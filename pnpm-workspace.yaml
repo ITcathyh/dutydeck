@@ -1,3 +1,10 @@
 packages:
   - apps/*
   - packages/*
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  node-pty: true
+  protobufjs: false
+patchedDependencies:
+  acpx@0.13.0: patches/acpx@0.13.0.patch
