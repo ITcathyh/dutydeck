@@ -45,11 +45,13 @@ export function createClaudeCodeAdapter(): CliAdapter {
     capabilities: { resume: true },
 
     buildArgs({ sessionId, resume, resumeSessionId, model }: AdapterSessionContext): string[] {
+      // dockmux sessionId 形如 "ses_<uuid>"，claude --session-id/--resume 只接受裸 UUID。
+      const uuid = sessionId.replace(/^ses_/, '');
       const args: string[] = [];
       if (resume) {
-        args.push('--resume', resumeSessionId ?? sessionId);
+        args.push('--resume', resumeSessionId ?? uuid);
       } else {
-        args.push('--session-id', sessionId);
+        args.push('--session-id', uuid);
       }
       if (model && model.trim()) {
         args.push('--model', model.trim());
@@ -114,7 +116,7 @@ export function createClaudeCodeAdapter(): CliAdapter {
     },
 
     buildResumeCommand(sessionId: string): string[] {
-      return ['--resume', sessionId];
+      return ['--resume', sessionId.replace(/^ses_/, '')];
     },
 
     completionPattern: COMPLETION_RE,
