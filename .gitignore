@@ -1,0 +1,10 @@
+node_modules/
+dist/
+apps/web/dist/
+apps/server/dist/
+packages/*/dist/
+.env
+.env.local
+*.log
+.DS_Store
+.dockmux/

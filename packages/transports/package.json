@@ -1,0 +1,39 @@
+{
+  "name": "@dockmux/transports",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./jsonl-agent": "./agents/jsonl-echo.mjs",
+    "./pty-agent": "./agents/pty-shell.mjs"
+  },
+  "files": [
+    "src/index.ts",
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "agents",
+    "scripts"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/fix-node-pty.mjs",
+    "build": "tsc -p tsconfig.json",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@dockmux/shared": "workspace:*",
+    "@dockmux/acp-client": "workspace:*",
+    "node-pty": "1.2.0-beta.15"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  }
+}

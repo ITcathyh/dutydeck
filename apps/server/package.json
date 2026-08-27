@@ -1,0 +1,47 @@
+{
+  "name": "dockmux",
+  "version": "0.1.29",
+  "type": "module",
+  "bin": {
+    "dockmux": "./dist/cli.js"
+  },
+  "files": [
+    "dist/cli.js",
+    "dist/cli.js.map",
+    "dist/agents",
+    "dist/assets",
+    "public",
+    "scripts/fix-node-pty.mjs"
+  ],
+  "scripts": {
+    "dev": "NODE_OPTIONS=--conditions=development tsx watch src/cli.ts",
+    "start": "node dist/cli.js",
+    "build": "node scripts/build.mjs",
+    "prepack": "pnpm --dir ../web build && pnpm build",
+    "postinstall": "node scripts/fix-node-pty.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.66.0",
+    "@agentclientprotocol/sdk": "1.3.0",
+    "@fastify/cors": "10.1.0",
+    "@larksuiteoapi/node-sdk": "^1.71.1",
+    "acpx": "0.13.0",
+    "better-sqlite3": "12.11.1",
+    "commander": "15.0.0",
+    "daemonize-process": "4.1.1",
+    "drizzle-orm": "0.44.2",
+    "fastify": "5.4.0",
+    "node-pty": "1.2.0-beta.15",
+    "pino": "9.7.0",
+    "safe-regex2": "5.1.1",
+    "zod": "3.25.67"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}

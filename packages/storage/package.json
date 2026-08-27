@@ -1,0 +1,39 @@
+{
+  "name": "@dockmux/storage",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "src/index.ts",
+    "src/schema.ts",
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "dist/schema.js",
+    "dist/schema.js.map",
+    "dist/schema.d.ts"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@dockmux/shared": "workspace:*",
+    "better-sqlite3": "12.11.1",
+    "drizzle-orm": "0.44.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "9.6.0",
+    "typescript": "5.8.3"
+  }
+}
