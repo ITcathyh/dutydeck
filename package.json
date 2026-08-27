@@ -6,16 +6,6 @@
   "engines": {
     "node": ">=22.12.0"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild",
-      "node-pty"
-    ],
-    "patchedDependencies": {
-      "acpx@0.13.0": "patches/acpx@0.13.0.patch"
-    }
-  },
   "scripts": {
     "dev": "pnpm --parallel --filter dockmux --filter @dockmux/web dev",
     "dev:server": "pnpm --filter dockmux dev",
