@@ -145,3 +145,5 @@ export interface RepositoryBundle {
 
 export const now = () => new Date().toISOString();
 export const makeId = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
+
+export * from './driver.js';
