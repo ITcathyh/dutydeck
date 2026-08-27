@@ -1,0 +1,227 @@
+import { createHash } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, join } from 'node:path';
+import type { Session } from '@dockmux/shared';
+import type { StoredLarkConfig } from './config.js';
+import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
+import { LarkServiceError, type LarkCardService } from './service.js';
+import type { LarkChatMode } from './chat-mode.js';
+import type { LarkGroup } from './coordinator.js';
+import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
+
+// 会话路由与资源物化辅助（从 listener.ts 拆分）。
+// 路由规则移植自 botmux 的 decideRouting：thread_id 是「是否真在话题里」的权威信号
+// （root_id 可能被引用气泡误带），话题群种子消息按 message_id 开新话题，普通群按
+// groupReplyMode 配置路由；配置缺失时保持 dockmux legacy 行为。
+
+/** 群形态查询函数（生产环境由 chat-mode.ts 的 getChatMode 注入，单测可注入 mock）。 */
+export type LarkChatModeResolver = (appId: string, chatId: string) => Promise<LarkChatMode>;
+
+const trimmed = (value?: string): string | undefined => {
+  const text = value?.trim();
+  return text || undefined;
+};
+
+export const larkSessionConfigKey = (config: StoredLarkConfig) => JSON.stringify([
+  config.defaultAgentId ?? null,
+  config.defaultModel ?? null,
+  config.defaultReasoningEffort ?? null,
+  config.workspace ?? null
+]);
+
+// 群聊不能按 chat_id 复用同一个 Agent 会话，否则不同话题/提问人的历史和预注入 Prompt 会串在一起。
+// 话题群优先按 thread_id 隔离，让同一话题内的连续追问复用同一会话；普通群聊没有 thread_id 时再按发送人隔离。
+export const larkGroupScopeId = (event: LarkMessageEvent) => {
+  if (event.chatType !== 'group') return event.chatType;
+  const thread = event.threadId?.trim();
+  if (thread) return `thread:${thread}`;
+  const actor = event.senderOpenId?.trim();
+  if (actor) return `user:${actor}`;
+  return `message:${event.messageId}`;
+};
+
+export const larkGroupKey = (event: LarkMessageEvent, scopeId: string) => `${event.chatId}:${scopeId}`;
+
+export const larkReplyContext = (event: LarkMessageEvent) => ({
+  // 回复 API 的路径参数只能使用真实的 om_* 消息 ID。回复触发消息即可保留准确的上下文位置。
+  messageId: event.messageId,
+  // thread_id 只用于识别话题和隔离 Agent 会话，不可作为回复 API 的 messageId。
+  ...(event.threadId?.trim() ? { replyInThread: true } : {}),
+  // 话题根消息 id 一并带入回复上下文，让后续回复能锚到话题根；
+  // service.ts 的回复 API 消费该字段前，它只是随上下文透传的额外字段。
+  ...(event.rootId?.trim() ? { replyRootId: event.rootId.trim() } : {})
+});
+
+export const larkSourceId = (config: StoredLarkConfig, chatId: string, chatType: string, scopeId: string) => {
+  const base = `${config.appId}:${chatId}:${chatType}`;
+  // sourceId 会持久化到 runtime session；群聊追加 scopeId 后，私聊仍保持旧格式，群聊则能按话题或发送人复用会话。
+  return chatType === 'group' ? `${base}:${scopeId}` : base;
+};
+
+export async function parsePrompt(event: LarkMessageEvent) {
+  // 合并转发（merge_forward）消息不自动展开，只返回带 message_id 的占位提示；
+  // Agent 如需查看转发内容，可通过群协作工具按 message_id 拉取。
+  const parsed = await parseLarkMessageContent(event.messageType, event.content, {
+    messageId: event.messageId
+  });
+  let text = parsed.text;
+  for (const mention of event.mentions) {
+    text = text.replaceAll(mention.key, '').replace(new RegExp(`@${mention.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), '');
+  }
+  return { prompt: text.trim(), resources: parsed.resources };
+}
+
+const resourceExtensions: Record<string, string> = {
+  'image/jpeg': '.jpg', 'image/png': '.png', 'image/gif': '.gif', 'image/webp': '.webp',
+  'application/pdf': '.pdf', 'text/plain': '.txt', 'audio/mpeg': '.mp3', 'video/mp4': '.mp4'
+};
+
+const safeResourceName = (resource: LarkMessageResource, contentType?: string) => {
+  const hash = createHash('sha256').update(`${resource.type}:${resource.key}`).digest('hex').slice(0, 12);
+  const supplied = resource.fileName ? basename(resource.fileName).replace(/[^\p{L}\p{N}._ -]/gu, '_').slice(0, 120) : '';
+  return supplied ? `${hash}-${supplied}` : `${resource.type}-${hash}${resourceExtensions[contentType ?? ''] ?? ''}`;
+};
+
+const resourceFailureGuidance = (error: unknown) => {
+  const upstreamCode = error instanceof LarkServiceError ? Number(error.details?.upstreamCode) : undefined;
+  if (upstreamCode === 234002 || upstreamCode === 14005) {
+    return '该错误通常表示机器人无权访问这条消息所在的会话，或附件已被删除，并非缺少 API scope；请用户重新上传附件，并确认机器人仍在对应会话中。';
+  }
+  const consoleUrl = error instanceof LarkServiceError && typeof error.details?.consoleUrl === 'string' ? error.details.consoleUrl : undefined;
+  return `请管理员确认机器人已开通 \`im:message:readonly\` 权限${consoleUrl ? `，权限配置地址：${consoleUrl}` : ''}；如果权限已开通，请用户重新上传可能已过期或删除的附件。`;
+};
+
+export async function materializeLarkResources(messageId: string, prompt: string, resources: LarkMessageResource[], service: Pick<LarkCardService, 'downloadMessageResource'>) {
+  if (!resources.length) return prompt;
+  const directory = join(tmpdir(), 'dockmux', 'lark-resources', messageId.replace(/[^a-zA-Z0-9_-]/g, '_'));
+  const notes: string[] = [];
+  for (const resource of resources) {
+    try {
+      const downloaded = await service.downloadMessageResource(messageId, resource.key, resource.type);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const path = join(directory, safeResourceName(resource, downloaded.contentType));
+      await writeFile(path, downloaded.data, { mode: 0o600 });
+      notes.push(`- ${resource.label}已下载到本地：${path}。请使用本地文件读取工具查看。`);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      notes.push(`- ${resource.label}下载失败：${reason}。你无法读取该附件；请在回复中明确告知用户。${resourceFailureGuidance(error)}`);
+    }
+  }
+  return `${prompt}\n\n[Dockmux 飞书附件处理结果]\n${notes.join('\n')}`.trim();
+}
+
+/**
+ * 计算消息的会话隔离 scope（移植 botmux decideRouting）：
+ *   - root_id + thread_id     → thread:${rootId}（真实话题回复，锚到话题根；所有模式一致）
+ *   - 话题群 + 无真实话题      → thread:${messageId}（话题群种子消息）
+ *   - p2pMode === 'thread'    → 每条顶层 DM 是新话题 thread:${messageId}；
+ *                               thread_id-only 的回复回退锚到 thread_id
+ *   - 普通群 groupReplyMode    → 'new-topic' 顶层开新话题；'chat'/'shared' 全群一个会话；
+ *                               'chat-topic' 顶层平铺、omt_ 原生话题种子独立会话
+ *   - 未设置配置               → dockmux legacy：thread_id → thread:${threadId}，
+ *                               否则按发送人 user:${openId}，再否则 message:${messageId}
+ *
+ * thread_id 是权威信号：Lark 客户端的引用气泡/快速回复有时会给顶层消息塞 root_id 但不塞
+ * thread_id，只看 root_id 会把用户从平铺会话里误拽进孤立 thread 会话。
+ */
+export async function resolveLarkScopeId(
+  event: LarkMessageEvent,
+  config: StoredLarkConfig,
+  chatModeResolver?: LarkChatModeResolver
+): Promise<string> {
+  const rootId = trimmed(event.rootId);
+  const threadId = trimmed(event.threadId);
+  if (event.chatType !== 'group') {
+    // 私聊：默认（'chat'/未设）整段 DM 共用一个连续会话；'thread' 时每条顶层 DM 是新话题。
+    if (config.p2pMode === 'thread') {
+      if (rootId && threadId) return `thread:${rootId}`;
+      if (threadId) return `thread:${threadId}`;
+      return `thread:${event.messageId}`;
+    }
+    return event.chatType;
+  }
+  // 群聊：root_id + thread_id 同时存在才是真实话题回复，锚点为话题根消息 id（规则 1）。
+  if (rootId && threadId) return `thread:${rootId}`;
+  // 话题群：顶层消息（含只有 thread_id 的话题种子）一律开新话题（规则 4）。
+  if (chatModeResolver) {
+    try {
+      const mode = await chatModeResolver(config.appId, event.chatId);
+      if (mode === 'topic') return `thread:${event.messageId}`;
+    } catch {
+      // 群形态查询失败时降级为普通群路由，不能阻塞消息处理。
+    }
+  }
+  // 普通群：按 groupReplyMode 路由（规则 5）；未设置走 dockmux legacy。
+  switch (config.groupReplyMode) {
+    case 'new-topic':
+      return `thread:${event.messageId}`;
+    case 'chat':
+    case 'shared':
+      return `chat:${event.chatId}`;
+    case 'chat-topic':
+      // 顶层平铺；但 omt_ 开头的原生话题种子各自独立会话。
+      return threadId?.startsWith('omt_') ? `thread:${event.messageId}` : `chat:${event.chatId}`;
+    default:
+      // legacy：有 thread_id 按话题隔离（无 root_id 时锚点回退 thread_id），否则按发送人，再否则按消息。
+      return larkGroupScopeId(event);
+  }
+}
+
+export async function resolveLarkSession(
+  runtime: LarkRuntime,
+  log: ListenerLog,
+  group: LarkGroup,
+  config: StoredLarkConfig,
+  chatId: string,
+  chatType: LarkMessageEvent['chatType'],
+  scopeId: string
+): Promise<Session> {
+  if (!config.defaultAgentId) throw new LarkServiceError('LARK_AGENT_CONFIG_REQUIRED', '机器人尚未配置默认 Agent，请在 Dockmux 飞书设置的“Agent 与门禁”中完成配置。', 409);
+  const configKey = larkSessionConfigKey(config);
+  const sourceId = larkSourceId(config, chatId, chatType, scopeId);
+  if (group.sessionId) {
+    const existing = await runtime.getSession(group.sessionId);
+    const reusable = existing && !['failed', 'stopped'].includes(existing.state);
+    if (reusable && group.sessionConfigKey === configKey) {
+      if (existing.permissionMode !== 'full-trust' && runtime.setPermissionMode) return runtime.setPermissionMode(existing.id, 'full-trust');
+      return existing;
+    }
+    if (reusable && group.sessionConfigKey !== configKey) {
+      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书 Agent 配置已变更，停止旧 Session 并应用新配置');
+      await runtime.stop?.(existing.id);
+    }
+    group.sessionId = undefined;
+    group.sessionConfigKey = undefined;
+  }
+  if (runtime.listSessions) {
+    const sessions = await runtime.listSessions();
+    const existing = [...sessions].reverse().find(item => item.source === 'lark'
+      && item.sourceId === sourceId
+      && item.agentId === config.defaultAgentId
+      && !item.archivedAt
+      && !['failed', 'stopped'].includes(item.state)
+      && (!config.workspace || item.cwd === config.workspace)
+      && (!config.defaultModel || item.model === config.defaultModel)
+      && (!config.defaultReasoningEffort || item.reasoningEffort === config.defaultReasoningEffort));
+    if (existing) {
+      group.sessionId = existing.id;
+      group.sessionConfigKey = configKey;
+      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '复用已持久化的飞书 Session');
+      if (existing.permissionMode !== 'full-trust' && runtime.setPermissionMode) return runtime.setPermissionMode(existing.id, 'full-trust');
+      return existing;
+    }
+  }
+  const session = await runtime.start({
+    agentId: config.defaultAgentId,
+    ...(config.workspace ? { cwd: config.workspace } : {}),
+    ...(config.defaultModel ? { model: config.defaultModel } : {}),
+    ...(config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
+    permissionMode: 'full-trust',
+    source: 'lark',
+    sourceId
+  });
+  group.sessionId = session.id;
+  group.sessionConfigKey = configKey;
+  return session;
+}

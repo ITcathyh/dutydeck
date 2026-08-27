@@ -1,9 +1,9 @@
 import { type Dispatch, type KeyboardEvent, type RefObject, type SetStateAction, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BrainCircuit, Check, ChevronDown, File, FolderOpen, Gauge, ListEnd, Plus, RefreshCw, Send, Sparkles, Square, X, Zap } from 'lucide-react';
-import type { AgentModel, SkillReference, Task } from './api';
-import { formatTokens, replaceSlashQuery, shouldDismissComposerPanel, slashQuery, type ComposerReference, type ContextStats, type ModelReadiness } from './composer-utils';
+import type { AgentModel, SkillReference, Task } from '../api';
+import { formatTokens, replaceSlashQuery, shouldDismissComposerPanel, slashQuery, type ComposerReference, type ContextStats, type ModelReadiness } from '../composer-utils';
 
-type SendMode = 'queue' | 'interrupt';
+export type SendMode = 'queue' | 'interrupt';
 type ComposerCommand = { name: string; description: string; action: 'file' | 'model' | 'reasoning' | 'insert' };
 type ComposerPanel = 'commands' | 'file' | 'models' | 'reasoning' | undefined;
 

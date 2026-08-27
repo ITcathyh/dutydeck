@@ -2,10 +2,11 @@ import { dirname, join } from 'node:path';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeEvent, type AcpRuntimeHandle, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
-import type { AgentConfig, EventType, PermissionMode, ToolRiskPolicy } from '@dockmux/shared';
+import type { AgentConfig, AgentDriver, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy } from '@dockmux/shared';
 import { testRegexWithTimeout } from './regex-timeout.js';
 
-export interface NormalizedDriverEvent { type: EventType; data: any; raw?: string }
+// 归一化事件类型统一从 @dockmux/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
+export type { NormalizedDriverEvent };
 export interface AcpxBuiltinAgent { id: string; argv: string[] }
 
 function claudeLauncherPath() {
@@ -84,7 +85,7 @@ export class AgentIdleTimeoutError extends Error {
   }
 }
 
-export class AcpxAdapter {
+export class AcpxAdapter implements AgentDriver {
   private readonly runtime: AcpRuntime;
   private readonly sessionStore: AcpSessionStore;
   private handle?: AcpRuntimeHandle;

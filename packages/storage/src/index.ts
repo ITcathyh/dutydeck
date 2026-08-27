@@ -5,36 +5,14 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AgentConfig, AgentEvent, RepositoryBundle, Session, TaskRecord } from '@dockmux/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
+import { runMigrations } from './migrations.js';
 export * from './schema.js';
 
 export function createRepositories(filename: string): RepositoryBundle {
   if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true });
   const sqlite = new Database(filename);
   sqlite.pragma('journal_mode = WAL');
-  sqlite.exec(`
-    CREATE TABLE IF NOT EXISTS agent_configs (id TEXT PRIMARY KEY, json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT NOT NULL, metadata TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, machine_id TEXT, name TEXT NOT NULL, cwd TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, state TEXT NOT NULL, cwd TEXT NOT NULL, model TEXT, reasoning_effort TEXT, system_prompt TEXT, permission_mode TEXT DEFAULT 'full-trust', source TEXT, source_id TEXT, archived_at TEXT, protocol TEXT, run_id TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, data TEXT NOT NULL, raw TEXT);
-    CREATE UNIQUE INDEX IF NOT EXISTS events_session_seq ON events(session_id, sequence);
-    CREATE TABLE IF NOT EXISTS tool_calls (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS permission_requests (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, status TEXT NOT NULL, data TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS errors (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, message TEXT NOT NULL, details TEXT, created_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS channel_mappings (id TEXT PRIMARY KEY, channel TEXT NOT NULL, external_id TEXT NOT NULL, session_id TEXT NOT NULL, extra TEXT, created_at TEXT NOT NULL);
-    CREATE UNIQUE INDEX IF NOT EXISTS channel_external ON channel_mappings(channel, external_id);
-    CREATE TABLE IF NOT EXISTS configs (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-  `);
-  const sessionColumns = sqlite.pragma('table_info(sessions)') as Array<{ name: string }>;
-  if (!sessionColumns.some(column => column.name === 'reasoning_effort')) sqlite.exec('ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT');
-  if (!sessionColumns.some(column => column.name === 'system_prompt')) sqlite.exec('ALTER TABLE sessions ADD COLUMN system_prompt TEXT');
-  if (!sessionColumns.some(column => column.name === 'permission_mode')) sqlite.exec("ALTER TABLE sessions ADD COLUMN permission_mode TEXT DEFAULT 'full-trust'");
-  if (!sessionColumns.some(column => column.name === 'source')) sqlite.exec('ALTER TABLE sessions ADD COLUMN source TEXT');
-  if (!sessionColumns.some(column => column.name === 'source_id')) sqlite.exec('ALTER TABLE sessions ADD COLUMN source_id TEXT');
-  if (!sessionColumns.some(column => column.name === 'archived_at')) sqlite.exec('ALTER TABLE sessions ADD COLUMN archived_at TEXT');
-  const channelMappingColumns = sqlite.pragma('table_info(channel_mappings)') as Array<{ name: string }>;
-  if (!channelMappingColumns.some(column => column.name === 'extra')) sqlite.exec('ALTER TABLE channel_mappings ADD COLUMN extra TEXT');
+  runMigrations(sqlite);
   const db = drizzle(sqlite);
   return {
     agents: {

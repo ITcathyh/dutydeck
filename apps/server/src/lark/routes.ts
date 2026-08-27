@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository } from '@dockmux/shared';
 import type { DockmuxRuntime } from '@dockmux/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
+import { detectUnusableOwnerEntries, normalizeOwnerEntries, type ContactLookup } from './owner-identity.js';
 import { defaultHighRiskPattern, deleteLarkConfig, publicLarkConfigs, readLarkConfig, readLarkConfigs, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
 import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listener.js';
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
@@ -137,8 +138,51 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         const info = await bot.getBotInfo();
         const resolvedAllowedUsers = input.allowedUserNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedUserNames);
         const resolvedAllowedBots = input.allowedBotNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedBotNames, ['bot']);
-        const allowedUsers = resolvedAllowedUsers ?? input.allowedUsers ?? existing?.allowedUsers ?? [];
+        let allowedUsers = resolvedAllowedUsers ?? input.allowedUsers ?? existing?.allowedUsers ?? [];
         const allowedEmails = input.allowedEmails ?? existing?.allowedEmails ?? [];
+        // Owner-identity 边界：未走姓名解析（resolvedAllowedUsers === undefined）时，
+        // input.allowedUsers 是调用方直接写入的原始 open_id——典型场景是把 A 应用的
+        // 配置复制到 B 应用。ou_ 是 app-scoped，跨应用复制会让 owner 被锁死，必须先
+        // 通过目标 app 校验再落库。姓名解析路径本身已用目标 app 解析，不受影响。
+        if (resolvedAllowedUsers === undefined && Array.isArray(input.allowedUsers)
+          && input.allowedUsers.some(user => String(user?.openId ?? '').trim().startsWith('ou_'))) {
+          const rawOpenIdEntries = [...new Set(input.allowedUsers
+            .map(user => String(user?.openId ?? '').trim())
+            .filter(openId => openId.startsWith('ou_')))];
+          const lookup: ContactLookup = {
+            getUser: (id, idType) => bot.getContactUser(id, idType),
+            batchGetIdByEmail: email => bot.batchGetIdByEmail(email),
+            batchGetIdByMobile: mobile => bot.batchGetIdByMobile(mobile)
+          };
+          // 新建 bot：没有来源 app 可转换，ou_ 一律拒绝（对齐 botmux「No open_id can
+          // belong to an app that does not exist yet」）。
+          if (!existing) {
+            throw new LarkServiceError('LARK_OWNER_OPENID_CROSS_APP',
+              `保存新机器人时不能直接使用 app-scoped open_id（${rawOpenIdEntries.join(', ')}）：open_id 只对签发它的应用有效，新应用还不存在、无法归属任何 open_id。请改用完整邮箱、手机号或 on_ union_id，或先在目标应用下通过姓名解析。`,
+              400);
+          }
+          // 已存在 bot：通过目标 app 校验。明确不可用（跨 app open_id / 目标 app
+          // 无效 id / code:0 无 user）→ 拒绝；网络/scope 错误 → inconclusive 放行。
+          const unusable = await detectUnusableOwnerEntries(rawOpenIdEntries, lookup);
+          if (unusable.length > 0) {
+            throw new LarkServiceError('LARK_OWNER_OPENID_CROSS_APP',
+              `以下白名单 open_id 无法通过目标应用校验，不能保存：${unusable.join(', ')}。open_id 只对签发它的应用有效，跨应用复制会导致 owner 被锁死。请改用完整邮箱、手机号或 on_ union_id，或先在目标应用下通过姓名解析。`,
+              400);
+          }
+          // 归一化：能解析成 union_id 的 ou_ 在 botmux 里会替换为 on_ 落库。dockmux
+          // 的 allowedUsers 只存 ou_（config.ts 归一化丢弃非 ou_ 条目，运行时按
+          // open_id 匹配），且这些 ou_ 已通过目标 app 校验、就是该 app 自己的
+          // open_id，故仍以 ou_ 形态保存；on_ 形态待 schema 支持 union_id 白名单后
+          // 再启用。inconclusive 的条目保留原值。
+          const normalizedEntries = await normalizeOwnerEntries(rawOpenIdEntries, lookup);
+          const normalizedByOpenId = new Map(rawOpenIdEntries.map((entry, index) => [entry, normalizedEntries[index] ?? entry]));
+          allowedUsers = allowedUsers.map(user => {
+            const openId = String(user?.openId ?? '').trim();
+            const normalized = normalizedByOpenId.get(openId);
+            return normalized && normalized.startsWith('ou_') ? { ...user, openId: normalized } : user;
+          });
+          input = { ...input, allowedUsers };
+        }
         if (!allowedUsers.length && allowedEmails.length) await bot.checkIdentityResolution();
         input = {
           ...input,

@@ -1,0 +1,234 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具调用/结果 + 终态输出 1`] = `
+[
+  {
+    "content": "全部通过。",
+    "element_id": "final_output",
+    "margin": "0px",
+    "tag": "markdown",
+    "text_align": "left",
+    "text_size": "normal_v2",
+  },
+  {
+    "direction": "vertical",
+    "element_id": "trace_group_0",
+    "elements": [
+      {
+        "icon": {
+          "color": "grey",
+          "tag": "standard_icon",
+          "token": "setting_outlined",
+        },
+        "margin": "0px 0px 2px 0px",
+        "tag": "div",
+        "text": {
+          "content": "1 段思考 · 1 次工具调用",
+          "tag": "plain_text",
+          "text_color": "grey",
+          "text_size": "notation",
+        },
+        "width": "auto",
+      },
+      {
+        "content": "**思考过程**　<font color='grey'>先跑测试，失败再修。</font>",
+        "icon": {
+          "color": "grey",
+          "tag": "standard_icon",
+          "token": "mindnote_outlined",
+        },
+        "margin": "0px 0px 2px 20px",
+        "tag": "markdown",
+        "text_size": "notation",
+      },
+      {
+        "direction": "vertical",
+        "element_id": "trace_tool_0_0",
+        "elements": [
+          {
+            "content": "**输入**
+
+\`\`\`text
+{
+  "command": "pnpm test"
+}
+\`\`\`",
+            "margin": "0px",
+            "tag": "markdown",
+            "text_size": "notation",
+          },
+          {
+            "content": "**结果**
+
+\`\`\`text
+125 passed
+\`\`\`",
+            "margin": "0px",
+            "tag": "markdown",
+            "text_size": "notation",
+          },
+        ],
+        "expanded": false,
+        "header": {
+          "icon": {
+            "color": "grey",
+            "size": "12px 12px",
+            "tag": "standard_icon",
+            "token": "down-small-ccm_outlined",
+          },
+          "icon_expanded_angle": -180,
+          "icon_position": "right",
+          "title": {
+            "content": "<font color='trace_success'>●</font>　运行测试　<font color='grey'>pnpm test</font>　<font color='grey'>1s</font>",
+            "icon": {
+              "color": "grey",
+              "tag": "standard_icon",
+              "token": "doc-checklist_outlined",
+            },
+            "tag": "markdown",
+            "text_size": "notation",
+          },
+          "vertical_align": "center",
+        },
+        "margin": "0px 0px 0px 20px",
+        "padding": "4px 0px 0px 0px",
+        "tag": "collapsible_panel",
+        "vertical_spacing": "4px",
+      },
+    ],
+    "expanded": false,
+    "header": {
+      "icon": {
+        "color": "grey",
+        "size": "14px 14px",
+        "tag": "standard_icon",
+        "token": "down-small-ccm_outlined",
+      },
+      "icon_expanded_angle": -180,
+      "icon_position": "right",
+      "title": {
+        "content": "pnpm test　<font color='grey'>2s</font>　<font color='green'>● 已完成</font>",
+        "tag": "markdown",
+        "text_size": "notation",
+      },
+      "vertical_align": "center",
+    },
+    "margin": "0px",
+    "padding": "2px 0px 0px 0px",
+    "tag": "collapsible_panel",
+    "vertical_spacing": "2px",
+  },
+]
+`;
+
+exports[`renderLarkCardElements 视觉快照 > renderLarkTrace markdown 形态（completed） 1`] = `
+"**思考**
+
+> 先跑测试，失败再修。
+
+---
+
+**工具 · Bash** · completed
+
+\`\`\`text
+125 passed
+\`\`\`
+
+---
+
+**Agent**
+
+全部通过。"
+`;
+
+exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进行中的工具调用 1`] = `
+[
+  {
+    "direction": "vertical",
+    "element_id": "trace_group_0",
+    "elements": [
+      {
+        "icon": {
+          "color": "grey",
+          "tag": "standard_icon",
+          "token": "setting_outlined",
+        },
+        "margin": "0px 0px 2px 0px",
+        "tag": "div",
+        "text": {
+          "content": "1 次工具调用",
+          "tag": "plain_text",
+          "text_color": "grey",
+          "text_size": "notation",
+        },
+        "width": "auto",
+      },
+      {
+        "direction": "vertical",
+        "element_id": "trace_tool_0_0",
+        "elements": [
+          {
+            "content": "**输入**
+
+\`\`\`text
+{
+  "command": "pnpm test"
+}
+\`\`\`",
+            "margin": "0px",
+            "tag": "markdown",
+            "text_size": "notation",
+          },
+        ],
+        "expanded": false,
+        "header": {
+          "icon": {
+            "color": "grey",
+            "size": "12px 12px",
+            "tag": "standard_icon",
+            "token": "down-small-ccm_outlined",
+          },
+          "icon_expanded_angle": -180,
+          "icon_position": "right",
+          "title": {
+            "content": "<font color='trace_running'>●</font>　运行测试　<font color='grey'>pnpm test</font>　<font color='grey'>1s</font>",
+            "icon": {
+              "color": "grey",
+              "tag": "standard_icon",
+              "token": "doc-checklist_outlined",
+            },
+            "tag": "markdown",
+            "text_size": "notation",
+          },
+          "vertical_align": "center",
+        },
+        "margin": "0px 0px 0px 20px",
+        "padding": "4px 0px 0px 0px",
+        "tag": "collapsible_panel",
+        "vertical_spacing": "4px",
+      },
+    ],
+    "expanded": false,
+    "header": {
+      "icon": {
+        "color": "grey",
+        "size": "14px 14px",
+        "tag": "standard_icon",
+        "token": "down-small-ccm_outlined",
+      },
+      "icon_expanded_angle": -180,
+      "icon_position": "right",
+      "title": {
+        "content": "正在分析需求，先跑一遍测试。　<font color='grey'>1s</font>　<font color='trace_running'>● 执行中</font>",
+        "tag": "markdown",
+        "text_size": "notation",
+      },
+      "vertical_align": "center",
+    },
+    "margin": "0px",
+    "padding": "2px 0px 0px 0px",
+    "tag": "collapsible_panel",
+    "vertical_spacing": "2px",
+  },
+]
+`;

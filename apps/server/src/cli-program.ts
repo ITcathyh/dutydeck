@@ -48,6 +48,10 @@ export interface UpdateCliOptions {
   distTag?: string;
 }
 
+export interface AuthTokenCliOptions {
+  rotate?: boolean;
+}
+
 export interface CliHandlers {
   serve?(options: CliOptions): void | Promise<void>;
   daemonStart?(options: CliOptions): void | Promise<void>;
@@ -55,6 +59,7 @@ export interface CliHandlers {
   daemonRestart?(options: CliOptions): void | Promise<void>;
   daemonStatus?(): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
+  authToken?(options: AuthTokenCliOptions): void | Promise<void>;
   larkSend?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   larkUpdate?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   groupSelf?(): void | Promise<void>;
@@ -179,6 +184,12 @@ Routing guidance:
     .option('--dist-tag <tag>', 'npm dist-tag to install (default: latest)', 'latest')
     .action(options => handlers.update?.(options));
 
+  const auth = program.command('auth').description('Manage access authentication');
+  auth.command('token')
+    .description('Print the access token for remote API access (generates one on first use)')
+    .option('--rotate', 'Generate a new token, invalidating the previous one')
+    .action(options => handlers.authToken?.(options));
+
   const addProcessCommands = (parent: Command) => {
     parent.command('start')
       .description('Start the Dockmux server in the background')
@@ -210,6 +221,8 @@ Examples:
   $ dockmux status
   $ dockmux restart --port 4410
   $ dockmux update --dist-tag fix
+  $ dockmux auth token
+  $ dockmux auth token --rotate
   $ dockmux stop
   $ dockmux daemon start --port 4310
   $ dockmux daemon status

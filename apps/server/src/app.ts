@@ -7,6 +7,8 @@ import type { DockmuxRuntime } from '@dockmux/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
+import { registerAuthMiddleware, type AuthMiddlewareOptions } from './auth/auth.js';
+import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -26,7 +28,22 @@ const contentTypes: Record<string, string> = {
   '.woff2': 'font/woff2'
 };
 
-export interface BuildAppOptions { webRoot?: string; lark?: LarkRoutesOptions; system?: SystemRoutesOptions }
+export interface TerminalRouteOptions {
+  /** 会话 → 终端流访问器；Team Core 交付 runtime.getTerminalStream 前由 service 层注入占位实现 */
+  provider: TerminalStreamProvider;
+  /** WS 升级认证（?token= query param）；不传 = 不认证 */
+  auth?: TerminalRouteAuth;
+}
+
+export interface BuildAppOptions {
+  webRoot?: string;
+  lark?: LarkRoutesOptions;
+  system?: SystemRoutesOptions;
+  /** 访问认证中间件选项；不传 = 不启用认证（仅 loopback 场景） */
+  auth?: AuthMiddlewareOptions;
+  /** 终端 WS 代理；不传 = 不注册 /api/terminal/:sessionId */
+  terminal?: TerminalRouteOptions;
+}
 
 export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions = {}) {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
@@ -40,6 +57,21 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
   });
 
   app.get('/health', async () => ({ ok: true }));
+  if (options.auth) {
+    // 中央豁免规则（所有调用方一致）：
+    //  - 非 /api/ 路径（静态 web 壳）公开：HTML/JS/CSS 不含会话数据，API 仍全部要 token
+    //  - /api/lark/agent-tools/* 有自己的 Bearer 机制（agentGroupToolBearerToken），不重复门禁
+    //  - 飞书卡片回调（card.action.trigger）走长连接监听、不经 HTTP，天然不受影响
+    const userExempt = options.auth.exempt;
+    registerAuthMiddleware(app, {
+      ...options.auth,
+      exempt: (method, pathname) =>
+        !pathname.startsWith('/api/')
+        || pathname.startsWith('/api/lark/agent-tools/')
+        || userExempt?.(method, pathname) === true
+    });
+  }
+  if (options.terminal) registerTerminalRoutes(app, options.terminal);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get('/api/agents', async () => runtime.listAgents());

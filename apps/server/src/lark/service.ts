@@ -1,4 +1,6 @@
 import { readFile } from 'node:fs/promises';
+import * as lark from '@larksuiteoapi/node-sdk';
+import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
 
 export const larkCardStates = ['queued', 'running', 'completed', 'failed', 'interrupted'] as const;
 export type LarkCardState = (typeof larkCardStates)[number];
@@ -21,7 +23,7 @@ export interface LarkCardInput {
   readOnly?: boolean;
 }
 export interface LarkSendInput extends LarkCardInput { receiveId?: string; receiveIdType?: LarkReceiveIdType; chatId?: string }
-export interface LarkReplyInput extends LarkCardInput { messageId: string; replyInThread?: boolean }
+export interface LarkReplyInput extends LarkCardInput { messageId: string; replyInThread?: boolean; replyRootId?: string }
 export interface LarkUpdateInput extends LarkCardInput { messageId: string }
 export interface LarkMessageResult { messageId: string; chatId?: string }
 export interface LarkReactionResult { messageId: string; reactionId: string; emojiType: string }
@@ -512,7 +514,11 @@ export class LarkCardService {
     const messageId = required(input.messageId, 'messageId');
     const cardInput = await this.cardInput(input);
     // messageId 必须是 om_* 消息 ID；话题回复通过 reply_in_thread 显式声明，不能把 omt_* thread_id 当成 messageId。
-    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reply`, {
+    // 话题根锚点：飞书 im.v1.message.reply 只接受 path 的 message_id + reply_in_thread 布尔，没有独立的
+    // root 锚点参数——话题锚定由 path 的 message_id 决定。replyInThread=true 且带 replyRootId（话题根
+    // 消息 om_*）时，用 replyRootId 作为 path 锚点，让卡片落在话题根下；否则回落到触发消息 messageId。
+    const threadAnchor = input.replyInThread && input.replyRootId?.trim() ? input.replyRootId.trim() : messageId;
+    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
       body: {
         msg_type: 'interactive',
         content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
@@ -825,6 +831,98 @@ export class LarkCardService {
       );
     }
     return { verified: true, sampleOpenId, sampleEmails: [email] };
+  }
+
+  /**
+   * 联系人查询（owner-identity 边界用）。与卡片/消息方法走同一套 raw-fetch + token
+   * 管理不同，这里用 SDK Client，因为它的错误形态（Axios throw / 业务 code 非零）
+   * 正是 owner-identity 的 definitive-miss 判定所依赖的。SDK Client 懒构造、复用
+   * token 缓存。domain 直接用 config.baseUrl（feishu/lark 品牌已由 baseUrl 区分）。
+   */
+  private contactClient?: lark.Client;
+  private contactSdk(): lark.Client {
+    if (!this.contactClient) {
+      this.contactClient = new lark.Client({
+        appId: this.config.appId,
+        appSecret: this.config.appSecret,
+        domain: this.config.baseUrl,
+        disableTokenCache: false
+      });
+    }
+    return this.contactClient;
+  }
+
+  /**
+   * 把 SDK 抛出的错误归一化成 { code, data } 形态，让 owner-identity 的
+   * larkErrorCode 能从 err.code / err.data.code / err.response.data.code 三处
+   * 挖到数字码。挖不到码（纯网络错误）时 code 为 undefined，调用方按
+   * inconclusive 处理。
+   */
+  private static normalizeContactError(err: unknown): never {
+    const code = larkErrorCode(err);
+    const data = (err as { response?: { data?: unknown }; data?: unknown } | null | undefined)?.response?.data
+      ?? (err as { data?: unknown } | null | undefined)?.data;
+    throw Object.assign(
+      new Error(`Lark contact API failed (code: ${code ?? 'unknown'})`),
+      { code, ...(data !== undefined ? { data } : {}) }
+    );
+  }
+
+  /**
+   * 按 open_id（ou_）或 union_id（on_）查询用户。返回 undefined 表示 code:0
+   * 但响应里没有 user（明确不存在 = definitive miss）；业务码非零或网络错误
+   * 一律 throw（definitive 码由 owner-identity 识别，其余按 inconclusive）。
+   */
+  async getContactUser(id: string, idType: ContactIdType): Promise<ContactUser | undefined> {
+    const userId = required(id, 'id');
+    let res: { code?: number; data?: { user?: { open_id?: string; union_id?: string } } };
+    try {
+      res = await this.contactSdk().contact.v3.user.get({
+        path: { user_id: userId },
+        params: { user_id_type: idType }
+      });
+    } catch (err) {
+      LarkCardService.normalizeContactError(err);
+    }
+    const code = Number(res?.code ?? 0);
+    if (code !== 0) {
+      throw Object.assign(new Error(`Lark contact user.get failed (code: ${code})`), { code, data: res?.data });
+    }
+    const user = res?.data?.user;
+    if (!user || typeof user !== 'object') return undefined;
+    return {
+      ...(user.open_id ? { openId: String(user.open_id) } : {}),
+      ...(user.union_id ? { unionId: String(user.union_id) } : {})
+    };
+  }
+
+  /** 通过完整邮箱解析用户 ID（存在性校验用）；干净空响应返回 undefined。 */
+  async batchGetIdByEmail(email: string): Promise<string | undefined> {
+    return this.batchGetId({ emails: [required(email, 'email')] });
+  }
+
+  /** 通过手机号解析用户 ID（存在性校验用）；干净空响应返回 undefined。 */
+  async batchGetIdByMobile(mobile: string): Promise<string | undefined> {
+    return this.batchGetId({ mobiles: [required(mobile, 'mobile')] });
+  }
+
+  private async batchGetId(key: { emails?: string[]; mobiles?: string[] }): Promise<string | undefined> {
+    let res: { code?: number; data?: { user_list?: Array<{ user_id?: string }> } };
+    try {
+      res = await this.contactSdk().contact.v3.user.batchGetId({
+        params: { user_id_type: 'open_id' },
+        data: { ...key, include_resigned: false }
+      });
+    } catch (err) {
+      LarkCardService.normalizeContactError(err);
+    }
+    const code = Number(res?.code ?? 0);
+    if (code !== 0) {
+      throw Object.assign(new Error(`Lark contact batchGetId failed (code: ${code})`), { code, data: res?.data });
+    }
+    const list = Array.isArray(res?.data?.user_list) ? res.data.user_list : [];
+    const hit = list.find(user => typeof user?.user_id === 'string' && user.user_id);
+    return hit ? String(hit.user_id) : undefined;
   }
 
   private async tenantToken() {

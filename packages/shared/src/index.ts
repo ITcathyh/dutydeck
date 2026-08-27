@@ -13,7 +13,7 @@ export function validateHighRiskPattern(pattern: string): RegexPatternValidation
   return { valid: true };
 }
 
-export const protocols = ['auto', 'acp', 'jsonl', 'pipe', 'pty'] as const;
+export const protocols = ['auto', 'acp', 'jsonl', 'pipe', 'pty', 'pty-cli'] as const;
 export type Protocol = (typeof protocols)[number];
 export const permissionModes = ['ask', 'approve-reads', 'deny-all', 'full-trust'] as const;
 export type PermissionMode = (typeof permissionModes)[number];

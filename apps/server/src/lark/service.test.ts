@@ -244,6 +244,30 @@ describe('Lark card service', () => {
     expect(byId(JSON.parse(body.content), 'task_status').text.content).toContain('已完成');
   });
 
+  it('anchors a thread reply to the root message when replyRootId is provided', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_reply', chat_id: 'oc_group' } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await expect(service.reply({ messageId: 'om_source', replyInThread: true, replyRootId: 'om_root', state: 'completed', taskId: 'task-2', markdown: '锚到话题根' })).resolves.toEqual({ messageId: 'om_reply', chatId: 'oc_group' });
+    // 话题根锚点：path 用 replyRootId（om_root），而非触发消息 om_source。
+    expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/messages/om_root/reply');
+    const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
+    expect(body).toMatchObject({ msg_type: 'interactive', reply_in_thread: true });
+  });
+
+  it('ignores replyRootId for non-thread replies (anchors to messageId)', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_reply', chat_id: 'oc_group' } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await service.reply({ messageId: 'om_source', replyRootId: 'om_root', state: 'completed', taskId: 'task-3', markdown: '非话题回复' });
+    // 未开 replyInThread 时 replyRootId 不生效，path 仍用触发消息 om_source。
+    expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/messages/om_source/reply');
+    const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
+    expect(body).not.toHaveProperty('reply_in_thread');
+  });
+
   it('adds and removes a reaction through the bot API', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
