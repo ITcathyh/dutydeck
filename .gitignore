@@ -8,3 +8,4 @@ packages/*/dist/
 *.log
 .DS_Store
 .dockmux/
+apps/server/public
