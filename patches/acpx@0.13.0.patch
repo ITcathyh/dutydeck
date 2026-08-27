@@ -1,0 +1,13 @@
+diff --git a/dist/runtime.js b/dist/runtime.js
+index 3fb25ae4124cea292546e1dda95465b3ae15577e..736e0f145b9e5b974c9dd3401d9461245f639ec6 100644
+--- a/dist/runtime.js
++++ b/dist/runtime.js
+@@ -849,7 +849,7 @@ var AcpRuntimeManager = class {
+ 		});
+ 		let keepClientOpen = false;
+ 		try {
+-			await client.start();
++			await withTimeout(client.start(), this.options.timeoutMs);
+ 			const session = await createOrLoadRuntimeSession(client, input.resumeSessionId, cwd);
+ 			const record = await this.createAndSaveRuntimeRecord({
+ 				input,

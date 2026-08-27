@@ -1,0 +1,43 @@
+{
+  "name": "dockmux-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.18.0",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "esbuild",
+      "node-pty"
+    ],
+    "patchedDependencies": {
+      "acpx@0.13.0": "patches/acpx@0.13.0.patch"
+    }
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter dockmux --filter @dockmux/web dev",
+    "dev:server": "pnpm --filter dockmux dev",
+    "dev:web": "pnpm --filter @dockmux/web dev",
+    "server": "pnpm build && pnpm --filter dockmux start",
+    "lark:echo": "node scripts/lark-card-echo-bot.mjs",
+    "build:packages": "pnpm -r --filter './packages/**' build",
+    "build": "pnpm build:packages && pnpm --filter @dockmux/web build && pnpm --filter dockmux build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@dockmux/acp-client": "workspace:*",
+    "@dockmux/config": "workspace:*",
+    "@dockmux/runtime": "workspace:*",
+    "@dockmux/shared": "workspace:*",
+    "@dockmux/storage": "workspace:*",
+    "@larksuiteoapi/node-sdk": "^1.71.1",
+    "@types/node": "22.15.30",
+    "tsx": "4.20.3",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}

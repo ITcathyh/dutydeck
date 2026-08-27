@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* { box-sizing: border-box; }
+html, body, #root { min-height: 100%; }
+body { margin: 0; background: #f7f8fa; color: #18181b; font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+button, input, textarea, select { font: inherit; }
+button:not(:disabled) { cursor: pointer; }
+::selection { background: #d4d4d8; color: #18181b; }
+* { scrollbar-color: #d4d4d8 transparent; scrollbar-width: thin; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid #71717a; outline-offset: 2px; }
+.markdown { overflow-wrap: anywhere; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown p { margin: .65rem 0; }
+.markdown h1, .markdown h2, .markdown h3 { margin: 1.4rem 0 .6rem; color: #18181b; font-weight: 650; letter-spacing: -.02em; }
+.markdown h1 { font-size: 1.35rem; }
+.markdown h2 { font-size: 1.15rem; }
+.markdown h3 { font-size: 1rem; }
+.markdown ul, .markdown ol { margin: .7rem 0; padding-left: 1.4rem; }
+.markdown li { margin: .2rem 0; }
+.markdown a { color: #2563eb; text-decoration: underline; text-underline-offset: 3px; }
+.markdown blockquote { margin: .8rem 0; border-left: 3px solid #d4d4d8; padding-left: 1rem; color: #52525b; }
+.assistant-output.markdown p { margin: .35rem 0; }
+.assistant-output.markdown h1, .assistant-output.markdown h2, .assistant-output.markdown h3 { margin: .8rem 0 .35rem; }
+.assistant-output.markdown h1 { font-size: 1.15rem; }
+.assistant-output.markdown h2 { font-size: 1.02rem; }
+.assistant-output.markdown h3 { font-size: .94rem; }
+.assistant-output.markdown ul, .assistant-output.markdown ol { margin: .35rem 0; padding-left: 1.2rem; }
+.assistant-output.markdown li { margin: .08rem 0; }
+.assistant-output.markdown blockquote { margin: .5rem 0; padding-left: .8rem; }
+.assistant-output.markdown code { font-size: .92em; }
+.code-renderer, .code-renderer * { overflow-wrap: normal; }
+.code-renderer-scroll { scrollbar-color: #52525b transparent; scrollbar-gutter: stable; tab-size: 2; }
+.reasoning summary { list-style: none; }
+.reasoning summary::-webkit-details-marker { display: none; }
+
+@keyframes ui-overlay-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ui-dialog-in { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes ui-popover-in { from { opacity: 0; transform: translateY(-4px) scale(.99); } to { opacity: 1; transform: translateY(0) scale(1); } }
+@keyframes ui-timeline-in { from { opacity: 0; transform: translateY(7px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes ui-empty-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes ui-side-panel-in { from { opacity: 0; transform: translateX(12px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes ui-status-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+@keyframes ui-live-dot { 0%, 100% { opacity: .55; transform: scale(.82); } 50% { opacity: 1; transform: scale(1); } }
+@keyframes ui-thinking-caret { 0%, 45% { opacity: 1; } 46%, 100% { opacity: 0; } }
+@keyframes ui-live-orbit { 0%, 100% { box-shadow: 0 0 0 0 rgba(217, 119, 6, .08); } 50% { box-shadow: 0 0 0 5px rgba(217, 119, 6, 0); } }
+
+@media (prefers-reduced-motion: no-preference) {
+  .ui-overlay { animation: ui-overlay-in 180ms ease-out both; }
+  .ui-dialog { animation: ui-dialog-in 280ms cubic-bezier(.16, 1, .3, 1) both; transform-origin: 50% 35%; }
+  .ui-popover { animation: ui-popover-in 180ms cubic-bezier(.16, 1, .3, 1) both; transform-origin: top; }
+  .ui-timeline-item { animation: ui-timeline-in 260ms cubic-bezier(.16, 1, .3, 1) both; }
+  .ui-empty-state { animation: ui-empty-in 420ms cubic-bezier(.16, 1, .3, 1) both; }
+  .ui-side-panel { animation: ui-side-panel-in 260ms cubic-bezier(.16, 1, .3, 1) both; }
+  .ui-session-row { animation: ui-timeline-in 220ms cubic-bezier(.16, 1, .3, 1) both; }
+  .ui-status-pulse { animation: ui-status-pulse 1.5s ease-in-out infinite; }
+  .ui-live-dot { animation: ui-live-dot 1.3s ease-in-out infinite; }
+  .ui-thinking-caret { animation: ui-thinking-caret .9s steps(1, end) infinite; }
+  .ui-live-orbit { animation: ui-live-orbit 1.8s ease-in-out infinite; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; } }

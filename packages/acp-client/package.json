@@ -1,0 +1,39 @@
+{
+  "name": "@dockmux/acp-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "development": "./src/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./mock-agent": "./agents/mock-acp.mjs",
+    "./claude-agent": "./agents/claude-acp.mjs"
+  },
+  "files": [
+    "src/index.ts",
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "agents"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepack": "pnpm build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "0.66.0",
+    "@dockmux/shared": "workspace:*",
+    "acpx": "0.13.0"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}
