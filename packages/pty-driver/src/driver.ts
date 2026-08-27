@@ -48,6 +48,18 @@ export class PtyCliDriver implements AgentDriver {
   /** 一轮任务进行中：send() 置 true，completed 发出后置 false。 */
   private turnActive = false;
   private firstPromptSent = false;
+  /** 本轮是否已收到 CLI 的实质性输出（text/thinking/tool）。
+   *  idle 检测在 CLI 启动期（splash 屏静止）会误判为空闲，必须等至少
+   *  一条实质事件后才允许 completed。 */
+  private turnHasOutput = false;
+  /** 本轮开始时间——用于启动宽限期：CLI 初始化期间 PTY 静止，
+   *  idle 检测会误判，宽限期内禁止 completed。 */
+  private turnStartedAt = 0;
+  private static readonly TURN_GRACE_MS = 15_000;
+  /** send() 的等待者：send() 必须等本轮 completed（或 driver 退出）才 resolve，
+   *  与 AcpxAdapter 的语义对齐（runtime 在 send resolve 后立即判定终态）。 */
+  private turnResolve: (() => void) | null = null;
+  private turnReject: ((err: Error) => void) | null = null;
 
   private idleDetector: IdleDetector | undefined;
   private snapshot: TerminalSnapshot | undefined;
@@ -108,8 +120,17 @@ export class PtyCliDriver implements AgentDriver {
     this.firstPromptSent = true;
 
     this.turnActive = true;
+    this.turnHasOutput = false;
+    this.turnStartedAt = Date.now();
     this.idleDetector?.reset();
     await this.adapter.writeInput(this.backend, finalPrompt);
+
+    // 与 AcpxAdapter 语义对齐：send() 等本轮结束（completed）才 resolve，
+    // runtime 在 send resolve 后立即判定终态。driver 退出则 reject。
+    return new Promise<void>((resolve, reject) => {
+      this.turnResolve = resolve;
+      this.turnReject = reject;
+    });
   }
 
   async interrupt(): Promise<void> {
@@ -117,6 +138,11 @@ export class PtyCliDriver implements AgentDriver {
     this.backend.interrupt();
     // 不主动发 completed——等 idle 检测到 prompt 回归自然完成（turnActive 仍为 true）。
     this.emitEvent({ type: 'status', data: { state: 'interrupted' } });
+    // 但 send() 的等待者需要被唤醒——interrupt 后 runtime 会走 interrupted 路径。
+    this.turnActive = false;
+    this.turnResolve?.();
+    this.turnResolve = null;
+    this.turnReject = null;
   }
 
   async resume(): Promise<void> {
@@ -181,8 +207,16 @@ export class PtyCliDriver implements AgentDriver {
     });
     this.idleDetector.onIdle(() => {
       if (!this.turnActive) return;
+      // 已有实质输出（CLI 在干活）→ 不受宽限期限制，idle 即完成。
+      // 尚无实质输出 → 可能还在启动期（splash 屏静止），宽限期内禁止 completed。
+      if (!this.turnHasOutput) {
+        if (Date.now() - this.turnStartedAt < PtyCliDriver.TURN_GRACE_MS) return;
+      }
       this.turnActive = false;
       this.emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
+      this.turnResolve?.();
+      this.turnResolve = null;
+      this.turnReject = null;
     });
 
     backend.onData(data => {
@@ -190,12 +224,20 @@ export class PtyCliDriver implements AgentDriver {
       this.snapshot?.write(data);
       for (const cb of this.terminalSubscribers) cb(data);
       this.scheduleRawTerminal();
+      // 本轮进行中的 PTY 输出 = CLI 在干活（splash 屏静止不会触发 onData）。
+      if (this.turnActive) this.turnHasOutput = true;
     });
     backend.onExit(code => this.handleExit(code));
 
     this.transcript = createTranscriptTailer(this.adapter.id, { cwd: this.cwd });
     if (this.transcript) {
-      this.transcript.onEvent(e => this.emitEvent(e));
+      this.transcript.onEvent(e => {
+        // 标记本轮已有实质输出（text/thinking/tool_*），解除 idle 闸门。
+        if (e.type === 'text' || e.type === 'thinking' || e.type === 'tool_call' || e.type === 'tool_result') {
+          this.turnHasOutput = true;
+        }
+        this.emitEvent(e);
+      });
       this.transcript.start();
     }
   }
@@ -220,6 +262,13 @@ export class PtyCliDriver implements AgentDriver {
     this.exitReported = true;
     this.stopped = true;
     this.teardownWiring();
+    // 若本轮仍在进行，driver 退出 = 本轮失败，reject send() 的等待者。
+    if (this.turnActive) {
+      this.turnActive = false;
+      this.turnReject?.(new Error(`Agent exited with code ${code}`));
+      this.turnResolve = null;
+      this.turnReject = null;
+    }
     this.exitCallback(code);
   }
 
@@ -295,8 +344,16 @@ export function createPtyCliDriver(opts: PtyCliDriverOptions): PtyCliDriver {
 }
 
 function mergedEnv(agentEnv: Record<string, string>): Record<string, string> {
+  // 剥离桥接进程自身的 ANTHROPIC_* / CLAUDE_* 环境变量——这些是 dockmux
+  // daemon 的运行身份，不是被桥接 CLI 的。CLI 应该用自己的配置（~/.claude/）
+  // 或 agent.env 里显式声明的变量。
+  const stripped = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([key]) => !/^(ANTHROPIC_|CLAUDE_)/i.test(key)
+    )
+  );
   return Object.fromEntries(
-    Object.entries({ ...process.env, ...agentEnv }).filter(
+    Object.entries({ ...stripped, ...agentEnv }).filter(
       (entry): entry is [string, string] => typeof entry[1] === 'string'
     )
   );
