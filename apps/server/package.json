@@ -36,12 +36,14 @@
     "node-pty": "1.2.0-beta.15",
     "pino": "9.7.0",
     "safe-regex2": "5.1.1",
-    "zod": "3.25.67"
+    "zod": "3.25.67",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "esbuild": "0.25.12",
     "tsx": "4.20.3",
     "typescript": "5.8.3",
-    "vitest": "3.2.4"
+    "vitest": "3.2.4",
+    "@types/ws": "^8.18.1"
   }
 }
