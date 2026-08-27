@@ -1,2 +1,10 @@
-// 占位：由对应团队填充
-export {};
+export type { SessionBackend, SpawnOptions, SessionProbe } from './types.js';
+export { PtyBackend } from './pty-backend.js';
+export {
+  TmuxBackend,
+  TmuxError,
+  TmuxServerError,
+  TmuxSessionMissingError,
+  TmuxSessionExistsError,
+  isTmuxAvailable,
+} from './tmux-backend.js';

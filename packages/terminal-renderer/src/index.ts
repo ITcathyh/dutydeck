@@ -1,2 +1,1 @@
-// 占位：由对应团队填充
-export {};
+export { TerminalSnapshot } from './renderer.js';

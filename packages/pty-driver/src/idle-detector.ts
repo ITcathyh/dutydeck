@@ -1,0 +1,315 @@
+/**
+ * Idle detection state machine — ported verbatim from botmux
+ * (src/utils/idle-detector.ts). The ONLY intentional difference is the
+ * constructor: botmux takes a CliAdapter, dockmux takes a plain IdlePatterns
+ * bag so pty-driver internals do not reverse-depend on cli-adapters types.
+ *
+ * Strategy logic is byte-for-byte the botmux original — do NOT "simplify":
+ *   - Strategy 1: CLI completion marker → 500ms delayed idle
+ *   - Strategy 2: quiescence (2000ms PTY silence) + spinner guard (3000ms)
+ *   - readyPattern gating (quiescence suppressed until the prompt renders)
+ *   - static-busy latch (capacity-queue screens) with stale-tail position
+ *     tracking
+ *   - idleToBusy edge arming (at most one busy emit per idle cycle)
+ *   - ANSI stripping, 500-char rolling tail, lastMatchIndex helper
+ */
+
+export type IdleEvidenceSource = 'screen' | 'external';
+
+/** Pattern bag driving the detector. Mirrors the optional pattern fields of
+ *  botmux's CliAdapter; every field is optional. */
+export interface IdlePatterns {
+  completionPattern?: RegExp;
+  idleToBusyPattern?: RegExp;
+  staticBusyPattern?: RegExp;
+  staticBusyClearPattern?: RegExp;
+  readyPattern?: RegExp;
+}
+
+/** Spinner frames — animate while CLI is working.
+ *  Includes Claude Code symbols, Ink dots braille chars (Gemini),
+ *  and OpenCode progress bar chars (■⬝). */
+const SPINNER_RE = /[·✢✳✶✻✽⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏■⬝]/;
+
+/** Default quiescence timeout (ms) — idle if PTY silent + no recent spinner */
+const QUIESCENCE_MS = 2_000;
+/** Spinner guard — don't declare idle if spinner seen within this window */
+const SPINNER_GUARD_MS = 3_000;
+
+export class IdleDetector {
+  private outputTail = '';
+  private lastSpinnerAt = 0;
+  private quiescenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private isIdle = false;
+  private idleCallback: ((source: IdleEvidenceSource) => void) | null = null;
+  private busyCallback: (() => void) | null = null;
+  private completionPattern: RegExp | undefined;
+  private idleToBusyPattern: RegExp | undefined;
+  private staticBusyPattern: RegExp | undefined;
+  private staticBusyClearPattern: RegExp | undefined;
+  private busyTransitionArmed = false;
+  private readyPattern: RegExp | undefined;
+  private readySeen = false;
+  /** Pre-idle latch for static busy screens (capacity queue). Set from PTY
+   *  chunks carrying explicit static-busy evidence (scanned across chunks
+   *  via the rolling tail); suppresses screen-derived idle until a chunk
+   *  with explicit composer evidence (staticBusyClearPattern) redraws. */
+  private staticBusyLatch = false;
+  /** Tail position of the last composer clear evidence. Queue evidence in
+   *  the tail at or before this position is stale (from before the clear)
+   *  and must not re-set the latch. -1 = no clear recorded. */
+  private staticBusyClearTailPos = -1;
+
+  constructor(patterns: IdlePatterns) {
+    this.completionPattern = patterns.completionPattern;
+    this.idleToBusyPattern = patterns.idleToBusyPattern;
+    this.staticBusyPattern = patterns.staticBusyPattern;
+    this.staticBusyClearPattern = patterns.staticBusyClearPattern;
+    this.readyPattern = patterns.readyPattern;
+  }
+
+  onIdle(cb: (source: IdleEvidenceSource) => void): void {
+    this.idleCallback = cb;
+  }
+
+  onBusy(cb: () => void): void {
+    this.busyCallback = cb;
+  }
+
+  /**
+   * Seed readyPattern evidence for a prompt that IS on screen but was rendered
+   * before resetReadyEvidence() cleared the flag. A new session (SessionStart
+   * source=startup) never redraws after that boundary, so Strategy 2's
+   * `!readySeen` early return would suppress quiescence detection forever.
+   *
+   * The caller must first confirm the PTY is quiet AND the current rendered
+   * screen matches readyPattern. This only restores readySeen — a full
+   * quiescence check (spinner guard included) still runs on top of it, so no
+   * existing check is bypassed.
+   */
+  seedReadyEvidence(): boolean {
+    if (this.isIdle || this.readySeen) return false;
+    this.readySeen = true;
+    this.clearTimer();
+    this.quiescenceCheck();
+    return true;
+  }
+
+  feed(data: string): void {
+    // A botmux-owned submit calls reset() before writing input, but adopted
+    // panes can also receive local terminal input while we are already idle.
+    // Treat any later PTY data as a fresh cycle so that local work can become
+    // idle and flush transcript-driven fallback output.
+    if (this.isIdle) {
+      this.isIdle = false;
+      this.outputTail = '';
+      this.readySeen = false;
+      this.staticBusyClearTailPos = -1;
+      this.lastSpinnerAt = Date.now();
+    }
+
+    const stripped = this.stripAnsi(data);
+    // Shift the clear position left when the tail window drops characters
+    // from the head, so it stays relative to the current window.
+    const combined = this.outputTail + stripped;
+    const dropped = Math.max(0, combined.length - 500);
+    this.outputTail = combined.slice(-500);
+    if (this.staticBusyClearTailPos >= 0) {
+      this.staticBusyClearTailPos = Math.max(-1, this.staticBusyClearTailPos - dropped);
+    }
+
+    // Only an explicitly opted-in CLI marker may turn a previously reported
+    // idle cycle back into busy. Plain PTY activity — and legacy busyPattern
+    // matches — can be a transcript redraw, so they are insufficient evidence.
+    // Keep the edge armed across chunks, then emit at most once per cycle.
+    if (
+      this.busyTransitionArmed
+      && this.idleToBusyPattern
+      && (
+        this.idleToBusyPattern.test(stripped)
+        || this.idleToBusyPattern.test(this.outputTail)
+      )
+    ) {
+      this.busyTransitionArmed = false;
+      this.busyCallback?.();
+    }
+
+    // Track when the CLI's input prompt appears.
+    // Check the current chunk too — a single chunk can contain the prompt
+    // AND a full status-bar redraw (hundreds of chars), pushing the prompt
+    // out of the 500-char outputTail before the check runs.
+    const readyMatched = this.readyPattern && (
+      this.readyPattern.test(stripped) || this.readyPattern.test(this.outputTail)
+    );
+    if (readyMatched) {
+      this.readySeen = true;
+    }
+
+    // Pre-idle static-busy latch (capacity-queue screens).
+    // SET: scan both the current chunk AND the rolling tail — the queue
+    //  marker can be split across chunks ("Queued for cap" + "acity"), and
+    //  the tail already holds the full text by the time the second chunk
+    //  arrives (consistent with idleToBusy/completionPattern split-chunk
+    //  handling).
+    // CLEAR: explicit composer evidence (staticBusyClearPattern) in the
+    //  CURRENT chunk. The broad readyPattern includes `\d+% left` (status
+    //  bar), which the queue screen itself carries — using it to clear
+    //  would re-open the false-idle bug when queue and status bar arrive
+    //  in separate chunks.
+    // ORDER: within a single chunk, whichever evidence appears LAST wins —
+    //  a submitted user message (`› text`) followed by a fresh queue line
+    //  must NOT clear the latch (the queue is fresher), while a queue line
+    //  followed by a real composer redraw must clear it.
+    // STALE-TAIL: after a clear, queue text lingering in the tail must not
+    //  re-set the latch. Record the clear position in the tail; only queue
+    //  evidence AFTER that position is fresh enough to set.
+    if (this.staticBusyPattern) {
+      const clearIdx = this.staticBusyClearPattern
+        ? lastMatchIndex(this.staticBusyClearPattern, stripped)
+        : -1;
+      const staticChunkIdx = lastMatchIndex(this.staticBusyPattern, stripped);
+      const staticTailIdx = lastMatchIndex(this.staticBusyPattern, this.outputTail);
+      if (clearIdx >= 0 && clearIdx > staticChunkIdx) {
+        this.staticBusyLatch = false;
+        // Record where the clear landed in the tail so stale queue text
+        // before it doesn't re-set the latch on the next chunk.
+        const chunkStart = this.outputTail.length - stripped.length;
+        this.staticBusyClearTailPos = chunkStart >= 0
+          ? chunkStart + clearIdx
+          : this.outputTail.length;
+      } else if (staticTailIdx >= 0 && staticTailIdx > this.staticBusyClearTailPos) {
+        this.staticBusyLatch = true;
+      }
+    }
+
+    // Track spinner — but not if it's part of completion marker,
+    // and not after ready pattern is seen (status bar chars like · are not real spinners)
+    if (SPINNER_RE.test(stripped) && !(this.completionPattern?.test(stripped) || this.completionPattern?.test(this.outputTail)) && !this.readySeen) {
+      this.lastSpinnerAt = Date.now();
+    }
+
+    // Strategy 1: CLI-specific completion marker
+    // Check the current chunk too: a single full-screen redraw can contain
+    // the completion line and enough trailing status text to push it out of
+    // the 500-char tail before this check runs.
+    if (this.completionPattern?.test(stripped) || this.completionPattern?.test(this.outputTail)) {
+      this.clearTimer();
+      this.quiescenceTimer = setTimeout(() => {
+        this.quiescenceTimer = null;
+        // A static-busy latch outranks a completion marker: the queue screen
+        // can carry both, and the latch only clears on a composer redraw.
+        if (!this.isIdle && !this.staticBusyLatch) this.markIdle('screen');
+      }, 500);
+      return;
+    }
+
+    // Strategy 2: quiescence (PTY silence + no recent spinner)
+    // When readyPattern is set, suppress quiescence until the input prompt appears.
+    if (this.readyPattern && !this.readySeen) return;
+
+    this.clearTimer();
+    this.quiescenceTimer = setTimeout(() => this.quiescenceCheck(), QUIESCENCE_MS);
+  }
+
+  reset(): void {
+    this.isIdle = false;
+    this.busyTransitionArmed = false;
+    this.outputTail = '';
+    this.readySeen = false;
+    this.staticBusyLatch = false;
+    this.staticBusyClearTailPos = -1;
+    this.lastSpinnerAt = Date.now();
+    this.clearTimer();
+  }
+
+  /**
+   * Drop prompt evidence observed before a SessionStart boundary. Unlike the
+   * ordinary per-turn reset, this does not synthesize a recent spinner: once
+   * Claude finishes the remaining parallel hooks, its newly rendered prompt
+   * should need only the normal quiescence window.
+   */
+  resetReadyEvidence(): void {
+    this.isIdle = false;
+    this.busyTransitionArmed = false;
+    this.outputTail = '';
+    this.readySeen = false;
+    this.staticBusyLatch = false;
+    this.staticBusyClearTailPos = -1;
+    this.lastSpinnerAt = 0;
+    this.clearTimer();
+  }
+
+  /** External idle source — lets transcript-driven detectors (Claude jsonl
+   *  Stop, Codex rollout assistant_final, CoCo events.jsonl finish_reason
+   *  stop) push idle without waiting for screen-pattern + quiescence to
+   *  agree. Idempotent within a turn (gated by isIdle); reset() re-arms it
+   *  for the next turn — same lifecycle as the internal markIdle path. */
+  fireIdle(): void {
+    if (this.isIdle) return;
+    this.markIdle('external');
+  }
+
+  dispose(): void {
+    this.clearTimer();
+    this.idleCallback = null;
+    this.busyCallback = null;
+    this.busyTransitionArmed = false;
+    this.staticBusyLatch = false;
+    this.staticBusyClearTailPos = -1;
+  }
+
+  private quiescenceCheck(): void {
+    this.quiescenceTimer = null;
+    if (this.isIdle) return;
+    // Explicit static-busy evidence (capacity queue): the screen is not
+    // quiescing into a prompt — it is parked on a queue notice. Do not mark
+    // idle and do not re-arm: the latch clears on the composer redraw, whose
+    // feed() re-arms quiescence.
+    if (this.staticBusyLatch) return;
+    const sinceSpinner = Date.now() - this.lastSpinnerAt;
+    if (sinceSpinner < SPINNER_GUARD_MS) {
+      this.quiescenceTimer = setTimeout(
+        () => this.quiescenceCheck(),
+        SPINNER_GUARD_MS - sinceSpinner + 200,
+      );
+      return;
+    }
+    this.markIdle('screen');
+  }
+
+  private markIdle(source: IdleEvidenceSource): void {
+    this.isIdle = true;
+    // Arm before the callback: markPromptReady may synchronously flush queued
+    // botmux input and call reset(), which must win and disarm this edge.
+    this.busyTransitionArmed = true;
+    this.outputTail = '';
+    this.clearTimer();
+    this.idleCallback?.(source);
+  }
+
+  private clearTimer(): void {
+    if (this.quiescenceTimer) {
+      clearTimeout(this.quiescenceTimer);
+      this.quiescenceTimer = null;
+    }
+  }
+
+  private stripAnsi(str: string): string {
+    return str
+      .replace(/\x1b\[(\d*)C/g, (_m, n) => ' '.repeat(Number(n) || 1))
+      .replace(/\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]|\x1b\[[\?]?[0-9;]*[hlmsuJ]/g, '');
+  }
+}
+
+/** Find the LAST match index of a regex in a string, or -1. Handles
+ *  non-global regexes by cloning with the g flag. */
+function lastMatchIndex(re: RegExp, s: string): number {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : re.flags + 'g');
+  let last = -1;
+  let m: RegExpExecArray | null;
+  while ((m = g.exec(s)) !== null) {
+    last = m.index;
+    if (g.lastIndex === m.index) g.lastIndex++;
+  }
+  return last;
+}

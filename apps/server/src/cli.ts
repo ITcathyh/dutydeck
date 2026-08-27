@@ -10,8 +10,12 @@ import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupWait } from './lark/agent-tools-cli.js';
 import { agentDockGroupToolsCommand } from './lark/agent-tools.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop } from './daemon/command.js';
+import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { runNpmForDockmuxUpdate, updateDockmux } from './update.js';
+import { loadConfig } from '@dockmux/config';
+import { createRepositories } from '@dockmux/storage';
+import { runAuthTokenCommand } from './auth/auth.js';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
@@ -108,6 +112,17 @@ async function main() {
         runNpm: runNpmForDockmuxUpdate,
         restart: restartWithInstalledCli
       }));
+    },
+    authToken: async options => {
+      // 优先用运行中/上次 daemon 记录的数据库路径，保证查看/轮换的是同一个 token；
+      // daemon 从未运行过时回退到 loadConfig 的默认解析（<cwd>/.dockmux/dockmux.db）。
+      const databaseUrl = readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl;
+      const repos = createRepositories(databaseUrl);
+      try {
+        output(await runAuthTokenCommand(repos.config, { rotate: options.rotate === true }));
+      } finally {
+        repos.close();
+      }
     },
     larkSend: async (markdown, options) => { output(await runLarkSend(markdown, options)); },
     larkUpdate: async (markdown, options) => { output(await runLarkUpdate(markdown, options)); },

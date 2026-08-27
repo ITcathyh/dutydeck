@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dockmux/storage';
 import type { AgentConfig, Session } from '@dockmux/shared';
-import { DockmuxRuntime, type AgentDriver } from './index.js';
+import { DockmuxRuntime, type AgentDriver, type DriverFactory } from './index.js';
 
 const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
 
@@ -9,7 +9,7 @@ function harness(options: { onSend?: (emit: (event: any) => void) => void; exitO
   const repos = createRepositories(':memory:'); let emit!: (event: any) => void; let exit!: (code: number | null) => void; const configuredAgents: AgentConfig[] = [];
   const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { options.onSend?.(emit); if (options.exitOnSend) exit(options.exitOnSend); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}), setModel: vi.fn(async () => {}), setReasoningEffort: vi.fn(async () => {}), setPermissionMode: vi.fn() };
   const runtime = new DockmuxRuntime(repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (configuredAgent, _p, onEvent, onExit) => { configuredAgents.push(configuredAgent); emit = onEvent; exit = onExit; return driver; }, driverIdleTimeoutMs: options.driverIdleTimeoutMs, sessionEnvironment: options.sessionEnvironment, sessionPrompt: options.sessionPrompt });
-  return { repos, runtime, driver, configuredAgents, emit: (event: any) => emit(event) };
+  return { repos, runtime, driver, configuredAgents, emit: (event: any) => emit(event), exit: (code: number | null) => exit(code) };
 }
 
 function deferred() {
@@ -350,6 +350,101 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.send(s.id, 'work');
     expect((await h.runtime.getTasks(s.id))[0]?.status).toBe('failed');
     await vi.waitFor(async () => expect((await h.runtime.getEvents(s.id)).some(e => e.type === 'error' && /截断/.test((e.data as any)?.message ?? ''))).toBe(true));
+    await h.runtime.shutdown(); h.repos.close();
+  });
+});
+
+describe('multi-driver routing', () => {
+  const ptyAgent: AgentConfig = { id: 'mock-pty', name: 'Mock PTY', command: process.execPath, args: [], protocol: 'pty-cli', cwd: '/tmp', env: {}, permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+  const ptyProbe = () => ({ protocol: 'pty-cli' as const, available: true, pause: false, resume: true });
+
+  function ptyHarness(ptyDriverFactory?: DriverFactory) {
+    const repos = createRepositories(':memory:');
+    let emit!: (event: any) => void;
+    const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { emit({ type: 'text', data: { text: 'answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    let routedProtocol: string | undefined;
+    const runtime = new DockmuxRuntime(repos, {
+      probe: ptyProbe,
+      ptyDriverFactory: ptyDriverFactory ?? ((_agent, protocol, onEvent) => { routedProtocol = protocol; emit = onEvent; return driver; })
+    });
+    return { repos, runtime, driver, routedProtocol: () => routedProtocol };
+  }
+
+  it('routes pty-cli agents to the injected ptyDriverFactory and streams a turn', async () => {
+    const h = ptyHarness();
+    await h.repos.agents.save(ptyAgent);
+    await h.runtime.initialize([ptyAgent]);
+    const session = await h.runtime.start({ agentId: 'mock-pty' });
+    expect(h.routedProtocol()).toBe('pty-cli');
+    expect((await h.runtime.getSession(session.id))?.state).toBe('idle');
+    await h.runtime.send(session.id, 'work');
+    expect(h.driver.send).toHaveBeenCalledWith('work');
+    expect((await h.runtime.getSession(session.id))?.state).toBe('completed');
+    expect((await h.runtime.getEvents(session.id)).map(e => e.type)).toEqual(expect.arrayContaining(['text', 'completed']));
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('rejects pty-cli sessions when no ptyDriverFactory is injected', async () => {
+    const repos = createRepositories(':memory:');
+    const runtime = new DockmuxRuntime(repos, { probe: ptyProbe });
+    await repos.agents.save(ptyAgent);
+    await runtime.initialize([ptyAgent]);
+    await expect(runtime.start({ agentId: 'mock-pty' })).rejects.toMatchObject({ code: 'DRIVER_UNAVAILABLE', statusCode: 503 });
+    await runtime.shutdown(); repos.close();
+  });
+
+  it('lets a custom driverFactory take precedence over pty-cli routing', async () => {
+    const repos = createRepositories(':memory:');
+    const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const custom = vi.fn(() => driver);
+    const ptyFallback = vi.fn(() => driver);
+    const runtime = new DockmuxRuntime(repos, { probe: ptyProbe, driverFactory: custom, ptyDriverFactory: ptyFallback });
+    await repos.agents.save(ptyAgent);
+    await runtime.initialize([ptyAgent]);
+    await runtime.start({ agentId: 'mock-pty' });
+    expect(custom).toHaveBeenCalledWith(expect.objectContaining({ id: 'mock-pty' }), 'pty-cli', expect.any(Function), expect.any(Function), expect.any(String));
+    expect(ptyFallback).not.toHaveBeenCalled();
+    await runtime.shutdown(); repos.close();
+  });
+});
+
+describe('driver accessor', () => {
+  it('exposes the live driver after start and releases it after stop', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]);
+    expect(h.runtime.getDriver('ses_unknown')).toBeUndefined();
+    const session = await h.runtime.start({ agentId: 'mock' });
+    expect(h.runtime.getDriver(session.id)).toBe(h.driver);
+    await h.runtime.stop(session.id);
+    expect(h.runtime.getDriver(session.id)).toBeUndefined();
+    h.repos.close();
+  });
+});
+
+describe('driver exit subscription', () => {
+  it('fans driver exit codes out to per-session subscribers and stops after unsubscribe', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const codes: Array<number | null> = [];
+    const unsubscribe = h.runtime.onDriverExit(session.id, code => codes.push(code));
+    h.exit(137);
+    expect(codes).toEqual([137]);
+    unsubscribe();
+    h.exit(1);
+    expect(codes).toEqual([137]);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not fan exit codes out to subscribers of other sessions', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const otherCodes: Array<number | null> = [];
+    h.runtime.onDriverExit('ses_other', code => otherCodes.push(code));
+    h.exit(0);
+    expect(otherCodes).toEqual([]);
+    expect((await h.runtime.getSession(session.id))?.state).not.toBe('failed');
     await h.runtime.shutdown(); h.repos.close();
   });
 });

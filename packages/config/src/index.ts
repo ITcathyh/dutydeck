@@ -1,6 +1,7 @@
 import { agentConfigSchema, type AgentConfig } from '@dockmux/shared';
 import { listAcpxBuiltinAgents } from '@dockmux/acp-client';
 import { commandExists } from '@dockmux/transports';
+import type { DriverFactory, RuntimeOptions } from '@dockmux/runtime';
 import { z } from 'zod';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -41,12 +42,41 @@ const scanBuiltinAgents = () => scannedBuiltinAgents ??= listAcpxBuiltinAgents()
   if (!detail || !commandExists(detail.cli)) return [];
   return [{ id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'full-trust' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(detail.cli) }];
 });
-export const builtinAgents = (cwd = process.cwd()): AgentConfig[] => scanBuiltinAgents().map(agent => ({ ...agent, cwd }));
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+// PTY 适配器（@dockmux/cli-adapters，由 server 组装时注入，本包不直接依赖）贡献的内置 agent 描述
+export interface PtyAgentContribution {
+  id: string
+  name: string
+  command: string
+  args?: string[]
+  builtin?: boolean
+}
+
+// PTY 贡献的扫描结果按贡献列表内容缓存：commandExists/cliVersion 都是 spawnSync 重操作，同一组贡献不重复探测
+const scannedPtyAgents = new Map<string, Array<Omit<AgentConfig, 'cwd'>>>();
+const scanPtyAgents = (contributions: PtyAgentContribution[], acpxIds: Set<string>): Array<Omit<AgentConfig, 'cwd'>> => {
+  const cacheKey = JSON.stringify(contributions);
+  const cached = scannedPtyAgents.get(cacheKey);
+  if (cached) return cached;
+  const agents = contributions.flatMap(contribution => {
+    // id 冲突时 ACPX 优先：与 ACPX 内置 agent 同 id 的 PTY 贡献直接跳过，保证 ACP 基线不回归
+    if (acpxIds.has(contribution.id) || !commandExists(contribution.command)) return [];
+    return [{ id: contribution.id, name: contribution.name, command: contribution.command, args: contribution.args ?? [], protocol: 'pty-cli' as const, env: {}, permissionMode: 'full-trust' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: contribution.builtin ?? true, version: cliVersion(contribution.command) }];
+  });
+  scannedPtyAgents.set(cacheKey, agents);
+  return agents;
+};
+
+export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentContribution[] = []): AgentConfig[] => {
+  const acpxAgents = scanBuiltinAgents();
+  const ptyAgents = scanPtyAgents(ptyContributions, new Set(acpxAgents.map(agent => agent.id)));
+  return [...acpxAgents, ...ptyAgents].map(agent => ({ ...agent, cwd }));
+};
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = []): AppConfig {
   const extra = env.DOCKMUX_AGENTS_JSON ? JSON.parse(env.DOCKMUX_AGENTS_JSON) : [];
   const defaultCwd = env.DOCKMUX_DEFAULT_CWD ?? process.cwd();
-  const agents = new Map(builtinAgents(defaultCwd).map(agent => [agent.id, agent]));
+  const agents = new Map(builtinAgents(defaultCwd, ptyContributions).map(agent => [agent.id, agent]));
   for (const agent of extra) {
     const configured = agentConfigSchema.parse(agent);
     if (commandExists(configured.command)) agents.set(configured.id, { ...configured, cwd: configured.cwd ?? defaultCwd, version: configured.version ?? cliVersion(configured.command) });
@@ -60,4 +90,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     cleanupIntervalMs: env.DOCKMUX_CLEANUP_INTERVAL_MS ? Number(env.DOCKMUX_CLEANUP_INTERVAL_MS) : undefined,
     agents: [...agents.values()]
   });
+}
+
+/**
+ * 把 AppConfig 映射成 DockmuxRuntime 的 RuntimeOptions 子集（server 组装时与 sessionEnvironment/sessionPrompt 等 spread 合并）。
+ * ptyDriverFactory 是函数、不能进 zod 校验的 AppConfig，经此注入点透传（由 server 从 @dockmux/pty-driver 组装）。
+ */
+export function createRuntimeOptions(
+  config: AppConfig,
+  options: { ptyDriverFactory?: DriverFactory } = {}
+): Pick<RuntimeOptions, 'acpxCommand' | 'driverIdleTimeoutMs' | 'cleanupIntervalMs' | 'ptyDriverFactory'> {
+  return {
+    acpxCommand: config.acpxCommand,
+    driverIdleTimeoutMs: config.driverIdleTimeoutMs,
+    cleanupIntervalMs: config.cleanupIntervalMs,
+    ptyDriverFactory: options.ptyDriverFactory
+  };
 }

@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
-import type { AgentConfig, AgentEvent, EventType, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dockmux/shared';
+import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, NormalizedDriverEvent, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dockmux/shared';
 import { makeId, now, RuntimeError } from '@dockmux/shared';
-import { AcpxAdapter, type NormalizedDriverEvent } from '@dockmux/acp-client';
+import { AcpxAdapter } from '@dockmux/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dockmux/transports';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -24,24 +24,19 @@ export function correlateToolCalls(events: Array<NormalizedDriverEvent | undefin
   return calls;
 }
 
-export interface AgentDriver {
-  start(): Promise<void>;
-  send(prompt: string): Promise<void>;
-  interrupt(): Promise<void>;
-  resume(): Promise<void>;
-  stop(options?: { discardSession?: boolean }): Promise<void>;
-  resolvePermission?(id: string, approved: boolean): Promise<boolean>;
-  setModel?(model: string): Promise<void>;
-  setReasoningEffort?(reasoningEffort: string): Promise<void>;
-  setRiskPolicy?(policy?: ToolRiskPolicy): void;
-  setPermissionMode?(mode: PermissionMode): void;
-}
-
-type DriverFactory = (agent: AgentConfig, protocol: 'acp' | 'jsonl' | 'pipe' | 'pty', onEvent: (e: NormalizedDriverEvent) => void, onExit: (code: number | null) => void, sessionId: string) => AgentDriver;
+// 驱动契约类型统一从 @dockmux/shared 导出（driver.ts 是跨团队冻结契约），
+// 本包不再自定义 AgentDriver / DriverFactory / NormalizedDriverEvent。
+export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
 
 export interface RuntimeOptions {
   acpxCommand?: string;
   driverFactory?: DriverFactory;
+  /**
+   * pty-cli 协议驱动工厂（botmux 适配器栈，由 @dockmux/pty-driver 提供）。
+   * 仅在未注入自定义 driverFactory 时生效：agent.protocol === 'pty-cli' 的会话路由到它。
+   * 未提供时创建 pty-cli 会话会抛 DRIVER_UNAVAILABLE。
+   */
+  ptyDriverFactory?: DriverFactory;
   probe?: typeof probeAgent;
   driverIdleTimeoutMs?: number;
   cleanupIntervalMs?: number;
@@ -66,14 +61,20 @@ export class DockmuxRuntime {
   private readonly driverEventChains = new Map<string, Promise<void>>();
   private readonly driverEventErrors = new Map<string, unknown>();
   private readonly driverStopReasons = new Map<string, string>();
+  private readonly exitListeners = new Map<string, Set<(code: number | null) => void>>();
   private readonly factory: DriverFactory;
   private readonly lastActivity = new Map<string, number>();
   private readonly cleanupTimer?: NodeJS.Timeout;
   private cleanupRun?: Promise<void>;
 
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
+    const ptyDriverFactory = options.ptyDriverFactory;
     this.factory = options.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId) => {
       if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dockmux_session_id: sessionId } }, { sessionKey: sessionId, onEvent });
+      if (protocol === 'pty-cli') {
+        if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dockmux/pty-driver）', 503);
+        return ptyDriverFactory(agent, protocol, onEvent, onExit, sessionId);
+      }
       if (protocol === 'pty') return new PtyTransport(agent, { onEvent, onExit });
       if (protocol === 'pipe') return new PipeTransport(agent, { onEvent, onExit });
       return new JsonlTransport(agent, { onEvent, onExit });
@@ -198,6 +199,8 @@ export class DockmuxRuntime {
   listAgents() { return this.repos.agents.list(); }
   listSessions() { return this.repos.sessions.list(); }
   getSession(id: string) { return this.repos.sessions.get(id); }
+  /** 只读访问当前内存中的 driver 实例（如终端 WS 代理取 createTerminalStream）；未连接/已释放时返回 undefined。 */
+  getDriver(sessionId: string): AgentDriver | undefined { return this.drivers.get(sessionId); }
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getTasks(id: string) { return this.repos.tasks.listBySession(id); }
@@ -243,6 +246,26 @@ export class DockmuxRuntime {
     return () => this.emitter.off(name, listener);
   }
 
+  /**
+   * 订阅某 session 的 driver 进程退出事件（终端 WS 代理等用它合成 exit 帧，替代匹配 error 事件文本）。
+   * driver 工厂的 onExit 触发时 fan-out 给该 session 的所有订阅者；返回取消订阅函数。
+   */
+  onDriverExit(sessionId: string, callback: (code: number | null) => void): () => void {
+    const listeners = this.exitListeners.get(sessionId) ?? new Set();
+    listeners.add(callback);
+    this.exitListeners.set(sessionId, listeners);
+    return () => {
+      const current = this.exitListeners.get(sessionId);
+      current?.delete(callback);
+      if (current && !current.size) this.exitListeners.delete(sessionId);
+    };
+  }
+  private notifyDriverExit(sessionId: string, code: number | null) {
+    for (const callback of this.exitListeners.get(sessionId) ?? []) {
+      try { callback(code); } catch { /* 订阅者异常不影响 runtime 自身的退出处理 */ }
+    }
+  }
+
   private async consume(session: Session, event: NormalizedDriverEvent) {
     this.touch(session.id);
     // Driver completion closes its stream; Runtime emits the single canonical
@@ -284,7 +307,7 @@ export class DockmuxRuntime {
     await this.repos.artifacts.ensureLocalProject(session.cwd);
     await this.repos.sessions.save(session);
     await this.saveState(session, 'starting');
-    const driver = this.factory(this.configureAgentForSession(configured, session), capability.protocol, this.onDriverEvent(session), code => { if (code && session.state !== 'stopped' && !this.interruptedTurns.has(session.id) && !this.hardInterrupts.has(session.id)) void this.saveState(session, 'failed', `Agent exited with code ${code}`).then(() => this.emit(session.id, 'error', { message: `Agent exited with code ${code}` })); }, session.id);
+    const driver = this.factory(this.configureAgentForSession(configured, session), capability.protocol, this.onDriverEvent(session), code => { this.notifyDriverExit(session.id, code); if (code && session.state !== 'stopped' && !this.interruptedTurns.has(session.id) && !this.hardInterrupts.has(session.id)) void this.saveState(session, 'failed', `Agent exited with code ${code}`).then(() => this.emit(session.id, 'error', { message: `Agent exited with code ${code}` })); }, session.id);
     this.drivers.set(session.id, driver);
     try { await driver.start(); this.touch(session.id); await this.saveState(session, 'idle'); return session; }
     catch (error) {
@@ -519,7 +542,7 @@ export class DockmuxRuntime {
     this.hardInterrupts.delete(id);
   }
   async pause(id: string) { const { session } = await this.active(id); const agent = await this.repos.agents.get(session.agentId); if (!agent?.capabilities.pause) throw new RuntimeError('UNSUPPORTED_CAPABILITY', `Agent ${agent?.name ?? session.agentId} does not support pause/resume`, 422); await this.interrupt(id); }
-  async resume(id: string) { const { session } = await this.active(id); const agent = await this.repos.agents.get(session.agentId); if (!agent?.capabilities.resume) throw new RuntimeError('UNSUPPORTED_CAPABILITY', `Agent ${agent?.name ?? session.agentId} does not support resume`, 422); let driver = this.drivers.get(id); if (!driver) { const configured = this.configureAgentForSession(agent, session); driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => { if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`); }, session.id); this.drivers.set(id, driver); } await driver.resume(); await this.saveState(session, 'idle'); }
+  async resume(id: string) { const { session } = await this.active(id); const agent = await this.repos.agents.get(session.agentId); if (!agent?.capabilities.resume) throw new RuntimeError('UNSUPPORTED_CAPABILITY', `Agent ${agent?.name ?? session.agentId} does not support resume`, 422); let driver = this.drivers.get(id); if (!driver) { const configured = this.configureAgentForSession(agent, session); driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => { this.notifyDriverExit(session.id, code); if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`); }, session.id); this.drivers.set(id, driver); } await driver.resume(); await this.saveState(session, 'idle'); }
   async stop(id: string) {
     const { session, driver } = await this.active(id);
     this.hardInterrupts.add(id);
@@ -541,7 +564,7 @@ export class DockmuxRuntime {
     await this.repos.sessions.save(stopped);
     return stopped;
   }
-  async restart(id: string) { const { session } = await this.active(id); await this.stop(id); const agent = await this.repos.agents.get(session.agentId); if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent config was removed', 404); session.runId = makeId('run'); session.error = undefined; const configured = this.configureAgentForSession(agent, session); const driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => { if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`); }, session.id); this.drivers.set(id, driver); await this.saveState(session, 'starting'); await driver.start(); await this.saveState(session, 'idle'); return session; }
+  async restart(id: string) { const { session } = await this.active(id); await this.stop(id); const agent = await this.repos.agents.get(session.agentId); if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent config was removed', 404); session.runId = makeId('run'); session.error = undefined; const configured = this.configureAgentForSession(agent, session); const driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => { this.notifyDriverExit(session.id, code); if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`); }, session.id); this.drivers.set(id, driver); await this.saveState(session, 'starting'); await driver.start(); await this.saveState(session, 'idle'); return session; }
   async setPermissionMode(id: string, mode: PermissionMode) { const { session, driver } = await this.active(id); session.permissionMode = mode; session.updatedAt = now(); driver?.setPermissionMode?.(mode); await this.repos.sessions.save(session); return session; }
   async resolvePermission(sessionId: string, permissionId: string, approved: boolean) { const { session, driver } = await this.active(sessionId); const key = this.permissionKey(sessionId, permissionId); const request = this.permissions.get(key); if (!request) throw new RuntimeError('PERMISSION_NOT_FOUND', `Unknown permission request: ${permissionId}`, 404); const resolved = await driver?.resolvePermission?.(permissionId, approved); if (driver?.resolvePermission && !resolved) throw new RuntimeError('PERMISSION_EXPIRED', `Permission request is no longer active: ${permissionId}`, 409); request.status = approved ? 'approved' : 'rejected'; this.permissions.delete(key); this.touch(sessionId); await this.repos.artifacts.savePermission(sessionId, request); await this.emit(sessionId, 'permission_request', request); await this.saveState(session, 'thinking'); return request; }
 
@@ -553,6 +576,7 @@ export class DockmuxRuntime {
     this.interruptedTurns.delete(sessionId);
     this.hardInterrupts.delete(sessionId);
     this.driverStopReasons.delete(sessionId);
+    this.exitListeners.delete(sessionId);
     this.driverEventChains.delete(sessionId);
     this.driverEventErrors.delete(sessionId);
     this.queues.delete(sessionId);

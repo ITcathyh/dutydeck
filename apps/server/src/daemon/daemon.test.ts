@@ -107,6 +107,32 @@ describe('Dockmux daemon session', () => {
     expect(readDaemonStatus(dir)).toBeUndefined();
   });
 
+  it('daemonStop lets the daemon run its SIGTERM handler for a graceful exit', async () => {
+    // serve() installs a SIGTERM handler that closes the service before exiting.
+    // Mirror that contract in the child: handle SIGTERM, record a marker, exit 0.
+    // daemonStop must observe the graceful exit and clear state without escalating
+    // to SIGKILL (which would surface as a timeout error on the result).
+    const { spawn } = await import('node:child_process');
+    const marker = join(tmp, 'graceful-stop-marker');
+    const child = spawn(process.execPath, [
+      '-e',
+      `process.on('SIGTERM', () => { import('node:fs').then(fs => { fs.writeFileSync(${JSON.stringify(marker)}, 'ok'); process.exit(0); }); }); process.stdout.write('ready'); setTimeout(() => {}, 60_000);`
+    ], { stdio: ['ignore', 'pipe', 'ignore'] });
+    // Wait until the handler is registered, otherwise SIGTERM can land during
+    // process boot and take the default termination action.
+    await new Promise<void>(resolve => child.stdout!.once('data', () => resolve()));
+    const dir = defaultDaemonDir();
+    writeState(dir, { pid: child.pid!, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp });
+    const exited = new Promise<number | null>(resolve => child.once('exit', resolve));
+    const result = await daemonStop();
+    const code = await exited;
+    expect(code).toBe(0); // 0 means the handler ran; default SIGTERM termination yields null
+    expect(result).toMatchObject({ ok: true, action: 'stop', running: false, pid: child.pid, state: 'stopped' });
+    expect(result.error).toBeUndefined();
+    expect(readFileSync(marker, 'utf8')).toBe('ok');
+    expect(readDaemonStatus(dir)).toBeUndefined();
+  });
+
   it('daemonStop reports not-running when nothing is recorded', async () => {
     const result = await daemonStop();
     expect(result).toMatchObject({ ok: true, action: 'stop', running: false, state: 'not-running' });

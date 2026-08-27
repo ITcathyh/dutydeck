@@ -25,6 +25,7 @@
   },
   "dependencies": {
     "@dockmux/acp-client": "workspace:*",
+    "@dockmux/runtime": "workspace:*",
     "@dockmux/shared": "workspace:*",
     "@dockmux/transports": "workspace:*",
     "zod": "3.25.67"
