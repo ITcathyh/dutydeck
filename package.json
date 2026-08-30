@@ -16,7 +16,8 @@
     "build": "pnpm build:packages && pnpm --filter @dockmux/web build && pnpm --filter dockmux build",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "smoke": "node scripts/e2e-smoke.mjs"
   },
   "devDependencies": {
     "@dockmux/acp-client": "workspace:*",

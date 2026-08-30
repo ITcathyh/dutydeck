@@ -15,7 +15,7 @@ export interface SpawnOptions {
 }
 
 export interface SessionBackend {
-  readonly kind: 'pty' | 'tmux';
+  readonly kind: 'pty' | 'tmux' | 'zellij' | 'zmx';
   /** Start the CLI process. Calling twice is undefined behavior (driver calls once). */
   spawn(bin: string, args: string[], opts: SpawnOptions): void;
   /** Write literal text. Returns false when the backend refused outright

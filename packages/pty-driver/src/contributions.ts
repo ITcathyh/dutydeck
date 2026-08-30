@@ -37,7 +37,41 @@ export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
   { id: 'cursor', name: 'Cursor', command: 'cursor-agent', adapterId: 'cursor', capabilities: { pause: false, resume: true } },
   { id: 'kimi', name: 'Kimi', command: 'kimi', adapterId: 'kimi', capabilities: { pause: false, resume: true } },
   { id: 'traex', name: 'TRAE', command: 'traex', adapterId: 'traex', capabilities: { pause: false, resume: true } },
+  // ---- M2 移植的 CLI（command / name 逐条核对 botmux RAW_CLI_EXECUTABLES 与
+  //      CLI_DISPLAY_NAMES；resume 按各适配器 buildArgs 是否真接 resume 参数）----
+  { id: 'antigravity', name: 'Antigravity', command: 'agy', adapterId: 'antigravity', capabilities: { pause: false, resume: true } },
+  { id: 'coco', name: 'CoCo', command: 'coco', adapterId: 'coco', capabilities: { pause: false, resume: true } },
+  { id: 'opencode2', name: 'OpenCode 2', command: 'opencode2', adapterId: 'opencode2', capabilities: { pause: false, resume: true } },
+  { id: 'mtr', name: 'MTR', command: 'mtr', adapterId: 'mtr', capabilities: { pause: false, resume: true } },
+  { id: 'hermes', name: 'Hermes', command: 'hermes', adapterId: 'hermes', capabilities: { pause: false, resume: true } },
+  { id: 'pi', name: 'Pi', command: 'pi', adapterId: 'pi', capabilities: { pause: false, resume: true } },
+  { id: 'oh-my-pi', name: 'Oh My Pi', command: 'omp', adapterId: 'oh-my-pi', capabilities: { pause: false, resume: true } },
+  { id: 'copilot', name: 'Copilot', command: 'copilot', adapterId: 'copilot', capabilities: { pause: false, resume: true } },
+  { id: 'kiro-cli', name: 'Kiro', command: 'kiro-cli', adapterId: 'kiro-cli', capabilities: { pause: false, resume: true } },
+  { id: 'reasonix', name: 'Reasonix', command: 'reasonix', adapterId: 'reasonix', capabilities: { pause: false, resume: true } },
+  { id: 'dsh-tui', name: 'DeepSeek Harness TUI', command: 'dsh-tui', adapterId: 'dsh-tui', capabilities: { pause: false, resume: false } },
+  { id: 'seed', name: 'Seed', command: 'seed', adapterId: 'seed', capabilities: { pause: false, resume: true } },
+  { id: 'relay', name: 'Relay', command: 'relay', adapterId: 'relay', capabilities: { pause: false, resume: true } },
+  { id: 'aiden', name: 'Aiden', command: 'aiden', adapterId: 'aiden', capabilities: { pause: false, resume: true } },
+  { id: 'genius', name: 'Genius', command: 'genius', adapterId: 'genius', capabilities: { pause: false, resume: true } },
+  // ⚠️ 未登记：mir / dsh / codex-app / mojo / riff / mira —— 适配器都已移植可用
+  // （createCliAdapter 取得到），但**都不能由 dockmux 直接 spawn**，登记进来只会
+  // 让它们出现在 UI 列表里、用户一点就失败：
+  //
+  //  - mir / dsh / codex-app 是 runner 类：适配器 buildArgs 产出的是 *runner* 的
+  //    参数，而 botmux 的 runner 脚本尚未移植。botmux RAW_CLI_EXECUTABLES 里登记的
+  //    `mircli` / `dsh-jsonrpc-agent` / `codex` 是 runner 自己再去 spawn 的**二段
+  //    依赖**，不是 argv 的接收方。尤其 codex-app 的 `codex` 在多数开发机上真实
+  //    存在，commandExists 会放行它，于是 runner 参数被喂给真实 codex 而失败。
+  //  - mojo 的 worker 从不 spawn 它（botmux 侧由 MojoBackend 按回合 shell out），
+  //    没有 MojoBackend 就没有执行主体。
+  //  - riff / mira 是 API-backed，botmux 对二者的 command 显式写 `undefined`
+  //    （真实工作在 RiffBackend / mira runner 里），本接口 command 必填，无从填写。
+  //
+  // 移植 runner / 对应后端后，把 command 改指向 runner 入口（botmux 侧形如
+  // `node dist/<id>-runner.js`）再登记。
 ];
+
 
 /** 编译期对齐守卫：本包的贡献数据必须能赋给 @dockmux/config 的
  *  PtyAgentContribution 形状（config 不被本包依赖，用结构子集断言代替

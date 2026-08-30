@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig, NormalizedDriverEvent } from '@dockmux/shared';
 import type { CliAdapter } from '@dockmux/cli-adapters';
+import { createCliAdapter } from '@dockmux/cli-adapters';
 import { PtyBackend } from '@dockmux/session-backends';
 import { PtyCliDriver } from './driver.js';
 import { PTY_AGENT_CONTRIBUTIONS } from './contributions.js';
@@ -124,15 +125,35 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
 });
 
 describe('PTY_AGENT_CONTRIBUTIONS', () => {
-  it('8 条贡献，id 与 adapterId 一致且唯一，pause 全 false', () => {
-    expect(PTY_AGENT_CONTRIBUTIONS).toHaveLength(8);
+  it('id 与 adapterId 一致且唯一，字段齐备，pause 全 false', () => {
+    // 不锁总条数：每移植一个适配器就要改一次数字的断言只会制造无谓冲突，
+    // 且「数量对」并不能证明任何东西。锁的是每条都必须成立的不变量。
+    expect(PTY_AGENT_CONTRIBUTIONS.length).toBeGreaterThan(0);
     const ids = PTY_AGENT_CONTRIBUTIONS.map(c => c.id);
-    expect(new Set(ids).size).toBe(8);
+    expect(new Set(ids).size).toBe(ids.length);
     for (const c of PTY_AGENT_CONTRIBUTIONS) {
       expect(c.adapterId).toBe(c.id);
       expect(c.command).toBeTruthy();
       expect(c.name).toBeTruthy();
       expect(c.capabilities.pause).toBe(false);
+    }
+  });
+
+  it('每条贡献的 adapterId 都能创建出适配器（防止登记了不存在的适配器）', () => {
+    for (const c of PTY_AGENT_CONTRIBUTIONS) {
+      expect(() => createCliAdapter(c.adapterId), `adapterId=${c.adapterId}`).not.toThrow();
+    }
+  });
+
+  it('声明 resume 能力的贡献，其适配器必须真的实现 buildResumeCommand', () => {
+    // driver.resume() 只在 buildResumeCommand 存在时才动作：声明 resume:true
+    // 却不实现它 = 用户点恢复毫无反应的静默 no-op。
+    for (const c of PTY_AGENT_CONTRIBUTIONS) {
+      const adapter = createCliAdapter(c.adapterId);
+      expect(
+        typeof adapter.buildResumeCommand === 'function',
+        `${c.id} 声明 resume=${c.capabilities.resume}，适配器 buildResumeCommand=${typeof adapter.buildResumeCommand}`,
+      ).toBe(c.capabilities.resume);
     }
   });
 

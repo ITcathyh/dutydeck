@@ -23,28 +23,17 @@
  */
 import { existsSync, opendirSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dockmux/shared';
+import { codexSessionsRoot } from '../cli-paths.js';
 import { JsonlTailer, type TranscriptEventSource } from './tail.js';
 
 const SESSION_SCAN_MAX_DEPTH = 3;
 
-function expandHome(p: string): string {
-  return p.startsWith('~') ? join(homedir(), p.slice(1)) : p;
-}
-
-/** Codex data root: $CODEX_HOME when set, else ~/.codex. Dynamic so env
- *  changes after module load still resolve. */
-function codexHome(): string {
-  const configured = process.env.CODEX_HOME?.trim();
-  return configured ? expandHome(configured) : join(homedir(), '.codex');
-}
-
-/** Newest rollout-*.jsonl under <codexHome>/sessions (by mtime), or
- *  undefined. Iterative depth-limited walk; symlinked dirs are not followed. */
-export function resolveCodexRolloutPath(_cwd: string): string | undefined {
-  const sessionsRoot = join(codexHome(), 'sessions');
+/** Newest rollout-*.jsonl under a Codex-dialect sessions root (by mtime), or
+ *  undefined. Iterative depth-limited walk; symlinked dirs are not followed.
+ *  Shared with the TRAE tailer, whose root is <TRAE_HOME>/cli/sessions. */
+export function resolveNewestRollout(sessionsRoot: string): string | undefined {
   if (!existsSync(sessionsRoot)) return undefined;
   let rootStat;
   try {
@@ -88,6 +77,12 @@ export function resolveCodexRolloutPath(_cwd: string): string | undefined {
     }
   }
   return latest;
+}
+
+/** Locate the newest Codex rollout jsonl. Codex rollout paths do NOT encode
+ *  the cwd, so `cwd` is accepted for API symmetry but unused. */
+export function resolveCodexRolloutPath(_cwd?: string): string | undefined {
+  return resolveNewestRollout(codexSessionsRoot());
 }
 
 /** Parse a JSON-encoded arguments string when parseable, else return the
