@@ -280,6 +280,19 @@ importers:
         specifier: 5.8.3
         version: 5.8.3
 
+  packages/relay:
+    dependencies:
+      '@dockmux/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      '@types/node':
+        specifier: 22.15.30
+        version: 22.15.30
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+
   packages/renderer:
     dependencies:
       '@dockmux/shared':
@@ -376,6 +389,19 @@ importers:
         specifier: 1.2.0-beta.15
         version: 1.2.0-beta.15
     devDependencies:
+      typescript:
+        specifier: 5.8.3
+        version: 5.8.3
+
+  packages/workflow:
+    dependencies:
+      '@dockmux/shared':
+        specifier: workspace:*
+        version: link:../shared
+    devDependencies:
+      '@types/node':
+        specifier: 22.15.30
+        version: 22.15.30
       typescript:
         specifier: 5.8.3
         version: 5.8.3
