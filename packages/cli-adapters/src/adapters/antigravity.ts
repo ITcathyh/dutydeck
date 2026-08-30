@@ -1,4 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -26,8 +27,9 @@ export function createAntigravityAdapter(): CliAdapter {
       // `--conversation` 严格按既有 id 查找，所以 dockmux 的 sessionId 在这里没用。
       // 无 resumeSessionId 时新起会话；绝不用 `-c/--continue`——"最近一个"在多会话
       // 并行时会串到兄弟会话。
-      if (resume && resumeSessionId) {
-        args.push('--conversation', resumeSessionId);
+      const usable = usableResumeId(resumeSessionId);
+      if (resume && usable) {
+        args.push('--conversation', usable);
       }
       return args;
     },
@@ -55,9 +57,10 @@ export function createAntigravityAdapter(): CliAdapter {
       else backend.write('\r');
     },
 
-    buildResumeCommand(sessionId: string): string[] {
-      // 这里的 id 必须是 agy 自己的 conversation UUID（由上层捕获后传入），
-      // 不能拿 dockmux 的 sessionId 顶替。
+    /** agy 自己铸 conversation UUID 并忽略外部传值，`--conversation` 严格按既有
+     *  id 查找。收到 dockmux 的 `ses_<uuid>` 必然查不到 → null，改起新会话。 */
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (isDockmuxSessionId(sessionId)) return null;
       return ['--conversation', sessionId];
     },
   };

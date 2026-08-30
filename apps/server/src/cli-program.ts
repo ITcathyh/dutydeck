@@ -48,6 +48,13 @@ export interface UpdateCliOptions {
   distTag?: string;
 }
 
+export interface SessionRelayCliOptions {
+  /** ask 超时秒数 */
+  timeout?: string;
+  /** 以 JSON 输出结果而非裸答案 */
+  json?: boolean;
+}
+
 export interface AuthTokenCliOptions {
   rotate?: boolean;
 }
@@ -70,6 +77,8 @@ export interface CliHandlers {
   groupMessage?(messageId: string): void | Promise<void>;
   groupSend?(content: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
+  sessionSend?(text: string): void | Promise<void>;
+  sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
 }
 
 const addCardOptions = (command: Command) => command
@@ -179,6 +188,32 @@ Routing guidance:
     .option('--timeout-ms <milliseconds>', 'Long-poll timeout (0-30000)', '15000')
     .action(options => handlers.groupWait?.(options));
 
+  // 通用回传通道（M3 relay）：任何来源的会话内的 CLI 都能用，不限飞书。
+  // 与 `dockmux group send` 分层并存——group 面向飞书群里的其他人/机器人，
+  // session 面向「发起本会话的用户」，落点是会话事件流（Web 时间线 / 卡片）。
+  const session = program.command('session').description('Relay messages to the user who owns the current Dockmux session');
+  session.command('send')
+    .description('Push a message to the user now, without waiting for the turn to end')
+    .argument('<text>', 'Message content')
+    .action(text => handlers.sessionSend?.(text));
+  session.command('ask')
+    .description('Ask the user a question and block until they answer')
+    .argument('<question>', 'Question to ask')
+    .option('--timeout <seconds>', 'Seconds to wait for an answer (default: 300)')
+    .option('--json', 'Print the full result as JSON instead of the bare answer')
+    .action((question, options) => handlers.sessionAsk?.(question, options))
+    .addHelpText('after', `
+Exit codes:
+  0    answered — the answer is printed to stdout
+  2    usage error (missing session credentials, bad arguments)
+  3    relay unavailable (server unreachable, session ended, question cancelled)
+  124  timed out with no answer
+
+Examples:
+  $ dockmux session send "已完成迁移，正在跑回归"
+  $ answer=$(dockmux session ask "要继续发布吗？") && echo "user said: $answer"
+  $ dockmux session ask "选哪个方案？" --timeout 60 --json`);
+
   program.command('update')
     .description('Update the global Dockmux package and restart the background service')
     .option('--dist-tag <tag>', 'npm dist-tag to install (default: latest)', 'latest')
@@ -232,6 +267,8 @@ Examples:
   $ dockmux group peers
   $ dockmux group members
   $ dockmux group send "请检查接口" --to cli_peer
+  $ dockmux session send "已完成迁移，正在跑回归"
+  $ dockmux session ask "要继续发布吗？"
   $ dockmux --version`);
 }
 

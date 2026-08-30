@@ -53,7 +53,7 @@ export function createGrokAdapter(): CliAdapter {
     // 会话上下文（路由块）由 driver 拼到首轮 prompt 前（botmux 走 --rules，
     // 精简契约统一走 prompt 前缀）。
     injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDockmuxRoutingBlock(ctx.locale);
+      return buildDockmuxRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

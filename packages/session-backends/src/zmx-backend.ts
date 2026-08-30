@@ -319,7 +319,8 @@ export function buildZmxAttachArgs(sessionName: string, bootstrapPath: string): 
 export class ZmxBackend implements SessionBackend {
   readonly kind = 'zmx' as const;
 
-  private readonly sessionName: string;
+  /** SessionBackend contract: the zmx session this backend owns. */
+  readonly sessionName: string;
   private started = false;
   private exited = false;
   /** Set by detach()/kill() so teardown we caused is not reported as CLI exit. */

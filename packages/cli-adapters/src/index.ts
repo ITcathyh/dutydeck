@@ -7,6 +7,7 @@ export type {
 export type { CliId } from './factory.js';
 export { ALL_CLI_IDS, createCliAdapter, getCliAdapter } from './factory.js';
 export { DOCKMUX_SHELL_HINTS, buildDockmuxRoutingBlock, prependRoutingBlock } from './shared-hints.js';
+export { isDockmuxSessionId, usableResumeId } from './resume-id.js';
 export {
   RUNNER_INPUT_CHUNK_BYTES,
   RUNNER_INPUT_THROTTLE_MS,

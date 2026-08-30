@@ -365,4 +365,31 @@ describe('HTTP API boundary', () => {
     expect(api.statusCode).toBe(404); expect(api.json().error.code).toBe('NOT_FOUND');
   });
 
+  it('中央豁免名单：静态壳与 lark agent-tools 放行，其余 /api/* 一律要 token', async () => {
+    // 守的是 app.ts 里那份 exempt 规则本身（auth 中间件的通用逻辑另有测试）。
+    // 名单是"谁可以不带 token 就访问"，加一条就等于开一个口子，必须显式对拍。
+    //
+    // /api/relay/* 尤其**不该**在名单里：relay 有自己的能力 token，但那是
+    // "这个子进程属于哪个会话"，不是"这台机器可以被谁访问"。远程调用必须两层
+    // 都过。误加进豁免 = 任何能连上端口的人都能拿一个伪造 relay token 来试。
+    const repos = createRepositories(':memory:'); repositories.push(repos);
+    const app = await buildApp({} as any, {
+      auth: { getToken: async () => 'secret-token', localOnly: false },
+    }); apps.push(app);
+
+    const remote = { remoteAddress: '8.8.8.8' } as const;
+    // 豁免：静态壳（不含会话数据）
+    expect((await app.inject({ method: 'GET', url: '/', ...remote })).statusCode).not.toBe(401);
+    // 豁免：lark agent-tools 自带 Bearer 机制
+    expect((await app.inject({ method: 'GET', url: '/api/lark/agent-tools/self', ...remote })).statusCode).not.toBe(401);
+
+    // 非豁免：这些必须 401
+    for (const url of ['/api/sessions', '/api/agents', '/api/relay/sessions/self/send']) {
+      expect(
+        (await app.inject({ method: 'GET', url, ...remote })).statusCode,
+        `${url} 不在豁免名单里，无 token 的远程请求必须 401`,
+      ).toBe(401);
+    }
+  });
+
 });

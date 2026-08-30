@@ -25,7 +25,7 @@ import { existsSync, opendirSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dockmux/shared';
-import { codexSessionsRoot } from '../cli-paths.js';
+import { codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { JsonlTailer, type TranscriptEventSource } from './tail.js';
 
 const SESSION_SCAN_MAX_DEPTH = 3;
@@ -80,9 +80,10 @@ export function resolveNewestRollout(sessionsRoot: string): string | undefined {
 }
 
 /** Locate the newest Codex rollout jsonl. Codex rollout paths do NOT encode
- *  the cwd, so `cwd` is accepted for API symmetry but unused. */
-export function resolveCodexRolloutPath(_cwd?: string): string | undefined {
-  return resolveNewestRollout(codexSessionsRoot());
+ *  the cwd, so `cwd` is accepted for API symmetry but unused. `env` must be
+ *  the environment the CLI child received (see cli-paths.ts). */
+export function resolveCodexRolloutPath(_cwd?: string, env?: CliPathEnv): string | undefined {
+  return resolveNewestRollout(codexSessionsRoot(env));
 }
 
 /** Parse a JSON-encoded arguments string when parseable, else return the
@@ -232,6 +233,9 @@ export interface CodexTranscriptTailerOptions {
   transcriptPath?: string;
   /** Poll interval in ms (default 300). */
   pollIntervalMs?: number;
+  /** The environment the CLI child was spawned with (defaults to process.env);
+   *  `$CODEX_HOME` from `agent.env` only exists there. */
+  env?: CliPathEnv;
 }
 
 export class CodexTranscriptTailer implements TranscriptEventSource {
@@ -242,7 +246,7 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
     this.tailer = new JsonlTailer({
       resolvePath: explicit
         ? () => explicit
-        : () => resolveCodexRolloutPath(opts.cwd),
+        : () => resolveCodexRolloutPath(opts.cwd, opts.env),
       mapEntry: mapCodexEntry,
       pollIntervalMs: opts.pollIntervalMs,
       watchForSwitch: !explicit,

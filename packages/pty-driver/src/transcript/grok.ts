@@ -34,7 +34,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dockmux/shared';
-import { resolveGrokCwdBucketDir } from '../cli-paths.js';
+import { resolveGrokCwdBucketDir, type CliPathEnv } from '../cli-paths.js';
 import { JsonlTailer, type TranscriptEventSource } from './tail.js';
 
 /** ACP tool status → dockmux status. `in_progress` is the spec spelling;
@@ -49,9 +49,10 @@ const TOOL_STATUS: Record<string, 'pending' | 'running' | 'completed' | 'failed'
 
 /** Newest `<bucket>/<sessionId>/updates.jsonl` for a working directory. Grok
  *  keeps one directory per session inside the cwd bucket, so "newest session
- *  in this cwd" is a mtime pick among those. */
-export function resolveGrokUpdatesPath(cwd: string): string | undefined {
-  const bucket = resolveGrokCwdBucketDir(cwd);
+ *  in this cwd" is a mtime pick among those. `env` must be the environment the
+ *  CLI child received (see cli-paths.ts). */
+export function resolveGrokUpdatesPath(cwd: string, env?: CliPathEnv): string | undefined {
+  const bucket = resolveGrokCwdBucketDir(cwd, env);
   if (!existsSync(bucket)) return undefined;
   let names: string[];
   try {
@@ -180,6 +181,9 @@ export interface GrokTranscriptTailerOptions {
   transcriptPath?: string;
   /** Poll interval in ms (default 300). */
   pollIntervalMs?: number;
+  /** The environment the CLI child was spawned with (defaults to process.env);
+   *  `$GROK_HOME` from `agent.env` only exists there. */
+  env?: CliPathEnv;
 }
 
 export class GrokTranscriptTailer implements TranscriptEventSource {
@@ -188,7 +192,7 @@ export class GrokTranscriptTailer implements TranscriptEventSource {
   constructor(opts: GrokTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
     this.tailer = new JsonlTailer({
-      resolvePath: explicit ? () => explicit : () => resolveGrokUpdatesPath(opts.cwd),
+      resolvePath: explicit ? () => explicit : () => resolveGrokUpdatesPath(opts.cwd, opts.env),
       mapEntry: mapGrokEntry,
       pollIntervalMs: opts.pollIntervalMs,
       watchForSwitch: !explicit,

@@ -16,6 +16,18 @@ export interface SpawnOptions {
 
 export interface SessionBackend {
   readonly kind: 'pty' | 'tmux' | 'zellij' | 'zmx';
+  /**
+   * The multiplexer session this backend is bound to (tmux/zellij/zmx session
+   * name), or undefined for backends with no addressable session (pty).
+   *
+   * This is the ONLY supported way to ask a backend which session it owns.
+   * The driver needs it to probe "is my session still alive?" before deciding
+   * between reattach and respawn; it used to read the implementations' private
+   * `sessionName` field by reflection, which broke silently on any rename.
+   * Read-only on purpose: the name is fixed at construction, and rebinding a
+   * live backend to a different session would strand its capture pipeline.
+   */
+  readonly sessionName?: string;
   /** Start the CLI process. Calling twice is undefined behavior (driver calls once). */
   spawn(bin: string, args: string[], opts: SpawnOptions): void;
   /** Write literal text. Returns false when the backend refused outright

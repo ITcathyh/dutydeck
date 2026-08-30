@@ -34,7 +34,7 @@ import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 import { claudeSessionIdLookup } from './claude.js';
 import { codexSessionIdLookup, traexSessionIdLookup } from './codex.js';
 import { grokSessionIdLookup } from './grok.js';
-import { opencodeSessionIdLookup } from './opencode.js';
+import { opencode2SessionIdLookup, opencodeSessionIdLookup } from './opencode.js';
 
 export type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 export {
@@ -45,17 +45,32 @@ export {
 export { claudeSessionIdLookup } from './claude.js';
 export { codexSessionIdLookup, traexSessionIdLookup } from './codex.js';
 export { grokSessionIdLookup } from './grok.js';
-export { opencodeSessionIdLookup, readOpenCodeSessionId } from './opencode.js';
+export {
+  opencodeSessionIdLookup,
+  opencode2SessionIdLookup,
+  readOpenCodeSessionId,
+  type OpenCodeDbKind,
+} from './opencode.js';
 
 const LOOKUPS: SessionIdLookup[] = [
-  claudeSessionIdLookup,
+  claudeSessionIdLookup,       // claude-code + its seed/relay forks
   codexSessionIdLookup,
   traexSessionIdLookup,
   grokSessionIdLookup,
-  opencodeSessionIdLookup,
+  opencodeSessionIdLookup,     // V1 table space
+  opencode2SessionIdLookup,    // V2 table space, same database file
 ];
 
-const BY_ADAPTER = new Map(LOOKUPS.map(l => [l.adapterId, l]));
+/** adapter id → lookup. One lookup may claim several ids (same CLI on disk);
+ *  a duplicate registration is a programming error, so it throws at load
+ *  rather than letting one resolver silently shadow another. */
+const BY_ADAPTER = new Map<string, SessionIdLookup>();
+for (const lookup of LOOKUPS) {
+  for (const id of lookup.adapterIds) {
+    if (BY_ADAPTER.has(id)) throw new Error(`duplicate session-id lookup for adapter "${id}"`);
+    BY_ADAPTER.set(id, lookup);
+  }
+}
 
 /** Adapter ids that have a native session-id lookup. */
 export function adapterIdsWithSessionIdLookup(): string[] {

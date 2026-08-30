@@ -113,8 +113,10 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
       const uuid = sessionId.replace(/^ses_/, '');
       const args: string[] = [];
       if (resume) {
-        // resumeSessionId 是 CLI 自己铸的裸 UUID，原样用；缺省回退到本会话 uuid。
-        args.push('--resume', resumeSessionId ?? uuid);
+        // resumeSessionId 可能是 CLI 自己铸的裸 UUID，也可能是 driver 反查失败后
+        // 退回来的 dockmux `ses_<uuid>`——后者必须同样剥前缀，否则 argv 变成
+        // `--resume ses_<uuid>`，claude 认不出这个 id。缺省回退到本会话 uuid。
+        args.push('--resume', (resumeSessionId ?? uuid).replace(/^ses_/, ''));
       } else {
         args.push('--session-id', uuid);
       }
@@ -130,7 +132,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     // 会话上下文（路由块）由 driver 拼到首轮 prompt 前（契约统一走 prompt
     // 前缀，不再走 botmux 的 --append-system-prompt）。
     injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDockmuxRoutingBlock(ctx.locale);
+      return buildDockmuxRoutingBlock(ctx.locale, ctx.env);
     },
 
     writeInput: writeClaudeFamilyInput,

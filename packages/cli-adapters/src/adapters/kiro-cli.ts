@@ -1,4 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -40,8 +41,9 @@ export function createKiroCliAdapter(): CliAdapter {
       // --trust-all-tools：Kiro 的终端 UI 会为该 flag 弹一道风险确认门，
       // 无人值守下过不去；改为直接信任官方文档列出的核心工具。
       args.push(`--trust-tools=${TRUSTED_CORE_TOOLS}`);
-      if (resume && resumeSessionId) {
-        args.push('--resume-id', resumeSessionId);
+      const usable = usableResumeId(resumeSessionId);
+      if (resume && usable) {
+        args.push('--resume-id', usable);
       }
       return args;
     },
@@ -69,7 +71,10 @@ export function createKiroCliAdapter(): CliAdapter {
       }
     },
 
-    buildResumeCommand(sessionId: string): string[] {
+    /** Kiro 会话 id 由 CLI 自己分配（dockmux 尚无捕获管道），`--resume-id` 只认
+     *  它自己的 id。收到 dockmux 的 `ses_<uuid>` → null，driver 改起新会话。 */
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (isDockmuxSessionId(sessionId)) return null;
       return ['chat', '--resume-id', sessionId];
     },
 

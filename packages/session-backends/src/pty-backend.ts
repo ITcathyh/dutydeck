@@ -26,6 +26,9 @@ try {
  */
 export class PtyBackend implements SessionBackend {
   readonly kind = 'pty' as const;
+  /** SessionBackend contract: a pty child has no addressable session of its
+   *  own — it dies with its backend, so there is nothing to reattach to. */
+  readonly sessionName = undefined;
   private process: pty.IPty | null = null;
 
   spawn(bin: string, args: string[], opts: SpawnOptions): void {

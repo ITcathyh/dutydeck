@@ -1,4 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -23,8 +24,9 @@ export function createCursorAdapter(): CliAdapter {
         if (initialPrompt) base.push(initialPrompt);
         return base;
       }
-      if (resumeSessionId) {
-        base.push('--resume', resumeSessionId);
+      const usable = usableResumeId(resumeSessionId);
+      if (usable) {
+        base.push('--resume', usable);
       }
       // 绝不 --continue：它续接全局最近 chat，会串到兄弟会话上下文
       // （同一 Cursor config home 被所有会话共享）。
@@ -78,7 +80,10 @@ export function createCursorAdapter(): CliAdapter {
       emitEnter();
     },
 
-    buildResumeCommand(sessionId: string): string[] {
+    /** Cursor 的 chat id 不透明、由 CLI 自己铸，dockmux 的 sessionId 推导不出来。
+     *  收到 dockmux 的 `ses_<uuid>` → null，driver 改起新会话。 */
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (isDockmuxSessionId(sessionId)) return null;
       return ['--resume', sessionId];
     },
 

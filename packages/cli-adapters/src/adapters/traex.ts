@@ -1,4 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -97,8 +98,9 @@ export function createTraexAdapter(): CliAdapter {
       }
       // 只做精确 id 续接；无 resumeSessionId 时新起会话（botmux 的 history
       // 反查已随 transcript 机制一起丢弃）。
-      if (resume && resumeSessionId) {
-        return ['resume', ...args, resumeSessionId];
+      const usable = usableResumeId(resumeSessionId);
+      if (resume && usable) {
+        return ['resume', ...args, usable];
       }
       return args;
     },
@@ -115,7 +117,10 @@ export function createTraexAdapter(): CliAdapter {
       else backend.write('\r');
     },
 
-    buildResumeCommand(sessionId: string): string[] {
+    /** 与 codex 同源：自己铸 rollout id。收到 dockmux 的 `ses_<uuid>` 说明反查
+     *  失败，`resume <未知id>` 起不来 → 返回 null，driver 改起新会话。 */
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (isDockmuxSessionId(sessionId)) return null;
       return ['resume', sessionId];
     },
 

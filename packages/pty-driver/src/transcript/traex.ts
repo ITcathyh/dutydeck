@@ -22,14 +22,15 @@
  * final answer that TRAE recorded elsewhere.
  */
 import type { NormalizedDriverEvent } from '@dockmux/shared';
-import { traeSessionsRoot } from '../cli-paths.js';
+import { traeSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { JsonlTailer, type TranscriptEventSource } from './tail.js';
 import { mapCodexEntry, resolveNewestRollout } from './codex.js';
 
 /** Locate the newest TRAE rollout jsonl. Like Codex, TRAE rollout paths do
- *  not encode the cwd, so `cwd` is accepted for API symmetry only. */
-export function resolveTraexRolloutPath(_cwd?: string): string | undefined {
-  return resolveNewestRollout(traeSessionsRoot());
+ *  not encode the cwd, so `cwd` is accepted for API symmetry only. `env` must
+ *  be the environment the CLI child received (see cli-paths.ts). */
+export function resolveTraexRolloutPath(_cwd?: string, env?: CliPathEnv): string | undefined {
+  return resolveNewestRollout(traeSessionsRoot(env));
 }
 
 /** Text of a TRAE `agent_message` / AgentMessage payload. TRAE puts the text
@@ -81,6 +82,9 @@ export interface TraexTranscriptTailerOptions {
   transcriptPath?: string;
   /** Poll interval in ms (default 300). */
   pollIntervalMs?: number;
+  /** The environment the CLI child was spawned with (defaults to process.env);
+   *  `$TRAE_HOME` from `agent.env` only exists there. */
+  env?: CliPathEnv;
 }
 
 export class TraexTranscriptTailer implements TranscriptEventSource {
@@ -89,7 +93,7 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
   constructor(opts: TraexTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
     this.tailer = new JsonlTailer({
-      resolvePath: explicit ? () => explicit : () => resolveTraexRolloutPath(opts.cwd),
+      resolvePath: explicit ? () => explicit : () => resolveTraexRolloutPath(opts.cwd, opts.env),
       mapEntry: mapTraexEntry,
       pollIntervalMs: opts.pollIntervalMs,
       watchForSwitch: !explicit,

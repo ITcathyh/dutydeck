@@ -83,9 +83,6 @@ export class PtyCliDriver implements AgentDriver {
   /** CLI 原生 session id：调用方注入的、或 resume 时从 CLI 落盘记录反查到的。
    *  一旦确定就缓存——反查要扫目录，同一会话不该反复付这个钱。 */
   private cliSessionId: string | undefined;
-  /** 本 driver 的 tmux 会话名。driver 自己建后端时记下来，就不必反射读
-   *  后端私有字段（见 tmuxSessionName）。 */
-  private knownTmuxSessionName: string | undefined;
 
   constructor(opts: PtyCliDriverOptions) {
     this.agent = opts.agent;
@@ -132,7 +129,7 @@ export class PtyCliDriver implements AgentDriver {
       // 自己正跑在无人值守桥接会话里（botmux 对大多数 CLI 同样注入）。
       const block = this.adapter.injectSessionContext
         ? this.adapter.injectSessionContext(this.sessionContext())
-        : buildDockmuxRoutingBlock(this.sessionContext().locale);
+        : buildDockmuxRoutingBlock(this.sessionContext().locale, this.agent.env);
       // 会话指纹：CLI 会把提交的 prompt 文本落盘（claude jsonl / codex
       // history.jsonl / grok prompt_history.jsonl / opencode part 表），
       // 这个标记因此成为「dockmux 会话 ↔ CLI 原生 session id」的反查锚点。
@@ -184,11 +181,48 @@ export class PtyCliDriver implements AgentDriver {
       return;
     }
     // 路径 2：适配器支持 CLI 级 resume → kill 旧后端，带 resume 参数重 spawn。
-    if (this.adapter.buildResumeCommand) {
-      this.respawn(this.buildResumeArgs());
+    if (!this.adapter.buildResumeCommand) return;   // 无 resume 能力 → no-op
+    const plan = this.planResume();
+    this.respawn(plan.args);
+    if (plan.kind === 'resume') {
       this.markResumed();
+      return;
     }
-    // 否则 no-op。
+    // 降级为全新会话：后端是活的（不该再 spawn），但 CLI 里什么上下文都没有。
+    // 必须重新走首轮注入——路由块要重发，而且会话指纹是「dockmux 会话 ↔ CLI
+    // 原生 id」反查的唯一锚点，新会话不重新打标，下一次 resume 同样反查不到。
+    this.started = true;
+    this.firstPromptSent = false;
+    // 旧的 CLI id（若有）指向的会话已经不是当前这个了，清掉免得污染下次反查。
+    this.cliSessionId = undefined;
+    this.emitResumeDegraded(plan.attemptedSessionId);
+  }
+
+  /**
+   * resume 决策：续接既有会话，还是放弃 resume 改起新会话。
+   *
+   * `buildResumeCommand` 在这里有双重身份：既是 resume 能力的声明位，也是
+   * 「这个 id 能不能用」的裁决者。返回 null = 适配器认定该 id 对它的 CLI 无效
+   * （最典型的是反查失败后退回来的 dockmux sessionId），此时带着这个 id 启动
+   * 必然失败——`opencode -s <不存在的id>` 立刻 exit 1，会话随即被判 failed。
+   * 与其起一个注定崩掉的进程，不如起一个干净会话：丢上下文是降级，起不来是故障。
+   *
+   * 真正的 argv 仍然走 `buildArgs`（见下），buildResumeCommand 只出裁决与定位。
+   */
+  private planResume():
+    | { kind: 'resume'; args: string[] }
+    | { kind: 'fresh'; args: string[]; attemptedSessionId: string } {
+    const resumeSessionId = this.resolveResumeSessionId();
+    const fragment = this.adapter.buildResumeCommand?.(resumeSessionId) ?? null;
+    if (fragment === null) {
+      // 适配器否决了这个 id：起全新会话，argv 走 fresh 分支（不带任何 resume 定位）。
+      return {
+        kind: 'fresh',
+        args: this.adapter.buildArgs(this.sessionContext()),
+        attemptedSessionId: resumeSessionId,
+      };
+    }
+    return { kind: 'resume', args: this.buildResumeArgs(resumeSessionId, fragment) };
   }
 
   /**
@@ -201,12 +235,10 @@ export class PtyCliDriver implements AgentDriver {
    * 2 秒后 state=failed，之后 send 全部 409）。
    *
    * 正解是走 `buildArgs({ resume: true, resumeSessionId })`：适配器在那里把
-   * 「续接定位 + 常规启动参数」拼成一套完整 argv。buildResumeCommand 仍是
-   * resume 能力的声明位（driver.resume 用它判断该不该走这条路径），并为
-   * 只认得续接片段的适配器保留定位来源。
+   * 「续接定位 + 常规启动参数」拼成一套完整 argv。传进来的 fragment 只在
+   * 「适配器没在 buildArgs 里实现 resume 分支」时兜底。
    */
-  private buildResumeArgs(): string[] {
-    const resumeSessionId = this.resolveResumeSessionId();
+  private buildResumeArgs(resumeSessionId: string, fragment: string[]): string[] {
     const args = this.adapter.buildArgs({
       ...this.sessionContext(),
       resume: true,
@@ -214,7 +246,40 @@ export class PtyCliDriver implements AgentDriver {
     });
     if (args.length > 0) return args;
     // 适配器没在 buildArgs 里实现 resume 分支时，退回续接片段（聊胜于无）。
-    return this.adapter.buildResumeCommand?.(resumeSessionId) ?? [];
+    return fragment;
+  }
+
+  /**
+   * 告诉用户「resume 降级成新会话了」。
+   *
+   * 发两条，各有各的受众：
+   *  - `status`：结构化、机器可读，时间线与卡片不渲染，供 runtime/relay 判读。
+   *  - `text`：人读的一句话。降级是**静默丢上下文**——CLI 好端端地起来了，用户
+   *    看不出任何异样，直到发现 agent 不记得刚才聊过什么。这条必须可见。
+   *
+   * 刻意不发 `error`：runtime 对轮次之外的 error 的处置是把会话打成 failed
+   * （见 agent-runtime 的 onDriverEvent），而这里新进程明明已经正常起来了，
+   * 打成 failed 会让后续 send 全部 409 —— 那才是真故障。
+   */
+  private emitResumeDegraded(attemptedSessionId: string): void {
+    this.emitEvent({
+      type: 'status',
+      data: {
+        state: 'resume_degraded',
+        reason: 'unusable_cli_session_id',
+        adapterId: this.adapter.id,
+        attemptedSessionId,
+      },
+    });
+    this.emitEvent({
+      type: 'text',
+      data: {
+        role: 'assistant',
+        text: `⚠️ 无法恢复原会话（${this.adapter.id} 认不出会话 id `
+          + `\`${attemptedSessionId}\`），已改为**新起一个干净会话**。`
+          + `之前的上下文不会带过来，需要的话请重新交代背景。`,
+      },
+    });
   }
 
   /** resume 之后 driver 已有一个接好线的活后端：start() 不该再 spawn，
@@ -244,6 +309,9 @@ export class PtyCliDriver implements AgentDriver {
     const found = resolveCliSessionId(this.adapter.id, {
       sessionId: this.sessionId,
       cwd: this.cwd,
+      // The CLI recorded its id under the data root ITS env named — see the
+      // note on spawnEnv() and cli-paths.ts.
+      env: this.spawnEnv(),
     });
     if (found) {
       this.cliSessionId = found;
@@ -327,7 +395,16 @@ export class PtyCliDriver implements AgentDriver {
     });
     backend.onExit(code => this.handleExit(code, backend));
 
-    this.transcript = createTranscriptTailer(this.adapter.id, { cwd: this.cwd });
+    // The tailer must resolve the CLI's data dir from the environment the CLI
+    // CHILD got, never the daemon's: mergedEnv strips CLAUDE_* from the child,
+    // and agent.env may relocate CODEX_HOME / CLAUDE_CONFIG_DIR / HOME. Reading
+    // the daemon's env instead watches a tree the CLI never writes to, and the
+    // turn is then reported as "no final output" while the screen shows a
+    // perfectly good answer.
+    this.transcript = createTranscriptTailer(this.adapter.id, {
+      cwd: this.cwd,
+      env: this.spawnEnv(),
+    });
     if (this.transcript) {
       this.transcript.onEvent(e => {
         // 标记本轮已有实质输出（text/thinking/tool_*），解除 idle 闸门。
@@ -399,32 +476,24 @@ export class PtyCliDriver implements AgentDriver {
       cwd: this.cwd,
       model: this.agent.model,
       reasoningEffort: this.agent.reasoningEffort,
+      env: this.agent.env,
     };
   }
 
   /**
-   * 本 driver 的 tmux 会话名。
+   * The tmux session name this driver is bound to, or undefined when the
+   * backend is not a tmux backend.
    *
-   * 优先用 driver 自己记住的名字：reattach / respawn 都由 driver 构造
-   * TmuxBackend，名字是 driver 传进去的，不需要问后端。只有「调用方注入了
-   * 一个 TmuxBackend」这一种情况 driver 没参与命名，才回退到反射读私有
-   * 字段——那条路是脆的（后端一改字段名就静默失效），所以只当兜底，且拿到
-   * 后立刻缓存，后续不再反射。
-   *
-   * TODO(cross-team): 兜底反射可以彻底去掉——需要 session-backends 在
-   * SessionBackend 上暴露一个只读的会话标识（例如 `readonly name?: string`，
-   * TmuxBackend 返回 sessionName、PtyBackend 返回 undefined）。该包由
-   * Team Backends 持有，本次未改。
+   * `SessionBackend.sessionName` is the contract (TmuxBackend returns its
+   * session, PtyBackend returns undefined), so an injected backend and a
+   * driver-built one answer through the same door. This used to reflect into
+   * the backend's private `sessionName` field, which broke silently on any
+   * rename; that fallback is gone.
    */
   private tmuxSessionName(): string | undefined {
     if (!(this.backend instanceof TmuxBackend)) return undefined;
-    if (this.knownTmuxSessionName !== undefined) return this.knownTmuxSessionName;
-    const name = (this.backend as unknown as { sessionName?: unknown }).sessionName;
-    if (typeof name === 'string' && name.length > 0) {
-      this.knownTmuxSessionName = name;
-      return name;
-    }
-    return undefined;
+    const name = this.backend.sessionName;
+    return name.length > 0 ? name : undefined;
   }
 
   private reattachTmux(sessionName: string): void {
@@ -433,8 +502,6 @@ export class PtyCliDriver implements AgentDriver {
     this.backend.detach?.();
     const backend = new TmuxBackend(sessionName);
     this.backend = backend;
-    // driver 自己命名的后端：记下来，之后不必反射读后端私有字段。
-    this.knownTmuxSessionName = sessionName;
     // attach 到既有会话：不重建 session、不重发 CLI 启动命令，只重建捕获。
     backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
     this.wire(backend);
@@ -456,7 +523,6 @@ export class PtyCliDriver implements AgentDriver {
     }
     const backend = tmuxName !== undefined ? new TmuxBackend(tmuxName) : new PtyBackend();
     this.backend = backend;
-    if (tmuxName !== undefined) this.knownTmuxSessionName = tmuxName;
     this.lastArgs = args;
     backend.spawn(this.agent.command, args, {
       cwd: this.cwd,

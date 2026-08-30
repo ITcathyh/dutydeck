@@ -9,6 +9,7 @@ import { discoverAgentModels } from './agent-models.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
 import { registerAuthMiddleware, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
+import { registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -43,6 +44,8 @@ export interface BuildAppOptions {
   auth?: AuthMiddlewareOptions;
   /** 终端 WS 代理；不传 = 不注册 /api/terminal/:sessionId */
   terminal?: TerminalRouteOptions;
+  /** 通用回传通道（M3 relay）；不传 = 不注册 /api/relay/* */
+  relay?: RelayRoutesOptions;
 }
 
 export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions = {}) {
@@ -72,6 +75,7 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
     });
   }
   if (options.terminal) registerTerminalRoutes(app, options.terminal);
+  registerRelayRoutes(app, { ...options.relay, runtime: options.relay?.runtime ?? runtime });
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get('/api/agents', async () => runtime.listAgents());

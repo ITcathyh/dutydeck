@@ -37,7 +37,7 @@ export function createGeniusAdapter(): CliAdapter {
     // botmux 走 --append-system-prompt 注入共用提示（所以它把 systemHints 置空、
     // 标记自注入）；精简契约统一改为 driver 把返回块拼到首轮 prompt 前。
     injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDockmuxRoutingBlock(ctx.locale);
+      return buildDockmuxRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

@@ -2,6 +2,10 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
+/** OpenCode 原生会话 id 形态：`ses_` + 纯字母数字（CLI 自己铸，dockmux 钉不了）。
+ *  dockmux 的 `ses_<uuid>` 带连字符，正好被这条规则挡住。 */
+const OPENCODE_SESSION_ID_RE = /^ses_[0-9A-Za-z]+$/;
+
 /** 超过该长度（或含换行）的内容走 pasteText，避免 TUI paste 检测折叠。 */
 const OPENCODE_PASTE_THRESHOLD = 150;
 
@@ -15,9 +19,9 @@ export function createOpenCodeAdapter(): CliAdapter {
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }
-      // 只做精确 id 续接；无 id 时新起会话（botmux 的 SQLite 反查已丢弃）。
+      // 只做精确 id 续接；无有效 id 时新起会话。
       // 绝不带无效 id 启动：`opencode -s <不存在的id>` 会立即 exit 1。
-      if (resume && resumeSessionId) {
+      if (resume && resumeSessionId && OPENCODE_SESSION_ID_RE.test(resumeSessionId)) {
         args.push('--session', resumeSessionId);
       }
       // 首轮 prompt 走 --prompt：Bubble Tea TUI 启动期的 stdin 写入可能丢失。
@@ -46,7 +50,17 @@ export function createOpenCodeAdapter(): CliAdapter {
       }
     },
 
-    buildResumeCommand(sessionId: string): string[] {
+    /**
+     * OpenCode 自己铸 session id，dockmux 钉不了——所以只认原生形态的 id。
+     *
+     * 认不出就返回 null，让 driver 放弃 resume 改起新会话：
+     * `opencode -s <不存在的id>` 会立即 exit 1，会话随即被判 failed，之后所有
+     * send 都 409。丢上下文只是降级，起不来是故障。反查（session-id/opencode.ts
+     * 扫 SQLite）失败时 driver 退回来的就是 dockmux 的 `ses_<uuid>`，它带连字符，
+     * 正好被这条正则挡在门外。
+     */
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (!OPENCODE_SESSION_ID_RE.test(sessionId)) return null;
       return ['-s', sessionId];
     },
   };

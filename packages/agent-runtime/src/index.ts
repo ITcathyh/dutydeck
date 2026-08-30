@@ -205,6 +205,24 @@ export class DockmuxRuntime {
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getTasks(id: string) { return this.repos.tasks.listBySession(id); }
 
+  /**
+   * 外部来源事件写入（M3 通用回传通道 @dockmux/relay 用）。
+   *
+   * 事件流此前只有 driver 一个入口（onDriverEvent → consume → emit），而 relay 的
+   * send/ask 来自会话内 CLI 主动发起的**带外**调用，不属于任何 driver 事件。
+   * 直接调 `repos.events.append()` 是错的：那样只落库、不通知在线 SSE 订阅者，
+   * 且不推进 `this.sequences`，下一次 emit 会撞 events(session_id, sequence) 唯一索引。
+   * 所以这里暴露一个薄封装，语义与内部 emit 完全一致（落库 + fan-out + 序号推进）。
+   *
+   * 只接受与会话状态无关的表述性事件；状态机迁移仍只能由 runtime 自己驱动。
+   */
+  async publishSessionEvent(sessionId: string, type: EventType, data: unknown) {
+    const session = await this.repos.sessions.get(sessionId);
+    if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${sessionId}`, 404);
+    if (session.archivedAt) throw new RuntimeError('SESSION_ARCHIVED', 'Archived sessions are read-only', 409);
+    return this.emit(sessionId, type, data);
+  }
+
   private async saveState(session: Session, state: Session['state'], error?: string) {
     this.touch(session.id);
     session.state = state; session.updatedAt = now(); session.error = error;
