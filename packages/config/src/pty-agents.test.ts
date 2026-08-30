@@ -38,8 +38,24 @@ describe('builtinAgents PTY contributions', () => {
     expect(gemini?.cwd).toBe('/tmp/dockmux-pty-test');
   });
 
-  it('filters out PTY contributions whose command does not exist', () => {
-    const contribution: PtyAgentContribution = { id: 'ghost', name: 'Ghost', command: '/bin/ghost-cli-that-does-not-exist' };
+  it('propagates the contribution\'s declared capabilities instead of hardcoding resume:true', () => {
+    // gemini 每次都是全新会话，没有 resume——贡献方显式声明后必须原样传播，
+    // 否则 UI/runtime 会把它当成可恢复会话。
+    const contribution: PtyAgentContribution = {
+      id: 'gemini', name: 'Gemini', command: process.execPath,
+      capabilities: { pause: false, resume: false },
+    };
+    const agents = builtinAgents('/tmp/dockmux-pty-caps', [contribution]);
+    expect(agents.find(agent => agent.id === 'gemini')?.capabilities).toEqual({ pause: false, resume: false });
+  });
+
+  it('falls back to the conservative default when a contribution omits capabilities', () => {
+    const contribution: PtyAgentContribution = { id: 'nocaps', name: 'NoCaps', command: process.execPath };
+    const agents = builtinAgents('/tmp/dockmux-pty-caps', [contribution]);
+    expect(agents.find(agent => agent.id === 'nocaps')?.capabilities).toEqual({ pause: false, resume: true });
+  });
+
+  it('filters out PTY contributions whose command does not exist', () => {    const contribution: PtyAgentContribution = { id: 'ghost', name: 'Ghost', command: '/bin/ghost-cli-that-does-not-exist' };
     const agents = builtinAgents('/tmp/dockmux-pty-test', [contribution]);
     expect(agents.some(agent => agent.id === 'ghost')).toBe(false);
   });
