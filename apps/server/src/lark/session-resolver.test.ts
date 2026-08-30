@@ -1,21 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import type { Session } from '@dockmux/shared';
 import type { StoredLarkConfig } from './config.js';
 import {
   larkGroupKey,
   larkGroupScopeId,
   larkReplyContext,
+  larkSessionConfigKey,
   larkSourceId,
+  resolveLarkSession,
   resolveLarkScopeId,
   type LarkChatModeResolver
 } from './session-resolver.js';
 import type { LarkMessageEvent } from './listener.js';
 
 const baseConfig: StoredLarkConfig = {
-  appId: 'cli_test', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex', listening: true,
+  appId: 'cli_test', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true,
   preInjectPrompt: '',
   groupToolsEnabled: false, groupToolsAllowSend: false,
   pushIntervalMs: 1_000, hideTraceOnComplete: false, allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [],
-  highRiskPattern: 'rm\\b', gateEnabled: false, softGateEnabled: false, hardGateEnabled: false, hookTrustConfirmed: false
+  highRiskPattern: 'rm\\b', riskControlMode: 'off'
 };
 
 const groupEvent = (overrides: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({
@@ -147,5 +150,56 @@ describe('larkReplyContext / larkSourceId / larkGroupKey', () => {
 
   it('groupKey = chatId:scopeId', () => {
     expect(larkGroupKey(groupEvent(), 'thread:omt_topic')).toBe('oc_group:thread:omt_topic');
+  });
+});
+
+describe('resolveLarkSession permission posture', () => {
+  const persisted = (overrides: Partial<Session> = {}): Session => ({
+    id: 'ses_restricted', agentId: 'codex', state: 'idle', cwd: '/workspace',
+    permissionMode: 'ask', source: 'lark', sourceId: 'cli_test:oc_group:group:user:ou_user',
+    runId: 'run_restricted', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    ...overrides
+  });
+
+  it('拒绝未明示确认 full-trust 的配置且不启动 Agent', async () => {
+    const runtime = {
+      listSessions: vi.fn(async () => []),
+      getSession: vi.fn(),
+      stop: vi.fn(),
+      start: vi.fn()
+    };
+    const group = { tail: Promise.resolve() };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    await expect(resolveLarkSession(runtime as any, log, group as any, { ...baseConfig, fullTrustConfirmed: false }, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({
+      code: 'LARK_FULL_TRUST_CONFIRMATION_REQUIRED',
+      statusCode: 409
+    });
+    expect(runtime.listSessions).not.toHaveBeenCalled();
+    expect(runtime.start).not.toHaveBeenCalled();
+  });
+
+  it('stops a persisted non-full-trust session and creates a new full-trust run', async () => {
+    const restricted = persisted();
+    const trusted = persisted({ id: 'ses_trusted', runId: 'run_trusted', permissionMode: 'full-trust' });
+    const runtime = {
+      listSessions: vi.fn(async () => [restricted]),
+      getSession: vi.fn(),
+      stop: vi.fn(async () => {}),
+      start: vi.fn(async () => trusted)
+    };
+    const group = { tail: Promise.resolve() };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    await expect(resolveLarkSession(runtime as any, log, group as any, baseConfig, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(trusted);
+
+    expect(runtime.stop).toHaveBeenCalledWith(restricted.id);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({
+      agentId: 'codex',
+      permissionMode: 'full-trust',
+      source: 'lark',
+      sourceId: restricted.sourceId
+    }));
+    expect(group).toMatchObject({ sessionId: trusted.id, sessionConfigKey: larkSessionConfigKey(baseConfig) });
   });
 });

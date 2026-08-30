@@ -8,15 +8,14 @@ export function createAidenAdapter(): CliAdapter {
     id: 'aiden',
     capabilities: { resume: true },
 
-    buildArgs({ sessionId, resume, resumeSessionId }: AdapterSessionContext): string[] {
+    buildArgs({ sessionId, resume, resumeSessionId, permissionMode }: AdapterSessionContext): string[] {
       const args: string[] = [];
       if (resume) {
         // Aiden 直接吃外部会话 id（无 id 轮换、无 CLI 自有 id），
         // 新建会话时它自己生成 id，所以只有 resume 分支需要传。
         args.push('--resume', resumeSessionId ?? sessionId);
       }
-      // dockmux MVP 无人值守：恒定放行（botmux 的 !disableCliBypass 分支）。
-      args.push('--permission-mode', 'agentFull');
+      if (permissionMode === 'full-trust') args.push('--permission-mode', 'agentFull');
       return args;
     },
 

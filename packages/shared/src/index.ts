@@ -34,7 +34,7 @@ export const agentConfigSchema = z.object({
   cwd: z.string().optional(),
   env: z.record(z.string()).default({}),
   systemPrompt: z.string().optional(),
-  permissionMode: z.enum(permissionModes).default('full-trust'),
+  permissionMode: z.enum(permissionModes).default('ask'),
   timeout: z.number().positive().default(600),
   capabilities: z.object({ pause: z.boolean().default(false), resume: z.boolean().default(true) }).default({ pause: false, resume: true }),
   builtin: z.boolean().default(false)
@@ -115,9 +115,26 @@ export interface SessionRepository {
   get(id: string): Promise<Session | undefined>;
   save(session: Session): Promise<void>;
 }
-export interface TaskRecord { id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string }
+export interface TaskExecutionContext {
+  /** 实际发送给 Agent 的 prompt；可能包含来源通道补充的上下文。 */
+  agentPrompt: string;
+  riskPolicy?: ToolRiskPolicy;
+}
+export interface TaskRecord { id: string; sessionId: string; prompt: string; status: string; executionContext?: TaskExecutionContext; createdAt: string; updatedAt: string }
 export interface TaskRepository { save(task: TaskRecord): Promise<void>; listBySession(sessionId: string): Promise<TaskRecord[]> }
-export interface EventRepository { append(event: AgentEvent): Promise<void>; list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>; listRecent(sessionId: string, limit: number): Promise<AgentEvent[]> }
+export interface EventWindowOptions {
+  afterSequence?: number;
+  beforeSequence?: number;
+  limit?: number;
+  direction?: 'forward' | 'backward';
+}
+export interface EventRepository {
+  append(event: AgentEvent): Promise<void>;
+  list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>;
+  listRecent(sessionId: string, limit: number): Promise<AgentEvent[]>;
+  /** 有硬上限的游标窗口；无论查询方向如何，结果均按 sequence 升序。 */
+  listWindow(sessionId: string, options?: EventWindowOptions): Promise<AgentEvent[]>;
+}
 export interface ConfigRepository { get(key: string): Promise<string | undefined>; set(key: string, value: string): Promise<void> }
 export interface ChannelMapping { id: string; channel: string; externalId: string; sessionId: string; extra?: string | null; createdAt: string }
 export interface ChannelMappingRepository {

@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
+import type { PermissionMode } from '@dockmux/shared';
 import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
 
 export const larkCardStates = ['queued', 'running', 'completed', 'failed', 'interrupted'] as const;
@@ -9,6 +10,7 @@ export type LarkReceiveIdType = (typeof larkReceiveIdTypes)[number];
 
 export interface LarkCardInput {
   agentName?: string;
+  workspace?: string;
   state?: LarkCardState;
   taskName?: string;
   taskId?: string;
@@ -21,6 +23,7 @@ export interface LarkCardInput {
   loadingImageKey?: string;
   idempotencyKey?: string;
   readOnly?: boolean;
+  permissionMode?: PermissionMode;
 }
 export interface LarkSendInput extends LarkCardInput { receiveId?: string; receiveIdType?: LarkReceiveIdType; chatId?: string }
 export interface LarkReplyInput extends LarkCardInput { messageId: string; replyInThread?: boolean; replyRootId?: string }
@@ -130,11 +133,11 @@ export interface LarkConfigurationStatus {
 }
 
 const statePresentation = {
-  queued: { title: '排队中', color: 'grey' },
-  running: { title: '正在执行', color: 'wathet' },
-  completed: { title: '已完成', color: 'green' },
-  failed: { title: '已失败', color: 'yellow' },
-  interrupted: { title: '已取消', color: 'grey' }
+  queued: { title: '排队中', color: 'grey', template: 'grey' },
+  running: { title: '正在执行', color: 'wathet', template: 'blue' },
+  completed: { title: '已完成', color: 'green', template: 'green' },
+  failed: { title: '已失败', color: 'red', template: 'red' },
+  interrupted: { title: '已取消', color: 'grey', template: 'grey' }
 } as const;
 const elapsedLabel = (seconds: number) => {
   const value = Math.max(0, Math.floor(seconds));
@@ -143,6 +146,19 @@ const elapsedLabel = (seconds: number) => {
   const rest = value % 60;
   return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
 };
+const clipCardField = (value: string, limit: number) => {
+  const characters = Array.from(value);
+  return characters.length <= limit ? value : `${characters.slice(0, Math.max(1, limit - 1)).join('')}…`;
+};
+const cardFieldLimits = {
+  taskName: 160,
+  agentName: 64,
+  workspace: 160,
+  taskId: 96,
+  sessionId: 128,
+  webBaseUrl: 512,
+  imageKey: 256
+} as const;
 export const larkCardSafeLimits = { bytes: 24 * 1024, components: 180 } as const;
 export const larkCardSnapshotLimits = { bytes: 16 * 1024, components: 120 } as const;
 const cardBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
@@ -173,11 +189,6 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
   };
   const stripGroupContent = (group: Record<string, unknown>): boolean => {
     const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
-    const thinkingIndex = groupElements.findIndex(el => typeof el.content === 'string' && el.content.includes('思考过程'));
-    if (thinkingIndex >= 0) {
-      group.elements = groupElements.filter((_, i) => i !== thinkingIndex);
-      return true;
-    }
     const toolIndex = groupElements.findIndex(el => typeof el.element_id === 'string' && el.element_id.startsWith('trace_tool_') && Array.isArray(el.elements) && el.elements.length > 0);
     if (toolIndex >= 0) {
       const tool = groupElements[toolIndex] as Record<string, unknown>;
@@ -203,7 +214,7 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
     const group = mainElements[groupIndex] as Record<string, unknown>;
     const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
     const remainingGroups = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')).length;
-    // 优先从最旧分组中剥离内容（思考过程、工具输入输出），保留分组结构；
+    // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
     // 仅当分组已无内容可剥离时，才删除整个分组。
     if (remainingGroups > 1 && stripGroupContent(group)) continue;
     // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动，避免整组被丢弃后用户什么都看不到。
@@ -263,12 +274,18 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const state = input.state ?? 'running';
   const presentation = statePresentation[state];
   if (!presentation) throw new LarkServiceError('INVALID_CARD_STATE', `Unsupported Lark card state: ${String(state)}`, 400);
-  const taskName = input.taskName?.trim() || 'Dockmux';
-  const taskId = String(input.taskId ?? Date.now()).trim();
+  const taskName = clipCardField((input.taskName?.trim() || 'Dockmux').replace(/\s+/g, ' '), cardFieldLimits.taskName);
+  const taskId = clipCardField(String(input.taskId ?? Date.now()).trim() || 'task', cardFieldLimits.taskId);
+  const agentName = clipCardField(input.agentName?.trim() || 'Dockmux', cardFieldLimits.agentName);
+  const workspace = input.workspace?.trim() ? clipCardField(input.workspace.trim(), cardFieldLimits.workspace) : undefined;
+  const sessionId = input.sessionId?.trim() ? clipCardField(input.sessionId.trim(), cardFieldLimits.sessionId) : undefined;
+  const webBaseUrl = input.webBaseUrl?.trim() ? clipCardField(input.webBaseUrl.trim(), cardFieldLimits.webBaseUrl) : undefined;
+  const loadingImageKey = input.loadingImageKey?.trim() ? clipCardField(input.loadingImageKey.trim(), cardFieldLimits.imageKey) : undefined;
   const elapsedSeconds = Number(input.elapsedSeconds ?? 0);
   if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 0) throw new LarkServiceError('INVALID_ELAPSED_SECONDS', 'elapsedSeconds must be a non-negative number', 400);
   const content = input.markdown !== undefined ? String(input.markdown) : state === 'completed' ? '任务已完成。' : '';
   const liveTitle = state === 'running' ? '执行中' : presentation.title;
+  const compactTaskName = taskName;
   const actionButton = !input.readOnly && state === 'queued' ? {
     tag: 'button', text: { tag: 'plain_text', content: '取消' }, type: 'default', size: 'small',
     behaviors: [{ type: 'callback', value: { action: 'cancel', task_id: taskId } }],
@@ -284,10 +301,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   } : undefined;
   const footerColumns: any[] = [{
     tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
-    elements: [{ tag: 'markdown', content: `<font color='grey'>任务 #${taskId} · 已用时 ${elapsedLabel(elapsedSeconds)}</font>`, text_size: 'x-small', margin: '0px' }]
+    elements: [{ tag: 'markdown', content: `<font color='grey'>${agentName}${workspace ? ` · ${workspace}` : ''} · 任务 #${taskId}${input.permissionMode === 'full-trust' ? ' · 完全信任' : ''}</font>`, text_size: 'x-small', margin: '0px' }]
   }];
-  if (input.webBaseUrl) {
-    const traceUrl = input.sessionId ? `${input.webBaseUrl}/sessions/${input.sessionId}` : `${input.webBaseUrl}/sessions`;
+  if (webBaseUrl) {
+    const traceUrl = sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/sessions`;
     footerColumns.push({
       tag: 'column', width: 'auto', vertical_align: 'center',
       elements: [{
@@ -300,79 +317,94 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const sourceMainElements = input.elements?.length
     ? input.elements
     : [{ tag: 'markdown', content, text_align: 'left', text_size: 'normal_v2', margin: '0px' }];
+  const hasPendingApproval = (elements: Array<Record<string, unknown>>) => elements.some(element =>
+    typeof element.element_id === 'string' && element.element_id.startsWith('risk_alert_pending_')
+  );
   const arrange = (mainElements: Array<Record<string, unknown>>) => {
-    const finalElements = mainElements.filter(element => element.element_id === 'final_output');
+    const waitingForApproval = state === 'running' && hasPendingApproval(mainElements);
+    const finalIds = new Set(['result_header', 'final_output', 'next_step_hint', 'result_missing']);
+    const finalElements = mainElements.filter(element => finalIds.has(String(element.element_id ?? '')));
     const traceElements = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
-    const otherElements = mainElements.filter(element => element.element_id !== 'final_output' && !(typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')));
-    const statusContent = `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>　${elapsedLabel(elapsedSeconds)}`;
-    const loadingIcon = input.loadingImageKey
-      ? { tag: 'custom_icon', img_key: input.loadingImageKey, size: '20px 20px' }
+    const traceDigest = mainElements.find(element => element.element_id === 'trace_digest');
+    const attentionElements = mainElements.filter(element => {
+      const id = String(element.element_id ?? '');
+      return id.startsWith('risk_alert_') || id.startsWith('execution_alert_') || String(element.content ?? '').includes('原运行卡片未能更新');
+    });
+    const claimed = new Set([...finalElements, ...traceElements, ...attentionElements, ...(traceDigest ? [traceDigest] : [])]);
+    const otherElements = mainElements.filter(element => !claimed.has(element));
+    const statusContent = `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${waitingForApproval ? '等待审批' : liveTitle}</text_tag>　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>`;
+    const loadingIcon = loadingImageKey
+      ? { tag: 'custom_icon', img_key: loadingImageKey, size: '20px 20px' }
       : { tag: 'standard_icon', token: 'loading_outlined', color: 'grey', size: '14px 14px' };
-    const overviewLoadingIcon = input.loadingImageKey
-      ? { tag: 'custom_icon', img_key: input.loadingImageKey }
+    const overviewLoadingIcon = loadingImageKey
+      ? { tag: 'custom_icon', img_key: loadingImageKey }
       : { tag: 'standard_icon', token: 'loading_outlined', color: 'grey' };
     const statusElement = {
       tag: 'div', element_id: 'task_status', width: 'auto', margin: '0px',
       text: { tag: 'lark_md', content: statusContent, text_size: 'small' },
-      ...(state === 'running' ? { icon: loadingIcon } : {})
+      ...(state === 'running' && !waitingForApproval ? { icon: loadingIcon } : {})
     };
     const traceOverview = traceElements.length ? [{
       tag: 'collapsible_panel', element_id: 'trace_overview', expanded: state === 'running',
-      direction: 'vertical', vertical_spacing: '2px', padding: '2px 0px 0px 0px', margin: '0px',
+      direction: 'vertical', vertical_spacing: '2px', padding: '4px 0px 0px 0px', margin: '8px 0px 0px 0px',
       header: {
         title: {
-          tag: 'markdown', content: `${state === 'running' ? '已耗时' : '耗时'} ${elapsedLabel(elapsedSeconds)}　<font color='${state === 'running' ? 'trace_running' : state === 'failed' ? 'trace_failure' : presentation.color}'>● ${liveTitle}</font>　<font color='grey'>${traceElements.length} 个阶段</font>`, text_size: 'notation',
-          ...(state === 'running' ? { icon: overviewLoadingIcon } : {})
+          tag: 'markdown', content: `执行轨迹　<font color='grey'>${traceElements.length} 个阶段</font>`, text_size: 'notation',
+          ...(state === 'running' && !waitingForApproval ? { icon: overviewLoadingIcon } : {})
         },
         vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
         icon_position: 'right', icon_expanded_angle: -180
       },
-      elements: traceElements
+      elements: [...(traceDigest ? [traceDigest] : []), ...traceElements]
     }] : [];
-    const compactTaskName = taskName.replace(/\s+/g, ' ').trim();
-    const taskSummary = taskName === 'Dockmux' ? [] : [{
-      tag: 'div', width: 'fill', margin: '0px 0px 4px 0px',
-      text: { tag: 'plain_text', content: compactTaskName, text_size: 'notation', text_color: 'grey', lines: 1 }
-    }];
-    const finals = finalElements.map(element => ({ ...element, margin: traceElements.length || otherElements.length ? '10px 0px 0px 0px' : '8px 0px 0px 0px' }));
-    const primaryStatus = traceElements.length ? traceOverview[0] : statusElement;
-    const actionSummary = taskSummary[0] ? { ...taskSummary[0], margin: '0px' } : {
-      tag: 'div', width: 'fill', margin: '0px',
-      text: { tag: 'plain_text', content: compactTaskName || 'Dockmux', text_size: 'notation', text_color: 'grey', lines: 1 }
-    };
     const taskHeader = actionButton ? [{
       tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '8px', vertical_align: 'center', margin: '0px',
       columns: [
-        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [actionSummary] },
+        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [statusElement] },
         { tag: 'column', width: '72px', vertical_align: 'center', elements: [actionButton] }
       ]
-    }] : taskSummary;
-    return [...taskHeader, primaryStatus, ...otherElements, ...finals];
+    }] : [statusElement];
+    return [
+      ...taskHeader,
+      ...attentionElements,
+      ...finalElements,
+      ...otherElements,
+      ...traceOverview
+    ];
   };
-  const assemble = (mainElements: Array<Record<string, unknown>>) => ({
-    schema: '2.0',
-    config: {
-      update_multi: true,
-      width_mode: 'default',
-      streaming_mode: state === 'running',
-      style: { color: {
-        trace_success: { light_mode: 'rgba(92,184,119,1)', dark_mode: 'rgba(118,204,142,1)' },
-        trace_failure: { light_mode: 'rgba(208,180,92,1)', dark_mode: 'rgba(226,202,124,1)' },
-        trace_running: { light_mode: 'rgba(96,184,232,1)', dark_mode: 'rgba(124,202,242,1)' }
-      } },
-      ...(state === 'running' || state === 'queued' ? { summary: { content: `${taskName} · ${liveTitle}` } } : {})
-    },
-    body: {
-      direction: 'vertical', vertical_spacing: '2px', padding: '8px 12px 10px 12px',
-      elements: [
-        ...arrange(mainElements),
-        {
-          tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
-          columns: footerColumns
-        }
-      ]
-    }
-  });
+  const assemble = (mainElements: Array<Record<string, unknown>>) => {
+    const waitingForApproval = state === 'running' && hasPendingApproval(mainElements);
+    return {
+      schema: '2.0',
+      header: {
+        title: { tag: 'plain_text', content: compactTaskName || 'Dockmux' },
+        subtitle: { tag: 'plain_text', content: `${agentName} · Agent 任务` },
+        template: waitingForApproval ? 'orange' : presentation.template,
+        padding: '10px 12px 8px 12px'
+      },
+      config: {
+        update_multi: true,
+        width_mode: 'default',
+        streaming_mode: state === 'running',
+        style: { color: {
+          trace_success: { light_mode: 'rgba(92,184,119,1)', dark_mode: 'rgba(118,204,142,1)' },
+          trace_failure: { light_mode: 'rgba(208,180,92,1)', dark_mode: 'rgba(226,202,124,1)' },
+          trace_running: { light_mode: 'rgba(96,184,232,1)', dark_mode: 'rgba(124,202,242,1)' }
+        } },
+        summary: { content: `${taskName} · ${waitingForApproval ? '等待审批' : liveTitle}` }
+      },
+      body: {
+        direction: 'vertical', vertical_spacing: '2px', padding: '10px 12px 10px 12px',
+        elements: [
+          ...arrange(mainElements),
+          {
+            tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
+            columns: footerColumns
+          }
+        ]
+      }
+    };
+  };
   const withinLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && cardComponents(card) <= larkCardSafeLimits.components;
   const omissionNotice = (count: number) => ({
     tag: 'markdown', element_id: 'dockmux_omission',
@@ -391,13 +423,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   };
   const stripGroupContent = (group: Record<string, unknown>): boolean => {
     const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
-    // 1. 先移除思考过程元素
-    const thinkingIndex = groupElements.findIndex(el => typeof el.content === 'string' && el.content.includes('思考过程'));
-    if (thinkingIndex >= 0) {
-      group.elements = groupElements.filter((_, i) => i !== thinkingIndex);
-      return true;
-    }
-    // 2. 再移除工具的输入/输出内容，仅保留工具标题
+    // 移除工具的输入/输出内容，仅保留工具标题。
     const toolIndex = groupElements.findIndex(el => typeof el.element_id === 'string' && el.element_id.startsWith('trace_tool_') && Array.isArray(el.elements) && el.elements.length > 0);
     if (toolIndex >= 0) {
       const tool = groupElements[toolIndex] as Record<string, unknown>;
@@ -415,7 +441,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const group = mainElements[groupIndex] as Record<string, unknown>;
     const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
     const remainingGroups = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')).length;
-    // 优先从最旧分组中剥离内容（思考过程、工具输入输出），保留分组结构；
+    // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
     // 仅当分组已无内容可剥离时，才删除整个分组。
     if (remainingGroups > 1 && stripGroupContent(group)) {
       card = assemble(mainElements);
@@ -433,10 +459,25 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   }
   if (withinLimits(card)) return card;
   const fallbackText = String((sourceMainElements.find(element => element.element_id === 'final_output') as any)?.content ?? (sourceMainElements.find(element => element.tag === 'markdown') as any)?.content ?? content ?? '内容过长');
-  return assemble([
+  const fallbackCard = assemble([
     { tag: 'markdown', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
     { tag: 'markdown', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起；完整记录请在 Dockmux Web 查看。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
   ]);
+  if (withinLimits(fallbackCard)) return fallbackCard;
+  // All caller-controlled fields have already been bounded. This last constant-size shape is the
+  // hard safety net for unexpected Card schema overhead or deeply nested third-party elements.
+  return {
+    schema: '2.0',
+    header: { title: { tag: 'plain_text', content: compactTaskName }, template: presentation.template },
+    config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: `${taskName} · ${liveTitle}` } },
+    body: {
+      direction: 'vertical', padding: '10px 12px',
+      elements: [
+        { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>`, text_size: 'small' },
+        { tag: 'markdown', content: '卡片内容超过飞书安全预算，详细内容已收起。请在 Dockmux Web 查看完整记录。', text_size: 'normal' }
+      ]
+    }
+  };
 }
 
 export class LarkServiceError extends Error {

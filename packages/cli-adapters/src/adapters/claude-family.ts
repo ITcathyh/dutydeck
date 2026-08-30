@@ -89,9 +89,9 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
   else backend.write('\r');
 }
 
-/** 无人值守 bypass 姿态（botmux 的 !disableCliBypass 分支）：跳过权限确认。
- *  dockmux MVP 恒定无人值守，所以永远加上。 */
-export function pushClaudeFamilyBypassArgs(args: string[]): void {
+/** full-trust 姿态：同时跳过工具权限确认与危险模式提示。 */
+export function pushClaudeFamilyBypassArgs(args: string[], permissionMode: AdapterSessionContext['permissionMode']): void {
+  if (permissionMode !== 'full-trust') return;
   args.push('--dangerously-skip-permissions');
   args.push(
     '--settings',
@@ -108,7 +108,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     id,
     capabilities: { resume: true },
 
-    buildArgs({ sessionId, resume, resumeSessionId, model }: AdapterSessionContext): string[] {
+    buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
       // dockmux sessionId 形如 "ses_<uuid>"，--session-id/--resume 只接受裸 UUID。
       const uuid = sessionId.replace(/^ses_/, '');
       const args: string[] = [];
@@ -123,7 +123,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }
-      pushClaudeFamilyBypassArgs(args);
+      pushClaudeFamilyBypassArgs(args, permissionMode);
       // PlanMode 的审批 TUI 在 IM 场景无法驱动，直接禁掉。
       args.push('--disallowed-tools', 'EnterPlanMode,ExitPlanMode');
       return args;

@@ -20,7 +20,7 @@ export const migrations: Migration[] = [
     CREATE TABLE IF NOT EXISTS agent_configs (id TEXT PRIMARY KEY, json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS machines (id TEXT PRIMARY KEY, name TEXT NOT NULL, metadata TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, machine_id TEXT, name TEXT NOT NULL, cwd TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, state TEXT NOT NULL, cwd TEXT NOT NULL, model TEXT, reasoning_effort TEXT, system_prompt TEXT, permission_mode TEXT DEFAULT 'full-trust', source TEXT, source_id TEXT, archived_at TEXT, protocol TEXT, run_id TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, state TEXT NOT NULL, cwd TEXT NOT NULL, model TEXT, reasoning_effort TEXT, system_prompt TEXT, permission_mode TEXT DEFAULT 'ask', source TEXT, source_id TEXT, archived_at TEXT, protocol TEXT, run_id TEXT NOT NULL, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, prompt TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, sequence INTEGER NOT NULL, type TEXT NOT NULL, timestamp TEXT NOT NULL, data TEXT NOT NULL, raw TEXT);
     CREATE UNIQUE INDEX IF NOT EXISTS events_session_seq ON events(session_id, sequence);
@@ -46,7 +46,7 @@ export const migrations: Migration[] = [
   {
     version: 4,
     name: 'sessions_add_permission_mode',
-    up(db) { ensureColumn(db, 'sessions', 'permission_mode', "permission_mode TEXT DEFAULT 'full-trust'") }
+    up(db) { ensureColumn(db, 'sessions', 'permission_mode', "permission_mode TEXT DEFAULT 'ask'") }
   },
   {
     version: 5,
@@ -67,6 +67,59 @@ export const migrations: Migration[] = [
     version: 8,
     name: 'channel_mappings_add_extra',
     up(db) { ensureColumn(db, 'channel_mappings', 'extra', 'extra TEXT') }
+  },
+  {
+    version: 9,
+    name: 'tasks_add_execution_context_and_session_index',
+    up(db) {
+      ensureColumn(db, 'tasks', 'execution_context', 'execution_context TEXT')
+      db.exec('CREATE INDEX IF NOT EXISTS tasks_session_created ON tasks(session_id, created_at)')
+    }
+  },
+  {
+    version: 10,
+    name: 'sessions_default_permission_to_ask',
+    up(db) {
+      // SQLite cannot alter a column default in place. Rebuild the table so
+      // databases that already applied v4 stop creating full-trust sessions,
+      // while keeping every existing session's explicit permission posture.
+      // Very early pre-migration databases may lack these nullable v1 fields.
+      ensureColumn(db, 'sessions', 'model', 'model TEXT')
+      ensureColumn(db, 'sessions', 'protocol', 'protocol TEXT')
+      ensureColumn(db, 'sessions', 'error', 'error TEXT')
+      db.exec(`
+        CREATE TABLE sessions_v10 (
+          id TEXT PRIMARY KEY,
+          agent_id TEXT NOT NULL,
+          state TEXT NOT NULL,
+          cwd TEXT NOT NULL,
+          model TEXT,
+          reasoning_effort TEXT,
+          system_prompt TEXT,
+          permission_mode TEXT DEFAULT 'ask',
+          source TEXT,
+          source_id TEXT,
+          archived_at TEXT,
+          protocol TEXT,
+          run_id TEXT NOT NULL,
+          error TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        INSERT INTO sessions_v10 (
+          id, agent_id, state, cwd, model, reasoning_effort, system_prompt,
+          permission_mode, source, source_id, archived_at, protocol, run_id,
+          error, created_at, updated_at
+        )
+        SELECT
+          id, agent_id, state, cwd, model, reasoning_effort, system_prompt,
+          permission_mode, source, source_id, archived_at, protocol, run_id,
+          error, created_at, updated_at
+        FROM sessions;
+        DROP TABLE sessions;
+        ALTER TABLE sessions_v10 RENAME TO sessions;
+      `)
+    }
   }
 ]
 

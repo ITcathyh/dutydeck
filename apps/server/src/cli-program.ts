@@ -188,7 +188,7 @@ Routing guidance:
     .option('--timeout-ms <milliseconds>', 'Long-poll timeout (0-30000)', '15000')
     .action(options => handlers.groupWait?.(options));
 
-  // 通用回传通道（M3 relay）：任何来源的会话内的 CLI 都能用，不限飞书。
+  // 通用回传通道：任何来源的会话内 CLI 都能使用，不限飞书。
   // 与 `dockmux group send` 分层并存——group 面向飞书群里的其他人/机器人，
   // session 面向「发起本会话的用户」，落点是会话事件流（Web 时间线 / 卡片）。
   const session = program.command('session').description('Relay messages to the user who owns the current Dockmux session');

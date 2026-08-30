@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import { WebSocket, WebSocketServer } from 'ws';
+import { extractBearerToken, extractCookie, isLoopbackHost, isSameOriginRequest } from '../auth/auth.js';
 
 /** 终端流句柄：stream + 进程退出订阅（runtime 侧从 driver onExit 合成） */
 export interface TerminalStreamHandle {
@@ -15,15 +16,16 @@ export type TerminalStreamLookup =
   | { status: 'no-session' }      // session 不存在 → 404
   | { status: 'unsupported' };    // driver 不支持终端流（ACP）→ 400
 
-/** runtime 侧实现的只读访问器（Team Core 尚未交付，app 组装处先传 undefined/占位） */
+/** runtime driver 终端流的只读访问器，由 service 在 app 组装时注入。 */
 export interface TerminalStreamProvider {
   lookupTerminalStream(sessionId: string): TerminalStreamLookup;
 }
 
 /** WS 认证钩子（由 auth 模块提供，负责人接线）；不传 = 不认证（loopback 场景） */
 export interface TerminalRouteAuth {
-  isLoopback(address: string): boolean;
-  /** presented 来自 ?token= query param */
+  /** 仅显式 local-only 监听可免认证。 */
+  allowUnauthenticated?: boolean;
+  /** 浏览器来自 HttpOnly cookie，非浏览器客户端也可使用 Bearer。 */
   check(presented: string | undefined): boolean;
 }
 
@@ -163,15 +165,29 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       }
       if (!url.pathname.startsWith(TERMINAL_PATH_PREFIX)) return; // 非本路由，放行
 
-      // 认证：配置了 auth 时，loopback 来源免认证；否则要求 ?token= 且 check 通过
-      if (options.auth) {
-        const address = request.socket.remoteAddress ?? '';
-        if (!options.auth.isLoopback(address)) {
-          const presented = url.searchParams.get('token') ?? undefined;
-          if (!options.auth.check(presented)) {
-            rejectUpgrade(socket, 401, 'Unauthorized', 'unauthorized');
-            return;
-          }
+      // local-only may omit a token, but still validates Host/Origin to block
+      // browser DNS rebinding into the loopback terminal.
+      if (options.auth?.allowUnauthenticated) {
+        if (!isLoopbackHost(request.headers.host)) {
+          rejectUpgrade(socket, 403, 'Forbidden', 'host not allowed');
+          return;
+        }
+        const encrypted = 'encrypted' in request.socket && request.socket.encrypted === true;
+        if (request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, encrypted ? 'https' : 'http')) {
+          rejectUpgrade(socket, 403, 'Forbidden', 'origin not allowed');
+          return;
+        }
+      } else if (options.auth) {
+        const cookie = extractCookie(request.headers.cookie);
+        const bearer = extractBearerToken(request.headers.authorization);
+        const encrypted = 'encrypted' in request.socket && request.socket.encrypted === true;
+        if (request.headers.origin && !isSameOriginRequest(request.headers, encrypted ? 'https' : 'http')) {
+          rejectUpgrade(socket, 403, 'Forbidden', 'origin not allowed');
+          return;
+        }
+        if (!options.auth.check(bearer ?? cookie)) {
+          rejectUpgrade(socket, 401, 'Unauthorized', 'unauthorized');
+          return;
         }
       }
 

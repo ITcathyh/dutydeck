@@ -4,6 +4,7 @@ import type { ConfigRepository } from '@dockmux/shared';
 
 /** token 在 configs 表中的 key */
 export const AUTH_TOKEN_CONFIG_KEY = 'auth.accessToken';
+export const AUTH_COOKIE_NAME = 'dockmux_access';
 
 /** 32 随机字节 base64url（43 字符，无填充） */
 export function generateAuthToken(): string {
@@ -75,13 +76,6 @@ export function tokensEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
-/** loopback：127.0.0.1 / ::1 / ::ffff:127.0.0.1（IPv4-mapped） */
-export function isLoopbackAddress(address: string | undefined): boolean {
-  return address === '127.0.0.1'
-    || address === '::1'
-    || address === '::ffff:127.0.0.1';
-}
-
 /** 从 Authorization 头提取 Bearer token；缺失或格式不对返回 undefined */
 export function extractBearerToken(authorization: string | undefined): string | undefined {
   if (!authorization) return undefined;
@@ -90,50 +84,148 @@ export function extractBearerToken(authorization: string | undefined): string | 
   return token || undefined;
 }
 
+/** Read one exact cookie without decoding arbitrary user-controlled values. */
+export function extractCookie(cookieHeader: string | undefined, name = AUTH_COOKIE_NAME): string | undefined {
+  if (!cookieHeader) return undefined;
+  for (const part of cookieHeader.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    const value = part.slice(separator + 1).trim();
+    return value || undefined;
+  }
+  return undefined;
+}
+
 export interface AuthMiddlewareOptions {
   /** 当前有效 token（null = 未配置，fail closed：非豁免请求一律 401） */
   getToken(): Promise<string | null>;
-  /** 服务以 --local-only 启动（绑 127.0.0.1）时为 true，全部豁免 */
+  /** 服务以 --local-only 启动（绑 127.0.0.1）时为 true；仍校验 Host/Origin 以阻断 DNS rebinding */
   localOnly: boolean;
   /** 额外豁免判定（如 /api/lark/agent-tools/* 自有 Bearer）。默认无豁免 */
   exempt?: (method: string, pathname: string) => boolean;
 }
 
+export type BrowserAuthState = { authenticated: boolean; required: boolean };
+
 const UNAUTHORIZED_PAYLOAD = {
   error: { code: 'UNAUTHORIZED', message: 'Authentication required' }
 } as const;
 
-/** 从 query 中取 token：SSE 的 EventSource 与 WS 升级都无法设 Authorization 头 */
-function tokenFromQuery(query: unknown): string | undefined {
-  const value = (query as { token?: unknown } | undefined)?.token;
-  if (Array.isArray(value)) {
-    const first = value.find(item => typeof item === 'string' && item.length > 0);
-    return first === undefined ? undefined : String(first);
+type OriginHeaders = {
+  origin?: string;
+  host?: string;
+  'x-forwarded-host'?: string | string[];
+  'x-forwarded-proto'?: string | string[];
+};
+
+const firstForwardedValue = (value: string | string[] | undefined) =>
+  (Array.isArray(value) ? value[0] : value)?.split(',')[0]?.trim();
+
+/** Browser cookie/WS requests must originate from the exact public Dockmux origin. */
+export function isSameOriginRequest(headers: OriginHeaders, fallbackProtocol = 'http'): boolean {
+  if (!headers.origin) return true;
+  const host = firstForwardedValue(headers['x-forwarded-host']) || headers.host?.trim();
+  const protocol = firstForwardedValue(headers['x-forwarded-proto']) || fallbackProtocol;
+  if (!host || (protocol !== 'http' && protocol !== 'https')) return false;
+  try { return new URL(headers.origin).origin === `${protocol}://${host}`; }
+  catch { return false; }
+}
+
+/** local-only requests may name only the loopback listener, never an attacker-controlled DNS host. */
+export function isLoopbackHost(host: string | undefined): boolean {
+  if (!host) return false;
+  try {
+    const hostname = new URL(`http://${host}`).hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return false;
   }
-  if (typeof value === 'string' && value.length > 0) return value;
-  return undefined;
 }
 
 /**
  * 注册访问认证中间件（Fastify onRequest hook）。判定顺序：
- * 1. localOnly → 放行（服务只绑 loopback，外部不可达）
- * 2. request.ip 是 loopback → 放行（本机请求免认证）
- * 3. exempt(method, pathname) 为 true → 放行
- * 4. 否则取 presented token（Authorization: Bearer 头或 ?token= query param），
+ * 1. localOnly → 仅 loopback Host 且（若有）Origin 精确同源时放行
+ * 2. exempt(method, pathname) 为 true → 放行
+ * 3. 否则取 presented token（Authorization: Bearer 头或 HttpOnly cookie），
  *    与 getToken() 的当前 token 做 timing-safe 比对；未配置/缺失/不匹配 → 401
  */
 export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddlewareOptions): void {
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (options.localOnly) return;
-    if (isLoopbackAddress(request.ip)) return;
+    if (options.localOnly) {
+      if (!isLoopbackHost(request.headers.host)) {
+        return reply.code(403).send({ error: { code: 'HOST_NOT_ALLOWED', message: 'Local-only requests require a loopback Host' } });
+      }
+      if (request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, request.protocol)) {
+        return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dockmux' } });
+      }
+      return;
+    }
     const pathname = new URL(request.url, 'http://dockmux.local').pathname;
     if (options.exempt?.(request.method, pathname)) return;
-    const presented = extractBearerToken(request.headers.authorization)
-      ?? tokenFromQuery(request.query);
+    const bearer = extractBearerToken(request.headers.authorization);
+    const cookie = extractCookie(request.headers.cookie);
+    if (!bearer && cookie && !isSameOriginRequest(request.headers, request.protocol)) {
+      return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dockmux' } });
+    }
+    const presented = bearer ?? cookie;
     const token = await options.getToken();
     if (!token || !presented || !tokensEqual(presented, token)) {
       return reply.code(401).send(UNAUTHORIZED_PAYLOAD);
     }
+  });
+}
+
+const browserAuthRequired = (request: FastifyRequest, options: AuthMiddlewareOptions) =>
+  !options.localOnly;
+
+const requestToken = (request: FastifyRequest) => extractBearerToken(request.headers.authorization)
+  ?? extractCookie(request.headers.cookie);
+
+const cookieAttributes = (request: FastifyRequest, clear = false) => {
+  const forwarded = request.headers['x-forwarded-proto'];
+  const protocol = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
+  const secure = request.protocol === 'https' || protocol === 'https';
+  return [
+    `${AUTH_COOKIE_NAME}=${clear ? '' : '__VALUE__'}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Strict',
+    ...(secure ? ['Secure'] : []),
+    ...(clear ? ['Max-Age=0'] : ['Max-Age=2592000'])
+  ].join('; ');
+};
+
+/**
+ * Browser login for remote Web access. The long-lived access token is submitted
+ * once and kept in an HttpOnly, same-site cookie, so fetch, EventSource and
+ * WebSocket upgrades authenticate without exposing it in URLs or JavaScript.
+ */
+export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMiddlewareOptions): void {
+  app.get('/api/auth/status', async (request, reply): Promise<BrowserAuthState> => {
+    reply.header('Cache-Control', 'no-store');
+    const required = browserAuthRequired(request, options);
+    if (!required) return { authenticated: true, required: false };
+    const expected = await options.getToken();
+    const presented = requestToken(request);
+    return { authenticated: Boolean(expected && presented && tokensEqual(presented, expected)), required: true };
+  });
+
+  app.post<{ Body: { token?: unknown } }>('/api/auth/login', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    if (!browserAuthRequired(request, options)) return { authenticated: true, required: false } satisfies BrowserAuthState;
+    const expected = await options.getToken();
+    const presented = typeof request.body?.token === 'string' ? request.body.token.trim() : '';
+    if (!expected || !presented || !tokensEqual(presented, expected)) {
+      return reply.code(401).send(UNAUTHORIZED_PAYLOAD);
+    }
+    reply.header('Set-Cookie', cookieAttributes(request).replace('__VALUE__', presented));
+    return { authenticated: true, required: true } satisfies BrowserAuthState;
+  });
+
+  app.post('/api/auth/logout', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    reply.header('Set-Cookie', cookieAttributes(request, true));
+    return { authenticated: false, required: browserAuthRequired(request, options) } satisfies BrowserAuthState;
   });
 }
 

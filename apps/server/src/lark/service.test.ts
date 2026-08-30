@@ -34,22 +34,26 @@ describe('Lark card service', () => {
     return [...(typeof value.tag === 'string' ? [value] : []), ...Object.values(value).flatMap(components)];
   };
   const byId = (card: any, elementId: string) => components(card).find(element => element.element_id === elementId);
-  it('omits retry from a completed Card 2.0 footer', () => {
-    const card = buildLarkCard({ agentName: 'Business Agent', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
+  it('renders a completed Card 2.0 with a clear task header, status, and compact footer', () => {
+    const card = buildLarkCard({ agentName: 'Business Agent', permissionMode: 'full-trust', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
     expect(card.schema).toBe('2.0');
     expect(card.config.style.color).toMatchObject({
       trace_success: { light_mode: expect.stringContaining('92,184,119') },
       trace_failure: { light_mode: expect.stringContaining('208,180,92') },
       trace_running: { light_mode: expect.stringContaining('96,184,232') }
     });
-    expect(card.header).toBeUndefined();
-    expect(card.body.elements[0].text.content).toContain('Release');
-    expect(card.body.elements[0].text.lines).toBe(1);
-    expect(card.body.elements[1].text.content).toContain('已完成');
-    expect(card.body.elements[1].text.text_size).toBe('small');
-    expect(card.body.elements[2].content).toBe('**done**');
+    expect(card.header).toMatchObject({
+      title: { tag: 'plain_text', content: 'Release' },
+      subtitle: { tag: 'plain_text', content: 'Business Agent · Agent 任务' },
+      template: 'green'
+    });
+    expect(card.body.elements[0].text.content).toContain('已完成');
+    expect(card.body.elements[0].text.content).toContain('已用时 1m 5s');
+    expect(card.body.elements[0].text.text_size).toBe('small');
+    expect(card.body.elements[1].content).toBe('**done**');
     const footer: any = card.body.elements.at(-1);
-    expect(footer.columns[0].elements[0].content).toContain('任务 #42 · 已用时 1m 5s');
+    expect(footer.columns[0].elements[0].content).toContain('Business Agent · 任务 #42');
+    expect(footer.columns[0].elements[0].content).toContain('完全信任');
     expect(footer.columns[0].elements[0].text_size).toBe('x-small');
     expect(footer.columns).toHaveLength(1);
   });
@@ -65,7 +69,7 @@ describe('Lark card service', () => {
     expect(queued.config).toMatchObject({ streaming_mode: false, summary: { content: expect.stringContaining('排队中') } });
     expect(byId(running, 'interrupt')).toMatchObject({ text: { content: '中断' }, behaviors: [{ value: { action: 'interrupt', task_id: 'running' } }] });
     expect(byId(failed, 'retry')).toMatchObject({ text: { content: '重试' }, behaviors: [{ value: { action: 'retry', task_id: 'failed' } }] });
-    expect(byId(failed, 'task_status').text.content).toContain("<text_tag color='yellow'>已失败</text_tag>");
+    expect(byId(failed, 'task_status').text.content).toContain("<text_tag color='red'>已失败</text_tag>");
     expect(byId(interrupted, 'task_status').text.content).toContain('已取消');
     expect(byId(interrupted, 'retry')).toMatchObject({ behaviors: [{ value: { action: 'retry', task_id: 'interrupted' } }] });
     expect(byId(running, 'task_action_row')).toBe(running.body.elements[0]);
@@ -73,11 +77,11 @@ describe('Lark card service', () => {
     expect(running.config).toMatchObject({ streaming_mode: true, summary: { content: expect.stringContaining('执行中') } });
     const loading0: any = buildLarkCard({ state: 'running', elapsedSeconds: 0 });
     const loading1: any = buildLarkCard({ state: 'running', elapsedSeconds: 1 });
-    expect(loading0.header).toBeUndefined();
+    expect(loading0.header).toMatchObject({ template: 'blue', title: { content: 'Dockmux' } });
     expect(byId(loading0, 'task_status')).toMatchObject({ tag: 'div', icon: { tag: 'standard_icon', token: 'loading_outlined', color: 'grey' } });
     expect(byId(loading0, 'task_status').text.content).toContain('执行中');
     expect(byId(loading0, 'task_status').text.text_size).toBe('small');
-    expect(components(buildLarkCard({ state: 'running', taskName: '任务摘要' }).body.elements[0]).find(element => element.text?.content === '任务摘要')?.text.text_size).toBe('notation');
+    expect(buildLarkCard({ state: 'running', taskName: '任务摘要' }).header.title).toMatchObject({ tag: 'plain_text', content: '任务摘要' });
     expect(byId(loading1, 'task_status').icon.token).toBe('loading_outlined');
     const animated: any = buildLarkCard({ state: 'running', loadingImageKey: 'img_loading' });
     expect(byId(animated, 'task_status').icon).toMatchObject({ tag: 'custom_icon', img_key: 'img_loading', size: '20px 20px' });
@@ -93,7 +97,9 @@ describe('Lark card service', () => {
     expect(components(card.body.elements[0]).some(element => element.element_id === 'trace_overview')).toBe(false);
     expect(card.body.elements[1]).toMatchObject({ tag: 'collapsible_panel', element_id: 'trace_overview', expanded: true });
     expect(byId(card, 'trace_overview')).toMatchObject({ expanded: true, header: { title: { icon: { tag: 'standard_icon', token: 'loading_outlined', color: 'grey' } } } });
-    expect(byId(card, 'trace_overview').header.title.content).toContain("<font color='trace_running'>● 执行中</font>");
+    expect(byId(card, 'task_status').text.content).toContain('执行中');
+    expect(byId(card, 'trace_overview').header.title.content).toContain('执行轨迹');
+    expect(byId(card, 'trace_overview').header.title.content).toContain('1 个阶段');
     expect(byId(card, 'interrupt')).toMatchObject({ behaviors: [{ value: { action: 'interrupt', task_id: 'trace-running' } }] });
     expect(card.body.elements.at(-1).columns).toHaveLength(1);
     const animated: any = buildLarkCard({ state: 'running', taskId: 'trace-animated', loadingImageKey: 'img_bouncing', elements: [
@@ -113,7 +119,7 @@ describe('Lark card service', () => {
   it('passes CLI Markdown through unchanged for every state', () => {
     const markdown = `### 自定义阶段\n\n${'very-long-command '.repeat(8)}\n\n🟢 业务自行决定展示数量`;
     const card: any = buildLarkCard({ state: 'running', markdown });
-    expect(card.header).toBeUndefined();
+    expect(card.header).toMatchObject({ template: 'blue', title: { content: 'Dockmux' } });
     expect(card.body.elements.some((element: any) => element.content === markdown)).toBe(true);
   });
 
@@ -122,13 +128,9 @@ describe('Lark card service', () => {
       state: 'running',
       taskName: '请完成 Trace 测试：\n1. 执行 pwd\n2. 读取 **package.json**\n3. 输出结论'
     });
-    expect(components(card).find(element => element.text?.content === '请完成 Trace 测试： 1. 执行 pwd 2. 读取 **package.json** 3. 输出结论')).toMatchObject({
-      tag: 'div', width: 'fill',
-      text: {
-        tag: 'plain_text',
-        content: '请完成 Trace 测试： 1. 执行 pwd 2. 读取 **package.json** 3. 输出结论',
-        text_size: 'notation', text_color: 'grey', lines: 1
-      }
+    expect(card.header.title).toMatchObject({
+      tag: 'plain_text',
+      content: '请完成 Trace 测试： 1. 执行 pwd 2. 读取 **package.json** 3. 输出结论'
     });
   });
 
@@ -148,7 +150,28 @@ describe('Lark card service', () => {
     expect(JSON.stringify(card)).toContain('已省略');
   });
 
-  it('places a compact trace summary before the final output', () => {
+  it('bounds oversized card metadata and keeps the final JSON below the hard byte limit', () => {
+    const huge = '超长字段'.repeat(7_500);
+    const card: any = buildLarkCard({
+      state: 'running',
+      taskName: huge,
+      agentName: huge,
+      taskId: huge,
+      sessionId: huge,
+      webBaseUrl: `https://dockmux.example/${huge}`,
+      loadingImageKey: huge,
+      markdown: huge
+    });
+    const serialized = JSON.stringify(card);
+    expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+    expect(componentCount(card)).toBeLessThanOrEqual(larkCardSafeLimits.components);
+    expect(Array.from(card.header.title.content).length).toBeLessThanOrEqual(160);
+    expect(Array.from(card.header.subtitle.content.replace(' · Agent 任务', '')).length).toBeLessThanOrEqual(64);
+    expect(byId(card, 'interrupt').behaviors[0].value.task_id).toHaveLength(96);
+    expect(serialized).not.toContain(huge);
+  });
+
+  it('places the final conclusion before a collapsed compact trace summary', () => {
     const card: any = buildLarkCard({ state: 'completed', taskName: '检查项目', elapsedSeconds: 97, elements: [
       { tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false, header: { title: { tag: 'markdown', content: '步骤' } }, elements: [] },
       { tag: 'markdown', element_id: 'final_output', content: '最终结论' }
@@ -156,23 +179,23 @@ describe('Lark card service', () => {
     const overviewIndex = card.body.elements.findIndex((element: any) => element.element_id === 'trace_overview');
     const statusIndex = card.body.elements.findIndex((element: any) => element.element_id === 'task_status');
     const finalIndex = card.body.elements.findIndex((element: any) => element.element_id === 'final_output');
-    expect(statusIndex).toBe(-1);
+    expect(statusIndex).toBe(0);
     expect(card.body.elements[overviewIndex]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
-    expect(card.body.elements[overviewIndex].header.title.content).toContain('耗时 1m 37s');
-    expect(card.body.elements[overviewIndex].header.title.content).toContain('● 已完成');
-    expect(card.body.elements[overviewIndex].header.title.content).not.toContain('部分失败');
+    expect(byId(card, 'task_status').text.content).toContain('已用时 1m 37s');
+    expect(byId(card, 'task_status').text.content).toContain('已完成');
     expect(card.body.elements[overviewIndex].header.title.content).toContain('1 个阶段');
     expect(card.body.elements[overviewIndex].header.title.text_size).toBe('notation');
     expect(card.body.elements[overviewIndex].header.title.icon).toBeUndefined();
-    expect(finalIndex).toBeGreaterThan(overviewIndex);
+    expect(finalIndex).toBeGreaterThan(statusIndex);
+    expect(finalIndex).toBeLessThan(overviewIndex);
   });
 
-  it('shows only the actual task terminal state in the trace overview', () => {
+  it('shows only the actual task terminal state in the dedicated status row', () => {
     const trace = [{ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false, header: { title: { tag: 'markdown', content: "步骤 <font color='orange'>● 部分失败</font>" } }, elements: [] }];
-    expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'trace_overview').header.title.content).toContain('● 已完成');
+    expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'task_status').text.content).toContain('已完成');
     expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'trace_overview').header.title.content).not.toContain('部分失败');
-    expect(byId(buildLarkCard({ state: 'failed', elements: trace }), 'trace_overview').header.title.content).toContain('● 已失败');
-    expect(byId(buildLarkCard({ state: 'interrupted', elements: trace }), 'trace_overview').header.title.content).toContain('● 已取消');
+    expect(byId(buildLarkCard({ state: 'failed', elements: trace }), 'task_status').text.content).toContain('已失败');
+    expect(byId(buildLarkCard({ state: 'interrupted', elements: trace }), 'task_status').text.content).toContain('已取消');
   });
 
   it('reports missing bot configuration without exposing secrets', () => {
@@ -202,7 +225,7 @@ describe('Lark card service', () => {
     expect(sendBody.receive_id).toBe('user@example.com');
     expect(sendBody.uuid).toBe('task-42');
     const sentCard = JSON.parse(sendBody.content);
-    expect(sentCard.header).toBeUndefined();
+    expect(sentCard.header).toMatchObject({ template: 'blue', subtitle: { content: 'Business Agent · Agent 任务' } });
     expect(byId(sentCard, 'task_status').text.content).toContain('执行中');
     expect(byId(sentCard, 'task_status').icon).toMatchObject({ tag: 'custom_icon', img_key: 'img_loading' });
     expect(byId(sentCard, 'interrupt')).toMatchObject({ behaviors: [{ value: { action: 'interrupt', task_id: '42' } }] });

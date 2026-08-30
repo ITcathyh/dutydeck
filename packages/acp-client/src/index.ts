@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeEvent, type AcpRuntimeHandle, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy } from '@dockmux/shared';
@@ -13,6 +14,67 @@ function claudeLauncherPath() {
   const moduleDirectory = dirname(fileURLToPath(import.meta.url));
   const adjacent = join(moduleDirectory, 'agents', 'claude-acp.mjs');
   return existsSync(adjacent) ? adjacent : join(moduleDirectory, '..', 'agents', 'claude-acp.mjs');
+}
+
+function envLauncherPath() {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const adjacent = join(moduleDirectory, 'agents', 'env-launcher.mjs');
+  return existsSync(adjacent) ? adjacent : join(moduleDirectory, '..', 'agents', 'env-launcher.mjs');
+}
+
+const persistedEnvKey = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
+const bridgedAgentEnvFileKey = 'dockmux_agent_env_file';
+const bridgedAgentEnvDigestKey = 'dockmux_agent_env_digest';
+
+function splitAgentEnvironment(env: Record<string, string>) {
+  const persisted: Record<string, string> = {};
+  const bridged: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (persistedEnvKey.test(key)) persisted[key] = value;
+    else bridged[key] = value;
+  }
+  return { persisted, bridged };
+}
+
+export function acpxPermissionMode(permissionMode: PermissionMode) {
+  return permissionMode === 'full-trust' ? 'approve-all' as const
+    : permissionMode === 'approve-reads' ? 'approve-reads' as const
+      : 'deny-all' as const;
+}
+
+export interface AcpxAgentLaunch {
+  command: string[];
+  sessionOptions: ReturnType<typeof buildAcpxSessionOptions>;
+  cleanup(): void;
+}
+
+/** Prepare the ACPX boundary without persisting vendor env names or values. */
+export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDirectory: string; sessionKey: string }): AcpxAgentLaunch {
+  const { persisted, bridged } = splitAgentEnvironment(agent.env);
+  const entries = Object.entries(bridged);
+  if (entries.length === 0) {
+    return { command: [agent.command, ...agent.args], sessionOptions: buildAcpxSessionOptions(agent), cleanup() {} };
+  }
+
+  mkdirSync(options.runtimeDirectory, { recursive: true, mode: 0o700 });
+  chmodSync(options.runtimeDirectory, 0o700);
+  const identity = createHash('sha256').update(options.sessionKey).digest('hex');
+  const payload = JSON.stringify(bridged);
+  const environmentFile = join(options.runtimeDirectory, `${identity}.json`);
+  writeFileSync(environmentFile, payload, { encoding: 'utf8', mode: 0o600 });
+  chmodSync(environmentFile, 0o600);
+  return {
+    command: [process.execPath, envLauncherPath(), agent.command, ...agent.args],
+    sessionOptions: {
+      ...buildAcpxSessionOptions(agent),
+      env: {
+        ...persisted,
+        [bridgedAgentEnvFileKey]: environmentFile,
+        [bridgedAgentEnvDigestKey]: createHash('sha256').update(payload).digest('hex')
+      }
+    },
+    cleanup() { rmSync(environmentFile, { force: true }); }
+  };
 }
 
 const flattenRiskText = (value: unknown, output: string[] = []): string[] => {
@@ -71,7 +133,10 @@ export function buildAcpxSessionOptions(agent: AgentConfig) {
   return {
     ...(agent.model ? { model: agent.model } : {}),
     ...(agent.systemPrompt ? { systemPrompt: agent.systemPrompt } : {}),
-    env: agent.env
+    // ACPX recursively validates persisted object keys. Keep native lowercase
+    // runtime variables direct, and bridge vendor-style uppercase variables
+    // through one snake_case string that the process launcher expands.
+    env: splitAgentEnvironment(agent.env).persisted
   };
 }
 
@@ -94,16 +159,21 @@ export class AcpxAdapter implements AgentDriver {
   private readonly sessionKey: string;
   private riskPolicy?: ToolRiskPolicy;
   private permissionMode: PermissionMode;
+  private readonly launch: AcpxAgentLaunch;
 
   constructor(readonly agent: SessionAgentConfig, private readonly options: AcpxAdapterOptions) {
     const cwd = agent.cwd ?? process.cwd(); this.sessionKey = options.sessionKey ?? `dockmux-${agent.id}`;
     this.permissionMode = agent.permissionMode;
     this.sessionStore = createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') });
+    this.launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(cwd, '.dockmux', 'runtime-env'), sessionKey: this.sessionKey });
     this.runtime = createAcpRuntime({
       cwd,
       sessionStore: this.sessionStore,
-      agentRegistry: createAgentRegistry({ overrides: { [agent.id]: [agent.command, ...agent.args] } }),
-      permissionMode: agent.permissionMode === 'full-trust' ? 'approve-all' : agent.permissionMode === 'deny-all' ? 'deny-all' : 'approve-reads',
+      agentRegistry: createAgentRegistry({ overrides: { [agent.id]: this.launch.command } }),
+      // `ask` must not silently auto-approve direct read capabilities. ACP
+      // permission requests still flow through onPermissionRequest below;
+      // capabilities the host cannot intercept fail closed.
+      permissionMode: acpxPermissionMode(agent.permissionMode),
       nonInteractivePermissions: 'fail', timeoutMs: agent.timeout * 1000,
       onPermissionRequest: async request => {
         const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
@@ -128,7 +198,7 @@ export class AcpxAdapter implements AgentDriver {
     });
   }
 
-  private sessionInput() { return { sessionKey: this.sessionKey, agent: this.agent.id, mode: 'persistent' as const, cwd: this.agent.cwd, sessionOptions: buildAcpxSessionOptions(this.agent) }; }
+  private sessionInput() { return { sessionKey: this.sessionKey, agent: this.agent.id, mode: 'persistent' as const, cwd: this.agent.cwd, sessionOptions: this.launch.sessionOptions }; }
   private isMissingPersistentSession(error: unknown): boolean {
     for (let current: unknown = error, depth = 0; current && depth < 5; depth++) {
       const message = current instanceof Error ? current.message : String(current);
@@ -144,9 +214,12 @@ export class AcpxAdapter implements AgentDriver {
     await this.sessionStore.save(record);
   }
   private async resetWhenScopedEnvironmentChanged() {
-    const desired = buildAcpxSessionOptions(this.agent).env ?? {};
-    const scopedKeys = ['dockmux_group_tools_url', 'dockmux_group_tools_token'] as const;
-    if (!scopedKeys.some(key => desired[key])) return;
+    const desired = this.launch.sessionOptions.env ?? {};
+    const scopedKeys = [
+      'dockmux_group_tools_url', 'dockmux_group_tools_token',
+      'dockmux_relay_url', 'dockmux_relay_token', 'dockmux_relay_command',
+      bridgedAgentEnvDigestKey
+    ] as const;
     const record = await this.sessionStore.load(this.sessionKey);
     if (!record) return;
     const stored = record.acpx?.session_options?.env ?? {};
@@ -225,9 +298,11 @@ export class AcpxAdapter implements AgentDriver {
       try { await turn.cancel({ reason: 'Dockmux stop' }); }
       finally { if (this.turn === turn) this.turn = undefined; }
     }
-    if (this.handle) await this.runtime.close({ handle: this.handle, reason: 'Dockmux stop' });
-    this.handle = undefined;
-    if (options.discardSession) await this.resetPersistentState();
+    try {
+      if (this.handle) await this.runtime.close({ handle: this.handle, reason: 'Dockmux stop' });
+      this.handle = undefined;
+      if (options.discardSession) await this.resetPersistentState();
+    } finally { this.launch.cleanup(); }
   }
   async resolvePermission(id: string, approved: boolean) { const resolve = this.pendingPermissions.get(id); if (!resolve) return false; this.pendingPermissions.delete(id); resolve({ outcome: approved ? 'allow_once' : 'reject_once' }); return true; }
   async setModel(model: string) {
@@ -253,6 +328,5 @@ export class AcpxAdapter implements AgentDriver {
     this.agent.reasoningEffort = reasoningEffort;
   }
   setRiskPolicy(policy?: ToolRiskPolicy) { this.riskPolicy = policy; }
-  setPermissionMode(mode: PermissionMode) { this.permissionMode = mode; }
   killActive() { void this.interrupt(); }
 }

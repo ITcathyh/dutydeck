@@ -180,7 +180,7 @@ async function installJsonHook(adapter: HookAdapter, workspace: string) {
   const command = `DOCKMUX_POLICY_ROOT=${quote(workspace)} ${quote(process.execPath)} ${quote(scriptPath)}`;
   const entry = adapter.kind === 'cursor-json'
     ? { command, matcher: '.*', timeout: 5, failClosed: true }
-    : { matcher: '.*', hooks: [{ type: 'command', command, timeout: 5, statusMessage: 'Dockmux 高危操作门禁检查' }] };
+    : { matcher: '.*', hooks: [{ type: 'command', command, timeout: 5, statusMessage: 'Dockmux 高危操作风险检查' }] };
   const existingIndex = entries.findIndex((item: unknown) => JSON.stringify(item).includes(markerFor(adapter)));
   if (existingIndex >= 0) entries[existingIndex] = entry;
   else entries.push(entry);
@@ -189,7 +189,7 @@ async function installJsonHook(adapter: HookAdapter, workspace: string) {
 
 export async function installLarkHook(agentId: string | undefined, workspace: string | undefined): Promise<LarkHookStatus> {
   const status = await larkHookStatus(agentId, workspace);
-  if (!status.supported || !workspace) throw new LarkServiceError('HARD_GATE_UNSUPPORTED', status.reason ?? 'Selected Agent does not support hard gates', 422);
+  if (!status.supported || !workspace) throw new LarkServiceError('RISK_CONTROL_UNSUPPORTED', status.reason ?? 'Selected Agent does not support enforced risk control', 422);
   if (!status.writable) throw new LarkServiceError('HOOK_NOT_WRITABLE', status.reason ?? 'Workspace is not writable', 403);
   const adapter = adapterFor(agentId)!;
   if (adapter.kind === 'pi-extension') {

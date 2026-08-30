@@ -6,7 +6,7 @@ import {
   AgentGroupToolError,
   LarkAgentToolCapabilityRegistry,
   LarkAgentToolsService,
-  agentDockGroupToolsCommand,
+  dockmuxGroupToolsCommand,
   larkAgentSessionBinding,
   loadOrCreateGroupToolsSigningSecret,
   type LarkGroupToolClient
@@ -60,8 +60,8 @@ async function setup(clients: Record<string, LarkGroupToolClient>, groupToolsCom
 
 describe('Agent group collaboration domain service', () => {
   it('builds a command bound to the current TypeScript or built entrypoint', () => {
-    expect(agentDockGroupToolsCommand('/workspace/apps/server/src/cli.ts', '/usr/bin/node', 'file:///workspace/node_modules/tsx/loader.mjs')).toBe("'/usr/bin/node' --import 'file:///workspace/node_modules/tsx/loader.mjs' '/workspace/apps/server/src/cli.ts'");
-    expect(agentDockGroupToolsCommand('/workspace/apps/server/dist/cli.js', '/usr/bin/node')).toBe("'/usr/bin/node' '/workspace/apps/server/dist/cli.js'");
+    expect(dockmuxGroupToolsCommand('/workspace/apps/server/src/cli.ts', '/usr/bin/node', 'file:///workspace/node_modules/tsx/loader.mjs')).toBe("'/usr/bin/node' --import 'file:///workspace/node_modules/tsx/loader.mjs' '/workspace/apps/server/src/cli.ts'");
+    expect(dockmuxGroupToolsCommand('/workspace/apps/server/dist/cli.js', '/usr/bin/node')).toBe("'/usr/bin/node' '/workspace/apps/server/dist/cli.js'");
   });
 
   it('binds capabilities to one persisted Lark session and never injects bot credentials', async () => {

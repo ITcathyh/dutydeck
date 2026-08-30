@@ -35,12 +35,11 @@ export function createKiroCliAdapter(): CliAdapter {
     id: 'kiro-cli',
     capabilities: { resume: true },
 
-    buildArgs({ resume, resumeSessionId }: AdapterSessionContext): string[] {
+    buildArgs({ resume, resumeSessionId, permissionMode }: AdapterSessionContext): string[] {
       const args = ['chat'];
-      // dockmux MVP 无人值守（botmux !disableCliBypass 分支）。避开
-      // --trust-all-tools：Kiro 的终端 UI 会为该 flag 弹一道风险确认门，
-      // 无人值守下过不去；改为直接信任官方文档列出的核心工具。
-      args.push(`--trust-tools=${TRUSTED_CORE_TOOLS}`);
+      // full-trust 避开 --trust-all-tools：Kiro 会为该 flag 额外弹出风险
+      // 确认门；使用官方文档列出的核心工具白名单表达同一姿态。
+      if (permissionMode === 'full-trust') args.push(`--trust-tools=${TRUSTED_CORE_TOOLS}`);
       const usable = usableResumeId(resumeSessionId);
       if (resume && usable) {
         args.push('--resume-id', usable);

@@ -3,13 +3,14 @@ import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 
 // 卡片渲染与限流/拒绝判断辅助。
-// 本文件从 listener.ts 原样拆分而来：trace 卡片是 Dockmux 飞书侧的必保特色，
-// 所有渲染逻辑逐行搬运，不得改动任何视觉输出。
+// 飞书只展示可观察的阶段摘要、工具活动和最终结果；模型 thinking 属于内部推理，
+// 只能用于计数和阶段状态判断，不得把原文写入卡片或降级 Markdown。
 
 export type TraceEntry = { type: AgentEvent['type']; data: Record<string, any>; timestamp: string };
 export type TraceGroup = { narratives: TraceEntry[]; actions: TraceEntry[] };
 export type LarkCardElement = Record<string, any>;
 type TraceToolKind = 'command' | 'read' | 'edit' | 'search' | 'web' | 'git' | 'test' | 'data' | 'agent' | 'tool';
+const visibleTraceGroupLimit = 5;
 
 // 任务终态集合：reconcile 与 trace 渲染共用（runtime task 状态机的终态判定）。
 export const terminalTaskStates = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
@@ -57,6 +58,7 @@ export function patchRejectedCardDelta(previous: LarkCardElement[] = [], current
 function compactTrace(events: AgentEvent[]): TraceEntry[] {
   const result: TraceEntry[] = [];
   const tools = new Map<string, TraceEntry>();
+  const permissions = new Map<string, TraceEntry>();
   for (const event of events) {
     if (event.type === 'task' || event.type === 'completed' || event.type === 'status') continue;
     const data = event.data && typeof event.data === 'object' ? event.data as Record<string, any> : { value: event.data };
@@ -98,6 +100,19 @@ function compactTrace(events: AgentEvent[]): TraceEntry[] {
       existing.timestamp = event.timestamp;
       continue;
     }
+    if (event.type === 'permission_request' && data.id) {
+      const permissionId = String(data.id);
+      const existing = permissions.get(permissionId);
+      if (existing) {
+        existing.data = { ...existing.data, ...data };
+        existing.timestamp = event.timestamp;
+      } else {
+        const entry = { type: event.type, data: { ...data }, timestamp: event.timestamp };
+        permissions.set(permissionId, entry);
+        result.push(entry);
+      }
+      continue;
+    }
     result.push({ type: event.type, data: { ...data }, timestamp: event.timestamp });
   }
   return result;
@@ -125,6 +140,34 @@ const truncate = (value: unknown, limit: number) => {
   if (text.length <= limit) return text;
   return `${text.slice(0, limit).trimEnd()}\n…（内容过长，已截断）`;
 };
+const sensitiveTraceKey = /(?:authorization|api[_-]?key|access[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|passwd|pwd)$/i;
+const redactTraceText = (value: string) => value
+  // Treat a truncated PEM as sensitive through end-of-input; logs often cut
+  // output before the END marker arrives.
+  .replace(/-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?(?:-----END(?: [A-Z0-9]+)* PRIVATE KEY-----|$)/g, '[REDACTED_PRIVATE_KEY]')
+  // URL userinfo can contain both a user name and password. Keep only the destination URL shape.
+  .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, '$1[REDACTED]@')
+  // Authorization is handled before generic assignments so "Bearer token" is removed as one value.
+  .replace(/(\bauthorization\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n"',;&}]+)/gi, '$1[REDACTED]')
+  .replace(/\bbearer\s+[^"'\s,;}&]+/gi, 'Bearer [REDACTED]')
+  // Common CLI flags use a following argument instead of key=value.
+  .replace(/(^|[^A-Za-z0-9_-])((?:--?)(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret[_-]?access[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)\s+)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gim, '$1$2[REDACTED]')
+  .replace(/((?:\b(?:api[_-]?key|access[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)|\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|ACCESS_KEY|API_KEY)[A-Z0-9_]*)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi, '$1[REDACTED]');
+
+const redactTraceValue = (value: unknown, seen = new WeakSet<object>(), depth = 0): unknown => {
+  if (typeof value === 'string') return redactTraceText(value);
+  if (!value || typeof value !== 'object') return value;
+  if (depth >= 12) return '[REDACTED: nested value]';
+  if (seen.has(value)) return '[REDACTED: circular value]';
+  seen.add(value);
+  if (Array.isArray(value)) return value.map(item => redactTraceValue(item, seen, depth + 1));
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+    key,
+    sensitiveTraceKey.test(key) ? '[REDACTED]' : redactTraceValue(item, seen, depth + 1)
+  ]));
+};
+
+const truncateTrace = (value: unknown, limit: number) => truncate(redactTraceValue(value), limit);
 const truncateInline = (value: string, limit = 64) => {
   const text = value.replace(/\s+/g, ' ').trim();
   return text.length <= limit ? text : `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
@@ -191,23 +234,23 @@ const toolPresentation = (entry: TraceEntry) => {
   else if (/\b(?:sqlite|sql|database|postgres|mysql)\b/.test(haystack)) { action = '查询数据'; kind = 'data'; }
   else if (/\b(?:agent|spawn|delegate|group\s+(?:self|peers|messages|send|wait))\b/.test(haystack)) { action = 'Agent 协作'; kind = 'agent'; }
   else if (command || /shell|bash|terminal|exec|command/.test(normalized)) { action = '运行命令'; kind = 'command'; }
-  const fullDetail = command ?? url ?? path ?? (/^(?:tool|tool call)$/i.test(name) ? '' : name);
+  const fullDetail = redactTraceText(command ?? url ?? path ?? (/^(?:tool|tool call)$/i.test(name) ? '' : name));
   const detail = truncateInline(fullDetail);
   const status = String(data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')).toLowerCase();
   const failed = /fail|error|reject|cancel/.test(status);
   const running = /running|pending|started|in_progress/.test(status);
   return {
     kind,
-    action,
-    description,
+    action: redactTraceText(action),
+    description: description ? redactTraceText(description) : description,
     detail,
     statusLabel: failed ? '失败' : running ? '执行中' : '已完成',
     statusColor: failed ? 'yellow' : running ? 'orange' : 'green',
     indicatorColor: failed ? 'trace_failure' : running ? 'trace_running' : 'trace_success',
     elapsed: traceElapsed(data.startedAt ?? entry.timestamp, running ? undefined : data.completedAt ?? entry.timestamp),
     fullDetail,
-    input: truncate(data.input, 250),
-    output: truncate(data.output, 450)
+    input: truncateTrace(data.input, 250),
+    output: truncateTrace(data.output, 450)
   };
 };
 
@@ -265,14 +308,14 @@ const traceGroups = (entries: TraceEntry[]): TraceGroup[] => {
 const groupDescription = (group: TraceGroup) => {
   const narrative = [...group.narratives].reverse().find(entry => entry.type === 'text') ?? group.narratives.at(-1);
   const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
-  const narrativeText = String(assistantNarrative?.data.text ?? '').trim();
+  const narrativeText = redactTraceText(String(assistantNarrative?.data.text ?? '')).trim();
   if (narrativeText) return narrativeText;
   const tool = group.actions.find(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
   if (tool) {
     const presentation = toolPresentation(tool);
     return presentation.description || presentation.fullDetail || presentation.action;
   }
-  return narrative ? '思考过程' : '执行过程';
+  return narrative ? '分析与规划' : '执行过程';
 };
 
 const groupPanel = (group: TraceGroup, index: number, terminal = false): LarkCardElement => {
@@ -290,8 +333,8 @@ const groupPanel = (group: TraceGroup, index: number, terminal = false): LarkCar
   const thinkingEntries = group.narratives.filter(entry => entry.type === 'thinking' && String(entry.data.text ?? '').trim());
   const actionElements = visibleActions.flatMap((entry, actionIndex): LarkCardElement[] => {
     if (entry.type === 'tool_call' || entry.type === 'tool_result') return [toolPanel(entry, `${index}_${actionIndex}`)];
-    if (entry.type === 'permission_request') return [{ tag: 'markdown', content: `**权限请求**　<text_tag color='orange'>${entry.data.status ?? '待处理'}</text_tag>\n\n${truncate(entry.data.title, 800)}`, text_size: 'x-small', margin: '0px' }];
-    if (entry.type === 'error') return [{ tag: 'markdown', content: `<text_tag color='yellow'>有错误</text_tag>\n\n${truncate(entry.data.message ?? 'Agent 执行未完全成功', 1_500)}`, text_size: 'x-small', margin: '0px' }];
+    if (entry.type === 'permission_request') return [{ tag: 'markdown', content: `**权限请求**　<text_tag color='orange'>${entry.data.status ?? '待处理'}</text_tag>\n\n${truncateTrace(entry.data.title, 800)}`, text_size: 'x-small', margin: '0px' }];
+    if (entry.type === 'error') return [{ tag: 'markdown', content: `<text_tag color='yellow'>有错误</text_tag>\n\n${truncateTrace(entry.data.message ?? 'Agent 执行未完全成功', 1_500)}`, text_size: 'x-small', margin: '0px' }];
     if (entry.type === 'raw_terminal') return [toolPanel({ ...entry, type: 'tool_result', data: { ...entry.data, name: 'terminal', output: entry.data.text, status: 'completed' } }, `${index}_${actionIndex}`)];
     return [];
   });
@@ -301,16 +344,12 @@ const groupPanel = (group: TraceGroup, index: number, terminal = false): LarkCar
   const elapsed = traceElapsed(first?.data.startedAt ?? first?.timestamp, last?.data.completedAt ?? last?.timestamp);
   const elapsedSuffix = elapsed ? `　<font color='grey'>${elapsed}</font>` : '';
   const stateSuffix = `　<font color='${status.color}'>● ${status.label}</font>`;
-  const countParts = [thinkingEntries.length ? `${thinkingEntries.length} 段思考` : '', tools.length ? `${tools.length} 次工具调用` : ''].filter(Boolean);
+  const countParts = [thinkingEntries.length ? `${thinkingEntries.length} 项内部分析` : '', tools.length ? `${tools.length} 次工具调用` : ''].filter(Boolean);
   const summaryElements: LarkCardElement[] = countParts.length ? [{
     tag: 'div', width: 'auto', margin: '0px 0px 2px 0px',
     text: { tag: 'plain_text', content: countParts.join(' · '), text_size: 'notation', text_color: 'grey' },
     icon: { tag: 'standard_icon', token: 'setting_outlined', color: 'grey' }
   }] : [];
-  const thinkingElements: LarkCardElement[] = thinkingEntries.map(entry => ({
-    tag: 'markdown', content: `**思考过程**　<font color='grey'>${truncate(entry.data.text, 500)}</font>`, text_size: 'notation', margin: '0px 0px 2px 20px',
-    icon: { tag: 'standard_icon', token: 'mindnote_outlined', color: 'grey' }
-  }));
   return {
     tag: 'collapsible_panel', element_id: `trace_group_${index}`, expanded: false,
     direction: 'vertical', vertical_spacing: '2px', padding: '2px 0px 0px 0px', margin: '0px',
@@ -319,13 +358,61 @@ const groupPanel = (group: TraceGroup, index: number, terminal = false): LarkCar
       vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
       icon_position: 'right', icon_expanded_angle: -180
     },
-    elements: [...summaryElements, ...thinkingElements, ...actionElements]
+    elements: [...summaryElements, ...actionElements]
+  };
+};
+
+const permissionAlert = (entry: TraceEntry, index: number): LarkCardElement => {
+  const status = String(entry.data.status ?? 'pending').toLowerCase();
+  const pending = /pending|waiting|requested/.test(status);
+  const rejected = /reject|denied|blocked|cancel/.test(status);
+  const title = truncateTrace(entry.data.title ?? 'Agent 请求执行受保护操作', 800);
+  const highRisk = /高危|风险|danger|risk/i.test(title);
+  const tagColor = pending ? 'orange' : rejected ? 'red' : 'green';
+  const tagLabel = pending ? (highRisk ? '高风险待确认' : '等待审批') : rejected ? '已安全拦截' : '授权已处理';
+  const headline = pending
+    ? '任务已暂停，需要人工确认'
+    : rejected ? '受保护操作未执行' : '任务已恢复执行';
+  const guidance = pending
+    ? '请在 Dockmux 工作台中查看详情并审批；处理后卡片会继续同步。'
+    : rejected ? '可调整指令后重试，或由有权限的成员重新发起。' : '无需额外操作。';
+  const visualStatus = pending ? 'pending' : rejected ? 'rejected' : 'resolved';
+  return {
+    tag: 'markdown', element_id: `risk_alert_${visualStatus}_${index}`,
+    content: `<text_tag color='${tagColor}'>${tagLabel}</text_tag>　**${headline}**\n\n${title}\n\n<font color='grey'>${guidance}</font>`,
+    text_size: 'normal', margin: '6px 0px 8px 0px'
+  };
+};
+
+const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
+  tag: 'markdown', element_id: `execution_alert_${index}`,
+  content: `<text_tag color='red'>执行异常</text_tag>　**需要关注**\n\n${truncateTrace(entry.data.message ?? 'Agent 执行未完全成功', 1_500)}`,
+  text_size: 'normal', margin: '6px 0px 8px 0px'
+});
+
+const progressDigest = (groups: TraceGroup[]): LarkCardElement | undefined => {
+  const entries = groups.flatMap(group => [...group.narratives, ...group.actions]);
+  const analyses = entries.filter(entry => entry.type === 'thinking').length;
+  const tools = entries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').map(toolPresentation);
+  const settled = tools.filter(tool => tool.statusLabel !== '执行中').length;
+  const failed = tools.filter(tool => tool.statusLabel === '失败').length;
+  if (!tools.length && !analyses) return undefined;
+  const parts = [
+    `${groups.length} 个阶段`,
+    tools.length ? `${settled}/${tools.length} 个工具已返回` : '',
+    analyses ? `${analyses} 项内部分析（内容不展示）` : '',
+    failed ? `${failed} 项异常` : ''
+  ].filter(Boolean);
+  return {
+    tag: 'div', element_id: 'trace_digest', width: 'auto', margin: '0px 0px 4px 0px',
+    text: { tag: 'plain_text', content: parts.join(' · '), text_size: 'notation', text_color: failed ? 'orange' : 'grey', lines: 1 },
+    icon: { tag: 'standard_icon', token: 'doc-checklist_outlined', color: failed ? 'orange' : 'grey' }
   };
 };
 
 export function renderLarkCardElements(
   events: AgentEvent[],
-  config: Pick<StoredLarkConfig, 'traceLimit'>,
+  _config: Pick<StoredLarkConfig, 'traceLimit'>,
   completed = false,
   compensation = false
 ): LarkCardElement[] {
@@ -340,26 +427,47 @@ export function renderLarkCardElements(
   const lastActivityIndex = lastIndex(entry => entry.type !== 'text');
   const finalFollowsActivity = finalMessageIndex > lastActivityIndex;
   const finalMessage = finalMessageIndex >= 0 && finalFollowsActivity ? entries[finalMessageIndex] : undefined;
-  const finalText = truncate(finalMessage?.data.text, 6_000);
-  let activityEntries = entries.filter(entry => entry !== finalMessage || !finalFollowsActivity);
-  // 先全量分组，再按 group 数量裁剪。
+  const finalText = truncateTrace(finalMessage?.data.text, 6_000);
+  const activityEntries = entries.filter(entry => entry !== finalMessage || !finalFollowsActivity);
+  const permissionEntries = activityEntries.filter(entry => entry.type === 'permission_request');
+  const errorEntries = activityEntries.filter(entry => entry.type === 'error');
+  const traceEntries = activityEntries.filter(entry => entry.type !== 'permission_request' && entry.type !== 'error');
+  // 先全量分组，再只展示最近五组有效活动。traceLimit 控制上游取样/对账规模，
+  // 不控制卡片视觉密度；否则默认 50 会把运行态重新变成日志墙。
   // 若在 entry 级别切片，滑动窗口可能切断 group 边界，导致 group 数量随新事件到来而跳变。
-  // 按 group 级别裁剪后，group 数量单调递增，超过 traceLimit 时才丢弃最旧的 group，计数稳定。
-  const allGroups = traceGroups(activityEntries);
-  const groups = config.traceLimit && allGroups.length > config.traceLimit
-    ? allGroups.slice(-config.traceLimit)
-    : allGroups;
+  // 按 group 级别裁剪后，卡片始终保留最近且完整的阶段。
+  const allGroups = traceGroups(traceEntries);
+  const groups = allGroups.slice(-visibleTraceGroupLimit);
+  const omittedGroupCount = allGroups.length - groups.length;
   const elements: LarkCardElement[] = [];
 
   if (compensation) {
     elements.push({ tag: 'markdown', content: "<font color='orange'>原运行卡片未能更新，Dockmux 已补发终态结果。</font>", text_size: 'notation', margin: '0px 0px 8px 0px' });
   }
+  elements.push(...permissionEntries.map(permissionAlert));
+  elements.push(...errorEntries.map(errorAlert));
   if (finalText) {
+    elements.push({
+      tag: 'div', element_id: 'result_header', width: 'auto', margin: '4px 0px 2px 0px',
+      text: { tag: 'plain_text', content: '执行结论', text_size: 'small', text_color: 'green' },
+      icon: { tag: 'standard_icon', token: 'doc-checklist_outlined', color: 'green' }
+    });
     elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? finalText : `**当前进展**\n\n${finalText}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
+    if (completed) elements.push({
+      tag: 'div', element_id: 'next_step_hint', width: 'auto', margin: '6px 0px 2px 0px',
+      text: { tag: 'plain_text', content: '下一步：在当前对话继续给 Agent 指令，可补充目标或要求调整。', text_size: 'notation', text_color: 'grey', lines: 2 }
+    });
   } else if (completed) {
-    elements.push({ tag: 'markdown', content: "<font color='orange'>Agent 未返回最终输出</font>", text_size: 'notation', margin: '0px' });
+    elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }
   if (groups.length) {
+    const digest = progressDigest(allGroups);
+    if (digest) elements.push(digest);
+    if (omittedGroupCount) elements.push({
+      tag: 'markdown', element_id: 'trace_omission',
+      content: `<font color='grey'>仅展示最近 ${groups.length} 个阶段，另有 ${omittedGroupCount} 个阶段；完整记录请在 Dockmux Web 查看。</font>`,
+      text_size: 'notation', margin: '0px 0px 4px 0px'
+    });
     elements.push(...groups.map((group, index) => groupPanel(group, index, completed)));
   }
   if (!elements.length) elements.push({ tag: 'markdown', content: '正在思考中…', text_size: 'normal', margin: '0px' });
@@ -372,12 +480,12 @@ export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkCon
   if (!entries.length) return '正在思考中…';
   return entries.map(entry => {
     const data = entry.data;
-    if (entry.type === 'text') return `**Agent**\n\n${data.text ?? ''}`;
-    if (entry.type === 'thinking') return `**思考**\n\n> ${String(data.text ?? '').replaceAll('\n', '\n> ')}`;
-    if (entry.type === 'tool_call' || entry.type === 'tool_result') return `**工具 · ${data.name ?? 'tool'}** · ${data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')}${fenced(data.output ?? data.input)}`;
-    if (entry.type === 'permission_request') return `**权限请求** · ${data.status ?? 'pending'}\n\n${data.title ?? ''}`;
-    if (entry.type === 'error') return `**错误**\n\n${data.message ?? 'Agent 执行失败'}`;
-    if (entry.type === 'raw_terminal') return `**终端**${fenced(data.text ?? '')}`;
+    if (entry.type === 'text') return `**Agent**\n\n${redactTraceText(String(data.text ?? ''))}`;
+    if (entry.type === 'thinking') return '**内部分析**\n\n> Agent 已完成内部分析（推理原文不展示）';
+    if (entry.type === 'tool_call' || entry.type === 'tool_result') return `**工具 · ${redactTraceText(String(data.name ?? 'tool'))}** · ${data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')}${fenced(redactTraceValue(data.output ?? data.input))}`;
+    if (entry.type === 'permission_request') return `**权限请求** · ${data.status ?? 'pending'}\n\n${redactTraceText(String(data.title ?? ''))}`;
+    if (entry.type === 'error') return `**错误**\n\n${redactTraceText(String(data.message ?? 'Agent 执行失败'))}`;
+    if (entry.type === 'raw_terminal') return `**终端**${fenced(redactTraceText(String(data.text ?? '')))}`;
     return '';
   }).filter(Boolean).join('\n\n---\n\n');
 }

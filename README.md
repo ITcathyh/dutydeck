@@ -1,16 +1,25 @@
 # Dockmux
 
-Dockmux 是一个 ACP 优先的多 Agent 工作台。它会发现内置 ACPX 注册表支持的 Agent，仅保留本机已安装 CLI 的 Agent，并在 Web 界面中展示对应的 CLI 版本。Web 与 HTTP 是同一套仓储驱动运行时上的两个独立通道。
+Dockmux 是本地优先的 Agent 工程工作台。你从 Web 或飞书下达工程目标，Dockmux 负责选择和连接本机 Agent、持续展示有效进展、处理排队与审批、恢复异常，并把结果和验证证据留在同一条任务记录中。
 
 ```text
-Web / HTTP → Dockmux 运行时 → acpx@0.13.0 → ACP Agent
+选择工作区 → 描述目标 → 查看进展 → 审批或纠偏 → 验证结果 → 继续工作
 ```
 
-Dockmux 不使用 Agent SDK，也不内嵌供应商专属适配器。固定版本的公开 `acpx/runtime` 接口负责 ACP 初始化、持久会话、重连、流式输出、实时权限请求、取消和子进程清理；Dockmux 负责产品状态、标准化事件、存储、API 与通道。
+产品界面以 `Workspace → Task → Run` 组织信息；Session 是保持 Agent 上下文和兼容 HTTP API 的内部概念，不是使用 Dockmux 的前置知识。
+
+## 核心体验
+
+- **任务优先的 Web 工作台**：按工作目录聚合运行，首页集中显示执行中、排队、失败和最近完成的任务。创建任务时先写目标，再按需覆盖 Agent、模型和推理强度。
+- **飞书指挥台**：私聊或群聊 @ 即可下达任务。单张卡片从排队更新到终态，优先展示当前焦点、结论、验证证据和此刻真正可用的操作。
+- **可干预、可恢复的运行时**：支持排队、取消排队、立即介入、中断、继续、停止和重启。SQLite 保存任务、事件、授权请求和通道映射，daemon 重启后会恢复可执行队列。
+- **有界历史与实时增量**：Web 首屏只读取最近 200 个事件，按游标加载更早记录，并将本地渲染窗口限制在 800 个事件；SSE 使用严格递增的 `sequence` 补齐断线期间的事件。
+- **安全姿态明确**：Agent 默认使用 `ask`，`full-trust` 必须显式配置。远程浏览器通过 HttpOnly、SameSite Cookie 登录；浏览器登录流程不会把访问令牌写进 URL 或前端存储。
+- **ACP 与真实 CLI**：优先使用固定版本的 `acpx@0.13.0` 接入 ACP Agent，也可通过 PTY 适配器连接已安装的 CLI。Dockmux 只展示本机实际可用的 Agent 和版本。
 
 ## 快速开始
 
-环境要求：Node.js 22.12+、pnpm 11。需要使用的 Agent CLI 必须已在本机安装，并按需完成认证。
+环境要求：Node.js 22.12+、pnpm 11。要使用的 Agent CLI 需已在本机安装并完成供应商认证。
 
 ```bash
 pnpm install
@@ -18,269 +27,168 @@ cp .env.example .env
 pnpm dev
 ```
 
-开发时访问 `http://127.0.0.1:4311`；Vite 会将 API 代理到 `http://127.0.0.1:4310`。
+开发模式下：
 
-常用命令：
+- Web：`http://127.0.0.1:4311`
+- API：`http://127.0.0.1:4310`
+
+Vite 会把 Web 请求代理到本地 API。首次进入工作台后，选择工作区、填写任务目标并执行即可。
+
+生产构建和本仓库启动：
 
 ```bash
-pnpm dev:server       # 仅启动 Fastify
-pnpm dev:web          # 仅启动 Vite
-pnpm test             # 验收测试与集成测试
-pnpm typecheck
 pnpm build
+pnpm server
 ```
 
-## 本地会话服务
-
-唯一可发布的软件包 `dockmux` 提供 `dockmux` 可执行命令。它内置生产版 Web 界面，并统一管理运行时、ACP 进程、会话持久化、HTTP API 和 SSE 流；客户端不会直接启动 Agent 进程。服务启动后，界面、API 和 SSE 均使用终端输出的服务地址。
+全局安装后可以直接运行：
 
 ```bash
-# 在当前仓库运行（会先执行构建）
-pnpm server
-
-# 软件包发布并安装后运行
 pnpm add -g dockmux
 dockmux --cwd /path/to/project --port 4310
 ```
 
-支持的参数包括 `--local-only`、`--host`、`--port`、`--cwd`、`--database`、`--idle-timeout-ms`、`--cleanup-interval-ms` 和 `--no-lark-listen`。运行 `dockmux --help` 可查看完整说明。
+运行 `dockmux --help` 查看全部参数。
 
-### 后台运行
+## 前台、后台与更新
 
-`dockmux daemon` 命令组可以把服务挂到后台运行并随时管理它，无需 `pm2` / `systemd` 之类的进程守护工具。它会通过 `daemonize-process` 将当前进程重新派生成隔离会话的守护进程，并把 PID、状态和日志记录在首次启动根目录的 `.dockmux/daemon/` 下。该根目录会被持久记忆；此后即使服务已停止，或者从其他目录执行 `start` / `restart`，仍会复用同一个根目录和 `.dockmux/dockmux.db`，不会静默创建第二套机器人配置。
-
-`start` / `stop` / `restart` / `status` 既可以用在 `dockmux daemon ...` 下，也可以不带前缀直接作为顶层命令使用，两者指向同一套实现：
+无子命令的 `dockmux` 在前台运行。`start`、`stop`、`restart` 和 `status` 管理内置 daemon；带或不带 `daemon` 前缀的两种写法等价。
 
 ```bash
-# 后台启动，可以带上与前台一致的启动参数（顶层或 daemon 前缀皆可）
 dockmux start --cwd /path/to/project --port 4310
-dockmux daemon start --port 4410
-
-# 查看是否在运行、PID、地址与日志路径
 dockmux status
+dockmux restart --port 4410
+dockmux stop
+
+# 等价命令组
+dockmux daemon start --port 4310
 dockmux daemon status
 
-# 重启（沿用 start 时的参数，也可更换参数）
-dockmux restart --port 4420
-
-# 停止后台服务
-dockmux stop
+# 更新全局包并重启后台服务
+dockmux update
 ```
 
-- 无子命令的 `dockmux` 仍然在前台直接启动服务；只有显式的 `start` 才会转入后台运行，两者互不干扰。
-- 启动后会通过 PID 文件加载，处理 SIGTERM 优雅退出；`stop` 会先发 SIGTERM，超时未退再发 SIGKILL，并清理状态文件。
-- 日志追加写入 `.dockmux/daemon/dockmux.log`；前台启动的 `dockmux` 与后台 `dockmux daemon start` 可互不干扰地同时使用。
-- `status` / `stop` / `restart` 也从当前工作目录解析 `.dockmux/daemon/`。请与 `start` 在同一个目录下执行。
-- 已在运行时再次 `start` 会返回 `ok:false` 与 `state:"already-running"`，不会重复拉起进程。
-
-`dockmux acpk` 后的所有内容都会原样传递给已安装的 `acpk` 可执行文件，不做二次解析。参数、选项、顺序、标准输入、标准输出、标准错误和子进程退出码都会完整保留。
-
-```bash
-dockmux acpk agents list --json
-dockmux acpk run --help
-```
-
-默认情况下，本机及同一局域网内的其他设备均可访问 Dockmux。这不会将服务发布到公网，访问仍受路由器、防火墙和网络策略约束。使用 `--local-only`（或 `DOCKMUX_LOCAL_ONLY=true`）启动时，只接受来自本机的连接；高级场景仍可使用 `--host <address>` 指定监听接口。
-
-工作目录按会话解析，优先级依次为：`POST /api/sessions` 提供的 `cwd`、Agent 专属 `cwd`、进程级 `--cwd`。若均未提供，所有内置或自定义 Agent 默认使用启动 `dockmux` 时所在的目录。
+daemon 的数据库、PID、状态和日志位于启动根目录的 `.dockmux/`。服务会记住第一次启动的根目录，后续管理命令不会静默创建第二套配置。收到退出信号时，Dockmux 会关闭 Agent、SSE、终端连接和 SQLite；空闲 Driver 默认在 6 小时后释放，任务历史仍会保留。
 
 ## Web 工作台
 
-Web 界面将本地会话和来自飞书的会话统一展示在同一套时间线中。当 Agent 忙碌时，新消息可以排队等待，也可以中断当前轮次后立即发送；排队消息在执行前可以取消。会话完成后，消息、推理过程、工具调用、权限请求和终端输出都会保存在 SQLite 中。
+工作台将 Web 与飞书创建的任务统一到工作区视图中：
 
-Agent 输出的 Markdown 会随流式内容持续渲染。围栏代码块使用同步 Prism 语法高亮，在新 Token 到达时保持稳定的深色背景，同时展示声明的语言并提供复制操作。遇到未知语言标识时，渲染器会回退为纯文本，不会报错，也不会异步加载第二套主题。
+1. 首页按状态扫描所有任务运行，并显示真实任务目标，而不是内部 ID。
+2. 新建任务同时创建运行上下文并派发目标；若派发失败，可以只重试派发，不会重复创建。
+3. 任务详情合并连续工具活动，突出当前步骤、最终回答、审批和错误；原始终端输出在独立面板中按需查看。
+4. Agent 忙碌时，新指令可以排队，也可以立即介入；排队项可取消或提升为下一项。
+5. 中断、失败或停止后的任务可以重启；归档后保留只读历史。
 
-## 飞书卡片
+Markdown、代码块、工具调用和终端视图均按需渲染。长历史不会在首屏全量读取或一次性挂载到 DOM。
 
+## 远程浏览器访问
 
-发布后的 `dockmux` 可执行命令可以发送新的 Dockmux Card JSON 2.0 消息，也可以原地更新已有卡片。同一套实现会随服务挂载到 `/api/lark`；飞书配置是可选项，不会阻止常规 Dockmux HTTP/SSE 服务启动。
+Dockmux 默认只监听 `127.0.0.1:4310`，本机使用无需登录。需要局域网访问时显式使用 `--host 0.0.0.0`；一旦启用远程监听，所有来源（包括反向代理的 loopback 回源）都必须认证。
 
-每个已保存机器人的消息接收状态，都可以在 **飞书设置** 中独立控制。机器人开启监听后，Dockmux 会在启动时建立该机器人的飞书长连接，并在后续启动时自动恢复。使用 `--no-lark-listen` 可以只为当前进程禁用全部监听器；此时界面开关为只读状态，SQLite 中的配置值不会改变。
+服务首次启动时会生成访问令牌并打印一次。之后可以随时查看或轮换：
 
-私聊消息会直接唤醒已配置的 Agent；群聊消息只有在机器人被 @ 时才会唤醒。服务进程存活期间，每个会话复用同一个 Agent Session。Dockmux 会先添加一个随机确认表情，再发送运行中服务卡片、撤销确认表情，并随着 Agent 事件到达持续刷新同一张卡片。在群聊中，服务卡片会作为触发消息的**回复**发出，从而直接落在用户消息之下；如果触发消息位于话题线程内，卡片也会出现在对应线程中（回复失败时回退为群内普通发送）。
+```bash
+dockmux auth token
+dockmux auth token --rotate
+```
 
-在飞书开放平台配置机器人：
+远程浏览器打开工作台后输入令牌一次。验证成功后，服务只设置 `HttpOnly; SameSite=Strict` Cookie，fetch、SSE 和终端 WebSocket 会自动携带它。轮换令牌会使旧令牌及其浏览器会话失效。通过 HTTPS 反向代理访问时，应正确传递请求协议，使 Cookie 同时带上 `Secure`。
 
-1. 创建企业自建应用并启用机器人能力。
-2. 为机器人开通飞书 API 所需的消息发送/更新、消息接收和表情回复写入权限；多 Agent 协作还需开通“获取群组中其他机器人和用户 @ 当前机器人的消息”。
-3. 使用长连接方式订阅 `im.message.receive_v1`。
-4. 发布应用版本，并将目标用户加入应用可用范围。
-5. 将机器人加入每个目标群聊。
+仅在本机使用时可以缩小监听面：
 
-Web 侧边栏提供两步式的多机器人 **飞书设置** 对话框。第一步校验 App ID 和 App Secret，并可通过 TagInput 直接填写可用成员的真实姓名；保存时服务端会在机器人所在群中精确解析姓名并持久化对应 `open_id`，运行时不读取成员邮箱。找不到姓名或不同用户同名时会拒绝保存，避免授权错误。该步骤同时保存工作区、监听开关、推送间隔和轨迹策略。第二步配置 Agent、模型、推理强度、每轮预注入 Prompt 和高危操作门禁。两步全部完成前，机器人不能开启监听。每个 App ID 只能对应一个配置面板，重复 App ID 会返回 `409 LARK_BOT_ALREADY_CONFIGURED`。
+```bash
+dockmux --local-only
+# 或 DOCKMUX_LOCAL_ONLY=true
 
-每个机器人都可以配置绝对路径工作区、500 至 20000 毫秒的推送间隔、轨迹条数上限，以及完成后是否隐藏前置轨迹。默认推送间隔为 1000 毫秒，执行中展示最近 10 条轨迹；任务完成后默认隐藏前置 Trace，仅保留 Agent 最终输出。macOS 上的工作区按钮会通过本地服务打开系统目录选择器。配置以明文 JSON 形式存入本地 SQLite 的 `configs` 表。`GET /api/lark/config` 会返回全部机器人配置面板，但绝不会返回 App Secret。
+# 显式开启局域网访问
+dockmux --host 0.0.0.0
+```
 
-修改默认 Agent、模型、推理强度或工作区后，当前任务不受影响；该机器人在对应会话中的下一条消息会停止旧 Session，并按新配置创建 Session。旧 Session 的历史记录仍会保留。仅修改 Prompt、协作开关、轨迹或卡片展示策略时会继续复用当前 Session，并从后续消息开始生效，无需重启：配置按消息实时读取，协作工具的注入 Prompt（含 `groupToolsEnabled`/`groupToolsAllowSend`/`preInjectPrompt`）会在下一条消息起自动使用新值。单个任务失败（如未产生最终输出、输出被截断或瞬时驱动错误）只会结束该任务，不会把共享 Session 永久置为 `failed`：Session 会回到可复用的 `idle` 状态并继续消费队列中的后续任务，排队的任务不再因会话失败而悬在 `queued` 状态（过去会导致 `Unknown queued task` 和整个群聊卡死）。
+高级场景可使用 `--host <address>` 指定接口。不要把未启用 TLS 的服务直接暴露到不可信网络。
 
-### 飞书群内的 Agent 协作
+## 权限姿态
 
-对于已启用协作的群聊，飞书本身就是共享消息总线：Dockmux 不维护第二个房间，也不会将群历史复制到协作数据库。每个 Agent 都会获得一个仅限当前会话的本地 Capability，并可以使用以下命令：
+Dockmux 将一个权限姿态从 Agent 配置贯穿到 ACP 或 PTY 启动边界：
+
+| 模式 | 行为 |
+|---|---|
+| `ask` | 默认值；需要升级的操作进入实时审批。 |
+| `approve-reads` | ACP：自动允许只读请求，其他请求仍需批准。 |
+| `deny-all` | ACP：拒绝所有需要升级的权限请求。 |
+| `full-trust` | 显式开启完全信任；只应用于你确认可无人值守执行的工作区。 |
+
+ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒绝。PTY CLI 当前只支持 `ask` 与 `full-trust`：`ask` 保留供应商原生确认并可从终端处理，另外两种不受支持的模式会被明确拒绝。适配器在安全模式下不会追加供应商的 bypass / yolo 参数；完全信任参数只在 `full-trust` 下启用。
+
+## 飞书指挥台
+
+发布版服务可以监听多个飞书机器人，也可以通过 CLI 或 `/api/lark` 主动发送和原地更新 Card JSON 2.0 消息。飞书配置可选，不会阻止 Web/API 启动。
+
+### 用户路径
+
+- 私聊文本直接创建任务；群聊只有 @ 机器人时触发。
+- Dockmux 先确认收到，再在触发消息或对应话题下回复唯一任务卡片。
+- 排队、运行、待决策、完成、中断和失败使用不同视觉层级。
+- 运行态只保留少量合并后的有效进展；完成态先给结论，再给检查、改动和异常等证据。
+- 卡片不展示模型私有思维链。工具参数、输出、错误和终端摘要在进入卡片前会做敏感信息清理并受卡片总大小预算约束。
+- daemon 重启后，恢复中的旧卡片先变为只读，再与持久化终态对账，避免展示已经失效的按钮。
+
+### 接入机器人
+
+1. 在飞书开放平台创建企业自建应用，取得 App ID 与 App Secret。
+2. 在 Web 的“飞书指挥台”填写 App ID，点击“自动配置”。Dockmux 会复用本机私密登录态；没有可用登录态时显示飞书二维码。
+3. 自动配置会增量导入 Dockmux 需要的 16 项消息、群聊、附件与联系人权限，启用机器人，设置长连接 `im.message.receive_v1` 与 `card.action.trigger`，回读验证后发布新版本。存量应用的可见范围会在发版前完整读回并原样保留；无法确认时停止发版。
+4. 填写 App Secret、工作区与 Agent，明确确认无人值守 `full-trust` 后启用监听，并把机器人加入目标群。
+
+自动配置不是保存门禁，也不会申请用户身份发消息权限；需要时仍可在开发者后台手动配置。开放平台 Cookie 只写入本机 `~/.dockmux/feishu-open-platform-session.json`（私有权限），不会返回浏览器、进入日志或交给 Agent。
+
+App Secret 只保留在服务端；通过 Web 保存时写入本地 SQLite，查询接口不会返回它。成员白名单使用姓名录入，保存时解析成 `open_id`；同名或找不到成员时会拒绝保存。使用 `--no-lark-listen` 可以只为当前进程关闭监听，不修改已保存配置。
+
+常用环境变量：
+
+| 变量 | 用途 |
+|---|---|
+| `LARK_APP_ID` | 企业自建应用 ID。 |
+| `LARK_APP_SECRET` | 应用密钥，只供服务端使用。 |
+| `LARK_RECEIVE_ID` | CLI/API 的默认接收方。 |
+| `LARK_RECEIVE_ID_TYPE` | `open_id`、`union_id`、`user_id`、`email` 或 `chat_id`。 |
+| `LARK_CHAT_ID` | 默认群聊 ID；存在时优先于默认接收方。 |
+| `LARK_AGENT_NAME` | 卡片默认 Agent 名称。 |
+| `LARK_OPEN_API_BASE_URL` | OpenAPI 地址，默认 `https://open.feishu.cn`。 |
+
+主动发送或更新卡片：
+
+```bash
+export LARK_APP_ID=cli_xxx
+export LARK_APP_SECRET=replace_me
+export LARK_RECEIVE_ID=user@example.com
+export LARK_RECEIVE_ID_TYPE=email
+
+dockmux lark send '**构建完成**' --task-name '发布验证' --task-id release-42
+dockmux lark update '**所有检查均已通过**' \
+  --message-id om_xxx --state completed --task-id release-42
+```
+
+### 群内 Agent 协作
+
+启用群协作后，飞书群本身是共享消息总线。Agent 可以发现当前群中由本 Dockmux 实例管理的机器人、增量读取消息，并在管理员允许时发送或回复：
 
 ```bash
 dockmux group self
 dockmux group peers
 dockmux group members
 dockmux group messages --limit 20
-dockmux group messages --after '<cursor>' --limit 20
 dockmux group send '请检查这个接口' --to cli_peer
-dockmux group send '请改用 dockmux' --to '伟哥'
-dockmux group send '已修复' --reply-to om_xxx --idempotency-key handoff-1
 dockmux group wait --after '<cursor>' --timeout-ms 15000
 ```
 
-`peers` 会取“当前飞书群内的机器人”与“本 Dockmux 实例已配置的机器人”的交集，因此不会将任意第三方机器人暴露为可调用 Agent。`messages` 和 `wait` 返回不透明游标，用于增量读取。回复操作会校验目标消息是否属于当前群聊，`send --to` 也只会解析发现结果中的协作方。界面分别提供“启用协作”和“允许写入”两个开关，对应配置字段为 `groupToolsEnabled` 和 `groupToolsAllowSend`。两个能力均默认关闭，必须由管理员显式启用。
+群工具 capability 精确绑定运行、机器人和群聊。App Secret 与飞书访问令牌不会交给 Agent。ACPX Session 只写入 snake_case 的 `dockmux_group_tools_url` 和 `dockmux_group_tools_token`；旧大写键仅能在读取边界兼容。
 
-Capability 仅包含一个随机 Token，并精确绑定到指定的 Dockmux Session、机器人和群聊。App Secret 与飞书访问令牌始终保留在服务端。以下 snake_case 运行时变量会自动注入，不应手动配置：`dockmux_group_tools_url` 和 `dockmux_group_tools_token`。CLI 仍兼容读取旧版大写变量，但服务端不再注入它们，避免违反 ACPX 持久化键名约束。
+## Agent 配置
 
-机器人需要开通与已启用操作对应的 OpenAPI 权限：
+Dockmux 启动时读取 ACPX 注册表，并检查对应供应商 CLI。只有可执行文件存在的 Agent 才会进入 Web 与飞书选择器；能够探测到的 CLI 版本会一并展示。
 
-| 操作 | 权限 |
-|---|---|
-| 发现群内机器人 | `im:chat.members:read` |
-| 接收其他机器人 @ 当前机器人的消息 | `im:message.group_at_msg.include_bot:readonly` |
-| 读取或等待群消息 | `im:message:readonly` 和 `im:message.group_msg` |
-| 发送或回复消息 | `im:message` |
-
-飞书因权限不足拒绝操作时，命令会返回 `GROUP_TOOL_AUTHORIZATION_REQUIRED`，并携带 `requiredScopes`、`instruction` 和 `authorizationUrl`。Agent 会被要求停止该操作，并向用户展示这些信息。管理员必须在飞书开放平台为机器人开通权限并发布新的应用版本；机器人授权不能通过 `lark-cli auth login` 修复，Agent 也绝不能向用户索要 App Secret 或访问令牌。
-
-可选的高危操作门禁包含两层。软门禁会针对不在高危成员名单中的发送者，注入不可绕过的安全指令；高危成员同样通过姓名 TagInput 填写，并在保存时解析为 `open_id` 鉴权。硬门禁会额外启用 ACP 权限拦截器和所选 Agent 的原生工具调用 Hook。Codex、Claude Code、Trae、Cursor Agent 和 Pi 均支持原生安装。Hook 配置写入所选工作区，已有且无关的 Hook 会被保留；高危正则表达式会同时在 Web 界面和服务端校验。匹配过程运行在隔离 Worker 中，超过 1000 毫秒即按失败关闭策略处理。
-
-Session 侧边栏会优先展示机器人标签页，其后是本地视图和汇总视图。飞书 Session 会标记所属 App ID，因此不同机器人的消息绝不会混入同一标签页。Session 可以永久归档；已归档 Session 为只读状态，默认隐藏，可从左下角归档区域打开。系统有意不提供恢复 API。
-
-环境变量：
-
-| 变量 | 是否必需 | 用途 |
-|---|---:|---|
-| `LARK_APP_ID` | 是 | 企业自建应用 ID（`cli_xxx`） |
-| `LARK_APP_SECRET` | 是 | 企业自建应用密钥；仅服务端使用，状态 API 永不返回 |
-| `LARK_RECEIVE_ID` | 使用默认发送目标时 | 默认接收方；单次 CLI/API 调用可以覆盖 |
-| `LARK_RECEIVE_ID_TYPE` | 否 | `open_id`、`union_id`、`user_id`、`email` 或 `chat_id`；默认为 `email` |
-| `LARK_CHAT_ID` | 使用默认群聊时 | 群聊 ID（`oc_xxx`）；优先级高于 `LARK_RECEIVE_ID` |
-| `LARK_AGENT_NAME` | 否 | 默认卡片标题前缀；默认为 `Dockmux`，每次调用均可覆盖 |
-| `LARK_OPEN_API_BASE_URL` | 否 | OpenAPI 地址；默认为 `https://open.feishu.cn` |
-
-对应的服务启动参数为 `--lark-app-id`、`--lark-app-secret`、`--lark-receive-id`、`--lark-chat-id`、`--lark-receive-id-type`、`--lark-agent-name` 和 `--lark-base-url`。`--no-lark-listen` 只覆盖当前进程的监听状态。
-
-CLI 示例：
-
-```bash
-# 推荐：从进程环境变量或 .env 读取凭证
-export LARK_APP_ID=cli_xxx
-export LARK_APP_SECRET=replace_me
-export LARK_RECEIVE_ID=user@example.com
-export LARK_RECEIVE_ID_TYPE=email
-dockmux lark send '**构建完成**' --task-id release-42
-
-# 将机器人加入群聊后，直接向该群发送消息
-dockmux lark send '**群聊构建通知**' --chat-id oc_xxx --task-id release-42
-
-# 等价的单次调用参数
-# 完成态卡片；默认使用 LARK_RECEIVE_ID
-dockmux lark send '**构建完成**' \
-  --app-id cli_xxx \
-  --app-secret 'replace_me' \
-  --receive-id user@example.com \
-  --receive-id-type email \
-  --task-name '发布验证' \
-  --task-id release-42 \
-  --elapsed-seconds 35
-
-# 运行态卡片；Markdown 正文原样传递
-dockmux lark send $'### 构建阶段\n\n🟢 依赖安装完成\n🟡 正在执行测试' \
-  --state running \
-  --agent-name '我的 Agent' \
-  --read-only
-
-# 原地更新同一张卡片
-dockmux lark update '**所有检查均已通过。**' \
-  --message-id om_xxx \
-  --state completed \
-  --task-id release-42 \
-  --elapsed-seconds 48
-```
-
-以下 HTTP 接口均以 Dockmux 服务地址为前缀：
-
-```text
-GET  /api/lark/status
-GET  /api/lark/config
-PUT  /api/lark/config
-DELETE /api/lark/config/:appId
-POST /api/lark/bot/inspect
-GET  /api/lark/hooks/status
-POST /api/lark/hooks/install
-POST /api/lark/send
-POST /api/lark/update
-GET  /api/system/capabilities
-POST /api/system/select-directory
-```
-
-请求体示例：
-
-```json
-POST /api/lark/send
-{
-  "bot": {
-    "appId": "cli_xxx",
-    "appSecret": "replace_me",
-    "receiveId": "user@example.com",
-    "receiveIdType": "email",
-    "agentName": "我的 Agent"
-  },
-  "receiveId": "user@example.com",
-  "receiveIdType": "email",
-  "agentName": "我的 Agent",
-  "state": "running",
-  "readOnly": true,
-  "taskName": "发布验证",
-  "taskId": "release-42",
-  "elapsedSeconds": 10,
-  "markdown": "### 构建阶段\n\n🟢 已连接 Session\n🟡 正在执行测试"
-}
-
-POST /api/lark/update
-{
-  "bot": {
-    "appId": "cli_xxx",
-    "appSecret": "replace_me",
-    "agentName": "我的 Agent"
-  },
-  "messageId": "om_xxx",
-  "agentName": "我的 Agent",
-  "state": "completed",
-  "taskName": "发布验证",
-  "taskId": "release-42",
-  "elapsedSeconds": 35,
-  "markdown": "**执行完成**\n\n所有检查均已通过。"
-}
-```
-
-通过 HTTP 向群聊发送消息：
-
-```json
-POST /api/lark/send
-{
-  "botAppId": "cli_xxx",
-  "chatId": "oc_xxx",
-  "agentName": "我的 Agent",
-  "state": "completed",
-  "taskId": "release-42",
-  "markdown": "**群聊任务已完成**"
-}
-```
-
-机器人必须已经加入目标群聊。向已知 `chatId` 发送消息只需要常规机器人消息权限；该选项不会同时启用群列表查询或消息接收能力。
-
-`GET /api/lark/status` 用于报告机器人凭证是否存在。`GET /api/lark/config` 可以返回 App ID 和默认 Agent ID，但绝不会返回 App Secret。未配置凭证时调用发送/更新接口会返回 `503 LARK_NOT_CONFIGURED`，其他 Dockmux Session 和 SSE 路由仍可正常使用。
-
-处于已完成、空闲或已中断状态的 Agent Driver 默认会在 6 小时后释放，系统每 5 分钟执行一次清理扫描。Session 元数据和事件仍保存在 SQLite 中，下一条消息会自动重连持久 ACP Session。收到 `SIGINT`、`SIGTERM` 或调用 `server.close()` 时，系统会清除定时器、关闭子 Driver 和 SSE 连接，并释放 SQLite。第二次按下 `Ctrl-C` 会立即退出；CLI 关闭流程设有 5 秒硬上限，避免卡死的子进程占住终端。
-
-Dockmux 启动时会读取 ACPX 内置注册表，检查对应的本地供应商 CLI，并调用其版本命令。只有成功发现的 Agent 才会出现在 `GET /api/agents`、Session 选择器和飞书默认 Agent 选择器中。Mock ACP、JSONL Demo 和 PTY Demo 仅用于测试，不会作为可选内置 Agent 发布。
-
-## Trae 与自定义 ACP Agent
-
-ACPX 内置的 `trae` 条目会解析为 `traecli acp serve`。仍可通过 `DOCKMUX_AGENTS_JSON` 添加自定义 ACP 服务，但只有对应命令可用时才会被纳入：
+使用 `DOCKMUX_AGENTS_JSON` 添加或覆盖 Agent。下面是自定义 ACP 示例：
 
 ```json
 [
@@ -292,7 +200,7 @@ ACPX 内置的 `trae` 条目会解析为 `traecli acp serve`。仍可通过 `DOC
     "protocol": "acp",
     "model": "optional-model",
     "cwd": "/work/project",
-    "env": { "TRAE_PROFILE": "work" },
+    "env": { "CUSTOM_PROFILE": "work" },
     "permissionMode": "ask",
     "timeout": 600,
     "capabilities": { "pause": false, "resume": true },
@@ -301,36 +209,63 @@ ACPX 内置的 `trae` 条目会解析为 `traecli acp serve`。仍可通过 `DOC
 ]
 ```
 
-该进程必须通过 stdio 使用 ACP 协议，并支持 `initialize`、Session 创建/加载、Prompt、流式 `session/update`、权限请求和 `session/cancel`。Dockmux 会将 argv 原样传递给 acpx；发现阶段会忽略命令不存在的配置。
+工作目录优先级为：创建运行时的 `cwd`、Agent 配置的 `cwd`、进程级 `--cwd`。自定义 ACP 进程需通过 stdio 支持初始化、创建/加载 Session、Prompt、流式更新、权限请求与取消。
 
-权限模式包括 `ask`（默认）、`approve-reads`、`deny-all`，以及必须显式启用的 `full-trust`。`ask` 和 `approve-reads` 会将升级后的 ACP 权限请求发送到 Web 界面，用户的允许/拒绝操作会直接完成实时 acpx 请求。完全信任模式绝不会默认启用。
+主要环境变量：
 
-## HTTP API
+| 变量 | 默认值/用途 |
+|---|---|
+| `DOCKMUX_HOST` | 默认 `127.0.0.1`；显式设为 `0.0.0.0` 才开启局域网监听。 |
+| `DOCKMUX_PORT` | 默认 `4310`。 |
+| `DOCKMUX_LOCAL_ONLY` | `true` 时只监听 `127.0.0.1`。 |
+| `DOCKMUX_DATABASE_URL` | 默认 `<cwd>/.dockmux/dockmux.db`。 |
+| `DOCKMUX_DEFAULT_CWD` | 默认工作区。 |
+| `DOCKMUX_ACPX_COMMAND` | ACPX 可执行命令。 |
+| `DOCKMUX_DRIVER_IDLE_TIMEOUT_MS` | Driver 空闲释放时间，默认 6 小时。 |
+| `DOCKMUX_CLEANUP_INTERVAL_MS` | 清理扫描间隔，默认 5 分钟。 |
+| `DOCKMUX_AGENTS_JSON` | 自定义 Agent JSON 数组。 |
+
+## HTTP 与事件模型
+
+对外 HTTP 路径暂时保留 `/api/sessions/*` 以兼容现有客户端；产品层把一条 Session 投影为一个任务运行。常用接口：
 
 ```text
 POST /api/sessions
 GET  /api/sessions
-GET  /api/sessions/:id
+GET  /api/sessions/summaries
 POST /api/sessions/:id/send
-DELETE /api/sessions/:id/queue/:taskId
 POST /api/sessions/:id/interrupt
-POST /api/sessions/:id/pause
-POST /api/sessions/:id/resume
-POST /api/sessions/:id/stop
 POST /api/sessions/:id/restart
-POST /api/sessions/:id/archive
 POST /api/sessions/:id/permissions/:permissionId
-GET  /api/sessions/:id/events?after=<sequence>
-GET  /api/sessions/:id/stream
+GET  /api/sessions/:id/tasks
+GET  /api/sessions/:id/events?before=<sequence>&limit=200&direction=backward
+GET  /api/sessions/:id/stream?after=<sequence>
 GET  /api/agents
 ```
 
-SSE 事件携带 `id: <sequence>`，并支持通过 `Last-Event-ID` 或 `?after=` 回放。输出会标准化为 `text`、`thinking`、`tool_call`、`tool_result`、`permission_request`、`status`、`error`、`completed` 和 `raw_terminal`。解析失败的内容始终转换为 `raw_terminal`，绝不会丢弃。
+事件标准化为 `text`、`thinking`、`tool_call`、`tool_result`、`permission_request`、`status`、`task`、`error`、`completed` 和 `raw_terminal`。无法解析的输出保留为 `raw_terminal`，不会静默丢弃。SSE 在建立订阅后回放持久化事件，并按 `sequence` 合并同时到达的实时事件，消除回放与订阅之间的丢失窗口。
 
-`interrupt` 会取消当前 ACP 轮次，但保留 Session；`stop` 会关闭 acpx Session 和进程；`resume` 使用持久化的 Dockmux Session Key 重连；`restart` 会先停止，再使用新的 `runId` 启动运行时实例。不支持暂停的 Agent 会返回 `UNSUPPORTED_CAPABILITY`，而不会假装暂停成功。
+## 验证与性能
 
-## 存储与架构
+```bash
+pnpm test
+pnpm typecheck
+pnpm build
+pnpm smoke
+pnpm benchmark
+```
 
-业务代码依赖仓储接口，而非直接依赖 SQLite。Drizzle/better-sqlite3 实现负责持久化机器、项目、Session、任务、事件、工具调用、权限、错误和通道映射。
+- `pnpm smoke` 使用隔离的假 CLI 验证发现 Agent、创建运行、SSE、继续对话、终端 WebSocket 和生产 Web。
+- `node scripts/e2e-smoke.mjs --real` 使用本机真实 Claude CLI 执行同一关键链路，会调用模型并可能产生费用，必须显式运行。
+- `pnpm benchmark` 构建 Web 后写入临时磁盘 SQLite 的 5 万事件，并用真实无头 Chromium 检查首屏、分页、实时增量、浏览器堆、100 次 SSE 重连、服务端内存和入口 gzip 预算；超出任一预算即失败。
 
-需求与验证证据的对应关系见[验收计划](docs/acceptance-plan.md)。测试套件覆盖：真实内嵌 acpx 运行时与 Mock ACP 服务、工具调用关联、实时权限、生命周期语义、异常退出、JSONL/PTY 降级、无损原始输出、SSE 回放、仓储恢复、安全默认值、自定义 Agent，以及 12 项 TraeX 检查。
+完整产品定义、架构不变量和一次性交付矩阵见：
+
+- [产品定义](docs/product-1.0.md)
+- [架构](docs/architecture-1.0.md)
+- [验收矩阵](docs/acceptance-1.0.md)
+- [包边界审计](docs/package-boundaries-1.0.md)
+
+## Historical / Provenance
+
+Dockmux 的部分 ACP 工作台、飞书桥接、CLI 适配与终端实现来自早期内部原型的演进。来源只用于保留版权、许可证和代码考古信息，不定义当前产品模型。历史说明见 [Provenance](docs/architecture.md)；如需追溯具体实现，请以 Git 历史和对应源文件版权声明为准。

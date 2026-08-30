@@ -16,6 +16,11 @@ export interface RelayRoutesOptions {
   service?: RelayService;
 }
 
+/** Only child-to-host relay calls use the session HMAC as their sole credential. */
+export const isRelayCapabilityRequest = (method: string, pathname: string) =>
+  method.toUpperCase() === 'POST'
+  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask)$/.test(pathname);
+
 /** 会话进入这些状态时，把该会话所有阻塞中的 ask 唤醒 */
 const terminalStates = new Set(['stopped', 'failed']);
 
@@ -24,8 +29,8 @@ const terminalStates = new Set(['stopped', 'failed']);
  *
  * 为什么复用 `text` 而不是新增事件类型：`eventTypes` 是 @dockmux/shared 里的
  * 封闭联合（driver 契约的一部分），新增一类要同时改 shared / web 时间线 /
- * 飞书卡片渲染三处，属于跨团队改动。M3 先用 `text` + `data.relay` 判别字段落地，
- * Web 与飞书卡片**无需改动即可显示**；将来要专门的气泡样式，UI 侧读 `data.relay` 即可。
+ * 使用 `text` + `data.relay` 判别字段落地，Web 与飞书卡片沿用统一文本展示；
+ * 消费方需要区分来源时读取 `data.relay`。
  *
  * role 的取舍：
  *  - send / ask 是 Agent 在说话 → assistant 侧（不设 role，消费方默认 assistant）
@@ -59,11 +64,10 @@ function handleRelayError(error: unknown, reply: FastifyReply) {
  *  - `/send`、`/ask` 由**会话内的 CLI 子进程**调用，凭 `Authorization: Bearer <会话能力 token>`
  *    证明自己属于哪个会话；sessionId 从 token 校验得出，调用方无法自报别的会话。
  *  - `/asks`、`/answer` 由**人类用户**从 Web/IM 调用，走 app.ts 的常规访问认证
- *    （远程需 access token，loopback 豁免），不需要会话能力 token。
+ *    （远程监听需 access token），不需要会话能力 token。
  *
- * 注意 relay 路由**没有**加进 app.ts 的 auth 豁免名单：子进程连的是
- * `localApiBaseUrl`（127.0.0.1），本就命中 loopback 豁免；而远程调用则在能力 token
- * 之外**额外**要求 access token，只会更严，不会更松。
+ * `/send`、`/ask` 在中央访问认证处做精确豁免，因为 HTTP Authorization 只能承载
+ * 一枚 Bearer，而这里必须承载会话 HMAC。其余 relay 路由仍由中央 access token 保护。
  */
 export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOptions = {}) {
   const runtime = options.runtime;

@@ -65,9 +65,34 @@ async function harness(sessions: Record<string, Session | undefined> = { ses_a: 
   return { app, runtime, capabilities, broker };
 }
 
+async function remoteHarness(sessions: Record<string, Session | undefined> = { ses_a: session('ses_a') }) {
+  const runtime = fakeRuntime(sessions);
+  const capabilities = new RelayCapabilityRegistry(
+    { async get(id) { const found = sessions[id]; return found && { id: found.id, state: found.state, archivedAt: found.archivedAt }; } },
+    'http://127.0.0.1:4310', 'test-secret'
+  );
+  const app = await buildApp(runtime as any, {
+    auth: { getToken: async () => 'access-token', localOnly: false },
+    relay: { runtime: runtime as any, capabilities }
+  });
+  apps.push(app);
+  return { app, runtime, capabilities };
+}
+
 const auth = (token: string) => ({ authorization: `Bearer ${token}` });
 
 describe('relay routes — authentication', () => {
+  it('uses the capability bearer directly in remote mode while human relay routes retain access auth', async () => {
+    const { app, capabilities, runtime } = await remoteHarness();
+    const capability = auth(capabilities.tokenFor('ses_a'));
+    const sent = await app.inject({ method: 'POST', url: '/api/relay/sessions/self/send', headers: capability, payload: { text: 'remote child progress' }, remoteAddress: '203.0.113.7' });
+    expect(sent.statusCode).toBe(200);
+    expect(runtime.events).toHaveLength(1);
+
+    expect((await app.inject({ method: 'GET', url: '/api/relay/sessions/ses_a/asks', headers: capability, remoteAddress: '203.0.113.7' })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/api/relay/sessions/ses_a/asks', headers: auth('access-token'), remoteAddress: '203.0.113.7' })).statusCode).toBe(200);
+  });
+
   it('rejects a request with no token, a garbage token, and another session\'s token', async () => {
     const { app, capabilities, runtime } = await harness({ ses_a: session('ses_a'), ses_b: session('ses_b') });
 

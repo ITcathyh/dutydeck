@@ -14,8 +14,8 @@ export function createKimiAdapter(): CliAdapter {
     id: 'kimi',
     capabilities: { resume: true },
 
-    buildArgs({ resume, resumeSessionId, model }: AdapterSessionContext): string[] {
-      const args: string[] = ['--yolo'];
+    buildArgs({ resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
+      const args: string[] = permissionMode === 'full-trust' ? ['--yolo'] : [];
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

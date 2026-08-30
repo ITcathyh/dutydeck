@@ -17,7 +17,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig, NormalizedDriverEvent } from '@dockmux/shared';
-import type { CliAdapter, PtyLike } from '@dockmux/cli-adapters';
+import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dockmux/cli-adapters';
 import { PtyBackend, TmuxBackend, isTmuxAvailable } from '@dockmux/session-backends';
 import { PtyCliDriver } from './driver.js';
 import { buildSessionMarker } from './session-id/index.js';
@@ -110,6 +110,7 @@ process.stdin.on('data', d => {
 interface RecordingAdapter extends CliAdapter {
   readonly prompts: string[];
   readonly resumeIds: string[];
+  readonly contexts: AdapterSessionContext[];
 }
 
 function recordingAdapter(opts: {
@@ -119,14 +120,17 @@ function recordingAdapter(opts: {
 }): RecordingAdapter {
   const prompts: string[] = [];
   const resumeIds: string[] = [];
+  const contexts: AdapterSessionContext[] = [];
   const adapter: RecordingAdapter = {
     id: opts.id,
     capabilities: { resume: opts.withResume !== false },
     prompts,
     resumeIds,
+    contexts,
     // resume 走的是 buildArgs 的 resume 分支（driver 需要完整 argv，
     // 不能只拿 buildResumeCommand 的续接片段），反查到的 id 在这里落账。
     buildArgs: ctx => {
+      contexts.push(ctx);
       if (ctx.resume && ctx.resumeSessionId !== undefined) resumeIds.push(ctx.resumeSessionId);
       return [opts.fixturePath];
     },
@@ -181,6 +185,52 @@ describe('PtyCliDriver session marker injection', () => {
 
     await driver.stop();
   }, 30_000);
+
+  it('passes the supported ask permission mode to adapter argv construction', async () => {
+    const adapter = recordingAdapter({ id: 'mock-cli', fixturePath });
+    const driver = new PtyCliDriver({
+      agent: agentConfig({ permissionMode: 'ask' }),
+      adapter,
+      backend: new PtyBackend(),
+      onEvent: () => {},
+      onExit: () => {},
+      sessionId: SESSION_ID,
+    });
+
+    await driver.start();
+    expect(adapter.contexts[0]?.permissionMode).toBe('ask');
+    await driver.stop();
+  });
+
+  it.each(['approve-reads', 'deny-all'] as const)('rejects unsupported %s posture before starting the CLI', async permissionMode => {
+    const adapter = recordingAdapter({ id: 'mock-cli', fixturePath });
+    const driver = new PtyCliDriver({
+      agent: agentConfig({ permissionMode }),
+      adapter,
+      backend: new PtyBackend(),
+      onEvent: () => {},
+      onExit: () => {},
+      sessionId: SESSION_ID,
+    });
+
+    await expect(driver.start()).rejects.toThrow(`does not support permission mode ${permissionMode}`);
+    expect(adapter.contexts).toHaveLength(0);
+  });
+
+  it.each(['approve-reads', 'deny-all'] as const)('rejects unsupported %s posture before resuming the CLI', async permissionMode => {
+    const adapter = recordingAdapter({ id: 'mock-cli', fixturePath });
+    const driver = new PtyCliDriver({
+      agent: agentConfig({ permissionMode }),
+      adapter,
+      backend: new PtyBackend(),
+      onEvent: () => {},
+      onExit: () => {},
+      sessionId: SESSION_ID,
+    });
+
+    await expect(driver.resume()).rejects.toThrow(`does not support permission mode ${permissionMode}`);
+    expect(adapter.contexts).toHaveLength(0);
+  });
 });
 
 // ─── resume session-id resolution ──────────────────────────────────────────

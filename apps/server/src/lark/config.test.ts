@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dockmux/shared';
-import { larkBotsConfigKey, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
+import { larkBotsConfigKey, larkCredentialsConfigKey, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
 
 const createRepository = (initial: Record<string, string> = {}): ConfigRepository => {
   const store = new Map<string, string>(Object.entries(initial));
@@ -76,6 +76,82 @@ describe('Lark config new-field normalization', () => {
   });
 });
 
+describe('Lark risk-control migration', () => {
+  it('defaults a completely missing legacy configuration to off and writes only the new field', async () => {
+    const repository = seedBots([{ appId: 'cli_legacy', appSecret: 'secret' }]);
+
+    const [config] = await readLarkConfigs(repository);
+
+    expect(config.riskControlMode).toBe('off');
+    const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted.riskControlMode).toBe('off');
+    expect(persisted).not.toHaveProperty('gateEnabled');
+    expect(persisted).not.toHaveProperty('softGateEnabled');
+    expect(persisted).not.toHaveProperty('hardGateEnabled');
+    expect(persisted).not.toHaveProperty('hookTrustConfirmed');
+  });
+
+  it.each([
+    [{ gateEnabled: true }, 'guidance'],
+    [{ softGateEnabled: true }, 'guidance'],
+    [{ gateEnabled: false, hardGateEnabled: true }, 'off'],
+    [{ riskControlMode: 'off', hardGateEnabled: true }, 'off']
+  ] as const)('normalizes legacy fields %# to %s', async (legacy, expected) => {
+    const repository = seedBots([{ appId: 'cli_legacy', appSecret: 'secret', ...legacy }]);
+
+    const [config] = await readLarkConfigs(repository);
+
+    expect(config.riskControlMode).toBe(expected);
+    const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted.riskControlMode).toBe(expected);
+    expect(persisted).not.toHaveProperty('gateEnabled');
+    expect(persisted).not.toHaveProperty('softGateEnabled');
+    expect(persisted).not.toHaveProperty('hardGateEnabled');
+    expect(persisted).not.toHaveProperty('hookTrustConfirmed');
+  });
+
+  it('accepts old API input at the save boundary and persists only riskControlMode', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_legacy', appSecret: 'secret', gateEnabled: true, hardGateEnabled: true });
+
+    const [config] = await readLarkConfigs(repository);
+
+    expect(config.riskControlMode).toBe('enforced');
+    const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted).toMatchObject({ riskControlMode: 'enforced' });
+    expect(persisted).not.toHaveProperty('gateEnabled');
+    expect(persisted).not.toHaveProperty('softGateEnabled');
+    expect(persisted).not.toHaveProperty('hardGateEnabled');
+    expect(persisted).not.toHaveProperty('hookTrustConfirmed');
+  });
+
+  it('moves the single-bot credential record into the normalized collection', async () => {
+    const repository = createRepository({
+      [larkCredentialsConfigKey]: JSON.stringify({ appId: 'cli_credential', appSecret: 'secret', softGateEnabled: true })
+    });
+
+    const [config] = await readLarkConfigs(repository);
+
+    expect(config.riskControlMode).toBe('guidance');
+    const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted).toMatchObject({ appId: 'cli_credential', riskControlMode: 'guidance' });
+    expect(persisted).not.toHaveProperty('softGateEnabled');
+  });
+
+  it('exposes only riskControlMode in the public API view', async () => {
+    const repository = seedBots([{ appId: 'cli_test', appSecret: 'secret', hardGateEnabled: true, hookTrustConfirmed: true }]);
+    const [config] = await readLarkConfigs(repository);
+
+    const publicConfig = publicLarkConfig(config);
+
+    expect(publicConfig.riskControlMode).toBe('enforced');
+    expect(publicConfig).not.toHaveProperty('gateEnabled');
+    expect(publicConfig).not.toHaveProperty('softGateEnabled');
+    expect(publicConfig).not.toHaveProperty('hardGateEnabled');
+    expect(publicConfig).not.toHaveProperty('hookTrustConfirmed');
+  });
+});
+
 describe('saveLarkConfig inheritance semantics', () => {
   it('inherits new fields from current when input omits them', async () => {
     const repository = createRepository();
@@ -133,7 +209,7 @@ describe('saveLarkConfig inheritance semantics', () => {
 });
 
 describe('publicLarkConfig new-field exposure', () => {
-  it('exposes the new fields in the public view', async () => {
+  it('exposes safe new fields but never returns Agent environment credentials', async () => {
     const repository = seedBots([{
       appId: 'cli_test', appSecret: 'secret',
       p2pMode: 'thread', groupReplyMode: 'chat-topic', brand: 'lark',
@@ -144,8 +220,8 @@ describe('publicLarkConfig new-field exposure', () => {
     expect(pub.p2pMode).toBe('thread');
     expect(pub.groupReplyMode).toBe('chat-topic');
     expect(pub.brand).toBe('lark');
-    expect(pub.env).toEqual({ A: '1' });
-    expect(pub.startupCommands).toEqual(['/model opus']);
+    expect(pub).not.toHaveProperty('env');
+    expect(pub).not.toHaveProperty('startupCommands');
     expect(pub.displayName).toBe('dn');
   });
 
@@ -170,7 +246,7 @@ describe('publicLarkConfig new-field exposure', () => {
     const collection = publicLarkConfigs(configs, { activeAppIds: ['cli_test'] });
     expect(collection.configured).toBe(true);
     expect(collection.bots[0].p2pMode).toBe('chat');
-    expect(collection.bots[0].env).toEqual({ A: '1' });
+    expect(collection.bots[0]).not.toHaveProperty('env');
     expect(collection.bots[0].displayName).toBe('dn');
     expect(collection.bots[0].activeListening).toBe(true);
   });

@@ -7,9 +7,8 @@ import { relayCommandEnvKey, relayTokenEnvKey, relayUrlEnvKey } from './capabili
  *
  * `larkGroupToolsPrompt` 明确要求「不要改用 PATH 中的其他 dockmux」，因为多安装
  * 共存时裸 `dockmux` 可能命中另一个版本，其 token 与本 daemon 不匹配。正确的前缀是
- * `agentDockGroupToolsCommand()` 在运行期算出的 `'<node>' '<abs>/cli.js'`——
- * 静态字符串常量拿不到它（这也是 packages/skills/src/definitions.ts:18-26
- * 拒绝把 group 命令做成静态 SKILL.md 的原因）。
+ * `dockmuxGroupToolsCommand()` 在运行期算出的 `'<node>' '<abs>/cli.js'`——
+ * 静态字符串常量拿不到它，因此群工具提示必须在运行时按 Session 注入。
  *
  * 但 `DOCKMUX_SHELL_HINTS` 的消费方（pty-driver、各 adapter 的
  * `injectSessionContext`）都不持有那个前缀：`groupToolsCommand` 只存在于

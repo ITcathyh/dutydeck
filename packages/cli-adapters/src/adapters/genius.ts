@@ -8,7 +8,7 @@ export function createGeniusAdapter(): CliAdapter {
     id: 'genius',
     capabilities: { resume: true },
 
-    buildArgs({ sessionId, cwd, resume, resumeSessionId, model }: AdapterSessionContext): string[] {
+    buildArgs({ sessionId, cwd, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
       // Genius 是 Claude 家族（同样的 --session-id/--resume/--settings 形态），
       // 会话 id 按裸 UUID 传；dockmux sessionId 形如 "ses_<uuid>"。
       const uuid = sessionId.replace(/^ses_/, '');
@@ -20,17 +20,16 @@ export function createGeniusAdapter(): CliAdapter {
         args.push('--session-id', uuid);
       }
       if (model && model.trim()) args.push('--model', model.trim());
-      // dockmux MVP 无人值守：走与 Claude Code 一致的 bypass 姿态（botmux 的
-      // !disableCliBypass 分支），否则连正常回复都会卡在终端确认上——消息文本里
-      // 带反引号之类的 shell 风险字符尤其容易触发。
-      args.push('--dangerously-skip-permissions');
-      args.push(
-        '--settings',
-        JSON.stringify({
-          skipDangerousModePermissionPrompt: true,
-          permissions: { defaultMode: 'bypassPermissions' },
-        }),
-      );
+      if (permissionMode === 'full-trust') {
+        args.push('--dangerously-skip-permissions');
+        args.push(
+          '--settings',
+          JSON.stringify({
+            skipDangerousModePermissionPrompt: true,
+            permissions: { defaultMode: 'bypassPermissions' },
+          }),
+        );
+      }
       return args;
     },
 

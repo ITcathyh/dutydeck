@@ -27,7 +27,8 @@ export const larkSessionConfigKey = (config: StoredLarkConfig) => JSON.stringify
   config.defaultAgentId ?? null,
   config.defaultModel ?? null,
   config.defaultReasoningEffort ?? null,
-  config.workspace ?? null
+  config.workspace ?? null,
+  config.fullTrustConfirmed === true
 ]);
 
 // 群聊不能按 chat_id 复用同一个 Agent 会话，否则不同话题/提问人的历史和预注入 Prompt 会串在一起。
@@ -177,15 +178,17 @@ export async function resolveLarkSession(
   chatType: LarkMessageEvent['chatType'],
   scopeId: string
 ): Promise<Session> {
-  if (!config.defaultAgentId) throw new LarkServiceError('LARK_AGENT_CONFIG_REQUIRED', '机器人尚未配置默认 Agent，请在 Dockmux 飞书设置的“Agent 与门禁”中完成配置。', 409);
+  if (!config.defaultAgentId) throw new LarkServiceError('LARK_AGENT_CONFIG_REQUIRED', '机器人尚未配置默认 Agent，请在 Dockmux 飞书设置的“Agent 与风险控制”中完成配置。', 409);
+  if (config.fullTrustConfirmed !== true) throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '飞书无人值守任务尚未获得完全信任确认，请在 Dockmux 飞书设置中确认后重试。', 409);
   const configKey = larkSessionConfigKey(config);
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
   if (group.sessionId) {
     const existing = await runtime.getSession(group.sessionId);
     const reusable = existing && !['failed', 'stopped'].includes(existing.state);
     if (reusable && group.sessionConfigKey === configKey) {
-      if (existing.permissionMode !== 'full-trust' && runtime.setPermissionMode) return runtime.setPermissionMode(existing.id, 'full-trust');
-      return existing;
+      if (existing.permissionMode === 'full-trust') return existing;
+      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书自动执行需要完全信任姿态，停止旧 Session 并创建新运行');
+      await runtime.stop?.(existing.id);
     }
     if (reusable && group.sessionConfigKey !== configKey) {
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书 Agent 配置已变更，停止旧 Session 并应用新配置');
@@ -205,11 +208,14 @@ export async function resolveLarkSession(
       && (!config.defaultModel || item.model === config.defaultModel)
       && (!config.defaultReasoningEffort || item.reasoningEffort === config.defaultReasoningEffort));
     if (existing) {
-      group.sessionId = existing.id;
-      group.sessionConfigKey = configKey;
-      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '复用已持久化的飞书 Session');
-      if (existing.permissionMode !== 'full-trust' && runtime.setPermissionMode) return runtime.setPermissionMode(existing.id, 'full-trust');
-      return existing;
+      if (existing.permissionMode === 'full-trust') {
+        group.sessionId = existing.id;
+        group.sessionConfigKey = configKey;
+        log.info({ sessionId: existing.id, appId: config.appId, chatId }, '复用已持久化的飞书 Session');
+        return existing;
+      }
+      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '持久化飞书 Session 不是自动执行姿态，停止旧 Session 并创建新运行');
+      await runtime.stop?.(existing.id);
     }
   }
   const session = await runtime.start({

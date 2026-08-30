@@ -2,7 +2,7 @@
  * 会话提示块注入机制（移植自 botmux `shared-hints.ts`，精简形态）。
  *
  * botmux 版教 CLI 用 `botmux send` 回传消息；dockmux 的对应命令是
- * `dockmux session send` / `dockmux session ask`（M3 通用回传通道，见 @dockmux/relay）。
+ * `dockmux session send` / `dockmux session ask`（通用回传通道，见 @dockmux/relay）。
  * 注入机制保留：
  *
  *  - 不实现 `injectSessionContext` 的适配器（codex / gemini / opencode /
@@ -34,7 +34,7 @@ export const DOCKMUX_SHELL_HINTS: readonly string[] = [
 
 /**
  * 路由块文本。
- * @param locale 预留给 i18n，MVP 只有中文静态文案
+ * @param locale 预留给后续语言选择；当前产品文案为中文
  * @param env    会话 env（含 relay 注入的 url/token/command）；不传则不含回传命令说明
  */
 export function buildDockmuxRoutingBlock(locale?: string, env?: RelayPromptEnv): string {

@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, NormalizedDriverEvent, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dockmux/shared';
+import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dockmux/shared';
 import { makeId, now, RuntimeError } from '@dockmux/shared';
 import { AcpxAdapter } from '@dockmux/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dockmux/transports';
@@ -53,14 +53,13 @@ export class DockmuxRuntime {
   private readonly hardInterrupts = new Set<string>();
   private readonly turnWaiters = new Map<string, Set<() => void>>();
   private readonly queues = new Map<string, TaskRecord[]>();
-  private readonly queuedAgentPrompts = new Map<string, string>();
-  private readonly queuedRiskPolicies = new Map<string, ToolRiskPolicy>();
   private readonly queueRuns = new Map<string, Promise<void>>();
   private readonly sequences = new Map<string, number>();
   private readonly permissions = new Map<string, PermissionRequestData>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
   private readonly driverEventErrors = new Map<string, unknown>();
   private readonly driverStopReasons = new Map<string, string>();
+  private readonly turnErrors = new Map<string, string>();
   private readonly exitListeners = new Map<string, Set<(code: number | null) => void>>();
   private readonly factory: DriverFactory;
   private readonly lastActivity = new Map<string, number>();
@@ -114,29 +113,33 @@ export class DockmuxRuntime {
   }
   // 终态要求最后一次活动（思考 / 工具）之后必须存在 assistant text，否则视为缺少最终输出。
   // 与 Web 时间线 buildTimelineSections 的 finalIndex 判定保持一致。
-  private async turnHasFinalAssistantText(sessionId: string, taskId: string): Promise<boolean> {
-    const events = await this.repos.events.list(sessionId);
-    let promptIndex = -1;
-    for (let index = events.length - 1; index >= 0; index--) {
-      const event = events[index]!;
-      if (event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId) { promptIndex = index; break; }
+  private async turnHasFinalAssistantText(sessionId: string, promptSequence: number): Promise<boolean> {
+    let beforeSequence: number | undefined;
+    while (true) {
+      const events = await this.repos.events.listWindow(sessionId, {
+        afterSequence: promptSequence,
+        beforeSequence,
+        direction: 'backward',
+        limit: 200
+      });
+      for (let index = events.length - 1; index >= 0; index--) {
+        const event = events[index]!;
+        if (event.type === 'text' && (event.data as any)?.role !== 'user') return true;
+        if (event.type === 'thinking' || event.type === 'tool_call' || event.type === 'tool_result') return false;
+      }
+      if (events.length < 200) return false;
+      beforeSequence = events[0]!.sequence;
     }
-    const turnEvents = promptIndex >= 0 ? events.slice(promptIndex + 1) : events;
-    let lastActivity = -1;
-    let lastAssistantText = -1;
-    turnEvents.forEach((event, index) => {
-      if (event.type === 'thinking' || event.type === 'tool_call' || event.type === 'tool_result') lastActivity = index;
-      else if (event.type === 'text' && (event.data as any)?.role !== 'user') lastAssistantText = index;
-    });
-    return lastAssistantText > lastActivity;
   }
-  private async resolveTaskOutcome(session: Session, task: TaskRecord): Promise<{ status: 'completed' | 'failed' | 'interrupted'; stopReason?: string; message?: string }> {
+  private async resolveTaskOutcome(session: Session, promptSequence: number): Promise<{ status: 'completed' | 'failed' | 'interrupted'; stopReason?: string; message?: string; errorAlreadyEmitted?: boolean }> {
     const stopReason = this.driverStopReasons.get(session.id);
     if (this.interruptedTurns.has(session.id) || stopReason === 'cancelled') return { status: 'interrupted', stopReason };
+    const turnError = this.turnErrors.get(session.id);
+    if (turnError) return { status: 'failed', stopReason, message: turnError, errorAlreadyEmitted: true };
     if (DockmuxRuntime.isTruncatedStopReason(stopReason)) {
       return { status: 'failed', stopReason, message: `输出因达到 token 上限被截断（stopReason: ${stopReason}），未产生完整最终输出` };
     }
-    if (!await this.turnHasFinalAssistantText(session.id, task.id)) {
+    if (!await this.turnHasFinalAssistantText(session.id, promptSequence)) {
       return { status: 'failed', stopReason, message: 'Agent 未返回最终输出' };
     }
     return { status: 'completed', stopReason };
@@ -161,13 +164,8 @@ export class DockmuxRuntime {
     // that are no longer discovered from the ACPX registry.
     const configuredIds = new Set(agents.map(agent => agent.id));
     for (const existing of await this.repos.agents.list()) if (existing.builtin && !configuredIds.has(existing.id)) await this.repos.agents.delete(existing.id);
-    for (const agent of agents) await this.repos.agents.save({ ...agent, permissionMode: 'full-trust' });
+    for (const agent of agents) await this.repos.agents.save(agent);
     for (const session of await this.repos.sessions.list()) {
-      if (session.permissionMode !== 'full-trust') {
-        session.permissionMode = 'full-trust';
-        session.updatedAt = now();
-        await this.repos.sessions.save(session);
-      }
       if (session.archivedAt) continue;
       const persistedTasks = await this.repos.tasks.listBySession(session.id);
       if (!persistedTasks.length && ['created', 'starting', 'failed'].includes(session.state)) {
@@ -189,7 +187,18 @@ export class DockmuxRuntime {
         }
         await this.saveState(session, 'interrupted', message);
       }
-      const queued = persistedTasks.filter(task => task.status === 'queued').sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      const queuedTasks = persistedTasks.filter(task => task.status === 'queued').sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      const legacyQueued = queuedTasks.filter(task => typeof task.executionContext?.agentPrompt !== 'string');
+      if (legacyQueued.length) {
+        const message = 'Dockmux 守护进程重启，旧任务缺少可验证的执行上下文，已安全中断，请重新发送';
+        for (const task of legacyQueued) {
+          await this.saveTask(task, 'interrupted');
+          await this.repos.artifacts.saveError(session.id, message, { taskId: task.id });
+          await this.emit(session.id, 'error', { message, taskId: task.id });
+        }
+        if (legacyQueued.length === queuedTasks.length && !['stopped', 'failed'].includes(session.state)) await this.saveState(session, 'interrupted', message);
+      }
+      const queued = queuedTasks.filter(task => typeof task.executionContext?.agentPrompt === 'string');
       if (queued.length) {
         this.queues.set(session.id, queued);
         if (!['stopped', 'failed'].includes(session.state)) this.scheduleQueue(session.id);
@@ -203,10 +212,11 @@ export class DockmuxRuntime {
   getDriver(sessionId: string): AgentDriver | undefined { return this.drivers.get(sessionId); }
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
-  getTasks(id: string) { return this.repos.tasks.listBySession(id); }
+  getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
+  async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
 
   /**
-   * 外部来源事件写入（M3 通用回传通道 @dockmux/relay 用）。
+   * 外部来源事件写入（通用回传通道 @dockmux/relay 使用）。
    *
    * 事件流此前只有 driver 一个入口（onDriverEvent → consume → emit），而 relay 的
    * send/ask 来自会话内 CLI 主动发起的**带外**调用，不属于任何 driver 事件。
@@ -256,7 +266,19 @@ export class DockmuxRuntime {
   private async saveTask(task: TaskRecord, status = task.status) {
     task.status = status; task.updatedAt = now();
     await this.repos.tasks.save(task);
-    await this.emit(task.sessionId, 'task', { task: { ...task } });
+    await this.emit(task.sessionId, 'task', { task: this.publicTask(task) });
+  }
+
+  private publicTask(task: TaskRecord): Omit<TaskRecord, 'executionContext'> {
+    const { executionContext: _executionContext, ...visible } = task;
+    return visible;
+  }
+
+  private executionContext(agentPrompt: string, riskPolicy?: ToolRiskPolicy): TaskExecutionContext {
+    return {
+      agentPrompt,
+      ...(riskPolicy ? { riskPolicy } : {})
+    };
   }
 
   subscribe(sessionId: string, listener: (event: AgentEvent) => void) {
@@ -306,6 +328,7 @@ export class DockmuxRuntime {
       if (data.status === 'pending') { this.permissions.set(this.permissionKey(session.id, data.id), data); await this.saveState(session, 'waiting_for_permission'); }
       await this.repos.artifacts.savePermission(session.id, data);
     } else if (event.type === 'error') {
+      if (this.activeTurns.has(session.id)) this.turnErrors.set(session.id, data.message);
       await this.repos.artifacts.saveError(session.id, data.message, data.detail);
       // Error events emitted during a turn describe that task. runTask owns the
       // terminal task outcome and returns a reusable shared Session to idle.
@@ -318,9 +341,15 @@ export class DockmuxRuntime {
   async start(input: StartSessionInput): Promise<Session> {
     const agent = await this.repos.agents.get(input.agentId);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${input.agentId}`, 404);
-    const configured = { ...agent, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: 'full-trust' as const };
+    const configured = { ...agent, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
     const capability = (this.options.probe ?? probeAgent)(configured, this.options.acpxCommand);
     if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
+    if (capability.protocol === 'pty') {
+      throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Legacy PTY transport cannot enforce a permission posture or expose interactive approval; use an ACP or PTY CLI Agent', 422);
+    }
+    if (capability.protocol === 'pty-cli' && configured.permissionMode !== 'ask' && configured.permissionMode !== 'full-trust') {
+      throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode', 422);
+    }
     const session: Session = { id: makeId('ses'), agentId: agent.id, state: 'created', cwd: configured.cwd!, model: configured.model, reasoningEffort: configured.reasoningEffort, permissionMode: configured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: configured.systemPrompt };
     await this.repos.artifacts.ensureLocalProject(session.cwd);
     await this.repos.sessions.save(session);
@@ -370,69 +399,82 @@ export class DockmuxRuntime {
     await writeFile(join(directory, `${session.id}.json`), JSON.stringify(policy ?? { enabled: false }), { mode: 0o600 });
   }
 
-  private async runTask(id: string, task: TaskRecord, agentPrompt = task.prompt, riskPolicy?: ToolRiskPolicy) {
+  private async runTask(id: string, task: TaskRecord) {
     const { session } = await this.active(id);
     if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot send while session is ${session.state}`, 409);
     if (this.activeTurns.has(id)) throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response to finish', 409);
     this.activeTurns.add(id);
     this.activeTasks.set(id, task);
+    this.driverStopReasons.delete(id);
+    this.turnErrors.delete(id);
     this.touch(id);
-    let driver: AgentDriver;
-    try { driver = await this.reconnect(session); }
-    catch (error) {
-      this.activeTurns.delete(id); this.activeTasks.delete(id);
-      await this.saveTask(task, 'failed');
-      throw error;
-    }
-    if (riskPolicy) await this.applyRiskPolicy(session, driver, riskPolicy);
-    await this.saveTask(task, 'running');
-    await this.emit(id, 'text', { text: task.prompt, role: 'user', taskId: task.id });
-    await this.saveState(session, 'thinking');
     try {
+      const driver = await this.reconnect(session);
+      const { agentPrompt = task.prompt, riskPolicy } = task.executionContext ?? {};
+      // 每个任务都明确设置（或清除）策略，避免复用会话沿用上一个
+      // Lark 任务的高危正则到普通 Web/CLI 任务。
+      await this.applyRiskPolicy(session, driver, riskPolicy);
+      await this.saveTask(task, 'running');
+      const promptEvent = await this.emit(id, 'text', { text: task.prompt, role: 'user', taskId: task.id });
+      await this.saveState(session, 'thinking');
       const resolvedAgentPrompt = await this.options.sessionPrompt?.(session, agentPrompt) ?? agentPrompt;
-      this.driverStopReasons.delete(id);
       await driver.send(resolvedAgentPrompt);
       await this.flushDriverEvents(id);
-      const outcome = await this.resolveTaskOutcome(session, task);
+      const outcome = await this.resolveTaskOutcome(session, promptEvent.sequence);
       if (outcome.status === 'interrupted') { await this.saveTask(task, 'interrupted'); await this.saveState(session, 'interrupted'); }
       else if (outcome.status === 'failed') {
         await this.saveTask(task, 'failed');
-        if (outcome.message) { await this.repos.artifacts.saveError(id, outcome.message); await this.emit(id, 'error', { message: outcome.message }); await this.recoverSessionAfterTask(session, outcome.message); }
+        if (outcome.message) {
+          if (!outcome.errorAlreadyEmitted) { await this.repos.artifacts.saveError(id, outcome.message); await this.emit(id, 'error', { message: outcome.message }); }
+          await this.recoverSessionAfterTask(session, outcome.message);
+        }
       } else { await this.saveTask(task, 'completed'); await this.saveState(session, 'completed'); await this.emit(id, 'completed', { stopReason: outcome.stopReason ?? 'end_turn' }); }
     } catch (error) {
       try { await this.flushDriverEvents(id); }
       catch { /* Preserve the driver error while ensuring preceding events finish first. */ }
-      if (this.interruptedTurns.has(id) || this.driverStopReasons.get(id) === 'cancelled') await this.saveTask(task, 'interrupted');
-      else { const message = error instanceof Error ? error.message : String(error); await this.saveTask(task, 'failed'); await this.repos.artifacts.saveError(id, message); await this.emit(id, 'error', { message }); await this.recoverSessionAfterTask(session, message); throw error; }
+      const interrupted = this.interruptedTurns.has(id) || this.driverStopReasons.get(id) === 'cancelled';
+      const attempt = async (operation: () => Promise<unknown>) => { try { await operation(); } catch { /* Preserve the original turn failure and keep cleanup progressing. */ } };
+      if (interrupted) {
+        await attempt(() => this.saveTask(task, 'interrupted'));
+        await attempt(() => this.saveState(session, 'interrupted'));
+      } else {
+        const message = error instanceof Error ? error.message : String(error);
+        const emittedDriverError = this.turnErrors.get(id);
+        await attempt(() => this.saveTask(task, 'failed'));
+        if (!emittedDriverError) {
+          await attempt(() => this.repos.artifacts.saveError(id, message));
+          await attempt(() => this.emit(id, 'error', { message }));
+        }
+        await attempt(() => this.recoverSessionAfterTask(session, emittedDriverError ?? message));
+        throw error;
+      }
     } finally {
       const hardInterrupted = this.hardInterrupts.has(id);
-      this.interruptedTurns.delete(id); this.activeTurns.delete(id); this.activeTasks.delete(id); this.touch(id);
+      this.interruptedTurns.delete(id); this.activeTurns.delete(id); this.activeTasks.delete(id); this.turnErrors.delete(id); this.touch(id);
       for (const resolve of this.turnWaiters.get(id) ?? []) resolve();
       this.turnWaiters.delete(id);
       if (!hardInterrupted) this.scheduleQueue(id);
     }
-    return task;
+    return this.publicTask(task);
   }
 
-  async send(id: string, prompt: string, agentPrompt = prompt) {
-    const task = { id: makeId('task'), sessionId: id, prompt, status: 'running', createdAt: now(), updatedAt: now() };
-    return this.runTask(id, task, agentPrompt);
+  async send(id: string, prompt: string, agentPrompt = prompt, riskPolicy?: ToolRiskPolicy) {
+    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'running', executionContext: this.executionContext(agentPrompt, riskPolicy), createdAt: now(), updatedAt: now() };
+    return this.runTask(id, task);
   }
 
   async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy) {
     const { session } = await this.active(id);
     if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot send while session is ${session.state}`, 409);
-    const task = { id: makeId('task'), sessionId: id, prompt, status: 'queued', createdAt: now(), updatedAt: now() };
+    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'queued', executionContext: this.executionContext(agentPrompt, riskPolicy), createdAt: now(), updatedAt: now() };
     const queue = this.queues.get(id) ?? [];
     const queuedAhead = queue.length + (this.activeTurns.has(id) ? 1 : 0);
     if (mode === 'interrupt') queue.unshift(task); else queue.push(task);
     this.queues.set(id, queue);
-    if (agentPrompt !== prompt) this.queuedAgentPrompts.set(task.id, agentPrompt);
-    if (riskPolicy) this.queuedRiskPolicies.set(task.id, riskPolicy);
     await this.saveTask(task, 'queued');
     if (mode === 'interrupt' && this.activeTurns.has(id)) await this.terminateCurrentTurn(id);
     this.scheduleQueue(id);
-    return { ...task, queuedAhead };
+    return { ...this.publicTask(task), queuedAhead };
   }
 
   private scheduleQueue(id: string) {
@@ -447,11 +489,7 @@ export class DockmuxRuntime {
       const task = queue?.shift();
       if (!task) { this.queues.delete(id); return; }
       if (!queue?.length) this.queues.delete(id);
-      const agentPrompt = this.queuedAgentPrompts.get(task.id) ?? task.prompt;
-      const riskPolicy = this.queuedRiskPolicies.get(task.id);
-      this.queuedAgentPrompts.delete(task.id);
-      this.queuedRiskPolicies.delete(task.id);
-      try { await this.runTask(id, task, agentPrompt, riskPolicy); }
+      try { await this.runTask(id, task); }
       catch {
         // A prompt/SDK failure only fails the current task. recoverSessionAfterTask
         // restores a reusable shared session to idle, so later queued work must
@@ -472,8 +510,6 @@ export class DockmuxRuntime {
     const remaining = this.queues.get(id) ?? [];
     this.queues.delete(id);
     for (const task of remaining) {
-      this.queuedAgentPrompts.delete(task.id);
-      this.queuedRiskPolicies.delete(task.id);
       try { await this.saveTask(task, 'failed'); } catch { /* best-effort */ }
     }
   }
@@ -484,10 +520,8 @@ export class DockmuxRuntime {
     if (index < 0) throw new RuntimeError('QUEUED_TASK_NOT_FOUND', `Unknown queued task: ${taskId}`, 404);
     const [task] = queue.splice(index, 1);
     if (!queue.length) this.queues.delete(id);
-    this.queuedAgentPrompts.delete(taskId);
-    this.queuedRiskPolicies.delete(taskId);
     await this.saveTask(task!, 'cancelled');
-    return task;
+    return this.publicTask(task!);
   }
 
   async steerQueued(id: string, taskId: string) {
@@ -500,13 +534,13 @@ export class DockmuxRuntime {
     this.queues.set(id, queue);
     if (this.activeTurns.has(id)) await this.terminateCurrentTurn(id);
     this.scheduleQueue(id);
-    return task!;
+    return this.publicTask(task!);
   }
 
   private async cancelSessionQueue(id: string) {
     const queue = this.queues.get(id) ?? [];
     this.queues.delete(id);
-    await Promise.all(queue.map(task => { this.queuedAgentPrompts.delete(task.id); this.queuedRiskPolicies.delete(task.id); return this.saveTask(task, 'cancelled'); }));
+    await Promise.all(queue.map(task => this.saveTask(task, 'cancelled')));
   }
 
   async interrupt(id: string) { const { session, driver } = await this.active(id); if (!driver) throw new RuntimeError('SESSION_DISCONNECTED', 'Session is disconnected', 409); if (this.activeTurns.has(id)) this.interruptedTurns.add(id); await this.saveState(session, 'interrupting'); await driver.interrupt(); await this.saveState(session, 'interrupted'); }
@@ -607,7 +641,18 @@ export class DockmuxRuntime {
     return stopped;
   }
   async restart(id: string) { const { session } = await this.active(id); await this.stop(id); const agent = await this.repos.agents.get(session.agentId); if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent config was removed', 404); session.runId = makeId('run'); session.error = undefined; const configured = this.configureAgentForSession(agent, session); const driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => { this.notifyDriverExit(session.id, code); if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`); }, session.id); this.drivers.set(id, driver); await this.saveState(session, 'starting'); await driver.start(); await this.saveState(session, 'idle'); return session; }
-  async setPermissionMode(id: string, mode: PermissionMode) { const { session, driver } = await this.active(id); session.permissionMode = mode; session.updatedAt = now(); driver?.setPermissionMode?.(mode); await this.repos.sessions.save(session); return session; }
+  async setPermissionMode(id: string, mode: PermissionMode) {
+    const { session, driver } = await this.active(id);
+    if (this.activeTurns.has(id)) throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response before switching permissions', 409);
+    // 已启动驱动不支持热切换时，不得只改数据库却让子进程继续沿用
+    // 旧 argv；未连接会话可以先持久化，下次 reconnect 会按新姿态启动。
+    if (driver && !driver.setPermissionMode) throw new RuntimeError('PERMISSION_MODE_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime permission switching`, 422);
+    driver?.setPermissionMode?.(mode);
+    session.permissionMode = mode;
+    session.updatedAt = now();
+    await this.repos.sessions.save(session);
+    return session;
+  }
   async resolvePermission(sessionId: string, permissionId: string, approved: boolean) { const { session, driver } = await this.active(sessionId); const key = this.permissionKey(sessionId, permissionId); const request = this.permissions.get(key); if (!request) throw new RuntimeError('PERMISSION_NOT_FOUND', `Unknown permission request: ${permissionId}`, 404); const resolved = await driver?.resolvePermission?.(permissionId, approved); if (driver?.resolvePermission && !resolved) throw new RuntimeError('PERMISSION_EXPIRED', `Permission request is no longer active: ${permissionId}`, 409); request.status = approved ? 'approved' : 'rejected'; this.permissions.delete(key); this.touch(sessionId); await this.repos.artifacts.savePermission(sessionId, request); await this.emit(sessionId, 'permission_request', request); await this.saveState(session, 'thinking'); return request; }
 
   private releaseSessionMemory(sessionId: string) {
@@ -618,12 +663,11 @@ export class DockmuxRuntime {
     this.interruptedTurns.delete(sessionId);
     this.hardInterrupts.delete(sessionId);
     this.driverStopReasons.delete(sessionId);
+    this.turnErrors.delete(sessionId);
     this.exitListeners.delete(sessionId);
     this.driverEventChains.delete(sessionId);
     this.driverEventErrors.delete(sessionId);
     this.queues.delete(sessionId);
-    this.queuedAgentPrompts.delete(sessionId);
-    this.queuedRiskPolicies.delete(sessionId);
     this.queueRuns.delete(sessionId);
     for (const resolve of this.turnWaiters.get(sessionId) ?? []) resolve();
     this.turnWaiters.delete(sessionId);
@@ -655,8 +699,8 @@ export class DockmuxRuntime {
     await Promise.allSettled(drivers.map(driver => driver.stop()));
     await Promise.allSettled(this.queueRuns.values());
     await Promise.allSettled(this.driverEventChains.values());
-    this.sequences.clear(); this.permissions.clear(); this.lastActivity.clear(); this.activeTurns.clear(); this.activeTasks.clear(); this.interruptedTurns.clear(); this.hardInterrupts.clear(); this.driverEventChains.clear(); this.driverEventErrors.clear();
+    this.sequences.clear(); this.permissions.clear(); this.lastActivity.clear(); this.activeTurns.clear(); this.activeTasks.clear(); this.interruptedTurns.clear(); this.hardInterrupts.clear(); this.turnErrors.clear(); this.driverEventChains.clear(); this.driverEventErrors.clear();
     for (const waiters of this.turnWaiters.values()) for (const resolve of waiters) resolve();
-    this.turnWaiters.clear(); this.queues.clear(); this.queuedAgentPrompts.clear(); this.queuedRiskPolicies.clear(); this.queueRuns.clear(); this.emitter.removeAllListeners();
+    this.turnWaiters.clear(); this.queues.clear(); this.queueRuns.clear(); this.emitter.removeAllListeners();
   }
 }

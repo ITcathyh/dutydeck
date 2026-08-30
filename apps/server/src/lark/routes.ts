@@ -3,11 +3,16 @@ import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepos
 import type { DockmuxRuntime } from '@dockmux/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
 import { detectUnusableOwnerEntries, normalizeOwnerEntries, type ContactLookup } from './owner-identity.js';
-import { defaultHighRiskPattern, deleteLarkConfig, publicLarkConfigs, readLarkConfig, readLarkConfigs, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
+import { defaultHighRiskPattern, deleteLarkConfig, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
 import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listener.js';
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
 import type { LarkAgentToolsService } from './agent-tools.js';
+import {
+  openPlatformConfigurationJobs,
+  type OpenPlatformConfigurationJobManager,
+} from './open-platform-jobs.js';
+import { isValidLarkAppId } from './open-platform-configurator.js';
 
 type LarkSendRequest = LarkSendInput & { bot?: LarkBotConfigInput; botAppId?: string };
 type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?: string };
@@ -24,11 +29,13 @@ export interface LarkRoutesOptions {
   runtime?: DockmuxRuntime;
   listeningDisabled?: boolean;
   agentTools?: LarkAgentToolsService;
+  openPlatformJobs?: Pick<OpenPlatformConfigurationJobManager, 'start' | 'get'>;
 }
 
 export async function registerLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {}) {
   const env = options.env ?? process.env;
   const fetcher = options.fetcher ?? globalThis.fetch;
+  const openPlatformJobs = options.openPlatformJobs ?? openPlatformConfigurationJobs;
   let service = options.service;
   const listeningDisabled = options.listeningDisabled === true;
   const listener = options.listener ?? new LarkLongConnectionListenerPool(app.log, {
@@ -69,6 +76,21 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
 
   app.get('/api/lark/status', async () => ({ ...larkConfigurationStatus(env, await storedBot()), configuredBots: (await readLarkConfigs(options.config)).length, listening: listener.listening, activeAppIds: listener.activeAppIds, listeningDisabled }));
   app.get('/api/lark/config', async () => publicLarkConfigs(await readLarkConfigs(options.config), { activeAppIds: listener.activeAppIds, listeningDisabled }));
+  app.post<{ Body: { appId?: string; forceLogin?: boolean } }>('/api/lark/open-platform/configure', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const appId = request.body?.appId?.trim();
+    if (!appId || !isValidLarkAppId(appId)) return reply.code(400).send({ error: { code: 'INVALID_LARK_APP_ID', message: '飞书应用 ID 格式无效，应为 cli_*' } });
+    try {
+      return reply.code(202).send(openPlatformJobs.start(appId, { forceLogin: request.body?.forceLogin === true }));
+    } catch (error) {
+      return reply.code(400).send({ error: { code: 'LARK_OPEN_PLATFORM_SETUP_FAILED', message: error instanceof Error ? error.message : String(error) } });
+    }
+  });
+  app.get<{ Params: { jobId: string } }>('/api/lark/open-platform/jobs/:jobId', async (request, reply) => {
+    reply.header('cache-control', 'no-store');
+    const job = openPlatformJobs.get(request.params.jobId);
+    return job ?? reply.code(404).send({ error: { code: 'LARK_OPEN_PLATFORM_JOB_NOT_FOUND', message: '飞书自动配置任务不存在或已过期' } });
+  });
   app.post<{ Body: { appId?: string; appSecret?: string } }>('/api/lark/bot/inspect', async (request, reply) => {
     try {
       const bot = createLarkCardService(env, fetcher, { appId: request.body?.appId, appSecret: request.body?.appSecret });
@@ -99,10 +121,10 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       throw error;
     }
   });
-  app.get<{ Querystring: { appId?: string } }>('/api/lark/hooks/status', async (request, reply) => {
+  app.get<{ Querystring: { appId?: string; agentId?: string } }>('/api/lark/hooks/status', async (request, reply) => {
     const config = await readLarkConfig(options.config, request.query.appId);
     if (!config) return reply.code(404).send({ error: { code: 'LARK_BOT_NOT_FOUND', message: 'Unknown Lark bot' } });
-    return larkHookStatus(config.defaultAgentId, config.workspace);
+    return larkHookStatus(request.query.agentId?.trim() || config.defaultAgentId, config.workspace);
   });
   app.post<{ Body: { appId?: string; highRiskPattern?: string } }>('/api/lark/hooks/install', async (request, reply) => {
     try {
@@ -116,9 +138,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         stage: 'agent',
         originalAppId: config.appId,
         ...(request.body?.highRiskPattern !== undefined ? { highRiskPattern: request.body.highRiskPattern } : {}),
-        gateEnabled: true,
-        hardGateEnabled: false,
-        hookTrustConfirmed: true
+        riskControlMode: 'guidance'
       });
       if (!listeningDisabled) await syncListeners(saved);
       return hook;
@@ -197,16 +217,17 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         const resolvedHighRiskAllowedUsers = input.highRiskAllowedUserNames === undefined || !existing ? undefined : await createLarkCardService(env, fetcher, { appId: existing.appId, appSecret: existing.appSecret }).resolveChatUsersByNames(input.highRiskAllowedUserNames);
         const highRiskAllowedUsers = resolvedHighRiskAllowedUsers ?? input.highRiskAllowedUsers ?? existing?.highRiskAllowedUsers ?? [];
         const highRiskAllowedEmails = input.highRiskAllowedEmails ?? existing?.highRiskAllowedEmails ?? [];
-        const gateEnabled = input.gateEnabled ?? existing?.gateEnabled ?? false;
-        if (gateEnabled && !highRiskAllowedUsers.length && highRiskAllowedEmails.length && existing) {
+        const riskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
+        if (riskControlMode !== 'off' && !highRiskAllowedUsers.length && highRiskAllowedEmails.length && existing) {
           await createLarkCardService(env, fetcher, { appId: existing.appId, appSecret: existing.appSecret }).checkIdentityResolution();
         }
         if (resolvedHighRiskAllowedUsers !== undefined) input = { ...input, highRiskAllowedUsers: resolvedHighRiskAllowedUsers, highRiskAllowedEmails: [] };
       }
-      if (input.hardGateEnabled === true) {
-        const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
+      const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
+      const requestedRiskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
+      if (requestedRiskControlMode === 'enforced') {
         const hook = await larkHookStatus(input.defaultAgentId ?? existing?.defaultAgentId, input.workspace ?? existing?.workspace);
-        if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('HARD_GATE_NOT_READY', hook.reason ?? 'Install the selected Agent hook before enabling the hard gate', 409);
+        if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? 'Install the selected Agent hook before enabling enforced risk control', 409);
       }
       const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);
       if (!listeningDisabled) await syncListeners(saved);

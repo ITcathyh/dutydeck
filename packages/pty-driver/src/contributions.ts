@@ -5,14 +5,13 @@
  * command 按 botmux src/adapters/cli/registry.ts 的 RAW_CLI_EXECUTABLES 核对；
  * capabilities.resume 按 botmux 各适配器 buildArgs 的实际 resume 支持核对
  * （gemini 适配器明确 always start fresh，无 resume）。
- * pause 全 false：MVP 不支持暂停。
+ * pause 全 false：这些供应商 CLI 没有可由 Dockmux 可靠兑现的暂停语义。
  *
  * 与 @dockmux/config 的 PtyAgentContribution 对齐：config 包定义的形状是
  * `{ id, name, command, args?, builtin? }`，本接口是它的超集——多出的
- * adapterId / capabilities 是 server 组装 driver 时的元数据（id 与 adapterId
- * 在 MVP 恒等，server 可直接用 agent.id 经 createCliAdapter 取适配器）。
- * 注意：config 的 scanPtyAgents 目前硬编码 capabilities { pause:false, resume:true }，
- * gemini 的 resume:false 尚未经 config 传播（M2 收口）。
+ * adapterId / capabilities 是 server 组装 driver 时的元数据；当前贡献的 id 与
+ * adapterId 恒等，server 可直接用 agent.id 经 createCliAdapter 取适配器。
+ * config 会逐项传播这里声明的能力，避免把 fresh-only CLI 错报为可恢复。
  */
 export interface PtyAgentContribution {
   /** 与 adapter id 一致 */
@@ -23,7 +22,7 @@ export interface PtyAgentContribution {
   command: string;
   /** 透传进 AgentConfig.args 的默认参数（一般为空：spawn 参数由 adapter.buildArgs 构造） */
   args?: string[];
-  /** cli-adapters 里的适配器 id（MVP 与 id 恒等） */
+  /** cli-adapters 里的适配器 id（当前内置贡献与 id 恒等） */
   adapterId: string;
   capabilities: { pause: boolean; resume: boolean };
 }
@@ -37,7 +36,7 @@ export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
   { id: 'cursor', name: 'Cursor', command: 'cursor-agent', adapterId: 'cursor', capabilities: { pause: false, resume: true } },
   { id: 'kimi', name: 'Kimi', command: 'kimi', adapterId: 'kimi', capabilities: { pause: false, resume: true } },
   { id: 'traex', name: 'TRAE', command: 'traex', adapterId: 'traex', capabilities: { pause: false, resume: true } },
-  // ---- M2 移植的 CLI（command / name 逐条核对 botmux RAW_CLI_EXECUTABLES 与
+  // ---- 扩展 CLI（command / name 逐条核对供应商可执行文件与
   //      CLI_DISPLAY_NAMES；resume 按各适配器 buildArgs 是否真接 resume 参数）----
   { id: 'antigravity', name: 'Antigravity', command: 'agy', adapterId: 'antigravity', capabilities: { pause: false, resume: true } },
   { id: 'coco', name: 'CoCo', command: 'coco', adapterId: 'coco', capabilities: { pause: false, resume: true } },

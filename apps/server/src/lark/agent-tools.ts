@@ -551,7 +551,7 @@ export class LarkAgentToolsService {
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
-export const agentDockGroupToolsCommand = (entrypoint: string, execPath = process.execPath, tsxLoader?: string) => {
+export const dockmuxGroupToolsCommand = (entrypoint: string, execPath = process.execPath, tsxLoader?: string) => {
   const absoluteEntrypoint = resolve(entrypoint);
   const loader = absoluteEntrypoint.endsWith('.ts') ? tsxLoader ?? import.meta.resolve('tsx') : undefined;
   return `${shellQuote(execPath)}${loader ? ` --import ${shellQuote(loader)}` : ''} ${shellQuote(absoluteEntrypoint)}`;

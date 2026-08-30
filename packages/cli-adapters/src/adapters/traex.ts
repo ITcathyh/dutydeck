@@ -78,15 +78,11 @@ export function createTraexAdapter(): CliAdapter {
     id: 'traex',
     capabilities: { resume: true },
 
-    buildArgs({ resume, resumeSessionId, cwd, model, reasoningEffort }: AdapterSessionContext): string[] {
-      const args: string[] = [
-        // dockmux MVP 无人值守：bypass 审批 + 沙箱（botmux !disableCliBypass 分支）。
-        '--dangerously-bypass-approvals-and-sandbox',
-        // botmux bypassHookTrust 默认 ON：跳过 "Hooks need review" 交互门，
-        // 否则无人值守会话永远到不了 prompt。
-        '--dangerously-bypass-hook-trust',
-        '--no-alt-screen',
-      ];
+    buildArgs({ resume, resumeSessionId, cwd, model, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
+      const args: string[] = ['--no-alt-screen'];
+      if (permissionMode === 'full-trust') {
+        args.unshift('--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust');
+      }
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

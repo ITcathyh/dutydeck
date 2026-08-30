@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
+import { acpxPermissionMode, prepareAcpxAgentLaunch } from '@dockmux/acp-client';
 import type { AgentConfig } from '@dockmux/shared';
 
 const run = promisify(execFile);
@@ -85,17 +86,20 @@ export async function probeModelsThroughAcpRuntime(runtime: AcpRuntime, input: A
 
 async function discoverThroughAcp(agent: AgentConfig, model?: string): Promise<AgentModelsResult | undefined> {
   const stateDir = await mkdtemp(join(tmpdir(), 'dockmux-models-'));
+  const sessionKey = `dockmux-model-probe-${crypto.randomUUID()}`;
+  const launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(stateDir, 'runtime-env'), sessionKey });
   const runtime = createAcpRuntime({
     cwd: agent.cwd ?? process.cwd(),
     sessionStore: createRuntimeStore({ stateDir }),
-    agentRegistry: createAgentRegistry({ overrides: { [agent.id]: [agent.command, ...agent.args] } }),
-    permissionMode: agent.permissionMode === 'full-trust' ? 'approve-all' : agent.permissionMode === 'deny-all' ? 'deny-all' : 'approve-reads',
+    agentRegistry: createAgentRegistry({ overrides: { [agent.id]: launch.command } }),
+    permissionMode: acpxPermissionMode(agent.permissionMode),
     nonInteractivePermissions: 'fail',
     timeoutMs: Math.min(agent.timeout * 1000, ACP_MODEL_PROBE_TIMEOUT_MS)
   });
   try {
-    return await probeModelsThroughAcpRuntime(runtime, { sessionKey: `dockmux-model-probe-${crypto.randomUUID()}`, agent: agent.id, mode: 'oneshot', cwd: agent.cwd ?? process.cwd(), sessionOptions: { env: agent.env, ...(model ? { model } : {}) } });
+    return await probeModelsThroughAcpRuntime(runtime, { sessionKey, agent: agent.id, mode: 'oneshot', cwd: agent.cwd ?? process.cwd(), sessionOptions: { ...launch.sessionOptions, ...(model ? { model } : {}) } });
   } finally {
+    launch.cleanup();
     await rm(stateDir, { recursive: true, force: true });
   }
 }

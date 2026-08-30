@@ -34,6 +34,7 @@ describe('builtinAgents PTY contributions', () => {
     expect(gemini?.protocol).toBe('pty-cli');
     expect(gemini?.args).toEqual([]);
     expect(gemini?.builtin).toBe(true);
+    expect(gemini?.permissionMode).toBe('ask');
     expect(gemini?.version).toBeTruthy();
     expect(gemini?.cwd).toBe('/tmp/dockmux-pty-test');
   });

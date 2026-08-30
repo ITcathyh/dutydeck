@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { AcpRuntime } from 'acpx/runtime';
-import { AgentModelProbeTimeoutError, modelsFromAcpStatus, probeModelsThroughAcpRuntime } from './agent-models.js';
+import { AgentModelProbeTimeoutError, discoverAgentModels, modelsFromAcpStatus, probeModelsThroughAcpRuntime } from './agent-models.js';
 
 const probeInput = { sessionKey: 'probe', agent: 'codex', mode: 'oneshot' as const };
 const handle = { sessionKey: 'probe', backend: 'acpx', runtimeSessionName: 'probe', acpxRecordId: 'probe-record' };
@@ -55,5 +56,16 @@ describe('ACP-first Agent model discovery', () => {
     const buildScript = readFileSync(new URL('../scripts/build.mjs', import.meta.url), 'utf8');
     expect(patch).toContain('await withTimeout(client.start(), this.options.timeoutMs)');
     expect(buildScript).toContain("fileURLToPath(import.meta.resolve('acpx/runtime'))");
+  });
+
+  it('discovers models through the real ACP runtime with uppercase Agent env bridged to the child', async () => {
+    const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
+    const result = await discoverAgentModels({
+      id: `model-probe-${crypto.randomUUID()}`,
+      name: 'Model probe', command: process.execPath, args: [fixture], protocol: 'acp',
+      env: { MOCK_VENDOR_TOKEN: 'model-probe-secret' }, permissionMode: 'ask', timeout: 10,
+      capabilities: { pause: false, resume: true }, builtin: false
+    }, undefined, true);
+    expect(result).toMatchObject({ models: [{ id: 'bridged-model', name: 'Bridged Model' }], defaultModel: 'bridged-model', source: 'acp' });
   });
 });

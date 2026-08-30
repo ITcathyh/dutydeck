@@ -208,7 +208,7 @@ export function daemonStatus(): DaemonStatusInfo {
 }
 
 function addressFromCli(options: CliOptions): { host?: string; port?: number; address?: string } {
-  const host = options.host ?? (options.localOnly ? '127.0.0.1' : '0.0.0.0');
+  const host = options.host ?? '127.0.0.1';
   const port = Number(options.port ?? 4310);
   const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
   return { host, port, address: `http://${displayHost.includes(':') ? `[${displayHost}]` : displayHost}:${port}` };

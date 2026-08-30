@@ -14,8 +14,7 @@ import type { PtyLike } from './types.js';
  * Enter 时入队。控制行是纯 ASCII（marker + base64），按 code unit 切就是
  * 干净的字节切分。
  *
- * 当前 8 个 MVP 适配器都不用 runner（botmux 的使用方是 codex-app / mira，
- * 未移植）；这是 M2 runner 类适配器的底层工具。
+ * 仅 runner 类兼容适配器使用；当前可发现的本机 Agent 不依赖该协议。
  */
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));

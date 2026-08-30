@@ -11,18 +11,16 @@ export function createCodexAdapter(): CliAdapter {
     id: 'codex',
     capabilities: { resume: true },
 
-    buildArgs({ resume, resumeSessionId, cwd, model, reasoningEffort }: AdapterSessionContext): string[] {
+    buildArgs({ resume, resumeSessionId, cwd, model, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
       const args: string[] = [
-        // dockmux MVP 无人值守：bypass 审批 + 沙箱（botmux !disableCliBypass 分支）。
-        '--dangerously-bypass-approvals-and-sandbox',
-        // botmux bypassHookTrust 默认 ON：跳过 0.14x 的 hook 信任交互门，
-        // 否则无人值守的首个 turn 会永远卡在 "Press t to trust"。
-        '--dangerously-bypass-hook-trust',
         '--no-alt-screen',
         // 启动更新选择器会吞掉首条消息，进程级关掉（不动用户全局 config）。
         '-c',
         'check_for_update_on_startup=false',
       ];
+      if (permissionMode === 'full-trust') {
+        args.unshift('--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust');
+      }
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

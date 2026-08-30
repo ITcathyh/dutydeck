@@ -1,3 +1,5 @@
+import type { PermissionMode } from '@dockmux/shared';
+
 /** buildArgs 的会话上下文（从 botmux 20+ 字段瘦身到这些） */
 export interface AdapterSessionContext {
   sessionId: string;
@@ -7,6 +9,11 @@ export interface AdapterSessionContext {
   initialPrompt?: string;
   model?: string;
   reasoningEffort?: string;
+  /**
+   * 由 AgentConfig/Session 传入的权限姿态。缺省按非 full-trust 处理，
+   * 适配器不得因旧调用方漏传而默认追加 bypass 参数。
+   */
+  permissionMode?: PermissionMode;
   locale?: string;
   /**
    * 会话 env（含 relay 注入的 `dockmux_relay_url` / `_token` / `_command`）。
@@ -27,8 +34,6 @@ export interface PtyLike {
 export interface CliAdapterCapabilities {
   /** 支持 --resume 类会话恢复 */
   resume?: boolean;
-  /** 支持 skill 投递（M2，占位） */
-  skills?: boolean;
   /** 首轮 prompt 走 CLI 参数而非 stdin */
   initialPromptViaArgs?: boolean;
 }
@@ -56,8 +61,8 @@ export interface CliAdapter {
    * grok `--session-id`、pi、mtr…）永远不该返回 null：那个 id 就是有效的
    * resume 目标。
    *
-   * ⚠️ 它只是**续接定位片段**，不是完整 argv——不含 `--dangerously-skip-permissions`
-   * 这类无人值守必需参数。driver 走的是 `buildArgs({resume:true})`，本方法负责
+   * ⚠️ 它只是**续接定位片段**，不是完整 argv——不含模型、权限姿态
+   * 等通用参数。driver 走的是 `buildArgs({resume:true})`，本方法负责
    * 两件事：声明 resume 能力，以及裁决「这个 id 能不能用」（见 driver.resume）。
    */
   buildResumeCommand?(sessionId: string): string[] | null;

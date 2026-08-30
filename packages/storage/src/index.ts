@@ -1,18 +1,52 @@
 import Database from 'better-sqlite3';
-import { and, asc, desc, eq, gt } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { AgentConfig, AgentEvent, RepositoryBundle, Session, TaskRecord } from '@dockmux/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
 import { runMigrations } from './migrations.js';
 export * from './schema.js';
 
+export const EVENT_WINDOW_DEFAULT_LIMIT = 200;
+export const EVENT_WINDOW_MAX_LIMIT = 1_000;
+export const PRE_V10_BACKUP_SUFFIX = '.pre-v10.bak';
+
+function tableExists(sqlite: Database.Database, table: string) {
+  return Boolean(sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+}
+
+/** v10 rebuilds sessions, so preserve one consistent pre-migration snapshot first. */
+function backupBeforeV10(sqlite: Database.Database, filename: string) {
+  if (filename === ':memory:' || !tableExists(sqlite, 'sessions')) return;
+  const version = tableExists(sqlite, 'schema_migrations')
+    ? (sqlite.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version?: number | null } | undefined)?.version ?? 0
+    : 0;
+  if (version >= 10) return;
+  const backupFilename = `${filename}${PRE_V10_BACKUP_SUFFIX}`;
+  if (existsSync(backupFilename)) return;
+  // VACUUM INTO takes a transactionally consistent snapshot, including WAL pages.
+  sqlite.exec(`VACUUM INTO '${backupFilename.replaceAll("'", "''")}'`);
+}
+
+function decodeTask(row: typeof tasks.$inferSelect): TaskRecord {
+  return {
+    ...row,
+    executionContext: row.executionContext ? JSON.parse(row.executionContext) : undefined
+  } as TaskRecord;
+}
+
 export function createRepositories(filename: string): RepositoryBundle {
   if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true });
   const sqlite = new Database(filename);
-  sqlite.pragma('journal_mode = WAL');
-  runMigrations(sqlite);
+  try {
+    sqlite.pragma('journal_mode = WAL');
+    backupBeforeV10(sqlite, filename);
+    runMigrations(sqlite);
+  } catch (error) {
+    sqlite.close();
+    throw error;
+  }
   const db = drizzle(sqlite);
   return {
     agents: {
@@ -27,8 +61,11 @@ export function createRepositories(filename: string): RepositoryBundle {
       async save(s) { db.insert(sessions).values(s).onConflictDoUpdate({ target: sessions.id, set: s }).run(); }
     },
     tasks: {
-      async save(t) { db.insert(tasks).values(t).onConflictDoUpdate({ target: tasks.id, set: t }).run(); },
-      async listBySession(sessionId) { return db.select().from(tasks).where(eq(tasks.sessionId, sessionId)).all() as TaskRecord[]; }
+      async save(t) {
+        const row = { ...t, executionContext: t.executionContext ? JSON.stringify(t.executionContext) : null };
+        db.insert(tasks).values(row).onConflictDoUpdate({ target: tasks.id, set: row }).run();
+      },
+      async listBySession(sessionId) { return db.select().from(tasks).where(eq(tasks.sessionId, sessionId)).orderBy(asc(tasks.createdAt)).all().map(decodeTask); }
     },
     events: {
       async append(e) { db.insert(events).values({ ...e, data: JSON.stringify(e.data) }).run(); },
@@ -36,6 +73,17 @@ export function createRepositories(filename: string): RepositoryBundle {
       async listRecent(sessionId, limit) {
         const rows = db.select().from(events).where(eq(events.sessionId, sessionId)).orderBy(desc(events.sequence)).limit(limit).all();
         return rows.reverse().map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[];
+      },
+      async listWindow(sessionId, options = {}) {
+        const requestedLimit = Number.isFinite(options.limit) ? Math.trunc(options.limit!) : EVENT_WINDOW_DEFAULT_LIMIT;
+        const limit = Math.max(1, Math.min(EVENT_WINDOW_MAX_LIMIT, requestedLimit));
+        const filters = [eq(events.sessionId, sessionId)];
+        if (options.afterSequence !== undefined) filters.push(gt(events.sequence, options.afterSequence));
+        if (options.beforeSequence !== undefined) filters.push(lt(events.sequence, options.beforeSequence));
+        const backward = options.direction === 'backward';
+        const rows = db.select().from(events).where(and(...filters)).orderBy(backward ? desc(events.sequence) : asc(events.sequence)).limit(limit).all();
+        if (backward) rows.reverse();
+        return rows.map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[];
       }
     },
     config: {

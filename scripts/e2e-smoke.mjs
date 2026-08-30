@@ -2,13 +2,13 @@
 /**
  * dockmux 端到端冒烟检查
  *
- * 固化 M1 手动验证过的关键路径，可重复执行：
+ * 固化发布验收中的关键路径，可重复执行：
  *   1. 启动 server（临时端口 + 临时数据目录，前台进程，绝不 daemonize）
  *   2. GET /api/agents —— 断言 ACP agent 与 pty-cli agent 都被发现
  *   3. 创建 pty-cli 会话（claude-code）→ 发消息 → SSE 收事件流
  *      断言：收到 thinking/text、最终 completed、session state 变 completed
  *   4. resume 后仍能继续对话：POST /resume → 再发一轮 → 用 SSE 游标确认是新事件
- *      而不是回放（M2 时这条路径全套单测通过、真实环境却完全不可用）
+ *      而不是历史回放，避免单测通过但真实环境不可用
  *   5. 终端 WS /api/terminal/:sessionId 能连上并收到帧
  *   6. 静态 Web UI 可访问
  *   7. 清理：停会话、杀 server、删临时数据目录
@@ -33,7 +33,7 @@
  */
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,7 +57,7 @@ const PORT = Number(value('port', '14387'));
 const TIMEOUT_MS = Number(value('timeout', REAL ? '300000' : '120000'));
 
 // 被桥接的 CLI 必须拿干净的鉴权环境：本机 shell 里的这些变量会污染子进程
-// （M1 时的真实 bug：daemon 的 ANTHROPIC_BASE_URL 漏进了被桥接的 claude）。
+// 防止 daemon 的 ANTHROPIC_BASE_URL 意外泄漏进被桥接的 Claude。
 const POLLUTING_ENV = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN'];
 
 // ── 输出 ───────────────────────────────────────────────────────────────────
@@ -255,6 +255,7 @@ function loadWebSocket() {
 async function main() {
   log(`dockmux e2e smoke — ${REAL ? 'REAL（调用真实 CLI 与模型）' : 'MOCK（假 CLI，不触碰模型）'}`);
   log(`端口 ${PORT} · 全局超时 ${TIMEOUT_MS}ms`);
+  assert(existsSync(join(REPO, 'apps/server/dist/agents/env-launcher.mjs')), 'production build packages the ACP environment launcher');
 
   // 临时数据目录（DB、假 CLI、假 CLAUDE_CONFIG_DIR 全在里面，清理时整棵删掉）
   const dataDir = mkdtempSync(join(tmpdir(), 'dockmux-smoke-'));
@@ -339,7 +340,7 @@ async function main() {
 
   const server = spawn(process.execPath, [
     SERVER_ENTRY,
-    '--local-only',            // 绑 127.0.0.1，同时让鉴权中间件整体放行
+    '--local-only',            // 绑 127.0.0.1；免 token，但仍校验 loopback Host/Origin
     '--port', String(PORT),
     '--cwd', workspace,
     '--database', join(dataDir, 'dockmux.db'),
@@ -391,14 +392,14 @@ async function main() {
   if (!REAL) assert(claudeCode.command.endsWith('mock-claude'), 'mock 模式下 claude-code 指向假 CLI（未使用真实 claude）');
 
   // ── 3. pty-cli 会话 + SSE ────────────────────────────────────────────────
-  step('创建 pty-cli 会话并通过 SSE 收事件流');
+  step('创建 pty-cli 任务运行并通过 SSE 收事件流');
   const created = await request('POST', '/api/sessions', { agentId: 'claude-code', cwd: workspace });
   assert(created.status === 200, `POST /api/sessions 返回 200（实际 ${created.status}）`);
   const session = created.json;
-  assert(typeof session?.id === 'string' && session.id.startsWith('ses_'), `会话已创建：${session?.id}`);
-  assert(session.protocol === 'pty-cli' || claudeCode.protocol === 'pty-cli', '会话走 pty-cli 协议');
+  assert(typeof session?.id === 'string' && session.id.startsWith('ses_'), `任务运行已创建：${session?.id}`);
+  assert(session.protocol === 'pty-cli' || claudeCode.protocol === 'pty-cli', '任务运行走 pty-cli 协议');
 
-  onCleanup(`关闭会话 ${session.id}`, async () => {
+  onCleanup(`关闭任务运行 ${session.id}`, async () => {
     const stopped = await request('POST', `/api/sessions/${session.id}/stop`);
     if (stopped.status !== 200) throw new Error(`stop 返回 ${stopped.status}`);
   });
@@ -428,11 +429,11 @@ async function main() {
   const completedEvent = events.find(item => item.type === 'completed').event;
   assert(typeof completedEvent.sequence === 'number' && completedEvent.sequence > 0, 'completed 事件带 sequence（SSE id: 游标可用）');
 
-  const finalState = await waitFor('session state 变 completed', async () => {
+  const finalState = await waitFor('任务运行状态变为 completed', async () => {
     const current = await request('GET', `/api/sessions/${session.id}`);
     return current.json?.state === 'completed' ? current.json : undefined;
   }, { timeoutMs: 20_000 });
-  assert(finalState.state === 'completed', `会话 state = completed`);
+  assert(finalState.state === 'completed', '任务运行 state = completed');
 
   if (!REAL) {
     const assistantText = events.filter(item => item.type === 'text').map(item => item.event.data?.text ?? '').join('');
@@ -440,7 +441,7 @@ async function main() {
   }
 
   // ── 4. resume 后续接可用 ─────────────────────────────────────────────────
-  // 为什么值得单列一步：M2 时全套单测通过，resume 在真实环境里却完全不可用——
+  // 单列真实 resume：这类供应商协议差异不能只靠 mock 单测证明。
   // respawn 会 kill 旧后端，那次 SIGHUP(129) 被当成 agent 崩溃上报，会话立刻
   // 判 failed，之后每个 send 都是 409。mock CLI 的单测发现不了，只有走完整
   // HTTP + PTY 链路才暴露。

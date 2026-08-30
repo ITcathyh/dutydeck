@@ -15,14 +15,10 @@ export function createGrokAdapter(): CliAdapter {
       model,
       reasoningEffort,
       initialPrompt,
+      permissionMode,
     }: AdapterSessionContext): string[] {
-      const args: string[] = [
-        // 无人值守 YOLO（对应 claude 的 --dangerously-skip-permissions）。
-        '--always-approve',
-        // 对齐 claude 的 EnterPlanMode/ExitPlanMode 禁用：IM 场景驱动不了
-        // plan 审批 TUI。
-        '--no-plan',
-      ];
+      const args: string[] = ['--no-plan'];
+      if (permissionMode === 'full-trust') args.unshift('--always-approve');
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }
