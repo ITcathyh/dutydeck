@@ -58,6 +58,30 @@ describe('configs 存取', () => {
     expect(await getAuthToken(configs)).toBe(first.token);
   });
 
+  it('并发 loadOrCreate 只创建一个 token，所有调用方拿到同一串', async () => {
+    // 竞态窗口在「读到值」与「写回」之间：get 必须先取快照再让出，
+    // 否则 8 次读会被自然串行化（后来的读到先前的写），竞态根本不发生。
+    const store = new Map<string, string>();
+    let setCalls = 0;
+    const configs: ConfigRepository = {
+      async get(key) {
+        const value = store.get(key);
+        await new Promise(r => setTimeout(r, 5));
+        return value;
+      },
+      async set(key, value) { setCalls++; store.set(key, value); }
+    };
+
+    const results = await Promise.all(Array.from({ length: 8 }, () => loadOrCreateAuthToken(configs)));
+    const tokens = new Set(results.map(r => r.token));
+    expect(tokens.size).toBe(1);
+    expect(setCalls).toBe(1);
+    // created 只对真正建号的那一次为 true（日志不重复）
+    expect(results.filter(r => r.created)).toHaveLength(1);
+    // 落盘的就是大家手里那一串
+    expect(await getAuthToken(configs)).toBe(results[0]!.token);
+  });
+
   it('rotate 后 token 变化且旧 token 失效', async () => {
     const configs = memoryConfigs();
     const old = (await loadOrCreateAuthToken(configs)).token;

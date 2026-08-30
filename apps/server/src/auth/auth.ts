@@ -17,15 +17,47 @@ export async function getAuthToken(configs: ConfigRepository): Promise<string | 
   return token ? token : null;
 }
 
+/**
+ * 同进程内的「读-建-写」串行化闩。
+ *
+ * loadOrCreateAuthToken 是 get-then-set：两个并发调用都可能读到空，各自生成
+ * 一个 token 并写入，后写的赢——先拿到 token 的调用方手里就是个已失效的串。
+ * 按 ConfigRepository 实例去重在途调用，让并发调用共享同一次创建。
+ *
+ * 注意边界：ConfigRepository 只有 get/set，没有 insert-if-absent，所以**跨进程**
+ * 的同一 DB 竞态仍然存在（两个 daemon 同时首启）。真正修掉它需要 storage 层
+ * 提供原子的 setIfAbsent；在此之前，跨进程首启请避免并发。
+ */
+const inFlightTokenCreation = new WeakMap<ConfigRepository, Promise<{ token: string; created: boolean }>>();
+
 /** 读取或创建 token。created=true 表示本次新建（调用方负责打印一次日志） */
 export async function loadOrCreateAuthToken(
   configs: ConfigRepository,
 ): Promise<{ token: string; created: boolean }> {
   const existing = await getAuthToken(configs);
   if (existing) return { token: existing, created: false };
-  const token = generateAuthToken();
-  await configs.set(AUTH_TOKEN_CONFIG_KEY, token);
-  return { token, created: true };
+
+  const inFlight = inFlightTokenCreation.get(configs);
+  if (inFlight) {
+    // 并发调用共享同一次创建，但 created 只对发起者为 true——日志才不会打两次。
+    const shared = await inFlight;
+    return { token: shared.token, created: false };
+  }
+
+  const creation = (async () => {
+    // 二次确认：等到闩之前可能已有别的调用写完了。
+    const raced = await getAuthToken(configs);
+    if (raced) return { token: raced, created: false };
+    const token = generateAuthToken();
+    await configs.set(AUTH_TOKEN_CONFIG_KEY, token);
+    return { token, created: true };
+  })();
+  inFlightTokenCreation.set(configs, creation);
+  try {
+    return await creation;
+  } finally {
+    inFlightTokenCreation.delete(configs);
+  }
 }
 
 /** 轮换 token（无条件重新生成并写入），返回新 token；旧 token 随即失效 */
