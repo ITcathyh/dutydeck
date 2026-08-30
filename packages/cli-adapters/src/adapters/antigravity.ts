@@ -20,9 +20,8 @@ export function createAntigravityAdapter(): CliAdapter {
     id: 'antigravity',
     capabilities: { resume: true },
 
-    buildArgs({ resume, resumeSessionId }: AdapterSessionContext): string[] {
-      // dockmux MVP 无人值守：自动批准工具调用（botmux !disableCliBypass 分支）。
-      const args = ['--dangerously-skip-permissions'];
+    buildArgs({ resume, resumeSessionId, permissionMode }: AdapterSessionContext): string[] {
+      const args: string[] = permissionMode === 'full-trust' ? ['--dangerously-skip-permissions'] : [];
       // 只做精确 id 续接：agy 在 spawn 时自己生成 conversation id 并忽略外部传值，
       // `--conversation` 严格按既有 id 查找，所以 dockmux 的 sessionId 在这里没用。
       // 无 resumeSessionId 时新起会话；绝不用 `-c/--continue`——"最近一个"在多会话

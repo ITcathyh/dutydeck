@@ -1,15 +1,14 @@
 import Fastify from 'fastify';
-import cors from '@fastify/cors';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
-import { RuntimeError } from '@dockmux/shared';
+import { permissionModes, RuntimeError, type PermissionMode } from '@dockmux/shared';
 import type { DockmuxRuntime } from '@dockmux/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
-import { registerAuthMiddleware, type AuthMiddlewareOptions } from './auth/auth.js';
+import { registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
-import { registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
+import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -30,9 +29,9 @@ const contentTypes: Record<string, string> = {
 };
 
 export interface TerminalRouteOptions {
-  /** 会话 → 终端流访问器；Team Core 交付 runtime.getTerminalStream 前由 service 层注入占位实现 */
+  /** 由 service 从 runtime driver 暴露的会话终端流访问器。 */
   provider: TerminalStreamProvider;
-  /** WS 升级认证（?token= query param）；不传 = 不认证 */
+  /** WS 升级认证；不传 = 不认证 */
   auth?: TerminalRouteAuth;
 }
 
@@ -44,14 +43,13 @@ export interface BuildAppOptions {
   auth?: AuthMiddlewareOptions;
   /** 终端 WS 代理；不传 = 不注册 /api/terminal/:sessionId */
   terminal?: TerminalRouteOptions;
-  /** 通用回传通道（M3 relay）；不传 = 不注册 /api/relay/* */
+  /** 通用会话回传通道；不传 = 不注册 /api/relay/* */
   relay?: RelayRoutesOptions;
 }
 
 export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions = {}) {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
   const streams = new Set<import('node:http').ServerResponse>();
-  await app.register(cors, { origin: true });
   app.addHook('preClose', async () => { for (const stream of streams) stream.end(); streams.clear(); });
 
   app.setErrorHandler((error, _request, reply) => {
@@ -61,16 +59,22 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
 
   app.get('/health', async () => ({ ok: true }));
   if (options.auth) {
+    registerBrowserAuthRoutes(app, options.auth);
     // 中央豁免规则（所有调用方一致）：
     //  - 非 /api/ 路径（静态 web 壳）公开：HTML/JS/CSS 不含会话数据，API 仍全部要 token
     //  - /api/lark/agent-tools/* 有自己的 Bearer 机制（agentGroupToolBearerToken），不重复门禁
+    //  - relay send/ask 精确使用会话 HMAC；同一个 Authorization 头无法再放 access token
     //  - 飞书卡片回调（card.action.trigger）走长连接监听、不经 HTTP，天然不受影响
     const userExempt = options.auth.exempt;
     registerAuthMiddleware(app, {
       ...options.auth,
       exempt: (method, pathname) =>
         !pathname.startsWith('/api/')
+        || pathname === '/api/auth/status'
+        || pathname === '/api/auth/login'
+        || pathname === '/api/auth/logout'
         || pathname.startsWith('/api/lark/agent-tools/')
+        || isRelayCapabilityRequest(method, pathname)
         || userExempt?.(method, pathname) === true
     });
   }
@@ -85,7 +89,23 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
     return discoverAgentModels(agent, request.query.model?.trim() || undefined, request.query.refresh === '1' || request.query.refresh === 'true');
   });
   app.get('/api/sessions', async () => runtime.listSessions());
-  app.post<{ Body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string } }>('/api/sessions', async request => runtime.start(request.body));
+  app.get('/api/sessions/summaries', async () => {
+    const sessions = await runtime.listSessions();
+    const summaries = await Promise.all(sessions.map(async session => {
+      const tasks = (await runtime.getTasks(session.id))
+        .filter((task: any) => typeof task.prompt === 'string' && task.prompt.trim() && task.status !== 'cancelled')
+        .sort((left: any, right: any) => left.createdAt.localeCompare(right.createdAt));
+      const first = tasks[0];
+      if (!first) return undefined;
+      const latest = [...tasks].sort((left: any, right: any) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt))[0] ?? first;
+      return { sessionId: session.id, taskId: first.id, prompt: first.prompt.trim(), status: first.status, queuedCount: tasks.filter((task: any) => task.status === 'queued').length, updatedAt: latest.updatedAt || latest.createdAt };
+    }));
+    return summaries.filter(Boolean);
+  });
+  app.post<{ Body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode } }>('/api/sessions', async request => {
+    if (request.body.permissionMode !== undefined && !permissionModes.includes(request.body.permissionMode)) throw new RuntimeError('INVALID_PERMISSION_MODE', `Unknown permission mode: ${String(request.body.permissionMode)}`, 400);
+    return runtime.start(request.body);
+  });
   app.get<{ Params: { id: string } }>('/api/sessions/:id', async (request, reply) => (await runtime.getSession(request.params.id)) ?? reply.code(404).send({ error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' } }));
   app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' } }>('/api/sessions/:id/send', async (request, reply) => {
     const prompt = request.body?.prompt?.trim();
@@ -109,22 +129,146 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
   }
   app.post<{ Params: { id: string } }>('/api/sessions/:id/archive', async request => runtime.archive(request.params.id));
   app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean } }>('/api/sessions/:id/permissions/:permissionId', async request => runtime.resolvePermission(request.params.id, request.params.permissionId, request.body.approved));
-  app.get<{ Params: { id: string }; Querystring: { after?: string } }>('/api/sessions/:id/events', async request => runtime.getEvents(request.params.id, Number(request.query.after ?? 0)));
+  const parseEventCursor = (value: string | undefined, name: string) => {
+    if (value === undefined) return undefined;
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) throw new RuntimeError('INVALID_EVENT_CURSOR', `${name} must be a non-negative integer`, 400);
+    return parsed;
+  };
+  const parseEventLimit = (value: string | undefined) => {
+    const parsed = parseEventCursor(value, 'limit');
+    if (parsed !== undefined && (parsed < 1 || parsed > 1_000)) throw new RuntimeError('INVALID_EVENT_LIMIT', 'limit must be an integer between 1 and 1000', 400);
+    return parsed;
+  };
+  app.get<{ Params: { id: string }; Querystring: { after?: string; before?: string; limit?: string; direction?: string } }>('/api/sessions/:id/events', async request => {
+    const { after, before, limit, direction } = request.query;
+    if (direction !== undefined && direction !== 'forward' && direction !== 'backward') throw new RuntimeError('INVALID_EVENT_DIRECTION', `Unknown event direction: ${direction}`, 400);
+    return runtime.getEventWindow(request.params.id, {
+      afterSequence: parseEventCursor(after, 'after'),
+      beforeSequence: parseEventCursor(before, 'before'),
+      limit: parseEventLimit(limit),
+      direction: (direction ?? (after !== undefined ? 'forward' : 'backward')) as 'forward' | 'backward'
+    });
+  });
   app.get<{ Params: { id: string } }>('/api/sessions/:id/tasks', async request => runtime.getTasks(request.params.id));
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>('/api/sessions/:id/stream', async (request, reply) => {
     const fromHeader = request.headers['last-event-id'];
-    const queryAfter = Number(request.query.after ?? 0);
-    const headerAfter = Number((Array.isArray(fromHeader) ? fromHeader[0] : fromHeader) ?? 0);
+    const queryAfter = parseEventCursor(request.query.after, 'after') ?? 0;
+    const rawHeaderAfter = (Array.isArray(fromHeader) ? fromHeader[0] : fromHeader);
+    const headerAfter = parseEventCursor(rawHeaderAfter, 'Last-Event-ID') ?? 0;
     const after = Math.max(queryAfter, headerAfter);
     reply.hijack();
     streams.add(reply.raw);
     reply.raw.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
-    reply.raw.write(': connected\n\n');
-    const write = (event: any) => reply.raw.write(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
-    for (const event of await runtime.getEvents(request.params.id, after)) write(event);
-    const unsubscribe = runtime.subscribe(request.params.id, write);
-    const heartbeat = setInterval(() => reply.raw.write(': heartbeat\n\n'), 15_000);
-    request.raw.once('close', () => { clearInterval(heartbeat); unsubscribe(); streams.delete(reply.raw); });
+    let closed = false;
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
+    let delivered = after;
+    let replaying = true;
+    let unsubscribe = () => {};
+    let livePump: Promise<void> | undefined;
+    const pendingLive: any[] = [];
+    const drainClosers = new Set<() => void>();
+    const maxPendingLive = 1_000;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      replaying = false;
+      pendingLive.length = 0;
+      if (heartbeat) clearInterval(heartbeat);
+      unsubscribe();
+      for (const close of drainClosers) close();
+      drainClosers.clear();
+      streams.delete(reply.raw);
+    };
+    const waitForDrain = () => new Promise<boolean>(resolve => {
+      let settled = false;
+      const finish = (drained: boolean) => {
+        if (settled) return;
+        settled = true;
+        reply.raw.off('drain', onDrain);
+        drainClosers.delete(onClose);
+        resolve(drained);
+      };
+      const onDrain = () => finish(true);
+      const onClose = () => finish(false);
+      drainClosers.add(onClose);
+      reply.raw.once('drain', onDrain);
+      if (closed || reply.raw.destroyed) onClose();
+    });
+    const writeChunk = async (chunk: string) => {
+      if (closed || reply.raw.destroyed) return false;
+      return reply.raw.write(chunk) || await waitForDrain();
+    };
+    const writeEvent = (event: any) => writeChunk(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    const disconnectSlowClient = () => {
+      cleanup();
+      reply.raw.destroy();
+    };
+    const pumpLive = () => {
+      if (livePump || closed || replaying) return;
+      livePump = (async () => {
+        while (!closed && pendingLive.length > 0) {
+          const event = pendingLive.shift()!;
+          if (event.sequence <= delivered) continue;
+          if (!await writeEvent(event)) return;
+          delivered = event.sequence;
+        }
+      })().finally(() => {
+        livePump = undefined;
+        if (!closed && pendingLive.length > 0) pumpLive();
+      });
+    };
+    const enqueueLive = (event: any) => {
+      if (closed || event.sequence <= delivered) return;
+      if (pendingLive.length >= maxPendingLive) return disconnectSlowClient();
+      pendingLive.push(event);
+      pumpLive();
+    };
+    // Subscribe before replaying persisted events. Otherwise an event emitted
+    // between getEvents() and subscribe() is neither in the replay nor live
+    // stream and the client can keep stale task state forever. Sequence-based
+    // filtering makes the overlap idempotent.
+    unsubscribe = runtime.subscribe(request.params.id, enqueueLive);
+    // Install cleanup before the replay await. A client can disconnect while
+    // storage is still reading, and Node will not replay an already-fired close.
+    request.raw.once('close', cleanup);
+    try {
+      if (!await writeChunk(': connected\n\n')) return;
+      // A fresh stream only needs the latest visible window; reconnects page
+      // forward in bounded batches so storage and heap never materialize an
+      // unbounded session history at once. Waiting for drain also bounds the
+      // socket buffer when a reconnecting client reads slowly.
+      if (after === 0) {
+        const replay = await runtime.getEventWindow(request.params.id, { direction: 'backward', limit: 200 });
+        if (closed) return;
+        for (const event of replay) {
+          if (!await writeEvent(event)) return;
+          delivered = Math.max(delivered, event.sequence);
+        }
+      } else {
+        while (!closed) {
+          const cursor = delivered;
+          const replay = await runtime.getEventWindow(request.params.id, { afterSequence: cursor, direction: 'forward', limit: 1_000 });
+          if (closed) return;
+          for (const event of replay) {
+            if (!await writeEvent(event)) return;
+            delivered = Math.max(delivered, event.sequence);
+          }
+          if (replay.length < 1_000) break;
+          if (delivered <= cursor) break;
+        }
+      }
+      replaying = false;
+      pendingLive.sort((left, right) => left.sequence - right.sequence);
+      pumpLive();
+    } catch (error) {
+      const disconnected = closed;
+      cleanup();
+      if (disconnected) return;
+      reply.raw.end();
+      throw error;
+    }
+    if (!closed) heartbeat = setInterval(() => { if (!closed && !reply.raw.writableNeedDrain) reply.raw.write(': heartbeat\n\n'); }, 15_000);
   });
 
   if (options.webRoot) {

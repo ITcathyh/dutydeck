@@ -6,7 +6,7 @@ describe('working directory configuration', () => {
     const config = loadConfig({});
     expect(config.agents.every(agent => agent.cwd === process.cwd())).toBe(true);
     expect(config.databaseUrl).toBe(`${process.cwd()}/.dockmux/dockmux.db`);
-    expect(config.host).toBe('0.0.0.0');
+    expect(config.host).toBe('127.0.0.1');
     expect(config.driverIdleTimeoutMs).toBe(21_600_000);
     expect(config.cleanupIntervalMs).toBe(300_000);
     expect(config.agents.some(agent => ['mock-acp', 'jsonl-demo', 'pty-demo'].includes(agent.id))).toBe(false);
@@ -27,6 +27,13 @@ describe('working directory configuration', () => {
     const custom = { id: 'custom', name: 'Custom', command: process.execPath, args: [], protocol: 'acp' };
     const configured = loadConfig({ DOCKMUX_DEFAULT_CWD: cwd, DOCKMUX_AGENTS_JSON: JSON.stringify([custom]) });
     expect(configured.agents.find(agent => agent.id === 'custom')?.cwd).toBe(cwd);
+    expect(configured.agents.find(agent => agent.id === 'custom')?.permissionMode).toBe('ask');
+  });
+
+  it('keeps an explicit legacy permissionMode while defaulting omitted configs to ask', () => {
+    const explicit = { id: 'trusted', name: 'Trusted', command: process.execPath, protocol: 'acp', permissionMode: 'full-trust' };
+    const configured = loadConfig({ DOCKMUX_AGENTS_JSON: JSON.stringify([explicit]) });
+    expect(configured.agents.find(agent => agent.id === 'trusted')?.permissionMode).toBe('full-trust');
   });
 
   it('preserves an agent-specific cwd over the server default', () => {

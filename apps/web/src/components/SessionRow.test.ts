@@ -16,15 +16,17 @@ const session: Session = {
 };
 
 describe('SessionRow', () => {
-  it('renders agent name and cwd when inactive', () => {
-    const html = renderToStaticMarkup(createElement(SessionRow, { session, agent, active: false, onClick: () => {} }));
+  it('renders the agent run identity without promoting Session language', () => {
+    const html = renderToStaticMarkup(createElement(SessionRow, { session, summary: { sessionId: session.id, taskId: 'task-1', prompt: '修复登录超时', status: 'running', queuedCount: 0, updatedAt: '' }, agent, active: false, onClick: () => {} }));
     expect(html).toContain('Codex');
-    expect(html).toContain('/tmp/dockmux-project');
+    expect(html).toContain('修复登录超时');
+    expect(html).toContain('就绪');
+    expect(html).not.toContain('Session');
   });
 
   it('renders with active styling when active', () => {
     const html = renderToStaticMarkup(createElement(SessionRow, { session, agent, active: true, onClick: () => {} }));
     expect(html).toContain('Codex');
-    expect(html).toContain('shadow-[0_2px_8px_rgba(24,24,27,.055)]');
+    expect(html).toContain('shadow-[inset_3px_0_0_#5eead4]');
   });
 });

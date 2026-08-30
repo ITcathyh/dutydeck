@@ -18,18 +18,17 @@ export type ListenerLog = {
 
 export interface LarkRuntime {
   start(input: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string }): Promise<Session>;
+  listAgents?(): Promise<Array<{ id: string; name: string }>>;
   listSessions?(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
   stop?(id: string): Promise<unknown>;
-  setPermissionMode?(id: string, mode: PermissionMode): Promise<Session>;
-  send(id: string, prompt: string, agentPrompt?: string): Promise<unknown>;
+  send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy): Promise<unknown>;
   dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy): Promise<{ id: string; status: string; queuedAhead?: number }>;
   getTasks?(id: string): Promise<TaskRecord[]>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;
   interrupt(id: string): Promise<unknown>;
   cancelQueued?(id: string, taskId: string): Promise<unknown>;
-  setRiskPolicy?(id: string, policy?: ToolRiskPolicy): Promise<unknown>;
   subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
 
@@ -183,7 +182,7 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
   get activeAppIds() { return [...this.listeners.keys()]; }
 
   async sync(configs: StoredLarkConfig[]) {
-    const enabled = new Map(configs.filter(config => config.listening).map(config => [config.appId, config]));
+    const enabled = new Map(configs.filter(config => config.listening && config.fullTrustConfirmed === true).map(config => [config.appId, config]));
     for (const [appId, listener] of this.listeners) {
       if (enabled.has(appId)) continue;
       listener.stop();

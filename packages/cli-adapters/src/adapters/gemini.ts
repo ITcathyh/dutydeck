@@ -7,10 +7,10 @@ export function createGeminiAdapter(): CliAdapter {
     id: 'gemini',
     capabilities: { initialPromptViaArgs: true },
 
-    buildArgs({ initialPrompt, model }: AdapterSessionContext): string[] {
+    buildArgs({ initialPrompt, model, permissionMode }: AdapterSessionContext): string[] {
       // Gemini CLI 自己管会话（--resume 只吃 "latest"/索引/UUID，不吃外部
       // 会话 id），永远新起会话。
-      const args = ['--yolo'];
+      const args: string[] = permissionMode === 'full-trust' ? ['--yolo'] : [];
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

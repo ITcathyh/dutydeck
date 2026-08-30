@@ -12,7 +12,7 @@ export function createCocoAdapter(): CliAdapter {
     id: 'coco',
     capabilities: { resume: true },
 
-    buildArgs({ sessionId, resume, resumeSessionId, model }: AdapterSessionContext): string[] {
+    buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
       // CoCo 的会话目录是 `<cache>/coco/sessions/<uuid>/`，只认裸 UUID；
       // dockmux sessionId 形如 "ses_<uuid>"，前缀必须剥掉。
       const uuid = sessionId.replace(/^ses_/, '');
@@ -25,8 +25,7 @@ export function createCocoAdapter(): CliAdapter {
       } else {
         args.push('--session-id', uuid);
       }
-      // dockmux MVP 无人值守：bypass 权限确认（botmux !disableCliBypass 分支）。
-      args.push('--yolo');
+      if (permissionMode === 'full-trust') args.push('--yolo');
       if (model && model.trim()) {
         // 模型覆盖必须走嵌套 key：`--config model=…` 直接 exit 1，
         // `--config model.name=…` 才能正常启动。

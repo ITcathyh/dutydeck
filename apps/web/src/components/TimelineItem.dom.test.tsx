@@ -26,9 +26,9 @@ describe('TimelineItem 事件分发', () => {
     expect(screen.getByText('失败')).toBeTruthy();
   });
 
-  it('permission_request → PermissionCard，展示「操作已拦截」与标题', () => {
+  it('permission_request → PermissionCard，展示审批提示与标题', () => {
     render(<TimelineItem event={event('permission_request', { title: '写入 /etc/hosts', status: 'pending' })}/>);
-    expect(screen.getByText('操作已拦截')).toBeTruthy();
+    expect(screen.getByText('需要操作授权')).toBeTruthy();
     expect(screen.getByText('写入 /etc/hosts')).toBeTruthy();
   });
 

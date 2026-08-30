@@ -66,6 +66,8 @@ export type PersistedLarkCardTask = {
   state: LarkTaskState;
   started_at: number;
   last_successful_elements?: LarkCardElement[];
+  /** Daemon recovery already removed stale in-memory card actions. */
+  recovery_read_only?: boolean;
 };
 const acknowledgementEmojis = ['OK', 'THUMBSUP', 'FINGERHEART', 'APPLAUSE', 'JIAYI', 'SMILE'] as const;
 
@@ -78,16 +80,17 @@ async function sendTaskCard(
   input: Omit<Parameters<LarkCardService['send']>[0], 'chatId'>,
   log?: { warn: (...args: any[]) => void }
 ) {
+  const executionInput = { permissionMode: 'full-trust' as const, ...input };
   if (event.chatType === 'group' && typeof service.reply === 'function') {
     try {
-      return await service.reply({ ...larkReplyContext(event), ...input });
+      return await service.reply({ ...larkReplyContext(event), ...executionInput });
     } catch (error) {
       // 回复触发消息失败（例如消息已被删除）时，回退为群内发送，保证卡片仍能送达。
       log?.warn({ error, messageId: event.messageId, chatId: event.chatId }, '回复卡片失败，回退为群内发送');
-      return await service.send({ chatId: event.chatId, ...input });
+      return await service.send({ chatId: event.chatId, ...executionInput });
     }
   }
-  return await service.send({ chatId: event.chatId, ...input });
+  return await service.send({ chatId: event.chatId, ...executionInput });
 }
 
 export class LarkMessageCoordinator {
@@ -399,6 +402,13 @@ export class LarkMessageCoordinator {
       task.prompt = await this.buildEmptyMessageFallback(event);
     }
     const prompt = task.prompt;
+    let agentName = config.defaultAgentId ?? 'Dockmux';
+    try {
+      agentName = (await this.runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? agentName;
+    } catch (error) {
+      this.log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 渲染卡片');
+    }
+    const cardContext = { agentName, ...(config.workspace ? { workspace: config.workspace } : {}) };
     const firstAttempt = !task.cardMessageId;
     const emojiType = acknowledgementEmojis[Math.floor(this.random() * acknowledgementEmojis.length)] ?? acknowledgementEmojis[0];
     let reactionId: string | undefined;
@@ -418,7 +428,7 @@ export class LarkMessageCoordinator {
     const highRiskAllowedUsers = config.highRiskAllowedUsers ?? [];
     const highRiskAllowedEmails = config.highRiskAllowedEmails ?? [];
     const highRiskPattern = config.highRiskPattern || defaultHighRiskPattern;
-    const gateEnabled = config.gateEnabled === true;
+    const riskControlEnabled = config.riskControlMode !== 'off';
     const botSender = event.senderType === 'app' || event.senderType === 'bot';
     let trustedPeerBot = false;
     if (botSender) {
@@ -426,19 +436,19 @@ export class LarkMessageCoordinator {
         trustedPeerBot = Boolean(config.groupToolsEnabled && event.senderOpenId && await this.peerBotAuthorized?.(event.chatId, event.senderOpenId));
       } catch (error) {
         task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
-        const card = await sendTaskCard(this.service, event, { state: 'failed', retryable: false, taskId: task.id, taskName: 'Agent 协作身份校验失败', markdown: `**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: 'Agent 协作身份校验失败', markdown: `**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
         task.cardMessageId = card.messageId;
         if (reactionId) await this.service.deleteReaction(event.messageId, reactionId).catch(() => undefined);
         return;
       }
-    } else if ((!allowedUsers.length && allowedEmails.length) || (gateEnabled && !highRiskAllowedUsers.length && highRiskAllowedEmails.length)) {
+    } else if ((!allowedUsers.length && allowedEmails.length) || (riskControlEnabled && !highRiskAllowedUsers.length && highRiskAllowedEmails.length)) {
       try {
         if (!event.senderOpenId) throw new Error('消息事件未包含发送人 open_id');
         actorEmails = await this.service.getUserEmails(event.senderOpenId);
         if (!actorEmails.length) throw new LarkServiceError('LARK_SENDER_EMAIL_EMPTY', '飞书没有返回当前发送人的邮箱字段', 409);
       } catch (error) {
         task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
-        const card = await sendTaskCard(this.service, event, { state: 'failed', retryable: false, taskId: task.id, taskName: '身份解析权限缺失', markdown: larkIdentityPermissionHelp(error, config.appId), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '身份解析权限缺失', markdown: larkIdentityPermissionHelp(error, config.appId), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
         task.cardMessageId = card.messageId;
         if (reactionId) await this.service.deleteReaction(event.messageId, reactionId).catch(() => undefined);
         return;
@@ -454,32 +464,32 @@ export class LarkMessageCoordinator {
       : !accessRestricted || (allowedUsers.length ? Boolean(allowedUser) : actorEmails.some(email => allowedEmails.includes(email)));
     if (!allowed) {
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
-      const card = await sendTaskCard(this.service, event, { state: 'failed', retryable: false, taskId: task.id, taskName: '访问被拒绝', markdown: '**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。', ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '访问被拒绝', markdown: '**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。', ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
       if (reactionId) await this.service.deleteReaction(event.messageId, reactionId).catch(() => undefined);
       return;
     }
     const highRiskAuthorized = botSender
       ? false
-      : (!gateEnabled || (!highRiskAllowedUsers.length && !highRiskAllowedEmails.length)
+      : (!riskControlEnabled || (!highRiskAllowedUsers.length && !highRiskAllowedEmails.length)
           ? allowed
           : highRiskAllowedUsers.length
             ? Boolean(highRiskAllowedUser)
             : actorEmails.some(email => highRiskAllowedEmails.includes(email)));
     const actorEmail = actorEmails[0];
-    const riskPolicy: ToolRiskPolicy = {
-      enabled: gateEnabled && config.hardGateEnabled,
+    const riskPolicy: ToolRiskPolicy | undefined = config.riskControlMode === 'enforced' ? {
+      enabled: true,
       authorized: highRiskAuthorized,
       pattern: highRiskPattern,
       ...(actorEmail ? { actorEmail } : {}),
       reason: '当前飞书发送人不在高危操作允许名单中'
-    };
+    } : undefined;
     let session: Session;
     try { session = await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId); }
     catch (error) {
       task.state = 'failed'; task.startedAt = Date.now();
       const markdown = `**Agent 启动失败**\n\n${error instanceof Error ? error.message : String(error)}`;
-      const card = await sendTaskCard(this.service, event, { state: 'failed', taskId: task.id, taskName: prompt.slice(0, 80), markdown, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', taskId: task.id, taskName: prompt.slice(0, 80), markdown, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
       if (reactionId) await this.service.deleteReaction(event.messageId, reactionId).catch(() => undefined);
       return;
@@ -491,9 +501,9 @@ export class LarkMessageCoordinator {
     task.interruptRequested = false;
     const initialElements = boundLarkCardElements(renderLarkCardElements([], config));
     if (task.cardMessageId) {
-      await this.service.update({ messageId: task.cardMessageId, state: 'running', taskId: task.id, taskName: prompt.slice(0, 80), markdown: '正在思考中…', sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+      await this.service.update({ ...cardContext, messageId: task.cardMessageId, permissionMode: 'full-trust', state: 'running', taskId: task.id, taskName: prompt.slice(0, 80), markdown: '正在思考中…', sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
     } else {
-      const card = await sendTaskCard(this.service, event, { state: 'running', taskId: task.id, taskName: prompt.slice(0, 80), markdown: '正在思考中…', sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'running', taskId: task.id, taskName: prompt.slice(0, 80), markdown: '正在思考中…', sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
     }
     task.lastSuccessfulElements = initialElements;
@@ -572,6 +582,7 @@ export class LarkMessageCoordinator {
                 ? patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined)
                 : boundLarkCardElements(renderLarkCardElements(task.events, config, pending.completed, true));
               const replacement = await sendTaskCard(this.service, event, {
+                ...cardContext,
                 state: pending.input.state,
                 taskId: task.id,
                 taskName: prompt.slice(0, 80),
@@ -590,6 +601,7 @@ export class LarkMessageCoordinator {
                 try {
                   const patchedElements = patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined);
                   const minimal = await sendTaskCard(this.service, event, {
+                    ...cardContext,
                     state: pending.input.state,
                     taskId: task.id,
                     taskName: prompt.slice(0, 80),
@@ -625,7 +637,9 @@ export class LarkMessageCoordinator {
         terminal: state !== 'running',
         completed,
         input: {
+          ...cardContext,
           messageId: task.cardMessageId!,
+          permissionMode: 'full-trust',
           state,
           taskId: task.id,
           taskName: prompt.slice(0, 80),
@@ -658,7 +672,7 @@ export class LarkMessageCoordinator {
 - 若内容是独立公告、新任务或不应归入当前讨论，使用 group send 且不要传 --reply-to/--in-thread。
 - reply-to 只能使用 om_* message_id，不能使用 omt_* thread_id。`);
     }
-    if (gateEnabled && !highRiskAuthorized) injected.push(`[Dockmux 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dockmux 安全策略阻止。`);
+    if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dockmux 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dockmux 安全策略阻止。`);
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${prompt}` : prompt;
 
     if (this.runtime.dispatch) {
@@ -729,14 +743,16 @@ export class LarkMessageCoordinator {
         else receive(agentEvent);
       });
       try {
-        const runtimeTask = await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy);
+        const runtimeTask = riskPolicy
+          ? await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy)
+          : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt);
         runtimeTaskId = runtimeTask.id;
         task.runtimeTaskId = runtimeTask.id;
         await this.saveCardTask(task, runtimeTask.status === 'queued' ? 'queued' : task.state);
         for (const agentEvent of buffered) receive(agentEvent);
         buffered = [];
         if (runtimeTask.status === 'queued' && (runtimeTask.queuedAhead ?? 0) > 0 && task.state === 'queued') {
-          await this.service.update({ messageId: task.cardMessageId!, state: 'queued', taskId: task.id, taskName: prompt.slice(0, 80), markdown: `正在排队，前面还有 ${runtimeTask.queuedAhead} 个任务…`, sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+          await this.service.update({ ...cardContext, messageId: task.cardMessageId!, permissionMode: 'full-trust', state: 'queued', taskId: task.id, taskName: prompt.slice(0, 80), markdown: `正在排队，前面还有 ${runtimeTask.queuedAhead} 个任务…`, sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
           await this.saveCardTask(task, 'queued');
         }
       } catch (error) {
@@ -759,8 +775,8 @@ export class LarkMessageCoordinator {
     try {
       heartbeatActive = true;
       scheduleHeartbeat();
-      await this.runtime.setRiskPolicy?.(session.id, riskPolicy);
-      if (agentPrompt === prompt) await this.runtime.send(session.id, prompt);
+      if (riskPolicy) await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy);
+      else if (agentPrompt === prompt) await this.runtime.send(session.id, prompt);
       else await this.runtime.send(session.id, prompt, agentPrompt);
       // 若轮次已变（用户在 send 期间点击了重试），本轮不得覆盖新状态。
       if (task.turn !== currentTurn) return;

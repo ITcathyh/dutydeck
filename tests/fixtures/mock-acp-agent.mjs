@@ -16,7 +16,10 @@ rl.on('line', async line => {
   }
   if (method === 'session/new') {
     const sessionId = `mock-${Date.now()}`; sessions.add(sessionId);
-    return send({ jsonrpc: '2.0', id, result: { sessionId } });
+    const configOptions = process.env.MOCK_VENDOR_TOKEN
+      ? [{ type: 'select', id: 'model', name: 'Model', category: 'model', currentValue: 'bridged-model', options: [{ value: 'bridged-model', name: 'Bridged Model' }] }]
+      : undefined;
+    return send({ jsonrpc: '2.0', id, result: { sessionId, ...(configOptions ? { configOptions } : {}) } });
   }
   if (method === 'session/load' || method === 'session/resume') {
     if (process.env.mock_acp_reject_unknown_load === '1' && !sessions.has(params.sessionId)) return send({ jsonrpc: '2.0', id, error: { code: -32602, message: `Resource not found: ${params.sessionId}` } });
@@ -24,6 +27,10 @@ rl.on('line', async line => {
   }
   if (method === 'session/prompt') {
     const prompt = (params.prompt ?? []).map(p => p.text ?? '').join('');
+    if (prompt.includes('report bridged environment')) {
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Bridged: ${process.env.MOCK_VENDOR_TOKEN ?? 'missing'}` } } } });
+      return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
+    }
     if (prompt.includes('crash')) process.exit(17);
     if (prompt.includes('permission')) {
       const decision = await request('session/request_permission', { sessionId: params.sessionId, toolCall: { title: 'Edit a file', kind: 'edit', status: 'pending', toolCallId: 'permission-tool', content: [], locations: [] }, options: [{ kind: 'allow_once', name: 'Allow', optionId: 'allow' }, { kind: 'reject_once', name: 'Deny', optionId: 'deny' }] });

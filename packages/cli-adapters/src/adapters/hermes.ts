@@ -7,15 +7,13 @@ export function createHermesAdapter(): CliAdapter {
     id: 'hermes',
     capabilities: { resume: true },
 
-    buildArgs({ sessionId, resume, resumeSessionId }: AdapterSessionContext): string[] {
+    buildArgs({ sessionId, resume, resumeSessionId, permissionMode }: AdapterSessionContext): string[] {
       const args: string[] = [];
       // Hermes 的会话存在 ~/.hermes/state.db（不是 cwd 作用域的 JSONL）；
       // `--pass-session-id` 让它接受我们传的 id，所以无 resumeSessionId 时回退
       // 到 dockmux 自己的 sessionId 就是精确续接。
       if (resume) args.push('--resume', resumeSessionId ?? sessionId);
-      // dockmux MVP 无人值守：bypass 权限确认 + 自动接受 hook
-      //（botmux !disableCliBypass 分支）。
-      args.push('--yolo', '--accept-hooks');
+      if (permissionMode === 'full-trust') args.push('--yolo', '--accept-hooks');
       args.push('--pass-session-id');
       return args;
     },

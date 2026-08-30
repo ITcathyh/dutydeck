@@ -8,7 +8,7 @@ export function SystemPromptModal({ open, session, onClose }: SystemPromptModalP
   if (!open || !session?.systemPrompt) return null;
   return <div className="ui-overlay fixed inset-0 z-30 grid place-items-center bg-zinc-950/30 p-4 backdrop-blur-[2px]" onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}>
     <div className="ui-dialog flex max-h-[80dvh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-[0_24px_80px_rgba(24,24,27,.2)]">
-      <div className="flex items-center border-b border-zinc-100 px-4 py-3"><div className="min-w-0"><h2 className="text-[14px] font-semibold text-zinc-900">系统提示词</h2><p className="mt-0.5 truncate text-[11px] text-zinc-500">该 Session 创建时注入的系统提示词</p></div><span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span></div>
+      <div className="flex items-center border-b border-zinc-100 px-4 py-3"><div className="min-w-0"><h2 className="text-[14px] font-semibold text-zinc-900">系统提示词</h2><p className="mt-0.5 truncate text-[11px] text-zinc-500">该任务运行创建时注入的系统提示词</p></div><span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span></div>
       <div className="overflow-y-auto px-4 py-4"><pre className="m-0 whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-zinc-700">{session.systemPrompt}</pre></div>
     </div>
   </div>;

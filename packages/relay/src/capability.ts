@@ -65,7 +65,7 @@ export class RelayCapabilityRegistry {
 
   /**
    * 注入子进程的环境变量。**任何会话都返回**（不像 lark 版要求先有飞书绑定），
-   * 这正是 M3 要补的缺口：Web 工作台创建的 pty-cli 会话此前完全没有回传通道。
+   * 因此 Web 与飞书创建的 pty-cli 会话都具备同一套回传能力。
    */
   environmentFor(sessionId: string): Record<string, string> {
     return {

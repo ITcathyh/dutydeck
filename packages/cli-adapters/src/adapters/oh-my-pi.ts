@@ -109,14 +109,13 @@ export function createOhMyPiAdapter(): CliAdapter {
 
     // 绝不把 prompt 当位置参数传：OMP 只会把它塞进 TUI 输入框、不自动提交。
     // prompt 一律走 writeInput，由 dockmux 掌握最终的提交键。
-    buildArgs({ resume, resumeSessionId, model, cwd }: AdapterSessionContext): string[] {
+    buildArgs({ resume, resumeSessionId, model, cwd, permissionMode }: AdapterSessionContext): string[] {
       const args = ['--no-title'];
       // OMP 的 `--resume` 吃的是 transcript 文件路径，不是会话 id
       // （botmux 靠扫描 session 目录里最新的 .jsonl 得到它，该探测已丢弃）。
       const usable = usableResumeId(resumeSessionId);
       if (resume && usable) args.push('--resume', usable);
-      // dockmux MVP 无人值守：固定走 botmux 的 bypass 分支（!disableCliBypass）。
-      args.push('--approval-mode', 'yolo');
+      if (permissionMode === 'full-trust') args.push('--approval-mode', 'yolo');
       if (model && model.trim()) args.push('--model', model.trim());
       if (cwd) args.push('--cwd', cwd);
       return args;

@@ -14,12 +14,12 @@ export function createCopilotAdapter(): CliAdapter {
     id: 'copilot',
     capabilities: { resume: true },
 
-    buildArgs({ resume, resumeSessionId, model }: AdapterSessionContext): string[] {
+    buildArgs({ resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
       // --allow-all-tools 把 Copilot 放到与 cursor --force / claude-code
       // --dangerously-skip-permissions 同级的「不逐工具审批」姿态。没有它，
       // 每次 shell/编辑都会弹回 TUI 等确认，而 IM 用户看不到终端。
-      // dockmux MVP 无人值守，恒定加上。
-      const args: string[] = ['--allow-all-tools'];
+      // 只有用户显式选择 full-trust 时才加。
+      const args: string[] = permissionMode === 'full-trust' ? ['--allow-all-tools'] : [];
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

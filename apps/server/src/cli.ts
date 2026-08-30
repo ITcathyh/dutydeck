@@ -10,7 +10,7 @@ import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupWait } from './lark/agent-tools-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { RelayCliError } from '@dockmux/relay';
-import { agentDockGroupToolsCommand } from './lark/agent-tools.js';
+import { dockmuxGroupToolsCommand } from './lark/agent-tools.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop } from './daemon/command.js';
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
@@ -24,7 +24,7 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 try { loadEnvFile(); } catch {}
 
 async function serve(options: CliOptions, onReady?: () => void) {
-  const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: agentDockGroupToolsCommand(fileURLToPath(import.meta.url)) });
+  const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dockmuxGroupToolsCommand(fileURLToPath(import.meta.url)) });
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`
     : `http://${service.config.host.includes(':') ? `[${service.config.host}]` : service.config.host}:${service.config.port}`;

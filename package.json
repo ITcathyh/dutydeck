@@ -17,6 +17,7 @@
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run",
     "test:watch": "vitest",
+    "benchmark": "pnpm --filter @dockmux/web build && node --expose-gc --import tsx scripts/benchmark-history.mts && node --expose-gc --import tsx scripts/benchmark-browser.mts",
     "smoke": "node scripts/e2e-smoke.mjs"
   },
   "devDependencies": {
@@ -26,6 +27,7 @@
     "@dockmux/shared": "workspace:*",
     "@dockmux/storage": "workspace:*",
     "@larksuiteoapi/node-sdk": "^1.71.1",
+    "@playwright/test": "1.62.1",
     "@types/node": "22.15.30",
     "tsx": "4.20.3",
     "typescript": "5.8.3",

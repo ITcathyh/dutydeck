@@ -1,46 +1,10 @@
-# Dockmux MVP acceptance plan
+# Dockmux 1.0 文档入口
 
-Dockmux is a channel-independent workspace for operating local or remote coding agents. ACP is the preferred protocol and `acpx@0.13.0` is the owned runtime boundary. JSONL, pipe, and PTY are compatibility fallbacks.
+此路径为旧链接兼容入口，不再维护旧版分阶段验收计划。Dockmux 1.0 只有一套完整交付标准：
 
-## Acceptance criteria
+1. [产品定义](./product-1.0.md)：定位、核心对象、Web 与飞书体验、非目标；
+2. [架构](./architecture-1.0.md)：运行边界、恢复、安全和兼容不变量；
+3. [验收矩阵](./acceptance-1.0.md)：Web、飞书、Runtime、性能和发布证据；
+4. [包边界审计](./package-boundaries-1.0.md)：生产依赖与暂未接入的实验包。
 
-1. Sessions implement `start`, `send`, `interrupt`, `pause`, `resume`, `stop`, and `restart`; interrupt preserves the session while stop terminates its process tree.
-2. Runtime states include `created`, `starting`, `idle`, `thinking`, `running_tool`, `waiting_for_permission`, `interrupting`, `interrupted`, `completed`, `failed`, and `stopped`.
-3. Agent configuration supports name, command, args, protocol, model, cwd, env, permission mode, and timeout. A capability probe chooses ACP, JSONL, pipe, then PTY.
-4. Built-in definitions exist for Codex, Claude, Cursor, Pi, TraeX, a mock ACP agent, a custom ACP agent, JSONL fallback, and PTY fallback.
-5. TraeX is an ACP agent reached through the pinned acpx custom-agent boundary. Its executable and ACP arguments are configurable; Dockmux does not embed TraeX-specific runtime logic.
-6. All output is normalized to text, thinking, tool call, tool result, permission request, status, error, completed, or raw terminal events. Unparseable output is retained as raw terminal data.
-7. Tool calls retain id, name, input, output, status, startedAt, and completedAt and correlate updates by id.
-8. Fastify exposes the required session, event, SSE stream, permission, and agent endpoints. Routes only call the Dockmux runtime.
-9. React UI includes sessions, agent/model/cwd setup, live Markdown, collapsible tools, permissions, errors, states, lifecycle controls, and raw terminal output.
-10. SQLite persists AgentConfig, Machine, Project, Session, Task, Event, ToolCall, PermissionRequest, Error, and ChannelMapping exclusively through repository interfaces.
-11. Full-trust permission mode is never the default.
-
-## Acceptance tests (written before implementation)
-
-The automated suite covers: mock ACP initialization and streaming; tool/result correlation; permission approve/reject; interrupt; process-tree cleanup on stop; a new run instance on restart; abnormal exit errors; ACP→JSONL and JSONL→PTY fallback; lossless raw PTY output; SSE reconnect with `Last-Event-ID`; SQLite save/restore; explicit unsupported pause/resume errors; safe default permissions; custom ACP configuration; built-in Codex/Claude/Cursor/Pi probes; and all twelve TraeX-specific cases in the supplied brief.
-
-## Target directory structure
-
-```text
-apps/
-  server/          Fastify API and SSE composition root
-  web/             React, Vite, Tailwind, Zustand, TanStack Query
-packages/
-  agent-runtime/   Lifecycle/state machine and normalized event orchestration
-  acp-client/      Pinned acpx process adapter
-  transports/      Probe, JSONL/pipe/PTY process transports
-  renderer/        Shared event rendering helpers
-  storage/         Drizzle schema and repository implementations
-  config/          Validated agent/application configuration
-  shared/          Domain types, schemas, errors, and repository contracts
-tests/fixtures/     Mock ACP, JSONL, and PTY agents
-docs/              Acceptance plan and architecture notes
-```
-
-## Evidence required for completion
-
-- `pnpm test` passes the acceptance suite.
-- `pnpm typecheck` and `pnpm build` pass across the workspace.
-- A server smoke test creates a session, receives an SSE event, and exercises a lifecycle action.
-- README and `.env.example` document installation, acpx/TraeX configuration, commands, safety defaults, and fallback behavior.
+内部可以并行实施，但不能把任何章节当成可单独发布的精简版本。以 [acceptance-1.0.md](./acceptance-1.0.md) 为最终验收入口。

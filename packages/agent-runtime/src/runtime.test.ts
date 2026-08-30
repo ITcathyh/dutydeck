@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dockmux/storage';
-import type { AgentConfig, Session } from '@dockmux/shared';
+import type { AgentConfig, Session, ToolRiskPolicy } from '@dockmux/shared';
 import { DockmuxRuntime, type AgentDriver, type DriverFactory } from './index.js';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
 
@@ -99,20 +102,37 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
-  it('forces complete access even when Agent config or session input requests approval', async () => {
+  it('preserves the configured permission posture and lets session input make it stricter', async () => {
     const h = harness(); await h.runtime.initialize([{ ...agent, permissionMode: 'ask' }]);
     const session = await h.runtime.start({ agentId: 'mock', permissionMode: 'deny-all' });
-    expect(session.permissionMode).toBe('full-trust');
-    expect(h.configuredAgents[0]?.permissionMode).toBe('full-trust');
-    expect((await h.runtime.listAgents())[0]?.permissionMode).toBe('full-trust');
+    expect(session.permissionMode).toBe('deny-all');
+    expect(h.configuredAgents[0]?.permissionMode).toBe('deny-all');
+    expect((await h.runtime.listAgents())[0]?.permissionMode).toBe('ask');
     await h.runtime.shutdown(); h.repos.close();
   });
 
-  it('migrates persisted sessions to complete access during initialization', async () => {
+  it('preserves the permission posture of persisted sessions during initialization', async () => {
     const h = harness();
     await h.repos.sessions.save({ id: 'ses_old', agentId: 'mock', state: 'idle', cwd: '/tmp', permissionMode: 'ask', runId: 'run_old', createdAt: '', updatedAt: '' });
     await h.runtime.initialize([agent]);
-    expect(await h.runtime.getSession('ses_old')).toMatchObject({ permissionMode: 'full-trust' });
+    expect(await h.runtime.getSession('ses_old')).toMatchObject({ permissionMode: 'ask' });
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('switches permission mode only when the live driver can apply it', async () => {
+    const h = harness(); await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    await expect(h.runtime.setPermissionMode(session.id, 'full-trust')).resolves.toMatchObject({ permissionMode: 'full-trust' });
+    expect(h.driver.setPermissionMode).toHaveBeenCalledWith('full-trust');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not persist a permission change that a live driver cannot apply', async () => {
+    const h = harness(); await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    delete h.driver.setPermissionMode;
+    await expect(h.runtime.setPermissionMode(session.id, 'full-trust')).rejects.toMatchObject({ code: 'PERMISSION_MODE_SWITCH_UNSUPPORTED', statusCode: 422 });
+    expect(await h.runtime.getSession(session.id)).toMatchObject({ permissionMode: 'ask' });
     await h.runtime.shutdown(); h.repos.close();
   });
 
@@ -126,6 +146,23 @@ describe('runtime lifecycle acceptance', () => {
     expect((await h.runtime.getSession('ses_orphaned'))?.state).toBe('interrupted');
     const events = await h.runtime.getEvents('ses_orphaned');
     expect(events.some(e => e.type === 'error' && e.data.message.includes('守护进程重启'))).toBe(true);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('safely interrupts legacy queued tasks that lack persisted execution context', async () => {
+    const h = harness();
+    const timestamp = new Date().toISOString();
+    await h.repos.sessions.save({ id: 'ses_legacy_queue', agentId: 'mock', state: 'completed', cwd: '/tmp', permissionMode: 'full-trust', protocol: 'acp', runId: 'run_old', createdAt: timestamp, updatedAt: timestamp });
+    await h.repos.tasks.save({ id: 'task_legacy_queue', sessionId: 'ses_legacy_queue', prompt: 'do not replay without policy context', status: 'queued', createdAt: timestamp, updatedAt: timestamp });
+
+    await h.runtime.initialize([agent]);
+
+    expect(h.driver.send).not.toHaveBeenCalled();
+    expect((await h.runtime.getTasks('ses_legacy_queue'))[0]?.status).toBe('interrupted');
+    expect(await h.runtime.getSession('ses_legacy_queue')).toMatchObject({ state: 'interrupted', error: expect.stringContaining('缺少可验证的执行上下文') });
+    const events = await h.runtime.getEvents('ses_legacy_queue');
+    expect(events.some(event => event.type === 'task' && (event.data as any).task.status === 'interrupted')).toBe(true);
+    expect(events.some(event => event.type === 'error' && /请重新发送/.test((event.data as any).message))).toBe(true);
     await h.runtime.shutdown(); h.repos.close();
   });
 
@@ -176,7 +213,7 @@ describe('runtime lifecycle acceptance', () => {
     const gate = deferred(); const h = harness();
     h.driver.send = vi.fn(async prompt => { if (prompt === 'first') await gate.promise; h.emit({ type: 'text', data: { text: `answer:${prompt}` } }); });
     await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: 'mock' });
-    const first = await h.runtime.dispatch(session.id, 'first'); expect(first.queuedAhead).toBe(0); await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledWith('first'));
+    const first = await h.runtime.dispatch(session.id, 'first'); expect(first.queuedAhead).toBe(0); expect(first).not.toHaveProperty('executionContext'); await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledWith('first'));
     const second = await h.runtime.dispatch(session.id, 'second');
     const third = await h.runtime.dispatch(session.id, 'third');
     expect(second.queuedAhead).toBe(1);
@@ -188,6 +225,136 @@ describe('runtime lifecycle acceptance', () => {
     await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.prompt === 'third')?.status).toBe('completed'));
     expect((h.driver.send as ReturnType<typeof vi.fn>).mock.calls.map(call => call[0])).toEqual(['first', 'third']);
     expect((await h.runtime.getTasks(session.id)).find(task => task.id === second.id)?.status).toBe('cancelled');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('restores queued execution context and risk policy from a real database after restart', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dockmux-runtime-recovery-'));
+    const database = join(directory, 'dockmux.db');
+    const timestamp = new Date().toISOString();
+    const riskPolicy: ToolRiskPolicy = { enabled: true, authorized: true, pattern: 'rm\\s', actorEmail: 'owner@example.com', reason: 'approved in Lark' };
+    const seeded = createRepositories(database);
+    await seeded.sessions.save({ id: 'ses_recovery', agentId: 'mock', state: 'completed', cwd: directory, permissionMode: 'full-trust', source: 'lark', sourceId: 'oc_group', protocol: 'acp', runId: 'run_old', createdAt: timestamp, updatedAt: timestamp });
+    await seeded.tasks.save({
+      id: 'task_recovery',
+      sessionId: 'ses_recovery',
+      prompt: 'visible user prompt',
+      status: 'queued',
+      executionContext: { agentPrompt: 'agent prompt with group context', riskPolicy },
+      createdAt: timestamp,
+      updatedAt: timestamp
+    });
+    seeded.close();
+
+    const repos = createRepositories(database);
+    let emit!: (event: any) => void;
+    const driver: AgentDriver = {
+      start: vi.fn(async () => {}),
+      send: vi.fn(async () => emit({ type: 'text', data: { text: 'recovered answer' } })),
+      interrupt: vi.fn(async () => {}),
+      resume: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+      setRiskPolicy: vi.fn()
+    };
+    const restored = new DockmuxRuntime(repos, {
+      driverIdleTimeoutMs: 0,
+      driverFactory: (_configured, _protocol, onEvent) => { emit = onEvent; return driver; }
+    });
+    try {
+      await restored.initialize([agent]);
+      await vi.waitFor(async () => expect((await restored.getTasks('ses_recovery'))[0]?.status).toBe('completed'));
+
+      expect(driver.send).toHaveBeenCalledWith('agent prompt with group context');
+      expect(driver.setRiskPolicy).toHaveBeenCalledWith(riskPolicy);
+      expect((await repos.tasks.listBySession('ses_recovery'))[0]?.executionContext).toEqual({ agentPrompt: 'agent prompt with group context', riskPolicy });
+      expect((await restored.getTasks('ses_recovery'))[0]).not.toHaveProperty('executionContext');
+      const taskEvents = (await restored.getEvents('ses_recovery')).filter(event => event.type === 'task');
+      expect(taskEvents.length).toBeGreaterThan(0);
+      for (const event of taskEvents) expect((event.data as any).task).not.toHaveProperty('executionContext');
+    } finally {
+      await restored.shutdown();
+      repos.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('cleans up a turn when the driver rejects its persisted risk policy and remains reusable', async () => {
+    const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'answer' } }) });
+    const policy: ToolRiskPolicy = { enabled: true, authorized: true, pattern: 'rm\\s' };
+    h.driver.setRiskPolicy = vi.fn(current => { if (current) throw new Error('risk policy rejected'); });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+
+    const failed = await h.runtime.dispatch(session.id, 'guarded work', 'queue', 'guarded agent prompt', policy);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.id === failed.id)?.status).toBe('failed'));
+    expect(h.driver.send).not.toHaveBeenCalled();
+    expect(await h.runtime.getSession(session.id)).toMatchObject({ state: 'idle', error: 'risk policy rejected' });
+
+    await h.runtime.dispatch(session.id, 'safe retry');
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.prompt === 'safe retry')?.status).toBe('completed'));
+    expect(h.driver.send).toHaveBeenCalledWith('safe retry');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('cleans up a turn when risk policy persistence fails and continues later queued work', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dockmux-risk-write-'));
+    const invalidCwd = join(directory, 'not-a-directory');
+    await writeFile(invalidCwd, 'file blocks nested security directory');
+    const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'answer' } }) });
+    const policy: ToolRiskPolicy = { enabled: true, authorized: true, pattern: 'rm\\s' };
+    h.driver.setRiskPolicy = vi.fn();
+    try {
+      await h.runtime.initialize([agent]);
+      const session = await h.runtime.start({ agentId: 'mock', cwd: invalidCwd });
+      const failed = await h.runtime.dispatch(session.id, 'guarded work', 'queue', 'guarded agent prompt', policy);
+      await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.id === failed.id)?.status).toBe('failed'));
+      expect(h.driver.setRiskPolicy).toHaveBeenCalledWith(policy);
+      expect(h.driver.send).not.toHaveBeenCalled();
+
+      await rm(invalidCwd, { force: true });
+      await mkdir(invalidCwd);
+      await h.runtime.dispatch(session.id, 'safe retry');
+      await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.prompt === 'safe retry')?.status).toBe('completed'));
+      expect(h.driver.send).toHaveBeenCalledWith('safe retry');
+      await h.runtime.shutdown(); h.repos.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('clears a previous task risk policy before running an unguarded task in the same session', async () => {
+    const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'answer' } }) });
+    const policy: ToolRiskPolicy = { enabled: true, authorized: true, pattern: 'rm\\s' };
+    h.driver.setRiskPolicy = vi.fn();
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+
+    await h.runtime.dispatch(session.id, 'guarded', 'queue', 'guarded', policy);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.prompt === 'guarded')?.status).toBe('completed'));
+    await h.runtime.dispatch(session.id, 'ordinary');
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.prompt === 'ordinary')?.status).toBe('completed'));
+
+    expect(h.driver.setRiskPolicy).toHaveBeenNthCalledWith(1, policy);
+    expect(h.driver.setRiskPolicy).toHaveBeenNthCalledWith(2, undefined);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('paginates across more than 5,000 events in the current turn without an unbounded history read', async () => {
+    const h = harness({ onSend: emit => {
+      emit({ type: 'text', data: { text: 'final answer before terminal noise' } });
+      for (let index = 0; index < 5_000; index++) emit({ type: 'raw_terminal', data: { text: `noise:${index}` } });
+    } });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const unboundedList = vi.spyOn(h.repos.events, 'list');
+    const windowedList = vi.spyOn(h.repos.events, 'listWindow');
+
+    await h.runtime.send(session.id, 'new work');
+
+    expect(unboundedList).not.toHaveBeenCalled();
+    expect(windowedList.mock.calls.length).toBeGreaterThan(25);
+    for (const [, options] of windowedList.mock.calls) expect(options).toEqual(expect.objectContaining({ direction: 'backward', limit: 200 }));
+    expect((await h.runtime.getTasks(session.id))[0]?.status).toBe('completed');
     await h.runtime.shutdown(); h.repos.close();
   });
 
@@ -304,10 +471,28 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
     await h.runtime.send(s.id, 'first');
     expect((await h.runtime.getTasks(s.id))[0]?.status).toBe('failed');
-    expect(await h.runtime.getSession(s.id)).toMatchObject({ state: 'idle', error: 'Agent 未返回最终输出' });
+    expect(await h.runtime.getSession(s.id)).toMatchObject({ state: 'idle', error: 'temporary SDK error' });
     h.driver.send = vi.fn(async () => h.emit({ type: 'text', data: { text: 'done' } }));
     await h.runtime.send(s.id, 'second');
     expect((await h.runtime.getTasks(s.id)).find(task => task.prompt === 'second')?.status).toBe('completed');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('keeps a current-turn error terminal even when assistant text was already emitted', async () => {
+    const h = harness({ onSend: emit => {
+      emit({ type: 'text', data: { text: 'partial answer' } });
+      emit({ type: 'error', data: { message: 'terminal SDK error' } });
+    } });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+
+    await h.runtime.send(s.id, 'work');
+
+    expect((await h.runtime.getTasks(s.id))[0]?.status).toBe('failed');
+    expect(await h.runtime.getSession(s.id)).toMatchObject({ state: 'idle', error: 'terminal SDK error' });
+    const events = await h.runtime.getEvents(s.id);
+    expect(events.some(event => event.type === 'text' && (event.data as any).text === 'partial answer')).toBe(true);
+    expect(events.some(event => event.type === 'error' && (event.data as any).message === 'terminal SDK error')).toBe(true);
+    expect(events.some(event => event.type === 'completed')).toBe(false);
     await h.runtime.shutdown(); h.repos.close();
   });
 
@@ -344,6 +529,39 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('keeps cancellation terminal even when the driver also emitted an error', async () => {
+    const h = harness({ onSend: emit => {
+      emit({ type: 'error', data: { message: 'cancel race error' } });
+      emit({ type: 'completed', data: { stopReason: 'cancelled' } });
+    } });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const task = await h.runtime.send(session.id, 'cancel work');
+    expect(task.status).toBe('interrupted');
+    expect((await h.runtime.getSession(session.id))?.state).toBe('interrupted');
+    expect((await h.runtime.getEvents(session.id)).some(event => event.type === 'completed')).toBe(false);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not duplicate a driver error when send rejects after emitting it', async () => {
+    const h = harness();
+    const saveError = vi.spyOn(h.repos.artifacts, 'saveError');
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    h.driver.send = vi.fn(async () => {
+      h.emit({ type: 'error', data: { message: 'canonical driver error' } });
+      throw new Error('transport rejected');
+    });
+    await expect(h.runtime.send(session.id, 'broken work')).rejects.toThrow('transport rejected');
+    const errors = (await h.runtime.getEvents(session.id)).filter(event => event.type === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.data).toMatchObject({ message: 'canonical driver error' });
+    expect(saveError).toHaveBeenCalledTimes(1);
+    expect(saveError).toHaveBeenCalledWith(session.id, 'canonical driver error', undefined);
+    expect((await h.runtime.getSession(session.id))?.state).toBe('idle');
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('marks a turn failed when the driver reports a max_tokens stopReason', async () => {
     const h = harness({ onSend: emit => emit({ type: 'completed', data: { stopReason: 'max_tokens' } }) });
     await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
@@ -357,6 +575,19 @@ describe('runtime lifecycle acceptance', () => {
 describe('multi-driver routing', () => {
   const ptyAgent: AgentConfig = { id: 'mock-pty', name: 'Mock PTY', command: process.execPath, args: [], protocol: 'pty-cli', cwd: '/tmp', env: {}, permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   const ptyProbe = () => ({ protocol: 'pty-cli' as const, available: true, pause: false, resume: true });
+
+  it('fails closed for the legacy PTY transport that cannot enforce permissions or expose approval', async () => {
+    const repos = createRepositories(':memory:');
+    const legacy: AgentConfig = { ...ptyAgent, id: 'legacy-pty', protocol: 'pty', permissionMode: 'ask' };
+    const factory = vi.fn();
+    const runtime = new DockmuxRuntime(repos, { probe: () => ({ protocol: 'pty' as const, available: true, pause: false, resume: true }), driverFactory: factory });
+    await repos.agents.save(legacy);
+    await runtime.initialize([legacy]);
+    await expect(runtime.start({ agentId: legacy.id })).rejects.toMatchObject({ code: 'PERMISSION_MODE_UNSUPPORTED', statusCode: 422 });
+    expect(factory).not.toHaveBeenCalled();
+    expect(await runtime.listSessions()).toEqual([]);
+    await runtime.shutdown(); repos.close();
+  });
 
   function ptyHarness(ptyDriverFactory?: DriverFactory) {
     const repos = createRepositories(':memory:');
@@ -381,6 +612,21 @@ describe('multi-driver routing', () => {
     expect(h.driver.send).toHaveBeenCalledWith('work');
     expect((await h.runtime.getSession(session.id))?.state).toBe('completed');
     expect((await h.runtime.getEvents(session.id)).map(e => e.type)).toEqual(expect.arrayContaining(['text', 'completed']));
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it.each(['approve-reads', 'deny-all'] as const)('rejects unsupported PTY permission mode %s with 422 before creating a driver', async permissionMode => {
+    const factory = vi.fn();
+    const h = ptyHarness(factory);
+    await h.repos.agents.save(ptyAgent);
+    await h.runtime.initialize([ptyAgent]);
+
+    await expect(h.runtime.start({ agentId: 'mock-pty', permissionMode })).rejects.toMatchObject({
+      code: 'PERMISSION_MODE_UNSUPPORTED',
+      statusCode: 422
+    });
+    expect(factory).not.toHaveBeenCalled();
+    expect(await h.runtime.listSessions()).toEqual([]);
     await h.runtime.shutdown(); h.repos.close();
   });
 

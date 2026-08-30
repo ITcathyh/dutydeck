@@ -6,9 +6,9 @@ import { normalizeAcpxEvent } from '@dockmux/acp-client';
 import { correlateToolCalls, selectProtocol } from '@dockmux/runtime';
 
 describe('acceptance foundations (specified before implementation)', () => {
-  it('enables full trust by default', () => {
-    expect(agentConfigSchema.parse({ id: 'x', name: 'x', command: 'x' }).permissionMode).toBe('full-trust');
-    expect(builtinAgents().every(a => a.permissionMode === 'full-trust')).toBe(true);
+  it('requires approval by default', () => {
+    expect(agentConfigSchema.parse({ id: 'x', name: 'x', command: 'x' }).permissionMode).toBe('ask');
+    expect(builtinAgents().every(a => a.permissionMode === 'ask')).toBe(true);
   });
 
   it.each(builtinAgents().map(agent => [agent.id, agent] as const))('%s is a scanned ACPX agent', (_id, agent) => {
@@ -17,7 +17,7 @@ describe('acceptance foundations (specified before implementation)', () => {
   });
 
   it('uses ACPX registry commands for discovered agents', () => {
-    for (const agent of builtinAgents('/work')) expect(agent).toMatchObject({ protocol: 'acp', cwd: '/work', permissionMode: 'full-trust' });
+    for (const agent of builtinAgents('/work')) expect(agent).toMatchObject({ protocol: 'acp', cwd: '/work', permissionMode: 'ask' });
   });
 
   it('falls back ACP -> JSONL -> PTY based on probes', () => {

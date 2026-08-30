@@ -77,18 +77,18 @@ async function startServer(provider: TerminalStreamProvider, auth?: TerminalRout
   return { app, port: address.port };
 }
 
-function connect(port: number, path: string): Promise<WebSocket> {
+function connect(port: number, path: string, headers?: Record<string, string>): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, { headers });
     ws.once('open', () => resolve(ws));
     ws.once('error', reject);
   });
 }
 
 /** 期望升级被拒：读 HTTP 状态码与 JSON body（ws 客户端默认会 abort，需监听 unexpected-response） */
-function expectUpgradeRejected(port: number, path: string): Promise<{ status: number; body: string }> {
+function expectUpgradeRejected(port: number, path: string, headers?: Record<string, string>): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`);
+    const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, { headers });
     ws.on('unexpected-response', (_request, response) => {
       const chunks: Buffer[] = [];
       response.on('data', chunk => chunks.push(chunk as Buffer));
@@ -232,10 +232,10 @@ describe('terminal WS proxy', () => {
     ws.close();
   });
 
-  it('配置 auth 时 loopback 来源免认证', async () => {
+  it('仅显式 local-only 模式免认证', async () => {
     const fake = createFakeStream();
     const check = vi.fn(() => false);
-    const auth: TerminalRouteAuth = { isLoopback: () => true, check };
+    const auth: TerminalRouteAuth = { allowUnauthenticated: true, check };
     const { port } = await startServer(providerFrom({ s1: fake.handle }), auth);
 
     const ws = await connect(port, '/api/terminal/s1');
@@ -246,8 +246,19 @@ describe('terminal WS proxy', () => {
     ws.close();
   });
 
-  it('非 loopback 无 token 时回 HTTP 401', async () => {
-    const auth: TerminalRouteAuth = { isLoopback: () => false, check: () => false };
+  it('local-only 仍拒绝 DNS rebinding Host 和跨源浏览器 WS', async () => {
+    const auth: TerminalRouteAuth = { allowUnauthenticated: true, check: () => false };
+    const { port } = await startServer(providerFrom({ s1: createFakeStream().handle }), auth);
+    const rebound = await expectUpgradeRejected(port, '/api/terminal/s1', { host: `attacker.example:${port}`, origin: `http://attacker.example:${port}` });
+    expect(rebound.status).toBe(403);
+    expect(JSON.parse(rebound.body)).toEqual({ type: 'error', message: 'host not allowed' });
+    const crossOrigin = await expectUpgradeRejected(port, '/api/terminal/s1', { host: `127.0.0.1:${port}`, origin: 'https://attacker.example' });
+    expect(crossOrigin.status).toBe(403);
+    expect(JSON.parse(crossOrigin.body)).toEqual({ type: 'error', message: 'origin not allowed' });
+  });
+
+  it('remote 模式即使 socket 来自 loopback，无 token 仍回 HTTP 401', async () => {
+    const auth: TerminalRouteAuth = { check: () => false };
     const { port } = await startServer(providerFrom({ s1: createFakeStream().handle }), auth);
 
     const rejected = await expectUpgradeRejected(port, '/api/terminal/s1');
@@ -255,8 +266,8 @@ describe('terminal WS proxy', () => {
     expect(JSON.parse(rejected.body)).toEqual({ type: 'error', message: 'unauthorized' });
   });
 
-  it('非 loopback 错误 token 时回 HTTP 401', async () => {
-    const auth: TerminalRouteAuth = { isLoopback: () => false, check: token => token === 'good-token' };
+  it('URL query token 不再作为 WS 凭据', async () => {
+    const auth: TerminalRouteAuth = { check: token => token === 'good-token' };
     const { port } = await startServer(providerFrom({ s1: createFakeStream().handle }), auth);
 
     const rejected = await expectUpgradeRejected(port, '/api/terminal/s1?token=bad-token');
@@ -264,16 +275,36 @@ describe('terminal WS proxy', () => {
     expect(JSON.parse(rejected.body)).toEqual({ type: 'error', message: 'unauthorized' });
   });
 
-  it('非 loopback 正确 token 时升级成功', async () => {
+  it('非浏览器客户端可用正确 Bearer 升级', async () => {
     const fake = createFakeStream();
-    const auth: TerminalRouteAuth = { isLoopback: () => false, check: token => token === 'good-token' };
+    const auth: TerminalRouteAuth = { check: token => token === 'good-token' };
     const { port } = await startServer(providerFrom({ s1: fake.handle }), auth);
 
-    const ws = await connect(port, '/api/terminal/s1?token=good-token');
+    const ws = await connect(port, '/api/terminal/s1', { authorization: 'Bearer good-token' });
     const frame = nextMessage(ws);
     fake.emitData('ok');
     expect(await frame).toEqual({ type: 'data', data: 'ok' });
     ws.close();
+  });
+
+  it('非 loopback 浏览器 cookie 时升级成功且无需 query token', async () => {
+    const fake = createFakeStream();
+    const auth: TerminalRouteAuth = { check: token => token === 'good-token' };
+    const { port } = await startServer(providerFrom({ s1: fake.handle }), auth);
+
+    const ws = await connect(port, '/api/terminal/s1', { cookie: 'dockmux_access=good-token' });
+    const frame = nextMessage(ws);
+    fake.emitData('cookie-ok');
+    expect(await frame).toEqual({ type: 'data', data: 'cookie-ok' });
+    ws.close();
+  });
+
+  it('浏览器 cookie 的 WS 必须来自相同 Origin', async () => {
+    const auth: TerminalRouteAuth = { check: token => token === 'good-token' };
+    const { port } = await startServer(providerFrom({ s1: createFakeStream().handle }), auth);
+    const rejected = await expectUpgradeRejected(port, '/api/terminal/s1', { host: `127.0.0.1:${port}`, origin: 'https://evil.example', cookie: 'dockmux_access=good-token' });
+    expect(rejected.status).toBe(403);
+    expect(JSON.parse(rejected.body)).toEqual({ type: 'error', message: 'origin not allowed' });
   });
 
   it('畸形 JSON 消息回 error 帧且不断开连接', async () => {

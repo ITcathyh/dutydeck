@@ -38,6 +38,7 @@ export function applyStatusEvent(session: Session, event: DockEvent): Session {
   return {
     ...session,
     state: event.data.state,
+    updatedAt: event.timestamp || session.updatedAt,
     ...(typeof event.data.model === 'string' ? { model: event.data.model } : {}),
     ...(typeof event.data.reasoningEffort === 'string' ? { reasoningEffort: event.data.reasoningEffort } : {})
   };

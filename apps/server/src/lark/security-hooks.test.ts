@@ -102,7 +102,7 @@ describe('Lark Agent security hooks', () => {
 
   it('refuses genuinely unsupported Agents instead of presenting a false hard-gate switch', async () => {
     const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hook-')); workspaces.push(workspace);
-    await expect(installLarkHook('gemini', workspace)).rejects.toMatchObject({ code: 'HARD_GATE_UNSUPPORTED', statusCode: 422 });
+    await expect(installLarkHook('gemini', workspace)).rejects.toMatchObject({ code: 'RISK_CONTROL_UNSUPPORTED', statusCode: 422 });
     expect(await larkHookStatus('gemini', workspace)).toMatchObject({ supported: false, installed: false, writable: false });
   });
 });

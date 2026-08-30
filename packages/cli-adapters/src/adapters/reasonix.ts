@@ -23,9 +23,8 @@ export function createReasonixAdapter(): CliAdapter {
     id: 'reasonix',
     capabilities: { resume: true },
 
-    buildArgs({ resume, resumeSessionId, model }: AdapterSessionContext): string[] {
-      // dockmux MVP 无人值守：固定走 botmux 的 bypass 分支（!disableCliBypass）。
-      const args: string[] = ['--yolo'];
+    buildArgs({ resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
+      const args: string[] = permissionMode === 'full-trust' ? ['--yolo'] : [];
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }

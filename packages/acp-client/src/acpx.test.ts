@@ -52,6 +52,21 @@ describe('acpx ACP boundary', () => {
     expect(events.some(e => e.type === 'text' && e.data.text.includes('selected'))).toBe(true); await adapter.stop();
   });
 
+  it.each([
+    ['ask', 'deny-all'],
+    ['deny-all', 'deny-all'],
+    ['approve-reads', 'approve-reads'],
+    ['full-trust', 'approve-all']
+  ] as const)('maps Dockmux %s to ACPX %s at construction time', (permissionMode, expected) => {
+    const adapter = new AcpxAdapter({ ...agentConfig(), permissionMode }, { onEvent() {} });
+    expect((adapter as any).runtime.options.permissionMode).toBe(expected);
+  });
+
+  it('does not advertise a fake live permission-mode switch on an ACPX adapter', () => {
+    const adapter = new AcpxAdapter(agentConfig(), { onEvent() {} });
+    expect((adapter as any).setPermissionMode).toBeUndefined();
+  });
+
   it('auto-approves ACP permission requests in full-trust mode', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dockmux-full-trust-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
@@ -134,6 +149,28 @@ describe('acpx ACP boundary', () => {
     await adapter.stop();
   });
 
+  it('bridges uppercase Agent env without persisting an uppercase session key', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-agent-env-')); dirs.push(cwd);
+    const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
+    const events: any[] = [];
+    const sessionKey = 'uppercase-agent-env-session';
+    const adapter = new AcpxAdapter({
+      ...agentConfig(), cwd, command: process.execPath, args: [fixture],
+      env: { MOCK_VENDOR_TOKEN: 'vendor-secret', dockmux_group_tools_url: 'http://127.0.0.1:4310/tools' }
+    }, { sessionKey, onEvent: event => events.push(event) });
+    await expect(adapter.start()).resolves.toBeUndefined();
+    await adapter.send('report bridged environment');
+    expect(events.some(event => event.type === 'text' && event.data.text === 'Bridged: vendor-secret')).toBe(true);
+    await adapter.stop();
+
+    const store = createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') });
+    const persisted = (await store.load(sessionKey))?.acpx?.session_options?.env ?? {};
+    expect(persisted).not.toHaveProperty('MOCK_VENDOR_TOKEN');
+    expect(Object.keys(persisted).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
+    expect(JSON.stringify(persisted)).not.toContain('vendor-secret');
+    expect(persisted.dockmux_group_tools_url).toBe('http://127.0.0.1:4310/tools');
+  });
+
   it('recreates a persisted ACP session once when its scoped group capability changes', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dockmux-group-env-refresh-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
@@ -141,7 +178,7 @@ describe('acpx ACP boundary', () => {
     const base = { ...agentConfig(), cwd, command: process.execPath, args: [fixture] };
     const first = new AcpxAdapter({
       ...base,
-      env: { dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'legacy-random-token' }
+      env: { dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'legacy-random-token', dockmux_relay_url: 'http://127.0.0.1:4310/api/relay', dockmux_relay_token: 'relay-v1', dockmux_relay_command: '/old/dockmux' }
     }, { sessionKey, onEvent() {} });
     await first.start(); await first.stop();
     const store = createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') });
@@ -149,10 +186,15 @@ describe('acpx ACP boundary', () => {
 
     const second = new AcpxAdapter({
       ...base,
-      env: { dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'v1.stable-token' }
+      env: { dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'v1.stable-token', dockmux_relay_url: 'http://127.0.0.1:9321/api/relay', dockmux_relay_token: 'relay-v2', dockmux_relay_command: '/new/dockmux' }
     }, { sessionKey, onEvent() {} });
     await second.start(); await second.stop();
     expect((await store.load(sessionKey))?.acpx?.session_options?.env?.dockmux_group_tools_token).toBe('v1.stable-token');
+    expect((await store.load(sessionKey))?.acpx?.session_options?.env?.dockmux_relay_url).toBe('http://127.0.0.1:9321/api/relay');
+
+    const third = new AcpxAdapter({ ...base, env: {} }, { sessionKey, onEvent() {} });
+    await third.start(); await third.stop();
+    expect((await store.load(sessionKey))?.acpx?.session_options?.env ?? {}).not.toHaveProperty('dockmux_relay_url');
   });
 
   it('normalizes raw ACP session/update envelopes', () => {

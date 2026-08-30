@@ -90,6 +90,11 @@ describe('applyStatusEvent', () => {
     expect(result.model).toBe('gpt-y');
   });
 
+  it('status 事件同步推进 updatedAt，供工作区最近活动排序', () => {
+    const status = { ...makeEvent(1, 'status', { state: 'thinking' }), timestamp: '2026-08-30T08:00:00.000Z' };
+    expect(applyStatusEvent(makeSession({ updatedAt: 'old' }), status).updatedAt).toBe(status.timestamp);
+  });
+
   it('model 为非 string → 不覆盖', () => {
     const result = applyStatusEvent(makeSession({ model: 'gpt-x' }), makeEvent(1, 'status', { state: 'idle', model: 42 }));
     expect(result.model).toBe('gpt-x');

@@ -36,18 +36,19 @@ async function sendPersistedTaskCard(
   input: Omit<Parameters<LarkCardService['send']>[0], 'chatId'>,
   log?: { warn: (...args: any[]) => void }
 ) {
+  const executionInput = { permissionMode: 'full-trust' as const, ...input };
   const replyMessageId = persisted.reply_message_id?.trim()
     || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined);
   if (replyMessageId && typeof service.reply === 'function') {
     try {
-      return await service.reply({ messageId: replyMessageId, ...(persisted.reply_in_thread ? { replyInThread: true } : {}), ...input });
+      return await service.reply({ messageId: replyMessageId, ...(persisted.reply_in_thread ? { replyInThread: true } : {}), ...executionInput });
     } catch (error) {
       // The original message may have been deleted while Dockmux was down.
       // Keep reconciliation deliverable by falling back to a top-level card.
       log?.warn({ error, messageId: replyMessageId, chatId: persisted.chat_id }, '恢复卡片回复失败，回退为群内发送');
     }
   }
-  return await service.send({ chatId: persisted.chat_id, ...input });
+  return await service.send({ chatId: persisted.chat_id, ...executionInput });
 }
 
 export async function performLarkCardReconcile(input: {
@@ -60,6 +61,10 @@ export async function performLarkCardReconcile(input: {
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
+  let agentName = config.defaultAgentId ?? 'Dockmux';
+  try { agentName = (await runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? agentName; }
+  catch (error) { log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 对账卡片'); }
+  const cardContext = { agentName, ...(config.workspace ? { workspace: config.workspace } : {}) };
   const mappings = await cardMappings.list(channel);
   let unresolved = 0;
   for (const mapping of mappings) {
@@ -70,7 +75,37 @@ export async function performLarkCardReconcile(input: {
     catch (error) { unresolved++; log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '读取待补偿飞书任务失败'); continue; }
     const runtimeTask = (persisted.runtime_task_id ? runtimeTasks.find(item => item.id === persisted.runtime_task_id) : undefined)
       ?? [...runtimeTasks].reverse().find(item => item.prompt === persisted.prompt && Date.parse(item.createdAt) >= persisted.started_at - 5_000);
-    if (!runtimeTask || !terminalTaskStates.has(runtimeTask.status)) { unresolved++; continue; }
+    if (!runtimeTask) { unresolved++; continue; }
+    if (!terminalTaskStates.has(runtimeTask.status)) {
+      // The coordinator's in-memory action map is intentionally not restored.
+      // Remove stale cancel/interrupt actions immediately while reconciliation
+      // keeps polling the durable Runtime task to its terminal state.
+      if (!persisted.recovery_read_only) try {
+        await service.update({
+          ...cardContext,
+          messageId: persisted.card_message_id,
+          permissionMode: 'full-trust',
+          state: runtimeTask.status === 'queued' ? 'queued' : 'running',
+          taskId: mapping.externalId,
+          taskName: persisted.task_name,
+          elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
+          sessionId: mapping.sessionId,
+          readOnly: true,
+          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+          ...(Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length
+            ? { elements: persisted.last_successful_elements }
+            : { markdown: 'Dockmux 已恢复任务状态，正在继续跟踪执行进度。' })
+        });
+        await cardMappings.save({
+          ...mapping,
+          extra: JSON.stringify({ ...persisted, runtime_task_id: runtimeTask.id, recovery_read_only: true })
+        });
+      } catch (error) {
+        log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '恢复中的飞书卡片切换只读失败');
+      }
+      unresolved++;
+      continue;
+    }
     let state: 'completed' | 'failed' | 'interrupted' = runtimeTask.status === 'completed'
       ? 'completed'
       : runtimeTask.status === 'failed' ? 'failed' : 'interrupted';
@@ -88,12 +123,15 @@ export async function performLarkCardReconcile(input: {
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         await service.update({
+          ...cardContext,
           messageId: persisted.card_message_id,
+          permissionMode: 'full-trust',
           state,
           taskId: mapping.externalId,
           taskName: persisted.task_name,
           elapsedSeconds,
           sessionId: mapping.sessionId,
+          readOnly: true,
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
           elements: currentElements
         });
@@ -112,12 +150,15 @@ export async function performLarkCardReconcile(input: {
       const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
       try {
         await service.update({
+          ...cardContext,
           messageId: persisted.card_message_id,
+          permissionMode: 'full-trust',
           state,
           taskId: mapping.externalId,
           taskName: persisted.task_name,
           elapsedSeconds,
           sessionId: mapping.sessionId,
+          readOnly: true,
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
           elements: patchedElements
         });
@@ -141,11 +182,13 @@ export async function performLarkCardReconcile(input: {
           ? patchRejectedCardDelta(persisted.last_successful_elements, currentElements)
           : boundLarkCardElements(renderLarkCardElements(events, config, completed, true));
         const replacement = await sendPersistedTaskCard(service, persisted, {
+          ...cardContext,
           state,
           taskId: mapping.externalId,
           taskName: persisted.task_name,
           elapsedSeconds,
           sessionId: mapping.sessionId,
+          readOnly: true,
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
           elements: replacementElements,
           idempotencyKey: `reconcile_${persisted.card_message_id}_${state}`.slice(0, 50)
@@ -157,11 +200,13 @@ export async function performLarkCardReconcile(input: {
           try {
             const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
             const minimal = await sendPersistedTaskCard(service, persisted, {
+              ...cardContext,
               state,
               taskId: mapping.externalId,
               taskName: persisted.task_name,
               elapsedSeconds,
               sessionId: mapping.sessionId,
+              readOnly: true,
               ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
               elements: patchedElements,
               idempotencyKey: `reconcile_safe_${persisted.card_message_id}_${state}`.slice(0, 50)

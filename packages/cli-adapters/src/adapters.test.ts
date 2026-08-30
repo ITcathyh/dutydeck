@@ -12,6 +12,7 @@ import { encodeRunnerInput, chunkAscii, writeRunnerInput, RUNNER_INPUT_CHUNK_BYT
 import type { PtyLike } from './types.js';
 
 const SID = '11111111-2222-3333-4444-555555555555';
+const FULL_TRUST = { permissionMode: 'full-trust' as const };
 
 /** 全部 29 个适配器 id。手写一份「期望清单」与 ALL_CLI_IDS 对拍——
  *  ALL_CLI_IDS 现在从 factories 的键派生，只能防「注册了但没进清单」，
@@ -65,8 +66,11 @@ function nativeSampleId(id: string): string {
 describe('claude-code', () => {
   const adapter = createClaudeCodeAdapter();
 
-  it('默认参数：bypass + session-id + disallowed-tools', () => {
-    const args = adapter.buildArgs({ sessionId: SID });
+  it('安全模式不 bypass，full-trust 才注入 settings', () => {
+    const safeArgs = adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' });
+    expect(safeArgs).not.toContain('--dangerously-skip-permissions');
+    expect(safeArgs).not.toContain('--settings');
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST });
     expect(args).toContain('--dangerously-skip-permissions');
     expect(args).toContain('--session-id');
     expect(args).toContain(SID);
@@ -104,8 +108,11 @@ describe('claude-code', () => {
 describe('codex', () => {
   const adapter = createCodexAdapter();
 
-  it('默认参数：bypass 双 flag + --no-alt-screen + 关闭更新检查', () => {
-    const args = adapter.buildArgs({ sessionId: SID });
+  it('安全模式保留通用参数，full-trust 才添加 bypass 双 flag', () => {
+    const safeArgs = adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' });
+    expect(safeArgs).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+    expect(safeArgs).not.toContain('--dangerously-bypass-hook-trust');
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST });
     expect(args).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(args).toContain('--dangerously-bypass-hook-trust');
     expect(args).toContain('--no-alt-screen');
@@ -143,8 +150,9 @@ describe('codex', () => {
 describe('gemini', () => {
   const adapter = createGeminiAdapter();
 
-  it('默认参数：--yolo', () => {
-    expect(adapter.buildArgs({ sessionId: SID })).toEqual(['--yolo']);
+  it('安全模式无 bypass，full-trust 使用 --yolo', () => {
+    expect(adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' })).toEqual([]);
+    expect(adapter.buildArgs({ sessionId: SID, ...FULL_TRUST })).toEqual(['--yolo']);
   });
 
   it('resume 不支持（永远新起会话），无 resume 能力位', () => {
@@ -195,8 +203,10 @@ describe('opencode', () => {
 describe('grok', () => {
   const adapter = createGrokAdapter();
 
-  it('默认参数：--always-approve + --no-plan + --session-id 钉到 dockmux UUID', () => {
-    const args = adapter.buildArgs({ sessionId: SID });
+  it('安全模式不自动批准，full-trust 添加 --always-approve', () => {
+    const safeArgs = adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' });
+    expect(safeArgs).not.toContain('--always-approve');
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST });
     expect(args).toContain('--always-approve');
     expect(args).toContain('--no-plan');
     expect(args).toContain('--session-id');
@@ -230,8 +240,9 @@ describe('grok', () => {
 describe('cursor', () => {
   const adapter = createCursorAdapter();
 
-  it('默认参数：--trust + --force', () => {
-    const args = adapter.buildArgs({ sessionId: SID });
+  it('安全模式不预信任工作区，full-trust 才使用 --trust + --force', () => {
+    expect(adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' })).toEqual([]);
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST });
     expect(args.slice(0, 2)).toEqual(['--trust', '--force']);
   });
 
@@ -262,8 +273,9 @@ describe('cursor', () => {
 describe('kimi', () => {
   const adapter = createKimiAdapter();
 
-  it('默认参数：--yolo', () => {
-    expect(adapter.buildArgs({ sessionId: SID })).toEqual(['--yolo']);
+  it('安全模式无 bypass，full-trust 使用 --yolo', () => {
+    expect(adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' })).toEqual([]);
+    expect(adapter.buildArgs({ sessionId: SID, ...FULL_TRUST })).toEqual(['--yolo']);
   });
 
   it('resume=true：--resume 精确 id；绝不 --continue', () => {
@@ -287,8 +299,11 @@ describe('kimi', () => {
 describe('traex', () => {
   const adapter = createTraexAdapter();
 
-  it('默认参数：bypass 双 flag + --no-alt-screen', () => {
-    const args = adapter.buildArgs({ sessionId: SID });
+  it('安全模式不 bypass，full-trust 才添加双 flag', () => {
+    const safeArgs = adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' });
+    expect(safeArgs).not.toContain('--dangerously-bypass-approvals-and-sandbox');
+    expect(safeArgs).not.toContain('--dangerously-bypass-hook-trust');
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST });
     expect(args).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(args).toContain('--dangerously-bypass-hook-trust');
     expect(args).toContain('--no-alt-screen');
@@ -395,9 +410,52 @@ const FULL_CTX = {
   model: 'some-model',
   reasoningEffort: 'high',
   locale: 'zh',
+  permissionMode: 'full-trust' as const,
 };
 
 describe('全适配器横切契约', () => {
+  const fullTrustSignatures: Partial<Record<(typeof EXPECTED_IDS)[number], string[]>> = {
+    'claude-code': ['--dangerously-skip-permissions', 'bypassPermissions'],
+    seed: ['--dangerously-skip-permissions', 'bypassPermissions'],
+    relay: ['--dangerously-skip-permissions', 'bypassPermissions'],
+    codex: ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'],
+    traex: ['--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust'],
+    gemini: ['--yolo'],
+    grok: ['--always-approve'],
+    cursor: ['--trust', '--force'],
+    kimi: ['--yolo'],
+    antigravity: ['--dangerously-skip-permissions'],
+    coco: ['--yolo'],
+    hermes: ['--yolo', '--accept-hooks'],
+    'oh-my-pi': ['--approval-mode', 'yolo'],
+    copilot: ['--allow-all-tools'],
+    'kiro-cli': ['--trust-tools=read,write,shell'],
+    reasonix: ['--yolo'],
+    aiden: ['--permission-mode', 'agentFull'],
+    genius: ['--dangerously-skip-permissions', 'bypassPermissions'],
+  };
+
+  it('缺省/ask/approve-reads/deny-all 不注入任何 CLI 的 full-trust 签名', () => {
+    for (const [id, signatures] of Object.entries(fullTrustSignatures)) {
+      const adapter = createCliAdapter(id);
+      for (const permissionMode of [undefined, 'ask', 'approve-reads', 'deny-all'] as const) {
+        const serialized = adapter.buildArgs({ sessionId: SID, permissionMode }).join('\u0000');
+        for (const signature of signatures) {
+          expect(serialized, `${id}/${permissionMode ?? 'omitted'} 不应包含 ${signature}`).not.toContain(signature);
+        }
+      }
+    }
+  });
+
+  it('full-trust 为每个支持显式放行的 CLI 注入其原生参数/settings', () => {
+    for (const [id, signatures] of Object.entries(fullTrustSignatures)) {
+      const serialized = createCliAdapter(id).buildArgs({ sessionId: SID, ...FULL_TRUST }).join('\u0000');
+      for (const signature of signatures) {
+        expect(serialized, `${id}/full-trust 应包含 ${signature}`).toContain(signature);
+      }
+    }
+  });
+
   it('每个 id 都能创建，且 adapter.id 与请求 id 一致', () => {
     for (const id of EXPECTED_IDS) {
       const adapter = createCliAdapter(id);
@@ -656,7 +714,7 @@ describe('runner 类适配器', () => {
 describe('参数复杂的适配器：buildArgs 快照', () => {
   it('coco：session-id/resume + yolo + 嵌套 model key + 禁 PlanMode', () => {
     const adapter = createCliAdapter('coco');
-    expect(adapter.buildArgs({ sessionId: `ses_${SID}`, model: 'doubao' })).toEqual([
+    expect(adapter.buildArgs({ sessionId: `ses_${SID}`, model: 'doubao', ...FULL_TRUST })).toEqual([
       '--session-id', SID, '--yolo', '--config', 'model.name=doubao',
       '--disallowed-tool', 'EnterPlanMode', '--disallowed-tool', 'ExitPlanMode',
     ]);
@@ -664,7 +722,7 @@ describe('参数复杂的适配器：buildArgs 快照', () => {
   });
 
   it('claude 家族（claude-code/seed/relay）argv 完全同构，只有 id 不同', () => {
-    const ctx = { sessionId: `ses_${SID}`, model: 'opus' };
+    const ctx = { sessionId: `ses_${SID}`, model: 'opus', ...FULL_TRUST };
     const base = createCliAdapter('claude-code').buildArgs(ctx);
     expect(base).toEqual(createCliAdapter('seed').buildArgs(ctx));
     expect(base).toEqual(createCliAdapter('relay').buildArgs(ctx));
@@ -675,6 +733,7 @@ describe('参数复杂的适配器：buildArgs 快照', () => {
   it('oh-my-pi：--no-title 起头，resume 吃 transcript 路径，yolo 审批', () => {
     const args = createCliAdapter('oh-my-pi').buildArgs({
       sessionId: SID, resume: true, resumeSessionId: '/tmp/omp/x.jsonl', model: 'm', cwd: '/tmp/ws',
+      ...FULL_TRUST,
     });
     expect(args).toEqual([
       '--no-title', '--resume', '/tmp/omp/x.jsonl',
@@ -683,7 +742,7 @@ describe('参数复杂的适配器：buildArgs 快照', () => {
   });
 
   it('kiro-cli：chat 子命令 + 核心工具白名单（不是 --trust-all-tools）', () => {
-    const args = createCliAdapter('kiro-cli').buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'k1' });
+    const args = createCliAdapter('kiro-cli').buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'k1', ...FULL_TRUST });
     expect(args).toEqual(['chat', '--trust-tools=read,write,shell', '--resume-id', 'k1']);
     expect(args).not.toContain('--trust-all-tools');
     expect(createCliAdapter('kiro-cli').buildResumeCommand?.('k1')).toEqual(['chat', '--resume-id', 'k1']);
@@ -710,9 +769,9 @@ describe('参数复杂的适配器：buildArgs 快照', () => {
 
   it('antigravity：只认精确 conversation id，绝不 --continue', () => {
     const adapter = createCliAdapter('antigravity');
-    expect(adapter.buildArgs({ sessionId: SID })).toEqual(['--dangerously-skip-permissions']);
+    expect(adapter.buildArgs({ sessionId: SID, ...FULL_TRUST })).toEqual(['--dangerously-skip-permissions']);
     expect(adapter.buildArgs({ sessionId: SID, resume: true })).not.toContain('--continue');
-    expect(adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'conv-1' }))
+    expect(adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'conv-1', ...FULL_TRUST }))
       .toEqual(['--dangerously-skip-permissions', '--conversation', 'conv-1']);
   });
 

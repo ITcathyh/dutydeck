@@ -1,29 +1,53 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具调用/结果 + 终态输出 1`] = `
-[
-  {
-    "content": "全部通过。",
-    "element_id": "final_output",
-    "margin": "0px",
-    "tag": "markdown",
-    "text_align": "left",
-    "text_size": "normal_v2",
-  },
-  {
+{
+  "body": {
     "direction": "vertical",
-    "element_id": "trace_group_0",
     "elements": [
       {
-        "icon": {
-          "color": "grey",
-          "tag": "standard_icon",
-          "token": "setting_outlined",
-        },
-        "margin": "0px 0px 2px 0px",
+        "element_id": "task_status",
+        "margin": "0px",
         "tag": "div",
         "text": {
-          "content": "1 段思考 · 1 次工具调用",
+          "content": "<text_tag color='green'>已完成</text_tag>　<font color='grey'>已用时 2s</font>",
+          "tag": "lark_md",
+          "text_size": "small",
+        },
+        "width": "auto",
+      },
+      {
+        "element_id": "result_header",
+        "icon": {
+          "color": "green",
+          "tag": "standard_icon",
+          "token": "doc-checklist_outlined",
+        },
+        "margin": "4px 0px 2px 0px",
+        "tag": "div",
+        "text": {
+          "content": "执行结论",
+          "tag": "plain_text",
+          "text_color": "green",
+          "text_size": "small",
+        },
+        "width": "auto",
+      },
+      {
+        "content": "全部通过。",
+        "element_id": "final_output",
+        "margin": "0px",
+        "tag": "markdown",
+        "text_align": "left",
+        "text_size": "normal_v2",
+      },
+      {
+        "element_id": "next_step_hint",
+        "margin": "6px 0px 2px 0px",
+        "tag": "div",
+        "text": {
+          "content": "下一步：在当前对话继续给 Agent 指令，可补充目标或要求调整。",
+          "lines": 2,
           "tag": "plain_text",
           "text_color": "grey",
           "text_size": "notation",
@@ -31,100 +55,217 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
         "width": "auto",
       },
       {
-        "content": "**思考过程**　<font color='grey'>先跑测试，失败再修。</font>",
-        "icon": {
-          "color": "grey",
-          "tag": "standard_icon",
-          "token": "mindnote_outlined",
-        },
-        "margin": "0px 0px 2px 20px",
-        "tag": "markdown",
-        "text_size": "notation",
-      },
-      {
         "direction": "vertical",
-        "element_id": "trace_tool_0_0",
+        "element_id": "trace_overview",
         "elements": [
           {
-            "content": "**输入**
+            "element_id": "trace_digest",
+            "icon": {
+              "color": "grey",
+              "tag": "standard_icon",
+              "token": "doc-checklist_outlined",
+            },
+            "margin": "0px 0px 4px 0px",
+            "tag": "div",
+            "text": {
+              "content": "1 个阶段 · 1/1 个工具已返回 · 1 项内部分析（内容不展示）",
+              "lines": 1,
+              "tag": "plain_text",
+              "text_color": "grey",
+              "text_size": "notation",
+            },
+            "width": "auto",
+          },
+          {
+            "direction": "vertical",
+            "element_id": "trace_group_0",
+            "elements": [
+              {
+                "icon": {
+                  "color": "grey",
+                  "tag": "standard_icon",
+                  "token": "setting_outlined",
+                },
+                "margin": "0px 0px 2px 0px",
+                "tag": "div",
+                "text": {
+                  "content": "1 项内部分析 · 1 次工具调用",
+                  "tag": "plain_text",
+                  "text_color": "grey",
+                  "text_size": "notation",
+                },
+                "width": "auto",
+              },
+              {
+                "direction": "vertical",
+                "element_id": "trace_tool_0_0",
+                "elements": [
+                  {
+                    "content": "**输入**
 
 \`\`\`text
 {
   "command": "pnpm test"
 }
 \`\`\`",
-            "margin": "0px",
-            "tag": "markdown",
-            "text_size": "notation",
-          },
-          {
-            "content": "**结果**
+                    "margin": "0px",
+                    "tag": "markdown",
+                    "text_size": "notation",
+                  },
+                  {
+                    "content": "**结果**
 
 \`\`\`text
 125 passed
 \`\`\`",
+                    "margin": "0px",
+                    "tag": "markdown",
+                    "text_size": "notation",
+                  },
+                ],
+                "expanded": false,
+                "header": {
+                  "icon": {
+                    "color": "grey",
+                    "size": "12px 12px",
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                  },
+                  "icon_expanded_angle": -180,
+                  "icon_position": "right",
+                  "title": {
+                    "content": "<font color='trace_success'>●</font>　运行测试　<font color='grey'>pnpm test</font>　<font color='grey'>1s</font>",
+                    "icon": {
+                      "color": "grey",
+                      "tag": "standard_icon",
+                      "token": "doc-checklist_outlined",
+                    },
+                    "tag": "markdown",
+                    "text_size": "notation",
+                  },
+                  "vertical_align": "center",
+                },
+                "margin": "0px 0px 0px 20px",
+                "padding": "4px 0px 0px 0px",
+                "tag": "collapsible_panel",
+                "vertical_spacing": "4px",
+              },
+            ],
+            "expanded": false,
+            "header": {
+              "icon": {
+                "color": "grey",
+                "size": "14px 14px",
+                "tag": "standard_icon",
+                "token": "down-small-ccm_outlined",
+              },
+              "icon_expanded_angle": -180,
+              "icon_position": "right",
+              "title": {
+                "content": "pnpm test　<font color='grey'>2s</font>　<font color='green'>● 已完成</font>",
+                "tag": "markdown",
+                "text_size": "notation",
+              },
+              "vertical_align": "center",
+            },
             "margin": "0px",
-            "tag": "markdown",
-            "text_size": "notation",
+            "padding": "2px 0px 0px 0px",
+            "tag": "collapsible_panel",
+            "vertical_spacing": "2px",
           },
         ],
         "expanded": false,
         "header": {
           "icon": {
             "color": "grey",
-            "size": "12px 12px",
+            "size": "14px 14px",
             "tag": "standard_icon",
             "token": "down-small-ccm_outlined",
           },
           "icon_expanded_angle": -180,
           "icon_position": "right",
           "title": {
-            "content": "<font color='trace_success'>●</font>　运行测试　<font color='grey'>pnpm test</font>　<font color='grey'>1s</font>",
-            "icon": {
-              "color": "grey",
-              "tag": "standard_icon",
-              "token": "doc-checklist_outlined",
-            },
+            "content": "执行轨迹　<font color='grey'>1 个阶段</font>",
             "tag": "markdown",
             "text_size": "notation",
           },
           "vertical_align": "center",
         },
-        "margin": "0px 0px 0px 20px",
+        "margin": "8px 0px 0px 0px",
         "padding": "4px 0px 0px 0px",
         "tag": "collapsible_panel",
-        "vertical_spacing": "4px",
+        "vertical_spacing": "2px",
+      },
+      {
+        "columns": [
+          {
+            "elements": [
+              {
+                "content": "<font color='grey'>Dockmux · 任务 #task-completed</font>",
+                "margin": "0px",
+                "tag": "markdown",
+                "text_size": "x-small",
+              },
+            ],
+            "tag": "column",
+            "vertical_align": "center",
+            "weight": 1,
+            "width": "weighted",
+          },
+        ],
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "margin": "6px 0px 0px 0px",
+        "tag": "column_set",
       },
     ],
-    "expanded": false,
-    "header": {
-      "icon": {
-        "color": "grey",
-        "size": "14px 14px",
-        "tag": "standard_icon",
-        "token": "down-small-ccm_outlined",
-      },
-      "icon_expanded_angle": -180,
-      "icon_position": "right",
-      "title": {
-        "content": "pnpm test　<font color='grey'>2s</font>　<font color='green'>● 已完成</font>",
-        "tag": "markdown",
-        "text_size": "notation",
-      },
-      "vertical_align": "center",
-    },
-    "margin": "0px",
-    "padding": "2px 0px 0px 0px",
-    "tag": "collapsible_panel",
+    "padding": "10px 12px 10px 12px",
     "vertical_spacing": "2px",
   },
-]
+  "config": {
+    "streaming_mode": false,
+    "style": {
+      "color": {
+        "trace_failure": {
+          "dark_mode": "rgba(226,202,124,1)",
+          "light_mode": "rgba(208,180,92,1)",
+        },
+        "trace_running": {
+          "dark_mode": "rgba(124,202,242,1)",
+          "light_mode": "rgba(96,184,232,1)",
+        },
+        "trace_success": {
+          "dark_mode": "rgba(118,204,142,1)",
+          "light_mode": "rgba(92,184,119,1)",
+        },
+      },
+    },
+    "summary": {
+      "content": "验证 Dockmux 测试 · 已完成",
+    },
+    "update_multi": true,
+    "width_mode": "default",
+  },
+  "header": {
+    "padding": "10px 12px 8px 12px",
+    "subtitle": {
+      "content": "Dockmux · Agent 任务",
+      "tag": "plain_text",
+    },
+    "template": "green",
+    "title": {
+      "content": "验证 Dockmux 测试",
+      "tag": "plain_text",
+    },
+  },
+  "schema": "2.0",
+}
 `;
 
 exports[`renderLarkCardElements 视觉快照 > renderLarkTrace markdown 形态（completed） 1`] = `
-"**思考**
+"**内部分析**
 
-> 先跑测试，失败再修。
+> Agent 已完成内部分析（推理原文不展示）
 
 ---
 
@@ -142,93 +283,462 @@ exports[`renderLarkCardElements 视觉快照 > renderLarkTrace markdown 形态�
 `;
 
 exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进行中的工具调用 1`] = `
-[
-  {
+{
+  "body": {
     "direction": "vertical",
-    "element_id": "trace_group_0",
     "elements": [
       {
-        "icon": {
-          "color": "grey",
-          "tag": "standard_icon",
-          "token": "setting_outlined",
-        },
-        "margin": "0px 0px 2px 0px",
-        "tag": "div",
-        "text": {
-          "content": "1 次工具调用",
-          "tag": "plain_text",
-          "text_color": "grey",
-          "text_size": "notation",
-        },
-        "width": "auto",
+        "columns": [
+          {
+            "elements": [
+              {
+                "element_id": "task_status",
+                "icon": {
+                  "color": "grey",
+                  "size": "14px 14px",
+                  "tag": "standard_icon",
+                  "token": "loading_outlined",
+                },
+                "margin": "0px",
+                "tag": "div",
+                "text": {
+                  "content": "<text_tag color='wathet'>执行中</text_tag>　<font color='grey'>已用时 2s</font>",
+                  "tag": "lark_md",
+                  "text_size": "small",
+                },
+                "width": "auto",
+              },
+            ],
+            "tag": "column",
+            "vertical_align": "center",
+            "weight": 1,
+            "width": "weighted",
+          },
+          {
+            "elements": [
+              {
+                "behaviors": [
+                  {
+                    "type": "callback",
+                    "value": {
+                      "action": "interrupt",
+                      "task_id": "task-running",
+                    },
+                  },
+                ],
+                "element_id": "interrupt",
+                "margin": "0px",
+                "size": "small",
+                "tag": "button",
+                "text": {
+                  "content": "中断",
+                  "tag": "plain_text",
+                },
+                "type": "danger",
+              },
+            ],
+            "tag": "column",
+            "vertical_align": "center",
+            "width": "72px",
+          },
+        ],
+        "element_id": "task_action_row",
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "margin": "0px",
+        "tag": "column_set",
+        "vertical_align": "center",
       },
       {
         "direction": "vertical",
-        "element_id": "trace_tool_0_0",
+        "element_id": "trace_overview",
         "elements": [
           {
-            "content": "**输入**
+            "element_id": "trace_digest",
+            "icon": {
+              "color": "grey",
+              "tag": "standard_icon",
+              "token": "doc-checklist_outlined",
+            },
+            "margin": "0px 0px 4px 0px",
+            "tag": "div",
+            "text": {
+              "content": "1 个阶段 · 0/1 个工具已返回",
+              "lines": 1,
+              "tag": "plain_text",
+              "text_color": "grey",
+              "text_size": "notation",
+            },
+            "width": "auto",
+          },
+          {
+            "direction": "vertical",
+            "element_id": "trace_group_0",
+            "elements": [
+              {
+                "icon": {
+                  "color": "grey",
+                  "tag": "standard_icon",
+                  "token": "setting_outlined",
+                },
+                "margin": "0px 0px 2px 0px",
+                "tag": "div",
+                "text": {
+                  "content": "1 次工具调用",
+                  "tag": "plain_text",
+                  "text_color": "grey",
+                  "text_size": "notation",
+                },
+                "width": "auto",
+              },
+              {
+                "direction": "vertical",
+                "element_id": "trace_tool_0_0",
+                "elements": [
+                  {
+                    "content": "**输入**
 
 \`\`\`text
 {
   "command": "pnpm test"
 }
 \`\`\`",
+                    "margin": "0px",
+                    "tag": "markdown",
+                    "text_size": "notation",
+                  },
+                ],
+                "expanded": false,
+                "header": {
+                  "icon": {
+                    "color": "grey",
+                    "size": "12px 12px",
+                    "tag": "standard_icon",
+                    "token": "down-small-ccm_outlined",
+                  },
+                  "icon_expanded_angle": -180,
+                  "icon_position": "right",
+                  "title": {
+                    "content": "<font color='trace_running'>●</font>　运行测试　<font color='grey'>pnpm test</font>　<font color='grey'>1s</font>",
+                    "icon": {
+                      "color": "grey",
+                      "tag": "standard_icon",
+                      "token": "doc-checklist_outlined",
+                    },
+                    "tag": "markdown",
+                    "text_size": "notation",
+                  },
+                  "vertical_align": "center",
+                },
+                "margin": "0px 0px 0px 20px",
+                "padding": "4px 0px 0px 0px",
+                "tag": "collapsible_panel",
+                "vertical_spacing": "4px",
+              },
+            ],
+            "expanded": false,
+            "header": {
+              "icon": {
+                "color": "grey",
+                "size": "14px 14px",
+                "tag": "standard_icon",
+                "token": "down-small-ccm_outlined",
+              },
+              "icon_expanded_angle": -180,
+              "icon_position": "right",
+              "title": {
+                "content": "正在分析需求，先跑一遍测试。　<font color='grey'>1s</font>　<font color='trace_running'>● 执行中</font>",
+                "tag": "markdown",
+                "text_size": "notation",
+              },
+              "vertical_align": "center",
+            },
             "margin": "0px",
-            "tag": "markdown",
-            "text_size": "notation",
+            "padding": "2px 0px 0px 0px",
+            "tag": "collapsible_panel",
+            "vertical_spacing": "2px",
           },
         ],
-        "expanded": false,
+        "expanded": true,
         "header": {
           "icon": {
             "color": "grey",
-            "size": "12px 12px",
+            "size": "14px 14px",
             "tag": "standard_icon",
             "token": "down-small-ccm_outlined",
           },
           "icon_expanded_angle": -180,
           "icon_position": "right",
           "title": {
-            "content": "<font color='trace_running'>●</font>　运行测试　<font color='grey'>pnpm test</font>　<font color='grey'>1s</font>",
+            "content": "执行轨迹　<font color='grey'>1 个阶段</font>",
             "icon": {
               "color": "grey",
               "tag": "standard_icon",
-              "token": "doc-checklist_outlined",
+              "token": "loading_outlined",
             },
             "tag": "markdown",
             "text_size": "notation",
           },
           "vertical_align": "center",
         },
-        "margin": "0px 0px 0px 20px",
+        "margin": "8px 0px 0px 0px",
         "padding": "4px 0px 0px 0px",
         "tag": "collapsible_panel",
-        "vertical_spacing": "4px",
+        "vertical_spacing": "2px",
+      },
+      {
+        "columns": [
+          {
+            "elements": [
+              {
+                "content": "<font color='grey'>Dockmux · 任务 #task-running</font>",
+                "margin": "0px",
+                "tag": "markdown",
+                "text_size": "x-small",
+              },
+            ],
+            "tag": "column",
+            "vertical_align": "center",
+            "weight": 1,
+            "width": "weighted",
+          },
+        ],
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "margin": "6px 0px 0px 0px",
+        "tag": "column_set",
       },
     ],
-    "expanded": false,
-    "header": {
-      "icon": {
-        "color": "grey",
-        "size": "14px 14px",
-        "tag": "standard_icon",
-        "token": "down-small-ccm_outlined",
-      },
-      "icon_expanded_angle": -180,
-      "icon_position": "right",
-      "title": {
-        "content": "正在分析需求，先跑一遍测试。　<font color='grey'>1s</font>　<font color='trace_running'>● 执行中</font>",
-        "tag": "markdown",
-        "text_size": "notation",
-      },
-      "vertical_align": "center",
-    },
-    "margin": "0px",
-    "padding": "2px 0px 0px 0px",
-    "tag": "collapsible_panel",
+    "padding": "10px 12px 10px 12px",
     "vertical_spacing": "2px",
   },
-]
+  "config": {
+    "streaming_mode": true,
+    "style": {
+      "color": {
+        "trace_failure": {
+          "dark_mode": "rgba(226,202,124,1)",
+          "light_mode": "rgba(208,180,92,1)",
+        },
+        "trace_running": {
+          "dark_mode": "rgba(124,202,242,1)",
+          "light_mode": "rgba(96,184,232,1)",
+        },
+        "trace_success": {
+          "dark_mode": "rgba(118,204,142,1)",
+          "light_mode": "rgba(92,184,119,1)",
+        },
+      },
+    },
+    "summary": {
+      "content": "验证 Dockmux 测试 · 执行中",
+    },
+    "update_multi": true,
+    "width_mode": "default",
+  },
+  "header": {
+    "padding": "10px 12px 8px 12px",
+    "subtitle": {
+      "content": "Dockmux · Agent 任务",
+      "tag": "plain_text",
+    },
+    "template": "blue",
+    "title": {
+      "content": "验证 Dockmux 测试",
+      "tag": "plain_text",
+    },
+  },
+  "schema": "2.0",
+}
+`;
+
+exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使用强提醒且不伪造操作按钮 1`] = `
+{
+  "body": {
+    "direction": "vertical",
+    "elements": [
+      {
+        "columns": [
+          {
+            "elements": [
+              {
+                "element_id": "task_status",
+                "margin": "0px",
+                "tag": "div",
+                "text": {
+                  "content": "<text_tag color='orange'>等待审批</text_tag>　<font color='grey'>已用时 2s</font>",
+                  "tag": "lark_md",
+                  "text_size": "small",
+                },
+                "width": "auto",
+              },
+            ],
+            "tag": "column",
+            "vertical_align": "center",
+            "weight": 1,
+            "width": "weighted",
+          },
+          {
+            "elements": [
+              {
+                "behaviors": [
+                  {
+                    "type": "callback",
+                    "value": {
+                      "action": "interrupt",
+                      "task_id": "task-approval",
+                    },
+                  },
+                ],
+                "element_id": "interrupt",
+                "margin": "0px",
+                "size": "small",
+                "tag": "button",
+                "text": {
+                  "content": "中断",
+                  "tag": "plain_text",
+                },
+                "type": "danger",
+              },
+            ],
+            "tag": "column",
+            "vertical_align": "center",
+            "width": "72px",
+          },
+        ],
+        "element_id": "task_action_row",
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "margin": "0px",
+        "tag": "column_set",
+        "vertical_align": "center",
+      },
+      {
+        "content": "<text_tag color='orange'>高风险待确认</text_tag>　**任务已暂停，需要人工确认**
+
+高危操作：删除构建缓存目录
+
+<font color='grey'>请在 Dockmux 工作台中查看详情并审批；处理后卡片会继续同步。</font>",
+        "element_id": "risk_alert_pending_0",
+        "margin": "6px 0px 8px 0px",
+        "tag": "markdown",
+        "text_size": "normal",
+      },
+      {
+        "direction": "vertical",
+        "element_id": "trace_overview",
+        "elements": [
+          {
+            "direction": "vertical",
+            "element_id": "trace_group_0",
+            "elements": [],
+            "expanded": false,
+            "header": {
+              "icon": {
+                "color": "grey",
+                "size": "14px 14px",
+                "tag": "standard_icon",
+                "token": "down-small-ccm_outlined",
+              },
+              "icon_expanded_angle": -180,
+              "icon_position": "right",
+              "title": {
+                "content": "准备清理构建缓存。　<font color='grey'>1ms</font>　<font color='trace_running'>● 执行中</font>",
+                "tag": "markdown",
+                "text_size": "notation",
+              },
+              "vertical_align": "center",
+            },
+            "margin": "0px",
+            "padding": "2px 0px 0px 0px",
+            "tag": "collapsible_panel",
+            "vertical_spacing": "2px",
+          },
+        ],
+        "expanded": true,
+        "header": {
+          "icon": {
+            "color": "grey",
+            "size": "14px 14px",
+            "tag": "standard_icon",
+            "token": "down-small-ccm_outlined",
+          },
+          "icon_expanded_angle": -180,
+          "icon_position": "right",
+          "title": {
+            "content": "执行轨迹　<font color='grey'>1 个阶段</font>",
+            "tag": "markdown",
+            "text_size": "notation",
+          },
+          "vertical_align": "center",
+        },
+        "margin": "8px 0px 0px 0px",
+        "padding": "4px 0px 0px 0px",
+        "tag": "collapsible_panel",
+        "vertical_spacing": "2px",
+      },
+      {
+        "columns": [
+          {
+            "elements": [
+              {
+                "content": "<font color='grey'>Dockmux · 任务 #task-approval</font>",
+                "margin": "0px",
+                "tag": "markdown",
+                "text_size": "x-small",
+              },
+            ],
+            "tag": "column",
+            "vertical_align": "center",
+            "weight": 1,
+            "width": "weighted",
+          },
+        ],
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "margin": "6px 0px 0px 0px",
+        "tag": "column_set",
+      },
+    ],
+    "padding": "10px 12px 10px 12px",
+    "vertical_spacing": "2px",
+  },
+  "config": {
+    "streaming_mode": true,
+    "style": {
+      "color": {
+        "trace_failure": {
+          "dark_mode": "rgba(226,202,124,1)",
+          "light_mode": "rgba(208,180,92,1)",
+        },
+        "trace_running": {
+          "dark_mode": "rgba(124,202,242,1)",
+          "light_mode": "rgba(96,184,232,1)",
+        },
+        "trace_success": {
+          "dark_mode": "rgba(118,204,142,1)",
+          "light_mode": "rgba(92,184,119,1)",
+        },
+      },
+    },
+    "summary": {
+      "content": "清理构建缓存 · 等待审批",
+    },
+    "update_multi": true,
+    "width_mode": "default",
+  },
+  "header": {
+    "padding": "10px 12px 8px 12px",
+    "subtitle": {
+      "content": "Dockmux · Agent 任务",
+      "tag": "plain_text",
+    },
+    "template": "orange",
+    "title": {
+      "content": "清理构建缓存",
+      "tag": "plain_text",
+    },
+  },
+  "schema": "2.0",
+}
 `;

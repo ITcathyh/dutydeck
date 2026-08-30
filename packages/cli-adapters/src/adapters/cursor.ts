@@ -12,11 +12,8 @@ export function createCursorAdapter(): CliAdapter {
     id: 'cursor',
     capabilities: { resume: true, initialPromptViaArgs: true },
 
-    buildArgs({ resume, resumeSessionId, initialPrompt, model }: AdapterSessionContext): string[] {
-      // --trust 预答 "Workspace Trust Required" 启动弹窗：没有它，每个全新
-      // 工作目录的首次 spawn 都会静默卡在弹窗上（quiescence 误判 idle，首条
-      // prompt 被打进弹窗）。这是无人值守启动门，与 --force 的审批 bypass 正交。
-      const base = ['--trust', '--force'];
+    buildArgs({ resume, resumeSessionId, initialPrompt, model, permissionMode }: AdapterSessionContext): string[] {
+      const base: string[] = permissionMode === 'full-trust' ? ['--trust', '--force'] : [];
       if (model && model.trim()) {
         base.push('--model', model.trim());
       }

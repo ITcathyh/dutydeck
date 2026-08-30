@@ -5,7 +5,7 @@ import type { DriverFactory } from '@dockmux/shared';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
-import { getAuthToken, isLoopbackAddress, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
+import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import { createPtyCliDriver, PTY_AGENT_CONTRIBUTIONS } from '@dockmux/pty-driver';
 import { createCliAdapter } from '@dockmux/cli-adapters';
@@ -68,7 +68,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     getAuthToken(repos.config).then(current => { if (current) activeToken = current; }).catch(() => {});
   }, 5_000);
   tokenRefresh.unref();
-  // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 PtyCliDriver（botmux 适配器栈）。
+  // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dockmux 的 PtyCliDriver。
   // agent.id 即 adapter id（contributions 的 id 与 adapterId 一致）；自定义 pty-cli agent
   // 需用已知 adapter id 作为 agent id。
   const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId) => {
@@ -129,7 +129,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       },
       terminal: {
         provider: terminalProvider,
-        auth: { isLoopback: isLoopbackAddress, check: presented => !!presented && tokensEqual(presented, activeToken) }
+        auth: { allowUnauthenticated: config.host === '127.0.0.1', check: presented => !!presented && tokensEqual(presented, activeToken) }
       },
       relay: { runtime, capabilities: relayCapabilities, broker: relayBroker }
     });

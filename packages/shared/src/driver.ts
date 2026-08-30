@@ -9,7 +9,7 @@ import type { EventType, PermissionMode, ToolRiskPolicy } from './index.js';
  *
  * 已实现：
  *  - AcpxAdapter（@dockmux/acp-client）—— ACP 协议，经 acpx 运行时
- *  - PtyCliDriver（@dockmux/pty-driver）—— PTY 里的 CLI，botmux 适配器生态
+ *  - PtyCliDriver（@dockmux/pty-driver）—— PTY 里的供应商 CLI 适配层
  *
  * 实现方注意：
  *  - 事件必须按发生顺序回调；运行时按 session 串行化消费，不要求实现方自己排队。
@@ -86,7 +86,7 @@ export interface TerminalStream {
 
 /**
  * 驱动工厂签名（运行时按 agent.protocol 路由到具体工厂）。
- * protocol: 'acp' | 'jsonl' | 'pipe' | 'pty' | 'pty-cli'（新增 pty-cli 走 botmux 适配器栈）
+ * protocol: 'acp' | 'jsonl' | 'pipe' | 'pty' | 'pty-cli'（pty-cli 使用 Dockmux PTY 适配层）
  */
 export type DriverFactory = (
   agent: import('./index.js').AgentConfig,

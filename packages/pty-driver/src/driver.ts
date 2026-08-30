@@ -95,14 +95,22 @@ export class PtyCliDriver implements AgentDriver {
     this.cliSessionId = opts.cliSessionId;
   }
 
+  private assertPermissionModeSupported() {
+    if (this.agent.permissionMode !== 'ask' && this.agent.permissionMode !== 'full-trust') {
+      throw new Error(`PTY Agent ${this.agent.id} does not support permission mode ${this.agent.permissionMode}; use ask or full-trust`);
+    }
+  }
+
   async start(): Promise<void> {
     if (this.started) return;
+    this.assertPermissionModeSupported();
     this.started = true;
     this.lastArgs = this.adapter.buildArgs({
       sessionId: this.sessionId,
       cwd: this.agent.cwd,
       model: this.agent.model,
       reasoningEffort: this.agent.reasoningEffort,
+      permissionMode: this.agent.permissionMode,
     });
     this.backend.spawn(this.agent.command, this.lastArgs, {
       cwd: this.cwd,
@@ -168,6 +176,7 @@ export class PtyCliDriver implements AgentDriver {
 
   async resume(): Promise<void> {
     if (this.stopped) return;
+    this.assertPermissionModeSupported();
     // 路径 1：tmux 会话仍在 → reattach（后端内部重启 pipe-pane 捕获，driver 重建订阅）。
     const tmuxName = this.tmuxSessionName();
     if (tmuxName !== undefined && TmuxBackend.probeSession(tmuxName) === 'exists') {
@@ -229,9 +238,9 @@ export class PtyCliDriver implements AgentDriver {
    * resume 重 spawn 的完整 argv。
    *
    * 不能直接用 `adapter.buildResumeCommand()` 当 argv——它只产出**续接定位**
-   * 那几个参数（claude 是 `--resume <uuid>`），不含权限绕过、settings、
-   * disallowed-tools 等无人值守必需的启动参数。拿它当完整 argv 拉起来的 CLI
-   * 会在权限确认处 exit 1，会话随即被判 failed（真实环境实测：resume 返回 200，
+   * 那几个参数（claude 是 `--resume <uuid>`），不含权限姿态、settings、
+   * disallowed-tools 等通用启动参数。拿它当完整 argv 会丢掉会话配置，
+   * 甚至使 CLI 在启动交互处 exit 1（真实环境实测：resume 返回 200，
    * 2 秒后 state=failed，之后 send 全部 409）。
    *
    * 正解是走 `buildArgs({ resume: true, resumeSessionId })`：适配器在那里把
@@ -476,6 +485,7 @@ export class PtyCliDriver implements AgentDriver {
       cwd: this.cwd,
       model: this.agent.model,
       reasoningEffort: this.agent.reasoningEffort,
+      permissionMode: this.agent.permissionMode,
       env: this.agent.env,
     };
   }

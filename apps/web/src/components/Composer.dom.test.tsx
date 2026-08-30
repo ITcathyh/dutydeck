@@ -210,7 +210,7 @@ describe('Composer 排队任务', () => {
 
   it('渲染排队列表与条数', () => {
     render(<Composer {...baseProps} queuedTasks={[task('t1', '第一条'), task('t2', '第二条')]}/>);
-    expect(screen.getByText('等待发送')).toBeTruthy();
+    expect(screen.getByText('待执行指令')).toBeTruthy();
     expect(screen.getByText('2')).toBeTruthy();
     expect(screen.getByText('第一条')).toBeTruthy();
   });
