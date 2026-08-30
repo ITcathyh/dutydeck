@@ -18,32 +18,11 @@
  * Sidechain (Task tool internals) and API-error assistant lines are skipped —
  * they are not model output.
  */
-import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dockmux/shared';
+import { claudeProjectDir } from '../cli-paths.js';
 import { JsonlTailer, type TranscriptEventSource } from './tail.js';
-
-function expandHome(p: string): string {
-  return p.startsWith('~') ? join(homedir(), p.slice(1)) : p;
-}
-
-/** Claude data root: $CLAUDE_CONFIG_DIR when set, else ~/.claude. Read
- *  dynamically so tests / child processes that set the env after module
- *  load still resolve correctly. */
-function claudeDataDir(): string {
-  const configured = process.env.CLAUDE_CONFIG_DIR?.trim();
-  return configured ? expandHome(configured) : join(homedir(), '.claude');
-}
-
-/** cwd → the path Claude keys its project dir by: the REALPATH (symlinks
- *  resolved), falling back to a lexical resolve only when the path isn't on
- *  disk. Claude keys projects by realpath, so a symlinked cwd must resolve
- *  to the same string the CLI used. */
-function realCwd(cwd: string): string {
-  const expanded = expandHome(cwd);
-  try { return realpathSync(expanded); } catch { return resolve(expanded); }
-}
 
 /** Newest *.jsonl (by mtime) in a Claude project dir, or undefined. Ported
  *  from botmux's findLatestJsonl (no acceptCandidate — the dockmux tailer
@@ -76,9 +55,7 @@ function findLatestJsonl(dir: string): string | undefined {
 
 /** Locate the newest Claude transcript jsonl for a cwd. */
 export function resolveClaudeTranscriptPath(cwd: string): string | undefined {
-  const projectKey = realCwd(cwd).replace(/[^A-Za-z0-9-]/g, '-');
-  const projectDir = join(claudeDataDir(), 'projects', projectKey);
-  return findLatestJsonl(projectDir);
+  return findLatestJsonl(claudeProjectDir(cwd));
 }
 
 /** Flatten a tool_result block's content (string, or array of text blocks)

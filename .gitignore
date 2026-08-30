@@ -9,3 +9,4 @@ packages/*/dist/
 .DS_Store
 .dockmux/
 apps/server/public
+*.tsbuildinfo

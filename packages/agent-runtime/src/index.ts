@@ -542,7 +542,31 @@ export class DockmuxRuntime {
     this.hardInterrupts.delete(id);
   }
   async pause(id: string) { const { session } = await this.active(id); const agent = await this.repos.agents.get(session.agentId); if (!agent?.capabilities.pause) throw new RuntimeError('UNSUPPORTED_CAPABILITY', `Agent ${agent?.name ?? session.agentId} does not support pause/resume`, 422); await this.interrupt(id); }
-  async resume(id: string) { const { session } = await this.active(id); const agent = await this.repos.agents.get(session.agentId); if (!agent?.capabilities.resume) throw new RuntimeError('UNSUPPORTED_CAPABILITY', `Agent ${agent?.name ?? session.agentId} does not support resume`, 422); let driver = this.drivers.get(id); if (!driver) { const configured = this.configureAgentForSession(agent, session); driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => { this.notifyDriverExit(session.id, code); if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`); }, session.id); this.drivers.set(id, driver); } await driver.resume(); await this.saveState(session, 'idle'); }
+  /**
+   * Resume a session.
+   *
+   * A pty-cli resume kills the old backend and re-spawns with the CLI's resume
+   * flags, so the previous CLI exits (SIGHUP → 129) as a normal part of
+   * resuming. That exit must not mark the session failed — `PtyCliDriver`
+   * filters it out by backend identity before it ever reaches this callback
+   * (see its `handleExit`), which is why there is no timing guard here.
+   */
+  async resume(id: string) {
+    const { session } = await this.active(id);
+    const agent = await this.repos.agents.get(session.agentId);
+    if (!agent?.capabilities.resume) throw new RuntimeError('UNSUPPORTED_CAPABILITY', `Agent ${agent?.name ?? session.agentId} does not support resume`, 422);
+    let driver = this.drivers.get(id);
+    if (!driver) {
+      const configured = this.configureAgentForSession(agent, session);
+      driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => {
+        this.notifyDriverExit(session.id, code);
+        if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`);
+      }, session.id);
+      this.drivers.set(id, driver);
+    }
+    await driver.resume();
+    await this.saveState(session, 'idle');
+  }
   async stop(id: string) {
     const { session, driver } = await this.active(id);
     this.hardInterrupts.add(id);
