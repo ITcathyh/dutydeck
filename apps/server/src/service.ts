@@ -9,6 +9,7 @@ import { getAuthToken, isLoopbackAddress, loadOrCreateAuthToken, tokensEqual } f
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import { createPtyCliDriver, PTY_AGENT_CONTRIBUTIONS } from '@dockmux/pty-driver';
 import { createCliAdapter } from '@dockmux/cli-adapters';
+import { RelayAskBroker, RelayCapabilityRegistry, RelayService, loadOrCreateRelaySigningSecret } from '@dockmux/relay';
 
 export interface StartLocalServerOptions { env?: NodeJS.ProcessEnv; webRoot?: string; groupToolsCommand?: string }
 export interface LocalServer {
@@ -37,7 +38,19 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   let groupToolsSigningSecret: string;
   try { groupToolsSigningSecret = await loadOrCreateGroupToolsSigningSecret(repos.config); }
   catch (error) { repos.close(); throw error; }
+  let relaySigningSecret: string;
+  try { relaySigningSecret = await loadOrCreateRelaySigningSecret(repos.config); }
+  catch (error) { repos.close(); throw error; }
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret);
+  // 通用回传通道：与飞书无关，任何来源的会话（含 Web 工作台创建的 pty-cli）都注入凭证。
+  // command 前缀复用 groupToolsCommand 算出的运行期绝对路径——静态文案拿不到它，
+  // 经 env 下发后由 @dockmux/relay 的 relayHintLines() 在提示块里读回。
+  const relayCapabilities = new RelayCapabilityRegistry(
+    repos.sessions,
+    localApiBaseUrl(config),
+    relaySigningSecret,
+    options.groupToolsCommand
+  );
   const env = options.env ?? process.env;
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, { env, groupToolsCommand: options.groupToolsCommand });
   // 访问认证：启动时确保 token 存在（首次生成并打印到日志一次）。
@@ -67,7 +80,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     ptyDriverFactory,
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     cleanupIntervalMs: config.cleanupIntervalMs,
-    sessionEnvironment: session => capabilities.environmentFor(session),
+    sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id) }),
     sessionPrompt: (session, prompt) => agentTools.promptForSession(session, prompt)
   });
   // 终端 WS 代理的会话→终端流访问器，走 runtime 的只读 getDriver 访问器（Team Core 已交付）。
@@ -95,6 +108,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   };
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
   let closed = false;
+  const relayBroker = new RelayAskBroker({
+    async publish(sessionId, input) {
+      await runtime.publishSessionEvent(sessionId, 'text', {
+        text: input.text,
+        relay: input.kind,
+        ...(input.askId ? { askId: input.askId } : {})
+      });
+    }
+  });
   try {
     await runtime.initialize(config.agents);
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
@@ -108,7 +130,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       terminal: {
         provider: terminalProvider,
         auth: { isLoopback: isLoopbackAddress, check: presented => !!presented && tokensEqual(presented, activeToken) }
-      }
+      },
+      relay: { runtime, capabilities: relayCapabilities, broker: relayBroker }
     });
     await app.listen(listenOptions(config));
   } catch (error) {
@@ -122,6 +145,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (closed) return;
       closed = true;
       clearInterval(tokenRefresh);
+      // 先唤醒所有阻塞中的 ask，再关 app：否则长轮询请求会拖住 app.close()。
+      relayBroker.close();
       const results = await Promise.allSettled([app?.close() ?? Promise.resolve(), runtime.shutdown()]);
       capabilities.close();
       repos.close();

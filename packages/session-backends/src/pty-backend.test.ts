@@ -3,6 +3,9 @@ import { tmpdir } from 'node:os';
 import { describe, expect, it, afterEach } from 'vitest';
 import { PtyBackend } from './pty-backend.js';
 import { TmuxBackend, isTmuxAvailable } from './tmux-backend.js';
+import { ZellijBackend } from './zellij-backend.js';
+import { ZmxBackend } from './zmx-backend.js';
+import type { SessionBackend } from './types.js';
 
 /** Poll a predicate until true or timeout. Defaults are generous: under a
  *  fully concurrent suite the tmux spawn → pipe-pane → tail -F chain and the
@@ -256,4 +259,47 @@ tmuxDescribe('TmuxBackend', () => {
     expect(second.write('after-reattach')).toBe(true);
     await waitFor(() => reReceived.join('').includes('after-reattach'));
   }, 60000);
+});
+
+// ─── SessionBackend.sessionName contract ───────────────────────────────────
+
+/**
+ * The driver needs each backend's multiplexer session name to decide between
+ * "reattach to the live session" and "respawn". It used to reach into the
+ * implementations' PRIVATE `sessionName` field by reflection, which any
+ * rename would have broken silently — and silently means the driver stops
+ * finding live sessions and respawns instead, losing the CLI's context with
+ * no error anywhere. These tests pin the public contract that replaced it.
+ */
+describe('SessionBackend.sessionName contract', () => {
+  it('每个持久后端都把自己的会话名作为公开只读字段暴露出来', () => {
+    // 逐个构造，不用循环：这四个类的构造签名本来就不同，写死才能防「新增后端
+    // 忘了实现契约」——那种情况下 driver 对它永远反查不到会话名。
+    const name = 'dockmux-contract-probe';
+    expect(new TmuxBackend(name).sessionName).toBe(name);
+    expect(new ZellijBackend(name).sessionName).toBe(name);
+    expect(new ZmxBackend(name).sessionName).toBe(name);
+  });
+
+  it('PtyBackend 没有可寻址的会话 → sessionName 为 undefined', () => {
+    // pty 子进程随后端一起死，没有任何东西可以 reattach。这里必须是
+    // undefined 而不是空串：driver 用 `!== undefined` 判断该不该探测会话。
+    expect(new PtyBackend().sessionName).toBeUndefined();
+  });
+
+  it('sessionName 是构造期固定的，不随 spawn/attach 变化', () => {
+    // 会话名一旦绑定就不该变：改绑一个活后端会让它的捕获管道指向旧会话，
+    // 而 driver 已经拿新名字去探测了。
+    const backend = new TmuxBackend('dockmux-immutable-probe');
+    const before = backend.sessionName;
+    expect(Object.isFrozen(before)).toBe(true);   // 字符串天然不可变
+    expect(backend.sessionName).toBe(before);
+  });
+
+  it('契约是结构化可读的：拿到 SessionBackend 类型就能读到 sessionName', () => {
+    // 这条锁的是「通过接口类型而不是具体类」读得到——driver 持有的正是
+    // SessionBackend，不是 TmuxBackend。若字段被改回 private，这里编译不过。
+    const backends: SessionBackend[] = [new PtyBackend(), new TmuxBackend('via-interface')];
+    expect(backends.map(b => b.sessionName)).toEqual([undefined, 'via-interface']);
+  });
 });

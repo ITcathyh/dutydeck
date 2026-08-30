@@ -56,14 +56,14 @@ export function findGrokSessionIdInPromptHistory(
 }
 
 export const grokSessionIdLookup: SessionIdLookup = {
-  adapterId: 'grok',
+  adapterIds: ['grok'],
 
-  resolve({ sessionId, cwd }: SessionIdLookupContext): string | undefined {
-    const bucket = resolveGrokCwdBucketDir(cwd);
+  resolve({ sessionId, cwd, env }: SessionIdLookupContext): string | undefined {
+    const bucket = resolveGrokCwdBucketDir(cwd, env);
     // Fast path: dockmux pinned the id via --session-id and Grok accepted it
     // (the session directory exists under this cwd's bucket).
     if (sessionId && existsSync(join(bucket, sessionId))) return sessionId;
     if (!isUsableMarker(sessionId)) return undefined;
-    return findGrokSessionIdInPromptHistory(grokPromptHistoryPath(cwd), sessionId);
+    return findGrokSessionIdInPromptHistory(grokPromptHistoryPath(cwd, env), sessionId);
   },
 };

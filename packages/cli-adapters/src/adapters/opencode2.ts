@@ -52,7 +52,12 @@ export function createOpenCode2Adapter(): CliAdapter {
       }
     },
 
-    buildResumeCommand(sessionId: string): string[] {
+    /**
+     * V2 同样自己铸 id，只认原生形态；认不出返回 null → driver 起新会话。
+     * 带无效 id 启动会撞 `Session not found` 并立即退出（见 buildArgs 注释）。
+     */
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (!OPENCODE_SESSION_ID_RE.test(sessionId)) return null;
       return ['-s', sessionId];
     },
   };

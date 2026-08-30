@@ -189,7 +189,8 @@ const LITERAL_SEND_LIMIT = 4096;
 export class TmuxBackend implements SessionBackend {
   readonly kind = 'tmux' as const;
 
-  private readonly sessionName: string;
+  /** SessionBackend contract: the tmux session this backend owns. */
+  readonly sessionName: string;
   private cols = 80;
   private rows = 24;
   private started = false;

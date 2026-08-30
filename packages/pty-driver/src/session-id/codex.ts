@@ -33,6 +33,7 @@ import {
   realCwd,
   traeHistoryPath,
   traeSessionsRoot,
+  type CliPathEnv,
 } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, readTail, walkFiles } from './fs-scan.js';
 import { isUsableMarker } from './marker.js';
@@ -99,8 +100,9 @@ export function findSessionIdInRollouts(
   sessionsRoot: string,
   marker: string,
   cwd: string,
+  env?: CliPathEnv,
 ): string | undefined {
-  const wanted = realCwd(cwd);
+  const wanted = realCwd(cwd, env);
   const candidates = walkFiles(sessionsRoot, {
     maxDepth: SESSION_SCAN_MAX_DEPTH,
     accept: name => name.startsWith('rollout-') && name.endsWith('.jsonl'),
@@ -115,7 +117,7 @@ export function findSessionIdInRollouts(
       if (entry?.type === 'session_meta') {
         const p = entry.payload;
         if (typeof p?.session_id === 'string' && p.session_id.length > 0) metaSessionId = p.session_id;
-        if (typeof p?.cwd === 'string' && p.cwd.length > 0) cwdOk = realCwd(p.cwd) === wanted;
+        if (typeof p?.cwd === 'string' && p.cwd.length > 0) cwdOk = realCwd(p.cwd, env) === wanted;
         continue;
       }
       if (entry?.type === 'response_item' && rolloutUserText(entry).includes(marker)) {
@@ -137,21 +139,23 @@ export function findSessionIdInRollouts(
 function codexFamilyResolve(
   historyPath: string,
   sessionsRoot: string,
-  { sessionId, cwd }: SessionIdLookupContext,
+  { sessionId, cwd, env }: SessionIdLookupContext,
 ): string | undefined {
   if (!isUsableMarker(sessionId)) return undefined;
   // history.jsonl first: it is written at submit time, so it is populated
   // before the rollout has any user content to match on.
   return findSessionIdInHistory(historyPath, sessionId)
-    ?? findSessionIdInRollouts(sessionsRoot, sessionId, cwd);
+    ?? findSessionIdInRollouts(sessionsRoot, sessionId, cwd, env);
 }
 
 export const codexSessionIdLookup: SessionIdLookup = {
-  adapterId: 'codex',
-  resolve: ctx => codexFamilyResolve(codexHistoryPath(), codexSessionsRoot(), ctx),
+  adapterIds: ['codex'],
+  // Roots are resolved per call against the CHILD's env: `agent.env` may set
+  // CODEX_HOME per session, so a root captured once would be wrong.
+  resolve: ctx => codexFamilyResolve(codexHistoryPath(ctx.env), codexSessionsRoot(ctx.env), ctx),
 };
 
 export const traexSessionIdLookup: SessionIdLookup = {
-  adapterId: 'traex',
-  resolve: ctx => codexFamilyResolve(traeHistoryPath(), traeSessionsRoot(), ctx),
+  adapterIds: ['traex'],
+  resolve: ctx => codexFamilyResolve(traeHistoryPath(ctx.env), traeSessionsRoot(ctx.env), ctx),
 };

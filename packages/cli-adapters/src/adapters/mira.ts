@@ -1,4 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
 import { writeRunnerInput } from '../runner-input.js';
 
 /**
@@ -29,7 +30,8 @@ export function createMiraAdapter(): CliAdapter {
     buildArgs({ sessionId, resume, resumeSessionId, locale }: AdapterSessionContext): string[] {
       // sessionId / miraSessionId 都是不透明 key，原样传。
       const args = ['--session-id', sessionId];
-      if (resume && resumeSessionId) args.push('--mira-session-id', resumeSessionId);
+      const usable = usableResumeId(resumeSessionId);
+      if (resume && usable) args.push('--mira-session-id', usable);
       pushOpt(args, '--locale', locale);
       return args;
     },
@@ -39,10 +41,11 @@ export function createMiraAdapter(): CliAdapter {
       await writeRunnerInput(backend, '::dockmux-mira:', prompt);
     },
 
-    // ⚠️ 入参必须是 Mira 自己铸的会话 id（`--mira-session-id` 的唯一形态）。
-    // driver 的 resume() 目前只传 dockmux sessionId，直到它能回传 CLI-native id
-    // 之前，这条路径拼出来的 argv 恢复不到正确会话（botmux 因此直接返回 null）。
-    buildResumeCommand(sessionId: string): string[] {
+    // 入参必须是 Mira 自己铸的会话 id（`--mira-session-id` 的唯一形态）。
+    // dockmux sessionId 顶替不了，恢复不到正确会话 → 返回 null（botmux 同样如此），
+    // driver 据此改起新会话。
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (isDockmuxSessionId(sessionId)) return null;
       return ['--mira-session-id', sessionId];
     },
 

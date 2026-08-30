@@ -25,6 +25,42 @@ const EXPECTED_IDS = [
   'aiden', 'genius', 'codex-app',
 ] as const;
 
+/**
+ * 自己铸 session id 的 CLI —— dockmux 钉不了它们的会话 id。
+ *
+ * 反查失败时 driver 会退回 dockmux 的 `ses_<uuid>`，这些 CLI 从没见过那个 id：
+ * 带着它启动轻则静默起个空会话，重则立刻 exit 1（opencode / codex 实测）。
+ * 它们的 buildResumeCommand 必须对这种 id 返回 null，让 driver 改起干净会话。
+ *
+ * 名单是显式的、不是推导的：新增自铸 id 的适配器时必须手工登记到这里，
+ * 否则「忘了实现 null 判断」这类回归没有任何东西能拦住。
+ */
+const CLI_MINTED_ID_ADAPTERS = [
+  'opencode', 'opencode2', 'codex', 'traex', 'antigravity', 'mira',
+  'oh-my-pi', 'kiro-cli', 'copilot', 'cursor', 'kimi', 'reasonix',
+] as const;
+
+/**
+ * dockmux 在 fresh spawn 时把会话 id 钉给了 CLI（`--session-id` 一类），
+ * 所以 dockmux 的 sessionId **就是**有效的 resume 目标——绝不该返回 null。
+ * 这份名单是上面那条的反向闸门，防「一刀切全返回 null」把能恢复的也丢掉。
+ */
+const PINNED_ID_ADAPTERS = ['claude-code', 'seed', 'relay', 'coco', 'genius', 'grok', 'pi', 'mtr'] as const;
+
+/** OpenCode 家族的原生 id 就是 `ses_<base62>`（自己的命名空间，非 dockmux 前缀）。 */
+const OPENCODE_FAMILY = new Set(['opencode', 'opencode2']);
+
+/**
+ * 一个「该适配器所属 CLI 会认得」的样例 id。
+ *
+ * 大多数 CLI 的原生 id 形态各异且不透明，用裸 UUID 即可（codex 的 rollout id
+ * 本来就是 UUID）；OpenCode 家族严格要求 `ses_<纯字母数字>`，喂 UUID 会被
+ * 它自己的正则挡掉，所以单独给形态正确的样例。
+ */
+function nativeSampleId(id: string): string {
+  return OPENCODE_FAMILY.has(id) ? 'ses_7f3kQ2mBz9' : SID;
+}
+
 
 describe('claude-code', () => {
   const adapter = createClaudeCodeAdapter();
@@ -394,11 +430,41 @@ describe('全适配器横切契约', () => {
     for (const id of EXPECTED_IDS) {
       if (NATIVE_SES_PREFIX.has(id)) continue;
       const adapter = createCliAdapter(id);
-      // 只查 fresh 分支：resume 分支传的 resumeSessionId 是 CLI 自己铸的 id，
-      // 由调用方保证形态，适配器不该改写它。
+      // 只查 fresh 分支：resume 分支的 resumeSessionId 另有专门用例（见下一条），
+      // 因为那条路径上「调用方保证形态」这个前提并不成立。
       for (const a of adapter.buildArgs({ sessionId: SID, cwd: '/tmp/ws', model: 'm' })) {
         expect(a, `${id} 不应把 ses_ 前缀透传进 argv`).not.toContain('ses_');
       }
+    }
+  });
+
+  it('钉过 id 的 CLI：fresh 与 resume 必须钉同一种 id 形态', () => {
+    // 「resumeSessionId 由调用方保证是 CLI 原生形态」——这个前提是**错的**。
+    // driver 的 resolveResumeSessionId() 三级优先里，最后一级是「反查不到 →
+    // 退回 dockmux 自己的 sessionId」，那个 id 带着 `ses_` 前缀。
+    //
+    // 钉过 id 的 CLI 在 fresh spawn 时自己决定了写进磁盘的 id 长什么样
+    // （claude 剥成裸 UUID、grok 用完整 `ses_<uuid>`、mtr 推导成 `ses_<26位>`）。
+    // resume 想续上的就是那一个会话，所以两条分支必须归一出**同一个字符串**。
+    // 不一致 = 拿一个 CLI 从没写过的 id 去续接：真机实测 claude 会
+    // exit 1（No conversation found with session ID）；pi 更坏——exit 0 却
+    // 静默 fork 出新会话，上下文全丢且没有任何信号。
+    //
+    // 断言的是「两分支一致」而不是「必须剥前缀」：grok 的 `ses_<uuid>` 是它
+    // fresh 时亲自钉下去的，剥掉反而错。自铸 id 的 CLI 不在此列——它们对这个
+    // id 的正确回答是 null（放弃 resume），由后面的用例守。
+    const dockmuxId = `ses_${SID}`;
+    for (const id of PINNED_ID_ADAPTERS) {
+      const adapter = createCliAdapter(id);
+      const base = { sessionId: dockmuxId, cwd: '/tmp/ws' };
+      const freshIds = adapter.buildArgs(base).filter(a => a.includes(SID.slice(0, 8)));
+      const resumeIds = adapter
+        .buildArgs({ ...base, resume: true, resumeSessionId: dockmuxId })
+        .filter(a => a.includes(SID.slice(0, 8)));
+      expect(resumeIds, `${id}: resume 分支没带上会话 id`).not.toHaveLength(0);
+      expect(resumeIds, `${id}: fresh 钉的是 ${JSON.stringify(freshIds)}，`
+        + `resume 却拿 ${JSON.stringify(resumeIds)} 去续接——CLI 磁盘上没有后者这个会话`)
+        .toEqual(freshIds);
     }
   });
 
@@ -414,7 +480,7 @@ describe('全适配器横切契约', () => {
     }
   });
 
-  it('有 resume 能力的适配器：buildResumeCommand 返回非空且不含 dockmux 的 ses_ 前缀', () => {
+  it('喂 CLI 原生形态的 id 时，有 resume 能力的适配器都给出非空 argv（不是 null）', () => {
     // 例外：mtr 的原生 id 形态本身就是 `ses_<alnum>`（自己的命名空间，不是
     // dockmux 前缀泄漏）——它在 buildResumeCommand 里会把 dockmux 前缀与连字符
     // 一起归一掉，单独在下面的 mtr 快照用例里断言。
@@ -422,13 +488,51 @@ describe('全适配器横切契约', () => {
     for (const id of EXPECTED_IDS) {
       const adapter = createCliAdapter(id);
       if (!adapter.capabilities.resume) continue;
-      const argv = adapter.buildResumeCommand!(SID);
-      expect(argv.length, `${id} 的 resume argv 不应为空`).toBeGreaterThan(0);
-      for (const a of argv) {
+      const argv = adapter.buildResumeCommand!(nativeSampleId(id));
+      expect(argv, `${id} 拿到自己原生形态的 id 不该否决`).not.toBeNull();
+      expect(argv!.length, `${id} 的 resume argv 不应为空`).toBeGreaterThan(0);
+      for (const a of argv!) {
         expect(typeof a, `${id} 的 resume argv 元素应全是字符串`).toBe('string');
-        if (NATIVE_SES_PREFIX.has(id)) continue;
+        if (NATIVE_SES_PREFIX.has(id) || OPENCODE_FAMILY.has(id)) continue;
         expect(a, `${id} 的 resume argv 不应含 ses_ 前缀`).not.toContain('ses_');
       }
+    }
+  });
+
+  it('喂 dockmux 自己的 ses_<uuid> 时：自铸 id 的 CLI 必须返回 null（放弃 resume）', () => {
+    // 这是缺口 1 的核心契约。driver 的 resolveResumeSessionId 反查不到 CLI 原生
+    // id 时会退回 dockmux 的 `ses_<uuid>`。对自己铸 id 的 CLI，这个 id 它从没见过：
+    // `opencode -s <不存在的id>` 立刻 exit 1，会话随即被判 failed，之后 send 全 409。
+    // 唯一正确的回答是 null —— 让 driver 放弃 resume、改起干净会话。
+    const dockmuxId = `ses_${SID}`;
+    for (const id of CLI_MINTED_ID_ADAPTERS) {
+      const adapter = createCliAdapter(id);
+      expect(
+        adapter.buildResumeCommand!(dockmuxId),
+        `${id} 自己铸 session id，收到 dockmux 的 ${dockmuxId} 必须返回 null 而不是拿它去启动`,
+      ).toBeNull();
+    }
+  });
+
+  it('喂 dockmux 自己的 ses_<uuid> 时：dockmux 钉过 id 的 CLI 必须照常 resume', () => {
+    // 反向断言，防「一刀切全返回 null」：claude `--session-id` 这类适配器在
+    // fresh spawn 时就把 id 钉成了 dockmux 的，那个 id 就是有效的 resume 目标，
+    // 否决它等于白白丢掉本来能恢复的上下文。
+    for (const id of PINNED_ID_ADAPTERS) {
+      const adapter = createCliAdapter(id);
+      const argv = adapter.buildResumeCommand!(`ses_${SID}`);
+      expect(argv, `${id} 的 id 是 dockmux 钉的，不该否决`).not.toBeNull();
+      expect(argv!.length, `${id} 的 resume argv 不应为空`).toBeGreaterThan(0);
+    }
+  });
+
+  it('null 与能力位不矛盾：返回 null 的适配器仍然声明 resume 能力', () => {
+    // null 的语义是「这个 id 用不了」，不是「我不支持 resume」。能力位若跟着
+    // 消失，driver.resume 会走成 no-op 分支——既不续接也不降级，用户什么都收不到。
+    for (const id of CLI_MINTED_ID_ADAPTERS) {
+      const adapter = createCliAdapter(id);
+      expect(adapter.capabilities.resume, `${id} 应仍声明 resume 能力`).toBe(true);
+      expect(typeof adapter.buildResumeCommand, `${id} 应仍实现 buildResumeCommand`).toBe('function');
     }
   });
 
@@ -440,9 +544,29 @@ describe('全适配器横切契约', () => {
     const STRIPS_PREFIX = ['claude-code', 'seed', 'relay', 'genius', 'coco', 'pi'] as const;
     for (const id of STRIPS_PREFIX) {
       const adapter = createCliAdapter(id);
-      for (const a of adapter.buildResumeCommand!(`ses_${SID}`)) {
+      for (const a of adapter.buildResumeCommand!(`ses_${SID}`)!) {
         expect(a, `${id} 的 buildResumeCommand 应剥掉 ses_ 前缀`).not.toContain('ses_');
       }
+    }
+  });
+
+  it('resume 分支的 buildArgs 与 buildResumeCommand 对同一个 id 判断一致', () => {
+    // driver 用 buildResumeCommand 裁决「能不能 resume」，但真正的 argv 来自
+    // buildArgs({resume:true})。两者若不同步，就会出现「裁决说不能续接、argv 里
+    // 却仍带着续接定位」的矛盾：CLI 拿着必然无效的 id 启动，正是缺口 1 要根治的。
+    //
+    // 断言方式是「fresh 与 resume 的 argv 必须逐字相同」而不是「argv 里不许出现
+    // 这个 id」：mira / dsh 一类 runner 适配器的 `--session-id` 是 **runner 自己的**
+    // 参数，本来就该带 dockmux sessionId，与 CLI 侧的续接定位无关。
+    const dockmuxId = `ses_${SID}`;
+    for (const id of CLI_MINTED_ID_ADAPTERS) {
+      const adapter = createCliAdapter(id);
+      const fresh = adapter.buildArgs({ sessionId: dockmuxId });
+      const resumed = adapter.buildArgs({ sessionId: dockmuxId, resume: true, resumeSessionId: dockmuxId });
+      expect(
+        resumed,
+        `${id} 否决了这个 id，resume 分支的 argv 就该与 fresh 完全一致（不带任何续接定位）`,
+      ).toEqual(fresh);
     }
   });
 

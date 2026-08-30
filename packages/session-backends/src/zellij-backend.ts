@@ -267,7 +267,8 @@ export function normaliseCaptureLineEndings(s: string): string {
 export class ZellijBackend implements SessionBackend {
   readonly kind = 'zellij' as const;
 
-  private readonly sessionName: string;
+  /** SessionBackend contract: the zellij session this backend owns. */
+  readonly sessionName: string;
   private process: pty.IPty | null = null;
   private tmpConfigDir: string | null = null;
   private cols = 80;

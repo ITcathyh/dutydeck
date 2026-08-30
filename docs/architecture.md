@@ -131,6 +131,76 @@ resume()     → tmux reattach（后端存活）或 adapter.buildResumeCommand()
 ## 9. 里程碑
 
 - **M0（已完成）**：fork 脚手架 + rebrand + 基线绿
-- **M1（本次冲刺）**：MVP 验收 1-6
-- **M2**：剩余 21 适配器 + zellij/zmx 后端 + skills 系统
-- **M3**：v3 workflow 引擎移植 + fleet 多 bot 监管 + Electron 壳
+- **M1（已完成）**：MVP 验收 1-6
+- **M2（已完成）**：适配器 8→29、zellij/zmx 后端 + selector、resume 反查、skills 包、
+  vitest 双 project + Web DOM 测试 + e2e 冒烟
+- **M3（进行中）**：通用回传通道（send/ask）、v3 workflow 核心子集、M2 遗留收口
+
+### e2e 冒烟为什么必须跑真实 CLI
+
+`scripts/e2e-smoke.mjs` 默认用假 CLI（CI 可跑、不烧钱），但**关键路径的验收必须
+跑过一次 `--real`**。已经有两次「全套单测绿、真实环境完全不可用」的记录：
+
+1. **resume 判 failed**（M2）：respawn kill 掉旧后端，那次 SIGHUP(129) 被当成 agent
+   崩溃上报 → 会话 failed → 之后每个 send 都是 409。假 CLI 的单测发现不了。
+   现已固化为冒烟第 4 步。
+2. **transcript 读错目录**（M3）：daemon 的 `CLAUDE_CONFIG_DIR` 与子进程实际用的
+   目录不是同一个 → 每轮判「Agent 未返回最终输出」。屏幕上 CLI 明明答了。
+
+写 e2e 断言时的两个坑（都真的骗过一次）：
+
+- **每个 HTTP 请求都要查状态码**。曾经 `send` 返回 409 而脚本只看事件流里「有没有
+  text」，读到的全是上一轮的回放，脚本报成功。
+- **用 sequence 游标切分新事件与回放**。SSE 带 `?after=0` 会补发历史，「流里有
+  text」永远成立。断言必须是「sequence 严格大于本轮开始时的游标」。
+
+`--real` 为什么不隔离 CLI 的配置目录：**claude 的凭证与 transcript 在同一个目录**，
+隔离后者等于隔离登录状态，TUI 会停在「Select login method」等人选。隔离 HOME 并
+播种 `~/.claude.json` 也不行，换成停在「Security notes … Press Enter to continue」
+——那些一次性确认状态 TUI 另有存放（同条件下 `claude -p` 非交互模式正常，两条路径
+不共用）。所以 `--real` 直接用开发者的真实配置目录，靠「workspace 是本次独有的临时
+目录 → claude 派生出的 project key 也独有」来保证清理时只删掉自己写的那些会话。
+
+### 已评估后决定**不做**的项
+
+记录判断依据，避免后人重复讨论或误按原计划推进：
+
+- **fleet 多 bot 监管**：dockmux 已是「单 daemon + `lark.bots` 多配置 + `activeAppIds`
+  活跃跟踪 + UI 多 tab」形态，多 bot 能力本就具备。botmux 的 fleet supervisor 是为
+  「每 bot 一个 daemon 进程」的架构设计的，移过来等于把不需要的进程模型搬进来。
+  将来若要跨机分布式，再重新评估。
+- **Electron 壳**：它是打包形态而非能力。当前缺的是能力本身，且会引入 ~200MB 依赖
+  与跨平台构建复杂度，投入产出比最低。Web 工作台已可用。
+
+### 两处「看起来像 bug、其实是设计」
+
+- **`skill-catalog.ts` 的 `discoverSkills` 不扫 dockmux 的 skill 投递目录**（只扫
+  `.agents/skills` / `.codex/skills`）。这是对的：那是 **Web 的 skill 选择器**，列的是
+  给用户挑选的 skill；而 dockmux 投递的桥接 skill（`dockmux-` 前缀）只应对被桥接的
+  CLI 可见，不该混进用户选择器。两者是不同用途，不要"顺手统一"。
+- **`@dockmux/skills` 默认拒绝写入用户全局 skill 目录**（`~/.claude/skills` 等）。
+  写进去会污染用户自己开的、与 dockmux 无关的 CLI 会话——那些会话里「你运行在
+  无人值守桥接会话中」是错的。要绕过必须显式传 `allowGlobalDir: true`。
+  注意校验的是**实际写入路径**而非入参：`installSkillsToPluginDir('~/.claude')`
+  拼出的 `~/.claude/skills` 同样要被拒（这条曾经漏过，真的往 home 写过文件）。
+
+### 三条容易被「顺手」破坏的不变量
+
+都在 M3 集成验证时用变异测试暴露过——把实现改回坏形态后**全套测试仍然全绿**，
+说明当时只有注释在守，没有测试在守。现已各自补上守卫：
+
+- **`/api/relay/*` 不在 auth 豁免名单里**（`app.ts` 的中央 `exempt`）。relay 自带
+  能力 token，但那回答的是「这个子进程属于哪个会话」，不是「这台机器可以被谁
+  访问」；远程调用必须两层都过。把它加进豁免 = 任何能连上端口的人都能拿伪造
+  token 来试。守卫见 `app.test.ts` 的「中央豁免名单」。
+- **带外事件必须走 `runtime.publishSessionEvent()`，不能直接 `repos.events.append()`**。
+  后者只落库：不通知在线 SSE 订阅者（Web/飞书卡片收不到），也不推进 `sequences`，
+  下一次 emit 会撞 `events(session_id, sequence)` 唯一索引。守卫见 `runtime.test.ts`
+  的「publishSessionEvent — 带外事件入口」。
+- **钉过 id 的 CLI，fresh 与 resume 必须钉同一种 id 形态**。driver 的
+  `resolveResumeSessionId()` 反查不到时会退回带 `ses_` 前缀的 dockmux id，适配器
+  必须归一成 fresh 时写进磁盘的那一个：claude 剥成裸 UUID、grok 用完整
+  `ses_<uuid>`、mtr 推导成 `ses_<26位>`——**不是统一剥前缀**，grok 剥掉反而错。
+  不一致的真实后果：claude exit 1；pi 更坏，exit 0 却静默 fork 新会话，上下文
+  全丢且无任何信号。守卫见 `adapters.test.ts` 的「fresh 与 resume 必须钉同一种
+  id 形态」。

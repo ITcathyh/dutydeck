@@ -1,4 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -112,7 +113,8 @@ export function createOhMyPiAdapter(): CliAdapter {
       const args = ['--no-title'];
       // OMP 的 `--resume` 吃的是 transcript 文件路径，不是会话 id
       // （botmux 靠扫描 session 目录里最新的 .jsonl 得到它，该探测已丢弃）。
-      if (resume && resumeSessionId) args.push('--resume', resumeSessionId);
+      const usable = usableResumeId(resumeSessionId);
+      if (resume && usable) args.push('--resume', usable);
       // dockmux MVP 无人值守：固定走 botmux 的 bypass 分支（!disableCliBypass）。
       args.push('--approval-mode', 'yolo');
       if (model && model.trim()) args.push('--model', model.trim());
@@ -151,8 +153,10 @@ export function createOhMyPiAdapter(): CliAdapter {
       composerDirty = false;
     },
 
-    buildResumeCommand(sessionId: string): string[] {
-      // 这里的 sessionId 必须是 OMP 的 transcript 路径（`--resume` 的唯一入参形态）。
+    buildResumeCommand(sessionId: string): string[] | null {
+      // OMP 的 `--resume` 吃的是 transcript **文件路径**，不是会话 id。
+      // dockmux 的 `ses_<uuid>` 显然不是路径 → null，driver 改起新会话。
+      if (isDockmuxSessionId(sessionId)) return null;
       return ['--resume', sessionId];
     },
 

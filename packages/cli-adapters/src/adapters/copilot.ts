@@ -1,4 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -22,8 +23,9 @@ export function createCopilotAdapter(): CliAdapter {
       if (model && model.trim()) {
         args.push('--model', model.trim());
       }
-      if (resume && resumeSessionId) {
-        args.push('--resume', resumeSessionId);
+      const usable = usableResumeId(resumeSessionId);
+      if (resume && usable) {
+        args.push('--resume', usable);
       }
       // 无精确 id 时新起干净会话，绝不 `--continue`（= `--resume=-1`）：它续接
       // 全局最近一个会话，而同一 Copilot config home 被本 bot 的所有会话共享，
@@ -51,7 +53,11 @@ export function createCopilotAdapter(): CliAdapter {
       }
     },
 
-    buildResumeCommand(sessionId: string): string[] {
+    /** Copilot 会话完全由 CLI 自己管，dockmux 的 sessionId 钉不成它的会话 id，
+     *  且没有任何 cliSessionId 捕获机制——「缺 id」是常态。收到 dockmux 的
+     *  `ses_<uuid>` → null，driver 改起新会话（而不是拿它去撞 `--resume`）。 */
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (isDockmuxSessionId(sessionId)) return null;
       return ['--resume', sessionId];
     },
 

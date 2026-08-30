@@ -7,9 +7,11 @@
  *   2. GET /api/agents —— 断言 ACP agent 与 pty-cli agent 都被发现
  *   3. 创建 pty-cli 会话（claude-code）→ 发消息 → SSE 收事件流
  *      断言：收到 thinking/text、最终 completed、session state 变 completed
- *   4. 终端 WS /api/terminal/:sessionId 能连上并收到帧
- *   5. 静态 Web UI 可访问
- *   6. 清理：停会话、杀 server、删临时数据目录
+ *   4. resume 后仍能继续对话：POST /resume → 再发一轮 → 用 SSE 游标确认是新事件
+ *      而不是回放（M2 时这条路径全套单测通过、真实环境却完全不可用）
+ *   5. 终端 WS /api/terminal/:sessionId 能连上并收到帧
+ *   6. 静态 Web UI 可访问
+ *   7. 清理：停会话、杀 server、删临时数据目录
  *
  * 两种模式
  *   默认 --mock：用 /tmp 下生成的假 CLI（Node 脚本）冒充 claude，不触碰真实模型，CI 可跑。
@@ -31,8 +33,8 @@
  */
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, readFileSync, realpathSync } from 'node:fs';
+import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
@@ -136,7 +138,15 @@ import { join } from 'node:path';
 
 // 驱动会剥离子进程的 CLAUDE_* 环境变量，所以数据目录经 agent.env 用别名传进来
 const dataDir = process.env.MOCK_CLAUDE_DATA_DIR;
-const sessionArg = process.argv[process.argv.indexOf('--session-id') + 1];
+// fresh 形态的 argv 是 --session-id <id>，resume 形态是 --resume <id>。
+// 两种都要落到**同一个** jsonl：resume 后 transcript tailer 还在 tail 原文件，
+// 换个文件名等于跟丢，第二轮永远收不到结构化事件。
+const freshIndex = process.argv.indexOf('--session-id');
+const resumeIndex = process.argv.indexOf('--resume');
+const resumed = resumeIndex >= 0;
+const sessionArg = freshIndex >= 0
+  ? process.argv[freshIndex + 1]
+  : (resumed ? process.argv[resumeIndex + 1] : undefined);
 const projectKey = realpathSync(process.cwd()).replace(/[^A-Za-z0-9-]/g, '-');
 const dir = join(dataDir, 'projects', projectKey);
 mkdirSync(dir, { recursive: true });
@@ -144,7 +154,7 @@ const file = join(dir, \`\${sessionArg ?? 'mock'}.jsonl\`);
 const write = entry => appendFileSync(file, JSON.stringify(entry) + '\\n');
 
 // readyPattern：❯ —— 不打印它，idle-detector 永远不会判定空闲
-process.stdout.write('Mock Claude CLI\\r\\n\\u276f ');
+process.stdout.write((resumed ? 'Mock Claude CLI (resumed)' : 'Mock Claude CLI') + '\\r\\n\\u276f ');
 
 let buffer = '';
 process.stdin.setEncoding('utf8');
@@ -160,7 +170,9 @@ process.stdin.on('data', chunk => {
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_mock_1', name: 'Bash', input: { command: 'echo mock' } }] } });
     write({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_mock_1', content: 'mock' }] } });
-    write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'MOCK_REPLY: ' + prompt }] } });
+    // 回复带上形态标记：resume 后的那一轮必须由**重 spawn 出来的**进程产出，
+    // 拿不到这个标记就说明第二轮读到的其实是第一轮的回放。
+    write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: (resumed ? 'MOCK_RESUMED: ' : 'MOCK_REPLY: ') + prompt }] } });
     // completionPattern：✳ Worked for Ns
     process.stdout.write('\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
   }, 300);
@@ -174,7 +186,13 @@ process.stdin.resume();
 // ── SSE ────────────────────────────────────────────────────────────────────
 /**
  * 手写 SSE 客户端（Node 无内建 EventSource，且这里要断言 id:/event:/data: 的线格式）。
- * 返回 { events, done, close }：events 持续累积，done 在收到 completed 事件后 resolve。
+ * 返回 { events, done, close, cursor, since }：
+ *  - events 持续累积，done 在收到**第一个** completed 后 resolve（步骤 3 用）
+ *  - cursor()/since() 按 sequence 切分「新事件 vs 已有事件」，供 resume 步骤跨轮判定
+ *
+ * 为什么需要游标：resume 之后再发一轮，流里已经躺着第一轮的全部事件。
+ * 只看「有没有 text」会把上一轮的输出当成本轮的产出——这个假象真的骗过我一次，
+ * 当时脚本报成功，实际第二轮的 send 返回的是 409，读到的全是回放。
  */
 function openSseStream(sessionId) {
   const events = [];
@@ -214,10 +232,19 @@ function openSseStream(sessionId) {
   });
   req.on('error', error => { if (!settled) { settled = true; rejectDone(error); } });
 
-  return { events, done, close: () => { try { req.destroy(); } catch { /* 已关闭 */ } } };
+  const cursor = () => events.reduce((max, item) => Math.max(max, item.event.sequence ?? 0), 0);
+  return {
+    events,
+    done,
+    cursor,
+    /** 严格晚于 `at` 的事件——即某个时间点之后真正新产生的那些。 */
+    since: at => events.filter(item => (item.event.sequence ?? 0) > at),
+    close: () => { try { req.destroy(); } catch { /* 已关闭 */ } }
+  };
 }
 
 // ── WS ─────────────────────────────────────────────────────────────────────
+
 /** 终端 WS：ws 包装在 apps/server 的依赖里，从那儿解析 */
 function loadWebSocket() {
   const require = createRequire(join(REPO, 'apps/server/package.json'));
@@ -241,10 +268,26 @@ async function main() {
   step('启动 server');
   const serverEnv = { ...process.env };
   for (const key of POLLUTING_ENV) delete serverEnv[key];
-  // transcript tailer 在 server 进程内读 CLAUDE_CONFIG_DIR，指向临时目录，
-  // 免得 mock 会话去 tail 开发者真实的 ~/.claude
-  serverEnv.CLAUDE_CONFIG_DIR = claudeDataDir;
+  // 刻意**不**在这里设 CLAUDE_CONFIG_DIR。
+  //
+  // 曾经这么做过，而且是靠一个 bug 才生效的：tailer 那时读的是 daemon 自己的
+  // process.env，所以 daemon 上设一下就够了。真实形态完全不是这样——driver 的
+  // mergedEnv 会把 CLAUDE_* 从子进程剥掉，CLI 实际写的是它自己 env 指向的目录。
+  // 那个 bug 修掉后（tailer 改读子进程 env），这里再设就没有任何作用了。
+  //
+  // 正确通道是下面 agent.env：它在剥离之后合并，既真的送进 CLI、也正是
+  // tailer 现在解析的那份 env。
   serverEnv.NODE_ENV = 'production';
+
+  // MOCK 模式的 CLI 数据目录：假 CLI 没有登录概念，隔离到临时目录即可。
+  //
+  // REAL 模式不能这么做——claude 的**凭证和 transcript 在同一个目录**，隔离
+  // transcript 就等于隔离登录状态，CLI 会停在「Select login method」页等人选。
+  // （试过隔离 HOME 并播种配置，同样卡住，只是换成 "Security notes … Press
+  // Enter to continue" 那一屏；`claude -p` 非交互模式正常，但 dockmux 用的是
+  // TUI 形态，两条路径不共用这些一次性状态。）
+  // 所以 REAL 用开发者真实的配置目录，跑完把自己产生的会话文件删掉。
+  const bridgedCliEnv = REAL ? {} : { CLAUDE_CONFIG_DIR: claudeDataDir };
 
   if (!REAL) {
     const mockPath = writeMockCli(binDir, claudeDataDir);
@@ -259,7 +302,7 @@ async function main() {
       protocol: 'pty-cli',
       cwd: workspace,
       // agent.env 在剥离之后合并，是把变量送进被桥接 CLI 的唯一通道
-      env: { MOCK_CLAUDE_DATA_DIR: claudeDataDir },
+      env: { ...bridgedCliEnv, MOCK_CLAUDE_DATA_DIR: claudeDataDir },
       permissionMode: 'full-trust',
       timeout: 600,
       capabilities: { pause: false, resume: true },
@@ -267,6 +310,31 @@ async function main() {
       version: 'mock-1.0'
     }]);
     debug('假 CLI', mockPath);
+  } else {
+    // REAL 模式：真实 claude，用开发者自己的配置目录（凭证在那儿，见上面的说明）。
+    // 会话历史因此会写进 ~/.claude/projects/<workspace 派生的 key>/——但 workspace
+    // 是本次跑独有的临时目录，所以那个 project 目录也是本次独有的，清理时整个删掉，
+    // 开发者真实项目的历史一个字节都不受影响。
+    onCleanup('删除真实 CLI 写下的会话历史', () => {
+      // claude 用 realpath 后把非字母数字替换成 '-' 作为 project key，
+      // 与 packages/pty-driver 的 realCwd()/claudeProjectDir() 同一套规则。
+      const projectKey = realpathSync(workspace).replace(/[^A-Za-z0-9-]/g, '-');
+      rmSync(join(homedir(), '.claude', 'projects', projectKey), { recursive: true, force: true });
+    });
+    serverEnv.DOCKMUX_AGENTS_JSON = JSON.stringify([{
+      id: 'claude-code',
+      name: 'Claude Code',
+      command: 'claude',
+      args: [],
+      protocol: 'pty-cli',
+      cwd: workspace,
+      env: bridgedCliEnv,
+      permissionMode: 'full-trust',
+      timeout: 600,
+      capabilities: { pause: false, resume: true },
+      builtin: false
+    }]);
+    debug('真实 CLI 的工作目录', workspace);
   }
 
   const server = spawn(process.execPath, [
@@ -371,7 +439,49 @@ async function main() {
     assert(assistantText.includes('MOCK_REPLY'), '假 CLI 的回复经 transcript 解析成 text 事件');
   }
 
-  // ── 4. 终端 WS ───────────────────────────────────────────────────────────
+  // ── 4. resume 后续接可用 ─────────────────────────────────────────────────
+  // 为什么值得单列一步：M2 时全套单测通过，resume 在真实环境里却完全不可用——
+  // respawn 会 kill 旧后端，那次 SIGHUP(129) 被当成 agent 崩溃上报，会话立刻
+  // 判 failed，之后每个 send 都是 409。mock CLI 的单测发现不了，只有走完整
+  // HTTP + PTY 链路才暴露。
+  step('resume 后仍能继续对话');
+  const beforeResume = stream.cursor();
+  const resumed = await request('POST', `/api/sessions/${session.id}/resume`);
+  assert(resumed.status === 200 || resumed.status === 202, `POST /resume 返回 2xx（实际 ${resumed.status}）`);
+
+  // 关键：resume 返回 200 之后，failed 才在下一个 tick 悄悄写进去。
+  // 立刻断言"成功"会漏掉整个 bug——必须等一会儿再查状态。
+  await sleep(3_000);
+  const afterResume = await request('GET', `/api/sessions/${session.id}`);
+  assert(afterResume.json?.state !== 'failed',
+    `resume 3 秒后 state 不是 failed（实际 ${afterResume.json?.state}）`);
+  const resumeErrors = stream.since(beforeResume).filter(item => item.type === 'error');
+  assert(resumeErrors.length === 0,
+    `resume 未产生 error 事件（实际 ${JSON.stringify(resumeErrors.map(item => item.event.data?.message))}）`);
+
+  const beforeSecondTurn = stream.cursor();
+  const secondPrompt = REAL ? '再回复一句话：resume ok' : 'second turn after resume';
+  const secondSent = await request('POST', `/api/sessions/${session.id}/send`, { prompt: secondPrompt, mode: 'queue' });
+  // 这条断言是当初漏掉的那条：send 返回 409 INVALID_STATE，而脚本只看流里
+  // "有 text" 就报成功——读到的其实全是第一轮的回放。
+  assert(secondSent.status === 202, `resume 后 POST /send 返回 202（实际 ${secondSent.status}）`);
+
+  const secondTurn = await waitFor('resume 后第二轮的 completed', async () => {
+    const fresh = stream.since(beforeSecondTurn);
+    return fresh.some(item => item.type === 'completed') ? fresh : undefined;
+  }, { timeoutMs: REAL ? 150_000 : 60_000 });
+  assert(secondTurn.some(item => item.type === 'text' || item.type === 'thinking'),
+    `第二轮有实质输出（${secondTurn.length} 条新事件，全部 sequence > ${beforeSecondTurn}）`);
+
+  if (!REAL) {
+    const secondText = secondTurn.filter(item => item.type === 'text').map(item => item.event.data?.text ?? '').join('');
+    // MOCK_RESUMED 只有带 --resume 起来的进程会写：拿到它才证明第二轮真的
+    // 由 respawn 出来的新进程产出，而不是旧事件被重放。
+    assert(secondText.includes('MOCK_RESUMED'),
+      `第二轮由 --resume 形态的进程产出（实际前 120 字：${secondText.slice(0, 120)}）`);
+  }
+
+  // ── 5. 终端 WS ───────────────────────────────────────────────────────────
   step('连接终端 WebSocket');
   const WebSocketImpl = loadWebSocket();
   const frames = await new Promise((resolveFrames, rejectFrames) => {
@@ -401,7 +511,7 @@ async function main() {
   assert(frames.length > 0, `终端 WS 连接成功并收到 ${frames.length} 帧`);
   assert(frames.some(frame => frame.type === 'data'), 'WS 收到 data 帧（PTY 输出已代理到前端）');
 
-  // ── 5. 静态 Web UI ───────────────────────────────────────────────────────
+  // ── 6. 静态 Web UI ───────────────────────────────────────────────────────
   step('访问静态 Web UI');
   const index = await request('GET', '/');
   assert(index.status === 200, 'GET / 返回 200');

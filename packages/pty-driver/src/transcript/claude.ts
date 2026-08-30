@@ -21,7 +21,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dockmux/shared';
-import { claudeProjectDir } from '../cli-paths.js';
+import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
 import { JsonlTailer, type TranscriptEventSource } from './tail.js';
 
 /** Newest *.jsonl (by mtime) in a Claude project dir, or undefined. Ported
@@ -53,9 +53,11 @@ function findLatestJsonl(dir: string): string | undefined {
   return latest;
 }
 
-/** Locate the newest Claude transcript jsonl for a cwd. */
-export function resolveClaudeTranscriptPath(cwd: string): string | undefined {
-  return findLatestJsonl(claudeProjectDir(cwd));
+/** Locate the newest Claude transcript jsonl for a cwd. `env` must be the
+ *  environment the CLI child received (see cli-paths.ts); it defaults to the
+ *  current process env. */
+export function resolveClaudeTranscriptPath(cwd: string, env?: CliPathEnv): string | undefined {
+  return findLatestJsonl(claudeProjectDir(cwd, env));
 }
 
 /** Flatten a tool_result block's content (string, or array of text blocks)
@@ -137,6 +139,10 @@ export interface ClaudeTranscriptTailerOptions {
   transcriptPath?: string;
   /** Poll interval in ms (default 300). */
   pollIntervalMs?: number;
+  /** The environment the CLI child was spawned with. Defaults to the current
+   *  process env; the driver passes `spawnEnv()` so a `CLAUDE_CONFIG_DIR` that
+   *  only the child sees (or only the daemon sees) resolves correctly. */
+  env?: CliPathEnv;
 }
 
 export class ClaudeTranscriptTailer implements TranscriptEventSource {
@@ -147,7 +153,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
     this.tailer = new JsonlTailer({
       resolvePath: explicit
         ? () => explicit
-        : () => resolveClaudeTranscriptPath(opts.cwd),
+        : () => resolveClaudeTranscriptPath(opts.cwd, opts.env),
       mapEntry: mapClaudeEntry,
       pollIntervalMs: opts.pollIntervalMs,
       watchForSwitch: !explicit,

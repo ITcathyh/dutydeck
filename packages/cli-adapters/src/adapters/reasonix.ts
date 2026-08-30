@@ -1,4 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
+import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -30,8 +31,9 @@ export function createReasonixAdapter(): CliAdapter {
       }
       // 只做精确 id 续接。缺原生 id 时新起会话，绝不用 cwd 维度的 `--continue`：
       // 同一工作目录下它可能选中另一个话题的会话。
-      if (resume && resumeSessionId) {
-        args.push('--resume', resumeSessionId);
+      const usable = usableResumeId(resumeSessionId);
+      if (resume && usable) {
+        args.push('--resume', usable);
       }
       return args;
     },
@@ -48,7 +50,10 @@ export function createReasonixAdapter(): CliAdapter {
       }
     },
 
-    buildResumeCommand(sessionId: string): string[] {
+    /** Reasonix 自己铸会话 id（精简契约下 dockmux 拿不到精确 id）；收到 dockmux 的
+     *  `ses_<uuid>` → null，driver 改起新会话。 */
+    buildResumeCommand(sessionId: string): string[] | null {
+      if (isDockmuxSessionId(sessionId)) return null;
       return ['--resume', sessionId];
     },
   };

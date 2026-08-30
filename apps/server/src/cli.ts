@@ -8,6 +8,8 @@ import { startLocalServer } from './service.js';
 import { runLarkSend, runLarkUpdate } from './lark/cli.js';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupWait } from './lark/agent-tools-cli.js';
+import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
+import { RelayCliError } from '@dockmux/relay';
 import { agentDockGroupToolsCommand } from './lark/agent-tools.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop } from './daemon/command.js';
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
@@ -133,7 +135,17 @@ async function main() {
     groupMessages: async options => { output(await runGroupMessages(options)); },
     groupMessage: async messageId => { output(await runGroupMessage(messageId)); },
     groupSend: async (content, options) => { output(await runGroupSend(content, options)); },
-    groupWait: async options => { output(await runGroupWait(options)); }
+    groupWait: async options => { output(await runGroupWait(options)); },
+    sessionSend: async text => { output(await runSessionSend(text)); },
+    sessionAsk: async (question, options) => {
+      // ask 有自己的 stdout/退出码契约（答案裸文本走 stdout，提示走 stderr），
+      // 不能套用通用的 output()：调用方要能 `answer=$(dockmux session ask ...)`。
+      const result = await runSessionAsk(question, options);
+      const rendered = askOutput(result, options.json === true);
+      if (rendered.stdout) process.stdout.write(rendered.stdout);
+      if (rendered.stderr) process.stderr.write(rendered.stderr);
+      process.exitCode = rendered.exitCode;
+    }
   });
   await program.parseAsync();
 }
@@ -143,5 +155,6 @@ try {
 } catch (error) {
   if (error instanceof AgentGroupToolCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: error.error })}\n`);
   else process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-  process.exit(1);
+  // relay 的 CLI 错误自带退出码契约（2 用法 / 3 通道不可用），不能一律压成 1
+  process.exit(error instanceof RelayCliError ? error.exitCode : 1);
 }

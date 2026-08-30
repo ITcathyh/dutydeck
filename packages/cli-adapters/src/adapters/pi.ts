@@ -34,8 +34,11 @@ export function createPiAdapter(): CliAdapter {
       // dockmux sessionId 形如 `ses_<uuid>`，先剥前缀。
       const uuid = sessionId.replace(/^ses_/, '');
       // Pi 没有独立的 --resume：同一个 --session-id 再启一次就是续接，
-      // 所以 fresh 与 resume 的 argv 结构相同。
-      const args = ['--session-id', resume && resumeSessionId ? resumeSessionId : uuid];
+      // 所以 fresh 与 resume 的 argv 结构相同。resumeSessionId 也要剥前缀——
+      // driver 反查失败时退回来的是 `ses_<uuid>`，不剥就会指到另一个会话，
+      // 而且 Pi 不报错，只是静默丢掉全部历史。
+      const args = ['--session-id',
+        resume && resumeSessionId ? resumeSessionId.replace(/^ses_/, '') : uuid];
       if (model && model.trim()) args.push('--model', model.trim());
       // Pi 交互模式在 TUI 启动完成后才处理位置参数形式的首轮消息，既避开了
       // stdin 竞态，又保留原生 TUI。

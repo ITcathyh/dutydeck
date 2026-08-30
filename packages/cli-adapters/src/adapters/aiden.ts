@@ -23,7 +23,7 @@ export function createAidenAdapter(): CliAdapter {
     // botmux 给 aiden 挂了共用 shell 提示（systemHints），精简契约里改为由
     // driver 把返回块拼到首轮 prompt 前。
     injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDockmuxRoutingBlock(ctx.locale);
+      return buildDockmuxRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

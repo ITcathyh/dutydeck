@@ -448,3 +448,66 @@ describe('driver exit subscription', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 });
+
+describe('publishSessionEvent — 带外事件入口（@dockmux/relay 的落点）', () => {
+  // 这个入口存在的**唯一理由**就是「不能直接调 repos.events.append()」：
+  // 那样只落库，既不通知在线 SSE 订阅者，也不推进 runtime 的序号计数器。
+  // 下面两条把这个理由本身钉成契约——此前它只写在注释里，把实现换成
+  // 裸 append 时全套测试仍然全绿（实测 367/367 通过），等于没有守卫。
+
+  it('投递给在线订阅者，而不只是落库', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+
+    const received: any[] = [];
+    const unsubscribe = h.runtime.subscribe(session.id, event => received.push(event));
+    const published = await h.runtime.publishSessionEvent(session.id, 'text', { text: 'relay 带外消息', relay: 'send' });
+    unsubscribe();
+
+    // 落库
+    const stored = await h.runtime.getEvents(session.id);
+    expect(stored.some(e => e.id === published.id)).toBe(true);
+    // fan-out：这条是裸 append 过不了的那一关
+    expect(received.map(e => e.id), '带外事件没有推给在线订阅者（SSE 客户端将收不到）')
+      .toContain(published.id);
+
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('推进会话序号，后续事件不会撞 (session_id, sequence) 唯一索引', async () => {
+    const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'driver 的回答' } }) });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+
+    const published = await h.runtime.publishSessionEvent(session.id, 'text', { text: '带外', relay: 'send' });
+    // 带外事件之后再走一遍正常 driver 路径：序号没推进的话这里会撞唯一索引。
+    await h.runtime.send(session.id, 'work');
+
+    const sequences = (await h.runtime.getEvents(session.id)).map(e => e.sequence);
+    expect(new Set(sequences).size, `序号出现重复：${sequences.join(',')}`).toBe(sequences.length);
+    expect(Math.max(...sequences), '带外事件之后的事件序号应继续增长')
+      .toBeGreaterThan(published.sequence);
+
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('拒绝未知会话与已归档会话', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]);
+    // 断言必须钉到具体错误码，不能只用 rejects.toThrow()：去掉存在性校验后
+    // 代码会在 `session.archivedAt` 上抛 TypeError，裸 toThrow() 照样满足，
+    // 这条守卫就成了摆设（我实测过：变异后仍然全绿）。
+    await expect(h.runtime.publishSessionEvent('ses_nope', 'text', { text: 'x' }))
+      .rejects.toMatchObject({ code: 'SESSION_NOT_FOUND' });
+
+    const session = await h.runtime.start({ agentId: 'mock' });
+    await h.runtime.archive(session.id);
+    await expect(
+      h.runtime.publishSessionEvent(session.id, 'text', { text: 'x' }),
+      '归档会话是只读的，带外入口不该成为绕过它的后门',
+    ).rejects.toMatchObject({ code: 'SESSION_ARCHIVED' });
+
+    await h.runtime.shutdown(); h.repos.close();
+  });
+});

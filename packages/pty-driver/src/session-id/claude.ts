@@ -56,10 +56,14 @@ function entrySessionId(entry: any): string | undefined {
 }
 
 export const claudeSessionIdLookup: SessionIdLookup = {
-  adapterId: 'claude-code',
+  // Claude Code plus its two forks: same per-project JSONL layout, same
+  // `sessionId`-per-entry field, same filename-is-the-session-id rule. Only
+  // the root differs, and that arrives with `ctx.env` (the fork's own
+  // CLAUDE_CONFIG_DIR must be set through `agent.env`).
+  adapterIds: ['claude-code', 'seed', 'relay'],
 
-  resolve({ sessionId, cwd }: SessionIdLookupContext): string | undefined {
-    const projectDir = claudeProjectDir(cwd);
+  resolve({ sessionId, cwd, env }: SessionIdLookupContext): string | undefined {
+    const projectDir = claudeProjectDir(cwd, env);
 
     // Fast path: dockmux pinned the id via --session-id and Claude accepted it.
     const pinned = bareId(sessionId);

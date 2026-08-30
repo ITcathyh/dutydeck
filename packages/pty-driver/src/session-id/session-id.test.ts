@@ -472,7 +472,9 @@ describe('opencode session id lookup', () => {
 describe('resolveCliSessionId registry', () => {
   it('covers the CLIs that need reverse lookup', () => {
     expect(adapterIdsWithSessionIdLookup().sort()).toEqual(
-      ['claude-code', 'codex', 'grok', 'opencode', 'traex'],
+      // claude-code's seed/relay forks and opencode's V2 sibling are the same
+      // CLIs on disk; see session-id/index.ts and env-passthrough.test.ts.
+      ['claude-code', 'codex', 'grok', 'opencode', 'opencode2', 'relay', 'seed', 'traex'],
     );
   });
 

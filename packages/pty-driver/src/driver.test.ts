@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import type { AgentConfig, NormalizedDriverEvent } from '@dockmux/shared';
 import type { CliAdapter } from '@dockmux/cli-adapters';
 import { createCliAdapter } from '@dockmux/cli-adapters';
-import { PtyBackend } from '@dockmux/session-backends';
+import { PtyBackend, TmuxBackend, type SessionBackend } from '@dockmux/session-backends';
+import { readFile } from 'node:fs/promises';
 import { PtyCliDriver } from './driver.js';
 import { PTY_AGENT_CONTRIBUTIONS } from './contributions.js';
 
@@ -169,5 +170,29 @@ describe('PTY_AGENT_CONTRIBUTIONS', () => {
       kimi: 'kimi',
       traex: 'traex',
     });
+  });
+});
+
+
+// ─── 后端私有字段反射（缺口 2）───────────────────────────────────────────
+
+describe('driver 不反射读后端私有字段', () => {
+  it('driver.ts 源码里没有 `backend as unknown as` 这类穿透断言', async () => {
+    // driver 曾经这样反射读 TmuxBackend 的私有 sessionName：
+    //   (this.backend as unknown as { sessionName?: unknown }).sessionName
+    // 后端一改字段名它就静默返回 undefined —— driver 于是再也找不到活着的
+    // tmux 会话，每次 resume 都 respawn，用户的上下文无声无息地丢掉。
+    // 现在 SessionBackend 有公开的 readonly sessionName，这条路必须彻底堵死。
+    const src = await readFile(new URL('./driver.ts', import.meta.url), 'utf8');
+    const reflection = /\bbackend\s+as\s+unknown\s+as\b/;
+    expect(reflection.test(src), 'driver.ts 不应再有对后端的 as-unknown-as 穿透断言').toBe(false);
+    // 也不该有别的形式的私有字段窥探（例如 (backend as any).sessionName）。
+    expect(/\(\s*this\.backend\s+as\s+any\s*\)/.test(src)).toBe(false);
+  });
+
+  it('走的是公开契约：backend.sessionName 直接可读', () => {
+    // 正向断言，防「把反射删了但也不读了」——那样 tmux reattach 会全线失效。
+    const backend: SessionBackend = new TmuxBackend('dockmux-driver-contract');
+    expect(backend.sessionName).toBe('dockmux-driver-contract');
   });
 });
