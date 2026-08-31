@@ -42,6 +42,8 @@ export function createReporter({ verbose = false } = {}) {
   const failures = [];
   let stepNumber = 0;
   let currentStep = '(未命名)';
+  // 每节结束后的状态复位钩子（可选）。见 section() 的说明。
+  let sectionReset;
   const log = (...args) => console.log(...args);
   return {
     results,
@@ -62,6 +64,22 @@ export function createReporter({ verbose = false } = {}) {
      * 它后面那些**同样重要、而且可能也坏了**的能力就永远测不到，一次跑只能暴露一个问题。
      * 分节之后一次跑能给出完整的缺陷清单。注意这不降低严格性——
      * 任何一节失败，整个脚本仍然以退出码 1 结束，且失败会在末尾逐条列出。
+     *
+     * ── 为什么 finally 里必须无条件复位状态 ────────────────────────────────
+     * 只 catch 不复位是个隐蔽的坑，我被它坑过：一节在**断言处**抛出时，
+     * 该节结尾的清理代码（关浮层、清输入）就再也不会执行，浮层被原样留在页面上。
+     * 下一节起点因此被污染——而浮层打开时全套单键快捷键会被 enabled:false 集体停用，
+     * 于是下一节报出的失败根本不是它要测的能力。
+     *
+     * 实测症状就是这样：某一轮里【输入态仍放行组合键】与【Toast】**一起**失败，
+     * 而单独跑这两节都稳定通过；每轮失败项还都不一样——先踩到时序抖动的那一节
+     * 成为污染源，后面就级联。所以复位必须放在 finally，与成功/失败无关。
+     *
+     * 三条边界（都是为了不让「隔离」变成「洗白」）：
+     *   1. 复位不改变判定：本节的失败已经记进 failures，复位成功也不会撤销。
+     *   2. 复位自身失败不静默：它会作为独立的一条 failure 记下来，因为
+     *      「复位不掉」意味着后续所有节的起点都不可信，那本身就是必须看见的问题。
+     *   3. 没有「复位后重试一次」。重试会把偶发的真实缺陷洗成通过。
      */
     async section(title, fn) {
       try {
@@ -72,8 +90,24 @@ export function createReporter({ verbose = false } = {}) {
         log(`   ✗ ${message}`);
         log(`   ! 「${title}」未通过，继续执行后续检查（整体仍判失败）`);
         if (verbose && error instanceof Error && error.stack) log(error.stack);
+      } finally {
+        if (sectionReset) {
+          try {
+            await sectionReset();
+          } catch (resetError) {
+            const message = resetError instanceof Error ? resetError.message : String(resetError);
+            failures.push({ step: currentStep, section: `${title} → 节后状态复位`, message });
+            log(`   ✗ 节后状态复位失败：${message}`);
+            log('   ! 复位失败意味着后续各节的起点都不可信，这条单独计为失败');
+          }
+        }
       }
     },
+    /**
+     * 注册每节结束后的状态复位钩子。传 undefined 可注销。
+     * 钩子要做的是「回到确定起点」，而不是「重跑一遍」。
+     */
+    setSectionReset(fn) { sectionReset = fn; },
     count: () => results.length
   };
 }
@@ -157,6 +191,13 @@ export function loadWebSocket() {
  *
  * 与 e2e-smoke.mjs 的那份保持行为一致：回复前缀 MOCK_REPLY / MOCK_CONTINUED / MOCK_RESUMED，
  * 让「第二轮不是历史回放」这件事仍然可证。
+ *
+ * 轮次耗时可用 `MOCK_TURN_MS` 调慢（默认 300ms，与原行为完全一致）。
+ * 为什么需要它：要断言「取消一条排队中的指令」，就必须让某条指令真的**停在**
+ * queued 上。300ms 一轮的话，先发的那条早就跑完了，后发的直接进运行态——
+ * 「排队」这个前提根本不成立，取消按钮只在一个随机的瞬间存在。
+ * 靠「读到过 queued 就赶紧点」是不行的：读完到点下去之间它随时会转走。
+ * 唯一可靠的办法是把占位那一轮拉长，让排队状态真实且稳定地存在。
  */
 export function writeMockCli(binDir) {
   const path = join(binDir, 'mock-claude');
@@ -165,6 +206,8 @@ import { appendFileSync, mkdirSync, realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
 const dataDir = process.env.MOCK_CLAUDE_DATA_DIR;
+// 每轮耗时。默认 300ms —— 与加这个开关之前完全一致，e2e-smoke.mjs 的基线因此不受影响。
+const turnMs = Number(process.env.MOCK_TURN_MS ?? '300') || 300;
 const freshIndex = process.argv.indexOf('--session-id');
 const resumeIndex = process.argv.indexOf('--resume');
 const resumed = resumeIndex >= 0;
@@ -192,12 +235,19 @@ const submitPrompt = rawPrompt => {
   if (!prompt) return;
   const currentTurn = ++turn;
   process.stdout.write('\\r\\nworking\\r\\n');
+  // 慢速轮次必须持续吐 spinner 字符，否则 PTY 静默 2s（IdleDetector 的
+  // QUIESCENCE_MS）就会被判为「这一轮结束了」——真实 CLI 正是靠 spinner 表示还在忙。
+  // 不吐的话，8s 轮次会在第 2 秒被误判 idle，随后那一轮被当成失败。
+  const spinner = turnMs > 1500
+    ? setInterval(() => process.stdout.write('\\u2733'), 500)
+    : undefined;
   setTimeout(() => {
+    if (spinner) clearInterval(spinner);
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
     const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
     process.stdout.write('\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
-  }, 300);
+  }, turnMs);
 };
 
 process.stdin.setEncoding('utf8');
@@ -337,9 +387,7 @@ export async function assertPortFree(port) {
 
 /** mock 模式的 agent 定义：id 必须仍是 claude-code（pty 工厂按 id 找适配器）。 */
 export function mockAgentsJson({ mockPath, dirs }) {
-  return [{
-    id: 'claude-code',
-    name: 'Mock Claude',
+  const base = {
     command: mockPath,
     args: [],
     protocol: 'pty-cli',
@@ -351,5 +399,26 @@ export function mockAgentsJson({ mockPath, dirs }) {
     capabilities: { pause: false, resume: true },
     builtin: false,
     version: 'mock-1.0'
-  }];
+  };
+  return [
+    { ...base, id: 'claude-code', name: 'Mock Claude' },
+    /**
+     * 慢速变体：每轮 8 秒。
+     *
+     * 专给「取消排队中的指令」这类断言用：只有当前一轮真的还在跑，后发的指令才会
+     * **稳定地**停在 queued 上，取消按钮才稳定存在。用快轮次去测排队，等于把断言
+     * 建在一个随机的瞬间上——偶发失败且看起来像产品缺陷。
+     *
+     * id 必须取自 cli-adapters 的固定注册表（createCliAdapter 按 id 查表，未知 id 直接
+     * 500 Unknown CLI adapter），不能自己编一个。这里用 `seed`：它与 claude-code 都是
+     * createClaudeFamilyAdapter 的同一份实现，只有 id 不同，所以 ready/completion 的
+     * 屏幕识别行为完全一致，同一个假 CLI 可以直接复用。
+     */
+    {
+      ...base,
+      id: 'seed',
+      name: 'Mock Claude（慢速轮次）',
+      env: { ...base.env, MOCK_TURN_MS: '8000' }
+    }
+  ];
 }

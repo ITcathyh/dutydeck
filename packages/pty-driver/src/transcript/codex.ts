@@ -4,10 +4,11 @@
  * Codex stores each session's transcript at
  *   <CODEX_HOME>/sessions/<YYYY>/<MM>/<DD>/rollout-<ts>-<cliSessionId>.jsonl
  * (CODEX_HOME defaults to ~/.codex) and creates the file lazily on the first
- * user submit. The resolver scans the shallow sessions tree (year/month/day,
- * depth 3 — same bound as botmux) and picks the newest rollout file by mtime.
- * Note: codex rollout paths do NOT encode the cwd, so the `cwd` parameter is
- * accepted for API symmetry but unused by the resolver.
+ * user submit. The tree is GLOBAL — the path encodes no cwd — so concurrent
+ * sessions from unrelated projects all live in it together. Resolution is
+ * therefore by session id whenever the caller supplies one (see
+ * resolveCodexRolloutPath); the newest-by-mtime scan remains only for callers
+ * with no session in mind, where a single running session makes it unambiguous.
  *
  * Entry mapping (per dockmux driver contract; field names from botmux
  * codex-transcript.ts):
@@ -26,9 +27,16 @@ import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dockmux/shared';
 import { codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
+import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
+import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptEventSource } from './tail.js';
 
 const SESSION_SCAN_MAX_DEPTH = 3;
+/** Head window per rollout candidate — session_meta rides the first record.
+ *  Matches session-id/codex.ts. */
+const ROLLOUT_HEAD_BYTES = 256 * 1024;
+/** Newest-first cap on rollout candidates examined. */
+const MAX_ROLLOUT_CANDIDATES = 60;
 
 /** Newest rollout-*.jsonl under a Codex-dialect sessions root (by mtime), or
  *  undefined. Iterative depth-limited walk; symlinked dirs are not followed.
@@ -79,11 +87,62 @@ export function resolveNewestRollout(sessionsRoot: string): string | undefined {
   return latest;
 }
 
-/** Locate the newest Codex rollout jsonl. Codex rollout paths do NOT encode
- *  the cwd, so `cwd` is accepted for API symmetry but unused. `env` must be
- *  the environment the CLI child received (see cli-paths.ts). */
-export function resolveCodexRolloutPath(_cwd?: string, env?: CliPathEnv): string | undefined {
-  return resolveNewestRollout(codexSessionsRoot(env));
+/**
+ * The rollout file belonging to one CLI session id, searched newest-first.
+ *
+ * Codex names rollouts `rollout-<ts>-<uuid>.jsonl` and also records
+ * `session_meta.session_id` in the head, so either can identify the file. The
+ * filename is checked first because it costs no read.
+ */
+export function findRolloutBySessionId(
+  sessionsRoot: string,
+  cliSessionId: string,
+): string | undefined {
+  if (!existsSync(sessionsRoot)) return undefined;
+  const candidates = walkFiles(sessionsRoot, {
+    maxDepth: SESSION_SCAN_MAX_DEPTH,
+    accept: name => name.startsWith('rollout-') && name.endsWith('.jsonl'),
+  }).sort(byMtimeDesc).slice(0, MAX_ROLLOUT_CANDIDATES);
+  for (const candidate of candidates) {
+    if (candidate.path.includes(cliSessionId)) return candidate.path;
+    for (const entry of parseJsonlObjects(readHead(candidate.path, ROLLOUT_HEAD_BYTES))) {
+      if (entry?.type !== 'session_meta') continue;
+      if (entry.payload?.session_id === cliSessionId) return candidate.path;
+      break; // session_meta is the head record; past it there is nothing to learn.
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Locate the Codex rollout jsonl for a session.
+ *
+ * With `sessionId`, the CLI's own id is recovered first (Codex mints it and
+ * never accepts ours, so `session-id/codex.ts` reads it out of history.jsonl /
+ * the rollout head) and the matching rollout is then addressed directly.
+ * That matters because the rollout root is GLOBAL — not even cwd-scoped — so
+ * every concurrent Codex session in every project competes to be "newest",
+ * and an mtime pick can attach a rollout from an unrelated repo.
+ *
+ * Without `sessionId` it falls back to the newest rollout, which is only
+ * unambiguous when a single Codex session is running (tooling / tests).
+ *
+ * `cwd` is unused by the recency path (rollout paths do not encode it) and is
+ * kept for API symmetry; the scoped path passes it on so `session_meta.cwd`
+ * can gate the marker match. `env` must be the environment the CLI child
+ * received (see cli-paths.ts).
+ */
+export function resolveCodexRolloutPath(
+  cwd?: string,
+  env?: CliPathEnv,
+  sessionId?: string,
+): string | undefined {
+  const root = codexSessionsRoot(env);
+  if (sessionId && cwd) {
+    const cliSessionId = resolveCliSessionId('codex', { sessionId, cwd, env });
+    return cliSessionId ? findRolloutBySessionId(root, cliSessionId) : undefined;
+  }
+  return resolveNewestRollout(root);
 }
 
 /** Parse a JSON-encoded arguments string when parseable, else return the
@@ -231,6 +290,11 @@ export interface CodexTranscriptTailerOptions {
   /** Explicit rollout path. When given, directory scanning and file
    *  switching are disabled. */
   transcriptPath?: string;
+  /** dockmux's session id. Required for correctness whenever more than one
+   *  Codex session may be running — the rollout root is global, so without it
+   *  resolution falls back to "newest rollout anywhere" and can attach a
+   *  rollout from an unrelated project. See resolveCodexRolloutPath. */
+  sessionId?: string;
   /** Poll interval in ms (default 300). */
   pollIntervalMs?: number;
   /** The environment the CLI child was spawned with (defaults to process.env);
@@ -243,12 +307,26 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
 
   constructor(opts: CodexTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
+    // Memoise the session-scoped resolution: JsonlTailer re-resolves every
+    // ~300ms tick, and recovering the CLI's own session id means reading
+    // history/rollout heads. The rollout path never changes once found, so
+    // resolve until it succeeds and then hold the answer. See the Claude
+    // tailer for the full reasoning.
+    let resolved: string | undefined;
+    const resolveOnce = () => (resolved ??= resolveCodexRolloutPath(opts.cwd, opts.env, opts.sessionId));
     this.tailer = new JsonlTailer({
       resolvePath: explicit
         ? () => explicit
-        : () => resolveCodexRolloutPath(opts.cwd, opts.env),
+        : opts.sessionId
+          ? resolveOnce
+          : () => resolveCodexRolloutPath(opts.cwd, opts.env),
       mapEntry: mapCodexEntry,
       pollIntervalMs: opts.pollIntervalMs,
+      // Re-resolving each tick is what lets the tailer attach late: the
+      // rollout appears a beat after spawn, and the CLI's id is only
+      // recoverable once history.jsonl carries our marker. With a sessionId
+      // every resolution names the same session, so this cannot drift onto a
+      // concurrent session's rollout. See the Claude tailer for the tradeoff.
       watchForSwitch: !explicit,
     });
   }

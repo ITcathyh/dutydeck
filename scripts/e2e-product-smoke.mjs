@@ -41,7 +41,6 @@
  *   node scripts/e2e-product-smoke.mjs --only lark      # 只跑模块域
  */
 import { createRequire } from 'node:module';
-import { readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium } from '@playwright/test';
 import {
@@ -63,9 +62,22 @@ const RUN_LARK = ONLY === 'all' || ONLY === 'lark';
 
 const BASE = `http://127.0.0.1:${PORT}`;
 const reporter = createReporter({ verbose: VERBOSE });
-const { log, debug, ok, step, assert, section } = reporter;
+const { log, debug, ok, step, assert, section, setSectionReset } = reporter;
 const { onCleanup, runCleanup } = createCleanupStack({ log });
 const request = createHttp(BASE);
+
+// 终端输入/回显的两种表示，别混用——混用会让一条本该有效的断言永远不成立。
+//
+//   写进 PTY：真正的控制字节（ESC = 0x1b，所以方向键上是 0x1b '[' 'A'）。
+//   从 PTY 读回：终端行规程开着 ECHOCTL，控制字符被回显成**可打印的插入符记法**，
+//                即 4 个字符 '^' '[' '[' 'A'（码位 94,91,91,65），里面一个 0x1b 都没有。
+//
+// 我在这上面栽过一次：断言写的是 includes(真 ESC 字节)，于是无论键条工作得多好都永远超时，
+// 看上去像「有个键没送达」的产品缺陷。实测确认过：↑ 回显 "^[[A"、Esc 回显 "^["、^L 回显 "^L"。
+const ARROW_UP = '\u001b[A';        // 写进 PTY 的字节
+const ARROW_UP_ECHO = '^[[A';       // PTY 回显出来的插入符记法
+const ESC_KEY = '\u001b';
+const ESC_KEY_ECHO = '^[';
 
 // 深浅色的判定基准：把 rgb() 解析成亮度。断言「两种主题的实际渲染色不同」时，
 // 不比字符串而比亮度——这样即使调色板换了具体色值，只要仍是一深一浅，断言依然成立。
@@ -80,19 +92,17 @@ const luminance = color => {
 async function browserAcceptance() {
   const dirs = createDataDir({ onCleanup, prefix: 'dockmux-product-' });
 
-  // 两个假 CLI：默认版本秒回（用于快速跑到 completed），慢速版本把回复推迟到 9s，
-  // 用于稳定造出一个真的停在 queued 的任务——Toast 的 Undo 路径只有排队态才可达。
+  // 一个假 CLI 文件，两个 agent 定义：默认 claude-code 秒回（各节快速跑到 completed），
+  // 慢速那条（id 取 seed —— 与 claude-code 共用同一份 claude-family 实现）每轮 8s，
+  // 只有前一轮真的还在跑，后发的指令才会**稳定地**停在 queued 上，Toast 的 Undo 路径才可达。
+  // 轮次耗时由 MOCK_TURN_MS 控制，见 e2e-harness.mjs 的 writeMockCli / mockAgentsJson。
   const mockPath = writeMockCli(dirs.binDir);
-  const slowPath = join(dirs.binDir, 'mock-claude-slow');
-  writeFileSync(slowPath, readFileSync(mockPath, 'utf8').replace('}, 300);', '}, Number(process.env.MOCK_CLAUDE_DELAY_MS ?? 300));'), 'utf8');
-  chmodSync(slowPath, 0o755);
 
   step('启动 server（临时端口 + 临时数据目录 + 假 CLI）');
   // 先确认端口没人占：同端口上活着的另一个实例会替我们回 /health，
   // 于是整套断言会跑在别人的数据库上——那种失败极难归因，必须在这里就拦死。
   await assertPortFree(PORT);
-  const agentsJson = mockAgentsJson({ mockPath: slowPath, dirs });
-  agentsJson[0].env.MOCK_CLAUDE_DELAY_MS = '9000';
+  const agentsJson = mockAgentsJson({ mockPath, dirs });
   const server = startServer({ port: PORT, dirs, agentsJson, onCleanup, verbose: VERBOSE });
   await server.waitUntilReady({ base: BASE });
   ok(`GET /health 返回 {ok:true}（端口 ${PORT}，由本次拉起的进程应答）`);
@@ -161,6 +171,32 @@ async function browserAcceptance() {
     // 等 agents / sessions 查询落地：快捷键的可用性依赖这些数据
     await page.waitForTimeout(2_000);
   };
+
+  // 每节结束后无条件复位：把浮层关干净、把输入框清空。
+  //
+  // 必须放在 section 的 finally 里，而不是各节自己的结尾——一节在断言处抛出时，
+  // 它结尾的清理代码根本不会执行，浮层就被留给了下一节。浮层开着时全套单键快捷键
+  // 会被 enabled:false 集体停用，于是下一节报出的失败与它要测的能力毫无关系。
+  //
+  // 刻意**不**在这里 goto 首页：SPA 首屏重新加载会把懒加载 chunk 的时序问题
+  // （样式表、xterm）重新引进来，那正是 44px 那条断言曾经误判的根源。
+  // 复位只做「关浮层 + 清输入」这两件确定性的事，路由留给各节自己按需导航。
+  setSectionReset(async () => {
+    if (!browser) return;                 // 已进入清理阶段
+    if (page.isClosed()) return;
+    await dismissDialogs();
+    // 清空所有可见的文本输入：上一节残留的文字会让下一节的 inputValue 断言看到脏值
+    await page.evaluate(() => {
+      for (const field of document.querySelectorAll('textarea, input[type="text"], input:not([type])')) {
+        if (field instanceof HTMLTextAreaElement || field instanceof HTMLInputElement) {
+          if (!field.value) continue;
+          field.value = '';
+          field.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    });
+  });
 
   await page.emulateMedia({ colorScheme: 'light' });
   await gotoHome();
@@ -353,6 +389,22 @@ async function browserAcceptance() {
     const createTaskHelpRow = (await help.locator('li', { hasText: '新建任务运行' }).innerText()).replace(/\s+/g, ' ');
     helpClaimsCreateTaskUsable = !createTaskHelpRow.includes('当前不可用');
     debug('帮助面板对 n 的自述', createTaskHelpRow);
+
+    // 帮助面板的「不可用」计数必须与作用域一致，不能被面板自身的浮层状态污染。
+    //
+    // 这条针对一类具体的错：把运行期的 enabled（浮层打开时整套快捷键停用）也喂给展示层。
+    // 帮助面板自己就是浮层，一打开 overlayOpen 即为真，于是 21 条里 20 条被标成「当前不可用」——
+    // 面板存在的意义正是告诉用户此刻能按什么，那样它每次打开都在撒谎。
+    // 在任务中心（没有打开任何任务运行）只有 session 作用域的快捷键该不可用，其余全部可用。
+    const unavailableRows = await help.locator('li', { hasText: '当前不可用' }).count();
+    const totalRows = await help.locator('li').count();
+    // 用「不可用的都必须是 session 作用域」来表达，而不是写死数字：
+    // 注册表以后增删快捷键，这条断言仍然成立。
+    const sessionScopedUnavailable = await help.locator('li', { hasText: '当前不可用：先打开一个任务运行' }).count();
+    assert(unavailableRows === sessionScopedUnavailable,
+      `任务中心打开帮助面板时，标为「当前不可用」的 ${unavailableRows} 条全部是 session 作用域快捷键（共 ${totalRows} 条），全局快捷键没有被面板自身的浮层状态误标`);
+    assert(unavailableRows < totalRows / 2,
+      `帮助面板不会把大多数快捷键标成不可用（${unavailableRows}/${totalRows} 不可用）`);
     await page.keyboard.press('Escape');
     await help.waitFor({ state: 'hidden', timeout: 10_000 });
     ok('Esc 关闭快捷键帮助面板');
@@ -420,8 +472,14 @@ async function browserAcceptance() {
       `经 SPA 导航（g t）回到任务中心后按 n 打开创建任务向导（实际：${JSON.stringify(afterN)}）`);
   });
 
-  // 输入态抑制：在创建向导的输入框里连打单键快捷键的字符，必须一个都不触发
-  await section('输入态抑制单键快捷键', async () => {
+  // 输入态抑制：在创建向导的输入框里连打单键快捷键的字符，必须一个都不触发。
+  //
+  // 注意这一节的证明力有限，别把它当成「输入态抑制」的主要证据：创建向导本身是浮层，
+  // overlayOpen 为真时整套快捷键已被 enabled:false 全局停用，所以即使 isEditableTarget
+  // 那条分支坏掉，这一节仍会通过（我变异验证过：注释掉 editable 判断，这里全绿）。
+  // 真正考验 editable 分支的是下面 Composer 那一节——任务详情页没有浮层，
+  // 单键快捷键此时是活的，只能靠「目标在输入框内」这一条来沉默。
+  await section('输入态抑制单键快捷键（浮层路径）', async () => {
     await dismissDialogs();
     // 用可靠的入口打开创建向导：这一节要测的是输入态抑制，不该被 n 的缺陷挡住
     await page.getByRole('button', { name: '创建任务', exact: true }).first().click();
@@ -444,18 +502,31 @@ async function browserAcceptance() {
   // 组合键在输入态仍必须可用——这是「沉默」与「瘫痪」的分界
   await section('输入态仍放行组合键', async () => {
     await page.goto(`${BASE}/sessions/${sessions.payment}`, { waitUntil: 'domcontentloaded' });
-    await page.waitForTimeout(2_500);
-    const composer = page.locator('textarea').first();
+    // Composer 用 aria-label 定位，不用 locator('textarea').first()：
+    // 页面上不止一个 textarea（系统提示词面板等也有），DOM 顺序会随加载时序变，
+    // .first() 因此可能取到别的框，让这一节偶发失败在一个与被测能力无关的地方。
+    const composer = page.getByLabel('消息', { exact: true });
+    await composer.waitFor({ state: 'visible', timeout: 20_000 });
     await composer.click();
     await composer.fill('');
+    // 确认焦点真的在 Composer 里再开始打字：焦点不在输入框时，这一节测的就不是输入态了
+    await page.waitForFunction(() =>
+      document.activeElement instanceof HTMLTextAreaElement
+      && document.activeElement.getAttribute('aria-label') === '消息',
+      undefined, { timeout: 10_000 });
     await page.keyboard.type('n?te');
-    await page.waitForTimeout(500);
+    await page.waitForFunction(() => {
+      const field = document.querySelector('textarea[aria-label="消息"]');
+      return field instanceof HTMLTextAreaElement && field.value === 'n?te';
+    }, undefined, { timeout: 10_000 }).catch(() => {});
     assert(await composer.inputValue() === 'n?te', 'Composer 里连打快捷键字符同样原样输入，不被劫持');
+    // 这条是「输入态抑制」的核心证据：此刻没有任何浮层，单键快捷键本来是活的，
+    // 唯一让它们沉默的就是 isEditableTarget。所以 n / ? / t / e 一个都不能起作用。
+    assert((await visibleDialogLabels()).length === 0,
+      '在 Composer 里打字时 n / ? / t / e 全部沉默，没有浮层被误开（无浮层环境下由 isEditableTarget 兜住）');
     await page.keyboard.press('Control+k');
     await palette.waitFor({ state: 'visible', timeout: 10_000 });
     assert(await palette.isVisible(), '在 Composer 内按 Ctrl+K 仍能打开命令面板（带修饰键的组合不被抑制）');
-    await dismissDialogs();
-    await composer.fill('');
   });
 
   // ── 5. Toast ────────────────────────────────────────────────────────────
@@ -466,16 +537,39 @@ async function browserAcceptance() {
     assert(await politeRegion.count() === 1 && await assertiveRegion.count() === 1,
       '礼貌区与断言区两个 live region 常驻 DOM（读屏才会播报后插入的通知）');
 
-    // 造一个真的停在 queued 的任务：慢速假 CLI 让第一条占住 9s，第二条必然排队。
+    /**
+     * 造一个**真的停在 queued 上**的任务。
+     *
+     * 这里必须用慢速 agent（每轮 8s），不能复用默认的 claude-code：
+     * 默认假 CLI 一轮只要 300ms，先发的占位指令早就跑完了，后发的直接进运行态——
+     * 「有一条指令在排队」这个前提根本不成立，取消按钮只在一个随机瞬间存在。
+     * 曾经的写法是「先发占位 → 等 1.5s → 再发目标 → 轮询读到 queued 就点按钮」，
+     * 但轮询只证明「某一瞬间读到过 queued」，读完到点下去之间它随时会转走，
+     * 于是这一节偶发 15s 超时，看上去像产品缺陷。
+     * 用慢速轮次把排队状态变成稳定事实，断言测的仍然是真实排队与真实撤销。
+     */
+    const undoSessionResponse = await request('POST', '/api/sessions', { agentId: 'seed', cwd: dirs.workspace });
+    if (undoSessionResponse.status !== 200) throw new Error(`Toast 专用会话创建失败：${undoSessionResponse.status} ${undoSessionResponse.text}`);
+    const undoSession = undoSessionResponse.json.id;
+    onCleanup(`关闭 Toast 专用会话 ${undoSession}`, async () => { await request('POST', `/api/sessions/${undoSession}/stop`); });
+
     const undoTarget = 'UNDO_TARGET_TASK';
-    await request('POST', `/api/sessions/${sessions.payment}/send`, { prompt: 'OCCUPIER slow turn', mode: 'queue' });
-    await page.waitForTimeout(1_500);
-    await request('POST', `/api/sessions/${sessions.payment}/send`, { prompt: undoTarget, mode: 'queue' });
+    await request('POST', `/api/sessions/${undoSession}/send`, { prompt: 'OCCUPIER slow turn', mode: 'queue' });
+    // 等占位指令真的进入运行态，之后发的才必然排队（不靠固定 sleep 猜）
+    await waitFor('占位指令已在运行（后续指令必然排队）', async () => {
+      const tasks = (await request('GET', `/api/sessions/${undoSession}/tasks`)).json ?? [];
+      return tasks.some(task => task.prompt === 'OCCUPIER slow turn' && task.status === 'running') ? tasks : undefined;
+    }, { timeoutMs: 30_000, intervalMs: 300 });
+    await request('POST', `/api/sessions/${undoSession}/send`, { prompt: undoTarget, mode: 'queue' });
     const queuedBefore = await waitFor('出现真正排队的任务', async () => {
-      const tasks = (await request('GET', `/api/sessions/${sessions.payment}/tasks`)).json ?? [];
+      const tasks = (await request('GET', `/api/sessions/${undoSession}/tasks`)).json ?? [];
       return tasks.some(task => task.prompt === undoTarget && task.status === 'queued') ? tasks : undefined;
     }, { timeoutMs: 20_000, intervalMs: 400 });
     debug('tasks', JSON.stringify(queuedBefore.map(task => [task.status, task.prompt])));
+
+    // 页面要停在这条会话上，取消按钮才在视野里
+    await page.goto(`${BASE}/sessions/${undoSession}`, { waitUntil: 'domcontentloaded' });
+    await page.waitForTimeout(2_000);
 
     const cancelQueued = page.getByRole('button', { name: `取消排队：${undoTarget}` });
     await cancelQueued.waitFor({ state: 'visible', timeout: 15_000 });
@@ -486,7 +580,7 @@ async function browserAcceptance() {
     assert(toastText.includes('已取消 1 条待执行指令'),
       `真实 mutation 成功后弹出成功通知（实际「${toastText.split('\n').filter(Boolean).slice(0, 2).join(' / ')}」）`);
     assert(toastText.includes('成功'), '通知带「成功」文字标签（不靠颜色单独表意）');
-    assert((await request('GET', `/api/sessions/${sessions.payment}/tasks`)).json
+    assert((await request('GET', `/api/sessions/${undoSession}/tasks`)).json
       .some(task => task.prompt === undoTarget && task.status === 'cancelled'),
       '通知对应的服务端状态真的变了（该指令已 cancelled）');
 
@@ -495,13 +589,31 @@ async function browserAcceptance() {
     assert(await undoButton.isVisible(), '成功通知上带「恢复这条指令」的撤销动作');
     await undoButton.click();
     const restored = await waitFor('撤销后指令重新入队', async () => {
-      const tasks = (await request('GET', `/api/sessions/${sessions.payment}/tasks`)).json ?? [];
+      const tasks = (await request('GET', `/api/sessions/${undoSession}/tasks`)).json ?? [];
       return tasks.filter(task => task.prompt === undoTarget && task.status !== 'cancelled').length > 0 ? tasks : undefined;
     }, { timeoutMs: 20_000, intervalMs: 400 });
     assert(restored.filter(task => task.prompt === undoTarget).length === 2,
       `撤销真的重新下发了这条指令（同名任务 ${restored.filter(task => task.prompt === undoTarget).length} 条：一条 cancelled、一条重新排队）`);
     await politeRegion.locator('.ui-toast').first().waitFor({ state: 'hidden', timeout: 10_000 });
     ok('撤销成功后该通知自动收起（动作完成即退场）');
+
+    /**
+     * 本节结束前把这条慢速会话停掉：撤销那一步刚把指令重新排进队列，而这条会话
+     * 每轮 8s，放着不管它会带着未跑完的队列一直活到后面的小节。让每节自己清掉
+     * 自己造的负载，后面各节的起点才是确定的。
+     *
+     * ⚠️ 不要把这一行当成「键条那节失败」的修复。那个失败的真因是产品缺陷，
+     * 已单独修掉：transcript 定位按 mtime 取最新，而 Claude 的 transcript 目录
+     * 只由 cwd 决定，于是同 cwd 的多条会话互相抢同一个文件
+     * （见 packages/pty-driver/src/transcript/claude.ts）。
+     *
+     * 我在这里先后写过两版归因——「PTY 脏了就不回显」和「会话忙着跑轮次就不回显」
+     * ——两版都没做实就写成了结论，而且都错。真正把它定位下来的办法是：
+     * 给每条会话发独一无二的 prompt，再检查它**收到的** text 里含谁的标记。
+     * 只看「有没有失败」永远看不出串台，因为串台的另一种表现是「成功」：
+     * 三条会话全报 completed，其中两条显示的是第三条的回答。
+     */
+    await request('POST', `/api/sessions/${undoSession}/stop`);
 
     // 自动消失：归档的 success 通知默认 4s，等 6.5s 后必须已经不在
     await dismissDialogs();
@@ -520,8 +632,30 @@ async function browserAcceptance() {
   // ── 6. 移动端终端快捷键条 ───────────────────────────────────────────────
   step('移动端终端快捷键条：触控目标尺寸、按键真的写进 PTY、桌面不出现');
   await section('移动端终端快捷键条', async () => {
+    // 本节专用的新会话：不复用前面几节用过的 session。
+    // 前面的 session 已经历过归档、取消排队、长时间空转，其 PTY 未必还可写；
+    // 拿它测键条，失败时无法区分「键条没送到」与「这条 PTY 本来就不通了」。
+    // 现开一条并跑完一轮，让 PTY 停在提示符上，起点就是确定的。
+    //
+    // 顺带记一笔：这一节曾长期不稳定，我两次把原因归到「PTY 脏了」「会话忙」，
+    // 两次都是没做实的猜测。真因是 transcript 定位按 mtime 取最新，导致同 cwd
+    // 的会话互相抢同一份 transcript（已修，见 transcript/claude.ts）。
+    // 所以「本节自建会话」是为了可归因，不是为了绕开那个缺陷。
+    const created = await request('POST', '/api/sessions', { agentId: 'claude-code', cwd: dirs.workspace });
+    if (created.status !== 200) throw new Error(`键条专用会话创建失败：${created.status} ${created.text}`);
+    const keyBarSession = created.json.id;
+    onCleanup(`关闭键条专用会话 ${keyBarSession}`, async () => { await request('POST', `/api/sessions/${keyBarSession}/stop`); });
+    const primed = await request('POST', `/api/sessions/${keyBarSession}/send`, { prompt: 'terminal key bar probe', mode: 'queue' });
+    if (primed.status !== 202) throw new Error(`键条专用会话派发失败：${primed.status} ${primed.text}`);
+    await waitFor('键条专用会话跑完一轮', async () => {
+      const session = (await request('GET', `/api/sessions/${keyBarSession}`)).json;
+      const tasks = (await request('GET', `/api/sessions/${keyBarSession}/tasks`)).json ?? [];
+      debug('键条会话', `state=${session?.state} tasks=${JSON.stringify(tasks.map(t => [t.status, t.prompt]))}`);
+      return session?.state === 'completed';
+    }, { timeoutMs: 60_000, intervalMs: 500 });
+
     // 桌面视口先取证：宽屏鼠标环境不该出现这一条，否则它只挡内容
-    await page.goto(`${BASE}/sessions/${sessions.cjk}`, { waitUntil: 'domcontentloaded' });
+    await page.goto(`${BASE}/sessions/${keyBarSession}`, { waitUntil: 'domcontentloaded' });
     await page.waitForTimeout(2_000);
     await page.getByRole('tab', { name: '终端' }).click();
     await page.waitForTimeout(2_500);
@@ -556,7 +690,7 @@ async function browserAcceptance() {
       socket.on('close', () => { terminalSocketOpen = false; });
       socket.on('framesent', frame => sentFrames.push(String(frame.payload)));
     });
-    await phonePage.goto(`${BASE}/sessions/${sessions.cjk}`, { waitUntil: 'domcontentloaded' });
+    await phonePage.goto(`${BASE}/sessions/${keyBarSession}`, { waitUntil: 'domcontentloaded' });
     await phonePage.waitForTimeout(2_500);
     await phonePage.getByRole('tab', { name: '终端' }).click();
     const keyBar = phonePage.getByRole('toolbar', { name: '终端快捷键' });
@@ -565,6 +699,23 @@ async function browserAcceptance() {
 
     const keyButtons = await keyBar.getByRole('button').all();
     assert(keyButtons.length >= 9, `快捷键条至少提供 9 颗按键（实际 ${keyButtons.length} 个可点元素）`);
+    // 量尺寸前必须先确认 Tailwind 样式表**已经生效**：终端是懒加载 chunk，
+    // 它的样式和 xterm 一起晚到，而 toolbar 可见远早于样式落地。
+    // 在样式生效前量，会量到纯内容尺寸（32x32）或有 padding 无 min-* 的中间态（41x32），
+    // 那是「样式还没到」，不是「产品把触控目标做小了」——两者必须分开，
+    // 否则这条断言会偶发失败并把开发者引向不存在的产品缺陷。
+    //
+    // 判据取 min-height 这个**由样式表提供**的计算值：它出现即证明 min-h-11 那条规则已应用。
+    // 不用 sleep 兜：sleep 只是把窗口拉宽，负载一高照样偶发。
+    await phonePage.waitForFunction(() => {
+      const bar = document.querySelector('[role="toolbar"][aria-label="终端快捷键"]');
+      const button = bar?.querySelector('button');
+      if (!button) return false;
+      const style = getComputedStyle(button);
+      // min-h-11 / min-w-11 = 2.75rem = 44px；只要它已是 44px，说明样式表生效了
+      return parseFloat(style.minHeight) >= 44 && parseFloat(style.minWidth) >= 44;
+    }, undefined, { timeout: 20_000 });
+    ok('键条样式表已生效（首颗按键的 min-height/min-width 计算值已达 44px，可以开始量真实盒子）');
     const undersized = [];
     for (const button of keyButtons) {
       const box = await button.boundingBox();
@@ -578,7 +729,7 @@ async function browserAcceptance() {
     // 观察者是独立连接，因此它收到的东西证明字节真的到了 PTY，而不只是留在页面里。
     const WebSocketImpl = loadWebSocket();
     const observed = [];
-    const observer = new WebSocketImpl(`ws://127.0.0.1:${PORT}/api/terminal/${encodeURIComponent(sessions.cjk)}`);
+    const observer = new WebSocketImpl(`ws://127.0.0.1:${PORT}/api/terminal/${encodeURIComponent(keyBarSession)}`);
     onCleanup('关闭终端观察者 WS', () => { try { observer.close(); } catch { /* 已关闭 */ } });
     await new Promise((resolve, reject) => {
       observer.on('open', resolve);
@@ -601,19 +752,19 @@ async function browserAcceptance() {
     // 这一步让下面键条的失败可归因：对照也收不到回显 → 该会话的 PTY 已不可写（例如被桥接进程已退出），
     // 问题不在键条；只有对照通过、键条不通，才是键条自己的缺陷。
     observed.length = 0;
-    observer.send(JSON.stringify({ type: 'input', data: '\u001b[A' }));
+    observer.send(JSON.stringify({ type: 'input', data: ARROW_UP }));
     const ptyWritable = await waitFor('PTY 对照写入回显', async () =>
-      observed.join('').includes('\u001b[A') ? observed.join('') : undefined,
+      observed.join('').includes(ARROW_UP_ECHO) ? observed.join('') : undefined,
       { timeoutMs: 8_000, intervalMs: 200 }).then(() => true).catch(() => false);
-    const sessionStateNow = (await request('GET', `/api/sessions/${sessions.cjk}`)).json?.state;
+    const sessionStateNow = (await request('GET', `/api/sessions/${keyBarSession}`)).json?.state;
     assert(ptyWritable,
       `对照写入证明该会话的 PTY 此刻可写并会回显（会话状态 ${sessionStateNow}）——键条断言因此可归因`);
 
     // 逐颗验证：↑ 与 Esc 都是无副作用的键（不像 ^C 会杀掉被桥接的 CLI）。
     // 每颗键分两步断言：页面确实发出了对应控制序列 → 独立观察者确实看到 PTY 回显。
     for (const probe of [
-      { name: /方向键上/, label: '方向键上', data: '[A', echo: '[A' },
-      { name: /发送 Esc/, label: 'Esc', data: '', echo: '' }
+      { name: /方向键上/, label: '方向键上', data: ARROW_UP, echo: ARROW_UP_ECHO },
+      { name: /发送 Esc/, label: 'Esc', data: ESC_KEY, echo: ESC_KEY_ECHO }
     ]) {
       sentFrames.length = 0;
       observed.length = 0;

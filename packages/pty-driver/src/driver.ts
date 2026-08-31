@@ -483,6 +483,13 @@ export class PtyCliDriver implements AgentDriver {
     this.transcript = createTranscriptTailer(this.adapter.id, {
       cwd: this.cwd,
       env: this.spawnEnv(),
+      // Claude keys its transcript directory by cwd ALONE, so two dockmux
+      // sessions in one repo share it. Without the session id the tailer
+      // resolves by recency and picks up a sibling's transcript — the timeline
+      // then shows another session's answer, or the turn is failed as "no
+      // final output" while our own transcript sits on disk, correct and
+      // unread. Sources that cannot be session-scoped ignore this.
+      sessionId: this.sessionId,
     });
     if (this.transcript) {
       this.transcript.onEvent(e => {
