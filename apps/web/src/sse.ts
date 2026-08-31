@@ -10,7 +10,7 @@ export type StreamStatus = 'connecting' | 'open' | 'reconnecting';
 export const stateLabels: Record<string, string> = {
   created: '已创建', starting: '启动中', idle: '就绪', thinking: '思考中', running_tool: '正在调用工具', waiting_for_permission: '等待授权', interrupting: '正在取消', interrupted: '已取消', completed: '已完成', failed: '失败', stopped: '已停止'
 };
-export const stateTone: Record<string, string> = { starting: 'bg-amber-500', thinking: 'bg-amber-500', running_tool: 'bg-blue-500', waiting_for_permission: 'bg-orange-500', failed: 'bg-red-500', stopped: 'bg-zinc-400', interrupted: 'bg-zinc-500', completed: 'bg-emerald-500', idle: 'bg-emerald-500' };
+export const stateTone: Record<string, string> = { starting: 'bg-[var(--status-warning-solid)]', thinking: 'bg-[var(--status-warning-solid)]', running_tool: 'bg-[var(--status-info-solid)]', waiting_for_permission: 'bg-[var(--status-attention-solid)]', failed: 'bg-[var(--status-danger-solid)]', stopped: 'bg-[var(--status-neutral-solid)]', interrupted: 'bg-[var(--status-neutral-solid)]', completed: 'bg-[var(--status-success-solid)]', idle: 'bg-[var(--status-success-solid)]' };
 
 // 指数退避延迟：baseMs * 2^attempt，封顶 maxMs
 export function nextBackoffDelay(attempt: number, baseMs = 1000, maxMs = 30000): number {

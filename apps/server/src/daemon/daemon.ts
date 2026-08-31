@@ -1,16 +1,16 @@
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
-import { daemonizeProcess } from 'daemonize-process';
+import { existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 
 /**
  * Self-managed background daemon for the Dockmux local session server.
  *
- * `dockmux start` re-spawns itself out of band via `daemonize-process`
- * (a `child_process.spawn` with `detached: true`) and then exits, leaving a
- * foreground child that owns the server. That child records its PID plus
- * metadata under the working directory's `.dockmux/daemon/` so `stop` /
- * `restart` / `status` can locate and control it without any external
+ * `dockmux start` re-spawns itself out of band (a `child_process.spawn` with
+ * `detached: true`) and waits for the child to report ready — or to die — before
+ * exiting, leaving a background child that owns the server. That child records
+ * its PID plus metadata under the working directory's `.dockmux/daemon/` so
+ * `stop` / `restart` / `status` can locate and control it without any external
  * supervisor (no pm2 / systemd).
  *
  * Parent vs. daemon child split is signalled through the
@@ -193,20 +193,40 @@ export interface DaemonizeOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+/** 已启动的后台子进程句柄。父进程据此判断「起来了」还是「当场就死了」。 */
+export interface DaemonChildHandle {
+  pid: number;
+  /**
+   * 子进程退出时 resolve。
+   *
+   * 有了它，父进程就不必傻等满就绪超时：端口被占用之类的失败会在几十毫秒内
+   * 让子进程带非零码退出，父进程立刻据此报错。
+   */
+  exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+}
+
 /**
- * Re-spawn the current `dockmux` process in the background with stdout /
- * stderr redirected into the daemon log file. `daemonize-process` exits the
- * caller after launching the detached child, so this is terminal for the
- * calling process.
+ * 把当前 `dockmux` 进程在后台重新拉起一份，stdout / stderr 重定向进守护日志。
+ *
+ * 这里刻意不用 `daemonize-process`：它在 spawn 完成后立刻 `exit(0)` 掉父进程，
+ * 于是「服务到底起来没有」永远没人检查——端口被占用时子进程 EADDRINUSE 死掉，
+ * 父进程却已经带 0 退出且一个字都不打印，用户以为起好了。这违反「状态不许说谎」。
+ * 改成自己 spawn 并把句柄交还调用方，让父进程等到就绪或失败再决定退出码与输出。
+ *
+ * `execArgv` 一并透传，否则在 tsx 等 loader 下起出来的子进程会因为 node 无法加载
+ * `.ts` 入口而立刻死掉（表现为 ERR_MODULE_NOT_FOUND）。
  */
-export function daemonize(options: DaemonizeOptions = {}): void {
+export function daemonize(options: DaemonizeOptions = {}): DaemonChildHandle {
   const cwd = options.cwd ?? process.cwd();
   const logFile = daemonPaths(cwd ? join(cwd, '.dockmux', 'daemon') : defaultDaemonDir()).logFile;
   const fd = openLogFd(logFile);
+  const script = process.argv[1];
+  if (script === undefined) throw new Error('无法确定 Dockmux 自身的入口脚本，无法启动后台服务。');
 
-  daemonizeProcess({
+  const child = spawn(process.execPath, [...process.execArgv, script, ...process.argv.slice(2)], {
     cwd,
     stdio: ['ignore', fd, fd],
+    detached: true,
     env: {
       ...(options.env ?? process.env),
       [DAEMON_ENV_FLAG]: '1',
@@ -214,6 +234,65 @@ export function daemonize(options: DaemonizeOptions = {}): void {
       [DAEMON_STARTED_AT_ENV]: options.startedAt ?? new Date().toISOString()
     }
   });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolve => {
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+    child.once('error', () => resolve({ code: null, signal: null }));
+  });
+  // detached + unref：父进程退出后子进程继续活着，且不因它而卡住事件循环。
+  child.unref();
+  return { pid: child.pid ?? 0, exited };
+}
+
+/**
+ * 看起来像「失败原因」的行。启动日志里绝大多数是正常的启动流水，直接取末尾几行
+ * 会把真正的报错埋掉，所以只挑错误特征行。
+ */
+const FAILURE_LINE_PATTERN = /error|EADDRINUSE|EACCES|EPERM|ENOENT|ENOTDIR|cannot|can't|unable|failed|fatal|denied|refused|exception|throw|not found|invalid/i;
+
+/**
+ * 疑似携带机密的行，一律不回放。
+ *
+ * 守护日志里混着服务自己打印的访问令牌（`Generated access token ...`）。把日志
+ * 尾巴原样搬进 CLI 输出会让令牌进入终端记录、CI 日志乃至 `--json` 的消费方——
+ * 这是「绝不泄密」的红线。错误特征过滤已经能挡掉这一行，这里再做一道兜底，
+ * 因为将来谁在启动路径上多打一行机密，都不该因此泄漏。
+ */
+const SECRET_LINE_PATTERN = /token|secret|password|passwd|credential|api[-_ ]?key|authorization|bearer/i;
+
+/** 单行上限，防止一条巨大的堆栈或 JSON 把终端糊满。 */
+const MAX_REASON_LINE = 200;
+
+/** 守护日志当前字节数。用于只读取「这次启动之后」新写入的内容。 */
+export function daemonLogSize(dir: string): number {
+  try {
+    return statSync(daemonPaths(dir).logFile).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * 从守护日志里提炼「起不来」的原因，用于直接呈现给用户。
+ *
+ * `fromByte` 是关键：日志是 append 的，若不从本次启动的偏移开始读，报错里会混进
+ * 上几轮运行的陈旧行——真正的原因（比如 EADDRINUSE）被埋在噪音后面，用户反而
+ * 更难判断。只报不改：读失败就返回空，绝不因为取日志而让启动流程崩掉。
+ */
+export function tailDaemonLog(dir: string, lines = 3, fromByte = 0): string[] {
+  try {
+    const text = readFileSync(daemonPaths(dir).logFile, 'utf8');
+    const fresh = fromByte > 0 && fromByte <= text.length ? text.slice(fromByte) : text;
+    return fresh
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => line !== '')
+      .filter(line => !SECRET_LINE_PATTERN.test(line))
+      .filter(line => FAILURE_LINE_PATTERN.test(line))
+      .map(line => line.length > MAX_REASON_LINE ? `${line.slice(0, MAX_REASON_LINE)}…` : line)
+      .slice(-lines);
+  } catch {
+    return [];
+  }
 }
 
 /** Open a log file for append (creating parent directories), returning its numeric fd. */

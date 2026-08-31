@@ -137,4 +137,96 @@ describe('Dockmux CLI', () => {
     await createCliProgram('0.0.6', { update }).parseAsync(['node', 'dockmux', 'update', '--dist-tag', 'fix']);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ distTag: 'fix' }));
   });
+
+  it('parses setup field flags so scripted callers never pipe answers at prompts', async () => {
+    const setup = vi.fn();
+    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dockmux', 'setup',
+      '--cwd', '/tmp/project', '--port', '4400', '--local-only', '--lark-app-id', 'cli_wizard', '--force-login', '--yes']);
+    expect(setup).toHaveBeenCalledWith(expect.objectContaining({
+      cwd: '/tmp/project', port: '4400', localOnly: true, larkAppId: 'cli_wizard', forceLogin: true, yes: true
+    }));
+  });
+
+  it('parses setup --json and --skip-lark independently of the interactive path', async () => {
+    const setup = vi.fn();
+    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dockmux', 'setup', '--json', '--skip-lark']);
+    expect(setup).toHaveBeenCalledWith(expect.objectContaining({ json: true, skipLark: true }));
+  });
+
+  it('defaults setup flags to undefined so the wizard can tell "unset" from "explicitly chosen"', async () => {
+    const setup = vi.fn();
+    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dockmux', 'setup']);
+    const options = setup.mock.calls[0]![0]! as Record<string, unknown>;
+    expect(options.cwd).toBeUndefined();
+    expect(options.port).toBeUndefined();
+    expect(options.yes).toBeUndefined();
+    expect(options.json).toBeUndefined();
+  });
+
+  it('parses doctor with an optional machine-readable flag', async () => {
+    const doctor = vi.fn();
+    await createCliProgram('0.0.6', { doctor }).parseAsync(['node', 'dockmux', 'doctor']);
+    expect(doctor).toHaveBeenCalledWith(expect.not.objectContaining({ json: true }));
+    const asJson = vi.fn();
+    await createCliProgram('0.0.6', { doctor: asJson }).parseAsync(['node', 'dockmux', 'doctor', '--json']);
+    expect(asJson).toHaveBeenCalledWith(expect.objectContaining({ json: true }));
+  });
+
+  it('parses the three autostart subcommands', async () => {
+    const autostartEnable = vi.fn(); const autostartDisable = vi.fn(); const autostartStatus = vi.fn();
+    await createCliProgram('0.0.6', { autostartEnable }).parseAsync(['node', 'dockmux', 'autostart', 'enable']);
+    await createCliProgram('0.0.6', { autostartDisable }).parseAsync(['node', 'dockmux', 'autostart', 'disable']);
+    await createCliProgram('0.0.6', { autostartStatus }).parseAsync(['node', 'dockmux', 'autostart', 'status', '--json']);
+    expect(autostartEnable).toHaveBeenCalledOnce();
+    expect(autostartDisable).toHaveBeenCalledOnce();
+    expect(autostartStatus).toHaveBeenCalledWith(expect.objectContaining({ json: true }));
+  });
+
+  it('rejects an unknown autostart subcommand instead of silently doing nothing', async () => {
+    const autostartEnable = vi.fn();
+    const program = createCliProgram('0.0.6', { autostartEnable }).exitOverride().configureOutput({ writeErr: () => {} });
+    await expect(program.parseAsync(['node', 'dockmux', 'autostart', 'toggle'])).rejects.toThrow();
+    expect(autostartEnable).not.toHaveBeenCalled();
+  });
+
+  it('documents setup, doctor and autostart in the root help so a new user finds them first', () => {
+    let output = '';
+    const program = createCliProgram('0.0.6').exitOverride().configureOutput({ writeOut: value => { output += value; } });
+    expect(() => program.parse(['node', 'dockmux', '--help'])).toThrow();
+    expect(output).toContain('setup');
+    expect(output).toContain('doctor');
+    expect(output).toContain('autostart');
+    expect(output).toContain('$ dockmux setup');
+  });
+
+  it('keeps setup help honest about non-interactive behaviour', () => {
+    // 用 outputHelp 而非 helpInformation：后者不含 addHelpText('after') 的内容，
+    // 而行为契约恰好写在那里。
+    const program = createCliProgram('0.0.6');
+    const setup = program.commands.find(command => command.name() === 'setup')!;
+    let help = '';
+    setup.configureOutput({ writeOut: value => { help += value; } });
+    setup.outputHelp();
+    // --json 是行为契约（不提问、不渲染二维码），帮助里必须写明，否则脚本调用方会踩坑。
+    expect(help).toContain('--json');
+    expect(help).toContain('绝不');
+    expect(help).toContain('--yes');
+    expect(help).toContain('--skip-lark');
+    expect(help).toContain('幂等');
+  });
+
+  it('tells the user that autostart enable does not start the server now', () => {
+    const program = createCliProgram('0.0.6');
+    const autostart = program.commands.find(command => command.name() === 'autostart')!;
+    const capture = (name: string) => {
+      const command = autostart.commands.find(entry => entry.name() === name)!;
+      let help = '';
+      command.configureOutput({ writeOut: value => { help += value; } });
+      command.outputHelp();
+      return help;
+    };
+    // enable ≠ start、disable ≠ stop 必须写在帮助里，否则用户会以为服务已经起来/已经停了。
+    expect(capture('enable')).toContain('dockmux start');
+    expect(capture('disable')).toContain('dockmux stop');
+  });
 });

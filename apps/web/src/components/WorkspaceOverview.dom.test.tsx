@@ -92,4 +92,30 @@ describe('WorkspaceOverview', () => {
     expect(container.querySelector('main')).toBeNull();
     expect(screen.getByRole('region', { name: '今天需要推进什么？' })).toBeTruthy();
   });
+
+  it('Agent 尚未加载完时不谎报「先准备 Agent」，改为说明正在检测', () => {
+    render(<WorkspaceOverview {...baseProps} sessions={[]} agents={[]} agentsLoading/>);
+    expect(screen.getByText('正在同步任务状态…')).toBeTruthy();
+    expect(screen.queryByText('还没有任务。先准备 Agent，再创建第一个任务。')).toBeNull();
+    const cta = screen.getByRole('button', { name: '正在检测 Agent…' });
+    expect(cta.hasAttribute('disabled')).toBe(true);
+  });
+
+  it('Agent 加载中时任务列表展示骨架，而不是先闪一次空状态', () => {
+    const { container } = render(<WorkspaceOverview {...baseProps} sessions={[]} agents={[]} agentsLoading/>);
+    expect(container.querySelectorAll('.animate-pulse').length).toBeGreaterThan(0);
+    expect(screen.queryByText('先准备一个可用 Agent')).toBeNull();
+  });
+
+  it('飞书接入状态未就绪时不谎报「尚未接入机器人」', () => {
+    render(<WorkspaceOverview {...baseProps} sessions={[]} larkBots={0} larkBotsLoading/>);
+    expect(screen.getByText('正在读取接入状态…')).toBeTruthy();
+    expect(screen.queryByText('尚未接入机器人')).toBeNull();
+  });
+
+  it('数据就绪后仍然如实展示空状态', () => {
+    render(<WorkspaceOverview {...baseProps} sessions={[]} agents={[]}/>);
+    expect(screen.getByText('还没有任务。先准备 Agent，再创建第一个任务。')).toBeTruthy();
+    expect(screen.getByText('尚未接入机器人')).toBeTruthy();
+  });
 });

@@ -8,9 +8,11 @@ import {
   writeState,
   writePidFile,
   clearState,
+  daemonLogSize,
   defaultDaemonDir,
   isDaemonRunning,
-  daemonPaths
+  daemonPaths,
+  tailDaemonLog
 } from './daemon.js';
 import { daemonRestartOptions, daemonStart, daemonStop, daemonStatus } from './command.js';
 
@@ -172,5 +174,63 @@ describe('Dockmux daemon session', () => {
     expect(daemonRestartOptions({}, base)).not.toHaveProperty('auth');
     expect(daemonRestartOptions({}, { ...base, authEnabled: 'false' } as any)).not.toHaveProperty('auth');
     expect(daemonRestartOptions({}, undefined, { DOCKMUX_DAEMON_RESTART_AUTH: 'broken' })).not.toHaveProperty('auth');
+  });
+
+  /**
+   * 启动失败原因的提炼。
+   *
+   * 背景：`dockmux start` 过去在端口被占用时子进程死掉、父进程仍 exit 0 且零输出。
+   * 修复方式是父进程等子进程 exit 并回放日志。回放本身有两个陷阱，各配一条断言：
+   * 陈旧行（日志 append，必须按偏移只取本次）与机密行（服务会打印访问令牌）。
+   */
+  describe('tailDaemonLog', () => {
+    const write = (text: string) => {
+      const dir = defaultDaemonDir(tmp);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(daemonPaths(dir).logFile, text, 'utf8');
+      return dir;
+    };
+
+    it('只挑错误特征行，不把正常启动流水当成原因', () => {
+      const dir = write([
+        'Server listening at http://127.0.0.1:4310',
+        'Dockmux UI and API listening on http://127.0.0.1:4310',
+        'listen EADDRINUSE: address already in use 127.0.0.1:4310'
+      ].join('\n'));
+      expect(tailDaemonLog(dir)).toEqual(['listen EADDRINUSE: address already in use 127.0.0.1:4310']);
+    });
+
+    it('按字节偏移只回放本次启动写入的行 —— 否则上一轮的报错会被当成这次的原因', () => {
+      const stale = 'listen EADDRINUSE: address already in use 127.0.0.1:9999\n';
+      const dir = write(`${stale}listen EACCES: permission denied 127.0.0.1:80\n`);
+      expect(tailDaemonLog(dir, 3, Buffer.byteLength(stale))).toEqual(['listen EACCES: permission denied 127.0.0.1:80']);
+    });
+
+    /**
+     * 「绝不泄密」：服务启动时会把生成的访问令牌打进同一份日志，而这份回放会进入
+     * 终端、CI 记录与 `--json` 的消费方。实测踩过一次，故用真实文案锁死。
+     */
+    it('绝不回放疑似机密的行', () => {
+      const dir = write([
+        '[dockmux] Generated access token for remote access: DHL-ws45-FkYdsVMkKlmmKj0aGkVFyRAPX3QyDUHkaw',
+        "[dockmux] Run 'dockmux auth token' to view it again, or 'dockmux auth token --rotate' to rotate it.",
+        'listen EADDRINUSE: address already in use 127.0.0.1:4310'
+      ].join('\n'));
+      const lines = tailDaemonLog(dir);
+      expect(lines).toEqual(['listen EADDRINUSE: address already in use 127.0.0.1:4310']);
+      expect(lines.join('\n')).not.toContain('DHL-ws45');
+    });
+
+    it('单行过长时截断，不把终端糊满', () => {
+      const dir = write(`Error: ${'x'.repeat(500)}`);
+      const [line] = tailDaemonLog(dir);
+      expect(line!.length).toBeLessThanOrEqual(201);
+      expect(line!.endsWith('…')).toBe(true);
+    });
+
+    it('日志不存在时返回空，绝不因为取日志而让启动流程崩掉', () => {
+      expect(tailDaemonLog(join(tmp, 'nope'))).toEqual([]);
+      expect(daemonLogSize(join(tmp, 'nope'))).toBe(0);
+    });
   });
 });

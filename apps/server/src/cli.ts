@@ -11,7 +11,7 @@ import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage,
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { RelayCliError } from '@dockmux/relay';
 import { dockmuxGroupToolsCommand } from './lark/agent-tools.js';
-import { daemonRestart, daemonStart, daemonStatus, daemonStop } from './daemon/command.js';
+import { daemonRestart, daemonStart, daemonStatus, daemonStop, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { runNpmForDockmuxUpdate, updateDockmux } from './update.js';
@@ -23,6 +23,12 @@ import { BotmuxImportCliError, runBotmuxArchive, runBotmuxDiscover, runBotmuxPla
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dockmux/secret-provider';
 import { SecretCliError, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
+import { runSetup } from './setup/setup.js';
+import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
+import { InvalidWorkingDirectoryError } from './setup/detect.js';
+import { runDoctor } from './doctor/doctor.js';
+import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
+import { createCliUi } from './cli-ui.js';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
@@ -87,12 +93,88 @@ async function restartWithInstalledCli(entrypoint: string) {
   throw new Error('Dockmux was updated, but the restarted service did not become ready within 15 seconds. Run dockmux status and inspect the daemon log.');
 }
 
+/**
+ * start / stop / restart / status 四个命令的统一渲染。
+ *
+ * 为什么要有它：这四个命令过去直接把 `JSON.stringify(result)` 打进 stdout，于是
+ *   · `dockmux status` 给人看的是一行裸 JSON——而 doctor 的多条 verify 正是让用户跑它；
+ *   · `--json` 反而不被接受（unknown option），与 setup / doctor / autostart 的约定相反。
+ * 现在与其余命令对齐：默认人类可读，`--json` 才输出单行 JSON。
+ *
+ * 失败一律带「怎么修」。起不来时最有用的信息是日志路径，所以 logFile 必须露出来。
+ */
+function renderDaemonResult(result: DaemonCommandResult | (DaemonStatusInfo & { action: 'status' }), json: boolean): void {
+  if (json) {
+    createCliUi().json({ ok: 'ok' in result ? result.ok : true, ...result });
+    return;
+  }
+  const ui = createCliUi();
+  const running = result.running;
+  const address = result.address;
+  const auth = result.authEnabled === undefined ? undefined : (result.authEnabled ? '认证开启' : '认证关闭');
+  const detail = [address, result.pid === undefined ? undefined : `pid ${result.pid}`, auth]
+    .filter(Boolean).join(' · ');
+
+  if (result.action === 'status') {
+    if (running) {
+      ui.status('ok', '守护进程正在运行', detail || undefined);
+      if (result.logFile) ui.hint(`日志：${result.logFile}`);
+      if (address) ui.hint(`在浏览器打开：${address}`);
+    } else {
+      ui.status('info', '守护进程未运行');
+      ui.hint('启动它：');
+      ui.command('dockmux start');
+    }
+    return;
+  }
+
+  // stop：没在跑也算达成目标，用 ok/info 区分「这次真停了」和「本来就没跑」。
+  if (result.action === 'stop') {
+    if ('ok' in result && !result.ok) {
+      ui.status('fail', '停止失败', result.error);
+      ui.hint('确认进程归属后手工处理，或查看日志：');
+      if (result.logFile) ui.command(`tail -n 50 ${result.logFile}`);
+      return;
+    }
+    ui.status(result.state === 'not-running' ? 'info' : 'done',
+      result.state === 'not-running' ? '守护进程本来就没在运行' : '守护进程已停止',
+      result.pid === undefined ? undefined : `pid ${result.pid}`);
+    if (result.error) ui.hint(result.error);
+    return;
+  }
+
+  // start / restart
+  if ('ok' in result && !result.ok) {
+    if (result.state === 'already-running') {
+      // 「已经在跑」不是故障：目标状态已达成，只是这次没动它。
+      ui.status('ok', 'Dockmux 已经在运行中', result.pid === undefined ? undefined : `pid ${result.pid}`);
+      ui.hint('要让新的启动参数生效，重启它：');
+      ui.command('dockmux restart');
+      ui.hint('验证：dockmux status');
+      return;
+    }
+    ui.status('fail', result.action === 'restart' ? '重启失败' : '启动失败', result.error);
+    ui.hint('多数情况是端口被占用或配置有误，先跑一次体检：');
+    ui.command('dockmux doctor');
+    if (result.logFile) ui.hint(`完整日志：${result.logFile}`);
+    return;
+  }
+  ui.status('done', result.action === 'restart' ? '守护进程已重启' : '守护进程已启动', detail || undefined);
+  if (address) ui.hint(`在浏览器打开：${address}`);
+  if (result.logFile) ui.hint(`日志：${result.logFile}`);
+  if (result.error) ui.status('warn', result.error);
+  ui.hint('验证：dockmux status');
+}
+
 async function main() {
   const acpkArgs = acpkPassThroughArgs(process.argv);
   if (acpkArgs) {
     process.exitCode = await runAcpk(acpkArgs);
     return;
-  }
+  }  // 开机项里要写的是「真实的 CLI 入口」。用 import.meta.url 解析到当前正在执行的
+  // dist/cli.js，而不是拼 pkgRoot/dist/cli.js——后者在打包成单文件二进制时会指向
+  // 一个进程外不存在的虚拟路径，导致开机项静默失效（botmux 踩过这个坑）。
+  const autostartOptions = () => ({ cliPath: fileURLToPath(import.meta.url) });
   const output = (result: unknown) => process.stdout.write(`${JSON.stringify({ ok: true, ...result as object })}\n`);
   const daemonServe: (options: CliOptions, onReady?: () => void) => Promise<void> = (options, onReady) => serve(options, onReady);
   const withSecretContext = async <T>(database: string | undefined, work: (context: SecretCliContext) => Promise<T>): Promise<T> => {
@@ -107,21 +189,74 @@ async function main() {
   };
   const program = createCliProgram(packageJson.version, {
     serve,
+    setup: async options => {
+      const result = await runSetup(options);
+      // setup 自己负责全部输出（人读或 --json 单行），这里只把成败映射到退出码。
+      if (!result.ok) process.exitCode = 1;
+    },
+    doctor: async options => {
+      const report = await runDoctor(options);
+      // 有任何一项 fail 才算体检失败；仅有警告仍然是 0。
+      if (!report.ok) process.exitCode = 1;
+    },
+    autostartEnable: async () => {
+      const ui = createCliUi();
+      const result = await autostartEnable(autostartOptions());
+      ui.status(result.changed ? 'done' : 'ok', result.changed ? '已注册开机自启' : '开机自启已是目标状态',
+        result.state.unitPath);
+      for (const notice of result.notices) ui.hint(notice);
+    },
+    autostartDisable: async () => {
+      const ui = createCliUi();
+      const result = await autostartDisable(autostartOptions());
+      ui.status(result.changed ? 'done' : 'ok', result.changed ? '已移除开机自启' : '开机自启本来就未启用');
+      for (const notice of result.notices) ui.hint(notice);
+    },
+    autostartStatus: async options => {
+      const result = await autostartStatus(autostartOptions());
+      if (options.json === true) {
+        process.stdout.write(`${JSON.stringify({ ok: true, ...result })}\n`);
+        return;
+      }
+      const ui = createCliUi();
+      if (!result.state.supported) {
+        ui.status('info', '当前平台不支持开机自启', result.state.platform);
+      } else {
+        ui.status(result.state.enabled ? 'ok' : 'info', result.state.enabled ? '开机自启已启用' : '开机自启未启用',
+          result.state.unitPath);
+        // running 为 undefined 表示「无法确定」，不能当成「没在跑」——状态不能撒谎。
+        if (result.state.running !== undefined) {
+          ui.status(result.state.running ? 'ok' : 'info', result.state.running ? '服务已加载' : '服务当前未加载');
+        }
+        if (result.state.stale === true) {
+          ui.status('warn', '开机项内容与当前启动路径不一致');
+          ui.hint('重新注册以修复（nvm 切换或 npm 升级后会发生）：');
+          ui.command('dockmux autostart enable');
+        }
+      }
+      for (const notice of result.notices) ui.hint(notice);
+    },
     daemonStart: async options => {
       const result = await daemonStart(options, { serve: daemonServe });
-      process.stdout.write(`${JSON.stringify(result)}\n`);
+      renderDaemonResult(result, options.json === true);
+      // 起不来必须是非零退出码：脚本里 `dockmux start && curl ...` 才不会踩空。
+      // 「已经在运行」不算失败：目标状态已达成。
+      if (!result.ok && result.state !== 'already-running') process.exitCode = 1;
     },
-    daemonStop: async () => {
+    daemonStop: async options => {
       const result = await daemonStop();
-      process.stdout.write(`${JSON.stringify(result)}\n`);
+      renderDaemonResult(result, options.json === true);
+      if (!result.ok) process.exitCode = 1;
     },
     daemonRestart: async options => {
       const result = await daemonRestart(options, { serve: daemonServe });
-      process.stdout.write(`${JSON.stringify(result)}\n`);
+      renderDaemonResult(result, options.json === true);
+      if (!result.ok) process.exitCode = 1;
     },
-    daemonStatus: () => {
+    daemonStatus: options => {
       const status = daemonStatus();
-      process.stdout.write(`${JSON.stringify({ ok: true, action: 'status', ...status })}\n`);
+      renderDaemonResult({ action: 'status', ...status }, options.json === true);
+      // status 是查询命令：不在运行不是「命令失败」，退出码保持 0。
     },
     update: async options => {
       output(await updateDockmux(packageJson.version, options, {
@@ -185,6 +320,15 @@ try {
     process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   }
   else if (error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
+  // setup 的三类错误自带中文说明和「该补哪个 flag」，直接原样呈现，不要压成 JSON 或堆栈。
+  else if (error instanceof PromptUnavailableError || error instanceof PromptAbortedError || error instanceof InvalidWorkingDirectoryError) {
+    process.stderr.write(`${error.message}\n`);
+  }
+  // autostart 明确拒绝不支持的平台/不可用的 systemd，并带上可执行的兜底建议。
+  else if (error instanceof AutostartError) {
+    process.stderr.write(`${error.message}\n`);
+    for (const notice of error.notices) process.stderr.write(`  ${notice}\n`);
+  }
   else process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   // relay 的 CLI 错误自带退出码契约（2 用法 / 3 通道不可用），不能一律压成 1
   process.exit(error instanceof RelayCliError ? error.exitCode : 1);

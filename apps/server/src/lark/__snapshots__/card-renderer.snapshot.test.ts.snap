@@ -199,6 +199,7 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
                     "value": {
                       "action": "interrupt",
                       "task_id": "task-running",
+                      "turn": "0",
                     },
                   },
                 ],
@@ -463,6 +464,7 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
                     "value": {
                       "action": "interrupt",
                       "task_id": "task-approval",
+                      "turn": "0",
                     },
                   },
                 ],

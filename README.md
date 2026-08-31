@@ -16,14 +16,57 @@ Dockmux 是本地优先的 Agent 工程工作台。你从 Web 或飞书下达工
 - **有界历史与实时增量**：Web 首屏只读取最近 200 个事件，按游标加载更早记录，并将本地渲染窗口限制在 800 个事件；SSE 使用严格递增的 `sequence` 补齐断线期间的事件。
 - **安全姿态明确**：Agent 默认使用 `ask`，`full-trust` 必须显式配置。远程浏览器通过 HttpOnly、SameSite Cookie 登录；浏览器登录流程不会把访问令牌写进 URL 或前端存储。
 - **ACP 与真实 CLI**：优先使用固定版本的 `acpx@0.13.0` 接入 ACP Agent，也可通过 PTY 适配器连接已安装的 CLI。Dockmux 只展示本机实际可用的 Agent 和版本。
+- **一条命令完成上手**：`dockmux setup` 引导式配置（含飞书机器人自动接入），`dockmux doctor` 体检并给出可执行的补救命令，`dockmux autostart` 管理开机自启。三者都支持 `--json` 供脚本消费。
 
 ## 快速开始
 
 环境要求：Node.js 22.12+、pnpm 11。要使用的 Agent CLI 需已在本机安装并完成供应商认证。
 
+全局安装后，一条命令完成引导：
+
+```bash
+pnpm add -g dockmux
+dockmux setup
+dockmux start
+```
+
+`dockmux setup` 是引导式向导：探测本机已安装的 Agent CLI → 选定并校验默认工作目录
+→ 可选绑定飞书机器人（自动配置权限、事件、回调并提交版本）→ 写入配置 → 打印下一步。
+
+向导幂等可重跑：检测到已有配置时逐项询问「保留或更新」，配置无变化就报告无需改动。
+中途取消或失败不会留下半份配置，并会打印一条算好的续跑命令。它只改自己管理的键，
+不会动你手写的注释和其他变量。
+
+CI / 脚本里用字段 flag，不要给交互式提问喂管道输入（加一个问题就会错位）：
+
+```bash
+dockmux setup --cwd /path/to/project --port 4310 --skip-lark --yes
+dockmux setup --json --cwd /path/to/project --skip-lark --yes   # 单行 JSON，机密已掩码
+```
+
+`--json` 是行为契约而非格式化开关：它隐含「绝不提问、绝不渲染二维码」，无法继续时
+会直接返回并指出该补哪个 flag。
+
+配好之后体检本机环境与配置：
+
+```bash
+dockmux doctor          # 每一项失败都会给出具体的补救命令
+dockmux doctor --json   # 机器可读
+```
+
+开机自启（macOS 用 launchd，Linux 用 systemd --user）：
+
+```bash
+dockmux autostart enable   # 只注册开机项，不会立即启动；立即启动用 dockmux start
+dockmux autostart status
+dockmux autostart disable  # 只移除开机项，运行中的服务不受影响
+```
+
+### 从源码开发
+
 ```bash
 pnpm install
-cp .env.example .env
+cp .env.example .env   # 或直接跑 dockmux setup
 pnpm dev
 ```
 
@@ -41,10 +84,9 @@ pnpm build
 pnpm server
 ```
 
-全局安装后可以直接运行：
+也可以直接用参数启动，跳过配置文件：
 
 ```bash
-pnpm add -g dockmux
 dockmux --cwd /path/to/project --port 4310
 ```
 
@@ -69,6 +111,18 @@ dockmux update
 ```
 
 daemon 的数据库、PID、状态和日志位于启动根目录的 `.dockmux/`。服务会记住第一次启动的根目录，后续管理命令不会静默创建第二套配置。收到退出信号时，Dockmux 会关闭 Agent、SSE、终端连接和 SQLite；空闲 Driver 默认在 6 小时后释放，任务历史仍会保留。
+
+启动异常时先跑 `dockmux doctor`：它会检查 Node 版本、daemon 存活与端口、数据库可达性、`.dockmux/` 权限、已安装 Agent、飞书配置与监听、端口占用和远程访问姿态，每一项失败都会给出具体的补救命令。注意 `status` 记录的 PID 已消失时，doctor 会如实报告为「记录残留」，而不是复述过期记录。
+
+让服务开机自启（`enable` 只注册开机项，不会立即启动；`disable` 也不会停掉正在运行的服务）：
+
+```bash
+dockmux autostart enable
+dockmux autostart status
+dockmux autostart disable
+```
+
+macOS 使用 launchd（`~/Library/LaunchAgents/com.dockmux.server.plist`），Linux 使用 systemd --user（`~/.config/systemd/user/dockmux.service`），其他平台会明确拒绝而不是静默无操作。Linux 上如果没开 linger，注销会杀掉服务，`enable` 会提示对应的 `loginctl enable-linger` 命令。nvm 切换或 npm 升级导致启动路径变化时，重跑 `enable` 会重写开机项。
 
 ## Web 工作台
 
@@ -153,10 +207,30 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 
 ### 接入机器人
 
+最快路径是 CLI 向导，它驱动的是与 Web 相同的自动配置能力：
+
+```bash
+dockmux setup --lark-app-id cli_xxx
+dockmux setup --lark-app-id cli_xxx --force-login   # 换开放平台账号
+```
+
+向导会在终端渲染开放平台登录二维码（复用本机私密登录态时不需要扫码），在动手改动前
+先显示即将写入的账号与企业名称并要求确认，然后逐项如实汇报权限、机器人、长连接、事件、
+回调、版本与发布的结果——已经满足的项报「已配置」，本次真正改动的才报「已完成」。
+
+发布版本是对外且不可撤销的动作，因此必须显式确认；非交互环境下只有 `--yes` 能放行。
+注意向导只配置既有应用、不会创建应用，失败时可直接重跑同一条命令。
+
+也可以走 Web 路径：
+
 1. 在飞书开放平台创建企业自建应用，取得 App ID 与 App Secret。
 2. 在 Web 的“飞书指挥台”填写 App ID，点击“自动配置”。Dockmux 会复用本机私密登录态；没有可用登录态时显示飞书二维码。
 3. 自动配置会增量导入 Dockmux 需要的 16 项消息、群聊、附件与联系人权限，启用机器人，设置长连接 `im.message.receive_v1` 与 `card.action.trigger`，回读验证后发布新版本。存量应用的可见范围会在发版前完整读回并原样保留；无法确认时停止发版。
 4. 填写 App Secret、工作区与 Agent，明确确认无人值守 `full-trust` 后启用监听，并把机器人加入目标群。
+
+无论走哪条路径，App Secret 都属于机密，应使用 `dockmux secret set` 从隐藏输入或
+`--value-fd` 录入，向导和 CLI 都不会回显或记录它。用 `dockmux doctor` 可以确认飞书
+配置是否完整、监听是否可能生效。
 
 自动配置不是保存门禁，也不会申请用户身份发消息权限；需要时仍可在开发者后台手动配置。开放平台 Cookie 只写入本机 `~/.dockmux/feishu-open-platform-session.json`（私有权限），不会返回浏览器、进入日志或交给 Agent。
 

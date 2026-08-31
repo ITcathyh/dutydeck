@@ -46,10 +46,10 @@ const CodeBlock = memo(function CodeBlock({ code, className }: { code: string; c
       resetTimer.current = setTimeout(() => setCopied(false), 1_500);
     } catch { setCopied(false); }
   };
-  return <div className="code-renderer group/code my-4 overflow-hidden rounded-xl border border-zinc-700/70 bg-[#18191d] shadow-[0_8px_24px_rgba(24,24,27,.12)] [contain:layout_paint]">
-    <div className="flex h-9 items-center border-b border-white/[.07] bg-white/[.025] px-3 text-[10px] text-zinc-400">
+  return <div className="code-renderer group/code my-4 overflow-hidden rounded-xl border border-[var(--code-border)] bg-[var(--code-surface)] shadow-[var(--shadow-panel)] [contain:layout_paint]">
+    <div className="flex h-9 items-center border-b border-white/[.07] bg-white/[.025] px-3 text-[10px] text-[var(--code-header-text)]">
       <span className="font-mono tracking-wide">{label}</span>
-      <button type="button" onClick={() => void copy()} className="ml-auto flex h-7 items-center gap-1.5 rounded-md px-2 font-medium text-zinc-400 transition-colors hover:bg-white/[.07] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-zinc-500" aria-label={copied ? '代码已复制' : '复制代码'}>
+      <button type="button" onClick={() => void copy()} className="ml-auto flex h-7 items-center gap-1.5 rounded-md px-2 font-medium text-[var(--code-header-text)] transition-colors hover:bg-white/[.07] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--code-header-text)]" aria-label={copied ? '代码已复制' : '复制代码'}>
         {copied ? <Check size={12}/> : <Copy size={12}/>}<span>{copied ? '已复制' : '复制'}</span>
       </button>
     </div>
@@ -62,7 +62,7 @@ const CodeBlock = memo(function CodeBlock({ code, className }: { code: string; c
 const markdownComponents: Components = {
   code({ className, children }) {
     if (isBlockCode(className, children)) return <CodeBlock className={className} code={String(children).replace(/\n$/, '')}/>;
-    return <code className="rounded-[.3rem] bg-zinc-100 px-[.32rem] py-[.12rem] font-mono text-[.86em] text-zinc-800 ring-1 ring-inset ring-zinc-200">{children}</code>;
+    return <code className="rounded-[.3rem] bg-[var(--code-inline-bg)] px-[.32rem] py-[.12rem] font-mono text-[.86em] text-[var(--code-inline-text)] ring-1 ring-inset ring-[var(--code-inline-border)]">{children}</code>;
   },
   pre({ children }) { return <>{children}</>; }
 };

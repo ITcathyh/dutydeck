@@ -1,0 +1,308 @@
+// 飞书进度卡操作按钮的唯一事实源。
+//
+// 为什么要独立成一个模块：渲染端（buildLarkCard）和回调端（coordinator.handleAction）
+// 必须共用同一张能力表。历史事故是两端各自硬编码——渲染端按某个 CLI 的能力发按钮，
+// 回调端却在另一个 CLI 上无法执行，于是用户看到一整排点了没反应的「死按钮」。
+// 本模块把「此刻哪个操作可用」收敛成 isLarkCardActionAvailable 一个判断，
+// buildLarkCardActions 只是它的渲染投影，两端不可能给出不同答案。
+//
+// 本模块必须保持纯函数、无副作用、不发网络请求，也不 import service.ts / card-renderer.ts：
+// service.ts 会 import 本模块，而 card-renderer.ts 又 import service.ts，
+// 引用它们任何一个都会形成 import 环。
+//
+// 关于脱敏：本模块所有按钮文案都是静态常量，唯一的动态入参是 taskId（飞书 message_id）
+// 和 webUrl（来自 StoredLarkConfig.webBaseUrl），都不是 Agent / 工具输出，
+// 因此不需要 redactTraceText / redactTraceValue。反过来说这也是一条约束：
+// 任何时候都不要把 Agent 输出、工具参数或错误原文塞进按钮 label 或 callback value。
+
+/** 与 card-renderer.ts 的 LarkCardElement 结构一致，这里本地定义以避免 import 环。 */
+export type LarkCardElement = Record<string, any>;
+
+/** 回调型操作。查看详情是 open_url 链接按钮，不是回调，故不在此列。 */
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh';
+
+/** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
+export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted';
+
+/**
+ * 能力必须由调用方显式传入，不能在本模块内猜。
+ * 「猜」正是死按钮的根因：runtime 是否实现 cancelQueued、task 有没有 sessionId、
+ * handleAction 有没有接 refresh 分支，只有调用方知道。任一能力为 false 时，
+ * 本模块选择不渲染按钮，而不是渲染一个注定失败的按钮。
+ */
+export interface LarkCardCapabilities {
+  /** runtime.cancelQueued 存在，且 task 同时具备 sessionId + runtimeTaskId。 */
+  canCancelQueued: boolean;
+  /** runtime.interrupt 存在，且 task 已有 sessionId。 */
+  canInterrupt: boolean;
+  canRetry: boolean;
+  /** handleAction 已支持 refresh，且该任务仍持有 requestUpdate 心跳句柄。 */
+  canRefresh: boolean;
+  /** 已解析好的深链，仅在配置了 webBaseUrl 时提供。 */
+  webUrl?: string;
+}
+
+export interface LarkCardActionContext {
+  state: LarkCardActionState;
+  taskId: string;
+  turn: number;
+  /** 冻结收据：终态卡片转为只读，绝不提供任何操作。 */
+  readOnly?: boolean;
+  retryable?: boolean;
+  capabilities: LarkCardCapabilities;
+}
+
+/** 回调 value 一律是字符串字段，解析结果才转回数字。 */
+export interface LarkCardActionValue {
+  action: LarkCardActionName;
+  taskId: string;
+  turn?: number;
+}
+
+/**
+ * 元素预算：飞书整卡上限约 24KB / 180 个组件。
+ * 一个按钮记 2 个组件（button 自身 + text.plain_text），
+ * 因此操作区最多 4 个按钮 = 8 个组件、数百字节，不可能压爆预算。
+ */
+export const larkCardActionBudget = { maxButtons: 4, componentsPerButton: 2 } as const;
+
+/** taskId 上限：om_* 消息 ID 约 50 字符；超长说明上游有 bug，拒绝渲染回调按钮以保护 value 体积。 */
+const maxTaskIdLength = 256;
+const maxWebUrlLength = 512;
+
+type LarkCardActionDefinition = {
+  action: LarkCardActionName;
+  /** 复用既有 element_id，保证历史测试与快照的定位方式不变。 */
+  elementId: string;
+  /** 按钮文案。飞书按钮列很窄，长文案会折行，所以短标签 + hint 分工。 */
+  label: string;
+  /** 「动作 + 对象 + 预期结果」的完整说明，供卡片用 markdown 补充（schema 2.0 拒绝 note 标签，ErrCode 200861）。 */
+  hint: string;
+  buttonType: 'default' | 'primary' | 'danger';
+  /** 允许该操作的状态集合。 */
+  states: readonly LarkCardActionState[];
+  capable: (capabilities: LarkCardCapabilities) => boolean;
+  /** 状态与能力之外的附加约束（例如 retryable === false 的任务不给重试）。 */
+  guard?: (context: LarkCardActionContext) => boolean;
+  /** 是否为该状态的唯一主操作；主操作排在最前，视觉上最突出。 */
+  primary: boolean;
+};
+
+/**
+ * 唯一的操作定义表。渲染与鉴权都只读这张表，因此两端不可能出现权限差。
+ *
+ * 状态收敛（一个状态一个主要下一步）：
+ *   queued        → 取消
+ *   running       → 中断
+ *   interrupting  → 无主操作（停止请求已在途，见下方说明）
+ *   completed     → 无主操作（结果已作为 fresh final 送达，验收在 Web）
+ *   failed        → 重试
+ *   interrupted   → 重试
+ *
+ * interrupting 为什么不给「中断」：该状态表示停止请求已经发出并在等待 runtime 回应。
+ * 当前 coordinator.handleAction 的 interrupt 分支要求 state === 'running'，
+ * 在 interrupting 上会直接回一个 warning toast——那正是一个死按钮。
+ * 逃生通道由「刷新」承担：用户可以立刻拉取停止是否已生效，
+ * 而不必销毁会话。若日后 handleAction 允许对 interrupting 幂等地重复中断，
+ * 只需把下面 interrupt 的 states 加上 'interrupting'，两端会同时生效。
+ */
+const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
+  {
+    action: 'cancel',
+    elementId: 'cancel',
+    label: '取消',
+    hint: '取消排队任务，Agent 不会开始执行',
+    buttonType: 'default',
+    states: ['queued'],
+    capable: capabilities => capabilities.canCancelQueued,
+    primary: true
+  },
+  {
+    action: 'interrupt',
+    elementId: 'interrupt',
+    label: '中断',
+    hint: '中断当前执行，已完成的步骤会保留',
+    buttonType: 'danger',
+    states: ['running'],
+    capable: capabilities => capabilities.canInterrupt,
+    primary: true
+  },
+  {
+    action: 'retry',
+    elementId: 'retry',
+    label: '重试',
+    hint: '查看失败详情，修正后重新运行',
+    buttonType: 'primary',
+    states: ['failed', 'interrupted'],
+    capable: capabilities => capabilities.canRetry,
+    // 明确标记为不可重试的任务（例如配置错误、权限不足）不提供重试入口。
+    guard: context => context.retryable !== false,
+    primary: false
+  },
+  {
+    action: 'refresh',
+    elementId: 'refresh',
+    label: '刷新',
+    hint: '立即拉取任务最新状态，卡片心跳受频率限制可能滞后',
+    buttonType: 'default',
+    // 只在非终态提供：终态已经收敛，刷新不会带来新信息。
+    states: ['queued', 'running', 'interrupting'],
+    capable: capabilities => capabilities.canRefresh,
+    primary: false
+  }
+] as const;
+
+const definitionFor = (action: LarkCardActionName) =>
+  larkCardActionDefinitions.find(definition => definition.action === action);
+
+const normalizedTaskId = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const resolved = value.trim();
+  if (!resolved || resolved.length > maxTaskIdLength) return undefined;
+  return resolved;
+};
+
+/** turn 归一化为非负整数；非法值按第 0 轮处理，避免因为轮次脏数据丢掉整个操作。 */
+const normalizedTurn = (value: number): number => {
+  if (!Number.isFinite(value) || value < 0) return 0;
+  return Math.floor(value);
+};
+
+/** 只接受 http/https 深链，防止把 javascript: 之类的 URL 渲染成可点按钮。 */
+const normalizedWebUrl = (value: string | undefined): string | undefined => {
+  const resolved = value?.trim();
+  if (!resolved || resolved.length > maxWebUrlLength) return undefined;
+  try {
+    const parsed = new URL(resolved);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? resolved : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * 鉴权侧入口：回调到达时判断该操作在当前上下文是否合法。
+ * 渲染侧共用同一函数，因此「界面上出现的按钮」与「后端接受的回调」严格等价。
+ */
+export function isLarkCardActionAvailable(action: LarkCardActionName, context: LarkCardActionContext): boolean {
+  // 只读收据不接受任何操作：卡片一旦冻结就是历史凭证，
+  // 在上面执行操作等于改写已经交付给用户的结论。
+  if (context.readOnly) return false;
+  // 没有可用 taskId 时任何回调都无法被 coordinator 定位到任务，等于死按钮。
+  if (!normalizedTaskId(context.taskId)) return false;
+  const definition = definitionFor(action);
+  if (!definition) return false;
+  if (!definition.states.includes(context.state)) return false;
+  if (!definition.capable(context.capabilities)) return false;
+  return definition.guard ? definition.guard(context) : true;
+}
+
+/** 当前状态下可用的回调操作，按主操作优先排序。 */
+export function availableLarkCardActions(context: LarkCardActionContext): LarkCardActionName[] {
+  return larkCardActionDefinitions
+    .filter(definition => isLarkCardActionAvailable(definition.action, context))
+    .sort((left, right) => Number(right.primary) - Number(left.primary))
+    .map(definition => definition.action);
+}
+
+/** 供卡片正文补充「动作 + 对象 + 预期结果」的完整说明，禁止只靠颜色或短标签表意。 */
+export function larkCardActionHint(action: LarkCardActionName): string | undefined {
+  return definitionFor(action)?.hint;
+}
+
+/**
+ * callback value 一律使用字符串字段。
+ * 原因有两条：飞书只能稳定保留 value 对象里的字符串（数字/布尔可能被吞或被改写类型）；
+ * 更重要的是 value 必须自带状态——daemon 重启后内存里的任务上下文全丢了，
+ * 只有 value 里的 action / task_id / turn 能让重启后的进程独立解释这次点击，
+ * 从而让操作在重启前后保持幂等。
+ */
+const callbackValue = (action: LarkCardActionName, taskId: string, turn: number) => ({
+  action,
+  task_id: taskId,
+  turn: String(turn)
+});
+
+const callbackButton = (definition: LarkCardActionDefinition, taskId: string, turn: number): LarkCardElement => ({
+  tag: 'button',
+  text: { tag: 'plain_text', content: definition.label },
+  type: definition.buttonType,
+  size: 'small',
+  behaviors: [{ type: 'callback', value: callbackValue(definition.action, taskId, turn) }],
+  margin: '0px',
+  element_id: definition.elementId
+});
+
+/** 查看详情是真实的 open_url 链接按钮而不是回调：它不需要 daemon 参与，也不会因任务过期而失效。 */
+const detailButton = (webUrl: string): LarkCardElement => ({
+  tag: 'button',
+  text: { tag: 'plain_text', content: '查看详情' },
+  type: 'default',
+  size: 'small',
+  behaviors: [{ type: 'open_url', default_url: webUrl }],
+  margin: '0px',
+  element_id: 'view_detail'
+});
+
+/**
+ * 渲染侧入口：返回当前状态下应该出现的按钮，没有可用操作时返回空数组。
+ *
+ * 只读卡片返回空数组是硬规则：终态进度卡是冻结收据，
+ * 提供任何按钮都会变成「假操作」——点了要么被拒绝，要么改写已交付的结论。
+ * 收据仍可通过卡片页脚的 [查看详情] markdown 链接进入 Web，不会失去出口。
+ *
+ * 注意：这里返回的是扁平按钮列表，不含 column_set 包装，
+ * 由调用方决定放进状态行的哪一列（多按钮时需要放宽既有的 72px 列宽）。
+ */
+export function buildLarkCardActions(context: LarkCardActionContext): LarkCardElement[] {
+  if (context.readOnly) return [];
+  const taskId = normalizedTaskId(context.taskId);
+  const turn = normalizedTurn(context.turn);
+  const elements: LarkCardElement[] = [];
+  if (taskId) {
+    for (const action of availableLarkCardActions(context)) {
+      const definition = definitionFor(action);
+      if (definition) elements.push(callbackButton(definition, taskId, turn));
+    }
+  }
+  // 链接按钮不依赖 taskId，也不消耗回调链路，只要配置了 Web 深链就值得给。
+  const webUrl = normalizedWebUrl(context.capabilities.webUrl);
+  if (webUrl) elements.push(detailButton(webUrl));
+  // 预算兜底：正常路径最多 3 个按钮，这里的截断是防御性上限。
+  return elements.slice(0, larkCardActionBudget.maxButtons);
+}
+
+/**
+ * 解析回调 value。宽进严出：
+ * - 接受 JSON 字符串和对象（listener 直接透传 event.action.value，两种形态都出现过）
+ * - 兼容线上遗留形态 {action, task_id}（不带 turn）：已经发给用户的老卡片必须继续可用
+ * - 同时接受 task_id 与 taskId 两种键名
+ * - 任何畸形输入返回 undefined，绝不抛异常（回调路径抛异常会让用户只看到一个失败 toast）
+ */
+export function parseLarkCardActionValue(value: unknown): LarkCardActionValue | undefined {
+  let parsed: unknown = value;
+  if (typeof parsed === 'string') {
+    const text = parsed.trim();
+    if (!text) return undefined;
+    try { parsed = JSON.parse(text); } catch { return undefined; }
+  }
+  // 数组也是 object，必须显式排除，否则 ['cancel'] 之类的输入会走到属性读取。
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  const action = typeof record.action === 'string' ? record.action.trim() : '';
+  const definition = larkCardActionDefinitions.find(item => item.action === action);
+  if (!definition) return undefined;
+  const taskId = normalizedTaskId(record.task_id) ?? normalizedTaskId(record.taskId);
+  if (!taskId) return undefined;
+  // turn 是字符串写入的，这里转回数字；遗留卡片没有 turn，保持 undefined 由调用方决定是否校验轮次。
+  const rawTurn = record.turn;
+  const turnNumber = typeof rawTurn === 'string' && rawTurn.trim()
+    ? Number(rawTurn)
+    : typeof rawTurn === 'number'
+      ? rawTurn
+      : undefined;
+  const turn = turnNumber !== undefined && Number.isFinite(turnNumber) && turnNumber >= 0
+    ? Math.floor(turnNumber)
+    : undefined;
+  return { action: definition.action, taskId, ...(turn === undefined ? {} : { turn }) };
+}

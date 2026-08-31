@@ -17,6 +17,8 @@ export interface CliOptions {
   larkAgentName?: string;
   larkBaseUrl?: string;
   larkListen?: boolean;
+  /** `--json`：把结果打成单行 JSON，供脚本消费。 */
+  json?: boolean;
 }
 
 export interface LarkCliOptions {
@@ -75,6 +77,21 @@ export interface BotmuxArchiveCliOptions extends BotmuxSourceCliOptions {
   passphraseFd?: string;
 }
 
+export interface SetupCliProgramOptions {
+  yes?: boolean;
+  json?: boolean;
+  cwd?: string;
+  port?: string;
+  localOnly?: boolean;
+  larkAppId?: string;
+  skipLark?: boolean;
+  forceLogin?: boolean;
+}
+
+export interface DoctorCliOptions {
+  json?: boolean;
+}
+
 export interface SecretValueCliOptions { valueFd?: string; database?: string }
 export interface SecretRotateCliOptions extends SecretValueCliOptions { expectedRevision: string }
 export interface SecretRemoveCliOptions { expectedRevision: string; database?: string }
@@ -82,10 +99,15 @@ export interface SecretListCliOptions { database?: string }
 
 export interface CliHandlers {
   serve?(options: CliOptions): void | Promise<void>;
+  setup?(options: SetupCliProgramOptions): void | Promise<void>;
+  doctor?(options: DoctorCliOptions): void | Promise<void>;
+  autostartEnable?(): void | Promise<void>;
+  autostartDisable?(): void | Promise<void>;
+  autostartStatus?(options: DoctorCliOptions): void | Promise<void>;
   daemonStart?(options: CliOptions): void | Promise<void>;
-  daemonStop?(): void | Promise<void>;
+  daemonStop?(options: DoctorCliOptions): void | Promise<void>;
   daemonRestart?(options: CliOptions): void | Promise<void>;
-  daemonStatus?(): void | Promise<void>;
+  daemonStatus?(options: DoctorCliOptions): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
   authToken?(options: AuthTokenCliOptions): void | Promise<void>;
   botmuxDiscover?(options: BotmuxSourceCliOptions): void | Promise<void>;
@@ -154,6 +176,27 @@ const addBotmuxSourceOptions = (command: Command) => command
  */
 const serverOptionsFrom = (options: CliOptions, command: Command): CliOptions => ({ ...command.optsWithGlobals(), ...options });
 
+/**
+ * setup 的选项来源同理，但只挑 setup 真正认识的键。
+ *
+ * 不能直接把 optsWithGlobals() 整个透传：根命令上还有 --host/--database/--no-auth 等
+ * 一大批 serve 专属选项，混进来会让 setup 的入参含义变得含糊。这里做显式白名单，
+ * 既拿到被父命令截获的 --cwd/--port/--local-only/--lark-app-id，又不携带无关项。
+ */
+const setupOptionsFrom = (options: SetupCliProgramOptions, command: Command): SetupCliProgramOptions => {
+  const merged = { ...command.optsWithGlobals(), ...options } as Record<string, unknown>;
+  const picked: SetupCliProgramOptions = {};
+  if (typeof merged.cwd === 'string') picked.cwd = merged.cwd;
+  if (typeof merged.port === 'string') picked.port = merged.port;
+  if (merged.localOnly === true) picked.localOnly = true;
+  if (typeof merged.larkAppId === 'string') picked.larkAppId = merged.larkAppId;
+  if (merged.yes === true) picked.yes = true;
+  if (merged.json === true) picked.json = true;
+  if (merged.skipLark === true) picked.skipLark = true;
+  if (merged.forceLogin === true) picked.forceLogin = true;
+  return picked;
+};
+
 export function createCliProgram(version: string, handlers: CliHandlers = {}) {
   const program = new Command()
     .name('dockmux')
@@ -164,6 +207,78 @@ export function createCliProgram(version: string, handlers: CliHandlers = {}) {
     .showHelpAfterError();
 
   program.action(options => handlers.serve?.(options));
+
+  // 新用户的第一条命令。放在最前面是刻意的：`dockmux --help` 第一眼就该看到它。
+  //
+  // 注意 --cwd / --port / --local-only / --lark-app-id 在根命令上也有同名同义的定义，
+  // commander 会把它们路由到定义处（即根命令），所以这里必须读合并后的 globals，
+  // 否则 `dockmux setup --cwd X` 里的 X 会落到根命令上、setup 拿到 undefined。
+  program.command('setup')
+    .description('Guided first-run setup: detect Agent CLIs, choose a working directory, optionally bind a Lark bot')
+    .option('--yes', 'Accept defaults without prompting; the only way to skip the Lark publish confirmation')
+    .option('--json', 'Emit a single JSON line and never prompt or render a QR code (secrets are masked)')
+    .option('--cwd <directory>', 'Default Agent working directory; skips that question')
+    .option('--port <port>', 'Bind port to write into the configuration (default: 4310)')
+    .option('--local-only', 'Only accept connections from this computer (127.0.0.1)')
+    .option('--lark-app-id <id>', 'Lark app ID (cli_*) to configure and bind')
+    .option('--skip-lark', 'Skip the Lark binding step entirely')
+    .option('--force-login', 'Re-scan the Lark open-platform QR code to switch accounts')
+    .action((options, command) => handlers.setup?.(setupOptionsFrom(options, command)))
+    .addHelpText('after', `
+Behaviour:
+  幂等可重跑：检测到已有配置时逐项询问「保留或更新」，配置无变化则报告无需改动。
+  中途失败或取消不会写入半份配置，并会打印一条算好的续跑命令。
+  --json 隐含「绝不提问、绝不渲染二维码」；非交互环境请用字段 flag 或 --yes。
+
+Examples:
+  $ dockmux setup
+  $ dockmux setup --cwd /path/to/project --port 4310
+  $ dockmux setup --lark-app-id cli_xxx
+  $ dockmux setup --lark-app-id cli_xxx --force-login
+  $ dockmux setup --cwd /path/to/project --skip-lark --yes
+  $ dockmux setup --json --cwd /path/to/project --skip-lark --yes`);
+
+  program.command('doctor')
+    .description('Diagnose the local environment and configuration; every failure prints a fix')
+    .option('--json', 'Emit machine-readable diagnostics as a single JSON line')
+    .action(options => handlers.doctor?.(options))
+    .addHelpText('after', `
+Exit codes:
+  0    所有检查通过（可能含警告）
+  1    至少一项检查失败
+
+Examples:
+  $ dockmux doctor
+  $ dockmux doctor --json
+  $ dockmux doctor --json | jq '.checks[] | select(.level=="fail")'`);
+
+  const autostart = program.command('autostart').description('Manage starting Dockmux automatically at login');
+  autostart.command('enable')
+    .description('Register the boot hook (launchd on macOS, systemd --user on Linux); does not start the server now')
+    .action(() => handlers.autostartEnable?.())
+    .addHelpText('after', `
+Note:
+  enable 只注册开机项，不会立即启动服务；立即启动请用 dockmux start。
+
+Examples:
+  $ dockmux autostart enable`);
+  autostart.command('disable')
+    .description('Remove the boot hook; leaves an already-running server untouched')
+    .action(() => handlers.autostartDisable?.())
+    .addHelpText('after', `
+Note:
+  disable 只移除开机项，正在运行的服务不受影响；停止它请用 dockmux stop。
+
+Examples:
+  $ dockmux autostart disable`);
+  autostart.command('status')
+    .description('Show whether the boot hook is registered and whether the service is loaded')
+    .option('--json', 'Emit machine-readable state as a single JSON line')
+    .action(options => handlers.autostartStatus?.(options))
+    .addHelpText('after', `
+Examples:
+  $ dockmux autostart status
+  $ dockmux autostart status --json`);
 
   const lark = program.command('lark').description('Send and update Dockmux Lark cards');
   addCardOptions(lark.command('send')
@@ -306,16 +421,20 @@ Examples:
   const addProcessCommands = (parent: Command) => {
     parent.command('start')
       .description('Start the Dockmux server in the background')
+      .option('--json', 'Print the result as a single line of JSON')
       .action((options, command) => handlers.daemonStart?.(serverOptionsFrom(options, command)));
     parent.command('stop')
       .description('Stop the background Dockmux server')
-      .action(() => handlers.daemonStop?.());
+      .option('--json', 'Print the result as a single line of JSON')
+      .action(options => handlers.daemonStop?.(options));
     parent.command('restart')
       .description('Restart the background Dockmux server')
+      .option('--json', 'Print the result as a single line of JSON')
       .action((options, command) => handlers.daemonRestart?.(serverOptionsFrom(options, command)));
     parent.command('status')
       .description('Show whether the background Dockmux server is running')
-      .action(() => handlers.daemonStatus?.());
+      .option('--json', 'Print the result as a single line of JSON')
+      .action(options => handlers.daemonStatus?.(options));
   };
 
   // Both the top-level `dockmux start/stop/restart/status` (no prefix) and the
@@ -326,6 +445,11 @@ Examples:
 
   return program
     .addHelpText('after', `
+Getting started:
+  $ dockmux setup
+  $ dockmux doctor
+  $ dockmux autostart enable
+
 Examples:
   $ dockmux
   $ dockmux --local-only
