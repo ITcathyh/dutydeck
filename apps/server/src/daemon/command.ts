@@ -3,15 +3,18 @@ import {
   clearState,
   daemonPaths,
   daemonize,
+  daemonLogSize,
   defaultDaemonDir,
   isDaemonChild,
   pidAlive,
   pidFromState,
   readDaemonStatus,
   resolveDaemonDir,
+  tailDaemonLog,
   writeLastDaemonDir,
   writePidFile,
   writeState,
+  type DaemonChildHandle,
   type DaemonState
 } from './daemon.js';
 import type { CliOptions } from '../cli-program.js';
@@ -112,19 +115,43 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
 
   const startedAt = new Date().toISOString();
   clearState(dir);
-  daemonize({ cwd, startedAt, env });
-
-  // daemonize-process exits the parent, but poll readiness in case it returns.
-  return waitUntilReady(dir, startedAt);
+  // 先记下日志长度，失败时只回放这次启动新写入的行（日志是 append 的）。
+  const logOffset = daemonLogSize(dir);
+  const child = daemonize({ cwd, startedAt, env });
+  return await waitUntilReady(dir, startedAt, child, logOffset);
 }
 
-async function waitUntilReady(dir: string, startedAt: string): Promise<DaemonCommandResult> {
+/**
+ * 等到子进程「就绪」或「死掉」，两者以先到者为准。
+ *
+ * 早前这里只轮询就绪标记，且父进程其实已被 daemonize-process 提前 exit(0)，于是
+ * 端口被占用这类失败完全无人报告。现在同时盯住子进程的 exit：它带非零码退出就
+ * 立即失败，并把守护日志末尾几行作为原因带回去——用户不必自己去翻日志。
+ */
+async function waitUntilReady(dir: string, startedAt: string, child?: DaemonChildHandle, logOffset = 0): Promise<DaemonCommandResult> {
+  let childExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  void child?.exited.then(result => { childExit = result; });
+
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const state = readDaemonStatus(dir);
     if (state && state.pid > 0 && pidAlive(state.pid) && state.ready) {
       const authEnabled = state.authEnabled !== false;
       return { ok: true, action: 'start', running: true, pid: state.pid, address: state.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile: daemonPaths(dir).logFile, state: 'started' };
+    }
+    // 子进程已经退出且没留下就绪状态 —— 它是起崩了，别再等满 15 秒。
+    if (childExit !== undefined) {
+      const reason = tailDaemonLog(dir, 3, logOffset);
+      const detail = reason.length > 0 ? `原因：${reason.join('；')}` : '守护日志中没有更多线索。';
+      const how = childExit.signal ? `被信号 ${childExit.signal} 终止` : `退出码 ${childExit.code ?? '未知'}`;
+      return {
+        ok: false,
+        action: 'start',
+        running: false,
+        state: 'not-running',
+        logFile: daemonPaths(dir).logFile,
+        error: `后台服务启动后立即退出（${how}）。${detail}`
+      };
     }
     await sleep(200);
   }
@@ -134,7 +161,7 @@ async function waitUntilReady(dir: string, startedAt: string): Promise<DaemonCom
     const authEnabled = state?.authEnabled !== false;
     return { ok: true, action: 'start', running: true, pid, address: state?.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile: daemonPaths(dir).logFile, state: 'started', error: 'Daemon started but did not report ready within the timeout.' };
   }
-  return { ok: false, action: 'start', running: false, state: 'not-running', error: 'Daemon failed to start within the timeout. See the log file for details.' };
+  return { ok: false, action: 'start', running: false, state: 'not-running', logFile: daemonPaths(dir).logFile, error: 'Daemon failed to start within the timeout. See the log file for details.' };
 }
 
 /** `dockmux stop`: SIGTERM the daemon and clear its state. */

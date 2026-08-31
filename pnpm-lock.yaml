@@ -77,9 +77,6 @@ importers:
       commander:
         specifier: 15.0.0
         version: 15.0.0
-      daemonize-process:
-        specifier: 4.1.1
-        version: 4.1.1
       drizzle-orm:
         specifier: 0.44.2
         version: 0.44.2(@types/better-sqlite3@9.6.0)(better-sqlite3@12.11.1)
@@ -108,6 +105,9 @@ importers:
       '@dockmux/botmux-importer':
         specifier: workspace:*
         version: link:../../packages/botmux-importer
+      '@types/better-sqlite3':
+        specifier: 9.6.0
+        version: 9.6.0
       '@types/qrcode':
         specifier: ^1.5.6
         version: 1.5.6
@@ -1625,10 +1625,6 @@ packages:
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}
-
-  daemonize-process@4.1.1:
-    resolution: {integrity: sha512-HCnsEluUmDaIrrFQ0193mV0J8xEzLTJZIZ62HxyPmMuZzlwLxl9SORAT4bvwyqqWB9vGvzUiKF0HoQigwLhMXQ==}
-    engines: {node: '>=18'}
 
   data-urls@5.0.0:
     resolution: {integrity: sha512-ZYP5VBHshaDAiVZxjbRVcFJpc+4xGgT0bK3vzy1HLN8jTO975HEbuYzZJcHoQEY5K1a0z8YayJkyVETa08eNTg==}
@@ -4359,8 +4355,6 @@ snapshots:
       rrweb-cssom: 0.8.0
 
   csstype@3.2.3: {}
-
-  daemonize-process@4.1.1: {}
 
   data-urls@5.0.0:
     dependencies:

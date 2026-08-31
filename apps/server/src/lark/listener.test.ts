@@ -157,6 +157,61 @@ describe('Lark message coordinator', () => {
     expect(runtime.start).not.toHaveBeenCalled();
   });
 
+  it('revokes the acknowledgement reaction when the turn fails before any card is delivered', async () => {
+    // reaction 只是「请求已接入」的回执。若首张卡片送达前就抛错而 reaction 仍挂在原消息上，
+    // 用户会看到「已接收」却永远等不到进度卡——正是设计契约禁止的两个竞争状态并存。
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-doomed' })),
+      // 卡片发送与回退发送双双失败：runTurn 在设置 cardMessageId 前抛出。
+      send: vi.fn(async () => { throw new Error('Feishu unavailable'); }),
+      reply: vi.fn(async () => { throw new Error('Feishu unavailable'); }),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn()
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    await coordinator.handle({ messageId: 'om_doomed', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"跑个测试"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(service.deleteReaction).toHaveBeenCalledWith('om_doomed', 'reaction-doomed'));
+  });
+
+  it('revokes the acknowledgement reaction only once across the normal and fallback paths', async () => {
+    // 幂等性：正常路径撤销后，异常兜底不得重复打 OpenAPI 删同一个 reaction。
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => { throw new Error('dispatch exploded'); }), interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-once' })),
+      send: vi.fn(async () => ({ messageId: 'om_card' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    await coordinator.handle({ messageId: 'om_once', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"跑个测试"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(service.deleteReaction).toHaveBeenCalledWith('om_once', 'reaction-once'));
+    expect(service.deleteReaction).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not let a failed reaction revocation block task execution', async () => {
+    // reaction 失败必须只进日志、不改变任务推进。
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const warn = vi.fn();
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-flaky' })),
+      send: vi.fn(async () => ({ messageId: 'om_card' })),
+      deleteReaction: vi.fn(async () => { throw new Error('reaction already removed'); }),
+      update: vi.fn(async () => ({ messageId: 'om_card' }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn, error: vi.fn() }, Math.random, 'ou_bot');
+    await coordinator.handle({ messageId: 'om_flaky', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"跑个测试"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ reactionId: 'reaction-flaky' }), '撤销飞书确认表情失败');
+  });
+
   it('uses empty-message context only to resolve references and requires confirmation before side effects', async () => {
     const runtime = {
       start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
@@ -177,6 +232,192 @@ describe('Lark message coordinator', () => {
     expect(contextualPrompt).toContain('把这个目录删掉');
     expect(contextualPrompt).toContain('必须先复述你对用户意图的理解并询问确认');
     expect(contextualPrompt).toContain('不得执行命令、写入文件、发送消息或触发其他副作用');
+  });
+
+  it('refreshes a running card on demand and reports a concrete failure when the refresh cannot land', async () => {
+    // 卡片心跳受频率限制（含 per-app 限流），用户看到的可能是滞后画面。
+    // 刷新强制重绘当前状态，不改变任务状态机。
+    let finish!: () => void;
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(() => new Promise<void>(resolve => { finish = resolve; })), interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
+      send: vi.fn(async () => ({ messageId: 'om_card' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    coordinator.handle({ messageId: 'om_refresh', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+
+    await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_refresh' })).resolves.toEqual({ type: 'success', content: '已拉取最新状态' });
+    // 刷新只重绘运行态，绝不把任务推进到终态。
+    expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'completed' }));
+    finish();
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ state: 'completed' })));
+
+    // 轮次结束后 requestUpdate 已清空：刷新必须诚实地说不可用，而不是假装成功。
+    await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_refresh' }))
+      .resolves.toEqual({ type: 'warning', content: '当前状态无法刷新，任务已结束或心跳已停止' });
+  });
+
+  it('does not offer cancel on a queued card before a runtime task id exists, and offers it once queued', async () => {
+    // 死按钮防线：runtimeTaskId 未分配时 cancelQueued 必然失败，此时不得渲染取消按钮。
+    let releaseDispatch!: (value: any) => void;
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}),
+      dispatch: vi.fn(() => new Promise(resolve => { releaseDispatch = resolve; })),
+      cancelQueued: vi.fn(async () => {}), getEvents: vi.fn(async () => [])
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
+      send: vi.fn(async () => ({ messageId: 'om_queued_card' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_queued_card' }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    coordinator.handle({ messageId: 'om_queued', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"排队任务"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledOnce());
+    // 首张「已接收」卡片是只读的，不提供任何操作按钮。
+    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ state: 'queued', readOnly: true }));
+
+    releaseDispatch({ id: 'rt_1', status: 'queued', queuedAhead: 2 });
+    // runtimeTaskId 就位后，排队卡片开始提供可真正执行的取消。
+    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'queued', statusLabel: '排队中',
+      capabilities: expect.objectContaining({ canCancelQueued: true })
+    })));
+    await expect(coordinator.handleAction({ action: 'cancel', task_id: 'om_queued' })).resolves.toEqual({ type: 'success', content: '正在取消排队任务' });
+    expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'rt_1');
+  });
+
+  it('rejects malformed and unknown card action values through the shared validator', async () => {
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
+      send: vi.fn(async () => ({ messageId: 'om_card' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    for (const value of ['not json', null, [], {}, { action: 'launch_missiles', task_id: 'om_x' }, { action: 'cancel' }]) {
+      await expect(coordinator.handleAction(value as any)).resolves.toEqual({ type: 'error', content: '无法识别卡片操作' });
+    }
+  });
+
+  it('answers /help with a read-only receipt without starting an Agent turn', async () => {
+    // 命令不是 Agent 任务：不得占用一次 Agent 轮次，也不得留下可操作的进度卡。
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-help' })),
+      send: vi.fn(async () => ({ messageId: 'om_help' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn()
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    await coordinator.handle({ messageId: 'om_help_msg', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"/help"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true, taskName: '命令帮助' })));
+    // 帮助回执必须列出真实可用的命令，且不得使用 schema 2.0 拒绝的 note 标签。
+    const payload = service.send.mock.calls[0]?.[0];
+    expect(JSON.stringify(payload.elements ?? payload.markdown)).toContain('/status');
+    expect(JSON.stringify(payload.elements ?? [])).not.toContain('"tag":"note"');
+    expect(runtime.start).not.toHaveBeenCalled();
+    expect(runtime.send).not.toHaveBeenCalled();
+    // reaction 在命令回执落地后撤销，避免两个竞争状态并存。
+    expect(service.deleteReaction).toHaveBeenCalledWith('om_help_msg', 'reaction-help');
+  });
+
+  it('refuses a mutating command from an account outside the allow list', async () => {
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), stop: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-deny' })),
+      send: vi.fn(async () => ({ messageId: 'om_deny' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn(),
+      getUserEmails: vi.fn(async () => ['outsider@example.com'])
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    await coordinator.handle(
+      { messageId: 'om_deny_msg', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"/new"}', mentions: [], senderOpenId: 'ou_outsider' },
+      { ...config, allowedEmails: ['allowed@example.com'] }
+    );
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'failed', readOnly: true, markdown: expect.stringContaining('白名单')
+    })));
+    // 权限不足绝不能触及运行时。
+    expect(runtime.stop).not.toHaveBeenCalled();
+  });
+
+  it('reports an unavailable command instead of pretending it worked', async () => {
+    // /new 依赖 runtime.stop（可选方法）；缺失时必须诚实回执，不得假装已开启新会话。
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-unavail' })),
+      send: vi.fn(async () => ({ messageId: 'om_unavail' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn()
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    await coordinator.handle({ messageId: 'om_unavail_msg', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"/new"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ state: 'failed', readOnly: true })));
+    expect(runtime.start).not.toHaveBeenCalled();
+  });
+
+  it('passes an unrecognized slash message through to the Agent as ordinary text', async () => {
+    // 单段路径（/tmp）与命令形状相同，不能因此给用户一条失败回执。
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-pass' })),
+      send: vi.fn(async () => ({ messageId: 'om_pass' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_pass' }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    coordinator.handle({ messageId: 'om_pass_msg', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"/tmp/build 目录能删吗"}', mentions: [] }, config);
+    // 归一化后的原文照常进入 Agent 轮次，而不是被当成未知命令报错。
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    expect(String(runtime.send.mock.calls[0]?.[1])).toContain('/tmp/build');
+  });
+
+  it('reports session and queue state for /status without creating a task', async () => {
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}),
+      getTasks: vi.fn(async () => [
+        { id: 'rt_1', status: 'running' }, { id: 'rt_2', status: 'queued' }, { id: 'rt_3', status: 'queued' }
+      ])
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-status' })),
+      send: vi.fn(async () => ({ messageId: 'om_card' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    // 先跑一轮真实任务，让 group 绑定到会话——否则 /status 只能诚实地说「尚未创建」。
+    coordinator.handle({ messageId: 'om_first', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"先跑一轮"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+
+    await coordinator.handle({ messageId: 'om_status_msg', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"/status"}', mentions: [] }, config);
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ readOnly: true, taskName: '任务状态' })));
+    const statusCall = service.send.mock.calls.find(([input]) => input.taskName === '任务状态');
+    const markdown = String(statusCall?.[0]?.markdown ?? '');
+    expect(markdown).toContain('ses_1');
+    // 排队运行数与待执行指令数必须分开表达，不混用口径。
+    expect(markdown).toContain('**待执行指令**：2 条');
+    expect(markdown).toContain('**执行中的运行**：1 个');
+    // /status 是只读查询，不得额外触发 Agent 轮次。
+    expect(runtime.send).toHaveBeenCalledOnce();
   });
 
   it('reuses one session per group, acknowledges mentions, and revokes the reaction after card send', async () => {

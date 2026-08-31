@@ -2,6 +2,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { AgentEvent, ChannelMappingRepository, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
 import type { StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError } from './service.js';
+import { setLarkGateLog } from './api-gate.js';
 import { getChatMode } from './chat-mode.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 
@@ -77,6 +78,9 @@ export class LarkLongConnectionListener implements LarkListener {
   constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}) {}
 
   async start(config: StoredLarkConfig) {
+    // api-gate 是模块级单例（per-appId 限流状态必须跨会话共享），没有构造注入点。
+    // 在监听装配处接上真实日志，让限流等待、退避重试和熔断跳闸可观测。
+    setLarkGateLog(this.log);
     const credentials = `${config.appId}\u0000${config.appSecret}`;
     if (this.listening && this.credentials === credentials) {
       this.config = config;
@@ -130,7 +134,12 @@ export class LarkLongConnectionListener implements LarkListener {
         const result = await coordinator?.handleAction(event.action?.value, operatorOpenId);
         if (!result) return;
         return { toast: result };
-      }
+      },
+      // 入站 reaction 显式登记为 no-op：机器人自己加/撤 `OK` 回执会回流成事件，
+      // 用户手动贴表情也会。两者都不得驱动任务，也不应落到未知事件分支产生日志噪音。
+      // reaction 在本产品里只是「请求已接入」的单向回执，不是可交互的控制面。
+      'im.message.reaction.created_v1': () => undefined,
+      'im.message.reaction.deleted_v1': () => undefined
     });
     const client = new lark.WSClient({
       appId: config.appId,

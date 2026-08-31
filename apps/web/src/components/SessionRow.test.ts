@@ -27,6 +27,6 @@ describe('SessionRow', () => {
   it('renders with active styling when active', () => {
     const html = renderToStaticMarkup(createElement(SessionRow, { session, agent, active: true, onClick: () => {} }));
     expect(html).toContain('Codex');
-    expect(html).toContain('shadow-[inset_3px_0_0_#5eead4]');
+    expect(html).toContain('shadow-[inset_3px_0_0_var(--sidebar-accent)]');
   });
 });

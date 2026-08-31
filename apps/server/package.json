@@ -33,7 +33,6 @@
     "acpx": "0.13.0",
     "better-sqlite3": "12.11.1",
     "commander": "15.0.0",
-    "daemonize-process": "4.1.1",
     "drizzle-orm": "0.44.2",
     "fastify": "5.4.0",
     "node-pty": "1.2.0-beta.15",
@@ -45,6 +44,7 @@
   },
   "devDependencies": {
     "@dockmux/botmux-importer": "workspace:*",
+    "@types/better-sqlite3": "9.6.0",
     "@types/qrcode": "^1.5.6",
     "@types/ws": "^8.18.1",
     "esbuild": "0.25.12",

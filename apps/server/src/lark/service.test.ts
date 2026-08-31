@@ -452,4 +452,33 @@ describe('Lark card service', () => {
     expect(body.content).toContain('执行中');
     expect(body.content).toContain('任务');
   });
+
+  it('surfaces Retry-After and x-ogw-ratelimit-reset to the rate-limit gate as milliseconds', async () => {
+    // service.ts 是唯一能看到响应头的地方。若不把这两个头换算成 details.retryAfterMs，
+    // api-gate 就只能盲目指数退避，无法尊重飞书明确要求的等待时长。
+    // 两个头同时出现时取较大值：宁可多等，也不要再撞一次频控。
+    const rateLimited = () => new Response(JSON.stringify({ code: 230020, msg: 'too many request' }), {
+      status: 429,
+      headers: { 'content-type': 'application/json', 'retry-after': '2', 'x-ogw-ratelimit-reset': '7' }
+    });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockImplementation(async () => rateLimited());
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const error = await service.update({ messageId: 'om_card', state: 'running', taskId: 't1' }).catch(caught => caught);
+    expect(error).toBeInstanceOf(LarkServiceError);
+    expect((error as LarkServiceError).details?.upstreamHttpStatus).toBe(429);
+    // 取 max(2s, 7s) = 7s，并换算成毫秒。
+    expect((error as LarkServiceError).details?.retryAfterMs).toBe(7_000);
+  });
+
+  it('omits retryAfterMs when the response carries no rate-limit headers', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockImplementation(async () => response({ code: 99991663, msg: 'invalid param' }, 400));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const error = await service.update({ messageId: 'om_card', state: 'running', taskId: 't1' }).catch(caught => caught);
+    expect(error).toBeInstanceOf(LarkServiceError);
+    expect((error as LarkServiceError).details).not.toHaveProperty('retryAfterMs');
+  });
 });

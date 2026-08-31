@@ -2,6 +2,23 @@ import { readFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { PermissionMode } from '@dockmux/shared';
 import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
+import { executeWithLarkGate, LarkCircuitOpenError } from './api-gate.js';
+import { buildLarkCardActions, type LarkCardCapabilities } from './card-actions.js';
+
+/**
+ * 从响应头解析飞书要求的等待时长（ms）。Retry-After 与 x-ogw-ratelimit-reset 的
+ * 单位都是**秒**，两者同时出现时取较大值（宁可多等，不要再撞一次频控）。
+ * 解析结果交给 api-gate 决定实际退避，避免网关只能盲目指数退避。
+ */
+function retryAfterMsFromHeaders(headers: Headers | undefined): number | undefined {
+  if (!headers || typeof headers.get !== 'function') return undefined;
+  let best: number | undefined;
+  for (const name of ['retry-after', 'x-ogw-ratelimit-reset']) {
+    const seconds = Number(headers.get(name));
+    if (Number.isFinite(seconds) && seconds > 0) best = best === undefined ? seconds : Math.max(best, seconds);
+  }
+  return best === undefined ? undefined : best * 1000;
+}
 
 export const larkCardStates = ['queued', 'running', 'completed', 'failed', 'interrupted'] as const;
 export type LarkCardState = (typeof larkCardStates)[number];
@@ -26,6 +43,22 @@ export interface LarkCardInput {
   permissionMode?: PermissionMode;
   /** Override the lifecycle label without changing the machine state. */
   statusLabel?: string;
+  /**
+   * 操作按钮能力声明（card-actions.ts 的唯一事实源入参）。
+   * 由 coordinator 按 runtime 实际能力 + 任务当前状态注入；未注入时按保守默认推导，
+   * 保证既有调用点行为不变。任一能力为 false 时对应按钮不渲染，而不是渲染死按钮。
+   */
+  capabilities?: LarkCardCapabilities;
+  /**
+   * 轮次编号，写入 callback value 以便 daemon 重启后仍能解释这次点击。
+   * 卡片状态机之外的信息一律放进 value，不依赖内存。
+   */
+  turn?: number;
+  /**
+   * 按钮状态覆写：卡片视觉状态只有 5 种（LarkCardState），但任务状态机多一个
+   * interrupting。需要按 interrupting 收敛按钮时用它，不改变卡片配色与标题。
+   */
+  actionState?: 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted';
 }
 export interface LarkSendInput extends LarkCardInput { receiveId?: string; receiveIdType?: LarkReceiveIdType; chatId?: string }
 export interface LarkReplyInput extends LarkCardInput { messageId: string; replyInThread?: boolean; replyRootId?: string }
@@ -115,6 +148,12 @@ export interface LarkBotConfig {
   defaultReceiveIdType: LarkReceiveIdType;
   defaultAgentName: string;
   baseUrl: string;
+  /**
+   * 构造本 service 时使用的 env，转交给 api-gate 读取限流/退避/熔断配置。
+   * 不透传的话网关只会读 process.env，测试无法在不污染全局的前提下调参，
+   * 多租户部署也无法给不同 app 配不同 QPS。
+   */
+  env?: NodeJS.ProcessEnv;
 }
 export interface LarkBotConfigInput {
   appId?: string;
@@ -270,7 +309,8 @@ export function loadLarkBotConfig(env: NodeJS.ProcessEnv = process.env, input: L
     defaultReceiveId: input.chatId?.trim() || env.LARK_CHAT_ID?.trim() || input.receiveId?.trim() || env.LARK_RECEIVE_ID?.trim() || undefined,
     defaultReceiveIdType: status.defaultReceiveIdType,
     defaultAgentName: status.defaultAgentName,
-    baseUrl: status.baseUrl
+    baseUrl: status.baseUrl,
+    env
   };
 }
 
@@ -292,19 +332,30 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     ? clipCardField(input.statusLabel.trim(), 32)
     : state === 'running' ? '执行中' : presentation.title;
   const compactTaskName = taskName;
-  const actionButton = !input.readOnly && state === 'queued' ? {
-    tag: 'button', text: { tag: 'plain_text', content: '取消' }, type: 'default', size: 'small',
-    behaviors: [{ type: 'callback', value: { action: 'cancel', task_id: taskId } }],
-    margin: '0px', element_id: 'cancel'
-  } : !input.readOnly && state === 'running' ? {
-    tag: 'button', text: { tag: 'plain_text', content: '中断' }, type: 'danger', size: 'small',
-    behaviors: [{ type: 'callback', value: { action: 'interrupt', task_id: taskId } }],
-    margin: '0px', element_id: 'interrupt'
-  } : !input.readOnly && (state === 'failed' || state === 'interrupted') && input.retryable !== false ? {
-    tag: 'button', text: { tag: 'plain_text', content: '重试' }, type: 'primary', size: 'small',
-    behaviors: [{ type: 'callback', value: { action: 'retry', task_id: taskId } }],
-    margin: '0px', element_id: 'retry'
-  } : undefined;
+  // 操作按钮统一由 card-actions.ts 这一唯一事实源决定：渲染端与 coordinator 回调端
+  // 共用同一张能力表，因此不可能出现「界面上有按钮但回调拒绝执行」的死按钮。
+  //
+  // capabilities 未注入时的默认值刻意保留 cancel/interrupt/retry：
+  // buildLarkCard 是公开 API（routes.ts、对账补发都在用），默认全 false 会让这些
+  // 既有卡片静默丢掉主操作——那是功能回退，不是安全收益。真正的死按钮风险由
+  // coordinator 注入真实能力来消除（见 capabilitiesForTask）。
+  // canRefresh 例外：它依赖 coordinator 的 requestUpdate 心跳句柄，进程内不存在
+  // 等价物，未显式声明时必须为 false，否则点了必然失败。
+  const actionCapabilities: LarkCardCapabilities = input.capabilities ?? {
+    canCancelQueued: true,
+    canInterrupt: true,
+    canRetry: input.retryable !== false,
+    canRefresh: false,
+    ...(webBaseUrl ? { webUrl: sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/sessions` } : {})
+  };
+  const actionButtons = buildLarkCardActions({
+    state: (input.actionState ?? state) as Parameters<typeof buildLarkCardActions>[0]['state'],
+    taskId,
+    turn: Number(input.turn ?? 0),
+    ...(input.readOnly ? { readOnly: true } : {}),
+    ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
+    capabilities: actionCapabilities
+  });
   const footerColumns: any[] = [{
     tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
     elements: [{ tag: 'markdown', content: `<font color='grey'>${agentName}${workspace ? ` · ${workspace}` : ''} · 任务 #${taskId}${input.permissionMode === 'full-trust' ? ' · 完全信任' : ''}</font>`, text_size: 'x-small', margin: '0px' }]
@@ -363,11 +414,19 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       },
       elements: [...(traceDigest ? [traceDigest] : []), ...traceElements]
     }] : [];
-    const taskHeader = actionButton ? [{
+    // 按钮列宽随按钮数量放宽：单按钮沿用 72px，多按钮时改为自适应，
+    // 否则第二个按钮会被 72px 挤压折行。
+    const taskHeader = actionButtons.length ? [{
       tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '8px', vertical_align: 'center', margin: '0px',
       columns: [
         { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [statusElement] },
-        { tag: 'column', width: '72px', vertical_align: 'center', elements: [actionButton] }
+        {
+          tag: 'column', width: actionButtons.length > 1 ? 'auto' : '72px', vertical_align: 'center',
+          elements: actionButtons.length > 1 ? [{
+            tag: 'column_set', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
+            columns: actionButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
+          }] : actionButtons
+        }
       ]
     }] : [statusElement];
     return [
@@ -1020,29 +1079,53 @@ export class LarkCardService {
 
   private async request(path: string, options: { method?: string; body?: unknown; token?: boolean }) {
     const headers: Record<string, string> = { 'content-type': 'application/json; charset=utf-8' };
+    // token 必须在网关之外解析：tenantToken() 自身就走 request()，若放在 gate 内部
+    // 会形成嵌套调用——一次业务请求消耗两个令牌，且鉴权请求的重试会与业务请求的
+    // 重试相乘。鉴权自身是低频且带缓存的，不需要限流。
     if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken()}`;
-    let response: Response;
+    // 所有出网 JSON 调用（卡片创建/更新、消息发送、reaction、通讯录）都经由此处，
+    // 因此在这里收口 per-appId 限流：N 个并发会话的卡片心跳不再能合计打爆 app 配额。
+    // 熔断快速失败要转成 LarkServiceError：routes.ts 有 8 处按 instanceof LarkServiceError
+    // 决定 HTTP 状态码，不转换会让熔断退化成一个语义不明的 500。
     try {
-      response = await this.fetcher(`${this.config.baseUrl}${path}`, {
-        method: options.method ?? 'POST', headers, ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })
-      });
+      return await executeWithLarkGate(this.config.appId, `${options.method ?? 'POST'} ${path.split('?')[0]}`, async () => {
+      let response: Response;
+      try {
+        response = await this.fetcher(`${this.config.baseUrl}${path}`, {
+          method: options.method ?? 'POST', headers, ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })        });
+      } catch (error) {
+        throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark OpenAPI request failed: ${error instanceof Error ? error.message : String(error)}`, 502);
+      }
+      if (!response) throw new LarkServiceError('LARK_NETWORK_ERROR', 'Lark OpenAPI request returned no response', 502);
+      const payload = await response.json().catch(() => ({})) as any;
+      if (!response.ok || payload.code !== 0) {
+        const message = payload.msg || payload.message || `${response.status} ${response.statusText}`;
+        const violation = Array.isArray(payload.error?.permission_violations) ? payload.error.permission_violations[0] : undefined;
+        const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
+        // 网关按 retryAfterMs 决定退避时长：飞书用 Retry-After / x-ogw-ratelimit-reset
+        // （单位秒）告知需要等多久，丢掉它就只能盲目指数退避。
+        const retryAfterMs = retryAfterMsFromHeaders(response.headers);
+        throw new LarkServiceError('LARK_OPENAPI_ERROR', `Lark OpenAPI request failed: ${message} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
+          upstreamCode: payload.code,
+          upstreamHttpStatus: response.status,
+          ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+          ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
+          ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
+        });
+      }
+      return payload;
+      }, this.config.env ? { env: this.config.env } : undefined);
     } catch (error) {
-      throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark OpenAPI request failed: ${error instanceof Error ? error.message : String(error)}`, 502);
+      // 熔断跳闸期间请求未触达网络。转成 503（Service Unavailable）+ 可操作的中文说明，
+      // 让 routes.ts 现有的 instanceof 分支能给出正确状态码，也让上层日志看得懂原因。
+      if (error instanceof LarkCircuitOpenError) {
+        throw new LarkServiceError('LARK_CIRCUIT_OPEN', `飞书 OpenAPI 连续失败已触发熔断，暂时停止外发请求。请稍后重试，或检查机器人凭据与网络连通性。`, 503, {
+          appId: error.appId,
+          openedAt: new Date(error.openedAt).toISOString()
+        });
+      }
+      throw error;
     }
-    if (!response) throw new LarkServiceError('LARK_NETWORK_ERROR', 'Lark OpenAPI request returned no response', 502);
-    const payload = await response.json().catch(() => ({})) as any;
-    if (!response.ok || payload.code !== 0) {
-      const message = payload.msg || payload.message || `${response.status} ${response.statusText}`;
-      const violation = Array.isArray(payload.error?.permission_violations) ? payload.error.permission_violations[0] : undefined;
-      const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
-      throw new LarkServiceError('LARK_OPENAPI_ERROR', `Lark OpenAPI request failed: ${message} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
-        upstreamCode: payload.code,
-        upstreamHttpStatus: response.status,
-        ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
-        ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
-      });
-    }
-    return payload;
   }
 }
 

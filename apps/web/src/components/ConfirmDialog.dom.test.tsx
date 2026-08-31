@@ -93,9 +93,9 @@ describe('ConfirmDialog 交互', () => {
 
   it('tone="danger" 时确认按钮为红色，默认 warning 为深灰', () => {
     const { rerender } = render(<ConfirmDialog {...baseProps} open tone="danger"/>);
-    expect(screen.getByRole('button', { name: '删除' }).className).toContain('bg-red-600');
+    expect(screen.getByRole('button', { name: '删除' }).className).toContain('bg-[var(--status-danger-solid)]');
     rerender(<ConfirmDialog {...baseProps} open/>);
-    expect(screen.getByRole('button', { name: '删除' }).className).toContain('bg-zinc-900');
+    expect(screen.getByRole('button', { name: '删除' }).className).toContain('bg-[var(--surface-inverse)]');
   });
 
   it('传入 error 时展示错误文案；未传时不渲染错误区', () => {

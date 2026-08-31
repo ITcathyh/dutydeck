@@ -262,3 +262,89 @@ describe('App browser navigation and shell states', () => {
     expect(drawer?.className).not.toContain('lg:static');
   });
 });
+
+describe('App 搜索、快捷键与通知接线', () => {
+  it('Ctrl-K 打开命令面板，可检索到任务并跳进详情', async () => {
+    const user = userEvent.setup();
+    mockAppApi({ sessions: [session('s1'), session('s2')], summaries: [summary('s1', '修复登录超时'), summary('s2', '补齐回归测试')] });
+    renderApp();
+    // 任务同时出现在侧栏和总览列表里，这里只锚定总览列表，避免匹配到侧栏那一份。
+    const taskList = await screen.findByRole('region', { name: '任务列表' });
+    await within(taskList).findByRole('button', { name: /修复登录超时/ });
+
+    await user.keyboard('{Control>}k{/Control}');
+    const palette = await screen.findByRole('dialog', { name: '搜索任务与命令' });
+    const results = within(palette).getByRole('listbox', { name: '搜索结果' });
+    await user.type(within(palette).getByRole('combobox'), '回归');
+    // 检索命中的是另一条任务，说明搜索真的过滤了，而不是把全部任务列出来。
+    await waitFor(() => expect(within(results).queryByText('修复登录超时')).toBeNull());
+    await user.click(within(results).getByText('补齐回归测试'));
+
+    await waitFor(() => expect(window.location.pathname).toBe('/sessions/s2'));
+    expect(screen.queryByRole('dialog', { name: '搜索任务与命令' })).toBeNull();
+  });
+
+  it('页首搜索入口与问号帮助面板都可达，且帮助面板如实标出不可用项', async () => {
+    const user = userEvent.setup();
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
+    renderApp();
+
+    await user.click(await screen.findByRole('button', { name: /搜索任务目标、工作区或 Agent/ }));
+    expect(await screen.findByRole('dialog', { name: '搜索任务与命令' })).toBeTruthy();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '搜索任务与命令' })).toBeNull());
+
+    await user.keyboard('?');
+    const sheet = await screen.findByRole('dialog', { name: /快捷键/ });
+    // 总览页没有打开任何运行，session 作用域的快捷键必须显示为当前不可用，而不是假装可用。
+    expect(within(sheet).getAllByText('当前不可用').length).toBeGreaterThan(0);
+  });
+
+  it('取消待执行指令后给出成功通知，并提供把指令排回队尾的撤销', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1', 'thinking')], summaries: [summary('s1', '修复登录超时')] });
+    const queued = { id: 'task-q1', sessionId: 's1', prompt: '顺手补一个回归测试', status: 'queued', createdAt: '2026-08-30T00:00:00Z', updatedAt: '2026-08-30T00:00:00Z' };
+    vi.spyOn(api, 'tasks').mockResolvedValue([queued]);
+    vi.spyOn(api, 'cancelQueued').mockResolvedValue({ ...queued, status: 'cancelled' });
+    const send = vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task: { ...queued, id: 'task-q2' } });
+    renderApp();
+
+    await user.click(await screen.findByRole('button', { name: /取消/ }));
+    expect(await screen.findByText('已取消 1 条待执行指令')).toBeTruthy();
+    // 诚实表达能力：撤销只能排到队尾，不能还原原来的位置，文案必须说明。
+    expect(screen.getByText('恢复会把这条指令重新排到队列末尾，不会回到原来的位置。')).toBeTruthy();
+
+    await user.click(screen.getByRole('button', { name: '恢复这条指令' }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith('s1', '顺手补一个回归测试', 'queue'));
+  });
+
+  it('外观选择持久化到 localStorage，并写入 data-theme', async () => {
+    const user = userEvent.setup();
+    mockAppApi();
+    renderApp();
+
+    await user.click(await screen.findByRole('radio', { name: /^深色/ }));
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+    expect(window.localStorage.getItem('dockmux.theme')).toBe('dark');
+
+    await user.click(screen.getByRole('radio', { name: /^跟随系统/ }));
+    expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
+    expect(window.localStorage.getItem('dockmux.theme')).toBeNull();
+  });
+
+  it('在输入框里打字不会被单键快捷键劫持', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
+    renderApp();
+
+    const composer = await screen.findByRole('textbox', { name: /指令|输入|消息/ }).catch(() => undefined) ?? (await screen.findAllByRole('textbox'))[0]!;
+    await user.click(composer);
+    await user.type(composer, 'net');
+    // n 会新建任务、e 会归档、t 会切 tab —— 在输入态它们都必须只是普通字符。
+    expect((composer as HTMLTextAreaElement).value).toBe('net');
+    expect(screen.queryByRole('dialog', { name: '创建新任务' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: /归档/ })).toBeNull();
+  });
+});

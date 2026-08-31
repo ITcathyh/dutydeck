@@ -1,4 +1,5 @@
-import { AlertTriangle, Archive, ArrowRight, CheckCircle2, CircleDot, Clock3, ListEnd, MessageSquare, Plus, Radio } from 'lucide-react';
+import { AlertTriangle, Archive, ArrowRight, CheckCircle2, CircleDot, Clock3, Keyboard, ListEnd, MessageSquare, Plus, Radio, Search } from 'lucide-react';
+import type { ReactNode } from 'react';
 import type { Agent, RunSummary, Session } from '../api';
 import {
   attentionReasonForSession,
@@ -19,13 +20,18 @@ type OverviewProps = {
   summaries: Record<string, RunSummary>;
   agents: Agent[];
   loading: boolean;
+  agentsLoading?: boolean;
   larkBots: number;
+  larkBotsLoading?: boolean;
   view: WorkbenchView;
   onViewChange(view: WorkbenchView): void;
   onSelect(id: string): void;
   onCreate(): void;
   onOpenAgentSetup(): void;
   onOpenLarkSetup(): void;
+  onOpenSearch?(): void;
+  onOpenShortcuts?(): void;
+  themeControl?: ReactNode;
 };
 
 const filters: Array<{ id: WorkbenchView; label: string; Icon: typeof Radio }> = [
@@ -86,7 +92,7 @@ function TaskRow({ session, summary, agent, section, onSelect }: {
   </button>;
 }
 
-export function WorkspaceOverview({ sessions, summaries, agents, loading, larkBots, view, onViewChange, onSelect, onCreate, onOpenAgentSetup, onOpenLarkSetup }: OverviewProps) {
+export function WorkspaceOverview({ sessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, view, onViewChange, onSelect, onCreate, onOpenAgentSetup, onOpenLarkSetup, onOpenSearch, onOpenShortcuts, themeControl }: OverviewProps) {
   const counts = workbenchCounts(sessions, summaries);
   const ordered = orderSessionsForWorkbench(sessions, view, summaries);
   const selectedLabel = filters.find(filter => filter.id === view)?.label ?? '总览';
@@ -101,9 +107,14 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, larkBo
         <div>
           <p className="text-sm font-medium text-[var(--text-secondary)]">任务中心</p>
           <h1 id="workspace-overview-title" className="mt-1 text-2xl font-semibold tracking-[-.035em] text-[var(--text-primary)] sm:text-[28px]">今天需要推进什么？</h1>
-          <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">{loading ? '正在同步任务状态…' : counts.all === 0 ? (agents.length ? '还没有任务。写下第一个目标，让 Agent 开始执行。' : '还没有任务。先准备 Agent，再创建第一个任务。') : blockingCount ? `${blockingCount} 个任务需要你先处理，${counts.active} 个正在进行。` : counts.active ? `没有阻塞项，${counts.active} 个任务正在进行。` : '当前任务都已处理，可以开始一个新目标。'}</p>
+          <p className="mt-2 text-sm leading-6 text-[var(--text-secondary)]">{loading || agentsLoading ? '正在同步任务状态…' : counts.all === 0 ? (agents.length ? '还没有任务。写下第一个目标，让 Agent 开始执行。' : '还没有任务。先准备 Agent，再创建第一个任务。') : blockingCount ? `${blockingCount} 个任务需要你先处理，${counts.active} 个正在进行。` : counts.active ? `没有阻塞项，${counts.active} 个任务正在进行。` : '当前任务都已处理，可以开始一个新目标。'}</p>
         </div>
-        <button type="button" onClick={agents.length ? onCreate : onOpenAgentSetup} className="flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-[var(--action-primary)] px-4 text-sm font-semibold text-[var(--text-on-action)] hover:bg-[var(--action-primary-hover)] active:translate-y-px"><Plus size={17}/>{agents.length ? '创建任务' : '准备 Agent'}</button>
+        <div className="flex flex-wrap items-center gap-2">
+          {onOpenSearch && <button type="button" onClick={onOpenSearch} className="flex min-h-10 flex-1 items-center gap-2 rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] px-3 text-sm text-[var(--text-muted)] hover:border-[var(--action-primary)] hover:text-[var(--text-primary)] sm:flex-none sm:w-64"><Search aria-hidden="true" size={15}/><span className="min-w-0 flex-1 truncate text-left">搜索任务目标、工作区或 Agent</span><kbd className="hidden shrink-0 rounded border border-[var(--border-default)] bg-[var(--surface-muted)] px-1.5 font-sans text-[11px] font-semibold sm:inline">Ctrl K</kbd></button>}
+          {themeControl}
+          {onOpenShortcuts && <button type="button" onClick={onOpenShortcuts} aria-label="查看键盘快捷键" title="查看键盘快捷键" className="grid min-h-10 min-w-10 place-items-center rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] text-[var(--text-secondary)] hover:border-[var(--action-primary)] hover:text-[var(--action-primary)]"><Keyboard aria-hidden="true" size={16}/></button>}
+          <button type="button" disabled={agentsLoading} onClick={agents.length ? onCreate : onOpenAgentSetup} className="flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-lg bg-[var(--action-primary)] px-4 text-sm font-semibold text-[var(--text-on-action)] hover:bg-[var(--action-primary-hover)] active:translate-y-px disabled:opacity-60"><Plus size={17}/>{agentsLoading ? '正在检测 Agent…' : agents.length ? '创建任务' : '准备 Agent'}</button>
+        </div>
       </header>
 
       <section aria-label="运行概览" className="-mx-1 mt-4 overflow-x-auto px-1 pb-1">
@@ -120,14 +131,14 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, larkBo
 
       <div className="mt-5 grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_260px]">
         <section aria-label="任务列表" className="min-w-0">
-          {loading ? <div className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-4"><div className="h-16 animate-pulse rounded-lg bg-[var(--surface-muted)]"/><div className="mt-2 h-16 animate-pulse rounded-lg bg-[var(--surface-muted)]"/></div> : sections.length && ordered.length ? <div className="space-y-6">{sections.map(section => <section key={section.id} aria-labelledby={`task-section-${section.id}`}>
+          {loading || agentsLoading ? <div className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-4"><div className="h-16 animate-pulse rounded-lg bg-[var(--surface-muted)]"/><div className="mt-2 h-16 animate-pulse rounded-lg bg-[var(--surface-muted)]"/></div> : sections.length && ordered.length ? <div className="space-y-6">{sections.map(section => <section key={section.id} aria-labelledby={`task-section-${section.id}`}>
             <div className="mb-2 flex items-baseline justify-between gap-3"><div><h2 id={`task-section-${section.id}`} className="text-base font-semibold text-[var(--text-primary)]">{view === 'all' ? sectionCopy[section.id].title : selectedLabel}</h2><p className="mt-0.5 text-xs leading-5 text-[var(--text-secondary)]">{view === 'all' ? sectionCopy[section.id].description : '按最近更新排序'}</p></div><span className="text-xs font-medium tabular-nums text-[var(--text-muted)]">{section.sessions.length} 个</span></div>
             <div className="overflow-hidden rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)]">{section.sessions.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={onSelect}/>)}</div>
           </section>)}</div> : view === 'all' && sessions.length === 0 ? <div className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] px-5 py-7 sm:px-7"><span className="grid h-10 w-10 place-items-center rounded-xl bg-[var(--action-soft)] text-[var(--action-primary)]"><Plus size={19}/></span><h2 className="mt-4 text-base font-semibold text-[var(--text-primary)]">{agents.length ? '从第一个明确目标开始' : '先准备一个可用 Agent'}</h2><p className="mt-1 max-w-xl text-sm leading-6 text-[var(--text-secondary)]">{agents.length ? '描述要完成的事情，选择工作目录和 Agent；创建后会立即开始执行。' : 'Dockmux 会自动发现这台机器上已安装并登录的 Agent CLI。准备完成后，就能创建任务或把它连接到飞书。'}</p><div className="mt-5 flex flex-wrap gap-2"><button type="button" onClick={agents.length ? onCreate : onOpenAgentSetup} className="flex min-h-10 items-center gap-2 rounded-lg bg-[var(--action-primary)] px-4 text-sm font-semibold text-[var(--text-on-action)]">{agents.length ? '创建第一个任务' : '查看 Agent 添加方法'}<ArrowRight size={15}/></button><button type="button" onClick={onOpenLarkSetup} className="flex min-h-10 items-center gap-2 rounded-lg border border-[var(--border-default)] px-4 text-sm font-medium text-[var(--text-primary)] hover:border-[var(--action-primary)]">绑定飞书 Bot</button></div></div> : <div className="rounded-xl border border-dashed border-[var(--border-strong)] bg-[var(--surface-default)] px-6 py-10 text-center"><CheckCircle2 size={22} className="mx-auto text-[var(--status-success)]"/><h2 className="mt-3 text-sm font-semibold text-[var(--text-primary)]">当前视图没有任务</h2><p className="mt-1 text-sm text-[var(--text-secondary)]">选择其他状态，或创建一个新任务。</p></div>}
         </section>
 
         <aside aria-label="协作入口" className="rounded-xl border border-[var(--border-default)] bg-[var(--surface-default)] p-4">
-          <div className="flex items-center gap-2"><span className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--status-info-soft)] text-[var(--status-info)]"><MessageSquare size={17}/></span><div><h2 className="text-sm font-semibold text-[var(--text-primary)]">飞书协作</h2><p className="text-xs text-[var(--text-secondary)]">{larkBots ? `${larkBots} 个机器人已接入` : '尚未接入机器人'}</p></div></div>
+          <div className="flex items-center gap-2"><span className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--status-info-soft)] text-[var(--status-info)]"><MessageSquare size={17}/></span><div><h2 className="text-sm font-semibold text-[var(--text-primary)]">飞书协作</h2><p className="text-xs text-[var(--text-secondary)]">{larkBotsLoading ? '正在读取接入状态…' : larkBots ? `${larkBots} 个机器人已接入` : '尚未接入机器人'}</p></div></div>
           <p className="mt-3 text-sm leading-6 text-[var(--text-secondary)]">在飞书中下达任务、跟进执行与接收结果。</p>
           <button type="button" onClick={onOpenLarkSetup} className="mt-3 flex min-h-10 w-full items-center justify-between rounded-lg border border-[var(--border-default)] px-3 text-sm font-medium text-[var(--text-primary)] hover:border-[var(--action-primary)] hover:text-[var(--action-primary)]"><span>{larkBots ? '管理飞书 Bot' : '绑定飞书 Bot'}</span><ArrowRight size={15}/></button>
           <div className="mt-3 flex items-center gap-1.5 border-t border-[var(--border-subtle)] pt-3 text-xs text-[var(--text-muted)]"><Clock3 size={13}/><span>消息、卡片和群协作共用同一任务上下文</span></div>

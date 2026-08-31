@@ -39,16 +39,16 @@ describe('ToolCard 状态渲染分支', () => {
     const { container } = render(<ToolCard event={toolEvent({ status: 'completed', completedAt: '2026-08-27T00:00:02.000Z' })}/>);
     expect(screen.getByText('已完成')).toBeTruthy();
     expect(spinner(container)).toBeNull();
-    expect(statusDot(container)?.className).toContain('bg-emerald-500');
-    expect(statusDot(container)?.className).not.toContain('bg-red-500');
+    expect(statusDot(container)?.className).toContain('bg-[var(--status-success-solid)]');
+    expect(statusDot(container)?.className).not.toContain('bg-[var(--status-danger-solid)]');
   });
 
   it('failed：红色状态灯 + 「失败」，不是绿灯', () => {
     const { container } = render(<ToolCard event={toolEvent({ status: 'failed', completedAt: '2026-08-27T00:00:02.000Z' })}/>);
     expect(screen.getByText('失败')).toBeTruthy();
     expect(spinner(container)).toBeNull();
-    expect(statusDot(container)?.className).toContain('bg-red-500');
-    expect(statusDot(container)?.className).not.toContain('bg-emerald-500');
+    expect(statusDot(container)?.className).toContain('bg-[var(--status-danger-solid)]');
+    expect(statusDot(container)?.className).not.toContain('bg-[var(--status-success-solid)]');
   });
 
   it('terminal 态才算耗时到 completedAt：completed 显示 2 秒而非 running 的实时耗时', () => {
@@ -107,7 +107,7 @@ describe('ToolBatch 聚合状态', () => {
     const { container } = render(<ToolBatch description="读取三个文件" events={batch(['completed', 'completed', 'completed'])}/>);
     expect(screen.getByText('已完成')).toBeTruthy();
     expect(screen.getByText('3 次操作')).toBeTruthy();
-    expect(container.querySelector('span.rounded-full')?.className).toContain('bg-emerald-500');
+    expect(container.querySelector('span.rounded-full')?.className).toContain('bg-[var(--status-success-solid)]');
   });
 
   it('有完成也有失败 → 「部分失败」（不是笼统的「失败」）', () => {

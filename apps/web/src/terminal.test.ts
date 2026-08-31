@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { nextTerminalBackoffMs, parseTerminalFrame, terminalWsUrl } from './terminal';
+import { nextTerminalBackoffMs, parseTerminalFrame, terminalFontSize, terminalWsUrl } from './terminal';
 
 describe('terminalWsUrl', () => {
   it('upgrades http to ws', () => {
@@ -48,5 +48,38 @@ describe('nextTerminalBackoffMs', () => {
     // 2^5 * 1000 = 32000 已超过 30000 上限，封顶为 30000
     expect(nextTerminalBackoffMs(5)).toBe(30000);
     expect(nextTerminalBackoffMs(10)).toBe(30000);
+  });
+});
+
+describe('terminalFontSize', () => {
+  it('宽容器保持 12px 基准字号，只缩不放（桌面渲染零变化）', () => {
+    expect(terminalFontSize(1200)).toBe(12);
+    expect(terminalFontSize(800)).toBe(12);
+    // 446px 起 ideal 就达到 12（446 / (62 * 0.6) ≈ 12.0），再宽也不会超过基准
+    expect(terminalFontSize(450)).toBe(12);
+  });
+
+  it('窄视口缩小字号换取更多列数：390px 手机不再停在 12px', () => {
+    const iphone = terminalFontSize(390);
+    expect(iphone).toBeLessThan(12);
+    // 390 / (62 * 0.6) ≈ 10.48，半档取整到 10.5
+    expect(iphone).toBe(10.5);
+    // 414px 的大屏手机 ≈ 11.13 → 11
+    expect(terminalFontSize(414)).toBe(11);
+  });
+
+  it('按半档取整，不落在容易糊掉的亚像素字号上', () => {
+    for (const width of [280, 320, 360, 390, 414, 430]) {
+      expect(terminalFontSize(width) * 2 % 1).toBe(0);
+    }
+  });
+
+  it('不低于 9px 可读下限，异常宽度回落基准字号', () => {
+    expect(terminalFontSize(120)).toBe(9);
+    expect(terminalFontSize(1)).toBe(9);
+    // 宽度还没布局出来（隐藏 tab / 刚插进 DOM）时保持基准，等尺寸事件再纠正
+    expect(terminalFontSize(0)).toBe(12);
+    expect(terminalFontSize(-50)).toBe(12);
+    expect(terminalFontSize(Number.NaN)).toBe(12);
   });
 });
