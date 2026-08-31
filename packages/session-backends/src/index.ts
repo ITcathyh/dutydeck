@@ -6,7 +6,10 @@ export {
   TmuxServerError,
   TmuxSessionMissingError,
   TmuxSessionExistsError,
+  TmuxOwnershipError,
   isTmuxAvailable,
+  type TmuxBackendOptions,
+  type TmuxDockmuxMetadataKey,
 } from './tmux-backend.js';
 export {
   ZellijBackend,

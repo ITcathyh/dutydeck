@@ -1,0 +1,16 @@
+{
+  "fixture_task": {
+    "id": "fixture_task",
+    "larkAppId": "cli_fixture_alpha",
+    "chatId": "oc_fixture_alpha",
+    "chatType": "group",
+    "rootMessageId": "om_fixture_root",
+    "enabled": true,
+    "parsed": { "kind": "interval", "minutes": 60, "display": "synthetic interval" },
+    "schedule": "every synthetic hour",
+    "prompt": "SYNTHETIC_SCHEDULE_PROMPT_NEVER_SEND",
+    "scope": "thread",
+    "executionPosition": "topic",
+    "workingDir": "/synthetic/workspace/alpha"
+  }
+}

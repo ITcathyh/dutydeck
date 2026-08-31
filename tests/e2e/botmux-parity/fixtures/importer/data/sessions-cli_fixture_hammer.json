@@ -1,0 +1,9 @@
+{
+  "fixture_hammer_active": {
+    "sessionId": "fixture_hammer_active",
+    "larkAppId": "cli_fixture_hammer",
+    "status": "active",
+    "scope": "thread",
+    "backendType": "tmux"
+  }
+}

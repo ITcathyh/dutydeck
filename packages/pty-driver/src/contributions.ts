@@ -41,7 +41,10 @@ export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
   { id: 'antigravity', name: 'Antigravity', command: 'agy', adapterId: 'antigravity', capabilities: { pause: false, resume: true } },
   { id: 'coco', name: 'CoCo', command: 'coco', adapterId: 'coco', capabilities: { pause: false, resume: true } },
   { id: 'opencode2', name: 'OpenCode 2', command: 'opencode2', adapterId: 'opencode2', capabilities: { pause: false, resume: true } },
-  { id: 'mtr', name: 'MTR', command: 'mtr', adapterId: 'mtr', capabilities: { pause: false, resume: true } },
+  // MTR is intentionally not auto-discovered: its executable name collides
+  // with the ubiquitous network diagnostic `/usr/bin/mtr`. Until discovery
+  // has a reliable vendor fingerprint, users of the AI CLI can opt in with
+  // DOCKMUX_AGENTS_JSON instead of exposing a guaranteed-broken false Agent.
   { id: 'hermes', name: 'Hermes', command: 'hermes', adapterId: 'hermes', capabilities: { pause: false, resume: true } },
   { id: 'pi', name: 'Pi', command: 'pi', adapterId: 'pi', capabilities: { pause: false, resume: true } },
   { id: 'oh-my-pi', name: 'Oh My Pi', command: 'omp', adapterId: 'oh-my-pi', capabilities: { pause: false, resume: true } },

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "run": {
+    "run_ref": "run_fixture_restart",
+    "session_ref": "session_fixture_restart",
+    "backend_kind": "tmux",
+    "persistent_required": true,
+    "ownership_ref": "owner_fixture_dockmux",
+    "initial_generation": 7,
+    "restart_boundary": "between_completed_turns"
+  },
+  "expected": {
+    "source_process_identity_preserved": true,
+    "new_process_count": 0,
+    "reattach_generation": 8,
+    "first_prompt_reinjected": false,
+    "completed_prompts_persisted": 2,
+    "final_stop_destroys_pane": true,
+    "isolated_tmux_namespace_empty_after_test": true,
+    "ownership_mismatch_result": "degraded_no_spawn",
+    "unknown_probe_result": "degraded_no_spawn"
+  },
+  "not_covered": {
+    "active_turn_final_result_reconstruction": true,
+    "two_daemon_shared_fence": true
+  }
+}

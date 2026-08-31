@@ -1,0 +1,12 @@
+[
+  {
+    "larkAppId": "cli_fixture_alpha",
+    "larkAppSecret": "SYNTHETIC_SECRET_ALPHA_OLD_NEVER_VALID",
+    "cliId": "claude-code"
+  },
+  {
+    "larkAppId": "cli_fixture_retired",
+    "larkAppSecret": "SYNTHETIC_SECRET_RETIRED_NEVER_VALID",
+    "cliId": "traex"
+  }
+]

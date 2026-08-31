@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "runId": "fixture-run",
+  "status": "grilling",
+  "goal": "SYNTHETIC_WORKFLOW_GOAL_NEVER_EXECUTE",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "updatedAt": "2026-01-01T00:00:00.000Z"
+}

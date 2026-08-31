@@ -1,16 +1,71 @@
 import Database from 'better-sqlite3';
 import { and, asc, desc, eq, gt, lt } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
-import { existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
+import { basename, dirname } from 'node:path';
 import type { AgentConfig, AgentEvent, RepositoryBundle, Session, TaskRecord } from '@dockmux/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
 import { runMigrations } from './migrations.js';
+import { createFoundationRepositories } from './foundation.js';
+import { createWp1aRepositories } from './group-policy.js';
+import { createScheduleFoundationRepositories } from './schedule-foundation.js';
 export * from './schema.js';
+export * from './foundation.js';
+export * from './group-policy.js';
+export * from './schedule-foundation.js';
 
 export const EVENT_WINDOW_DEFAULT_LIMIT = 200;
 export const EVENT_WINDOW_MAX_LIMIT = 1_000;
 export const PRE_V10_BACKUP_SUFFIX = '.pre-v10.bak';
+const PRIVATE_DIRECTORY_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+
+/**
+ * POSIX modes do not model Windows ACLs. Avoid pretending that chmod provides
+ * equivalent protection there; Windows keeps the inherited ACL of the user's
+ * profile or configured data directory.
+ */
+function supportsPosixModes(): boolean {
+  return process.platform !== 'win32';
+}
+
+function prepareDatabaseDirectory(filename: string): void {
+  const directory = dirname(filename);
+  const existed = existsSync(directory);
+  mkdirSync(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  if (!supportsPosixModes()) return;
+
+  // Tighten directories created by Dockmux and its conventional persisted
+  // `.dockmux` directory. Do not chmod an unrelated existing parent such as
+  // `/tmp` when a caller explicitly stores a database directly inside it.
+  if (!existed || basename(directory) === '.dockmux') chmodSync(directory, PRIVATE_DIRECTORY_MODE);
+}
+
+function prepareDatabaseFile(filename: string): void {
+  if (!supportsPosixModes()) return;
+  if (!existsSync(filename)) {
+    try {
+      const descriptor = openSync(filename, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, PRIVATE_FILE_MODE);
+      closeSync(descriptor);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+  }
+  chmodSync(filename, PRIVATE_FILE_MODE);
+}
+
+function restrictDatabaseFiles(filename: string): void {
+  if (!supportsPosixModes()) return;
+  for (const candidate of [
+    filename,
+    `${filename}-wal`,
+    `${filename}-shm`,
+    `${filename}-journal`,
+    `${filename}${PRE_V10_BACKUP_SUFFIX}`
+  ]) {
+    if (existsSync(candidate)) chmodSync(candidate, PRIVATE_FILE_MODE);
+  }
+}
 
 function tableExists(sqlite: Database.Database, table: string) {
   return Boolean(sqlite.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
@@ -37,17 +92,27 @@ function decodeTask(row: typeof tasks.$inferSelect): TaskRecord {
 }
 
 export function createRepositories(filename: string): RepositoryBundle {
-  if (filename !== ':memory:') mkdirSync(dirname(filename), { recursive: true });
+  if (filename !== ':memory:') {
+    prepareDatabaseDirectory(filename);
+    prepareDatabaseFile(filename);
+    restrictDatabaseFiles(filename);
+  }
   const sqlite = new Database(filename);
   try {
+    sqlite.pragma('foreign_keys = ON');
     sqlite.pragma('journal_mode = WAL');
     backupBeforeV10(sqlite, filename);
     runMigrations(sqlite);
+    if (filename !== ':memory:') restrictDatabaseFiles(filename);
   } catch (error) {
     sqlite.close();
+    if (filename !== ':memory:') restrictDatabaseFiles(filename);
     throw error;
   }
   const db = drizzle(sqlite);
+  const foundationRepositories = createFoundationRepositories(sqlite);
+  const wp1aRepositories = createWp1aRepositories(sqlite);
+  const scheduleRepositories = createScheduleFoundationRepositories(sqlite);
   return {
     agents: {
       async list() { return db.select().from(agentConfigs).all().map(r => JSON.parse(r.json)); },
@@ -101,6 +166,13 @@ export function createRepositories(filename: string): RepositoryBundle {
       async savePermission(sessionId, data) { const time = new Date().toISOString(); db.insert(permissionRequests).values({ id: `${sessionId}:${data.id}`, sessionId, status: data.status, data: JSON.stringify(data), createdAt: time, updatedAt: time }).onConflictDoUpdate({ target: permissionRequests.id, set: { status: data.status, data: JSON.stringify(data), updatedAt: time } }).run(); },
       async saveError(sessionId, message, details) { db.insert(errors).values({ id: `error:${crypto.randomUUID()}`, sessionId, message, details: details === undefined ? undefined : JSON.stringify(details), createdAt: new Date().toISOString() }).run(); }
     },
-    close() { sqlite.close(); }
+    ...foundationRepositories,
+    ...wp1aRepositories,
+    ...scheduleRepositories,
+    close() {
+      if (filename !== ':memory:') restrictDatabaseFiles(filename);
+      sqlite.close();
+      if (filename !== ':memory:') restrictDatabaseFiles(filename);
+    }
   };
 }

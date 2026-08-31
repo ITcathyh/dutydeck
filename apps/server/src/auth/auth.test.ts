@@ -204,6 +204,20 @@ describe('registerAuthMiddleware', () => {
     await app.close();
   });
 
+  it('explicit open mode skips tokens but keeps exact browser Origin checks', async () => {
+    const getToken = vi.fn(async () => TOKEN);
+    const app = buildApp({ getToken, localOnly: false, mode: 'open' });
+    const open = await app.inject({ method: 'GET', url: '/api/protected', headers: { host: 'devbox.example:4310', origin: 'http://devbox.example:4310' } });
+    expect(open.statusCode).toBe(200);
+    const cli = await app.inject({ method: 'POST', url: '/api/protected', headers: { host: 'devbox.example:4310' } });
+    expect(cli.statusCode).toBe(200);
+    const crossOrigin = await app.inject({ method: 'POST', url: '/api/protected', headers: { host: 'devbox.example:4310', origin: 'https://evil.example' } });
+    expect(crossOrigin.statusCode).toBe(403);
+    expect(crossOrigin.json().error.code).toBe('ORIGIN_NOT_ALLOWED');
+    expect(getToken).not.toHaveBeenCalled();
+    await app.close();
+  });
+
   it('非 loopback 无 token → 401', async () => {
     const app = buildApp({ getToken: async () => TOKEN, localOnly: false });
     const response = await app.inject({ method: 'GET', url: '/api/protected', remoteAddress: '8.8.8.8' });
@@ -390,6 +404,15 @@ describe('browser auth routes', () => {
     const app = buildApp(true);
     const status = await app.inject({ method: 'GET', url: '/api/auth/status', remoteAddress: '203.0.113.7' });
     expect(status.json()).toEqual({ authenticated: true, required: false });
+    await app.close();
+  });
+
+  it('reports explicit open access as authenticated without requiring a token', async () => {
+    const app = Fastify();
+    registerBrowserAuthRoutes(app, { getToken: async () => { throw new Error('must not read token'); }, localOnly: false, mode: 'open' });
+    expect((await app.inject({ method: 'GET', url: '/api/auth/status' })).json()).toEqual({ authenticated: true, required: false });
+    expect((await app.inject({ method: 'POST', url: '/api/auth/login', payload: {} })).json()).toEqual({ authenticated: true, required: false });
+    expect((await app.inject({ method: 'POST', url: '/api/auth/logout' })).json()).toEqual({ authenticated: true, required: false });
     await app.close();
   });
 });

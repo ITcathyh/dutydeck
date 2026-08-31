@@ -26,6 +26,60 @@ afterEach(async () => {
 });
 
 describe('HTTP API boundary', () => {
+  it('checks the session execution adapter before invoking runtime mutations', async () => {
+    const runtime = { dispatch: vi.fn() } as any;
+    const authorize = vi.fn(async (_request: any, _sessionId: string, _boundary: any, action: any) => ({
+      allowed: false, action, code: 'channel_bot_disabled', reason: 'staged GroupBinding runtime is blocked', source: 'integration' as const
+    }));
+    const app = await buildApp(runtime, { executionPolicy: { authorize } }); apps.push(app);
+
+    const response = await app.inject({ method: 'POST', url: '/api/sessions/ses_managed/send', payload: { prompt: 'must not execute' } });
+
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toMatchObject({ error: { code: 'channel_bot_disabled' } });
+    expect(authorize).toHaveBeenCalledWith(expect.any(Object), 'ses_managed', 'session', 'turn.append');
+    expect(runtime.dispatch).not.toHaveBeenCalled();
+  });
+
+  it('returns /api/agents through an allowlist without launch secrets or PII', async () => {
+    const privateAgent = {
+      id: 'private-agent',
+      name: 'Safe display name',
+      command: 'private-command-canary',
+      args: ['private-arg-canary'],
+      protocol: 'acp',
+      model: 'model-a',
+      reasoningEffort: 'private-reasoning-canary',
+      version: '1.2.3',
+      cwd: '/private/alice@example.com',
+      env: { PRIVATE_TOKEN: 'private-env-canary' },
+      systemPrompt: 'private-system-canary for alice@example.com',
+      permissionMode: 'ask',
+      timeout: 600,
+      capabilities: { pause: false, resume: true },
+      builtin: true
+    };
+    const app = await buildApp({ listAgents: vi.fn(async () => [privateAgent]) } as any); apps.push(app);
+
+    const response = await app.inject({ method: 'GET', url: '/api/agents' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual([{
+      id: 'private-agent',
+      name: 'Safe display name',
+      version: '1.2.3',
+      model: 'model-a',
+      protocol: 'acp',
+      permissionMode: 'ask'
+    }]);
+    for (const canary of ['private-command-canary', 'private-arg-canary', 'private-reasoning-canary', '/private/', 'alice@example.com', 'PRIVATE_TOKEN', 'private-env-canary', 'private-system-canary']) {
+      expect(response.body).not.toContain(canary);
+    }
+    for (const privateField of ['command', 'args', 'cwd', 'env', 'systemPrompt', 'reasoningEffort', 'timeout', 'capabilities', 'builtin']) {
+      expect(response.json()[0]).not.toHaveProperty(privateField);
+    }
+  });
+
   it('mounts optional Lark status, send, and update routes', async () => {
     const lark: any = { send: vi.fn(async () => ({ messageId: 'om_sent', chatId: 'oc_chat' })), update: vi.fn(async () => ({ messageId: 'om_sent' })) };
     const app = await buildApp({} as any, { lark: { env: { LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_AGENT_NAME: 'My Agent' }, service: lark } }); apps.push(app);

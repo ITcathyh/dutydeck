@@ -24,6 +24,8 @@ export interface DaemonCommandResult {
   running: boolean;
   pid?: number;
   address?: string;
+  authEnabled?: boolean;
+  authentication?: 'required' | 'disabled';
   logFile?: string;
   state?: 'started' | 'already-running' | 'not-running' | 'stopped' | 'restarted';
   error?: string;
@@ -34,23 +36,34 @@ const RESTART_HOST_ENV = 'DOCKMUX_DAEMON_RESTART_HOST';
 const RESTART_PORT_ENV = 'DOCKMUX_DAEMON_RESTART_PORT';
 const RESTART_CWD_ENV = 'DOCKMUX_DAEMON_RESTART_CWD';
 const RESTART_DATABASE_ENV = 'DOCKMUX_DAEMON_RESTART_DATABASE';
+const RESTART_AUTH_ENV = 'DOCKMUX_DAEMON_RESTART_AUTH';
 
 export interface DaemonCommandHandlers {
   serve(options: CliOptions, onReady?: () => void): Promise<void> | void;
 }
 
 export function daemonRestartOptions(options: CliOptions, previousState?: DaemonState, env: NodeJS.ProcessEnv = {}): CliOptions {
+  const inheritedAuth = previousState?.authEnabled === false
+    ? false
+    : previousState?.authEnabled === true
+      ? true
+      : env[RESTART_AUTH_ENV] === 'false'
+        ? false
+        : env[RESTART_AUTH_ENV] === 'true'
+          ? true
+          : undefined;
   return {
     ...options,
     ...(options.cwd === undefined && (previousState?.cwd ?? env[RESTART_CWD_ENV]) ? { cwd: previousState?.cwd ?? env[RESTART_CWD_ENV] } : {}),
     ...(options.database === undefined && (previousState?.database ?? env[RESTART_DATABASE_ENV]) ? { database: previousState?.database ?? env[RESTART_DATABASE_ENV] } : {}),
     ...(options.host === undefined && (previousState?.host ?? env[RESTART_HOST_ENV]) ? { host: previousState?.host ?? env[RESTART_HOST_ENV] } : {}),
-    ...(options.port === undefined && (previousState?.port ?? env[RESTART_PORT_ENV]) ? { port: String(previousState?.port ?? env[RESTART_PORT_ENV]) } : {})
+    ...(options.port === undefined && (previousState?.port ?? env[RESTART_PORT_ENV]) ? { port: String(previousState?.port ?? env[RESTART_PORT_ENV]) } : {}),
+    ...(options.auth === undefined && inheritedAuth !== undefined ? { auth: inheritedAuth } : {})
   };
 }
 
 /** Mark the running daemon as ready and refresh its live metadata. */
-export function markDaemonReady(dir: string, patch: Partial<Pick<DaemonState, 'host' | 'port' | 'address' | 'database'>> = {}): void {
+export function markDaemonReady(dir: string, patch: Partial<Pick<DaemonState, 'host' | 'port' | 'address' | 'database' | 'authEnabled'>> = {}): void {
   const previous = readDaemonStatus(dir);
   writeState(dir, {
     pid: process.pid,
@@ -82,11 +95,12 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
       startedAt: meta.startedAt,
       cwd,
       database,
-      ...addressFromCli(options)
+      ...addressFromCli(options, env)
     });
     writeLastDaemonDir(dir, env.HOME);
-    await handlers.serve({ ...options, database }, () => markDaemonReady(dir, { ...addressFromCli(options), database }));
-    return { ok: true, action: 'start', running: true, pid: process.pid };
+    await handlers.serve({ ...options, database }, () => markDaemonReady(dir, { ...addressFromCli(options, env), database }));
+    const authEnabled = authEnabledFromCli(options, env);
+    return { ok: true, action: 'start', running: true, pid: process.pid, authEnabled, authentication: authEnabled ? 'required' : 'disabled' };
   }
 
   // Foreground parent: refuse to double-start.
@@ -109,14 +123,16 @@ async function waitUntilReady(dir: string, startedAt: string): Promise<DaemonCom
   while (Date.now() < deadline) {
     const state = readDaemonStatus(dir);
     if (state && state.pid > 0 && pidAlive(state.pid) && state.ready) {
-      return { ok: true, action: 'start', running: true, pid: state.pid, address: state.address, logFile: daemonPaths(dir).logFile, state: 'started' };
+      const authEnabled = state.authEnabled !== false;
+      return { ok: true, action: 'start', running: true, pid: state.pid, address: state.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile: daemonPaths(dir).logFile, state: 'started' };
     }
     await sleep(200);
   }
   const state = readDaemonStatus(dir);
   const pid = pidFromState(state);
   if (pid > 0 && pidAlive(pid)) {
-    return { ok: true, action: 'start', running: true, pid, address: state?.address, logFile: daemonPaths(dir).logFile, state: 'started', error: 'Daemon started but did not report ready within the timeout.' };
+    const authEnabled = state?.authEnabled !== false;
+    return { ok: true, action: 'start', running: true, pid, address: state?.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile: daemonPaths(dir).logFile, state: 'started', error: 'Daemon started but did not report ready within the timeout.' };
   }
   return { ok: false, action: 'start', running: false, state: 'not-running', error: 'Daemon failed to start within the timeout. See the log file for details.' };
 }
@@ -170,7 +186,8 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
     ...(restartOptions.cwd ? { [RESTART_CWD_ENV]: restartOptions.cwd } : {}),
     ...(restartOptions.database ? { [RESTART_DATABASE_ENV]: restartOptions.database } : {}),
     ...(restartOptions.host ? { [RESTART_HOST_ENV]: restartOptions.host } : {}),
-    ...(restartOptions.port ? { [RESTART_PORT_ENV]: restartOptions.port } : {})
+    ...(restartOptions.port ? { [RESTART_PORT_ENV]: restartOptions.port } : {}),
+    ...(restartOptions.auth !== undefined ? { [RESTART_AUTH_ENV]: String(restartOptions.auth) } : {})
   };
   if (previousCwd && previousCwd !== process.cwd()) {
     process.chdir(previousCwd);
@@ -189,6 +206,8 @@ export interface DaemonStatusInfo {
   logFile?: string;
   startedAt?: string;
   ready?: boolean;
+  authEnabled?: boolean;
+  authentication?: 'required' | 'disabled';
 }
 
 /** `dockmux status`: report whether a daemon is alive and where. */
@@ -197,19 +216,29 @@ export function daemonStatus(): DaemonStatusInfo {
   const state = readDaemonStatus(dir);
   const pid = pidFromState(state);
   const alive = pid > 0 && pidAlive(pid);
+  const authEnabled = state?.authEnabled !== false;
   return {
     running: alive,
     pid: alive ? pid : undefined,
     address: alive ? state?.address : undefined,
     logFile: alive ? daemonPaths(dir).logFile : undefined,
     startedAt: alive ? state?.startedAt : undefined,
-    ready: alive ? state?.ready : false
+    ready: alive ? state?.ready : false,
+    authEnabled: alive ? authEnabled : undefined,
+    authentication: alive ? (authEnabled ? 'required' : 'disabled') : undefined
   };
 }
 
-function addressFromCli(options: CliOptions): { host?: string; port?: number; address?: string } {
-  const host = options.host ?? '127.0.0.1';
-  const port = Number(options.port ?? 4310);
+function authEnabledFromCli(options: CliOptions, env: NodeJS.ProcessEnv): boolean {
+  if (options.auth !== undefined) return options.auth;
+  return env.DOCKMUX_AUTH !== 'false';
+}
+
+function addressFromCli(options: CliOptions, env: NodeJS.ProcessEnv = process.env): { host?: string; port?: number; address?: string; authEnabled: boolean } {
+  const host = options.localOnly === true || (options.host === undefined && env.DOCKMUX_LOCAL_ONLY === 'true')
+    ? '127.0.0.1'
+    : options.host ?? env.DOCKMUX_HOST ?? '127.0.0.1';
+  const port = Number(options.port ?? env.DOCKMUX_PORT ?? 4310);
   const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
-  return { host, port, address: `http://${displayHost.includes(':') ? `[${displayHost}]` : displayHost}:${port}` };
+  return { host, port, address: `http://${displayHost.includes(':') ? `[${displayHost}]` : displayHost}:${port}`, authEnabled: authEnabledFromCli(options, env) };
 }

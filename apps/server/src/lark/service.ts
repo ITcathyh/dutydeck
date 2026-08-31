@@ -24,6 +24,8 @@ export interface LarkCardInput {
   idempotencyKey?: string;
   readOnly?: boolean;
   permissionMode?: PermissionMode;
+  /** Override the lifecycle label without changing the machine state. */
+  statusLabel?: string;
 }
 export interface LarkSendInput extends LarkCardInput { receiveId?: string; receiveIdType?: LarkReceiveIdType; chatId?: string }
 export interface LarkReplyInput extends LarkCardInput { messageId: string; replyInThread?: boolean; replyRootId?: string }
@@ -31,6 +33,8 @@ export interface LarkUpdateInput extends LarkCardInput { messageId: string }
 export interface LarkMessageResult { messageId: string; chatId?: string }
 export interface LarkReactionResult { messageId: string; reactionId: string; emojiType: string }
 export interface LarkBotInfo { appName: string; openId: string; avatarUrl?: string; activateStatus?: number }
+export interface LarkApplicationIdentityCheck { verified: true; reportedAppId?: string; tenantKey?: string }
+export interface LarkChatPreflightInfo { chatMode?: string; chatStatus?: string }
 export interface LarkIdentityResolutionCheck { verified: true; sampleOpenId: string; sampleEmails: string[] }
 export interface LarkMessageResourceResult { data: Uint8Array; contentType?: string }
 export type LarkChatMemberType = 'user' | 'bot';
@@ -284,7 +288,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const elapsedSeconds = Number(input.elapsedSeconds ?? 0);
   if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 0) throw new LarkServiceError('INVALID_ELAPSED_SECONDS', 'elapsedSeconds must be a non-negative number', 400);
   const content = input.markdown !== undefined ? String(input.markdown) : state === 'completed' ? '任务已完成。' : '';
-  const liveTitle = state === 'running' ? '执行中' : presentation.title;
+  const liveTitle = input.statusLabel?.trim()
+    ? clipCardField(input.statusLabel.trim(), 32)
+    : state === 'running' ? '执行中' : presentation.title;
   const compactTaskName = taskName;
   const actionButton = !input.readOnly && state === 'queued' ? {
     tag: 'button', text: { tag: 'plain_text', content: '取消' }, type: 'default', size: 'small',
@@ -845,6 +851,41 @@ export class LarkCardService {
     };
   }
 
+  /**
+   * Read back the exact application resource addressed by the configured App
+   * credential. A successful request proves that the tenant token can inspect
+   * that App; when Lark includes an App ID or tenant key, callers can apply a
+   * stricter equality check without exposing either value outside the probe.
+   */
+  async checkApplicationIdentity(expectedAppId: string): Promise<LarkApplicationIdentityCheck> {
+    const appId = required(expectedAppId, 'expectedAppId');
+    const payload = await this.request(`/open-apis/application/v6/applications/${encodeURIComponent(appId)}?lang=en_us`, { method: 'GET' });
+    const application = payload.data?.app ?? payload.data?.application ?? payload.data ?? {};
+    const reportedAppId = String(application.app_id ?? application.appId ?? '').trim() || undefined;
+    const tenantKey = String(application.tenant_key ?? application.tenantKey ?? '').trim() || undefined;
+    return { verified: true, ...(reportedAppId ? { reportedAppId } : {}), ...(tenantKey ? { tenantKey } : {}) };
+  }
+
+  /** Read-only metadata needed to classify a configured GroupBinding. */
+  async getChatPreflightInfo(chatIdInput: string): Promise<LarkChatPreflightInfo> {
+    const chatId = required(chatIdInput, 'chatId');
+    if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
+    const payload = await this.request(`/open-apis/im/v1/chats/${encodeURIComponent(chatId)}?user_id_type=open_id`, { method: 'GET' });
+    const chat = payload.data ?? {};
+    const chatMode = String(chat.chat_mode ?? '').trim() || undefined;
+    const chatStatus = String(chat.chat_status ?? '').trim() || undefined;
+    return { ...(chatMode ? { chatMode } : {}), ...(chatStatus ? { chatStatus } : {}) };
+  }
+
+  /** The tenant token implicitly identifies the bot whose membership is read. */
+  async checkBotInChat(chatIdInput: string): Promise<boolean> {
+    const chatId = required(chatIdInput, 'chatId');
+    if (!chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
+    const payload = await this.request(`/open-apis/im/v1/chats/${encodeURIComponent(chatId)}/members/is_in_chat`, { method: 'GET' });
+    if (typeof payload.data?.is_in_chat !== 'boolean') throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark membership response did not include is_in_chat', 502);
+    return payload.data.is_in_chat;
+  }
+
   async getUserEmails(openId: string): Promise<string[]> {
     const payload = await this.request(`/open-apis/contact/v3/users/${encodeURIComponent(required(openId, 'openId'))}?user_id_type=open_id`, { method: 'GET' });
     const user = payload.data?.user ?? {};
@@ -996,6 +1037,7 @@ export class LarkCardService {
       const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
       throw new LarkServiceError('LARK_OPENAPI_ERROR', `Lark OpenAPI request failed: ${message} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
         upstreamCode: payload.code,
+        upstreamHttpStatus: response.status,
         ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
         ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
       });

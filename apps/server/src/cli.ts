@@ -18,6 +18,11 @@ import { runNpmForDockmuxUpdate, updateDockmux } from './update.js';
 import { loadConfig } from '@dockmux/config';
 import { createRepositories } from '@dockmux/storage';
 import { runAuthTokenCommand } from './auth/auth.js';
+import { BotmuxImportError } from '@dockmux/botmux-importer';
+import { BotmuxImportCliError, runBotmuxArchive, runBotmuxDiscover, runBotmuxPlan } from './botmux-import-cli.js';
+import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dockmux/secret-provider';
+import { SecretCliError, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
+import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
@@ -90,6 +95,16 @@ async function main() {
   }
   const output = (result: unknown) => process.stdout.write(`${JSON.stringify({ ok: true, ...result as object })}\n`);
   const daemonServe: (options: CliOptions, onReady?: () => void) => Promise<void> = (options, onReady) => serve(options, onReady);
+  const withSecretContext = async <T>(database: string | undefined, work: (context: SecretCliContext) => Promise<T>): Promise<T> => {
+    const configured = database
+      ? loadConfig({ ...process.env, DOCKMUX_DATABASE_URL: database }).databaseUrl
+      : readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl;
+    const repositories = createRepositories(configured);
+    try {
+      const provider = new LocalFileSecretProvider(secretDirectoryForDatabase(configured), { createDirectory: true });
+      return await work({ repositories, provider });
+    } finally { repositories.close(); }
+  };
   const program = createCliProgram(packageJson.version, {
     serve,
     daemonStart: async options => {
@@ -126,8 +141,20 @@ async function main() {
         repos.close();
       }
     },
+    botmuxDiscover: runBotmuxDiscover,
+    botmuxPlan: runBotmuxPlan,
+    botmuxArchive: runBotmuxArchive,
+    secretList: async options => { output(await withSecretContext(options.database, runSecretList)); },
+    secretSet: async (id, options) => { output(await withSecretContext(options.database, context => runSecretSet(id, options, context))); },
+    secretRotate: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRotate(id, options, context))); },
+    secretRemove: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRemove(id, options, context))); },
     larkSend: async (markdown, options) => { output(await runLarkSend(markdown, options)); },
     larkUpdate: async (markdown, options) => { output(await runLarkUpdate(markdown, options)); },
+    identityPreflight: async (channelBotId, options) => {
+      const result = await runIdentityPreflightCli(channelBotId, options);
+      output(result);
+      if (result.status === 'blocked') process.exitCode = 2;
+    },
     groupSelf: async () => { output(await runGroupSelf()); },
     groupPeers: async () => { output(await runGroupPeers()); },
     groupMembers: async () => { output(await runGroupMembers()); },
@@ -154,6 +181,10 @@ try {
   await main();
 } catch (error) {
   if (error instanceof AgentGroupToolCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: error.error })}\n`);
+  else if (error instanceof BotmuxImportError || error instanceof BotmuxImportCliError) {
+    process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
+  }
+  else if (error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   else process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   // relay 的 CLI 错误自带退出码契约（2 用法 / 3 通道不可用），不能一律压成 1
   process.exit(error instanceof RelayCliError ? error.exitCode : 1);

@@ -11,6 +11,8 @@ export const ACXP_VERSION = '0.13.0';
 export const appConfigSchema = z.object({
   host: z.string().default('127.0.0.1'),
   port: z.number().int().positive().default(4310),
+  /** Access-token authentication remains enabled unless explicitly disabled. */
+  authEnabled: z.boolean().default(true),
   databaseUrl: z.string().default('./.dockmux/dockmux.db'),
   acpxCommand: z.string().default('acpx'),
   driverIdleTimeoutMs: z.number().nonnegative().default(6 * 60 * 60_000),
@@ -91,6 +93,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContribution
   return appConfigSchema.parse({
     host: env.DOCKMUX_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DOCKMUX_HOST,
     port: env.DOCKMUX_PORT ? Number(env.DOCKMUX_PORT) : undefined,
+    authEnabled: env.DOCKMUX_AUTH === undefined
+      ? undefined
+      : z.enum(['true', 'false']).parse(env.DOCKMUX_AUTH) === 'true',
     databaseUrl: resolve(defaultCwd, env.DOCKMUX_DATABASE_URL ?? './.dockmux/dockmux.db'),
     acpxCommand: env.DOCKMUX_ACPX_COMMAND,
     driverIdleTimeoutMs: env.DOCKMUX_DRIVER_IDLE_TIMEOUT_MS ? Number(env.DOCKMUX_DRIVER_IDLE_TIMEOUT_MS) : undefined,

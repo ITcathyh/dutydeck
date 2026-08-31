@@ -5,9 +5,11 @@
  * tmux-pipe-backend.ts. Architecture (no PTY, no attach):
  *   - `tmux new-session -d -s <name> -x <cols> -y <rows> -c <cwd>` starts a
  *     bare shell in a detached session (spawnSync, env-scrubbed client).
- *   - The CLI is launched by typing `exec /usr/bin/env KEY=VAL… <bin> <args>`
- *     into the pane via send-keys, so session-specific env NEVER touches the
- *     tmux server's global environment (injectEnv travels the same prefix).
+ *   - Session-specific env is staged with `set-environment -t <session>`, the
+ *     pane is atomically replaced with the CLI via `respawn-pane`, then the
+ *     staged values are immediately removed from tmux. This avoids both the
+ *     shared server-global environment and typing secrets/large launch lines
+ *     into an interactive shell's visible history.
  *   - `tmux pipe-pane -o -t <name> 'cat >> <tmpfile>'` replicates every byte
  *     the pane writes; a `tail -F` child streams the file back to onData.
  *   - Writes go through `tmux send-keys -l` (long/multiline text via
@@ -75,6 +77,19 @@ export class TmuxSessionExistsError extends TmuxError {
   }
 }
 
+/**
+ * The tmux session exists, but it was not created for the Dockmux session the
+ * caller is trying to restore.  Treating an arbitrary same-named pane as ours
+ * would attach user input to the wrong process, so ownership mismatch is a
+ * hard failure and never triggers kill/respawn.
+ */
+export class TmuxOwnershipError extends TmuxError {
+  constructor(message: string, stderr?: string) {
+    super(message, stderr);
+    this.name = 'TmuxOwnershipError';
+  }
+}
+
 // ─── Classification helpers (ported from botmux tmux-backend.ts) ───────────
 
 /**
@@ -90,6 +105,14 @@ export class TmuxSessionExistsError extends TmuxError {
  */
 function isServerLevelErrorText(stderrText: string): boolean {
   return /error connecting to|lost server|server exited unexpectedly/i.test(stderrText);
+}
+
+/** A clean tmux client answer that its selected socket path does not exist.
+ * Unlike ECONNREFUSED/lost-server, ENOENT proves there is no server (and
+ * therefore no target session) in this namespace at the time of the probe.
+ * This is the normal first-use result for a fresh TMUX_TMPDIR. */
+function isSocketMissingErrorText(stderrText: string): boolean {
+  return /error connecting to .*\(No such file or directory\)/i.test(stderrText);
 }
 
 /** True when a thrown exec*Sync error is the caller's own timeout deadline
@@ -110,12 +133,15 @@ function shellescape(s: string): string {
  * inherited env) from the first client that boots it, so anything
  * session-specific (opts.env / injectEnv) must never travel here.
  * TMUX/TMUX_PANE are stripped so a daemon started inside a tmux session
- * doesn't target that parent server's socket.
+ * doesn't target that parent server's socket. TMUX_TMPDIR is different: it
+ * selects the tmux socket root itself, so every client must preserve it or a
+ * backend launched in an isolated namespace will silently create/query the
+ * default server instead.
  */
 function tmuxClientEnv(): NodeJS.ProcessEnv {
   const allow = [
     'PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG',
-    'LC_ALL', 'LC_CTYPE', 'TERM', 'XDG_RUNTIME_DIR', 'TZ',
+    'LC_ALL', 'LC_CTYPE', 'TERM', 'XDG_RUNTIME_DIR', 'TZ', 'TMUX_TMPDIR',
   ];
   const out: NodeJS.ProcessEnv = {};
   for (const key of allow) {
@@ -185,12 +211,28 @@ export function isTmuxAvailable(): boolean {
 /** send-keys -l payloads longer than this risk hitting the tty canonical
  *  input limit (MAX_CANON, 4096 bytes on Linux) — route through paste-buffer. */
 const LITERAL_SEND_LIMIT = 4096;
+const OWNER_OPTION = '@dockmux_owner_id';
+const METADATA_OPTIONS = {
+  first_prompt_sent: '@dockmux_first_prompt_sent',
+} as const;
+
+export type TmuxDockmuxMetadataKey = keyof typeof METADATA_OPTIONS;
+
+export interface TmuxBackendOptions {
+  /**
+   * Stable Dockmux-owned identity expected on spawn/attach.  When present,
+   * attach refuses sessions without the exact marker.  This is what prevents
+   * the production driver from adopting BotMux or unrelated user tmux panes.
+   */
+  ownerId?: string;
+}
 
 export class TmuxBackend implements SessionBackend {
   readonly kind = 'tmux' as const;
 
   /** SessionBackend contract: the tmux session this backend owns. */
   readonly sessionName: string;
+  readonly ownerId?: string;
   private cols = 80;
   private rows = 24;
   private started = false;
@@ -204,8 +246,9 @@ export class TmuxBackend implements SessionBackend {
   private readonly exitCbs: Array<(code: number | null, signal: string | null) => void> = [];
   private exitTimer: NodeJS.Timeout | null = null;
 
-  constructor(sessionName: string) {
+  constructor(sessionName: string, options: TmuxBackendOptions = {}) {
     this.sessionName = sessionName;
+    this.ownerId = options.ownerId;
   }
 
   // ─── SessionBackend implementation ──────────────────────────────────────
@@ -237,22 +280,23 @@ export class TmuxBackend implements SessionBackend {
     }
 
     try {
-      // 2. Pipe every byte the pane writes into a per-session tmp file;
+      this.writeOwnershipMarker();
+      // 2. Stage the child environment on this session only. injectEnv is
+      // applied last so it wins on collisions, matching PtyBackend.
+      const childEnvironment = { ...opts.env, ...opts.injectEnv };
+      this.stageSessionEnvironment(childEnvironment);
+
+      // 3. Pipe every byte the pane writes into a per-session tmp file;
       //    `tail -F` streams it back to onData. The file is removed on kill.
       this.startCapture();
 
-      // 3. Launch the CLI with a per-pane env prefix: env(1) assignments
-      //    apply to the CLI only, after the (scrubbed) pane shell starts.
-      //    `exec` replaces the shell so pane_pid IS the CLI.
-      const assignments = [
-        ...Object.entries(opts.env),
-        ...Object.entries(opts.injectEnv ?? {}),
-      ].map(([k, v]) => `${k}=${v}`);
-      const launchLine = ['exec', '/usr/bin/env', ...assignments, bin, ...args]
-        .map(shellescape)
-        .join(' ');
-      this.sendLiteral(launchLine);
-      runTmux(['send-keys', '-t', this.sessionName, 'Enter']);
+      // 4. Replace the bootstrap shell instead of typing a potentially huge
+      // launch line into it. tmux forks the pane with a snapshot of the
+      // session environment before respawn-pane returns; clear the staged
+      // values immediately afterwards so secrets do not linger in tmux.
+      const launchLine = ['exec', bin, ...args].map(shellescape).join(' ');
+      runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, launchLine]);
+      this.clearSessionEnvironment(Object.keys(childEnvironment));
 
       this.startExitWatcher();
     } catch (err) {
@@ -311,6 +355,10 @@ export class TmuxBackend implements SessionBackend {
     this.exited = true;
     this.stopExitWatcher();
     this.cleanup();
+    // An owner-bound backend may be a not-yet-attached restoration handle.
+    // If its name now points at an unmarked/foreign pane, cleanup after a
+    // failed attach must never destroy that pane (including BotMux history).
+    if (this.ownerId !== undefined && TmuxBackend.sessionOwner(this.sessionName) !== this.ownerId) return;
     try { runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 }); } catch { /* already gone */ }
   }
 
@@ -337,10 +385,16 @@ export class TmuxBackend implements SessionBackend {
    */
   attach(opts: { cols: number; rows: number }): void {
     if (this.started) throw new TmuxError('tmux attach() called twice');
+    this.assertOwnership();
     this.started = true;
     this.cols = opts.cols;
     this.rows = opts.rows;
     try {
+      // A daemon crash leaves tmux's `pipe-pane` writer alive even though the
+      // local tail process is gone. Replace that stale capture before arming
+      // ours; the higher-level lease/fencing layer is responsible for
+      // preventing two live daemons from attaching concurrently.
+      runTmux(['pipe-pane', '-t', this.sessionName]);
       this.startCapture();
       this.startExitWatcher();
     } catch (err) {
@@ -391,6 +445,25 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
+  /** Read a small non-secret driver lifecycle marker persisted by tmux. */
+  getDockmuxMetadata(key: TmuxDockmuxMetadataKey): string | undefined {
+    if (this.exited) return undefined;
+    try {
+      const value = runTmux([
+        'show-options', '-v', '-t', this.sessionName, METADATA_OPTIONS[key],
+      ], { timeout: 2000 }).trim();
+      return value || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Persist a small non-secret driver lifecycle marker on the tmux session. */
+  setDockmuxMetadata(key: TmuxDockmuxMetadataKey, value: string): void {
+    if (this.exited) throw new TmuxError('cannot write metadata on an exited tmux backend');
+    runTmux(['set-option', '-t', this.sessionName, METADATA_OPTIONS[key], value], { timeout: 2000 });
+  }
+
   // ─── Static helpers ─────────────────────────────────────────────────────
 
   /**
@@ -418,6 +491,7 @@ export class TmuxBackend implements SessionBackend {
       const err = e as { status?: number; signal?: string; stderr?: Buffer };
       if (err && typeof err.status === 'number' && !err.signal) {
         const stderrText = (err.stderr?.toString?.() ?? '').trim();
+        if (isSocketMissingErrorText(stderrText)) return 'missing';
         if (isServerLevelErrorText(stderrText)) return 'unknown';
         return 'missing';
       }
@@ -434,6 +508,16 @@ export class TmuxBackend implements SessionBackend {
         env: tmuxClientEnv(),
       });
     } catch { /* session doesn't exist */ }
+  }
+
+  /** Diagnostic/readiness helper.  Missing markers return undefined. */
+  static sessionOwner(name: string): string | undefined {
+    try {
+      const owner = runTmux(['show-options', '-v', '-t', name, OWNER_OPTION], { timeout: 2000 }).trim();
+      return owner || undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   // ─── Internals ──────────────────────────────────────────────────────────
@@ -466,6 +550,33 @@ export class TmuxBackend implements SessionBackend {
 
     // -o opens only when no pipe is set yet; detach() cancels it.
     runTmux(['pipe-pane', '-o', '-t', this.sessionName, `cat >> ${shellescape(this.pipePath)}`]);
+  }
+
+  private writeOwnershipMarker(): void {
+    if (this.ownerId === undefined) return;
+    runTmux(['set-option', '-t', this.sessionName, OWNER_OPTION, this.ownerId], { timeout: 2000 });
+  }
+
+  private stageSessionEnvironment(environment: Record<string, string>): void {
+    for (const [key, value] of Object.entries(environment)) {
+      runTmux(['set-environment', '-t', this.sessionName, '--', key, value], { timeout: 2000 });
+    }
+  }
+
+  private clearSessionEnvironment(keys: string[]): void {
+    for (const key of keys) {
+      runTmux(['set-environment', '-u', '-t', this.sessionName, '--', key], { timeout: 2000 });
+    }
+  }
+
+  private assertOwnership(): void {
+    if (this.ownerId === undefined) return;
+    const actual = TmuxBackend.sessionOwner(this.sessionName);
+    if (actual !== this.ownerId) {
+      throw new TmuxOwnershipError(
+        `Refusing to attach tmux session ${this.sessionName}: Dockmux ownership marker mismatch`,
+      );
+    }
   }
 
   /** Send text literally: send-keys -l for short single-line payloads,
@@ -522,8 +633,9 @@ export class TmuxBackend implements SessionBackend {
       if (TmuxBackend.probeSession(this.sessionName) === 'missing') {
         failed = true;
       } else {
-        // Session exists: with `exec env` the pane process IS the CLI, so a
-        // dead pid means the CLI exited even if tmux hasn't reaped the pane.
+        // Session exists: respawn-pane launches with `exec`, so the pane
+        // process IS the CLI; a dead pid is therefore authoritative even if
+        // tmux has not reaped the pane yet.
         const pid = this.getPid();
         if (pid !== null) {
           try {

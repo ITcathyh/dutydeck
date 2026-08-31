@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "app_ref": "app_fixture_alpha",
+  "schedule": {
+    "schedule_ref": "schedule_fixture_interval",
+    "source_enabled": true,
+    "ownership": "botmux_owned",
+    "target_state": "staged_disabled",
+    "generation": 7,
+    "source_watermark_ref": "watermark_fixture_source",
+    "target_watermark_ref": null,
+    "occurrence_key_template": "schedule_ref+generation+scheduled_at"
+  },
+  "listener_fence": {
+    "source_runtime": "botmux",
+    "target_runtime": "dockmux",
+    "active_generation": 7,
+    "source_drained": false,
+    "source_reconnect_inhibited": false,
+    "target_listener_eligible": false
+  },
+  "expected": [
+    { "operation": "target_schedule_tick", "result": "blocked_source_is_writer" },
+    { "operation": "same_occurrence_retry", "result": "same_occurrence_no_duplicate" },
+    { "operation": "target_listener_start", "result": "blocked_source_not_fenced" },
+    { "operation": "rollback_before_target_start", "result": "source_generation_unchanged" },
+    { "operation": "rollback_after_target_observation", "result": "target_drain_then_watermark_then_source_restore" }
+  ]
+}

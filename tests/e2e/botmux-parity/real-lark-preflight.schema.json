@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dockmux.invalid/schemas/botmux-parity-real-lark-preflight-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dedicated_test_app",
+    "production_app",
+    "app_ref",
+    "chat_ref",
+    "identity_validation",
+    "external_fencing",
+    "valid_until"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "dedicated_test_app": { "const": true },
+    "production_app": { "const": false },
+    "app_ref": { "type": "string", "pattern": "^app_[a-f0-9]{24}$" },
+    "chat_ref": { "type": "string", "pattern": "^chat_[a-f0-9]{24}$" },
+    "identity_validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target_app_bot_identity_verified", "chat_membership_verified", "principal_app_scope_verified", "evidence_ref"],
+      "properties": {
+        "target_app_bot_identity_verified": { "const": true },
+        "chat_membership_verified": { "const": true },
+        "principal_app_scope_verified": { "const": true },
+        "evidence_ref": { "type": "string", "pattern": "^evidence_[a-f0-9]{24}$" }
+      }
+    },
+    "external_fencing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_listener_drained",
+        "source_reconnect_inhibited",
+        "target_listener_disabled",
+        "schedule_writer",
+        "generation",
+        "watermark_ref",
+        "evidence_ref"
+      ],
+      "properties": {
+        "source_listener_drained": { "const": true },
+        "source_reconnect_inhibited": { "const": true },
+        "target_listener_disabled": { "const": true },
+        "schedule_writer": { "const": "botmux_only" },
+        "generation": { "type": "integer", "minimum": 1 },
+        "watermark_ref": { "type": "string", "pattern": "^watermark_[a-f0-9]{24}$" },
+        "evidence_ref": { "type": "string", "pattern": "^evidence_[a-f0-9]{24}$" }
+      }
+    },
+    "valid_until": { "type": "string", "format": "date-time" }
+  }
+}

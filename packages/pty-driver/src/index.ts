@@ -3,6 +3,11 @@ export type { PtyCliDriverOptions } from './driver.js';
 export { PTY_AGENT_CONTRIBUTIONS } from './contributions.js';
 export type { PtyAgentContribution } from './contributions.js';
 export {
+  createDockmuxPersistentBackend,
+  dockmuxPtySessionName,
+  type BackendProbes,
+} from './persistent-backend.js';
+export {
   createTranscriptTailer,
   TRANSCRIPT_ADAPTER_IDS,
   type TranscriptEventSource,

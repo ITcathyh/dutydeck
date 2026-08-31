@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "agent_definitions": [
+    {
+      "id": "agent_fixture_primary",
+      "driver_kind": "pty-cli",
+      "adapter_id": "claude-code",
+      "backend_required": "tmux"
+    }
+  ],
+  "channel_bots": [
+    {
+      "id": "channel_bot_fixture_alpha",
+      "app_ref": "app_fixture_alpha",
+      "default_agent_definition_id": "agent_fixture_primary",
+      "routing_defaults": {
+        "p2p_mode": "thread",
+        "group_reply_mode": "chat-topic",
+        "mention_policy": "topic"
+      },
+      "group_tools_ceiling": { "read": true, "discover": true, "send": false },
+      "desired_listener_state": "disabled",
+      "full_trust_confirmed": false
+    }
+  ],
+  "group_bindings": [
+    {
+      "id": "binding_fixture_alpha",
+      "channel_bot_id": "channel_bot_fixture_alpha",
+      "chat_ref": "chat_fixture_alpha",
+      "oncall": true,
+      "workspace_ref": "workspace_fixture_alpha",
+      "mention_policy": "topic",
+      "group_reply_mode": "chat-topic",
+      "group_tools": { "read": true, "discover": true, "send": false }
+    }
+  ],
+  "principals": [
+    { "id": "principal_fixture_member", "role": "member", "grants": ["can_talk"] },
+    { "id": "principal_fixture_operator", "role": "operator", "grants": ["can_talk", "can_operate"] },
+    { "id": "principal_fixture_admin", "role": "admin", "grants": ["can_talk", "can_operate", "admin"] },
+    { "id": "principal_fixture_unknown", "role": "unknown", "grants": [] }
+  ],
+  "decisions": [
+    { "principal": "principal_fixture_member", "action": "task.create", "allow": true },
+    { "principal": "principal_fixture_member", "action": "run.interrupt", "allow": false },
+    { "principal": "principal_fixture_member", "action": "terminal.read", "allow": false },
+    { "principal": "principal_fixture_operator", "action": "run.interrupt", "allow": true },
+    { "principal": "principal_fixture_operator", "action": "terminal.write", "allow": false, "reason": "explicit_terminal_write_gate_missing" },
+    { "principal": "principal_fixture_operator", "action": "group_tools.send", "allow": false, "reason": "group_send_ceiling_denies" },
+    { "principal": "principal_fixture_admin", "action": "group_binding.update", "allow": true },
+    { "principal": "principal_fixture_unknown", "action": "task.create", "allow": false }
+  ]
+}

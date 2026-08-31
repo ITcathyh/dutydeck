@@ -803,8 +803,10 @@ describe('PTY_AGENT_CONTRIBUTIONS 覆盖度', () => {
   //   mir/dsh/codex-app —— runner 类，buildArgs 产出的是 runner 参数，
   //                        而 dockmux 尚未移植 botmux 的 runner 脚本
   //   mojo        —— 执行主体是 MojoBackend（按回合 shell out），尚未移植
+  //   mtr         —— 可执行文件名与常见网络诊断工具冲突；在能可靠指纹识别前
+  //                        仅允许通过 DOCKMUX_AGENTS_JSON 显式配置
   // 移植 runner / 对应后端后再登记，并把 id 从这里挪走。
-  const NOT_CONTRIBUTED = new Set(['riff', 'mira', 'mir', 'dsh', 'codex-app', 'mojo']);
+  const NOT_CONTRIBUTED = new Set(['riff', 'mira', 'mir', 'dsh', 'codex-app', 'mojo', 'mtr']);
 
   it('每个 adapterId 都能创建出适配器，且 id 自洽', async () => {
     const { PTY_AGENT_CONTRIBUTIONS } = await import('@dockmux/pty-driver');

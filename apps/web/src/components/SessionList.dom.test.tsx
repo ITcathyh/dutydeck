@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from '../api';
 import { SessionList, type SessionListProps } from './SessionList';
 
-const baseProps: SessionListProps = { open: false, onClose: () => {}, sessions: [], summaries: {}, sessionsLoading: false, agents: [], larkBots: [], view: 'all', onViewChange: () => {}, onSelect: () => {}, onNewSession: () => {}, onOpenLark: () => {} };
+const baseProps: SessionListProps = { open: false, onClose: () => {}, sessions: [], summaries: {}, sessionsLoading: false, agents: [], larkBots: [], view: 'all', onViewChange: () => {}, onSelect: () => {}, onNewSession: () => {}, onOpenLarkSetup: () => {}, onOpenControlCenter: () => {} };
 const originalMatchMedia = window.matchMedia;
 
 afterEach(() => { vi.restoreAllMocks(); Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: originalMatchMedia }); });
@@ -26,8 +26,8 @@ describe('SessionList mobile accessibility', () => {
     const user = userEvent.setup();
     const onViewChange = vi.fn(); const onSelect = vi.fn();
     render(<SessionList {...baseProps} open onViewChange={onViewChange} onSelect={onSelect}/>);
-    for (const label of ['全部运行', '正在推进', '排队等待', '等待处理', '需要恢复', '已经完成', '已经归档']) expect(screen.getByRole('button', { name: new RegExp(label) })).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: /已经归档/ }));
+    for (const label of ['总览', '待你处理', '进行中', '有排队的运行', '失败', '已完成', '已归档']) expect(screen.getByRole('button', { name: new RegExp(label) })).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: /已归档/ }));
     expect(onViewChange).toHaveBeenCalledWith('archived');
     expect(onSelect).toHaveBeenCalledWith(undefined);
   });
@@ -37,5 +37,14 @@ describe('SessionList mobile accessibility', () => {
     render(<SessionList {...baseProps} open view="archived" sessions={[makeSession('current'), makeSession('history', '2026-08-30T00:00:00Z')]}/>);
     expect(screen.getByText('history')).toBeTruthy();
     expect(screen.queryByText('current')).toBeNull();
+  });
+
+  it('以设置与接入承载低频配置，并明确受信开发机模式', async () => {
+    const onOpenControlCenter = vi.fn();
+    render(<SessionList {...baseProps} open authRequired={false} onOpenControlCenter={onOpenControlCenter}/>);
+    await userEvent.click(screen.getByRole('button', { name: /Agent 与设置/ }));
+    expect(onOpenControlCenter).toHaveBeenCalledOnce();
+    expect(screen.getByText(/受信开发机模式 · 无需 token/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /开启监听/ })).toBeNull();
   });
 });

@@ -5,13 +5,15 @@
  * 固化发布验收中的关键路径，可重复执行：
  *   1. 启动 server（临时端口 + 临时数据目录，前台进程，绝不 daemonize）
  *   2. GET /api/agents —— 断言 ACP agent 与 pty-cli agent 都被发现
- *   3. 创建 pty-cli 会话（claude-code）→ 发消息 → SSE 收事件流
+ *   3. 真实 Chromium 打开首页，验证创建任务 / 绑定 Bot 主入口，
+ *      并通过页面创建、执行一个 mock Agent 任务
+ *   4. 创建 pty-cli 会话（claude-code）→ 发消息 → SSE 收事件流
  *      断言：收到 thinking/text、最终 completed、session state 变 completed
- *   4. resume 后仍能继续对话：POST /resume → 再发一轮 → 用 SSE 游标确认是新事件
+ *   5. resume 后仍能继续对话：POST /resume → 再发一轮 → 用 SSE 游标确认是新事件
  *      而不是历史回放，避免单测通过但真实环境不可用
- *   5. 终端 WS /api/terminal/:sessionId 能连上并收到帧
- *   6. 静态 Web UI 可访问
- *   7. 清理：停会话、杀 server、删临时数据目录
+ *   6. 终端 WS /api/terminal/:sessionId 能连上并收到帧
+ *   7. 静态 Web UI 可访问
+ *   8. 清理：关 Chromium、停会话、杀 server、删临时数据目录
  *
  * 两种模式
  *   默认 --mock：用 /tmp 下生成的假 CLI（Node 脚本）冒充 claude，不触碰真实模型，CI 可跑。
@@ -38,6 +40,7 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { chromium } from '@playwright/test';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..');
@@ -121,6 +124,17 @@ async function waitFor(label, predicate, { timeoutMs = 30_000, intervalMs = 300 
   throw new Error(`等待「${label}」超时（${timeoutMs}ms）${last instanceof Error ? `：${last.message}` : ''}`);
 }
 
+/** 文案可以微调，但产品主入口必须是浏览器可见、可点的语义化按钮。 */
+async function waitForVisibleLocator(label, factories, timeoutMs = 15_000) {
+  return waitFor(label, async () => {
+    for (const factory of factories) {
+      const locator = factory().first();
+      if (await locator.isVisible().catch(() => false)) return locator;
+    }
+    return undefined;
+  }, { timeoutMs, intervalMs: 100 });
+}
+
 // ── 假 CLI ─────────────────────────────────────────────────────────────────
 /**
  * 生成假 claude CLI。它必须同时满足 pty-cli 驱动的两条链路，否则会话到不了 completed：
@@ -152,30 +166,78 @@ const dir = join(dataDir, 'projects', projectKey);
 mkdirSync(dir, { recursive: true });
 const file = join(dir, \`\${sessionArg ?? 'mock'}.jsonl\`);
 const write = entry => appendFileSync(file, JSON.stringify(entry) + '\\n');
+// 正确聚合整轮输入后，首条结构化输出会与 completion 很接近；预先创建文件，
+// 让 transcript tailer 在发送 prompt 前就能订阅，避免把最终输出错过成 raw-only。
+appendFileSync(file, '');
 
 // readyPattern：❯ —— 不打印它，idle-detector 永远不会判定空闲
 process.stdout.write((resumed ? 'Mock Claude CLI (resumed)' : 'Mock Claude CLI') + '\\r\\n\\u276f ');
 
 let buffer = '';
-process.stdin.setEncoding('utf8');
-process.stdin.on('data', chunk => {
-  buffer += chunk;
-  if (!/[\\r\\n]/.test(buffer)) return;
-  // 适配器用 bracketed paste 包裹 prompt，这里剥掉标记
-  const prompt = buffer.replace(/\\u001b\\[20[01]~/g, '').replace(/[\\r\\n]+/g, ' ').trim();
-  buffer = '';
+let composedPrompt = '';
+let bracketedPaste = false;
+let turn = 0;
+const bracketedPasteStart = '\\u001b[200~';
+const bracketedPasteEnd = '\\u001b[201~';
+
+const submitPrompt = rawPrompt => {
+  const prompt = rawPrompt.trim();
   if (!prompt) return;
+  const currentTurn = ++turn;
   process.stdout.write('\\r\\nworking\\r\\n');
   setTimeout(() => {
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_mock_1', name: 'Bash', input: { command: 'echo mock' } }] } });
     write({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_mock_1', content: 'mock' }] } });
-    // 回复带上形态标记：resume 后的那一轮必须由**重 spawn 出来的**进程产出，
-    // 拿不到这个标记就说明第二轮读到的其实是第一轮的回放。
-    write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: (resumed ? 'MOCK_RESUMED: ' : 'MOCK_REPLY: ') + prompt }] } });
+    // persistent tmux 优先续用存活 pane；只有进程不存在时才以 --resume 重启。
+    // 用独立标记区分两条合法路径，也让 smoke 能证明第二轮不是历史回放。
+    const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
+    write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
     // completionPattern：✳ Worked for Ns
     process.stdout.write('\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
   }, 300);
+};
+
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => {
+  buffer += chunk;
+  for (;;) {
+    if (bracketedPaste) {
+      const pasteEnd = buffer.indexOf(bracketedPasteEnd);
+      if (pasteEnd < 0) return;
+      composedPrompt += buffer.slice(0, pasteEnd);
+      buffer = buffer.slice(pasteEnd + bracketedPasteEnd.length);
+      bracketedPaste = false;
+      continue;
+    }
+
+    const pasteStart = buffer.indexOf(bracketedPasteStart);
+    const lineBreak = /[\\r\\n]/.exec(buffer);
+    if (pasteStart >= 0 && (!lineBreak || pasteStart < lineBreak.index)) {
+      composedPrompt += buffer.slice(0, pasteStart);
+      buffer = buffer.slice(pasteStart + bracketedPasteStart.length);
+      bracketedPaste = true;
+      continue;
+    }
+    if (!lineBreak) return;
+
+    composedPrompt += buffer.slice(0, lineBreak.index);
+    const delimiter = lineBreak[0];
+    buffer = buffer.slice(lineBreak.index + delimiter.length);
+    // 同一个 Enter 可能以 CRLF 到达，只消费配对的第二个字节。
+    if ((delimiter === '\\r' && buffer.startsWith('\\n')) || (delimiter === '\\n' && buffer.startsWith('\\r'))) {
+      buffer = buffer.slice(1);
+    }
+    // tmux 下 Claude family 用「反斜杠 + Enter」表达 composer 软换行；
+    // 这里只累积，最后一个没有反斜杠的 Enter 才算真正提交一轮。
+    if (composedPrompt.endsWith('\\\\')) {
+      composedPrompt = composedPrompt.slice(0, -1) + '\\n';
+      continue;
+    }
+    const prompt = composedPrompt;
+    composedPrompt = '';
+    submitPrompt(prompt);
+  }
 });
 process.stdin.resume();
 `, 'utf8');
@@ -389,9 +451,121 @@ async function main() {
   assert(ptyAgents.length > 0, `发现 pty-cli agent ${ptyAgents.length} 个：${ptyAgents.map(a => a.id).join(', ')}`);
   const claudeCode = ptyAgents.find(agent => agent.id === 'claude-code');
   assert(Boolean(claudeCode), 'pty-cli 列表里有 claude-code');
-  if (!REAL) assert(claudeCode.command.endsWith('mock-claude'), 'mock 模式下 claude-code 指向假 CLI（未使用真实 claude）');
+  if (!REAL) {
+    assert(claudeCode.name === 'Mock Claude' && claudeCode.version === 'mock-1.0',
+      'mock Agent 的公开名称与版本已生效（未使用真实 claude）');
+  }
+  const leakedAgentFields = ['command', 'args', 'cwd', 'env', 'systemPrompt', 'reasoningEffort', 'timeout', 'capabilities', 'builtin']
+    .filter(field => Object.hasOwn(claudeCode, field));
+  assert(leakedAgentFields.length === 0,
+    `公开 Agent 列表不泄露启动配置（实际泄露：${leakedAgentFields.join(', ') || '无'}）`);
 
-  // ── 3. pty-cli 会话 + SSE ────────────────────────────────────────────────
+  // ── 3. 浏览器产品旅程 ──────────────────────────────────────────────────
+  step('用真实 Chromium 走通首次使用、Bot 绑定入口与任务创建');
+  let browser = await chromium.launch({ headless: true });
+  onCleanup('关闭 Chromium', async () => {
+    if (!browser) return;
+    await browser.close();
+    browser = undefined;
+  });
+
+  let browserSessionId;
+  onCleanup('关闭浏览器创建的任务运行', async () => {
+    if (!browserSessionId) return;
+    const stopped = await request('POST', `/api/sessions/${browserSessionId}/stop`);
+    if (stopped.status !== 200) throw new Error(`stop 返回 ${stopped.status}`);
+    browserSessionId = undefined;
+  });
+
+  const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  const page = await context.newPage();
+  page.on('pageerror', error => debug('browser pageerror', error.message));
+  page.on('requestfailed', failed => debug('browser requestfailed', failed.method(), failed.url(), failed.failure()?.errorText));
+  const productResponses = [];
+  page.on('response', response => productResponses.push(response));
+
+  await page.goto(BASE, { waitUntil: 'domcontentloaded' });
+  await page.getByRole('heading', { name: '今天需要推进什么？' }).waitFor({ state: 'visible', timeout: 20_000 });
+  const firstUseHeading = page.getByRole('heading', { name: '从第一个明确目标开始' });
+  await firstUseHeading.waitFor({ state: 'visible', timeout: 20_000 });
+  assert(await firstUseHeading.isVisible(), '首次使用空状态说明如何开始第一个任务');
+
+  const workbenchNavigation = page.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+  const createTaskEntry = await waitForVisibleLocator('首页创建任务主入口', [
+    () => workbenchNavigation.getByRole('button', { name: '创建任务', exact: true }),
+    () => page.getByRole('button', { name: '创建第一个任务', exact: true })
+  ]);
+  const bindBotEntry = await waitForVisibleLocator('首页绑定 Bot 主入口', [
+    () => workbenchNavigation.getByRole('button', { name: '绑定 Bot', exact: true }),
+    () => page.getByRole('button', { name: '绑定飞书 Bot', exact: true })
+  ]);
+  assert(await createTaskEntry.isEnabled(), '首页「创建任务」主入口可见且可用');
+  assert(await bindBotEntry.isEnabled(), '首页「绑定 Bot」主入口可见且可用');
+
+  await bindBotEntry.click();
+  const bindBotWizard = page.getByRole('dialog', { name: /绑定.*Bot|飞书机器人/ });
+  await bindBotWizard.waitFor({ state: 'visible', timeout: 20_000 });
+  assert(await bindBotWizard.getByRole('button', { name: '新增机器人', exact: true }).isVisible(),
+    '绑定 Bot 向导已打开，并提供新增机器人入口');
+  await bindBotWizard.getByRole('button', { name: '关闭', exact: true }).click();
+  await bindBotWizard.waitFor({ state: 'hidden' });
+
+  await createTaskEntry.click();
+  const createTaskForm = page.getByRole('dialog', { name: /创建.*任务/ });
+  await createTaskForm.waitFor({ state: 'visible' });
+  const browserPrompt = REAL ? '回复一句话：browser smoke ok' : 'browser product journey';
+  await createTaskForm.getByLabel('任务目标').fill(browserPrompt);
+
+  const agentSelect = createTaskForm.locator('button[aria-haspopup="listbox"]').first();
+  await agentSelect.click();
+  const browserAgentName = REAL ? 'Claude Code' : 'Mock Claude';
+  // Option 的 accessible name 还会包含版本号，因此按 Agent 名称子串匹配。
+  await page.getByRole('option', { name: browserAgentName }).click();
+  assert((await agentSelect.textContent())?.includes(browserAgentName),
+    `创建任务向导已选择 ${browserAgentName}`);
+  const fullTrustConfirmation = createTaskForm.getByRole('checkbox');
+  if (await fullTrustConfirmation.isVisible().catch(() => false)) {
+    await fullTrustConfirmation.check();
+    assert(await fullTrustConfirmation.isChecked(), `已在浏览器确认 ${browserAgentName} 的完全信任权限`);
+  }
+
+  await createTaskForm.getByRole('button', { name: '创建并执行', exact: true }).click();
+  const browserCreateResponse = await waitFor('浏览器发出创建任务请求', () => productResponses.find(response => {
+    const url = new URL(response.url());
+    return response.request().method() === 'POST' && url.pathname === '/api/sessions';
+  }), { timeoutMs: 30_000, intervalMs: 50 });
+  assert(browserCreateResponse.status() === 200,
+    `浏览器 POST /api/sessions 返回 200（实际 ${browserCreateResponse.status()}）`);
+  const browserSession = await browserCreateResponse.json();
+  assert(typeof browserSession?.id === 'string' && browserSession.id.startsWith('ses_'),
+    `浏览器创建了真实任务运行：${browserSession?.id}`);
+  browserSessionId = browserSession.id;
+
+  const browserSendResponse = await waitFor('浏览器派发任务目标', () => productResponses.find(response => {
+    const url = new URL(response.url());
+    return response.request().method() === 'POST' && url.pathname === `/api/sessions/${browserSessionId}/send`;
+  }), { timeoutMs: 30_000, intervalMs: 50 });
+  assert(browserSendResponse.status() === 202,
+    `浏览器 POST /send 返回 202（实际 ${browserSendResponse.status()}）`);
+  await page.waitForURL(url => url.pathname === `/sessions/${browserSessionId}`, { timeout: 20_000 });
+  await page.getByLabel('已完成', { exact: true }).waitFor({ state: 'visible', timeout: REAL ? 150_000 : 60_000 });
+  if (!REAL) {
+    try {
+      await page.getByText(/MOCK_REPLY:/).last().waitFor({ state: 'visible', timeout: 20_000 });
+    } catch (error) {
+      const visibleText = (await page.locator('body').innerText()).slice(-2_000);
+      throw new Error(`浏览器任务已完成但最终回复未展示。页面末尾文本：\n${visibleText}`, { cause: error });
+    }
+    ok('Mock Agent 的最终回复已展示在真实浏览器任务详情中');
+  }
+
+  await browser.close();
+  browser = undefined;
+  const stoppedBrowserSession = await request('POST', `/api/sessions/${browserSessionId}/stop`);
+  assert(stoppedBrowserSession.status === 200, `浏览器任务运行清理成功（实际 ${stoppedBrowserSession.status}）`);
+  browserSessionId = undefined;
+
+  // ── 4. pty-cli 会话 + SSE ────────────────────────────────────────────────
   step('创建 pty-cli 任务运行并通过 SSE 收事件流');
   const created = await request('POST', '/api/sessions', { agentId: 'claude-code', cwd: workspace });
   assert(created.status === 200, `POST /api/sessions 返回 200（实际 ${created.status}）`);
@@ -440,11 +614,11 @@ async function main() {
     assert(assistantText.includes('MOCK_REPLY'), '假 CLI 的回复经 transcript 解析成 text 事件');
   }
 
-  // ── 4. resume 后续接可用 ─────────────────────────────────────────────────
+  // ── 5. resume 后续接可用 ─────────────────────────────────────────────────
   // 单列真实 resume：这类供应商协议差异不能只靠 mock 单测证明。
-  // respawn 会 kill 旧后端，那次 SIGHUP(129) 被当成 agent 崩溃上报，会话立刻
-  // 判 failed，之后每个 send 都是 409。mock CLI 的单测发现不了，只有走完整
-  // HTTP + PTY 链路才暴露。
+  // persistent tmux 的主路径是 reattach 仍存活的 pane、续用同一进程；若 pane
+  // 中的进程已不存在，则允许以 --resume respawn。两种路径都必须保持会话可用、
+  // 产生严格晚于游标的新事件，不能把第一轮历史回放误判成第二轮成功。
   step('resume 后仍能继续对话');
   const beforeResume = stream.cursor();
   const resumed = await request('POST', `/api/sessions/${session.id}/resume`);
@@ -476,13 +650,16 @@ async function main() {
 
   if (!REAL) {
     const secondText = secondTurn.filter(item => item.type === 'text').map(item => item.event.data?.text ?? '').join('');
-    // MOCK_RESUMED 只有带 --resume 起来的进程会写：拿到它才证明第二轮真的
-    // 由 respawn 出来的新进程产出，而不是旧事件被重放。
-    assert(secondText.includes('MOCK_RESUMED'),
-      `第二轮由 --resume 形态的进程产出（实际前 120 字：${secondText.slice(0, 120)}）`);
+    const continuation = [
+      { marker: 'MOCK_CONTINUED', path: 'persistent pane 中的存活进程续跑' },
+      { marker: 'MOCK_RESUMED', path: '进程缺失后以 --resume respawn' }
+    ].find(candidate => secondText.includes(`${candidate.marker}: ${secondPrompt}`));
+    assert(Boolean(continuation),
+      `第二轮包含新 prompt，并走 persistent continuation 或 --resume respawn（实际前 160 字：${secondText.slice(0, 160)}）`);
+    ok(`resume 采用合法路径：${continuation.path}`);
   }
 
-  // ── 5. 终端 WS ───────────────────────────────────────────────────────────
+  // ── 6. 终端 WS ───────────────────────────────────────────────────────────
   step('连接终端 WebSocket');
   const WebSocketImpl = loadWebSocket();
   const frames = await new Promise((resolveFrames, rejectFrames) => {
@@ -512,7 +689,7 @@ async function main() {
   assert(frames.length > 0, `终端 WS 连接成功并收到 ${frames.length} 帧`);
   assert(frames.some(frame => frame.type === 'data'), 'WS 收到 data 帧（PTY 输出已代理到前端）');
 
-  // ── 6. 静态 Web UI ───────────────────────────────────────────────────────
+  // ── 7. 静态 Web UI ───────────────────────────────────────────────────────
   step('访问静态 Web UI');
   const index = await request('GET', '/');
   assert(index.status === 200, 'GET / 返回 200');

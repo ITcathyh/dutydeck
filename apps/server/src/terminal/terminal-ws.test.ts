@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import WebSocket from 'ws';
 import type { IncomingMessage } from 'node:http';
-import type { TerminalStream } from '@dockmux/shared';
+import type { PolicyDecision, TerminalStream } from '@dockmux/shared';
 import {
   registerTerminalRoutes,
   type TerminalRouteAuth,
@@ -67,9 +67,13 @@ afterEach(async () => {
   await Promise.all(apps.splice(0).map(app => app.close()));
 });
 
-async function startServer(provider: TerminalStreamProvider, auth?: TerminalRouteAuth): Promise<{ app: FastifyInstance; port: number }> {
+async function startServer(
+  provider: TerminalStreamProvider,
+  auth?: TerminalRouteAuth,
+  authorize?: (request: IncomingMessage, sessionId: string, action: 'terminal.read' | 'terminal.write') => Promise<PolicyDecision>,
+): Promise<{ app: FastifyInstance; port: number }> {
   const app = Fastify({ logger: false });
-  registerTerminalRoutes(app, { provider, auth });
+  registerTerminalRoutes(app, { provider, auth, authorize });
   await app.listen({ host: '127.0.0.1', port: 0 });
   apps.push(app);
   const address = app.server.address();
@@ -114,6 +118,20 @@ function closed(ws: WebSocket): Promise<void> {
 }
 
 describe('terminal WS proxy', () => {
+  it('在 provider lookup 和每次写入前执行统一终端权限边界', async () => {
+    const fake = createFakeStream();
+    const authorize = vi.fn(async (_request: IncomingMessage, _sessionId: string, action: 'terminal.read' | 'terminal.write'): Promise<PolicyDecision> => action === 'terminal.read'
+      ? { allowed: true, action, code: 'legacy_unmanaged', reason: 'legacy', source: 'integration' }
+      : { allowed: false, action, code: 'channel_bot_disabled', reason: 'staged bot', source: 'integration' });
+    const { port } = await startServer(providerFrom({ s1: fake.handle }), undefined, authorize);
+    const ws = await connect(port, '/api/terminal/s1');
+    const denied = nextMessage(ws);
+    ws.send(JSON.stringify({ type: 'input', data: 'must-not-run\n' }));
+    await expect(denied).resolves.toEqual({ type: 'error', message: 'staged bot', code: 'channel_bot_disabled' });
+    await vi.waitFor(() => expect(authorize).toHaveBeenCalledWith(expect.any(Object), 's1', 'terminal.write'));
+    expect(fake.writeCalls).toEqual([]);
+  });
+
   it('透传 PTY 输出为 data 帧', async () => {
     const fake = createFakeStream();
     const { port } = await startServer(providerFrom({ s1: fake.handle }));
@@ -264,6 +282,37 @@ describe('terminal WS proxy', () => {
     const rejected = await expectUpgradeRejected(port, '/api/terminal/s1');
     expect(rejected.status).toBe(401);
     expect(JSON.parse(rejected.body)).toEqual({ type: 'error', message: 'unauthorized' });
+  });
+
+  it('explicit open mode accepts remote Host without a token but rejects cross-Origin browsers', async () => {
+    const fake = createFakeStream();
+    const check = vi.fn(() => false);
+    const { port } = await startServer(providerFrom({ s1: fake.handle }), { mode: 'open', check });
+    const ws = await connect(port, '/api/terminal/s1', { host: `devbox.example:${port}`, origin: `http://devbox.example:${port}` });
+    const frame = nextMessage(ws);
+    fake.emitData('open-ok');
+    expect(await frame).toEqual({ type: 'data', data: 'open-ok' });
+    expect(check).not.toHaveBeenCalled();
+    ws.close();
+
+    const rejected = await expectUpgradeRejected(port, '/api/terminal/s1', { host: `devbox.example:${port}`, origin: 'https://evil.example' });
+    expect(rejected.status).toBe(403);
+    expect(JSON.parse(rejected.body)).toEqual({ type: 'error', message: 'origin not allowed' });
+  });
+
+  it('explicit open mode accepts an exact public Origin forwarded by a TLS proxy', async () => {
+    const fake = createFakeStream();
+    const { port } = await startServer(providerFrom({ s1: fake.handle }), { mode: 'open', check: () => false });
+    const ws = await connect(port, '/api/terminal/s1', {
+      host: `127.0.0.1:${port}`,
+      origin: 'https://dockmux.example',
+      'x-forwarded-host': 'dockmux.example',
+      'x-forwarded-proto': 'https'
+    });
+    const frame = nextMessage(ws);
+    fake.emitData('proxied-open-ok');
+    expect(await frame).toEqual({ type: 'data', data: 'proxied-open-ok' });
+    ws.close();
   });
 
   it('URL query token 不再作为 WS 凭据', async () => {

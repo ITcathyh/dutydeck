@@ -808,13 +808,15 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     const name = tmuxName();
     const cwd = makeTempDir('tmux-cwd');
     const resumeIds: string[] = [];
+    const ownerId = `dockmux:${SESSION_ID}`;
 
     // ── daemon lifetime #1: spawn the CLI inside tmux ──
     const firstEvents: NormalizedDriverEvent[] = [];
+    const firstBackend = new TmuxBackend(name, { ownerId });
     const first = new PtyCliDriver({
       agent: agentConfig({ command: '/bin/sh', cwd }),
       adapter: shellAdapter(resumeIds),
-      backend: new TmuxBackend(name),
+      backend: firstBackend,
       onEvent: e => firstEvents.push(e),
       onExit: () => {},
       sessionId: SESSION_ID,
@@ -823,9 +825,16 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     await waitForAssert(() => {
       expect(firstEvents.some(e => e.type === 'raw_terminal')).toBe(true);
     });
+    await first.send('echo DRIVER-BEFORE-RESTART; echo DRIVER-DONE');
+    const originalPid = firstBackend.getPid();
+    expect(originalPid).toBeGreaterThan(0);
+    expect(TmuxBackend.sessionOwner(name)).toBe(ownerId);
+    expect(firstBackend.getDockmuxMetadata('first_prompt_sent')).toBe('true');
 
-    // Detach WITHOUT killing: this is what a daemon shutdown does.
-    (first as unknown as { backend: { detach?: () => void } }).backend.detach?.();
+    // The service marks every production driver before runtime.shutdown().
+    // stop() must detach rather than kill only on that path.
+    first.prepareForDaemonShutdown();
+    await first.stop();
     expect(TmuxBackend.probeSession(name)).toBe('exists');
 
     // ── daemon lifetime #2: a brand-new driver over the SAME tmux session ──
@@ -833,16 +842,20 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     const second = new PtyCliDriver({
       agent: agentConfig({ command: '/bin/sh', cwd }),
       adapter: shellAdapter(resumeIds),
-      backend: new TmuxBackend(name),
+      backend: new TmuxBackend(name, { ownerId }),
       onEvent: e => secondEvents.push(e),
       onExit: () => {},
       sessionId: SESSION_ID,
     });
-    await second.resume();
+    // Production runtime reconnect calls start(), not resume().
+    await second.start();
 
     // The live pane was reattached, not respawned.
     expect(resumeIds).toEqual([]);
     expect(TmuxBackend.probeSession(name)).toBe('exists');
+    const restoredBackend = new TmuxBackend(name, { ownerId });
+    expect(TmuxBackend.sessionOwner(name)).toBe(ownerId);
+    expect(restoredBackend.getPid()).toBe(originalPid);
 
     // Output flows again through the rebuilt capture.
     second.createTerminalStream();
@@ -857,6 +870,40 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
 
     await second.stop();
     await waitFor(() => TmuxBackend.probeSession(name) === 'missing');
+  }, 60_000);
+
+  it('does not kill a foreign same-named pane when reattach ownership validation fails', async () => {
+    const name = tmuxName();
+    const cwd = makeTempDir('tmux-cwd');
+    const foreign = new TmuxBackend(name, { ownerId: 'dockmux:foreign-session' });
+    foreign.spawn('/bin/sh', ['-c', 'sleep 30'], {
+      cwd,
+      cols: 80,
+      rows: 24,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    });
+    const foreignPid = foreign.getPid();
+    expect(foreignPid).toBeGreaterThan(0);
+    foreign.detach();
+
+    const driver = new PtyCliDriver({
+      agent: agentConfig({ command: '/bin/sh', cwd }),
+      adapter: shellAdapter([]),
+      backend: new TmuxBackend(name, { ownerId: `dockmux:${SESSION_ID}` }),
+      onEvent: () => {},
+      onExit: () => {},
+      sessionId: SESSION_ID,
+    });
+    await expect(driver.start()).rejects.toThrow(/ownership marker mismatch/i);
+
+    // Runtime performs this cleanup after a failed start. It must remain
+    // scoped to the expected owner rather than deleting the foreign pane.
+    await driver.stop({ discardSession: true });
+    expect(TmuxBackend.probeSession(name)).toBe('exists');
+    const observer = new TmuxBackend(name, { ownerId: 'dockmux:foreign-session' });
+    observer.attach({ cols: 80, rows: 24 });
+    expect(observer.getPid()).toBe(foreignPid);
+    observer.detach();
   }, 60_000);
 
   it('falls back to a CLI-level resume when the tmux session is gone', async () => {

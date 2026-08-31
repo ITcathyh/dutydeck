@@ -9,6 +9,7 @@ import {
   dockmuxGroupToolsCommand,
   larkAgentSessionBinding,
   loadOrCreateGroupToolsSigningSecret,
+  type LarkAgentToolsOptions,
   type LarkGroupToolClient
 } from './agent-tools.js';
 import { LarkServiceError, type LarkChatMessage } from './service.js';
@@ -39,7 +40,11 @@ function fakeClient(overrides: Partial<LarkGroupToolClient> = {}): LarkGroupTool
   };
 }
 
-async function setup(clients: Record<string, LarkGroupToolClient>, groupToolsCommand?: string) {
+async function setup(
+  clients: Record<string, LarkGroupToolClient>,
+  groupToolsCommand?: string,
+  executionPolicy?: LarkAgentToolsOptions['executionPolicy'],
+) {
   const repos = createRepositories(':memory:'); repositories.push(repos);
   const activeSession = session();
   await repos.sessions.save(activeSession);
@@ -53,12 +58,29 @@ async function setup(clients: Record<string, LarkGroupToolClient>, groupToolsCom
   const tools = new LarkAgentToolsService(capabilities, repos.config, {
     pollIntervalMs: 50,
     ...(groupToolsCommand ? { groupToolsCommand } : {}),
+    ...(executionPolicy ? { executionPolicy } : {}),
     clientFactory: config => clients[config.appId] ?? fakeClient()
   });
   return { repos, activeSession, capabilities, tools, token: environment.dockmux_group_tools_token! };
 }
 
 describe('Agent group collaboration domain service', () => {
+  it('checks the unified group-tools execution edge before reading or sending', async () => {
+    const current = fakeClient();
+    const authorize = vi.fn(async (_boundary: 'group_tools', action: any) => ({
+      allowed: false, action, code: 'channel_bot_disabled', reason: 'staged bot', source: 'integration' as const
+    }));
+    const { tools, token } = await setup({ cli_current: current }, undefined, {
+      integrationMode: 'legacy_unmanaged',
+      authorize,
+    });
+    await expect(tools.messages(token)).rejects.toMatchObject({
+      code: 'channel_bot_disabled', statusCode: 403, details: { boundary: 'group_tools', integrationMode: 'legacy_unmanaged' }
+    });
+    expect(authorize).toHaveBeenCalledWith('group_tools', 'group_tools.read');
+    expect(current.listChatMessages).not.toHaveBeenCalled();
+  });
+
   it('builds a command bound to the current TypeScript or built entrypoint', () => {
     expect(dockmuxGroupToolsCommand('/workspace/apps/server/src/cli.ts', '/usr/bin/node', 'file:///workspace/node_modules/tsx/loader.mjs')).toBe("'/usr/bin/node' --import 'file:///workspace/node_modules/tsx/loader.mjs' '/workspace/apps/server/src/cli.ts'");
     expect(dockmuxGroupToolsCommand('/workspace/apps/server/dist/cli.js', '/usr/bin/node')).toBe("'/usr/bin/node' '/workspace/apps/server/dist/cli.js'");

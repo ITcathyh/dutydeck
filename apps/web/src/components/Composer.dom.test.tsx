@@ -215,21 +215,21 @@ describe('Composer 排队任务', () => {
     expect(screen.getByText('第一条')).toBeTruthy();
   });
 
-  it('取消 / 立即发送分别回调对应 taskId', async () => {
+  it('取消排队 / 打断当前任务并执行分别回调对应 taskId', async () => {
     const user = userEvent.setup();
     const onCancelQueued = vi.fn();
     const onSteerQueued = vi.fn();
     render(<Composer {...baseProps} queuedTasks={[task('t1', '第一条')]} onCancelQueued={onCancelQueued} onSteerQueued={onSteerQueued}/>);
     await user.click(screen.getByRole('button', { name: '取消排队：第一条' }));
     expect(onCancelQueued).toHaveBeenCalledWith('t1');
-    await user.click(screen.getByRole('button', { name: '立即发送' }));
+    await user.click(screen.getByRole('button', { name: '打断当前任务并执行' }));
     expect(onSteerQueued).toHaveBeenCalledWith('t1');
   });
 
   it('正在取消某条时，队列上的按钮整体 disabled，防并发操作', () => {
     render(<Composer {...baseProps} queuedTasks={[task('t1', '第一条')]} cancellingTaskId="t1"/>);
     expect((screen.getByRole('button', { name: '取消排队：第一条' }) as HTMLButtonElement).disabled).toBe(true);
-    expect((screen.getByRole('button', { name: '立即发送' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: '打断当前任务并执行' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('无排队任务时不渲染排队区', () => {

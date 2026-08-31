@@ -1,5 +1,5 @@
 import * as lark from '@larksuiteoapi/node-sdk';
-import type { AgentEvent, ChannelMappingRepository, PermissionMode, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
+import type { AgentEvent, ChannelMappingRepository, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
 import type { StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError } from './service.js';
 import { getChatMode } from './chat-mode.js';
@@ -60,6 +60,11 @@ export interface LarkLongConnectionListenerOptions {
   peerBotAuthorized?: (appId: string, chatId: string, senderOpenId: string) => Promise<boolean>;
   /** 群形态查询（话题群 vs 普通群）；未注入时默认走 chat-mode.ts 的 getChatMode（带缓存）。 */
   chatModeResolver?: (appId: string, chatId: string) => Promise<'topic' | 'group' | 'p2p'>;
+  /** Existing StoredLarkConfig listeners are always explicitly legacy_unmanaged. */
+  executionPolicy?: {
+    integrationMode: 'legacy_unmanaged';
+    authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
+  };
 }
 
 export class LarkLongConnectionListener implements LarkListener {
@@ -95,7 +100,8 @@ export class LarkLongConnectionListener implements LarkListener {
       botOpenId,
       (chatId, senderOpenId) => this.options.peerBotAuthorized?.(config.appId, chatId, senderOpenId) ?? Promise.resolve(false),
       this.options.cardMappings,
-      chatModeResolver
+      chatModeResolver,
+      this.options.executionPolicy,
     ) : undefined;
     try { await coordinator?.startReconciliation(config); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账启动失败，继续建立消息监听'); }

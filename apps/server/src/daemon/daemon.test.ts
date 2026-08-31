@@ -53,12 +53,27 @@ describe('Dockmux daemon session', () => {
   it('daemonStart in the child branch records pid and serves in-band', async () => {
     const serve = vi.fn();
     const env = { HOME: tmp, DOCKMUX_DAEMONIZED: '1', DOCKMUX_DAEMON_CWD: tmp, DOCKMUX_DAEMON_STARTED_AT: '2024-01-01T00:00:00.000Z' } as NodeJS.ProcessEnv;
-    const result = await daemonStart({ port: '4310' }, { serve }, env);
-    expect(result).toMatchObject({ ok: true, action: 'start', running: true, pid: process.pid });
+    const result = await daemonStart({ port: '4310', auth: false }, { serve }, env);
+    expect(result).toMatchObject({ ok: true, action: 'start', running: true, pid: process.pid, authEnabled: false, authentication: 'disabled' });
     expect(serve).toHaveBeenCalledOnce();
     const state = readDaemonStatus(defaultDaemonDir());
-    expect(state).toMatchObject({ pid: process.pid, ready: false, address: 'http://127.0.0.1:4310', database: join(tmp, '.dockmux', 'dockmux.db') });
+    expect(state).toMatchObject({ pid: process.pid, ready: false, address: 'http://127.0.0.1:4310', authEnabled: false, database: join(tmp, '.dockmux', 'dockmux.db') });
     expect(serve).toHaveBeenCalledWith(expect.objectContaining({ database: join(tmp, '.dockmux', 'dockmux.db') }), expect.any(Function));
+  });
+
+  it('records the effective remote open deployment when configured only through env', async () => {
+    const serve = vi.fn();
+    const env = {
+      HOME: tmp,
+      DOCKMUX_DAEMONIZED: '1',
+      DOCKMUX_DAEMON_CWD: tmp,
+      DOCKMUX_DAEMON_STARTED_AT: '2024-01-01T00:00:00.000Z',
+      DOCKMUX_HOST: '0.0.0.0',
+      DOCKMUX_PORT: '4510',
+      DOCKMUX_AUTH: 'false'
+    } as NodeJS.ProcessEnv;
+    await daemonStart({}, { serve }, env);
+    expect(readDaemonStatus(defaultDaemonDir())).toMatchObject({ host: '0.0.0.0', port: 4510, address: 'http://127.0.0.1:4510', authEnabled: false });
   });
 
   it('reuses the first Dockmux root after the daemon has stopped', async () => {
@@ -86,10 +101,11 @@ describe('Dockmux daemon session', () => {
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},5000)'], { stdio: 'ignore' });
     const dir = defaultDaemonDir();
-    writeState(dir, { pid: child.pid!, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp, address: 'http://127.0.0.1:4310' });
+    writeState(dir, { pid: child.pid!, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp, address: 'http://127.0.0.1:4310', authEnabled: false });
     const status = daemonStatus();
     expect(status.running).toBe(true);
     expect(status.pid).toBe(child.pid);
+    expect(status).toMatchObject({ authEnabled: false, authentication: 'disabled' });
     child.kill('SIGKILL');
     await new Promise(resolve => child.once('exit', resolve));
   });
@@ -139,14 +155,22 @@ describe('Dockmux daemon session', () => {
   });
 
   it('preserves the previous host and port on restart unless explicitly overridden', () => {
-    const previous = { pid: 42, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp, database: join(tmp, '.dockmux', 'dockmux.db'), host: '127.0.0.1', port: 4600 };
-    expect(daemonRestartOptions({}, previous)).toMatchObject({ cwd: tmp, database: join(tmp, '.dockmux', 'dockmux.db'), host: '127.0.0.1', port: '4600' });
+    const previous = { pid: 42, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp, database: join(tmp, '.dockmux', 'dockmux.db'), host: '127.0.0.1', port: 4600, authEnabled: false };
+    expect(daemonRestartOptions({}, previous)).toMatchObject({ cwd: tmp, database: join(tmp, '.dockmux', 'dockmux.db'), host: '127.0.0.1', port: '4600', auth: false });
     expect(daemonRestartOptions({ host: '0.0.0.0', port: '4700' }, previous)).toMatchObject({ host: '0.0.0.0', port: '4700' });
+    expect(daemonRestartOptions({ auth: true }, previous)).toMatchObject({ auth: true });
     expect(daemonRestartOptions({}, undefined, {
       DOCKMUX_DAEMON_RESTART_CWD: tmp,
       DOCKMUX_DAEMON_RESTART_DATABASE: join(tmp, '.dockmux', 'dockmux.db'),
       DOCKMUX_DAEMON_RESTART_HOST: '127.0.0.1',
       DOCKMUX_DAEMON_RESTART_PORT: '4600'
     })).toMatchObject({ cwd: tmp, database: join(tmp, '.dockmux', 'dockmux.db'), host: '127.0.0.1', port: '4600' });
+  });
+
+  it('fails secure for legacy or malformed daemon auth state', () => {
+    const base = { pid: 42, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp };
+    expect(daemonRestartOptions({}, base)).not.toHaveProperty('auth');
+    expect(daemonRestartOptions({}, { ...base, authEnabled: 'false' } as any)).not.toHaveProperty('auth');
+    expect(daemonRestartOptions({}, undefined, { DOCKMUX_DAEMON_RESTART_AUTH: 'broken' })).not.toHaveProperty('auth');
   });
 });

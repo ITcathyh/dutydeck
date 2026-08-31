@@ -1,0 +1,32 @@
+[
+  {
+    "larkAppId": "cli_fixture_alpha",
+    "larkAppSecret": "SYNTHETIC_SECRET_ALPHA_NEVER_VALID",
+    "cliId": "claude-code",
+    "backendType": "tmux",
+    "defaultWorkingDir": "/synthetic/workspace/alpha",
+    "allowedUsers": ["owner.fixture@example.invalid"],
+    "oncallChats": [
+      { "chatId": "oc_fixture_alpha", "workingDir": "/synthetic/workspace/alpha" },
+      { "chatId": "oc_fixture_beta", "workingDir": "/synthetic/workspace/alpha" }
+    ],
+    "p2pMode": "thread",
+    "regularGroupReplyMode": "chat-topic",
+    "regularGroupMentionMode": "topic",
+    "unknownFixturePolicy": { "enabled": true }
+  },
+  {
+    "larkAppId": "cli_fixture_hammer",
+    "larkAppSecret": "SYNTHETIC_SECRET_HAMMER_NEVER_VALID",
+    "cliId": "claude-code",
+    "backendType": "tmux",
+    "defaultWorkingDir": "/synthetic/workspace/hammer",
+    "allowedUsers": ["owner.fixture@example.invalid"],
+    "hammer": {
+      "enabled": true,
+      "mode": "full",
+      "enforceGates": true,
+      "skillsInjection": "prompt"
+    }
+  }
+]

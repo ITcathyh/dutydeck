@@ -14,6 +14,8 @@ export interface PtyCliDriverOptions {
   backend?: SessionBackend;
   onEvent: (e: NormalizedDriverEvent) => void;
   onExit: (code: number | null) => void;
+  /** Driver-owned stop completed (explicit kill or daemon detach). */
+  onStopped?: () => void;
   sessionId: string;
   /**
    * 已知的 CLI 原生 session id（调用方持久化过的话）。给了就直接用，
@@ -44,12 +46,17 @@ export class PtyCliDriver implements AgentDriver {
   private readonly sessionId: string;
   private readonly emitEvent: (e: NormalizedDriverEvent) => void;
   private readonly exitCallback: (code: number | null) => void;
+  private readonly stoppedCallback: (() => void) | undefined;
 
   private backend: SessionBackend;
   private readonly cwd: string;
 
   private started = false;
   private stopped = false;
+  /** Normal daemon shutdown preserves a persistent backend; explicit
+   * session stop/restart still destroys it. Set only by the service
+   * composition root immediately before runtime.shutdown(). */
+  private detachOnStop = false;
   private exitReported = false;
   /** 一轮任务进行中：send() 置 true，completed 发出后置 false。 */
   private turnActive = false;
@@ -90,6 +97,7 @@ export class PtyCliDriver implements AgentDriver {
     this.sessionId = opts.sessionId;
     this.emitEvent = opts.onEvent;
     this.exitCallback = opts.onExit;
+    this.stoppedCallback = opts.onStopped;
     this.backend = opts.backend ?? new PtyBackend();
     this.cwd = opts.agent.cwd ?? process.cwd();
     this.cliSessionId = opts.cliSessionId;
@@ -104,6 +112,24 @@ export class PtyCliDriver implements AgentDriver {
   async start(): Promise<void> {
     if (this.started) return;
     this.assertPermissionModeSupported();
+
+    // Runtime reconnects a persisted Dockmux session by constructing a fresh
+    // driver and calling start(), not resume(). A production-injected tmux
+    // backend therefore has to attach here when its owned pane survived the
+    // daemon, otherwise spawn() would collide with the live session.
+    const tmuxName = this.tmuxSessionName();
+    if (tmuxName !== undefined) {
+      const probe = TmuxBackend.probeSession(tmuxName);
+      if (probe === 'exists') {
+        this.reattachTmux(tmuxName, false);
+        this.markTmuxReattached();
+        return;
+      }
+      if (probe === 'unknown') {
+        throw new Error(`Cannot determine whether persistent tmux session ${tmuxName} is alive; refusing to spawn a duplicate CLI`);
+      }
+    }
+
     this.started = true;
     this.lastArgs = this.adapter.buildArgs({
       sessionId: this.sessionId,
@@ -131,7 +157,8 @@ export class PtyCliDriver implements AgentDriver {
     if (!this.started) await this.start();
 
     let finalPrompt = prompt;
-    if (!this.firstPromptSent) {
+    const isFirstPrompt = !this.firstPromptSent;
+    if (isFirstPrompt) {
       // 首轮 prompt 前注入路由块：适配器自带 injectSessionContext 的用它
       // （claude-code/grok），其余用默认 DOCKMUX_SHELL_HINTS 块——教 CLI
       // 自己正跑在无人值守桥接会话里（botmux 对大多数 CLI 同样注入）。
@@ -146,13 +173,19 @@ export class PtyCliDriver implements AgentDriver {
       const prefix = block ? `${block.replace(/\n$/, '')}\n${marker}` : marker;
       finalPrompt = `${prefix}\n${finalPrompt}`;
     }
-    this.firstPromptSent = true;
-
     this.turnActive = true;
     this.turnHasOutput = false;
     this.turnStartedAt = Date.now();
     this.idleDetector?.reset();
     await this.adapter.writeInput(this.backend, finalPrompt);
+    this.firstPromptSent = true;
+    if (isFirstPrompt && this.backend instanceof TmuxBackend) {
+      // tmux owns this tiny non-secret lifecycle marker across daemon
+      // restarts, so reattach neither repeats nor accidentally skips the
+      // first-turn routing/session marker.
+      try { this.backend.setDockmuxMetadata('first_prompt_sent', 'true'); }
+      catch { /* A missing lifecycle marker may repeat context after restart, but must not fail a prompt already sent. */ }
+    }
 
     // 与 AcpxAdapter 语义对齐：send() 等本轮结束（completed）才 resolve，
     // runtime 在 send resolve 后立即判定终态。driver 退出则 reject。
@@ -179,15 +212,19 @@ export class PtyCliDriver implements AgentDriver {
     this.assertPermissionModeSupported();
     // 路径 1：tmux 会话仍在 → reattach（后端内部重启 pipe-pane 捕获，driver 重建订阅）。
     const tmuxName = this.tmuxSessionName();
-    if (tmuxName !== undefined && TmuxBackend.probeSession(tmuxName) === 'exists') {
-      this.reattachTmux(tmuxName);
+    const tmuxProbe = tmuxName === undefined ? 'missing' : TmuxBackend.probeSession(tmuxName);
+    if (tmuxName !== undefined && tmuxProbe === 'exists') {
+      this.reattachTmux(tmuxName, this.started);
       // daemon 重启后的典型形态：新 driver 直接 resume()，从没调过 start()。
       // 必须置 started，否则接下来的 send() 会走 start() 再 spawn 一次，
       // 把刚 attach 上的后端二次 spawn（tmux 后端直接抛 "spawn() called twice"）。
       // 同理 firstPromptSent：CLI 进程还活着，上一条 prompt 里的路由块/指纹
       // 仍在它的上下文里，重发一遍只会污染会话。
-      this.markResumed();
+      this.markTmuxReattached();
       return;
+    }
+    if (tmuxName !== undefined && tmuxProbe === 'unknown') {
+      throw new Error(`Cannot determine whether persistent tmux session ${tmuxName} is alive; refusing to replace it`);
     }
     // 路径 2：适配器支持 CLI 级 resume → kill 旧后端，带 resume 参数重 spawn。
     if (!this.adapter.buildResumeCommand) return;   // 无 resume 能力 → no-op
@@ -291,11 +328,20 @@ export class PtyCliDriver implements AgentDriver {
     });
   }
 
-  /** resume 之后 driver 已有一个接好线的活后端：start() 不该再 spawn，
+  /** CLI-level resume 之后 driver 已有一个接好线的活后端：start() 不该再 spawn，
    *  首轮注入也不该重来（会话上下文已经带着它了）。 */
   private markResumed(): void {
     this.started = true;
     this.firstPromptSent = true;
+  }
+
+  /** tmux reattach restores the exact first-prompt state saved on the owned
+   * session. This also handles a daemon restart between session start and the
+   * first user prompt without silently losing the routing/session marker. */
+  private markTmuxReattached(): void {
+    this.started = true;
+    this.firstPromptSent = this.backend instanceof TmuxBackend
+      && this.backend.getDockmuxMetadata('first_prompt_sent') === 'true';
   }
 
   /**
@@ -335,15 +381,39 @@ export class PtyCliDriver implements AgentDriver {
     return this.cliSessionId;
   }
 
-  async stop(): Promise<void> {
+  /**
+   * Mark the next normal stop as a daemon-lifecycle detach. The service calls
+   * this immediately before runtime.shutdown(); user stop/restart paths never
+   * call it and therefore continue to kill the tmux session.
+   */
+  prepareForDaemonShutdown(): void {
+    this.detachOnStop = true;
+  }
+
+  async stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
     this.teardownWiring();
     this.terminalSubscribers.clear();
+    const tmuxBackend = this.backend instanceof TmuxBackend ? this.backend : undefined;
+    const preservePersistentSession = this.detachOnStop
+      && !options.discardSession
+      && tmuxBackend !== undefined;
+    if (this.turnActive) {
+      this.turnActive = false;
+      this.turnReject?.(new Error(preservePersistentSession
+        ? 'Driver detached for Dockmux daemon shutdown'
+        : 'Driver stopped'));
+      this.turnResolve = null;
+      this.turnReject = null;
+    }
     try {
-      this.backend.kill();
+      if (preservePersistentSession) tmuxBackend.detach();
+      else this.backend.kill();
     } catch {
       // best effort：后端可能已退出
+    } finally {
+      this.stoppedCallback?.();
     }
     // onExit 由 backend 的 exit 事件驱动（kill 会触发）；若后端已自行退出，
     // handleExit 早已回调过，exitReported 保证恰好一次。
@@ -506,11 +576,12 @@ export class PtyCliDriver implements AgentDriver {
     return name.length > 0 ? name : undefined;
   }
 
-  private reattachTmux(sessionName: string): void {
+  private reattachTmux(sessionName: string, detachCurrent: boolean): void {
     this.teardownWiring();
     // detach 只拆捕获，不杀 tmux 会话——CLI 进程继续存活。
-    this.backend.detach?.();
-    const backend = new TmuxBackend(sessionName);
+    const ownerId = this.backend instanceof TmuxBackend ? this.backend.ownerId : undefined;
+    if (detachCurrent) this.backend.detach?.();
+    const backend = new TmuxBackend(sessionName, { ownerId });
     this.backend = backend;
     // attach 到既有会话：不重建 session、不重发 CLI 启动命令，只重建捕获。
     backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
@@ -531,7 +602,8 @@ export class PtyCliDriver implements AgentDriver {
     } catch {
       // best effort
     }
-    const backend = tmuxName !== undefined ? new TmuxBackend(tmuxName) : new PtyBackend();
+    const ownerId = previousBackend instanceof TmuxBackend ? previousBackend.ownerId : undefined;
+    const backend = tmuxName !== undefined ? new TmuxBackend(tmuxName, { ownerId }) : new PtyBackend();
     this.backend = backend;
     this.lastArgs = args;
     backend.spawn(this.agent.command, args, {

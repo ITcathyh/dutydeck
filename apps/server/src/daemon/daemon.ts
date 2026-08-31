@@ -34,6 +34,8 @@ export interface DaemonState {
   host?: string;
   port?: number;
   address?: string;
+  /** Missing or malformed legacy values are interpreted as enabled. */
+  authEnabled?: boolean;
   stoppedAt?: string;
 }
 
