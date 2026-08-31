@@ -31,7 +31,8 @@
  *
  * 清理保证
  *   所有资源注册到 cleanup 栈并在 finally 里逆序释放；server 先 SIGTERM 后 SIGKILL 且杀整个进程组；
- *   全局看门狗（--timeout，默认 300s）到点强制清理退出 1；SIGINT/SIGTERM 同样走清理。
+ *   全局看门狗（--timeout，默认 600s）到点强制清理退出 1；SIGINT/SIGTERM 同样走清理。
+ *   启动前会检查端口是否空闲：同端口上活着的实例会替我们回 /health，导致断言跑在别人的数据上。
  *
  * 用法
  *   node scripts/e2e-product-smoke.mjs
@@ -44,7 +45,7 @@ import { readFileSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { chromium } from '@playwright/test';
 import {
-  REPO, createCleanupStack, createDataDir, createHttp, createReporter,
+  REPO, assertPortFree, createCleanupStack, createDataDir, createHttp, createReporter,
   loadWebSocket, mockAgentsJson, parseArgs, sleep, startServer, waitFor, writeMockCli
 } from './e2e-harness.mjs';
 
@@ -52,7 +53,10 @@ const { flag, value } = parseArgs();
 const VERBOSE = flag('verbose');
 // 默认端口刻意避开 14310/4310（开发者本地实例）与 14387（基线冒烟脚本）
 const PORT = Number(value('port', '14481'));
-const TIMEOUT_MS = Number(value('timeout', '300000'));
+// 全局超时给 600s：整套跑完实测约 260-300s（含两次 xterm 懒加载、Toast 的 4s 自动消失等待、
+// 慢速假 CLI 的 9s 占位轮次）。300s 会在第 8 节把 server 杀掉，表现为 ERR_CONNECTION_REFUSED——
+// 那是看门狗砍掉了自己的被测对象，会被误读成产品缺陷。留一倍余量。
+const TIMEOUT_MS = Number(value('timeout', '600000'));
 const ONLY = value('only', 'all');
 const RUN_BROWSER = ONLY === 'all' || ONLY === 'browser';
 const RUN_LARK = ONLY === 'all' || ONLY === 'lark';
@@ -84,15 +88,18 @@ async function browserAcceptance() {
   chmodSync(slowPath, 0o755);
 
   step('启动 server（临时端口 + 临时数据目录 + 假 CLI）');
+  // 先确认端口没人占：同端口上活着的另一个实例会替我们回 /health，
+  // 于是整套断言会跑在别人的数据库上——那种失败极难归因，必须在这里就拦死。
+  await assertPortFree(PORT);
   const agentsJson = mockAgentsJson({ mockPath: slowPath, dirs });
   agentsJson[0].env.MOCK_CLAUDE_DELAY_MS = '9000';
-  const { exitCode, serverLog } = startServer({ port: PORT, dirs, agentsJson, onCleanup, verbose: VERBOSE });
-  await waitFor('server 就绪', async () => {
-    if (exitCode() !== undefined) throw new Error(`server 提前退出（code ${exitCode()}）：\n${serverLog.join('')}`);
-    const response = await request('GET', '/health');
-    return response.status === 200 && response.json?.ok === true;
-  }, { timeoutMs: 45_000 });
-  ok(`GET /health 返回 {ok:true}（端口 ${PORT}）`);
+  const server = startServer({ port: PORT, dirs, agentsJson, onCleanup, verbose: VERBOSE });
+  await server.waitUntilReady({ base: BASE });
+  ok(`GET /health 返回 {ok:true}（端口 ${PORT}，由本次拉起的进程应答）`);
+  // 干净起点：新数据库里不该有任何会话。有的话说明数据目录或端口串了。
+  const preexisting = (await request('GET', '/api/sessions')).json ?? [];
+  assert(preexisting.length === 0,
+    `临时数据库是干净的（0 个既有会话，实际 ${preexisting.length}）——后续的检索计数断言才有意义`);
 
   // 三个目标刻意可区分：一条纯英文、一条纯中文、一条与前两者无共同子串。
   // 中文那条是本节的重点——实现用的是 NFKC + 子串而非分词，这条能证明中文检索真的可用。
@@ -377,16 +384,24 @@ async function browserAcceptance() {
       `在任务中心（整页加载后）按 n 打开创建任务向导（实际打开：${JSON.stringify(afterN)}）`);
   });
 
-  // 帮助面板与实际行为的一致性：面板说「可用」，按下去就不能是别的动作或没反应。
-  // 这一条与上一条分开，是为了在缺陷报告里把「n 坏了」和「说明书还在说它好用」区分开。
+  // 帮助面板与实际行为的一致性。这一条与上一条分开，是为了在缺陷报告里把
+  // 「n 打不开创建任务」和「按下去反而跑去了别的地方」这两种错分别定位。
+  //
+  // 注意这里不接受「面板说不可用 + 按下去开了别的浮层」这种组合：
+  // shortcutAvailability 判为不可用的快捷键，按下去必须完全惰性（什么都不发生）。
+  // 开出一个用户没要求的界面，比什么都不做更糟——那是误触，不是「不可用」。
   await section('帮助面板不撒谎', async () => {
     await dismissDialogs();
     await page.keyboard.press('n');
     await page.waitForTimeout(900);
     const opened = await visibleDialogLabels();
-    const actuallyCreatesTask = opened.includes('创建新任务');
-    assert(helpClaimsCreateTaskUsable === actuallyCreatesTask,
-      `帮助面板对 n 的自述与真实行为一致（面板称${helpClaimsCreateTaskUsable ? '可用' : '当前不可用'}，实际${actuallyCreatesTask ? '打开创建任务' : `打开 ${JSON.stringify(opened)}`}）`);
+    if (helpClaimsCreateTaskUsable) {
+      assert(opened.includes('创建新任务'),
+        `帮助面板称 n 可用，按下去就打开创建任务（实际 ${JSON.stringify(opened)}）`);
+    } else {
+      assert(opened.length === 0,
+        `帮助面板称 n 当前不可用，按下去必须完全惰性、不打开任何界面（实际 ${JSON.stringify(opened)}）`);
+    }
   });
 
   // SPA 内导航到任务中心后再按 n —— 与整页加载走的是不同的渲染路径，两条都要成立
@@ -582,6 +597,18 @@ async function browserAcceptance() {
     await sleep(600);
     ok('手机端终端 WebSocket 已建立（按键有可写入的通道）');
 
+    // 对照写入：先用观察者自己往 PTY 写一个同样的控制序列，确认「写进去 → 回显出来」这条链路此刻是通的。
+    // 这一步让下面键条的失败可归因：对照也收不到回显 → 该会话的 PTY 已不可写（例如被桥接进程已退出），
+    // 问题不在键条；只有对照通过、键条不通，才是键条自己的缺陷。
+    observed.length = 0;
+    observer.send(JSON.stringify({ type: 'input', data: '\u001b[A' }));
+    const ptyWritable = await waitFor('PTY 对照写入回显', async () =>
+      observed.join('').includes('\u001b[A') ? observed.join('') : undefined,
+      { timeoutMs: 8_000, intervalMs: 200 }).then(() => true).catch(() => false);
+    const sessionStateNow = (await request('GET', `/api/sessions/${sessions.cjk}`)).json?.state;
+    assert(ptyWritable,
+      `对照写入证明该会话的 PTY 此刻可写并会回显（会话状态 ${sessionStateNow}）——键条断言因此可归因`);
+
     // 逐颗验证：↑ 与 Esc 都是无副作用的键（不像 ^C 会杀掉被桥接的 CLI）。
     // 每颗键分两步断言：页面确实发出了对应控制序列 → 独立观察者确实看到 PTY 回显。
     for (const probe of [
@@ -604,8 +631,11 @@ async function browserAcceptance() {
     }
   });
 
-  assert(pageErrors.length === 0,
-    `整段浏览器旅程没有未捕获的页面异常（实际 ${pageErrors.length} 条${pageErrors.length ? `：${pageErrors.slice(0, 3).join(' / ')}` : ''}）`);
+  // 未捕获异常单独成节：它是「整段旅程」的汇总结论，不该因为自己失败就掩盖前面已跑完的结果。
+  await section('无未捕获页面异常', async () => {
+    assert(pageErrors.length === 0,
+      `整段浏览器旅程没有未捕获的页面异常（实际 ${pageErrors.length} 条${pageErrors.length ? `：${pageErrors.slice(0, 5).join(' / ')}` : ''}）`);
+  });
 
   await browser.close();
   browser = undefined;

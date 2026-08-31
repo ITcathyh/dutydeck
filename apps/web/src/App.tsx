@@ -252,10 +252,23 @@ export default function App() {
     } : {})
   // openCreateTask / openSettings / openLarkSetup / act 每次渲染重建但只读最新 state，hook 内部用 ref 同步，
   // 因此依赖数组只跟踪真正影响可用性的值。
+  //
+  // agents.data 必须在列：openCreateTask 会在「一个 Agent 都没有」时改道去设置页，而首屏
+  // agents 还没加载完。漏掉它会让这个 memo 冻住一个「看到 0 个 Agent」的过期闭包——整页
+  // 打开或刷新任务中心后按 n 永久跳到设置与接入。hook 内部同步的是这个 memo 对象本身，
+  // 救不了对象里的陈旧闭包。
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [active, isPtyCli, raw, selectSession, toggleRaw]);
+  }), [active, agents.data, isPtyCli, raw, selectSession, toggleRaw]);
   useKeyboardShortcuts(shortcutHandlers, { enabled: !overlayOpen, sessionOpen: Boolean(active) });
-  const shortcutsAvailable = shortcutAvailability(shortcutHandlers, { sessionOpen: Boolean(active), enabled: !overlayOpen });
+  /**
+   * 帮助面板的可用性标注刻意不传 enabled。
+   *
+   * 运行期在浮层打开时停用整套快捷键是对的，但展示层不能共用这个判断：帮助面板自己
+   * 就是浮层，一打开 overlayOpen 即为 true，于是 21 条快捷键会有 20 条被标成「当前
+   * 不可用」——面板存在的意义正是告诉用户能按什么，那样它每次都在撒谎。这里只按
+   * 作用域（是否打开了任务运行）与 handler 是否存在来判定。
+   */
+  const shortcutsAvailable = shortcutAvailability(shortcutHandlers, { sessionOpen: Boolean(active) });
 
   const paletteActions: CommandAction[] = [
     { id: 'create-task', label: '创建任务', hint: agents.data?.length ? '描述目标后立即开始执行' : undefined, group: '任务', keywords: 'new task 新建 创建', shortcut: 'N', disabled: agents.isLoading, disabledReason: agents.isLoading ? '正在检测可用 Agent，稍候即可创建' : undefined, run: openCreateTask },

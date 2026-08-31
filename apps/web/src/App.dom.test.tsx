@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { api, foundationApi, scheduleApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
 import App from './App';
 import { useDockStore } from './store';
+import { shortcutDefinitions } from './useKeyboardShortcuts';
 
 vi.mock('./useSessionStream', () => ({ useSessionStream: () => 'open' }));
 vi.mock('./components/TerminalView', () => ({ TerminalView: ({ sessionId }: { sessionId: string }) => <div>Terminal {sessionId}</div> }));
@@ -296,8 +297,42 @@ describe('App 搜索、快捷键与通知接线', () => {
 
     await user.keyboard('?');
     const sheet = await screen.findByRole('dialog', { name: /快捷键/ });
-    // 总览页没有打开任何运行，session 作用域的快捷键必须显示为当前不可用，而不是假装可用。
-    expect(within(sheet).getAllByText('当前不可用').length).toBeGreaterThan(0);
+    /**
+     * 面板必须如实标注，两个方向都不能错：
+     *   · session 作用域（总览页没有打开任何运行）要标成不可用，并说明先打开一个运行；
+     *   · 全局作用域此刻确实能按，就不能标成不可用。
+     *
+     * 后者曾经是坏的：展示层复用了运行期的 enabled: !overlayOpen，而帮助面板自己就是
+     * 浮层，一打开 overlayOpen 即为 true，于是 21 条里 20 条被标成「当前不可用」。
+     * 面板的意义正是告诉用户此刻能按什么，那样它每次都在撒谎。当时的断言写的是
+     * 「> 0」，恰好被这个 bug 满足，所以没能拦住——这里改成精确计数。
+     */
+    const unavailable = within(sheet).getAllByText(/当前不可用/);
+    const sessionScoped = shortcutDefinitions.filter(definition => definition.scope === 'session').length;
+    expect(unavailable.length).toBe(sessionScoped);
+    expect(within(sheet).getAllByText(/当前不可用：先打开一个任务运行/).length).toBe(sessionScoped);
+    const globalRow = within(sheet).getByText('打开命令面板，搜索任务与操作').closest('li')!;
+    expect(within(globalRow).queryByText(/当前不可用/)).toBeNull();
+  });
+
+  /**
+   * 回归：整页加载（而非 SPA 导航）进任务中心后按 n。
+   *
+   * shortcutHandlers 的 useMemo 依赖数组曾漏掉 agents.data，于是首屏 agents 还没到位时
+   * openCreateTask 闭包看到 0 个 Agent，改道去了「设置与接入」；agents 到位后 memo 不
+   * 重算，闭包永久过期——最常见的入口（直接打开或刷新）上 n 就一直是错的。
+   */
+  it('整页加载任务中心后按 n 打开创建任务，而不是设置与接入', async () => {
+    const user = userEvent.setup();
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
+    renderApp();
+    // 等 agents 查询落地：Agent 数据到位后，过期闭包与正确闭包才会出现分歧。
+    await screen.findByRole('region', { name: '任务列表' });
+    await waitFor(() => expect(api.agents).toHaveBeenCalled());
+
+    await user.keyboard('n');
+    expect(await screen.findByRole('dialog', { name: /新建|创建/ })).toBeTruthy();
+    expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull();
   });
 
   it('取消待执行指令后给出成功通知，并提供把指令排回队尾的撤销', async () => {
