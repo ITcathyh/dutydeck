@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -19,12 +19,33 @@ const BUSINESS_TABLES = [
   'permission_requests',
   'errors',
   'channel_mappings',
-  'configs'
+  'configs',
+  'secret_refs',
+  'channel_bots',
+  'foundation_entity_versions',
+  'channel_bot_policies',
+  'group_bindings',
+  'remote_chat_facts',
+  'remote_identity_facts',
+  'role_assignments',
+  'wp1a_entity_versions',
+  'schedule_definitions',
+  'schedule_generations',
+  'schedule_occurrences',
+  'schedule_watermarks',
+  'schedule_leases',
+  'archived_integrations',
+  'schedule_entity_versions'
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
 const temporaryDirectories: string[] = []
+const linuxIt = process.platform === 'linux' ? it : it.skip
+
+async function mode(path: string): Promise<number> {
+  return (await stat(path)).mode & 0o777
+}
 
 afterEach(async () => Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true }))))
 
@@ -65,6 +86,35 @@ describe('storage migrations', () => {
     const db = new Database(':memory:')
     runMigrations(db)
     expect(() => runMigrations(db)).not.toThrow()
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('upgrades v13 remote chat facts without loss and expires unbound legacy rows', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 13)) {
+      migration.up(db)
+      record.run(migration.version, '2026-01-01T00:00:00.000Z')
+    }
+    db.prepare('INSERT INTO secret_refs (id, schema_version, revision, kind, provider, reference_key, status, created_at, updated_at) VALUES (?, 1, 1, ?, ?, ?, ?, ?, ?)')
+      .run('secret_legacy', 'lark_app_secret', 'keychain', 'synthetic-reference', 'configured', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    db.prepare('INSERT INTO channel_bots (id, schema_version, revision, channel, external_app_id, display_name, brand, credential_ref, state, desired_listener_state, full_trust_confirmed, created_at, updated_at) VALUES (?, 1, 1, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)')
+      .run('bot_legacy', 'lark', 'synthetic-app', 'Legacy Bot', 'feishu', 'secret_legacy', 'staged', 'disabled', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    db.prepare('INSERT INTO remote_chat_facts (id, schema_version, revision, channel_bot_id, external_chat_id, membership_state, chat_type, display_name, observed_at, last_success_at, error_code, created_at, updated_at) VALUES (?, 1, 1, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)')
+      .run('chat_legacy', 'bot_legacy', 'synthetic-chat', 'member', 'group', 'Synthetic Legacy Group', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+
+    runMigrations(db)
+
+    expect(db.prepare('SELECT external_chat_id, display_name, expires_at, credential_ref_id, identity_fact_id FROM remote_chat_facts WHERE id = ?').get('chat_legacy')).toEqual({
+      external_chat_id: 'synthetic-chat',
+      display_name: 'Synthetic Legacy Group',
+      expires_at: '1970-01-01T00:00:00.000Z',
+      credential_ref_id: null,
+      identity_fact_id: null
+    })
+    expect(db.prepare('SELECT COUNT(*) AS count FROM remote_identity_facts').get()).toEqual({ count: 0 })
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
     db.close()
   })
@@ -140,6 +190,80 @@ describe('storage migrations', () => {
     db.close()
   })
 
+  it('adds v11 foundation tables without rewriting v10 legacy data', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 10)) {
+      migration.up(db)
+      record.run(migration.version, '2026-01-01T00:00:00.000Z')
+    }
+    const agentJson = JSON.stringify({ id: 'legacy-agent', command: 'legacy-command', env: { PRIVATE_TOKEN: 'migration-canary' } })
+    const botsJson = JSON.stringify([{ appId: 'cli_legacy', appSecret: 'legacy-secret-canary', listening: false }])
+    db.prepare('INSERT INTO agent_configs (id, json, created_at, updated_at) VALUES (?, ?, ?, ?)')
+      .run('legacy-agent', agentJson, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+    db.prepare('INSERT INTO configs (key, value) VALUES (?, ?)').run('lark.bots', botsJson)
+    db.prepare('INSERT INTO sessions (id, agent_id, state, cwd, permission_mode, run_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run('legacy-session', 'legacy-agent', 'idle', '/legacy/workspace', 'ask', 'legacy-run', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
+
+    runMigrations(db)
+
+    expect(db.prepare('SELECT json FROM agent_configs WHERE id = ?').get('legacy-agent')).toEqual({ json: agentJson })
+    expect(db.prepare('SELECT value FROM configs WHERE key = ?').get('lark.bots')).toEqual({ value: botsJson })
+    expect(db.prepare('SELECT agent_id, state, cwd, permission_mode, run_id FROM sessions WHERE id = ?').get('legacy-session'))
+      .toEqual({ agent_id: 'legacy-agent', state: 'idle', cwd: '/legacy/workspace', permission_mode: 'ask', run_id: 'legacy-run' })
+    expect(db.prepare('SELECT COUNT(*) AS count FROM secret_refs').get()).toEqual({ count: 0 })
+    expect(db.prepare('SELECT COUNT(*) AS count FROM channel_bots').get()).toEqual({ count: 0 })
+    expect(columnNames(db, 'secret_refs')).not.toContain('value')
+    expect(columnNames(db, 'secret_refs')).not.toContain('secret')
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('adds v12 group-policy tables without changing v11 or legacy rows', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 11)) {
+      migration.up(db)
+      record.run(migration.version, '2026-08-30T00:00:00.000Z')
+    }
+    db.prepare('INSERT INTO agent_configs (id, json, created_at, updated_at) VALUES (?, ?, ?, ?)').run('legacy-v12', '{"private":"unchanged"}', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+    db.prepare(`INSERT INTO channel_bots (id, schema_version, revision, channel, external_app_id, display_name, brand, state, desired_listener_state, full_trust_confirmed, created_at, updated_at) VALUES (?, 1, 1, 'lark', ?, ?, 'feishu', 'disabled', 'disabled', 0, ?, ?)`)
+      .run('bot-v11', 'cli_v11', 'V11 Bot', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+
+    runMigrations(db)
+
+    expect(db.prepare('SELECT json FROM agent_configs WHERE id = ?').get('legacy-v12')).toEqual({ json: '{"private":"unchanged"}' })
+    expect(db.prepare('SELECT revision, state, desired_listener_state, full_trust_confirmed FROM channel_bots WHERE id = ?').get('bot-v11'))
+      .toEqual({ revision: 1, state: 'disabled', desired_listener_state: 'disabled', full_trust_confirmed: 0 })
+    for (const table of ['channel_bot_policies', 'group_bindings', 'remote_chat_facts', 'role_assignments']) expect(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 })
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('adds v13 Schedule ledgers as disabled control-plane tables without creating runtime work', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 12)) {
+      migration.up(db)
+      record.run(migration.version, '2026-08-30T00:00:00.000Z')
+    }
+    db.prepare(`INSERT INTO channel_bots (id, schema_version, revision, channel, external_app_id, display_name, brand, state, desired_listener_state, full_trust_confirmed, created_at, updated_at) VALUES (?, 1, 1, 'lark', ?, ?, 'feishu', 'disabled', 'disabled', 0, ?, ?)`).run('bot-v13', 'cli_v13', 'V13 Bot', '2026-08-30T00:00:00.000Z', '2026-08-30T00:00:00.000Z')
+
+    runMigrations(db)
+
+    for (const table of ['schedule_definitions', 'schedule_generations', 'schedule_occurrences', 'schedule_watermarks', 'schedule_leases', 'archived_integrations']) {
+      expect(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 })
+    }
+    expect(db.prepare('SELECT revision, state, desired_listener_state FROM channel_bots WHERE id = ?').get('bot-v13')).toEqual({ revision: 1, state: 'disabled', desired_listener_state: 'disabled' })
+    expect(db.prepare('SELECT COUNT(*) AS count FROM tasks').get()).toEqual({ count: 0 })
+    expect(db.prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 0 })
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
   it('creates a consistent one-time backup before the irreversible v10 table rebuild', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dockmux-migration-backup-'))
     temporaryDirectories.push(directory)
@@ -179,6 +303,52 @@ describe('storage migrations', () => {
     const reopened = createRepositories(filename)
     reopened.close()
     expect((await stat(backupFilename)).mtimeMs).toBe(backupMtime)
+  })
+
+  linuxIt('creates a private database directory and SQLite files without changing its parent mode', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'dockmux-storage-permissions-'))
+    temporaryDirectories.push(parent)
+    await chmod(parent, 0o755)
+    const directory = join(parent, 'private-data')
+    const filename = join(directory, 'dockmux.db')
+
+    const repositories = createRepositories(filename)
+    await repositories.config.set('credential', 'secret')
+
+    expect(await mode(parent)).toBe(0o755)
+    expect(await mode(directory)).toBe(0o700)
+    expect(await mode(filename)).toBe(0o600)
+    expect(existsSync(`${filename}-wal`)).toBe(true)
+    expect(existsSync(`${filename}-shm`)).toBe(true)
+    expect(await mode(`${filename}-wal`)).toBe(0o600)
+    expect(await mode(`${filename}-shm`)).toBe(0o600)
+    repositories.close()
+  })
+
+  linuxIt('tightens an existing .dockmux directory, database, sidecars, and backup only', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'dockmux-storage-existing-'))
+    temporaryDirectories.push(parent)
+    await chmod(parent, 0o755)
+    const directory = join(parent, '.dockmux')
+    const filename = join(directory, 'dockmux.db')
+    await mkdir(directory, { mode: 0o755 })
+
+    const initial = new Database(filename)
+    runMigrations(initial)
+    initial.close()
+    const backupFilename = `${filename}${PRE_V10_BACKUP_SUFFIX}`
+    await writeFile(backupFilename, 'stale-sensitive-data', { mode: 0o644 })
+    await chmod(filename, 0o644)
+
+    const repositories = createRepositories(filename)
+    expect(await mode(parent)).toBe(0o755)
+    expect(await mode(directory)).toBe(0o700)
+    expect(await mode(filename)).toBe(0o600)
+    expect(await mode(backupFilename)).toBe(0o600)
+    const journalFilename = `${filename}-journal`
+    await writeFile(journalFilename, 'runtime-sensitive-data', { mode: 0o644 })
+    repositories.close()
+    expect(await mode(journalFilename)).toBe(0o600)
   })
 
   it('createRepositories runs migrations and round-trips agents', async () => {

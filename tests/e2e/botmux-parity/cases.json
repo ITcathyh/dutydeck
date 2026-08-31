@@ -1,0 +1,431 @@
+{
+  "schema_version": 1,
+  "suite_id": "botmux-parity-v1",
+  "default_action": "self_check_only",
+  "safety_contract": {
+    "starts_or_stops_listener": false,
+    "writes_botmux_source": false,
+    "writes_dockmux_database": false,
+    "uses_existing_credentials": false,
+    "writes_only_disposable_test_state": true,
+    "isolates_home_tmp_ports_tmux": true,
+    "checks_tmux_residue": true,
+    "real_lark_requires_dedicated_test_app": true,
+    "real_lark_requires_external_fencing": true
+  },
+  "required_coverage": [
+    "remote_open_http",
+    "remote_open_sse",
+    "remote_open_terminal_ws",
+    "same_origin",
+    "secret_provider",
+    "importer_read_only",
+    "importer_cli",
+    "daemon_restart_reattach",
+    "active_turn_result_reconstruction",
+    "channel_routing",
+    "effective_config",
+    "rbac",
+    "high_risk_gates",
+    "staged_fail_closed",
+    "schedule_single_writer",
+    "schedule_dst",
+    "schedule_idempotency",
+    "schedule_lease",
+    "schedule_offline_api",
+    "schedule_activation",
+    "identity_preflight",
+    "listener_lease",
+    "dual_consumer_fencing",
+    "rollback",
+    "real_lark_opt_in"
+  ],
+  "cases": [
+    {
+      "id": "remote-open-contract-http-sse",
+      "title": "Explicit remote-open mode serves HTTP/SSE without a token and rejects cross-origin browsers",
+      "coverage": ["remote_open_http", "remote_open_sse", "same_origin"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "apps/server/src/access-mode.test.ts",
+        "apps/server/src/auth/auth.test.ts",
+        "--project", "node"
+      ],
+      "evidence_sources": [
+        "dockmux:apps/server/src/access-mode.test.ts",
+        "dockmux:apps/server/src/auth/auth.test.ts"
+      ],
+      "assertions": [
+        "explicit open mode never reads or requires an access token",
+        "HTTP and SSE are reachable without Authorization or Cookie",
+        "cross-origin browser requests fail before subscribing or mutating",
+        "trusted proxy origin is compared against the effective public origin"
+      ]
+    },
+    {
+      "id": "remote-open-contract-terminal-ws",
+      "title": "Explicit remote-open Terminal WebSocket is tokenless but exact same-origin",
+      "coverage": ["remote_open_terminal_ws", "same_origin", "high_risk_gates"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "apps/server/src/terminal/terminal-ws.test.ts",
+        "--project", "node"
+      ],
+      "evidence_sources": [
+        "dockmux:apps/server/src/terminal/terminal-ws.test.ts"
+      ],
+      "assertions": [
+        "open mode accepts an exact same-origin WebSocket without a token",
+        "cross-origin upgrades are rejected",
+        "query-string tokens are not credentials",
+        "token-protected remote mode still rejects a tokenless loopback hop"
+      ]
+    },
+    {
+      "id": "remote-dev-open-mode-no-token",
+      "title": "Opt-in read-only probe of a remote development Dockmux HTTP/SSE/Terminal WS endpoint",
+      "coverage": ["remote_open_http", "remote_open_sse", "remote_open_terminal_ws", "same_origin"],
+      "execution": "remote_opt_in",
+      "expectation": "pass",
+      "command": ["node", "tests/e2e/botmux-parity/checks/remote-open.mjs"],
+      "required_env": ["DOCKMUX_PARITY_BASE_URL", "DOCKMUX_PARITY_SESSION_ID", "DOCKMUX_PARITY_REMOTE_OPEN_ACK"],
+      "safety": [
+        "runner requires --allow-remote-open",
+        "probe sends no Authorization, Cookie, terminal input, or mutation request",
+        "base URL may not contain userinfo, query, or fragment",
+        "the supplied session must be a dedicated disposable PTY-CLI session"
+      ],
+      "assertions": [
+        "auth status reports required=false",
+        "session HTTP is reachable without a token",
+        "SSE connects with the exact public Origin and cross-Origin fails",
+        "Terminal WS connects with the exact public Origin and cross-Origin fails"
+      ]
+    },
+    {
+      "id": "secret-provider-and-cli-boundary",
+      "title": "SecretProvider and secret CLI preserve metadata-only, private-file and fail-closed boundaries",
+      "coverage": ["secret_provider", "staged_fail_closed"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "packages/secret-provider/src/index.test.ts",
+        "apps/server/src/secret-cli.blackbox.test.ts",
+        "apps/server/src/foundation-routes.test.ts",
+        "--project", "node"
+      ],
+      "evidence_sources": [
+        "dockmux:packages/secret-provider/src/index.test.ts",
+        "dockmux:apps/server/src/secret-cli.blackbox.test.ts",
+        "dockmux:apps/server/src/foundation-routes.test.ts"
+      ],
+      "assertions": [
+        "Secret values enter through an FD/runtime-only callback, are never accepted on argv or persisted in metadata, and input buffers are wiped",
+        "provider directories and files are private, exclusive and symlink-safe",
+        "rotation/removal use CAS and referenced SecretRefs cannot be removed",
+        "missing or unreadable SecretRefs keep ChannelBots staged and activation-ineligible"
+      ]
+    },
+    {
+      "id": "importer-redaction-no-go-source-immutable",
+      "title": "Importer core emits a redacted NO_GO plan and never mutates its synthetic Botmux source",
+      "coverage": ["importer_read_only"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": ["node", "node_modules/tsx/dist/cli.mjs", "tests/e2e/botmux-parity/checks/importer-read-only.mts"],
+      "fixtures": ["fixtures/importer"],
+      "evidence_sources": [
+        "dockmux:packages/botmux-importer/src/importer.ts",
+        "dockmux:packages/botmux-importer/src/archive.ts"
+      ],
+      "assertions": [
+        "production_cutover is NO_GO and activation_ready is false",
+        "Hammer, enabled Schedule, active topic, and unknown configuration are blockers",
+        "plans and manifests contain no raw App, chat, principal, path, prompt, or secret",
+        "source tree digest is unchanged after plan and encrypted archive"
+      ]
+    },
+    {
+      "id": "importer-cli-discover-plan-archive",
+      "title": "Importer CLI discover, plan and archive remain redacted, exclusive and non-activating",
+      "coverage": ["importer_read_only", "importer_cli", "staged_fail_closed"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "apps/server/src/botmux-import-cli.blackbox.test.ts",
+        "--project", "node"
+      ],
+      "evidence_sources": [
+        "dockmux:apps/server/src/botmux-import-cli.blackbox.test.ts",
+        "dockmux:apps/server/src/botmux-import-cli.ts"
+      ],
+      "assertions": [
+        "the CLI exposes discover, plan and archive but no apply/stage/activate/cutover/resume command",
+        "discover and plan stay NO_GO, redact paths/identities/secrets and leave the source digest unchanged",
+        "redacted outputs use exclusive 0600 files and refuse overwrite or symlink targets",
+        "archive requires an explicit non-argv passphrase FD, writes 0700/0600 encrypted output and never changes the source"
+      ]
+    },
+    {
+      "id": "daemon-restart-owned-run-reattach",
+      "title": "A completed Dockmux-owned run reattaches on the same pane PID after service restart and final stop destroys it",
+      "coverage": ["daemon_restart_reattach"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": ["node", "tests/e2e/botmux-parity/checks/wp2-service-restart.mjs"],
+      "fixtures": ["fixtures/restart-run.json"],
+      "evidence_sources": [
+        "dockmux:apps/server/src/service.test.ts",
+        "dockmux:apps/server/src/service.ts"
+      ],
+      "assertions": [
+        "two service lifetimes use the same isolated SQLite database",
+        "the second service lazily reconnects the persisted session without an eager duplicate driver",
+        "the tmux pane PID is unchanged after the post-restart turn",
+        "both completed prompts remain persisted",
+        "explicit final session stop destroys the tmux session",
+        "the wrapper leaves no tmux session in its isolated TMUX_TMPDIR namespace"
+      ]
+    },
+    {
+      "id": "active-turn-result-reconstruction-after-restart",
+      "title": "An active turn survives daemon loss and reconstructs its exact final result after reconnect",
+      "coverage": ["active_turn_result_reconstruction"],
+      "execution": "expected_blocked",
+      "expectation": "expected_blocked",
+      "reason_code": "ACTIVE_TURN_RESULT_RECONSTRUCTION_NOT_PROVEN",
+      "blocked_by": [
+        "the WP2 service test restarts only between completed turns",
+        "runtime initialization currently classifies tasks left running by the prior process as interrupted",
+        "no service-level test reconstructs the terminal result, task completion, and delivery identity for a turn active during restart"
+      ],
+      "fixtures": ["fixtures/restart-run.json"],
+      "supporting_evidence": [
+        "dockmux:apps/server/src/service.test.ts",
+        "dockmux:packages/agent-runtime/src/runtime.test.ts"
+      ]
+    },
+    {
+      "id": "agent-channelbot-groupbinding-routing",
+      "title": "Agent, ChannelBot and GroupBinding resolve App+Chat routing, mention/topic and group-tool ceilings offline",
+      "coverage": ["channel_routing", "effective_config"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "packages/shared/src/group-policy.test.ts",
+        "packages/storage/src/group-policy.test.ts",
+        "apps/server/src/foundation-routes.test.ts",
+        "--project", "node"
+      ],
+      "fixtures": ["fixtures/routing-and-rbac.json"],
+      "evidence_sources": [
+        "dockmux:packages/shared/src/group-policy.test.ts",
+        "dockmux:packages/storage/src/group-policy.test.ts",
+        "dockmux:apps/server/src/foundation-routes.test.ts"
+      ],
+      "assertions": [
+        "effective config resolves bot defaults and per-chat overrides deterministically",
+        "mention=topic and group reply=chat-topic retain group_override provenance",
+        "oncall grants talk only and group-tool send cannot exceed the ChannelBot ceiling",
+        "management API returns an allowlisted App+Chat matrix without raw principals or secrets"
+      ]
+    },
+    {
+      "id": "rbac-talk-operate-admin",
+      "title": "can_talk, can_operate and admin remain distinct in the persisted policy and management authorizer",
+      "coverage": ["rbac", "staged_fail_closed"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "packages/shared/src/group-policy.test.ts",
+        "packages/storage/src/group-policy.test.ts",
+        "apps/server/src/foundation-policy.test.ts",
+        "--project", "node"
+      ],
+      "fixtures": ["fixtures/routing-and-rbac.json"],
+      "evidence_sources": [
+        "dockmux:packages/shared/src/group-policy.test.ts",
+        "dockmux:packages/storage/src/group-policy.test.ts",
+        "dockmux:apps/server/src/foundation-policy.test.ts"
+      ],
+      "assertions": [
+        "oncall/all-chat membership grants can_talk without can_operate or admin",
+        "role assignments retain independent operate scopes and action gates",
+        "management writes require the owner/admin resolver and token mode has no anonymous fallback",
+        "managed staged bindings fail closed while explicitly isolated legacy execution remains legacy_unmanaged"
+      ]
+    },
+    {
+      "id": "high-risk-terminal-and-group-tools",
+      "title": "Terminal write and group-tool send require explicit independent high-risk gates",
+      "coverage": ["high_risk_gates", "staged_fail_closed"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "apps/server/src/foundation-policy.test.ts",
+        "apps/server/src/terminal/terminal-ws.test.ts",
+        "apps/server/src/lark/agent-tools.test.ts",
+        "--project", "node"
+      ],
+      "fixtures": ["fixtures/routing-and-rbac.json"],
+      "evidence_sources": [
+        "dockmux:apps/server/src/foundation-policy.test.ts",
+        "dockmux:apps/server/src/terminal/terminal-ws.test.ts",
+        "dockmux:apps/server/src/lark/agent-tools.test.ts"
+      ],
+      "assertions": [
+        "Terminal WS re-authorizes read and write separately and closes denied writes with a machine-readable policy code",
+        "group-tool read/discover/send pass through the injected policy evaluator",
+        "can_operate or full trust alone does not override terminalWrite, highRisk or groupToolsSend gates",
+        "managed staged/disabled bindings deny session, terminal, high-risk and group-tool execution"
+      ]
+    },
+    {
+      "id": "staged-foundation-fail-closed",
+      "title": "Unwired and staged ChannelBot, GroupBinding and Schedule foundations fail closed at every management boundary",
+      "coverage": ["staged_fail_closed"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "apps/server/src/foundation-policy.test.ts",
+        "apps/server/src/foundation-routes.test.ts",
+        "apps/server/src/schedule-routes.test.ts",
+        "--project", "node"
+      ],
+      "evidence_sources": [
+        "dockmux:apps/server/src/foundation-policy.test.ts",
+        "dockmux:apps/server/src/foundation-routes.test.ts",
+        "dockmux:apps/server/src/schedule-routes.test.ts"
+      ],
+      "assertions": [
+        "missing repositories and permission evaluators produce machine-readable denial",
+        "ChannelBots and GroupBindings can only be staged or disabled and cannot activate listeners",
+        "Schedule routes expose no enable or run-now operation",
+        "raw secrets, plaintext-like fields and raw principal PII are rejected without echo"
+      ]
+    },
+    {
+      "id": "schedule-single-writer-idempotency-watermark",
+      "title": "Schedule foundation proves DST semantics, generation-pinned idempotency, watermark and CAS lease offline",
+      "coverage": ["schedule_single_writer", "schedule_dst", "schedule_idempotency", "schedule_lease", "schedule_offline_api", "staged_fail_closed"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": [
+        "node", "node_modules/vitest/vitest.mjs", "run",
+        "packages/shared/src/schedule-foundation.test.ts",
+        "packages/storage/src/schedule-foundation.test.ts",
+        "packages/storage/src/migrations.test.ts",
+        "apps/server/src/schedule-routes.test.ts",
+        "--project", "node"
+      ],
+      "fixtures": ["fixtures/schedule-and-fencing.json"],
+      "evidence_sources": [
+        "dockmux:packages/shared/src/schedule-foundation.test.ts",
+        "dockmux:packages/storage/src/schedule-foundation.test.ts",
+        "dockmux:packages/storage/src/migrations.test.ts",
+        "dockmux:apps/server/src/schedule-routes.test.ts"
+      ],
+      "assertions": [
+        "IANA timezone, DST gap/overlap, cron and interval preview semantics are deterministic",
+        "occurrence idempotency keys are stable, generation-pinned and advance only the planning watermark",
+        "lease acquire/renew/fence/reacquire require CAS proof and an expired held lease cannot be stolen",
+        "imported enabled Botmux schedules remain source-owned pending, staged_disabled and non-dispatchable",
+        "offline API can list/edit/preview but has no enable, run-now, timer or listener"
+      ]
+    },
+    {
+      "id": "schedule-executor-and-activation",
+      "title": "Schedule executor, timer and activation remain intentionally unavailable",
+      "coverage": ["schedule_activation"],
+      "execution": "expected_blocked",
+      "expectation": "expected_blocked",
+      "reason_code": "SCHEDULE_EXECUTOR_ACTIVATION_NOT_IMPLEMENTED",
+      "blocked_by": [
+        "the v13 foundation creates only task_run_snapshot intent with dispatchAllowed=false",
+        "no timer, outbox worker or production Schedule executor is registered",
+        "management API deliberately has no enable or run-now operation"
+      ],
+      "supporting_evidence": [
+        "dockmux:packages/shared/src/schedule-foundation.test.ts",
+        "dockmux:apps/server/src/schedule-routes.test.ts"
+      ]
+    },
+    {
+      "id": "app-chat-identity-preflight",
+      "title": "App×Chat identity preflight uses loopback fake Lark and remains activation-ineligible",
+      "coverage": ["identity_preflight", "secret_provider", "staged_fail_closed"],
+      "execution": "offline",
+      "expectation": "pass",
+      "command": ["node", "tests/e2e/botmux-parity/checks/identity-preflight.mjs"],
+      "evidence_sources": [
+        "dockmux:tests/e2e/botmux-parity/checks/identity-preflight.mjs",
+        "dockmux:apps/server/src/lark/identity-preflight.test.ts",
+        "dockmux:apps/server/src/identity-preflight.service.test.ts",
+        "dockmux:apps/server/src/identity-preflight-cli.test.ts"
+      ],
+      "safety": [
+        "all remote calls terminate at a per-test loopback fake Lark server on an ephemeral port",
+        "all SecretProvider files and SQLite state live under the runner case-private TMPDIR",
+        "no listener is started and no activation or cutover route is invoked"
+      ],
+      "assertions": [
+        "successful App×Chat verification uses only read-only identity, membership and chat probes and persists version-bound facts",
+        "local App mismatch, remote App mismatch, missing SecretRef value and unreadable SecretRef value fail closed",
+        "not-member and inaccessible chat evidence produce non-sensitive blockers",
+        "a definitive failed recheck CAS-invalidates the last successful identity and bound chat facts",
+        "API and CLI public projections exclude secrets, tokens, raw App/chat/open_id/tenant identities, names and upstream error payloads",
+        "success still returns activationChanged=false and listenerReadiness=blocked while the ChannelBot remains staged/disabled"
+      ]
+    },
+    {
+      "id": "dual-consumer-fencing-and-rollback",
+      "title": "Listener lease and cross-runtime fencing prevent dual consumption and preserve rollback watermarks",
+      "coverage": ["listener_lease", "dual_consumer_fencing", "rollback"],
+      "execution": "expected_blocked",
+      "expectation": "expected_blocked",
+      "reason_code": "EXTERNAL_FENCING_NOT_IMPLEMENTED",
+      "blocked_by": [
+        "no production listener lease is acquired, renewed, fenced or released by Dockmux",
+        "a future Dockmux-local lease alone cannot stop Botmux reconnect",
+        "no shared supervisor enforces one App generation across both runtimes",
+        "drain acknowledgement, source/target watermarks, dedup window, and mechanical rollback are absent"
+      ],
+      "fixtures": ["fixtures/schedule-and-fencing.json"],
+      "supporting_evidence": [
+        "dockmux:docs/botmux-import-cutover-spec.md",
+        "dockmux:docs/botmux-integration-master-plan.md"
+      ]
+    },
+    {
+      "id": "real-lark-dedicated-test-app",
+      "title": "Opt-in real Lark parity probe on a dedicated test App and chat",
+      "coverage": ["real_lark_opt_in", "channel_routing", "rbac", "dual_consumer_fencing"],
+      "execution": "real_lark_opt_in",
+      "expectation": "skip",
+      "reason_code": "REAL_LARK_DRIVER_INTENTIONALLY_NOT_BUNDLED",
+      "blocked_by": [
+        "a repository runner must not obtain or reuse existing Lark credentials",
+        "an external operator-owned driver is required after identity and fencing preflight",
+        "the current production Botmux Apps/listeners are explicitly out of scope"
+      ],
+      "preflight_schema": "real-lark-preflight.schema.json",
+      "safety": [
+        "dedicated_test_app=true and production_app=false",
+        "App-scoped bot identity and App+Chat membership must be positively verified",
+        "Botmux listener must be drained and reconnect-inhibited by an external fence",
+        "target listener must remain disabled until the external test driver owns the generation",
+        "no credential or raw App/chat/open_id is stored in this suite"
+      ]
+    }
+  ]
+}

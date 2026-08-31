@@ -1,4 +1,4 @@
-import type { AgentEvent, ChannelMappingRepository, Session, ToolRiskPolicy } from '@dockmux/shared';
+import type { AgentEvent, ChannelMappingRepository, PolicyAction, PolicyDecision, Session, ToolRiskPolicy } from '@dockmux/shared';
 import { defaultHighRiskPattern, defaultLarkTraceLimit, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
@@ -44,6 +44,11 @@ export type LarkTask = {
   cardMessageId?: string;
   runtimeTaskId?: string;
   startedAt?: number;
+  acknowledgementReactionId?: string;
+  /** Immutable terminal notification for the current turn. */
+  finalMessageId?: string;
+  finalDeliveredTurn?: number;
+  progressFrozen?: boolean;
   interruptRequested?: boolean;
   requestUpdate?: (state: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted', completed?: boolean) => Promise<void>;
   retryable?: boolean;
@@ -68,8 +73,12 @@ export type PersistedLarkCardTask = {
   last_successful_elements?: LarkCardElement[];
   /** Daemon recovery already removed stale in-memory card actions. */
   recovery_read_only?: boolean;
+  chat_type?: LarkMessageEvent['chatType'];
+  final_message_id?: string;
+  final_delivery_state?: 'delivered';
+  progress_frozen?: boolean;
+  turn?: number;
 };
-const acknowledgementEmojis = ['OK', 'THUMBSUP', 'FINGERHEART', 'APPLAUSE', 'JIAYI', 'SMILE'] as const;
 
 const larkCardChannel = (appId: string) => `lark-card:${appId}`;
 
@@ -107,12 +116,28 @@ export class LarkMessageCoordinator {
     private readonly runtime: LarkRuntime,
     private readonly service: LarkCardService,
     private readonly log: ListenerLog,
-    private readonly random: () => number = Math.random,
+    private readonly _random: () => number = Math.random,
     private readonly botOpenId?: string,
     private readonly peerBotAuthorized?: (chatId: string, senderOpenId: string) => Promise<boolean>,
     private readonly cardMappings?: ChannelMappingRepository,
-    private readonly chatModeResolver?: LarkChatModeResolver
+    private readonly chatModeResolver?: LarkChatModeResolver,
+    private readonly executionPolicy?: {
+      integrationMode: 'legacy_unmanaged';
+      authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
+    },
   ) {}
+
+  private async requireExecution(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction) {
+    if (!this.executionPolicy) return;
+    const decision = await this.executionPolicy.authorize(boundary, action);
+    if (!decision.allowed) {
+      throw new LarkServiceError('LARK_EXECUTION_POLICY_DENIED', decision.reason, 403, {
+        policyCode: decision.code,
+        boundary,
+        integrationMode: this.executionPolicy.integrationMode,
+      });
+    }
+  }
 
   private async saveCardTask(task: LarkTask, state = task.state) {
     if (!this.cardMappings || !task.sessionId || !task.cardMessageId || !task.startedAt) return;
@@ -124,6 +149,10 @@ export class LarkMessageCoordinator {
       task_name: task.prompt.slice(0, 80),
       prompt: task.prompt,
       state,
+      chat_type: task.event.chatType,
+      turn: task.turn,
+      ...(task.finalMessageId ? { final_message_id: task.finalMessageId, final_delivery_state: 'delivered' as const } : {}),
+      ...(task.progressFrozen ? { progress_frozen: true } : {}),
       ...(task.lastSuccessfulElements?.length ? { last_successful_elements: task.lastSuccessfulElements } : {}),
       ...(task.event.chatType === 'group' ? {
         reply_message_id: task.event.messageId,
@@ -192,17 +221,42 @@ export class LarkMessageCoordinator {
     const mentionsBot = this.botOpenId ? event.mentions.some(mention => mention.openId === this.botOpenId) : event.mentions.some(mention => mention.mentionedType === 'bot');
     const shouldWake = event.chatType === 'p2p' || (event.chatType === 'group' && mentionsBot);
     if (this.stopped || !shouldWake || this.handledMessages.has(event.messageId)) return;
+    await this.requireExecution('listener', 'task.create');
     // 先标记已处理，避免异步解析期间同一条消息被重复入队。
     this.handledMessages.add(event.messageId);
     if (this.handledMessages.size > 5_000) this.handledMessages.delete(this.handledMessages.values().next().value!);
-    const { prompt, resources } = await parsePrompt(event);
-    // 路由解析（话题群种子 / 普通群回复模式 / legacy）与 group key 共用同一 scopeId，
-    // 保证同一会话的消息串行化到同一个 group。
-    const scopeId = await resolveLarkScopeId(event, config, this.chatModeResolver);
+    // 事件接入后立即给出稳定、单义的接收确认。解析、附件下载和会话路由均可能较慢，
+    // 不应让用户在这些步骤中面对无反馈的聊天界面。
+    let acknowledgementReactionId: string | undefined;
+    try {
+      acknowledgementReactionId = (await this.service.addReaction(event.messageId, 'OK')).reactionId;
+    } catch (error) {
+      this.log.warn({ error, messageId: event.messageId }, '发送飞书确认表情失败，继续处理消息');
+    }
+    let prompt: string;
+    let resources: LarkMessageResource[];
+    let scopeId: string;
+    try {
+      ({ prompt, resources } = await parsePrompt(event));
+      // 路由解析（话题群种子 / 普通群回复模式 / legacy）与 group key 共用同一 scopeId，
+      // 保证同一会话的消息串行化到同一个 group。
+      scopeId = await resolveLarkScopeId(event, config, this.chatModeResolver);
+    } catch (error) {
+      this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '解析飞书消息失败，已向用户回执');
+      await sendTaskCard(this.service, event, {
+        state: 'failed', retryable: false, readOnly: true,
+        taskId: event.messageId, taskName: '消息接收失败',
+        markdown: `**消息未能解析，Agent 尚未执行。**\n\n${error instanceof Error ? error.message : String(error)}\n\n请检查消息内容或附件后重新发送。`,
+        idempotencyKey: `parse_failed_${event.messageId}`.slice(0, 50),
+        ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
+      }, this.log).catch(cardError => this.log.error({ error: cardError, messageId: event.messageId }, '发送飞书解析失败回执失败'));
+      if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
+      return;
+    }
     // 空 @ 消息（仅 @ 机器人无文字）仍需创建任务，由 runTurn 拉取聊天记录做兜底意图判断。
     const groupKey = larkGroupKey(event, scopeId);
     const group = this.groups.get(groupKey) ?? { tail: Promise.resolve() };
-    const task: LarkTask = { id: event.messageId, group, event, prompt, resources, config, state: 'queued', events: [], turn: 0, scopeId };
+    const task: LarkTask = { id: event.messageId, group, event, prompt, resources, config, state: 'queued', events: [], turn: 0, scopeId, acknowledgementReactionId };
     this.tasks.set(task.id, task);
     if (this.tasks.size > 5_000) this.tasks.delete(this.tasks.keys().next().value!);
     group.tail = group.tail.then(() => this.runTurn(task)).catch(error => {
@@ -291,7 +345,7 @@ export class LarkMessageCoordinator {
           if (task.state === 'interrupting') task.state = 'queued';
           this.log.warn({ error, taskId, sessionId, runtimeTaskId }, '取消飞书排队任务失败');
           this.pushTaskError(task, `取消排队任务失败：${error instanceof Error ? error.message : String(error)}`);
-          await task.requestUpdate?.('queued', false).catch(() => undefined);
+          await task.requestUpdate?.(task.state === 'running' ? 'running' : 'queued', false).catch(() => undefined);
         }
       })();
       return { type: 'success', content: '正在取消排队任务' };
@@ -321,6 +375,13 @@ export class LarkMessageCoordinator {
     if (action === 'retry') {
       if (task.state !== 'failed' && task.state !== 'interrupted') return { type: 'warning', content: '只有失败或已中断的任务可以重试' };
       task.state = 'queued';
+      // 终态卡片是不可变收据；重试必须创建一张新的进度卡，不能复用或覆盖旧收据。
+      task.cardMessageId = undefined;
+      task.finalMessageId = undefined;
+      task.finalDeliveredTurn = undefined;
+      task.lastSuccessfulElements = undefined;
+      task.runtimeTaskId = undefined;
+      task.progressFrozen = undefined;
       task.group.tail = task.group.tail.then(() => this.runTurn(task)).catch(error => {
         this.log.error({ error, chatId: task.event.chatId, messageId: task.event.messageId }, '重试飞书任务失败');
         this.pushTaskError(task, `重试任务失败：${error instanceof Error ? error.message : String(error)}`);
@@ -352,7 +413,8 @@ export class LarkMessageCoordinator {
    * 让 Agent 根据历史判断用户意图；若拉取失败则退化为纯提示，让 Agent 主动询问。
    */
   private async buildEmptyMessageFallback(event: LarkMessageEvent): Promise<string> {
-    const fallback = '用户仅 @ 了机器人而未发送任何文字内容。请礼貌地询问用户需要什么帮助。';
+    const confirmationRule = '你可以使用上下文识别指代，但当前消息没有明确请求。必须先复述你对用户意图的理解并询问确认；在用户明确确认前，不得执行命令、写入文件、发送消息或触发其他副作用。';
+    const fallback = `用户仅 @ 了机器人而未发送任何文字内容。${confirmationRule}`;
     try {
       // 话题内的空 @ 优先拉取该话题的消息，保证上下文不串到群里其他话题。
       const threadId = event.threadId?.trim();
@@ -379,7 +441,7 @@ export class LarkMessageCoordinator {
         text = text.trim();
         return `${sender}: ${text || '[图片/文件/卡片等非文字消息]'}`;
       }));
-      return `[Dockmux 空消息兜底]\n用户仅 @ 了机器人而未发送任何文字内容。以下是当前会话最近的聊天记录，请根据上下文判断用户的意图并回复。如果无法判断，请礼貌地询问用户需要什么帮助。\n\n[最近聊天记录]\n${lines.join('\n')}`;
+      return `[Dockmux 空消息兜底]\n用户仅 @ 了机器人而未发送任何文字内容。以下是当前会话最近的聊天记录，仅用于识别指代。${confirmationRule}\n\n[最近聊天记录]\n${lines.join('\n')}`;
     } catch (error) {
       this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '拉取飞书聊天记录为空消息兜底失败');
       return fallback;
@@ -409,16 +471,13 @@ export class LarkMessageCoordinator {
       this.log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 渲染卡片');
     }
     const cardContext = { agentName, ...(config.workspace ? { workspace: config.workspace } : {}) };
-    const firstAttempt = !task.cardMessageId;
-    const emojiType = acknowledgementEmojis[Math.floor(this.random() * acknowledgementEmojis.length)] ?? acknowledgementEmojis[0];
-    let reactionId: string | undefined;
-    if (firstAttempt) {
-      try {
-        reactionId = (await this.service.addReaction(event.messageId, emojiType)).reactionId;
-      } catch (error) {
-        this.log.warn({ error, messageId: event.messageId }, '发送飞书确认表情失败，继续执行任务');
-      }
-    }
+    const clearAcknowledgement = async () => {
+      const reactionId = task.acknowledgementReactionId;
+      task.acknowledgementReactionId = undefined;
+      if (!reactionId) return;
+      try { await this.service.deleteReaction(event.messageId, reactionId); }
+      catch (error) { this.log.warn({ error, messageId: event.messageId, reactionId }, '撤销飞书确认表情失败'); }
+    };
 
     let actorEmails: string[] = [];
     const allowedUsers = config.allowedUsers ?? [];
@@ -438,7 +497,7 @@ export class LarkMessageCoordinator {
         task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
         const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: 'Agent 协作身份校验失败', markdown: `**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
         task.cardMessageId = card.messageId;
-        if (reactionId) await this.service.deleteReaction(event.messageId, reactionId).catch(() => undefined);
+        await clearAcknowledgement();
         return;
       }
     } else if ((!allowedUsers.length && allowedEmails.length) || (riskControlEnabled && !highRiskAllowedUsers.length && highRiskAllowedEmails.length)) {
@@ -450,7 +509,7 @@ export class LarkMessageCoordinator {
         task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
         const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '身份解析权限缺失', markdown: larkIdentityPermissionHelp(error, config.appId), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
         task.cardMessageId = card.messageId;
-        if (reactionId) await this.service.deleteReaction(event.messageId, reactionId).catch(() => undefined);
+        await clearAcknowledgement();
         return;
       }
     }
@@ -466,7 +525,7 @@ export class LarkMessageCoordinator {
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
       const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '访问被拒绝', markdown: '**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。', ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
-      if (reactionId) await this.service.deleteReaction(event.messageId, reactionId).catch(() => undefined);
+      await clearAcknowledgement();
       return;
     }
     const highRiskAuthorized = botSender
@@ -485,33 +544,35 @@ export class LarkMessageCoordinator {
       reason: '当前飞书发送人不在高危操作允许名单中'
     } : undefined;
     let session: Session;
-    try { session = await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId); }
+    try {
+      await this.requireExecution('session', 'task.create');
+      if (riskPolicy) await this.requireExecution('high_risk', 'high_risk.execute');
+      session = await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId);
+    }
     catch (error) {
       task.state = 'failed'; task.startedAt = Date.now();
       const markdown = `**Agent 启动失败**\n\n${error instanceof Error ? error.message : String(error)}`;
       const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', taskId: task.id, taskName: prompt.slice(0, 80), markdown, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
-      if (reactionId) await this.service.deleteReaction(event.messageId, reactionId).catch(() => undefined);
+      await clearAcknowledgement();
       return;
     }
     task.sessionId = session.id;
-    task.state = 'running';
+    const initialState = this.runtime.dispatch ? 'queued' : 'running';
+    task.state = initialState;
     task.events = [];
     task.startedAt = Date.now();
     task.interruptRequested = false;
-    const initialElements = boundLarkCardElements(renderLarkCardElements([], config));
+    const initialElements = boundLarkCardElements(renderLarkCardElements([], config, false, false, event.chatType));
     if (task.cardMessageId) {
-      await this.service.update({ ...cardContext, messageId: task.cardMessageId, permissionMode: 'full-trust', state: 'running', taskId: task.id, taskName: prompt.slice(0, 80), markdown: '正在思考中…', sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+      await this.service.update({ ...cardContext, messageId: task.cardMessageId, permissionMode: 'full-trust', state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, taskId: task.id, taskName: prompt.slice(0, 80), markdown: initialState === 'queued' ? '任务已接收，正在准备执行…' : '正在思考中…', sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
     } else {
-      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'running', taskId: task.id, taskName: prompt.slice(0, 80), markdown: '正在思考中…', sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+      const card = await sendTaskCard(this.service, event, { ...cardContext, state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, readOnly: initialState === 'queued', taskId: task.id, taskName: prompt.slice(0, 80), markdown: initialState === 'queued' ? '任务已接收，正在准备执行…' : '正在思考中…', sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
     }
     task.lastSuccessfulElements = initialElements;
     await this.saveCardTask(task);
-    if (reactionId) {
-      try { await this.service.deleteReaction(event.messageId, reactionId); }
-      catch (error) { this.log.warn({ error, messageId: event.messageId, reactionId }, '撤销飞书确认表情失败'); }
-    }
+    await clearAcknowledgement();
 
     let timer: NodeJS.Timeout | undefined;
     let heartbeatActive = false;
@@ -580,7 +641,7 @@ export class LarkMessageCoordinator {
             try {
               const replacementElements = contentRejected
                 ? patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined)
-                : boundLarkCardElements(renderLarkCardElements(task.events, config, pending.completed, true));
+                : boundLarkCardElements((pending.input.elements ?? []) as LarkCardElement[]);
               const replacement = await sendTaskCard(this.service, event, {
                 ...cardContext,
                 state: pending.input.state,
@@ -588,6 +649,7 @@ export class LarkMessageCoordinator {
                 taskName: prompt.slice(0, 80),
                 elapsedSeconds: pending.input.elapsedSeconds,
                 sessionId: task.sessionId,
+                readOnly: true,
                 ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
                 elements: replacementElements,
                 idempotencyKey: `comp_${pending.input.messageId}_${pending.input.state}`.slice(0, 50)
@@ -607,6 +669,7 @@ export class LarkMessageCoordinator {
                     taskName: prompt.slice(0, 80),
                     elapsedSeconds: pending.input.elapsedSeconds,
                     sessionId: task.sessionId,
+                    readOnly: true,
                     ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
                     elements: patchedElements,
                     idempotencyKey: `comp_safe_${pending.input.messageId}_${pending.input.state}`.slice(0, 50)
@@ -623,7 +686,10 @@ export class LarkMessageCoordinator {
               }
             }
           }
-          if (delivered && pending.input.state) await this.saveCardTask(task, pending.input.state);
+          if (delivered && pending.input.state) {
+            if (pending.terminal) task.progressFrozen = true;
+            await this.saveCardTask(task, pending.input.state);
+          }
         }
       })().finally(() => {
         updateChain = undefined;
@@ -631,10 +697,23 @@ export class LarkMessageCoordinator {
       });
       return updateChain;
     };
-    const update = (state: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted', completed = false) => {
+    const update = (state: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted', completed = false, freezeReceipt = false) => {
+      // Runtime running is monotonic for a turn. Late dispatch/cancel bookkeeping may
+      // still report queued, but must never repaint an executing card backwards.
+      if (state === 'queued' && task.state === 'running') return Promise.resolve();
       if (timer) { clearTimeout(timer); timer = undefined; }
+      const terminal = state === 'completed' || state === 'failed' || state === 'interrupted';
+      const receiptElements: LarkCardElement[] = [{
+        tag: 'markdown', element_id: 'terminal_receipt',
+        content: state === 'completed'
+          ? '**任务已完成。**\n\n最终结果已作为新消息发送。'
+          : state === 'failed'
+            ? '**任务执行失败。**\n\n失败原因和恢复建议已作为新消息发送。'
+            : '**任务已取消。**\n\n本轮已停止，后续操作已作为新消息发送。',
+        text_size: 'normal', margin: '0px'
+      }];
       pendingUpdate = {
-        terminal: state !== 'running',
+        terminal,
         completed,
         input: {
           ...cardContext,
@@ -645,11 +724,61 @@ export class LarkMessageCoordinator {
           taskName: prompt.slice(0, 80),
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
           sessionId: task.sessionId,
+          ...(freezeReceipt ? { readOnly: true } : {}),
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-          elements: boundLarkCardElements(renderLarkCardElements(task.events, config, completed))
+          elements: freezeReceipt
+            ? receiptElements
+            : boundLarkCardElements(renderLarkCardElements(task.events, config, completed, false, event.chatType))
         }
       };
       return flushUpdates();
+    };
+    let terminalDelivery: Promise<void> | undefined;
+    const deliverTerminal = (state: 'completed' | 'failed' | 'interrupted', completed = false) => {
+      if (task.finalDeliveredTurn === currentTurn && task.finalMessageId) return Promise.resolve();
+      if (terminalDelivery) return terminalDelivery;
+      terminalDelivery = (async () => {
+        // Mutable progress card becomes an immutable receipt. The actual result is a fresh
+        // reply so Lark generates a new notification instead of silently PATCHing history.
+        await update(state, completed, true);
+        if (task.turn !== currentTurn || (task.finalDeliveredTurn === currentTurn && task.finalMessageId)) return;
+        const finalElements = boundLarkCardElements(renderLarkCardElements(task.events, config, completed, false, event.chatType));
+        const finalInput = {
+          ...cardContext,
+          state,
+          taskId: task.id,
+          taskName: prompt.slice(0, 80),
+          elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
+          sessionId: task.sessionId,
+          retryable: task.retryable,
+          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+          elements: finalElements,
+          idempotencyKey: `final_${task.id}_${currentTurn}_${state}`.slice(0, 50)
+        } as const;
+        let finalCard;
+        try {
+          finalCard = await sendTaskCard(this.service, event, finalInput, this.log);
+        } catch (error) {
+          if (!isLarkCardContentRejected(error)) throw error;
+          finalCard = await sendTaskCard(this.service, event, {
+            ...finalInput,
+            elements: [{
+              tag: 'markdown', element_id: 'final_delivery_safe_fallback',
+              content: '**任务已结束，但结果内容未通过飞书安全检查。**\n\n请在 Dockmux Web 查看完整结果，或调整请求后重试。',
+              text_size: 'normal', margin: '0px'
+            }]
+          }, this.log);
+          this.log.warn({ taskId: task.id, state }, '飞书终态新消息内容被拒绝，已发送安全降级通知');
+        }
+        task.finalMessageId = finalCard.messageId;
+        task.finalDeliveredTurn = currentTurn;
+        await this.saveCardTask(task, state);
+      })().catch(error => {
+        this.log.error({ error, taskId: task.id, state }, '发送飞书终态新消息失败，等待对账补偿');
+        this.scheduleReconcile();
+        throw error;
+      }).finally(() => { terminalDelivery = undefined; });
+      return terminalDelivery;
     };
     const scheduleHeartbeat = () => {
       if (!heartbeatActive || timer) return;
@@ -658,7 +787,9 @@ export class LarkMessageCoordinator {
         void update('running').finally(scheduleHeartbeat);
       }, Math.max(config.pushIntervalMs, cardRateLimitedUntil - Date.now()));
     };
-    task.requestUpdate = update;
+    task.requestUpdate = (state, completed) => state === 'completed' || state === 'failed' || state === 'interrupted'
+      ? deliverTerminal(state, completed)
+      : update(state, completed);
     const injected: string[] = [];
     injected.push(`[Dockmux 机器人身份]
 - 机器人名称：${config.name ?? config.appId}
@@ -712,7 +843,7 @@ export class LarkMessageCoordinator {
           settled = true;
           active = false;
           task.state = resolvedState;
-          await update(resolvedState, resolvedState === 'completed').finally(cleanup);
+          await deliverTerminal(resolvedState, resolvedState === 'completed').finally(cleanup);
         })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));
       };
       const receive = (agentEvent: AgentEvent) => {
@@ -748,17 +879,21 @@ export class LarkMessageCoordinator {
           : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt);
         runtimeTaskId = runtimeTask.id;
         task.runtimeTaskId = runtimeTask.id;
-        await this.saveCardTask(task, runtimeTask.status === 'queued' ? 'queued' : task.state);
-        for (const agentEvent of buffered) receive(agentEvent);
-        buffered = [];
-        if (runtimeTask.status === 'queued' && (runtimeTask.queuedAhead ?? 0) > 0 && task.state === 'queued') {
-          await this.service.update({ ...cardContext, messageId: task.cardMessageId!, permissionMode: 'full-trust', state: 'queued', taskId: task.id, taskName: prompt.slice(0, 80), markdown: `正在排队，前面还有 ${runtimeTask.queuedAhead} 个任务…`, sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+        await this.saveCardTask(task, task.state);
+        // 先提交 queued UI，再消费订阅期间缓存的 running 事件，杜绝 running→queued 闪回。
+        if (runtimeTask.status === 'queued' && task.state === 'queued') {
+          const queueMarkdown = (runtimeTask.queuedAhead ?? 0) > 0
+            ? `正在排队，前面还有 ${runtimeTask.queuedAhead} 个任务…`
+            : '已进入执行队列，等待 Agent 开始…';
+          await this.service.update({ ...cardContext, messageId: task.cardMessageId!, permissionMode: 'full-trust', state: 'queued', statusLabel: '排队中', taskId: task.id, taskName: prompt.slice(0, 80), markdown: queueMarkdown, sessionId: task.sessionId, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
           await this.saveCardTask(task, 'queued');
         }
+        for (const agentEvent of buffered) receive(agentEvent);
+        buffered = [];
       } catch (error) {
         task.events.push({ id: `lark-error-${event.messageId}`, sessionId: session.id, sequence: Number.MAX_SAFE_INTEGER, type: 'error', timestamp: new Date().toISOString(), data: { message: error instanceof Error ? error.message : String(error) } });
         task.state = 'failed';
-        await update('failed', false);
+        await deliverTerminal('failed', false);
         cleanup();
       }
       return;
@@ -781,21 +916,21 @@ export class LarkMessageCoordinator {
       // 若轮次已变（用户在 send 期间点击了重试），本轮不得覆盖新状态。
       if (task.turn !== currentTurn) return;
       if (task.interruptRequested) {
-        await update('interrupted', false);
         task.state = 'interrupted';
+        await deliverTerminal('interrupted', false);
       } else {
-        await update('completed', true);
         task.state = 'completed';
+        await deliverTerminal('completed', true);
       }
     } catch (error) {
       if (task.turn !== currentTurn) return;
       if (task.interruptRequested) {
-        await update('interrupted', false);
         task.state = 'interrupted';
+        await deliverTerminal('interrupted', false);
       } else {
         if (!task.events.some(item => item.type === 'error')) task.events.push({ id: `lark-error-${event.messageId}`, sessionId: session.id, sequence: Number.MAX_SAFE_INTEGER, type: 'error', timestamp: new Date().toISOString(), data: { message: error instanceof Error ? error.message : String(error) } });
-        await update('failed', false);
         task.state = 'failed';
+        await deliverTerminal('failed', false);
       }
     } finally {
       heartbeatActive = false;

@@ -10,9 +10,10 @@ describe('App 集成冒烟（SSR 静态渲染）', () => {
   it('无激活运行时渲染工作台总览且不抛异常', () => {
     const client = new QueryClient();
     const html = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(App)));
-    expect(html).toContain('把目标交给 Agent');
-    expect(html).toContain('创建任务');
-    expect(html).toContain('最近运行');
+    expect(html).toContain('今天需要推进什么');
+    expect(html).toContain('准备 Agent');
+    expect(html).toContain('绑定 Bot');
+    expect(html).toContain('任务中心');
     expect(html).toContain('Dockmux');
   });
 
@@ -20,14 +21,14 @@ describe('App 集成冒烟（SSR 静态渲染）', () => {
     const client = new QueryClient();
     const html = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(App)));
     expect(html).toContain('任务视图');
-    expect(html).toContain('正在推进');
-    expect(html).toContain('等待处理');
-    expect(html).toContain('需要恢复');
+    expect(html).toContain('进行中');
+    expect(html).toContain('待你处理');
+    expect(html).toContain('失败');
     expect(html).toContain('工作区');
-    expect(html).toContain('飞书指挥台');
-    expect(html).toContain('排队等待');
-    expect(html).toContain('已经完成');
-    expect(html).toContain('已经归档');
+    expect(html).toContain('飞书协作');
+    expect(html).toContain('有排队的运行');
+    expect(html).toContain('已完成');
+    expect(html).toContain('已归档');
   });
 
   it('为 reduced-motion 用户关闭滚动和持续动效', () => {

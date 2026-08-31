@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import type { ConfigRepository, Session, SessionRepository } from '@dockmux/shared';
+import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dockmux/shared';
 import { parseLarkMessageContent } from './message-content.js';
 import { readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import {
@@ -137,6 +137,11 @@ export interface LarkAgentToolsOptions {
   clientFactory?: (config: StoredLarkConfig) => LarkGroupToolClient;
   pollIntervalMs?: number;
   groupToolsCommand?: string;
+  /** Stored Lark sessions are explicitly legacy_unmanaged during WP1b. */
+  executionPolicy?: {
+    integrationMode: 'legacy_unmanaged';
+    authorize(boundary: 'group_tools', action: PolicyAction): Promise<PolicyDecision>;
+  };
 }
 
 type ToolContext = LarkAgentSessionBinding & { config: StoredLarkConfig; client: LarkGroupToolClient };
@@ -275,8 +280,15 @@ export class LarkAgentToolsService {
     return info;
   }
 
-  private async context(token: string | undefined): Promise<ToolContext> {
+  private async context(token: string | undefined, action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send'): Promise<ToolContext> {
     const binding = await this.capabilities.resolve(token);
+    if (this.options.executionPolicy) {
+      const decision = await this.options.executionPolicy.authorize('group_tools', action);
+      if (!decision.allowed) throw new AgentGroupToolError(decision.code, decision.reason, 403, {
+        boundary: 'group_tools',
+        integrationMode: this.options.executionPolicy.integrationMode,
+      });
+    }
     const config = await readLarkConfig(this.configs, binding.appId);
     if (!config) throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
     if (!config.groupToolsEnabled) throw new AgentGroupToolError('GROUP_TOOLS_DISABLED', '当前飞书机器人的 Agent 群协作工具已被管理员关闭。', 403);
@@ -293,7 +305,7 @@ export class LarkAgentToolsService {
   }
 
   async self(token?: string) {
-    const context = await this.context(token);
+    const context = await this.context(token, 'group_tools.read');
     let bot: LarkBotInfo;
     try { bot = await context.client.getBotInfo(); }
     catch (error) {
@@ -364,11 +376,11 @@ export class LarkAgentToolsService {
   }
 
   async peers(token?: string) {
-    return this.peersFor(await this.context(token));
+    return this.peersFor(await this.context(token, 'group_tools.discover'));
   }
 
   async bots(token?: string) {
-    return this.peersFor(await this.context(token));
+    return this.peersFor(await this.context(token, 'group_tools.discover'));
   }
 
   private async membersFor(context: ToolContext) {
@@ -385,7 +397,7 @@ export class LarkAgentToolsService {
   }
 
   async members(token?: string) {
-    return this.membersFor(await this.context(token));
+    return this.membersFor(await this.context(token, 'group_tools.discover'));
   }
 
   async promptForSession(session: Session, prompt: string) {
@@ -457,11 +469,11 @@ export class LarkAgentToolsService {
   }
 
   async messages(token: string | undefined, input: { after?: string; limit?: number } = {}) {
-    return this.messagesFor(await this.context(token), input);
+    return this.messagesFor(await this.context(token, 'group_tools.read'), input);
   }
 
   async message(token: string | undefined, input: { messageId: string }) {
-    const context = await this.context(token);
+    const context = await this.context(token, 'group_tools.read');
     const messageId = input.messageId?.trim();
     if (!messageId) throw new AgentGroupToolError('GROUP_MESSAGE_ID_REQUIRED', 'messageId 不能为空。', 400);
     if (!messageId.startsWith('om_')) {
@@ -491,7 +503,7 @@ export class LarkAgentToolsService {
   }
 
   async wait(token: string | undefined, input: { after?: string; limit?: number; timeoutMs?: number } = {}) {
-    const context = await this.context(token);
+    const context = await this.context(token, 'group_tools.read');
     if (!input.after) throw new AgentGroupToolError('GROUP_WAIT_CURSOR_REQUIRED', 'wait 必须传入 messages 或上一次 wait 返回的 --after cursor。', 400);
     const timeoutMs = input.timeoutMs ?? 15_000;
     if (!Number.isInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > maxWaitTimeoutMs) throw new AgentGroupToolError('INVALID_GROUP_WAIT_TIMEOUT', `timeoutMs 必须是 0-${maxWaitTimeoutMs} 的整数。`, 400);
@@ -506,7 +518,7 @@ export class LarkAgentToolsService {
   }
 
   async send(token: string | undefined, input: { content?: string; to?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string }) {
-    const context = await this.context(token);
+    const context = await this.context(token, 'group_tools.send');
     if (!context.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
     const content = input.content?.trim();
     if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);

@@ -10,8 +10,10 @@ const publicDir = resolve(serverRoot, 'public');
 const aliases = new Map([
   ['acpx/runtime', fileURLToPath(import.meta.resolve('acpx/runtime'))],
   ['@dockmux/acp-client', 'packages/acp-client/src/index.ts'],
+  ['@dockmux/botmux-importer', 'packages/botmux-importer/src/index.ts'],
   ['@dockmux/config', 'packages/config/src/index.ts'],
   ['@dockmux/runtime', 'packages/agent-runtime/src/index.ts'],
+  ['@dockmux/secret-provider', 'packages/secret-provider/src/index.ts'],
   ['@dockmux/shared', 'packages/shared/src/index.ts'],
   ['@dockmux/storage', 'packages/storage/src/index.ts'],
   ['@dockmux/transports', 'packages/transports/src/index.ts']

@@ -65,14 +65,14 @@ async function harness(sessions: Record<string, Session | undefined> = { ses_a: 
   return { app, runtime, capabilities, broker };
 }
 
-async function remoteHarness(sessions: Record<string, Session | undefined> = { ses_a: session('ses_a') }) {
+async function remoteHarness(sessions: Record<string, Session | undefined> = { ses_a: session('ses_a') }, mode: 'token' | 'open' = 'token') {
   const runtime = fakeRuntime(sessions);
   const capabilities = new RelayCapabilityRegistry(
     { async get(id) { const found = sessions[id]; return found && { id: found.id, state: found.state, archivedAt: found.archivedAt }; } },
     'http://127.0.0.1:4310', 'test-secret'
   );
   const app = await buildApp(runtime as any, {
-    auth: { getToken: async () => 'access-token', localOnly: false },
+    auth: { mode, getToken: async () => 'access-token', localOnly: false },
     relay: { runtime: runtime as any, capabilities }
   });
   apps.push(app);
@@ -109,6 +109,13 @@ describe('relay routes — authentication', () => {
     expect(crossed.json().error.code).toBe('RELAY_UNAUTHORIZED');
 
     // 三次被拒都不能有任何事件落进流里
+    expect(runtime.events).toHaveLength(0);
+  });
+
+  it('keeps relay capability authentication in explicit open access mode', async () => {
+    const { app, runtime } = await remoteHarness({ ses_a: session('ses_a') }, 'open');
+    const rejected = await app.inject({ method: 'POST', url: '/api/relay/sessions/self/send', headers: auth('garbage'), payload: { text: 'must not land' } });
+    expect(rejected.statusCode).toBe(401);
     expect(runtime.events).toHaveLength(0);
   });
 

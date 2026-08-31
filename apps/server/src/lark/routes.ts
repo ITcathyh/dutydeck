@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository } from '@dockmux/shared';
+import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dockmux/shared';
 import type { DockmuxRuntime } from '@dockmux/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
 import { detectUnusableOwnerEntries, normalizeOwnerEntries, type ContactLookup } from './owner-identity.js';
@@ -30,6 +30,11 @@ export interface LarkRoutesOptions {
   listeningDisabled?: boolean;
   agentTools?: LarkAgentToolsService;
   openPlatformJobs?: Pick<OpenPlatformConfigurationJobManager, 'start' | 'get'>;
+  /** StoredLarkConfig is the isolated legacy path during the compatibility period. */
+  executionPolicy?: {
+    integrationMode: 'legacy_unmanaged';
+    authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
+  };
 }
 
 export async function registerLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {}) {
@@ -43,6 +48,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     cardMappings: options.cardMappings,
     env,
     fetcher,
+    executionPolicy: options.executionPolicy,
     peerBotAuthorized: (appId, chatId, senderOpenId) => options.agentTools?.isConfiguredPeer(appId, chatId, senderOpenId) ?? Promise.resolve(false)
   });
   const syncListeners = async (configs: Awaited<ReturnType<typeof readLarkConfigs>>) => {
@@ -74,7 +80,14 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   app.addHook('onClose', async () => listener.stop());
   await registerLarkAgentToolRoutes(app, options.agentTools);
 
-  app.get('/api/lark/status', async () => ({ ...larkConfigurationStatus(env, await storedBot()), configuredBots: (await readLarkConfigs(options.config)).length, listening: listener.listening, activeAppIds: listener.activeAppIds, listeningDisabled }));
+  app.get('/api/lark/status', async () => ({
+    ...larkConfigurationStatus(env, await storedBot()),
+    configuredBots: (await readLarkConfigs(options.config)).length,
+    listening: listener.listening,
+    activeAppIds: listener.activeAppIds,
+    listeningDisabled,
+    policyIntegration: options.executionPolicy?.integrationMode ?? 'legacy_unmanaged',
+  }));
   app.get('/api/lark/config', async () => publicLarkConfigs(await readLarkConfigs(options.config), { activeAppIds: listener.activeAppIds, listeningDisabled }));
   app.post<{ Body: { appId?: string; forceLogin?: boolean } }>('/api/lark/open-platform/configure', async (request, reply) => {
     reply.header('cache-control', 'no-store');

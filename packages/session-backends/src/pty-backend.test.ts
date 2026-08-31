@@ -1,8 +1,10 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, afterEach } from 'vitest';
 import { PtyBackend } from './pty-backend.js';
-import { TmuxBackend, isTmuxAvailable } from './tmux-backend.js';
+import { TmuxBackend, TmuxOwnershipError, isTmuxAvailable } from './tmux-backend.js';
 import { ZellijBackend } from './zellij-backend.js';
 import { ZmxBackend } from './zmx-backend.js';
 import type { SessionBackend } from './types.js';
@@ -130,13 +132,12 @@ tmuxDescribe('TmuxBackend', () => {
     backend.onData(d => received.push(d));
     backend.onExit((code, signal) => { exitArgs = { code, signal }; });
 
-    // Output flows through pipe-pane → tmp file → tail -F. The launch line is
-    // echoed verbatim by the tty (it contains the script text "TMUX-READY"),
-    // so wait for TWO occurrences: the typed echo + the command's real output.
+    // Output flows through pipe-pane → tmp file → tail -F. The launch
+    // command is never typed into the pane, so only process output is visible.
     const joined = () => received.join('');
     // 全量并发套件下 pipe-pane → tail -F 链路可能较慢（首个 tmux 测试还要
     // 承担 tmux server 冷启动），给 30s。
-    await waitFor(() => (joined().match(/TMUX-READY/g) ?? []).length >= 2, 30000);
+    await waitFor(() => joined().includes('TMUX-READY'), 30000);
     expect(TmuxBackend.probeSession(name)).toBe('exists');
 
     // display-message can transiently return null under load (its 2s internal
@@ -178,7 +179,7 @@ tmuxDescribe('TmuxBackend', () => {
     await waitFor(() => TmuxBackend.probeSession(name) === 'missing', 30000);
   }, 120000);
 
-  it('injects env via per-pane prefix without leaking it into the tmux server global env', async () => {
+  it('injects session-scoped env without leaking it into the tmux server global env', async () => {
     const name = newSessionName();
     sessions.push(name);
     backend = new TmuxBackend(name);
@@ -200,6 +201,38 @@ tmuxDescribe('TmuxBackend', () => {
     });
     expect(globalEnv).not.toContain('MY_TEST_VAR');
     expect(globalEnv).not.toContain('MY_INJECT_VAR');
+  }, 60000);
+
+  it('starts with a production-sized environment without exposing staged secrets in the pane or tmux', async () => {
+    const name = newSessionName();
+    sessions.push(name);
+    backend = new TmuxBackend(name);
+    const received: string[] = [];
+    const secret = `not-in-pane-${Math.random().toString(36).slice(2)}`;
+    backend.spawn('/bin/sh', ['-c', 'echo LARGE-ENV-READY; sleep 30'], {
+      cwd: tmpdir(),
+      cols: 80,
+      rows: 24,
+      env: nodeEnv({
+        DOCKMUX_TEST_SECRET: secret,
+        ...Object.fromEntries(Array.from(
+          { length: 64 },
+          (_, index) => [`DOCKMUX_TEST_PADDING_${index}`, 'x'.repeat(512)],
+        )),
+      }),
+    });
+    backend.onData(d => received.push(d));
+    await waitFor(() => received.join('').includes('LARGE-ENV-READY'));
+
+    const screen = backend.captureCurrentScreen();
+    expect(screen).toContain('LARGE-ENV-READY');
+    expect(screen).not.toContain(secret);
+    const sessionEnv = execFileSync('tmux', ['show-environment', '-t', name], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    expect(sessionEnv).not.toContain(secret);
+    expect(sessionEnv).not.toContain('DOCKMUX_TEST_PADDING_0=');
   }, 60000);
 
   it('write() returns false after the session is gone', async () => {
@@ -258,6 +291,130 @@ tmuxDescribe('TmuxBackend', () => {
     // Output capture works after reattach: typed input echoes back through the new pipe.
     expect(second.write('after-reattach')).toBe(true);
     await waitFor(() => reReceived.join('').includes('after-reattach'));
+  }, 60000);
+
+  it('keeps spawn, external lookup, and reattach in an isolated TMUX_TMPDIR namespace', async () => {
+    const namespaceRoot = mkdtempSync(join(tmpdir(), 'dockmux-tmux-namespace-'));
+    chmodSync(namespaceRoot, 0o700);
+    const previousTmuxTmpdir = process.env.TMUX_TMPDIR;
+    process.env.TMUX_TMPDIR = namespaceRoot;
+    const name = newSessionName();
+    const ownerId = `dockmux:${name}`;
+    const isolatedClientEnv = { ...process.env };
+    delete isolatedClientEnv.TMUX;
+    const defaultClientEnv = { ...isolatedClientEnv };
+    delete defaultClientEnv.TMUX_TMPDIR;
+    const first = new TmuxBackend(name, { ownerId });
+    let restored: TmuxBackend | null = null;
+
+    try {
+      // A fresh isolated socket root has no server yet. That is an
+      // authoritative absence, not an ambiguous transport failure.
+      expect(TmuxBackend.probeSession(name)).toBe('missing');
+      first.spawn('/bin/sh', ['-c', 'sleep 30'], {
+        cwd: tmpdir(),
+        cols: 80,
+        rows: 24,
+        env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      });
+
+      // An ordinary tmux client in the same isolated environment must see
+      // the exact live pane. A client in the default namespace must not.
+      const originalPid = Number(execFileSync(
+        'tmux',
+        ['display-message', '-p', '-t', name, '#{pane_pid}'],
+        { encoding: 'utf8', env: isolatedClientEnv },
+      ).trim());
+      expect(originalPid).toBeGreaterThan(0);
+      expect(spawnSync('tmux', ['has-session', '-t', name], {
+        env: defaultClientEnv,
+        stdio: 'ignore',
+      }).status).not.toBe(0);
+
+      first.detach();
+      restored = new TmuxBackend(name, { ownerId });
+      restored.attach({ cols: 80, rows: 24 });
+      expect(restored.getPid()).toBe(originalPid);
+
+      restored.kill();
+      expect(spawnSync('tmux', ['has-session', '-t', name], {
+        env: isolatedClientEnv,
+        stdio: 'ignore',
+      }).status).not.toBe(0);
+      expect(TmuxBackend.probeSession(name)).toBe('missing');
+    } finally {
+      // Keep cleanup in the same namespace even if an assertion fails. This
+      // also makes the test prove it cannot leave an isolated tmux residue.
+      restored?.kill();
+      spawnSync('tmux', ['kill-session', '-t', name], {
+        env: isolatedClientEnv,
+        stdio: 'ignore',
+      });
+      if (previousTmuxTmpdir === undefined) delete process.env.TMUX_TMPDIR;
+      else process.env.TMUX_TMPDIR = previousTmuxTmpdir;
+      rmSync(namespaceRoot, { recursive: true, force: true });
+    }
+  }, 60000);
+
+  it('replaces a stale pipe-pane capture left behind by an ungraceful daemon exit', async () => {
+    const name = newSessionName();
+    sessions.push(name);
+    const ownerId = 'dockmux:crash-recovery';
+    const first = new TmuxBackend(name, { ownerId });
+    backend = first;
+    const firstReceived: string[] = [];
+    first.spawn('/bin/sh', ['-c', 'while :; do echo CRASH-RECOVERY; sleep 0.2; done'], {
+      cwd: tmpdir(),
+      cols: 80,
+      rows: 24,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    });
+    first.onData(d => firstReceived.push(d));
+    await waitFor(() => firstReceived.join('').includes('CRASH-RECOVERY'));
+    const originalPid = first.getPid();
+
+    // No detach(): model a dead daemon whose tmux-side `cat >> pipe-file`
+    // survived. A fresh backend must replace that writer and receive output.
+    const restored = new TmuxBackend(name, { ownerId });
+    const restoredReceived: string[] = [];
+    restored.onData(d => restoredReceived.push(d));
+    restored.attach({ cols: 80, rows: 24 });
+    backend = restored;
+    await waitFor(() => restoredReceived.join('').includes('CRASH-RECOVERY'));
+    expect(restored.getPid()).toBe(originalPid);
+
+    restored.kill();
+    first.detach();
+  }, 60000);
+
+  it('persists Dockmux ownership/metadata and refuses a foreign attach without killing the pane', async () => {
+    const name = newSessionName();
+    sessions.push(name);
+    const first = new TmuxBackend(name, { ownerId: 'dockmux:ses-owned' });
+    backend = first;
+    first.spawn('/bin/sh', ['-c', 'sleep 30'], {
+      cwd: tmpdir(),
+      cols: 80,
+      rows: 24,
+      env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    });
+    await waitFor(() => first.getPid() !== null);
+    const originalPid = first.getPid();
+    expect(TmuxBackend.sessionOwner(name)).toBe('dockmux:ses-owned');
+    first.setDockmuxMetadata('first_prompt_sent', 'true');
+    expect(first.getDockmuxMetadata('first_prompt_sent')).toBe('true');
+    first.detach();
+
+    const foreign = new TmuxBackend(name, { ownerId: 'dockmux:ses-other' });
+    expect(() => foreign.attach({ cols: 80, rows: 24 })).toThrow(TmuxOwnershipError);
+    foreign.kill();
+    expect(TmuxBackend.probeSession(name)).toBe('exists');
+
+    const restored = new TmuxBackend(name, { ownerId: 'dockmux:ses-owned' });
+    restored.attach({ cols: 80, rows: 24 });
+    backend = restored;
+    expect(restored.getPid()).toBe(originalPid);
+    expect(restored.getDockmuxMetadata('first_prompt_sent')).toBe('true');
   }, 60000);
 });
 

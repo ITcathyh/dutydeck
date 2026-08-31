@@ -412,9 +412,10 @@ const progressDigest = (groups: TraceGroup[]): LarkCardElement | undefined => {
 
 export function renderLarkCardElements(
   events: AgentEvent[],
-  _config: Pick<StoredLarkConfig, 'traceLimit'>,
+  config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete'>,
   completed = false,
-  compensation = false
+  compensation = false,
+  chatType?: string
 ): LarkCardElement[] {
   const entries = compactTrace(events);
   const lastIndex = (predicate: (entry: TraceEntry) => boolean) => {
@@ -455,12 +456,30 @@ export function renderLarkCardElements(
     elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? finalText : `**当前进展**\n\n${finalText}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
     if (completed) elements.push({
       tag: 'div', element_id: 'next_step_hint', width: 'auto', margin: '6px 0px 2px 0px',
-      text: { tag: 'plain_text', content: '下一步：在当前对话继续给 Agent 指令，可补充目标或要求调整。', text_size: 'notation', text_color: 'grey', lines: 2 }
+      text: {
+        tag: 'plain_text',
+        content: chatType === 'group'
+          ? '下一步：回复当前消息并 @机器人，可补充目标或要求调整。'
+          : '下一步：在当前对话继续给 Agent 指令，可补充目标或要求调整。',
+        text_size: 'notation', text_color: 'grey', lines: 2
+      }
     });
   } else if (completed) {
     elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }
-  if (groups.length) {
+  const hideCompletedTrace = completed && config.hideTraceOnComplete !== false;
+  if (groups.length && hideCompletedTrace) {
+    const digest = progressDigest(allGroups);
+    if (digest) elements.push({
+      ...digest,
+      element_id: 'evidence_summary',
+      text: {
+        ...(digest.text as Record<string, unknown>),
+        content: `${String((digest.text as any)?.content ?? '')} · 详细记录请在 Dockmux Web 查看`,
+        lines: 2
+      }
+    });
+  } else if (groups.length) {
     const digest = progressDigest(allGroups);
     if (digest) elements.push(digest);
     if (omittedGroupCount) elements.push({

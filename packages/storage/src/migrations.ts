@@ -120,6 +120,336 @@ export const migrations: Migration[] = [
         ALTER TABLE sessions_v10 RENAME TO sessions;
       `)
     }
+  },
+  {
+    version: 11,
+    name: 'botmux_foundation_safety',
+    up(db) {
+      // These tables are intentionally additive. Existing Agent, Lark and
+      // Session data stays authoritative until a later explicit cutover.
+      db.exec(`
+        CREATE TABLE secret_refs (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          kind TEXT NOT NULL CHECK (kind IN ('lark_app_secret', 'agent_env', 'generic')),
+          provider TEXT NOT NULL,
+          reference_key TEXT NOT NULL,
+          status TEXT NOT NULL CHECK (status IN ('configured', 'invalid')),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE channel_bots (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          channel TEXT NOT NULL CHECK (channel = 'lark'),
+          external_app_id TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          brand TEXT NOT NULL CHECK (brand IN ('feishu', 'lark')),
+          credential_ref TEXT REFERENCES secret_refs(id) ON DELETE RESTRICT,
+          state TEXT NOT NULL CHECK (state IN ('staged', 'disabled')),
+          desired_listener_state TEXT NOT NULL CHECK (desired_listener_state = 'disabled'),
+          full_trust_confirmed INTEGER NOT NULL CHECK (full_trust_confirmed = 0),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(channel, external_app_id)
+        );
+        CREATE TABLE foundation_entity_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_kind TEXT NOT NULL CHECK (entity_kind IN ('secret_ref', 'channel_bot')),
+          entity_id TEXT NOT NULL,
+          from_revision INTEGER,
+          to_revision INTEGER NOT NULL CHECK (to_revision >= 1),
+          before_json TEXT,
+          after_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(entity_kind, entity_id, to_revision)
+        );
+        CREATE INDEX foundation_versions_entity ON foundation_entity_versions(entity_kind, entity_id, to_revision DESC);
+      `)
+    }
+  },
+  {
+    version: 12,
+    name: 'group_policy_foundation',
+    up(db) {
+      // WP1a is control-plane only: all tables are additive and contain no
+      // listener, lease, schedule, SecretRef value or runtime dispatch state.
+      db.exec(`
+        CREATE TABLE channel_bot_policies (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          channel_bot_id TEXT NOT NULL REFERENCES channel_bots(id) ON DELETE RESTRICT,
+          defaults_json TEXT NOT NULL,
+          routing_defaults_json TEXT NOT NULL,
+          access_policy_json TEXT NOT NULL,
+          group_tools_policy_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(channel_bot_id)
+        );
+        CREATE TABLE group_bindings (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          channel_bot_id TEXT NOT NULL REFERENCES channel_bots(id) ON DELETE RESTRICT,
+          external_chat_id TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('staged', 'disabled', 'needs_review', 'archived')),
+          oncall INTEGER NOT NULL CHECK (oncall IN (0, 1)),
+          agent_override_json TEXT NOT NULL,
+          workspace_override_json TEXT NOT NULL,
+          model_override_json TEXT NOT NULL,
+          reasoning_override_json TEXT NOT NULL,
+          role_policy_override_json TEXT NOT NULL,
+          routing_override_json TEXT NOT NULL,
+          access_override_json TEXT NOT NULL,
+          group_tools_override_json TEXT NOT NULL,
+          presentation_override_json TEXT NOT NULL,
+          review_reasons_json TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(channel_bot_id, external_chat_id)
+        );
+        CREATE INDEX group_bindings_bot_state ON group_bindings(channel_bot_id, state);
+        CREATE TABLE remote_chat_facts (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          channel_bot_id TEXT NOT NULL REFERENCES channel_bots(id) ON DELETE RESTRICT,
+          external_chat_id TEXT NOT NULL,
+          membership_state TEXT NOT NULL CHECK (membership_state IN ('member', 'not_member', 'inaccessible', 'unknown')),
+          chat_type TEXT NOT NULL CHECK (chat_type IN ('group', 'topic_group', 'unknown')),
+          display_name TEXT,
+          observed_at TEXT NOT NULL,
+          last_success_at TEXT,
+          error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(channel_bot_id, external_chat_id)
+        );
+        CREATE INDEX remote_chat_facts_bot ON remote_chat_facts(channel_bot_id, observed_at DESC);
+        CREATE TABLE role_assignments (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          channel_bot_id TEXT NOT NULL REFERENCES channel_bots(id) ON DELETE RESTRICT,
+          group_binding_id TEXT REFERENCES group_bindings(id) ON DELETE RESTRICT,
+          scope_key TEXT NOT NULL,
+          principal_id TEXT NOT NULL CHECK (principal_id LIKE 'principal_%'),
+          role TEXT NOT NULL CHECK (role IN ('can_talk', 'can_operate', 'admin')),
+          operate_scope TEXT NOT NULL CHECK (operate_scope IN ('none', 'own_runs', 'group_runs', 'bot_runs')),
+          action_gates_json TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+          expires_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(channel_bot_id, scope_key, principal_id, role)
+        );
+        CREATE INDEX role_assignments_lookup ON role_assignments(channel_bot_id, group_binding_id, principal_id, role, state, expires_at);
+        CREATE TABLE wp1a_entity_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_kind TEXT NOT NULL CHECK (entity_kind IN ('channel_bot_policy', 'group_binding', 'remote_chat_fact', 'role_assignment')),
+          entity_id TEXT NOT NULL,
+          from_revision INTEGER,
+          to_revision INTEGER NOT NULL CHECK (to_revision >= 1),
+          before_json TEXT,
+          after_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(entity_kind, entity_id, to_revision)
+        );
+        CREATE INDEX wp1a_versions_entity ON wp1a_entity_versions(entity_kind, entity_id, to_revision DESC);
+      `)
+    }
+  },
+  {
+    version: 13,
+    name: 'schedule_single_writer_foundation',
+    up(db) {
+      // WP-Schedule is a disabled control-plane ledger. No timer, listener,
+      // dispatcher or executable workflow consumes these tables.
+      db.exec(`
+        CREATE TABLE schedule_definitions (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          channel_bot_id TEXT NOT NULL REFERENCES channel_bots(id) ON DELETE RESTRICT,
+          group_binding_id TEXT REFERENCES group_bindings(id) ON DELETE RESTRICT,
+          name TEXT NOT NULL,
+          description TEXT,
+          trigger_kind TEXT NOT NULL CHECK (trigger_kind IN ('at', 'interval', 'cron')),
+          at_local_datetime TEXT,
+          interval_seconds INTEGER,
+          interval_anchor_at TEXT,
+          cron_expression TEXT,
+          timezone TEXT NOT NULL,
+          dst_gap_policy TEXT NOT NULL CHECK (dst_gap_policy IN ('skip', 'shift_forward')),
+          dst_overlap_policy TEXT NOT NULL CHECK (dst_overlap_policy IN ('first', 'second')),
+          delivery_mode TEXT NOT NULL CHECK (delivery_mode IN ('chat', 'thread')),
+          chat_ref TEXT NOT NULL,
+          root_message_ref TEXT,
+          continuation_policy TEXT NOT NULL CHECK (continuation_policy IN ('same_thread', 'new_topic', 'chat_root')),
+          cwd_ref TEXT,
+          payload_ref TEXT NOT NULL,
+          identity_ref TEXT,
+          secret_ref TEXT REFERENCES secret_refs(id) ON DELETE RESTRICT,
+          source_ownership TEXT NOT NULL CHECK (source_ownership IN ('dockmux', 'botmux')),
+          source_namespace TEXT NOT NULL,
+          source_schedule_ref TEXT,
+          source_enabled INTEGER NOT NULL CHECK (source_enabled IN (0, 1)),
+          state TEXT NOT NULL CHECK (state IN ('staged', 'disabled')),
+          desired_executor_state TEXT NOT NULL CHECK (desired_executor_state = 'disabled'),
+          current_generation INTEGER NOT NULL CHECK (current_generation >= 1),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK (
+            (trigger_kind = 'at' AND at_local_datetime IS NOT NULL AND interval_seconds IS NULL AND interval_anchor_at IS NULL AND cron_expression IS NULL) OR
+            (trigger_kind = 'interval' AND at_local_datetime IS NULL AND interval_seconds >= 60 AND interval_anchor_at IS NOT NULL AND cron_expression IS NULL) OR
+            (trigger_kind = 'cron' AND at_local_datetime IS NULL AND interval_seconds IS NULL AND interval_anchor_at IS NULL AND cron_expression IS NOT NULL)
+          )
+        );
+        CREATE UNIQUE INDEX schedule_definitions_source ON schedule_definitions(source_namespace, source_schedule_ref) WHERE source_schedule_ref IS NOT NULL;
+        CREATE INDEX schedule_definitions_bot_state ON schedule_definitions(channel_bot_id, state, updated_at DESC);
+
+        CREATE TABLE schedule_generations (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          schedule_definition_id TEXT NOT NULL REFERENCES schedule_definitions(id) ON DELETE RESTRICT,
+          generation INTEGER NOT NULL CHECK (generation >= 1),
+          definition_revision INTEGER NOT NULL CHECK (definition_revision >= 1),
+          definition_hash TEXT NOT NULL CHECK (length(definition_hash) = 64),
+          timezone TEXT NOT NULL,
+          identity_ref TEXT,
+          secret_ref TEXT REFERENCES secret_refs(id) ON DELETE RESTRICT,
+          state TEXT NOT NULL CHECK (state = 'staged_disabled'),
+          created_at TEXT NOT NULL,
+          UNIQUE(schedule_definition_id, generation)
+        );
+
+        CREATE TABLE schedule_occurrences (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          schedule_definition_id TEXT NOT NULL REFERENCES schedule_definitions(id) ON DELETE RESTRICT,
+          schedule_generation_id TEXT NOT NULL REFERENCES schedule_generations(id) ON DELETE RESTRICT,
+          generation INTEGER NOT NULL CHECK (generation >= 1),
+          scheduled_for_utc TEXT NOT NULL,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL CHECK (state IN ('planned', 'source_owned_pending', 'settled', 'suppressed')),
+          intent_kind TEXT NOT NULL CHECK (intent_kind = 'task_run_snapshot'),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(schedule_definition_id, generation, scheduled_for_utc)
+        );
+        CREATE INDEX schedule_occurrences_definition_time ON schedule_occurrences(schedule_definition_id, scheduled_for_utc DESC);
+
+        CREATE TABLE schedule_watermarks (
+          schedule_definition_id TEXT PRIMARY KEY REFERENCES schedule_definitions(id) ON DELETE RESTRICT,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          last_planned_occurrence_key TEXT,
+          last_claimed_occurrence_key TEXT,
+          last_started_occurrence_key TEXT,
+          last_settled_occurrence_key TEXT,
+          next_due_at TEXT,
+          updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE schedule_leases (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          lease_key TEXT NOT NULL UNIQUE,
+          generation INTEGER NOT NULL CHECK (generation >= 0),
+          holder_id TEXT,
+          holder_identity_ref TEXT,
+          secret_ref TEXT REFERENCES secret_refs(id) ON DELETE RESTRICT,
+          state TEXT NOT NULL CHECK (state IN ('held', 'fenced', 'released')),
+          schedule_set_hash TEXT NOT NULL CHECK (length(schedule_set_hash) = 64),
+          fence_token INTEGER NOT NULL CHECK (fence_token >= 0),
+          renewed_at TEXT,
+          expires_at TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          CHECK (state != 'held' OR (holder_id IS NOT NULL AND holder_identity_ref IS NOT NULL AND secret_ref IS NOT NULL AND renewed_at IS NOT NULL AND expires_at IS NOT NULL))
+        );
+
+        CREATE TABLE archived_integrations (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          channel_bot_id TEXT NOT NULL REFERENCES channel_bots(id) ON DELETE RESTRICT,
+          kind TEXT NOT NULL CHECK (kind = 'hammer'),
+          source_system TEXT NOT NULL CHECK (source_system = 'botmux'),
+          source_enabled INTEGER NOT NULL CHECK (source_enabled IN (0, 1)),
+          hammer_mode TEXT NOT NULL CHECK (hammer_mode IN ('full', 'lite', 'unknown')),
+          enforce_gates INTEGER NOT NULL CHECK (enforce_gates IN (0, 1)),
+          skills_injection TEXT NOT NULL CHECK (skills_injection IN ('prompt', 'runtime', 'none', 'unknown')),
+          state TEXT NOT NULL CHECK (state = 'archived'),
+          executor_state TEXT NOT NULL CHECK (executor_state = 'unavailable'),
+          blocker_code TEXT NOT NULL CHECK (blocker_code = 'hammer_executor_unavailable'),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(channel_bot_id, kind)
+        );
+
+        CREATE TABLE schedule_entity_versions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          entity_kind TEXT NOT NULL CHECK (entity_kind IN ('schedule_definition', 'schedule_lease', 'archived_integration')),
+          entity_id TEXT NOT NULL,
+          from_revision INTEGER,
+          to_revision INTEGER NOT NULL CHECK (to_revision >= 1),
+          before_json TEXT,
+          after_hash TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          UNIQUE(entity_kind, entity_id, to_revision)
+        );
+        CREATE INDEX schedule_versions_entity ON schedule_entity_versions(entity_kind, entity_id, to_revision DESC);
+      `)
+    }
+  },
+  {
+    version: 14,
+    name: 'remote_identity_fact_fencing',
+    up(db) {
+      // Remote verification facts are a short-lived, fail-closed cache. The
+      // migration deliberately expires every v12 RemoteChatFact because those
+      // rows predate credential and identity version binding.
+      db.exec(`
+        CREATE TABLE remote_identity_facts (
+          id TEXT PRIMARY KEY,
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          revision INTEGER NOT NULL CHECK (revision >= 1),
+          channel_bot_id TEXT NOT NULL REFERENCES channel_bots(id) ON DELETE RESTRICT,
+          credential_ref_id TEXT NOT NULL REFERENCES secret_refs(id) ON DELETE RESTRICT,
+          credential_revision INTEGER NOT NULL CHECK (credential_revision >= 1),
+          credential_fingerprint TEXT NOT NULL CHECK (length(credential_fingerprint) = 64 AND credential_fingerprint NOT GLOB '*[^0-9a-f]*'),
+          app_fingerprint TEXT NOT NULL CHECK (length(app_fingerprint) = 64 AND app_fingerprint NOT GLOB '*[^0-9a-f]*'),
+          bot_identity_ref TEXT NOT NULL CHECK (bot_identity_ref LIKE 'remote_bot_%'),
+          tenant_ref TEXT CHECK (tenant_ref IS NULL OR tenant_ref LIKE 'remote_tenant_%'),
+          app_id_match INTEGER NOT NULL CHECK (app_id_match IN (0, 1)),
+          checked_at TEXT NOT NULL,
+          expires_at TEXT NOT NULL,
+          error_code TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          UNIQUE(channel_bot_id)
+        );
+        CREATE INDEX remote_identity_facts_expiry ON remote_identity_facts(channel_bot_id, expires_at);
+
+        ALTER TABLE remote_chat_facts ADD COLUMN credential_ref_id TEXT REFERENCES secret_refs(id) ON DELETE RESTRICT;
+        ALTER TABLE remote_chat_facts ADD COLUMN credential_revision INTEGER;
+        ALTER TABLE remote_chat_facts ADD COLUMN credential_fingerprint TEXT CHECK (credential_fingerprint IS NULL OR (length(credential_fingerprint) = 64 AND credential_fingerprint NOT GLOB '*[^0-9a-f]*'));
+        ALTER TABLE remote_chat_facts ADD COLUMN identity_fact_id TEXT REFERENCES remote_identity_facts(id) ON DELETE RESTRICT;
+        ALTER TABLE remote_chat_facts ADD COLUMN identity_revision INTEGER;
+        ALTER TABLE remote_chat_facts ADD COLUMN expires_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z';
+        ALTER TABLE remote_chat_facts ADD COLUMN invalidated_at TEXT;
+        CREATE INDEX remote_chat_facts_current ON remote_chat_facts(channel_bot_id, external_chat_id, expires_at);
+        CREATE INDEX remote_chat_facts_identity ON remote_chat_facts(identity_fact_id, identity_revision);
+        CREATE INDEX remote_chat_facts_credential ON remote_chat_facts(credential_ref_id, credential_revision);
+      `)
+    }
   }
 ]
 

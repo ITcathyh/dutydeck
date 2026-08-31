@@ -1,0 +1,19 @@
+{
+  "fixture_active": {
+    "sessionId": "fixture_active",
+    "larkAppId": "cli_fixture_alpha",
+    "status": "active",
+    "scope": "thread",
+    "backendType": "tmux",
+    "rootMessageId": "om_fixture_root",
+    "ownerOpenId": "ou_fixture_owner",
+    "lastUserPrompt": "SYNTHETIC_SESSION_PROMPT_NEVER_SEND"
+  },
+  "fixture_closed": {
+    "sessionId": "fixture_closed",
+    "larkAppId": "cli_fixture_alpha",
+    "status": "closed",
+    "scope": "thread",
+    "backendType": "tmux"
+  }
+}

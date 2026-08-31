@@ -1,7 +1,7 @@
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
-import { permissionModes, RuntimeError, type PermissionMode } from '@dockmux/shared';
+import { permissionModes, RuntimeError, toPublicAgent, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dockmux/shared';
 import type { DockmuxRuntime } from '@dockmux/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
@@ -9,6 +9,9 @@ import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.
 import { registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
+import { registerFoundationManagementRoutes, type FoundationManagementOptions } from './foundation-routes.js';
+import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from './schedule-routes.js';
+import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -33,6 +36,12 @@ export interface TerminalRouteOptions {
   provider: TerminalStreamProvider;
   /** WS 升级认证；不传 = 不认证 */
   auth?: TerminalRouteAuth;
+  /** New GroupBinding terminal authorization. Legacy sessions are explicitly unmanaged. */
+  authorize?: (request: import('node:http').IncomingMessage, sessionId: string, action: 'terminal.read' | 'terminal.write') => Promise<PolicyDecision>;
+}
+
+export interface SessionExecutionPolicy {
+  authorize(request: FastifyRequest, sessionId: string, boundary: 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
 }
 
 export interface BuildAppOptions {
@@ -45,11 +54,28 @@ export interface BuildAppOptions {
   terminal?: TerminalRouteOptions;
   /** 通用会话回传通道；不传 = 不注册 /api/relay/* */
   relay?: RelayRoutesOptions;
+  /** WP1a offline management only. Production service wiring is deferred to WP1b. */
+  foundation?: FoundationManagementOptions;
+  /** v13 disabled Schedule management. No executor is registered here. */
+  schedule?: ScheduleManagementOptions;
+  /** Explicit read-only App×Chat verification. Never starts a listener. */
+  identityPreflight?: IdentityPreflightRouteOptions;
+  /** Fail-closed policy edge for sessions associated with a new GroupBinding. */
+  executionPolicy?: SessionExecutionPolicy;
 }
 
 export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions = {}) {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
   const streams = new Set<import('node:http').ServerResponse>();
+  const requireSessionExecution = async (request: FastifyRequest, sessionId: string, boundary: 'session' | 'high_risk', action: PolicyAction) => {
+    if (!options.executionPolicy) return;
+    const decision = await options.executionPolicy.authorize(request, sessionId, boundary, action);
+    if (!decision.allowed) throw new RuntimeError(decision.code, decision.reason, 403);
+  };
+  const canViewSession = async (request: FastifyRequest, sessionId: string) => {
+    if (!options.executionPolicy) return true;
+    return (await options.executionPolicy.authorize(request, sessionId, 'session', 'task.view_result')).allowed;
+  };
   app.addHook('preClose', async () => { for (const stream of streams) stream.end(); streams.clear(); });
 
   app.setErrorHandler((error, _request, reply) => {
@@ -80,17 +106,28 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
   }
   if (options.terminal) registerTerminalRoutes(app, options.terminal);
   registerRelayRoutes(app, { ...options.relay, runtime: options.relay?.runtime ?? runtime });
+  await registerFoundationManagementRoutes(app, options.foundation);
+  await registerIdentityPreflightRoutes(app, options.identityPreflight);
+  await registerScheduleManagementRoutes(app, options.schedule);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
-  app.get('/api/agents', async () => runtime.listAgents());
+  app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
   app.get<{ Params: { id: string }; Querystring: { model?: string; refresh?: string } }>('/api/agents/:id/models', async request => {
     const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${request.params.id}`, 404);
     return discoverAgentModels(agent, request.query.model?.trim() || undefined, request.query.refresh === '1' || request.query.refresh === 'true');
   });
-  app.get('/api/sessions', async () => runtime.listSessions());
-  app.get('/api/sessions/summaries', async () => {
+  app.get('/api/sessions', async request => {
     const sessions = await runtime.listSessions();
+    if (!options.executionPolicy) return sessions;
+    const visible = await Promise.all(sessions.map(async session => await canViewSession(request, session.id) ? session : undefined));
+    return visible.filter(Boolean);
+  });
+  app.get('/api/sessions/summaries', async request => {
+    const listed = await runtime.listSessions();
+    const sessions = options.executionPolicy
+      ? (await Promise.all(listed.map(async session => await canViewSession(request, session.id) ? session : undefined))).filter((session): session is typeof listed[number] => Boolean(session))
+      : listed;
     const summaries = await Promise.all(sessions.map(async session => {
       const tasks = (await runtime.getTasks(session.id))
         .filter((task: any) => typeof task.prompt === 'string' && task.prompt.trim() && task.status !== 'cancelled')
@@ -106,29 +143,58 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
     if (request.body.permissionMode !== undefined && !permissionModes.includes(request.body.permissionMode)) throw new RuntimeError('INVALID_PERMISSION_MODE', `Unknown permission mode: ${String(request.body.permissionMode)}`, 400);
     return runtime.start(request.body);
   });
-  app.get<{ Params: { id: string } }>('/api/sessions/:id', async (request, reply) => (await runtime.getSession(request.params.id)) ?? reply.code(404).send({ error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' } }));
+  app.get<{ Params: { id: string } }>('/api/sessions/:id', async (request, reply) => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
+    return (await runtime.getSession(request.params.id)) ?? reply.code(404).send({ error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' } });
+  });
   app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' } }>('/api/sessions/:id/send', async (request, reply) => {
     const prompt = request.body?.prompt?.trim();
     const mode = request.body?.mode ?? 'queue';
     if (!prompt) throw new RuntimeError('INVALID_PROMPT', 'Prompt must not be empty', 400);
     if (mode !== 'queue' && mode !== 'interrupt') throw new RuntimeError('INVALID_SEND_MODE', `Unknown send mode: ${String(mode)}`, 400);
+    await requireSessionExecution(request, request.params.id, 'session', 'turn.append');
     const task = await runtime.dispatch(request.params.id, prompt, mode);
     return reply.code(202).send({ accepted: true, task });
   });
   app.patch<{ Params: { id: string }; Body: { model?: string; reasoningEffort?: string } }>('/api/sessions/:id/config', async request => {
     const model = request.body?.model?.trim();
-    if (model) return runtime.setModel(request.params.id, model);
+    if (model) {
+      await requireSessionExecution(request, request.params.id, 'session', 'run.change_model');
+      return runtime.setModel(request.params.id, model);
+    }
     const reasoningEffort = request.body?.reasoningEffort?.trim();
-    if (reasoningEffort) return runtime.setReasoningEffort(request.params.id, reasoningEffort);
+    if (reasoningEffort) {
+      await requireSessionExecution(request, request.params.id, 'session', 'run.change_model');
+      return runtime.setReasoningEffort(request.params.id, reasoningEffort);
+    }
     throw new RuntimeError('INVALID_SESSION_CONFIG', 'Model or reasoning effort is required', 400);
   });
-  app.delete<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId', async request => runtime.cancelQueued(request.params.id, request.params.taskId));
-  app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId/steer', async request => runtime.steerQueued(request.params.id, request.params.taskId));
+  app.delete<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'queue.cancel');
+    return runtime.cancelQueued(request.params.id, request.params.taskId);
+  });
+  app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId/steer', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'queue.promote');
+    return runtime.steerQueued(request.params.id, request.params.taskId);
+  });
+  const sessionActionPolicy: Record<'interrupt' | 'pause' | 'resume' | 'stop' | 'restart', PolicyAction> = {
+    interrupt: 'run.interrupt', pause: 'run.pause', resume: 'run.resume', stop: 'run.interrupt', restart: 'run.restart'
+  };
   for (const action of ['interrupt', 'pause', 'resume', 'stop', 'restart'] as const) {
-    app.post<{ Params: { id: string } }>(`/api/sessions/:id/${action}`, async request => { const result = await runtime[action](request.params.id); return result ?? { ok: true }; });
+    app.post<{ Params: { id: string } }>(`/api/sessions/:id/${action}`, async request => {
+      await requireSessionExecution(request, request.params.id, 'session', sessionActionPolicy[action]);
+      const result = await runtime[action](request.params.id);
+      return result ?? { ok: true };
+    });
   }
-  app.post<{ Params: { id: string } }>('/api/sessions/:id/archive', async request => runtime.archive(request.params.id));
-  app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean } }>('/api/sessions/:id/permissions/:permissionId', async request => runtime.resolvePermission(request.params.id, request.params.permissionId, request.body.approved));
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/archive', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'run.interrupt');
+    return runtime.archive(request.params.id);
+  });
+  app.post<{ Params: { id: string; permissionId: string }; Body: { approved: boolean } }>('/api/sessions/:id/permissions/:permissionId', async request => {
+    await requireSessionExecution(request, request.params.id, 'high_risk', 'high_risk.execute');
+    return runtime.resolvePermission(request.params.id, request.params.permissionId, request.body.approved);
+  });
   const parseEventCursor = (value: string | undefined, name: string) => {
     if (value === undefined) return undefined;
     const parsed = Number(value);
@@ -141,6 +207,7 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
     return parsed;
   };
   app.get<{ Params: { id: string }; Querystring: { after?: string; before?: string; limit?: string; direction?: string } }>('/api/sessions/:id/events', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
     const { after, before, limit, direction } = request.query;
     if (direction !== undefined && direction !== 'forward' && direction !== 'backward') throw new RuntimeError('INVALID_EVENT_DIRECTION', `Unknown event direction: ${direction}`, 400);
     return runtime.getEventWindow(request.params.id, {
@@ -150,8 +217,12 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
       direction: (direction ?? (after !== undefined ? 'forward' : 'backward')) as 'forward' | 'backward'
     });
   });
-  app.get<{ Params: { id: string } }>('/api/sessions/:id/tasks', async request => runtime.getTasks(request.params.id));
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/tasks', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
+    return runtime.getTasks(request.params.id);
+  });
   app.get<{ Params: { id: string }; Querystring: { after?: string } }>('/api/sessions/:id/stream', async (request, reply) => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
     const fromHeader = request.headers['last-event-id'];
     const queryAfter = parseEventCursor(request.query.after, 'after') ?? 0;
     const rawHeaderAfter = (Array.isArray(fromHeader) ? fromHeader[0] : fromHeader);

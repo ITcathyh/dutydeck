@@ -3,6 +3,7 @@ import { Command } from 'commander';
 export interface CliOptions {
   host?: string;
   localOnly?: boolean;
+  auth?: boolean;
   port?: string;
   cwd?: string;
   database?: string;
@@ -34,6 +35,8 @@ export interface LarkCliOptions {
   baseUrl?: string;
 }
 
+export interface IdentityPreflightCliOptions { groupBinding?: string[] }
+
 export interface AgentGroupCliOptions {
   after?: string;
   limit?: string;
@@ -59,6 +62,24 @@ export interface AuthTokenCliOptions {
   rotate?: boolean;
 }
 
+export interface BotmuxSourceCliOptions {
+  sourceHome?: string;
+  botsConfig?: string;
+  dataDir?: string;
+  output?: string;
+  json?: boolean;
+}
+
+export interface BotmuxArchiveCliOptions extends BotmuxSourceCliOptions {
+  output: string;
+  passphraseFd?: string;
+}
+
+export interface SecretValueCliOptions { valueFd?: string; database?: string }
+export interface SecretRotateCliOptions extends SecretValueCliOptions { expectedRevision: string }
+export interface SecretRemoveCliOptions { expectedRevision: string; database?: string }
+export interface SecretListCliOptions { database?: string }
+
 export interface CliHandlers {
   serve?(options: CliOptions): void | Promise<void>;
   daemonStart?(options: CliOptions): void | Promise<void>;
@@ -67,8 +88,16 @@ export interface CliHandlers {
   daemonStatus?(): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
   authToken?(options: AuthTokenCliOptions): void | Promise<void>;
+  botmuxDiscover?(options: BotmuxSourceCliOptions): void | Promise<void>;
+  botmuxPlan?(options: BotmuxSourceCliOptions): void | Promise<void>;
+  botmuxArchive?(options: BotmuxArchiveCliOptions): void | Promise<void>;
+  secretList?(options: SecretListCliOptions): void | Promise<void>;
+  secretSet?(id: string, options: SecretValueCliOptions): void | Promise<void>;
+  secretRotate?(id: string, options: SecretRotateCliOptions): void | Promise<void>;
+  secretRemove?(id: string, options: SecretRemoveCliOptions): void | Promise<void>;
   larkSend?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   larkUpdate?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
+  identityPreflight?(channelBotId: string, options: IdentityPreflightCliOptions): void | Promise<void>;
   groupSelf?(): void | Promise<void>;
   groupPeers?(): void | Promise<void>;
   groupMembers?(): void | Promise<void>;
@@ -95,6 +124,8 @@ const addCardOptions = (command: Command) => command
 const addServerOptions = (command: Command) => command
   .option('--host <host>', 'Advanced: bind a specific host or interface')
   .option('--local-only', 'Only accept connections from this computer (127.0.0.1)')
+  .option('--auth', 'Require access-token authentication on non-local listeners (default)')
+  .option('--no-auth', 'Explicitly disable Dockmux access-token authentication (trusted networks only)')
   .option('--port <port>', 'Bind port (default: 4310)')
   .option('--cwd <directory>', 'Default Agent working directory')
   .option('--database <file>', 'SQLite database path')
@@ -108,6 +139,12 @@ const addServerOptions = (command: Command) => command
   .option('--lark-agent-name <name>', 'Default Lark card agent name')
   .option('--lark-base-url <url>', 'Lark OpenAPI base URL')
   .option('--no-lark-listen', 'Disable Lark message listening for this process without changing saved configuration');
+
+const addBotmuxSourceOptions = (command: Command) => command
+  .option('--source-home <directory>', 'Botmux source home to inspect')
+  .option('--bots-config <file>', 'Exact Botmux bot registry file to inspect')
+  .option('--data-dir <directory>', 'Exact Botmux data directory to inspect')
+  .option('--json', 'Emit compact JSON (content remains redacted)');
 
 /**
  * Server options may appear on the root (default serve) or a `daemon start /
@@ -141,6 +178,11 @@ export function createCliProgram(version: string, handlers: CliHandlers = {}) {
     .argument('[markdown]', 'Final Markdown or fallback card content')
     .requiredOption('--message-id <id>', 'Lark card message ID to update'))
     .action((markdown, options) => handlers.larkUpdate?.(markdown, options));
+  lark.command('preflight')
+    .description('Run a read-only identity/App×Chat preflight for a staged ChannelBot')
+    .argument('<channel-bot-id>', 'Staged or disabled ChannelBot ID')
+    .option('--group-binding <id>', 'Limit verification to a GroupBinding (repeatable)', (value: string, previous: string[]) => [...previous, value], [])
+    .action((channelBotId, options) => handlers.identityPreflight?.(channelBotId, options));
 
   const group = program.command('group').description('Collaborate with Agents in the current Lark group');
   group.command('self')
@@ -214,6 +256,42 @@ Examples:
   $ answer=$(dockmux session ask "要继续发布吗？") && echo "user said: $answer"
   $ dockmux session ask "选哪个方案？" --timeout 60 --json`);
 
+  const botmux = program.command('botmux').description('Inspect Botmux data with the read-only migration importer');
+  addBotmuxSourceOptions(botmux.command('discover')
+    .description('Discover and classify source artifacts without changing either system')
+    .option('--output <file>', 'Write the redacted report to a new private file'))
+    .action(options => handlers.botmuxDiscover?.(options));
+  addBotmuxSourceOptions(botmux.command('plan')
+    .description('Create a redacted NO_GO migration plan without writing Dockmux data')
+    .option('--output <file>', 'Write the redacted manifest to a new private file'))
+    .action(options => handlers.botmuxPlan?.(options));
+  addBotmuxSourceOptions(botmux.command('archive')
+    .description('Copy eligible artifacts into a new encrypted private archive')
+    .requiredOption('--output <directory>', 'New private archive directory')
+    .option('--passphrase-fd <fd>', 'Read the archive passphrase from an explicitly supplied file descriptor'))
+    .action(options => handlers.botmuxArchive?.(options));
+
+  const secret = program.command('secret').description('Manage local SecretRef metadata and encrypted-channel credentials without printing values');
+  secret.command('list')
+    .description('List SecretRef metadata and file availability; never prints secret values')
+    .action((options, command) => handlers.secretList?.(serverOptionsFrom(options, command)));
+  secret.command('set')
+    .description('Create a local Lark credential SecretRef from hidden TTY input or --value-fd')
+    .argument('<id>', 'Opaque SecretRef ID')
+    .option('--value-fd <fd>', 'Read strict credential bundle JSON from an inherited file descriptor')
+    .action((id, options, command) => handlers.secretSet?.(id, serverOptionsFrom(options, command)));
+  secret.command('rotate')
+    .description('Conditionally rotate a local Lark credential SecretRef')
+    .argument('<id>', 'Opaque SecretRef ID')
+    .requiredOption('--expected-revision <revision>', 'Current SecretRef revision for CAS')
+    .option('--value-fd <fd>', 'Read strict credential bundle JSON from an inherited file descriptor')
+    .action((id, options, command) => handlers.secretRotate?.(id, serverOptionsFrom(options, command) as SecretRotateCliOptions));
+  secret.command('remove')
+    .description('Remove an unreferenced local SecretRef and its value')
+    .argument('<id>', 'Opaque SecretRef ID')
+    .requiredOption('--expected-revision <revision>', 'Current SecretRef revision for CAS')
+    .action((id, options, command) => handlers.secretRemove?.(id, serverOptionsFrom(options, command) as SecretRemoveCliOptions));
+
   program.command('update')
     .description('Update the global Dockmux package and restart the background service')
     .option('--dist-tag <tag>', 'npm dist-tag to install (default: latest)', 'latest')
@@ -251,6 +329,7 @@ Examples:
 Examples:
   $ dockmux
   $ dockmux --local-only
+  $ dockmux --host 0.0.0.0 --no-auth
   $ dockmux --cwd /path/to/project --port 4310
   $ dockmux start --port 4310
   $ dockmux status
@@ -264,11 +343,18 @@ Examples:
   $ dockmux acpk agents list --json
   $ dockmux lark send "**任务已完成**"
   $ dockmux lark update "**最新结果**" --message-id om_xxx
+  $ dockmux lark preflight bot-id --group-binding binding-id
   $ dockmux group peers
   $ dockmux group members
   $ dockmux group send "请检查接口" --to cli_peer
   $ dockmux session send "已完成迁移，正在跑回归"
   $ dockmux session ask "要继续发布吗？"
+  $ dockmux botmux discover --source-home /tmp/botmux-fixture --json
+  $ dockmux botmux plan --source-home /tmp/botmux-fixture --output /tmp/redacted-plan.json
+  $ dockmux botmux archive --source-home /tmp/botmux-fixture --output /tmp/private-archive
+  $ dockmux secret list
+  $ dockmux secret set team-bot --value-fd 0
+  $ dockmux secret rotate team-bot --expected-revision 1 --value-fd 0
   $ dockmux --version`);
 }
 
@@ -276,6 +362,7 @@ export function environmentFromCli(options: CliOptions, base: NodeJS.ProcessEnv 
   const env = { ...base };
   if (options.host !== undefined) env.DOCKMUX_HOST = options.host;
   if (options.localOnly === true) env.DOCKMUX_LOCAL_ONLY = 'true';
+  if (options.auth !== undefined) env.DOCKMUX_AUTH = String(options.auth);
   if (options.port !== undefined) env.DOCKMUX_PORT = options.port;
   if (options.cwd !== undefined) env.DOCKMUX_DEFAULT_CWD = options.cwd;
   if (options.database !== undefined) env.DOCKMUX_DATABASE_URL = options.database;

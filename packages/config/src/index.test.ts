@@ -7,6 +7,7 @@ describe('working directory configuration', () => {
     expect(config.agents.every(agent => agent.cwd === process.cwd())).toBe(true);
     expect(config.databaseUrl).toBe(`${process.cwd()}/.dockmux/dockmux.db`);
     expect(config.host).toBe('127.0.0.1');
+    expect(config.authEnabled).toBe(true);
     expect(config.driverIdleTimeoutMs).toBe(21_600_000);
     expect(config.cleanupIntervalMs).toBe(300_000);
     expect(config.agents.some(agent => ['mock-acp', 'jsonl-demo', 'pty-demo'].includes(agent.id))).toBe(false);
@@ -20,6 +21,12 @@ describe('working directory configuration', () => {
 
   it('binds only to loopback when local-only startup mode is enabled', () => {
     expect(loadConfig({ DOCKMUX_LOCAL_ONLY: 'true', DOCKMUX_HOST: '0.0.0.0' }).host).toBe('127.0.0.1');
+  });
+
+  it('disables access authentication only through an explicit false value', () => {
+    expect(loadConfig({ DOCKMUX_HOST: '0.0.0.0', DOCKMUX_AUTH: 'false' })).toMatchObject({ host: '0.0.0.0', authEnabled: false });
+    expect(loadConfig({ DOCKMUX_HOST: '0.0.0.0', DOCKMUX_AUTH: 'true' })).toMatchObject({ host: '0.0.0.0', authEnabled: true });
+    expect(() => loadConfig({ DOCKMUX_AUTH: '0' })).toThrow();
   });
 
   it('applies the server default cwd to custom agents that omit cwd', () => {

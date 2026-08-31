@@ -97,6 +97,8 @@ export function extractCookie(cookieHeader: string | undefined, name = AUTH_COOK
 }
 
 export interface AuthMiddlewareOptions {
+  /** Explicit access mode. Omitted for compatibility with localOnly callers. */
+  mode?: 'local' | 'token' | 'open';
   /** 当前有效 token（null = 未配置，fail closed：非豁免请求一律 401） */
   getToken(): Promise<string | null>;
   /** 服务以 --local-only 启动（绑 127.0.0.1）时为 true；仍校验 Host/Origin 以阻断 DNS rebinding */
@@ -106,6 +108,9 @@ export interface AuthMiddlewareOptions {
 }
 
 export type BrowserAuthState = { authenticated: boolean; required: boolean };
+
+const accessMode = (options: AuthMiddlewareOptions): 'local' | 'token' | 'open' =>
+  options.mode ?? (options.localOnly ? 'local' : 'token');
 
 const UNAUTHORIZED_PAYLOAD = {
   error: { code: 'UNAUTHORIZED', message: 'Authentication required' }
@@ -151,11 +156,20 @@ export function isLoopbackHost(host: string | undefined): boolean {
  */
 export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddlewareOptions): void {
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
-    if (options.localOnly) {
+    const mode = accessMode(options);
+    if (mode === 'local') {
       if (!isLoopbackHost(request.headers.host)) {
         return reply.code(403).send({ error: { code: 'HOST_NOT_ALLOWED', message: 'Local-only requests require a loopback Host' } });
       }
       if (request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, request.protocol)) {
+        return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dockmux' } });
+      }
+      return;
+    }
+    if (mode === 'open') {
+      // --no-auth removes the credential gate, not browser same-origin
+      // protection. CLI/API clients without Origin remain supported.
+      if (request.headers.origin && !isSameOriginRequest(request.headers, request.protocol)) {
         return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dockmux' } });
       }
       return;
@@ -176,7 +190,7 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
 }
 
 const browserAuthRequired = (request: FastifyRequest, options: AuthMiddlewareOptions) =>
-  !options.localOnly;
+  accessMode(options) === 'token';
 
 const requestToken = (request: FastifyRequest) => extractBearerToken(request.headers.authorization)
   ?? extractCookie(request.headers.cookie);
@@ -225,7 +239,8 @@ export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMid
   app.post('/api/auth/logout', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     reply.header('Set-Cookie', cookieAttributes(request, true));
-    return { authenticated: false, required: browserAuthRequired(request, options) } satisfies BrowserAuthState;
+    const required = browserAuthRequired(request, options);
+    return { authenticated: !required, required } satisfies BrowserAuthState;
   });
 }
 

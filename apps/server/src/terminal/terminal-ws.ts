@@ -1,8 +1,8 @@
-import type { TerminalStream } from '@dockmux/shared';
+import type { PolicyDecision, TerminalStream } from '@dockmux/shared';
 import type { FastifyInstance } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
-import { WebSocket, WebSocketServer } from 'ws';
+import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { extractBearerToken, extractCookie, isLoopbackHost, isSameOriginRequest } from '../auth/auth.js';
 
 /** 终端流句柄：stream + 进程退出订阅（runtime 侧从 driver onExit 合成） */
@@ -23,6 +23,8 @@ export interface TerminalStreamProvider {
 
 /** WS 认证钩子（由 auth 模块提供，负责人接线）；不传 = 不认证（loopback 场景） */
 export interface TerminalRouteAuth {
+  /** Explicit access mode. Omitted for compatibility with older callers. */
+  mode?: 'local' | 'token' | 'open';
   /** 仅显式 local-only 监听可免认证。 */
   allowUnauthenticated?: boolean;
   /** 浏览器来自 HttpOnly cookie，非浏览器客户端也可使用 Bearer。 */
@@ -32,6 +34,8 @@ export interface TerminalRouteAuth {
 export interface TerminalRouteOptions {
   provider: TerminalStreamProvider;
   auth?: TerminalRouteAuth;
+  /** Unified GroupBinding execution gate; legacy sessions return legacy_unmanaged. */
+  authorize?: (request: IncomingMessage, sessionId: string, action: 'terminal.read' | 'terminal.write') => Promise<PolicyDecision>;
 }
 
 const TERMINAL_PATH_PREFIX = '/api/terminal/';
@@ -57,7 +61,12 @@ function rejectUpgrade(socket: Socket, statusCode: number, statusText: string, m
 }
 
 /** 单个 WS 连接的双向绑定：stream → ws 帧、ws 消息 → stream 调用 */
-function bindConnection(ws: WebSocket, handle: TerminalStreamHandle, onClosed: () => void): void {
+function bindConnection(
+  ws: WebSocket,
+  handle: TerminalStreamHandle,
+  onClosed: () => void,
+  authorizeWrite?: () => Promise<PolicyDecision>,
+): void {
   const { stream } = handle;
   let disposed = false;
   let closed = false;
@@ -98,13 +107,23 @@ function bindConnection(ws: WebSocket, handle: TerminalStreamHandle, onClosed: (
     }
   });
 
-  ws.on('message', raw => {
+  const handleMessage = async (raw: RawData) => {
     let message: any;
     try {
       message = JSON.parse(raw.toString());
     } catch {
       sendFrame({ type: 'error', message: 'invalid JSON message' });
       return;
+    }
+    if (message?.type === 'input' || message?.type === 'resize') {
+      let decision: PolicyDecision | undefined;
+      try { decision = await authorizeWrite?.(); }
+      catch { decision = { allowed: false, action: 'terminal.write', code: 'permission_evaluator_failed', reason: 'Terminal permission evaluation failed', source: 'integration' }; }
+      if (decision && !decision.allowed) {
+        sendFrame({ type: 'error', message: decision.reason, code: decision.code });
+        try { ws.close(); } catch { /* 已关闭 */ }
+        return;
+      }
     }
     if (message?.type === 'input') {
       try {
@@ -133,6 +152,15 @@ function bindConnection(ws: WebSocket, handle: TerminalStreamHandle, onClosed: (
     }
     // 未知 type / 解析失败 → error 帧，不断开
     sendFrame({ type: 'error', message: `unknown message type: ${String(message?.type)}` });
+  };
+  // Authorization may be asynchronous. Preserve PTY input ordering instead of
+  // allowing a slower permission lookup to reorder adjacent key frames.
+  let messageChain = Promise.resolve();
+  ws.on('message', raw => {
+    messageChain = messageChain.then(() => handleMessage(raw)).catch(error => {
+      sendFrame({ type: 'error', message: errorMessage(error) });
+      try { ws.close(); } catch { /* 已关闭 */ }
+    });
   });
 
   ws.on('close', cleanup);
@@ -156,7 +184,7 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
     const server = app.server;
     // 防御：app.server 在 listen 后才存在（ready 后理论上必有）
     if (!server) return;
-    server.on('upgrade', (request: IncomingMessage, socket: Socket, head: Buffer) => {
+    server.on('upgrade', async (request: IncomingMessage, socket: Socket, head: Buffer) => {
       let url: URL;
       try {
         url = new URL(request.url ?? '/', 'http://terminal.local');
@@ -165,9 +193,18 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       }
       if (!url.pathname.startsWith(TERMINAL_PATH_PREFIX)) return; // 非本路由，放行
 
+      const authMode = options.auth?.mode ?? (options.auth?.allowUnauthenticated ? 'local' : 'token');
+      // Explicit open mode accepts remote hosts without a token, while browser
+      // upgrades still have to originate from the exact public Dockmux origin.
+      if (options.auth && authMode === 'open') {
+        const encrypted = 'encrypted' in request.socket && request.socket.encrypted === true;
+        if (request.headers.origin && !isSameOriginRequest(request.headers, encrypted ? 'https' : 'http')) {
+          rejectUpgrade(socket, 403, 'Forbidden', 'origin not allowed');
+          return;
+        }
       // local-only may omit a token, but still validates Host/Origin to block
       // browser DNS rebinding into the loopback terminal.
-      if (options.auth?.allowUnauthenticated) {
+      } else if (options.auth && authMode === 'local') {
         if (!isLoopbackHost(request.headers.host)) {
           rejectUpgrade(socket, 403, 'Forbidden', 'host not allowed');
           return;
@@ -205,6 +242,19 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
         return;
       }
 
+      if (options.authorize) {
+        let decision: PolicyDecision;
+        try { decision = await options.authorize(request, sessionId, 'terminal.read'); }
+        catch {
+          rejectUpgrade(socket, 503, 'Service Unavailable', 'terminal permission evaluation failed');
+          return;
+        }
+        if (!decision.allowed) {
+          rejectUpgrade(socket, 403, 'Forbidden', decision.reason);
+          return;
+        }
+      }
+
       const lookup = options.provider.lookupTerminalStream(sessionId);
       if (lookup.status === 'no-session') {
         rejectUpgrade(socket, 404, 'Not Found', 'session not found');
@@ -217,7 +267,12 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
 
       wss.handleUpgrade(request, socket, head, ws => {
         active.add(ws);
-        bindConnection(ws, lookup.handle, () => active.delete(ws));
+        bindConnection(
+          ws,
+          lookup.handle,
+          () => active.delete(ws),
+          options.authorize ? () => options.authorize!(request, sessionId, 'terminal.write') : undefined,
+        );
       });
     });
   });

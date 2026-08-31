@@ -58,9 +58,10 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('start 收 raw_terminal，每轮 send 恰好一次 completed，stop 触发 onExit', async () => {
+  it('start 收 raw_terminal，每轮 send 恰好一次 completed，stop 触发生命周期回调', async () => {
     const events: NormalizedDriverEvent[] = [];
     let exitCode: number | null | undefined;
+    let stopped = false;
 
     const adapter: CliAdapter = {
       id: 'mock-cli',
@@ -93,6 +94,7 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
       onExit: code => {
         exitCode = code;
       },
+      onStopped: () => { stopped = true; },
       sessionId: 'test-session',
     });
 
@@ -121,6 +123,7 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
 
     // 4. stop 后 onExit 触发
     await driver.stop();
+    expect(stopped).toBe(true);
     await waitFor('onExit after stop', () => exitCode !== undefined);
   }, 30_000);
 });
@@ -170,6 +173,10 @@ describe('PTY_AGENT_CONTRIBUTIONS', () => {
       kimi: 'kimi',
       traex: 'traex',
     });
+  });
+
+  it('does not auto-discover the ambiguous system mtr executable as an AI Agent', () => {
+    expect(PTY_AGENT_CONTRIBUTIONS.some(contribution => contribution.command === 'mtr')).toBe(false);
   });
 });
 

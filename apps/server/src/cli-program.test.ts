@@ -36,6 +36,20 @@ describe('Dockmux CLI', () => {
     expect(environmentFromCli(program.opts(), {})).toEqual({ DOCKMUX_LOCAL_ONLY: 'true' });
   });
 
+  it('requires an explicit no-auth option and maps it independently from the listen host', () => {
+    const defaults = createCliProgram('0.0.5');
+    defaults.parse(['node', 'dockmux', '--host', '0.0.0.0']);
+    expect(environmentFromCli(defaults.opts(), {})).toEqual({ DOCKMUX_HOST: '0.0.0.0' });
+
+    const disabled = createCliProgram('0.0.5');
+    disabled.parse(['node', 'dockmux', '--host', '0.0.0.0', '--no-auth']);
+    expect(environmentFromCli(disabled.opts(), {})).toEqual({ DOCKMUX_HOST: '0.0.0.0', DOCKMUX_AUTH: 'false' });
+
+    const enabled = createCliProgram('0.0.5');
+    enabled.parse(['node', 'dockmux', '--auth']);
+    expect(environmentFromCli(enabled.opts(), { DOCKMUX_AUTH: 'false' })).toEqual({ DOCKMUX_AUTH: 'true' });
+  });
+
   it('prints the installed version', () => {
     let output = '';
     const program = createCliProgram('0.0.5').exitOverride().configureOutput({ writeOut: value => { output += value; } });
@@ -84,6 +98,14 @@ describe('Dockmux CLI', () => {
     await program.parseAsync(['node', 'dockmux', 'daemon', 'start', '--port', '4500', '--local-only', '--cwd', '/tmp/project']);
     expect(daemonStart).toHaveBeenCalledWith(expect.objectContaining({ port: '4500', localOnly: true, cwd: '/tmp/project' }));
     expect(environmentFromCli(daemonStart.mock.calls[0]![0]!, {})).toMatchObject({ DOCKMUX_PORT: '4500', DOCKMUX_DEFAULT_CWD: '/tmp/project' });
+  });
+
+  it('passes no-auth to background daemon commands', async () => {
+    const daemonStart = vi.fn();
+    const program = createCliProgram('0.0.6', { daemonStart });
+    await program.parseAsync(['node', 'dockmux', 'daemon', 'start', '--host', '0.0.0.0', '--no-auth']);
+    expect(daemonStart).toHaveBeenCalledWith(expect.objectContaining({ host: '0.0.0.0', auth: false }));
+    expect(environmentFromCli(daemonStart.mock.calls[0]![0]!, {})).toMatchObject({ DOCKMUX_HOST: '0.0.0.0', DOCKMUX_AUTH: 'false' });
   });
 
   it('parses daemon stop, restart, and status commands', async () => {

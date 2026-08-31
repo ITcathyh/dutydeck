@@ -58,6 +58,36 @@ describe('CompactSelect 开合与选择', () => {
     await user.click(screen.getByTestId('outside'));
     expect(screen.queryByRole('listbox')).toBeNull();
   });
+
+  it('supports Arrow/Home/End navigation and Enter selection', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<CompactSelect {...baseProps} onChange={onChange}/>);
+    const button = screen.getByRole('button', { name: /选项 A/ });
+    button.focus();
+    await user.keyboard('{ArrowDown}');
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })));
+    await user.keyboard('{End}');
+    expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 B/ }));
+    await user.keyboard('{Home}{ArrowDown}{Enter}');
+    expect(onChange).toHaveBeenCalledWith('b');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    await vi.waitFor(() => expect(document.activeElement).toBe(button));
+  });
+
+  it('Escape closes only the listbox and restores its trigger', async () => {
+    const user = userEvent.setup();
+    const parentKeyDown = vi.fn();
+    render(<div onKeyDown={parentKeyDown}><CompactSelect {...baseProps}/></div>);
+    const button = screen.getByRole('button', { name: /选项 A/ });
+    await user.click(button);
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })));
+    parentKeyDown.mockClear();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(parentKeyDown).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.activeElement).toBe(button));
+  });
 });
 
 describe('CompactSelect 空态与禁用', () => {

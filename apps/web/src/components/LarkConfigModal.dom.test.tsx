@@ -187,7 +187,7 @@ describe('LarkConfigModal risk control', () => {
     }));
     renderModal(collection({ defaultAgentId: 'codex', fullTrustConfirmed: true, setupComplete: true, riskControlMode: 'enforced' }));
 
-    await user.click(await screen.findByRole('button', { name: /Agent 与风险控制/ }));
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
     expect(await screen.findByText(/已为 codex 配置/)).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Codex' }));
     await user.click(screen.getByRole('option', { name: 'Claude' }));

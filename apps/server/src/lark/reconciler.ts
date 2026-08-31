@@ -69,7 +69,7 @@ export async function performLarkCardReconcile(input: {
   let unresolved = 0;
   for (const mapping of mappings) {
     const persisted = persistedCardTask(mapping.extra);
-    if (!persisted || terminalTaskStates.has(persisted.state)) continue;
+    if (!persisted || (terminalTaskStates.has(persisted.state) && persisted.progress_frozen && persisted.final_delivery_state === 'delivered' && persisted.final_message_id)) continue;
     let runtimeTasks: TaskRecord[];
     try { runtimeTasks = await runtime.getTasks(mapping.sessionId); }
     catch (error) { unresolved++; log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '读取待补偿飞书任务失败'); continue; }
@@ -115,12 +115,24 @@ export async function performLarkCardReconcile(input: {
     if (state === 'completed' && hasUnresolvedToolCalls(events)) state = 'failed';
     const completed = state === 'completed';
     const elapsedSeconds = Math.max(0, (Date.parse(runtimeTask.updatedAt) - persisted.started_at) / 1_000);
-    let updated = false;
+    let updated = Boolean(persisted.progress_frozen);
     let lastError: unknown;
     let contentRejected = false;
-    const currentElements = boundLarkCardElements(renderLarkCardElements(events, config, completed));
-    let deliveredElements = currentElements;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    const chatType = persisted.chat_type ?? (persisted.reply_message_id ? 'group' : 'p2p');
+    const currentElements = boundLarkCardElements(renderLarkCardElements(events, config, completed, false, chatType));
+    const receiptElements: LarkCardElement[] = [{
+      tag: 'markdown', element_id: 'terminal_receipt',
+      content: state === 'completed'
+        ? '**任务已完成。**\n\n最终结果已作为新消息发送。'
+        : state === 'failed'
+          ? '**任务执行失败。**\n\n失败原因和恢复建议已作为新消息发送。'
+          : '**任务已取消。**\n\n本轮已停止，后续操作已作为新消息发送。',
+      text_size: 'normal', margin: '0px'
+    }];
+    let deliveredElements = persisted.progress_frozen && persisted.last_successful_elements?.length
+      ? persisted.last_successful_elements
+      : receiptElements;
+    if (!updated) for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         await service.update({
           ...cardContext,
@@ -133,7 +145,7 @@ export async function performLarkCardReconcile(input: {
           sessionId: mapping.sessionId,
           readOnly: true,
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-          elements: currentElements
+          elements: receiptElements
         });
         updated = true;
         break;
@@ -147,7 +159,7 @@ export async function performLarkCardReconcile(input: {
       }
     }
     if (!updated && contentRejected && Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length) {
-      const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
+      const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, receiptElements);
       try {
         await service.update({
           ...cardContext,
@@ -173,14 +185,16 @@ export async function performLarkCardReconcile(input: {
     let cardMessageId = persisted.card_message_id;
     if (!updated) {
       if (!isLarkMessageUnupdatable(lastError)) {
-        log.warn({ error: lastError, messageId: persisted.card_message_id }, '飞书原卡暂时更新失败，保留原卡等待下次对账');
+        // A transient PATCH failure must not suppress the fresh terminal notification.
+        // Persist final delivery independently and keep progress_frozen=false so the next
+        // reconciliation retries freezing the old running card without redelivering result.
+        log.warn({ error: lastError, messageId: persisted.card_message_id }, '飞书原卡暂时更新失败，先补发终态新消息并在下次对账重试冻结');
         unresolved++;
-        continue;
-      }
-      try {
+        deliveredElements = persisted.last_successful_elements ?? [];
+      } else try {
         const replacementElements = contentRejected
-          ? patchRejectedCardDelta(persisted.last_successful_elements, currentElements)
-          : boundLarkCardElements(renderLarkCardElements(events, config, completed, true));
+          ? patchRejectedCardDelta(persisted.last_successful_elements, receiptElements)
+          : receiptElements;
         const replacement = await sendPersistedTaskCard(service, persisted, {
           ...cardContext,
           state,
@@ -195,10 +209,11 @@ export async function performLarkCardReconcile(input: {
         }, log);
         cardMessageId = replacement.messageId;
         deliveredElements = replacementElements;
+        updated = true;
       } catch (error) {
         if (isLarkCardContentRejected(error)) {
           try {
-            const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
+            const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, receiptElements);
             const minimal = await sendPersistedTaskCard(service, persisted, {
               ...cardContext,
               state,
@@ -213,6 +228,7 @@ export async function performLarkCardReconcile(input: {
             }, log);
             cardMessageId = minimal.messageId;
             deliveredElements = patchedElements;
+            updated = true;
             log.warn({ rejectedMessageId: persisted.card_message_id, replacementMessageId: cardMessageId, upstreamCode: error.details?.upstreamCode }, '飞书补发终态卡片内容被拒绝，已降级为最小安全卡片');
           } catch (fallbackError) {
             log.error({ error: fallbackError, contentError: error, updateError: lastError, messageId: persisted.card_message_id }, '飞书终态对账最小卡片补偿失败');
@@ -226,11 +242,65 @@ export async function performLarkCardReconcile(input: {
         }
       }
     }
+    let finalMessageId = persisted.final_message_id;
+    if (!finalMessageId || persisted.final_delivery_state !== 'delivered') {
+      try {
+        const finalInput = {
+          ...cardContext,
+          state,
+          taskId: mapping.externalId,
+          taskName: persisted.task_name,
+          elapsedSeconds,
+          sessionId: mapping.sessionId,
+          readOnly: true,
+          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+          elements: currentElements,
+          // Reuse the live coordinator key after a crash between successful send and
+          // persistence. Lark can then deduplicate the recovery delivery server-side.
+          idempotencyKey: (persisted.turn
+            ? `final_${mapping.externalId}_${persisted.turn}_${state}`
+            : `final_${mapping.externalId}_legacy_${state}`).slice(0, 50)
+        } as const;
+        let finalCard;
+        try {
+          finalCard = await sendPersistedTaskCard(service, persisted, finalInput, log);
+        } catch (error) {
+          if (!isLarkCardContentRejected(error)) throw error;
+          finalCard = await sendPersistedTaskCard(service, persisted, {
+            ...finalInput,
+            elements: [{
+              tag: 'markdown', element_id: 'final_delivery_safe_fallback',
+              content: '**任务已结束，但结果内容未通过飞书安全检查。**\n\n请在 Dockmux Web 查看完整结果，或调整请求后重试。',
+              text_size: 'normal', margin: '0px'
+            }]
+          }, log);
+          log.warn({ externalId: mapping.externalId, state }, '飞书终态新消息内容被拒绝，已发送安全降级通知');
+        }
+        finalMessageId = finalCard.messageId;
+      } catch (error) {
+        log.error({ error, messageId: cardMessageId, state }, '飞书终态新消息补发失败');
+        unresolved++;
+        await cardMappings.save({
+          ...mapping,
+          extra: JSON.stringify({ ...persisted, card_message_id: cardMessageId, runtime_task_id: runtimeTask.id, state, progress_frozen: updated, last_successful_elements: deliveredElements })
+        });
+        continue;
+      }
+    }
     await cardMappings.save({
       ...mapping,
-      extra: JSON.stringify({ ...persisted, card_message_id: cardMessageId, runtime_task_id: runtimeTask.id, state, last_successful_elements: deliveredElements })
+      extra: JSON.stringify({
+        ...persisted,
+        card_message_id: cardMessageId,
+        runtime_task_id: runtimeTask.id,
+        state,
+        progress_frozen: updated,
+        final_message_id: finalMessageId,
+        final_delivery_state: 'delivered',
+        last_successful_elements: deliveredElements
+      })
     });
-    log.info({ messageId: persisted.card_message_id, replacementMessageId: cardMessageId === persisted.card_message_id ? undefined : cardMessageId, state }, '飞书卡片终态对账完成');
+    log.info({ messageId: persisted.card_message_id, replacementMessageId: cardMessageId === persisted.card_message_id ? undefined : cardMessageId, finalMessageId, state }, '飞书卡片终态对账完成');
   }
   return unresolved;
 }
