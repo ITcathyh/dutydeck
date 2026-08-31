@@ -60,6 +60,19 @@ export interface CreateTranscriptTailerOptions {
   cwd: string;
   /** Explicit transcript path (skips directory resolution + switching). */
   transcriptPath?: string;
+  /**
+   * dockmux's session id, used to identify WHICH transcript in a shared
+   * location belongs to this session.
+   *
+   * Several CLIs key their transcript location by cwd alone, so every dockmux
+   * session started in one repo writes into the same directory. Resolving by
+   * recency there silently attaches a sibling's transcript: the timeline then
+   * shows another session's answer, or the turn is failed as "no final output"
+   * while the correct transcript sits on disk untouched. Sources that can be
+   * session-scoped use this; the rest fall back to recency and are documented
+   * as such at their resolver.
+   */
+  sessionId?: string;
   /** Poll interval in ms (default 300). */
   pollIntervalMs?: number;
   /**

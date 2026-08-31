@@ -34,7 +34,8 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dockmux/shared';
-import { resolveGrokCwdBucketDir, type CliPathEnv } from '../cli-paths.js';
+import { grokUpdatesPath, resolveGrokCwdBucketDir, type CliPathEnv } from '../cli-paths.js';
+import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptEventSource } from './tail.js';
 
 /** ACP tool status → dockmux status. `in_progress` is the spec spelling;
@@ -47,11 +48,32 @@ const TOOL_STATUS: Record<string, 'pending' | 'running' | 'completed' | 'failed'
   failed: 'failed',
 };
 
-/** Newest `<bucket>/<sessionId>/updates.jsonl` for a working directory. Grok
- *  keeps one directory per session inside the cwd bucket, so "newest session
- *  in this cwd" is a mtime pick among those. `env` must be the environment the
- *  CLI child received (see cli-paths.ts). */
-export function resolveGrokUpdatesPath(cwd: string, env?: CliPathEnv): string | undefined {
+/**
+ * Grok's `<bucket>/<sessionId>/updates.jsonl` for a working directory.
+ *
+ * With `sessionId`, resolution is session-scoped and therefore correct when
+ * several dockmux sessions share a cwd: the bucket is cwd-keyed, so all of
+ * them live side by side under it, and an mtime pick among them returns a
+ * sibling's stream as readily as this session's. The two-step mirrors
+ * session-id/grok.ts — the id dockmux pinned via `--session-id`, then the
+ * bucket's prompt_history marker scan for when Grok minted its own.
+ *
+ * Without `sessionId` it falls back to the mtime pick, which is only
+ * unambiguous when one session owns the cwd (tooling / tests).
+ *
+ * `env` must be the environment the CLI child received (see cli-paths.ts).
+ */
+export function resolveGrokUpdatesPath(
+  cwd: string,
+  env?: CliPathEnv,
+  sessionId?: string,
+): string | undefined {
+  if (sessionId) {
+    const cliSessionId = resolveCliSessionId('grok', { sessionId, cwd, env });
+    if (!cliSessionId) return undefined;
+    const path = grokUpdatesPath(cliSessionId, cwd, env);
+    return existsSync(path) ? path : undefined;
+  }
   const bucket = resolveGrokCwdBucketDir(cwd, env);
   if (!existsSync(bucket)) return undefined;
   let names: string[];
@@ -179,6 +201,11 @@ export interface GrokTranscriptTailerOptions {
   /** Explicit updates.jsonl path. When given, directory scanning and file
    *  switching are disabled. */
   transcriptPath?: string;
+  /** dockmux's session id. Required for correctness whenever more than one
+   *  session may share `cwd` — the bucket is cwd-keyed, so without it
+   *  resolution falls back to "newest session directory" and can attach a
+   *  sibling's stream. See resolveGrokUpdatesPath. */
+  sessionId?: string;
   /** Poll interval in ms (default 300). */
   pollIntervalMs?: number;
   /** The environment the CLI child was spawned with (defaults to process.env);
@@ -191,10 +218,26 @@ export class GrokTranscriptTailer implements TranscriptEventSource {
 
   constructor(opts: GrokTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
+    // Memoise the session-scoped resolution: JsonlTailer re-resolves every
+    // ~300ms tick, and recovering the CLI's own session id means reading
+    // history/rollout heads. The updates stream path never changes once found, so
+    // resolve until it succeeds and then hold the answer. See the Claude
+    // tailer for the full reasoning.
+    let resolved: string | undefined;
+    const resolveOnce = () => (resolved ??= resolveGrokUpdatesPath(opts.cwd, opts.env, opts.sessionId));
     this.tailer = new JsonlTailer({
-      resolvePath: explicit ? () => explicit : () => resolveGrokUpdatesPath(opts.cwd, opts.env),
+      resolvePath: explicit
+        ? () => explicit
+        : opts.sessionId
+          ? resolveOnce
+          : () => resolveGrokUpdatesPath(opts.cwd, opts.env),
       mapEntry: mapGrokEntry,
       pollIntervalMs: opts.pollIntervalMs,
+      // Re-resolving each tick is what lets the tailer attach late: the
+      // stream does not exist on the first ticks, and a refused
+      // `--session-id` is only found by the marker scan afterwards. With a
+      // sessionId every resolution names the same session, so this cannot
+      // drift onto a sibling's stream. See the Claude tailer for the tradeoff.
       watchForSwitch: !explicit,
     });
   }
