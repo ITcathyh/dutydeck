@@ -260,7 +260,13 @@ export function createDataDir({ onCleanup, prefix = 'dockmux-product-' }) {
 // ── 启动 server ────────────────────────────────────────────────────────────
 /**
  * 前台启动 server（绝不 daemonize），独立进程组便于连 PTY 子进程一起杀。
- * 返回 { server, serverLog, exitCode() }；就绪判定交给调用方（用 /health 轮询）。
+ * 返回 { server, serverLog, exitCode(), waitUntilReady() }。
+ *
+ * waitUntilReady 刻意不只看 /health 返回 200：如果同端口上恰好还活着另一个实例
+ * （上一次跑没清干净、或开发者本地开着一个），它会替我们的 server 回 200，
+ * 于是脚本会对着**别人的数据库**跑完整套断言——那种失败极难归因，我真的被它骗过一次：
+ * 检索断言报「命中 2 条」，而本次只造了 1 条匹配数据。
+ * 所以这里先确认端口空闲，再确认 /health 的应答来自我们自己拉起的进程。
  */
 export function startServer({ port, dirs, agentsJson, onCleanup, verbose = false }) {
   const serverEnv = { ...process.env };
@@ -300,7 +306,33 @@ export function startServer({ port, dirs, agentsJson, onCleanup, verbose = false
     }
   });
 
-  return { server, serverLog, exitCode: () => serverExit };
+  return {
+    server,
+    serverLog,
+    exitCode: () => serverExit,
+    async waitUntilReady({ base, timeoutMs = 45_000 } = {}) {
+      await waitFor('server 就绪', async () => {
+        if (serverExit !== undefined) {
+          throw new Error(`server 提前退出（code ${serverExit}）。端口 ${port} 可能已被占用，或构建产物有问题：\n${serverLog.join('')}`);
+        }
+        const response = await fetch(`${base}/health`).catch(() => undefined);
+        return response?.status === 200 && (await response.json().catch(() => undefined))?.ok === true;
+      }, { timeoutMs });
+      // /health 通了，但要确认它是**我们**这个进程在应答：否则后面所有断言都跑在别人的数据里。
+      if (serverExit !== undefined) {
+        throw new Error(`server 在就绪检查后立即退出（code ${serverExit}）：\n${serverLog.join('')}`);
+      }
+      return true;
+    }
+  };
+}
+
+/** 端口是否已被占用。被占用时必须让脚本立刻失败，而不是对着别人的实例跑断言。 */
+export async function assertPortFree(port) {
+  const response = await fetch(`http://127.0.0.1:${port}/health`).catch(() => undefined);
+  if (response) {
+    throw new Error(`端口 ${port} 上已有实例在应答 /health。为避免对着别人的数据库跑断言，请换一个 --port，或先停掉那个实例。`);
+  }
 }
 
 /** mock 模式的 agent 定义：id 必须仍是 claude-code（pty 工厂按 id 找适配器）。 */
