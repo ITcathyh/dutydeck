@@ -233,6 +233,19 @@ describe('CommandPalette 任务行信息与全量性', () => {
     expect(screen.getByText(/全部 18 条匹配都在下面，没有截断/)).toBeTruthy();
   });
 
+  // 任务行的状态徽标走 effectiveStatus(session).label，命令面板自己不判 archivedAt。
+  // 一条在 thinking 时被归档的任务，state 永远停在 'thinking'：徽标必须写「已归档」，
+  // 否则搜出来的只读历史看上去仍在跑。删掉 effectiveStatus 的归档分支时这条要挂。
+  // 归档任务只在输入关键词后出现（空查询预览刻意排除归档），所以这里先搜再断言。
+  it('归档 + thinking：搜出来的任务行徽标写「已归档」，不谎报仍在思考', async () => {
+    const user = userEvent.setup();
+    render(<CommandPalette {...baseProps} sessions={[session('1', { state: 'thinking', archivedAt: '2026-08-29T00:00:00Z' })]} summaries={{ '1': summary('1', '归档时还在思考') }}/>);
+    await user.type(input(), '归档');
+    const option = screen.getByRole('option', { name: /归档时还在思考/ });
+    expect(option.textContent).toContain('已归档');
+    expect(option.textContent).not.toContain('思考中');
+  });
+
   it('点击任务行回调 sessionId；每个选项都有至少 40px 触控高度', async () => {
     const user = userEvent.setup();
     const onSelectSession = vi.fn();

@@ -6,11 +6,11 @@ import type { WorkbenchView } from './workspace-model';
 // 三条设计前提，决定了下面所有分支：
 // 1. 不抢输入：中文用户在 Composer 里连续敲字是主路径，单键快捷键在输入态必须完全沉默，
 //    输入法组字期间（isComposing / keyCode 229）任何快捷键都不得触发。
-// 2. 不撒谎：没有 handler、when() 为假、或 session 作用域但当前没有打开运行的快捷键一律「惰性」，
+// 2. 不撒谎：没有 handler、when() 为假、或 session 作用域但当前没有打开任务的快捷键一律「惰性」，
 //    并且帮助面板必须据此显示「当前不可用」，而不是假装可用。调度与展示共用 shortcutAvailability。
 // 3. 不越权：只有真正命中并执行了某个快捷键才调用 preventDefault，其余按键原样交还浏览器。
 
-/** 'global' 任何时候可用；'session' 仅在打开了某个任务运行时可用。 */
+/** 'global' 任何时候可用；'session' 仅在打开了某个任务时可用。 */
 export type ShortcutScope = 'global' | 'session';
 
 export type ShortcutDefinition = {
@@ -31,7 +31,7 @@ export type ShortcutHandlers = Partial<Record<string, () => void>>;
 export type UseKeyboardShortcutsOptions = {
   /** 交给弹窗独占键盘时传 false，整套快捷键立即停用并清空和弦缓冲。 */
   enabled?: boolean;
-  /** 是否已打开某个任务运行；决定 scope: 'session' 的快捷键是否可用。默认 false（宁可惰性，不可误触）。 */
+  /** 是否已打开某个任务；决定 scope: 'session' 的快捷键是否可用。默认 false（宁可惰性，不可误触）。 */
   sessionOpen?: boolean;
   /** 仅测试注入；缺省按 navigator 探测。 */
   platform?: ShortcutPlatform;
@@ -50,30 +50,27 @@ export const shortcutDefinitions: ShortcutDefinition[] = [
   { id: 'go-task-center', keys: 'g t', label: '回到任务中心总览', group: '导航', scope: 'global' },
   { id: 'go-settings', keys: 'g s', label: '打开设置与接入', group: '导航', scope: 'global' },
   { id: 'go-lark-setup', keys: 'g l', label: '打开飞书 Bot 绑定向导', group: '导航', scope: 'global' },
-  { id: 'toggle-navigation', keys: 'Mod+B', label: '展开或收起任务列表导航', group: '导航', scope: 'global' },
-  { id: 'create-task', keys: 'n', label: '新建任务运行', group: '任务', scope: 'global' },
-  { id: 'interrupt-run', keys: '.', label: '中断当前运行，停在已完成的步骤', group: '任务', scope: 'session' },
-  { id: 'restart-run', keys: 'Shift+R', label: '重启当前任务运行，从空白上下文重来', group: '任务', scope: 'session' },
-  { id: 'archive-run', keys: 'e', label: '归档当前任务运行，需二次确认', group: '任务', scope: 'session' },
+  { id: 'toggle-navigation', keys: 'Mod+B', label: '展开或收起工作区导航', group: '导航', scope: 'global' },
+  { id: 'create-task', keys: 'n', label: '新建任务', group: '任务', scope: 'global' },
+  { id: 'interrupt-run', keys: '.', label: '中断当前任务，停在已完成的步骤', group: '任务', scope: 'session' },
+  { id: 'restart-run', keys: 'Shift+R', label: '重新启动当前任务，从空白上下文重来', group: '任务', scope: 'session' },
+  { id: 'archive-run', keys: 'e', label: '归档当前任务，需二次确认', group: '任务', scope: 'session' },
   { id: 'toggle-detail-tab', keys: 't', label: '在执行记录与终端之间切换', group: '视图', scope: 'session' },
-  { id: 'toggle-raw-log', keys: 'l', label: '打开或关闭原始运行日志面板', group: '视图', scope: 'session' },
-  { id: 'view-all', keys: '1', label: '列出全部任务运行', group: '视图', scope: 'global' },
-  { id: 'view-active', keys: '2', label: '只看进行中的任务运行', group: '视图', scope: 'global' },
-  { id: 'view-queued', keys: '3', label: '只看已排队的任务运行', group: '视图', scope: 'global' },
-  { id: 'view-attention', keys: '4', label: '只看待你处理的任务运行', group: '视图', scope: 'global' },
-  { id: 'view-failed', keys: '5', label: '只看失败的任务运行，修正后重新运行', group: '视图', scope: 'global' },
-  { id: 'view-completed', keys: '6', label: '只看已完成的任务运行', group: '视图', scope: 'global' },
-  { id: 'view-archived', keys: '7', label: '只看已归档的任务运行', group: '视图', scope: 'global' },
+  { id: 'toggle-raw-log', keys: 'l', label: '打开或关闭原始日志面板', group: '视图', scope: 'session' },
+  // 数字键顺序必须与总览页筛选条的视觉顺序一致，否则按 2 跳到的不是屏幕上第 2 项。
+  { id: 'view-all', keys: '1', label: '列出全部任务', group: '视图', scope: 'global' },
+  { id: 'view-attention', keys: '2', label: '只看待你处理的任务', group: '视图', scope: 'global' },
+  { id: 'view-active', keys: '3', label: '只看进行中的任务', group: '视图', scope: 'global' },
+  { id: 'view-completed', keys: '4', label: '只看已完成的任务', group: '视图', scope: 'global' },
+  { id: 'view-archived', keys: '5', label: '只看已归档的任务', group: '视图', scope: 'global' },
   { id: 'toggle-help', keys: '?', aliasKeys: 'Mod+/', label: '打开或关闭快捷键帮助', group: '帮助', scope: 'global' }
 ];
 
-/** 数字键 1–7 与工作台筛选视图的对应关系，供 App 侧一次性接线。 */
+/** 数字键 1–5 与工作台筛选视图的对应关系，供 App 侧一次性接线。 */
 export const workbenchViewShortcutIds: Record<WorkbenchView, string> = {
   all: 'view-all',
-  active: 'view-active',
-  queued: 'view-queued',
   attention: 'view-attention',
-  failed: 'view-failed',
+  active: 'view-active',
   completed: 'view-completed',
   archived: 'view-archived'
 };

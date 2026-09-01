@@ -15,6 +15,7 @@ import {
   type ShortcutHandlers,
   type UseKeyboardShortcutsOptions
 } from './useKeyboardShortcuts';
+import { workbenchViewOrder } from './workspace-model';
 
 // 这些用例盯的是「快捷键抢走用户输入」和「面板宣称的能力与实际不符」两类回归。
 // 中文输入法（isComposing）、可编辑目标、多余修饰键三条是本产品最容易被破坏的边界。
@@ -165,9 +166,10 @@ describe('shortcutDefinitions 注册表', () => {
     }
   });
 
-  it('七个工作台视图各自映射到一条已注册的快捷键', () => {
+  it('五个工作台视图各自映射到一条已注册的快捷键，且顺序与筛选条一致', () => {
     const ids = new Set(shortcutDefinitions.map(definition => definition.id));
     for (const shortcutId of Object.values(workbenchViewShortcutIds)) expect(ids.has(shortcutId)).toBe(true);
+    expect(Object.keys(workbenchViewShortcutIds)).toEqual([...workbenchViewOrder]);
   });
 });
 
@@ -452,12 +454,14 @@ describe('useKeyboardShortcuts', () => {
     expect(restart).toHaveBeenCalledTimes(1);
   });
 
-  it('数字键 1–7 切换七个工作台视图', () => {
+  it('数字键 1–5 按屏幕顺序切换五个工作台视图', () => {
     const calls: string[] = [];
     const handlers = Object.fromEntries(Object.entries(workbenchViewShortcutIds).map(([view, id]) => [id, () => calls.push(view)]));
     renderShortcuts({ handlers, options: macOptions });
-    for (const key of ['1', '2', '3', '4', '5', '6', '7']) press(key);
-    expect(calls).toEqual(['all', 'active', 'queued', 'attention', 'failed', 'completed', 'archived']);
+    for (const key of ['1', '2', '3', '4', '5']) press(key);
+    // 顺序必须与总览页筛选条一致（workbenchViewOrder），否则按 2 跳到的不是屏幕上第 2 项。
+    expect(calls).toEqual([...workbenchViewOrder]);
+    expect(calls).toEqual(['all', 'attention', 'active', 'completed', 'archived']);
   });
 
   it('不接管 Escape：全局层不吞掉浮层自己的关闭键', () => {

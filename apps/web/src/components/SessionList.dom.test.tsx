@@ -2,9 +2,10 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Session } from '../api';
+import { workbenchViewLabels, workbenchViewOrder } from '../workspace-model';
 import { SessionList, type SessionListProps } from './SessionList';
 
-const baseProps: SessionListProps = { open: false, onClose: () => {}, sessions: [], summaries: {}, sessionsLoading: false, agents: [], larkBots: [], view: 'all', onViewChange: () => {}, onSelect: () => {}, onNewSession: () => {}, onOpenLarkSetup: () => {}, onOpenControlCenter: () => {} };
+const baseProps: SessionListProps = { open: false, onClose: () => {}, sessions: [], summaries: {}, sessionsLoading: false, agents: [], larkBots: [], view: 'all', onSelect: () => {}, onNewSession: () => {}, onOpenControlCenter: () => {} };
 const originalMatchMedia = window.matchMedia;
 
 afterEach(() => { vi.restoreAllMocks(); Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: originalMatchMedia }); });
@@ -22,17 +23,46 @@ describe('SessionList mobile accessibility', () => {
     expect(aside.hasAttribute('aria-hidden')).toBe(false);
   });
 
-  it('所有任务状态都是可选视图，选择后回到工作台首页', async () => {
-    const user = userEvent.setup();
-    const onViewChange = vi.fn(); const onSelect = vi.fn();
-    render(<SessionList {...baseProps} open onViewChange={onViewChange} onSelect={onSelect}/>);
-    for (const label of ['总览', '待你处理', '进行中', '有排队的运行', '失败', '已完成', '已归档']) expect(screen.getByRole('button', { name: new RegExp(label) })).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: /已归档/ }));
-    expect(onViewChange).toHaveBeenCalledWith('archived');
-    expect(onSelect).toHaveBeenCalledWith(undefined);
+  /**
+   * 侧栏只回答「按目录找任务」，状态筛选是总览页的职责。
+   *
+   * 侧栏在桌面端恒常可见（md:static），此前它自带一份 7 项状态导航，
+   * 于是同一屏上必然出现两份筛选，且两份的口径还各自漂移。
+   * 这条用例守的是「状态筛选在侧栏里不存在」，防止它再长回来。
+   */
+  it('侧栏只做工作区导航，不再重复渲染状态筛选', () => {
+    const makeSession = (id: string, state: string): Session => ({ id, agentId: 'codex', state, cwd: `/repo/${id}`, runId: `run-${id}`, createdAt: '', updatedAt: '' });
+    render(<SessionList {...baseProps} open sessions={[makeSession('alpha', 'failed'), makeSession('beta', 'thinking')]}/>);
+    expect(screen.queryByRole('navigation', { name: '任务视图' })).toBeNull();
+    for (const label of [...workbenchViewOrder.map(view => workbenchViewLabels[view]), '有排队的运行', '失败']) {
+      expect(screen.queryByRole('button', { name: new RegExp(`^${label}`) })).toBeNull();
+    }
+    // 「绑定 Bot」也从侧栏移除：飞书入口只在总览页与设置里各留一处。
+    expect(screen.queryByRole('button', { name: /绑定 Bot/ })).toBeNull();
+    // 工作区分组仍然列任务，这是侧栏保留的那条检索路径。
+    expect(screen.getByText('工作区')).toBeTruthy();
+    for (const name of ['alpha', 'beta']) expect(screen.getByText(name)).toBeTruthy();
   });
 
-  it('归档视图只展示归档运行', () => {
+  it('创建任务按钮在 Agent 未就绪时不谎报，加载完成后才给出真实去向', async () => {
+    const user = userEvent.setup();
+    const onNewSession = vi.fn(); const onOpenControlCenter = vi.fn();
+    const { rerender } = render(<SessionList {...baseProps} open agentsLoading onNewSession={onNewSession} onOpenControlCenter={onOpenControlCenter}/>);
+    const detecting = screen.getByRole('button', { name: '正在检测 Agent…' });
+    expect(detecting.hasAttribute('disabled')).toBe(true);
+
+    // 加载完仍然没有 Agent：按钮如实改口，去向是「准备 Agent」而不是创建任务。
+    rerender(<SessionList {...baseProps} open agents={[]} onNewSession={onNewSession} onOpenControlCenter={onOpenControlCenter}/>);
+    await user.click(screen.getByRole('button', { name: '准备 Agent' }));
+    expect(onOpenControlCenter).toHaveBeenCalledTimes(1);
+    expect(onNewSession).not.toHaveBeenCalled();
+
+    rerender(<SessionList {...baseProps} open agents={[{ id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'full-trust' }]} onNewSession={onNewSession} onOpenControlCenter={onOpenControlCenter}/>);
+    await user.click(screen.getByRole('button', { name: '创建任务' }));
+    expect(onNewSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('归档视图只展示已归档任务', () => {
     const makeSession = (id: string, archivedAt?: string): Session => ({ id, agentId: 'codex', state: 'completed', cwd: `/repo/${id}`, runId: `run-${id}`, createdAt: '', updatedAt: '', ...(archivedAt ? { archivedAt } : {}) });
     render(<SessionList {...baseProps} open view="archived" sessions={[makeSession('current'), makeSession('history', '2026-08-30T00:00:00Z')]}/>);
     expect(screen.getByText('history')).toBeTruthy();
