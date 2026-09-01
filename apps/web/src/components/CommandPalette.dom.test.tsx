@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import type { Agent, RunSummary, Session } from '../api';
 import { CommandPalette, type CommandAction } from './CommandPalette';
+import { useEscapeKey } from '../useEscapeKey';
 
 // CommandPalette 是完全受控的展示组件：open / 关闭 与 Cmd-K 由 App 持有。
 // 用例盯住三类最容易回归的契约：键盘漫游（跳过禁用项、Home/End、Enter）、
@@ -168,6 +169,27 @@ describe('CommandPalette 键盘导航', () => {
     await user.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+
+  /*
+    面板的 Escape 刻意没有迁到 useEscapeKey（见 CommandPalette.tsx 里的长注释）：
+    两者互斥，SyntheticEvent.stopPropagation() 会连原生事件一起停掉，document 上的
+    监听根本不会跑，「不冒泡给外层」那条断言与 useEscapeKey 不能同时成立。
+
+    这条用例守的是「没迁 hook 也不破坏 §8.1 的 LIFO 语义」：面板压在一个已经用
+    useEscapeKey 的层之上时，一次 Escape 只关面板，下层不动。没有它，将来有人
+    「顺手把 Escape 统一到 hook」时，两条性质会一起悄悄退化。
+  */
+  it('叠在 useEscapeKey 层之上时，一次 Escape 只关面板，不连带关掉下层', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    const underlyingClose = vi.fn();
+    function Underlying() { useEscapeKey(true, underlyingClose); return <div>下层浮层</div>; }
+    render(<><Underlying/><CommandPalette {...keyboardProps} onClose={onClose}/></>);
+    await vi.waitFor(() => expect(document.activeElement).toBe(input()));
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(underlyingClose).not.toHaveBeenCalled();
   });
 
   it('禁用命令被键盘跳过、点击不触发，并展示中文不可用原因', async () => {

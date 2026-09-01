@@ -1,6 +1,7 @@
-import { ArrowDown, LoaderCircle, MessageSquare } from 'lucide-react';
+import { ArrowDown, MessageSquare } from 'lucide-react';
 import type { TimelineEvent, TimelineSection } from '../timeline';
 import { useTimelineAutoScroll } from '../useTimelineAutoScroll';
+import { Button, EmptyState, Skeleton } from './primitives';
 import { ActivityPanel } from './ActivityPanel';
 import { TimelineItem } from './TimelineItem';
 
@@ -20,6 +21,69 @@ export type TimelineViewProps = {
   activeOutputLabel: string;
 };
 
+/*
+  「加载更早记录」按钮的可访问名必须恒定：测试与读屏都靠这行文案定位它。
+  loading 期间由 Button 原语自己置 disabled + 渲染 Spinner，不要把文案换成「加载中…」，
+  否则 getByRole('button', { name: '加载更早记录' }) 会失效。
+*/
+function LoadEarlierButton({ loading, onLoad }: { loading: boolean; onLoad(): void }) {
+  return <div className="mb-6 flex justify-center">
+    <Button size="sm" variant="secondary" loading={loading} onClick={onLoad}>加载更早记录</Button>
+  </div>;
+}
+
+/** 时间线首屏骨架：两行标题占位 + 一块正文占位，对应真实内容的视觉重量。 */
+function TimelineSkeleton() {
+  return <div className="space-y-5">
+    <Skeleton variant="text" lines={2}/>
+    <Skeleton variant="block"/>
+  </div>;
+}
+
+/** 首次进入、还没有任何任务时的引导（tone=guide，不是「筛不出结果」的 neutral）。 */
+function TimelineEmptyState() {
+  return <div className="flex min-h-[55vh] flex-col items-center justify-center">
+    <EmptyState
+      tone="guide"
+      icon={<MessageSquare size={22}/>}
+      title="下达第一个任务"
+      description="说明目标、改动范围与验收条件，Agent 会在当前工作区开始执行。"
+    />
+  </div>;
+}
+
+/** 用户向上翻阅历史后，把他送回最新消息。 */
+function ScrollToBottomButton({ onClick }: { onClick(): void }) {
+  return <div className="absolute bottom-4 right-5 z-sticky">
+    <Button size="md" variant="secondary" icon={<ArrowDown size={13}/>} aria-label="回到最新消息" onClick={onClick} className="shadow-panel">回到底部</Button>
+  </div>;
+}
+
+function TimelineBody({ timelineSections, activeOutputLabel, onResolvePermission, resolvingPermissionId, awaitingAnswer, hasOngoingActivity, timeline, latestUserIndex }: Pick<TimelineViewProps, 'timelineSections' | 'activeOutputLabel' | 'onResolvePermission' | 'resolvingPermissionId' | 'awaitingAnswer' | 'hasOngoingActivity' | 'timeline' | 'latestUserIndex'>) {
+  return <>
+    {timelineSections.map(section => section.kind === 'event'
+      ? <TimelineItem
+          key={section.event.id}
+          event={section.event}
+          final={section.final}
+          assistantLabel={activeOutputLabel}
+          onResolvePermission={onResolvePermission}
+          resolvingPermissionId={resolvingPermissionId}
+        />
+      : <ActivityPanel
+          key={`${section.id}-${section.hasAnswer ? 'settled' : 'active'}`}
+          groups={section.groups}
+          hasAnswer={section.hasAnswer}
+          taskStatus={section.taskStatus}
+          ongoing={section.isLatestTurn && awaitingAnswer}
+          modelLabel={activeOutputLabel}
+          startedAt={section.startedAt}
+          completedAt={section.completedAt}
+        />)}
+    {awaitingAnswer && !hasOngoingActivity && <ActivityPanel groups={[]} ongoing modelLabel={activeOutputLabel} startedAt={timeline[latestUserIndex]?.timestamp}/>}
+  </>;
+}
+
 export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, hasEarlier, onLoadEarlier, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel }: TimelineViewProps) {
   const timelineScroll = useTimelineAutoScroll(activeSessionId, timeline, awaitingAnswer);
   const loadEarlier = async () => {
@@ -30,7 +94,26 @@ export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, h
       requestAnimationFrame(() => { if (container) container.scrollTop += container.scrollHeight - previousHeight; });
     } catch { /* mutation 已在全局错误条展示 */ }
   };
-  return <div className="relative min-h-0 flex-1 bg-[var(--surface-canvas)]"><div ref={timelineScroll.containerRef} onScroll={timelineScroll.onScroll} className="absolute inset-0 overscroll-contain overflow-y-auto"><div className="mx-auto w-full max-w-[880px] px-5 py-8 sm:px-8 sm:py-10">
-        {hasEarlier && <div className="mb-6 flex justify-center"><button type="button" disabled={loadingEarlier} onClick={() => void loadEarlier()} className="flex h-8 items-center gap-1.5 rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] px-3 text-[11px] font-medium text-[var(--text-secondary)] shadow-[var(--shadow-card)] hover:border-[var(--border-strong)] disabled:opacity-50">{loadingEarlier && <LoaderCircle size={12} className="animate-spin"/>}{loadingEarlier ? '加载中…' : '加载更早记录'}</button></div>}{eventsLoading ? <div className="space-y-5"><div className="h-4 w-3/4 animate-pulse rounded bg-[var(--surface-muted)]"/><div className="h-4 w-1/2 animate-pulse rounded bg-[var(--surface-muted)]"/><div className="h-20 animate-pulse rounded-xl bg-[var(--surface-default)]"/></div> : timeline.length ? <>{timelineSections.map(section => section.kind === 'event' ? <TimelineItem key={section.event.id} event={section.event} final={section.final} assistantLabel={activeOutputLabel} onResolvePermission={onResolvePermission} resolvingPermissionId={resolvingPermissionId}/> : <ActivityPanel key={`${section.id}-${section.hasAnswer ? 'settled' : 'active'}`} groups={section.groups} hasAnswer={section.hasAnswer} taskStatus={section.taskStatus} ongoing={section.isLatestTurn && awaitingAnswer} modelLabel={activeOutputLabel} startedAt={section.startedAt} completedAt={section.completedAt}/>)}{awaitingAnswer && !hasOngoingActivity && <ActivityPanel groups={[]} ongoing modelLabel={activeOutputLabel} startedAt={timeline[latestUserIndex]?.timestamp}/>}</> : <div className="flex min-h-[55vh] flex-col items-center justify-center text-center"><div className="grid h-11 w-11 place-items-center rounded-2xl border border-[var(--border-default)] bg-[var(--surface-default)] text-[var(--action-primary)] shadow-[var(--shadow-card)]"><MessageSquare size={18}/></div><h2 className="mt-4 text-sm font-semibold text-[var(--text-primary)]">下达第一个任务</h2><p className="mt-1 max-w-xs leading-5 text-xs text-[var(--text-muted)]">说明目标、改动范围与验收条件，Agent 会在当前工作区开始执行。</p></div>}
-        </div></div>{!timelineScroll.isFollowing && <button type="button" onClick={timelineScroll.scrollToBottom} className="absolute bottom-4 right-5 z-10 flex h-9 items-center gap-1.5 rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] px-3 text-[12px] font-medium text-[var(--text-secondary)] shadow-[var(--shadow-panel)] transition-colors hover:border-[var(--border-strong)] hover:bg-[var(--surface-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-default)]" aria-label="回到最新消息"><ArrowDown size={13}/>回到底部</button>}</div>;
+  return <div className="relative min-h-0 flex-1 bg-canvas">
+    <div ref={timelineScroll.containerRef} onScroll={timelineScroll.onScroll} className="absolute inset-0 overscroll-contain overflow-y-auto">
+      <div className="mx-auto w-full max-w-[880px] px-5 py-8 sm:px-8 sm:py-10">
+        {hasEarlier && <LoadEarlierButton loading={loadingEarlier} onLoad={() => void loadEarlier()}/>}
+        {eventsLoading
+          ? <TimelineSkeleton/>
+          : timeline.length
+            ? <TimelineBody
+                timelineSections={timelineSections}
+                activeOutputLabel={activeOutputLabel}
+                onResolvePermission={onResolvePermission}
+                resolvingPermissionId={resolvingPermissionId}
+                awaitingAnswer={awaitingAnswer}
+                hasOngoingActivity={hasOngoingActivity}
+                timeline={timeline}
+                latestUserIndex={latestUserIndex}
+              />
+            : <TimelineEmptyState/>}
+      </div>
+    </div>
+    {!timelineScroll.isFollowing && <ScrollToBottomButton onClick={timelineScroll.scrollToBottom}/>}
+  </div>;
 }

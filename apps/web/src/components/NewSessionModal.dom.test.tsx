@@ -100,3 +100,64 @@ describe('NewSessionModal create → dispatch', () => {
     expect(submit.disabled).toBe(false);
   });
 });
+
+describe('NewSessionModal 弹层外壳（契约 §7 / §8.1）', () => {
+  const renderModal = (props: Partial<Parameters<typeof NewSessionModal>[0]> = {}) => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    return render(<QueryClientProvider client={client}><NewSessionModal open onClose={() => {}} onCreated={() => {}} agents={[agent]} {...props}/></QueryClientProvider>);
+  };
+
+  it('portal 到 document.body，不留在调用方的组件树里', async () => {
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const { container } = renderModal();
+    const dialog = await screen.findByRole('dialog', { name: '创建新任务' });
+    // 就地渲染时弹层会继承祖先的 transform / overflow / stacking context，
+    // 那是 5 档手工 z-index 的根因；portal 之后 container 里应当什么都不剩。
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.contains(dialog)).toBe(true);
+  });
+
+  /*
+    契约 §8.1 的事故形状：用户填了一半目标、点开 Agent 选择器、按 Escape 想收起下拉，
+    结果整张表单连同已填内容一起消失。Escape 必须只关最上面那一层。
+  */
+  it('下拉展开时 Escape 只收下拉，表单与已填内容都还在；再按一次才关弹层', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    renderModal({ onClose });
+
+    await user.type(screen.getByLabelText('任务目标'), '修复登录超时');
+    await user.click(screen.getByRole('button', { name: /Codex/ }));
+    expect(screen.getByRole('listbox')).toBeTruthy();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(screen.getByRole('dialog', { name: '创建新任务' })).toBeTruthy();
+    expect((screen.getByLabelText('任务目标') as HTMLTextAreaElement).value).toBe('修复登录超时');
+    expect(onClose).not.toHaveBeenCalled();
+
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('提交进行中时 Escape 不关闭弹层，避免把已发出的写操作丢在半路', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'create').mockResolvedValue(session);
+    vi.spyOn(api, 'send').mockReturnValue(new Promise(() => {}));
+    const { baseElement } = renderModal({ onClose });
+
+    await user.type(screen.getByLabelText('任务目标'), '修复登录超时');
+    await user.click(screen.getByRole('button', { name: '创建并执行' }));
+    // Session 已建好、目标还挂在网络上：这一刻按 Escape 最容易把写操作丢在半路。
+    // （提交按钮此时已改口播「重试发送」，所以按 type 定位而不是按名字。）
+    const submit = baseElement.querySelector('button[type="submit"]') as HTMLButtonElement;
+    await waitFor(() => expect(submit.getAttribute('aria-busy')).toBe('true'));
+
+    await user.keyboard('{Escape}');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: '创建新任务' })).toBeTruthy();
+  });
+});

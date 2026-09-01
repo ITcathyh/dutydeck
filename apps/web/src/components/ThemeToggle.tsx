@@ -16,7 +16,11 @@ export function ThemeToggle({ preference, resolved, onChange, className = '' }: 
   className?: string;
 }) {
   const resolvedLabel = resolved === 'dark' ? '深色' : '浅色';
-  return <div role="radiogroup" aria-label="界面外观" className={`flex items-center gap-1 rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] p-0.5 ${className}`}>
+  // 圆角取档（契约 §3，半径 ≈ 高度 / 3.5）：外框高 = 40px 分段项 + 2×2px padding = 44px，
+  // 落在 31–47px 档 → rounded-md（10px）。内嵌项本身 40px 也落在同一档，但同心圆角必须
+  // 内小于外，否则两条弧线重叠看起来像描歪的边；内半径 = 外半径 − padding = 10 − 2 = 8px，
+  // 就近取下一档 rounded-sm（6px）。
+  return <div role="radiogroup" aria-label="界面外观" className={`flex items-center gap-1 rounded-md border border-default bg-surface p-0.5 ${className}`}>
     {themePreferences.map(option => {
       const Icon = icons[option];
       const selected = preference === option;
@@ -30,7 +34,7 @@ export function ThemeToggle({ preference, resolved, onChange, className = '' }: 
         title={hint}
         aria-label={`${themeLabels[option]}：${hint}`}
         onClick={() => onChange(option)}
-        className={`flex min-h-10 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors ${selected ? 'bg-[var(--action-soft)] text-[var(--action-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'}`}
+        className={`flex min-h-10 items-center gap-1.5 rounded-sm px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selected ? 'bg-action-soft text-action' : 'text-secondary hover:bg-hover hover:text-primary'}`}
       ><Icon aria-hidden="true" size={14}/><span className="hidden sm:inline">{themeLabels[option]}</span></button>;
     })}
   </div>;

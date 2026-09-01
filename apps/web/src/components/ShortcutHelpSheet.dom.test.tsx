@@ -37,19 +37,20 @@ describe('ShortcutHelpSheet 渲染', () => {
   });
 
   it('macOS 显示 ⌘，其它平台显示 Ctrl', () => {
-    const { rerender, container } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
-    const macKeys = [...container.querySelectorAll('kbd')].map(node => node.textContent);
+    // 面板 portal 到 document.body，container 里没有节点，只能从 baseElement 找。
+    const { rerender, baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
+    const macKeys = [...baseElement.querySelectorAll('kbd')].map(node => node.textContent);
     expect(macKeys).toContain('⌘');
     expect(macKeys).not.toContain('Ctrl');
     rerender(<ShortcutHelpSheet open onClose={() => {}} platform="other"/>);
-    const pcKeys = [...container.querySelectorAll('kbd')].map(node => node.textContent);
+    const pcKeys = [...baseElement.querySelectorAll('kbd')].map(node => node.textContent);
     expect(pcKeys).toContain('Ctrl');
     expect(pcKeys).not.toContain('⌘');
   });
 
   it('每个按键片段都渲染成独立的 <kbd>，而不是一串纯文本', () => {
-    const { container } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
-    const keys = [...container.querySelectorAll('kbd')].map(node => node.textContent);
+    const { baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
+    const keys = [...baseElement.querySelectorAll('kbd')].map(node => node.textContent);
     expect(keys).toContain('K');
     expect(keys).toContain('?');
     expect(keys).toContain('N');
@@ -123,8 +124,8 @@ describe('ShortcutHelpSheet 渲染', () => {
   it('点击遮罩关闭，点击面板内部不关闭', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
-    const { container } = render(<ShortcutHelpSheet open onClose={onClose} platform="mac"/>);
-    await user.click(container.querySelector('.ui-overlay') as HTMLElement);
+    const { baseElement } = render(<ShortcutHelpSheet open onClose={onClose} platform="mac"/>);
+    await user.click(baseElement.querySelector('.ui-overlay') as HTMLElement);
     expect(onClose).toHaveBeenCalledTimes(1);
     onClose.mockClear();
     await user.click(screen.getByRole('heading', { name: '键盘快捷键', level: 2 }));
@@ -157,8 +158,8 @@ describe('ShortcutHelpSheet 渲染', () => {
   });
 
   it('正文区域可滚动，且不产生横向溢出（390px 窄屏）', () => {
-    const { container } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
-    const body = container.querySelector('.overflow-y-auto') as HTMLElement;
+    const { baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
+    const body = baseElement.querySelector('.overflow-y-auto') as HTMLElement;
     expect(body.className).toContain('overflow-y-auto');
     expect(body.className).toContain('overflow-x-hidden');
     const panel = screen.getByRole('dialog', { name: '键盘快捷键帮助' });
@@ -167,9 +168,17 @@ describe('ShortcutHelpSheet 渲染', () => {
   });
 
   it('复用 index.css 的 ui-overlay / ui-dialog 动画类，不自造关键帧', () => {
-    const { container } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
-    expect(container.querySelector('.ui-overlay')).toBeTruthy();
+    const { baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
+    expect(baseElement.querySelector('.ui-overlay')).toBeTruthy();
     expect(screen.getByRole('dialog', { name: '键盘快捷键帮助' }).className).toContain('ui-dialog');
+  });
+
+  it('portal 到 document.body，不留在组件树里（契约 §7）', () => {
+    const { container, baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
+    const dialog = screen.getByRole('dialog', { name: '键盘快捷键帮助' });
+    expect(container.contains(dialog)).toBe(false);
+    expect(document.body.contains(dialog)).toBe(true);
+    expect(baseElement).toBe(document.body);
   });
 
   it('关闭按钮触控高度不低于 40px（h-10）', () => {
@@ -179,8 +188,10 @@ describe('ShortcutHelpSheet 渲染', () => {
   });
 
   it('只使用语义 token 颜色，不出现硬编码调色板（深色模式回归）', () => {
-    const { container } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
-    const classNames = [...container.querySelectorAll<HTMLElement>('*')].map(node => node.className).join(' ');
+    // 弹层 portal 到 body 之后，container 是空的——这条必须扫 baseElement，
+    // 否则断言会退化成永真的假绿。
+    const { baseElement } = render(<ShortcutHelpSheet open onClose={() => {}} platform="mac"/>);
+    const classNames = [...baseElement.querySelectorAll<HTMLElement>('*')].map(node => node.className).join(' ');
     for (const banned of ['zinc-', 'slate-', 'amber-', 'teal-', 'rose-', 'bg-white', 'text-white', 'bg-black']) expect(classNames).not.toContain(banned);
   });
 });

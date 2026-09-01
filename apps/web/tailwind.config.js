@@ -120,7 +120,10 @@ export default {
         panel: 'var(--shadow-panel)',
         dialog: 'var(--shadow-dialog)',
         overlay: 'var(--shadow-overlay)',
-        sidebar: 'var(--sidebar-shadow)'
+        sidebar: 'var(--sidebar-shadow)',
+        // 侧栏选中行的左侧色条。它是「选中」的唯一视觉承载（配 aria-current），
+        // 不是分层阴影，所以单列一档而不是复用上面五档。
+        'row-active': 'inset 3px 0 0 var(--sidebar-accent)'
       },
       // 2 档动效时长（契约 §8）
       transitionDuration: {

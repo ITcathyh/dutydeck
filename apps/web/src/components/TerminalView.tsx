@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { nextTerminalBackoffMs, parseTerminalFrame, terminalFontSize, terminalWsUrl } from '../terminal';
 import { readThemeColor } from '../theme';
+import { useMediaQuery } from '../useMediaQuery';
 import { TerminalKeyBar } from './TerminalKeyBar';
 
 // 主题色只能给 xterm 真实色值，CSS 变量它读不懂，所以运行时从 :root 上取计算值。
@@ -21,25 +22,6 @@ function readTerminalTheme(): { background: string; foreground: string; cursor: 
 const KEY_BAR_MEDIA = '(pointer: coarse), (max-width: 767px)';
 // 触屏拖选的抑制规则单独用「只有粗指针」判定：窄窗口的桌面浏览器仍是鼠标，不该被剥掉拖选复制。
 const COARSE_MEDIA = '(pointer: coarse)';
-
-function mediaMatches(query: string): boolean {
-  try { return typeof window.matchMedia === 'function' && window.matchMedia(query).matches; }
-  catch { return false; }
-}
-
-// 订阅媒体查询：初值同步取，之后跟着变化走（转屏、拖动窗口宽度）
-function useMediaQuery(query: string): boolean {
-  const [matches, setMatches] = useState(() => mediaMatches(query));
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia(query);
-    const update = () => setMatches(media.matches);
-    update();
-    media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, [query]);
-  return matches;
-}
 
 // PTY 实时终端视图：xterm.js 直连 WebSocket，协议见 apps/web/TERMINAL_API.md
 // showKeyBar 显式指定是否渲染快捷键条；不传时按媒体查询判断（jsdom 查不出粗指针，所以留出这个口子）

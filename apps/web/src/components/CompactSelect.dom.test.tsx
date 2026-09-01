@@ -1,7 +1,9 @@
+import { useState } from 'react';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { AgentSelect, CompactSelect } from './CompactSelect';
+import { Dialog, Field } from './primitives';
 import type { Agent } from '../api';
 
 // CompactSelect 是自绘下拉（不是原生 <select>），开合状态、外点关闭、
@@ -87,6 +89,63 @@ describe('CompactSelect 开合与选择', () => {
     expect(screen.queryByRole('listbox')).toBeNull();
     expect(parentKeyDown).not.toHaveBeenCalled();
     await vi.waitFor(() => expect(document.activeElement).toBe(button));
+  });
+});
+
+/*
+  契约 §8.1 的核心场景：模态里套浮层，一次 Escape 只关最上面一层。
+
+  这里守的是一个真实事故形状——用户在弹层里填了一半表单、点开某个下拉、按 Escape
+  想收起下拉，结果整张表单连同已填内容一起消失。CompactSelect 为此同时挂了
+  stopPropagation（挡 React 合成事件冒泡）和 useEscapeKey（在 document 的 LIFO 栈里占位），
+  两条路径覆盖的情形不同，下面两条用例分别守着。
+*/
+describe('CompactSelect 嵌在 Dialog 里的 Escape 语义（契约 §8.1）', () => {
+  function Harness() {
+    const [dialogOpen, setDialogOpen] = useState(true);
+    return <Dialog open={dialogOpen} onClose={() => setDialogOpen(false)} label="外层弹层">
+      <input aria-label="填了一半的输入框"/>
+      <CompactSelect {...baseProps}/>
+    </Dialog>;
+  }
+
+  it('焦点在选项上时：Escape 只收 listbox，Dialog 不关；再按一次才关 Dialog', async () => {
+    const user = userEvent.setup();
+    render(<Harness/>);
+    await user.click(screen.getByRole('button', { name: /选项 A/ }));
+    await vi.waitFor(() => expect(document.activeElement).toBe(screen.getByRole('option', { name: /选项 A/ })));
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  // stopPropagation 覆盖不到的那个洞：listbox 开着，但焦点已经挪到弹层里别处。
+  // 这时没有任何合成事件经过 CompactSelect，Escape 直接打到 document——
+  // 只有 useEscapeKey 的 LIFO 栈能保住这张表单。
+  it('焦点已挪到弹层内别处时：Escape 仍然先收 listbox，不丢表单', async () => {
+    const user = userEvent.setup();
+    render(<Harness/>);
+    await user.click(screen.getByRole('button', { name: /选项 A/ }));
+    expect(screen.getByRole('listbox')).toBeTruthy();
+
+    screen.getByLabelText('填了一半的输入框').focus();
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('listbox')).toBeNull();
+    expect(screen.getByRole('dialog')).toBeTruthy();
+  });
+});
+
+describe('CompactSelect 与 Field 的无障碍关联', () => {
+  it('套在 Field 里时触发器 aria-describedby 指向 hint 文本', () => {
+    render(<Field label="操作权限" hint="遇到受控操作时询问"><CompactSelect {...baseProps}/></Field>);
+    const describedBy = screen.getByRole('button', { name: /选项 A/ }).getAttribute('aria-describedby');
+    expect(describedBy).toBeTruthy();
+    expect(document.getElementById(describedBy!)?.textContent).toBe('遇到受控操作时询问');
   });
 });
 

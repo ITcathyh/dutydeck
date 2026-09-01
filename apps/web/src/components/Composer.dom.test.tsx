@@ -237,3 +237,196 @@ describe('Composer 排队任务', () => {
     expect(screen.queryByText('等待发送')).toBeNull();
   });
 });
+
+describe('Composer 内建命令（与飞书命令体系同一套设计模式）', () => {
+  const live = { state: 'idle' as const };
+  // 命令行是「/name + 描述」两段文本的按钮；按命令名精确取按钮，避免撞到描述里的同名字样。
+  const commandButton = (name: string) => {
+    const label = [...document.querySelectorAll('button > span > span:first-child')].find(node => node.textContent === `/${name}`);
+    if (!label) throw new Error(`命令面板里没有 /${name}`);
+    return label.closest('button')!;
+  };
+  const withActions = { ...baseProps, session: live, onShowStatus: noop, onRestart: noop, onCreateTask: noop, onOpenHelp: noop };
+
+  it('不再提供服务端零实现的 /goal 与 /fast', () => {
+    render(<Composer {...withActions} value="/"/>);
+    expect(screen.queryByText('/goal')).toBeNull();
+    expect(screen.queryByText('/fast')).toBeNull();
+  });
+
+  it('列出与飞书同名的 /status /cancel /new /help', () => {
+    render(<Composer {...withActions} value="/"/>);
+    for (const name of ['/status', '/cancel', '/new', '/help']) expect(screen.getByText(name), name).toBeTruthy();
+  });
+
+  it('重新启动命令叫 /restart，描述点明上下文会清空', () => {
+    // 飞书 /retry 保留上下文，Web restart 起全新进程。同名会让用户以为能接着上次继续。
+    render(<Composer {...withActions} session={{ state: 'failed' }} value="/rest"/>);
+    expect(screen.getByText('/restart')).toBeTruthy();
+    expect(screen.getByText(/空白上下文/)).toBeTruthy();
+    expect(screen.queryByText('/retry')).toBeNull();
+  });
+
+  it('不可用的命令仍然列出，但禁用并说明原因', () => {
+    // 命令消失会让用户以为自己记错了；这里保留条目并写清缺什么。
+    render(<Composer {...withActions} session={{ state: 'idle' }} value="/restart"/>);
+    const button = commandButton('restart');
+    expect(button.hasAttribute('disabled')).toBe(true);
+    expect(screen.getByText('只有失败或已停止的任务可以重新启动')).toBeTruthy();
+  });
+
+  it('点击不可用命令不触发任何动作', async () => {
+    const user = userEvent.setup();
+    const onRestart = vi.fn();
+    render(<Composer {...withActions} session={{ state: 'idle' }} value="/restart" onRestart={onRestart}/>);
+    await user.click(commandButton('restart'));
+    expect(onRestart).not.toHaveBeenCalled();
+  });
+
+  it('/restart 在失败任务上可点，触发重新启动', async () => {
+    const user = userEvent.setup();
+    const onRestart = vi.fn();
+    render(<Composer {...withActions} session={{ state: 'failed' }} state="failed" value="/restart" onRestart={onRestart}/>);
+    await user.click(commandButton('restart'));
+    expect(onRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it('/cancel 在执行中触发中断', async () => {
+    const user = userEvent.setup();
+    const onInterrupt = vi.fn();
+    render(<Composer {...withActions} session={{ state: 'thinking' }} state="thinking" value="/cancel" onInterrupt={onInterrupt}/>);
+    await user.click(commandButton('cancel'));
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  });
+
+  it('/cancel 在只有排队指令时取消排队而不是中断', async () => {
+    const user = userEvent.setup();
+    const onCancelQueued = vi.fn();
+    const onInterrupt = vi.fn();
+    const queuedTasks = [{ id: 't1', sessionId: 's', prompt: '排队的指令', status: 'queued', createdAt: '', updatedAt: '' }];
+    render(<Composer {...withActions} session={{ state: 'idle' }} queuedTasks={queuedTasks} value="/cancel" onCancelQueued={onCancelQueued} onInterrupt={onInterrupt}/>);
+    await user.click(commandButton('cancel'));
+    expect(onCancelQueued).toHaveBeenCalledWith('t1');
+    expect(onInterrupt).not.toHaveBeenCalled();
+  });
+
+  it('stop 别名与飞书一致，命中同一条 cancel', () => {
+    render(<Composer {...withActions} session={{ state: 'thinking' }} value="/stop"/>);
+    expect(commandButton('cancel')).toBeTruthy();
+  });
+
+  it('归档任务上所有会话作用域命令都不可用', () => {
+    render(<Composer {...withActions} session={{ state: 'thinking', archivedAt: '2026-09-01T00:00:00Z' }} value="/status"/>);
+    expect(commandButton('status').hasAttribute('disabled')).toBe(true);
+  });
+
+  it('未传回调时对应命令不出现，避免点了没反应', () => {
+    render(<Composer {...baseProps} session={live} value="/"/>);
+    expect(screen.queryByText('/status')).toBeNull();
+    expect(screen.queryByText('/help')).toBeNull();
+    expect(screen.getByText('/file')).toBeTruthy();
+  });
+
+  it('Enter 跳过禁用命令，落到第一个可用项', async () => {
+    const user = userEvent.setup();
+    const onRestart = vi.fn();
+    const onChange = vi.fn();
+    // /r 同时匹配禁用的 /restart 与可用的 /reasoning（models 为空时 reasoning 也禁用，
+    // 故给出 reasoningEfforts 让它可用）。
+    render(<Composer {...withActions} session={{ state: 'idle' }} reasoningEfforts={[{ id: 'high', name: '高' }]} value="/r" onRestart={onRestart} onChange={onChange}/>);
+    await user.click(screen.getByLabelText('消息'));
+    await user.keyboard('{Enter}');
+    expect(onRestart).not.toHaveBeenCalled();
+  });
+});
+
+// 这一组盯的是审计查出的两个浮层缺陷。它们在迁到 Popover 原语之前完全没有测试守着，
+// 正因如此才能长期存活：幽灵浮层和缺失的 aria 都是「看上去正常」的缺陷。
+describe('Composer 浮层缺陷回归', () => {
+  it('发送模式菜单不再是幽灵浮层：输入清空后触发按钮消失，菜单跟着消失', async () => {
+    const user = userEvent.setup();
+    // 触发按钮的渲染条件是 busy && value.trim()。旧实现里输入一清空按钮就没了，
+    // 菜单却留在屏幕上——既点不到触发器收起它，也没有外部点击/Escape 监听。
+    const { rerender } = render(<Composer {...baseProps} state="thinking" value="补充要求"/>);
+    await user.click(screen.getByRole('button', { name: /排队/ }));
+    expect(screen.getByText('打断并立即发送')).toBeTruthy();
+    rerender(<Composer {...baseProps} state="thinking" value=""/>);
+    expect(screen.queryByText('打断并立即发送')).toBeNull();
+  });
+
+  it('发送模式菜单响应 Escape（旧实现两个都不听）', async () => {
+    const user = userEvent.setup();
+    render(<Composer {...baseProps} state="thinking" value="补充要求"/>);
+    await user.click(screen.getByRole('button', { name: /排队/ }));
+    expect(screen.getByText('排队发送')).toBeTruthy();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('排队发送')).toBeNull();
+  });
+
+  it('发送模式菜单响应外部点击', async () => {
+    const user = userEvent.setup();
+    render(<Composer {...baseProps} state="thinking" value="补充要求"/>);
+    await user.click(screen.getByRole('button', { name: /排队/ }));
+    expect(screen.getByText('排队发送')).toBeTruthy();
+    await user.click(document.body);
+    expect(screen.queryByText('排队发送')).toBeNull();
+  });
+
+  it('三个面板触发按钮都自报 aria-expanded / aria-haspopup', async () => {
+    const user = userEvent.setup();
+    render(<Composer {...baseProps} value="你好" models={[{ id: 'opus', name: 'Opus' }]}/>);
+    const slash = screen.getByRole('button', { name: '打开斜杠菜单' });
+    const model = screen.getByTitle('切换模型');
+    const reasoning = screen.getByTitle('调整思考深度');
+    // 读屏用户必须能知道这三颗按钮会展开面板，而不是执行一个动作。
+    for (const trigger of [slash, model, reasoning]) {
+      expect(trigger.getAttribute('aria-haspopup')).toBeTruthy();
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    }
+    await user.click(slash);
+    expect(slash.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('斜杠面板可被 Escape 收起，且收起后不因 query 仍在而自己弹回来', async () => {
+    const user = userEvent.setup();
+    // 面板的显示条件是从 value 里的斜杠查询推导的。只把 panel 置空而不记住
+    // 「这一次已经收起过」，下一帧 query 还在，面板会立刻重新出现，Escape 等于失灵。
+    render(<Composer {...baseProps} value="/mod"/>);
+    expect(screen.getByText('/model')).toBeTruthy();
+    await user.click(screen.getByLabelText('消息'));
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('/model')).toBeNull();
+  });
+
+  it('面板 portal 到 body，不再被 Composer 外壳的 overflow 裁掉', async () => {
+    const user = userEvent.setup();
+    const { container } = render(<Composer {...baseProps} value="你好" models={[{ id: 'opus', name: 'Opus' }]}/>);
+    await user.click(screen.getByTitle('切换模型'));
+    const option = screen.getByText('Opus');
+    expect(container.contains(option)).toBe(false);
+    expect(document.body.contains(option)).toBe(true);
+  });
+});
+
+describe('Composer 触控目标（契约 §9：主要交互 ≥40px）', () => {
+  it('发送按钮与中断按钮都是 40px', () => {
+    const { unmount } = render(<Composer {...baseProps} value="你好"/>);
+    expect(screen.getByRole('button', { name: '发送消息' }).className).toContain('h-10');
+    unmount();
+    render(<Composer {...baseProps} state="running_tool" value=""/>);
+    expect(screen.getByRole('button', { name: '中断当前任务' }).className).toContain('h-10');
+  });
+
+  it('三个面板触发按钮都是 40px', () => {
+    render(<Composer {...baseProps} value="你好"/>);
+    expect(screen.getByRole('button', { name: '打开斜杠菜单' }).className).toContain('h-10');
+    for (const title of ['切换模型', '调整思考深度']) expect(screen.getByTitle(title).className).toContain('h-10');
+  });
+
+  it('排队行的两个操作按钮达标：取消是 IconButton（命中区 40px），打断是 40px 按钮', () => {
+    const task = { id: 't1', sessionId: 's1', prompt: '第一条', status: 'queued', createdAt: '', updatedAt: '' };
+    render(<Composer {...baseProps} queuedTasks={[task]}/>);
+    expect(screen.getByRole('button', { name: '取消排队：第一条' }).className).toContain('h-10');
+    expect(screen.getByRole('button', { name: '打断当前任务并执行' }).className).toContain('h-10');
+  });
+});

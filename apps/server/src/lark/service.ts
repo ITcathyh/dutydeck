@@ -346,7 +346,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     canInterrupt: true,
     canRetry: input.retryable !== false,
     canRefresh: false,
-    ...(webBaseUrl ? { webUrl: sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/sessions` } : {})
+    // 没有 sessionId 时回退到任务中心根路径。Web 路由只认 /sessions/:id，
+    // 裸 /sessions 会命中 not-found——那等于把「查看详情」指向一个死页面。
+    ...(webBaseUrl ? { webUrl: sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/` } : {})
   };
   const actionButtons = buildLarkCardActions({
     state: (input.actionState ?? state) as Parameters<typeof buildLarkCardActions>[0]['state'],
@@ -361,7 +363,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     elements: [{ tag: 'markdown', content: `<font color='grey'>${agentName}${workspace ? ` · ${workspace}` : ''} · 任务 #${taskId}${input.permissionMode === 'full-trust' ? ' · 完全信任' : ''}</font>`, text_size: 'x-small', margin: '0px' }]
   }];
   if (webBaseUrl) {
-    const traceUrl = sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/sessions`;
+    const traceUrl = sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/`;
     footerColumns.push({
       tag: 'column', width: 'auto', vertical_align: 'center',
       elements: [{

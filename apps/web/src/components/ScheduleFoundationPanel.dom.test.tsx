@@ -13,9 +13,9 @@ const list: ScheduleList = { capabilities: ready, schedules: [{
   readiness: { executionEligible: false, nextOccurrence: { scheduledForUtc: '2026-08-31T01:00:00.000Z', localLabel: '2026-08-31T09:00:00', timezone: 'Asia/Shanghai', dstResolution: 'exact' }, blockers: [{ code: 'schedule_identity_required', message: 'Identity missing', action: 'Bind identity' }, { code: 'schedule_secret_ref_required', message: 'SecretRef missing', action: 'Bind SecretRef' }, { code: 'schedule_executor_unavailable', message: 'No executor', action: 'Keep disabled' }] }
 }] };
 
-function renderPanel() {
+function renderPanel(onClose: () => void = () => {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={client}><ScheduleFoundationPanel open onClose={() => {}}/></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><ScheduleFoundationPanel open onClose={onClose}/></QueryClientProvider>);
 }
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -75,5 +75,56 @@ describe('ScheduleFoundationPanel offline-only journey', () => {
     await userEvent.click(screen.getByRole('button', { name: /基于新版本重试/ }));
     await userEvent.click(screen.getByRole('button', { name: '保存 staged/disabled 定义' }));
     await waitFor(() => expect(update).toHaveBeenLastCalledWith('schedule-ui', expect.objectContaining({ expectedRevision: 2, name: 'My preserved draft' })));
+  });
+
+  it('portals the panel to document.body so no ancestor stacking context can clip it', async () => {
+    vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue(ready);
+    vi.spyOn(scheduleApi, 'list').mockResolvedValue(list);
+    vi.spyOn(scheduleApi, 'archivedIntegrations').mockResolvedValue({ integrations: [] });
+    const { container } = renderPanel();
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule 离线管理' });
+    expect(container.contains(dialog)).toBe(false);
+    expect(document.body.contains(dialog)).toBe(true);
+  });
+
+  it('announces itself as a modal dialog to assistive technology', async () => {
+    // 回归守卫：迁到 Dialog 原语之前这里是个裸 role="dialog"，既无 aria-modal，
+    // 也没有任何焦点管理——读屏用户会以为背景内容仍可浏览。
+    vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue(ready);
+    vi.spyOn(scheduleApi, 'list').mockResolvedValue(list);
+    vi.spyOn(scheduleApi, 'archivedIntegrations').mockResolvedValue({ integrations: [] });
+    renderPanel();
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule 离线管理' });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+  });
+
+  it('closes with Escape so keyboard users are not trapped', async () => {
+    // 回归守卫：迁移前这个面板完全不响应 Escape，只能靠鼠标点遮罩或关闭钮退出。
+    vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue(ready);
+    vi.spyOn(scheduleApi, 'list').mockResolvedValue(list);
+    vi.spyOn(scheduleApi, 'archivedIntegrations').mockResolvedValue({ integrations: [] });
+    const onClose = vi.fn();
+    renderPanel(onClose);
+    await screen.findByRole('dialog', { name: 'Schedule 离线管理' });
+    await userEvent.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('refuses to close on Escape while a CAS save is in flight', async () => {
+    vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue(ready);
+    vi.spyOn(scheduleApi, 'list').mockResolvedValue(list);
+    vi.spyOn(scheduleApi, 'archivedIntegrations').mockResolvedValue({ integrations: [] });
+    // 永不 resolve：制造一个稳定的 isPending 态，模拟「CAS 写还在路上」。
+    vi.spyOn(scheduleApi, 'update').mockImplementation(() => new Promise(() => {}));
+    const onClose = vi.fn();
+    renderPanel(onClose);
+    await userEvent.click(await screen.findByRole('button', { name: '编辑禁用态定义' }));
+    const save = screen.getByRole('button', { name: '保存 staged/disabled 定义' });
+    await userEvent.click(save);
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存中…' }).getAttribute('aria-busy')).toBe('true'));
+    await userEvent.keyboard('{Escape}');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'Schedule 离线管理' })).toBeTruthy();
   });
 });

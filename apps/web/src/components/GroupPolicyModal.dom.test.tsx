@@ -27,9 +27,9 @@ const matrix: GroupMatrix = {
   }]
 };
 
-function renderModal() {
+function renderModal(onClose: () => void = () => {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={client}><GroupPolicyModal open onClose={() => {}}/></QueryClientProvider>);
+  return render(<QueryClientProvider client={client}><GroupPolicyModal open onClose={onClose}/></QueryClientProvider>);
 }
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -117,5 +117,59 @@ describe('GroupPolicyModal disabled management journey', () => {
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     expect(create.mock.calls[0]![0]).toMatchObject({ channelBotId: 'bot-ui', externalChatId: 'chat-ui' });
     expect(JSON.stringify(create.mock.calls[0]![0])).not.toMatch(/enabled|listener|secret/i);
+  });
+});
+
+/*
+  迁移到 <Dialog> 原语之前，这个弹层的 role="dialog" 既没有 aria-modal、也没有任何
+  焦点管理与 Escape 关闭——读屏用户不知道自己进了模态，键盘用户按 Escape 没反应。
+  下面四条是那三个缺陷的回归守卫，不是锦上添花的覆盖率。
+*/
+describe('GroupPolicyModal 模态外壳契约', () => {
+  function mockReady() {
+    vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(ready);
+    vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue(matrix);
+    vi.spyOn(foundationApi, 'secretRefs').mockResolvedValue({ secretRefs: [] });
+  }
+
+  it('portals the dialog to document.body instead of rendering it in place', async () => {
+    mockReady();
+    const { container } = renderModal();
+    expect(await screen.findByRole('dialog', { name: '群配置与权限' })).toBeTruthy();
+    // portal 之后弹层不在 RTL 的 container 里；就地渲染会继承祖先的 transform / overflow。
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeTruthy();
+  });
+
+  it('marks the dialog aria-modal so screen readers get a modal boundary', async () => {
+    mockReady();
+    renderModal();
+    const dialog = await screen.findByRole('dialog', { name: '群配置与权限' });
+    expect(dialog.getAttribute('aria-modal')).toBe('true');
+  });
+
+  it('closes on Escape', async () => {
+    mockReady();
+    const onClose = vi.fn();
+    renderModal(onClose);
+    await screen.findByRole('dialog', { name: '群配置与权限' });
+    await userEvent.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the dialog open on Escape while a policy save is in flight', async () => {
+    vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(ready);
+    vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue(matrix);
+    vi.spyOn(foundationApi, 'secretRefs').mockResolvedValue({ secretRefs: [] });
+    // 永不 resolve：把弹层钉在「保存中」这一帧上。
+    vi.spyOn(foundationApi, 'updateGroupBinding').mockImplementation(() => new Promise(() => {}));
+    const onClose = vi.fn();
+    renderModal(onClose);
+    await userEvent.click(await screen.findByRole('button', { name: '编辑群策略' }));
+    await userEvent.click(screen.getByRole('button', { name: '保存禁用态策略' }));
+    await screen.findByRole('button', { name: '保存中…' });
+    await userEvent.keyboard('{Escape}');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: '群配置与权限' })).toBeTruthy();
   });
 });

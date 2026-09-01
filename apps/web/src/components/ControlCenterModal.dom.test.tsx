@@ -66,6 +66,48 @@ describe('ControlCenterModal information architecture', () => {
     expect(JSON.stringify(input)).not.toMatch(/app.secret|credential|token|value/i);
   });
 
+  it('portals the dialog to document.body so no ancestor stacking context can clip it', async () => {
+    mocks();
+    const { container } = renderModal();
+    const dialog = await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    expect(container.contains(dialog)).toBe(false);
+    expect(document.body.contains(dialog)).toBe(true);
+  });
+
+  it('refuses to close on Escape while a staged ChannelBot write is in flight', async () => {
+    mocks({ capabilities: foundationReady, bots: [] });
+    // 永不 resolve：制造一个稳定的 isPending 态，模拟「写操作还在路上」。
+    vi.spyOn(foundationApi, 'createChannelBot').mockImplementation(() => new Promise(() => {}));
+    const onClose = vi.fn();
+    renderModal({ initialSection: 'lark', onClose });
+    await userEvent.click(await screen.findByText('迁移与高级草稿'));
+    await userEvent.click(await screen.findByRole('button', { name: '创建 staged Bot' }));
+    await userEvent.type(screen.getByRole('textbox', { name: 'ChannelBot 显示名称' }), '研发 Bot');
+    await userEvent.type(screen.getByRole('textbox', { name: 'ChannelBot App ID' }), 'cli_safe');
+    await userEvent.click(screen.getByRole('button', { name: '保存 staged 草稿' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: '保存 staged 草稿' }).getAttribute('aria-busy')).toBe('true'));
+    await userEvent.keyboard('{Escape}');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeTruthy();
+  });
+
+  it('binds each visible staged-bot label to its control so clicking the label focuses the input', async () => {
+    mocks({ capabilities: foundationReady, bots: [] });
+    renderModal({ initialSection: 'lark' });
+    await userEvent.click(await screen.findByText('迁移与高级草稿'));
+    await userEvent.click(await screen.findByRole('button', { name: '创建 staged Bot' }));
+    for (const [visible, accessible] of [['显示名称', 'ChannelBot 显示名称'], ['飞书 App ID', 'ChannelBot App ID']] as const) {
+      const label = screen.getByText(visible) as HTMLLabelElement;
+      const control = screen.getByRole('textbox', { name: accessible }) as HTMLInputElement;
+      expect(label.htmlFor).toBe(control.id);
+      expect(control.id).not.toBe('');
+      await userEvent.click(label);
+      expect(document.activeElement).toBe(control);
+    }
+    const brand = screen.getByText('品牌') as HTMLLabelElement;
+    expect(brand.htmlFor).toBe((screen.getByRole('combobox') as HTMLSelectElement).id);
+  });
+
   it('gives an actionable zero-group path and still routes to automation details', async () => {
     mocks();
     const onOpenLarkSetup = vi.fn(); const onOpenSchedules = vi.fn();

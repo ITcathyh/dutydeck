@@ -197,3 +197,121 @@ describe('LarkConfigModal risk control', () => {
     expect(screen.getByRole('button', { name: '配置拦截 Hook' })).toBeTruthy();
   });
 });
+
+/*
+  🔒 凭据只写不读的回归守卫。
+
+  这不是覆盖率练习：App Secret 一旦回填明文，任何能看到这块屏幕的人（肩窥、
+  截图、录屏、共享会议）就拿到了机器人的完整凭据。而「留空 = 保持不变」一旦
+  失守，编辑一次工作区就会把 appSecret: '' 覆盖进后端，机器人当场失联。
+  两条都必须在 DOM 与请求体两端各钉一颗钉子。
+*/
+describe('LarkConfigModal 凭据边界', () => {
+  it('never rehydrates a stored App Secret into the input', async () => {
+    // setupComplete 决定落在哪一步；App Secret 只在第 1 步渲染。
+    renderModal(collection({ appId: 'cli_test', setupComplete: true }));
+    const secret = await screen.findByPlaceholderText('已保存') as HTMLInputElement;
+    // 已有 bot：占位符表明后端存着一份，输入框本身必须是空的、且不可见读。
+    expect(secret.value).toBe('');
+    expect(secret.type).toBe('password');
+    expect(screen.queryByDisplayValue(/secret/i)).toBeNull();
+  });
+
+  it('omits the appSecret key entirely when the field is left blank', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ appId: 'cli_test', setupComplete: true }));
+
+    await screen.findByPlaceholderText('已保存');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    const payload = save.mock.calls[0]![0];
+    // 留空 = 保持不变：键根本不进请求体，而不是送一个空串把后端的凭据抹掉。
+    expect(payload).not.toHaveProperty('appSecret');
+    expect(JSON.stringify(payload)).not.toContain('appSecret');
+  });
+});
+
+describe('LarkConfigModal 模态外壳契约', () => {
+  it('portals the wizard to document.body instead of rendering it in place', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue(collection());
+    vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'acp' });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const { container } = render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={() => {}}/></QueryClientProvider>);
+
+    expect(await screen.findByRole('dialog', { name: '绑定飞书 Bot' })).toBeTruthy();
+    expect(container.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"][aria-modal="true"]')).toBeTruthy();
+  });
+
+  it('keeps the wizard open on Escape while a save is in flight', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: false, bots: [], listeningDisabled: false });
+    vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'acp' });
+    // 永不 resolve：把向导钉在「验证中」这一帧。
+    vi.spyOn(api, 'saveLarkConfig').mockImplementation(() => new Promise(() => {}));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={onClose}/></QueryClientProvider>);
+
+    await user.type(await screen.findByPlaceholderText('cli_xxx'), 'cli_test');
+    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'secret');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await screen.findByRole('button', { name: '验证中' });
+
+    await user.keyboard('{Escape}');
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: '绑定飞书 Bot' })).toBeTruthy();
+  });
+
+  it('lets Escape dismiss only the confirmation while the wizard stays open', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue(collection({ appId: 'cli_test', setupComplete: false }));
+    vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'acp' });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={onClose}/></QueryClientProvider>);
+
+    // 草稿未完成 → 关闭请求先弹确认框，而不是直接丢弃。
+    await user.click(await screen.findByRole('button', { name: '关闭' }));
+    expect(await screen.findByText('稍后再完成配置？')).toBeTruthy();
+
+    // 一次 Escape 只关最上面一层：确认框收起，向导与填了一半的表单必须还在。
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByText('稍后再完成配置？')).toBeNull());
+    expect(screen.getByRole('dialog', { name: '绑定飞书 Bot' })).toBeTruthy();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('正则语法错误通过 aria-describedby 关联到输入框，读屏能听到「为什么」无效', async () => {
+    /*
+      守的是「只有 aria-invalid、没有 aria-describedby」这种半吊子错误提示。
+
+      迁移中一度把错误行手写在 Field 外面（为了塞一个 AlertTriangle 图标），
+      结果 Field 不知道有错，textarea 的 aria-describedby 恒为 null：读屏用户
+      听得到「无效」，却永远听不到原因。而这里的原因偏偏不可推测——
+      「正则语法错误」和「灾难性回溯」（见 high-risk-pattern.test.ts）是两种
+      完全不同的修法，猜不出来。图标是眼睛的锚点，不该以牺牲读屏为代价。
+    */
+    const user = userEvent.setup();
+    renderModal(collection({ defaultAgentId: 'codex', fullTrustConfirmed: true, setupComplete: true, riskControlMode: 'guidance' }));
+
+    // 风险控制在第 2 步；setupComplete 的 bot 默认停在第 1 步。
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    const pattern = await screen.findByRole('textbox', { name: /高危操作正则表达式/ });
+    await user.clear(pattern);
+    await user.type(pattern, '(unclosed');
+
+    await waitFor(() => expect(pattern.getAttribute('aria-invalid')).toBe('true'));
+    const describedBy = pattern.getAttribute('aria-describedby');
+    expect(describedBy).toBeTruthy();
+    const description = document.getElementById(describedBy!);
+    expect(description?.textContent).toContain('语法错误');
+    // 错误文本必须即时播报，否则用户改到一半不知道已经修好了没有。
+    expect(description?.getAttribute('role')).toBe('alert');
+  });
+});
