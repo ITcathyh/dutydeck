@@ -63,6 +63,18 @@ describe('设计一致性：尺度不得被绕过', () => {
     const palette = /\b(?:bg|text|border|ring|from|to|via|divide|outline|decoration|shadow)-(?:slate|gray|zinc|neutral|stone|red|orange|amber|yellow|lime|green|emerald|teal|cyan|sky|blue|indigo|violet|purple|fuchsia|pink|rose)-\d{2,3}\b/g;
     expect(violations(palette)).toEqual([]);
   });
+
+  it('没有 white/black 加透明度的硬编码色（契约 §1）', () => {
+    /*
+      `border-white/[.07]` 这类写法躲过了上面的色阶正则（它没有数字色阶），
+      但同样是写死在组件里的颜色字面量——Team-Runtime 迁移时正是被它卡住，
+      因为当时没有对应 token。缺 token 的正解是补 token（已补 --code-header-*），
+      不是就地写死一个值。
+
+      注意 `bg-white`（不带透明度）也一并禁：纯白在深色主题下同样是硬伤。
+    */
+    expect(violations(/\b(?:bg|text|border|ring|divide|outline|shadow)-(?:white|black)(?:\/(?:\[[\d.]+\]|\d{1,3}))?\b/g)).toEqual([]);
+  });
 });
 
 describe('设计一致性：可访问性下限', () => {

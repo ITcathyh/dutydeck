@@ -123,13 +123,20 @@ describe('App browser navigation and shell states', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
     expect(dialog).toBeTruthy();
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
-    expect(container.querySelector('main')?.hasAttribute('inert')).toBe(true);
+    /*
+      Dialog 原语 portal 到 body 后，inert 从 <main> 挪到了整棵应用子树上
+      （container 本身），覆盖范围严格变大——背景里的侧栏、工具条也一并
+      不可达了，而原先只有 <main> 被隔离。所以断言改成「背景在 inert 子树
+      里」而不是「main 这个节点上有 inert 属性」：前者是我们真正要的性质，
+      后者只是当时的实现方式。
+    */
+    expect(container.querySelector('main')?.closest('[inert]')).toBeTruthy();
     expect(screen.getByText(/受信开发机模式：/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /^Agent 准备本机执行者$/ })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /开启监听|立即运行|run.now/i })).toBeNull();
     await userEvent.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull());
-    expect(container.querySelector('main')?.hasAttribute('inert')).toBe(false);
+    expect(container.querySelector('main')?.closest('[inert]')).toBeNull();
     expect(document.activeElement).toBe(opener);
   });
 

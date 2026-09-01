@@ -15,10 +15,6 @@ export function getModelReadiness({ loaded, loading, switching, failed }: { load
   return { kind: 'blocked', label: '模型未加载', reason: '模型加载完成后才能发送消息' };
 }
 
-export function shouldDismissComposerPanel({ insidePopover, onPanelTrigger }: { insidePopover: boolean; onPanelTrigger: boolean }): boolean {
-  return !insidePopover && !onPanelTrigger;
-}
-
 export function buildPrompt(message: string, references: ComposerReference[]) {
   const referenceLines = references.map(reference => reference.kind === 'file'
     ? `/file ${reference.value}`

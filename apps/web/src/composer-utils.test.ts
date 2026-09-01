@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPrompt, commandsFromEvents, contextStatsFromEvents, getModelReadiness, replaceSlashQuery, shouldDismissComposerPanel, slashQuery } from './composer-utils';
+import { buildPrompt, commandsFromEvents, contextStatsFromEvents, getModelReadiness, replaceSlashQuery, slashQuery } from './composer-utils';
 
 describe('composer slash references', () => {
   it('builds file and skill references with the shared slash syntax', () => {
@@ -33,11 +33,5 @@ describe('composer slash references', () => {
 
   it('blocks sending while switching models even when the previous catalog is loaded', () => {
     expect(getModelReadiness({ loaded: true, loading: false, switching: true, failed: false })).toMatchObject({ kind: 'loading', label: '模型切换中…' });
-  });
-
-  it('dismisses an open panel only for interactions outside the popover and its triggers', () => {
-    expect(shouldDismissComposerPanel({ insidePopover: true, onPanelTrigger: false })).toBe(false);
-    expect(shouldDismissComposerPanel({ insidePopover: false, onPanelTrigger: true })).toBe(false);
-    expect(shouldDismissComposerPanel({ insidePopover: false, onPanelTrigger: false })).toBe(true);
   });
 });
