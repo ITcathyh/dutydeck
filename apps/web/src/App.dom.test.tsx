@@ -64,6 +64,25 @@ describe('App mobile navigation accessibility', () => {
     expect(main.hasAttribute('inert')).toBe(false);
     await waitFor(() => expect(document.activeElement).toBe(trigger));
   });
+
+  /**
+   * 汉堡按钮固定在 <main> 上，任务列表从它下面滚过去（真正滚动的是
+   * WorkspaceOverview 内部的 overflow-y-auto 容器）。IconButton 自身背景透明，
+   * 一旦外壳也透明，滚动后图标就压在任务卡片正文上——难读且会误触。
+   * 这条断言守住外壳的不透明背景：改回透明立刻挂。
+   */
+  it('gives the floating mobile navigation trigger an opaque surface so scrolled task cards never show through it', async () => {
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    mockAppApi({ sessions: [session('s1', 'failed')], summaries: [summary('s1', '任务异常：Agent exited with code 129')] });
+    renderApp();
+    const trigger = await screen.findByRole('button', { name: '打开工作台导航' });
+    const shell = trigger.parentElement!;
+    expect(shell.className).toContain('bg-[var(--surface-default)]');
+    expect(shell.className).toContain('border-[var(--border-default)]');
+    expect(shell.className).toContain('shadow-[var(--shadow-card)]');
+    // 桌面端侧边栏常驻，这枚按钮必须彻底消失。
+    expect(shell.className).toContain('md:hidden');
+  });
 });
 
 describe('App browser navigation and shell states', () => {
@@ -118,7 +137,7 @@ describe('App browser navigation and shell states', () => {
     await userEvent.click(await within(navigation).findByRole('button', { name: /任务一/ }));
     expect(pushState).toHaveBeenCalledWith({ sessionId: 's1' }, '', '/sessions/s1');
     expect(window.location.pathname).toBe('/sessions/s1');
-    await screen.findByRole('button', { name: '归档任务运行' });
+    await screen.findByRole('button', { name: '归档任务' });
 
     act(() => {
       window.history.replaceState(null, '', '/');
@@ -130,7 +149,7 @@ describe('App browser navigation and shell states', () => {
       window.history.replaceState({ sessionId: 's1' }, '', '/sessions/s1');
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
-    await screen.findByRole('button', { name: '归档任务运行' });
+    await screen.findByRole('button', { name: '归档任务' });
   });
 
   it('restores a deep link and shows an explicit not-found state only after sessions load', async () => {
@@ -138,8 +157,8 @@ describe('App browser navigation and shell states', () => {
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')] });
     renderApp();
 
-    expect(await screen.findByRole('heading', { name: '找不到这个任务运行' })).toBeTruthy();
-    expect(screen.queryByText('当前视图没有任务运行。')).toBeNull();
+    expect(await screen.findByRole('heading', { name: '找不到这个任务' })).toBeTruthy();
+    expect(screen.queryByText('当前视图没有任务。')).toBeNull();
     expect(api.events).not.toHaveBeenCalled();
     expect(api.tasks).not.toHaveBeenCalled();
     await userEvent.click(screen.getByRole('button', { name: '回到任务中心' }));
@@ -158,8 +177,8 @@ describe('App browser navigation and shell states', () => {
 
     const error = await screen.findByRole('alert');
     expect(error.textContent).toContain('Agent 信息');
-    expect(error.textContent).toContain('任务运行');
-    expect(error.textContent).toContain('运行摘要');
+    expect(error.textContent).toContain('任务列表');
+    expect(error.textContent).toContain('任务摘要');
     expect(screen.getByRole('complementary', { name: 'Dockmux 工作台导航' }).querySelector('.animate-pulse')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: '重新加载' }));
     await screen.findByRole('heading', { name: '今天需要推进什么？' });
@@ -172,14 +191,14 @@ describe('App browser navigation and shell states', () => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')] });
     const { client } = renderApp();
-    await screen.findByRole('button', { name: '归档任务运行' });
+    await screen.findByRole('button', { name: '归档任务' });
 
     vi.mocked(api.sessions).mockRejectedValueOnce(new Error('temporary sessions failure'));
     await act(async () => { await client.refetchQueries({ queryKey: ['sessions'], exact: true }); });
 
     const staleStatus = await screen.findByRole('status');
-    expect(staleStatus.textContent).toContain('部分数据可能不是最新：任务运行');
-    expect(screen.getByRole('button', { name: '归档任务运行' })).toBeTruthy();
+    expect(staleStatus.textContent).toContain('部分数据可能不是最新：任务列表');
+    expect(screen.getByRole('button', { name: '归档任务' })).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
 
     act(() => {
@@ -187,7 +206,7 @@ describe('App browser navigation and shell states', () => {
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
     await screen.findByRole('heading', { name: '今天需要推进什么？' });
-    expect(screen.getByRole('status').textContent).toContain('任务运行');
+    expect(screen.getByRole('status').textContent).toContain('任务列表');
 
     await userEvent.click(screen.getByRole('button', { name: '重试' }));
     await waitFor(() => expect(screen.queryByRole('status')).toBeNull());
@@ -226,7 +245,7 @@ describe('App browser navigation and shell states', () => {
     mockAppApi({ agents: [agent('pty-cli')], sessions: [session('s1')], summaries: [summary('s1', 'PTY 任务')] });
     renderApp();
 
-    expect(await screen.findByRole('tablist', { name: '任务运行内容' })).toBeTruthy();
+    expect(await screen.findByRole('tablist', { name: '任务内容' })).toBeTruthy();
     const timelineTab = screen.getByRole('tab', { name: '执行记录' });
     const terminalTab = screen.getByRole('tab', { name: '终端' });
     expect(timelineTab.getAttribute('aria-selected')).toBe('true');
@@ -258,7 +277,7 @@ describe('App browser navigation and shell states', () => {
     const rawButton = await screen.findByRole('button', { name: '原始日志' });
     await waitFor(() => expect(rawButton.hasAttribute('disabled')).toBe(false));
     await userEvent.click(rawButton);
-    const drawer = screen.getByText('原始运行日志').closest('aside');
+    const drawer = screen.getByText('原始日志', { selector: 'div' }).closest('aside');
     expect(drawer?.className).toContain('2xl:static');
     expect(drawer?.className).not.toContain('lg:static');
   });
@@ -299,7 +318,7 @@ describe('App 搜索、快捷键与通知接线', () => {
     const sheet = await screen.findByRole('dialog', { name: /快捷键/ });
     /**
      * 面板必须如实标注，两个方向都不能错：
-     *   · session 作用域（总览页没有打开任何运行）要标成不可用，并说明先打开一个运行；
+     *   · session 作用域（总览页没有打开任何任务）要标成不可用，并说明先打开一个任务；
      *   · 全局作用域此刻确实能按，就不能标成不可用。
      *
      * 后者曾经是坏的：展示层复用了运行期的 enabled: !overlayOpen，而帮助面板自己就是
@@ -310,7 +329,7 @@ describe('App 搜索、快捷键与通知接线', () => {
     const unavailable = within(sheet).getAllByText(/当前不可用/);
     const sessionScoped = shortcutDefinitions.filter(definition => definition.scope === 'session').length;
     expect(unavailable.length).toBe(sessionScoped);
-    expect(within(sheet).getAllByText(/当前不可用：先打开一个任务运行/).length).toBe(sessionScoped);
+    expect(within(sheet).getAllByText(/当前不可用：先打开一个任务/).length).toBe(sessionScoped);
     const globalRow = within(sheet).getByText('打开命令面板，搜索任务与操作').closest('li')!;
     expect(within(globalRow).queryByText(/当前不可用/)).toBeNull();
   });

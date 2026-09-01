@@ -5,6 +5,10 @@ const icons: Record<ThemePreference, typeof Sun> = { system: Monitor, light: Sun
 
 // 外观选择用一组 radio 语义的分段控件：三个选项同时可见，当前值靠 aria-checked 与文字标签表达，
 // 不依赖颜色或高亮单独表意。
+//
+// 文字在移动端隐藏（sm: 以下只留图标）：三段带文字的按钮在 390px 宽屏上要占掉整行，
+// 把真实任务挤到折叠线以下（docs/interaction-design-2026-08-30.md §7.2）。
+// 隐藏的只是视觉文本——aria-label 已含完整文案与提示，读屏与 radiogroup 语义不受影响。
 export function ThemeToggle({ preference, resolved, onChange, className = '' }: {
   preference: ThemePreference;
   resolved: ResolvedTheme;
@@ -27,7 +31,7 @@ export function ThemeToggle({ preference, resolved, onChange, className = '' }: 
         aria-label={`${themeLabels[option]}：${hint}`}
         onClick={() => onChange(option)}
         className={`flex min-h-10 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition-colors ${selected ? 'bg-[var(--action-soft)] text-[var(--action-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] hover:text-[var(--text-primary)]'}`}
-      ><Icon aria-hidden="true" size={14}/><span>{themeLabels[option]}</span></button>;
+      ><Icon aria-hidden="true" size={14}/><span className="hidden sm:inline">{themeLabels[option]}</span></button>;
     })}
   </div>;
 }

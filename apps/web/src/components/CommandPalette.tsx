@@ -5,7 +5,7 @@ import { fallbackRunTitle } from '../run-summary';
 import { searchTasks, taskSearchTerms, type TaskSearchField, type TaskSearchMatch } from '../task-search';
 import { useDialogFocus } from '../useDialogFocus';
 import { attentionReasonForSession, formatRelativeTime, shortRunId, workbenchTaskSection, workspaceName } from '../workspace-model';
-import { stateLabels } from './ui';
+import { effectiveStatus, stateBadgeStyle } from './ui';
 
 export type CommandAction = {
   id: string;
@@ -37,14 +37,6 @@ type PaletteSection = { id: string; title: string; hint?: string; items: Palette
 // 空查询时的「最近更新」预览条数。有明确标题和说明，输入关键词后即展示全部匹配，不做无出口截断。
 const recentPreviewLimit = 5;
 const fieldLabels: Record<TaskSearchField, string> = { goal: '任务目标', workspace: '工作区', agent: 'Agent' };
-
-const statusStyle = (session: Session): string => {
-  if (session.archivedAt) return 'border-[var(--border-subtle)] bg-[var(--surface-muted)] text-[var(--text-muted)]';
-  if (session.state === 'failed' || session.state === 'stopped') return 'border-[var(--status-danger-border)] bg-[var(--status-danger-soft)] text-[var(--status-danger)]';
-  if (session.state === 'waiting_for_permission' || session.state === 'interrupted' || session.state === 'created' || session.state === 'idle') return 'border-[var(--status-warning-border)] bg-[var(--status-warning-soft)] text-[var(--status-warning)]';
-  if (session.state === 'completed') return 'border-[var(--status-success-border)] bg-[var(--status-success-soft)] text-[var(--status-success)]';
-  return 'border-[var(--status-info-border)] bg-[var(--status-info-soft)] text-[var(--status-info)]';
-};
 
 /** 命令按 label + keywords 做同一套 AND 子串匹配，中文不分词，与任务检索保持一致的手感。 */
 function matchAction(action: CommandAction, terms: string[]): boolean {
@@ -207,12 +199,12 @@ function TaskOption({ optionRef, match, summary, agent, optionId, active, onHove
 }) {
   const { session, fields } = match;
   const updatedAt = session.updatedAt || session.createdAt;
-  const status = session.archivedAt ? '已归档' : stateLabels[session.state] ?? session.state;
+  const status = effectiveStatus(session).label;
   const goal = summary?.prompt?.trim() || fallbackRunTitle(session.source);
   const queuedCommands = summary?.queuedCount ?? 0;
   const attention = !session.archivedAt && workbenchTaskSection(session, summary) === 'attention';
   return <button ref={optionRef} type="button" role="option" id={optionId} tabIndex={-1} aria-selected={active} onMouseMove={onHover} onClick={onRun} className={`flex min-h-10 w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left ${active ? 'bg-[var(--action-soft)]' : 'hover:bg-[var(--surface-hover)]'}`}>
-    <span className={`mt-px inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-[11px] font-semibold ${statusStyle(session)}`}>{status}</span>
+    <span className={`mt-px inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-[11px] font-semibold ${stateBadgeStyle(session)}`}>{status}</span>
     <span className="min-w-0 flex-1">
       <span className="block truncate text-[13px] font-medium leading-5 text-[var(--text-primary)]" title={goal}>{goal}</span>
       <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] leading-4 text-[var(--text-secondary)]">

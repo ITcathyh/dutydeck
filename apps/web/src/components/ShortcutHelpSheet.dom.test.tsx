@@ -11,6 +11,8 @@ import { shortcutDefinitions } from '../useKeyboardShortcuts';
 
 const allUnavailable = Object.fromEntries(shortcutDefinitions.map(definition => [definition.id, false]));
 const allAvailable = Object.fromEntries(shortcutDefinitions.map(definition => [definition.id, true]));
+/** 按 id 取当前文案，这样改快捷键描述不用回来改测试。 */
+const labelOf = (id: string) => shortcutDefinitions.find(definition => definition.id === id)!.label;
 
 describe('ShortcutHelpSheet 渲染', () => {
   it('open=false 时不渲染任何内容，Esc 也不回调 onClose', async () => {
@@ -70,17 +72,17 @@ describe('ShortcutHelpSheet 渲染', () => {
 
   it('不可用的快捷键用文字标注「当前不可用」，不只靠颜色', () => {
     render(<ShortcutHelpSheet open onClose={() => {}} platform="mac" available={{ ...allUnavailable, 'create-task': true }}/>);
-    const unavailable = screen.getByText('打开或关闭原始运行日志面板').closest('li')!;
+    const unavailable = screen.getByText(labelOf('toggle-raw-log')).closest('li')!;
     expect(within(unavailable).getByText(/当前不可用/)).toBeTruthy();
-    const availableRow = screen.getByText('新建任务运行').closest('li')!;
+    const availableRow = screen.getByText(labelOf('create-task')).closest('li')!;
     expect(within(availableRow).queryByText(/当前不可用/)).toBeNull();
   });
 
-  it('session 作用域不可用时说明要先打开任务运行', () => {
+  it('session 作用域不可用时说明要先打开一个任务', () => {
     render(<ShortcutHelpSheet open onClose={() => {}} platform="mac" available={allUnavailable}/>);
-    const row = screen.getByText('中断当前运行，停在已完成的步骤').closest('li')!;
-    expect(within(row).getByText('当前不可用：先打开一个任务运行')).toBeTruthy();
-    const globalRow = screen.getByText('新建任务运行').closest('li')!;
+    const row = screen.getByText(labelOf('interrupt-run')).closest('li')!;
+    expect(within(row).getByText('当前不可用：先打开一个任务')).toBeTruthy();
+    const globalRow = screen.getByText(labelOf('create-task')).closest('li')!;
     expect(within(globalRow).getByText('当前不可用')).toBeTruthy();
   });
 

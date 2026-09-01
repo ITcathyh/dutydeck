@@ -32,7 +32,7 @@ function ShortcutRow({ definition, actionable, platform }: { definition: Shortcu
   return <li className="flex min-h-10 items-center gap-3 rounded-lg px-2 py-1.5 odd:bg-[var(--surface-muted)]">
     <span className="min-w-0 flex-1">
       <span className={`block text-[13px] leading-5 ${actionable ? 'text-[var(--text-primary)]' : 'text-[var(--text-muted)]'}`}>{definition.label}</span>
-      {!actionable && <span className="mt-0.5 block text-[11px] leading-4 text-[var(--text-muted)]">当前不可用{definition.scope === 'session' ? '：先打开一个任务运行' : ''}</span>}
+      {!actionable && <span className="mt-0.5 block text-[11px] leading-4 text-[var(--text-muted)]">当前不可用{definition.scope === 'session' ? '：先打开一个任务' : ''}</span>}
     </span>
     <span className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
       <KeyCombo keys={definition.keys} platform={platform}/>
