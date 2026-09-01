@@ -30,17 +30,17 @@ describe('SessionRow 归档态状态视觉', () => {
   it('归档 + failed：文案「已归档」，文字与圆点都不再是失败红', () => {
     const { dot, label } = renderRow(makeSession('failed', '2026-08-30T00:00:00.000Z'));
     expect(label.textContent).toBe('已归档');
-    expect(label.className).not.toContain('--status-danger');
-    expect(label.className).toContain('text-[var(--sidebar-text-muted)]');
-    expect(dot.className).not.toContain('--status-danger-solid');
-    expect(dot.className).toContain('bg-[var(--status-neutral-solid)]');
+    expect(label.className).not.toMatch(/text-danger\b/);
+    expect(label.className).toContain('text-sidebar-text-muted');
+    expect(dot.className).not.toMatch(/bg-danger-solid\b/);
+    expect(dot.className).toContain('bg-neutral-solid');
   });
 
   it('归档 + thinking：圆点不呼吸，不暗示任务还在跑', () => {
     const { dot, label } = renderRow(makeSession('thinking', '2026-08-30T00:00:00.000Z'));
     expect(label.textContent).toBe('已归档');
     expect(dot.className).not.toContain('ui-status-pulse');
-    expect(dot.className).toContain('bg-[var(--status-neutral-solid)]');
+    expect(dot.className).toContain('bg-neutral-solid');
   });
 
   it('归档 + waiting_for_permission：不留 warning 色，也不呼吸', () => {
@@ -54,14 +54,14 @@ describe('SessionRow 归档态状态视觉', () => {
   it('未归档 + failed：失败提示照旧是红的，别把正常告警一起修没了', () => {
     const { dot, label } = renderRow(makeSession('failed'));
     expect(label.textContent).toBe('失败');
-    expect(label.className).toContain('text-[var(--status-danger)]');
-    expect(dot.className).toContain('bg-[var(--status-danger-solid)]');
+    expect(label.className).toContain('text-danger');
+    expect(dot.className).toContain('bg-danger-solid');
   });
 
   it('未归档 + thinking：圆点仍然呼吸', () => {
     const { dot, label } = renderRow(makeSession('thinking'));
     expect(label.textContent).toBe('思考中');
     expect(dot.className).toContain('ui-status-pulse');
-    expect(dot.className).toContain('bg-[var(--status-warning-solid)]');
+    expect(dot.className).toContain('bg-warning-solid');
   });
 });

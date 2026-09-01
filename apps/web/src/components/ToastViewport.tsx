@@ -1,15 +1,16 @@
 import { useState } from 'react';
 import { AlertCircle, AlertTriangle, CheckCircle2, Info, X } from 'lucide-react';
+import { Button, IconButton } from './primitives';
 import { dismiss as dismissToast, useToasts, type Toast, type ToastKind } from '../useToasts';
 
 // 每类通知的文本标签 + 语义 token。
 // 文本标签是硬要求：交互蓝图 §1「不用颜色单独表意」——绿色/红色底加图标不足以表意，
 // 色觉障碍用户和读屏用户都必须能读到「成功 / 失败」这几个字。
 const kindMeta: Record<ToastKind, { label: string; icon: typeof CheckCircle2; text: string; soft: string; border: string }> = {
-  success: { label: '成功', icon: CheckCircle2, text: 'text-[var(--status-success)]', soft: 'bg-[var(--status-success-soft)]', border: 'border-[var(--status-success-border)]' },
-  error: { label: '失败', icon: AlertCircle, text: 'text-[var(--status-danger)]', soft: 'bg-[var(--status-danger-soft)]', border: 'border-[var(--status-danger-border)]' },
-  info: { label: '提示', icon: Info, text: 'text-[var(--status-info)]', soft: 'bg-[var(--status-info-soft)]', border: 'border-[var(--status-info-border)]' },
-  warning: { label: '注意', icon: AlertTriangle, text: 'text-[var(--status-warning)]', soft: 'bg-[var(--status-warning-soft)]', border: 'border-[var(--status-warning-border)]' }
+  success: { label: '成功', icon: CheckCircle2, text: 'text-success', soft: 'bg-success-soft', border: 'border-success-border' },
+  error: { label: '失败', icon: AlertCircle, text: 'text-danger', soft: 'bg-danger-soft', border: 'border-danger-border' },
+  info: { label: '提示', icon: Info, text: 'text-info', soft: 'bg-info-soft', border: 'border-info-border' },
+  warning: { label: '注意', icon: AlertTriangle, text: 'text-warning', soft: 'bg-warning-soft', border: 'border-warning-border' }
 };
 
 /** 断言式（role="alert"）通道承载的类型：失败必须打断读屏当前朗读，警告同理；成功/提示走礼貌通道。 */
@@ -39,18 +40,20 @@ function ToastCard({ toast, onDismiss }: { toast: Toast; onDismiss(id: string): 
       setRunning(false);
     }
   };
-  return <div className={`ui-toast pointer-events-auto flex w-full items-start gap-2.5 rounded-xl border ${meta.border} bg-[var(--surface-raised)] p-3 shadow-[var(--shadow-panel)] sm:w-[352px]`}>
-    <div className={`grid h-7 w-7 shrink-0 place-items-center rounded-lg ${meta.soft} ${meta.text}`}><Icon size={15} strokeWidth={1.9} aria-hidden="true"/></div>
+  return <div className={`ui-toast pointer-events-auto flex w-full items-start gap-2.5 rounded-lg border ${meta.border} bg-raised p-3 shadow-panel sm:w-[352px]`}>
+    <div className={`grid h-7 w-7 shrink-0 place-items-center rounded-sm ${meta.soft} ${meta.text}`}><Icon size={15} strokeWidth={1.9} aria-hidden="true"/></div>
     <div className="min-w-0 flex-1">
       <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
-        <span className={`shrink-0 rounded px-1 py-px text-[11px] font-semibold ${meta.soft} ${meta.text}`}>{meta.label}</span>
-        <p className="min-w-0 text-[13px] font-semibold leading-5 tracking-[-.01em] text-[var(--text-primary)]">{toast.title}</p>
+        <span className={`shrink-0 rounded-sm px-1 py-px text-meta font-semibold ${meta.soft} ${meta.text}`}>{meta.label}</span>
+        <p className="min-w-0 text-body font-semibold tracking-[-.01em] text-primary">{toast.title}</p>
       </div>
-      {toast.description && <p className="mt-1 text-[12px] leading-5 text-[var(--text-secondary)]">{toast.description}</p>}
-      {actionError && <p className="mt-1.5 rounded-lg border border-[var(--status-danger-border)] bg-[var(--status-danger-soft)] px-2 py-1.5 text-[11px] leading-4 text-[var(--status-danger)]">{`${toast.action?.label ?? '该操作'}没有成功：${actionError}`}</p>}
-      {toast.action && <button type="button" disabled={running} onClick={() => { void runAction(); }} className="mt-2 inline-flex min-h-10 items-center rounded-lg bg-[var(--action-soft)] px-3 text-[12px] font-semibold text-[var(--action-primary)] transition-[background-color,transform] active:scale-[.98] hover:bg-[var(--action-soft-hover)] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50">{running ? '正在执行' : actionError ? `重试${toast.action.label}` : toast.action.label}</button>}
+      {toast.description && <p className="mt-1 text-caption text-secondary">{toast.description}</p>}
+      {actionError && <p className="mt-1.5 rounded-sm border border-danger-border bg-danger-soft px-2 py-1.5 text-meta text-danger">{`${toast.action?.label ?? '该操作'}没有成功：${actionError}`}</p>}
+      {/* 不用 size="sm"：契约 §9 的 sm(32px) 仅限非关键的密集工具条，
+          而「撤销」往往是用户误操作后唯一的补救入口，必须是 40px。 */}
+      {toast.action && <Button variant="ghost" className="mt-2 bg-action-soft text-action hover:bg-action-soft-hover" loading={running} onClick={() => { void runAction(); }}>{running ? '正在执行' : actionError ? `重试${toast.action.label}` : toast.action.label}</Button>}
     </div>
-    <button type="button" aria-label={`关闭通知：${toast.title}`} onClick={() => onDismiss(toast.id)} className="grid min-h-10 min-w-10 shrink-0 place-items-center rounded-lg text-[var(--text-muted)] transition-[color,background-color] hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] focus-visible:outline-none"><X size={15} strokeWidth={2} aria-hidden="true"/></button>
+    <IconButton label={`关闭通知：${toast.title}`} onClick={() => onDismiss(toast.id)}><X size={15} strokeWidth={2}/></IconButton>
   </div>;
 }
 
@@ -81,7 +84,7 @@ export function ToastViewport({ toasts, onDismiss }: ToastViewportProps = {}) {
   // 但 role 会把这两个常驻空容器登记进无障碍树的 status/alert 角色里，
   // 与页面自身的错误条、过期数据条抢同一个角色查询——读屏用户会听到两个竞争的 alert，
   // 测试里 getByRole('alert') 也会命中这个空容器。用 aria-live 保留播报、不占角色。
-  return <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex flex-col px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:inset-x-auto sm:right-4 sm:items-end">
+  return <div className="pointer-events-none fixed inset-x-0 bottom-0 z-toast flex flex-col px-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:inset-x-auto sm:right-4 sm:items-end">
     <div aria-live="polite" aria-atomic="false" aria-label="操作结果通知" className="flex w-full flex-col gap-2 sm:w-auto sm:items-end">
       {polite.map(toast => <ToastCard key={toast.id} toast={toast} onDismiss={handleDismiss}/>)}
     </div>

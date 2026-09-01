@@ -86,11 +86,13 @@ describe('ToastViewport 触控与操作', () => {
     expect(onDismiss).toHaveBeenCalledWith('toast-9');
   });
 
-  it('关闭按钮触控目标不小于 40px（min-h-10 min-w-10）', () => {
+  // 断言的是「命中区 >=40px」这个结果，不是达成它的具体写法：
+  // IconButton 原语用 h-10 w-10 固定尺寸，与原先的 min-h-10 等效。
+  it('关闭按钮触控目标不小于 40px', () => {
     render(<ToastViewport toasts={[makeToast()]}/>);
     const close = screen.getByRole('button', { name: '关闭通知：已发送指令' });
-    expect(close.className).toContain('min-h-10');
-    expect(close.className).toContain('min-w-10');
+    expect(close.className).toMatch(/\b(?:min-)?h-10\b/);
+    expect(close.className).toMatch(/\b(?:min-)?w-10\b/);
   });
 
   it('操作按钮是真实 button、用动作导向的中文文案，且触控目标不小于 40px', () => {
@@ -98,7 +100,8 @@ describe('ToastViewport 触控与操作', () => {
     const action = screen.getByRole('button', { name: '恢复这条指令' });
     expect(action.tagName).toBe('BUTTON');
     expect(action.getAttribute('type')).toBe('button');
-    expect(action.className).toContain('min-h-10');
+    // 「撤销」常是误操作后唯一的补救入口，不能降到 sm(32px)。
+    expect(action.className).toMatch(/\b(?:min-)?h-10\b/);
   });
 
   it('没有 action 时只渲染关闭按钮，不出现假操作', () => {
@@ -199,7 +202,9 @@ describe('ToastViewport 布局与动效', () => {
     ]}/>);
     const classNames = [...container.querySelectorAll<HTMLElement>('*')].map(node => node.className).join(' ');
     expect(classNames).not.toMatch(/\b(?:bg|text|border|ring)-(?:zinc|slate|gray|neutral|stone|amber|red|green|emerald|blue|white|black)(?:-\d{2,3})?\b/);
-    expect(classNames).toContain('bg-[var(--surface-raised)]');
+    // 语义类取代了内联 token（契约 §1.2）：主题层负责明暗切换，组件不该知道 token 名。
+    expect(classNames).toContain('bg-raised');
+    expect(classNames).not.toMatch(/\[var\(--/);
   });
 });
 
