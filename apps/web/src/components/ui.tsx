@@ -22,7 +22,7 @@ export const permissionLabels: Record<PermissionMode, string> = {
   'deny-all': '全部拒绝',
   'full-trust': '完全信任'
 };
-export const stateTone: Record<string, string> = { starting: 'bg-[var(--status-warning-solid)]', thinking: 'bg-[var(--status-warning-solid)]', running_tool: 'bg-[var(--status-info-solid)]', waiting_for_permission: 'bg-[var(--status-attention-solid)]', failed: 'bg-[var(--status-danger-solid)]', stopped: 'bg-[var(--status-neutral-solid)]', interrupted: 'bg-[var(--status-neutral-solid)]', completed: 'bg-[var(--status-success-solid)]', idle: 'bg-[var(--status-success-solid)]' };
+export const stateTone: Record<string, string> = { starting: 'bg-warning-solid', thinking: 'bg-warning-solid', running_tool: 'bg-info-solid', waiting_for_permission: 'bg-attention-solid', failed: 'bg-danger-solid', stopped: 'bg-neutral-solid', interrupted: 'bg-neutral-solid', completed: 'bg-success-solid', idle: 'bg-success-solid' };
 export const busyStates = new Set(['starting', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting']);
 export const parseMemberNames = (value: string) => [...new Set(value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean))];
 
@@ -68,11 +68,11 @@ export function effectiveStatus(session: Session): { label: string; archived: bo
  */
 export function sidebarStatusVisual(session: Session): { label: string; textClass: string; dotClass: string; pulse: boolean } {
   const status = effectiveStatus(session);
-  if (status.archived) return { label: status.label, textClass: 'text-[var(--sidebar-text-muted)]', dotClass: 'bg-[var(--status-neutral-solid)]', pulse: false };
+  if (status.archived) return { label: status.label, textClass: 'text-sidebar-text-muted', dotClass: 'bg-neutral-solid', pulse: false };
   return {
     label: status.label,
-    textClass: session.state === 'failed' ? 'text-[var(--status-danger)]' : session.state === 'waiting_for_permission' ? 'text-[var(--status-warning)]' : 'text-[var(--sidebar-text-muted)]',
-    dotClass: stateTone[session.state] ?? 'bg-[var(--status-neutral-solid)]',
+    textClass: session.state === 'failed' ? 'text-danger' : session.state === 'waiting_for_permission' ? 'text-warning' : 'text-sidebar-text-muted',
+    dotClass: stateTone[session.state] ?? 'bg-neutral-solid',
     pulse: status.busy
   };
 }
@@ -90,11 +90,11 @@ export function sidebarStatusVisual(session: Session): { label: string; textClas
  * 旁边再写 `session.archivedAt ?`。
  */
 export function stateBadgeStyle(session: Session): string {
-  if (session.archivedAt) return 'border-[var(--border-subtle)] bg-[var(--surface-muted)] text-[var(--text-muted)]';
-  if (session.state === 'failed' || session.state === 'stopped') return 'border-[var(--status-danger-border)] bg-[var(--status-danger-soft)] text-[var(--status-danger)]';
-  if (session.state === 'waiting_for_permission' || session.state === 'interrupted' || session.state === 'created' || session.state === 'idle') return 'border-[var(--status-warning-border)] bg-[var(--status-warning-soft)] text-[var(--status-warning)]';
-  if (session.state === 'completed') return 'border-[var(--status-success-border)] bg-[var(--status-success-soft)] text-[var(--status-success)]';
-  return 'border-[var(--status-info-border)] bg-[var(--status-info-soft)] text-[var(--status-info)]';
+  if (session.archivedAt) return 'border-subtle bg-muted text-subtle';
+  if (session.state === 'failed' || session.state === 'stopped') return 'border-danger-border bg-danger-soft text-danger';
+  if (session.state === 'waiting_for_permission' || session.state === 'interrupted' || session.state === 'created' || session.state === 'idle') return 'border-warning-border bg-warning-soft text-warning';
+  if (session.state === 'completed') return 'border-success-border bg-success-soft text-success';
+  return 'border-info-border bg-info-soft text-info';
 }
 
 /**
@@ -121,5 +121,5 @@ export function DockmuxIcon({ className = '' }: { className?: string }) {
 }
 
 export function IconButton({ label, disabled, onClick, children }: { label: string; disabled?: boolean; onClick(): void; children: React.ReactNode }) {
-  return <button type="button" title={label} aria-label={label} disabled={disabled} onClick={onClick} className="grid h-8 w-8 place-items-center rounded-lg text-[var(--text-muted)] transition-[color,background-color,transform] duration-200 hover:bg-[var(--surface-muted)] hover:text-[var(--text-primary)] active:scale-[.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--border-default)] disabled:pointer-events-none disabled:opacity-30">{children}</button>;
+  return <button type="button" title={label} aria-label={label} disabled={disabled} onClick={onClick} className="grid h-8 w-8 place-items-center rounded-md text-subtle transition-[color,background-color,transform] duration-normal hover:bg-muted hover:text-primary active:scale-[.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring disabled:pointer-events-none disabled:opacity-30">{children}</button>;
 }
