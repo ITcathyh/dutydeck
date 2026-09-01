@@ -1,0 +1,288 @@
+/*
+  设计系统 token 的唯一定义处（docs/design-system-contract.md §1）。
+  任何颜色、字号、圆角、层级、动效时长的字面量只允许出现在这个文件里；
+  组件消费 tailwind.config.js 映射出来的语义类（bg-surface / text-body / rounded-md），
+  不消费 token 名本身。
+*/
+
+/*
+  非颜色标度：字号、圆角、层级、动效。这些值与主题无关，两套主题共用同一份，
+  所以单独声明一层，不参与下面颜色 token 的三层覆盖。
+*/
+:root {
+  /* 字号 6 档（契约 §2）。每档配一个行高，成对使用，不允许单独覆盖行高。 */
+  --font-size-meta: 11px;
+  --line-height-meta: 16px;
+  --font-size-caption: 12px;
+  --line-height-caption: 18px;
+  --font-size-body: 14px;
+  --line-height-body: 22px;
+  --font-size-title: 16px;
+  --line-height-title: 24px;
+  --font-size-heading: 20px;
+  --line-height-heading: 28px;
+  --font-size-display: 28px;
+  --line-height-display: 36px;
+
+  /* 圆角 4 档 + full（契约 §3）。取档公式：半径 ≈ 元素高度 / 3.5。 */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+  --radius-full: 999px;
+
+  /* 层级 5 档（契约 §7）。取消散落的手工 z-index，所有模态经 Dialog 原语 portal 到 body。 */
+  --z-base: 0;
+  --z-sticky: 100;
+  --z-drawer: 800;
+  --z-dialog: 900;
+  --z-toast: 1000;
+
+  /* 动效 2 档（契约 §8）。缓动与时长成对使用：fast 配 ease-out，normal 配 emphasized。 */
+  --duration-fast: 120ms;
+  --duration-normal: 180ms;
+  --ease-out: ease-out;
+  --ease-emphasized: cubic-bezier(.16, 1, .3, 1);
+}
+
+/*
+  语义 token 分三层声明，顺序不可调整：
+  1. 裸 :root 是完整的浅色调色板，任何颜色的唯一定义都必须在这里。
+  2. prefers-color-scheme: dark 里只重写取值，并用 :not([data-theme="light"]) 让显式浅色选择优先。
+  3. [data-theme="dark"] 再重写一次，让显式深色选择在系统为浅色时同样生效。
+  跟随系统时不写 data-theme 属性，由第 2 层接管。
+*/
+:root {
+  color-scheme: light;
+  --surface-canvas: #f5f7f6;
+  --surface-default: #ffffff;
+  --surface-muted: #eef2f0;
+  --surface-hover: #f7f9f8;
+  --surface-raised: #ffffff;
+  --surface-inverse: #16201f;
+  --surface-inverse-hover: #24312f;
+  --text-primary: #17201f;
+  --text-secondary: #53615f;
+  --text-muted: #76817f;
+  --text-on-action: #ffffff;
+  --text-inverse: #eef2f0;
+  --text-link: #2563eb;
+  --border-subtle: #edf0ef;
+  --border-default: #dce3e1;
+  --border-strong: #bdc8c5;
+  --action-primary: #0f766e;
+  --action-primary-hover: #0b5f59;
+  --action-soft: #e6f3f1;
+  --action-soft-hover: #d3eae6;
+  --status-warning: #8a5616;
+  --status-warning-soft: #fff7e6;
+  --status-warning-border: #efd59d;
+  --status-warning-solid: #d97706;
+  --status-danger: #a83a43;
+  --status-danger-soft: #fff0f1;
+  --status-danger-border: #efc1c5;
+  --status-danger-solid: #dc2626;
+  --status-success: #257252;
+  --status-success-soft: #eaf6ef;
+  --status-success-border: #bfe0cd;
+  --status-success-solid: #10b981;
+  --status-info: #2d609b;
+  --status-info-soft: #edf4fb;
+  --status-info-border: #c8dbee;
+  --status-info-solid: #3b82f6;
+  --status-queued: #565693;
+  --status-queued-soft: #f0effa;
+  --status-queued-border: #cdcbee;
+  --status-attention-solid: #f97316;
+  --status-neutral-solid: #a1a1aa;
+  --overlay-scrim: rgba(15, 23, 42, .35);
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, .05);
+  --shadow-panel: 0 12px 34px rgba(15, 23, 42, .09);
+  --shadow-dialog: 0 24px 80px rgba(15, 23, 42, .22);
+  --shadow-overlay: 0 30px 100px rgba(15, 23, 42, .32);
+  --scrollbar-thumb: #d4d4d8;
+  --focus-ring: #0f766e;
+
+  /* 侧栏是双主题下都保持深色的导航底盘，单独一套 token，避免和内容表面互相污染。 */
+  --sidebar-surface: #16201f;
+  --sidebar-border: #2a3634;
+  --sidebar-text: #dfe6e5;
+  --sidebar-text-strong: #ffffff;
+  --sidebar-text-muted: #8b9997;
+  --sidebar-text-faint: #6b7876;
+  --sidebar-hover: rgba(255, 255, 255, .06);
+  --sidebar-active: rgba(255, 255, 255, .1);
+  --sidebar-accent: #5eead4;
+  --sidebar-accent-text: #05201c;
+  --sidebar-shadow: 12px 0 32px rgba(15, 23, 42, .16);
+
+  /* 终端与代码块需要真实颜色值（xterm.js 的 theme 对象读不了 CSS 变量），在这里集中定义。 */
+  --terminal-bg: #fafafa;
+  --terminal-fg: #3f3f46;
+  --terminal-cursor: #0f766e;
+  --terminal-selection: rgba(15, 118, 110, .22);
+  --code-surface: #18191d;
+  --code-border: rgba(63, 63, 70, .7);
+  --code-header-text: #a1a1aa;
+  /* 代码块头部：与 --code-surface 同族的分隔线与悬浮底，不能复用 --code-border（那是整块外框，更重）。 */
+  --code-header-border: rgba(255, 255, 255, .07);
+  --code-header-bg: rgba(255, 255, 255, .025);
+  --code-header-hover: rgba(255, 255, 255, .07);
+  --code-inline-bg: #eef2f0;
+  --code-inline-text: #27272a;
+  --code-inline-border: #dce3e1;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --surface-canvas: #0d1211;
+    --surface-default: #151c1b;
+    --surface-muted: #1d2625;
+    --surface-hover: #1f2a29;
+    --surface-raised: #1b2423;
+    --surface-inverse: #e8edec;
+    --surface-inverse-hover: #cdd6d4;
+    --text-primary: #e8edec;
+    --text-secondary: #a6b3b1;
+    --text-muted: #7f8c8a;
+    --text-on-action: #04211d;
+    --text-inverse: #17201f;
+    --text-link: #7dd3fc;
+    --border-subtle: #1e2726;
+    --border-default: #2b3635;
+    --border-strong: #45524f;
+    --action-primary: #2dd4bf;
+    --action-primary-hover: #5eead4;
+    --action-soft: #10322e;
+    --action-soft-hover: #164039;
+    --status-warning: #f0c078;
+    --status-warning-soft: #2a2013;
+    --status-warning-border: #4b3a1b;
+    --status-warning-solid: #f59e0b;
+    --status-danger: #f5a3aa;
+    --status-danger-soft: #2c1719;
+    --status-danger-border: #4e262a;
+    --status-danger-solid: #f87171;
+    --status-success: #6fd39b;
+    --status-success-soft: #12291f;
+    --status-success-border: #234b36;
+    --status-success-solid: #34d399;
+    --status-info: #93c0f2;
+    --status-info-soft: #14202e;
+    --status-info-border: #26415f;
+    --status-info-solid: #60a5fa;
+    --status-queued: #adabec;
+    --status-queued-soft: #1c1b33;
+    --status-queued-border: #302e52;
+    --status-attention-solid: #fb923c;
+    --status-neutral-solid: #71717a;
+    --overlay-scrim: rgba(2, 6, 6, .62);
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-panel: 0 12px 34px rgba(0, 0, 0, .45);
+    --shadow-dialog: 0 24px 80px rgba(0, 0, 0, .6);
+    --shadow-overlay: 0 30px 100px rgba(0, 0, 0, .68);
+    --scrollbar-thumb: #3f4a48;
+    --focus-ring: #2dd4bf;
+    --sidebar-surface: #0a0f0e;
+    --sidebar-border: #1b2422;
+    --sidebar-text: #dbe3e2;
+    --sidebar-text-strong: #ffffff;
+    --sidebar-text-muted: #84918f;
+    --sidebar-text-faint: #62706e;
+    --sidebar-hover: rgba(255, 255, 255, .055);
+    --sidebar-active: rgba(255, 255, 255, .095);
+    --sidebar-accent: #2dd4bf;
+    --sidebar-accent-text: #04211d;
+    --sidebar-shadow: 12px 0 32px rgba(0, 0, 0, .5);
+    --terminal-bg: #0d1211;
+    --terminal-fg: #cbd5d3;
+    --terminal-cursor: #2dd4bf;
+    --terminal-selection: rgba(45, 212, 191, .26);
+    --code-surface: #101615;
+    --code-border: rgba(69, 82, 79, .7);
+    --code-header-text: #8b9997;
+  --code-header-border: rgba(255, 255, 255, .07);
+  --code-header-bg: rgba(255, 255, 255, .025);
+  --code-header-hover: rgba(255, 255, 255, .07);
+    --code-header-border: rgba(255, 255, 255, .07);
+    --code-header-bg: rgba(255, 255, 255, .025);
+    --code-header-hover: rgba(255, 255, 255, .07);
+    --code-inline-bg: #1d2625;
+    --code-inline-text: #dfe6e5;
+    --code-inline-border: #2b3635;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-canvas: #0d1211;
+  --surface-default: #151c1b;
+  --surface-muted: #1d2625;
+  --surface-hover: #1f2a29;
+  --surface-raised: #1b2423;
+  --surface-inverse: #e8edec;
+  --surface-inverse-hover: #cdd6d4;
+  --text-primary: #e8edec;
+  --text-secondary: #a6b3b1;
+  --text-muted: #7f8c8a;
+  --text-on-action: #04211d;
+  --text-inverse: #17201f;
+  --text-link: #7dd3fc;
+  --border-subtle: #1e2726;
+  --border-default: #2b3635;
+  --border-strong: #45524f;
+  --action-primary: #2dd4bf;
+  --action-primary-hover: #5eead4;
+  --action-soft: #10322e;
+  --action-soft-hover: #164039;
+  --status-warning: #f0c078;
+  --status-warning-soft: #2a2013;
+  --status-warning-border: #4b3a1b;
+  --status-warning-solid: #f59e0b;
+  --status-danger: #f5a3aa;
+  --status-danger-soft: #2c1719;
+  --status-danger-border: #4e262a;
+  --status-danger-solid: #f87171;
+  --status-success: #6fd39b;
+  --status-success-soft: #12291f;
+  --status-success-border: #234b36;
+  --status-success-solid: #34d399;
+  --status-info: #93c0f2;
+  --status-info-soft: #14202e;
+  --status-info-border: #26415f;
+  --status-info-solid: #60a5fa;
+  --status-queued: #adabec;
+  --status-queued-soft: #1c1b33;
+  --status-queued-border: #302e52;
+  --status-attention-solid: #fb923c;
+  --status-neutral-solid: #71717a;
+  --overlay-scrim: rgba(2, 6, 6, .62);
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-panel: 0 12px 34px rgba(0, 0, 0, .45);
+  --shadow-dialog: 0 24px 80px rgba(0, 0, 0, .6);
+  --shadow-overlay: 0 30px 100px rgba(0, 0, 0, .68);
+  --scrollbar-thumb: #3f4a48;
+  --focus-ring: #2dd4bf;
+  --sidebar-surface: #0a0f0e;
+  --sidebar-border: #1b2422;
+  --sidebar-text: #dbe3e2;
+  --sidebar-text-strong: #ffffff;
+  --sidebar-text-muted: #84918f;
+  --sidebar-text-faint: #62706e;
+  --sidebar-hover: rgba(255, 255, 255, .055);
+  --sidebar-active: rgba(255, 255, 255, .095);
+  --sidebar-accent: #2dd4bf;
+  --sidebar-accent-text: #04211d;
+  --sidebar-shadow: 12px 0 32px rgba(0, 0, 0, .5);
+  --terminal-bg: #0d1211;
+  --terminal-fg: #cbd5d3;
+  --terminal-cursor: #2dd4bf;
+  --terminal-selection: rgba(45, 212, 191, .26);
+  --code-surface: #101615;
+  --code-border: rgba(69, 82, 79, .7);
+  --code-header-text: #8b9997;
+  --code-inline-bg: #1d2625;
+  --code-inline-text: #dfe6e5;
+  --code-inline-border: #2b3635;
+}
