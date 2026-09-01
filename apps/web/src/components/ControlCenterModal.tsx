@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { ApiError, foundationApi, scheduleApi, type Agent, type LarkBotConfig } from '../api';
 import { useDialogFocus } from '../useDialogFocus';
-import { IconButton } from './ui';
+import { IconButton, permissionLabels } from './ui';
 
 export type ControlCenterSection = 'agents' | 'lark' | 'groups' | 'automation';
 
@@ -57,7 +57,7 @@ function newId(prefix: string) {
 }
 
 function permissionLabel(value: Agent['permissionMode']) {
-  return ({ ask: '操作前确认', 'approve-reads': '自动读取', 'deny-all': '全部拒绝', 'full-trust': '完全信任' } as const)[value];
+  return permissionLabels[value];
 }
 
 export function ControlCenterModal({

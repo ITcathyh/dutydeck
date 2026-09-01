@@ -11,8 +11,8 @@ const baseCommands: ComposerCommand[] = [
   { name: 'file', description: '引用本地文件路径', action: 'file' },
   { name: 'goal', description: '创建或继续一个 Goal', action: 'insert' },
   { name: 'fast', description: '使用快速执行模式', action: 'insert' },
-  { name: 'model', description: '切换当前运行模型', action: 'model' },
-  { name: 'reasoning', description: '调整当前运行思考深度', action: 'reasoning' }
+  { name: 'model', description: '切换当前任务模型', action: 'model' },
+  { name: 'reasoning', description: '调整当前任务思考深度', action: 'reasoning' }
 ];
 
 function useAutoResizeTextarea(value: string) {

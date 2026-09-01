@@ -36,12 +36,12 @@ describe('ToastViewport 无障碍结构', () => {
 
   it('success / info 进礼貌区，error / warning 进断言区（aria-live="assertive"）', () => {
     render(<ToastViewport toasts={[
-      makeToast({ id: 'a', kind: 'success', title: '已归档任务运行' }),
+      makeToast({ id: 'a', kind: 'success', title: '任务已归档' }),
       makeToast({ id: 'b', kind: 'info', title: '已加载更早的执行记录' }),
       makeToast({ id: 'c', kind: 'error', title: '取消待执行指令失败' }),
       makeToast({ id: 'd', kind: 'warning', title: '模型列表仍是缓存值' })
     ]}/>);
-    expect(within(politeRegion()).getByText('已归档任务运行')).toBeTruthy();
+    expect(within(politeRegion()).getByText('任务已归档')).toBeTruthy();
     expect(within(politeRegion()).getByText('已加载更早的执行记录')).toBeTruthy();
     expect(within(politeRegion()).queryByText('取消待执行指令失败')).toBeNull();
     expect(within(assertiveRegion()).getByText('取消待执行指令失败')).toBeTruthy();
@@ -54,7 +54,7 @@ describe('ToastViewport 无障碍结构', () => {
   });
 
   it('图标是纯装饰（aria-hidden），不重复播报状态', () => {
-    const { container } = render(<ToastViewport toasts={[makeToast({ kind: 'error', title: '重启任务运行失败' })]}/>);
+    const { container } = render(<ToastViewport toasts={[makeToast({ kind: 'error', title: '重新启动失败' })]}/>);
     const icons = container.querySelectorAll('svg');
     expect(icons.length).toBeGreaterThan(0);
     for (const icon of icons) expect(icon.getAttribute('aria-hidden')).toBe('true');
@@ -71,7 +71,7 @@ describe('ToastViewport 无障碍结构', () => {
     const outside = screen.getByRole('button', { name: '页面上的其他按钮' });
     outside.focus();
     const { rerender } = render(<ToastViewport toasts={[]}/>);
-    rerender(<ToastViewport toasts={[makeToast({ kind: 'error', title: '归档任务运行失败' })]}/>);
+    rerender(<ToastViewport toasts={[makeToast({ kind: 'error', title: '归档失败' })]}/>);
     await vi.waitFor(() => expect(document.activeElement).toBe(outside));
     expect(document.querySelector('[aria-modal]')).toBeNull();
   });
