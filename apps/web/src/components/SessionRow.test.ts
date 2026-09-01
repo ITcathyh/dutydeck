@@ -27,6 +27,9 @@ describe('SessionRow', () => {
   it('renders with active styling when active', () => {
     const html = renderToStaticMarkup(createElement(SessionRow, { session, agent, active: true, onClick: () => {} }));
     expect(html).toContain('Codex');
-    expect(html).toContain('shadow-[inset_3px_0_0_var(--sidebar-accent)]');
+    // 左侧色条走 shadow-row-active 这一档（原先是内联的 shadow-[inset_3px_0_0_var(--...)]）。
+    // 一并断言 aria-current：选中态原本只有视觉，读屏用户不知道自己停在哪一行。
+    expect(html).toContain('shadow-row-active');
+    expect(html).toContain('aria-current="true"');
   });
 });

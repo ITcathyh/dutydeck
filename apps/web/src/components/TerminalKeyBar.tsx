@@ -60,8 +60,11 @@ function writeStored(key: string, value: string): void {
 
 // 44px 触控目标（min-h-11 min-w-11）是高频移动操作的下限，比设计基线 40px 再放宽一档：
 // Ctrl-C 打错一次要么杀错进程要么白等，代价比多占几像素高得多。
-const keyClass = 'flex min-h-11 min-w-11 items-center justify-center rounded-lg border border-[var(--border-default)] bg-[var(--surface-default)] px-2 font-mono text-[13px] font-semibold text-[var(--text-primary)] transition active:bg-[var(--action-soft)] active:text-[var(--action-primary)]';
-const chromeClass = 'flex min-h-11 min-w-11 items-center justify-center rounded-lg text-[var(--text-secondary)] transition active:bg-[var(--surface-hover)]';
+// 圆角按契约 §3 的「半径 ≈ 高度/3.5」取档：键帽 44px 落在 31–47px 档，用 rounded-md（10px）。
+// 键帽刻意保持原生 <button> 而不换 Button 原语：它们是等宽 mono 的键帽，且靠 onPointerDown /
+// onMouseDown 的 preventDefault 保软键盘，Button / IconButton 的 props 形状盖不住这两件事。
+const keyClass = 'flex min-h-11 min-w-11 items-center justify-center rounded-md border border-default bg-surface px-2 font-mono text-body font-semibold text-primary transition active:bg-action-soft active:text-action';
+const chromeClass = 'flex min-h-11 min-w-11 items-center justify-center rounded-md text-secondary transition active:bg-hover';
 
 export function TerminalKeyBar({ onKey, onSelectModeChange, selectMode = false }: TerminalKeyBarProps) {
   const [expanded, setExpanded] = useState(() => readStored(COLLAPSED_KEY) !== '1');
@@ -78,10 +81,12 @@ export function TerminalKeyBar({ onKey, onSelectModeChange, selectMode = false }
 
   const dockClass = side === 'left' ? 'left-0 pl-[max(0.5rem,env(safe-area-inset-left))]' : 'right-0 pr-[max(0.5rem,env(safe-area-inset-right))]';
 
-  const renderKey = (key: KeyDef) => <button key={key.id} type="button" aria-label={key.aria} onPointerDown={holdFocus} onMouseDown={holdFocus} onClick={() => onKey(key.data)} className={`${keyClass} ${key.wide ? 'min-w-[3.25rem]' : ''}`}>{key.label}</button>;
+  // min-w-14（56px）落在 4px 网格上，取代原来的 3.25rem（52px，不在网格上）。
+  // 这是宽度下限不是上限：Home/End/PgUp/PgDn 在 14px mono 下实测约 50px，塞得进去不会被挤压。
+  const renderKey = (key: KeyDef) => <button key={key.id} type="button" aria-label={key.aria} onPointerDown={holdFocus} onMouseDown={holdFocus} onClick={() => onKey(key.data)} className={`${keyClass} ${key.wide ? 'min-w-14' : ''}`}>{key.label}</button>;
 
-  return <div className={`pointer-events-none absolute bottom-0 z-10 flex justify-end pb-[max(0.5rem,env(safe-area-inset-bottom))] ${dockClass}`}>
-    <div role="toolbar" aria-label="终端快捷键" aria-orientation="horizontal" className="pointer-events-auto flex max-w-[min(20rem,calc(100vw-1.5rem))] flex-col gap-1.5 rounded-xl border border-[var(--border-default)] bg-[var(--surface-muted)] p-1.5 shadow-[var(--shadow-panel)]">
+  return <div className={`pointer-events-none absolute bottom-0 z-sticky flex justify-end pb-[max(0.5rem,env(safe-area-inset-bottom))] ${dockClass}`}>
+    <div role="toolbar" aria-label="终端快捷键" aria-orientation="horizontal" className="pointer-events-auto flex max-w-[min(20rem,calc(100vw-1.5rem))] flex-col gap-1.5 rounded-lg border border-default bg-muted p-1.5 shadow-panel">
       <div className="flex items-center gap-1">
         <button type="button" aria-expanded={expanded} aria-label={expanded ? '收起终端快捷键条' : '展开终端快捷键条'} onPointerDown={holdFocus} onMouseDown={holdFocus} onClick={() => setExpanded(value => !value)} className={chromeClass}>
           {expanded ? <ChevronDown size={18}/> : <Keyboard size={18}/>}
@@ -90,14 +95,14 @@ export function TerminalKeyBar({ onKey, onSelectModeChange, selectMode = false }
           <button type="button" aria-label={side === 'right' ? '把快捷键条移到左侧' : '把快捷键条移到右侧'} onPointerDown={holdFocus} onMouseDown={holdFocus} onClick={() => setSide(value => (value === 'right' ? 'left' : 'right'))} className={chromeClass}>
             {side === 'right' ? <PanelLeftClose size={18}/> : <PanelRightClose size={18}/>}
           </button>
-          {onSelectModeChange && <button type="button" aria-label={selectMode ? '退出选择模式，恢复拖动滚动' : '进入选择模式，拖动可选中文字复制'} aria-pressed={selectMode} onPointerDown={holdFocus} onMouseDown={holdFocus} onClick={() => onSelectModeChange(!selectMode)} className={`${chromeClass} ${selectMode ? 'bg-[var(--action-soft)] text-[var(--action-primary)]' : ''}`}>
+          {onSelectModeChange && <button type="button" aria-label={selectMode ? '退出选择模式，恢复拖动滚动' : '进入选择模式，拖动可选中文字复制'} aria-pressed={selectMode} onPointerDown={holdFocus} onMouseDown={holdFocus} onClick={() => onSelectModeChange(!selectMode)} className={`${chromeClass} ${selectMode ? 'bg-action-soft text-action' : ''}`}>
             <MousePointer2 size={18}/>
           </button>}
-          <button type="button" aria-expanded={more} aria-label={more ? '收起更多按键' : '展开更多按键，含 Ctrl-Z、清屏与翻页'} onPointerDown={holdFocus} onMouseDown={holdFocus} onClick={() => setMore(value => !value)} className={`${chromeClass} font-mono text-sm`}>⋯</button>
+          <button type="button" aria-expanded={more} aria-label={more ? '收起更多按键' : '展开更多按键，含 Ctrl-Z、清屏与翻页'} onPointerDown={holdFocus} onMouseDown={holdFocus} onClick={() => setMore(value => !value)} className={`${chromeClass} font-mono text-body`}>⋯</button>
         </>}
       </div>
       {expanded && <div className="flex flex-wrap justify-end gap-1.5">{primaryKeys.map(renderKey)}</div>}
-      {expanded && more && <div className="flex flex-wrap justify-end gap-1.5 border-t border-[var(--border-subtle)] pt-1.5">{secondaryKeys.map(renderKey)}</div>}
+      {expanded && more && <div className="flex flex-wrap justify-end gap-1.5 border-t border-subtle pt-1.5">{secondaryKeys.map(renderKey)}</div>}
     </div>
   </div>;
 }

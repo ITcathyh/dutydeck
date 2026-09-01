@@ -27,6 +27,20 @@ export function captureDialogOpener(): void {
 /**
  * Gives a modal its expected keyboard contract: focus enters the dialog,
  * cycles inside it, and returns to the element that opened it.
+ *
+ * 下面两段补偿逻辑（「猜最后一个 [role=dialog]」与「手工遍历兄弟节点打 inert」）
+ * 曾计划在 Dialog 原语 portal 化之后删除。Phase 0 实测：现在还删不掉，两段都仍然
+ * 承载着未迁移调用方的行为，删任何一段都会退化。
+ *
+ *   - 猜 dialog：NewSessionModal.tsx:35 与 LarkConfigModal.tsx:17 调用了本 hook
+ *     但**不挂返回的 ref**，dialog.current 恒为 null。删掉这段，这两个弹层的 Tab
+ *     直接不再被困住（已用探针测到：焦点根本进不去弹层）。
+ *   - 兄弟 inert：App.dom.test.tsx 断言设置中心打开时 <main> 带 inert。那是这段
+ *     遍历打上去的。删掉即挂。
+ *
+ * 经 Dialog 原语渲染的浮层两段都不需要：ref 直接挂到面板上，且 portal 到 body 后
+ * 「背景」就是整棵应用子树，遍历自然落在它身上。等 Phase 1 把 11 份手写遮罩壳
+ * 全部迁到 <Dialog> 之后，这两段才能安全删除——删之前请重跑上面两个探针场景。
  */
 export function useDialogFocus(active = true): RefCallback<HTMLElement> {
   const dialog = useRef<HTMLElement | null>(null);

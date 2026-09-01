@@ -35,7 +35,9 @@ describe('TimelineItem 事件分发', () => {
   it('warning → role="status" 的琥珀色提示，warningKind=skill 时标题为「Skill 提示」', () => {
     render(<TimelineItem event={event('warning', { text: '未找到该 Skill', warningKind: 'skill' })}/>);
     const status = screen.getByRole('status');
-    expect(status.className).toContain('bg-[var(--status-warning-soft)]');
+    // Banner 迁移后是语义类；断言意图不变：warning 用琥珀软底，不与 error 的红软底混。
+    expect(status.className).toContain('bg-warning-soft');
+    expect(status.className).not.toContain('bg-danger-soft');
     expect(screen.getByText('Skill 提示')).toBeTruthy();
     expect(screen.getByText('未找到该 Skill')).toBeTruthy();
   });
@@ -49,7 +51,9 @@ describe('TimelineItem 事件分发', () => {
   it('error → role="alert"（不是 status），红色样式 + 「Agent 错误」', () => {
     render(<TimelineItem event={event('error', { message: '模型调用超时' })}/>);
     const alert = screen.getByRole('alert');
-    expect(alert.className).toContain('bg-[var(--status-danger-soft)]');
+    // Banner 迁移后是语义类；断言意图不变：error 用红软底，不与 warning 的琥珀软底混。
+    expect(alert.className).toContain('bg-danger-soft');
+    expect(alert.className).not.toContain('bg-warning-soft');
     expect(screen.getByText('Agent 错误')).toBeTruthy();
     expect(screen.getByText('模型调用超时')).toBeTruthy();
     expect(screen.queryByRole('status')).toBeNull();

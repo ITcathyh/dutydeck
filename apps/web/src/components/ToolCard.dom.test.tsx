@@ -23,8 +23,13 @@ const toolEvent = (overrides: Partial<TimelineEvent['data']> = {}, event: Partia
 });
 
 // 状态灯是无文本的 <span>，只能靠 class 断言；用 querySelector 精确定位圆点而不是整卡搜索。
+// 前提：状态灯必须是卡片里唯一的 span.rounded-full——别给别的 span 加这个类，
+// 否则选择器会抓错元素而测试还「通过」。
 const statusDot = (container: HTMLElement) => container.querySelector('span.rounded-full');
 const spinner = (container: HTMLElement) => container.querySelector('.animate-spin');
+// 展开区改用 prism 高亮后，文本被切成大量 token <span>，单节点的 getByText 不再适用，
+// 只能在 .code-renderer 容器上断言聚合文本。
+const codeBlock = (container: HTMLElement) => container.querySelector('.code-renderer');
 
 describe('ToolCard 状态渲染分支', () => {
   it('running：转圈动画 + 「执行中」，且没有终态状态灯', () => {
@@ -39,16 +44,16 @@ describe('ToolCard 状态渲染分支', () => {
     const { container } = render(<ToolCard event={toolEvent({ status: 'completed', completedAt: '2026-08-27T00:00:02.000Z' })}/>);
     expect(screen.getByText('已完成')).toBeTruthy();
     expect(spinner(container)).toBeNull();
-    expect(statusDot(container)?.className).toContain('bg-[var(--status-success-solid)]');
-    expect(statusDot(container)?.className).not.toContain('bg-[var(--status-danger-solid)]');
+    expect(statusDot(container)?.className).toContain('bg-success-solid');
+    expect(statusDot(container)?.className).not.toContain('bg-danger-solid');
   });
 
   it('failed：红色状态灯 + 「失败」，不是绿灯', () => {
     const { container } = render(<ToolCard event={toolEvent({ status: 'failed', completedAt: '2026-08-27T00:00:02.000Z' })}/>);
     expect(screen.getByText('失败')).toBeTruthy();
     expect(spinner(container)).toBeNull();
-    expect(statusDot(container)?.className).toContain('bg-[var(--status-danger-solid)]');
-    expect(statusDot(container)?.className).not.toContain('bg-[var(--status-success-solid)]');
+    expect(statusDot(container)?.className).toContain('bg-danger-solid');
+    expect(statusDot(container)?.className).not.toContain('bg-success-solid');
   });
 
   it('terminal 态才算耗时到 completedAt：completed 显示 2 秒而非 running 的实时耗时', () => {
@@ -71,31 +76,33 @@ describe('ToolCard 状态渲染分支', () => {
 describe('ToolCard 展开交互', () => {
   it('点击展开后渲染 input/output JSON，再点收起', async () => {
     const user = userEvent.setup();
-    render(<ToolCard event={toolEvent({ status: 'completed', input: { command: 'ls -la' }, output: 'total 0' })}/>);
-    expect(screen.queryByText(/total 0/)).toBeNull();
-    await user.click(screen.getByRole('button'));
-    const pre = screen.getByText(/"output"/);
-    expect(pre.textContent).toContain('ls -la');
-    expect(pre.textContent).toContain('total 0');
-    await user.click(screen.getByRole('button'));
-    expect(screen.queryByText(/"output"/)).toBeNull();
+    const { container } = render(<ToolCard event={toolEvent({ status: 'completed', input: { command: 'ls -la' }, output: 'total 0' })}/>);
+    expect(codeBlock(container)).toBeNull();
+    await user.click(screen.getByRole('button', { name: /运行命令/ }));
+    const block = codeBlock(container);
+    expect(block).toBeTruthy();
+    expect(block!.textContent).toContain('"output"');
+    expect(block!.textContent).toContain('ls -la');
+    expect(block!.textContent).toContain('total 0');
+    await user.click(screen.getByRole('button', { name: /运行命令/ }));
+    expect(codeBlock(container)).toBeNull();
   });
 
   it('没有 input/output 时按钮 disabled，点击不展开', async () => {
     const user = userEvent.setup();
-    render(<ToolCard event={toolEvent({ status: 'completed', input: undefined, output: undefined })}/>);
+    const { container } = render(<ToolCard event={toolEvent({ status: 'completed', input: undefined, output: undefined })}/>);
     const button = screen.getByRole('button');
     expect((button as HTMLButtonElement).disabled).toBe(true);
     await user.click(button);
-    expect(screen.queryByText(/"input"/)).toBeNull();
+    expect(codeBlock(container)).toBeNull();
   });
 
   it('ongoing 且未终结时默认展开；ongoing 但已完成则默认收起', () => {
-    const { unmount } = render(<ToolCard event={toolEvent({ status: 'running', output: 'partial' })} ongoing/>);
-    expect(screen.getByText(/"output"/)).toBeTruthy();
-    unmount();
-    render(<ToolCard event={toolEvent({ status: 'completed', output: 'done' })} ongoing/>);
-    expect(screen.queryByText(/"output"/)).toBeNull();
+    const running = render(<ToolCard event={toolEvent({ status: 'running', output: 'partial' })} ongoing/>);
+    expect(codeBlock(running.container)?.textContent).toContain('"output"');
+    running.unmount();
+    const completed = render(<ToolCard event={toolEvent({ status: 'completed', output: 'done' })} ongoing/>);
+    expect(codeBlock(completed.container)).toBeNull();
   });
 });
 
@@ -107,7 +114,7 @@ describe('ToolBatch 聚合状态', () => {
     const { container } = render(<ToolBatch description="读取三个文件" events={batch(['completed', 'completed', 'completed'])}/>);
     expect(screen.getByText('已完成')).toBeTruthy();
     expect(screen.getByText('3 次操作')).toBeTruthy();
-    expect(container.querySelector('span.rounded-full')?.className).toContain('bg-[var(--status-success-solid)]');
+    expect(container.querySelector('span.rounded-full')?.className).toContain('bg-success-solid');
   });
 
   it('有完成也有失败 → 「部分失败」（不是笼统的「失败」）', () => {

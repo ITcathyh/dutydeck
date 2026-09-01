@@ -81,10 +81,16 @@ describe('WorkspaceOverview', () => {
     expect(screen.getByRole('region', { name: '任务列表' }).querySelectorAll('[data-task-priority]')).toHaveLength(8);
   });
 
+  // 契约 §9 要求主要交互的触控高度 ≥40px。两个入口现在用两种方式表达同一条下限：
+  // 「创建任务」走 Button 原语，它把 md 档写成固定 `h-10`（恰好 40px）；筛选芯片
+  // 仍是原生 button，用 `min-h-10` 保留纵向增长空间（芯片文案换行时不能被压扁）。
+  // 断言接受两种写法，但不接受任何更矮的档位——`h-8` / `min-h-8` 一样会挂。
+  const meetsTouchTarget = (node: HTMLElement) => /(?:^|\s)(?:min-)?h-10(?:\s|$)/.test(node.className);
+
   it('主操作与状态筛选提供至少 40px 触控目标', () => {
     render(<WorkspaceOverview sessions={[]} summaries={{}} agents={agents} loading={false} larkBots={0} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
-    expect(screen.getByRole('button', { name: '创建任务' }).className).toContain('min-h-10');
-    expect(screen.getByRole('button', { name: /总览 0/ }).className).toContain('min-h-10');
+    expect(meetsTouchTarget(screen.getByRole('button', { name: '创建任务' }))).toBe(true);
+    expect(meetsTouchTarget(screen.getByRole('button', { name: /总览 0/ }))).toBe(true);
   });
 
   it('待处理任务优先展示经脱敏的 Runtime 错误摘要', () => {
@@ -150,6 +156,22 @@ describe('WorkspaceOverview', () => {
     const row = screen.getByRole('button', { name: /归档时还在思考/ });
     expect(row.textContent).toContain('已归档');
     expect(row.textContent).not.toContain('思考中');
+  });
+
+  /*
+    「当前视图没有任务」是好消息，不是失败。契约 §10 给 EmptyState 定了三档 tone，
+    并明写 positive「不得用灰色失望感呈现」——把「你已经处理完了」画成灰色空盒子，
+    是在为一件好事道歉。
+
+    这条守的是 tone 选择本身：positive 档会渲染绿勾图标（EmptyState 在 tone=positive
+    且调用方没传 icon 时的默认），neutral 档不会。改成 neutral 立刻挂。
+  */
+  it('筛不出结果时用 positive 空态，不把「没有待办」画成灰色失望感', () => {
+    const { container } = render(<WorkspaceOverview {...baseProps} sessions={[session('1', '/repo/done', 'completed')]} view="attention"/>);
+    expect(screen.getByText('当前视图没有任务')).toBeTruthy();
+    const glyph = container.querySelector('.ui-empty-state span');
+    expect(glyph?.className).toContain('text-success');
+    expect(glyph?.className).not.toContain('text-subtle');
   });
 
   it('数据就绪后仍然如实展示空状态', () => {

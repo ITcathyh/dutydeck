@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { ChevronRight, CircleStop, CircleX, LoaderCircle, MessageSquare } from 'lucide-react';
+import { ChevronRight, CircleStop, CircleX, MessageSquare } from 'lucide-react';
 import type { TimelineActivityGroup } from '../timeline';
 import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
+import { Spinner } from './primitives';
 import { ActivityGroupPanel } from './ToolCard';
 
 export function ActivityPanel({ groups, ongoing, hasAnswer = false, taskStatus = 'running', modelLabel, startedAt, completedAt }: { groups: TimelineActivityGroup[]; ongoing: boolean; hasAnswer?: boolean; taskStatus?: string; modelLabel: string; startedAt?: string; completedAt?: string }) {
@@ -11,21 +12,22 @@ export function ActivityPanel({ groups, ongoing, hasAnswer = false, taskStatus =
   const failed = taskStatus === 'failed';
   const incomplete = taskStatus === 'incomplete';
   const statusLabel = ongoing ? '执行中' : interrupted ? '已取消' : failed ? '已失败' : incomplete ? '未完成' : '已完成';
-  const statusTone = ongoing ? 'text-[var(--status-info)]' : interrupted ? 'text-[var(--text-muted)]' : failed ? 'text-[var(--status-danger)]' : incomplete ? 'text-[var(--status-warning)]' : 'text-[var(--status-success)]';
+  const statusTone = ongoing ? 'text-info' : interrupted ? 'text-subtle' : failed ? 'text-danger' : incomplete ? 'text-warning' : 'text-success';
   const missingFinal = !ongoing && !hasAnswer;
   const missingFinalText = interrupted ? '任务已中断，未产生最终输出。' : failed ? '任务执行失败，未产生最终输出。' : 'Agent 未返回最终输出。';
   return <>
-  <details open={open} onToggle={event => setOpen(event.currentTarget.open)} aria-live={ongoing ? 'polite' : undefined} aria-label={`${modelLabel} 执行过程`} className="reasoning ui-timeline-item group/turn my-3 border-b border-[var(--border-default)] text-sm text-[var(--text-muted)]">
-    <summary className="flex min-h-11 cursor-pointer select-none items-center gap-2 py-2.5 text-[12px] font-medium text-[var(--text-muted)] outline-none transition-colors hover:text-[var(--text-primary)] focus-visible:rounded-md focus-visible:ring-2 focus-visible:ring-[var(--border-default)] focus-visible:ring-inset">
+  <details open={open} onToggle={event => setOpen(event.currentTarget.open)} aria-live={ongoing ? 'polite' : undefined} aria-label={`${modelLabel} 执行过程`} className="reasoning ui-timeline-item group/turn my-3 border-b border-default text-body text-subtle">
+    <summary className="flex min-h-11 cursor-pointer select-none items-center gap-2 py-2.5 text-caption font-medium text-subtle outline-none transition-colors hover:text-primary focus-visible:rounded-md focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-inset">
       <span className="whitespace-nowrap">{elapsed ? `${ongoing ? '已耗时' : '耗时'} ${elapsed}` : '查看执行过程'}</span>
-      {ongoing ? <LoaderCircle size={11} className="shrink-0 animate-spin text-[var(--status-info-solid)]"/> : <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${interrupted ? 'bg-[var(--status-neutral-solid)]' : failed ? 'bg-[var(--status-danger-solid)]' : incomplete ? 'bg-[var(--status-warning-solid)]' : 'bg-[var(--status-success-solid)]'}`}/>}<span className={`shrink-0 whitespace-nowrap text-[10px] ${statusTone}`}>{statusLabel}</span>
-      <ChevronRight size={13} className="shrink-0 text-[var(--text-muted)] transition-transform group-open/turn:rotate-90"/>
-      {groups.length > 0 && <span className="ml-auto text-[10px] tabular-nums text-[var(--text-muted)]">{groups.length} 个阶段</span>}
+      {/* 转圈是纯装饰：状态文案就在旁边，不传 label，避免读屏重复播报。 */}
+      {ongoing ? <span className="shrink-0 text-info-solid"><Spinner/></span> : <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${interrupted ? 'bg-neutral-solid' : failed ? 'bg-danger-solid' : incomplete ? 'bg-warning-solid' : 'bg-success-solid'}`}/>}<span className={`shrink-0 whitespace-nowrap text-caption ${statusTone}`}>{statusLabel}</span>
+      <ChevronRight size={13} className="shrink-0 text-subtle transition-transform group-open/turn:rotate-90"/>
+      {groups.length > 0 && <span className="ml-auto text-caption tabular-nums text-subtle">{groups.length} 个阶段</span>}
     </summary>
     <div className="pb-3 pl-5">
-      {groups.length ? groups.map((group, index) => <ActivityGroupPanel key={group.id} group={group} ongoing={ongoing && index === groups.length - 1}/>) : <div className="flex items-center gap-2 py-2 text-[11px] text-[var(--text-muted)]"><LoaderCircle size={12} className="animate-spin"/>等待模型输出</div>}
+      {groups.length ? groups.map((group, index) => <ActivityGroupPanel key={group.id} group={group} ongoing={ongoing && index === groups.length - 1}/>) : <div className="flex items-center gap-2 py-2 text-caption text-subtle"><Spinner/>等待模型输出</div>}
     </div>
   </details>
-  {missingFinal && <div role="status" className="ui-timeline-item my-4 flex items-center gap-2 text-[12px] text-[var(--text-muted)]">{failed ? <CircleX size={14} className="text-[var(--status-danger-solid)]"/> : interrupted ? <CircleStop size={14} className="text-[var(--text-muted)]"/> : <MessageSquare size={14} className={incomplete ? 'text-[var(--status-warning-solid)]' : 'text-[var(--text-muted)]'}/>}<span>{missingFinalText}</span></div>}
+  {missingFinal && <div role="status" className="ui-timeline-item my-4 flex items-center gap-2 text-caption text-subtle">{failed ? <CircleX size={14} className="text-danger-solid"/> : interrupted ? <CircleStop size={14} className="text-subtle"/> : <MessageSquare size={14} className={incomplete ? 'text-warning-solid' : 'text-subtle'}/>}<span>{missingFinalText}</span></div>}
   </>;
 }

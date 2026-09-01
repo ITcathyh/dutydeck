@@ -58,6 +58,22 @@ describe('Lark card service', () => {
     expect(footer.columns).toHaveLength(1);
   });
 
+  it('没有 sessionId 时，Web 出口指向任务中心而不是会命中 not-found 的 /sessions', () => {
+    // Web 路由只认 /sessions/:id，裸 /sessions 会落到「找不到这个页面」。
+    // 任务尚未建立 session 时（解析中、排队中）飞书卡片仍要给出可用的去向。
+    const withoutSession: any = buildLarkCard({ state: 'queued', taskId: 't1', webBaseUrl: 'https://web.example.com' });
+    const withSession: any = buildLarkCard({ state: 'running', taskId: 't2', webBaseUrl: 'https://web.example.com', sessionId: 'ses_1' });
+    const detailUrl = (card: any) => byId(card, 'view_detail')?.behaviors?.[0]?.default_url;
+    const footerLink = (card: any) => card.body.elements.at(-1)?.columns?.at(-1)?.elements?.[0]?.content ?? '';
+
+    expect(detailUrl(withoutSession)).toBe('https://web.example.com/');
+    expect(footerLink(withoutSession)).toContain('(https://web.example.com/)');
+    expect(JSON.stringify(withoutSession)).not.toContain('web.example.com/sessions');
+
+    expect(detailUrl(withSession)).toBe('https://web.example.com/sessions/ses_1');
+    expect(footerLink(withSession)).toContain('(https://web.example.com/sessions/ses_1)');
+  });
+
   it('keeps state-specific actions in the top prompt row', () => {
     const queued: any = buildLarkCard({ state: 'queued', taskId: 'queued' });
     const running: any = buildLarkCard({ state: 'running', taskId: 'running' });

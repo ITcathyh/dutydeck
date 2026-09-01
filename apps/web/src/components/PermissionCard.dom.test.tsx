@@ -21,4 +21,21 @@ describe('PermissionCard', () => {
     expect(screen.getByText('已允许')).toBeTruthy();
     expect(screen.queryByRole('button')).toBeNull();
   });
+
+  // 全站风险最高的两个决策按钮曾是 h-8（32px），低于契约 §9 的 40px 触控目标。
+  // 用 Button 默认 md 档后是 h-10；这条守的是别有人把它改回 size="sm"。
+  it('允许 / 拒绝的触控目标是 40px，不是 32px', () => {
+    render(<PermissionCard event={permission('pending')} onResolve={() => {}}/>);
+    for (const name of ['允许', '拒绝']) expect(screen.getByRole('button', { name }).className).toContain('h-10');
+  });
+
+  // resolving 期间原先是手写转圈图标，现由 Button 的 loading 渲染 Spinner 并置 aria-busy。
+  // 两个按钮都必须点不动，否则用户能重复提交同一条授权。
+  it('resolving 期间两个按钮都禁用，「允许」标记 aria-busy', () => {
+    render(<PermissionCard event={permission('pending')} resolving onResolve={() => {}}/>);
+    const approve = screen.getByRole('button', { name: '允许' }) as HTMLButtonElement;
+    expect(approve.disabled).toBe(true);
+    expect(approve.getAttribute('aria-busy')).toBe('true');
+    expect((screen.getByRole('button', { name: '拒绝' }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
