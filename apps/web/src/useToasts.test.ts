@@ -20,11 +20,11 @@ afterEach(() => {
 describe('toastStore 基础行为', () => {
   it('push 返回可用于 dismiss 的 id，且 id 不重复', () => {
     const first = toastStore.push({ kind: 'success', title: '已发送指令' });
-    const second = toastStore.push({ kind: 'success', title: '已归档任务运行' });
+    const second = toastStore.push({ kind: 'success', title: '任务已归档' });
     expect(first).not.toBe(second);
     expect(toastStore.getSnapshot().map(toast => toast.id)).toEqual([first, second]);
     toastStore.dismiss(first);
-    expect(titles()).toEqual(['已归档任务运行']);
+    expect(titles()).toEqual(['任务已归档']);
   });
 
   it('dismiss 不存在的 id 不抛错、也不改变快照引用', () => {
@@ -35,7 +35,7 @@ describe('toastStore 基础行为', () => {
   });
 
   it('clear 清空全部通知', () => {
-    toastStore.push({ kind: 'success', title: '已重启任务运行' });
+    toastStore.push({ kind: 'success', title: '任务已重新启动' });
     toastStore.push({ kind: 'error', title: '重启失败' });
     toastStore.clear();
     expect(titles()).toEqual([]);
@@ -237,7 +237,7 @@ describe('useToasts 订阅', () => {
 
   it('定时器到点时 hook 同步收起该通知', () => {
     const { result } = renderHook(() => useToasts());
-    act(() => { toastStore.push({ kind: 'success', title: '已归档任务运行' }); });
+    act(() => { toastStore.push({ kind: 'success', title: '任务已归档' }); });
     expect(result.current.toasts).toHaveLength(1);
     act(() => { vi.advanceTimersByTime(TOAST_DURATIONS.success); });
     expect(result.current.toasts).toEqual([]);

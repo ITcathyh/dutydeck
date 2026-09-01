@@ -4,7 +4,7 @@ import { api, type Session, type Task } from './api';
 import { EVENT_PAGE_SIZE, mergeLiveEvent, mergeReconciledEvents, newestSequence, type EventWindow } from './event-history';
 import { SessionStream, applyStatusEvent, upsertTask, type StreamStatus } from './sse';
 
-// 订阅当前会话的 SSE 事件流，把事件 merge 进 TanStack Query 缓存；
+// 订阅当前任务的 SSE 事件流，把事件 merge 进 TanStack Query 缓存；
 // 断线时由 SessionStream 按指数退避自动重连（原生 EventSource 重连会自动带 Last-Event-ID header）
 export function useSessionStream(sessionId: string | undefined, runId: string | undefined, enabled: boolean): StreamStatus {
   const qc = useQueryClient();

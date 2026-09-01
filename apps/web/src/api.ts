@@ -80,7 +80,7 @@ export const api = {
   login: (token: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }),
   logout: () => json<BrowserAuthState>('/api/auth/logout', { method: 'POST' }),
   agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh)), sessions: () => json<Session[]>('/api/sessions'), events: (id: string, query?: EventWindowQuery) => json<DockEvent[]>(eventsUrl(id, query)), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
-  // 跨运行标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
+  // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),
   create: (body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode }) => json<Session>('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   send: (id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue') => json<{ accepted: true; task: Task }>(`/api/sessions/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, mode }) }),
