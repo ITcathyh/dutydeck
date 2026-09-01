@@ -70,6 +70,10 @@ describe('App mobile navigation accessibility', () => {
    * WorkspaceOverview 内部的 overflow-y-auto 容器）。IconButton 自身背景透明，
    * 一旦外壳也透明，滚动后图标就压在任务卡片正文上——难读且会误触。
    * 这条断言守住外壳的不透明背景：改回透明立刻挂。
+   *
+   * 语义类替代了内联 token（契约 §1.2），断言跟着换名，守护的意图不变：
+   * 不透明底 + 外圈 + 阴影，让它明确是悬浮控件而不是一个透明图标。
+   * 外圈在这里合法——契约 §5 白名单第 3 类「脱离文档流的浮层外圈」。
    */
   it('gives the floating mobile navigation trigger an opaque surface so scrolled task cards never show through it', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
@@ -77,9 +81,11 @@ describe('App mobile navigation accessibility', () => {
     renderApp();
     const trigger = await screen.findByRole('button', { name: '打开工作台导航' });
     const shell = trigger.parentElement!;
-    expect(shell.className).toContain('bg-[var(--surface-default)]');
-    expect(shell.className).toContain('border-[var(--border-default)]');
-    expect(shell.className).toContain('shadow-[var(--shadow-card)]');
+    expect(shell.className).toContain('bg-surface');
+    expect(shell.className).toContain('border-default');
+    expect(shell.className).toContain('shadow-card');
+    // 透明底会让图标压在滚过的任务卡片正文上，既读不清又会误触。
+    expect(shell.className).not.toMatch(/bg-transparent/);
     // 桌面端侧边栏常驻，这枚按钮必须彻底消失。
     expect(shell.className).toContain('md:hidden');
   });
@@ -400,5 +406,107 @@ describe('App 搜索、快捷键与通知接线', () => {
     expect((composer as HTMLTextAreaElement).value).toBe('net');
     expect(screen.queryByRole('dialog', { name: '创建新任务' })).toBeNull();
     expect(screen.queryByRole('dialog', { name: /归档/ })).toBeNull();
+  });
+});
+
+/**
+ * 浮层的 URL 状态（契约 §11.4）。
+ *
+ * 重构前 9 个浮层全无 URL 表示：设置页分享不出去、后退键关不掉弹层（会直接跳走）、
+ * 刷新即丢失。这组测试守住「可深链的四个浮层」的完整往返。
+ */
+describe('可深链浮层的 URL 契约', () => {
+  const mockFoundation = () => {
+    const foundation = { schemaVersion: 1 as const, repositoriesWired: true, permissionEvaluatorWired: true, secretInspectorWired: true, runtimeWired: false as const, writesEnabled: true, readiness: 'offline_management_ready' as const, blockers: [] };
+    const schedules = { schemaVersion: 1 as const, repositoriesWired: true, permissionEvaluatorWired: true, writesEnabled: true, executorWired: false as const, uiEntryReady: false as const, readiness: 'offline_management_ready' as const, blockers: [] };
+    vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(foundation);
+    vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue({ capabilities: foundation, bots: [] });
+    vi.spyOn(foundationApi, 'secretRefs').mockResolvedValue({ secretRefs: [] });
+    vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue(schedules);
+    vi.spyOn(scheduleApi, 'list').mockResolvedValue({ capabilities: schedules, schedules: [] });
+  };
+
+  it('打开设置写进 URL，关闭后退回原地址', async () => {
+    mockAppApi();
+    mockFoundation();
+    renderApp();
+    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    await userEvent.click(within(navigation).getByRole('button', { name: /Agent 与设置/ }));
+    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    expect(window.location.search).toBe('?panel=settings&section=agents');
+
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull());
+    // 关闭走 history.back()，不是再 push 一条——否则后退会把刚关掉的浮层重新打开。
+    await waitFor(() => expect(window.location.search).toBe(''));
+    expect(window.location.pathname).toBe('/');
+  });
+
+  it('直接深链进设置页时自动打开，且不叠加新的历史记录', async () => {
+    window.history.replaceState(null, '', '/?panel=settings&section=lark');
+    mockAppApi();
+    mockFoundation();
+    const pushState = vi.spyOn(window.history, 'pushState');
+    renderApp();
+    expect(await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeTruthy();
+    expect(pushState).not.toHaveBeenCalled();
+  });
+
+  it('深链关闭时用 replaceState 抹掉 query，不 back 出站', async () => {
+    window.history.replaceState(null, '', '/?panel=settings&section=agents');
+    mockAppApi();
+    mockFoundation();
+    const back = vi.spyOn(window.history, 'back');
+    renderApp();
+    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(window.location.search).toBe(''));
+    // history.state 上没有我们的标记 ⇒ 这条 entry 不是我们 push 的，back() 会离开站点。
+    expect(back).not.toHaveBeenCalled();
+  });
+
+  it('后退键关闭浮层，而不是跳走', async () => {
+    mockAppApi();
+    mockFoundation();
+    renderApp();
+    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    await userEvent.click(within(navigation).getByRole('button', { name: /Agent 与设置/ }));
+    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+
+    await act(async () => { window.history.back(); await new Promise(resolve => setTimeout(resolve, 30)); });
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull());
+    expect(window.location.pathname).toBe('/');
+    expect(window.location.search).toBe('');
+  });
+
+  it('浮层可以叠在任务详情上，关闭后仍留在该任务', async () => {
+    window.history.replaceState(null, '', '/sessions/s1?panel=settings&section=agents');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录态')] });
+    mockFoundation();
+    renderApp();
+    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull());
+    // 关掉设置不应该把用户踢回任务中心。
+    expect(window.location.pathname).toBe('/sessions/s1');
+    expect(window.location.search).toBe('');
+  });
+
+  it('归档确认框没有 URL 表示，深链打不开', async () => {
+    // 深链等于让一条链接直接对别人的任务弹出不可逆操作的确认框。
+    window.history.replaceState(null, '', '/sessions/s1?panel=archive');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录态')] });
+    renderApp();
+    // 标题在侧栏和详情页各出现一次，这里只需确认详情已渲染。
+    await waitFor(() => expect(screen.getAllByText('修复登录态').length).toBeGreaterThan(0));
+    expect(screen.queryByRole('dialog', { name: /归档/ })).toBeNull();
+  });
+
+  it('未知 panel 值不打开任何浮层', async () => {
+    window.history.replaceState(null, '', '/?panel=totally-made-up');
+    mockAppApi();
+    renderApp();
+    expect(await screen.findByRole('heading', { name: '今天需要推进什么？' })).toBeTruthy();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
