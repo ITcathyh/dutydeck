@@ -335,3 +335,44 @@ botmux 的教训：它定义了 8 档字号 token，实际引用 41 次，硬编
 | 手写空态 21 份 | `<EmptyState>` |
 | 手写骨架 12 份 | `<Skeleton>` |
 | 手写 spinner 19 份 | `<Spinner>` |
+
+## 14. Phase 1 落地实况（2026-09-01）
+
+三队并发交付 + 整合，实测结果与契约的差异如下。**差异都有实测支撑，不是妥协。**
+
+| 项 | 契约目标 | 实测 |
+| --- | --- | --- |
+| 内联 `var(--token)` | 0 | **0** |
+| 硬编码字号 | 0 | **0** |
+| 共享原语 | — | **16 个** |
+| 测试 | 不低于 1913 | **2206 passed / 1 failed**（失败项为本机环境污染） |
+
+### 已知例外（各有实测依据）
+
+1. **`CommandPalette` 不用 `useEscapeKey`**。三个 jsdom 探针实测：只用 hook →
+   外层 React `onKeyDown` 仍被调用（1/1）；hook + React `stopPropagation` → 0/0；
+   hook + 原生 `stopPropagation` → 0/0。React 挂在 root container 而 `document`
+   在冒泡链末端，中途 stop 会连 hook 一起掐死。**要兼得须把 hook 改捕获阶段**——
+   那是冻结 API，挂 Phase 2，届时三处探针要重跑。
+
+2. **`LarkConfigModal` 的「显示 Secret」保留手写按钮**。`IconButton` 是 40×40，
+   套进 40px 高的输入框会撑破它；手写版命中区仍做到 40×40，输入框补 `pr-10`。
+
+3. **`shadow-row-active` 单列一档**。侧栏选中行的左侧色条是「选中」的视觉承载而非
+   分层阴影，复用 card/panel 那五档语义不符。
+
+### Phase 2 待办（本轮刻意不做）
+
+- 删 `ui.tsx` 的 `IconButton` 与 `stateBadgeStyle`（已确认全仓无引用，是死代码）
+- 删 `useDialogFocus` 的两段补偿逻辑（前提：11 份壳全迁完 + 两个漏挂 ref 的弹层修好，
+  本轮已满足前半，需复核 `App.dom.test.tsx` 的 inert 断言）
+- `useEscapeKey` 改捕获阶段，然后统一 `CommandPalette`
+- 原语加 `tone="sidebar"`：`Skeleton`/`EmptyState`/`Button` 都写死内容表面色，
+  套到恒深色侧栏上浅色主题会深字压深底，目前靠 arbitrary variant 覆盖
+- `IconButton` 透传 rest props，让 Composer 三个面板触发钮也能收敛
+
+### 一致性测试的实际拦截记录
+
+它不是摆设，本轮真的拦下了两次：
+- 我把通知里的「撤销」写成 `Button size="sm"`（32px），触控断言当场红；
+- `white/[.07]` 躲过了原生色阶正则——**测试漏了**，已补第 5 条规则并补 token。
