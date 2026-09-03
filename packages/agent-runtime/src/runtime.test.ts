@@ -756,4 +756,169 @@ describe('publishSessionEvent — 带外事件入口（@dockmux/relay 的落点�
 
     await h.runtime.shutdown(); h.repos.close();
   });
+  /**
+   * 【已知缺陷 · 未修复】忙碌轮次中 stop / archive / restart 永久挂起
+   *
+   * 现象（隔离实例 + 假 claude CLI，pty-cli 协议，多次稳定复现）：
+   *   - 会话空闲 / 已完成时：POST /stop        → 110ms 返回 200
+   *   - 会话处于忙碌轮次（thinking）时：
+   *       POST /stop / /archive / /restart     → 20s 打满仍不返回，状态卡在 thinking
+   *   - 同样忙碌，但有人在订阅 /api/sessions/:id/stream 时：
+   *       POST /archive                        → 117ms 返回 200
+   *   - POST /interrupt 始终不受影响（11ms 返回）——因为 interrupt()（index.ts:546）
+   *     压根不调 waitForTurn，发完 driver.interrupt() 直接返回。不是它更可靠，是它不等。
+   *
+   * 代码坐标：
+   *   - stop()            index.ts:622，其中 :627 无条件 `await this.waitForTurn(id)`
+   *   - archive()         index.ts:631 先调 stop()
+   *   - restart()         index.ts:643 先调 stop()
+   *   - waiter 只在两处 resolve：轮次自然走完的 finally（:454）、驱动进程退出
+   *     notifyDriverExit（:672）。两处都没发生，就是永久等待。
+   *
+   * ── 关于「没有 SSE 订阅者所以轮次不推进」这条解释：已被证伪，别再复用 ──
+   *
+   * 我最初据「有订阅者 117ms / 无订阅者挂死」的对照给出过这个因果，整合者反驳得对：
+   * emit()（:257）用的是 Node EventEmitter 的同步派发，无监听者时是空操作，不阻塞；
+   * 事件先 `await this.repos.events.append(event)` 落库，那一步与订阅者无关。
+   * 「事件消费链被抽干」在代码上没有依据。
+   *
+   * 我随后做了两次定向观测，结论是**订阅者和 driver 都不是真因**：
+   *
+   *   观测 A（真实 PtyCliDriver + 假 CLI，忙碌轮次中直接调 driver.stop()）：
+   *     driver.stop() 1ms 就返回，并把 send() 的 promise 以 'Driver stopped' reject，
+   *     onExit(code=0) 也正常回调。→ driver 侧行为完全正确，不是它不返回。
+   *
+   *   观测 B（本文件同款 harness，driver.send 永不 resolve、driver.stop 立即 resolve，
+   *           全程零 HTTP、零 SSE、emitter 上一个监听者都没有）：
+   *     runtime.stop() 仍然挂死 6s+ 超时。→ 在完全没有「订阅者」这个变量的环境里
+   *     照样复现，直接排除订阅者假设。
+   *
+   * 由此定位到真因在 runtime 自身的顺序上：stop() 先 `await driver.stop()`，
+   * 此时 driver 已把 send() reject 掉，但 runTask 的 catch/finally 是在**另一条
+   * 异步链**上跑的；stop() 紧接着 `await this.waitForTurn(id)` 时，若那条链尚未推进到
+   * finally（:451-455）去 resolve waiters，stop() 就再也等不到了。有 SSE 订阅者时
+   * 之所以「恰好好了」，最可能是订阅带来的额外 I/O / 微任务让那条链先跑到了 finally
+   * ——即**时序巧合，不是因果**。这一点尚未被单独证明，留给修复者验证。
+   *
+   * 为什么当时 skip 而不修：三支前端队正在并发改 UI，此刻改 runtime 核心会让那一轮
+   * 改版的验证结论不可信（出问题分不清是布局还是 runtime）。
+   *
+   * ── 2026-09-03 已修复，本用例转为回归守卫 ──
+   *
+   * 修法：`waitForTurn` 加 2s 上限（index.ts）。**不是**"修好竞争"——竞争可以调顺序
+   * 缓解，但根子上，等待一条自己不掌控的异步链本就不该没有上限。到点就往下走，
+   * 让 stop 的后续清理（cancelSessionQueue / releaseSessionMemory / saveState）
+   * 照常执行；那些清理才是 stop 的实质，调用方拿到的仍然是"已停止"。
+   *
+   * 取值踩过一次坑：初版设 5s，正好等于本用例的判定窗口，成了平局竞态，测试照样红。
+   * 改 2s 后通过（实测 2081ms）。教训是**兜底必须明显快于调用方的耐心阈值**，
+   * 贴着边设等于没设。
+   *
+   * 上面「时序巧合而非因果」那一条**仍未被单独证明**，修复没有依赖它——
+   * 超时兜底对两种解释都成立。想深究的人可以从那里接着查。
+   */
+  it('忙碌轮次中 stop() 不应永久挂起（2026-09-03 缺陷回归守卫）', async () => {
+    // driver.send 永不 resolve = 轮次一直忙；driver.stop 立即 resolve = 与实测的
+    // 真实 PtyCliDriver 行为一致（1ms 返回）。这样复现里唯一的变量就只剩 runtime。
+    const neverEndingTurn = new Promise<void>(() => {});
+    const h = harness();
+    h.driver.send = vi.fn(async () => neverEndingTurn);
+
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    void h.runtime.send(session.id, 'busy work').catch(() => { /* 这一轮不会结束 */ });
+    await vi.waitFor(async () => expect((await h.runtime.getSession(session.id))?.state).toBe('thinking'));
+
+    const outcome = await Promise.race([
+      h.runtime.stop(session.id).then(() => 'returned' as const),
+      new Promise<'hung'>(resolve => { setTimeout(() => resolve('hung'), 5_000); })
+    ]);
+    expect(outcome, 'stop() 在忙碌轮次中必须能返回，而不是永久等待 waitForTurn').toBe('returned');
+    expect(h.driver.stop).toHaveBeenCalled();
+
+    await h.runtime.shutdown(); h.repos.close();
+  }, 15_000);
+});
+
+describe('重启后的忙碌态回收', () => {
+  /*
+    2026-09-03 线上实测：4310 实例上 3 个会话卡在 thinking，界面一直放呼吸动画，
+    而它们的 cwd(/tmp/dockmux-test) 早被删除、任务记录已经是 failed——
+    **会话态与任务态互相矛盾**，用户分不出「真在想」和「进程三天前就死了」。
+
+    原有三条回收分支都漏了这种形状：第一条只认 created/starting/failed 且无任务记录，
+    第二条只认有 running 任务的（SIGKILL 时任务状态来不及落库），第三条只认旧队列。
+  */
+  const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+  const stamp = new Date().toISOString();
+  const boot = async (seed: (repos: ReturnType<typeof createRepositories>) => Promise<void>) => {
+    const repos = createRepositories(':memory:');
+    await repos.agents.save(agent);
+    await seed(repos);
+    const runtime = new DockmuxRuntime(repos, { probe: () => ({ protocol: 'acp' as const, available: true, pause: false, resume: true }), driverFactory: () => ({ start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) }) });
+    await runtime.initialize([agent]);
+    return { repos, runtime };
+  };
+
+  it('把重启后不可能仍在跑的忙碌会话落到 stopped 并说明原因', async () => {
+    const { repos, runtime } = await boot(async seeded => {
+      // 复刻线上那三个：会话 thinking，任务却已经是 failed
+      await seeded.sessions.save({ id: 'ses_zombie', agentId: 'mock', state: 'thinking', cwd: '/tmp/gone', permissionMode: 'full-trust', source: 'web', protocol: 'acp', runId: 'run_old', createdAt: stamp, updatedAt: stamp });
+      await seeded.tasks.save({ id: 'task_dead', sessionId: 'ses_zombie', prompt: 'p', status: 'failed', createdAt: stamp, updatedAt: stamp });
+    });
+    const session = await runtime.getSession('ses_zombie');
+    expect(session?.state).toBe('stopped');
+    // 光改状态不够：不说原因，用户只会以为自己的任务被无声吞了
+    expect(session?.error).toContain('守护进程重启');
+    await runtime.shutdown(); repos.close();
+  });
+
+  it('五个忙碌态一个都不漏', async () => {
+    /*
+      注意每个会话都带一条任务记录：第一条回收分支（created/starting/failed 且
+      **无任务记录** → 判 failed 并归档）会先截胡 starting。那条分支是对的——
+      「启动就没成功过」标 failed 比 stopped 准确——所以这里要测的是「已经跑起来过、
+      然后进程没了」的形状，得让它落到本条兜底上。
+
+      初版断言没给任务记录，starting 拿到 failed 当场红。那不是产品 bug，
+      是我的断言把两种不同的场景混在了一起。
+    */
+    const busy = ['starting', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting'] as const;
+    const { repos, runtime } = await boot(async seeded => {
+      for (const state of busy) {
+        await seeded.sessions.save({ id: `ses_${state}`, agentId: 'mock', state, cwd: '/tmp/gone', permissionMode: 'full-trust', source: 'web', protocol: 'acp', runId: 'run_old', createdAt: stamp, updatedAt: stamp });
+        await seeded.tasks.save({ id: `task_${state}`, sessionId: `ses_${state}`, prompt: 'p', status: 'failed', createdAt: stamp, updatedAt: stamp });
+      }
+    });
+    for (const state of busy) expect((await runtime.getSession(`ses_${state}`))?.state, state).toBe('stopped');
+    await runtime.shutdown(); repos.close();
+  });
+
+  it('不碰已经是终态的会话', async () => {
+    // 回收只该管「撒谎的」状态。completed / interrupted 是真话，改了反而抹掉历史。
+    const settled = ['completed', 'interrupted', 'failed', 'idle'] as const;
+    const { repos, runtime } = await boot(async seeded => {
+      for (const state of settled) {
+        await seeded.sessions.save({ id: `ses_${state}`, agentId: 'mock', state, cwd: '/tmp/gone', permissionMode: 'full-trust', source: 'web', protocol: 'acp', runId: 'run_old', createdAt: stamp, updatedAt: stamp });
+        // 带一条任务记录，避开第一条回收分支（它只认「无任务记录」的）
+        await seeded.tasks.save({ id: `task_${state}`, sessionId: `ses_${state}`, prompt: 'p', status: 'completed', createdAt: stamp, updatedAt: stamp });
+      }
+    });
+    for (const state of settled) expect((await runtime.getSession(`ses_${state}`))?.state, state).toBe(state);
+    await runtime.shutdown(); repos.close();
+  });
+
+  it('有待执行队列的忙碌会话不标 stopped——它下一秒就要被重新调度', async () => {
+    /*
+      这条是写修复时发现的真实冲突：initialize 末尾会给有队列的会话调 scheduleQueue，
+      如果兜底排在它后面无差别地标 stopped，就会出现「正在跑却写着已停止」——
+      修掉一个矛盾又造一个新的。所以兜底必须排在 scheduleQueue 之前，并跳过有队列的。
+    */
+    const { repos, runtime } = await boot(async seeded => {
+      await seeded.sessions.save({ id: 'ses_queued', agentId: 'mock', state: 'thinking', cwd: '/tmp', permissionMode: 'full-trust', source: 'web', protocol: 'acp', runId: 'run_old', createdAt: stamp, updatedAt: stamp });
+      await seeded.tasks.save({ id: 'task_next', sessionId: 'ses_queued', prompt: 'p', status: 'queued', executionContext: { agentPrompt: 'p' }, createdAt: stamp, updatedAt: stamp });
+    });
+    expect((await runtime.getSession('ses_queued'))?.state).not.toBe('stopped');
+    await runtime.shutdown(); repos.close();
+  });
 });
