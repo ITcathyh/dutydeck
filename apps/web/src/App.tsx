@@ -25,7 +25,7 @@ import { captureDialogOpener } from './useDialogFocus';
 import { CommandPalette, type CommandAction } from './components/CommandPalette';
 import { ToastViewport } from './components/ToastViewport';
 import { toastStore } from './useToasts';
-import { ThemeToggle } from './components/ThemeToggle';
+import { TopBar } from './components/TopBar';
 import { useTheme } from './useTheme';
 import { shortcutAvailability, useKeyboardShortcuts, workbenchViewShortcutIds } from './useKeyboardShortcuts';
 import { ShortcutHelpSheet } from './components/ShortcutHelpSheet';
@@ -300,22 +300,17 @@ export default function App() {
     ] satisfies CommandAction[] : [])
   ];
   /**
-   * 移动端浮动汉堡按钮的外壳样式。
+   * 移动端导航入口现在只有一枚，在顶栏里（TopBar 的 md:hidden 汉堡）。
    *
-   * 这枚按钮绝对定位在 <main> 上，而真正滚动的是 WorkspaceOverview 内部的
-   * overflow-y-auto 容器（它是按钮的兄弟节点）。也就是说按钮固定不动，任务卡片
-   * 会从它下面滚过去。IconButton 自身 background 透明、只在 hover 才有底色，
-   * 于是滚动后图标会直接叠在「任务异常：…」这类正文上：既读不清，点图标间的
-   * 空隙还会穿透到卡片跳详情页。所以外壳必须自带不透明背景 + 边框 + 阴影，
-   * 让它是一枚明确悬浮在内容之上的控件，而不是一个透明图标。
+   * 在顶栏出现之前，这里还有一枚绝对定位在 <main> 上的浮动汉堡，另一枚在
+   * RunHeader 里，三处共用同一个无障碍名「打开工作台导航」。顶栏是常驻的，
+   * 再留着那两枚就等于同一时刻有两个同名按钮：读屏用户听到两遍、
+   * getByRole 直接抛 "found multiple elements"，而它们做的是同一件事。
    *
-   * md:hidden 必须保留：≥768px 时侧边栏 md:static 常驻，这枚按钮要彻底消失。
+   * 顺带解决了浮动汉堡的老问题——它压在滚动内容上，得靠不透明底 + 边框 + 阴影
+   * 才不至于和任务卡片正文糊在一起。挪进顶栏后它在自己的行里，不再需要这些补丁。
    */
-  const mobileNavigationTriggerClass = 'absolute left-3 top-3 z-sticky rounded-lg border border-default bg-surface shadow-card md:hidden';
-  const mobileNavigationButton = <div className={mobileNavigationTriggerClass}><IconButton label="打开工作台导航" onClick={openMobileNavigation}><Menu size={17}/></IconButton></div>;
-
   const renderNotFound = (kind: 'page' | 'session') => <div className="relative grid min-h-0 flex-1 place-items-center overflow-auto p-6">
-    {mobileNavigationButton}
     <Card as="section" padding="lg" className="w-full max-w-md text-center">
       <p className="text-meta font-semibold uppercase tracking-[.12em] text-warning">{kind === 'page' ? '页面不存在' : '任务不存在'}</p>
       <h1 className="mt-2 text-heading font-semibold text-primary">{kind === 'page' ? '找不到这个页面' : '找不到这个任务'}</h1>
@@ -325,7 +320,6 @@ export default function App() {
   </div>;
 
   const renderBlockingFailure = () => <div className="relative grid min-h-0 flex-1 place-items-center overflow-auto p-6">
-    {mobileNavigationButton}
     <Card as="section" role="alert" padding="lg" className="w-full max-w-lg">
       <p className="text-meta font-semibold uppercase tracking-[.12em] text-danger">数据未就绪</p>
       <h1 className="mt-2 text-heading font-semibold text-primary">无法加载任务中心</h1>
@@ -338,20 +332,31 @@ export default function App() {
   // 四个懒加载浮层的加载态是同一件事，只有文案不同。
   const overlayFallback = (label: string) => <div className="fixed inset-0 z-dialog grid place-items-center bg-scrim backdrop-blur-sm"><Spinner label={label}/></div>;
 
-  return <div className="relative flex h-[100dvh] min-h-[100dvh] overflow-hidden bg-canvas font-sans text-primary">
-    {mobileNavigationOpen && <button type="button" aria-label="关闭工作台导航" onClick={() => setSidebarOpen(false)} className="ui-overlay fixed inset-0 z-sticky bg-scrim backdrop-blur-[1px] md:hidden"/>}
-    <SessionList open={sidebarOpen} onClose={() => setSidebarOpen(false)} sessions={sortedSessions} summaries={runSummaries} sessionsLoading={sessions.isLoading} agents={agents.data ?? []} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} activeSessionId={activeSessionId} view={workbenchView} onSelect={selectSession} onNewSession={openCreateTask} onOpenControlCenter={() => openSettings('agents')} authRequired={authStatus.data?.required}/>
-    <main aria-hidden={mobileNavigationOpen || undefined} inert={mobileNavigationOpen || undefined} className="flex min-w-0 flex-1 flex-col">
+  return <div className="relative flex h-[100dvh] min-h-[100dvh] flex-col overflow-hidden bg-canvas font-sans text-primary">
+    <TopBar hidden={mobileNavigationOpen} onOpenNavigation={openMobileNavigation} onGoHome={() => selectSession(undefined)} onOpenSearch={openPalette} onOpenShortcuts={openHelp} themePreference={theme.preference} themeResolved={theme.resolved} onThemeChange={theme.setPreference}/>
+    {/*
+      顶栏之下的躯干。侧栏是 position:fixed 的浮动卡片而不是栅格列，所以这里是
+      普通的 block/flex 容器，主区靠 md:ml-main-inset 让位——--main-inset 就是
+      「侧栏左插入 + 侧栏宽 + 右间距」的唯一定义（tokens.css），主区不自己算像素。
+
+      让位只在 md: 及以上生效：窄屏侧栏是 translate-x 抽屉，浮在内容之上，主区
+      让位反而会留下一条永远空着的左边距。
+    */}
+    <div className="relative flex min-h-0 flex-1 overflow-hidden">
+      {mobileNavigationOpen && <button type="button" aria-label="关闭工作台导航" onClick={() => setSidebarOpen(false)} className="ui-overlay fixed inset-0 z-sticky bg-scrim backdrop-blur-[1px] md:hidden"/>}
+      <SessionList open={sidebarOpen} onClose={() => setSidebarOpen(false)} sessions={sortedSessions} summaries={runSummaries} sessionsLoading={sessions.isLoading} agents={agents.data ?? []} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} activeSessionId={activeSessionId} view={workbenchView} onSelect={selectSession} onNewSession={openCreateTask} onOpenControlCenter={() => openSettings('agents')} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })} authRequired={authStatus.data?.required}/>
+      <main aria-hidden={mobileNavigationOpen || undefined} inert={mobileNavigationOpen || undefined} className="flex min-w-0 flex-1 flex-col md:ml-main-inset">
       {route.kind !== 'not-found' && !blockingMainQueryFailures.length && staleMainQueryFailures.length > 0 && <div className="shrink-0 px-4 py-2"><Banner tone="warning" action={{ label: retryingMainQueries ? '重试中…' : '重试', busy: retryingMainQueries, onClick: () => void Promise.all(staleMainQueryFailures.map(failure => failure.retry())) }}><span className="block min-w-0 truncate" title={staleMainQueryFailures.map(failure => `${failure.label}：${failure.message}`).join('\n')}>部分数据可能不是最新：{staleMainQueryFailures.map(failure => failure.label).join('、')}</span></Banner></div>}
       {route.kind === 'not-found' ? renderNotFound('page') : blockingMainQueryFailures.length ? renderBlockingFailure() : route.kind === 'session' && sessions.isPending ? <div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载任务…"/></div> : missingActiveSession ? renderNotFound('session') : active ? <>
-        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onOpenSidebar={openMobileNavigation} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRaw}/>
+        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRaw}/>
         {actionError && <div className="shrink-0 px-4 py-2"><Banner tone="danger" onDismiss={() => setActionError(undefined)}>{actionError}</Banner></div>}
         {isPtyCli && <><div className="shrink-0 bg-surface px-3 sm:px-5"><RunDetailTabs value={detailTab} onChange={setDetailTab}/></div>{active.permissionMode === 'ask' && <div className="shrink-0 px-4 py-2 sm:px-5"><Banner tone="warning" action={{ label: '打开终端', onClick: () => setDetailTab('terminal') }}>此 CLI 的操作确认在终端中完成；若任务等待响应，请前往终端处理。</Banner></div>}</>}
         <div className="flex min-h-0 flex-1"><section className="flex min-w-0 flex-1 flex-col">{detailTab === 'terminal' && isPtyCli ? <div id="tabpanel-terminal" role="tabpanel" aria-labelledby="tab-terminal" tabIndex={0} className="min-h-0 flex-1 bg-terminal-bg p-2"><Suspense fallback={<div className="grid h-full place-items-center"><Spinner label="终端加载中…"/></div>}><TerminalView sessionId={active.id} className="h-full"/></Suspense></div> : <div id={isPtyCli ? 'tabpanel-timeline' : undefined} role={isPtyCli ? 'tabpanel' : undefined} aria-labelledby={isPtyCli ? 'tab-timeline' : undefined} tabIndex={isPtyCli ? 0 : undefined} className="flex min-h-0 flex-1 flex-col"><Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载执行记录…"/></div>}><TimelineView activeSessionId={activeSessionId} eventsLoading={events.isLoading} loadingEarlier={loadEarlier.isPending} hasEarlier={Boolean(events.data?.hasEarlier)} onLoadEarlier={() => loadEarlier.mutateAsync()} onResolvePermission={(permissionId, approved) => resolvePermission.mutate({ sessionId: active.id, permissionId, approved })} resolvingPermissionId={resolvePermission.isPending ? resolvePermission.variables?.permissionId : undefined} timeline={timeline} timelineSections={timelineSections} awaitingAnswer={awaitingAnswer} hasOngoingActivity={hasOngoingActivity} latestUserIndex={latestUserIndex} activeOutputLabel={activeOutputLabel}/></Suspense></div>} {active.archivedAt ? <div className="border-t border-default bg-surface px-4 py-3 text-center text-caption text-subtle">该任务已归档，只能查看历史记录。</div> : <Composer state={active.state} value={prompt} references={composerReferences} sending={send.isPending} mode={sendMode} queuedTasks={queuedTasks} cancellingTaskId={cancelQueued.variables?.taskId} steeringTaskId={steerQueued.variables?.taskId} skills={skills.data ?? []} models={activeModels.data?.models ?? []} reasoningEfforts={activeModels.data?.reasoningEfforts ?? []} currentModel={active.model ?? activeModels.data?.defaultModel} currentReasoningEffort={active.reasoningEffort ?? activeModels.data?.defaultReasoningEffort} context={contextStatsFromEvents(eventList)} advertisedCommands={commandsFromEvents(eventList)} filePicker={Boolean(systemCapabilities.data?.filePicker)} modelReadiness={modelReadiness} switchingModel={switchModel.isPending || busyStates.has(active.state)} switchingReasoningEffort={switchReasoningEffort.isPending || busyStates.has(active.state)} refreshingModels={activeModels.isFetching || refreshModels.isPending} onChange={setPrompt} onReferencesChange={setComposerReferences} onModeChange={setSendMode} onSubmit={submit} onInterrupt={() => void act('interrupt')} onCancelQueued={taskId => cancelQueued.mutate({ sessionId: active.id, taskId })} onSteerQueued={taskId => steerQueued.mutate({ sessionId: active.id, taskId })} onPickFile={async () => (await pickComposerFile.mutateAsync()).path} onModelChange={nextModel => switchModel.mutate({ sessionId: active.id, nextModel })} onReasoningEffortChange={nextReasoningEffort => switchReasoningEffort.mutate({ sessionId: active.id, nextReasoningEffort })} onRefreshModels={() => refreshModels.mutate({ agentId: active.agentId, currentModel: active.model })} session={active} onShowStatus={() => { const status = effectiveStatus(active); toastStore.push({ kind: 'info', key: 'composer-status', title: `${status.label} · ${activeAgent?.name ?? active.agentId}`, description: `${workspaceName(active.cwd)}｜${queuedTasks.length ? `待执行指令 ${queuedTasks.length} 条｜` : ''}${status.archived ? '已归档任务只读' : nextActionForState(active.state)}` }); }} onRestart={() => restart.mutate(active.id)} onCreateTask={openCreateTask} onOpenHelp={openHelp}/>}</section>
           {rawVisible && <aside className="ui-side-panel fixed inset-y-0 right-0 z-drawer flex w-full max-w-[440px] shrink-0 flex-col border-l border-code-border bg-code-surface text-code-header-text shadow-overlay 2xl:static 2xl:z-base 2xl:w-[420px] 2xl:shadow-none"><div className="flex h-11 items-center border-b border-code-border px-3 text-caption font-medium"><Terminal size={13} className="mr-2 text-sidebar-accent"/>原始日志<span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRaw}><PanelRightClose size={14}/></IconButton></span></div><pre className="m-0 flex-1 overflow-auto whitespace-pre-wrap border-0 bg-code-surface p-4 font-mono text-meta leading-5 text-code-header-text">{raw || '当前任务暂无原始输出。'}</pre></aside>}
         </div>
-      </> : <><div className={mobileNavigationTriggerClass}><IconButton label="打开工作台导航" onClick={openMobileNavigation}><Menu size={17}/></IconButton></div><WorkspaceOverview sessions={sortedSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots.length ?? 0} larkBotsLoading={larkConfig.isLoading} view={workbenchView} onViewChange={setWorkbenchView} onSelect={selectSession} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={openLarkSetup} onOpenSearch={openPalette} onOpenShortcuts={openHelp} themeControl={<ThemeToggle preference={theme.preference} resolved={theme.resolved} onChange={theme.setPreference}/>}/></>}
+      </> : <WorkspaceOverview sessions={sortedSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots.length ?? 0} larkBotsLoading={larkConfig.isLoading} view={workbenchView} onViewChange={setWorkbenchView} onSelect={selectSession} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={openLarkSetup}/>}
     </main>
+    </div>
     <NewSessionModal open={newOpen} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} onCreated={(session, task) => { setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } })); void qc.invalidateQueries({ queryKey: ['sessions'] }); selectSession(session.id); setNewOpen(false); setActionError(undefined); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>
     {overlay?.kind === 'lark-setup' && <Suspense fallback={overlayFallback('正在打开 Bot 绑定向导…')}><LarkConfigModal agents={agents.data ?? []} onClose={() => { closeOverlay(); void qc.invalidateQueries({ queryKey: ['lark-config'] }); }}/></Suspense>}
     {overlay?.kind === 'settings' && <Suspense fallback={overlayFallback('正在打开设置与接入…')}><ControlCenterModal open initialSection={overlay.section} agents={agents.data ?? []} legacyBots={larkConfig.data?.bots ?? []} authRequired={authStatus.data?.required} onClose={closeOverlay} onCreateTask={() => { closeOverlay(); openCreateTask(); }} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })}/></Suspense>}

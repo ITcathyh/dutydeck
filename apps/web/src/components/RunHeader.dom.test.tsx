@@ -13,7 +13,7 @@ const queued: Task = { id: 't1', sessionId: 's1', prompt: '补充测试', status
 
 describe('RunHeader', () => {
   it('集中展示 workspace、任务状态、下一步与队列', () => {
-    render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onOpenSidebar={() => {}} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
     expect(screen.getByText('dockmux')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '优化飞书任务卡片' })).toBeTruthy();
     expect(screen.getByText('思考中')).toBeTruthy();
@@ -27,7 +27,7 @@ describe('RunHeader', () => {
 
   it('任务控制保持可达', async () => {
     const user = userEvent.setup(); const onInterrupt = vi.fn(); const onArchive = vi.fn();
-    render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onOpenSidebar={() => {}} onInterrupt={onInterrupt} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={onArchive} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={session} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={onInterrupt} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={onArchive} onToggleRaw={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '中断当前任务' }));
     await user.click(screen.getByRole('button', { name: '归档任务' }));
     expect(onInterrupt).toHaveBeenCalledTimes(1);
@@ -37,14 +37,14 @@ describe('RunHeader', () => {
 
   it('failed / stopped 任务可调用真实 restart 操作', async () => {
     const user = userEvent.setup(); const onRestart = vi.fn();
-    render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onOpenSidebar={() => {}} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '重新启动' }));
     expect(onRestart).toHaveBeenCalledTimes(1);
   });
 
   it('长任务目标视觉截断但为辅助技术和悬停保留完整文本', () => {
     const goal = '大规模优化并重构整个项目，使用户可以从飞书高效指挥任务并完成端到端验收';
-    render(<RunHeader session={session} agent={agent} taskPrompt={`  ${goal}  `} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onOpenSidebar={() => {}} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={session} agent={agent} taskPrompt={`  ${goal}  `} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
     const heading = screen.getByRole('heading', { name: goal });
     expect(heading.className).toContain('truncate');
     expect(heading.getAttribute('title')).toBe(goal);
@@ -58,7 +58,7 @@ describe('RunHeader', () => {
 describe('RunHeader 归档态状态视觉与只读约束', () => {
   const archivedAt = '2026-08-30T00:00:00.000Z';
   function renderHeader(overrides: Partial<Session>, restarting = false) {
-    const { container } = render(<RunHeader session={{ ...session, ...overrides }} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={restarting} onOpenSidebar={() => {}} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    const { container } = render(<RunHeader session={{ ...session, ...overrides }} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={restarting} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
     // 状态条的圆点是唯一带 aria-label 的 span，文案在它右边的 <strong> 里。
     return { dot: container.querySelector('span[aria-label]')!, statusText: container.querySelector('strong')! };
   }
@@ -92,7 +92,7 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
 
   it('未归档 + failed：「重新启动」按钮照旧在，别把正常恢复路径改没了', async () => {
     const user = userEvent.setup(); const onRestart = vi.fn();
-    render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onOpenSidebar={() => {}} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    render(<RunHeader session={{ ...session, state: 'failed' }} agent={agent} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={onRestart} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
     await user.click(screen.getByRole('button', { name: '重新启动' }));
     expect(onRestart).toHaveBeenCalledTimes(1);
     expect(screen.getByText('失败')).toBeTruthy();
@@ -115,7 +115,7 @@ describe('RunHeader 归档态状态视觉与只读约束', () => {
 describe('RunHeader 失败详情', () => {
   const error = 'spawn codex ENOENT: 未找到可执行文件';
   function renderHeader(overrides: Partial<Session>) {
-    return render(<RunHeader session={{ ...session, ...overrides }} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onOpenSidebar={() => {}} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    return render(<RunHeader session={{ ...session, ...overrides }} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
   }
 
   it('失败任务在详情页显示脱敏后的失败详情', () => {

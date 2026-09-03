@@ -66,28 +66,49 @@ describe('App mobile navigation accessibility', () => {
   });
 
   /**
-   * 汉堡按钮固定在 <main> 上，任务列表从它下面滚过去（真正滚动的是
-   * WorkspaceOverview 内部的 overflow-y-auto 容器）。IconButton 自身背景透明，
-   * 一旦外壳也透明，滚动后图标就压在任务卡片正文上——难读且会误触。
-   * 这条断言守住外壳的不透明背景：改回透明立刻挂。
+   * 这条断言原先守的是「浮动汉堡的外壳必须不透明」。
    *
-   * 语义类替代了内联 token（契约 §1.2），断言跟着换名，守护的意图不变：
-   * 不透明底 + 外圈 + 阴影，让它明确是悬浮控件而不是一个透明图标。
-   * 外圈在这里合法——契约 §5 白名单第 3 类「脱离文档流的浮层外圈」。
+   * 那枚按钮绝对定位在 <main> 上，任务列表从它下面滚过去，外壳一透明图标就压在
+   * 任务卡片正文上——难读且会误触。它需要不透明底 + 外圈 + 阴影才成立。
+   *
+   * 顶栏落地后这枚按钮不存在了：导航入口收进 TopBar，在自己的行里，上面永远不会
+   * 有内容滚过。原来的失效模式因此结构性地消失了，再断言 bg-surface 就是在守一个
+   * 不存在的东西。
+   *
+   * 但「移动端有且只有一个导航入口」这件事必须继续被守住，而且比原来更值得守：
+   * 顶栏、RunHeader、浮动按钮三处曾共用同一个无障碍名，读屏用户会听到重复项，
+   * getByRole 也会直接抛 "found multiple elements"。这里改成守唯一性与作用域。
    */
-  it('gives the floating mobile navigation trigger an opaque surface so scrolled task cards never show through it', async () => {
+  it('keeps exactly one mobile navigation trigger, in the top bar, and hides it once the sidebar is permanent', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     mockAppApi({ sessions: [session('s1', 'failed')], summaries: [summary('s1', '任务异常：Agent exited with code 129')] });
-    renderApp();
-    const trigger = await screen.findByRole('button', { name: '打开工作台导航' });
-    const shell = trigger.parentElement!;
-    expect(shell.className).toContain('bg-surface');
-    expect(shell.className).toContain('border-default');
-    expect(shell.className).toContain('shadow-card');
-    // 透明底会让图标压在滚过的任务卡片正文上，既读不清又会误触。
-    expect(shell.className).not.toMatch(/bg-transparent/);
+    const { container } = renderApp();
+    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    // 同名按钮只能有一枚，否则读屏会重复朗读，getByRole 也会抛 multiple elements。
+    const triggers = screen.getAllByRole('button', { name: '打开工作台导航' });
+    expect(triggers).toHaveLength(1);
+    // 它必须在顶栏里，而不是浮在滚动内容上。
+    const topBar = container.querySelector('header')!;
+    expect(topBar.contains(triggers[0])).toBe(true);
+    expect(topBar.className).toContain('h-topbar');
     // 桌面端侧边栏常驻，这枚按钮必须彻底消失。
-    expect(shell.className).toContain('md:hidden');
+    expect(triggers[0].parentElement!.className).toContain('md:hidden');
+  });
+
+  it('打开任务后导航入口仍然只有一枚', async () => {
+    /*
+      顶栏刚落地时这里是坏的：RunHeader 里还留着它自己那枚 md:hidden 汉堡，
+      无障碍名与顶栏那枚完全相同，于是会话详情页上同时存在两个「打开工作台导航」。
+      读屏用户会听到两遍，getByRole 直接抛 "found multiple elements"。
+
+      上一条只覆盖总览页——而重复恰恰只在详情页出现，所以必须单独有这一条。
+    */
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
+    renderApp();
+    await screen.findByRole('heading', { name: '修复登录超时' });
+    expect(screen.getAllByRole('button', { name: '打开工作台导航' })).toHaveLength(1);
   });
 });
 
@@ -315,6 +336,59 @@ describe('App 搜索、快捷键与通知接线', () => {
 
     await waitFor(() => expect(window.location.pathname).toBe('/sessions/s2'));
     expect(screen.queryByRole('dialog', { name: '搜索任务与命令' })).toBeNull();
+  });
+
+  it('打开任务后，搜索、外观与快捷键三个全局入口仍然可见可用', async () => {
+    /*
+      顶栏存在的理由就是这一条。在它之前这三个入口都长在 WorkspaceOverview 的页首行里，
+      而 App 的 active 分支是二选一：点进任何一个任务，WorkspaceOverview 整个卸载。
+
+      后果按严重程度排：
+        · 外观切换彻底失联——没有快捷键、没有命令面板项、没有菜单项，纯死路；
+        · 搜索只剩 Mod+K，而命令面板又是「设置」「飞书」这些命令的唯一发现路径；
+        · 快捷键帮助只剩 ? 键。
+
+      这条断言在会话详情页里查这三个入口，回退成两栏布局立刻挂。
+    */
+    const user = userEvent.setup();
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
+    const { container } = renderApp();
+
+    // 先确认自己确实在会话详情页，而不是被路由退回了总览。
+    await screen.findByRole('heading', { name: '修复登录超时' });
+    expect(screen.queryByRole('heading', { name: '今天需要推进什么？' })).toBeNull();
+
+    const topBar = container.querySelector('header')!;
+    await user.click(within(topBar).getByRole('button', { name: '搜索任务目标、工作区或 Agent' }));
+    expect(await screen.findByRole('dialog', { name: '搜索任务与命令' })).toBeTruthy();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '搜索任务与命令' })).toBeNull());
+
+    await user.click(within(within(topBar).getByRole('radiogroup', { name: '界面外观' })).getByRole('radio', { name: /^深色/ }));
+    expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
+
+    await user.click(within(topBar).getByRole('button', { name: '查看键盘快捷键' }));
+    expect(await screen.findByRole('dialog', { name: /快捷键/ })).toBeTruthy();
+  });
+
+  it('主区只靠 md:ml-main-inset 给浮动侧栏让位，移动端不让位', async () => {
+    /*
+      侧栏是 position:fixed 的浮动卡片，不是栅格列，所以「侧栏占多宽」这件事被拆成
+      两半：侧栏写自己的 left/top/bottom，主区写 margin-left。--main-inset 是这个
+      等式的唯一来源（= sidebar-w + shell-gap * 2），主区不许自己算 280px——写死之后
+      改 --sidebar-w 会让主区要么留一条空隙要么压住正文，且没有任何测试会红。
+
+      让位必须带 md: 前缀：窄屏侧栏是 translate-x 抽屉，浮在内容之上，主区一让位
+      就会留下一条永远空着的左边距。
+    */
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
+    const { container } = renderApp();
+    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    const main = container.querySelector('main')!;
+    expect(main.className).toContain('md:ml-main-inset');
+    // 任意值会被 design-consistency 拦下，但「换成另一个硬编码档位」只有这条能拦。
+    expect(main.className).not.toMatch(/\bml-\d|\bml-\[/);
   });
 
   it('页首搜索入口与问号帮助面板都可达，且帮助面板如实标出不可用项', async () => {
