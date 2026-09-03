@@ -13,8 +13,9 @@ export function SessionRow({ session, summary, agent, botName, active, onClick }
   // 在调用点换成语义类等于把同一条规则又抄了一遍，正是这组测试在防的漂移。
   const status = sidebarStatusVisual(session);
   // 别处（总览、命令面板、RunHeader）统一写「待执行指令 N 条」，这一行是唯一例外：
-  // 侧栏整行宽度只有 292px，还要同时容纳 Agent 名、飞书来源、相对时间和 run id，
-  // 多出的两个字会把相对时间挤掉。这里省掉「指令」二字，量词「条」保留。
+  // 侧栏整行宽度只有 248px（重做前是 292px，浮动卡片对齐 botmux 后又窄了 44px），
+  // 还要同时容纳 Agent 名、飞书来源、相对时间和 run id，多出的两个字会把相对时间挤掉。
+  // 这里省掉「指令」二字，量词「条」保留。窄了之后这条理由只会更强，别改回长版。
   const queuedCount = summary?.queuedCount ?? 0;
   // aria-current：选中态此前只有视觉（左侧 3px 内阴影），读屏用户听完整列任务也不知道
   // 自己正停在哪一个。取值用 'true' 而不是 'page'——侧栏任务行切换的是同一页面内的

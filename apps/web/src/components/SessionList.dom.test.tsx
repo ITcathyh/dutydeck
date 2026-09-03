@@ -5,7 +5,7 @@ import type { Session } from '../api';
 import { workbenchViewLabels, workbenchViewOrder } from '../workspace-model';
 import { SessionList, type SessionListProps } from './SessionList';
 
-const baseProps: SessionListProps = { open: false, onClose: () => {}, sessions: [], summaries: {}, sessionsLoading: false, agents: [], larkBots: [], view: 'all', onSelect: () => {}, onNewSession: () => {}, onOpenControlCenter: () => {} };
+const baseProps: SessionListProps = { open: false, onClose: () => {}, sessions: [], summaries: {}, sessionsLoading: false, agents: [], larkBots: [], view: 'all', onSelect: () => {}, onNewSession: () => {}, onOpenControlCenter: () => {}, onOpenLarkSetup: () => {}, onOpenGroups: () => {}, onOpenSchedules: () => {} };
 const originalMatchMedia = window.matchMedia;
 
 afterEach(() => { vi.restoreAllMocks(); Object.defineProperty(window, 'matchMedia', { configurable: true, writable: true, value: originalMatchMedia }); });
@@ -76,5 +76,100 @@ describe('SessionList mobile accessibility', () => {
     expect(onOpenControlCenter).toHaveBeenCalledOnce();
     expect(screen.getByText(/受信开发机模式 · 无需 token/)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /开启监听/ })).toBeNull();
+  });
+});
+
+/**
+ * 侧栏底部功能导航。
+ *
+ * 重做前整个侧栏只有三个可见字符串，一半的目的地（群与权限、定时任务）只能靠
+ * 三层点击或深链到达，而其中一颗按钮在数据为空时根本不渲染。这组用例守的是
+ * 「这些入口存在、可点、且不说谎」。
+ */
+describe('SessionList 功能导航区', () => {
+  it('把原先只能深链或三层点击才能到的目的地做成常驻入口', async () => {
+    const user = userEvent.setup();
+    const onOpenLarkSetup = vi.fn(); const onOpenGroups = vi.fn(); const onOpenSchedules = vi.fn();
+    render(<SessionList {...baseProps} open onOpenLarkSetup={onOpenLarkSetup} onOpenGroups={onOpenGroups} onOpenSchedules={onOpenSchedules}/>);
+    await user.click(screen.getByRole('button', { name: /飞书接入/ }));
+    expect(onOpenLarkSetup).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole('button', { name: /群与权限/ }));
+    expect(onOpenGroups).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole('button', { name: /定时任务/ }));
+    expect(onOpenSchedules).toHaveBeenCalledOnce();
+  });
+
+  /**
+   * 硬约束：导航项不得声称它不做的功能。
+   *
+   * 群与权限的 `runtimeWired`、定时任务的 `executorWired` 在 api.ts 里都是字面量
+   * `false`——不是「暂未完成」而是类型层面写死的。本仓有过 /help 承诺「可用命令
+   * 列表」却没有列表的教训，composer-commands.ts 也记着两条因为空承诺被删掉的命令。
+   * 这条用例把限制钉进可及名：措辞可以改，但「进去之后拿不到运行时」这件事必须
+   * 在点进去之前就说清楚。
+   */
+  it('对只有草稿态的目的地如实标注限制，不做成空承诺', () => {
+    render(<SessionList {...baseProps} open/>);
+    expect(screen.getByRole('button', { name: /群与权限.*尚未接入运行时/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /定时任务.*不会自动执行/ })).toBeTruthy();
+  });
+
+  it('飞书入口按已绑定数量如实改口', () => {
+    const { rerender } = render(<SessionList {...baseProps} open/>);
+    expect(screen.getByRole('button', { name: /飞书接入.*尚未绑定机器人/ })).toBeTruthy();
+    rerender(<SessionList {...baseProps} open larkBots={[{ appId: 'cli_a', name: '值班机器人' } as never]}/>);
+    expect(screen.getByRole('button', { name: /飞书接入.*1 个机器人已绑定/ })).toBeTruthy();
+  });
+
+  /**
+   * 分组必须是「真 heading + 可点条目」的结构，不是平铺。
+   *
+   * 视觉验收脚本认的是 nav/section/ul 容器里的 h2/h3/h4/[role=heading]——裸 <span>
+   * 标题不计入分组。平铺 4 个链接读不出层次，分组才是这块导航的价值（botmux 19 项
+   * 分 5 组，anatomy §A2）。这条用例在 e2e 之外再守一次，因为 e2e 要起浏览器。
+   */
+  it('导航是分组结构：每组都有真 heading 和至少一个条目', () => {
+    const { container } = render(<SessionList {...baseProps} open/>);
+    const groups = [...container.querySelectorAll('nav')].map(nav => ({
+      heading: nav.querySelector('h2,h3,h4,[role="heading"]')?.textContent?.trim() ?? '',
+      items: nav.querySelectorAll('button').length
+    }));
+    expect(groups.length).toBeGreaterThanOrEqual(2);
+    for (const group of groups) {
+      expect(group.heading).not.toBe('');
+      expect(group.items).toBeGreaterThan(0);
+    }
+    // 每个 <nav> 都要有可及名，否则读屏会连报数个无名「导航」地标。
+    for (const nav of container.querySelectorAll('nav')) expect(nav.getAttribute('aria-labelledby')).toBeTruthy();
+  });
+
+  /**
+   * 触控目标（契约 §9）：移动端侧栏是 fixed 抽屉，这里全是触控。
+   * botmux 的 36px 导航项档位刻意不引进——它是纯桌面英文界面。
+   */
+  it('导航项满足触控下限，且键盘可达', async () => {
+    render(<SessionList {...baseProps} open/>);
+    for (const name of [/飞书接入/, /群与权限/, /定时任务/]) {
+      const item = screen.getByRole('button', { name });
+      expect(item.className).toMatch(/\bmin-h-12\b/);
+      // 原生 <button> 天然可 Tab 到；这里守的是没人给它加 tabIndex={-1}。
+      expect(item.getAttribute('tabindex')).toBeNull();
+    }
+    // focus 环走 index.css 的全局 button:focus-visible，所以组件不得覆盖 outline。
+    expect(screen.getByRole('button', { name: /定时任务/ }).className).not.toMatch(/outline-none/);
+    await userEvent.tab();
+    expect(document.activeElement).toBeTruthy();
+  });
+
+  /**
+   * 侧栏不得长出第二份状态筛选（与总览页正交）。上面那条老用例守的是旧的 7 项
+   * 筛选不复活；这条守的是新导航区不把「已归档」这类状态视图混进来——它是总览页
+   * 的筛选（数字键 5），放进侧栏就等于在侧栏里重建了状态筛选。
+   */
+  it('功能导航不混入状态视图', () => {
+    const { container } = render(<SessionList {...baseProps} open/>);
+    for (const nav of container.querySelectorAll('nav')) {
+      for (const view of workbenchViewOrder) expect(nav.textContent).not.toContain(workbenchViewLabels[view]);
+    }
   });
 });

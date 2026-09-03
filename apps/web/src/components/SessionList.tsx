@@ -1,11 +1,12 @@
 import { useMemo } from 'react';
-import { FolderKanban, Plus, Settings2, ShieldCheck } from 'lucide-react';
+import { CalendarClock, FolderKanban, MessagesSquare, Plus, Settings2, ShieldCheck, Users } from 'lucide-react';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
 import { useMediaQuery } from '../useMediaQuery';
 import { groupSessionsByWorkspace, type WorkbenchView } from '../workspace-model';
 import { createTaskAffordance, DockmuxIcon } from './ui';
 import { Skeleton } from './primitives';
 import { SessionRow } from './SessionRow';
+import { SidebarNav, type SidebarNavGroup } from './SidebarNav';
 
 export type SessionListProps = {
   open: boolean;
@@ -21,21 +22,46 @@ export type SessionListProps = {
   onSelect(id?: string): void;
   onNewSession(): void;
   onOpenControlCenter(): void;
+  /** 飞书 Bot 绑定向导（?panel=lark-setup）。 */
+  onOpenLarkSetup(): void;
+  /** 群与权限草稿（?panel=groups）。 */
+  onOpenGroups(): void;
+  /** 定时任务草稿与预览（?panel=automation）。 */
+  onOpenSchedules(): void;
   authRequired?: boolean;
 };
 
 /**
- * 工作区导航。
+ * 工作台侧栏。
  *
- * 这里刻意不再渲染状态筛选：状态筛选是总览页的职责，而侧栏在桌面端恒常可见
- * （md:static），两份筛选曾经必然同屏并列。侧栏回答「按目录找任务」，
- * 总览页回答「按状态找任务」，两条正交的检索路径各留一处。
+ * 结构自上而下：品牌 → 创建操作 → 工作区任务列表（唯一可伸缩区）→ 功能导航 →
+ * 运行环境状态。创建操作在**顶部**、导航在**底部**，是刻意的：创建是每天做几十次
+ * 的高频动作，功能导航是每周点几次的低频跳转，把低频的放在拇指够不着也无所谓的
+ * 位置，高频的留在视线起点。
  *
- * 配色走独立的 sidebar-* 深色盘（契约 §6）：双主题下恒深色，不与内容表面
- * surface/muted 混用。下面几处「明明有原语却仍然手写」的地方，原因都是这一条——
- * 原语只覆盖内容表面色盘，套到恒深色底上会在浅色主题下变成深字压深底。
+ * ## 浮动卡片，不是栅格列
+ *
+ * `fixed` + `inset-*-shell-gap` + `top-shell-top`，四周留 16px 空隙、带圆角和阴影，
+ * 视觉上浮在画布之上（对齐 botmux `style.css:8201-8215`）。主区靠 `ml-main-inset`
+ * 让位，那半边是 Team-Shell 的。两边必须同源：`--main-inset` 就定义成
+ * `sidebar-w + shell-gap*2`，所以这里的 left/right 插入只能是 `shell-gap`，
+ * 写死数字会在有人改 `--sidebar-w` 时留下空隙或压住正文，且没有任何测试会红。
+ *
+ * ## 状态筛选仍然不在这里
+ *
+ * 侧栏回答「按目录找任务」，总览页回答「按状态找任务」，两条正交的检索路径各留
+ * 一处。桌面端侧栏恒常可见，两份筛选曾经必然同屏并列且各自漂移。底部新增的功能
+ * 导航是第三件事——它是「去别的地方」，不是「在这里筛」，不与这条约束冲突。
+ *
+ * ## 关于配色
+ *
+ * `sidebar-*` 现在整组是 `var()` 引用（`--sidebar-surface: var(--surface-default)`
+ * 等），跟随主题而不再是恒深色盘。原先几处「明明有原语却手写」的注释理由
+ * （「原语的内容表面色套到恒深色底上会深字压深底」）已经失效，但手写保留：原语
+ * 里没有 sidebar accent 这一档 variant，改用原语会让这几处颜色绕过 sidebar 语义层，
+ * 将来 Team-Palette 想把侧栏重新分离出去就会漏改。语义类留着，成本为零。
  */
-export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, authRequired }: SessionListProps) {
+export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, authRequired }: SessionListProps) {
   const workspaces = useMemo(() => groupSessionsByWorkspace(sessions, view, summaries), [sessions, summaries, view]);
   const matchesDesktop = useMediaQuery('(min-width: 768px)');
   // 读不到 media query 时侧栏必须保守地当作桌面（可见、可访问）。当成移动端会让
@@ -47,28 +73,94 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
   const desktop = typeof window === 'undefined' || typeof window.matchMedia !== 'function' ? true : matchesDesktop;
   const createTask = createTaskAffordance({ agents, agentsLoading, onCreate: onNewSession, onPrepareAgents: onOpenControlCenter });
   const hiddenOnMobile = !desktop && !open;
-  return <aside aria-label="Dockmux 工作台导航" aria-hidden={hiddenOnMobile || undefined} inert={hiddenOnMobile || undefined} className={`fixed inset-y-0 left-0 z-drawer flex w-[304px] shrink-0 flex-col overflow-hidden border-r border-sidebar-border bg-sidebar-surface text-sidebar-text shadow-sidebar transition-transform duration-normal ease-emphasized md:static md:w-[292px] md:translate-x-0 md:shadow-none ${open ? 'translate-x-0' : '-translate-x-full'}`}>
-    <div className="flex h-16 min-w-[292px] items-center gap-2.5 px-4"><DockmuxIcon className="h-8 w-8 shrink-0"/><span><strong className="block text-body font-semibold tracking-[-.025em] text-sidebar-text-strong">Dockmux</strong><span className="block text-caption text-sidebar-text-muted">Agent 任务台</span></span></div>
-    <div className="min-w-[292px] px-3">
-      {/* 主按钮手写而不是用 <Button>：原语没有 sidebar accent 这一档 variant，
-          而侧栏是独立色盘（§6）。min-h-10 是触控下限（§9），也是多处用例按名字
-          取这颗按钮的前提，不能改小。40px 高按 §3 取 rounded-md（10px）。 */}
+
+  /**
+   * 导航项的选取。**每一项都是在补一条原本没有常驻入口的路**，不是把已有按钮再抄一份。
+   *
+   * 分两组，切的是「配置什么」而不是 botmux 那种业务域划分（它 19 项分 5 组是因为
+   * 有 19 个真页面；dockmux 全站只有两个页面 + 四个浮层，抄 5 组只会得到 5 个空壳）。
+   *
+   * · 接入 —— 让任务能从外部进来：Agent 是执行者，飞书是消息入口。
+   * · 自动化 —— 让任务不靠人点也能发生：群策略、定时。两项当前都只有草稿态。
+   *
+   * 刻意**不放**进来的（都已有常驻可见入口，第二份只是噪音）：
+   * · 任务中心 / 回首页 —— 顶栏品牌位（TopBar 的 onGoHome）。
+   * · 搜索 / 命令面板、外观、快捷键帮助 —— 顶栏右侧三枚控件。
+   * · 创建任务 —— 就在这块导航正上方。
+   * · 已归档 —— 它是总览页的状态筛选（数字键 5），放进侧栏就是在侧栏里重建了一份
+   *   状态筛选，正是上面那条正交约束禁止的事。
+   */
+  const navGroups: SidebarNavGroup[] = [
+    { id: 'access', title: '接入', items: [
+      // 唯一一项本来就有常驻入口的，因为它原本就在这个位置，移走等于制造回归；
+      // 计数从原来的行尾挪进 hint，理由见下面 292→248 的说明。
+      { id: 'settings', label: 'Agent 与设置', hint: `${agents.length} 个 Agent${larkBots.length ? ` · ${larkBots.length} 个 Bot` : ''}`, Icon: Settings2, onClick: onOpenControlCenter },
+      // 飞书向导此前只在总览页的协作卡片上有入口——点进任何一个任务后就失联了。
+      { id: 'lark', label: '飞书接入', hint: larkBots.length ? `${larkBots.length} 个机器人已绑定` : '尚未绑定机器人', Icon: MessagesSquare, onClick: onOpenLarkSetup }
+    ] },
+    { id: 'automation', title: '自动化', items: [
+      /*
+        下面两项的 hint 是**能力声明**，不是描述性文案，改动前先读 SidebarNav 的
+        头注释。两者都不是「暂未完成」而是类型层面写死的：
+        `FoundationCapability.runtimeWired` 与 `ScheduleCapability.executorWired`
+        的类型都是字面量 `false`（api.ts），服务端恒挂对应 blocker。
+
+        用词逐字取自目标面板自己的说法（GroupPolicyModal「尚未接入运行时」、
+        ControlCenterModal「不会自动执行」），不另造一套——两处各写各的早晚漂移。
+
+        门控刻意不做：`disabled` 会让用户既进不去也看不到为什么。两个面板自己
+        都会把 blockers 列全，进得去才读得到。而且这两项的可用性判定要读
+        foundationApi/scheduleApi 的 capabilities，为了给侧栏画个灰按钮就多拉两个
+        查询，代价与收益不成比例。
+      */
+      { id: 'groups', label: '群与权限', hint: '策略草稿 · 尚未接入运行时', Icon: Users, onClick: onOpenGroups },
+      { id: 'schedules', label: '定时任务', hint: '草稿与预览 · 不会自动执行', Icon: CalendarClock, onClick: onOpenSchedules }
+    ] }
+  ];
+
+  return <aside
+    aria-label="Dockmux 工作台导航"
+    aria-hidden={hiddenOnMobile || undefined}
+    inert={hiddenOnMobile || undefined}
+    /*
+      移动端是贴边全高的抽屉（inset-y-0 left-0，靠 translate-x 滑入滑出），
+      桌面端才变成四周留白的浮动卡片。两套定位共用一个节点、只靠 md: 前缀切换，
+      不做两份 DOM——抽屉的 inert/aria-hidden 与焦点管理只写一次才不会漏。
+
+      shadow 在两端都保留（botmux 桌面端也有）：抽屉浮在遮罩之上，卡片浮在画布之上，
+      都需要与背后拉开层次。
+    */
+    className={`fixed inset-y-0 left-0 z-drawer flex w-sidebar flex-col overflow-hidden border-r border-sidebar-border bg-sidebar-surface text-sidebar-text shadow-sidebar transition-transform duration-normal ease-emphasized md:bottom-shell-gap md:left-shell-gap md:top-shell-top md:translate-x-0 md:rounded-lg md:border ${open ? 'translate-x-0' : '-translate-x-full'}`}
+  >
+    {/*
+      品牌块在移动端才渲染。桌面端顶栏已有可点的品牌位（TopBar 的「Dockmux 首页」），
+      再挂一份不可点的同名文字，读屏会连读两次「Dockmux」，而其中一个还不是控件。
+      移动端顶栏被抽屉遮住，这里是唯一的品牌锚点，保留。
+    */}
+    <div className="flex h-14 shrink-0 items-center gap-2.5 px-4 md:hidden"><DockmuxIcon className="h-8 w-8 shrink-0"/><span><strong className="block text-body font-semibold tracking-[-.025em] text-sidebar-text-strong">Dockmux</strong><span className="block text-caption text-sidebar-text-muted">Agent 任务台</span></span></div>
+
+    <div className="shrink-0 px-3 pt-2 md:pt-3">
+      {/* 主按钮手写而不是用 <Button>：原语没有 sidebar accent 这一档 variant。
+          min-h-10 是触控下限（§9），也是多处用例按名字取这颗按钮的前提，不能改小。
+          40px 高按 §3 取 rounded-md（10px）。 */}
       <button type="button" disabled={createTask.disabled} onClick={createTask.onClick} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-sidebar-accent px-3 text-body font-semibold text-sidebar-accent-text transition hover:brightness-110 active:translate-y-px disabled:opacity-60"><Plus size={16}/>{createTask.label}</button>
     </div>
 
-    <div className="mt-5 flex min-h-0 min-w-[292px] flex-1 flex-col"><div className="flex items-center px-4 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>工作区<span className="ml-auto font-mono text-meta">{workspaces.length}</span></div><div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">{sessionsLoading
-      /* Skeleton 的条子写死 bg-muted（内容表面色），直接铺在恒深色侧栏上是 §6 明禁的
-         混用。原语只有内容表面一档，这里用 arbitrary variant 覆盖条子底色而不是
-         另造一个骨架副本。 */
+    {/* 任务列表是唯一 flex-1 的区块：卡片高度固定（top/bottom 都钉死），多出来的
+        任务在这里滚，导航区和状态行不参与滚动，始终可见。 */}
+    <div className="mt-3 flex min-h-0 flex-1 flex-col"><div className="flex items-center px-4 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>工作区<span className="ml-auto font-mono text-meta">{workspaces.length}</span></div><div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">{sessionsLoading
+      /* Skeleton 的条子写死 bg-muted，与 sidebar-hover 现在同源但不同名；这里用
+         arbitrary variant 覆盖条子底色，让它跟着 sidebar 语义层走而不是内容表面层。 */
       ? <Skeleton variant="block" lines={2} className="px-1 [&>div]:bg-sidebar-hover"/>
       : workspaces.length ? workspaces.map(workspace => <section key={workspace.id} className="mb-3"><div className="flex min-w-0 items-center px-2 pb-1.5"><span className="min-w-0 flex-1 truncate text-caption font-semibold text-sidebar-text" title={workspace.cwd}>{workspace.name}</span><span className="ml-2 font-mono text-meta text-sidebar-text-muted">{workspace.sessions.length}</span></div>{workspace.sessions.map(session => <SessionRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(item => item.id === session.agentId)} botName={larkBots.find(bot => session.sourceId?.startsWith(`${bot.appId}:`))?.name} active={activeSessionId === session.id} onClick={() => { onSelect(session.id); onClose(); }}/>)}</section>)
-      /* 空态不用 <EmptyState>：原语取 text-secondary / text-subtle / bg-muted，全是内容
-         表面色，放到恒深色侧栏上浅色主题下就是深字压深底，读不出来。手写保留，颜色
-         走 sidebar 语义类。框高约 66px（py-6 + 一行 18px），按 §3 取 rounded-lg。 */
+      /* 空态不用 <EmptyState>：原语取 text-secondary / text-subtle / bg-muted，走的是
+         内容表面色盘。侧栏色现在虽与内容色同源，但语义层是两套，混用会让侧栏在
+         色盘再次分离时漏改。框高约 66px（py-6 + 一行 18px），按 §3 取 rounded-lg。 */
       : <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-center text-caption text-sidebar-text-muted">当前视图没有任务。</div>}</div></div>
 
-    {/* 底部入口同样手写：sidebar 色盘 + min-h-10 触控下限，理由同上。 */}
-    <div className="min-w-[292px] border-t border-sidebar-border px-2.5 py-2"><button type="button" onClick={onOpenControlCenter} className="flex min-h-10 w-full items-center gap-2.5 rounded-md px-2.5 text-body font-medium text-sidebar-text-muted transition hover:bg-sidebar-hover hover:text-sidebar-text-strong"><Settings2 size={15} className="text-sidebar-accent"/><span>Agent 与设置</span><span className="ml-auto font-mono text-caption text-sidebar-text-muted">{agents.length} Agent{larkBots.length > 0 ? ` · ${larkBots.length} Bot` : ''}</span></button></div>
-    <div className="min-w-[292px] border-t border-sidebar-border px-4 py-2.5 text-meta text-sidebar-text-faint">{authRequired === false ? <span className="flex items-center gap-1.5 text-sidebar-accent"><ShieldCheck size={12}/>受信开发机模式 · 无需 token</span> : '本机运行 · ACPX 0.13'}</div>
+    <div className="shrink-0 border-t border-sidebar-border pt-1"><SidebarNav groups={navGroups}/></div>
+
+    {/* 运行环境状态。它是事实陈述不是入口，所以在导航区之外、不做成按钮。 */}
+    <div className="shrink-0 border-t border-sidebar-border px-4 py-2 text-meta text-sidebar-text-faint">{authRequired === false ? <span className="flex items-center gap-1.5 text-sidebar-accent"><ShieldCheck size={12}/>受信开发机模式 · 无需 token</span> : '本机运行 · ACPX 0.13'}</div>
   </aside>;
 }
