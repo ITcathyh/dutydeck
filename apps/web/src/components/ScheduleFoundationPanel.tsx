@@ -113,7 +113,7 @@ export function ScheduleFoundationPanel({ open, onClose }: { open: boolean; onCl
           <Field label="DST gap"><Select value={draft.dstPolicy.gap} onChange={event => setDraft({ ...draft, dstPolicy: { ...draft.dstPolicy, gap: event.target.value as Draft['dstPolicy']['gap'] } })}><option value="skip">skip</option><option value="shift_forward">shift_forward</option></Select></Field>
           <Field label="DST overlap"><Select value={draft.dstPolicy.overlap} onChange={event => setDraft({ ...draft, dstPolicy: { ...draft.dstPolicy, overlap: event.target.value as Draft['dstPolicy']['overlap'] } })}><option value="first">first</option><option value="second">second</option></Select></Field>
         </div>
-        <div className="mt-3 flex justify-end"><Button type="submit" tone="inverse" loading={save.isPending} disabled={!capability?.writesEnabled || !draft.name.trim()}>{save.isPending ? '保存中…' : '保存 staged/disabled 定义'}</Button></div>
+        <div className="mt-3 flex justify-end"><Button type="submit" variant="primary" loading={save.isPending} disabled={!capability?.writesEnabled || !draft.name.trim()}>{save.isPending ? '保存中…' : '保存 staged/disabled 定义'}</Button></div>
       </form>
     </Dialog.Footer>}
   </Dialog>;
