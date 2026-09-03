@@ -386,7 +386,7 @@ async function browserAcceptance() {
     await page.keyboard.press('?');
     await help.waitFor({ state: 'visible', timeout: 10_000 });
     assert(await help.isVisible(), '按 ? 打开快捷键帮助面板');
-    const createTaskHelpRow = (await help.locator('li', { hasText: '新建任务运行' }).innerText()).replace(/\s+/g, ' ');
+    const createTaskHelpRow = (await help.locator('li', { hasText: '新建任务' }).innerText()).replace(/\s+/g, ' ');
     helpClaimsCreateTaskUsable = !createTaskHelpRow.includes('当前不可用');
     debug('帮助面板对 n 的自述', createTaskHelpRow);
 
@@ -400,7 +400,7 @@ async function browserAcceptance() {
     const totalRows = await help.locator('li').count();
     // 用「不可用的都必须是 session 作用域」来表达，而不是写死数字：
     // 注册表以后增删快捷键，这条断言仍然成立。
-    const sessionScopedUnavailable = await help.locator('li', { hasText: '当前不可用：先打开一个任务运行' }).count();
+    const sessionScopedUnavailable = await help.locator('li', { hasText: '当前不可用：先打开一个任务' }).count();
     assert(unavailableRows === sessionScopedUnavailable,
       `任务中心打开帮助面板时，标为「当前不可用」的 ${unavailableRows} 条全部是 session 作用域快捷键（共 ${totalRows} 条），全局快捷键没有被面板自身的浮层状态误标`);
     assert(unavailableRows < totalRows / 2,
@@ -617,14 +617,14 @@ async function browserAcceptance() {
 
     // 自动消失：归档的 success 通知默认 4s，等 6.5s 后必须已经不在
     await dismissDialogs();
-    const archiveButton = page.getByRole('button', { name: '归档任务运行' });
+    const archiveButton = page.getByRole('button', { name: '归档任务', exact: true });
     await archiveButton.first().click();
     const confirmArchive = page.getByRole('button', { name: '确认归档' });
     await confirmArchive.waitFor({ state: 'visible', timeout: 10_000 });
     await confirmArchive.click();
     await politeRegion.locator('.ui-toast').first().waitFor({ state: 'visible', timeout: 10_000 });
     const archiveToast = await politeRegion.innerText();
-    assert(archiveToast.includes('任务运行已归档'), '归档成功后弹出成功通知');
+    assert(archiveToast.includes('任务已归档'), '归档成功后弹出成功通知');
     await politeRegion.locator('.ui-toast').first().waitFor({ state: 'hidden', timeout: 12_000 });
     ok('无动作的成功通知会自动消失（4s 档位到点自行退场，无需用户关闭）');
   });

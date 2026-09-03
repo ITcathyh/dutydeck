@@ -1,0 +1,4 @@
+# Playwright 的运行产物：失败截图、trace、JSON 报告。每次跑都会重写，不进版本库。
+# 放在这里而不是根 .gitignore：这些路径只对视觉 e2e 有意义，规则跟着它走。
+.artifacts/
+results.json
