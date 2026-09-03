@@ -9,6 +9,10 @@ const icons: Record<ThemePreference, typeof Sun> = { system: Monitor, light: Sun
 // 文字在移动端隐藏（sm: 以下只留图标）：三段带文字的按钮在 390px 宽屏上要占掉整行，
 // 把真实任务挤到折叠线以下（docs/interaction-design-2026-08-30.md §7.2）。
 // 隐藏的只是视觉文本——aria-label 已含完整文案与提示，读屏与 radiogroup 语义不受影响。
+//
+// 但文字一隐藏，横向就只剩 px-2.5×2 + 14px 图标 = 34px，低于契约 §9 的 40px 触控目标：
+// 高度达标而**宽度**不达标，只查 min-h 的断言看不见它。三颗按钮紧挨着，点错一颗就换掉
+// 整个界面的主题。所以补 min-w-10 —— 触控目标是「区域」不是「高度」。
 export function ThemeToggle({ preference, resolved, onChange, className = '' }: {
   preference: ThemePreference;
   resolved: ResolvedTheme;
@@ -34,7 +38,7 @@ export function ThemeToggle({ preference, resolved, onChange, className = '' }: 
         title={hint}
         aria-label={`${themeLabels[option]}：${hint}`}
         onClick={() => onChange(option)}
-        className={`flex min-h-10 items-center gap-1.5 rounded-sm px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selected ? 'bg-action-soft text-action' : 'text-secondary hover:bg-hover hover:text-primary'}`}
+        className={`flex min-h-10 min-w-10 items-center justify-center gap-1.5 rounded-sm px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selected ? 'bg-action-soft text-action' : 'text-secondary hover:bg-hover hover:text-primary'}`}
       ><Icon aria-hidden="true" size={14}/><span className="hidden sm:inline">{themeLabels[option]}</span></button>;
     })}
   </div>;

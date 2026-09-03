@@ -39,6 +39,30 @@ const violations = (pattern: RegExp, exempt: (rel: string) => boolean = () => fa
   files.filter(file => !exempt(file.rel))
     .flatMap(file => [...file.text.matchAll(pattern)].map(match => `${file.rel}: ${match[0]}`));
 
+/**
+ * 取出 `<tag ...>` 的开标签，对 `{}` / `()` 计数。
+ *
+ * 不能用 `/<button[^>]*>/`：箭头函数 `onClick={() => x}` 里的 `>` 会让它提前截断，
+ * className 根本进不了匹配结果——第一版断言就是这么把 ThemeToggle 误报成违规的。
+ */
+function openingTags(text: string, tag: string): string[] {
+  const out: string[] = [];
+  for (let i = text.indexOf(`<${tag}`); i !== -1; i = text.indexOf(`<${tag}`, i + 1)) {
+    const after = text[i + tag.length + 1] ?? '';
+    if (/[A-Za-z0-9_-]/.test(after)) continue;   // <buttonish> 不算
+    let depth = 0;
+    let end = i;
+    for (let j = i; j < text.length; j++) {
+      const char = text[j];
+      if (char === '{' || char === '(') depth++;
+      else if (char === '}' || char === ')') depth--;
+      else if (char === '>' && depth === 0) { end = j; break; }
+    }
+    out.push(text.slice(i, end + 1));
+  }
+  return out;
+}
+
 describe('设计一致性：尺度不得被绕过', () => {
   it('没有任意值字号（契约 §12.1）', () => {
     // text-[13px] 这类写法正是「14 档字号并存」的来源。要新字号就改契约和 tokens.css。
@@ -95,9 +119,54 @@ describe('设计一致性：可访问性下限', () => {
     // 重构前 5 档手工 z-index 互相打架：抽屉盖住 toast、遮罩盖不住 popover。
     expect(violations(/\bz-\[\d+\]/g)).toEqual([]);
   });
+
+  it('移动端退化成纯图标的按钮必须同时约束宽度（契约 §9 是触控目标，不是高度）', () => {
+    /*
+      契约 §9 说的是「触控目标 ≥40px」——那是一块**区域**。此前全仓的触控断言
+      （TerminalKeyBar / CommandPalette / Tabs / ToastViewport / PermissionCard…）
+      查的全是 min-h-10 / h-10，只覆盖了高度这一个轴。
+
+      ThemeToggle 的三颗主题按钮正是从这个缺口漏过去的：高 40px 达标，但文字带
+      `hidden sm:inline`，移动端只剩 px-2.5×2 + 14px 图标 = **34px 宽**。三颗紧挨着，
+      点错一颗整个界面换主题——而所有既有断言都是绿的。
+
+      所以这条查的是「文字会在窄屏消失的按钮」：一旦文字隐藏它就退化成图标钮，
+      必须自带 w-* / min-w-* / size-*，或者干脆用 IconButton 原语（恒 40×40）。
+      不查那些文字常驻的按钮——它们的宽度由文案撑开，不会塌到 40px 以下。
+    */
+    const offenders = files.flatMap(file =>
+      [...file.text.matchAll(/<button(?=[\s>])[\s\S]*?<\/button>/g)]
+        .filter(match => /hidden\s+sm:(?:inline|block)/.test(match[0]))
+        .map(match => openingTags(match[0], 'button')[0] ?? '')
+        .filter(opening => opening && !/\b(?:min-)?w-\d|\bsize-\d|\bw-full\b|\baspect-square\b/.test(opening))
+        .map(opening => `${file.rel}: ${opening.replace(/\s+/g, ' ').slice(0, 110)}`)
+    );
+    expect(offenders).toEqual([]);
+  });
 });
 
 describe('设计一致性：单一副本', () => {
+  it('Button 传 tone 时必须同时声明 variant（强调级别不能靠 tone 表达）', () => {
+    /*
+      `tone` 与 `variant` 正交：tone 换的是底色族（默认 / 反色），variant 才表达强调级别。
+      但 `tone="inverse"` 是唯一「一个词就能得到实心按钮」的写法，想强调的人自然去抓它——
+      7 个调用点（ControlCenterModal 6 处 + ScheduleFoundationPanel 1 处）同时这么写，
+      于是全部落到默认的 secondary，拿到 bg-inverse 深藏青而不是品牌靛蓝。后果是整个
+      设置浮层 18 颗按钮只有三种底色，「用它创建任务」和「连接 Bot」视觉权重一样重，
+      这个界面从来没有主操作层级。
+
+      Button 的类型签名已经让这种写法编译不过（tone 出现则 variant 必填）。这条断言是
+      第二道闸：类型只在改动方跑 tsc 时报错，而这里连「用 spread 传 props 绕过类型」
+      的写法也能拦住，且失败信息直接指出是哪一行。
+    */
+    const offenders = files.flatMap(file =>
+      openingTags(file.text, 'Button')
+        .filter(tag => /\btone=/.test(tag) && !/\bvariant=/.test(tag))
+        .map(tag => `${file.rel}: ${tag.replace(/\s+/g, ' ').slice(0, 110)}`)
+    );
+    expect(offenders).toEqual([]);
+  });
+
   it('业务组件不从 components/ui 导入 IconButton（契约 §10 导入纪律）', () => {
     /*
       `ui.tsx` 的旧 IconButton 命中区 32px，`primitives/` 的新版 40px，两者视觉一致。

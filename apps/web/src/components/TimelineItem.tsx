@@ -22,7 +22,13 @@ export function TimelineItem({ event, final = false, assistantLabel = 'Agent', o
   // 思考内容归 ActivityPanel 折叠区，不在主时间线重复出现。
   if (event.type === 'thinking') return null;
   const user = event.data.role === 'user';
-  if (user) return <div className="ui-timeline-item my-6 flex justify-end"><div className="max-w-[84%] rounded-xl rounded-br-sm bg-inverse px-4 py-3 text-body text-on-inverse shadow-card sm:max-w-[78%]"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></div></div>;
+  /*
+    用户气泡取 rounded-lg：单行实测 46px（py-3 上下 24 + text-body 行高 22），
+    按契约 §3 的「半径 ≈ 高度 / 3.5」理论值 13.1px，最贴近 lg（14px）。
+    此前是 rounded-xl（20px），偏离 6.9px——60 组圆角实测里唯一的真实错档（见 §16）。
+    rounded-br-sm 保留：右下角收窄是「这句话出自你」的方向感，不是尺度取档。
+  */
+  if (user) return <div className="ui-timeline-item my-6 flex justify-end"><div className="max-w-[84%] rounded-lg rounded-br-sm bg-inverse px-4 py-3 text-body text-on-inverse shadow-card sm:max-w-[78%]"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></div></div>;
   if (final) return <article aria-label={`${assistantLabel} 最终输出`} className="assistant-output markdown ui-timeline-item my-4 max-w-[78ch] text-body text-primary"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></article>;
   return <article className="assistant-output markdown ui-timeline-item my-5 max-w-[78ch] text-body text-primary"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></article>;
 }

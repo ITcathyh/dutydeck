@@ -141,7 +141,7 @@ export function ControlCenterModal({
           <div className="text-caption font-semibold uppercase tracking-[.12em] text-subtle">建议下一步</div>
           <div className="mt-1 text-body font-semibold text-primary">{nextStep.title}</div>
           <p className="mt-1 text-caption text-secondary">{nextStep.detail}</p>
-          <Button tone="inverse" className="mt-2 w-full" onClick={nextStep.action}><span className="flex w-full items-center justify-between">继续<ArrowRight size={14}/></span></Button>
+          <Button variant="primary" className="mt-2 w-full" onClick={nextStep.action}><span className="flex w-full items-center justify-between">继续<ArrowRight size={14}/></span></Button>
         </Card>
         {/*
           可访问名是 label + description 两段拼出来的（App.dom.test.tsx 断言
@@ -170,7 +170,7 @@ function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { a
         <div className="flex items-center gap-2"><Bot size={16} className="text-action"/><h4 className="text-body font-semibold text-primary">{agent.name}</h4>{statePill('可创建任务', 'ready')}</div>
         <p className="mt-1 text-meta text-subtle">{agent.version ? `${agent.version} · ` : ''}{agent.protocol === 'pty-cli' ? '终端 CLI' : agent.protocol.toUpperCase()}</p>
         <div className="mt-3 grid grid-cols-2 gap-2 text-caption text-secondary"><div className="rounded-md bg-muted p-2">默认权限<br/><strong className="text-primary">{permissionLabel(agent.permissionMode)}</strong></div><div className="rounded-md bg-muted p-2">飞书 Bot<br/><strong className="text-primary">{boundBots.length ? `${boundBots.length} 个已连接` : '尚未连接'}</strong></div></div>
-        <div className="mt-3 flex gap-2"><Button tone="inverse" className="flex-1" onClick={onCreateTask}>用它创建任务</Button><Button variant="secondary" onClick={onOpenLarkSetup}>{boundBots.length ? '管理 Bot' : '连接 Bot'}</Button></div>
+        <div className="mt-3 flex gap-2"><Button variant="primary" className="flex-1" onClick={onCreateTask}>用它创建任务</Button><Button variant="secondary" onClick={onOpenLarkSetup}>{boundBots.length ? '管理 Bot' : '连接 Bot'}</Button></div>
       </Card>;
     })}</div>}
     <div className={`mt-4 rounded-lg border p-4 ${agents.length ? 'border-default bg-muted' : 'border-warning-border bg-warning-soft'}`}>
@@ -203,7 +203,7 @@ function LarkSection({ agents, legacyBots, capabilities, matrix, secretRefs, cha
   onOpenLarkSetup(): void;
 }) {
   return <section aria-labelledby="control-lark">
-    <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-lark" className="text-title font-semibold text-primary">飞书 Bot</h3><p className="mt-1 text-caption text-subtle">Bot 负责在飞书收发消息，Agent 负责执行任务。绑定向导会把两者一次连好。</p></div><Button tone="inverse" icon={<Plus size={15}/>} onClick={onOpenLarkSetup}>{legacyBots.length ? '绑定新 Bot' : '绑定飞书 Bot'}</Button></div>
+    <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-lark" className="text-title font-semibold text-primary">飞书 Bot</h3><p className="mt-1 text-caption text-subtle">Bot 负责在飞书收发消息，Agent 负责执行任务。绑定向导会把两者一次连好。</p></div><Button variant="primary" icon={<Plus size={15}/>} onClick={onOpenLarkSetup}>{legacyBots.length ? '绑定新 Bot' : '绑定飞书 Bot'}</Button></div>
     {legacyBots.length === 0
       ? <EmptyState tone="guide" icon={<MessageSquare size={22}/>} title="还没有飞书 Bot" description="准备 App ID 和 App Secret；向导会校验应用、配置飞书能力，再让你选择默认 Agent、工作区和监听状态。" primaryAction={{ label: '开始绑定', onClick: onOpenLarkSetup }}/>
       : <div className="mt-4 space-y-2">{legacyBots.map(bot => {
@@ -231,7 +231,7 @@ function LarkSection({ agents, legacyBots, capabilities, matrix, secretRefs, cha
         </div>
         <p className="mt-3 text-caption text-subtle">不需要 App Secret。结果固定为 staged / listener disabled，不能收发消息。</p>
         {createBot.error && <div className="mt-2"><Banner tone="danger">{createBot.error instanceof ApiError && createBot.error.status === 403 ? '需要 owner/admin 权限才能创建草稿。' : `创建失败：${createBot.error.message}`}</Banner></div>}
-        <div className="mt-3 flex justify-end gap-2"><Button variant="ghost" onClick={() => setCreateOpen(false)}>取消</Button><Button type="submit" tone="inverse" loading={createBot.isPending} disabled={!displayName.trim() || !externalAppId.trim()}>保存 staged 草稿</Button></div>
+        <div className="mt-3 flex justify-end gap-2"><Button variant="ghost" onClick={() => setCreateOpen(false)}>取消</Button><Button type="submit" variant="primary" loading={createBot.isPending} disabled={!displayName.trim() || !externalAppId.trim()}>保存 staged 草稿</Button></div>
       </form>}
       <div className="mt-3 space-y-2">{channelBots.map(entry => <Card key={entry.bot.id} as="article" padding="sm"><div className="flex flex-wrap items-center gap-2"><Bot size={14}/><strong className="text-caption text-primary">{entry.bot.displayName}</strong>{statePill(`${entry.bot.state} / listener disabled`)}{statePill(entry.bot.credentialStatus === 'configured' ? 'SecretRef ready' : `credential ${entry.bot.credentialStatus}`, entry.bot.credentialStatus === 'configured' ? 'ready' : 'blocked')}</div></Card>)}</div>
       {matrix.isLoading && <div className="mt-3"><Spinner label="正在读取高级草稿…"/></div>}
@@ -245,7 +245,7 @@ function GroupsSection({ cells, missingBindings, repositoriesWired, onOpenLarkSe
     <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-groups" className="text-title font-semibold text-primary">群与权限</h3><p className="mt-1 text-caption text-subtle">决定哪些群可以使用 Bot，以及聊天权限和操作权限的边界。</p></div>{statePill(cells.length ? `${cells.length} 个已发现群` : '尚未发现群', cells.length && !missingBindings ? 'ready' : 'blocked')}</div>
     {cells.length === 0
       ? <EmptyState tone="guide" icon={<Users size={21}/>} title="还没有可配置的群" description="先完成 Bot 绑定并把机器人加入飞书群，Dockmux 收到群消息后会在这里展示。" primaryAction={{ label: '检查 Bot 设置', onClick: onOpenLarkSetup }}/>
-      : <><div className="mt-4 grid gap-3 sm:grid-cols-3"><Card padding="md" tone="muted"><div className="text-caption font-semibold text-subtle">已配置群</div><div className="mt-1 text-heading font-semibold text-primary">{cells.length - missingBindings}/{cells.length}</div></Card><Card padding="md" tone="muted"><div className="text-caption font-semibold text-subtle">权限原则</div><div className="mt-1 text-body font-semibold text-primary">能聊天 ≠ 能操作终端</div><p className="mt-1 text-caption text-subtle">高风险操作单独授权</p></Card><div className="rounded-lg border border-warning-border bg-warning-soft p-4"><div className="text-caption font-semibold text-warning">高级策略运行时</div><div className="mt-1 text-body font-semibold text-warning">尚未启用</div></div></div><Button tone="inverse" className="mt-4 w-full" disabled={!repositoriesWired} onClick={onOpenGroups}><span className="flex w-full items-center justify-between">查看群配置<ArrowRight size={15}/></span></Button></>}
+      : <><div className="mt-4 grid gap-3 sm:grid-cols-3"><Card padding="md" tone="muted"><div className="text-caption font-semibold text-subtle">已配置群</div><div className="mt-1 text-heading font-semibold text-primary">{cells.length - missingBindings}/{cells.length}</div></Card><Card padding="md" tone="muted"><div className="text-caption font-semibold text-subtle">权限原则</div><div className="mt-1 text-body font-semibold text-primary">能聊天 ≠ 能操作终端</div><p className="mt-1 text-caption text-subtle">高风险操作单独授权</p></Card><div className="rounded-lg border border-warning-border bg-warning-soft p-4"><div className="text-caption font-semibold text-warning">高级策略运行时</div><div className="mt-1 text-body font-semibold text-warning">尚未启用</div></div></div><Button variant="primary" className="mt-4 w-full" disabled={!repositoriesWired} onClick={onOpenGroups}><span className="flex w-full items-center justify-between">查看群配置<ArrowRight size={15}/></span></Button></>}
   </section>;
 }
 
@@ -257,6 +257,6 @@ function AutomationSection({ scheduleCount, blockers, capabilities, onOpenSchedu
       {capabilities.data && blockers.length > 0 && <details className="mt-2"><summary className="cursor-pointer text-caption font-semibold">查看技术阻断</summary><div className="mt-2 space-y-1.5">{blockers.map(blocker => <div key={blocker.code} className="rounded-md bg-surface px-3 py-2 text-caption"><strong>{blocker.code}</strong> · {blocker.message}<br/>下一步：{blocker.action}</div>)}</div></details>}
     </Banner></div>
     {capabilities.isError && <div className="mt-3"><Banner tone="danger">自动化状态读取失败。<button type="button" className="ml-1 font-semibold underline" onClick={() => void capabilities.refetch()}>重试</button></Banner></div>}
-    <Button tone="inverse" className="mt-4 w-full" disabled={!capabilities.data?.repositoriesWired} onClick={onOpenSchedules}><span className="flex w-full items-center justify-between">编辑与预览自动化<ArrowRight size={15}/></span></Button>
+    <Button variant="primary" className="mt-4 w-full" disabled={!capabilities.data?.repositoriesWired} onClick={onOpenSchedules}><span className="flex w-full items-center justify-between">编辑与预览自动化<ArrowRight size={15}/></span></Button>
   </section>;
 }
