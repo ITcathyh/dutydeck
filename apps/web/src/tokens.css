@@ -3,11 +3,20 @@
   任何颜色、字号、圆角、层级、动效时长的字面量只允许出现在这个文件里；
   组件消费 tailwind.config.js 映射出来的语义类（bg-surface / text-body / rounded-md），
   不消费 token 名本身。
+
+  ## 灰阶的色相纪律（2026-09-03 重做）
+
+  重做前 dockmux 的全部中性色都是 **G > B**（带绿），品牌色是墨绿 #0f766e。
+  绿味灰在屏幕上读作「脏」和「旧」，这是界面「难看」最直接的来源，不是细节不精致。
+  重做后对齐 botmux 的冷灰蓝体系：**所有中性色（表面 / 文字 / 边框 / 滚动条 /
+  代码块底）一律 B ≥ G**，品牌色换成靛蓝 #4f56e8。
+  语义色（success / warning / danger / info / queued）保留各自的色相，不受这条约束——
+  绿色的「成功」就该是绿的。
 */
 
 /*
-  非颜色标度：字号、圆角、层级、动效。这些值与主题无关，两套主题共用同一份，
-  所以单独声明一层，不参与下面颜色 token 的三层覆盖。
+  非颜色标度：字号、圆角、层级、动效、布局骨架尺寸。这些值与主题无关，
+  两套主题共用同一份，所以单独声明一层，不参与下面颜色 token 的三层覆盖。
 */
 :root {
   /* 字号 6 档（契约 §2）。每档配一个行高，成对使用，不允许单独覆盖行高。 */
@@ -43,6 +52,28 @@
   --duration-normal: 180ms;
   --ease-out: ease-out;
   --ease-emphasized: cubic-bezier(.16, 1, .3, 1);
+
+  /*
+    布局骨架 2 档。取 botmux dashboard 的实测值：顶栏 56px、侧栏 248px。
+    重做前侧栏在 SessionList.tsx 里硬编码 292px（比 botmux 宽 44px，挤压主内容区），
+    这里给出唯一定义，消费方走 tailwind 的 w-sidebar / h-topbar。
+
+    注意 botmux 那边 --topbar-h(56px) 只被侧栏的 top 消费，顶栏自己用的是另一个
+    --topbar-height(60px)，两值不等是它的 off-by-4 bug（design-tokens.css:117
+    vs style.css:60）。这里只留一个值，不复制那个 bug。见契约 §15。
+  */
+  --topbar-h: 56px;
+  --sidebar-w: 248px;
+  /*
+    侧栏是浮动卡片（position: fixed，四周留白），不是 grid 列。于是「侧栏占多宽」
+    这个几何关系被拆成两半：侧栏自己写 left/top/bottom 的插入距离，主区写
+    margin-left 让位。两处必须同时改，否则要么压字要么留一条空隙。
+
+    --main-inset 就是为了让它们只有一个来源：主区直接用 ml-main-inset，
+    不许自己算 280px。design-tokens.test.ts 里有断言守着这个等式。
+  */
+  --shell-gap: 16px;
+  --main-inset: calc(var(--sidebar-w) + var(--shell-gap) * 2);
 }
 
 /*
@@ -54,235 +85,244 @@
 */
 :root {
   color-scheme: light;
-  --surface-canvas: #f5f7f6;
+  --surface-canvas: #f4f5f8;
   --surface-default: #ffffff;
-  --surface-muted: #eef2f0;
-  --surface-hover: #f7f9f8;
+  --surface-muted: #eceef4;
+  /*
+    hover 比 botmux 的 #f3f4f8 深不少。botmux 的 hover 对白底只有 1.055，悬浮几乎
+    没有反馈，而且对 surface-muted 只有 1.02（契约 §6 的下限是 1.08，等于看不见）。
+    #e0e5f1 对 muted 1.087、对白底 1.26，是「摸得到」的一档，且 text-muted 仍有 4.76。
+  */
+  --surface-hover: #e0e5f1;
   --surface-raised: #ffffff;
-  --surface-inverse: #16201f;
-  --surface-inverse-hover: #24312f;
-  --text-primary: #17201f;
-  --text-secondary: #53615f;
-  --text-muted: #76817f;
+  --surface-inverse: #1a2233;
+  --surface-inverse-hover: #29334a;
+  --text-primary: #1a2233;
+  --text-secondary: #4a5570;
+  /*
+    botmux 的第三档文字是 #8a92a8，对白底只有 3.1:1，达不到契约要求的 AA 4.5。
+    这里压到 #5a6379（对白 6.01、对最深的 surface-hover 4.99），色相仍是同一支冷蓝灰。
+  */
+  --text-muted: #5a6379;
   --text-on-action: #ffffff;
-  --text-inverse: #eef2f0;
-  --text-link: #2563eb;
-  --border-subtle: #edf0ef;
-  --border-default: #dce3e1;
-  --border-strong: #bdc8c5;
-  --action-primary: #0f766e;
-  --action-primary-hover: #0b5f59;
-  --action-soft: #e6f3f1;
-  --action-soft-hover: #d3eae6;
-  --status-warning: #8a5616;
-  --status-warning-soft: #fff7e6;
-  --status-warning-border: #efd59d;
-  --status-warning-solid: #d97706;
-  --status-danger: #a83a43;
-  --status-danger-soft: #fff0f1;
-  --status-danger-border: #efc1c5;
-  --status-danger-solid: #dc2626;
-  --status-success: #257252;
-  --status-success-soft: #eaf6ef;
-  --status-success-border: #bfe0cd;
-  --status-success-solid: #10b981;
-  --status-info: #2d609b;
-  --status-info-soft: #edf4fb;
-  --status-info-border: #c8dbee;
-  --status-info-solid: #3b82f6;
-  --status-queued: #565693;
-  --status-queued-soft: #f0effa;
+  --text-inverse: #eceef4;
+  --text-link: #4047de;
+  --border-subtle: #eceef4;
+  --border-default: #e3e6ee;
+  --border-strong: #c8cedb;
+  --action-primary: #4f56e8;
+  --action-primary-hover: #4047de;
+  --action-soft: #eef0fe;
+  --action-soft-hover: #dfe2fd;
+  --status-warning: #8d5a10;
+  --status-warning-soft: #fbf1de;
+  --status-warning-border: #eed8a6;
+  --status-warning-solid: #c07a12;
+  --status-danger: #b02a37;
+  --status-danger-soft: #fcebed;
+  --status-danger-border: #f2c5ca;
+  --status-danger-solid: #d83a48;
+  --status-success: #1c7350;
+  --status-success-soft: #e4f5ed;
+  --status-success-border: #bde3ce;
+  --status-success-solid: #1d9a63;
+  --status-info: #2560a6;
+  --status-info-soft: #e8f1fc;
+  --status-info-border: #c4dbf6;
+  --status-info-solid: #3b6fe0;
+  --status-queued: #4f4796;
+  --status-queued-soft: #efedfc;
   --status-queued-border: #cdcbee;
-  --status-attention-solid: #f97316;
-  --status-neutral-solid: #a1a1aa;
+  /*
+    四态信号色（botmux 的 --st-need / --st-work / --st-todo / --st-idle）在这里的落点：
+    need → attention（等待你响应）、work → info（执行中）、todo → queued（排队）、idle → neutral。
+    solid 是圆点/色条用的实色，soft 是同色相的极浅底。
+  */
+  --status-attention-solid: #cf8413;
+  --status-attention-soft: #fbf0da;
+  --status-neutral-solid: #8a92a8;
+  --status-neutral-soft: #f0f2f7;
   --overlay-scrim: rgba(15, 23, 42, .35);
   --shadow-card: 0 1px 2px rgba(15, 23, 42, .05);
   --shadow-panel: 0 12px 34px rgba(15, 23, 42, .09);
   --shadow-dialog: 0 24px 80px rgba(15, 23, 42, .22);
   --shadow-overlay: 0 30px 100px rgba(15, 23, 42, .32);
-  --scrollbar-thumb: #d4d4d8;
-  --focus-ring: #0f766e;
+  --scrollbar-thumb: #c8cedb;
+  --focus-ring: #4f56e8;
 
-  /* 侧栏是双主题下都保持深色的导航底盘，单独一套 token，避免和内容表面互相污染。 */
-  --sidebar-surface: #16201f;
-  --sidebar-border: #2a3634;
-  --sidebar-text: #dfe6e5;
-  --sidebar-text-strong: #ffffff;
-  --sidebar-text-muted: #8b9997;
-  --sidebar-text-faint: #6b7876;
-  --sidebar-hover: rgba(255, 255, 255, .06);
-  --sidebar-active: rgba(255, 255, 255, .1);
-  --sidebar-accent: #5eead4;
-  --sidebar-accent-text: #05201c;
-  --sidebar-shadow: 12px 0 32px rgba(15, 23, 42, .16);
+  /*
+    侧栏跟随主题（2026-09-03 改）。
+
+    重做前这里是一套双主题下恒深色的独立盘：浅色主题下左边杵一条深色导航条，
+    和内容区割裂，而且共享原语套到侧栏上就会「深字压深底」。botmux 的侧栏是
+    一张跟随主题的浮起卡片（背景取 --surface，即本仓的 surface-default），
+    它的 tokens 里根本没有 sidebar 专用色。
+
+    token 名全部保留（4 个消费文件由别的团队迁移），值改为引用主题表面色。
+    自定义属性的 var() 是**使用时**求值，所以这里声明一次，深色两层不必重复。
+  */
+  --sidebar-surface: var(--surface-default);
+  --sidebar-border: var(--border-default);
+  --sidebar-text: var(--text-secondary);
+  --sidebar-text-strong: var(--text-primary);
+  --sidebar-text-muted: var(--text-muted);
+  /* faint 曾是比 muted 更淡的第四档；跟随主题后再淡一档就会掉到 AA 线下，所以并到 muted。 */
+  --sidebar-text-faint: var(--text-muted);
+  --sidebar-hover: var(--surface-muted);
+  --sidebar-active: var(--action-soft);
+  --sidebar-accent: var(--action-primary);
+  --sidebar-accent-text: var(--text-on-action);
+  --sidebar-shadow: var(--shadow-panel);
 
   /* 终端与代码块需要真实颜色值（xterm.js 的 theme 对象读不了 CSS 变量），在这里集中定义。 */
-  --terminal-bg: #fafafa;
-  --terminal-fg: #3f3f46;
-  --terminal-cursor: #0f766e;
-  --terminal-selection: rgba(15, 118, 110, .22);
-  --code-surface: #18191d;
-  --code-border: rgba(63, 63, 70, .7);
-  --code-header-text: #a1a1aa;
+  --terminal-bg: #f7f8fa;
+  --terminal-fg: #3c4457;
+  --terminal-cursor: #4f56e8;
+  --terminal-selection: rgba(79, 86, 232, .20);
+  --code-surface: #161a24;
+  --code-border: rgba(60, 68, 87, .7);
+  --code-header-text: #98a1b5;
   /* 代码块头部：与 --code-surface 同族的分隔线与悬浮底，不能复用 --code-border（那是整块外框，更重）。 */
   --code-header-border: rgba(255, 255, 255, .07);
   --code-header-bg: rgba(255, 255, 255, .025);
   --code-header-hover: rgba(255, 255, 255, .07);
-  --code-inline-bg: #eef2f0;
-  --code-inline-text: #27272a;
-  --code-inline-border: #dce3e1;
+  --code-inline-bg: #eceef4;
+  --code-inline-text: #262d3d;
+  --code-inline-border: #e3e6ee;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --surface-canvas: #0d1211;
-    --surface-default: #151c1b;
-    --surface-muted: #1d2625;
-    --surface-hover: #1f2a29;
-    --surface-raised: #1b2423;
-    --surface-inverse: #e8edec;
-    --surface-inverse-hover: #cdd6d4;
-    --text-primary: #e8edec;
-    --text-secondary: #a6b3b1;
-    --text-muted: #7f8c8a;
-    --text-on-action: #04211d;
-    --text-inverse: #17201f;
-    --text-link: #7dd3fc;
-    --border-subtle: #1e2726;
-    --border-default: #2b3635;
-    --border-strong: #45524f;
-    --action-primary: #2dd4bf;
-    --action-primary-hover: #5eead4;
-    --action-soft: #10322e;
-    --action-soft-hover: #164039;
+    --surface-canvas: #0d1117;
+    --surface-default: #151b26;
+    --surface-muted: #1b2330;
+    --surface-hover: #222c3c;
+    --surface-raised: #1b2330;
+    --surface-inverse: #dde4f0;
+    --surface-inverse-hover: #c6ceda;
+    --text-primary: #dde4f0;
+    --text-secondary: #99a4b8;
+    --text-muted: #929db1;
+    --text-on-action: #10131f;
+    --text-inverse: #1a2233;
+    --text-link: #9ba1f7;
+    --border-subtle: #1e2734;
+    --border-default: #26303f;
+    --border-strong: #3a4658;
+    --action-primary: #7b82f5;
+    --action-primary-hover: #8d93f7;
+    --action-soft: #232842;
+    --action-soft-hover: #2c3252;
     --status-warning: #f0c078;
     --status-warning-soft: #2a2013;
     --status-warning-border: #4b3a1b;
-    --status-warning-solid: #f59e0b;
+    --status-warning-solid: #d99e3f;
     --status-danger: #f5a3aa;
     --status-danger-soft: #2c1719;
     --status-danger-border: #4e262a;
-    --status-danger-solid: #f87171;
+    --status-danger-solid: #e56270;
     --status-success: #6fd39b;
     --status-success-soft: #12291f;
     --status-success-border: #234b36;
-    --status-success-solid: #34d399;
-    --status-info: #93c0f2;
-    --status-info-soft: #14202e;
-    --status-info-border: #26415f;
-    --status-info-solid: #60a5fa;
+    --status-success-solid: #4cc38a;
+    --status-info: #9cc2f2;
+    --status-info-soft: #141f2e;
+    --status-info-border: #26405f;
+    --status-info-solid: #6b96e8;
     --status-queued: #adabec;
     --status-queued-soft: #1c1b33;
     --status-queued-border: #302e52;
-    --status-attention-solid: #fb923c;
-    --status-neutral-solid: #71717a;
-    --overlay-scrim: rgba(2, 6, 6, .62);
+    --status-attention-solid: #d99e3f;
+    --status-attention-soft: #2a2013;
+    --status-neutral-solid: #8a95a8;
+    --status-neutral-soft: #1e2431;
+    --overlay-scrim: rgba(3, 6, 12, .62);
     --shadow-card: 0 1px 2px rgba(0, 0, 0, .4);
     --shadow-panel: 0 12px 34px rgba(0, 0, 0, .45);
     --shadow-dialog: 0 24px 80px rgba(0, 0, 0, .6);
     --shadow-overlay: 0 30px 100px rgba(0, 0, 0, .68);
-    --scrollbar-thumb: #3f4a48;
-    --focus-ring: #2dd4bf;
-    --sidebar-surface: #0a0f0e;
-    --sidebar-border: #1b2422;
-    --sidebar-text: #dbe3e2;
-    --sidebar-text-strong: #ffffff;
-    --sidebar-text-muted: #84918f;
-    --sidebar-text-faint: #62706e;
-    --sidebar-hover: rgba(255, 255, 255, .055);
-    --sidebar-active: rgba(255, 255, 255, .095);
-    --sidebar-accent: #2dd4bf;
-    --sidebar-accent-text: #04211d;
-    --sidebar-shadow: 12px 0 32px rgba(0, 0, 0, .5);
-    --terminal-bg: #0d1211;
-    --terminal-fg: #cbd5d3;
-    --terminal-cursor: #2dd4bf;
-    --terminal-selection: rgba(45, 212, 191, .26);
-    --code-surface: #101615;
-    --code-border: rgba(69, 82, 79, .7);
-    --code-header-text: #8b9997;
-  --code-header-border: rgba(255, 255, 255, .07);
-  --code-header-bg: rgba(255, 255, 255, .025);
-  --code-header-hover: rgba(255, 255, 255, .07);
+    --scrollbar-thumb: #3a4658;
+    --focus-ring: #7b82f5;
+    --terminal-bg: #0b0e13;
+    --terminal-fg: #c3ccdd;
+    --terminal-cursor: #7b82f5;
+    --terminal-selection: rgba(123, 130, 245, .26);
+    --code-surface: #0f131c;
+    --code-border: rgba(58, 70, 88, .7);
+    --code-header-text: #8a95a8;
     --code-header-border: rgba(255, 255, 255, .07);
     --code-header-bg: rgba(255, 255, 255, .025);
     --code-header-hover: rgba(255, 255, 255, .07);
-    --code-inline-bg: #1d2625;
-    --code-inline-text: #dfe6e5;
-    --code-inline-border: #2b3635;
+    --code-inline-bg: #1b2330;
+    --code-inline-text: #dde4f0;
+    --code-inline-border: #26303f;
   }
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --surface-canvas: #0d1211;
-  --surface-default: #151c1b;
-  --surface-muted: #1d2625;
-  --surface-hover: #1f2a29;
-  --surface-raised: #1b2423;
-  --surface-inverse: #e8edec;
-  --surface-inverse-hover: #cdd6d4;
-  --text-primary: #e8edec;
-  --text-secondary: #a6b3b1;
-  --text-muted: #7f8c8a;
-  --text-on-action: #04211d;
-  --text-inverse: #17201f;
-  --text-link: #7dd3fc;
-  --border-subtle: #1e2726;
-  --border-default: #2b3635;
-  --border-strong: #45524f;
-  --action-primary: #2dd4bf;
-  --action-primary-hover: #5eead4;
-  --action-soft: #10322e;
-  --action-soft-hover: #164039;
+  --surface-canvas: #0d1117;
+  --surface-default: #151b26;
+  --surface-muted: #1b2330;
+  --surface-hover: #222c3c;
+  --surface-raised: #1b2330;
+  --surface-inverse: #dde4f0;
+  --surface-inverse-hover: #c6ceda;
+  --text-primary: #dde4f0;
+  --text-secondary: #99a4b8;
+  --text-muted: #929db1;
+  --text-on-action: #10131f;
+  --text-inverse: #1a2233;
+  --text-link: #9ba1f7;
+  --border-subtle: #1e2734;
+  --border-default: #26303f;
+  --border-strong: #3a4658;
+  --action-primary: #7b82f5;
+  --action-primary-hover: #8d93f7;
+  --action-soft: #232842;
+  --action-soft-hover: #2c3252;
   --status-warning: #f0c078;
   --status-warning-soft: #2a2013;
   --status-warning-border: #4b3a1b;
-  --status-warning-solid: #f59e0b;
+  --status-warning-solid: #d99e3f;
   --status-danger: #f5a3aa;
   --status-danger-soft: #2c1719;
   --status-danger-border: #4e262a;
-  --status-danger-solid: #f87171;
+  --status-danger-solid: #e56270;
   --status-success: #6fd39b;
   --status-success-soft: #12291f;
   --status-success-border: #234b36;
-  --status-success-solid: #34d399;
-  --status-info: #93c0f2;
-  --status-info-soft: #14202e;
-  --status-info-border: #26415f;
-  --status-info-solid: #60a5fa;
+  --status-success-solid: #4cc38a;
+  --status-info: #9cc2f2;
+  --status-info-soft: #141f2e;
+  --status-info-border: #26405f;
+  --status-info-solid: #6b96e8;
   --status-queued: #adabec;
   --status-queued-soft: #1c1b33;
   --status-queued-border: #302e52;
-  --status-attention-solid: #fb923c;
-  --status-neutral-solid: #71717a;
-  --overlay-scrim: rgba(2, 6, 6, .62);
+  --status-attention-solid: #d99e3f;
+  --status-attention-soft: #2a2013;
+  --status-neutral-solid: #8a95a8;
+  --status-neutral-soft: #1e2431;
+  --overlay-scrim: rgba(3, 6, 12, .62);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-panel: 0 12px 34px rgba(0, 0, 0, .45);
   --shadow-dialog: 0 24px 80px rgba(0, 0, 0, .6);
   --shadow-overlay: 0 30px 100px rgba(0, 0, 0, .68);
-  --scrollbar-thumb: #3f4a48;
-  --focus-ring: #2dd4bf;
-  --sidebar-surface: #0a0f0e;
-  --sidebar-border: #1b2422;
-  --sidebar-text: #dbe3e2;
-  --sidebar-text-strong: #ffffff;
-  --sidebar-text-muted: #84918f;
-  --sidebar-text-faint: #62706e;
-  --sidebar-hover: rgba(255, 255, 255, .055);
-  --sidebar-active: rgba(255, 255, 255, .095);
-  --sidebar-accent: #2dd4bf;
-  --sidebar-accent-text: #04211d;
-  --sidebar-shadow: 12px 0 32px rgba(0, 0, 0, .5);
-  --terminal-bg: #0d1211;
-  --terminal-fg: #cbd5d3;
-  --terminal-cursor: #2dd4bf;
-  --terminal-selection: rgba(45, 212, 191, .26);
-  --code-surface: #101615;
-  --code-border: rgba(69, 82, 79, .7);
-  --code-header-text: #8b9997;
-  --code-inline-bg: #1d2625;
-  --code-inline-text: #dfe6e5;
-  --code-inline-border: #2b3635;
+  --scrollbar-thumb: #3a4658;
+  --focus-ring: #7b82f5;
+  --terminal-bg: #0b0e13;
+  --terminal-fg: #c3ccdd;
+  --terminal-cursor: #7b82f5;
+  --terminal-selection: rgba(123, 130, 245, .26);
+  --code-surface: #0f131c;
+  --code-border: rgba(58, 70, 88, .7);
+  --code-header-text: #8a95a8;
+  --code-header-border: rgba(255, 255, 255, .07);
+  --code-header-bg: rgba(255, 255, 255, .025);
+  --code-header-hover: rgba(255, 255, 255, .07);
+  --code-inline-bg: #1b2330;
+  --code-inline-text: #dde4f0;
+  --code-inline-border: #26303f;
 }
