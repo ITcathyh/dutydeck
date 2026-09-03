@@ -54,8 +54,10 @@ export default {
         'queued-soft': 'var(--status-queued-soft)',
         'queued-border': 'var(--status-queued-border)',
         'attention-solid': 'var(--status-attention-solid)',
+        'attention-soft': 'var(--status-attention-soft)',
         'neutral-solid': 'var(--status-neutral-solid)',
-        // 侧栏独立深色盘（双主题下恒深色，契约 §6）
+        'neutral-soft': 'var(--status-neutral-soft)',
+        // 侧栏跟随主题：token 名保留，值在 tokens.css 里指向主题表面色（契约 §6）
         'sidebar-surface': 'var(--sidebar-surface)',
         'sidebar-border': 'var(--sidebar-border)',
         'sidebar-text': 'var(--sidebar-text)',
@@ -137,6 +139,27 @@ export default {
       fontFamily: {
         sans: ['Inter', 'ui-sans-serif', 'system-ui'],
         mono: ['SFMono-Regular', 'ui-monospace', 'monospace']
+      },
+      /*
+        布局骨架尺寸（2026-09-03 补）。侧栏宽度此前在 SessionList.tsx 里硬编码
+        292px，顶栏高度散在各处，两者都绕过了 token 层。这里给出 w-sidebar /
+        h-topbar / min-w-sidebar，消费方不再写 w-[292px]。
+
+        shell-gap / main-inset 是浮动侧栏的几何契约：侧栏用 inset-shell-gap 定位，
+        主区用 ml-main-inset 让位，两者同源。一致性测试禁止任意值，所以这里不给
+        档位就等于逼调用点去发明写法。
+      */
+      width: { sidebar: 'var(--sidebar-w)' },
+      minWidth: { sidebar: 'var(--sidebar-w)' },
+      height: { topbar: 'var(--topbar-h)' },
+      minHeight: { topbar: 'var(--topbar-h)' },
+      spacing: {
+        topbar: 'var(--topbar-h)',
+        sidebar: 'var(--sidebar-w)',
+        'shell-gap': 'var(--shell-gap)',
+        'main-inset': 'var(--main-inset)',
+        // 侧栏顶部要让开顶栏再留一个间距，写成 token 省得两队各算一次
+        'shell-top': 'calc(var(--topbar-h) + var(--shell-gap))'
       }
     }
   },

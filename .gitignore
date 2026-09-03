@@ -10,3 +10,10 @@ packages/*/dist/
 .dockmux/
 apps/server/public
 *.tsbuildinfo
+
+# setup 写入的 .env 备份（含本机路径，权限 600）
+.env.bak.*
+
+# 改版对比截图：4.9M 二进制，一轮改版就作废一批，进 git 会永久留在历史里。
+# 需要时用 scripts/shoot-redesign.mjs 重跑即可（脚本本身是提交的）。
+docs/assets/redesign-*/
