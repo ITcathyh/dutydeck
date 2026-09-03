@@ -1,4 +1,4 @@
-import { Archive, BookOpen, ChevronRight, Folder, Menu, MessageSquare, PanelRightOpen, Square, Terminal } from 'lucide-react';
+import { Archive, BookOpen, ChevronRight, Folder, MessageSquare, PanelRightOpen, Square, Terminal } from 'lucide-react';
 import type { Agent, Session, Task } from '../api';
 import type { StreamStatus } from '../sse';
 import { nextActionForState, sessionErrorSummary, shortRunId, workspaceName } from '../workspace-model';
@@ -25,7 +25,7 @@ export function RunDetailTabs({ value, onChange }: { value: RunDetailTab; onChan
   ]}/>;
 }
 
-export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, rawVisible, rawAvailable, restarting, onOpenSidebar, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw }: {
+export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw }: {
   session: Session;
   agent?: Agent;
   taskPrompt?: string;
@@ -34,7 +34,6 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   rawVisible: boolean;
   rawAvailable: boolean;
   restarting: boolean;
-  onOpenSidebar(): void;
   onInterrupt(): void;
   onRestart(): void;
   onOpenPrompt(): void;
@@ -56,8 +55,11 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   const errorSummary = sessionErrorSummary(session.error);
   return <header className="shrink-0 border-b border-default bg-surface backdrop-blur">
     <div className="flex min-h-14 items-center gap-2 px-3 sm:px-5">
-      <span className="md:hidden"><IconButton label="打开工作台导航" onClick={onOpenSidebar}><Menu size={17}/></IconButton></span>
       {/*
+        这里原先有一枚 md:hidden 的汉堡，无障碍名同样是「打开工作台导航」。
+        全局顶栏落地后导航入口收归 TopBar，再留一枚就等于同一屏上有两个同名按钮：
+        读屏用户听到两遍，getByRole 也会抛 "found multiple elements"。
+
         缺陷 7：这一行原先塞了 workspace / 任务目标 / runId / cwd / Agent / 权限模式六类信息，
         移动端只剩一个截断标题。现在拆成两层：主行只回答「这是哪个仓库的什么任务」，
         次要标识下沉到副行。副行的 cwd 与 runId 在窄屏用 CSS 隐藏（不是条件渲染），
