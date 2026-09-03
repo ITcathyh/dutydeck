@@ -6,6 +6,20 @@ import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatr
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
+/*
+  重启后无法靠自己恢复的「忙碌」状态。
+
+  这五个态都以「某个 driver 正在跑」为前提，而进程刚起来时内存里一个 driver 都没有，
+  所以它们只要还留在库里就一定是上一条命的残留。列在这里而不是内联，是因为
+  `sessionStates` 以后加新态时，得有人回来判断它属不属于这一档——摊开写才提醒得到。
+
+  不含 created：那是「还没启动」，第一条回收分支已经管了，且它没撒谎。
+*/
+const RECOVERABLE_BUSY_STATES = ['starting', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting'] as const satisfies readonly Session['state'][];
+
+/** `includes` 在 as const 数组上不接受更宽的入参；用类型谓词而不是 `as` 强转，保住穷尽性检查。 */
+const isRecoverableBusy = (state: Session['state']): boolean => (RECOVERABLE_BUSY_STATES as readonly string[]).includes(state);
+
 export function selectProtocol(probes: ProbeMatrix): 'acp' | 'jsonl' | 'pipe' | 'pty' {
   if (probes.acp) return 'acp';
   if (probes.jsonl) return 'jsonl';
@@ -197,6 +211,33 @@ export class DockmuxRuntime {
           await this.emit(session.id, 'error', { message, taskId: task.id });
         }
         if (legacyQueued.length === queuedTasks.length && !['stopped', 'failed'].includes(session.state)) await this.saveState(session, 'interrupted', message);
+      }
+      /*
+        兜底：进程刚起来，内存里一个 driver 都没有，所以任何「忙碌」状态都是上一条命
+        遗留的谎话——界面会照着它一直放呼吸动画，用户分不出「真在想」和「进程三天前
+        就死了」。2026-09-03 实测线上有 3 个会话卡在 thinking，cwd 指向早被删除的
+        /tmp/dockmux-test，而它们的任务记录已经是 failed —— **会话态与任务态互相矛盾**。
+
+        上面三条回收分支都漏掉了这种：
+        · 第一条只认 created/starting/failed 且无任务记录；
+        · 第二条只认有 running 任务的（被 SIGKILL 时任务状态根本来不及落库）；
+        · 第三条只认缺执行上下文的旧队列。
+
+        必须排在 scheduleQueue 之前：有排队任务的会话下面会被立刻调度起来，
+        那时标成 stopped 就成了「正在跑却写着已停止」——修掉一个矛盾又造一个新的。
+        所以这里只兜「没有队列可继续」的会话，有队列的交给下面那条重新跑起来。
+
+        不用 saveState 是因为它会走 emit 发事件，而此刻还没有任何订阅者，
+        白白写一条没人收的事件流；直接落库即可，前端下次拉列表就看到真相。
+      */
+      const resumableQueue = queuedTasks.some(task => typeof task.executionContext?.agentPrompt === 'string');
+      if (!resumableQueue && isRecoverableBusy(session.state)) {
+        const message = 'Dockmux 守护进程重启，上一轮执行已中断';
+        session.state = 'stopped';
+        session.error = message;
+        session.updatedAt = now();
+        await this.repos.sessions.save(session);
+        await this.repos.artifacts.saveError(session.id, message);
       }
       const queued = queuedTasks.filter(task => typeof task.executionContext?.agentPrompt === 'string');
       if (queued.length) {
@@ -578,9 +619,49 @@ export class DockmuxRuntime {
     await this.emit(id, 'status', { state: session.state, reasoningEffort: normalized });
     return session;
   }
-  private waitForTurn(id: string) {
+  /*
+    等当前轮次收尾。
+
+    ## 为什么必须有超时（2026-09-03）
+
+    原实现返回的 promise **没有任何退出条件**：waiter 只在轮次自然走完 finally
+    或 notifyDriverExit 时 resolve。功能 e2e 实测，忙碌轮次里调 stop/archive/restart
+    会 20s 打满仍不返回，而空闲时 110ms 就回来；interrupt 不受影响，因为它压根不等。
+
+    真因不是 driver：定向观测里真实 PtyCliDriver.stop() 1ms 返回且正确 reject 了
+    send()。也不是「没有 SSE 订阅者」——那条假设在零 HTTP、零 SSE、emitter 无监听者
+    的环境里被证伪，照样复现。是 runtime 自己的顺序问题：stop() 先 await driver.stop()，
+    此时 send 已被 reject，但 runTask 的 catch/finally 在**另一条异步链**上；
+    stop() 开始等的时候若那条链还没推进到 finally 去 resolve waiters，就再也等不到。
+
+    ## 为什么是超时而不是"修好竞争"
+
+    竞争本身可以调顺序缓解，但**等待一条自己不掌控的异步链，本就不该没有上限**。
+    超时是正确的兜底：到点就往下走，让 stop 的后续清理（cancelSessionQueue /
+    releaseSessionMemory / saveState）照常执行，而不是把整个请求永远挂住。
+    调用方拿到的仍是"已停止"，因为那些清理才是 stop 的实质。
+
+    2s 的取值：实测正常收尾在 110ms 量级，2s 是它的 18 倍，不会误伤慢轮次；
+    同时明显小于调用方的耐心阈值——HTTP 客户端、e2e 看门狗普遍在 5s 以上，
+    兜底必须先于它们动作，否则用户/测试先判定超时，兜底再返回也没意义了
+    （初版取 5s 就正好贴在回归测试的 5s 判定窗口上，成了平局竞态）。
+  */
+  private waitForTurn(id: string, timeoutMs = 2_000) {
     if (!this.activeTurns.has(id)) return Promise.resolve();
-    return new Promise<void>(resolve => { const waiters = this.turnWaiters.get(id) ?? new Set(); waiters.add(resolve); this.turnWaiters.set(id, waiters); });
+    return new Promise<void>(resolve => {
+      const waiters = this.turnWaiters.get(id) ?? new Set();
+      let timer: NodeJS.Timeout | undefined;
+      const settle = () => {
+        if (timer) clearTimeout(timer);
+        waiters.delete(settle);
+        resolve();
+      };
+      waiters.add(settle);
+      this.turnWaiters.set(id, waiters);
+      timer = setTimeout(settle, timeoutMs);
+      // 超时定时器不该拖住进程退出：shutdown 时还有未收尾的轮次是常态。
+      timer.unref?.();
+    });
   }
   private async terminateCurrentTurn(id: string) {
     const { session, driver } = await this.active(id);

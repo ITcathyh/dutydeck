@@ -203,3 +203,57 @@ describe('driver 不反射读后端私有字段', () => {
     expect(backend.sessionName).toBe('dockmux-driver-contract');
   });
 });
+
+/*
+  真实 PtyCliDriver + 真实 PTY 进程，验证 runtime 那条超时兜底所依赖的前提。
+
+  为什么单独写：功能 e2e 的回归测试（runtime.test.ts）用的是 mock driver，
+  `driver.stop` 立即 resolve 是照抄实测行为写死的常量。它能复现挂起，但
+  **证明不了修好了**——真实 PTY 的进程退出时序、onExit 回调时机在 mock 里都不存在。
+  CLAUDE.md 里 ACPX 那条（仅 mock ACP 客户端覆盖不了持久化键名校验）是同一类道理。
+
+  这里断言的是 runtime 修复的立足点：轮次真的在跑时，driver.stop() 自己会**及时返回**。
+  它成立，"runtime 挂起不是 driver 的锅"才成立；它不成立，2s 上限就只是在掩盖问题。
+*/
+describe('PtyCliDriver 在忙碌轮次中的 stop 行为（2026-09-03）', () => {
+  let dir: string;
+
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'pty-driver-busy-')); });
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }); });
+
+  it('轮次未完成时 stop() 仍然及时返回，并回调 onExit', async () => {
+    // 只打 ready，收到输入后什么都不回——完成标记永远不出现，轮次一直挂着
+    const neverDone = join(dir, 'never-done.mjs');
+    await writeFile(neverDone, `process.stdout.write('MOCK READY\\n');\nprocess.stdin.on('data', () => {});\nsetInterval(() => {}, 1000);\n`, 'utf8');
+
+    const events: NormalizedDriverEvent[] = [];
+    let exited = false;
+    const driver = new PtyCliDriver({
+      agent: { id: 'busy-agent', name: 'Busy', command: process.execPath, args: [], protocol: 'pty-cli', env: {}, permissionMode: 'full-trust', timeout: 600, capabilities: { pause: false, resume: false }, builtin: false },
+      adapter: { id: 'mock-cli', capabilities: {}, buildArgs: () => [neverDone], writeInput: (backend, prompt) => backend.write(prompt + '\n'), completionPattern: /MOCK DONE/ },
+      backend: new PtyBackend(),
+      onEvent: event => events.push(event),
+      onExit: () => { exited = true; },
+      sessionId: 'busy-session'
+    });
+
+    await driver.start();
+    await waitFor('CLI ready', () => events.some(e => e.type === 'raw_terminal' && String(e.data?.text ?? '').includes('MOCK READY')));
+
+    // 这一轮不会结束：send 的 promise 一直悬着
+    let sendSettled = false;
+    void driver.send('work that never finishes').then(() => { sendSettled = true; }, () => { sendSettled = true; });
+    await new Promise(done => setTimeout(done, 200));
+    expect(sendSettled, '前提检查：轮次必须真的还在跑，否则这条测试什么都没验').toBe(false);
+
+    const began = Date.now();
+    await driver.stop();
+    const elapsed = Date.now() - began;
+
+    // 实测量级是个位数毫秒；给到 2s 是留足 CI 抖动，同时仍能抓住"永久挂起"这个缺陷形态
+    expect(elapsed, `driver.stop() 在忙碌轮次中耗时 ${elapsed}ms，不应接近挂起`).toBeLessThan(2_000);
+    await waitFor('onExit 回调', () => exited);
+    // 挂着的 send 必须被了结，否则调用方永远等不到答复
+    await waitFor('挂起的 send 被 settle', () => sendSettled);
+  }, 20_000);
+});
