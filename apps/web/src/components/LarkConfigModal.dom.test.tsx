@@ -314,4 +314,49 @@ describe('LarkConfigModal 模态外壳契约', () => {
     // 错误文本必须即时播报，否则用户改到一半不知道已经修好了没有。
     expect(description?.getAttribute('role')).toBe('alert');
   });
+
+  /*
+    activeListening 只是「listener.start() 没抛异常」这一个标记：它不等待 WebSocket
+    握手，断连后也不会被置回。所以文案上限是「监听已启动」，不能说「长连接已连接」，
+    也不能在用户暂停监听或本次启动禁用监听时还显示成功态。
+  */
+  describe('监听状态文案不宣称连接健康', () => {
+    const ready = { defaultAgentId: 'codex', fullTrustConfirmed: true, setupComplete: true } as Partial<LarkBotConfig>;
+
+    // 监听开关在第 2 步；setupComplete 的 bot 默认停在第 1 步（同上一条用例的走法）。
+    const openStepTwo = async () => {
+      await userEvent.setup().click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+      return screen.findByRole('switch', { name: '监听飞书消息' });
+    };
+
+    it('监听已启动时说「监听已启动，可到飞书发送消息」，不说长连接已连接', async () => {
+      renderModal(collection({ ...ready, listening: true, activeListening: true }));
+      await openStepTwo();
+      expect(screen.getByText('监听已启动，可到飞书发送消息')).toBeTruthy();
+      for (const lie of ['长连接已连接', '长连接', '已验证']) {
+        expect(document.body.textContent).not.toContain(lie);
+      }
+    });
+
+    it('用户暂停监听时不出现成功态文案，Bot 标签也不点亮监听圆点', async () => {
+      renderModal(collection({ ...ready, listening: false, activeListening: false }));
+      await openStepTwo();
+      expect(screen.getByText('保持关闭，仅保存机器人配置')).toBeTruthy();
+      expect(document.body.textContent).not.toContain('监听已启动');
+      expect(document.body.querySelector('[title="监听已启动"]')).toBeNull();
+    });
+
+    /*
+      这一条是回归的核心：本次启动禁用监听时，服务端不会 sync，任何 Bot 都收不到消息，
+      但 activeListening 仍可能是上一次 sync 留下的 true。此前 Bot 标签只判
+      `bot.activeListening` 就点亮成功圆点，等于在整体禁用监听时谎报可用。
+    */
+    it('本次启动禁用监听时，即使 activeListening 为真也不点亮成功圆点', async () => {
+      renderModal({ ...collection({ ...ready, listening: true, activeListening: true }), listeningDisabled: true });
+      await openStepTwo();
+      expect(screen.getByText(/本次启动已通过 --no-lark-listen 禁用/)).toBeTruthy();
+      expect(document.body.querySelector('[title="监听已启动"]')).toBeNull();
+      expect(document.body.textContent).not.toContain('监听已启动，可到飞书发送消息');
+    });
+  });
 });

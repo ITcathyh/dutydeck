@@ -163,16 +163,20 @@
 
 **一律从 `components/primitives` 导入，不从 `components/ui` 导入任何组件。**
 
-`IconButton` 现在有两份同名导出：`ui.tsx` 的旧版（32px 命中区）和 `primitives/` 的新版
+> 2026-09-03 更新：`ui.tsx` 的 `IconButton` 与 `stateBadgeStyle` 已删除，同名陷阱不再存在。
+> 下面这段保留为病历——它记录了「两份同名导出、视觉一致、只有命中区不同」这种缺陷
+> 为什么值得写进契约：import 错了不会报错、不会变红，只是悄悄不满足 §9。
+
+`IconButton` 曾有两份同名导出：`ui.tsx` 的旧版（32px 命中区）和 `primitives/` 的新版
 （40px 命中区）。import 错了触控修复就不生效，而且**看不出来**——两者视觉一致。
 契约 §9 要修的 9 个低于 40px 的按钮（含 `PermissionCard` 的权限审批钮与 RunHeader
-的归档钮）全都依赖这次替换。
+的归档钮）全都依赖那次替换。
 
-`ui.tsx` 保留的是**语义函数**，继续从那里导入：`effectiveStatus` / `sidebarStatusVisual` /
-`createTaskAffordance` / `stateLabels` / `permissionLabels` / `busyStates` / `parseMemberNames`。
-
-迁移完成后由 Phase 2 删除 `ui.tsx` 的 `IconButton` 与 `stateBadgeStyle`
-（后者在 `WorkspaceOverview` / `CommandPalette` 迁到 `StatusBadge` 后即无引用）。
+`ui.tsx` 现在**只有语义函数**，从那里导入：`effectiveStatus` / `sidebarStatusVisual` /
+`createTaskAffordance` / `stateLabels` / `permissionLabels` / `busyStates` / `parseMemberNames`
+（外加 `DockmuxIcon` 这一个纯展示元件）。它不再导出任何交互组件，所以
+「从 ui 还是从 primitives 导入」已不构成选择——`design-consistency.test.ts` 第 10 条
+仍在守这条线，防止有人再往 `ui.tsx` 里加组件。
 
 ```ts
 // Button.tsx
@@ -378,7 +382,12 @@ botmux 的教训：它定义了 8 档字号 token，实际引用 41 次，硬编
 
 ### Phase 2 待办（本轮刻意不做）
 
-- 删 `ui.tsx` 的 `IconButton` 与 `stateBadgeStyle`（已确认全仓无引用，是死代码）
+- ~~删 `ui.tsx` 的 `IconButton` 与 `stateBadgeStyle`~~ —— **2026-09-03 已完成**。
+  两者确认零引用后删除。`ui.tsx` 的 `IconButton` 不只是死代码，还是个同名陷阱：
+  它与 `primitives/IconButton` 同名而命中区只有 32px，谁写 `from './ui'` 就静默
+  拿到不满足 §9 的那一份，且两者视觉一致、看不出来。同批删掉的还有零消费的
+  `primitives/Toolbar`（连测试一并删；它的用例恰好用 `label="任务筛选"`，
+  而总览页那块筛选区是手写的——原语造好了没人用）。
 - 删 `useDialogFocus` 的两段补偿逻辑（前提：11 份壳全迁完 + 两个漏挂 ref 的弹层修好，
   本轮已满足前半，需复核 `App.dom.test.tsx` 的 inert 断言）
 - `useEscapeKey` 改捕获阶段，然后统一 `CommandPalette`
@@ -387,6 +396,12 @@ botmux 的教训：它定义了 8 档字号 token，实际引用 41 次，硬编
   压深底」已随色板重做失效，但**待办本身仍成立**：原语缺 sidebar 变体，
   调用点只能绕过语义层）
 - `IconButton` 透传 rest props，让 Composer 三个面板触发钮也能收敛
+- `EmptyState` 的 `title` 渲染成 `<p>`，装不下「标题必须是真 heading」的调用点。
+  `WorkspaceOverview` 的首次使用引导因此仍是手写结构——`scripts/e2e-smoke.mjs:488`
+  用 `getByRole('heading', …)` 断言那个标题。若要收敛这最后一处手写空态，
+  得先给原语一个 `titleAs` 之类的出口，而 §10 的 API 已冻结。
+  （**注意**：该处注释原先声称的另一条理由「primaryAction 传不了 disabled」是错的，
+  `primitives/EmptyState.tsx:13` 从 Phase 1 起就有这个字段。已订正，勿再复用那条论证。）
 
 ### 一致性测试的实际拦截记录
 

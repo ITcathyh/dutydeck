@@ -180,7 +180,15 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
   const wss = new WebSocketServer({ noServer: true });
   const active = new Set<WebSocket>();
 
-  app.ready(() => {
+  /*
+   * 必须用被动的 onReady 钩子，不能调 app.ready(cb)：
+   * app.ready() 会**主动触发** Fastify 的 boot。buildApp 里终端路由注册在前，
+   * 之后还有 await registerLarkRoutes 等异步注册；真实启动时 Lark 那步要等网络
+   * （读取并同步 Bot 配置），boot 就在这个 await 期间跑完了，随后的 addHook /
+   * 路由注册直接抛 "Fastify instance is already listening. Cannot call addHook!"。
+   * onReady 只登记回调，由 listen 时统一触发，时机与原来一致，WS 行为不变。
+   */
+  app.addHook('onReady', async () => {
     const server = app.server;
     // 防御：app.server 在 listen 后才存在（ready 后理论上必有）
     if (!server) return;

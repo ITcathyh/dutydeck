@@ -6,6 +6,7 @@ import {
   larkCardActionBudget,
   larkCardActionHint,
   parseLarkCardActionValue,
+  safeLarkWebUrl,
   type LarkCardActionContext,
   type LarkCardActionName,
   type LarkCardActionState,
@@ -305,36 +306,42 @@ describe('parseLarkCardActionValue', () => {
   });
 });
 
-describe('查看详情链接按钮', () => {
+describe('查看详情：只在页脚出现一次', () => {
   const webUrl = 'https://dockmux.example.com/sessions/ses_1';
 
-  it('配置了 http/https 深链时渲染 open_url 按钮，且不是回调', () => {
-    // 链接按钮不经过 daemon，任务过期后依然可用，所以用 open_url 而不是 callback。
-    const elements = buildLarkCardActions(context('running', { capabilities: { ...allCapabilities, webUrl } }));
-    const detail = elements.find(element => element.element_id === 'view_detail');
-    expect(detail).toBeDefined();
-    expect(detail!.text).toEqual({ tag: 'plain_text', content: '查看详情' });
-    expect(detail!.behaviors).toEqual([{ type: 'open_url', default_url: webUrl }]);
-    expect(callbackButtons([detail!])).toEqual([]);
-    expect(elements.at(-1)!.element_id).toBe('view_detail');
-  });
-
-  it('未配置 webUrl 时不渲染查看详情', () => {
-    expect(buttonIds(buildLarkCardActions(context('running')))).not.toContain('view_detail');
-  });
-
-  it('拒绝非 http/https 协议与超长 URL', () => {
-    // 防止把 javascript: 之类的 URL 渲染成可点按钮。
-    for (const url of ['javascript:alert(1)', 'data:text/html,<script>', 'file:///etc/passwd', 'not a url', '', `https://x.example.com/${'p'.repeat(600)}`]) {
-      const elements = buildLarkCardActions(context('running', { capabilities: { ...allCapabilities, webUrl: url } }));
-      expect(buttonIds(elements), `${url} 不应渲染为链接按钮`).not.toContain('view_detail');
+  it('顶部操作行不渲染查看详情按钮（页脚已有同一去向的链接）', () => {
+    // 同一个链接在卡片上出现两次是重复入口。详情统一由页脚的 markdown 链接承担，
+    // 顶部只放真正改变任务状态的动作。
+    for (const state of allStates) {
+      const elements = buildLarkCardActions(context(state, { capabilities: { ...allCapabilities, webUrl } }));
+      expect(buttonIds(elements), `state=${state} 顶部不应有详情按钮`).not.toContain('view_detail');
+      expect(JSON.stringify(elements)).not.toContain('open_url');
+      expect(JSON.stringify(elements)).not.toContain('查看详情');
     }
   });
 
-  it('taskId 不可用但配置了 webUrl 时，仍保留 Web 出口', () => {
-    // 回调不可用不代表用户该失去去向：查看详情不依赖 taskId。
-    const elements = buildLarkCardActions(context('running', { taskId: '', capabilities: { ...allCapabilities, webUrl } }));
-    expect(buttonIds(elements)).toEqual(['view_detail']);
+  it('顶部只保留真正会改变任务状态的操作', () => {
+    const withUrl = (state: LarkCardActionState) => buttonIds(buildLarkCardActions(context(state, { capabilities: { ...allCapabilities, webUrl } })));
+    expect(withUrl('queued')).toEqual(['cancel', 'refresh']);
+    expect(withUrl('running')).toEqual(['interrupt', 'refresh']);
+    expect(withUrl('failed')).toEqual(['retry']);
+    expect(withUrl('interrupted')).toEqual(['retry']);
+    expect(withUrl('completed')).toEqual([]);
+  });
+
+  it('taskId 不可用时顶部零按钮，Web 出口由页脚承担', () => {
+    // 回调不可用不代表用户失去去向：页脚链接不依赖 taskId（见 service.test.ts 的页脚断言）。
+    expect(buildLarkCardActions(context('running', { taskId: '', capabilities: { ...allCapabilities, webUrl } }))).toEqual([]);
+  });
+
+  it('safeLarkWebUrl 只放行 http/https，且限制长度', () => {
+    // 校验必须随链接一起保留：页脚是唯一出口，它自己要挡住 javascript: 之类的目标。
+    for (const url of ['javascript:alert(1)', 'data:text/html,<script>', 'file:///etc/passwd', 'not a url', '', undefined, `https://x.example.com/${'p'.repeat(600)}`]) {
+      expect(safeLarkWebUrl(url), `${url} 不应被放行`).toBeUndefined();
+    }
+    expect(safeLarkWebUrl(webUrl)).toBe(webUrl);
+    expect(safeLarkWebUrl('http://internal.example.com/')).toBe('http://internal.example.com/');
+    expect(safeLarkWebUrl('  https://trim.example.com/  ')).toBe('https://trim.example.com/');
   });
 });
 

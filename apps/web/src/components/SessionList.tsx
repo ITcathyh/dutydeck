@@ -1,8 +1,9 @@
-import { useMemo } from 'react';
-import { CalendarClock, FolderKanban, MessagesSquare, Plus, Settings2, ShieldCheck, Users } from 'lucide-react';
+import { useMemo, useState } from 'react';
+import { CalendarClock, ChevronRight, FolderKanban, MessagesSquare, Plus, Settings2, ShieldCheck, Users } from 'lucide-react';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
 import { useMediaQuery } from '../useMediaQuery';
-import { groupSessionsByWorkspace, type WorkbenchView } from '../workspace-model';
+import { groupSessionsByWorkspace, type WorkbenchView, type WorkspaceGroup } from '../workspace-model';
+import { formatLarkNavSummary } from '../lark-status';
 import { createTaskAffordance, DockmuxIcon } from './ui';
 import { Skeleton } from './primitives';
 import { SessionRow } from './SessionRow';
@@ -17,6 +18,11 @@ export type SessionListProps = {
   agents: Agent[];
   agentsLoading?: boolean;
   larkBots: LarkBotConfig[];
+  /** 与总览页协作卡片同源：未就绪时两处必须都说「正在读取」，不得一处谎报「尚未接入」。 */
+  larkBotsLoading?: boolean;
+  larkListeningDisabled?: boolean;
+  /** Bot 状态读取失败：hint 必须说「状态未确认」，不得谎报「尚未配置机器人」。 */
+  larkBotsFailed?: boolean;
   activeSessionId?: string;
   view: WorkbenchView;
   onSelect(id?: string): void;
@@ -61,9 +67,38 @@ export type SessionListProps = {
  * 里没有 sidebar accent 这一档 variant，改用原语会让这几处颜色绕过 sidebar 语义层，
  * 将来 Team-Palette 想把侧栏重新分离出去就会漏改。语义类留着，成本为零。
  */
-export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, authRequired }: SessionListProps) {
+export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, authRequired }: SessionListProps) {
   const workspaces = useMemo(() => groupSessionsByWorkspace(sessions, view, summaries), [sessions, summaries, view]);
   const matchesDesktop = useMediaQuery('(min-width: 768px)');
+  /**
+   * 折叠状态只记「用户手动改过的那些」，其余交给下面的默认规则。
+   *
+   * 不预填成「全部折叠」的完整表：那样一来新出现的工作区（飞书新建任务、别处
+   * 起的会话）会因为不在表里而拿不到状态，得再补一层兜底；而且用户展开过的组
+   * 在 sessions 刷新后会被重置——15 秒一次的 refetch 会让它自己收起来。
+   */
+  const [overrides, setOverrides] = useState<Record<string, boolean>>({});
+  const toggleWorkspace = (id: string) => setOverrides(current => ({ ...current, [id]: !isExpandedById(id) }));
+  /*
+    默认展开规则两条，都以「折叠是否真的省行」为准：
+
+    1. 当前打开任务所在的组 —— 选中态藏在折叠区里等于没有选中态。e2e 旅程 6 正是按
+       `nav.getByRole('button', { name: /ALPHA_MARKER/ })` 取行再读 aria-current。
+
+    2. 只有一条任务的组 —— 折叠它把「1 行任务」换成「1 行组头」，一行也没省，却让
+       用户点两次才够得到那条任务。App.dom.test 里「切到另一个工作区的任务」两条用例
+       就是撞在这上面失败的：那不是测试过时，是默认折叠一条任务的组确实是纯负担。
+       降噪的收益全部来自多任务的组（18 条压到 4 行），这条规则不削弱它。
+
+    用户手动折叠过（override === false）时仍然尊重用户，两条默认规则都让位。
+  */
+  const containsActive = (workspace: WorkspaceGroup) => workspace.sessions.some(session => session.id === activeSessionId);
+  const autoExpanded = (workspace: WorkspaceGroup) => workspace.sessions.length === 1 || containsActive(workspace);
+  const isExpandedById = (id: string) => {
+    const workspace = workspaces.find(item => item.id === id);
+    return overrides[id] ?? (workspace ? autoExpanded(workspace) : false);
+  };
+  const isExpanded = (workspace: WorkspaceGroup) => overrides[workspace.id] ?? autoExpanded(workspace);
   // 读不到 media query 时侧栏必须保守地当作桌面（可见、可访问）。当成移动端会让
   // hiddenOnMobile 翻真，整个导航带上 inert + aria-hidden 从可访问树里摘掉：
   // SSR 首屏会丢掉侧栏，jsdom（默认没有 window.matchMedia）里则是所有按名字取
@@ -95,8 +130,11 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
       // 唯一一项本来就有常驻入口的，因为它原本就在这个位置，移走等于制造回归；
       // 计数从原来的行尾挪进 hint，理由见下面 292→248 的说明。
       { id: 'settings', label: 'Agent 与设置', hint: `${agents.length} 个 Agent${larkBots.length ? ` · ${larkBots.length} 个 Bot` : ''}`, Icon: Settings2, onClick: onOpenControlCenter },
-      // 飞书向导此前只在总览页的协作卡片上有入口——点进任何一个任务后就失联了。
-      { id: 'lark', label: '飞书接入', hint: larkBots.length ? `${larkBots.length} 个机器人已绑定` : '尚未绑定机器人', Icon: MessagesSquare, onClick: onOpenLarkSetup }
+      /*
+        飞书接入状态与总览页同源真实投影（formatLarkNavSummary），
+        绝不把未完成配置或禁用监听谎报为「已接入」。
+      */
+      { id: 'lark', label: '飞书接入', hint: formatLarkNavSummary({ bots: larkBots, listeningDisabled: larkListeningDisabled, loading: larkBotsLoading, failed: larkBotsFailed }), Icon: MessagesSquare, onClick: onOpenLarkSetup }
     ] },
     { id: 'automation', title: '自动化', items: [
       /*
@@ -140,10 +178,15 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
     <div className="flex h-14 shrink-0 items-center gap-2.5 px-4 md:hidden"><DockmuxIcon className="h-8 w-8 shrink-0"/><span><strong className="block text-body font-semibold tracking-[-.025em] text-sidebar-text-strong">Dockmux</strong><span className="block text-caption text-sidebar-text-muted">Agent 任务台</span></span></div>
 
     <div className="shrink-0 px-3 pt-2 md:pt-3">
-      {/* 主按钮手写而不是用 <Button>：原语没有 sidebar accent 这一档 variant。
+      {/* 手写而不是用 <Button>：原语没有 sidebar 这一层语义色。
           min-h-10 是触控下限（§9），也是多处用例按名字取这颗按钮的前提，不能改小。
-          40px 高按 §3 取 rounded-md（10px）。 */}
-      <button type="button" disabled={createTask.disabled} onClick={createTask.onClick} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-md bg-sidebar-accent px-3 text-body font-semibold text-sidebar-accent-text transition hover:brightness-110 active:translate-y-px disabled:opacity-60"><Plus size={16}/>{createTask.label}</button>
+          40px 高按 §3 取 rounded-md（10px）。
+
+          层级是**次操作**：飞书 Bot 是 agent 交互核心，首屏强主 CTA 是 Bot 概览里的
+          「绑定/管理飞书 Bot」。这颗原先是整块 sidebar-accent 实底，在桌面端与那颗
+          同屏时抢主入口。改成描边 + 常规字重，配色仍走 sidebar-* 语义层（不借用内容
+          表面色），键盘与 disabled 行为不变。 */}
+      <button type="button" disabled={createTask.disabled} onClick={createTask.onClick} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-sidebar-border px-3 text-body font-medium text-sidebar-text transition-colors duration-fast ease-out hover:bg-sidebar-hover hover:text-sidebar-text-strong active:translate-y-px disabled:opacity-60"><Plus size={16}/>{createTask.label}</button>
     </div>
 
     {/* 任务列表是唯一 flex-1 的区块：卡片高度固定（top/bottom 都钉死），多出来的
@@ -152,7 +195,32 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
       /* Skeleton 的条子写死 bg-muted，与 sidebar-hover 现在同源但不同名；这里用
          arbitrary variant 覆盖条子底色，让它跟着 sidebar 语义层走而不是内容表面层。 */
       ? <Skeleton variant="block" lines={2} className="px-1 [&>div]:bg-sidebar-hover"/>
-      : workspaces.length ? workspaces.map(workspace => <section key={workspace.id} className="mb-3"><div className="flex min-w-0 items-center px-2 pb-1.5"><span className="min-w-0 flex-1 truncate text-caption font-semibold text-sidebar-text" title={workspace.cwd}>{workspace.name}</span><span className="ml-2 font-mono text-meta text-sidebar-text-muted">{workspace.sessions.length}</span></div>{workspace.sessions.map(session => <SessionRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(item => item.id === session.agentId)} botName={larkBots.find(bot => session.sourceId?.startsWith(`${bot.appId}:`))?.name} active={activeSessionId === session.id} onClick={() => { onSelect(session.id); onClose(); }}/>)}</section>)
+      : workspaces.length ? workspaces.map(workspace => {
+        const expanded = isExpanded(workspace);
+        return <section key={workspace.id} className="mb-1.5">
+          {/*
+            分组标题是折叠开关。原先它是个不可点的 div，18 条任务全部平铺——
+            侧栏于是变成主区任务列表的一份低配副本（见 SessionRow 的头注释）。
+            折叠之后默认只剩「目录名 + 条数」，实测 18 行降到 4 行。
+            单任务的组默认仍展开，理由见上面 autoExpanded 的注释。
+
+            min-h-10 是触控下限（§9），也让 shell.spec.ts:264 那条两轴命中区断言过关；
+            40px 高按 §3 取 rounded-md。
+          */}
+          <button
+            type="button"
+            onClick={() => toggleWorkspace(workspace.id)}
+            aria-expanded={expanded}
+            title={workspace.cwd}
+            className="flex min-h-10 w-full min-w-0 items-center gap-1.5 rounded-md px-2 text-left transition-colors duration-fast ease-out hover:bg-sidebar-hover"
+          >
+            <ChevronRight aria-hidden="true" size={13} className={`shrink-0 text-sidebar-text-muted transition-transform duration-fast ${expanded ? 'rotate-90' : ''}`}/>
+            <span className="min-w-0 flex-1 truncate text-caption font-semibold text-sidebar-text">{workspace.name}</span>
+            <span className="ml-1 shrink-0 font-mono text-meta text-sidebar-text-muted">{workspace.sessions.length}</span>
+          </button>
+          {expanded && <div className="mt-0.5">{workspace.sessions.map(session => <SessionRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(item => item.id === session.agentId)} botName={larkBots.find(bot => session.sourceId?.startsWith(`${bot.appId}:`))?.name} active={activeSessionId === session.id} onClick={() => { onSelect(session.id); onClose(); }}/>)}</div>}
+        </section>;
+      })
       /* 空态不用 <EmptyState>：原语取 text-secondary / text-subtle / bg-muted，走的是
          内容表面色盘。侧栏色现在虽与内容色同源，但语义层是两套，混用会让侧栏在
          色盘再次分离时漏改。框高约 66px（py-6 + 一行 18px），按 §3 取 rounded-lg。 */

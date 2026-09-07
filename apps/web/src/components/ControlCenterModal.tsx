@@ -14,6 +14,7 @@ import {
   X
 } from 'lucide-react';
 import { ApiError, foundationApi, scheduleApi, type Agent, type LarkBotConfig } from '../api';
+import { projectLarkBotStatus } from '../lark-status';
 import { Badge, Banner, Button, Card, Dialog, EmptyState, Field, IconButton, Input, Select, Spinner } from './primitives';
 import { permissionLabels } from './ui';
 
@@ -24,6 +25,13 @@ type Props = {
   initialSection?: ControlCenterSection;
   agents: Agent[];
   legacyBots: LarkBotConfig[];
+  /** LarkConfig.listeningDisabled：本次启动是否整体禁用监听，影响所有 Bot 的真实可用性。 */
+  larkListeningDisabled?: boolean;
+  /** Bot 状态读取失败/进行中：不得把 pending 或 error 当成「还没有 Bot」。 */
+  larkBotsLoading?: boolean;
+  larkBotsFailed?: boolean;
+  larkBotsRetrying?: boolean;
+  onRetryLarkBots?(): void;
   authRequired?: boolean;
   onClose(): void;
   onCreateTask(): void;
@@ -64,6 +72,11 @@ export function ControlCenterModal({
   initialSection = 'agents',
   agents,
   legacyBots,
+  larkListeningDisabled = false,
+  larkBotsLoading = false,
+  larkBotsFailed = false,
+  larkBotsRetrying = false,
+  onRetryLarkBots,
   authRequired,
   onClose,
   onCreateTask,
@@ -109,11 +122,35 @@ export function ControlCenterModal({
   const scheduleCount = schedules.data?.schedules.length ?? 0;
   const nextStep = useMemo(() => {
     if (agents.length === 0) return { title: '准备第一个 Agent', detail: '安装并登录一个受支持的 CLI，然后重启 Dockmux。', action: () => setSection('agents' as const) };
-    if (legacyBots.length === 0) return { title: '创建任务，或连接飞书 Bot', detail: 'Agent 已可用。你可以直接在 Web 工作，也可以让它从飞书接收任务。', action: onOpenLarkSetup };
-    const incomplete = legacyBots.find(bot => !bot.setupComplete || !bot.activeListening);
-    if (incomplete) return { title: `继续设置 ${incomplete.name}`, detail: incomplete.setupComplete ? '配置已保存，但消息监听尚未连接。' : '还需要选择 Agent、工作区并完成权限确认。', action: onOpenLarkSetup };
-    return { title: '开始一个新任务', detail: `${agents.length} 个 Agent、${legacyBots.length} 个飞书 Bot 已可用。`, action: onCreateTask };
-  }, [agents.length, legacyBots, onCreateTask, onOpenLarkSetup]);
+    /*
+      Bot 状态未就绪时既不能说「还没有 Bot」，也不能沿用缓存说「监听已启动」。
+      larkConfig 失败后 isLoading=false、data=undefined，若直接落到下面的
+      `legacyBots.length === 0` 就会把「读不到」说成「没有」。
+    */
+    if (larkBotsLoading) return { title: '正在读取飞书接入状态', detail: '正在同步机器人配置与监听状态…', action: onOpenLarkSetup };
+    if (larkBotsFailed) return { title: '重试读取飞书接入状态', detail: legacyBots.length ? '已有配置记录，但这一次状态读取失败，无法确认机器人当前能否收到消息。' : '状态读取失败，因此无法判断是否已配置机器人。', action: onRetryLarkBots ?? onOpenLarkSetup };
+    if (legacyBots.length === 0) return { title: '连接飞书 Bot', detail: 'Agent 已可用。飞书是下达任务的主入口；也可以先在 Web 创建任务。', action: onOpenLarkSetup };
+    /*
+      建议下一步只能按**真实状态**给，不能按 Bot 条数宣称「已可用」。
+      判据复用 lark-status.ts 的投影（与首页、侧栏同一份），这里不再自己拼条件：
+      原先的 `!setupComplete || !activeListening` 漏掉了两种同样收不到消息的情况——
+      用户主动暂停监听（listening=false）与本次启动整体禁用监听（listeningDisabled），
+      两者都会让这里说出「N 个飞书 Bot 已可用」。
+    */
+    const unavailable = legacyBots
+      .map(bot => ({ bot, status: projectLarkBotStatus(bot, larkListeningDisabled, false) }))
+      .find(entry => entry.status.key !== 'listening');
+    if (unavailable) return { title: `继续设置 ${unavailable.bot.name}`, detail: `${unavailable.status.label}：${unavailable.status.description}。`, action: onOpenLarkSetup };
+    /*
+      到这里每个 Bot 都是「监听已启动」。措辞上限也就是「监听已启动」——它不证明
+      消息已送达，所以不写「已可用」。
+
+      标题必须与 action 一致：这颗按钮打开的是绑定/管理向导，不会把用户送进飞书，
+      也不该替用户挑一个 Bot 跳转。原先叫「到飞书下达任务」，点下去却弹出配置向导。
+      「下一步是去飞书发消息」这件事放在 detail 里说，标题只描述这颗按钮真的会做什么。
+    */
+    return { title: '管理飞书 Bot', detail: `${legacyBots.length} 个飞书 Bot 监听已启动，可在飞书私聊发目标或群聊 @机器人；这里可以调整机器人配置。`, action: onOpenLarkSetup };
+  }, [agents.length, larkBotsFailed, larkBotsLoading, larkListeningDisabled, legacyBots, onOpenLarkSetup, onRetryLarkBots]);
 
   const scheduleBlockers = scheduleCapabilities.data?.blockers.filter(blocker => blocker.code !== 'schedule_ui_entry_unwired') ?? [];
 
@@ -153,7 +190,7 @@ export function ControlCenterModal({
 
       <div className="min-h-0 overflow-y-auto p-5">
         {section === 'agents' && <AgentSection agents={agents} legacyBots={legacyBots} onCreateTask={onCreateTask} onOpenLarkSetup={onOpenLarkSetup}/>}
-        {section === 'lark' && <LarkSection agents={agents} legacyBots={legacyBots} capabilities={capabilities} matrix={matrix} secretRefs={secretRefs} channelBots={channelBots} availableLarkRefs={availableLarkRefs} createOpen={createOpen} setCreateOpen={setCreateOpen} displayName={displayName} setDisplayName={setDisplayName} externalAppId={externalAppId} setExternalAppId={setExternalAppId} brand={brand} setBrand={setBrand} createBot={createBot} onOpenLarkSetup={onOpenLarkSetup}/>}
+        {section === 'lark' && <LarkSection agents={agents} legacyBots={legacyBots} larkListeningDisabled={larkListeningDisabled} larkBotsLoading={larkBotsLoading} larkBotsFailed={larkBotsFailed} larkBotsRetrying={larkBotsRetrying} onRetryLarkBots={onRetryLarkBots} capabilities={capabilities} matrix={matrix} secretRefs={secretRefs} channelBots={channelBots} availableLarkRefs={availableLarkRefs} createOpen={createOpen} setCreateOpen={setCreateOpen} displayName={displayName} setDisplayName={setDisplayName} externalAppId={externalAppId} setExternalAppId={setExternalAppId} brand={brand} setBrand={setBrand} createBot={createBot} onOpenLarkSetup={onOpenLarkSetup}/>}
         {section === 'groups' && <GroupsSection cells={cells} missingBindings={missingBindings} repositoriesWired={capabilities.data?.repositoriesWired === true} onOpenLarkSetup={onOpenLarkSetup} onOpenGroups={onOpenGroups}/>}
         {section === 'automation' && <AutomationSection scheduleCount={scheduleCount} blockers={scheduleBlockers} capabilities={scheduleCapabilities} onOpenSchedules={onOpenSchedules}/>}
       </div>
@@ -169,7 +206,8 @@ function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { a
       return <Card key={agent.id} as="article" padding="md">
         <div className="flex items-center gap-2"><Bot size={16} className="text-action"/><h4 className="text-body font-semibold text-primary">{agent.name}</h4>{statePill('可创建任务', 'ready')}</div>
         <p className="mt-1 text-meta text-subtle">{agent.version ? `${agent.version} · ` : ''}{agent.protocol === 'pty-cli' ? '终端 CLI' : agent.protocol.toUpperCase()}</p>
-        <div className="mt-3 grid grid-cols-2 gap-2 text-caption text-secondary"><div className="rounded-md bg-muted p-2">默认权限<br/><strong className="text-primary">{permissionLabel(agent.permissionMode)}</strong></div><div className="rounded-md bg-muted p-2">飞书 Bot<br/><strong className="text-primary">{boundBots.length ? `${boundBots.length} 个已连接` : '尚未连接'}</strong></div></div>
+        {/* 「已绑定」不是「已连接」：这里只数了 defaultAgentId 指向本 Agent 的 Bot，没有读任何监听状态。 */}
+        <div className="mt-3 grid grid-cols-2 gap-2 text-caption text-secondary"><div className="rounded-md bg-muted p-2">默认权限<br/><strong className="text-primary">{permissionLabel(agent.permissionMode)}</strong></div><div className="rounded-md bg-muted p-2">飞书 Bot<br/><strong className="text-primary">{boundBots.length ? `${boundBots.length} 个已绑定` : '尚未绑定'}</strong></div></div>
         <div className="mt-3 flex gap-2"><Button variant="primary" className="flex-1" onClick={onCreateTask}>用它创建任务</Button><Button variant="secondary" onClick={onOpenLarkSetup}>{boundBots.length ? '管理 Bot' : '连接 Bot'}</Button></div>
       </Card>;
     })}</div>}
@@ -183,9 +221,14 @@ function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { a
 
 type QueryLike<T> = { data?: T; isError: boolean; isLoading: boolean; refetch(): unknown };
 
-function LarkSection({ agents, legacyBots, capabilities, matrix, secretRefs, channelBots, availableLarkRefs, createOpen, setCreateOpen, displayName, setDisplayName, externalAppId, setExternalAppId, brand, setBrand, createBot, onOpenLarkSetup }: {
+function LarkSection({ agents, legacyBots, larkListeningDisabled, larkBotsLoading, larkBotsFailed, larkBotsRetrying, onRetryLarkBots, capabilities, matrix, secretRefs, channelBots, availableLarkRefs, createOpen, setCreateOpen, displayName, setDisplayName, externalAppId, setExternalAppId, brand, setBrand, createBot, onOpenLarkSetup }: {
   agents: Agent[];
   legacyBots: LarkBotConfig[];
+  larkListeningDisabled: boolean;
+  larkBotsLoading: boolean;
+  larkBotsFailed: boolean;
+  larkBotsRetrying: boolean;
+  onRetryLarkBots?(): void;
   capabilities: QueryLike<Awaited<ReturnType<typeof foundationApi.capabilities>>>;
   matrix: QueryLike<Awaited<ReturnType<typeof foundationApi.groupMatrix>>>;
   secretRefs: QueryLike<Awaited<ReturnType<typeof foundationApi.secretRefs>>>;
@@ -204,12 +247,26 @@ function LarkSection({ agents, legacyBots, capabilities, matrix, secretRefs, cha
 }) {
   return <section aria-labelledby="control-lark">
     <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-lark" className="text-title font-semibold text-primary">飞书 Bot</h3><p className="mt-1 text-caption text-subtle">Bot 负责在飞书收发消息，Agent 负责执行任务。绑定向导会把两者一次连好。</p></div><Button variant="primary" icon={<Plus size={15}/>} onClick={onOpenLarkSetup}>{legacyBots.length ? '绑定新 Bot' : '绑定飞书 Bot'}</Button></div>
-    {legacyBots.length === 0
-      ? <EmptyState tone="guide" icon={<MessageSquare size={22}/>} title="还没有飞书 Bot" description="准备 App ID 和 App Secret；向导会校验应用、配置飞书能力，再让你选择默认 Agent、工作区和监听状态。" primaryAction={{ label: '开始绑定', onClick: onOpenLarkSetup }}/>
-      : <div className="mt-4 space-y-2">{legacyBots.map(bot => {
+    {/*
+      读取失败自成一档，且排在「还没有飞书 Bot」之前：larkConfig 失败后
+      legacyBots 是空数组，直接走空态就会把「读不到」说成「没有」。
+      有缓存时下面仍列出 Bot，但每张卡片都投影成「状态未确认」。
+    */}
+    {larkBotsFailed && <Banner tone="warning" action={onRetryLarkBots ? { label: larkBotsRetrying ? '重试中…' : '重试', busy: larkBotsRetrying, onClick: onRetryLarkBots } : undefined}>
+      {legacyBots.length ? '飞书接入状态读取失败，下面的机器人状态未确认。' : '飞书接入状态读取失败，无法判断是否已配置机器人。'}
+    </Banner>}
+    {larkBotsLoading
+      ? <div className="mt-4"><Spinner label="正在读取飞书接入状态…"/></div>
+      : legacyBots.length === 0
+        // 失败时不渲染「还没有飞书 Bot」引导：上面的 Banner 已说明状态未知。
+        ? larkBotsFailed ? null : <EmptyState tone="guide" icon={<MessageSquare size={22}/>} title="还没有飞书 Bot" description="准备 App ID 和 App Secret；向导会校验应用、配置飞书能力，再让你选择默认 Agent、工作区和监听状态。" primaryAction={{ label: '开始绑定', onClick: onOpenLarkSetup }}/>
+        : <div className="mt-4 space-y-2">{legacyBots.map(bot => {
         const agent = agents.find(item => item.id === bot.defaultAgentId);
-        const ready = bot.setupComplete && bot.activeListening;
-        return <Card key={bot.appId} as="article" padding="md"><div className="flex flex-wrap items-center gap-2"><MessageSquare size={15} className="text-action"/><h4 className="text-body font-semibold text-primary">{bot.name}</h4>{statePill(ready ? '可使用' : bot.setupComplete ? '监听未连接' : '设置未完成', ready ? 'ready' : 'blocked')}</div><div className="mt-3 grid gap-2 text-caption sm:grid-cols-3"><div className="rounded-md bg-muted p-2 text-subtle">默认 Agent<br/><strong className="text-primary">{agent?.name ?? bot.defaultAgentId ?? '未选择'}</strong></div><div className="rounded-md bg-muted p-2 text-subtle">工作区<br/><strong className="block truncate text-primary" title={bot.workspace}>{bot.workspace || '使用 Agent 默认目录'}</strong></div><div className="rounded-md bg-muted p-2 text-subtle">消息监听<br/><strong className="text-primary">{bot.activeListening ? '已连接' : bot.listening ? '正在等待连接' : '已关闭'}</strong></div></div><Button variant="secondary" className="mt-3" onClick={onOpenLarkSetup}>{ready ? '管理设置' : '继续设置'}</Button></Card>;
+        // 就绪判据与首页、侧栏同源，含 listening 与本次启动禁用监听两项，
+        // 也含读取失败（此时状态未确认，不沿用缓存说「监听已启动」）。
+        const status = projectLarkBotStatus(bot, larkListeningDisabled, false, larkBotsFailed);
+        const ready = status.key === 'listening';
+        return <Card key={bot.appId} as="article" padding="md"><div className="flex flex-wrap items-center gap-2"><MessageSquare size={15} className="text-action"/><h4 className="text-body font-semibold text-primary">{bot.name}</h4>{statePill(status.label, ready ? 'ready' : 'blocked')}</div><div className="mt-3 grid gap-2 text-caption sm:grid-cols-3"><div className="rounded-md bg-muted p-2 text-subtle">默认 Agent<br/><strong className="text-primary">{agent?.name || bot.defaultAgentId?.trim() || '未选择'}</strong></div><div className="rounded-md bg-muted p-2 text-subtle">工作区<br/><strong className="block truncate text-primary" title={bot.workspace}>{bot.workspace || '使用 Agent 默认目录'}</strong></div><div className="rounded-md bg-muted p-2 text-subtle">消息监听<br/><strong className="text-primary">{status.label}</strong></div></div><Button variant="secondary" className="mt-3" onClick={onOpenLarkSetup}>{ready ? '管理设置' : '继续设置'}</Button></Card>;
       })}</div>}
 
     <details className="mt-6 rounded-lg border border-default bg-muted p-4">

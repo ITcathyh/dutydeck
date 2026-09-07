@@ -486,21 +486,35 @@ async function main() {
 
   await page.goto(BASE, { waitUntil: 'domcontentloaded' });
   await page.getByRole('heading', { name: '今天需要推进什么？' }).waitFor({ state: 'visible', timeout: 20_000 });
+
+  // 首屏上段是飞书 Bot 概览：飞书 Bot 是 agent 交互核心，dashboard 先回答「Bot 能不能收到我的话」。
+  const botOverview = page.getByRole('complementary', { name: '协作入口' });
+  await botOverview.waitFor({ state: 'visible', timeout: 20_000 });
+  // 未配置 Bot 时必须给出可执行的飞书使用指引，而不是只说「尚未配置」。
+  await botOverview.getByRole('heading', { name: '尚未配置飞书机器人' }).waitFor({ state: 'visible', timeout: 20_000 });
+  const botGuide = (await botOverview.textContent()) ?? '';
+  for (const hint of ['私聊', '@机器人', '/help']) {
+    assert(botGuide.includes(hint), `Bot 概览说明绑定后如何在飞书使用（缺少「${hint}」）`);
+  }
+  // 无 Bot 时不得出现任何「已接入 / 监听已启动」类声明。
+  for (const lie of ['已接入', '监听已启动']) {
+    assert(!botGuide.includes(lie), `无 Bot 时不谎报接入状态（出现了「${lie}」）`);
+  }
+
   const firstUseHeading = page.getByRole('heading', { name: '从第一个明确目标开始' });
   await firstUseHeading.waitFor({ state: 'visible', timeout: 20_000 });
   assert(await firstUseHeading.isVisible(), '首次使用空状态说明如何开始第一个任务');
 
   const workbenchNavigation = page.getByRole('complementary', { name: 'Dockmux 工作台导航' });
-  const createTaskEntry = await waitForVisibleLocator('首页创建任务主入口', [
+  const createTaskEntry = await waitForVisibleLocator('首页创建任务入口', [
     () => workbenchNavigation.getByRole('button', { name: '创建任务', exact: true }),
     () => page.getByRole('button', { name: '创建第一个任务', exact: true })
   ]);
-  const bindBotEntry = await waitForVisibleLocator('首页绑定 Bot 主入口', [
-    () => workbenchNavigation.getByRole('button', { name: '绑定 Bot', exact: true }),
-    () => page.getByRole('button', { name: '绑定飞书 Bot', exact: true })
-  ]);
-  assert(await createTaskEntry.isEnabled(), '首页「创建任务」主入口可见且可用');
-  assert(await bindBotEntry.isEnabled(), '首页「绑定 Bot」主入口可见且可用');
+  // 绑定入口现在是首屏 Bot 概览的主操作，且同屏只有一颗（侧栏那颗叫「飞书接入」）。
+  const bindBotEntry = botOverview.getByRole('button', { name: '绑定飞书 Bot', exact: true });
+  assert(await bindBotEntry.count() === 1, '首屏「绑定飞书 Bot」主操作唯一，不与其他入口重名');
+  assert(await createTaskEntry.isEnabled(), 'Web 创建任务次级入口可见且可用');
+  assert(await bindBotEntry.isEnabled(), '首页「绑定飞书 Bot」主操作可见且可用');
 
   await bindBotEntry.click();
   const bindBotWizard = page.getByRole('dialog', { name: /绑定.*Bot|飞书机器人/ });

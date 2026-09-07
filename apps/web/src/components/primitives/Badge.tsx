@@ -43,13 +43,11 @@ export function Badge({ tone = 'neutral', variant = 'soft', children }: BadgePro
 export type StatusBadgeProps = { session: Session };
 
 /*
-  一条任务的状态徽标。文案与「归档优先」判据全部来自 ui.tsx:effectiveStatus，
-  取代 stateBadgeStyle 的 className 字符串拼接。
+  一条任务的状态徽标。文案与「归档优先」判据全部来自 ui.tsx:effectiveStatus。
 
   这里刻意只把 state 映射到语义 tone，不再判 `session.archivedAt`——归档由
   effectiveStatus 的 status.archived 回答，那是全站唯一判据（见 ui.tsx 的长注释：
   在调用点补 guard 只会把「N 份不同的判断」变成「N 份相同的判断」）。
-  Phase 1 迁移完 WorkspaceOverview 与 CommandPalette 后，stateBadgeStyle 可以删除。
 */
 const stateBadgeTone: Record<string, BadgeTone> = {
   failed: 'danger',
