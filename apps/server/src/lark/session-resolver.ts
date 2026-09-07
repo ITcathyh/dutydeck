@@ -190,11 +190,11 @@ export async function resolveLarkScopeId(
 export const larkSessionMatchesScope = (session: Session, config: StoredLarkConfig, sourceId: string) =>
   session.source === 'lark'
   && session.sourceId === sourceId
-  && session.agentId === config.defaultAgentId
+  && (config.managedGroup || session.agentId === config.defaultAgentId)
   && !session.archivedAt
-  && (!config.workspace || session.cwd === config.workspace)
-  && (!config.defaultModel || session.model === config.defaultModel)
-  && (!config.defaultReasoningEffort || session.reasoningEffort === config.defaultReasoningEffort);
+  && (config.managedGroup || !config.workspace || session.cwd === config.workspace)
+  && (config.managedGroup || !config.defaultModel || session.model === config.defaultModel)
+  && Boolean(config.managedGroup || !config.defaultReasoningEffort || session.reasoningEffort === config.defaultReasoningEffort);
 
 /**
  * 只读定位当前上下文的持久化会话，供聊天命令在 coordinator 重建后使用。
@@ -249,12 +249,12 @@ export async function resolveLarkSession(
   if (group.sessionId && !group.retiredSessionIds?.has(group.sessionId)) {
     const existing = await runtime.getSession(group.sessionId);
     const reusable = existing && !['failed', 'stopped'].includes(existing.state);
-    if (reusable && group.sessionConfigKey === configKey) {
+    if (reusable && (config.managedGroup || group.sessionConfigKey === configKey)) {
       if (existing.permissionMode === 'full-trust') return existing;
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书自动执行需要完全信任姿态，停止旧 Session 并创建新运行');
       await runtime.stop?.(existing.id);
     }
-    if (reusable && group.sessionConfigKey !== configKey) {
+    if (reusable && !config.managedGroup && group.sessionConfigKey !== configKey) {
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书 Agent 配置已变更，停止旧 Session 并应用新配置');
       await runtime.stop?.(existing.id);
     }

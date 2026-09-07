@@ -76,6 +76,25 @@ describe('反向序列化', () => {
     expect(appLocationPath({ route: { kind: 'session', sessionId: 's1' } })).toBe('/sessions/s1');
   });
 
+  it('支持主导航 bots 和 groups 的 URL 序列化与解析', () => {
+    const botsLoc = parseAppLocation('/', '?nav=bots&appId=cli_123');
+    expect(botsLoc).toEqual({
+      route: { kind: 'overview' },
+      nav: 'bots',
+      appId: 'cli_123'
+    });
+    expect(appLocationPath(botsLoc)).toBe('/?nav=bots&appId=cli_123');
+
+    const groupsLoc = parseAppLocation('/', '?nav=groups&chatId=oc_abc&appId=cli_123');
+    expect(groupsLoc).toEqual({
+      route: { kind: 'overview' },
+      nav: 'groups',
+      chatId: 'oc_abc',
+      appId: 'cli_123'
+    });
+    expect(appLocationPath(groupsLoc)).toBe('/?nav=groups&appId=cli_123&chatId=oc_abc');
+  });
+
   it('浮层序列化后解析回来完全一致', () => {
     const cases: Parameters<typeof appLocationPath>[0][] = [
       { route: { kind: 'overview' }, overlay: { kind: 'settings', section: 'agents' } },

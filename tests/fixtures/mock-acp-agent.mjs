@@ -34,7 +34,7 @@ rl.on('line', async line => {
     if (prompt.includes('crash')) process.exit(17);
     if (prompt.includes('permission')) {
       const decision = await request('session/request_permission', { sessionId: params.sessionId, toolCall: { title: 'Edit a file', kind: 'edit', status: 'pending', toolCallId: 'permission-tool', content: [], locations: [] }, options: [{ kind: 'allow_once', name: 'Allow', optionId: 'allow' }, { kind: 'reject_once', name: 'Deny', optionId: 'deny' }] });
-      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Permission: ${decision.outcome.outcome}` } } } });
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Permission: ${decision.outcome.outcome} ${JSON.stringify(decision.outcome)}` } } } });
       return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
     }
     if (prompt.includes('active longer than timeout')) {

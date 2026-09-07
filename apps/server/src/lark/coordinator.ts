@@ -1,3 +1,4 @@
+import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMappingRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
 import { defaultHighRiskPattern, defaultLarkTraceLimit, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
@@ -159,6 +160,7 @@ export class LarkMessageCoordinator {
       integrationMode: 'legacy_unmanaged';
       authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
     },
+    private readonly groupManager?: LarkGroupManager,
   ) {}
 
   private async requireExecution(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction) {
@@ -253,7 +255,17 @@ export class LarkMessageCoordinator {
 
   async handle(event: LarkMessageEvent, config: StoredLarkConfig) {
     const mentionsBot = this.botOpenId ? event.mentions.some(mention => mention.openId === this.botOpenId) : event.mentions.some(mention => mention.mentionedType === 'bot');
-    const shouldWake = event.chatType === 'p2p' || (event.chatType === 'group' && mentionsBot);
+    if (this.stopped || this.handledMessages.has(event.messageId)) return;
+    if (event.chatType === 'group' && this.groupManager) config = await this.groupManager.resolved(config, event.chatId);
+    const mentionPolicy = config.mentionPolicy ?? 'always';
+    const continuedTopic = mentionPolicy === 'topic' && this.groupManager
+      ? await this.groupManager.ownsTopic(config, event, await resolveLarkScopeId(event, config, this.chatModeResolver)) : false;
+    const botSender = event.senderType === 'app' || event.senderType === 'bot';
+    const shouldWake = event.chatType === 'p2p' || (event.chatType === 'group' && (mentionsBot || !botSender && (continuedTopic || mentionPolicy === 'never' || mentionPolicy === 'ambient')));
+    if (shouldWake && event.chatType === 'group' && this.groupManager) {
+      const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, 'task.create', undefined, { memberObserved: true });
+      if (decision && !decision.allowed) return;
+    }
     if (this.stopped || !shouldWake || this.handledMessages.has(event.messageId)) return;
     await this.requireExecution('listener', 'task.create');
     // 先标记已处理，避免异步解析期间同一条消息被重复入队。
@@ -332,7 +344,7 @@ export class LarkMessageCoordinator {
   ): Promise<'handled' | string | undefined> {
     if (!parseSlashCommand(prompt)) return undefined;
     const botSender = event.senderType === 'app' || event.senderType === 'bot';
-    const allowlisted = await this.isOperatorAllowed(config, event.senderOpenId, event.chatId);
+    const allowlisted = await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, group.sessionId);
     const route = routeLarkCommand(prompt, {
       capabilities: larkCommandCapabilities(this.runtime),
       operator: { kind: botSender ? 'bot' : 'user', allowlisted }
@@ -401,6 +413,10 @@ export class LarkMessageCoordinator {
       // 让 /new 在没停掉任何东西的情况下回一句「已受理」，甚至直接派发新任务。
       const boundSessionId = group.sessionId && !group.retiredSessionIds?.has(group.sessionId) ? group.sessionId : undefined;
       const sessionId = boundSessionId ?? (await this.findScopeSession(config, event, scopeId, group))?.id;
+      if (config.managedGroup && !await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) {
+        await replyCard(`/${route.command} 未执行`, '当前账号没有操作此任务的权限。', { failed: true });
+        return 'handled';
+      }
 
       if (route.command === 'status') {
         await replyCard('任务状态', await this.describeChatStatus(config, sessionId, latestTask));
@@ -653,7 +669,11 @@ export class LarkMessageCoordinator {
    * - 配置了 allowedUsers 时按 openId 匹配
    * - 仅配置 allowedEmails 时拉取操作人邮箱匹配
    */
-  private async isOperatorAllowed(config: StoredLarkConfig, operatorOpenId?: string, chatId?: string): Promise<boolean> {
+  private async isOperatorAllowed(config: StoredLarkConfig, operatorOpenId?: string, chatId?: string, sessionId?: string): Promise<boolean> {
+    if (this.groupManager && chatId) {
+      const decision = await this.groupManager.authorize(config.appId, chatId, operatorOpenId, 'run.interrupt', sessionId);
+      if (decision) return decision.allowed;
+    }
     const allowedUsers = config.allowedUsers ?? [];
     const allowedEmails = config.allowedEmails ?? [];
     const allowedBots = config.allowedBots ?? [];
@@ -750,7 +770,7 @@ export class LarkMessageCoordinator {
     // 访问权限：操作人必须在机器人白名单中，与「谁可以使用 Agent」的配置一致。
     // 白名单内的成员均可取消 / 中断 / 重试任意任务，不再限制为任务发起人本人，
     // 避免 AI 协作链（上游 AI 触发下游 AI 任务）中人类无法干预的问题。
-    const allowed = await this.isOperatorAllowed(task.config, operatorOpenId, task.event.chatId);
+    const allowed = await this.isOperatorAllowed(task.config, operatorOpenId, task.event.chatId, task.sessionId);
     if (!allowed) {
       return { type: 'warning', content: '当前账号不在机器人白名单中，无法执行此操作' };
     }
@@ -1017,7 +1037,7 @@ export class LarkMessageCoordinator {
     const allowedBot = allowedBots.find(bot => bot.openId === senderOpenId);
     const highRiskAllowedUser = highRiskAllowedUsers.find(user => user.openId === senderOpenId);
     const accessRestricted = allowedUsers.length > 0 || allowedEmails.length > 0;
-    const allowed = botSender
+    const allowed = config.managedGroup ? true : botSender
       ? (!accessRestricted || (peerBotsAllowed && trustedPeerBot) || Boolean(allowedBot))
       : !accessRestricted || (allowedUsers.length ? Boolean(allowedUser) : actorEmails.some(email => allowedEmails.includes(email)));
     if (!allowed) {
@@ -1044,6 +1064,10 @@ export class LarkMessageCoordinator {
     } : undefined;
     let session: Session;
     try {
+      if (this.groupManager && event.chatType === 'group') {
+        const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, 'task.create', group.sessionId);
+        if (decision && !decision.allowed) throw new LarkServiceError(decision.code, decision.reason, 403);
+      }
       await this.requireExecution('session', 'task.create');
       if (riskPolicy) await this.requireExecution('high_risk', 'high_risk.execute');
       // 附件下载与身份解析都可能很慢，期间用户可能已经 /new。此刻建会话等于把旧请求
@@ -1063,6 +1087,7 @@ export class LarkMessageCoordinator {
       return;
     }
     task.sessionId = session.id;
+    await this.groupManager?.recordRun(session, config, event, task.scopeId);
     const initialState = this.runtime.dispatch ? 'queued' : 'running';
     task.state = initialState;
     task.events = [];
@@ -1473,7 +1498,9 @@ export class LarkMessageCoordinator {
         else receive(agentEvent);
       });
       try {
-        const runtimeTask = riskPolicy
+        const runtimeTask = config.managedGroup
+          ? await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy, event.senderOpenId)
+          : riskPolicy
           ? await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy)
           : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt);
         runtimeTaskId = runtimeTask.id;
@@ -1517,7 +1544,8 @@ export class LarkMessageCoordinator {
     try {
       heartbeatActive = true;
       scheduleHeartbeat();
-      if (riskPolicy) await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy);
+      if (config.managedGroup) await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy, event.senderOpenId);
+      else if (riskPolicy) await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy);
       else if (agentPrompt === prompt) await this.runtime.send(session.id, prompt);
       else await this.runtime.send(session.id, prompt, agentPrompt);
       // 若轮次已变（用户在 send 期间点击了重试），本轮不得覆盖新状态。

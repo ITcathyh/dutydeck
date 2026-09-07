@@ -406,7 +406,11 @@ export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositor
     channelBotPolicies: { get: getPolicy, getByChannelBot: getPolicyByBot, create: createPolicy, update: updatePolicy },
     remoteChatFacts: { get: getFact, getByNaturalKey: getFactByNaturalKey, getCurrentByNaturalKey: getCurrentFactByNaturalKey, create: createFact, update: updateFact, upsert: upsertFact, invalidate: invalidateFact },
     remoteIdentityFacts: { get: getIdentityFact, getByChannelBot: getIdentityFactByBot, getCurrentByChannelBot: getCurrentIdentityFactByBot, upsert: upsertIdentityFact, invalidate: invalidateIdentityFact },
-    roleAssignments: { get: getRole, create: createRole, update: updateRole }
+    roleAssignments: { get: getRole, create: createRole, update: updateRole },
+    config: {
+      get: key => (sqlite.prepare('SELECT value FROM configs WHERE key = ?').get(key) as { value: string } | undefined)?.value,
+      set: (key, value) => { sqlite.prepare('INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value); }
+    }
   };
   const transact = async <T>(work: (repositories: GroupPolicyTransactionContext) => T): Promise<T> => {
     let result!: T;

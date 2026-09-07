@@ -1,11 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FolderOpen, X } from 'lucide-react';
+import { X } from 'lucide-react';
 import { api, type Agent, type PermissionMode, type Session, type Task } from '../api';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 import { permissionLabels } from './ui';
-import { Banner, Button, Dialog, Field, IconButton, Input, Spinner, Textarea } from './primitives';
+import { Banner, Button, Dialog, IconButton, Spinner, Textarea, Field } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
+import { DirectoryPicker } from './DirectoryPicker';
 
 export type NewSessionModalProps = {
   open: boolean;
@@ -80,7 +81,6 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
       onCreated(session, task);
     }
   });
-  const pickNewWorkspace = useMutation({ mutationFn: api.selectDirectory, onSuccess: result => setCwd(result.path) });
   if (!open) return null;
 
   if (agents.length === 0) return <Dialog open onClose={onClose} label="需要先准备 Agent" size="sm">
@@ -122,16 +122,19 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
           <Field label="任务目标">
             <Textarea autoFocus required aria-label="任务目标" value={goal} onChange={event => setGoal(event.target.value)} rows={3} placeholder="例如：修复登录超时问题，补齐回归测试并通过构建" className="resize-y"/>
           </Field>
+          <DirectoryPicker
+            value={cwd}
+            onChange={setCwd}
+            label="工作目录"
+            description="填写运行 Dockmux 的这台机器上的目录；留空会使用 Agent 的默认工作区。"
+            placeholder="留空则使用 Agent 默认目录"
+            allowNative={Boolean(capabilities?.directoryPicker)}
+            disabled={Boolean(createdSession)}
+          />
           <fieldset disabled={Boolean(createdSession)} className="contents disabled:opacity-60">
             <SelectField label="执行任务的 Agent">
               <AgentSelect agents={agents} value={agentId} onChange={value => { const nextAgent = agents.find(agent => agent.id === value); setAgentId(value); setPermissionMode(initialPermissionMode(nextAgent)); setFullTrustConfirmed(false); setModel(''); setReasoningEffort(''); }}/>
             </SelectField>
-            <Field label="工作目录" hint="填写运行 Dockmux 的这台机器上的目录；留空会使用 Agent 的默认工作区。" error={pickNewWorkspace.error?.message}>
-              <span className="flex gap-2">
-                <Input value={cwd} onChange={event => setCwd(event.target.value)} placeholder="留空则使用 Agent 默认目录" className="min-w-0 flex-1"/>
-                <Button variant="secondary" disabled={!capabilities?.directoryPicker || pickNewWorkspace.isPending} onClick={() => pickNewWorkspace.mutate()} icon={<FolderOpen size={14}/>}>{capabilities?.directoryPicker ? '选择目录' : '手动输入'}</Button>
-              </span>
-            </Field>
             <div>
               <SelectField label="操作权限">
                 <CompactSelect options={supportedPermissionModes(selectedAgent).map(value => ({ value, ...permissionOptions[value] }))} value={permissionMode} placeholder="选择操作权限" disabledText="" onChange={value => { setPermissionMode(value as PermissionMode); setFullTrustConfirmed(false); }}/>

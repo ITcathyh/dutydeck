@@ -19,7 +19,7 @@ import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from './m
 import { createEventWindow, EVENT_PAGE_SIZE, initialEventQuery, mergeOlderEvents, oldestSequence, type EventWindow } from './event-history';
 import { summaryFromTasks } from './run-summary';
 import { nextActionForState, workspaceName, type WorkbenchView } from './workspace-model';
-import { appLocationPath, OVERLAY_HISTORY_MARK, parseAppLocation, sessionPath, type AppLocation, type AppRoute, type OverlayRoute } from './app-route';
+import { appLocationPath, OVERLAY_HISTORY_MARK, parseAppLocation, sessionPath, type AppLocation, type AppRoute, type OverlayRoute, type PrimaryNav } from './app-route';
 import type { ControlCenterSection } from './components/ControlCenterModal';
 import { captureDialogOpener } from './useDialogFocus';
 import { CommandPalette, type CommandAction } from './components/CommandPalette';
@@ -37,6 +37,10 @@ const LarkConfigModal = lazy(() => import('./components/LarkConfigModal').then(m
 const GroupPolicyModal = lazy(() => import('./components/GroupPolicyModal').then(module => ({ default: module.GroupPolicyModal })));
 const ScheduleFoundationPanel = lazy(() => import('./components/ScheduleFoundationPanel').then(module => ({ default: module.ScheduleFoundationPanel })));
 const TimelineView = lazy(() => import('./components/TimelineView').then(module => ({ default: module.TimelineView })));
+// 机器人 / 群聊是一级视图但不是首屏：多数会话只用任务中心，两块管理界面各自带表单
+// 与目录浏览器，进首屏 chunk 只会拖慢每个人的第一次加载。
+const BotManagement = lazy(() => import('./components/BotManagement').then(module => ({ default: module.BotManagement })));
+const GroupManagement = lazy(() => import('./components/GroupManagement').then(module => ({ default: module.GroupManagement })));
 
 type DetailTab = 'timeline' | 'terminal';
 type MainQueryFailure = { label: string; message: string; hasData: boolean; retrying: boolean; retry(): Promise<void> };
@@ -63,6 +67,11 @@ export default function App() {
   const [location, setLocation] = useState<AppLocation>(currentLocation);
   const route = location.route;
   const overlay = location.overlay;
+  // 主区一级视图与选中对象。三者都在 URL 里，刷新和分享都能回到同一个对象
+  // （app-route.ts 的 nav/appId/chatId）。
+  const primaryNav: PrimaryNav = location.nav ?? 'tasks';
+  const selectedAppId = location.appId;
+  const selectedChatId = location.chatId;
   const [workbenchView, setWorkbenchView] = useState<WorkbenchView>('all');
   const [runSummaries, setRunSummaries] = useState<Record<string, RunSummary>>({});
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -102,8 +111,8 @@ export default function App() {
   const openOverlay = useCallback((next: OverlayRoute) => {
     captureDialogOpener();
     setSidebarOpen(false);
-    navigate({ route, overlay: next });
-  }, [navigate, route]);
+    navigate({ route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId, overlay: next });
+  }, [navigate, route, primaryNav, selectedAppId, selectedChatId]);
 
   /**
    * 关闭可深链浮层。
@@ -114,13 +123,41 @@ export default function App() {
   const closeOverlay = useCallback(() => {
     const pushedByUs = Boolean((window.history.state as Record<string, unknown> | null)?.[OVERLAY_HISTORY_MARK]);
     if (pushedByUs) { window.history.back(); return; }
-    navigate({ route }, { replace: true });
-  }, [navigate, route]);
+    navigate({ route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId }, { replace: true });
+  }, [navigate, route, primaryNav, selectedAppId, selectedChatId]);
 
+  /**
+   * 选中任务。
+   *
+   * 一律切回任务视图（点任务却停在 Bot 管理页上，是在无视用户刚做的选择），
+   * 但 appId / chatId 原样留在 URL 里：用户从任务详情跳去改配置、再切回来时
+   * 仍然落在原来那个 Bot 或群上，不用重新找一遍。
+   */
   const selectSession = useCallback((id?: string) => {
     applySessionSelection(id);
-    navigate({ route: id ? { kind: 'session', sessionId: id } : { kind: 'overview' } });
-  }, [applySessionSelection, navigate]);
+    navigate({ route: id ? { kind: 'session', sessionId: id } : { kind: 'overview' }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId });
+  }, [applySessionSelection, navigate, selectedAppId, selectedChatId]);
+
+  /**
+   * 切换主区一级视图。
+   *
+   * `route` 原样保留：用户在任务详情里切去「机器人」，主区换成 Bot 管理，但
+   * 那条任务仍在 URL 里；切回「任务」直接回到同一条任务，不用重新找。这正是
+   * 契约要求的「跳转配置再返回不丢任务」。
+   */
+  const setPrimaryNav = useCallback((next: PrimaryNav) => {
+    navigate({ route, nav: next, appId: selectedAppId, chatId: selectedChatId });
+  }, [navigate, route, selectedAppId, selectedChatId]);
+
+  /** 选中某个 Bot，进入机器人视图。chatId 保留，便于从 Bot 再跳回原来的群。 */
+  const selectBot = useCallback((appId: string) => {
+    navigate({ route, nav: 'bots', appId: appId || undefined, chatId: selectedChatId });
+  }, [navigate, route, selectedChatId]);
+
+  /** 选中某个群，进入群聊视图；带上 appId 时直接定位到该群里的这个 Bot。 */
+  const selectGroup = useCallback((chatId: string, appId?: string) => {
+    navigate({ route, nav: 'groups', chatId: chatId || undefined, appId: appId ?? selectedAppId });
+  }, [navigate, route, selectedAppId]);
 
   const agents = useQuery({ queryKey: ['agents'], queryFn: api.agents, staleTime: 5 * 60_000 });
   // 非当前任务没有 SSE，低频同步用于捕获飞书创建等外部变化；当前任务状态仍由 SSE 即时写入缓存。
@@ -344,10 +381,17 @@ export default function App() {
     */}
     <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {mobileNavigationOpen && <button type="button" aria-label="关闭工作台导航" onClick={() => setSidebarOpen(false)} className="ui-overlay fixed inset-0 z-sticky bg-scrim backdrop-blur-[1px] md:hidden"/>}
-      <SessionList open={sidebarOpen} onClose={() => setSidebarOpen(false)} sessions={sortedSessions} summaries={runSummaries} sessionsLoading={sessions.isLoading} agents={agents.data ?? []} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} activeSessionId={activeSessionId} view={workbenchView} onSelect={selectSession} onNewSession={openCreateTask} onOpenControlCenter={() => openSettings('agents')} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })} authRequired={authStatus.data?.required}/>
+      <SessionList open={sidebarOpen} onClose={() => setSidebarOpen(false)} sessions={sortedSessions} summaries={runSummaries} sessionsLoading={sessions.isLoading} agents={agents.data ?? []} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} activeSessionId={activeSessionId} view={workbenchView} onSelect={selectSession} onNewSession={openCreateTask} onOpenControlCenter={() => openSettings('agents')} onOpenLarkSetup={openLarkSetup} onOpenGroups={() => openOverlay({ kind: 'groups' })} onOpenSchedules={() => openOverlay({ kind: 'automation' })} primaryNav={primaryNav} onPrimaryNavChange={setPrimaryNav} authRequired={authStatus.data?.required}/>
       <main aria-hidden={mobileNavigationOpen || undefined} inert={mobileNavigationOpen || undefined} className="flex min-w-0 flex-1 flex-col md:ml-main-inset">
       {route.kind !== 'not-found' && !blockingMainQueryFailures.length && staleMainQueryFailures.length > 0 && <div className="shrink-0 px-4 py-2"><Banner tone="warning" action={{ label: retryingMainQueries ? '重试中…' : '重试', busy: retryingMainQueries, onClick: () => void Promise.all(staleMainQueryFailures.map(failure => failure.retry())) }}><span className="block min-w-0 truncate" title={staleMainQueryFailures.map(failure => `${failure.label}：${failure.message}`).join('\n')}>部分数据可能不是最新：{staleMainQueryFailures.map(failure => failure.label).join('、')}</span></Banner></div>}
-      {route.kind === 'not-found' ? renderNotFound('page') : blockingMainQueryFailures.length ? renderBlockingFailure() : route.kind === 'session' && sessions.isPending ? <div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载任务…"/></div> : missingActiveSession ? renderNotFound('session') : active ? <>
+      {/*
+        主区分派。机器人 / 群聊排在最前面：它们是用户刚点过的一级视图，
+        任务列表加载失败或当前任务不存在都不该把这两块管理界面挡掉——
+        「改配置」与「看任务」是两条独立的路，一条断了不该连坐另一条。
+      */}
+      {primaryNav === 'bots' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开机器人管理…"/></div>}><BotManagement selectedAppId={selectedAppId} onSelectBot={selectBot} onOpenLarkSetup={openLarkSetup} onSelectGroup={selectGroup} agents={agents.data ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false}/></Suspense>
+      : primaryNav === 'groups' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开群聊管理…"/></div>}><GroupManagement selectedChatId={selectedChatId} selectedAppId={selectedAppId} onSelectGroup={selectGroup} onNavigateToBot={selectBot} agents={agents.data ?? []}/></Suspense>
+      : route.kind === 'not-found' ? renderNotFound('page') : blockingMainQueryFailures.length ? renderBlockingFailure() : route.kind === 'session' && sessions.isPending ? <div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载任务…"/></div> : missingActiveSession ? renderNotFound('session') : active ? <>
         <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRaw}/>
         {actionError && <div className="shrink-0 px-4 py-2"><Banner tone="danger" onDismiss={() => setActionError(undefined)}>{actionError}</Banner></div>}
         {isPtyCli && <><div className="shrink-0 bg-surface px-3 sm:px-5"><RunDetailTabs value={detailTab} onChange={setDetailTab}/></div>{active.permissionMode === 'ask' && <div className="shrink-0 px-4 py-2 sm:px-5"><Banner tone="warning" action={{ label: '打开终端', onClick: () => setDetailTab('terminal') }}>此 CLI 的操作确认在终端中完成；若任务等待响应，请前往终端处理。</Banner></div>}</>}

@@ -456,6 +456,8 @@ export interface PolicyEvaluationInput {
   now: string;
   /** Explain mode computes entitlement only; it must never be used as an execution gate. */
   mode?: 'enforce' | 'explain';
+  /** Supplied only by the live Lark adapter after ownership, credentials and current group facts are verified. */
+  runtimeActivation?: { source: 'live_lark'; channelBotId: string; groupBindingId: string };
   principal?: { id: string; channelBotId: string; isOwner: boolean; isChatMember: boolean };
   channelBot: { id: string; state: 'staged' | 'disabled' };
   binding?: GroupBinding;
@@ -499,7 +501,11 @@ export function evaluatePolicyAction(input: PolicyEvaluationInput): PolicyDecisi
   const deny = (code: string, reason: string): PolicyDecision => ({ allowed: false, action: input.action, code, reason, source: 'explicit_deny' });
   if (!input.principal) return deny('principal_unresolved', 'Principal resolution is required');
   if (input.principal.channelBotId !== input.channelBot.id || (input.target && input.target.channelBotId !== input.channelBot.id)) return deny('scope_mismatch', 'Principal and target must belong to the same ChannelBot');
-  if (runtimeActions.has(input.action) && input.mode !== 'explain') return deny('channel_bot_disabled', 'The ChannelBot is disabled and has no production execution integration');
+  const activated = input.runtimeActivation?.source === 'live_lark'
+    && input.runtimeActivation.channelBotId === input.channelBot.id
+    && input.runtimeActivation.groupBindingId === input.binding?.id
+    && input.channelBot.state !== 'disabled';
+  if (runtimeActions.has(input.action) && input.mode !== 'explain' && !activated) return deny('channel_bot_disabled', 'The ChannelBot is disabled and has no production execution integration');
   if (input.binding && ['disabled', 'archived', 'needs_review'].includes(input.binding.state) && !adminActions.has(input.action)) return deny('group_binding_disabled', 'The GroupBinding is not eligible for runtime actions');
 
   const assignments = activeAssignments(input);
@@ -587,6 +593,7 @@ export interface RoleAssignmentRepository {
 }
 
 export interface GroupPolicyTransactionContext {
+  config: { get(key: string): string | undefined; set(key: string, value: string): void };
   groupBindings: { get(id: string): GroupBinding | undefined; getByNaturalKey(channelBotId: string, externalChatId: string): GroupBinding | undefined; create(input: CreateGroupBindingInput): GroupBinding; update(id: string, input: UpdateGroupBindingInput): GroupBinding };
   channelBotPolicies: { get(id: string): ChannelBotGroupPolicy | undefined; getByChannelBot(channelBotId: string): ChannelBotGroupPolicy | undefined; create(input: CreateChannelBotGroupPolicyInput): ChannelBotGroupPolicy; update(id: string, input: UpdateChannelBotGroupPolicyInput): ChannelBotGroupPolicy };
   remoteChatFacts: { get(id: string): RemoteChatFact | undefined; getByNaturalKey(channelBotId: string, externalChatId: string): RemoteChatFact | undefined; getCurrentByNaturalKey(channelBotId: string, externalChatId: string, now?: string): RemoteChatFact | undefined; create(input: CreateRemoteChatFactInput): RemoteChatFact; update(id: string, input: UpdateRemoteChatFactInput): RemoteChatFact; upsert(input: UpsertRemoteChatFactInput): RemoteChatFact; invalidate(id: string, input: InvalidateRemoteFactInput): RemoteChatFact };

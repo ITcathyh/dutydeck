@@ -1,5 +1,6 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { AgentEvent, ChannelMappingRepository, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
+import type { LarkGroupManager } from './group-management.js';
 import type { StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError } from './service.js';
 import { setLarkGateLog } from './api-gate.js';
@@ -23,8 +24,8 @@ export interface LarkRuntime {
   listSessions?(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
   stop?(id: string): Promise<unknown>;
-  send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy): Promise<unknown>;
-  dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy): Promise<{ id: string; status: string; queuedAhead?: number }>;
+  send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<unknown>;
+  dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<{ id: string; status: string; queuedAhead?: number }>;
   getTasks?(id: string): Promise<TaskRecord[]>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;
@@ -54,6 +55,7 @@ export interface LarkListener {
 }
 
 export interface LarkLongConnectionListenerOptions {
+  groupManager?: LarkGroupManager;
   runtime?: LarkRuntime;
   cardMappings?: ChannelMappingRepository;
   env?: NodeJS.ProcessEnv;
@@ -106,6 +108,7 @@ export class LarkLongConnectionListener implements LarkListener {
       this.options.cardMappings,
       chatModeResolver,
       this.options.executionPolicy,
+      this.options.groupManager,
     ) : undefined;
     try { await coordinator?.startReconciliation(config); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账启动失败，继续建立消息监听'); }

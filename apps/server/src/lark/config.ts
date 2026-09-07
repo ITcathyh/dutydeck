@@ -14,6 +14,10 @@ export const riskControlModes = ['off', 'guidance', 'enforced'] as const;
 export type RiskControlMode = typeof riskControlModes[number];
 
 export interface StoredLarkConfig {
+  revision?: number;
+  mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
+  /** Runtime-only resolved group context; never serialized in the Bot configuration. */
+  managedGroup?: { bindingId: string; revision: number; principalId?: string };
   appId: string;
   appSecret: string;
   name?: string;
@@ -65,6 +69,8 @@ export interface StoredLarkConfig {
 }
 
 export interface SaveLarkConfigInput {
+  expectedRevision?: number;
+  mentionPolicy?: StoredLarkConfig['mentionPolicy'];
   stage?: 'lark' | 'agent';
   originalAppId?: string;
   appId?: string;
@@ -115,6 +121,8 @@ export interface SaveLarkConfigInput {
 }
 
 export interface PublicLarkConfig {
+  revision: number;
+  mentionPolicy?: StoredLarkConfig['mentionPolicy'];
   configured: true;
   appId: string;
   name: string;
@@ -262,6 +270,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   const displayName = normalizeDisplayName(parsed.displayName);
   return {
     appId: parsed.appId.trim(),
+    revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
+    mentionPolicy: parsed.mentionPolicy ?? 'always',
     appSecret: parsed.appSecret,
     ...(parsed.name?.trim() ? { name: parsed.name.trim() } : {}),
     ...(parsed.workspace?.trim() ? { workspace: parsed.workspace.trim() } : {}),
@@ -301,7 +311,11 @@ export async function readLarkConfigs(repository?: ConfigRepository): Promise<St
       const parsed = JSON.parse(stored);
       if (Array.isArray(parsed)) {
         const configs = parsed.map(item => normalizeStoredConfig(item)).filter((item): item is StoredLarkConfig => Boolean(item));
-        if (parsed.some(needsRiskControlMigration)) await repository?.set(larkBotsConfigKey, JSON.stringify(configs));
+        if (parsed.some(needsRiskControlMigration)) {
+          if (repository?.compareAndSet) {
+            if (!await repository.compareAndSet(larkBotsConfigKey, stored, JSON.stringify(configs))) return readLarkConfigs(repository);
+          } else await repository?.set(larkBotsConfigKey, JSON.stringify(configs));
+        }
         return configs;
       }
     } catch {}
@@ -310,7 +324,11 @@ export async function readLarkConfigs(repository?: ConfigRepository): Promise<St
   if (!legacy) return [];
   try {
     const config = normalizeStoredConfig(JSON.parse(legacy));
-    if (config) await repository?.set(larkBotsConfigKey, JSON.stringify([config]));
+    if (config) {
+      if (repository?.compareAndSet) {
+        if (!await repository.compareAndSet(larkBotsConfigKey, stored, JSON.stringify([config]))) return readLarkConfigs(repository);
+      } else await repository?.set(larkBotsConfigKey, JSON.stringify([config]));
+    }
     return config ? [config] : [];
   } catch { return []; }
 }
@@ -323,6 +341,8 @@ export async function readLarkConfig(repository?: ConfigRepository, appId?: stri
 export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: ReadonlySet<string> = new Set(), duplicateNames: ReadonlySet<string> = new Set()): PublicLarkConfig => ({
   configured: true,
   appId: config.appId,
+  revision: config.revision ?? 1,
+  mentionPolicy: config.mentionPolicy ?? 'always',
   name: config.name ?? config.appId,
   tabLabel: duplicateNames.has((config.name ?? config.appId).toLowerCase()) ? `${config.name ?? config.appId} · ${config.appId}` : config.name ?? config.appId,
   setupComplete: Boolean(config.defaultAgentId && config.fullTrustConfirmed),
@@ -369,13 +389,19 @@ export const publicLarkConfigs = (configs: StoredLarkConfig[], runtime: { active
   };
 };
 
-export async function saveLarkConfig(repository: ConfigRepository | undefined, agents: AgentRepository | undefined, input: SaveLarkConfigInput): Promise<StoredLarkConfig[]> {
+async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, agents: AgentRepository | undefined, input: SaveLarkConfigInput): Promise<StoredLarkConfig[]> {
   if (!repository) throw new LarkServiceError('LARK_CONFIG_STORAGE_UNAVAILABLE', 'Lark configuration storage is unavailable', 503);
   const configs = await readLarkConfigs(repository);
   const originalAppId = input.originalAppId?.trim();
   const index = originalAppId ? configs.findIndex(config => config.appId === originalAppId) : -1;
   if (originalAppId && index < 0) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${originalAppId}`, 404);
   const current = index >= 0 ? configs[index] : undefined;
+  if (input.expectedRevision !== undefined && input.expectedRevision !== (current ? current.revision ?? 1 : 0)) {
+    throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
+  }
+  if (input.mentionPolicy !== undefined && !['always', 'topic', 'never', 'ambient'].includes(input.mentionPolicy)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '提及方式无效。', 400);
+  }
   const appId = input.appId?.trim() || current?.appId;
   const appSecret = input.appSecret?.trim() || current?.appSecret;
   const name = input.name === undefined ? current?.name : input.name.trim() || undefined;
@@ -421,6 +447,8 @@ export async function saveLarkConfig(repository: ConfigRepository | undefined, a
     throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先确认飞书任务将以完全信任模式无人值守运行。', 409);
   }
   const config: StoredLarkConfig = {
+    revision: (current?.revision ?? (current ? 1 : 0)) + 1,
+    mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? 'always',
     appId,
     appSecret,
     ...(name ? { name } : {}),
@@ -458,11 +486,43 @@ export async function saveLarkConfig(repository: ConfigRepository | undefined, a
   return configs;
 }
 
-export async function deleteLarkConfig(repository: ConfigRepository | undefined, appId: string): Promise<StoredLarkConfig[]> {
+async function deleteLarkConfigUnlocked(repository: ConfigRepository | undefined, appId: string): Promise<StoredLarkConfig[]> {
   if (!repository) throw new LarkServiceError('LARK_CONFIG_STORAGE_UNAVAILABLE', 'Lark configuration storage is unavailable', 503);
   const configs = await readLarkConfigs(repository);
   const next = configs.filter(config => config.appId !== appId);
   if (next.length === configs.length) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${appId}`, 404);
   await repository.set(larkBotsConfigKey, JSON.stringify(next));
   return next;
+}
+
+const configWrites = new WeakMap<ConfigRepository, Promise<unknown>>();
+async function mutateLarkConfigs(repository: ConfigRepository | undefined, work: (snapshot: ConfigRepository) => Promise<StoredLarkConfig[]>): Promise<StoredLarkConfig[]> {
+  if (!repository) throw new LarkServiceError('LARK_CONFIG_STORAGE_UNAVAILABLE', 'Lark configuration storage is unavailable', 503);
+  const previous = configWrites.get(repository) ?? Promise.resolve();
+  const next = previous.catch(() => {}).then(async () => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const before = await repository.get(larkBotsConfigKey);
+      let value = before;
+      const snapshot: ConfigRepository = {
+        get: async key => key === larkBotsConfigKey ? value : repository.get(key),
+        set: async (key, updated) => { if (key !== larkBotsConfigKey) throw new Error('Unexpected Bot config key'); value = updated; }
+      };
+      const result = await work(snapshot);
+      if (value === undefined) return result;
+      if (repository.compareAndSet) {
+        if (!await repository.compareAndSet(larkBotsConfigKey, before, value)) continue;
+      } else await repository.set(larkBotsConfigKey, value);
+      return result;
+    }
+    throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '配置正在被其他操作修改，请重试。', 409);
+  });
+  configWrites.set(repository, next);
+  try { return await next; } finally { if (configWrites.get(repository) === next) configWrites.delete(repository); }
+}
+
+export async function saveLarkConfig(repository: ConfigRepository | undefined, agents: AgentRepository | undefined, input: SaveLarkConfigInput) {
+  return mutateLarkConfigs(repository, snapshot => saveLarkConfigUnlocked(snapshot, agents, input));
+}
+export async function deleteLarkConfig(repository: ConfigRepository | undefined, appId: string) {
+  return mutateLarkConfigs(repository, snapshot => deleteLarkConfigUnlocked(snapshot, appId));
 }

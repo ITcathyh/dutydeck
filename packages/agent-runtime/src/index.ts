@@ -43,6 +43,8 @@ export function correlateToolCalls(events: Array<NormalizedDriverEvent | undefin
 export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
 
 export interface RuntimeOptions {
+  authorizeExecution?: (sessionId: string, actorId?: string) => Promise<void>;
+  resolveRiskPolicy?: (sessionId: string, fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>;
   acpxCommand?: string;
   driverFactory?: DriverFactory;
   /**
@@ -83,7 +85,7 @@ export class DockmuxRuntime {
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
     const ptyDriverFactory = options.ptyDriverFactory;
     this.factory = options.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId) => {
-      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dockmux_session_id: sessionId } }, { sessionKey: sessionId, onEvent });
+      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dockmux_session_id: sessionId } }, { sessionKey: sessionId, onEvent, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}) });
       if (protocol === 'pty-cli') {
         if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dockmux/pty-driver）', 503);
         return ptyDriverFactory(agent, protocol, onEvent, onExit, sessionId);
@@ -315,9 +317,10 @@ export class DockmuxRuntime {
     return visible;
   }
 
-  private executionContext(agentPrompt: string, riskPolicy?: ToolRiskPolicy): TaskExecutionContext {
+  private executionContext(agentPrompt: string, riskPolicy?: ToolRiskPolicy, actorId?: string): TaskExecutionContext {
     return {
       agentPrompt,
+      ...(actorId ? { actorId } : {}),
       ...(riskPolicy ? { riskPolicy } : {})
     };
   }
@@ -434,6 +437,7 @@ export class DockmuxRuntime {
   }
 
   private async applyRiskPolicy(session: Session, driver: AgentDriver | undefined, policy?: ToolRiskPolicy) {
+    if (this.options.resolveRiskPolicy) policy = await this.options.resolveRiskPolicy(session.id, policy);
     driver?.setRiskPolicy?.(policy);
     const directory = join(session.cwd, '.dockmux', 'security', 'sessions');
     await mkdir(directory, { recursive: true });
@@ -450,6 +454,7 @@ export class DockmuxRuntime {
     this.turnErrors.delete(id);
     this.touch(id);
     try {
+      await this.options.authorizeExecution?.(id, task.executionContext?.actorId);
       const driver = await this.reconnect(session);
       const { agentPrompt = task.prompt, riskPolicy } = task.executionContext ?? {};
       // 每个任务都明确设置（或清除）策略，避免复用会话沿用上一个
@@ -499,15 +504,15 @@ export class DockmuxRuntime {
     return this.publicTask(task);
   }
 
-  async send(id: string, prompt: string, agentPrompt = prompt, riskPolicy?: ToolRiskPolicy) {
-    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'running', executionContext: this.executionContext(agentPrompt, riskPolicy), createdAt: now(), updatedAt: now() };
+  async send(id: string, prompt: string, agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string) {
+    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'running', executionContext: this.executionContext(agentPrompt, riskPolicy, actorId), createdAt: now(), updatedAt: now() };
     return this.runTask(id, task);
   }
 
-  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy) {
+  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string) {
     const { session } = await this.active(id);
     if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot send while session is ${session.state}`, 409);
-    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'queued', executionContext: this.executionContext(agentPrompt, riskPolicy), createdAt: now(), updatedAt: now() };
+    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'queued', executionContext: this.executionContext(agentPrompt, riskPolicy, actorId), createdAt: now(), updatedAt: now() };
     const queue = this.queues.get(id) ?? [];
     const queuedAhead = queue.length + (this.activeTurns.has(id) ? 1 : 0);
     if (mode === 'interrupt') queue.unshift(task); else queue.push(task);

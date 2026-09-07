@@ -1,4 +1,4 @@
-import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dockmux/shared';
+import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dockmux/shared';
 
 export type PermissionMode = 'ask' | 'approve-reads' | 'deny-all' | 'full-trust';
 export type Agent = PublicAgent;
@@ -7,8 +7,104 @@ export type AgentModelsResult = { models: AgentModel[]; defaultModel?: string; r
 export type SkillReference = { name: string; description: string; path: string; source: 'workspace' | 'user' };
 export type LarkAllowedUser = { openId: string; name: string };
 export type RiskControlMode = 'off' | 'guidance' | 'enforced';
-export type LarkBotConfig = { configured: true; appId: string; name: string; tabLabel: string; setupComplete: boolean; workspace?: string; webBaseUrl?: string; defaultAgentId?: string; defaultModel?: string; defaultReasoningEffort?: string; fullTrustConfirmed: boolean; preInjectPrompt: string; listening: boolean; activeListening: boolean; groupToolsEnabled: boolean; groupToolsAllowSend: boolean; pushIntervalMs: number; traceLimit?: number; hideTraceOnComplete: boolean; allowedUsers: LarkAllowedUser[]; allowedEmails: string[]; allowedBots: LarkAllowedUser[]; peerBotsAllowed: boolean; highRiskAllowedUsers: LarkAllowedUser[]; highRiskAllowedEmails: string[]; highRiskPattern: string; riskControlMode: RiskControlMode };
+export type LarkBotConfig = {
+  configured: true;
+  appId: string;
+  name: string;
+  tabLabel: string;
+  setupComplete: boolean;
+  workspace?: string;
+  webBaseUrl?: string;
+  defaultAgentId?: string;
+  defaultModel?: string;
+  defaultReasoningEffort?: string;
+  fullTrustConfirmed: boolean;
+  preInjectPrompt: string;
+  listening: boolean;
+  activeListening: boolean;
+  groupToolsEnabled: boolean;
+  groupToolsAllowSend: boolean;
+  pushIntervalMs: number;
+  traceLimit?: number;
+  hideTraceOnComplete: boolean;
+  allowedUsers: LarkAllowedUser[];
+  allowedEmails: string[];
+  allowedBots: LarkAllowedUser[];
+  peerBotsAllowed: boolean;
+  highRiskAllowedUsers: LarkAllowedUser[];
+  highRiskAllowedEmails: string[];
+  highRiskPattern: string;
+  riskControlMode: RiskControlMode;
+  revision?: number;
+  p2pMode?: 'chat' | 'thread';
+  groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
+  mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
+};
 export type LarkConfig = { configured: boolean; bots: LarkBotConfig[]; listeningDisabled: boolean };
+
+export type RoleChange =
+  | {
+      kind: 'create';
+      principalId: string;
+      role: 'can_talk' | 'can_operate' | 'admin';
+      operateScope: 'none' | 'own_runs' | 'group_runs' | 'bot_runs';
+      actionGates: { terminalWrite: boolean; highRisk: boolean; groupToolsSend: boolean };
+    }
+  | {
+      kind: 'update';
+      id: string;
+      expectedRevision: number;
+      patch: {
+        state?: 'active' | 'revoked';
+        operateScope?: 'none' | 'own_runs' | 'group_runs' | 'bot_runs';
+        actionGates?: { terminalWrite: boolean; highRisk: boolean; groupToolsSend: boolean };
+      };
+    };
+
+export type ManagedGroupBot = {
+  appId: string;
+  channelBotId?: string;
+  binding?: GroupBinding;
+  effective?: EffectiveGroupConfig;
+  roles: RoleAssignment[];
+  membership: 'member' | 'not_member' | 'inaccessible' | 'unknown';
+  validity: string;
+  checkedAt?: string;
+  applied: boolean;
+  error?: string;
+};
+
+export type ManagedGroup = {
+  key: string;
+  chatId: string;
+  name: string;
+  bots: ManagedGroupBot[];
+};
+
+export type GroupMember = {
+  principalId: string;
+  openId: string;
+  name: string;
+};
+
+export type GroupMembersResult = {
+  members: GroupMember[];
+  pageToken?: string;
+  hasMore?: boolean;
+};
+
+export type SystemDirectoryEntry = {
+  name: string;
+  path: string;
+};
+
+export type SystemDirectoriesResult = {
+  path: string;
+  parent?: string;
+  roots: string[];
+  host: string;
+  entries: SystemDirectoryEntry[];
+};
 export type LarkHookStatus = { agentId?: string; supported: boolean; installed: boolean; writable: boolean; trustRequired: boolean; hooksPath?: string; reason?: string; trustInstructions?: string };
 export type LarkOpenPlatformSetupJob = {
   id: string;
@@ -92,8 +188,45 @@ export const api = {
   startLarkOpenPlatformSetup: (appId: string, forceLogin = false) => json<LarkOpenPlatformSetupJob>('/api/lark/open-platform/configure', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, forceLogin }) }),
   larkOpenPlatformSetupJob: (jobId: string) => json<LarkOpenPlatformSetupJob>(`/api/lark/open-platform/jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
   inspectLarkBot: (body: { appId: string; appSecret: string }) => json<{ appName: string; openId: string; avatarUrl?: string; activateStatus?: number }>('/api/lark/bot/inspect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-  saveLarkConfig: (body: { stage: 'lark' | 'agent'; originalAppId?: string; appId?: string; appSecret?: string; workspace?: string; webBaseUrl?: string; defaultAgentId?: string; defaultModel?: string; defaultReasoningEffort?: string; fullTrustConfirmed?: boolean; preInjectPrompt?: string; listening?: boolean; groupToolsEnabled?: boolean; groupToolsAllowSend?: boolean; pushIntervalMs?: number; traceLimit?: number | null; allowedUsers?: LarkAllowedUser[]; allowedUserNames?: string[]; allowedEmails?: string[]; allowedBots?: LarkAllowedUser[]; allowedBotNames?: string[]; peerBotsAllowed?: boolean; highRiskAllowedUsers?: LarkAllowedUser[]; highRiskAllowedUserNames?: string[]; highRiskAllowedEmails?: string[]; highRiskPattern?: string; riskControlMode?: RiskControlMode }) => json<LarkConfig>('/api/lark/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  saveLarkConfig: (body: {
+    stage: 'lark' | 'agent';
+    originalAppId?: string;
+    appId?: string;
+    appSecret?: string;
+    workspace?: string;
+    webBaseUrl?: string;
+    defaultAgentId?: string;
+    defaultModel?: string;
+    defaultReasoningEffort?: string;
+    fullTrustConfirmed?: boolean;
+    preInjectPrompt?: string;
+    listening?: boolean;
+    groupToolsEnabled?: boolean;
+    groupToolsAllowSend?: boolean;
+    pushIntervalMs?: number;
+    traceLimit?: number | null;
+    allowedUsers?: LarkAllowedUser[];
+    allowedUserNames?: string[];
+    allowedEmails?: string[];
+    allowedBots?: LarkAllowedUser[];
+    allowedBotNames?: string[];
+    peerBotsAllowed?: boolean;
+    highRiskAllowedUsers?: LarkAllowedUser[];
+    highRiskAllowedUserNames?: string[];
+    highRiskAllowedEmails?: string[];
+    highRiskPattern?: string;
+    riskControlMode?: RiskControlMode;
+    expectedRevision?: number;
+    p2pMode?: 'chat' | 'thread';
+    groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
+    mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
+  }) => json<LarkConfig>('/api/lark/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   deleteLarkConfig: (appId: string) => json<LarkConfig>(`/api/lark/config/${encodeURIComponent(appId)}`, { method: 'DELETE' }),
+  managementGroups: () => json<{ groups: ManagedGroup[] }>('/api/lark/management/groups', { cache: 'no-store' }),
+  syncGroups: (appId: string) => json<{ groups: ManagedGroup[]; error?: string }>(`/api/lark/bots/${encodeURIComponent(appId)}/sync-groups`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }),
+  updateGroupBotBinding: (appId: string, chatId: string, body: { expectedRevision: number; patch: Partial<Pick<GroupBinding, 'agentOverride' | 'workspaceOverride' | 'modelOverride' | 'reasoningOverride' | 'routingOverride' | 'accessOverride' | 'groupToolsOverride' | 'oncall' | 'state'>>; roleChanges?: RoleChange[] }) => json<ManagedGroupBot>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  groupMembers: (appId: string, chatId: string, pageToken?: string) => json<GroupMembersResult>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}/members${pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : ''}`, { cache: 'no-store' }),
+  systemDirectories: (path?: string) => json<SystemDirectoriesResult>(`/api/system/directories${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
   larkHookStatus: (appId: string, agentId?: string) => {
     const query = new URLSearchParams({ appId });
     if (agentId) query.set('agentId', agentId);

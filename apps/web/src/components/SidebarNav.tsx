@@ -10,6 +10,11 @@ export type SidebarNavItem = {
    */
   hint: string;
   Icon: LucideIcon;
+  /**
+   * 当前项。只有「切换主区视图」的项能传：它切完之后自己仍然可见，
+   * 选中态才有人看得见（见下面「选中态只属于主区导航」一节）。
+   */
+  active?: boolean;
   onClick(): void;
 };
 
@@ -56,11 +61,14 @@ export type SidebarNavProps = { groups: SidebarNavGroup[] };
  * 「不会自动执行」）。不另造一套措辞是刻意的：两处各写各的，早晚漂移成互相矛盾，
  * 那正是本轮重做要消灭的病。
  *
- * ## 为什么不做选中态
+ * ## 选中态只属于主区导航
  *
- * 这四项打开的都是浮层（Dialog portal + 遮罩），打开的一瞬间侧栏就在 scrim 之下。
- * 给它们挂 aria-current 既没人看得见，又要多传一个 overlay 状态进来——一个只在
- * 不可见时才为真的「当前项」是纯粹的噪音。任务行的选中态是另一回事，那个在场。
+ * 「机器人」「群聊」两项切换的是主区视图，切完之后侧栏还在，所以它们必须有
+ * aria-current——用户点完看不到自己在哪，会反复点同一项确认。
+ *
+ * 打开浮层的那几项仍然不做选中态：浮层是 Dialog portal + 遮罩，打开的一瞬间
+ * 侧栏就在 scrim 之下，一个只在不可见时才为真的「当前项」是纯粹的噪音。
+ * 所以 active 是可选的，由调用方按「这一项切不切主区」来决定传不传。
  */
 export function SidebarNav({ groups }: SidebarNavProps) {
   return <div className="shrink-0 px-2.5 pb-1.5">
@@ -76,6 +84,7 @@ export function SidebarNav({ groups }: SidebarNavProps) {
         key={item.id}
         type="button"
         onClick={item.onClick}
+        aria-current={item.active ? 'page' : undefined}
         /*
           高 48px（两行：body 22 + caption 18 + py），按契约 §3「半径 ≈ 高度/3.5」
           取 rounded-lg（14px），与同为多行的 SessionRow 一致。
@@ -87,7 +96,7 @@ export function SidebarNav({ groups }: SidebarNavProps) {
           2px 实心 focus 环，覆盖掉它就要在这里重新造一个等价物；nav 容器的
           px-2.5 已经给 outline-offset 留够了余量，不会被 aside 的 overflow-hidden 裁掉。
         */
-        className="group flex min-h-12 w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-fast ease-out hover:bg-sidebar-hover"
+        className={`group flex min-h-12 w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-fast ease-out ${item.active ? 'bg-sidebar-hover' : 'hover:bg-sidebar-hover'}`}
       >
         <item.Icon aria-hidden="true" size={16} className="shrink-0 text-sidebar-accent"/>
         <span className="min-w-0 flex-1">

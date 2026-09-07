@@ -1,0 +1,94 @@
+{
+  "testedAt": "2026-09-07T15:55:28.342Z",
+  "node": "v22.23.1",
+  "passed": true,
+  "apiOnly": false,
+  "results": [
+    "browser navigation, server directory picker and group overrides persist through real HTTP and SQLite",
+    "browser distinguishes Bot selection, explicit model clear and restore inheritance; refresh preserves the selected Bot",
+    "browser background refresh cannot overwrite a newer revision; conflict retains the draft and reload restores server values",
+    "Bot defaults retain drafts and save directly; 390 px Bot/group list-detail navigation works without horizontal overflow",
+    "two Bots × two groups discovered from the live API",
+    "real AcpxAdapter spawns CLI with independent Agent, model and cwd; results reach outbound cards",
+    "topic continuation retains old execution context and does not wake another Bot",
+    "new topics use updated workspace and explicit model clear uses the Agent default",
+    "stale saves return conflict and the current public configuration",
+    "server restart preserves group settings and resumes the original topic through ACP persistence",
+    "real ACP permissions keep Alice denied while privileged Bob is queued; Bob gets his own permissions only when his persisted task starts",
+    "Dashboard continuation records its authenticated owner independently of Lark task senders",
+    "group disablement blocks the real session API and ingress; a removed member loses access to the persisted session"
+  ],
+  "externalBoundaries": "synthetic Feishu transport and test CLI; real browser/API/SQLite/AcpxAdapter",
+  "observedProcesses": [
+    {
+      "agent": "agent_one",
+      "pid": 306978,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "model": "project-model",
+      "turn": 1
+    },
+    {
+      "agent": "agent_two",
+      "pid": 307005,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "model": "review-model",
+      "turn": 1
+    },
+    {
+      "agent": "agent_two",
+      "pid": 307015,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "model": "review-model",
+      "turn": 1
+    },
+    {
+      "agent": "agent_one",
+      "pid": 307023,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "model": "project-model",
+      "turn": 1
+    },
+    {
+      "agent": "agent_one",
+      "pid": 306978,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "model": "project-model",
+      "turn": 2
+    },
+    {
+      "agent": "agent_one",
+      "pid": 307085,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "model": "model-default",
+      "turn": 1
+    },
+    {
+      "agent": "agent_one",
+      "pid": 307138,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "model": "project-model",
+      "turn": 3
+    },
+    {
+      "agent": "agent_one",
+      "pid": 307151,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "model": "model-default",
+      "turn": 1
+    },
+    {
+      "agent": "agent_one",
+      "pid": 307151,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "model": "model-default",
+      "turn": 2
+    },
+    {
+      "agent": "agent_one",
+      "pid": 307138,
+      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "model": "project-model",
+      "turn": 4
+    }
+  ]
+}

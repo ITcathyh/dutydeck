@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { api, foundationApi, scheduleApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
 import App from './App';
 import { useDockStore } from './store';
+import { resetDrafts } from './draft-store';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
 
 vi.mock('./useSessionStream', () => ({ useSessionStream: () => 'open' }));
@@ -38,6 +39,8 @@ afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   useDockStore.setState({ activeSessionId: undefined, rawVisible: false });
+  // 编辑草稿是模块级 store（跨视图存活），不清会让用例互相串草稿。
+  resetDrafts();
   window.history.replaceState(null, '', '/');
 });
 
@@ -719,5 +722,156 @@ describe('App 飞书 Bot 状态读取失败', () => {
     // 缓存里的 Bot 仍然列出（不当成消失），但状态不再宣称已启动。
     expect(within(dialog).getByText('缓存机器人')).toBeTruthy();
     expect(within(dialog).queryByText('监听已启动')).toBeNull();
+  });
+});
+
+/*
+  主区一级导航：任务 / 机器人 / 群聊。
+
+  这一组守的是「日常操作不必先进设置中心」这条产品约束的可达性部分——三个视图
+  必须是常驻的一级目的地、状态进 URL、来回切换不丢当前任务和当前对象。
+  各视图内部的表单行为在 BotManagement / GroupManagement 各自的用例里。
+*/
+describe('主区一级导航', () => {
+  const mockManagementApis = () => {
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [
+      { key: 'k1', chatId: 'oc_chat_1', name: '研发项目群', bots: [{ appId: 'cli_a', membership: 'member', validity: 'valid', applied: true, roles: [] }] }
+    ] });
+  };
+
+  it('三项都是侧栏常驻入口，切换写进 URL 并标出当前项', async () => {
+    const user = userEvent.setup();
+    mockAppApi();
+    mockManagementApis();
+    renderApp();
+    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+
+    // 默认在任务视图，且当前项标了 aria-current。
+    expect(within(navigation).getByRole('button', { name: /^任务/ }).getAttribute('aria-current')).toBe('page');
+    expect(window.location.search).toBe('');
+
+    await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
+    await screen.findByRole('heading', { name: '机器人管理' });
+    expect(window.location.search).toBe('?nav=bots');
+    expect(within(navigation).getByRole('button', { name: /^机器人/ }).getAttribute('aria-current')).toBe('page');
+    expect(within(navigation).getByRole('button', { name: /^任务/ }).getAttribute('aria-current')).toBeNull();
+
+    await user.click(within(navigation).getByRole('button', { name: /^群聊/ }));
+    await screen.findByRole('heading', { name: '群聊管理' });
+    expect(window.location.search).toBe('?nav=groups');
+  });
+
+  it('深链带 nav 与对象 id 时直接落到对应视图，刷新可复现', async () => {
+    window.history.replaceState(null, '', '/?nav=groups&chatId=oc_chat_1');
+    mockAppApi();
+    mockManagementApis();
+    renderApp();
+    await screen.findByRole('heading', { name: '群聊管理' });
+    // 选中的是 URL 指定的那个群，不是列表第一个碰巧命中的。
+    expect(await screen.findByRole('heading', { name: '研发项目群' })).toBeTruthy();
+  });
+
+  it('从任务详情切去机器人再切回来，仍停在原来那条任务', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录超时')] });
+    mockManagementApis();
+    renderApp();
+    await screen.findByRole('heading', { name: '修复登录超时' });
+
+    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
+    await screen.findByRole('heading', { name: '机器人管理' });
+    // 任务仍在路径里，只是主区换了视图。
+    expect(window.location.pathname).toBe('/sessions/s1');
+
+    await user.click(within(navigation).getByRole('button', { name: /^任务/ }));
+    expect(await screen.findByRole('heading', { name: '修复登录超时' })).toBeTruthy();
+  });
+
+  it('任务列表读取失败不挡住机器人与群聊管理', async () => {
+    const user = userEvent.setup();
+    mockAppApi();
+    mockManagementApis();
+    vi.spyOn(api, 'sessions').mockRejectedValue(new Error('sessions api down'));
+    renderApp();
+    // 任务视图如实报错。
+    await screen.findByRole('heading', { name: '无法加载任务中心' });
+
+    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    await user.click(within(navigation).getByRole('button', { name: /^群聊/ }));
+    // 群聊管理照常可用：两条路互不连坐。
+    expect(await screen.findByRole('heading', { name: '群聊管理' })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: '无法加载任务中心' })).toBeNull();
+  });
+});
+
+/*
+  草稿跨主导航存活。
+
+  机器人页与群聊页是 <main> 按 primaryNav 分派的一级视图，切换即卸载——草稿留在
+  组件 useState 里就会静默丢字段。这条只能在 App 这一层验：单独渲染子组件时它
+  从来不卸载，无论草稿放哪里都会「通过」。
+*/
+describe('编辑草稿跨视图存活', () => {
+  const bot = { appId: 'cli_a', name: '开发助手', setupComplete: true, listening: true, activeListening: true, workspace: '/data/dev', defaultAgentId: 'codex', revision: 2 };
+
+  it('改了 Bot 默认目录后切去任务再切回来，草稿仍在', async () => {
+    const user = userEvent.setup();
+    mockAppApi();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, listeningDisabled: false, bots: [bot as never] });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    renderApp();
+
+    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
+    await screen.findByRole('heading', { name: '机器人管理' });
+
+    // 列表页不自动选中首项（否则窄屏退不回列表），要先点开这个 Bot。
+    await user.click(await screen.findByRole('button', { name: /开发助手/ }));
+    const workspaceInput = await screen.findByDisplayValue('/data/dev');
+    await user.type(workspaceInput, '-draft');
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+
+    // 切去任务：机器人页整体卸载。
+    await user.click(within(navigation).getByRole('button', { name: /^任务/ }));
+    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    expect(screen.queryByRole('heading', { name: '机器人管理' })).toBeNull();
+
+    // 切回来，用户填的字还在。
+    await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
+    await screen.findByRole('heading', { name: '机器人管理' });
+    // appId 留在 URL 里，切回来仍选中同一个 Bot，草稿也还在。
+    expect(await screen.findByDisplayValue('/data/dev-draft')).toBeTruthy();
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+  });
+
+  it('群内 Bot 的草稿在切去机器人页再回来后仍在', async () => {
+    const user = userEvent.setup();
+    mockAppApi();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, listeningDisabled: false, bots: [bot as never] });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [
+      { key: 'k1', chatId: 'oc_chat_1', name: '研发项目群', bots: [{ appId: 'cli_a', membership: 'member', validity: 'valid', applied: true, roles: [] }] }
+    ] });
+    renderApp();
+
+    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    await user.click(within(navigation).getByRole('button', { name: /^群聊/ }));
+    await screen.findByRole('heading', { name: '群聊管理' });
+
+    // 群列表同样不自动选首项，先点开这个群。
+    await user.click(await screen.findByRole('button', { name: /研发项目群/ }));
+    // 把模型改成「清空」——这是与「继承」语义不同的一档，必须被记住。
+    const clearModel = await screen.findByRole('radio', { name: /使用 Agent 默认/ });
+    await user.click(clearModel);
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+
+    await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
+    await screen.findByRole('heading', { name: '机器人管理' });
+
+    await user.click(within(navigation).getByRole('button', { name: /^群聊/ }));
+    await screen.findByRole('heading', { name: '群聊管理' });
+    expect((await screen.findByRole('radio', { name: /使用 Agent 默认/ }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
   });
 });

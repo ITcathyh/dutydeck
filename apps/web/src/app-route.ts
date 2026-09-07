@@ -27,6 +27,8 @@ import type { ControlCenterSection } from './components/ControlCenterModal';
  * 则用 replaceState 抹掉 query，因为此时 back() 会离开站点。
  */
 
+export type PrimaryNav = 'tasks' | 'bots' | 'groups';
+
 export type AppRoute = { kind: 'overview' } | { kind: 'session'; sessionId: string } | { kind: 'not-found' };
 
 export type OverlayRoute =
@@ -35,7 +37,13 @@ export type OverlayRoute =
   | { kind: 'groups' }
   | { kind: 'automation' };
 
-export type AppLocation = { route: AppRoute; overlay?: OverlayRoute };
+export type AppLocation = {
+  route: AppRoute;
+  nav?: PrimaryNav;
+  appId?: string;
+  chatId?: string;
+  overlay?: OverlayRoute;
+};
 
 /** history.state 上的标记：这条 entry 是浮层 push 出来的，关闭时可以安全 back()。 */
 export const OVERLAY_HISTORY_MARK = 'dockmuxOverlay';
@@ -76,7 +84,18 @@ export const parseAppLocation = (pathname: string, search: string): AppLocation 
   // 页面本身不存在时不解析浮层：在 not-found 上叠一个设置弹层，用户关掉后
   // 落到的还是死页面，那比不开更让人困惑。
   if (route.kind === 'not-found') return { route };
-  return { route, overlay: overlayFromSearch(search) };
+  const params = new URLSearchParams(search);
+  const navParam = params.get('nav');
+  const nav: PrimaryNav | undefined = (navParam === 'bots' || navParam === 'groups' || navParam === 'tasks') ? navParam : undefined;
+  const appId = params.get('appId') || undefined;
+  const chatId = params.get('chatId') || undefined;
+  return {
+    route,
+    ...(nav ? { nav } : {}),
+    ...(appId ? { appId } : {}),
+    ...(chatId ? { chatId } : {}),
+    overlay: overlayFromSearch(search)
+  };
 };
 
 const routePath = (route: AppRoute): string =>
@@ -85,10 +104,22 @@ const routePath = (route: AppRoute): string =>
 export const sessionPath = (id?: string) => id ? `/sessions/${encodeURIComponent(id)}` : '/';
 
 /** 反向序列化。route 为 not-found 时无法还原原始路径，调用方不应对它做导航。 */
-export const appLocationPath = ({ route, overlay }: AppLocation): string => {
+export const appLocationPath = ({ route, nav, appId, chatId, overlay }: AppLocation): string => {
   const base = routePath(route);
-  if (!overlay) return base;
-  const params = new URLSearchParams({ panel: overlay.kind });
-  if (overlay.kind === 'settings') params.set('section', overlay.section);
-  return `${base}?${params.toString()}`;
+  const params = new URLSearchParams();
+  if (nav && nav !== 'tasks') {
+    params.set('nav', nav);
+    if (appId) params.set('appId', appId);
+    if (chatId) params.set('chatId', chatId);
+  } else if (nav === 'tasks' && (appId || chatId)) {
+    params.set('nav', 'tasks');
+    if (appId) params.set('appId', appId);
+    if (chatId) params.set('chatId', chatId);
+  }
+  if (overlay) {
+    params.set('panel', overlay.kind);
+    if (overlay.kind === 'settings') params.set('section', overlay.section);
+  }
+  const query = params.toString();
+  return query ? `${base}?${query}` : base;
 };
