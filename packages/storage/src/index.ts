@@ -153,7 +153,12 @@ export function createRepositories(filename: string): RepositoryBundle {
     },
     config: {
       async get(key) { return db.select().from(configs).where(eq(configs.key, key)).get()?.value; },
-      async set(key, value) { db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); }
+      async set(key, value) { db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
+      async compareAndSet(key, expected, value) {
+        return expected === undefined
+          ? sqlite.prepare('INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, value).changes === 1
+          : sqlite.prepare('UPDATE configs SET value = ? WHERE key = ? AND value = ?').run(value, key, expected).changes === 1;
+      }
     },
     channelMappings: {
       async get(channel, externalId) { return db.select().from(channelMappings).where(and(eq(channelMappings.channel, channel), eq(channelMappings.externalId, externalId))).get(); },

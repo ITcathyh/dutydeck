@@ -140,7 +140,7 @@ export function buildAcpxSessionOptions(agent: AgentConfig) {
   };
 }
 
-export interface AcpxAdapterOptions { sessionKey?: string; onEvent(event: NormalizedDriverEvent): void; onExit?(code: number | null, signal: NodeJS.Signals | null): void }
+export interface AcpxAdapterOptions { resolveRiskPolicy?: (fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>; sessionKey?: string; onEvent(event: NormalizedDriverEvent): void; onExit?(code: number | null, signal: NodeJS.Signals | null): void }
 type SessionAgentConfig = AgentConfig & { reasoningEffort?: string };
 
 export class AgentIdleTimeoutError extends Error {
@@ -178,9 +178,14 @@ export class AcpxAdapter implements AgentDriver {
       onPermissionRequest: async request => {
         const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
         const candidate = flattenRiskText({ title: raw.toolCall?.title, input: raw.toolCall?.rawInput ?? raw.toolCall?.input ?? raw }).join('\n');
-        if (this.riskPolicy?.enabled && !this.riskPolicy.authorized) {
+        let riskPolicy = this.riskPolicy;
+        if (this.options.resolveRiskPolicy) {
+          try { riskPolicy = await this.options.resolveRiskPolicy(riskPolicy); }
+          catch { return { outcome: 'reject_once' }; }
+        }
+        if (riskPolicy?.enabled && !riskPolicy.authorized) {
           try {
-            if (await testRegexWithTimeout(this.riskPolicy.pattern, candidate)) {
+            if (await testRegexWithTimeout(riskPolicy.pattern, candidate)) {
               this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dockmux 拦截：${raw.toolCall?.title ?? 'tool'}`, options: [], status: 'rejected' } });
               return { outcome: 'reject_once' };
             }

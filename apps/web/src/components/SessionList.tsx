@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
-import { CalendarClock, ChevronRight, FolderKanban, MessagesSquare, Plus, Settings2, ShieldCheck, Users } from 'lucide-react';
+import { CalendarClock, ChevronRight, FolderKanban, ListTodo, MessagesSquare, Plus, Settings2, ShieldCheck, Users } from 'lucide-react';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
+import type { PrimaryNav } from '../app-route';
 import { useMediaQuery } from '../useMediaQuery';
 import { groupSessionsByWorkspace, type WorkbenchView, type WorkspaceGroup } from '../workspace-model';
 import { formatLarkNavSummary } from '../lark-status';
@@ -34,6 +35,13 @@ export type SessionListProps = {
   onOpenGroups(): void;
   /** 定时任务草稿与预览（?panel=automation）。 */
   onOpenSchedules(): void;
+  /**
+   * 主区一级视图。任务 / 机器人 / 群聊三选一，任何时刻只有一个为真；
+   * 它决定 <main> 里渲染的是任务中心、Bot 管理还是群聊管理。
+   */
+  primaryNav?: PrimaryNav;
+  /** 切换主区一级视图。不传时不渲染这一组导航（供仅列任务的用法复用）。 */
+  onPrimaryNavChange?(nav: PrimaryNav): void;
   authRequired?: boolean;
 };
 
@@ -67,7 +75,7 @@ export type SessionListProps = {
  * 里没有 sidebar accent 这一档 variant，改用原语会让这几处颜色绕过 sidebar 语义层，
  * 将来 Team-Palette 想把侧栏重新分离出去就会漏改。语义类留着，成本为零。
  */
-export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, authRequired }: SessionListProps) {
+export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, primaryNav = 'tasks', onPrimaryNavChange, authRequired }: SessionListProps) {
   const workspaces = useMemo(() => groupSessionsByWorkspace(sessions, view, summaries), [sessions, summaries, view]);
   const matchesDesktop = useMediaQuery('(min-width: 768px)');
   /**
@@ -125,6 +133,21 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
    * · 已归档 —— 它是总览页的状态筛选（数字键 5），放进侧栏就是在侧栏里重建了一份
    *   状态筛选，正是上面那条正交约束禁止的事。
    */
+  /*
+    主区一级导航。切的是 <main> 里渲染什么（任务中心 / Bot 管理 / 群聊管理），
+    切完侧栏仍在，所以三项都带 active，用户看得见自己在哪。
+
+    机器人和群聊是一级目的地而不是设置页分区：日常操作要的是「选中对象后直接改」，
+    「设置中心 → 分区 → 弹窗 → 再选对象」正是本轮要消灭的层级。
+
+    hint 的口径与下面「飞书接入」同源（formatLarkNavSummary），不另造措辞。
+  */
+  const primaryNavGroups: SidebarNavGroup[] = onPrimaryNavChange ? [{ id: 'workspace', title: '工作台', items: [
+    { id: 'nav-tasks', label: '任务', hint: `${sessions.length} 个任务 · 创建与跟进`, Icon: ListTodo, active: primaryNav === 'tasks', onClick: () => { onPrimaryNavChange('tasks'); onClose(); } },
+    { id: 'nav-bots', label: '机器人', hint: formatLarkNavSummary({ bots: larkBots, listeningDisabled: larkListeningDisabled, loading: larkBotsLoading, failed: larkBotsFailed }), Icon: MessagesSquare, active: primaryNav === 'bots', onClick: () => { onPrimaryNavChange('bots'); onClose(); } },
+    { id: 'nav-groups', label: '群聊', hint: '群内每个 Bot 的目录与触发', Icon: Users, active: primaryNav === 'groups', onClick: () => { onPrimaryNavChange('groups'); onClose(); } }
+  ] }] : [];
+
   const navGroups: SidebarNavGroup[] = [
     { id: 'access', title: '接入', items: [
       // 唯一一项本来就有常驻入口的，因为它原本就在这个位置，移走等于制造回归；
@@ -189,9 +212,23 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
       <button type="button" disabled={createTask.disabled} onClick={createTask.onClick} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-md border border-sidebar-border px-3 text-body font-medium text-sidebar-text transition-colors duration-fast ease-out hover:bg-sidebar-hover hover:text-sidebar-text-strong active:translate-y-px disabled:opacity-60"><Plus size={16}/>{createTask.label}</button>
     </div>
 
+    {/*
+      主区一级导航，在任务列表**之上**。
+
+      它与底部那两组导航本质不同：底部打开的是浮层，这三项换的是 <main> 里渲染
+      什么，切完侧栏还在，所以带 aria-current（SidebarNav 的 active）。
+
+      放在顶部而不是底部，是因为「今天要处理哪个对象」是进站第一个决定：任务、
+      某个 Bot、某个群。放到底部会让机器人和群聊看起来像设置的附属项，那正是
+      本轮要消灭的「设置中心 → 分区 → 弹窗 → 再选对象」层级。
+
+      onPrimaryNavChange 不传时整组不渲染：仅列任务的调用点不该长出三颗点不动的按钮。
+    */}
+    {onPrimaryNavChange && <div className="mt-1 shrink-0"><SidebarNav groups={primaryNavGroups}/></div>}
+
     {/* 任务列表是唯一 flex-1 的区块：卡片高度固定（top/bottom 都钉死），多出来的
         任务在这里滚，导航区和状态行不参与滚动，始终可见。 */}
-    <div className="mt-3 flex min-h-0 flex-1 flex-col"><div className="flex items-center px-4 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>工作区<span className="ml-auto font-mono text-meta">{workspaces.length}</span></div><div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">{sessionsLoading
+    <div className={`mt-3 min-h-0 flex-1 flex-col ${primaryNav === 'tasks' ? 'flex' : 'hidden'}`}><div className="flex items-center px-4 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>工作区<span className="ml-auto font-mono text-meta">{workspaces.length}</span></div><div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">{sessionsLoading
       /* Skeleton 的条子写死 bg-muted，与 sidebar-hover 现在同源但不同名；这里用
          arbitrary variant 覆盖条子底色，让它跟着 sidebar 语义层走而不是内容表面层。 */
       ? <Skeleton variant="block" lines={2} className="px-1 [&>div]:bg-sidebar-hover"/>
@@ -226,7 +263,9 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
          色盘再次分离时漏改。框高约 66px（py-6 + 一行 18px），按 §3 取 rounded-lg。 */
       : <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-center text-caption text-sidebar-text-muted">当前视图没有任务。</div>}</div></div>
 
-    <div className="shrink-0 border-t border-sidebar-border pt-1"><SidebarNav groups={navGroups}/></div>
+    <div className={`${primaryNav === 'tasks' ? '' : 'mt-auto'} shrink-0 border-t border-sidebar-border pt-1`}>{onPrimaryNavChange
+      ? <details className="px-2.5"><summary className="cursor-pointer rounded-md px-2 py-3 text-caption text-sidebar-text">设置与工具</summary><SidebarNav groups={navGroups}/></details>
+      : <SidebarNav groups={navGroups}/>}</div>
 
     {/* 运行环境状态。它是事实陈述不是入口，所以在导航区之外、不做成按钮。 */}
     <div className="shrink-0 border-t border-sidebar-border px-4 py-2 text-meta text-sidebar-text-faint">{authRequired === false ? <span className="flex items-center gap-1.5 text-sidebar-accent"><ShieldCheck size={12}/>受信开发机模式 · 无需 token</span> : '本机运行 · ACPX 0.13'}</div>

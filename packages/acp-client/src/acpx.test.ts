@@ -90,6 +90,32 @@ describe('acpx ACP boundary', () => {
     await adapter.stop();
   });
 
+  it('rechecks current group policy for real ACP requests with a persisted session key', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-live-risk-')); dirs.push(cwd);
+    const events: any[] = [];
+    let authorized = true;
+    let unavailable = false;
+    const adapter = new AcpxAdapter({ ...agentConfig(), cwd, command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], permissionMode: 'full-trust', env: { dockmux_group_tools_token: 'synthetic-token' } }, {
+      sessionKey: 'live-policy-session', onEvent: event => events.push(event),
+      resolveRiskPolicy: async () => { if (unavailable) throw new Error('Policy unavailable'); return { enabled: true, authorized, pattern: 'Edit' }; }
+    });
+    try {
+      await adapter.start();
+      await adapter.send('request permission');
+      expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"allow"'))).toBe(true);
+      events.length = 0; authorized = false;
+      await adapter.send('request permission');
+      expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"deny"'))).toBe(true);
+      expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ status: 'rejected' }) }));
+      events.length = 0; authorized = true; unavailable = true;
+      await adapter.send('request permission');
+      expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"deny"'))).toBe(true);
+    } finally { await adapter.stop(); }
+    const persisted = await createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') }).load('live-policy-session');
+    expect(persisted?.acpx?.session_options?.env?.dockmux_group_tools_token).toBe('synthetic-token');
+    expect(JSON.stringify(persisted)).not.toContain('resolveRiskPolicy');
+  });
+
   it('hard-stops an active turn even while permission is pending', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dockmux-hard-stop-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];

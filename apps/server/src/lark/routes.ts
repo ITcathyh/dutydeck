@@ -1,3 +1,4 @@
+import { registerLarkGroupManagementRoutes, type LarkGroupManager } from './group-management.js';
 import type { FastifyInstance } from 'fastify';
 import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dockmux/shared';
 import type { DockmuxRuntime } from '@dockmux/runtime';
@@ -19,6 +20,7 @@ type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?
 type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 export interface LarkRoutesOptions {
+  groupManager?: LarkGroupManager;
   env?: NodeJS.ProcessEnv;
   service?: LarkCardService;
   config?: ConfigRepository;
@@ -49,6 +51,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     env,
     fetcher,
     executionPolicy: options.executionPolicy,
+    groupManager: options.groupManager,
     peerBotAuthorized: (appId, chatId, senderOpenId) => options.agentTools?.isConfiguredPeer(appId, chatId, senderOpenId) ?? Promise.resolve(false)
   });
   const syncListeners = async (configs: Awaited<ReturnType<typeof readLarkConfigs>>) => {
@@ -79,6 +82,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   if (!listeningDisabled) await syncListeners(initialConfigs);
   app.addHook('onClose', async () => listener.stop());
   await registerLarkAgentToolRoutes(app, options.agentTools);
+  await registerLarkGroupManagementRoutes(app, options.groupManager);
 
   app.get('/api/lark/status', async () => ({
     ...larkConfigurationStatus(env, await storedBot()),
@@ -154,6 +158,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         riskControlMode: 'guidance'
       });
       if (!listeningDisabled) await syncListeners(saved);
+      if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       return hook;
     } catch (error) {
       if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
@@ -244,10 +249,11 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       }
       const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);
       if (!listeningDisabled) await syncListeners(saved);
+      if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       if (!options.service) service = undefined;
       return publicLarkConfigs(saved, { activeAppIds: listener.activeAppIds, listeningDisabled });
     } catch (error) {
-      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message }, ...(error.statusCode === 409 ? { current: (await publicLarkConfigs(await readLarkConfigs(options.config))).bots.find(bot => bot.appId === request.body.originalAppId) } : {}) });
       throw error;
     }
   });
@@ -255,6 +261,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     try {
       const saved = await deleteLarkConfig(options.config, request.params.appId);
       if (!listeningDisabled) await syncListeners(saved);
+      if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       if (!options.service) service = undefined;
       return publicLarkConfigs(saved, { activeAppIds: listener.activeAppIds, listeningDisabled });
     } catch (error) {

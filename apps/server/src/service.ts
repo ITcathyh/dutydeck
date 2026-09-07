@@ -1,7 +1,9 @@
+import { LarkGroupManager } from './lark/group-management.js';
+import { readLarkConfigs } from './lark/config.js';
 import { DockmuxRuntime } from '@dockmux/runtime';
 import { loadConfig, type AppConfig } from '@dockmux/config';
 import { createRepositories } from '@dockmux/storage';
-import type { DriverFactory, PolicyAction } from '@dockmux/shared';
+import { type DriverFactory, type PolicyAction } from '@dockmux/shared';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
@@ -148,10 +150,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       action,
     }),
   };
+  const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
     env,
     groupToolsCommand: options.groupToolsCommand,
     executionPolicy: legacyExecutionPolicy,
+    groupManager,
   });
   // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dockmux 的 PtyCliDriver。
   // agent.id 即 adapter id（contributions 的 id 与 adapterId 一致）；自定义 pty-cli agent
@@ -176,6 +180,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return driver;
   };
   const runtime = new DockmuxRuntime(repos, {
+    authorizeExecution: (sessionId, actorId) => groupManager.beginTurn(sessionId, actorId),
+    resolveRiskPolicy: (sessionId, fallback) => groupManager.riskPolicy(sessionId, fallback),
     acpxCommand: config.acpxCommand,
     ptyDriverFactory,
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
@@ -222,6 +228,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
     app = await buildApp(runtime, {
       webRoot,
+      system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
         env,
         config: repos.config,
@@ -230,6 +237,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         runtime,
         agentTools,
         executionPolicy: legacyExecutionPolicy,
+    groupManager,
         listeningDisabled: env.DOCKMUX_DISABLE_LARK_LISTENER === 'true',
       },
       auth: {
@@ -240,18 +248,18 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       terminal: {
         provider: terminalProvider,
         auth: { mode, allowUnauthenticated: mode === 'local', check: presented => !!presented && tokensEqual(presented, activeToken) },
-        authorize: (request, sessionId, action) => foundationExecution.authorizeSessionId(sessionId, {
+        authorize: async (request, sessionId, action) => await groupManager.authorizeSession(sessionId, action, true) ?? foundationExecution.authorizeSessionId(sessionId, {
           boundary: 'terminal',
           action,
           request,
         }),
       },
       relay: { runtime, capabilities: relayCapabilities, broker: relayBroker },
-      foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef },
+      foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef, isLiveManagedBot: id => groupManager.isLiveManagedBot(id) },
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
       schedule: { repositories: repos, authorize: foundationManagementAuthorizer },
       executionPolicy: {
-        authorize: (request, sessionId, boundary, action) => foundationExecution.authorizeSessionId(sessionId, {
+        authorize: async (request, sessionId, boundary, action) => await groupManager.authorizeSession(sessionId, action, true) ?? foundationExecution.authorizeSessionId(sessionId, {
           boundary,
           action,
           request,

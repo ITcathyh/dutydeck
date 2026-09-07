@@ -29,6 +29,7 @@ export type FoundationManagementRepositories = Pick<RepositoryBundle,
   'secretRefs' | 'channelBots' | 'channelBotPolicies' | 'groupBindings' | 'remoteChatFacts' | 'roleAssignments' | 'groupPolicy'>;
 
 export interface FoundationManagementOptions {
+  isLiveManagedBot?: (channelBotId: string) => Promise<boolean>;
   repositories?: FoundationManagementRepositories;
   authorize?: (request: FastifyRequest, action: PolicyAction) => boolean | PolicyDecision | Promise<boolean | PolicyDecision>;
   /** Metadata-only inspection. This surface must never receive a value resolver. */
@@ -130,7 +131,21 @@ export async function registerFoundationManagementRoutes(app: FastifyInstance, o
     repositories();
     if (!options.authorize) throw new RuntimeError('FOUNDATION_PERMISSION_EVALUATOR_UNWIRED', 'Foundation management permission evaluator is not wired', 403);
     const decision = await options.authorize(request, action);
-    if (decision === true || (typeof decision === 'object' && decision.allowed)) return;
+    if (decision === true || (typeof decision === 'object' && decision.allowed)) {
+      if (options.isLiveManagedBot) {
+        const body = request.body as { channelBotId?: string } | undefined;
+        const id = (request.params as { id?: string }).id;
+        let botId = body?.channelBotId;
+        const route = request.routeOptions.url ?? '';
+        if (id && route.includes('/channel-bots/')) botId = id;
+        if (id && route.includes('/channel-bot-policies/')) botId = (await repositories().channelBotPolicies.get(id))?.channelBotId;
+        if (id && route.includes('/group-bindings/')) botId = (await repositories().groupBindings.get(id))?.channelBotId;
+        if (id && route.includes('/role-assignments/')) botId = (await repositories().roleAssignments.get(id))?.channelBotId;
+        if (id && route.includes('/remote-chat-facts/')) botId = (await repositories().remoteChatFacts.get(id))?.channelBotId;
+        if (botId && await options.isLiveManagedBot(botId)) throw new RuntimeError('LARK_LIVE_MANAGEMENT_REQUIRED', '此 Bot 已接入群配置，请在机器人或群聊页面修改，以同步校验并应用到运行时。', 409);
+      }
+      return;
+    }
     const code = typeof decision === 'object' ? decision.code : 'FOUNDATION_PERMISSION_DENIED';
     const reason = typeof decision === 'object' ? decision.reason : 'Owner/admin permission is required';
     throw new RuntimeError(code, reason, 403);

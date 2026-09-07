@@ -1,3 +1,4 @@
+import type { LarkGroupManager } from './group-management.js';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dockmux/shared';
@@ -132,6 +133,7 @@ export interface LarkGroupToolClient {
 }
 
 export interface LarkAgentToolsOptions {
+  groupManager?: LarkGroupManager;
   env?: NodeJS.ProcessEnv;
   fetcher?: typeof globalThis.fetch;
   clientFactory?: (config: StoredLarkConfig) => LarkGroupToolClient;
@@ -289,8 +291,14 @@ export class LarkAgentToolsService {
         integrationMode: this.options.executionPolicy.integrationMode,
       });
     }
-    const config = await readLarkConfig(this.configs, binding.appId);
+    let config = await readLarkConfig(this.configs, binding.appId);
     if (!config) throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
+    if (this.options.groupManager) {
+      const decision = await this.options.groupManager.authorizeSession(binding.sessionId, action)
+        ?? await this.options.groupManager.authorize(binding.appId, binding.chatId, undefined, action, binding.sessionId);
+      if (decision && !decision.allowed) throw new AgentGroupToolError(decision.code, decision.reason, 403);
+      config = await this.options.groupManager.resolved(config, binding.chatId);
+    }
     if (!config.groupToolsEnabled) throw new AgentGroupToolError('GROUP_TOOLS_DISABLED', '当前飞书机器人的 Agent 群协作工具已被管理员关闭。', 403);
     return { ...binding, config, client: this.clientFor(config) };
   }
@@ -403,7 +411,7 @@ export class LarkAgentToolsService {
   async promptForSession(session: Session, prompt: string) {
     const binding = larkAgentSessionBinding(session);
     if (!binding) return prompt;
-    const config = await readLarkConfig(this.configs, binding.appId);
+    let config = await readLarkConfig(this.configs, binding.appId);
     if (!config?.groupToolsEnabled) return prompt;
     return `${larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand)}\n\n${prompt}`;
   }

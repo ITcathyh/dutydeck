@@ -286,7 +286,10 @@ export interface SessionRepository {
   get(id: string): Promise<Session | undefined>;
   save(session: Session): Promise<void>;
 }
+export const installationOwnerTaskActor = 'installation_owner';
 export interface TaskExecutionContext {
+  /** Trusted channel actor captured at enqueue time; activated only when this task runs. */
+  actorId?: string;
   /** 实际发送给 Agent 的 prompt；可能包含来源通道补充的上下文。 */
   agentPrompt: string;
   riskPolicy?: ToolRiskPolicy;
@@ -306,7 +309,11 @@ export interface EventRepository {
   /** 有硬上限的游标窗口；无论查询方向如何，结果均按 sequence 升序。 */
   listWindow(sessionId: string, options?: EventWindowOptions): Promise<AgentEvent[]>;
 }
-export interface ConfigRepository { get(key: string): Promise<string | undefined>; set(key: string, value: string): Promise<void> }
+export interface ConfigRepository {
+  get(key: string): Promise<string | undefined>;
+  set(key: string, value: string): Promise<void>;
+  compareAndSet?(key: string, expected: string | undefined, value: string): Promise<boolean>;
+}
 export interface ChannelMapping { id: string; channel: string; externalId: string; sessionId: string; extra?: string | null; createdAt: string }
 export interface ChannelMappingRepository {
   get(channel: string, externalId: string): Promise<ChannelMapping | undefined>;

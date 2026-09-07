@@ -1,7 +1,8 @@
+import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
-import { permissionModes, RuntimeError, toPublicAgent, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dockmux/shared';
+import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dockmux/shared';
 import type { DockmuxRuntime } from '@dockmux/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
@@ -71,6 +72,7 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
     if (!options.executionPolicy) return;
     const decision = await options.executionPolicy.authorize(request, sessionId, boundary, action);
     if (!decision.allowed) throw new RuntimeError(decision.code, decision.reason, 403);
+    return decision;
   };
   const canViewSession = async (request: FastifyRequest, sessionId: string) => {
     if (!options.executionPolicy) return true;
@@ -79,7 +81,7 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
   app.addHook('preClose', async () => { for (const stream of streams) stream.end(); streams.clear(); });
 
   app.setErrorHandler((error, _request, reply) => {
-    if (error instanceof RuntimeError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+    if (error instanceof RuntimeError || error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
 
@@ -152,8 +154,10 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
     const mode = request.body?.mode ?? 'queue';
     if (!prompt) throw new RuntimeError('INVALID_PROMPT', 'Prompt must not be empty', 400);
     if (mode !== 'queue' && mode !== 'interrupt') throw new RuntimeError('INVALID_SEND_MODE', `Unknown send mode: ${String(mode)}`, 400);
-    await requireSessionExecution(request, request.params.id, 'session', 'turn.append');
-    const task = await runtime.dispatch(request.params.id, prompt, mode);
+    const decision = await requireSessionExecution(request, request.params.id, 'session', 'turn.append');
+    const task = decision?.source === 'owner'
+      ? await runtime.dispatch(request.params.id, prompt, mode, prompt, undefined, installationOwnerTaskActor)
+      : await runtime.dispatch(request.params.id, prompt, mode);
     return reply.code(202).send({ accepted: true, task });
   });
   app.patch<{ Params: { id: string }; Body: { model?: string; reasoningEffort?: string } }>('/api/sessions/:id/config', async request => {
