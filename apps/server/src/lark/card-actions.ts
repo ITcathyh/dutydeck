@@ -168,8 +168,12 @@ const normalizedTurn = (value: number): number => {
   return Math.floor(value);
 };
 
-/** 只接受 http/https 深链，防止把 javascript: 之类的 URL 渲染成可点按钮。 */
-const normalizedWebUrl = (value: string | undefined): string | undefined => {
+/**
+ * 只接受 http/https 深链，防止把 javascript: 之类的 URL 渲染成可点目标。
+ * 页脚的「查看详情」markdown 链接是整卡唯一的 Web 出口，service.ts 复用同一份校验，
+ * 不允许两边各写一套判断。
+ */
+export const safeLarkWebUrl = (value: string | undefined): string | undefined => {
   const resolved = value?.trim();
   if (!resolved || resolved.length > maxWebUrlLength) return undefined;
   try {
@@ -233,23 +237,15 @@ const callbackButton = (definition: LarkCardActionDefinition, taskId: string, tu
   element_id: definition.elementId
 });
 
-/** 查看详情是真实的 open_url 链接按钮而不是回调：它不需要 daemon 参与，也不会因任务过期而失效。 */
-const detailButton = (webUrl: string): LarkCardElement => ({
-  tag: 'button',
-  text: { tag: 'plain_text', content: '查看详情' },
-  type: 'default',
-  size: 'small',
-  behaviors: [{ type: 'open_url', default_url: webUrl }],
-  margin: '0px',
-  element_id: 'view_detail'
-});
-
 /**
  * 渲染侧入口：返回当前状态下应该出现的按钮，没有可用操作时返回空数组。
  *
- * 只读卡片返回空数组是硬规则：终态进度卡是冻结收据，
+ * 只读卡片返回空数组是硬规则：只读卡是已交付的历史凭证，
  * 提供任何按钮都会变成「假操作」——点了要么被拒绝，要么改写已交付的结论。
- * 收据仍可通过卡片页脚的 [查看详情] markdown 链接进入 Web，不会失去出口。
+ * 卡片页脚始终有 [查看详情] markdown 链接，因此收据不会失去 Web 出口。
+ *
+ * 这里刻意**不**渲染「查看详情」按钮：页脚已经有同一个链接，顶部再放一个
+ * 就是同一去向的两个入口。顶部操作行只留真正改变任务状态的动作。
  *
  * 注意：这里返回的是扁平按钮列表，不含 column_set 包装，
  * 由调用方决定放进状态行的哪一列（多按钮时需要放宽既有的 72px 列宽）。
@@ -265,10 +261,7 @@ export function buildLarkCardActions(context: LarkCardActionContext): LarkCardEl
       if (definition) elements.push(callbackButton(definition, taskId, turn));
     }
   }
-  // 链接按钮不依赖 taskId，也不消耗回调链路，只要配置了 Web 深链就值得给。
-  const webUrl = normalizedWebUrl(context.capabilities.webUrl);
-  if (webUrl) elements.push(detailButton(webUrl));
-  // 预算兜底：正常路径最多 3 个按钮，这里的截断是防御性上限。
+  // 预算兜底：正常路径最多 2 个按钮，这里的截断是防御性上限。
   return elements.slice(0, larkCardActionBudget.maxButtons);
 }
 

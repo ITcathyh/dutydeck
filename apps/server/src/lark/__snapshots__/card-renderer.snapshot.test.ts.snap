@@ -42,19 +42,6 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
         "text_size": "normal_v2",
       },
       {
-        "element_id": "next_step_hint",
-        "margin": "6px 0px 2px 0px",
-        "tag": "div",
-        "text": {
-          "content": "下一步：在当前对话继续给 Agent 指令，可补充目标或要求调整。",
-          "lines": 2,
-          "tag": "plain_text",
-          "text_color": "grey",
-          "text_size": "notation",
-        },
-        "width": "auto",
-      },
-      {
         "element_id": "evidence_summary",
         "icon": {
           "color": "grey",
@@ -77,7 +64,7 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
           {
             "elements": [
               {
-                "content": "<font color='grey'>Dockmux · 任务 #task-completed</font>",
+                "content": "<font color='grey'>Dockmux</font>",
                 "margin": "0px",
                 "tag": "markdown",
                 "text_size": "x-small",
@@ -368,7 +355,7 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
           {
             "elements": [
               {
-                "content": "<font color='grey'>Dockmux · 任务 #task-running</font>",
+                "content": "<font color='grey'>Dockmux</font>",
                 "margin": "0px",
                 "tag": "markdown",
                 "text_size": "x-small",
@@ -560,7 +547,7 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
           {
             "elements": [
               {
-                "content": "<font color='grey'>Dockmux · 任务 #task-approval</font>",
+                "content": "<font color='grey'>Dockmux</font>",
                 "margin": "0px",
                 "tag": "markdown",
                 "text_size": "x-small",

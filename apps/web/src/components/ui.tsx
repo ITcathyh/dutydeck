@@ -78,26 +78,6 @@ export function sidebarStatusVisual(session: Session): { label: string; textClas
 }
 
 /**
- * 状态徽标的配色。总览页与命令面板曾各存一份逐行相同的副本。
- *
- * 第一行的 archivedAt 优先与 effectiveStatus 是同一条规则的第三处落地。这里刻意
- * 不改成消费 effectiveStatus：它返回的是拼好的 className 字符串而不是语义字段，
- * 强行统一签名只会让两边都变复杂。代价是这一行 archivedAt 判断仍是副本——
- * 改归档态的语义时，effectiveStatus 与这一行要一起看。
- * 两个调用点（WorkspaceOverview、CommandPalette）原先各自又算了一遍归档文案，
- * 同一个 <span> 里 archivedAt 被判两遍；现已改成 effectiveStatus(session).label，
- * 配色由这里给、文案由 effectiveStatus 给。新增徽标入口照此拆分，不要在调用点
- * 旁边再写 `session.archivedAt ?`。
- */
-export function stateBadgeStyle(session: Session): string {
-  if (session.archivedAt) return 'border-subtle bg-muted text-subtle';
-  if (session.state === 'failed' || session.state === 'stopped') return 'border-danger-border bg-danger-soft text-danger';
-  if (session.state === 'waiting_for_permission' || session.state === 'interrupted' || session.state === 'created' || session.state === 'idle') return 'border-warning-border bg-warning-soft text-warning';
-  if (session.state === 'completed') return 'border-success-border bg-success-soft text-success';
-  return 'border-info-border bg-info-soft text-info';
-}
-
-/**
  * 「创建任务」按钮的文案与去向。
  *
  * 「有没有可用 Agent」曾在四个入口各写一遍三元表达式，其中两个没有考虑
@@ -118,8 +98,4 @@ export function createTaskAffordance({ agents, agentsLoading = false, onCreate, 
 
 export function DockmuxIcon({ className = '' }: { className?: string }) {
   return <img src="/dockmux.svg" alt="" aria-hidden="true" className={className}/>;
-}
-
-export function IconButton({ label, disabled, onClick, children }: { label: string; disabled?: boolean; onClick(): void; children: React.ReactNode }) {
-  return <button type="button" title={label} aria-label={label} disabled={disabled} onClick={onClick} className="grid h-8 w-8 place-items-center rounded-md text-subtle transition-[color,background-color,transform] duration-normal hover:bg-muted hover:text-primary active:scale-[.96] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring disabled:pointer-events-none disabled:opacity-30">{children}</button>;
 }

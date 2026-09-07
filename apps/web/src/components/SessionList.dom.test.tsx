@@ -1,7 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { Session } from '../api';
+import type { RunSummary, Session } from '../api';
 import { workbenchViewLabels, workbenchViewOrder } from '../workspace-model';
 import { SessionList, type SessionListProps } from './SessionList';
 
@@ -80,6 +80,73 @@ describe('SessionList mobile accessibility', () => {
 });
 
 /**
+ * 工作区分组的折叠。
+ *
+ * 起因：18 条任务全部平铺时，侧栏 248px 宽塞进 822 个字符，讲的全是主区已经讲过
+ * 且更完整的事（桌面端两者同屏）。折叠让默认只剩「目录名 + 条数」。
+ *
+ * 但折叠本身也能变成负担，所以默认规则有两条边界，两条都在下面各有一条用例：
+ * 单任务的组折叠起来一行也不省、只多一次点击；当前打开任务藏进折叠区等于没有选中态。
+ */
+describe('SessionList 工作区折叠', () => {
+  const makeSession = (id: string, workspace: string): Session => ({ id, agentId: 'codex', state: 'idle', cwd: `/repo/${workspace}`, runId: `run-${id}`, createdAt: '', updatedAt: '' });
+  const twoInAlpha = [makeSession('a1', 'alpha'), makeSession('a2', 'alpha'), makeSession('b1', 'beta')];
+  // summaries 走真实类型而不是 `as never`：后者会让下面的 rerender 里那个 spread
+  // 失去对象类型，`tsc -b` 报 TS2698。vitest 不做类型检查，只有 build 会拦。
+  const summary = (id: string, prompt: string): RunSummary => ({ sessionId: id, taskId: `task-${id}`, prompt, status: 'idle', queuedCount: 0, updatedAt: '' });
+  const summaries: Record<string, RunSummary> = { a1: summary('a1', '任务 A1'), a2: summary('a2', '任务 A2'), b1: summary('b1', '任务 B1') };
+
+  it('多任务的组默认折叠，任务行不进 DOM；组头给出条数', () => {
+    render(<SessionList {...baseProps} open sessions={twoInAlpha} summaries={summaries}/>);
+    const header = screen.getByRole('button', { name: /^alpha/ });
+    expect(header.getAttribute('aria-expanded')).toBe('false');
+    // 断言「不在 DOM」而不是「不可见」：折叠是条件渲染，若改成 CSS 隐藏，读屏和
+    // Tab 顺序里仍然躺着 18 条任务，降噪只对眼睛生效。
+    expect(screen.queryByRole('button', { name: /任务 A1/ })).toBeNull();
+    expect(header.textContent).toContain('2');
+  });
+
+  it('只有一条任务的组默认展开：折叠它一行也不省，只多一次点击', () => {
+    render(<SessionList {...baseProps} open sessions={twoInAlpha} summaries={summaries}/>);
+    expect(screen.getByRole('button', { name: /^beta/ }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('button', { name: /任务 B1/ })).toBeTruthy();
+  });
+
+  it('当前打开任务所在的组默认展开，否则选中态藏进折叠区等于没有选中态', () => {
+    render(<SessionList {...baseProps} open sessions={twoInAlpha} summaries={summaries} activeSessionId="a2"/>);
+    expect(screen.getByRole('button', { name: /^alpha/ }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('button', { name: /任务 A2/ }).getAttribute('aria-current')).toBe('true');
+  });
+
+  it('点组头展开与收起，且用户的选择压过默认规则', async () => {
+    const user = userEvent.setup();
+    render(<SessionList {...baseProps} open sessions={twoInAlpha} summaries={summaries}/>);
+    await user.click(screen.getByRole('button', { name: /^alpha/ }));
+    expect(screen.getByRole('button', { name: /任务 A1/ })).toBeTruthy();
+    // 单任务组默认展开，但用户手动收起后必须保持收起，不被默认规则夺回。
+    await user.click(screen.getByRole('button', { name: /^beta/ }));
+    expect(screen.getByRole('button', { name: /^beta/ }).getAttribute('aria-expanded')).toBe('false');
+    expect(screen.queryByRole('button', { name: /任务 B1/ })).toBeNull();
+  });
+
+  /**
+   * 折叠状态只记「用户改过的那些」，不预填完整表。
+   *
+   * 预填会让 sessions 每次刷新（15 秒一次 refetch）都重算出一张新表，用户展开过的
+   * 组随之收起。这条用例用 rerender 模拟那次刷新：新任务进来了，展开态必须还在。
+   */
+  it('任务列表刷新后不把用户展开的组重新收起', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<SessionList {...baseProps} open sessions={twoInAlpha} summaries={summaries}/>);
+    await user.click(screen.getByRole('button', { name: /^alpha/ }));
+    expect(screen.getByRole('button', { name: /任务 A1/ })).toBeTruthy();
+    rerender(<SessionList {...baseProps} open sessions={[...twoInAlpha, makeSession('a3', 'alpha')]} summaries={{ ...summaries, a3: summary('a3', '任务 A3') }}/>);
+    expect(screen.getByRole('button', { name: /^alpha/ }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('button', { name: /任务 A3/ })).toBeTruthy();
+  });
+});
+
+/**
  * 侧栏底部功能导航。
  *
  * 重做前整个侧栏只有三个可见字符串，一半的目的地（群与权限、定时任务）只能靠
@@ -114,11 +181,27 @@ describe('SessionList 功能导航区', () => {
     expect(screen.getByRole('button', { name: /定时任务.*不会自动执行/ })).toBeTruthy();
   });
 
-  it('飞书入口按已绑定数量如实改口', () => {
+  it('飞书入口按真实状态如实改口，拒绝虚假声明', () => {
     const { rerender } = render(<SessionList {...baseProps} open/>);
-    expect(screen.getByRole('button', { name: /飞书接入.*尚未绑定机器人/ })).toBeTruthy();
-    rerender(<SessionList {...baseProps} open larkBots={[{ appId: 'cli_a', name: '值班机器人' } as never]}/>);
-    expect(screen.getByRole('button', { name: /飞书接入.*1 个机器人已绑定/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /飞书接入.*尚未配置机器人/ })).toBeTruthy();
+    // 只有 appId 但未配置完成（setupComplete: false）
+    rerender(<SessionList {...baseProps} open larkBots={[{ appId: 'cli_a', name: '值班机器人', setupComplete: false } as never]}/>);
+    expect(screen.getByRole('button', { name: /飞书接入.*配置未完成/ })).toBeTruthy();
+    // 完整就绪并启动监听
+    rerender(<SessionList {...baseProps} open larkBots={[{ appId: 'cli_a', name: '值班机器人', setupComplete: true, listening: true, activeListening: true } as never]}/>);
+    expect(screen.getByRole('button', { name: /飞书接入.*1 个机器人 · 监听已启动/ })).toBeTruthy();
+    // 本次禁用监听
+    rerender(<SessionList {...baseProps} open larkListeningDisabled larkBots={[{ appId: 'cli_a', name: '值班机器人', setupComplete: true, listening: true, activeListening: true } as never]}/>);
+    expect(screen.getByRole('button', { name: /飞书接入.*本次启动禁用监听/ })).toBeTruthy();
+  });
+
+  /**
+   * 侧栏与总览页协作卡片同屏（桌面端 ≥768px），所以「读不到」这一态必须两处一致。
+   */
+  it('飞书接入状态未就绪时不谎报「尚未配置」，与总览页说法一致', () => {
+    render(<SessionList {...baseProps} open larkBotsLoading/>);
+    expect(screen.getByRole('button', { name: /飞书接入.*正在读取接入状态/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /尚未配置机器人/ })).toBeNull();
   });
 
   /**

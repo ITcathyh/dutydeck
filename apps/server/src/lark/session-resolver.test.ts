@@ -143,13 +143,16 @@ describe('larkReplyContext / larkSourceId / larkGroupKey', () => {
     expect(larkReplyContext(groupEvent())).toEqual({ messageId: 'om_1' });
   });
 
-  it('sourceId 持久化格式不变：群聊追加 scopeId，私聊不追加', () => {
+  it('sourceId 持久化格式：scope 与 chatType 相同（普通私聊）保持旧格式，其余追加 scopeId', () => {
     expect(larkSourceId(baseConfig, 'oc_group', 'group', 'thread:omt_topic')).toBe('cli_test:oc_group:group:thread:omt_topic');
     expect(larkSourceId(baseConfig, 'oc_dm', 'p2p', 'p2p')).toBe('cli_test:oc_dm:p2p');
+    // p2pMode='thread' 时每个私聊话题必须各自持久化，否则同一个 DM 里的多个话题串上下文。
+    expect(larkSourceId(baseConfig, 'oc_dm', 'p2p', 'thread:om_seed')).toBe('cli_test:oc_dm:p2p:thread:om_seed');
   });
 
-  it('groupKey = chatId:scopeId', () => {
-    expect(larkGroupKey(groupEvent(), 'thread:omt_topic')).toBe('oc_group:thread:omt_topic');
+  it('groupKey = appId:chatId:scopeId，带 appId 隔离同一聊天里的两个机器人', () => {
+    expect(larkGroupKey(groupEvent(), 'thread:omt_topic', 'cli_test')).toBe('cli_test:oc_group:thread:omt_topic');
+    expect(larkGroupKey(groupEvent(), 'thread:omt_topic', 'cli_other')).not.toBe(larkGroupKey(groupEvent(), 'thread:omt_topic', 'cli_test'));
   });
 });
 

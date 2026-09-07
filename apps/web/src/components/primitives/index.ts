@@ -14,6 +14,5 @@ export { EmptyState, type EmptyStateProps, type EmptyStateTone } from './EmptySt
 export { Skeleton, type SkeletonProps } from './Skeleton';
 export { Spinner, type SpinnerProps } from './Spinner';
 export { Field, Input, Select, Textarea, useFieldControl, type FieldProps } from './Field';
-export { Toolbar, type ToolbarProps } from './Toolbar';
 export { Kbd, type KbdProps } from './Kbd';
 export { cn } from './cn';

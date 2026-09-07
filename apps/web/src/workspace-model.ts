@@ -22,6 +22,14 @@ export type WorkspaceGroup = {
   cwd: string;
   name: string;
   sessions: Session[];
+  /**
+   * 该工作区下所有任务的待执行指令总数。
+   *
+   * 目前没有渲染点：侧栏一行只有 248px，容不下第三个数字（工作区名 + 任务数已占满，
+   * 见 SessionRow.tsx:15-18 关于同一宽度压力的记录）。留着是因为它是这一层的完整
+   * 投影而不是遗留——workspace-model.test.ts 在断言它，删掉等于删一条真实覆盖。
+   * 若将来确定侧栏永不展示排队口径，连同那条断言一起删，不要只删字段。
+   */
   queuedCount: number;
   updatedAt: string;
 };

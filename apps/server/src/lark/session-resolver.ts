@@ -42,7 +42,15 @@ export const larkGroupScopeId = (event: LarkMessageEvent) => {
   return `message:${event.messageId}`;
 };
 
-export const larkGroupKey = (event: LarkMessageEvent, scopeId: string) => `${event.chatId}:${scopeId}`;
+/**
+ * 群/话题串行化的内存 key。
+ *
+ * 必须带 appId：同一个聊天里可以同时装着两个 Dockmux 机器人，它们各自持久化的
+ * sourceId 本来就不同（见 {@link larkSourceId}），但 group key 少了 appId 就会让两个
+ * 机器人共用同一条内存绑定——A 机器人建的会话会被 B 机器人直接复用，
+ * /new 也会停错人的会话。
+ */
+export const larkGroupKey = (event: LarkMessageEvent, scopeId: string, appId: string) => `${appId}:${event.chatId}:${scopeId}`;
 
 export const larkReplyContext = (event: LarkMessageEvent) => ({
   // 回复 API 的路径参数只能使用真实的 om_* 消息 ID。回复触发消息即可保留准确的上下文位置。
@@ -56,8 +64,11 @@ export const larkReplyContext = (event: LarkMessageEvent) => ({
 
 export const larkSourceId = (config: StoredLarkConfig, chatId: string, chatType: string, scopeId: string) => {
   const base = `${config.appId}:${chatId}:${chatType}`;
-  // sourceId 会持久化到 runtime session；群聊追加 scopeId 后，私聊仍保持旧格式，群聊则能按话题或发送人复用会话。
-  return chatType === 'group' ? `${base}:${scopeId}` : base;
+  // sourceId 会持久化到 runtime session。scopeId 与 chatType 相同时说明整个聊天只有一个
+  // 会话（普通 p2p），保持旧格式以兼容既有持久化记录；其余情况（群聊，以及
+  // p2pMode='thread' 下各自独立的私聊话题）必须把 scopeId 写进 sourceId，
+  // 否则同一个私聊里的多个话题会共用一条持久化会话，重启后互相串上下文。
+  return scopeId === chatType ? base : `${base}:${scopeId}`;
 };
 
 export async function parsePrompt(event: LarkMessageEvent) {
@@ -169,6 +180,59 @@ export async function resolveLarkScopeId(
   }
 }
 
+/**
+ * 一条持久化会话是否属于「当前 App + 聊天 + scope」。
+ *
+ * 普通消息（{@link resolveLarkSession}）与聊天命令（/status、/new）必须用同一份判据，
+ * 否则会出现「/new 说没有绑定会话、下一条消息却复用了旧上下文」这种自相矛盾的行为。
+ * 判据刻意不含 state：命令需要能看见失败/已停止的会话并如实报告，是否可复用由调用方决定。
+ */
+export const larkSessionMatchesScope = (session: Session, config: StoredLarkConfig, sourceId: string) =>
+  session.source === 'lark'
+  && session.sourceId === sourceId
+  && session.agentId === config.defaultAgentId
+  && !session.archivedAt
+  && (!config.workspace || session.cwd === config.workspace)
+  && (!config.defaultModel || session.model === config.defaultModel)
+  && (!config.defaultReasoningEffort || session.reasoningEffort === config.defaultReasoningEffort);
+
+/**
+ * 只读定位当前上下文的持久化会话，供聊天命令在 coordinator 重建后使用。
+ *
+ * 与 {@link resolveLarkSession} 的区别：不创建、不停止、不写 group 绑定，
+ * 并且**允许**返回 failed/stopped 的会话——/status 要如实报告状态，
+ * /new 要能真正结束它。取最近创建的一条，绝不跨话题/用户/App/Web 会话或归档会话。
+ */
+export async function findPersistedLarkSession(
+  runtime: LarkRuntime,
+  config: StoredLarkConfig,
+  chatId: string,
+  chatType: LarkMessageEvent['chatType'],
+  scopeId: string
+): Promise<Session | undefined> {
+  const sessions = await listPersistedLarkSessions(runtime, config, chatId, chatType, scopeId);
+  return sessions[sessions.length - 1];
+}
+
+/**
+ * 当前上下文里**全部**持久化会话，按创建顺序返回。
+ *
+ * /new 需要它：只看最近一条不够——最近一条可能已经是 stopped，而更早那条 idle
+ * 仍会被下一条普通消息选回来，「已结束当前会话」就成了假话。
+ */
+export async function listPersistedLarkSessions(
+  runtime: LarkRuntime,
+  config: StoredLarkConfig,
+  chatId: string,
+  chatType: LarkMessageEvent['chatType'],
+  scopeId: string
+): Promise<Session[]> {
+  if (!runtime.listSessions || !config.defaultAgentId) return [];
+  const sourceId = larkSourceId(config, chatId, chatType, scopeId);
+  const sessions = await runtime.listSessions();
+  return sessions.filter(session => larkSessionMatchesScope(session, config, sourceId));
+}
+
 export async function resolveLarkSession(
   runtime: LarkRuntime,
   log: ListenerLog,
@@ -182,7 +246,7 @@ export async function resolveLarkSession(
   if (config.fullTrustConfirmed !== true) throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '飞书无人值守任务尚未获得完全信任确认，请在 Dockmux 飞书设置中确认后重试。', 409);
   const configKey = larkSessionConfigKey(config);
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
-  if (group.sessionId) {
+  if (group.sessionId && !group.retiredSessionIds?.has(group.sessionId)) {
     const existing = await runtime.getSession(group.sessionId);
     const reusable = existing && !['failed', 'stopped'].includes(existing.state);
     if (reusable && group.sessionConfigKey === configKey) {
@@ -194,19 +258,16 @@ export async function resolveLarkSession(
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书 Agent 配置已变更，停止旧 Session 并应用新配置');
       await runtime.stop?.(existing.id);
     }
-    group.sessionId = undefined;
-    group.sessionConfigKey = undefined;
   }
+  group.sessionId = undefined;
+  group.sessionConfigKey = undefined;
   if (runtime.listSessions) {
     const sessions = await runtime.listSessions();
-    const existing = [...sessions].reverse().find(item => item.source === 'lark'
-      && item.sourceId === sourceId
-      && item.agentId === config.defaultAgentId
-      && !item.archivedAt
+    const existing = [...sessions].reverse().find(item => larkSessionMatchesScope(item, config, sourceId)
       && !['failed', 'stopped'].includes(item.state)
-      && (!config.workspace || item.cwd === config.workspace)
-      && (!config.defaultModel || item.model === config.defaultModel)
-      && (!config.defaultReasoningEffort || item.reasoningEffort === config.defaultReasoningEffort));
+      // /new 退休掉的会话不得再被复用：runtime.stop 可能尚未落库（会话仍是 idle），
+      // 此时并发到达的消息会把用户刚要求结束的上下文重新绑回来。
+      && !group.retiredSessionIds?.has(item.id));
     if (existing) {
       if (existing.permissionMode === 'full-trust') {
         group.sessionId = existing.id;

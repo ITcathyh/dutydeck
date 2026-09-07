@@ -3,7 +3,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { PermissionMode } from '@dockmux/shared';
 import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, LarkCircuitOpenError } from './api-gate.js';
-import { buildLarkCardActions, type LarkCardCapabilities } from './card-actions.js';
+import { buildLarkCardActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 
 /**
  * 从响应头解析飞书要求的等待时长（ms）。Retry-After 与 x-ogw-ratelimit-reset 的
@@ -321,7 +321,6 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const taskName = clipCardField((input.taskName?.trim() || 'Dockmux').replace(/\s+/g, ' '), cardFieldLimits.taskName);
   const taskId = clipCardField(String(input.taskId ?? Date.now()).trim() || 'task', cardFieldLimits.taskId);
   const agentName = clipCardField(input.agentName?.trim() || 'Dockmux', cardFieldLimits.agentName);
-  const workspace = input.workspace?.trim() ? clipCardField(input.workspace.trim(), cardFieldLimits.workspace) : undefined;
   const sessionId = input.sessionId?.trim() ? clipCardField(input.sessionId.trim(), cardFieldLimits.sessionId) : undefined;
   const webBaseUrl = input.webBaseUrl?.trim() ? clipCardField(input.webBaseUrl.trim(), cardFieldLimits.webBaseUrl) : undefined;
   const loadingImageKey = input.loadingImageKey?.trim() ? clipCardField(input.loadingImageKey.trim(), cardFieldLimits.imageKey) : undefined;
@@ -358,17 +357,21 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
     capabilities: actionCapabilities
   });
+  // 页脚只承载「谁在执行」和「去哪看全貌」两件事。工作区路径、任务号、权限标签
+  // 对聊天里的读者没有可操作性，只会挤占本就很窄的一行。
   const footerColumns: any[] = [{
     tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
-    elements: [{ tag: 'markdown', content: `<font color='grey'>${agentName}${workspace ? ` · ${workspace}` : ''} · 任务 #${taskId}${input.permissionMode === 'full-trust' ? ' · 完全信任' : ''}</font>`, text_size: 'x-small', margin: '0px' }]
+    elements: [{ tag: 'markdown', content: `<font color='grey'>${agentName}</font>`, text_size: 'x-small', margin: '0px' }]
   }];
-  if (webBaseUrl) {
-    const traceUrl = sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/`;
+  // 详情链接是整卡唯一的 Web 出口（顶部不再重复渲染同一个链接按钮），
+  // 因此这里必须自己校验协议，不能假设别处已经挡掉 javascript: 之类的目标。
+  const footerDetailUrl = safeLarkWebUrl(sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : webBaseUrl ? `${webBaseUrl}/` : undefined);
+  if (footerDetailUrl) {
     footerColumns.push({
       tag: 'column', width: 'auto', vertical_align: 'center',
       elements: [{
         tag: 'markdown',
-        content: `<font color='grey'>[查看详情](${traceUrl})</font>`,
+        content: `<font color='grey'>[查看详情](${footerDetailUrl})</font>`,
         text_size: 'x-small', margin: '0px'
       }]
     });
@@ -381,7 +384,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   );
   const arrange = (mainElements: Array<Record<string, unknown>>) => {
     const waitingForApproval = state === 'running' && hasPendingApproval(mainElements);
-    const finalIds = new Set(['result_header', 'final_output', 'next_step_hint', 'result_missing']);
+    const finalIds = new Set(['result_header', 'final_output', 'result_missing']);
     const finalElements = mainElements.filter(element => finalIds.has(String(element.element_id ?? '')));
     const traceElements = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
     const traceDigest = mainElements.find(element => element.element_id === 'trace_digest');

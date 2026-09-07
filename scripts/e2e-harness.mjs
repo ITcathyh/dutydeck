@@ -208,6 +208,15 @@ import { join } from 'node:path';
 const dataDir = process.env.MOCK_CLAUDE_DATA_DIR;
 // 每轮耗时。默认 300ms —— 与加这个开关之前完全一致，e2e-smoke.mjs 的基线因此不受影响。
 const turnMs = Number(process.env.MOCK_TURN_MS ?? '300') || 300;
+/**
+ * 可中断模式（默认关闭，只有显式设 MOCK_INTERRUPTIBLE=1 才生效）。
+ *
+ * 真实交互式 CLI 收到 Ctrl-C 时取消当轮、**进程继续活着**并重新打印提示符。
+ * 默认模式下本假 CLI 不处理 SIGINT，于是 PTY 的 \\x03 直接按默认行为杀掉进程，
+ * driver 变成 stopped，随后的 /retry 会撞上 "send() called after stop()"。
+ * 打开这个开关只影响中断语义，不改变任何一轮的正常输出，因此不动其它 e2e 的行为。
+ */
+const interruptible = process.env.MOCK_INTERRUPTIBLE === '1';
 const freshIndex = process.argv.indexOf('--session-id');
 const resumeIndex = process.argv.indexOf('--resume');
 const resumed = resumeIndex >= 0;
@@ -227,6 +236,8 @@ let buffer = '';
 let composedPrompt = '';
 let bracketedPaste = false;
 let turn = 0;
+/** 当前未完成的一轮（可中断模式下 Ctrl-C 要清掉它的定时器与 spinner）。 */
+let activeTurn;
 const bracketedPasteStart = '\\u001b[200~';
 const bracketedPasteEnd = '\\u001b[201~';
 
@@ -241,14 +252,36 @@ const submitPrompt = rawPrompt => {
   const spinner = turnMs > 1500
     ? setInterval(() => process.stdout.write('\\u2733'), 500)
     : undefined;
-  setTimeout(() => {
+  const timer = setTimeout(() => {
+    activeTurn = undefined;
     if (spinner) clearInterval(spinner);
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
     const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
     process.stdout.write('\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
   }, turnMs);
+  activeTurn = { timer, spinner };
 };
+
+/*
+  Ctrl-C：取消当轮定时器与 spinner、清掉输入缓冲，然后重新打印提示符，进程继续活着。
+  这与真实交互式 CLI 一致，也是「取消后还能在同一进程里重试」的前提。
+  被取消那一轮不再产出任何 assistant 输出（定时器已清），所以重试轮次是 turn 2 →
+  MOCK_CONTINUED，不会有残留的 MOCK_REPLY 冒充重试成功。
+*/
+if (interruptible) {
+  process.on('SIGINT', () => {
+    if (activeTurn) {
+      clearTimeout(activeTurn.timer);
+      if (activeTurn.spinner) clearInterval(activeTurn.spinner);
+      activeTurn = undefined;
+    }
+    buffer = '';
+    composedPrompt = '';
+    bracketedPaste = false;
+    process.stdout.write('\\r\\n^C\\r\\n\\u276f ');
+  });
+}
 
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => {

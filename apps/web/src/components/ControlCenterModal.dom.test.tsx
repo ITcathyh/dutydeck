@@ -10,7 +10,7 @@ const timestamp = '2026-08-30T00:00:00.000Z';
 const foundationReady: FoundationCapability = { schemaVersion: 1, repositoriesWired: true, permissionEvaluatorWired: true, secretInspectorWired: true, runtimeWired: false, writesEnabled: true, readiness: 'offline_management_ready', blockers: [{ code: 'production_execution_unwired', message: 'Runtime missing', action: 'Wire later' }] };
 const scheduleReady: ScheduleCapability = { schemaVersion: 1, repositoriesWired: true, permissionEvaluatorWired: true, writesEnabled: true, executorWired: false, uiEntryReady: false, readiness: 'offline_management_ready', blockers: [{ code: 'schedule_executor_unavailable', message: 'Executor missing', action: 'Keep disabled' }] };
 const matrix: GroupMatrix = { capabilities: foundationReady, bots: [{ bot: { schemaVersion: 1, id: 'bot-ui', revision: 1, channel: 'lark', externalAppId: 'cli_ui', displayName: 'Staged Bot', brand: 'feishu', state: 'staged', desiredListenerState: 'disabled', fullTrustConfirmed: false, createdAt: timestamp, updatedAt: timestamp, credentialStatus: 'missing', blockerCodes: ['channel_bot_credential_required', 'channel_bot_activation_unavailable'] }, cells: [] }] };
-const legacyBot = { appId: 'cli_legacy', name: 'Legacy Bot', defaultAgentId: 'codex', setupComplete: true, activeListening: true } as LarkBotConfig;
+const legacyBot = { appId: 'cli_legacy', name: 'Legacy Bot', defaultAgentId: 'codex', setupComplete: true, listening: true, activeListening: true } as LarkBotConfig;
 
 function mocks(groupMatrix: GroupMatrix = matrix) {
   vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(foundationReady);
@@ -44,7 +44,9 @@ describe('ControlCenterModal information architecture', () => {
     expect(await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeTruthy();
     for (const label of ['Agent', '飞书 Bot', '群与权限', '自动化']) expect(screen.getByRole('button', { name: new RegExp(label) })).toBeTruthy();
     expect(screen.getByText(/受信开发机模式：/)).toBeTruthy();
-    expect(screen.getByText(/1 个已连接/)).toBeTruthy();
+    // 「已绑定」不是「已连接」：这一格只数 defaultAgentId 指向该 Agent 的 Bot，不读监听状态。
+    expect(screen.getByText(/1 个已绑定/)).toBeTruthy();
+    expect(screen.queryByText(/1 个已连接/)).toBeNull();
     expect(screen.queryByRole('textbox', { name: /secret|凭据值/i })).toBeNull();
     expect(document.body.textContent).not.toContain('SECRET_VALUE_CANARY');
     expect(screen.queryByRole('button', { name: /开启监听|启用 Bot|立即运行|run.now/i })).toBeNull();
@@ -117,5 +119,99 @@ describe('ControlCenterModal information architecture', () => {
     await userEvent.click(screen.getByRole('button', { name: /自动化/ }));
     await userEvent.click(await screen.findByRole('button', { name: '编辑与预览自动化' }));
     expect(onOpenSchedules).toHaveBeenCalledOnce();
+  });
+
+  /*
+    「建议下一步」曾按 Bot 条数宣称「N 个飞书 Bot 已可用」，判据只看
+    setupComplete && activeListening，于是漏掉两种同样收不到消息的情况：
+    用户主动暂停监听、以及本次启动整体禁用监听。两者都有 bots.length > 0。
+    现在判据复用 lark-status 的投影，与首页、侧栏同一份。
+  */
+  describe('建议下一步按真实状态给，不按 Bot 条数', () => {
+    it('用户暂停监听时不说「已可用」，而是指出暂停并指向 Bot 设置', async () => {
+      mocks();
+      const paused = { ...legacyBot, listening: false, activeListening: false } as LarkBotConfig;
+      renderModal({ legacyBots: [paused] });
+      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      expect(screen.getByText('继续设置 Legacy Bot')).toBeTruthy();
+      expect(screen.getByText(/用户暂停监听：已在机器人设置中暂停监听。/)).toBeTruthy();
+      expect(document.body.textContent).not.toContain('已可用');
+      expect(document.body.textContent).not.toContain('监听已启动');
+    });
+
+    it('本次启动禁用监听时不说「已可用」，即使 Bot 自身字段全就绪', async () => {
+      mocks();
+      renderModal({ legacyBots: [legacyBot], larkListeningDisabled: true });
+      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      expect(screen.getByText('继续设置 Legacy Bot')).toBeTruthy();
+      expect(screen.getByText(/本次启动禁用监听：服务端启动参数已禁用监听。/)).toBeTruthy();
+      expect(document.body.textContent).not.toContain('已可用');
+    });
+
+    it('全部就绪时主建议仍是飞书优先，标题与它真正的动作一致', async () => {
+      mocks();
+      const onOpenLarkSetup = vi.fn(); const onCreateTask = vi.fn();
+      renderModal({ legacyBots: [legacyBot], onOpenLarkSetup, onCreateTask });
+      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      /*
+        标题必须描述这颗按钮真的会做的事。原先叫「到飞书下达任务」，点下去弹的却是
+        绑定/管理向导——它不会把用户送到飞书，也不该替用户挑一个 Bot 跳转。
+      */
+      expect(screen.getByText('管理飞书 Bot')).toBeTruthy();
+      expect(screen.queryByText('到飞书下达任务')).toBeNull();
+      expect(screen.getByText(/1 个飞书 Bot 监听已启动/)).toBeTruthy();
+      // 不得声称消息已送达 / 全部可用，也不暴露字段名。
+      for (const lie of ['已可用', '长连接', 'activeListening', '已验证']) {
+        expect(document.body.textContent).not.toContain(lie);
+      }
+      // 主建议走飞书，不退回 Web 创建任务。
+      await userEvent.click(screen.getByRole('button', { name: /继续/ }));
+      expect(onOpenLarkSetup).toHaveBeenCalledOnce();
+      expect(onCreateTask).not.toHaveBeenCalled();
+    });
+
+    it('Bot 卡片的就绪判据同源：暂停监听不显示「已连接」', async () => {
+      mocks();
+      const paused = { ...legacyBot, listening: false, activeListening: false } as LarkBotConfig;
+      renderModal({ initialSection: 'lark', legacyBots: [paused] });
+      const card = await screen.findByRole('article');
+      expect(card.textContent).toContain('用户暂停监听');
+      expect(card.textContent).not.toContain('已连接');
+      expect(card.textContent).toContain('继续设置');
+    });
+
+    /*
+      larkConfig 失败/进行中不能落到「还没有飞书 Bot」空态，也不能沿用缓存说就绪。
+      失败后 isLoading=false、data=undefined，legacyBots 因此是空数组。
+    */
+    it('读取失败且无缓存：建议下一步与 Bot 列表都说状态未知，不说「还没有 Bot」', async () => {
+      mocks();
+      const onRetryLarkBots = vi.fn();
+      renderModal({ initialSection: 'lark', legacyBots: [], larkBotsFailed: true, onRetryLarkBots });
+      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      expect(screen.getByText('重试读取飞书接入状态')).toBeTruthy();
+      expect(screen.getAllByText(/无法判断是否已配置机器人/).length).toBeGreaterThan(0);
+      expect(screen.queryByText('还没有飞书 Bot')).toBeNull();
+      // 设置内可以重试（Banner 上那颗）。
+      await userEvent.click(screen.getAllByRole('button', { name: '重试' })[0]!);
+      expect(onRetryLarkBots).toHaveBeenCalled();
+    });
+
+    it('读取失败但有缓存：Bot 仍列出，状态降级为未确认而不是「监听已启动」', async () => {
+      mocks();
+      renderModal({ initialSection: 'lark', legacyBots: [legacyBot], larkBotsFailed: true });
+      const card = await screen.findByRole('article');
+      expect(card.textContent).toContain('状态未确认');
+      expect(card.textContent).not.toContain('监听已启动');
+      expect(screen.getByText(/下面的机器人状态未确认/)).toBeTruthy();
+    });
+
+    it('读取进行中：说正在读取，不谎报还没有 Bot', async () => {
+      mocks();
+      renderModal({ initialSection: 'lark', legacyBots: [], larkBotsLoading: true });
+      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      expect(screen.getByText('正在读取飞书接入状态')).toBeTruthy();
+      expect(screen.queryByText('还没有飞书 Bot')).toBeNull();
+    });
   });
 });

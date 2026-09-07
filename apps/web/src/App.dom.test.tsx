@@ -591,3 +591,133 @@ describe('可深链浮层的 URL 契约', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
+
+/*
+  larkConfig 失败后 isLoading 变 false、data 是 undefined。此前首页与侧栏都只判
+  「loading ? 读取中 : bots.length ? … : 尚未配置」，于是接口挂掉时同屏两处都说
+  「尚未配置机器人」——把「读不到」说成「没有」。
+
+  这一组走真实 App，用 mock 让 api.larkConfig reject，验证 prop 真的流到两处、
+  重试真的重新发请求，而不是只测 helper。
+*/
+describe('App 飞书 Bot 状态读取失败', () => {
+  const failLarkConfig = () => {
+    mockAppApi();
+    return vi.spyOn(api, 'larkConfig').mockRejectedValue(new Error('lark api down'));
+  };
+
+  it('首页与侧栏都说状态未确认，不谎报「尚未配置机器人」', async () => {
+    failLarkConfig();
+    renderApp();
+    const aside = await screen.findByRole('complementary', { name: '协作入口' });
+    await waitFor(() => expect(within(aside).getByRole('heading', { name: /无法读取飞书接入状态/ })).toBeTruthy());
+    expect(within(aside).getByText(/无法判断是否已配置机器人/)).toBeTruthy();
+    // 「尚未配置」的两处文案都不许出现：概览引导与侧栏 hint。
+    expect(document.body.textContent).not.toContain('尚未配置机器人');
+    expect(document.body.textContent).not.toContain('尚未配置飞书机器人');
+    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    expect(within(navigation).getByRole('button', { name: /飞书接入.*接入状态读取失败/ })).toBeTruthy();
+  });
+
+  it('重试按钮真的重新请求 larkConfig，成功后改口为真实状态', async () => {
+    const spy = failLarkConfig();
+    renderApp();
+    const aside = await screen.findByRole('complementary', { name: '协作入口' });
+    await waitFor(() => expect(within(aside).getByRole('heading', { name: /无法读取飞书接入状态/ })).toBeTruthy());
+    const callsBefore = spy.mock.calls.length;
+
+    // 这一次让它成功，且返回一个「配置完成但用户暂停监听」的 Bot。
+    spy.mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_retry', name: '重试机器人', setupComplete: true, listening: false, activeListening: false } as never] });
+    await userEvent.click(within(aside).getByRole('button', { name: '重试' }));
+
+    await waitFor(() => expect(spy.mock.calls.length).toBeGreaterThan(callsBefore));
+    await waitFor(() => expect(screen.queryByRole('heading', { name: /无法读取飞书接入状态/ })).toBeNull());
+    // 改口后必须是真实状态，而不是「已接入」。
+    expect(await screen.findByText('用户暂停监听')).toBeTruthy();
+    expect(document.body.textContent).not.toContain('监听已启动');
+  });
+
+  it('Bot API 失败不挡任务详情，任务列表仍然可用', async () => {
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录态')] });
+    vi.spyOn(api, 'larkConfig').mockRejectedValue(new Error('lark api down'));
+    renderApp();
+    // 任务内容照常渲染：飞书接口失败不进 mainQueryFailures，不触发阻塞式失败页。
+    await waitFor(() => expect(screen.getAllByText('修复登录态').length).toBeGreaterThan(0));
+    expect(screen.queryByText(/无法加载工作台/)).toBeNull();
+    expect(screen.getByRole('region', { name: '任务列表' })).toBeTruthy();
+  });
+
+  it('已有缓存但 refetch 失败时标注状态未确认，不沿用旧值宣称在线', async () => {
+    mockAppApi();
+    const spy = vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_cached', name: '缓存机器人', setupComplete: true, listening: true, activeListening: true } as never] });
+    const { client } = renderApp();
+    expect(await screen.findByText('监听已启动')).toBeTruthy();
+
+    // 缓存已经有「监听已启动」，这一次 refetch 失败：状态必须降级为未确认。
+    spy.mockRejectedValue(new Error('lark api down'));
+    await act(async () => { await client.refetchQueries({ queryKey: ['lark-config'] }); });
+
+    const aside = screen.getByRole('complementary', { name: '协作入口' });
+    await waitFor(() => expect(within(aside).getByText('状态未确认')).toBeTruthy());
+    expect(within(aside).getByText(/已有配置记录，但这一次状态读取失败/)).toBeTruthy();
+    expect(within(aside).queryByText('监听已启动')).toBeNull();
+    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    expect(within(navigation).getByRole('button', { name: /飞书接入.*1 个机器人 · 状态未确认/ })).toBeTruthy();
+  });
+
+  /*
+    设置与接入浮层读的是同一个 larkConfig 查询。此前 App 只把 bots 数组传进去，
+    没传 loading/failed，于是首请求失败时「建议下一步」与 Bot 列表都会说
+    「还没有 Bot」，缓存 refetch 失败时又照旧说「监听已启动」。
+  */
+  const openSettings = async () => {
+    await userEvent.click(screen.getByRole('button', { name: /Agent 与设置/ }));
+    return screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+  };
+  // 浮层内切到「飞书 Bot」分区（Bot 列表与失败 Banner 在这一节）。
+  const openLarkSection = async (dialog: HTMLElement) => {
+    await userEvent.click(within(dialog).getByRole('button', { name: /飞书 Bot/ }));
+  };
+
+  it('设置与接入在首请求失败时说状态未知，且重试真的重新请求', async () => {
+    const spy = failLarkConfig();
+    renderApp();
+    await screen.findByRole('complementary', { name: '协作入口' });
+    const dialog = await openSettings();
+    // 「建议下一步」不说「还没有 Bot」，而是指向重试。
+    await waitFor(() => expect(within(dialog).getByText('重试读取飞书接入状态')).toBeTruthy());
+
+    await openLarkSection(dialog);
+    // Bot 列表同样不落到「还没有飞书 Bot」空态。
+    expect(within(dialog).queryByText('还没有飞书 Bot')).toBeNull();
+    // 建议下一步与 Bot 分区 Banner 都在说同一件事，两处都算。
+    expect(within(dialog).getAllByText(/无法判断是否已配置机器人/).length).toBeGreaterThan(0);
+
+    const callsBefore = spy.mock.calls.length;
+    spy.mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_retry', name: '重试机器人', setupComplete: true, listening: false, activeListening: false } as never] });
+    // 设置内的重试真的重新发请求（这条同时验证 App 把 onRetryLarkBots 接上了）。
+    // 同屏有两颗：建议下一步那颗与 Bot 分区 Banner 那颗，都指向同一个 refetch。
+    await userEvent.click(within(dialog).getAllByRole('button', { name: '重试' })[0]!);
+    await waitFor(() => expect(spy.mock.calls.length).toBeGreaterThan(callsBefore));
+    // 改口后是真实状态，而不是「已可用」。
+    await waitFor(() => expect(within(dialog).getByText('重试机器人')).toBeTruthy());
+    expect(within(dialog).getAllByText(/用户暂停监听/).length).toBeGreaterThan(0);
+  });
+
+  it('设置与接入在缓存 refetch 失败时把 Bot 状态降级为未确认', async () => {
+    mockAppApi();
+    const spy = vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_cached', name: '缓存机器人', setupComplete: true, listening: true, activeListening: true } as never] });
+    const { client } = renderApp();
+    expect(await screen.findByText('监听已启动')).toBeTruthy();
+    const dialog = await openSettings();
+    await openLarkSection(dialog);
+
+    spy.mockRejectedValue(new Error('lark api down'));
+    await act(async () => { await client.refetchQueries({ queryKey: ['lark-config'] }); });
+
+    await waitFor(() => expect(within(dialog).getByText(/下面的机器人状态未确认/)).toBeTruthy());
+    // 缓存里的 Bot 仍然列出（不当成消失），但状态不再宣称已启动。
+    expect(within(dialog).getByText('缓存机器人')).toBeTruthy();
+    expect(within(dialog).queryByText('监听已启动')).toBeNull();
+  });
+});

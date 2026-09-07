@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { boundLarkCardElements, buildLarkCard, createLarkCardService, larkCardSafeLimits, larkCardSnapshotLimits, larkConfigurationStatus, larkIdentityPermissionHelp, LarkServiceError, loadLarkBotConfig } from './service.js';
+import { boundLarkCardElements, buildLarkCard, createLarkCardService, larkCardSafeLimits, larkCardSnapshotLimits, larkCardStates, larkConfigurationStatus, larkIdentityPermissionHelp, LarkServiceError, loadLarkBotConfig } from './service.js';
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 const configured = {
@@ -35,7 +35,7 @@ describe('Lark card service', () => {
   };
   const byId = (card: any, elementId: string) => components(card).find(element => element.element_id === elementId);
   it('renders a completed Card 2.0 with a clear task header, status, and compact footer', () => {
-    const card = buildLarkCard({ agentName: 'Business Agent', permissionMode: 'full-trust', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
+    const card = buildLarkCard({ agentName: 'Business Agent', workspace: '/srv/repo', permissionMode: 'full-trust', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
     expect(card.schema).toBe('2.0');
     expect(card.config.style.color).toMatchObject({
       trace_success: { light_mode: expect.stringContaining('92,184,119') },
@@ -52,10 +52,14 @@ describe('Lark card service', () => {
     expect(card.body.elements[0].text.text_size).toBe('small');
     expect(card.body.elements[1].content).toBe('**done**');
     const footer: any = card.body.elements.at(-1);
-    expect(footer.columns[0].elements[0].content).toContain('Business Agent · 任务 #42');
-    expect(footer.columns[0].elements[0].content).toContain('完全信任');
+    // 页脚只承载 Agent 名。工作区路径、任务号、权限标签对聊天读者没有可操作性。
+    expect(footer.columns[0].elements[0].content).toBe("<font color='grey'>Business Agent</font>");
     expect(footer.columns[0].elements[0].text_size).toBe('x-small');
     expect(footer.columns).toHaveLength(1);
+    const rendered = JSON.stringify(card);
+    expect(rendered).not.toContain('/srv/repo');
+    expect(rendered).not.toContain('任务 #42');
+    expect(rendered).not.toContain('完全信任');
   });
 
   it('没有 sessionId 时，Web 出口指向任务中心而不是会命中 not-found 的 /sessions', () => {
@@ -63,15 +67,43 @@ describe('Lark card service', () => {
     // 任务尚未建立 session 时（解析中、排队中）飞书卡片仍要给出可用的去向。
     const withoutSession: any = buildLarkCard({ state: 'queued', taskId: 't1', webBaseUrl: 'https://web.example.com' });
     const withSession: any = buildLarkCard({ state: 'running', taskId: 't2', webBaseUrl: 'https://web.example.com', sessionId: 'ses_1' });
-    const detailUrl = (card: any) => byId(card, 'view_detail')?.behaviors?.[0]?.default_url;
     const footerLink = (card: any) => card.body.elements.at(-1)?.columns?.at(-1)?.elements?.[0]?.content ?? '';
 
-    expect(detailUrl(withoutSession)).toBe('https://web.example.com/');
     expect(footerLink(withoutSession)).toContain('(https://web.example.com/)');
     expect(JSON.stringify(withoutSession)).not.toContain('web.example.com/sessions');
-
-    expect(detailUrl(withSession)).toBe('https://web.example.com/sessions/ses_1');
     expect(footerLink(withSession)).toContain('(https://web.example.com/sessions/ses_1)');
+  });
+
+  it('整卡只有一个查看详情入口，且落在页脚', () => {
+    // 顶部曾经也有一个 open_url 按钮，与页脚链接指向同一个 session，是重复入口。
+    const card: any = buildLarkCard({ state: 'running', taskId: 't1', sessionId: 'ses_1', webBaseUrl: 'https://web.example.com' });
+    const rendered = JSON.stringify(card);
+    expect(rendered.match(/查看详情/g) ?? []).toHaveLength(1);
+    expect(rendered).not.toContain('open_url');
+    expect(byId(card, 'view_detail')).toBeUndefined();
+    expect(card.body.elements.at(-1).columns.at(-1).elements[0].content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
+  });
+
+  it('只读与恢复卡同样保留页脚的查看详情', () => {
+    // 只读卡没有任何按钮，页脚链接是它唯一的 Web 出口，不能一起被拿掉。
+    for (const state of larkCardStates) {
+      const card: any = buildLarkCard({ state, taskId: 't1', sessionId: 'ses_1', readOnly: true, webBaseUrl: 'https://web.example.com' });
+      const rendered = JSON.stringify(card);
+      expect(rendered.match(/查看详情/g) ?? [], `state=${state}`).toHaveLength(1);
+      expect(card.body.elements.at(-1).columns.at(-1).elements[0].content)
+        .toContain('[查看详情](https://web.example.com/sessions/ses_1)');
+    }
+  });
+
+  it('无效的 Web 深链不渲染任何详情链接', () => {
+    // 页脚现在是唯一出口，校验必须由它自己承担，不能假设别处挡过了。
+    for (const webBaseUrl of ['javascript:alert(1)', 'file:///etc/passwd', 'not a url', '   ']) {
+      const card: any = buildLarkCard({ state: 'running', taskId: 't1', sessionId: 'ses_1', webBaseUrl });
+      expect(JSON.stringify(card), `${webBaseUrl} 不应渲染详情链接`).not.toContain('查看详情');
+      expect(card.body.elements.at(-1).columns).toHaveLength(1);
+    }
+    const noUrl: any = buildLarkCard({ state: 'running', taskId: 't1', sessionId: 'ses_1' });
+    expect(JSON.stringify(noUrl)).not.toContain('查看详情');
   });
 
   it('keeps state-specific actions in the top prompt row', () => {

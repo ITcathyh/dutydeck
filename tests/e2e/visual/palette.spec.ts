@@ -33,9 +33,10 @@ test.describe('色板 · 品牌色', () => {
       await settle(dock);
       await applyTheme(dock, theme, path);
 
-      // 头部那颗「创建任务」是 <Button variant="primary">，consumer 侧的真实主操作。
-      // 侧栏里同名按钮走的是 sidebar-accent 独立色盘，取值不同，必须用 main 收窄。
-      const primary = dock.locator('main').getByRole('button', { name: '创建任务' }).first();
+      // 首屏真实主操作是 Bot 概览里的「绑定飞书 Bot」（<Button variant="primary">）。
+      // 「创建任务」已降为 variant="secondary"（走 bg-surface），量它只会量到卡片底色，
+      // 那会让这条品牌色护栏在实现真的退化时也照样绿——所以必须锚定当前的 primary。
+      const primary = dock.locator('main').getByRole('button', { name: /^(绑定|管理)飞书 Bot$/ }).first();
       await expect(primary).toBeVisible();
 
       const bg = await computed(primary, 'background-color');

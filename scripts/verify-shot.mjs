@@ -13,13 +13,22 @@ for (const [width, height, name] of [[1440, 900, 'desktop'], [390, 844, 'mobile'
   await page.screenshot({ path: `/tmp/dm-${tag}-${name}.png`, fullPage: false });
 
   if (name === 'desktop') {
-    // 三处「待你处理」的数字必须同源：页首副标题、筛选芯片、分区标题。
+    /*
+      「待你处理」的数字现在只该出现两处：页首那句话（回答规范 §5.1 的三个问题）
+      与筛选芯片（筛选器自身的计数）。
+
+      分区标题右侧原先还有第三份「N 个」，2026-09-03 删掉了：同一个数字同屏写三遍、
+      三种句式，读者要读三遍才知道是同一件事，而规范只要求页首回答。
+      所以这里从「读第三处的值」改成「断言第三处不存在」——留一行永远打印
+      undefined 的观测点，就是本文件最该避免的那种假观测（它全是 catch→null，
+      DOM 变了不会报错）。
+    */
     const subtitle = await page.locator('#workspace-overview-title + p').textContent().catch(() => null);
     const chip = await page.getByRole('button', { pressed: false }).filter({ hasText: '待你处理' }).first().textContent().catch(() => null);
-    const sectionCount = await page.locator('h2:has-text("待你处理")').locator('xpath=../../..').locator('text=/\\d+ 个/').first().textContent().catch(() => null);
-    console.log('页首副标题 :', subtitle?.trim());
-    console.log('筛选芯片   :', chip?.replace(/\s+/g, ' ').trim());
-    console.log('分区计数   :', sectionCount?.trim());
+    const strayCount = await page.locator('h2:has-text("待你处理")').locator('xpath=../..').locator('text=/^\\d+ 个$/').count().catch(() => -1);
+    console.log('页首副标题 :', subtitle?.trim() ?? '✗ 读不到（h1 后不再紧跟 <p>？）');
+    console.log('筛选芯片   :', chip?.replace(/\s+/g, ' ').trim() ?? '✗ 读不到');
+    console.log('分区重复计数:', strayCount === 0 ? '✓ 已无第三份' : strayCount < 0 ? '✗ 选择器失效' : `✗ 又长回来了（${strayCount} 处）`);
 
     const filterGroups = await page.getByRole('button', { name: /^总览/ }).count();
     console.log('「总览」按钮数（应为 1，两套导航时为 2）:', filterGroups);

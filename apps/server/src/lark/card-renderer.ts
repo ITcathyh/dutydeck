@@ -26,6 +26,16 @@ export const isLarkCardContentRejected = (error: unknown): error is LarkServiceE
 export const isLarkMessageUnupdatable = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
   && [230012, 230030].includes(Number(error.details?.upstreamCode));
 
+/**
+ * 原卡不可更新时补发终态卡的幂等键。
+ *
+ * 实时路径与对账路径必须用**同一个**键：实时补发成功后、持久化落库前进程崩溃（或网络
+ * 结果不明），恢复时对账会再补发一次；只有键一致，飞书才能在服务端去重，用户看到的
+ * 才是一张卡而不是两张。键只由原消息 ID + 终态决定，两条路径都能独立算出同一个值。
+ */
+export const larkTerminalReplacementKey = (originalMessageId: string, state: string | undefined, safe = false) =>
+  `${safe ? 'repl_safe' : 'repl'}_${originalMessageId}_${state ?? 'terminal'}`.slice(0, 50);
+
 const rejectedDeltaElement = (changedCount: number): LarkCardElement => ({
   tag: 'markdown',
   element_id: 'dockmux_rejected_delta',
@@ -415,7 +425,8 @@ export function renderLarkCardElements(
   config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete'>,
   completed = false,
   compensation = false,
-  chatType?: string
+  /** 保留入参以免改动全部调用点；下一步提示移除后渲染不再按会话类型分叉。 */
+  _chatType?: string
 ): LarkCardElement[] {
   const entries = compactTrace(events);
   const lastIndex = (predicate: (entry: TraceEntry) => boolean) => {
@@ -423,9 +434,12 @@ export function renderLarkCardElements(
     return -1;
   };
   const finalMessageIndex = completed ? lastIndex(entry => entry.type === 'text' && entry.data.role !== 'user') : -1;
-  // 与 runtime.turnHasFinalAssistantText 保持一致：thinking / 工具 / 权限等都算活动，
-  // final 文本必须位于最后一次活动之后。工具调用前的阶段描述不得提升为 final_output。
-  const lastActivityIndex = lastIndex(entry => entry.type !== 'text');
+  // final 文本必须位于最后一次**活动**之后：工具调用前的阶段描述不得提升为 final_output，
+  // 未决的 permission_request / error 也必须继续挡住提升。
+  // raw_terminal 例外——它是屏幕回显，不是活动。PTY 形态的 Agent 给出最终答复之后，
+  // 屏幕上必然还会再吐一个提示符；把它算作活动会让真实答复失去 final 资格，
+  // 而 hideTraceOnComplete 默认隐去 trace，用户最终一个字都看不到。
+  const lastActivityIndex = lastIndex(entry => entry.type !== 'text' && entry.type !== 'raw_terminal');
   const finalFollowsActivity = finalMessageIndex > lastActivityIndex;
   const finalMessage = finalMessageIndex >= 0 && finalFollowsActivity ? entries[finalMessageIndex] : undefined;
   const finalText = truncateTrace(finalMessage?.data.text, 6_000);
@@ -454,16 +468,6 @@ export function renderLarkCardElements(
       icon: { tag: 'standard_icon', token: 'doc-checklist_outlined', color: 'green' }
     });
     elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? finalText : `**当前进展**\n\n${finalText}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
-    if (completed) elements.push({
-      tag: 'div', element_id: 'next_step_hint', width: 'auto', margin: '6px 0px 2px 0px',
-      text: {
-        tag: 'plain_text',
-        content: chatType === 'group'
-          ? '下一步：回复当前消息并 @机器人，可补充目标或要求调整。'
-          : '下一步：在当前对话继续给 Agent 指令，可补充目标或要求调整。',
-        text_size: 'notation', text_color: 'grey', lines: 2
-      }
-    });
   } else if (completed) {
     elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }

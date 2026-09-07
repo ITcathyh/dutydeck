@@ -162,7 +162,8 @@ export interface LarkCommandDefinition {
  * - `/new`    runtime.stop（**可选方法**）。清掉 group 的会话绑定并不足以开启新会话：
  *             resolveLarkSession 之后会按 sourceId 在 listSessions 里复用同一个持久化
  *             session，只有 state 为 stopped/failed 的会话才会被排除。因此 /new 必须能
- *             stop 掉旧会话，否则是一条什么都没发生的假命令。
+ *             stop 掉旧会话，否则是一条什么都没发生的假命令。带任务内容时，argsText
+ *             由 coordinator 当作普通请求走完整建任务链路，命令层不自己派发。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   {
@@ -173,7 +174,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   },
   {
     name: 'status',
-    summary: '查看当前会话绑定的 Agent、工作区与本轮执行状态',
+    summary: '查看本会话绑定的 Agent、工作区、运行状态与待执行指令数',
     usage: '/status',
     mutating: false,
     requires: capabilities => capabilities.getSession,
@@ -200,8 +201,8 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   },
   {
     name: 'new',
-    summary: '结束当前会话上下文，让下一条消息开启一个全新的 Agent 会话',
-    usage: '/new',
+    summary: '结束当前会话上下文；带上任务内容可以同时开启新会话并立刻派发这个任务',
+    usage: '/new 或 /new <任务内容>',
     mutating: true,
     requires: capabilities => capabilities.stop,
     unavailableReason: '当前 Dockmux 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'
