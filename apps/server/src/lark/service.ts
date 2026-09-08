@@ -140,6 +140,9 @@ export interface LarkChatMessagesResult { items: LarkChatMessage[]; hasMore: boo
 export interface LarkTextMessageInput { text: string; idempotencyKey?: string }
 export interface LarkSendTextInput extends LarkTextMessageInput { chatId: string }
 export interface LarkReplyTextInput extends LarkTextMessageInput { messageId: string; replyInThread?: boolean }
+export interface LarkUploadInput { data: Uint8Array; filename: string; idempotencyKey: string }
+export interface LarkMediaSendInput { chatId: string; fileKey?: string; imageKey?: string; idempotencyKey: string }
+export interface LarkMediaReplyInput { messageId: string; replyInThread?: boolean; fileKey?: string; imageKey?: string; idempotencyKey: string }
 
 export interface LarkBotConfig {
   appId: string;
@@ -857,6 +860,32 @@ export class LarkCardService {
     return { messageId: replyId, chatId: payload.data?.chat_id };
   }
 
+  async uploadFile(input: LarkUploadInput): Promise<string> { return this.uploadMedia('/open-apis/im/v1/files', 'file', 'file_type', 'stream', input, 'file_key'); }
+  async uploadImage(input: LarkUploadInput): Promise<string> { return this.uploadMedia('/open-apis/im/v1/images', 'image', 'image_type', 'message', input, 'image_key'); }
+
+  async sendFile(input: LarkMediaSendInput): Promise<LarkMessageResult> { return this.sendMedia(input.chatId, 'file', { file_key: required(input.fileKey, 'fileKey') }, input.idempotencyKey); }
+  async sendImage(input: LarkMediaSendInput): Promise<LarkMessageResult> { return this.sendMedia(input.chatId, 'image', { image_key: required(input.imageKey, 'imageKey') }, input.idempotencyKey); }
+  async replyFile(input: LarkMediaReplyInput): Promise<LarkMessageResult> { return this.replyMedia(input, 'file', { file_key: required(input.fileKey, 'fileKey') }); }
+  async replyImage(input: LarkMediaReplyInput): Promise<LarkMessageResult> { return this.replyMedia(input, 'image', { image_key: required(input.imageKey, 'imageKey') }); }
+
+  private async uploadMedia(path: string, field: string, typeField: string, type: string, input: LarkUploadInput, responseKey: string) {
+    const form = new FormData(); form.append(typeField, type); form.append(field, new Blob([input.data]), required(input.filename, 'filename'));
+    const payload = await this.requestForm(path, form);
+    const key = payload.data?.[responseKey];
+    if (!key) throw new LarkServiceError('INVALID_LARK_RESPONSE', `Lark upload response did not include ${responseKey}`, 502);
+    return String(key);
+  }
+  private async sendMedia(chatId: string, msgType: 'file' | 'image', content: Record<string, string>, idempotencyKey: string) {
+    const payload = await this.request('/open-apis/im/v1/messages?receive_id_type=chat_id', { body: { receive_id: required(chatId, 'chatId'), msg_type: msgType, content: JSON.stringify(content), uuid: idempotencyKey } });
+    if (!payload.data?.message_id) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
+    return { messageId: String(payload.data.message_id), chatId: payload.data?.chat_id };
+  }
+  private async replyMedia(input: LarkMediaReplyInput, msgType: 'file' | 'image', content: Record<string, string>) {
+    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(required(input.messageId, 'messageId'))}/reply`, { body: { msg_type: msgType, content: JSON.stringify(content), ...(input.replyInThread ? { reply_in_thread: true } : {}), uuid: input.idempotencyKey } });
+    if (!payload.data?.message_id) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reply response did not include message_id', 502);
+    return { messageId: String(payload.data.message_id), chatId: payload.data?.chat_id };
+  }
+
   async addReaction(messageId: string, emojiType: string): Promise<LarkReactionResult> {
     const resolvedMessageId = required(messageId, 'messageId');
     const resolvedEmojiType = required(emojiType, 'emojiType');
@@ -898,6 +927,25 @@ export class LarkCardService {
     }
     const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || undefined;
     return { data: new Uint8Array(await response.arrayBuffer()), ...(contentType ? { contentType } : {}) };
+  }
+
+  async readDocument(urlInput: string): Promise<{ url: string; title?: string; text: string }> {
+    let url: URL;
+    try { url = new URL(urlInput); } catch { throw new LarkServiceError('INVALID_DOCUMENT_URL', '文档链接必须是飞书或 Lark 的 https docx/wiki URL。', 400); }
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== 'https:' || !(/(^|\.)feishu\.cn$/.test(host) || /(^|\.)larksuite\.com$/.test(host) || /(^|\.)larkoffice\.com$/.test(host))) throw new LarkServiceError('INVALID_DOCUMENT_URL', '只允许读取飞书或 Lark 的 https docx/wiki 链接。', 400);
+    const parts = url.pathname.split('/').filter(Boolean);
+    const kind = parts.at(-2); let token = parts.at(-1);
+    if ((kind !== 'docx' && kind !== 'wiki') || !token) throw new LarkServiceError('INVALID_DOCUMENT_URL', '只允许读取 docx 或 wiki 文档链接。', 400);
+    if (kind === 'wiki') {
+      const node = await this.request(`/open-apis/wiki/v2/spaces/get_node?token=${encodeURIComponent(token)}`, { method: 'GET' });
+      if (node.data?.node?.obj_type !== 'docx' || !node.data?.node?.obj_token) throw new LarkServiceError('UNSUPPORTED_DOCUMENT_TYPE', '知识库节点不是 docx，不能读取。', 400);
+      token = String(node.data.node.obj_token);
+    }
+    const raw = await this.request(`/open-apis/docx/v1/documents/${encodeURIComponent(token)}/raw_content`, { method: 'GET' });
+    const text = raw.data?.content;
+    if (typeof text !== 'string') throw new LarkServiceError('INVALID_LARK_RESPONSE', '文档读取响应未包含 raw_content。', 502);
+    return { url: url.toString(), ...(typeof raw.data?.title === 'string' ? { title: raw.data.title } : {}), text };
   }
 
   async getBotOpenId(): Promise<string> {
@@ -1131,6 +1179,16 @@ export class LarkCardService {
       }
       throw error;
     }
+  }
+
+  private async requestForm(path: string, form: FormData) {
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.config.baseUrl}${path}`, { method: 'POST', headers: { authorization: `Bearer ${await this.tenantToken()}` }, body: form });
+    } catch (error) { throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark OpenAPI request failed: ${error instanceof Error ? error.message : String(error)}`, 502); }
+    const payload = await response.json().catch(() => ({})) as any;
+    if (!response.ok || payload.code !== 0) throw new LarkServiceError('LARK_OPENAPI_ERROR', `Lark OpenAPI request failed: ${payload.msg || response.statusText}`, 502, { upstreamCode: payload.code, upstreamHttpStatus: response.status });
+    return payload;
   }
 }
 

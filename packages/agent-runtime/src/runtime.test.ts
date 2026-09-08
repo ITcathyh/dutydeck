@@ -8,9 +8,9 @@ import { join } from 'node:path';
 
 const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
 
-function harness(options: { onSend?: (emit: (event: any) => void) => void; exitOnSend?: number; driverIdleTimeoutMs?: number; sessionEnvironment?: (session: Session) => Record<string, string>; sessionPrompt?: (session: Session, prompt: string) => string | Promise<string> } = {}) {
+function harness(options: { onSend?: (emit: (event: any) => void) => void; exitOnSend?: number; driverIdleTimeoutMs?: number; sessionEnvironment?: (session: Session) => Record<string, string>; sessionPrompt?: (session: Session, prompt: string) => string | Promise<string>; resolvePermission?: (id: string, approved: boolean) => Promise<boolean> } = {}) {
   const repos = createRepositories(':memory:'); let emit!: (event: any) => void; let exit!: (code: number | null) => void; const configuredAgents: AgentConfig[] = [];
-  const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { options.onSend?.(emit); if (options.exitOnSend) exit(options.exitOnSend); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}), setModel: vi.fn(async () => {}), setReasoningEffort: vi.fn(async () => {}), setPermissionMode: vi.fn() };
+  const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { options.onSend?.(emit); if (options.exitOnSend) exit(options.exitOnSend); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}), resolvePermission: vi.fn(options.resolvePermission ?? (async () => true)), setModel: vi.fn(async () => {}), setReasoningEffort: vi.fn(async () => {}), setPermissionMode: vi.fn() };
   const runtime = new DockmuxRuntime(repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (configuredAgent, _p, onEvent, onExit) => { configuredAgents.push(configuredAgent); emit = onEvent; exit = onExit; return driver; }, driverIdleTimeoutMs: options.driverIdleTimeoutMs, sessionEnvironment: options.sessionEnvironment, sessionPrompt: options.sessionPrompt });
   return { repos, runtime, driver, configuredAgents, emit: (event: any) => emit(event), exit: (code: number | null) => exit(code) };
 }
@@ -423,11 +423,236 @@ describe('runtime lifecycle acceptance', () => {
   });
 
   it('interrupt cancels only the current turn and retains the session', async () => { const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await h.runtime.interrupt(s.id); expect(h.driver.interrupt).toHaveBeenCalledOnce(); expect((await h.runtime.getSession(s.id))?.state).toBe('interrupted'); h.repos.close(); });
+  it('does not interrupt a replacement task when authorization finished for an older task', async () => {
+    const secondTurn = deferred();
+    const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.driver.send = vi.fn(async () => {
+      if (h.driver.send.mock.calls.length === 2) await secondTurn.promise;
+      h.emit({ type: 'text', data: { text: 'done' } });
+    });
+    const first = await h.runtime.dispatch(s.id, 'first');
+    const second = await h.runtime.dispatch(s.id, 'second');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(2));
+    await expect(h.runtime.interrupt(s.id, first.id)).rejects.toMatchObject({ code: 'TASK_NOT_ACTIVE', statusCode: 409 });
+    expect(h.driver.interrupt).not.toHaveBeenCalled();
+    secondTurn.resolve();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(s.id)).find(task => task.id === second.id)?.status).toBe('completed'));
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not overwrite a replacement task after an asynchronous interrupt finishes', async () => {
+    const firstTurn = deferred(); const secondTurn = deferred(); const interruptDone = deferred();
+    const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.driver.send = vi.fn(async () => {
+      if (h.driver.send.mock.calls.length === 1) await firstTurn.promise;
+      else await secondTurn.promise;
+      h.emit({ type: 'text', data: { text: 'done' } });
+    });
+    h.driver.interrupt = vi.fn(async () => { await interruptDone.promise; });
+    const first = await h.runtime.dispatch(s.id, 'first');
+    const second = await h.runtime.dispatch(s.id, 'second');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(1));
+    const interrupting = h.runtime.interrupt(s.id, first.id);
+    await vi.waitFor(() => expect(h.driver.interrupt).toHaveBeenCalledOnce());
+    firstTurn.resolve();
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(2));
+    expect((await h.runtime.getSession(s.id))?.state).toBe('thinking');
+    interruptDone.resolve();
+    await expect(interrupting).resolves.toBeUndefined();
+    expect((await h.runtime.getSession(s.id))?.state).toBe('thinking');
+    secondTurn.resolve();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(s.id)).find(task => task.id === second.id)?.status).toBe('completed'));
+    await h.runtime.shutdown(); h.repos.close();
+  });
   it('stop delegates process-tree cleanup and marks stopped', async () => { const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await h.runtime.stop(s.id); expect(h.driver.stop).toHaveBeenCalledOnce(); expect((await h.runtime.getSession(s.id))?.state).toBe('stopped'); h.repos.close(); });
   it('permanently archives a session and rejects subsequent actions', async () => { const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); const archived = await h.runtime.archive(s.id); expect(archived.archivedAt).toBeTruthy(); expect(archived.state).toBe('stopped'); await expect(h.runtime.dispatch(s.id, 'not allowed')).rejects.toMatchObject({ code: 'SESSION_ARCHIVED' }); expect((await h.runtime.listSessions())[0]?.archivedAt).toBe(archived.archivedAt); await h.runtime.shutdown(); h.repos.close(); });
   it('restart creates a new run instance', async () => { const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); const old = s.runId; const restarted = await h.runtime.restart(s.id); expect(restarted.runId).not.toBe(old); expect(h.driver.stop).toHaveBeenCalledOnce(); h.repos.close(); });
   it('abnormal agent exit produces failed state and error event', async () => { const h = harness({ exitOnSend: 17 }); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await h.runtime.send(s.id, 'exit'); await vi.waitFor(async () => expect((await h.runtime.getEvents(s.id)).some(e => e.type === 'error')).toBe(true)); h.repos.close(); });
-  it('permission requests can be approved and rejected', async () => { const h = harness({ onSend: emit => { emit({ type: 'permission_request', data: { id: 'p1', title: 'Write?', status: 'pending' } }); emit({ type: 'permission_request', data: { id: 'p2', title: 'Delete?', status: 'pending' } }); } }); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await h.runtime.send(s.id, 'write'); expect((await h.runtime.resolvePermission(s.id, 'p1', true)).status).toBe('approved'); expect((await h.runtime.resolvePermission(s.id, 'p2', false)).status).toBe('rejected'); await expect(h.runtime.resolvePermission(s.id, 'p1', true)).rejects.toMatchObject({ code: 'PERMISSION_NOT_FOUND' }); await h.runtime.shutdown(); h.repos.close(); });
+  it('permission requests call the live driver for approve and reject exactly once', async () => {
+    const h = harness({ onSend: emit => { emit({ type: 'permission_request', data: { id: 'p1', title: 'Write?', status: 'pending' } }); emit({ type: 'permission_request', data: { id: 'p2', title: 'Delete?', status: 'pending' } }); } });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await h.runtime.send(s.id, 'write');
+    expect((await h.runtime.resolvePermission(s.id, 'p1', true)).status).toBe('approved');
+    expect((await h.runtime.resolvePermission(s.id, 'p2', false)).status).toBe('rejected');
+    expect(h.driver.resolvePermission).toHaveBeenNthCalledWith(1, 'p1', true);
+    expect(h.driver.resolvePermission).toHaveBeenNthCalledWith(2, 'p2', false);
+    await expect(h.runtime.resolvePermission(s.id, 'p1', true)).rejects.toMatchObject({ code: 'PERMISSION_NOT_FOUND' });
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('keeps a claim private while the driver decision is in flight', async () => {
+    const gate = deferred();
+    const h = harness({ resolvePermission: async () => { await gate.promise; return true; } });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.emit({ type: 'permission_request', data: { id: 'race', title: 'Race', status: 'pending' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    const first = h.runtime.resolvePermission(s.id, 'race', true);
+    await vi.waitFor(() => expect(h.driver.resolvePermission).toHaveBeenCalledWith('race', true));
+    expect(h.runtime.getPendingPermissions(s.id)).toEqual([]);
+    await expect(h.runtime.resolvePermission(s.id, 'race', true)).rejects.toMatchObject({ code: 'PERMISSION_RESOLVING', statusCode: 409 });
+    gate.resolve();
+    await expect(first).resolves.toMatchObject({ status: 'approved' });
+    expect(h.driver.resolvePermission).toHaveBeenCalledTimes(1);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('persists an approval intent before the driver and consumes it when audit delivery fails', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.emit({ type: 'permission_request', data: { id: 'audit', title: 'Audit', status: 'pending' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    const save = h.repos.artifacts.savePermission.bind(h.repos.artifacts);
+    const order: string[] = [];
+    h.repos.artifacts.savePermission = vi.fn(async (...args: Parameters<typeof save>) => { order.push('save'); return save(...args); });
+    h.driver.resolvePermission = vi.fn(async () => { order.push('driver'); return true; });
+    const append = h.repos.events.append.bind(h.repos.events);
+    h.repos.events.append = vi.fn(async event => {
+      if (event.type === 'permission_request' && (event.data as any)?.status === 'approved') throw new Error('event store down');
+      return append(event);
+    });
+    await expect(h.runtime.resolvePermission(s.id, 'audit', true)).rejects.toMatchObject({ code: 'PERMISSION_ACCEPTED_AUDIT_FAILED', statusCode: 503 });
+    expect(order.indexOf('save')).toBeLessThan(order.indexOf('driver'));
+    expect(h.driver.resolvePermission).toHaveBeenCalledOnce();
+    await expect(h.runtime.resolvePermission(s.id, 'audit', true)).rejects.toMatchObject({ code: 'PERMISSION_NOT_FOUND' });
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not submit to an old driver when stop wins while the decision intent is saving', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.emit({ type: 'permission_request', data: { id: 'stop-race', title: 'Stop race', status: 'pending' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    const started = deferred(); const gate = deferred();
+    const save = h.repos.artifacts.savePermission.bind(h.repos.artifacts);
+    h.repos.artifacts.savePermission = vi.fn(async (...args: Parameters<typeof save>) => { started.resolve(); await gate.promise; return save(...args); });
+    const decision = h.runtime.resolvePermission(s.id, 'stop-race', true);
+    await started.promise;
+    await h.runtime.stop(s.id);
+    gate.resolve();
+    await expect(decision).rejects.toMatchObject({ code: 'PERMISSION_EXPIRED', statusCode: 409 });
+    expect(h.driver.resolvePermission).not.toHaveBeenCalled();
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not turn a synchronous terminal driver update into a false expiry', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.emit({ type: 'permission_request', data: { id: 'synchronous-terminal', title: 'Sync', status: 'pending' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    h.driver.resolvePermission = vi.fn(async () => {
+      h.emit({ type: 'permission_request', data: { id: 'synchronous-terminal', title: 'Sync', status: 'approved' } });
+      await new Promise(resolve => setTimeout(resolve, 20));
+      return true;
+    });
+    await expect(h.runtime.resolvePermission(s.id, 'synchronous-terminal', true)).resolves.toMatchObject({ status: 'approved' });
+    const terminals = (await h.runtime.getEvents(s.id)).filter(event => event.type === 'permission_request' && (event.data as any)?.id === 'synchronous-terminal' && (event.data as any)?.status === 'approved');
+    expect(terminals).toHaveLength(1);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('reports accepted-but-audit-failed when persisting the accepted decision fails', async () => {
+    const h = harness();
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.emit({ type: 'permission_request', data: { id: 'save-failure', title: 'Save', status: 'pending' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    const save = h.repos.artifacts.savePermission.bind(h.repos.artifacts);
+    let saves = 0;
+    h.repos.artifacts.savePermission = vi.fn(async (...args: Parameters<typeof save>) => {
+      saves += 1;
+      if (saves === 2) throw new Error('artifact store down');
+      return save(...args);
+    });
+    await expect(h.runtime.resolvePermission(s.id, 'save-failure', true)).rejects.toMatchObject({ code: 'PERMISSION_ACCEPTED_AUDIT_FAILED', statusCode: 503 });
+    expect(h.driver.resolvePermission).toHaveBeenCalledOnce();
+    await expect(h.runtime.resolvePermission(s.id, 'save-failure', true)).rejects.toMatchObject({ code: 'PERMISSION_NOT_FOUND' });
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not leave a retryable approval after the live driver rejects it', async () => {
+    const h = harness({ resolvePermission: async () => false });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.emit({ type: 'permission_request', data: { id: 'rejected-by-driver', title: 'Reject', status: 'pending' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    await expect(h.runtime.resolvePermission(s.id, 'rejected-by-driver', true)).rejects.toMatchObject({ code: 'PERMISSION_EXPIRED', statusCode: 409 });
+    expect(h.driver.resolvePermission).toHaveBeenCalledOnce();
+    await expect(h.runtime.resolvePermission(s.id, 'rejected-by-driver', true)).rejects.toMatchObject({ code: 'PERMISSION_NOT_FOUND' });
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('clears a pending permission when the driver reports its terminal state', async () => {
+    const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    h.emit({ type: 'permission_request', data: { id: 'terminal', title: 'Terminal', status: 'pending' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    h.emit({ type: 'permission_request', data: { id: 'terminal', title: 'Terminal', status: 'rejected' } });
+    await vi.waitFor(() => expect(h.runtime.getPendingPermissions(s.id)).toEqual([]));
+    await expect(h.runtime.resolvePermission(s.id, 'terminal', false)).rejects.toMatchObject({ code: 'PERMISSION_NOT_FOUND' });
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('drops callbacks from a stopped driver after restart even when the permission id repeats', async () => {
+    const repos = createRepositories(':memory:');
+    const callbacks: Array<(event: any) => void> = [];
+    const drivers: AgentDriver[] = [];
+    const runtime = new DockmuxRuntime(repos, {
+      probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+      driverFactory: (_configured, _protocol, onEvent) => {
+        callbacks.push(onEvent);
+        const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}), resolvePermission: vi.fn(async () => true) };
+        drivers.push(driver); return driver;
+      }
+    });
+    await runtime.initialize([agent]); const s = await runtime.start({ agentId: 'mock' });
+    callbacks[0]!({ type: 'permission_request', data: { id: 'same', title: 'old', status: 'pending' } });
+    await vi.waitFor(() => expect(runtime.getPendingPermissions(s.id)).toHaveLength(1));
+    await runtime.restart(s.id);
+    callbacks[0]!({ type: 'permission_request', data: { id: 'same', title: 'stale', status: 'pending' } });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(runtime.getPendingPermissions(s.id)).toEqual([]);
+    callbacks[1]!({ type: 'permission_request', data: { id: 'same', title: 'new', status: 'pending' } });
+    await vi.waitFor(() => expect(runtime.getPendingPermissions(s.id)).toEqual([expect.objectContaining({ title: 'new' })]));
+    await runtime.resolvePermission(s.id, 'same', true);
+    expect(drivers[0]!.resolvePermission).not.toHaveBeenCalled();
+    expect(drivers[1]!.resolvePermission).toHaveBeenCalledWith('same', true);
+    await runtime.shutdown(); repos.close();
+  });
+
+  it('uses durable task ids to replay duplicate dispatches and reject conflicting deliveries', async () => {
+    const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'done' } }) });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    const accepted = await h.runtime.dispatch(s.id, 'one', 'queue', 'one', undefined, 'ou_a', 'message_1');
+    const replay = await h.runtime.dispatch(s.id, 'one', 'queue', 'one', undefined, 'ou_a', 'message_1');
+    expect(replay).toMatchObject({ id: accepted.id, replayed: true });
+    await expect(h.runtime.dispatch(s.id, 'changed', 'queue', 'changed', undefined, 'ou_a', 'message_1')).rejects.toMatchObject({ code: 'TASK_IDEMPOTENCY_CONFLICT' });
+    await expect(h.runtime.dispatch(s.id, 'one', 'queue', 'one', undefined, 'ou_b', 'message_1')).rejects.toMatchObject({ code: 'TASK_IDEMPOTENCY_CONFLICT' });
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledTimes(1));
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('recovers an atomically created idempotent task after a storage failure before scheduling', async () => {
+    const first = harness();
+    await first.runtime.initialize([agent]); const s = await first.runtime.start({ agentId: 'mock' });
+    const save = first.repos.tasks.save.bind(first.repos.tasks);
+    let failOnce = true;
+    first.repos.tasks.save = vi.fn(async task => {
+      if (failOnce && task.status === 'queued') { failOnce = false; throw new Error('storage unavailable'); }
+      return save(task);
+    });
+    await expect(first.runtime.dispatch(s.id, 'recover me', 'queue', 'agent recovery prompt', undefined, 'ou_a', 'delivery_1')).rejects.toThrow('storage unavailable');
+    await first.runtime.shutdown();
+    first.repos.tasks.save = save;
+    let emit!: (event: any) => void;
+    const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => emit({ type: 'text', data: { text: 'recovered' } })), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+    const restored = new DockmuxRuntime(first.repos, {
+      probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+      driverFactory: (_configured, _protocol, onEvent) => { emit = onEvent; return driver; }
+    });
+    await restored.initialize([agent]);
+    await vi.waitFor(async () => expect((await restored.getTasks(s.id)).find(task => task.prompt === 'recover me')?.status).toBe('completed'));
+    const replay = await restored.dispatch(s.id, 'recover me', 'queue', 'agent recovery prompt', undefined, 'ou_a', 'delivery_1');
+    expect(replay).toMatchObject({ replayed: true });
+    expect(driver.send).toHaveBeenCalledTimes(1);
+    await restored.shutdown(); first.repos.close();
+  });
+
   it('returns an explicit error for unsupported pause/resume', async () => { const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await expect(h.runtime.pause(s.id)).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY', statusCode: 422 }); h.repos.close(); });
   it('returns a clear dependency error when a scanned Agent becomes unavailable', async () => { const h = harness(); const unavailable = { ...agent, id: 'trae', name: 'Trae', command: 'missing-trae' }; const runtime = new DockmuxRuntime(h.repos, { probe: () => ({ protocol: 'acp', available: false, detail: 'command disappeared after scan', pause: false, resume: true }) }); await runtime.initialize([unavailable]); await expect(runtime.start({ agentId: 'trae' })).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE' }); h.repos.close(); });
 

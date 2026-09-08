@@ -295,7 +295,12 @@ export interface TaskExecutionContext {
   riskPolicy?: ToolRiskPolicy;
 }
 export interface TaskRecord { id: string; sessionId: string; prompt: string; status: string; executionContext?: TaskExecutionContext; createdAt: string; updatedAt: string }
-export interface TaskRepository { save(task: TaskRecord): Promise<void>; listBySession(sessionId: string): Promise<TaskRecord[]> }
+export interface TaskRepository {
+  save(task: TaskRecord): Promise<void>;
+  listBySession(sessionId: string): Promise<TaskRecord[]>;
+  get?(id: string): Promise<TaskRecord | undefined>;
+  create?(task: TaskRecord): Promise<boolean>;
+}
 export interface EventWindowOptions {
   afterSequence?: number;
   beforeSequence?: number;
@@ -313,6 +318,7 @@ export interface ConfigRepository {
   get(key: string): Promise<string | undefined>;
   set(key: string, value: string): Promise<void>;
   compareAndSet?(key: string, expected: string | undefined, value: string): Promise<boolean>;
+  list?(prefix: string): Promise<Array<{ key: string; value: string }>>;
 }
 export interface ChannelMapping { id: string; channel: string; externalId: string; sessionId: string; extra?: string | null; createdAt: string }
 export interface ChannelMappingRepository {

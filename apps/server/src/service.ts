@@ -6,6 +6,7 @@ import { createRepositories } from '@dockmux/storage';
 import { type DriverFactory, type PolicyAction } from '@dockmux/shared';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
+import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
 import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
@@ -222,14 +223,16 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         ...(input.askId ? { askId: input.askId } : {})
       });
     }
-  });
+  }, createRelayAskStore(repos.config));
   try {
+    await relayBroker.initialize();
     await runtime.initialize(config.agents);
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
     app = await buildApp(runtime, {
       webRoot,
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
+        relayBroker,
         env,
         config: repos.config,
         agents: repos.agents,
@@ -284,7 +287,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       // Explicit session stop/restart never passes through here and continues
       // to destroy its backend as requested by the user.
       for (const driver of ptyDrivers) driver.prepareForDaemonShutdown();
-      const results = await Promise.allSettled([app?.close() ?? Promise.resolve(), runtime.shutdown()]);
+      const results = await Promise.allSettled([relayBroker.flush(), app?.close() ?? Promise.resolve(), runtime.shutdown()]);
       capabilities.close();
       repos.close();
       const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);

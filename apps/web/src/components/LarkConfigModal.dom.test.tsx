@@ -43,10 +43,10 @@ const collection = (overrides: Partial<LarkBotConfig> = {}): LarkConfig => ({
   listeningDisabled: false
 });
 
-function renderModal(config: LarkConfig = collection()) {
+function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' = 'acp') {
   vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
   vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
-  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'acp' });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={() => {}}/></QueryClientProvider>);
 }
@@ -358,5 +358,34 @@ describe('LarkConfigModal 模态外壳契约', () => {
       expect(document.body.querySelector('[title="监听已启动"]')).toBeNull();
       expect(document.body.textContent).not.toContain('监听已启动，可到飞书发送消息');
     });
+  });
+});
+
+
+describe('LarkConfigModal ask permission posture', () => {
+  it('saves ask without a full-trust confirmation for an ACP Agent', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', permissionMode: 'ask', setupComplete: true }));
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+    await user.click(screen.getByRole('button', { name: /完全信任：自动执行操作/ }));
+    await user.click(await screen.findByRole('option', { name: /飞书逐项确认/ }));
+    expect(screen.queryByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ })).toBeNull();
+    const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'ask', fullTrustConfirmed: false })));
+  });
+
+  it('does not allow ask to save when the selected Agent is not ACP', async () => {
+    const user = userEvent.setup();
+    renderModal(collection(), 'cli');
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+    await user.click(screen.getByRole('button', { name: /完全信任：自动执行操作/ }));
+    await user.click(await screen.findByRole('option', { name: /飞书逐项确认/ }));
+    expect(await screen.findByText(/当前 Agent 尚未确认支持 ACP/)).toBeTruthy();
+    await waitFor(() => expect((screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement).disabled).toBe(true));
   });
 });

@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dockmux/shared';
 import { makeId, now, RuntimeError } from '@dockmux/shared';
 import { AcpxAdapter } from '@dockmux/acp-client';
@@ -71,7 +72,9 @@ export class DockmuxRuntime {
   private readonly queues = new Map<string, TaskRecord[]>();
   private readonly queueRuns = new Map<string, Promise<void>>();
   private readonly sequences = new Map<string, number>();
-  private readonly permissions = new Map<string, PermissionRequestData>();
+  private readonly permissions = new Map<string, { request: PermissionRequestData; generation: number }>();
+  private readonly permissionResolutions = new Map<string, string>();
+  private readonly sessionGenerations = new Map<string, number>();
   private readonly driverEventChains = new Map<string, Promise<void>>();
   private readonly driverEventErrors = new Map<string, unknown>();
   private readonly driverStopReasons = new Map<string, string>();
@@ -103,9 +106,11 @@ export class DockmuxRuntime {
 
   private touch(sessionId: string) { this.lastActivity.set(sessionId, Date.now()); }
   private permissionKey(sessionId: string, permissionId: string) { return `${sessionId}:${permissionId}`; }
-  private enqueueDriverEvent(session: Session, event: NormalizedDriverEvent) {
+  private enqueueDriverEvent(session: Session, event: NormalizedDriverEvent, generation: number) {
     const previous = this.driverEventChains.get(session.id) ?? Promise.resolve();
-    const next = previous.then(() => this.consume(session, event)).catch(error => {
+    const next = previous.then(() => {
+      if (this.sessionGenerations.get(session.id) === generation) return this.consume(session, event);
+    }).catch(error => {
       if (!this.driverEventErrors.has(session.id)) this.driverEventErrors.set(session.id, error);
     });
     this.driverEventChains.set(session.id, next);
@@ -160,8 +165,16 @@ export class DockmuxRuntime {
     }
     return { status: 'completed', stopReason };
   }
-  private onDriverEvent(session: Session) {
-    return (event: NormalizedDriverEvent) => this.enqueueDriverEvent(session, event);
+  private nextSessionGeneration(sessionId: string) {
+    const generation = (this.sessionGenerations.get(sessionId) ?? 0) + 1;
+    this.sessionGenerations.set(sessionId, generation);
+    return generation;
+  }
+  private onDriverEvent(session: Session, generation: number) {
+    return (event: NormalizedDriverEvent) => {
+      if (this.sessionGenerations.get(session.id) !== generation) return;
+      this.enqueueDriverEvent(session, event, generation);
+    };
   }
   private configureAgentForSession(agent: AgentConfig, session: Session): AgentConfig {
     return {
@@ -369,7 +382,9 @@ export class DockmuxRuntime {
     } else if (event.type === 'thinking' && session.state !== 'thinking') await this.saveState(session, 'thinking');
     else if (event.type === 'permission_request') {
       data = { ...data, status: data.status ?? 'pending' };
-      if (data.status === 'pending') { this.permissions.set(this.permissionKey(session.id, data.id), data); await this.saveState(session, 'waiting_for_permission'); }
+      const key = this.permissionKey(session.id, data.id);
+      if (data.status === 'pending') { this.permissions.set(key, { request: data, generation: this.sessionGenerations.get(session.id) ?? 0 }); await this.saveState(session, 'waiting_for_permission'); }
+      else { this.permissions.delete(key); this.permissionResolutions.delete(key); }
       await this.repos.artifacts.savePermission(session.id, data);
     } else if (event.type === 'error') {
       if (this.activeTurns.has(session.id)) this.turnErrors.set(session.id, data.message);
@@ -398,7 +413,8 @@ export class DockmuxRuntime {
     await this.repos.artifacts.ensureLocalProject(session.cwd);
     await this.repos.sessions.save(session);
     await this.saveState(session, 'starting');
-    const driver = this.factory(this.configureAgentForSession(configured, session), capability.protocol, this.onDriverEvent(session), code => { this.notifyDriverExit(session.id, code); if (code && session.state !== 'stopped' && !this.interruptedTurns.has(session.id) && !this.hardInterrupts.has(session.id)) void this.saveState(session, 'failed', `Agent exited with code ${code}`).then(() => this.emit(session.id, 'error', { message: `Agent exited with code ${code}` })); }, session.id);
+    const generation = this.nextSessionGeneration(session.id);
+    const driver = this.factory(this.configureAgentForSession(configured, session), capability.protocol, this.onDriverEvent(session, generation), code => { if (this.sessionGenerations.get(session.id) !== generation) return; this.notifyDriverExit(session.id, code); if (code && session.state !== 'stopped' && !this.interruptedTurns.has(session.id) && !this.hardInterrupts.has(session.id)) void this.saveState(session, 'failed', `Agent exited with code ${code}`).then(() => this.emit(session.id, 'error', { message: `Agent exited with code ${code}` })); }, session.id);
     this.drivers.set(session.id, driver);
     try { await driver.start(); this.touch(session.id); await this.saveState(session, 'idle'); return session; }
     catch (error) {
@@ -428,7 +444,9 @@ export class DockmuxRuntime {
     const agent = await this.repos.agents.get(session.agentId);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${session.agentId}`, 404);
     const configured = this.configureAgentForSession(agent, session);
-    const driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => {
+    const generation = this.nextSessionGeneration(session.id);
+    const driver = this.factory(configured, session.protocol!, this.onDriverEvent(session, generation), code => {
+      if (this.sessionGenerations.get(session.id) !== generation) return;
       if (code && session.state !== 'stopped' && !this.interruptedTurns.has(session.id) && !this.hardInterrupts.has(session.id)) void this.saveState(session, 'failed', `Agent exited with code ${code}`).then(() => this.emit(session.id, 'error', { message: `Agent exited with code ${code}` }));
     }, session.id);
     this.drivers.set(session.id, driver);
@@ -509,10 +527,25 @@ export class DockmuxRuntime {
     return this.runTask(id, task);
   }
 
-  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string) {
+  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string) {
+    const stableId = idempotencyKey ? 'task_' + createHash('sha256').update(id + '\0' + idempotencyKey).digest('hex') : undefined;
+    const replay = (task: TaskRecord) => {
+      if (task.sessionId !== id || task.prompt !== prompt || task.executionContext?.actorId !== actorId) throw new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'This delivery key belongs to a different task request', 409);
+      return { ...this.publicTask(task), replayed: true, queuedAhead: 0 };
+    };
+    if (stableId) {
+      if (!this.repos.tasks.get || !this.repos.tasks.create) throw new RuntimeError('TASK_IDEMPOTENCY_UNSUPPORTED', 'Task storage cannot atomically accept this message', 503);
+      const existing = await this.repos.tasks.get(stableId);
+      if (existing) return replay(existing);
+    }
     const { session } = await this.active(id);
     if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot send while session is ${session.state}`, 409);
-    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'queued', executionContext: this.executionContext(agentPrompt, riskPolicy, actorId), createdAt: now(), updatedAt: now() };
+    const task: TaskRecord = { id: stableId ?? makeId('task'), sessionId: id, prompt, status: 'queued', executionContext: this.executionContext(agentPrompt, riskPolicy, actorId), createdAt: now(), updatedAt: now() };
+    if (stableId && !await this.repos.tasks.create!(task)) {
+      const existing = await this.repos.tasks.get!(stableId);
+      if (!existing) throw new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'Task acceptance changed; retry the message', 409);
+      return replay(existing);
+    }
     const queue = this.queues.get(id) ?? [];
     const queuedAhead = queue.length + (this.activeTurns.has(id) ? 1 : 0);
     if (mode === 'interrupt') queue.unshift(task); else queue.push(task);
@@ -589,7 +622,21 @@ export class DockmuxRuntime {
     await Promise.all(queue.map(task => this.saveTask(task, 'cancelled')));
   }
 
-  async interrupt(id: string) { const { session, driver } = await this.active(id); if (!driver) throw new RuntimeError('SESSION_DISCONNECTED', 'Session is disconnected', 409); if (this.activeTurns.has(id)) this.interruptedTurns.add(id); await this.saveState(session, 'interrupting'); await driver.interrupt(); await this.saveState(session, 'interrupted'); }
+  async interrupt(id: string, expectedTaskId?: string) {
+    const { session, driver } = await this.active(id);
+    if (!driver) throw new RuntimeError('SESSION_DISCONNECTED', 'Session is disconnected', 409);
+    const task = expectedTaskId ? this.activeTasks.get(id) : undefined;
+    if (expectedTaskId && (!task || task.id !== expectedTaskId)) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
+    if (this.activeTurns.has(id)) this.interruptedTurns.add(id);
+    await this.saveState(session, 'interrupting');
+    if (expectedTaskId && this.activeTasks.get(id) !== task) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
+    await driver.interrupt();
+    // A driver interrupt may finish the requested turn and let the queue start
+    // another task before its promise resolves. That later task owns session
+    // state; this stale request must not interrupt or overwrite it.
+    if (expectedTaskId && this.activeTasks.get(id) !== task) return;
+    await this.saveState(session, 'interrupted');
+  }
   async setRiskPolicy(id: string, policy?: ToolRiskPolicy) {
     const { session, driver } = await this.active(id);
     await this.applyRiskPolicy(session, driver, policy);
@@ -696,7 +743,9 @@ export class DockmuxRuntime {
     let driver = this.drivers.get(id);
     if (!driver) {
       const configured = this.configureAgentForSession(agent, session);
-      driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => {
+      const generation = this.nextSessionGeneration(session.id);
+      driver = this.factory(configured, session.protocol!, this.onDriverEvent(session, generation), code => {
+        if (this.sessionGenerations.get(session.id) !== generation) return;
         this.notifyDriverExit(session.id, code);
         if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`);
       }, session.id);
@@ -726,7 +775,25 @@ export class DockmuxRuntime {
     await this.repos.sessions.save(stopped);
     return stopped;
   }
-  async restart(id: string) { const { session } = await this.active(id); await this.stop(id); const agent = await this.repos.agents.get(session.agentId); if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent config was removed', 404); session.runId = makeId('run'); session.error = undefined; const configured = this.configureAgentForSession(agent, session); const driver = this.factory(configured, session.protocol!, this.onDriverEvent(session), code => { this.notifyDriverExit(session.id, code); if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`); }, session.id); this.drivers.set(id, driver); await this.saveState(session, 'starting'); await driver.start(); await this.saveState(session, 'idle'); return session; }
+  async restart(id: string) {
+    const { session } = await this.active(id);
+    await this.stop(id);
+    const agent = await this.repos.agents.get(session.agentId);
+    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent config was removed', 404);
+    session.runId = makeId('run'); session.error = undefined;
+    const configured = this.configureAgentForSession(agent, session);
+    const generation = this.nextSessionGeneration(session.id);
+    const driver = this.factory(configured, session.protocol!, this.onDriverEvent(session, generation), code => {
+      if (this.sessionGenerations.get(session.id) !== generation) return;
+      this.notifyDriverExit(session.id, code);
+      if (code) void this.saveState(session, 'failed', `Agent exited with code ${code}`);
+    }, session.id);
+    this.drivers.set(id, driver);
+    await this.saveState(session, 'starting');
+    await driver.start();
+    await this.saveState(session, 'idle');
+    return session;
+  }
   async setPermissionMode(id: string, mode: PermissionMode) {
     const { session, driver } = await this.active(id);
     if (this.activeTurns.has(id)) throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response before switching permissions', 409);
@@ -739,7 +806,49 @@ export class DockmuxRuntime {
     await this.repos.sessions.save(session);
     return session;
   }
-  async resolvePermission(sessionId: string, permissionId: string, approved: boolean) { const { session, driver } = await this.active(sessionId); const key = this.permissionKey(sessionId, permissionId); const request = this.permissions.get(key); if (!request) throw new RuntimeError('PERMISSION_NOT_FOUND', `Unknown permission request: ${permissionId}`, 404); const resolved = await driver?.resolvePermission?.(permissionId, approved); if (driver?.resolvePermission && !resolved) throw new RuntimeError('PERMISSION_EXPIRED', `Permission request is no longer active: ${permissionId}`, 409); request.status = approved ? 'approved' : 'rejected'; this.permissions.delete(key); this.touch(sessionId); await this.repos.artifacts.savePermission(sessionId, request); await this.emit(sessionId, 'permission_request', request); await this.saveState(session, 'thinking'); return request; }
+  getPendingPermissions(sessionId: string): PermissionRequestData[] {
+    if (!this.drivers.get(sessionId)?.resolvePermission) return [];
+    return [...this.permissions.entries()].filter(([key]) => key.startsWith(sessionId + ':') && !this.permissionResolutions.has(key)).map(([, value]) => ({ ...value.request }));
+  }
+
+  async resolvePermission(sessionId: string, permissionId: string, approved: boolean) {
+    const { driver } = await this.active(sessionId);
+    const key = this.permissionKey(sessionId, permissionId);
+    const pending = this.permissions.get(key);
+    if (!pending) throw new RuntimeError('PERMISSION_NOT_FOUND', 'Permission request is no longer active', 404);
+    if (this.permissionResolutions.has(key)) throw new RuntimeError('PERMISSION_RESOLVING', 'Permission decision is already being submitted', 409);
+    if (!driver?.resolvePermission) throw new RuntimeError('PERMISSION_EXPIRED', 'The original approval driver is unavailable', 409);
+    const claim = makeId('permission_claim'); this.permissionResolutions.set(key, claim);
+    try {
+      if (pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0) || this.permissions.get(key) !== pending) throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
+      const request = { ...pending.request, status: approved ? 'approved' as const : 'rejected' as const };
+      // Keep the stored request pending while recording the requested decision.
+      // A failed driver call must not be represented as an accepted decision.
+      const intent = { ...pending.request, resolutionIntent: request.status };
+      await this.repos.artifacts.savePermission(sessionId, intent);
+      if (this.permissionResolutions.get(key) !== claim || this.permissions.get(key) !== pending || this.drivers.get(sessionId) !== driver || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0)) {
+        throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
+      }
+      const resolved = await driver.resolvePermission(permissionId, approved);
+      if (!resolved || this.drivers.get(sessionId) !== driver || pending.generation !== (this.sessionGenerations.get(sessionId) ?? 0)) {
+        if (this.permissions.get(key) === pending) this.permissions.delete(key);
+        throw new RuntimeError('PERMISSION_EXPIRED', 'Permission request is no longer active', 409);
+      }
+      // ACPX may synchronously emit its terminal permission update before its
+      // resolve promise settles. That event is the canonical audit record.
+      if (this.permissions.get(key) !== pending) return request;
+      this.permissions.delete(key);
+      this.touch(sessionId);
+      try {
+        await this.repos.artifacts.savePermission(sessionId, request);
+        await this.emit(sessionId, 'permission_request', request);
+      } catch (error) {
+        throw new RuntimeError('PERMISSION_ACCEPTED_AUDIT_FAILED', `Permission accepted but audit delivery failed: ${error instanceof Error ? error.message : String(error)}`, 503);
+      }
+      // Subsequent driver events own the session state; an approval must not overwrite a completed turn.
+      return request;
+    } finally { if (this.permissionResolutions.get(key) === claim) this.permissionResolutions.delete(key); }
+  }
 
   private releaseSessionMemory(sessionId: string) {
     this.drivers.delete(sessionId);
@@ -757,7 +866,9 @@ export class DockmuxRuntime {
     this.queueRuns.delete(sessionId);
     for (const resolve of this.turnWaiters.get(sessionId) ?? []) resolve();
     this.turnWaiters.delete(sessionId);
+    this.sessionGenerations.set(sessionId, (this.sessionGenerations.get(sessionId) ?? 0) + 1);
     for (const key of this.permissions.keys()) if (key.startsWith(`${sessionId}:`)) this.permissions.delete(key);
+    for (const key of this.permissionResolutions.keys()) if (key.startsWith(`${sessionId}:`)) this.permissionResolutions.delete(key);
   }
 
   private async cleanupIdleDriversOnce(at: number) {
@@ -785,7 +896,7 @@ export class DockmuxRuntime {
     await Promise.allSettled(drivers.map(driver => driver.stop()));
     await Promise.allSettled(this.queueRuns.values());
     await Promise.allSettled(this.driverEventChains.values());
-    this.sequences.clear(); this.permissions.clear(); this.lastActivity.clear(); this.activeTurns.clear(); this.activeTasks.clear(); this.interruptedTurns.clear(); this.hardInterrupts.clear(); this.turnErrors.clear(); this.driverEventChains.clear(); this.driverEventErrors.clear();
+    this.sequences.clear(); this.permissions.clear(); this.permissionResolutions.clear(); this.sessionGenerations.clear(); this.lastActivity.clear(); this.activeTurns.clear(); this.activeTasks.clear(); this.interruptedTurns.clear(); this.hardInterrupts.clear(); this.turnErrors.clear(); this.driverEventChains.clear(); this.driverEventErrors.clear();
     for (const waiters of this.turnWaiters.values()) for (const resolve of waiters) resolve();
     this.turnWaiters.clear(); this.queues.clear(); this.queueRuns.clear(); this.emitter.removeAllListeners();
   }

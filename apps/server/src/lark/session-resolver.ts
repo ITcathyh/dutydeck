@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { Session } from '@dockmux/shared';
-import type { StoredLarkConfig } from './config.js';
+import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkChatMode } from './chat-mode.js';
@@ -28,7 +28,8 @@ export const larkSessionConfigKey = (config: StoredLarkConfig) => JSON.stringify
   config.defaultModel ?? null,
   config.defaultReasoningEffort ?? null,
   config.workspace ?? null,
-  config.fullTrustConfirmed === true
+  config.fullTrustConfirmed === true,
+  larkPermissionMode(config)
 ]);
 
 // 群聊不能按 chat_id 复用同一个 Agent 会话，否则不同话题/提问人的历史和预注入 Prompt 会串在一起。
@@ -243,20 +244,30 @@ export async function resolveLarkSession(
   scopeId: string
 ): Promise<Session> {
   if (!config.defaultAgentId) throw new LarkServiceError('LARK_AGENT_CONFIG_REQUIRED', '机器人尚未配置默认 Agent，请在 Dockmux 飞书设置的“Agent 与风险控制”中完成配置。', 409);
-  if (config.fullTrustConfirmed !== true) throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '飞书无人值守任务尚未获得完全信任确认，请在 Dockmux 飞书设置中确认后重试。', 409);
+  if (!larkExecutionConfirmed(config)) throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '飞书无人值守任务尚未获得完全信任确认，请在 Dockmux 飞书设置中确认后重试。', 409);
+  const stopForConfiguration = async (session: Session) => {
+    if (['thinking', 'running_tool', 'waiting_for_permission', 'interrupting'].includes(session.state)
+      || (await runtime.getTasks?.(session.id))?.some(task => ['queued', 'running'].includes(task.status))) {
+      throw new LarkServiceError('LARK_CONFIGURATION_BUSY', '当前会话仍有任务。请等待结束或取消任务后，再应用新的 Agent 或审批模式。', 409);
+    }
+    if (!runtime.stop) throw new LarkServiceError('LARK_CONFIGURATION_UNSUPPORTED', '当前运行时无法结束旧会话以应用配置。', 409);
+    await runtime.stop(session.id);
+  };
+  const compatible = (session: Session) => session.permissionMode === larkPermissionMode(config)
+    && (larkPermissionMode(config) !== 'ask' || session.protocol === 'acp');
   const configKey = larkSessionConfigKey(config);
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
   if (group.sessionId && !group.retiredSessionIds?.has(group.sessionId)) {
     const existing = await runtime.getSession(group.sessionId);
     const reusable = existing && !['failed', 'stopped'].includes(existing.state);
     if (reusable && (config.managedGroup || group.sessionConfigKey === configKey)) {
-      if (existing.permissionMode === 'full-trust') return existing;
-      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书自动执行需要完全信任姿态，停止旧 Session 并创建新运行');
-      await runtime.stop?.(existing.id);
+      if (compatible(existing)) return existing;
+      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书权限姿态已变更，停止旧 Session 并创建新运行');
+      await stopForConfiguration(existing);
     }
     if (reusable && !config.managedGroup && group.sessionConfigKey !== configKey) {
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书 Agent 配置已变更，停止旧 Session 并应用新配置');
-      await runtime.stop?.(existing.id);
+      await stopForConfiguration(existing);
     }
   }
   group.sessionId = undefined;
@@ -269,14 +280,14 @@ export async function resolveLarkSession(
       // 此时并发到达的消息会把用户刚要求结束的上下文重新绑回来。
       && !group.retiredSessionIds?.has(item.id));
     if (existing) {
-      if (existing.permissionMode === 'full-trust') {
+      if (compatible(existing)) {
         group.sessionId = existing.id;
         group.sessionConfigKey = configKey;
         log.info({ sessionId: existing.id, appId: config.appId, chatId }, '复用已持久化的飞书 Session');
         return existing;
       }
-      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '持久化飞书 Session 不是自动执行姿态，停止旧 Session 并创建新运行');
-      await runtime.stop?.(existing.id);
+      log.info({ sessionId: existing.id, appId: config.appId, chatId }, '持久化飞书 Session 的权限姿态不匹配，停止旧 Session 并创建新运行');
+      await stopForConfiguration(existing);
     }
   }
   const session = await runtime.start({
@@ -284,10 +295,14 @@ export async function resolveLarkSession(
     ...(config.workspace ? { cwd: config.workspace } : {}),
     ...(config.defaultModel ? { model: config.defaultModel } : {}),
     ...(config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
-    permissionMode: 'full-trust',
+    permissionMode: larkPermissionMode(config),
     source: 'lark',
     sourceId
   });
+  if (larkPermissionMode(config) === 'ask' && session.protocol !== 'acp') {
+    await runtime.stop?.(session.id);
+    throw new LarkServiceError('LARK_APPROVAL_UNSUPPORTED', '飞书逐项确认仅支持 ACP Agent；此 Agent 的原生确认需在终端完成。', 422);
+  }
   group.sessionId = session.id;
   group.sessionConfigKey = configKey;
   return session;
