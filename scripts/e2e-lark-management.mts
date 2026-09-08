@@ -32,11 +32,15 @@ try {
     const nav = (label: string) => page.getByRole('navigation', { name: '工作台', exact: true }).getByRole('button', { name: new RegExp(`^${label}`) });
     const groupRow = () => page.getByRole('button').filter({ has: page.locator('strong', { hasText: /^项目群$/ }) });
     const binding = async () => (await request('GET', '/api/lark/management/groups')).groups.find((g: any) => g.chatId === 'oc_project').bots.find((b: any) => b.appId === 'cli_one');
+    assert.deepEqual((await request('GET', '/api/lark/management/groups')).groups, []);
+    const syncRequests: string[] = [];
+    page.on('request', req => { if (req.method() === 'POST' && req.url().endsWith('/sync-groups')) syncRequests.push(new URL(req.url()).pathname); });
     await page.goto(harness.base);
     await nav('群聊').click();
     await expect(page.getByRole('heading', { name: '群聊管理', exact: true })).toBeVisible();
-    await page.getByRole('button', { name: '同步群聊', exact: true }).click();
     await waitFor('browser syncs every configured Bot', async () => (await request('GET', '/api/lark/management/groups')).groups.every((g: any) => g.bots.length === 2) && (await request('GET', '/api/lark/management/groups')).groups.length === 2);
+    assert.deepEqual(syncRequests, ['/api/lark/bots/cli_one/sync-groups', '/api/lark/bots/cli_two/sync-groups']);
+    passed('entering the group page automatically discovers every configured Bot without clicking sync');
     await groupRow().click();
     await expect(page.getByRole('heading', { name: '项目群 / 开发助手', exact: true })).toBeVisible();
     await page.locator('input[name="agentMode"]').nth(1).check();
