@@ -11,11 +11,16 @@ const aliases = new Map([
   ['acpx/runtime', fileURLToPath(import.meta.resolve('acpx/runtime'))],
   ['@dockmux/acp-client', 'packages/acp-client/src/index.ts'],
   ['@dockmux/botmux-importer', 'packages/botmux-importer/src/index.ts'],
+  ['@dockmux/cli-adapters', 'packages/cli-adapters/src/index.ts'],
   ['@dockmux/config', 'packages/config/src/index.ts'],
+  ['@dockmux/pty-driver', 'packages/pty-driver/src/index.ts'],
+  ['@dockmux/relay', 'packages/relay/src/index.ts'],
   ['@dockmux/runtime', 'packages/agent-runtime/src/index.ts'],
   ['@dockmux/secret-provider', 'packages/secret-provider/src/index.ts'],
+  ['@dockmux/session-backends', 'packages/session-backends/src/index.ts'],
   ['@dockmux/shared', 'packages/shared/src/index.ts'],
   ['@dockmux/storage', 'packages/storage/src/index.ts'],
+  ['@dockmux/terminal-renderer', 'packages/terminal-renderer/src/index.ts'],
   ['@dockmux/transports', 'packages/transports/src/index.ts']
 ]);
 
