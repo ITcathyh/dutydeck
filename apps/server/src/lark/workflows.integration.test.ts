@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dockmux/storage';
@@ -117,8 +117,22 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   return { repos, runtime, broker, config, coordinator, createCoordinator, groupManager, service, cards, files, log, send, resolvePermission, interactions, completed };
 }
 
+async function seedLegacyResult(h: Awaited<ReturnType<typeof harness>>) {
+  const [mapping] = await h.repos.channelMappings.list(`lark-card:${h.config.appId}`);
+  const saved = JSON.parse(mapping!.extra!);
+  const id = createHash('sha256').update([h.config.appId, mapping!.sessionId, saved.runtime_task_id, saved.turn, 'result', saved.runtime_task_id, ''].join('\0')).digest('hex').slice(0, 24);
+  const record: LarkInteraction = {
+    appId: h.config.appId, sessionId: mapping!.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
+    event: event(mapping!.externalId, saved.prompt, { chatId: saved.chat_id, chatType: saved.chat_type, threadId: saved.thread_id, senderOpenId: saved.sender_open_id, mentions: [] }),
+    id, boot: 'legacy_boot', kind: 'result', nativeId: saved.runtime_task_id, question: '结果验收', state: 'pending', cardId: saved.final_message_id,
+    updatedAt: new Date().toISOString()
+  };
+  await h.repos.config.set(`lark.interaction.${h.config.appId}.${id}`, JSON.stringify(record));
+  return record;
+}
+
 describe('Feishu workflows through coordinator, Runtime and persistent storage', () => {
-  it('delivers one oversized result file and accepts an explicit reply without rerunning the task', async () => {
+  it('delivers one oversized result file without feedback controls, then continues in the same session', async () => {
     const answer = `开头\n${'完整结果🙂'.repeat(5000)}\n末尾`;
     const h = await harness('normal', { answerChunks: [answer] });
     await h.coordinator.handle(event('om_task', '生成长结果'), h.config);
@@ -128,22 +142,16 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(h.cards.size).toBe(2);
     const fileText = Buffer.from([...h.files.values()][0]!).toString('utf8');
     expect(fileText.startsWith(answer)).toBe(true);
-    expect(fileText).toContain('回复本文件消息「验收通过」');
+    expect(fileText).not.toContain('验收通过');
     const process = structuredClone(h.cards.get('om_card_1'));
     const file = structuredClone(h.cards.get('om_card_2'));
-    const updates = h.service.update.mock.calls.length;
-    const result = (await h.interactions()).find(item => item.kind === 'result')!;
-    expect(result.cardId).toBe('om_card_2');
-    await h.coordinator.handle(event('om_unauthorized_accept', '验收通过', { senderOpenId: 'ou_bob', parentId: result.cardId, mentions: [] }), h.config);
-    expect((await h.interactions()).find(item => item.id === result.id)?.state).toBe('pending');
-    await h.coordinator.handle(event('om_accept', '验收通过', { parentId: result.cardId, mentions: [] }), h.config);
-    expect((await h.interactions()).find(item => item.id === result.id)?.state).toBe('accepted');
-    expect(h.send).toHaveBeenCalledOnce();
+    expect(JSON.stringify(file)).not.toContain('workflow_accept');
+    expect(await h.interactions()).toEqual([]);
+    await h.coordinator.handle(event('om_revision', '补充一个例子', { parentId: 'om_card_2' }), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(2));
+    expect(await h.runtime.listSessions()).toHaveLength(1);
     expect(h.cards.get('om_card_1')).toEqual(process);
     expect(h.cards.get('om_card_2')).toEqual(file);
-    expect(h.service.update).toHaveBeenCalledTimes(updates);
-    const [mapping] = await h.repos.channelMappings.list(`lark-card:${h.config.appId}`);
-    expect(JSON.parse(mapping!.extra!)).toMatchObject({ final_message_id: 'om_card_2', result_feedback_state: 'accepted' });
   });
 
   it('delivers exactly a retained process card and a complete streamed result, then leaves both unchanged on recovery', async () => {
@@ -165,13 +173,8 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(JSON.stringify(result)).not.toContain('125 passed');
     const [mapping] = await h.repos.channelMappings.list(`lark-card:${h.config.appId}`);
     expect(JSON.parse(mapping!.extra!)).toMatchObject({ card_message_id: 'om_card_1', final_message_id: 'om_card_2', progress_frozen: true });
-    const interaction = (await h.interactions()).find(item => item.kind === 'result')!;
-    expect(interaction.cardId).toBe('om_card_2');
-    const processBeforeAcceptance = structuredClone(process);
-    expect(await h.coordinator.handleAction({ dockmux_workflow: 'accept', request_id: interaction.id, generation: interaction.boot }, 'ou_alice',
-      { messageId: interaction.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
-    expect(h.cards.get('om_card_1')).toEqual(processBeforeAcceptance);
-    expect(h.cards.get('om_card_2').elements.find((element: any) => element.element_id === 'final_output')?.content).toBe(answer);
+    expect(await h.interactions()).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain('workflow_accept');
     const before = structuredClone([...h.cards]);
     const updates = h.service.update.mock.calls.length;
     h.coordinator.stop();
@@ -237,11 +240,11 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
       expect(h.service.update).toHaveBeenCalledTimes(updates);
       expect(h.service.reply.mock.calls[2]?.[0].idempotencyKey).toBe(failedResultKey);
       expect(h.cards.get('om_card_2').elements.find((element: any) => element.element_id === 'final_output')?.content).toBe('工作已完成');
-      expect((await h.interactions()).find(item => item.kind === 'result')?.cardId).toBe('om_card_2');
+      expect(await h.interactions()).toEqual([]);
     } finally { restored.stop(); }
   });
 
-  it('answers the original Relay waiter by quoting its card without creating another task, then records result acceptance once', async () => {
+  it('answers the original Relay waiter by quoting its card without creating another task or result feedback', async () => {
     const h = await harness('ask');
     await h.coordinator.handle(event('om_task', '开始工作'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
@@ -252,13 +255,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(h.send).toHaveBeenCalledOnce();
     await h.coordinator.handle(event('om_duplicate', `/answer ${ask.id} 方案 B`), h.config);
     expect(h.send).toHaveBeenCalledOnce();
-    const result = (await h.interactions()).find(item => item.kind === 'result')!;
-    const value = { dockmux_workflow: 'accept', request_id: result.id, generation: result.boot };
-    expect(await h.coordinator.handleAction(value, 'ou_bob', { messageId: result.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'error' });
-    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: result.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
-    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: result.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'error' });
-    expect(h.send).toHaveBeenCalledOnce();
-    expect((await h.interactions()).find(item => item.id === result.id)?.state).toBe('accepted');
+    expect((await h.interactions()).some(item => item.kind === 'result')).toBe(false);
   });
 
   it('binds an ACP approval to the real card and current authority; simultaneous approvals resolve only once', async () => {
@@ -473,7 +470,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     } finally { restored.stop(); }
   });
 
-  it('does not overwrite the final answer when acceptance arrives before the terminal mapping is saved', async () => {
+  it('does not add feedback controls when the terminal mapping is saved after result delivery', async () => {
     const h = await harness();
     let release!: () => void;
     const gate = new Promise<void>(done => { release = done; });
@@ -486,19 +483,17 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     try {
       await h.coordinator.handle(event('om_task', '生成最终结果'), h.config);
       await vi.waitFor(() => expect(blocked).toBe(true));
-      const record = (await h.interactions()).find(item => item.kind === 'result')!;
-      const before = h.cards.get(record.cardId!);
+      const before = h.cards.get('om_card_2');
       expect(JSON.stringify(before)).toContain('工作已完成');
-      expect(await h.coordinator.handleAction({ dockmux_workflow: 'accept', request_id: record.id, generation: record.boot }, 'ou_alice',
-        { messageId: record.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
-      expect(h.cards.get(record.cardId!)).toEqual(before);
+      expect(JSON.stringify(before)).not.toContain('workflow_accept');
+      expect(await h.interactions()).toEqual([]);
       release();
-      await vi.waitFor(() => expect(JSON.stringify(h.cards.get(record.cardId!))).toContain('验收：已通过'));
-      expect(JSON.stringify(h.cards.get(record.cardId!))).toContain('工作已完成');
+      await h.completed();
+      expect(h.cards.get('om_card_2')).toEqual(before);
     } finally { release(); }
   });
 
-  it('binds acceptance to the separate result when the process card is missing and keeps quoted changes in the original session', async () => {
+  it('keeps a persisted legacy acceptance card actionable after restart when the process card is missing', async () => {
     const h = await harness();
     const update = h.service.update.getMockImplementation()!;
     h.service.update.mockImplementation(async input => {
@@ -506,30 +501,33 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
       return update(input);
     });
     await h.coordinator.handle(event('om_task', '生成结果'), h.config);
-    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'result')?.cardId).toBe('om_card_2'), { timeout: 4000 });
-    const record = (await h.interactions()).find(item => item.kind === 'result')!;
-    expect(await h.coordinator.handleAction({ dockmux_workflow: 'changes', request_id: record.id, generation: record.boot }, 'ou_alice',
-      { messageId: 'om_card_2', chatId: 'oc_group' })).toMatchObject({ type: 'success' });
-    await h.coordinator.handle(event('om_revision', '增加一个例子', { parentId: 'om_card_2', rootId: 'om_branch', threadId: 'omt_branch' }), h.config);
-    await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(2));
-    expect(await h.runtime.listSessions()).toHaveLength(1);
+    await h.completed();
+    const record = await seedLegacyResult(h);
+    h.coordinator.stop();
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      await restored.reconcile(h.config);
+      const value = { dockmux_workflow: 'changes', request_id: record.id, generation: record.boot };
+      expect(await restored.handleAction(value, 'ou_bob', { messageId: 'om_card_2', chatId: 'oc_group' })).toMatchObject({ type: 'error' });
+      expect(await restored.handleAction(value, 'ou_alice', { messageId: 'om_card_2', chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+      await restored.handle(event('om_revision', '增加一个例子', { parentId: 'om_card_2', rootId: 'om_branch', threadId: 'omt_branch' }), h.config);
+      await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(2));
+      expect(await h.runtime.listSessions()).toHaveLength(1);
+    } finally { restored.stop(); }
   });
 
-  it('records a direct reply to a pending result as changes, while preserving acceptance for later follow-ups', async () => {
+  it('continues a direct result reply in the same session without creating feedback records', async () => {
     const h = await harness();
     await h.coordinator.handle(event('om_task', '生成初稿'), h.config);
     await h.completed();
-    const first = (await h.interactions()).find(item => item.kind === 'result')!;
-    await h.coordinator.handle(event('om_direct_revision', '补充一个例子', { parentId: first.cardId, mentions: [] }), h.config);
+    await h.coordinator.handle(event('om_direct_revision', '补充一个例子', { parentId: 'om_card_2' }), h.config);
     await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(2));
-    expect((await h.interactions()).find(item => item.id === first.id)?.state).toBe('needs_changes');
-    await vi.waitFor(async () => expect((await h.interactions()).filter(item => item.kind === 'result')).toHaveLength(2));
-    const second = (await h.interactions()).find(item => item.kind === 'result' && item.id !== first.id)!;
-    expect(await h.coordinator.handleAction({ dockmux_workflow: 'accept', request_id: second.id, generation: second.boot }, 'ou_alice',
-      { messageId: second.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
-    await h.coordinator.handle(event('om_more_after_acceptance', '再写一份说明', { parentId: second.cardId, mentions: [] }), h.config);
-    await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(3));
-    expect((await h.interactions()).find(item => item.id === second.id)?.state).toBe('accepted');
+    expect((await h.interactions()).some(item => item.kind === 'result')).toBe(false);
     expect(await h.runtime.listSessions()).toHaveLength(1);
+    const [session] = await h.runtime.listSessions();
+    const tasks = await h.runtime.getTasks(session!.id);
+    expect(tasks.map(task => task.prompt)).toEqual(['生成初稿', '补充一个例子']);
+    expect(await h.repos.tasks.get(tasks[1]!.id)).toMatchObject({ sessionId: session!.id, prompt: '补充一个例子' });
   });
 });

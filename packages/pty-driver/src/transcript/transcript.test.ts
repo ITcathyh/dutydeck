@@ -42,6 +42,25 @@ function collect(source: { onEvent(cb: (e: NormalizedDriverEvent) => void): void
 }
 
 describe('ClaudeTranscriptTailer (explicit path)', () => {
+  it('flushes complete records once and retains a partial line for the next flush', () => {
+    const dir = makeTempDir('claude-flush');
+    const file = join(dir, 'session.jsonl');
+    writeFileSync(file, '');
+    const tailer = new ClaudeTranscriptTailer({ cwd: dir, transcriptPath: file, pollIntervalMs: 60_000 });
+    const events = collect(tailer);
+    tailer.start();
+    try {
+      const record = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: '完整总结🙂' } }) + '\n';
+      appendFileSync(file, record.slice(0, -2));
+      tailer.flush();
+      expect(events).toEqual([]);
+      appendFileSync(file, record.slice(-2));
+      tailer.flush();
+      tailer.flush();
+      expect(events).toEqual([{ type: 'text', data: { text: '完整总结🙂' } }]);
+    } finally { tailer.stop(); }
+  });
+
   it('maps assistant thinking/text/tool_use and user tool_result in order', async () => {
     const dir = makeTempDir('claude-explicit');
     const file = join(dir, 'session.jsonl');

@@ -15,7 +15,7 @@ const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
 
 /** Claude 家族完成标记：`✳ Worked for 12s` 等耗时行。 */
 export const CLAUDE_FAMILY_COMPLETION_RE =
-  /✳\s*(?:Worked|Crunched|Cogitated|Cooked|Churned|Saut[eé]ed|Baked|Brewed) for \d+[smh]/;
+  /[✳✻]\s*(?:Worked|Crunched|Cogitated|Cooked|Churned|Saut[eé]ed|Baked|Brewed) for \d+[smh]/;
 
 const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
@@ -142,6 +142,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     },
 
     completionPattern: CLAUDE_FAMILY_COMPLETION_RE,
+    screenBusyPattern: /\besc to interrupt\b/i,
     readyPattern: /❯/,
   };
 }

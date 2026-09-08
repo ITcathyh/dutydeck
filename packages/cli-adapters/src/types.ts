@@ -69,6 +69,8 @@ export interface CliAdapter {
   // ---- idle pattern 族（喂给 IdleDetector）----
   completionPattern?: RegExp;
   busyPattern?: RegExp;
+  /** Current rendered footer evidence that vetoes screen-derived completion. */
+  screenBusyPattern?: RegExp;
   idleToBusyPattern?: RegExp;
   readyPattern?: RegExp;
   staticBusyPattern?: RegExp;
