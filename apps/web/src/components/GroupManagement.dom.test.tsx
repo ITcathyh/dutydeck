@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { useState } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { StrictMode, useState } from 'react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError, type Agent, type LarkBotConfig, type ManagedGroup } from '../api';
@@ -141,6 +141,7 @@ function stubBaseQueries() {
     listeningDisabled: false
   });
   vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [{ id: 'gpt-4o', name: 'GPT-4o' }], reasoningEfforts: [] });
+  vi.spyOn(api, 'syncGroups').mockResolvedValue({ groups: [] });
 }
 
 describe('GroupManagement', () => {
@@ -182,7 +183,32 @@ describe('GroupManagement', () => {
     expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
   });
 
-  it('群列表为空时提供同步入口，点击调用 syncGroups', async () => {
+  it('首次进入自动同步全部 Bot，同步完成前不显示空列表', async () => {
+    stubBaseQueries();
+    const listSpy = vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    let finishSync!: () => void;
+    const pending = new Promise<void>(resolve => { finishSync = resolve; });
+    const syncSpy = vi.spyOn(api, 'syncGroups').mockImplementation(async () => {
+      await pending;
+      return { groups: mockGroups };
+    });
+    renderWithClient(
+      <StrictMode>
+        <GroupManagement onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents} />
+      </StrictMode>
+    );
+
+    await waitFor(() => expect(syncSpy).toHaveBeenCalledWith('cli_dev'));
+    expect(screen.getByText('正在同步飞书群聊…')).toBeTruthy();
+    expect(screen.queryByText('暂未发现任何飞书群聊')).toBeNull();
+    listSpy.mockResolvedValue({ groups: mockGroups });
+    finishSync();
+
+    await waitFor(() => expect(screen.getByText('研发项目群')).toBeTruthy());
+    expect(syncSpy.mock.calls).toEqual([['cli_dev'], ['cli_review']]);
+  });
+
+  it('自动同步后仍为空时保留手动重试，不循环同步', async () => {
     const user = userEvent.setup();
     stubBaseQueries();
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
@@ -193,6 +219,7 @@ describe('GroupManagement', () => {
     );
 
     await waitFor(() => expect(screen.getByText('暂未发现任何飞书群聊')).toBeTruthy());
+    expect(syncSpy.mock.calls).toEqual([['cli_dev'], ['cli_review']]);
     await user.click(screen.getByRole('button', { name: /立即同步群聊/ }));
     /*
       必须同步**全部**已配置 Bot。只同步当前那个有死结：第二个 Bot 还没出现在
@@ -200,7 +227,88 @@ describe('GroupManagement', () => {
     */
     await waitFor(() => expect(syncSpy).toHaveBeenCalledWith('cli_dev'));
     await waitFor(() => expect(syncSpy).toHaveBeenCalledWith('cli_review'));
-    expect(syncSpy).toHaveBeenCalledTimes(2);
+    await waitFor(() => expect(syncSpy).toHaveBeenCalledTimes(4));
+  });
+
+  it('已有群列表在后台自动同步期间保持可见', async () => {
+    stubBaseQueries();
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: mockGroups });
+    const syncSpy = vi.spyOn(api, 'syncGroups').mockReturnValue(new Promise(() => {}));
+    renderWithClient(
+      <GroupManagement onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents} />
+    );
+    await waitFor(() => expect(syncSpy).toHaveBeenCalledWith('cli_dev'));
+    expect(screen.getByText('研发项目群')).toBeTruthy();
+    expect((screen.getByRole('button', { name: '同步群聊' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('未配置 Bot 时不自动同步', async () => {
+    stubBaseQueries();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: false, bots: [], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    renderWithClient(
+      <GroupManagement onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents} />
+    );
+    await waitFor(() => expect(screen.getByText('暂未发现任何飞书群聊')).toBeTruthy());
+    expect(api.syncGroups).not.toHaveBeenCalled();
+  });
+
+  it('已有缓存配置时 StrictMode 重复挂载也只同步各 Bot 一次', async () => {
+    stubBaseQueries();
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['lark-config'], {
+      configured: true,
+      bots: [makeBot('cli_dev', '开发助手', '/data/dev'), makeBot('cli_review', '评审助手', '/data/review')],
+      listeningDisabled: false
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <StrictMode>
+          <GroupManagement onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents} />
+        </StrictMode>
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(screen.getByText('暂未发现任何飞书群聊')).toBeTruthy());
+    expect(vi.mocked(api.syncGroups).mock.calls).toEqual([['cli_dev'], ['cli_review']]);
+  });
+
+  it('同步期间新增 Bot 时只补同步新增项', async () => {
+    stubBaseQueries();
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    const config = { configured: true, bots: [makeBot('cli_dev', '开发助手', '/data/dev')], listeningDisabled: false };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
+    let finishSync!: () => void;
+    const pending = new Promise<void>(resolve => { finishSync = resolve; });
+    const syncSpy = vi.spyOn(api, 'syncGroups').mockImplementation(async () => { await pending; return { groups: [] }; });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['lark-config'], config);
+    render(
+      <QueryClientProvider client={client}>
+        <GroupManagement onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents} />
+      </QueryClientProvider>
+    );
+    await waitFor(() => expect(syncSpy).toHaveBeenCalledWith('cli_dev'));
+    await act(async () => {
+      client.setQueryData(['lark-config'], { ...config, bots: [...config.bots, makeBot('cli_review', '评审助手', '/data/review')] });
+    });
+    finishSync();
+    await waitFor(() => expect(screen.getByText('暂未发现任何飞书群聊')).toBeTruthy());
+    expect(syncSpy.mock.calls).toEqual([['cli_dev'], ['cli_review']]);
+  });
+
+  it('同步完成后重新读取群列表，不被较早的空列表响应覆盖', async () => {
+    stubBaseQueries();
+    let finishOldRead!: (value: { groups: ManagedGroup[] }) => void;
+    const oldRead = new Promise<{ groups: ManagedGroup[] }>(resolve => { finishOldRead = resolve; });
+    vi.spyOn(api, 'managementGroups').mockReturnValueOnce(oldRead).mockResolvedValue({ groups: mockGroups });
+    renderWithClient(
+      <GroupManagement onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents} />
+    );
+    await waitFor(() => expect(screen.getByText('研发项目群')).toBeTruthy());
+    await act(async () => { finishOldRead({ groups: [] }); });
+    expect(screen.getByText('研发项目群')).toBeTruthy();
+    expect(screen.queryByText('暂未发现任何飞书群聊')).toBeNull();
   });
 
   it('切换目录为本群单独设置后保存，patch 带 workspaceOverride 与 expectedRevision', async () => {
@@ -646,25 +754,23 @@ describe('GroupManagement 布局与响应式', () => {
 
 describe('GroupManagement 同步与选中的真实行为', () => {
   it('某个 Bot 同步失败时点名它，成功的部分仍然刷新可见', async () => {
-    const user = userEvent.setup();
     stubBaseQueries();
-    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    const listSpy = vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     const syncSpy = vi.spyOn(api, 'syncGroups').mockImplementation(async (appId: string) => {
       if (appId === 'cli_review') throw new Error('凭据已失效');
-      return { groups: [] };
+      listSpy.mockResolvedValue({ groups: mockGroups });
+      return { groups: mockGroups };
     });
 
     renderWithClient(
       <GroupManagement onSelectGroup={() => {}} onNavigateToBot={() => {}} agents={mockAgents}/>
     );
-    await waitFor(() => expect(screen.getByText('暂未发现任何飞书群聊')).toBeTruthy());
-    await user.click(screen.getByRole('button', { name: /立即同步群聊/ }));
-
     // 一个失败不该让另一个也不跑。
     await waitFor(() => expect(syncSpy).toHaveBeenCalledTimes(2));
     // 结果要点名是哪个 Bot 失败，不能笼统说「同步失败」。
     await waitFor(() => expect(screen.getByText(/评审助手：凭据已失效/)).toBeTruthy());
     expect(screen.getByText(/1 个机器人同步成功，1 个失败/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText('研发项目群')).toBeTruthy());
   });
 
   it('群内切换 Bot 会更新 URL，刷新后仍停在这个 Bot', async () => {

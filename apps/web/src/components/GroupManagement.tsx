@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Users,
@@ -168,6 +168,7 @@ export function GroupManagement({
     是用户接下来要去修的事，得一直看得见。
   */
   const [syncFailures, setSyncFailures] = useState<Array<{ appId: string; name: string; message: string }>>([]);
+  const autoSyncedBots = useRef(new Set<string>());
   /* 草稿在模块级 store 里，切走视图不丢；理由见 draft-store.ts 头注释。 */
   const drafts = useDraftStore(state => state.groupBotDrafts);
   const conflicts = useDraftStore(state => state.groupBotConflicts);
@@ -209,6 +210,7 @@ export function GroupManagement({
     }
     return map;
   }, [larkConfig.data]);
+  const needsAutoSync = [...botsMap.keys()].some(appId => !autoSyncedBots.current.has(appId));
 
   const groups = useMemo(() => groupsQuery.data?.groups ?? [], [groupsQuery.data]);
 
@@ -469,8 +471,7 @@ export function GroupManagement({
     成功的那部分照常可见（部分成功不谎报为全部成功，也不因为一个失败就丢弃全部）。
   */
   const syncMutation = useMutation({
-    mutationFn: async () => {
-      const appIds = Array.from(botsMap.keys());
+    mutationFn: async ({ appIds }: { appIds: string[]; automatic: boolean }) => {
       if (appIds.length === 0) throw new Error('还没有配置飞书 Bot，无法同步群聊');
       const failures: Array<{ appId: string; name: string; message: string }> = [];
       for (const appId of appIds) {
@@ -485,11 +486,13 @@ export function GroupManagement({
       }
       return { total: appIds.length, failures };
     },
-    onSuccess: ({ total, failures }) => {
+    onSuccess: async ({ total, failures }, { appIds, automatic }) => {
       // 无论成败都刷新一次：成功的那几个 Bot 的群必须立刻可见。
-      void qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
-      setSyncFailures(failures);
+      await qc.cancelQueries({ queryKey: ['lark-management-groups'] });
+      await qc.invalidateQueries({ queryKey: ['lark-management-groups'] });
+      setSyncFailures(previous => [...previous.filter(failure => !appIds.includes(failure.appId)), ...failures]);
       if (failures.length === 0) {
+        if (automatic) return;
         toastStore.push({
           kind: 'success',
           key: 'sync-groups',
@@ -513,6 +516,15 @@ export function GroupManagement({
       });
     }
   });
+
+  const { mutate: syncGroups, isPending: syncingGroups } = syncMutation;
+  useEffect(() => {
+    const appIds = [...botsMap.keys()].filter(appId => !autoSyncedBots.current.has(appId));
+    if (syncingGroups || !appIds.length) return;
+    // 每次进入页面为各 Bot 自动同步一次；空结果或失败由用户重试，避免循环请求。
+    for (const appId of appIds) autoSyncedBots.current.add(appId);
+    syncGroups({ appIds, automatic: true });
+  }, [botsMap, syncingGroups, syncGroups]);
 
   // 添加 Role 变更
   const handleAddRole = () => {
@@ -567,7 +579,8 @@ export function GroupManagement({
           <Button
             variant="secondary"
             loading={syncMutation.isPending}
-            onClick={() => syncMutation.mutate()}
+            disabled={!botsMap.size}
+            onClick={() => syncMutation.mutate({ appIds: [...botsMap.keys()], automatic: false })}
             className="shrink-0 text-caption"
             title="逐个同步所有已配置机器人可见的群聊"
           >
@@ -648,9 +661,9 @@ export function GroupManagement({
                   加载群列表失败：{groupsQuery.error.message}
                 </Banner>
               </div>
-            ) : groupsQuery.isLoading ? (
+            ) : groupsQuery.isLoading || !groups.length && (larkConfig.isPending || needsAutoSync || syncingGroups) ? (
               <div className="grid h-48 place-items-center">
-                <Spinner label="正在读取群聊列表…" />
+                <Spinner label={needsAutoSync || syncingGroups ? '正在同步飞书群聊…' : '正在读取群聊列表…'} />
               </div>
             ) : filteredGroups.length === 0 ? (
               <div className="p-6 text-center space-y-3">
@@ -662,7 +675,8 @@ export function GroupManagement({
                     variant="primary"
                     size="sm"
                     loading={syncMutation.isPending}
-                    onClick={() => syncMutation.mutate()}
+                    disabled={!botsMap.size}
+                    onClick={() => syncMutation.mutate({ appIds: [...botsMap.keys()], automatic: false })}
                   >
                     <RefreshCw size={14} className="mr-1.5" />
                     立即同步群聊
@@ -725,7 +739,7 @@ export function GroupManagement({
             <EmptyState
               icon={<Users size={36} className="text-subtle" />}
               title="未选择群聊"
-              description="请从左侧选择群聊，或者点击上方同步获取群聊列表。"
+              description="请从左侧选择群聊，查看和调整群内机器人的设置。"
             />
           ) : (
             <div className="mx-auto w-full min-w-0 max-w-4xl space-y-4">
