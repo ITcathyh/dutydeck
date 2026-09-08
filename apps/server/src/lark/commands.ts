@@ -169,10 +169,10 @@ export interface LarkCommandDefinition {
  *             由 coordinator 当作普通请求走完整建任务链路，命令层不自己派发。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
-  { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true },
-  { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true },
-  { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true },
-  { name: 'reject', summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true },
+  { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
+  { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
+  { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },
+  { name: 'reject', summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
   {
     name: 'help',
     summary: '列出当前可用的 Dockmux 命令及其用法',

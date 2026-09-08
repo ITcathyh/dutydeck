@@ -32,6 +32,7 @@
  *   node scripts/e2e-smoke.mjs                 # mock 模式（默认）
  *   node scripts/e2e-smoke.mjs --real          # 真实 CLI
  *   node scripts/e2e-smoke.mjs --port 14500 --verbose
+ *   node scripts/e2e-smoke.mjs --server-entry /tmp/install/node_modules/dockmux/dist/cli.js
  */
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -44,7 +45,6 @@ import { chromium } from '@playwright/test';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, '..');
-const SERVER_ENTRY = join(REPO, 'apps/server/dist/cli.js');
 
 // ── 参数 ───────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -58,6 +58,7 @@ const VERBOSE = flag('verbose');
 // 默认端口刻意避开 14310 与 4310：不要撞上开发者本地正在跑的实例
 const PORT = Number(value('port', '14387'));
 const TIMEOUT_MS = Number(value('timeout', REAL ? '300000' : '120000'));
+const SERVER_ENTRY = resolve(value('server-entry', join(REPO, 'apps/server/dist/cli.js')));
 
 // 被桥接的 CLI 必须拿干净的鉴权环境：本机 shell 里的这些变量会污染子进程
 // 防止 daemon 的 ANTHROPIC_BASE_URL 意外泄漏进被桥接的 Claude。
@@ -307,9 +308,9 @@ function openSseStream(sessionId) {
 
 // ── WS ─────────────────────────────────────────────────────────────────────
 
-/** 终端 WS：ws 包装在 apps/server 的依赖里，从那儿解析 */
+/** 终端 WS：从被测服务的依赖中解析 ws。 */
 function loadWebSocket() {
-  const require = createRequire(join(REPO, 'apps/server/package.json'));
+  const require = createRequire(SERVER_ENTRY);
   return require('ws').WebSocket;
 }
 
@@ -317,7 +318,7 @@ function loadWebSocket() {
 async function main() {
   log(`dockmux e2e smoke — ${REAL ? 'REAL（调用真实 CLI 与模型）' : 'MOCK（假 CLI，不触碰模型）'}`);
   log(`端口 ${PORT} · 全局超时 ${TIMEOUT_MS}ms`);
-  assert(existsSync(join(REPO, 'apps/server/dist/agents/env-launcher.mjs')), 'production build packages the ACP environment launcher');
+  assert(existsSync(join(dirname(SERVER_ENTRY), 'agents/env-launcher.mjs')), 'production build packages the ACP environment launcher');
 
   // 临时数据目录（DB、假 CLI、假 CLAUDE_CONFIG_DIR 全在里面，清理时整棵删掉）
   const dataDir = mkdtempSync(join(tmpdir(), 'dockmux-smoke-'));
