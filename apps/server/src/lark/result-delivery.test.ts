@@ -1,0 +1,95 @@
+import { describe, expect, it, vi } from 'vitest';
+import type { AgentEvent } from '@dockmux/shared';
+import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
+import { larkResultKey, sendLarkResult } from './result-delivery.js';
+import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';
+
+const event = (sequence: number, type: AgentEvent['type'], data: any): AgentEvent => ({
+  id: `e${sequence}`, sessionId: 'ses_1', sequence, type, data, timestamp: '2026-09-08T00:00:00Z'
+});
+const log = { warn: vi.fn() };
+const input = (text: string) => ({ state: 'completed' as const, taskId: 'task1', readOnly: true,
+  elements: renderLarkResultElements([event(1, 'text', { text })]), idempotencyKey: larkResultKey('om_process') });
+
+describe('separate process and complete result messages', () => {
+  it('keeps completed process panels expandable even when the old hide setting is enabled', () => {
+    const events = [
+      event(1, 'thinking', { text: 'private reasoning' }),
+      event(2, 'text', { text: '检查测试结果' }),
+      event(3, 'tool_call', { id: 't1', name: 'Bash', input: { command: 'pnpm test' }, status: 'running' }),
+      event(4, 'tool_result', { id: 't1', output: '125 passed', status: 'completed' }),
+      event(5, 'text', { text: '完整执行结论' })
+    ];
+    const elements = renderLarkProcessElements(events, { hideTraceOnComplete: true }, true);
+    const card = buildLarkCard({ state: 'completed', elements });
+    const trace: any = card.body.elements.find(element => element.element_id === 'trace_overview');
+    expect(trace).toMatchObject({ tag: 'collapsible_panel', expanded: false });
+    expect(JSON.stringify(trace)).toContain('125 passed');
+    expect(JSON.stringify(card)).toContain('已完成');
+    expect(JSON.stringify(card)).not.toContain('完整执行结论');
+    expect(JSON.stringify(card)).not.toContain('private reasoning');
+    const result = renderLarkResultElements(events);
+    expect(result.find(element => element.element_id === 'final_output')?.content).toBe('完整执行结论');
+    expect(JSON.stringify(result)).not.toContain('125 passed');
+    expect(JSON.stringify(result)).not.toContain('private reasoning');
+  });
+
+  it('sends more than 6000 characters intact through the real card service', async () => {
+    const text = `BEGIN\n${'a'.repeat(7000)}\nEND`;
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      if (_url.includes('tenant_access_token')) return Response.json({ code: 0, tenant_access_token: 'test-token', expire: 7200 });
+      const body = JSON.parse(String(init.body));
+      const card = JSON.parse(body.content);
+      expect(body).toMatchObject({ msg_type: 'interactive', uuid: larkResultKey('om_process') });
+      expect(card.body.elements.find((element: any) => element.element_id === 'final_output')?.content).toBe(text);
+      return Response.json({ code: 0, data: { message_id: 'om_result' } });
+    });
+    const service = new LarkCardService({ appId: 'cli_test', appSecret: 'test', defaultReceiveIdType: 'chat_id', defaultAgentName: 'test', baseUrl: 'https://open.feishu.cn' }, fetch as any);
+    const result = await sendLarkResult(service, { chatId: 'oc_group' }, input(text), log);
+    expect(result.messageId).toBe('om_result');
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('delivers an oversized Unicode answer as one complete file in the same thread', async () => {
+    const text = `开头\n${'完整结果🙂'.repeat(5000)}\n末尾`;
+    const service = { uploadFile: vi.fn(async () => 'file_full'), replyFile: vi.fn(async () => ({ messageId: 'om_file' })),
+      reply: vi.fn(), send: vi.fn(), sendFile: vi.fn() };
+    const result = await sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question', replyInThread: true }, input(text), log);
+    expect(Buffer.from(service.uploadFile.mock.calls[0]![0].data).toString('utf8')).toBe(text);
+    expect(service.replyFile).toHaveBeenCalledExactlyOnceWith({ messageId: 'om_question', replyInThread: true, fileKey: 'file_full', idempotencyKey: larkResultKey('om_process') });
+    expect(service.reply).not.toHaveBeenCalled();
+    expect(service.send).not.toHaveBeenCalled();
+    expect(service.sendFile).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ messageId: 'om_file', elements: undefined });
+  });
+
+  it('uses the same result UUID for reply fallback and propagates a failed delivery', async () => {
+    const service = { reply: vi.fn(async () => { throw new Error('missing question'); }), send: vi.fn(async () => { throw new Error('unavailable'); }) };
+    await expect(sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question' }, input('答案'), log)).rejects.toThrow('unavailable');
+    expect(service.reply.mock.calls[0]?.[0]).toMatchObject({ idempotencyKey: larkResultKey('om_process') });
+    expect(service.send.mock.calls[0]?.[0]).toMatchObject({ idempotencyKey: larkResultKey('om_process'), chatId: 'oc_group' });
+    expect(larkResultKey('om_next_process')).not.toBe(larkResultKey('om_process'));
+  });
+
+  it('does not replace a rejected result with a misleading delivered placeholder', async () => {
+    const error = new LarkServiceError('LARK_OPENAPI_ERROR', 'rejected', 502, { upstreamCode: 230028 });
+    const service = { send: vi.fn(async () => { throw error; }), uploadFile: vi.fn() };
+    await expect(sendLarkResult(service as any, { chatId: 'oc_group' }, input('答案'), log)).rejects.toBe(error);
+    expect(service.send).toHaveBeenCalledOnce();
+    expect(service.uploadFile).not.toHaveBeenCalled();
+  });
+
+  it('loads the complete task when a streamed answer exceeds the recent event window', async () => {
+    const events = [event(1, 'text', { role: 'user', taskId: 'task1', text: '问题' }),
+      ...Array.from({ length: 1600 }, (_, index) => event(index + 2, 'text', { text: `${index}\n` })),
+      event(1602, 'task', { task: { id: 'task1', status: 'completed' } }),
+      event(1603, 'text', { role: 'user', taskId: 'task2', text: '另一轮问题' }),
+      event(1604, 'text', { text: '另一轮结果' })];
+    const runtime = { getRecentEvents: vi.fn(async (_id: string, limit: number) => events.slice(-limit)) };
+    const loaded = await loadLarkTaskEvents(runtime, 'ses_1', 'task1', 500);
+    const result = renderLarkResultElements(loaded).find(element => element.element_id === 'final_output');
+    expect(result?.content).toBe(Array.from({ length: 1600 }, (_, index) => `${index}`).join('\n'));
+    expect(runtime.getRecentEvents.mock.calls.map(call => call[1])).toEqual([500, 1000, 2000]);
+    expect(JSON.stringify(result)).not.toContain('另一轮');
+  });
+});

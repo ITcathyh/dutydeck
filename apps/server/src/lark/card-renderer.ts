@@ -26,16 +26,6 @@ export const isLarkCardContentRejected = (error: unknown): error is LarkServiceE
 export const isLarkMessageUnupdatable = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
   && [230012, 230030].includes(Number(error.details?.upstreamCode));
 
-/**
- * 原卡不可更新时补发终态卡的幂等键。
- *
- * 实时路径与对账路径必须用**同一个**键：实时补发成功后、持久化落库前进程崩溃（或网络
- * 结果不明），恢复时对账会再补发一次；只有键一致，飞书才能在服务端去重，用户看到的
- * 才是一张卡而不是两张。键只由原消息 ID + 终态决定，两条路径都能独立算出同一个值。
- */
-export const larkTerminalReplacementKey = (originalMessageId: string, state: string | undefined, safe = false) =>
-  `${safe ? 'repl_safe' : 'repl'}_${originalMessageId}_${state ?? 'terminal'}`.slice(0, 50);
-
 const rejectedDeltaElement = (changedCount: number): LarkCardElement => ({
   tag: 'markdown',
   element_id: 'dockmux_rejected_delta',
@@ -137,6 +127,22 @@ export function eventsForRuntimeTask(events: AgentEvent[], taskId: string) {
     return task?.id === taskId && terminalTaskStates.has(task.status);
   });
   return events.slice(start + 1, endOffset < 0 ? undefined : start + 1 + endOffset);
+}
+
+export async function loadLarkTaskEvents(
+  runtime: { getEvents?(id: string): Promise<AgentEvent[]>; getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]> },
+  sessionId: string, taskId: string, limit: number
+) {
+  if (!runtime.getRecentEvents) return eventsForRuntimeTask(await runtime.getEvents!(sessionId), taskId);
+  // A long streamed answer can span more events than the trace window. Expand
+  // until the task boundary is present so the result cannot lose its beginning.
+  for (;;) {
+    const events = await runtime.getRecentEvents(sessionId, limit);
+    if (events.length < limit || events.some(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId)) {
+      return eventsForRuntimeTask(events, taskId);
+    }
+    limit *= 2;
+  }
 }
 
 const fenced = (value: unknown) => {
@@ -426,7 +432,8 @@ export function renderLarkCardElements(
   completed = false,
   compensation = false,
   /** 保留入参以免改动全部调用点；下一步提示移除后渲染不再按会话类型分叉。 */
-  _chatType?: string
+  _chatType?: string,
+  view: 'combined' | 'process' | 'result' = 'combined'
 ): LarkCardElement[] {
   const entries = compactTrace(events);
   const lastIndex = (predicate: (entry: TraceEntry) => boolean) => {
@@ -442,7 +449,7 @@ export function renderLarkCardElements(
   const lastActivityIndex = lastIndex(entry => entry.type !== 'text' && entry.type !== 'raw_terminal');
   const finalFollowsActivity = finalMessageIndex > lastActivityIndex;
   const finalMessage = finalMessageIndex >= 0 && finalFollowsActivity ? entries[finalMessageIndex] : undefined;
-  const finalText = truncateTrace(finalMessage?.data.text, 6_000);
+  const finalText = view === 'result' ? redactTraceText(String(finalMessage?.data.text ?? '')).trim() : truncateTrace(finalMessage?.data.text, 6_000);
   const activityEntries = entries.filter(entry => entry !== finalMessage || !finalFollowsActivity);
   const permissionEntries = activityEntries.filter(entry => entry.type === 'permission_request');
   const errorEntries = activityEntries.filter(entry => entry.type === 'error');
@@ -461,17 +468,18 @@ export function renderLarkCardElements(
   }
   elements.push(...permissionEntries.map(permissionAlert));
   elements.push(...errorEntries.map(errorAlert));
-  if (finalText) {
+  if (finalText && view !== 'process') {
     elements.push({
       tag: 'div', element_id: 'result_header', width: 'auto', margin: '4px 0px 2px 0px',
       text: { tag: 'plain_text', content: '执行结论', text_size: 'small', text_color: 'green' },
       icon: { tag: 'standard_icon', token: 'doc-checklist_outlined', color: 'green' }
     });
     elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? finalText : `**当前进展**\n\n${finalText}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
-  } else if (completed) {
+  } else if (completed && view !== 'process') {
     elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }
-  const hideCompletedTrace = completed && config.hideTraceOnComplete !== false;
+  if (view === 'result') return elements;
+  const hideCompletedTrace = view !== 'process' && completed && config.hideTraceOnComplete !== false;
   if (groups.length && hideCompletedTrace) {
     const digest = progressDigest(allGroups);
     if (digest) elements.push({
@@ -493,9 +501,15 @@ export function renderLarkCardElements(
     });
     elements.push(...groups.map((group, index) => groupPanel(group, index, completed)));
   }
-  if (!elements.length) elements.push({ tag: 'markdown', content: '正在思考中…', text_size: 'normal', margin: '0px' });
+  if (!elements.length) elements.push({ tag: 'markdown', content: completed ? '执行过程已结束，结果见单独的结果消息。' : '正在思考中…', text_size: 'normal', margin: '0px' });
   return elements;
 }
+
+export const renderLarkProcessElements = (events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete'>, terminal = false) =>
+  renderLarkCardElements(events, config, terminal, false, undefined, 'process');
+
+export const renderLarkResultElements = (events: AgentEvent[]) =>
+  renderLarkCardElements(events, { hideTraceOnComplete: true }, true, false, undefined, 'result');
 
 export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit'>, _completed = false) {
   let entries = compactTrace(events);

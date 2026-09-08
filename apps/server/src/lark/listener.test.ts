@@ -255,9 +255,10 @@ describe('Lark message coordinator', () => {
     // 刷新只重绘运行态，绝不把任务推进到终态。
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'completed' }));
     finish();
-    // 单卡契约：终态是对同一张卡的 PATCH，不是新消息。
+    // 终态冻结过程卡，并单独送达只读结果卡。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card', state: 'completed' })));
-    expect(service.send).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledTimes(2));
+    expect(service.send.mock.calls[1]?.[0]).toMatchObject({ state: 'completed', readOnly: true });
 
     // 轮次结束后 requestUpdate 已清空：刷新必须诚实地说不可用，而不是假装成功。
     await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_refresh' }))
@@ -750,6 +751,7 @@ describe('Lark message coordinator', () => {
     expect(runtime.send.mock.calls.map(call => call[0])).toEqual(['ses_1', 'ses_2', 'ses_1']);
     expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_alice_1', markdown: '正在思考中…' }));
     expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_bob_1', markdown: '正在思考中…' }));
+    // 首张过程卡保留普通群回复；终态结果同样回复到同一触发消息。
     expect(service.reply.mock.calls.every(call => call[0].replyInThread === undefined)).toBe(true);
     expect(service.send).not.toHaveBeenCalled();
   });
@@ -803,7 +805,9 @@ describe('Lark message coordinator', () => {
     };
     const service = {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
-      send: vi.fn(async () => ({ messageId: 'om_card' })), deleteReaction: vi.fn(async () => {}),
+      send: vi.fn()
+        .mockResolvedValueOnce({ messageId: 'om_card' })
+        .mockResolvedValueOnce({ messageId: 'om_result' }), deleteReaction: vi.fn(async () => {}),
       update: vi.fn(async () => ({ messageId: 'om_card' }))
     };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -854,14 +858,52 @@ describe('Lark message coordinator', () => {
     coordinator.handle({ messageId: 'om_persisted_final', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'running' })));
     subscriber?.(agentEvent(4, 'task', { task: terminalTask }));
-    // 终态 PATCH 回原卡，内容是从库里重新加载的真实结论。
+    // 终态 PATCH 仅冻结过程；重新加载的真实结论进入独立结果消息。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({
       messageId: 'om_card',
       state: 'completed',
-      elements: expect.arrayContaining([expect.objectContaining({ element_id: 'final_output', content: '持久化的最终答案' })])
+      elements: expect.not.arrayContaining([expect.objectContaining({ element_id: 'final_output' })])
     })));
-    expect(service.send).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledTimes(2));
+    expect(service.send.mock.calls[1]?.[0]).toMatchObject({ state: 'completed', readOnly: true });
+    expect(service.send.mock.calls[1]?.[0].elements).toEqual(expect.arrayContaining([
+      expect.objectContaining({ element_id: 'final_output', content: '持久化的最终答案' })
+    ]));
     expect(runtime.getRecentEvents).toHaveBeenCalledWith(session.id, expect.any(Number));
+    coordinator.stop();
+  });
+
+  it.each([false, true])('preserves a long streamed result and deduplicates terminal events (dispatch=%s)', async dispatch => {
+    let subscriber: ((event: AgentEvent) => void) | undefined;
+    const runtimeTask = { id: 'runtime-duplicate-terminal', status: 'completed', prompt: '执行任务' };
+    const answer = Array.from({ length: 1700 }, (_, index) => `line${index}\n`).join('').trim();
+    const emit = async () => {
+      subscriber?.(agentEvent(1, 'task', { task: { ...runtimeTask, status: 'running' } }));
+      for (let index = 0; index < 1700; index++) subscriber?.(agentEvent(index + 2, 'text', { text: `line${index}\n` }));
+      subscriber?.(agentEvent(1702, 'task', { task: runtimeTask }));
+      subscriber?.(agentEvent(1703, 'task', { task: runtimeTask }));
+      return { ...runtimeTask, status: 'running' };
+    };
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session),
+      subscribe: vi.fn((_id: string, listener: (event: AgentEvent) => void) => { subscriber = listener; return vi.fn(); }),
+      ...(dispatch ? { dispatch: vi.fn(emit) } : {}), send: vi.fn(emit),
+      interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })), deleteReaction: vi.fn(async () => {}),
+      send: vi.fn()
+        .mockResolvedValueOnce({ messageId: 'om_process' })
+        .mockResolvedValueOnce({ messageId: 'om_result' }),
+      update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+
+    await coordinator.handle({ messageId: 'om_duplicate_terminal', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
+
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledTimes(2));
+    expect(service.send.mock.calls[1]?.[0]).toMatchObject({ state: 'completed', readOnly: true });
+    expect(service.send.mock.calls[1]?.[0].elements.find((element: any) => element.element_id === 'final_output')?.content).toBe(answer);
     coordinator.stop();
   });
 
@@ -904,7 +946,9 @@ describe('Lark message coordinator', () => {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
       send: vi.fn()
         .mockResolvedValueOnce({ messageId: 'om_progress_1' })
-        .mockResolvedValueOnce({ messageId: 'om_progress_2' }),
+        .mockResolvedValueOnce({ messageId: 'om_result_1' })
+        .mockResolvedValueOnce({ messageId: 'om_progress_2' })
+        .mockResolvedValueOnce({ messageId: 'om_result_2' }),
       deleteReaction: vi.fn(async () => {}),
       update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
     };
@@ -925,20 +969,23 @@ describe('Lark message coordinator', () => {
 
     await expect(coordinator.handleAction('{"action":"retry","task_id":"om_task"}', 'ou_operator')).resolves.toEqual({ type: 'success', content: '已开始重试' });
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
-    // 重试的结论落在**第二张**卡上。
+    // 重试的过程收敛在第二张进度卡，结论进入它自己的只读结果卡。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({
       messageId: 'om_progress_2', state: 'completed',
-      elements: expect.arrayContaining([expect.objectContaining({ content: expect.stringContaining('重试成功') })])
+      elements: expect.not.arrayContaining([expect.objectContaining({ element_id: 'final_output' })])
     })));
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledTimes(4));
+    expect(service.send.mock.calls[3]?.[0]).toMatchObject({ state: 'completed', readOnly: true });
+    expect(JSON.stringify(service.send.mock.calls[3]?.[0].elements)).toContain('重试成功');
     // 上一轮那张卡是历史，重试不得把它改写成 completed。
     expect(service.update.mock.calls.filter(([input]: any[]) => input.messageId === 'om_progress_1' && input.state === 'completed')).toHaveLength(0);
-    // 两轮各一张卡，总共只发了两条消息。
-    expect(service.send).toHaveBeenCalledTimes(2);
+    // 两轮各有过程和结果两条消息，消息 ID 不复用。
+    expect(service.send).toHaveBeenCalledTimes(4);
     expect(runtime.send).toHaveBeenNthCalledWith(2, 'ses_1', '执行任务', expect.any(String));
 
     await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'warning', content: '只有失败或已中断的任务可以重试' });
     expect(runtime.send).toHaveBeenCalledTimes(2);
-    expect(service.send).toHaveBeenCalledTimes(2);
+    expect(service.send).toHaveBeenCalledTimes(4);
   });
 
   // 首张卡的回调必须绑在**本轮**上。buildLarkCard 对缺省 turn 会渲染成 "0"，
@@ -956,7 +1003,9 @@ describe('Lark message coordinator', () => {
     };
     const service = {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })), deleteReaction: vi.fn(async () => {}),
-      send: vi.fn(async () => ({ messageId: 'om_card' })), update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
+      send: vi.fn()
+        .mockResolvedValueOnce({ messageId: 'om_card' })
+        .mockResolvedValueOnce({ messageId: 'om_result' }), update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
     coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
@@ -1042,12 +1091,12 @@ describe('Lark message coordinator', () => {
     let nextCard = 0;
     const service = {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
-      // 第一张卡「已被删除」：第一轮的终态只能走补发，补发再按 options 决定是否挂起。
+      // 第一张过程卡「已被删除」：终态不能补进度卡，只能单独交付结果。
       update: vi.fn(async (input: any) => {
         if (options.deferReplacement && input.messageId === 'om_card_1' && input.state === 'failed') throw messageMissingError();
         return { messageId: input.messageId };
       }),
-      send: vi.fn(async (input: any) => (options.deferReplacement && input.idempotencyKey?.startsWith('repl_')
+      send: vi.fn(async (input: any) => (options.deferReplacement && input.idempotencyKey?.startsWith('result_')
         ? pendingReplacement
         : { messageId: `om_card_${++nextCard}` })),
       deleteReaction: vi.fn(async () => {})
@@ -1069,9 +1118,9 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledOnce());
 
-    // 第一轮失败 → 终态补发挂起。
+    // 第一轮失败 → 独立结果交付挂起。
     emit(agentEvent(11, 'task', { task: { id: 'runtime-1', status: 'failed' } }));
-    await vi.waitFor(() => expect(service.send.mock.calls.some(([input]: any[]) => input.idempotencyKey?.startsWith('repl_'))).toBe(true));
+    await vi.waitFor(() => expect(service.send.mock.calls.some(([input]: any[]) => input.idempotencyKey?.startsWith('result_'))).toBe(true));
 
     // 旧补发仍在飞的同时立刻重试，开启第二轮。
     await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '已开始重试' });
@@ -1080,7 +1129,7 @@ describe('Lark message coordinator', () => {
     const newCardId = parsedMapping().card_message_id;
     expect(newCardId).not.toBe('om_card_1');
 
-    // 旧轮的补发这才返回：它属于上一轮，不得把自己写成新一轮的卡或终态。
+    // 旧轮的结果这才返回：它属于上一轮，不得把自己写成新一轮的卡或终态。
     f.releaseReplacement({ messageId: 'om_stale_replacement' });
     emit(agentEvent(21, 'text', { text: '第二轮结果' }));
     await new Promise(resolve => setTimeout(resolve, 30));
@@ -1111,7 +1160,7 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledOnce());
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledOnce());
     emit(agentEvent(11, 'task', { task: { id: 'runtime-1', status: 'failed' } }));
-    await vi.waitFor(() => expect(service.send.mock.calls.some(([input]: any[]) => input.idempotencyKey?.startsWith('repl_'))).toBe(true));
+    await vi.waitFor(() => expect(service.send.mock.calls.some(([input]: any[]) => input.idempotencyKey?.startsWith('result_'))).toBe(true));
     const sendsBeforeRetry = service.send.mock.calls.length;
 
     await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '已开始重试' });
@@ -1209,7 +1258,7 @@ describe('Lark message coordinator', () => {
 
   // 评审 1：直播补发与对账补发必须用同一个幂等键，否则「补发成功但持久化前崩溃」
   // 会在恢复时补出第二张终态卡。
-  it('直播补发与对账补发共用同一幂等键，崩溃重放不会补出第二张终态卡', async () => {
+  it('直播与对账结果交付共用同一幂等键，崩溃重放不会补出第二条结果', async () => {
     let subscriber: ((event: AgentEvent) => void) | undefined;
     const runtime = {
       start: vi.fn(async () => session), getSession: vi.fn(async () => session),
@@ -1241,7 +1290,7 @@ describe('Lark message coordinator', () => {
     const recovered = new LarkMessageCoordinator(recoveryRuntime as any, recoveryService as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
     await recovered.reconcile(config);
 
-    // 同一个键 → 飞书侧幂等去重，用户只会看到一张补发卡。
+    // 同一个键 → 飞书侧幂等去重，用户只会看到一条结果消息。
     expect(recoveryService.send.mock.calls[0]?.[0].idempotencyKey).toBe(liveKey);
   });
 
@@ -1285,10 +1334,11 @@ describe('Lark message coordinator', () => {
     }
     expect(unhandled).toEqual([]);
     expect(terminalReached).toBe(true);
-    // 卡片确实带着真实结论 PATCH 出去了，只是落库失败改由对账兜底。
+    // 过程 PATCH 不含真实结论；结果卡仍单独送达，即使持久化要靠对账补齐。
     const terminal = service.update.mock.calls.find(([input]: any[]) => input.state === 'completed')?.[0];
-    expect(JSON.stringify(terminal.elements)).toContain('真实最终结果');
-    expect(service.send).toHaveBeenCalledOnce();
+    expect(JSON.stringify(terminal.elements)).not.toContain('真实最终结果');
+    expect(service.send).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(service.send.mock.calls[1]?.[0].elements)).toContain('真实最终结果');
     expect(log.warn).toHaveBeenCalled();
   });
 
@@ -1311,7 +1361,9 @@ describe('Lark message coordinator', () => {
     };
     const service = {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })), deleteReaction: vi.fn(async () => {}),
-      send: vi.fn(async () => ({ messageId: 'om_card' })),
+      send: vi.fn()
+        .mockResolvedValueOnce({ messageId: 'om_card' })
+        .mockResolvedValueOnce({ messageId: 'om_result' }),
       // 心跳那次 PATCH 卡住不返回，终态在它还在飞的时候入队。
       update: vi.fn(async (input: any) => { if (input.state === 'running') await runningUpdate; return { messageId: input.messageId }; })
     };
@@ -1334,10 +1386,11 @@ describe('Lark message coordinator', () => {
     expect(states.indexOf('completed')).toBe(states.length - 1);
     const terminal = service.update.mock.calls.at(-1)?.[0];
     expect(terminal.messageId).toBe('om_card');
-    expect(JSON.stringify(terminal.elements)).toContain('真实最终结果');
-    // 只有真正 PATCH 成功之后才允许标记已交付。
-    expect(JSON.parse(mapping.extra)).toMatchObject({ card_message_id: 'om_card', final_message_id: 'om_card', final_delivery_state: 'delivered', progress_frozen: true });
-    expect(service.send).toHaveBeenCalledOnce();
+    expect(JSON.stringify(terminal.elements)).not.toContain('真实最终结果');
+    // 过程与结果各自成功后才保存独立消息 ID。
+    expect(JSON.parse(mapping.extra)).toMatchObject({ card_message_id: 'om_card', final_message_id: 'om_result', final_delivery_state: 'delivered', progress_frozen: true });
+    expect(service.send).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(service.send.mock.calls[1]?.[0].elements)).toContain('真实最终结果');
     coordinator.stop();
   });
 
@@ -1512,7 +1565,7 @@ describe('Lark message coordinator', () => {
     expect(runtime.start).not.toHaveBeenCalled();
   });
 
-  it('原卡不可更新时只补发一张终态卡，且不再另发结果消息', async () => {
+  it('原过程卡不可更新时不补发过程卡，只单独交付结果消息', async () => {
     let subscriber: ((event: AgentEvent) => void) | undefined;
     const runtime = {
       start: vi.fn(async () => session), getSession: vi.fn(async () => session),
@@ -1535,18 +1588,16 @@ describe('Lark message coordinator', () => {
     coordinator.handle({ messageId: 'om_terminal_fallback', chatId: 'oc_group', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
 
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledTimes(2), { timeout: 2_500 });
-    // 单卡契约：进度卡一次 send，原卡确定不可更新后补发**一张**终态卡，没有第三条消息。
+    // 过程卡不可更新不会触发补发；第二条就是独立结果消息。
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(service.send).toHaveBeenCalledTimes(2);
-    const replacement = service.send.mock.calls[1]?.[0];
-    expect(replacement).toMatchObject({ chatId: 'oc_group', state: 'completed', idempotencyKey: expect.stringMatching(/^repl_/) });
-    // 补发的就是真实结论本身，不是「结果已另发」的收据。
-    expect(JSON.stringify(replacement.elements)).toContain('最终结果');
-    expect(JSON.stringify(replacement.elements)).not.toContain('已作为新消息发送');
-    expect(log.info).toHaveBeenCalledWith(expect.objectContaining({ previousMessageId: 'om_running', replacementMessageId: 'om_replacement' }), '已补发飞书终态卡片');
-    // 补发卡就是终态本身：final_message_id 指向它，而不是另一条消息。
+    const result = service.send.mock.calls[1]?.[0];
+    expect(result).toMatchObject({ chatId: 'oc_group', state: 'completed', readOnly: true, idempotencyKey: expect.stringMatching(/^result_/) });
+    expect(JSON.stringify(result.elements)).toContain('最终结果');
+    expect(log.info).not.toHaveBeenCalledWith(expect.objectContaining({ previousMessageId: 'om_running' }), '已补发飞书终态卡片');
+    // 原过程卡 ID 保持不变；结果 ID 单独持久化。
     const saved = JSON.parse(mappings.save.mock.calls.at(-1)?.[0].extra);
-    expect(saved).toMatchObject({ state: 'completed', card_message_id: 'om_replacement', final_message_id: 'om_replacement', final_delivery_state: 'delivered' });
+    expect(saved).toMatchObject({ state: 'completed', card_message_id: 'om_running', final_message_id: 'om_replacement', final_delivery_state: 'delivered' });
   });
 
   it('keeps the live card and patches only a rejected terminal delta', async () => {
@@ -1560,7 +1611,9 @@ describe('Lark message coordinator', () => {
     const contentError = new LarkServiceError('LARK_OPENAPI_ERROR', 'card content rejected', 502, { upstreamCode: 230099 });
     const service = {
       addReaction: vi.fn(async () => ({})),
-      send: vi.fn(async () => ({ messageId: 'om_running' })),
+      send: vi.fn()
+        .mockResolvedValueOnce({ messageId: 'om_running' })
+        .mockResolvedValueOnce({ messageId: 'om_result' }),
       deleteReaction: vi.fn(async () => {}),
       update: vi.fn().mockRejectedValueOnce(contentError).mockResolvedValueOnce({ messageId: 'om_running' })
     };
@@ -1576,9 +1629,10 @@ describe('Lark message coordinator', () => {
     expect(JSON.stringify(patched.elements)).toContain('dockmux_rejected_delta');
     expect(JSON.stringify(patched.elements)).not.toContain('未通过审核的最终结果');
     expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_running' }), '飞书卡片增量被拒绝，已保留上次成功内容并原地修补');
-    // 内容被拒绝只能原地降级：原卡还在且可更新，绝不因此再发一条消息。
+    // 内容被拒绝只影响过程卡；结果仍独立交付。
     await new Promise(resolve => setTimeout(resolve, 50));
-    expect(service.send).toHaveBeenCalledTimes(1);
+    expect(service.send).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(service.send.mock.calls[1]?.[0].elements)).toContain('未通过审核的最终结果');
   });
 
   it('schedules reconciliation when a live terminal update fails transiently', async () => {
@@ -1590,7 +1644,9 @@ describe('Lark message coordinator', () => {
       interrupt: vi.fn(async () => {})
     };
     const service = {
-      addReaction: vi.fn(async () => ({})), send: vi.fn(async () => ({ messageId: 'om_running' })), deleteReaction: vi.fn(async () => {}),
+      addReaction: vi.fn(async () => ({})), send: vi.fn()
+        .mockResolvedValueOnce({ messageId: 'om_running' })
+        .mockResolvedValueOnce({ messageId: 'om_result' }), deleteReaction: vi.fn(async () => {}),
       update: vi.fn(async () => { throw new Error('temporary network failure'); })
     };
     const mappings = { list: vi.fn(async () => []), get: vi.fn(), save: vi.fn(async () => {}) };
@@ -1601,12 +1657,12 @@ describe('Lark message coordinator', () => {
 
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledTimes(3), { timeout: 2_500 });
     expect(scheduleReconcile).toHaveBeenCalledOnce();
-    // 暂时性失败不得补发任何消息：只有进度卡那一条 send。
+    // 过程 PATCH 暂时失败不能阻断独立结果交付。
     await new Promise(resolve => setTimeout(resolve, 50));
-    expect(service.send).toHaveBeenCalledTimes(1);
-    // 未送达就不能记为已交付，否则对账会以为结论已经到了用户手上。
+    expect(service.send).toHaveBeenCalledTimes(2);
+    // 结果已送达而过程尚未冻结，恢复时只需补过程卡。
     const saved = mappings.save.mock.calls.map(([call]: any[]) => JSON.parse(call.extra));
-    expect(saved.every(entry => entry.final_delivery_state === undefined && !entry.final_message_id)).toBe(true);
+    expect(saved.some(entry => entry.final_delivery_state === 'delivered' && entry.final_message_id === 'om_result')).toBe(true);
   });
 
   it('reconciles a persisted queued card to completed after listener recovery', async () => {
@@ -1629,17 +1685,18 @@ describe('Lark message coordinator', () => {
 
     await coordinator.reconcile(config);
 
-    // 单卡对账：真实结论 PATCH 回原卡，不再发第二条消息。
+    // 对账冻结过程卡，再将结果作为第二条只读消息交付。
     expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_running', state: 'completed', readOnly: true, elements: expect.any(Array) }));
     const patched = JSON.stringify(service.update.mock.calls[0]?.[0].elements);
-    expect(patched).toContain('真实最终结果');
-    expect(patched).not.toContain('不应串入的结果');
-    expect(patched).not.toContain('已作为新消息发送');
-    expect(service.send).not.toHaveBeenCalled();
-    expect(JSON.parse(mappings.save.mock.calls.at(-1)?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_running', final_message_id: 'om_running', final_delivery_state: 'delivered', progress_frozen: true });
+    expect(patched).not.toContain('真实最终结果');
+    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ state: 'completed', readOnly: true, idempotencyKey: expect.stringMatching(/^result_/) }));
+    const result = JSON.stringify(service.send.mock.calls[0]?.[0].elements);
+    expect(result).toContain('真实最终结果');
+    expect(result).not.toContain('不应串入的结果');
+    expect(JSON.parse(mappings.save.mock.calls.at(-1)?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_running', final_message_id: 'om_final', final_delivery_state: 'delivered', progress_frozen: true });
   });
 
-  it('对账幂等：已收敛的单卡记录不再产生任何 API 调用', async () => {
+  it('对账幂等：过程与结果均已交付后不再产生任何 API 调用', async () => {
     const startedAt = Date.now() - 2_000;
     const runtimeTask = { id: 'runtime-idempotent', sessionId: session.id, prompt: '执行任务', status: 'completed', createdAt: new Date(startedAt).toISOString(), updatedAt: new Date().toISOString() };
     const mapping = {
@@ -1647,23 +1704,23 @@ describe('Lark message coordinator', () => {
       extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_p2p', chat_type: 'p2p', card_message_id: 'om_progress', runtime_task_id: runtimeTask.id, task_name: '执行任务', prompt: '执行任务', state: 'running', started_at: startedAt, turn: 3 })
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '最终结果' })]) };
-    const service = { update: vi.fn(async () => ({ messageId: 'om_progress' })), send: vi.fn() };
+    const service = { update: vi.fn(async () => ({ messageId: 'om_progress' })), send: vi.fn(async () => ({ messageId: 'om_result' })) };
     const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(0);
     expect(service.update).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(mapping.extra)).toMatchObject({ card_message_id: 'om_progress', final_message_id: 'om_progress', final_delivery_state: 'delivered', progress_frozen: true });
+    expect(JSON.parse(mapping.extra)).toMatchObject({ card_message_id: 'om_progress', final_message_id: 'om_result', final_delivery_state: 'delivered', progress_frozen: true });
 
     // 第二次对账必须完全静默：不重复 PATCH，更不补发任何消息。
     await expect(coordinator.reconcile(config)).resolves.toBe(0);
     expect(service.update).toHaveBeenCalledTimes(1);
-    expect(service.send).not.toHaveBeenCalled();
+    expect(service.send).toHaveBeenCalledOnce();
   });
 
-  it('遗留冻结收据缺终态时，对账补上真实结果而不是当成已交付跳过', async () => {
+  it('遗留冻结收据缺终态时，对账只补独立结果而不是改写历史过程卡', async () => {
     // 旧版本会把进度卡冻结成「结果已另发」的收据；若那条结果消息从未成功发出，
-    // 用户手上只剩一张什么都没说的收据。对账必须把真实结论补回这张卡。
+    // 用户手上只剩一张什么都没说的收据。对账必须补回独立结果。
     const startedAt = Date.now() - 2_000;
     const runtimeTask = { id: 'runtime-legacy-frozen', sessionId: session.id, prompt: '执行任务', status: 'completed', createdAt: new Date(startedAt).toISOString(), updatedAt: new Date().toISOString() };
     const mapping = {
@@ -1681,17 +1738,48 @@ describe('Lark message coordinator', () => {
       agentEvent(2, 'text', { text: '本该交付的真实结论' }),
       agentEvent(3, 'task', { task: runtimeTask })
     ]) };
-    const service = { update: vi.fn(async () => ({ messageId: 'om_legacy_receipt' })), send: vi.fn() };
+    const service = { update: vi.fn(async () => ({ messageId: 'om_legacy_receipt' })), send: vi.fn(async () => ({ messageId: 'om_legacy_result' })) };
     const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(0);
 
-    const patched = JSON.stringify(service.update.mock.calls[0]?.[0].elements);
-    expect(patched).toContain('本该交付的真实结论');
-    expect(patched).not.toContain('已作为新消息发送');
-    expect(service.send).not.toHaveBeenCalled();
-    expect(JSON.parse(mapping.extra)).toMatchObject({ card_message_id: 'om_legacy_receipt', final_message_id: 'om_legacy_receipt', final_delivery_state: 'delivered' });
+    expect(service.update).not.toHaveBeenCalled();
+    expect(JSON.stringify(service.send.mock.calls[0]?.[0].elements)).toContain('本该交付的真实结论');
+    expect(JSON.parse(mapping.extra)).toMatchObject({ card_message_id: 'om_legacy_receipt', final_message_id: 'om_legacy_result', final_delivery_state: 'delivered' });
+  });
+
+  it('recovery retries only an undelivered result after its send fails', async () => {
+    const startedAt = Date.now() - 2_000;
+    const runtimeTask = { id: 'runtime-result-retry', sessionId: session.id, prompt: '执行任务', status: 'completed', createdAt: new Date(startedAt).toISOString(), updatedAt: new Date().toISOString() };
+    const mapping = {
+      id: 'lark-card:cli_test:om_result_retry', channel: 'lark-card:cli_test', externalId: 'om_result_retry', sessionId: session.id, createdAt: new Date(startedAt).toISOString(),
+      extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_p2p', card_message_id: 'om_frozen_process', runtime_task_id: runtimeTask.id, task_name: '执行任务', prompt: '执行任务', state: 'completed', started_at: startedAt, progress_frozen: true })
+    };
+    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '恢复后应补发的结果' })]) };
+    const service = {
+      update: vi.fn(async () => ({ messageId: 'om_frozen_process' })),
+      send: vi.fn()
+        .mockRejectedValueOnce(new Error('temporary result delivery failure'))
+        .mockResolvedValueOnce({ messageId: 'om_recovered_result' })
+    };
+    const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }) };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
+
+    await expect(coordinator.reconcile(config)).resolves.toBe(1);
+    expect(service.update).not.toHaveBeenCalled();
+    expect(service.send).toHaveBeenCalledOnce();
+    expect(JSON.parse(mapping.extra)).toMatchObject({ progress_frozen: true });
+    expect(JSON.parse(mapping.extra).final_message_id).toBeUndefined();
+
+    await expect(coordinator.reconcile(config)).resolves.toBe(0);
+    expect(service.update).not.toHaveBeenCalled();
+    expect(service.send).toHaveBeenCalledTimes(2);
+    expect(service.send.mock.calls[1]?.[0].idempotencyKey).toBe(service.send.mock.calls[0]?.[0].idempotencyKey);
+    expect(JSON.stringify(service.send.mock.calls[1]?.[0].elements)).toContain('恢复后应补发的结果');
+    expect(JSON.parse(mapping.extra)).toMatchObject({
+      card_message_id: 'om_frozen_process', final_message_id: 'om_recovered_result', final_delivery_state: 'delivered', progress_frozen: true
+    });
   });
 
   it('历史双消息记录：不重发结论，只把旧进度卡收敛为终态', async () => {
@@ -1805,7 +1893,7 @@ describe('Lark message coordinator', () => {
     coordinator.stop();
   });
 
-  it('falls back to a green completed card when a reconciled original card cannot be updated', async () => {
+  it('delivers a result without replacing a reconciled process card that cannot be updated', async () => {
     const startedAt = Date.now() - 2_000;
     const runtimeTask = { id: 'runtime-2', sessionId: session.id, prompt: '执行任务', status: 'completed', createdAt: new Date(startedAt).toISOString(), updatedAt: new Date().toISOString() };
     const mapping = {
@@ -1820,11 +1908,11 @@ describe('Lark message coordinator', () => {
     await coordinator.reconcile(config);
 
     expect(service.update).toHaveBeenCalledTimes(3);
-    // 补发的这张卡就是结论本身，不是「结果已另发」的收据；幂等键与直播路径共用，崩溃重放不会补第二张。
-    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_group', state: 'completed', readOnly: true, idempotencyKey: expect.stringMatching(/^repl_/) }));
+    // 原过程卡不补发；结果单独交付并与直播路径共用幂等键。
+    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_group', state: 'completed', readOnly: true, idempotencyKey: expect.stringMatching(/^result_/) }));
     expect(JSON.stringify(service.send.mock.calls[0]?.[0].elements)).toContain('真实最终结果');
     expect(JSON.stringify(service.send.mock.calls[0]?.[0].elements)).not.toContain('已作为新消息发送');
-    expect(JSON.parse(mappings.save.mock.calls[0]?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_completed_replacement', final_message_id: 'om_completed_replacement', final_delivery_state: 'delivered' });
+    expect(JSON.parse(mappings.save.mock.calls[0]?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_stuck', final_message_id: 'om_completed_replacement', final_delivery_state: 'delivered', progress_frozen: true });
   });
 
   it('patches only the rejected delta in place during reconciliation', async () => {
@@ -1852,13 +1940,14 @@ describe('Lark message coordinator', () => {
     expect(JSON.stringify(patched.elements)).toContain('上次成功的进度');
     expect(JSON.stringify(patched.elements)).toContain('dockmux_rejected_delta');
     expect(JSON.stringify(patched.elements)).not.toContain('过长或未通过审核的结果');
-    // 内容被拒绝只允许原地降级；单卡契约下它绝不构成再发一条消息的理由。
-    expect(service.send).not.toHaveBeenCalled();
-    expect(JSON.parse(mappings.save.mock.calls.at(-1)?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_rejected', final_message_id: 'om_rejected', final_delivery_state: 'delivered', progress_frozen: true, last_successful_elements: patched.elements });
+    // 内容被拒绝只影响过程增量；最终结果仍单独交付。
+    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: expect.stringMatching(/^result_/), readOnly: true }));
+    expect(JSON.stringify(service.send.mock.calls[0]?.[0].elements)).toContain('过长或未通过审核的结果');
+    expect(JSON.parse(mappings.save.mock.calls.at(-1)?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_rejected', final_message_id: 'om_safe_final', final_delivery_state: 'delivered', progress_frozen: true, last_successful_elements: patched.elements });
     expect(log.error).not.toHaveBeenCalled();
   });
 
-  it('原卡内容被拒且无可降级的历史内容时，保持未交付等待下次对账，不另发消息', async () => {
+  it('原卡内容被拒且无可降级历史时，保持过程未冻结但仍交付独立结果', async () => {
     const startedAt = Date.now() - 2_000;
     const runtimeTask = { id: 'runtime-legacy-rejected', sessionId: session.id, prompt: '执行任务', status: 'completed', createdAt: new Date(startedAt).toISOString(), updatedAt: new Date().toISOString() };
     const mapping = {
@@ -1873,16 +1962,14 @@ describe('Lark message coordinator', () => {
 
     await expect(coordinator.reconcile(config)).resolves.toBe(1);
 
-    // 内容被拒绝时原卡还在，只是这一版内容进不去；不补发消息，也不能谎报已交付。
+    // 内容被拒绝时原卡还在，只是过程无法冻结；结果消息不受它阻断。
     expect(service.update).toHaveBeenCalledTimes(1);
-    expect(service.send).not.toHaveBeenCalled();
+    expect(service.send).toHaveBeenCalledOnce();
     const saved = JSON.parse(mapping.extra);
-    expect(saved.final_message_id).toBeUndefined();
-    expect(saved.final_delivery_state).toBeUndefined();
-    expect(saved).toMatchObject({ state: 'completed', card_message_id: 'om_legacy', progress_frozen: false });
+    expect(saved).toMatchObject({ state: 'completed', card_message_id: 'om_legacy', final_message_id: 'om_legacy_safe_final', final_delivery_state: 'delivered', progress_frozen: false });
   });
 
-  it('原卡暂时性 PATCH 失败时保持未交付，下一轮对账把结论补回同一张卡', async () => {
+  it('原卡暂时性 PATCH 失败时保留结果交付，下一轮对账只补过程卡', async () => {
     const startedAt = Date.now() - 2_000;
     const runtimeTask = { id: 'runtime-transient', sessionId: session.id, prompt: '执行任务', status: 'completed', createdAt: new Date(startedAt).toISOString(), updatedAt: new Date().toISOString() };
     const mapping = {
@@ -1890,29 +1977,27 @@ describe('Lark message coordinator', () => {
       extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_group', card_message_id: 'om_original', runtime_task_id: runtimeTask.id, task_name: '执行任务', prompt: '执行任务', state: 'running', started_at: startedAt })
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
-    const service = { update: vi.fn(async () => { throw new Error('temporary network failure'); }), send: vi.fn(async () => ({ messageId: 'om_should_not_be_sent' })) };
+    const service = { update: vi.fn(async () => { throw new Error('temporary network failure'); }), send: vi.fn(async () => ({ messageId: 'om_result' })) };
     const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async (saved: typeof mapping) => { mapping.extra = saved.extra; }) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await expect(coordinator.reconcile(config)).resolves.toBe(1);
 
-    // 三次重试都失败：不发消息，不标记已交付，等下一轮对同一个 message_id 重试。
+    // 三次过程重试都失败，但结果照常交付，下一轮只重试同一个过程卡。
     expect(service.update).toHaveBeenCalledTimes(3);
-    expect(service.send).not.toHaveBeenCalled();
+    expect(service.send).toHaveBeenCalledOnce();
     const pending = JSON.parse(mapping.extra);
-    expect(pending.final_message_id).toBeUndefined();
-    expect(pending.final_delivery_state).toBeUndefined();
-    expect(pending).toMatchObject({ progress_frozen: false });
+    expect(pending).toMatchObject({ final_message_id: 'om_result', final_delivery_state: 'delivered', progress_frozen: false });
 
     service.update.mockResolvedValue({ messageId: 'om_original' });
     await expect(coordinator.reconcile(config)).resolves.toBe(0);
-    expect(service.send).not.toHaveBeenCalled();
+    expect(service.send).toHaveBeenCalledOnce();
     const delivered = JSON.parse(mapping.extra);
-    expect(delivered).toMatchObject({ card_message_id: 'om_original', final_message_id: 'om_original', final_delivery_state: 'delivered', progress_frozen: true });
-    expect(JSON.stringify(service.update.mock.calls.at(-1)?.[0].elements)).toContain('真实最终结果');
+    expect(delivered).toMatchObject({ card_message_id: 'om_original', final_message_id: 'om_result', final_delivery_state: 'delivered', progress_frozen: true });
+    expect(service.update.mock.calls.at(-1)?.[0]).toMatchObject({ messageId: 'om_original', state: 'completed', readOnly: true });
   });
 
-  it('replies into the original group thread when reconciling a recovered card replacement', async () => {
+  it('replies with the result into the original group thread during recovery', async () => {
     const startedAt = Date.now() - 2_000;
     const runtimeTask = { id: 'runtime-thread', sessionId: session.id, prompt: '执行任务', status: 'completed', createdAt: new Date(startedAt).toISOString(), updatedAt: new Date().toISOString() };
     const mapping = {
@@ -1927,10 +2012,10 @@ describe('Lark message coordinator', () => {
     await coordinator.reconcile(config);
 
     expect(service.update).toHaveBeenCalledTimes(3);
-    expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_trigger_thread', replyInThread: true, state: 'completed', readOnly: true, idempotencyKey: expect.stringMatching(/^repl_/) }));
+    expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_trigger_thread', replyInThread: true, state: 'completed', readOnly: true, idempotencyKey: expect.stringMatching(/^result_/) }));
     expect(JSON.stringify(service.reply.mock.calls[0]?.[0].elements)).toContain('真实最终结果');
     expect(service.send).not.toHaveBeenCalled();
-    expect(JSON.parse(mappings.save.mock.calls[0]?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_thread_replacement', final_message_id: 'om_thread_replacement', reply_message_id: 'om_trigger_thread', reply_in_thread: true });
+    expect(JSON.parse(mappings.save.mock.calls[0]?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_expired_thread', final_message_id: 'om_thread_replacement', reply_message_id: 'om_trigger_thread', reply_in_thread: true, progress_frozen: true });
   });
 
   it('defaults to replying to the original message when reconciling a normal group card', async () => {
@@ -1941,13 +2026,14 @@ describe('Lark message coordinator', () => {
       extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_group', reply_message_id: 'om_group_trigger', card_message_id: 'om_expired_group', runtime_task_id: runtimeTask.id, task_name: '执行任务', prompt: '执行任务', state: 'running', started_at: startedAt })
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
-    const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(), reply: vi.fn(async () => ({ messageId: 'om_group_replacement' })) };
+    const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(async () => ({ messageId: 'om_group_result_fallback' })), reply: vi.fn(async () => ({ messageId: 'om_group_result' })) };
     const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
     await coordinator.reconcile(config);
 
     expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_group_trigger', state: 'completed' }));
+    expect(service.reply.mock.calls[0]?.[0]).toMatchObject({ readOnly: true, idempotencyKey: expect.stringMatching(/^result_/) });
     expect(service.reply.mock.calls[0]?.[0]).not.toHaveProperty('replyInThread');
     expect(service.send).not.toHaveBeenCalled();
   });
@@ -1963,7 +2049,7 @@ describe('Lark message coordinator', () => {
     const service = {
       update: vi.fn(async () => { throw messageMissingError(); }),
       reply: vi.fn(async () => { throw new Error('message deleted'); }),
-      send: vi.fn(async () => ({ messageId: 'om_fallback_replacement' }))
+      send: vi.fn(async () => ({ messageId: 'om_fallback_result' }))
     };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}) };
@@ -1973,8 +2059,8 @@ describe('Lark message coordinator', () => {
 
     expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_deleted_trigger', replyInThread: true, state: 'completed' }));
     expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_group', state: 'completed' }));
-    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_deleted_trigger', chatId: 'oc_group' }), '恢复卡片回复失败，回退为群内发送');
-    expect(JSON.parse(mappings.save.mock.calls[0]?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_fallback_replacement' });
+    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_deleted_trigger', chatId: 'oc_group' }), '回复执行结果失败，回退为会话内发送');
+    expect(JSON.parse(mappings.save.mock.calls[0]?.[0].extra)).toMatchObject({ state: 'completed', card_message_id: 'om_expired_reply', final_message_id: 'om_fallback_result', progress_frozen: true });
   });
 
   it('does not pass a legacy omt thread id to the message reply API during reconciliation', async () => {
@@ -1985,7 +2071,7 @@ describe('Lark message coordinator', () => {
       extra: JSON.stringify({ app_id: 'cli_test', chat_id: 'oc_group', root_message_id: 'omt_legacy_thread', card_message_id: 'om_expired_legacy', runtime_task_id: runtimeTask.id, task_name: '执行任务', prompt: '执行任务', state: 'running', started_at: startedAt })
     };
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
-    const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(async () => ({ messageId: 'om_legacy_replacement' })), reply: vi.fn() };
+    const service = { update: vi.fn(async () => { throw messageMissingError(); }), send: vi.fn(async () => ({ messageId: 'om_legacy_result' })), reply: vi.fn() };
     const mappings = { list: vi.fn(async () => [mapping]), get: vi.fn(), save: vi.fn(async () => {}) };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, undefined, undefined, mappings as any);
 
