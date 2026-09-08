@@ -1,5 +1,5 @@
-import type { ChannelMappingRepository, TaskRecord } from '@dockmux/shared';
-import { defaultLarkTraceLimit, type StoredLarkConfig } from './config.js';
+import type { ChannelMapping, ChannelMappingRepository, TaskRecord } from '@dockmux/shared';
+import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, type LarkCardService } from './service.js';
 import {
   eventsForRuntimeTask,
@@ -58,6 +58,7 @@ export async function performLarkCardReconcile(input: {
   log: ListenerLog;
   config: StoredLarkConfig;
   channel: string;
+  resultElements?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, cardId: string) => Promise<Array<Record<string, any>>>;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
@@ -86,7 +87,7 @@ export async function performLarkCardReconcile(input: {
         await service.update({
           ...cardContext,
           messageId: persisted.card_message_id,
-          permissionMode: 'full-trust',
+          permissionMode: larkPermissionMode(config),
           state: persisted.state as 'completed' | 'failed' | 'interrupted',
           taskId: mapping.externalId,
           taskName: persisted.task_name,
@@ -124,7 +125,7 @@ export async function performLarkCardReconcile(input: {
         await service.update({
           ...cardContext,
           messageId: persisted.card_message_id,
-          permissionMode: 'full-trust',
+          permissionMode: larkPermissionMode(config),
           state: runtimeTask.status === 'queued' ? 'queued' : 'running',
           taskId: mapping.externalId,
           taskName: persisted.task_name,
@@ -160,14 +161,15 @@ export async function performLarkCardReconcile(input: {
     let contentRejected = false;
     const chatType = persisted.chat_type ?? (persisted.reply_message_id ? 'group' : 'p2p');
     // 单卡对账：把**真实结论**写回原卡，而不是先写一张「结果已另发」的收据。
-    const currentElements = boundLarkCardElements(renderLarkCardElements(events, config, completed, false, chatType));
+    const currentElements = boundLarkCardElements([...renderLarkCardElements(events, config, completed, false, chatType),
+      ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, persisted.card_message_id) : [])]);
     let deliveredElements = currentElements;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
         await service.update({
           ...cardContext,
           messageId: persisted.card_message_id,
-          permissionMode: 'full-trust',
+          permissionMode: larkPermissionMode(config),
           state,
           taskId: mapping.externalId,
           taskName: persisted.task_name,
@@ -195,7 +197,7 @@ export async function performLarkCardReconcile(input: {
         await service.update({
           ...cardContext,
           messageId: persisted.card_message_id,
-          permissionMode: 'full-trust',
+          permissionMode: larkPermissionMode(config),
           state,
           taskId: mapping.externalId,
           taskName: persisted.task_name,
@@ -278,6 +280,7 @@ export async function performLarkCardReconcile(input: {
         }
       }
     }
+    if (completed && input.resultElements && cardMessageId !== persisted.card_message_id) await input.resultElements(mapping, persisted, cardMessageId);
     // 交付成功后终态就是这张卡自己：final_message_id === card_message_id。
     await cardMappings.save({
       ...mapping,

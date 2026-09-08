@@ -47,6 +47,7 @@ export interface AgentGroupCliOptions {
   replyTo?: string;
   inThread?: boolean;
   idempotencyKey?: string;
+  image?: boolean;
 }
 
 export interface UpdateCliOptions {
@@ -127,6 +128,7 @@ export interface CliHandlers {
   groupMessages?(options: AgentGroupCliOptions): void | Promise<void>;
   groupMessage?(messageId: string): void | Promise<void>;
   groupSend?(content: string, options: AgentGroupCliOptions): void | Promise<void>;
+  groupSendFile?(path: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
@@ -338,6 +340,14 @@ Examples:
 Routing guidance:
   Continue a discussion or answer a question with --reply-to ... --in-thread.
   Start an independent announcement or task without --reply-to/--in-thread.`);
+  group.command('send-file')
+    .description('Send a file from the current session workspace to the scoped Lark group')
+    .argument('<path>', 'Path inside the current session workspace')
+    .option('--reply-to <message-id>', 'Reply to a message in this group')
+    .option('--in-thread', 'Place the reply in the topic/thread')
+    .option('--idempotency-key <key>', 'Stable retry key')
+    .option('--image', 'Send as an image message (10 MiB limit)')
+    .action((path, options) => handlers.groupSendFile?.(path, options));
   group.command('wait')
     .description('Wait briefly for new messages after a cursor')
     .requiredOption('--after <cursor>', 'Cursor returned by messages or wait')

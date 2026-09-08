@@ -923,7 +923,7 @@ describe('Lark message coordinator', () => {
     expect(interruptedCall.capabilities).toMatchObject({ canRetry: true });
     finishFirst();
 
-    await expect(coordinator.handleAction('{"action":"retry","task_id":"om_task"}')).resolves.toEqual({ type: 'success', content: '已开始重试' });
+    await expect(coordinator.handleAction('{"action":"retry","task_id":"om_task"}', 'ou_operator')).resolves.toEqual({ type: 'success', content: '已开始重试' });
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
     // 重试的结论落在**第二张**卡上。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({
@@ -936,7 +936,7 @@ describe('Lark message coordinator', () => {
     expect(service.send).toHaveBeenCalledTimes(2);
     expect(runtime.send).toHaveBeenNthCalledWith(2, 'ses_1', '执行任务', expect.any(String));
 
-    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' })).resolves.toEqual({ type: 'warning', content: '只有失败或已中断的任务可以重试' });
+    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'warning', content: '只有失败或已中断的任务可以重试' });
     expect(runtime.send).toHaveBeenCalledTimes(2);
     expect(service.send).toHaveBeenCalledTimes(2);
   });
@@ -999,7 +999,7 @@ describe('Lark message coordinator', () => {
     // 线上遗留卡片不带 turn，必须继续可用，不能因为这次加固把老卡片全废掉。
     await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_turned' }))
       .resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1');
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2');
   });
 
   /**
@@ -1074,7 +1074,7 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(service.send.mock.calls.some(([input]: any[]) => input.idempotencyKey?.startsWith('repl_'))).toBe(true));
 
     // 旧补发仍在飞的同时立刻重试，开启第二轮。
-    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '已开始重试' });
+    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '已开始重试' });
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(parsedMapping().runtime_task_id).toBe('runtime-2'));
     const newCardId = parsedMapping().card_message_id;
@@ -1094,7 +1094,7 @@ describe('Lark message coordinator', () => {
     // 新一轮仍然活着：刷新与取消都还能作用在它身上，没被旧轮的 cleanup 清掉。
     await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '已拉取最新状态' });
     await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1');
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2');
     // 新一轮的终态落在新卡上，旧卡 om_card_1 始终没被改写成第二轮的结论。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: newCardId, state: 'interrupted' })));
     expect(service.update.mock.calls.filter(([input]: any[]) => input.messageId === 'om_card_1' && input.state === 'interrupted')).toHaveLength(0);
@@ -1114,7 +1114,7 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(service.send.mock.calls.some(([input]: any[]) => input.idempotencyKey?.startsWith('repl_'))).toBe(true));
     const sendsBeforeRetry = service.send.mock.calls.length;
 
-    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '已开始重试' });
+    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '已开始重试' });
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(parsedMapping().runtime_task_id).toBe('runtime-2'));
     const newCardId = parsedMapping().card_message_id;
@@ -1173,7 +1173,7 @@ describe('Lark message coordinator', () => {
 
     // 取消/中断请求发出，但 runtime 那一侧挂住不返回。
     await expect(coordinator.handleAction({ action, task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: toast });
-    if (action === 'interrupt') expect(runtime.interrupt).toHaveBeenCalledWith('ses_1');
+    if (action === 'interrupt') expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-1');
     else expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-1');
 
     // runtime 自己把第一轮判为 interrupted（事件流），于是任务可重试。
@@ -1181,7 +1181,7 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: firstCardId, state: 'interrupted' })));
 
     // 重试开出第二轮。
-    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '已开始重试' });
+    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '已开始重试' });
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(parsedMapping().runtime_task_id).toBe('runtime-2'));
     const newCardId = parsedMapping().card_message_id;

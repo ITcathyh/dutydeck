@@ -1,5 +1,6 @@
+import type { RelayAskBroker } from '@dockmux/relay';
 import * as lark from '@larksuiteoapi/node-sdk';
-import type { AgentEvent, ChannelMappingRepository, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
+import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
 import type { LarkGroupManager } from './group-management.js';
 import type { StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError } from './service.js';
@@ -25,11 +26,13 @@ export interface LarkRuntime {
   getSession(id: string): Promise<Session | undefined>;
   stop?(id: string): Promise<unknown>;
   send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<unknown>;
-  dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<{ id: string; status: string; queuedAhead?: number }>;
+  dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string): Promise<{ id: string; status: string; queuedAhead?: number; replayed?: boolean }>;
+  getPendingPermissions?(id: string): PermissionRequestData[] | Promise<PermissionRequestData[]>;
+  resolvePermission?(id: string, requestId: string, approved: boolean): Promise<unknown>;
   getTasks?(id: string): Promise<TaskRecord[]>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;
-  interrupt(id: string): Promise<unknown>;
+  interrupt(id: string, expectedTaskId?: string): Promise<unknown>;
   cancelQueued?(id: string, taskId: string): Promise<unknown>;
   subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
@@ -55,6 +58,8 @@ export interface LarkListener {
 }
 
 export interface LarkLongConnectionListenerOptions {
+  workflowStore?: ConfigRepository;
+  relayBroker?: RelayAskBroker;
   groupManager?: LarkGroupManager;
   runtime?: LarkRuntime;
   cardMappings?: ChannelMappingRepository;
@@ -109,7 +114,9 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
+      { store: this.options.workflowStore, broker: this.options.relayBroker },
     ) : undefined;
+    await coordinator?.initializeWorkflows(config);
     try { await coordinator?.startReconciliation(config); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账启动失败，继续建立消息监听'); }
     const dispatcher = new lark.EventDispatcher({ loggerLevel: lark.LoggerLevel.warn }).register({
@@ -134,7 +141,7 @@ export class LarkLongConnectionListener implements LarkListener {
       },
       'card.action.trigger': async (event: any) => {
         const operatorOpenId = event.operator?.open_id;
-        const result = await coordinator?.handleAction(event.action?.value, operatorOpenId);
+        const result = await coordinator?.handleAction(event.action?.value, operatorOpenId, { messageId: event.context?.open_message_id ?? event.open_message_id, chatId: event.context?.open_chat_id ?? event.open_chat_id });
         if (!result) return;
         return { toast: result };
       },

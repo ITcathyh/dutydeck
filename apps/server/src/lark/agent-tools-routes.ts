@@ -18,6 +18,7 @@ interface GroupSendBody {
   inThread?: boolean;
   idempotencyKey?: string;
 }
+interface GroupSendFileBody { path?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string; image?: boolean }
 
 const tokenFrom = (authorization?: string) => agentGroupToolBearerToken(authorization);
 const numberFrom = (value?: string) => value === undefined ? undefined : Number(value);
@@ -79,6 +80,10 @@ export async function registerLarkAgentToolRoutes(app: FastifyInstance, service?
 
   app.post<{ Body: GroupSendBody }>('/api/lark/agent-tools/send', async (request, reply) => {
     try { return await service.send(tokenFrom(request.headers.authorization), request.body ?? {}); }
+    catch (error) { return handleToolError(error, reply); }
+  });
+  app.post<{ Body: GroupSendFileBody }>('/api/lark/agent-tools/send-file', async (request, reply) => {
+    try { return await service.sendFile(tokenFrom(request.headers.authorization), request.body ?? {}); }
     catch (error) { return handleToolError(error, reply); }
   });
 }

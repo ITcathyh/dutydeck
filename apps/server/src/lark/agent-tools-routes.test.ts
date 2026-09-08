@@ -11,16 +11,18 @@ describe('Agent group tool HTTP boundary', () => {
     const service = {
       self: vi.fn(), peers: vi.fn(), members: vi.fn(async () => ({ chatId: 'oc_group', members: [] })),
       messages: vi.fn(async () => ({ chatId: 'oc_group', messages: [] })),
-      wait: vi.fn(), send: vi.fn(async () => ({ messageId: 'om_sent' }))
+      wait: vi.fn(), send: vi.fn(async () => ({ messageId: 'om_sent' })), sendFile: vi.fn(async () => ({ messageId: 'om_file' }))
     };
     const app = Fastify(); apps.push(app); await registerLarkAgentToolRoutes(app, service as any);
     const messages = await app.inject({ method: 'GET', url: '/api/lark/agent-tools/messages?after=cursor&limit=7', headers: { authorization: 'Bearer scoped-token' } });
     const members = await app.inject({ method: 'GET', url: '/api/lark/agent-tools/members', headers: { authorization: 'Bearer scoped-token' } });
     const sent = await app.inject({ method: 'POST', url: '/api/lark/agent-tools/send', headers: { authorization: 'Bearer scoped-token' }, payload: { content: 'hello', to: 'cli_peer', replyTo: 'om_parent', inThread: true } });
-    expect(messages.statusCode).toBe(200); expect(members.statusCode).toBe(200); expect(sent.statusCode).toBe(200);
+    const file = await app.inject({ method: 'POST', url: '/api/lark/agent-tools/send-file', headers: { authorization: 'Bearer scoped-token' }, payload: { path: 'report.pdf', image: true, idempotencyKey: 'file-1' } });
+    expect(messages.statusCode).toBe(200); expect(members.statusCode).toBe(200); expect(sent.statusCode).toBe(200); expect(file.statusCode).toBe(200);
     expect(service.members).toHaveBeenCalledWith('scoped-token');
     expect(service.messages).toHaveBeenCalledWith('scoped-token', { after: 'cursor', limit: 7 });
     expect(service.send).toHaveBeenCalledWith('scoped-token', { content: 'hello', to: 'cli_peer', replyTo: 'om_parent', inThread: true });
+    expect(service.sendFile).toHaveBeenCalledWith('scoped-token', { path: 'report.pdf', image: true, idempotencyKey: 'file-1' });
   });
 
   it('returns structured authorization instructions without reducing them to HTTP 500', async () => {

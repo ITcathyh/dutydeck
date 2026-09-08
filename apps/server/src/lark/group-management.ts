@@ -10,7 +10,7 @@ import {
   type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
   type PolicyDecision, type RepositoryBundle, type RoleAssignment, type Session, type ToolRiskPolicy
 } from '@dockmux/shared';
-import { readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { larkExecutionConfirmed, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError, type LarkCardService, type LarkChat } from './service.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkSourceId } from './session-resolver.js';
@@ -101,7 +101,7 @@ export class LarkGroupManager {
     const effective = binding ? resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), binding) : undefined;
     if (effective && binding?.routingOverride.groupReplyMode.mode === 'inherit' && !config.groupReplyMode) effective.routing.groupReplyMode = { value: undefined, source: 'unconfigured' };
     const enabled = Boolean(binding && binding.state === 'staged' && owner.activeGroups.includes(binding.id) && bot?.state !== 'disabled');
-    const applied = enabled && validity === 'valid' && fact?.membershipState === 'member' && config.fullTrustConfirmed === true;
+    const applied = enabled && validity === 'valid' && fact?.membershipState === 'member' && larkExecutionConfirmed(config);
     return { appId: config.appId, channelBotId: owner.channelBotId, binding, effective,
       roles: roles.filter(role => role.groupBindingId === binding?.id), membership: fact?.membershipState ?? 'unknown', validity, checkedAt: fact?.observedAt, applied,
       ...(!applied && binding ? { error: validity !== 'valid' ? '群身份或凭据校验已失效，请重新同步群聊。' : '群配置已停用或 Bot 尚未确认运行权限。' } : {}) };
@@ -206,7 +206,7 @@ export class LarkGroupManager {
       && Object.entries(input.patch).every(([key, value]) => JSON.stringify(value) === JSON.stringify(detail.binding![key as keyof GroupBinding])));
     const reducingAccess = disabling || revokingOnly;
     if (!reducingAccess && (detail.validity !== 'valid' || detail.membership !== 'member')) throw new RuntimeError('LARK_GROUP_VERIFY_REQUIRED', '请先同步并确认 Bot 在此群中。', 409);
-    if (!reducingAccess && !config.fullTrustConfirmed) throw new RuntimeError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先在 Bot 接入设置中确认无人值守运行权限。', 409);
+    if (!reducingAccess && !larkExecutionConfirmed(config)) throw new RuntimeError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先在 Bot 接入设置中确认无人值守运行权限。', 409);
     const { state: _state, ...newOverrides } = input.patch;
     const projected = detail.binding ? { ...detail.binding, ...input.patch } : createGroupBindingInputSchema.parse({ id: `live_binding_${hash(`${appId}\0${chatId}`)}`, channelBotId: owner.channelBotId, externalChatId: chatId, ...newOverrides });
     const effective = resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), projected as GroupBinding);
@@ -298,7 +298,7 @@ export class LarkGroupManager {
     } while (true);
   }
 
-  async authorize(appId: string, chatId: string, openId: string | undefined, action: PolicyAction, sessionId?: string, options: { memberObserved?: boolean; installationOwner?: boolean } = {}): Promise<PolicyDecision | undefined> {
+  async authorize(appId: string, chatId: string, openId: string | undefined, action: PolicyAction, sessionId?: string, options: { memberObserved?: boolean; installationOwner?: boolean; taskRequesterOpenId?: string } = {}): Promise<PolicyDecision | undefined> {
     const config = await readLarkConfig(this.repos.config, appId);
     if (!config) return deny(action, '此 Bot 已删除。');
     const owner = await this.owner(appId);
@@ -328,7 +328,7 @@ export class LarkGroupManager {
     return evaluatePolicyAction({ action, now, mode: 'enforce', runtimeActivation: { source: 'live_lark', channelBotId: owner.channelBotId, groupBindingId: detail.binding.id },
       channelBot: { id: owner.channelBotId, state: 'staged' }, binding: detail.binding, effectiveConfig: effective, assignments,
       principal: { id, channelBotId: owner.channelBotId, isOwner: Boolean(options.installationOwner), isChatMember: true },
-      target: { channelBotId: owner.channelBotId, groupBindingId: detail.binding.id, runOwnerPrincipalId: run?.principalId ?? id },
+      target: { channelBotId: owner.channelBotId, groupBindingId: detail.binding.id, runOwnerPrincipalId: options.taskRequesterOpenId ? principalId(appId, options.taskRequesterOpenId) : run?.principalId ?? id },
       sessionGroupTools: { read: config.groupToolsEnabled, discover: config.groupToolsEnabled, send: config.groupToolsAllowSend } });
   }
 
@@ -351,7 +351,7 @@ export class LarkGroupManager {
     if (run) {
       const actor = run.activeOpenId;
       const owner = installationOwner || actor === installationOwnerTaskActor;
-      return this.authorize(run.appId, run.chatId, owner ? undefined : actor, action, sessionId, { installationOwner: owner });
+      return this.authorize(run.appId, run.chatId, owner ? undefined : actor, action, sessionId, { installationOwner: owner, ...(actor && !owner ? { taskRequesterOpenId: actor } : {}) });
     }
     const session = await this.repos.sessions.get(sessionId);
     const [appId, chatId, chatType] = session?.sourceId?.split(':') ?? [];
