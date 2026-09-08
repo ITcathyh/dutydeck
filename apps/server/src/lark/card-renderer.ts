@@ -274,7 +274,18 @@ export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTrace(eve
   (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '执行中'
 );
 
-const toolPanel = (entry: TraceEntry, index: string | number): LarkCardElement => {
+const normalizeActions = (actions: TraceEntry[]): TraceEntry[] => actions.map(entry => {
+  if (entry.type === 'raw_terminal') {
+    return {
+      ...entry,
+      type: 'tool_result' as const,
+      data: { ...entry.data, name: 'terminal', output: entry.data.text, status: 'completed' }
+    };
+  }
+  return entry;
+});
+
+const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement => {
   const tool = toolPresentation(entry);
   const description = escapeCardInline(truncateInline(tool.description || tool.action, 72));
   const detail = escapeCardInline(tool.detail || '');
@@ -282,13 +293,13 @@ const toolPanel = (entry: TraceEntry, index: string | number): LarkCardElement =
   const elapsedSuffix = tool.elapsed ? `　<font color='grey'>${tool.elapsed}</font>` : '';
   const stateLamp = `<font color='${tool.indicatorColor}'>●</font>　`;
   const sections = [
-    tool.fullDetail && tool.fullDetail !== tool.detail && !tool.input ? `**完整内容**\n\n\`\`\`text\n${tool.fullDetail.replaceAll('```', '``\\`')}\n\`\`\`` : '',
-    tool.input ? `**输入**\n\n\`\`\`text\n${tool.input.replaceAll('```', '``\\`')}\n\`\`\`` : '',
-    tool.output ? `**结果**\n\n\`\`\`text\n${tool.output.replaceAll('```', '``\\`')}\n\`\`\`` : ''
+    tool.fullDetail && tool.fullDetail !== tool.detail && !tool.input ? `完整内容\n\n\`\`\`text\n${tool.fullDetail.replaceAll('```', '``\\`')}\n\`\`\`` : '',
+    tool.input ? `输入\n\n\`\`\`text\n${tool.input.replaceAll('```', '``\\`')}\n\`\`\`` : '',
+    tool.output ? `结果\n\n\`\`\`text\n${tool.output.replaceAll('```', '``\\`')}\n\`\`\`` : ''
   ].filter(Boolean);
   return {
     tag: 'collapsible_panel', element_id: `trace_tool_${index}`, expanded: false,
-    direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px 0px 0px 20px',
+    direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin,
     header: {
       title: { tag: 'markdown', content: `${stateLamp}${description}${detailSuffix}${elapsedSuffix}`, text_size: 'notation', icon: { tag: 'standard_icon', token: toolIcon(tool.kind), color: 'grey' } },
       vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '12px 12px' },
@@ -321,60 +332,215 @@ const traceGroups = (entries: TraceEntry[]): TraceGroup[] => {
   return groups;
 };
 
-const groupDescription = (group: TraceGroup) => {
-  const narrative = [...group.narratives].reverse().find(entry => entry.type === 'text') ?? group.narratives.at(-1);
-  const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
-  const narrativeText = redactTraceText(String(assistantNarrative?.data.text ?? '')).trim();
-  if (narrativeText) return narrativeText;
-  const tool = group.actions.find(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
-  if (tool) {
-    const presentation = toolPresentation(tool);
-    return presentation.description || presentation.fullDetail || presentation.action;
-  }
-  return narrative ? '分析与规划' : '执行过程';
-};
-
-const groupPanel = (group: TraceGroup, index: number, terminal = false): LarkCardElement => {
-  const visibleActions = group.actions;
+const historyGroupPanel = (
+  group: TraceGroup,
+  index: number,
+  showElapsed = false,
+  expanded = false
+): LarkCardElement => {
+  const visibleActions = normalizeActions(group.actions);
   const tools = visibleActions.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
   const statuses = tools.map(entry => toolPresentation(entry));
   const failedCount = statuses.filter(item => item.statusLabel === '失败').length;
   const succeededCount = statuses.filter(item => item.statusLabel === '已完成').length;
-  const hasErrorEvent = visibleActions.some(entry => entry.type === 'error');
-  const status = hasErrorEvent || (failedCount > 0 && succeededCount > 0)
+  const runningCount = statuses.filter(item => item.statusLabel === '执行中').length;
+  const hasErrorEvent = group.actions.some(entry => entry.type === 'error');
+  const hasFailed = hasErrorEvent || failedCount > 0;
+  const status = hasFailed && succeededCount > 0
     ? { label: '有失败', color: 'trace_failure' }
-    : failedCount > 0 ? { label: '失败', color: 'trace_failure' }
-    : statuses.some(item => item.statusLabel === '执行中') ? { label: '执行中', color: 'trace_running' }
-      : tools.length ? { label: '已完成', color: 'green' } : terminal ? { label: '已完成', color: 'green' } : { label: '执行中', color: 'trace_running' };
-  const thinkingEntries = group.narratives.filter(entry => entry.type === 'thinking' && String(entry.data.text ?? '').trim());
-  const actionElements = visibleActions.flatMap((entry, actionIndex): LarkCardElement[] => {
-    if (entry.type === 'tool_call' || entry.type === 'tool_result') return [toolPanel(entry, `${index}_${actionIndex}`)];
-    if (entry.type === 'permission_request') return [{ tag: 'markdown', content: `**权限请求**　<text_tag color='orange'>${entry.data.status ?? '待处理'}</text_tag>\n\n${truncateTrace(entry.data.title, 800)}`, text_size: 'x-small', margin: '0px' }];
-    if (entry.type === 'error') return [{ tag: 'markdown', content: `<text_tag color='yellow'>有错误</text_tag>\n\n${truncateTrace(entry.data.message ?? 'Agent 执行未完全成功', 1_500)}`, text_size: 'x-small', margin: '0px' }];
-    if (entry.type === 'raw_terminal') return [toolPanel({ ...entry, type: 'tool_result', data: { ...entry.data, name: 'terminal', output: entry.data.text, status: 'completed' } }, `${index}_${actionIndex}`)];
-    return [];
-  });
-  const preview = escapeCardInline(truncateInline(groupDescription(group), 92));
+    : hasFailed
+      ? { label: '失败', color: 'trace_failure' }
+      : runningCount > 0 ? { label: '执行中', color: 'trace_running' }
+      : { label: '已完成', color: 'green' };
+
+  const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
+  const narrativeText = assistantNarrative?.data.text ? redactTraceText(String(assistantNarrative.data.text)).trim() : '';
+
+  const primaryTool = statuses[0];
+  const toolExcerpt = primaryTool
+    ? truncateInline(primaryTool.output ? primaryTool.output.replace(/\s+/g, ' ') : (primaryTool.detail || primaryTool.description || primaryTool.action), 48)
+    : '';
+
+  const mainTitle = narrativeText
+    ? truncateInline(narrativeText, 72)
+    : (primaryTool ? `${primaryTool.action}${primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : (group.narratives.some(e => e.type === 'thinking') ? '分析与规划' : '执行过程'));
+
   const first = group.narratives[0] ?? group.actions[0];
   const last = group.actions.at(-1) ?? group.narratives.at(-1);
-  const elapsed = traceElapsed(first?.data.startedAt ?? first?.timestamp, last?.data.completedAt ?? last?.timestamp);
+  const elapsed = showElapsed ? traceElapsed(first?.data.startedAt ?? first?.timestamp, last?.data.completedAt ?? last?.timestamp) : '';
+
+  const preview = escapeCardInline(truncateInline(mainTitle, 92));
   const elapsedSuffix = elapsed ? `　<font color='grey'>${elapsed}</font>` : '';
   const stateSuffix = `　<font color='${status.color}'>● ${status.label}</font>`;
-  const countParts = [thinkingEntries.length ? `${thinkingEntries.length} 项内部分析` : '', tools.length ? `${tools.length} 次工具调用` : ''].filter(Boolean);
-  const summaryElements: LarkCardElement[] = countParts.length ? [{
-    tag: 'div', width: 'auto', margin: '0px 0px 2px 0px',
-    text: { tag: 'plain_text', content: countParts.join(' · '), text_size: 'notation', text_color: 'grey' },
-    icon: { tag: 'standard_icon', token: 'setting_outlined', color: 'grey' }
-  }] : [];
+  const subLine = toolExcerpt && toolExcerpt !== mainTitle ? `\n<font color='grey'>${escapeCardInline(toolExcerpt)}</font>` : '';
+  const headerTitle = `${preview}${elapsedSuffix}${stateSuffix}${subLine}`;
+
+  let actionElements: LarkCardElement[] = [];
+  if (tools.length === 1) {
+    const toolEntry = tools[0]!;
+    const panel = toolPanel(toolEntry, `${index}_0`, '0px');
+    actionElements = [{
+      tag: 'interactive_container',
+      element_id: panel.element_id,
+      behaviors: [],
+      has_border: false,
+      padding: '0px',
+      margin: '0px',
+      direction: 'vertical',
+      vertical_spacing: '4px',
+      elements: [
+        panel.header.title,
+        ...panel.elements
+      ]
+    }];
+  } else if (tools.length > 1) {
+    actionElements = tools.map((entry, actionIndex) => toolPanel(entry, `${index}_${actionIndex}`));
+  } else if (narrativeText) {
+    actionElements = [{
+      tag: 'markdown',
+      content: escapeCardInline(truncateTrace(narrativeText, 1_500)),
+      text_size: 'notation',
+      margin: '0px'
+    }];
+  } else if (group.narratives.some(e => e.type === 'thinking')) {
+    actionElements = [{
+      tag: 'markdown',
+      content: "<font color='grey'>内部分析已完成</font>",
+      text_size: 'notation',
+      margin: '0px'
+    }];
+  }
+
+  const extraElements = visibleActions.flatMap((entry): LarkCardElement[] => {
+    if (entry.type === 'permission_request') {
+      return [{ tag: 'markdown', content: `**权限请求**　<text_tag color='orange'>${entry.data.status ?? '待处理'}</text_tag>\n\n${truncateTrace(entry.data.title, 800)}`, text_size: 'x-small', margin: '0px' }];
+    }
+    if (entry.type === 'error') {
+      return [{ tag: 'markdown', content: `<text_tag color='yellow'>有错误</text_tag>\n\n${truncateTrace(entry.data.message ?? 'Agent 执行未完全成功', 1_500)}`, text_size: 'x-small', margin: '0px' }];
+    }
+    return [];
+  });
+
   return {
-    tag: 'collapsible_panel', element_id: `trace_group_${index}`, expanded: false,
-    direction: 'vertical', vertical_spacing: '2px', padding: '2px 0px 0px 0px', margin: '0px',
+    tag: 'collapsible_panel',
+    element_id: `trace_group_${index}`,
+    expanded,
+    direction: 'vertical',
+    vertical_spacing: '2px',
+    padding: '2px 0px 0px 0px',
+    margin: '0px',
     header: {
-      title: { tag: 'markdown', content: `${preview}${elapsedSuffix}${stateSuffix}`, text_size: 'notation' },
-      vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-      icon_position: 'right', icon_expanded_angle: -180
+      title: { tag: 'markdown', content: headerTitle, text_size: 'notation' },
+      vertical_align: 'center',
+      icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
+      icon_position: 'right',
+      icon_expanded_angle: -180
     },
-    elements: [...summaryElements, ...actionElements]
+    elements: [...actionElements, ...extraElements]
+  };
+};
+
+const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardElement => {
+  const visibleActions = normalizeActions(group.actions);
+  const tools = visibleActions.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
+  const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
+  const narrativeText = assistantNarrative?.data.text ? redactTraceText(String(assistantNarrative.data.text)).trim() : '';
+
+  const toolPresentations = tools.map(toolPresentation);
+  const primaryTool = toolPresentations[0];
+
+  const currentTitle = narrativeText
+    ? truncateInline(narrativeText, 72)
+    : (primaryTool ? `${primaryTool.action}${primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : '正在执行…');
+
+  const failedCount = toolPresentations.filter(item => item.statusLabel === '失败').length;
+  const succeededCount = toolPresentations.filter(item => item.statusLabel === '已完成').length;
+  const hasErrorEvent = group.actions.some(entry => entry.type === 'error');
+  const hasFailed = hasErrorEvent || failedCount > 0;
+  const stageStatus = hasFailed && succeededCount > 0
+    ? { label: '有失败', color: 'trace_failure' }
+    : hasFailed
+      ? { label: '失败', color: 'trace_failure' }
+      : toolPresentations.some(item => item.statusLabel === '执行中') ? { label: '执行中', color: 'trace_running' }
+      : { label: '已完成', color: 'green' };
+
+  const statusSuffix = hasFailed
+    ? `　<font color='${stageStatus.color}'>● ${stageStatus.label}</font>`
+    : '';
+
+  const elements: LarkCardElement[] = [
+    {
+      tag: 'markdown',
+      element_id: 'current_title',
+      content: `${escapeCardInline(currentTitle)}${statusSuffix}`,
+      text_size: 'notation',
+      margin: '0px'
+    }
+  ];
+
+  for (let actionIndex = 0; actionIndex < tools.length; actionIndex++) {
+    const toolEntry = tools[actionIndex]!;
+    elements.push(toolPanel(toolEntry, `${index}_${actionIndex}`, '0px'));
+  }
+
+  return {
+    tag: 'interactive_container',
+    element_id: `trace_group_${index}`,
+    behaviors: [],
+    background_style: 'current_bg',
+    has_border: false,
+    corner_radius: '8px',
+    padding: '8px 10px 8px 10px',
+    margin: '0px',
+    direction: 'vertical',
+    vertical_spacing: '4px',
+    elements
+  };
+};
+
+const buildEvidenceElement = (allGroups: TraceGroup[]): LarkCardElement | undefined => {
+  const allActions = allGroups.flatMap(group => group.actions);
+  const tools = allActions.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').map(toolPresentation);
+  const settled = tools.filter(tool => tool.statusLabel !== '执行中');
+  if (!settled.length) return undefined;
+
+  const failedCount = tools.filter(tool => tool.statusLabel === '失败').length;
+
+  const columns: LarkCardElement[] = [{
+    tag: 'column',
+    width: 'weighted',
+    weight: 1,
+    elements: [{
+      tag: 'markdown',
+      content: `${settled.length} 个工具已结束`,
+      text_size: 'notation',
+      margin: '0px',
+      icon: { tag: 'standard_icon', token: 'doc-checklist_outlined', color: 'grey' }
+    }]
+  }];
+
+  if (failedCount > 0) {
+    columns.push({
+      tag: 'column',
+      width: 'weighted',
+      weight: 1,
+      elements: [{
+        tag: 'markdown',
+        content: `${failedCount} 个工具失败`,
+        text_size: 'notation',
+        margin: '0px',
+        icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'orange' }
+      }]
+    });
+  }
+
+  return {
+    tag: 'column_set',
+    element_id: 'evidence',
+    flex_mode: 'none',
+    horizontal_spacing: '8px',
+    margin: '4px 0px 0px 0px',
+    columns
   };
 };
 
@@ -405,26 +571,6 @@ const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
   content: `<text_tag color='red'>执行异常</text_tag>　**需要关注**\n\n${truncateTrace(entry.data.message ?? 'Agent 执行未完全成功', 1_500)}`,
   text_size: 'normal', margin: '6px 0px 8px 0px'
 });
-
-const progressDigest = (groups: TraceGroup[]): LarkCardElement | undefined => {
-  const entries = groups.flatMap(group => [...group.narratives, ...group.actions]);
-  const analyses = entries.filter(entry => entry.type === 'thinking').length;
-  const tools = entries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').map(toolPresentation);
-  const settled = tools.filter(tool => tool.statusLabel !== '执行中').length;
-  const failed = tools.filter(tool => tool.statusLabel === '失败').length;
-  if (!tools.length && !analyses) return undefined;
-  const parts = [
-    `${groups.length} 个阶段`,
-    tools.length ? `${settled}/${tools.length} 个工具已返回` : '',
-    analyses ? `${analyses} 项内部分析（内容不展示）` : '',
-    failed ? `${failed} 项异常` : ''
-  ].filter(Boolean);
-  return {
-    tag: 'div', element_id: 'trace_digest', width: 'auto', margin: '0px 0px 4px 0px',
-    text: { tag: 'plain_text', content: parts.join(' · '), text_size: 'notation', text_color: failed ? 'orange' : 'grey', lines: 1 },
-    icon: { tag: 'standard_icon', token: 'doc-checklist_outlined', color: failed ? 'orange' : 'grey' }
-  };
-};
 
 export function renderLarkCardElements(
   events: AgentEvent[],
@@ -469,37 +615,46 @@ export function renderLarkCardElements(
   elements.push(...permissionEntries.map(permissionAlert));
   elements.push(...errorEntries.map(errorAlert));
   if (finalText && view !== 'process') {
-    elements.push({
-      tag: 'div', element_id: 'result_header', width: 'auto', margin: '4px 0px 2px 0px',
-      text: { tag: 'plain_text', content: '执行结论', text_size: 'small', text_color: 'green' },
-      icon: { tag: 'standard_icon', token: 'doc-checklist_outlined', color: 'green' }
-    });
     elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? finalText : `**当前进展**\n\n${finalText}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
   } else if (completed && view !== 'process') {
     elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }
+
+  if (completed && view !== 'process') {
+    const evidence = buildEvidenceElement(allGroups);
+    if (evidence) elements.push(evidence);
+  }
+
   if (view === 'result') return elements;
-  const hideCompletedTrace = view !== 'process' && completed && config.hideTraceOnComplete !== false;
-  if (groups.length && hideCompletedTrace) {
-    const digest = progressDigest(allGroups);
-    if (digest) elements.push({
-      ...digest,
-      element_id: 'evidence_summary',
-      text: {
-        ...(digest.text as Record<string, unknown>),
-        content: `${String((digest.text as any)?.content ?? '')} · 详细记录请在 Dockmux Web 查看`,
-        lines: 2
+
+  if (groups.length) {
+    if (completed) {
+      if (omittedGroupCount) {
+        elements.push({
+          tag: 'markdown', element_id: 'trace_omission',
+          content: `<font color='grey'>仅展示最近 ${groups.length} 个阶段，另有 ${omittedGroupCount} 个阶段；完整记录请在 Dockmux Web 查看。</font>`,
+          text_size: 'notation', margin: '0px 0px 4px 0px'
+        });
       }
-    });
-  } else if (groups.length) {
-    const digest = progressDigest(allGroups);
-    if (digest) elements.push(digest);
-    if (omittedGroupCount) elements.push({
-      tag: 'markdown', element_id: 'trace_omission',
-      content: `<font color='grey'>仅展示最近 ${groups.length} 个阶段，另有 ${omittedGroupCount} 个阶段；完整记录请在 Dockmux Web 查看。</font>`,
-      text_size: 'notation', margin: '0px 0px 4px 0px'
-    });
-    elements.push(...groups.map((group, index) => groupPanel(group, index, completed)));
+      const expanded = config.hideTraceOnComplete === false;
+      elements.push(...groups.map((group, index) => historyGroupPanel(group, index, false, expanded)));
+    } else {
+      const historyGroups = groups.slice(0, -1);
+      const currentGroup = groups.at(-1)!;
+
+      if (omittedGroupCount) {
+        elements.push({
+          tag: 'markdown', element_id: 'trace_omission',
+          content: `<font color='grey'>仅展示最近 ${groups.length} 个阶段，另有 ${omittedGroupCount} 个阶段；完整记录请在 Dockmux Web 查看。</font>`,
+          text_size: 'notation', margin: '0px 0px 4px 0px'
+        });
+      }
+      if (historyGroups.length > 0) {
+        elements.push({ tag: 'markdown', element_id: 'history_label', content: "<font color='grey'>此前阶段</font>", text_size: 'notation', margin: '4px 0px 2px 0px' });
+        elements.push(...historyGroups.map((group, index) => historyGroupPanel(group, index, true, false)));
+      }
+      elements.push(currentRunningStagePanel(currentGroup, groups.length - 1));
+    }
   }
   if (!elements.length) elements.push({ tag: 'markdown', content: completed ? '执行过程已结束，结果见单独的结果消息。' : '正在思考中…', text_size: 'normal', margin: '0px' });
   return elements;

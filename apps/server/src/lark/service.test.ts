@@ -137,23 +137,20 @@ describe('Lark card service', () => {
     expect(interrupted.config.streaming_mode).toBe(false);
   });
 
-  it('pins interrupt above an expanded full-width trace overview', () => {
+  it('pins interrupt above current running stage without trace overview wrapper', () => {
     const card: any = buildLarkCard({ state: 'running', taskId: 'trace-running', elements: [
       { tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false, header: { title: { tag: 'markdown', content: '步骤' } }, elements: [] }
     ] });
     expect(card.body.elements[0]).toMatchObject({ tag: 'column_set', element_id: 'task_action_row' });
-    expect(components(card.body.elements[0]).some(element => element.element_id === 'trace_overview')).toBe(false);
-    expect(card.body.elements[1]).toMatchObject({ tag: 'collapsible_panel', element_id: 'trace_overview', expanded: true });
-    expect(byId(card, 'trace_overview')).toMatchObject({ expanded: true, header: { title: { icon: { tag: 'standard_icon', token: 'loading_outlined', color: 'grey' } } } });
+    expect(components(card.body.elements).some(element => element.element_id === 'trace_overview')).toBe(false);
+    expect(card.body.elements[1]).toMatchObject({ element_id: 'trace_group_0' });
     expect(byId(card, 'task_status').text.content).toContain('执行中');
-    expect(byId(card, 'trace_overview').header.title.content).toContain('执行轨迹');
-    expect(byId(card, 'trace_overview').header.title.content).toContain('1 个阶段');
     expect(byId(card, 'interrupt')).toMatchObject({ behaviors: [{ value: { action: 'interrupt', task_id: 'trace-running' } }] });
     expect(card.body.elements.at(-1).columns).toHaveLength(1);
     const animated: any = buildLarkCard({ state: 'running', taskId: 'trace-animated', loadingImageKey: 'img_bouncing', elements: [
       { tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false, header: { title: { tag: 'markdown', content: '步骤' } }, elements: [] }
     ] });
-    expect(byId(animated, 'trace_overview').header.title.icon).toMatchObject({ tag: 'custom_icon', img_key: 'img_bouncing' });
+    expect(byId(animated, 'task_status').icon).toMatchObject({ tag: 'custom_icon', img_key: 'img_bouncing' });
   });
 
   it('omits all action buttons from read-only cards', () => {
@@ -231,7 +228,7 @@ describe('Lark card service', () => {
     expect(card.body.elements[overviewIndex]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
     expect(byId(card, 'task_status').text.content).toContain('已用时 1m 37s');
     expect(byId(card, 'task_status').text.content).toContain('已完成');
-    expect(card.body.elements[overviewIndex].header.title.content).toContain('1 个阶段');
+    expect(card.body.elements[overviewIndex].header.title.content).toBe('执行记录');
     expect(card.body.elements[overviewIndex].header.title.text_size).toBe('notation');
     expect(card.body.elements[overviewIndex].header.title.icon).toBeUndefined();
     expect(finalIndex).toBeGreaterThan(statusIndex);
