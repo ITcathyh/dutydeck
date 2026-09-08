@@ -206,3 +206,49 @@ describe('resolveLarkSession permission posture', () => {
     expect(group).toMatchObject({ sessionId: trusted.id, sessionConfigKey: larkSessionConfigKey(baseConfig) });
   });
 });
+
+describe('resolveLarkSession ask posture', () => {
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const group = () => ({ tail: Promise.resolve() });
+  const existing = (overrides: Partial<Session> = {}): Session => ({
+    id: 'ses_existing', agentId: 'codex', state: 'idle', cwd: '/workspace', protocol: 'acp',
+    permissionMode: 'ask', source: 'lark', sourceId: 'cli_test:oc_group:group:user:ou_user',
+    runId: 'run_existing', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', ...overrides
+  });
+
+  it('starts an ACP ask session without a full-trust confirmation', async () => {
+    const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
+    const session = { id: 'ses_ask', protocol: 'acp', permissionMode: 'ask', state: 'idle' };
+    const runtime = { listSessions: vi.fn(async () => []), start: vi.fn(async () => session), stop: vi.fn() };
+    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(session);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'ask' }));
+    expect(runtime.stop).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse a persisted PTY session for ask and rejects busy replacement without stopping it', async () => {
+    const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
+    const pty = existing({ protocol: 'pty-cli', permissionMode: 'ask', state: 'thinking' });
+    const runtime = { listSessions: vi.fn(async () => [pty]), getSession: vi.fn(), getTasks: vi.fn(async () => []), start: vi.fn(), stop: vi.fn() };
+    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({ code: 'LARK_CONFIGURATION_BUSY', statusCode: 409 });
+    expect(runtime.stop).not.toHaveBeenCalled();
+    expect(runtime.start).not.toHaveBeenCalled();
+  });
+
+  it('does not stop an idle session with queued work when changing to ask', async () => {
+    const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
+    const trusted = existing({ permissionMode: 'full-trust', state: 'idle' });
+    const runtime = { listSessions: vi.fn(async () => [trusted]), getSession: vi.fn(), getTasks: vi.fn(async () => [{ status: 'queued' }]), start: vi.fn(), stop: vi.fn() };
+    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({ code: 'LARK_CONFIGURATION_BUSY', statusCode: 409 });
+    expect(runtime.stop).not.toHaveBeenCalled();
+  });
+
+  it('stops an idle incompatible session then rejects a non-ACP ask session', async () => {
+    const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
+    const trusted = existing({ permissionMode: 'full-trust' });
+    const pty = { id: 'ses_pty', protocol: 'pty-cli', permissionMode: 'ask', state: 'idle' };
+    const runtime = { listSessions: vi.fn(async () => [trusted]), getSession: vi.fn(), getTasks: vi.fn(async () => []), start: vi.fn(async () => pty), stop: vi.fn(async () => {}) };
+    await expect(resolveLarkSession(runtime as any, log, group() as any, ask, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
+    expect(runtime.stop).toHaveBeenNthCalledWith(1, trusted.id);
+    expect(runtime.stop).toHaveBeenNthCalledWith(2, pty.id);
+  });
+});

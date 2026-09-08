@@ -1,3 +1,4 @@
+import type { RelayAskBroker } from '@dockmux/relay';
 import { registerLarkGroupManagementRoutes, type LarkGroupManager } from './group-management.js';
 import type { FastifyInstance } from 'fastify';
 import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dockmux/shared';
@@ -20,6 +21,7 @@ type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?
 type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 export interface LarkRoutesOptions {
+  relayBroker?: RelayAskBroker;
   groupManager?: LarkGroupManager;
   env?: NodeJS.ProcessEnv;
   service?: LarkCardService;
@@ -47,6 +49,8 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   const listeningDisabled = options.listeningDisabled === true;
   const listener = options.listener ?? new LarkLongConnectionListenerPool(app.log, {
     runtime: options.runtime,
+    workflowStore: options.config,
+    relayBroker: options.relayBroker,
     cardMappings: options.cardMappings,
     env,
     fetcher,

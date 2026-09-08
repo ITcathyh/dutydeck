@@ -35,6 +35,30 @@ describe('acpx ACP boundary', () => {
     await adapter.stop();
   });
 
+  it('persists a Lark-style ask session with snake_case capability env and resolves its live request once', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-lark-ask-acp-')); dirs.push(cwd);
+    const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
+    const sessionKey = 'lark-ask-persistent-session';
+    const adapter = new AcpxAdapter({
+      id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd,
+      env: {
+        dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'group-token',
+        dockmux_relay_url: 'http://127.0.0.1:4310/api/relay', dockmux_relay_token: 'relay-token'
+      }, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false
+    }, { sessionKey, onEvent: event => events.push(event) });
+    await adapter.start();
+    const sending = adapter.send('request permission');
+    await expect.poll(() => events.find(event => event.type === 'permission_request')?.data.id).toBe('permission-tool');
+    await expect(adapter.resolvePermission('permission-tool', true)).resolves.toBe(true);
+    await sending;
+    expect(events.filter(event => event.type === 'permission_request' && event.data.status === 'pending')).toHaveLength(1);
+    await adapter.stop();
+    const persisted = await createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') }).load(sessionKey);
+    const env = persisted?.acpx?.session_options?.env ?? {};
+    expect(env).toMatchObject({ dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'group-token', dockmux_relay_url: 'http://127.0.0.1:4310/api/relay', dockmux_relay_token: 'relay-token' });
+    expect(Object.keys(env).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
+  });
+
   it('maps ACP cancel to acpx cancel and retains the session', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dockmux-cancel-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');

@@ -251,3 +251,26 @@ describe('publicLarkConfig new-field exposure', () => {
     expect(collection.bots[0].activeListening).toBe(true);
   });
 });
+
+describe('Lark permission posture persistence', () => {
+  it('treats a legacy configuration without permissionMode as full-trust', async () => {
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret', defaultAgentId: 'codex' }]));
+    expect(publicLarkConfig(config)).toMatchObject({ permissionMode: 'full-trust', fullTrustConfirmed: false, setupComplete: false });
+  });
+
+  it('allows ask mode without full-trust confirmation and marks the setup complete', async () => {
+    const repository = createRepository();
+    await expect(saveLarkConfig(repository, undefined, {
+      appId: 'cli_ask', appSecret: 'secret', stage: 'agent', defaultAgentId: 'codex', permissionMode: 'ask', fullTrustConfirmed: false
+    })).resolves.toHaveLength(1);
+    const [config] = await readLarkConfigs(repository);
+    expect(config).toMatchObject({ permissionMode: 'ask', fullTrustConfirmed: false });
+    expect(publicLarkConfig(config)).toMatchObject({ permissionMode: 'ask', setupComplete: true });
+  });
+
+  it('rejects unsupported permission modes at the save boundary', async () => {
+    await expect(saveLarkConfig(createRepository(), undefined, {
+      appId: 'cli_invalid', appSecret: 'secret', permissionMode: 'approve-all' as any
+    })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400 });
+  });
+});

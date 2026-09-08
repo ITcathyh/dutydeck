@@ -52,7 +52,7 @@ export interface RelayCapability {
 }
 
 /** 提问的终态 */
-export type RelayAskStatus = 'pending' | 'answered' | 'cancelled' | 'expired';
+export type RelayAskStatus = 'pending' | 'answering' | 'answered' | 'cancelled' | 'expired';
 
 /** 提问记录（对外只读投影） */
 export interface RelayAskRecord {
@@ -64,6 +64,12 @@ export interface RelayAskRecord {
   expiresAt: string;
   answer?: string;
   reason?: string;
+}
+
+export interface RelayAskStore {
+  get(id: string): Promise<RelayAskRecord | undefined>;
+  list(): Promise<RelayAskRecord[]>;
+  compareAndSet(expected: RelayAskRecord | undefined, record: RelayAskRecord): Promise<boolean>;
 }
 
 /**

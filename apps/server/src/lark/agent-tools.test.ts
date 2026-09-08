@@ -90,8 +90,8 @@ describe('Agent group collaboration domain service', () => {
     const current = fakeClient();
     const { repos, activeSession, capabilities, tools, token } = await setup({ cli_current: current });
     expect(larkAgentSessionBinding(activeSession)).toEqual({ sessionId: 'ses_lark', appId: 'cli_current', chatId: 'oc_group', chatType: 'group' });
-    expect(larkAgentSessionBinding(session({ sourceId: 'cli_current:oc_p2p:p2p' }))).toBeUndefined();
-    expect(capabilities.environmentFor(session({ id: 'ses_p2p', sourceId: 'cli_current:oc_p2p:p2p' }))).toEqual({});
+    expect(larkAgentSessionBinding(session({ sourceId: 'cli_current:oc_p2p:p2p' }))).toMatchObject({ chatId: 'oc_p2p', chatType: 'p2p' });
+    expect(larkAgentSessionBinding(session({ sourceId: 'cli_current:ou_legacy:p2p' }))).toMatchObject({ chatId: 'ou_legacy', chatType: 'p2p' });
     expect(capabilities.environmentFor(activeSession)).toEqual({
       dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools',
       dockmux_group_tools_token: token
@@ -158,7 +158,7 @@ describe('Agent group collaboration domain service', () => {
     expect(prompt).toContain("'/usr/bin/node' '/app/cli.js' group peers");
     expect(prompt).toContain("group send '我已定位问题' --reply-to om_xxx --in-thread");
     expect(prompt).toContain("group send '发布窗口已开启'");
-    await expect(tools.promptForSession(session({ sourceId: 'cli_current:oc_p2p:p2p' }), '继续处理')).resolves.toBe('继续处理');
+    await expect(tools.promptForSession(session({ sourceId: 'cli_current:oc_p2p:p2p' }), '继续处理')).resolves.toContain('group send-file');
   });
 
   it('uses opaque cursors for incremental reads and mentions a discovered target when sending', async () => {

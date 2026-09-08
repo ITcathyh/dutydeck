@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AgentGroupToolCliError, runGroupMembers, runGroupMessages, runGroupSend } from './agent-tools-cli.js';
+import { AgentGroupToolCliError, runGroupMembers, runGroupMessages, runGroupSend, runGroupSendFile } from './agent-tools-cli.js';
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
@@ -34,6 +34,13 @@ describe('Agent group tool CLI client', () => {
       fetcher: fetcher as typeof fetch
     });
     expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:4310/api/lark/agent-tools/members', expect.any(Object));
+  });
+
+  it('wires send-file through the scoped capability only', async () => {
+    const fetcher = vi.fn(async () => response({ messageId: 'om_file' }));
+    await runGroupSendFile('report.pdf', { replyTo: 'om_parent', inThread: true, image: true, idempotencyKey: 'file-1' }, { env: { dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'capability-token' }, fetcher: fetcher as typeof fetch });
+    expect(fetcher).toHaveBeenCalledWith('http://127.0.0.1:4310/api/lark/agent-tools/send-file', expect.any(Object));
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1].body))).toEqual({ path: 'report.pdf', replyTo: 'om_parent', inThread: true, image: true, idempotencyKey: 'file-1' });
   });
 
   it('preserves actionable authorization details from the broker', async () => {

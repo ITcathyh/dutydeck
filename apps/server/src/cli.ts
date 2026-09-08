@@ -7,7 +7,7 @@ import { createCliProgram, environmentFromCli, type CliOptions } from './cli-pro
 import { startLocalServer } from './service.js';
 import { runLarkSend, runLarkUpdate } from './lark/cli.js';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
-import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupWait } from './lark/agent-tools-cli.js';
+import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupSendFile, runGroupWait } from './lark/agent-tools-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { RelayCliError } from '@dockmux/relay';
 import { dockmuxGroupToolsCommand } from './lark/agent-tools.js';
@@ -297,6 +297,7 @@ async function main() {
     groupMessages: async options => { output(await runGroupMessages(options)); },
     groupMessage: async messageId => { output(await runGroupMessage(messageId)); },
     groupSend: async (content, options) => { output(await runGroupSend(content, options)); },
+    groupSendFile: async (path, options) => { output(await runGroupSendFile(path, options)); },
     groupWait: async options => { output(await runGroupWait(options)); },
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionAsk: async (question, options) => {

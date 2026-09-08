@@ -223,6 +223,35 @@ describe('live group configuration', () => {
     expect(await manager.owner('cli_import')).toBeUndefined();
   });
 
+  it('authorizes high-risk approval against the current task requester rather than the session creator', async () => {
+    const initial = await save();
+    members.push('ou_charlie'); await manager.sync('cli_one');
+    const groupMembers = (await manager.members('cli_one', 'oc_one')).members;
+    const alice = groupMembers.find(member => member.openId === 'ou_alice')!;
+    const bob = groupMembers.find(member => member.openId === 'ou_bob')!;
+    const charlie = groupMembers.find(member => member.openId === 'ou_charlie')!;
+    const configured = await manager.save('cli_one', 'oc_one', {
+      expectedRevision: initial.binding!.revision, patch: {}, roleChanges: [
+        { kind: 'create', principalId: alice.principalId, role: 'can_operate', operateScope: 'own_runs', actionGates: { terminalWrite: false, highRisk: true, groupToolsSend: false } },
+        { kind: 'create', principalId: bob.principalId, role: 'can_operate', operateScope: 'own_runs', actionGates: { terminalWrite: false, highRisk: true, groupToolsSend: false } },
+        { kind: 'create', principalId: charlie.principalId, role: 'can_talk', operateScope: 'none', actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } }
+      ]
+    });
+    const config = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
+    const session: Session = { id: 'task-requester-owner', agentId: 'agent_one', cwd: dir, state: 'thinking', runId: 'run', createdAt: time.toISOString(), updatedAt: time.toISOString() };
+    await manager.recordRun(session, config, event, 'thread:om_root');
+    await manager.beginTurn(session.id, 'ou_alice');
+    expect((await manager.authorizeSession(session.id, 'high_risk.execute'))?.allowed).toBe(true);
+    await manager.beginTurn(session.id, 'ou_bob');
+    expect((await manager.authorizeSession(session.id, 'high_risk.execute'))?.allowed).toBe(true);
+    expect((await manager.authorize('cli_one', 'oc_one', 'ou_alice', 'high_risk.execute', session.id, { taskRequesterOpenId: 'ou_bob' }))?.allowed).toBe(false);
+    expect((await manager.authorize('cli_one', 'oc_one', 'ou_bob', 'task.view_result', session.id, { taskRequesterOpenId: 'ou_bob' }))?.allowed).toBe(true);
+    expect((await manager.authorize('cli_one', 'oc_one', 'ou_charlie', 'high_risk.execute', session.id, { taskRequesterOpenId: 'ou_charlie' }))?.allowed).toBe(false);
+    members = members.filter(openId => openId !== 'ou_bob');
+    expect((await manager.authorizeSession(session.id, 'high_risk.execute'))?.allowed).toBe(false);
+    expect(configured.roles).toHaveLength(3);
+  });
+
   it('atomically protects different App edits and rejects same-App stale edits across repository instances', async () => {
     const other = createRepositories(join(dir, 'state.sqlite'));
     try {

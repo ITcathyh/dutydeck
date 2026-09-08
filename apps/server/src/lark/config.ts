@@ -28,6 +28,7 @@ export interface StoredLarkConfig {
   defaultReasoningEffort?: string;
   /** Explicit consent for unattended Lark sessions to run in full-trust mode. */
   fullTrustConfirmed?: boolean;
+  permissionMode?: 'ask' | 'full-trust';
   /**
    * 私聊路由模式：'chat' 整段 DM 共用一个会话；'thread' 每条顶层 DM 开一个新话题。
    * 缺省（旧配置无此字段）由 runtime 按 'chat' 处理。
@@ -68,6 +69,9 @@ export interface StoredLarkConfig {
   riskControlMode: RiskControlMode;
 }
 
+export const larkPermissionMode = (config: Pick<StoredLarkConfig, 'permissionMode'>) => config.permissionMode === 'ask' ? 'ask' as const : 'full-trust' as const;
+export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissionMode' | 'fullTrustConfirmed'>) => larkPermissionMode(config) === 'ask' || config.fullTrustConfirmed === true;
+
 export interface SaveLarkConfigInput {
   expectedRevision?: number;
   mentionPolicy?: StoredLarkConfig['mentionPolicy'];
@@ -82,6 +86,7 @@ export interface SaveLarkConfigInput {
   defaultModel?: string;
   defaultReasoningEffort?: string;
   fullTrustConfirmed?: boolean;
+  permissionMode?: 'ask' | 'full-trust';
   /** 私聊路由模式：'chat' 整段 DM 一个会话；'thread' 每条顶层 DM 一个新话题。非法值归一化时丢弃。 */
   p2pMode?: 'chat' | 'thread';
   /** 普通群回复模式：'chat'/'shared' 全群一个会话；'new-topic' 每条顶层 @ 一个话题；'chat-topic' 顶层平铺、群内原生话题各自独立。非法值归一化时丢弃。 */
@@ -134,6 +139,7 @@ export interface PublicLarkConfig {
   defaultModel?: string;
   defaultReasoningEffort?: string;
   fullTrustConfirmed: boolean;
+  permissionMode?: 'ask' | 'full-trust';
   p2pMode?: 'chat' | 'thread';
   groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   brand?: 'feishu' | 'lark';
@@ -280,6 +286,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.defaultModel ? { defaultModel: parsed.defaultModel } : {}),
     ...(parsed.defaultReasoningEffort ? { defaultReasoningEffort: parsed.defaultReasoningEffort } : {}),
     fullTrustConfirmed: parsed.fullTrustConfirmed === true,
+    ...(parsed.permissionMode === 'ask' ? { permissionMode: 'ask' as const } : {}),
     ...(p2pMode ? { p2pMode } : {}),
     ...(groupReplyMode ? { groupReplyMode } : {}),
     ...(env ? { env } : {}),
@@ -345,13 +352,14 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   mentionPolicy: config.mentionPolicy ?? 'always',
   name: config.name ?? config.appId,
   tabLabel: duplicateNames.has((config.name ?? config.appId).toLowerCase()) ? `${config.name ?? config.appId} · ${config.appId}` : config.name ?? config.appId,
-  setupComplete: Boolean(config.defaultAgentId && config.fullTrustConfirmed),
+  setupComplete: Boolean(config.defaultAgentId && larkExecutionConfirmed(config)),
   ...(config.workspace ? { workspace: config.workspace } : {}),
   ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
   ...(config.defaultAgentId ? { defaultAgentId: config.defaultAgentId } : {}),
   ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
   ...(config.defaultReasoningEffort ? { defaultReasoningEffort: config.defaultReasoningEffort } : {}),
   fullTrustConfirmed: config.fullTrustConfirmed === true,
+  permissionMode: larkPermissionMode(config),
   ...(config.p2pMode ? { p2pMode: config.p2pMode } : {}),
   ...(config.groupReplyMode ? { groupReplyMode: config.groupReplyMode } : {}),
   ...(config.brand ? { brand: config.brand } : {}),
@@ -417,6 +425,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const defaultModel = input.defaultModel === undefined ? current?.defaultModel : input.defaultModel.trim() || undefined;
   const defaultReasoningEffort = input.defaultReasoningEffort === undefined ? current?.defaultReasoningEffort : input.defaultReasoningEffort.trim() || undefined;
   const fullTrustConfirmed = input.fullTrustConfirmed ?? current?.fullTrustConfirmed ?? false;
+  const permissionMode = input.permissionMode ?? larkPermissionMode(current ?? {});
+  if (permissionMode !== 'ask' && permissionMode !== 'full-trust') throw new LarkServiceError('INVALID_LARK_CONFIG', 'Unsupported Lark permission mode', 400);
   const p2pMode = input.p2pMode === undefined ? current?.p2pMode : normalizeP2pMode(input.p2pMode);
   const groupReplyMode = input.groupReplyMode === undefined ? current?.groupReplyMode : normalizeGroupReplyMode(input.groupReplyMode);
   const env = input.env === undefined ? current?.env : normalizeEnv(input.env);
@@ -443,7 +453,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (agents && defaultAgentId && !(await agents.get(defaultAgentId))) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown default Agent: ${defaultAgentId}`, 400);
   const duplicate = configs.find((config, configIndex) => config.appId === appId && configIndex !== index);
   if (duplicate) throw new LarkServiceError('LARK_BOT_ALREADY_CONFIGURED', `Lark bot ${appId} already has a configuration panel`, 409);
-  if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.listening === true) && !fullTrustConfirmed) {
+  if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.listening === true) && permissionMode === 'full-trust' && !fullTrustConfirmed) {
     throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先确认飞书任务将以完全信任模式无人值守运行。', 409);
   }
   const config: StoredLarkConfig = {
@@ -458,6 +468,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(defaultModel ? { defaultModel } : {}),
     ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),
     fullTrustConfirmed,
+    permissionMode,
     ...(p2pMode ? { p2pMode } : {}),
     ...(groupReplyMode ? { groupReplyMode } : {}),
     ...(env ? { env } : {}),

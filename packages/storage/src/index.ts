@@ -126,6 +126,14 @@ export function createRepositories(filename: string): RepositoryBundle {
       async save(s) { db.insert(sessions).values(s).onConflictDoUpdate({ target: sessions.id, set: s }).run(); }
     },
     tasks: {
+      async get(id) {
+        const row = db.select().from(tasks).where(eq(tasks.id, id)).get();
+        return row ? decodeTask(row) : undefined;
+      },
+      async create(task) {
+        const row = { ...task, executionContext: task.executionContext ? JSON.stringify(task.executionContext) : null };
+        return db.insert(tasks).values(row).onConflictDoNothing({ target: tasks.id }).run().changes === 1;
+      },
       async save(t) {
         const row = { ...t, executionContext: t.executionContext ? JSON.stringify(t.executionContext) : null };
         db.insert(tasks).values(row).onConflictDoUpdate({ target: tasks.id, set: row }).run();
@@ -154,6 +162,9 @@ export function createRepositories(filename: string): RepositoryBundle {
     config: {
       async get(key) { return db.select().from(configs).where(eq(configs.key, key)).get()?.value; },
       async set(key, value) { db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
+      async list(prefix) {
+        return sqlite.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix) as Array<{ key: string; value: string }>;
+      },
       async compareAndSet(key, expected, value) {
         return expected === undefined
           ? sqlite.prepare('INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, value).changes === 1
