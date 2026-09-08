@@ -20,7 +20,7 @@ const cardElements = (elements: any[]): any[] => elements.flatMap(element => {
   ];
   return [element, ...cardElements(children)];
 });
-const groupTitle = (group: any) => group.header?.title?.content ?? group.columns?.[0]?.elements?.[0]?.text?.content ?? '';
+const groupTitle = (group: any) => group.header?.title?.content ?? group.elements?.find((el: any) => el.element_id === 'current_title')?.content ?? group.columns?.[0]?.elements?.[0]?.text?.content ?? '';
 const groupElements = (group: any) => group.elements ?? group.columns?.[0]?.elements ?? [];
 const messageMissingError = () => new LarkServiceError('LARK_OPENAPI_ERROR', 'message not found', 502, { upstreamCode: 230030 });
 
@@ -2124,9 +2124,8 @@ describe('Lark trace rendering', () => {
     ], { ...config, hideTraceOnComplete: true }, true);
     expect(elements).toEqual(expect.arrayContaining([
       expect.objectContaining({ tag: 'markdown', content: '你好！有什么可以帮你的吗？' }),
-      expect.objectContaining({ element_id: 'evidence_summary' })
+      expect.objectContaining({ element_id: 'trace_group_0' })
     ]));
-    expect(elements).not.toEqual(expect.arrayContaining([expect.objectContaining({ element_id: 'trace_group_0' })]));
     expect(JSON.stringify(elements)).not.toContain('任务已完成。');
     expect(JSON.stringify(elements)).not.toContain('session updated');
   });
@@ -2147,7 +2146,8 @@ describe('Lark trace rendering', () => {
     expect(elements[0]).toMatchObject({ tag: 'markdown', element_id: 'risk_alert_pending_0', text_size: 'normal' });
     expect(elements[0]?.content).toContain('高风险待确认');
     expect(elements[0]?.content).toContain('任务已暂停，需要人工确认');
-    expect(JSON.stringify(elements)).not.toContain('behaviors');
+    expect(JSON.stringify(elements)).not.toContain('"callback"');
+    expect(JSON.stringify(elements)).not.toContain('"open_url"');
     expect(JSON.stringify(elements)).not.toContain('allow_once');
   });
 
@@ -2167,25 +2167,14 @@ describe('Lark trace rendering', () => {
     const group: any = elements.find(element => element.element_id?.startsWith('trace_group_'));
     expect(group).toMatchObject({ tag: 'collapsible_panel', expanded: false, vertical_spacing: '2px', padding: '2px 0px 0px 0px' });
     expect(groupTitle(group)).toContain('pwd');
-    expect(groupTitle(group)).toContain("<font color='green'>● 已完成</font>");
     expect(groupTitle(group)).not.toContain('先分析');
     expect(groupTitle(group)).not.toContain('**1');
     expect(group.header.icon).toMatchObject({ tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey' });
     expect(group.header.icon_position).toBe('right');
     expect(group.header.title.text_size).toBe('notation');
-    const tool: any = cardElements(elements).find(element => element.element_id?.startsWith('trace_tool_'));
-    expect(tool.header.title.content).toContain('pwd');
-    expect(tool.header.title.content).toContain("<font color='trace_success'>●</font>");
-    expect(tool.header.title.content).not.toContain('已完成');
-    expect(JSON.stringify(tool.elements)).toContain('/tmp');
-    expect(JSON.stringify(tool.elements)).toContain('notation');
-    expect(JSON.stringify(tool.elements)).toContain('```');
-    expect(tool).toMatchObject({ vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px 0px 0px 20px' });
-    expect(tool.header.title.icon).toMatchObject({ tag: 'standard_icon', token: 'command_outlined', color: 'grey' });
-    expect(tool.header.title.text_size).toBe('notation');
-    expect(tool.header.icon).toMatchObject({ tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey' });
-    expect(tool.header.icon_position).toBe('right');
-    expect(JSON.stringify(groupElements(group))).toContain('内部分析');
+    expect(JSON.stringify(groupElements(group))).toContain('/tmp');
+    expect(JSON.stringify(groupElements(group))).toContain('notation');
+    expect(JSON.stringify(groupElements(group))).toContain('```');
     expect(JSON.stringify(groupElements(group))).not.toContain('先分析');
     expect(JSON.stringify(groupElements(group))).not.toContain('思考过程');
     expect(JSON.stringify(groupElements(group))).toContain('notation');
@@ -2272,27 +2261,27 @@ describe('Lark trace rendering', () => {
       timed(5, 'text', { text: '检查完成。' }, 5)
     ], config, true);
     const group: any = elements.find(element => element.element_id === 'trace_group_0');
-    const tool: any = cardElements(groupElements(group)).find(element => element.element_id?.startsWith('trace_tool_'));
-    expect(groupTitle(group)).toContain("<font color='grey'>4s</font>　<font color='green'>● 已完成</font>");
-    expect(tool.header.title.content).toContain("<font color='trace_success'>●</font>");
-    expect(tool.header.title.content).toContain("<font color='grey'>3s</font>");
-    expect(tool.header.title.content).not.toContain('已完成');
+    expect(groupTitle(group)).toContain("<font color='green'>● 已完成</font>");
+    expect(groupTitle(group)).not.toContain("<font color='grey'>4s</font>");
+    expect(JSON.stringify(groupElements(group))).toContain("<font color='trace_success'>●</font>");
+    expect(JSON.stringify(groupElements(group))).toContain('/repo');
   });
 
   it('hides completed trace detail but keeps a compact evidence summary by default', () => {
     const elements = renderLarkCardElements(events, { ...config, hideTraceOnComplete: true }, true);
     expect(elements).toEqual(expect.arrayContaining([
       expect.objectContaining({ tag: 'markdown', content: '最终答案' }),
-      expect.objectContaining({ element_id: 'evidence_summary' })
+      expect.objectContaining({ element_id: 'evidence' }),
+      expect.objectContaining({ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false })
     ]));
-    expect(elements.some(element => element.element_id === 'trace_group_0')).toBe(false);
   });
 
   it('keeps completed trace detail collapsible when hideTraceOnComplete is false', () => {
     const elements = renderLarkCardElements(events, { ...config, hideTraceOnComplete: false }, true);
     expect(elements).toEqual(expect.arrayContaining([
       expect.objectContaining({ tag: 'markdown', content: '最终答案' }),
-      expect.objectContaining({ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false })
+      expect.objectContaining({ element_id: 'evidence' }),
+      expect.objectContaining({ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: true })
     ]));
   });
 
@@ -2379,11 +2368,9 @@ describe('Lark trace rendering', () => {
     const elements = renderLarkCardElements(ordered, config, false);
     const groups: any[] = elements.filter(element => element.element_id?.startsWith('trace_group_'));
     expect(groups.map(groupTitle)).toEqual(expect.arrayContaining([expect.stringContaining('pwd'), expect.stringContaining('ls -la')]));
-    expect(JSON.stringify(groupElements(groups[0]))).toContain('内部分析');
-    expect(JSON.stringify(groupElements(groups[1]))).toContain('内部分析');
     expect(JSON.stringify(elements)).not.toContain('先分析');
     expect(JSON.stringify(elements)).not.toContain('再检查目录');
-    expect(cardElements(groupElements(groups[0])).find(element => element.element_id?.startsWith('trace_tool_')).header.title.content).toContain('pwd');
+    expect(JSON.stringify(groupElements(groups[0]))).toContain('pwd');
     expect(cardElements(groupElements(groups[1])).find(element => element.element_id?.startsWith('trace_tool_')).header.title.content).toContain('ls -la');
   });
 
@@ -2413,7 +2400,6 @@ describe('Lark trace rendering', () => {
     expect(groupTitle(group)).toContain(description);
     expect(groupTitle(group)).not.toContain('我需要先理解文档');
     expect(JSON.stringify(groupElements(group))).not.toContain('**描述**');
-    expect(JSON.stringify(groupElements(group))).toContain('内部分析');
     expect(JSON.stringify(groupElements(group))).not.toContain('我需要先理解文档');
     expect(cardElements(groupElements(group)).filter(element => element.element_id?.startsWith('trace_tool_'))).toHaveLength(2);
   });

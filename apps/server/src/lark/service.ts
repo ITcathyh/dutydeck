@@ -235,10 +235,20 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
   };
   const stripGroupContent = (group: Record<string, unknown>): boolean => {
     const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
-    const toolIndex = groupElements.findIndex(el => typeof el.element_id === 'string' && el.element_id.startsWith('trace_tool_') && Array.isArray(el.elements) && el.elements.length > 0);
+    const toolIndex = groupElements.findIndex(el => {
+      if (typeof el.element_id !== 'string' || !el.element_id.startsWith('trace_tool_')) return false;
+      const toolEls = Array.isArray(el.elements) ? el.elements as Array<Record<string, unknown>> : [];
+      if (el.tag === 'interactive_container') return toolEls.length > 1;
+      return toolEls.length > 0;
+    });
     if (toolIndex >= 0) {
       const tool = groupElements[toolIndex] as Record<string, unknown>;
-      tool.elements = [];
+      const toolEls = Array.isArray(tool.elements) ? tool.elements as Array<Record<string, unknown>> : [];
+      if (tool.tag === 'interactive_container') {
+        tool.elements = [toolEls[0]!];
+      } else {
+        tool.elements = [];
+      }
       return true;
     }
     return false;
@@ -262,9 +272,14 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
     const remainingGroups = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')).length;
     // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
     // 仅当分组已无内容可剥离时，才删除整个分组。
-    if (remainingGroups > 1 && stripGroupContent(group)) continue;
+    if (stripGroupContent(group)) continue;
     // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动，避免整组被丢弃后用户什么都看不到。
     if (remainingGroups === 1 && groupElements.length > 1) {
+      const hasTitle = (groupElements[0] as Record<string, unknown>)?.element_id === 'current_title';
+      if (hasTitle && groupElements.length > 2) {
+        group.elements = [groupElements[0], ...groupElements.slice(2)];
+        continue;
+      }
       group.elements = groupElements.slice(1);
       continue;
     }
@@ -387,41 +402,65 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   );
   const arrange = (mainElements: Array<Record<string, unknown>>) => {
     const waitingForApproval = state === 'running' && hasPendingApproval(mainElements);
-    const finalIds = new Set(['result_header', 'final_output', 'result_missing']);
+    const finalIds = new Set(['result_header', 'final_output', 'result_missing', 'evidence']);
     const finalElements = mainElements.filter(element => finalIds.has(String(element.element_id ?? '')));
     const traceElements = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
+    const omissionNotice = mainElements.find(element => element.element_id === 'trace_omission');
+    const historyLabel = mainElements.find(element => element.element_id === 'history_label');
     const traceDigest = mainElements.find(element => element.element_id === 'trace_digest');
     const attentionElements = mainElements.filter(element => {
       const id = String(element.element_id ?? '');
       return id.startsWith('risk_alert_') || id.startsWith('execution_alert_') || String(element.content ?? '').includes('原运行卡片未能更新');
     });
-    const claimed = new Set([...finalElements, ...traceElements, ...attentionElements, ...(traceDigest ? [traceDigest] : [])]);
+    const claimed = new Set([
+      ...finalElements,
+      ...traceElements,
+      ...attentionElements,
+      ...(traceDigest ? [traceDigest] : []),
+      ...(omissionNotice ? [omissionNotice] : []),
+      ...(historyLabel ? [historyLabel] : [])
+    ]);
     const otherElements = mainElements.filter(element => !claimed.has(element));
     const statusContent = `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${waitingForApproval ? '等待审批' : liveTitle}</text_tag>　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>`;
     const loadingIcon = loadingImageKey
       ? { tag: 'custom_icon', img_key: loadingImageKey, size: '20px 20px' }
       : { tag: 'standard_icon', token: 'loading_outlined', color: 'grey', size: '14px 14px' };
-    const overviewLoadingIcon = loadingImageKey
-      ? { tag: 'custom_icon', img_key: loadingImageKey }
-      : { tag: 'standard_icon', token: 'loading_outlined', color: 'grey' };
     const statusElement = {
       tag: 'div', element_id: 'task_status', width: 'auto', margin: '0px',
       text: { tag: 'lark_md', content: statusContent, text_size: 'small' },
       ...(state === 'running' && !waitingForApproval ? { icon: loadingIcon } : {})
     };
-    const traceOverview = traceElements.length ? [{
-      tag: 'collapsible_panel', element_id: 'trace_overview', expanded: state === 'running',
-      direction: 'vertical', vertical_spacing: '2px', padding: '4px 0px 0px 0px', margin: '8px 0px 0px 0px',
-      header: {
-        title: {
-          tag: 'markdown', content: `执行轨迹　<font color='grey'>${traceElements.length} 个阶段</font>`, text_size: 'notation',
-          ...(state === 'running' && !waitingForApproval ? { icon: overviewLoadingIcon } : {})
+    let traceSection: Record<string, unknown>[] = [];
+    if (state === 'running') {
+      const currentGroup = traceElements.find(el => el.tag === 'interactive_container') ?? traceElements.at(-1);
+      const historyGroups = traceElements.filter(el => el !== currentGroup);
+      const historyItems: Record<string, unknown>[] = historyGroups.length ? [
+        historyLabel ?? { tag: 'markdown', element_id: 'history_label', content: "<font color='grey'>此前阶段</font>", text_size: 'notation', margin: '4px 0px 2px 0px' },
+        ...historyGroups
+      ] : [];
+
+      traceSection = [
+        ...(currentGroup ? [currentGroup] : []),
+        ...(omissionNotice ? [omissionNotice] : []),
+        ...historyItems
+      ];
+    } else if (traceElements.length) {
+      const recordsExpanded = traceElements.some(el => el.expanded === true);
+      traceSection = [{
+        tag: 'collapsible_panel', element_id: 'trace_overview', expanded: recordsExpanded,
+        direction: 'vertical', vertical_spacing: '2px', padding: '4px 0px 0px 0px', margin: '8px 0px 0px 0px',
+        header: {
+          title: { tag: 'markdown', content: '执行记录', text_size: 'notation' },
+          vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
+          icon_position: 'right', icon_expanded_angle: -180
         },
-        vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-        icon_position: 'right', icon_expanded_angle: -180
-      },
-      elements: [...(traceDigest ? [traceDigest] : []), ...traceElements]
-    }] : [];
+        elements: [
+          ...(traceDigest ? [traceDigest] : []),
+          ...(omissionNotice ? [omissionNotice] : []),
+          ...traceElements
+        ]
+      }];
+    }
     // 按钮列宽随按钮数量放宽：单按钮沿用 72px，多按钮时改为自适应，
     // 否则第二个按钮会被 72px 挤压折行。
     const taskHeader = actionButtons.length ? [{
@@ -441,8 +480,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ...taskHeader,
       ...attentionElements,
       ...finalElements,
-      ...otherElements,
-      ...traceOverview
+      ...traceSection,
+      ...otherElements
     ];
   };
   const assemble = (mainElements: Array<Record<string, unknown>>) => {
@@ -460,6 +499,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         width_mode: 'default',
         streaming_mode: state === 'running',
         style: { color: {
+          current_bg: { light_mode: 'rgba(240,245,253,1)', dark_mode: 'rgba(30,40,56,1)' },
           trace_success: { light_mode: 'rgba(92,184,119,1)', dark_mode: 'rgba(118,204,142,1)' },
           trace_failure: { light_mode: 'rgba(208,180,92,1)', dark_mode: 'rgba(226,202,124,1)' },
           trace_running: { light_mode: 'rgba(96,184,232,1)', dark_mode: 'rgba(124,202,242,1)' }
@@ -467,7 +507,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         summary: { content: `${taskName} · ${waitingForApproval ? '等待审批' : liveTitle}` }
       },
       body: {
-        direction: 'vertical', vertical_spacing: '2px', padding: '10px 12px 10px 12px',
+        direction: 'vertical', vertical_spacing: '8px', padding: '10px 12px 10px 12px',
         elements: [
           ...arrange(mainElements),
           {
@@ -497,10 +537,20 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const stripGroupContent = (group: Record<string, unknown>): boolean => {
     const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
     // 移除工具的输入/输出内容，仅保留工具标题。
-    const toolIndex = groupElements.findIndex(el => typeof el.element_id === 'string' && el.element_id.startsWith('trace_tool_') && Array.isArray(el.elements) && el.elements.length > 0);
+    const toolIndex = groupElements.findIndex(el => {
+      if (typeof el.element_id !== 'string' || !el.element_id.startsWith('trace_tool_')) return false;
+      const toolEls = Array.isArray(el.elements) ? el.elements as Array<Record<string, unknown>> : [];
+      if (el.tag === 'interactive_container') return toolEls.length > 1;
+      return toolEls.length > 0;
+    });
     if (toolIndex >= 0) {
       const tool = groupElements[toolIndex] as Record<string, unknown>;
-      tool.elements = [];
+      const toolEls = Array.isArray(tool.elements) ? tool.elements as Array<Record<string, unknown>> : [];
+      if (tool.tag === 'interactive_container') {
+        tool.elements = [toolEls[0]!];
+      } else {
+        tool.elements = [];
+      }
       return true;
     }
     return false;
@@ -516,13 +566,18 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const remainingGroups = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')).length;
     // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
     // 仅当分组已无内容可剥离时，才删除整个分组。
-    if (remainingGroups > 1 && stripGroupContent(group)) {
+    if (stripGroupContent(group)) {
       card = assemble(mainElements);
       continue;
     }
     // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动。
     if (remainingGroups === 1 && groupElements.length > 1) {
-      group.elements = groupElements.slice(1);
+      const hasTitle = (groupElements[0] as Record<string, unknown>)?.element_id === 'current_title';
+      if (hasTitle && groupElements.length > 2) {
+        group.elements = [groupElements[0], ...groupElements.slice(2)];
+      } else {
+        group.elements = groupElements.slice(1);
+      }
     } else {
       mainElements.splice(groupIndex, 1);
       omittedGroups++;

@@ -80,7 +80,6 @@ describe('renderLarkCardElements 视觉快照', () => {
     const panels = elements.filter(element => String(element.element_id ?? '').startsWith('trace_group_'));
     const rendered = JSON.stringify(elements);
     expect(panels).toHaveLength(5);
-    expect(rendered).toContain('7 个阶段');
     expect(rendered).toContain('仅展示最近 5 个阶段，另有 2 个阶段');
     expect(rendered).not.toContain('阶段 1');
     expect(rendered).not.toContain('阶段 2');
