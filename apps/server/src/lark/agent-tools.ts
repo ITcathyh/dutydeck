@@ -1,6 +1,7 @@
 import type { LarkGroupManager } from './group-management.js';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
 import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dockmux/shared';
 import { parseLarkMessageContent } from './message-content.js';
 import { readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -30,7 +31,8 @@ export function larkAgentSessionBinding(session: Pick<Session, 'id' | 'source' |
   const chatId = parts[1]!;
   const chatType = parts[2];
   if (!appId.startsWith('cli_')) return;
-  // 群聊 chatId 以 oc_ 开头；私聊（p2p）chatId 为对方 open_id，以 ou_ 开头。
+  // 飞书 message event 的 chat_id（包括 p2p）是 oc_*；兼容早期把对方 open_id
+  // 持久化为 chatId 的 ou_* 记录，避免升级后旧会话突然失去工具能力。
   if (chatType === 'group') {
     if (!chatId.startsWith('oc_')) return;
     // sourceId 格式：${appId}:${chatId}:group:${scopeId}
@@ -40,7 +42,7 @@ export function larkAgentSessionBinding(session: Pick<Session, 'id' | 'source' |
     return { sessionId: session.id, appId, chatId, chatType: 'group', ...(threadId ? { threadId } : {}) };
   }
   if (chatType === 'p2p') {
-    if (!chatId.startsWith('ou_')) return;
+    if (!chatId.startsWith('oc_') && !chatId.startsWith('ou_')) return;
     return { sessionId: session.id, appId, chatId, chatType: 'p2p' };
   }
   return;
@@ -108,6 +110,13 @@ export class LarkAgentToolCapabilityRegistry {
     return binding;
   }
 
+  async resolveSession(token: string | undefined): Promise<{ binding: LarkAgentSessionBinding; session: Session }> {
+    const binding = await this.resolve(token);
+    const session = await this.sessions.get(binding.sessionId);
+    if (!session) throw new AgentGroupToolError('GROUP_TOOL_SESSION_EXPIRED', '当前 Dockmux 飞书会话已结束，群协作工具凭证不再有效。', 401);
+    return { binding, session };
+  }
+
   close() {
     this.byToken.clear();
     this.bySession.clear();
@@ -130,6 +139,12 @@ export interface LarkGroupToolClient {
   getMessageItems(messageId: string): Promise<LarkChatMessage[]>;
   sendText(input: { chatId: string; text: string; idempotencyKey?: string }): Promise<LarkMessageResult>;
   replyText(input: { messageId: string; text: string; replyInThread?: boolean; idempotencyKey?: string }): Promise<LarkMessageResult>;
+  uploadFile?: ArtifactClient['uploadFile']; uploadImage?: ArtifactClient['uploadImage'];
+  sendFile?: (input: { chatId: string; fileKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
+  sendImage?: (input: { chatId: string; imageKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
+  replyFile?: (input: { messageId: string; replyInThread?: boolean; fileKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
+  replyImage?: (input: { messageId: string; replyInThread?: boolean; imageKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
+  readDocument?(url: string): Promise<{ url: string; title?: string; text: string }>;
 }
 
 export interface LarkAgentToolsOptions {
@@ -488,6 +503,7 @@ export class LarkAgentToolsService {
       throw new AgentGroupToolError('INVALID_GROUP_MESSAGE_ID', 'messageId 只能使用 om_* 消息 ID。', 400);
     }
     const message = await this.authorized(context, 'message', () => context.client.getMessage(messageId));
+    this.assertMessageScope(context, message);
     // 拉取单条消息时，若为合并转发（merge_forward），展开其转发的子消息内容。
     const parsed = await parseLarkMessageContent(message.messageType, message.rawContent, {
       messageId: message.messageId,
@@ -508,6 +524,11 @@ export class LarkAgentToolsService {
       mentions: message.mentions,
       ...(message.threadId ? { threadId: message.threadId } : {})
     };
+  }
+
+  private assertMessageScope(context: ToolContext, message: LarkChatMessage) {
+    if (message.chatId !== context.chatId) throw new AgentGroupToolError('GROUP_MESSAGE_OUT_OF_SCOPE', '消息不属于当前飞书群，已拒绝读取。', 403);
+    if (context.threadId && message.threadId !== context.threadId) throw new AgentGroupToolError('GROUP_MESSAGE_OUT_OF_SCOPE', '消息不属于当前绑定话题，已拒绝读取。', 403);
   }
 
   async wait(token: string | undefined, input: { after?: string; limit?: number; timeoutMs?: number } = {}) {
@@ -560,12 +581,31 @@ export class LarkAgentToolsService {
     if (input.replyTo?.trim()) {
       const replyTo = input.replyTo.trim();
       const original = await this.authorized(context, 'reply', () => context.client.getMessage(replyTo));
-      if (original.chatId !== context.chatId) throw new AgentGroupToolError('GROUP_REPLY_OUT_OF_SCOPE', 'replyTo 不属于当前飞书群，已拒绝跨群回复。', 403);
+      if (original.chatId !== context.chatId || (context.threadId && original.threadId !== context.threadId)) throw new AgentGroupToolError('GROUP_REPLY_OUT_OF_SCOPE', 'replyTo 不属于当前飞书群或话题，已拒绝跨范围回复。', 403);
       return this.authorized(context, 'reply', () => context.client.replyText({
         messageId: replyTo, text, ...(input.inThread ? { replyInThread: true } : {}), idempotencyKey
       }));
     }
     return this.authorized(context, 'send', () => context.client.sendText({ chatId: context.chatId, text, idempotencyKey }));
+  }
+
+  async sendFile(token: string | undefined, input: { path?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string; image?: boolean }) {
+    const context = await this.context(token, 'group_tools.send');
+    if (!context.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
+    const path = input.path?.trim(); if (!path) throw new AgentGroupToolError('ARTIFACT_PATH_REQUIRED', 'path 不能为空。', 400);
+    if (input.inThread && !input.replyTo?.trim()) throw new AgentGroupToolError('GROUP_THREAD_REPLY_TARGET_REQUIRED', '话题内回复必须同时传入 replyTo。', 400);
+    if (input.replyTo) { const original = await this.authorized(context, 'reply', () => context.client.getMessage(input.replyTo!.trim())); this.assertMessageScope(context, original); }
+    const { session } = await this.capabilities.resolveSession(token);
+    const client = context.client;
+    const target = input.replyTo ? { chatId: context.chatId, replyTo: input.replyTo.trim(), ...(input.inThread ? { inThread: true } : {}) } : { chatId: context.chatId };
+    const required = input.image ? [client.uploadImage, input.replyTo ? client.replyImage : client.sendImage] : [client.uploadFile, input.replyTo ? client.replyFile : client.sendFile];
+    if (required.some(method => !method)) throw new AgentGroupToolError('ARTIFACT_CLIENT_UNSUPPORTED', '当前飞书客户端不支持这一类文件交付。', 503);
+    const artifactClient: ArtifactClient = {
+      uploadFile: value => this.authorized(context, 'send', () => client.uploadFile!(value)), uploadImage: value => this.authorized(context, 'send', () => client.uploadImage!(value)),
+      sendFile: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyFile!({ messageId: value.replyTo!, replyInThread: value.inThread, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendFile!({ chatId: value.chatId, fileKey: value.fileKey, idempotencyKey: value.idempotencyKey })),
+      sendImage: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyImage!({ messageId: value.replyTo!, replyInThread: value.inThread, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendImage!({ chatId: value.chatId, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey }))
+    };
+    return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey });
   }
 }
 
@@ -582,6 +622,7 @@ ${allowSend ? '当前会话可读取和发送' : '当前会话可只读访问'}�
 - ${command} group self
 - ${command} group messages --limit 20 [--after <cursor>]
 - ${command} group message <om_* message_id>
+${allowSend ? `- ${command} group send-file <path> [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>] [--image]` : ''}
 - ${command} group wait --after <cursor> [--timeout-ms 15000]
 ${allowSend ? `- ${command} group send <内容> [--to <Agent/成员名称、appId 或 openId>] [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>]` : '- 当前机器人配置为只读：不要调用 group send。'}
 - （仅群聊）${command} group peers / members / bots：发现群内可协作 Agent 与人类成员。

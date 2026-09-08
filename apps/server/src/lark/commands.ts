@@ -105,6 +105,9 @@ export function parseSlashCommand(text: unknown): ParsedSlashCommand | undefined
  * 把必填方法也纳入门控，可以保证任何缺失都收敛成 `unavailable`，而不是一个执行时才爆的 intent。
  */
 export interface LarkCommandCapabilities {
+  tasks?: boolean;
+  answer?: boolean;
+  approval?: boolean;
   getSession: boolean;
   send: boolean;
   dispatch: boolean;
@@ -133,7 +136,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'help' | 'status' | 'cancel' | 'retry' | 'new';
+export type LarkCommandName = 'help' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -166,6 +169,10 @@ export interface LarkCommandDefinition {
  *             由 coordinator 当作普通请求走完整建任务链路，命令层不自己派发。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
+  { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true },
+  { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true },
+  { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true },
+  { name: 'reject', summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true },
   {
     name: 'help',
     summary: '列出当前可用的 Dockmux 命令及其用法',

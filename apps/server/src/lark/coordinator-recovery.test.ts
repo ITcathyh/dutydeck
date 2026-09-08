@@ -573,7 +573,7 @@ describe('/cancel 在 coordinator 重建后', () => {
     const service = cardService();
     await coordinatorFor(runtime, service).handle(dm('om_cancel', '/cancel'), config);
 
-    await vi.waitFor(() => expect(runtime.interrupt).toHaveBeenCalledWith('ses_1'));
+    await vi.waitFor(() => expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'rt_running'));
     expect(runtime.cancelQueued).not.toHaveBeenCalled();
     expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/cancel 已受理' }));
   });

@@ -17,6 +17,7 @@ export {
   RelayError,
   type RelayAskRecord,
   type RelayAskStatus,
+  type RelayAskStore,
   type RelayCapability,
   type RelayEventPublisher,
   type RelayMessageKind,

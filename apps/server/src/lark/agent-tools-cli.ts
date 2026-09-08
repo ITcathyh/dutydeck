@@ -115,3 +115,7 @@ export function runGroupSend(content: string, cliOptions: AgentGroupCliOptions, 
     })
   });
 }
+
+export function runGroupSendFile(path: string, cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
+  return new AgentGroupToolHttpClient(options).request('/send-file', { method: 'POST', body: JSON.stringify({ path, ...(cliOptions.replyTo ? { replyTo: cliOptions.replyTo } : {}), ...(cliOptions.inThread ? { inThread: true } : {}), ...(cliOptions.idempotencyKey ? { idempotencyKey: cliOptions.idempotencyKey } : {}), ...(cliOptions.image ? { image: true } : {}) }) });
+}

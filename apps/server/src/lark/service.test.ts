@@ -529,4 +529,30 @@ describe('Lark card service', () => {
     expect(error).toBeInstanceOf(LarkServiceError);
     expect((error as LarkServiceError).details).not.toHaveProperty('retryAfterMs');
   });
+
+  it('uploads the original file bytes as multipart and sends the returned file key', async () => {
+    const bytes = new Uint8Array([0, 255, 1, 2]);
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { file_key: 'file_key_1' } }))
+      .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_file', chat_id: 'oc_dm' } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await expect(service.uploadFile({ data: bytes, filename: 'raw.bin', idempotencyKey: 'artifact-1' })).resolves.toBe('file_key_1');
+    const form = fetcher.mock.calls[1]![1].body as FormData;
+    const part = form.get('file') as Blob;
+    expect(new Uint8Array(await part.arrayBuffer())).toEqual(bytes);
+    await expect(service.sendFile({ chatId: 'oc_dm', fileKey: 'file_key_1', idempotencyKey: 'artifact-1' })).resolves.toMatchObject({ messageId: 'om_file', chatId: 'oc_dm' });
+    expect(fetcher.mock.calls[2]![0]).toContain('receive_id_type=chat_id');
+    expect(JSON.parse(String(fetcher.mock.calls[2]![1].body))).toMatchObject({ msg_type: 'file', content: JSON.stringify({ file_key: 'file_key_1' }), uuid: 'artifact-1' });
+  });
+
+  it('rejects external and non-docx wiki URLs before fetching document content', async () => {
+    const fetcher = vi.fn(); const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await expect(service.readDocument('https://example.com/docx/abc')).rejects.toMatchObject({ code: 'INVALID_DOCUMENT_URL' });
+    expect(fetcher).not.toHaveBeenCalled();
+    const wikiFetcher = vi.fn().mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 })).mockResolvedValueOnce(response({ code: 0, data: { node: { obj_type: 'sheet', obj_token: 'sheet_1' } } }));
+    const wiki = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, wikiFetcher as typeof fetch);
+    await expect(wiki.readDocument('https://feishu.cn/wiki/wiki_token')).rejects.toMatchObject({ code: 'UNSUPPORTED_DOCUMENT_TYPE' });
+    expect(wikiFetcher).toHaveBeenCalledTimes(2);
+  });
 });
