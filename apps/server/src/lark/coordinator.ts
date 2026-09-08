@@ -9,17 +9,18 @@ import { defaultHighRiskPattern, defaultLarkTraceLimit, larkPermissionMode, read
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
 import {
-  eventsForRuntimeTask,
+  loadLarkTaskEvents,
   hasUnresolvedToolCalls,
   isLarkCardContentRejected,
   isLarkMessageRateLimit,
   isLarkMessageUnupdatable,
   larkRateLimitBackoffMs,
-  larkTerminalReplacementKey,
   patchRejectedCardDelta,
-  renderLarkCardElements,
+  renderLarkProcessElements,
+  renderLarkResultElements,
   type LarkCardElement
 } from './card-renderer.js';
+import { larkResultKey, sendLarkResult } from './result-delivery.js';
 import { performLarkCardReconcile } from './reconciler.js';
 import { isLarkCardActionAvailable, parseLarkCardActionValue, type LarkCardCapabilities } from './card-actions.js';
 import {
@@ -91,6 +92,7 @@ export type LarkTask = {
   /** Immutable terminal notification for the current turn. */
   finalMessageId?: string;
   finalDeliveredTurn?: number;
+  finalElements?: LarkCardElement[];
   progressFrozen?: boolean;
   interruptRequested?: boolean;
   requestUpdate?: (state: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted', completed?: boolean) => Promise<void>;
@@ -126,6 +128,7 @@ export type PersistedLarkCardTask = {
   chat_type?: LarkMessageEvent['chatType'];
   final_message_id?: string;
   final_delivery_state?: 'delivered';
+  final_elements?: LarkCardElement[];
   progress_frozen?: boolean;
   turn?: number;
 };
@@ -335,6 +338,12 @@ export class LarkMessageCoordinator {
       if (parsed?.name === 'tasks') {
         await this.workflowReply(event, config, '任务导航', await this.taskDashboard(event, config, Number(parsed.args[0] ?? 1))); return true;
       }
+      if (quoted?.kind === 'result' && prompt.trim() === '验收通过') {
+        const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'accept' });
+        await this.refreshResultFeedback(config.appId, quoted.id).catch(error => this.log.warn({ error }, '验收已记录，卡片刷新失败'));
+        await this.workflowReply(event, config, result);
+        return true;
+      }
       if (quoted?.kind === 'result' && (!parsed || !names.includes(parsed.name))) {
         if (!event.senderOpenId || !await this.authorizeInteraction(quoted, event.senderOpenId, 'run.interrupt')) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权修改此任务。', 403);
         const mapping = (await this.cardMappings!.list(larkCardChannel(config.appId))).find(item => item.externalId === quoted.event.messageId)!;
@@ -391,6 +400,7 @@ export class LarkMessageCoordinator {
       chat_type: task.event.chatType,
       turn: task.turn,
       ...(task.finalMessageId ? { final_message_id: task.finalMessageId, final_delivery_state: 'delivered' as const } : {}),
+      ...(task.finalElements ? { final_elements: task.finalElements } : {}),
       ...(task.progressFrozen ? { progress_frozen: true } : {}),
       ...(task.lastSuccessfulElements?.length ? { last_successful_elements: task.lastSuccessfulElements } : {}),
       ...(task.event.chatType === 'group' ? {
@@ -415,15 +425,22 @@ export class LarkMessageCoordinator {
     const mapping = (await this.cardMappings?.list(larkCardChannel(appId)))?.find(item => item.externalId === record.event.messageId);
     if (!mapping) return;
     const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
-    if (saved.state !== 'completed' || saved.final_delivery_state !== 'delivered' || saved.card_message_id !== record.cardId
+    if (saved.state !== 'completed' || saved.final_delivery_state !== 'delivered'
       || saved.final_message_id !== record.cardId || saved.runtime_task_id !== record.taskId || saved.turn !== record.turn) return;
     if (saved.result_feedback_state === record.state) return;
-    const elements = [...(saved.last_successful_elements ?? []).filter(item => !['workflow_accept', 'workflow_changes', 'workflow_result_status'].includes(String(item.element_id))),
+    const resultElements = saved.final_elements ?? (saved.final_message_id === saved.card_message_id ? saved.last_successful_elements : undefined);
+    if (!resultElements) {
+      // File results cannot be PATCHed; the reply receipt and task dashboard
+      // show acceptance while the original file and process stay unchanged.
+      await this.cardMappings!.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state }) });
+      return;
+    }
+    const elements = [...resultElements.filter(item => !['workflow_accept', 'workflow_changes', 'workflow_result_status'].includes(String(item.element_id))),
       ...await this.workflows!.result(record, record.cardId)];
     await this.service.update({ messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements });
     const current = (await this.cardMappings!.list(larkCardChannel(appId))).find(item => item.id === mapping.id);
     if (current?.extra !== mapping.extra) return;
-    await this.cardMappings!.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state, last_successful_elements: elements }) });
+    await this.cardMappings!.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state, final_elements: elements }) });
   }
 
   private async reconciledResult(mapping: { externalId: string; sessionId: string }, saved: PersistedLarkCardTask, cardId: string) {
@@ -1178,10 +1195,8 @@ export class LarkMessageCoordinator {
       if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
       task.event = retryEvent;
       task.config = effectiveConfig;
-      // 卡片生命周期字段刻意**不**在这里重置。上一轮可能还有在途的补发（原卡不可更新时
-      // 正在发替代卡），它会在 await 之后写回 cardMessageId；在这里清空只会被它重新填上，
-      // 于是新一轮把上一轮的终态卡当成自己的进度卡改写。重置放在新一轮 runTurn 的开头，
-      // 那时 turn 已经递增，上一轮的续跑会被 turn 守卫挡在门外。
+      // 生命周期字段在 runTurn 递增 turn 后再重置，避免上一轮在途的
+      // 过程更新或结果发送把旧消息 ID 写进新一轮。
       task.group.tail = task.group.tail.then(() => this.runTurn(task)).catch(error => {
         this.log.error({ error, chatId: task.event.chatId, messageId: task.event.messageId }, '重试飞书任务失败');
         this.pushTaskError(task, `重试任务失败：${error instanceof Error ? error.message : String(error)}`);
@@ -1295,14 +1310,14 @@ export class LarkMessageCoordinator {
     // 避免它在 await getEvents 期间被重试打断后，把 task.state 覆盖回终态。
     task.turn = (task.turn ?? 0) + 1;
     const currentTurn = task.turn;
-    // 重试开新一轮：上一轮的卡已经带着它自己的终态结论交付给用户，是不可改写的历史。
-    // 在这里（turn 已递增之后）才切断与它的关联，上一轮任何在途的补发都会被 turn 守卫
-    // 挡住，不可能再把它的 message_id 写回来变成新一轮的进度卡。
+    // 重试另建过程卡和结果消息，上一轮消息保留为历史。
+    // 先递增 turn，再清理关联，防止旧轮在途请求覆盖新轮消息归属。
     if (currentTurn > 1 && !restoring) {
       if (task.inbox) await this.inbox!.update(task.inbox, { state: 'received', turn: currentTurn, cardId: undefined, taskId: undefined, materials: undefined });
       task.cardMessageId = undefined;
       task.finalMessageId = undefined;
       task.finalDeliveredTurn = undefined;
+      task.finalElements = undefined;
       task.lastSuccessfulElements = undefined;
       task.runtimeTaskId = undefined;
       task.progressFrozen = undefined;
@@ -1452,7 +1467,7 @@ export class LarkMessageCoordinator {
     task.events = [];
     task.startedAt = Date.now();
     task.interruptRequested = false;
-    const initialElements = boundLarkCardElements(renderLarkCardElements([], config, false, false, event.chatType));
+    const initialElements = boundLarkCardElements(renderLarkProcessElements([], config));
     // 首张卡也必须带本轮 turn：它的按钮回调把 turn 写进 value，缺省会渲染成 "0"，
     // 而本轮 turn 从 1 起算——回调随后会被轮次校验当成上一轮的点击拒掉，
     // 直到某次心跳重绘才恢复。UI 不变，只是把回调绑到正确的轮次上。
@@ -1474,7 +1489,6 @@ export class LarkMessageCoordinator {
     type PendingCardUpdate = {
       input: Parameters<LarkCardService['update']>[0];
       terminal: boolean;
-      completed: boolean;
       /** 入队时的轮次；重试开了新一轮之后，这一条必须整条作废，不得再碰上一轮的卡。 */
       turn: number;
       settle: (outcome: CardUpdateOutcome) => void;
@@ -1492,7 +1506,7 @@ export class LarkMessageCoordinator {
           let lastError: unknown;
           let delivered = false;
           let contentRejected = false;
-          let deliveredMessageId = pending.input.messageId;
+          const deliveredMessageId = pending.input.messageId;
           // 整条 entry 的处理都包在 try/finally 里：PATCH 成功但落库失败时，
           // 也必须把这条 entry 结算掉。否则调用方的 await 永久挂起，cleanup 不会执行。
           try {
@@ -1501,7 +1515,7 @@ export class LarkMessageCoordinator {
            *
            * 必须在**每次 await 之后**重新判断，不能只在入口判一次：dispatch 模式下
            * executeTask 在 dispatch 建立订阅后就返回，group.tail 随即 resolve，因此
-           * 用户点重试时新一轮会立刻开跑并递增 turn——而上一轮的终态 PATCH / 补发可能
+           * 用户点重试时新一轮会立刻开跑并递增 turn——而上一轮的终态 PATCH 可能
            * 还悬在 await 里。等它回来时，task 上的 cardMessageId、lastSuccessfulElements、
            * finalMessageId 已经属于新一轮，旧轮次再写就会污染新一轮的卡片与持久化。
            * 判据用 pending.turn（入队时的轮次），不是现读的 task.turn。
@@ -1543,8 +1557,7 @@ export class LarkMessageCoordinator {
             }
           }
           if (stale()) continue;
-          // 内容被拒绝只允许原地降级，绝不允许因此多发一条消息：原卡仍然存在且可更新，
-          // 再发一条就又变回「收据 + 结果」两条消息。
+          // 过程卡内容被拒绝时保留上一次成功内容，结果消息独立交付。
           if (lastError && contentRejected && Array.isArray(task.lastSuccessfulElements) && task.lastSuccessfulElements.length) {
             const patchedElements = patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined);
             try {
@@ -1559,84 +1572,12 @@ export class LarkMessageCoordinator {
           }
           if (stale()) continue;
           if (lastError && pending.terminal) {
-            // 暂时性失败（网络、限流、5xx）：原卡还在，结论尚未送达。保持未交付并交给对账重试
-            // 同一个 message_id，绝不补发第二条消息——补发就是又一次「两条消息」。
-            if (!isLarkMessageUnupdatable(lastError)) {
-              this.log.warn({ error: lastError, messageId: pending.input.messageId }, '飞书原卡暂时更新失败，保留原卡等待终态对账');
+            if (isLarkMessageUnupdatable(lastError)) {
+              task.progressFrozen = true;
+            } else {
+              this.log.warn({ error: lastError, messageId: pending.input.messageId }, '执行过程卡更新失败，等待对账；结果仍将独立交付');
               this.scheduleReconcile();
-              continue;
             }
-            // 只有原消息确定不可更新（已删除 / 超出可更新期）才补发，且补发的就是最终结论本身，
-            // 不存在「替代收据 + 终态卡」两条。
-            try {
-              const replacementElements = contentRejected
-                ? patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined)
-                : boundLarkCardElements((pending.input.elements ?? []) as LarkCardElement[]);
-              const replacement = await sendTaskCard(this.service, event, {
-                ...cardContext,
-                state: pending.input.state,
-                taskId: task.id,
-                taskName: prompt.slice(0, 80),
-                elapsedSeconds: pending.input.elapsedSeconds,
-                sessionId: task.sessionId,
-                turn: pending.turn,
-                ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
-                capabilities: this.capabilitiesForTask(task),
-                ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-                elements: replacementElements,
-                idempotencyKey: larkTerminalReplacementKey(pending.input.messageId, pending.input.state)
-              }, this.log);
-              deliveredMessageId = replacement.messageId;
-              delivered = true;
-              // 补发期间用户可能已经重试。这张补发卡属于**旧**轮次，绝不能变成新一轮的进度卡。
-              if (stale()) {
-                this.log.info({ replacementMessageId: replacement.messageId, turn: pending.turn }, '旧轮次的终态补发已送达，但新一轮已开始，不改写当前卡片归属');
-              } else {
-                task.cardMessageId = replacement.messageId;
-                task.lastSuccessfulElements = replacementElements;
-              }
-              this.log.info({ previousMessageId: pending.input.messageId, replacementMessageId: replacement.messageId, state: pending.input.state }, '已补发飞书终态卡片');
-            } catch (compensationError) {
-              /*
-                补发的 await 已经回来了，这期间可能已经 /retry。降级补发要用
-                task.sessionId / retryable / capabilities 组卡，而它们此刻属于**新**一轮：
-                再发就是拿新一轮的运行态信息，去补一张旧轮次的终态卡。
-                旧轮次到此为止，未交付的部分交给对账。
-              */
-              if (stale()) {
-                this.log.info({ error: compensationError, messageId: pending.input.messageId, turn: pending.turn }, '旧轮次终态补发失败且新一轮已开始，不再降级补发');
-              } else if (isLarkCardContentRejected(compensationError)) {
-                try {
-                  const patchedElements = patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined);
-                  const minimal = await sendTaskCard(this.service, event, {
-                    ...cardContext,
-                    state: pending.input.state,
-                    taskId: task.id,
-                    taskName: prompt.slice(0, 80),
-                    elapsedSeconds: pending.input.elapsedSeconds,
-                    sessionId: task.sessionId,
-                    turn: pending.turn,
-                    ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
-                    capabilities: this.capabilitiesForTask(task),
-                    ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-                    elements: patchedElements,
-                    idempotencyKey: larkTerminalReplacementKey(pending.input.messageId, pending.input.state, true)
-                  }, this.log);
-                  deliveredMessageId = minimal.messageId;
-                  delivered = true;
-                  if (!stale()) {
-                    task.cardMessageId = minimal.messageId;
-                    task.lastSuccessfulElements = patchedElements;
-                  }
-                  this.log.warn({ previousMessageId: pending.input.messageId, replacementMessageId: minimal.messageId, upstreamCode: compensationError.details?.upstreamCode }, '飞书补发终态卡片增量被拒绝，已保留上次成功内容');
-                } catch (fallbackError) {
-                  this.log.error({ error: fallbackError, contentError: compensationError, updateError: lastError, messageId: pending.input.messageId }, '补发飞书终态最小卡片失败');
-                }
-              } else {
-                this.log.error({ error: compensationError, updateError: lastError, messageId: pending.input.messageId }, '补发飞书终态卡片失败');
-              }
-            }
-            if (!delivered && !stale()) this.scheduleReconcile();
           }
           if (delivered && pending.input.state) {
             // 旧轮次不得写入新一轮的持久化：mapping 只有一行，写进去就把新一轮的
@@ -1645,24 +1586,11 @@ export class LarkMessageCoordinator {
               this.log.info({ taskId: task.id, turn: pending.turn, messageId: deliveredMessageId }, '旧轮次终态已送达，但新一轮已开始，跳过持久化以免覆盖新一轮状态');
               continue;
             }
-            // 单卡契约：终态就是这张卡自己，因此 final_message_id === card_message_id。
-            // 只有真正成功的那次更新才允许标记已交付。
-            if (pending.terminal) {
-              task.progressFrozen = true;
-              task.finalMessageId = deliveredMessageId;
-              task.finalDeliveredTurn = pending.turn;
-              if (pending.completed && this.workflows && this.interactionContext(task)) {
-                await this.workflows.result(this.interactionContext(task)!, deliveredMessageId).catch(error => this.log.warn({ error, taskId: task.id }, '结果已交付，验收卡绑定保存失败'));
-              }
-            }
+            if (pending.terminal) task.progressFrozen = true;
             // 落库失败不改变「卡片已经送达用户」这个事实，因此不回退 delivered：
             // 谎称未送达会让对账再交付一次。只补一次对账把持久化补上。
             try {
               await this.saveCardTask(task, pending.input.state);
-              if (pending.completed && this.workflows) {
-                const feedback = (await this.workflows.list(config.appId)).find(item => item.kind === 'result' && item.taskId === task.runtimeTaskId && ['accepted', 'needs_changes'].includes(item.state));
-                if (feedback) await this.refreshResultFeedback(config.appId, feedback.id);
-              }
             } catch (error) {
               this.log.warn({ error, taskId: task.id, messageId: deliveredMessageId }, '飞书卡片状态落库失败，卡片已送达，等待对账补齐持久化');
               this.scheduleReconcile();
@@ -1680,7 +1608,7 @@ export class LarkMessageCoordinator {
       return updateChain;
     };
     /**
-     * 本轮是否已经请求过终态。终态一旦入队就是这一轮的最终结论，
+     * 本轮是否已经请求过终态。终态一旦入队就固定这一轮的过程卡状态，
      * 之后到达的心跳/排队重绘不得把它挤掉，也不得在它之后再改写卡片。
      */
     let terminalLatched = false;
@@ -1689,7 +1617,7 @@ export class LarkMessageCoordinator {
      *
      * 刻意不返回 updateChain：链的 finally 会为后到的 pendingUpdate 再起一次没人 await 的
      * flush，此时 await 旧链拿到的是「上一帧心跳写完了」，而不是「我的终态真的写进去了」。
-     * 终态交付必须以自己那次 PATCH 的真实结果为准，否则会把未送达的结论记成已交付。
+     * 过程冻结必须以自己那次 PATCH 的真实结果为准，结果消息的交付另行记录。
      */
     const enqueueUpdate = (entry: Omit<PendingCardUpdate, 'settle'>) => {
       // 终态已经在队列里或已经写过：晚到的非终态重绘一律丢弃。
@@ -1710,7 +1638,7 @@ export class LarkMessageCoordinator {
       });
     };
 
-    const update = async (state: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted', completed = false) => {
+    const update = async (state: 'queued' | 'running' | 'completed' | 'failed' | 'interrupted') => {
       // Runtime running is monotonic for a turn. Late dispatch/cancel bookkeeping may
       // still report queued, but must never repaint an executing card backwards.
       if (state === 'queued' && task.state === 'running') return Promise.resolve({ delivered: false } as CardUpdateOutcome);
@@ -1718,7 +1646,6 @@ export class LarkMessageCoordinator {
       const terminal = state === 'completed' || state === 'failed' || state === 'interrupted';
       return enqueueUpdate({
         terminal,
-        completed,
         turn: task.turn,
         input: {
           ...cardContext,
@@ -1735,30 +1662,50 @@ export class LarkMessageCoordinator {
           ...(terminal && task.retryable !== undefined ? { retryable: task.retryable } : {}),
           capabilities: this.capabilitiesForTask(task),
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-          elements: boundLarkCardElements([ ...renderLarkCardElements(task.events, config, completed, false, event.chatType),
-            ...(completed && this.workflows && this.interactionContext(task) ? await this.workflows.result(this.interactionContext(task)!, task.cardMessageId!) : []) ])
+          elements: boundLarkCardElements(renderLarkProcessElements(task.events, config, terminal))
         }
       });
     };
     let terminalDelivery: Promise<void> | undefined;
-    /**
-     * 单卡终态交付：把真实结论 PATCH 回这一轮自己的那张卡。
-     *
-     * 不再「冻结收据 + 另发一条结果」——那会让一轮任务留下两条消息。原卡更新失败时
-     * 保持未交付（对账重试同一个 message_id）；只有原卡确定不可更新时才补发唯一一张。
-     */
+    // Freeze the process card, then send one immutable result. Neither operation
+    // counts as success for the other; reconciliation retries only the missing part.
     const deliverTerminal = (state: 'completed' | 'failed' | 'interrupted', completed = false) => {
       if (task.finalDeliveredTurn === currentTurn && task.finalMessageId) return Promise.resolve();
       if (terminalDelivery) return terminalDelivery;
       terminalDelivery = (async () => {
-        const outcome = await update(state, completed);
-        // 未送达不是错误路径，而是「还没交付」：flushUpdates 已经安排了对账重试同一张卡。
-        // 这里不抛异常，避免调用方把它当成需要补发新消息的失败。
-        if (!outcome.delivered) return;
+        await update(state);
+        if (this.stopped || task.turn !== currentTurn) return;
+        const context = completed ? this.interactionContext(task) : undefined;
+        const elements = [...renderLarkResultElements(task.events),
+          ...(context && this.workflows ? await this.workflows.result(context, '') : [])];
+        if (this.stopped || task.turn !== currentTurn) return;
+        const result = await sendLarkResult(this.service, {
+          chatId: event.chatId,
+          ...(event.chatType === 'group' ? { replyMessageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) } : {})
+        }, {
+          ...cardContext, state, taskId: task.id, taskName: prompt.slice(0, 80),
+          sessionId: task.sessionId, turn: currentTurn, readOnly: true,
+          elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
+          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+          elements, idempotencyKey: larkResultKey(task.cardMessageId!)
+        }, this.log);
+        if (this.stopped || task.turn !== currentTurn) return;
+        task.finalMessageId = result.messageId;
+        task.finalDeliveredTurn = currentTurn;
+        task.finalElements = result.elements;
+        if (context && this.workflows) await this.workflows.result(context, result.messageId).catch(error => {
+          this.log.warn({ error, taskId: task.id }, '结果已送达，验收绑定等待对账补齐');
+          this.scheduleReconcile();
+        });
+        if (this.stopped || task.turn !== currentTurn) return;
+        await this.saveCardTask(task, state);
+        if (context && this.workflows) {
+          const feedback = (await this.workflows.list(config.appId)).find(item => item.kind === 'result' && item.taskId === context.taskId && ['accepted', 'needs_changes'].includes(item.state));
+          if (feedback) await this.refreshResultFeedback(config.appId, feedback.id);
+        }
       })().catch(error => {
-        this.log.error({ error, taskId: task.id, state }, '交付飞书终态卡片失败，等待对账补偿');
+        this.log.error({ error, taskId: task.id, state }, '交付飞书执行结果失败，等待对账补偿');
         this.scheduleReconcile();
-        throw error;
       }).finally(() => { terminalDelivery = undefined; });
       return terminalDelivery;
     };
@@ -1773,7 +1720,7 @@ export class LarkMessageCoordinator {
     };
     task.requestUpdate = async (state, completed) => {
       if (state === 'completed' || state === 'failed' || state === 'interrupted') return deliverTerminal(state, completed);
-      await update(state, completed);
+      await update(state);
     };
     const injected: string[] = [];
     injected.push(`[Dockmux 机器人身份]
@@ -1790,6 +1737,20 @@ export class LarkMessageCoordinator {
     }
     if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dockmux 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dockmux 安全策略阻止。`);
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
+
+    const appendEvent = (agentEvent: AgentEvent) => {
+      const previous = task.events.at(-1);
+      const data = agentEvent.data as any;
+      const previousData = previous?.data as any;
+      if (agentEvent.type === 'text' && previous?.type === 'text'
+        && (data?.role ?? 'assistant') === (previousData?.role ?? 'assistant')) {
+        task.events[task.events.length - 1] = { ...previous, data: { ...previousData, text: `${previousData?.text ?? ''}${data?.text ?? ''}` } };
+      } else task.events.push(agentEvent);
+      // Bound activity history after merging streamed text, so a long answer
+      // also stays complete for runtimes without durable event retrieval.
+      const maxBufferedEvents = Math.max((config.traceLimit ?? defaultLarkTraceLimit) * 20, 200);
+      if (task.events.length > maxBufferedEvents) task.events = task.events.slice(-maxBufferedEvents);
+    };
 
     if (this.runtime.dispatch) {
       task.state = 'queued';
@@ -1817,13 +1778,11 @@ export class LarkMessageCoordinator {
         void (async () => {
           if (runtimeTaskId && this.runtime.getRecentEvents) {
             try {
-              // 终态卡片仅需最终回复 + 最近 traceLimit 条活动，倒序加载足够原始事件即可，
-              // 避免长会话全量加载导致内存峰值。
               const recentLimit = Math.max((config.traceLimit ?? defaultLarkTraceLimit) * 30, 500);
-              const persistedEvents = await this.runtime.getRecentEvents(session.id, recentLimit);
+              const persistedEvents = await loadLarkTaskEvents(this.runtime, session.id, runtimeTaskId, recentLimit);
               // 读事件期间用户可能已经重试；旧轮次不得改写新一轮的事件缓冲。
               if (task.turn !== currentTurn) return;
-              task.events = eventsForRuntimeTask(persistedEvents, runtimeTaskId);
+              task.events = persistedEvents;
             } catch (error) {
               this.log.warn({ error, taskId: task.id, runtimeTaskId }, '读取任务最终事件失败，使用已接收事件生成终态卡片');
             }
@@ -1856,15 +1815,9 @@ export class LarkMessageCoordinator {
           return;
         }
         if (!active || settled) return;
-        task.events.push(agentEvent);
+        appendEvent(agentEvent);
         const context = this.interactionContext(task);
         if (context) void this.workflows?.observe(context, agentEvent).catch(error => this.log.error({ error, taskId: task.id }, '发送飞书工作请求失败'));
-        // 仅保留最近 N 条原始事件用于心跳渲染，避免长任务内存无限增长；
-        // 终态卡片会从 DB 倒序加载足够事件，不依赖此缓冲。
-        const maxBufferedEvents = Math.max((config.traceLimit ?? defaultLarkTraceLimit) * 20, 200);
-        if (task.events.length > maxBufferedEvents) {
-          task.events = task.events.slice(-maxBufferedEvents);
-        }
         if (!settling) scheduleHeartbeat();
       };
       unsubscribe = this.runtime.subscribe(session.id, agentEvent => {
@@ -1928,11 +1881,8 @@ export class LarkMessageCoordinator {
     }
 
     const unsubscribe = this.runtime.subscribe(session.id, agentEvent => {
-      task.events.push(agentEvent);
-      const maxBufferedEvents = Math.max((config.traceLimit ?? defaultLarkTraceLimit) * 20, 200);
-      if (task.events.length > maxBufferedEvents) {
-        task.events = task.events.slice(-maxBufferedEvents);
-      }
+      if (this.stopped || task.turn !== currentTurn) return;
+      appendEvent(agentEvent);
       scheduleHeartbeat();
     });
     try {

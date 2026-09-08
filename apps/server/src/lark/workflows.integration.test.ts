@@ -22,7 +22,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
-async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean } = {}) {
+async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean; answerChunks?: string[] } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dockmux-lark-workflows-'));
   const repos = createRepositories(join(cwd, 'state.db'));
   let broker!: RelayAskBroker;
@@ -43,6 +43,11 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
             emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'pending', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
             await waiting;
             emit({ type: 'text', data: { text: '审批处理完成' } });
+          } else if (options.answerChunks) {
+            emit({ type: 'text', data: { text: '正在检查执行结果' } });
+            emit({ type: 'tool_call', data: { id: 'tool_check', name: 'Bash', input: { command: 'pnpm test' }, status: 'running' } });
+            emit({ type: 'tool_result', data: { id: 'tool_check', output: '125 passed', status: 'completed' } });
+            for (const text of options.answerChunks) emit({ type: 'text', data: { text } });
           } else emit({ type: 'text', data: { text: '工作已完成' } });
         },
         resolvePermission: async (id, approved) => { resolvePermission(id, approved); release?.(); return true; }
@@ -75,9 +80,12 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   }
   let nextCard = 0;
   const cards = new Map<string, any>();
+  const files = new Map<string, Uint8Array>();
   const createCard = async (input: any) => { const id = `om_card_${++nextCard}`; cards.set(id, input); return { messageId: id }; };
   const service = {
     send: vi.fn(createCard), reply: vi.fn(createCard),
+    uploadFile: vi.fn(async (input: any) => { const key = `file_${files.size + 1}`; files.set(key, input.data); return key; }),
+    replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
     update: vi.fn(async (input: any) => { cards.set(input.messageId, input); return { messageId: input.messageId }; }),
     addReaction: vi.fn(async (messageId: string) => {
       const record = await repos.config.get(`lark.inbox.${config.appId}.${messageId}`);
@@ -101,12 +109,83 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   const interactions = async () => (await repos.config.list!(`lark.interaction.${config.appId}.`)).map(row => JSON.parse(row.value) as LarkInteraction);
   const completed = async () => {
     await vi.waitFor(async () => expect((await runtime.listSessions()).some(session => session.state === 'completed')).toBe(true));
-    await vi.waitFor(() => expect([...cards.values()].some(card => card.state === 'completed' && card.taskId === 'om_task')).toBe(true));
+    await vi.waitFor(async () => expect((await repos.channelMappings.list(`lark-card:${config.appId}`)).some(mapping => {
+      const saved = JSON.parse(mapping.extra ?? '{}');
+      return mapping.externalId === 'om_task' && saved.state === 'completed' && saved.final_delivery_state === 'delivered';
+    })).toBe(true));
   };
-  return { repos, runtime, broker, config, coordinator, createCoordinator, groupManager, service, cards, log, send, resolvePermission, interactions, completed };
+  return { repos, runtime, broker, config, coordinator, createCoordinator, groupManager, service, cards, files, log, send, resolvePermission, interactions, completed };
 }
 
 describe('Feishu workflows through coordinator, Runtime and persistent storage', () => {
+  it('delivers one oversized result file and accepts an explicit reply without rerunning the task', async () => {
+    const answer = `开头\n${'完整结果🙂'.repeat(5000)}\n末尾`;
+    const h = await harness('normal', { answerChunks: [answer] });
+    await h.coordinator.handle(event('om_task', '生成长结果'), h.config);
+    await h.completed();
+    expect(h.service.reply).toHaveBeenCalledOnce();
+    expect(h.service.replyFile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_task', replyInThread: true }));
+    expect(h.cards.size).toBe(2);
+    const fileText = Buffer.from([...h.files.values()][0]!).toString('utf8');
+    expect(fileText.startsWith(answer)).toBe(true);
+    expect(fileText).toContain('回复本文件消息「验收通过」');
+    const process = structuredClone(h.cards.get('om_card_1'));
+    const file = structuredClone(h.cards.get('om_card_2'));
+    const updates = h.service.update.mock.calls.length;
+    const result = (await h.interactions()).find(item => item.kind === 'result')!;
+    expect(result.cardId).toBe('om_card_2');
+    await h.coordinator.handle(event('om_unauthorized_accept', '验收通过', { senderOpenId: 'ou_bob', parentId: result.cardId, mentions: [] }), h.config);
+    expect((await h.interactions()).find(item => item.id === result.id)?.state).toBe('pending');
+    await h.coordinator.handle(event('om_accept', '验收通过', { parentId: result.cardId, mentions: [] }), h.config);
+    expect((await h.interactions()).find(item => item.id === result.id)?.state).toBe('accepted');
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.cards.get('om_card_1')).toEqual(process);
+    expect(h.cards.get('om_card_2')).toEqual(file);
+    expect(h.service.update).toHaveBeenCalledTimes(updates);
+    const [mapping] = await h.repos.channelMappings.list(`lark-card:${h.config.appId}`);
+    expect(JSON.parse(mapping!.extra!)).toMatchObject({ final_message_id: 'om_card_2', result_feedback_state: 'accepted' });
+  });
+
+  it('delivers exactly a retained process card and a complete streamed result, then leaves both unchanged on recovery', async () => {
+    const answerChunks = Array.from({ length: 1700 }, (_, index) => `line${index}\n`);
+    const answer = answerChunks.join('').trim();
+    const h = await harness('normal', { answerChunks });
+    await h.coordinator.handle(event('om_task', '生成完整结果'), { ...h.config, hideTraceOnComplete: true });
+    await h.completed();
+    expect(h.service.reply).toHaveBeenCalledTimes(2);
+    expect(h.service.send).not.toHaveBeenCalled();
+    for (const [sent] of h.service.reply.mock.calls) expect(sent).toMatchObject({ messageId: 'om_task', replyInThread: true });
+    const process = h.cards.get('om_card_1');
+    const result = h.cards.get('om_card_2');
+    expect(process.state).toBe('completed');
+    expect(JSON.stringify(process)).toContain('125 passed');
+    expect(process.elements.some((element: any) => element.tag === 'collapsible_panel')).toBe(true);
+    expect(process.elements.some((element: any) => element.element_id === 'final_output')).toBe(false);
+    expect(result.elements.find((element: any) => element.element_id === 'final_output')?.content).toBe(answer);
+    expect(JSON.stringify(result)).not.toContain('125 passed');
+    const [mapping] = await h.repos.channelMappings.list(`lark-card:${h.config.appId}`);
+    expect(JSON.parse(mapping!.extra!)).toMatchObject({ card_message_id: 'om_card_1', final_message_id: 'om_card_2', progress_frozen: true });
+    const interaction = (await h.interactions()).find(item => item.kind === 'result')!;
+    expect(interaction.cardId).toBe('om_card_2');
+    const processBeforeAcceptance = structuredClone(process);
+    expect(await h.coordinator.handleAction({ dockmux_workflow: 'accept', request_id: interaction.id, generation: interaction.boot }, 'ou_alice',
+      { messageId: interaction.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+    expect(h.cards.get('om_card_1')).toEqual(processBeforeAcceptance);
+    expect(h.cards.get('om_card_2').elements.find((element: any) => element.element_id === 'final_output')?.content).toBe(answer);
+    const before = structuredClone([...h.cards]);
+    const updates = h.service.update.mock.calls.length;
+    h.coordinator.stop();
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      expect(await restored.reconcile(h.config)).toBe(0);
+      expect(await restored.reconcile(h.config)).toBe(0);
+      expect(h.service.reply).toHaveBeenCalledTimes(2);
+      expect(h.service.update).toHaveBeenCalledTimes(updates);
+      expect([...h.cards]).toEqual(before);
+    } finally { restored.stop(); }
+  });
+
   it('preserves the user goal, injects sourced quote/document material once, and navigates to the original topic', async () => {
     const h = await harness();
     await h.coordinator.handle(event('om_task', '完成目标 https://team.feishu.cn/docx/doc1', { parentId: 'om_reference' }), h.config);
@@ -124,6 +203,42 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const navigation = [...h.cards.values()].find(card => card.taskId === 'om_tasks');
     expect(JSON.stringify(navigation)).toContain('client/thread/open');
     expect(JSON.stringify(navigation)).toContain('omt_topic');
+  });
+
+  it('recovers a failed result send without rerunning the task or repainting its frozen process', async () => {
+    const h = await harness();
+    const reply = h.service.reply.getMockImplementation()!;
+    const send = h.service.send.getMockImplementation()!;
+    h.service.reply.mockImplementation(async input => {
+      if (input.state === 'completed') throw new Error('result unavailable');
+      return reply(input);
+    });
+    h.service.send.mockRejectedValue(new Error('result unavailable'));
+    await h.coordinator.handle(event('om_task', '交付结果'), h.config);
+    await vi.waitFor(() => expect(h.log.error).toHaveBeenCalledWith(expect.anything(), '交付飞书执行结果失败，等待对账补偿'));
+    const [mapping] = await h.repos.channelMappings.list(`lark-card:${h.config.appId}`);
+    expect(JSON.parse(mapping!.extra!)).toMatchObject({ state: 'completed', progress_frozen: true });
+    expect(JSON.parse(mapping!.extra!).final_message_id).toBeUndefined();
+    expect(h.cards.size).toBe(1);
+    const process = structuredClone(h.cards.get('om_card_1'));
+    const updates = h.service.update.mock.calls.length;
+    const failedResultKey = h.service.reply.mock.calls[1]?.[0].idempotencyKey;
+    h.coordinator.stop();
+    h.service.reply.mockImplementation(reply);
+    h.service.send.mockImplementation(send);
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      expect(await restored.reconcile(h.config)).toBe(0);
+      expect(await restored.reconcile(h.config)).toBe(0);
+      expect(h.send).toHaveBeenCalledOnce();
+      expect(h.cards.size).toBe(2);
+      expect(h.cards.get('om_card_1')).toEqual(process);
+      expect(h.service.update).toHaveBeenCalledTimes(updates);
+      expect(h.service.reply.mock.calls[2]?.[0].idempotencyKey).toBe(failedResultKey);
+      expect(h.cards.get('om_card_2').elements.find((element: any) => element.element_id === 'final_output')?.content).toBe('工作已完成');
+      expect((await h.interactions()).find(item => item.kind === 'result')?.cardId).toBe('om_card_2');
+    } finally { restored.stop(); }
   });
 
   it('answers the original Relay waiter by quoting its card without creating another task, then records result acceptance once', async () => {
@@ -383,7 +498,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     } finally { release(); }
   });
 
-  it('binds acceptance to a terminal replacement card and keeps quoted changes in the original session', async () => {
+  it('binds acceptance to the separate result when the process card is missing and keeps quoted changes in the original session', async () => {
     const h = await harness();
     const update = h.service.update.getMockImplementation()!;
     h.service.update.mockImplementation(async input => {

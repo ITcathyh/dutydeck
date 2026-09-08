@@ -2,23 +2,22 @@ import type { ChannelMapping, ChannelMappingRepository, TaskRecord } from '@dock
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, type LarkCardService } from './service.js';
 import {
-  eventsForRuntimeTask,
+  loadLarkTaskEvents,
   hasUnresolvedToolCalls,
   isLarkCardContentRejected,
   isLarkMessageRateLimit,
   isLarkMessageUnupdatable,
   larkRateLimitBackoffMs,
-  larkTerminalReplacementKey,
   patchRejectedCardDelta,
-  renderLarkCardElements,
+  renderLarkProcessElements,
+  renderLarkResultElements,
   terminalTaskStates
 } from './card-renderer.js';
+import { larkResultKey, sendLarkResult } from './result-delivery.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 
-// 进程重启后的卡片终态对账（从 listener.ts 的 LarkMessageCoordinator.performReconcile 拆分）。
-// 对账可能无法更新原 running 卡片，只能补发终态卡片；持久化真实 reply_message_id 和话题标记，
-// 让进程重启后的终态补发仍回到原话题。
+// 进程重启后分别对账执行过程卡的终态和独立结果消息。
 
 const persistedCardTask = (value?: string | null): PersistedLarkCardTask | undefined => {
   if (!value) return;
@@ -28,28 +27,6 @@ const persistedCardTask = (value?: string | null): PersistedLarkCardTask | undef
     return parsed as PersistedLarkCardTask;
   } catch { return; }
 };
-
-// 旧 root_message_id 仅在确实是 om_* 消息 ID 时兼容；omt_* 不能传给回复接口。
-async function sendPersistedTaskCard(
-  service: Pick<LarkCardService, 'send' | 'reply'>,
-  persisted: Pick<PersistedLarkCardTask, 'chat_id' | 'reply_message_id' | 'reply_in_thread' | 'root_message_id'>,
-  input: Omit<Parameters<LarkCardService['send']>[0], 'chatId'>,
-  log?: { warn: (...args: any[]) => void }
-) {
-  const executionInput = { permissionMode: 'full-trust' as const, ...input };
-  const replyMessageId = persisted.reply_message_id?.trim()
-    || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined);
-  if (replyMessageId && typeof service.reply === 'function') {
-    try {
-      return await service.reply({ messageId: replyMessageId, ...(persisted.reply_in_thread ? { replyInThread: true } : {}), ...executionInput });
-    } catch (error) {
-      // The original message may have been deleted while Dockmux was down.
-      // Keep reconciliation deliverable by falling back to a top-level card.
-      log?.warn({ error, messageId: replyMessageId, chatId: persisted.chat_id }, '恢复卡片回复失败，回退为群内发送');
-    }
-  }
-  return await service.send({ chatId: persisted.chat_id, ...executionInput });
-}
 
 export async function performLarkCardReconcile(input: {
   runtime: LarkRuntime;
@@ -75,12 +52,10 @@ export async function performLarkCardReconcile(input: {
     const alreadyDelivered = terminalPersisted
       && persisted.final_delivery_state === 'delivered'
       && Boolean(persisted.final_message_id);
-    // 单卡记录已交付即完全收敛：终态就是这张卡自己。
+    // 旧版单卡结果已经交付，保留历史消息，不追发。
     if (alreadyDelivered && persisted.final_message_id === persisted.card_message_id) continue;
-    // 历史双消息记录：结论当年是作为**另一条**消息送达的，那条消息已经在用户的聊天里。
-    // 不删、不重发、也不把结论再 PATCH 一遍到旧进度卡（那会让用户看到两份同样的结果）。
-    // 唯一还欠的是把仍停在运行态的旧进度卡收敛为终态：只换状态，不加新内容。
     if (alreadyDelivered) {
+      if (persisted.state === 'completed' && input.resultElements) await input.resultElements(mapping, persisted, persisted.final_message_id!);
       if (persisted.progress_frozen) continue;
       const legacyElements = persisted.last_successful_elements?.length ? persisted.last_successful_elements : undefined;
       try {
@@ -99,15 +74,15 @@ export async function performLarkCardReconcile(input: {
         });
         await cardMappings.save({ ...mapping, extra: JSON.stringify({ ...persisted, progress_frozen: true }) });
       } catch (error) {
-        // 旧收据已被删除或过了可更新期：它永远不可能再收敛，重试只是每轮空打一次 API。
+        // 过程卡已被删除或过了可更新期：它永远不可能再收敛，重试只是每轮空打一次 API。
         // 结论早已作为另一条消息送达，这里不发任何卡片，就地记为已冻结即可。
         if (isLarkMessageUnupdatable(error)) {
           await cardMappings.save({ ...mapping, extra: JSON.stringify({ ...persisted, progress_frozen: true }) });
-          log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '历史双消息记录的旧进度卡已不可更新，就地收敛不再重试');
+          log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '执行过程卡已不可更新，就地收敛不再重试');
           continue;
         }
         unresolved++;
-        log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '历史双消息记录的旧进度卡收敛失败，稍后重试');
+        log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行过程卡收敛失败，稍后重试');
       }
       continue;
     }
@@ -151,20 +126,22 @@ export async function performLarkCardReconcile(input: {
       ? 'completed'
       : runtimeTask.status === 'failed' ? 'failed' : 'interrupted';
     const recentLimit = Math.max((config.traceLimit ?? defaultLarkTraceLimit) * 30, 500);
-    const sessionEvents = await (runtime.getRecentEvents?.(mapping.sessionId, recentLimit) ?? runtime.getEvents!(mapping.sessionId)).catch(() => []);
-    const events = eventsForRuntimeTask(sessionEvents, runtimeTask.id);
+    let events;
+    try { events = await loadLarkTaskEvents(runtime, mapping.sessionId, runtimeTask.id, recentLimit); }
+    catch (error) {
+      unresolved++;
+      log.warn({ error, taskId: runtimeTask.id }, '读取执行结果失败，等待下次对账');
+      continue;
+    }
     if (state === 'completed' && hasUnresolvedToolCalls(events)) state = 'failed';
     const completed = state === 'completed';
     const elapsedSeconds = Math.max(0, (Date.parse(runtimeTask.updatedAt) - persisted.started_at) / 1_000);
-    let updated = false;
+    let updated = Boolean(persisted.progress_frozen);
     let lastError: unknown;
     let contentRejected = false;
-    const chatType = persisted.chat_type ?? (persisted.reply_message_id ? 'group' : 'p2p');
-    // 单卡对账：把**真实结论**写回原卡，而不是先写一张「结果已另发」的收据。
-    const currentElements = boundLarkCardElements([...renderLarkCardElements(events, config, completed, false, chatType),
-      ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, persisted.card_message_id) : [])]);
-    let deliveredElements = currentElements;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    const currentElements = boundLarkCardElements(renderLarkProcessElements(events, config, true));
+    let deliveredElements = persisted.last_successful_elements;
+    for (let attempt = 1; !updated && attempt <= 3; attempt++) {
       try {
         await service.update({
           ...cardContext,
@@ -180,6 +157,7 @@ export async function performLarkCardReconcile(input: {
           elements: currentElements
         });
         updated = true;
+        deliveredElements = currentElements;
         break;
       } catch (error) {
         lastError = error;
@@ -215,87 +193,44 @@ export async function performLarkCardReconcile(input: {
         lastError = error;
       }
     }
-    let cardMessageId = persisted.card_message_id;
-    if (!updated) {
-      // 暂时性失败：原卡还在，结论尚未送达。保持未交付，下一轮对账重试同一个 message_id。
-      // 绝不因为「更新失败」就补发一条新消息——那正是要消除的第二条消息。
-      if (!isLarkMessageUnupdatable(lastError)) {
-        log.warn({ error: lastError, messageId: persisted.card_message_id }, '飞书原卡暂时更新失败，保留原卡等待下次对账重试');
-        unresolved++;
-        await cardMappings.save({
-          ...mapping,
-          extra: JSON.stringify({ ...persisted, runtime_task_id: runtimeTask.id, state, progress_frozen: false })
-        });
-        continue;
-      }
-      // 只有原卡确定不可更新（已删除 / 超出可更新期）才补发唯一一张终态卡，内容就是结论本身。
-      try {
-        const replacementElements = contentRejected
-          ? patchRejectedCardDelta(persisted.last_successful_elements, currentElements)
-          : currentElements;
-        const replacement = await sendPersistedTaskCard(service, persisted, {
-          ...cardContext,
-          state,
-          taskId: mapping.externalId,
-          taskName: persisted.task_name,
-          elapsedSeconds,
-          sessionId: mapping.sessionId,
-          readOnly: true,
-          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-          elements: replacementElements,
-          idempotencyKey: larkTerminalReplacementKey(persisted.card_message_id, state)
-        }, log);
-        cardMessageId = replacement.messageId;
-        deliveredElements = replacementElements;
-        updated = true;
-      } catch (error) {
-        if (isLarkCardContentRejected(error)) {
-          try {
-            const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
-            const minimal = await sendPersistedTaskCard(service, persisted, {
-              ...cardContext,
-              state,
-              taskId: mapping.externalId,
-              taskName: persisted.task_name,
-              elapsedSeconds,
-              sessionId: mapping.sessionId,
-              readOnly: true,
-              ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-              elements: patchedElements,
-              idempotencyKey: larkTerminalReplacementKey(persisted.card_message_id, state, true)
-            }, log);
-            cardMessageId = minimal.messageId;
-            deliveredElements = patchedElements;
-            updated = true;
-            log.warn({ rejectedMessageId: persisted.card_message_id, replacementMessageId: cardMessageId, upstreamCode: error.details?.upstreamCode }, '飞书补发终态卡片内容被拒绝，已降级为最小安全卡片');
-          } catch (fallbackError) {
-            log.error({ error: fallbackError, contentError: error, updateError: lastError, messageId: persisted.card_message_id }, '飞书终态对账最小卡片补偿失败');
-            unresolved++;
-            continue;
-          }
-        } else {
-          log.error({ error, updateError: lastError, messageId: persisted.card_message_id }, '飞书终态对账补偿失败');
-          unresolved++;
-          continue;
-        }
-      }
+    if (!updated && isLarkMessageUnupdatable(lastError)) updated = true;
+    let finalMessageId: string | undefined;
+    let finalElements: Array<Record<string, any>> | undefined;
+    try {
+      const elements = [...renderLarkResultElements(events),
+        ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : [])];
+      const result = await sendLarkResult(service, {
+        chatId: persisted.chat_id,
+        replyMessageId: persisted.reply_message_id?.trim()
+          || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
+        replyInThread: persisted.reply_in_thread
+      }, {
+        ...cardContext, permissionMode: larkPermissionMode(config), state,
+        taskId: mapping.externalId, taskName: persisted.task_name,
+        elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true,
+        ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+        elements, idempotencyKey: larkResultKey(persisted.card_message_id)
+      }, log);
+      finalMessageId = result.messageId;
+      finalElements = result.elements;
+      if (completed && input.resultElements) await input.resultElements(mapping, persisted, finalMessageId);
+    } catch (error) {
+      log.warn({ error, messageId: persisted.card_message_id }, '执行结果交付待下次对账重试');
     }
-    if (completed && input.resultElements && cardMessageId !== persisted.card_message_id) await input.resultElements(mapping, persisted, cardMessageId);
-    // 交付成功后终态就是这张卡自己：final_message_id === card_message_id。
+    if (!updated || !finalMessageId) unresolved++;
+    // A newer turn or live delivery may have updated the mapping during I/O.
+    const current = (await cardMappings.list(channel)).find(item => item.id === mapping.id);
+    if (current?.extra !== mapping.extra) continue;
     await cardMappings.save({
       ...mapping,
       extra: JSON.stringify({
-        ...persisted,
-        card_message_id: cardMessageId,
-        runtime_task_id: runtimeTask.id,
-        state,
-        progress_frozen: true,
-        final_message_id: cardMessageId,
-        final_delivery_state: 'delivered',
+        ...persisted, runtime_task_id: runtimeTask.id, state,
+        progress_frozen: updated,
+        ...(finalMessageId ? { final_message_id: finalMessageId, final_delivery_state: 'delivered', final_elements: finalElements } : {}),
         last_successful_elements: deliveredElements
       })
     });
-    log.info({ messageId: persisted.card_message_id, replacementMessageId: cardMessageId === persisted.card_message_id ? undefined : cardMessageId, finalMessageId: cardMessageId, state }, '飞书卡片终态对账完成');
+    log.info({ messageId: persisted.card_message_id, finalMessageId, state, progressFrozen: updated }, '飞书过程与结果消息对账完成');
   }
   return unresolved;
 }
