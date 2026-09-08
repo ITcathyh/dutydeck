@@ -136,6 +136,7 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
   }
 
   start(): void { this.tailer.start(); }
+  flush(): void { this.tailer.flush(); }
   stop(): void { this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
 }

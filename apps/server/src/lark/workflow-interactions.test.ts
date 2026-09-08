@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -98,6 +99,11 @@ const makeRuntime = (tasks: TaskRecord[], permissions: PermissionRequestData[], 
 const persistInteraction = async (config: { set(key: string, value: string): Promise<void> }, record: LarkInteraction) => {
   await config.set(`lark.interaction.${record.appId}.${record.id}`, JSON.stringify(record));
 };
+
+const legacyResult = (ctx: LarkInteractionContext, overrides: Partial<LarkInteraction> = {}): LarkInteraction => ({
+  ...interaction({ ...ctx, kind: 'result', nativeId: ctx.taskId, question: '结果验收', boot: 'legacy_boot', ...overrides }),
+  id: createHash('sha256').update([ctx.appId, ctx.sessionId, ctx.taskId, ctx.turn, 'result', ctx.taskId, ''].join('\0')).digest('hex').slice(0, 24)
+});
 
 const deferred = () => {
   let resolve!: () => void;
@@ -280,7 +286,23 @@ describe('persistent Lark workflow interactions', () => {
     }
   });
 
-  it('consumes a result acceptance once and never invokes the runtime', async () => {
+  it('does not create result feedback for a new completed task', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const { runtime } = makeRuntime([runningTask({ status: 'completed' })], []);
+      const { service } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      const ctx = context({ event: larkMessage({ messageId: 'om_result' }) });
+      expect(await workflow.result(ctx, 'om_result_card')).toEqual([]);
+      expect(await workflow.result(ctx, 'om_result_card')).toEqual([]);
+      expect(await workflow.list('app_one')).toEqual([]);
+    } finally {
+      repositories.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('renders and consumes a persisted legacy result acceptance once without invoking the runtime', async () => {
     const { directory, repositories } = await openDatabase();
     try {
       const tasks = [runningTask({ status: 'completed' })];
@@ -289,6 +311,7 @@ describe('persistent Lark workflow interactions', () => {
       const { service } = makeService();
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       const ctx = context({ event: larkMessage({ messageId: 'om_result' }) });
+      await persistInteraction(repositories.config, legacyResult(ctx));
       const firstCard = await workflow.result(ctx, 'om_result_card');
       const secondCard = await workflow.result(ctx, 'om_result_card');
       expect(secondCard).toEqual(firstCard);

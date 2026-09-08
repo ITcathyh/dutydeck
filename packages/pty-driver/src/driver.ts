@@ -452,11 +452,23 @@ export class PtyCliDriver implements AgentDriver {
     });
     this.idleDetector.onIdle(() => {
       if (!this.turnActive) return;
+      // Streaming can pause with an old prompt still on screen. Only the
+      // current footer counts; earlier busy text may remain in the answer.
+      const footer = this.snapshot?.lastLine() ?? '';
+      if (this.adapter.screenBusyPattern?.test(footer)) {
+        // Keep checking even if the next redraw only clears the footer.
+        this.idleDetector?.reset();
+        this.idleDetector?.seedReadyEvidence();
+        return;
+      }
       // 已有实质输出（CLI 在干活）→ 不受宽限期限制，idle 即完成。
       // 尚无实质输出 → 可能还在启动期（splash 屏静止），宽限期内禁止 completed。
       if (!this.turnHasOutput) {
         if (Date.now() - this.turnStartedAt < PtyCliDriver.TURN_GRACE_MS) return;
       }
+      // Publish the final JSONL record before Runtime closes the turn, even
+      // when it was written between the tailer's polling ticks.
+      this.transcript?.flush();
       this.turnActive = false;
       this.emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
       this.turnResolve?.();

@@ -82,8 +82,11 @@ export class LarkWorkflowInteractions {
     if (!await this.store.compareAndSet!(this.key(record), JSON.stringify(record), JSON.stringify(next))) throw stale();
     return next;
   }
+  private interactionId(context: LarkInteractionContext, kind: LarkInteraction['kind'], nativeId: string) {
+    return createHash('sha256').update([context.appId, context.sessionId, context.taskId, context.turn, kind, nativeId, kind === 'result' ? '' : this.boot].join('\0')).digest('hex').slice(0, 24);
+  }
   private async create(context: LarkInteractionContext, kind: LarkInteraction['kind'], nativeId: string, question: string) {
-    const id = createHash('sha256').update([context.appId, context.sessionId, context.taskId, context.turn, kind, nativeId, kind === 'result' ? '' : this.boot].join('\0')).digest('hex').slice(0, 24);
+    const id = this.interactionId(context, kind, nativeId);
     const record: LarkInteraction = { ...context, id, kind, nativeId, question, boot: this.boot, state: 'pending', updatedAt: new Date().toISOString() };
     if (!await this.store.compareAndSet!(this.key(record), undefined, JSON.stringify(record))) {
       const old = await this.store.get(this.key(record));
@@ -139,7 +142,9 @@ export class LarkWorkflowInteractions {
     } finally { this.delivering.delete(record.id); }
   }
   async result(context: LarkInteractionContext, cardId: string) {
-    let { record } = await this.create(context, 'result', context.taskId, '结果验收');
+    const raw = await this.store.get(prefix(context.appId) + this.interactionId(context, 'result', context.taskId));
+    if (!raw) return [];
+    let record = JSON.parse(raw) as LarkInteraction;
     if (record.cardId !== cardId) record = await this.bindCard(record, cardId);
     return record.state === 'pending' ? [
       { tag: 'markdown', element_id: 'workflow_result_status', content: '执行已结束。请验收结果；需要修改时，回复此卡片并说明要求。' },

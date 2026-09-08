@@ -121,6 +121,21 @@ export class TerminalSnapshot {
     return readViewportText(this.terminal, { filter: true });
   }
 
+  /** Last non-empty logical line, joining physical rows wrapped by xterm. */
+  lastLine(): string {
+    const buffer = this.terminal.buffer.active;
+    let row = buffer.baseY + this.terminal.rows - 1;
+    while (row >= buffer.baseY && !buffer.getLine(row)?.translateToString(true).trim()) row--;
+    if (row < buffer.baseY) return '';
+    let line = buffer.getLine(row);
+    let text = line?.translateToString(true) ?? '';
+    while (line?.isWrapped && row > buffer.baseY) {
+      line = buffer.getLine(--row);
+      text = (line?.translateToString(false) ?? '') + text;
+    }
+    return cleanBoxDrawing(text).trim();
+  }
+
   /**
    * Filtered viewport text with change detection — `changed` is false when
    * the text is byte-identical to the previous snapshot() call.

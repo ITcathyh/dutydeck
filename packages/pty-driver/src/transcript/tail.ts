@@ -23,6 +23,7 @@ import type { NormalizedDriverEvent } from '@dockmux/shared';
 export interface TranscriptEventSource {
   start(): void;
   stop(): void;
+  flush(): void;
   onEvent(cb: (e: NormalizedDriverEvent) => void): void;
 }
 
@@ -76,6 +77,8 @@ export class JsonlTailer implements TranscriptEventSource {
     this.tick();
     this.timer = setInterval(() => this.tick(), this.pollIntervalMs);
   }
+
+  flush(): void { this.tick(); }
 
   stop(): void {
     if (this.timer) {
