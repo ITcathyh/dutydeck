@@ -293,6 +293,8 @@ export interface TaskExecutionContext {
   /** 实际发送给 Agent 的 prompt；可能包含来源通道补充的上下文。 */
   agentPrompt: string;
   riskPolicy?: ToolRiskPolicy;
+  /** Original turn's output boundary; never exposed in public task responses. */
+  recovery?: import('./driver.js').DriverTurnRecovery;
 }
 export interface TaskRecord { id: string; sessionId: string; prompt: string; status: string; executionContext?: TaskExecutionContext; createdAt: string; updatedAt: string }
 export interface TaskRepository {

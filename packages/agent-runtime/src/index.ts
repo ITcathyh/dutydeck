@@ -1,21 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
 import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dockmux/shared';
-import { makeId, now, RuntimeError } from '@dockmux/shared';
+import { DriverDetachedError, DriverRecoveryError, makeId, now, RuntimeError } from '@dockmux/shared';
 import { AcpxAdapter } from '@dockmux/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dockmux/transports';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-/*
-  重启后无法靠自己恢复的「忙碌」状态。
-
-  这五个态都以「某个 driver 正在跑」为前提，而进程刚起来时内存里一个 driver 都没有，
-  所以它们只要还留在库里就一定是上一条命的残留。列在这里而不是内联，是因为
-  `sessionStates` 以后加新态时，得有人回来判断它属不属于这一档——摊开写才提醒得到。
-
-  不含 created：那是「还没启动」，第一条回收分支已经管了，且它没撒谎。
-*/
+// 没有可接管任务或可恢复队列时，这些忙碌状态需要在启动时回收。
 const RECOVERABLE_BUSY_STATES = ['starting', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting'] as const satisfies readonly Session['state'][];
 
 /** `includes` 在 as const 数组上不接受更宽的入参；用类型谓词而不是 `as` 强转，保住穷尽性检查。 */
@@ -84,6 +76,9 @@ export class DockmuxRuntime {
   private readonly lastActivity = new Map<string, number>();
   private readonly cleanupTimer?: NodeJS.Timeout;
   private cleanupRun?: Promise<void>;
+  private shuttingDown = false;
+  private readonly taskRuns = new Set<Promise<unknown>>();
+  private readonly replayedEvents = new Map<string, Set<string>>();
 
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
     const ptyDriverFactory = options.ptyDriverFactory;
@@ -207,7 +202,9 @@ export class DockmuxRuntime {
         continue;
       }
       const orphaned = persistedTasks.filter(task => task.status === 'running');
-      if (orphaned.length) {
+      const recoverable = orphaned.length === 1 && session.protocol === 'pty-cli' && !['stopped', 'failed', 'interrupting', 'interrupted'].includes(session.state) && orphaned[0]?.executionContext?.recovery
+        ? orphaned[0] : undefined;
+      if (orphaned.length && !recoverable) {
         const message = 'Dockmux 守护进程重启，正在进行的任务已中断';
         for (const task of orphaned) {
           await this.saveTask(task, 'interrupted');
@@ -227,26 +224,10 @@ export class DockmuxRuntime {
         }
         if (legacyQueued.length === queuedTasks.length && !['stopped', 'failed'].includes(session.state)) await this.saveState(session, 'interrupted', message);
       }
-      /*
-        兜底：进程刚起来，内存里一个 driver 都没有，所以任何「忙碌」状态都是上一条命
-        遗留的谎话——界面会照着它一直放呼吸动画，用户分不出「真在想」和「进程三天前
-        就死了」。2026-09-03 实测线上有 3 个会话卡在 thinking，cwd 指向早被删除的
-        /tmp/dockmux-test，而它们的任务记录已经是 failed —— **会话态与任务态互相矛盾**。
-
-        上面三条回收分支都漏掉了这种：
-        · 第一条只认 created/starting/failed 且无任务记录；
-        · 第二条只认有 running 任务的（被 SIGKILL 时任务状态根本来不及落库）；
-        · 第三条只认缺执行上下文的旧队列。
-
-        必须排在 scheduleQueue 之前：有排队任务的会话下面会被立刻调度起来，
-        那时标成 stopped 就成了「正在跑却写着已停止」——修掉一个矛盾又造一个新的。
-        所以这里只兜「没有队列可继续」的会话，有队列的交给下面那条重新跑起来。
-
-        不用 saveState 是因为它会走 emit 发事件，而此刻还没有任何订阅者，
-        白白写一条没人收的事件流；直接落库即可，前端下次拉列表就看到真相。
-      */
+      // Without a recoverable turn or resumable queue, a stale busy session
+      // has no work that this daemon can continue.
       const resumableQueue = queuedTasks.some(task => typeof task.executionContext?.agentPrompt === 'string');
-      if (!resumableQueue && isRecoverableBusy(session.state)) {
+      if (!recoverable && !resumableQueue && isRecoverableBusy(session.state)) {
         const message = 'Dockmux 守护进程重启，上一轮执行已中断';
         session.state = 'stopped';
         session.error = message;
@@ -257,7 +238,18 @@ export class DockmuxRuntime {
       const queued = queuedTasks.filter(task => typeof task.executionContext?.agentPrompt === 'string');
       if (queued.length) {
         this.queues.set(session.id, queued);
-        if (!['stopped', 'failed'].includes(session.state)) this.scheduleQueue(session.id);
+      }
+      if (recoverable) {
+        const run = this.runTask(session.id, recoverable, true).then(() => {}, () => {});
+        this.queueRuns.set(session.id, run);
+        void run.finally(async () => {
+          if (this.queueRuns.get(session.id) === run) this.queueRuns.delete(session.id);
+          if (this.shuttingDown) return;
+          const current = await this.repos.sessions.get(session.id);
+          if (current && !['stopped', 'failed'].includes(current.state)) this.scheduleQueue(session.id);
+        });
+      } else if (queued.length && !['stopped', 'failed'].includes(session.state)) {
+        this.scheduleQueue(session.id);
       }
     }
   }
@@ -310,10 +302,14 @@ export class DockmuxRuntime {
     await this.emit(session.id, 'status', { state: 'idle', error });
   }
 
-  private async emit(sessionId: string, type: EventType, data: any, raw?: string) {
+  private driverEventId(sessionId: string, sourceId: string) {
+    return 'evt_' + createHash('sha256').update(sessionId + '\0' + sourceId).digest('hex');
+  }
+
+  private async emit(sessionId: string, type: EventType, data: any, raw?: string, eventId = makeId('evt')) {
     const sequence = (this.sequences.get(sessionId) ?? (await this.repos.events.listRecent(sessionId, 1)).at(-1)?.sequence ?? 0) + 1;
     this.sequences.set(sessionId, sequence);
-    const event: AgentEvent = { id: makeId('evt'), sessionId, sequence, type, timestamp: now(), data, ...(raw ? { raw } : {}) };
+    const event: AgentEvent = { id: eventId, sessionId, sequence, type, timestamp: now(), data, ...(raw ? { raw } : {}) };
     await this.repos.events.append(event);
     this.emitter.emit(`session:${sessionId}`, event);
     return event;
@@ -364,6 +360,11 @@ export class DockmuxRuntime {
   }
 
   private async consume(session: Session, event: NormalizedDriverEvent) {
+    const eventId = event.sourceId ? this.driverEventId(session.id, event.sourceId) : undefined;
+    if (eventId && !this.replayedEvents.has(session.id)) {
+      this.replayedEvents.set(session.id, new Set((await this.repos.events.list(session.id)).map(item => item.id)));
+    }
+    if (eventId && this.replayedEvents.get(session.id)?.has(eventId)) return;
     this.touch(session.id);
     // Driver completion closes its stream; Runtime emits the single canonical
     // completed event after task persistence succeeds. Capture the real ACP
@@ -394,7 +395,8 @@ export class DockmuxRuntime {
       // Outside an active turn the same event is a driver-level hard failure.
       if (!this.activeTurns.has(session.id)) await this.saveState(session, 'failed', data.message);
     }
-    await this.emit(session.id, event.type, data, event.raw);
+    await this.emit(session.id, event.type, data, event.raw, eventId);
+    if (eventId) this.replayedEvents.get(session.id)?.add(eventId);
   }
 
   async start(input: StartSessionInput): Promise<Session> {
@@ -431,17 +433,20 @@ export class DockmuxRuntime {
   }
 
   private async active(id: string) {
+    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dockmux is shutting down', 503);
     const session = await this.repos.sessions.get(id);
+    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dockmux is shutting down', 503);
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
     if (session.archivedAt) throw new RuntimeError('SESSION_ARCHIVED', 'Archived sessions are read-only', 409);
     const driver = this.drivers.get(id);
     return { session, driver };
   }
 
-  private async reconnect(session: Session) {
+  private async reconnect(session: Session, start = true) {
     const existing = this.drivers.get(session.id);
     if (existing) return existing;
     const agent = await this.repos.agents.get(session.agentId);
+    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dockmux is shutting down', 503);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${session.agentId}`, 404);
     const configured = this.configureAgentForSession(agent, session);
     const generation = this.nextSessionGeneration(session.id);
@@ -450,7 +455,7 @@ export class DockmuxRuntime {
       if (code && session.state !== 'stopped' && !this.interruptedTurns.has(session.id) && !this.hardInterrupts.has(session.id)) void this.saveState(session, 'failed', `Agent exited with code ${code}`).then(() => this.emit(session.id, 'error', { message: `Agent exited with code ${code}` }));
     }, session.id);
     this.drivers.set(session.id, driver);
-    try { await driver.start(); this.touch(session.id); return driver; }
+    try { if (start) await driver.start(); this.touch(session.id); return driver; }
     catch (error) { this.drivers.delete(session.id); throw error; }
   }
 
@@ -462,7 +467,14 @@ export class DockmuxRuntime {
     await writeFile(join(directory, `${session.id}.json`), JSON.stringify(policy ?? { enabled: false }), { mode: 0o600 });
   }
 
-  private async runTask(id: string, task: TaskRecord) {
+  private runTask(id: string, task: TaskRecord, recovering = false) {
+    const run = this.executeTask(id, task, recovering);
+    this.taskRuns.add(run);
+    void run.then(() => this.taskRuns.delete(run), () => this.taskRuns.delete(run));
+    return run;
+  }
+
+  private async executeTask(id: string, task: TaskRecord, recovering: boolean) {
     const { session } = await this.active(id);
     if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot send while session is ${session.state}`, 409);
     if (this.activeTurns.has(id)) throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response to finish', 409);
@@ -471,20 +483,42 @@ export class DockmuxRuntime {
     this.driverStopReasons.delete(id);
     this.turnErrors.delete(id);
     this.touch(id);
+    const wasQueued = task.status === 'queued';
+    let submissionStarted = false;
     try {
       await this.options.authorizeExecution?.(id, task.executionContext?.actorId);
-      const driver = await this.reconnect(session);
+      const driver = await this.reconnect(session, !recovering);
       const { agentPrompt = task.prompt, riskPolicy } = task.executionContext ?? {};
       // 每个任务都明确设置（或清除）策略，避免复用会话沿用上一个
       // Lark 任务的高危正则到普通 Web/CLI 任务。
       await this.applyRiskPolicy(session, driver, riskPolicy);
-      await this.saveTask(task, 'running');
-      const promptEvent = await this.emit(id, 'text', { text: task.prompt, role: 'user', taskId: task.id });
-      await this.saveState(session, 'thinking');
-      const resolvedAgentPrompt = await this.options.sessionPrompt?.(session, agentPrompt) ?? agentPrompt;
-      await driver.send(resolvedAgentPrompt);
+      let promptSequence: number;
+      if (recovering) {
+        const events = await this.repos.events.list(id);
+        const promptEvent = events.find(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === task.id);
+        if (!driver.recover || !task.executionContext?.recovery || !promptEvent) throw new DriverRecoveryError('无法确认原任务的恢复边界，未重新发送指令');
+        promptSequence = promptEvent.sequence;
+        this.replayedEvents.set(id, new Set(events.map(event => event.id)));
+        if (this.shuttingDown) throw new DriverDetachedError();
+        await driver.recover(task.executionContext.recovery);
+      } else {
+        if (this.shuttingDown) throw new DriverDetachedError();
+        const existingPrompt = task.executionContext?.recovery
+          ? (await this.repos.events.list(id)).find(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === task.id)
+          : undefined;
+        const recovery = driver.checkpoint?.();
+        if (recovery) task.executionContext = { ...task.executionContext!, agentPrompt, recovery };
+        await this.saveTask(task, 'running');
+        const promptEvent = existingPrompt ?? await this.emit(id, 'text', { text: task.prompt, role: 'user', taskId: task.id });
+        promptSequence = promptEvent.sequence;
+        await this.saveState(session, 'thinking');
+        const resolvedAgentPrompt = await this.options.sessionPrompt?.(session, agentPrompt) ?? agentPrompt;
+        if (this.shuttingDown) throw new DriverDetachedError();
+        submissionStarted = true;
+        await driver.send(resolvedAgentPrompt);
+      }
       await this.flushDriverEvents(id);
-      const outcome = await this.resolveTaskOutcome(session, promptEvent.sequence);
+      const outcome = await this.resolveTaskOutcome(session, promptSequence);
       if (outcome.status === 'interrupted') { await this.saveTask(task, 'interrupted'); await this.saveState(session, 'interrupted'); }
       else if (outcome.status === 'failed') {
         await this.saveTask(task, 'failed');
@@ -496,7 +530,20 @@ export class DockmuxRuntime {
     } catch (error) {
       try { await this.flushDriverEvents(id); }
       catch { /* Preserve the driver error while ensuring preceding events finish first. */ }
-      const interrupted = this.interruptedTurns.has(id) || this.driverStopReasons.get(id) === 'cancelled';
+      if (this.shuttingDown && wasQueued && !submissionStarted && !recovering) {
+        await this.saveTask(task, 'queued');
+        return this.publicTask(task);
+      }
+      if (this.shuttingDown && error instanceof DriverDetachedError && task.executionContext?.recovery) return this.publicTask(task);
+      if (error instanceof DriverRecoveryError) {
+        await this.saveTask(task, 'interrupted');
+        await this.cancelSessionQueue(id);
+        await this.saveState(session, 'stopped', error.message);
+        await this.repos.artifacts.saveError(id, error.message);
+        await this.emit(id, 'error', { message: error.message });
+        throw error;
+      }
+      const interrupted = this.shuttingDown || this.interruptedTurns.has(id) || this.driverStopReasons.get(id) === 'cancelled';
       const attempt = async (operation: () => Promise<unknown>) => { try { await operation(); } catch { /* Preserve the original turn failure and keep cleanup progressing. */ } };
       if (interrupted) {
         await attempt(() => this.saveTask(task, 'interrupted'));
@@ -557,19 +604,20 @@ export class DockmuxRuntime {
   }
 
   private scheduleQueue(id: string) {
-    if (this.queueRuns.has(id) || this.activeTurns.has(id)) return;
+    if (this.shuttingDown || this.queueRuns.has(id) || this.activeTurns.has(id)) return;
     const run = this.drainQueue(id); this.queueRuns.set(id, run);
     void run.finally(() => { if (this.queueRuns.get(id) === run) this.queueRuns.delete(id); });
   }
 
   private async drainQueue(id: string) {
-    while (!this.activeTurns.has(id)) {
+    while (!this.shuttingDown && !this.activeTurns.has(id)) {
       const queue = this.queues.get(id);
       const task = queue?.shift();
       if (!task) { this.queues.delete(id); return; }
       if (!queue?.length) this.queues.delete(id);
       try { await this.runTask(id, task); }
       catch {
+        if (this.shuttingDown) return;
         // A prompt/SDK failure only fails the current task. recoverSessionAfterTask
         // restores a reusable shared session to idle, so later queued work must
         // still get its own attempt instead of being failed without execution.
@@ -852,6 +900,7 @@ export class DockmuxRuntime {
 
   private releaseSessionMemory(sessionId: string) {
     this.drivers.delete(sessionId);
+    this.replayedEvents.delete(sessionId);
     this.sequences.delete(sessionId);
     this.lastActivity.delete(sessionId);
     this.activeTasks.delete(sessionId);
@@ -889,13 +938,24 @@ export class DockmuxRuntime {
   }
 
   async shutdown() {
+    this.shuttingDown = true;
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     await this.cleanupRun;
     const drivers = [...this.drivers.values()];
     this.drivers.clear();
     await Promise.allSettled(drivers.map(driver => driver.stop()));
-    await Promise.allSettled(this.queueRuns.values());
+    // Some drivers never settle send() after stop(); keep the existing bounded
+    // turn-wait contract while allowing detached tasks to persist their state.
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        Promise.allSettled([...this.taskRuns, ...this.queueRuns.values()]),
+        new Promise<void>(resolve => { timer = setTimeout(resolve, 2_000); })
+      ]);
+    } finally { if (timer) clearTimeout(timer); }
+    this.taskRuns.clear();
     await Promise.allSettled(this.driverEventChains.values());
+    this.replayedEvents.clear();
     this.sequences.clear(); this.permissions.clear(); this.permissionResolutions.clear(); this.sessionGenerations.clear(); this.lastActivity.clear(); this.activeTurns.clear(); this.activeTasks.clear(); this.interruptedTurns.clear(); this.hardInterrupts.clear(); this.turnErrors.clear(); this.driverEventChains.clear(); this.driverEventErrors.clear();
     for (const waiters of this.turnWaiters.values()) for (const resolve of waiters) resolve();
     this.turnWaiters.clear(); this.queues.clear(); this.queueRuns.clear(); this.emitter.removeAllListeners();

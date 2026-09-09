@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -243,6 +243,89 @@ describe('production PTY backend injection', () => {
 
   const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
   const tmuxIt = tmuxAvailable ? it : it.skip;
+
+  tmuxIt.each([false, true])('recovers an in-flight task through a full service restart (completed offline: %s)', async offline => {
+    const root = mkdtempSync(join(tmpdir(), 'dockmux-service-turn-recovery-'));
+    temporaryDirectories.push(root);
+    const database = join(root, 'dockmux.db');
+    const runner = join(root, 'runner.mjs');
+    writeFileSync(runner, [
+      `#!${process.execPath}`,
+      "import { appendFileSync, existsSync } from 'node:fs';",
+      "process.stdin.setRawMode(true); process.stdin.setEncoding('utf8');",
+      "process.stdout.write('❯ ready\\r\\n'); let input = '';",
+      // The real adapter pastes a multiline routing block, then Enter commits it.
+      "process.stdin.on('data', data => {",
+      "  input += data; const end = input.indexOf('\\x1b[201~');",
+      "  if (end < 0 || !input.slice(end + 6).includes('\\r')) return;",
+      "  input = ''; appendFileSync('submissions', 'submitted\\n');",
+      "  process.stdout.write('\\x1b[2J\\x1b[HWorking (esc to interrupt)\\r\\n');",
+      "  const timer = setInterval(() => {",
+      "    if (!existsSync('finish')) return; clearInterval(timer);",
+      "    process.stdout.write('\\x1b[2J\\x1b[H✳ Worked for 1s\\r\\n❯ ready\\r\\n');",
+      '  }, 50);',
+      '});', ''
+    ].join('\n'));
+    chmodSync(runner, 0o700);
+    const serverEnv = async (): Promise<NodeJS.ProcessEnv> => ({
+      ...process.env, NODE_ENV: 'test', DOCKMUX_HOST: '127.0.0.1', DOCKMUX_PORT: String(await freePort()),
+      DOCKMUX_DEFAULT_CWD: root, DOCKMUX_DATABASE_URL: database, DOCKMUX_AUTH: 'false', DOCKMUX_DISABLE_LARK_LISTENER: 'true',
+      DOCKMUX_AGENTS_JSON: JSON.stringify([{
+        id: 'claude-code', name: 'Recovery test runner', command: runner, protocol: 'pty-cli',
+        permissionMode: 'ask', env: { CLAUDE_CONFIG_DIR: root }, capabilities: { pause: false, resume: true }
+      }])
+    });
+    const first = await startLocalServer({ webRoot: root, env: await serverEnv() });
+    let restored: Awaited<ReturnType<typeof startLocalServer>> | undefined;
+    try {
+      const session = await first.runtime.start({ agentId: 'claude-code' });
+      const backend = createProductionPtyBackend(session.id);
+      tmuxSessions.push(backend.sessionName);
+      const originalPid = backend.getPid();
+      const project = join(root, 'projects', realpathSync(root).replace(/[^A-Za-z0-9-]/g, '-'));
+      mkdirSync(project, { recursive: true });
+      const transcript = join(project, session.id.replace(/^ses_/, '') + '.jsonl');
+      writeFileSync(transcript, '');
+      const record = (text: string) => appendFileSync(transcript, JSON.stringify({
+        type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'end_turn' }
+      }) + '\n');
+      const task = await first.runtime.dispatch(session.id, 'recover this exact task');
+      await vi.waitFor(() => expect(existsSync(join(root, 'submissions'))).toBe(true), { timeout: 25_000 });
+      record('before restart');
+      await vi.waitFor(async () => expect((await first.runtime.getEvents(session.id)).some(event => (event.data as any)?.text === 'before restart')).toBe(true));
+      await first.close();
+      const persisted = createRepositories(database);
+      try {
+        expect((await persisted.tasks.listBySession(session.id))[0]?.status).toBe('running');
+        expect((await persisted.tasks.listBySession(session.id))[0]?.executionContext?.recovery?.turnId)
+          .toBe(backend.getDockmuxMetadata('turn_id'));
+      } finally { persisted.close(); }
+      const complete = () => { record('final answer'); writeFileSync(join(root, 'finish'), ''); };
+      if (offline) {
+        complete();
+        await vi.waitFor(() => expect(backend.captureCurrentScreen()).toContain('Worked for 1s'));
+      }
+      restored = await startLocalServer({ webRoot: root, env: await serverEnv() });
+      if (!offline) {
+        await vi.waitFor(() => expect(restored!.runtime.getDriver(session.id)).toBeDefined());
+        expect((await restored.runtime.getTasks(session.id))[0]?.status).toBe('running');
+        complete();
+      }
+      await vi.waitFor(async () => expect((await restored!.runtime.getTasks(session.id))[0]?.status, (await restored!.runtime.getSession(session.id))?.error).toBe('completed'), { timeout: 10_000 });
+      expect(backend.getPid()).toBe(originalPid);
+      expect(readFileSync(join(root, 'submissions'), 'utf8')).toBe('submitted\n');
+      expect((await restored.runtime.getTasks(session.id)).map(item => item.id)).toEqual([task.id]);
+      const events = await restored.runtime.getEvents(session.id);
+      expect(events.filter(event => event.type === 'text').map(event => (event.data as any).text))
+        .toEqual(['recover this exact task', 'before restart', 'final answer']);
+      expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+      expect(events.filter(event => event.type === 'error')).toEqual([]);
+      await restored.runtime.stop(session.id);
+    } finally {
+      await first.close();
+      await restored?.close();
+    }
+  }, 60_000);
 
   tmuxIt('keeps a completed Dockmux Run on the same pane across a service restart', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dockmux-persistent-pty-'));
