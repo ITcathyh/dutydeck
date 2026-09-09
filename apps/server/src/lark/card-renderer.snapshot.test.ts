@@ -80,7 +80,14 @@ describe('renderLarkCardElements 视觉快照', () => {
     const panels = elements.filter(element => String(element.element_id ?? '').startsWith('trace_group_'));
     const rendered = JSON.stringify(elements);
     expect(panels).toHaveLength(5);
-    expect(rendered).toContain('仅展示最近 5 个阶段，另有 2 个阶段');
+    // 省略提示并进「此前阶段」这一行：两条灰字紧挨着说的是同一件事，
+    // 分成两行只会把当前阶段往下推。渲染层同时留一份 trace_omission 给
+    // 非运行态布局，两者由 buildLarkCard 按状态各取一条，卡上只出现一次。
+    expect(rendered).toContain('此前阶段（另有 2 个更早阶段未展示');
+    for (const state of ['running', 'queued', 'completed'] as const) {
+      const card = JSON.stringify(buildLarkCard({ state, elements, taskName: '多阶段任务', taskId: 'task-omission', elapsedSeconds: 9 }));
+      expect(card.split('个更早阶段未展示')).toHaveLength(2);
+    }
     expect(rendered).not.toContain('阶段 1');
     expect(rendered).not.toContain('阶段 2');
     expect(rendered).toContain('阶段 3');

@@ -10,7 +10,7 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
         "margin": "0px",
         "tag": "div",
         "text": {
-          "content": "<text_tag color='green'>已完成</text_tag>　<font color='grey'>已用时 2s</font>",
+          "content": "<font color='grey'>已完成　已用时 2s</font>",
           "tag": "lark_md",
           "text_size": "small",
         },
@@ -23,33 +23,6 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
         "tag": "markdown",
         "text_align": "left",
         "text_size": "normal_v2",
-      },
-      {
-        "columns": [
-          {
-            "elements": [
-              {
-                "content": "1 个工具已结束",
-                "icon": {
-                  "color": "grey",
-                  "tag": "standard_icon",
-                  "token": "doc-checklist_outlined",
-                },
-                "margin": "0px",
-                "tag": "markdown",
-                "text_size": "notation",
-              },
-            ],
-            "tag": "column",
-            "weight": 1,
-            "width": "weighted",
-          },
-        ],
-        "element_id": "evidence",
-        "flex_mode": "none",
-        "horizontal_spacing": "8px",
-        "margin": "4px 0px 0px 0px",
-        "tag": "column_set",
       },
       {
         "direction": "vertical",
@@ -65,7 +38,7 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
                 "element_id": "trace_tool_0_0",
                 "elements": [
                   {
-                    "content": "<font color='trace_success'>●</font>　运行测试　<font color='grey'>pnpm test</font>　<font color='grey'>1s</font>",
+                    "content": "<font color='trace_success'>●</font>　运行测试　<font color='grey'>pnpm test</font>",
                     "icon": {
                       "color": "grey",
                       "tag": "standard_icon",
@@ -75,21 +48,7 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
                     "text_size": "notation",
                   },
                   {
-                    "content": "输入
-
-\`\`\`text
-{
-  "command": "pnpm test"
-}
-\`\`\`",
-                    "margin": "0px",
-                    "tag": "markdown",
-                    "text_size": "notation",
-                  },
-                  {
-                    "content": "结果
-
-\`\`\`text
+                    "content": "\`\`\`text
 125 passed
 \`\`\`",
                     "margin": "0px",
@@ -115,8 +74,7 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
               "icon_expanded_angle": -180,
               "icon_position": "right",
               "title": {
-                "content": "运行测试 · pnpm test　<font color='green'>● 已完成</font>
-<font color='grey'>125 passed</font>",
+                "content": "运行测试 · pnpm test",
                 "tag": "markdown",
                 "text_size": "notation",
               },
@@ -150,28 +108,6 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
         "tag": "collapsible_panel",
         "vertical_spacing": "2px",
       },
-      {
-        "columns": [
-          {
-            "elements": [
-              {
-                "content": "<font color='grey'>Dockmux</font>",
-                "margin": "0px",
-                "tag": "markdown",
-                "text_size": "x-small",
-              },
-            ],
-            "tag": "column",
-            "vertical_align": "center",
-            "weight": 1,
-            "width": "weighted",
-          },
-        ],
-        "flex_mode": "none",
-        "horizontal_spacing": "8px",
-        "margin": "6px 0px 0px 0px",
-        "tag": "column_set",
-      },
     ],
     "padding": "10px 12px 10px 12px",
     "vertical_spacing": "8px",
@@ -185,16 +121,16 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
           "light_mode": "rgba(240,245,253,1)",
         },
         "trace_failure": {
-          "dark_mode": "rgba(226,202,124,1)",
-          "light_mode": "rgba(208,180,92,1)",
+          "dark_mode": "rgba(255,178,102,1)",
+          "light_mode": "rgba(163,77,0,1)",
         },
         "trace_running": {
           "dark_mode": "rgba(124,202,242,1)",
-          "light_mode": "rgba(96,184,232,1)",
+          "light_mode": "rgba(36,91,219,1)",
         },
         "trace_success": {
           "dark_mode": "rgba(118,204,142,1)",
-          "light_mode": "rgba(92,184,119,1)",
+          "light_mode": "rgba(46,161,33,1)",
         },
       },
     },
@@ -207,7 +143,7 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
   "header": {
     "padding": "10px 12px 8px 12px",
     "subtitle": {
-      "content": "Dockmux · Agent 任务",
+      "content": "Dockmux",
       "tag": "plain_text",
     },
     "template": "green",
@@ -320,51 +256,19 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
             "element_id": "current_title",
             "margin": "0px",
             "tag": "markdown",
-            "text_size": "notation",
+            "text_size": "normal",
           },
           {
-            "direction": "vertical",
+            "content": "<font color='trace_running'>●</font>　运行测试　<font color='grey'>pnpm test</font>",
             "element_id": "trace_tool_0_0",
-            "elements": [
-              {
-                "content": "输入
-
-\`\`\`text
-{
-  "command": "pnpm test"
-}
-\`\`\`",
-                "margin": "0px",
-                "tag": "markdown",
-                "text_size": "notation",
-              },
-            ],
-            "expanded": false,
-            "header": {
-              "icon": {
-                "color": "grey",
-                "size": "12px 12px",
-                "tag": "standard_icon",
-                "token": "down-small-ccm_outlined",
-              },
-              "icon_expanded_angle": -180,
-              "icon_position": "right",
-              "title": {
-                "content": "<font color='trace_running'>●</font>　运行测试　<font color='grey'>pnpm test</font>　<font color='grey'>1s</font>",
-                "icon": {
-                  "color": "grey",
-                  "tag": "standard_icon",
-                  "token": "doc-checklist_outlined",
-                },
-                "tag": "markdown",
-                "text_size": "notation",
-              },
-              "vertical_align": "center",
+            "icon": {
+              "color": "grey",
+              "tag": "standard_icon",
+              "token": "doc-checklist_outlined",
             },
             "margin": "0px",
-            "padding": "4px 0px 0px 0px",
-            "tag": "collapsible_panel",
-            "vertical_spacing": "4px",
+            "tag": "markdown",
+            "text_size": "notation",
           },
         ],
         "has_border": false,
@@ -372,28 +276,6 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
         "padding": "8px 10px 8px 10px",
         "tag": "interactive_container",
         "vertical_spacing": "4px",
-      },
-      {
-        "columns": [
-          {
-            "elements": [
-              {
-                "content": "<font color='grey'>Dockmux</font>",
-                "margin": "0px",
-                "tag": "markdown",
-                "text_size": "x-small",
-              },
-            ],
-            "tag": "column",
-            "vertical_align": "center",
-            "weight": 1,
-            "width": "weighted",
-          },
-        ],
-        "flex_mode": "none",
-        "horizontal_spacing": "8px",
-        "margin": "6px 0px 0px 0px",
-        "tag": "column_set",
       },
     ],
     "padding": "10px 12px 10px 12px",
@@ -408,16 +290,16 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
           "light_mode": "rgba(240,245,253,1)",
         },
         "trace_failure": {
-          "dark_mode": "rgba(226,202,124,1)",
-          "light_mode": "rgba(208,180,92,1)",
+          "dark_mode": "rgba(255,178,102,1)",
+          "light_mode": "rgba(163,77,0,1)",
         },
         "trace_running": {
           "dark_mode": "rgba(124,202,242,1)",
-          "light_mode": "rgba(96,184,232,1)",
+          "light_mode": "rgba(36,91,219,1)",
         },
         "trace_success": {
           "dark_mode": "rgba(118,204,142,1)",
-          "light_mode": "rgba(92,184,119,1)",
+          "light_mode": "rgba(46,161,33,1)",
         },
       },
     },
@@ -430,7 +312,7 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
   "header": {
     "padding": "10px 12px 8px 12px",
     "subtitle": {
-      "content": "Dockmux · Agent 任务",
+      "content": "Dockmux",
       "tag": "plain_text",
     },
     "template": "blue",
@@ -528,7 +410,7 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
             "element_id": "current_title",
             "margin": "0px",
             "tag": "markdown",
-            "text_size": "notation",
+            "text_size": "normal",
           },
         ],
         "has_border": false,
@@ -536,28 +418,6 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
         "padding": "8px 10px 8px 10px",
         "tag": "interactive_container",
         "vertical_spacing": "4px",
-      },
-      {
-        "columns": [
-          {
-            "elements": [
-              {
-                "content": "<font color='grey'>Dockmux</font>",
-                "margin": "0px",
-                "tag": "markdown",
-                "text_size": "x-small",
-              },
-            ],
-            "tag": "column",
-            "vertical_align": "center",
-            "weight": 1,
-            "width": "weighted",
-          },
-        ],
-        "flex_mode": "none",
-        "horizontal_spacing": "8px",
-        "margin": "6px 0px 0px 0px",
-        "tag": "column_set",
       },
     ],
     "padding": "10px 12px 10px 12px",
@@ -572,16 +432,16 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
           "light_mode": "rgba(240,245,253,1)",
         },
         "trace_failure": {
-          "dark_mode": "rgba(226,202,124,1)",
-          "light_mode": "rgba(208,180,92,1)",
+          "dark_mode": "rgba(255,178,102,1)",
+          "light_mode": "rgba(163,77,0,1)",
         },
         "trace_running": {
           "dark_mode": "rgba(124,202,242,1)",
-          "light_mode": "rgba(96,184,232,1)",
+          "light_mode": "rgba(36,91,219,1)",
         },
         "trace_success": {
           "dark_mode": "rgba(118,204,142,1)",
-          "light_mode": "rgba(92,184,119,1)",
+          "light_mode": "rgba(46,161,33,1)",
         },
       },
     },
@@ -594,7 +454,7 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
   "header": {
     "padding": "10px 12px 8px 12px",
     "subtitle": {
-      "content": "Dockmux · Agent 任务",
+      "content": "Dockmux",
       "tag": "plain_text",
     },
     "template": "orange",

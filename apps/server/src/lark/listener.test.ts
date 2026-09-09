@@ -2188,9 +2188,11 @@ describe('Lark trace rendering', () => {
       agentEvent(4, 'tool_result', { id: 'web', name: 'Fetch', input: { url: 'https://example.com' }, status: 'completed' }),
       agentEvent(5, 'tool_result', { id: 'agent', name: 'group peers', status: 'completed' })
     ], config, false);
+    // 有可展开内容的工具是折叠面板（图标在 header.title），没有内容的工具是一行纯文本
+    // （图标就在元素自身）——后者不给折叠箭头，点开只会看到「暂无内容」。
     const tokens = cardElements(elements)
       .filter(element => element.element_id?.startsWith('trace_tool_'))
-      .map(element => element.header.title.icon.token);
+      .map(element => (element.header?.title ?? element).icon.token);
     expect(tokens).toEqual([
       'file-link-text_outlined',
       'edit_outlined',
@@ -2248,7 +2250,7 @@ describe('Lark trace rendering', () => {
     }
   });
 
-  it('shows stage and tool elapsed time in the same summary row as the Web timeline', () => {
+  it('keeps notable tool elapsed time in the summary row and drops the redundant success badge', () => {
     const timed = (sequence: number, type: AgentEvent['type'], data: any, seconds: number): AgentEvent => ({
       id: `timed-${sequence}`, sessionId: session.id, sequence, type,
       timestamp: `2026-08-19T00:00:${String(seconds).padStart(2, '0')}.000Z`, data
@@ -2261,26 +2263,30 @@ describe('Lark trace rendering', () => {
       timed(5, 'text', { text: '检查完成。' }, 5)
     ], config, true);
     const group: any = elements.find(element => element.element_id === 'trace_group_0');
-    expect(groupTitle(group)).toContain("<font color='green'>● 已完成</font>");
+    // 成功是默认预期，阶段标题不再标注：一次顺利的执行有五个阶段，五个「● 已完成」
+    // 只是在重复「没有异常」，同时把真正失败的那一个淹掉。
+    expect(groupTitle(group)).not.toContain('● 已完成');
     expect(groupTitle(group)).not.toContain("<font color='grey'>4s</font>");
+    // 工具行仍然带自己的耗时，但只有 3s 及以上才值得占标题里的一段位置。
+    expect(JSON.stringify(groupElements(group))).toContain("<font color='grey'>3s</font>");
     expect(JSON.stringify(groupElements(group))).toContain("<font color='trace_success'>●</font>");
     expect(JSON.stringify(groupElements(group))).toContain('/repo');
   });
 
-  it('hides completed trace detail but keeps a compact evidence summary by default', () => {
+  it('hides completed trace detail behind a collapsed stage by default', () => {
     const elements = renderLarkCardElements(events, { ...config, hideTraceOnComplete: true }, true);
     expect(elements).toEqual(expect.arrayContaining([
       expect.objectContaining({ tag: 'markdown', content: '最终答案' }),
-      expect.objectContaining({ element_id: 'evidence' }),
       expect.objectContaining({ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false })
     ]));
+    // 全部成功时结论下面不再跟一行工具计数：任务进入终态本身就意味着步骤都结束了。
+    expect(elements.some((element: any) => element.element_id === 'evidence')).toBe(false);
   });
 
   it('keeps completed trace detail collapsible when hideTraceOnComplete is false', () => {
     const elements = renderLarkCardElements(events, { ...config, hideTraceOnComplete: false }, true);
     expect(elements).toEqual(expect.arrayContaining([
       expect.objectContaining({ tag: 'markdown', content: '最终答案' }),
-      expect.objectContaining({ element_id: 'evidence' }),
       expect.objectContaining({ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: true })
     ]));
   });
@@ -2330,14 +2336,17 @@ describe('Lark trace rendering', () => {
       agentEvent(2, 'tool_result', { id: 'bad', name: 'Terminal', input: { command: 'false' }, output: 'exit 1', status: 'failed' }),
       agentEvent(3, 'tool_call', { id: 'live', name: 'Terminal', input: { command: 'sleep 10' }, status: 'running' })
     ], config, false);
+    // 前两个工具有输出，是折叠面板；第三个还在执行、命令已完整写在标题上，
+    // 没有可展开内容，因此是一行纯文本而不是空折叠。
     const tools: any[] = cardElements(elements).filter(element => element.element_id?.startsWith('trace_tool_'));
-    expect(tools.map(tool => tool.header.title.icon.color)).toEqual(['grey', 'grey', 'grey']);
-    expect(tools.map(tool => tool.header.title.content)).toEqual([
+    const summary = (tool: any) => tool.header?.title ?? tool;
+    expect(tools.map(tool => summary(tool).icon.color)).toEqual(['grey', 'grey', 'grey']);
+    expect(tools.map(tool => summary(tool).content)).toEqual([
       expect.stringContaining("<font color='trace_success'>●</font>"),
       expect.stringContaining("<font color='trace_failure'>●</font>"),
       expect.stringContaining("<font color='trace_running'>●</font>")
     ]);
-    for (const tool of tools) expect(tool.header.title.content).not.toMatch(/已完成|失败|执行中/);
+    for (const tool of tools) expect(summary(tool).content).not.toMatch(/已完成|失败|执行中/);
   });
 
   it('merges interleaved tool updates by id and preserves the concrete command over a generic completion title', () => {
@@ -2426,8 +2435,8 @@ describe('Lark trace rendering', () => {
     ], config, true);
     const group: any = elements.find(element => element.element_id === 'trace_group_0');
     const rendered = JSON.stringify(group);
-    expect(groupTitle(group)).toContain('已完成');
     expect(groupTitle(group)).toContain('分析与规划');
+    expect(groupTitle(group)).not.toContain('● 已完成');
     expect(groupTitle(group)).not.toContain('执行中');
     expect(groupTitle(group).length).toBeLessThan(260);
     expect(rendered).not.toContain('UNIQUE_THINKING_MARKER');
