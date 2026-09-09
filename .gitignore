@@ -17,3 +17,6 @@ apps/server/public
 # 改版对比截图：4.9M 二进制，一轮改版就作废一批，进 git 会永久留在历史里。
 # 需要时用 scripts/shoot-redesign.mjs 重跑即可（脚本本身是提交的）。
 docs/assets/redesign-*/
+
+# 卡片改版对比预览：改一轮就作废一批，需要时用 scripts/preview-lark-card.mts 重跑。
+docs/assets/card-preview*/
