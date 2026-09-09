@@ -6,17 +6,6 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
     "direction": "vertical",
     "elements": [
       {
-        "element_id": "task_status",
-        "margin": "0px",
-        "tag": "div",
-        "text": {
-          "content": "<font color='grey'>已完成　已用时 2s</font>",
-          "tag": "lark_md",
-          "text_size": "small",
-        },
-        "width": "auto",
-      },
-      {
         "content": "全部通过。",
         "element_id": "final_output",
         "margin": "0px",
@@ -38,7 +27,7 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
                 "element_id": "trace_tool_0_0",
                 "elements": [
                   {
-                    "content": "<font color='trace_success'>●</font>　运行测试　<font color='grey'>pnpm test</font>",
+                    "content": "pnpm test",
                     "icon": {
                       "color": "grey",
                       "tag": "standard_icon",
@@ -107,6 +96,29 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
         "padding": "4px 0px 0px 0px",
         "tag": "collapsible_panel",
         "vertical_spacing": "2px",
+      },
+      {
+        "columns": [
+          {
+            "elements": [
+              {
+                "content": "<font color='grey'>用时 2s</font>",
+                "element_id": "task_elapsed",
+                "margin": "0px",
+                "tag": "markdown",
+                "text_size": "x-small",
+              },
+            ],
+            "tag": "column",
+            "vertical_align": "center",
+            "weight": 1,
+            "width": "weighted",
+          },
+        ],
+        "flex_mode": "none",
+        "horizontal_spacing": "8px",
+        "margin": "6px 0px 0px 0px",
+        "tag": "column_set",
       },
     ],
     "padding": "10px 12px 10px 12px",
@@ -196,7 +208,7 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
                 "margin": "0px",
                 "tag": "div",
                 "text": {
-                  "content": "<text_tag color='wathet'>执行中</text_tag>　<font color='grey'>已用时 2s</font>",
+                  "content": "<font color='grey'>已用时 2s</font>",
                   "tag": "lark_md",
                   "text_size": "small",
                 },
@@ -259,7 +271,7 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
             "text_size": "normal",
           },
           {
-            "content": "<font color='trace_running'>●</font>　运行测试　<font color='grey'>pnpm test</font>",
+            "content": "<font color='trace_running'>●</font>　pnpm test",
             "element_id": "trace_tool_0_0",
             "icon": {
               "color": "grey",
@@ -388,11 +400,7 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
         "vertical_align": "center",
       },
       {
-        "content": "<text_tag color='orange'>高风险待确认</text_tag>　**任务已暂停，需要人工确认**
-
-高危操作：删除构建缓存目录
-
-<font color='grey'>请在 Dockmux 工作台中查看详情并审批；处理后卡片会继续同步。</font>",
+        "content": "高危操作：删除构建缓存目录",
         "element_id": "risk_alert_pending_0",
         "margin": "6px 0px 8px 0px",
         "tag": "markdown",

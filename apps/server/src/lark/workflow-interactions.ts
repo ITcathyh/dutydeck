@@ -66,7 +66,7 @@ export class LarkWorkflowInteractions {
   }
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
-    await this.service.update({ messageId: record.cardId, taskId: record.id, taskName: '确认本次操作', permissionMode: 'ask', state: 'running', statusLabel: '等待审批', readOnly: true,
+    await this.service.update({ messageId: record.cardId, taskId: record.id, taskName: '确认本次操作', permissionMode: 'ask', state: 'running', statusLabel: '等待审批', awaitingHuman: true, readOnly: true,
       elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: '上次提交未送达执行端，请重新批准或拒绝。' }, button(record, 'approve', '批准一次'), button(record, 'reject', '拒绝')] }).catch(() => undefined);
   }
   async expireTask(appId: string, taskId: string) {
@@ -129,7 +129,7 @@ export class LarkWorkflowInteractions {
     try {
       if (!await this.live(record)) { await this.move(record, 'expired'); return; }
       const card = await this.service.reply({ messageId: context.event.messageId, ...(context.event.threadId ? { replyInThread: true } : {}),
-        state: 'running', statusLabel: kind === 'ask' ? '等待回答' : '等待审批', readOnly: true,
+        state: 'running', statusLabel: kind === 'ask' ? '等待回答' : '等待审批', awaitingHuman: true, readOnly: true,
         taskId: record.id, taskName: kind === 'ask' ? 'Agent 需要你的回答' : '确认本次操作', permissionMode: 'ask', elements,
         idempotencyKey: `workflow_${record.id}` });
       await this.bindCard(record, card.messageId);

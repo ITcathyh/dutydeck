@@ -2144,8 +2144,18 @@ describe('Lark trace rendering', () => {
       agentEvent(2, 'permission_request', { id: 'permission-1', title: '高危操作：删除缓存目录', status: 'pending', options: ['allow_once', 'reject_once'] })
     ], config, false);
     expect(elements[0]).toMatchObject({ tag: 'markdown', element_id: 'risk_alert_pending_0', text_size: 'normal' });
-    expect(elements[0]?.content).toContain('高风险待确认');
-    expect(elements[0]?.content).toContain('任务已暂停，需要人工确认');
+    // 待审批的块只说一件事：要批的是什么。「等待审批」由卡片的橙色色带和状态行承担，
+    // 这里不再挂第三、第四遍标签，要批的操作直接坐在第一行。
+    expect(elements[0]?.content).toBe('高危操作：删除缓存目录');
+    // 不加粗：title 是 agent 侧内容，可能自带 ** 或换行，包起来会渲染出字面星号。
+    expect(elements[0]?.content).not.toContain('**');
+    // 不写 /approve：那个命令要带请求编号，而编号只印在另一张审批卡上。
+    // 也不承诺「稍后会收到审批卡」：带按钮的审批卡要 workflows 装配且 runtime 支持才会发，
+    // Web 出口要配了 webBaseUrl 才有，渲染这一层两个条件都看不见。
+    expect(elements[0]?.content).not.toContain('/approve');
+    expect(elements[0]?.content).not.toContain('Dockmux Web');
+    expect(elements[0]?.content).not.toContain('text_tag');
+    expect(elements[0]?.content).not.toContain('任务已暂停，需要人工确认');
     expect(JSON.stringify(elements)).not.toContain('"callback"');
     expect(JSON.stringify(elements)).not.toContain('"open_url"');
     expect(JSON.stringify(elements)).not.toContain('allow_once');
@@ -2158,7 +2168,7 @@ describe('Lark trace rendering', () => {
     ], config, false);
     expect(elements).toHaveLength(1);
     expect(elements[0]).toMatchObject({ element_id: 'risk_alert_resolved_0' });
-    expect(elements[0]?.content).toContain('授权已处理');
+    expect(elements[0]?.content).toContain('已授权');
     expect(elements[0]?.content).not.toContain('任务已暂停');
   });
 
@@ -2269,7 +2279,8 @@ describe('Lark trace rendering', () => {
     expect(groupTitle(group)).not.toContain("<font color='grey'>4s</font>");
     // 工具行仍然带自己的耗时，但只有 3s 及以上才值得占标题里的一段位置。
     expect(JSON.stringify(groupElements(group))).toContain("<font color='grey'>3s</font>");
-    expect(JSON.stringify(groupElements(group))).toContain("<font color='trace_success'>●</font>");
+    // 工具行同样不给成功点灯，理由与阶段标题相同。
+    expect(JSON.stringify(groupElements(group))).not.toContain("<font color='trace_success'>●</font>");
     expect(JSON.stringify(groupElements(group))).toContain('/repo');
   });
 
@@ -2341,11 +2352,12 @@ describe('Lark trace rendering', () => {
     const tools: any[] = cardElements(elements).filter(element => element.element_id?.startsWith('trace_tool_'));
     const summary = (tool: any) => tool.header?.title ?? tool;
     expect(tools.map(tool => summary(tool).icon.color)).toEqual(['grey', 'grey', 'grey']);
-    expect(tools.map(tool => summary(tool).content)).toEqual([
-      expect.stringContaining("<font color='trace_success'>●</font>"),
-      expect.stringContaining("<font color='trace_failure'>●</font>"),
-      expect.stringContaining("<font color='trace_running'>●</font>")
-    ]);
+    // 只有失败和执行中点灯。成功是默认预期，给它一个绿灯等于把「没有异常」重复一遍，
+    // 还会让真正需要看的那个失败灯淹在同色的一排里。
+    expect(summary(tools[0]).content).not.toContain('●');
+    expect(summary(tools[0]).content).toContain('true');
+    expect(summary(tools[1]).content).toContain("<font color='trace_failure'>●</font>");
+    expect(summary(tools[2]).content).toContain("<font color='trace_running'>●</font>");
     for (const tool of tools) expect(summary(tool).content).not.toMatch(/已完成|失败|执行中/);
   });
 
@@ -2376,7 +2388,10 @@ describe('Lark trace rendering', () => {
     ];
     const elements = renderLarkCardElements(ordered, config, false);
     const groups: any[] = elements.filter(element => element.element_id?.startsWith('trace_group_'));
-    expect(groups.map(groupTitle)).toEqual(expect.arrayContaining([expect.stringContaining('pwd'), expect.stringContaining('ls -la')]));
+    const toolTitleOf = (group: any) =>
+      cardElements(groupElements(group)).flatMap((element: any) => element.element_id?.startsWith('trace_tool_')
+        ? [String(element.header?.title?.content ?? element.content ?? element.elements?.[0]?.content ?? '')] : [])[0];
+    expect(groups.map(toolTitleOf)).toEqual([expect.stringContaining('pwd'), expect.stringContaining('ls -la')]);
     expect(JSON.stringify(elements)).not.toContain('先分析');
     expect(JSON.stringify(elements)).not.toContain('再检查目录');
     expect(JSON.stringify(groupElements(groups[0]))).toContain('pwd');
