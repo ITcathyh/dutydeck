@@ -517,6 +517,20 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     } finally { restored.stop(); }
   });
 
+  it('keeps the agent host on the result card when acceptance refreshes it in place', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_task', '生成结果'), h.config);
+    await h.completed();
+    expect(h.cards.get('om_card_2')).toMatchObject({ agentName: 'Mock' });
+    const record = await seedLegacyResult(h);
+    expect(await h.coordinator.handleAction({ dockmux_workflow: 'accept', request_id: record.id, generation: record.boot },
+      'ou_alice', { messageId: 'om_card_2', chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+    // 验收是对结果卡的原地覆盖。这里漏传执行宿主名，卡上的 Claude Code / Codex
+    // 就会被服务端兜底名改写，读者再也看不出这轮任务是哪个 CLI 跑的。
+    expect(h.service.update).toHaveBeenLastCalledWith(expect.objectContaining({ messageId: 'om_card_2', agentName: 'Mock' }));
+    expect(h.cards.get('om_card_2')).toMatchObject({ agentName: 'Mock' });
+  });
+
   it('continues a direct result reply in the same session without creating feedback records', async () => {
     const h = await harness();
     await h.coordinator.handle(event('om_task', '生成初稿'), h.config);

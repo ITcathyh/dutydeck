@@ -343,7 +343,7 @@ export class LarkMessageCoordinator {
       }
       if (quoted?.kind === 'result' && prompt.trim() === '验收通过') {
         const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'accept' });
-        await this.refreshResultFeedback(config.appId, quoted.id).catch(error => this.log.warn({ error }, '验收已记录，卡片刷新失败'));
+        await this.refreshResultFeedback(config, quoted.id).catch(error => this.log.warn({ error }, '验收已记录，卡片刷新失败'));
         await this.workflowReply(event, config, result);
         return true;
       }
@@ -354,7 +354,7 @@ export class LarkMessageCoordinator {
         if (!saved.scope_id) throw new LarkServiceError('LARK_CONTEXT_MISSING', '原任务上下文不可恢复，请发送新的任务目标。', 409);
         if (quoted.state === 'pending') {
           await this.workflows!.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'changes' });
-          await this.refreshResultFeedback(config.appId, quoted.id).catch(error => this.log.warn({ error }, '修改要求已记录，卡片刷新失败'));
+          await this.refreshResultFeedback(config, quoted.id).catch(error => this.log.warn({ error }, '修改要求已记录，卡片刷新失败'));
         }
         // A follow-up after acceptance is a new task in the same context; the
         // accepted result remains an accurate record of the previous version.
@@ -422,10 +422,20 @@ export class LarkMessageCoordinator {
     });
   }
 
-  private async refreshResultFeedback(appId: string, requestId: string) {
-    const record = (await this.workflows?.list(appId))?.find(item => item.id === requestId && item.kind === 'result');
+  /** 执行宿主名不进持久化，每次渲染时重新解析：Agent 可能被改名或删除，卡上应显示当前的名字。 */
+  private async resolveAgentName(config: StoredLarkConfig) {
+    try {
+      return (await this.runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? config.defaultAgentId ?? 'Dockmux';
+    } catch (error) {
+      this.log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 渲染卡片');
+      return config.defaultAgentId ?? 'Dockmux';
+    }
+  }
+
+  private async refreshResultFeedback(config: StoredLarkConfig, requestId: string) {
+    const record = (await this.workflows?.list(config.appId))?.find(item => item.id === requestId && item.kind === 'result');
     if (!record?.cardId) return;
-    const mapping = (await this.cardMappings?.list(larkCardChannel(appId)))?.find(item => item.externalId === record.event.messageId);
+    const mapping = (await this.cardMappings?.list(larkCardChannel(config.appId)))?.find(item => item.externalId === record.event.messageId);
     if (!mapping) return;
     const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
     if (saved.state !== 'completed' || saved.final_delivery_state !== 'delivered'
@@ -440,8 +450,9 @@ export class LarkMessageCoordinator {
     }
     const elements = [...resultElements.filter(item => !['workflow_accept', 'workflow_changes', 'workflow_result_status'].includes(String(item.element_id))),
       ...await this.workflows!.result(record, record.cardId)];
-    await this.service.update({ messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements });
-    const current = (await this.cardMappings!.list(larkCardChannel(appId))).find(item => item.id === mapping.id);
+    await this.service.update({ messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements,
+      agentName: await this.resolveAgentName(config) });
+    const current = (await this.cardMappings!.list(larkCardChannel(config.appId))).find(item => item.id === mapping.id);
     if (current?.extra !== mapping.extra) return;
     await this.cardMappings!.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state, final_elements: elements }) });
   }
@@ -466,7 +477,7 @@ export class LarkMessageCoordinator {
     });
     for (const record of await this.workflows?.list(config.appId) ?? []) {
       if (record.kind !== 'result' || !['accepted', 'needs_changes'].includes(record.state)) continue;
-      try { await this.refreshResultFeedback(config.appId, record.id); }
+      try { await this.refreshResultFeedback(config, record.id); }
       catch (error) { unresolved++; this.log.warn({ error, requestId: record.id }, '验收状态刷新待重试'); }
     }
     return unresolved;
@@ -1064,7 +1075,7 @@ export class LarkMessageCoordinator {
         const content = await this.workflows.respond({ appId: this.reconcileConfig.appId, chatId: context.chatId, cardId: context.messageId,
           actorId: operatorOpenId, requestId: String(workflow.request_id ?? ''), generation: String(workflow.generation ?? ''),
           callback: true, action: action as 'approve' | 'reject' | 'accept' | 'changes' });
-        if (action === 'accept' || action === 'changes') await this.refreshResultFeedback(this.reconcileConfig.appId, String(workflow.request_id)).catch(error => this.log.warn({ error }, '验收已记录，卡片刷新失败'));
+        if (action === 'accept' || action === 'changes') await this.refreshResultFeedback(this.reconcileConfig, String(workflow.request_id)).catch(error => this.log.warn({ error }, '验收已记录，卡片刷新失败'));
         return { type: 'success', content };
       } catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
     }
@@ -1336,13 +1347,7 @@ export class LarkMessageCoordinator {
     }
     const prompt = task.prompt;
     if (task.inbox?.request && task.inbox.request.prompt !== prompt) await this.inbox!.update(task.inbox, { request: { ...task.inbox.request, prompt } });
-    let agentName = config.defaultAgentId ?? 'Dockmux';
-    try {
-      agentName = (await this.runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? agentName;
-    } catch (error) {
-      this.log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 渲染卡片');
-    }
-    const cardContext = { agentName, permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
+    const cardContext = { agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
     const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
 
     let actorEmails: string[] = [];
@@ -1712,7 +1717,7 @@ export class LarkMessageCoordinator {
         await this.saveCardTask(task, state);
         if (context && this.workflows) {
           const feedback = (await this.workflows.list(config.appId)).find(item => item.kind === 'result' && item.taskId === context.taskId && ['accepted', 'needs_changes'].includes(item.state));
-          if (feedback) await this.refreshResultFeedback(config.appId, feedback.id);
+          if (feedback) await this.refreshResultFeedback(config, feedback.id);
         }
       })().catch(error => {
         this.log.error({ error, taskId: task.id, state }, '交付飞书执行结果失败，等待对账补偿');
