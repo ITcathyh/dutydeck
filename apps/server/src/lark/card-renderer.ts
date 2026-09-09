@@ -188,13 +188,16 @@ const truncateInline = (value: string, limit = 64) => {
   const text = value.replace(/\s+/g, ' ').trim();
   return text.length <= limit ? text : `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
 };
+// 耗时只在「值得注意」时才占用标题里的一段位置。毫秒级和一两秒的步骤是绝大多数，
+// 读者不会因为一条 1ms 改变任何判断，但每一条都会挤掉真正要读的命令。
+const notableElapsedMs = 3_000;
 const traceElapsed = (startedAt?: string, completedAt?: string) => {
   if (!startedAt) return '';
   const start = Date.parse(startedAt);
   const end = completedAt ? Date.parse(completedAt) : Date.now();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return '';
   const milliseconds = end - start;
-  if (milliseconds < 1_000) return `${Math.max(1, Math.round(milliseconds))}ms`;
+  if (milliseconds < notableElapsedMs) return '';
   const seconds = Math.round(milliseconds / 1_000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
@@ -252,6 +255,24 @@ const toolPresentation = (entry: TraceEntry) => {
   else if (command || /shell|bash|terminal|exec|command/.test(normalized)) { action = '运行命令'; kind = 'command'; }
   const fullDetail = redactTraceText(command ?? url ?? path ?? (/^(?:tool|tool call)$/i.test(name) ? '' : name));
   const detail = truncateInline(fullDetail);
+  // 标题已经完整展示了唯一的输入字段时，展开区里的「输入」只是把同一条内容再用
+  // JSON 包一层：三行括号讲一件标题上已经写着的事。只有输入里还有标题没覆盖的字段，
+  // 或标题被截断（fullDetail !== detail）时，展开才有内容可看。
+  //
+  // 字段名必须在白名单内，因为隐藏输入会连字段名一起隐藏。cwd 就是反例：
+  // `{cwd:'/srv/repo'}` 的标题是「运行命令 /srv/repo」，把工作目录读成了被执行的命令，
+  // 此时那层 JSON 是唯一能说清「这是 cwd」的东西，不能省。
+  const selfEvidentInputKeys = new Set(['command', 'cmd', 'path', 'file_path', 'url', 'href']);
+  const inputEntries = data.input && typeof data.input === 'object' && !Array.isArray(data.input)
+    ? Object.entries(data.input as Record<string, unknown>)
+    : [];
+  const soleEntry = inputEntries.length === 1 ? inputEntries[0]! : undefined;
+  const titleCoversInput = Boolean(fullDetail) && fullDetail === detail && (
+    typeof data.input === 'string'
+      ? redactTraceText(data.input.trim()) === fullDetail
+      : Boolean(soleEntry) && selfEvidentInputKeys.has(soleEntry![0])
+        && typeof soleEntry![1] === 'string' && redactTraceText((soleEntry![1] as string).trim()) === fullDetail
+  );
   const status = String(data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')).toLowerCase();
   const failed = /fail|error|reject|cancel/.test(status);
   const running = /running|pending|started|in_progress/.test(status);
@@ -265,6 +286,7 @@ const toolPresentation = (entry: TraceEntry) => {
     indicatorColor: failed ? 'trace_failure' : running ? 'trace_running' : 'trace_success',
     elapsed: traceElapsed(data.startedAt ?? entry.timestamp, running ? undefined : data.completedAt ?? entry.timestamp),
     fullDetail,
+    titleCoversInput,
     input: truncateTrace(data.input, 250),
     output: truncateTrace(data.output, 450)
   };
@@ -274,16 +296,71 @@ export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTrace(eve
   (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '执行中'
 );
 
-const normalizeActions = (actions: TraceEntry[]): TraceEntry[] => actions.map(entry => {
-  if (entry.type === 'raw_terminal') {
-    return {
-      ...entry,
-      type: 'tool_result' as const,
-      data: { ...entry.data, name: 'terminal', output: entry.data.text, status: 'completed' }
-    };
+type StageRecord = { kind: 'tool'; entry: TraceEntry } | { kind: 'terminal'; entries: TraceEntry[] };
+
+// 终端回显不是工具调用。把每一条 raw_terminal 都套成工具，会得到一排完全相同、
+// 零信息量的「运行命令 · terminal」标题，真正的输出反而被压进折叠层——一次翻页拉取
+// 就是 18 个同名面板。连续回显合并成一段终端输出，由一个折叠面板承载全部内容。
+const stageRecords = (actions: TraceEntry[]): StageRecord[] => {
+  const records: StageRecord[] = [];
+  for (const entry of actions) {
+    if (entry.type === 'raw_terminal') {
+      // PTY 每吐一个提示符就是一条纯空白回显。它们不值得占一个面板，也不该被算进条数。
+      if (!String(entry.data.text ?? '').trim()) continue;
+      const last = records.at(-1);
+      if (last?.kind === 'terminal') last.entries.push(entry);
+      else records.push({ kind: 'terminal', entries: [entry] });
+      continue;
+    }
+    if (entry.type === 'tool_call' || entry.type === 'tool_result') records.push({ kind: 'tool', entry });
   }
-  return entry;
-});
+  return records;
+};
+
+// 头尾都要保留：命令回显和第一条报错在开头，当前进度在结尾，中间是翻页噪声。
+// 只留尾部会让「FAIL src/critical.test.ts」这类只出现一次的关键行彻底消失。
+const terminalHeadLimit = 300;
+const terminalTailLimit = 600;
+// 被掐掉的中间段里，报错行和翻页噪声不等权：一整屏 PASS 里那一行 FAIL 是读者
+// 唯一要读的东西，按字符位置一起丢掉，卡上就只剩「1 failed」而看不到失败在哪。
+const terminalAlertPattern = /(?:\bFAIL(?:ED)?\b|\bERROR\b|\bTraceback\b|\bpanic:|error:)/i;
+const terminalAlertLimit = 5;
+const clipTerminalText = (text: string) => {
+  if (text.length <= terminalHeadLimit + terminalTailLimit) return text;
+  const middle = text.slice(terminalHeadLimit, text.length - terminalTailLimit);
+  const alerts = middle.split('\n').map(line => line.trim())
+    .filter(line => terminalAlertPattern.test(line)).slice(0, terminalAlertLimit);
+  const notice = alerts.length
+    ? `…（已省略中间 ${middle.length} 个字符，其中的报错行保留如下）`
+    : `…（已省略中间 ${middle.length} 个字符）`;
+  return [text.slice(0, terminalHeadLimit), notice, ...alerts, text.slice(-terminalTailLimit)].join('\n');
+};
+const terminalPanel = (entries: TraceEntry[], index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement => {
+  // 拼完再脱敏，不能逐条脱敏后拼接。stderr 是逐行发事件的，一份多行私钥必然被切成
+  // 多条：逐条脱敏时只有带 BEGIN 标记的那一条被替换，密钥体所在的那几条一个规则都不
+  // 命中，会原样进群消息。代价是一条含 BEGIN 字样、又没等到 END 的输出会把它后面的
+  // 内容一起吞成 [REDACTED_PRIVATE_KEY]——宁可让读者去 Web 看全文，不能漏密钥。
+  const text = redactTraceText(entries.map(entry => String(entry.data.text ?? '')).join('\n')).trim();
+  const clipped = clipTerminalText(text);
+  return {
+    tag: 'collapsible_panel', element_id: `trace_tool_${index}`, expanded: false,
+    direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin,
+    header: {
+      title: {
+        tag: 'markdown',
+        content: entries.length > 1 ? `终端输出（${entries.length} 条）` : '终端输出',
+        text_size: 'notation',
+        icon: { tag: 'standard_icon', token: toolIcon('command'), color: 'grey' }
+      },
+      vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '12px 12px' },
+      icon_position: 'right', icon_expanded_angle: -180
+    },
+    elements: [{ tag: 'markdown', content: `\`\`\`text\n${clipped.replaceAll('```', '``\\`')}\n\`\`\``, text_size: 'notation', margin: '0px' }]
+  };
+};
+
+const stageRecordPanel = (record: StageRecord, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement =>
+  record.kind === 'terminal' ? terminalPanel(record.entries, index, margin) : toolPanel(record.entry, index, margin);
 
 const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement => {
   const tool = toolPresentation(entry);
@@ -292,22 +369,36 @@ const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 
   const detailSuffix = detail && detail !== description ? `　<font color='grey'>${detail}</font>` : '';
   const elapsedSuffix = tool.elapsed ? `　<font color='grey'>${tool.elapsed}</font>` : '';
   const stateLamp = `<font color='${tool.indicatorColor}'>●</font>　`;
-  const sections = [
-    tool.fullDetail && tool.fullDetail !== tool.detail && !tool.input ? `完整内容\n\n\`\`\`text\n${tool.fullDetail.replaceAll('```', '``\\`')}\n\`\`\`` : '',
-    tool.input ? `输入\n\n\`\`\`text\n${tool.input.replaceAll('```', '``\\`')}\n\`\`\`` : '',
-    tool.output ? `结果\n\n\`\`\`text\n${tool.output.replaceAll('```', '``\\`')}\n\`\`\`` : ''
-  ].filter(Boolean);
+  // 零参工具的 input 会被序列化成 `{}`，那是个真值但没有内容——展开只会看到一对括号。
+  const showInput = Boolean(tool.input) && !['{}', '[]'].includes(tool.input) && !tool.titleCoversInput;
+  const parts: Array<{ label: string; text: string }> = [];
+  // 标题被截断且没有输入区兜底时，展开区必须还能拿到完整命令。
+  if (tool.fullDetail && tool.fullDetail !== tool.detail && !showInput) parts.push({ label: '完整内容', text: tool.fullDetail });
+  if (showInput) parts.push({ label: '输入', text: tool.input });
+  if (tool.output) parts.push({ label: '结果', text: tool.output });
+  // 只有一段内容时省掉标签：面板标题已经说明这是哪个工具，一个「结果」字样只多占一行。
+  const sections = parts.map(part => {
+    const fenced = `\`\`\`text\n${part.text.replaceAll('```', '``\\`')}\n\`\`\``;
+    return parts.length > 1 ? `${part.label}\n\n${fenced}` : fenced;
+  });
+  const title = {
+    tag: 'markdown',
+    content: `${stateLamp}${description}${detailSuffix}${elapsedSuffix}`,
+    text_size: 'notation',
+    icon: { tag: 'standard_icon', token: toolIcon(tool.kind), color: 'grey' }
+  };
+  // 没有可展开内容时不给折叠面板：一个点开只显示「暂无内容」的箭头是空承诺。
+  // 正在执行、还没拿到结果的工具本来就只有标题这一行信息，直接平铺即可。
+  if (!sections.length) return { ...title, element_id: `trace_tool_${index}`, margin };
   return {
     tag: 'collapsible_panel', element_id: `trace_tool_${index}`, expanded: false,
     direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin,
     header: {
-      title: { tag: 'markdown', content: `${stateLamp}${description}${detailSuffix}${elapsedSuffix}`, text_size: 'notation', icon: { tag: 'standard_icon', token: toolIcon(tool.kind), color: 'grey' } },
+      title,
       vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '12px 12px' },
       icon_position: 'right', icon_expanded_angle: -180
     },
-    elements: sections.length
-      ? sections.map(content => ({ tag: 'markdown', content, text_size: 'notation', margin: '0px' }))
-      : [{ tag: 'markdown', content: '<font color=\'grey\'>暂无可展示的输入或结果</font>', text_size: 'notation', margin: '0px' }]
+    elements: sections.map(content => ({ tag: 'markdown', content, text_size: 'notation', margin: '0px' }))
   };
 };
 
@@ -338,8 +429,8 @@ const historyGroupPanel = (
   showElapsed = false,
   expanded = false
 ): LarkCardElement => {
-  const visibleActions = normalizeActions(group.actions);
-  const tools = visibleActions.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
+  const records = stageRecords(group.actions);
+  const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
   const statuses = tools.map(entry => toolPresentation(entry));
   const failedCount = statuses.filter(item => item.statusLabel === '失败').length;
   const succeededCount = statuses.filter(item => item.statusLabel === '已完成').length;
@@ -357,13 +448,10 @@ const historyGroupPanel = (
   const narrativeText = assistantNarrative?.data.text ? redactTraceText(String(assistantNarrative.data.text)).trim() : '';
 
   const primaryTool = statuses[0];
-  const toolExcerpt = primaryTool
-    ? truncateInline(primaryTool.output ? primaryTool.output.replace(/\s+/g, ' ') : (primaryTool.detail || primaryTool.description || primaryTool.action), 48)
-    : '';
-
   const mainTitle = narrativeText
-    ? truncateInline(narrativeText, 72)
-    : (primaryTool ? `${primaryTool.action}${primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : (group.narratives.some(e => e.type === 'thinking') ? '分析与规划' : '执行过程'));
+    || (primaryTool ? `${primaryTool.action}${primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : '')
+    || (records.some(record => record.kind === 'terminal') ? '终端输出' : '')
+    || (group.narratives.some(e => e.type === 'thinking') ? '分析与规划' : '执行过程');
 
   const first = group.narratives[0] ?? group.actions[0];
   const last = group.actions.at(-1) ?? group.narratives.at(-1);
@@ -371,15 +459,18 @@ const historyGroupPanel = (
 
   const preview = escapeCardInline(truncateInline(mainTitle, 92));
   const elapsedSuffix = elapsed ? `　<font color='grey'>${elapsed}</font>` : '';
-  const stateSuffix = `　<font color='${status.color}'>● ${status.label}</font>`;
-  const subLine = toolExcerpt && toolExcerpt !== mainTitle ? `\n<font color='grey'>${escapeCardInline(toolExcerpt)}</font>` : '';
-  const headerTitle = `${preview}${elapsedSuffix}${stateSuffix}${subLine}`;
+  // 成功是默认预期，不需要标注。一次顺利的执行会有五个阶段，五个绿点「已完成」
+  // 只是在重复「没有异常」这件事，同时把失败的那一个淹掉。
+  const stateSuffix = status.label === '已完成' ? '' : `　<font color='${status.color}'>● ${status.label}</font>`;
+  const headerTitle = `${preview}${elapsedSuffix}${stateSuffix}`;
 
   let actionElements: LarkCardElement[] = [];
-  if (tools.length === 1) {
-    const toolEntry = tools[0]!;
-    const panel = toolPanel(toolEntry, `${index}_0`, '0px');
-    actionElements = [{
+  // 单条记录（一个工具、或一段合并后的终端输出）直接摊平：阶段本身已经是一层折叠，
+  // 再套一层意味着读者要点三次才能看到内容。
+  if (records.length === 1) {
+    const panel = stageRecordPanel(records[0]!, `${index}_0`, '0px');
+    // 无内容的工具已经是一行纯文本，没有 header/elements 可以摊平。
+    actionElements = panel.tag === 'collapsible_panel' ? [{
       tag: 'interactive_container',
       element_id: panel.element_id,
       behaviors: [],
@@ -392,9 +483,9 @@ const historyGroupPanel = (
         panel.header.title,
         ...panel.elements
       ]
-    }];
-  } else if (tools.length > 1) {
-    actionElements = tools.map((entry, actionIndex) => toolPanel(entry, `${index}_${actionIndex}`));
+    }] : [panel];
+  } else if (records.length) {
+    actionElements = records.map((record, actionIndex) => stageRecordPanel(record, `${index}_${actionIndex}`));
   } else if (narrativeText) {
     actionElements = [{
       tag: 'markdown',
@@ -411,7 +502,7 @@ const historyGroupPanel = (
     }];
   }
 
-  const extraElements = visibleActions.flatMap((entry): LarkCardElement[] => {
+  const extraElements = group.actions.flatMap((entry): LarkCardElement[] => {
     if (entry.type === 'permission_request') {
       return [{ tag: 'markdown', content: `**权限请求**　<text_tag color='orange'>${entry.data.status ?? '待处理'}</text_tag>\n\n${truncateTrace(entry.data.title, 800)}`, text_size: 'x-small', margin: '0px' }];
     }
@@ -420,6 +511,12 @@ const historyGroupPanel = (
     }
     return [];
   });
+
+  // 一个阶段可能什么都没留下：纯空白终端回显被跳过，又没有叙述或思考。
+  // 折叠面板在这种时候只是一个点开是空的箭头，直接退化成标题行。
+  if (!actionElements.length && !extraElements.length) {
+    return { tag: 'markdown', element_id: `trace_group_${index}`, content: headerTitle, text_size: 'notation', margin: '0px' };
+  }
 
   return {
     tag: 'collapsible_panel',
@@ -441,8 +538,8 @@ const historyGroupPanel = (
 };
 
 const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardElement => {
-  const visibleActions = normalizeActions(group.actions);
-  const tools = visibleActions.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
+  const records = stageRecords(group.actions);
+  const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
   const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
   const narrativeText = assistantNarrative?.data.text ? redactTraceText(String(assistantNarrative.data.text)).trim() : '';
 
@@ -450,7 +547,7 @@ const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardEle
   const primaryTool = toolPresentations[0];
 
   const currentTitle = narrativeText
-    ? truncateInline(narrativeText, 72)
+    ? truncateInline(narrativeText, 92)
     : (primaryTool ? `${primaryTool.action}${primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : '正在执行…');
 
   const failedCount = toolPresentations.filter(item => item.statusLabel === '失败').length;
@@ -472,15 +569,16 @@ const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardEle
     {
       tag: 'markdown',
       element_id: 'current_title',
+      // 「Agent 此刻在做什么」是运行态卡片的信息主体，用正文字号；
+      // 用 notation 会让最该读的一行成为卡上最小的字。
       content: `${escapeCardInline(currentTitle)}${statusSuffix}`,
-      text_size: 'notation',
+      text_size: 'normal',
       margin: '0px'
     }
   ];
 
-  for (let actionIndex = 0; actionIndex < tools.length; actionIndex++) {
-    const toolEntry = tools[actionIndex]!;
-    elements.push(toolPanel(toolEntry, `${index}_${actionIndex}`, '0px'));
+  for (let actionIndex = 0; actionIndex < records.length; actionIndex++) {
+    elements.push(stageRecordPanel(records[actionIndex]!, `${index}_${actionIndex}`, '0px'));
   }
 
   return {
@@ -498,49 +596,24 @@ const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardEle
   };
 };
 
+// 「N 个工具已结束」是纯计数：任务进入终态本身就意味着步骤都结束了，这一行不改变
+// 任何判断，却挂在最终答案正下方跟答案抢注意力——结果卡上尤其明显。
+// 只有失败数要求读者做点什么，所以只在有失败时才出现。
 const buildEvidenceElement = (allGroups: TraceGroup[]): LarkCardElement | undefined => {
-  const allActions = allGroups.flatMap(group => group.actions);
-  const tools = allActions.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').map(toolPresentation);
-  const settled = tools.filter(tool => tool.statusLabel !== '执行中');
-  if (!settled.length) return undefined;
-
-  const failedCount = tools.filter(tool => tool.statusLabel === '失败').length;
-
-  const columns: LarkCardElement[] = [{
-    tag: 'column',
-    width: 'weighted',
-    weight: 1,
-    elements: [{
-      tag: 'markdown',
-      content: `${settled.length} 个工具已结束`,
-      text_size: 'notation',
-      margin: '0px',
-      icon: { tag: 'standard_icon', token: 'doc-checklist_outlined', color: 'grey' }
-    }]
-  }];
-
-  if (failedCount > 0) {
-    columns.push({
-      tag: 'column',
-      width: 'weighted',
-      weight: 1,
-      elements: [{
-        tag: 'markdown',
-        content: `${failedCount} 个工具失败`,
-        text_size: 'notation',
-        margin: '0px',
-        icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'orange' }
-      }]
-    });
-  }
-
+  const failedCount = allGroups.flatMap(group => group.actions)
+    .filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result')
+    .map(toolPresentation)
+    .filter(tool => tool.statusLabel === '失败').length;
+  if (!failedCount) return undefined;
   return {
-    tag: 'column_set',
+    tag: 'markdown',
     element_id: 'evidence',
-    flex_mode: 'none',
-    horizontal_spacing: '8px',
+    // 不写「详情见执行记录」：失败数按全部阶段统计，而卡片只渲染最近五个阶段，
+    // 失败发生在更早的阶段时，那句指引会把读者送到一份没有失败记录的执行记录里。
+    content: `<font color='orange'>${failedCount} 个步骤执行失败</font>`,
+    text_size: 'notation',
     margin: '4px 0px 0px 0px',
-    columns
+    icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'orange' }
   };
 };
 
@@ -642,15 +715,24 @@ export function renderLarkCardElements(
       const historyGroups = groups.slice(0, -1);
       const currentGroup = groups.at(-1)!;
 
-      if (omittedGroupCount) {
-        elements.push({
-          tag: 'markdown', element_id: 'trace_omission',
-          content: `<font color='grey'>仅展示最近 ${groups.length} 个阶段，另有 ${omittedGroupCount} 个阶段；完整记录请在 Dockmux Web 查看。</font>`,
-          text_size: 'notation', margin: '0px 0px 4px 0px'
-        });
-      }
       if (historyGroups.length > 0) {
-        elements.push({ tag: 'markdown', element_id: 'history_label', content: "<font color='grey'>此前阶段</font>", text_size: 'notation', margin: '4px 0px 2px 0px' });
+        // 省略提示并进「此前阶段」这一行。两条灰字紧挨着说的是同一件事——
+        // 下面是历史，而且历史不全——分成两行只是把当前阶段往下推。
+        const omission = omittedGroupCount
+          ? `（另有 ${omittedGroupCount} 个更早阶段未展示，完整记录见 Dockmux Web）`
+          : '';
+        elements.push({
+          tag: 'markdown', element_id: 'history_label',
+          content: `<font color='grey'>此前阶段${omission}</font>`,
+          text_size: 'notation', margin: '4px 0px 2px 0px'
+        });
+        // 「此前阶段」只在运行态布局里被渲染。queued 之类的非运行态把所有阶段收进
+        // 「执行记录」，那条路径读的是 trace_omission，缺了它省略提示会整行消失。
+        if (omittedGroupCount) elements.push({
+          tag: 'markdown', element_id: 'trace_omission',
+          content: "<font color='grey'>另有 " + omittedGroupCount + " 个更早阶段未展示，完整记录见 Dockmux Web</font>",
+          text_size: 'notation', margin: '0px'
+        });
         elements.push(...historyGroups.map((group, index) => historyGroupPanel(group, index, true, false)));
       }
       elements.push(currentRunningStagePanel(currentGroup, groups.length - 1));

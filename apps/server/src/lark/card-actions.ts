@@ -171,7 +171,7 @@ const normalizedTurn = (value: number): number => {
 /**
  * 只接受 http/https 深链，防止把 javascript: 之类的 URL 渲染成可点目标。
  * 页脚的「查看详情」markdown 链接是整卡唯一的 Web 出口，service.ts 复用同一份校验，
- * 不允许两边各写一套判断。
+ * 不允许两边各写一套判断。校验不通过时页脚不渲染，卡上就没有 Web 出口。
  */
 export const safeLarkWebUrl = (value: string | undefined): string | undefined => {
   const resolved = value?.trim();
@@ -242,7 +242,9 @@ const callbackButton = (definition: LarkCardActionDefinition, taskId: string, tu
  *
  * 只读卡片返回空数组是硬规则：只读卡是已交付的历史凭证，
  * 提供任何按钮都会变成「假操作」——点了要么被拒绝，要么改写已交付的结论。
- * 卡片页脚始终有 [查看详情] markdown 链接，因此收据不会失去 Web 出口。
+ * 配置了合法 webBaseUrl 时，页脚的 [查看详情] 链接是收据的 Web 出口；
+ * 未配置或深链非法时页脚整行不渲染，此时只读卡确实没有任何出口——
+ * 那是缺配置的后果，不能靠在这里补一个注定失败的按钮来掩盖。
  *
  * 这里刻意**不**渲染「查看详情」按钮：页脚已经有同一个链接，顶部再放一个
  * 就是同一去向的两个入口。顶部操作行只留真正改变任务状态的动作。

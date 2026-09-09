@@ -37,26 +37,29 @@ describe('Lark card service', () => {
   it('renders a completed Card 2.0 with a clear task header, status, and compact footer', () => {
     const card = buildLarkCard({ agentName: 'Business Agent', workspace: '/srv/repo', permissionMode: 'full-trust', state: 'completed', taskName: 'Release', taskId: '42', elapsedSeconds: 65, markdown: '**done**' });
     expect(card.schema).toBe('2.0');
+    // 这三个色值既当状态圆点又当状态文字，取的是白底上可读的飞书语义色。
+    // 失败色曾是低饱和土黄（对比度约 2:1），当文字时几乎读不出来。
     expect(card.config.style.color).toMatchObject({
-      trace_success: { light_mode: expect.stringContaining('92,184,119') },
-      trace_failure: { light_mode: expect.stringContaining('208,180,92') },
-      trace_running: { light_mode: expect.stringContaining('96,184,232') }
+      trace_success: { light_mode: expect.stringContaining('46,161,33') },
+      trace_failure: { light_mode: expect.stringContaining('163,77,0') },
+      trace_running: { light_mode: expect.stringContaining('36,91,219') }
     });
     expect(card.header).toMatchObject({
       title: { tag: 'plain_text', content: 'Release' },
-      subtitle: { tag: 'plain_text', content: 'Business Agent · Agent 任务' },
+      subtitle: { tag: 'plain_text', content: 'Business Agent' },
       template: 'green'
     });
     expect(card.body.elements[0].text.content).toContain('已完成');
     expect(card.body.elements[0].text.content).toContain('已用时 1m 5s');
     expect(card.body.elements[0].text.text_size).toBe('small');
+    // 终态状态行是一行灰字：header 色带已经表达了结果，body 不再重复一块同色标签。
+    expect(card.body.elements[0].text.content).not.toContain('text_tag');
     expect(card.body.elements[1].content).toBe('**done**');
-    const footer: any = card.body.elements.at(-1);
-    // 页脚只承载 Agent 名。工作区路径、任务号、权限标签对聊天读者没有可操作性。
-    expect(footer.columns[0].elements[0].content).toBe("<font color='grey'>Business Agent</font>");
-    expect(footer.columns[0].elements[0].text_size).toBe('x-small');
-    expect(footer.columns).toHaveLength(1);
+    // 页脚只承载 Web 出口。Agent 名已经在 header 副标题里，页脚不再写第二遍；
+    // 本例没有 webBaseUrl，因此整行页脚不渲染。
+    expect(card.body.elements.filter((element: any) => element.tag === 'column_set')).toHaveLength(0);
     const rendered = JSON.stringify(card);
+    expect(rendered).not.toContain("<font color='grey'>Business Agent</font>");
     expect(rendered).not.toContain('/srv/repo');
     expect(rendered).not.toContain('任务 #42');
     expect(rendered).not.toContain('完全信任');
@@ -100,7 +103,8 @@ describe('Lark card service', () => {
     for (const webBaseUrl of ['javascript:alert(1)', 'file:///etc/passwd', 'not a url', '   ']) {
       const card: any = buildLarkCard({ state: 'running', taskId: 't1', sessionId: 'ses_1', webBaseUrl });
       expect(JSON.stringify(card), `${webBaseUrl} 不应渲染详情链接`).not.toContain('查看详情');
-      expect(card.body.elements.at(-1).columns).toHaveLength(1);
+      // 链接被拒绝时页脚没有别的内容可放，整行不渲染，不留一个空页脚。
+      expect(card.body.elements.filter((element: any) => element.tag === 'column_set' && element.element_id !== 'task_action_row')).toHaveLength(0);
     }
     const noUrl: any = buildLarkCard({ state: 'running', taskId: 't1', sessionId: 'ses_1' });
     expect(JSON.stringify(noUrl)).not.toContain('查看详情');
@@ -117,11 +121,16 @@ describe('Lark card service', () => {
     expect(queued.config).toMatchObject({ streaming_mode: false, summary: { content: expect.stringContaining('排队中') } });
     expect(byId(running, 'interrupt')).toMatchObject({ text: { content: '中断' }, behaviors: [{ value: { action: 'interrupt', task_id: 'running' } }] });
     expect(byId(failed, 'retry')).toMatchObject({ text: { content: '重试' }, behaviors: [{ value: { action: 'retry', task_id: 'failed' } }] });
-    expect(byId(failed, 'task_status').text.content).toContain("<text_tag color='red'>已失败</text_tag>");
+    // 运行态和排队态保留彩色 text_tag：状态还会变，需要它把注意力拉过去。
+    // 终态改为灰字，避免和 header 色带说同一件事。
+    expect(byId(running, 'task_status').text.content).toContain("<text_tag color='wathet'>执行中</text_tag>");
+    expect(byId(failed, 'task_status').text.content).toContain('已失败');
+    expect(byId(failed, 'task_status').text.content).not.toContain('text_tag');
     expect(byId(interrupted, 'task_status').text.content).toContain('已取消');
+    expect(byId(interrupted, 'task_status').text.content).not.toContain('text_tag');
     expect(byId(interrupted, 'retry')).toMatchObject({ behaviors: [{ value: { action: 'retry', task_id: 'interrupted' } }] });
     expect(byId(running, 'task_action_row')).toBe(running.body.elements[0]);
-    expect(running.body.elements.at(-1).columns).toHaveLength(1);
+    expect(running.body.elements.filter((element: any) => element.tag === 'column_set').map((element: any) => element.element_id)).toEqual(['task_action_row']);
     expect(running.config).toMatchObject({ streaming_mode: true, summary: { content: expect.stringContaining('执行中') } });
     const loading0: any = buildLarkCard({ state: 'running', elapsedSeconds: 0 });
     const loading1: any = buildLarkCard({ state: 'running', elapsedSeconds: 1 });
@@ -146,7 +155,7 @@ describe('Lark card service', () => {
     expect(card.body.elements[1]).toMatchObject({ element_id: 'trace_group_0' });
     expect(byId(card, 'task_status').text.content).toContain('执行中');
     expect(byId(card, 'interrupt')).toMatchObject({ behaviors: [{ value: { action: 'interrupt', task_id: 'trace-running' } }] });
-    expect(card.body.elements.at(-1).columns).toHaveLength(1);
+    expect(card.body.elements.filter((element: any) => element.tag === 'column_set').map((element: any) => element.element_id)).toEqual(['task_action_row']);
     const animated: any = buildLarkCard({ state: 'running', taskId: 'trace-animated', loadingImageKey: 'img_bouncing', elements: [
       { tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false, header: { title: { tag: 'markdown', content: '步骤' } }, elements: [] }
     ] });
@@ -157,7 +166,8 @@ describe('Lark card service', () => {
     for (const state of ['queued', 'running', 'failed', 'interrupted'] as const) {
       const card: any = buildLarkCard({ state, taskId: state, readOnly: true });
       expect(card.config.update_multi).toBe(true);
-      expect(card.body.elements[2].columns).toHaveLength(1);
+      // 只读卡没有按钮，也没有 webBaseUrl，所以整卡不应出现任何 column_set。
+      expect(card.body.elements.filter((element: any) => element.tag === 'column_set')).toHaveLength(0);
     }
   });
 
@@ -211,7 +221,7 @@ describe('Lark card service', () => {
     expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
     expect(componentCount(card)).toBeLessThanOrEqual(larkCardSafeLimits.components);
     expect(Array.from(card.header.title.content).length).toBeLessThanOrEqual(160);
-    expect(Array.from(card.header.subtitle.content.replace(' · Agent 任务', '')).length).toBeLessThanOrEqual(64);
+    expect(Array.from(card.header.subtitle.content).length).toBeLessThanOrEqual(64);
     expect(byId(card, 'interrupt').behaviors[0].value.task_id).toHaveLength(96);
     expect(serialized).not.toContain(huge);
   });
@@ -270,7 +280,7 @@ describe('Lark card service', () => {
     expect(sendBody.receive_id).toBe('user@example.com');
     expect(sendBody.uuid).toBe('task-42');
     const sentCard = JSON.parse(sendBody.content);
-    expect(sentCard.header).toMatchObject({ template: 'blue', subtitle: { content: 'Business Agent · Agent 任务' } });
+    expect(sentCard.header).toMatchObject({ template: 'blue', subtitle: { content: 'Business Agent' } });
     expect(byId(sentCard, 'task_status').text.content).toContain('执行中');
     expect(byId(sentCard, 'task_status').icon).toMatchObject({ tag: 'custom_icon', img_key: 'img_loading' });
     expect(byId(sentCard, 'interrupt')).toMatchObject({ behaviors: [{ value: { action: 'interrupt', task_id: '42' } }] });

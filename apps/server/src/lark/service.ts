@@ -208,6 +208,28 @@ const cardFieldLimits = {
 export const larkCardSafeLimits = { bytes: 24 * 1024, components: 180 } as const;
 export const larkCardSnapshotLimits = { bytes: 16 * 1024, components: 120 } as const;
 const cardBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+
+/**
+ * 超预算时从一个执行分组里剥掉一段工具内容，剥到只剩第一段就停手。
+ *
+ * 绝不剥成空：一个点开什么都没有的折叠箭头比直接删掉整个阶段更糟——它承诺了内容却不给。
+ * 已经只剩一段的面板不再重复剥，否则外层裁剪循环不会推进；此时循环会转去删整个阶段，
+ * 并附上省略提示，读者至少知道有东西被拿掉了。
+ *
+ * 快照裁剪（boundLarkCardElements）和整卡裁剪（buildLarkCard）共用这一份判断，
+ * 两处曾各有一份副本，行为一旦分叉就会出现「快照留着、整卡剥空」这种无法复现的差异。
+ */
+const stripFirstToolSection = (group: Record<string, unknown>): boolean => {
+  const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
+  const toolIndex = groupElements.findIndex(element => {
+    if (typeof element.element_id !== 'string' || !element.element_id.startsWith('trace_tool_')) return false;
+    return (Array.isArray(element.elements) ? element.elements : []).length > 1;
+  });
+  if (toolIndex < 0) return false;
+  const tool = groupElements[toolIndex] as Record<string, unknown>;
+  tool.elements = [(tool.elements as Array<Record<string, unknown>>)[0]!];
+  return true;
+};
 const cardComponents = (value: unknown): number => {
   if (Array.isArray(value)) return value.reduce((sum, item) => sum + cardComponents(item), 0);
   if (!value || typeof value !== 'object') return 0;
@@ -233,26 +255,6 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
       els.splice(firstGroup < 0 ? els.length : firstGroup, 0, notice);
     }
   };
-  const stripGroupContent = (group: Record<string, unknown>): boolean => {
-    const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
-    const toolIndex = groupElements.findIndex(el => {
-      if (typeof el.element_id !== 'string' || !el.element_id.startsWith('trace_tool_')) return false;
-      const toolEls = Array.isArray(el.elements) ? el.elements as Array<Record<string, unknown>> : [];
-      if (el.tag === 'interactive_container') return toolEls.length > 1;
-      return toolEls.length > 0;
-    });
-    if (toolIndex >= 0) {
-      const tool = groupElements[toolIndex] as Record<string, unknown>;
-      const toolEls = Array.isArray(tool.elements) ? tool.elements as Array<Record<string, unknown>> : [];
-      if (tool.tag === 'interactive_container') {
-        tool.elements = [toolEls[0]!];
-      } else {
-        tool.elements = [];
-      }
-      return true;
-    }
-    return false;
-  };
   const mainElements = [...elements];
   let omittedGroups = 0;
   while (true) {
@@ -272,7 +274,7 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
     const remainingGroups = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')).length;
     // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
     // 仅当分组已无内容可剥离时，才删除整个分组。
-    if (stripGroupContent(group)) continue;
+    if (stripFirstToolSection(group)) continue;
     // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动，避免整组被丢弃后用户什么都看不到。
     if (remainingGroups === 1 && groupElements.length > 1) {
       const hasTitle = (groupElements[0] as Record<string, unknown>)?.element_id === 'current_title';
@@ -375,22 +377,20 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
     capabilities: actionCapabilities
   });
-  // 页脚只承载「谁在执行」和「去哪看全貌」两件事。工作区路径、任务号、权限标签
-  // 对聊天里的读者没有可操作性，只会挤占本就很窄的一行。
-  const footerColumns: any[] = [{
-    tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
-    elements: [{ tag: 'markdown', content: `<font color='grey'>${agentName}</font>`, text_size: 'x-small', margin: '0px' }]
-  }];
+  // 页脚只承载「去哪看全貌」一件事。执行者已经写在 header 副标题里，页脚再写一次
+  // 就是同一个名字在一张卡上出现两遍；工作区路径、任务号、权限标签对聊天里的读者
+  // 没有可操作性，同样不占这一行。没有 Web 出口时整行不渲染，不留空页脚。
+  const footerColumns: any[] = [];
   // 详情链接是整卡唯一的 Web 出口（顶部不再重复渲染同一个链接按钮），
   // 因此这里必须自己校验协议，不能假设别处已经挡掉 javascript: 之类的目标。
   const footerDetailUrl = safeLarkWebUrl(sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : webBaseUrl ? `${webBaseUrl}/` : undefined);
   if (footerDetailUrl) {
     footerColumns.push({
-      tag: 'column', width: 'auto', vertical_align: 'center',
+      tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
       elements: [{
         tag: 'markdown',
         content: `<font color='grey'>[查看详情](${footerDetailUrl})</font>`,
-        text_size: 'x-small', margin: '0px'
+        text_size: 'x-small', text_align: 'right', margin: '0px'
       }]
     });
   }
@@ -421,7 +421,15 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ...(historyLabel ? [historyLabel] : [])
     ]);
     const otherElements = mainElements.filter(element => !claimed.has(element));
-    const statusContent = `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${waitingForApproval ? '等待审批' : liveTitle}</text_tag>　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>`;
+    // 终态卡片的 header 已经用色带表达了结果，body 再放一个同色 text_tag 就是同一件事
+    // 说两遍，而且它是整卡最重的一块颜色，会压过下面真正要读的结论。终态改用一行灰字
+    // （状态文字仍然保留，颜色不是唯一线索）；运行态保留彩色 tag——那时状态还会变，
+    // 需要它把注意力拉过去。
+    const liveState = state === 'running' || state === 'queued';
+    const statusLabelText = waitingForApproval ? '等待审批' : liveTitle;
+    const statusContent = liveState
+      ? `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${statusLabelText}</text_tag>　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>`
+      : `<font color='grey'>${statusLabelText}　已用时 ${elapsedLabel(elapsedSeconds)}</font>`;
     const loadingIcon = loadingImageKey
       ? { tag: 'custom_icon', img_key: loadingImageKey, size: '20px 20px' }
       : { tag: 'standard_icon', token: 'loading_outlined', color: 'grey', size: '14px 14px' };
@@ -459,9 +467,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ...historyGroups
       ] : [];
 
+      // 运行态的省略提示已经并进「此前阶段」那一行，这里再放一条 trace_omission 就是
+      // 同一句话说两遍；它只服务把所有阶段收进「执行记录」的非运行态布局。
       traceSection = [
         ...(currentStage ? [currentStage] : []),
-        ...(omissionNotice ? [omissionNotice] : []),
         ...historyItems
       ];
     } else if (traceElements.length) {
@@ -510,7 +519,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       schema: '2.0',
       header: {
         title: { tag: 'plain_text', content: compactTaskName || 'Dockmux' },
-        subtitle: { tag: 'plain_text', content: `${agentName} · Agent 任务` },
+        // 副标题只承载「谁在跑这个任务」。执行宿主（Claude Code / Codex / …）会改变
+        // 读者怎么理解结果、去哪排查，是这一行唯一有信息量的东西；
+        // 「· Agent 任务」每张卡都一样，只会把它冲淡。页脚不再重复第二遍。
+        subtitle: { tag: 'plain_text', content: agentName },
         template: waitingForApproval ? 'orange' : presentation.template,
         padding: '10px 12px 8px 12px'
       },
@@ -518,11 +530,15 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         update_multi: true,
         width_mode: 'default',
         streaming_mode: state === 'running',
+        // 语义色：绿=好 / 蓝=进行中 / 橙=要注意。失败色和执行中色会当状态文字用
+        // （`● 失败`、`● 执行中`），所以必须在白底上可读——原先的失败色是低饱和土黄，
+        // 对比度约 2:1，当文字时几乎读不出来，也和 errorAlert 的红色形不成层级。
+        // 成功色只当圆点用（成功不再渲染文字后缀），按图形元素的 3:1 要求取值。
         style: { color: {
           current_bg: { light_mode: 'rgba(240,245,253,1)', dark_mode: 'rgba(30,40,56,1)' },
-          trace_success: { light_mode: 'rgba(92,184,119,1)', dark_mode: 'rgba(118,204,142,1)' },
-          trace_failure: { light_mode: 'rgba(208,180,92,1)', dark_mode: 'rgba(226,202,124,1)' },
-          trace_running: { light_mode: 'rgba(96,184,232,1)', dark_mode: 'rgba(124,202,242,1)' }
+          trace_success: { light_mode: 'rgba(46,161,33,1)', dark_mode: 'rgba(118,204,142,1)' },
+          trace_failure: { light_mode: 'rgba(163,77,0,1)', dark_mode: 'rgba(255,178,102,1)' },
+          trace_running: { light_mode: 'rgba(36,91,219,1)', dark_mode: 'rgba(124,202,242,1)' }
         } },
         summary: { content: `${taskName} · ${waitingForApproval ? '等待审批' : liveTitle}` }
       },
@@ -530,10 +546,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         direction: 'vertical', vertical_spacing: '8px', padding: '10px 12px 10px 12px',
         elements: [
           ...arrange(mainElements),
-          {
+          ...(footerColumns.length ? [{
             tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
             columns: footerColumns
-          }
+          }] : [])
         ]
       }
     };
@@ -554,27 +570,6 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       elements.splice(firstGroup < 0 ? elements.length : firstGroup, 0, notice);
     }
   };
-  const stripGroupContent = (group: Record<string, unknown>): boolean => {
-    const groupElements = Array.isArray(group.elements) ? group.elements as Array<Record<string, unknown>> : [];
-    // 移除工具的输入/输出内容，仅保留工具标题。
-    const toolIndex = groupElements.findIndex(el => {
-      if (typeof el.element_id !== 'string' || !el.element_id.startsWith('trace_tool_')) return false;
-      const toolEls = Array.isArray(el.elements) ? el.elements as Array<Record<string, unknown>> : [];
-      if (el.tag === 'interactive_container') return toolEls.length > 1;
-      return toolEls.length > 0;
-    });
-    if (toolIndex >= 0) {
-      const tool = groupElements[toolIndex] as Record<string, unknown>;
-      const toolEls = Array.isArray(tool.elements) ? tool.elements as Array<Record<string, unknown>> : [];
-      if (tool.tag === 'interactive_container') {
-        tool.elements = [toolEls[0]!];
-      } else {
-        tool.elements = [];
-      }
-      return true;
-    }
-    return false;
-  };
   let mainElements = [...sourceMainElements];
   let omittedGroups = 0;
   let card = assemble(mainElements);
@@ -586,7 +581,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const remainingGroups = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_')).length;
     // 优先从最旧分组中剥离工具输入输出，保留可扫描的分组结构；
     // 仅当分组已无内容可剥离时，才删除整个分组。
-    if (stripGroupContent(group)) {
+    if (stripFirstToolSection(group)) {
       card = assemble(mainElements);
       continue;
     }
@@ -616,7 +611,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // hard safety net for unexpected Card schema overhead or deeply nested third-party elements.
   return {
     schema: '2.0',
-    header: { title: { tag: 'plain_text', content: compactTaskName }, template: presentation.template },
+    // 兜底卡同样要说清是谁在跑：它是超预算时用户唯一能看到的那张卡，
+    // 少了执行宿主就无法判断该去哪个 CLI 的会话里排查。
+    header: { title: { tag: 'plain_text', content: compactTaskName }, subtitle: { tag: 'plain_text', content: agentName }, template: presentation.template },
     config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: `${taskName} · ${liveTitle}` } },
     body: {
       direction: 'vertical', padding: '10px 12px',
