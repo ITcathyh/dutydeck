@@ -5,6 +5,7 @@ import { collectLarkTaskContext } from './task-context.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
+import { RuntimeError } from '@dockmux/shared';
 import { defaultHighRiskPattern, defaultLarkTraceLimit, larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
@@ -226,7 +227,9 @@ export class LarkMessageCoordinator {
       this.groups.set(key, group);
       const task: LarkTask = { id: mapping.externalId, event: stored.event, config: effective, prompt: saved.prompt, resources: [],
         group, inbox: adopted, state: 'queued', events: [], turn: (saved.turn ?? 1) - 1, scopeId: saved.scope_id, epoch: group.epoch ?? 0,
-        retryMaterialPrompt: saved.retry_material_prompt, sessionId: mapping.sessionId, cardMessageId: saved.card_message_id, resumeTask: runtimeTask, restoring: true };
+        retryMaterialPrompt: saved.retry_material_prompt, sessionId: mapping.sessionId, cardMessageId: saved.card_message_id,
+        runtimeTaskId: runtimeTask.id, startedAt: saved.started_at, lastSuccessfulElements: saved.last_successful_elements,
+        progressFrozen: saved.progress_frozen, resumeTask: runtimeTask, restoring: true };
       this.tasks.set(task.id, task);
       this.handledMessages.add(task.id);
       group.tail = group.tail.then(() => this.runTurn(task)).catch(error => this.log.error({ error, taskId: task.id }, '恢复飞书任务交互失败'));
@@ -1424,6 +1427,9 @@ export class LarkMessageCoordinator {
       if (this.supersededTurn(task, session)) return;
     }
     catch (error) {
+      // Keep the durable inbox pending for the next daemon; lifecycle shutdown
+      // is not an Agent startup failure.
+      if (error instanceof RuntimeError && error.code === 'RUNTIME_SHUTTING_DOWN') return;
       task.state = 'failed'; task.startedAt = Date.now();
       const markdown = `**Agent 启动失败**\n\n${error instanceof Error ? error.message : String(error)}`;
       const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', taskId: task.id, taskName: prompt.slice(0, 80), markdown, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
@@ -1462,25 +1468,30 @@ export class LarkMessageCoordinator {
       };
     }
     task.retryMaterialPrompt = materialPrompt;
-    const initialState = this.runtime.dispatch ? 'queued' : 'running';
+    const initialState = resumeTask?.status === 'running' ? 'running' : this.runtime.dispatch ? 'queued' : 'running';
     task.state = initialState;
-    task.events = [];
-    task.startedAt = Date.now();
+    task.events = resumeTask
+      ? await loadLarkTaskEvents(this.runtime, session.id, resumeTask.id, Math.max((config.traceLimit ?? defaultLarkTraceLimit) * 30, 500))
+      : [];
+    if (!resumeTask) task.startedAt = Date.now();
     task.interruptRequested = false;
-    const initialElements = boundLarkCardElements(renderLarkProcessElements([], config));
-    // 首张卡也必须带本轮 turn：它的按钮回调把 turn 写进 value，缺省会渲染成 "0"，
-    // 而本轮 turn 从 1 起算——回调随后会被轮次校验当成上一轮的点击拒掉，
-    // 直到某次心跳重绘才恢复。UI 不变，只是把回调绑到正确的轮次上。
-    if (task.cardMessageId) {
-      await this.service.update({ ...cardContext, messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, taskId: task.id, taskName: prompt.slice(0, 80), markdown: initialState === 'queued' ? '任务已接收，正在准备执行…' : '正在思考中…', sessionId: task.sessionId, turn: currentTurn, ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
-    } else {
-      const card = await sendTaskCard(this.service, event, { ...cardContext, ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, readOnly: initialState === 'queued', taskId: task.id, taskName: prompt.slice(0, 80), markdown: initialState === 'queued' ? '任务已接收，正在准备执行…' : '正在思考中…', sessionId: task.sessionId, turn: currentTurn, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
-      task.cardMessageId = card.messageId;
+    // An accepted task keeps its original card and mapping while reattaching.
+    if (!resumeTask) {
+      const initialElements = boundLarkCardElements(renderLarkProcessElements([], config));
+      // 首张卡也必须带本轮 turn：它的按钮回调把 turn 写进 value，缺省会渲染成 "0"，
+      // 而本轮 turn 从 1 起算——回调随后会被轮次校验当成上一轮的点击拒掉，
+      // 直到某次心跳重绘才恢复。UI 不变，只是把回调绑到正确的轮次上。
+      if (task.cardMessageId) {
+        await this.service.update({ ...cardContext, messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, taskId: task.id, taskName: prompt.slice(0, 80), markdown: initialState === 'queued' ? '任务已接收，正在准备执行…' : '正在思考中…', sessionId: task.sessionId, turn: currentTurn, ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+      } else {
+        const card = await sendTaskCard(this.service, event, { ...cardContext, ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, readOnly: initialState === 'queued', taskId: task.id, taskName: prompt.slice(0, 80), markdown: initialState === 'queued' ? '任务已接收，正在准备执行…' : '正在思考中…', sessionId: task.sessionId, turn: currentTurn, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+        task.cardMessageId = card.messageId;
+      }
+      task.lastSuccessfulElements = initialElements;
+      await this.saveCardTask(task);
+      if (task.inbox) await this.inbox!.update(task.inbox, { sessionId: session.id, cardId: task.cardMessageId, turn: currentTurn });
+      await clearAcknowledgement();
     }
-    task.lastSuccessfulElements = initialElements;
-    await this.saveCardTask(task);
-    if (task.inbox) await this.inbox!.update(task.inbox, { sessionId: session.id, cardId: task.cardMessageId, turn: currentTurn });
-    await clearAcknowledgement();
 
     let timer: NodeJS.Timeout | undefined;
     let heartbeatActive = false;
@@ -1809,7 +1820,7 @@ export class LarkMessageCoordinator {
             active = true;
             heartbeatActive = true;
             task.state = 'running';
-            task.startedAt = Date.now();
+            if (!resumeTask) task.startedAt = Date.now();
             void update('running').finally(scheduleHeartbeat);
           } else if (record.status === 'completed' || record.status === 'failed' || record.status === 'interrupted' || record.status === 'cancelled') finish(record.status === 'cancelled' ? 'interrupted' : record.status);
           return;
@@ -1872,6 +1883,7 @@ export class LarkMessageCoordinator {
       } catch (error) {
         // dispatch 失败也可能是在重试之后才抛出的；旧轮次不得把新一轮打成 failed。
         if (task.turn !== currentTurn) return;
+        if (error instanceof RuntimeError && error.code === 'RUNTIME_SHUTTING_DOWN') { cleanup(); return; }
         task.events.push({ id: `lark-error-${event.messageId}`, sessionId: session.id, sequence: Number.MAX_SAFE_INTEGER, type: 'error', timestamp: new Date().toISOString(), data: { message: error instanceof Error ? error.message : String(error) } });
         task.state = 'failed';
         await deliverTerminal('failed', false);

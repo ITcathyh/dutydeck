@@ -534,7 +534,9 @@ export class DockmuxRuntime {
         await this.saveTask(task, 'queued');
         return this.publicTask(task);
       }
-      if (this.shuttingDown && error instanceof DriverDetachedError && task.executionContext?.recovery) return this.publicTask(task);
+      const daemonDetached = error instanceof DriverDetachedError
+        || error instanceof RuntimeError && error.code === 'RUNTIME_SHUTTING_DOWN';
+      if (this.shuttingDown && daemonDetached && task.executionContext?.recovery) return this.publicTask(task);
       if (error instanceof DriverRecoveryError) {
         await this.saveTask(task, 'interrupted');
         await this.cancelSessionQueue(id);
