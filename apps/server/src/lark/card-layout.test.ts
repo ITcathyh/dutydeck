@@ -83,7 +83,8 @@ describe('Lark card layout renderer->bound->build integration', () => {
     expect(currentTitle.icon).toBeUndefined();
 
     // 当前命令摘要默认可见，I/O 可展开
-    const currentTool = components(currentContainer).find(el => el.element_id?.startsWith('trace_tool_'));
+    expect(byId(currentContainer, 'current_records')).toBeUndefined();
+    const currentTool = currentContainer.elements.find((el: any) => el.element_id?.startsWith('trace_tool_'));
     expect(currentTool).toMatchObject({ tag: 'collapsible_panel', expanded: false });
     expect(currentTool.header.title.content).toContain('运行测试');
     expect(currentTool.header.title.content).toContain('pnpm test');
@@ -108,6 +109,45 @@ describe('Lark card layout renderer->bound->build integration', () => {
     const completedCard = buildLarkCard({ state: 'completed', elements: completedElements });
     const completedGroup0 = components(completedCard).find(el => el.element_id === 'trace_group_0');
     expect(completedGroup0.header.title.content).not.toContain("<font color='grey'>3s</font>");
+  });
+
+  it('collapses repeated terminal records together while keeping current progress visible', () => {
+    const events = [
+      makeEvent(1, 'text', { text: '消息量很大，继续翻页拉取。' }),
+      ...Array.from({ length: 24 }, (_, index) => makeEvent(index + 2, 'raw_terminal', { text: `终端输出 ${index + 1}` }))
+    ];
+    const card = buildLarkCard({ state: 'running', elements: boundLarkCardElements(renderLarkProcessElements(events, config)) });
+    const current = byId(card, 'trace_group_0');
+    expect(current.elements).toHaveLength(2);
+    expect(current.elements[0]).toMatchObject({ element_id: 'current_title', content: '消息量很大，继续翻页拉取。' });
+    const records = current.elements[1];
+    expect(records).toMatchObject({
+      tag: 'collapsible_panel', expanded: false,
+      header: { title: { content: '执行记录（24 条）' } }
+    });
+    expect(records.elements).toHaveLength(24);
+    expect(records.elements.every((element: any) => element.element_id.startsWith('trace_tool_'))).toBe(true);
+    expect(JSON.stringify(records)).toContain('终端输出 24');
+    expect(byId(card, 'task_status').text.content).toContain('执行中');
+  });
+
+  it('keeps failures and approvals visible outside collapsed running records', () => {
+    const events = [
+      makeEvent(1, 'text', { text: '检查配置' }),
+      makeEvent(2, 'tool_result', { id: 'failed', name: 'read', output: '文件不存在', status: 'failed' }),
+      makeEvent(3, 'tool_call', { id: 'running', name: 'exec', input: { command: 'pnpm test' }, status: 'running' }),
+      makeEvent(4, 'permission_request', { id: 'approval', title: '允许修改配置', status: 'pending' }),
+      makeEvent(5, 'error', { message: '配置读取失败' })
+    ];
+    const card = buildLarkCard({ state: 'running', elements: boundLarkCardElements(renderLarkProcessElements(events, config)) });
+    const current = byId(card, 'trace_group_0');
+    expect(current.elements[0].content).toContain('失败');
+    expect(current.elements[1]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
+    expect(JSON.stringify(current.elements[1])).toContain('文件不存在');
+    expect(JSON.stringify(current.elements[1])).toContain('pnpm test');
+    expect(card.body.elements.some((element: any) => element.element_id?.startsWith('risk_alert_pending_'))).toBe(true);
+    expect(card.body.elements.some((element: any) => element.element_id?.startsWith('execution_alert_'))).toBe(true);
+    expect(byId(card, 'task_status').text.content).toContain('等待审批');
   });
 
   it('2. history stage: single tool flattens I/O without extra folding, multi-tool preserves tool panels', () => {
@@ -436,6 +476,11 @@ export function restoreSession(sessionId: string) {
     expect(JSON.stringify(card)).toContain('heavy_step_25');
     // 当前阶段标题保留
     expect(byId(card, 'current_title')).toBeDefined();
+    const records = byId(card, 'current_records');
+    expect(records).toMatchObject({ tag: 'collapsible_panel', expanded: false });
+    expect(records.header.title.content).toBe(`执行记录（${records.elements.length} 条）`);
+    expect(records.elements.length).toBeGreaterThan(1);
+    expect(JSON.stringify(records.elements.at(-1))).toContain('heavy_step_25');
   });
 
   it('10. readOnly card security: clears action buttons while keeping footer web link', () => {

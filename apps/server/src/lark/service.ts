@@ -433,6 +433,26 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     let traceSection: Record<string, unknown>[] = [];
     if (state === 'running') {
       const currentGroup = traceElements.find(el => el.tag === 'interactive_container') ?? traceElements.at(-1);
+      const currentItems = currentGroup?.tag === 'interactive_container' && Array.isArray(currentGroup.elements)
+        ? currentGroup.elements as Record<string, unknown>[] : [];
+      const currentTools = currentItems.filter(el => String(el.element_id ?? '').startsWith('trace_tool_'));
+      // 在组装时折叠，裁剪器仍按原有扁平结构保留最新记录；标题计数对应裁剪后的内容。
+      const currentStage = currentTools.length > 1 ? {
+        ...currentGroup,
+        elements: [
+          ...currentItems.filter(el => !currentTools.includes(el)),
+          {
+            tag: 'collapsible_panel', element_id: 'current_records', expanded: false,
+            direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px',
+            header: {
+              title: { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' },
+              vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
+              icon_position: 'right', icon_expanded_angle: -180
+            },
+            elements: currentTools
+          }
+        ]
+      } : currentGroup;
       const historyGroups = traceElements.filter(el => el !== currentGroup);
       const historyItems: Record<string, unknown>[] = historyGroups.length ? [
         historyLabel ?? { tag: 'markdown', element_id: 'history_label', content: "<font color='grey'>此前阶段</font>", text_size: 'notation', margin: '4px 0px 2px 0px' },
@@ -440,7 +460,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ] : [];
 
       traceSection = [
-        ...(currentGroup ? [currentGroup] : []),
+        ...(currentStage ? [currentStage] : []),
         ...(omissionNotice ? [omissionNotice] : []),
         ...historyItems
       ];
