@@ -1,11 +1,20 @@
-import type { AgentConfig, AgentDriver, NormalizedDriverEvent, TerminalStream } from '@dockmux/shared';
-import type { AdapterSessionContext, CliAdapter } from '@dockmux/cli-adapters';
+import {
+  DriverDetachedError,
+  DriverRecoveryError,
+  type AgentConfig,
+  type AgentDriver,
+  type DriverTurnRecovery,
+  type NormalizedDriverEvent,
+  type TerminalStream,
+} from '@dockmux/shared';
+import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dockmux/cli-adapters';
 import { buildDockmuxRoutingBlock } from '@dockmux/cli-adapters';
 import { PtyBackend, TmuxBackend, type SessionBackend } from '@dockmux/session-backends';
 import { TerminalSnapshot } from '@dockmux/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
 import { createTranscriptTailer, type TranscriptEventSource } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
+import { randomUUID } from 'node:crypto';
 
 export interface PtyCliDriverOptions {
   agent: AgentConfig;
@@ -73,6 +82,25 @@ export class PtyCliDriver implements AgentDriver {
    *  与 AcpxAdapter 的语义对齐（runtime 在 send resolve 后立即判定终态）。 */
   private turnResolve: (() => void) | null = null;
   private turnReject: ((err: Error) => void) | null = null;
+  /** Cancels an adapter write which is still awaiting while stop() tears the
+   * backend down. The write itself cannot be cancelled, but send() must not
+   * remain hung behind an adapter promise after its turn was stopped. */
+  private turnWriteReject: ((err: Error) => void) | null = null;
+  /** The adapter can await between paste chunks and its final Enter. Every
+   * write travels through this identity-bound guard so a detached driver
+   * cannot leave a delayed submit key in a surviving tmux pane. */
+  private activeSubmission: { cancelError?: Error } | undefined;
+  /** A checkpoint is prepared before writeInput. It becomes recoverable only
+   * after the successful submission has been stamped on the owned tmux pane. */
+  private preparedTurnId: string | undefined;
+  /** A recovered screen can contain an old end-turn marker (notably while
+   * Claude background agents continue). Do not settle it until the restored
+   * transcript proves this turn advanced beyond its durable cursor. */
+  private awaitingRecoveryTranscript = false;
+  /** A rejected recovery has never attached this backend. stop() may be
+   * called by runtime cleanup afterwards, but it must not destroy a pane we
+   * explicitly refused to adopt. */
+  private recoveryRejected = false;
 
   private idleDetector: IdleDetector | undefined;
   private snapshot: TerminalSnapshot | undefined;
@@ -176,8 +204,40 @@ export class PtyCliDriver implements AgentDriver {
     this.turnActive = true;
     this.turnHasOutput = false;
     this.turnStartedAt = Date.now();
+    this.awaitingRecoveryTranscript = false;
     this.idleDetector?.reset();
-    await this.adapter.writeInput(this.backend, finalPrompt);
+    const completion = new Promise<void>((resolve, reject) => {
+      this.turnResolve = resolve;
+      this.turnReject = reject;
+    });
+    // send() normally returns this promise after writeInput settles. If the
+    // write itself rejects first, though, send() throws that write error and
+    // no caller can yet hold `completion`; consume that parallel rejection so
+    // it never becomes an unhandled process-level rejection.
+    void completion.catch(() => {});
+    const writeCancelled = new Promise<never>((_, reject) => {
+      this.turnWriteReject = reject;
+    });
+    const submission = { cancelError: undefined as Error | undefined };
+    this.activeSubmission = submission;
+    try {
+      // Register the completion waiter before writeInput: an in-memory/mock
+      // backend may synchronously emit a completion marker from write().
+      await Promise.race([this.adapter.writeInput(this.submissionBackend(submission), finalPrompt), writeCancelled]);
+    } catch (err) {
+      this.preparedTurnId = undefined;
+      this.cancelSubmission(submission, err instanceof Error ? err : new Error(String(err)));
+      if (this.turnActive) {
+        this.turnActive = false;
+        this.turnReject?.(err instanceof Error ? err : new Error(String(err)));
+        this.turnResolve = null;
+        this.turnReject = null;
+      }
+      throw err;
+    } finally {
+      this.turnWriteReject = null;
+      if (this.activeSubmission === submission) this.activeSubmission = undefined;
+    }
     this.firstPromptSent = true;
     if (isFirstPrompt && this.backend instanceof TmuxBackend) {
       // tmux owns this tiny non-secret lifecycle marker across daemon
@@ -186,13 +246,90 @@ export class PtyCliDriver implements AgentDriver {
       try { this.backend.setDockmuxMetadata('first_prompt_sent', 'true'); }
       catch { /* A missing lifecycle marker may repeat context after restart, but must not fail a prompt already sent. */ }
     }
+    if (this.preparedTurnId && this.backend instanceof TmuxBackend) {
+      try {
+        // This is deliberately after writeInput. A persisted cursor without a
+        // matching pane stamp must be rejected, never used to resend a prompt
+        // whose delivery we cannot prove.
+        this.backend.setDockmuxMetadata('turn_id', this.preparedTurnId);
+      } catch {
+        this.preparedTurnId = undefined;
+      }
+    }
 
     // 与 AcpxAdapter 语义对齐：send() 等本轮结束（completed）才 resolve，
     // runtime 在 send resolve 后立即判定终态。driver 退出则 reject。
-    return new Promise<void>((resolve, reject) => {
+    return completion;
+  }
+
+  checkpoint(): DriverTurnRecovery | undefined {
+    // A cursor alone is insufficient: only an owned persistent tmux pane can
+    // prove that it is still executing the exact prompt at this boundary.
+    if (!(this.backend instanceof TmuxBackend) || !this.backend.ownerId || !this.transcript) return undefined;
+    this.transcript.flush();
+    const turnId = randomUUID();
+    this.preparedTurnId = turnId;
+    return { kind: 'pty-jsonl-v1', turnId, transcript: this.transcript.checkpoint() };
+  }
+
+  async recover(state: DriverTurnRecovery): Promise<void> {
+    if (this.started || this.stopped) {
+      throw this.rejectRecovery('PTY turn recovery requires a fresh driver');
+    }
+    if (!state || state.kind !== 'pty-jsonl-v1' || typeof state.turnId !== 'string' || state.turnId.length === 0
+      || !state.transcript || !Number.isSafeInteger(state.transcript.offset) || state.transcript.offset < 0) {
+      throw this.rejectRecovery('Invalid PTY turn recovery state');
+    }
+    if (!(this.backend instanceof TmuxBackend) || !this.backend.ownerId) {
+      throw this.rejectRecovery('PTY turn recovery requires an owned tmux backend');
+    }
+    const sessionName = this.tmuxSessionName();
+    if (!sessionName || TmuxBackend.probeSession(sessionName) !== 'exists') {
+      throw this.rejectRecovery('Original tmux session is not alive');
+    }
+    if (TmuxBackend.sessionOwner(sessionName) !== this.backend.ownerId) {
+      throw this.rejectRecovery('Original tmux session owner does not match');
+    }
+    // The metadata belongs to the original backend and is checked before any
+    // attach side effect. Missing, stale, or foreign turns are all unsafe.
+    if (this.backend.getDockmuxMetadata('turn_id') !== state.turnId) {
+      throw this.rejectRecovery('Original tmux turn id does not match');
+    }
+
+    this.turnActive = true;
+    this.turnHasOutput = false;
+    this.turnStartedAt = 0;
+    this.awaitingRecoveryTranscript = true;
+    const completion = new Promise<void>((resolve, reject) => {
       this.turnResolve = resolve;
       this.turnReject = reject;
     });
+    void completion.catch(() => {});
+    const originalBackend = this.backend;
+    try {
+      this.reattachTmux(sessionName, false, state.transcript);
+      this.markTmuxReattached();
+      // pipe-pane only receives future redraws. Capture the current render so
+      // an offline-completed turn can be settled even when the pane is quiet.
+      const screen = this.backend instanceof TmuxBackend ? this.backend.captureCurrentScreen() : null;
+      if (screen) this.feedRecoveredScreen(screen);
+    } catch (err) {
+      this.turnActive = false;
+      this.awaitingRecoveryTranscript = false;
+      this.turnReject?.(err instanceof Error ? err : new Error(String(err)));
+      this.turnResolve = null;
+      this.turnReject = null;
+      // `reattachTmux` assigns the newly-created backend before attach/wire.
+      // A transcript restore can therefore fail after pipe-pane, tail and the
+      // exit watcher are live. Tear down that temporary attachment only; the
+      // original tmux pane continues and is never killed by a bad cursor.
+      if (this.backend !== originalBackend) {
+        this.teardownWiring();
+        try { this.backend.detach?.(); } catch { /* best effort */ }
+      }
+      throw this.rejectRecovery(`Could not reattach original PTY turn: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return completion;
   }
 
   async interrupt(): Promise<void> {
@@ -393,22 +530,33 @@ export class PtyCliDriver implements AgentDriver {
   async stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
-    this.teardownWiring();
-    this.terminalSubscribers.clear();
     const tmuxBackend = this.backend instanceof TmuxBackend ? this.backend : undefined;
     const preservePersistentSession = this.detachOnStop
       && !options.discardSession
       && tmuxBackend !== undefined;
+    const stopReason = preservePersistentSession ? new DriverDetachedError() : new Error('Driver stopped');
     if (this.turnActive) {
       this.turnActive = false;
-      this.turnReject?.(new Error(preservePersistentSession
-        ? 'Driver detached for Dockmux daemon shutdown'
-        : 'Driver stopped'));
+      this.turnReject?.(stopReason);
       this.turnResolve = null;
       this.turnReject = null;
     }
+    // A synchronous backend completion can clear turnActive while an adapter
+    // still awaits its write promise. stop() must release that send() too.
+    this.cancelActiveSubmission(stopReason);
+    this.turnWriteReject?.(stopReason);
+    this.turnWriteReject = null;
+    // The cursor consumed by a checkpoint must include every complete record
+    // observed before daemon teardown, including one written in the final poll
+    // interval. Keep the source alive through this flush.
+    this.transcript?.flush();
+    this.teardownWiring();
+    this.terminalSubscribers.clear();
     try {
-      if (preservePersistentSession) tmuxBackend.detach();
+      if (this.recoveryRejected) {
+        // Nothing was attached: this is a foreign/mismatched live pane which
+        // recovery deliberately left untouched.
+      } else if (preservePersistentSession) tmuxBackend.detach();
       else this.backend.kill();
     } catch {
       // best effort：后端可能已退出
@@ -441,7 +589,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
-  private wire(backend: SessionBackend): void {
+  private wire(backend: SessionBackend, restoreTranscript?: DriverTurnRecovery['transcript']): void {
     this.snapshot = new TerminalSnapshot(DEFAULT_COLS, DEFAULT_ROWS);
     this.idleDetector = new IdleDetector({
       completionPattern: this.adapter.completionPattern,
@@ -452,6 +600,7 @@ export class PtyCliDriver implements AgentDriver {
     });
     this.idleDetector.onIdle(() => {
       if (!this.turnActive) return;
+      if (this.awaitingRecoveryTranscript) return;
       // Streaming can pause with an old prompt still on screen. Only the
       // current footer counts; earlier busy text may remain in the answer.
       const footer = this.snapshot?.lastLine() ?? '';
@@ -508,9 +657,11 @@ export class PtyCliDriver implements AgentDriver {
         // 标记本轮已有实质输出（text/thinking/tool_*），解除 idle 闸门。
         if (e.type === 'text' || e.type === 'thinking' || e.type === 'tool_call' || e.type === 'tool_result') {
           this.turnHasOutput = true;
+          this.awaitingRecoveryTranscript = false;
         }
         this.emitEvent(e);
       });
+      if (restoreTranscript) this.transcript.restore(restoreTranscript);
       this.transcript.start();
     }
   }
@@ -547,10 +698,15 @@ export class PtyCliDriver implements AgentDriver {
     // 若本轮仍在进行，driver 退出 = 本轮失败，reject send() 的等待者。
     if (this.turnActive) {
       this.turnActive = false;
+      this.awaitingRecoveryTranscript = false;
       this.turnReject?.(new Error(`Agent exited with code ${code}`));
       this.turnResolve = null;
       this.turnReject = null;
     }
+    const exitError = new Error(`Agent exited with code ${code}`);
+    this.cancelActiveSubmission(exitError);
+    this.turnWriteReject?.(exitError);
+    this.turnWriteReject = null;
     this.exitCallback(code);
   }
 
@@ -595,7 +751,11 @@ export class PtyCliDriver implements AgentDriver {
     return name.length > 0 ? name : undefined;
   }
 
-  private reattachTmux(sessionName: string, detachCurrent: boolean): void {
+  private reattachTmux(
+    sessionName: string,
+    detachCurrent: boolean,
+    restoreTranscript?: DriverTurnRecovery['transcript'],
+  ): void {
     this.teardownWiring();
     // detach 只拆捕获，不杀 tmux 会话——CLI 进程继续存活。
     const ownerId = this.backend instanceof TmuxBackend ? this.backend.ownerId : undefined;
@@ -604,7 +764,50 @@ export class PtyCliDriver implements AgentDriver {
     this.backend = backend;
     // attach 到既有会话：不重建 session、不重发 CLI 启动命令，只重建捕获。
     backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
-    this.wire(backend);
+    this.wire(backend, restoreTranscript);
+  }
+
+  /** Feed a point-in-time tmux capture through the same snapshot and idle
+   * machinery as pipe-pane bytes, without treating it as new PTY output. */
+  private feedRecoveredScreen(screen: string): void {
+    this.idleDetector?.feed(screen);
+    this.snapshot?.write(screen);
+    for (const cb of this.terminalSubscribers) cb(screen);
+    this.scheduleRawTerminal();
+  }
+
+  /** Wrap the intentionally-small adapter PTY surface per submission. The
+   * real Claude adapter awaits between its bracketed paste and Enter, so
+   * checking only before writeInput is insufficient after daemon detach. */
+  private submissionBackend(submission: { cancelError?: Error }): PtyLike {
+    const target = this.backend as SessionBackend & Partial<PtyLike>;
+    const guarded = <T>(write: () => T): T => {
+      if (submission.cancelError) throw submission.cancelError;
+      if (this.activeSubmission !== submission) {
+        throw new Error('PtyCliDriver: submission is no longer active');
+      }
+      return write();
+    };
+    const proxy: PtyLike = {
+      write: data => guarded(() => target.write(data)),
+    };
+    if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text));
+    if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys));
+    if (target.pasteText) proxy.pasteText = text => guarded(() => target.pasteText!(text));
+    return proxy;
+  }
+
+  private cancelActiveSubmission(error: Error): void {
+    if (this.activeSubmission) this.cancelSubmission(this.activeSubmission, error);
+  }
+
+  private cancelSubmission(submission: { cancelError?: Error }, error: Error): void {
+    submission.cancelError ??= error;
+  }
+
+  private rejectRecovery(message: string): DriverRecoveryError {
+    this.recoveryRejected = true;
+    return new DriverRecoveryError(message);
   }
 
   private respawn(args: string[]): void {

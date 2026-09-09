@@ -24,7 +24,7 @@ import type { NormalizedDriverEvent } from '@dockmux/shared';
 import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { isUsableMarker } from '../session-id/marker.js';
-import { JsonlTailer, type TranscriptEventSource } from './tail.js';
+import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 
 /** Head window per candidate when scanning for the marker. It rides the FIRST
  *  user prompt, so a small window suffices and a long conversation is never
@@ -287,6 +287,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
 
   start(): void { this.tailer.start(); }
   flush(): void { this.tailer.flush(); }
+  checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
+  restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
   stop(): void { this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
 }

@@ -23,6 +23,21 @@ export interface NormalizedDriverEvent {
   type: EventType;
   data: any;
   raw?: string;
+  /** Stable transcript record identity, preserved when replaying after restart. */
+  sourceId?: string;
+}
+
+export interface TranscriptCursor { path?: string; offset: number }
+export interface DriverTurnRecovery { kind: 'pty-jsonl-v1'; turnId: string; transcript: TranscriptCursor }
+
+/** A detached persistent turn remains running in its backend. */
+export class DriverDetachedError extends Error {
+  constructor() { super('Driver detached for Dockmux daemon shutdown'); this.name = 'DriverDetachedError'; }
+}
+
+/** The original turn cannot be safely identified or attached; do not replay its prompt. */
+export class DriverRecoveryError extends Error {
+  constructor(message: string) { super(message); this.name = 'DriverRecoveryError'; }
 }
 
 /**
@@ -52,6 +67,10 @@ export interface AgentDriver {
   interrupt(): Promise<void>;
   /** 重连/恢复持久会话（ACP resume / tmux reattach / CLI --resume）。 */
   resume(): Promise<void>;
+  /** Capture the output boundary before submitting a new turn, if recoverable. */
+  checkpoint?(): DriverTurnRecovery | undefined;
+  /** Attach to the original live backend and await this turn without resending its prompt. */
+  recover?(state: DriverTurnRecovery): Promise<void>;
   /** 停止驱动并清理子进程。discardSession=true 时同时清除持久化会话状态。 */
   stop(options?: { discardSession?: boolean }): Promise<void>;
   /** 裁决一个挂起的权限请求。返回是否成功兑现。 */

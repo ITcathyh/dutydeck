@@ -28,7 +28,7 @@ import { CodexTranscriptTailer, type CodexTranscriptTailerOptions } from './code
 import { TraexTranscriptTailer, type TraexTranscriptTailerOptions } from './traex.js';
 import { GrokTranscriptTailer, type GrokTranscriptTailerOptions } from './grok.js';
 
-export type { TranscriptEventSource } from './tail.js';
+export type { TranscriptCursor, TranscriptEventSource } from './tail.js';
 export { JsonlTailer, type JsonlTailerOptions, type TranscriptEntry } from './tail.js';
 export {
   ClaudeTranscriptTailer,

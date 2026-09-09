@@ -214,6 +214,7 @@ const LITERAL_SEND_LIMIT = 4096;
 const OWNER_OPTION = '@dockmux_owner_id';
 const METADATA_OPTIONS = {
   first_prompt_sent: '@dockmux_first_prompt_sent',
+  turn_id: '@dockmux_turn_id',
 } as const;
 
 export type TmuxDockmuxMetadataKey = keyof typeof METADATA_OPTIONS;

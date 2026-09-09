@@ -36,7 +36,7 @@ import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dockmux/shared';
 import { grokUpdatesPath, resolveGrokCwdBucketDir, type CliPathEnv } from '../cli-paths.js';
 import { resolveCliSessionId } from '../session-id/index.js';
-import { JsonlTailer, type TranscriptEventSource } from './tail.js';
+import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 
 /** ACP tool status → dockmux status. `in_progress` is the spec spelling;
  *  `running` is accepted defensively (dockmux's own internal name). */
@@ -244,6 +244,8 @@ export class GrokTranscriptTailer implements TranscriptEventSource {
 
   start(): void { this.tailer.start(); }
   flush(): void { this.tailer.flush(); }
+  checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
+  restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
   stop(): void { this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
 }
