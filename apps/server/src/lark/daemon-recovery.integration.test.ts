@@ -7,6 +7,7 @@ import { DockmuxRuntime } from '@dockmux/runtime';
 import {
   DriverDetachedError,
   DriverRecoveryError,
+  RuntimeError,
   type AgentConfig,
   type AgentDriver,
   type DriverFactory,
@@ -106,11 +107,12 @@ function database() {
   return join(directory, 'state.db');
 }
 
-function open(file: string, factory: DriverFactory) {
+function open(file: string, factory: DriverFactory, options: ConstructorParameters<typeof DockmuxRuntime>[1] = {}) {
   const repos = createRepositories(file);
   const runtime = new DockmuxRuntime(repos, {
     driverFactory: factory,
     probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }),
+    ...options,
   });
   repositories.push(repos);
   runtimes.push(runtime);
@@ -159,24 +161,39 @@ async function prepareFirstDaemon(file: string, backend: ReturnType<typeof persi
 }
 
 describe('daemon restart recovery through Runtime and Lark workflow coordinator', () => {
-  it('reattaches the accepted card to a recovered running task and delivers one result', async () => {
+  it.each([false, true])('keeps the card running throughout restart and delivers one result (listener stops first: %s)', async listenerFirst => {
     const file = database();
     const backend = persistentBackend();
     const service = cardService();
     const { first, firstCoordinator } = await prepareFirstDaemon(file, backend, service);
+    backend.publish('重启前的已有进度');
+    const [session] = await first.runtime.listSessions();
+    await vi.waitFor(async () => expect((await first.runtime.getEvents(session!.id)).some(event => event.data?.text === '重启前的已有进度')).toBe(true));
     const [before] = await first.repos.channelMappings.list(`lark-card:${config.appId}`);
     const originalCardId = JSON.parse(before!.extra!).card_message_id;
+    const originalStartedAt = JSON.parse(before!.extra!).started_at;
 
-    firstCoordinator.stop();
+    if (listenerFirst) firstCoordinator.stop();
     await close(first);
+    firstCoordinator.stop();
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input.state))).toBe(false);
 
     const second = open(file, backend.factory);
     await second.runtime.initialize([agent]);
+    const saves = vi.spyOn(second.repos.channelMappings, 'save');
+    const updateOffset = service.update.mock.calls.length;
     const restored = coordinator(second, service);
     await restored.initializeWorkflows(config);
     await vi.waitFor(() => expect(backend.drivers[1]!.recover).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: originalCardId }))); 
+    await vi.waitFor(() => expect(service.update.mock.calls.slice(updateOffset).some(([input]) => input.messageId === originalCardId && input.state === 'running')).toBe(true));
     await restored.startReconciliation(config);
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input.state))).toBe(false);
+    expect(service.update.mock.calls.slice(updateOffset).some(([input]) => input.state === 'queued')).toBe(false);
+    expect(JSON.stringify(service.update.mock.calls.slice(updateOffset))).toContain('重启前的已有进度');
+    expect(saves).toHaveBeenCalled();
+    for (const [saved] of saves.mock.calls) {
+      expect(JSON.parse(saved.extra!)).toMatchObject({ runtime_task_id: JSON.parse(before!.extra!).runtime_task_id, started_at: originalStartedAt });
+    }
 
     backend.publish('恢复后的结果');
     backend.complete();
@@ -194,6 +211,78 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     expect(service.send.mock.calls.filter(([input]) => input.state === 'completed' && input.readOnly === true)).toHaveLength(1);
     expect(JSON.parse((await second.repos.config.get(`lark.inbox.${config.appId}.${message.messageId}`))!)).toMatchObject({ state: 'accepted' });
 
+    restored.stop();
+  });
+
+  it.each(['start', 'dispatch'] as const)('defers a request rejected by daemon shutdown at %s without delivering a failure card', async phase => {
+    const file = database(); const backend = persistentBackend(); const service = cardService();
+    const first = open(file, backend.factory);
+    await first.runtime.initialize([agent]);
+    await first.repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    const operation = vi.spyOn(first.runtime, phase).mockRejectedValueOnce(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dockmux is shutting down', 503));
+    const original = coordinator(first, service);
+    await original.initializeWorkflows(config);
+    await original.handle(message, config);
+    await vi.waitFor(() => expect(operation).toHaveBeenCalledOnce());
+    // handle queues runTurn, so await that turn before inspecting its receipt.
+    await (original as any).groups.values().next().value.tail;
+    const inbox = JSON.parse((await first.repos.config.get(`lark.inbox.${config.appId}.${message.messageId}`))!);
+    expect(inbox.state).toBe('received');
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input.state))).toBe(false);
+    original.stop(); await close(first);
+
+    const second = open(file, backend.factory);
+    await second.runtime.initialize([agent]);
+    const restored = coordinator(second, service);
+    await restored.initializeWorkflows(config);
+    await vi.waitFor(() => expect(backend.prompts).toHaveLength(1));
+    backend.publish('自动恢复结果'); backend.complete();
+    await vi.waitFor(() => expect(service.send.mock.calls.filter(([input]) => input.state === 'completed' && input.readOnly)).toHaveLength(1));
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted'].includes(input.state))).toBe(false);
+    const [mapping] = await second.repos.channelMappings.list(`lark-card:${config.appId}`);
+    if (inbox.cardId) expect(JSON.parse(mapping!.extra!).card_message_id).toBe(inbox.cardId);
+    restored.stop();
+  });
+
+  it('keeps the original card and task running when another restart interrupts recovery setup', async () => {
+    const file = database(); const backend = persistentBackend(); const service = cardService();
+    const { first, firstCoordinator } = await prepareFirstDaemon(file, backend, service);
+    const [session] = await first.runtime.listSessions();
+    const [originalTask] = await first.runtime.getTasks(session!.id);
+    const [mapping] = await first.repos.channelMappings.list(`lark-card:${config.appId}`);
+    const cardId = JSON.parse(mapping!.extra!).card_message_id;
+    firstCoordinator.stop(); await close(first);
+
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const authorize = vi.fn(() => gate);
+    const second = open(file, backend.factory, { authorizeExecution: authorize });
+    await second.runtime.initialize([agent]);
+    await vi.waitFor(() => expect(authorize).toHaveBeenCalledOnce());
+    const recovering = coordinator(second, service);
+    await recovering.initializeWorkflows(config);
+    // Leave card subscribers live while Runtime shuts down so a transient
+    // interrupted/failed task cannot be hidden by listener teardown ordering.
+    const stopping = second.runtime.shutdown();
+    release(); await stopping;
+    expect((await second.runtime.getTasks(session!.id))[0]?.status).toBe('running');
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input.state))).toBe(false);
+    recovering.stop(); await close(second);
+
+    const third = open(file, backend.factory);
+    await third.runtime.initialize([agent]);
+    const restored = coordinator(third, service);
+    await restored.initializeWorkflows(config);
+    await vi.waitFor(() => expect(backend.drivers[1]!.recover).toHaveBeenCalledOnce());
+    backend.publish('连续重启后的最终结果'); backend.complete();
+    await vi.waitFor(async () => {
+      const [current] = await third.repos.channelMappings.list(`lark-card:${config.appId}`);
+      expect(JSON.parse(current!.extra!)).toMatchObject({ card_message_id: cardId, state: 'completed', final_delivery_state: 'delivered' });
+    });
+    expect((await third.runtime.getTasks(session!.id)).map(task => task.id)).toEqual([originalTask!.id]);
+    expect(backend.prompts).toHaveLength(1);
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted'].includes(input.state))).toBe(false);
+    expect(service.send.mock.calls.filter(([input]) => input.state === 'completed' && input.readOnly)).toHaveLength(1);
     restored.stop();
   });
 
