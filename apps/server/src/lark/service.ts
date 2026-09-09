@@ -44,6 +44,12 @@ export interface LarkCardInput {
   /** Override the lifecycle label without changing the machine state. */
   statusLabel?: string;
   /**
+   * 这张卡正停下来等人（等审批、等回答）。任务卡由 trace 里的 risk_alert_pending_* 自证，
+   * 而 workflow 的审批/提问卡自己拼 elements、没有那个 element_id，只能显式声明。
+   * 声明后卡片转成橙色色带，从执行中的蓝色里区分出来。
+   */
+  awaitingHuman?: boolean;
+  /**
    * 操作按钮能力声明（card-actions.ts 的唯一事实源入参）。
    * 由 coordinator 按 runtime 实际能力 + 任务当前状态注入；未注入时按保守默认推导，
    * 保证既有调用点行为不变。任一能力为 false 时对应按钮不渲染，而不是渲染死按钮。
@@ -178,6 +184,10 @@ export interface LarkConfigurationStatus {
   baseUrl: string;
 }
 
+// header 的 template 是整条卡宽的饱和色块，一张卡上最重的一块颜色，也是在群里滚动时
+// 唯一能不读字就分出来的东西：蓝=在跑、绿=跑完、红=失败、灰=排队或已取消。
+// 等人处理的卡在 buildLarkCard 里强制转 orange——橙色在这套配色里没有别的用途，
+// 一眼就能从一片蓝绿里跳出来。
 const statePresentation = {
   queued: { title: '排队中', color: 'grey', template: 'grey' },
   running: { title: '正在执行', color: 'wathet', template: 'blue' },
@@ -347,8 +357,13 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const elapsedSeconds = Number(input.elapsedSeconds ?? 0);
   if (!Number.isFinite(elapsedSeconds) || elapsedSeconds < 0) throw new LarkServiceError('INVALID_ELAPSED_SECONDS', 'elapsedSeconds must be a non-negative number', 400);
   const content = input.markdown !== undefined ? String(input.markdown) : state === 'completed' ? '任务已完成。' : '';
-  const liveTitle = input.statusLabel?.trim()
-    ? clipCardField(input.statusLabel.trim(), 32)
+  // 调用方显式传 statusLabel，是在说这张卡的状态不是本 state 的默认说法：workflow 的
+  // 审批卡传「等待审批」、提问卡传「等待回答」、办结卡传「已处理」。下面两条
+  // 「状态已经由别处表达了」的省略规则必须给它让路——省掉之后，一张停下来等人的卡上
+  // 只剩一个表示「正在跑」的转圈图标，语义正好是反的。
+  const explicitStatusLabel = Boolean(input.statusLabel?.trim());
+  const liveTitle = explicitStatusLabel
+    ? clipCardField(input.statusLabel!.trim(), 32)
     : state === 'running' ? '执行中' : presentation.title;
   const compactTaskName = taskName;
   // 操作按钮统一由 card-actions.ts 这一唯一事实源决定：渲染端与 coordinator 回调端
@@ -377,10 +392,24 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
     capabilities: actionCapabilities
   });
-  // 页脚只承载「去哪看全貌」一件事。执行者已经写在 header 副标题里，页脚再写一次
-  // 就是同一个名字在一张卡上出现两遍；工作区路径、任务号、权限标签对聊天里的读者
-  // 没有可操作性，同样不占这一行。没有 Web 出口时整行不渲染，不留空页脚。
+  // 页脚承载两件不值得占正文的事：这轮跑了多久，以及去哪看全貌。执行者已经写在
+  // header 副标题里，页脚再写一次就是同一个名字在一张卡上出现两遍；工作区路径、
+  // 任务号、权限标签对聊天里的读者没有可操作性，同样不占这一行。
+  // 两者都没有时整行不渲染，不留空页脚。
   const footerColumns: any[] = [];
+  // 已完成的卡不再渲染状态行（见下方 showStatusRow），耗时挪到页脚：它能说明这轮跑了
+  // 多久，值得留下，但不值得占正文最上面一行去把结果往下推。
+  // 调用方显式给了 statusLabel 时状态行会保留，耗时也就还在正文里，页脚不能再写一遍。
+  if (state === 'completed' && elapsedSeconds > 0 && !explicitStatusLabel) {
+    footerColumns.push({
+      tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
+      elements: [{
+        tag: 'markdown', element_id: 'task_elapsed',
+        content: `<font color='grey'>用时 ${elapsedLabel(elapsedSeconds)}</font>`,
+        text_size: 'x-small', margin: '0px'
+      }]
+    });
+  }
   // 详情链接是整卡唯一的 Web 出口（顶部不再重复渲染同一个链接按钮），
   // 因此这里必须自己校验协议，不能假设别处已经挡掉 javascript: 之类的目标。
   const footerDetailUrl = safeLarkWebUrl(sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : webBaseUrl ? `${webBaseUrl}/` : undefined);
@@ -399,15 +428,13 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     : [{ tag: 'markdown', content, text_align: 'left', text_size: 'normal_v2', margin: '0px' }];
   const hasPendingApproval = (elements: Array<Record<string, unknown>>) => elements.some(element =>
     typeof element.element_id === 'string' && element.element_id.startsWith('risk_alert_pending_')
-  );
+  ) || input.awaitingHuman === true;
   const arrange = (mainElements: Array<Record<string, unknown>>) => {
     const waitingForApproval = state === 'running' && hasPendingApproval(mainElements);
-    const finalIds = new Set(['result_header', 'final_output', 'result_missing', 'evidence']);
+    const finalIds = new Set(['final_output', 'result_missing', 'evidence']);
     const finalElements = mainElements.filter(element => finalIds.has(String(element.element_id ?? '')));
     const traceElements = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
     const omissionNotice = mainElements.find(element => element.element_id === 'trace_omission');
-    const historyLabel = mainElements.find(element => element.element_id === 'history_label');
-    const traceDigest = mainElements.find(element => element.element_id === 'trace_digest');
     const attentionElements = mainElements.filter(element => {
       const id = String(element.element_id ?? '');
       return id.startsWith('risk_alert_') || id.startsWith('execution_alert_') || String(element.content ?? '').includes('原运行卡片未能更新');
@@ -416,9 +443,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ...finalElements,
       ...traceElements,
       ...attentionElements,
-      ...(traceDigest ? [traceDigest] : []),
-      ...(omissionNotice ? [omissionNotice] : []),
-      ...(historyLabel ? [historyLabel] : [])
+      ...(omissionNotice ? [omissionNotice] : [])
     ]);
     const otherElements = mainElements.filter(element => !claimed.has(element));
     // 终态卡片的 header 已经用色带表达了结果，body 再放一个同色 text_tag 就是同一件事
@@ -426,10 +451,25 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     // （状态文字仍然保留，颜色不是唯一线索）；运行态保留彩色 tag——那时状态还会变，
     // 需要它把注意力拉过去。
     const liveState = state === 'running' || state === 'queued';
-    const statusLabelText = waitingForApproval ? '等待审批' : liveTitle;
+    const statusLabelText = waitingForApproval && !explicitStatusLabel ? '等待审批' : liveTitle;
+    // 「已完成」这一行在终态卡上没有读者：绿色色带已经说了一遍，结果就在它正下方，
+    // 而它每出现一次就把结果往下推一行。撤掉之后结论坐在卡片第一行，耗时退到页脚。
+    // 注意这没有消除过程卡与结果卡之间的跨消息重复——两张卡的标题、页脚耗时和
+    // 「查看详情」仍然相同，只是不再各占一行正文。
+    //
+    // 其余终态仍然渲染：失败和取消要让读者据此决定是否重试，而那不是默认预期。
+    const showStatusRow = state !== 'completed' || explicitStatusLabel;
+    // 「已用时 0s」不是信息：它要么是首帧、要么是这张卡根本不会再更新（审批卡、提问卡
+    // 都由 workflow-interactions 一次性投递，没有心跳）。0 一律不写。
+    const elapsedText = elapsedSeconds > 0 ? `已用时 ${elapsedLabel(elapsedSeconds)}` : '';
+    // 执行中的卡上，状态行右边就跟着一个转圈的 loading 图标，它本身已经说明任务在跑；
+    // 再挂一个「执行中」标签，是同一件事的第三遍（还有一遍在聊天列表的 summary 里）。
+    // 排队中和等待审批没有这个图标，状态必须由文字承担，标签保留。
+    // 耗时还没攒够 1 秒时也保留：图标不能独自撑起一行没有任何文字的状态行。
+    const spinnerSpeaks = state === 'running' && !waitingForApproval && !explicitStatusLabel && elapsedText !== '';
     const statusContent = liveState
-      ? `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${statusLabelText}</text_tag>　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>`
-      : `<font color='grey'>${statusLabelText}　已用时 ${elapsedLabel(elapsedSeconds)}</font>`;
+      ? [spinnerSpeaks ? '' : `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${statusLabelText}</text_tag>`, elapsedText && `<font color='grey'>${elapsedText}</font>`].filter(Boolean).join('　')
+      : `<font color='grey'>${[statusLabelText, elapsedText].filter(Boolean).join('　')}</font>`;
     const loadingIcon = loadingImageKey
       ? { tag: 'custom_icon', img_key: loadingImageKey, size: '20px 20px' }
       : { tag: 'standard_icon', token: 'loading_outlined', color: 'grey', size: '14px 14px' };
@@ -462,13 +502,14 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ]
       } : currentGroup;
       const historyGroups = traceElements.filter(el => el !== currentGroup);
+      // 历史阶段的位置本身就说明了它们是历史，不需要一行「此前阶段」再讲一遍。
+      // 位置表达不了的只有「还有多少个更早阶段没展示」，那一行由 renderer 作为
+      // trace_omission 产出，运行态与非运行态两种布局共用同一条。
       const historyItems: Record<string, unknown>[] = historyGroups.length ? [
-        historyLabel ?? { tag: 'markdown', element_id: 'history_label', content: "<font color='grey'>此前阶段</font>", text_size: 'notation', margin: '4px 0px 2px 0px' },
+        ...(omissionNotice ? [omissionNotice] : []),
         ...historyGroups
       ] : [];
 
-      // 运行态的省略提示已经并进「此前阶段」那一行，这里再放一条 trace_omission 就是
-      // 同一句话说两遍；它只服务把所有阶段收进「执行记录」的非运行态布局。
       traceSection = [
         ...(currentStage ? [currentStage] : []),
         ...historyItems
@@ -484,7 +525,6 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           icon_position: 'right', icon_expanded_angle: -180
         },
         elements: [
-          ...(traceDigest ? [traceDigest] : []),
           ...(omissionNotice ? [omissionNotice] : []),
           ...traceElements
         ]
@@ -492,7 +532,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     }
     // 按钮列宽随按钮数量放宽：单按钮沿用 72px，多按钮时改为自适应，
     // 否则第二个按钮会被 72px 挤压折行。
-    const taskHeader = actionButtons.length ? [{
+    const buttonRow = [{
       tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '8px', vertical_align: 'center', margin: '0px',
       columns: [
         { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [statusElement] },
@@ -504,7 +544,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           }] : actionButtons
         }
       ]
-    }] : [statusElement];
+    }];
+    // 有按钮就必须有承载它们的那一行，状态一并显示在左侧；没有按钮时状态行可以整行
+    // 省掉——已完成的卡走的就是这条路。
+    const taskHeader = actionButtons.length ? buttonRow : showStatusRow ? [statusElement] : [];
     return [
       ...taskHeader,
       ...attentionElements,
@@ -540,7 +583,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           trace_failure: { light_mode: 'rgba(163,77,0,1)', dark_mode: 'rgba(255,178,102,1)' },
           trace_running: { light_mode: 'rgba(36,91,219,1)', dark_mode: 'rgba(124,202,242,1)' }
         } },
-        summary: { content: `${taskName} · ${waitingForApproval ? '等待审批' : liveTitle}` }
+        summary: { content: `${taskName} · ${waitingForApproval && !explicitStatusLabel ? '等待审批' : liveTitle}` }
       },
       body: {
         direction: 'vertical', vertical_spacing: '8px', padding: '10px 12px 10px 12px',
@@ -618,7 +661,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     body: {
       direction: 'vertical', padding: '10px 12px',
       elements: [
-        { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>`, text_size: 'small' },
+        { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
         { tag: 'markdown', content: '卡片内容超过飞书安全预算，详细内容已收起。请在 Dockmux Web 查看完整记录。', text_size: 'normal' }
       ]
     }

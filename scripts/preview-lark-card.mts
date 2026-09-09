@@ -23,7 +23,10 @@ import {
 } from '../apps/server/src/lark/card-renderer.js';
 import { boundLarkCardElements, buildLarkCard } from '../apps/server/src/lark/service.js';
 
-const base = Date.parse('2026-09-09T10:00:00.000Z');
+// 仍在执行的步骤没有 completedAt，耗时按 Date.now() 兜底计算。基线钉死在某个日期时，
+// 这类步骤会渲染出「80m 12s」——那是基线到今天的距离，不是步骤耗时，改版前后并排看时
+// 它是一处每天都在变的假差异。基线跟随当前整分钟，同一分钟内重跑结果一致。
+const base = Math.floor(Date.now() / 60_000) * 60_000 - 90_000;
 const t = (seconds: number) => new Date(base + seconds * 1_000).toISOString();
 const event = (sequence: number, type: AgentEvent['type'], seconds: number, data: Record<string, unknown>): AgentEvent =>
   ({ id: `e${sequence}`, sessionId: 'ses_preview', sequence, type, timestamp: t(seconds), data });
@@ -91,6 +94,29 @@ const web = 'http://10.37.33.49:4310';
 const liveCapabilities = { canCancelQueued: false, canInterrupt: true, canRetry: false, canRefresh: true, webUrl: `${web}/sessions/ses_preview` };
 const doneCapabilities = { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, webUrl: `${web}/sessions/ses_preview` };
 
+// workflow-interactions.ts 的审批/提问卡自己拼 elements 走 service.reply，不经过
+// renderLarkProcessElements，也是唯一能真正落地审批的入口。它长期没进预览，
+// 「statusLabel 被状态默认值吞掉」这类只发生在这条链路上的问题就没人看得见。
+const workflowButton = (action: string, label: string) => ({
+  tag: 'button', element_id: `workflow_${action}`, text: { tag: 'plain_text', content: label },
+  type: action === 'approve' ? 'primary' : 'default',
+  behaviors: [{ type: 'callback', value: { dockmux_workflow: action, request_id: 'wf_preview', generation: 'preview' } }]
+});
+const workflowCard = (kind: 'permission' | 'ask') => buildLarkCard({
+  agentName: 'Claude Code', state: 'running', readOnly: true, awaitingHuman: true, permissionMode: 'ask',
+  statusLabel: kind === 'ask' ? '等待回答' : '等待审批',
+  taskId: `wf_preview_${kind}`, taskName: kind === 'ask' ? 'Agent 需要你的回答' : '确认本次操作',
+  elements: [
+    { tag: 'div', text: { tag: 'plain_text', content: kind === 'ask'
+      ? '缓存目录里 pnpm 占 3.2G、playwright 占 880M。整个删掉，还是只清 pnpm？'
+      : '高危操作：删除 ~/.cache/pnpm 目录（3.2G）' } },
+    { tag: 'markdown', content: kind === 'ask'
+      ? '回复此卡片，或发送 `/answer wf_preview_ask 你的回答`。'
+      : '仅对本次工具调用生效。也可发送 `/approve wf_preview_permission` 或 `/reject wf_preview_permission`。' },
+    ...(kind === 'permission' ? [workflowButton('approve', '批准一次'), workflowButton('reject', '拒绝')] : [])
+  ]
+});
+
 const scenarios: Scenario[] = [
   {
     id: 'running-multi-stage',
@@ -124,6 +150,18 @@ const scenarios: Scenario[] = [
       capabilities: liveCapabilities,
       elements: boundLarkCardElements(renderLarkProcessElements(approvalRun, config))
     })
+  },
+  {
+    id: 'workflow-permission',
+    label: '审批卡 · 独立回复（可点批准）',
+    note: '任务卡只负责说「停下来等人了」，真正能批准的是这张。只读态下卡片自己不加按钮，正文里那两个才是入口。',
+    card: workflowCard('permission')
+  },
+  {
+    id: 'workflow-ask',
+    label: '提问卡 · 独立回复',
+    note: '同一条链路的另一种停：Agent 在问问题。状态字必须是「等待回答」，不能被写成「等待审批」。',
+    card: workflowCard('ask')
   },
   {
     id: 'completed-process',
@@ -178,24 +216,44 @@ const fontColor: Record<string, string> = {
   grey: '#8F959E', green: '#2EA121', red: '#C93A38', orange: '#A34D00', yellow: '#8F6A00',
   blue: '#245BDB', wathet: '#245BDB'
 };
+// 飞书内置字号档。heading-* 是 schema 2.0 的语义档，卡片可以在 config.style.text_size 里
+// 给它们起自定义名（并为 PC 与移动端各取一档），正文再按那个名字引用。
 const size: Record<string, string> = {
+  'heading-0': '24px', 'heading-1': '20px', 'heading-2': '18px', 'heading-3': '16px', 'heading-4': '14px',
   heading: '18px', normal: '14px', normal_v2: '14px', small: '13px', notation: '12px', 'x-small': '11px'
 };
+
+/** 卡片自带的色板与字号表，随 config.style 逐卡解析。 */
+type Theme = { color: Record<string, string>; textSize: Record<string, string> };
 
 const esc = (value: string) => value.replace(/&(?![a-z]+;|#\d+;)/gi, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const IDEOGRAPHIC_SPACE = String.fromCharCode(0x3000);
 
-/** 只覆盖卡片实际用到的 markdown 子集：font/text_tag/代码块/行内代码/加粗/链接/标题/列表。 */
-function markdown(input: string, styles: Record<string, string>): string {
+/** 自定义字号名先查卡片自己的声明，再落到内置档，两者都没有时按正文字号处理。 */
+const fontSize = (name: string | undefined, theme: Theme) =>
+  theme.textSize[name ?? ''] ?? size[name ?? 'normal'] ?? '14px';
+
+/** 自定义色名同理：卡片声明优先，其次内置语义色，最后当作原样的 CSS 颜色。 */
+const tint = (name: string | undefined, theme: Theme) =>
+  name ? theme.color[name] ?? fontColor[name] ?? name : undefined;
+
+/**
+ * 只覆盖卡片实际用到的 markdown 子集：font/text_tag/代码块/行内代码/加粗/链接/标题/列表。
+ *
+ * 代码块先抽走、渲染完再放回，占位符用 NUL 包住序号。分隔符必须是正文里不可能出现的
+ * 字符：用空格包序号的话，正文里一句「17 项断言全部通过」会被当成第 17 个代码块，
+ * 还原成 undefined。
+ */
+function markdown(input: string, theme: Theme): string {
   const blocks: string[] = [];
   let text = String(input ?? '').replace(/```(?:\w+)?\n([\s\S]*?)```/g, (_match, code: string) => {
     blocks.push(`<pre class="code">${esc(code.replace(/\n$/, ''))}</pre>`);
-    return ` ${blocks.length - 1} `;
+    return `\0${blocks.length - 1}\0`;
   });
   text = esc(text);
   text = text
     .replace(/&lt;font color='([^']+)'&gt;([\s\S]*?)&lt;\/font&gt;/g,
-      (_m, color: string, body: string) => `<span style="color:${styles[color] ?? fontColor[color] ?? color}">${body}</span>`)
+      (_m, color: string, body: string) => `<span style="color:${tint(color, theme)}">${body}</span>`)
     .replace(/&lt;text_tag color='([^']+)'&gt;([\s\S]*?)&lt;\/text_tag&gt;/g, (_m, color: string, body: string) => {
       const [background, foreground] = tagColor[color] ?? tagColor.neutral!;
       return `<span class="tag" style="background:${background};color:${foreground}">${body}</span>`;
@@ -207,37 +265,53 @@ function markdown(input: string, styles: Record<string, string>): string {
     .replace(/^(\s*)[-*]\s+(.+)$/gm, '$1• $2')
     .split(IDEOGRAPHIC_SPACE).join('<span class="gap"></span>')
     .replace(/\n/g, '<br>');
-  return text.replace(/ (\d+) /g, (_m, index: string) => blocks[Number(index)]!);
+  return text.replace(/\0(\d+)\0/g, (_m, index: string) => blocks[Number(index)]!);
 }
 
-const icon = (element: any) => element
-  ? `<span class="icon" title="${esc(String(element.token ?? element.img_key ?? ''))}"></span>`
+const icon = (element: any, theme?: Theme) => element
+  ? `<span class="icon" title="${esc(String(element.token ?? element.img_key ?? ''))}"${
+      element.color && theme ? ` style="background:${tint(element.color, theme)}"` : ''}></span>`
   : '';
 
-function renderElement(element: any, styles: Record<string, string>): string {
+/** 纵向堆叠间距：飞书的 vertical_spacing 作用在容器上，这里落成 flex gap。 */
+const stackStyle = (spacing: unknown) =>
+  spacing ? `display:flex;flex-direction:column;gap:${spacing};` : '';
+
+function renderElement(element: any, theme: Theme): string {
   if (!element || typeof element !== 'object') return '';
   const margin = String(element.margin ?? '0px');
   const align = element.text_align ? `text-align:${element.text_align};` : '';
   const wrap = (inner: string) => `<div style="margin:${margin};${align}">${inner}</div>`;
   switch (element.tag) {
     case 'markdown':
-      return wrap(`${icon(element.icon)}<span style="font-size:${size[element.text_size ?? 'normal'] ?? '14px'}">${markdown(element.content, styles)}</span>`);
-    case 'div':
-      return wrap(`${icon(element.icon)}<span style="font-size:${size[element.text?.text_size ?? 'normal'] ?? '14px'}">${markdown(element.text?.content ?? '', styles)}</span>`);
-    case 'button': {
-      const kind = element.type === 'danger' ? 'danger' : element.type === 'primary' ? 'primary' : 'default';
-      return `<button class="btn ${kind}">${esc(element.text?.content ?? '')}</button>`;
+      return wrap(`${icon(element.icon, theme)}<span style="font-size:${fontSize(element.text_size, theme)}">${markdown(element.content, theme)}</span>`);
+    case 'div': {
+      const color = tint(element.text?.text_color, theme);
+      return wrap(`${icon(element.icon, theme)}<span style="${color ? `color:${color};` : ''}font-size:${fontSize(element.text?.text_size, theme)}">${markdown(element.text?.content ?? '', theme)}</span>`);
     }
-    case 'column_set':
-      return wrap(`<div class="row" style="gap:${element.horizontal_spacing ?? '8px'}">${(element.columns ?? [])
-        .map((column: any) => `<div class="col" style="${column.width === 'weighted' ? `flex:${column.weight ?? 1}` : 'flex:0 0 auto'}">${(column.elements ?? []).map((child: any) => renderElement(child, styles)).join('')}</div>`)
+    case 'button': {
+      const kind = element.type === 'danger' ? 'danger'
+        : element.type === 'primary' ? 'primary'
+          : element.type === 'text' ? 'text' : 'default';
+      return `<button class="btn ${kind}"${element.disabled ? ' disabled' : ''}>${esc(element.text?.content ?? '')}</button>`;
+    }
+    case 'column_set': {
+      const vertical = element.vertical_align === 'center' ? 'align-items:center;' : '';
+      return wrap(`<div class="row" style="gap:${element.horizontal_spacing ?? '8px'};${vertical}">${(element.columns ?? [])
+        .map((column: any) => {
+          const flex = column.width === 'weighted' ? `flex:${column.weight ?? 1};`
+            : typeof column.width === 'string' && column.width.endsWith('px') ? `flex:0 0 ${column.width};`
+              : 'flex:0 0 auto;';
+          return `<div class="col" style="${flex}${column.padding ? `padding:${column.padding};` : ''}${stackStyle(column.vertical_spacing)}">${(column.elements ?? []).map((child: any) => renderElement(child, theme)).join('')}</div>`;
+        })
         .join('')}</div>`);
+    }
     case 'collapsible_panel':
-      return wrap(`<details class="panel"${element.expanded ? ' open' : ''}><summary>${renderElement({ ...element.header?.title, margin: '0px' }, styles)}<span class="chevron">v</span></summary><div class="panel-body" style="padding:${element.padding ?? '0px'}">${(element.elements ?? []).map((child: any) => renderElement(child, styles)).join('')}</div></details>`);
+      return wrap(`<details class="panel"${element.expanded ? ' open' : ''}><summary>${renderElement({ ...element.header?.title, margin: '0px' }, theme)}<span class="chevron">v</span></summary><div class="panel-body" style="padding:${element.padding ?? '0px'};${stackStyle(element.vertical_spacing)}">${(element.elements ?? []).map((child: any) => renderElement(child, theme)).join('')}</div></details>`);
     case 'interactive_container': {
-      const background = element.background_style && styles[element.background_style]
-        ? `background:${styles[element.background_style]};` : '';
-      return wrap(`<div class="container" style="${background}border-radius:${element.corner_radius ?? '0px'};padding:${element.padding ?? '0px'}">${(element.elements ?? []).map((child: any) => renderElement(child, styles)).join('')}</div>`);
+      const background = tint(element.background_style, theme);
+      const border = element.has_border ? `border:1px solid ${tint(element.border_color, theme) ?? '#DEE0E3'};` : '';
+      return wrap(`<div class="container" style="${background ? `background:${background};` : ''}${border}${stackStyle(element.vertical_spacing)}border-radius:${element.corner_radius ?? '0px'};padding:${element.padding ?? '0px'}">${(element.elements ?? []).map((child: any) => renderElement(child, theme)).join('')}</div>`);
     }
     case 'hr':
       return '<hr>';
@@ -246,17 +320,30 @@ function renderElement(element: any, styles: Record<string, string>): string {
   }
 }
 
-function renderCard(card: any): string {
-  const styles: Record<string, string> = Object.fromEntries(
-    Object.entries(card.config?.style?.color ?? {}).map(([name, value]: [string, any]) => [name, value.light_mode]));
-  const bar = template[card.header?.template ?? 'blue'] ?? '#3370FF';
-  return `<div class="card">
-  <div class="card-header" style="background:${bar}">
-    <div class="card-title">${esc(card.header?.title?.content ?? '')}</div>
-    ${card.header?.subtitle?.content ? `<div class="card-subtitle">${esc(card.header.subtitle.content)}</div>` : ''}
-  </div>
+export function renderCard(card: any): string {
+  const theme: Theme = {
+    color: Object.fromEntries(Object.entries(card.config?.style?.color ?? {})
+      .map(([name, value]: [string, any]) => [name, value.light_mode])),
+    // 一个自定义字号可以按端各取一档（default / pc / mobile）。预览是桌面宽度，取 pc。
+    textSize: Object.fromEntries(Object.entries(card.config?.style?.text_size ?? {})
+      .map(([name, value]: [string, any]) => [
+        name,
+        size[typeof value === 'string' ? value : value?.pc ?? value?.default] ?? '14px'
+      ]))
+  };
+  // template 的默认值 default 就是「无色带」形态：白底、深色标题。改版把成功和运行中
+  // 都收敛到了这一档，预览必须能如实画出来，否则改版前后最大的一处差别恰好看不见。
+  // 整卡不带 header 也是合法形态，同样要能画。
+  const band = String(card.header?.template ?? 'default');
+  const plain = !template[band];
+  const header = card.header ? `
+  <div class="card-header${plain ? ' plain' : ''}"${plain ? '' : ` style="background:${template[band]}"`}>
+    <div class="card-title">${esc(card.header.title?.content ?? '')}</div>
+    ${card.header.subtitle?.content ? `<div class="card-subtitle">${esc(card.header.subtitle.content)}</div>` : ''}
+  </div>` : '';
+  return `<div class="card">${header}
   <div class="card-body" style="padding:${card.body?.padding ?? '12px'}">
-    ${(card.body?.elements ?? []).map((element: any) => `<div class="stack" style="margin-bottom:${card.body?.vertical_spacing ?? '8px'}">${renderElement(element, styles)}</div>`).join('')}
+    ${(card.body?.elements ?? []).map((element: any) => `<div class="stack" style="margin-bottom:${card.body?.vertical_spacing ?? '8px'}">${renderElement(element, theme)}</div>`).join('')}
   </div>
 </div>`;
 }
@@ -299,6 +386,11 @@ const html = `<!doctype html>
   .btn { border:1px solid #DEE0E3; background:#fff; border-radius:6px; padding:2px 10px; font-size:12px; line-height:20px; cursor:default; color:#1F2329; }
   .btn.primary { background:#3370FF; border-color:#3370FF; color:#fff; }
   .btn.danger { background:#fff; border-color:#F54A45; color:#F54A45; }
+  .btn.text { border-color:transparent; background:transparent; color:#245BDB; padding:2px 6px; }
+  .btn:disabled { opacity:.55; }
+  .card-header.plain { background:#fff; padding:12px 12px 2px; }
+  .card-header.plain .card-title { color:#1F2329; }
+  .card-header.plain .card-subtitle { color:#8F959E; }
   details.panel > summary { display:flex; align-items:center; gap:6px; cursor:pointer; list-style:none; }
   details.panel > summary::-webkit-details-marker { display:none; }
   details.panel > summary > div { flex:1; min-width:0; }

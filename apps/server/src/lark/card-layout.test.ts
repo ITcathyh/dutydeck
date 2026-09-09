@@ -87,13 +87,18 @@ describe('Lark card layout renderer->bound->build integration', () => {
     expect(byId(currentContainer, 'current_records')).toBeUndefined();
     const currentTool = currentContainer.elements.find((el: any) => el.element_id?.startsWith('trace_tool_'));
     expect(currentTool.tag).toBe('markdown');
-    expect(currentTool.content).toContain('运行测试');
+    // 摘要行写这一步实际跑的命令，不写「运行测试」这类分类名——分类已经由左边的
+    // 图标表达，用四个汉字复述一遍只会把命令挤到后半行。
     expect(currentTool.content).toContain('pnpm test');
+    expect(currentTool.content).not.toContain('运行测试');
+    expect(currentTool.icon).toMatchObject({ token: 'doc-checklist_outlined' });
 
-    // 此前阶段直接展示在 body
-    const historyLabelIndex = card.body.elements.findIndex((el: any) => el.element_id === 'history_label');
-    expect(historyLabelIndex).toBeGreaterThan(0);
-    const historyPanels = card.body.elements.slice(historyLabelIndex + 1).filter(
+    // 历史阶段直接排在当前阶段后面的 body 里，中间不再插一行「此前阶段」——
+    // 位置本身就说明了它们是历史。没有省略时这一段完全没有标签行。
+    expect(JSON.stringify(card)).not.toContain('此前阶段');
+    const currentIndex = card.body.elements.findIndex((el: any) => el === currentContainer);
+    expect(currentIndex).toBeGreaterThan(0);
+    const historyPanels = card.body.elements.slice(currentIndex + 1).filter(
       (el: any) => el.tag === 'collapsible_panel' && el.element_id?.startsWith('trace_group_')
     );
     expect(historyPanels).toHaveLength(2);
@@ -116,7 +121,7 @@ describe('Lark card layout renderer->bound->build integration', () => {
       makeEvent(1, 'text', { text: '消息量很大，继续翻页拉取。' }),
       ...Array.from({ length: 24 }, (_, index) => makeEvent(index + 2, 'raw_terminal', { text: `终端输出 ${index + 1}` }))
     ];
-    const card = buildLarkCard({ state: 'running', elements: boundLarkCardElements(renderLarkProcessElements(events, config)) });
+    const card = buildLarkCard({ state: 'running', elapsedSeconds: 31, elements: boundLarkCardElements(renderLarkProcessElements(events, config)) });
     const current = byId(card, 'trace_group_0');
     expect(current.elements).toHaveLength(2);
     expect(current.elements[0]).toMatchObject({ element_id: 'current_title', content: '消息量很大，继续翻页拉取。' });
@@ -131,7 +136,9 @@ describe('Lark card layout renderer->bound->build integration', () => {
     expect(records.elements[0].content).toContain('终端输出 1');
     expect(records.elements[0].content).toContain('终端输出 24');
     expect(JSON.stringify(card)).not.toContain('terminal');
-    expect(byId(card, 'task_status').text.content).toContain('执行中');
+    // 执行中的状态由 loading 图标承担，状态行不再重复一个「执行中」标签。
+    expect(byId(card, 'task_status').text.content).toContain('已用时');
+    expect(byId(card, 'task_status').icon).toBeDefined();
   });
 
   it('keeps failures and approvals visible outside collapsed running records', () => {
@@ -192,8 +199,10 @@ describe('Lark card layout renderer->bound->build integration', () => {
     expect(toolsInGroup1).toHaveLength(2);
     expect(toolsInGroup1[0]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
     expect(toolsInGroup1[1]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
-    expect(toolsInGroup1[0].header.title.content).toContain('读取文件');
-    expect(toolsInGroup1[1].header.title.content).toContain('修改文件');
+    // 同上：标题给出被读写的真实路径，分类由图标表达。
+    expect(toolsInGroup1[0].header.title.content).toContain('a.ts');
+    expect(toolsInGroup1[0].header.title.icon).toMatchObject({ token: 'file-link-text_outlined' });
+    expect(toolsInGroup1[1].header.title.icon).toMatchObject({ token: 'edit_outlined' });
   });
 
   it('3. raw_terminal normalization: raw-only running, raw-only history, tool+raw history', () => {
@@ -443,7 +452,7 @@ export function restoreSession(sessionId: string) {
     expect(byId(card, 'final_output')?.content).toContain('最终总结结论');
     expect(JSON.stringify(card)).toContain('核心权限保留');
     expect(JSON.stringify(card)).toContain('第 15 阶段');
-    expect(JSON.stringify(card)).toContain('另有 10 个阶段');
+    expect(JSON.stringify(card)).toContain('另有 10 个更早阶段未展示');
   });
 
   it('9. budget bounds on single running group with many tools: does not silently drop latest command', () => {
@@ -578,8 +587,8 @@ export function restoreSession(sessionId: string) {
     const boundedToolContainer = (boundedGroup0.elements as any[]).find(el => el.element_id?.startsWith('trace_tool_'));
     expect(boundedToolContainer).toBeDefined();
     expect(boundedToolContainer.elements).toHaveLength(1); // 仅保留 elements[0] 工具标题摘要
-    expect(boundedToolContainer.elements[0].content).toContain('读取文件');
     expect(boundedToolContainer.elements[0].content).toContain('读取中文配置内容_1');
+    expect(boundedToolContainer.elements[0].icon).toMatchObject({ token: 'file-link-text_outlined' });
 
   });
 
@@ -606,7 +615,8 @@ export function restoreSession(sessionId: string) {
     const tool = byId(card, 'trace_tool_0_0');
     expect(tool.elements).toHaveLength(1);
     expect(tool.elements[0].content).toContain('command_0');
-    expect(tool.elements[0].content).toContain('trace_success');
+    // 成功的步骤不点灯：绿灯只是把「没有异常」重复一遍，还会淹掉真正的失败灯。
+    expect(tool.elements[0].content).not.toContain('trace_success');
     expect(tool.elements[0].content).toContain('4s');
     expect(byId(card, 'final_output').content).toBe(`最终结果。${padding}`);
   });
@@ -791,10 +801,67 @@ export function restoreSession(sessionId: string) {
       );
     }
     const elements = renderLarkProcessElements(events, config, false);
-    // running 靠「此前阶段（另有 N 个…）」这一行承载；queued 走的是另一套布局。
+    // 两种布局各自取一条 trace_omission，措辞相同。
     for (const state of ['running', 'queued'] as const) {
       expect(JSON.stringify(buildLarkCard({ state, elements, taskName: '多阶段任务', taskId: 'om_x', elapsedSeconds: 30 })))
         .toContain('个更早阶段未展示');
+    }
+  });
+
+  it('20. 工具摘要行永远有字：空工具名和零输入都不会退化成一行空白', () => {
+    // 摘要行改成「优先写命令、分类名退到兜底」之后，任何一环取到空串都会让整行只剩
+    // 一个图标。`{ name: '' }` 是真实存在的形态——空串不是 undefined，`??` 兜不住它。
+    const blank = renderLarkProcessElements(
+      [makeEvent(1, 'tool_result', { id: 'blank', name: '', output: 'ok', status: 'completed' })], config, true);
+    const zeroArg = renderLarkProcessElements(
+      [makeEvent(1, 'tool_result', { id: 'zero', name: 'tool', input: {}, output: 'ok', status: 'completed' })], config, true);
+    const summaryOf = (elements: Record<string, any>[]) => {
+      const node = components(elements).find(element => String(element.element_id ?? '').startsWith('trace_tool_'))!;
+      return String(node.header?.title?.content ?? node.content ?? node.elements?.[0]?.content ?? '');
+    };
+    for (const elements of [blank, zeroArg]) {
+      expect(summaryOf(elements).replace(/<[^>]+>|[●　\s]/g, '')).not.toBe('');
+    }
+  });
+
+  it('21. 只有 cwd 的工具保留分类名：工作目录不能被读成被执行的命令', () => {
+    // cwd 和 file_path 会被归并成同一个 detail，但语义相反。detail 独占标题时，
+    // `{ cwd: '/srv/repo' }` 会显示成一行孤零零的「/srv/repo」，读起来像执行了它。
+    const withCwd = renderLarkProcessElements(
+      [makeEvent(1, 'tool_result', { id: 'c', name: 'Bash', input: { cwd: '/srv/repo' }, output: 'ok', status: 'completed' })], config, true);
+    const withCommand = renderLarkProcessElements(
+      [makeEvent(1, 'tool_result', { id: 'r', name: 'Bash', input: { command: 'ls -la' }, output: 'ok', status: 'completed' })], config, true);
+    const summaryOf = (elements: Record<string, any>[]) => {
+      const node = components(elements).find(element => String(element.element_id ?? '').startsWith('trace_tool_'))!;
+      return String(node.header?.title?.content ?? node.content ?? node.elements?.[0]?.content ?? '');
+    };
+    // firstValue 先扫顶层再递归子对象，所以 detail 取到的是顶层的 cwd，而「detail 能不能
+    // 独占标题」的判定如果各查各的，会递归到嵌套的 file_path 判成 true，保护就失效了。
+    const nested = renderLarkProcessElements(
+      [makeEvent(1, 'tool_result', { id: 'n', name: 'Bash', input: { cwd: '/srv/repo', args: { file_path: 'a.ts' } }, output: 'ok', status: 'completed' })], config, true);
+    expect(summaryOf(withCwd)).toContain('运行命令');
+    expect(summaryOf(withCwd)).toContain('/srv/repo');
+    expect(summaryOf(nested)).toContain('运行命令');
+    // 命令本身是自解释的，此时分类名要让位，否则又变回「四个汉字挤掉命令」。
+    expect(summaryOf(withCommand)).toContain('ls -la');
+    expect(summaryOf(withCommand)).not.toContain('运行命令');
+  });
+
+  it('22. 告警块永远有正文：空的错误原因和空的审批标题都不会渲染出空 content', () => {
+    // ACP 侧的 message 可以是空串（acp-client 里是 `event.message ?? event.error?.message ?? 'Agent error'`，
+    // 第三方 agent 回 `{"error":{"message":""}}` 就得到空串）。`??` 兜不住空串，
+    // truncateTrace 里的 trim 又把纯空白压成空串——schema 2.0 下 content 为空的 markdown
+    // 要么被判非法让整卡更新失败，要么渲染成一块只有红色图标、一个字都没有的区域。
+    const contentOf = (elements: Record<string, any>[], prefix: string) =>
+      String(components(elements).find(element => String(element.element_id ?? '').startsWith(prefix))?.content ?? '');
+    for (const message of ['', '   ', undefined]) {
+      const elements = renderLarkProcessElements([makeEvent(1, 'error', { message })], config, true);
+      expect(contentOf(elements, 'execution_alert_').trim()).not.toBe('');
+    }
+    for (const title of ['', '   ', undefined]) {
+      const elements = renderLarkProcessElements(
+        [makeEvent(1, 'permission_request', { id: 'p1', title, status: 'pending', options: [] })], config);
+      expect(contentOf(elements, 'risk_alert_').replace(/<[^>]+>|\s/g, '')).not.toBe('');
     }
   });
 });

@@ -49,15 +49,13 @@ describe('Lark card service', () => {
       subtitle: { tag: 'plain_text', content: 'Business Agent' },
       template: 'green'
     });
-    expect(card.body.elements[0].text.content).toContain('已完成');
-    expect(card.body.elements[0].text.content).toContain('已用时 1m 5s');
-    expect(card.body.elements[0].text.text_size).toBe('small');
-    // 终态状态行是一行灰字：header 色带已经表达了结果，body 不再重复一块同色标签。
-    expect(card.body.elements[0].text.content).not.toContain('text_tag');
-    expect(card.body.elements[1].content).toBe('**done**');
-    // 页脚只承载 Web 出口。Agent 名已经在 header 副标题里，页脚不再写第二遍；
-    // 本例没有 webBaseUrl，因此整行页脚不渲染。
-    expect(card.body.elements.filter((element: any) => element.tag === 'column_set')).toHaveLength(0);
+    // 已完成的卡不渲染状态行：结论直接排在最上面，不再被一行「已完成」往下推。
+    expect(byId(card, 'task_status')).toBeUndefined();
+    expect(card.body.elements[0].content).toBe('**done**');
+    // 耗时改由页脚承担。Agent 名已经在 header 副标题里，页脚不写第二遍；
+    // 本例没有 webBaseUrl，所以页脚只剩耗时这一列。
+    expect(byId(card, 'task_elapsed').content).toContain('用时 1m 5s');
+    expect(JSON.stringify(card)).not.toContain('text_tag');
     const rendered = JSON.stringify(card);
     expect(rendered).not.toContain("<font color='grey'>Business Agent</font>");
     expect(rendered).not.toContain('/srv/repo');
@@ -112,7 +110,7 @@ describe('Lark card service', () => {
 
   it('keeps state-specific actions in the top prompt row', () => {
     const queued: any = buildLarkCard({ state: 'queued', taskId: 'queued' });
-    const running: any = buildLarkCard({ state: 'running', taskId: 'running' });
+    const running: any = buildLarkCard({ state: 'running', taskId: 'running', elapsedSeconds: 31 });
     const failed: any = buildLarkCard({ state: 'failed', taskId: 'failed' });
     const interrupted: any = buildLarkCard({ state: 'interrupted', taskId: 'interrupted' });
     expect(byId(queued, 'cancel')).toMatchObject({ text: { content: '取消' }, behaviors: [{ value: { action: 'cancel', task_id: 'queued' } }] });
@@ -121,9 +119,12 @@ describe('Lark card service', () => {
     expect(queued.config).toMatchObject({ streaming_mode: false, summary: { content: expect.stringContaining('排队中') } });
     expect(byId(running, 'interrupt')).toMatchObject({ text: { content: '中断' }, behaviors: [{ value: { action: 'interrupt', task_id: 'running' } }] });
     expect(byId(failed, 'retry')).toMatchObject({ text: { content: '重试' }, behaviors: [{ value: { action: 'retry', task_id: 'failed' } }] });
-    // 运行态和排队态保留彩色 text_tag：状态还会变，需要它把注意力拉过去。
-    // 终态改为灰字，避免和 header 色带说同一件事。
-    expect(byId(running, 'task_status').text.content).toContain("<text_tag color='wathet'>执行中</text_tag>");
+    // 执行中不再挂状态标签：状态行左边的 loading 图标已经在说任务在跑，
+    // 标签只是第三遍（第二遍在聊天列表的 summary 里）。排队中没有那个图标，
+    // 状态只能由文字承担，标签保留。
+    expect(byId(running, 'task_status').text.content).not.toContain('text_tag');
+    expect(byId(running, 'task_status').icon).toMatchObject({ token: 'loading_outlined' });
+    expect(byId(queued, 'task_status').text.content).toContain("<text_tag color='grey'>排队中</text_tag>");
     expect(byId(failed, 'task_status').text.content).toContain('已失败');
     expect(byId(failed, 'task_status').text.content).not.toContain('text_tag');
     expect(byId(interrupted, 'task_status').text.content).toContain('已取消');
@@ -136,7 +137,10 @@ describe('Lark card service', () => {
     const loading1: any = buildLarkCard({ state: 'running', elapsedSeconds: 1 });
     expect(loading0.header).toMatchObject({ template: 'blue', title: { content: 'Dockmux' } });
     expect(byId(loading0, 'task_status')).toMatchObject({ tag: 'div', icon: { tag: 'standard_icon', token: 'loading_outlined', color: 'grey' } });
+    // 0 秒不写耗时：这一格要么是首帧、要么是这张卡不会再更新，「已用时 0s」两种情况下都是假信息。
+    expect(byId(loading0, 'task_status').text.content).not.toContain('已用时');
     expect(byId(loading0, 'task_status').text.content).toContain('执行中');
+    expect(byId(loading1, 'task_status').text.content).toContain('已用时 1s');
     expect(byId(loading0, 'task_status').text.text_size).toBe('small');
     expect(buildLarkCard({ state: 'running', taskName: '任务摘要' }).header.title).toMatchObject({ tag: 'plain_text', content: '任务摘要' });
     expect(byId(loading1, 'task_status').icon.token).toBe('loading_outlined');
@@ -147,13 +151,13 @@ describe('Lark card service', () => {
   });
 
   it('pins interrupt above current running stage without trace overview wrapper', () => {
-    const card: any = buildLarkCard({ state: 'running', taskId: 'trace-running', elements: [
+    const card: any = buildLarkCard({ state: 'running', taskId: 'trace-running', elapsedSeconds: 31, elements: [
       { tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false, header: { title: { tag: 'markdown', content: '步骤' } }, elements: [] }
     ] });
     expect(card.body.elements[0]).toMatchObject({ tag: 'column_set', element_id: 'task_action_row' });
     expect(components(card.body.elements).some(element => element.element_id === 'trace_overview')).toBe(false);
     expect(card.body.elements[1]).toMatchObject({ element_id: 'trace_group_0' });
-    expect(byId(card, 'task_status').text.content).toContain('执行中');
+    expect(byId(card, 'task_status').text.content).toContain('已用时');
     expect(byId(card, 'interrupt')).toMatchObject({ behaviors: [{ value: { action: 'interrupt', task_id: 'trace-running' } }] });
     expect(card.body.elements.filter((element: any) => element.tag === 'column_set').map((element: any) => element.element_id)).toEqual(['task_action_row']);
     const animated: any = buildLarkCard({ state: 'running', taskId: 'trace-animated', loadingImageKey: 'img_bouncing', elements: [
@@ -234,20 +238,66 @@ describe('Lark card service', () => {
     const overviewIndex = card.body.elements.findIndex((element: any) => element.element_id === 'trace_overview');
     const statusIndex = card.body.elements.findIndex((element: any) => element.element_id === 'task_status');
     const finalIndex = card.body.elements.findIndex((element: any) => element.element_id === 'final_output');
-    expect(statusIndex).toBe(0);
+    // 已完成的卡撤掉状态行，结论因此坐在第一位；耗时退到页脚。
+    expect(statusIndex).toBe(-1);
+    expect(finalIndex).toBe(0);
+    expect(byId(card, 'task_elapsed').content).toContain('用时 1m 37s');
     expect(card.body.elements[overviewIndex]).toMatchObject({ tag: 'collapsible_panel', expanded: false });
-    expect(byId(card, 'task_status').text.content).toContain('已用时 1m 37s');
-    expect(byId(card, 'task_status').text.content).toContain('已完成');
     expect(card.body.elements[overviewIndex].header.title.content).toBe('执行记录');
     expect(card.body.elements[overviewIndex].header.title.text_size).toBe('notation');
     expect(card.body.elements[overviewIndex].header.title.icon).toBeUndefined();
-    expect(finalIndex).toBeGreaterThan(statusIndex);
     expect(finalIndex).toBeLessThan(overviewIndex);
+  });
+
+  it('keeps an explicitly supplied status label instead of the state default', () => {
+    // 撤掉终态状态行、以及用 loading 图标顶替「执行中」标签，这两条省略规则都只看 state。
+    // workflow 的审批卡、提问卡、办结卡走的正是同一个 buildLarkCard，却靠 statusLabel
+    // 表达「停下来等人」「已处理」这些 state 说不出来的状态——被省掉之后，一张等人的卡上
+    // 只剩一个表示「正在跑」的转圈图标，语义正好是反的。
+    const waiting: any = buildLarkCard({ state: 'running', statusLabel: '等待审批', awaitingHuman: true, readOnly: true, taskName: '确认本次操作' });
+    expect(byId(waiting, 'task_status').text.content).toContain('等待审批');
+    // 等人的卡用橙色，必须和执行中的蓝色区分开，否则群里滚动时看不出它在等人。
+    expect(waiting.header.template).toBe('orange');
+    expect(buildLarkCard({ state: 'running', taskName: '确认本次操作' }).header.template).toBe('blue');
+    // 审批卡由 workflow-interactions 一次性投递，之后不再心跳。执行中态照常写耗时的话，
+    // 这张卡会永久挂着一个「已用时 0s」。
+    expect(byId(waiting, 'task_status').text.content).not.toContain('已用时');
+
+    // 提问卡问的是问题，不是让人去批。「等待审批」是 trace 自证那条路径的推断文案，
+    // 不能覆盖调用方自己说的状态。
+    const asking: any = buildLarkCard({ state: 'running', statusLabel: '等待回答', awaitingHuman: true, readOnly: true, taskName: 'Agent 需要你的回答' });
+    expect(byId(asking, 'task_status').text.content).toContain('等待回答');
+    expect(byId(asking, 'task_status').text.content).not.toContain('已用时');
+    expect(asking.config.summary.content).toContain('等待回答');
+    expect(JSON.stringify(asking)).not.toContain('等待审批');
+
+    // 终态同理：「已处理」要留下，而这类卡从不传耗时，「已用时 0s」是永远不会变的假信息。
+    const closed: any = buildLarkCard({ state: 'completed', statusLabel: '已处理', readOnly: true, taskName: '确认本次操作' });
+    expect(byId(closed, 'task_status').text.content).toContain('已处理');
+    expect(JSON.stringify(closed)).not.toContain('0s');
+    expect(byId(closed, 'task_elapsed')).toBeUndefined();
+  });
+
+  it('never leaves the status row textless when a running card has no elapsed time yet', () => {
+    // 「执行中」标签平时由转圈图标顶替，耗时为 0 时又不写耗时——两条省略规则叠在一起，
+    // 首帧的状态行会退化成一个没有任何文字的图标。此时标签必须顶上。
+    const firstFrame: any = buildLarkCard({ state: 'running', taskName: '构建服务端' });
+    expect(byId(firstFrame, 'task_status').text.content).toContain("<text_tag color='wathet'>执行中</text_tag>");
+    expect(byId(firstFrame, 'task_status').text.content).not.toContain('已用时');
+    // 攒够耗时之后交回给图标，标签退场。
+    const ticking: any = buildLarkCard({ state: 'running', taskName: '构建服务端', elapsedSeconds: 12 });
+    expect(byId(ticking, 'task_status').text.content).toContain('已用时 12s');
+    expect(byId(ticking, 'task_status').text.content).not.toContain('执行中');
   });
 
   it('shows only the actual task terminal state in the dedicated status row', () => {
     const trace = [{ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false, header: { title: { tag: 'markdown', content: "步骤 <font color='orange'>● 部分失败</font>" } }, elements: [] }];
-    expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'task_status').text.content).toContain('已完成');
+    // 已完成没有状态行可言：色带已中性、结果就在下面，「已完成」只会挤掉结果。
+    // 失败和取消仍然要说，读者据此决定是否重试。
+    expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'task_status')).toBeUndefined();
+    expect(byId(buildLarkCard({ state: 'completed', elapsedSeconds: 97, elements: trace }), 'task_elapsed').content).toContain('用时 1m 37s');
+    // 没有耗时可报时页脚不编一个：终态的「0s」不会再变，是永久留在卡上的假信息。
+    expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'task_elapsed')).toBeUndefined();
     expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'trace_overview').header.title.content).not.toContain('部分失败');
     expect(byId(buildLarkCard({ state: 'failed', elements: trace }), 'task_status').text.content).toContain('已失败');
     expect(byId(buildLarkCard({ state: 'interrupted', elements: trace }), 'task_status').text.content).toContain('已取消');
@@ -270,7 +320,7 @@ describe('Lark card service', () => {
       .mockResolvedValueOnce(response({ code: 0, data: { message_id: 'om_sent', chat_id: 'oc_chat' } }))
       .mockResolvedValueOnce(response({ code: 0, data: {} }));
     const service = createLarkCardService(configured, fetcher as typeof fetch);
-    await expect(service.send({ state: 'running', taskId: '42', markdown: '业务传入的运行态正文', idempotencyKey: 'task-42' })).resolves.toEqual({ messageId: 'om_sent', chatId: 'oc_chat' });
+    await expect(service.send({ state: 'running', taskId: '42', elapsedSeconds: 31, markdown: '业务传入的运行态正文', idempotencyKey: 'task-42' })).resolves.toEqual({ messageId: 'om_sent', chatId: 'oc_chat' });
     await expect(service.update({ messageId: 'om_sent', state: 'completed', taskId: '42', markdown: '完成' })).resolves.toEqual({ messageId: 'om_sent', chatId: undefined });
     expect(fetcher).toHaveBeenCalledTimes(4);
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/images');
@@ -281,7 +331,7 @@ describe('Lark card service', () => {
     expect(sendBody.uuid).toBe('task-42');
     const sentCard = JSON.parse(sendBody.content);
     expect(sentCard.header).toMatchObject({ template: 'blue', subtitle: { content: 'Business Agent' } });
-    expect(byId(sentCard, 'task_status').text.content).toContain('执行中');
+    expect(byId(sentCard, 'task_status').text.content).toContain('已用时');
     expect(byId(sentCard, 'task_status').icon).toMatchObject({ tag: 'custom_icon', img_key: 'img_loading' });
     expect(byId(sentCard, 'interrupt')).toMatchObject({ behaviors: [{ value: { action: 'interrupt', task_id: '42' } }] });
     const update = fetcher.mock.calls[3];
@@ -319,7 +369,10 @@ describe('Lark card service', () => {
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/messages/om_source/reply');
     const body = JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body));
     expect(body).toMatchObject({ msg_type: 'interactive', reply_in_thread: true, uuid: 'task-1' });
-    expect(byId(JSON.parse(body.content), 'task_status').text.content).toContain('已完成');
+    // 已完成的卡没有状态行，回复路径的验收改看正文。
+    const replied = JSON.parse(body.content);
+    expect(replied.body.elements.some((element: any) => element.content === '话题内回复')).toBe(true);
+    expect(byId(replied, 'task_status')).toBeUndefined();
   });
 
   it('anchors a thread reply to the root message when replyRootId is provided', async () => {

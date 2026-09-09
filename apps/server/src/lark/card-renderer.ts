@@ -235,7 +235,7 @@ const toolIcon = (kind: TraceToolKind) => ({
 
 const toolPresentation = (entry: TraceEntry) => {
   const data = entry.data;
-  const name = String(data.name ?? data.title ?? '工具').trim();
+  const name = String(data.name ?? data.title ?? '').trim() || '工具';
   const normalized = name.toLowerCase();
   const command = typeof data.input === 'string' ? data.input.trim() : firstValue(data.input, ['command', 'cmd']);
   const url = firstValue(data.input, ['url', 'href']);
@@ -273,6 +273,10 @@ const toolPresentation = (entry: TraceEntry) => {
       : Boolean(soleEntry) && selfEvidentInputKeys.has(soleEntry![0])
         && typeof soleEntry![1] === 'string' && redactTraceText((soleEntry![1] as string).trim()) === fullDetail
   );
+  // 判定必须落在 fullDetail 实际取到的那个值上，不能各查各的：firstValue 先扫顶层再递归，
+  // `{cwd:'/srv/repo', args:{file_path:'a.ts'}}` 会让 path 取到 cwd、而独立查一次
+  // ['path','file_path'] 递归到 a.ts 判成 true，标题就退化成一个裸的 /srv/repo。
+  const selfEvidentDetail = Boolean(command || url || (path && path === firstValue(data.input, ['path', 'file_path'])));
   const status = String(data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')).toLowerCase();
   const failed = /fail|error|reject|cancel/.test(status);
   const running = /running|pending|started|in_progress/.test(status);
@@ -285,6 +289,7 @@ const toolPresentation = (entry: TraceEntry) => {
     statusColor: failed ? 'yellow' : running ? 'orange' : 'green',
     indicatorColor: failed ? 'trace_failure' : running ? 'trace_running' : 'trace_success',
     elapsed: traceElapsed(data.startedAt ?? entry.timestamp, running ? undefined : data.completedAt ?? entry.timestamp),
+    selfEvidentDetail,
     fullDetail,
     titleCoversInput,
     input: truncateTrace(data.input, 250),
@@ -364,11 +369,23 @@ const stageRecordPanel = (record: StageRecord, index: string | number, margin = 
 
 const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement => {
   const tool = toolPresentation(entry);
-  const description = escapeCardInline(truncateInline(tool.description || tool.action, 72));
+  // 标题写这一步实际做的事：优先用工具自带的描述，其次用命令、URL 或文件路径这类
+  // 自己就能说清自己的值。分类名（「运行命令」「搜索内容」）退到兜底位置——左边的图标
+  // 已经表达了分类，再用四个汉字复述一遍，只会把唯一有信息量的那段挤到后半行。
+  //
+  // 只有自解释的值才能独占标题。cwd 是反例：它和 file_path 会被归并成同一个 detail，
+  // 但语义相反，裸着放进标题时 `{cwd:'/srv/repo'}` 会被读成「执行了 /srv/repo」，
+  // 此时「运行命令」这四个字正是唯一能说清那是工作目录的东西。
+  const description = tool.description ? escapeCardInline(truncateInline(tool.description, 72)) : '';
   const detail = escapeCardInline(tool.detail || '');
-  const detailSuffix = detail && detail !== description ? `　<font color='grey'>${detail}</font>` : '';
+  const headline = description
+    || (tool.selfEvidentDetail ? detail : '')
+    || escapeCardInline(truncateInline(tool.action, 72));
+  const detailSuffix = detail && detail !== headline ? `　<font color='grey'>${detail}</font>` : '';
   const elapsedSuffix = tool.elapsed ? `　<font color='grey'>${tool.elapsed}</font>` : '';
-  const stateLamp = `<font color='${tool.indicatorColor}'>●</font>　`;
+  // 成功是默认预期。每条都点一个绿灯，等于把「没有异常」重复 N 遍，
+  // 还会让真正需要人看的那一个失败灯淹在同色的一排里。只有失败和执行中值得占这个位置。
+  const stateLamp = tool.indicatorColor === 'trace_success' ? '' : `<font color='${tool.indicatorColor}'>●</font>　`;
   // 零参工具的 input 会被序列化成 `{}`，那是个真值但没有内容——展开只会看到一对括号。
   const showInput = Boolean(tool.input) && !['{}', '[]'].includes(tool.input) && !tool.titleCoversInput;
   const parts: Array<{ label: string; text: string }> = [];
@@ -383,7 +400,7 @@ const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 
   });
   const title = {
     tag: 'markdown',
-    content: `${stateLamp}${description}${detailSuffix}${elapsedSuffix}`,
+    content: `${stateLamp}${headline}${detailSuffix}${elapsedSuffix}`,
     text_size: 'notation',
     icon: { tag: 'standard_icon', token: toolIcon(tool.kind), color: 'grey' }
   };
@@ -435,8 +452,7 @@ const historyGroupPanel = (
   const failedCount = statuses.filter(item => item.statusLabel === '失败').length;
   const succeededCount = statuses.filter(item => item.statusLabel === '已完成').length;
   const runningCount = statuses.filter(item => item.statusLabel === '执行中').length;
-  const hasErrorEvent = group.actions.some(entry => entry.type === 'error');
-  const hasFailed = hasErrorEvent || failedCount > 0;
+  const hasFailed = failedCount > 0;
   const status = hasFailed && succeededCount > 0
     ? { label: '有失败', color: 'trace_failure' }
     : hasFailed
@@ -502,19 +518,9 @@ const historyGroupPanel = (
     }];
   }
 
-  const extraElements = group.actions.flatMap((entry): LarkCardElement[] => {
-    if (entry.type === 'permission_request') {
-      return [{ tag: 'markdown', content: `**权限请求**　<text_tag color='orange'>${entry.data.status ?? '待处理'}</text_tag>\n\n${truncateTrace(entry.data.title, 800)}`, text_size: 'x-small', margin: '0px' }];
-    }
-    if (entry.type === 'error') {
-      return [{ tag: 'markdown', content: `<text_tag color='yellow'>有错误</text_tag>\n\n${truncateTrace(entry.data.message ?? 'Agent 执行未完全成功', 1_500)}`, text_size: 'x-small', margin: '0px' }];
-    }
-    return [];
-  });
-
   // 一个阶段可能什么都没留下：纯空白终端回显被跳过，又没有叙述或思考。
   // 折叠面板在这种时候只是一个点开是空的箭头，直接退化成标题行。
-  if (!actionElements.length && !extraElements.length) {
+  if (!actionElements.length) {
     return { tag: 'markdown', element_id: `trace_group_${index}`, content: headerTitle, text_size: 'notation', margin: '0px' };
   }
 
@@ -533,7 +539,7 @@ const historyGroupPanel = (
       icon_position: 'right',
       icon_expanded_angle: -180
     },
-    elements: [...actionElements, ...extraElements]
+    elements: actionElements
   };
 };
 
@@ -546,14 +552,15 @@ const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardEle
   const toolPresentations = tools.map(toolPresentation);
   const primaryTool = toolPresentations[0];
 
+  // 没有旁白时只写分类名。detail 就是紧挨着的那行工具摘要的内容，工具行改成直接写真实
+  // 命令之后，再拼一次等于同一条命令连着出现两行。分类名反倒是工具行没有的那半句。
   const currentTitle = narrativeText
     ? truncateInline(narrativeText, 92)
-    : (primaryTool ? `${primaryTool.action}${primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : '正在执行…');
+    : (primaryTool ? primaryTool.action : '正在执行…');
 
   const failedCount = toolPresentations.filter(item => item.statusLabel === '失败').length;
   const succeededCount = toolPresentations.filter(item => item.statusLabel === '已完成').length;
-  const hasErrorEvent = group.actions.some(entry => entry.type === 'error');
-  const hasFailed = hasErrorEvent || failedCount > 0;
+  const hasFailed = failedCount > 0;
   const stageStatus = hasFailed && succeededCount > 0
     ? { label: '有失败', color: 'trace_failure' }
     : hasFailed
@@ -617,32 +624,57 @@ const buildEvidenceElement = (allGroups: TraceGroup[]): LarkCardElement | undefi
   };
 };
 
+const traceOmissionElement = (omittedGroupCount: number, margin: string): LarkCardElement => ({
+  tag: 'markdown', element_id: 'trace_omission',
+  content: `<font color='grey'>另有 ${omittedGroupCount} 个更早阶段未展示，完整记录见 Dockmux Web</font>`,
+  text_size: 'notation', margin
+});
+
+// 待审批的卡上，读者只需要知道两件事：要批的是什么、去哪批。
+// 这里原先在这两件事之前还压着一个「高风险待确认」标签和一行「任务已暂停，需要人工
+// 确认」——连同卡片顶部的橙色色带和状态行里的「等待审批」，同一件事被说了四遍，
+// 而真正要批的那个操作被挤到第三行。
+//
+// 剩下的只有「要批的是什么」。「去哪批」这一层说不准：带按钮的审批卡要 workflows 已装配
+// 且 runtime 实现了 resolvePermission / getPendingPermissions 才会发出来
+// （workflow-interactions.ts:110-113），Web 出口要配了 webBaseUrl 页脚才有，两个条件
+// 渲染这一层都看不见。指一条可能不存在的路比不指更糟，所以 pending 不写指引。
 const permissionAlert = (entry: TraceEntry, index: number): LarkCardElement => {
   const status = String(entry.data.status ?? 'pending').toLowerCase();
   const pending = /pending|waiting|requested/.test(status);
   const rejected = /reject|denied|blocked|cancel/.test(status);
-  const title = truncateTrace(entry.data.title ?? 'Agent 请求执行受保护操作', 800);
-  const highRisk = /高危|风险|danger|risk/i.test(title);
-  const tagColor = pending ? 'orange' : rejected ? 'red' : 'green';
-  const tagLabel = pending ? (highRisk ? '高风险待确认' : '等待审批') : rejected ? '已安全拦截' : '授权已处理';
-  const headline = pending
-    ? '任务已暂停，需要人工确认'
-    : rejected ? '受保护操作未执行' : '任务已恢复执行';
-  const guidance = pending
-    ? '请在 Dockmux 工作台中查看详情并审批；处理后卡片会继续同步。'
-    : rejected ? '可调整指令后重试，或由有权限的成员重新发起。' : '无需额外操作。';
+  const title = truncateTrace(entry.data.title, 800) || 'Agent 请求执行受保护操作';
+  // pending 不带标签：卡片顶部已经是橙色色带，状态行也已经写着「等待审批」，
+  // 这里再挂一个「待审批」就是同一件事的第三遍，而它正好压在要批的那个操作前面。
+  // 已拦截 / 已授权则必须自己说——那时任务状态行显示的是「执行中」，不是审批结果。
+  const resolvedTag = pending ? '' : rejected
+    ? "<text_tag color='red'>已拦截</text_tag>　"
+    : "<text_tag color='green'>已授权</text_tag>　";
+  // 已拦截是唯一需要指引的分支：它是终局，而且下一步与部署形态无关。
+  const guidance = rejected && !pending ? '可调整指令后重试，或由有权限的成员重新发起。' : '';
   const visualStatus = pending ? 'pending' : rejected ? 'rejected' : 'resolved';
   return {
     tag: 'markdown', element_id: `risk_alert_${visualStatus}_${index}`,
-    content: `<text_tag color='${tagColor}'>${tagLabel}</text_tag>　**${headline}**\n\n${title}\n\n<font color='grey'>${guidance}</font>`,
+    // title 是 agent 侧内容，可能自带 ** 或换行。用 ** 包住它，遇到「写入文件 **README.md**」
+    // 会渲染出一串字面星号，遇到多行标题则加粗跨段落直接失效。这一行是块内唯一的正文，
+    // 靠字号和它下面那行灰字指引就分得出层级，不需要再加粗。
+    content: `${resolvedTag}${title}${guidance ? `\n\n<font color='grey'>${guidance}</font>` : ''}`,
     text_size: 'normal', margin: '6px 0px 8px 0px'
   };
 };
 
+// 失败已经由卡片顶部的红色色带和状态行说清楚了，这里再挂一个「执行异常」标签加一句
+// 「需要关注」，是把同一件事说到第四遍，而且「需要关注」没有说明要关注什么。
+// 这一行唯一值得占位置的是失败原因本身，图标承担「这是异常」的语义。
 const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
   tag: 'markdown', element_id: `execution_alert_${index}`,
-  content: `<text_tag color='red'>执行异常</text_tag>　**需要关注**\n\n${truncateTrace(entry.data.message ?? 'Agent 执行未完全成功', 1_500)}`,
-  text_size: 'normal', margin: '6px 0px 8px 0px'
+  // 兜底放在 truncateTrace 之后：`?? ` 挡不住空串，而 ACP 侧的 message 可以是空串
+  // （acp-client/src/index.ts:124 的 `event.message ?? ...`，第三方 agent 回 `{"error":{"message":""}}` 即是），
+  // truncateTrace 内部的 trim 又会把纯空白压成空串——两条路都会得到一个 content 为空的
+  // markdown，正好出现在任务真的出错的时候。
+  content: truncateTrace(entry.data.message, 1_500) || 'Agent 执行未完全成功',
+  text_size: 'normal', margin: '6px 0px 8px 0px',
+  icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'red' }
 });
 
 export function renderLarkCardElements(
@@ -702,13 +734,7 @@ export function renderLarkCardElements(
 
   if (groups.length) {
     if (completed) {
-      if (omittedGroupCount) {
-        elements.push({
-          tag: 'markdown', element_id: 'trace_omission',
-          content: `<font color='grey'>仅展示最近 ${groups.length} 个阶段，另有 ${omittedGroupCount} 个阶段；完整记录请在 Dockmux Web 查看。</font>`,
-          text_size: 'notation', margin: '0px 0px 4px 0px'
-        });
-      }
+      if (omittedGroupCount) elements.push(traceOmissionElement(omittedGroupCount, '0px 0px 4px 0px'));
       const expanded = config.hideTraceOnComplete === false;
       elements.push(...groups.map((group, index) => historyGroupPanel(group, index, false, expanded)));
     } else {
@@ -716,23 +742,10 @@ export function renderLarkCardElements(
       const currentGroup = groups.at(-1)!;
 
       if (historyGroups.length > 0) {
-        // 省略提示并进「此前阶段」这一行。两条灰字紧挨着说的是同一件事——
-        // 下面是历史，而且历史不全——分成两行只是把当前阶段往下推。
-        const omission = omittedGroupCount
-          ? `（另有 ${omittedGroupCount} 个更早阶段未展示，完整记录见 Dockmux Web）`
-          : '';
-        elements.push({
-          tag: 'markdown', element_id: 'history_label',
-          content: `<font color='grey'>此前阶段${omission}</font>`,
-          text_size: 'notation', margin: '4px 0px 2px 0px'
-        });
-        // 「此前阶段」只在运行态布局里被渲染。queued 之类的非运行态把所有阶段收进
-        // 「执行记录」，那条路径读的是 trace_omission，缺了它省略提示会整行消失。
-        if (omittedGroupCount) elements.push({
-          tag: 'markdown', element_id: 'trace_omission',
-          content: "<font color='grey'>另有 " + omittedGroupCount + " 个更早阶段未展示，完整记录见 Dockmux Web</font>",
-          text_size: 'notation', margin: '0px'
-        });
+        // 历史阶段就排在当前阶段下面，位置本身已经说明了它们是历史，不必再用一行
+        // 灰字讲一遍「此前阶段」——那一行只是把当前阶段继续往下推。位置表达不了的
+        // 只有「还有多少个更早阶段没展示」，所以这里只在真的省略了阶段时才出一行。
+        if (omittedGroupCount) elements.push(traceOmissionElement(omittedGroupCount, '4px 0px 2px 0px'));
         elements.push(...historyGroups.map((group, index) => historyGroupPanel(group, index, true, false)));
       }
       elements.push(currentRunningStagePanel(currentGroup, groups.length - 1));
