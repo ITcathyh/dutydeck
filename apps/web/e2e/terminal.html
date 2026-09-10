@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+  <head><meta name="viewport" content="width=device-width, initial-scale=1.0" /></head>
+  <body>
+    <div id="root" style="height: 100dvh; padding: 8px;"></div>
+    <script type="module">
+      import React from 'react';
+      import { createRoot } from 'react-dom/client';
+      import { TerminalView } from '../src/components/TerminalView.tsx';
+      import '../src/index.css';
+      createRoot(document.getElementById('root')).render(
+        React.createElement(TerminalView, { sessionId: 'scroll-test', className: 'h-full' })
+      );
+    </script>
+  </body>
+</html>

@@ -3,6 +3,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import { nextTerminalBackoffMs, parseTerminalFrame, terminalFontSize, terminalWsUrl } from '../terminal';
+import { bindTerminalTouchScroll } from '../terminal-touch';
 import { readThemeColor } from '../theme';
 import { useMediaQuery } from '../useMediaQuery';
 import { TerminalKeyBar } from './TerminalKeyBar';
@@ -35,6 +36,10 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
   const coarsePointer = useMediaQuery(COARSE_MEDIA);
   // 选择模式：默认关（触屏拖动 = 滚动回看历史），开启后放开 xterm 原生拖选以便复制
   const [selectMode, setSelectMode] = useState(false);
+  const selectModeRef = useRef(selectMode);
+  useEffect(() => { selectModeRef.current = selectMode; }, [selectMode]);
+  const scrollToBottomRef = useRef<(focus: boolean) => void>(() => {});
+  const [scrolledUp, setScrolledUp] = useState(false);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -52,6 +57,13 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
+    const unbindTouchScroll = bindTerminalTouchScroll(term, () => selectModeRef.current);
+    setScrolledUp(false);
+    scrollToBottomRef.current = focus => { term.scrollToBottom(); if (focus) term.focus(); };
+    // xterm 的原生 viewport 滚动会抑制 onScroll；渲染事件同时覆盖滚轮、触摸和新输出。
+    const scrollDisposable = term.onRender(() => {
+      setScrolledUp(term.buffer.active.viewportY < term.buffer.active.baseY);
+    });
     // 容器尺寸为 0（如隐藏的 tab）时 fit 会抛错，忽略即可
     const tryFit = () => { try { fit.fit(); } catch { /* 容器尚未可见，等下次 ResizeObserver 回调 */ } };
     tryFit();
@@ -126,6 +138,9 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
       themeObserver.disconnect();
       colorScheme?.removeEventListener('change', applyTheme);
       inputDisposable.dispose();
+      scrollDisposable.dispose();
+      unbindTouchScroll();
+      scrollToBottomRef.current = () => {};
       sendInputRef.current = () => {};
       ws?.close();
       term.dispose();
@@ -135,15 +150,12 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
   const onKey = useCallback((data: string) => sendInputRef.current(data), []);
   const keyBarVisible = showKeyBar ?? wideEnoughForKeys;
 
-  // 触屏上 xterm 默认的拖动选中会和「拖动滚动回看历史」抢同一个手势：手指划过有字的区域会起
-  // 原生选区并弹长按菜单，滚动就地卡住，而空白区域却照常能滚——这就是手机上滚动时好时坏的成因。
-  // 判据抄 botmux 的 body.touch 规则：触屏下关掉渲染层的 user-select 与长按菜单，拖动因此落到
-  // .xterm-viewport 的原生滚动上；要复制时用快捷键条的「选择」开关切回原生拖选。
-  // 只认粗指针，鼠标一律不进这个分支，桌面（含窄窗口）的拖选复制不受影响。
+  // 滚动模式禁用触屏长按菜单；实际滚动由 bindTerminalTouchScroll 处理。
   const touchScroll = coarsePointer && !selectMode;
 
   return <div className={`relative ${className ?? ''}`}>
     <div ref={hostRef} data-touch-scroll={touchScroll ? 'on' : undefined} className={`h-full w-full ${touchScroll ? '[&_.xterm-screen]:select-none [&_.xterm-screen]:[-webkit-touch-callout:none] [&_.xterm-screen_*]:select-none [&_.xterm-viewport]:overscroll-none' : ''}`}/>
+    {scrolledUp && <button type="button" onPointerDown={event => event.preventDefault()} onMouseDown={event => event.preventDefault()} onClick={event => scrollToBottomRef.current(document.activeElement === event.currentTarget)} className="absolute right-2 top-2 z-sticky min-h-11 rounded-md border border-default bg-surface px-3 text-caption text-secondary shadow-panel">回到底部</button>}
     {keyBarVisible && <TerminalKeyBar onKey={onKey} selectMode={selectMode} onSelectModeChange={setSelectMode}/>}
   </div>;
 }
