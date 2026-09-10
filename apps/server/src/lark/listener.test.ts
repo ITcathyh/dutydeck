@@ -311,6 +311,25 @@ describe('Lark message coordinator', () => {
     }
   });
 
+  it('routes approval cards issued before the rename into the workflow branch', async () => {
+    // 按钮的 callback value 存在飞书服务器上：改名前发出、升级后才被点的卡片仍带 dockmux_workflow。
+    // 这里断言它进的是 workflow 分支（回「卡片身份不完整」），而不是掉进「无法识别卡片操作」。
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const service = {
+      addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
+      send: vi.fn(async () => ({ messageId: 'om_card' })),
+      deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
+    for (const key of ['dockmux_workflow', 'dutydeck_workflow']) {
+      await expect(coordinator.handleAction({ [key]: 'approve', request_id: 'req_1', generation: 'gen_1' } as any))
+        .resolves.toEqual({ type: 'error', content: '卡片身份不完整或已失效。' });
+    }
+  });
+
   it('answers /help with a read-only receipt without starting an Agent turn', async () => {
     // 命令不是 Agent 任务：不得占用一次 Agent 轮次，也不得留下可操作的进度卡。
     const runtime = {

@@ -35,9 +35,13 @@ const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.me
 
 try { loadEnvFile(); } catch {}
 
-// 先接管旧品牌名的环境变量和状态目录，再让任何命令去解析路径。
+// 先把旧状态目录就位，再接管环境变量——否则无从判断变量里改写后的路径是否真的存在。
+const legacyState = migrateLegacyBrandDirs();
+for (const dir of legacyState.migrated) process.stderr.write(`已接管 dockmux 时期的状态目录：${dir}\n`);
+for (const dir of legacyState.skipped) {
+  process.stderr.write(`未接管 ${dir}：同级已有 .dutydeck，两份状态都留着，请自行确认用哪一份。\n`);
+}
 adoptLegacyEnv();
-for (const dir of migrateLegacyBrandDirs()) process.stderr.write(`已接管 dockmux 时期的状态目录：${dir}\n`);
 
 async function serve(options: CliOptions, onReady?: () => void) {
   const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });

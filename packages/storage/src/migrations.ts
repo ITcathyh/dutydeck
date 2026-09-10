@@ -450,6 +450,45 @@ export const migrations: Migration[] = [
         CREATE INDEX remote_chat_facts_credential ON remote_chat_facts(credential_ref_id, credential_revision);
       `)
     }
+  },
+  {
+    version: 15,
+    name: 'schedule_source_ownership_rebrand',
+    up(db) {
+      // v13 把品牌名写进了 CHECK 约束（source_ownership IN ('dockmux', 'botmux')）。
+      // 改名后新代码只会写 'dutydeck'，老库的约束会让每一次 Schedule 写入直接 SQLITE_CONSTRAINT_CHECK，
+      // 已有行也会在读取时被 zod 判为非法枚举值。SQLite 不能 ALTER 掉 CHECK，只能重建表。
+      const existing = db
+        .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'schedule_definitions'")
+        .get() as { sql?: string } | undefined
+      // 新装的库由改名后的 v13 直接建出正确约束，这里无事可做。
+      if (!existing?.sql?.includes("'dockmux'")) return
+
+      const rebuilt = existing.sql
+        .replace("'dockmux'", "'dutydeck'")
+        .replace('CREATE TABLE schedule_definitions', 'CREATE TABLE schedule_definitions_rebrand')
+      const columns = (db.pragma('table_info(schedule_definitions)') as Array<{ name: string }>).map(entry => entry.name)
+      // 老行的值是 'dockmux'，必须在搬运途中改写：直接 UPDATE 会撞上老表自己的约束。
+      const selected = columns
+        .map(name => (name === 'source_ownership'
+          ? "CASE source_ownership WHEN 'dockmux' THEN 'dutydeck' ELSE source_ownership END"
+          : `"${name}"`))
+        .join(', ')
+      const target = columns.map(name => `"${name}"`).join(', ')
+
+      // schedule_generations / schedule_occurrences / schedule_watermarks 以 ON DELETE RESTRICT 引用本表，
+      // 中途 DROP 必然违反外键。事务内 PRAGMA foreign_keys 是空操作，只能用 defer 把检查推到提交时——
+      // 那时表已按原名重建且行数不变，引用重新成立。
+      db.pragma('defer_foreign_keys = ON')
+      db.exec(rebuilt)
+      db.exec(`INSERT INTO schedule_definitions_rebrand (${target}) SELECT ${selected} FROM schedule_definitions`)
+      db.exec('DROP TABLE schedule_definitions')
+      db.exec('ALTER TABLE schedule_definitions_rebrand RENAME TO schedule_definitions')
+      db.exec(`
+        CREATE UNIQUE INDEX schedule_definitions_source ON schedule_definitions(source_namespace, source_schedule_ref) WHERE source_schedule_ref IS NOT NULL;
+        CREATE INDEX schedule_definitions_bot_state ON schedule_definitions(channel_bot_id, state, updated_at DESC);
+      `)
+    }
   }
 ]
 
