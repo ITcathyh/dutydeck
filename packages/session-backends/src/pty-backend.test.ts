@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, afterEach } from 'vitest';
@@ -113,6 +113,47 @@ tmuxDescribe('TmuxBackend', () => {
       try { execFileSync('tmux', ['kill-session', '-t', s], { stdio: 'ignore' }); } catch { /* already gone */ }
     }
     sessions.length = 0;
+  });
+
+  it.each(['missing', 'file'])('identifies an invalid working directory (%s) before creating a session', kind => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-invalid-cwd-'));
+    const cwd = join(root, 'workspace');
+    const name = newSessionName();
+    sessions.push(name);
+    backend = new TmuxBackend(name);
+    try {
+      if (kind === 'file') writeFileSync(cwd, 'not a directory');
+      expect(() => backend!.spawn('/bin/sh', ['-c', 'sleep 30'], {
+        cwd, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      })).toThrow(`工作目录不可用：${cwd}`);
+      expect(TmuxBackend.probeSession(name)).toBe('missing');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('starts in the renamed workspace after the configured directory is corrected', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-renamed-cwd-'));
+    const previous = join(root, 'dockmux');
+    const current = join(root, 'dutydeck');
+    mkdirSync(previous);
+    renameSync(previous, current);
+    const name = newSessionName();
+    sessions.push(name);
+    backend = new TmuxBackend(name);
+    const received: string[] = [];
+    backend.onData(data => received.push(data));
+    const args = ['-c', 'pwd; sleep 30'];
+    const options = { cwd: previous, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' } };
+    try {
+      expect(() => backend!.spawn('/bin/sh', args, options)).toThrow(`工作目录不可用：${previous}`);
+      backend.spawn('/bin/sh', args, { ...options, cwd: current });
+      await waitFor(() => received.join('').includes(current));
+      expect(TmuxBackend.probeSession(name)).toBe('exists');
+    } finally {
+      backend.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('spawns, streams output, captures the screen, reports pid/size, and kills the session', async () => {
