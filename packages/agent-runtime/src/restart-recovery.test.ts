@@ -201,3 +201,36 @@ it('reattaches a completed terminal once after restart without starting or chang
   expect(attached.send).not.toHaveBeenCalled();
   expect(await second.runtime.getSession(session.id)).toEqual(before);
 });
+
+it('stops a terminal attached between active() and the stop continuation', async () => {
+  const file = database();
+  const backend = persistentTurn();
+  const first = open(file, backend.factory);
+  await first.runtime.initialize([agent]);
+  const session = await first.runtime.start({ agentId: agent.id });
+  session.state = 'completed';
+  await first.repos.sessions.save(session);
+  await close(first);
+  const attached: AgentDriver = {
+    start: vi.fn(async () => {}), resume: vi.fn(async () => {}), send: vi.fn(async () => {}),
+    interrupt: vi.fn(async () => {}), stop: vi.fn(async () => {}), attachTerminal: vi.fn(() => true)
+  };
+  const second = open(file, () => attached);
+  await second.runtime.initialize([agent]);
+  let releaseAgent!: (value: AgentConfig) => void;
+  const agentRead = new Promise<AgentConfig>(resolve => { releaseAgent = resolve; });
+  const getAgent = vi.spyOn(second.repos.agents, 'get').mockReturnValueOnce(agentRead);
+  const loading = second.runtime.getTerminalDriver(session.id);
+  await vi.waitFor(() => expect(getAgent).toHaveBeenCalled());
+  let releaseSession!: (value: typeof session) => void;
+  const sessionRead = new Promise<typeof session>(resolve => { releaseSession = resolve; });
+  vi.spyOn(second.repos.sessions, 'get').mockReturnValueOnce(sessionRead);
+  const stopping = second.runtime.stop(session.id);
+  releaseSession(session);
+  releaseAgent(agent);
+  await Promise.all([loading, stopping]);
+  expect(attached.attachTerminal).toHaveBeenCalledOnce();
+  expect(attached.stop).toHaveBeenCalledOnce();
+  expect(second.runtime.getDriver(session.id)).toBeUndefined();
+  expect((await second.runtime.getSession(session.id))?.state).toBe('stopped');
+});

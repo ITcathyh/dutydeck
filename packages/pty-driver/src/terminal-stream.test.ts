@@ -30,9 +30,9 @@ describe('terminal initial screen', () => {
     const frames: Array<TerminalScreen | string> = [];
     driver.createTerminalStream().onData(data => frames.push(data), screen => frames.push(screen));
     output('during');
-    await vi.waitFor(() => expect(frames).toHaveLength(2));
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
     output('after');
-    expect(frames.slice(1)).toEqual(['during', 'after']);
+    expect(frames.slice(1)).toEqual(['after']);
     const screen = frames[0] as TerminalScreen;
     const restored = new TerminalSnapshot(screen.cols, screen.rows);
     await restored.writeAndFlush(screen.data + frames.slice(1).join(''));
@@ -41,6 +41,23 @@ describe('terminal initial screen', () => {
     // A second subscription has no fresh output to wake it up.
     const second = await new Promise<TerminalScreen>(resolve => driver.createTerminalStream().onData(() => {}, resolve));
     expect(second.data).toContain('beforeduringafter');
+  });
+
+  it('restores cursor-addressed pending bytes before a narrower browser resize', async () => {
+    const { driver, output } = fixture();
+    await driver.start();
+    const stream = driver.createTerminalStream();
+    stream.resize(80, 24);
+    output('READY');
+    const screen = new Promise<TerminalScreen>(resolve => stream.onData(() => {}, resolve));
+    output('\x1b[24;80H#');
+    const initial = await screen;
+    const restored = new TerminalSnapshot(initial.cols, initial.rows);
+    await restored.writeAndFlush(initial.data);
+    expect(restored.xterm.buffer.active.getLine(23)?.getCell(79)?.getChars()).toBe('#');
+    expect(restored.xterm.buffer.active.getLine(23)?.getCell(39)?.getChars()).not.toBe('#');
+    restored.resize(40, 24);
+    restored.dispose();
   });
 
   it('does not invoke callbacks after disposal or stop during snapshot capture', async () => {
