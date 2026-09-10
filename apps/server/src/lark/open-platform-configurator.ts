@@ -162,7 +162,7 @@ export async function configureLarkOpenPlatformApp(
     appVersion,
     mobileDefaultAbility: 'bot',
     pcDefaultAbility: 'bot',
-    changeLog: 'Configure Dockmux bot capabilities.',
+    changeLog: 'Configure Dutydeck bot capabilities.',
     visibleSuggest: visibility.whiteList,
     blackVisibleSuggest: visibility.blackList,
   }, 'version_create_failed', '创建飞书应用版本失败');

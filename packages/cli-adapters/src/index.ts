@@ -6,8 +6,8 @@ export type {
 } from './types.js';
 export type { CliId } from './factory.js';
 export { ALL_CLI_IDS, createCliAdapter, getCliAdapter } from './factory.js';
-export { DOCKMUX_SHELL_HINTS, buildDockmuxRoutingBlock, prependRoutingBlock } from './shared-hints.js';
-export { isDockmuxSessionId, usableResumeId } from './resume-id.js';
+export { DUTYDECK_SHELL_HINTS, buildDutydeckRoutingBlock, prependRoutingBlock } from './shared-hints.js';
+export { isDutydeckSessionId, usableResumeId } from './resume-id.js';
 export {
   RUNNER_INPUT_CHUNK_BYTES,
   RUNNER_INPUT_THROTTLE_MS,

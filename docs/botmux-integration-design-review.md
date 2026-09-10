@@ -1,4 +1,4 @@
-# Botmux → Dockmux 集成方案交叉设计评审
+# Botmux → Dutydeck 集成方案交叉设计评审
 
 > 评审日期：2026-08-30  
 > 视角：资深产品设计 / 交互设计  
@@ -14,7 +14,7 @@
 
 重点检查：
 
-- 用户如何从 Botmux 迁移到 Dockmux，而不是只检查字段是否可导入；
+- 用户如何从 Botmux 迁移到 Dutydeck，而不是只检查字段是否可导入；
 - `group × bot` 群配置矩阵是否能表达远端事实、期望策略和实际生效状态；
 - 权限分级是否能让普通成员、任务发起人、群操作者和管理员做对事、阻止错事；
 - 失败、部分成功、冲突、切流和回滚是否对用户可见、可理解、可恢复；
@@ -27,7 +27,7 @@
 最大问题有四个：
 
 1. **当前真实在用能力与阶段优先级冲突。** 唯一启用的 Schedule、Hammer full/gates/skill injection、现有飞书话题上下文被放入较晚阶段或未进入统一 P0 清单。
-2. **“canary”名称制造了错误预期。** 同一 Lark App 不能让 Botmux 和 Dockmux 同时消费，当前设计中的 canary 实际是整 App 的受控切流观察，不是小比例或单群灰度。
+2. **“canary”名称制造了错误预期。** 同一 Lark App 不能让 Botmux 和 Dutydeck 同时消费，当前设计中的 canary 实际是整 App 的受控切流观察，不是小比例或单群灰度。
 3. **群矩阵和权限层级只有数据概念，没有完成用户决策模型。** 用户仍不知道一个格子为什么红、改 Bot 默认会影响哪些群、普通请求者能否取消自己的任务。
 4. **回滚有技术步骤，缺少运行中用户体验。** 当前没有定义切流失败发生在不同阶段时，系统自动恢复还是等待人工、哪些消息可能需要核对、如何避免 Schedule 双跑或漏跑。
 
@@ -43,10 +43,10 @@
 | Hammer | 未作为独立能力进入 P0 | 当前 Hammer Bot 使用 full + gates + prompt skill injection，明确 P0 blocker | skills/plugins 在阶段 3，虽写“实际使用升 P0”但无 Hammer 专项 gate | 当前 Hammer App 必须 P0 blocked，不能以普通 Claude Agent 通过 offline verify |
 | 历史/活跃 Session | 历史能力整体偏 defer；新 PTY 持久性已列 P0 | 28 条元数据，默认 archive-only | session/history/adopt 放 P2 | 冷历史可 P2；仍活跃的飞书话题与 live tmux continuity 是 P0，需要逐条 probe 和处置 |
 | 持久 backend | 已修正为生产接线 P0 缺口 | 明确 server 默认 `PtyBackend`，不允许 tmux 降级 | 明确 P0 | 结论一致，保留 |
-| 权限层级 | 提出 `can_talk/can_dispatch/can_operate/can_admin` | 描述 Botmux 的 owner/canOperate/canTalk | 提出 principal/grant/policy evaluator | 四级名称尚无动作定义；`talk` 与 `dispatch` 在 Dockmux 中高度重叠，不能直接进 UI/schema |
+| 权限层级 | 提出 `can_talk/can_dispatch/can_operate/can_admin` | 描述 Botmux 的 owner/canOperate/canTalk | 提出 principal/grant/policy evaluator | 四级名称尚无动作定义；`talk` 与 `dispatch` 在 Dutydeck 中高度重叠，不能直接进 UI/schema |
 | Secret 迁移 | 强调 secret ref 与不泄露 | 倾向 prompt/reference，不直接迁 secret | 支持 private secret ref 导入 | 应允许本机、显式确认、全程不可见的安全转存；强制重填 App Secret 会造成不必要中断 |
 | Group tools 旧配置 | 通用能力 P0/P1 | 发现一条旧 App+Chat bridge，但当前 Botmux 源码不消费，无法证明 send 权 | per-chat policy P0/P1 | 应显示“遗留意图待确认”，不能自动当成活跃行为，也不能静默丢弃；send 默认关是正确的 |
-| 切流 | 强调 capability gate | Import/Activate 分离 | 按 App lease，状态含 `dockmux_canary` | 单 App 切流正确，但应重命名为“受控切流观察”，避免暗示按群/比例灰度 |
+| 切流 | 强调 capability gate | Import/Activate 分离 | 按 App lease，状态含 `dutydeck_canary` | 单 App 切流正确，但应重命名为“受控切流观察”，避免暗示按群/比例灰度 |
 
 ## 4. 必须修改
 
@@ -60,7 +60,7 @@
 
 | 维度 | 含义 |
 |---|---|
-| `product_priority` | 该能力对 Dockmux 通用路线图的默认优先级 |
+| `product_priority` | 该能力对 Dutydeck 通用路线图的默认优先级 |
 | `cutover_requirement` | 对某个源 App 是 `required / review / archive_allowed / not_used` |
 
 规则：只要拟切流 App 正在使用某能力，且用户可见行为会改变，该能力的 `cutover_requirement` 就必须是 `required`，不受通用路线图优先级影响。
@@ -77,7 +77,7 @@
 
 ### M2. 将“活跃会话连续性”从历史归档中拆出，提升为 P0
 
-“28 条 Session 默认 archive-only”对冷历史是合理的，但用户会在切流后继续回复原飞书话题。若 Dockmux 对原 topic 建立一个新 Session，用户看到的是同一话题，Agent 实际却失去上下文，这是最危险的静默降级之一。
+“28 条 Session 默认 archive-only”对冷历史是合理的，但用户会在切流后继续回复原飞书话题。若 Dutydeck 对原 topic 建立一个新 Session，用户看到的是同一话题，Agent 实际却失去上下文，这是最危险的静默降级之一。
 
 切流前必须逐条把源 Session 分为：
 
@@ -89,14 +89,14 @@
 
 每个仍可能收到回复的飞书 topic 必须在切流前选择：
 
-1. 在 Dockmux 继续原上下文；
+1. 在 Dutydeck 继续原上下文；
 2. 保持 Botmux 服务该 topic——只有存在明确 per-topic ownership 机制时才可选；
-3. 在 Dockmux 新开上下文，并在原话题中明确告知用户“已从摘要重新开始”；
+3. 在 Dutydeck 新开上下文，并在原话题中明确告知用户“已从摘要重新开始”；
 4. 不切该 App。
 
 不能把选项 3 静默执行。若当前架构只能整 App 切流，且不能把旧 topic 留给 Botmux，则活跃话题 adopt/resume 或显式 restart 是 App 切流 P0。
 
-### M3. 把 `dockmux_canary` 重命名并修正用户承诺
+### M3. 把 `dutydeck_canary` 重命名并修正用户承诺
 
 同一 App 任一时刻只能有一个 event consumer，因此当前并不存在按比例、按人或按群的真实 canary。建议状态改为：
 
@@ -106,12 +106,12 @@ botmux_active
   -> verified_offline
   -> ready_for_handoff
   -> draining_botmux
-  -> dockmux_observation
-  -> dockmux_active
+  -> dutydeck_observation
+  -> dutydeck_active
   -> migration_finalized
 ```
 
-`dockmux_observation` 是整 App 已切流、Botmux 保留用于回滚的观察期。
+`dutydeck_observation` 是整 App 已切流、Botmux 保留用于回滚的观察期。
 
 必须在 UI 明示：
 
@@ -132,7 +132,7 @@ CLI `plan/apply/rollback` 是执行工具，不是用户旅程。P0 应有一个
 4. **解决阻塞**：每个问题只有明确动作，如“验证身份”“选择 workspace 映射”“保留在 Botmux”“显式归档”；不能只有错误码和 CLI flag。
 5. **离线验证**：验证 App credential/scope、Agent 登录与启动、workspace、backend、effective policy，但保持 listener 关闭。
 6. **准备切流**：展示正在运行的 Turn、排队任务、下一次 Schedule 时间、预计暂停和回滚可用性；用户选择立即、等待 drain 或取消。
-7. **受控切流观察**：逐步显示 Botmux 已 drain、watermark 已写、Dockmux lease 已取得、listener 已健康、第一条测试消息已通过。
+7. **受控切流观察**：逐步显示 Botmux 已 drain、watermark 已写、Dutydeck lease 已取得、listener 已健康、第一条测试消息已通过。
 8. **完成或回滚**：观察期内持续保留 Botmux；只有用户确认后才完成迁移和开始保留期倒计时。
 
 任何阶段关闭页面后都能从持久状态继续，不得要求用户回忆上次执行到哪一步。
@@ -144,7 +144,7 @@ CLI `plan/apply/rollback` 是执行工具，不是用户旅程。P0 应有一个
 | 层 | 示例 | 来源 |
 |---|---|---|
 | 飞书事实 | 已入群、已退群、不可见、权限不足、最后同步时间 | Lark API / listener |
-| Dockmux 期望 | workspace、Agent、reply/mention、访问策略、群工具策略 | GroupBinding |
+| Dutydeck 期望 | workspace、Agent、reply/mention、访问策略、群工具策略 | GroupBinding |
 | 运行生效 | listener owner、policy revision、last verified、degraded 原因 | runtime / RunSnapshot |
 
 必须支持以下可辨识状态：
@@ -163,7 +163,7 @@ CLI `plan/apply/rollback` 是执行工具，不是用户旅程。P0 应有一个
 矩阵 cell 点击后进入详情抽屉，按以下顺序展示：
 
 1. 群名、Bot 名、远端 membership 和最后同步时间；
-2. 当前 runtime owner：Botmux 或 Dockmux；
+2. 当前 runtime owner：Botmux 或 Dutydeck；
 3. 有效 Agent、workspace 及 readiness；
 4. Session/reply/mention 行为，用自然语言描述；
 5. 谁可发起、谁可操作、谁可管理；
@@ -175,7 +175,7 @@ CLI `plan/apply/rollback` 是执行工具，不是用户旅程。P0 应有一个
 
 ### M6. 重构权限表达，不能直接落四级名称
 
-`can_talk` 与 `can_dispatch` 在 Dockmux 中没有稳定差异：一条普通飞书消息通常就会创建 Turn/Task。若不先定义动作，四级角色会在 listener、卡片和设置页各自解释。
+`can_talk` 与 `can_dispatch` 在 Dutydeck 中没有稳定差异：一条普通飞书消息通常就会创建 Turn/Task。若不先定义动作，四级角色会在 listener、卡片和设置页各自解释。
 
 建议权限核心按动作能力建模，再提供用户可理解的 preset：
 
@@ -217,9 +217,9 @@ Botmux 源行为映射必须保真：oncall/allowed group/grant 默认只映射�
 | plan/apply 前 | 自动停止，无线上影响 | 哪个源项变化、冲突或无法读取；重新扫描 |
 | 配置 transaction 中 | 自动回滚 DB | “未写入任何配置”，附失败实体，不展示 secret |
 | Botmux drain 前 | 保持 Botmux active | “切流尚未开始” |
-| Botmux 已 drain、Dockmux 未取得 lease | 优先恢复 Botmux；恢复失败则进入人工阻塞 | 当前哪一侧在监听、是否存在静默窗口 |
-| Dockmux 已监听、尚未接受消息 | 可自动回滚 | 回滚步骤与健康验证 |
-| Dockmux 已接受消息/已启动 Run | 禁止盲目重放；先 drain 并列出需核对事件 | 可能受影响的消息数量、任务状态和人工动作 |
+| Botmux 已 drain、Dutydeck 未取得 lease | 优先恢复 Botmux；恢复失败则进入人工阻塞 | 当前哪一侧在监听、是否存在静默窗口 |
+| Dutydeck 已监听、尚未接受消息 | 可自动回滚 | 回滚步骤与健康验证 |
+| Dutydeck 已接受消息/已启动 Run | 禁止盲目重放；先 drain 并列出需核对事件 | 可能受影响的消息数量、任务状态和人工动作 |
 | observation 期 | 可一键发起受控回滚 | 预览正在运行任务、下一次 Schedule、目标配置冲突 |
 
 回滚入口必须先展示：
@@ -255,7 +255,7 @@ Schedule P0 gate 必须包含：
 
 可接受的处置只有：
 
-1. Dockmux 提供等价 Hammer policy，并通过包含 gate 拒绝路径的 E2E；
+1. Dutydeck 提供等价 Hammer policy，并通过包含 gate 拒绝路径的 E2E；
 2. Hammer App 保持 Botmux active；
 3. 用户明确创建一个新的普通 Claude Bot，使用不同身份，不称为 Hammer 迁移。
 
@@ -267,7 +267,7 @@ Schedule P0 gate 必须包含：
 
 - canonical realpath；
 - 目录存在、可进入、权限正确；
-- 是否在 Dockmux 允许的 workspace root 内；
+- 是否在 Dutydeck 允许的 workspace root 内；
 - 软链变化是否会改变安全边界；
 - Agent 进程用户是否能读取项目和自己的 CLI 登录态；
 - 选择的 backend 能在该目录启动并恢复。
@@ -385,7 +385,7 @@ CWD、oncall、mention、reply、群工具和权限不能折叠为纯 chat 级�
 
 ### A7. RunSnapshot 与有效配置来源
 
-进行中的 Run 不跟随默认值漂移，且能解释配置来自 Run、群、Bot、Agent 还是进程默认，是 Dockmux 应强化的优势。
+进行中的 Run 不跟随默认值漂移，且能解释配置来自 Run、群、Bot、Agent 还是进程默认，是 Dutydeck 应强化的优势。
 
 ### A8. Secret、ACPX 和群工具边界
 
@@ -419,7 +419,7 @@ VC、voice、文档评论、旧 Workflow 等应走后续 Connector/Run DAG，而
 - [ ] Hammer 等 Bot 专属行为已通过行为级 E2E，或该 App 保持 Botmux active；
 - [ ] 所有可能继续收到回复的旧 topic 已选择 adopt/resume/summary restart，不存在静默新上下文；
 - [ ] 当前 running/queued Turn 已 drain 或有明确处置；
-- [ ] Botmux listener 可按 App 停止，Dockmux lease 可取得，handoff watermark 可写入；
+- [ ] Botmux listener 可按 App 停止，Dutydeck lease 可取得，handoff watermark 可写入；
 - [ ] 回滚预检为 ready，且用户知道 observation 期间 Botmux 仍被保留；
 - [ ] 切流后第一条私聊、普通群、话题群、允许/拒绝用户和群工具 smoke 均有明确验证步骤；
 - [ ] UI 能在任何失败阶段说明当前哪一侧在监听、哪些消息/任务需要核对、下一步是重试还是回滚。

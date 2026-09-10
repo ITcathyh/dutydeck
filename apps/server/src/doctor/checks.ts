@@ -58,7 +58,7 @@ export function checkNodeVersion(nodeVersion: string): DoctorCheck {
     label: 'Node.js 版本',
     level: 'fail',
     detail: `当前 ${nodeVersion}，需要 >= v${REQUIRED_NODE_VERSION}`,
-    remedy: `Dockmux 要求 Node.js >= ${REQUIRED_NODE_VERSION}。请升级 Node 后重跑，例如用 nvm 装一个满足要求的版本。`,
+    remedy: `Dutydeck 要求 Node.js >= ${REQUIRED_NODE_VERSION}。请升级 Node 后重跑，例如用 nvm 装一个满足要求的版本。`,
     command: `nvm install ${REQUIRED_NODE_VERSION}`,
     verify: 'node --version'
   };
@@ -95,7 +95,7 @@ export function checkDaemon(observation: DaemonObservation): DoctorCheck {
         level: 'warn',
         detail: `进程在跑但尚未就绪${detail ? `（${detail}）` : ''}`,
         remedy: '守护进程已启动但还没报告 ready：可能仍在初始化，也可能卡在启动过程中。稍等几秒重跑体检；若一直如此，看日志再重启。',
-        command: 'dockmux restart',
+        command: 'dutydeck restart',
         ...(logFile ? { verify: `tail -n 50 ${logFile}` } : {})
       };
     }
@@ -110,7 +110,7 @@ export function checkDaemon(observation: DaemonObservation): DoctorCheck {
       level: 'warn',
       detail: `记录中的 pid ${recordedPid} 已不存在（残留状态，进程可能崩溃或被强杀）`,
       remedy: `上次记录的守护进程 pid ${recordedPid} 已经消失，这是残留状态而非从未启动。${logFile ? `先看日志确认崩溃原因（${logFile}），再重新启动。` : '重新启动即可清理残留状态。'}`,
-      command: 'dockmux start',
+      command: 'dutydeck start',
       ...(logFile ? { verify: `tail -n 50 ${logFile}` } : {})
     };
   }
@@ -120,9 +120,9 @@ export function checkDaemon(observation: DaemonObservation): DoctorCheck {
     label: '守护进程',
     level: 'warn',
     detail: '未运行',
-    remedy: '本机没有正在运行的 Dockmux 守护进程，Web 面板与飞书监听都不会工作。启动它即可。',
-    command: 'dockmux start',
-    verify: 'dockmux status'
+    remedy: '本机没有正在运行的 Dutydeck 守护进程，Web 面板与飞书监听都不会工作。启动它即可。',
+    command: 'dutydeck start',
+    verify: 'dutydeck status'
   };
 }
 
@@ -153,8 +153,8 @@ export function checkDatabase(path: string, probe: DatabaseProbeResult): DoctorC
       level: 'warn',
       detail: `尚未初始化（${path} 不存在）`,
       remedy: '数据库会在首次启动守护进程时自动创建并迁移。体检不会替你建库，以免留下一个空库掩盖真实状态。',
-      command: 'dockmux start',
-      verify: 'dockmux status'
+      command: 'dutydeck start',
+      verify: 'dutydeck status'
     };
   }
   if (probe.error) {
@@ -175,7 +175,7 @@ export function checkDatabase(path: string, probe: DatabaseProbeResult): DoctorC
  * 迁移漂移检查。
  *
  * expectedVersion 为 undefined 时降级 skip：`migrations` 目前并未从
- * @dockmux/storage 的入口导出（实测 TS2305），拿不到期望头版本时如实说不知道，
+ * @dutydeck/storage 的入口导出（实测 TS2305），拿不到期望头版本时如实说不知道，
  * 不要拿一个猜的数字去报「库过期」。
  */
 export function checkSchema(probe: DatabaseProbeResult, expectedVersion?: number): DoctorCheck {
@@ -196,8 +196,8 @@ export function checkSchema(probe: DatabaseProbeResult, expectedVersion?: number
       level: 'warn',
       detail: `已应用 ${applied}，当前代码期望 ${expectedVersion}`,
       remedy: '数据库结构比当前代码旧。迁移会在守护进程下次启动时自动补齐；重启一次即可。',
-      command: 'dockmux restart',
-      verify: 'dockmux doctor'
+      command: 'dutydeck restart',
+      verify: 'dutydeck doctor'
     };
   }
   return {
@@ -205,13 +205,13 @@ export function checkSchema(probe: DatabaseProbeResult, expectedVersion?: number
     label: '数据库迁移',
     level: 'warn',
     detail: `已应用 ${applied}，高于当前代码期望的 ${expectedVersion}`,
-    remedy: '数据库是更新版本的 Dockmux 写下的，当前这份代码更旧，继续用可能读不懂新结构。请把 Dockmux 升级到最新版本。',
-    command: 'dockmux update',
-    verify: 'dockmux --version'
+    remedy: '数据库是更新版本的 Dutydeck 写下的，当前这份代码更旧，继续用可能读不懂新结构。请把 Dutydeck 升级到最新版本。',
+    command: 'dutydeck update',
+    verify: 'dutydeck --version'
   };
 }
 
-// ─── 5. dockmux.dir ──────────────────────────────────────────────────────────
+// ─── 5. dutydeck.dir ──────────────────────────────────────────────────────────
 
 export interface DirectoryObservation {
   path: string;
@@ -223,27 +223,27 @@ export interface DirectoryObservation {
   error?: string;
 }
 
-/** `.dockmux/` 存放 access token 与飞书凭据，组/其他人可访问就是泄露面。 */
-export function checkDockmuxDir(observation: DirectoryObservation): DoctorCheck {
+/** `.dutydeck/` 存放 access token 与飞书凭据，组/其他人可访问就是泄露面。 */
+export function checkDutydeckDir(observation: DirectoryObservation): DoctorCheck {
   const { path, exists, writable, mode, posix } = observation;
   if (!exists) {
     return {
-      id: 'dockmux.dir',
-      label: '.dockmux 目录',
+      id: 'dutydeck.dir',
+      label: '.dutydeck 目录',
       level: 'warn',
       detail: `尚不存在：${path}`,
       remedy: '该目录会在首次启动时自动创建（权限 700）。它保存访问令牌与渠道凭据，不要手工放宽权限。',
-      command: 'dockmux start',
+      command: 'dutydeck start',
       verify: `ls -ld ${path}`
     };
   }
   if (!writable) {
     return {
-      id: 'dockmux.dir',
-      label: '.dockmux 目录',
+      id: 'dutydeck.dir',
+      label: '.dutydeck 目录',
       level: 'fail',
       detail: `不可写：${path}${observation.error ? `（${observation.error}）` : ''}`,
-      remedy: `Dockmux 需要写入 ${path}（数据库、令牌、日志都在这里）。把它的属主改回当前用户并收紧到 700。`,
+      remedy: `Dutydeck 需要写入 ${path}（数据库、令牌、日志都在这里）。把它的属主改回当前用户并收紧到 700。`,
       command: `chmod 700 ${path}`,
       verify: `ls -ld ${path}`
     };
@@ -252,8 +252,8 @@ export function checkDockmuxDir(observation: DirectoryObservation): DoctorCheck 
   if (posix && mode !== undefined && (mode & 0o077) !== 0) {
     const octal = (mode & 0o777).toString(8).padStart(3, '0');
     return {
-      id: 'dockmux.dir',
-      label: '.dockmux 目录',
+      id: 'dutydeck.dir',
+      label: '.dutydeck 目录',
       level: 'warn',
       detail: `权限过宽：${octal}（同组或其他用户可访问）`,
       remedy: `${path} 里保存着访问令牌与飞书应用凭据，当前权限 ${octal} 允许同组/其他用户读取。收紧为仅属主可访问。`,
@@ -262,7 +262,7 @@ export function checkDockmuxDir(observation: DirectoryObservation): DoctorCheck 
     };
   }
   const octal = mode === undefined ? undefined : (mode & 0o777).toString(8).padStart(3, '0');
-  return { id: 'dockmux.dir', label: '.dockmux 目录', level: 'ok', detail: octal ? `${path}（${octal}）` : path };
+  return { id: 'dutydeck.dir', label: '.dutydeck 目录', level: 'ok', detail: octal ? `${path}（${octal}）` : path };
 }
 
 // ─── 6. agents.detected / agents.auth ────────────────────────────────────────
@@ -274,9 +274,9 @@ export function checkAgents(agents: DoctorConfig['agents']): DoctorCheck {
       label: 'Agent CLI',
       level: 'warn',
       detail: '未检测到任何已安装的 Agent CLI',
-      remedy: 'Dockmux 只驱动本机已安装的 Agent CLI。先安装其中任意一个（如 Claude Code、Codex、Gemini），再重跑配置向导让它被登记。',
-      command: 'dockmux setup',
-      verify: 'dockmux doctor'
+      remedy: 'Dutydeck 只驱动本机已安装的 Agent CLI。先安装其中任意一个（如 Claude Code、Codex、Gemini），再重跑配置向导让它被登记。',
+      command: 'dutydeck setup',
+      verify: 'dutydeck doctor'
     };
   }
   const listed = agents.map(agent => (agent.version ? `${agent.name} ${agent.version}` : agent.name)).join('、');
@@ -299,8 +299,8 @@ export function checkAgentAuth(agents: DoctorConfig['agents']): DoctorCheck {
     label: 'Agent 认证',
     level: 'info',
     detail: names
-      ? `Agent 的登录/认证由各 CLI 自己管理，Dockmux 不代为判断；要确认登录态，直接在终端运行对应 CLI（${names}）`
-      : 'Agent 的登录/认证由各 CLI 自己管理，Dockmux 不代为判断；要确认登录态，直接在终端运行对应 CLI'
+      ? `Agent 的登录/认证由各 CLI 自己管理，Dutydeck 不代为判断；要确认登录态，直接在终端运行对应 CLI（${names}）`
+      : 'Agent 的登录/认证由各 CLI 自己管理，Dutydeck 不代为判断；要确认登录态，直接在终端运行对应 CLI'
     // info 级不需要 remedy：这不是问题，只是说明责任边界。
   };
 }
@@ -354,9 +354,9 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
         label: '飞书配置',
         level: 'fail',
         detail: `${larkBotsConfigKey} 不是合法 JSON，飞书机器人不会被加载`,
-        remedy: `configs 表里的 ${larkBotsConfigKey} 已损坏。重新走一遍配置向导覆盖它；凭据请用 dockmux secret set 录入，不会回显到终端。`,
-        command: 'dockmux setup --lark-app-id <应用ID>',
-        verify: 'dockmux doctor --json'
+        remedy: `configs 表里的 ${larkBotsConfigKey} 已损坏。重新走一遍配置向导覆盖它；凭据请用 dutydeck secret set 录入，不会回显到终端。`,
+        command: 'dutydeck setup --lark-app-id <应用ID>',
+        verify: 'dutydeck doctor --json'
       }],
     };
   }
@@ -369,8 +369,8 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
         level: 'fail',
         detail: `${larkBotsConfigKey} 不是数组，飞书机器人不会被加载`,
         remedy: `configs 表里的 ${larkBotsConfigKey} 结构异常（期望是数组）。重新走一遍配置向导覆盖它。`,
-        command: 'dockmux setup --lark-app-id <应用ID>',
-        verify: 'dockmux doctor --json'
+        command: 'dutydeck setup --lark-app-id <应用ID>',
+        verify: 'dutydeck doctor --json'
       }],
     };
   }
@@ -393,9 +393,9 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
       level: 'fail',
       // 只报「缺失」这一事实，永不打印 secret 本身。
       detail: `${missingSecret.length} 个机器人缺少 App Secret：${ids}`,
-      remedy: `缺少 App Secret 的飞书机器人会被静默忽略。重新绑定以补齐凭据；也可以用 dockmux secret set 录入，它从文件描述符读取、不会把凭据回显到终端或 shell 历史。`,
-      command: `dockmux setup --lark-app-id ${missingSecret[0]?.appId ?? '<应用ID>'}`,
-      verify: 'dockmux doctor --json'
+      remedy: `缺少 App Secret 的飞书机器人会被静默忽略。重新绑定以补齐凭据；也可以用 dutydeck secret set 录入，它从文件描述符读取、不会把凭据回显到终端或 shell 历史。`,
+      command: `dutydeck setup --lark-app-id ${missingSecret[0]?.appId ?? '<应用ID>'}`,
+      verify: 'dutydeck doctor --json'
     });
   } else if (missingAppId.length > 0) {
     checks.push({
@@ -404,8 +404,8 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
       level: 'fail',
       detail: `${missingAppId.length} 个条目缺少 App ID，会被忽略`,
       remedy: '存在没有 App ID 的飞书配置条目，它们不会被加载。重新走配置向导覆盖这份配置。',
-      command: 'dockmux setup --lark-app-id <应用ID>',
-      verify: 'dockmux doctor --json'
+      command: 'dutydeck setup --lark-app-id <应用ID>',
+      verify: 'dutydeck doctor --json'
     });
   } else {
     // publicLarkConfigs 是纯函数、同步、且本身就是「浏览器安全」的投影（不含 appSecret）。
@@ -427,8 +427,8 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
         level: 'warn',
         detail: `${unconfirmed.length} 个机器人已开启监听但未确认完全信任：${unconfirmed.map(bot => bot.appId).join('、')}`,
         remedy: '只有确认过「以完全信任模式无人值守运行」的机器人才会真正建立监听连接；未确认的会一直连不上。在 Web 面板的飞书配置里勾选确认，或重新走一遍配置向导。',
-        command: `dockmux setup --lark-app-id ${unconfirmed[0]?.appId ?? '<应用ID>'}`,
-        verify: 'dockmux doctor --json'
+        command: `dutydeck setup --lark-app-id ${unconfirmed[0]?.appId ?? '<应用ID>'}`,
+        verify: 'dutydeck doctor --json'
       });
     }
     const incomplete = view.bots.filter(bot => !bot.setupComplete);
@@ -439,8 +439,8 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
         level: 'warn',
         detail: `${incomplete.length} 个机器人尚未配完（缺默认 Agent 或未确认完全信任）：${incomplete.map(bot => bot.appId).join('、')}`,
         remedy: '缺少默认 Agent 的机器人收到消息后不知道该用哪个 Agent 处理。补上默认 Agent 并完成完全信任确认。',
-        command: `dockmux setup --lark-app-id ${incomplete[0]?.appId ?? '<应用ID>'}`,
-        verify: 'dockmux doctor --json'
+        command: `dutydeck setup --lark-app-id ${incomplete[0]?.appId ?? '<应用ID>'}`,
+        verify: 'dutydeck doctor --json'
       });
     }
   }
@@ -454,10 +454,10 @@ export function checkLarkListener(botCount: number, daemonRunning: boolean, list
       id: 'lark.listener',
       label: '飞书监听',
       level: 'warn',
-      detail: '本进程环境里 DOCKMUX_DISABLE_LARK_LISTENER=true，监听已关闭',
-      remedy: '环境变量 DOCKMUX_DISABLE_LARK_LISTENER=true 会让本进程完全不建立飞书长连接（等价于 --no-lark-listen）。要恢复监听，去掉该变量后重启守护进程。',
-      command: 'unset DOCKMUX_DISABLE_LARK_LISTENER && dockmux restart',
-      verify: 'dockmux doctor --json'
+      detail: '本进程环境里 DUTYDECK_DISABLE_LARK_LISTENER=true，监听已关闭',
+      remedy: '环境变量 DUTYDECK_DISABLE_LARK_LISTENER=true 会让本进程完全不建立飞书长连接（等价于 --no-lark-listen）。要恢复监听，去掉该变量后重启守护进程。',
+      command: 'unset DUTYDECK_DISABLE_LARK_LISTENER && dutydeck restart',
+      verify: 'dutydeck doctor --json'
     };
   }
   if (botCount === 0) {
@@ -470,8 +470,8 @@ export function checkLarkListener(botCount: number, daemonRunning: boolean, list
       level: 'warn',
       detail: '已配置飞书，但守护进程未运行，监听不可能是活的',
       remedy: '飞书长连接由守护进程持有。进程没跑起来时，机器人收不到任何消息。启动守护进程后监听才会建立。',
-      command: 'dockmux start',
-      verify: 'dockmux status'
+      command: 'dutydeck start',
+      verify: 'dutydeck status'
     };
   }
   return { id: 'lark.listener', label: '飞书监听', level: 'ok', detail: `守护进程在运行，${botCount} 个机器人的监听由它持有` };
@@ -502,8 +502,8 @@ export function checkAccessPosture(observation: PostureObservation): DoctorCheck
       level: 'fail',
       detail: `认证已关闭且监听在 ${host}:${port}（非仅本机）——同网络任何人都能打开终端并驱动 Agent`,
       remedy: `这等于把本机 shell 和所有 Agent 的控制权敞开给整个网络。二选一：重新开启访问认证，或改回只监听本机（127.0.0.1）。`,
-      command: 'dockmux setup --local-only',
-      verify: 'dockmux doctor --json'
+      command: 'dutydeck setup --local-only',
+      verify: 'dutydeck doctor --json'
     };
   }
   if (mode === 'local' && !authEnabled) {
@@ -512,9 +512,9 @@ export function checkAccessPosture(observation: PostureObservation): DoctorCheck
       label: '访问姿态',
       level: 'warn',
       detail: `认证已关闭，但只监听 ${host}（仅本机可达）`,
-      remedy: '当前只有本机能连，风险有限；但本机上的任何进程/用户都能无凭据操作 Dockmux。若这台机器不是你独占的，请开启访问认证。',
-      command: 'dockmux restart --auth',
-      verify: 'dockmux doctor --json'
+      remedy: '当前只有本机能连，风险有限；但本机上的任何进程/用户都能无凭据操作 Dutydeck。若这台机器不是你独占的，请开启访问认证。',
+      command: 'dutydeck restart --auth',
+      verify: 'dutydeck doctor --json'
     };
   }
   if (mode === 'local') {
@@ -524,7 +524,7 @@ export function checkAccessPosture(observation: PostureObservation): DoctorCheck
     id: 'access.posture',
     label: '访问姿态',
     level: 'ok',
-    detail: `监听 ${host}:${port}，访问认证开启（远程访问需带令牌，用 dockmux auth token 获取）`
+    detail: `监听 ${host}:${port}，访问认证开启（远程访问需带令牌，用 dutydeck auth token 获取）`
   };
 }
 
@@ -547,8 +547,8 @@ export function checkPostureDrift(observation: PostureObservation): DoctorCheck 
     level: 'warn',
     detail: parts,
     remedy: '正在运行的守护进程用的是启动时的配置，之后的配置改动不会自动生效——你看到的行为仍是旧配置。重启守护进程让新配置生效。',
-    command: 'dockmux restart',
-    verify: 'dockmux status'
+    command: 'dutydeck restart',
+    verify: 'dutydeck status'
   };
 }
 
@@ -583,11 +583,11 @@ export function checkAccessToken(observation: TokenObservation): DoctorCheck {
       level: 'fail',
       detail: '认证已开启但没有访问令牌，所有请求都会被拒绝（401）',
       remedy: '访问认证开着却没有令牌，等于谁都进不来。生成一个令牌（守护进程首次启动时也会自动生成一个）。',
-      command: 'dockmux auth token',
-      verify: 'dockmux auth token'
+      command: 'dutydeck auth token',
+      verify: 'dutydeck auth token'
     };
   }
-  return { id: 'access.token', label: '访问令牌', level: 'ok', detail: '已存在（值不在此显示，用 dockmux auth token 查看）' };
+  return { id: 'access.token', label: '访问令牌', level: 'ok', detail: '已存在（值不在此显示，用 dutydeck auth token 查看）' };
 }
 
 // ─── 9. port.conflict ────────────────────────────────────────────────────────
@@ -611,16 +611,16 @@ export function checkPort(observation: PortObservation, platform: string): Docto
   const { host, port, outcome, ownDaemon } = observation;
   if (outcome === 'occupied' && ownDaemon) {
     // 占用者就是我们自己 —— 这正是健康状态，不是冲突。
-    return { id: 'port.conflict', label: '端口占用', level: 'ok', detail: `${port} 由本机 Dockmux 守护进程占用（就是它自己）` };
+    return { id: 'port.conflict', label: '端口占用', level: 'ok', detail: `${port} 由本机 Dutydeck 守护进程占用（就是它自己）` };
   }
   if (outcome === 'occupied') {
     return {
       id: 'port.conflict',
       label: '端口占用',
       level: 'fail',
-      detail: `${host}:${port} 已被其他进程占用，Dockmux 起不来`,
-      remedy: `端口 ${port} 被别的程序占着，而它不是 Dockmux 的守护进程。要么停掉那个程序，要么把 Dockmux 换到别的端口。`,
-      command: `dockmux setup --port <其他端口>`,
+      detail: `${host}:${port} 已被其他进程占用，Dutydeck 起不来`,
+      remedy: `端口 ${port} 被别的程序占着，而它不是 Dutydeck 的守护进程。要么停掉那个程序，要么把 Dutydeck 换到别的端口。`,
+      command: `dutydeck setup --port <其他端口>`,
       verify: holderCommand(port, platform)
     };
   }
@@ -632,7 +632,7 @@ export function checkPort(observation: PortObservation, platform: string): Docto
       detail: `${host}:${port} 占用情况探测不出来（可能是权限不足或探测超时）`,
       remedy: `无法确认端口 ${port} 是否可用（低于 1024 的端口通常需要特权，也可能是探测超时）。手工确认一下谁在监听。`,
       command: holderCommand(port, platform),
-      verify: 'dockmux status'
+      verify: 'dutydeck status'
     };
   }
   return { id: 'port.conflict', label: '端口占用', level: 'ok', detail: `${host}:${port} 可用` };
@@ -650,7 +650,7 @@ export function checkPlatformPickers(platform: string): DoctorCheck {
     label: '原生目录选择器',
     level: 'info',
     detail: `${platform} 平台没有原生选择器，工作目录需要手工输入绝对路径`,
-    verify: 'dockmux setup --cwd <绝对路径>'
+    verify: 'dutydeck setup --cwd <绝对路径>'
   };
 }
 
@@ -668,7 +668,7 @@ export function checkAutostart(result: DoctorAutostartResult | undefined, userna
       label: '开机自启',
       level: 'info',
       detail: `${state.platform ?? '当前'} 平台不支持自动注册开机自启（仅 macOS launchd 与 Linux user systemd）`,
-      verify: 'dockmux start'
+      verify: 'dutydeck start'
     }];
   }
   const checks: DoctorCheck[] = [];
@@ -677,10 +677,10 @@ export function checkAutostart(result: DoctorAutostartResult | undefined, userna
       id: 'autostart',
       label: '开机自启',
       level: 'info',
-      detail: '未注册：重启或重新登录后 Dockmux 不会自动起来',
-      remedy: '若希望开机/登录后自动拉起 Dockmux，注册开机自启（只登记引导钩子，不会立刻启动服务）。',
-      command: 'dockmux autostart enable',
-      verify: 'dockmux autostart status'
+      detail: '未注册：重启或重新登录后 Dutydeck 不会自动起来',
+      remedy: '若希望开机/登录后自动拉起 Dutydeck，注册开机自启（只登记引导钩子，不会立刻启动服务）。',
+      command: 'dutydeck autostart enable',
+      verify: 'dutydeck autostart status'
     });
     return checks;
   }
@@ -695,10 +695,10 @@ export function checkAutostart(result: DoctorAutostartResult | undefined, userna
       id: 'autostart.stale',
       label: '开机自启已漂移',
       level: 'warn',
-      detail: `磁盘上的启动配置与当前 node / dockmux 路径不一致${state.unitPath ? `（${state.unitPath}）` : ''}`,
+      detail: `磁盘上的启动配置与当前 node / dutydeck 路径不一致${state.unitPath ? `（${state.unitPath}）` : ''}`,
       remedy: '换过 node 版本或升级过 npm 包后，已登记的启动路径会静默失效——重启后服务再也起不来，且不会有任何报错。重新执行一次 enable 即可用当前路径刷新。',
-      command: 'dockmux autostart enable',
-      verify: 'dockmux autostart status'
+      command: 'dutydeck autostart enable',
+      verify: 'dutydeck autostart status'
     });
   }
   if (state.platform === 'linux' && state.lingerEnabled === false) {
@@ -707,7 +707,7 @@ export function checkAutostart(result: DoctorAutostartResult | undefined, userna
       label: 'systemd linger',
       level: 'warn',
       detail: '未开启 linger：注销当前登录会话后服务会被系统杀掉',
-      remedy: 'user systemd 默认在用户注销时回收其所有服务。要让 Dockmux 跨注销/重启常驻，需要为该用户开启 linger（可能需要 sudo）。',
+      remedy: 'user systemd 默认在用户注销时回收其所有服务。要让 Dutydeck 跨注销/重启常驻，需要为该用户开启 linger（可能需要 sudo）。',
       command: `loginctl enable-linger ${username}`,
       verify: `loginctl show-user ${username} --property=Linger`
     });

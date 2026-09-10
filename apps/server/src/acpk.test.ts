@@ -3,9 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 
 describe('acpk pass-through', () => {
-  it('preserves every argument after dockmux acpk', () => {
-    expect(acpkPassThroughArgs(['node', 'dockmux', 'acpk', 'agents', 'list', '--json', '--scope=x'])).toEqual(['agents', 'list', '--json', '--scope=x']);
-    expect(acpkPassThroughArgs(['node', 'dockmux', '--help'])).toBeUndefined();
+  it('preserves every argument after dutydeck acpk', () => {
+    expect(acpkPassThroughArgs(['node', 'dutydeck', 'acpk', 'agents', 'list', '--json', '--scope=x'])).toEqual(['agents', 'list', '--json', '--scope=x']);
+    expect(acpkPassThroughArgs(['node', 'dutydeck', '--help'])).toBeUndefined();
   });
 
   it('spawns acpk without a shell and returns its exit code', async () => {

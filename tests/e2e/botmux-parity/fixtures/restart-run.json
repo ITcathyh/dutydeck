@@ -5,7 +5,7 @@
     "session_ref": "session_fixture_restart",
     "backend_kind": "tmux",
     "persistent_required": true,
-    "ownership_ref": "owner_fixture_dockmux",
+    "ownership_ref": "owner_fixture_dutydeck",
     "initial_generation": 7,
     "restart_boundary": "between_completed_turns"
   },

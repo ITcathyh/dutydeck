@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import Fastify from 'fastify';
-import type { ConfigRepository } from '@dockmux/shared';
+import type { ConfigRepository } from '@dutydeck/shared';
 import {
   AUTH_TOKEN_CONFIG_KEY,
   AUTH_COOKIE_NAME,
@@ -131,14 +131,14 @@ describe('tokensEqual', () => {
 
 describe('isSameOriginRequest', () => {
   it('accepts exact direct and reverse-proxy origins', () => {
-    expect(isSameOriginRequest({ origin: 'http://dockmux.test:4310', host: 'dockmux.test:4310' })).toBe(true);
-    expect(isSameOriginRequest({ origin: 'https://dockmux.example.com', host: '127.0.0.1:4310', 'x-forwarded-host': 'dockmux.example.com', 'x-forwarded-proto': 'https' })).toBe(true);
+    expect(isSameOriginRequest({ origin: 'http://dutydeck.test:4310', host: 'dutydeck.test:4310' })).toBe(true);
+    expect(isSameOriginRequest({ origin: 'https://dutydeck.example.com', host: '127.0.0.1:4310', 'x-forwarded-host': 'dutydeck.example.com', 'x-forwarded-proto': 'https' })).toBe(true);
   });
 
   it('rejects cross-origin, null and malformed browser origins', () => {
-    expect(isSameOriginRequest({ origin: 'https://evil.example', host: 'dockmux.test:4310' })).toBe(false);
-    expect(isSameOriginRequest({ origin: 'null', host: 'dockmux.test:4310' })).toBe(false);
-    expect(isSameOriginRequest({ origin: 'not a url', host: 'dockmux.test:4310' })).toBe(false);
+    expect(isSameOriginRequest({ origin: 'https://evil.example', host: 'dutydeck.test:4310' })).toBe(false);
+    expect(isSameOriginRequest({ origin: 'null', host: 'dutydeck.test:4310' })).toBe(false);
+    expect(isSameOriginRequest({ origin: 'not a url', host: 'dutydeck.test:4310' })).toBe(false);
   });
 });
 
@@ -287,10 +287,10 @@ describe('registerAuthMiddleware', () => {
 
   it('cookie 请求拒绝跨 Origin，允许完全同源或无 Origin API 客户端', async () => {
     const app = buildApp({ getToken: async () => TOKEN, localOnly: false });
-    const crossOrigin = await app.inject({ method: 'POST', url: '/api/protected', remoteAddress: '203.0.113.7', headers: { host: 'dockmux.test', origin: 'https://evil.example', cookie: `${AUTH_COOKIE_NAME}=${TOKEN}` } });
+    const crossOrigin = await app.inject({ method: 'POST', url: '/api/protected', remoteAddress: '203.0.113.7', headers: { host: 'dutydeck.test', origin: 'https://evil.example', cookie: `${AUTH_COOKIE_NAME}=${TOKEN}` } });
     expect(crossOrigin.statusCode).toBe(403);
     expect(crossOrigin.json().error.code).toBe('ORIGIN_NOT_ALLOWED');
-    const sameOrigin = await app.inject({ method: 'POST', url: '/api/protected', remoteAddress: '203.0.113.7', headers: { host: 'dockmux.test', origin: 'http://dockmux.test', cookie: `${AUTH_COOKIE_NAME}=${TOKEN}` } });
+    const sameOrigin = await app.inject({ method: 'POST', url: '/api/protected', remoteAddress: '203.0.113.7', headers: { host: 'dutydeck.test', origin: 'http://dutydeck.test', cookie: `${AUTH_COOKIE_NAME}=${TOKEN}` } });
     expect(sameOrigin.statusCode).toBe(200);
     const apiClient = await app.inject({ method: 'POST', url: '/api/protected', remoteAddress: '203.0.113.7', headers: { cookie: `${AUTH_COOKIE_NAME}=${TOKEN}` } });
     expect(apiClient.statusCode).toBe(200);

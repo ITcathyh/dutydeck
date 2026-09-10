@@ -5,7 +5,7 @@ import { writeRunnerInput } from '../runner-input.js';
  * Codex App 适配器 —— runner 类：由一个 Node runner 通过 app-server 协议
  * （`codex app-server`）驱动 Codex，不驱动 TUI。
  *
- * ⚠️ dockmux 未移植 botmux 的 runner 脚本：**agent 的 command 必须指向对应的
+ * ⚠️ dutydeck 未移植 botmux 的 runner 脚本：**agent 的 command 必须指向对应的
  * codex-app runner**（botmux 侧是 `node dist/codex-app-runner.js`），本适配器只
  * 产出 runner 的参数，不解析 bin 路径。
  *
@@ -25,7 +25,7 @@ export function createCodexAppAdapter(): CliAdapter {
     id: 'codex-app',
     // resume 能力位为否：buildArgs 虽能接 --thread-id（driver 回填
     // resumeSessionId 时可用），但没有 buildResumeCommand——thread id 是
-    // app-server 铸的，driver 的 resume() 只拿得到 dockmux sessionId，拼出来
+    // app-server 铸的，driver 的 resume() 只拿得到 dutydeck sessionId，拼出来
     // 必然指向不存在的 thread。botmux 同样返回 null。
     capabilities: {},
 
@@ -44,7 +44,7 @@ export function createCodexAppAdapter(): CliAdapter {
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // 分块 + 节流 stdin 注入：整条控制行（可能 ~20KB）一次 send-keys 会溢出
       // pane pty 输入缓冲并被丢弃。
-      await writeRunnerInput(backend, '::dockmux-codex-app:', prompt);
+      await writeRunnerInput(backend, '::dutydeck-codex-app:', prompt);
     },
 
     readyPattern: /›/,

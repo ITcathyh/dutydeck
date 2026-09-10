@@ -5,13 +5,13 @@ This surface performs an explicit, read-only verification for a staged or disabl
 ## CLI
 
 ```bash
-dockmux lark preflight <channel-bot-id>
-dockmux lark preflight <channel-bot-id> \
+dutydeck lark preflight <channel-bot-id>
+dutydeck lark preflight <channel-bot-id> \
   --group-binding <binding-id> \
   --group-binding <another-binding-id>
 ```
 
-The command connects only to the locally recorded Dockmux daemon. In token mode it reads that daemon's access token from the recorded database and sends it as a Bearer credential; an explicitly configured no-auth trusted devhost sends no token. Tokens and SecretRef values are never printed.
+The command connects only to the locally recorded Dutydeck daemon. In token mode it reads that daemon's access token from the recorded database and sends it as a Bearer credential; an explicitly configured no-auth trusted devhost sends no token. Tokens and SecretRef values are never printed.
 
 Exit status is `0` for passed evidence, `2` when the read-only probe completed but returned blockers, and `1` for request/configuration errors.
 

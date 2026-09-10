@@ -8,7 +8,7 @@ describe('stream-safe Markdown code rendering', () => {
   });
 
   it('falls back to plain text for an unknown grammar while retaining its label', () => {
-    expect(resolveCodeLanguage('language-dockmux')).toEqual({ language: 'plain', label: 'dockmux' });
+    expect(resolveCodeLanguage('language-dutydeck')).toEqual({ language: 'plain', label: 'dutydeck' });
   });
 
   it('distinguishes inline code from fenced or multiline code', () => {

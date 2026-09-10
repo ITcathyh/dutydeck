@@ -70,7 +70,7 @@ export const defaultDatabaseProbe: DatabaseProbe = (path, keys) => {
  * 端口占用探测：尝试 bind，EADDRINUSE 即占用。
  *
  * 三条硬约束：
- *   1. 一定关掉 socket —— 探针自己把端口占住的话，紧随其后的 `dockmux start` 会失败。
+ *   1. 一定关掉 socket —— 探针自己把端口占住的话，紧随其后的 `dutydeck start` 会失败。
  *   2. 超时兜底，绝不挂住整个体检。
  *   3. 探不出来就返回 'unknown'，不冒充 'free'。低端口 EACCES 属于这一类：
  *      绑不上不代表没人在听。

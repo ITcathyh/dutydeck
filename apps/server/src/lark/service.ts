@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
-import type { PermissionMode } from '@dockmux/shared';
+import type { PermissionMode } from '@dutydeck/shared';
 import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, LarkCircuitOpenError } from './api-gate.js';
 import { buildLarkCardActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
@@ -251,14 +251,14 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
   const withinLimits = (value: unknown) => cardBytes(value) <= larkCardSnapshotLimits.bytes
     && cardComponents(value) <= larkCardSnapshotLimits.components;
   const omissionNotice = (count: number) => ({
-    tag: 'markdown', element_id: 'dockmux_snapshot_omission',
-    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组；完整记录请在 Dockmux Web 查看。</font>`,
+    tag: 'markdown', element_id: 'dutydeck_snapshot_omission',
+    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组；完整记录请在 Dutydeck Web 查看。</font>`,
     text_size: 'x-small', margin: '4px 0px'
   });
   const upsertOmissionNotice = (els: Array<Record<string, unknown>>, count: number) => {
     if (count <= 0) return;
     const notice = omissionNotice(count);
-    const index = els.findIndex(element => element.element_id === 'dockmux_snapshot_omission');
+    const index = els.findIndex(element => element.element_id === 'dutydeck_snapshot_omission');
     if (index >= 0) els[index] = notice;
     else {
       const firstGroup = els.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
@@ -276,7 +276,7 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
         ?? (mainElements.find(element => element.tag === 'markdown') as any)?.content ?? '内容过长');
       return [
         { tag: 'markdown', element_id: 'final_output', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
-        { tag: 'markdown', element_id: 'dockmux_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起；完整记录请在 Dockmux Web 查看。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
+        { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起；完整记录请在 Dutydeck Web 查看。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
       ];
     }
     const group = mainElements[groupIndex] as Record<string, unknown>;
@@ -326,7 +326,7 @@ export function larkConfigurationStatus(env: NodeJS.ProcessEnv = process.env, in
     missing,
     defaultReceiveIdConfigured: Boolean(defaultChatId || input.receiveId?.trim() || env.LARK_RECEIVE_ID?.trim()),
     defaultReceiveIdType: defaultChatId ? 'chat_id' : receiveIdType(input.receiveIdType ?? env.LARK_RECEIVE_ID_TYPE),
-    defaultAgentName: input.agentName?.trim() || env.LARK_AGENT_NAME?.trim() || 'Dockmux',
+    defaultAgentName: input.agentName?.trim() || env.LARK_AGENT_NAME?.trim() || 'Dutydeck',
     baseUrl: (input.baseUrl?.trim() || env.LARK_OPEN_API_BASE_URL?.trim() || 'https://open.feishu.cn').replace(/\/$/, '')
   };
 }
@@ -348,9 +348,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const state = input.state ?? 'running';
   const presentation = statePresentation[state];
   if (!presentation) throw new LarkServiceError('INVALID_CARD_STATE', `Unsupported Lark card state: ${String(state)}`, 400);
-  const taskName = clipCardField((input.taskName?.trim() || 'Dockmux').replace(/\s+/g, ' '), cardFieldLimits.taskName);
+  const taskName = clipCardField((input.taskName?.trim() || 'Dutydeck').replace(/\s+/g, ' '), cardFieldLimits.taskName);
   const taskId = clipCardField(String(input.taskId ?? Date.now()).trim() || 'task', cardFieldLimits.taskId);
-  const agentName = clipCardField(input.agentName?.trim() || 'Dockmux', cardFieldLimits.agentName);
+  const agentName = clipCardField(input.agentName?.trim() || 'Dutydeck', cardFieldLimits.agentName);
   const sessionId = input.sessionId?.trim() ? clipCardField(input.sessionId.trim(), cardFieldLimits.sessionId) : undefined;
   const webBaseUrl = input.webBaseUrl?.trim() ? clipCardField(input.webBaseUrl.trim(), cardFieldLimits.webBaseUrl) : undefined;
   const loadingImageKey = input.loadingImageKey?.trim() ? clipCardField(input.loadingImageKey.trim(), cardFieldLimits.imageKey) : undefined;
@@ -561,7 +561,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     return {
       schema: '2.0',
       header: {
-        title: { tag: 'plain_text', content: compactTaskName || 'Dockmux' },
+        title: { tag: 'plain_text', content: compactTaskName || 'Dutydeck' },
         // 副标题只承载「谁在跑这个任务」。执行宿主（Claude Code / Codex / …）会改变
         // 读者怎么理解结果、去哪排查，是这一行唯一有信息量的东西；
         // 「· Agent 任务」每张卡都一样，只会把它冲淡。页脚不再重复第二遍。
@@ -599,14 +599,14 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   };
   const withinLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && cardComponents(card) <= larkCardSafeLimits.components;
   const omissionNotice = (count: number) => ({
-    tag: 'markdown', element_id: 'dockmux_omission',
-    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组；完整记录请在 Dockmux Web 查看。</font>`,
+    tag: 'markdown', element_id: 'dutydeck_omission',
+    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组；完整记录请在 Dutydeck Web 查看。</font>`,
     text_size: 'x-small', margin: '4px 0px'
   });
   const upsertOmissionNotice = (elements: Array<Record<string, unknown>>, count: number) => {
     if (count <= 0) return;
     const notice = omissionNotice(count);
-    const index = elements.findIndex(element => element.element_id === 'dockmux_omission');
+    const index = elements.findIndex(element => element.element_id === 'dutydeck_omission');
     if (index >= 0) elements[index] = notice;
     else {
       const firstGroup = elements.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
@@ -647,7 +647,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const fallbackText = String((sourceMainElements.find(element => element.element_id === 'final_output') as any)?.content ?? (sourceMainElements.find(element => element.tag === 'markdown') as any)?.content ?? content ?? '内容过长');
   const fallbackCard = assemble([
     { tag: 'markdown', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
-    { tag: 'markdown', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起；完整记录请在 Dockmux Web 查看。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
+    { tag: 'markdown', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起；完整记录请在 Dutydeck Web 查看。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
   ]);
   if (withinLimits(fallbackCard)) return fallbackCard;
   // All caller-controlled fields have already been bounded. This last constant-size shape is the
@@ -662,7 +662,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       direction: 'vertical', padding: '10px 12px',
       elements: [
         { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
-        { tag: 'markdown', content: '卡片内容超过飞书安全预算，详细内容已收起。请在 Dockmux Web 查看完整记录。', text_size: 'normal' }
+        { tag: 'markdown', content: '卡片内容超过飞书安全预算，详细内容已收起。请在 Dutydeck Web 查看完整记录。', text_size: 'normal' }
       ]
     }
   };
@@ -706,7 +706,7 @@ export class LarkCardService {
       try {
         const form = new FormData();
         form.append('image_type', 'message');
-        form.append('image', new Blob([await readFile(new URL('./assets/dockmux-bouncing-ball.webp', import.meta.url))], { type: 'image/webp' }), 'dockmux-bouncing-ball.webp');
+        form.append('image', new Blob([await readFile(new URL('./assets/dutydeck-bouncing-ball.webp', import.meta.url))], { type: 'image/webp' }), 'dutydeck-bouncing-ball.webp');
         const response = await this.fetcher(`${this.config.baseUrl}/open-apis/im/v1/images`, {
           method: 'POST', headers: { authorization: `Bearer ${await this.tenantToken()}` }, body: form
         });

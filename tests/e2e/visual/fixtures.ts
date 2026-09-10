@@ -17,7 +17,7 @@ import { test as base, type Page, type Locator } from '@playwright/test';
  * 用户走的路径，也是最容易在重构中被漏掉一层的地方。
  */
 
-export const BASE_URL = process.env.DOCKMUX_E2E_BASE_URL ?? 'http://10.37.33.49:4310';
+export const BASE_URL = process.env.DUTYDECK_E2E_BASE_URL ?? 'http://10.37.33.49:4310';
 
 export type ThemeMode = 'light' | 'dark';
 /** attr = 显式 data-theme；media = 不写属性，靠 prefers-color-scheme。 */
@@ -45,13 +45,13 @@ export async function applyTheme(page: Page, theme: ThemeMode, path: ThemePath):
   if (path === 'attr') {
     await page.evaluate(t => {
       document.documentElement.setAttribute('data-theme', t);
-      try { window.localStorage.setItem('dockmux.theme', t); } catch { /* 隐私模式忽略 */ }
+      try { window.localStorage.setItem('dutydeck.theme', t); } catch { /* 隐私模式忽略 */ }
     }, theme);
   } else {
     await page.emulateMedia({ colorScheme: theme });
     await page.evaluate(() => {
       document.documentElement.removeAttribute('data-theme');
-      try { window.localStorage.removeItem('dockmux.theme'); } catch { /* 同上 */ }
+      try { window.localStorage.removeItem('dutydeck.theme'); } catch { /* 同上 */ }
     });
   }
   await page.waitForTimeout(400);

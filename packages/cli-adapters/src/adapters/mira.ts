@@ -1,12 +1,12 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { writeRunnerInput } from '../runner-input.js';
 
 /**
  * Mira（Mira Web API）适配器 —— runner 类：云端编排 + 远端 sandbox，没有本地
  * 二进制，全部经由一个 Node runner 走 HTTP。
  *
- * ⚠️ dockmux 未移植 botmux 的 runner 脚本：**agent 的 command 必须指向对应的
+ * ⚠️ dutydeck 未移植 botmux 的 runner 脚本：**agent 的 command 必须指向对应的
  * mira runner**（botmux 侧是 `node dist/mira-runner.js`），本适配器只产出 runner
  * 的参数，不解析任何 bin 路径。
  *
@@ -38,14 +38,14 @@ export function createMiraAdapter(): CliAdapter {
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // 分块 + 节流 stdin 注入：单次 send-keys 发整条大消息会被丢弃并卡死会话。
-      await writeRunnerInput(backend, '::dockmux-mira:', prompt);
+      await writeRunnerInput(backend, '::dutydeck-mira:', prompt);
     },
 
     // 入参必须是 Mira 自己铸的会话 id（`--mira-session-id` 的唯一形态）。
-    // dockmux sessionId 顶替不了，恢复不到正确会话 → 返回 null（botmux 同样如此），
+    // dutydeck sessionId 顶替不了，恢复不到正确会话 → 返回 null（botmux 同样如此），
     // driver 据此改起新会话。
     buildResumeCommand(sessionId: string): string[] | null {
-      if (isDockmuxSessionId(sessionId)) return null;
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['--mira-session-id', sessionId];
     },
 

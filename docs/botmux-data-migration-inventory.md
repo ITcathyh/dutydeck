@@ -2,7 +2,7 @@
 
 > 审计时间：2026-08-30（PRC）
 >
-> 来源：本机 Botmux 用户目录与 Dockmux 当前代码/数据库 schema
+> 来源：本机 Botmux 用户目录与 Dutydeck 当前代码/数据库 schema
 >
 > 安全边界：本文不记录 App Secret、token、cookie、登录态、消息正文或任务 prompt。文中的 `cli_*`、`oc_*` 是非敏感路由标识。
 
@@ -18,7 +18,7 @@
 - 0 个用户自定义 connector、0 个已安装 plugin、0 个 prompt/skill customization。
 - 28 条历史 session 元数据；其中 6 条属于已从当前 `bots.json` 移除的 TraeX Bot。
 
-Dockmux 已能直接承载 Agent 基础定义、飞书 App、模型/CWD、私聊模式、普通群 reply mode、全局白名单和群协作工具；但当前没有一等承载下列 Botmux 语义：
+Dutydeck 已能直接承载 Agent 基础定义、飞书 App、模型/CWD、私聊模式、普通群 reply mode、全局白名单和群协作工具；但当前没有一等承载下列 Botmux 语义：
 
 - per-app + per-group 的 oncall/CWD/授权/回复策略；
 - `canTalk`、`canOperate`、owner 三层权限；
@@ -49,21 +49,21 @@ Dockmux 已能直接承载 Agent 基础定义、飞书 App、模型/CWD、私聊
 
 Botmux 的数据目录优先级是 `SESSION_DATA_DIR` → `.data-dir` breadcrumb → `~/.botmux/data`。Importer 不得写死默认目录。
 
-### 2.2 Dockmux 当前承载面
+### 2.2 Dutydeck 当前承载面
 
-Dockmux SQLite 当前有 7 个 `agent_configs`、18 个 session、0 个 `channel_mappings`；`configs` 仅有认证、群工具签名、relay 签名三项，没有 `lark.bots`，所以本次导入不会与既有飞书 Bot 配置冲突。现有 Agent ID 已包含：
+Dutydeck SQLite 当前有 7 个 `agent_configs`、18 个 session、0 个 `channel_mappings`；`configs` 仅有认证、群工具签名、relay 签名三项，没有 `lark.bots`，所以本次导入不会与既有飞书 Bot 配置冲突。现有 Agent ID 已包含：
 
 - `claude-code`（PTY CLI）；
 - `traex`（PTY CLI）。
 
 现有 schema 的直接承载能力：
 
-| Dockmux 位置 | 已支持字段 |
+| Dutydeck 位置 | 已支持字段 |
 |---|---|
 | `agent_configs.json` | command、args、protocol、model、reasoning effort、cwd、env、system prompt、permission mode |
 | `configs['lark.bots']` | App ID/Secret、名称、workspace、默认 Agent/模型/思考强度、p2p mode、group reply mode、全局用户/Bot 白名单、风险控制、群协作工具开关 |
 | `sessions` | Agent、CWD、模型、思考强度、permission mode、source/source_id、run ID |
-| `channel_mappings` | 外部飞书路由到 Dockmux session 的映射 |
+| `channel_mappings` | 外部飞书路由到 Dutydeck session 的映射 |
 
 `configs` 是通用 KV，不等于上述缺失能力已经实现；没有读取/授权/执行路径的 JSON 不能视为功能迁移完成。
 
@@ -96,7 +96,7 @@ Dockmux SQLite 当前有 7 个 `agent_configs`、18 个 session、0 个 `channel
 }
 ```
 
-这四项不是普通 `systemPrompt` 的同义词。Dockmux 在没有 Hammer gate/skill runtime 前，不能把该 Bot 静默降级成普通 `claude-code`。
+这四项不是普通 `systemPrompt` 的同义词。Dutydeck 在没有 Hammer gate/skill runtime 前，不能把该 Bot 静默降级成普通 `claude-code`。
 
 ### 3.2 历史/孤儿 Bot
 
@@ -119,7 +119,7 @@ Dockmux SQLite 当前有 7 个 `agent_configs`、18 个 session、0 个 `channel
 | `cli_aa0869da68b91cc9` | `hammer` | 是 |
 | `cli_aafc1d3bc1b8dd2d` | `traex` | 否 |
 
-三者均有 bot open ID 与 union ID cache；这些 ID 是派生身份缓存，不是配置源。目标端应在各 App 凭据下重新调用飞书接口解析，尤其不能把一个 App 视角下的 `ou_*` 跨 App 复制。当前 owner 使用邮箱，适合直接迁移到 Dockmux `allowedEmails`，再由目标 App 自行解析。
+三者均有 bot open ID 与 union ID cache；这些 ID 是派生身份缓存，不是配置源。目标端应在各 App 凭据下重新调用飞书接口解析，尤其不能把一个 App 视角下的 `ou_*` 跨 App 复制。当前 owner 使用邮箱，适合直接迁移到 Dutydeck `allowedEmails`，再由目标 App 自行解析。
 
 ## 4. 群配置、成员与协作策略
 
@@ -137,7 +137,7 @@ Dockmux SQLite 当前有 7 个 `agent_configs`、18 个 session、0 个 `channel
 - `hammer` 的 3 条 thread session，CWD 为 `/home/huangyuhang.edu/projects`；
 - 已退役 TraeX 的 6 条 thread session，CWD 为 `im_workspace`。
 
-因此 CWD 是 `(app_id, chat_id)` 级配置，不能折叠成一个群级 CWD，也不能只用 Dockmux 当前的 per-App `workspace` 表达。
+因此 CWD 是 `(app_id, chat_id)` 级配置，不能折叠成一个群级 CWD，也不能只用 Dutydeck 当前的 per-App `workspace` 表达。
 
 ### 4.2 权限语义
 
@@ -149,13 +149,13 @@ Botmux 权限是分层的：
 
 本机当前只有 owner 邮箱和 2 条 oncall，显式 grants 数量为 0。Oncall 群成员在源端可对话，但并不自动拥有 owner 操作权。
 
-Dockmux 当前 `allowedUsers`/`allowedEmails` 是整条消息入口的全局白名单，没有独立 `canTalk`/`canOperate`。若只导入 owner 邮箱，oncall 群其他成员会失去源端对话权；若放开全局白名单，又会扩大非 oncall 群权限。必须先增加 per-group RBAC 承载。
+Dutydeck 当前 `allowedUsers`/`allowedEmails` 是整条消息入口的全局白名单，没有独立 `canTalk`/`canOperate`。若只导入 owner 邮箱，oncall 群其他成员会失去源端对话权；若放开全局白名单，又会扩大非 oncall 群权限。必须先增加 per-group RBAC 承载。
 
 ### 4.3 回复与唤醒策略
 
-- 两个当前 Bot 的有效普通群 reply mode 都是 `chat-topic`，Dockmux 可直接映射到 `groupReplyMode`。
+- 两个当前 Bot 的有效普通群 reply mode 都是 `chat-topic`，Dutydeck 可直接映射到 `groupReplyMode`。
 - `bdev-helper` 的 `regularGroupMentionMode=topic` 表示顶层仍需 @，但在 Bot 自己的 shared topic 内可无 @ 续聊。
-- Dockmux 当前群事件只在 @ 当前 Bot 时唤醒，尚不能完整表达 Botmux 的 `topic`/`never`/`ambient` 四级 @ 策略。
+- Dutydeck 当前群事件只在 @ 当前 Bot 时唤醒，尚不能完整表达 Botmux 的 `topic`/`never`/`ambient` 四级 @ 策略。
 
 因此 `groupReplyMode` 可迁移，但 mention policy 必须另建字段和 dispatcher 行为，不能丢弃。
 
@@ -170,15 +170,15 @@ Dockmux 当前 `allowedUsers`/`allowedEmails` 是整条消息入口的全局白�
 
 Botmux 当前源码没有消费这些字段；它们属于外部/遗留群工具桥接。可确认的业务语义只有“该 App 在该群启用过群协作通道”，无法仅凭这 4 个字段证明具体读写操作范围。
 
-Dockmux 已有 session-bound 群协作工具和 HMAC capability，并在运行时注入：
+Dutydeck 已有 session-bound 群协作工具和 HMAC capability，并在运行时注入：
 
-- `dockmux_group_tools_url`；
-- `dockmux_group_tools_token`。
+- `dutydeck_group_tools_url`；
+- `dutydeck_group_tools_token`。
 
 迁移要求：
 
 1. 迁移 `(app_id, chat_id)` allowlist 语义，不迁移旧 socket、旧 transport token 或 token 文件。
-2. Dockmux 现有 `groupToolsEnabled`/`groupToolsAllowSend` 是 per-App 开关，直接开启会把权限扩大到该 App 的所有群。要保真必须增加 per-group policy。
+2. Dutydeck 现有 `groupToolsEnabled`/`groupToolsAllowSend` 是 per-App 开关，直接开启会把权限扩大到该 App 的所有群。要保真必须增加 per-group policy。
 3. 旧配置无法证明 send 权限，Importer 默认 `allow_send=false`，要求用户显式确认后才能开启。
 4. ACPX `session_options.env` 持久化键必须为 snake_case。禁止把 `BOT_GATEWAY_*` 或任何大写环境变量写进 session；旧大写名只能在读取边界兼容。
 
@@ -196,7 +196,7 @@ Dockmux 已有 session-bound 群协作工具和 HMAC capability，并在运行�
 | 用户 Skill Registry | 0 | `~/.botmux/skills/` 不存在 |
 | Prompt/Skill Customization | 0 | `data/customizations/` 不存在 |
 
-`~/.botmux/claude-plugin/` 和 `data/runtime-skills/` 是 Botmux 生成的内置/会话级物化产物，不是用户配置，不应复制到 Dockmux。
+`~/.botmux/claude-plugin/` 和 `data/runtime-skills/` 是 Botmux 生成的内置/会话级物化产物，不是用户配置，不应复制到 Dutydeck。
 
 ## 5. Schedule、Workflow、Feedback 与历史状态
 
@@ -213,7 +213,7 @@ Dockmux 已有 session-bound 群协作工具和 HMAC capability，并在运行�
 - CWD：`im_workspace`；
 - 最近状态：`ok`。
 
-任务还包含 schedule 表达式、prompt、root message、next/last run 等字段，本文不输出正文。Dockmux 当前没有 scheduler/store，不能静默跳过；在 schedule 能力落地前，Importer 必须把本次导入判为 `blocked`，或在用户显式选择 `--skip-schedules` 时只归档并给出醒目缺失报告。
+任务还包含 schedule 表达式、prompt、root message、next/last run 等字段，本文不输出正文。Dutydeck 当前没有 scheduler/store，不能静默跳过；在 schedule 能力落地前，Importer 必须把本次导入判为 `blocked`，或在用户显式选择 `--skip-schedules` 时只归档并给出醒目缺失报告。
 
 ### 5.2 Workflow
 
@@ -223,7 +223,7 @@ Dockmux 已有 session-bound 群协作工具和 HMAC capability，并在运行�
 - `config.json` 不存在，Botmux v3 workflow 机器级开关按默认关闭。
 - Botmux 源码仓库内的 7 个 `*.workflow.json` 是产品示例，不是用户数据。
 
-这 30 个 run 应作为未完成草稿归档，不能直接变成 Dockmux 可执行任务。其 goal 文本可能包含业务信息，Importer 日志不得打印。
+这 30 个 run 应作为未完成草稿归档，不能直接变成 Dutydeck 可执行任务。其 goal 文本可能包含业务信息，Importer 日志不得打印。
 
 ### 5.3 Session
 
@@ -235,7 +235,7 @@ Dockmux 已有 session-bound 群协作工具和 HMAC capability，并在运行�
 
 总计 28 条，全部为群聊 thread scope，全部记录 `agentFrozen=true` 和 persistent backend target。文件里的 `active` 是 Botmux 元数据状态，不保证进程仍存活。
 
-Dockmux 当前 PTY CLI 工厂默认创建 `PtyBackend`，Agent schema 也没有 backend 选择字段。虽然仓库已有 `TmuxBackend` 实现，但尚未形成可持久化的 per-Agent/per-session 选择与导入 reattach 契约。因此：
+Dutydeck 当前 PTY CLI 工厂默认创建 `PtyBackend`，Agent schema 也没有 backend 选择字段。虽然仓库已有 `TmuxBackend` 实现，但尚未形成可持久化的 per-Agent/per-session 选择与导入 reattach 契约。因此：
 
 - 默认不导入为可运行 session；
 - 可先导入为 archived source record；
@@ -268,7 +268,7 @@ Dockmux 当前 PTY CLI 工厂默认创建 `PtyBackend`，Agent schema 也没有 
 
 - bot open ID、union ID、头像和 app-scoped `ou_*` cache；
 - allowed-user open ID cache、identity mention cache；
-- group-tools HMAC signing secret和每 session capability；保留 Dockmux 已有 signing secret；
+- group-tools HMAC signing secret和每 session capability；保留 Dutydeck 已有 signing secret；
 - dedup、queue、turn marks/sends、frozen cards、runtime skills、plugin manifests；
 - dashboard daemon registry、worker lease、OAuth pending。
 
@@ -285,7 +285,7 @@ Dockmux 当前 PTY CLI 工厂默认创建 `PtyBackend`，Agent schema 也没有 
 
 ## 7. 迁移映射与缺口
 
-| Botmux 语义 | Dockmux 目标 | 当前状态 | 处理 |
+| Botmux 语义 | Dutydeck 目标 | 当前状态 | 处理 |
 |---|---|---|---|
 | `larkAppId`/Secret/brand/name | `configs['lark.bots']` | 已支持 | Secret 用引用/交互输入，不写报告 |
 | `cliId=claude-code` | `defaultAgentId=claude-code` | 已有 Agent | 可复用 |
@@ -313,7 +313,7 @@ Dockmux 当前 PTY CLI 工厂默认创建 `PtyBackend`，Agent schema 也没有 
 ### 8.1 CLI
 
 ```text
-dockmux import botmux \
+dutydeck import botmux \
   --source-home ~/.botmux \
   --dry-run \
   [--include-retired-bots] \
@@ -465,8 +465,8 @@ blocked_capabilities=oncall,schedule,hammer,group_tools_per_group,mention_policy
 3. Hammer 仍执行 full 模式、gate 和 prompt skill injection；若未实现，必须保持禁用并明确报错。
 4. 唯一 enabled schedule 在目标 scheduler 中仍启用，路由到原 App/Chat/topic/CWD，且不会重复触发。
 5. `bdev-helper` 的 `p2p=thread`、两个 Bot 的 `groupReplyMode=chat-topic`、mention policy 行为与源端一致。
-6. 群协作工具只在 `cli_aaec... + oc_e462...` 策略范围内启用；运行时只持久化 snake_case env key，token 为 Dockmux 新生成的 session capability。
+6. 群协作工具只在 `cli_aaec... + oc_e462...` 策略范围内启用；运行时只持久化 snake_case env key，token 为 Dutydeck 新生成的 session capability。
 7. 已退役 TraeX 不会被默认复活；其 6 条 session 可查为 archive，但不参与 live routing。
 8. Botmux 28 条 tmux session 不会被静默改成 PTY；resume 未实现时明确 archive-only。
-9. Dockmux 原有 7 个 Agent、18 个 session 和三个 signing/auth config 不被覆盖；`lark.group_tools.signing_secret` 保持原值。
+9. Dutydeck 原有 7 个 Agent、18 个 session 和三个 signing/auth config 不被覆盖；`lark.group_tools.signing_secret` 保持原值。
 10. Import 可重复运行且结果幂等；第二次 dry-run 应报告 0 个新增、0 个隐式覆盖。

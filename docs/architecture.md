@@ -1,10 +1,10 @@
 # Historical / Provenance
 
-> 本文件只保留 Dockmux 0.x 之前的来源说明。当前产品、架构和验收事实源分别是
+> 本文件只保留 Dutydeck 0.x 之前的来源说明。当前产品、架构和验收事实源分别是
 > [product-1.0.md](./product-1.0.md)、[architecture-1.0.md](./architecture-1.0.md) 和
 > [acceptance-1.0.md](./acceptance-1.0.md)。
 
-Dockmux 的代码历史包含两类早期探索：一类围绕 ACP Agent 的状态化工作台（旧提交中称 AgentDock），另一类围绕飞书消息、CLI 适配和终端会话桥接（旧提交中称 Botmux）。当前实现吸收了其中经验证的运行时、通道和适配经验，但不再以“融合项目”“移植清单”或来源项目的里程碑描述产品。
+Dutydeck 的代码历史包含两类早期探索：一类围绕 ACP Agent 的状态化工作台（旧提交中称 AgentDock），另一类围绕飞书消息、CLI 适配和终端会话桥接（旧提交中称 Botmux）。当前实现吸收了其中经验证的运行时、通道和适配经验，但不再以“融合项目”“移植清单”或来源项目的里程碑描述产品。
 
 这些来源信息仍有三个用途：
 

@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -113,10 +113,10 @@ export function createTraexAdapter(): CliAdapter {
       else backend.write('\r');
     },
 
-    /** 与 codex 同源：自己铸 rollout id。收到 dockmux 的 `ses_<uuid>` 说明反查
+    /** 与 codex 同源：自己铸 rollout id。收到 dutydeck 的 `ses_<uuid>` 说明反查
      *  失败，`resume <未知id>` 起不来 → 返回 null，driver 改起新会话。 */
     buildResumeCommand(sessionId: string): string[] | null {
-      if (isDockmuxSessionId(sessionId)) return null;
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['resume', sessionId];
     },
 

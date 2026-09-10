@@ -1,4 +1,4 @@
-# Dockmux Web 设计系统契约
+# Dutydeck Web 设计系统契约
 
 > 日期：2026-09-01
 > 状态：重构执行契约。Phase 0 产出此契约的实现，Phase 1 三个团队并发消费。
@@ -10,7 +10,7 @@
 
 | 症状 | 实测 |
 | --- | --- |
-| 共享 UI 原语 | 27 个组件文件 / **2 个原语**（IconButton、DockmuxIcon） |
+| 共享 UI 原语 | 27 个组件文件 / **2 个原语**（IconButton、DutydeckIcon） |
 | 内联 `var(--token)` | **1390 处**，className 占源码字符 **19.3%** |
 | 硬编码字号 | **247 处**，叠加 Tailwind 6 级 ≈ **14 档并存** |
 | 圆角 | 5 档散落，无取档规则 |
@@ -174,7 +174,7 @@
 
 `ui.tsx` 现在**只有语义函数**，从那里导入：`effectiveStatus` / `sidebarStatusVisual` /
 `createTaskAffordance` / `stateLabels` / `permissionLabels` / `busyStates` / `parseMemberNames`
-（外加 `DockmuxIcon` 这一个纯展示元件）。它不再导出任何交互组件，所以
+（外加 `DutydeckIcon` 这一个纯展示元件）。它不再导出任何交互组件，所以
 「从 ui 还是从 primitives 导入」已不构成选择——`design-consistency.test.ts` 第 10 条
 仍在守这条线，防止有人再往 `ui.tsx` 里加组件。
 
@@ -415,15 +415,15 @@ botmux 的教训：它定义了 8 档字号 token，实际引用 41 次，硬编
 量过数据之后决定不抄的**。写在这里是因为：不写的话，半年后有人比对两仓色值，
 会把这些当成「漏迁」直接抄回去，把无障碍下限一起抄没。
 
-**判定原则：botmux 是参考不是权威。** 它是纯桌面英文界面，dockmux 有移动抽屉、
+**判定原则：botmux 是参考不是权威。** 它是纯桌面英文界面，dutydeck 有移动抽屉、
 中文正文和读屏用户。抄它的克制感，不抄它的历史包袱。
 
-| # | botmux 的做法 | 实测 | dockmux 取值 | 为什么 |
+| # | botmux 的做法 | 实测 | dutydeck 取值 | 为什么 |
 | --- | --- | --- | --- | --- |
 | 1 | 三级文字 `#8a92a8` | 白底 **3.11:1** | `--text-muted: #5a6379`（**6.01:1**） | AA 要 4.5。`#8a92a8` 保留给 `--status-neutral-solid`——那是圆点填充，不承载文字 |
 | 2 | `--surface-hover: #f3f4f8` | 对 muted 只有 **1.055** | `#e0e5f1`（**1.087**） | 契约 §6 地板 1.08。botmux 能容忍是因为它侧栏 hover 走 `::before` 覆盖层，压根没用 surface token |
 | 3 | `--topbar-h: 56px` 与 `--topbar-height: 60px` 并存 | 前者只有 1 个消费方（侧栏 `top`），顶栏自己用后者 | 全仓只有 `h-topbar`（56px） | 这是 botmux 的 off-by-4 **bug**，不是设计。见 `design-tokens.css:117` vs `style.css:60` |
-| 4 | `--button-height: 32px` | — | 主按钮 40px，`size="sm"`(32px) 仅限非关键密集工具条 | dockmux 侧栏在 `<md` 是 `fixed` 抽屉，是触控界面。契约 §9 |
+| 4 | `--button-height: 32px` | — | 主按钮 40px，`size="sm"`(32px) 仅限非关键密集工具条 | dutydeck 侧栏在 `<md` 是 `fixed` 抽屉，是触控界面。契约 §9 |
 | 5 | `html { font-size: 13px }` | — | 正文 14px | 13px 是英文界面遗产，中文字形在该尺寸笔画粘连 |
 
 第 1、2 条是 Team-Palette 拿实测数字推翻我原指令的——我原话是「照抄 botmux 色值」，
@@ -490,7 +490,7 @@ botmux 里有三层互相矛盾的圆角声明：
 **L3 赢**。于是 L2 那段自称「最终生效」的注释描述的是一份**死值**。
 
 也就是说：**botmux 实际渲染的 6/8/12/16，是加载顺序的产物，不是任何人的设计决定；
-它唯一写下过设计意图的地方（L2）声明的恰恰就是 6/10/14——与 dockmux 现行档位完全一致。**
+它唯一写下过设计意图的地方（L2）声明的恰恰就是 6/10/14——与 dutydeck 现行档位完全一致。**
 抄 L3 = 抄一个覆盖事故，还要顺带背弃 L2 那条我们和它共用的 ÷3.5 公式。
 
 实测同样支持保持不动。全仓 60 组「元素实际高度 ↔ 圆角档位」配对，套 §3 公式算理论值：
@@ -563,10 +563,10 @@ Composer 五个面板项、CompactSelect、各类 40px 行），全部聚在 40p
   中间输出 5、用户气泡 6）。**这是刻意的**：间距在这里编码「这条与上一条的关系有多紧」，
   不是随手取值，合并会让连续输出和话轮切换看起来一样。
 
-botmux 主区用 `--sp-*` 变量（4/8/12/16/24/32/40/48），dockmux 走 Tailwind 4px 刻度，
+botmux 主区用 `--sp-*` 变量（4/8/12/16/24/32/40/48），dutydeck 走 Tailwind 4px 刻度，
 两者同为 4px 基准，**节奏本身没有差异**——botmux 的「克制感」来自它主工作区是等宽字体
 终端 iframe（`.wb-pane` 零边框零圆角零阴影），不来自间距更小。那是形态差异，不是尺度差异，
-dockmux 的主区是聊天时间线，不适用。
+dutydeck 的主区是聊天时间线，不适用。
 
 ### 17.4 `Button` 的 `tone` 收紧为「必须同时声明 variant」
 

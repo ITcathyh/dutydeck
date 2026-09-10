@@ -1,11 +1,11 @@
-import type { RelayAskBroker } from '@dockmux/relay';
+import type { RelayAskBroker } from '@dutydeck/relay';
 import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
 import { collectLarkTaskContext } from './task-context.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import type { LarkGroupManager } from './group-management.js';
-import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
-import { RuntimeError } from '@dockmux/shared';
+import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
+import { RuntimeError } from '@dutydeck/shared';
 import { defaultHighRiskPattern, defaultLarkTraceLimit, larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
@@ -440,10 +440,10 @@ export class LarkMessageCoordinator {
   /** 执行宿主名不进持久化，每次渲染时重新解析：Agent 可能被改名或删除，卡上应显示当前的名字。 */
   private async resolveAgentName(config: StoredLarkConfig) {
     try {
-      return (await this.runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? config.defaultAgentId ?? 'Dockmux';
+      return (await this.runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? config.defaultAgentId ?? 'Dutydeck';
     } catch (error) {
       this.log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 渲染卡片');
-      return config.defaultAgentId ?? 'Dockmux';
+      return config.defaultAgentId ?? 'Dutydeck';
     }
   }
 
@@ -753,7 +753,7 @@ export class LarkMessageCoordinator {
         // 停止原语必须真的被调用；调不动就说调不动，不发一句空口「已受理」。
         if (target.status === 'queued') {
           if (!this.runtime.cancelQueued) {
-            await replyCard('/cancel 未执行', '**当前 Dockmux 运行时无法取消排队任务。**\n\n请前往 Dockmux Web 处理。', { failed: true });
+            await replyCard('/cancel 未执行', '**当前 Dutydeck 运行时无法取消排队任务。**\n\n请前往 Dutydeck Web 处理。', { failed: true });
             return 'handled';
           }
           await this.runtime.cancelQueued(target.sessionId, target.id);
@@ -813,14 +813,14 @@ export class LarkMessageCoordinator {
         await replyCard(
           '/new 已受理',
           retired
-            ? '**已结束当前会话，下一条消息将开启全新上下文。**\n\n历史记录仍可在 Dockmux Web 查看。'
+            ? '**已结束当前会话，下一条消息将开启全新上下文。**\n\n历史记录仍可在 Dutydeck Web 查看。'
             : '**当前没有已绑定的会话，下一条消息会直接开启新会话。**'
         );
         return 'handled';
       }
     } catch (error) {
       this.log.warn({ error, command: route.command, messageId: event.messageId }, '执行飞书聊天命令失败');
-      await replyCard(`/${route.command} 执行失败`, `**命令未能完成。**\n\n${error instanceof Error ? error.message : String(error)}\n\n可稍后重试，或前往 Dockmux Web 处理。`, { failed: true });
+      await replyCard(`/${route.command} 执行失败`, `**命令未能完成。**\n\n${error instanceof Error ? error.message : String(error)}\n\n可稍后重试，或前往 Dutydeck Web 处理。`, { failed: true });
     }
     return 'handled';
   }
@@ -937,7 +937,7 @@ export class LarkMessageCoordinator {
    */
   private async describeChatStatus(config: StoredLarkConfig, sessionId?: string, latestTask?: LarkTask): Promise<string> {
     const lines: string[] = [];
-    const configuredAgent = config.defaultAgentId ?? 'Dockmux';
+    const configuredAgent = config.defaultAgentId ?? 'Dutydeck';
     if (!sessionId) {
       lines.push(`**Agent**：${larkCommandEcho(configuredAgent, 64)}`);
       if (config.workspace) lines.push(`**工作区**：${larkCommandEcho(config.workspace, 160)}`);
@@ -962,7 +962,7 @@ export class LarkMessageCoordinator {
       lines.push(`**配置的工作区**：${larkCommandEcho(config.workspace, 160)}（下一个新会话生效）`);
     }
     lines.push(`**会话**：\`${larkCommandEcho(sessionId, 64)}\``);
-    if (sessionError) lines.push('**运行状态**：读取失败，请前往 Dockmux Web 查看。');
+    if (sessionError) lines.push('**运行状态**：读取失败，请前往 Dutydeck Web 查看。');
     else if (session) lines.push(`**运行状态**：${larkCommandEcho(session.state, 32)}`);
     else lines.push('**运行状态**：会话记录已不存在，发送新的请求会开启新会话。');
     if (this.runtime.getTasks) {
@@ -1082,9 +1082,9 @@ export class LarkMessageCoordinator {
 
   async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
     const workflow = value as Record<string, unknown> | null;
-    if (workflow && typeof workflow.dockmux_workflow === 'string') {
+    if (workflow && typeof workflow.dutydeck_workflow === 'string') {
       if (!this.workflows || !context?.messageId || !context.chatId || !this.reconcileConfig) return { type: 'error', content: '卡片身份不完整或已失效。' };
-      const action = workflow.dockmux_workflow;
+      const action = workflow.dutydeck_workflow;
       if (!['approve', 'reject', 'accept', 'changes'].includes(action)) return { type: 'error', content: '无法识别任务操作。' };
       try {
         const content = await this.workflows.respond({ appId: this.reconcileConfig.appId, chatId: context.chatId, cardId: context.messageId,
@@ -1143,7 +1143,7 @@ export class LarkMessageCoordinator {
         return { type: 'success', content: '已拉取最新状态' };
       } catch (error) {
         this.log.warn({ error, taskId }, '刷新飞书卡片失败');
-        return { type: 'error', content: '刷新失败，请稍后重试或前往 Dockmux Web 查看' };
+        return { type: 'error', content: '刷新失败，请稍后重试或前往 Dutydeck Web 查看' };
       }
     }
 
@@ -1322,7 +1322,7 @@ export class LarkMessageCoordinator {
         text = text.trim();
         return `${sender}: ${text || '[图片/文件/卡片等非文字消息]'}`;
       }));
-      return `[Dockmux 空消息兜底]\n用户仅 @ 了机器人而未发送任何文字内容。以下是当前会话最近的聊天记录，仅用于识别指代。${confirmationRule}\n\n[最近聊天记录]\n${lines.join('\n')}`;
+      return `[Dutydeck 空消息兜底]\n用户仅 @ 了机器人而未发送任何文字内容。以下是当前会话最近的聊天记录，仅用于识别指代。${confirmationRule}\n\n[最近聊天记录]\n${lines.join('\n')}`;
     } catch (error) {
       this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '拉取飞书聊天记录为空消息兜底失败');
       return fallback;
@@ -1754,19 +1754,19 @@ export class LarkMessageCoordinator {
       await update(state);
     };
     const injected: string[] = [];
-    injected.push(`[Dockmux 机器人身份]
+    injected.push(`[Dutydeck 机器人身份]
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${config.workspace ? `\n- 工作区：${config.workspace}` : ''}`);
-    if (config.preInjectPrompt?.trim()) injected.push(`[Dockmux 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
+    if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     if (event.chatType === 'group' && config.groupToolsEnabled && config.groupToolsAllowSend) {
-      injected.push(`[Dockmux 飞书当前消息 · 系统上下文]
+      injected.push(`[Dutydeck 飞书当前消息 · 系统上下文]
 - 当前消息 message_id：${event.messageId}
 - 当前消息 thread_id：${event.threadId?.trim() || '事件未提供'}
 - 若要延续当前讨论或回答当前提问，使用 group send --reply-to ${event.messageId} --in-thread。
 - 若内容是独立公告、新任务或不应归入当前讨论，使用 group send 且不要传 --reply-to/--in-thread。
 - reply-to 只能使用 om_* message_id，不能使用 omt_* thread_id。`);
     }
-    if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dockmux 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dockmux 安全策略阻止。`);
+    if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dutydeck 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dutydeck 安全策略阻止。`);
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
 
     const appendEvent = (agentEvent: AgentEvent) => {

@@ -2,8 +2,8 @@ import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
-import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dockmux/shared';
-import type { DockmuxRuntime } from '@dockmux/runtime';
+import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { registerLarkRoutes, type LarkRoutesOptions } from './lark/routes.js';
 import { discoverAgentModels } from './agent-models.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
@@ -65,7 +65,7 @@ export interface BuildAppOptions {
   executionPolicy?: SessionExecutionPolicy;
 }
 
-export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions = {}) {
+export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOptions = {}) {
   const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
   const streams = new Set<import('node:http').ServerResponse>();
   const requireSessionExecution = async (request: FastifyRequest, sessionId: string, boundary: 'session' | 'high_risk', action: PolicyAction) => {
@@ -351,7 +351,7 @@ export async function buildApp(runtime: DockmuxRuntime, options: BuildAppOptions
     const indexFile = resolve(webRoot, 'index.html');
     app.setNotFoundHandler(async (request, reply) => {
       if (request.method !== 'GET' && request.method !== 'HEAD') return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'Route not found' } });
-      const pathname = new URL(request.url, 'http://dockmux.local').pathname;
+      const pathname = new URL(request.url, 'http://dutydeck.local').pathname;
       if (pathname.startsWith('/api/') || pathname === '/api') return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'API route not found' } });
 
       let requestedFile: string;

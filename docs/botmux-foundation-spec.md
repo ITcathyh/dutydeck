@@ -101,11 +101,11 @@ WP0 冻结后续 WP 的输入输出；WP1 提供后续所需持久化。不得�
 - canonical hash 使用字段排序后的规范化 JSON；时间戳、readiness observation 等非语义字段不进入 config hash。
 - Secret value、vendor env value、Cookie、capability token、schedule prompt、消息正文不得进入四核心实体、RunSnapshot、ImportEntityVersion、日志或 public DTO。
 - Secret 只通过 `secret_ref` 引用；WP1 的 SecretRef 表只记录 provider metadata，不提供 value column。
-- ACPX persisted `session_options` 的全部 object key 必须为 `snake_case`。群工具只允许 `dockmux_group_tools_url` 和 `dockmux_group_tools_token`；vendor 大写 env 留在 runtime bridge，不进入本规格实体 JSON。
+- ACPX persisted `session_options` 的全部 object key 必须为 `snake_case`。群工具只允许 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`；vendor 大写 env 留在 runtime bridge，不进入本规格实体 JSON。
 
 ### 3.4 Foundation feature flag
 
-- 环境变量固定为 `DOCKMUX_BOTMUX_FOUNDATION=true|false`，默认 `false`；
+- 环境变量固定为 `DUTYDECK_BOTMUX_FOUNDATION=true|false`，默认 `false`；
 - 数据库 migration 始终可安全执行，feature flag 只控制新 repository 写入口、management API 和后续 UI 是否暴露；
 - flag 关闭时现有 Agent/Lark/Session 行为完全不变；
 - flag 开启也不得自动迁移 `agent_configs`、写 `channel_bots`、启 listener 或确认 full trust；
@@ -126,7 +126,7 @@ WP0 冻结后续 WP 的输入输出；WP1 提供后续所需持久化。不得�
 | `state` | `enabled / disabled / archived` | 是 | 是 | disabled 不得被新 Run 选择 |
 | `driverKind` | `pty / acpx` | 是 | 是 | 真实 driver |
 | `adapterId` | string | 是 | 是 | 如 `claude-code`、`codex` |
-| `protocol` | Dockmux normalized protocol | 是 | 是 | 不从 `id` 推断 |
+| `protocol` | Dutydeck normalized protocol | 是 | 是 | 不从 `id` 推断 |
 | `launchProfile` | private object | 是 | 否 | command、args、runtime distribution；不得包含 secret value |
 | `runtimeVersion` | string? | 否 | 是 | 探测值或 imported value |
 | `backendPolicy` | BackendPolicy | 是 | 是 | 见下 |
@@ -215,12 +215,12 @@ WP0 冻结后续 WP 的输入输出；WP1 提供后续所需持久化。不得�
 
 `migrationState`：
 
-- `native_disabled`：Dockmux 原生创建但未启用；
+- `native_disabled`：Dutydeck 原生创建但未启用；
 - `imported_disabled`：已导入，未监听；
 - `verified_offline`：离线 readiness 已通过；
 - `ready_for_handoff`：没有 blocker，等待 WP9 切流；
-- `observation`：整 App 已切 Dockmux，处于回滚观察期；
-- `active`：Dockmux 是正式 owner；
+- `observation`：整 App 已切 Dutydeck，处于回滚观察期；
+- `active`：Dutydeck 是正式 owner；
 - `blocked`：有明确 blocker；
 - `degraded`：曾 active，但当前不健康；
 - `rolled_back`：已回 Botmux。
@@ -591,9 +591,9 @@ Repository 只提供 create/get/listBySourceRevision；无 update/delete/upsert�
 `cutover_leases`：
 
 - `channel/external_app_id` unique；
-- `active_runtime`: `botmux / dockmux / none`；
+- `active_runtime`: `botmux / dutydeck / none`；
 - `generation positive integer`；
-- `state`: `botmux_active / imported_disabled / verified_offline / ready_for_handoff / draining / observation / dockmux_active / rollback_pending / rolled_back / degraded`；
+- `state`: `botmux_active / imported_disabled / verified_offline / ready_for_handoff / draining / observation / dutydeck_active / rollback_pending / rolled_back / degraded`；
 - `message_watermark_ref/schedule_watermark_ref`；
 - `holder_id/lease_expires_at`；
 - `revision/timestamps/last_error_code`。
@@ -814,7 +814,7 @@ migration_state=imported_disabled 或 blocked
 
 ### 11.4 Disabled 状态的消息语义
 
-- Dockmux 不消费该 App Lark 消息；
+- Dutydeck 不消费该 App Lark 消息；
 - Web/API 可用该 AgentDefinition 做独立 smoke test，但结果不得伪装成该 Lark Bot 已验证；
 - GroupMatrix cell 必须继承 Bot “尚未接管”状态，不能单独显示 active；
 - Botmux 仍 active 时，页面不显示“迁移完成”。
@@ -848,13 +848,13 @@ WP0 冻结状态/error code；WP1 持久化；WP7/WP8/WP9 实现行为和页面�
 | 状态 | 页面标题 | 主 CTA |
 |---|---|---|
 | planned | 迁移计划待确认 | 解决阻塞 / 应用计划 |
-| applying | 正在写入 Dockmux，Bot 仍未启用 | 等待；禁止重复 apply |
+| applying | 正在写入 Dutydeck，Bot 仍未启用 | 等待；禁止重复 apply |
 | applied_disabled | 已安全导入，尚未接管 | 离线验证 |
 | conflict | 有配置冲突，未覆盖现有修改 | 比较冲突 |
 | failed | 导入失败，已回滚数据库 | 查看失败并重试 |
 | rollback_pending | 回滚预检待确认 | 查看影响 |
-| rolling_back | 正在恢复 Dockmux 配置 | 等待 |
-| rolled_back | Dockmux 配置已恢复 | 查看记录 |
+| rolling_back | 正在恢复 Dutydeck 配置 | 等待 |
+| rolled_back | Dutydeck 配置已恢复 | 查看记录 |
 | rollback_conflict | 有后续修改，未自动覆盖 | 逐项处理 |
 
 ### 12.3 冲突比较
@@ -862,10 +862,10 @@ WP0 冻结状态/error code；WP1 持久化；WP7/WP8/WP9 实现行为和页面�
 冲突页以实体为单位显示：
 
 - 来源版本的安全摘要；
-- 当前 Dockmux 值；
+- 当前 Dutydeck 值；
 - 上次 importer 写入值；
 - 字段级 `same / source_changed / target_changed / both_changed`；
-- 允许动作：保留 Dockmux、采用来源（仅允许的实体且需确认）、为无外部自然键对象另存、取消本 App 迁移。
+- 允许动作：保留 Dutydeck、采用来源（仅允许的实体且需确认）、为无外部自然键对象另存、取消本 App 迁移。
 
 App ID、Chat ID、Principal 等外部自然键不允许 rename。Secret 字段只显示 configured/changed，不显示值或单 secret hash。
 

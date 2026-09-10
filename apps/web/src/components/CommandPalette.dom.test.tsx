@@ -18,7 +18,7 @@ const session = (id: string, overrides: Partial<Session> = {}): Session => ({
   id,
   agentId: 'codex',
   state: 'idle',
-  cwd: '/repo/dockmux',
+  cwd: '/repo/dutydeck',
   runId: `run-${id}`,
   createdAt: '2026-08-20T00:00:00Z',
   updatedAt: '2026-08-20T00:00:00Z',
@@ -97,7 +97,7 @@ describe('CommandPalette 开合与筛选', () => {
 
   it('结果条数写在 aria-live=polite 的状态区域里', async () => {
     const user = userEvent.setup();
-    render(<CommandPalette {...baseProps} sessions={[session('1'), session('2', { cwd: '/repo/api' })]} summaries={{ '1': summary('1', 'dockmux 优化'), '2': summary('2', 'api 优化') }} actions={[action()]}/>);
+    render(<CommandPalette {...baseProps} sessions={[session('1'), session('2', { cwd: '/repo/api' })]} summaries={{ '1': summary('1', 'dutydeck 优化'), '2': summary('2', 'api 优化') }} actions={[action()]}/>);
     const live = screen.getByRole('status');
     expect(live.getAttribute('aria-live')).toBe('polite');
     expect(live.textContent).toBe('1 个命令，2 个最近任务');
@@ -236,21 +236,21 @@ describe('CommandPalette 任务行信息与全量性', () => {
 
   it('任务行说明命中的字段，用户不必猜为什么这条会出现', async () => {
     const user = userEvent.setup();
-    render(<CommandPalette {...baseProps} sessions={[session('1', { cwd: '/repo/dockmux' })]} summaries={{ '1': summary('1', '修复登录超时') }}/>);
-    await user.type(input(), 'dockmux');
+    render(<CommandPalette {...baseProps} sessions={[session('1', { cwd: '/repo/dutydeck' })]} summaries={{ '1': summary('1', '修复登录超时') }}/>);
+    await user.type(input(), 'dutydeck');
     expect(screen.getByRole('option', { name: /修复登录超时/ }).textContent).toContain('命中 工作区');
     await user.clear(input());
-    await user.type(input(), '登录 dockmux');
+    await user.type(input(), '登录 dutydeck');
     expect(screen.getByRole('option', { name: /修复登录超时/ }).textContent).toContain('命中 任务目标、工作区');
   });
 
   it('输入关键词后展示全部匹配任务，不截断为最近若干条', async () => {
     const user = userEvent.setup();
-    const sessions = Array.from({ length: 18 }, (_, index) => session(`s${index}`, { cwd: '/repo/dockmux' }));
-    const summaries = Object.fromEntries(sessions.map((item, index) => [item.id, summary(item.id, `dockmux 任务 ${index}`)]));
+    const sessions = Array.from({ length: 18 }, (_, index) => session(`s${index}`, { cwd: '/repo/dutydeck' }));
+    const summaries = Object.fromEntries(sessions.map((item, index) => [item.id, summary(item.id, `dutydeck 任务 ${index}`)]));
     render(<CommandPalette {...baseProps} sessions={sessions} summaries={summaries}/>);
     expect(screen.getAllByRole('option')).toHaveLength(5);
-    await user.type(input(), 'dockmux');
+    await user.type(input(), 'dutydeck');
     expect(screen.getAllByRole('option')).toHaveLength(18);
     expect(screen.getByText(/全部 18 条匹配都在下面，没有截断/)).toBeTruthy();
   });

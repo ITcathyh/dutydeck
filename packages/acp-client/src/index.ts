@@ -3,10 +3,10 @@ import { dirname, join } from 'node:path';
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeEvent, type AcpRuntimeHandle, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
-import type { AgentConfig, AgentDriver, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy } from '@dockmux/shared';
+import type { AgentConfig, AgentDriver, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy } from '@dutydeck/shared';
 import { testRegexWithTimeout } from './regex-timeout.js';
 
-// 归一化事件类型统一从 @dockmux/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
+// 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
 export type { NormalizedDriverEvent };
 export interface AcpxBuiltinAgent { id: string; argv: string[] }
 
@@ -23,8 +23,8 @@ function envLauncherPath() {
 }
 
 const persistedEnvKey = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
-const bridgedAgentEnvFileKey = 'dockmux_agent_env_file';
-const bridgedAgentEnvDigestKey = 'dockmux_agent_env_digest';
+const bridgedAgentEnvFileKey = 'dutydeck_agent_env_file';
+const bridgedAgentEnvDigestKey = 'dutydeck_agent_env_digest';
 
 function splitAgentEnvironment(env: Record<string, string>) {
   const persisted: Record<string, string> = {};
@@ -162,10 +162,10 @@ export class AcpxAdapter implements AgentDriver {
   private readonly launch: AcpxAgentLaunch;
 
   constructor(readonly agent: SessionAgentConfig, private readonly options: AcpxAdapterOptions) {
-    const cwd = agent.cwd ?? process.cwd(); this.sessionKey = options.sessionKey ?? `dockmux-${agent.id}`;
+    const cwd = agent.cwd ?? process.cwd(); this.sessionKey = options.sessionKey ?? `dutydeck-${agent.id}`;
     this.permissionMode = agent.permissionMode;
-    this.sessionStore = createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') });
-    this.launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(cwd, '.dockmux', 'runtime-env'), sessionKey: this.sessionKey });
+    this.sessionStore = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
+    this.launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(cwd, '.dutydeck', 'runtime-env'), sessionKey: this.sessionKey });
     this.runtime = createAcpRuntime({
       cwd,
       sessionStore: this.sessionStore,
@@ -186,7 +186,7 @@ export class AcpxAdapter implements AgentDriver {
         if (riskPolicy?.enabled && !riskPolicy.authorized) {
           try {
             if (await testRegexWithTimeout(riskPolicy.pattern, candidate)) {
-              this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dockmux 拦截：${raw.toolCall?.title ?? 'tool'}`, options: [], status: 'rejected' } });
+              this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${raw.toolCall?.title ?? 'tool'}`, options: [], status: 'rejected' } });
               return { outcome: 'reject_once' };
             }
           } catch (error) {
@@ -221,8 +221,8 @@ export class AcpxAdapter implements AgentDriver {
   private async resetWhenScopedEnvironmentChanged() {
     const desired = this.launch.sessionOptions.env ?? {};
     const scopedKeys = [
-      'dockmux_group_tools_url', 'dockmux_group_tools_token',
-      'dockmux_relay_url', 'dockmux_relay_token', 'dockmux_relay_command',
+      'dutydeck_group_tools_url', 'dutydeck_group_tools_token',
+      'dutydeck_relay_url', 'dutydeck_relay_token', 'dutydeck_relay_command',
       bridgedAgentEnvDigestKey
     ] as const;
     const record = await this.sessionStore.load(this.sessionKey);
@@ -250,7 +250,7 @@ export class AcpxAdapter implements AgentDriver {
   private async sendTurn(prompt: string) {
     if (!this.handle) await this.start(); const requestId = `req-${crypto.randomUUID()}`;
     // ACPX 的 timeoutMs 是整轮墙钟超时，流式事件和工具调用都不会续期。
-    // 禁用它，在 Dockmux 边界按每个 ACP 事件重置“无活动”计时，避免正常长任务被固定时长误杀。
+    // 禁用它，在 Dutydeck 边界按每个 ACP 事件重置“无活动”计时，避免正常长任务被固定时长误杀。
     const idleTimeoutMs = this.agent.timeout * 1_000;
     const turn = this.runtime.startTurn({ handle: this.handle!, text: prompt, mode: 'prompt', requestId, timeoutMs: 0 });
     this.turn = turn;
@@ -293,18 +293,18 @@ export class AcpxAdapter implements AgentDriver {
       await this.sendTurn(prompt);
     }
   }
-  async interrupt() { if (this.turn) await this.turn.cancel({ reason: 'Dockmux interrupt' }); else if (this.handle) await this.runtime.cancel({ handle: this.handle, reason: 'Dockmux interrupt' }); }
+  async interrupt() { if (this.turn) await this.turn.cancel({ reason: 'Dutydeck interrupt' }); else if (this.handle) await this.runtime.cancel({ handle: this.handle, reason: 'Dutydeck interrupt' }); }
   async resume() { await this.start(); }
   async stop(options: { discardSession?: boolean } = {}) {
     for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
     this.pendingPermissions.clear();
     const turn = this.turn;
     if (turn) {
-      try { await turn.cancel({ reason: 'Dockmux stop' }); }
+      try { await turn.cancel({ reason: 'Dutydeck stop' }); }
       finally { if (this.turn === turn) this.turn = undefined; }
     }
     try {
-      if (this.handle) await this.runtime.close({ handle: this.handle, reason: 'Dockmux stop' });
+      if (this.handle) await this.runtime.close({ handle: this.handle, reason: 'Dutydeck stop' });
       this.handle = undefined;
       if (options.discardSession) await this.resetPersistentState();
     } finally { this.launch.cleanup(); }

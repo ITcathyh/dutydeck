@@ -8,9 +8,9 @@ import { defineConfig, devices } from '@playwright/test';
  * testDir 与之完全不重叠，`pnpm test` 不会误跑浏览器用例。
  *
  * 服务绑外部主机名而不是 loopback，`127.0.0.1` 会 ERR_CONNECTION_REFUSED —— 见
- * fixtures.ts 的 BASE_URL。想指向别的实例时设 `DOCKMUX_E2E_BASE_URL`。
+ * fixtures.ts 的 BASE_URL。想指向别的实例时设 `DUTYDECK_E2E_BASE_URL`。
  *
- * 不配 webServer：dockmux 服务是常驻的，测试自己拉起会打断其他人的验证。
+ * 不配 webServer：dutydeck 服务是常驻的，测试自己拉起会打断其他人的验证。
  */
 export default defineConfig({
   testDir: '.',
@@ -26,7 +26,7 @@ export default defineConfig({
   outputDir: './.artifacts',
   use: {
     ...devices['Desktop Chrome'],
-    baseURL: process.env.DOCKMUX_E2E_BASE_URL ?? 'http://10.37.33.49:4310',
+    baseURL: process.env.DUTYDECK_E2E_BASE_URL ?? 'http://10.37.33.49:4310',
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
     // 主题相关用例自己 emulateMedia，这里给一个确定的初值，避免受宿主机系统外观影响。

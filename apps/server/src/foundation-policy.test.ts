@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { createRepositories } from '@dockmux/storage';
+import { createRepositories } from '@dutydeck/storage';
 import {
   createFoundationExecutionAuthorizer,
   createFoundationManagementAuthorizer,

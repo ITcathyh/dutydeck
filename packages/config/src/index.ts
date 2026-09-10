@@ -1,7 +1,7 @@
-import { agentConfigSchema, type AgentConfig } from '@dockmux/shared';
-import { listAcpxBuiltinAgents } from '@dockmux/acp-client';
-import { commandExists } from '@dockmux/transports';
-import type { DriverFactory, RuntimeOptions } from '@dockmux/runtime';
+import { agentConfigSchema, type AgentConfig } from '@dutydeck/shared';
+import { listAcpxBuiltinAgents } from '@dutydeck/acp-client';
+import { commandExists } from '@dutydeck/transports';
+import type { DriverFactory, RuntimeOptions } from '@dutydeck/runtime';
 import { z } from 'zod';
 import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
@@ -13,7 +13,7 @@ export const appConfigSchema = z.object({
   port: z.number().int().positive().default(4310),
   /** Access-token authentication remains enabled unless explicitly disabled. */
   authEnabled: z.boolean().default(true),
-  databaseUrl: z.string().default('./.dockmux/dockmux.db'),
+  databaseUrl: z.string().default('./.dutydeck/dutydeck.db'),
   acpxCommand: z.string().default('acpx'),
   driverIdleTimeoutMs: z.number().nonnegative().default(6 * 60 * 60_000),
   cleanupIntervalMs: z.number().positive().default(5 * 60_000),
@@ -45,7 +45,7 @@ const scanBuiltinAgents = () => scannedBuiltinAgents ??= listAcpxBuiltinAgents()
   return [{ id, name: detail.name, command: argv[0]!, args: argv.slice(1), protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: cliVersion(detail.cli) }];
 });
 
-// PTY 适配器（@dockmux/cli-adapters，由 server 组装时注入，本包不直接依赖）贡献的内置 agent 描述
+// PTY 适配器（@dutydeck/cli-adapters，由 server 组装时注入，本包不直接依赖）贡献的内置 agent 描述
 export interface PtyAgentContribution {
   id: string
   name: string
@@ -53,7 +53,7 @@ export interface PtyAgentContribution {
   args?: string[]
   builtin?: boolean
   /** 该 CLI 的真实能力。省略时按保守默认 { pause: false, resume: true } 处理——
-   *  贡献方（@dockmux/pty-driver 的 PTY_AGENT_CONTRIBUTIONS）应显式声明，
+   *  贡献方（@dutydeck/pty-driver 的 PTY_AGENT_CONTRIBUTIONS）应显式声明，
    *  否则像 gemini 这种「每次都全新会话、无 resume」的 CLI 会被错报为可恢复。 */
   capabilities?: { pause: boolean; resume: boolean }
 }
@@ -83,30 +83,30 @@ export const builtinAgents = (cwd = process.cwd(), ptyContributions: PtyAgentCon
 };
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContributions: PtyAgentContribution[] = []): AppConfig {
-  const extra = env.DOCKMUX_AGENTS_JSON ? JSON.parse(env.DOCKMUX_AGENTS_JSON) : [];
-  const defaultCwd = env.DOCKMUX_DEFAULT_CWD ?? process.cwd();
+  const extra = env.DUTYDECK_AGENTS_JSON ? JSON.parse(env.DUTYDECK_AGENTS_JSON) : [];
+  const defaultCwd = env.DUTYDECK_DEFAULT_CWD ?? process.cwd();
   const agents = new Map(builtinAgents(defaultCwd, ptyContributions).map(agent => [agent.id, agent]));
   for (const agent of extra) {
     const configured = agentConfigSchema.parse(agent);
     if (commandExists(configured.command)) agents.set(configured.id, { ...configured, cwd: configured.cwd ?? defaultCwd, version: configured.version ?? cliVersion(configured.command) });
   }
   return appConfigSchema.parse({
-    host: env.DOCKMUX_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DOCKMUX_HOST,
-    port: env.DOCKMUX_PORT ? Number(env.DOCKMUX_PORT) : undefined,
-    authEnabled: env.DOCKMUX_AUTH === undefined
+    host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST,
+    port: env.DUTYDECK_PORT ? Number(env.DUTYDECK_PORT) : undefined,
+    authEnabled: env.DUTYDECK_AUTH === undefined
       ? undefined
-      : z.enum(['true', 'false']).parse(env.DOCKMUX_AUTH) === 'true',
-    databaseUrl: resolve(defaultCwd, env.DOCKMUX_DATABASE_URL ?? './.dockmux/dockmux.db'),
-    acpxCommand: env.DOCKMUX_ACPX_COMMAND,
-    driverIdleTimeoutMs: env.DOCKMUX_DRIVER_IDLE_TIMEOUT_MS ? Number(env.DOCKMUX_DRIVER_IDLE_TIMEOUT_MS) : undefined,
-    cleanupIntervalMs: env.DOCKMUX_CLEANUP_INTERVAL_MS ? Number(env.DOCKMUX_CLEANUP_INTERVAL_MS) : undefined,
+      : z.enum(['true', 'false']).parse(env.DUTYDECK_AUTH) === 'true',
+    databaseUrl: resolve(defaultCwd, env.DUTYDECK_DATABASE_URL ?? './.dutydeck/dutydeck.db'),
+    acpxCommand: env.DUTYDECK_ACPX_COMMAND,
+    driverIdleTimeoutMs: env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS ? Number(env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS) : undefined,
+    cleanupIntervalMs: env.DUTYDECK_CLEANUP_INTERVAL_MS ? Number(env.DUTYDECK_CLEANUP_INTERVAL_MS) : undefined,
     agents: [...agents.values()]
   });
 }
 
 /**
- * 把 AppConfig 映射成 DockmuxRuntime 的 RuntimeOptions 子集（server 组装时与 sessionEnvironment/sessionPrompt 等 spread 合并）。
- * ptyDriverFactory 是函数、不能进 zod 校验的 AppConfig，经此注入点透传（由 server 从 @dockmux/pty-driver 组装）。
+ * 把 AppConfig 映射成 DutydeckRuntime 的 RuntimeOptions 子集（server 组装时与 sessionEnvironment/sessionPrompt 等 spread 合并）。
+ * ptyDriverFactory 是函数、不能进 zod 校验的 AppConfig，经此注入点透传（由 server 从 @dutydeck/pty-driver 组装）。
  */
 export function createRuntimeOptions(
   config: AppConfig,

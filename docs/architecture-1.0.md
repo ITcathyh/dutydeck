@@ -1,4 +1,4 @@
-# Dockmux 1.0 架构
+# Dutydeck 1.0 架构
 
 > 本文档是 1.0 的架构事实源。设计以当前产品闭环为边界，避免为假设中的未来能力增加层次。
 
@@ -40,7 +40,7 @@ AgentDriver                    snapshots / projections
 - 远程访问令牌和会话 capability 解决不同问题，不能互相替代。
 - 凭证不得进入 prompt、卡片、浏览器响应、普通日志或 ACPX 持久化环境。
 - 开放平台 Cookie 原子写入用户目录的私有文件（目录 `0700`、文件 `0600`）；CSRF、Cookie、App Secret 与账号内部 ID 不进入 job 状态或错误信息。
-- ACPX `session_options` 的持久化对象键递归遵循 `snake_case`。群聊工具只写入 `dockmux_group_tools_url` 与 `dockmux_group_tools_token`；大写旧键只能在读取边界兼容。
+- ACPX `session_options` 的持久化对象键递归遵循 `snake_case`。群聊工具只写入 `dutydeck_group_tools_url` 与 `dutydeck_group_tools_token`；大写旧键只能在读取边界兼容。
 
 ## 必守不变量
 
@@ -56,5 +56,5 @@ AgentDriver                    snapshots / projections
 
 - 首次不可逆迁移前备份旧数据库，旧历史保持可读。
 - 主要 CLI 行为兼容；需要重做的 HTTP 契约采用版本化迁移。
-- 用户文档直接解释 Dockmux；历史来源保留在版本历史或 NOTICE，不再构成产品模型。
+- 用户文档直接解释 Dutydeck；历史来源保留在版本历史或 NOTICE，不再构成产品模型。
 - `/api/sessions/*` 在兼容期继续作为内部运行 API；Web 与飞书使用 Task/Run 语言，不复制一套平行状态机。

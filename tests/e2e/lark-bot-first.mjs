@@ -2,7 +2,7 @@
 /**
  * 飞书 Bot-first 应用边界 E2E。
  *
- * 真实件：LarkMessageCoordinator、createLarkCardService（真实 fetch）、DockmuxRuntime、
+ * 真实件：LarkMessageCoordinator、createLarkCardService（真实 fetch）、DutydeckRuntime、
  * 磁盘 SQLite、真实 createPtyCliDriver + 真实测试 CLI 进程（PTY）。
  *
  * 替身边界（脚本会打印）：
@@ -204,7 +204,7 @@ function startFakeLark() {
         return json(res, 200, { code: 0, msg: 'ok', data: { message_id: messageId, chat_id: 'oc_fake' } });
       }
       if (method === 'GET' && path === '/open-apis/bot/v3/info') {
-        return json(res, 200, { code: 0, msg: 'ok', bot: { open_id: 'ou_fake_bot', app_name: 'Fake Dockmux Bot' } });
+        return json(res, 200, { code: 0, msg: 'ok', bot: { open_id: 'ou_fake_bot', app_name: 'Fake Dutydeck Bot' } });
       }
       rejected.push(`${method} ${path}`);
       return json(res, 404, { code: 99, msg: 'fake-Lark: endpoint not implemented' });
@@ -252,7 +252,7 @@ async function main() {
   console.log('飞书 Bot-first 应用边界 E2E');
   console.log('替身边界：① 外部飞书平台（入站合成事件 / 出站 fake-Lark HTTP，不发真实消息）');
   console.log('           ② 模型（测试 PTY CLI，不调任何 provider）');
-  console.log('真实件：LarkMessageCoordinator · createLarkCardService(真实 fetch) · DockmuxRuntime · 磁盘 SQLite · 真实 PTY 驱动与进程');
+  console.log('真实件：LarkMessageCoordinator · createLarkCardService(真实 fetch) · DutydeckRuntime · 磁盘 SQLite · 真实 PTY 驱动与进程');
   console.log('范围说明：应用边界 E2E。PTY 用进程内 PtyBackend（非生产 tmux 持久后端），不起 daemon/HTTP API，因此不覆盖 daemon 重启与 tmux 复用。');
 
   const { register } = await import(pathToFileURL(require.resolve('tsx/esm/api')).href);
@@ -260,7 +260,7 @@ async function main() {
   onCleanup('注销 tsx loader', () => { try { unregister(); } catch { /* 已注销 */ } });
 
   // ── 隔离目录 ──
-  const dataDir = mkdtempSync(join(tmpdir(), 'dockmux-lark-e2e-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'dutydeck-lark-e2e-'));
   onCleanup(`删除临时目录 ${dataDir}`, () => rmSync(dataDir, { recursive: true, force: true }));
   const binDir = join(dataDir, 'bin');
   const claudeDir = join(dataDir, 'claude');
@@ -307,7 +307,7 @@ async function main() {
   onCleanup('恢复 globalThis.fetch', () => { globalThis.fetch = realFetch; });
 
   // ── 产品模块 ──
-  const [{ createRepositories }, { DockmuxRuntime }, { createPtyCliDriver }, { createCliAdapter }, backends, coordinatorMod, serviceMod, rendererMod, configMod] = await Promise.all([
+  const [{ createRepositories }, { DutydeckRuntime }, { createPtyCliDriver }, { createCliAdapter }, backends, coordinatorMod, serviceMod, rendererMod, configMod] = await Promise.all([
     import(pathToFileURL(join(REPO, 'packages/storage/src/index.ts')).href),
     import(pathToFileURL(join(REPO, 'packages/agent-runtime/src/index.ts')).href),
     import(pathToFileURL(join(REPO, 'packages/pty-driver/src/index.ts')).href),
@@ -327,12 +327,12 @@ async function main() {
   // 任务边界复用产品自己的切片函数，避免测试另写一套"哪些事件属于这一轮"。
   const { eventsForRuntimeTask } = rendererMod;
   if (typeof eventsForRuntimeTask !== 'function') throw new Error('card-renderer 未导出 eventsForRuntimeTask');
-  // 进程内 PtyBackend（生产是 createDockmuxPersistentBackend/tmux）——见顶部范围说明。
+  // 进程内 PtyBackend（生产是 createDutydeckPersistentBackend/tmux）——见顶部范围说明。
   const PtyBackendCtor = backends.PtyBackend;
-  if (!PtyBackendCtor) throw new Error(`@dockmux/session-backends 未导出 PtyBackend：${Object.keys(backends).join(',')}`);
+  if (!PtyBackendCtor) throw new Error(`@dutydeck/session-backends 未导出 PtyBackend：${Object.keys(backends).join(',')}`);
 
   // createRepositories 把路径原样交给 better-sqlite3，不支持 file: URI（storage/src/index.ts:94）。
-  const dbPath = join(dataDir, 'dockmux.db');
+  const dbPath = join(dataDir, 'dutydeck.db');
   const repos = createRepositories(dbPath);
   onCleanup('关闭 SQLite', () => repos.close());
 
@@ -358,7 +358,7 @@ async function main() {
     livePtyDrivers.clear();
   });
 
-  const runtime = new DockmuxRuntime(repos, { ptyDriverFactory });
+  const runtime = new DutydeckRuntime(repos, { ptyDriverFactory });
   onCleanup('runtime.shutdown', () => runtime.shutdown?.());
   // 真实 agent 注册走 runtime.initialize（agent-runtime/src/index.ts:176），它自己写 repos.agents。
   await runtime.initialize(agents);

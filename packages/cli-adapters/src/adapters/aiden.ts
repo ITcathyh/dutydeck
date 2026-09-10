@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { buildDockmuxRoutingBlock } from '../shared-hints.js';
+import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -22,7 +22,7 @@ export function createAidenAdapter(): CliAdapter {
     // botmux 给 aiden 挂了共用 shell 提示（systemHints），精简契约里改为由
     // driver 把返回块拼到首轮 prompt 前。
     injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDockmuxRoutingBlock(ctx.locale, ctx.env);
+      return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

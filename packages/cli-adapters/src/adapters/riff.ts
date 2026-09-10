@@ -5,7 +5,7 @@ import type { CliAdapter, PtyLike } from '../types.js';
  *
  * riff 跑在远端（没有本地二进制可 spawn），botmux 里由 RiffBackend 把 write()
  * 翻译成 riff HTTP API 调用。所以这里：无参数、无 PTY 节流、无 bracketed paste，
- * prompt 原样交给后端。dockmux 尚无对应后端，形态如实保留。
+ * prompt 原样交给后端。dutydeck 尚无对应后端，形态如实保留。
  */
 export function createRiffAdapter(): CliAdapter {
   return {

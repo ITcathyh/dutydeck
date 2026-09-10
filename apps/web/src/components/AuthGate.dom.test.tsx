@@ -33,7 +33,7 @@ describe('AuthGate', () => {
     render(<AuthGate><div>受保护内容</div></AuthGate>);
     expect(await screen.findByText('受保护内容')).toBeTruthy();
     window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-    await waitFor(() => expect(screen.getByRole('heading', { name: '连接到这台 Dockmux' })).toBeTruthy());
+    await waitFor(() => expect(screen.getByRole('heading', { name: '连接到这台 Dutydeck' })).toBeTruthy());
     expect(screen.queryByText('受保护内容')).toBeNull();
   });
 

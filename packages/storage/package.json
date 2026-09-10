@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/storage",
+  "name": "@dutydeck/storage",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -40,7 +40,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@dockmux/shared": "workspace:*",
+    "@dutydeck/shared": "workspace:*",
     "better-sqlite3": "12.11.1",
     "drizzle-orm": "0.44.2"
   },

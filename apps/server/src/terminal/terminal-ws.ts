@@ -1,4 +1,4 @@
-import type { PolicyDecision, TerminalStream } from '@dockmux/shared';
+import type { PolicyDecision, TerminalStream } from '@dutydeck/shared';
 import type { FastifyInstance } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
@@ -203,7 +203,7 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
 
       const authMode = options.auth?.mode ?? (options.auth?.allowUnauthenticated ? 'local' : 'token');
       // Explicit open mode accepts remote hosts without a token, while browser
-      // upgrades still have to originate from the exact public Dockmux origin.
+      // upgrades still have to originate from the exact public Dutydeck origin.
       if (options.auth && authMode === 'open') {
         const encrypted = 'encrypted' in request.socket && request.socket.encrypted === true;
         if (request.headers.origin && !isSameOriginRequest(request.headers, encrypted ? 'https' : 'http')) {

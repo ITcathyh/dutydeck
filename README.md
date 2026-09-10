@@ -1,12 +1,12 @@
-# Dockmux
+# Dutydeck
 
-Dockmux 是本地优先的 Agent 工程工作台。飞书机器人是下达任务的核心入口：在私聊发送工程目标或在群聊 `@机器人` 即可发起任务，用 `/help` 查看可用操作。Web dashboard 负责机器人接入状态、配置、任务记录与排障，也可直接创建任务。Dockmux 负责选择和连接本机 Agent、持续展示有效进展、处理排队与审批、恢复异常，并把结果和验证证据留在同一条任务记录中。
+Dutydeck 是本地优先的 Agent 工程工作台。飞书机器人是下达任务的核心入口：在私聊发送工程目标或在群聊 `@机器人` 即可发起任务，用 `/help` 查看可用操作。Web dashboard 负责机器人接入状态、配置、任务记录与排障，也可直接创建任务。Dutydeck 负责选择和连接本机 Agent、持续展示有效进展、处理排队与审批、恢复异常，并把结果和验证证据留在同一条任务记录中。
 
 ```text
 绑定飞书 Bot → 在飞书下达目标 → 查看进展 → 审批或纠偏 → 验证结果 → 继续工作
 ```
 
-产品界面以「工作区 → 任务 → 指令」组织信息；Session 是保持 Agent 上下文和兼容 HTTP API 的内部概念，不是使用 Dockmux 的前置知识。
+产品界面以「工作区 → 任务 → 指令」组织信息；Session 是保持 Agent 上下文和兼容 HTTP API 的内部概念，不是使用 Dutydeck 的前置知识。
 
 ## 核心体验
 
@@ -15,8 +15,8 @@ Dockmux 是本地优先的 Agent 工程工作台。飞书机器人是下达任�
 - **可干预、可恢复的运行时**：支持排队、取消排队、立即介入、中断、继续、停止和重启。SQLite 保存任务、事件、授权请求和通道映射，daemon 重启后会恢复可执行队列。
 - **有界历史与实时增量**：Web 首屏只读取最近 200 个事件，按游标加载更早记录，并将本地渲染窗口限制在 800 个事件；SSE 使用严格递增的 `sequence` 补齐断线期间的事件。
 - **安全姿态明确**：Agent 默认使用 `ask`，`full-trust` 必须显式配置。远程浏览器通过 HttpOnly、SameSite Cookie 登录；浏览器登录流程不会把访问令牌写进 URL 或前端存储。
-- **ACP 与真实 CLI**：优先使用固定版本的 `acpx@0.13.0` 接入 ACP Agent，也可通过 PTY 适配器连接已安装的 CLI。Dockmux 只展示本机实际可用的 Agent 和版本。
-- **一条命令完成上手**：`dockmux setup` 引导式配置（含飞书机器人自动接入），`dockmux doctor` 体检并给出可执行的补救命令，`dockmux autostart` 管理开机自启。三者都支持 `--json` 供脚本消费。
+- **ACP 与真实 CLI**：优先使用固定版本的 `acpx@0.13.0` 接入 ACP Agent，也可通过 PTY 适配器连接已安装的 CLI。Dutydeck 只展示本机实际可用的 Agent 和版本。
+- **一条命令完成上手**：`dutydeck setup` 引导式配置（含飞书机器人自动接入），`dutydeck doctor` 体检并给出可执行的补救命令，`dutydeck autostart` 管理开机自启。三者都支持 `--json` 供脚本消费。
 
 ## 快速开始
 
@@ -25,12 +25,12 @@ Dockmux 是本地优先的 Agent 工程工作台。飞书机器人是下达任�
 全局安装后，一条命令完成引导：
 
 ```bash
-pnpm add -g dockmux
-dockmux setup
-dockmux start
+pnpm add -g dutydeck
+dutydeck setup
+dutydeck start
 ```
 
-`dockmux setup` 是引导式向导：探测本机已安装的 Agent CLI → 选定并校验默认工作目录
+`dutydeck setup` 是引导式向导：探测本机已安装的 Agent CLI → 选定并校验默认工作目录
 → 可选绑定飞书机器人（自动配置权限、事件、回调并提交版本）→ 写入配置 → 打印下一步。
 
 向导幂等可重跑：检测到已有配置时逐项询问「保留或更新」，配置无变化就报告无需改动。
@@ -40,8 +40,8 @@ dockmux start
 CI / 脚本里用字段 flag，不要给交互式提问喂管道输入（加一个问题就会错位）：
 
 ```bash
-dockmux setup --cwd /path/to/project --port 4310 --skip-lark --yes
-dockmux setup --json --cwd /path/to/project --skip-lark --yes   # 单行 JSON，机密已掩码
+dutydeck setup --cwd /path/to/project --port 4310 --skip-lark --yes
+dutydeck setup --json --cwd /path/to/project --skip-lark --yes   # 单行 JSON，机密已掩码
 ```
 
 `--json` 是行为契约而非格式化开关：它隐含「绝不提问、绝不渲染二维码」，无法继续时
@@ -50,23 +50,23 @@ dockmux setup --json --cwd /path/to/project --skip-lark --yes   # 单行 JSON，
 配好之后体检本机环境与配置：
 
 ```bash
-dockmux doctor          # 每一项失败都会给出具体的补救命令
-dockmux doctor --json   # 机器可读
+dutydeck doctor          # 每一项失败都会给出具体的补救命令
+dutydeck doctor --json   # 机器可读
 ```
 
 开机自启（macOS 用 launchd，Linux 用 systemd --user）：
 
 ```bash
-dockmux autostart enable   # 只注册开机项，不会立即启动；立即启动用 dockmux start
-dockmux autostart status
-dockmux autostart disable  # 只移除开机项，运行中的服务不受影响
+dutydeck autostart enable   # 只注册开机项，不会立即启动；立即启动用 dutydeck start
+dutydeck autostart status
+dutydeck autostart disable  # 只移除开机项，运行中的服务不受影响
 ```
 
 ### 从源码开发
 
 ```bash
 pnpm install
-cp .env.example .env   # 或直接跑 dockmux setup
+cp .env.example .env   # 或直接跑 dutydeck setup
 pnpm dev
 ```
 
@@ -87,42 +87,42 @@ pnpm server
 也可以直接用参数启动，跳过配置文件：
 
 ```bash
-dockmux --cwd /path/to/project --port 4310
+dutydeck --cwd /path/to/project --port 4310
 ```
 
-运行 `dockmux --help` 查看全部参数。
+运行 `dutydeck --help` 查看全部参数。
 
 ## 前台、后台与更新
 
-无子命令的 `dockmux` 在前台运行。`start`、`stop`、`restart` 和 `status` 管理内置 daemon；带或不带 `daemon` 前缀的两种写法等价。
+无子命令的 `dutydeck` 在前台运行。`start`、`stop`、`restart` 和 `status` 管理内置 daemon；带或不带 `daemon` 前缀的两种写法等价。
 
 ```bash
-dockmux start --cwd /path/to/project --port 4310
-dockmux status
-dockmux restart --port 4410
-dockmux stop
+dutydeck start --cwd /path/to/project --port 4310
+dutydeck status
+dutydeck restart --port 4410
+dutydeck stop
 
 # 等价命令组
-dockmux daemon start --port 4310
-dockmux daemon status
+dutydeck daemon start --port 4310
+dutydeck daemon status
 
 # 更新全局包并重启后台服务
-dockmux update
+dutydeck update
 ```
 
-daemon 的数据库、PID、状态和日志位于启动根目录的 `.dockmux/`。服务会记住第一次启动的根目录，后续管理命令不会静默创建第二套配置。收到退出信号时，Dockmux 会关闭 Agent、SSE、终端连接和 SQLite；空闲 Driver 默认在 6 小时后释放，任务历史仍会保留。
+daemon 的数据库、PID、状态和日志位于启动根目录的 `.dutydeck/`。服务会记住第一次启动的根目录，后续管理命令不会静默创建第二套配置。收到退出信号时，Dutydeck 会关闭 Agent、SSE、终端连接和 SQLite；空闲 Driver 默认在 6 小时后释放，任务历史仍会保留。
 
-启动异常时先跑 `dockmux doctor`：它会检查 Node 版本、daemon 存活与端口、数据库可达性、`.dockmux/` 权限、已安装 Agent、飞书配置与监听、端口占用和远程访问姿态，每一项失败都会给出具体的补救命令。注意 `status` 记录的 PID 已消失时，doctor 会如实报告为「记录残留」，而不是复述过期记录。
+启动异常时先跑 `dutydeck doctor`：它会检查 Node 版本、daemon 存活与端口、数据库可达性、`.dutydeck/` 权限、已安装 Agent、飞书配置与监听、端口占用和远程访问姿态，每一项失败都会给出具体的补救命令。注意 `status` 记录的 PID 已消失时，doctor 会如实报告为「记录残留」，而不是复述过期记录。
 
 让服务开机自启（`enable` 只注册开机项，不会立即启动；`disable` 也不会停掉正在运行的服务）：
 
 ```bash
-dockmux autostart enable
-dockmux autostart status
-dockmux autostart disable
+dutydeck autostart enable
+dutydeck autostart status
+dutydeck autostart disable
 ```
 
-macOS 使用 launchd（`~/Library/LaunchAgents/com.dockmux.server.plist`），Linux 使用 systemd --user（`~/.config/systemd/user/dockmux.service`），其他平台会明确拒绝而不是静默无操作。Linux 上如果没开 linger，注销会杀掉服务，`enable` 会提示对应的 `loginctl enable-linger` 命令。nvm 切换或 npm 升级导致启动路径变化时，重跑 `enable` 会重写开机项。
+macOS 使用 launchd（`~/Library/LaunchAgents/com.dutydeck.server.plist`），Linux 使用 systemd --user（`~/.config/systemd/user/dutydeck.service`），其他平台会明确拒绝而不是静默无操作。Linux 上如果没开 linger，注销会杀掉服务，`enable` 会提示对应的 `loginctl enable-linger` 命令。nvm 切换或 npm 升级导致启动路径变化时，重跑 `enable` 会重写开机项。
 
 ## Web 工作台
 
@@ -138,13 +138,13 @@ Markdown、代码块、工具调用和终端视图均按需渲染。长历史不
 
 ## 远程浏览器访问
 
-Dockmux 默认只监听 `127.0.0.1:4310`，本机使用无需登录。需要局域网访问时显式使用 `--host 0.0.0.0`；远程监听默认要求所有来源（包括反向代理的 loopback 回源）通过访问令牌认证。监听接口与鉴权是独立配置，`--host` 本身不会关闭安全门禁。
+Dutydeck 默认只监听 `127.0.0.1:4310`，本机使用无需登录。需要局域网访问时显式使用 `--host 0.0.0.0`；远程监听默认要求所有来源（包括反向代理的 loopback 回源）通过访问令牌认证。监听接口与鉴权是独立配置，`--host` 本身不会关闭安全门禁。
 
 服务首次启动时会生成访问令牌并打印一次。之后可以随时查看或轮换：
 
 ```bash
-dockmux auth token
-dockmux auth token --rotate
+dutydeck auth token
+dutydeck auth token --rotate
 ```
 
 远程浏览器打开工作台后输入令牌一次。验证成功后，服务只设置 `HttpOnly; SameSite=Strict` Cookie，fetch、SSE 和终端 WebSocket 会自动携带它。轮换令牌会使旧令牌及其浏览器会话失效。通过 HTTPS 反向代理访问时，应正确传递请求协议，使 Cookie 同时带上 `Secure`。
@@ -152,32 +152,32 @@ dockmux auth token --rotate
 仅在本机使用时可以缩小监听面：
 
 ```bash
-dockmux --local-only
-# 或 DOCKMUX_LOCAL_ONLY=true
+dutydeck --local-only
+# 或 DUTYDECK_LOCAL_ONLY=true
 
 # 显式开启局域网访问
-dockmux --host 0.0.0.0
+dutydeck --host 0.0.0.0
 ```
 
-如果开发机所在网络已经可信，或入口前已有统一身份认证，可以显式关闭 Dockmux Token：
+如果开发机所在网络已经可信，或入口前已有统一身份认证，可以显式关闭 Dutydeck Token：
 
 ```bash
-dockmux start --host 0.0.0.0 --no-auth
+dutydeck start --host 0.0.0.0 --no-auth
 # 等价环境变量（只接受精确的小写 false）
-DOCKMUX_AUTH=false dockmux start --host 0.0.0.0
+DUTYDECK_AUTH=false dutydeck start --host 0.0.0.0
 ```
 
 `--no-auth` 会同时作用于 HTTP API、SSE 和终端 WebSocket；浏览器请求仍要求严格同源。后台服务会把这个选择记录进 daemon state，普通 `restart` 和升级后的自动重启会继承；使用 `--auth` 可显式恢复默认鉴权。
 
 > 警告：关闭鉴权后，任何能访问该地址的人都能查看任务、控制 Agent 和访问终端。只能用于可信网络或具备上游认证的代理之后，绝不能把它直接暴露到不可信网络或公网。
 
-从 `--no-auth` 启动、浏览器控制中心、SecretRef 安全录入、staged 群配置、Schedule 预览到 Botmux 只读迁移检查的端到端说明，见 [远程开发机上的 Dockmux 控制面](docs/remote-devhost-control-plane.md)。其中会明确区分“Dockmux 无访问 token”和“飞书 App 仍需 credentials”，并列出当前所有 NO-ACTIVATION 限制。
+从 `--no-auth` 启动、浏览器控制中心、SecretRef 安全录入、staged 群配置、Schedule 预览到 Botmux 只读迁移检查的端到端说明，见 [远程开发机上的 Dutydeck 控制面](docs/remote-devhost-control-plane.md)。其中会明确区分“Dutydeck 无访问 token”和“飞书 App 仍需 credentials”，并列出当前所有 NO-ACTIVATION 限制。
 
 高级场景可使用 `--host <address>` 指定接口。不要把未启用 TLS 的服务直接暴露到不可信网络。
 
 ## 权限姿态
 
-Dockmux 将一个权限姿态从 Agent 配置贯穿到 ACP 或 PTY 启动边界：
+Dutydeck 将一个权限姿态从 Agent 配置贯穿到 ACP 或 PTY 启动边界：
 
 | 模式 | 行为 |
 |---|---|
@@ -197,7 +197,7 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 ### 用户路径
 
 - 私聊文本直接创建任务；群聊遵循机器人当前唤醒策略，默认需要 @。回复问题卡可以直接回答原提问。
-- Dockmux 先保存入站消息，再用固定 `OK` 确认收到；随后在触发消息或对应话题下回复可变进度卡。解析失败也会给出可见失败回执。
+- Dutydeck 先保存入站消息，再用固定 `OK` 确认收到；随后在触发消息或对应话题下回复可变进度卡。解析失败也会给出可见失败回执。
 - 排队、运行、待决策、完成、中断和失败使用不同视觉层级。
 - 运行态只保留少量合并后的有效进展；最终结论更新在原任务卡上。只有原卡确定不可更新时才补发唯一替代卡。
 - 默认完成通知隐藏详细 trace，只保留简短证据摘要并提供 Web 详情入口；显式关闭隐藏时，详细轨迹仍以折叠区提供。
@@ -212,8 +212,8 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 最快路径是 CLI 向导，它驱动的是与 Web 相同的自动配置能力：
 
 ```bash
-dockmux setup --lark-app-id cli_xxx
-dockmux setup --lark-app-id cli_xxx --force-login   # 换开放平台账号
+dutydeck setup --lark-app-id cli_xxx
+dutydeck setup --lark-app-id cli_xxx --force-login   # 换开放平台账号
 ```
 
 向导会在终端渲染开放平台登录二维码（复用本机私密登录态时不需要扫码），在动手改动前
@@ -226,15 +226,15 @@ dockmux setup --lark-app-id cli_xxx --force-login   # 换开放平台账号
 也可以走 Web 路径：
 
 1. 在飞书开放平台创建企业自建应用，取得 App ID 与 App Secret。
-2. 在 Web 的“飞书指挥台”填写 App ID，点击“自动配置”。Dockmux 会复用本机私密登录态；没有可用登录态时显示飞书二维码。
-3. 自动配置会增量导入 Dockmux 需要的 16 项消息、群聊、附件与联系人权限，启用机器人，设置长连接 `im.message.receive_v1` 与 `card.action.trigger`，回读验证后发布新版本。存量应用的可见范围会在发版前完整读回并原样保留；无法确认时停止发版。
+2. 在 Web 的“飞书指挥台”填写 App ID，点击“自动配置”。Dutydeck 会复用本机私密登录态；没有可用登录态时显示飞书二维码。
+3. 自动配置会增量导入 Dutydeck 需要的 16 项消息、群聊、附件与联系人权限，启用机器人，设置长连接 `im.message.receive_v1` 与 `card.action.trigger`，回读验证后发布新版本。存量应用的可见范围会在发版前完整读回并原样保留；无法确认时停止发版。
 4. 填写 App Secret、工作区与 Agent，明确确认无人值守 `full-trust` 后启用监听，并把机器人加入目标群。
 
-无论走哪条路径，App Secret 都属于机密，应使用 `dockmux secret set` 从隐藏输入或
-`--value-fd` 录入，向导和 CLI 都不会回显或记录它。用 `dockmux doctor` 可以确认飞书
+无论走哪条路径，App Secret 都属于机密，应使用 `dutydeck secret set` 从隐藏输入或
+`--value-fd` 录入，向导和 CLI 都不会回显或记录它。用 `dutydeck doctor` 可以确认飞书
 配置是否完整、监听是否可能生效。
 
-自动配置不是保存门禁，也不会申请用户身份发消息权限；需要时仍可在开发者后台手动配置。开放平台 Cookie 只写入本机 `~/.dockmux/feishu-open-platform-session.json`（私有权限），不会返回浏览器、进入日志或交给 Agent。
+自动配置不是保存门禁，也不会申请用户身份发消息权限；需要时仍可在开发者后台手动配置。开放平台 Cookie 只写入本机 `~/.dutydeck/feishu-open-platform-session.json`（私有权限），不会返回浏览器、进入日志或交给 Agent。
 
 App Secret 只保留在服务端；通过 Web 保存时写入本地 SQLite，查询接口不会返回它。成员白名单使用姓名录入，保存时解析成 `open_id`；同名或找不到成员时会拒绝保存。使用 `--no-lark-listen` 可以只为当前进程关闭监听，不修改已保存配置。
 
@@ -258,31 +258,31 @@ export LARK_APP_SECRET=replace_me
 export LARK_RECEIVE_ID=user@example.com
 export LARK_RECEIVE_ID_TYPE=email
 
-dockmux lark send '**构建完成**' --task-name '发布验证' --task-id release-42
-dockmux lark update '**所有检查均已通过**' \
+dutydeck lark send '**构建完成**' --task-name '发布验证' --task-id release-42
+dutydeck lark update '**所有检查均已通过**' \
   --message-id om_xxx --state completed --task-id release-42
 ```
 
 ### 群内 Agent 协作
 
-启用群协作后，飞书群本身是共享消息总线。Agent 可以发现当前群中由本 Dockmux 实例管理的机器人、增量读取消息，并在管理员允许时发送或回复：
+启用群协作后，飞书群本身是共享消息总线。Agent 可以发现当前群中由本 Dutydeck 实例管理的机器人、增量读取消息，并在管理员允许时发送或回复：
 
 ```bash
-dockmux group self
-dockmux group peers
-dockmux group members
-dockmux group messages --limit 20
-dockmux group send '请检查这个接口' --to cli_peer
-dockmux group wait --after '<cursor>' --timeout-ms 15000
+dutydeck group self
+dutydeck group peers
+dutydeck group members
+dutydeck group messages --limit 20
+dutydeck group send '请检查这个接口' --to cli_peer
+dutydeck group wait --after '<cursor>' --timeout-ms 15000
 ```
 
-群工具 capability 精确绑定运行、机器人和群聊。App Secret 与飞书访问令牌不会交给 Agent。ACPX Session 只写入 snake_case 的 `dockmux_group_tools_url` 和 `dockmux_group_tools_token`；旧大写键仅能在读取边界兼容。
+群工具 capability 精确绑定运行、机器人和群聊。App Secret 与飞书访问令牌不会交给 Agent。ACPX Session 只写入 snake_case 的 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`；旧大写键仅能在读取边界兼容。
 
 ## Agent 配置
 
-Dockmux 启动时读取 ACPX 注册表，并检查对应供应商 CLI。只有可执行文件存在的 Agent 才会进入 Web 与飞书选择器；能够探测到的 CLI 版本会一并展示。
+Dutydeck 启动时读取 ACPX 注册表，并检查对应供应商 CLI。只有可执行文件存在的 Agent 才会进入 Web 与飞书选择器；能够探测到的 CLI 版本会一并展示。
 
-使用 `DOCKMUX_AGENTS_JSON` 添加或覆盖 Agent。下面是自定义 ACP 示例：
+使用 `DUTYDECK_AGENTS_JSON` 添加或覆盖 Agent。下面是自定义 ACP 示例：
 
 ```json
 [
@@ -309,16 +309,16 @@ Dockmux 启动时读取 ACPX 注册表，并检查对应供应商 CLI。只有�
 
 | 变量 | 默认值/用途 |
 |---|---|
-| `DOCKMUX_HOST` | 默认 `127.0.0.1`；显式设为 `0.0.0.0` 才开启局域网监听。 |
-| `DOCKMUX_PORT` | 默认 `4310`。 |
-| `DOCKMUX_LOCAL_ONLY` | `true` 时只监听 `127.0.0.1`。 |
-| `DOCKMUX_AUTH` | 默认 `true`；仅精确设置为 `false` 时关闭 HTTP、SSE 与终端 WS 的 Dockmux Token 鉴权。 |
-| `DOCKMUX_DATABASE_URL` | 默认 `<cwd>/.dockmux/dockmux.db`。 |
-| `DOCKMUX_DEFAULT_CWD` | 默认工作区。 |
-| `DOCKMUX_ACPX_COMMAND` | ACPX 可执行命令。 |
-| `DOCKMUX_DRIVER_IDLE_TIMEOUT_MS` | Driver 空闲释放时间，默认 6 小时。 |
-| `DOCKMUX_CLEANUP_INTERVAL_MS` | 清理扫描间隔，默认 5 分钟。 |
-| `DOCKMUX_AGENTS_JSON` | 自定义 Agent JSON 数组。 |
+| `DUTYDECK_HOST` | 默认 `127.0.0.1`；显式设为 `0.0.0.0` 才开启局域网监听。 |
+| `DUTYDECK_PORT` | 默认 `4310`。 |
+| `DUTYDECK_LOCAL_ONLY` | `true` 时只监听 `127.0.0.1`。 |
+| `DUTYDECK_AUTH` | 默认 `true`；仅精确设置为 `false` 时关闭 HTTP、SSE 与终端 WS 的 Dutydeck Token 鉴权。 |
+| `DUTYDECK_DATABASE_URL` | 默认 `<cwd>/.dutydeck/dutydeck.db`。 |
+| `DUTYDECK_DEFAULT_CWD` | 默认工作区。 |
+| `DUTYDECK_ACPX_COMMAND` | ACPX 可执行命令。 |
+| `DUTYDECK_DRIVER_IDLE_TIMEOUT_MS` | Driver 空闲释放时间，默认 6 小时。 |
+| `DUTYDECK_CLEANUP_INTERVAL_MS` | 清理扫描间隔，默认 5 分钟。 |
+| `DUTYDECK_AGENTS_JSON` | 自定义 Agent JSON 数组。 |
 
 ## HTTP 与事件模型
 
@@ -365,4 +365,4 @@ pnpm benchmark
 
 ## Historical / Provenance
 
-Dockmux 的部分 ACP 工作台、飞书桥接、CLI 适配与终端实现来自早期内部原型的演进。来源只用于保留版权、许可证和代码考古信息，不定义当前产品模型。历史说明见 [Provenance](docs/architecture.md)；如需追溯具体实现，请以 Git 历史和对应源文件版权声明为准。
+Dutydeck 的部分 ACP 工作台、飞书桥接、CLI 适配与终端实现来自早期内部原型的演进。来源只用于保留版权、许可证和代码考古信息，不定义当前产品模型。历史说明见 [Provenance](docs/architecture.md)；如需追溯具体实现，请以 Git 历史和对应源文件版权声明为准。

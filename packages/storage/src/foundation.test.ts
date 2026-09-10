@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import type { CreateChannelBotInput, CreateSecretRefInput } from '@dockmux/shared';
+import type { CreateChannelBotInput, CreateSecretRefInput } from '@dutydeck/shared';
 import { createRepositories } from './index.js';
 
 function secretInput(id: string): CreateSecretRefInput {
-  return { id, kind: 'lark_app_secret', provider: 'keychain', referenceKey: `dockmux/lark/${id}`, status: 'configured' };
+  return { id, kind: 'lark_app_secret', provider: 'keychain', referenceKey: `dutydeck/lark/${id}`, status: 'configured' };
 }
 
 function botInput(id: string, credentialRef?: string): CreateChannelBotInput {

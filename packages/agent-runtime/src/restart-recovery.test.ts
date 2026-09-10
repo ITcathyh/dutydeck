@@ -2,13 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRepositories } from '@dockmux/storage';
-import { DriverDetachedError, DriverRecoveryError, type AgentConfig, type AgentDriver, type DriverFactory, type DriverTurnRecovery, type NormalizedDriverEvent } from '@dockmux/shared';
-import { DockmuxRuntime } from './index.js';
+import { createRepositories } from '@dutydeck/storage';
+import { DriverDetachedError, DriverRecoveryError, type AgentConfig, type AgentDriver, type DriverFactory, type DriverTurnRecovery, type NormalizedDriverEvent } from '@dutydeck/shared';
+import { DutydeckRuntime } from './index.js';
 
 const agent: AgentConfig = { id: 'persistent', name: 'Persistent', command: 'unused', args: [], protocol: 'pty-cli', cwd: '/tmp', env: {}, permissionMode: 'full-trust', timeout: 30, capabilities: { pause: false, resume: true }, builtin: false };
 const directories: string[] = [];
-const runtimes: DockmuxRuntime[] = [];
+const runtimes: DutydeckRuntime[] = [];
 const repositories: ReturnType<typeof createRepositories>[] = [];
 afterEach(async () => {
   for (const runtime of runtimes.splice(0)) await runtime.shutdown();
@@ -55,14 +55,14 @@ function persistentTurn() {
 }
 
 function database() {
-  const dir = mkdtempSync(join(tmpdir(), 'dockmux-task-recovery-'));
+  const dir = mkdtempSync(join(tmpdir(), 'dutydeck-task-recovery-'));
   directories.push(dir);
-  return join(dir, 'dockmux.db');
+  return join(dir, 'dutydeck.db');
 }
 
-function open(database: string, factory: DriverFactory, options: ConstructorParameters<typeof DockmuxRuntime>[1] = {}) {
+function open(database: string, factory: DriverFactory, options: ConstructorParameters<typeof DutydeckRuntime>[1] = {}) {
   const repos = createRepositories(database);
-  const runtime = new DockmuxRuntime(repos, { driverFactory: factory, probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }), ...options });
+  const runtime = new DutydeckRuntime(repos, { driverFactory: factory, probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }), ...options });
   repositories.push(repos); runtimes.push(runtime);
   return { repos, runtime };
 }

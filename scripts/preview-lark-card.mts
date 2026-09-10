@@ -16,7 +16,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { AgentEvent } from '@dockmux/shared';
+import type { AgentEvent } from '@dutydeck/shared';
 import {
   renderLarkProcessElements,
   renderLarkResultElements
@@ -46,7 +46,7 @@ const multiStage: AgentEvent[] = [
   event(4, 'tool_result', 3, { id: 't1', name: 'Bash', output: 'apps/server/src/lark/card-renderer.ts:575\napps/server/src/lark/card-renderer.ts:664', status: 'completed', completedAt: t(3) }),
   event(5, 'text', 4, { role: 'assistant', text: '读取 card-renderer.ts 与 service.ts 里的卡片组装逻辑。' }),
   event(6, 'tool_call', 4, { id: 't2', name: 'read', input: { path: 'apps/server/src/lark/card-renderer.ts' }, status: 'running', startedAt: t(4) }),
-  event(7, 'tool_result', 6, { id: 't2', name: 'read', output: 'import type { AgentEvent } from "@dockmux/shared";\n…683 行', status: 'completed', completedAt: t(6) }),
+  event(7, 'tool_result', 6, { id: 't2', name: 'read', output: 'import type { AgentEvent } from "@dutydeck/shared";\n…683 行', status: 'completed', completedAt: t(6) }),
   event(8, 'tool_call', 6, { id: 't3', name: 'read', input: { path: 'apps/server/src/lark/service.ts' }, status: 'running', startedAt: t(6) }),
   event(9, 'tool_result', 8, { id: 't3', name: 'read', output: 'export function buildLarkCard(input: LarkCardInput = {}) {\n…1272 行', status: 'completed', completedAt: t(8) }),
   event(10, 'text', 9, { role: 'assistant', text: '跑一遍卡片相关的单元测试，确认当前基线是绿的。' }),
@@ -106,7 +106,7 @@ const doneCapabilities = { canCancelQueued: false, canInterrupt: false, canRetry
 const workflowButton = (action: string, label: string) => ({
   tag: 'button', element_id: `workflow_${action}`, text: { tag: 'plain_text', content: label },
   type: action === 'approve' ? 'primary' : 'default',
-  behaviors: [{ type: 'callback', value: { dockmux_workflow: action, request_id: 'wf_preview', generation: 'preview' } }]
+  behaviors: [{ type: 'callback', value: { dutydeck_workflow: action, request_id: 'wf_preview', generation: 'preview' } }]
 });
 const workflowCard = (kind: 'permission' | 'ask') => buildLarkCard({
   agentName: 'Claude Code', state: 'running', readOnly: true, awaitingHuman: true, permissionMode: 'ask',
@@ -135,7 +135,7 @@ const commandReceiptCard = (taskName: string, elements: Array<Record<string, any
 // dashboardNow 传给渲染器——否则每次跑图这些值都在动，并排复核时全是假差异。
 const dashboardNow = base;
 const ago = (minutes: number) => new Date(dashboardNow - minutes * 60_000).toISOString();
-const workspace = '/data00/home/huangyuhang.edu/ai/dockmux';
+const workspace = '/data00/home/huangyuhang.edu/ai/dutydeck';
 const appLink = 'https://applink.feishu.cn/client/chat/open?openChatId=oc_preview';
 const dashboardEntries = [
   { taskId: 't1', title: '看看发送的消息卡片能不能做大规模重构优化', workspace, status: 'waiting_for_permission', updatedAt: ago(12), url: appLink },
@@ -401,7 +401,7 @@ const outDir = resolve(positional[0] ?? 'docs/assets/card-preview');
 await mkdir(outDir, { recursive: true });
 
 const html = `<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>Dockmux 飞书卡片预览</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Dutydeck 飞书卡片预览</title>
 <style>
   :root { color-scheme: light; }
   body { margin:0; padding:24px; background:#F5F6F7; font:14px/1.5 -apple-system,"PingFang SC","Helvetica Neue",Arial,sans-serif; color:#1F2329; }
@@ -440,7 +440,7 @@ const html = `<!doctype html>
   hr { border:0; border-top:1px solid #DEE0E3; margin:6px 0; }
   .unknown { color:#F54A45; font-size:11px; }
 </style></head><body>
-<h1>Dockmux 飞书任务卡片预览</h1>
+<h1>Dutydeck 飞书任务卡片预览</h1>
 <p class="lede">近似渲染，非飞书渲染引擎：字号、圆角、颜色按飞书取值对齐，用于判断信息层级与视觉密度，不用于像素级验收。折叠面板默认收起，点击可展开。</p>
 <div class="grid">
 ${scenarios.map(scenario => `<div class="cell">

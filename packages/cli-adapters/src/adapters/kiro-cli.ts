@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -27,7 +27,7 @@ async function requestSessionIdOnce(backend: PtyLike): Promise<void> {
  *
  * Kiro 会话 id 由 CLI 自己分配，只能通过 TUI 的 `/session-id` 斜杠命令回显——
  * 首次写入前敲一次，让 id 出现在屏幕上供 driver 捕获（botmux 靠这条把
- * cliSessionId 抓回来；dockmux 尚无捕获管道，命令仍保留，屏幕上有 id 才有
+ * cliSessionId 抓回来；dutydeck 尚无捕获管道，命令仍保留，屏幕上有 id 才有
  * 后续接入的可能）。
  */
 export function createKiroCliAdapter(): CliAdapter {
@@ -70,10 +70,10 @@ export function createKiroCliAdapter(): CliAdapter {
       }
     },
 
-    /** Kiro 会话 id 由 CLI 自己分配（dockmux 尚无捕获管道），`--resume-id` 只认
-     *  它自己的 id。收到 dockmux 的 `ses_<uuid>` → null，driver 改起新会话。 */
+    /** Kiro 会话 id 由 CLI 自己分配（dutydeck 尚无捕获管道），`--resume-id` 只认
+     *  它自己的 id。收到 dutydeck 的 `ses_<uuid>` → null，driver 改起新会话。 */
     buildResumeCommand(sessionId: string): string[] | null {
-      if (isDockmuxSessionId(sessionId)) return null;
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['chat', '--resume-id', sessionId];
     },
 

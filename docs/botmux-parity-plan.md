@@ -1,36 +1,36 @@
-# BotMux → Dockmux 能力对齐与渐进迁移方案
+# BotMux → Dutydeck 能力对齐与渐进迁移方案
 
 > 状态：设计草案；本文只定义迁移架构与验收门槛，不包含实现。
 >
-> 核心约束：迁移期间 BotMux 持续服务；不以“成功复制 `bots.json`”作为迁移完成；任何已使用但未被 Dockmux 等价承接的能力，都必须阻止对应 Lark App 激活。
+> 核心约束：迁移期间 BotMux 持续服务；不以“成功复制 `bots.json`”作为迁移完成；任何已使用但未被 Dutydeck 等价承接的能力，都必须阻止对应 Lark App 激活。
 
 ## 1. 结论
 
-BotMux 的配置不是一个文件，而是一组互相关联的运行时状态：`bots.json`、全局 `config.json`、每 bot 的 `BOT_HOME`、共享 `dataDir` 下的群策略、授权、团队、计划任务、订阅、工作流及私密凭据，以及各 CLI 自己的 session/transcript。Dockmux 当前可以直接承接 Lark 凭据、基础 Agent 配置、默认模型/工作目录、P2P/群会话路由和部分群工具；但还没有导入服务、一等的每群策略、BotMux 的团队/授权/自动化模型，也不能无歧义地表达“多个 Bot 使用同一种 CLI、但有不同启动配置”的场景。
+BotMux 的配置不是一个文件，而是一组互相关联的运行时状态：`bots.json`、全局 `config.json`、每 bot 的 `BOT_HOME`、共享 `dataDir` 下的群策略、授权、团队、计划任务、订阅、工作流及私密凭据，以及各 CLI 自己的 session/transcript。Dutydeck 当前可以直接承接 Lark 凭据、基础 Agent 配置、默认模型/工作目录、P2P/群会话路由和部分群工具；但还没有导入服务、一等的每群策略、BotMux 的团队/授权/自动化模型，也不能无歧义地表达“多个 Bot 使用同一种 CLI、但有不同启动配置”的场景。
 
 因此采用以下原则：
 
 1. **先盘点、再映射、后切流。** 每条源数据必须被标记为 `mapped`、`staged`、`runtime_only`、`unsupported` 或 `excluded_with_reason`，不允许静默丢字段。
-2. **双轨兼容，但同一 App 不双写。** BotMux 在兼容期保持运行；Dockmux 导入后的 bot 默认 `listening=false`。同一个 Lark `app_id` 任一时刻只能有一个 WebSocket/event consumer 对外回复。
+2. **双轨兼容，但同一 App 不双写。** BotMux 在兼容期保持运行；Dutydeck 导入后的 bot 默认 `listening=false`。同一个 Lark `app_id` 任一时刻只能有一个 WebSocket/event consumer 对外回复。
 3. **切流单位是 Lark App，而不是单个群。** 一个 App 的消息流包含其所有私聊和群聊；只有该 App 实际使用的安全、路由和启动能力全部通过 P0 门槛，才能切换。
 4. **导入是可重复的受管同步，不是一次性拷贝。** 使用稳定自然键、源/目标哈希、来源映射和事务，支持 no-op 重跑、冲突检测、回滚及后续增量导入。
-5. **保留不等于启用。** 尚未实现的配置进入受保护的兼容快照，BotMux 继续执行该能力；不能把未知字段写进 Dockmux 后就宣称已兼容。
+5. **保留不等于启用。** 尚未实现的配置进入受保护的兼容快照，BotMux 继续执行该能力；不能把未知字段写进 Dutydeck 后就宣称已兼容。
 6. **密钥默认不可见。** 导入计划、日志、API 和错误不得返回 `app_secret`、Agent `env`、token、webhook key、connector credential 或启动命令中的内联密钥。
 
 ## 2. 当前实现基线
 
 本方案基于当前代码的以下事实：
 
-- Dockmux `AgentConfig` 已有 `command`、`args`、`protocol`、`model`、`reasoningEffort`、`cwd`、`env`、`systemPrompt`、权限与超时等字段；Agent 以 ID upsert 到 SQLite `agent_configs`。
+- Dutydeck `AgentConfig` 已有 `command`、`args`、`protocol`、`model`、`reasoningEffort`、`cwd`、`env`、`systemPrompt`、权限与超时等字段；Agent 以 ID upsert 到 SQLite `agent_configs`。
 - 启动时会把配置文件/环境中的 Agent 写入数据库，但没有 Agent CRUD/导入 API。非 builtin Agent 不会在启动清理中被删除，因此可以作为导入落点，但运行中的 Agent catalog 需要明确 reload/restart 语义。
 - `GET /api/agents` 当前直接返回运行时 `AgentConfig`。这可能暴露 `command`、`args`、`env` 和 system prompt；在导入任何含密钥的 Agent 之前必须先改为 public DTO。
 - Lark bot 目前以聚合配置 `configs['lark.bots']` 保存，按 `appId` 更新；公开 DTO 已排除 `appSecret`、`env` 和 `startupCommands`。其中 `env`/`startupCommands` 仅是旧导入兼容字段，当前不会被 Agent 启动链路消费，不能作为真实迁移落点。
-- Dockmux 支持 bot 级 `p2pMode`、`groupReplyMode`、默认 Agent/模型/推理强度、监听开关、人员与 bot allowlist、高风险规则、卡片 trace 设置及群工具开关。
-- Dockmux 没有一等的 per-chat policy 表；`channel_mappings` 是卡片/投递映射，不是群配置，不能复用成授权或路由策略表。
-- Dockmux 群工具 token 使用持久化签名密钥、按 session/app/chat 绑定，向 Agent 注入的变量是 `dockmux_group_tools_url` 和 `dockmux_group_tools_token`。
+- Dutydeck 支持 bot 级 `p2pMode`、`groupReplyMode`、默认 Agent/模型/推理强度、监听开关、人员与 bot allowlist、高风险规则、卡片 trace 设置及群工具开关。
+- Dutydeck 没有一等的 per-chat policy 表；`channel_mappings` 是卡片/投递映射，不是群配置，不能复用成授权或路由策略表。
+- Dutydeck 群工具 token 使用持久化签名密钥、按 session/app/chat 绑定，向 Agent 注入的变量是 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`。
 - 当前内置 PTY CLI 覆盖 BotMux 的大部分常用 CLI，但 `mir`、`dsh`、`codex-app`、`mojo`、`riff`、`mira` 等没有可用的 server 启动路径。`codex` ID 还会优先命中 ACPX builtin；Agent 模型没有独立的 `driver_id`/`adapter_id`，所以不能用别名表达“此 bot 明确使用 PTY Codex”。
-- session backend 包内虽有 PTY/tmux/zellij/zmx 相关实现，server 创建 `PtyCliDriver` 时仍使用默认 `PtyBackend`，并未注入 tmux 等持久 backend。BotMux 的 backend 选择以及“Dockmux daemon 重启不终止正在运行的 CLI”都尚无等价运行时落点。
-- Dockmux 能持久化自己的 session、task、event、tool call 和 Lark channel mapping，但 BotMux session ID、CLI transcript、session-group 出生关系与 Dockmux session schema 不兼容。
+- session backend 包内虽有 PTY/tmux/zellij/zmx 相关实现，server 创建 `PtyCliDriver` 时仍使用默认 `PtyBackend`，并未注入 tmux 等持久 backend。BotMux 的 backend 选择以及“Dutydeck daemon 重启不终止正在运行的 CLI”都尚无等价运行时落点。
+- Dutydeck 能持久化自己的 session、task、event、tool call 和 Lark channel mapping，但 BotMux session ID、CLI transcript、session-group 出生关系与 Dutydeck session schema 不兼容。
 
 相关代码入口：
 
@@ -65,7 +65,7 @@ BotMux 的配置不是一个文件，而是一组互相关联的运行时状态�
 
 状态定义：
 
-- **支持**：Dockmux 已有等价运行时语义；仍可能缺导入接线。
+- **支持**：Dutydeck 已有等价运行时语义；仍可能缺导入接线。
 - **部分**：有相近模型，但字段、默认值、作用域或运行路径不等价。
 - **缺失**：没有可安全承接的运行时模型。
 - **归档**：切流时不执行，仅保留来源与恢复能力。
@@ -76,17 +76,17 @@ BotMux 的配置不是一个文件，而是一组互相关联的运行时状态�
 - **P1**：主要交互/协作能力；一旦源 App 使用会动态提升为 P0。
 - **P2/P3**：长尾或历史能力；仍需盘点和保留，不代表允许静默丢失。
 
-| BotMux 能力 | Dockmux 当前状态 | 缺口/风险 | 目标数据落点 | 优先级 |
+| BotMux 能力 | Dutydeck 当前状态 | 缺口/风险 | 目标数据落点 | 优先级 |
 |---|---|---|---|---|
 | Lark `appId/appSecret`、名称、品牌、展示名 | 支持 | 没有批量导入；聚合 JSON 的并发 RMW 可能丢更新 | `lark_bots` + private `secret_refs`；过渡期兼容 `lark.bots` | P0 |
 | bot 启停、`apiOnly`、auto-start | 部分 | 只有 `listening`；导入时若自动监听会与 BotMux 双回复 | `lark_bots.listener_state` + `cutover_leases` | P0 |
-| owner、allowed users/email/bots | 部分 | Dockmux 主要支持 `ou_`/email；BotMux 还有 `on_`、owner、跨 bot 身份信息 | 结构化 `lark_principals`，区分 `open_id/union_id/email/bot` 与所属 app | P0 |
+| owner、allowed users/email/bots | 部分 | Dutydeck 主要支持 `ou_`/email；BotMux 还有 `on_`、owner、跨 bot 身份信息 | 结构化 `lark_principals`，区分 `open_id/union_id/email/bot` 与所属 app | P0 |
 | `allowedChatGroups`、oncall chat | 缺失 | 没有群级 allow/deny/oncall 模型 | `lark_chat_policies` | P0 |
 | chat grants/global grants、grant expiry、quota、slash 限制、auto-grant | 缺失 | 直接丢失会扩大或缩小权限 | `lark_grants`、`lark_quotas`、policy evaluator | P0（使用即阻断） |
-| 高风险命令控制 | 部分 | Dockmux 有 bot 级 allowlist/regex/risk mode，但与 BotMux grant/sandbox 语义不同 | bot risk policy + chat/user grant evaluator | P0 |
+| 高风险命令控制 | 部分 | Dutydeck 有 bot 级 allowlist/regex/risk mode，但与 BotMux grant/sandbox 语义不同 | bot risk policy + chat/user grant evaluator | P0 |
 | P2P `chat/thread` 路由 | 支持 | 必须显式物化默认值，避免版本默认漂移 | `lark_bots.p2p_mode` | P0 |
-| 普通群 `chat/shared/new-topic/chat-topic` | 部分 | BotMux 缺省是 `chat-topic`；Dockmux 缺省会走 legacy per-sender 路由，不能留空 | `lark_bots.group_reply_mode`，导入时写显式 `chat-topic` | P0 |
-| 每群 reply/mention/substitute/no-card/no-CoT 等覆盖 | 缺失 | Dockmux 只有 bot 级 group mode 和少量全局卡片项 | `lark_chat_policies.routing_json` / typed columns | P0/P1 |
+| 普通群 `chat/shared/new-topic/chat-topic` | 部分 | BotMux 缺省是 `chat-topic`；Dutydeck 缺省会走 legacy per-sender 路由，不能留空 | `lark_bots.group_reply_mode`，导入时写显式 `chat-topic` | P0 |
+| 每群 reply/mention/substitute/no-card/no-CoT 等覆盖 | 缺失 | Dutydeck 只有 bot 级 group mode 和少量全局卡片项 | `lark_chat_policies.routing_json` / typed columns | P0/P1 |
 | default Agent/model/reasoning/cwd/timeout | 部分 | 可表达基础值，但 timeout 和 bot profile 的完整启动语义未完全接线 | 独立受管 `agent_configs` + `lark_bots.default_agent_id` | P0 |
 | 多 Bot 共用同一 CLI、配置各自独立 | 部分 | Agent ID 兼作 adapter ID，别名无法选 adapter；会互相覆盖或无法启动 | Agent 增加 `driver_id`/`adapter_id`；稳定导入 ID `botmux:<appId>:<cliId>` | P0 |
 | Codex PTY 与 ACPX Codex 区分 | 缺失 | `codex` builtin collision 会优先使用 ACPX，迁移后协议可能变化 | 明确 `driver_kind=pty/acpx` + `adapter_id=codex` | P0 |
@@ -95,23 +95,23 @@ BotMux 的配置不是一个文件，而是一组互相关联的运行时状态�
 | startup commands、wrapper、launch shell、runtime override | 缺失/部分 | Lark 字段只是 dormant 兼容数据；不能假装已执行 | typed launch profile + 首次启动/每次启动明确语义 | P0（实际使用者）/P1 |
 | PTY/tmux/zellij/zmx/backendType | 部分 | backend 包存在，但 server 未注入，实际默认 `PtyBackend` | `agent_configs.backend_type` + backend factory | P0 |
 | daemon 重启不中断 CLI、重启后重连 | 缺失 | 当前 `PtyBackend` 子进程生命周期不能当作持久 backend；已有 session DB 行不等于 CLI 进程仍存活 | 持久 backend ownership、attach/reconcile、orphan 检测和 restart protocol | P0 |
-| sandbox、sandbox paths/network、disable bypass | 缺失/部分 | Dockmux 的 full-trust 确认不是 BotMux sandbox 等价物 | execution policy/sandbox profile；未映射时禁止 full-trust 激活 | P0 |
+| sandbox、sandbox paths/network、disable bypass | 缺失/部分 | Dutydeck 的 full-trust 确认不是 BotMux sandbox 等价物 | execution policy/sandbox profile；未映射时禁止 full-trust 激活 | P0 |
 | working dirs、default dir、repo picker、auto-worktree、same-dir inheritance | 部分 | 仅固定 workspace/cwd 可直接表达 | agent workspace + chat/session workspace policy + worktree registry | P0（固定 cwd）/P1 |
-| group tools：成员/消息/peer/bot/send/reply | 支持/部分 | Dockmux 有受 session/app/chat 约束的工具；send 是 bot 级开关，缺每群授权 | capability token + `lark_chat_policies.group_tools_*` | P0/P1 |
+| group tools：成员/消息/peer/bot/send/reply | 支持/部分 | Dutydeck 有受 session/app/chat 约束的工具；send 是 bot 级开关，缺每群授权 | capability token + `lark_chat_policies.group_tools_*` | P0/P1 |
 | 群管理：建群、改名、邀请、转让、删除、离群 | 缺失 | 目前主要是 chat/member 查询 | 独立 group admin service + 审计/高风险确认 | P1 |
-| streaming card、trace、thinking、silent reaction、private/writable terminal | 部分 | Dockmux 有 live card、trace/hide trace；多数 BotMux 细粒度偏好缺失 | bot/chat presentation policy | P1 |
+| streaming card、trace、thinking、silent reaction、private/writable terminal | 部分 | Dutydeck 有 live card、trace/hide trace；多数 BotMux 细粒度偏好缺失 | bot/chat presentation policy | P1 |
 | bot-to-bot、peer trust、same-dir | 部分 | allowed bots 与 peer tools 已有基础；没有完整 team/federation 信任根 | principals + team/federation graph + per-chat capability | P1 |
 | teams、team groups、federation、platform roster、role profiles | 缺失 | 不能扁平映射为 allowedBots，否则丢失作用域与信任边界 | `teams`、`team_members`、`team_chats`、`federations`、role artifact store | P1/P2 |
 | system prompt、pre-inject prompt、skills/plugins | 部分 | 有 system/pre-inject prompt；无 BotMux 注入策略、registry、feedback/pack 等完整语义 | versioned agent customization + skill/plugin registry | P1 |
 | message listeners、content trigger、substitute mode、doc/comment subscription | 缺失 | 影响触发和回复范围，迁移定义但不执行会漏消息 | trigger/subscription tables + idempotent dispatcher | P1/P2 |
-| schedule、async trigger、hook/webhook、workflow | 缺失/部分 | Dockmux 有 session relay，但无 BotMux schedule/workflow 执行模型 | schedules/triggers/outbox + secret refs + execution audit | P1/P2 |
-| session group 出生关系、owner/reminder、feed metadata | 缺失 | Dockmux group session 路由不包含 BotMux 的出生/归属关系 | session lineage/group registry | P2 |
+| schedule、async trigger、hook/webhook、workflow | 缺失/部分 | Dutydeck 有 session relay，但无 BotMux schedule/workflow 执行模型 | schedules/triggers/outbox + secret refs + execution audit | P1/P2 |
+| session group 出生关系、owner/reminder、feed metadata | 缺失 | Dutydeck group session 路由不包含 BotMux 的出生/归属关系 | session lineage/group registry | P2 |
 | session/history/resume/adopt、CLI transcript | 缺失/归档 | 两边 session ID 与 transcript 格式不兼容；盲目复用会串会话 | read-only legacy session catalog；逐 adapter 验证后 adopt | P2 |
-| dedup、idempotency、frozen card、outbox | 部分/归档 | Dockmux 有自己的 task/event/tool-call/channel state，不能直接复用 BotMux 运行态 | 不迁活跃锁；仅迁需持续的 idempotency key/outbox，带 namespace | P0（切流窗口）/P2 |
+| dedup、idempotency、frozen card、outbox | 部分/归档 | Dutydeck 有自己的 task/event/tool-call/channel state，不能直接复用 BotMux 运行态 | 不迁活跃锁；仅迁需持续的 idempotency key/outbox，带 namespace | P0（切流窗口）/P2 |
 | voice、VC meeting agent | 缺失 | 包含外部凭据、监听角色和复杂 delivery state | 独立 connector/meeting 模块；之前保持 BotMux | P2 |
-| whiteboard、team board、summary、issue board、feedback、usage | 缺失/部分 | Dockmux 无等价协作产物模型 | versioned artifact/board/ledger store 或只读 archive | P2 |
+| whiteboard、team board、summary、issue board、feedback、usage | 缺失/部分 | Dutydeck 无等价协作产物模型 | versioned artifact/board/ledger store 或只读 archive | P2 |
 | connector、webhook、feedback secrets | 缺失 | 不能放入普通 config JSON 或 plan | private `secret_refs` + connector-specific schema | P0（实际使用者）/P2 |
-| 全局语言、代理、更新、维护、overload/notifier、timezone | 部分 | Dockmux 有自身 auth/update，其他机器级行为不等价 | typed host settings；不自动覆盖 Dockmux 运维配置 | P2/P3 |
+| 全局语言、代理、更新、维护、overload/notifier、timezone | 部分 | Dutydeck 有自身 auth/update，其他机器级行为不等价 | typed host settings；不自动覆盖 Dutydeck 运维配置 | P2/P3 |
 | 部署身份、seen-message、临时锁、runtime tombstone/cache | 归档/不迁 | 机器运行态不应跨系统复用；但切流需定义 dedup 水位 | import manifest 记录排除原因；切流水位单独生成 | P0（dedup 水位）/P3 |
 
 矩阵中的静态优先级不是豁免规则：例如 VC 通常是 P2，但某个拟切流 App 正在承担会议监听时，该能力立即成为该 App 的 P0 blocker。
@@ -184,12 +184,12 @@ Lark bot 从聚合 `lark.bots` 演进成一等实体：
 建议本地 CLI 为唯一可以指定任意源路径的入口：
 
 ```text
-dockmux import botmux plan [--bots-config <exact-file>] [--data-dir <dir>]
-dockmux import botmux apply --plan-id <id> [--on-conflict preserve|rename|overwrite]
-dockmux import botmux rollback --run-id <id>
+dutydeck import botmux plan [--bots-config <exact-file>] [--data-dir <dir>]
+dutydeck import botmux apply --plan-id <id> [--on-conflict preserve|rename|overwrite]
+dutydeck import botmux rollback --run-id <id>
 ```
 
-默认行为是 plan/dry-run。Web/API 只能查看已由本地 CLI 建立的 redacted plan 或触发既定 plan apply，不能接受任意服务器文件路径，避免把 Dockmux auth 变成任意文件读取能力。
+默认行为是 plan/dry-run。Web/API 只能查看已由本地 CLI 建立的 redacted plan 或触发既定 plan apply，不能接受任意服务器文件路径，避免把 Dutydeck auth 变成任意文件读取能力。
 
 Plan 必须：
 
@@ -225,8 +225,8 @@ Apply 必须重读源并校验 fingerprint 和 plan digest。plan 后源发生�
 
 - 单次 apply 的所有目标变更使用同一 DB transaction；失败自动回滚。
 - 已提交 run 的 rollback 使用 `import_entity_versions` 逆向恢复，仅当目标仍等于该 run 的 `after_hash`。若已有后续人工修改，停止并报告冲突。
-- rollback 只恢复 Dockmux，不修改/删除 BotMux 数据。
-- 已切流 App 的运行回滚顺序是：Dockmux 停止接收并 drain → 写 handoff watermark → 释放 Dockmux lease → 恢复 BotMux listener → 验证消息和授权；不能简单先启动 BotMux 造成双回复。
+- rollback 只恢复 Dutydeck，不修改/删除 BotMux 数据。
+- 已切流 App 的运行回滚顺序是：Dutydeck 停止接收并 drain → 写 handoff watermark → 释放 Dutydeck lease → 恢复 BotMux listener → 验证消息和授权；不能简单先启动 BotMux 造成双回复。
 
 ## 7. Secret 与 API 安全门槛
 
@@ -244,9 +244,9 @@ Apply 必须重读源并校验 fingerprint 和 plan digest。plan 后源发生�
 导入 Agent env 时必须保留原环境变量的大小写，不能为了通过 ACPX 校验把 vendor key 改名：
 
 - ACPX 会递归校验持久化 `session_options` 的所有 object key，持久化键必须是 `snake_case`。
-- `OPENAI_API_KEY`、`ANTHROPIC_*` 等大写或非 snake_case key 继续走现有 `0600` runtime env JSON bridge；持久化 session 只保存 `dockmux_agent_env_file` 和 digest 等 snake_case 元数据。
-- 群工具直接写入 ACPX session 的键只能是 `dockmux_group_tools_url` 和 `dockmux_group_tools_token`。
-- 如需兼容旧 `DOCKMUX_GROUP_TOOLS_*`，只能在读取边界兼容；禁止把大写键写回 `session_options.env`。
+- `OPENAI_API_KEY`、`ANTHROPIC_*` 等大写或非 snake_case key 继续走现有 `0600` runtime env JSON bridge；持久化 session 只保存 `dutydeck_agent_env_file` 和 digest 等 snake_case 元数据。
+- 群工具直接写入 ACPX session 的键只能是 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`。
+- 如需兼容旧 `DUTYDECK_GROUP_TOOLS_*`，只能在读取边界兼容；禁止把大写键写回 `session_options.env`。
 - 导入 plan/diff 不显示 env value，且不能因“未持久化到 session_options”误判 env 未迁移。
 
 必须增加使用真实 `AcpxAdapter` 和真实持久化 session key 的回归测试，覆盖：
@@ -259,7 +259,7 @@ Apply 必须重读源并校验 fingerprint 和 plan digest。plan 后源发生�
 
 ## 9. 双轨兼容与切流流程
 
-兼容期保持 BotMux 二进制、配置、数据目录和其他 bot daemon 原样运行。Dockmux 的导入不是接管动作。
+兼容期保持 BotMux 二进制、配置、数据目录和其他 bot daemon 原样运行。Dutydeck 的导入不是接管动作。
 
 ### 9.1 双轨状态
 
@@ -267,25 +267,25 @@ Apply 必须重读源并校验 fingerprint 和 plan digest。plan 后源发生�
 
 ```text
 botmux_active
-  -> dockmux_imported_disabled
-  -> dockmux_verified_offline
+  -> dutydeck_imported_disabled
+  -> dutydeck_verified_offline
   -> handoff_draining
-  -> dockmux_canary
-  -> dockmux_active
+  -> dutydeck_canary
+  -> dutydeck_active
   -> botmux_retained_for_rollback
 ```
 
-- `dockmux_imported_disabled`：凭据和配置已导入，但 `listening=false`、未确认 full trust。
-- `dockmux_verified_offline`：通过 Web/API 发起 Dockmux 本地 Agent 测试，不连接同一 App 的消息流。
+- `dutydeck_imported_disabled`：凭据和配置已导入，但 `listening=false`、未确认 full trust。
+- `dutydeck_verified_offline`：通过 Web/API 发起 Dutydeck 本地 Agent 测试，不连接同一 App 的消息流。
 - `handoff_draining`：只停止该 App 的 BotMux listener/daemon 并记录消息水位；BotMux 的其他 App 继续运行。
-- `dockmux_canary`：Dockmux 获得 App lease 后才开启 listener；同一 App 禁止 BotMux 同时重连。
+- `dutydeck_canary`：Dutydeck 获得 App lease 后才开启 listener；同一 App 禁止 BotMux 同时重连。
 - `botmux_retained_for_rollback`：源配置和运行环境继续保留，直到观察期和全部 parity 验收完成。
 
 如果现有部署无法按 App 单独停止 listener，就不能在同一 App 上做在线 shadow；应使用独立测试 App，或先补 per-App drain/lease 能力。绝不能依赖“两个 consumer 大概不会同时收到消息”。
 
 ### 9.2 切流水位
 
-切流需记录最后处理的 Lark message/event 时间和可用幂等键。Dockmux 启动后对水位附近消息执行 dedup；BotMux 的临时锁、PID、cache 不迁移。对无法建立确定水位的事件类型，canary 必须选择低风险窗口并保留人工核对清单。
+切流需记录最后处理的 Lark message/event 时间和可用幂等键。Dutydeck 启动后对水位附近消息执行 dedup；BotMux 的临时锁、PID、cache 不迁移。对无法建立确定水位的事件类型，canary 必须选择低风险窗口并保留人工核对清单。
 
 ## 10. 分阶段实施与验收
 
@@ -298,9 +298,9 @@ botmux_active
 - 对目标 BotMux 实例扫描 `bots.json`、全局 config、BOT_HOME、dataDir 和已知 store，artifact coverage 为 100%。
 - 每个字段/文件都有 classification；未知项使 plan 失败而非告警后继续。
 - `/api/agents`、Lark public config、plan、日志和错误的 secret 泄漏测试通过。
-- plan 不写 Dockmux、不改 BotMux；连续两次 plan digest 一致。
+- plan 不写 Dutydeck、不改 BotMux；连续两次 plan digest 一致。
 - DB transaction、provenance、before version 和 rollback 设计经故障注入测试覆盖。
-- BotMux 正常运行，Dockmux 尚未监听任何导入 App。
+- BotMux 正常运行，Dutydeck 尚未监听任何导入 App。
 
 ### 阶段 1：P0 核心配置导入（默认禁用）
 
@@ -310,7 +310,7 @@ P0 激活门槛：
 
 - App credential 能通过目标 Lark app 验证；`ou_`/`on_`/email 身份完成 scope 校验。
 - 该 App 使用的 CLI、driver kind、backend、startup command、env、sandbox 行为有等价实现；否则 blocker。
-- Dockmux daemon 重启不会终止已运行 CLI，重启后能按持久 backend 身份重新 attach；仅恢复数据库 session 行不计通过。
+- Dutydeck daemon 重启不会终止已运行 CLI，重启后能按持久 backend 身份重新 attach；仅恢复数据库 session 行不计通过。
 - BotMux 缺省 group reply mode 被显式导成 `chat-topic`；每群覆盖逐条一致。
 - allow group、oncall、grant、quota、expiry 和高风险策略的 golden cases 一致。
 - 同 CLI 的多个 bot 生成不同 Agent profile；PTY Codex 不会误选 ACPX Codex。
@@ -328,9 +328,9 @@ P0 激活门槛：
 - BotMux 其他 App 全程继续服务；目标 App 不存在双 listener 窗口。
 - canary 覆盖私聊、普通群、话题群、@/非@、允许/拒绝用户、允许/拒绝群、高风险命令、群工具 read/send。
 - 回复 session scope、模型、cwd、env 和卡片行为符合迁移 plan。
-- 重启 Dockmux 后 lease、群策略、ACPX session 与 secret bridge 可恢复；PTY 类 Agent 的 CLI 进程保持运行并重新 attach，不产生第二个进程。
-- 演练 Dockmux → BotMux 回滚，无重复回复、无未授权执行、无源配置改写。
-- canary 观察期内无 P0 blocker 后，才可将 App 标为 `dockmux_active`。
+- 重启 Dutydeck 后 lease、群策略、ACPX session 与 secret bridge 可恢复；PTY 类 Agent 的 CLI 进程保持运行并重新 attach，不产生第二个进程。
+- 演练 Dutydeck → BotMux 回滚，无重复回复、无未授权执行、无源配置改写。
+- canary 观察期内无 P0 blocker 后，才可将 App 标为 `dutydeck_active`。
 
 ### 阶段 3：P1 群协作与定制能力
 
@@ -368,19 +368,19 @@ P0 激活门槛：
 - app secret/env/webhook secret 不出现在 HTTP、CLI、日志、exception、telemetry、test snapshot；
 - allowed user 的 `ou_` 同 App 成功、跨 App 失败，`on_`/email 经目标 App 验证后成功；
 - grant 到期、quota 临界值、高风险 allow/deny、群工具 token 越 chat/session 使用失败；
-- BotMux listener 未 drain 时 Dockmux lease 获取失败；Dockmux active 时 BotMux 重连被 runbook/guard 阻止；
-- Dockmux 重启、BotMux 重启、ACPX session reconnect、runtime env bridge 丢失/权限异常；
+- BotMux listener 未 drain 时 Dutydeck lease 获取失败；Dutydeck active 时 BotMux 重连被 runbook/guard 阻止；
+- Dutydeck 重启、BotMux 重启、ACPX session reconnect、runtime env bridge 丢失/权限异常；
 - 新增未知 BotMux store/字段导致 plan fail closed，并在 coverage report 中可见。
 
 ## 12. 非目标与禁止捷径
 
-- 不在第一阶段尝试把所有 BotMux 历史 session 强行转换成 Dockmux session。
+- 不在第一阶段尝试把所有 BotMux 历史 session 强行转换成 Dutydeck session。
 - 不把 `channel_mappings` 当作群策略表。
 - 不把每 bot 的 env/startup commands 塞进 Lark legacy 字段后视为已迁移。
 - 不按 `cli_id` 合并 Agent profile，也不让 `codex` ID 隐式决定 PTY/ACPX。
 - 不自动确认 full trust，不在 import 完成时自动监听。
-- 不让 BotMux 与 Dockmux 同时消费同一 App 来做“影子流量”。
+- 不让 BotMux 与 Dutydeck 同时消费同一 App 来做“影子流量”。
 - 不删除、重写或就地迁移 BotMux 源数据；退休是迁移完成后的单独决策。
 - 不因某能力优先级是 P2 就忽略它；源 App 正在使用时必须升级为切流 blocker。
 
-按此方案，Dockmux 可以先可靠承接实际使用的核心 bot/Agent/群能力，同时保持 BotMux 作为未完成能力的运行时与完整恢复源，逐 App、可审计、可回滚地完成迁移，而不是以一次不可逆的配置复制换取表面上的“导入成功”。
+按此方案，Dutydeck 可以先可靠承接实际使用的核心 bot/Agent/群能力，同时保持 BotMux 作为未完成能力的运行时与完整恢复源，逐 App、可审计、可回滚地完成迁移，而不是以一次不可逆的配置复制换取表面上的“导入成功”。

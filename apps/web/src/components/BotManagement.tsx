@@ -745,7 +745,7 @@ export function BotManagement({
         open={Boolean(deleteConfirmAppId)}
         tone="danger"
         title="移除此飞书 Bot？"
-        description="移除后将停止该 Bot 的全部监听，并清除其在 Dockmux 中的本地配置绑定。"
+        description="移除后将停止该 Bot 的全部监听，并清除其在 Dutydeck 中的本地配置绑定。"
         confirmLabel="确认移除"
         busy={deleteMutation.isPending}
         onCancel={() => setDeleteConfirmAppId(null)}

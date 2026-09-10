@@ -1,4 +1,4 @@
-# 让飞书成为 Dockmux 的完整工作入口
+# 让飞书成为 Dutydeck 的完整工作入口
 
 调研日期：2026-09-08。面向本地或受信开发机上的编码、调研与巡检任务，兼顾个人使用和项目群协作。本文记录调研时的代码基线与产品建议。用户随后授权实施，首批落地状态见[实施记录](feishu-workflows-implementation-2026-09-08.md)，用法见[飞书工作流程](feishu-workflows.md)。下文“当前能力”均指调研基线。
 
@@ -8,7 +8,7 @@
 
 ## 当前能力比旧审计更完整，但飞书操作仍有断点
 
-本轮代码基线：Dockmux `20b504251c0309ae5332503a2f957536f8e6a679`；本地 Botmux `13413f8561d14b78081c046fde3ad8c72875572e`，两者最新提交日期均为 2026-09-07。未拉取远端、切换分支或读取生产凭据。Botmux 结论针对这个本地 checkout。
+本轮代码基线：Dutydeck `20b504251c0309ae5332503a2f957536f8e6a679`；本地 Botmux `13413f8561d14b78081c046fde3ad8c72875572e`，两者最新提交日期均为 2026-09-07。未拉取远端、切换分支或读取生产凭据。Botmux 结论针对这个本地 checkout。
 
 已全文阅读本项目 README、产品定义、架构定义、2026-08-30 Botmux 能力审计、集成主蓝图及远程控制面指南，再用当前装配代码和测试核对。旧审计和部分控制面说明存在版本差异，不能直接转成新的开发清单。
 
@@ -16,14 +16,14 @@
 |---|---|---|
 | 私聊、普通群、话题群连续工作 | 已实现 App、群和话题范围的会话解析，多种回复模式及持久会话查找 | 保留；优化任务发现和上下文展示。[会话解析](../apps/server/src/lark/session-resolver.ts) |
 | 群级 Agent、目录、模型与权限 | 已有 `live_lark` 路径，群覆盖、角色、任务发起人和执行时权限校验已接入 | 不再列为“从零补 GroupBinding”。live_lark 也可存为 staged，但按独立绑定和成员事实判定是否应用；通用 foundation 不允许直接改 live bot。[群管理](../apps/server/src/lark/group-management.ts)、[运行装配](../apps/server/src/service.ts) |
-| tmux 持久进程 | 生产 PTY factory 已显式注入带 Dockmux 所有权的 tmux 后端；本轮隔离测试通过同一 pane/PID 重连 | 旧审计的“生产未接线”已过时。当前重启会将持久化 running 任务标为 interrupted；运行中结果续接尚未实现。[后端装配](../apps/server/src/service.ts)、[持久后端](../packages/pty-driver/src/persistent-backend.ts) |
+| tmux 持久进程 | 生产 PTY factory 已显式注入带 Dutydeck 所有权的 tmux 后端；本轮隔离测试通过同一 pane/PID 重连 | 旧审计的“生产未接线”已过时。当前重启会将持久化 running 任务标为 interrupted；运行中结果续接尚未实现。[后端装配](../apps/server/src/service.ts)、[持久后端](../packages/pty-driver/src/persistent-backend.ts) |
 | 进度和完成通知 | 已有确认表情、可变进度卡、单卡终态交付、重试及持久化对账 | 保留单卡交付；原卡确定不可更新时才补发唯一替代卡。后续补验收动作及附件。[协调器](../apps/server/src/lark/coordinator.ts)、[对账](../apps/server/src/lark/reconciler.ts) |
 | 接收后、执行前的消息恢复 | listener 将事件直接交给 coordinator；入口去重使用内存 Set，随后才解析、排队和创建执行 | 已有任务与卡片持久化，仍不能据此承诺入站消息全程耐重启；“确认收到后、执行落库前”的恢复为 unverified。[接收入口](../apps/server/src/lark/listener.ts)、[去重与排队](../apps/server/src/lark/coordinator.ts) |
 | 飞书操作前审批 | 当前飞书 Session 创建明确要求 `fullTrustConfirmed`，并固定 `permissionMode: full-trust`；卡片回调只有 cancel、interrupt、retry、refresh | 有 Runtime/Web 审批底座，缺飞书审批交互与非全信任启动路径。full-trust 下 ACP 自动允许请求；另有高危自动拦截，但不等于交互审批。[启动约束](../apps/server/src/lark/session-resolver.ts)、[卡片动作](../apps/server/src/lark/card-actions.ts)、[权限接口](../apps/server/src/app.ts) |
 | Agent 向用户提问 | `session ask` 和 HTTP 回答接口已实现，问题进入文本事件；待回答记录保存在内存 | 飞书消息处理和卡片动作未接到该回答接口；需要把回答送回挂起的问题。持久恢复也需补齐。[Relay 路由](../apps/server/src/relay-routes.ts)、[Ask broker](../packages/relay/src/ask-broker.ts) |
 | 飞书任务导航与配置 | 命令注册表有 help、status、cancel/stop、retry、new | `/status` 只查看当前上下文。跨任务查找、切回任务、选择工作区/模型仍缺原生入口。[命令表](../apps/server/src/lark/commands.ts) |
 | 上下文与附件输入 | 当前消息的多媒体资源可下载；空 `@` 会读取最近消息并要求确认；群工具也可按 chat/thread、cursor 和 wait 查消息，并展开合并转发 | 有基础，不宜写成“不会读历史”。普通带文字请求缺统一的引用、线程增量和文档材料收集流程；合并转发默认只给占位信息。[附件解析](../apps/server/src/lark/message-content.ts)、[资源处理](../apps/server/src/lark/session-resolver.ts)、[空消息回退](../apps/server/src/lark/coordinator.ts) |
-| 输出文件与文档 | 核心 Lark service 的 send/reply 发交互卡；另有加载动画图片上传 | 未找到面向 Agent 产物的通用上传/回传工具。具体 Agent 可自行使用已安装工具，但交付尚无 Dockmux 统一契约。[Lark service](../apps/server/src/lark/service.ts)、[群工具](../apps/server/src/lark/agent-tools.ts) |
+| 输出文件与文档 | 核心 Lark service 的 send/reply 发交互卡；另有加载动画图片上传 | 未找到面向 Agent 产物的通用上传/回传工具。具体 Agent 可自行使用已安装工具，但交付尚无 Dutydeck 统一契约。[Lark service](../apps/server/src/lark/service.ts)、[群工具](../apps/server/src/lark/agent-tools.ts) |
 | 定时任务 | 已有定义、时区/DST、发生记录、所有权、水位与预览；API 明确 `executorWired: false` | 下一步是执行器和飞书创建/暂停流程，不能把配置页当成已支持定时执行。[Schedule API](../apps/server/src/schedule-routes.ts)、[存储](../packages/storage/src/schedule-foundation.ts) |
 | Skills 与用量 | 已有本地 skill 发现、Web 选择、ACP usage 事件与上下文展示 | 缺飞书能力目录、结果反馈和专门的跨任务用量汇总。应复用现有数据。[Skill 发现](../apps/server/src/skill-catalog.ts)、[usage 事件](../packages/acp-client/src/index.ts)、[上下文展示](../apps/web/src/composer-utils.ts) |
 
@@ -31,7 +31,7 @@
 
 选择直接连接本地 Agent 的 IM 工具，以及在聊天中交付工程结果的产品。对飞书直接竞品看接入和日常操作，对 Slack 产品看可迁移的交互模式。在线资料统一访问于 2026-09-08；下表链接文字标识产品及对应页面；未单列发布日期的来源均未注明，结论只代表本轮读取到的文档状态。
 
-| 产品 | 核查到的具体能力 | 值得融入 Dockmux | 适用边界 |
+| 产品 | 核查到的具体能力 | 值得融入 Dutydeck | 适用边界 |
 |---|---|---|---|
 | Botmux，本地源码 | TUI 提问卡等待 worker ACK；持久 CardKit 序号；定时前置条件；会话级浏览器工具；skill 按 adapter 投递 | 提问送达确认、流更新抗乱序、条件执行、浏览器授权边界 | 和本项目最接近；功能面广，需按现有 Runtime 接入。v3 workflow 自身标为实验性，不能据此承诺可靠性 |
 | [OpenClaw 飞书通道](https://github.com/openclaw/openclaw/blob/main/docs/channels/feishu.md) | 持久入站队列、事件去重；群/发送者/topic 会话范围；文档、知识库、云盘、Base 工具；持久 ACP 绑定 | 接收即落库；按范围提供飞书工具；显式项目记忆 | 上游包为 `@openclaw/feishu`；动态用户 workspace 共享宿主进程，不是系统沙箱；持久队列保证不覆盖所有飞书事件 |
@@ -39,12 +39,12 @@
 | [cc-connect](https://github.com/chenhg5/cc-connect/blob/main/docs/feishu.md) | 飞书权限卡与文本回退、按话题绑定工作区、多图合批；[会话切换和 cron 命令](https://github.com/chenhg5/cc-connect/blob/main/docs/usage.md) | 手机端任务导航；一次发多张图只形成一份任务材料；卡片不可用时仍能完成操作 | 本地 CLI 需先认证；群历史共享仅缓存进程观察到的消息；定时任务重启补偿与投递保证为 unverified |
 | [Claude-to-IM](https://github.com/op7418/Claude-to-IM) | 飞书适配器实现 CardKit v2、权限按钮及 `/perm` 文字降级；桥接层处理重试和限速 | 参考权限请求与消息交付的接口，不必替换现有 Runtime | 是需宿主实现存储、模型和权限接口的库；模型事件接口针对 Claude Code SDK；原生 topic、出站媒体及 scheduler 为 unverified |
 | [lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge) | 本地 Claude/Codex；群、topic、文档评论会话；恢复命令、profile 和权限模式映射 | 文档评论直接发起修改；飞书内查看和恢复会话 | package/命令名为 `lark-channel-bridge`；默认 full，桥接自身无文件系统沙箱；不同 provider 的逐工具审批为 unverified |
-| [acp-link](https://github.com/xufanglin/acp-link) | 话题首轮聚合、后续增量、待处理附件；MCP 文件回传和 docx/wiki 读取；cron | 用户分多条消息提交材料，Agent 回传真实文件 | 轻量 ACP 桥接；源码可查，本轮未执行；其通用文件路径参数不应直接成为 Dockmux 的发送授权 |
+| [acp-link](https://github.com/xufanglin/acp-link) | 话题首轮聚合、后续增量、待处理附件；MCP 文件回传和 docx/wiki 读取；cron | 用户分多条消息提交材料，Agent 回传真实文件 | 轻量 ACP 桥接；源码可查，本轮未执行；其通用文件路径参数不应直接成为 Dutydeck 的发送授权 |
 | [Cursor Slack](https://cursor.com/docs/integrations/slack) | 同线程续作、强制新任务、运行任务列表、频道默认仓库与显式覆盖、完成 PR 通知 | 飞书任务工作卡、工作区选择、线程跟进和结果入口 | 需 Cursor 账户及仓库连接；当前文档也支持指定自托管 worker/pool，不能简单归为只能云端运行 |
 | [Devin Slack](https://docs.devin.ai/integrations/slack) | 消息快捷创建任务、Web/Slack 双向同步、取消同步、归档后继续；环境改动可在 Slack 查看并 Apply | 把现有消息变成任务；任务可显式绑定消息通道；审批展示具体变更 | 依赖 Devin 身份与执行环境；Code Channels 依赖 Slack 发布进度，不等于飞书已有相同组件 |
 | [Claude Code Channels](https://code.claude.com/docs/en/channels-reference) / [Remote Control](https://code.claude.com/docs/en/remote-control) | 本地会话接外部消息；双向 channel 可转发工具审批；请求 ID 匹配，手机/本地先到的答案生效 | 消息、提问、权限决策分流；保持本地执行并从飞书干预 | Channels 为预览能力并需显式开启；项目 trust 和 MCP consent 不转发，不能承诺所有交互均可远程完成 |
 
-Cursor 的 [Cloud Agent 能力文档](https://cursor.com/docs/cloud-agent/capabilities) 还明确把任务完成后的 PR 评论、CI、Slack 回复和定时器作为订阅事件，唤醒原会话继续工作。对 Dockmux 的启发是：等待外部结果应成为可持久化的任务状态。可以先解决用户回答与 CI 完成两种事件，避免让 Agent 持续轮询。
+Cursor 的 [Cloud Agent 能力文档](https://cursor.com/docs/cloud-agent/capabilities) 还明确把任务完成后的 PR 评论、CI、Slack 回复和定时器作为订阅事件，唤醒原会话继续工作。对 Dutydeck 的启发是：等待外部结果应成为可持久化的任务状态。可以先解决用户回答与 CI 完成两种事件，避免让 Agent 持续轮询。
 
 Devin 的 [Scheduled Sessions](https://docs.devin.ai/product-guides/scheduled-sessions) 和 [Automations](https://docs.devin.ai/product-guides/automations) 提供运行历史、状态及条件/动作配置。可借鉴其“谁创建、以谁的身份执行、何时触发、执行后向哪里报告”的可见性；本项目已经有 Schedule 基础模型，应在其上接通执行。
 
@@ -52,11 +52,11 @@ Claude 的 Slack 产品正在变化。[旧 Claude Code Slack 文档](https://cod
 
 ### 飞书直接竞品补充了三点产品方向
 
-**业务材料和操作身份应在任务里看得见。** Lark 官方插件把文档、Base、日历、任务作为工具提供；OpenClaw 上游则按账号开启工具族，权限管理工具默认关闭。Dockmux 可先复用已有 skill/CLI，支持“读需求文档 → 修改代码 → 把结果写回指定文档”的完整任务，并在操作前展示用机器人还是当前用户身份、作用于哪个资源。先接消息与文档，日历、Base 和会议按实际需求展开，不复制一套全量飞书 SDK。[官方插件能力](https://github.com/larksuite/openclaw-lark)、[上游工具开关](https://github.com/openclaw/openclaw/blob/main/docs/channels/feishu.md)。具体身份授权兼容性仍需实施时验证。
+**业务材料和操作身份应在任务里看得见。** Lark 官方插件把文档、Base、日历、任务作为工具提供；OpenClaw 上游则按账号开启工具族，权限管理工具默认关闭。Dutydeck 可先复用已有 skill/CLI，支持“读需求文档 → 修改代码 → 把结果写回指定文档”的完整任务，并在操作前展示用机器人还是当前用户身份、作用于哪个资源。先接消息与文档，日历、Base 和会议按实际需求展开，不复制一套全量飞书 SDK。[官方插件能力](https://github.com/larksuite/openclaw-lark)、[上游工具开关](https://github.com/openclaw/openclaw/blob/main/docs/channels/feishu.md)。具体身份授权兼容性仍需实施时验证。
 
-**收到消息与恢复执行之间还有一段需要保护。** OpenClaw 明确对消息和文档评论先持久化，再按会话串行分发。Dockmux 当前 listener 异步提交后返回，入口使用内存去重，并先发送确认表情；已有的 Runtime 队列和卡片对账保护的是后续阶段。建议把入站持久接收纳入长任务恢复：先保存来源和去重键，再发送“已接收”，重启后继续尚未交给 Runtime 的消息；同时处理“Runtime 已接收但入口未记成功”的重复窗口。这里是代码路径支持的风险判断，尚未做故障注入，不能声称已经复现丢消息。[OpenClaw 入站语义](https://github.com/openclaw/openclaw/blob/main/docs/channels/feishu.md)、[Dockmux 入口](../apps/server/src/lark/coordinator.ts)。
+**收到消息与恢复执行之间还有一段需要保护。** OpenClaw 明确对消息和文档评论先持久化，再按会话串行分发。Dutydeck 当前 listener 异步提交后返回，入口使用内存去重，并先发送确认表情；已有的 Runtime 队列和卡片对账保护的是后续阶段。建议把入站持久接收纳入长任务恢复：先保存来源和去重键，再发送“已接收”，重启后继续尚未交给 Runtime 的消息；同时处理“Runtime 已接收但入口未记成功”的重复窗口。这里是代码路径支持的风险判断，尚未做故障注入，不能声称已经复现丢消息。[OpenClaw 入站语义](https://github.com/openclaw/openclaw/blob/main/docs/channels/feishu.md)、[Dutydeck 入口](../apps/server/src/lark/coordinator.ts)。
 
-**手机端的小交互值得优先打磨。** cc-connect 会合并连续图片，并提供会话/工作区切换；它的群历史共享却不回放启动前消息。因此 Dockmux 应做有来源的材料收集，不能用短时缓存代替完整上下文。[飞书指南](https://github.com/chenhg5/cc-connect/blob/main/docs/feishu.md)。Claude-to-IM 的 [飞书适配器](https://github.com/op7418/Claude-to-IM/blob/main/src/lib/bridge/adapters/feishu-adapter.ts) 和 [权限 broker](https://github.com/op7418/Claude-to-IM/blob/main/src/lib/bridge/permission-broker.ts) 还提供明确的权限请求与文字回答路径，适合借鉴为卡片失效时的操作回退；回退也必须匹配请求 ID 和操作者，不能让任意群回复成为批准。
+**手机端的小交互值得优先打磨。** cc-connect 会合并连续图片，并提供会话/工作区切换；它的群历史共享却不回放启动前消息。因此 Dutydeck 应做有来源的材料收集，不能用短时缓存代替完整上下文。[飞书指南](https://github.com/chenhg5/cc-connect/blob/main/docs/feishu.md)。Claude-to-IM 的 [飞书适配器](https://github.com/op7418/Claude-to-IM/blob/main/src/lib/bridge/adapters/feishu-adapter.ts) 和 [权限 broker](https://github.com/op7418/Claude-to-IM/blob/main/src/lib/bridge/permission-broker.ts) 还提供明确的权限请求与文字回答路径，适合借鉴为卡片失效时的操作回退；回退也必须匹配请求 ID 和操作者，不能让任意群回复成为批准。
 
 文档评论是后续很自然的新入口：用户在报告某段评论“更新这部分”，Agent 就近获取材料并回复处理结果。[lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge#cloud-doc-comments) 已有这一交互。建议列入文档集成的第二步，沿用本项目任务授权和工作区绑定，不照搬“能评论就能触发本机执行”的访问规则，也不默认落到用户 home 目录执行。
 
@@ -77,7 +77,7 @@ Botmux 的反馈策略还区分请求人、指定评审者和显式开放范围�
 
 ### CardKit 是可选优化，先解决操作与结果
 
-Dockmux 已设置卡片的 `streaming_mode`，实际更新调用是按 `message_id` PATCH 整卡。CardKit 的卡实体流更新则使用 `card_id`、元素 ID 与递增 `sequence`；两种更新路径不能混为一谈。[本项目更新调用](../apps/server/src/lark/service.ts)、[飞书官方 SDK 的 CardKit 说明](https://github.com/larksuite/oapi-sdk-python/blob/v2_main/doc/channel/cardkit-streaming.md)。该 SDK 页面已标注迁移，应在实施时依据新 SDK/当前 OpenAPI 核对接口。
+Dutydeck 已设置卡片的 `streaming_mode`，实际更新调用是按 `message_id` PATCH 整卡。CardKit 的卡实体流更新则使用 `card_id`、元素 ID 与递增 `sequence`；两种更新路径不能混为一谈。[本项目更新调用](../apps/server/src/lark/service.ts)、[飞书官方 SDK 的 CardKit 说明](https://github.com/larksuite/oapi-sdk-python/blob/v2_main/doc/channel/cardkit-streaming.md)。该 SDK 页面已标注迁移，应在实施时依据新 SDK/当前 OpenAPI 核对接口。
 
 建议在长输出卡片确有刷新开销或渲染问题时采用 CardKit。收益待测，不能声称替换后必然更快。即使使用元素级更新，仍保留现有单卡终态和对账；完成推送是否另加表情提醒应经手机端实测决定，避免重新产生两张结果卡。
 
@@ -97,13 +97,13 @@ Claude Channels 的请求 ID 及先到答案生效机制、Botmux 的 TUI ACK，
 
 ### 把引用、线程与飞书文档带进任务
 
-用户先在话题发截图和需求文档，再说“按上面的要求修一下”，Dockmux 应自动整理本次任务所需的材料，并在首张卡片显示材料来源及读取失败项。后续补充只加入新消息，避免反复发送整个群历史。
+用户先在话题发截图和需求文档，再说“按上面的要求修一下”，Dutydeck 应自动整理本次任务所需的材料，并在首张卡片显示材料来源及读取失败项。后续补充只加入新消息，避免反复发送整个群历史。
 
 现有线程隔离解决的是“送到哪个上下文”。建议再补一个有界材料收集步骤：读取明确引用的消息；对首次接手的话题获取近期上下文；按消息 ID 保存已读水位；收集前后分开发送的附件；识别 docx/wiki 链接并按权限读取。群聊范围、原作者和原链接都应保留。
 
 [acp-link](https://github.com/xufanglin/acp-link) 的首轮话题聚合、后续增量和待处理附件队列是很直接的参考。其 [link.rs](https://github.com/xufanglin/acp-link/blob/596cc53419a383cf4260a63c49d12e306d6c2c09/src/link.rs) 有新会话聚合和附件入队路径，文件发送/文档读取工具见 [mcp_tools.rs](https://github.com/xufanglin/acp-link/blob/596cc53419a383cf4260a63c49d12e306d6c2c09/src/im/feishu/mcp_tools.rs)。这些是源码证据，本轮未运行该产品。
 
-建议先支持用户主动给出的消息和文档。文档写入、日历或会议能力按具体任务单独接入。读取失败时展示缺哪份材料和如何补充；群成员共享的内容只能作为任务材料，不能提升执行权限。已有 Agent skill/CLI 可以承接读取操作，Dockmux 负责来源、范围和结果状态。
+建议先支持用户主动给出的消息和文档。文档写入、日历或会议能力按具体任务单独接入。读取失败时展示缺哪份材料和如何补充；群成员共享的内容只能作为任务材料，不能提升执行权限。已有 Agent skill/CLI 可以承接读取操作，Dutydeck 负责来源、范围和结果状态。
 
 验收场景：引用一条消息后发“解释这个报错”；先图后文；首次介入已有话题；文档无权限；合并转发中部分附件不可读；两个话题含同名文件。此项 **M，estimate**；用户身份授权若成为必要条件，需另估。
 
@@ -146,7 +146,7 @@ Cursor 的线程续作/新建/运行列表与 Devin 的消息快捷创建，都�
 | 飞书文档操作与身份授权 | P1 / M–L | 读取需求、写回报告，知道以谁的身份操作 | 复用现有 skill/CLI；先做指定文档读写与授权状态，再接评论入口；日历/Base 按需展开 |
 | 定时任务实际执行 | P1 / L | “每个工作日九点检查 CI”，可查看、暂停和修改 | 接通现有 occurrence/ownership 模型；飞书确认时区、目标话题、下次执行和上下文策略 |
 | 外部事件触发 | P1 / M–L | CI 失败或指定文档更新后创建任务，结果回飞书 | 从一个真实事件源开始；幂等键、来源身份、限流、取消和结果查询 |
-| 每任务独立 worktree | P1，发生并行改码时提前 / M–L | 同一仓库的两个任务互不覆盖改动 | Dockmux 管工作目录分配、分支归属和收口；复用现有 CLI 执行能力 |
+| 每任务独立 worktree | P1，发生并行改码时提前 / M–L | 同一仓库的两个任务互不覆盖改动 | Dutydeck 管工作目录分配、分支归属和收口；复用现有 CLI 执行能力 |
 | 显式项目记忆 | P1 / M | 用户确认后记住项目约定，下次有来源可查 | 按用户/群/工作区隔离；可查看、修改、删除；复用文件型记忆与原生 Agent 能力 |
 | 浏览器接管与截图证据 | P2，浏览器任务高频时提前 / L | 在飞书安排浏览器操作，必要时接管登录，再收到结果 | 先做受控连接/截图/断线提示；远程开发机与用户电脑不在一处时需桥接 |
 | 原生用量与质量统计 | P1 配套 / M | 找到重复失败、需要返工或上下文过长的任务类型 | 关联原生 usage、验证与用户反馈；缺失值保留 unknown，不推算费用 |
@@ -178,7 +178,7 @@ worktree 只隔离代码目录和分支，不提供凭据、文件访问或网�
 
 ## 本轮验证及边界
 
-代码核查覆盖 Lark listener/coordinator、Session 路由、卡片动作、群管理、Relay、Runtime 权限接口、Schedule API 与存储、PTY 生产装配、skill/usage 入口。缺口结论通过对应执行路径与调用方检索核对；未把独立 Agent 自身能做的事等同于 Dockmux 已提供的一致产品能力。
+代码核查覆盖 Lark listener/coordinator、Session 路由、卡片动作、群管理、Relay、Runtime 权限接口、Schedule API 与存储、PTY 生产装配、skill/usage 入口。缺口结论通过对应执行路径与调用方检索核对；未把独立 Agent 自身能做的事等同于 Dutydeck 已提供的一致产品能力。
 
 本轮实际通过：
 

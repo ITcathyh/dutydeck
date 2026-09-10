@@ -1,7 +1,7 @@
 /**
  * Idle detection state machine — ported verbatim from botmux
  * (src/utils/idle-detector.ts). The ONLY intentional difference is the
- * constructor: botmux takes a CliAdapter, dockmux takes a plain IdlePatterns
+ * constructor: botmux takes a CliAdapter, dutydeck takes a plain IdlePatterns
  * bag so pty-driver internals do not reverse-depend on cli-adapters types.
  *
  * Strategy logic is byte-for-byte the botmux original — do NOT "simplify":

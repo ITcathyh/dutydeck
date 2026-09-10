@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from './app.js';
-import { createRepositories } from '@dockmux/storage';
-import { RelayAskBroker, RelayCapabilityRegistry } from '@dockmux/relay';
-import type { AgentEvent, EventType, Session } from '@dockmux/shared';
+import { createRepositories } from '@dutydeck/storage';
+import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
+import type { AgentEvent, EventType, Session } from '@dutydeck/shared';
 
 const apps: any[] = [];
 const repositories: Array<ReturnType<typeof createRepositories>> = [];

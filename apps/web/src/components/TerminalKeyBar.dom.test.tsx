@@ -108,7 +108,7 @@ describe('TerminalKeyBar 折叠与停靠', () => {
     const user = userEvent.setup();
     const { unmount } = render(<TerminalKeyBar onKey={vi.fn()}/>);
     await user.click(screen.getByRole('button', { name: '收起终端快捷键条' }));
-    expect(window.localStorage.getItem('dockmux.terminal_key_bar.collapsed.v1')).toBe('1');
+    expect(window.localStorage.getItem('dutydeck.terminal_key_bar.collapsed.v1')).toBe('1');
     unmount();
     render(<TerminalKeyBar onKey={vi.fn()}/>);
     expect(screen.getByRole('button', { name: '展开终端快捷键条' })).toBeTruthy();
@@ -120,7 +120,7 @@ describe('TerminalKeyBar 折叠与停靠', () => {
     expect(container.firstElementChild!.className).toContain('right-0');
     await user.click(screen.getByRole('button', { name: '把快捷键条移到左侧' }));
     expect(container.firstElementChild!.className).toContain('left-0');
-    expect(window.localStorage.getItem('dockmux.terminal_key_bar.side.v1')).toBe('left');
+    expect(window.localStorage.getItem('dutydeck.terminal_key_bar.side.v1')).toBe('left');
     unmount();
     const second = render(<TerminalKeyBar onKey={vi.fn()}/>);
     expect(second.container.firstElementChild!.className).toContain('left-0');

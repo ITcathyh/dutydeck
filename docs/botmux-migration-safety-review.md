@@ -1,4 +1,4 @@
-# Botmux → Dockmux 迁移安全与可执行性评审
+# Botmux → Dutydeck 迁移安全与可执行性评审
 
 > 评审日期：2026-08-30（PRC）
 >
@@ -29,7 +29,7 @@
 | `~/.botmux/bots/*/schedules.json` | 3 个 per-bot store，合计 1 条任务且 enabled | schedule 权威源；prompt、message/root ID 属私密业务数据 |
 | `~/.botmux/data/teams.json` | 1 个空 team | 可导入为空壳或记录为已审计排除，不阻塞当前运行 |
 | `~/.botmux/data/sessions-*.json` | 28 条：25 条 metadata-active、3 条 closed；全部为 group/thread、tmux、`agentFrozen=true` | 只读 legacy catalog/冷归档；`active` 不证明 OS 进程仍存活 |
-| `~/.botmux/v3-runs/*/grill.state.json` | 30 条，全部为 `grilling`；无 spec/dag/attempt 文件 | 未完成草稿，仅归档，不创建 Dockmux Task/Run |
+| `~/.botmux/v3-runs/*/grill.state.json` | 30 条，全部为 `grilling`；无 spec/dag/attempt 文件 | 未完成草稿，仅归档，不创建 Dutydeck Task/Run |
 | `bots.json.bak` 与派生 identity cache | 含 1 个已从当前 registry 移除的历史 Bot | 仅 orphan 检测；不得自动复活或作为 owner 权威源 |
 | feedback SQLite / WAL | 当前库 WAL 活跃；无实际 feedback label/delivery | 如归档须 SQLite online backup；不能只复制主 DB |
 
@@ -38,7 +38,7 @@ Botmux 的真实寻址优先级也得到代码确认：Bot registry 先看精确
 ### 2.2 不能从历史数据反推配置
 
 - 同一个群在 session 历史里出现于多个 App，只能证明多个 Bot 曾在该群产生过 session，不能证明这些 App 当前都有 oncall、allowlist 或群工具授权。
-- 历史 session 的 `rootMessageId`、CLI session ID 和 tmux target 不能直接变成 Dockmux `channel_mappings`。两套 session key、进程所有权和 transcript 语义不兼容。
+- 历史 session 的 `rootMessageId`、CLI session ID 和 tmux target 不能直接变成 Dutydeck `channel_mappings`。两套 session key、进程所有权和 transcript 语义不兼容。
 - `bots-info.json`、bot open/union ID cache、allowed-user cache 只是某个 App 视角下的派生结果，不能替代目标 App 的在线验证。
 - 遗留 `.env` 中的网关 App/Chat 字段没有当前 Botmux 源码消费者。它只能标成 `unknown_external_legacy`，不能直接认定为现行群工具授权。
 
@@ -95,7 +95,7 @@ Botmux 的真实寻址优先级也得到代码确认：Bot registry 先看精确
 
 源端当前 owner 使用同一完整邮箱条目，这是适合跨 App 搬运的 locator；但最终授权主体仍必须分别在两个目标 App 下解析。
 
-风险：Dockmux 现有 owner 校验把网络/scope 异常视为 inconclusive，可允许配置保存。这适合编辑体验，不足以作为迁移激活门槛。当前 `allowedUsers` schema 只保存 `ou_`；把 `on_` 直接塞入会在归一化时丢失。
+风险：Dutydeck 现有 owner 校验把网络/scope 异常视为 inconclusive，可允许配置保存。这适合编辑体验，不足以作为迁移激活门槛。当前 `allowedUsers` schema 只保存 `ou_`；把 `on_` 直接塞入会在归一化时丢失。
 
 修正：
 
@@ -114,7 +114,7 @@ Botmux 的真实寻址优先级也得到代码确认：Bot registry 先看精确
 - Oncall 的源语义是“本群所有能发言成员可 talk，operate 仍只认 owner/allowedUsers”，不能把全群 talk 升级成全局 allowlist或 card operate 权。
 - 激活前使用目标 App 验证 Bot 仍在群内、能读取必要 metadata、能按策略回复；本地 oncall/session 记录不是远端成员事实。
 - 遗留网关配置默认 `enabled=false`、`allow_send=false`；在找到外部桥接实现或获得操作者明确确认前，不创建有效 capability。
-- 旧 socket/token 不复制；Dockmux 重新签发 session+app+chat scoped capability，并只持久化 snake_case 环境键。
+- 旧 socket/token 不复制；Dutydeck 重新签发 session+app+chat scoped capability，并只持久化 snake_case 环境键。
 
 ### P0-6：源快照与 fingerprint 目前会被活跃运行态破坏
 
@@ -141,7 +141,7 @@ Botmux 仍在运行时，session、WAL、heartbeat、queue、dedup 和 usage 会
 - Legacy catalog 只暴露脱敏标题、时间、来源 App/Chat 的 opaque ref 和状态；原始 JSON/sidecar 使用 `0600` 私密归档，不进入 git、普通 API 或 plan diff。
 - `metadata-active` 统一显示为 `source_status=active, liveness=unknown`；未验证 OS pane、CLI native session 和 frozen launch snapshot 前，不允许 reattach。
 - 不导入 Botmux dedup、queue、turn marks/sends、frozen card、PID/port/lock；它们属于源 runtime namespace。
-- 30 个 `grilling` run 只作为 incomplete draft archive，不创建 Dockmux Task/Run，不自动继续 goal。
+- 30 个 `grilling` run 只作为 incomplete draft archive，不创建 Dutydeck Task/Run，不自动继续 goal。
 - 历史 TraeX 默认 archive-only；backup/cache 永不触发 live Bot 创建。
 
 唯一 enabled schedule 还绑定 thread root 与 continuation 语义。即使未来有 scheduler，如果原 thread/session 无法验证，也不能静默改成新 chat/new session；必须要求用户选择“保留原 topic 但新上下文”或“完成可验证 adopt”。
@@ -160,20 +160,20 @@ Botmux 仍在运行时，session、WAL、heartbeat、queue、dedup 和 usage 会
 6. 已提交 rollback 本身也是一个有 provenance 的事务，只恢复该 run 管理的配置实体，且仅在目标仍等于 `after_hash` 时执行；不删除期间产生的 session/task/history。
 7. Secret 回滚恢复 ref，不恢复日志/快照里的 Secret 值；文件 staging 的补偿状态必须可重试。
 
-### P0-9：Dockmux 单边 lease 不能防止 Botmux 重连
+### P0-9：Dutydeck 单边 lease 不能防止 Botmux 重连
 
-`cutover_leases` 若只存在 Dockmux 数据库，只能约束 Dockmux 自己，Botmux 不读取它，因而不能技术上保证同一 App 不出现双 listener。
+`cutover_leases` 若只存在 Dutydeck 数据库，只能约束 Dutydeck 自己，Botmux 不读取它，因而不能技术上保证同一 App 不出现双 listener。
 
 修正：
 
 - 切流前必须能按 App 停止并 drain 对应 Botmux daemon/listener，确认连接已断并记录 source watermark。
 - 使用双方都能观察的 fencing 机制，或由 supervisor 持有唯一 App lease；只有持有当前 generation 的 runtime 才可启动 listener。
 - 若无法按 App 独立 drain，使用独立测试 App；禁止同一生产 App 在线 shadow。
-- 运行回滚顺序固定为 Dockmux stop/drain → 写目标 watermark → 释放/fence Dockmux → 恢复 Botmux → 验证授权与去重。该流程不是 SQLite rollback 的一部分。
+- 运行回滚顺序固定为 Dutydeck stop/drain → 写目标 watermark → 释放/fence Dutydeck → 恢复 Botmux → 验证授权与去重。该流程不是 SQLite rollback 的一部分。
 
 ## 4. CWD 与路径的可执行性修正
 
-本机一个 Bot 的默认 CWD 是 `~`，而 Dockmux 当前 Lark workspace 要求绝对路径。Importer 不能原样写入，也不能只做字符串比较。
+本机一个 Bot 的默认 CWD 是 `~`，而 Dutydeck 当前 Lark workspace 要求绝对路径。Importer 不能原样写入，也不能只做字符串比较。
 
 建议在 plan 中同时保存：
 
@@ -189,15 +189,15 @@ Botmux 仍在运行时，session、WAL、heartbeat、queue、dedup 和 usage 会
 ### 5.1 命令边界
 
 ```text
-dockmux import botmux plan \
+dutydeck import botmux plan \
   [--bots-config <exact-file>] [--data-dir <dir>] [--emit-redacted <file>]
 
-dockmux import botmux apply --plan-id <id> \
+dutydeck import botmux apply --plan-id <id> \
   [--on-conflict preserve|rename] [--secret-mode prompt|reference|local-copy]
 
-dockmux import botmux verify --run-id <id>
-dockmux import botmux activate --app-id <id> --verified-run-id <id>
-dockmux import botmux rollback --run-id <id>
+dutydeck import botmux verify --run-id <id>
+dutydeck import botmux activate --app-id <id> --verified-run-id <id>
+dutydeck import botmux rollback --run-id <id>
 ```
 
 安全默认值：plan-only、history archive-only、retired Bot excluded、listener disabled、full trust false、group tools disabled、send false。`overwrite` 如保留，必须逐实体显式确认，不能作为全局开关。
@@ -218,7 +218,7 @@ apply 失败
   -> failed_rolled_back | failed_compensation_required
 ```
 
-`apply` 成功只代表 Dockmux 内部配置原子落库，不代表 Lark App 已接管。只有 `activate` 可以获得 cutover generation 并打开 listener。
+`apply` 成功只代表 Dutydeck 内部配置原子落库，不代表 Lark App 已接管。只有 `activate` 可以获得 cutover generation 并打开 listener。
 
 ### 5.3 本机预期 gate
 
@@ -258,7 +258,7 @@ activation_ready_apps=0
 - 保留“导入后 full trust false/listening false”，并补充当前 save API 与该目标冲突，列为实现前 P0。
 - 把 `source_root_fingerprint` 拆为 apply/archive/watermark 三类，避免活跃 Botmux 使 plan 永久 stale。
 - 明确 secret provider 的跨事务补偿和 rollback-by-ref；不要在 before version 保存 plaintext。
-- 明确 Dockmux 自己的 `cutover_leases` 不是跨系统 fencing。
+- 明确 Dutydeck 自己的 `cutover_leases` 不是跨系统 fencing。
 - 对本机 enabled schedule 动态提升为阶段 1/2 激活 blocker，而不是等阶段 4。
 
 ### `botmux-capability-audit.md`
@@ -283,4 +283,4 @@ activation_ready_apps=0
 9. per-App Botmux drain、双 listener fencing、watermark/dedup 和运行回滚演练通过。
 10. 同一 plan 重复 apply 为 no-op；目标人工修改后为 conflict；rollback 不覆盖后续用户运行数据。
 
-在这些条件之前，最安全且可执行的下一步是实现纯只读 `plan`：完成源寻址、全 artifact 分类、私密快照和 redacted capability report，但不写 Dockmux、不读取后输出任何凭据、不启动或停止任何 listener。
+在这些条件之前，最安全且可执行的下一步是实现纯只读 `plan`：完成源寻址、全 artifact 分类、私密快照和 redacted capability report，但不写 Dutydeck、不读取后输出任何凭据、不启动或停止任何 listener。

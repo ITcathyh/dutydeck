@@ -122,7 +122,7 @@ describe('Lark api gate error classification', () => {
   });
 
   it('ignores LarkServiceError.statusCode 502 and reads details.upstreamHttpStatus instead', () => {
-    // statusCode 是 Dockmux 回给自己客户端的状态，不是飞书返回的；若误读成 5xx，
+    // statusCode 是 Dutydeck 回给自己客户端的状态，不是飞书返回的；若误读成 5xx，
     // 每一个确定性 OpenAPI 错误都会被无脑重试。
     const deterministic = openApiError(99992402, 400);
     expect(deterministic.statusCode).toBe(502);

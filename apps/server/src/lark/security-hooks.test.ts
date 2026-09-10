@@ -9,8 +9,8 @@ const workspaces: string[] = [];
 afterEach(async () => Promise.all(workspaces.splice(0).map(path => rm(path, { recursive: true, force: true }))));
 
 const runGuard = async (workspace: string, agentId: 'codex' | 'cursor', sessionId: string, event: unknown) => new Promise<{ code: number | null; output: string }>((resolve, reject) => {
-  const script = join(workspace, '.dockmux', 'security', `dockmux-lark-high-risk-guard-${agentId}.mjs`);
-  const child = spawn(process.execPath, [script], { env: { ...process.env, dockmux_session_id: sessionId, DOCKMUX_POLICY_ROOT: workspace }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const script = join(workspace, '.dutydeck', 'security', `dutydeck-lark-high-risk-guard-${agentId}.mjs`);
+  const child = spawn(process.execPath, [script], { env: { ...process.env, dutydeck_session_id: sessionId, DUTYDECK_POLICY_ROOT: workspace }, stdio: ['pipe', 'pipe', 'pipe'] });
   let output = ''; let error = '';
   child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { error += chunk; });
   child.once('error', reject); child.once('close', code => error ? reject(new Error(error)) : resolve({ code, output }));
@@ -19,7 +19,7 @@ const runGuard = async (workspace: string, agentId: 'codex' | 'cursor', sessionI
 
 describe('Lark Agent security hooks', () => {
   it('installs or updates a Codex PreToolUse hook without replacing existing hooks', async () => {
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hook-')); workspaces.push(workspace);
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     await mkdir(join(workspace, '.codex'), { recursive: true });
     await writeFile(join(workspace, '.codex', 'hooks.json'), JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Read', hooks: [{ type: 'command', command: 'existing' }] }] } }));
     expect(await larkHookStatus('codex', workspace)).toMatchObject({ supported: true, installed: false, writable: true });
@@ -29,15 +29,15 @@ describe('Lark Agent security hooks', () => {
     const hooks = JSON.parse(await readFile(join(workspace, '.codex', 'hooks.json'), 'utf8')).hooks.PreToolUse;
     expect(hooks).toHaveLength(2);
     expect(JSON.stringify(hooks)).toContain('existing');
-    expect(JSON.stringify(hooks)).toContain('dockmux-lark-high-risk-guard-codex.mjs');
+    expect(JSON.stringify(hooks)).toContain('dutydeck-lark-high-risk-guard-codex.mjs');
     await installLarkHook('codex', workspace);
     expect(JSON.parse(await readFile(join(workspace, '.codex', 'hooks.json'), 'utf8')).hooks.PreToolUse).toHaveLength(2);
   });
 
   it('blocks matching tool input and allows authorized or safe input', async () => {
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hook-')); workspaces.push(workspace);
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     await installLarkHook('codex', workspace);
-    const policyDirectory = join(workspace, '.dockmux', 'security', 'sessions');
+    const policyDirectory = join(workspace, '.dutydeck', 'security', 'sessions');
     await mkdir(policyDirectory, { recursive: true });
     await writeFile(join(policyDirectory, 'ses_guard.json'), JSON.stringify({ enabled: true, authorized: false, pattern: '(?:^|\\s)rm\\b', reason: 'blocked by test' }));
     const denied = await runGuard(workspace, 'codex', 'ses_guard', { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'rm -rf /tmp/example' } });
@@ -49,9 +49,9 @@ describe('Lark Agent security hooks', () => {
   });
 
   it('terminates catastrophic matching after one second and fails closed', async () => {
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hook-')); workspaces.push(workspace);
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     await installLarkHook('codex', workspace);
-    const policyDirectory = join(workspace, '.dockmux', 'security', 'sessions');
+    const policyDirectory = join(workspace, '.dutydeck', 'security', 'sessions');
     await mkdir(policyDirectory, { recursive: true });
     await writeFile(join(policyDirectory, 'ses_timeout.json'), JSON.stringify({ enabled: true, authorized: false, pattern: '(a+)+$' }));
     const startedAt = Date.now();
@@ -65,12 +65,12 @@ describe('Lark Agent security hooks', () => {
     ['trae', '.trae/hooks.json', 'PreToolUse'],
     ['cursor', '.cursor/hooks.json', 'preToolUse']
   ] as const)('installs a native %s project hook', async (agentId, relativePath, eventKey) => {
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hook-')); workspaces.push(workspace);
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     const installed = await installLarkHook(agentId, workspace);
     expect(installed).toMatchObject({ agentId, supported: true, installed: true, writable: true, trustRequired: true });
     const config = JSON.parse(await readFile(join(workspace, relativePath), 'utf8'));
     expect(config.hooks[eventKey]).toHaveLength(1);
-    expect(JSON.stringify(config.hooks[eventKey])).toContain(`dockmux-lark-high-risk-guard-${agentId}.mjs`);
+    expect(JSON.stringify(config.hooks[eventKey])).toContain(`dutydeck-lark-high-risk-guard-${agentId}.mjs`);
     if (agentId === 'cursor') {
       expect(config).toMatchObject({ version: 1 });
       expect(config.hooks.preToolUse[0]).toMatchObject({ failClosed: true, timeout: 5 });
@@ -78,20 +78,20 @@ describe('Lark Agent security hooks', () => {
   });
 
   it('installs a Pi tool_call extension and recognizes common aliases', async () => {
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hook-')); workspaces.push(workspace);
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     expect(await installLarkHook('pi', workspace)).toMatchObject({ agentId: 'pi', supported: true, installed: true });
-    const extension = await readFile(join(workspace, '.pi/extensions/dockmux-high-risk-guard.ts'), 'utf8');
-    expect(extension).toContain('dockmux-high-risk-guard-v2');
+    const extension = await readFile(join(workspace, '.pi/extensions/dutydeck-high-risk-guard.ts'), 'utf8');
+    expect(extension).toContain('dutydeck-high-risk-guard-v2');
     expect(extension).toContain("pi.on('tool_call'");
     expect(await larkHookStatus('claudecode', workspace)).toMatchObject({ agentId: 'claude', supported: true, installed: false });
     expect(await larkHookStatus('cursoragent', workspace)).toMatchObject({ agentId: 'cursor', supported: true, installed: false });
   });
 
   it('returns Cursor permission deny and keeps another Agent hook in the same workspace', async () => {
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hook-')); workspaces.push(workspace);
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     await installLarkHook('codex', workspace);
     await installLarkHook('cursor', workspace);
-    const policyDirectory = join(workspace, '.dockmux', 'security', 'sessions');
+    const policyDirectory = join(workspace, '.dutydeck', 'security', 'sessions');
     await mkdir(policyDirectory, { recursive: true });
     await writeFile(join(policyDirectory, 'ses_cursor.json'), JSON.stringify({ enabled: true, authorized: false, pattern: 'sudo\\b', reason: 'cursor blocked' }));
     const denied = await runGuard(workspace, 'cursor', 'ses_cursor', { tool_name: 'Shell', tool_input: { command: 'sudo reboot' } });
@@ -101,7 +101,7 @@ describe('Lark Agent security hooks', () => {
   });
 
   it('refuses genuinely unsupported Agents instead of presenting a false hard-gate switch', async () => {
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hook-')); workspaces.push(workspace);
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hook-')); workspaces.push(workspace);
     await expect(installLarkHook('gemini', workspace)).rejects.toMatchObject({ code: 'RISK_CONTROL_UNSUPPORTED', statusCode: 422 });
     expect(await larkHookStatus('gemini', workspace)).toMatchObject({ supported: false, installed: false, writable: false });
   });

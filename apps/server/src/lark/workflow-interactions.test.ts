@@ -3,12 +3,12 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { RelayAskBroker } from '@dockmux/relay';
-import { createRepositories } from '@dockmux/storage';
+import { RelayAskBroker } from '@dutydeck/relay';
+import { createRepositories } from '@dutydeck/storage';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import type { LarkCardService } from './service.js';
-import type { AgentEvent, PermissionRequestData, TaskRecord } from '@dockmux/shared';
+import type { AgentEvent, PermissionRequestData, TaskRecord } from '@dutydeck/shared';
 import type { LarkMessageEvent, LarkRuntime } from './listener.js';
 
 const larkMessage = (overrides: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({
@@ -78,7 +78,7 @@ const responseInput = (record: LarkInteraction, overrides: Partial<ResponseInput
 });
 
 const openDatabase = async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'dockmux-lark-workflow-'));
+  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflow-'));
   const filename = join(directory, 'state.db');
   return { directory, filename, repositories: createRepositories(filename) };
 };

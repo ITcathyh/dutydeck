@@ -91,7 +91,7 @@ function validateManifest() {
   invariant(manifest.default_action === 'self_check_only', 'MANIFEST_DEFAULT_ACTION_UNSAFE');
   invariant(manifest.safety_contract?.starts_or_stops_listener === false, 'MANIFEST_LISTENER_MUTATION_UNSAFE');
   invariant(manifest.safety_contract?.writes_botmux_source === false, 'MANIFEST_BOTMUX_MUTATION_UNSAFE');
-  invariant(manifest.safety_contract?.writes_dockmux_database === false, 'MANIFEST_DOCKMUX_DB_MUTATION_UNSAFE');
+  invariant(manifest.safety_contract?.writes_dutydeck_database === false, 'MANIFEST_DUTYDECK_DB_MUTATION_UNSAFE');
   invariant(manifest.safety_contract?.uses_existing_credentials === false, 'MANIFEST_CREDENTIAL_POLICY_UNSAFE');
   invariant(manifest.safety_contract?.writes_only_disposable_test_state === true, 'MANIFEST_DISPOSABLE_STATE_POLICY_MISSING');
   invariant(manifest.safety_contract?.isolates_home_tmp_ports_tmux === true, 'MANIFEST_CASE_ISOLATION_POLICY_MISSING');
@@ -253,9 +253,9 @@ function execute(item) {
   const allowedRemoteKeys = new Set(item.execution === 'remote_opt_in' ? (item.required_env ?? []) : []);
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => {
     if (allowedRemoteKeys.has(key)) return true;
-    return !/(?:TOKEN|SECRET|COOKIE|CREDENTIAL|AUTHORIZATION|LARK|FEISHU|BOTMUX|DOCKMUX_)/i.test(key);
+    return !/(?:TOKEN|SECRET|COOKIE|CREDENTIAL|AUTHORIZATION|LARK|FEISHU|BOTMUX|DUTYDECK_)/i.test(key);
   }));
-  const privateRoot = mkdtempSync(resolve(tmpdir(), 'dockmux-botmux-parity-case-'));
+  const privateRoot = mkdtempSync(resolve(tmpdir(), 'dutydeck-botmux-parity-case-'));
   const isolatedHome = resolve(privateRoot, 'home');
   const isolatedTmp = resolve(privateRoot, 'tmp');
   const isolatedTmux = resolve(privateRoot, 'tmux');

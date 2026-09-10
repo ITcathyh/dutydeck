@@ -16,7 +16,7 @@ import {
 const roots: string[] = [];
 
 async function fixture(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dockmux-env-file-'));
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-env-file-'));
   roots.push(root);
   return root;
 }
@@ -26,7 +26,7 @@ const tick = () => new Promise(resolve => setTimeout(resolve, 20));
 
 const lines = (content: string) => content.split('\n');
 const linesStartingWith = (content: string, prefix: string) => lines(content).filter(line => line.startsWith(prefix));
-const stagingLeftovers = async (directory: string) => (await readdir(directory)).filter(name => name.startsWith('.dockmux-env-'));
+const stagingLeftovers = async (directory: string) => (await readdir(directory)).filter(name => name.startsWith('.dutydeck-env-'));
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
@@ -38,27 +38,27 @@ describe('mergeEnvContent', () => {
     'MY_OWN_KEY=keep-me',
     '',
     '# 端口',
-    'DOCKMUX_PORT=4310',
+    'DUTYDECK_PORT=4310',
     'UNRELATED_TOKEN="do not touch"',
     ''
   ].join('\n');
 
   it('only touches managed keys and updates an existing key in place', () => {
-    const merged = mergeEnvContent(handwritten, { DOCKMUX_PORT: '4400' });
+    const merged = mergeEnvContent(handwritten, { DUTYDECK_PORT: '4400' });
 
     // 注释与无关键原样保留。
     expect(merged).toContain('# 用户自己的注释：不要被向导吃掉');
     expect(merged).toContain('# 端口');
     expect(merged).toContain('MY_OWN_KEY=keep-me');
     expect(merged).toContain('UNRELATED_TOKEN="do not touch"');
-    // 就地改值：只有一行 DOCKMUX_PORT，且仍在「# 端口」之后、UNRELATED_TOKEN 之前。
-    expect(linesStartingWith(merged, 'DOCKMUX_PORT=')).toEqual(['DOCKMUX_PORT=4400']);
+    // 就地改值：只有一行 DUTYDECK_PORT，且仍在「# 端口」之后、UNRELATED_TOKEN 之前。
+    expect(linesStartingWith(merged, 'DUTYDECK_PORT=')).toEqual(['DUTYDECK_PORT=4400']);
     expect(merged).not.toContain('4310');
-    const position = lines(merged).indexOf('DOCKMUX_PORT=4400');
-    expect(position).toBe(lines(handwritten).indexOf('DOCKMUX_PORT=4310'));
+    const position = lines(merged).indexOf('DUTYDECK_PORT=4400');
+    expect(position).toBe(lines(handwritten).indexOf('DUTYDECK_PORT=4310'));
     expect(position).toBeLessThan(lines(merged).findIndex(line => line.startsWith('UNRELATED_TOKEN=')));
     // 没有追加重复键，所以也不该出现追加区的标记。
-    expect(merged).not.toContain('由 dockmux setup 写入');
+    expect(merged).not.toContain('由 dutydeck setup 写入');
   });
 
   it('appends new keys and drops the whole line for an undefined value', () => {
@@ -66,7 +66,7 @@ describe('mergeEnvContent', () => {
 
     expect(linesStartingWith(merged, 'LARK_APP_ID=')).toEqual(['LARK_APP_ID=cli_new']);
     // 新键在末尾（原有内容之后）。
-    expect(lines(merged).indexOf('LARK_APP_ID=cli_new')).toBeGreaterThan(lines(merged).indexOf('DOCKMUX_PORT=4310'));
+    expect(lines(merged).indexOf('LARK_APP_ID=cli_new')).toBeGreaterThan(lines(merged).indexOf('DUTYDECK_PORT=4310'));
     // undefined = 删除整行，连键名都不留。
     expect(merged).not.toContain('MY_OWN_KEY');
     expect(merged).not.toContain('keep-me');
@@ -96,7 +96,7 @@ describe('mergeEnvContent', () => {
 
   it('keeps such a value idempotent across a rewrite', async () => {
     // 回归防线：读回值必须等于待写值，否则 changedKeys 每次都非空，重跑永远报「已变更」。
-    const root = await mkdtemp(join(tmpdir(), 'dockmux-env-quote-'));
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-env-quote-'));
     roots.push(root);
     const path = join(root, '.env');
     const secret = 'pa"ss\\word';
@@ -142,27 +142,27 @@ describe('writeEnvFile', () => {
   it('creates the file atomically with 0600 and reports created only on the first write', async () => {
     const root = await fixture();
     const path = join(root, '.env');
-    const updates = { DOCKMUX_PORT: '4400', LARK_APP_SECRET: 'sec ret#1' };
+    const updates = { DUTYDECK_PORT: '4400', LARK_APP_SECRET: 'sec ret#1' };
 
     const first: WriteEnvResult = writeEnvFile(path, updates);
     expect(first).toMatchObject({ path, changed: true, created: true });
-    expect(first.changedKeys.sort()).toEqual(['DOCKMUX_PORT', 'LARK_APP_SECRET']);
+    expect(first.changedKeys.sort()).toEqual(['DUTYDECK_PORT', 'LARK_APP_SECRET']);
     if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600);
     expect(await stagingLeftovers(root)).toEqual([]);
     expect(await readdir(root)).toEqual(['.env']);
 
-    const second = writeEnvFile(path, { DOCKMUX_PORT: '4500' });
-    expect(second).toMatchObject({ changed: true, created: false, changedKeys: ['DOCKMUX_PORT'] });
+    const second = writeEnvFile(path, { DUTYDECK_PORT: '4500' });
+    expect(second).toMatchObject({ changed: true, created: false, changedKeys: ['DUTYDECK_PORT'] });
     // 原子替换不留暂存目录，值也真的落了盘。
     expect(await stagingLeftovers(root)).toEqual([]);
-    expect(parseEnvFile(await readFile(path, 'utf8')).get('DOCKMUX_PORT')).toBe('4500');
+    expect(parseEnvFile(await readFile(path, 'utf8')).get('DUTYDECK_PORT')).toBe('4500');
     if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 
   it('is idempotent: a second identical write reports no change and leaves mtime untouched', async () => {
     const root = await fixture();
     const path = join(root, '.env');
-    const updates = { DOCKMUX_DEFAULT_CWD: root, LARK_APP_ID: 'cli_idempotent' };
+    const updates = { DUTYDECK_DEFAULT_CWD: root, LARK_APP_ID: 'cli_idempotent' };
 
     expect(writeEnvFile(path, updates).changed).toBe(true);
     const before = await stat(path);
@@ -180,16 +180,16 @@ describe('writeEnvFile', () => {
   it('creates missing parent directories and removes a key idempotently', async () => {
     const root = await fixture();
     const path = join(root, 'nested', 'deeper', '.env');
-    expect(writeEnvFile(path, { DOCKMUX_HOST: '127.0.0.1' })).toMatchObject({ changed: true, created: true });
+    expect(writeEnvFile(path, { DUTYDECK_HOST: '127.0.0.1' })).toMatchObject({ changed: true, created: true });
 
-    const removed = writeEnvFile(path, { DOCKMUX_HOST: undefined });
-    expect(removed).toMatchObject({ changed: true, created: false, changedKeys: ['DOCKMUX_HOST'] });
+    const removed = writeEnvFile(path, { DUTYDECK_HOST: undefined });
+    expect(removed).toMatchObject({ changed: true, created: false, changedKeys: ['DUTYDECK_HOST'] });
     const afterRemoval = await readFile(path, 'utf8');
-    expect(afterRemoval).not.toContain('DOCKMUX_HOST');
+    expect(afterRemoval).not.toContain('DUTYDECK_HOST');
     expect(afterRemoval).not.toContain('127.0.0.1');
     expect(parseEnvFile(afterRemoval).size).toBe(0);
 
-    const removedAgain = writeEnvFile(path, { DOCKMUX_HOST: undefined });
+    const removedAgain = writeEnvFile(path, { DUTYDECK_HOST: undefined });
     expect(removedAgain).toEqual({ path, changed: false, changedKeys: [], created: false });
     expect(await stagingLeftovers(join(root, 'nested', 'deeper'))).toEqual([]);
   });
@@ -197,13 +197,13 @@ describe('writeEnvFile', () => {
   it('preserves handwritten content across a rewrite', async () => {
     const root = await fixture();
     const path = join(root, '.env');
-    await writeFile(path, '# 手写注释\nMY_OWN_KEY=keep-me\nDOCKMUX_PORT=4310\n');
+    await writeFile(path, '# 手写注释\nMY_OWN_KEY=keep-me\nDUTYDECK_PORT=4310\n');
 
-    writeEnvFile(path, { DOCKMUX_PORT: '4400' });
+    writeEnvFile(path, { DUTYDECK_PORT: '4400' });
     const content = await readFile(path, 'utf8');
     expect(content).toContain('# 手写注释');
     expect(content).toContain('MY_OWN_KEY=keep-me');
-    expect(linesStartingWith(content, 'DOCKMUX_PORT=')).toEqual(['DOCKMUX_PORT=4400']);
+    expect(linesStartingWith(content, 'DUTYDECK_PORT=')).toEqual(['DUTYDECK_PORT=4400']);
   });
 });
 
@@ -241,12 +241,12 @@ describe('secret handling', () => {
   it('classifies only the app secret as secret', () => {
     expect(isSecretKey('LARK_APP_SECRET')).toBe(true);
     expect(isSecretKey('LARK_APP_ID')).toBe(false);
-    expect(isSecretKey('DOCKMUX_DEFAULT_CWD')).toBe(false);
+    expect(isSecretKey('DUTYDECK_DEFAULT_CWD')).toBe(false);
   });
 
   it('manages both the default cwd and the app secret', () => {
     expect(MANAGED_KEYS).toContain('LARK_APP_SECRET');
-    expect(MANAGED_KEYS).toContain('DOCKMUX_DEFAULT_CWD');
+    expect(MANAGED_KEYS).toContain('DUTYDECK_DEFAULT_CWD');
     expect(new Set(MANAGED_KEYS).size).toBe(MANAGED_KEYS.length);
   });
 });

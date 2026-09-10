@@ -12,7 +12,7 @@
 
 ## 回答问题与批准操作
 
-Agent 发起 `dockmux session ask "问题"` 后，问题卡会出现在原讨论中。回复问题卡即可回答，也可以发送 `/answer <卡片上的编号> <回答>`。回答送回等待中的原任务。
+Agent 发起 `dutydeck session ask "问题"` 后，问题卡会出现在原讨论中。回复问题卡即可回答，也可以发送 `/answer <卡片上的编号> <回答>`。回答送回等待中的原任务。
 
 问题卡临时发送失败时，只要原任务仍在等待，入口会随任务心跳重试投递，失败后的重投间隔至少 5 秒。
 
@@ -33,8 +33,8 @@ Agent 发起 `dockmux session ask "问题"` 后，问题卡会出现在原讨论
 启用当前机器人的群协作工具及发送权限后，Agent 可在已有会话中执行：
 
 ```bash
-dockmux group send-file ./report.pdf --idempotency-key report-v1
-dockmux group send-file ./preview.png --image --reply-to om_xxx --in-thread
+dutydeck group send-file ./report.pdf --idempotency-key report-v1
+dutydeck group send-file ./preview.png --image --reply-to om_xxx --in-thread
 ```
 
 文件必须位于该 Session 的工作目录内。普通文件上限 30 MiB，图片上限 10 MiB；目录、非普通文件、空文件和路径逃逸会被拒绝。目标由当前会话绑定，不能传任意群 ID。目前文件回传要求 Linux 且可读取 `/proc/self/fd`，以校验打开后的真实文件位置；其他平台会明确拒绝发送。

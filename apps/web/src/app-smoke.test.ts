@@ -13,7 +13,7 @@ describe('App 集成冒烟（SSR 静态渲染）', () => {
     const html = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(App)));
     expect(html).toContain('今天需要推进什么');
     expect(html).toContain('任务中心');
-    expect(html).toContain('Dockmux');
+    expect(html).toContain('Dutydeck');
     // SSR 时 agents 查询还没落地，此刻既不知道有没有 Agent，就不能替用户下结论。
     // 「准备 Agent」曾经在这里出现，是把「查询未完成」误读成「没有 Agent」。
     expect(html).toContain('正在检测 Agent…');

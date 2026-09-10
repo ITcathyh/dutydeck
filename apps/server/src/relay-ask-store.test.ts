@@ -2,13 +2,13 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { createRepositories } from '@dockmux/storage';
-import { RelayAskBroker, type RelayAskRecord } from '@dockmux/relay';
+import { createRepositories } from '@dutydeck/storage';
+import { RelayAskBroker, type RelayAskRecord } from '@dutydeck/relay';
 import { createRelayAskStore } from './relay-ask-store.js';
 
 describe('persistent relay questions', () => {
   it('expires abandoned waiters on restart without restoring permission to answer', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'dockmux-relay-restart-'));
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-relay-restart-'));
     const filename = join(directory, 'state.db');
     let repos = createRepositories(filename);
     try {

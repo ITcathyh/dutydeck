@@ -22,7 +22,7 @@ import {
   type SecretRefRepository,
   type UpdateChannelBotInput,
   type UpdateSecretRefInput
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 
 interface SecretRefRow {
   id: string;

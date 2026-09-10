@@ -44,8 +44,8 @@ const secondaryKeys: KeyDef[] = [
   { id: 'pgdn', label: 'PgDn', data: '\x1b[6~', aria: '发送 PgDn 向下翻页', wide: true }
 ];
 
-const COLLAPSED_KEY = 'dockmux.terminal_key_bar.collapsed.v1';
-const SIDE_KEY = 'dockmux.terminal_key_bar.side.v1';
+const COLLAPSED_KEY = 'dutydeck.terminal_key_bar.collapsed.v1';
+const SIDE_KEY = 'dutydeck.terminal_key_bar.side.v1';
 
 // localStorage 在 Safari 隐私模式下读写都会抛异常，每次访问都要兜住，读不到就用默认值。
 function readStored(key: string): string | undefined {

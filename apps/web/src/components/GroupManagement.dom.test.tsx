@@ -4,7 +4,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError, type Agent, type LarkBotConfig, type ManagedGroup } from '../api';
-import type { GroupBinding, RoleAssignment } from '@dockmux/shared';
+import type { GroupBinding, RoleAssignment } from '@dutydeck/shared';
 import { resetDrafts } from '../draft-store';
 import { GroupManagement } from './GroupManagement';
 

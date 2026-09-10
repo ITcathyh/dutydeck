@@ -1,16 +1,16 @@
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { createRepositories } from '@dockmux/storage';
-import { DockmuxRuntime } from '@dockmux/runtime';
-import { agentConfigSchema } from '@dockmux/shared';
+import { createRepositories } from '@dutydeck/storage';
+import { DutydeckRuntime } from '@dutydeck/runtime';
+import { agentConfigSchema } from '@dutydeck/shared';
 import { buildApp } from '../apps/server/src/app.js';
 import { LarkGroupManager } from '../apps/server/src/lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
 import { LarkMessageCoordinator, type LarkMessageEvent } from '../apps/server/src/lark/listener.js';
 
 export async function createLarkManagementHarness(webRoot?: string, existingDirectory?: string) {
-  const directory = existingDirectory ?? await mkdtemp(join(tmpdir(), 'dockmux-dashboard-e2e-'));
+  const directory = existingDirectory ?? await mkdtemp(join(tmpdir(), 'dutydeck-dashboard-e2e-'));
   const workspaces = [join(directory, 'project'), join(directory, 'review')];
   for (const workspace of workspaces) await mkdir(workspace, { recursive: true });
   const record = join(directory, 'cli-observations.jsonl');
@@ -18,7 +18,7 @@ export async function createLarkManagementHarness(webRoot?: string, existingDire
   let repositories = createRepositories(database);
   const agents = ['agent_one', 'agent_two'].map((id, i) => agentConfigSchema.parse({ id, name: i ? '评审 Agent' : '开发 Agent', command: process.execPath,
     args: [resolve('tests/fixtures/group-management-agent.mjs'), '--record', record, '--agent', id], protocol: 'acp', cwd: workspaces[i], timeout: 30, model: 'model-default' }));
-  const runtime = new DockmuxRuntime(repositories, {
+  const runtime = new DutydeckRuntime(repositories, {
     authorizeExecution: (sessionId, actorId) => manager.beginTurn(sessionId, actorId),
     resolveRiskPolicy: (sessionId, fallback) => manager.riskPolicy(sessionId, fallback)
   });

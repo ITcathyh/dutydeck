@@ -3,7 +3,7 @@ import { api, type AgentModel, type AgentModelsResult } from './api';
 type ModelCacheStorage = Pick<Storage, 'getItem' | 'setItem'>;
 type CachedAgentModels = { savedAt: number; value: AgentModelsResult };
 
-const CACHE_PREFIX = 'dockmux.agent_models.v1';
+const CACHE_PREFIX = 'dutydeck.agent_models.v1';
 const CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 
 const browserStorage = (): ModelCacheStorage | undefined => {

@@ -1036,7 +1036,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
     secret_requirements: secretRequirements.sort((left, right) => left.secret_ref.localeCompare(right.secret_ref)),
     blockers: blockers.sort((left, right) => `${left.code}:${left.scope_ref ?? ''}`.localeCompare(`${right.code}:${right.scope_ref ?? ''}`)),
     forbidden_capabilities: [
-      'write_dockmux_db',
+      'write_dutydeck_db',
       'modify_botmux_source',
       'enable_listener',
       'enable_schedule',

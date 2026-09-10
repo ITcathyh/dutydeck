@@ -11,7 +11,7 @@ export function createHermesAdapter(): CliAdapter {
       const args: string[] = [];
       // Hermes 的会话存在 ~/.hermes/state.db（不是 cwd 作用域的 JSONL）；
       // `--pass-session-id` 让它接受我们传的 id，所以无 resumeSessionId 时回退
-      // 到 dockmux 自己的 sessionId 就是精确续接。
+      // 到 dutydeck 自己的 sessionId 就是精确续接。
       if (resume) args.push('--resume', resumeSessionId ?? sessionId);
       if (permissionMode === 'full-trust') args.push('--yolo', '--accept-hooks');
       args.push('--pass-session-id');

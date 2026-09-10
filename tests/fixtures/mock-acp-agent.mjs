@@ -12,7 +12,7 @@ rl.on('line', async line => {
   const { id, method, params = {} } = message;
   if (!method && pending.has(id)) { pending.get(id)(message.result); pending.delete(id); return; }
   if (method === 'initialize') {
-    return send({ jsonrpc: '2.0', id, result: { protocolVersion: params.protocolVersion, agentCapabilities: { loadSession: true, promptCapabilities: { image: false, audio: false, embeddedContext: false } }, authMethods: [], agentInfo: { name: 'Dockmux Mock ACP', version: '1.0.0' } } });
+    return send({ jsonrpc: '2.0', id, result: { protocolVersion: params.protocolVersion, agentCapabilities: { loadSession: true, promptCapabilities: { image: false, audio: false, embeddedContext: false } }, authMethods: [], agentInfo: { name: 'Dutydeck Mock ACP', version: '1.0.0' } } });
   }
   if (method === 'session/new') {
     const sessionId = `mock-${Date.now()}`; sessions.add(sessionId);

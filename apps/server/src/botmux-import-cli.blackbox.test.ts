@@ -37,7 +37,7 @@ async function privateJson(path: string, value: unknown): Promise<void> {
 }
 
 async function fixture(): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), 'dockmux-botmux-cli-'));
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-botmux-cli-'));
   roots.push(root);
   const sourceHome = join(root, 'botmux-source');
   const dataDir = join(sourceHome, 'data');
@@ -118,7 +118,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-describe('dockmux botmux CLI black box', () => {
+describe('dutydeck botmux CLI black box', () => {
   it('exposes only the three read-only Botmux subcommands', async () => {
     const source = await fixture();
     const result = invoke(['botmux', '--help'], { cwd: source.root });

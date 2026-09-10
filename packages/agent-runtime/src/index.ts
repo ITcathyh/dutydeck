@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dockmux/shared';
-import { DriverDetachedError, DriverRecoveryError, makeId, now, RuntimeError } from '@dockmux/shared';
-import { AcpxAdapter } from '@dockmux/acp-client';
-import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dockmux/transports';
+import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dutydeck/shared';
+import { DriverDetachedError, DriverRecoveryError, makeId, now, RuntimeError } from '@dutydeck/shared';
+import { AcpxAdapter } from '@dutydeck/acp-client';
+import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -31,7 +31,7 @@ export function correlateToolCalls(events: Array<NormalizedDriverEvent | undefin
   return calls;
 }
 
-// 驱动契约类型统一从 @dockmux/shared 导出（driver.ts 是跨团队冻结契约），
+// 驱动契约类型统一从 @dutydeck/shared 导出（driver.ts 是跨团队冻结契约），
 // 本包不再自定义 AgentDriver / DriverFactory / NormalizedDriverEvent。
 export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
 
@@ -41,7 +41,7 @@ export interface RuntimeOptions {
   acpxCommand?: string;
   driverFactory?: DriverFactory;
   /**
-   * pty-cli 协议驱动工厂（botmux 适配器栈，由 @dockmux/pty-driver 提供）。
+   * pty-cli 协议驱动工厂（botmux 适配器栈，由 @dutydeck/pty-driver 提供）。
    * 仅在未注入自定义 driverFactory 时生效：agent.protocol === 'pty-cli' 的会话路由到它。
    * 未提供时创建 pty-cli 会话会抛 DRIVER_UNAVAILABLE。
    */
@@ -53,7 +53,7 @@ export interface RuntimeOptions {
   sessionPrompt?: (session: Session, prompt: string) => string | Promise<string>;
 }
 
-export class DockmuxRuntime {
+export class DutydeckRuntime {
   private readonly emitter = new EventEmitter();
   private readonly drivers = new Map<string, AgentDriver>();
   private readonly activeTurns = new Set<string>();
@@ -83,9 +83,9 @@ export class DockmuxRuntime {
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
     const ptyDriverFactory = options.ptyDriverFactory;
     this.factory = options.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId) => {
-      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dockmux_session_id: sessionId } }, { sessionKey: sessionId, onEvent, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}) });
+      if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, onEvent, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}) });
       if (protocol === 'pty-cli') {
-        if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dockmux/pty-driver）', 503);
+        if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dutydeck/pty-driver）', 503);
         return ptyDriverFactory(agent, protocol, onEvent, onExit, sessionId);
       }
       if (protocol === 'pty') return new PtyTransport(agent, { onEvent, onExit });
@@ -152,7 +152,7 @@ export class DockmuxRuntime {
     if (this.interruptedTurns.has(session.id) || stopReason === 'cancelled') return { status: 'interrupted', stopReason };
     const turnError = this.turnErrors.get(session.id);
     if (turnError) return { status: 'failed', stopReason, message: turnError, errorAlreadyEmitted: true };
-    if (DockmuxRuntime.isTruncatedStopReason(stopReason)) {
+    if (DutydeckRuntime.isTruncatedStopReason(stopReason)) {
       return { status: 'failed', stopReason, message: `输出因达到 token 上限被截断（stopReason: ${stopReason}），未产生完整最终输出` };
     }
     if (!await this.turnHasFinalAssistantText(session.id, promptSequence)) {
@@ -193,7 +193,7 @@ export class DockmuxRuntime {
       if (session.archivedAt) continue;
       const persistedTasks = await this.repos.tasks.listBySession(session.id);
       if (!persistedTasks.length && ['created', 'starting', 'failed'].includes(session.state)) {
-        const message = session.error ?? 'Dockmux 守护进程重启，未完成启动的会话已回收';
+        const message = session.error ?? 'Dutydeck 守护进程重启，未完成启动的会话已回收';
         session.state = 'failed';
         session.error = message;
         session.archivedAt = now();
@@ -205,7 +205,7 @@ export class DockmuxRuntime {
       const recoverable = orphaned.length === 1 && session.protocol === 'pty-cli' && !['stopped', 'failed', 'interrupting', 'interrupted'].includes(session.state) && orphaned[0]?.executionContext?.recovery
         ? orphaned[0] : undefined;
       if (orphaned.length && !recoverable) {
-        const message = 'Dockmux 守护进程重启，正在进行的任务已中断';
+        const message = 'Dutydeck 守护进程重启，正在进行的任务已中断';
         for (const task of orphaned) {
           await this.saveTask(task, 'interrupted');
           await this.repos.artifacts.saveError(session.id, message);
@@ -216,7 +216,7 @@ export class DockmuxRuntime {
       const queuedTasks = persistedTasks.filter(task => task.status === 'queued').sort((left, right) => left.createdAt.localeCompare(right.createdAt));
       const legacyQueued = queuedTasks.filter(task => typeof task.executionContext?.agentPrompt !== 'string');
       if (legacyQueued.length) {
-        const message = 'Dockmux 守护进程重启，旧任务缺少可验证的执行上下文，已安全中断，请重新发送';
+        const message = 'Dutydeck 守护进程重启，旧任务缺少可验证的执行上下文，已安全中断，请重新发送';
         for (const task of legacyQueued) {
           await this.saveTask(task, 'interrupted');
           await this.repos.artifacts.saveError(session.id, message, { taskId: task.id });
@@ -228,7 +228,7 @@ export class DockmuxRuntime {
       // has no work that this daemon can continue.
       const resumableQueue = queuedTasks.some(task => typeof task.executionContext?.agentPrompt === 'string');
       if (!recoverable && !resumableQueue && isRecoverableBusy(session.state)) {
-        const message = 'Dockmux 守护进程重启，上一轮执行已中断';
+        const message = 'Dutydeck 守护进程重启，上一轮执行已中断';
         session.state = 'stopped';
         session.error = message;
         session.updatedAt = now();
@@ -264,7 +264,7 @@ export class DockmuxRuntime {
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
 
   /**
-   * 外部来源事件写入（通用回传通道 @dockmux/relay 使用）。
+   * 外部来源事件写入（通用回传通道 @dutydeck/relay 使用）。
    *
    * 事件流此前只有 driver 一个入口（onDriverEvent → consume → emit），而 relay 的
    * send/ask 来自会话内 CLI 主动发起的**带外**调用，不属于任何 driver 事件。
@@ -433,9 +433,9 @@ export class DockmuxRuntime {
   }
 
   private async active(id: string) {
-    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dockmux is shutting down', 503);
+    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
     const session = await this.repos.sessions.get(id);
-    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dockmux is shutting down', 503);
+    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
     if (session.archivedAt) throw new RuntimeError('SESSION_ARCHIVED', 'Archived sessions are read-only', 409);
     const driver = this.drivers.get(id);
@@ -446,7 +446,7 @@ export class DockmuxRuntime {
     const existing = this.drivers.get(session.id);
     if (existing) return existing;
     const agent = await this.repos.agents.get(session.agentId);
-    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dockmux is shutting down', 503);
+    if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${session.agentId}`, 404);
     const configured = this.configureAgentForSession(agent, session);
     const generation = this.nextSessionGeneration(session.id);
@@ -462,7 +462,7 @@ export class DockmuxRuntime {
   private async applyRiskPolicy(session: Session, driver: AgentDriver | undefined, policy?: ToolRiskPolicy) {
     if (this.options.resolveRiskPolicy) policy = await this.options.resolveRiskPolicy(session.id, policy);
     driver?.setRiskPolicy?.(policy);
-    const directory = join(session.cwd, '.dockmux', 'security', 'sessions');
+    const directory = join(session.cwd, '.dutydeck', 'security', 'sessions');
     await mkdir(directory, { recursive: true });
     await writeFile(join(directory, `${session.id}.json`), JSON.stringify(policy ?? { enabled: false }), { mode: 0o600 });
   }

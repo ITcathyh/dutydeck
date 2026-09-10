@@ -327,7 +327,7 @@ process.stdin.resume();
 
 // ── 临时数据目录 ───────────────────────────────────────────────────────────
 /** 一次跑独有的临时目录树；DB、假 CLI、假 CLAUDE_CONFIG_DIR 全在里面，清理时整棵删掉。 */
-export function createDataDir({ onCleanup, prefix = 'dockmux-product-' }) {
+export function createDataDir({ onCleanup, prefix = 'dutydeck-product-' }) {
   const dataDir = mkdtempSync(join(tmpdir(), prefix));
   onCleanup(`删除临时目录 ${dataDir}`, () => rmSync(dataDir, { recursive: true, force: true }));
   const dirs = {
@@ -355,14 +355,14 @@ export function startServer({ port, dirs, agentsJson, onCleanup, verbose = false
   const serverEnv = { ...process.env };
   for (const key of POLLUTING_ENV) delete serverEnv[key];
   serverEnv.NODE_ENV = 'production';
-  serverEnv.DOCKMUX_AGENTS_JSON = JSON.stringify(agentsJson);
+  serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify(agentsJson);
 
   const server = spawn(process.execPath, [
     SERVER_ENTRY,
     '--local-only',            // 绑 127.0.0.1；免 token，但仍校验 loopback Host/Origin
     '--port', String(port),
     '--cwd', dirs.workspace,
-    '--database', join(dirs.dataDir, 'dockmux.db'),
+    '--database', join(dirs.dataDir, 'dutydeck.db'),
     '--no-lark-listen'         // 不去连飞书
   ], {
     cwd: dirs.workspace,

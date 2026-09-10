@@ -1,6 +1,6 @@
 # PTY 终端 WebSocket 协议（TERMINAL_API）
 
-Web 工作台“终端”标签与服务端之间的实时终端协议。服务端通过 `GET /api/terminal/:sessionId` WebSocket 端点，把 Dockmux PTY 运行的屏幕流推给浏览器，并把浏览器的键盘输入回写给 PTY。`sessionId` 是兼容 API 使用的内部运行标识。
+Web 工作台“终端”标签与服务端之间的实时终端协议。服务端通过 `GET /api/terminal/:sessionId` WebSocket 端点，把 Dutydeck PTY 运行的屏幕流推给浏览器，并把浏览器的键盘输入回写给 PTY。`sessionId` 是兼容 API 使用的内部运行标识。
 
 ## 1. 端点与 URL 推导
 

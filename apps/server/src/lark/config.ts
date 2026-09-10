@@ -1,4 +1,4 @@
-import { validateHighRiskPattern, type AgentRepository, type ConfigRepository } from '@dockmux/shared';
+import { validateHighRiskPattern, type AgentRepository, type ConfigRepository } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
 import { LarkServiceError } from './service.js';
 

@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { GrokTranscriptTailer, mapGrokEntry, resolveGrokUpdatesPath } from './grok.js';
 import { TraexTranscriptTailer, mapTraexEntry, resolveTraexRolloutPath } from './traex.js';
 import { createTranscriptTailer, TRANSCRIPT_ADAPTER_IDS } from './index.js';
@@ -41,7 +41,7 @@ let tempRoots: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
 
 function makeTempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `dockmux-tsrc-${prefix}-`));
+  const dir = mkdtempSync(join(tmpdir(), `dutydeck-tsrc-${prefix}-`));
   tempRoots.push(dir);
   return dir;
 }

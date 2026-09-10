@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/acp-client",
+  "name": "@dutydeck/acp-client",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -29,7 +29,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "0.66.0",
-    "@dockmux/shared": "workspace:*",
+    "@dutydeck/shared": "workspace:*",
     "acpx": "0.13.0"
   },
   "devDependencies": {

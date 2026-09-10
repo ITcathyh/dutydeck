@@ -46,7 +46,7 @@ export type AppLocation = {
 };
 
 /** history.state 上的标记：这条 entry 是浮层 push 出来的，关闭时可以安全 back()。 */
-export const OVERLAY_HISTORY_MARK = 'dockmuxOverlay';
+export const OVERLAY_HISTORY_MARK = 'dutydeckOverlay';
 
 const controlCenterSections: readonly ControlCenterSection[] = ['agents', 'lark', 'groups', 'automation'];
 

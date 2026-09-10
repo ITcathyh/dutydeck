@@ -4,7 +4,7 @@ const utcTimestamp = z.string().datetime({ offset: true });
 const localDateTime = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/, 'Expected a local ISO date-time without an offset');
 
 export const scheduleDefinitionStates = ['staged', 'disabled'] as const;
-export const scheduleOwnerships = ['dockmux', 'botmux'] as const;
+export const scheduleOwnerships = ['dutydeck', 'botmux'] as const;
 export const scheduleDstGapPolicies = ['skip', 'shift_forward'] as const;
 export const scheduleDstOverlapPolicies = ['first', 'second'] as const;
 

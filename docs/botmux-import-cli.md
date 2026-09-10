@@ -1,6 +1,6 @@
 # Botmux 只读迁移 CLI
 
-当前 CLI 只提供 `dockmux botmux discover`、`dockmux botmux plan` 和 `dockmux botmux archive`。它们不会连接或写入 Dockmux 数据库，不会修改 Botmux 源，不会启动 listener/Schedule，也不会把 legacy session/workflow 恢复为运行态。
+当前 CLI 只提供 `dutydeck botmux discover`、`dutydeck botmux plan` 和 `dutydeck botmux archive`。它们不会连接或写入 Dutydeck 数据库，不会修改 Botmux 源，不会启动 listener/Schedule，也不会把 legacy session/workflow 恢复为运行态。
 
 所有成功报告都保持 `production_cutover=NO_GO`、`eligibility.activation_ready=false`，并列出当前 blocker。默认输出是缩进 JSON；`--json` 只改为紧凑 JSON，不增加字段，也不会输出原始路径、App/Chat/用户身份或 secret。
 
@@ -9,11 +9,11 @@
 以下路径仅为合成示例：
 
 ```bash
-dockmux botmux discover \
+dutydeck botmux discover \
   --source-home ./synthetic-botmux \
   --data-dir ./synthetic-botmux/data
 
-dockmux botmux plan \
+dutydeck botmux plan \
   --source-home ./synthetic-botmux \
   --data-dir ./synthetic-botmux/data \
   --output ./redacted-plan.json
@@ -28,17 +28,17 @@ dockmux botmux plan \
 交互式终端会隐式询问并确认口令：
 
 ```bash
-dockmux botmux archive \
+dutydeck botmux archive \
   --source-home ./synthetic-botmux \
   --data-dir ./synthetic-botmux/data \
   --output ./synthetic-private-archive
 ```
 
-非 TTY 环境必须显式提供文件描述符。下面的口令只存在于 shell 变量和管道中，不进入 Dockmux argv、日志或环境变量：
+非 TTY 环境必须显式提供文件描述符。下面的口令只存在于 shell 变量和管道中，不进入 Dutydeck argv、日志或环境变量：
 
 ```bash
 read -r -s archive_passphrase
-printf '%s\n' "$archive_passphrase" | dockmux botmux archive \
+printf '%s\n' "$archive_passphrase" | dutydeck botmux archive \
   --source-home ./synthetic-botmux \
   --data-dir ./synthetic-botmux/data \
   --output ./synthetic-private-archive \

@@ -7,7 +7,7 @@
  * from botmux transcript-resolver.ts, including the realpath-not-lexical
  * rule: a symlinked cwd must resolve to the same key the CLI used).
  *
- * Entry mapping (per dockmux driver contract):
+ * Entry mapping (per dutydeck driver contract):
  *   assistant message.content[]:
  *     thinking block  → { type:'thinking',  data:{ text } }
  *     text block      → { type:'text',      data:{ text } }
@@ -20,7 +20,7 @@
  */
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { isUsableMarker } from '../session-id/marker.js';
@@ -36,7 +36,7 @@ const MAX_MARKER_CANDIDATES = 40;
 /** Newest *.jsonl (by mtime) in a Claude project dir, or undefined.
  *
  *  DANGEROUS on its own: the project dir is keyed by cwd ALONE, so every
- *  dockmux session started in the same repo lands here, and "newest" is then
+ *  dutydeck session started in the same repo lands here, and "newest" is then
  *  a sibling's transcript as often as it is ours. Only reachable now when the
  *  caller supplies no session id (tooling / tests). Session-scoped callers go
  *  through resolveClaudeTranscriptPath with a sessionId. */
@@ -73,7 +73,7 @@ function findLatestJsonl(dir: string): string | undefined {
  * the caller genuinely has no session in mind.
  *
  * WHY: the project dir is derived from cwd alone
- * (`projects/<cwd-with-punctuation-replaced>/`), so N dockmux sessions in one
+ * (`projects/<cwd-with-punctuation-replaced>/`), so N dutydeck sessions in one
  * repo write N jsonl files into ONE directory. Picking by mtime therefore
  * picks whoever wrote last — a sibling, most of the time. Observed with three
  * sessions sharing a cwd: two of them replayed the third's answer verbatim
@@ -84,7 +84,7 @@ function findLatestJsonl(dir: string): string | undefined {
  * `session-id/claude.ts` already refuses the mtime pick for exactly this
  * reason ("picking the newest jsonl among them would resume a sibling's
  * conversation"). This is the same hazard on the read path, so it takes the
- * same two-step resolution: the id dockmux pinned via `--session-id`, then
+ * same two-step resolution: the id dutydeck pinned via `--session-id`, then
  * the marker scan for when Claude declined that id (a collision makes the CLI
  * mint its own) or when the session was adopted rather than spawned by us.
  *
@@ -108,7 +108,7 @@ export function resolveClaudeTranscriptPath(
 /** The session's own jsonl inside an already-resolved project dir: pinned id
  *  first, marker scan second, undefined when neither identifies it. */
 function resolveClaudeSessionTranscript(projectDir: string, sessionId: string): string | undefined {
-  // Fast path: dockmux pinned the id via `--session-id <uuid>` (see
+  // Fast path: dutydeck pinned the id via `--session-id <uuid>` (see
   // cli-adapters/adapters/claude-family.ts buildArgs) and Claude accepted it,
   // so the filename is the bare uuid.
   const pinned = sessionId.replace(/^ses_/, '');
@@ -226,7 +226,7 @@ export interface ClaudeTranscriptTailerOptions {
    *  resolved the session file. */
   transcriptPath?: string;
   /**
-   * dockmux's session id. Required for correctness whenever more than one
+   * dutydeck's session id. Required for correctness whenever more than one
    * session may share `cwd`: without it resolution falls back to "newest
    * jsonl in the project dir", which is a sibling session's transcript as
    * often as it is this one's. See resolveClaudeTranscriptPath.

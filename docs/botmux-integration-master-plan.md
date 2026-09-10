@@ -1,4 +1,4 @@
-# BotMux → Dockmux 集成主蓝图
+# BotMux → Dutydeck 集成主蓝图
 
 > 状态：唯一实施蓝图；当前结论为 **NO-GO 真实 staging/apply，NO-GO 激活/切流**。
 >
@@ -12,12 +12,12 @@
 
 | 动作 | 当前裁决 | 说明 |
 |---|---|---|
-| 读取设计文档、实现 WP0 安全底座 | GO | 不接触真实 BotMux 运行态，不改变 Dockmux listener |
+| 读取设计文档、实现 WP0 安全底座 | GO | 不接触真实 BotMux 运行态，不改变 Dutydeck listener |
 | 实现纯只读 importer plan | GO | 只输出脱敏报告；零数据库写入、零 secret 输出、零外部副作用 |
 | 建立私密 archive | NO-GO，等待 WP0–WP3 | archive 本身是写操作，需先具备安全存储、分类、稳定快照和补偿 |
-| 把真实 BotMux 配置写进 Dockmux | NO-GO | 当前没有安全的禁用态 Bot、跨仓储事务、CAS 和完整 secret-ref 边界 |
+| 把真实 BotMux 配置写进 Dutydeck | NO-GO | 当前没有安全的禁用态 Bot、跨仓储事务、CAS 和完整 secret-ref 边界 |
 | 对当前 App 做 offline verify 后直接 activate | NO-GO | 当前两个 App 均有未关闭的行为 blocker |
-| 同一生产 App 在线 shadow/canary | 永久禁止 | 同一 App 不能同时由 BotMux 与 Dockmux 消费 |
+| 同一生产 App 在线 shadow/canary | 永久禁止 | 同一 App 不能同时由 BotMux 与 Dutydeck 消费 |
 | 当前 App 切流/回滚 | NO-GO | WP5/6 仅建设并在独立测试 App 演练机械；另行评审后才可能开放生产 |
 
 当前实现必须显式报告：
@@ -46,7 +46,7 @@ allowed_mode=read_only_plan
 4. **实际行为决定切流门槛。** source App 正在使用的能力必须 `required`；产品路线图 P1/P2 不能豁免 App blocker。
 5. **保留不等于承接。** archive 可以防止数据丢失，但 Hammer、Schedule、活跃上下文等仍必须显示 Blocked，不能显示 Ready。
 6. **没有静默降级。** tmux 不可退到普通 PTY；旧 topic 不可静默开空上下文；Hammer 不可退成 system prompt；未知群工具不得自动启用。
-7. **权限按动作能力定义。** `can_talk/can_operate` 仅作 BotMux 兼容语义；Dockmux 核心按 request/operate/manage 动作执行。
+7. **权限按动作能力定义。** `can_talk/can_operate` 仅作 BotMux 兼容语义；Dutydeck 核心按 request/operate/manage 动作执行。
 8. **运行配置冻结。** `RunSnapshot` 创建后不可变；默认值修改只影响新 Run。
 9. **Secret 是不可见引用。** public DTO、redacted plan、RunSnapshot、ACPX persisted session、日志和 rollback history 不保存 secret value。
 10. **远端事实与本地期望分离。** Lark membership、listener ownership 是事实；GroupBinding 是期望；runtime verification 是第三层状态。
@@ -105,7 +105,7 @@ Run override > GroupBinding > ChannelBot > AgentDefinition > process default
 
 ### 3.5 动作 RBAC
 
-Dockmux P0 权限能力：
+Dutydeck P0 权限能力：
 
 | Capability | 用户结果 |
 |---|---|
@@ -131,7 +131,7 @@ Schedule 先建所有权与审计模型，不在 importer 中直接启用：
 
 - `ScheduleDefinition`：source ID、ChannelBot/GroupBinding、表达式/时区、thread root/continuation、delivery、cwd、payload ref、enabled source state；
 - `ScheduleOccurrence`：稳定 fire ID、planned/claimed/run/delivered 状态；
-- `ScheduleOwnership`：`botmux_owned | handoff_pending | dockmux_shadow | dockmux_owned | rollback_pending`，带 generation/watermark；
+- `ScheduleOwnership`：`botmux_owned | handoff_pending | dutydeck_shadow | dutydeck_owned | rollback_pending`，带 generation/watermark；
 - imported/archived schedule 永远保持 `botmux_owned`，除非未来独立 runtime/handoff gate 完成。
 
 Hammer 配置保存为版本化、私密 `ArchivedCapability`：`enabled/full/enforce_gates/skills_injection` 仅供 diff/readiness，不能被 prompt/runtime 消费。只要没有 Hammer 行为级实现和拒绝路径 E2E，Hammer ChannelBot 永远 Blocked。
@@ -158,7 +158,7 @@ Hammer 配置保存为版本化、私密 `ArchivedCapability`：`enabled/full/en
 ### 4.3 历史不是 live 配置
 
 - 28 条 session 显示为 `source_status` 与 `liveness=unknown`；未验证 OS pane、CLI native session 和 frozen launch snapshot 前禁止 attach。
-- P0 不提供通用 `--resume-sessions`；历史 App/Chat/root/CLI ID 不能变成 Dockmux channel mapping。
+- P0 不提供通用 `--resume-sessions`；历史 App/Chat/root/CLI ID 不能变成 Dutydeck channel mapping。
 - 30 个 workflow grilling run 是敏感 incomplete draft，只归档，不创建 Task/Run，不继续 goal。
 - 不迁 BotMux queue、dedup、turn marks/sends、frozen card、PID/port/lock/runtime token。
 - retired TraeX、backup 和 identity cache 只用于 orphan 检测，不生成 live entity。
@@ -217,7 +217,7 @@ Hammer 配置保存为版本化、私密 `ArchivedCapability`：`enabled/full/en
 - 两个 oncall binding 可表达不同 App+Chat cwd；同一 chat 的其他 App 不继承。
 - oncall 普通成员只有 request；不能操作任务、改 cwd/policy、拿 terminal 或启用 group-tool send。
 - BotMux 缺省 `chat-topic` 被物化，`topic` mention 有自然语言 effective preview。
-- 唯一 enabled Schedule 被表达为 `botmux_owned`，任何 Dockmux tick/Run 创建尝试被拒绝。
+- 唯一 enabled Schedule 被表达为 `botmux_owned`，任何 Dutydeck tick/Run 创建尝试被拒绝。
 - Hammer capability 可安全 readback/diff，但任何 Ready/activate 计算必为 Blocked。
 - WP1 完成后没有真实 Bot/Group/Schedule 写入，production activation 仍为 NO-GO。
 
@@ -225,7 +225,7 @@ Hammer 配置保存为版本化、私密 `ArchivedCapability`：`enabled/full/en
 
 依赖：WP0、WP1 的 AgentDefinition/backend contract。
 
-目标：关闭“package 存在但 production 仍使用 PtyBackend”的事实缺口，只保证 Dockmux-owned 测试 Run 的进程连续性，不 adopt BotMux legacy session。
+目标：关闭“package 存在但 production 仍使用 PtyBackend”的事实缺口，只保证 Dutydeck-owned 测试 Run 的进程连续性，不 adopt BotMux legacy session。
 
 主责边界：session-backends、pty-driver、server composition root 的 backend selector/injection、ownership marker、startup reconcile。
 
@@ -253,10 +253,10 @@ Hammer 配置保存为版本化、私密 `ArchivedCapability`：`enabled/full/en
 唯一允许的命令面：
 
 ```text
-dockmux import botmux plan \
+dutydeck import botmux plan \
   [--bots-config <exact-file>] [--data-dir <dir>] [--emit-redacted <file>]
 
-dockmux import botmux archive --plan-id <id>
+dutydeck import botmux archive --plan-id <id>
 ```
 
 `archive` 只写 WP0 私密 archive/provenance，不创建 AgentDefinition、ChannelBot、GroupBinding、Principal、Schedule runtime、Session、Task、Run 或 channel mapping。
@@ -285,7 +285,7 @@ production_cutover=NO_GO
 
 验收：
 
-- plan 对 Dockmux DB、BotMux source、listener、Schedule 和 Lark 零写入/零副作用；连续两次静态 apply fingerprint 一致。
+- plan 对 Dutydeck DB、BotMux source、listener、Schedule 和 Lark 零写入/零副作用；连续两次静态 apply fingerprint 一致。
 - archive 只产生 private artifact/provenance；公开 API 不能读取 raw archive。
 - 所有 source 项有 disposition；未知项给出安全下一步，不能 warning 后 Ready。
 - Hammer、Schedule、活跃-looking session、遗留 gateway 都显示 blocker/needs review，不被 archive 状态消除。
@@ -321,17 +321,17 @@ production_cutover=NO_GO
 
 依赖：WP0–WP4。
 
-目标：解决“Dockmux 单边 lease 无法阻止 BotMux 重连”。只在 supervisor/隔离测试 App 验证，不切当前 App。
+目标：解决“Dutydeck 单边 lease 无法阻止 BotMux 重连”。只在 supervisor/隔离测试 App 验证，不切当前 App。
 
 主责边界：shared supervisor/fencing adapter、per-App drain acknowledgement、generation/watermark protocol、listener start guard。
 
 必须交付：
 
-- BotMux 与 Dockmux 都可观察或由共同 supervisor 强制的唯一 App generation；只持有当前 fence 的 runtime 能建 listener。
+- BotMux 与 Dutydeck 都可观察或由共同 supervisor 强制的唯一 App generation；只持有当前 fence 的 runtime 能建 listener。
 - per-App drain：停止接新事件、等待/处置 running/queued work、确认连接断开、记录 source watermark。
-- Dockmux listener start 前验证 source fenced、credential/scope/readiness、target generation；失败不连接。
-- BotMux/Dockmux restart 都不能绕过 fence；stale generation 拒绝启动。
-- Schedule ownership 使用同一 generation，但此阶段不启用当前 source Schedule 的 Dockmux executor。
+- Dutydeck listener start 前验证 source fenced、credential/scope/readiness、target generation；失败不连接。
+- BotMux/Dutydeck restart 都不能绕过 fence；stale generation 拒绝启动。
+- Schedule ownership 使用同一 generation，但此阶段不启用当前 source Schedule 的 Dutydeck executor。
 - 如果现有 BotMux 无法 per-App drain，结果必须是 Blocked；不能用整套停机或同 App 双消费替代验收。
 
 验收：
@@ -339,7 +339,7 @@ production_cutover=NO_GO
 - 独立测试 App 上强制并发启动两边，只有一边能建立 listener；反复重启仍成立。
 - source drain 后 target 未接管的静默窗口可见且可恢复 source；watermark 持久。
 - stale holder、supervisor 不可达、ack 丢失都 fail closed，不靠超时猜测 ownership。
-- 证明 Dockmux DB 中的 CutoverLease 单独存在不能通过测试。
+- 证明 Dutydeck DB 中的 CutoverLease 单独存在不能通过测试。
 - 不对当前两个生产 App 执行 drain/fence；production activation 仍为 NO-GO。
 
 ### WP6：离线 shadow、受控 handoff 与 rollback 机械
@@ -406,7 +406,7 @@ discovered
 | source snapshot TOCTOU、root 永久 stale | WP3 | no-follow 稳定读与三种 fingerprint/watermark 分离 |
 | 历史 session/workflow 含敏感数据或被误转 live | WP3 | private archive、liveness unknown、无 resume/apply 路径 |
 | App-scoped identity/membership/cwd/login 未正向验证 | WP4 | 只读正向 probe；inconclusive 仍 Blocked |
-| Dockmux 单边 lease 无法阻止 BotMux | WP5 | 共同 supervisor/fence 和 per-App drain 真验证 |
+| Dutydeck 单边 lease 无法阻止 BotMux | WP5 | 共同 supervisor/fence 和 per-App drain 真验证 |
 | 活跃 topic 去向、运行中失败、用户可见回滚未定义 | WP4、WP6 | disposition + 持久状态机 + test App 故障演练 |
 
 表中的“未来 executor/Hammer runtime gate”明确表示：WP0–WP6 可以把风险变成可见、可阻断、可演练的状态，但不会自动获得当前生产 App 激活资格。
@@ -466,4 +466,4 @@ WP0–WP6 全部完成后，也只允许申请新的 release review。申请材�
 - Hammer full/gates/prompt skill injection 的行为级实现与 gate 拒绝 E2E，或继续保留 Hammer App 在 BotMux；
 - 明确的人工批准，决定哪些 App 继续 BotMux、哪些进入未来受控 observation。
 
-在新评审批准前，主蓝图的最终状态保持不变：**BotMux 继续服务当前 App；Dockmux 只做安全前置、只读 plan、私密 archive 与独立测试 App 演练。**
+在新评审批准前，主蓝图的最终状态保持不变：**BotMux 继续服务当前 App；Dutydeck 只做安全前置、只读 plan、私密 archive 与独立测试 App 演练。**

@@ -31,9 +31,9 @@ const exerciseEverything = (ui: ReturnType<typeof harness>['ui']) => {
   ui.line('普通行');
   ui.line();
   ui.hint('可以这样修');
-  ui.command('dockmux setup');
+  ui.command('dutydeck setup');
   ui.keyValues([['host', '127.0.0.1'], ['port', '4300']]);
-  ui.summary('接下来', [{ text: '启动服务', command: 'dockmux start' }]);
+  ui.summary('接下来', [{ text: '启动服务', command: 'dutydeck start' }]);
   ui.json({ ok: true });
   ui.progress('正在安装依赖');
   ui.notice('端口被占用');
@@ -45,7 +45,7 @@ describe('createCliUi 的流分工', () => {
     exerciseEverything(ui);
 
     const out = stdout.text();
-    for (const fragment of ['环境检查', 'Node 版本', '缺少配置', '普通行', '可以这样修', '$ dockmux setup', 'host', '接下来', '启动服务', '{"ok":true}']) {
+    for (const fragment of ['环境检查', 'Node 版本', '缺少配置', '普通行', '可以这样修', '$ dutydeck setup', 'host', '接下来', '启动服务', '{"ok":true}']) {
       expect(out).toContain(fragment);
     }
 
@@ -54,7 +54,7 @@ describe('createCliUi 的流分工', () => {
     expect(err).toContain('端口被占用');
   });
 
-  it('进度文本绝不污染 stdout —— `dockmux doctor | head -1` 靠这一条', () => {
+  it('进度文本绝不污染 stdout —— `dutydeck doctor | head -1` 靠这一条', () => {
     const { ui, stdout, stderr } = harness();
     ui.progress('正在探测 acpx');
     ui.notice('注意这个');
@@ -150,13 +150,13 @@ describe('有颜色输出', () => {
     const { ui, stdout } = harness({ color: true });
     ui.section('标题');
     ui.hint('提示');
-    ui.command('dockmux doctor');
-    ui.summary('接下来', [{ text: '一步', command: 'dockmux start' }]);
+    ui.command('dutydeck doctor');
+    ui.summary('接下来', [{ text: '一步', command: 'dutydeck start' }]);
     const out = stdout.text();
     expect(out).toContain(`${ANSI}1m标题${ANSI}0m`);
     expect(out).toContain(`${ANSI}90m提示${ANSI}0m`);
-    expect(out).toContain(`${ANSI}36m$ dockmux doctor${ANSI}0m`);
-    expect(out).toContain(`${ANSI}36m$ dockmux start${ANSI}0m`);
+    expect(out).toContain(`${ANSI}36m$ dutydeck doctor${ANSI}0m`);
+    expect(out).toContain(`${ANSI}36m$ dutydeck start${ANSI}0m`);
     // 每段上色都自己收尾：CSI 总数正好是 reset 数的两倍（一开一闭）。
     const resets = out.split(`${ANSI}0m`).length - 1;
     const sequences = out.split(ANSI).length - 1;
@@ -267,9 +267,9 @@ describe('排版细节', () => {
     const { ui, stdout } = harness();
     ui.summary('接下来做什么', [
       { text: '打开面板' },
-      { text: '跑一次自检', command: 'dockmux doctor' }
+      { text: '跑一次自检', command: 'dutydeck doctor' }
     ]);
-    expect(stdout.text()).toBe('\n接下来做什么\n  1. 打开面板\n  2. 跑一次自检\n     $ dockmux doctor\n');
+    expect(stdout.text()).toBe('\n接下来做什么\n  1. 打开面板\n  2. 跑一次自检\n     $ dutydeck doctor\n');
   });
 
   it('status 的 detail 渲染在括号里，没有 detail 就不留括号', () => {

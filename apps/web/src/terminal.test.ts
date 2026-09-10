@@ -7,7 +7,7 @@ describe('terminalWsUrl', () => {
   });
 
   it('upgrades https to wss', () => {
-    expect(terminalWsUrl('sess-1', { protocol: 'https:', host: 'dockmux.example.com' })).toBe('wss://dockmux.example.com/api/terminal/sess-1');
+    expect(terminalWsUrl('sess-1', { protocol: 'https:', host: 'dutydeck.example.com' })).toBe('wss://dutydeck.example.com/api/terminal/sess-1');
   });
 
   it('encodes special characters in the session id', () => {

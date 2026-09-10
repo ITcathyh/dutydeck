@@ -10,7 +10,7 @@ const makeSession = (state: string, archivedAt?: string): Session => ({
   id: 'session-1',
   agentId: 'codex',
   state,
-  cwd: '/tmp/dockmux-project',
+  cwd: '/tmp/dutydeck-project',
   runId: 'run-1',
   createdAt: '2026-08-27T00:00:00.000Z',
   updatedAt: '2026-08-27T00:00:00.000Z',

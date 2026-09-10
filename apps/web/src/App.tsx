@@ -193,7 +193,7 @@ export default function App() {
 
   useEffect(() => {
     if (!mobileNavigationOpen) return;
-    const frame = requestAnimationFrame(() => document.querySelector<HTMLElement>('[aria-label="Dockmux 工作台导航"] button')?.focus());
+    const frame = requestAnimationFrame(() => document.querySelector<HTMLElement>('[aria-label="Dutydeck 工作台导航"] button')?.focus());
     const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setSidebarOpen(false); };
     window.addEventListener('keydown', onKeyDown);
     return () => {
@@ -351,7 +351,7 @@ export default function App() {
     <Card as="section" padding="lg" className="w-full max-w-md text-center">
       <p className="text-meta font-semibold uppercase tracking-[.12em] text-warning">{kind === 'page' ? '页面不存在' : '任务不存在'}</p>
       <h1 className="mt-2 text-heading font-semibold text-primary">{kind === 'page' ? '找不到这个页面' : '找不到这个任务'}</h1>
-      <p className="mt-2 text-caption text-subtle">{kind === 'page' ? '当前链接不是有效的 Dockmux 页面。' : '它可能已被删除，或当前链接不属于这个 Dockmux 实例。'}</p>
+      <p className="mt-2 text-caption text-subtle">{kind === 'page' ? '当前链接不是有效的 Dutydeck 页面。' : '它可能已被删除，或当前链接不属于这个 Dutydeck 实例。'}</p>
       <div className="mt-5 flex justify-center"><Button variant="primary" onClick={() => selectSession(undefined)}>回到任务中心</Button></div>
     </Card>
   </div>;

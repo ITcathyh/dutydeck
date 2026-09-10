@@ -169,7 +169,7 @@ function TaskListEmpty({ firstUse, hasAgents, createTask }: {
   return <Card padding="lg">
     <span className="grid h-10 w-10 place-items-center rounded-md bg-action-soft text-action"><Plus size={19}/></span>
     <h2 className="mt-4 text-title font-semibold text-primary">{hasAgents ? '从第一个明确目标开始' : '先准备一个可用 Agent'}</h2>
-    <p className="mt-1 max-w-xl text-body text-secondary">{hasAgents ? '可在飞书私聊发目标或群聊 @机器人 下达任务；也可以在这里创建任务直接执行。' : 'Dockmux 会自动发现这台机器上已安装并登录的 Agent CLI。准备完成后，就能把它连接到飞书或直接创建任务。'}</p>
+    <p className="mt-1 max-w-xl text-body text-secondary">{hasAgents ? '可在飞书私聊发目标或群聊 @机器人 下达任务；也可以在这里创建任务直接执行。' : 'Dutydeck 会自动发现这台机器上已安装并登录的 Agent CLI。准备完成后，就能把它连接到飞书或直接创建任务。'}</p>
     <div className="mt-5 flex flex-wrap gap-2">
       <Button variant="secondary" disabled={createTask.disabled} onClick={createTask.onClick} iconEnd={<ArrowRight size={15}/>}>{hasAgents ? '创建第一个任务' : createTask.label}</Button>
     </div>

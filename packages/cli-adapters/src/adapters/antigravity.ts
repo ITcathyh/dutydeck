@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -23,7 +23,7 @@ export function createAntigravityAdapter(): CliAdapter {
     buildArgs({ resume, resumeSessionId, permissionMode }: AdapterSessionContext): string[] {
       const args: string[] = permissionMode === 'full-trust' ? ['--dangerously-skip-permissions'] : [];
       // 只做精确 id 续接：agy 在 spawn 时自己生成 conversation id 并忽略外部传值，
-      // `--conversation` 严格按既有 id 查找，所以 dockmux 的 sessionId 在这里没用。
+      // `--conversation` 严格按既有 id 查找，所以 dutydeck 的 sessionId 在这里没用。
       // 无 resumeSessionId 时新起会话；绝不用 `-c/--continue`——"最近一个"在多会话
       // 并行时会串到兄弟会话。
       const usable = usableResumeId(resumeSessionId);
@@ -57,9 +57,9 @@ export function createAntigravityAdapter(): CliAdapter {
     },
 
     /** agy 自己铸 conversation UUID 并忽略外部传值，`--conversation` 严格按既有
-     *  id 查找。收到 dockmux 的 `ses_<uuid>` 必然查不到 → null，改起新会话。 */
+     *  id 查找。收到 dutydeck 的 `ses_<uuid>` 必然查不到 → null，改起新会话。 */
     buildResumeCommand(sessionId: string): string[] | null {
-      if (isDockmuxSessionId(sessionId)) return null;
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['--conversation', sessionId];
     },
   };

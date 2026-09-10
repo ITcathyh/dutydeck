@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRepositories } from '@dockmux/storage';
-import type { Session } from '@dockmux/shared';
+import { createRepositories } from '@dutydeck/storage';
+import type { Session } from '@dutydeck/shared';
 import { larkBotsConfigKey } from './config.js';
 import {
   AgentGroupToolError,
   LarkAgentToolCapabilityRegistry,
   LarkAgentToolsService,
-  dockmuxGroupToolsCommand,
+  dutydeckGroupToolsCommand,
   larkAgentSessionBinding,
   loadOrCreateGroupToolsSigningSecret,
   type LarkAgentToolsOptions,
@@ -61,7 +61,7 @@ async function setup(
     ...(executionPolicy ? { executionPolicy } : {}),
     clientFactory: config => clients[config.appId] ?? fakeClient()
   });
-  return { repos, activeSession, capabilities, tools, token: environment.dockmux_group_tools_token! };
+  return { repos, activeSession, capabilities, tools, token: environment.dutydeck_group_tools_token! };
 }
 
 describe('Agent group collaboration domain service', () => {
@@ -82,8 +82,8 @@ describe('Agent group collaboration domain service', () => {
   });
 
   it('builds a command bound to the current TypeScript or built entrypoint', () => {
-    expect(dockmuxGroupToolsCommand('/workspace/apps/server/src/cli.ts', '/usr/bin/node', 'file:///workspace/node_modules/tsx/loader.mjs')).toBe("'/usr/bin/node' --import 'file:///workspace/node_modules/tsx/loader.mjs' '/workspace/apps/server/src/cli.ts'");
-    expect(dockmuxGroupToolsCommand('/workspace/apps/server/dist/cli.js', '/usr/bin/node')).toBe("'/usr/bin/node' '/workspace/apps/server/dist/cli.js'");
+    expect(dutydeckGroupToolsCommand('/workspace/apps/server/src/cli.ts', '/usr/bin/node', 'file:///workspace/node_modules/tsx/loader.mjs')).toBe("'/usr/bin/node' --import 'file:///workspace/node_modules/tsx/loader.mjs' '/workspace/apps/server/src/cli.ts'");
+    expect(dutydeckGroupToolsCommand('/workspace/apps/server/dist/cli.js', '/usr/bin/node')).toBe("'/usr/bin/node' '/workspace/apps/server/dist/cli.js'");
   });
 
   it('binds capabilities to one persisted Lark session and never injects bot credentials', async () => {
@@ -93,8 +93,8 @@ describe('Agent group collaboration domain service', () => {
     expect(larkAgentSessionBinding(session({ sourceId: 'cli_current:oc_p2p:p2p' }))).toMatchObject({ chatId: 'oc_p2p', chatType: 'p2p' });
     expect(larkAgentSessionBinding(session({ sourceId: 'cli_current:ou_legacy:p2p' }))).toMatchObject({ chatId: 'ou_legacy', chatType: 'p2p' });
     expect(capabilities.environmentFor(activeSession)).toEqual({
-      dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools',
-      dockmux_group_tools_token: token
+      dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools',
+      dutydeck_group_tools_token: token
     });
     expect(JSON.stringify(capabilities.environmentFor(activeSession))).not.toContain('secret-current');
     await expect(tools.self('wrong-token')).rejects.toMatchObject({ code: 'GROUP_TOOL_UNAUTHORIZED', statusCode: 401 });
@@ -115,10 +115,10 @@ describe('Agent group collaboration domain service', () => {
     const signingSecret = await loadOrCreateGroupToolsSigningSecret(repos.config);
     expect(await loadOrCreateGroupToolsSigningSecret(repos.config)).toBe(signingSecret);
     const first = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310', signingSecret);
-    const firstToken = first.environmentFor(activeSession).dockmux_group_tools_token;
+    const firstToken = first.environmentFor(activeSession).dutydeck_group_tools_token;
     first.close();
     const second = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310', signingSecret);
-    const secondToken = second.environmentFor(activeSession).dockmux_group_tools_token;
+    const secondToken = second.environmentFor(activeSession).dutydeck_group_tools_token;
     expect(firstToken).toMatch(/^v1\./);
     expect(secondToken).toBe(firstToken);
     await expect(second.resolve(secondToken)).resolves.toMatchObject({ sessionId: activeSession.id, chatId: 'oc_group' });
@@ -194,9 +194,9 @@ describe('Agent group collaboration domain service', () => {
       chatId: 'oc_group', securityLimited: false,
       members: [{ name: '伟哥', memberId: 'ou_human', openId: 'ou_human' }]
     });
-    await expect(tools.send(token, { content: '请改用 dockmux', to: '伟哥' })).resolves.toEqual({ messageId: 'om_sent', chatId: 'oc_group' });
+    await expect(tools.send(token, { content: '请改用 dutydeck', to: '伟哥' })).resolves.toEqual({ messageId: 'om_sent', chatId: 'oc_group' });
     expect(current.sendText).toHaveBeenCalledWith(expect.objectContaining({
-      chatId: 'oc_group', text: '<at user_id="ou_human">伟哥</at> 请改用 dockmux'
+      chatId: 'oc_group', text: '<at user_id="ou_human">伟哥</at> 请改用 dutydeck'
     }));
   });
 

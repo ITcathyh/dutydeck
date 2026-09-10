@@ -16,7 +16,7 @@ import type {
 import type { Prompter } from './prompts.js';
 import { bindLarkApp, type LarkBindResult, type LarkBindStepKey } from './lark-bind.js';
 
-const APP_ID = 'cli_dockmux_test';
+const APP_ID = 'cli_dutydeck_test';
 
 /** 会话里出现过的敏感串。任何一个泄进结果对象都是事故。 */
 const SECRETS = {
@@ -212,8 +212,8 @@ let stdout: Sink;
 let stderr: Sink;
 
 beforeEach(async () => {
-  // 绝不碰真实 ~/.dockmux：每个用例一个临时会话文件路径。
-  sessionDir = await mkdtemp(join(tmpdir(), 'dockmux-lark-bind-'));
+  // 绝不碰真实 ~/.dutydeck：每个用例一个临时会话文件路径。
+  sessionDir = await mkdtemp(join(tmpdir(), 'dutydeck-lark-bind-'));
   sessionFilePath = join(sessionDir, 'session.json');
   stdout = sink();
   stderr = sink();
@@ -329,7 +329,7 @@ describe('bindLarkApp', () => {
 
     expect(result.outcome).toBe('failed');
     expect(result.error?.code).toBe('scope_update_failed');
-    expect(result.next).toContain(`dockmux setup --lark-app-id ${APP_ID}`);
+    expect(result.next).toContain(`dutydeck setup --lark-app-id ${APP_ID}`);
     // 不是会话问题，就不该让用户白扫一次二维码。
     expect(result.next).not.toContain('--force-login');
     expect(result.steps.some(step => step.level === 'fail')).toBe(true);
@@ -389,7 +389,7 @@ describe('bindLarkApp', () => {
     expect(renderQr).not.toHaveBeenCalled();
     expect(configure).not.toHaveBeenCalled();
     expect(result.outcome).toBe('skipped');
-    expect(result.next).toContain(`dockmux setup --lark-app-id ${APP_ID}`);
+    expect(result.next).toContain(`dutydeck setup --lark-app-id ${APP_ID}`);
     expect(JSON.stringify(result)).not.toContain(SECRETS.token);
     expect(stdout.text).toBe('');
     never.resolve(connected());

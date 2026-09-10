@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/config",
+  "name": "@dutydeck/config",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -24,10 +24,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@dockmux/acp-client": "workspace:*",
-    "@dockmux/runtime": "workspace:*",
-    "@dockmux/shared": "workspace:*",
-    "@dockmux/transports": "workspace:*",
+    "@dutydeck/acp-client": "workspace:*",
+    "@dutydeck/runtime": "workspace:*",
+    "@dutydeck/shared": "workspace:*",
+    "@dutydeck/transports": "workspace:*",
     "zod": "3.25.67"
   },
   "devDependencies": {

@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { AgentConfig } from '@dockmux/shared'
+import type { AgentConfig } from '@dutydeck/shared'
 import { createRepositories, PRE_V10_BACKUP_SUFFIX } from './index.js'
 import { migrations, runMigrations } from './migrations.js'
 
@@ -265,9 +265,9 @@ describe('storage migrations', () => {
   })
 
   it('creates a consistent one-time backup before the irreversible v10 table rebuild', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'dockmux-migration-backup-'))
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-migration-backup-'))
     temporaryDirectories.push(directory)
-    const filename = join(directory, 'dockmux.db')
+    const filename = join(directory, 'dutydeck.db')
     const legacy = new Database(filename)
     legacy.exec(`
       CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
@@ -306,11 +306,11 @@ describe('storage migrations', () => {
   })
 
   linuxIt('creates a private database directory and SQLite files without changing its parent mode', async () => {
-    const parent = await mkdtemp(join(tmpdir(), 'dockmux-storage-permissions-'))
+    const parent = await mkdtemp(join(tmpdir(), 'dutydeck-storage-permissions-'))
     temporaryDirectories.push(parent)
     await chmod(parent, 0o755)
     const directory = join(parent, 'private-data')
-    const filename = join(directory, 'dockmux.db')
+    const filename = join(directory, 'dutydeck.db')
 
     const repositories = createRepositories(filename)
     await repositories.config.set('credential', 'secret')
@@ -325,12 +325,12 @@ describe('storage migrations', () => {
     repositories.close()
   })
 
-  linuxIt('tightens an existing .dockmux directory, database, sidecars, and backup only', async () => {
-    const parent = await mkdtemp(join(tmpdir(), 'dockmux-storage-existing-'))
+  linuxIt('tightens an existing .dutydeck directory, database, sidecars, and backup only', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'dutydeck-storage-existing-'))
     temporaryDirectories.push(parent)
     await chmod(parent, 0o755)
-    const directory = join(parent, '.dockmux')
-    const filename = join(directory, 'dockmux.db')
+    const directory = join(parent, '.dutydeck')
+    const filename = join(directory, 'dutydeck.db')
     await mkdir(directory, { mode: 0o755 })
 
     const initial = new Database(filename)

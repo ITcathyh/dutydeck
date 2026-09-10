@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import type { Session } from '@dockmux/shared';
+import type { Session } from '@dutydeck/shared';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
@@ -13,7 +13,7 @@ import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
 // 会话路由与资源物化辅助（从 listener.ts 拆分）。
 // 路由规则移植自 botmux 的 decideRouting：thread_id 是「是否真在话题里」的权威信号
 // （root_id 可能被引用气泡误带），话题群种子消息按 message_id 开新话题，普通群按
-// groupReplyMode 配置路由；配置缺失时保持 dockmux legacy 行为。
+// groupReplyMode 配置路由；配置缺失时保持 dutydeck legacy 行为。
 
 /** 群形态查询函数（生产环境由 chat-mode.ts 的 getChatMode 注入，单测可注入 mock）。 */
 export type LarkChatModeResolver = (appId: string, chatId: string) => Promise<LarkChatMode>;
@@ -46,7 +46,7 @@ export const larkGroupScopeId = (event: LarkMessageEvent) => {
 /**
  * 群/话题串行化的内存 key。
  *
- * 必须带 appId：同一个聊天里可以同时装着两个 Dockmux 机器人，它们各自持久化的
+ * 必须带 appId：同一个聊天里可以同时装着两个 Dutydeck 机器人，它们各自持久化的
  * sourceId 本来就不同（见 {@link larkSourceId}），但 group key 少了 appId 就会让两个
  * 机器人共用同一条内存绑定——A 机器人建的会话会被 B 机器人直接复用，
  * /new 也会停错人的会话。
@@ -107,7 +107,7 @@ const resourceFailureGuidance = (error: unknown) => {
 
 export async function materializeLarkResources(messageId: string, prompt: string, resources: LarkMessageResource[], service: Pick<LarkCardService, 'downloadMessageResource'>) {
   if (!resources.length) return prompt;
-  const directory = join(tmpdir(), 'dockmux', 'lark-resources', messageId.replace(/[^a-zA-Z0-9_-]/g, '_'));
+  const directory = join(tmpdir(), 'dutydeck', 'lark-resources', messageId.replace(/[^a-zA-Z0-9_-]/g, '_'));
   const notes: string[] = [];
   for (const resource of resources) {
     try {
@@ -121,7 +121,7 @@ export async function materializeLarkResources(messageId: string, prompt: string
       notes.push(`- ${resource.label}下载失败：${reason}。你无法读取该附件；请在回复中明确告知用户。${resourceFailureGuidance(error)}`);
     }
   }
-  return `${prompt}\n\n[Dockmux 飞书附件处理结果]\n${notes.join('\n')}`.trim();
+  return `${prompt}\n\n[Dutydeck 飞书附件处理结果]\n${notes.join('\n')}`.trim();
 }
 
 /**
@@ -132,7 +132,7 @@ export async function materializeLarkResources(messageId: string, prompt: string
  *                               thread_id-only 的回复回退锚到 thread_id
  *   - 普通群 groupReplyMode    → 'new-topic' 顶层开新话题；'chat'/'shared' 全群一个会话；
  *                               'chat-topic' 顶层平铺、omt_ 原生话题种子独立会话
- *   - 未设置配置               → dockmux legacy：thread_id → thread:${threadId}，
+ *   - 未设置配置               → dutydeck legacy：thread_id → thread:${threadId}，
  *                               否则按发送人 user:${openId}，再否则 message:${messageId}
  *
  * thread_id 是权威信号：Lark 客户端的引用气泡/快速回复有时会给顶层消息塞 root_id 但不塞
@@ -165,7 +165,7 @@ export async function resolveLarkScopeId(
       // 群形态查询失败时降级为普通群路由，不能阻塞消息处理。
     }
   }
-  // 普通群：按 groupReplyMode 路由（规则 5）；未设置走 dockmux legacy。
+  // 普通群：按 groupReplyMode 路由（规则 5）；未设置走 dutydeck legacy。
   switch (config.groupReplyMode) {
     case 'new-topic':
       return `thread:${event.messageId}`;
@@ -243,8 +243,8 @@ export async function resolveLarkSession(
   chatType: LarkMessageEvent['chatType'],
   scopeId: string
 ): Promise<Session> {
-  if (!config.defaultAgentId) throw new LarkServiceError('LARK_AGENT_CONFIG_REQUIRED', '机器人尚未配置默认 Agent，请在 Dockmux 飞书设置的“Agent 与风险控制”中完成配置。', 409);
-  if (!larkExecutionConfirmed(config)) throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '飞书无人值守任务尚未获得完全信任确认，请在 Dockmux 飞书设置中确认后重试。', 409);
+  if (!config.defaultAgentId) throw new LarkServiceError('LARK_AGENT_CONFIG_REQUIRED', '机器人尚未配置默认 Agent，请在 Dutydeck 飞书设置的“Agent 与风险控制”中完成配置。', 409);
+  if (!larkExecutionConfirmed(config)) throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '飞书无人值守任务尚未获得完全信任确认，请在 Dutydeck 飞书设置中确认后重试。', 409);
   const stopForConfiguration = async (session: Session) => {
     if (['thinking', 'running_tool', 'waiting_for_permission', 'interrupting'].includes(session.state)
       || (await runtime.getTasks?.(session.id))?.some(task => ['queued', 'running'].includes(task.status))) {

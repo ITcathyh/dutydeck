@@ -1,7 +1,7 @@
 /**
  * Lark OpenAPI 网关：per-appId 的跨会话限流 + 退避重试 + 熔断器。
  *
- * 背景：Dockmux 目前只有 per-session 限流（coordinator.ts 的 cardRateLimitedUntil
+ * 背景：Dutydeck 目前只有 per-session 限流（coordinator.ts 的 cardRateLimitedUntil
  * + larkRateLimitBackoffMs 只护住单个会话的心跳），没有任何跨会话 / per-app 的 QPS
  * 闸门。50 个并发会话 × 约 0.5 QPS 的卡片 PATCH ≈ 25 QPS，打在约 15 QPS 的 app 配额
  * 上必然产生 429 风暴：每个会话单看都很守规矩，合起来把整个 app 的配额打爆。本模块
@@ -76,7 +76,7 @@ export interface LarkGateOptions {
 const TRANSIENT_LARK_CODES = new Set([230049, 230020, 99991400]);
 
 /**
- * Dockmux 自己抛的 transport 层错误码（service.ts request()）。只有被明确识别为
+ * Dutydeck 自己抛的 transport 层错误码（service.ts request()）。只有被明确识别为
  * “出网请求失败”的错误才参与重试/熔断判定；INVALID_CARD_STATE、LARK_NOT_CONFIGURED
  * 这类本地校验错误必须原样快速抛出。
  */
@@ -161,7 +161,7 @@ type ErrorLike = {
 } | null | undefined;
 
 /**
- * 提取飞书业务码。优先 details.upstreamCode —— 这是 Dockmux 的 LarkServiceError
+ * 提取飞书业务码。优先 details.upstreamCode —— 这是 Dutydeck 的 LarkServiceError
  * 放置上游业务码的位置（service.ts request()）；其次交给 owner-identity 的
  * larkErrorCode 兜住 SDK / axios / 归一化后的 contact 错误形态；最后从消息尾部的
  * `(code: NNN)` 兜底（service.ts 的多处错误信息都带这个后缀）。
@@ -196,7 +196,7 @@ function finiteNumber(value: unknown): number | undefined {
 /**
  * 提取**上游** HTTP 状态。
  *
- * 关键坑：LarkServiceError.statusCode 恒为 502（那是 Dockmux 回给自己 HTTP 客户端
+ * 关键坑：LarkServiceError.statusCode 恒为 502（那是 Dutydeck 回给自己 HTTP 客户端
  * 的状态），**不是**飞书返回的状态。真正的上游状态在 details.upstreamHttpStatus。
  * 所以这里绝不能读 statusCode，否则每个 OpenAPI 错误都会被当成 5xx 无脑重试。
  */

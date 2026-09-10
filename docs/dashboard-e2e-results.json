@@ -23,70 +23,70 @@
     {
       "agent": "agent_one",
       "pid": 306978,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/project",
       "model": "project-model",
       "turn": 1
     },
     {
       "agent": "agent_two",
       "pid": 307005,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/review",
       "model": "review-model",
       "turn": 1
     },
     {
       "agent": "agent_two",
       "pid": 307015,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/review",
       "model": "review-model",
       "turn": 1
     },
     {
       "agent": "agent_one",
       "pid": 307023,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/project",
       "model": "project-model",
       "turn": 1
     },
     {
       "agent": "agent_one",
       "pid": 306978,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/project",
       "model": "project-model",
       "turn": 2
     },
     {
       "agent": "agent_one",
       "pid": 307085,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/review",
       "model": "model-default",
       "turn": 1
     },
     {
       "agent": "agent_one",
       "pid": 307138,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/project",
       "model": "project-model",
       "turn": 3
     },
     {
       "agent": "agent_one",
       "pid": 307151,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/review",
       "model": "model-default",
       "turn": 1
     },
     {
       "agent": "agent_one",
       "pid": 307151,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/review",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/review",
       "model": "model-default",
       "turn": 2
     },
     {
       "agent": "agent_one",
       "pid": 307138,
-      "cwd": "/tmp/dockmux-dashboard-e2e-xzodyC/project",
+      "cwd": "/tmp/dutydeck-dashboard-e2e-xzodyC/project",
       "model": "project-model",
       "turn": 4
     }

@@ -1,35 +1,35 @@
-# Botmux 全能力审计与 Dockmux 能力保全清单
+# Botmux 全能力审计与 Dutydeck 能力保全清单
 
 > 审计日期：2026-08-30  
 > Botmux 基线：`06db2b4837b7ad88490d107c59aa4ed8b14d42d3`  
-> Dockmux 对照基线：`27532041babfe3c322542ddbb1e6951d039a1806`
+> Dutydeck 对照基线：`27532041babfe3c322542ddbb1e6951d039a1806`
 
 ## 1. 目的与边界
 
 本文回答两个问题：
 
 1. Botmux 在 Agent 接入、飞书路由、群协作、会话、终端、自动化、安全和运维方面，已经形成了哪些真实用户能力；
-2. Dockmux 替代 Botmux 时，哪些能力必须保留，哪些应该按 Dockmux 的 Task/Run 架构重塑，哪些应推迟或明确放弃。
+2. Dutydeck 替代 Botmux 时，哪些能力必须保留，哪些应该按 Dutydeck 的 Task/Run 架构重塑，哪些应推迟或明确放弃。
 
-审计基于本机 Botmux 与 Dockmux 仓库的代码、测试和文档，只读完成。本文不记录任何 App Secret、访问令牌、Cookie、用户标识或其他凭据值。
+审计基于本机 Botmux 与 Dutydeck 仓库的代码、测试和文档，只读完成。本文不记录任何 App Secret、访问令牌、Cookie、用户标识或其他凭据值。
 
 证据路径约定：
 
 - `B:` 表示 `/data00/home/huangyuhang.edu/ai/botmux/`；
-- `D:` 表示 `/data00/home/huangyuhang.edu/ai/dockmux/`。
+- `D:` 表示 `/data00/home/huangyuhang.edu/ai/dutydeck/`。
 
 覆盖度：
 
-- `已覆盖`：Dockmux 已提供同等或更强的用户结果；
+- `已覆盖`：Dutydeck 已提供同等或更强的用户结果；
 - `部分覆盖`：已有底层能力，但缺少策略层、配置入口或完整交互闭环；
 - `未覆盖`：当前没有对应产品能力。
 
 处置含义：
 
-- `retain`：保留 Dockmux 当前实现，并把它作为替换时的回归契约；
-- `reshape`：能力价值明确，但应按 Dockmux 的 Task/Run、统一 runtime 和最小权限架构重做；
+- `retain`：保留 Dutydeck 当前实现，并把它作为替换时的回归契约；
+- `reshape`：能力价值明确，但应按 Dutydeck 的 Task/Run、统一 runtime 和最小权限架构重做；
 - `defer`：有价值但不是当前替换的必要条件，等核心模型稳定后再做；
-- `drop`：不应继承，通常因为安全风险、架构负担或与 Dockmux 产品方向冲突。
+- `drop`：不应继承，通常因为安全风险、架构负担或与 Dutydeck 产品方向冲突。
 
 “核心优势”判断的是该能力是否构成 Botmux 用户选择、持续使用或依赖它的主要原因，而不是代码量大小。
 
@@ -56,9 +56,9 @@ Session / Turn
 5. 多 Bot 协作依赖显式交接，不靠隐形广播；
 6. 高风险能力、可写终端、文件系统和凭据之间存在明确边界。
 
-Dockmux 已在 Task 队列与数据库状态恢复、语义事件、权限姿态、附件输入、飞书最小权限配置、Agent 适配器覆盖面方面达到或超过 Botmux。这里的“状态恢复”不等于 PTY CLI 进程跨 daemon 存活：虽然 `packages/session-backends` 已有 tmux/zellij/zmx 实现，生产装配 `D:apps/server/src/service.ts` 创建 `PtyCliDriver` 时没有注入 backend，driver 会在 `D:packages/pty-driver/src/driver.ts` 默认使用 `PtyBackend`。因此 PTY CLI 的 backing process continuity 仍是 P0 缺口。替换工作的重点不是复制全部外围功能，而是补齐 `GroupBinding`、动作权限分级、配置生效预览、Agent/群运营视图和生产持久 backend 接线。
+Dutydeck 已在 Task 队列与数据库状态恢复、语义事件、权限姿态、附件输入、飞书最小权限配置、Agent 适配器覆盖面方面达到或超过 Botmux。这里的“状态恢复”不等于 PTY CLI 进程跨 daemon 存活：虽然 `packages/session-backends` 已有 tmux/zellij/zmx 实现，生产装配 `D:apps/server/src/service.ts` 创建 `PtyCliDriver` 时没有注入 backend，driver 会在 `D:packages/pty-driver/src/driver.ts` 默认使用 `PtyBackend`。因此 PTY CLI 的 backing process continuity 仍是 P0 缺口。替换工作的重点不是复制全部外围功能，而是补齐 `GroupBinding`、动作权限分级、配置生效预览、Agent/群运营视图和生产持久 backend 接线。
 
-## 3. 推荐的 Dockmux 配置分层
+## 3. 推荐的 Dutydeck 配置分层
 
 ### 3.1 AgentDefinition
 
@@ -129,13 +129,13 @@ Run 显式覆盖
 
 不可丢契约：进行中的 Run 不因后台修改 Bot 默认值而切换 Agent、工作目录、后端或权限姿态；新配置只影响后续 Run，除非用户执行一个可审计的显式迁移。
 
-ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所有键必须使用 `snake_case`；群工具运行时变量使用 `dockmux_group_tools_url` 和 `dockmux_group_tools_token`。大写环境变量只能在读取边界兼容，不能写入 ACPX 持久化 session。
+ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所有键必须使用 `snake_case`；群工具运行时变量使用 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`。大写环境变量只能在读取边界兼容，不能写入 ACPX 持久化 session。
 
 ## 4. 能力地图
 
 ### 4.1 Agent 适配器与配置入口
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
 | 多 CLI 适配器 | `B:src/adapters/cli/registry.ts`；`B:docs-site/docs/zh/adapters.md` | 用户可使用既有 coding CLI 和账号体系 | 选择的 Agent 必须对应真实运行进程，能力不可虚报 | 已覆盖：ACPX discovery + PTY adapter，见 `D:packages/config/src/index.ts`、`D:packages/cli-adapters/src/factory.ts` | 支撑 | retain |
 | 协议与 runtime/发行来源分离 | `B:src/bot-registry.ts`；`B:docs-site/docs/zh/bots-json.md` | 同一协议可运行官方 CLI、fork、wrapper 或网关 | UI 必须显示实际 runtime、命令来源、版本；Session 内冻结 | 部分覆盖 | 核心 | reshape |
@@ -145,9 +145,9 @@ ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所�
 
 ### 4.2 飞书接入、Bot 身份与消息路由
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
-| QR/manual 飞书 Setup | `B:docs-site/docs/zh/quickstart.md`；`B:src/cli.ts`；`B:src/setup/open-platform-automation.ts` | 非平台专家也能完成应用、权限、事件和发版 | 增量配置、回读验证；已有可见范围无法确认时停止 | 已覆盖且权限范围更聚焦，见 `D:README.md`、`D:apps/server/src/lark/open-platform-configurator.ts` | 核心 | retain Dockmux 实现 |
+| QR/manual 飞书 Setup | `B:docs-site/docs/zh/quickstart.md`；`B:src/cli.ts`；`B:src/setup/open-platform-automation.ts` | 非平台专家也能完成应用、权限、事件和发版 | 增量配置、回读验证；已有可见范围无法确认时停止 | 已覆盖且权限范围更聚焦，见 `D:README.md`、`D:apps/server/src/lark/open-platform-configurator.ts` | 核心 | retain Dutydeck 实现 |
 | 多飞书 Bot | `B:src/bot-registry.ts`；`B:docs-site/docs/zh/architecture.md` | 同一机器承载多个不同身份和职责 | 每个 App 独立身份；一个 App 的 `open_id` 不能复制到另一个 App 当 owner | 已覆盖：多 listener | 核心 | retain |
 | P2P chat/thread 路由 | `B:docs-site/docs/zh/session-model.md`；`B:src/im/lark/event-dispatcher.ts` | 用户可选择长期私聊上下文或每线程独立 | 相同路由键必须稳定命中同一 Session；重复事件不得重复执行 | 已覆盖，见 `D:apps/server/src/lark/session-resolver.ts` | 核心 | retain |
 | 普通群四种回复模式 | `B:src/bot-registry.ts`；`B:src/im/lark/event-dispatcher.ts` | 兼顾共享群上下文和独立话题 | root、thread、topic 的边界必须可解释；模式变更不能串历史上下文 | 已覆盖主要模式 | 核心 | retain，并显式展示有效默认值 |
@@ -156,11 +156,11 @@ ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所�
 | 单人单 Bot 群免 @ | `B:src/im/lark/event-dispatcher.ts` | 将专用群用作个人工作台 | 仅在成员拓扑可确定为 1 human + 1 bot 时生效 | 未覆盖 | 支撑 | defer |
 | 进群/新话题自动开工 | `B:src/bot-registry.ts`；`B:src/im/lark/event-dispatcher.ts` | 主动欢迎或执行固定任务 | 默认关闭；必须验证 owner 在群内并防止重复触发 | 未覆盖 | 外围 | defer |
 
-说明：Botmux 的注释、文档和实际 loader 默认值存在过漂移；审计时源码表现为 P2P 默认 `chat`，普通群实际默认趋向 `chat-topic`。Dockmux 不应复制隐式默认，而应在配置页和 Run 详情中展示 materialized effective value。
+说明：Botmux 的注释、文档和实际 loader 默认值存在过漂移；审计时源码表现为 P2P 默认 `chat`，普通群实际默认趋向 `chat-topic`。Dutydeck 不应复制隐式默认，而应在配置页和 Run 详情中展示 materialized effective value。
 
 ### 4.3 群配置与多 Agent 协作
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
 | `chat × bot` 群矩阵 | `B:src/services/groups-store.ts`；`B:src/core/dashboard-ipc-server.ts`；`B:src/dashboard/web/groups-page.tsx` | 一眼看出 Bot 是否入群、是否绑定目录/角色、是否监听 | 远端群状态与本地配置分别展示；部分失败不能伪装成全部成功 | 未覆盖 | 核心 | reshape，P0 |
 | 创建群、邀请 Bot、转移群主 | `B:src/services/groups-store.ts`；`B:src/dashboard/web/groups-page.tsx` | 不离开控制台即可完成协作空间搭建 | 展示执行 Bot、邀请结果和 ownership 变更；转移群主需明确确认 | 未覆盖 | 支撑 | defer；先做只读矩阵和加入/移除 |
@@ -173,29 +173,29 @@ ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所�
 
 ### 4.4 Session、后台进程与终端
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
 | tmux 默认持久进程 | `B:docs-site/docs/zh/tmux.md`；`B:src/core/session-manager.ts` | daemon 重启时 CLI 和上下文仍存活 | tmux 缺失时明确失败，不能静默退回不持久 PTY | 部分覆盖：`D:packages/session-backends/src/tmux-backend.ts` 已实现，但 `D:apps/server/src/service.ts` 未向 `PtyCliDriver` 注入 backend，生产 pty-cli 实际默认 `PtyBackend` | 核心 | reshape，P0 接入生产路径 |
-| zellij/herdr/zmx backend | `B:src/adapters/backend`；`B:docs-site/docs/zh/zmx.md` | 适配不同机器环境 | UI 显示 backend 的真实 resume/attach 限制 | 部分覆盖：Dockmux package/tests 有 zellij/zmx/PTY，尚未接入生产 driver factory；无 herdr | 支撑 | reshape；先保证一个持久 backend 端到端可用 |
+| zellij/herdr/zmx backend | `B:src/adapters/backend`；`B:docs-site/docs/zh/zmx.md` | 适配不同机器环境 | UI 显示 backend 的真实 resume/attach 限制 | 部分覆盖：Dutydeck package/tests 有 zellij/zmx/PTY，尚未接入生产 driver factory；无 herdr | 支撑 | reshape；先保证一个持久 backend 端到端可用 |
 | Worker 崩溃重启与熔断 | `B:src/core/worker-pool.ts` | 短暂崩溃可恢复，持续崩溃不无限拉起 | 达到阈值进入 degraded，保留错误原因和人工恢复入口 | 部分覆盖 | 核心可靠性 | reshape |
 | 空闲 worker suspend/reclaim | `B:src/core/worker-pool.ts`；`B:src/bot-registry.ts` | 控制多 Session 资源占用 | suspend 不能等同结束；恢复能力必须真实 | 已有 6 小时 driver idle release | 支撑 | retain/reshape 可见状态 |
 | Adopt 外部 tmux pane | `B:docs-site/docs/zh/adopt.mdx` | 把正在本地运行的工作无扰接入聊天 | attach/detach 不杀原进程；明确无 sandbox/resume 保证 | 未覆盖 | 差异化 | defer |
 | Chat-to-chat Relay | `B:docs-site/docs/zh/relay.md` | 将同一上下文迁到新群/私聊 | owner-only、idle-only、目标无活动 Session | 未覆盖 | 支撑 | drop 原模型；reshape 为一个 Task 绑定多个 Channel |
-| 语义事件与原始终端 | `B:docs-site/docs/zh/cards.md`；`B:docs-site/docs/zh/web-terminal.md` | 日常看语义进度，排障时看终端 | 原始终端是 drill-down，不是唯一状态源 | Dockmux 语义事件更强，且有 terminal WS | Dockmux 核心优势 | retain Dockmux |
-| 只读/可写终端链接 | `B:src/core/terminal-url.ts`；`B:src/core/terminal-write-auth.ts` | 远程查看和必要时接管 CLI | 可写入口必须鉴权并私下发给操作者；不可把 bearer token 放群卡 | Dockmux Web auth + terminal 已覆盖 | 安全支撑 | retain；drop 群卡公开可写选项 |
+| 语义事件与原始终端 | `B:docs-site/docs/zh/cards.md`；`B:docs-site/docs/zh/web-terminal.md` | 日常看语义进度，排障时看终端 | 原始终端是 drill-down，不是唯一状态源 | Dutydeck 语义事件更强，且有 terminal WS | Dutydeck 核心优势 | retain Dutydeck |
+| 只读/可写终端链接 | `B:src/core/terminal-url.ts`；`B:src/core/terminal-write-auth.ts` | 远程查看和必要时接管 CLI | 可写入口必须鉴权并私下发给操作者；不可把 bearer token 放群卡 | Dutydeck Web auth + terminal 已覆盖 | 安全支撑 | retain；drop 群卡公开可写选项 |
 
 ### 4.5 Task、卡片与长期执行
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
-| type-ahead/排队 | `B:docs-site/docs/zh/cards.md`；`B:src/core/session-manager.ts` | 当前任务运行时继续下达后续请求 | 取消 queued item 不能中断当前 running item | 已覆盖且更强，见 `D:packages/agent-runtime/src/index.ts` | Dockmux 核心优势 | retain |
+| type-ahead/排队 | `B:docs-site/docs/zh/cards.md`；`B:src/core/session-manager.ts` | 当前任务运行时继续下达后续请求 | 取消 queued item 不能中断当前 running item | 已覆盖且更强，见 `D:packages/agent-runtime/src/index.ts` | Dutydeck 核心优势 | retain |
 | 每轮状态卡与快捷操作 | `B:docs-site/docs/zh/cards.md` | 用户知道已接收、执行、完成或失败 | 按钮权限与任务状态二次校验；过期按钮不得误操作新任务 | 已覆盖，见 `D:apps/server/src/lark/coordinator.ts` | 核心 | retain |
-| 最终回执持久化和对账 | `B:src/core/deferred-schedule-settlement.ts` 及 card reconciliation 代码 | daemon 重启或网络抖动后仍能收到最终结果 | 最终回执 exactly-once observable；重复发送至少可去重 | Dockmux 已有 reconciler，见 `D:apps/server/src/lark/reconciler.ts` | Dockmux 核心优势 | retain |
-| Needs You/Active/Recent 工作台 | Botmux Fleet dashboard；Dockmux `D:docs/interaction-design-2026-08-30.md` | 先看到需介入事项，再看运行和历史 | 任务状态必须来自持久事件，不由 UI 猜测 | Dockmux 更强 | Dockmux 核心优势 | retain Dockmux，不把首页改成 Bot 矩阵 |
+| 最终回执持久化和对账 | `B:src/core/deferred-schedule-settlement.ts` 及 card reconciliation 代码 | daemon 重启或网络抖动后仍能收到最终结果 | 最终回执 exactly-once observable；重复发送至少可去重 | Dutydeck 已有 reconciler，见 `D:apps/server/src/lark/reconciler.ts` | Dutydeck 核心优势 | retain |
+| Needs You/Active/Recent 工作台 | Botmux Fleet dashboard；Dutydeck `D:docs/interaction-design-2026-08-30.md` | 先看到需介入事项，再看运行和历史 | 任务状态必须来自持久事件，不由 UI 猜测 | Dutydeck 更强 | Dutydeck 核心优势 | retain Dutydeck，不把首页改成 Bot 矩阵 |
 
 ### 4.6 Workflow、定时和外部触发
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
 | 一次性/cron/自然语言定时 | `B:docs-site/docs/zh/schedule.md`；`B:src/core/scheduler.ts`；`B:src/services/schedule-store.ts` | 自动巡检、日报和周期任务 | 每次触发有独立 Run、来源、下次时间和可取消状态 | 未覆盖 | 核心场景之一 | reshape 为 Schedule → Task/Run |
 | 继续原 Session 或新话题 | `B:docs-site/docs/zh/schedule.md` | 周期工作可延续上下文或保持隔离 | UI 明示上下文策略；目标 Session 不存在时不能静默换目标 | 未覆盖 | 支撑 | reshape |
@@ -206,7 +206,7 @@ ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所�
 
 ### 4.7 角色、Profile 与 Team
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
 | Bot 默认角色 + 群级覆盖 | `B:docs-site/docs/zh/roles.md`；`B:src/core/role-resolver.ts` | 同一 Bot 在不同群承担不同职责 | 优先级 chat > bot default > none；Run 中固化角色版本 | 部分覆盖：systemPrompt + preInjectPrompt | 核心 | reshape |
 | 可复用 RoleProfile | `B:src/services/role-profile-store.ts`；`B:src/dashboard/web/roles-page.tsx` | 多 Bot/群批量采用一致角色 | 应用前差异预览；缺失 profile 安全回退并提示 | 未覆盖 | 支撑 | reshape |
@@ -216,7 +216,7 @@ ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所�
 
 ### 4.8 记忆、反馈和用量
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
 | CLI 原生上下文/记忆 | `B:docs-site/docs/zh/bots-json.md` | 延续用户既有 Agent 习惯 | 不伪造跨 CLI 统一记忆语义 | 已通过原生 resume/ACPX Session 覆盖 | 核心 | retain |
 | 显式 `/summary` 记忆 | `B:src/im/lark/summary-command.ts`；`B:src/services/summary-range-store.ts` | 将关键决策沉淀为可复用记录 | 用户显式触发、可审阅、记录来源和范围、受 workspace/sandbox 边界约束 | 未覆盖 | 支撑 | defer/reshape |
@@ -227,7 +227,7 @@ ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所�
 
 ### 4.9 附件、语音、会议和文档
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
 | 图片/文件/富文本输入 | `B:src/im/lark/message-parser.ts`；`B:src/core/attachment-path.ts` | Agent 可处理真实工作材料 | 下载失败给可执行错误；临时文件权限和生命周期受控 | 已覆盖且格式更广，见 `D:apps/server/src/lark/message-content.ts`、`session-resolver.ts` | 核心输入能力 | retain |
 | 文件/图片输出与卡片 | `B:src/im/lark/client.ts`；`B:docs-site/docs/zh/cards.md` | 结果能以适合的媒介返回群聊 | 大文件失败可解释；不能把本机任意路径泄露给聊天 | 部分覆盖 | 支撑 | reshape 按真实需求 |
@@ -237,53 +237,53 @@ ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所�
 
 ### 4.10 Dashboard 与运营视图
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
-| Fleet Sessions | `B:docs-site/docs/zh/dashboard.md`；`B:src/dashboard.ts` | 运营多个 Bot daemon 和 Session | 展示真实 daemon/session 状态及部分失败 | Dockmux 以 Task 工作台覆盖主要旅程 | 核心但模型不同 | retain Dockmux Task-first |
+| Fleet Sessions | `B:docs-site/docs/zh/dashboard.md`；`B:src/dashboard.ts` | 运营多个 Bot daemon 和 Session | 展示真实 daemon/session 状态及部分失败 | Dutydeck 以 Task 工作台覆盖主要旅程 | 核心但模型不同 | retain Dutydeck Task-first |
 | Groups/Role/Bot Defaults/Schedule 页面 | `B:src/dashboard/web/groups-page.tsx`；`roles-page.tsx`；`bot-defaults-page.tsx`；`schedules-page.tsx` | 集中管理身份、群关系和自动化 | 配置来源、覆盖关系和生效范围可见 | 未覆盖/部分覆盖 | 核心运营能力 | reshape 为二级“集成与策略”区域 |
 | Feedback analytics | `B:src/dashboard/web/feedback-page.tsx`；`B:src/dashboard/feedback-analytics-api.ts` | 发现低质量 Agent/群/场景 | 指标口径、样本量和时间范围明确 | 未覆盖 | 支撑 | defer 到反馈采集后 |
-| public read-only Dashboard | `B:docs-site/docs/zh/dashboard.md` | 低成本共享运行状态 | Botmux 可能暴露部分元数据 | Dockmux 默认 token auth 更安全 | 风险大于价值 | drop 默认公开；如未来提供需独立最小数据面 |
-| 首页 Bot/Fleet 矩阵 | Botmux Dashboard 导航 | 适合 daemon 运维 | 不能挤压“待你处理”的主任务旅程 | Dockmux Needs You/Active/Recent 更清晰 | 非 Dockmux 核心 | drop 作为首页；保留为设置子页 |
+| public read-only Dashboard | `B:docs-site/docs/zh/dashboard.md` | 低成本共享运行状态 | Botmux 可能暴露部分元数据 | Dutydeck 默认 token auth 更安全 | 风险大于价值 | drop 默认公开；如未来提供需独立最小数据面 |
+| 首页 Bot/Fleet 矩阵 | Botmux Dashboard 导航 | 适合 daemon 运维 | 不能挤压“待你处理”的主任务旅程 | Dutydeck Needs You/Active/Recent 更清晰 | 非 Dutydeck 核心 | drop 作为首页；保留为设置子页 |
 
 ### 4.11 权限、风险与沙箱
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
-| `canTalk` / `canOperate` 分离 | `B:src/im/lark/event-dispatcher.ts`；`B:src/bot-registry.ts` | 群成员可请求 Agent，但不能重启、改目录或控制他人任务 | 所有按钮和 daemon command 按动作分类二次鉴权；talk grant 永不自动升级为 operate | 未覆盖：Dockmux 白名单成员可操作任意卡片 | 核心安全优势 | reshape，P0 |
+| `canTalk` / `canOperate` 分离 | `B:src/im/lark/event-dispatcher.ts`；`B:src/bot-registry.ts` | 群成员可请求 Agent，但不能重启、改目录或控制他人任务 | 所有按钮和 daemon command 按动作分类二次鉴权；talk grant 永不自动升级为 operate | 未覆盖：Dutydeck 白名单成员可操作任意卡片 | 核心安全优势 | reshape，P0 |
 | owner anchor | `B:src/bot-registry.ts` 的 `ownerOpenId`；`B:src/im/lark/event-dispatcher.ts` | 始终有明确管理员和故障通知对象 | owner 身份按 App 解析；跨 App 的 `open_id` 不可复用 | 部分覆盖 | 核心 | reshape |
 | talk grant 请求卡 | `B:src/services/grant-store.ts`；`B:src/im/lark/event-dispatcher.ts` | 陌生用户可向 owner 申请临时使用 | 有效期、额度、范围、撤销和 pending 节流；只授 talk/dispatch | 未覆盖 | 核心协作优势 | reshape，P1 |
-| allowlist 解析失败关闭 | `B:src/im/lark/event-dispatcher.ts` | 配错 owner 时不会放开给所有人 | “已配置但解析为空”必须 fail-closed 并通知 owner | Dockmux邮箱解析失败已关闭，但空白名单仍开放 | 核心 | reshape |
+| allowlist 解析失败关闭 | `B:src/im/lark/event-dispatcher.ts` | 配错 owner 时不会放开给所有人 | “已配置但解析为空”必须 fail-closed 并通知 owner | Dutydeck邮箱解析失败已关闭，但空白名单仍开放 | 核心 | reshape |
 | 显式访问策略 | Botmux 的 open/allowlist/p2pOpen 组合；`D:apps/server/src/lark/coordinator.ts` | 管理员理解谁可以发起与操作 | 不允许“空名单”隐式表示开放；应有 `owner_only/allowlist/open` | 未覆盖显式策略 | 核心 | reshape，默认 `owner_only` |
-| 高危操作控制 | `D:apps/server/src/lark/config.ts`；`D:apps/server/src/lark/security-hooks.ts` | full-trust 飞书运行仍有额外门禁 | enforced 模式在 adapter/tool 边界执行，超时或异常 fail-closed；提示词仅辅助 | Dockmux 已覆盖且更强 | Dockmux 核心优势 | retain |
-| Agent permission posture | `D:README.md`；`D:packages/acp-client/src/index.ts`；`D:packages/pty-driver/src/driver.ts` | Web 任务默认可审批，full-trust 明确可见 | `ask` 不得追加 bypass；full-trust 需显式同意；PTY 不支持的模式明确拒绝 | 已覆盖 | Dockmux 核心优势 | retain |
+| 高危操作控制 | `D:apps/server/src/lark/config.ts`；`D:apps/server/src/lark/security-hooks.ts` | full-trust 飞书运行仍有额外门禁 | enforced 模式在 adapter/tool 边界执行，超时或异常 fail-closed；提示词仅辅助 | Dutydeck 已覆盖且更强 | Dutydeck 核心优势 | retain |
+| Agent permission posture | `D:README.md`；`D:packages/acp-client/src/index.ts`；`D:packages/pty-driver/src/driver.ts` | Web 任务默认可审批，full-trust 明确可见 | `ask` 不得追加 bypass；full-trust 需显式同意；PTY 不支持的模式明确拒绝 | 已覆盖 | Dutydeck 核心优势 | retain |
 | 三层文件沙箱 | `B:src/adapters/backend/sandbox.ts`；`B:src/services/sandbox-store.ts` | 限制 Agent 读写工作区外文件，隔离凭据 | RW/RO/Deny deny-wins；不支持时 fail-closed；网络策略明确；凭据不进 sandbox | 未覆盖；permission posture 不是文件隔离 | 核心安全优势 | reshape 为 backend capability |
-| sandbox outbox relay | `B:src/adapters/backend/sandbox.ts` | sandbox Agent 可请求发消息但拿不到飞书凭据 | sandbox 只写受限请求；host 重建命令、强制 session/chat 身份并校验参数 | Dockmux group tools 已用 scoped token，但无文件 sandbox | 核心边界设计 | reshape 时参考 |
-| 可写终端 token | `B:src/core/terminal-write-auth.ts`；`B:src/bot-registry.ts` | owner 必要时远程接管 | bearer token 不进群卡和日志；短期、单用途、可撤销 | Dockmux Web auth 较安全 | 安全支撑 | retain Dockmux，drop Botmux 公开开关 |
+| sandbox outbox relay | `B:src/adapters/backend/sandbox.ts` | sandbox Agent 可请求发消息但拿不到飞书凭据 | sandbox 只写受限请求；host 重建命令、强制 session/chat 身份并校验参数 | Dutydeck group tools 已用 scoped token，但无文件 sandbox | 核心边界设计 | reshape 时参考 |
+| 可写终端 token | `B:src/core/terminal-write-auth.ts`；`B:src/bot-registry.ts` | owner 必要时远程接管 | bearer token 不进群卡和日志；短期、单用途、可撤销 | Dutydeck Web auth 较安全 | 安全支撑 | retain Dutydeck，drop Botmux 公开开关 |
 | Bot 消息信任 | `B:src/im/lark/event-dispatcher.ts`；`D:apps/server/src/lark/coordinator.ts` | 允许 Agent 协作且防止陌生 Bot 注入 | peer 身份必须由 app/chat roster 验证；Bot 默认无高危权；防回环 | 部分覆盖 | 核心 | retain/reshape，禁止宽泛 team 自动获得 operate |
 
 ### 4.12 部署、恢复与可靠性
 
-| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dockmux 覆盖 | 核心优势 | 处置 |
+| 能力 | Botmux 证据 | 用户价值 | 不可丢交互契约 | Dutydeck 覆盖 | 核心优势 | 处置 |
 |---|---|---|---|---|---|---|
 | setup/start/stop/restart/status/upgrade | `B:docs-site/docs/zh/quickstart.md`；`B:docs-site/docs/zh/cli-commands.md` | 普通用户能完成本机运维 | 命令幂等；失败保留可执行诊断；升级不误删 session 数据 | 已覆盖 daemon 命令，见 `D:apps/server/src/daemon` | 支撑 | retain |
-| 一 Bot 一 daemon | `B:docs-site/docs/zh/architecture.md` | Bot 间故障和配置隔离 | Dashboard 需 fan-out 并处理部分 daemon 离线 | Dockmux 单 runtime + 多 listener 更简单 | Botmux 架构特征，不是用户必需 | drop，不照搬 |
-| SQLite/文件状态恢复 | `B:src/core/session-manager.ts` 及各 store；`D:packages/storage/src` | 重启后任务、映射和回执可继续 | 状态迁移可回滚；不能因内存 map 丢失而把任务误判成功 | Dockmux 已覆盖核心 Task 状态 | 核心可靠性 | retain |
+| 一 Bot 一 daemon | `B:docs-site/docs/zh/architecture.md` | Bot 间故障和配置隔离 | Dashboard 需 fan-out 并处理部分 daemon 离线 | Dutydeck 单 runtime + 多 listener 更简单 | Botmux 架构特征，不是用户必需 | drop，不照搬 |
+| SQLite/文件状态恢复 | `B:src/core/session-manager.ts` 及各 store；`D:packages/storage/src` | 重启后任务、映射和回执可继续 | 状态迁移可回滚；不能因内存 map 丢失而把任务误判成功 | Dutydeck 已覆盖核心 Task 状态 | 核心可靠性 | retain |
 | 后端 readiness 与硬失败 | `B:docs-site/docs/zh/tmux.md`；`B:src/adapters/backend` | 用户在开工前知道依赖缺失 | 缺 tmux/bwrap/CLI 时不静默换弱安全后端 | 部分覆盖：selector/package 有规则，生产 server 尚未使用 selector | 核心 | reshape，P0 |
 | daemon 重启后的 Session reattach | `B:src/core/session-manager.ts`；`B:src/core/worker-pool.ts` | 长任务不中断或至少可恢复 | 重新附着同一 backing session；失败显示 degraded，不创建冒充原 Session 的新上下文 | 部分覆盖：ACP/CLI 原生 resume 可恢复部分上下文，但生产 pty-cli 使用 `PtyBackend`，进程不会跨 daemon 存活，也没有 backing-session reattach | 核心 | reshape，P0 并补真实进程 E2E |
-| 卡片/回执重放与去重 | `B:src/core/deferred-schedule-settlement.ts`；`D:apps/server/src/lark/reconciler.ts` | 网络抖动和重启不丢最终结果 | 事件至少一次到达时，用户侧结果不可无限重复 | Dockmux 已覆盖较强 | 核心 | retain |
-| 日志/审计脱敏 | `B:src/services/webhook-audit.ts`；Dockmux auth/config code | 排障时不泄露凭据 | Secret、Cookie、bearer token、附件临时路径按策略脱敏 | 部分覆盖 | 基础安全 | retain 并持续测试 |
+| 卡片/回执重放与去重 | `B:src/core/deferred-schedule-settlement.ts`；`D:apps/server/src/lark/reconciler.ts` | 网络抖动和重启不丢最终结果 | 事件至少一次到达时，用户侧结果不可无限重复 | Dutydeck 已覆盖较强 | 核心 | retain |
+| 日志/审计脱敏 | `B:src/services/webhook-audit.ts`；Dutydeck auth/config code | 排障时不泄露凭据 | Secret、Cookie、bearer token、附件临时路径按策略脱敏 | 部分覆盖 | 基础安全 | retain 并持续测试 |
 
 ## 5. 明确不照搬的 Botmux 设计
 
 1. 不复制单一 `bots.json` catch-all。身份凭据、Agent 定义、群绑定、运行态和审计数据应分层存储。
 2. 不允许空白名单隐式代表开放。开放必须是显式、有警告、可审计的策略选择。
-3. 不把 Botmux 的一 Bot 一 daemon 作为 Dockmux 目标架构；保留统一 runtime 和 listener pool。
-4. 不把原始终端截图当作主要进度；Dockmux 的结构化事件和 Task 状态是事实源。
+3. 不把 Botmux 的一 Bot 一 daemon 作为 Dutydeck 目标架构；保留统一 runtime 和 listener pool。
+4. 不把原始终端截图当作主要进度；Dutydeck 的结构化事件和 Task 状态是事实源。
 5. 不在未验证 workspace ACL 时继承另一个 Bot 的 cwd。
 6. 不把 Role/Profile 的“private”语义宣传为安全隔离。
 7. 不把可写终端 bearer URL直接放进群卡。
 8. 不默认开放 public read-only Dashboard。
-9. 不迁移 Botmux 旧 Workflow 与 v3 Workflow 双体系；未来只保留一个 Dockmux-native Run DAG。
+9. 不迁移 Botmux 旧 Workflow 与 v3 Workflow 双体系；未来只保留一个 Dutydeck-native Run DAG。
 10. 不把语音、会议、文档评论等垂直集成塞进核心 Bot 配置；未来统一走 Connector → Task。
 11. 不让 cross-deployment team membership 自动扩大 operate 或高危权限。
 12. 不自动把任意聊天内容写入长期记忆；必须显式、可审阅、带来源并受 workspace 边界约束。
@@ -321,7 +321,7 @@ ACPX 的 `session_options` 会递归校验持久化键名。写入其中的所�
 
 ## 7. Capability Preservation Gate
 
-Dockmux 在宣称可替换 Botmux 前，以下场景必须在真实或等价隔离的飞书、真实 `AcpxAdapter`/PTY backend、真实持久化数据库上通过 E2E。只用 mock Lark client、mock ACP client 或内存仓库不能关闭 gate。
+Dutydeck 在宣称可替换 Botmux 前，以下场景必须在真实或等价隔离的飞书、真实 `AcpxAdapter`/PTY backend、真实持久化数据库上通过 E2E。只用 mock Lark client、mock ACP client 或内存仓库不能关闭 gate。
 
 ### G0：配置与凭据边界
 
@@ -396,7 +396,7 @@ Dockmux 在宣称可替换 Botmux 前，以下场景必须在真实或等价隔�
 - [ ] Dashboard 能从 Needs You/Active/Recent 定位任务，并从 Task 追到 Agent、Bot、群绑定、RunSnapshot 和原始事件。
 - [ ] 多 Bot 中一个 listener 离线时，其余 Bot 和 Web Task 不受影响；设置页明确显示局部故障。
 - [ ] 配置迁移前后对同一组 Bot/群生成 effective-config diff；无法映射的 Botmux 字段被列为人工处理项，不静默丢弃。
-- [ ] 迁移失败可回滚到迁移前 Dockmux 配置和数据库；回滚不覆盖用户新产生的运行记录。
+- [ ] 迁移失败可回滚到迁移前 Dutydeck 配置和数据库；回滚不覆盖用户新产生的运行记录。
 - [ ] 日志和审计记录能说明谁在何时发起、授权、操作、修改策略，但不记录 Secret、Cookie 或 bearer token。
 
 ### G9：启用后才必须通过的条件 gate
@@ -418,4 +418,4 @@ Dockmux 在宣称可替换 Botmux 前，以下场景必须在真实或等价隔�
 4. 涉及重启恢复的场景必须真的终止并重启 daemon/runtime 进程；仅重建内存对象不计通过。
 5. 涉及 backend 持久化的场景必须检查原 OS 进程/pane 身份，而不是只断言数据库记录存在。
 6. 涉及权限和 sandbox 的场景必须同时包含允许路径与拒绝路径，并验证拒绝发生在执行边界而非仅提示词层。
-7. 任一 P0 gate 失败时，不应宣称 Dockmux 已完整替换 Botmux；应明确标注替换范围和保留的 Botmux fallback。
+7. 任一 P0 gate 失败时，不应宣称 Dutydeck 已完整替换 Botmux；应明确标注替换范围和保留的 Botmux fallback。

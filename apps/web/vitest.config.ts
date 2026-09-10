@@ -10,22 +10,22 @@ import { fileURLToPath, URL } from 'node:url';
 // ERR_MODULE_NOT_FOUND）。把 project 拆成独立配置文件后，该 project 的 root 就是 apps/web，
 // 插件 import 与 environment: 'jsdom' 的解析都发生在 apps/web 下，才能找到这些包。
 //
-// ⚠️ 下面的 alias 表与根 vitest.config.ts 保持一致，新增 @dockmux/* 包时两处都要加。
+// ⚠️ 下面的 alias 表与根 vitest.config.ts 保持一致，新增 @dutydeck/* 包时两处都要加。
 export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@dockmux/acp-client': fileURLToPath(new URL('../../packages/acp-client/src/index.ts', import.meta.url)),
-      '@dockmux/runtime': fileURLToPath(new URL('../../packages/agent-runtime/src/index.ts', import.meta.url)),
-      '@dockmux/config': fileURLToPath(new URL('../../packages/config/src/index.ts', import.meta.url)),
-      '@dockmux/shared': fileURLToPath(new URL('../../packages/shared/src/index.ts', import.meta.url)),
-      '@dockmux/storage': fileURLToPath(new URL('../../packages/storage/src/index.ts', import.meta.url)),
-      '@dockmux/transports': fileURLToPath(new URL('../../packages/transports/src/index.ts', import.meta.url)),
-      '@dockmux/pty-driver': fileURLToPath(new URL('../../packages/pty-driver/src/index.ts', import.meta.url)),
-      '@dockmux/cli-adapters': fileURLToPath(new URL('../../packages/cli-adapters/src/index.ts', import.meta.url)),
-      '@dockmux/session-backends': fileURLToPath(new URL('../../packages/session-backends/src/index.ts', import.meta.url)),
-      '@dockmux/terminal-renderer': fileURLToPath(new URL('../../packages/terminal-renderer/src/index.ts', import.meta.url)),
-      '@dockmux/relay': fileURLToPath(new URL('../../packages/relay/src/index.ts', import.meta.url))
+      '@dutydeck/acp-client': fileURLToPath(new URL('../../packages/acp-client/src/index.ts', import.meta.url)),
+      '@dutydeck/runtime': fileURLToPath(new URL('../../packages/agent-runtime/src/index.ts', import.meta.url)),
+      '@dutydeck/config': fileURLToPath(new URL('../../packages/config/src/index.ts', import.meta.url)),
+      '@dutydeck/shared': fileURLToPath(new URL('../../packages/shared/src/index.ts', import.meta.url)),
+      '@dutydeck/storage': fileURLToPath(new URL('../../packages/storage/src/index.ts', import.meta.url)),
+      '@dutydeck/transports': fileURLToPath(new URL('../../packages/transports/src/index.ts', import.meta.url)),
+      '@dutydeck/pty-driver': fileURLToPath(new URL('../../packages/pty-driver/src/index.ts', import.meta.url)),
+      '@dutydeck/cli-adapters': fileURLToPath(new URL('../../packages/cli-adapters/src/index.ts', import.meta.url)),
+      '@dutydeck/session-backends': fileURLToPath(new URL('../../packages/session-backends/src/index.ts', import.meta.url)),
+      '@dutydeck/terminal-renderer': fileURLToPath(new URL('../../packages/terminal-renderer/src/index.ts', import.meta.url)),
+      '@dutydeck/relay': fileURLToPath(new URL('../../packages/relay/src/index.ts', import.meta.url))
     }
   },
   test: {

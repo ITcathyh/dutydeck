@@ -28,13 +28,13 @@ class AgentGroupToolHttpClient {
 
   constructor(options: GroupToolClientOptions = {}) {
     const env = options.env ?? process.env;
-    this.baseUrl = (env.dockmux_group_tools_url ?? env.DOCKMUX_GROUP_TOOLS_URL)?.trim().replace(/\/$/, '') ?? '';
-    this.token = (env.dockmux_group_tools_token ?? env.DOCKMUX_GROUP_TOOLS_TOKEN)?.trim() ?? '';
+    this.baseUrl = (env.dutydeck_group_tools_url ?? env.DUTYDECK_GROUP_TOOLS_URL)?.trim().replace(/\/$/, '') ?? '';
+    this.token = (env.dutydeck_group_tools_token ?? env.DUTYDECK_GROUP_TOOLS_TOKEN)?.trim() ?? '';
     this.fetcher = options.fetcher ?? globalThis.fetch;
     if (!this.baseUrl || !this.token) {
       throw new AgentGroupToolCliError({
         code: 'GROUP_TOOL_CONTEXT_REQUIRED',
-        message: '群协作工具只能由 Dockmux 飞书群会话内的 Agent 调用；当前进程没有会话 capability。'
+        message: '群协作工具只能由 Dutydeck 飞书群会话内的 Agent 调用；当前进程没有会话 capability。'
       });
     }
   }
@@ -52,14 +52,14 @@ class AgentGroupToolHttpClient {
     } catch (error) {
       throw new AgentGroupToolCliError({
         code: 'GROUP_TOOL_UNAVAILABLE',
-        message: `无法连接 Dockmux 群协作服务：${error instanceof Error ? error.message : String(error)}`
+        message: `无法连接 Dutydeck 群协作服务：${error instanceof Error ? error.message : String(error)}`
       });
     }
     const payload = await response.json().catch(() => ({})) as { error?: GroupToolErrorBody } & Record<string, unknown>;
     if (!response.ok) {
       throw new AgentGroupToolCliError(payload.error ?? {
         code: 'GROUP_TOOL_REQUEST_FAILED',
-        message: `Dockmux 群协作服务返回 HTTP ${response.status}`
+        message: `Dutydeck 群协作服务返回 HTTP ${response.status}`
       }, response.status);
     }
     return payload;

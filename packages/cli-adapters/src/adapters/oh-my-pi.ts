@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -108,7 +108,7 @@ export function createOhMyPiAdapter(): CliAdapter {
     capabilities: { resume: true },
 
     // 绝不把 prompt 当位置参数传：OMP 只会把它塞进 TUI 输入框、不自动提交。
-    // prompt 一律走 writeInput，由 dockmux 掌握最终的提交键。
+    // prompt 一律走 writeInput，由 dutydeck 掌握最终的提交键。
     buildArgs({ resume, resumeSessionId, model, cwd, permissionMode }: AdapterSessionContext): string[] {
       const args = ['--no-title'];
       // OMP 的 `--resume` 吃的是 transcript 文件路径，不是会话 id
@@ -154,8 +154,8 @@ export function createOhMyPiAdapter(): CliAdapter {
 
     buildResumeCommand(sessionId: string): string[] | null {
       // OMP 的 `--resume` 吃的是 transcript **文件路径**，不是会话 id。
-      // dockmux 的 `ses_<uuid>` 显然不是路径 → null，driver 改起新会话。
-      if (isDockmuxSessionId(sessionId)) return null;
+      // dutydeck 的 `ses_<uuid>` 显然不是路径 → null，driver 改起新会话。
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['--resume', sessionId];
     },
 

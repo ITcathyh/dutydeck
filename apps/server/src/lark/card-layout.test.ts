@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent } from '@dockmux/shared';
+import type { AgentEvent } from '@dutydeck/shared';
 import {
   renderLarkCardElements,
   renderLarkProcessElements,
@@ -249,7 +249,7 @@ describe('Lark card layout renderer->bound->build integration', () => {
     // 工具那份记录一个字都不能少。
     expect(JSON.stringify(group)).toContain('file.txt');
     expect(JSON.stringify(group)).toContain('content');
-    // 屏幕那份不再单独成块。它在 Dockmux Web 的完整记录里仍然保留。
+    // 屏幕那份不再单独成块。它在 Dutydeck Web 的完整记录里仍然保留。
     expect(JSON.stringify(group)).not.toContain('Build step succeeded');
     // 降级路径不能一起丢：同一阶段一个工具记录都没有时（transcript 缺席或中途断开），
     // 屏幕回显仍然是唯一的可见性来源，必须照常渲染——由上面 B 段守着。
@@ -520,7 +520,7 @@ export function restoreSession(sessionId: string) {
       taskId: 'readonly_task',
       readOnly: true,
       sessionId: 'ses_secure_123',
-      webBaseUrl: 'https://dockmux.example.com'
+      webBaseUrl: 'https://dutydeck.example.com'
     });
 
     expect(byId(card, 'interrupt')).toBeUndefined();
@@ -528,7 +528,7 @@ export function restoreSession(sessionId: string) {
     expect(byId(card, 'cancel')).toBeUndefined();
 
     const footer = card.body.elements.at(-1);
-    expect(JSON.stringify(footer)).toContain('[查看详情](https://dockmux.example.com/sessions/ses_secure_123)');
+    expect(JSON.stringify(footer)).toContain('[查看详情](https://dutydeck.example.com/sessions/ses_secure_123)');
   });
 
   it('11. P2-1 regression: bounds oversized narrative body before pruning stages when followed by error/permission', () => {
@@ -767,7 +767,7 @@ export function restoreSession(sessionId: string) {
   it('17. 终端输出掐中间时，被掐掉那段里的报错行单独保留', () => {
     // 一整屏 PASS 里那一行 FAIL 是读者唯一要读的东西。按字符位置连同翻页噪声
     // 一起丢掉，卡上就只剩「1 failed」而看不到失败在哪。
-    const lines = ['> dockmux@0.1.0 test  (node:12345) ExperimentalWarning: tsx is experimental'];
+    const lines = ['> dutydeck@0.1.0 test  (node:12345) ExperimentalWarning: tsx is experimental'];
     for (let index = 0; index < 6; index++) lines.push(`PASS  packages/core/src/module_${index}/index.test.ts (8 tests | 0 skipped) 120ms`);
     lines.push('FAIL  packages/pay/src/payment.test.ts > 支付回调签名校验失败');
     for (let index = 0; index < 20; index++) lines.push(`PASS  packages/other/src/feature_${index}/deep/nested/index.test.ts (5 tests) 90ms`);
@@ -784,7 +784,7 @@ export function restoreSession(sessionId: string) {
     expect(body).toContain('其中的报错行保留如下');
     expect(body).toContain('FAIL  packages/pay/src/payment.test.ts');
     // 头尾照旧保留，报错行是额外捞回来的，不是靠放大窗口蒙到的。
-    expect(body).toContain('> dockmux@0.1.0 test');
+    expect(body).toContain('> dutydeck@0.1.0 test');
     expect(body).toContain('Tests  1 failed | 123 passed');
     expect(body).not.toContain('feature_10/deep');
   });

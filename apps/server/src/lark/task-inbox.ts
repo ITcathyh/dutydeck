@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { ConfigRepository } from '@dockmux/shared';
+import type { ConfigRepository } from '@dutydeck/shared';
 import type { LarkMessageResource } from './message-content.js';
 import type { LarkContextCursor } from './task-context.js';
 import type { LarkMessageEvent } from './listener.js';

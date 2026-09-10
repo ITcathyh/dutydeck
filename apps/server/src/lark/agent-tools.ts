@@ -2,7 +2,7 @@ import type { LarkGroupManager } from './group-management.js';
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
-import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dockmux/shared';
+import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dutydeck/shared';
 import { parseLarkMessageContent } from './message-content.js';
 import { readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import {
@@ -78,7 +78,7 @@ export class LarkAgentToolCapabilityRegistry {
 
   private tokenFor(binding: LarkAgentSessionBinding) {
     const digest = createHmac('sha256', this.signingSecret)
-      .update(`dockmux-group-tools-v1\0${binding.sessionId}\0${binding.appId}\0${binding.chatId}`)
+      .update(`dutydeck-group-tools-v1\0${binding.sessionId}\0${binding.appId}\0${binding.chatId}`)
       .digest('base64url');
     return `v1.${digest}`;
   }
@@ -94,18 +94,18 @@ export class LarkAgentToolCapabilityRegistry {
     this.bySession.set(session.id, capability);
     this.byToken.set(capability.token, capability);
     return {
-      dockmux_group_tools_url: `${this.apiBaseUrl.replace(/\/$/, '')}${groupToolPath}`,
-      dockmux_group_tools_token: capability.token
+      dutydeck_group_tools_url: `${this.apiBaseUrl.replace(/\/$/, '')}${groupToolPath}`,
+      dutydeck_group_tools_token: capability.token
     };
   }
 
   async resolve(token: string | undefined): Promise<LarkAgentSessionBinding> {
     const capability = token ? this.byToken.get(token) : undefined;
-    if (!capability) throw new AgentGroupToolError('GROUP_TOOL_UNAUTHORIZED', '群协作工具凭证缺失或无效。该工具只能在 Dockmux 飞书会话内使用。', 401);
+    if (!capability) throw new AgentGroupToolError('GROUP_TOOL_UNAUTHORIZED', '群协作工具凭证缺失或无效。该工具只能在 Dutydeck 飞书会话内使用。', 401);
     const session = await this.sessions.get(capability.sessionId);
     const binding = session ? larkAgentSessionBinding(session) : undefined;
     if (!session || !binding || binding.appId !== capability.appId || binding.chatId !== capability.chatId || session.archivedAt || ['failed', 'stopped'].includes(session.state)) {
-      throw new AgentGroupToolError('GROUP_TOOL_SESSION_EXPIRED', '当前 Dockmux 飞书会话已结束，群协作工具凭证不再有效。', 401);
+      throw new AgentGroupToolError('GROUP_TOOL_SESSION_EXPIRED', '当前 Dutydeck 飞书会话已结束，群协作工具凭证不再有效。', 401);
     }
     return binding;
   }
@@ -113,7 +113,7 @@ export class LarkAgentToolCapabilityRegistry {
   async resolveSession(token: string | undefined): Promise<{ binding: LarkAgentSessionBinding; session: Session }> {
     const binding = await this.resolve(token);
     const session = await this.sessions.get(binding.sessionId);
-    if (!session) throw new AgentGroupToolError('GROUP_TOOL_SESSION_EXPIRED', '当前 Dockmux 飞书会话已结束，群协作工具凭证不再有效。', 401);
+    if (!session) throw new AgentGroupToolError('GROUP_TOOL_SESSION_EXPIRED', '当前 Dutydeck 飞书会话已结束，群协作工具凭证不再有效。', 401);
     return { binding, session };
   }
 
@@ -552,7 +552,7 @@ export class LarkAgentToolsService {
     const content = input.content?.trim();
     if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
     if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
-    const idempotencyKey = input.idempotencyKey?.trim() || `dockmux-${randomUUID()}`;
+    const idempotencyKey = input.idempotencyKey?.trim() || `dutydeck-${randomUUID()}`;
     if (idempotencyKey.length > 50) throw new AgentGroupToolError('INVALID_IDEMPOTENCY_KEY', 'idempotencyKey 不能超过 50 个字符。', 400);
     if (input.inThread && !input.replyTo?.trim()) {
       throw new AgentGroupToolError('GROUP_THREAD_REPLY_TARGET_REQUIRED', '话题内回复必须同时传入 replyTo；请使用当前消息或 messages 返回的 om_* messageId。', 400);
@@ -611,14 +611,14 @@ export class LarkAgentToolsService {
 
 const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
-export const dockmuxGroupToolsCommand = (entrypoint: string, execPath = process.execPath, tsxLoader?: string) => {
+export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process.execPath, tsxLoader?: string) => {
   const absoluteEntrypoint = resolve(entrypoint);
   const loader = absoluteEntrypoint.endsWith('.ts') ? tsxLoader ?? import.meta.resolve('tsx') : undefined;
   return `${shellQuote(execPath)}${loader ? ` --import ${shellQuote(loader)}` : ''} ${shellQuote(absoluteEntrypoint)}`;
 };
 
-export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dockmux') => `[Dockmux 飞书会话工具]
-${allowSend ? '当前会话可读取和发送' : '当前会话可只读访问'}当前飞书会话的消息。必须使用以下当前服务绑定命令，不要改用 PATH 中的其他 dockmux：
+export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dutydeck') => `[Dutydeck 飞书会话工具]
+${allowSend ? '当前会话可读取和发送' : '当前会话可只读访问'}当前飞书会话的消息。必须使用以下当前服务绑定命令，不要改用 PATH 中的其他 dutydeck：
 - ${command} group self
 - ${command} group messages --limit 20 [--after <cursor>]
 - ${command} group message <om_* message_id>
@@ -629,7 +629,7 @@ ${allowSend ? `- ${command} group send <内容> [--to <Agent/成员名称、appI
 
 协作规则：
 - messages 返回的消息列表中，合并转发（merge_forward）消息只显示占位提示和 message_id，不会自动展开。如需查看转发的具体内容，请调用 ${command} group message <message_id> 按 message_id 拉取。
-- ${allowSend ? `需要其他 Agent 协助时先调用 peers 或 bots；返回的机器人中，带 agentId 字段的是本 Dockmux 实例管理的可协作 Agent，不带 agentId 的是群内其他机器人。需要 @群内人类用户时先调用 members。再用 send --to 明确目标；名称重名时使用 appId 或 openId，不要臆测。
+- ${allowSend ? `需要其他 Agent 协助时先调用 peers 或 bots；返回的机器人中，带 agentId 字段的是本 Dutydeck 实例管理的可协作 Agent，不带 agentId 的是群内其他机器人。需要 @群内人类用户时先调用 members。再用 send --to 明确目标；名称重名时使用 appId 或 openId，不要臆测。
 - 发送前先判断消息归属：延续某条提问、回答某个话题或补充该话题结论时，使用 send --reply-to <该消息的 om_* messageId> --in-thread；独立公告、新任务或不应归入原讨论的内容，使用 send 且不要传 --reply-to/--in-thread。不要因为“能回复”就机械回复，也不要把 omt_* threadId 当作 reply-to。
 - 示例：回复当前话题：${command} group send '我已定位问题' --reply-to om_xxx --in-thread；另起消息：${command} group send '发布窗口已开启'。` : '可以发现和读取同群 Agent 与成员，但不得尝试发送、回复或 @交接。'}
 - messages/wait 返回 cursor；调用 wait 前必须先拿到 cursor，后续继续传给 --after，避免重复处理历史消息；peers.securityLimited=true 表示发现结果不完整，应明确告知用户。不要无目的地无限轮询。

@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Bot, MessageSquare, Users, X } from 'lucide-react';
 import { ApiError, foundationApi, type GroupMatrixCell, type PublicSecretRef } from '../api';
-import type { GroupBinding, PublicChannelBotFoundation, UpdateGroupBindingInput } from '@dockmux/shared';
+import type { GroupBinding, PublicChannelBotFoundation, UpdateGroupBindingInput } from '@dutydeck/shared';
 import { Badge, Banner, Button, Card, Dialog, EmptyState, Field, IconButton, Select, Spinner } from './primitives';
 
 type Draft = {
@@ -113,7 +113,7 @@ function SecretRefSelector({ bot, refs, writesEnabled, pending, error, conflict,
       </div>
       <Button variant="secondary" disabled={!writesEnabled || pending || selected === (bot.selectedSecretRefId ?? '')} onClick={() => onSave(selected || undefined, bot.revision)}>{pending ? '保存中…' : '保存引用'}</Button>
     </div>
-    {eligible.length === 0 && <Banner tone="warning">尚无 Lark SecretRef。请在远程机终端运行 <code>dockmux secret set &lt;id&gt; --value-fd 0</code>；不要在 Web 粘贴凭据。</Banner>}
+    {eligible.length === 0 && <Banner tone="warning">尚无 Lark SecretRef。请在远程机终端运行 <code>dutydeck secret set &lt;id&gt; --value-fd 0</code>；不要在 Web 粘贴凭据。</Banner>}
     {error && (conflict
       ? <Banner tone="warning" role="alert" action={{ label: '基于新版本重试', onClick: () => onSave(selected || undefined, conflict.revision) }}>Bot 配置已变化到 revision {conflict.revision}；你的 SecretRef 选择仍保留。</Banner>
       : <Banner tone="danger">{error instanceof ApiError && error.status === 403 ? '需要 owner/admin 权限才能保存引用。' : `SecretRef 保存失败：${error.message}`}</Banner>)}
@@ -179,7 +179,7 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
       </Card>}
       {matrix.isLoading && <div className="flex justify-center"><Spinner label="正在加载群配置矩阵…"/></div>}
       {matrix.isError && <Banner tone="danger" action={{ label: '重试', onClick: () => void matrix.refetch() }}>群配置读取失败：{matrix.error.message}</Banner>}
-      {secretRefs.isError && <Banner tone="danger">SecretRef metadata 读取失败；请在远程机运行 <code>dockmux secret list</code> 检查。</Banner>}
+      {secretRefs.isError && <Banner tone="danger">SecretRef metadata 读取失败；请在远程机运行 <code>dutydeck secret list</code> 检查。</Banner>}
       {matrix.data?.bots.length === 0 && <Card tone="dashed" padding="none">
         <EmptyState tone="neutral" title="尚无 staged/disabled ChannelBot" description="先通过管理 API 创建安全草稿；此页面不会创建或启用 listener。"/>
       </Card>}
@@ -190,7 +190,7 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
           <Badge>{entry.bot.state} · rev {entry.bot.revision}</Badge>
           <Badge tone={entry.bot.credentialStatus === 'configured' ? 'success' : 'danger'}>凭据 {entry.bot.credentialStatus}</Badge>
         </div>
-        {entry.bot.credentialStatus !== 'configured' && <div className="mb-3"><Banner tone="danger"><strong>Bot 保持禁用：</strong>{entry.bot.credentialStatus === 'unreadable' ? '所选 SecretRef 文件缺失或不可读。下一步：在远程机运行 dockmux secret list 检查，并用 rotate 修复。' : '缺少可用 SecretRef。下一步：选择已配置且可读的 SecretRef。'} 此页面不会读取、测试或回显 App Secret。</Banner></div>}
+        {entry.bot.credentialStatus !== 'configured' && <div className="mb-3"><Banner tone="danger"><strong>Bot 保持禁用：</strong>{entry.bot.credentialStatus === 'unreadable' ? '所选 SecretRef 文件缺失或不可读。下一步：在远程机运行 dutydeck secret list 检查，并用 rotate 修复。' : '缺少可用 SecretRef。下一步：选择已配置且可读的 SecretRef。'} 此页面不会读取、测试或回显 App Secret。</Banner></div>}
         <SecretRefSelector
           bot={entry.bot}
           refs={secretRefs.data?.secretRefs ?? []}

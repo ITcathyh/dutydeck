@@ -5,10 +5,10 @@
  * session. Every CLI we bridge records the submitted prompt text somewhere
  * durable (claude jsonl, codex/traex history.jsonl + rollout, grok
  * prompt_history.jsonl, opencode part table), so the marker becomes the
- * bridge between "dockmux's session id" and "the CLI's own session id".
+ * bridge between "dutydeck's session id" and "the CLI's own session id".
  *
  * Why a prompt marker and not a time window:
- *   A time window + cwd cannot separate two dockmux sessions started in the
+ *   A time window + cwd cannot separate two dutydeck sessions started in the
  *   same repo within the same second — a common case (a burst of topics).
  *   Picking wrong there resumes SOMEONE ELSE'S conversation, which is worse
  *   than not resuming at all. The marker is per-session unique by
@@ -29,7 +29,7 @@ export const MIN_MARKER_SESSION_ID_LENGTH = 8;
 
 /** The marker block injected into the first prompt. */
 export function buildSessionMarker(sessionId: string): string {
-  return `<dockmux_session_id>${sessionId}</dockmux_session_id>`;
+  return `<dutydeck_session_id>${sessionId}</dutydeck_session_id>`;
 }
 
 /** True when a session id is distinctive enough to be used as a fingerprint. */

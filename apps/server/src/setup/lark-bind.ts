@@ -1,7 +1,7 @@
 /**
  * setup 向导的飞书绑定步骤。
  *
- * 这个模块只做一件事：把一个「已经存在」的飞书应用（cli_*）配置成 Dockmux 能用的
+ * 这个模块只做一件事：把一个「已经存在」的飞书应用（cli_*）配置成 Dutydeck 能用的
  * 机器人，并如实汇报每一步到底发生了什么。它自己从不创建应用。
  *
  * 三个必须记住的设计约束（都来自线上事故）：
@@ -118,7 +118,7 @@ function isSessionFailure(message: string): boolean {
 
 /** 算出续跑命令：复用同一个 app id，只在会话问题时才追加 --force-login。 */
 function resumeCommand(appId: string, needsRelogin: boolean): string {
-  return `dockmux setup --lark-app-id ${appId}${needsRelogin ? ' --force-login' : ''}`;
+  return `dutydeck setup --lark-app-id ${appId}${needsRelogin ? ' --force-login' : ''}`;
 }
 
 const NOTHING_CREATED =

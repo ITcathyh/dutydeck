@@ -161,11 +161,11 @@ describe('conversation timeline', () => {
     const tasks = [{ id: 'task-1', sessionId: 's1', prompt: '检查', status: 'running', createdAt: '', updatedAt: '' }];
     const timeline = buildTimeline([
       event(1, 'text', { text: '检查', role: 'user', taskId: 'task-1' }),
-      event(2, 'text', { text: '确认 **Dockmux** 并读取 [说明](https://example.com)\n继续执行', role: 'assistant' }),
+      event(2, 'text', { text: '确认 **Dutydeck** 并读取 [说明](https://example.com)\n继续执行', role: 'assistant' }),
       event(3, 'tool_call', { id: 'read', name: 'Read', status: 'running' })
     ]);
     expect(buildTimelineSections(timeline, tasks).find(section => section.kind === 'activity')).toMatchObject({
-      groups: [expect.objectContaining({ label: '确认 Dockmux 并读取 说明 继续执行' })]
+      groups: [expect.objectContaining({ label: '确认 Dutydeck 并读取 说明 继续执行' })]
     });
   });
 

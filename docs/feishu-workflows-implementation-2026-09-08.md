@@ -1,6 +1,6 @@
 # 飞书完整工作入口：首轮实现计划
 
-用户已授权调研、设计后直接实施。基线为 `20b5042`，集成工作目录为 `/data00/home/huangyuhang.edu/ai/dockmux-feishu-workflows-20260908`。不变更真实飞书配置，不启动生产实例。本轮交付任务导航、产物回传、问答与 ACP 审批、任务材料收集；定时执行、浏览器和项目记忆留在后续清单。
+用户已授权调研、设计后直接实施。基线为 `20b5042`，集成工作目录为 `/data00/home/huangyuhang.edu/ai/dutydeck-feishu-workflows-20260908`。不变更真实飞书配置，不启动生产实例。本轮交付任务导航、产物回传、问答与 ACP 审批、任务材料收集；定时执行、浏览器和项目记忆留在后续清单。
 
 ## 用户行为与完成标准
 
@@ -26,7 +26,7 @@ ACP 审批保留 Runtime 的结构化请求；配置新增显式 ask 姿态，�
 
 ### A：文件交付与文档读取，terra worker
 
-独立目录 `/data00/home/huangyuhang.edu/ai/dockmux-feishu-files-20260908`。负责 `apps/server/src/lark/service.ts`、`agent-tools.ts`、`agent-tools-routes.ts`、`agent-tools-cli.ts` 及对应测试，可新增 `artifact-delivery.ts` 与测试。不得改 coordinator/listener/runtime/shared/storage/config，不 commit，不派 agent，不使用真实飞书。还有其他 agent 工作，不能回退其改动。
+独立目录 `/data00/home/huangyuhang.edu/ai/dutydeck-feishu-files-20260908`。负责 `apps/server/src/lark/service.ts`、`agent-tools.ts`、`agent-tools-routes.ts`、`agent-tools-cli.ts` 及对应测试，可新增 `artifact-delivery.ts` 与测试。不得改 coordinator/listener/runtime/shared/storage/config，不 commit，不派 agent，不使用真实飞书。还有其他 agent 工作，不能回退其改动。
 
 - CLI：`group send-file <path> [--reply-to om_x] [--in-thread] [--idempotency-key value] [--image]`。沿用现有 token、群工具发送权限及目标校验，不接收任意 chatId。回复目标需属于绑定群。
 - 当前 Session cwd 内的 canonical 普通文件才可发送；拒绝路径逃逸、symlink 逃逸、目录/FIFO/空文件。尽量使用已打开 fd 的 fstat 与内容，减少检查和读取之间的文件变化。产品上限：文件 30 MiB、图片 10 MiB；这是本轮保守选择，不声明为平台最新最大值。

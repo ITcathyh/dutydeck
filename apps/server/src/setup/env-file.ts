@@ -17,10 +17,10 @@ import { dirname, join } from 'node:path';
 
 /** 向导管理的键。不在此列的键一律不碰。 */
 export const MANAGED_KEYS = [
-  'DOCKMUX_DEFAULT_CWD',
-  'DOCKMUX_PORT',
-  'DOCKMUX_HOST',
-  'DOCKMUX_LOCAL_ONLY',
+  'DUTYDECK_DEFAULT_CWD',
+  'DUTYDECK_PORT',
+  'DUTYDECK_HOST',
+  'DUTYDECK_LOCAL_ONLY',
   'LARK_APP_ID',
   'LARK_APP_SECRET'
 ] as const;
@@ -75,7 +75,7 @@ function quoteIfNeeded(value: string): string {
   return `"${value.replace(/(["\\])/g, '\\$1')}"`;
 }
 
-const MANAGED_BANNER = '# 由 dockmux setup 写入';
+const MANAGED_BANNER = '# 由 dutydeck setup 写入';
 
 /**
  * 把 updates 合并进原文件内容，返回新内容。
@@ -160,7 +160,7 @@ export function writeEnvFile(path: string, updates: Record<string, string | unde
   const directory = dirname(path);
   mkdirSync(directory, { recursive: true });
   // 同目录临时文件 + rename：跨设备 rename 会失败，所以不能用 tmpdir()。
-  const staging = mkdtempSync(join(directory, '.dockmux-env-'));
+  const staging = mkdtempSync(join(directory, '.dutydeck-env-'));
   const stagedFile = join(staging, 'env');
   try {
     writeFileSync(stagedFile, next, { mode: 0o600 });

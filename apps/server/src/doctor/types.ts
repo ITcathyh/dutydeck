@@ -1,5 +1,5 @@
 /**
- * `dockmux doctor` 的类型契约与可注入依赖。
+ * `dutydeck doctor` 的类型契约与可注入依赖。
  *
  * 单独成文件的原因：checks.ts 与 doctor.ts 互相需要这些类型，放在任一侧都会形成
  * 循环 import。类型在运行时被擦除，但依赖注入的默认实现是真值，必须避免环。

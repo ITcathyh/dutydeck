@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -77,10 +77,10 @@ export function createCursorAdapter(): CliAdapter {
       emitEnter();
     },
 
-    /** Cursor 的 chat id 不透明、由 CLI 自己铸，dockmux 的 sessionId 推导不出来。
-     *  收到 dockmux 的 `ses_<uuid>` → null，driver 改起新会话。 */
+    /** Cursor 的 chat id 不透明、由 CLI 自己铸，dutydeck 的 sessionId 推导不出来。
+     *  收到 dutydeck 的 `ses_<uuid>` → null，driver 改起新会话。 */
     buildResumeCommand(sessionId: string): string[] | null {
-      if (isDockmuxSessionId(sessionId)) return null;
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['--resume', sessionId];
     },
 

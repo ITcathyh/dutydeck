@@ -463,7 +463,7 @@ button.sidebar-create-btn {
 
 ## B. 侧栏细节：工作台会话列表
 
-> 注意：这一节说的**不是** A2 的全局导航侧栏，而是 `#/agent-workbench` 驾驶舱里那条会话栏（`agent-workbench-session-list.tsx`，642 行）。dockmux 要对标的是这个。
+> 注意：这一节说的**不是** A2 的全局导航侧栏，而是 `#/agent-workbench` 驾驶舱里那条会话栏（`agent-workbench-session-list.tsx`，642 行）。dutydeck 要对标的是这个。
 
 **它有自己的一套 token**，不复用 dashboard 的语义色。`style.css:28445-28553` 定义 `.agent-workbench-page, .agent-workbench-dock` 作用域下的 `--wb-*`：
 
@@ -875,7 +875,7 @@ function byActivityDesc(a, b) {
 
 **页头没有共享组件**：7 个页面里 6 个手抄同一段 JSX 字面量 `<div className="page-heading"><div><p className="eyebrow">…</p><h1>…</h1></div><div className="page-heading-actions">…</div></div>`。`dashboard-components.tsx` 导出的 `SectionHeader`（`:50`）渲染的是 `.sect-head`，那是**面板**标题不是**页面**标题。
 
-> 这一块是 botmux 的**弱项**，不建议照抄：8 条路由 + 4 种页内导航 + 3 套 tab 类族，用户要记住「哪个设置在哪个路由下」。dockmux 若要对标，建议取它的 `NAV_GROUPS` 分组思路（§A2），但设置侧收敛成单一层级。
+> 这一块是 botmux 的**弱项**，不建议照抄：8 条路由 + 4 种页内导航 + 3 套 tab 类族，用户要记住「哪个设置在哪个路由下」。dutydeck 若要对标，建议取它的 `NAV_GROUPS` 分组思路（§A2），但设置侧收敛成单一层级。
 
 ### C12. 命令面板：**有，但只在 Insights 页内，不是全局**
 
@@ -1518,7 +1518,7 @@ const allowed = /^(?:0|50%|var\(--radius-(?:sm|md|lg|full)\))$/;       // 圆角
 4. **小尺寸元素（chip、徽标）→ 画 1px 中性环**，语义只走文字色和 12% 填充。环不承载语义。
 5. **状态（hover / 选中）→ 永远用色块，不用线**。选中的方向感靠 `inset` 内投影（`box-shadow: inset 2px 0 0 var(--accent)`），不用 `border-left`——后者在圆角处会露直角。
 
-Dashboard 侧没有这套机器约束，所以出现了 §0.1、§E17 那些不一致。**工作台这套是 botmux 明显更成熟的部分，dockmux 应当照抄这个方法论而不是抄具体色值。**
+Dashboard 侧没有这套机器约束，所以出现了 §0.1、§E17 那些不一致。**工作台这套是 botmux 明显更成熟的部分，dutydeck 应当照抄这个方法论而不是抄具体色值。**
 
 ### E20. 渐变、模糊、动效
 
@@ -1586,7 +1586,7 @@ Dashboard 侧没有这套机器约束，所以出现了 §0.1、§E17 那些不�
 
 ---
 
-## 附录：给 dockmux 的可抄清单
+## 附录：给 dutydeck 的可抄清单
 
 **建议直接抄的（有证据支撑其优越性）：**
 

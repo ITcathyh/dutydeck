@@ -2,7 +2,7 @@
  * Driver-level tests for the M2 resume work:
  *   - the session marker is injected into the FIRST prompt only
  *   - resume() resolves the CLI's own session id before building the command
- *   - resume() degrades to the dockmux session id when the lookup finds nothing
+ *   - resume() degrades to the dutydeck session id when the lookup finds nothing
  *   - tmux reattach survives a "daemon restart" (a fresh driver over a live
  *     tmux session) and keeps streaming
  *
@@ -16,9 +16,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentConfig, NormalizedDriverEvent } from '@dockmux/shared';
-import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dockmux/cli-adapters';
-import { PtyBackend, TmuxBackend, isTmuxAvailable } from '@dockmux/session-backends';
+import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
+import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
+import { PtyBackend, TmuxBackend, isTmuxAvailable } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 import { buildSessionMarker } from './session-id/index.js';
 
@@ -51,7 +51,7 @@ let tempRoots: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
 
 function makeTempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `dockmux-drv-${prefix}-`));
+  const dir = mkdtempSync(join(tmpdir(), `dutydeck-drv-${prefix}-`));
   tempRoots.push(dir);
   return dir;
 }
@@ -312,7 +312,7 @@ describe('PtyCliDriver resume session id resolution', () => {
     writeFileSync(probeCli, `
       import { writeFileSync } from 'node:fs';
       writeFileSync(${JSON.stringify(envDump)}, JSON.stringify({
-        probe: process.env.DOCKMUX_PROBE ?? null,
+        probe: process.env.DUTYDECK_PROBE ?? null,
         hasPath: Boolean(process.env.PATH),
       }));
       process.stdout.write('MOCK READY\\n');
@@ -329,7 +329,7 @@ describe('PtyCliDriver resume session id resolution', () => {
     };
 
     const driver = new PtyCliDriver({
-      agent: agentConfig({ cwd, env: { DOCKMUX_PROBE: 'from-agent-env' } }),
+      agent: agentConfig({ cwd, env: { DUTYDECK_PROBE: 'from-agent-env' } }),
       adapter, backend: new PtyBackend(),
       onEvent: () => {}, onExit: () => {}, sessionId: SESSION_ID,
     });
@@ -406,14 +406,14 @@ describe('PtyCliDriver resume session id resolution', () => {
     await driver.start();
     await driver.resume();
 
-    // The CLI's own id — NOT the dockmux session id.
+    // The CLI's own id — NOT the dutydeck session id.
     expect(adapter.resumeIds).toEqual([cliSessionId]);
     expect(driver.getCliSessionId()).toBe(cliSessionId);
 
     await driver.stop();
   }, 30_000);
 
-  it('degrades to the dockmux session id when the lookup finds nothing, without throwing', async () => {
+  it('degrades to the dutydeck session id when the lookup finds nothing, without throwing', async () => {
     const cwd = makeTempDir('codex-cwd');
     setEnv('CODEX_HOME', makeTempDir('codex-empty'));
 
@@ -472,7 +472,7 @@ describe('PtyCliDriver resume session id resolution', () => {
     await driver.stop();
   }, 30_000);
 
-  it('uses the pinned id for a CLI whose session id dockmux chose (claude)', async () => {
+  it('uses the pinned id for a CLI whose session id dutydeck chose (claude)', async () => {
     const cwd = makeTempDir('claude-cwd');
     const configDir = makeTempDir('claude-cfg');
     // The lookup resolves against the env the CLI CHILD was spawned with, and
@@ -570,10 +570,10 @@ describe('PtyCliDriver resume degradation (buildResumeCommand → null)', () => 
     };
   }
 
-  const NATIVE_ID = /^ses_[0-9A-Za-z]+$/;   // 无连字符 —— dockmux 的 ses_<uuid> 进不来
+  const NATIVE_ID = /^ses_[0-9A-Za-z]+$/;   // 无连字符 —— dutydeck 的 ses_<uuid> 进不来
 
   it('反查不到 → 适配器返回 null → 起新会话，argv 里绝不带那个无效 id', async () => {
-    // 缺口 1 的核心路径。旧行为是把 dockmux sessionId 硬塞进 resume argv，
+    // 缺口 1 的核心路径。旧行为是把 dutydeck sessionId 硬塞进 resume argv，
     // 对 opencode 这类 CLI 必然 exit 1；现在必须彻底不带续接定位。
     const cwd = makeTempDir('degrade-cwd');
     const argvLog: string[][] = [];
@@ -588,7 +588,7 @@ describe('PtyCliDriver resume degradation (buildResumeCommand → null)', () => 
     expect(argvLog).toHaveLength(1);
     const argv = argvLog[0]!;
     expect(argv, 'fresh spawn 不该带任何续接定位').toEqual([fixturePath]);
-    expect(argv, 'dockmux sessionId 绝不能出现在 argv 里').not.toContain(SESSION_ID);
+    expect(argv, 'dutydeck sessionId 绝不能出现在 argv 里').not.toContain(SESSION_ID);
     expect(argv).not.toContain('--session');
 
     await driver.stop();
@@ -626,7 +626,7 @@ describe('PtyCliDriver resume degradation (buildResumeCommand → null)', () => 
 
   it('降级后重新走首轮注入：新会话必须重新打会话指纹', async () => {
     // 降级起的是**全新** CLI 会话，里面没有路由块、也没有会话指纹。指纹是
-    // 「dockmux 会话 ↔ CLI 原生 id」反查的唯一锚点：不重新打，下一次 resume
+    // 「dutydeck 会话 ↔ CLI 原生 id」反查的唯一锚点：不重新打，下一次 resume
     // 照样反查不到，会话就永久失去恢复能力。
     const cwd = makeTempDir('degrade-cwd');
     const prompts: string[] = [];
@@ -783,7 +783,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
   });
 
   function tmuxName(): string {
-    const name = `dockmux-drv-test-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const name = `dutydeck-drv-test-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     sessions.push(name);
     return name;
   }
@@ -808,7 +808,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     const name = tmuxName();
     const cwd = makeTempDir('tmux-cwd');
     const resumeIds: string[] = [];
-    const ownerId = `dockmux:${SESSION_ID}`;
+    const ownerId = `dutydeck:${SESSION_ID}`;
 
     // ── daemon lifetime #1: spawn the CLI inside tmux ──
     const firstEvents: NormalizedDriverEvent[] = [];
@@ -829,7 +829,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     const originalPid = firstBackend.getPid();
     expect(originalPid).toBeGreaterThan(0);
     expect(TmuxBackend.sessionOwner(name)).toBe(ownerId);
-    expect(firstBackend.getDockmuxMetadata('first_prompt_sent')).toBe('true');
+    expect(firstBackend.getDutydeckMetadata('first_prompt_sent')).toBe('true');
 
     // The service marks every production driver before runtime.shutdown().
     // stop() must detach rather than kill only on that path.
@@ -875,7 +875,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
   it('does not kill a foreign same-named pane when reattach ownership validation fails', async () => {
     const name = tmuxName();
     const cwd = makeTempDir('tmux-cwd');
-    const foreign = new TmuxBackend(name, { ownerId: 'dockmux:foreign-session' });
+    const foreign = new TmuxBackend(name, { ownerId: 'dutydeck:foreign-session' });
     foreign.spawn('/bin/sh', ['-c', 'sleep 30'], {
       cwd,
       cols: 80,
@@ -889,7 +889,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     const driver = new PtyCliDriver({
       agent: agentConfig({ command: '/bin/sh', cwd }),
       adapter: shellAdapter([]),
-      backend: new TmuxBackend(name, { ownerId: `dockmux:${SESSION_ID}` }),
+      backend: new TmuxBackend(name, { ownerId: `dutydeck:${SESSION_ID}` }),
       onEvent: () => {},
       onExit: () => {},
       sessionId: SESSION_ID,
@@ -900,7 +900,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     // scoped to the expected owner rather than deleting the foreign pane.
     await driver.stop({ discardSession: true });
     expect(TmuxBackend.probeSession(name)).toBe('exists');
-    const observer = new TmuxBackend(name, { ownerId: 'dockmux:foreign-session' });
+    const observer = new TmuxBackend(name, { ownerId: 'dutydeck:foreign-session' });
     observer.attach({ cols: 80, rows: 24 });
     expect(observer.getPid()).toBe(foreignPid);
     observer.detach();
@@ -930,7 +930,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     await driver.resume();
 
     // No live pane to reattach → the adapter's resume path ran instead, and
-    // with no transcript evidence it degraded to the dockmux session id.
+    // with no transcript evidence it degraded to the dutydeck session id.
     expect(resumeIds).toEqual([SESSION_ID]);
     // The respawn reused the SAME tmux session name (state stays addressable).
     await waitFor(() => TmuxBackend.probeSession(name) === 'exists');

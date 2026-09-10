@@ -104,7 +104,7 @@ tmuxDescribe('TmuxBackend', () => {
   let backend: TmuxBackend | null = null;
 
   const newSessionName = () =>
-    `dockmux-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    `dutydeck-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   afterEach(() => {
     backend?.kill();
@@ -214,10 +214,10 @@ tmuxDescribe('TmuxBackend', () => {
       cols: 80,
       rows: 24,
       env: nodeEnv({
-        DOCKMUX_TEST_SECRET: secret,
+        DUTYDECK_TEST_SECRET: secret,
         ...Object.fromEntries(Array.from(
           { length: 64 },
-          (_, index) => [`DOCKMUX_TEST_PADDING_${index}`, 'x'.repeat(512)],
+          (_, index) => [`DUTYDECK_TEST_PADDING_${index}`, 'x'.repeat(512)],
         )),
       }),
     });
@@ -232,7 +232,7 @@ tmuxDescribe('TmuxBackend', () => {
       stdio: ['ignore', 'pipe', 'ignore'],
     });
     expect(sessionEnv).not.toContain(secret);
-    expect(sessionEnv).not.toContain('DOCKMUX_TEST_PADDING_0=');
+    expect(sessionEnv).not.toContain('DUTYDECK_TEST_PADDING_0=');
   }, 60000);
 
   it('write() returns false after the session is gone', async () => {
@@ -294,12 +294,12 @@ tmuxDescribe('TmuxBackend', () => {
   }, 60000);
 
   it('keeps spawn, external lookup, and reattach in an isolated TMUX_TMPDIR namespace', async () => {
-    const namespaceRoot = mkdtempSync(join(tmpdir(), 'dockmux-tmux-namespace-'));
+    const namespaceRoot = mkdtempSync(join(tmpdir(), 'dutydeck-tmux-namespace-'));
     chmodSync(namespaceRoot, 0o700);
     const previousTmuxTmpdir = process.env.TMUX_TMPDIR;
     process.env.TMUX_TMPDIR = namespaceRoot;
     const name = newSessionName();
-    const ownerId = `dockmux:${name}`;
+    const ownerId = `dutydeck:${name}`;
     const isolatedClientEnv = { ...process.env };
     delete isolatedClientEnv.TMUX;
     const defaultClientEnv = { ...isolatedClientEnv };
@@ -359,7 +359,7 @@ tmuxDescribe('TmuxBackend', () => {
   it('replaces a stale pipe-pane capture left behind by an ungraceful daemon exit', async () => {
     const name = newSessionName();
     sessions.push(name);
-    const ownerId = 'dockmux:crash-recovery';
+    const ownerId = 'dutydeck:crash-recovery';
     const first = new TmuxBackend(name, { ownerId });
     backend = first;
     const firstReceived: string[] = [];
@@ -387,10 +387,10 @@ tmuxDescribe('TmuxBackend', () => {
     first.detach();
   }, 60000);
 
-  it('persists Dockmux ownership/metadata and refuses a foreign attach without killing the pane', async () => {
+  it('persists Dutydeck ownership/metadata and refuses a foreign attach without killing the pane', async () => {
     const name = newSessionName();
     sessions.push(name);
-    const first = new TmuxBackend(name, { ownerId: 'dockmux:ses-owned' });
+    const first = new TmuxBackend(name, { ownerId: 'dutydeck:ses-owned' });
     backend = first;
     first.spawn('/bin/sh', ['-c', 'sleep 30'], {
       cwd: tmpdir(),
@@ -400,21 +400,21 @@ tmuxDescribe('TmuxBackend', () => {
     });
     await waitFor(() => first.getPid() !== null);
     const originalPid = first.getPid();
-    expect(TmuxBackend.sessionOwner(name)).toBe('dockmux:ses-owned');
-    first.setDockmuxMetadata('first_prompt_sent', 'true');
-    expect(first.getDockmuxMetadata('first_prompt_sent')).toBe('true');
+    expect(TmuxBackend.sessionOwner(name)).toBe('dutydeck:ses-owned');
+    first.setDutydeckMetadata('first_prompt_sent', 'true');
+    expect(first.getDutydeckMetadata('first_prompt_sent')).toBe('true');
     first.detach();
 
-    const foreign = new TmuxBackend(name, { ownerId: 'dockmux:ses-other' });
+    const foreign = new TmuxBackend(name, { ownerId: 'dutydeck:ses-other' });
     expect(() => foreign.attach({ cols: 80, rows: 24 })).toThrow(TmuxOwnershipError);
     foreign.kill();
     expect(TmuxBackend.probeSession(name)).toBe('exists');
 
-    const restored = new TmuxBackend(name, { ownerId: 'dockmux:ses-owned' });
+    const restored = new TmuxBackend(name, { ownerId: 'dutydeck:ses-owned' });
     restored.attach({ cols: 80, rows: 24 });
     backend = restored;
     expect(restored.getPid()).toBe(originalPid);
-    expect(restored.getDockmuxMetadata('first_prompt_sent')).toBe('true');
+    expect(restored.getDutydeckMetadata('first_prompt_sent')).toBe('true');
   }, 60000);
 });
 
@@ -432,7 +432,7 @@ describe('SessionBackend.sessionName contract', () => {
   it('每个持久后端都把自己的会话名作为公开只读字段暴露出来', () => {
     // 逐个构造，不用循环：这四个类的构造签名本来就不同，写死才能防「新增后端
     // 忘了实现契约」——那种情况下 driver 对它永远反查不到会话名。
-    const name = 'dockmux-contract-probe';
+    const name = 'dutydeck-contract-probe';
     expect(new TmuxBackend(name).sessionName).toBe(name);
     expect(new ZellijBackend(name).sessionName).toBe(name);
     expect(new ZmxBackend(name).sessionName).toBe(name);
@@ -447,7 +447,7 @@ describe('SessionBackend.sessionName contract', () => {
   it('sessionName 是构造期固定的，不随 spawn/attach 变化', () => {
     // 会话名一旦绑定就不该变：改绑一个活后端会让它的捕获管道指向旧会话，
     // 而 driver 已经拿新名字去探测了。
-    const backend = new TmuxBackend('dockmux-immutable-probe');
+    const backend = new TmuxBackend('dutydeck-immutable-probe');
     const before = backend.sessionName;
     expect(Object.isFrozen(before)).toBe(true);   // 字符串天然不可变
     expect(backend.sessionName).toBe(before);

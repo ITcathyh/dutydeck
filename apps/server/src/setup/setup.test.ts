@@ -1,5 +1,5 @@
 /**
- * `dockmux setup` 编排器测试。
+ * `dutydeck setup` 编排器测试。
  *
  * 全部依赖都从 SetupDependencies 注入：不碰网络、不碰真实 .env、不写临时目录之外
  * 的任何东西。真实目录只用 mkdtemp 建、afterEach 删。
@@ -19,7 +19,7 @@ const tempDirs: string[] = [];
 const originalIsTTY = process.stdin.isTTY;
 
 async function makeTempDir(): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'dockmux-setup-'));
+  const dir = await mkdtemp(join(tmpdir(), 'dutydeck-setup-'));
   tempDirs.push(dir);
   return dir;
 }
@@ -126,19 +126,19 @@ describe('runSetup', () => {
     expect(result.ok).toBe(true);
     expect(result.action).toBe('setup');
     expect(result.changed).toBe(true);
-    expect(result.changedKeys).toContain('DOCKMUX_DEFAULT_CWD');
+    expect(result.changedKeys).toContain('DUTYDECK_DEFAULT_CWD');
     expect(result.defaultCwd).toBe(dir);
     expect(result.port).toBe('4310');
     expect(result.envFile).toBe(join(dir, '.env'));
-    expect(result.next).toBe('dockmux start');
+    expect(result.next).toBe('dutydeck start');
     // 关键契约：绝不逐步增量写盘，只有全部校验通过后的那一次原子写入。
     expect(writeEnv).toHaveBeenCalledTimes(1);
-    expect(writeEnv).toHaveBeenCalledWith(join(dir, '.env'), expect.objectContaining({ DOCKMUX_DEFAULT_CWD: dir }));
+    expect(writeEnv).toHaveBeenCalledWith(join(dir, '.env'), expect.objectContaining({ DUTYDECK_DEFAULT_CWD: dir }));
   });
 
   it('reports no change on an idempotent re-run and distinguishes initial from update mode', async () => {
     const dir = await makeTempDir();
-    const existing = { DOCKMUX_DEFAULT_CWD: dir, DOCKMUX_PORT: '4310' };
+    const existing = { DUTYDECK_DEFAULT_CWD: dir, DUTYDECK_PORT: '4310' };
     const update = harness({ cwd: dir, existing, changed: false });
 
     const rerun = await runSetup({ cwd: dir, port: '4310', skipLark: true, yes: true }, update.deps);
@@ -181,7 +181,7 @@ describe('runSetup', () => {
     const secret = 'sEcRet-do-NOT-leak-9f3a';
     const { deps, out } = harness({
       cwd: dir,
-      existing: { DOCKMUX_DEFAULT_CWD: dir, DOCKMUX_PORT: '4310', LARK_APP_SECRET: secret }
+      existing: { DUTYDECK_DEFAULT_CWD: dir, DUTYDECK_PORT: '4310', LARK_APP_SECRET: secret }
     });
 
     await runSetup({ json: true, cwd: dir, port: '4310', skipLark: true, yes: true }, deps);
@@ -249,7 +249,7 @@ describe('runSetup', () => {
       appId: 'cli_x',
       steps: [],
       warnings: [],
-      next: 'dockmux setup --lark-app-id cli_x --force-login',
+      next: 'dutydeck setup --lark-app-id cli_x --force-login',
       error: { code: 'X', message: 'boom' }
     };
     const { deps, writeEnv, bind, out } = harness({ cwd: dir, bind: async () => failed });
@@ -259,8 +259,8 @@ describe('runSetup', () => {
     expect(bind).toHaveBeenCalledTimes(1);
     expect(result.ok).toBe(false);
     // 算好的续跑命令绝不能被泛泛的建议替换。
-    expect(result.next).toBe('dockmux setup --lark-app-id cli_x --force-login');
-    expect(out.read()).toContain('dockmux setup --lark-app-id cli_x --force-login');
+    expect(result.next).toBe('dutydeck setup --lark-app-id cli_x --force-login');
+    expect(out.read()).toContain('dutydeck setup --lark-app-id cli_x --force-login');
     expect(result.error).toEqual({ code: 'X', message: 'boom' });
     expect(result.lark).toBe(failed);
     // 前三步是纯本地且已校验，飞书失败不该丢掉它们；但绝不能记下没绑成功的 app id。
@@ -293,7 +293,7 @@ describe('runSetup', () => {
     expect(result.ok).toBe(true);
     expect(bind).not.toHaveBeenCalled();
     expect(result.lark).toBeUndefined();
-    expect(out.read()).toContain('dockmux setup --lark-app-id cli_xxx');
+    expect(out.read()).toContain('dutydeck setup --lark-app-id cli_xxx');
     expect(updatesOf(writeEnv)).not.toHaveProperty('LARK_APP_ID');
   });
 
@@ -315,7 +315,7 @@ describe('runSetup', () => {
     const { deps, out, err } = harness({
       cwd: dir,
       bind: async (options: LarkBindOptions) => {
-        // bind 内部的进度与提示必须落在 stderr，否则 `dockmux setup | head -1` 失去意义。
+        // bind 内部的进度与提示必须落在 stderr，否则 `dutydeck setup | head -1` 失去意义。
         options.ui.progress('正在配置飞书应用 cli_ok');
         options.ui.notice('请用飞书 App 扫码');
         return larkResult({ outcome: 'ready', appId: 'cli_ok' });
@@ -329,7 +329,7 @@ describe('runSetup', () => {
     const stderr = err.read();
     expect(stdout).toContain('配置结果');
     expect(stdout).toContain('接下来做什么');
-    expect(stdout).toContain('dockmux start');
+    expect(stdout).toContain('dutydeck start');
     expect(stderr).toContain('正在配置飞书应用 cli_ok');
     expect(stderr).toContain('请用飞书 App 扫码');
     expect(stdout).not.toContain('正在配置飞书应用');
@@ -342,7 +342,7 @@ describe('runSetup', () => {
     // 沿用旧值是唯一不过 validateWorkingDirectory 的路径：目录可能在写入后被删了。
     const dir = await makeTempDir();
     const stale = join(dir, 'deleted-since');
-    const { deps, out } = harness({ cwd: dir, existing: { DOCKMUX_DEFAULT_CWD: stale, DOCKMUX_PORT: '4310' } });
+    const { deps, out } = harness({ cwd: dir, existing: { DUTYDECK_DEFAULT_CWD: stale, DUTYDECK_PORT: '4310' } });
 
     const result = await runSetup({ port: '4310', skipLark: true, yes: true }, deps);
 
@@ -350,14 +350,14 @@ describe('runSetup', () => {
     expect(result.defaultCwd).toBe(stale);
     expect(result.warnings.some(warning => warning.includes(stale))).toBe(true);
     expect(out.read()).toContain(symbolFor('warn'));
-    expect(out.read()).toContain('dockmux setup --cwd');
+    expect(out.read()).toContain('dutydeck setup --cwd');
   });
 
   it('reports the stale-directory warning in --json too, where no human output exists', async () => {
     // 警告的计算不能挂在渲染模式上：机器调用方看不到人类输出，最需要这条结构化警告。
     const dir = await makeTempDir();
     const stale = join(dir, 'deleted-since');
-    const { deps, out } = harness({ cwd: dir, existing: { DOCKMUX_DEFAULT_CWD: stale, DOCKMUX_PORT: '4310' } });
+    const { deps, out } = harness({ cwd: dir, existing: { DUTYDECK_DEFAULT_CWD: stale, DUTYDECK_PORT: '4310' } });
 
     const result = await runSetup({ port: '4310', skipLark: true, yes: true, json: true }, deps);
 
@@ -368,7 +368,7 @@ describe('runSetup', () => {
 
   it('does not warn when the reused working directory still exists', async () => {
     const dir = await makeTempDir();
-    const { deps } = harness({ cwd: dir, existing: { DOCKMUX_DEFAULT_CWD: dir, DOCKMUX_PORT: '4310' } });
+    const { deps } = harness({ cwd: dir, existing: { DUTYDECK_DEFAULT_CWD: dir, DUTYDECK_PORT: '4310' } });
 
     const result = await runSetup({ port: '4310', skipLark: true, yes: true }, deps);
 

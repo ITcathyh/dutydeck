@@ -17,7 +17,7 @@
  * task was marked failed — the runtime never saw an assistant text event
  * because the tailer was watching the wrong tree.
  *
- * The mirror case is `agent.env` (dockmux's supported way to isolate accounts
+ * The mirror case is `agent.env` (dutydeck's supported way to isolate accounts
  * and sandboxes, and what scripts/e2e-smoke.mjs itself uses): the child writes
  * where `agent.env` says, the daemon-env tailer looks somewhere else.
  *
@@ -35,9 +35,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentConfig, NormalizedDriverEvent } from '@dockmux/shared';
-import type { CliAdapter, PtyLike } from '@dockmux/cli-adapters';
-import { PtyBackend } from '@dockmux/session-backends';
+import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
+import type { CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
+import { PtyBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
 import { readOpenCodeSessionId } from './session-id/opencode.js';
@@ -53,7 +53,7 @@ let tempRoots: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
 
 function makeTempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `dockmux-env-${prefix}-`));
+  const dir = mkdtempSync(join(tmpdir(), `dutydeck-env-${prefix}-`));
   tempRoots.push(dir);
   return dir;
 }
@@ -304,7 +304,7 @@ describe('PtyCliDriver transcript tailer uses the spawned child env', () => {
   }, 40_000);
 
   it('direction 2: agent.env sets CLAUDE_CONFIG_DIR and the tailer follows it there', async () => {
-    // agent.env is dockmux's supported multi-account / sandbox channel (and
+    // agent.env is dutydeck's supported multi-account / sandbox channel (and
     // what e2e-smoke uses). The child writes where it says; a daemon-env
     // tailer would watch the daemon's dir and see nothing.
     const daemonDir = makeTempDir('daemon-claude');

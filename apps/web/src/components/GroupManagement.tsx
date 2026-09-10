@@ -23,7 +23,7 @@ import {
 import type {
   GroupBinding,
   RoleAssignment
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 import { Badge, Banner, Button, Card, EmptyState, Input, Select, Spinner } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';

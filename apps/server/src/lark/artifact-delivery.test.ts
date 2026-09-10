@@ -26,16 +26,16 @@ const execFile = promisify(execFileCallback);
 
 describe('artifact delivery', () => {
   it('reads original bytes only from the canonical workspace and rejects escapes', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-artifact-')); await mkdir(join(cwd, 'nested'));
-    const bytes = new Uint8Array([0, 255, 1, 2]); await writeFile(join(cwd, 'nested', 'a.bin'), bytes); await writeFile(join(tmpdir(), 'dockmux-outside.bin'), 'x');
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); await mkdir(join(cwd, 'nested'));
+    const bytes = new Uint8Array([0, 255, 1, 2]); await writeFile(join(cwd, 'nested', 'a.bin'), bytes); await writeFile(join(tmpdir(), 'dutydeck-outside.bin'), 'x');
     await expect(readArtifact(cwd, 'nested/a.bin', false)).resolves.toMatchObject({ data: bytes, fingerprint: createHash('sha256').update(bytes).digest('hex') });
-    await expect(readArtifact(cwd, '../dockmux-outside.bin', false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
-    await symlink(join(tmpdir(), 'dockmux-outside.bin'), join(cwd, 'escape'));
+    await expect(readArtifact(cwd, '../dutydeck-outside.bin', false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
+    await symlink(join(tmpdir(), 'dutydeck-outside.bin'), join(cwd, 'escape'));
     await expect(readArtifact(cwd, 'escape', false)).rejects.toMatchObject({ code: 'ARTIFACT_PATH_OUT_OF_SCOPE' });
   });
 
   it('rejects a swapped parent directory before upload can read an outside file', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-artifact-')); const outside = await mkdtemp(join(tmpdir(), 'dockmux-artifact-outside-'));
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); const outside = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-outside-'));
     await mkdir(join(cwd, 'sub')); await writeFile(join(cwd, 'sub', 'report.txt'), 'inside'); await writeFile(join(outside, 'report.txt'), 'outside');
     const client = { uploadFile: vi.fn(), uploadImage: vi.fn(), sendFile: vi.fn(), sendImage: vi.fn() };
     // This hook is installed by the fs mock below immediately before open(),
@@ -48,7 +48,7 @@ describe('artifact delivery', () => {
   });
 
   it('uses a persisted upload key after send failure and never sends a duplicate success', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-artifact-')); await writeFile(join(cwd, 'report.txt'), 'hello'); await writeFile(join(cwd, 'other.txt'), 'other'); const config = configs();
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); await writeFile(join(cwd, 'report.txt'), 'hello'); await writeFile(join(cwd, 'other.txt'), 'other'); const config = configs();
     const client = { uploadFile: vi.fn(async () => 'file_key'), uploadImage: vi.fn(), sendImage: vi.fn(), sendFile: vi.fn().mockRejectedValueOnce(new Error('send failed')).mockResolvedValue({ messageId: 'om_done', chatId: 'oc_group' }) };
     const input = { configs: config, sessionId: 'ses_1', cwd, client, path: 'report.txt', target: { chatId: 'oc_group' }, image: false, idempotencyKey: 'delivery-1' };
     await expect(deliverArtifact(input)).rejects.toThrow('send failed');
@@ -59,7 +59,7 @@ describe('artifact delivery', () => {
   });
 
   it('rejects directories, FIFOs and an over-limit image without blocking or reading it all', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-artifact-')); await mkdir(join(cwd, 'directory')); await execFile('mkfifo', [join(cwd, 'pipe')]);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); await mkdir(join(cwd, 'directory')); await execFile('mkfifo', [join(cwd, 'pipe')]);
     await writeFile(join(cwd, 'image.bin'), new Uint8Array(10 * 1024 * 1024 + 1));
     await expect(readArtifact(cwd, 'directory', false)).rejects.toMatchObject({ code: 'ARTIFACT_NOT_REGULAR_FILE' });
     await expect(readArtifact(cwd, 'pipe', false)).rejects.toMatchObject({ code: 'ARTIFACT_NOT_REGULAR_FILE' });
@@ -67,7 +67,7 @@ describe('artifact delivery', () => {
   });
 
   it('derives provider UUIDs per session and makes a second repository observe the active CAS lease', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-artifact-')); await writeFile(join(cwd, 'report.txt'), 'hello'); const values = new Map<string, string>(); const config = configs(values); const secondConfig = configs(values);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-artifact-')); await writeFile(join(cwd, 'report.txt'), 'hello'); const values = new Map<string, string>(); const config = configs(values); const secondConfig = configs(values);
     let release!: () => void; const paused = new Promise<void>(resolve => { release = resolve; });
     const client = { uploadFile: vi.fn(async input => { await paused; return input.idempotencyKey; }), uploadImage: vi.fn(), sendImage: vi.fn(), sendFile: vi.fn(async input => ({ messageId: input.idempotencyKey, chatId: 'oc_group' })) };
     const base = { configs: config, cwd, client, path: 'report.txt', target: { chatId: 'oc_group' }, image: false, idempotencyKey: 'same-key' };
@@ -77,6 +77,6 @@ describe('artifact delivery', () => {
     release(); await first;
     await deliverArtifact({ ...base, sessionId: 'ses_two' });
     expect(client.uploadFile.mock.calls[0]![0].idempotencyKey).not.toBe(client.uploadFile.mock.calls[1]![0].idempotencyKey);
-    expect(client.uploadFile.mock.calls[0]![0].idempotencyKey).toMatch(/^dockmux-.{40}$/);
+    expect(client.uploadFile.mock.calls[0]![0].idempotencyKey).toMatch(/^dutydeck-.{40}$/);
   });
 });

@@ -43,7 +43,7 @@ import {
   type UpdateRoleAssignmentInput,
   type UpsertRemoteChatFactInput,
   type UpsertRemoteIdentityFactInput
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 
 type Wp1aEntity = ChannelBotGroupPolicy | GroupBinding | RemoteChatFact | RoleAssignment;
 type Wp1aEntityKind = 'channel_bot_policy' | 'group_binding' | 'remote_chat_fact' | 'role_assignment';

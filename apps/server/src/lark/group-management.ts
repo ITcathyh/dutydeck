@@ -9,7 +9,7 @@ import {
   groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, updateRoleAssignmentInputSchema,
   type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
   type PolicyDecision, type RepositoryBundle, type RoleAssignment, type Session, type ToolRiskPolicy
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 import { larkExecutionConfirmed, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError, type LarkCardService, type LarkChat } from './service.js';
 import type { LarkMessageEvent } from './listener.js';

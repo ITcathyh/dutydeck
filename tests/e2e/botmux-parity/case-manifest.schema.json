@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://dockmux.invalid/schemas/botmux-parity-cases-v1.json",
+  "$id": "https://dutydeck.invalid/schemas/botmux-parity-cases-v1.json",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "suite_id", "default_action", "safety_contract", "required_coverage", "cases"],

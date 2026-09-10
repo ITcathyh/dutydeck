@@ -8,8 +8,8 @@ import {
   larkCredentialBundleSchema,
   localFileSecretProviderName,
   type SecretAvailability
-} from '@dockmux/secret-provider';
-import { RuntimeError, type RepositoryBundle, type SecretRefMetadata } from '@dockmux/shared';
+} from '@dutydeck/secret-provider';
+import { RuntimeError, type RepositoryBundle, type SecretRefMetadata } from '@dutydeck/shared';
 
 const MAX_INPUT_BYTES = 64 * 1024;
 const secretIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/);

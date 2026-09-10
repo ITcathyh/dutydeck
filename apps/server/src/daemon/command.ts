@@ -35,11 +35,11 @@ export interface DaemonCommandResult {
 }
 
 const READY_TIMEOUT_MS = 15_000;
-const RESTART_HOST_ENV = 'DOCKMUX_DAEMON_RESTART_HOST';
-const RESTART_PORT_ENV = 'DOCKMUX_DAEMON_RESTART_PORT';
-const RESTART_CWD_ENV = 'DOCKMUX_DAEMON_RESTART_CWD';
-const RESTART_DATABASE_ENV = 'DOCKMUX_DAEMON_RESTART_DATABASE';
-const RESTART_AUTH_ENV = 'DOCKMUX_DAEMON_RESTART_AUTH';
+const RESTART_HOST_ENV = 'DUTYDECK_DAEMON_RESTART_HOST';
+const RESTART_PORT_ENV = 'DUTYDECK_DAEMON_RESTART_PORT';
+const RESTART_CWD_ENV = 'DUTYDECK_DAEMON_RESTART_CWD';
+const RESTART_DATABASE_ENV = 'DUTYDECK_DAEMON_RESTART_DATABASE';
+const RESTART_AUTH_ENV = 'DUTYDECK_DAEMON_RESTART_AUTH';
 
 export interface DaemonCommandHandlers {
   serve(options: CliOptions, onReady?: () => void): Promise<void> | void;
@@ -78,15 +78,15 @@ export function markDaemonReady(dir: string, patch: Partial<Pick<DaemonState, 'h
 }
 
 /**
- * Entry point for `dockmux start`. From the foreground it re-spawns the
+ * Entry point for `dutydeck start`. From the foreground it re-spawns the
  * server as a detached daemon then exits; inside the detached child (signalled
- * via `DOCKMUX_DAEMONIZED`) it records self metadata and serves in-band.
+ * via `DUTYDECK_DAEMONIZED`) it records self metadata and serves in-band.
  */
 export async function daemonStart(options: CliOptions, handlers: DaemonCommandHandlers, env: NodeJS.ProcessEnv = process.env): Promise<DaemonCommandResult> {
   const invocationCwd = process.cwd();
   const dir = isDaemonChild(env) ? defaultDaemonDir(invocationCwd) : resolveDaemonDir(invocationCwd, env.HOME);
   const cwd = isDaemonChild(env) ? invocationCwd : resolve(dir, '../..');
-  const database = resolve(cwd, options.database ?? '.dockmux/dockmux.db');
+  const database = resolve(cwd, options.database ?? '.dutydeck/dutydeck.db');
 
   if (isDaemonChild(env)) {
     // We are the detached child: own the server and publish self metadata.
@@ -110,7 +110,7 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
   const runningDir = resolveDaemonDir(cwd);
   const current = readDaemonStatus(runningDir);
   if (current && current.pid > 0 && pidAlive(current.pid)) {
-    return { ok: false, action: 'start', running: true, pid: current.pid, state: 'already-running', error: `Dockmux is already running (pid ${current.pid}). Use 'dockmux status' or 'dockmux restart'.` };
+    return { ok: false, action: 'start', running: true, pid: current.pid, state: 'already-running', error: `Dutydeck is already running (pid ${current.pid}). Use 'dutydeck status' or 'dutydeck restart'.` };
   }
 
   const startedAt = new Date().toISOString();
@@ -164,7 +164,7 @@ async function waitUntilReady(dir: string, startedAt: string, child?: DaemonChil
   return { ok: false, action: 'start', running: false, state: 'not-running', logFile: daemonPaths(dir).logFile, error: 'Daemon failed to start within the timeout. See the log file for details.' };
 }
 
-/** `dockmux stop`: SIGTERM the daemon and clear its state. */
+/** `dutydeck stop`: SIGTERM the daemon and clear its state. */
 export async function daemonStop(): Promise<DaemonCommandResult> {
   const dir = resolveDaemonDir();
   const state = readDaemonStatus(dir);
@@ -199,7 +199,7 @@ export async function daemonStop(): Promise<DaemonCommandResult> {
   return { ok: true, action: 'stop', running: false, pid, state: 'stopped', error: 'Graceful stop timed out; sent SIGKILL.' };
 }
 
-/** `dockmux restart`: stop, then start again. */
+/** `dutydeck restart`: stop, then start again. */
 export async function daemonRestart(options: CliOptions, handlers: DaemonCommandHandlers, env: NodeJS.ProcessEnv = process.env): Promise<DaemonCommandResult> {
   // Resolve the currently running daemon's directory so we can restart it in
   // the same working directory (important when the user runs `restart` from a
@@ -237,7 +237,7 @@ export interface DaemonStatusInfo {
   authentication?: 'required' | 'disabled';
 }
 
-/** `dockmux status`: report whether a daemon is alive and where. */
+/** `dutydeck status`: report whether a daemon is alive and where. */
 export function daemonStatus(): DaemonStatusInfo {
   const dir = resolveDaemonDir();
   const state = readDaemonStatus(dir);
@@ -258,14 +258,14 @@ export function daemonStatus(): DaemonStatusInfo {
 
 function authEnabledFromCli(options: CliOptions, env: NodeJS.ProcessEnv): boolean {
   if (options.auth !== undefined) return options.auth;
-  return env.DOCKMUX_AUTH !== 'false';
+  return env.DUTYDECK_AUTH !== 'false';
 }
 
 function addressFromCli(options: CliOptions, env: NodeJS.ProcessEnv = process.env): { host?: string; port?: number; address?: string; authEnabled: boolean } {
-  const host = options.localOnly === true || (options.host === undefined && env.DOCKMUX_LOCAL_ONLY === 'true')
+  const host = options.localOnly === true || (options.host === undefined && env.DUTYDECK_LOCAL_ONLY === 'true')
     ? '127.0.0.1'
-    : options.host ?? env.DOCKMUX_HOST ?? '127.0.0.1';
-  const port = Number(options.port ?? env.DOCKMUX_PORT ?? 4310);
+    : options.host ?? env.DUTYDECK_HOST ?? '127.0.0.1';
+  const port = Number(options.port ?? env.DUTYDECK_PORT ?? 4310);
   const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
   return { host, port, address: `http://${displayHost.includes(':') ? `[${displayHost}]` : displayHost}:${port}`, authEnabled: authEnabledFromCli(options, env) };
 }

@@ -80,8 +80,8 @@ describe('workspace model', () => {
   });
 
   it('兼容 Unix 与 Windows 工作目录', () => {
-    expect(workspaceName('/repo/dockmux/')).toBe('dockmux');
-    expect(workspaceName('C:\\work\\dockmux\\')).toBe('dockmux');
+    expect(workspaceName('/repo/dutydeck/')).toBe('dutydeck');
+    expect(workspaceName('C:\\work\\dutydeck\\')).toBe('dutydeck');
   });
 
   it('默认按待处理、进行中、最近的优先级排列，过滤视图保持时间顺序', () => {
@@ -105,12 +105,12 @@ describe('workspace model', () => {
   });
 
   it('优先展示 Runtime 错误摘要，并隐藏凭据、归一化换行与截断超长文本', () => {
-    const raw = `\u001b[31m连接本地进程失败\u001b[0m\nAuthorization: Bearer super-secret token=raw-token --api-key cli-secret dockmux_group_tools_token=runtime-secret ${'详情'.repeat(100)}`;
+    const raw = `\u001b[31m连接本地进程失败\u001b[0m\nAuthorization: Bearer super-secret token=raw-token --api-key cli-secret dutydeck_group_tools_token=runtime-secret ${'详情'.repeat(100)}`;
     const summary = sessionErrorSummary(raw)!;
     expect(summary).toContain('连接本地进程失败 Authorization: [已隐藏]');
     expect(summary).toContain('token=[已隐藏]');
     expect(summary).toContain('--api-key [已隐藏]');
-    expect(summary).toContain('dockmux_group_tools_token=[已隐藏]');
+    expect(summary).toContain('dutydeck_group_tools_token=[已隐藏]');
     expect(summary).not.toMatch(/super-secret|raw-token|cli-secret|runtime-secret|\n|\u001b/);
     expect(Array.from(summary)).toHaveLength(140);
     expect(summary.endsWith('…')).toBe(true);

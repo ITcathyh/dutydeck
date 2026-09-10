@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/session-backends",
+  "name": "@dutydeck/session-backends",
   "version": "0.1.0",
   "private": true,
   "type": "module",

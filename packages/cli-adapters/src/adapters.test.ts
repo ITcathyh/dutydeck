@@ -27,9 +27,9 @@ const EXPECTED_IDS = [
 ] as const;
 
 /**
- * 自己铸 session id 的 CLI —— dockmux 钉不了它们的会话 id。
+ * 自己铸 session id 的 CLI —— dutydeck 钉不了它们的会话 id。
  *
- * 反查失败时 driver 会退回 dockmux 的 `ses_<uuid>`，这些 CLI 从没见过那个 id：
+ * 反查失败时 driver 会退回 dutydeck 的 `ses_<uuid>`，这些 CLI 从没见过那个 id：
  * 带着它启动轻则静默起个空会话，重则立刻 exit 1（opencode / codex 实测）。
  * 它们的 buildResumeCommand 必须对这种 id 返回 null，让 driver 改起干净会话。
  *
@@ -42,13 +42,13 @@ const CLI_MINTED_ID_ADAPTERS = [
 ] as const;
 
 /**
- * dockmux 在 fresh spawn 时把会话 id 钉给了 CLI（`--session-id` 一类），
- * 所以 dockmux 的 sessionId **就是**有效的 resume 目标——绝不该返回 null。
+ * dutydeck 在 fresh spawn 时把会话 id 钉给了 CLI（`--session-id` 一类），
+ * 所以 dutydeck 的 sessionId **就是**有效的 resume 目标——绝不该返回 null。
  * 这份名单是上面那条的反向闸门，防「一刀切全返回 null」把能恢复的也丢掉。
  */
 const PINNED_ID_ADAPTERS = ['claude-code', 'seed', 'relay', 'coco', 'genius', 'grok', 'pi', 'mtr'] as const;
 
-/** OpenCode 家族的原生 id 就是 `ses_<base62>`（自己的命名空间，非 dockmux 前缀）。 */
+/** OpenCode 家族的原生 id 就是 `ses_<base62>`（自己的命名空间，非 dutydeck 前缀）。 */
 const OPENCODE_FAMILY = new Set(['opencode', 'opencode2']);
 
 /**
@@ -100,7 +100,7 @@ describe('claude-code', () => {
     expect(adapter.readyPattern).toBeInstanceOf(RegExp);
     expect(adapter.capabilities.resume).toBe(true);
     const block = adapter.injectSessionContext?.({ sessionId: SID });
-    expect(block).toContain('<dockmux_routing>');
+    expect(block).toContain('<dutydeck_routing>');
     expect(adapter.buildResumeCommand?.(SID)).toEqual(['--resume', SID]);
   });
 });
@@ -232,7 +232,7 @@ describe('grok', () => {
     expect(adapter.readyPattern).toBeInstanceOf(RegExp);
     expect(adapter.busyPattern).toBeInstanceOf(RegExp);
     expect(adapter.capabilities.resume).toBe(true);
-    expect(adapter.injectSessionContext?.({ sessionId: SID })).toContain('<dockmux_routing>');
+    expect(adapter.injectSessionContext?.({ sessionId: SID })).toContain('<dutydeck_routing>');
     expect(adapter.buildResumeCommand?.(SID)).toEqual(['--resume', SID]);
   });
 });
@@ -373,23 +373,23 @@ describe('runner-input', () => {
       sendText: text => { texts.push(text); return true; },
       sendSpecialKeys: (...keys) => { specialKeys.push(keys); return true; },
     };
-    const result = await writeRunnerInput(backend, '::dockmux-test:', 'x'.repeat(2500));
+    const result = await writeRunnerInput(backend, '::dutydeck-test:', 'x'.repeat(2500));
     expect(result.submitted).toBe(true);
     // 预冲 1 次 + 提交 1 次
     expect(specialKeys.filter(k => k[0] === 'Enter').length).toBeGreaterThanOrEqual(2);
     // 分块写入，拼回来是完整控制行
     const joined = texts.join('');
-    expect(joined.startsWith('::dockmux-test:')).toBe(true);
-    expect(joined).toHaveLength('::dockmux-test:'.length + encodeRunnerInput('x'.repeat(2500)).length);
+    expect(joined.startsWith('::dutydeck-test:')).toBe(true);
+    expect(joined).toHaveLength('::dutydeck-test:'.length + encodeRunnerInput('x'.repeat(2500)).length);
   });
 
   it('writeRunnerInput：裸 PTY 回退单次写入', async () => {
     const writes: string[] = [];
     const backend: PtyLike = { write: data => { writes.push(data); return true; } };
-    const result = await writeRunnerInput(backend, '::dockmux-test:', 'hi');
+    const result = await writeRunnerInput(backend, '::dutydeck-test:', 'hi');
     expect(result.submitted).toBe(true);
     expect(writes).toHaveLength(1);
-    expect(writes[0]).toBe(`::dockmux-test:${encodeRunnerInput('hi')}\r`);
+    expect(writes[0]).toBe(`::dutydeck-test:${encodeRunnerInput('hi')}\r`);
   });
 });
 
@@ -481,9 +481,9 @@ describe('全适配器横切契约', () => {
     }
   });
 
-  it('buildArgs 不把 dockmux 的 ses_ 前缀泄漏进 argv', () => {
+  it('buildArgs 不把 dutydeck 的 ses_ 前缀泄漏进 argv', () => {
     // 例外：mtr 的原生 id 形态本身就是 `ses_<alnum>`（与 opencode 同一套规则），
-    // 它的 `ses_` 是 mtr 自己的命名空间，不是 dockmux 前缀泄漏。
+    // 它的 `ses_` 是 mtr 自己的命名空间，不是 dutydeck 前缀泄漏。
     const NATIVE_SES_PREFIX = new Set(['mtr']);
     for (const id of EXPECTED_IDS) {
       if (NATIVE_SES_PREFIX.has(id)) continue;
@@ -499,7 +499,7 @@ describe('全适配器横切契约', () => {
   it('钉过 id 的 CLI：fresh 与 resume 必须钉同一种 id 形态', () => {
     // 「resumeSessionId 由调用方保证是 CLI 原生形态」——这个前提是**错的**。
     // driver 的 resolveResumeSessionId() 三级优先里，最后一级是「反查不到 →
-    // 退回 dockmux 自己的 sessionId」，那个 id 带着 `ses_` 前缀。
+    // 退回 dutydeck 自己的 sessionId」，那个 id 带着 `ses_` 前缀。
     //
     // 钉过 id 的 CLI 在 fresh spawn 时自己决定了写进磁盘的 id 长什么样
     // （claude 剥成裸 UUID、grok 用完整 `ses_<uuid>`、mtr 推导成 `ses_<26位>`）。
@@ -511,13 +511,13 @@ describe('全适配器横切契约', () => {
     // 断言的是「两分支一致」而不是「必须剥前缀」：grok 的 `ses_<uuid>` 是它
     // fresh 时亲自钉下去的，剥掉反而错。自铸 id 的 CLI 不在此列——它们对这个
     // id 的正确回答是 null（放弃 resume），由后面的用例守。
-    const dockmuxId = `ses_${SID}`;
+    const dutydeckId = `ses_${SID}`;
     for (const id of PINNED_ID_ADAPTERS) {
       const adapter = createCliAdapter(id);
-      const base = { sessionId: dockmuxId, cwd: '/tmp/ws' };
+      const base = { sessionId: dutydeckId, cwd: '/tmp/ws' };
       const freshIds = adapter.buildArgs(base).filter(a => a.includes(SID.slice(0, 8)));
       const resumeIds = adapter
-        .buildArgs({ ...base, resume: true, resumeSessionId: dockmuxId })
+        .buildArgs({ ...base, resume: true, resumeSessionId: dutydeckId })
         .filter(a => a.includes(SID.slice(0, 8)));
       expect(resumeIds, `${id}: resume 分支没带上会话 id`).not.toHaveLength(0);
       expect(resumeIds, `${id}: fresh 钉的是 ${JSON.stringify(freshIds)}，`
@@ -540,7 +540,7 @@ describe('全适配器横切契约', () => {
 
   it('喂 CLI 原生形态的 id 时，有 resume 能力的适配器都给出非空 argv（不是 null）', () => {
     // 例外：mtr 的原生 id 形态本身就是 `ses_<alnum>`（自己的命名空间，不是
-    // dockmux 前缀泄漏）——它在 buildResumeCommand 里会把 dockmux 前缀与连字符
+    // dutydeck 前缀泄漏）——它在 buildResumeCommand 里会把 dutydeck 前缀与连字符
     // 一起归一掉，单独在下面的 mtr 快照用例里断言。
     const NATIVE_SES_PREFIX = new Set(['mtr']);
     for (const id of EXPECTED_IDS) {
@@ -557,29 +557,29 @@ describe('全适配器横切契约', () => {
     }
   });
 
-  it('喂 dockmux 自己的 ses_<uuid> 时：自铸 id 的 CLI 必须返回 null（放弃 resume）', () => {
+  it('喂 dutydeck 自己的 ses_<uuid> 时：自铸 id 的 CLI 必须返回 null（放弃 resume）', () => {
     // 这是缺口 1 的核心契约。driver 的 resolveResumeSessionId 反查不到 CLI 原生
-    // id 时会退回 dockmux 的 `ses_<uuid>`。对自己铸 id 的 CLI，这个 id 它从没见过：
+    // id 时会退回 dutydeck 的 `ses_<uuid>`。对自己铸 id 的 CLI，这个 id 它从没见过：
     // `opencode -s <不存在的id>` 立刻 exit 1，会话随即被判 failed，之后 send 全 409。
     // 唯一正确的回答是 null —— 让 driver 放弃 resume、改起干净会话。
-    const dockmuxId = `ses_${SID}`;
+    const dutydeckId = `ses_${SID}`;
     for (const id of CLI_MINTED_ID_ADAPTERS) {
       const adapter = createCliAdapter(id);
       expect(
-        adapter.buildResumeCommand!(dockmuxId),
-        `${id} 自己铸 session id，收到 dockmux 的 ${dockmuxId} 必须返回 null 而不是拿它去启动`,
+        adapter.buildResumeCommand!(dutydeckId),
+        `${id} 自己铸 session id，收到 dutydeck 的 ${dutydeckId} 必须返回 null 而不是拿它去启动`,
       ).toBeNull();
     }
   });
 
-  it('喂 dockmux 自己的 ses_<uuid> 时：dockmux 钉过 id 的 CLI 必须照常 resume', () => {
+  it('喂 dutydeck 自己的 ses_<uuid> 时：dutydeck 钉过 id 的 CLI 必须照常 resume', () => {
     // 反向断言，防「一刀切全返回 null」：claude `--session-id` 这类适配器在
-    // fresh spawn 时就把 id 钉成了 dockmux 的，那个 id 就是有效的 resume 目标，
+    // fresh spawn 时就把 id 钉成了 dutydeck 的，那个 id 就是有效的 resume 目标，
     // 否决它等于白白丢掉本来能恢复的上下文。
     for (const id of PINNED_ID_ADAPTERS) {
       const adapter = createCliAdapter(id);
       const argv = adapter.buildResumeCommand!(`ses_${SID}`);
-      expect(argv, `${id} 的 id 是 dockmux 钉的，不该否决`).not.toBeNull();
+      expect(argv, `${id} 的 id 是 dutydeck 钉的，不该否决`).not.toBeNull();
       expect(argv!.length, `${id} 的 resume argv 不应为空`).toBeGreaterThan(0);
     }
   });
@@ -595,7 +595,7 @@ describe('全适配器横切契约', () => {
   });
 
   it('buildResumeCommand 对带 ses_ 前缀的 sessionId 至少不原样透传', () => {
-    // 只有把 dockmux sessionId 当 CLI 原生 id 用的适配器才需要剥前缀；
+    // 只有把 dutydeck sessionId 当 CLI 原生 id 用的适配器才需要剥前缀；
     // 其余适配器的入参是 CLI 自己铸的 id（codex 的 rollout id 等），
     // 适配器不该改写它。所以这里断言的是「不把 `ses_<uuid>` 整串原样递出」
     // 这一类适配器的行为，名单按各 CLI 的 id 语义显式列出。
@@ -615,12 +615,12 @@ describe('全适配器横切契约', () => {
     //
     // 断言方式是「fresh 与 resume 的 argv 必须逐字相同」而不是「argv 里不许出现
     // 这个 id」：mira / dsh 一类 runner 适配器的 `--session-id` 是 **runner 自己的**
-    // 参数，本来就该带 dockmux sessionId，与 CLI 侧的续接定位无关。
-    const dockmuxId = `ses_${SID}`;
+    // 参数，本来就该带 dutydeck sessionId，与 CLI 侧的续接定位无关。
+    const dutydeckId = `ses_${SID}`;
     for (const id of CLI_MINTED_ID_ADAPTERS) {
       const adapter = createCliAdapter(id);
-      const fresh = adapter.buildArgs({ sessionId: dockmuxId });
-      const resumed = adapter.buildArgs({ sessionId: dockmuxId, resume: true, resumeSessionId: dockmuxId });
+      const fresh = adapter.buildArgs({ sessionId: dutydeckId });
+      const resumed = adapter.buildArgs({ sessionId: dutydeckId, resume: true, resumeSessionId: dutydeckId });
       expect(
         resumed,
         `${id} 否决了这个 id，resume 分支的 argv 就该与 fresh 完全一致（不带任何续接定位）`,
@@ -644,11 +644,11 @@ describe('全适配器横切契约', () => {
     }
   });
 
-  it('injectSessionContext（若实现）返回含 dockmux_routing 的块', () => {
+  it('injectSessionContext（若实现）返回含 dutydeck_routing 的块', () => {
     for (const id of EXPECTED_IDS) {
       const adapter = createCliAdapter(id);
       if (!adapter.injectSessionContext) continue;
-      expect(adapter.injectSessionContext(MINIMAL_CTX), `${id} 的注入块`).toContain('<dockmux_routing>');
+      expect(adapter.injectSessionContext(MINIMAL_CTX), `${id} 的注入块`).toContain('<dutydeck_routing>');
     }
   });
 
@@ -672,13 +672,13 @@ describe('全适配器横切契约', () => {
 describe('runner 类适配器', () => {
   const RUNNER_IDS = ['mir', 'mira', 'dsh', 'codex-app'] as const;
 
-  it('marker 前缀是 ::dockmux-<id>:，且走 base64 控制行协议', async () => {
+  it('marker 前缀是 ::dutydeck-<id>:，且走 base64 控制行协议', async () => {
     for (const id of RUNNER_IDS) {
       const adapter = createCliAdapter(id);
       const writes: string[] = [];
       await adapter.writeInput({ write: data => { writes.push(data); return true; } }, 'hi');
       expect(writes, `${id} 应单次写入控制行`).toHaveLength(1);
-      expect(writes[0], `${id} 的 marker 前缀`).toBe(`::dockmux-${id}:${encodeRunnerInput('hi')}\r`);
+      expect(writes[0], `${id} 的 marker 前缀`).toBe(`::dutydeck-${id}:${encodeRunnerInput('hi')}\r`);
     }
   });
 
@@ -755,7 +755,7 @@ describe('参数复杂的适配器：buildArgs 快照', () => {
     // mtr 的 id 只接受 `ses_` + 纯字母数字：连字符剥掉、尾段截到 26 位
     expect(fresh[1]).toBe(`ses_${SID.replace(/-/g, '').slice(0, 26)}`);
     expect(fresh[1]!.slice(4)).toMatch(/^[0-9A-Za-z]+$/);
-    // 同一 dockmux session 恒定映射到同一 mtr id，resume 才能精确续接
+    // 同一 dutydeck session 恒定映射到同一 mtr id，resume 才能精确续接
     expect(adapter.buildArgs({ sessionId: `ses_${SID}`, resume: true })).toEqual(['--session', fresh[1]]);
     expect(adapter.buildResumeCommand?.(`ses_${SID}`)).toEqual(['--session', fresh[1]]);
   });
@@ -796,20 +796,20 @@ describe('参数复杂的适配器：buildArgs 快照', () => {
 describe('PTY_AGENT_CONTRIBUTIONS 覆盖度', () => {
   // 跨包断言放在这里而不是 pty-driver：contributions.ts 的每个 adapterId 都必须
   // 能被本包创建出来，否则 server 组装 driver 时才会在运行期炸。反向不成立——
-  // 下面这些适配器已移植可用，但**都不能由 dockmux 直接 spawn**，登记进去只会
+  // 下面这些适配器已移植可用，但**都不能由 dutydeck 直接 spawn**，登记进去只会
   // 让它们出现在 UI 列表里、用户一点就失败（尤其 codex-app 的 `codex` 在多数
   // 开发机上真实存在，commandExists 会放行，于是 runner 参数被喂给真实 codex）：
   //   riff / mira  —— API-backed，botmux 的 RAW_CLI_EXECUTABLES 对二者写 undefined
   //   mir/dsh/codex-app —— runner 类，buildArgs 产出的是 runner 参数，
-  //                        而 dockmux 尚未移植 botmux 的 runner 脚本
+  //                        而 dutydeck 尚未移植 botmux 的 runner 脚本
   //   mojo        —— 执行主体是 MojoBackend（按回合 shell out），尚未移植
   //   mtr         —— 可执行文件名与常见网络诊断工具冲突；在能可靠指纹识别前
-  //                        仅允许通过 DOCKMUX_AGENTS_JSON 显式配置
+  //                        仅允许通过 DUTYDECK_AGENTS_JSON 显式配置
   // 移植 runner / 对应后端后再登记，并把 id 从这里挪走。
   const NOT_CONTRIBUTED = new Set(['riff', 'mira', 'mir', 'dsh', 'codex-app', 'mojo', 'mtr']);
 
   it('每个 adapterId 都能创建出适配器，且 id 自洽', async () => {
-    const { PTY_AGENT_CONTRIBUTIONS } = await import('@dockmux/pty-driver');
+    const { PTY_AGENT_CONTRIBUTIONS } = await import('@dutydeck/pty-driver');
     expect(PTY_AGENT_CONTRIBUTIONS.length).toBeGreaterThan(0);
     for (const c of PTY_AGENT_CONTRIBUTIONS) {
       expect(createCliAdapter(c.adapterId).id, `${c.id} 的 adapterId 应能创建`).toBe(c.adapterId);
@@ -817,12 +817,12 @@ describe('PTY_AGENT_CONTRIBUTIONS 覆盖度', () => {
   });
 
   it('不可直接 spawn 的适配器不得登记，其余都已登记，且 contributions 无重复 id', async () => {
-    const { PTY_AGENT_CONTRIBUTIONS } = await import('@dockmux/pty-driver');
+    const { PTY_AGENT_CONTRIBUTIONS } = await import('@dutydeck/pty-driver');
     const contributed = new Set(PTY_AGENT_CONTRIBUTIONS.map(c => c.adapterId));
     expect(contributed.size, 'contributions 的 adapterId 不应重复').toBe(PTY_AGENT_CONTRIBUTIONS.length);
     for (const id of EXPECTED_IDS) {
       if (NOT_CONTRIBUTED.has(id)) {
-        expect(contributed.has(id), `${id} 不可由 dockmux 直接 spawn，不该登记`).toBe(false);
+        expect(contributed.has(id), `${id} 不可由 dutydeck 直接 spawn，不该登记`).toBe(false);
         continue;
       }
       expect(contributed.has(id), `${id} 应登记进 PTY_AGENT_CONTRIBUTIONS`).toBe(true);
@@ -830,7 +830,7 @@ describe('PTY_AGENT_CONTRIBUTIONS 覆盖度', () => {
   });
 
   it('声明 resume 的贡献，其适配器必须真有 resume 能力', async () => {
-    const { PTY_AGENT_CONTRIBUTIONS } = await import('@dockmux/pty-driver');
+    const { PTY_AGENT_CONTRIBUTIONS } = await import('@dutydeck/pty-driver');
     for (const c of PTY_AGENT_CONTRIBUTIONS) {
       expect(
         !!createCliAdapter(c.adapterId).capabilities.resume,

@@ -3,8 +3,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { chromium } from '@playwright/test';
-import type { AgentEvent, Session, TaskRecord } from '@dockmux/shared';
-import { createRepositories } from '@dockmux/storage';
+import type { AgentEvent, Session, TaskRecord } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
 import { buildApp } from '../apps/server/src/app.js';
 
 const SESSION_ID = 'ses_browser_perf';
@@ -56,7 +56,7 @@ async function waitForPaint(page: import('@playwright/test').Page, text: string)
 
 async function main() {
   process.env.NODE_ENV = 'test';
-  const directory = await mkdtemp(join(tmpdir(), 'dockmux-browser-benchmark-'));
+  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-browser-benchmark-'));
   const repos = createRepositories(join(directory, 'history.db'));
   const subscribers = new Set<(event: AgentEvent) => void>();
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;

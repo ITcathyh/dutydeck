@@ -3,7 +3,7 @@ import test from 'node:test';
 import { buildAgentCard, AgentCardTurn } from './lark-agent-card.mjs';
 
 test('running card passes caller Markdown through unchanged', () => {
-  const markdown = '### 自定义阶段\n\n🟡 用户自己决定状态展示\n\n`a very long command --without-dockmux-truncation`';
+  const markdown = '### 自定义阶段\n\n🟡 用户自己决定状态展示\n\n`a very long command --without-dutydeck-truncation`';
   const card = buildAgentCard({
     taskName: 'Agent Debug',
     taskId: '18779161860',
@@ -12,7 +12,7 @@ test('running card passes caller Markdown through unchanged', () => {
   });
   assert.equal(card.schema, '2.0');
   assert.equal(card.header.template, 'violet');
-  assert.equal(card.header.title.content, '🏗️ Dockmux 正在执行');
+  assert.equal(card.header.title.content, '🏗️ Dutydeck 正在执行');
   assert.equal(card.header.subtitle.content, 'Agent Debug');
   assert.equal(card.body.elements[0].content, markdown);
   const footer = card.body.elements[2];

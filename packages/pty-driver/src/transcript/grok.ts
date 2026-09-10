@@ -15,7 +15,7 @@
  * with stable ids — the richest structured source after Claude, for zero
  * native dependencies.
  *
- * Mapping (ACP kinds → dockmux driver contract):
+ * Mapping (ACP kinds → dutydeck driver contract):
  *   agent_thought_chunk → thinking  ({ content: {type:'text', text} })
  *   agent_message_chunk → text      (same ContentChunk shape)
  *   tool_call           → tool_call     (toolCallId / title / rawInput / status)
@@ -33,13 +33,13 @@
  */
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { grokUpdatesPath, resolveGrokCwdBucketDir, type CliPathEnv } from '../cli-paths.js';
 import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 
-/** ACP tool status → dockmux status. `in_progress` is the spec spelling;
- *  `running` is accepted defensively (dockmux's own internal name). */
+/** ACP tool status → dutydeck status. `in_progress` is the spec spelling;
+ *  `running` is accepted defensively (dutydeck's own internal name). */
 const TOOL_STATUS: Record<string, 'pending' | 'running' | 'completed' | 'failed'> = {
   pending: 'pending',
   in_progress: 'running',
@@ -52,10 +52,10 @@ const TOOL_STATUS: Record<string, 'pending' | 'running' | 'completed' | 'failed'
  * Grok's `<bucket>/<sessionId>/updates.jsonl` for a working directory.
  *
  * With `sessionId`, resolution is session-scoped and therefore correct when
- * several dockmux sessions share a cwd: the bucket is cwd-keyed, so all of
+ * several dutydeck sessions share a cwd: the bucket is cwd-keyed, so all of
  * them live side by side under it, and an mtime pick among them returns a
  * sibling's stream as readily as this session's. The two-step mirrors
- * session-id/grok.ts — the id dockmux pinned via `--session-id`, then the
+ * session-id/grok.ts — the id dutydeck pinned via `--session-id`, then the
  * bucket's prompt_history marker scan for when Grok minted its own.
  *
  * Without `sessionId` it falls back to the mtime pick, which is only
@@ -201,7 +201,7 @@ export interface GrokTranscriptTailerOptions {
   /** Explicit updates.jsonl path. When given, directory scanning and file
    *  switching are disabled. */
   transcriptPath?: string;
-  /** dockmux's session id. Required for correctness whenever more than one
+  /** dutydeck's session id. Required for correctness whenever more than one
    *  session may share `cwd` — the bucket is cwd-keyed, so without it
    *  resolution falls back to "newest session directory" and can attach a
    *  sibling's stream. See resolveGrokUpdatesPath. */

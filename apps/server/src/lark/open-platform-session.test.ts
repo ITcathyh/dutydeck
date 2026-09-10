@@ -13,7 +13,7 @@ import {
 
 const temporaryDirectories: string[] = [];
 const temporaryDirectory = () => {
-  const path = mkdtempSync(join(tmpdir(), 'dockmux-open-platform-'));
+  const path = mkdtempSync(join(tmpdir(), 'dutydeck-open-platform-'));
   temporaryDirectories.push(path);
   return path;
 };
@@ -42,14 +42,14 @@ const consoleHtml = (csrf = 'private-csrf-value') => `
   </script>`;
 
 describe('Open Platform session cache', () => {
-  it('uses the Dockmux-specific default path and writes an atomic private cache', () => {
+  it('uses the Dutydeck-specific default path and writes an atomic private cache', () => {
     const home = temporaryDirectory();
-    expect(defaultOpenPlatformSessionFilePath(home)).toBe(join(home, '.dockmux', 'feishu-open-platform-session.json'));
+    expect(defaultOpenPlatformSessionFilePath(home)).toBe(join(home, '.dutydeck', 'feishu-open-platform-session.json'));
 
     const file = defaultOpenPlatformSessionFilePath(home);
     writeOpenPlatformSessionCookies(file, [cookie()]);
 
-    expect(statSync(join(home, '.dockmux')).mode & 0o777).toBe(0o700);
+    expect(statSync(join(home, '.dutydeck')).mode & 0o777).toBe(0o700);
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(readOpenPlatformSessionCookies(file)).toEqual([cookie()]);
     expect(readFileSync(file, 'utf8')).not.toContain('csrf');

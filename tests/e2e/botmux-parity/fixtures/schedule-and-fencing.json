@@ -13,7 +13,7 @@
   },
   "listener_fence": {
     "source_runtime": "botmux",
-    "target_runtime": "dockmux",
+    "target_runtime": "dutydeck",
     "active_generation": 7,
     "source_drained": false,
     "source_reconnect_inhibited": false,

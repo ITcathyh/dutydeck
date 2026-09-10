@@ -42,7 +42,7 @@ export const MOBILE_VIEWPORT = { width: 390, height: 844 };
 
 /** 界面文案的单一来源。改文案时只改这里，用例不必逐个搜。 */
 export const UI = {
-  nav: 'Dockmux 工作台导航',
+  nav: 'Dutydeck 工作台导航',
   navOpen: '打开工作台导航',
   navClose: '关闭工作台导航',
   overviewTitle: '今天需要推进什么？',
@@ -68,7 +68,7 @@ export const UI = {
 
 /** 四个可深链浮层：URL ↔ dialog 名称。见 apps/web/src/app-route.ts。 */
 export const OVERLAYS = [
-  { panel: 'settings', search: '?panel=settings&section=agents', dialog: 'Dockmux 设置与接入' },
+  { panel: 'settings', search: '?panel=settings&section=agents', dialog: 'Dutydeck 设置与接入' },
   { panel: 'lark-setup', search: '?panel=lark-setup', dialog: '绑定飞书 Bot' },
   { panel: 'groups', search: '?panel=groups', dialog: '群配置与权限' },
   { panel: 'automation', search: '?panel=automation', dialog: 'Schedule 离线管理' },
@@ -77,11 +77,11 @@ export const OVERLAYS = [
 /**
  * 起一个完全隔离的实例：临时端口 + 临时 SQLite + 假 CLI。
  *
- * 绝不碰开发者的 4310 实例、~/.dockmux 或 ~/.claude——用户的真实工作跑在那上面。
+ * 绝不碰开发者的 4310 实例、~/.dutydeck 或 ~/.claude——用户的真实工作跑在那上面。
  */
 export async function bootIsolatedStack({ port, onCleanup, verbose = false }) {
   await assertPortFree(port);
-  const dirs = createDataDir({ onCleanup, prefix: 'dockmux-journey-' });
+  const dirs = createDataDir({ onCleanup, prefix: 'dutydeck-journey-' });
   const agentsJson = mockAgentsJson({ mockPath: writeMockCli(dirs.binDir), dirs });
   const base = `http://127.0.0.1:${port}`;
   const server = startServer({ port, dirs, agentsJson, onCleanup, verbose });
@@ -118,7 +118,7 @@ export async function seedCompletedSession(request, { cwd, prompt, agentId = 'cl
  */
 export async function mainRegionText(page) {
   return page.evaluate(() => {
-    const nav = document.querySelector('[aria-label="Dockmux 工作台导航"]');
+    const nav = document.querySelector('[aria-label="Dutydeck 工作台导航"]');
     const main = document.querySelector('main') ?? document.body;
     if (!nav || !main.contains(nav)) return main.innerText;
     // 侧栏在 main 里时先摘掉再读，读完放回去（不改变最终 DOM）。

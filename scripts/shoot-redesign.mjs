@@ -18,7 +18,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const BASE = process.env.DOCKMUX_E2E_BASE_URL ?? 'http://10.37.33.49:4310';
+const BASE = process.env.DUTYDECK_E2E_BASE_URL ?? 'http://10.37.33.49:4310';
 const BOTMUX = process.env.BOTMUX_DASHBOARD_URL ?? 'http://127.0.0.1:7891';
 
 const tag = process.argv[2] ?? 'before';
@@ -36,7 +36,7 @@ async function settle(page) {
 async function applyTheme(page, theme) {
   await page.evaluate(t => {
     document.documentElement.setAttribute('data-theme', t);
-    try { window.localStorage.setItem('dockmux.theme', t); } catch {}
+    try { window.localStorage.setItem('dutydeck.theme', t); } catch {}
   }, theme);
   await page.waitForTimeout(500);
 }

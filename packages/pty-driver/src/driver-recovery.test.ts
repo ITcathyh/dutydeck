@@ -4,10 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
-import type { AgentConfig, DriverTurnRecovery, NormalizedDriverEvent } from '@dockmux/shared';
-import { DriverDetachedError, DriverRecoveryError } from '@dockmux/shared';
-import type { CliAdapter, PtyLike } from '@dockmux/cli-adapters';
-import { TmuxBackend, isTmuxAvailable, type SessionBackend } from '@dockmux/session-backends';
+import type { AgentConfig, DriverTurnRecovery, NormalizedDriverEvent } from '@dutydeck/shared';
+import { DriverDetachedError, DriverRecoveryError } from '@dutydeck/shared';
+import type { CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
+import { TmuxBackend, isTmuxAvailable, type SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 
 const tmuxDescribe = isTmuxAvailable() ? describe : describe.skip;
@@ -64,17 +64,17 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
   });
 
   function fixture(): { cwd: string; transcript: string; name: string; ownerId: string } {
-    const cwd = mkdtempSync(join(tmpdir(), 'dockmux-turn-recovery-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'dutydeck-turn-recovery-'));
     roots.push(cwd);
     const project = join(cwd, 'projects', realpathSync(cwd).replace(/[^A-Za-z0-9-]/g, '-'));
     mkdirSync(project, { recursive: true });
     const transcript = join(project, 'recovery-fixture.jsonl');
-    // A pinned dockmux id is enough for the real Claude resolver; no mocked
+    // A pinned dutydeck id is enough for the real Claude resolver; no mocked
     // tailer or hand-wired transcript source is involved in these tests.
     writeFileSync(transcript, '');
-    const name = `dockmux-turn-recovery-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+    const name = `dutydeck-turn-recovery-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     sessions.push(name);
-    return { cwd, transcript, name, ownerId: `dockmux:${sessionId}` };
+    return { cwd, transcript, name, ownerId: `dutydeck:${sessionId}` };
   }
 
   it('reattaches the original busy pane, replays only appended JSONL, and never submits the prompt twice', async () => {
@@ -90,7 +90,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     expect(checkpoint).toBeDefined();
     const originalPid = firstBackend.getPid();
     const sent = first.send('sleep 1; echo SHELL-DONE');
-    await waitFor(() => expect(firstBackend.getDockmuxMetadata('turn_id')).toBe(checkpoint?.turnId));
+    await waitFor(() => expect(firstBackend.getDutydeckMetadata('turn_id')).toBe(checkpoint?.turnId));
     first.prepareForDaemonShutdown();
     await first.stop();
     await expect(sent).rejects.toBeInstanceOf(DriverDetachedError);
@@ -124,7 +124,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     await first.start();
     const checkpoint = first.checkpoint()!;
     const pending = first.send('sleep 0.2; echo SHELL-DONE');
-    await waitFor(() => expect(firstBackend.getDockmuxMetadata('turn_id')).toBe(checkpoint.turnId));
+    await waitFor(() => expect(firstBackend.getDutydeckMetadata('turn_id')).toBe(checkpoint.turnId));
     first.prepareForDaemonShutdown();
     await first.stop();
     await expect(pending).rejects.toBeInstanceOf(DriverDetachedError);
@@ -148,7 +148,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     const pid = owner.getPid();
     owner.detach();
     const state: DriverTurnRecovery = { kind: 'pty-jsonl-v1', turnId: 'expected-turn', transcript: { offset: 0 } };
-    for (const [ownerId, turnId] of [[f.ownerId, 'expected-turn'], ['dockmux:someone-else', 'expected-turn'], [f.ownerId, 'other-turn']] as const) {
+    for (const [ownerId, turnId] of [[f.ownerId, 'expected-turn'], ['dutydeck:someone-else', 'expected-turn'], [f.ownerId, 'other-turn']] as const) {
       const prompts: string[] = [];
       const driver = new PtyCliDriver({
         agent: config(f.cwd), adapter: shellAdapter(prompts), backend: new TmuxBackend(f.name, { ownerId }),
@@ -172,7 +172,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     await first.start();
     const checkpoint = first.checkpoint()!;
     const submitted = first.send('echo SHELL-DONE');
-    await waitFor(() => expect(firstBackend.getDockmuxMetadata('turn_id')).toBe(checkpoint.turnId));
+    await waitFor(() => expect(firstBackend.getDutydeckMetadata('turn_id')).toBe(checkpoint.turnId));
     first.prepareForDaemonShutdown();
     await first.stop();
     await submitted.catch(() => {});

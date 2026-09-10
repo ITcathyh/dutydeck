@@ -6,7 +6,7 @@
  * and every entry carries a `sessionId` field, so the CLI's session id is
  * recoverable from either the filename or the file body.
  *
- * dockmux normally pins this id itself (`claude --session-id <uuid>`), so the
+ * dutydeck normally pins this id itself (`claude --session-id <uuid>`), so the
  * happy path needs no scan at all — the resolver first checks whether the
  * expected file exists and returns immediately. The scan only matters when
  * Claude declined the pinned id (a collision with an existing session makes
@@ -14,7 +14,7 @@
  * spawned by us.
  *
  * The scan matches on the injected marker inside the first user prompt, NOT
- * on recency: several dockmux sessions can share a cwd, and picking the
+ * on recency: several dutydeck sessions can share a cwd, and picking the
  * newest jsonl among them would resume a sibling's conversation.
  */
 import { existsSync } from 'node:fs';
@@ -31,7 +31,7 @@ const HEAD_BYTES = 256 * 1024;
 /** Newest-first cap on candidates scanned in one project dir. */
 const MAX_CANDIDATES = 40;
 
-/** Strip the `ses_` prefix dockmux uses; Claude's own ids are bare UUIDs. */
+/** Strip the `ses_` prefix dutydeck uses; Claude's own ids are bare UUIDs. */
 function bareId(sessionId: string): string {
   return sessionId.replace(/^ses_/, '');
 }
@@ -65,7 +65,7 @@ export const claudeSessionIdLookup: SessionIdLookup = {
   resolve({ sessionId, cwd, env }: SessionIdLookupContext): string | undefined {
     const projectDir = claudeProjectDir(cwd, env);
 
-    // Fast path: dockmux pinned the id via --session-id and Claude accepted it.
+    // Fast path: dutydeck pinned the id via --session-id and Claude accepted it.
     const pinned = bareId(sessionId);
     if (pinned && existsSync(join(projectDir, `${pinned}.jsonl`))) return pinned;
 

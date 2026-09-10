@@ -34,7 +34,7 @@ import {
   type ScheduleWatermarkRepository,
   type RenewScheduleLeaseInput,
   type UpdateScheduleDefinitionInput
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 
 type ScheduleVersionKind = 'schedule_definition' | 'schedule_lease' | 'archived_integration';
 type Versioned = ScheduleDefinition | ScheduleLease | ArchivedHammerIntegration;

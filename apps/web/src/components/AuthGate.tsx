@@ -41,8 +41,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
   };
 
   // Spinner 带 label 时自带 role=status + aria-live=polite，加载文案因此进得了可访问树；
-  // 原来那行「正在连接 Dockmux…」只是视觉文本，读屏用户听不到页面正在做什么。
-  if (checking && !auth) return <main className="grid min-h-[100dvh] place-items-center bg-canvas"><Spinner size="sm" label="正在连接 Dockmux…"/></main>;
+  // 原来那行「正在连接 Dutydeck…」只是视觉文本，读屏用户听不到页面正在做什么。
+  if (checking && !auth) return <main className="grid min-h-[100dvh] place-items-center bg-canvas"><Spinner size="sm" label="正在连接 Dutydeck…"/></main>;
 
   /*
     这一屏刻意没有 Hero、英文 slogan 与背景网格（docs/interaction-design-2026-08-30.md §5.1）：
@@ -58,8 +58,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
       <form onSubmit={login}>
         {/* 40px 方块，圆角按契约 §3「半径 ≈ 高度 / 3.5」取档：40 / 3.5 ≈ 11 → rounded-md（10px）。 */}
         <div className="grid h-10 w-10 place-items-center rounded-md bg-action text-body font-semibold text-on-action">D</div>
-        <h1 className="mt-5 text-heading font-semibold tracking-tight text-primary">连接到这台 Dockmux</h1>
-        <p className="mt-2 text-body text-secondary">输入 <code className="rounded-sm bg-muted px-1 py-0.5 text-caption">dockmux auth token</code> 显示的访问令牌。登录后凭据保存在 HttpOnly Cookie 中，不会出现在 URL。</p>
+        <h1 className="mt-5 text-heading font-semibold tracking-tight text-primary">连接到这台 Dutydeck</h1>
+        <p className="mt-2 text-body text-secondary">输入 <code className="rounded-sm bg-muted px-1 py-0.5 text-caption">dutydeck auth token</code> 显示的访问令牌。登录后凭据保存在 HttpOnly Cookie 中，不会出现在 URL。</p>
         {/*
           Field 把 label 与控件用 id 绑起来（点标签能聚焦输入框），比原先手写的
           <span> + aria-label 少一份要同步的文案副本。原来贴在框里的钥匙图标随之舍弃：

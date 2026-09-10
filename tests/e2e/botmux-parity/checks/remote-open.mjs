@@ -114,9 +114,9 @@ async function main() {
     currentStage = name;
     return work();
   };
-  invariant(process.env.DOCKMUX_PARITY_REMOTE_OPEN_ACK === 'read_only_dedicated_instance', 'REMOTE_OPEN_ACK_REQUIRED');
-  const baseUrl = safeBaseUrl(process.env.DOCKMUX_PARITY_BASE_URL ?? '');
-  const sessionId = process.env.DOCKMUX_PARITY_SESSION_ID ?? '';
+  invariant(process.env.DUTYDECK_PARITY_REMOTE_OPEN_ACK === 'read_only_dedicated_instance', 'REMOTE_OPEN_ACK_REQUIRED');
+  const baseUrl = safeBaseUrl(process.env.DUTYDECK_PARITY_BASE_URL ?? '');
+  const sessionId = process.env.DUTYDECK_PARITY_SESSION_ID ?? '';
   invariant(/^[A-Za-z0-9_-]{8,160}$/.test(sessionId), 'SESSION_ID_INVALID');
 
   const health = await runStage('health', () => fetchWithTimeout(new URL('/health', baseUrl), { headers: { Origin: baseUrl.origin } }));

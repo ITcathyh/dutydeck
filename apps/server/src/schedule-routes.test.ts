@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
-import { RuntimeError } from '@dockmux/shared';
-import { createRepositories } from '@dockmux/storage';
+import { RuntimeError } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
 import { registerScheduleManagementRoutes } from './schedule-routes.js';
 
 const apps: FastifyInstance[] = [];
@@ -45,7 +45,7 @@ describe('Schedule disabled management routes', () => {
     const instance = await app({ repositories, authorize: () => true });
     const created = await instance.inject({ method: 'POST', url: '/api/foundation/schedules', payload: body });
     expect(created.statusCode).toBe(201);
-    expect(created.json()).toMatchObject({ definition: { revision: 1, state: 'staged', desiredExecutorState: 'disabled', sourceOwnership: 'dockmux', sourceEnabled: false, secretRefConfigured: true }, readiness: { executionEligible: false } });
+    expect(created.json()).toMatchObject({ definition: { revision: 1, state: 'staged', desiredExecutorState: 'disabled', sourceOwnership: 'dutydeck', sourceEnabled: false, secretRefConfigured: true }, readiness: { executionEligible: false } });
     expect(JSON.stringify(created.json())).not.toContain('private_chat_ref');
     expect(JSON.stringify(created.json())).not.toContain('private_payload_ref');
     const list = await instance.inject({ method: 'GET', url: '/api/foundation/schedules' });

@@ -11,7 +11,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSy
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { ClaudeTranscriptTailer, resolveClaudeTranscriptPath } from './claude.js';
 import { CodexTranscriptTailer, resolveCodexRolloutPath } from './codex.js';
 import { createTranscriptTailer } from './index.js';
@@ -22,7 +22,7 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let tempRoots: string[] = [];
 
 function makeTempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `dockmux-transcript-${prefix}-`));
+  const dir = mkdtempSync(join(tmpdir(), `dutydeck-transcript-${prefix}-`));
   tempRoots.push(dir);
   return dir;
 }
@@ -476,7 +476,7 @@ describe('ClaudeTranscriptTailer (directory resolution + switching)', () => {
 });
 
 /**
- * Regression: two dockmux sessions sharing one cwd must never see each other's
+ * Regression: two dutydeck sessions sharing one cwd must never see each other's
  * transcript.
  *
  * The project dir is keyed by cwd ALONE, so N sessions in one repo write N
@@ -494,7 +494,7 @@ describe('ClaudeTranscriptTailer (同 cwd 多会话隔离)', () => {
   /** A first-prompt entry carrying the session marker, as the CLI records it. */
   const markerEntry = (sessionId: string) => JSON.stringify({
     type: 'user',
-    message: { role: 'user', content: [{ type: 'text', text: `<dockmux_session_id>${sessionId}</dockmux_session_id>\nhello` }] },
+    message: { role: 'user', content: [{ type: 'text', text: `<dutydeck_session_id>${sessionId}</dutydeck_session_id>\nhello` }] },
   }) + '\n';
   const assistantEntry = (text: string) => JSON.stringify({
     type: 'assistant',
@@ -507,7 +507,7 @@ describe('ClaudeTranscriptTailer (同 cwd 多会话隔离)', () => {
     process.env.CLAUDE_CONFIG_DIR = configDir;
     const projectDir = join(configDir, 'projects', cwd.replace(/[^A-Za-z0-9-]/g, '-'));
     mkdirSync(projectDir, { recursive: true });
-    // Pinned ids: dockmux passes `--session-id <uuid>` and Claude names the
+    // Pinned ids: dutydeck passes `--session-id <uuid>` and Claude names the
     // file after it (cli-adapters/adapters/claude-family.ts buildArgs).
     const mine = '11111111-1111-4111-8111-111111111111';
     const sibling = '22222222-2222-4222-8222-222222222222';
@@ -679,7 +679,7 @@ describe('CodexTranscriptTailer (explicit path)', () => {
     }) + '\n');
     appendFileSync(file, JSON.stringify({
       type: 'response_item',
-      payload: { type: 'web_search_call', call_id: 'c_3', action: { query: 'dockmux' } },
+      payload: { type: 'web_search_call', call_id: 'c_3', action: { query: 'dutydeck' } },
     }) + '\n');
     appendFileSync(file, JSON.stringify({
       type: 'response_item',
@@ -768,7 +768,7 @@ describe('resolveCodexRolloutPath', () => {
     const sibling = join(dayDir, 'rollout-2026-08-27T10-30-00-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl');
     // history.jsonl 是 session-id 反查的第一来源：一行一次提交，带 marker。
     writeFileSync(join(home, 'history.jsonl'),
-      JSON.stringify({ session_id: mineId, ts: 1, text: '<dockmux_session_id>ses_deadbeef-1111-4111-8111-111111111111</dockmux_session_id> hi' }) + '\n');
+      JSON.stringify({ session_id: mineId, ts: 1, text: '<dutydeck_session_id>ses_deadbeef-1111-4111-8111-111111111111</dutydeck_session_id> hi' }) + '\n');
     writeFileSync(mine, JSON.stringify({ type: 'session_meta', payload: { session_id: mineId, cwd: '/any/cwd' } }) + '\n');
     writeFileSync(sibling, '{}\n');
     const now = Date.now() / 1000;

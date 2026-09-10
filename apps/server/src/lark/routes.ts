@@ -1,8 +1,8 @@
-import type { RelayAskBroker } from '@dockmux/relay';
+import type { RelayAskBroker } from '@dutydeck/relay';
 import { registerLarkGroupManagementRoutes, type LarkGroupManager } from './group-management.js';
 import type { FastifyInstance } from 'fastify';
-import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dockmux/shared';
-import type { DockmuxRuntime } from '@dockmux/runtime';
+import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepository, type ConfigRepository, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
 import { detectUnusableOwnerEntries, normalizeOwnerEntries, type ContactLookup } from './owner-identity.js';
 import { defaultHighRiskPattern, deleteLarkConfig, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
@@ -30,7 +30,7 @@ export interface LarkRoutesOptions {
   cardMappings?: ChannelMappingRepository;
   fetcher?: typeof globalThis.fetch;
   listener?: LarkListenerPool;
-  runtime?: DockmuxRuntime;
+  runtime?: DutydeckRuntime;
   listeningDisabled?: boolean;
   agentTools?: LarkAgentToolsService;
   openPlatformJobs?: Pick<OpenPlatformConfigurationJobManager, 'start' | 'get'>;
@@ -211,7 +211,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
               `以下白名单 open_id 无法通过目标应用校验，不能保存：${unusable.join(', ')}。open_id 只对签发它的应用有效，跨应用复制会导致 owner 被锁死。请改用完整邮箱、手机号或 on_ union_id，或先在目标应用下通过姓名解析。`,
               400);
           }
-          // 归一化：能解析成 union_id 的 ou_ 在 botmux 里会替换为 on_ 落库。dockmux
+          // 归一化：能解析成 union_id 的 ou_ 在 botmux 里会替换为 on_ 落库。dutydeck
           // 的 allowedUsers 只存 ou_（config.ts 归一化丢弃非 ou_ 条目，运行时按
           // open_id 匹配），且这些 ou_ 已通过目标 app 校验、就是该 app 自己的
           // open_id，故仍以 ou_ 形态保存；on_ 形态待 schema 支持 union_id 白名单后

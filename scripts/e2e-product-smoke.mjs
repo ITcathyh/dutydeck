@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dockmux 产品化能力端到端验收
+ * dutydeck 产品化能力端到端验收
  *
  * 定位：scripts/e2e-smoke.mjs 是发布主链路的基线（42 项断言），本脚本是它的**兄弟脚本**，
  * 专门验收三条新交付的产品化能力，一个都不与基线重叠：
@@ -26,8 +26,8 @@
  *     这两项是纯函数契约，起浏览器反而绕远；但它们仍在同一份验收里报数。
  *
  * 假 CLI 与费用
- *   默认（也是唯一）模式为 mock：/tmp 下生成的 Node 脚本冒充 claude，经 DOCKMUX_AGENTS_JSON
- *   覆盖 claude-code 的 command，绝不触碰真实模型，也不会读写开发者的 ~/.dockmux 或 ~/.claude。
+ *   默认（也是唯一）模式为 mock：/tmp 下生成的 Node 脚本冒充 claude，经 DUTYDECK_AGENTS_JSON
+ *   覆盖 claude-code 的 command，绝不触碰真实模型，也不会读写开发者的 ~/.dutydeck 或 ~/.claude。
  *
  * 清理保证
  *   所有资源注册到 cleanup 栈并在 finally 里逆序释放；server 先 SIGTERM 后 SIGKILL 且杀整个进程组；
@@ -90,7 +90,7 @@ const luminance = color => {
 
 // ── 浏览器域 ───────────────────────────────────────────────────────────────
 async function browserAcceptance() {
-  const dirs = createDataDir({ onCleanup, prefix: 'dockmux-product-' });
+  const dirs = createDataDir({ onCleanup, prefix: 'dutydeck-product-' });
 
   // 一个假 CLI 文件，两个 agent 定义：默认 claude-code 秒回（各节快速跑到 completed），
   // 慢速那条（id 取 seed —— 与 claude-code 共用同一份 claude-family 实现）每轮 8s，
@@ -205,7 +205,7 @@ async function browserAcceptance() {
   step('深色模式：三态切换、DOM 契约、持久化、真实计算色');
   const themeState = () => page.evaluate(() => ({
     attribute: document.documentElement.getAttribute('data-theme'),
-    stored: window.localStorage.getItem('dockmux.theme'),
+    stored: window.localStorage.getItem('dutydeck.theme'),
     bodyBackground: getComputedStyle(document.body).backgroundColor,
     terminalBackground: getComputedStyle(document.documentElement).getPropertyValue('--terminal-bg').trim()
   }));
@@ -218,19 +218,19 @@ async function browserAcceptance() {
     const initial = await themeState();
     assert(initial.attribute === null,
       `默认「跟随系统」时 documentElement 不写 data-theme（实际 ${JSON.stringify(initial.attribute)}）`);
-    assert(initial.stored === null, '默认「跟随系统」时 localStorage 不留 dockmux.theme 键');
+    assert(initial.stored === null, '默认「跟随系统」时 localStorage 不留 dutydeck.theme 键');
     assert(await appearance.getByRole('radio', { name: /^跟随系统/ }).getAttribute('aria-checked') === 'true',
       '「跟随系统」的 aria-checked 为 true（当前值不靠颜色单独表意）');
 
     await appearance.getByRole('radio', { name: /^深色/ }).click();
     const dark = await themeState();
     assert(dark.attribute === 'dark', `选择「深色」后 data-theme="dark"（实际 ${JSON.stringify(dark.attribute)}）`);
-    assert(dark.stored === 'dark', '选择「深色」后偏好写入 localStorage.dockmux.theme');
+    assert(dark.stored === 'dark', '选择「深色」后偏好写入 localStorage.dutydeck.theme');
 
     await appearance.getByRole('radio', { name: /^浅色/ }).click();
     const light = await themeState();
     assert(light.attribute === 'light', `选择「浅色」后 data-theme="light"（实际 ${JSON.stringify(light.attribute)}）`);
-    assert(light.stored === 'light', '选择「浅色」后偏好写入 localStorage.dockmux.theme');
+    assert(light.stored === 'light', '选择「浅色」后偏好写入 localStorage.dutydeck.theme');
 
     // 这条是 jsdom 拿不到的核心断言：真实 Chromium 的计算背景色必须一深一浅。
     // 比亮度而不比色值字符串，调色板换色也不会让它变成假通过。
@@ -271,7 +271,7 @@ async function browserAcceptance() {
     assert(luminance(afterReload.bodyBackground) + 60 < lightLuminance,
       `刷新后真实渲染仍为深色（body 背景 ${afterReload.bodyBackground}）`);
     // 恢复默认，避免污染后面的节
-    await page.evaluate(() => { window.localStorage.removeItem('dockmux.theme'); });
+    await page.evaluate(() => { window.localStorage.removeItem('dutydeck.theme'); });
     await gotoHome();
   });
 
@@ -957,7 +957,7 @@ process.on('SIGINT', () => onSignal('SIGINT'));
 process.on('SIGTERM', () => onSignal('SIGTERM'));
 
 try {
-  log('dockmux 产品化能力验收 — MOCK（假 CLI，不触碰模型，无需任何凭证）');
+  log('dutydeck 产品化能力验收 — MOCK（假 CLI，不触碰模型，无需任何凭证）');
   log(`端口 ${PORT} · 全局超时 ${TIMEOUT_MS}ms · 范围 ${ONLY}`);
   if (RUN_BROWSER) await browserAcceptance();
   if (RUN_LARK) await larkAcceptance();

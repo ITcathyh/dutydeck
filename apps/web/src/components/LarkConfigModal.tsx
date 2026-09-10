@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Bot, Check, ExternalLink, Eye, EyeOff, FolderOpen, Plus, Trash2, Wrench, X } from 'lucide-react';
-import { validateHighRiskPattern } from '@dockmux/shared';
+import { validateHighRiskPattern } from '@dutydeck/shared';
 import { api, type Agent, type RiskControlMode } from '../api';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 import { Badge, Banner, Button, Dialog, Field, IconButton, Input, Select, Skeleton, Spinner, Textarea } from './primitives';
@@ -128,7 +128,7 @@ export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
         {config.isLoading ? <Skeleton variant="row" lines={3}/> : <>
           <div className="mb-1 grid grid-cols-2 rounded-md bg-muted p-1"><button type="button" onClick={() => setStep(1)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out ${step === 1 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">1</span>连接飞书应用</button><button type="button" disabled={!current} onClick={() => setStep(2)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out disabled:opacity-40 ${step === 2 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">2</span>选择 Agent 并启用</button></div>
           <p className="-mt-1 text-caption text-subtle">{step === 1 ? '填写飞书应用凭据并配置必要能力；成员范围可以留空，稍后再收紧。' : '选择处理飞书消息的 Agent、确认工作方式并启用监听。'}</p>
-          {agents.length === 0 && <Banner tone="warning" role="alert">当前没有可用 Agent。你可以先保存飞书应用，但完成绑定前需要安装并登录 Agent CLI，然后重启 Dockmux。</Banner>}
+          {agents.length === 0 && <Banner tone="warning" role="alert">当前没有可用 Agent。你可以先保存飞书应用，但完成绑定前需要安装并登录 Agent CLI，然后重启 Dutydeck。</Banner>}
           {step === 1 ? <>
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="机器人名称"><Input value={name} readOnly placeholder="校验凭证后自动识别" className="bg-muted font-mono text-subtle"/></Field>
@@ -160,13 +160,13 @@ export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
           </div>
           <Field label="默认工作区" hint="飞书创建的新任务默认在这个代码目录执行。">
             <span className="flex gap-2">
-              <Input value={workspace} onChange={event => setWorkspace(event.target.value)} placeholder="输入运行 Dockmux 的机器上的绝对路径" className="min-w-0 flex-1 font-mono"/>
+              <Input value={workspace} onChange={event => setWorkspace(event.target.value)} placeholder="输入运行 Dutydeck 的机器上的绝对路径" className="min-w-0 flex-1 font-mono"/>
               <Button variant="secondary" icon={<FolderOpen size={13}/>} disabled={!capabilities.data?.directoryPicker || pickWorkspace.isPending} onClick={() => pickWorkspace.mutate()}>{capabilities.data?.directoryPicker ? '选择目录' : '手动输入'}</Button>
             </span>
           </Field>
           <details className="rounded-lg bg-muted p-3"><summary className="min-h-10 cursor-pointer py-2 text-caption font-semibold text-secondary">访问范围与高级设置（可选）</summary><div className="mt-3 space-y-3.5">
           <Field label="Web 访问地址（可选）" hint="配置后，飞书卡片底部会显示“查看详情”链接，指向该域名下的任务 Trace 页面。">
-            <Input value={webBaseUrl} onChange={event => setWebBaseUrl(event.target.value)} placeholder="https://dockmux.example.com" className="font-mono"/>
+            <Input value={webBaseUrl} onChange={event => setWebBaseUrl(event.target.value)} placeholder="https://dutydeck.example.com" className="font-mono"/>
           </Field>
           {!current && <Button variant="secondary" fullWidth icon={<Bot size={12}/>} loading={inspect.isPending} disabled={!appId.trim() || !appSecret.trim()} onClick={() => inspect.mutate()}>校验凭证并识别机器人名称</Button>}
           <div className="border-t border-subtle pt-3.5">

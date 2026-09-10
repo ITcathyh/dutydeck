@@ -18,7 +18,7 @@ node scripts/verify-redesign.mjs
 ```
 
 服务绑外部主机名而非 loopback，`127.0.0.1` 会 ERR_CONNECTION_REFUSED。
-默认打 `http://10.37.33.49:4310`，换实例设 `DOCKMUX_E2E_BASE_URL`。
+默认打 `http://10.37.33.49:4310`，换实例设 `DUTYDECK_E2E_BASE_URL`。
 
 **这些用例读的是 `apps/web/dist` 的构建产物，不是源码。** 改完源码要
 `pnpm build` 才能看到变化（服务从磁盘读，不必重启）。曾经因为这个把已经改好的

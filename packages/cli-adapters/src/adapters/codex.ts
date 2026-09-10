@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -53,17 +53,17 @@ export function createCodexAdapter(): CliAdapter {
     },
 
     /**
-     * Codex 自己铸 rollout id（也是 UUID 形态），dockmux 钉不了。
+     * Codex 自己铸 rollout id（也是 UUID 形态），dutydeck 钉不了。
      *
-     * 收到 dockmux 自己的 `ses_<uuid>` = 反查（session-id/codex.ts 扫
+     * 收到 dutydeck 自己的 `ses_<uuid>` = 反查（session-id/codex.ts 扫
      * history.jsonl）没找到锚点，这个 id codex 从没见过：`codex resume <未知id>`
      * 起不来。返回 null 让 driver 改起新会话——丢上下文是降级，起不来是故障。
      *
      * 注意这里只挡 `ses_` 前缀那一种形态：codex 原生 id 本身就是裸 UUID，
-     * 把裸 UUID 一并当成「dockmux 的」会误杀所有正常 resume（见 resume-id.ts）。
+     * 把裸 UUID 一并当成「dutydeck 的」会误杀所有正常 resume（见 resume-id.ts）。
      */
     buildResumeCommand(sessionId: string): string[] | null {
-      if (isDockmuxSessionId(sessionId)) return null;
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['resume', sessionId];
     },
 

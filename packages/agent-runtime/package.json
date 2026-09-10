@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/runtime",
+  "name": "@dutydeck/runtime",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -25,9 +25,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@dockmux/shared": "workspace:*",
-    "@dockmux/acp-client": "workspace:*",
-    "@dockmux/transports": "workspace:*"
+    "@dutydeck/shared": "workspace:*",
+    "@dutydeck/acp-client": "workspace:*",
+    "@dutydeck/transports": "workspace:*"
   },
   "devDependencies": {
     "typescript": "5.8.3",

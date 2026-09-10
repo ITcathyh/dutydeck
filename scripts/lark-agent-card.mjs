@@ -19,7 +19,7 @@ const elapsedLabel = seconds => {
 };
 
 export function buildAgentCard({
-  agentName = 'Dockmux',
+  agentName = 'Dutydeck',
   state = 'running',
   taskName,
   taskId,
@@ -59,7 +59,7 @@ export function buildAgentCard({
     schema: '2.0',
     config: { update_multi: true },
     header: {
-      title: { tag: 'plain_text', content: `${presentation.icon} ${String(agentName).trim() || 'Dockmux'} ${presentation.title}` },
+      title: { tag: 'plain_text', content: `${presentation.icon} ${String(agentName).trim() || 'Dutydeck'} ${presentation.title}` },
       subtitle: { tag: 'plain_text', content: taskName.trim() },
       template: presentation.template,
       padding: '12px'
@@ -152,7 +152,7 @@ export class AgentCardTurn {
   constructor(client, {
     receiveId,
     receiveIdType = 'email',
-    agentName = 'Dockmux',
+    agentName = 'Dutydeck',
     taskName,
     taskId,
     refreshIntervalMs = 5000,

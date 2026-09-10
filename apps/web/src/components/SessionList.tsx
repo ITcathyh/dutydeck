@@ -5,7 +5,7 @@ import type { PrimaryNav } from '../app-route';
 import { useMediaQuery } from '../useMediaQuery';
 import { groupSessionsByWorkspace, type WorkbenchView, type WorkspaceGroup } from '../workspace-model';
 import { formatLarkNavSummary } from '../lark-status';
-import { createTaskAffordance, DockmuxIcon } from './ui';
+import { createTaskAffordance, DutydeckIcon } from './ui';
 import { Skeleton } from './primitives';
 import { SessionRow } from './SessionRow';
 import { SidebarNav, type SidebarNavGroup } from './SidebarNav';
@@ -121,7 +121,7 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
    * 导航项的选取。**每一项都是在补一条原本没有常驻入口的路**，不是把已有按钮再抄一份。
    *
    * 分两组，切的是「配置什么」而不是 botmux 那种业务域划分（它 19 项分 5 组是因为
-   * 有 19 个真页面；dockmux 全站只有两个页面 + 四个浮层，抄 5 组只会得到 5 个空壳）。
+   * 有 19 个真页面；dutydeck 全站只有两个页面 + 四个浮层，抄 5 组只会得到 5 个空壳）。
    *
    * · 接入 —— 让任务能从外部进来：Agent 是执行者，飞书是消息入口。
    * · 自动化 —— 让任务不靠人点也能发生：群策略、定时。两项当前都只有草稿态。
@@ -180,7 +180,7 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
   ];
 
   return <aside
-    aria-label="Dockmux 工作台导航"
+    aria-label="Dutydeck 工作台导航"
     aria-hidden={hiddenOnMobile || undefined}
     inert={hiddenOnMobile || undefined}
     /*
@@ -194,11 +194,11 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
     className={`fixed inset-y-0 left-0 z-drawer flex w-sidebar flex-col overflow-hidden border-r border-sidebar-border bg-sidebar-surface text-sidebar-text shadow-sidebar transition-transform duration-normal ease-emphasized md:bottom-shell-gap md:left-shell-gap md:top-shell-top md:translate-x-0 md:rounded-lg md:border ${open ? 'translate-x-0' : '-translate-x-full'}`}
   >
     {/*
-      品牌块在移动端才渲染。桌面端顶栏已有可点的品牌位（TopBar 的「Dockmux 首页」），
-      再挂一份不可点的同名文字，读屏会连读两次「Dockmux」，而其中一个还不是控件。
+      品牌块在移动端才渲染。桌面端顶栏已有可点的品牌位（TopBar 的「Dutydeck 首页」），
+      再挂一份不可点的同名文字，读屏会连读两次「Dutydeck」，而其中一个还不是控件。
       移动端顶栏被抽屉遮住，这里是唯一的品牌锚点，保留。
     */}
-    <div className="flex h-14 shrink-0 items-center gap-2.5 px-4 md:hidden"><DockmuxIcon className="h-8 w-8 shrink-0"/><span><strong className="block text-body font-semibold tracking-[-.025em] text-sidebar-text-strong">Dockmux</strong><span className="block text-caption text-sidebar-text-muted">Agent 任务台</span></span></div>
+    <div className="flex h-14 shrink-0 items-center gap-2.5 px-4 md:hidden"><DutydeckIcon className="h-8 w-8 shrink-0"/><span><strong className="block text-body font-semibold tracking-[-.025em] text-sidebar-text-strong">Dutydeck</strong><span className="block text-caption text-sidebar-text-muted">Agent 任务台</span></span></div>
 
     <div className="shrink-0 px-3 pt-2 md:pt-3">
       {/* 手写而不是用 <Button>：原语没有 sidebar 这一层语义色。

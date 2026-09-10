@@ -323,7 +323,7 @@ describe('/help 渲染', () => {
 
   it('文案为简体中文，且列出别名与权限提示', () => {
     const help = renderLarkCommandHelp(fullCapabilities, { pageSize: 20 });
-    expect(help.text).toContain('Dockmux 飞书命令');
+    expect(help.text).toContain('Dutydeck 飞书命令');
     expect(help.text).toContain('当前可用');
     expect(help.text).toContain('/stop');
     expect(help.text).toContain('需白名单权限');
@@ -406,7 +406,7 @@ describe('未识别命令的透传归一化', () => {
     expect(once.split(larkPassthroughMarker).length - 1).toBe(1);
   });
 
-  it('Dockmux 没有的命令一律走透传，不伪造能力', () => {
+  it('Dutydeck 没有的命令一律走透传，不伪造能力', () => {
     for (const text of ['/relay', '/adopt', '/cli', '/cwd /tmp', '/repo x', '/model gpt-5', '/agent codex']) {
       const route = routeLarkCommand(text, context());
       expect(route.kind).toBe('unknown_command');

@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/web",
+  "name": "@dutydeck/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@dockmux/shared": "workspace:*",
+    "@dutydeck/shared": "workspace:*",
     "@tanstack/react-query": "5.81.2",
     "lucide-react": "0.522.0",
     "prism-react-renderer": "2.4.1",

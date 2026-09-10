@@ -4,8 +4,8 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createRepositories } from '@dockmux/storage';
-import { LocalFileSecretProvider, secretDirectoryForDatabase } from '@dockmux/secret-provider';
+import { createRepositories } from '@dutydeck/storage';
+import { LocalFileSecretProvider, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { getAuthToken } from './auth/auth.js';
 import { startLocalServer, type LocalServer } from './service.js';
 
@@ -95,13 +95,13 @@ async function start(root: string, database: string, port: number, baseUrl: stri
     env: {
       ...process.env,
       NODE_ENV: 'test',
-      DOCKMUX_HOST: '0.0.0.0',
-      DOCKMUX_PORT: String(port),
-      DOCKMUX_DEFAULT_CWD: root,
-      DOCKMUX_DATABASE_URL: database,
-      DOCKMUX_AUTH: String(auth),
-      DOCKMUX_DISABLE_LARK_LISTENER: 'true',
-      DOCKMUX_AGENTS_JSON: '[]',
+      DUTYDECK_HOST: '0.0.0.0',
+      DUTYDECK_PORT: String(port),
+      DUTYDECK_DEFAULT_CWD: root,
+      DUTYDECK_DATABASE_URL: database,
+      DUTYDECK_AUTH: String(auth),
+      DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+      DUTYDECK_AGENTS_JSON: '[]',
     },
     identityPreflight: { baseUrlForBrand: () => baseUrl, now: () => now },
   });
@@ -124,9 +124,9 @@ afterEach(async () => {
 
 describe('production identity preflight wiring', () => {
   it('persists allowlisted CAS facts, survives restart, expires closed, and never activates', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-preflight-service-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-preflight-service-'));
     roots.push(root);
-    const database = join(root, 'dockmux.db');
+    const database = join(root, 'dutydeck.db');
     await seed(database);
     const fake = await fakeLark();
     const firstPort = await freePort();
@@ -204,9 +204,9 @@ describe('production identity preflight wiring', () => {
   });
 
   it('requires a verified access token in token mode and accepts the trusted no-auth path separately', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-preflight-token-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-preflight-token-'));
     roots.push(root);
-    const database = join(root, 'dockmux.db');
+    const database = join(root, 'dutydeck.db');
     await seed(database);
     const fake = await fakeLark();
     const port = await freePort();

@@ -1,22 +1,22 @@
 # Botmux 只读 Import、Preflight 与 Cutover Fencing 规格
 
-> WP3b 当前可执行面以 [Botmux 只读迁移 CLI](./botmux-import-cli.md) 为准：仅 `dockmux botmux discover|plan|archive`，不接 Dockmux DB 或运行态。本文其余命令面是后续安全设计，不代表当前 CLI 已实现。
+> WP3b 当前可执行面以 [Botmux 只读迁移 CLI](./botmux-import-cli.md) 为准：仅 `dutydeck botmux discover|plan|archive`，不接 Dutydeck DB 或运行态。本文其余命令面是后续安全设计，不代表当前 CLI 已实现。
 >
 > 状态：设计规格，不包含实现。
 >
-> 安全目标：读取并验证 Botmux 资产，生成私密迁移计划、历史归档和可审计 cutover packet；不修改 Botmux，不写入 Dockmux live Agent/Lark/Schedule 配置，不启动或停止 listener，不启用 schedule，不确认 full trust。
+> 安全目标：读取并验证 Botmux 资产，生成私密迁移计划、历史归档和可审计 cutover packet；不修改 Botmux，不写入 Dutydeck live Agent/Lark/Schedule 配置，不启动或停止 listener，不启用 schedule，不确认 full trust。
 >
 > 本文不记录任何 Secret、token、cookie、邮箱全文、手机号、App 视角身份值、消息正文、schedule prompt 或 workflow goal。
 
 ## 1. 不变量与结论
 
-本规格定义的 CLI 是只读控制面，不是接管工具。允许的唯一写入是 Dockmux 私有 control store 中的 plan/preflight 记录、受保护 archive 和 cutover packet；这些记录不能被 runtime 当作 live 配置读取。
+本规格定义的 CLI 是只读控制面，不是接管工具。允许的唯一写入是 Dutydeck 私有 control store 中的 plan/preflight 记录、受保护 archive 和 cutover packet；这些记录不能被 runtime 当作 live 配置读取。
 
 以下不变量不可通过参数绕过：
 
 1. Importer 没有 `apply`、`activate`、`listen`、`enable-schedule` 或 `confirm-full-trust` 命令。
 2. 所有发现到的 Bot 默认 `target_state=staged_only`；任何输出都不能使 listener 或 scheduler 生效。
-3. 同一个生产 Lark App 不允许 Botmux 与 Dockmux 同时建立事件连接；“shadow”不等于第二个生产 listener。
+3. 同一个生产 Lark App 不允许 Botmux 与 Dutydeck 同时建立事件连接；“shadow”不等于第二个生产 listener。
 4. Lark listener 与 Schedule writer 分别只有一个 owner；listener 停止不代表 scheduler 已停止。
 5. `ou_` 只在产生它的 App 下有效；identity cache 永远不是授权事实源。
 6. 群策略主键为 `(app_id, chat_id)`，不能折叠成纯 `chat_id`。
@@ -32,7 +32,7 @@
 ### 2.1 Source discovery
 
 ```text
-dockmux import botmux discover \
+dutydeck import botmux discover \
   [--source-home <dir>] \
   [--bots-config <exact-file>] \
   [--data-dir <dir>] \
@@ -49,7 +49,7 @@ dockmux import botmux discover \
 ### 2.2 Plan
 
 ```text
-dockmux import botmux plan \
+dutydeck import botmux plan \
   --discovery-id <id> \
   [--include-retired-in-archive] \
   [--include-history-archive] \
@@ -66,7 +66,7 @@ dockmux import botmux plan \
 ### 2.3 Archive snapshot
 
 ```text
-dockmux import botmux archive \
+dutydeck import botmux archive \
   --plan-id <id> \
   --destination <private-dir> \
   [--history sessions,workflows,usage,feedback,attachments]
@@ -82,7 +82,7 @@ dockmux import botmux archive \
 ### 2.4 Identity and chat preflight
 
 ```text
-dockmux cutover botmux preflight \
+dutydeck cutover botmux preflight \
   --plan-id <id> \
   --app-ref <opaque-ref> \
   [--identity-check] \
@@ -100,7 +100,7 @@ dockmux cutover botmux preflight \
 ### 2.5 Shadow plan
 
 ```text
-dockmux cutover botmux shadow-plan \
+dutydeck cutover botmux shadow-plan \
   --preflight-id <id> \
   --mode parser|policy|independent-test-app
 ```
@@ -116,11 +116,11 @@ dockmux cutover botmux shadow-plan \
 ### 2.6 Fence inspection
 
 ```text
-dockmux cutover botmux fence-check \
+dutydeck cutover botmux fence-check \
   --preflight-id <id> \
   --app-ref <opaque-ref>
 
-dockmux cutover botmux cutover-packet \
+dutydeck cutover botmux cutover-packet \
   --preflight-id <id> \
   --app-ref <opaque-ref> \
   --output <private-file>
@@ -131,7 +131,7 @@ dockmux cutover botmux cutover-packet \
 ### 2.7 Rollback planning
 
 ```text
-dockmux cutover botmux rollback-plan \
+dutydeck cutover botmux rollback-plan \
   --cutover-packet <private-file> \
   --current-observation-id <id>
 ```
@@ -143,13 +143,13 @@ dockmux cutover botmux rollback-plan \
 以下调用必须返回 `FORBIDDEN_MUTATION`：
 
 ```text
-dockmux import botmux apply ...
-dockmux import botmux activate ...
-dockmux import botmux --confirm-full-trust ...
-dockmux import botmux --resume-sessions ...
-dockmux cutover botmux acquire-lease ...
-dockmux cutover botmux start-listener ...
-dockmux cutover botmux enable-schedule ...
+dutydeck import botmux apply ...
+dutydeck import botmux activate ...
+dutydeck import botmux --confirm-full-trust ...
+dutydeck import botmux --resume-sessions ...
+dutydeck cutover botmux acquire-lease ...
+dutydeck cutover botmux start-listener ...
+dutydeck cutover botmux enable-schedule ...
 ```
 
 ### 2.9 Exit code
@@ -197,7 +197,7 @@ dockmux cutover botmux enable-schedule ...
     "archive_snapshot_id": null
   },
   "target": {
-    "dockmux_instance_id": "<opaque>",
+    "dutydeck_instance_id": "<opaque>",
     "baseline_fingerprint": "<opaque>",
     "live_write_allowed": false
   },
@@ -278,7 +278,7 @@ interface ImportEntity {
 
 ### 4.1 Source instance identity
 
-`source_instance_id` 必须在多次 plan 间稳定，且不依赖会变化的文件内容。建议第一次发现时生成随机 ID，存于 Dockmux private source registry，并以受保护的 locator identity、Botmux deployment evidence 和 operator confirmation关联。
+`source_instance_id` 必须在多次 plan 间稳定，且不依赖会变化的文件内容。建议第一次发现时生成随机 ID，存于 Dutydeck private source registry，并以受保护的 locator identity、Botmux deployment evidence 和 operator confirmation关联。
 
 不得把绝对路径、App Secret hash、邮箱 hash 或整个 source root hash直接当 source ID。
 
@@ -392,13 +392,13 @@ cross-app/unresolvable/definitive miss
 
 ### 7.1 Lease 模型
 
-Lease 必须由 Botmux、Dockmux 和 supervisor 都能观察/强制，不能只存 Dockmux SQLite：
+Lease 必须由 Botmux、Dutydeck 和 supervisor 都能观察/强制，不能只存 Dutydeck SQLite：
 
 ```ts
 interface AppListenerLease {
   app_ref: string
   generation: number
-  owner_runtime: 'botmux' | 'dockmux' | 'none'
+  owner_runtime: 'botmux' | 'dutydeck' | 'none'
   owner_instance_ref: string
   state: 'active' | 'draining' | 'stopped_verified' | 'expired' | 'conflict'
   acquired_at: string
@@ -409,7 +409,7 @@ interface AppListenerLease {
 }
 ```
 
-持有者必须周期续租；失租立即停止接收并断开连接。每次连接建立和事件接收都校验当前 generation。只检查进程存在、PID 文件或 Dockmux 自己的 lease 行都不构成跨系统 fencing。
+持有者必须周期续租；失租立即停止接收并断开连接。每次连接建立和事件接收都校验当前 generation。只检查进程存在、PID 文件或 Dutydeck 自己的 lease 行都不构成跨系统 fencing。
 
 ### 7.2 没有共享 lease 时的硬 fence
 
@@ -440,7 +440,7 @@ Listener lease 与 Schedule writer lease 必须分离。Botmux listener 停止�
 interface ScheduleWriterLease {
   app_ref: string
   generation: number
-  owner_runtime: 'botmux' | 'dockmux' | 'none'
+  owner_runtime: 'botmux' | 'dutydeck' | 'none'
   state: 'active' | 'draining' | 'stopped_verified' | 'conflict'
   renewed_at: string
   expires_at: string
@@ -512,7 +512,7 @@ delivery watermark 记录已提交但未确认的发送。Source outbox 未清�
 ### 10.1 允许
 
 - 对同一 source snapshot 连续运行 parser，验证 normalized result 与 plan digest 稳定。
-- 用脱敏 actor/chat/message-shape 元数据比较 Botmux 与 Dockmux policy evaluator verdict。
+- 用脱敏 actor/chat/message-shape 元数据比较 Botmux 与 Dutydeck policy evaluator verdict。
 - 对历史 route key 做离线 collision 检查，但不创建 channel mapping。
 - 在独立测试 App 下验证 listener、群路由、身份、群工具和卡片行为。
 - 在本地独立测试 workspace 运行 Agent/backend readiness，不使用生产消息。
@@ -520,7 +520,7 @@ delivery watermark 记录已提交但未确认的发送。Source outbox 未清�
 ### 10.2 禁止
 
 - 同一生产 App 的第二个 WebSocket/event consumer；
-- 生产事件 mirror/replay 到会执行 Agent 的 Dockmux；
+- 生产事件 mirror/replay 到会执行 Agent 的 Dutydeck；
 - 生产 schedule prompt 的 shadow fire；
 - shadow 发送消息、创建群、邀请成员、修改卡片或消费 grant/quota；
 - 通过“只观察但仍 ack/claim”规避 single-consumer 约束。
@@ -564,7 +564,7 @@ Packet 是私密、签名、一次性的操作输入，不是 activation capabil
 
 ## 12. Rollback runbook
 
-运行回滚和配置回滚是两件事。运行回滚必须先处理 consumer/writer，再考虑 Dockmux 受管配置：
+运行回滚和配置回滚是两件事。运行回滚必须先处理 consumer/writer，再考虑 Dutydeck 受管配置：
 
 1. Target 停止接收新 turn，drain running/final delivery。
 2. Target Schedule writer 停止 claim，settle 或记录 pending occurrence。
@@ -573,7 +573,7 @@ Packet 是私密、签名、一次性的操作输入，不是 activation capabil
 5. Supervisor 解除 Source inhibit，Source 以新 generation 恢复 listener。
 6. Source schedule writer 读取 occurrence watermark 后恢复，唯一约束阻止重复 fire。
 7. 在 watermark 邻域做 dedup/人工对账，确认没有重复回复或漏投。
-8. Dockmux managed config 若要回滚，只恢复未被人工修改的 entity revision；不删除切流期间产生的 session/task/audit/history。
+8. Dutydeck managed config 若要回滚，只恢复未被人工修改的 entity revision；不删除切流期间产生的 session/task/audit/history。
 9. Secret 只恢复旧 ref；不从 diff/archive 恢复 plaintext。
 
 若 Target 无法证明已断开，或 Source 不支持 generation/watermark，禁止恢复 Source 形成双 consumer；保持两边停止并人工处置。

@@ -68,7 +68,7 @@ export interface ConnectedOpenPlatformSession {
 }
 
 export function defaultOpenPlatformSessionFilePath(home = homedir()): string {
-  return join(home, '.dockmux', 'feishu-open-platform-session.json');
+  return join(home, '.dutydeck', 'feishu-open-platform-session.json');
 }
 
 export function readOpenPlatformSessionCookies(filePath: string): StoredOpenPlatformCookie[] | null {

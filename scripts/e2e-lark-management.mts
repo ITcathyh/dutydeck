@@ -133,7 +133,7 @@ try {
     await page.getByRole('heading', { name: '项目群', exact: true }).scrollIntoViewIfNeeded();
     await page.screenshot({ path: resolve('docs/dashboard-acceptance/groups-mobile.png') });
     await page.setViewportSize({ width: 1440, height: 980 });
-    await expect.poll(async () => (await page.getByRole('complementary', { name: 'Dockmux 工作台导航' }).boundingBox())?.x ?? -1).toBeGreaterThanOrEqual(0);
+    await expect.poll(async () => (await page.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).boundingBox())?.x ?? -1).toBeGreaterThanOrEqual(0);
     await page.screenshot({ path: resolve('docs/dashboard-acceptance/groups-desktop.png') });
     assert.deepEqual(errors, []);
     passed('Bot defaults retain drafts and save directly; 390 px Bot/group list-detail navigation works without horizontal overflow');
@@ -238,6 +238,6 @@ try {
   await writeFile(location, JSON.stringify({ testedAt: new Date().toISOString(), node: process.version, passed: true, apiOnly, results, externalBoundaries: 'synthetic Feishu transport and test CLI; real browser/API/SQLite/AcpxAdapter', observedProcesses: (await harness.observations()).map(({ agent, pid, cwd, model, turn }) => ({ agent, pid, cwd, model, turn })) }, null, 2) + '\n');
   console.log(`RESULT ${location}`);
 } catch (error) {
-  for (const context of browser?.contexts() ?? []) for (const page of context.pages()) await page.screenshot({ path: resolve(tmpdir(), 'dockmux-lark-management-failure.png') }).catch(() => {});
+  for (const context of browser?.contexts() ?? []) for (const page of context.pages()) await page.screenshot({ path: resolve(tmpdir(), 'dutydeck-lark-management-failure.png') }).catch(() => {});
   throw error;
 } finally { await browser?.close(); await harness.close(); }

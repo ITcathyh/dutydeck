@@ -5,10 +5,10 @@ import { RelayError, type RelayCapability, type RelaySecretStore, type RelaySess
 export const relaySigningSecretConfigKey = 'relay.signing_secret';
 
 /** 注入子进程的环境变量名。小写 snake_case 是 ACPX 持久化键名约束（见 CLAUDE.md）。 */
-export const relayUrlEnvKey = 'dockmux_relay_url';
-export const relayTokenEnvKey = 'dockmux_relay_token';
-/** 运行期算出的 dockmux 调用前缀（`'<node>' '<abs>/cli.js'`），解决静态文案拿不到绝对路径的问题 */
-export const relayCommandEnvKey = 'dockmux_relay_command';
+export const relayUrlEnvKey = 'dutydeck_relay_url';
+export const relayTokenEnvKey = 'dutydeck_relay_token';
+/** 运行期算出的 dutydeck 调用前缀（`'<node>' '<abs>/cli.js'`），解决静态文案拿不到绝对路径的问题 */
+export const relayCommandEnvKey = 'dutydeck_relay_command';
 
 /** 会话进入这些状态后凭证立即失效 */
 const terminalStates = new Set(['failed', 'stopped']);
@@ -32,7 +32,7 @@ function tokensEqual(left: string, right: string) {
 /**
  * 会话能力凭证登记处。
  *
- * 鉴权设计：token = HMAC(secret, "dockmux-relay-v1\0<sessionId>")，`v1.` 前缀便于将来轮换算法。
+ * 鉴权设计：token = HMAC(secret, "dutydeck-relay-v1\0<sessionId>")，`v1.` 前缀便于将来轮换算法。
  *
  *  - **确定性**：同一会话在 daemon 重启后仍得到同一 token（secret 持久化在 config 表），
  *    所以「进程重启 → 子进程手里的旧 token 立刻失效」这种伪故障不会发生。
@@ -59,7 +59,7 @@ export class RelayCapabilityRegistry {
 
   private digestFor(sessionId: string) {
     return createHmac('sha256', this.signingSecret)
-      .update(`dockmux-relay-v1\0${sessionId}`)
+      .update(`dutydeck-relay-v1\0${sessionId}`)
       .digest('base64url');
   }
 
@@ -84,7 +84,7 @@ export class RelayCapabilityRegistry {
   async resolve(token: string | undefined, expectedSessionId?: string): Promise<RelayCapability> {
     const presented = token?.trim();
     if (!presented) {
-      throw new RelayError('RELAY_CONTEXT_REQUIRED', '回传通道只能由 Dockmux 会话内的 Agent 调用；当前进程没有会话凭证。', 401);
+      throw new RelayError('RELAY_CONTEXT_REQUIRED', '回传通道只能由 Dutydeck 会话内的 Agent 调用；当前进程没有会话凭证。', 401);
     }
     const parts = presented.split('.');
     if (parts.length !== 3 || parts[0] !== 'v1' || !parts[1] || !parts[2]) {

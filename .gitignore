@@ -7,7 +7,7 @@ packages/*/dist/
 .env.local
 *.log
 .DS_Store
-.dockmux/
+.dutydeck/
 apps/server/public
 *.tsbuildinfo
 

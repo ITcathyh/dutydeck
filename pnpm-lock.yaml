@@ -11,19 +11,19 @@ importers:
 
   .:
     devDependencies:
-      '@dockmux/acp-client':
+      '@dutydeck/acp-client':
         specifier: workspace:*
         version: link:packages/acp-client
-      '@dockmux/config':
+      '@dutydeck/config':
         specifier: workspace:*
         version: link:packages/config
-      '@dockmux/runtime':
+      '@dutydeck/runtime':
         specifier: workspace:*
         version: link:packages/agent-runtime
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:packages/shared
-      '@dockmux/storage':
+      '@dutydeck/storage':
         specifier: workspace:*
         version: link:packages/storage
       '@larksuiteoapi/node-sdk':
@@ -93,19 +93,19 @@ importers:
         specifier: 3.25.67
         version: 3.25.67
     devDependencies:
-      '@dockmux/botmux-importer':
+      '@dutydeck/botmux-importer':
         specifier: workspace:*
         version: link:../../packages/botmux-importer
-      '@dockmux/cli-adapters':
+      '@dutydeck/cli-adapters':
         specifier: workspace:*
         version: link:../../packages/cli-adapters
-      '@dockmux/pty-driver':
+      '@dutydeck/pty-driver':
         specifier: workspace:*
         version: link:../../packages/pty-driver
-      '@dockmux/relay':
+      '@dutydeck/relay':
         specifier: workspace:*
         version: link:../../packages/relay
-      '@dockmux/secret-provider':
+      '@dutydeck/secret-provider':
         specifier: workspace:*
         version: link:../../packages/secret-provider
       '@types/better-sqlite3':
@@ -132,7 +132,7 @@ importers:
 
   apps/web:
     dependencies:
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../../packages/shared
       '@tanstack/react-query':
@@ -208,7 +208,7 @@ importers:
       '@agentclientprotocol/claude-agent-acp':
         specifier: 0.66.0
         version: 0.66.0(@anthropic-ai/sdk@0.120.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@4.4.3))
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
       acpx:
@@ -224,13 +224,13 @@ importers:
 
   packages/agent-runtime:
     dependencies:
-      '@dockmux/acp-client':
+      '@dutydeck/acp-client':
         specifier: workspace:*
         version: link:../acp-client
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
-      '@dockmux/transports':
+      '@dutydeck/transports':
         specifier: workspace:*
         version: link:../transports
     devDependencies:
@@ -252,10 +252,10 @@ importers:
 
   packages/cli-adapters:
     dependencies:
-      '@dockmux/relay':
+      '@dutydeck/relay':
         specifier: workspace:*
         version: link:../relay
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
@@ -268,16 +268,16 @@ importers:
 
   packages/config:
     dependencies:
-      '@dockmux/acp-client':
+      '@dutydeck/acp-client':
         specifier: workspace:*
         version: link:../acp-client
-      '@dockmux/runtime':
+      '@dutydeck/runtime':
         specifier: workspace:*
         version: link:../agent-runtime
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
-      '@dockmux/transports':
+      '@dutydeck/transports':
         specifier: workspace:*
         version: link:../transports
       zod:
@@ -290,16 +290,16 @@ importers:
 
   packages/pty-driver:
     dependencies:
-      '@dockmux/cli-adapters':
+      '@dutydeck/cli-adapters':
         specifier: workspace:*
         version: link:../cli-adapters
-      '@dockmux/session-backends':
+      '@dutydeck/session-backends':
         specifier: workspace:*
         version: link:../session-backends
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
-      '@dockmux/terminal-renderer':
+      '@dutydeck/terminal-renderer':
         specifier: workspace:*
         version: link:../terminal-renderer
     devDependencies:
@@ -312,7 +312,7 @@ importers:
 
   packages/relay:
     dependencies:
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
     devDependencies:
@@ -361,7 +361,7 @@ importers:
 
   packages/storage:
     dependencies:
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
       better-sqlite3:
@@ -380,7 +380,7 @@ importers:
 
   packages/terminal-renderer:
     dependencies:
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
       '@xterm/headless':
@@ -396,10 +396,10 @@ importers:
 
   packages/transports:
     dependencies:
-      '@dockmux/acp-client':
+      '@dutydeck/acp-client':
         specifier: workspace:*
         version: link:../acp-client
-      '@dockmux/shared':
+      '@dutydeck/shared':
         specifier: workspace:*
         version: link:../shared
       node-pty:

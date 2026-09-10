@@ -78,7 +78,7 @@ export class TmuxSessionExistsError extends TmuxError {
 }
 
 /**
- * The tmux session exists, but it was not created for the Dockmux session the
+ * The tmux session exists, but it was not created for the Dutydeck session the
  * caller is trying to restore.  Treating an arbitrary same-named pane as ours
  * would attach user input to the wrong process, so ownership mismatch is a
  * hard failure and never triggers kill/respawn.
@@ -211,17 +211,17 @@ export function isTmuxAvailable(): boolean {
 /** send-keys -l payloads longer than this risk hitting the tty canonical
  *  input limit (MAX_CANON, 4096 bytes on Linux) — route through paste-buffer. */
 const LITERAL_SEND_LIMIT = 4096;
-const OWNER_OPTION = '@dockmux_owner_id';
+const OWNER_OPTION = '@dutydeck_owner_id';
 const METADATA_OPTIONS = {
-  first_prompt_sent: '@dockmux_first_prompt_sent',
-  turn_id: '@dockmux_turn_id',
+  first_prompt_sent: '@dutydeck_first_prompt_sent',
+  turn_id: '@dutydeck_turn_id',
 } as const;
 
-export type TmuxDockmuxMetadataKey = keyof typeof METADATA_OPTIONS;
+export type TmuxDutydeckMetadataKey = keyof typeof METADATA_OPTIONS;
 
 export interface TmuxBackendOptions {
   /**
-   * Stable Dockmux-owned identity expected on spawn/attach.  When present,
+   * Stable Dutydeck-owned identity expected on spawn/attach.  When present,
    * attach refuses sessions without the exact marker.  This is what prevents
    * the production driver from adopting BotMux or unrelated user tmux panes.
    */
@@ -447,7 +447,7 @@ export class TmuxBackend implements SessionBackend {
   }
 
   /** Read a small non-secret driver lifecycle marker persisted by tmux. */
-  getDockmuxMetadata(key: TmuxDockmuxMetadataKey): string | undefined {
+  getDutydeckMetadata(key: TmuxDutydeckMetadataKey): string | undefined {
     if (this.exited) return undefined;
     try {
       const value = runTmux([
@@ -460,7 +460,7 @@ export class TmuxBackend implements SessionBackend {
   }
 
   /** Persist a small non-secret driver lifecycle marker on the tmux session. */
-  setDockmuxMetadata(key: TmuxDockmuxMetadataKey, value: string): void {
+  setDutydeckMetadata(key: TmuxDutydeckMetadataKey, value: string): void {
     if (this.exited) throw new TmuxError('cannot write metadata on an exited tmux backend');
     runTmux(['set-option', '-t', this.sessionName, METADATA_OPTIONS[key], value], { timeout: 2000 });
   }
@@ -527,7 +527,7 @@ export class TmuxBackend implements SessionBackend {
    *  subscription. Shared by spawn() (new session) and attach() (existing
    *  session); the file is removed by cleanup() on kill/detach. */
   private startCapture(): void {
-    this.pipePath = join(tmpdir(), `dockmux-tmux-${randomBytes(8).toString('hex')}.log`);
+    this.pipePath = join(tmpdir(), `dutydeck-tmux-${randomBytes(8).toString('hex')}.log`);
     closeSync(openSync(this.pipePath, 'w')); // ensure it exists before tail -F
     this.tail = spawn('tail', ['-n', '+1', '-F', this.pipePath], {
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -575,7 +575,7 @@ export class TmuxBackend implements SessionBackend {
     const actual = TmuxBackend.sessionOwner(this.sessionName);
     if (actual !== this.ownerId) {
       throw new TmuxOwnershipError(
-        `Refusing to attach tmux session ${this.sessionName}: Dockmux ownership marker mismatch`,
+        `Refusing to attach tmux session ${this.sessionName}: Dutydeck ownership marker mismatch`,
       );
     }
   }
@@ -592,7 +592,7 @@ export class TmuxBackend implements SessionBackend {
   }
 
   private pasteLiteral(text: string): void {
-    const bufferName = `dockmux-${randomBytes(8).toString('hex')}`;
+    const bufferName = `dutydeck-${randomBytes(8).toString('hex')}`;
     let loaded = false;
     try {
       runTmux(['load-buffer', '-b', bufferName, '-'], { input: text });

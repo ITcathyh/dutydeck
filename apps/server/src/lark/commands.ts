@@ -19,7 +19,7 @@
  * 3. **诚实表达能力**：命令只有在 LarkRuntime 真的具备对应能力时才存在。LarkRuntime 里
  *    带 `?` 的方法（stop / dispatch / cancelQueued / getTasks / listAgents / listSessions）
  *    在运行时可能缺失；缺失时对应命令不会出现在 /help，也只会路由成 `unavailable`，
- *    绝不会变成一个执行不了的 intent。Dockmux 今天支撑不了的命令（/cwd、/model、/agent）
+ *    绝不会变成一个执行不了的 intent。Dutydeck 今天支撑不了的命令（/cwd、/model、/agent）
  *    直接不注册，宁可少而诚实。
  *
  * 4. `/help` **渲染只用 markdown**：飞书卡片 schema 2.0 拒绝 `note` 标签（ErrCode 200861），
@@ -153,7 +153,7 @@ export interface LarkCommandDefinition {
 }
 
 /**
- * 当前**真的**由 Dockmux 支撑的命令。每条都对应一个已核对过的运行时能力：
+ * 当前**真的**由 Dutydeck 支撑的命令。每条都对应一个已核对过的运行时能力：
  *
  * - `/help`   纯函数，本模块自己渲染，永远可用。
  * - `/status` runtime.getSession（必填）+ 可选 getTasks 补排队口径；coordinator 已持有
@@ -175,7 +175,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   { name: 'reject', summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
   {
     name: 'help',
-    summary: '列出当前可用的 Dockmux 命令及其用法',
+    summary: '列出当前可用的 Dutydeck 命令及其用法',
     usage: '/help [页码]',
     mutating: false
   },
@@ -185,7 +185,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     usage: '/status',
     mutating: false,
     requires: capabilities => capabilities.getSession,
-    unavailableReason: '当前 Dockmux 运行时无法读取会话状态（缺少 getSession），/status 给不出真实状态，已停用。'
+    unavailableReason: '当前 Dutydeck 运行时无法读取会话状态（缺少 getSession），/status 给不出真实状态，已停用。'
   },
   {
     name: 'cancel',
@@ -196,7 +196,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     // 中断运行中的一轮与取消排队中的一轮是两种能力；只要有一种就还能真的停下一些东西。
     // 两种都缺时 /cancel 只能是空承诺，直接停用。
     requires: capabilities => capabilities.interrupt || capabilities.cancelQueued,
-    unavailableReason: '当前 Dockmux 运行时没有可用的停止手段（缺少 interrupt 与 cancelQueued），/cancel 无法真正取消任务，已停用。'
+    unavailableReason: '当前 Dutydeck 运行时没有可用的停止手段（缺少 interrupt 与 cancelQueued），/cancel 无法真正取消任务，已停用。'
   },
   {
     name: 'retry',
@@ -204,7 +204,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     usage: '/retry',
     mutating: true,
     requires: capabilities => capabilities.dispatch || capabilities.send,
-    unavailableReason: '当前 Dockmux 运行时无法重新下发任务（缺少 dispatch 与 send），/retry 无法重新执行，已停用。'
+    unavailableReason: '当前 Dutydeck 运行时无法重新下发任务（缺少 dispatch 与 send），/retry 无法重新执行，已停用。'
   },
   {
     name: 'new',
@@ -212,7 +212,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     usage: '/new 或 /new <任务内容>',
     mutating: true,
     requires: capabilities => capabilities.stop,
-    unavailableReason: '当前 Dockmux 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'
+    unavailableReason: '当前 Dutydeck 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'
   }
 ];
 
@@ -255,20 +255,20 @@ export function resolveLarkCommand(parsed: ParsedSlashCommand): LarkCommandDefin
 // 未识别命令的透传归一化
 // ---------------------------------------------------------------------------
 
-/** 透传标记，与 coordinator 既有的 `[Dockmux …]` 系统上下文标记风格一致。 */
-export const larkPassthroughMarker = '[Dockmux 非命令原文]';
+/** 透传标记，与 coordinator 既有的 `[Dutydeck …]` 系统上下文标记风格一致。 */
+export const larkPassthroughMarker = '[Dutydeck 非命令原文]';
 
 /**
  * 把未识别的 `/xxx` 归一化成给 Agent 的普通请求文本。
  *
  * 归一化后的文本以 `[` 开头，因此再次经过 {@link parseSlashCommand} 一定返回 undefined：
  * 无论这段文本后续被谁重新解析（重试、对账、日志回灌），都不可能被认成内建命令，
- * 也就无法用字面量「影子」掉真正的 Dockmux 命令。已带标记的文本不会被重复包裹。
+ * 也就无法用字面量「影子」掉真正的 Dutydeck 命令。已带标记的文本不会被重复包裹。
  */
 export function normalizeLarkPassthroughPrompt(raw: unknown): string {
   const body = typeof raw === 'string' ? raw.trim() : '';
   if (body.startsWith(larkPassthroughMarker)) return body;
-  return `${larkPassthroughMarker}\n以下内容不是 Dockmux 命令，请按普通用户请求处理：\n${body}`;
+  return `${larkPassthroughMarker}\n以下内容不是 Dutydeck 命令，请按普通用户请求处理：\n${body}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +303,7 @@ const denyBotOperator = (name: string) =>
   `协作机器人不能执行 /${name}：改变会话状态的命令仅限白名单内的人类成员操作。请改由人工在飞书中发送该命令。`;
 
 const defaultUnavailable = (name: string) =>
-  `当前 Dockmux 运行时不支持 /${name}，已停用。`;
+  `当前 Dutydeck 运行时不支持 /${name}，已停用。`;
 
 /** {@link evaluateLarkCommand} 的判定结果，路由与权限门共享同一份。 */
 export type LarkCommandVerdict =
@@ -412,7 +412,7 @@ export function renderLarkCommandHelp(
   const page = clampNumber(Math.trunc(options.page ?? 1) || 1, 1, totalPages);
   const slice = commands.slice((page - 1) * pageSize, page * pageSize);
 
-  const header = `**Dockmux 飞书命令**\n当前可用 ${commands.length} 条，第 ${page}/${totalPages} 页。`;
+  const header = `**Dutydeck 飞书命令**\n当前可用 ${commands.length} 条，第 ${page}/${totalPages} 页。`;
   const rows = slice.map(definition => {
     const aliases = definition.aliases?.length
       ? `（别名 ${definition.aliases.map(alias => `\`/${alias}\``).join('、')}）`
@@ -423,7 +423,7 @@ export function renderLarkCommandHelp(
   const body = rows.length ? rows.join('\n\n') : '当前运行时没有可用命令，请直接用普通消息下达任务。';
   const footerLines = [
     ...(totalPages > 1 ? [`发送 \`/help ${page < totalPages ? page + 1 : 1}\` 查看${page < totalPages ? '下一页' : '第 1 页'}。`] : []),
-    '未列出的 `/xxx` 会作为普通文字交给 Agent 处理，不会被当作 Dockmux 命令。'
+    '未列出的 `/xxx` 会作为普通文字交给 Agent 处理，不会被当作 Dutydeck 命令。'
   ];
 
   return {

@@ -1,17 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createCliProgram, environmentFromCli } from './cli-program.js';
 
-describe('Dockmux CLI', () => {
+describe('Dutydeck CLI', () => {
   it('maps explicit Commander options to runtime environment variables', () => {
     const program = createCliProgram('0.0.5');
-    program.parse(['node', 'dockmux', '--host', '127.0.0.1', '--port', '4400', '--cwd', '/tmp/project', '--database', '/tmp/dock.db', '--idle-timeout-ms', '1000', '--cleanup-interval-ms', '500', '--lark-app-id', 'cli_test', '--lark-agent-name', 'My Agent']);
-    expect(environmentFromCli(program.opts(), { DOCKMUX_PORT: '4310', KEEP_ME: 'yes' })).toMatchObject({
-      DOCKMUX_HOST: '127.0.0.1',
-      DOCKMUX_PORT: '4400',
-      DOCKMUX_DEFAULT_CWD: '/tmp/project',
-      DOCKMUX_DATABASE_URL: '/tmp/dock.db',
-      DOCKMUX_DRIVER_IDLE_TIMEOUT_MS: '1000',
-      DOCKMUX_CLEANUP_INTERVAL_MS: '500',
+    program.parse(['node', 'dutydeck', '--host', '127.0.0.1', '--port', '4400', '--cwd', '/tmp/project', '--database', '/tmp/dock.db', '--idle-timeout-ms', '1000', '--cleanup-interval-ms', '500', '--lark-app-id', 'cli_test', '--lark-agent-name', 'My Agent']);
+    expect(environmentFromCli(program.opts(), { DUTYDECK_PORT: '4310', KEEP_ME: 'yes' })).toMatchObject({
+      DUTYDECK_HOST: '127.0.0.1',
+      DUTYDECK_PORT: '4400',
+      DUTYDECK_DEFAULT_CWD: '/tmp/project',
+      DUTYDECK_DATABASE_URL: '/tmp/dock.db',
+      DUTYDECK_DRIVER_IDLE_TIMEOUT_MS: '1000',
+      DUTYDECK_CLEANUP_INTERVAL_MS: '500',
       LARK_APP_ID: 'cli_test',
       LARK_AGENT_NAME: 'My Agent',
       KEEP_ME: 'yes'
@@ -20,71 +20,71 @@ describe('Dockmux CLI', () => {
 
   it('does not overwrite environment values for omitted options', () => {
     const program = createCliProgram('0.0.5');
-    program.parse(['node', 'dockmux']);
-    expect(environmentFromCli(program.opts(), { DOCKMUX_HOST: '10.0.0.1' })).toEqual({ DOCKMUX_HOST: '10.0.0.1' });
+    program.parse(['node', 'dutydeck']);
+    expect(environmentFromCli(program.opts(), { DUTYDECK_HOST: '10.0.0.1' })).toEqual({ DUTYDECK_HOST: '10.0.0.1' });
   });
 
   it('disables Lark listening for only the current process', () => {
     const program = createCliProgram('0.0.5');
-    program.parse(['node', 'dockmux', '--no-lark-listen']);
-    expect(environmentFromCli(program.opts(), {})).toEqual({ DOCKMUX_DISABLE_LARK_LISTENER: 'true' });
+    program.parse(['node', 'dutydeck', '--no-lark-listen']);
+    expect(environmentFromCli(program.opts(), {})).toEqual({ DUTYDECK_DISABLE_LARK_LISTENER: 'true' });
   });
 
   it('supports a semantic local-only startup option without requiring a raw host address', () => {
     const program = createCliProgram('0.0.5');
-    program.parse(['node', 'dockmux', '--local-only']);
-    expect(environmentFromCli(program.opts(), {})).toEqual({ DOCKMUX_LOCAL_ONLY: 'true' });
+    program.parse(['node', 'dutydeck', '--local-only']);
+    expect(environmentFromCli(program.opts(), {})).toEqual({ DUTYDECK_LOCAL_ONLY: 'true' });
   });
 
   it('requires an explicit no-auth option and maps it independently from the listen host', () => {
     const defaults = createCliProgram('0.0.5');
-    defaults.parse(['node', 'dockmux', '--host', '0.0.0.0']);
-    expect(environmentFromCli(defaults.opts(), {})).toEqual({ DOCKMUX_HOST: '0.0.0.0' });
+    defaults.parse(['node', 'dutydeck', '--host', '0.0.0.0']);
+    expect(environmentFromCli(defaults.opts(), {})).toEqual({ DUTYDECK_HOST: '0.0.0.0' });
 
     const disabled = createCliProgram('0.0.5');
-    disabled.parse(['node', 'dockmux', '--host', '0.0.0.0', '--no-auth']);
-    expect(environmentFromCli(disabled.opts(), {})).toEqual({ DOCKMUX_HOST: '0.0.0.0', DOCKMUX_AUTH: 'false' });
+    disabled.parse(['node', 'dutydeck', '--host', '0.0.0.0', '--no-auth']);
+    expect(environmentFromCli(disabled.opts(), {})).toEqual({ DUTYDECK_HOST: '0.0.0.0', DUTYDECK_AUTH: 'false' });
 
     const enabled = createCliProgram('0.0.5');
-    enabled.parse(['node', 'dockmux', '--auth']);
-    expect(environmentFromCli(enabled.opts(), { DOCKMUX_AUTH: 'false' })).toEqual({ DOCKMUX_AUTH: 'true' });
+    enabled.parse(['node', 'dutydeck', '--auth']);
+    expect(environmentFromCli(enabled.opts(), { DUTYDECK_AUTH: 'false' })).toEqual({ DUTYDECK_AUTH: 'true' });
   });
 
   it('prints the installed version', () => {
     let output = '';
     const program = createCliProgram('0.0.5').exitOverride().configureOutput({ writeOut: value => { output += value; } });
-    expect(() => program.parse(['node', 'dockmux', '--version'])).toThrowError(expect.objectContaining({ code: 'commander.version', exitCode: 0 }));
+    expect(() => program.parse(['node', 'dutydeck', '--version'])).toThrowError(expect.objectContaining({ code: 'commander.version', exitCode: 0 }));
     expect(output).toBe('0.0.5\n');
   });
 
   it('parses lark send card options', async () => {
     const larkSend = vi.fn();
     const program = createCliProgram('0.0.6', { larkSend });
-    await program.parseAsync(['node', 'dockmux', 'lark', 'send', '**done**', '--agent-name', 'My Agent', '--receive-id', 'user@example.com', '--receive-id-type', 'email', '--task-id', 'task-1', '--app-id', 'cli_test', '--read-only']);
+    await program.parseAsync(['node', 'dutydeck', 'lark', 'send', '**done**', '--agent-name', 'My Agent', '--receive-id', 'user@example.com', '--receive-id-type', 'email', '--task-id', 'task-1', '--app-id', 'cli_test', '--read-only']);
     expect(larkSend).toHaveBeenCalledWith('**done**', expect.objectContaining({ agentName: 'My Agent', receiveId: 'user@example.com', receiveIdType: 'email', taskId: 'task-1', appId: 'cli_test', readOnly: true }));
   });
 
   it('requires a message id for lark update', async () => {
     const larkUpdate = vi.fn();
     const program = createCliProgram('0.0.6', { larkUpdate }).exitOverride();
-    await expect(program.parseAsync(['node', 'dockmux', 'lark', 'update', '**done**'])).rejects.toThrow();
+    await expect(program.parseAsync(['node', 'dutydeck', 'lark', 'update', '**done**'])).rejects.toThrow();
     expect(larkUpdate).not.toHaveBeenCalled();
   });
 
   it('parses a group chat recipient for lark send', async () => {
     const larkSend = vi.fn();
     const program = createCliProgram('0.0.6', { larkSend });
-    await program.parseAsync(['node', 'dockmux', 'lark', 'send', 'group update', '--chat-id', 'oc_group']);
+    await program.parseAsync(['node', 'dutydeck', 'lark', 'send', 'group update', '--chat-id', 'oc_group']);
     expect(larkSend).toHaveBeenCalledWith('group update', expect.objectContaining({ chatId: 'oc_group' }));
   });
 
   it('parses Agent group discovery, incremental reads, sends, and waits', async () => {
     const groupPeers = vi.fn(); const groupMembers = vi.fn(); const groupMessages = vi.fn(); const groupSend = vi.fn(); const groupWait = vi.fn();
-    await createCliProgram('0.0.6', { groupPeers }).parseAsync(['node', 'dockmux', 'group', 'peers']);
-    await createCliProgram('0.0.6', { groupMembers }).parseAsync(['node', 'dockmux', 'group', 'members']);
-    await createCliProgram('0.0.6', { groupMessages }).parseAsync(['node', 'dockmux', 'group', 'messages', '--after', 'cursor-1', '--limit', '8']);
-    await createCliProgram('0.0.6', { groupSend }).parseAsync(['node', 'dockmux', 'group', 'send', '请检查', '--to', 'cli_peer', '--reply-to', 'om_parent', '--in-thread', '--idempotency-key', 'handoff-1']);
-    await createCliProgram('0.0.6', { groupWait }).parseAsync(['node', 'dockmux', 'group', 'wait', '--after', 'cursor-2', '--timeout-ms', '30000']);
+    await createCliProgram('0.0.6', { groupPeers }).parseAsync(['node', 'dutydeck', 'group', 'peers']);
+    await createCliProgram('0.0.6', { groupMembers }).parseAsync(['node', 'dutydeck', 'group', 'members']);
+    await createCliProgram('0.0.6', { groupMessages }).parseAsync(['node', 'dutydeck', 'group', 'messages', '--after', 'cursor-1', '--limit', '8']);
+    await createCliProgram('0.0.6', { groupSend }).parseAsync(['node', 'dutydeck', 'group', 'send', '请检查', '--to', 'cli_peer', '--reply-to', 'om_parent', '--in-thread', '--idempotency-key', 'handoff-1']);
+    await createCliProgram('0.0.6', { groupWait }).parseAsync(['node', 'dutydeck', 'group', 'wait', '--after', 'cursor-2', '--timeout-ms', '30000']);
     expect(groupPeers).toHaveBeenCalledOnce();
     expect(groupMembers).toHaveBeenCalledOnce();
     expect(groupMessages).toHaveBeenCalledWith(expect.objectContaining({ after: 'cursor-1', limit: '8' }));
@@ -95,24 +95,24 @@ describe('Dockmux CLI', () => {
   it('parses the daemon start command with serve options', async () => {
     const daemonStart = vi.fn();
     const program = createCliProgram('0.0.6', { daemonStart });
-    await program.parseAsync(['node', 'dockmux', 'daemon', 'start', '--port', '4500', '--local-only', '--cwd', '/tmp/project']);
+    await program.parseAsync(['node', 'dutydeck', 'daemon', 'start', '--port', '4500', '--local-only', '--cwd', '/tmp/project']);
     expect(daemonStart).toHaveBeenCalledWith(expect.objectContaining({ port: '4500', localOnly: true, cwd: '/tmp/project' }));
-    expect(environmentFromCli(daemonStart.mock.calls[0]![0]!, {})).toMatchObject({ DOCKMUX_PORT: '4500', DOCKMUX_DEFAULT_CWD: '/tmp/project' });
+    expect(environmentFromCli(daemonStart.mock.calls[0]![0]!, {})).toMatchObject({ DUTYDECK_PORT: '4500', DUTYDECK_DEFAULT_CWD: '/tmp/project' });
   });
 
   it('passes no-auth to background daemon commands', async () => {
     const daemonStart = vi.fn();
     const program = createCliProgram('0.0.6', { daemonStart });
-    await program.parseAsync(['node', 'dockmux', 'daemon', 'start', '--host', '0.0.0.0', '--no-auth']);
+    await program.parseAsync(['node', 'dutydeck', 'daemon', 'start', '--host', '0.0.0.0', '--no-auth']);
     expect(daemonStart).toHaveBeenCalledWith(expect.objectContaining({ host: '0.0.0.0', auth: false }));
-    expect(environmentFromCli(daemonStart.mock.calls[0]![0]!, {})).toMatchObject({ DOCKMUX_HOST: '0.0.0.0', DOCKMUX_AUTH: 'false' });
+    expect(environmentFromCli(daemonStart.mock.calls[0]![0]!, {})).toMatchObject({ DUTYDECK_HOST: '0.0.0.0', DUTYDECK_AUTH: 'false' });
   });
 
   it('parses daemon stop, restart, and status commands', async () => {
     const daemonStop = vi.fn(); const daemonRestart = vi.fn(); const daemonStatus = vi.fn();
-    await createCliProgram('0.0.6', { daemonStop }).parseAsync(['node', 'dockmux', 'daemon', 'stop']);
-    await createCliProgram('0.0.6', { daemonRestart }).parseAsync(['node', 'dockmux', 'daemon', 'restart', '--port', '4600']);
-    await createCliProgram('0.0.6', { daemonStatus }).parseAsync(['node', 'dockmux', 'daemon', 'status']);
+    await createCliProgram('0.0.6', { daemonStop }).parseAsync(['node', 'dutydeck', 'daemon', 'stop']);
+    await createCliProgram('0.0.6', { daemonRestart }).parseAsync(['node', 'dutydeck', 'daemon', 'restart', '--port', '4600']);
+    await createCliProgram('0.0.6', { daemonStatus }).parseAsync(['node', 'dutydeck', 'daemon', 'status']);
     expect(daemonStop).toHaveBeenCalledOnce();
     expect(daemonRestart).toHaveBeenCalledWith(expect.objectContaining({ port: '4600' }));
     expect(daemonStatus).toHaveBeenCalledOnce();
@@ -120,11 +120,11 @@ describe('Dockmux CLI', () => {
 
   it('supports the top-level start/stop/restart/status forms and keeps default serve', async () => {
     const serve = vi.fn(); const daemonStart = vi.fn(); const daemonStop = vi.fn(); const daemonRestart = vi.fn(); const daemonStatus = vi.fn();
-    await createCliProgram('0.0.6', { serve }).parseAsync(['node', 'dockmux']);
-    await createCliProgram('0.0.6', { daemonStart }).parseAsync(['node', 'dockmux', 'start', '--port', '4500', '--local-only']);
-    await createCliProgram('0.0.6', { daemonStop }).parseAsync(['node', 'dockmux', 'stop']);
-    await createCliProgram('0.0.6', { daemonRestart }).parseAsync(['node', 'dockmux', 'restart', '--port', '4600']);
-    await createCliProgram('0.0.6', { daemonStatus }).parseAsync(['node', 'dockmux', 'status']);
+    await createCliProgram('0.0.6', { serve }).parseAsync(['node', 'dutydeck']);
+    await createCliProgram('0.0.6', { daemonStart }).parseAsync(['node', 'dutydeck', 'start', '--port', '4500', '--local-only']);
+    await createCliProgram('0.0.6', { daemonStop }).parseAsync(['node', 'dutydeck', 'stop']);
+    await createCliProgram('0.0.6', { daemonRestart }).parseAsync(['node', 'dutydeck', 'restart', '--port', '4600']);
+    await createCliProgram('0.0.6', { daemonStatus }).parseAsync(['node', 'dutydeck', 'status']);
     expect(serve).toHaveBeenCalledOnce();
     expect(daemonStart).toHaveBeenCalledWith(expect.objectContaining({ port: '4500', localOnly: true }));
     expect(daemonStop).toHaveBeenCalledOnce();
@@ -134,13 +134,13 @@ describe('Dockmux CLI', () => {
 
   it('parses update with an optional npm dist-tag', async () => {
     const update = vi.fn();
-    await createCliProgram('0.0.6', { update }).parseAsync(['node', 'dockmux', 'update', '--dist-tag', 'fix']);
+    await createCliProgram('0.0.6', { update }).parseAsync(['node', 'dutydeck', 'update', '--dist-tag', 'fix']);
     expect(update).toHaveBeenCalledWith(expect.objectContaining({ distTag: 'fix' }));
   });
 
   it('parses setup field flags so scripted callers never pipe answers at prompts', async () => {
     const setup = vi.fn();
-    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dockmux', 'setup',
+    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dutydeck', 'setup',
       '--cwd', '/tmp/project', '--port', '4400', '--local-only', '--lark-app-id', 'cli_wizard', '--force-login', '--yes']);
     expect(setup).toHaveBeenCalledWith(expect.objectContaining({
       cwd: '/tmp/project', port: '4400', localOnly: true, larkAppId: 'cli_wizard', forceLogin: true, yes: true
@@ -149,13 +149,13 @@ describe('Dockmux CLI', () => {
 
   it('parses setup --json and --skip-lark independently of the interactive path', async () => {
     const setup = vi.fn();
-    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dockmux', 'setup', '--json', '--skip-lark']);
+    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dutydeck', 'setup', '--json', '--skip-lark']);
     expect(setup).toHaveBeenCalledWith(expect.objectContaining({ json: true, skipLark: true }));
   });
 
   it('defaults setup flags to undefined so the wizard can tell "unset" from "explicitly chosen"', async () => {
     const setup = vi.fn();
-    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dockmux', 'setup']);
+    await createCliProgram('0.0.6', { setup }).parseAsync(['node', 'dutydeck', 'setup']);
     const options = setup.mock.calls[0]![0]! as Record<string, unknown>;
     expect(options.cwd).toBeUndefined();
     expect(options.port).toBeUndefined();
@@ -165,18 +165,18 @@ describe('Dockmux CLI', () => {
 
   it('parses doctor with an optional machine-readable flag', async () => {
     const doctor = vi.fn();
-    await createCliProgram('0.0.6', { doctor }).parseAsync(['node', 'dockmux', 'doctor']);
+    await createCliProgram('0.0.6', { doctor }).parseAsync(['node', 'dutydeck', 'doctor']);
     expect(doctor).toHaveBeenCalledWith(expect.not.objectContaining({ json: true }));
     const asJson = vi.fn();
-    await createCliProgram('0.0.6', { doctor: asJson }).parseAsync(['node', 'dockmux', 'doctor', '--json']);
+    await createCliProgram('0.0.6', { doctor: asJson }).parseAsync(['node', 'dutydeck', 'doctor', '--json']);
     expect(asJson).toHaveBeenCalledWith(expect.objectContaining({ json: true }));
   });
 
   it('parses the three autostart subcommands', async () => {
     const autostartEnable = vi.fn(); const autostartDisable = vi.fn(); const autostartStatus = vi.fn();
-    await createCliProgram('0.0.6', { autostartEnable }).parseAsync(['node', 'dockmux', 'autostart', 'enable']);
-    await createCliProgram('0.0.6', { autostartDisable }).parseAsync(['node', 'dockmux', 'autostart', 'disable']);
-    await createCliProgram('0.0.6', { autostartStatus }).parseAsync(['node', 'dockmux', 'autostart', 'status', '--json']);
+    await createCliProgram('0.0.6', { autostartEnable }).parseAsync(['node', 'dutydeck', 'autostart', 'enable']);
+    await createCliProgram('0.0.6', { autostartDisable }).parseAsync(['node', 'dutydeck', 'autostart', 'disable']);
+    await createCliProgram('0.0.6', { autostartStatus }).parseAsync(['node', 'dutydeck', 'autostart', 'status', '--json']);
     expect(autostartEnable).toHaveBeenCalledOnce();
     expect(autostartDisable).toHaveBeenCalledOnce();
     expect(autostartStatus).toHaveBeenCalledWith(expect.objectContaining({ json: true }));
@@ -185,18 +185,18 @@ describe('Dockmux CLI', () => {
   it('rejects an unknown autostart subcommand instead of silently doing nothing', async () => {
     const autostartEnable = vi.fn();
     const program = createCliProgram('0.0.6', { autostartEnable }).exitOverride().configureOutput({ writeErr: () => {} });
-    await expect(program.parseAsync(['node', 'dockmux', 'autostart', 'toggle'])).rejects.toThrow();
+    await expect(program.parseAsync(['node', 'dutydeck', 'autostart', 'toggle'])).rejects.toThrow();
     expect(autostartEnable).not.toHaveBeenCalled();
   });
 
   it('documents setup, doctor and autostart in the root help so a new user finds them first', () => {
     let output = '';
     const program = createCliProgram('0.0.6').exitOverride().configureOutput({ writeOut: value => { output += value; } });
-    expect(() => program.parse(['node', 'dockmux', '--help'])).toThrow();
+    expect(() => program.parse(['node', 'dutydeck', '--help'])).toThrow();
     expect(output).toContain('setup');
     expect(output).toContain('doctor');
     expect(output).toContain('autostart');
-    expect(output).toContain('$ dockmux setup');
+    expect(output).toContain('$ dutydeck setup');
   });
 
   it('keeps setup help honest about non-interactive behaviour', () => {
@@ -226,7 +226,7 @@ describe('Dockmux CLI', () => {
       return help;
     };
     // enable ≠ start、disable ≠ stop 必须写在帮助里，否则用户会以为服务已经起来/已经停了。
-    expect(capture('enable')).toContain('dockmux start');
-    expect(capture('disable')).toContain('dockmux stop');
+    expect(capture('enable')).toContain('dutydeck start');
+    expect(capture('disable')).toContain('dutydeck stop');
   });
 });

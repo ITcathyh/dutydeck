@@ -1,6 +1,6 @@
 import { Keyboard, Menu, Search } from 'lucide-react';
 import { IconButton, Kbd } from './primitives';
-import { DockmuxIcon } from './ui';
+import { DutydeckIcon } from './ui';
 import { ThemeToggle } from './ThemeToggle';
 import type { ResolvedTheme, ThemePreference } from '../theme';
 
@@ -22,7 +22,7 @@ export type TopBarProps = {
 
   ## 为什么需要它
 
-  在此之前 dockmux 只有「侧栏 + 主区」两栏，全局动作全部寄居在 WorkspaceOverview
+  在此之前 dutydeck 只有「侧栏 + 主区」两栏，全局动作全部寄居在 WorkspaceOverview
   的页首行里。而 WorkspaceOverview 只在没有打开任务时挂载（App.tsx 的 active 分支
   是二选一），于是一旦点进任何一个任务：
 
@@ -71,11 +71,11 @@ export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcu
     <button
       type="button"
       onClick={onGoHome}
-      aria-label="Dockmux 首页，回到任务中心"
+      aria-label="Dutydeck 首页，回到任务中心"
       className="flex min-h-10 shrink-0 items-center gap-2 rounded-md px-1.5 transition-colors duration-fast ease-out hover:bg-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring"
     >
-      <DockmuxIcon className="h-7 w-7 shrink-0"/>
-      <span className="hidden text-body font-semibold tracking-[-.025em] text-primary sm:inline">Dockmux</span>
+      <DutydeckIcon className="h-7 w-7 shrink-0"/>
+      <span className="hidden text-body font-semibold tracking-[-.025em] text-primary sm:inline">Dutydeck</span>
     </button>
 
     <div className="ml-auto flex min-w-0 items-center gap-1.5">

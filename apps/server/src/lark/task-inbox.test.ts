@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { createRepositories } from '@dockmux/storage';
+import { createRepositories } from '@dutydeck/storage';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkTaskInbox } from './task-inbox.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -18,7 +18,7 @@ const message = (overrides: Partial<LarkMessageEvent> = {}): LarkMessageEvent =>
 });
 
 const openDatabase = async () => {
-  const directory = await mkdtemp(join(tmpdir(), 'dockmux-lark-inbox-'));
+  const directory = await mkdtemp(join(tmpdir(), 'dutydeck-lark-inbox-'));
   const filename = join(directory, 'state.db');
   return { directory, filename, repositories: createRepositories(filename) };
 };

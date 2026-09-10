@@ -1,5 +1,5 @@
-import type { ConfigRepository } from '@dockmux/shared';
-import type { RelayAskRecord, RelayAskStore } from '@dockmux/relay';
+import type { ConfigRepository } from '@dutydeck/shared';
+import type { RelayAskRecord, RelayAskStore } from '@dutydeck/relay';
 
 const prefix = 'relay.ask.';
 

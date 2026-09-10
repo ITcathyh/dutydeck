@@ -4,7 +4,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFile
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRepositories } from '@dockmux/storage';
+import { createRepositories } from '@dutydeck/storage';
 import { getAuthToken } from './auth/auth.js';
 import { accessMode, createProductionPtyBackend, listenOptions, startLocalServer } from './service.js';
 
@@ -58,21 +58,21 @@ describe('server access mode', () => {
   });
 
   it('does not create or refresh an access token when auth is explicitly disabled', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-open-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-open-'));
     temporaryDirectories.push(root);
-    const database = join(root, 'dockmux.db');
+    const database = join(root, 'dutydeck.db');
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const service = await startLocalServer({
       webRoot: root,
       env: {
         ...process.env,
         NODE_ENV: 'test',
-        DOCKMUX_HOST: '127.0.0.1',
-        DOCKMUX_PORT: String(await freePort()),
-        DOCKMUX_DEFAULT_CWD: root,
-        DOCKMUX_DATABASE_URL: database,
-        DOCKMUX_AUTH: 'false',
-        DOCKMUX_AGENTS_JSON: '[]'
+        DUTYDECK_HOST: '127.0.0.1',
+        DUTYDECK_PORT: String(await freePort()),
+        DUTYDECK_DEFAULT_CWD: root,
+        DUTYDECK_DATABASE_URL: database,
+        DUTYDECK_AUTH: 'false',
+        DUTYDECK_AGENTS_JSON: '[]'
       }
     });
     await service.close();
@@ -85,7 +85,7 @@ describe('server access mode', () => {
   });
 
   it('wires no-auth trusted-devhost management while all foundation execution stays staged and blocked', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-foundation-service-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-foundation-service-'));
     temporaryDirectories.push(root);
     const port = await freePort();
     const service = await startLocalServer({
@@ -93,13 +93,13 @@ describe('server access mode', () => {
       env: {
         ...process.env,
         NODE_ENV: 'test',
-        DOCKMUX_HOST: '0.0.0.0',
-        DOCKMUX_PORT: String(port),
-        DOCKMUX_DEFAULT_CWD: root,
-        DOCKMUX_DATABASE_URL: join(root, 'dockmux.db'),
-        DOCKMUX_AUTH: 'false',
-        DOCKMUX_DISABLE_LARK_LISTENER: 'true',
-        DOCKMUX_AGENTS_JSON: '[]'
+        DUTYDECK_HOST: '0.0.0.0',
+        DUTYDECK_PORT: String(port),
+        DUTYDECK_DEFAULT_CWD: root,
+        DUTYDECK_DATABASE_URL: join(root, 'dutydeck.db'),
+        DUTYDECK_AUTH: 'false',
+        DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+        DUTYDECK_AGENTS_JSON: '[]'
       }
     });
     const base = `http://127.0.0.1:${port}`;
@@ -180,22 +180,22 @@ describe('server access mode', () => {
   });
 
   it('requires the verified installation token for remote foundation writes with no anonymous principal fallback', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-foundation-token-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-foundation-token-'));
     temporaryDirectories.push(root);
-    const database = join(root, 'dockmux.db');
+    const database = join(root, 'dutydeck.db');
     const port = await freePort();
     const service = await startLocalServer({
       webRoot: root,
       env: {
         ...process.env,
         NODE_ENV: 'test',
-        DOCKMUX_HOST: '0.0.0.0',
-        DOCKMUX_PORT: String(port),
-        DOCKMUX_DEFAULT_CWD: root,
-        DOCKMUX_DATABASE_URL: database,
-        DOCKMUX_AUTH: 'true',
-        DOCKMUX_DISABLE_LARK_LISTENER: 'true',
-        DOCKMUX_AGENTS_JSON: '[]'
+        DUTYDECK_HOST: '0.0.0.0',
+        DUTYDECK_PORT: String(port),
+        DUTYDECK_DEFAULT_CWD: root,
+        DUTYDECK_DATABASE_URL: database,
+        DUTYDECK_AUTH: 'true',
+        DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+        DUTYDECK_AGENTS_JSON: '[]'
       }
     });
     try {
@@ -219,15 +219,15 @@ describe('server access mode', () => {
 });
 
 describe('production PTY backend injection', () => {
-  it('always selects a namespaced, owned tmux backend for Dockmux sessions', () => {
+  it('always selects a namespaced, owned tmux backend for Dutydeck sessions', () => {
     const backend = createProductionPtyBackend('ses/test:one', {
       isAvailable: kind => kind === 'tmux',
       probeSession: () => 'missing',
     });
 
     expect(backend.kind).toBe('tmux');
-    expect(backend.sessionName).toMatch(/^dockmux-ses-test-one-[a-f0-9]{16}$/);
-    expect(backend.ownerId).toBe('dockmux:ses/test:one');
+    expect(backend.sessionName).toMatch(/^dutydeck-ses-test-one-[a-f0-9]{16}$/);
+    expect(backend.ownerId).toBe('dutydeck:ses/test:one');
     expect(createProductionPtyBackend('ses/test:one', {
       isAvailable: kind => kind === 'tmux',
       probeSession: () => 'missing',
@@ -245,9 +245,9 @@ describe('production PTY backend injection', () => {
   const tmuxIt = tmuxAvailable ? it : it.skip;
 
   tmuxIt.each([false, true])('recovers an in-flight task through a full service restart (completed offline: %s)', async offline => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-service-turn-recovery-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-service-turn-recovery-'));
     temporaryDirectories.push(root);
-    const database = join(root, 'dockmux.db');
+    const database = join(root, 'dutydeck.db');
     const runner = join(root, 'runner.mjs');
     writeFileSync(runner, [
       `#!${process.execPath}`,
@@ -268,9 +268,9 @@ describe('production PTY backend injection', () => {
     ].join('\n'));
     chmodSync(runner, 0o700);
     const serverEnv = async (): Promise<NodeJS.ProcessEnv> => ({
-      ...process.env, NODE_ENV: 'test', DOCKMUX_HOST: '127.0.0.1', DOCKMUX_PORT: String(await freePort()),
-      DOCKMUX_DEFAULT_CWD: root, DOCKMUX_DATABASE_URL: database, DOCKMUX_AUTH: 'false', DOCKMUX_DISABLE_LARK_LISTENER: 'true',
-      DOCKMUX_AGENTS_JSON: JSON.stringify([{
+      ...process.env, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
+      DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database, DUTYDECK_AUTH: 'false', DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+      DUTYDECK_AGENTS_JSON: JSON.stringify([{
         id: 'claude-code', name: 'Recovery test runner', command: runner, protocol: 'pty-cli',
         permissionMode: 'ask', env: { CLAUDE_CONFIG_DIR: root }, capabilities: { pause: false, resume: true }
       }])
@@ -298,7 +298,7 @@ describe('production PTY backend injection', () => {
       try {
         expect((await persisted.tasks.listBySession(session.id))[0]?.status).toBe('running');
         expect((await persisted.tasks.listBySession(session.id))[0]?.executionContext?.recovery?.turnId)
-          .toBe(backend.getDockmuxMetadata('turn_id'));
+          .toBe(backend.getDutydeckMetadata('turn_id'));
       } finally { persisted.close(); }
       const complete = () => { record('final answer'); writeFileSync(join(root, 'finish'), ''); };
       if (offline) {
@@ -327,10 +327,10 @@ describe('production PTY backend injection', () => {
     }
   }, 60_000);
 
-  tmuxIt('keeps a completed Dockmux Run on the same pane across a service restart', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-persistent-pty-'));
+  tmuxIt('keeps a completed Dutydeck Run on the same pane across a service restart', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-persistent-pty-'));
     temporaryDirectories.push(root);
-    const database = join(root, 'dockmux.db');
+    const database = join(root, 'dutydeck.db');
     const fakeRunner = join(root, 'fake-claude-runner.sh');
     writeFileSync(fakeRunner, [
       '#!/bin/sh',
@@ -345,13 +345,13 @@ describe('production PTY backend injection', () => {
     const serverEnv = async (): Promise<NodeJS.ProcessEnv> => ({
       ...process.env,
       NODE_ENV: 'test',
-      DOCKMUX_HOST: '127.0.0.1',
-      DOCKMUX_PORT: String(await freePort()),
-      DOCKMUX_DEFAULT_CWD: root,
-      DOCKMUX_DATABASE_URL: database,
-      DOCKMUX_AUTH: 'false',
-      DOCKMUX_DISABLE_LARK_LISTENER: 'true',
-      DOCKMUX_AGENTS_JSON: JSON.stringify([{
+      DUTYDECK_HOST: '127.0.0.1',
+      DUTYDECK_PORT: String(await freePort()),
+      DUTYDECK_DEFAULT_CWD: root,
+      DUTYDECK_DATABASE_URL: database,
+      DUTYDECK_AUTH: 'false',
+      DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+      DUTYDECK_AGENTS_JSON: JSON.stringify([{
         id: 'claude-code',
         name: 'Persistent test runner',
         command: fakeRunner,
@@ -398,9 +398,9 @@ describe('production PTY backend injection', () => {
 
 describe('production schedule foundation wiring', () => {
   it('persists offline schedule management across restarts without exposing an executor or dispatch route', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-schedule-service-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-schedule-service-'));
     temporaryDirectories.push(root);
-    const database = join(root, 'dockmux.db');
+    const database = join(root, 'dutydeck.db');
     const bootstrap = createRepositories(database);
     await bootstrap.secretRefs.create({
       id: 'secret-schedule-service', kind: 'generic', provider: 'local-file-v1', referenceKey: 'schedule.service.ref', status: 'configured'
@@ -414,13 +414,13 @@ describe('production schedule foundation wiring', () => {
     const envFor = async (): Promise<NodeJS.ProcessEnv> => ({
       ...process.env,
       NODE_ENV: 'test',
-      DOCKMUX_HOST: '127.0.0.1',
-      DOCKMUX_PORT: String(await freePort()),
-      DOCKMUX_DEFAULT_CWD: root,
-      DOCKMUX_DATABASE_URL: database,
-      DOCKMUX_AUTH: 'false',
-      DOCKMUX_DISABLE_LARK_LISTENER: 'true',
-      DOCKMUX_AGENTS_JSON: '[]'
+      DUTYDECK_HOST: '127.0.0.1',
+      DUTYDECK_PORT: String(await freePort()),
+      DUTYDECK_DEFAULT_CWD: root,
+      DUTYDECK_DATABASE_URL: database,
+      DUTYDECK_AUTH: 'false',
+      DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+      DUTYDECK_AGENTS_JSON: '[]'
     });
     const scheduleBody = {
       id: 'schedule-service', channelBotId: 'bot-schedule-service', name: 'Service restart review',
@@ -453,7 +453,7 @@ describe('production schedule foundation wiring', () => {
       expect(created.body).toMatchObject({
         definition: {
           id: 'schedule-service', revision: 1, state: 'staged', desiredExecutorState: 'disabled',
-          sourceOwnership: 'dockmux', sourceEnabled: false, currentGeneration: 1
+          sourceOwnership: 'dutydeck', sourceEnabled: false, currentGeneration: 1
         },
         readiness: { executionEligible: false }
       });

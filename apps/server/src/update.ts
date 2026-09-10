@@ -3,13 +3,13 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-const DEFAULT_PACKAGE_NAME = 'dockmux';
+const DEFAULT_PACKAGE_NAME = 'dutydeck';
 
-export interface DockmuxUpdateOptions {
+export interface DutydeckUpdateOptions {
   distTag?: string;
 }
 
-export interface DockmuxUpdateResult {
+export interface DutydeckUpdateResult {
   action: 'update';
   packageName: string;
   distTag: string;
@@ -19,7 +19,7 @@ export interface DockmuxUpdateResult {
   restarted: true;
 }
 
-export interface DockmuxUpdateDependencies {
+export interface DutydeckUpdateDependencies {
   runNpm(args: string[]): Promise<string>;
   restart(installedEntrypoint: string): Promise<void>;
   packageName?: string;
@@ -60,18 +60,18 @@ const installedVersion = (raw: string, packageName: string): string => {
   return value.trim();
 };
 
-export async function updateDockmux(
+export async function updateDutydeck(
   currentVersion: string,
-  options: DockmuxUpdateOptions,
-  dependencies: DockmuxUpdateDependencies
-): Promise<DockmuxUpdateResult> {
+  options: DutydeckUpdateOptions,
+  dependencies: DutydeckUpdateDependencies
+): Promise<DutydeckUpdateResult> {
   const packageName = dependencies.packageName ?? DEFAULT_PACKAGE_NAME;
   const distTag = normalizeDistTag(options.distTag);
   const targetVersion = publishedVersion(await dependencies.runNpm(['view', `${packageName}@${distTag}`, 'version', '--json']));
   await dependencies.runNpm(['install', '--global', `${packageName}@${distTag}`]);
   const version = installedVersion(await dependencies.runNpm(['list', '--global', packageName, '--depth=0', '--json']), packageName);
   if (version !== targetVersion) {
-    throw new Error(`Dockmux update verification failed: ${distTag} resolved to ${targetVersion}, but npm installed ${version}. The service was not restarted.`);
+    throw new Error(`Dutydeck update verification failed: ${distTag} resolved to ${targetVersion}, but npm installed ${version}. The service was not restarted.`);
   }
   const globalRoot = (await dependencies.runNpm(['root', '--global'])).trim();
   if (!globalRoot) throw new Error('npm did not report its global package directory. The service was not restarted.');
@@ -82,4 +82,4 @@ export async function updateDockmux(
   };
 }
 
-export const runNpmForDockmuxUpdate = defaultRunNpm;
+export const runNpmForDutydeckUpdate = defaultRunNpm;

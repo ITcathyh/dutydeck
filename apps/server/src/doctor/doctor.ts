@@ -1,5 +1,5 @@
 /**
- * `dockmux doctor` —— 本机环境与配置体检。
+ * `dutydeck doctor` —— 本机环境与配置体检。
  *
  * 四条硬约束（每条都对应一个真实踩坑）：
  *
@@ -28,7 +28,7 @@ import { existsSync } from 'node:fs';
 import { access as fsAccess, stat as fsStat } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { dirname } from 'node:path';
-import { loadConfig } from '@dockmux/config';
+import { loadConfig } from '@dutydeck/config';
 import { daemonStatus } from '../daemon/command.js';
 import { daemonPaths, readDaemonStatus, resolveDaemonDir } from '../daemon/daemon.js';
 import { accessMode } from '../service.js';
@@ -45,7 +45,7 @@ import {
   checkConfig,
   checkDaemon,
   checkDatabase,
-  checkDockmuxDir,
+  checkDutydeckDir,
   checkLark,
   checkLarkListener,
   checkNodeVersion,
@@ -98,12 +98,12 @@ async function loadAutostartStatus(): Promise<DoctorAutostartResult | undefined>
 /**
  * 期望的 migration 头版本。
  *
- * `migrations` 目前并未从 @dockmux/storage 的入口导出（实测 TS2305），所以这里
+ * `migrations` 目前并未从 @dutydeck/storage 的入口导出（实测 TS2305），所以这里
  * 动态探一次：拿到就比对，拿不到就让 schema 检查 skip，绝不拿猜的数字报「库过期」。
  */
 async function resolveExpectedSchemaVersion(): Promise<number | undefined> {
   try {
-    const module = await import('@dockmux/storage') as { migrations?: ReadonlyArray<{ version: number }> };
+    const module = await import('@dutydeck/storage') as { migrations?: ReadonlyArray<{ version: number }> };
     const head = module.migrations?.at(-1)?.version;
     return typeof head === 'number' ? head : undefined;
   } catch {
@@ -111,7 +111,7 @@ async function resolveExpectedSchemaVersion(): Promise<number | undefined> {
   }
 }
 
-/** `.dockmux/` 目录的存在性、可写性与权限位。任何一步失败都不抛，如实降级。 */
+/** `.dutydeck/` 目录的存在性、可写性与权限位。任何一步失败都不抛，如实降级。 */
 async function observeDirectory(
   path: string,
   platform: string,
@@ -140,7 +140,7 @@ async function observeDirectory(
 
 /** 人类可读渲染：每项一行，fail/warn 追加修法与命令。 */
 function render(ui: CliUi, report: DoctorReport): void {
-  ui.section('Dockmux 环境体检');
+  ui.section('Dutydeck 环境体检');
   for (const check of report.checks) {
     ui.status(check.level, check.label, check.detail);
     if (check.remedy) ui.hint(check.remedy);
@@ -183,7 +183,7 @@ export async function runDoctor(
     try { return userInfo().username; } catch { return env.USER ?? 'your-user'; }
   })();
 
-  // 进度走 stderr，结果走 stdout —— `dockmux doctor | head -1` 才有意义。
+  // 进度走 stderr，结果走 stdout —— `dutydeck doctor | head -1` 才有意义。
   const progress = (text: string) => { if (!json) ui.progress(text); };
 
   const checks: DoctorCheck[] = [];
@@ -217,9 +217,9 @@ export async function runDoctor(
   const expectedSchemaVersion = dependencies.expectedSchemaVersion ?? await resolveExpectedSchemaVersion();
   checks.push(checkSchema(probe, expectedSchemaVersion));
 
-  // ---- 5. .dockmux 目录 ----
-  const dockmuxDir = dirname(databaseUrl);
-  checks.push(checkDockmuxDir(await observeDirectory(dockmuxDir, platform, exists, access, stat)));
+  // ---- 5. .dutydeck 目录 ----
+  const dutydeckDir = dirname(databaseUrl);
+  checks.push(checkDutydeckDir(await observeDirectory(dutydeckDir, platform, exists, access, stat)));
 
   // ---- 6. Agent ----
   checks.push(checkAgents(config.agents));
@@ -227,7 +227,7 @@ export async function runDoctor(
 
   // ---- 7. 飞书 ----
   const databaseUnreadable = !probe.exists || Boolean(probe.error);
-  const listenerDisabled = env.DOCKMUX_DISABLE_LARK_LISTENER === 'true';
+  const listenerDisabled = env.DUTYDECK_DISABLE_LARK_LISTENER === 'true';
   const lark = checkLark(
     databaseUnreadable ? { unavailable: true } : { ...(probe.values?.[larkBotsConfigKey] ? { raw: probe.values[larkBotsConfigKey] } : {}) },
     listenerDisabled
@@ -290,7 +290,7 @@ export async function runDoctor(
     ?? (summary.fail > 0
       ? '存在失败项，请按上面的补救说明处理。'
       : firstActionable?.command
-        ?? (summary.warn > 0 ? '没有失败项，但有警告值得处理。' : '一切正常，可以直接使用 Dockmux。'));
+        ?? (summary.warn > 0 ? '没有失败项，但有警告值得处理。' : '一切正常，可以直接使用 Dutydeck。'));
 
   const report: DoctorReport = { ok, action: 'doctor', checks, summary, next };
 

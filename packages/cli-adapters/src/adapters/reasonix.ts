@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -49,10 +49,10 @@ export function createReasonixAdapter(): CliAdapter {
       }
     },
 
-    /** Reasonix 自己铸会话 id（精简契约下 dockmux 拿不到精确 id）；收到 dockmux 的
+    /** Reasonix 自己铸会话 id（精简契约下 dutydeck 拿不到精确 id）；收到 dutydeck 的
      *  `ses_<uuid>` → null，driver 改起新会话。 */
     buildResumeCommand(sessionId: string): string[] | null {
-      if (isDockmuxSessionId(sessionId)) return null;
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['--resume', sessionId];
     },
   };

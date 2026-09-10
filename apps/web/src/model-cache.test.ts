@@ -29,7 +29,7 @@ describe('agent model cache', () => {
     const storage = memoryStorage();
     writeCachedAgentModels('claude', 'opus', result, storage, 1_000);
     expect(readCachedAgentModels('claude', 'opus', storage, 8 * 24 * 60 * 60_000)).toBeUndefined();
-    storage.setItem('dockmux.agent_models.v1:claude:opus', '{bad json');
+    storage.setItem('dutydeck.agent_models.v1:claude:opus', '{bad json');
     expect(readCachedAgentModels('claude', 'opus', storage, 2_000)).toBeUndefined();
   });
 

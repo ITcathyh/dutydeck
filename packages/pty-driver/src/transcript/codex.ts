@@ -10,7 +10,7 @@
  * resolveCodexRolloutPath); the newest-by-mtime scan remains only for callers
  * with no session in mind, where a single running session makes it unambiguous.
  *
- * Entry mapping (per dockmux driver contract; field names from botmux
+ * Entry mapping (per dutydeck driver contract; field names from botmux
  * codex-transcript.ts):
  *   response_item reasoning                       → thinking
  *   response_item function_call / custom_tool_call
@@ -25,7 +25,7 @@
 import { existsSync, opendirSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';
 import { join } from 'node:path';
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { resolveCliSessionId } from '../session-id/index.js';
@@ -290,7 +290,7 @@ export interface CodexTranscriptTailerOptions {
   /** Explicit rollout path. When given, directory scanning and file
    *  switching are disabled. */
   transcriptPath?: string;
-  /** dockmux's session id. Required for correctness whenever more than one
+  /** dutydeck's session id. Required for correctness whenever more than one
    *  Codex session may be running — the rollout root is global, so without it
    *  resolution falls back to "newest rollout anywhere" and can attach a
    *  rollout from an unrelated project. See resolveCodexRolloutPath. */

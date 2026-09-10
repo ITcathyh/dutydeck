@@ -33,7 +33,7 @@ describe('ControlCenterModal information architecture', () => {
     mocks();
     const onClose = vi.fn();
     renderModal({ onClose });
-    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
     await userEvent.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledOnce();
   });
@@ -41,7 +41,7 @@ describe('ControlCenterModal information architecture', () => {
   it('shows one progressive control shell, trusted-machine context and actionable SecretRef CLI guidance', async () => {
     mocks();
     renderModal({ legacyBots: [legacyBot] });
-    expect(await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeTruthy();
+    expect(await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeTruthy();
     for (const label of ['Agent', '飞书 Bot', '群与权限', '自动化']) expect(screen.getByRole('button', { name: new RegExp(label) })).toBeTruthy();
     expect(screen.getByText(/受信开发机模式：/)).toBeTruthy();
     // 「已绑定」不是「已连接」：这一格只数 defaultAgentId 指向该 Agent 的 Bot，不读监听状态。
@@ -71,7 +71,7 @@ describe('ControlCenterModal information architecture', () => {
   it('portals the dialog to document.body so no ancestor stacking context can clip it', async () => {
     mocks();
     const { container } = renderModal();
-    const dialog = await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    const dialog = await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
     expect(container.contains(dialog)).toBe(false);
     expect(document.body.contains(dialog)).toBe(true);
   });
@@ -90,7 +90,7 @@ describe('ControlCenterModal information architecture', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '保存 staged 草稿' }).getAttribute('aria-busy')).toBe('true'));
     await userEvent.keyboard('{Escape}');
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeTruthy();
   });
 
   it('binds each visible staged-bot label to its control so clicking the label focuses the input', async () => {
@@ -132,7 +132,7 @@ describe('ControlCenterModal information architecture', () => {
       mocks();
       const paused = { ...legacyBot, listening: false, activeListening: false } as LarkBotConfig;
       renderModal({ legacyBots: [paused] });
-      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
       expect(screen.getByText('继续设置 Legacy Bot')).toBeTruthy();
       expect(screen.getByText(/用户暂停监听：已在机器人设置中暂停监听。/)).toBeTruthy();
       expect(document.body.textContent).not.toContain('已可用');
@@ -142,7 +142,7 @@ describe('ControlCenterModal information architecture', () => {
     it('本次启动禁用监听时不说「已可用」，即使 Bot 自身字段全就绪', async () => {
       mocks();
       renderModal({ legacyBots: [legacyBot], larkListeningDisabled: true });
-      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
       expect(screen.getByText('继续设置 Legacy Bot')).toBeTruthy();
       expect(screen.getByText(/本次启动禁用监听：服务端启动参数已禁用监听。/)).toBeTruthy();
       expect(document.body.textContent).not.toContain('已可用');
@@ -152,7 +152,7 @@ describe('ControlCenterModal information architecture', () => {
       mocks();
       const onOpenLarkSetup = vi.fn(); const onCreateTask = vi.fn();
       renderModal({ legacyBots: [legacyBot], onOpenLarkSetup, onCreateTask });
-      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
       /*
         标题必须描述这颗按钮真的会做的事。原先叫「到飞书下达任务」，点下去弹的却是
         绑定/管理向导——它不会把用户送到飞书，也不该替用户挑一个 Bot 跳转。
@@ -188,7 +188,7 @@ describe('ControlCenterModal information architecture', () => {
       mocks();
       const onRetryLarkBots = vi.fn();
       renderModal({ initialSection: 'lark', legacyBots: [], larkBotsFailed: true, onRetryLarkBots });
-      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
       expect(screen.getByText('重试读取飞书接入状态')).toBeTruthy();
       expect(screen.getAllByText(/无法判断是否已配置机器人/).length).toBeGreaterThan(0);
       expect(screen.queryByText('还没有飞书 Bot')).toBeNull();
@@ -209,7 +209,7 @@ describe('ControlCenterModal information architecture', () => {
     it('读取进行中：说正在读取，不谎报还没有 Bot', async () => {
       mocks();
       renderModal({ initialSection: 'lark', legacyBots: [], larkBotsLoading: true });
-      await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+      await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
       expect(screen.getByText('正在读取飞书接入状态')).toBeTruthy();
       expect(screen.queryByText('还没有飞书 Bot')).toBeNull();
     });

@@ -1,6 +1,6 @@
 # Dashboard 优化：简洁操作与群内 Bot 配置
 
-分析日期：2026-09-07。源码基线：dockmux `19c3e66`，botmux `09b9b2b5`。本文保留改动前的分析和方案；实际实现与验证范围见 [交付验收记录](dashboard-management-acceptance.md)。
+分析日期：2026-09-07。源码基线：dutydeck `19c3e66`，botmux `09b9b2b5`。本文保留改动前的分析和方案；实际实现与验证范围见 [交付验收记录](dashboard-management-acceptance.md)。
 
 **优先减少操作层级，把常用设置放到所选 Bot 和群的旁边。** 复用现有群策略模型，补上生产消息的消费链路。用户应能指定：同一个 Bot 在项目群使用项目目录，在值班群使用另一目录；同一个群里的不同 Bot 使用不同 Agent、模型和触发条件。
 
@@ -8,7 +8,7 @@
 
 ## 1. 现有能力到哪里了
 
-| 用户要做的事 | dockmux 当前实现 | 需要补什么 |
+| 用户要做的事 | dutydeck 当前实现 | 需要补什么 |
 |---|---|---|
 | 添加多个飞书 Bot，为各 Bot 选不同 Agent | 已支持。绑定向导按 App 保存，listener pool 按 App 管理 | 从 Bot 卡片直接进入所选 Bot，完善列表、搜索和状态 |
 | 同群使用多个 Bot，互不串会话 | 已支持基本隔离。会话来源包含 App、chat 和 scope | 保持隔离，补群内 Bot 的集中管理 |
@@ -52,17 +52,17 @@ flowchart LR
 
 botmux 最有参考价值的是**群详情中的每个 Bot 都是可操作对象**，且操作明确传递目标 App。可以复用这种交互与作用域设计。
 
-| botmux 机制 | 实际实现与限制 | dockmux 的取舍 |
+| botmux 机制 | 实际实现与限制 | dutydeck 的取舍 |
 |---|---|---|
 | 群详情按 Bot 展示配置 | 每个 Bot 有自己的 Oncall、Role、卡片 Pin 操作 | 采用“群 → Bot 行 → 本群配置”的主路径 |
 | 群内工作目录 | OncallRow → 指定 App 的 API → `oncallChats` → 新会话目录解析；同群各 Bot 可用不同目录 | 直接把“工作目录”作为独立字段，oncall 只表达值班/访问行为 |
 | 群角色与 Bot 默认角色 | 群角色优先于 Bot 角色，运行时注入 prompt | 本轮先做目录、Agent、模型、触发和权限；完整角色内容管理另行承接 |
 | 群级提及和回复模式 | 有 per-chat store 与入站消费；本次未发现群详情的对应写控件，主要从聊天命令修改 | 补 Dashboard 表单，并与聊天命令使用同一保存/解析逻辑 |
-| Bot 默认模型 | Bot Defaults 按 App 配置；本次未发现群级模型覆盖 | 群级模型覆盖使用 dockmux 已有模型，不宣称来自 botmux |
+| Bot 默认模型 | Bot Defaults 按 App 配置；本次未发现群级模型覆盖 | 群级模型覆盖使用 dutydeck 已有模型，不宣称来自 botmux |
 | 群覆盖矩阵 | 聚合在线 daemon 的群结果，缺席项补 `inChat:false` | 保留离线 Bot；“未返回结果”显示未知，不能直接判定已退群 |
 | 配置写入后生效 | 多数 store 写 `bots.json` 并同步内存；部分功能会处理存量对象 | 明确每类设置的生效边界，不笼统写“立即生效” |
 
-这些结论来自 UI → API → store → runtime 的代码追踪，见 E6、E7。botmux 的每 Bot daemon 代理、多个 JSON store、设置页分散等实现结构不适合照搬到 dockmux。
+这些结论来自 UI → API → store → runtime 的代码追踪，见 E6、E7。botmux 的每 Bot daemon 代理、多个 JSON store、设置页分散等实现结构不适合照搬到 dutydeck。
 
 仓库的《Botmux Dashboard 结构解剖》和《集成方案交叉设计评审》已提出设置入口收敛、群×Bot、远端事实与有效配置分离。本文完整阅读了这两份报告，但以上现状以本次源码和测试为准，不沿用报告中的历史实例数量或完成状态。[E8]
 
@@ -279,7 +279,7 @@ legacy Bot 目前以整个 `lark.bots` 数组读改写。第 0 项的版本检�
 - 群事实：离线、权限不足、退出群、凭据轮换导致的事实过期不被显示为正常；发现群不授予权限。
 - 重启与并发：配置持久化、listener 唯一、会话映射恢复；两处同时编辑返回冲突并保留用户草稿。
 - 浏览器全链路：页面编辑 → 真实 API → SQLite → 入站事件 → 测试 CLI → 回复，覆盖桌面与窄屏；避免只断言 mock API 收到字段。
-- 涉及 ACPX 配置/环境注入时，用真实 `AcpxAdapter` 与持久化 session key 测试；群工具变量保持 `dockmux_group_tools_url`、`dockmux_group_tools_token`。
+- 涉及 ACPX 配置/环境注入时，用真实 `AcpxAdapter` 与持久化 session key 测试；群工具变量保持 `dutydeck_group_tools_url`、`dutydeck_group_tools_token`。
 
 ## 6. 本次验证与证据
 
@@ -287,16 +287,16 @@ legacy Bot 目前以整个 `lark.bots` 数组读改写。第 0 项的版本检�
 
 | 验证 | 本次结果 | 能证明什么 |
 |---|---|---|
-| dockmux 的 GroupPolicyModal、LarkConfigModal、ControlCenterModal DOM 测试 | 3 文件，38 项通过 | 当前表单、草稿状态及 API 调用契约；API 被 mock，不证明生产策略生效 |
-| dockmux 的 WorkspaceOverview、NewSessionModal DOM 测试 | 2 文件，38 项通过 | 当前首屏、空态、新任务表单与重试行为；不代表新设计已通过可用性验证 |
-| dockmux 配置、会话解析、listener、coordinator recovery、Foundation 路由/权限、群策略存储、app、agent-tools、chat-mode 测试 | 10 文件，239 项通过 | 当前配置与策略边界、路由和隔离逻辑；使用内存/临时 SQLite 与 fake Lark |
+| dutydeck 的 GroupPolicyModal、LarkConfigModal、ControlCenterModal DOM 测试 | 3 文件，38 项通过 | 当前表单、草稿状态及 API 调用契约；API 被 mock，不证明生产策略生效 |
+| dutydeck 的 WorkspaceOverview、NewSessionModal DOM 测试 | 2 文件，38 项通过 | 当前首屏、空态、新任务表单与重试行为；不代表新设计已通过可用性验证 |
+| dutydeck 配置、会话解析、listener、coordinator recovery、Foundation 路由/权限、群策略存储、app、agent-tools、chat-mode 测试 | 10 文件，239 项通过 | 当前配置与策略边界、路由和隔离逻辑；使用内存/临时 SQLite 与 fake Lark |
 | botmux Oncall、提及模式、Role、Pin、群矩阵及多 Bot 群流测试 | 6 文件，77 项通过 | 相应配置存储、解析及隔离测试链路；外部飞书为测试替身 |
 | 独立代码勘察 | 两路勘察完成，证据已纳入本文 | 交叉核对两个仓库的 UI、API、存储和运行时；不等同于完整方案复核 |
 | herdr 调度 `ccflash` 与 `claude --dangerously-skip-permissions` 方案复核 | 两路均完成；修订后增量复核均为 DONE，无残留阻塞 | 已修正保存事务、群事实有效性、身份映射、激活边界及会话记录等问题；复核未重跑测试 |
 
 前端测试实际命令：`node node_modules/vitest/vitest.mjs run apps/web/src/components/GroupPolicyModal.dom.test.tsx apps/web/src/components/LarkConfigModal.dom.test.tsx apps/web/src/components/ControlCenterModal.dom.test.tsx`。`pnpm exec` 在当前环境触发依赖检查并尝试安装，因无 TTY 中止；改用已有 Vitest 直接运行，未安装或清理依赖。
 
-其余验证由两个只读勘察单元回报。dockmux 使用同一 Vitest 入口执行上述 10 个服务端/存储文件；botmux 分别执行 unit 项目的 `role-resolver`、`pin-streaming-card-mode-store`、`dashboard-groups-matrix-snapshot`、`oncall-store`、`mention-mode-command`，以及 e2e 项目的 `multi-bot-group-flow`。加上主控执行的 5 个 Web 测试文件，共计 dockmux 315 项、botmux 77 项通过；这些是本次选定测试的数量，不是全仓测试总数。
+其余验证由两个只读勘察单元回报。dutydeck 使用同一 Vitest 入口执行上述 10 个服务端/存储文件；botmux 分别执行 unit 项目的 `role-resolver`、`pin-streaming-card-mode-store`、`dashboard-groups-matrix-snapshot`、`oncall-store`、`mention-mode-command`，以及 e2e 项目的 `multi-bot-group-flow`。加上主控执行的 5 个 Web 测试文件，共计 dutydeck 315 项、botmux 77 项通过；这些是本次选定测试的数量，不是全仓测试总数。
 
 真实飞书权限、线上 Bot/群数量、部署中的前端版本、实际群内交互与性能均为 **unverified**。本文不把本地单测通过作为线上能力已实现的证据，也不给未经测量的工期数字。
 

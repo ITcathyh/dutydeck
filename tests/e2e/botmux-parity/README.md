@@ -1,8 +1,8 @@
 # Botmux parity E2E assets
 
-This directory is an executable acceptance inventory, not an activation tool. It records what Dockmux can prove today, what is deliberately blocked, and what requires an externally fenced opt-in environment.
+This directory is an executable acceptance inventory, not an activation tool. It records what Dutydeck can prove today, what is deliberately blocked, and what requires an externally fenced opt-in environment.
 
-The runner never starts/stops a Dockmux or Botmux listener, writes an existing Dockmux database, edits Botmux source data, acquires real credentials, enables a Schedule, or performs cutover/rollback. Offline commands may create disposable synthetic SQLite/secret/archive files under a case-private temporary directory. Its default action is manifest self-check only.
+The runner never starts/stops a Dutydeck or Botmux listener, writes an existing Dutydeck database, edits Botmux source data, acquires real credentials, enables a Schedule, or performs cutover/rollback. Offline commands may create disposable synthetic SQLite/secret/archive files under a case-private temporary directory. Its default action is manifest self-check only.
 
 ## What was used as the behavioral baseline
 
@@ -13,13 +13,13 @@ The cases were derived read-only from existing implementation and tests:
 - Botmux `test/team-operate.test.ts`: a trusted bot union can operate, but a human in the same team chat does not inherit operate.
 - Botmux `test/session-liveness.test.ts` and restart tests: managed sessions remain recoverable; a dead PID is not sufficient proof that a transcript-backed run should be discarded.
 - Botmux scheduler/provenance/idempotency tests: schedule identity is App+Chat/task scoped and repeated delivery must be accounted for.
-- Dockmux access-mode/auth/Terminal WS tests: explicit remote-open mode is tokenless but still exact same-origin for browsers.
-- Dockmux SecretProvider and secret CLI tests: credential values cross only the explicit FD/runtime boundary; metadata, permissions, CAS and symlink handling are independently enforced.
-- Dockmux GroupBinding tests and management API: bot defaults, App+Chat overrides, mention/topic routing, group-tool ceilings and role assignments produce one effective configuration.
-- Dockmux foundation policy edges: staged managed integrations deny listener/session/terminal/high-risk/group-tool execution with machine-readable reasons.
-- Dockmux Schedule foundation: timezone/DST preview, generation-pinned occurrences, durable planning watermark, CAS lease/fence and offline API are implemented without an executor.
-- Dockmux importer core and CLI tests: discover, plan and archive are read-only; imported assets remain `NO_GO`, disabled and non-activatable.
-- Dockmux identity-preflight probe, service and CLI tests: App×Chat evidence is obtained through read-only Lark APIs, persisted with credential/identity revision fencing, projected through public allowlists, and never changes listener activation.
+- Dutydeck access-mode/auth/Terminal WS tests: explicit remote-open mode is tokenless but still exact same-origin for browsers.
+- Dutydeck SecretProvider and secret CLI tests: credential values cross only the explicit FD/runtime boundary; metadata, permissions, CAS and symlink handling are independently enforced.
+- Dutydeck GroupBinding tests and management API: bot defaults, App+Chat overrides, mention/topic routing, group-tool ceilings and role assignments produce one effective configuration.
+- Dutydeck foundation policy edges: staged managed integrations deny listener/session/terminal/high-risk/group-tool execution with machine-readable reasons.
+- Dutydeck Schedule foundation: timezone/DST preview, generation-pinned occurrences, durable planning watermark, CAS lease/fence and offline API are implemented without an executor.
+- Dutydeck importer core and CLI tests: discover, plan and archive are read-only; imported assets remain `NO_GO`, disabled and non-activatable.
+- Dutydeck identity-preflight probe, service and CLI tests: App×Chat evidence is obtained through read-only Lark APIs, persisted with credential/identity revision fencing, projected through public allowlists, and never changes listener activation.
 
 The baseline is intentionally semantic. No live Botmux configuration, history, identity, path, token, cookie or App secret is copied into this directory.
 
@@ -64,7 +64,7 @@ On a host with tmux installed, a successful `--run-offline` ends with `pass=12`,
 
 The WP2 service-level test now proves the completed-turn restart boundary with two service lifetimes, one SQLite database, the same pane PID, lazy driver reconnect, persisted prompts and final stop destruction. The parity wrapper gives that test an isolated `TMPDIR` and `TMUX_TMPDIR`, then checks and destroys only that private tmux server namespace. Active-turn final-result reconstruction remains blocked and is not inferred from the completed-turn test.
 
-The WP4 offline identity case starts only ephemeral loopback fake-Lark HTTP servers and disposable Dockmux service state. It covers successful identity/chat verification, local and remote App mismatch, missing/unreadable credentials, not-member/inaccessible chats, CAS invalidation of previously successful facts, and API/CLI leakage canaries. Its check wrapper suppresses the child test process output because the service test intentionally creates a disposable access token; only a fixed allowlisted result crosses the runner output boundary. A successful preflight still reports `activationChanged=false` and `listenerReadiness=blocked`; it is evidence validation, not listener activation. This offline case does not claim that a real App owns a real chat—the separate real-Lark case remains an externally fenced opt-in skip.
+The WP4 offline identity case starts only ephemeral loopback fake-Lark HTTP servers and disposable Dutydeck service state. It covers successful identity/chat verification, local and remote App mismatch, missing/unreadable credentials, not-member/inaccessible chats, CAS invalidation of previously successful facts, and API/CLI leakage canaries. Its check wrapper suppresses the child test process output because the service test intentionally creates a disposable access token; only a fixed allowlisted result crosses the runner output boundary. A successful preflight still reports `activationChanged=false` and `listenerReadiness=blocked`; it is evidence validation, not listener activation. This offline case does not claim that a real App owns a real chat—the separate real-Lark case remains an externally fenced opt-in skip.
 
 ## Safe commands
 
@@ -98,7 +98,7 @@ Executable cases use exit code `77` for a missing host dependency such as tmux. 
 
 ## Remote development endpoint: explicit no-token probe
 
-This check is read-only but it targets a real running Dockmux. The operator must first provide an isolated development instance explicitly configured for open mode and a dedicated disposable PTY-CLI session. Do not point it at a shared or production service. The runner does not create the session or change the service lifecycle.
+This check is read-only but it targets a real running Dutydeck. The operator must first provide an isolated development instance explicitly configured for open mode and a dedicated disposable PTY-CLI session. Do not point it at a shared or production service. The runner does not create the session or change the service lifecycle.
 
 The check sends no Authorization header, Cookie, query token, terminal input, POST/PUT/PATCH/DELETE request, or listener command. It verifies:
 
@@ -110,9 +110,9 @@ The check sends no Authorization header, Cookie, query token, terminal input, PO
 The base URL must contain only scheme/host/port. Userinfo, query, fragment and non-root path are rejected.
 
 ```bash
-DOCKMUX_PARITY_BASE_URL=http://devbox.example:4310 \
-DOCKMUX_PARITY_SESSION_ID=dedicated_synthetic_session \
-DOCKMUX_PARITY_REMOTE_OPEN_ACK=read_only_dedicated_instance \
+DUTYDECK_PARITY_BASE_URL=http://devbox.example:4310 \
+DUTYDECK_PARITY_SESSION_ID=dedicated_synthetic_session \
+DUTYDECK_PARITY_REMOTE_OPEN_ACK=read_only_dedicated_instance \
 node tests/e2e/botmux-parity/runner.mjs \
   --run-case remote-dev-open-mode-no-token \
   --allow-remote-open
@@ -129,8 +129,8 @@ The repository deliberately contains no real-Lark driver and no credential looku
 1. Use a newly created dedicated test App and disposable chat. Existing production Botmux Apps/chats are forbidden.
 2. Resolve the bot identity under that exact App and positively verify App+Chat membership.
 3. Resolve every principal under the target App. Never copy an `ou_` from another App; App scope must be positively verified.
-4. Externally drain the Botmux listener for the test App and inhibit its supervisor reconnect. A Dockmux-local flag is not sufficient fencing.
-5. Keep the Dockmux listener disabled while preparing evidence. Record the shared generation and a source watermark.
+4. Externally drain the Botmux listener for the test App and inhibit its supervisor reconnect. A Dutydeck-local flag is not sufficient fencing.
+5. Keep the Dutydeck listener disabled while preparing evidence. Record the shared generation and a source watermark.
 6. Keep Botmux as the only Schedule writer. This suite cannot authorize a Schedule handoff.
 7. Write only opaque refs and boolean evidence into a new private `0600` preflight file matching `real-lark-preflight.schema.json`. The file must expire within four hours. Never put a token, secret, raw App ID, chat ID or open ID in it.
 8. Validate the file locally:
@@ -168,6 +168,6 @@ An `expected_blocked` case may become `pass` only when its command drives the ex
 - active-turn promotion additionally requires exact terminal-result/task/delivery reconstruction and cannot reuse the completed-turn restart proof;
 - real App×Chat routing/RBAC still requires the dedicated real-Lark harness and App-scoped identity preflight;
 - Schedule activation additionally requires a reviewed timer/executor and cannot be inferred from the offline occurrence ledger;
-- dual-consumer fencing must be externally enforceable by both Botmux and Dockmux and must exercise rollback ordering.
+- dual-consumer fencing must be externally enforceable by both Botmux and Dutydeck and must exercise rollback ordering.
 
 No case in this directory is permission to activate a current App.

@@ -10,7 +10,7 @@ const session = (id: string, overrides: Partial<Session> = {}): Session => ({
   id,
   agentId: 'codex',
   state: 'idle',
-  cwd: '/repo/dockmux',
+  cwd: '/repo/dutydeck',
   runId: `run-${id}`,
   createdAt: '2026-08-20T00:00:00Z',
   updatedAt: '2026-08-20T00:00:00Z',
@@ -26,11 +26,11 @@ const ids = (matches: ReturnType<typeof searchTasks>) => matches.map(match => ma
 
 describe('normalizeSearchQuery', () => {
   it('折叠大小写、合并空白并去掉首尾空格', () => {
-    expect(normalizeSearchQuery('  Dockmux   FAILED  ')).toBe('dockmux failed');
+    expect(normalizeSearchQuery('  Dutydeck   FAILED  ')).toBe('dutydeck failed');
   });
 
   it('全角输入归一化为半角，避免中文输入法下检索不到', () => {
-    expect(normalizeSearchQuery('Ｄｏｃｋｍｕｘ')).toBe('dockmux');
+    expect(normalizeSearchQuery('Ｄｕｔｙｄｅｃｋ')).toBe('dutydeck');
   });
 
   it('纯空白查询归一化为空串', () => {
@@ -56,8 +56,8 @@ describe('taskSearchHaystack', () => {
 describe('searchTasks 匹配语义', () => {
   it('大小写无关：小写查询命中大写目标', () => {
     const sessions = [session('1')];
-    expect(ids(run('dockmux', sessions, { '1': summary('1', 'Fix DOCKMUX login timeout') }))).toEqual(['1']);
-    expect(ids(run('DOCKMUX', sessions, { '1': summary('1', 'fix dockmux login timeout') }))).toEqual(['1']);
+    expect(ids(run('dutydeck', sessions, { '1': summary('1', 'Fix DUTYDECK login timeout') }))).toEqual(['1']);
+    expect(ids(run('DUTYDECK', sessions, { '1': summary('1', 'fix dutydeck login timeout') }))).toEqual(['1']);
   });
 
   it('中文按子串匹配，不依赖空格分词', () => {
@@ -69,10 +69,10 @@ describe('searchTasks 匹配语义', () => {
   });
 
   it('多词查询是 AND，且各词可以落在不同字段', () => {
-    const sessions = [session('1', { cwd: '/repo/dockmux' }), session('2', { cwd: '/repo/other' })];
+    const sessions = [session('1', { cwd: '/repo/dutydeck' }), session('2', { cwd: '/repo/other' })];
     const summaries = { '1': summary('1', '构建失败需要排查'), '2': summary('2', '构建失败需要排查') };
-    expect(ids(run('dockmux 失败', sessions, summaries))).toEqual(['1']);
-    expect(ids(run('dockmux 失败 不存在的词', sessions, summaries))).toEqual([]);
+    expect(ids(run('dutydeck 失败', sessions, summaries))).toEqual(['1']);
+    expect(ids(run('dutydeck 失败 不存在的词', sessions, summaries))).toEqual([]);
   });
 
   it('可用工作区短名或完整 cwd 命中同一个任务', () => {
@@ -140,8 +140,8 @@ describe('searchTasks 排序', () => {
 
 describe('searchTasks 全量性与命中字段', () => {
   it('24 条匹配全部返回，模型层不做任何截断', () => {
-    const sessions = Array.from({ length: 24 }, (_, index) => session(`s${String(index).padStart(2, '0')}`, { cwd: '/repo/dockmux' }));
-    const matches = run('dockmux', sessions);
+    const sessions = Array.from({ length: 24 }, (_, index) => session(`s${String(index).padStart(2, '0')}`, { cwd: '/repo/dutydeck' }));
+    const matches = run('dutydeck', sessions);
     expect(matches).toHaveLength(24);
     expect(new Set(ids(matches)).size).toBe(24);
   });
@@ -152,12 +152,12 @@ describe('searchTasks 全量性与命中字段', () => {
   });
 
   it('多词分别命中不同字段时，fields 汇总全部命中字段', () => {
-    const matches = run('登录 dockmux', [session('1', { cwd: '/repo/dockmux' })], { '1': summary('1', '修复登录超时') });
+    const matches = run('登录 dutydeck', [session('1', { cwd: '/repo/dutydeck' })], { '1': summary('1', '修复登录超时') });
     expect(matches[0].fields).toEqual(['goal', 'workspace']);
   });
 
   it('归档任务不在模型层被过滤，可见范围交给调用方决定', () => {
     const archived = session('1', { archivedAt: '2026-08-29T00:00:00Z' });
-    expect(ids(run('dockmux', [archived]))).toEqual(['1']);
+    expect(ids(run('dutydeck', [archived]))).toEqual(['1']);
   });
 });

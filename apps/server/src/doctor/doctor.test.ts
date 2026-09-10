@@ -45,7 +45,7 @@ const baseConfig: DoctorConfig = {
   host: '127.0.0.1',
   port: 4310,
   authEnabled: true,
-  databaseUrl: '/tmp/dockmux-fixture/.dockmux/dockmux.db',
+  databaseUrl: '/tmp/dutydeck-fixture/.dutydeck/dutydeck.db',
   agents: [{ id: 'claude', name: 'Claude Code', command: 'claude', version: '1.2.3', protocol: 'acp' }]
 };
 
@@ -60,14 +60,14 @@ function deps(overrides: Partial<DoctorDependencies> = {}): DoctorDependencies {
     config: baseConfig,
     daemonStatus: () => ({ running: true, pid: 4242, ready: true, address: 'http://127.0.0.1:4310', authEnabled: true }),
     daemonRecord: () => ({ pid: 4242, ready: true, host: '127.0.0.1', port: 4310, authEnabled: true, database: baseConfig.databaseUrl }),
-    daemonLogFile: '/tmp/dockmux-fixture/.dockmux/daemon/dockmux.log',
+    daemonLogFile: '/tmp/dutydeck-fixture/.dutydeck/daemon/dutydeck.log',
     databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [AUTH_TOKEN_CONFIG_KEY]: FIXTURE_TOKEN } }),
     expectedSchemaVersion: 14,
     portProbe: async () => 'occupied' as PortProbeOutcome,
     exists: () => true,
     access: async () => undefined,
     stat: async () => ({ mode: 0o40700 }),
-    autostartStatus: async () => ({ state: { platform: 'linux', supported: true, enabled: true, lingerEnabled: true, stale: false, unitPath: '/home/tester/.config/systemd/user/dockmux.service' } }),
+    autostartStatus: async () => ({ state: { platform: 'linux', supported: true, enabled: true, lingerEnabled: true, stale: false, unitPath: '/home/tester/.config/systemd/user/dutydeck.service' } }),
     ...overrides
   };
 }
@@ -93,7 +93,7 @@ describe('runDoctor —— 硬不变量', () => {
         autostartStatus: async () => ({ state: { platform: 'linux', supported: true, enabled: true, stale: true, lingerEnabled: false } })
       })),
       runDoctor({ json: true }, deps({
-        env: { DOCKMUX_DISABLE_LARK_LISTENER: 'true' },
+        env: { DUTYDECK_DISABLE_LARK_LISTENER: 'true' },
         config: { ...baseConfig, authEnabled: false },
         databaseProbe: () => ({ exists: false }),
         daemonStatus: () => ({ running: true, ready: false, pid: 7, address: 'http://127.0.0.1:4310' }),
@@ -184,7 +184,7 @@ describe('runDoctor —— 硬不变量', () => {
     const check = find(report, 'access.token')!;
     expect(check.level).toBe('ok');
     expect(JSON.stringify(report)).not.toContain(FIXTURE_TOKEN);
-    expect(check.detail).toContain('dockmux auth token');
+    expect(check.detail).toContain('dutydeck auth token');
   });
 
   it('机密也不出现在人类可读输出里', async () => {
@@ -255,12 +255,12 @@ describe('--json 契约', () => {
     expect(rendered.stderr.text()).toBe('');
   });
 
-  it('人类模式下进度走 stderr、结果走 stdout —— dockmux doctor | head -1 才有意义', async () => {
+  it('人类模式下进度走 stderr、结果走 stdout —— dutydeck doctor | head -1 才有意义', async () => {
     const rendered = ui();
     await runDoctor({}, deps({ ui: rendered.ui }));
     expect(rendered.stderr.text()).toContain('检查守护进程状态');
     expect(rendered.stdout.text()).not.toContain('检查守护进程状态');
-    expect(rendered.stdout.text()).toContain('Dockmux 环境体检');
+    expect(rendered.stdout.text()).toContain('Dutydeck 环境体检');
   });
 
   it('人类模式下每个 fail/warn 的修法与命令都被渲染出来', async () => {
@@ -296,21 +296,21 @@ describe('daemon.status —— 状态不许说谎', () => {
     expect(check.detail).toContain('4242');
   });
 
-  it('从未启动过：warn「未运行」，remedy 是 dockmux start', async () => {
+  it('从未启动过：warn「未运行」，remedy 是 dutydeck start', async () => {
     const check = find(await runDoctor({ json: true }, deps({
       daemonStatus: () => ({ running: false, ready: false }),
       daemonRecord: () => undefined
     })), 'daemon.status')!;
     expect(check.level).toBe('warn');
     expect(check.detail).toContain('未运行');
-    expect(check.command).toBe('dockmux start');
+    expect(check.command).toBe('dutydeck start');
   });
 
   it('残留记录（pid 已死）与「从未启动」渲染不同：点名那个消失的 pid 并指向日志', async () => {
     const stale = find(await runDoctor({ json: true }, deps({
       daemonStatus: () => ({ running: false, ready: false }),
       daemonRecord: () => ({ pid: 999_002, ready: true }),
-      daemonLogFile: '/tmp/fixture/dockmux.log'
+      daemonLogFile: '/tmp/fixture/dutydeck.log'
     })), 'daemon.status')!;
     const never = find(await runDoctor({ json: true }, deps({
       daemonStatus: () => ({ running: false, ready: false }),
@@ -321,8 +321,8 @@ describe('daemon.status —— 状态不许说谎', () => {
     expect(stale.detail).toContain('999002');
     expect(stale.detail).not.toContain('未运行');
     expect(stale.remedy).toContain('残留');
-    expect(stale.command).toBe('dockmux start');
-    expect(stale.verify).toContain('/tmp/fixture/dockmux.log');
+    expect(stale.command).toBe('dutydeck start');
+    expect(stale.verify).toContain('/tmp/fixture/dutydeck.log');
     // 两种情况必须给出不同的说明，否则用户分不清「崩了」和「还没开始」
     expect(stale.detail).not.toBe(never.detail);
     expect(stale.verify).not.toBe(never.verify);
@@ -346,7 +346,7 @@ describe('database.reachable / schema.migrations', () => {
     const check = find(report, 'database.reachable')!;
     expect(check.level).toBe('warn');
     expect(check.detail).toContain('尚未初始化');
-    expect(check.command).toBe('dockmux start');
+    expect(check.command).toBe('dutydeck start');
     expect(probed).toBe(1);
     // 库不可读时迁移检查降级 skip，不瞎猜版本
     expect(level(report, 'schema.migrations')).toBe('skip');
@@ -364,10 +364,10 @@ describe('database.reachable / schema.migrations', () => {
   it('可读为 ok；库路径优先取守护进程记录里的那个', async () => {
     const seen: string[] = [];
     const report = await runDoctor({ json: true }, deps({
-      daemonRecord: () => ({ pid: 4242, ready: true, database: '/var/lib/other/.dockmux/dockmux.db' }),
+      daemonRecord: () => ({ pid: 4242, ready: true, database: '/var/lib/other/.dutydeck/dutydeck.db' }),
       databaseProbe: path => { seen.push(path); return { exists: true, appliedVersion: 14 }; }
     }));
-    expect(seen).toEqual(['/var/lib/other/.dockmux/dockmux.db']);
+    expect(seen).toEqual(['/var/lib/other/.dutydeck/dutydeck.db']);
     expect(find(report, 'database.reachable')?.detail).toContain('/var/lib/other');
   });
 
@@ -377,14 +377,14 @@ describe('database.reachable / schema.migrations', () => {
       expectedSchemaVersion: 14
     })), 'schema.migrations')!;
     expect(behind.level).toBe('warn');
-    expect(behind.command).toBe('dockmux restart');
+    expect(behind.command).toBe('dutydeck restart');
 
     const ahead = find(await runDoctor({ json: true }, deps({
       databaseProbe: () => ({ exists: true, appliedVersion: 20 }),
       expectedSchemaVersion: 14
     })), 'schema.migrations')!;
     expect(ahead.level).toBe('warn');
-    expect(ahead.command).toBe('dockmux update');
+    expect(ahead.command).toBe('dutydeck update');
 
     const matched = find(await runDoctor({ json: true }, deps()), 'schema.migrations')!;
     expect(matched.level).toBe('ok');
@@ -402,13 +402,13 @@ describe('database.reachable / schema.migrations', () => {
   });
 });
 
-describe('dockmux.dir', () => {
+describe('dutydeck.dir', () => {
   it('真实临时目录：700 为 ok，组可读为 warn 并给出 chmod 700', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-doctor-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-'));
     try {
-      const dir = join(root, '.dockmux');
+      const dir = join(root, '.dutydeck');
       mkdirSync(dir, { recursive: true, mode: 0o700 });
-      const database = join(dir, 'dockmux.db');
+      const database = join(dir, 'dutydeck.db');
 
       chmodSync(dir, 0o700);
       const tight = find(await runDoctor({ json: true }, deps({
@@ -417,7 +417,7 @@ describe('dockmux.dir', () => {
         exists: undefined,
         access: undefined,
         stat: undefined
-      })), 'dockmux.dir')!;
+      })), 'dutydeck.dir')!;
       expect(tight.level).toBe('ok');
       expect(tight.detail).toContain('700');
 
@@ -428,7 +428,7 @@ describe('dockmux.dir', () => {
         exists: undefined,
         access: undefined,
         stat: undefined
-      })), 'dockmux.dir')!;
+      })), 'dutydeck.dir')!;
       expect(loose.level).toBe('warn');
       expect(loose.detail).toContain('755');
       expect(loose.command).toBe(`chmod 700 ${dir}`);
@@ -441,13 +441,13 @@ describe('dockmux.dir', () => {
   it('不可写为 fail', async () => {
     const check = find(await runDoctor({ json: true }, deps({
       access: async () => { throw new Error('EACCES: permission denied'); }
-    })), 'dockmux.dir')!;
+    })), 'dutydeck.dir')!;
     expect(check.level).toBe('fail');
     expect(check.command).toContain('chmod 700');
   });
 
   it('目录不存在为 warn，不去创建它', async () => {
-    const check = find(await runDoctor({ json: true }, deps({ exists: () => false })), 'dockmux.dir')!;
+    const check = find(await runDoctor({ json: true }, deps({ exists: () => false })), 'dutydeck.dir')!;
     expect(check.level).toBe('warn');
     expect(check.detail).toContain('尚不存在');
   });
@@ -456,7 +456,7 @@ describe('dockmux.dir', () => {
     const check = find(await runDoctor({ json: true }, deps({
       platform: 'win32',
       stat: async () => ({ mode: 0o40777 })
-    })), 'dockmux.dir')!;
+    })), 'dutydeck.dir')!;
     expect(check.level).toBe('ok');
   });
 });
@@ -468,13 +468,13 @@ describe('agents', () => {
     expect(check.detail).toContain('Claude Code 1.2.3');
   });
 
-  it('零 Agent 为 warn，remedy 提到安装与 dockmux setup', async () => {
+  it('零 Agent 为 warn，remedy 提到安装与 dutydeck setup', async () => {
     const check = find(await runDoctor({ json: true }, deps({
       config: { ...baseConfig, agents: [] }
     })), 'agents.detected')!;
     expect(check.level).toBe('warn');
     expect(check.remedy).toContain('安装');
-    expect(check.command).toBe('dockmux setup');
+    expect(check.command).toBe('dutydeck setup');
   });
 
   it('agents.auth 只做 info 说明，绝不猜各家 CLI 的登录态', async () => {
@@ -548,8 +548,8 @@ describe('lark', () => {
     const check = find(await runDoctor({ json: true }, withBots([{ appId: 'cli_nosecret', listening: true }])), 'lark.config')!;
     expect(check.level).toBe('fail');
     expect(check.detail).toContain('cli_nosecret');
-    expect(check.command).toBe('dockmux setup --lark-app-id cli_nosecret');
-    expect(check.remedy).toContain('dockmux secret set');
+    expect(check.command).toBe('dutydeck setup --lark-app-id cli_nosecret');
+    expect(check.remedy).toContain('dutydeck secret set');
   });
 
   it('lark.bots 是坏 JSON 为 fail 且带修法', async () => {
@@ -573,18 +573,18 @@ describe('lark', () => {
     expect(check.remedy).toContain('默认 Agent');
   });
 
-  it('DOCKMUX_DISABLE_LARK_LISTENER=true 为 warn 并点名该 flag', async () => {
+  it('DUTYDECK_DISABLE_LARK_LISTENER=true 为 warn 并点名该 flag', async () => {
     const report = await runDoctor({ json: true }, deps({
-      env: { DOCKMUX_DISABLE_LARK_LISTENER: 'true' },
+      env: { DUTYDECK_DISABLE_LARK_LISTENER: 'true' },
       databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [larkBotsConfigKey]: JSON.stringify([bot()]) } })
     }));
     const check = find(report, 'lark.listener')!;
     expect(check.level).toBe('warn');
-    expect(check.detail).toContain('DOCKMUX_DISABLE_LARK_LISTENER');
-    expect(check.remedy).toContain('DOCKMUX_DISABLE_LARK_LISTENER');
+    expect(check.detail).toContain('DUTYDECK_DISABLE_LARK_LISTENER');
+    expect(check.remedy).toContain('DUTYDECK_DISABLE_LARK_LISTENER');
   });
 
-  it('已配飞书但守护进程没跑：说明监听不可能是活的，指向 dockmux start', async () => {
+  it('已配飞书但守护进程没跑：说明监听不可能是活的，指向 dutydeck start', async () => {
     const check = find(await runDoctor({ json: true }, deps({
       daemonStatus: () => ({ running: false, ready: false }),
       daemonRecord: () => undefined,
@@ -592,7 +592,7 @@ describe('lark', () => {
     })), 'lark.listener')!;
     expect(check.level).toBe('warn');
     expect(check.detail).toMatch(/不可能是活的|未运行/);
-    expect(check.command).toBe('dockmux start');
+    expect(check.command).toBe('dutydeck start');
   });
 
   it('数据库不可读时飞书检查 skip，不谎称「未配置」', async () => {
@@ -634,7 +634,7 @@ describe('access.posture / access.token', () => {
     }
   });
 
-  it('认证开启为 ok；远程场景提到 dockmux auth token', async () => {
+  it('认证开启为 ok；远程场景提到 dutydeck auth token', async () => {
     const local = find(await runDoctor({ json: true }, deps()), 'access.posture')!;
     expect(local.level).toBe('ok');
 
@@ -642,7 +642,7 @@ describe('access.posture / access.token', () => {
       config: { ...baseConfig, host: '0.0.0.0', authEnabled: true }
     })), 'access.posture')!;
     expect(remote.level).toBe('ok');
-    expect(remote.detail).toContain('dockmux auth token');
+    expect(remote.detail).toContain('dutydeck auth token');
   });
 
   it('token 模式缺令牌为 fail（每个请求都会 401）', async () => {
@@ -652,7 +652,7 @@ describe('access.posture / access.token', () => {
     })), 'access.token')!;
     expect(check.level).toBe('fail');
     expect(check.detail).toContain('401');
-    expect(check.command).toBe('dockmux auth token');
+    expect(check.command).toBe('dutydeck auth token');
   });
 
   it('仅本机模式不需要令牌 → skip', async () => {
@@ -668,7 +668,7 @@ describe('access.posture / access.token', () => {
     const drift = find(report, 'access.drift')!;
     expect(drift.level).toBe('warn');
     expect(drift.detail).toContain('127.0.0.1');
-    expect(drift.command).toBe('dockmux restart');
+    expect(drift.command).toBe('dutydeck restart');
   });
 
   it('一致时不产出 access.drift 噪音', async () => {
@@ -699,7 +699,7 @@ describe('port.conflict', () => {
       daemonRecord: () => undefined
     })), 'port.conflict')!;
     expect(check.level).toBe('fail');
-    expect(check.command).toContain('dockmux setup --port');
+    expect(check.command).toContain('dutydeck setup --port');
     // Linux 上给 ss（lsof 常常没装），darwin 上给 lsof
     expect(check.verify).toContain('ss -ltnp');
     expect(check.verify).toContain('4310');
@@ -743,8 +743,8 @@ describe('port.conflict', () => {
   });
 
   /**
-   * 回归：`dockmux start --port 14612` 后跑体检，曾经报「4310 被别人占用」FAIL，
-   * 并建议 `dockmux setup --port <其他端口>` —— 一条不存在的故障配一条错误的修法。
+   * 回归：`dutydeck start --port 14612` 后跑体检，曾经报「4310 被别人占用」FAIL，
+   * 并建议 `dutydeck setup --port <其他端口>` —— 一条不存在的故障配一条错误的修法。
    * 根因是探针只认配置端口，而 `--port` 从不回写配置。
    */
   it('daemon 跑在非默认端口时，探配置端口不得误报冲突', async () => {
@@ -777,7 +777,7 @@ describe('port.conflict', () => {
     expect(drift.level).toBe('warn');
     expect(drift.detail).toContain('14612');
     expect(drift.detail).toContain('4310');
-    expect(drift.command).toBe('dockmux restart');
+    expect(drift.command).toBe('dutydeck restart');
     // 端口这一项本身必须是干净的 ok，漂移不重复计一次失败。
     expect(level(report, 'port.conflict')).toBe('ok');
   });
@@ -788,11 +788,11 @@ describe('platform.pickers', () => {
     expect(level(await runDoctor({ json: true }, deps({ platform: 'darwin' })), 'platform.pickers')).toBe('ok');
   });
 
-  it('非 darwin 为 info，说明要手输路径并提到 dockmux setup --cwd', async () => {
+  it('非 darwin 为 info，说明要手输路径并提到 dutydeck setup --cwd', async () => {
     const check = find(await runDoctor({ json: true }, deps({ platform: 'linux' })), 'platform.pickers')!;
     expect(check.level).toBe('info');
     expect(check.detail).toContain('手工输入');
-    expect(check.verify).toContain('dockmux setup --cwd');
+    expect(check.verify).toContain('dutydeck setup --cwd');
   });
 });
 
@@ -809,7 +809,7 @@ describe('autostart', () => {
       autostartStatus: async () => ({ state: { platform: 'linux', supported: true, enabled: false } })
     })), 'autostart')!;
     expect(check.level).toBe('info');
-    expect(check.command).toBe('dockmux autostart enable');
+    expect(check.command).toBe('dutydeck autostart enable');
   });
 
   it('已注册为 ok', async () => {
@@ -822,7 +822,7 @@ describe('autostart', () => {
     })), 'autostart.stale')!;
     expect(check.level).toBe('warn');
     expect(check.remedy).toMatch(/路径/);
-    expect(check.command).toBe('dockmux autostart enable');
+    expect(check.command).toBe('dutydeck autostart enable');
   });
 
   it('Linux 已注册但没开 linger 为 warn，命令里带真实用户名', async () => {
@@ -846,7 +846,7 @@ describe('autostart', () => {
 
 describe('默认探针（真实系统，仅限临时目录与本地端口）', () => {
   it('端口探针：空闲 / 占用都判对，且探完一定把 socket 关掉', async () => {
-    // 关不掉 socket 的话，紧随体检之后的 dockmux start 会被自己的探针挤掉端口。
+    // 关不掉 socket 的话，紧随体检之后的 dutydeck start 会被自己的探针挤掉端口。
     expect(await defaultPortProbe('127.0.0.1', 45231, 1_000)).toBe('free');
     const server = createServer();
     await new Promise<void>(resolve => server.listen({ host: '127.0.0.1', port: 45231 }, () => resolve()));
@@ -856,7 +856,7 @@ describe('默认探针（真实系统，仅限临时目录与本地端口）', (
   });
 
   it('数据库探针：库不存在时如实返回且绝不建库', () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-doctor-db-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-db-'));
     try {
       const missing = join(root, 'nope.db');
       expect(defaultDatabaseProbe(missing, [])).toEqual({ exists: false });
@@ -867,9 +867,9 @@ describe('默认探针（真实系统，仅限临时目录与本地端口）', (
   });
 
   it('数据库探针：只读读出迁移版本与 configs 键值', () => {
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-doctor-db-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-db-'));
     try {
-      const file = join(root, 'dockmux.db');
+      const file = join(root, 'dutydeck.db');
       const writer = new Database(file);
       writer.pragma('journal_mode = WAL');
       writer.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
@@ -892,7 +892,7 @@ describe('默认探针（真实系统，仅限临时目录与本地端口）', (
   it('数据库探针：半初始化的库（没有 configs / schema_migrations 表）仍算可读，不误报为坏库', () => {
     // 这是真实回归：早先版本里 prepare 抛错会让整个库被判成不可读，
     // 于是「库刚建好还没迁移」被显示成「数据库损坏」。
-    const root = mkdtempSync(join(tmpdir(), 'dockmux-doctor-db-'));
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-db-'));
     try {
       const file = join(root, 'partial.db');
       const writer = new Database(file);

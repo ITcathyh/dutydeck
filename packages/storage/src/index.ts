@@ -3,7 +3,7 @@ import { and, asc, desc, eq, gt, lt } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import type { AgentConfig, AgentEvent, RepositoryBundle, Session, TaskRecord } from '@dockmux/shared';
+import type { AgentConfig, AgentEvent, RepositoryBundle, Session, TaskRecord } from '@dutydeck/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
 import { runMigrations } from './migrations.js';
 import { createFoundationRepositories } from './foundation.js';
@@ -35,10 +35,10 @@ function prepareDatabaseDirectory(filename: string): void {
   mkdirSync(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   if (!supportsPosixModes()) return;
 
-  // Tighten directories created by Dockmux and its conventional persisted
-  // `.dockmux` directory. Do not chmod an unrelated existing parent such as
+  // Tighten directories created by Dutydeck and its conventional persisted
+  // `.dutydeck` directory. Do not chmod an unrelated existing parent such as
   // `/tmp` when a caller explicitly stores a database directly inside it.
-  if (!existed || basename(directory) === '.dockmux') chmodSync(directory, PRIVATE_DIRECTORY_MODE);
+  if (!existed || basename(directory) === '.dutydeck') chmodSync(directory, PRIVATE_DIRECTORY_MODE);
 }
 
 function prepareDatabaseFile(filename: string): void {
