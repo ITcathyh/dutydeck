@@ -128,9 +128,10 @@ describe('Lark card layout renderer->bound->build integration', () => {
     // 终端回显不是工具调用：24 条各自套一个工具面板会得到 24 个完全相同、
     // 零信息量的「运行命令 · terminal」标题，真正的输出反而被压进折叠层。
     const records = current.elements[1];
+    // 标题不写条数：帧合并去重之后，「多少条事件」和面板里实际有多少内容不再是一回事。
     expect(records).toMatchObject({
       tag: 'collapsible_panel', expanded: false,
-      header: { title: { content: '终端输出（24 条）' } }
+      header: { title: { content: '终端输出' } }
     });
     expect(records.elements).toHaveLength(1);
     expect(records.elements[0].content).toContain('终端输出 1');
@@ -229,7 +230,11 @@ describe('Lark card layout renderer->bound->build integration', () => {
     expect(JSON.stringify(historyGroup)).toContain('Building assets with password=[REDACTED]');
     expect(JSON.stringify(historyGroup)).not.toContain('rawpassword456');
 
-    // C: 单工具 + raw 组合历史：正常计为多动作阶段，保留独立展示
+    // C: 工具记录 + 屏幕回显落在同一阶段：只留结构化的那份。
+    // 两路讲的是同一批事实——pty-driver 在 transcript 之外还发一路整屏快照做兜底
+    // （packages/pty-driver/src/driver.ts:42-48）。一次工具调用在结构化那份里是命令加结果，
+    // 在屏幕那份里是几十帧带 TUI 边框的重绘：真实会话实测屏幕行重复率 88–90%，其中 43%
+    // 是状态栏和转圈动画。两份都留，等于把这些噪声原样搬进卡片。
     const mixedEvents = [
       makeEvent(1, 'tool_call', { id: 't1', name: 'read', input: { path: 'file.txt' }, status: 'running' }, t(1)),
       makeEvent(2, 'tool_result', { id: 't1', name: 'read', output: 'content', status: 'completed' }, t(2)),
@@ -240,8 +245,14 @@ describe('Lark card layout renderer->bound->build integration', () => {
     const mixedCard = buildLarkCard({ state: 'completed', elements: mixedElements });
     const group = components(mixedCard).find(el => el.element_id === 'trace_group_0');
     const tools = group.elements.filter((el: any) => el.element_id?.startsWith('trace_tool_'));
-    expect(tools).toHaveLength(2);
-    expect(JSON.stringify(group)).toContain('Build step succeeded');
+    expect(tools).toHaveLength(1);
+    // 工具那份记录一个字都不能少。
+    expect(JSON.stringify(group)).toContain('file.txt');
+    expect(JSON.stringify(group)).toContain('content');
+    // 屏幕那份不再单独成块。它在 Dockmux Web 的完整记录里仍然保留。
+    expect(JSON.stringify(group)).not.toContain('Build step succeeded');
+    // 降级路径不能一起丢：同一阶段一个工具记录都没有时（transcript 缺席或中途断开），
+    // 屏幕回显仍然是唯一的可见性来源，必须照常渲染——由上面 B 段守着。
   });
 
   it('4. completed state: no result_header, normal_v2 final_output, default collapsed vs hideTraceOnComplete=false expanded', () => {
@@ -845,6 +856,165 @@ export function restoreSession(sessionId: string) {
     // 命令本身是自解释的，此时分类名要让位，否则又变回「四个汉字挤掉命令」。
     expect(summaryOf(withCommand)).toContain('ls -la');
     expect(summaryOf(withCommand)).not.toContain('运行命令');
+  });
+
+  it('23. 屏幕回显：整屏快照按重叠重建、TUI 装饰不进卡片、滤干净后不留空面板', () => {
+    // raw_terminal 是每 200ms 一帧的整屏快照，不是增量输出。首尾相接会把同一屏抄很多遍，
+    // 所以要按「新帧与已输出尾部的最长重叠」重建成一份连续输出：每行只出现一次，
+    // 已经滚出视口的行也不能因此丢掉。
+    const frames = [
+      makeEvent(1, 'raw_terminal', { text: '$ pnpm build\ncompiling…' }, t(1)),
+      makeEvent(2, 'raw_terminal', { text: '$ pnpm build\ncompiling…\ndone in 3s' }, t(2)),
+      makeEvent(3, 'raw_terminal', { text: 'compiling…\ndone in 3s\nPASS 12 tests' }, t(3))
+    ];
+    const rebuilt = JSON.stringify(buildLarkCard({ state: 'running', elements: renderLarkProcessElements(frames, config) }));
+    const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+    expect(occurrences(rebuilt, 'compiling…')).toBe(1);
+    expect(occurrences(rebuilt, 'done in 3s')).toBe(1);
+    expect(rebuilt).toContain('$ pnpm build');
+    expect(rebuilt).toContain('PASS 12 tests');
+
+    // TUI 把自己的界面画在屏幕上，快照连装饰一起收下。这些行每帧都在变，躲得过 driver
+    // 那道「屏幕文本没变就不发」的闸，对读者却是零信息量。
+    const chrome = [makeEvent(1, 'raw_terminal', { text: [
+      '● Bash(pnpm test)',
+      'Thought for 2s (ctrl+o to expand)',
+      '✻ Seasoning… (2s · ⚒ 1.6k tokens)',
+      '⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents',
+      '⎿  Tip: Use /memory to view and manage Claude memory',
+      'PASS src/app.test.ts'
+    ].join('\n') }, t(1))];
+    const filtered = JSON.stringify(buildLarkCard({ state: 'running', elements: renderLarkProcessElements(chrome, config) }));
+    expect(filtered).toContain('PASS src/app.test.ts');
+    expect(filtered).toContain('Bash(pnpm test)');
+    for (const noise of ['Thought for 2s', 'Seasoning', 'bypass permissions', 'Tip: Use /memory']) {
+      expect(filtered).not.toContain(noise);
+    }
+
+    // 一屏全是装饰时过滤后什么都不剩。那样的记录不能留下一个点开是空的折叠箭头。
+    const allChrome = [makeEvent(1, 'raw_terminal', {
+      text: '⏵⏵ bypass permissions on (shift+tab to cycle)\nThought for 1s (ctrl+o to expand)'
+    }, t(1))];
+    expect(JSON.stringify(buildLarkCard({
+      state: 'running', elements: renderLarkProcessElements(allChrome, config)
+    }))).not.toContain('终端输出');
+  });
+
+  it('24. 阶段标题写这一步在做什么：工具自带的描述优先于命令，环境变量前缀不占标题', () => {
+    // 真实会话里 86–94% 的工具调用自带一句中文描述，阶段标题此前一直跳过它，
+    // 退化成「分类名 · 原始命令」；命令又常以一串开关开头，于是三个不同的阶段
+    // 渲染出三行一模一样的标题。
+    const events = [
+      makeEvent(1, 'tool_call', { id: 't1', name: 'Bash', status: 'running', input: {
+        command: 'LARKSUITE_CLI_NO_UPDATE_NOTIFIER=1 LARKSUITE_CLI_NO_SKILLS_NOTIFIER=1 lark-cli im +chat-messages-list --chat-id oc_f34138da',
+        description: '拉取群内 9月8日以来的全部消息'
+      } }, t(1)),
+      makeEvent(2, 'tool_result', { id: 't1', name: 'Bash', output: 'ok', status: 'completed' }, t(3)),
+      makeEvent(3, 'text', { text: '下一步' }, t(4)),
+      makeEvent(4, 'tool_call', { id: 't2', name: 'Bash', input: { command: 'ls' }, status: 'running' }, t(4))
+    ];
+    const card = buildLarkCard({ state: 'running', elements: renderLarkProcessElements(events, config) });
+    const group = byId(card, 'trace_group_0');
+    const title = String(group.header?.title?.content ?? group.content ?? '');
+    expect(title).toContain('拉取群内 9月8日以来的全部消息');
+    // 描述已经把这一步说清楚了，命令不再拼在后面把标题撑成两行。
+    expect(title).not.toContain('lark-cli');
+    expect(title).not.toContain('LARKSUITE_CLI_NO_UPDATE_NOTIFIER');
+    // 命令没有丢，它在展开区的输入里——要排查时点开就有。
+    expect(JSON.stringify(group)).toContain('lark-cli im +chat-messages-list');
+  });
+
+  it('25. 没有描述时：命令剥掉环境变量前缀、文件路径留两段、分类不被管道词带偏', () => {
+    const rendered = (input: any, name = 'Bash') => JSON.stringify(buildLarkCard({
+      state: 'completed',
+      elements: renderLarkProcessElements([
+        makeEvent(1, 'tool_call', { id: 'x', name, input, status: 'running' }, t(1)),
+        makeEvent(2, 'tool_result', { id: 'x', name, output: 'ok', status: 'completed' }, t(2))
+      ], config, true)
+    }));
+    // 标题从第一个真实命令词开始，而不是从一串开关开始。
+    expect(rendered({ command: 'FOO=1 BAR=2 rg -n needle src' })).toContain('rg -n needle src');
+    // 文件路径留最后两段：SKILL.md、index.ts 这类名字一个仓库里能有几十份，
+    // 上一层目录往往正是区分它们的那一段。完整路径退到展开区。
+    const file = rendered({ file_path: '/home/u/.claude/skills/lark-shared/SKILL.md' }, 'Read');
+    expect(file).toContain('lark-shared/SKILL.md');
+    expect(file).toContain('/home/u/.claude/skills/lark-shared/SKILL.md');
+    // 末尾的 head 只是把输出截短，不能让这一步的图标和分类名指向「读取文件」。
+    const piped = rendered({ command: 'lark-cli im +chat-messages-list --help 2>&1 | head -60' });
+    expect(piped).not.toContain('读取文件');
+    expect(piped).toContain('运行命令');
+  });
+
+  it('26. 展开区的输入按原样成段：多行脚本不被压成一行字面 \\n', () => {
+    // JSON.stringify 把换行写成字面 `\n`，一段 20 行的 heredoc 会挤成一行长字符串，
+    // 读者得在脑子里反转义一遍才能看懂自己刚跑过的脚本。
+    const script = "cd /tmp && python3 - <<'EOF'\nimport json\nprint(json.dumps({'ok': True}))\nEOF";
+    const card = buildLarkCard({ state: 'completed', elements: renderLarkProcessElements([
+      makeEvent(1, 'tool_call', { id: 's', name: 'Bash', input: { command: script, description: '跑一段脚本' }, status: 'running' }, t(1)),
+      makeEvent(2, 'tool_result', { id: 's', name: 'Bash', output: '{"ok": true}', status: 'completed' }, t(2))
+    ], config, true) });
+    const shown = components(card).map(element => String(element.content ?? '')).find(content => content.includes('python3')) ?? '';
+    expect(shown).toContain('\nimport json');
+    expect(shown).not.toContain('\\nimport json');
+    // 字段名仍然在——它区分 command 和 description，只是不再由一层 JSON 括号来承担。
+    expect(shown).not.toContain('"command"');
+  });
+
+  it('27. 工具输入的脱敏不因为改成可读文本而失效', () => {
+    // redactTraceValue 有两条规则：按字段名整值替换（sensitiveTraceKey），和按文本形状替换。
+    // 前者只在对象形态下生效。输入一旦先被拍成可读文本再脱敏，就只剩后者，而文本正则的
+    // 值形状停在第一个空白或逗号处——密钥里带空格、逗号、换行，或者干脆是个数组时，
+    // 会有一截明文跟着卡片发进群。
+    const leaked = (input: unknown, secret: string) => JSON.stringify(renderLarkProcessElements([
+      makeEvent(1, 'tool_call', { id: 't', name: 'Bash', input, status: 'running' }, t(1)),
+      makeEvent(2, 'tool_result', { id: 't', name: 'Bash', output: 'ok', status: 'completed' }, t(2))
+    ], config, true)).includes(secret);
+    expect(leaked({ endpoint: 'https://x', method: 'POST', password: 'S3cret Pass Phrase' }, 'Pass Phrase')).toBe(false);
+    expect(leaked({ name: 'rotate', access_token: ['tok_AAA', 'tok_BBB', 'tok_CCC'] }, 'tok_BBB')).toBe(false);
+    expect(leaked({ note: 'x', api_key: 'AKIA111\nSECONDLINE222' }, 'SECONDLINE222')).toBe(false);
+    expect(leaked({ secret: 'a,b,c,d' }, 'b,c,d')).toBe(false);
+  });
+
+  it('28. 屏幕流的两种形态：整屏快照去重、逐行输出原样保留、装饰规则不误伤真实输出', () => {
+    const screen = (lines: string[], done = false) => JSON.stringify(buildLarkCard({
+      state: done ? 'completed' : 'running',
+      elements: renderLarkProcessElements(lines.map((line, index) => makeEvent(index + 1, 'raw_terminal', { text: line }, t(index + 1))), config, done)
+    }));
+    const occurrences = (haystack: string, needle: string) => haystack.split(needle).length - 1;
+
+    // 整屏快照：破坏帧间重叠的正是每帧都在变的装饰行，所以必须先滤再合并。
+    // 顺序反了的话，下面这 5 帧会把正文原样重复 5 遍。
+    const spinner = '✢✳✶✻✽'.split('').map((glyph, index) =>
+      `$ pnpm test\nNow running the test suite\nPASS src/app.test.ts\n${glyph} Seasoning… (${index}s · ⚒ 1.2k tokens)`);
+    expect(occurrences(screen(spinner), 'Now running the test suite')).toBe(1);
+
+    // 逐行输出（transports 的 stdio stderr 每行发一条）：连着两行相同的告警是两次真实告警，
+    // 不是重复帧。按重叠合并会把第二行当成重复吞掉。
+    expect(occurrences(screen(['npm warn deprecated foo@1.0.0', 'npm warn deprecated foo@1.0.0', 'done']),
+      'npm warn deprecated')).toBe(2);
+
+    // 装饰规则作用在 agent 的真实输出上，宽一分就吃掉别人的日志。
+    const survives = (line: string) => screen([`前一行\n${line}`]).includes(line.slice(0, 14));
+    for (const kept of ['* Building…', '· 正在同步…', 'README says: press esc to interrupt the run', 'Compiled main.ts (ctrl+c to expand)']) {
+      expect(survives(kept), kept).toBe(true);
+    }
+    for (const dropped of ['⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt', 'Thought for 2s (ctrl+o to expand)', '✻ Seasoning… (2s · ⚒ 1.6k tokens)']) {
+      expect(survives(dropped), dropped).toBe(false);
+    }
+  });
+
+  it('29. 任务已收尾而工具没等到结果时，屏幕回显是唯一线索，不能一起丢掉', () => {
+    // CLI 崩了、卡在交互授权、鉴权失败都是这个形状：tool_call 发出去了，tool_result 永远
+    // 不来。结构化记录此时只有一行「执行中」，原因全在屏幕上那两行。
+    const stuck = [
+      makeEvent(1, 'text', { text: '我来看一下服务状态' }, t(1)),
+      makeEvent(2, 'tool_call', { id: 't1', name: 'Bash', status: 'running',
+        input: { command: 'kubectl get pods', description: '查看 Pod 状态' } }, t(2)),
+      makeEvent(3, 'raw_terminal', { text: 'error: You must be logged in to the server (Unauthorized)' }, t(3))
+    ];
+    expect(JSON.stringify(renderLarkProcessElements(stuck, config, true))).toContain('Unauthorized');
+    // 运行态不走这条：那时「还没拿到结果」是正常的，留下屏幕流等于把 TUI 录像搬回卡片。
+    expect(JSON.stringify(renderLarkProcessElements(stuck, config, false))).not.toContain('Unauthorized');
   });
 
   it('22. 告警块永远有正文：空的错误原因和空的审批标题都不会渲染出空 content', () => {

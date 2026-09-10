@@ -184,10 +184,96 @@ const redactTraceValue = (value: unknown, seen = new WeakSet<object>(), depth = 
 };
 
 const truncateTrace = (value: unknown, limit: number) => truncate(redactTraceValue(value), limit);
+
+// 值自己就能说清自己是什么的字段。命令、路径、URL 裸着放也不会被读错，
+// 其余字段名必须留着：`{cwd:'/srv/repo'}` 去掉 cwd 之后就成了「执行了 /srv/repo」，
+// 与事实相反。toolPresentation 判断标题是否已覆盖输入时用的也是这一份。
+const selfEvidentInputKeys = new Set(['command', 'cmd', 'path', 'file_path', 'url', 'href']);
+
+// JSON.stringify 把值里的换行写成字面 `\n`：一段 20 行的 python heredoc 会挤成一行带
+// `\n` 的长字符串，读者得在脑子里反转义一遍才能看懂自己刚跑过的脚本。JSON 在这里唯一
+// 的作用是标注字段名，不该拿值的可读性去换。自解释的单字段直接给值，其余保留字段名，
+// 多行的值原样成段。
+const readableInput = (value: unknown): string => {
+  if (typeof value === 'string') return value;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return JSON.stringify(value, null, 2) ?? '';
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (!entries.length) return '';
+  const [soleKey, soleValue] = entries[0]!;
+  if (entries.length === 1 && typeof soleValue === 'string' && selfEvidentInputKeys.has(soleKey)) return soleValue;
+  return entries.map(([key, item]) => typeof item === 'string'
+    ? (item.includes('\n') ? `${key}:\n${item}` : `${key}: ${item}`)
+    : `${key}: ${JSON.stringify(item)}`).join('\n');
+};
 const truncateInline = (value: string, limit = 64) => {
   const text = value.replace(/\s+/g, ' ').trim();
   return text.length <= limit ? text : `${text.slice(0, Math.max(1, limit - 1)).trimEnd()}…`;
 };
+
+// CLI 命令常以一串环境变量赋值开头（`FOO=1 BAR=2 真正的命令 …`）。标题只有 64 个字符，
+// 两三个 NO_UPDATE_NOTIFIER 之类的开关就能把它占满：真实会话里三条不同的 lark-cli 调用
+// 渲染出了三行一模一样的标题，真正的子命令一个字都没露出来。前缀对读者没有可操作性，
+// 标题从第一个真实命令词开始；完整命令仍由展开区的「完整内容」保留。
+// 只认全大写的名字。环境变量名按惯例大写，而小写的 `key=value` 多半是日志字段：
+// `level=error msg=数据库连接失败 retry=3` 按大小写不敏感的规则会被剥成 `retry=3`，
+// 标题于是指向一件没发生的事。
+const stripEnvAssignments = (value: string) =>
+  value.replace(/^(?:[A-Z_][A-Z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)[ \t]+)+/, '');
+
+// raw_terminal 有两种形态，合并只对第一种成立：
+//   · pty-driver 每 200ms 发一帧整屏快照（driver.ts:713），相邻帧大面积重叠；
+//   · transports 的 stdio stderr 逐行发（transports/src/index.ts:32），每条就是一行增量。
+// 对第一种直接首尾相接等于把同一屏抄几十遍——真实会话里终端行重复率 88–90%，出现最多
+// 的那一行被抄了 1778 次。对第二种做重叠合并则会吞掉内容：连着两行相同的
+// `npm warn deprecated foo@1.0.0` 会被当成重复帧，只剩一行。
+// 用行数区分：整屏快照必然多行，逐行增量必然单行，单行条目一律原样追加。
+//
+// 重叠从长到短试：终端滚动一行时新帧与尾部有 rows-1 行重叠，取最长的才不会把整屏重新
+// 追加一遍。已知取舍——内容高度周期性（例如「失败/重试」两行循环）且每帧滚动量整除该周期
+// 时，贪心会匹配到比真实滚动更长的重叠，把中间几轮折叠掉。失败方向是少显示重复行，
+// 不会拼出不存在的内容，完整记录在 Dockmux Web。
+const mergeTerminalFrames = (frames: string[]) => {
+  const output: string[] = [];
+  for (const frame of frames) {
+    const lines = frame.split('\n');
+    if (lines.length < 2) { output.push(...lines); continue; }
+    let overlap = Math.min(lines.length, output.length);
+    while (overlap > 0) {
+      let same = true;
+      for (let index = 0; index < overlap; index++) {
+        if (output[output.length - overlap + index] !== lines[index]) { same = false; break; }
+      }
+      if (same) break;
+      overlap--;
+    }
+    output.push(...lines.slice(overlap));
+  }
+  return output.join('\n');
+};
+
+// TUI 把自己的界面装饰画在屏幕上，快照就把装饰一并收下：底部的模式状态栏、
+// 「Thought for 2s (ctrl+o to expand)」这类折叠占位、转圈动画帧和它带的 token 计数。
+// 它们每帧都在变（所以躲得过 driver 那道「屏幕文本没变就不发」的闸），对读者却是零信息量
+// ——真实会话里这类行占终端全部非空行的 43%。去掉它们剩下的才是命令与输出。
+// 每条都要窄到只认 TUI 自己画的那一行。这些规则作用在 agent 的真实输出上，宽一分就会
+// 吃掉别人的日志：只匹配 `esc to interrupt` 的话，一句「press esc to interrupt the run」
+// 的 README 摘录会整行消失；只匹配 `(ctrl+? to expand)` 结尾的话，`Compiled main.ts
+// (ctrl+c to expand)` 这种真实编译输出会被当成折叠占位。
+const terminalChromePattern = new RegExp([
+  // 底部模式状态栏，形如
+  // `⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← for agents`。
+  // 要求任意两个特征词同现，单独引用其中一句的正常输出因此不受影响。
+  '^(?=(?:.*(?:esc to interrupt|shift\\+tab to cycle|bypass permissions|for agents)){2}).*$',
+  // 折叠占位行，只有这两种形态：`Thought for 2s (ctrl+o to expand)`、`… +23 lines (…)`。
+  '^\\s*(?:Thought for \\d+[smh]|…\\s*\\+\\d+ lines?)\\b.*\\(ctrl\\+[a-z] to (?:expand|toggle)\\)\\s*$',
+  // 转圈动画帧：`✻ Seasoning… (2s · ⚒ 1.6k tokens)`。后面那个耗时括号是必需的——
+  // 少了它，`* Building…`、`· 正在同步…` 这类真实进度行会一起被吃掉。
+  '^\\s*[✢✳✶✻✽]\\s+\\S+…\\s*\\(\\d+[smh]',
+  // Claude Code 的随机提示行：`⎿  Tip: Use /memory …`
+  '^\\s*⎿\\s*Tip:'
+].join('|'));
+const stripTerminalChrome = (text: string) => text.split('\n')
+  .filter(line => !terminalChromePattern.test(line)).join('\n');
 // 耗时只在「值得注意」时才占用标题里的一段位置。毫秒级和一两秒的步骤是绝大多数，
 // 读者不会因为一条 1ms 改变任何判断，但每一条都会挤掉真正要读的命令。
 const notableElapsedMs = 3_000;
@@ -243,7 +329,10 @@ const toolPresentation = (entry: TraceEntry) => {
   const description = firstValue(data.input, ['description']) ?? (typeof data.description === 'string' ? data.description.trim() : undefined);
   let action = /^(?:tool|tool call)$/i.test(name) ? '工具调用' : name;
   let kind: TraceToolKind = 'tool';
-  const haystack = `${normalized} ${command ?? ''}`;
+  // 分类只看命令的第一段管道。`lark-cli im +chat-messages-list --help 2>&1 | head -60`
+  // 这一步做的是查参数说明，末尾的 head 只是把输出截短；按整条命令匹配时那个 head 会把
+  // 它判成「读取文件」，于是图标和分类名一起指向一件没发生的事。
+  const haystack = `${normalized} ${stripEnvAssignments(command ?? '').split('|')[0] ?? ''}`;
   if (/\b(?:apply_patch|patch|edit|write|replace|create_file)\b/.test(haystack)) { action = '修改文件'; kind = 'edit'; }
   else if (/\b(?:read|cat|head|tail|sed\s+-n|open_file)\b/.test(haystack)) { action = '读取文件'; kind = 'read'; }
   else if (/\b(?:rg|grep|find|search|glob|query)\b/.test(haystack)) { action = '搜索内容'; kind = 'search'; }
@@ -253,8 +342,17 @@ const toolPresentation = (entry: TraceEntry) => {
   else if (/\b(?:sqlite|sql|database|postgres|mysql)\b/.test(haystack)) { action = '查询数据'; kind = 'data'; }
   else if (/\b(?:agent|spawn|delegate|group\s+(?:self|peers|messages|send|wait))\b/.test(haystack)) { action = 'Agent 协作'; kind = 'agent'; }
   else if (command || /shell|bash|terminal|exec|command/.test(normalized)) { action = '运行命令'; kind = 'command'; }
-  const fullDetail = redactTraceText(command ?? url ?? path ?? (/^(?:tool|tool call)$/i.test(name) ? '' : name));
-  const detail = truncateInline(fullDetail);
+  // 文件路径留最后两段：`/home/user/.claude/skills/lark-shared/SKILL.md` 前面那几层目录
+  // 对聊天里的读者没有可操作性，却占掉标题一大半，把文件名挤到截断线外。留两段而不是
+  // 只留文件名，是因为 `SKILL.md`、`index.ts` 这类名字在一个仓库里能有几十份，
+  // 上一层目录往往正是区分它们的那一段。完整路径仍由展开区的输入保留。
+  // 只削文件，不削目录——cwd 的最后一段是它唯一的内容，削成 `repo` 就什么都没剩下。
+  const filePath = firstValue(data.input, ['path', 'file_path']);
+  const shortPath = path && path === filePath
+    ? path.split('/').filter(Boolean).slice(-2).join('/') || path
+    : path;
+  const fullDetail = redactTraceText(command ?? url ?? shortPath ?? (/^(?:tool|tool call)$/i.test(name) ? '' : name));
+  const detail = truncateInline(stripEnvAssignments(fullDetail));
   // 标题已经完整展示了唯一的输入字段时，展开区里的「输入」只是把同一条内容再用
   // JSON 包一层：三行括号讲一件标题上已经写着的事。只有输入里还有标题没覆盖的字段，
   // 或标题被截断（fullDetail !== detail）时，展开才有内容可看。
@@ -262,7 +360,6 @@ const toolPresentation = (entry: TraceEntry) => {
   // 字段名必须在白名单内，因为隐藏输入会连字段名一起隐藏。cwd 就是反例：
   // `{cwd:'/srv/repo'}` 的标题是「运行命令 /srv/repo」，把工作目录读成了被执行的命令，
   // 此时那层 JSON 是唯一能说清「这是 cwd」的东西，不能省。
-  const selfEvidentInputKeys = new Set(['command', 'cmd', 'path', 'file_path', 'url', 'href']);
   const inputEntries = data.input && typeof data.input === 'object' && !Array.isArray(data.input)
     ? Object.entries(data.input as Record<string, unknown>)
     : [];
@@ -292,7 +389,11 @@ const toolPresentation = (entry: TraceEntry) => {
     selfEvidentDetail,
     fullDetail,
     titleCoversInput,
-    input: truncateTrace(data.input, 250),
+    // 顺序不能反：redactTraceValue 里那条「字段名命中就整值替换」的规则（sensitiveTraceKey）
+    // 只在对象形态下生效。先拍成文本再脱敏的话，它就退化成纯文本正则——而文本正则的值形状
+    // 停在第一个空白或逗号处，`{password:'S3cret Pass Phrase'}` 会漏出 `Pass Phrase`，
+    // 数组形态的 `{access_token:[...]}` 会漏掉除第一个以外的全部元素。
+    input: truncate(readableInput(redactTraceValue(data.input)), 250),
     output: truncateTrace(data.output, 450)
   };
 };
@@ -301,25 +402,55 @@ export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTrace(eve
   (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '执行中'
 );
 
-type StageRecord = { kind: 'tool'; entry: TraceEntry } | { kind: 'terminal'; entries: TraceEntry[] };
+type StageRecord = { kind: 'tool'; entry: TraceEntry } | { kind: 'terminal'; entries: TraceEntry[]; text: string };
 
 // 终端回显不是工具调用。把每一条 raw_terminal 都套成工具，会得到一排完全相同、
 // 零信息量的「运行命令 · terminal」标题，真正的输出反而被压进折叠层——一次翻页拉取
 // 就是 18 个同名面板。连续回显合并成一段终端输出，由一个折叠面板承载全部内容。
-const stageRecords = (actions: TraceEntry[]): StageRecord[] => {
+const stageRecords = (actions: TraceEntry[], keepScreenFallback = false): StageRecord[] => {
   const records: StageRecord[] = [];
+  // 屏幕流是兜底，不是第二份执行记录。pty-driver 同时发两路：transcript 解析出的
+  // 结构化 tool_call/tool_result，和「永不丢」的整屏快照（driver.ts:42-48）。两路讲的是
+  // 同一批事实——一次 Bash 调用，结构化那份是命令加结果两行，屏幕那份是几十帧带 TUI
+  // 边框的重绘。同一个阶段里两者都在时只留结构化的那份；阶段里一个工具记录都没有
+  // （transcript 缺席或中途断开）时仍然渲染屏幕流，否则那个阶段会变成一片空白。
+  const hasStructuredTools = actions.some(entry => entry.type === 'tool_call' || entry.type === 'tool_result');
+  // 例外：任务已经收尾，工具却还停在「执行中」——结果永远不会来了。CLI 崩了、卡在交互
+  // 授权、鉴权失败都是这个形状，而结构化记录此时只有一行「执行中」，一个字的原因都没有。
+  // 屏幕上那几行是唯一说得清原因的东西，这时必须留。运行态不走这条：那时「还没拿到结果」
+  // 是正常的，留下屏幕流就等于把 TUI 录像原样搬回卡片。
+  const awaitingResultForever = keepScreenFallback && actions.some(entry =>
+    (entry.type === 'tool_call' || entry.type === 'tool_result')
+    && toolPresentation(entry).statusLabel === '执行中');
   for (const entry of actions) {
     if (entry.type === 'raw_terminal') {
+      if (hasStructuredTools && !awaitingResultForever) continue;
       // PTY 每吐一个提示符就是一条纯空白回显。它们不值得占一个面板，也不该被算进条数。
       if (!String(entry.data.text ?? '').trim()) continue;
       const last = records.at(-1);
       if (last?.kind === 'terminal') last.entries.push(entry);
-      else records.push({ kind: 'terminal', entries: [entry] });
+      else records.push({ kind: 'terminal', entries: [entry], text: '' });
       continue;
     }
     if (entry.type === 'tool_call' || entry.type === 'tool_result') records.push({ kind: 'tool', entry });
   }
-  return records;
+  // 合并、脱敏和去装饰都在这里做完，面板只负责显示。整屏快照里可能一行正文都没有
+  // （一屏全是状态栏和转圈动画），那样的记录不能留下一个点开是空的折叠箭头。
+  //
+  // 拼完再脱敏，不能逐条脱敏后拼接：stderr 是逐行发事件的，一份多行私钥必然被切成多条，
+  // 逐条脱敏时只有带 BEGIN 标记的那条被替换，密钥体所在的几条一个规则都不命中，会原样
+  // 进群消息。代价是一条含 BEGIN 字样、又没等到 END 的输出会把后面的内容一起吞成
+  // [REDACTED_PRIVATE_KEY]——宁可让读者去 Web 看全文，不能漏密钥。
+  return records.filter(record => {
+    if (record.kind !== 'terminal') return true;
+    // 先滤装饰再合并，顺序不能反：破坏帧间重叠的正是那几行每帧都在变的装饰（转圈动画、
+    // 带秒数的状态栏）。它们留在帧里时，新帧与尾部的重叠会掉到 0，整屏被原样再追加一遍
+    // ——合并等于没做。实测同一块屏幕的 5 帧，先合并后滤会让正文重复 5 次。
+    record.text = redactTraceText(mergeTerminalFrames(
+      record.entries.map(entry => stripTerminalChrome(String(entry.data.text ?? '')))
+    )).trim();
+    return Boolean(record.text);
+  });
 };
 
 // 头尾都要保留：命令回显和第一条报错在开头，当前进度在结尾，中间是翻页噪声。
@@ -340,20 +471,17 @@ const clipTerminalText = (text: string) => {
     : `…（已省略中间 ${middle.length} 个字符）`;
   return [text.slice(0, terminalHeadLimit), notice, ...alerts, text.slice(-terminalTailLimit)].join('\n');
 };
-const terminalPanel = (entries: TraceEntry[], index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement => {
-  // 拼完再脱敏，不能逐条脱敏后拼接。stderr 是逐行发事件的，一份多行私钥必然被切成
-  // 多条：逐条脱敏时只有带 BEGIN 标记的那一条被替换，密钥体所在的那几条一个规则都不
-  // 命中，会原样进群消息。代价是一条含 BEGIN 字样、又没等到 END 的输出会把它后面的
-  // 内容一起吞成 [REDACTED_PRIVATE_KEY]——宁可让读者去 Web 看全文，不能漏密钥。
-  const text = redactTraceText(entries.map(entry => String(entry.data.text ?? '')).join('\n')).trim();
-  const clipped = clipTerminalText(text);
+const terminalPanel = (record: Extract<StageRecord, { kind: 'terminal' }>, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement => {
+  const clipped = clipTerminalText(record.text);
   return {
     tag: 'collapsible_panel', element_id: `trace_tool_${index}`, expanded: false,
     direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin,
     header: {
       title: {
         tag: 'markdown',
-        content: entries.length > 1 ? `终端输出（${entries.length} 条）` : '终端输出',
+        // 不写条数：合并去重之后它与面板里实际有多少内容再无关系。40 帧同一块屏幕会
+        // 合并成几行，标题却写着「40 条」，读者会以为剩下的被省略了。
+        content: '终端输出',
         text_size: 'notation',
         icon: { tag: 'standard_icon', token: toolIcon('command'), color: 'grey' }
       },
@@ -365,7 +493,7 @@ const terminalPanel = (entries: TraceEntry[], index: string | number, margin = '
 };
 
 const stageRecordPanel = (record: StageRecord, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement =>
-  record.kind === 'terminal' ? terminalPanel(record.entries, index, margin) : toolPanel(record.entry, index, margin);
+  record.kind === 'terminal' ? terminalPanel(record, index, margin) : toolPanel(record.entry, index, margin);
 
 const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 0px 20px'): LarkCardElement => {
   const tool = toolPresentation(entry);
@@ -381,13 +509,20 @@ const toolPanel = (entry: TraceEntry, index: string | number, margin = '0px 0px 
   const headline = description
     || (tool.selfEvidentDetail ? detail : '')
     || escapeCardInline(truncateInline(tool.action, 72));
-  const detailSuffix = detail && detail !== headline ? `　<font color='grey'>${detail}</font>` : '';
+  // 描述已经用人话说清这一步在做什么，后面再拼一段命令只是把同一件事用机器语言重讲，
+  // 而它通常比描述长得多——标题被撑成两行，真正要读的那半句反倒退到第一行末尾。
+  // 命令不会丢：它就在展开区的输入里。没有描述时命令仍要留在标题上，那时它是唯一线索。
+  const detailSuffix = detail && detail !== headline && !description ? `　<font color='grey'>${detail}</font>` : '';
   const elapsedSuffix = tool.elapsed ? `　<font color='grey'>${tool.elapsed}</font>` : '';
   // 成功是默认预期。每条都点一个绿灯，等于把「没有异常」重复 N 遍，
   // 还会让真正需要人看的那一个失败灯淹在同色的一排里。只有失败和执行中值得占这个位置。
   const stateLamp = tool.indicatorColor === 'trace_success' ? '' : `<font color='${tool.indicatorColor}'>●</font>　`;
   // 零参工具的 input 会被序列化成 `{}`，那是个真值但没有内容——展开只会看到一对括号。
-  const showInput = Boolean(tool.input) && !['{}', '[]'].includes(tool.input) && !tool.titleCoversInput;
+  // titleCoversInput 的前提是「标题上写的就是那个唯一的输入字段」。description 占了标题
+  // 时这个前提不成立，必须把输入放出来——否则 `{command:'pnpm install'}` 配一句「安装依赖」
+  // 会让命令既不在标题也不在展开区，上面那句「命令就在展开区的输入里」会落空。
+  const showInput = Boolean(tool.input) && !['{}', '[]'].includes(tool.input)
+    && (!tool.titleCoversInput || Boolean(description));
   const parts: Array<{ label: string; text: string }> = [];
   // 标题被截断且没有输入区兜底时，展开区必须还能拿到完整命令。
   if (tool.fullDetail && tool.fullDetail !== tool.detail && !showInput) parts.push({ label: '完整内容', text: tool.fullDetail });
@@ -444,9 +579,10 @@ const historyGroupPanel = (
   group: TraceGroup,
   index: number,
   showElapsed = false,
-  expanded = false
+  expanded = false,
+  keepScreenFallback = false
 ): LarkCardElement => {
-  const records = stageRecords(group.actions);
+  const records = stageRecords(group.actions, keepScreenFallback);
   const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
   const statuses = tools.map(entry => toolPresentation(entry));
   const failedCount = statuses.filter(item => item.statusLabel === '失败').length;
@@ -464,8 +600,15 @@ const historyGroupPanel = (
   const narrativeText = assistantNarrative?.data.text ? redactTraceText(String(assistantNarrative.data.text)).trim() : '';
 
   const primaryTool = statuses[0];
+  // 阶段标题是收起态唯一露出来的一行，它要回答的是「这一步在干什么」，不是「敲了什么命令」。
+  // Agent 自己的旁白最好，其次是工具自带的描述——真实会话里 86–94% 的工具调用都带着一句
+  // 中文描述（「拉取群内 9月8日以来的全部消息」），此前却一直被跳过，标题退化成
+  // 「读取文件 · lark-cli im +chat-messages-list --chat-id oc_f34138…」：分类名重复了左边的
+  // 图标，命令被截断在参数中间，三个不同的阶段因此渲染出三行几乎一样的标题。
+  // 命令留在展开区，那里才是查细节的地方。
   const mainTitle = narrativeText
-    || (primaryTool ? `${primaryTool.action}${primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : '')
+    || primaryTool?.description
+    || (primaryTool ? `${primaryTool.action}${primaryTool.selfEvidentDetail && primaryTool.detail ? ` · ${primaryTool.detail}` : ''}` : '')
     || (records.some(record => record.kind === 'terminal') ? '终端输出' : '')
     || (group.narratives.some(e => e.type === 'thinking') ? '分析与规划' : '执行过程');
 
@@ -552,11 +695,12 @@ const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardEle
   const toolPresentations = tools.map(toolPresentation);
   const primaryTool = toolPresentations[0];
 
-  // 没有旁白时只写分类名。detail 就是紧挨着的那行工具摘要的内容，工具行改成直接写真实
-  // 命令之后，再拼一次等于同一条命令连着出现两行。分类名反倒是工具行没有的那半句。
+  // 没有旁白时用工具自带的描述，再没有才落到分类名。detail 不参与：它就是紧挨着的那行
+  // 工具摘要的内容，再拼一次等于同一条命令连着出现两行。
   const currentTitle = narrativeText
     ? truncateInline(narrativeText, 92)
-    : (primaryTool ? primaryTool.action : '正在执行…');
+    : (primaryTool?.description ? truncateInline(primaryTool.description, 92)
+      : primaryTool ? primaryTool.action : '正在执行…');
 
   const failedCount = toolPresentations.filter(item => item.statusLabel === '失败').length;
   const succeededCount = toolPresentations.filter(item => item.statusLabel === '已完成').length;
@@ -736,7 +880,7 @@ export function renderLarkCardElements(
     if (completed) {
       if (omittedGroupCount) elements.push(traceOmissionElement(omittedGroupCount, '0px 0px 4px 0px'));
       const expanded = config.hideTraceOnComplete === false;
-      elements.push(...groups.map((group, index) => historyGroupPanel(group, index, false, expanded)));
+      elements.push(...groups.map((group, index) => historyGroupPanel(group, index, false, expanded, true)));
     } else {
       const historyGroups = groups.slice(0, -1);
       const currentGroup = groups.at(-1)!;
