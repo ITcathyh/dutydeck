@@ -64,6 +64,16 @@ describe('TerminalSnapshot', () => {
     snap.dispose();
   });
 
+  it('viewportText keeps a bare composer prompt and a selected menu entry', async () => {
+    const snap = new TerminalSnapshot(80, 8);
+    snap.write('Quick safety check:\r\n❯ Yes, I trust this folder\r\n❯\u00a0');
+    await flush();
+    expect(snap.text()).not.toContain('❯');
+    expect(snap.viewportText()).toContain('❯ Yes, I trust this folder');
+    expect(snap.viewportText()).toContain('❯');
+    snap.dispose();
+  });
+
   it('collapses runs of spaces left by box-drawing cleanup', async () => {
     const snap = new TerminalSnapshot(80, 10);
     snap.write('┌────┐\r\n│ hi │\r\n└────┘');

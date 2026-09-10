@@ -327,6 +327,15 @@ describe('Lark card layout renderer->bound->build integration', () => {
     expect(byId(failedCard, 'evidence').content).not.toContain('3 个步骤');
   });
 
+  it('does not add a generic missing-result instruction when a concrete error is present', () => {
+    const elements = renderLarkCardElements([
+      makeEvent(1, 'error', { message: 'Claude 启动尚未就绪，请打开终端处理启动确认后再发送任务。' }),
+    ], config, true);
+    const card = buildLarkCard({ state: 'failed', elements });
+    expect(byId(card, 'execution_alert_0').content).toContain('Claude 启动尚未就绪');
+    expect(byId(card, 'result_missing')).toBeUndefined();
+  });
+
   it('5. process vs result view separation: process has no final_output/evidence, result has no trace', () => {
     const longConclusion = '详细执行报告：\n' + 'line '.repeat(1000);
     const events: AgentEvent[] = [

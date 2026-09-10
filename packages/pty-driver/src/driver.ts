@@ -201,26 +201,32 @@ export class PtyCliDriver implements AgentDriver {
       const prefix = block ? `${block.replace(/\n$/, '')}\n${marker}` : marker;
       finalPrompt = `${prefix}\n${finalPrompt}`;
     }
-    this.turnActive = true;
-    this.turnHasOutput = false;
-    this.turnStartedAt = Date.now();
-    this.awaitingRecoveryTranscript = false;
-    this.idleDetector?.reset();
-    const completion = new Promise<void>((resolve, reject) => {
-      this.turnResolve = resolve;
-      this.turnReject = reject;
-    });
-    // send() normally returns this promise after writeInput settles. If the
-    // write itself rejects first, though, send() throws that write error and
-    // no caller can yet hold `completion`; consume that parallel rejection so
-    // it never becomes an unhandled process-level rejection.
-    void completion.catch(() => {});
     const writeCancelled = new Promise<never>((_, reject) => {
       this.turnWriteReject = reject;
     });
     const submission = { cancelError: undefined as Error | undefined };
     this.activeSubmission = submission;
+    let completion: Promise<void> | undefined;
     try {
+      // Startup confirmation is outside a turn: a static confirmation menu
+      // must never be mistaken for an idle, completed agent response.
+      if (isFirstPrompt && this.adapter.prepareInput) {
+        await Promise.race([this.adapter.prepareInput(this.submissionBackend(submission), this.sessionContext()), writeCancelled]);
+      }
+      this.turnActive = true;
+      this.turnHasOutput = false;
+      this.turnStartedAt = Date.now();
+      this.awaitingRecoveryTranscript = false;
+      this.idleDetector?.reset();
+      completion = new Promise<void>((resolve, reject) => {
+        this.turnResolve = resolve;
+        this.turnReject = reject;
+      });
+      // send() normally returns this promise after writeInput settles. If the
+      // write itself rejects first, though, send() throws that write error and
+      // no caller can yet hold `completion`; consume that parallel rejection so
+      // it never becomes an unhandled process-level rejection.
+      void completion.catch(() => {});
       // Register the completion waiter before writeInput: an in-memory/mock
       // backend may synchronously emit a completion marker from write().
       await Promise.race([this.adapter.writeInput(this.submissionBackend(submission), finalPrompt), writeCancelled]);
@@ -259,7 +265,7 @@ export class PtyCliDriver implements AgentDriver {
 
     // 与 AcpxAdapter 语义对齐：send() 等本轮结束（completed）才 resolve，
     // runtime 在 send resolve 后立即判定终态。driver 退出则 reject。
-    return completion;
+    return completion!;
   }
 
   checkpoint(): DriverTurnRecovery | undefined {
@@ -790,6 +796,12 @@ export class PtyCliDriver implements AgentDriver {
     };
     const proxy: PtyLike = {
       write: data => guarded(() => target.write(data)),
+      // tmux can synchronously capture the pane. Prefer that authoritative
+      // current render over its asynchronous pipe-pane/tail mirror while a
+      // startup dialog is deciding whether it may accept any input.
+      readScreen: () => guarded(() => target.captureCurrentScreen
+        ? target.captureCurrentScreen() ?? ''
+        : this.snapshot?.viewportText() ?? ''),
     };
     if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text));
     if (target.sendSpecialKeys) proxy.sendSpecialKeys = (...keys) => guarded(() => target.sendSpecialKeys!(...keys));
@@ -798,7 +810,10 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private cancelActiveSubmission(error: Error): void {
-    if (this.activeSubmission) this.cancelSubmission(this.activeSubmission, error);
+    if (this.activeSubmission) {
+      this.cancelSubmission(this.activeSubmission, error);
+      this.activeSubmission = undefined;
+    }
   }
 
   private cancelSubmission(submission: { cancelError?: Error }, error: Error): void {

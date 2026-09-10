@@ -220,6 +220,38 @@ tmuxDescribe('TmuxBackend', () => {
     await waitFor(() => TmuxBackend.probeSession(name) === 'missing', 30000);
   }, 120000);
 
+  it('sends named special keys through tmux instead of literal escape text', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-tmux-keys-'));
+    const fixture = join(root, 'keys.mjs');
+    writeFileSync(fixture, [
+      "process.stdin.setRawMode?.(true);",
+      "process.stdout.write('\\x1b[?1hKEYS_READY\\n');",
+      "process.stdin.on('data', data => process.stdout.write('KEY:' + JSON.stringify(data.toString()) + '\\n'));",
+      'setInterval(() => {}, 1000);',
+    ].join('\n'));
+    const name = newSessionName();
+    sessions.push(name);
+    backend = new TmuxBackend(name);
+    const received: string[] = [];
+    backend.onData(data => received.push(data));
+    try {
+      backend.spawn(process.execPath, [fixture], {
+        cwd: root, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+      });
+      await waitFor(() => received.join('').includes('KEYS_READY'));
+      expect(backend.sendSpecialKeys('Down', 'Enter')).toBe(true);
+      await waitFor(() => received.join('').includes('KEY:'));
+      const keys = received.join('');
+      // Application cursor mode makes tmux encode Down as ESC O B. A literal
+      // fallback would be ESC [ B and Claude would treat it as text/cancel.
+      expect(keys).toContain('KEY:"\\u001bOB\\r"');
+      expect(keys).not.toContain('KEY:"\\u001b[B');
+    } finally {
+      backend.kill();
+      rmSync(root, { recursive: true, force: true });
+    }
+  }, 60000);
+
   it('injects session-scoped env without leaking it into the tmux server global env', async () => {
     const name = newSessionName();
     sessions.push(name);

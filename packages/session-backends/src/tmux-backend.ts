@@ -331,6 +331,20 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
+  /** Send tmux key names (for example Down or Enter), never literal escape
+   * bytes. Applications in cursor-key mode distinguish these from text sent
+   * through write(), which is intentionally limited to literal paste input. */
+  sendSpecialKeys(...keys: string[]): boolean {
+    if (this.exited || !this.started || keys.length === 0) return false;
+    try {
+      runTmux(['send-keys', '-t', this.sessionName, ...keys]);
+      return true;
+    } catch (err) {
+      if (err instanceof TmuxSessionMissingError) this.handlePaneExit();
+      return false;
+    }
+  }
+
   interrupt(): void {
     if (this.exited) return;
     try { runTmux(['send-keys', '-t', this.sessionName, 'C-c']); } catch { /* best effort */ }
