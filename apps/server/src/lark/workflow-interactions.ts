@@ -121,9 +121,18 @@ export class LarkWorkflowInteractions {
     this.delivering.add(record.id);
     const elements: LarkCardElement[] = [
       { tag: 'div', text: { tag: 'plain_text', content: question.slice(0, 6000) } },
+      // 正文只写读者做决定时需要知道的东西：授权范围（permission）、怎么答（ask）。
+      // 原先还各带一份完整 slash 指令，`/approve wf_01H…` 里那串请求编号在 permission 卡上
+      // 出现两次，正下方就是「批准一次 / 拒绝」两个按钮——对能点按钮的人是三行纯噪声。
+      //
+      // 编号因此不再出现在任何卡片正文里，按钮失灵时的备用路径改成「引用这张卡 + /approve」：
+      // routeWorkflow 组装 requestId 时，没有显式编号就回落到被引用卡片的 id。删掉编号
+      // 而不做那个回落，等于把这条备用路径一起删掉——命令会以「请填写请求编号」失败，
+      // 而那个编号已经没有任何卡会显示。
+      // 命令本身的可发现性由 `/help` 承担（commands.ts:173-175 已列出三条命令及其用法）。
       { tag: 'markdown', content: kind === 'ask'
-        ? `回复此卡片，或发送 \`/answer ${record.id} 你的回答\`。`
-        : `仅对本次工具调用生效。也可发送 \`/approve ${record.id}\` 或 \`/reject ${record.id}\`。` },
+        ? '回复此卡片即可回答。'
+        : '仅对本次工具调用生效。' },
       ...(kind === 'permission' ? [button(record, 'approve', '批准一次'), button(record, 'reject', '拒绝')] : [])
     ];
     try {

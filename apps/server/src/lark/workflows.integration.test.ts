@@ -273,6 +273,18 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.completed();
   });
 
+  it('approves by quoting the permission card, whose request id is no longer printed anywhere', async () => {
+    const h = await harness('permission');
+    await h.coordinator.handle(event('om_task', '修改实现'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    const request = (await h.interactions()).find(item => item.kind === 'permission')!;
+    // 审批卡正文不再带 `/approve <编号>`，编号在卡上任何位置都不显示，所以「引用那张卡 +
+    // 无参 /approve」是按钮失灵时唯一还走得通的路径：requestId 必须从引用关系回落取到。
+    await h.coordinator.handle(event('om_quoted_approve', '/approve', { parentId: request.cardId, mentions: [] }), h.config);
+    expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', true);
+    await h.completed();
+  });
+
   it('rejects revoked members and old cards after coordinator recreation', async () => {
     const h = await harness('permission');
     await h.coordinator.handle(event('om_task', '等待批准'), h.config);

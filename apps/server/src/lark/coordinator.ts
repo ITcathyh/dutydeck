@@ -199,7 +199,7 @@ export class LarkMessageCoordinator {
       await this.inbox!.update(record, { state: 'failed', error: '重启后无法确认命令是否完成；如未生效，请重新发送。' });
       const actor = record.event.senderOpenId;
       if (actor && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
-        await this.workflowReply(record.event, config, '重启后无法确认这条命令是否完成。如结果未生效，请重新发送该命令。').catch(error => this.log.warn({ error }, '命令恢复回执发送失败'));
+        await this.workflowReply(record.event, config, '重启后无法确认这条命令是否完成。如结果未生效，请重新发送该命令。', { failed: true }).catch(error => this.log.warn({ error }, '命令恢复回执发送失败'));
       }
     }
     for (const record of await this.inbox?.recoverable(config.appId) ?? []) {
@@ -292,9 +292,21 @@ export class LarkMessageCoordinator {
       taskId: task.runtimeTaskId, turn: task.turn, event: task.event } : undefined;
   }
 
-  private async workflowReply(event: LarkMessageEvent, config: StoredLarkConfig, markdown: string, elements?: LarkCardElement[]) {
-    await sendTaskCard(this.service, event, { taskId: event.messageId, taskName: '任务操作', state: 'completed', readOnly: true,
-      permissionMode: larkPermissionMode(config), markdown, ...(elements ? { elements } : {}),
+  /**
+   * 任务操作类命令的回执。
+   *
+   * `failed` 必须由调用方按语义传：这里原先写死 `state: 'completed'`，于是拒绝、报错和
+   * 「命令可能没生效」的警告都顶着绿色色带和「已完成」发出去——读者看到的颜色和文字
+   * 说的是相反的事。同文件的 replyCard 一直是按语义分的（见其 options.failed）。
+   */
+  private async workflowReply(
+    event: LarkMessageEvent, config: StoredLarkConfig, markdown: string,
+    options: { elements?: LarkCardElement[]; failed?: boolean; taskName?: string } = {}
+  ) {
+    await sendTaskCard(this.service, event, {
+      taskId: event.messageId, taskName: options.taskName ?? '任务操作',
+      state: options.failed ? 'failed' : 'completed', readOnly: true,
+      permissionMode: larkPermissionMode(config), markdown, ...(options.elements ? { elements: options.elements } : {}),
       idempotencyKey: `workflow_reply_${event.messageId}`.slice(0, 50) }, this.log);
   }
 
@@ -335,11 +347,11 @@ export class LarkMessageCoordinator {
     const names = ['tasks', 'answer', 'approve', 'reject'];
     if (!quoted && (!parsed || !names.includes(parsed.name))) return false;
     if (event.senderType === 'app' || event.senderType === 'bot') {
-      await this.workflowReply(event, config, '任务操作需由人类成员发起。'); return true;
+      await this.workflowReply(event, config, '任务操作需由人类成员发起。', { failed: true }); return true;
     }
     try {
       if (parsed?.name === 'tasks') {
-        await this.workflowReply(event, config, '任务导航', await this.taskDashboard(event, config, Number(parsed.args[0] ?? 1))); return true;
+        await this.workflowReply(event, config, '', { taskName: '任务导航', elements: await this.taskDashboard(event, config, Number(parsed.args[0] ?? 1)) }); return true;
       }
       if (quoted?.kind === 'result' && prompt.trim() === '验收通过') {
         const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'accept' });
@@ -363,13 +375,16 @@ export class LarkMessageCoordinator {
       }
       const action = parsed && ['answer', 'approve', 'reject'].includes(parsed.name) ? parsed.name as 'answer' | 'approve' | 'reject' : 'answer';
       if (quoted && quoted.kind !== 'ask' && action === 'answer') throw new LarkServiceError('LARK_APPROVAL_EXPLICIT', '审批请使用按钮或明确的 /approve、/reject 命令。', 400);
-      const requestId = parsed && names.includes(parsed.name) ? parsed.args[0] : quoted?.id;
-      if (!requestId) throw new LarkServiceError('LARK_REQUEST_REQUIRED', '请填写问题卡上显示的请求编号。', 400);
+      // 显式编号优先，其次回落到被引用的那张卡。请求编号不再印在卡片正文里
+      // （审批卡下方就是按钮，编号对能点按钮的人是噪声），所以「引用那张卡 + /approve」
+      // 必须能走通——否则删掉编号就等于删掉了按钮失灵时的唯一备用路径。
+      const requestId = (parsed && names.includes(parsed.name) ? parsed.args[0] : undefined) ?? quoted?.id;
+      if (!requestId) throw new LarkServiceError('LARK_REQUEST_REQUIRED', '请回复要处理的那张卡片，或直接用卡片上的按钮。', 400);
       const answer = parsed?.name === 'answer' ? parsed.argsText.slice(parsed.args[0]?.length ?? 0).trim() : prompt;
       const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId, action, answer });
       await this.workflowReply(event, config, result);
     } catch (error) {
-      await this.workflowReply(event, config, error instanceof Error ? error.message : String(error));
+      await this.workflowReply(event, config, error instanceof Error ? error.message : String(error), { failed: true });
     }
     return true;
   }

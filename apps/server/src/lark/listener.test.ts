@@ -2149,7 +2149,7 @@ describe('Lark trace rendering', () => {
     expect(elements[0]?.content).toBe('高危操作：删除缓存目录');
     // 不加粗：title 是 agent 侧内容，可能自带 ** 或换行，包起来会渲染出字面星号。
     expect(elements[0]?.content).not.toContain('**');
-    // 不写 /approve：那个命令要带请求编号，而编号只印在另一张审批卡上。
+    // 不写 /approve：编号不印在任何卡上（审批走按钮，或引用审批卡回一句无参 /approve）。
     // 也不承诺「稍后会收到审批卡」：带按钮的审批卡要 workflows 装配且 runtime 支持才会发，
     // Web 出口要配了 webBaseUrl 才有，渲染这一层两个条件都看不见。
     expect(elements[0]?.content).not.toContain('/approve');
