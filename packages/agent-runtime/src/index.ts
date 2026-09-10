@@ -840,7 +840,9 @@ export class DutydeckRuntime {
     const { session, driver } = await this.active(id);
     this.hardInterrupts.add(id);
     if (this.activeTurns.has(id)) this.interruptedTurns.add(id);
-    await driver?.stop();
+    // A terminal lookup can attach after active() read the map but before
+    // this continuation sets the stop fence.
+    await (this.drivers.get(id) ?? driver)?.stop();
     await this.waitForTurn(id);
     await this.cancelSessionQueue(id);
     this.releaseSessionMemory(id);

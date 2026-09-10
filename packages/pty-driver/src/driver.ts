@@ -584,13 +584,12 @@ export class PtyCliDriver implements AgentDriver {
           snapshot.capture(screen => {
             if (!local.has(forward) || !this.terminalSubscribers.has(forward)) return;
             if (snapshot !== this.snapshot) { pending.length = 0; capture(); return; }
-            onSnapshot(screen);
-            for (const data of pending) {
-              if (!local.has(forward)) return;
-              cb(data);
-            }
+            // These bytes were produced at the snapshot dimensions. Restore
+            // them in the same write before the browser fits its viewport.
+            const data = screen.data + pending.join('');
             pending.length = 0;
             ready = true;
+            onSnapshot({ ...screen, data });
           });
         };
         if (!ready) capture();
