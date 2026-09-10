@@ -11,6 +11,9 @@ const entry = (overrides: Partial<LarkTaskDashboardEntry> = {}): LarkTaskDashboa
 });
 
 const rows = (elements: Array<Record<string, any>>) => elements.filter(element => String(element.element_id ?? '').startsWith('task_row_'));
+const headerText = (elements: Array<Record<string, any>>) =>
+  String(elements.find(element => element.element_id === 'task_dashboard_header')?.content ?? '');
+const statusLine = (row: Record<string, any>) => rowText(row).split('\n')[1] ?? '';
 const rowText = (row: Record<string, any>) => String(row.columns?.[0]?.elements?.[0]?.text?.content ?? '');
 const rowButton = (row: Record<string, any>) => row.columns?.[1]?.elements?.[0];
 
@@ -79,10 +82,41 @@ describe('buildLarkTaskDashboard', () => {
 
     expect(Array.from(titleLine).length).toBeLessThanOrEqual(120);
     expect(titleLine).toContain('**危险**');
-    expect(summary).toContain('工作区：/');
-    expect(summary).toContain('更新时间：');
+    expect(headerText(result.elements)).toContain('工作区：/');
+    // 无法解析的时间戳不再被原样截断印出，而是收敛成一句话。
+    expect(statusLine(rows(result.elements)[0]!)).toContain('时间未知');
+    expect(summary).not.toContain('a'.repeat(20));
     expect(JSON.stringify(result.elements)).not.toContain('secret-task-id');
     expect(result.elements[3]?.tag).toBe('markdown');
+  });
+
+  it('renders update time as a relative age and lifts a shared workspace into the header', () => {
+    const now = Date.parse('2026-09-10T12:00:00.000Z');
+    const result = buildLarkTaskDashboard([
+      entry({ taskId: 'minutes', title: '分钟档', workspace: '/srv/app', updatedAt: '2026-09-10T11:19:00.000Z' }),
+      entry({ taskId: 'hours', title: '小时档', workspace: '/srv/app', updatedAt: '2026-09-10T09:00:00.000Z' }),
+      entry({ taskId: 'days', title: '天档', workspace: '/srv/app', updatedAt: '2026-09-08T12:00:00.000Z' })
+    ], 1, now);
+
+    expect(headerText(result.elements)).toContain('工作区：app');
+    expect(rows(result.elements).map(statusLine)).toEqual([
+      '已完成 · 41 分钟前', '已完成 · 3 小时前', '已完成 · 2 天前'
+    ]);
+    // 表头已经写了工作区，行内不再逐行重复。
+    for (const row of rows(result.elements)) expect(rowText(row)).not.toContain('工作区');
+  });
+
+  it('keeps the workspace on every row when tasks span more than one workspace', () => {
+    const now = Date.parse('2026-09-10T12:00:00.000Z');
+    const result = buildLarkTaskDashboard([
+      entry({ taskId: 'one', title: 'A', workspace: '/srv/one', updatedAt: '2026-09-10T11:59:30.000Z' }),
+      entry({ taskId: 'two', title: 'B', workspace: '/srv/two', updatedAt: '2026-09-10T11:59:00.000Z' })
+    ], 1, now);
+
+    expect(headerText(result.elements)).not.toContain('工作区');
+    expect(rows(result.elements).map(statusLine)).toEqual([
+      '已完成 · 刚刚 · one', '已完成 · 1 分钟前 · two'
+    ]);
   });
 
   it('adds an open_url button only for approved HTTPS Feishu or Lark applinks', () => {
@@ -119,10 +153,11 @@ describe('buildLarkTaskDashboard', () => {
 
     expect(rows(result.elements)).toHaveLength(10);
     expect(Buffer.byteLength(JSON.stringify(result.elements), 'utf8')).toBeLessThan(24 * 1024);
+    expect(Array.from(headerText(result.elements)).length).toBeLessThanOrEqual(160);
     for (const row of rows(result.elements)) {
       expect(Array.from(rowText(row).split('\n')[0] ?? '').length).toBeLessThanOrEqual(120);
-      expect(Array.from(rowText(row).split('\n')[1]?.replace('工作区：', '') ?? '').length).toBeLessThanOrEqual(120);
-      expect(Array.from(rowText(row).split('\n')[3]?.replace('更新时间：', '') ?? '').length).toBeLessThanOrEqual(64);
+      expect(Array.from(statusLine(row)).length).toBeLessThanOrEqual(160);
+      expect(rowText(row).split('\n')).toHaveLength(2);
     }
   });
 });

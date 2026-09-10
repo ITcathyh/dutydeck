@@ -17,7 +17,6 @@ export interface LarkTaskDashboardResult {
 const PAGE_SIZE = 10;
 const MAX_TITLE_CHARS = 120;
 const MAX_WORKSPACE_CHARS = 120;
-const MAX_UPDATED_AT_CHARS = 64;
 const MAX_URL_CHARS = 512;
 
 const waitingStatuses = new Set(['waiting_for_permission', 'waiting_for_answer', 'failed', 'interrupted']);
@@ -86,6 +85,24 @@ const timestamp = (value: unknown) => {
   return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
 };
 
+// 列表里读者只判断「新不新」，不核对时刻。相对时间同时省掉了「更新时间：」这个标签词：
+// 「41 分钟前」自己就说明了它是时间。超过 30 天退回日期，那时相对值已经失去分辨力。
+const relativeTime = (value: unknown, now: number) => {
+  const at = timestamp(value);
+  if (at === Number.NEGATIVE_INFINITY) return '时间未知';
+  const minutes = Math.floor((now - at) / 60_000);
+  if (minutes < 1) return '刚刚';
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days <= 30) return `${days} 天前`;
+  // Date 只接受 ±8.64e15；timestamp() 的数字串分支只挡了 Number.isFinite，
+  // 超范围值会让下一行抛 RangeError，把整张任务列表变成一句 Invalid time value。
+  if (Math.abs(at) > 8.64e15) return '时间未知';
+  return new Date(at).toISOString().slice(0, 10);
+};
+
 const validAppLink = (value: unknown) => {
   const candidate = typeof value === 'string' ? value.trim() : '';
   if (!candidate || candidate.length > MAX_URL_CHARS || /[\u0000-\u0020]/u.test(candidate)) return undefined;
@@ -103,17 +120,23 @@ const markdown = (elementId: string, content: string) => ({
   tag: 'markdown', element_id: elementId, content
 });
 
-const taskRow = (item: IndexedEntry, rowIndex: number) => {
+const escapeCardInline = (value: string) =>
+  value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorkspace?: string) => {
   const entry = item.entry;
   const title = compactText(entry.title, MAX_TITLE_CHARS, '未命名任务');
   const workspace = workspaceName(entry.workspace);
-  const updatedAt = compactText(entry.updatedAt, MAX_UPDATED_AT_CHARS, '未知');
   const feedback = entry.feedback ? ` · 验收：${({ pending: '待验收', accepted: '已通过', needs_changes: '需要修改' })[entry.feedback]}` : '';
-  const summary = `${title}\n工作区：${workspace}\n状态：${statusLabel(entry.status)}${feedback} · 更新时间：${updatedAt}`;
+  // 「状态：」「工作区：」这类标签词占了每行前四个字，而「等待审批」「dockmux」自己
+  // 就说明了自己是什么。全部任务在同一个工作区时（单机常态）它更是逐行重复同一个词，
+  // 这时提到表头写一次，行内只留真正逐行不同的东西。
+  const location = sharedWorkspace ? '' : ` · ${workspace}`;
+  const summary = `${title}\n${statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}`;
   const url = validAppLink(entry.url);
   const summaryElement = {
     tag: 'div',
-    text: { tag: 'plain_text', content: summary, lines: 4 },
+    text: { tag: 'plain_text', content: summary, lines: 3 },
     width: 'auto',
     margin: '0px'
   };
@@ -146,7 +169,8 @@ const validPage = (page: number) => Number.isFinite(page) && Number.isInteger(pa
 
 export function buildLarkTaskDashboard(
   entries: LarkTaskDashboardEntry[],
-  page = 1
+  page = 1,
+  now = Date.now()
 ): LarkTaskDashboardResult {
   const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
   const ordered = ([0, 1, 2] as DashboardGroup[]).flatMap(group => indexed
@@ -164,9 +188,16 @@ export function buildLarkTaskDashboard(
   }
 
   const pageEntries = ordered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE);
+  // 全部任务同在一个工作区时，工作区名从每一行提到表头。
+  const workspaces = new Set(ordered.map(item => workspaceName(item.entry.workspace)));
+  const sharedWorkspace = workspaces.size === 1 ? [...workspaces][0] : undefined;
+  // 不写「任务导航」标题：卡片 header 已经是这四个字（coordinator.ts 的 workflowReply
+  // 用 taskName: '任务导航' 发出这张卡），正文再写一遍就是紧挨着的两行同名标题。
   const elements: Array<Record<string, any>> = [markdown(
     'task_dashboard_header',
-    `**任务导航**\n第 ${currentPage}/${totalPages} 页，共 ${ordered.length} 项。`
+    [`第 ${currentPage}/${totalPages} 页，共 ${ordered.length} 项。`,
+      sharedWorkspace && `工作区：${escapeCardInline(sharedWorkspace)}`]
+      .filter(Boolean).join(' · ')
   )];
   let lastGroup: DashboardGroup | undefined;
   pageEntries.forEach((item, index) => {
@@ -175,7 +206,7 @@ export function buildLarkTaskDashboard(
       const groupCount = ordered.filter(candidate => candidate.group === item.group).length;
       elements.push(markdown(`task_dashboard_group_${item.group}`, `**${groupLabels[item.group]}**（${groupCount}）`));
     }
-    elements.push(taskRow(item, (currentPage - 1) * PAGE_SIZE + index));
+    elements.push(taskRow(item, (currentPage - 1) * PAGE_SIZE + index, now, sharedWorkspace));
   });
 
   const nextPage = currentPage < totalPages ? currentPage + 1 : 1;
