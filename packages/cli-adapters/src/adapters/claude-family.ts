@@ -12,6 +12,9 @@ import { buildDutydeckRoutingBlock } from '../shared-hints.js';
  */
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+const STARTUP_POLL_MS = 100;
+const STARTUP_TIMEOUT_MS = 30_000;
+const TRUST_KEY_RETRY_MS = 1_000;
 
 /** Claude 家族完成标记：`✳ Worked for 12s` 等耗时行。 */
 export const CLAUDE_FAMILY_COMPLETION_RE =
@@ -102,6 +105,91 @@ export function pushClaudeFamilyBypassArgs(args: string[], permissionMode: Adapt
   );
 }
 
+function isComposerScreen(screen: string): boolean {
+  const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
+  return lines.filter(line => line === '❯').length === 1
+    && lines.some(line => /Claude Code v\d/.test(line))
+    && !lines.some(line => /^(Accessing workspace:|Quick safety check:|Security guide|Enter to confirm)/.test(line))
+    && !lines.some(line => /^(?:❯\s*)?(?:No, exit|Yes, I trust this folder)$/.test(line));
+}
+
+function trustSelection(screen: string, cwd: string | undefined): 'No, exit' | 'Yes, I trust this folder' | undefined {
+  if (!cwd) return undefined;
+  const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
+  const workspaceIndexes = lines.reduce<number[]>((indexes, line, index) => {
+    if (line === 'Accessing workspace:') indexes.push(index);
+    return indexes;
+  }, []);
+  if (workspaceIndexes.length !== 1) return undefined;
+  const workspaceIndex = workspaceIndexes[0]!;
+  const prefix = lines.slice(0, workspaceIndex);
+  // capture-pane retains the top separator; the local xterm viewport removes
+  // box drawing, leaving no prefix. Neither path may contain other content.
+  if (!((prefix.length === 0) || (prefix.length === 1 && /^─+$/.test(prefix[0]!))) || lines[workspaceIndex + 1] !== cwd) return undefined;
+  const guideIndex = lines.indexOf('Security guide');
+  if (guideIndex < workspaceIndex + 3 || lines.lastIndexOf('Security guide') !== guideIndex) return undefined;
+  const explanation = lines.slice(workspaceIndex + 2, guideIndex).join(' ');
+  if (explanation !== 'Quick safety check: Is this a project you created or one you trust? '
+    + "(Like your own code, a well-known open source project, or work from your team). If not, take a moment to review what's in this folder first. "
+    + "Claude Code'll be able to read, edit, and execute files here."
+    || lines[guideIndex + 3] !== 'Enter to confirm · Esc to cancel'
+    || guideIndex + 4 !== lines.length) return undefined;
+  const choices = lines.slice(guideIndex + 1, guideIndex + 3).map(line => ({
+    label: line.replace(/^❯\s*/, ''), selected: line.startsWith('❯'),
+  }));
+  if (choices[0]!.label !== 'No, exit' || choices[1]!.label !== 'Yes, I trust this folder'
+    || choices.filter(choice => choice.selected).length !== 1) return undefined;
+  return choices.find(choice => choice.selected)!.label as 'No, exit' | 'Yes, I trust this folder';
+}
+/**
+ * Claude 2.1.267 may ask whether a newly-entered cwd is trusted even when
+ * bypass permissions is supplied. This is deliberately narrow: only the
+ * observed workspace-trust dialog for this exact cwd is accepted, and only
+ * full-trust is allowed to choose its affirmative option.
+ */
+export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSessionContext): Promise<void> {
+  if (!backend.readScreen) {
+    throw new Error('Claude startup confirmation requires a terminal screen reader');
+  }
+
+  const startedAt = Date.now();
+  let lastDownAt = -Infinity;
+  let lastEnterAt = -Infinity;
+  while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
+    const screen = backend.readScreen();
+    const selection = trustSelection(screen, ctx.cwd);
+    const trustScreen = selection !== undefined;
+
+    if (trustScreen && ctx.permissionMode !== 'full-trust') {
+      throw new Error('Claude 正在确认此目录是否可信，请通过终端确认目录后再发送任务。');
+    }
+
+    // The page can redraw while we poll. Never carry the authority granted
+    // by an earlier render into a different or partially-rendered dialog.
+    if (!trustScreen) {
+      if (isComposerScreen(screen)) return;
+      await delay(STARTUP_POLL_MS);
+      continue;
+    }
+
+    // Ink can discard a key while its first frame is still settling. Retry
+    // only the exact current trust selection, at a bounded cadence and only
+    // until this page disappears; do not reuse a historical selection.
+    const now = Date.now();
+    if (selection === 'No, exit' && now - lastDownAt >= TRUST_KEY_RETRY_MS) {
+      lastDownAt = now;
+      if (backend.sendSpecialKeys) backend.sendSpecialKeys('Down');
+      else backend.write('\x1b[B');
+    } else if (selection === 'Yes, I trust this folder' && now - lastEnterAt >= TRUST_KEY_RETRY_MS) {
+      lastEnterAt = now;
+      if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
+      else backend.write('\r');
+    }
+    await delay(STARTUP_POLL_MS);
+  }
+  throw new Error('Claude 启动尚未就绪，请打开终端处理启动确认后再发送任务。');
+}
+
 /** 建一个 Claude 家族适配器；三者只有 id 不同。 */
 export function createClaudeFamilyAdapter(id: string): CliAdapter {
   return {
@@ -136,6 +224,8 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     },
 
     writeInput: writeClaudeFamilyInput,
+
+    prepareInput: id === 'claude-code' ? prepareClaudeFamilyInput : undefined,
 
     buildResumeCommand(sessionId: string): string[] {
       return ['--resume', sessionId.replace(/^ses_/, '')];

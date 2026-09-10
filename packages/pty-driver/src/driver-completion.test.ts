@@ -20,6 +20,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
   let output: (data: string) => void;
   let events: NormalizedDriverEvent[];
   let transcript: string;
+  let submitted: boolean;
 
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -29,6 +30,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     transcript = join(project, 'completion-fixture.jsonl');
     writeFileSync(transcript, '');
     events = [];
+    submitted = false;
     const backend: SessionBackend = {
       kind: 'pty', spawn() {}, write() {}, resize() {}, kill() {}, onExit() {},
       onData(callback) { output = callback; },
@@ -38,10 +40,16 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
       agent: { id: 'claude-code', name: 'Claude', command: 'unused', args: [], protocol: 'pty-cli', cwd: directory,
         env: { CLAUDE_CONFIG_DIR: directory }, permissionMode: 'full-trust', timeout: 60,
         capabilities: { pause: false, resume: true }, builtin: false },
-      adapter: { ...createCliAdapter('claude-code'), writeInput() {} },
+      adapter: { ...createCliAdapter('claude-code'), writeInput() { submitted = true; } },
       backend, sessionId: 'ses_completion-fixture', onEvent: event => events.push(event), onExit() {}
     });
     await driver.start();
+    // Claude's first send now verifies the actual composer screen. This
+    // fixture begins after startup, so provide the same initial render a live
+    // Claude pane has before the tests paint their busy/final states.
+    output(repaint(`Claude Code v2.1.267\n${directory}\n────────────────\n❯ \n────────────────\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(250);
+    expect((driver as unknown as { snapshot?: { viewportText(): string } }).snapshot?.viewportText()).toContain('❯');
   });
 
   afterEach(async () => {
@@ -53,10 +61,15 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
   const answer = (file: string, text = finalText) => appendFileSync(file,
     JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'end_turn' } }) + '\n');
 
+  const waitForSubmission = async () => {
+    for (let attempt = 0; attempt < 10 && !submitted; attempt++) await Promise.resolve();
+    expect(submitted).toBe(true);
+  };
+
   it('keeps a streaming turn open across silent pauses and partial redraws, then delivers the whole answer', async () => {
     let settled = false;
     const pending = driver.send('总结消息').then(() => { settled = true; });
-    await Promise.resolve();
+    await waitForSubmission();
     answer(transcript, '等第 2 段返回。');
     output(repaint(`❯ 总结消息\n正文仍在输出\n\n\n\n${busyFooter}`));
     await vi.advanceTimersByTimeAsync(4_000);
@@ -78,7 +91,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
 
   it('flushes a final record written between the last poll and the completion timer', async () => {
     const pending = driver.send('总结消息');
-    await Promise.resolve();
+    await waitForSubmission();
     output(repaint(`✻ Cooked for 16m 55s\n❯\n${idleFooter}`));
     await vi.advanceTimersByTimeAsync(499);
     answer(transcript);
@@ -92,7 +105,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
 
   it('can still finish after interruption clears the busy footer without a duration marker', async () => {
     const pending = driver.send('总结消息');
-    await Promise.resolve();
+    await waitForSubmission();
     output(repaint(`❯ 总结消息\n\n${busyFooter}`));
     await vi.advanceTimersByTimeAsync(4_000);
     expect(events.some(event => event.type === 'completed')).toBe(false);
@@ -105,12 +118,15 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
 
   it('rechecks a vetoed idle when only the footer is cleared', async () => {
     const pending = driver.send('总结消息');
-    await Promise.resolve();
+    await waitForSubmission();
     output(repaint(`❯ 总结消息\n\n${busyFooter}`));
     await vi.advanceTimersByTimeAsync(4_000);
     expect(events.some(event => event.type === 'completed')).toBe(false);
     answer(transcript);
     output(`\x1b[3;1H\x1b[2K${idleFooter}`);
+    // xterm applies cursor-addressed redraws asynchronously. Flush this
+    // footer-only update before advancing the driver's quiescence window.
+    await vi.advanceTimersByTimeAsync(1);
     await vi.advanceTimersByTimeAsync(4_000);
     await pending;
     expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
@@ -119,7 +135,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
   it.each([120, 40])('distinguishes a quoted busy hint from the actual footer at %i columns', async cols => {
     driver.createTerminalStream().resize(cols, 30);
     const pending = driver.send('解释快捷键');
-    await Promise.resolve();
+    await waitForSubmission();
     output(repaint(`❯ 解释快捷键\n\n${busyFooter}`));
     await vi.advanceTimersByTimeAsync(4_000);
     expect(events.some(event => event.type === 'completed')).toBe(false);

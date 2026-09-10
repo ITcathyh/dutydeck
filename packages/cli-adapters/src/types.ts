@@ -26,6 +26,8 @@ export interface AdapterSessionContext {
 /** 后端写接口的最小表面（PtyBackend/TmuxBackend 都满足） */
 export interface PtyLike {
   write(data: string): void | boolean;
+  /** 当前终端已渲染的完整屏幕。仅需要在启动交互前确认状态的适配器使用。 */
+  readScreen?(): string;
   sendText?(text: string): void | boolean;
   sendSpecialKeys?(...keys: string[]): void | boolean;
   pasteText?(text: string): void;
@@ -45,6 +47,8 @@ export interface CliAdapter {
   buildArgs(ctx: AdapterSessionContext): string[];
   /** 把 prompt 写进后端（paste+Enter / 分块 stdin / runner 帧，因 CLI 而异） */
   writeInput(backend: PtyLike, prompt: string): void;
+  /** 首轮输入前处理 CLI 自己的、可安全识别的启动交互。 */
+  prepareInput?(backend: PtyLike, ctx: AdapterSessionContext): void | Promise<void>;
   /**
    * 恢复会话的续接参数片段（仅 resume 能力的适配器实现）。
    *

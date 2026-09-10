@@ -121,6 +121,15 @@ export class TerminalSnapshot {
     return readViewportText(this.terminal, { filter: true });
   }
 
+  /**
+   * Unfiltered viewport text for terminal interactions. Unlike text(), this
+   * retains a bare composer prompt and menu selections so callers can make a
+   * decision from the screen currently visible to the user.
+   */
+  viewportText(): string {
+    return readViewportText(this.terminal, { filter: false });
+  }
+
   /** Last non-empty logical line, joining physical rows wrapped by xterm. */
   lastLine(): string {
     const buffer = this.terminal.buffer.active;

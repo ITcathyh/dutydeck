@@ -868,7 +868,7 @@ export function renderLarkCardElements(
   elements.push(...errorEntries.map(errorAlert));
   if (finalText && view !== 'process') {
     elements.push({ tag: 'markdown', element_id: 'final_output', content: completed ? finalText : `**当前进展**\n\n${finalText}`, text_align: 'left', text_size: 'normal_v2', margin: '0px' });
-  } else if (completed && view !== 'process') {
+  } else if (completed && view !== 'process' && errorEntries.length === 0) {
     elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }
 
