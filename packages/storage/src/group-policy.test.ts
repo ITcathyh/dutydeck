@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REMOTE_FACT_EXPIRED_AT, type CreateRoleAssignmentInput } from '@dockmux/shared';
+import { REMOTE_FACT_EXPIRED_AT, type CreateRoleAssignmentInput } from '@dutydeck/shared';
 import { createRepositories } from './index.js';
 
 async function createBot(repositories: ReturnType<typeof createRepositories>, id = 'bot-1') {

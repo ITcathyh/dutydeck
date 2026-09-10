@@ -3,7 +3,7 @@
 export type ThemePreference = 'system' | 'light' | 'dark';
 export type ResolvedTheme = 'light' | 'dark';
 
-export const THEME_STORAGE_KEY = 'dockmux.theme';
+export const THEME_STORAGE_KEY = 'dutydeck.theme';
 export const themePreferences: ThemePreference[] = ['system', 'light', 'dark'];
 
 // 文案说明「这个选项会带来什么」，不用「切换」这类没有对象的抽象动词。

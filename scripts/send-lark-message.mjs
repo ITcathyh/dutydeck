@@ -10,7 +10,7 @@ const appId = required('LARK_APP_ID');
 const appSecret = required('LARK_APP_SECRET');
 const receiveId = required('LARK_RECEIVE_ID');
 const receiveIdType = process.env.LARK_RECEIVE_ID_TYPE?.trim() || 'email';
-const text = process.env.LARK_MESSAGE_TEXT?.trim() || 'Dockmux 飞书 OpenAPI 联调成功。';
+const text = process.env.LARK_MESSAGE_TEXT?.trim() || 'Dutydeck 飞书 OpenAPI 联调成功。';
 const baseUrl = (process.env.LARK_OPEN_API_BASE_URL?.trim() || 'https://open.feishu.cn').replace(/\/$/, '');
 const supportedReceiveIdTypes = new Set(['open_id', 'union_id', 'user_id', 'email', 'chat_id']);
 

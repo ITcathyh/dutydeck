@@ -20,7 +20,7 @@ function encrypt(bytes: Uint8Array, key: Uint8Array): Uint8Array {
   const cipher = createCipheriv('aes-256-gcm', key, iv);
   const ciphertext = Buffer.concat([cipher.update(bytes), cipher.final()]);
   const tag = cipher.getAuthTag();
-  return Buffer.concat([Buffer.from('DOCKMUX-BOTMUX-ARCHIVE-V1\0'), iv, tag, ciphertext]);
+  return Buffer.concat([Buffer.from('DUTYDECK-BOTMUX-ARCHIVE-V1\0'), iv, tag, ciphertext]);
 }
 
 async function privateWrite(path: string, bytes: string | Uint8Array): Promise<void> {

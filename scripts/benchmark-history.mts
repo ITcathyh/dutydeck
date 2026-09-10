@@ -2,8 +2,8 @@ import { performance } from 'node:perf_hooks';
 import { gzipSync } from 'node:zlib';
 import { readdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import type { AgentEvent } from '@dockmux/shared';
-import { createRepositories } from '@dockmux/storage';
+import type { AgentEvent } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
 import { buildApp } from '../apps/server/src/app.js';
 import { createEventWindow, EVENT_RENDER_LIMIT, mergeLiveEvent } from '../apps/web/src/event-history.js';
 

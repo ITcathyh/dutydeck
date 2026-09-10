@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { buildDockmuxRoutingBlock } from '../shared-hints.js';
+import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -26,17 +26,17 @@ export function createGrokAdapter(): CliAdapter {
         args.push('--reasoning-effort', reasoningEffort.trim());
       }
       if (resume) {
-        // 精确 resume：fresh spawn 会把 --session-id 钉到 dockmux 的 UUID，
-        // 所以 dockmux sessionId 就是 grok 会话 id。绝不 --continue（会续接
+        // 精确 resume：fresh spawn 会把 --session-id 钉到 dutydeck 的 UUID，
+        // 所以 dutydeck sessionId 就是 grok 会话 id。绝不 --continue（会续接
         // 全局最近会话，串到兄弟会话上下文）。
         const sid = resumeSessionId || sessionId;
         if (sid) {
           args.push('--resume', sid);
         }
       } else if (sessionId) {
-        // 把 grok 会话 id 钉到 dockmux 的 UUID，resume 才能精确复用。
+        // 把 grok 会话 id 钉到 dutydeck 的 UUID，resume 才能精确复用。
         // （botmux 在这里有 grokSessionDirExists 探测，避免 id 冲突 exit 1；
-        // 该文件系统探测已丢弃，dockmux 的会话 id 每次新生成，冲突概率可忽略。）
+        // 该文件系统探测已丢弃，dutydeck 的会话 id 每次新生成，冲突概率可忽略。）
         args.push('--session-id', sessionId);
       }
       // 位置参数首轮 prompt：TUI 启动后处理，fresh / resume spawn 都生效。
@@ -49,7 +49,7 @@ export function createGrokAdapter(): CliAdapter {
     // 会话上下文（路由块）由 driver 拼到首轮 prompt 前（botmux 走 --rules，
     // 精简契约统一走 prompt 前缀）。
     injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDockmuxRoutingBlock(ctx.locale, ctx.env);
+      return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

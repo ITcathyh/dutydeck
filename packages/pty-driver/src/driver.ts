@@ -6,11 +6,11 @@ import {
   type DriverTurnRecovery,
   type NormalizedDriverEvent,
   type TerminalStream,
-} from '@dockmux/shared';
-import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dockmux/cli-adapters';
-import { buildDockmuxRoutingBlock } from '@dockmux/cli-adapters';
-import { PtyBackend, TmuxBackend, type SessionBackend } from '@dockmux/session-backends';
-import { TerminalSnapshot } from '@dockmux/terminal-renderer';
+} from '@dutydeck/shared';
+import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
+import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
+import { PtyBackend, TmuxBackend, type SessionBackend } from '@dutydeck/session-backends';
+import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
 import { createTranscriptTailer, type TranscriptEventSource } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
@@ -141,7 +141,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.started) return;
     this.assertPermissionModeSupported();
 
-    // Runtime reconnects a persisted Dockmux session by constructing a fresh
+    // Runtime reconnects a persisted Dutydeck session by constructing a fresh
     // driver and calling start(), not resume(). A production-injected tmux
     // backend therefore has to attach here when its owned pane survived the
     // daemon, otherwise spawn() would collide with the live session.
@@ -188,14 +188,14 @@ export class PtyCliDriver implements AgentDriver {
     const isFirstPrompt = !this.firstPromptSent;
     if (isFirstPrompt) {
       // 首轮 prompt 前注入路由块：适配器自带 injectSessionContext 的用它
-      // （claude-code/grok），其余用默认 DOCKMUX_SHELL_HINTS 块——教 CLI
+      // （claude-code/grok），其余用默认 DUTYDECK_SHELL_HINTS 块——教 CLI
       // 自己正跑在无人值守桥接会话里（botmux 对大多数 CLI 同样注入）。
       const block = this.adapter.injectSessionContext
         ? this.adapter.injectSessionContext(this.sessionContext())
-        : buildDockmuxRoutingBlock(this.sessionContext().locale, this.agent.env);
+        : buildDutydeckRoutingBlock(this.sessionContext().locale, this.agent.env);
       // 会话指纹：CLI 会把提交的 prompt 文本落盘（claude jsonl / codex
       // history.jsonl / grok prompt_history.jsonl / opencode part 表），
-      // 这个标记因此成为「dockmux 会话 ↔ CLI 原生 session id」的反查锚点。
+      // 这个标记因此成为「dutydeck 会话 ↔ CLI 原生 session id」的反查锚点。
       // 必须在首轮就注入，resume 时才有东西可查。见 session-id/marker.ts。
       const marker = buildSessionMarker(this.sessionId);
       const prefix = block ? `${block.replace(/\n$/, '')}\n${marker}` : marker;
@@ -243,7 +243,7 @@ export class PtyCliDriver implements AgentDriver {
       // tmux owns this tiny non-secret lifecycle marker across daemon
       // restarts, so reattach neither repeats nor accidentally skips the
       // first-turn routing/session marker.
-      try { this.backend.setDockmuxMetadata('first_prompt_sent', 'true'); }
+      try { this.backend.setDutydeckMetadata('first_prompt_sent', 'true'); }
       catch { /* A missing lifecycle marker may repeat context after restart, but must not fail a prompt already sent. */ }
     }
     if (this.preparedTurnId && this.backend instanceof TmuxBackend) {
@@ -251,7 +251,7 @@ export class PtyCliDriver implements AgentDriver {
         // This is deliberately after writeInput. A persisted cursor without a
         // matching pane stamp must be rejected, never used to resend a prompt
         // whose delivery we cannot prove.
-        this.backend.setDockmuxMetadata('turn_id', this.preparedTurnId);
+        this.backend.setDutydeckMetadata('turn_id', this.preparedTurnId);
       } catch {
         this.preparedTurnId = undefined;
       }
@@ -292,7 +292,7 @@ export class PtyCliDriver implements AgentDriver {
     }
     // The metadata belongs to the original backend and is checked before any
     // attach side effect. Missing, stale, or foreign turns are all unsafe.
-    if (this.backend.getDockmuxMetadata('turn_id') !== state.turnId) {
+    if (this.backend.getDutydeckMetadata('turn_id') !== state.turnId) {
       throw this.rejectRecovery('Original tmux turn id does not match');
     }
 
@@ -372,7 +372,7 @@ export class PtyCliDriver implements AgentDriver {
       return;
     }
     // 降级为全新会话：后端是活的（不该再 spawn），但 CLI 里什么上下文都没有。
-    // 必须重新走首轮注入——路由块要重发，而且会话指纹是「dockmux 会话 ↔ CLI
+    // 必须重新走首轮注入——路由块要重发，而且会话指纹是「dutydeck 会话 ↔ CLI
     // 原生 id」反查的唯一锚点，新会话不重新打标，下一次 resume 同样反查不到。
     this.started = true;
     this.firstPromptSent = false;
@@ -386,7 +386,7 @@ export class PtyCliDriver implements AgentDriver {
    *
    * `buildResumeCommand` 在这里有双重身份：既是 resume 能力的声明位，也是
    * 「这个 id 能不能用」的裁决者。返回 null = 适配器认定该 id 对它的 CLI 无效
-   * （最典型的是反查失败后退回来的 dockmux sessionId），此时带着这个 id 启动
+   * （最典型的是反查失败后退回来的 dutydeck sessionId），此时带着这个 id 启动
    * 必然失败——`opencode -s <不存在的id>` 立刻 exit 1，会话随即被判 failed。
    * 与其起一个注定崩掉的进程，不如起一个干净会话：丢上下文是降级，起不来是故障。
    *
@@ -478,13 +478,13 @@ export class PtyCliDriver implements AgentDriver {
   private markTmuxReattached(): void {
     this.started = true;
     this.firstPromptSent = this.backend instanceof TmuxBackend
-      && this.backend.getDockmuxMetadata('first_prompt_sent') === 'true';
+      && this.backend.getDutydeckMetadata('first_prompt_sent') === 'true';
   }
 
   /**
    * resume 要传给适配器的 session id。
    *
-   * 旧行为直接传 dockmux 的 sessionId，这只有在「dockmux 亲自把 id 钉给 CLI」
+   * 旧行为直接传 dutydeck 的 sessionId，这只有在「dutydeck 亲自把 id 钉给 CLI」
    * 时才成立（claude `--session-id`、grok `--session-id`）。大多数 CLI 自己
    * 生成 id 且从不告诉我们，那些 resume 于是静默起了个全新会话，或者对
    * `codex resume <id>` 这类形态直接失败。
@@ -492,7 +492,7 @@ export class PtyCliDriver implements AgentDriver {
    * 三级优先：
    *  1. 调用方注入/上次反查缓存的 cliSessionId —— 最可靠，不碰磁盘。
    *  2. 从 CLI 自己的落盘记录反查（按首轮 prompt 里的会话指纹匹配）。
-   *  3. 反查不到 → 退回 dockmux sessionId（旧行为）。绝不抛错、绝不卡住：
+   *  3. 反查不到 → 退回 dutydeck sessionId（旧行为）。绝不抛错、绝不卡住：
    *     对钉过 id 的 CLI 这本来就是对的，对其余 CLI 它至少能起一个新会话，
    *     而 resume 失败绝不该让整个会话不可用。
    */
@@ -644,7 +644,7 @@ export class PtyCliDriver implements AgentDriver {
     this.transcript = createTranscriptTailer(this.adapter.id, {
       cwd: this.cwd,
       env: this.spawnEnv(),
-      // Claude keys its transcript directory by cwd ALONE, so two dockmux
+      // Claude keys its transcript directory by cwd ALONE, so two dutydeck
       // sessions in one repo share it. Without the session id the tailer
       // resolves by recency and picks up a sibling's transcript — the timeline
       // then shows another session's answer, or the turn is failed as "no
@@ -843,7 +843,7 @@ export function createPtyCliDriver(opts: PtyCliDriverOptions): PtyCliDriver {
 }
 
 function mergedEnv(agentEnv: Record<string, string>): Record<string, string> {
-  // 剥离桥接进程自身的 ANTHROPIC_* / CLAUDE_* 环境变量——这些是 dockmux
+  // 剥离桥接进程自身的 ANTHROPIC_* / CLAUDE_* 环境变量——这些是 dutydeck
   // daemon 的运行身份，不是被桥接 CLI 的。CLI 应该用自己的配置（~/.claude/）
   // 或 agent.env 里显式声明的变量。
   const stripped = Object.fromEntries(

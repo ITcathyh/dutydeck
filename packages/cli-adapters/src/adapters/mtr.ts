@@ -2,7 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
-/** mtr 原生会话 id 形态：`ses_` + 纯字母数字。dockmux 的 `ses_<uuid>` 带连字符，
+/** mtr 原生会话 id 形态：`ses_` + 纯字母数字。dutydeck 的 `ses_<uuid>` 带连字符，
  *  **不满足**这个形态，必须归一后再传。 */
 const MTR_SESSION_ID_RE = /^ses_[0-9A-Za-z]+$/;
 
@@ -10,7 +10,7 @@ const MTR_SESSION_ID_RE = /^ses_[0-9A-Za-z]+$/;
 const MTR_SESSION_ID_BODY_LEN = 26;
 
 /**
- * 由 dockmux sessionId 确定性推导 mtr 会话 id：去掉 `ses_` 前缀与 uuid 连字符，
+ * 由 dutydeck sessionId 确定性推导 mtr 会话 id：去掉 `ses_` 前缀与 uuid 连字符，
  * 取前 26 位十六进制凑成 `ses_<26>`（botmux 用 sha256+base62 生成同样长度的 id，
  * 这里改用 uuid 自身的熵——同样确定性，且 hex 是任何可能字符集的子集）。
  *
@@ -19,7 +19,7 @@ const MTR_SESSION_ID_BODY_LEN = 26;
  */
 export function mtrSessionIdFor(sessionId: string): string {
   const body = sessionId.replace(/^ses_/, '').replace(/[^0-9A-Za-z]/g, '');
-  return `ses_${(body || 'dockmux').slice(0, MTR_SESSION_ID_BODY_LEN)}`;
+  return `ses_${(body || 'dutydeck').slice(0, MTR_SESSION_ID_BODY_LEN)}`;
 }
 
 function nativeSessionId(sessionId: string, cliSessionId?: string): string {

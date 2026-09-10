@@ -10,7 +10,7 @@ afterEach(async () => Promise.all(dirs.splice(0).map(path => rm(path, { recursiv
 
 describe('acpx ACP boundary', () => {
   it('initializes a custom Mock ACP agent and streams normalized events', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-acp-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const events: any[] = [];
     const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock ACP', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: e => events.push(e) });
@@ -24,7 +24,7 @@ describe('acpx ACP boundary', () => {
   });
 
   it('treats timeout as inactivity and lets an active turn exceed its configured duration', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-acp-active-timeout-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-active-timeout-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const events: any[] = [];
     const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock ACP', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'deny-all', timeout: 2, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: event => events.push(event) });
@@ -36,14 +36,14 @@ describe('acpx ACP boundary', () => {
   });
 
   it('persists a Lark-style ask session with snake_case capability env and resolves its live request once', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-lark-ask-acp-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-ask-acp-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
     const sessionKey = 'lark-ask-persistent-session';
     const adapter = new AcpxAdapter({
       id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd,
       env: {
-        dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'group-token',
-        dockmux_relay_url: 'http://127.0.0.1:4310/api/relay', dockmux_relay_token: 'relay-token'
+        dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'group-token',
+        dutydeck_relay_url: 'http://127.0.0.1:4310/api/relay', dutydeck_relay_token: 'relay-token'
       }, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false
     }, { sessionKey, onEvent: event => events.push(event) });
     await adapter.start();
@@ -53,21 +53,21 @@ describe('acpx ACP boundary', () => {
     await sending;
     expect(events.filter(event => event.type === 'permission_request' && event.data.status === 'pending')).toHaveLength(1);
     await adapter.stop();
-    const persisted = await createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') }).load(sessionKey);
+    const persisted = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey);
     const env = persisted?.acpx?.session_options?.env ?? {};
-    expect(env).toMatchObject({ dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'group-token', dockmux_relay_url: 'http://127.0.0.1:4310/api/relay', dockmux_relay_token: 'relay-token' });
+    expect(env).toMatchObject({ dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'group-token', dutydeck_relay_url: 'http://127.0.0.1:4310/api/relay', dutydeck_relay_token: 'relay-token' });
     expect(Object.keys(env).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
   });
 
   it('maps ACP cancel to acpx cancel and retains the session', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-cancel-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-cancel-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent() {} });
     await adapter.start(); await adapter.interrupt(); await adapter.resume(); await adapter.stop();
   });
 
   it('resolves a live ACP permission request from an external Web decision', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-permission-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-permission-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
     const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: e => events.push(e) });
     await adapter.start(); const sending = adapter.send('request permission');
@@ -81,7 +81,7 @@ describe('acpx ACP boundary', () => {
     ['deny-all', 'deny-all'],
     ['approve-reads', 'approve-reads'],
     ['full-trust', 'approve-all']
-  ] as const)('maps Dockmux %s to ACPX %s at construction time', (permissionMode, expected) => {
+  ] as const)('maps Dutydeck %s to ACPX %s at construction time', (permissionMode, expected) => {
     const adapter = new AcpxAdapter({ ...agentConfig(), permissionMode }, { onEvent() {} });
     expect((adapter as any).runtime.options.permissionMode).toBe(expected);
   });
@@ -92,7 +92,7 @@ describe('acpx ACP boundary', () => {
   });
 
   it('auto-approves ACP permission requests in full-trust mode', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-full-trust-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-full-trust-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
     const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: event => events.push(event) });
     await adapter.start(); await adapter.send('request permission');
@@ -102,24 +102,24 @@ describe('acpx ACP boundary', () => {
   });
 
   it('rejects a matching ACP permission before it reaches the Web approval UI', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-risk-gate-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-risk-gate-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
     const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'full-trust', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: event => events.push(event) });
     adapter.setRiskPolicy({ enabled: true, authorized: false, pattern: 'Edit\\s+a\\s+file', actorEmail: 'user@example.com' });
     await adapter.start();
     await adapter.send('request permission');
-    expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'permission-tool', status: 'rejected', title: expect.stringContaining('Dockmux') }) }));
+    expect(events).toContainEqual(expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'permission-tool', status: 'rejected', title: expect.stringContaining('Dutydeck') }) }));
     expect(events.some(event => event.type === 'permission_request' && event.data.status === 'pending')).toBe(false);
     expect(await adapter.resolvePermission('permission-tool', true)).toBe(false);
     await adapter.stop();
   });
 
   it('rechecks current group policy for real ACP requests with a persisted session key', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-live-risk-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-live-risk-')); dirs.push(cwd);
     const events: any[] = [];
     let authorized = true;
     let unavailable = false;
-    const adapter = new AcpxAdapter({ ...agentConfig(), cwd, command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], permissionMode: 'full-trust', env: { dockmux_group_tools_token: 'synthetic-token' } }, {
+    const adapter = new AcpxAdapter({ ...agentConfig(), cwd, command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], permissionMode: 'full-trust', env: { dutydeck_group_tools_token: 'synthetic-token' } }, {
       sessionKey: 'live-policy-session', onEvent: event => events.push(event),
       resolveRiskPolicy: async () => { if (unavailable) throw new Error('Policy unavailable'); return { enabled: true, authorized, pattern: 'Edit' }; }
     });
@@ -135,13 +135,13 @@ describe('acpx ACP boundary', () => {
       await adapter.send('request permission');
       expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"deny"'))).toBe(true);
     } finally { await adapter.stop(); }
-    const persisted = await createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') }).load('live-policy-session');
-    expect(persisted?.acpx?.session_options?.env?.dockmux_group_tools_token).toBe('synthetic-token');
+    const persisted = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load('live-policy-session');
+    expect(persisted?.acpx?.session_options?.env?.dutydeck_group_tools_token).toBe('synthetic-token');
     expect(JSON.stringify(persisted)).not.toContain('resolveRiskPolicy');
   });
 
   it('hard-stops an active turn even while permission is pending', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-hard-stop-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-hard-stop-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
     const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: event => events.push(event) });
     await adapter.start(); const sending = adapter.send('request permission');
@@ -151,12 +151,12 @@ describe('acpx ACP boundary', () => {
   });
 
   it('recreates a persistent ACP session when the agent no longer recognizes its id', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-stale-session-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-stale-session-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const config = { id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp' as const, cwd, env: { mock_acp_reject_unknown_load: '1' }, permissionMode: 'deny-all' as const, timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
-    const first = new AcpxAdapter(config, { sessionKey: 'same-dockmux-session', onEvent() {} });
+    const first = new AcpxAdapter(config, { sessionKey: 'same-dutydeck-session', onEvent() {} });
     await first.start(); await first.stop();
-    const second = new AcpxAdapter(config, { sessionKey: 'same-dockmux-session', onEvent() {} });
+    const second = new AcpxAdapter(config, { sessionKey: 'same-dutydeck-session', onEvent() {} });
     await expect(second.start()).resolves.toBeUndefined();
     await expect(second.send('after stale session')).resolves.toBeUndefined();
     await second.stop();
@@ -173,14 +173,14 @@ describe('acpx ACP boundary', () => {
   });
 
   it('persists the system prompt with ACPX keys and reuses it for the same session', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-system-prompt-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-system-prompt-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const sessionKey = 'system-prompt-session';
     const base = { ...agentConfig(), cwd, command: process.execPath, args: [fixture] };
     const first = new AcpxAdapter({ ...base, systemPrompt: 'original session prompt' }, { sessionKey, onEvent() {} });
     await first.start(); await first.stop();
 
-    const store = createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') });
+    const store = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
     expect((await store.load(sessionKey))?.acpx?.session_options?.system_prompt).toBe('original session prompt');
 
     const restored = new AcpxAdapter({ ...base, systemPrompt: 'new global prompt' }, { sessionKey, onEvent() {} });
@@ -188,63 +188,63 @@ describe('acpx ACP boundary', () => {
     expect((await store.load(sessionKey))?.acpx?.session_options?.system_prompt).toBe('original session prompt');
   });
 
-  it('persists Dockmux group capability environment with snake_case keys', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-group-env-')); dirs.push(cwd);
+  it('persists Dutydeck group capability environment with snake_case keys', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-group-env-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const adapter = new AcpxAdapter({
       ...agentConfig(), cwd, command: process.execPath, args: [fixture],
-      env: { dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'scoped-token' }
+      env: { dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'scoped-token' }
     }, { sessionKey: 'group-capability-session', onEvent() {} });
     await expect(adapter.start()).resolves.toBeUndefined();
     await adapter.stop();
   });
 
   it('bridges uppercase Agent env without persisting an uppercase session key', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-agent-env-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-agent-env-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const events: any[] = [];
     const sessionKey = 'uppercase-agent-env-session';
     const adapter = new AcpxAdapter({
       ...agentConfig(), cwd, command: process.execPath, args: [fixture],
-      env: { MOCK_VENDOR_TOKEN: 'vendor-secret', dockmux_group_tools_url: 'http://127.0.0.1:4310/tools' }
+      env: { MOCK_VENDOR_TOKEN: 'vendor-secret', dutydeck_group_tools_url: 'http://127.0.0.1:4310/tools' }
     }, { sessionKey, onEvent: event => events.push(event) });
     await expect(adapter.start()).resolves.toBeUndefined();
     await adapter.send('report bridged environment');
     expect(events.some(event => event.type === 'text' && event.data.text === 'Bridged: vendor-secret')).toBe(true);
     await adapter.stop();
 
-    const store = createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') });
+    const store = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
     const persisted = (await store.load(sessionKey))?.acpx?.session_options?.env ?? {};
     expect(persisted).not.toHaveProperty('MOCK_VENDOR_TOKEN');
     expect(Object.keys(persisted).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
     expect(JSON.stringify(persisted)).not.toContain('vendor-secret');
-    expect(persisted.dockmux_group_tools_url).toBe('http://127.0.0.1:4310/tools');
+    expect(persisted.dutydeck_group_tools_url).toBe('http://127.0.0.1:4310/tools');
   });
 
   it('recreates a persisted ACP session once when its scoped group capability changes', async () => {
-    const cwd = await mkdtemp(join(tmpdir(), 'dockmux-group-env-refresh-')); dirs.push(cwd);
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-group-env-refresh-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const sessionKey = 'group-capability-refresh-session';
     const base = { ...agentConfig(), cwd, command: process.execPath, args: [fixture] };
     const first = new AcpxAdapter({
       ...base,
-      env: { dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'legacy-random-token', dockmux_relay_url: 'http://127.0.0.1:4310/api/relay', dockmux_relay_token: 'relay-v1', dockmux_relay_command: '/old/dockmux' }
+      env: { dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'legacy-random-token', dutydeck_relay_url: 'http://127.0.0.1:4310/api/relay', dutydeck_relay_token: 'relay-v1', dutydeck_relay_command: '/old/dutydeck' }
     }, { sessionKey, onEvent() {} });
     await first.start(); await first.stop();
-    const store = createRuntimeStore({ stateDir: join(cwd, '.dockmux', 'acpx') });
-    expect((await store.load(sessionKey))?.acpx?.session_options?.env?.dockmux_group_tools_token).toBe('legacy-random-token');
+    const store = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
+    expect((await store.load(sessionKey))?.acpx?.session_options?.env?.dutydeck_group_tools_token).toBe('legacy-random-token');
 
     const second = new AcpxAdapter({
       ...base,
-      env: { dockmux_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dockmux_group_tools_token: 'v1.stable-token', dockmux_relay_url: 'http://127.0.0.1:9321/api/relay', dockmux_relay_token: 'relay-v2', dockmux_relay_command: '/new/dockmux' }
+      env: { dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'v1.stable-token', dutydeck_relay_url: 'http://127.0.0.1:9321/api/relay', dutydeck_relay_token: 'relay-v2', dutydeck_relay_command: '/new/dutydeck' }
     }, { sessionKey, onEvent() {} });
     await second.start(); await second.stop();
-    expect((await store.load(sessionKey))?.acpx?.session_options?.env?.dockmux_group_tools_token).toBe('v1.stable-token');
-    expect((await store.load(sessionKey))?.acpx?.session_options?.env?.dockmux_relay_url).toBe('http://127.0.0.1:9321/api/relay');
+    expect((await store.load(sessionKey))?.acpx?.session_options?.env?.dutydeck_group_tools_token).toBe('v1.stable-token');
+    expect((await store.load(sessionKey))?.acpx?.session_options?.env?.dutydeck_relay_url).toBe('http://127.0.0.1:9321/api/relay');
 
     const third = new AcpxAdapter({ ...base, env: {} }, { sessionKey, onEvent() {} });
     await third.start(); await third.stop();
-    expect((await store.load(sessionKey))?.acpx?.session_options?.env ?? {}).not.toHaveProperty('dockmux_relay_url');
+    expect((await store.load(sessionKey))?.acpx?.session_options?.env ?? {}).not.toHaveProperty('dutydeck_relay_url');
   });
 
   it('normalizes raw ACP session/update envelopes', () => {

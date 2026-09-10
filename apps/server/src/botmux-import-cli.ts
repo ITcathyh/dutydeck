@@ -9,7 +9,7 @@ import {
   discoverBotmuxSource,
   type BotmuxArchiveKeyDerivation,
   type BotmuxRedactedManifest
-} from '@dockmux/botmux-importer';
+} from '@dutydeck/botmux-importer';
 import type { BotmuxArchiveCliOptions, BotmuxSourceCliOptions } from './cli-program.js';
 
 const PASSPHRASE_MIN_BYTES = 16;

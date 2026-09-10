@@ -133,7 +133,7 @@ export function kdlString(s: string): string {
  * single prefix key, but with nothing reserved at all). Startup tips and pane
  * frames are off so the captured stream is just the CLI.
  */
-export const ZELLIJ_CONFIG_KDL = `// dockmux-generated — do not edit
+export const ZELLIJ_CONFIG_KDL = `// dutydeck-generated — do not edit
 show_startup_tips false
 pane_frames false
 default_mode "locked"
@@ -217,7 +217,7 @@ export function parseChildPids(psOut: string, parent: number): number[] {
  * spawn-time path forever, and a freed name is reusable — so a name-keyed
  * lookup can in principle bind to a different session's server. botmux defends
  * against that with a socket-probe child that attributes an accept() to a
- * specific pid; that machinery is deliberately NOT ported here. dockmux owns
+ * specific pid; that machinery is deliberately NOT ported here. dutydeck owns
  * its session names and never renames them, so the argv-tail match (botmux's
  * own non-Linux path) is sufficient.
  */
@@ -360,7 +360,7 @@ export class ZellijBackend implements SessionBackend {
     // rejoin it instead of starting a second CLI.
     this.reattaching = ZellijBackend.probeSession(this.sessionName) === 'exists';
 
-    this.tmpConfigDir = mkdtempSync(join(tmpdir(), 'dockmux-zellij-'));
+    this.tmpConfigDir = mkdtempSync(join(tmpdir(), 'dutydeck-zellij-'));
     const configPath = join(this.tmpConfigDir, 'config.kdl');
     writeFileSync(configPath, ZELLIJ_CONFIG_KDL, { mode: 0o600 });
 

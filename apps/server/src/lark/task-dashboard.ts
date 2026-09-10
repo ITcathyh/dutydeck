@@ -128,7 +128,7 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
   const title = compactText(entry.title, MAX_TITLE_CHARS, '未命名任务');
   const workspace = workspaceName(entry.workspace);
   const feedback = entry.feedback ? ` · 验收：${({ pending: '待验收', accepted: '已通过', needs_changes: '需要修改' })[entry.feedback]}` : '';
-  // 「状态：」「工作区：」这类标签词占了每行前四个字，而「等待审批」「dockmux」自己
+  // 「状态：」「工作区：」这类标签词占了每行前四个字，而「等待审批」「dutydeck」自己
   // 就说明了自己是什么。全部任务在同一个工作区时（单机常态）它更是逐行重复同一个词，
   // 这时提到表头写一次，行内只留真正逐行不同的东西。
   const location = sharedWorkspace ? '' : ` · ${workspace}`;

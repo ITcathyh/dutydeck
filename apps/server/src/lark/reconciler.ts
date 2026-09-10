@@ -1,4 +1,4 @@
-import type { ChannelMapping, ChannelMappingRepository, TaskRecord } from '@dockmux/shared';
+import type { ChannelMapping, ChannelMappingRepository, TaskRecord } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, type LarkCardService } from './service.js';
 import {
@@ -39,7 +39,7 @@ export async function performLarkCardReconcile(input: {
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
-  let agentName = config.defaultAgentId ?? 'Dockmux';
+  let agentName = config.defaultAgentId ?? 'Dutydeck';
   try { agentName = (await runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? agentName; }
   catch (error) { log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 对账卡片'); }
   const cardContext = { agentName, ...(config.workspace ? { workspace: config.workspace } : {}) };
@@ -110,7 +110,7 @@ export async function performLarkCardReconcile(input: {
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
           ...(Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length
             ? { elements: persisted.last_successful_elements }
-            : { markdown: 'Dockmux 已恢复任务状态，正在继续跟踪执行进度。' })
+            : { markdown: 'Dutydeck 已恢复任务状态，正在继续跟踪执行进度。' })
         });
         await cardMappings.save({
           ...mapping,

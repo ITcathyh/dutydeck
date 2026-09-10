@@ -122,12 +122,12 @@ describe('zellij pure helpers', () => {
     });
 
     it('shell-escapes values so a quote cannot break out of the sh fragment', () => {
-      const evil = "'; touch /tmp/dockmux-zellij-pwned; '";
+      const evil = "'; touch /tmp/dutydeck-zellij-pwned; '";
       const layout = buildZellijLayout('mycli', [], { ...opts, env: { EVIL: evil } });
       // The payload survives verbatim, but only INSIDE a quoted word: every
       // embedded ' is closed-escaped-reopened. Note the sh escaping is itself
       // KDL-escaped on the way out, so the backslashes appear doubled here.
-      expect(layout).toContain("'EVIL='\\\\''; touch /tmp/dockmux-zellij-pwned; '\\\\'''");
+      expect(layout).toContain("'EVIL='\\\\''; touch /tmp/dutydeck-zellij-pwned; '\\\\'''");
 
       // Prove it: pull the sh fragment back out of the KDL and run it with a
       // printer in place of the CLI.
@@ -143,7 +143,7 @@ describe('zellij pure helpers', () => {
       const script = kdl.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\');
       const r = spawnSync('/bin/sh', ['-c', script], { encoding: 'utf-8', timeout: 10000 });
       expect(r.stdout).toBe(`[${evil}]`);
-      expect(existsSync('/tmp/dockmux-zellij-pwned')).toBe(false);
+      expect(existsSync('/tmp/dutydeck-zellij-pwned')).toBe(false);
     });
 
     it('escapes the sh fragment for KDL so embedded quotes stay inside the string', () => {
@@ -258,7 +258,7 @@ zellijDescribe('ZellijBackend (live)', () => {
   let backend: ZellijBackend | null = null;
 
   const newSessionName = () =>
-    `dockmux-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    `dutydeck-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   afterEach(() => {
     backend?.kill();

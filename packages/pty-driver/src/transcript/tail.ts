@@ -18,7 +18,7 @@
  */
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 
 /** A durable position immediately after the last complete JSONL record.
  * Without a path there is no file identity, so the only valid offset is 0. */

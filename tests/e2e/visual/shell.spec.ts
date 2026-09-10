@@ -24,7 +24,7 @@ import {
  * - 侧栏分组导航：红。四个功能全在「Agent 与设置」一个弹层入口后面，且没有分组。
  */
 
-const sidebar = 'aside[aria-label="Dockmux 工作台导航"]';
+const sidebar = 'aside[aria-label="Dutydeck 工作台导航"]';
 
 test.describe('骨架 · 应用顶栏', () => {
   const cases: { viewport: keyof typeof VIEWPORTS }[] = [{ viewport: 'desktop' }, { viewport: 'mobile' }];
@@ -234,7 +234,7 @@ test.describe('骨架 · 侧栏分组导航区', () => {
     await dock.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded' });
     await settle(dock);
     // botmux 的 `.sidebar-create-actions` 在**顶部**、用虚线边框 + 6% accent 底
-    // 与实线导航项区分（anatomy §A2）。dockmux 现在只有一颗实心「创建任务」，
+    // 与实线导航项区分（anatomy §A2）。dutydeck 现在只有一颗实心「创建任务」，
     // 与下方列表没有形态区隔。这里断言「创建操作位于所有导航条目之上」。
     const layout = await dock.locator(sidebar).evaluate(el => {
       const create = [...el.querySelectorAll('button,a')].find(b => /创建/.test(b.textContent ?? ''));

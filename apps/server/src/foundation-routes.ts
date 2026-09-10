@@ -23,7 +23,7 @@ import {
   type SecretRefAvailability,
   type SecretRefMetadata,
   type RoleAssignment
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 
 export type FoundationManagementRepositories = Pick<RepositoryBundle,
   'secretRefs' | 'channelBots' | 'channelBotPolicies' | 'groupBindings' | 'remoteChatFacts' | 'roleAssignments' | 'groupPolicy'>;
@@ -197,7 +197,7 @@ export async function registerFoundationManagementRoutes(app: FastifyInstance, o
                 action: code === 'channel_bot_credential_required'
                   ? '选择 SecretRef'
                   : code === 'channel_bot_credential_unreadable'
-                    ? '运行 dockmux secret list 检查并 rotate'
+                    ? '运行 dutydeck secret list 检查并 rotate'
                     : '等待 WP1b 接入运行时'
               })),
               ...(!binding ? [{ code: 'group_binding_missing', action: '配置此群' }] : binding.state !== 'staged' && binding.state !== 'disabled' ? [{ code: `group_binding_${binding.state}`, action: '确认或修复群策略' }] : []),

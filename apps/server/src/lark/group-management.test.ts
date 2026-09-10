@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { agentConfigSchema, type RepositoryBundle, type Session } from '@dockmux/shared';
-import { createRepositories } from '@dockmux/storage';
+import { agentConfigSchema, type RepositoryBundle, type Session } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
 import { buildApp } from '../app.js';
 import { LarkGroupManager } from './group-management.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
@@ -22,7 +22,7 @@ describe('live group configuration', () => {
   const save = (appId = 'cli_one', chatId = 'oc_one', patch = {}) => manager.save(appId, chatId, { expectedRevision: 0, patch });
 
   beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'dockmux-group-management-'));
+    dir = await mkdtemp(join(tmpdir(), 'dutydeck-group-management-'));
     await mkdir(join(dir, 'one')); await mkdir(join(dir, 'two'));
     repos = createRepositories(join(dir, 'state.sqlite'));
     time = new Date('2026-09-07T00:00:00.000Z'); members = ['ou_alice', 'ou_bob'];
@@ -150,7 +150,7 @@ describe('live group configuration', () => {
     await save('cli_one', 'oc_one', { accessOverride: { mode: 'allowlist', principalIds: [bob.principalId] } });
     const config = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
     const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:1');
-    const token = capabilities.environmentFor(session).dockmux_group_tools_token;
+    const token = capabilities.environmentFor(session).dutydeck_group_tools_token;
     const sendText = vi.fn(async () => ({ messageId: 'om_test', chatId: 'oc_one' }));
     const tools = new LarkAgentToolsService(capabilities, repos.config, { groupManager: manager, clientFactory: () => ({ sendText }) as any });
     try {

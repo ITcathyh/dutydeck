@@ -1,9 +1,9 @@
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import type { CliPathEnv } from '../cli-paths.js';
 
 /** Everything a resolver may use to identify the session on disk. */
 export interface SessionIdLookupContext {
-  /** dockmux's session id — also the fingerprint injected into prompt #1. */
+  /** dutydeck's session id — also the fingerprint injected into prompt #1. */
   sessionId: string;
   /** The working directory the CLI was spawned in. */
   cwd: string;
@@ -18,7 +18,7 @@ export interface SessionIdLookupContext {
   env?: CliPathEnv;
 }
 
-/** One CLI's reverse lookup: dockmux session id → the CLI's own session id. */
+/** One CLI's reverse lookup: dutydeck session id → the CLI's own session id. */
 export interface SessionIdLookup {
   /**
    * cli-adapters adapter ids this lookup serves.

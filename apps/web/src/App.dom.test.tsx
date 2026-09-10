@@ -61,7 +61,7 @@ describe('App mobile navigation accessibility', () => {
     const main = container.querySelector('main')!;
     expect(main.hasAttribute('inert')).toBe(true);
     expect(main.getAttribute('aria-hidden')).toBe('true');
-    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航', hidden: true });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航', hidden: true });
     await waitFor(() => expect(navigation.contains(document.activeElement)).toBe(true));
     await userEvent.keyboard('{Escape}');
     expect(main.hasAttribute('inert')).toBe(false);
@@ -141,10 +141,10 @@ describe('App browser navigation and shell states', () => {
     vi.spyOn(scheduleApi, 'list').mockResolvedValue({ capabilities: schedules, schedules: [] });
     const { container } = renderApp();
     expect(await screen.findByRole('heading', { name: '今天需要推进什么？' })).toBeTruthy();
-    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     const opener = within(navigation).getByRole('button', { name: /Agent 与设置/ });
     await userEvent.click(opener);
-    const dialog = await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    const dialog = await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
     expect(dialog).toBeTruthy();
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
     /*
@@ -159,7 +159,7 @@ describe('App browser navigation and shell states', () => {
     expect(screen.getByRole('button', { name: /^Agent 准备本机执行者$/ })).toBeTruthy();
     expect(screen.queryByRole('button', { name: /开启监听|立即运行|run.now/i })).toBeNull();
     await userEvent.keyboard('{Escape}');
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull());
     expect(container.querySelector('main')?.closest('[inert]')).toBeNull();
     expect(document.activeElement).toBe(opener);
   });
@@ -170,7 +170,7 @@ describe('App browser navigation and shell states', () => {
     const pushState = vi.spyOn(window.history, 'pushState');
     renderApp();
 
-    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await userEvent.click(await within(navigation).findByRole('button', { name: /任务一/ }));
     expect(pushState).toHaveBeenCalledWith({ sessionId: 's1' }, '', '/sessions/s1');
     expect(window.location.pathname).toBe('/sessions/s1');
@@ -216,7 +216,7 @@ describe('App browser navigation and shell states', () => {
     expect(error.textContent).toContain('Agent 信息');
     expect(error.textContent).toContain('任务列表');
     expect(error.textContent).toContain('任务摘要');
-    expect(screen.getByRole('complementary', { name: 'Dockmux 工作台导航' }).querySelector('.animate-pulse')).toBeNull();
+    expect(screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' }).querySelector('.animate-pulse')).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: '重新加载' }));
     await screen.findByRole('heading', { name: '今天需要推进什么？' });
     expect(agents).toHaveBeenCalledTimes(2);
@@ -271,7 +271,7 @@ describe('App browser navigation and shell states', () => {
     await waitFor(() => expect(screen.getAllByRole('button', { name: '中断当前任务' }).length).toBeGreaterThan(0));
     await userEvent.click(screen.getAllByRole('button', { name: '中断当前任务' })[0]);
     expect((await screen.findByRole('alert')).textContent).toContain('中断失败');
-    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await userEvent.click(within(navigation).getByRole('button', { name: /任务二/ }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     expect(window.location.pathname).toBe('/sessions/s2');
@@ -441,7 +441,7 @@ describe('App 搜索、快捷键与通知接线', () => {
 
     await user.keyboard('n');
     expect(await screen.findByRole('dialog', { name: /新建|创建/ })).toBeTruthy();
-    expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull();
+    expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull();
   });
 
   it('取消待执行指令后给出成功通知，并提供把指令排回队尾的撤销', async () => {
@@ -470,11 +470,11 @@ describe('App 搜索、快捷键与通知接线', () => {
 
     await user.click(await screen.findByRole('radio', { name: /^深色/ }));
     expect(document.documentElement.getAttribute('data-theme')).toBe('dark');
-    expect(window.localStorage.getItem('dockmux.theme')).toBe('dark');
+    expect(window.localStorage.getItem('dutydeck.theme')).toBe('dark');
 
     await user.click(screen.getByRole('radio', { name: /^跟随系统/ }));
     expect(document.documentElement.hasAttribute('data-theme')).toBe(false);
-    expect(window.localStorage.getItem('dockmux.theme')).toBeNull();
+    expect(window.localStorage.getItem('dutydeck.theme')).toBeNull();
   });
 
   it('在输入框里打字不会被单键快捷键劫持', async () => {
@@ -514,13 +514,13 @@ describe('可深链浮层的 URL 契约', () => {
     mockAppApi();
     mockFoundation();
     renderApp();
-    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await userEvent.click(within(navigation).getByRole('button', { name: /Agent 与设置/ }));
-    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
     expect(window.location.search).toBe('?panel=settings&section=agents');
 
     await userEvent.keyboard('{Escape}');
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull());
     // 关闭走 history.back()，不是再 push 一条——否则后退会把刚关掉的浮层重新打开。
     await waitFor(() => expect(window.location.search).toBe(''));
     expect(window.location.pathname).toBe('/');
@@ -532,7 +532,7 @@ describe('可深链浮层的 URL 契约', () => {
     mockFoundation();
     const pushState = vi.spyOn(window.history, 'pushState');
     renderApp();
-    expect(await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeTruthy();
+    expect(await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeTruthy();
     expect(pushState).not.toHaveBeenCalled();
   });
 
@@ -542,7 +542,7 @@ describe('可深链浮层的 URL 契约', () => {
     mockFoundation();
     const back = vi.spyOn(window.history, 'back');
     renderApp();
-    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
     await userEvent.keyboard('{Escape}');
     await waitFor(() => expect(window.location.search).toBe(''));
     // history.state 上没有我们的标记 ⇒ 这条 entry 不是我们 push 的，back() 会离开站点。
@@ -553,12 +553,12 @@ describe('可深链浮层的 URL 契约', () => {
     mockAppApi();
     mockFoundation();
     renderApp();
-    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await userEvent.click(within(navigation).getByRole('button', { name: /Agent 与设置/ }));
-    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
 
     await act(async () => { window.history.back(); await new Promise(resolve => setTimeout(resolve, 30)); });
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull());
     expect(window.location.pathname).toBe('/');
     expect(window.location.search).toBe('');
   });
@@ -568,9 +568,9 @@ describe('可深链浮层的 URL 契约', () => {
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '修复登录态')] });
     mockFoundation();
     renderApp();
-    await screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
     await userEvent.keyboard('{Escape}');
-    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dockmux 设置与接入' })).toBeNull());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Dutydeck 设置与接入' })).toBeNull());
     // 关掉设置不应该把用户踢回任务中心。
     expect(window.location.pathname).toBe('/sessions/s1');
     expect(window.location.search).toBe('');
@@ -618,7 +618,7 @@ describe('App 飞书 Bot 状态读取失败', () => {
     // 「尚未配置」的两处文案都不许出现：概览引导与侧栏 hint。
     expect(document.body.textContent).not.toContain('尚未配置机器人');
     expect(document.body.textContent).not.toContain('尚未配置飞书机器人');
-    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     expect(within(navigation).getByRole('button', { name: /飞书接入.*接入状态读取失败/ })).toBeTruthy();
   });
 
@@ -664,7 +664,7 @@ describe('App 飞书 Bot 状态读取失败', () => {
     await waitFor(() => expect(within(aside).getByText('状态未确认')).toBeTruthy());
     expect(within(aside).getByText(/已有配置记录，但这一次状态读取失败/)).toBeTruthy();
     expect(within(aside).queryByText('监听已启动')).toBeNull();
-    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     expect(within(navigation).getByRole('button', { name: /飞书接入.*1 个机器人 · 状态未确认/ })).toBeTruthy();
   });
 
@@ -675,7 +675,7 @@ describe('App 飞书 Bot 状态读取失败', () => {
   */
   const openSettings = async () => {
     await userEvent.click(screen.getByRole('button', { name: /Agent 与设置/ }));
-    return screen.findByRole('dialog', { name: 'Dockmux 设置与接入' });
+    return screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
   };
   // 浮层内切到「飞书 Bot」分区（Bot 列表与失败 Banner 在这一节）。
   const openLarkSection = async (dialog: HTMLElement) => {
@@ -744,7 +744,7 @@ describe('主区一级导航', () => {
     mockAppApi();
     mockManagementApis();
     renderApp();
-    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
 
     // 默认在任务视图，且当前项标了 aria-current。
     expect(within(navigation).getByRole('button', { name: /^任务/ }).getAttribute('aria-current')).toBe('page');
@@ -779,7 +779,7 @@ describe('主区一级导航', () => {
     renderApp();
     await screen.findByRole('heading', { name: '修复登录超时' });
 
-    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
     await screen.findByRole('heading', { name: '机器人管理' });
     // 任务仍在路径里，只是主区换了视图。
@@ -798,7 +798,7 @@ describe('主区一级导航', () => {
     // 任务视图如实报错。
     await screen.findByRole('heading', { name: '无法加载任务中心' });
 
-    const navigation = screen.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await user.click(within(navigation).getByRole('button', { name: /^群聊/ }));
     // 群聊管理照常可用：两条路互不连坐。
     expect(await screen.findByRole('heading', { name: '群聊管理' })).toBeTruthy();
@@ -823,7 +823,7 @@ describe('编辑草稿跨视图存活', () => {
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     renderApp();
 
-    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await user.click(within(navigation).getByRole('button', { name: /^机器人/ }));
     await screen.findByRole('heading', { name: '机器人管理' });
 
@@ -855,7 +855,7 @@ describe('编辑草稿跨视图存活', () => {
     ] });
     renderApp();
 
-    const navigation = await screen.findByRole('complementary', { name: 'Dockmux 工作台导航' });
+    const navigation = await screen.findByRole('complementary', { name: 'Dutydeck 工作台导航' });
     await user.click(within(navigation).getByRole('button', { name: /^群聊/ }));
     await screen.findByRole('heading', { name: '群聊管理' });
 

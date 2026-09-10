@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dockmux 界面功能旅程 e2e —— 改版回归网
+ * dutydeck 界面功能旅程 e2e —— 改版回归网
  *
  * ## 定位
  *
@@ -26,7 +26,7 @@
  * ## 隔离
  *
  * 临时端口 + 临时 SQLite + 假 CLI，绝不碰用户 4310 端口上的真实工作，也不读写
- * ~/.dockmux / ~/.claude。跑完整棵临时目录删掉。
+ * ~/.dutydeck / ~/.claude。跑完整棵临时目录删掉。
  *
  * ## 用法
  *
@@ -75,7 +75,7 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 }
 
 async function main() {
-  log(`Dockmux 界面功能旅程 e2e（端口 ${PORT}，隔离实例 + 假 Agent）`);
+  log(`Dutydeck 界面功能旅程 e2e（端口 ${PORT}，隔离实例 + 假 Agent）`);
 
   const { dirs, base, request } = await bootIsolatedStack({ port: PORT, onCleanup, verbose: VERBOSE });
   ok(`隔离实例就绪：${base}（临时库 ${dirs.dataDir}）`);
@@ -375,7 +375,7 @@ async function main() {
     await page.getByRole('heading', { name: UI.overviewTitle }).waitFor({ state: 'visible', timeout: 20_000 });
     const settingsEntry = page.getByRole('complementary', { name: UI.nav }).getByRole('button', { name: UI.settingsEntry });
     await settingsEntry.click();
-    const settingsDialog = page.getByRole('dialog', { name: 'Dockmux 设置与接入' });
+    const settingsDialog = page.getByRole('dialog', { name: 'Dutydeck 设置与接入' });
     await settingsDialog.waitFor({ state: 'visible', timeout: 25_000 });
     assert(new URL(page.url()).searchParams.get('panel') === 'settings', '站内点开设置后 URL 同步为 ?panel=settings');
 
@@ -498,8 +498,8 @@ async function main() {
       { timeoutMs: 10_000, intervalMs: 200 });
     ok('点「深色」后 data-theme=dark 生效');
 
-    const stored = await page.evaluate(() => window.localStorage.getItem('dockmux.theme'));
-    assert(stored === 'dark', `偏好写入 localStorage（dockmux.theme=${stored}）`);
+    const stored = await page.evaluate(() => window.localStorage.getItem('dutydeck.theme'));
+    assert(stored === 'dark', `偏好写入 localStorage（dutydeck.theme=${stored}）`);
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: UI.overviewTitle }).waitFor({ state: 'visible', timeout: 20_000 });
@@ -509,7 +509,7 @@ async function main() {
     // 切回跟随系统：必须把存储清掉，否则「跟随系统」会被上一次的选择永久压住。
     await page.getByRole('radio', { name: /^跟随系统/ }).click();
     await waitFor('跟随系统时清除持久化偏好', async () =>
-      (await page.evaluate(() => window.localStorage.getItem('dockmux.theme'))) === null,
+      (await page.evaluate(() => window.localStorage.getItem('dutydeck.theme'))) === null,
       { timeoutMs: 10_000, intervalMs: 200 });
     ok('切回「跟随系统」会清除持久化偏好（不残留旧选择）');
     await page.close();
@@ -587,7 +587,7 @@ async function main() {
      * 用「绑定/飞书 Bot」这种动宾结构限定，避开纯计数后缀。
      */
     const candidates = [
-      { name: UI.settingsEntry, dialog: 'Dockmux 设置与接入', panel: 'settings', required: true, label: '设置与接入' },
+      { name: UI.settingsEntry, dialog: 'Dutydeck 设置与接入', panel: 'settings', required: true, label: '设置与接入' },
       { name: /飞书接入|绑定.*Bot|飞书 Bot|管理飞书/, dialog: '绑定飞书 Bot', panel: 'lark-setup', required: false, label: '飞书接入' },
       { name: /群配置|群与权限/, dialog: '群配置与权限', panel: 'groups', required: false, label: '群与权限' },
       { name: /定时任务|自动化|Schedule/, dialog: 'Schedule 离线管理', panel: 'automation', required: false, label: '定时任务' },

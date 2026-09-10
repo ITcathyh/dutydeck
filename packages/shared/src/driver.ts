@@ -1,15 +1,15 @@
 import type { EventType, PermissionMode, ToolRiskPolicy } from './index.js';
 
 /**
- * Dockmux 驱动契约（canonical driver contract）
+ * Dutydeck 驱动契约（canonical driver contract）
  * ================================================
- * 运行时（@dockmux/runtime）与具体 Agent 接入方式之间的唯一接缝。
+ * 运行时（@dutydeck/runtime）与具体 Agent 接入方式之间的唯一接缝。
  * 每个实现负责把一种 Agent 接入形态（ACP 子进程 / PTY 里的 CLI / 远程 API…）
  * 归一化成同一种事件流（NormalizedDriverEvent）。
  *
  * 已实现：
- *  - AcpxAdapter（@dockmux/acp-client）—— ACP 协议，经 acpx 运行时
- *  - PtyCliDriver（@dockmux/pty-driver）—— PTY 里的供应商 CLI 适配层
+ *  - AcpxAdapter（@dutydeck/acp-client）—— ACP 协议，经 acpx 运行时
+ *  - PtyCliDriver（@dutydeck/pty-driver）—— PTY 里的供应商 CLI 适配层
  *
  * 实现方注意：
  *  - 事件必须按发生顺序回调；运行时按 session 串行化消费，不要求实现方自己排队。
@@ -32,7 +32,7 @@ export interface DriverTurnRecovery { kind: 'pty-jsonl-v1'; turnId: string; tran
 
 /** A detached persistent turn remains running in its backend. */
 export class DriverDetachedError extends Error {
-  constructor() { super('Driver detached for Dockmux daemon shutdown'); this.name = 'DriverDetachedError'; }
+  constructor() { super('Driver detached for Dutydeck daemon shutdown'); this.name = 'DriverDetachedError'; }
 }
 
 /** The original turn cannot be safely identified or attached; do not replay its prompt. */
@@ -105,7 +105,7 @@ export interface TerminalStream {
 
 /**
  * 驱动工厂签名（运行时按 agent.protocol 路由到具体工厂）。
- * protocol: 'acp' | 'jsonl' | 'pipe' | 'pty' | 'pty-cli'（pty-cli 使用 Dockmux PTY 适配层）
+ * protocol: 'acp' | 'jsonl' | 'pipe' | 'pty' | 'pty-cli'（pty-cli 使用 Dutydeck PTY 适配层）
  */
 export type DriverFactory = (
   agent: import('./index.js').AgentConfig,

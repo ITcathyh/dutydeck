@@ -6,8 +6,8 @@
  */
 import { accessSync, constants, statSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { builtinAgents } from '@dockmux/config';
-import type { AgentConfig } from '@dockmux/shared';
+import { builtinAgents } from '@dutydeck/config';
+import type { AgentConfig } from '@dutydeck/shared';
 
 export interface DetectedAgent {
   id: string;
@@ -21,7 +21,7 @@ export interface DetectedAgent {
 }
 
 export interface DetectAgentsOptions {
-  /** 注入点：默认调用 @dockmux/config 的 builtinAgents()。 */
+  /** 注入点：默认调用 @dutydeck/config 的 builtinAgents()。 */
   scan?: (cwd: string) => AgentConfig[];
   cwd?: string;
 }
@@ -32,7 +32,7 @@ export interface DetectAgentsOptions {
  * 复用 `builtinAgents()`——它内部已经做了 commandExists + cliVersion 探测，
  * 我们不重复实现一套探测逻辑，否则向导报告的可用性会和服务端真实解析结果漂移。
  *
- * 关于「是否已认证」：Dockmux 没有统一的认证探测接口，各家 CLI 的登录状态存放
+ * 关于「是否已认证」：Dutydeck 没有统一的认证探测接口，各家 CLI 的登录状态存放
  * 位置和判定方式都不同（配置文件、keychain、环境变量），逐个去猜会既慢又不可靠，
  * 还可能误报成「未认证」把用户劝退。因此这里只报告「已安装 + 版本」这个可靠事实，
  * 认证状态留给 doctor 用各 CLI 自己的方式单独体检。

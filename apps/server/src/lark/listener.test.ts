@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentEvent, Session } from '@dockmux/shared';
+import type { AgentEvent, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkMessageCoordinator, patchRejectedCardDelta, renderLarkCardElements, renderLarkTrace } from './listener.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
@@ -65,7 +65,7 @@ describe('Lark message coordinator', () => {
       [stable, oldChanged, suffix],
       [stable, { ...oldChanged, content: '被拒绝的新进度' }, { tag: 'markdown', content: '新增敏感内容' }, suffix]
     );
-    expect(patched).toEqual([stable, oldChanged, expect.objectContaining({ element_id: 'dockmux_rejected_delta' }), suffix]);
+    expect(patched).toEqual([stable, oldChanged, expect.objectContaining({ element_id: 'dutydeck_rejected_delta' }), suffix]);
     expect(JSON.stringify(patched)).not.toContain('被拒绝的新进度');
     expect(JSON.stringify(patched)).not.toContain('新增敏感内容');
   });
@@ -80,11 +80,11 @@ describe('Lark message coordinator', () => {
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
     const content = JSON.stringify({ title: '', content_v2: [[
-      { tag: 'text', text: '切到 ' }, { tag: 'text', text: 'feat/dockmux-migration' }, { tag: 'text', text: ' 并 push 当前代码' }
+      { tag: 'text', text: '切到 ' }, { tag: 'text', text: 'feat/dutydeck-migration' }, { tag: 'text', text: ' 并 push 当前代码' }
     ]] });
     coordinator.handle({ messageId: 'om_post', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'post', content, mentions: [] }, config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
-    expect(runtime.send).toHaveBeenCalledWith('ses_1', '切到 feat/dockmux-migration 并 push 当前代码', expect.any(String));
+    expect(runtime.send).toHaveBeenCalledWith('ses_1', '切到 feat/dutydeck-migration 并 push 当前代码', expect.any(String));
     expect(runtime.send.mock.calls[0]?.[1]).not.toContain('content_v2');
   });
 
@@ -102,7 +102,7 @@ describe('Lark message coordinator', () => {
     coordinator.handle({ messageId: 'om_image', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'image', content: '{"image_key":"img_1"}', mentions: [] }, config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(service.downloadMessageResource).toHaveBeenCalledWith('om_image', 'img_1', 'image');
-    expect(runtime.send.mock.calls[0]?.[1]).toContain('/dockmux/lark-resources/om_image/image-');
+    expect(runtime.send.mock.calls[0]?.[1]).toContain('/dutydeck/lark-resources/om_image/image-');
     expect(runtime.send.mock.calls[0]?.[1]).toContain('请使用本地文件读取工具查看');
   });
 
@@ -447,7 +447,7 @@ describe('Lark message coordinator', () => {
     };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const coordinator = new LarkMessageCoordinator(runtime, service as any, log, () => 0.99, 'ou_bot');
-    const message = (id: string) => ({ messageId: id, chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: '@_user_1 帮我检查' }), senderOpenId: 'ou_user', mentions: [{ key: '@_user_1', name: 'Dockmux', openId: 'ou_bot' }] });
+    const message = (id: string) => ({ messageId: id, chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: '@_user_1 帮我检查' }), senderOpenId: 'ou_user', mentions: [{ key: '@_user_1', name: 'Dutydeck', openId: 'ou_bot' }] });
     coordinator.handle(message('om_1'), config);
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'completed', elements: expect.any(Array) })));
     coordinator.handle(message('om_2'), config);
@@ -481,7 +481,7 @@ describe('Lark message coordinator', () => {
       update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_trigger', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: '@bot 分析这个' }), mentions: [{ key: '@bot', name: 'Dockmux', openId: 'ou_bot' }] }, config);
+    coordinator.handle({ messageId: 'om_trigger', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: '@bot 分析这个' }), mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }] }, config);
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'completed' })));
 
     expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_trigger', state: 'running', taskName: expect.any(String) }));
@@ -504,7 +504,7 @@ describe('Lark message coordinator', () => {
     };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_trigger_2', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: '@bot 处理' }), mentions: [{ key: '@bot', name: 'Dockmux', openId: 'ou_bot' }] }, config);
+    coordinator.handle({ messageId: 'om_trigger_2', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: '@bot 处理' }), mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }] }, config);
     await vi.waitFor(() => expect(service.reply).toHaveBeenCalled());
     expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ chatId: 'oc_group', state: 'running' }));
     expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_trigger_2' }), expect.stringContaining('回复卡片失败'));
@@ -609,7 +609,7 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     const injectedPrompt = runtime.send.mock.calls[0]?.[2];
     expect(runtime.send).toHaveBeenCalledWith('ses_1', '协作处理', expect.any(String));
-    expect(injectedPrompt).toContain('[Dockmux 飞书当前消息 · 系统上下文]');
+    expect(injectedPrompt).toContain('[Dutydeck 飞书当前消息 · 系统上下文]');
     expect(injectedPrompt).toContain('message_id：om_group_tools');
     expect(injectedPrompt).toContain('thread_id：omt_topic');
     expect(injectedPrompt).toContain('group send --reply-to om_group_tools --in-thread');
@@ -686,7 +686,7 @@ describe('Lark message coordinator', () => {
     const message = (messageId: string, threadId: string, senderOpenId: string, text: string) => ({
       messageId, threadId, chatId: 'oc_group', chatType: 'group', messageType: 'text',
       content: JSON.stringify({ text: `@bot ${text}` }), senderOpenId,
-      mentions: [{ key: '@bot', name: 'Dockmux', openId: 'ou_bot' }]
+      mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }]
     });
 
     coordinator.handle(message('om_alice_1', 'omt_topic_a', 'ou_alice', '第一条'), { ...config, preInjectPrompt: '最新群提示' });
@@ -701,8 +701,8 @@ describe('Lark message coordinator', () => {
       'cli_test:oc_group:group:thread:omt_topic_b'
     ]);
     expect(runtime.send.mock.calls.map(call => call[0])).toEqual(['ses_1', 'ses_2', 'ses_1']);
-    expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dockmux 预注入 Prompt]\n最新群提示');
-    expect(runtime.send.mock.calls[2]?.[2]).toContain('[Dockmux 预注入 Prompt]\n更新后的群提示');
+    expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 预注入 Prompt]\n最新群提示');
+    expect(runtime.send.mock.calls[2]?.[2]).toContain('[Dutydeck 预注入 Prompt]\n更新后的群提示');
     expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_alice_1', replyInThread: true, markdown: '正在思考中…' }));
     expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_bob_1', replyInThread: true, markdown: '正在思考中…' }));
     expect(service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ messageId: expect.stringMatching(/^omt_/) }));
@@ -734,7 +734,7 @@ describe('Lark message coordinator', () => {
     const message = (messageId: string, senderOpenId: string, text: string) => ({
       messageId, chatId: 'oc_group', chatType: 'group', messageType: 'text',
       content: JSON.stringify({ text: `@bot ${text}` }), senderOpenId,
-      mentions: [{ key: '@bot', name: 'Dockmux', openId: 'ou_bot' }]
+      mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }]
     });
 
     coordinator.handle(message('om_alice_1', 'ou_alice', '第一条'), config);
@@ -777,13 +777,13 @@ describe('Lark message coordinator', () => {
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, () => 0, 'ou_bot');
-    const message = (messageId: string, text: string) => ({ messageId, chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: `@bot ${text}` }), senderOpenId: 'ou_user', mentions: [{ key: '@bot', name: 'Dockmux', openId: 'ou_bot' }] });
+    const message = (messageId: string, text: string) => ({ messageId, chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: `@bot ${text}` }), senderOpenId: 'ou_user', mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }] });
     coordinator.handle(message('om_first', '第一条'), config);
     coordinator.handle(message('om_second', '第二条'), { ...config, riskControlMode: 'guidance', highRiskAllowedUsers: [{ openId: 'ou_admin', name: '管理员' }] });
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
     expect(runtime.dispatch.mock.calls.map(call => call.slice(1, 3))).toEqual([['第一条', 'queue'], ['第二条', 'queue']]);
     expect(runtime.dispatch.mock.calls.every(call => call.length === 4)).toBe(true);
-    expect(runtime.dispatch.mock.calls[1]?.[3]).toContain('[Dockmux 安全策略 · 自动注入]');
+    expect(runtime.dispatch.mock.calls[1]?.[3]).toContain('[Dutydeck 安全策略 · 自动注入]');
     expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: '正在排队，前面还有 1 个任务…' }));
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('前面还有 0 个任务') }));
     expect(runtime.send).not.toHaveBeenCalled();
@@ -1419,7 +1419,7 @@ describe('Lark message coordinator', () => {
       deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({ messageId: 'om_card' }))
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, () => 0, 'ou_bot');
-    const message = (messageId: string, text: string) => ({ messageId, chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: `@bot ${text}` }), mentions: [{ key: '@bot', name: 'Dockmux', openId: 'ou_bot' }] });
+    const message = (messageId: string, text: string) => ({ messageId, chatId: 'oc_group', chatType: 'group', messageType: 'text', content: JSON.stringify({ text: `@bot ${text}` }), mentions: [{ key: '@bot', name: 'Dutydeck', openId: 'ou_bot' }] });
     coordinator.handle(message('om_first', '第一条'), config);
     coordinator.handle(message('om_second', '第二条'), config);
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
@@ -1474,8 +1474,8 @@ describe('Lark message coordinator', () => {
     coordinator.handle({ messageId: 'om_guard', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"请 rm -rf 临时目录"}', senderOpenId: 'ou_user', mentions: [] }, { ...config, preInjectPrompt: '始终使用中文回答。', riskControlMode: 'enforced', highRiskAllowedEmails: ['admin@example.com'] });
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     expect(runtime.send.mock.calls[0]?.[1]).toBe('请 rm -rf 临时目录');
-    expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dockmux 安全策略 · 自动注入]');
-    expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dockmux 预注入 Prompt]\n始终使用中文回答。');
+    expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 安全策略 · 自动注入]');
+    expect(runtime.send.mock.calls[0]?.[2]).toContain('[Dutydeck 预注入 Prompt]\n始终使用中文回答。');
     expect(runtime.send.mock.calls[0]?.[2]).toContain('请 rm -rf 临时目录');
     expect(runtime.send.mock.calls[0]?.[3]).toEqual(expect.objectContaining({ enabled: true, authorized: false, actorEmail: 'user@example.com' }));
   });
@@ -1529,7 +1529,7 @@ describe('Lark message coordinator', () => {
     });
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     const injectedPrompt = runtime.send.mock.calls[0]![2];
-    expect(injectedPrompt).toContain('[Dockmux 安全策略 · 自动注入]');
+    expect(injectedPrompt).toContain('[Dutydeck 安全策略 · 自动注入]');
     expect(injectedPrompt).toContain('[用户请求]\n删除文件');
     expect(injectedPrompt).not.toContain(maliciousName);
     expect(runtime.send.mock.calls[0]).toHaveLength(3);
@@ -1626,7 +1626,7 @@ describe('Lark message coordinator', () => {
     const patched = service.update.mock.calls[1]?.[0];
     expect(patched.messageId).toBe('om_running');
     expect(JSON.stringify(patched.elements)).toContain('正在思考中');
-    expect(JSON.stringify(patched.elements)).toContain('dockmux_rejected_delta');
+    expect(JSON.stringify(patched.elements)).toContain('dutydeck_rejected_delta');
     expect(JSON.stringify(patched.elements)).not.toContain('未通过审核的最终结果');
     expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_running' }), '飞书卡片增量被拒绝，已保留上次成功内容并原地修补');
     // 内容被拒绝只影响过程卡；结果仍独立交付。
@@ -1938,7 +1938,7 @@ describe('Lark message coordinator', () => {
     const patched = service.update.mock.calls[1]?.[0];
     expect(patched).toMatchObject({ messageId: 'om_rejected', state: 'completed' });
     expect(JSON.stringify(patched.elements)).toContain('上次成功的进度');
-    expect(JSON.stringify(patched.elements)).toContain('dockmux_rejected_delta');
+    expect(JSON.stringify(patched.elements)).toContain('dutydeck_rejected_delta');
     expect(JSON.stringify(patched.elements)).not.toContain('过长或未通过审核的结果');
     // 内容被拒绝只影响过程增量；最终结果仍单独交付。
     expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: expect.stringMatching(/^result_/), readOnly: true }));
@@ -2153,7 +2153,7 @@ describe('Lark trace rendering', () => {
     // 也不承诺「稍后会收到审批卡」：带按钮的审批卡要 workflows 装配且 runtime 支持才会发，
     // Web 出口要配了 webBaseUrl 才有，渲染这一层两个条件都看不见。
     expect(elements[0]?.content).not.toContain('/approve');
-    expect(elements[0]?.content).not.toContain('Dockmux Web');
+    expect(elements[0]?.content).not.toContain('Dutydeck Web');
     expect(elements[0]?.content).not.toContain('text_tag');
     expect(elements[0]?.content).not.toContain('任务已暂停，需要人工确认');
     expect(JSON.stringify(elements)).not.toContain('"callback"');
@@ -2194,7 +2194,7 @@ describe('Lark trace rendering', () => {
     const elements = renderLarkCardElements([
       agentEvent(1, 'tool_result', { id: 'read', name: 'Read', input: { path: 'README.md' }, status: 'completed' }),
       agentEvent(2, 'tool_result', { id: 'edit', name: 'apply_patch', input: { command: 'apply_patch' }, status: 'completed' }),
-      agentEvent(3, 'tool_result', { id: 'search', name: 'Search', input: { query: 'Dockmux' }, status: 'completed' }),
+      agentEvent(3, 'tool_result', { id: 'search', name: 'Search', input: { query: 'Dutydeck' }, status: 'completed' }),
       agentEvent(4, 'tool_result', { id: 'web', name: 'Fetch', input: { url: 'https://example.com' }, status: 'completed' }),
       agentEvent(5, 'tool_result', { id: 'agent', name: 'group peers', status: 'completed' })
     ], config, false);

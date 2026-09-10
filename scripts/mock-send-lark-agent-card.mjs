@@ -22,7 +22,7 @@ turn.setMarkdown('进展：运行事件检查完成\n\n当前步骤：验证 SSE
 await new Promise(resolve => setTimeout(resolve, 5200));
 await turn.complete(`**Agent Debug 已完成**
 
-已检查 Dockmux 任务运行链路，结果如下：
+已检查 Dutydeck 任务运行链路，结果如下：
 
 - 任务运行可以正常创建并连续执行
 - SSE 使用 \`sequence\` 恢复，未发现事件重复

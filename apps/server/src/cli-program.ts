@@ -138,7 +138,7 @@ const addCardOptions = (command: Command) => command
   .option('--state <state>', 'Card state: queued, running, completed, failed, or interrupted', 'completed')
   .option('--read-only', 'Render the card without action buttons')
   .option('--agent-name <name>', 'Agent name shown in the card title')
-  .option('--task-name <name>', 'Card subtitle / task name', 'Dockmux')
+  .option('--task-name <name>', 'Card subtitle / task name', 'Dutydeck')
   .option('--task-id <id>', 'Task identifier shown in the footer')
   .option('--elapsed-seconds <seconds>', 'Elapsed time shown in the footer', '0')
   .option('--app-id <id>', 'Lark app ID; defaults to LARK_APP_ID')
@@ -149,7 +149,7 @@ const addServerOptions = (command: Command) => command
   .option('--host <host>', 'Advanced: bind a specific host or interface')
   .option('--local-only', 'Only accept connections from this computer (127.0.0.1)')
   .option('--auth', 'Require access-token authentication on non-local listeners (default)')
-  .option('--no-auth', 'Explicitly disable Dockmux access-token authentication (trusted networks only)')
+  .option('--no-auth', 'Explicitly disable Dutydeck access-token authentication (trusted networks only)')
   .option('--port <port>', 'Bind port (default: 4310)')
   .option('--cwd <directory>', 'Default Agent working directory')
   .option('--database <file>', 'SQLite database path')
@@ -201,8 +201,8 @@ const setupOptionsFrom = (options: SetupCliProgramOptions, command: Command): Se
 
 export function createCliProgram(version: string, handlers: CliHandlers = {}) {
   const program = new Command()
-    .name('dockmux')
-    .description('Run the Dockmux local session server')
+    .name('dutydeck')
+    .description('Run the Dutydeck local session server')
     .version(version, '-V, --version', 'Show the installed version');
 
   addServerOptions(program)
@@ -210,11 +210,11 @@ export function createCliProgram(version: string, handlers: CliHandlers = {}) {
 
   program.action(options => handlers.serve?.(options));
 
-  // 新用户的第一条命令。放在最前面是刻意的：`dockmux --help` 第一眼就该看到它。
+  // 新用户的第一条命令。放在最前面是刻意的：`dutydeck --help` 第一眼就该看到它。
   //
   // 注意 --cwd / --port / --local-only / --lark-app-id 在根命令上也有同名同义的定义，
   // commander 会把它们路由到定义处（即根命令），所以这里必须读合并后的 globals，
-  // 否则 `dockmux setup --cwd X` 里的 X 会落到根命令上、setup 拿到 undefined。
+  // 否则 `dutydeck setup --cwd X` 里的 X 会落到根命令上、setup 拿到 undefined。
   program.command('setup')
     .description('Guided first-run setup: detect Agent CLIs, choose a working directory, optionally bind a Lark bot')
     .option('--yes', 'Accept defaults without prompting; the only way to skip the Lark publish confirmation')
@@ -233,12 +233,12 @@ Behaviour:
   --json 隐含「绝不提问、绝不渲染二维码」；非交互环境请用字段 flag 或 --yes。
 
 Examples:
-  $ dockmux setup
-  $ dockmux setup --cwd /path/to/project --port 4310
-  $ dockmux setup --lark-app-id cli_xxx
-  $ dockmux setup --lark-app-id cli_xxx --force-login
-  $ dockmux setup --cwd /path/to/project --skip-lark --yes
-  $ dockmux setup --json --cwd /path/to/project --skip-lark --yes`);
+  $ dutydeck setup
+  $ dutydeck setup --cwd /path/to/project --port 4310
+  $ dutydeck setup --lark-app-id cli_xxx
+  $ dutydeck setup --lark-app-id cli_xxx --force-login
+  $ dutydeck setup --cwd /path/to/project --skip-lark --yes
+  $ dutydeck setup --json --cwd /path/to/project --skip-lark --yes`);
 
   program.command('doctor')
     .description('Diagnose the local environment and configuration; every failure prints a fix')
@@ -250,48 +250,48 @@ Exit codes:
   1    至少一项检查失败
 
 Examples:
-  $ dockmux doctor
-  $ dockmux doctor --json
-  $ dockmux doctor --json | jq '.checks[] | select(.level=="fail")'`);
+  $ dutydeck doctor
+  $ dutydeck doctor --json
+  $ dutydeck doctor --json | jq '.checks[] | select(.level=="fail")'`);
 
-  const autostart = program.command('autostart').description('Manage starting Dockmux automatically at login');
+  const autostart = program.command('autostart').description('Manage starting Dutydeck automatically at login');
   autostart.command('enable')
     .description('Register the boot hook (launchd on macOS, systemd --user on Linux); does not start the server now')
     .action(() => handlers.autostartEnable?.())
     .addHelpText('after', `
 Note:
-  enable 只注册开机项，不会立即启动服务；立即启动请用 dockmux start。
+  enable 只注册开机项，不会立即启动服务；立即启动请用 dutydeck start。
 
 Examples:
-  $ dockmux autostart enable`);
+  $ dutydeck autostart enable`);
   autostart.command('disable')
     .description('Remove the boot hook; leaves an already-running server untouched')
     .action(() => handlers.autostartDisable?.())
     .addHelpText('after', `
 Note:
-  disable 只移除开机项，正在运行的服务不受影响；停止它请用 dockmux stop。
+  disable 只移除开机项，正在运行的服务不受影响；停止它请用 dutydeck stop。
 
 Examples:
-  $ dockmux autostart disable`);
+  $ dutydeck autostart disable`);
   autostart.command('status')
     .description('Show whether the boot hook is registered and whether the service is loaded')
     .option('--json', 'Emit machine-readable state as a single JSON line')
     .action(options => handlers.autostartStatus?.(options))
     .addHelpText('after', `
 Examples:
-  $ dockmux autostart status
-  $ dockmux autostart status --json`);
+  $ dutydeck autostart status
+  $ dutydeck autostart status --json`);
 
-  const lark = program.command('lark').description('Send and update Dockmux Lark cards');
+  const lark = program.command('lark').description('Send and update Dutydeck Lark cards');
   addCardOptions(lark.command('send')
-    .description('Send a new Dockmux card')
+    .description('Send a new Dutydeck card')
     .argument('[markdown]', 'Final Markdown or fallback card content')
     .option('--receive-id <id>', 'Recipient ID; defaults to LARK_RECEIVE_ID')
     .option('--chat-id <id>', 'Group chat ID (oc_xxx); defaults to LARK_CHAT_ID')
     .option('--receive-id-type <type>', 'ID type; defaults to LARK_RECEIVE_ID_TYPE'))
     .action((markdown, options) => handlers.larkSend?.(markdown, options));
   addCardOptions(lark.command('update')
-    .description('Update an existing Dockmux card in place')
+    .description('Update an existing Dutydeck card in place')
     .argument('[markdown]', 'Final Markdown or fallback card content')
     .requiredOption('--message-id <id>', 'Lark card message ID to update'))
     .action((markdown, options) => handlers.larkUpdate?.(markdown, options));
@@ -312,7 +312,7 @@ Examples:
     .description('Discover human members in this Lark group')
     .action(() => handlers.groupMembers?.());
   group.command('bots')
-    .description('List all bots in this Lark group (agentId present means managed by this Dockmux instance)')
+    .description('List all bots in this Lark group (agentId present means managed by this Dutydeck instance)')
     .action(() => handlers.groupBots?.());
   group.command('messages')
     .description('Read messages from this Lark group')
@@ -333,9 +333,9 @@ Examples:
     .action((content, options) => handlers.groupSend?.(content, options))
     .addHelpText('after', `
 Examples:
-  $ dockmux group send "我已定位问题" --reply-to om_xxx --in-thread
-  $ dockmux group send "请检查接口" --to cli_peer --reply-to om_xxx --in-thread
-  $ dockmux group send "发布窗口已开启"
+  $ dutydeck group send "我已定位问题" --reply-to om_xxx --in-thread
+  $ dutydeck group send "请检查接口" --to cli_peer --reply-to om_xxx --in-thread
+  $ dutydeck group send "发布窗口已开启"
 
 Routing guidance:
   Continue a discussion or answer a question with --reply-to ... --in-thread.
@@ -356,9 +356,9 @@ Routing guidance:
     .action(options => handlers.groupWait?.(options));
 
   // 通用回传通道：任何来源的会话内 CLI 都能使用，不限飞书。
-  // 与 `dockmux group send` 分层并存——group 面向飞书群里的其他人/机器人，
+  // 与 `dutydeck group send` 分层并存——group 面向飞书群里的其他人/机器人，
   // session 面向「发起本会话的用户」，落点是会话事件流（Web 时间线 / 卡片）。
-  const session = program.command('session').description('Relay messages to the user who owns the current Dockmux session');
+  const session = program.command('session').description('Relay messages to the user who owns the current Dutydeck session');
   session.command('send')
     .description('Push a message to the user now, without waiting for the turn to end')
     .argument('<text>', 'Message content')
@@ -377,9 +377,9 @@ Exit codes:
   124  timed out with no answer
 
 Examples:
-  $ dockmux session send "已完成迁移，正在跑回归"
-  $ answer=$(dockmux session ask "要继续发布吗？") && echo "user said: $answer"
-  $ dockmux session ask "选哪个方案？" --timeout 60 --json`);
+  $ dutydeck session send "已完成迁移，正在跑回归"
+  $ answer=$(dutydeck session ask "要继续发布吗？") && echo "user said: $answer"
+  $ dutydeck session ask "选哪个方案？" --timeout 60 --json`);
 
   const botmux = program.command('botmux').description('Inspect Botmux data with the read-only migration importer');
   addBotmuxSourceOptions(botmux.command('discover')
@@ -387,7 +387,7 @@ Examples:
     .option('--output <file>', 'Write the redacted report to a new private file'))
     .action(options => handlers.botmuxDiscover?.(options));
   addBotmuxSourceOptions(botmux.command('plan')
-    .description('Create a redacted NO_GO migration plan without writing Dockmux data')
+    .description('Create a redacted NO_GO migration plan without writing Dutydeck data')
     .option('--output <file>', 'Write the redacted manifest to a new private file'))
     .action(options => handlers.botmuxPlan?.(options));
   addBotmuxSourceOptions(botmux.command('archive')
@@ -418,7 +418,7 @@ Examples:
     .action((id, options, command) => handlers.secretRemove?.(id, serverOptionsFrom(options, command) as SecretRemoveCliOptions));
 
   program.command('update')
-    .description('Update the global Dockmux package and restart the background service')
+    .description('Update the global Dutydeck package and restart the background service')
     .option('--dist-tag <tag>', 'npm dist-tag to install (default: latest)', 'latest')
     .action(options => handlers.update?.(options));
 
@@ -430,78 +430,78 @@ Examples:
 
   const addProcessCommands = (parent: Command) => {
     parent.command('start')
-      .description('Start the Dockmux server in the background')
+      .description('Start the Dutydeck server in the background')
       .option('--json', 'Print the result as a single line of JSON')
       .action((options, command) => handlers.daemonStart?.(serverOptionsFrom(options, command)));
     parent.command('stop')
-      .description('Stop the background Dockmux server')
+      .description('Stop the background Dutydeck server')
       .option('--json', 'Print the result as a single line of JSON')
       .action(options => handlers.daemonStop?.(options));
     parent.command('restart')
-      .description('Restart the background Dockmux server')
+      .description('Restart the background Dutydeck server')
       .option('--json', 'Print the result as a single line of JSON')
       .action((options, command) => handlers.daemonRestart?.(serverOptionsFrom(options, command)));
     parent.command('status')
-      .description('Show whether the background Dockmux server is running')
+      .description('Show whether the background Dutydeck server is running')
       .option('--json', 'Print the result as a single line of JSON')
       .action(options => handlers.daemonStatus?.(options));
   };
 
-  // Both the top-level `dockmux start/stop/restart/status` (no prefix) and the
-  // `dockmux daemon start/.../status` group are supported and share one implementation.
+  // Both the top-level `dutydeck start/stop/restart/status` (no prefix) and the
+  // `dutydeck daemon start/.../status` group are supported and share one implementation.
   addProcessCommands(program);
-  const daemon = program.command('daemon').description('Run the Dockmux server in the background and manage it');
+  const daemon = program.command('daemon').description('Run the Dutydeck server in the background and manage it');
   addProcessCommands(daemon);
 
   return program
     .addHelpText('after', `
 Getting started:
-  $ dockmux setup
-  $ dockmux doctor
-  $ dockmux autostart enable
+  $ dutydeck setup
+  $ dutydeck doctor
+  $ dutydeck autostart enable
 
 Examples:
-  $ dockmux
-  $ dockmux --local-only
-  $ dockmux --host 0.0.0.0 --no-auth
-  $ dockmux --cwd /path/to/project --port 4310
-  $ dockmux start --port 4310
-  $ dockmux status
-  $ dockmux restart --port 4410
-  $ dockmux update --dist-tag fix
-  $ dockmux auth token
-  $ dockmux auth token --rotate
-  $ dockmux stop
-  $ dockmux daemon start --port 4310
-  $ dockmux daemon status
-  $ dockmux acpk agents list --json
-  $ dockmux lark send "**任务已完成**"
-  $ dockmux lark update "**最新结果**" --message-id om_xxx
-  $ dockmux lark preflight bot-id --group-binding binding-id
-  $ dockmux group peers
-  $ dockmux group members
-  $ dockmux group send "请检查接口" --to cli_peer
-  $ dockmux session send "已完成迁移，正在跑回归"
-  $ dockmux session ask "要继续发布吗？"
-  $ dockmux botmux discover --source-home /tmp/botmux-fixture --json
-  $ dockmux botmux plan --source-home /tmp/botmux-fixture --output /tmp/redacted-plan.json
-  $ dockmux botmux archive --source-home /tmp/botmux-fixture --output /tmp/private-archive
-  $ dockmux secret list
-  $ dockmux secret set team-bot --value-fd 0
-  $ dockmux secret rotate team-bot --expected-revision 1 --value-fd 0
-  $ dockmux --version`);
+  $ dutydeck
+  $ dutydeck --local-only
+  $ dutydeck --host 0.0.0.0 --no-auth
+  $ dutydeck --cwd /path/to/project --port 4310
+  $ dutydeck start --port 4310
+  $ dutydeck status
+  $ dutydeck restart --port 4410
+  $ dutydeck update --dist-tag fix
+  $ dutydeck auth token
+  $ dutydeck auth token --rotate
+  $ dutydeck stop
+  $ dutydeck daemon start --port 4310
+  $ dutydeck daemon status
+  $ dutydeck acpk agents list --json
+  $ dutydeck lark send "**任务已完成**"
+  $ dutydeck lark update "**最新结果**" --message-id om_xxx
+  $ dutydeck lark preflight bot-id --group-binding binding-id
+  $ dutydeck group peers
+  $ dutydeck group members
+  $ dutydeck group send "请检查接口" --to cli_peer
+  $ dutydeck session send "已完成迁移，正在跑回归"
+  $ dutydeck session ask "要继续发布吗？"
+  $ dutydeck botmux discover --source-home /tmp/botmux-fixture --json
+  $ dutydeck botmux plan --source-home /tmp/botmux-fixture --output /tmp/redacted-plan.json
+  $ dutydeck botmux archive --source-home /tmp/botmux-fixture --output /tmp/private-archive
+  $ dutydeck secret list
+  $ dutydeck secret set team-bot --value-fd 0
+  $ dutydeck secret rotate team-bot --expected-revision 1 --value-fd 0
+  $ dutydeck --version`);
 }
 
 export function environmentFromCli(options: CliOptions, base: NodeJS.ProcessEnv = process.env) {
   const env = { ...base };
-  if (options.host !== undefined) env.DOCKMUX_HOST = options.host;
-  if (options.localOnly === true) env.DOCKMUX_LOCAL_ONLY = 'true';
-  if (options.auth !== undefined) env.DOCKMUX_AUTH = String(options.auth);
-  if (options.port !== undefined) env.DOCKMUX_PORT = options.port;
-  if (options.cwd !== undefined) env.DOCKMUX_DEFAULT_CWD = options.cwd;
-  if (options.database !== undefined) env.DOCKMUX_DATABASE_URL = options.database;
-  if (options.idleTimeoutMs !== undefined) env.DOCKMUX_DRIVER_IDLE_TIMEOUT_MS = options.idleTimeoutMs;
-  if (options.cleanupIntervalMs !== undefined) env.DOCKMUX_CLEANUP_INTERVAL_MS = options.cleanupIntervalMs;
+  if (options.host !== undefined) env.DUTYDECK_HOST = options.host;
+  if (options.localOnly === true) env.DUTYDECK_LOCAL_ONLY = 'true';
+  if (options.auth !== undefined) env.DUTYDECK_AUTH = String(options.auth);
+  if (options.port !== undefined) env.DUTYDECK_PORT = options.port;
+  if (options.cwd !== undefined) env.DUTYDECK_DEFAULT_CWD = options.cwd;
+  if (options.database !== undefined) env.DUTYDECK_DATABASE_URL = options.database;
+  if (options.idleTimeoutMs !== undefined) env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS = options.idleTimeoutMs;
+  if (options.cleanupIntervalMs !== undefined) env.DUTYDECK_CLEANUP_INTERVAL_MS = options.cleanupIntervalMs;
   if (options.larkAppId !== undefined) env.LARK_APP_ID = options.larkAppId;
   if (options.larkAppSecret !== undefined) env.LARK_APP_SECRET = options.larkAppSecret;
   if (options.larkReceiveId !== undefined) env.LARK_RECEIVE_ID = options.larkReceiveId;
@@ -509,6 +509,6 @@ export function environmentFromCli(options: CliOptions, base: NodeJS.ProcessEnv 
   if (options.larkReceiveIdType !== undefined) env.LARK_RECEIVE_ID_TYPE = options.larkReceiveIdType;
   if (options.larkAgentName !== undefined) env.LARK_AGENT_NAME = options.larkAgentName;
   if (options.larkBaseUrl !== undefined) env.LARK_OPEN_API_BASE_URL = options.larkBaseUrl;
-  if (options.larkListen === false) env.DOCKMUX_DISABLE_LARK_LISTENER = 'true';
+  if (options.larkListen === false) env.DUTYDECK_DISABLE_LARK_LISTENER = 'true';
   return env;
 }

@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import type { AgentConfig, Protocol } from '@dockmux/shared';
+import type { AgentConfig, Protocol } from '@dutydeck/shared';
 import {
   InvalidWorkingDirectoryError,
   detectAgents,
@@ -15,7 +15,7 @@ const roots: string[] = [];
 const savedHome = process.env.HOME;
 
 async function fixture(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dockmux-detect-'));
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-detect-'));
   roots.push(root);
   return root;
 }

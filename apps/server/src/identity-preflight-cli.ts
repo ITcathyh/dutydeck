@@ -1,4 +1,4 @@
-import { createRepositories } from '@dockmux/storage';
+import { createRepositories } from '@dutydeck/storage';
 import { getAuthToken } from './auth/auth.js';
 import { readDaemonStatus, resolveDaemonDir, type DaemonState } from './daemon/daemon.js';
 
@@ -67,7 +67,7 @@ function projectChat(value: unknown) {
 export function projectIdentityPreflightCliResult(value: unknown) {
   const item = record(value);
   if (item.schemaVersion !== 1 || typeof item.channelBotId !== 'string' || (item.status !== 'passed' && item.status !== 'blocked')) {
-    throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_RESPONSE_INVALID', 'Dockmux returned an invalid identity preflight response');
+    throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_RESPONSE_INVALID', 'Dutydeck returned an invalid identity preflight response');
   }
   const identityFact = projectIdentity(item.identityFact);
   const chatFacts = Array.isArray(item.chatFacts) ? item.chatFacts.flatMap(value => {
@@ -96,10 +96,10 @@ export function projectIdentityPreflightCliResult(value: unknown) {
 function loopbackAddress(raw: string): string {
   let url: URL;
   try { url = new URL(raw); }
-  catch { throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_DAEMON_ADDRESS_INVALID', 'The Dockmux daemon address is invalid'); }
+  catch { throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_DAEMON_ADDRESS_INVALID', 'The Dutydeck daemon address is invalid'); }
   const hostname = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1'].includes(hostname)) {
-    throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_DAEMON_ADDRESS_INVALID', 'Identity preflight CLI only connects to the locally recorded Dockmux daemon');
+    throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_DAEMON_ADDRESS_INVALID', 'Identity preflight CLI only connects to the locally recorded Dutydeck daemon');
   }
   return url.origin;
 }
@@ -117,7 +117,7 @@ export async function runIdentityPreflightCli(
 ) {
   if (!channelBotId.trim()) throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_CHANNEL_BOT_REQUIRED', 'ChannelBot ID is required');
   const state = dependencies.readState?.() ?? readDaemonStatus(resolveDaemonDir());
-  if (!state?.ready || !state.address) throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_DAEMON_UNAVAILABLE', 'The Dockmux daemon is not ready');
+  if (!state?.ready || !state.address) throw new IdentityPreflightCliError('IDENTITY_PREFLIGHT_DAEMON_UNAVAILABLE', 'The Dutydeck daemon is not ready');
   const base = loopbackAddress(state.address);
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (state.authEnabled !== false) {

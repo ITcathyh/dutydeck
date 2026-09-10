@@ -30,7 +30,7 @@ function print(value, stream = process.stdout) {
 }
 
 function main() {
-  const privateRoot = mkdtempSync(join(tmpdir(), 'dockmux-parity-wp2-'));
+  const privateRoot = mkdtempSync(join(tmpdir(), 'dutydeck-parity-wp2-'));
   const runtimeTmp = join(privateRoot, 'runtime');
   const tmuxTmp = join(privateRoot, 'tmux');
   mkdirSync(runtimeTmp, { mode: 0o700 });
@@ -65,7 +65,7 @@ function main() {
       'node_modules/vitest/vitest.mjs', 'run',
       'apps/server/src/service.test.ts',
       '--project', 'node',
-      '-t', 'keeps a completed Dockmux Run on the same pane across a service restart',
+      '-t', 'keeps a completed Dutydeck Run on the same pane across a service restart',
     ], { stdio: 'inherit' });
     testStatus = test.status ?? 1;
     residue = isolatedSessions(env);

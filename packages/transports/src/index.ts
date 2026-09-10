@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import readline from 'node:readline';
 import * as pty from 'node-pty';
-import type { AgentConfig, AgentCapabilities } from '@dockmux/shared';
-import { normalizeAcpxEvent, type NormalizedDriverEvent } from '@dockmux/acp-client';
+import type { AgentConfig, AgentCapabilities } from '@dutydeck/shared';
+import { normalizeAcpxEvent, type NormalizedDriverEvent } from '@dutydeck/acp-client';
 
 export interface ProbeMatrix { acp: boolean; jsonl: boolean; pipe: boolean; pty: boolean }
 export function commandExists(command: string) {

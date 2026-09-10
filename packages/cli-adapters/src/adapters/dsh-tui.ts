@@ -17,14 +17,14 @@ const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
  *     这里透传用于会话恢复。
  *
  * 不实现 buildResumeCommand：裸 `--resume` 读的是 resume.txt 里的「最后一个会话」，
- * 不按 dockmux 会话隔离，交给用户可能恢复到别的会话去。
+ * 不按 dutydeck 会话隔离，交给用户可能恢复到别的会话去。
  */
 export function createDshTuiAdapter(): CliAdapter {
   return {
     id: 'dsh-tui',
     // resume 能力位为否：buildArgs 虽能接 --resume（driver 回填 resumeSessionId
     // 时可用），但没有 buildResumeCommand——裸 --resume 读的是 ~/.dsh-tui/resume.txt
-    // 里的「最后一个会话」，不按 dockmux 会话隔离，可能恢复到兄弟会话去；显式 id
+    // 里的「最后一个会话」，不按 dutydeck 会话隔离，可能恢复到兄弟会话去；显式 id
     // 又要 TUI 自己铸的 session id（driver 拿不到）。botmux 同样返回 null。
     capabilities: {},
 

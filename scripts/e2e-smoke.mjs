@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * dockmux 端到端冒烟检查
+ * dutydeck 端到端冒烟检查
  *
  * 固化发布验收中的关键路径，可重复执行：
  *   1. 启动 server（临时端口 + 临时数据目录，前台进程，绝不 daemonize）
@@ -17,7 +17,7 @@
  *
  * 两种模式
  *   默认 --mock：用 /tmp 下生成的假 CLI（Node 脚本）冒充 claude，不触碰真实模型，CI 可跑。
- *               通过 DOCKMUX_AGENTS_JSON 覆盖 claude-code agent 的 command 指向假 CLI。
+ *               通过 DUTYDECK_AGENTS_JSON 覆盖 claude-code agent 的 command 指向假 CLI。
  *   --real     ：用本机真实 `claude` CLI，会真的调用模型、产生费用。必须显式指定。
  *
  * 清理保证
@@ -32,7 +32,7 @@
  *   node scripts/e2e-smoke.mjs                 # mock 模式（默认）
  *   node scripts/e2e-smoke.mjs --real          # 真实 CLI
  *   node scripts/e2e-smoke.mjs --port 14500 --verbose
- *   node scripts/e2e-smoke.mjs --server-entry /tmp/install/node_modules/dockmux/dist/cli.js
+ *   node scripts/e2e-smoke.mjs --server-entry /tmp/install/node_modules/dutydeck/dist/cli.js
  */
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -316,12 +316,12 @@ function loadWebSocket() {
 
 // ── 主流程 ─────────────────────────────────────────────────────────────────
 async function main() {
-  log(`dockmux e2e smoke — ${REAL ? 'REAL（调用真实 CLI 与模型）' : 'MOCK（假 CLI，不触碰模型）'}`);
+  log(`dutydeck e2e smoke — ${REAL ? 'REAL（调用真实 CLI 与模型）' : 'MOCK（假 CLI，不触碰模型）'}`);
   log(`端口 ${PORT} · 全局超时 ${TIMEOUT_MS}ms`);
   assert(existsSync(join(dirname(SERVER_ENTRY), 'agents/env-launcher.mjs')), 'production build packages the ACP environment launcher');
 
   // 临时数据目录（DB、假 CLI、假 CLAUDE_CONFIG_DIR 全在里面，清理时整棵删掉）
-  const dataDir = mkdtempSync(join(tmpdir(), 'dockmux-smoke-'));
+  const dataDir = mkdtempSync(join(tmpdir(), 'dutydeck-smoke-'));
   onCleanup(`删除临时目录 ${dataDir}`, () => rmSync(dataDir, { recursive: true, force: true }));
   const binDir = join(dataDir, 'bin');
   const claudeDataDir = join(dataDir, 'claude');
@@ -348,7 +348,7 @@ async function main() {
   // REAL 模式不能这么做——claude 的**凭证和 transcript 在同一个目录**，隔离
   // transcript 就等于隔离登录状态，CLI 会停在「Select login method」页等人选。
   // （试过隔离 HOME 并播种配置，同样卡住，只是换成 "Security notes … Press
-  // Enter to continue" 那一屏；`claude -p` 非交互模式正常，但 dockmux 用的是
+  // Enter to continue" 那一屏；`claude -p` 非交互模式正常，但 dutydeck 用的是
   // TUI 形态，两条路径不共用这些一次性状态。）
   // 所以 REAL 用开发者真实的配置目录，跑完把自己产生的会话文件删掉。
   const bridgedCliEnv = REAL ? {} : { CLAUDE_CONFIG_DIR: claudeDataDir };
@@ -358,7 +358,7 @@ async function main() {
     // 覆盖内置 claude-code agent 的 command 指向假 CLI。
     // id 必须仍是 'claude-code'：pty 驱动工厂按 agent.id 找适配器，未知 id 会抛错。
     // 给 version 是为了跳过 cliVersion() 的三次 spawnSync 探测。
-    serverEnv.DOCKMUX_AGENTS_JSON = JSON.stringify([{
+    serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify([{
       id: 'claude-code',
       name: 'Mock Claude',
       command: mockPath,
@@ -385,7 +385,7 @@ async function main() {
       const projectKey = realpathSync(workspace).replace(/[^A-Za-z0-9-]/g, '-');
       rmSync(join(homedir(), '.claude', 'projects', projectKey), { recursive: true, force: true });
     });
-    serverEnv.DOCKMUX_AGENTS_JSON = JSON.stringify([{
+    serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify([{
       id: 'claude-code',
       name: 'Claude Code',
       command: 'claude',
@@ -406,7 +406,7 @@ async function main() {
     '--local-only',            // 绑 127.0.0.1；免 token，但仍校验 loopback Host/Origin
     '--port', String(PORT),
     '--cwd', workspace,
-    '--database', join(dataDir, 'dockmux.db'),
+    '--database', join(dataDir, 'dutydeck.db'),
     '--no-lark-listen'         // 不去连飞书
   ], {
     cwd: workspace,
@@ -506,7 +506,7 @@ async function main() {
   await firstUseHeading.waitFor({ state: 'visible', timeout: 20_000 });
   assert(await firstUseHeading.isVisible(), '首次使用空状态说明如何开始第一个任务');
 
-  const workbenchNavigation = page.getByRole('complementary', { name: 'Dockmux 工作台导航' });
+  const workbenchNavigation = page.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
   const createTaskEntry = await waitForVisibleLocator('首页创建任务入口', [
     () => workbenchNavigation.getByRole('button', { name: '创建任务', exact: true }),
     () => page.getByRole('button', { name: '创建第一个任务', exact: true })

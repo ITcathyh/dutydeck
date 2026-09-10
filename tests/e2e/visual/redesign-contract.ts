@@ -46,13 +46,13 @@ export const SIDEBAR_WIDTH = { value: 248, tolerance: 2 } as const;
  * 四周留 16px 空隙、12px 圆角、1px 边框带阴影，视觉上「浮」在背景上；主区靠
  * `margin-left: calc(248px + 48px)` 让位（anatomy §A1）。
  *
- * 现状 dockmux 侧栏是 `fixed inset-y-0 left-0` 的贴边通栏，圆角 0、左边距 0。
+ * 现状 dutydeck 侧栏是 `fixed inset-y-0 left-0` 的贴边通栏，圆角 0、左边距 0。
  * 只断宽度会让「把 292 改成 248 但仍然贴边」蒙混过关，所以形态要单独断。
  */
 export const SIDEBAR_CARD = {
   /** 距视口左边/上边的空隙下限。botmux 是 16px，留 8px 下限允许我们自己收紧。 */
   minInset: 8,
-  /** 圆角下限。botmux `--radius-lg` = 12px；dockmux 自己的 `--radius-md` = 10px 也可接受。 */
+  /** 圆角下限。botmux `--radius-lg` = 12px；dutydeck 自己的 `--radius-md` = 10px 也可接受。 */
   minRadius: 8
 } as const;
 
@@ -72,7 +72,7 @@ export const DARK_SIDEBAR_MAX_LUMINANCE = 0.2;
  * 侧栏功能导航区必须是**分组结构**，不只是几个链接。
  *
  * botmux 侧栏是「顶部 2 个创建操作 + 19 项导航分 5 组」（概览 / 协作 / 数字员工 /
- * 分析 / 管理，anatomy §A2 的 `NAV_GROUPS`）。dockmux 现状是「一个任务列表 + 底部
+ * 分析 / 管理，anatomy §A2 的 `NAV_GROUPS`）。dutydeck 现状是「一个任务列表 + 底部
  * 一颗『Agent 与设置』按钮」，四个功能（Agent / 飞书 / 群与权限 / 自动化）全塞在
  * 那颗按钮后面的弹层里，从侧栏看不到它们存在。
  *
@@ -82,5 +82,5 @@ export const DARK_SIDEBAR_MAX_LUMINANCE = 0.2;
 export const SIDEBAR_NAV_ENTRIES = ['Agent 与设置', '飞书接入'] as const;
 /** 至少要有几个直达入口才算「有导航区」——两个就够证明不再是单一弹层入口。 */
 export const SIDEBAR_NAV_MIN_ENTRIES = 2;
-/** 至少几个分组。botmux 是 5 组；dockmux 功能面更窄，2 组（任务 / 配置）即算成立。 */
+/** 至少几个分组。botmux 是 5 组；dutydeck 功能面更窄，2 组（任务 / 配置）即算成立。 */
 export const SIDEBAR_NAV_MIN_GROUPS = 2;

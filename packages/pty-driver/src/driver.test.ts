@@ -2,10 +2,10 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentConfig, NormalizedDriverEvent } from '@dockmux/shared';
-import type { CliAdapter } from '@dockmux/cli-adapters';
-import { createCliAdapter } from '@dockmux/cli-adapters';
-import { PtyBackend, TmuxBackend, type SessionBackend } from '@dockmux/session-backends';
+import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
+import type { CliAdapter } from '@dutydeck/cli-adapters';
+import { createCliAdapter } from '@dutydeck/cli-adapters';
+import { PtyBackend, TmuxBackend, type SessionBackend } from '@dutydeck/session-backends';
 import { readFile } from 'node:fs/promises';
 import { PtyCliDriver } from './driver.js';
 import { PTY_AGENT_CONTRIBUTIONS } from './contributions.js';
@@ -199,8 +199,8 @@ describe('driver 不反射读后端私有字段', () => {
 
   it('走的是公开契约：backend.sessionName 直接可读', () => {
     // 正向断言，防「把反射删了但也不读了」——那样 tmux reattach 会全线失效。
-    const backend: SessionBackend = new TmuxBackend('dockmux-driver-contract');
-    expect(backend.sessionName).toBe('dockmux-driver-contract');
+    const backend: SessionBackend = new TmuxBackend('dutydeck-driver-contract');
+    expect(backend.sessionName).toBe('dutydeck-driver-contract');
   });
 });
 

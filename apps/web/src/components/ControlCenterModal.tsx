@@ -121,7 +121,7 @@ export function ControlCenterModal({
   const missingBindings = cells.filter(cell => !cell.desiredPolicy).length;
   const scheduleCount = schedules.data?.schedules.length ?? 0;
   const nextStep = useMemo(() => {
-    if (agents.length === 0) return { title: '准备第一个 Agent', detail: '安装并登录一个受支持的 CLI，然后重启 Dockmux。', action: () => setSection('agents' as const) };
+    if (agents.length === 0) return { title: '准备第一个 Agent', detail: '安装并登录一个受支持的 CLI，然后重启 Dutydeck。', action: () => setSection('agents' as const) };
     /*
       Bot 状态未就绪时既不能说「还没有 Bot」，也不能沿用缓存说「监听已启动」。
       larkConfig 失败后 isLoading=false、data=undefined，若直接落到下面的
@@ -161,7 +161,7 @@ export function ControlCenterModal({
   */
   const busy = createBot.isPending;
 
-  return <Dialog open={open} onClose={onClose} label="Dockmux 设置与接入" size="xl" closeOnEscape={!busy} closeOnScrim={!busy}>
+  return <Dialog open={open} onClose={onClose} label="Dutydeck 设置与接入" size="xl" closeOnEscape={!busy} closeOnScrim={!busy}>
     <Dialog.Header>
       <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-action-soft text-action"><Settings2 size={18}/></span>
       <div className="min-w-0 flex-1">
@@ -200,7 +200,7 @@ export function ControlCenterModal({
 
 function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { agents: Agent[]; legacyBots: LarkBotConfig[]; onCreateTask(): void; onOpenLarkSetup(): void }) {
   return <section aria-labelledby="control-agents">
-    <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-agents" className="text-title font-semibold text-primary">Agent</h3><p className="mt-1 text-caption text-subtle">Agent 是在这台机器上执行任务的 CLI。Dockmux 会自动发现已安装并登录的受支持 CLI。</p></div>{statePill(agents.length ? `${agents.length} 个可用` : '尚未找到', agents.length ? 'ready' : 'blocked')}</div>
+    <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-agents" className="text-title font-semibold text-primary">Agent</h3><p className="mt-1 text-caption text-subtle">Agent 是在这台机器上执行任务的 CLI。Dutydeck 会自动发现已安装并登录的受支持 CLI。</p></div>{statePill(agents.length ? `${agents.length} 个可用` : '尚未找到', agents.length ? 'ready' : 'blocked')}</div>
     {agents.length > 0 && <div className="mt-4 grid gap-3 sm:grid-cols-2">{agents.map(agent => {
       const boundBots = legacyBots.filter(bot => bot.defaultAgentId === agent.id);
       return <Card key={agent.id} as="article" padding="md">
@@ -213,8 +213,8 @@ function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { a
     })}</div>}
     <div className={`mt-4 rounded-lg border p-4 ${agents.length ? 'border-default bg-muted' : 'border-warning-border bg-warning-soft'}`}>
       <h4 className="text-body font-semibold text-primary">{agents.length ? '添加另一个 Agent' : '添加第一个 Agent'}</h4>
-      <ol className="mt-2 space-y-2 text-caption text-secondary"><li><strong className="text-primary">1.</strong> 在运行 Dockmux 的机器上安装并登录 Codex、Claude Code、Gemini 等受支持 CLI。</li><li><strong className="text-primary">2.</strong> 在终端运行 <code className="rounded-sm bg-inverse px-1.5 py-1 text-on-inverse">dockmux restart</code>，让 Dockmux 重新检测。</li><li><strong className="text-primary">3.</strong> 回到此页确认 Agent 显示为“可用”，再创建任务或连接飞书 Bot。</li></ol>
-      <details className="mt-3 text-caption text-secondary"><summary className="cursor-pointer font-semibold text-primary">自定义 Agent</summary><p className="mt-2">通过 <code>DOCKMUX_AGENTS_JSON</code> 配置自定义 ACP/CLI 后重启。启动命令、环境变量、密钥和 system prompt 不会发送到浏览器。</p></details>
+      <ol className="mt-2 space-y-2 text-caption text-secondary"><li><strong className="text-primary">1.</strong> 在运行 Dutydeck 的机器上安装并登录 Codex、Claude Code、Gemini 等受支持 CLI。</li><li><strong className="text-primary">2.</strong> 在终端运行 <code className="rounded-sm bg-inverse px-1.5 py-1 text-on-inverse">dutydeck restart</code>，让 Dutydeck 重新检测。</li><li><strong className="text-primary">3.</strong> 回到此页确认 Agent 显示为“可用”，再创建任务或连接飞书 Bot。</li></ol>
+      <details className="mt-3 text-caption text-secondary"><summary className="cursor-pointer font-semibold text-primary">自定义 Agent</summary><p className="mt-2">通过 <code>DUTYDECK_AGENTS_JSON</code> 配置自定义 ACP/CLI 后重启。启动命令、环境变量、密钥和 system prompt 不会发送到浏览器。</p></details>
     </div>
   </section>;
 }
@@ -292,7 +292,7 @@ function LarkSection({ agents, legacyBots, larkListeningDisabled, larkBotsLoadin
       </form>}
       <div className="mt-3 space-y-2">{channelBots.map(entry => <Card key={entry.bot.id} as="article" padding="sm"><div className="flex flex-wrap items-center gap-2"><Bot size={14}/><strong className="text-caption text-primary">{entry.bot.displayName}</strong>{statePill(`${entry.bot.state} / listener disabled`)}{statePill(entry.bot.credentialStatus === 'configured' ? 'SecretRef ready' : `credential ${entry.bot.credentialStatus}`, entry.bot.credentialStatus === 'configured' ? 'ready' : 'blocked')}</div></Card>)}</div>
       {matrix.isLoading && <div className="mt-3"><Spinner label="正在读取高级草稿…"/></div>}
-      <Card padding="sm" className="mt-4"><div className="flex items-center gap-2"><KeyRound size={14}/><h4 className="text-caption font-semibold text-primary">SecretRef metadata</h4><span className="ml-auto text-caption text-subtle">可用 {availableLarkRefs.length}</span></div>{availableLarkRefs.length === 0 && <p className="mt-2 text-caption text-secondary">高级迁移凭据只能通过本机 CLI 写入：<code className="ml-1 rounded-sm bg-inverse px-1.5 py-1 text-on-inverse">dockmux secret set &lt;ref-id&gt;</code></p>}</Card>
+      <Card padding="sm" className="mt-4"><div className="flex items-center gap-2"><KeyRound size={14}/><h4 className="text-caption font-semibold text-primary">SecretRef metadata</h4><span className="ml-auto text-caption text-subtle">可用 {availableLarkRefs.length}</span></div>{availableLarkRefs.length === 0 && <p className="mt-2 text-caption text-secondary">高级迁移凭据只能通过本机 CLI 写入：<code className="ml-1 rounded-sm bg-inverse px-1.5 py-1 text-on-inverse">dutydeck secret set &lt;ref-id&gt;</code></p>}</Card>
     </details>
   </section>;
 }
@@ -301,7 +301,7 @@ function GroupsSection({ cells, missingBindings, repositoriesWired, onOpenLarkSe
   return <section aria-labelledby="control-groups">
     <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-groups" className="text-title font-semibold text-primary">群与权限</h3><p className="mt-1 text-caption text-subtle">决定哪些群可以使用 Bot，以及聊天权限和操作权限的边界。</p></div>{statePill(cells.length ? `${cells.length} 个已发现群` : '尚未发现群', cells.length && !missingBindings ? 'ready' : 'blocked')}</div>
     {cells.length === 0
-      ? <EmptyState tone="guide" icon={<Users size={21}/>} title="还没有可配置的群" description="先完成 Bot 绑定并把机器人加入飞书群，Dockmux 收到群消息后会在这里展示。" primaryAction={{ label: '检查 Bot 设置', onClick: onOpenLarkSetup }}/>
+      ? <EmptyState tone="guide" icon={<Users size={21}/>} title="还没有可配置的群" description="先完成 Bot 绑定并把机器人加入飞书群，Dutydeck 收到群消息后会在这里展示。" primaryAction={{ label: '检查 Bot 设置', onClick: onOpenLarkSetup }}/>
       : <><div className="mt-4 grid gap-3 sm:grid-cols-3"><Card padding="md" tone="muted"><div className="text-caption font-semibold text-subtle">已配置群</div><div className="mt-1 text-heading font-semibold text-primary">{cells.length - missingBindings}/{cells.length}</div></Card><Card padding="md" tone="muted"><div className="text-caption font-semibold text-subtle">权限原则</div><div className="mt-1 text-body font-semibold text-primary">能聊天 ≠ 能操作终端</div><p className="mt-1 text-caption text-subtle">高风险操作单独授权</p></Card><div className="rounded-lg border border-warning-border bg-warning-soft p-4"><div className="text-caption font-semibold text-warning">高级策略运行时</div><div className="mt-1 text-body font-semibold text-warning">尚未启用</div></div></div><Button variant="primary" className="mt-4 w-full" disabled={!repositoriesWired} onClick={onOpenGroups}><span className="flex w-full items-center justify-between">查看群配置<ArrowRight size={15}/></span></Button></>}
   </section>;
 }

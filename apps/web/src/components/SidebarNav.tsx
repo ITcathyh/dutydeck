@@ -28,7 +28,7 @@ export type SidebarNavProps = { groups: SidebarNavGroup[] };
  * ## 为什么要有它
  *
  * 重做前整个侧栏只有三个可见字符串（「工作区」「Agent 与设置」「本机运行 · ACPX 0.13」）。
- * 清点下来，dockmux 一半的目的地根本没有常驻入口：
+ * 清点下来，dutydeck 一半的目的地根本没有常驻入口：
  *
  * - `?panel=groups`（群与权限）埋在三层点击之下：侧栏「Agent 与设置」→ 左侧分区
  *   「群与权限」→「查看群配置」，而最后那颗按钮在 `cells.length === 0` 时**根本不渲染**
@@ -90,7 +90,7 @@ export function SidebarNav({ groups }: SidebarNavProps) {
           取 rounded-lg（14px），与同为多行的 SessionRow 一致。
 
           触控目标 §9 要求 ≥40px，48px 有余量——botmux 导航项是 36px，那一档
-          刻意不引进：它是纯桌面界面，dockmux 在 <md 时这里是 fixed 抽屉，是触控界面。
+          刻意不引进：它是纯桌面界面，dutydeck 在 <md 时这里是 fixed 抽屉，是触控界面。
 
           不写 focus-visible:outline-none。index.css 给所有 button 定义了
           2px 实心 focus 环，覆盖掉它就要在这里重新造一个等价物；nav 容器的

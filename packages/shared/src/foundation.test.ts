@@ -48,7 +48,7 @@ describe('WP0 public and disabled-state contracts', () => {
       revision: 1,
       kind: 'lark_app_secret',
       provider: 'keychain',
-      referenceKey: 'dockmux/lark/app-1',
+      referenceKey: 'dutydeck/lark/app-1',
       status: 'configured',
       createdAt: timestamp,
       updatedAt: timestamp

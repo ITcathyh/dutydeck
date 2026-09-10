@@ -25,7 +25,7 @@
  * session/transport/gate LABELS and the same-name-replacement detection built
  * on them, ambiguous-submission journalling and fail-closed composer recovery,
  * tail reconnect/backoff state machine, sandbox and wrapper-shell integration.
- * Those defend against botmux's multi-tenant fleet semantics; dockmux owns its
+ * Those defend against botmux's multi-tenant fleet semantics; dutydeck owns its
  * session names.
  */
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -391,7 +391,7 @@ export class ZmxBackend implements SessionBackend {
     // turns out to be gone (the liveness poll will then fire onExit).
     const probe = ZmxBackend.probeSession(this.sessionName);
     if (probe === 'missing') {
-      this.launchDir = mkdtempSync(join(tmpdir(), 'dockmux-zmx-'));
+      this.launchDir = mkdtempSync(join(tmpdir(), 'dutydeck-zmx-'));
       const bootstrapPath = join(this.launchDir, `bootstrap-${randomBytes(6).toString('hex')}.sh`);
       writeFileSync(bootstrapPath, buildZmxBootstrap(bin, args, opts), { mode: 0o600 });
       const result = spawnSync('zmx', buildZmxAttachArgs(this.sessionName, bootstrapPath), {
@@ -594,7 +594,7 @@ export class ZmxBackend implements SessionBackend {
 
       let timer: NodeJS.Timeout;
       try {
-        dir = mkdtempSync(join(tmpdir(), 'dockmux-zmx-history-'));
+        dir = mkdtempSync(join(tmpdir(), 'dutydeck-zmx-history-'));
         const path = join(dir, 'history.txt');
         fd = openSync(path, 'wx+', 0o600);
         rmSync(path); // keep the bytes reachable only through the fd

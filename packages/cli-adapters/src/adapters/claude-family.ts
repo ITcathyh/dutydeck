@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { buildDockmuxRoutingBlock } from '../shared-hints.js';
+import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 
 /**
  * Claude Code 家族共用实现（claude-code / seed / relay）。
@@ -7,7 +7,7 @@ import { buildDockmuxRoutingBlock } from '../shared-hints.js';
  * Seed 与 Relay 是 Claude Code 的 fork（Relay 是 Seed 的当前发行名）：flag、
  * slash 命令、落盘会话布局逐字同构，只有二进制名、鉴权和数据根不同——而数据根
  * 定位、鉴权路径、transcript 桥都是 botmux 的基建，精简契约里不存在。所以三者
- * 在 dockmux 侧真正的差异只剩 `id`，其余「命令行参数 + 输入时序 + idle pattern」
+ * 在 dutydeck 侧真正的差异只剩 `id`，其余「命令行参数 + 输入时序 + idle pattern」
  * 完全一致，收敛到这里，避免三份逐字复制各自漂移。
  */
 
@@ -109,12 +109,12 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     capabilities: { resume: true },
 
     buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
-      // dockmux sessionId 形如 "ses_<uuid>"，--session-id/--resume 只接受裸 UUID。
+      // dutydeck sessionId 形如 "ses_<uuid>"，--session-id/--resume 只接受裸 UUID。
       const uuid = sessionId.replace(/^ses_/, '');
       const args: string[] = [];
       if (resume) {
         // resumeSessionId 可能是 CLI 自己铸的裸 UUID，也可能是 driver 反查失败后
-        // 退回来的 dockmux `ses_<uuid>`——后者必须同样剥前缀，否则 argv 变成
+        // 退回来的 dutydeck `ses_<uuid>`——后者必须同样剥前缀，否则 argv 变成
         // `--resume ses_<uuid>`，claude 认不出这个 id。缺省回退到本会话 uuid。
         args.push('--resume', (resumeSessionId ?? uuid).replace(/^ses_/, ''));
       } else {
@@ -132,7 +132,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     // 会话上下文（路由块）由 driver 拼到首轮 prompt 前（契约统一走 prompt
     // 前缀，不再走 botmux 的 --append-system-prompt）。
     injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDockmuxRoutingBlock(ctx.locale, ctx.env);
+      return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     writeInput: writeClaudeFamilyInput,

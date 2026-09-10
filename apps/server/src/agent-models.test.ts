@@ -40,7 +40,7 @@ describe('ACP-first Agent model discovery', () => {
     const close = vi.fn(async () => undefined);
     const target = runtime({ getStatus: vi.fn(() => new Promise(() => undefined)), close });
     await expect(probeModelsThroughAcpRuntime(target, probeInput, 10)).rejects.toEqual(expect.objectContaining<Partial<AgentModelProbeTimeoutError>>({ phase: 'getStatus' }));
-    expect(close).toHaveBeenCalledWith({ handle, reason: 'Dockmux model discovery', discardPersistentState: true });
+    expect(close).toHaveBeenCalledWith({ handle, reason: 'Dutydeck model discovery', discardPersistentState: true });
   });
 
   it('bounds close cleanup and still returns the model fallback', async () => {

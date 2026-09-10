@@ -47,7 +47,7 @@ interface FixtureTree {
 }
 
 async function createFixture(options: { unknownField?: boolean; unknownArtifact?: boolean } = {}): Promise<FixtureTree> {
-  const root = await mkdtemp(join(tmpdir(), 'dockmux-botmux-importer-'));
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-botmux-importer-'));
   dirs.push(root);
   const sourceHome = join(root, 'source-home');
   const dataDir = join(sourceHome, 'data');
@@ -346,7 +346,7 @@ describe('Botmux read-only importer', () => {
         'FIXTURE_SESSION_PROMPT_DO_NOT_LEAK',
         fixture.sourceHome
       ]) expect(serialized).not.toContain(forbidden);
-      if (name.endsWith('.enc')) expect(bytes.subarray(0, 32).toString('utf8')).toContain('DOCKMUX-BOTMUX-ARCHIVE');
+      if (name.endsWith('.enc')) expect(bytes.subarray(0, 32).toString('utf8')).toContain('DUTYDECK-BOTMUX-ARCHIVE');
     }
 
     const redactedPath = join(fixture.root, 'redacted-plan.json');

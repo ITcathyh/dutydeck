@@ -8,7 +8,7 @@ describe('tool presentation', () => {
     expect(toolPresentation({ name: 'tool call', input: { command: 'pwd' } })).toEqual({ kind: 'terminal', label: '运行命令', detail: 'pwd' });
     expect(toolPresentation({ name: 'Read', input: { path: 'README.md' } })).toEqual({ kind: 'read', label: '读取文件', detail: 'README.md' });
     expect(toolPresentation({ name: 'apply_patch', input: {} })).toMatchObject({ kind: 'edit', label: '编辑文件' });
-    expect(toolPresentation({ name: 'Terminal', input: { command: 'dockmux group messages --limit 20' } })).toMatchObject({ kind: 'agent', label: 'Agent 群协作' });
+    expect(toolPresentation({ name: 'Terminal', input: { command: 'dutydeck group messages --limit 20' } })).toMatchObject({ kind: 'agent', label: 'Agent 群协作' });
   });
 
   it('summarizes a batch without exposing lifecycle event noise', () => {

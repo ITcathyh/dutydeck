@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/transports",
+  "name": "@dutydeck/transports",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -29,8 +29,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@dockmux/shared": "workspace:*",
-    "@dockmux/acp-client": "workspace:*",
+    "@dutydeck/shared": "workspace:*",
+    "@dutydeck/acp-client": "workspace:*",
     "node-pty": "1.2.0-beta.15"
   },
   "devDependencies": {

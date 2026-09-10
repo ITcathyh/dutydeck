@@ -10,7 +10,7 @@ import {
   type RemoteChatFact,
   type RemoteIdentityFact,
   type RepositoryBundle,
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 import { IdentityPreflightError, LarkIdentityPreflightProbe, type LarkIdentityPreflightEvidence } from './lark/identity-preflight.js';
 
 export type IdentityPreflightRepositories = Pick<RepositoryBundle,

@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpRuntime, type AcpRuntimeEnsureInput, type AcpRuntimeHandle, type AcpRuntimeStatus } from 'acpx/runtime';
-import { acpxPermissionMode, prepareAcpxAgentLaunch } from '@dockmux/acp-client';
-import type { AgentConfig } from '@dockmux/shared';
+import { acpxPermissionMode, prepareAcpxAgentLaunch } from '@dutydeck/acp-client';
+import type { AgentConfig } from '@dutydeck/shared';
 
 const run = promisify(execFile);
 const ACP_MODEL_PROBE_TIMEOUT_MS = 30_000;
@@ -79,14 +79,14 @@ export async function probeModelsThroughAcpRuntime(runtime: AcpRuntime, input: A
     return modelsFromAcpStatus(status);
   } finally {
     if (handle) {
-      await withAgentModelProbeTimeout('close', timeoutMs, runtime.close({ handle, reason: 'Dockmux model discovery', discardPersistentState: true })).catch(() => undefined);
+      await withAgentModelProbeTimeout('close', timeoutMs, runtime.close({ handle, reason: 'Dutydeck model discovery', discardPersistentState: true })).catch(() => undefined);
     }
   }
 }
 
 async function discoverThroughAcp(agent: AgentConfig, model?: string): Promise<AgentModelsResult | undefined> {
-  const stateDir = await mkdtemp(join(tmpdir(), 'dockmux-models-'));
-  const sessionKey = `dockmux-model-probe-${crypto.randomUUID()}`;
+  const stateDir = await mkdtemp(join(tmpdir(), 'dutydeck-models-'));
+  const sessionKey = `dutydeck-model-probe-${crypto.randomUUID()}`;
   const launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(stateDir, 'runtime-env'), sessionKey });
   const runtime = createAcpRuntime({
     cwd: agent.cwd ?? process.cwd(),

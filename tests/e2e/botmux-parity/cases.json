@@ -5,7 +5,7 @@
   "safety_contract": {
     "starts_or_stops_listener": false,
     "writes_botmux_source": false,
-    "writes_dockmux_database": false,
+    "writes_dutydeck_database": false,
     "uses_existing_credentials": false,
     "writes_only_disposable_test_state": true,
     "isolates_home_tmp_ports_tmux": true,
@@ -54,8 +54,8 @@
         "--project", "node"
       ],
       "evidence_sources": [
-        "dockmux:apps/server/src/access-mode.test.ts",
-        "dockmux:apps/server/src/auth/auth.test.ts"
+        "dutydeck:apps/server/src/access-mode.test.ts",
+        "dutydeck:apps/server/src/auth/auth.test.ts"
       ],
       "assertions": [
         "explicit open mode never reads or requires an access token",
@@ -76,7 +76,7 @@
         "--project", "node"
       ],
       "evidence_sources": [
-        "dockmux:apps/server/src/terminal/terminal-ws.test.ts"
+        "dutydeck:apps/server/src/terminal/terminal-ws.test.ts"
       ],
       "assertions": [
         "open mode accepts an exact same-origin WebSocket without a token",
@@ -87,12 +87,12 @@
     },
     {
       "id": "remote-dev-open-mode-no-token",
-      "title": "Opt-in read-only probe of a remote development Dockmux HTTP/SSE/Terminal WS endpoint",
+      "title": "Opt-in read-only probe of a remote development Dutydeck HTTP/SSE/Terminal WS endpoint",
       "coverage": ["remote_open_http", "remote_open_sse", "remote_open_terminal_ws", "same_origin"],
       "execution": "remote_opt_in",
       "expectation": "pass",
       "command": ["node", "tests/e2e/botmux-parity/checks/remote-open.mjs"],
-      "required_env": ["DOCKMUX_PARITY_BASE_URL", "DOCKMUX_PARITY_SESSION_ID", "DOCKMUX_PARITY_REMOTE_OPEN_ACK"],
+      "required_env": ["DUTYDECK_PARITY_BASE_URL", "DUTYDECK_PARITY_SESSION_ID", "DUTYDECK_PARITY_REMOTE_OPEN_ACK"],
       "safety": [
         "runner requires --allow-remote-open",
         "probe sends no Authorization, Cookie, terminal input, or mutation request",
@@ -120,9 +120,9 @@
         "--project", "node"
       ],
       "evidence_sources": [
-        "dockmux:packages/secret-provider/src/index.test.ts",
-        "dockmux:apps/server/src/secret-cli.blackbox.test.ts",
-        "dockmux:apps/server/src/foundation-routes.test.ts"
+        "dutydeck:packages/secret-provider/src/index.test.ts",
+        "dutydeck:apps/server/src/secret-cli.blackbox.test.ts",
+        "dutydeck:apps/server/src/foundation-routes.test.ts"
       ],
       "assertions": [
         "Secret values enter through an FD/runtime-only callback, are never accepted on argv or persisted in metadata, and input buffers are wiped",
@@ -140,8 +140,8 @@
       "command": ["node", "node_modules/tsx/dist/cli.mjs", "tests/e2e/botmux-parity/checks/importer-read-only.mts"],
       "fixtures": ["fixtures/importer"],
       "evidence_sources": [
-        "dockmux:packages/botmux-importer/src/importer.ts",
-        "dockmux:packages/botmux-importer/src/archive.ts"
+        "dutydeck:packages/botmux-importer/src/importer.ts",
+        "dutydeck:packages/botmux-importer/src/archive.ts"
       ],
       "assertions": [
         "production_cutover is NO_GO and activation_ready is false",
@@ -162,8 +162,8 @@
         "--project", "node"
       ],
       "evidence_sources": [
-        "dockmux:apps/server/src/botmux-import-cli.blackbox.test.ts",
-        "dockmux:apps/server/src/botmux-import-cli.ts"
+        "dutydeck:apps/server/src/botmux-import-cli.blackbox.test.ts",
+        "dutydeck:apps/server/src/botmux-import-cli.ts"
       ],
       "assertions": [
         "the CLI exposes discover, plan and archive but no apply/stage/activate/cutover/resume command",
@@ -174,15 +174,15 @@
     },
     {
       "id": "daemon-restart-owned-run-reattach",
-      "title": "A completed Dockmux-owned run reattaches on the same pane PID after service restart and final stop destroys it",
+      "title": "A completed Dutydeck-owned run reattaches on the same pane PID after service restart and final stop destroys it",
       "coverage": ["daemon_restart_reattach"],
       "execution": "offline",
       "expectation": "pass",
       "command": ["node", "tests/e2e/botmux-parity/checks/wp2-service-restart.mjs"],
       "fixtures": ["fixtures/restart-run.json"],
       "evidence_sources": [
-        "dockmux:apps/server/src/service.test.ts",
-        "dockmux:apps/server/src/service.ts"
+        "dutydeck:apps/server/src/service.test.ts",
+        "dutydeck:apps/server/src/service.ts"
       ],
       "assertions": [
         "two service lifetimes use the same isolated SQLite database",
@@ -207,8 +207,8 @@
       ],
       "fixtures": ["fixtures/restart-run.json"],
       "supporting_evidence": [
-        "dockmux:apps/server/src/service.test.ts",
-        "dockmux:packages/agent-runtime/src/runtime.test.ts"
+        "dutydeck:apps/server/src/service.test.ts",
+        "dutydeck:packages/agent-runtime/src/runtime.test.ts"
       ]
     },
     {
@@ -226,9 +226,9 @@
       ],
       "fixtures": ["fixtures/routing-and-rbac.json"],
       "evidence_sources": [
-        "dockmux:packages/shared/src/group-policy.test.ts",
-        "dockmux:packages/storage/src/group-policy.test.ts",
-        "dockmux:apps/server/src/foundation-routes.test.ts"
+        "dutydeck:packages/shared/src/group-policy.test.ts",
+        "dutydeck:packages/storage/src/group-policy.test.ts",
+        "dutydeck:apps/server/src/foundation-routes.test.ts"
       ],
       "assertions": [
         "effective config resolves bot defaults and per-chat overrides deterministically",
@@ -252,9 +252,9 @@
       ],
       "fixtures": ["fixtures/routing-and-rbac.json"],
       "evidence_sources": [
-        "dockmux:packages/shared/src/group-policy.test.ts",
-        "dockmux:packages/storage/src/group-policy.test.ts",
-        "dockmux:apps/server/src/foundation-policy.test.ts"
+        "dutydeck:packages/shared/src/group-policy.test.ts",
+        "dutydeck:packages/storage/src/group-policy.test.ts",
+        "dutydeck:apps/server/src/foundation-policy.test.ts"
       ],
       "assertions": [
         "oncall/all-chat membership grants can_talk without can_operate or admin",
@@ -278,9 +278,9 @@
       ],
       "fixtures": ["fixtures/routing-and-rbac.json"],
       "evidence_sources": [
-        "dockmux:apps/server/src/foundation-policy.test.ts",
-        "dockmux:apps/server/src/terminal/terminal-ws.test.ts",
-        "dockmux:apps/server/src/lark/agent-tools.test.ts"
+        "dutydeck:apps/server/src/foundation-policy.test.ts",
+        "dutydeck:apps/server/src/terminal/terminal-ws.test.ts",
+        "dutydeck:apps/server/src/lark/agent-tools.test.ts"
       ],
       "assertions": [
         "Terminal WS re-authorizes read and write separately and closes denied writes with a machine-readable policy code",
@@ -303,9 +303,9 @@
         "--project", "node"
       ],
       "evidence_sources": [
-        "dockmux:apps/server/src/foundation-policy.test.ts",
-        "dockmux:apps/server/src/foundation-routes.test.ts",
-        "dockmux:apps/server/src/schedule-routes.test.ts"
+        "dutydeck:apps/server/src/foundation-policy.test.ts",
+        "dutydeck:apps/server/src/foundation-routes.test.ts",
+        "dutydeck:apps/server/src/schedule-routes.test.ts"
       ],
       "assertions": [
         "missing repositories and permission evaluators produce machine-readable denial",
@@ -330,10 +330,10 @@
       ],
       "fixtures": ["fixtures/schedule-and-fencing.json"],
       "evidence_sources": [
-        "dockmux:packages/shared/src/schedule-foundation.test.ts",
-        "dockmux:packages/storage/src/schedule-foundation.test.ts",
-        "dockmux:packages/storage/src/migrations.test.ts",
-        "dockmux:apps/server/src/schedule-routes.test.ts"
+        "dutydeck:packages/shared/src/schedule-foundation.test.ts",
+        "dutydeck:packages/storage/src/schedule-foundation.test.ts",
+        "dutydeck:packages/storage/src/migrations.test.ts",
+        "dutydeck:apps/server/src/schedule-routes.test.ts"
       ],
       "assertions": [
         "IANA timezone, DST gap/overlap, cron and interval preview semantics are deterministic",
@@ -356,8 +356,8 @@
         "management API deliberately has no enable or run-now operation"
       ],
       "supporting_evidence": [
-        "dockmux:packages/shared/src/schedule-foundation.test.ts",
-        "dockmux:apps/server/src/schedule-routes.test.ts"
+        "dutydeck:packages/shared/src/schedule-foundation.test.ts",
+        "dutydeck:apps/server/src/schedule-routes.test.ts"
       ]
     },
     {
@@ -368,10 +368,10 @@
       "expectation": "pass",
       "command": ["node", "tests/e2e/botmux-parity/checks/identity-preflight.mjs"],
       "evidence_sources": [
-        "dockmux:tests/e2e/botmux-parity/checks/identity-preflight.mjs",
-        "dockmux:apps/server/src/lark/identity-preflight.test.ts",
-        "dockmux:apps/server/src/identity-preflight.service.test.ts",
-        "dockmux:apps/server/src/identity-preflight-cli.test.ts"
+        "dutydeck:tests/e2e/botmux-parity/checks/identity-preflight.mjs",
+        "dutydeck:apps/server/src/lark/identity-preflight.test.ts",
+        "dutydeck:apps/server/src/identity-preflight.service.test.ts",
+        "dutydeck:apps/server/src/identity-preflight-cli.test.ts"
       ],
       "safety": [
         "all remote calls terminate at a per-test loopback fake Lark server on an ephemeral port",
@@ -395,15 +395,15 @@
       "expectation": "expected_blocked",
       "reason_code": "EXTERNAL_FENCING_NOT_IMPLEMENTED",
       "blocked_by": [
-        "no production listener lease is acquired, renewed, fenced or released by Dockmux",
-        "a future Dockmux-local lease alone cannot stop Botmux reconnect",
+        "no production listener lease is acquired, renewed, fenced or released by Dutydeck",
+        "a future Dutydeck-local lease alone cannot stop Botmux reconnect",
         "no shared supervisor enforces one App generation across both runtimes",
         "drain acknowledgement, source/target watermarks, dedup window, and mechanical rollback are absent"
       ],
       "fixtures": ["fixtures/schedule-and-fencing.json"],
       "supporting_evidence": [
-        "dockmux:docs/botmux-import-cutover-spec.md",
-        "dockmux:docs/botmux-integration-master-plan.md"
+        "dutydeck:docs/botmux-import-cutover-spec.md",
+        "dutydeck:docs/botmux-integration-master-plan.md"
       ]
     },
     {

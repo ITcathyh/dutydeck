@@ -1,5 +1,5 @@
 /**
- * Unit tests for IdleDetector (dockmux port of botmux's idle-detector).
+ * Unit tests for IdleDetector (dutydeck port of botmux's idle-detector).
  *
  * Run: pnpm vitest run packages/pty-driver/src/idle-detector.test.ts
  */

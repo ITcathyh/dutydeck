@@ -1,11 +1,11 @@
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-const carrierKey = 'dockmux_agent_env_file';
-const digestKey = 'dockmux_agent_env_digest';
+const carrierKey = 'dutydeck_agent_env_file';
+const digestKey = 'dutydeck_agent_env_digest';
 const [command, ...args] = process.argv.slice(2);
 if (!command) {
-  process.stderr.write('Dockmux ACP environment launcher requires a command.\n');
+  process.stderr.write('Dutydeck ACP environment launcher requires a command.\n');
   process.exit(2);
 }
 
@@ -17,7 +17,7 @@ try {
   if (!bridged || typeof bridged !== 'object' || Array.isArray(bridged)) throw new Error('expected an object');
   if (Object.values(bridged).some(value => typeof value !== 'string')) throw new Error('all values must be strings');
 } catch (error) {
-  process.stderr.write(`Invalid Dockmux ACP environment: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`Invalid Dutydeck ACP environment: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(2);
 }
 

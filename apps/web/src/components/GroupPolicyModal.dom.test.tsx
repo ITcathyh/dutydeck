@@ -5,7 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError, foundationApi, type FoundationCapability, type GroupMatrix } from '../api';
 import { GroupPolicyModal } from './GroupPolicyModal';
-import type { GroupBinding } from '@dockmux/shared';
+import type { GroupBinding } from '@dutydeck/shared';
 
 const timestamp = '2026-08-30T00:00:00.000Z';
 const binding: GroupBinding = {

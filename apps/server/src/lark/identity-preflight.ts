@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import type { ChannelBotFoundation, GroupBinding, SecretRefMetadata } from '@dockmux/shared';
+import type { ChannelBotFoundation, GroupBinding, SecretRefMetadata } from '@dutydeck/shared';
 import {
   LarkIdentityPreflightSecretBoundary,
   LocalFileLarkCredentialResolver,
@@ -7,7 +7,7 @@ import {
   SecretProviderError,
   localFileSecretProviderName,
   type LarkCredentialBundle,
-} from '@dockmux/secret-provider';
+} from '@dutydeck/secret-provider';
 import {
   LarkServiceError,
   createLarkCardService,

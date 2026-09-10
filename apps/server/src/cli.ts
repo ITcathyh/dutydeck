@@ -9,18 +9,18 @@ import { runLarkSend, runLarkUpdate } from './lark/cli.js';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupSendFile, runGroupWait } from './lark/agent-tools-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
-import { RelayCliError } from '@dockmux/relay';
-import { dockmuxGroupToolsCommand } from './lark/agent-tools.js';
+import { RelayCliError } from '@dutydeck/relay';
+import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
-import { runNpmForDockmuxUpdate, updateDockmux } from './update.js';
-import { loadConfig } from '@dockmux/config';
-import { createRepositories } from '@dockmux/storage';
+import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
+import { loadConfig } from '@dutydeck/config';
+import { createRepositories } from '@dutydeck/storage';
 import { runAuthTokenCommand } from './auth/auth.js';
-import { BotmuxImportError } from '@dockmux/botmux-importer';
+import { BotmuxImportError } from '@dutydeck/botmux-importer';
 import { BotmuxImportCliError, runBotmuxArchive, runBotmuxDiscover, runBotmuxPlan } from './botmux-import-cli.js';
-import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dockmux/secret-provider';
+import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { SecretCliError, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 import { runSetup } from './setup/setup.js';
@@ -29,17 +29,22 @@ import { InvalidWorkingDirectoryError } from './setup/detect.js';
 import { runDoctor } from './doctor/doctor.js';
 import { AutostartError, autostartDisable, autostartEnable, autostartStatus } from './autostart/autostart.js';
 import { createCliUi } from './cli-ui.js';
+import { adoptLegacyEnv, migrateLegacyBrandDirs } from './legacy-brand.js';
 
 const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { name: string; version: string };
 
 try { loadEnvFile(); } catch {}
 
+// 先接管旧品牌名的环境变量和状态目录，再让任何命令去解析路径。
+adoptLegacyEnv();
+for (const dir of migrateLegacyBrandDirs()) process.stderr.write(`已接管 dockmux 时期的状态目录：${dir}\n`);
+
 async function serve(options: CliOptions, onReady?: () => void) {
-  const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dockmuxGroupToolsCommand(fileURLToPath(import.meta.url)) });
+  const service = await startLocalServer({ env: environmentFromCli(options), groupToolsCommand: dutydeckGroupToolsCommand(fileURLToPath(import.meta.url)) });
   const address = service.config.host === '0.0.0.0'
     ? `http://127.0.0.1:${service.config.port} (LAN access enabled; other devices can use this computer's LAN IP)`
     : `http://${service.config.host.includes(':') ? `[${service.config.host}]` : service.config.host}:${service.config.port}`;
-  process.stdout.write(`Dockmux UI and API listening on ${address}\n`);
+  process.stdout.write(`Dutydeck UI and API listening on ${address}\n`);
   onReady?.();
   let closing = false;
   let hardStop: NodeJS.Timeout | undefined;
@@ -49,7 +54,7 @@ async function serve(options: CliOptions, onReady?: () => void) {
       process.exit(130);
     }
     closing = true;
-    process.stdout.write('Shutting down Dockmux… Press Ctrl-C again to force exit.\n');
+    process.stdout.write('Shutting down Dutydeck… Press Ctrl-C again to force exit.\n');
     hardStop = setTimeout(() => {
       process.stderr.write('Shutdown exceeded 5 seconds; forcing exit.\n');
       process.exit(1);
@@ -77,12 +82,12 @@ async function serve(options: CliOptions, onReady?: () => void) {
 }
 
 async function restartWithInstalledCli(entrypoint: string) {
-  if (!existsSync(entrypoint)) throw new Error(`Updated Dockmux entrypoint was not found: ${entrypoint}. The service was not restarted.`);
+  if (!existsSync(entrypoint)) throw new Error(`Updated Dutydeck entrypoint was not found: ${entrypoint}. The service was not restarted.`);
   const previousPid = daemonStatus().pid;
   const child = spawn(process.execPath, [entrypoint, 'daemon', 'restart'], { stdio: 'inherit', env: process.env });
   await new Promise<void>((resolve, reject) => {
     child.once('error', reject);
-    child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Dockmux restart exited with code ${code ?? 'unknown'}.`)));
+    child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Dutydeck restart exited with code ${code ?? 'unknown'}.`)));
   });
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
@@ -90,14 +95,14 @@ async function restartWithInstalledCli(entrypoint: string) {
     if (status.running && status.ready && status.pid && status.pid !== previousPid) return;
     await sleep(200);
   }
-  throw new Error('Dockmux was updated, but the restarted service did not become ready within 15 seconds. Run dockmux status and inspect the daemon log.');
+  throw new Error('Dutydeck was updated, but the restarted service did not become ready within 15 seconds. Run dutydeck status and inspect the daemon log.');
 }
 
 /**
  * start / stop / restart / status 四个命令的统一渲染。
  *
  * 为什么要有它：这四个命令过去直接把 `JSON.stringify(result)` 打进 stdout，于是
- *   · `dockmux status` 给人看的是一行裸 JSON——而 doctor 的多条 verify 正是让用户跑它；
+ *   · `dutydeck status` 给人看的是一行裸 JSON——而 doctor 的多条 verify 正是让用户跑它；
  *   · `--json` 反而不被接受（unknown option），与 setup / doctor / autostart 的约定相反。
  * 现在与其余命令对齐：默认人类可读，`--json` 才输出单行 JSON。
  *
@@ -123,7 +128,7 @@ function renderDaemonResult(result: DaemonCommandResult | (DaemonStatusInfo & { 
     } else {
       ui.status('info', '守护进程未运行');
       ui.hint('启动它：');
-      ui.command('dockmux start');
+      ui.command('dutydeck start');
     }
     return;
   }
@@ -147,15 +152,15 @@ function renderDaemonResult(result: DaemonCommandResult | (DaemonStatusInfo & { 
   if ('ok' in result && !result.ok) {
     if (result.state === 'already-running') {
       // 「已经在跑」不是故障：目标状态已达成，只是这次没动它。
-      ui.status('ok', 'Dockmux 已经在运行中', result.pid === undefined ? undefined : `pid ${result.pid}`);
+      ui.status('ok', 'Dutydeck 已经在运行中', result.pid === undefined ? undefined : `pid ${result.pid}`);
       ui.hint('要让新的启动参数生效，重启它：');
-      ui.command('dockmux restart');
-      ui.hint('验证：dockmux status');
+      ui.command('dutydeck restart');
+      ui.hint('验证：dutydeck status');
       return;
     }
     ui.status('fail', result.action === 'restart' ? '重启失败' : '启动失败', result.error);
     ui.hint('多数情况是端口被占用或配置有误，先跑一次体检：');
-    ui.command('dockmux doctor');
+    ui.command('dutydeck doctor');
     if (result.logFile) ui.hint(`完整日志：${result.logFile}`);
     return;
   }
@@ -163,7 +168,7 @@ function renderDaemonResult(result: DaemonCommandResult | (DaemonStatusInfo & { 
   if (address) ui.hint(`在浏览器打开：${address}`);
   if (result.logFile) ui.hint(`日志：${result.logFile}`);
   if (result.error) ui.status('warn', result.error);
-  ui.hint('验证：dockmux status');
+  ui.hint('验证：dutydeck status');
 }
 
 async function main() {
@@ -179,7 +184,7 @@ async function main() {
   const daemonServe: (options: CliOptions, onReady?: () => void) => Promise<void> = (options, onReady) => serve(options, onReady);
   const withSecretContext = async <T>(database: string | undefined, work: (context: SecretCliContext) => Promise<T>): Promise<T> => {
     const configured = database
-      ? loadConfig({ ...process.env, DOCKMUX_DATABASE_URL: database }).databaseUrl
+      ? loadConfig({ ...process.env, DUTYDECK_DATABASE_URL: database }).databaseUrl
       : readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl;
     const repositories = createRepositories(configured);
     try {
@@ -231,7 +236,7 @@ async function main() {
         if (result.state.stale === true) {
           ui.status('warn', '开机项内容与当前启动路径不一致');
           ui.hint('重新注册以修复（nvm 切换或 npm 升级后会发生）：');
-          ui.command('dockmux autostart enable');
+          ui.command('dutydeck autostart enable');
         }
       }
       for (const notice of result.notices) ui.hint(notice);
@@ -239,7 +244,7 @@ async function main() {
     daemonStart: async options => {
       const result = await daemonStart(options, { serve: daemonServe });
       renderDaemonResult(result, options.json === true);
-      // 起不来必须是非零退出码：脚本里 `dockmux start && curl ...` 才不会踩空。
+      // 起不来必须是非零退出码：脚本里 `dutydeck start && curl ...` 才不会踩空。
       // 「已经在运行」不算失败：目标状态已达成。
       if (!result.ok && result.state !== 'already-running') process.exitCode = 1;
     },
@@ -259,15 +264,15 @@ async function main() {
       // status 是查询命令：不在运行不是「命令失败」，退出码保持 0。
     },
     update: async options => {
-      output(await updateDockmux(packageJson.version, options, {
+      output(await updateDutydeck(packageJson.version, options, {
         packageName: packageJson.name,
-        runNpm: runNpmForDockmuxUpdate,
+        runNpm: runNpmForDutydeckUpdate,
         restart: restartWithInstalledCli
       }));
     },
     authToken: async options => {
       // 优先用运行中/上次 daemon 记录的数据库路径，保证查看/轮换的是同一个 token；
-      // daemon 从未运行过时回退到 loadConfig 的默认解析（<cwd>/.dockmux/dockmux.db）。
+      // daemon 从未运行过时回退到 loadConfig 的默认解析（<cwd>/.dutydeck/dutydeck.db）。
       const databaseUrl = readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl;
       const repos = createRepositories(databaseUrl);
       try {
@@ -302,7 +307,7 @@ async function main() {
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionAsk: async (question, options) => {
       // ask 有自己的 stdout/退出码契约（答案裸文本走 stdout，提示走 stderr），
-      // 不能套用通用的 output()：调用方要能 `answer=$(dockmux session ask ...)`。
+      // 不能套用通用的 output()：调用方要能 `answer=$(dutydeck session ask ...)`。
       const result = await runSessionAsk(question, options);
       const rendered = askOutput(result, options.json === true);
       if (rendered.stdout) process.stdout.write(rendered.stdout);

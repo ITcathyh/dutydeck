@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ConfigRepository } from '@dockmux/shared';
+import type { ConfigRepository } from '@dutydeck/shared';
 import { larkBotsConfigKey, larkCredentialsConfigKey, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
 
 const createRepository = (initial: Record<string, string> = {}): ConfigRepository => {

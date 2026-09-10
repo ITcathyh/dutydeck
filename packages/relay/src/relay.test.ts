@@ -195,8 +195,8 @@ describe('relay ask', () => {
     const broker = new RelayAskBroker(publisher);
     const pending = broker.register({ sessionId: 'ses_a', question: 'q', timeoutMs: 60_000 });
     await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(1));
-    broker.close('Dockmux 服务已关闭');
-    expect(await pending).toMatchObject({ status: 'cancelled', reason: 'Dockmux 服务已关闭' });
+    broker.close('Dutydeck 服务已关闭');
+    expect(await pending).toMatchObject({ status: 'cancelled', reason: 'Dutydeck 服务已关闭' });
   });
 
   it('does not register the ask when publishing the question fails', async () => {

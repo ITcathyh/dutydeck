@@ -96,6 +96,6 @@ export function createTaskAffordance({ agents, agentsLoading = false, onCreate, 
   return { label: '创建任务', disabled: false, onClick: onCreate };
 }
 
-export function DockmuxIcon({ className = '' }: { className?: string }) {
-  return <img src="/dockmux.svg" alt="" aria-hidden="true" className={className}/>;
+export function DutydeckIcon({ className = '' }: { className?: string }) {
+  return <img src="/dutydeck.svg" alt="" aria-hidden="true" className={className}/>;
 }

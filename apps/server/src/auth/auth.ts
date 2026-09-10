@@ -1,10 +1,10 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import type { ConfigRepository } from '@dockmux/shared';
+import type { ConfigRepository } from '@dutydeck/shared';
 
 /** token 在 configs 表中的 key */
 export const AUTH_TOKEN_CONFIG_KEY = 'auth.accessToken';
-export const AUTH_COOKIE_NAME = 'dockmux_access';
+export const AUTH_COOKIE_NAME = 'dutydeck_access';
 
 /** 32 随机字节 base64url（43 字符，无填充） */
 export function generateAuthToken(): string {
@@ -126,7 +126,7 @@ type OriginHeaders = {
 const firstForwardedValue = (value: string | string[] | undefined) =>
   (Array.isArray(value) ? value[0] : value)?.split(',')[0]?.trim();
 
-/** Browser cookie/WS requests must originate from the exact public Dockmux origin. */
+/** Browser cookie/WS requests must originate from the exact public Dutydeck origin. */
 export function isSameOriginRequest(headers: OriginHeaders, fallbackProtocol = 'http'): boolean {
   if (!headers.origin) return true;
   const host = firstForwardedValue(headers['x-forwarded-host']) || headers.host?.trim();
@@ -162,7 +162,7 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
         return reply.code(403).send({ error: { code: 'HOST_NOT_ALLOWED', message: 'Local-only requests require a loopback Host' } });
       }
       if (request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, request.protocol)) {
-        return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dockmux' } });
+        return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dutydeck' } });
       }
       return;
     }
@@ -170,16 +170,16 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
       // --no-auth removes the credential gate, not browser same-origin
       // protection. CLI/API clients without Origin remain supported.
       if (request.headers.origin && !isSameOriginRequest(request.headers, request.protocol)) {
-        return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dockmux' } });
+        return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dutydeck' } });
       }
       return;
     }
-    const pathname = new URL(request.url, 'http://dockmux.local').pathname;
+    const pathname = new URL(request.url, 'http://dutydeck.local').pathname;
     if (options.exempt?.(request.method, pathname)) return;
     const bearer = extractBearerToken(request.headers.authorization);
     const cookie = extractCookie(request.headers.cookie);
     if (!bearer && cookie && !isSameOriginRequest(request.headers, request.protocol)) {
-      return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dockmux' } });
+      return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dutydeck' } });
     }
     const presented = bearer ?? cookie;
     const token = await options.getToken();
@@ -250,7 +250,7 @@ export interface AuthTokenCommandResult {
   rotated: boolean;
 }
 
-/** `dockmux auth token` CLI 的处理器逻辑（负责人负责 commander 接线） */
+/** `dutydeck auth token` CLI 的处理器逻辑（负责人负责 commander 接线） */
 export async function runAuthTokenCommand(
   configs: ConfigRepository,
   options: { rotate?: boolean },

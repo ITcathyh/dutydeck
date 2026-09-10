@@ -34,12 +34,12 @@ export class RelayHttpClient {
 
   constructor(options: RelayClientOptions = {}) {
     const env = options.env ?? process.env;
-    this.baseUrl = (env[relayUrlEnvKey] ?? env.DOCKMUX_RELAY_URL)?.trim().replace(/\/$/, '') ?? '';
-    this.token = (env[relayTokenEnvKey] ?? env.DOCKMUX_RELAY_TOKEN)?.trim() ?? '';
+    this.baseUrl = (env[relayUrlEnvKey] ?? env.DUTYDECK_RELAY_URL)?.trim().replace(/\/$/, '') ?? '';
+    this.token = (env[relayTokenEnvKey] ?? env.DUTYDECK_RELAY_TOKEN)?.trim() ?? '';
     this.fetcher = options.fetcher ?? globalThis.fetch;
     if (!this.baseUrl || !this.token) {
       throw new RelayCliError(
-        '回传命令只能在 Dockmux 会话内的 Agent 进程中调用；当前进程没有会话凭证。',
+        '回传命令只能在 Dutydeck 会话内的 Agent 进程中调用；当前进程没有会话凭证。',
         relayAskExitCodes.usage,
         'RELAY_CONTEXT_REQUIRED'
       );
@@ -59,7 +59,7 @@ export class RelayHttpClient {
       });
     } catch (error) {
       throw new RelayCliError(
-        `无法连接 Dockmux 回传服务：${error instanceof Error ? error.message : String(error)}`,
+        `无法连接 Dutydeck 回传服务：${error instanceof Error ? error.message : String(error)}`,
         relayAskExitCodes.unavailable,
         'RELAY_UNAVAILABLE'
       );
@@ -67,7 +67,7 @@ export class RelayHttpClient {
     const payload = await response.json().catch(() => ({})) as { error?: RelayErrorBody } & Record<string, unknown>;
     if (!response.ok) {
       const code = payload.error?.code ?? 'RELAY_REQUEST_FAILED';
-      const message = payload.error?.message ?? `Dockmux 回传服务返回 HTTP ${response.status}`;
+      const message = payload.error?.message ?? `Dutydeck 回传服务返回 HTTP ${response.status}`;
       // 400/413 是调用方用法问题；401/404/409/5xx 是通道不可用
       const exitCode = response.status === 400 || response.status === 413
         ? relayAskExitCodes.usage

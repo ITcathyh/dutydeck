@@ -1,9 +1,9 @@
 import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfigs } from './lark/config.js';
-import { DockmuxRuntime } from '@dockmux/runtime';
-import { loadConfig, type AppConfig } from '@dockmux/config';
-import { createRepositories } from '@dockmux/storage';
-import { type DriverFactory, type PolicyAction } from '@dockmux/shared';
+import { DutydeckRuntime } from '@dutydeck/runtime';
+import { loadConfig, type AppConfig } from '@dutydeck/config';
+import { createRepositories } from '@dutydeck/storage';
+import { type DriverFactory, type PolicyAction } from '@dutydeck/shared';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { createRelayAskStore } from './relay-ask-store.js';
@@ -11,15 +11,15 @@ import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGro
 import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
-  createDockmuxPersistentBackend,
+  createDutydeckPersistentBackend,
   createPtyCliDriver,
   PTY_AGENT_CONTRIBUTIONS,
   type BackendProbes,
   type PtyCliDriver,
-} from '@dockmux/pty-driver';
-import { createCliAdapter } from '@dockmux/cli-adapters';
-import { RelayAskBroker, RelayCapabilityRegistry, RelayService, loadOrCreateRelaySigningSecret } from '@dockmux/relay';
-import { LocalFileSecretProvider, localFileSecretProviderName, secretDirectoryForDatabase } from '@dockmux/secret-provider';
+} from '@dutydeck/pty-driver';
+import { createCliAdapter } from '@dutydeck/cli-adapters';
+import { RelayAskBroker, RelayCapabilityRegistry, RelayService, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
+import { LocalFileSecretProvider, localFileSecretProviderName, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { LarkIdentityPreflightProbe } from './lark/identity-preflight.js';
 import {
   createFoundationExecutionAuthorizer,
@@ -41,7 +41,7 @@ export interface StartLocalServerOptions {
 }
 export interface LocalServer {
   config: AppConfig;
-  runtime: DockmuxRuntime;
+  runtime: DutydeckRuntime;
   close(): Promise<void>;
 }
 
@@ -70,7 +70,7 @@ export function createProductionPtyBackend(
   sessionId: string,
   probes?: BackendProbes,
 ) {
-  return createDockmuxPersistentBackend(sessionId, probes);
+  return createDutydeckPersistentBackend(sessionId, probes);
 }
 
 export async function startLocalServer(options: StartLocalServerOptions = {}): Promise<LocalServer> {
@@ -107,7 +107,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret);
   // 通用回传通道：与飞书无关，任何来源的会话（含 Web 工作台创建的 pty-cli）都注入凭证。
   // command 前缀复用 groupToolsCommand 算出的运行期绝对路径——静态文案拿不到它，
-  // 经 env 下发后由 @dockmux/relay 的 relayHintLines() 在提示块里读回。
+  // 经 env 下发后由 @dutydeck/relay 的 relayHintLines() 在提示块里读回。
   const relayCapabilities = new RelayCapabilityRegistry(
     repos.sessions,
     localApiBaseUrl(config),
@@ -116,7 +116,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   );
   // 访问认证：默认启动时确保 token 存在（首次生成并打印到日志一次）。
   // 走 stderr 而非 stdout——daemon 子进程的 stdout 承载 daemon 协议的 JSON 输出，不能污染；
-  // daemon 模式下 stderr 与 stdout 一起重定向到 dockmux.log，前台模式下直接可见。
+  // daemon 模式下 stderr 与 stdout 一起重定向到 dutydeck.log，前台模式下直接可见。
   const mode = accessMode(config);
   let activeToken = '';
   let tokenRefresh: ReturnType<typeof setInterval> | undefined;
@@ -124,17 +124,17 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     const { token: accessToken, created: tokenCreated } = await loadOrCreateAuthToken(repos.config);
     activeToken = accessToken;
     if (tokenCreated) {
-      process.stderr.write(`[dockmux] Generated access token for remote access: ${accessToken}\n`);
-      process.stderr.write(`[dockmux] Run 'dockmux auth token' to view it again, or 'dockmux auth token --rotate' to rotate it.\n`);
+      process.stderr.write(`[dutydeck] Generated access token for remote access: ${accessToken}\n`);
+      process.stderr.write(`[dutydeck] Run 'dutydeck auth token' to view it again, or 'dutydeck auth token --rotate' to rotate it.\n`);
     }
-    // WS 升级认证是同步钩子，token 又可能被 `dockmux auth token --rotate` 在另一个进程轮换，
+    // WS 升级认证是同步钩子，token 又可能被 `dutydeck auth token --rotate` 在另一个进程轮换，
     // 所以维护一份短周期刷新的缓存（HTTP 中间件每次请求直读 DB，不受此缓存影响）。
     tokenRefresh = setInterval(() => {
       getAuthToken(repos.config).then(current => { if (current) activeToken = current; }).catch(() => {});
     }, 5_000);
     tokenRefresh.unref();
   } else {
-    process.stderr.write('[dockmux] WARNING: authentication is disabled. Everyone who can reach this address can view tasks, control Agents, and access terminals. Use only on a trusted network or behind upstream authentication.\n');
+    process.stderr.write('[dutydeck] WARNING: authentication is disabled. Everyone who can reach this address can view tasks, control Agents, and access terminals. Use only on a trusted network or behind upstream authentication.\n');
   }
   const resolveInstallationPrincipal = createInstallationPrincipalResolver({
     authEnabled: config.authEnabled,
@@ -158,7 +158,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     executionPolicy: legacyExecutionPolicy,
     groupManager,
   });
-  // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dockmux 的 PtyCliDriver。
+  // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
   // agent.id 即 adapter id（contributions 的 id 与 adapterId 一致）；自定义 pty-cli agent
   // 需用已知 adapter id 作为 agent id。
   const ptyDrivers = new Set<PtyCliDriver>();
@@ -180,7 +180,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     ptyDrivers.add(driver);
     return driver;
   };
-  const runtime = new DockmuxRuntime(repos, {
+  const runtime = new DutydeckRuntime(repos, {
     authorizeExecution: (sessionId, actorId) => groupManager.beginTurn(sessionId, actorId),
     resolveRiskPolicy: (sessionId, fallback) => groupManager.riskPolicy(sessionId, fallback),
     acpxCommand: config.acpxCommand,
@@ -241,7 +241,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         agentTools,
         executionPolicy: legacyExecutionPolicy,
     groupManager,
-        listeningDisabled: env.DOCKMUX_DISABLE_LARK_LISTENER === 'true',
+        listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
       },
       auth: {
         mode,
@@ -283,7 +283,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (tokenRefresh) clearInterval(tokenRefresh);
       // 先唤醒所有阻塞中的 ask，再关 app：否则长轮询请求会拖住 app.close()。
       relayBroker.close();
-      // A normal daemon stop/restart detaches Dockmux-owned tmux sessions.
+      // A normal daemon stop/restart detaches Dutydeck-owned tmux sessions.
       // Explicit session stop/restart never passes through here and continues
       // to destroy its backend as requested by the user.
       for (const driver of ptyDrivers) driver.prepareForDaemonShutdown();
@@ -291,7 +291,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       capabilities.close();
       repos.close();
       const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
-      if (errors.length) throw new AggregateError(errors, 'Dockmux did not shut down cleanly');
+      if (errors.length) throw new AggregateError(errors, 'Dutydeck did not shut down cleanly');
     }
   };
 }

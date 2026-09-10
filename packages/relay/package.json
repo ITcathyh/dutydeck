@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/relay",
+  "name": "@dutydeck/relay",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -7,6 +7,6 @@
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "development": "./src/index.ts", "import": "./dist/index.js" } },
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
-  "dependencies": { "@dockmux/shared": "workspace:*" },
+  "dependencies": { "@dutydeck/shared": "workspace:*" },
   "devDependencies": { "typescript": "5.8.3", "@types/node": "22.15.30" }
 }

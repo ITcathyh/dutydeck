@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { createRepositories } from '@dockmux/storage';
+import { createRepositories } from '@dutydeck/storage';
 
 const workspaceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 const cliPath = join(workspaceRoot, 'apps/server/src/cli.ts');
@@ -18,7 +18,7 @@ function bundle(appSecret: string): string {
 }
 
 function invoke(root: string, args: string[], input?: string, extraEnv: Record<string, string> = {}) {
-  return spawnSync(tsxPath, [cliPath, '--database', join(root, 'dockmux.db'), ...args], {
+  return spawnSync(tsxPath, [cliPath, '--database', join(root, 'dutydeck.db'), ...args], {
     cwd: root,
     env: { HOME: root, PATH: process.env.PATH, TMPDIR: tmpdir(), NODE_OPTIONS: '--conditions=development', ...extraEnv },
     encoding: 'utf8',
@@ -33,7 +33,7 @@ function expectNoValues(result: ReturnType<typeof invoke>): void {
 }
 
 async function fixture(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), 'dockmux-secret-cli-'));
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-secret-cli-'));
   roots.push(root);
   return root;
 }
@@ -42,7 +42,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-describe('dockmux secret CLI black box', () => {
+describe('dutydeck secret CLI black box', () => {
   it('sets, lists and rotates using fd input while outputting metadata only', async () => {
     const root = await fixture();
     const created = invoke(root, ['secret', 'set', 'team-bot', '--value-fd', '0'], bundle(INITIAL_SECRET));
@@ -85,7 +85,7 @@ describe('dockmux secret CLI black box', () => {
     const created = invoke(root, ['secret', 'set', 'referenced', '--value-fd', '0'], bundle(INITIAL_SECRET));
     expect(created.status, created.stderr).toBe(0);
     const metadata = JSON.parse(created.stdout).secretRef as { referenceKey: string };
-    const repositories = createRepositories(join(root, 'dockmux.db'));
+    const repositories = createRepositories(join(root, 'dutydeck.db'));
     await repositories.channelBots.create({ id: 'uses-secret', channel: 'lark', externalAppId: 'cli_uses_secret', displayName: 'Uses Secret', brand: 'feishu', credentialRef: 'referenced', state: 'staged' });
     repositories.close();
 
@@ -97,7 +97,7 @@ describe('dockmux secret CLI black box', () => {
     const listed = invoke(root, ['secret', 'list']);
     expect(JSON.parse(listed.stdout).secretRefs).toEqual([expect.objectContaining({ id: 'referenced', availability: 'available' })]);
 
-    const detached = createRepositories(join(root, 'dockmux.db'));
+    const detached = createRepositories(join(root, 'dutydeck.db'));
     await detached.channelBots.update('uses-secret', { expectedRevision: 1, credentialRef: null });
     detached.close();
     const removed = invoke(root, ['secret', 'remove', 'referenced', '--expected-revision', '1']);
@@ -113,7 +113,7 @@ describe('dockmux secret CLI black box', () => {
     expect(argv.status).not.toBe(0);
     expect(argv.stderr).toContain('unknown option');
     expectNoValues(argv);
-    const env = invoke(root, ['secret', 'set', 'env-ref'], undefined, { DOCKMUX_SECRET_VALUE: INITIAL_SECRET });
+    const env = invoke(root, ['secret', 'set', 'env-ref'], undefined, { DUTYDECK_SECRET_VALUE: INITIAL_SECRET });
     expect(env.status).not.toBe(0);
     expect(env.stderr).toContain('SECRET_VALUE_INPUT_REQUIRED');
     expectNoValues(env);

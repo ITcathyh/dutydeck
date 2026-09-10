@@ -85,7 +85,7 @@ async function treeDigest(root: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const tempRoot = await mkdtemp(join(tmpdir(), 'dockmux-botmux-parity-'));
+  const tempRoot = await mkdtemp(join(tmpdir(), 'dutydeck-botmux-parity-'));
   try {
     const sourceHome = join(tempRoot, 'source-home');
     const dataDirectory = join(sourceHome, 'data');
@@ -150,7 +150,7 @@ async function main(): Promise<void> {
       const bytes = await readFile(path);
       if (process.platform !== 'win32') invariant(((await lstat(path)).mode & 0o777) === 0o600, 'ARCHIVE_FILE_MODE_UNSAFE');
       if (name.endsWith('.enc')) {
-        invariant(bytes.subarray(0, 32).toString('utf8').includes('DOCKMUX-BOTMUX-ARCHIVE'), 'ARCHIVE_HEADER_INVALID');
+        invariant(bytes.subarray(0, 32).toString('utf8').includes('DUTYDECK-BOTMUX-ARCHIVE'), 'ARCHIVE_HEADER_INVALID');
       } else {
         const text = bytes.toString('utf8');
         invariant(!text.includes(sourceHome), 'ARCHIVE_PLAN_PATH_LEAKED');

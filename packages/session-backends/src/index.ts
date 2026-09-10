@@ -9,7 +9,7 @@ export {
   TmuxOwnershipError,
   isTmuxAvailable,
   type TmuxBackendOptions,
-  type TmuxDockmuxMetadataKey,
+  type TmuxDutydeckMetadataKey,
 } from './tmux-backend.js';
 export {
   ZellijBackend,

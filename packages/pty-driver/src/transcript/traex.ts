@@ -21,7 +21,7 @@
  * still the durable end-of-turn marker; the extra dialects only recover a
  * final answer that TRAE recorded elsewhere.
  */
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { traeSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
@@ -98,7 +98,7 @@ export interface TraexTranscriptTailerOptions {
   /** Explicit rollout path. When given, directory scanning and file
    *  switching are disabled. */
   transcriptPath?: string;
-  /** dockmux's session id. Required for correctness whenever more than one
+  /** dutydeck's session id. Required for correctness whenever more than one
    *  TRAE session may be running — the rollout root is global, so without it
    *  resolution falls back to "newest rollout anywhere". See
    *  resolveTraexRolloutPath. */

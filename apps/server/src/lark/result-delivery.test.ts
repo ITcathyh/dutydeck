@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentEvent } from '@dockmux/shared';
+import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
 import { larkResultKey, sendLarkResult } from './result-delivery.js';
 import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';

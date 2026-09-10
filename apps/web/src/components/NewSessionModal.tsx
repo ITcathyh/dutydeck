@@ -88,7 +88,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
       <h2 className="text-title font-semibold text-primary">先准备一个 Agent</h2>
       <span className="ml-auto"><IconButton label="关闭" onClick={onClose}><X size={16}/></IconButton></span>
     </Dialog.Header>
-    <Dialog.Body>Dockmux 没有检测到可用的 Agent CLI。安装并登录 Codex、Claude Code 等 CLI 后重启 Dockmux，再回来创建任务。</Dialog.Body>
+    <Dialog.Body>Dutydeck 没有检测到可用的 Agent CLI。安装并登录 Codex、Claude Code 等 CLI 后重启 Dutydeck，再回来创建任务。</Dialog.Body>
     <Dialog.Footer>
       <Button variant="secondary" onClick={onClose}>稍后再说</Button>
       <Button variant="primary" onClick={onOpenAgentSetup ?? onClose}>查看添加方法</Button>
@@ -126,7 +126,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
             value={cwd}
             onChange={setCwd}
             label="工作目录"
-            description="填写运行 Dockmux 的这台机器上的目录；留空会使用 Agent 的默认工作区。"
+            description="填写运行 Dutydeck 的这台机器上的目录；留空会使用 Agent 的默认工作区。"
             placeholder="留空则使用 Agent 默认目录"
             allowNative={Boolean(capabilities?.directoryPicker)}
             disabled={Boolean(createdSession)}

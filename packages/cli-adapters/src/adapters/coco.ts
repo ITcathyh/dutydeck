@@ -14,11 +14,11 @@ export function createCocoAdapter(): CliAdapter {
 
     buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
       // CoCo 的会话目录是 `<cache>/coco/sessions/<uuid>/`，只认裸 UUID；
-      // dockmux sessionId 形如 "ses_<uuid>"，前缀必须剥掉。
+      // dutydeck sessionId 形如 "ses_<uuid>"，前缀必须剥掉。
       const uuid = sessionId.replace(/^ses_/, '');
       const args: string[] = [];
       if (resume) {
-        // CoCo 的会话 id 在 fresh spawn 时就被 --session-id 钉成 dockmux 的 UUID，
+        // CoCo 的会话 id 在 fresh spawn 时就被 --session-id 钉成 dutydeck 的 UUID，
         // 所以无 resumeSessionId 时回退到自己的 id 就是精确续接。driver 反查失败
         // 时退回来的是带前缀的 `ses_<uuid>`，这里同样要剥掉。
         args.push('--resume', (resumeSessionId ?? uuid).replace(/^ses_/, ''));

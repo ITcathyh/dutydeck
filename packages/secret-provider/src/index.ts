@@ -24,7 +24,7 @@ const SECRET_FILE_MODE = 0o600;
 const MAX_SECRET_BYTES = 64 * 1024;
 const REFERENCE_KEY = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const runtimeBoundaryMarker = Symbol('dockmux.lark-secret-runtime-boundary');
+const runtimeBoundaryMarker = Symbol('dutydeck.lark-secret-runtime-boundary');
 const runtimeReaders = new WeakMap<LocalFileSecretProvider, (referenceKey: string) => Buffer>();
 
 export const localFileSecretProviderName = 'local-file-v1';

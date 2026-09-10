@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentEvent, TaskRecord, ToolRiskPolicy } from '@dockmux/shared';
+import type { AgentEvent, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { createRepositories, EVENT_WINDOW_MAX_LIMIT } from './index.js';
 
 function event(sequence: number): AgentEvent {

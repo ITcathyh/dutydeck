@@ -211,7 +211,7 @@ describe('normalizeOwnerEntries', () => {
     await expect(normalizeOwnerEntries(['ou_a', 'ou_b'], lookup)).resolves.toEqual(['on_same']);
   });
 
-  it('preferUnionId: false 时即使能解析也保留 ou_（dockmux 落库场景）', async () => {
+  it('preferUnionId: false 时即使能解析也保留 ou_（dutydeck 落库场景）', async () => {
     const lookup = makeLookup({
       users: new Map([[userKey('ou_owner', 'open_id'), { unionId: 'on_owner' }]])
     });

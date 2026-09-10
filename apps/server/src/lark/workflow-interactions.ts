@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dockmux/shared';
-import type { RelayAskBroker } from '@dockmux/relay';
+import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
+import type { RelayAskBroker } from '@dutydeck/relay';
 import type { LarkMessageEvent, LarkRuntime } from './listener.js';
 import type { LarkCardService } from './service.js';
 import { LarkServiceError } from './service.js';
@@ -28,7 +28,7 @@ const prefix = (appId: string) => `lark.interaction.${appId}.`;
 const stale = () => new LarkServiceError('LARK_INTERACTION_EXPIRED', '此操作已处理或失效，请查看最新任务状态。', 409);
 const button = (record: LarkInteraction, action: string, label: string): LarkCardElement => ({
   tag: 'button', element_id: `workflow_${action}`, text: { tag: 'plain_text', content: label }, type: action === 'approve' ? 'primary' : 'default',
-  behaviors: [{ type: 'callback', value: { dockmux_workflow: action, request_id: record.id, generation: record.boot } }]
+  behaviors: [{ type: 'callback', value: { dutydeck_workflow: action, request_id: record.id, generation: record.boot } }]
 });
 
 /** Persisted cards identify a live waiter; history never recreates executable approvals. */

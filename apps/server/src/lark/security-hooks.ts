@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { LarkServiceError } from './service.js';
 
-const guardVersion = 'dockmux-high-risk-guard-v2';
+const guardVersion = 'dutydeck-high-risk-guard-v2';
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 type HookAgentId = 'codex' | 'claude' | 'trae' | 'cursor' | 'pi';
@@ -18,11 +18,11 @@ type HookAdapter = {
 };
 
 const adapters: Record<HookAgentId, HookAdapter> = {
-  codex: { id: 'codex', label: 'Codex', kind: 'nested-json', configDirectory: '.codex', configFile: 'hooks.json', eventKey: 'PreToolUse', trustInstructions: 'Codex 首次执行时如提示信任，请在该工作区执行 /hooks 并确认 Dockmux PreToolUse Hook。' },
+  codex: { id: 'codex', label: 'Codex', kind: 'nested-json', configDirectory: '.codex', configFile: 'hooks.json', eventKey: 'PreToolUse', trustInstructions: 'Codex 首次执行时如提示信任，请在该工作区执行 /hooks 并确认 Dutydeck PreToolUse Hook。' },
   claude: { id: 'claude', label: 'Claude Code', kind: 'nested-json', configDirectory: '.claude', configFile: 'settings.json', eventKey: 'PreToolUse', trustInstructions: 'Claude Code 会从项目 .claude/settings.json 加载 PreToolUse Hook；首次进入工作区时请确认项目信任。' },
-  trae: { id: 'trae', label: 'Trae', kind: 'nested-json', configDirectory: '.trae', configFile: 'hooks.json', eventKey: 'PreToolUse', trustInstructions: 'Trae 首次发现项目 Hook 时会要求审核，请确认 Dockmux PreToolUse Hook。' },
+  trae: { id: 'trae', label: 'Trae', kind: 'nested-json', configDirectory: '.trae', configFile: 'hooks.json', eventKey: 'PreToolUse', trustInstructions: 'Trae 首次发现项目 Hook 时会要求审核，请确认 Dutydeck PreToolUse Hook。' },
   cursor: { id: 'cursor', label: 'Cursor Agent', kind: 'cursor-json', configDirectory: '.cursor', configFile: 'hooks.json', eventKey: 'preToolUse', trustInstructions: 'Cursor Agent 会从项目 .cursor/hooks.json 加载 fail-closed preToolUse Hook；新会话启动后生效。' },
-  pi: { id: 'pi', label: 'Pi', kind: 'pi-extension', configDirectory: '.pi/extensions', configFile: 'dockmux-high-risk-guard.ts', trustInstructions: 'Pi 会自动发现项目 .pi/extensions；首次进入工作区时请批准项目本地资源。' }
+  pi: { id: 'pi', label: 'Pi', kind: 'pi-extension', configDirectory: '.pi/extensions', configFile: 'dutydeck-high-risk-guard.ts', trustInstructions: 'Pi 会自动发现项目 .pi/extensions；首次进入工作区时请批准项目本地资源。' }
 };
 
 const aliases: Record<string, HookAgentId> = {
@@ -34,12 +34,12 @@ const adapterFor = (agentId?: string) => {
   const normalized = agentId ? aliases[agentId.toLowerCase()] : undefined;
   return normalized ? adapters[normalized] : undefined;
 };
-const markerFor = (adapter: HookAdapter) => `dockmux-lark-high-risk-guard-${adapter.id}.mjs`;
+const markerFor = (adapter: HookAdapter) => `dutydeck-lark-high-risk-guard-${adapter.id}.mjs`;
 const paths = (adapter: HookAdapter, workspace: string) => ({
   hooksPath: join(workspace, adapter.configDirectory, adapter.configFile),
   scriptPath: adapter.kind === 'pi-extension'
     ? join(workspace, adapter.configDirectory, adapter.configFile)
-    : join(workspace, '.dockmux', 'security', markerFor(adapter))
+    : join(workspace, '.dutydeck', 'security', markerFor(adapter))
 });
 
 export interface LarkHookStatus {
@@ -70,15 +70,15 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 
-const sessionId = process.env.dockmux_session_id;
+const sessionId = process.env.dutydeck_session_id;
 if (!sessionId) process.exit(0);
 let input = '';
 for await (const chunk of process.stdin) input += chunk;
 let event;
 try { event = JSON.parse(input); } catch { process.exit(2); }
-const root = process.env.DOCKMUX_POLICY_ROOT || event.cwd || process.cwd();
+const root = process.env.DUTYDECK_POLICY_ROOT || event.cwd || process.cwd();
 let policy;
-try { policy = JSON.parse(readFileSync(join(root, '.dockmux', 'security', 'sessions', sessionId + '.json'), 'utf8')); } catch { process.exit(0); }
+try { policy = JSON.parse(readFileSync(join(root, '.dutydeck', 'security', 'sessions', sessionId + '.json'), 'utf8')); } catch { process.exit(0); }
 if (!policy.enabled || policy.authorized || !policy.pattern) process.exit(0);
 const values = [];
 const flatten = value => {
@@ -122,11 +122,11 @@ const matches = (pattern: string, input: string) => new Promise<{ risky: boolean
 
 export default function (pi: any) {
   pi.on('tool_call', async (event: any, ctx: any) => {
-    const sessionId = process.env.dockmux_session_id;
+    const sessionId = process.env.dutydeck_session_id;
     if (!sessionId) return undefined;
-    const root = process.env.DOCKMUX_POLICY_ROOT || ctx?.cwd || process.cwd();
+    const root = process.env.DUTYDECK_POLICY_ROOT || ctx?.cwd || process.cwd();
     let policy: any;
-    try { policy = JSON.parse(readFileSync(join(root, '.dockmux', 'security', 'sessions', sessionId + '.json'), 'utf8')); } catch { return undefined; }
+    try { policy = JSON.parse(readFileSync(join(root, '.dutydeck', 'security', 'sessions', sessionId + '.json'), 'utf8')); } catch { return undefined; }
     if (!policy.enabled || policy.authorized || !policy.pattern) return undefined;
     const result = await matches(policy.pattern, JSON.stringify({ tool_name: event.toolName, tool_input: event.input }));
     if (!result.risky) return undefined;
@@ -173,14 +173,14 @@ async function installJsonHook(adapter: HookAdapter, workspace: string) {
   await mkdir(dirname(scriptPath), { recursive: true });
   await mkdir(dirname(hooksPath), { recursive: true });
   await writeFile(scriptPath, commandGuardScript(adapter.kind === 'cursor-json' ? 'cursor' : 'standard'), { mode: 0o700 });
-  const fallback = adapter.kind === 'cursor-json' ? { version: 1, hooks: {} } : { description: 'Dockmux project hooks', hooks: {} };
+  const fallback = adapter.kind === 'cursor-json' ? { version: 1, hooks: {} } : { description: 'Dutydeck project hooks', hooks: {} };
   const config = await readableJson(hooksPath, fallback);
   const hooks = config.hooks && typeof config.hooks === 'object' && !Array.isArray(config.hooks) ? config.hooks : {};
   const entries = Array.isArray(hooks[adapter.eventKey!]) ? hooks[adapter.eventKey!] : [];
-  const command = `DOCKMUX_POLICY_ROOT=${quote(workspace)} ${quote(process.execPath)} ${quote(scriptPath)}`;
+  const command = `DUTYDECK_POLICY_ROOT=${quote(workspace)} ${quote(process.execPath)} ${quote(scriptPath)}`;
   const entry = adapter.kind === 'cursor-json'
     ? { command, matcher: '.*', timeout: 5, failClosed: true }
-    : { matcher: '.*', hooks: [{ type: 'command', command, timeout: 5, statusMessage: 'Dockmux 高危操作风险检查' }] };
+    : { matcher: '.*', hooks: [{ type: 'command', command, timeout: 5, statusMessage: 'Dutydeck 高危操作风险检查' }] };
   const existingIndex = entries.findIndex((item: unknown) => JSON.stringify(item).includes(markerFor(adapter)));
   if (existingIndex >= 0) entries[existingIndex] = entry;
   else entries.push(entry);

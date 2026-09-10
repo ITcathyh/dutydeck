@@ -41,7 +41,7 @@ export class RelayAskBroker {
       let record: RelayAskRecord | undefined = initial;
       for (let attempt = 0; record && attempt < 3; attempt++) {
         if (record.status !== 'pending' && record.status !== 'answering') break;
-        const cancelled: RelayAskRecord = { ...record, status: 'cancelled', reason: 'Dockmux 服务已重启，原提问连接失效，请重新提问。' };
+        const cancelled: RelayAskRecord = { ...record, status: 'cancelled', reason: 'Dutydeck 服务已重启，原提问连接失效，请重新提问。' };
         if (await this.store.compareAndSet(record, cancelled)) { record = cancelled; break; }
         record = await this.store.get(record.id);
       }
@@ -52,7 +52,7 @@ export class RelayAskBroker {
 
   async register(input: { sessionId: string; question: string; timeoutMs?: number }): Promise<RelayAskOutcome> {
     await this.ready;
-    if (this.closed) throw new RelayError('RELAY_CLOSED', 'Dockmux 提问通道已关闭。', 409);
+    if (this.closed) throw new RelayError('RELAY_CLOSED', 'Dutydeck 提问通道已关闭。', 409);
     const question = input.question.trim();
     if (!question) throw new RelayError('RELAY_QUESTION_REQUIRED', '提问内容不能为空。', 400);
     const timeoutMs = input.timeoutMs ?? relayAskDefaultTimeoutMs;
@@ -76,7 +76,7 @@ export class RelayAskBroker {
     ask.timer.unref?.();
     // Register before publishing so a reply arriving during publish can find the live request.
     try {
-      if (this.closed) await this.finish(ask, { status: 'cancelled', askId: record.id, reason: 'Dockmux 服务已关闭' });
+      if (this.closed) await this.finish(ask, { status: 'cancelled', askId: record.id, reason: 'Dutydeck 服务已关闭' });
       else await Promise.race([
         this.publisher.publish(input.sessionId, { kind: 'ask', text: question, askId: record.id }),
         ask.outcome.then(() => undefined)
@@ -147,7 +147,7 @@ export class RelayAskBroker {
     }
   }
 
-  close(reason = 'Dockmux 服务已关闭') {
+  close(reason = 'Dutydeck 服务已关闭') {
     this.closed = true;
     for (const ask of [...this.pending.values()]) {
       if (ask.record.status === 'pending') this.track(this.finish(ask, { status: 'cancelled', askId: ask.record.id, reason }));

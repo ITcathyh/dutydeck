@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import type { DockmuxRuntime } from '@dockmux/runtime';
+import type { DutydeckRuntime } from '@dutydeck/runtime';
 import {
   RelayAskBroker,
   RelayCapabilityRegistry,
@@ -7,10 +7,10 @@ import {
   RelayService,
   type RelayEventPublisher,
   type RelayPublishInput
-} from '@dockmux/relay';
+} from '@dutydeck/relay';
 
 export interface RelayRoutesOptions {
-  runtime?: DockmuxRuntime;
+  runtime?: DutydeckRuntime;
   capabilities?: RelayCapabilityRegistry;
   broker?: RelayAskBroker;
   service?: RelayService;
@@ -27,7 +27,7 @@ const terminalStates = new Set(['stopped', 'failed']);
 /**
  * 事件流投递适配器：把 relay 的抽象消息映射成 runtime 的 `text` 事件。
  *
- * 为什么复用 `text` 而不是新增事件类型：`eventTypes` 是 @dockmux/shared 里的
+ * 为什么复用 `text` 而不是新增事件类型：`eventTypes` 是 @dutydeck/shared 里的
  * 封闭联合（driver 契约的一部分），新增一类要同时改 shared / web 时间线 /
  * 使用 `text` + `data.relay` 判别字段落地，Web 与飞书卡片沿用统一文本展示；
  * 消费方需要区分来源时读取 `data.relay`。
@@ -40,7 +40,7 @@ const terminalStates = new Set(['stopped', 'failed']);
  *    中途插入一条 user 文本会切碎轮次、甚至顶掉真实任务的 prompt 显示。
  *    所以答案同样走 assistant 侧，靠 `data.relay==='answer'` 区分来源。
  */
-function createRuntimePublisher(runtime: DockmuxRuntime): RelayEventPublisher {
+function createRuntimePublisher(runtime: DutydeckRuntime): RelayEventPublisher {
   return {
     async publish(sessionId: string, input: RelayPublishInput) {
       await runtime.publishSessionEvent(sessionId, 'text', {

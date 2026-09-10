@@ -15,7 +15,7 @@ const base = (trigger: ScheduleDefinition['trigger'], overrides: Partial<Schedul
   schemaVersion: 1, id: 'schedule-test', revision: 1, channelBotId: 'bot-test', name: 'Test schedule',
   trigger, timezone: 'America/New_York', dstPolicy: { gap: 'skip', overlap: 'first' },
   delivery: { mode: 'chat', chatRef: 'chat_ref', continuation: 'chat_root' }, payloadRef: 'payload_ref',
-  sourceOwnership: 'dockmux', sourceNamespace: 'fixture', sourceEnabled: false, state: 'staged',
+  sourceOwnership: 'dutydeck', sourceNamespace: 'fixture', sourceEnabled: false, state: 'staged',
   desiredExecutorState: 'disabled', currentGeneration: 1, createdAt: timestamp, updatedAt: timestamp, ...overrides
 });
 

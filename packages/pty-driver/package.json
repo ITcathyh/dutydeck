@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/pty-driver",
+  "name": "@dutydeck/pty-driver",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,10 +8,10 @@
   "exports": { ".": { "types": "./dist/index.d.ts", "development": "./src/index.ts", "import": "./dist/index.js" } },
   "scripts": { "build": "tsc -p tsconfig.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
   "dependencies": {
-    "@dockmux/shared": "workspace:*",
-    "@dockmux/cli-adapters": "workspace:*",
-    "@dockmux/session-backends": "workspace:*",
-    "@dockmux/terminal-renderer": "workspace:*"
+    "@dutydeck/shared": "workspace:*",
+    "@dutydeck/cli-adapters": "workspace:*",
+    "@dutydeck/session-backends": "workspace:*",
+    "@dutydeck/terminal-renderer": "workspace:*"
   },
   "devDependencies": { "typescript": "5.8.3", "@types/node": "22.15.30" }
 }

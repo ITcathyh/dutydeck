@@ -51,7 +51,7 @@ export function hueWithin(hue: number, from: number, to: number): boolean {
 /**
  * 灰阶「不带绿」的判据。
  *
- * dockmux 现在的中性色是 `#f5f7f6` / `#17201f` 这一族——G 通道恒比 B 高 1–2，
+ * dutydeck 现在的中性色是 `#f5f7f6` / `#17201f` 这一族——G 通道恒比 B 高 1–2，
  * 于是整屏灰阶朝黄绿偏，肉眼读作「脏」。冷灰（botmux 的 `#0d1117`：G=17 < B=23）
  * 反过来 B ≥ G。所以判据就是 **B ≥ G**。
  *

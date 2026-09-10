@@ -1,12 +1,12 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { isDockmuxSessionId, usableResumeId } from '../resume-id.js';
+import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
 /**
  * GitHub Copilot CLI（npm `@github/copilot`）适配器。
  *
- * Ink 交互式 agent，会话完全由 CLI 自己管——dockmux 的 sessionId 没法钉成
+ * Ink 交互式 agent，会话完全由 CLI 自己管——dutydeck 的 sessionId 没法钉成
  * Copilot 的会话 id，所以永远新起会话，恢复只认精确的 `--resume <id>`。
  */
 export function createCopilotAdapter(): CliAdapter {
@@ -53,11 +53,11 @@ export function createCopilotAdapter(): CliAdapter {
       }
     },
 
-    /** Copilot 会话完全由 CLI 自己管，dockmux 的 sessionId 钉不成它的会话 id，
-     *  且没有任何 cliSessionId 捕获机制——「缺 id」是常态。收到 dockmux 的
+    /** Copilot 会话完全由 CLI 自己管，dutydeck 的 sessionId 钉不成它的会话 id，
+     *  且没有任何 cliSessionId 捕获机制——「缺 id」是常态。收到 dutydeck 的
      *  `ses_<uuid>` → null，driver 改起新会话（而不是拿它去撞 `--resume`）。 */
     buildResumeCommand(sessionId: string): string[] | null {
-      if (isDockmuxSessionId(sessionId)) return null;
+      if (isDutydeckSessionId(sessionId)) return null;
       return ['--resume', sessionId];
     },
 

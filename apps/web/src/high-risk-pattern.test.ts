@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateHighRiskPattern } from '@dockmux/shared';
+import { validateHighRiskPattern } from '@dutydeck/shared';
 
 describe('high-risk pattern form validation', () => {
   it('accepts usable patterns and explains invalid or unsafe patterns', () => {

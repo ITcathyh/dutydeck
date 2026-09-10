@@ -294,7 +294,7 @@ export const migrations: Migration[] = [
           payload_ref TEXT NOT NULL,
           identity_ref TEXT,
           secret_ref TEXT REFERENCES secret_refs(id) ON DELETE RESTRICT,
-          source_ownership TEXT NOT NULL CHECK (source_ownership IN ('dockmux', 'botmux')),
+          source_ownership TEXT NOT NULL CHECK (source_ownership IN ('dutydeck', 'botmux')),
           source_namespace TEXT NOT NULL,
           source_schedule_ref TEXT,
           source_enabled INTEGER NOT NULL CHECK (source_enabled IN (0, 1)),

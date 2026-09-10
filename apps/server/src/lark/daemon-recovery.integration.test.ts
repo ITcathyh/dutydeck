@@ -2,8 +2,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRepositories } from '@dockmux/storage';
-import { DockmuxRuntime } from '@dockmux/runtime';
+import { createRepositories } from '@dutydeck/storage';
+import { DutydeckRuntime } from '@dutydeck/runtime';
 import {
   DriverDetachedError,
   DriverRecoveryError,
@@ -13,13 +13,13 @@ import {
   type DriverFactory,
   type DriverTurnRecovery,
   type NormalizedDriverEvent,
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
 
 const directories: string[] = [];
-const runtimes: DockmuxRuntime[] = [];
+const runtimes: DutydeckRuntime[] = [];
 const repositories: ReturnType<typeof createRepositories>[] = [];
 
 afterEach(async () => {
@@ -102,14 +102,14 @@ function persistentBackend() {
 }
 
 function database() {
-  const directory = mkdtempSync(join(tmpdir(), 'dockmux-lark-daemon-recovery-'));
+  const directory = mkdtempSync(join(tmpdir(), 'dutydeck-lark-daemon-recovery-'));
   directories.push(directory);
   return join(directory, 'state.db');
 }
 
-function open(file: string, factory: DriverFactory, options: ConstructorParameters<typeof DockmuxRuntime>[1] = {}) {
+function open(file: string, factory: DriverFactory, options: ConstructorParameters<typeof DutydeckRuntime>[1] = {}) {
   const repos = createRepositories(file);
-  const runtime = new DockmuxRuntime(repos, {
+  const runtime = new DutydeckRuntime(repos, {
     driverFactory: factory,
     probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }),
     ...options,
@@ -219,7 +219,7 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     const first = open(file, backend.factory);
     await first.runtime.initialize([agent]);
     await first.repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
-    const operation = vi.spyOn(first.runtime, phase).mockRejectedValueOnce(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dockmux is shutting down', 503));
+    const operation = vi.spyOn(first.runtime, phase).mockRejectedValueOnce(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503));
     const original = coordinator(first, service);
     await original.initializeWorkflows(config);
     await original.handle(message, config);

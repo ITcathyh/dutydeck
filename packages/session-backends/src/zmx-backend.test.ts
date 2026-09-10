@@ -207,12 +207,12 @@ describe('zmx pure helpers', () => {
     });
 
     it('shell-escapes values so a quote cannot break out', () => {
-      const evil = "'; touch /tmp/dockmux-pwned; '";
+      const evil = "'; touch /tmp/dutydeck-pwned; '";
       const script = buildZmxBootstrap('mycli', [], { ...opts, env: { EVIL: evil } });
       // The payload survives verbatim, but only INSIDE a quoted word: every
       // embedded ' is closed-escaped-reopened, so it can never terminate the
       // string and start a new command.
-      expect(script).toContain("'EVIL='\\''; touch /tmp/dockmux-pwned; '\\'''");
+      expect(script).toContain("'EVIL='\\''; touch /tmp/dutydeck-pwned; '\\'''");
 
       // Prove it by actually running the escaped launch line: replace the CLI
       // with a printer and check the value arrives intact, with no injected
@@ -226,7 +226,7 @@ describe('zmx pure helpers', () => {
       }).replace(/\nwhile ! sleep .*$/, '');
       const r = spawnSync('/bin/sh', ['-c', probe], { encoding: 'utf-8', timeout: 10000 });
       expect(r.stdout).toBe(`[${evil}]`);
-      expect(existsSync('/tmp/dockmux-pwned')).toBe(false);
+      expect(existsSync('/tmp/dutydeck-pwned')).toBe(false);
     });
 
     it('injectEnv is emitted after env so it wins on a key collision', () => {
@@ -305,7 +305,7 @@ zmxDescribe('ZmxBackend (live)', () => {
   let backend: ZmxBackend | null = null;
 
   const newSessionName = () =>
-    `dockmux-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    `dutydeck-test-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   afterEach(() => {
     backend?.kill();

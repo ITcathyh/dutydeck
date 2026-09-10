@@ -35,14 +35,14 @@ const OUR_UUID = OUR_SESSION.replace(/^ses_/, '');
 
 /** The first prompt the driver actually sends: routing block + marker + text. */
 function firstPrompt(sessionId: string, text: string): string {
-  return `<dockmux_routing>\n  hints\n</dockmux_routing>\n${buildSessionMarker(sessionId)}\n${text}`;
+  return `<dutydeck_routing>\n  hints\n</dutydeck_routing>\n${buildSessionMarker(sessionId)}\n${text}`;
 }
 
 let tempRoots: string[] = [];
 const savedEnv: Record<string, string | undefined> = {};
 
 function makeTempDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), `dockmux-sid-${prefix}-`));
+  const dir = mkdtempSync(join(tmpdir(), `dutydeck-sid-${prefix}-`));
   tempRoots.push(dir);
   return dir;
 }
@@ -73,7 +73,7 @@ function writeJsonl(path: string, entries: unknown[]): void {
 
 describe('session marker', () => {
   it('wraps the session id in a recognizable tag', () => {
-    expect(buildSessionMarker(OUR_SESSION)).toBe(`<dockmux_session_id>${OUR_SESSION}</dockmux_session_id>`);
+    expect(buildSessionMarker(OUR_SESSION)).toBe(`<dutydeck_session_id>${OUR_SESSION}</dutydeck_session_id>`);
   });
 
   it('rejects ids too short to be a safe fingerprint', () => {
@@ -139,7 +139,7 @@ describe('claude-code session id lookup', () => {
     const decoyCliId = 'bbbbbbbb-0000-0000-0000-000000000002';
     writeJsonl(join(projectDir, `${ourCliId}.jsonl`),
       claudeTranscript(ourCliId, firstPrompt(OUR_SESSION, 'do our work')));
-    // Decoy: same cwd, DIFFERENT dockmux session, written last so a
+    // Decoy: same cwd, DIFFERENT dutydeck session, written last so a
     // newest-wins resolver would pick it.
     writeJsonl(join(projectDir, `${decoyCliId}.jsonl`),
       claudeTranscript(decoyCliId, firstPrompt(OTHER_SESSION, 'do their work')));

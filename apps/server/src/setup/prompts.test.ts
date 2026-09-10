@@ -232,7 +232,7 @@ describe('ask 的交互路径', () => {
   });
 
   it('一次到达的多行按顺序分配给连续的提问', async () => {
-    // 管道场景：`printf 'a\\nb\\n' | dockmux setup` 会让两行几乎同时到达。
+    // 管道场景：`printf 'a\\nb\\n' | dutydeck setup` 会让两行几乎同时到达。
     // 第二行必须排队进 bufferedLines 等第二问，而不是因为「当前没人在等」被丢掉。
     // 关掉 bufferedLines 的消费，本例必然失败——这是它守护的性质。
     // 排序理由同上：为确定性，与是否存在时序竞态无关。

@@ -3,8 +3,8 @@
  *
  * OpenCode 1.17+ keeps every project's sessions in ONE global database at
  * `${XDG_DATA_HOME:-~/.local/share}/opencode/opencode.db`. Its ids look like
- * `ses_<base62>` and are minted by the CLI, so dockmux can never pin one —
- * `opencode -s <dockmuxSessionId>` would exit 1 ("Session not found") and, in
+ * `ses_<base62>` and are minted by the CLI, so dutydeck can never pin one —
+ * `opencode -s <dutydeckSessionId>` would exit 1 ("Session not found") and, in
  * a supervised setup, crash-loop. This lookup is therefore not an
  * optimisation: without it OpenCode resume cannot work at all.
  *
@@ -128,7 +128,7 @@ export function readOpenCodeSessionId(
 function opencodeResolve(kind: OpenCodeDbKind) {
   return ({ sessionId, env }: SessionIdLookupContext): string | undefined => {
     // No fast path: OpenCode never accepts a caller-supplied id, so the
-    // dockmux session id is never also the CLI's.
+    // dutydeck session id is never also the CLI's.
     if (!isUsableMarker(sessionId)) return undefined;
     // The db path follows the CHILD's $XDG_DATA_HOME / $HOME, not the daemon's.
     return readOpenCodeSessionId(opencodeDbPath(env), sessionId, kind);

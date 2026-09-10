@@ -44,9 +44,9 @@ const env = { ...settingsEnv, ...process.env };
 const installedClaude = await findClaudeExecutable(env.PATH);
 if (installedClaude) env.CLAUDE_CODE_EXECUTABLE = installedClaude;
 const bundledClaudeAcp = fileURLToPath(import.meta.resolve('@agentclientprotocol/claude-agent-acp/dist/index.js'));
-const command = process.env.DOCKMUX_CLAUDE_ACP_COMMAND || process.execPath;
-const args = process.env.DOCKMUX_CLAUDE_ACP_ARGS_JSON
-  ? JSON.parse(process.env.DOCKMUX_CLAUDE_ACP_ARGS_JSON)
+const command = process.env.DUTYDECK_CLAUDE_ACP_COMMAND || process.execPath;
+const args = process.env.DUTYDECK_CLAUDE_ACP_ARGS_JSON
+  ? JSON.parse(process.env.DUTYDECK_CLAUDE_ACP_ARGS_JSON)
   : [bundledClaudeAcp];
 const child = spawn(command, args, { cwd: process.cwd(), env, stdio: 'inherit' });
 

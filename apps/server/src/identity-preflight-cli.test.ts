@@ -25,7 +25,7 @@ describe('identity preflight CLI', () => {
   it('parses the documented repeatable GroupBinding command exactly', async () => {
     const identityPreflight = vi.fn();
     await createCliProgram('test', { identityPreflight }).parseAsync([
-      'node', 'dockmux', 'lark', 'preflight', 'bot-1', '--group-binding', 'binding-1', '--group-binding', 'binding-2',
+      'node', 'dutydeck', 'lark', 'preflight', 'bot-1', '--group-binding', 'binding-1', '--group-binding', 'binding-2',
     ]);
     expect(identityPreflight).toHaveBeenCalledWith('bot-1', expect.objectContaining({ groupBinding: ['binding-1', 'binding-2'] }));
   });

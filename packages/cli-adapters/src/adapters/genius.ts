@@ -1,5 +1,5 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
-import { buildDockmuxRoutingBlock } from '../shared-hints.js';
+import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -10,7 +10,7 @@ export function createGeniusAdapter(): CliAdapter {
 
     buildArgs({ sessionId, cwd, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
       // Genius 是 Claude 家族（同样的 --session-id/--resume/--settings 形态），
-      // 会话 id 按裸 UUID 传；dockmux sessionId 形如 "ses_<uuid>"。
+      // 会话 id 按裸 UUID 传；dutydeck sessionId 形如 "ses_<uuid>"。
       const uuid = sessionId.replace(/^ses_/, '');
       const args: string[] = [];
       if (cwd) args.push('--add-dir', cwd);
@@ -36,7 +36,7 @@ export function createGeniusAdapter(): CliAdapter {
     // botmux 走 --append-system-prompt 注入共用提示（所以它把 systemHints 置空、
     // 标记自注入）；精简契约统一改为 driver 把返回块拼到首轮 prompt 前。
     injectSessionContext(ctx: AdapterSessionContext): string {
-      return buildDockmuxRoutingBlock(ctx.locale, ctx.env);
+      return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

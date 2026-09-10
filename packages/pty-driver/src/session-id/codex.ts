@@ -2,7 +2,7 @@
  * Codex-family native session-id lookup (codex + traex).
  *
  * Both CLIs mint their own UUID and never accept one from the caller, so
- * `codex resume <dockmuxSessionId>` was always wrong. Two on-disk sources
+ * `codex resume <dutydeckSessionId>` was always wrong. Two on-disk sources
  * bridge the gap:
  *
  *  1. `<home>/history.jsonl` — the global submit log. One
@@ -59,7 +59,7 @@ export function findSessionIdInHistory(historyPath: string, marker: string): str
   const text = readTail(historyPath, HISTORY_TAIL_BYTES);
   if (!text) return undefined;
   const lines = text.split('\n');
-  // Last match wins: the newest submit naming this dockmux session belongs to
+  // Last match wins: the newest submit naming this dutydeck session belongs to
   // the CLI session that is still alive.
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!;
@@ -94,7 +94,7 @@ function rolloutUserText(entry: any): string {
 /**
  * Scan the rollout tree for the session whose head carries the marker.
  * `cwd` gates the match: session_meta records the working directory, and a
- * rollout from a different project can never be this dockmux session.
+ * rollout from a different project can never be this dutydeck session.
  */
 export function findSessionIdInRollouts(
   sessionsRoot: string,

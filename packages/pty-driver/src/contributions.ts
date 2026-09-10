@@ -1,13 +1,13 @@
 /**
  * pty-cli 驱动的内置 Agent 贡献清单。
  *
- * id/adapterId 与 @dockmux/cli-adapters 的适配器 id 一致；
+ * id/adapterId 与 @dutydeck/cli-adapters 的适配器 id 一致；
  * command 按 botmux src/adapters/cli/registry.ts 的 RAW_CLI_EXECUTABLES 核对；
  * capabilities.resume 按 botmux 各适配器 buildArgs 的实际 resume 支持核对
  * （gemini 适配器明确 always start fresh，无 resume）。
- * pause 全 false：这些供应商 CLI 没有可由 Dockmux 可靠兑现的暂停语义。
+ * pause 全 false：这些供应商 CLI 没有可由 Dutydeck 可靠兑现的暂停语义。
  *
- * 与 @dockmux/config 的 PtyAgentContribution 对齐：config 包定义的形状是
+ * 与 @dutydeck/config 的 PtyAgentContribution 对齐：config 包定义的形状是
  * `{ id, name, command, args?, builtin? }`，本接口是它的超集——多出的
  * adapterId / capabilities 是 server 组装 driver 时的元数据；当前贡献的 id 与
  * adapterId 恒等，server 可直接用 agent.id 经 createCliAdapter 取适配器。
@@ -44,7 +44,7 @@ export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
   // MTR is intentionally not auto-discovered: its executable name collides
   // with the ubiquitous network diagnostic `/usr/bin/mtr`. Until discovery
   // has a reliable vendor fingerprint, users of the AI CLI can opt in with
-  // DOCKMUX_AGENTS_JSON instead of exposing a guaranteed-broken false Agent.
+  // DUTYDECK_AGENTS_JSON instead of exposing a guaranteed-broken false Agent.
   { id: 'hermes', name: 'Hermes', command: 'hermes', adapterId: 'hermes', capabilities: { pause: false, resume: true } },
   { id: 'pi', name: 'Pi', command: 'pi', adapterId: 'pi', capabilities: { pause: false, resume: true } },
   { id: 'oh-my-pi', name: 'Oh My Pi', command: 'omp', adapterId: 'oh-my-pi', capabilities: { pause: false, resume: true } },
@@ -57,7 +57,7 @@ export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
   { id: 'aiden', name: 'Aiden', command: 'aiden', adapterId: 'aiden', capabilities: { pause: false, resume: true } },
   { id: 'genius', name: 'Genius', command: 'genius', adapterId: 'genius', capabilities: { pause: false, resume: true } },
   // ⚠️ 未登记：mir / dsh / codex-app / mojo / riff / mira —— 适配器都已移植可用
-  // （createCliAdapter 取得到），但**都不能由 dockmux 直接 spawn**，登记进来只会
+  // （createCliAdapter 取得到），但**都不能由 dutydeck 直接 spawn**，登记进来只会
   // 让它们出现在 UI 列表里、用户一点就失败：
   //
   //  - mir / dsh / codex-app 是 runner 类：适配器 buildArgs 产出的是 *runner* 的
@@ -75,7 +75,7 @@ export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
 ];
 
 
-/** 编译期对齐守卫：本包的贡献数据必须能赋给 @dockmux/config 的
+/** 编译期对齐守卫：本包的贡献数据必须能赋给 @dutydeck/config 的
  *  PtyAgentContribution 形状（config 不被本包依赖，用结构子集断言代替
  *  跨包 import）。形状漂移时这行会编译失败。 */
 type ConfigContributionShape = {

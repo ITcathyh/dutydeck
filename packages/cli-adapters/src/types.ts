@@ -1,4 +1,4 @@
-import type { PermissionMode } from '@dockmux/shared';
+import type { PermissionMode } from '@dutydeck/shared';
 
 /** buildArgs 的会话上下文（从 botmux 20+ 字段瘦身到这些） */
 export interface AdapterSessionContext {
@@ -16,7 +16,7 @@ export interface AdapterSessionContext {
   permissionMode?: PermissionMode;
   locale?: string;
   /**
-   * 会话 env（含 relay 注入的 `dockmux_relay_url` / `_token` / `_command`）。
+   * 会话 env（含 relay 注入的 `dutydeck_relay_url` / `_token` / `_command`）。
    * 供 `injectSessionContext` 把回传命令说明拼进上下文块——命令前缀是运行期
    * 算出的绝对路径，静态文案拿不到，只能经 env 下发。见 shared-hints.ts 注释。
    */
@@ -53,11 +53,11 @@ export interface CliAdapter {
    *
    * 什么时候该返回 null：CLI 自己铸 session id（opencode / codex / cursor…），
    * 而传进来的 id 明显不是它铸的——最典型的是反查失败后 driver 退回来的
-   * dockmux sessionId（`ses_<uuid>` 形态）。这种 id 递给 CLI 必然无效：
+   * dutydeck sessionId（`ses_<uuid>` 形态）。这种 id 递给 CLI 必然无效：
    * `opencode -s <不存在的id>` 立刻 exit 1，会话随即被判 failed。宁可丢上下文
    * 起新会话，也不要拿一个必然无效的 id 去启动。
    *
-   * 反过来，dockmux 亲自把 id 钉给 CLI 的适配器（claude `--session-id`、
+   * 反过来，dutydeck 亲自把 id 钉给 CLI 的适配器（claude `--session-id`、
    * grok `--session-id`、pi、mtr…）永远不该返回 null：那个 id 就是有效的
    * resume 目标。
    *

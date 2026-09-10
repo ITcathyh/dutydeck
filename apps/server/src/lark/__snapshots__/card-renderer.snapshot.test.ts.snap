@@ -147,7 +147,7 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
       },
     },
     "summary": {
-      "content": "验证 Dockmux 测试 · 已完成",
+      "content": "验证 Dutydeck 测试 · 已完成",
     },
     "update_multi": true,
     "width_mode": "default",
@@ -155,12 +155,12 @@ exports[`renderLarkCardElements 视觉快照 > completed 态：思考 + 工具�
   "header": {
     "padding": "10px 12px 8px 12px",
     "subtitle": {
-      "content": "Dockmux",
+      "content": "Dutydeck",
       "tag": "plain_text",
     },
     "template": "green",
     "title": {
-      "content": "验证 Dockmux 测试",
+      "content": "验证 Dutydeck 测试",
       "tag": "plain_text",
     },
   },
@@ -316,7 +316,7 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
       },
     },
     "summary": {
-      "content": "验证 Dockmux 测试 · 执行中",
+      "content": "验证 Dutydeck 测试 · 执行中",
     },
     "update_multi": true,
     "width_mode": "default",
@@ -324,12 +324,12 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
   "header": {
     "padding": "10px 12px 8px 12px",
     "subtitle": {
-      "content": "Dockmux",
+      "content": "Dutydeck",
       "tag": "plain_text",
     },
     "template": "blue",
     "title": {
-      "content": "验证 Dockmux 测试",
+      "content": "验证 Dutydeck 测试",
       "tag": "plain_text",
     },
   },
@@ -462,7 +462,7 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
   "header": {
     "padding": "10px 12px 8px 12px",
     "subtitle": {
-      "content": "Dockmux",
+      "content": "Dutydeck",
       "tag": "plain_text",
     },
     "template": "orange",

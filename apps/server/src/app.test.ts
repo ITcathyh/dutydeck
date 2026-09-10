@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { get as httpGet, type IncomingMessage } from 'node:http';
 import { buildApp } from './app.js';
-import { createRepositories } from '@dockmux/storage';
+import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey, larkCredentialsConfigKey } from './lark/config.js';
 
 const apps: any[] = [];
@@ -121,7 +121,7 @@ describe('HTTP API boundary', () => {
     expect((await app.inject({ method: 'GET', url: '/api/lark/open-platform/jobs/missing' })).statusCode).toBe(404);
   });
 
-  it('keeps Dockmux available when Lark is not configured', async () => {
+  it('keeps Dutydeck available when Lark is not configured', async () => {
     const app = await buildApp({} as any, { lark: { env: {} } }); apps.push(app);
     expect((await app.inject({ method: 'GET', url: '/api/lark/status' })).json()).toMatchObject({ configured: false, missing: ['LARK_APP_ID', 'LARK_APP_SECRET'] });
     const response = await app.inject({ method: 'POST', url: '/api/lark/send', payload: { receiveId: 'user@example.com', markdown: 'done' } });
@@ -325,7 +325,7 @@ describe('HTTP API boundary', () => {
 
   it('requires a hook for enforced control while allowing the Agent to change through guidance', async () => {
     const repos = createRepositories(':memory:'); repositories.push(repos);
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-hard-gate-')); tempDirectories.push(workspace);
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hard-gate-')); tempDirectories.push(workspace);
     for (const id of ['codex', 'claude']) await repos.agents.save({ id, name: id, command: id, args: [], protocol: 'acp', cwd: workspace, env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true });
     const listener = listenerPool();
     const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, listener } }); apps.push(app);
@@ -568,18 +568,18 @@ describe('HTTP API boundary', () => {
   });
 
   it('serves the bundled Web UI while preserving API 404 responses', async () => {
-    const webRoot = await mkdtemp(join(tmpdir(), 'dockmux-web-')); tempDirectories.push(webRoot);
+    const webRoot = await mkdtemp(join(tmpdir(), 'dutydeck-web-')); tempDirectories.push(webRoot);
     await mkdir(join(webRoot, 'assets'));
-    await writeFile(join(webRoot, 'index.html'), '<main>Dockmux UI</main>');
-    await writeFile(join(webRoot, 'assets', 'app.js'), 'globalThis.dockmux = true;');
+    await writeFile(join(webRoot, 'index.html'), '<main>Dutydeck UI</main>');
+    await writeFile(join(webRoot, 'assets', 'app.js'), 'globalThis.dutydeck = true;');
     const runtime: any = { listAgents: async () => [], listSessions: async () => [], getSession: async () => undefined, start: vi.fn(), send: vi.fn(), interrupt: vi.fn(), pause: vi.fn(), resume: vi.fn(), stop: vi.fn(), restart: vi.fn(), resolvePermission: vi.fn(), getEvents: vi.fn(async () => []), getTasks: vi.fn(async () => []), subscribe: vi.fn(() => () => {}) };
     const app = await buildApp(runtime, { webRoot }); apps.push(app);
 
     const index = await app.inject({ method: 'GET', url: '/' });
-    expect(index.statusCode).toBe(200); expect(index.headers['content-type']).toContain('text/html'); expect(index.body).toContain('Dockmux UI');
+    expect(index.statusCode).toBe(200); expect(index.headers['content-type']).toContain('text/html'); expect(index.body).toContain('Dutydeck UI');
     const asset = await app.inject({ method: 'GET', url: '/assets/app.js' });
     expect(asset.statusCode).toBe(200); expect(asset.headers['cache-control']).toContain('immutable');
-    expect((await app.inject({ method: 'GET', url: '/sessions/s1' })).body).toContain('Dockmux UI');
+    expect((await app.inject({ method: 'GET', url: '/sessions/s1' })).body).toContain('Dutydeck UI');
     const api = await app.inject({ method: 'GET', url: '/api/not-real' });
     expect(api.statusCode).toBe(404); expect(api.json().error.code).toBe('NOT_FOUND');
   });
@@ -604,7 +604,7 @@ describe('HTTP API boundary', () => {
     expect((await app.inject({ method: 'GET', url: '/api/auth/status', ...remote })).json()).toEqual({ authenticated: false, required: true });
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { token: 'secret-token' }, ...remote });
     expect(login.statusCode).toBe(200);
-    expect(login.headers['set-cookie']).toContain('dockmux_access=secret-token');
+    expect(login.headers['set-cookie']).toContain('dutydeck_access=secret-token');
     expect((await app.inject({ method: 'GET', url: '/api/sessions', headers: { cookie: login.headers['set-cookie'] }, ...remote })).statusCode).not.toBe(401);
 
     // 非豁免：这些必须 401

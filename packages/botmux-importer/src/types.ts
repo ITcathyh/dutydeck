@@ -149,7 +149,7 @@ export interface BotmuxPrivateMigrationPlan {
   secret_requirements: BotmuxSecretRequirement[];
   blockers: BotmuxImportBlocker[];
   forbidden_capabilities: readonly [
-    'write_dockmux_db',
+    'write_dutydeck_db',
     'modify_botmux_source',
     'enable_listener',
     'enable_schedule',

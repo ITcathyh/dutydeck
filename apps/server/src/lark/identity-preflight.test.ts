@@ -3,8 +3,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { LocalFileSecretProvider } from '@dockmux/secret-provider';
-import type { ChannelBotFoundation, GroupBinding, SecretRefMetadata } from '@dockmux/shared';
+import { LocalFileSecretProvider } from '@dutydeck/secret-provider';
+import type { ChannelBotFoundation, GroupBinding, SecretRefMetadata } from '@dutydeck/shared';
 import { IdentityPreflightError, LarkIdentityPreflightProbe } from './identity-preflight.js';
 
 const roots: string[] = [];
@@ -64,7 +64,7 @@ const secretRef = (): SecretRefMetadata => ({
 });
 
 async function secretFixture(appId = 'cli_expected_app') {
-  const root = await mkdtemp(join(tmpdir(), 'dockmux-identity-preflight-'));
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-identity-preflight-'));
   roots.push(root);
   const provider = new LocalFileSecretProvider(join(root, 'secrets'), { createDirectory: true });
   provider.writeExclusive(secretRef().referenceKey, Buffer.from(JSON.stringify({
@@ -173,7 +173,7 @@ describe('Lark App×Chat identity preflight', () => {
   });
 
   it('fails before network on a missing, unreadable, or App-mismatched selected secret', async () => {
-    const missingRoot = await mkdtemp(join(tmpdir(), 'dockmux-identity-preflight-missing-'));
+    const missingRoot = await mkdtemp(join(tmpdir(), 'dutydeck-identity-preflight-missing-'));
     roots.push(missingRoot);
     const missingProvider = new LocalFileSecretProvider(join(missingRoot, 'secrets'), { createDirectory: true });
     const noNetwork = () => { throw new Error('network must not be called'); };

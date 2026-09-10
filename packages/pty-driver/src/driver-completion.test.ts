@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createCliAdapter } from '@dockmux/cli-adapters';
-import type { NormalizedDriverEvent } from '@dockmux/shared';
-import type { SessionBackend } from '@dockmux/session-backends';
+import { createCliAdapter } from '@dutydeck/cli-adapters';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import type { SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 
 // The 2026-09-08 incident kept this footer visible while streaming a long
@@ -23,7 +23,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
 
   beforeEach(async () => {
     vi.useFakeTimers();
-    directory = mkdtempSync(join(tmpdir(), 'dockmux-completion-'));
+    directory = mkdtempSync(join(tmpdir(), 'dutydeck-completion-'));
     const project = join(directory, 'projects', realpathSync(directory).replace(/[^A-Za-z0-9-]/g, '-'));
     mkdirSync(project, { recursive: true });
     transcript = join(project, 'completion-fixture.jsonl');

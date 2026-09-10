@@ -59,7 +59,7 @@ describe('TopBar 全局入口', () => {
     */
     const onGoHome = vi.fn();
     renderTopBar({ onGoHome });
-    await userEvent.click(screen.getByRole('button', { name: 'Dockmux 首页，回到任务中心' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Dutydeck 首页，回到任务中心' }));
     expect(onGoHome).toHaveBeenCalledTimes(1);
     expect(screen.queryByRole('button', { name: '回到任务中心' })).toBeNull();
   });
@@ -95,7 +95,7 @@ describe('TopBar 全局入口', () => {
     // md:hidden 的汉堡在 jsdom 里仍然渲染（CSS 不生效），所以它也在 Tab 序列里。
     const interactive = [
       screen.getByRole('button', { name: '打开工作台导航' }),
-      screen.getByRole('button', { name: 'Dockmux 首页，回到任务中心' }),
+      screen.getByRole('button', { name: 'Dutydeck 首页，回到任务中心' }),
       screen.getByRole('button', { name: '搜索任务目标、工作区或 Agent' }),
       screen.getByRole('button', { name: '查看键盘快捷键' })
     ];

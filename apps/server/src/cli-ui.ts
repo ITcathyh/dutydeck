@@ -5,7 +5,7 @@
  *   1. 零依赖——只用 Node 内置能力，不引入 chalk / ora 之类的包。
  *   2. 尊重 NO_COLOR 与非 TTY——被管道接收时不输出任何 ANSI 序列。
  *   3. 不使用 spinner。进度只报告离散状态变化，且一律走 stderr；
- *      结果走 stdout，这样 `dockmux doctor | head -1` 仍然有意义。
+ *      结果走 stdout，这样 `dutydeck doctor | head -1` 仍然有意义。
  *   4. 输出可注入——所有写入都走注入的 target，测试直接断言纯文本。
  */
 

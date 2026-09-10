@@ -17,7 +17,7 @@ const PI_WORKING_PATTERN = /Working\.\.\./;
  *     输入框画出来（扩展/模型还在加载）。此时的静默不是 idle——需要 driver 把
  *     首次 ready 压到「turn 确实起来了」为止（PTY 上出现 `Working...`）。
  *     这条闸门在 driver 侧，精简契约里没有对应字段。
- *  2. turn 中途：botmux 靠 JSONL transcript 的终止事件压制屏幕 idle；dockmux
+ *  2. turn 中途：botmux 靠 JSONL transcript 的终止事件压制屏幕 idle；dutydeck
  *     未移植 transcript bridge，这条闸门缺失。
  *  3. idle 之后：`idleToBusyPattern` 把误判的 ready 拉回 working——`Working...`
  *     在一次 idle 上报之后重新出现，就说明刚才那次 ready 是假的。它当 idle→busy
@@ -31,7 +31,7 @@ export function createPiAdapter(): CliAdapter {
 
     buildArgs({ sessionId, resume, resumeSessionId, initialPrompt, model }: AdapterSessionContext): string[] {
       // Pi 的会话文件名是 `<时间戳>_<uuid>.jsonl`，`--session-id` 只接受裸 UUID；
-      // dockmux sessionId 形如 `ses_<uuid>`，先剥前缀。
+      // dutydeck sessionId 形如 `ses_<uuid>`，先剥前缀。
       const uuid = sessionId.replace(/^ses_/, '');
       // Pi 没有独立的 --resume：同一个 --session-id 再启一次就是续接，
       // 所以 fresh 与 resume 的 argv 结构相同。resumeSessionId 也要剥前缀——
@@ -46,7 +46,7 @@ export function createPiAdapter(): CliAdapter {
       // 未移植的能力：botmux 对超过 4096 字节、或含控制字符的首轮 prompt 会改
       // 写成 `@<文件>` 位置参数（部分 launcher 拒绝 argv 里的控制字符），并配一个
       // Pi extension 把文件内容当一条消息投递。那套机制依赖 botmux 的 session
-      // 数据目录与沙箱只读挂载，dockmux 精简契约里无处安放——超长首轮 prompt
+      // 数据目录与沙箱只读挂载，dutydeck 精简契约里无处安放——超长首轮 prompt
       // 需要 driver 改走 writeInput。
       if (initialPrompt) args.push(initialPrompt);
       return args;

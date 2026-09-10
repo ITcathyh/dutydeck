@@ -88,8 +88,8 @@ describe('remote access modes', () => {
       method: 'POST', url: '/api/sessions', payload: { agentId: 'codex' },
       headers: {
         host: '127.0.0.1:4310',
-        origin: 'https://dockmux.example',
-        'x-forwarded-host': 'dockmux.example',
+        origin: 'https://dutydeck.example',
+        'x-forwarded-host': 'dutydeck.example',
         'x-forwarded-proto': 'https'
       }
     });

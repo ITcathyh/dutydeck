@@ -120,7 +120,7 @@ describe('飞书卡片操作按钮：只读收据零按钮', () => {
     for (const state of allStates) {
       const elements = buildLarkCardActions(context(state, {
         readOnly: true,
-        capabilities: { ...allCapabilities, webUrl: 'https://dockmux.example.com/sessions/ses_1' }
+        capabilities: { ...allCapabilities, webUrl: 'https://dutydeck.example.com/sessions/ses_1' }
       }));
       expect(elements).toEqual([]);
       for (const action of ['cancel', 'interrupt', 'retry', 'refresh'] as LarkCardActionName[]) {
@@ -179,7 +179,7 @@ describe('飞书卡片操作按钮：回调 value 全字符串（跨重启幂等
     const contexts = allStates.flatMap(state => [
       context(state, { turn: 0 }),
       context(state, { turn: 7 }),
-      context(state, { turn: 12, capabilities: { ...allCapabilities, webUrl: 'https://dockmux.example.com/sessions/ses_1' } })
+      context(state, { turn: 12, capabilities: { ...allCapabilities, webUrl: 'https://dutydeck.example.com/sessions/ses_1' } })
     ]);
     let asserted = 0;
     for (const ctx of contexts) {
@@ -215,7 +215,7 @@ describe('飞书卡片操作按钮：渲染与鉴权不可分叉', () => {
       context(state, {}, { canCancelQueued: false }),
       context(state, {}, { canInterrupt: false }),
       context(state, {}, { canRefresh: false }),
-      context(state, { capabilities: { ...allCapabilities, webUrl: 'https://dockmux.example.com/sessions/ses_1' } })
+      context(state, { capabilities: { ...allCapabilities, webUrl: 'https://dutydeck.example.com/sessions/ses_1' } })
     ]);
     let roundTripped = 0;
     for (const ctx of contexts) {
@@ -307,7 +307,7 @@ describe('parseLarkCardActionValue', () => {
 });
 
 describe('查看详情：只在页脚出现一次', () => {
-  const webUrl = 'https://dockmux.example.com/sessions/ses_1';
+  const webUrl = 'https://dutydeck.example.com/sessions/ses_1';
 
   it('顶部操作行不渲染查看详情按钮（页脚已有同一去向的链接）', () => {
     // 同一个链接在卡片上出现两次是重复入口。详情统一由页脚的 markdown 链接承担，
@@ -349,7 +349,7 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
   it('每个按钮都有非空文案，语义不靠颜色单独承载', () => {
     for (const state of allStates) {
       const elements = buildLarkCardActions(context(state, {
-        capabilities: { ...allCapabilities, webUrl: 'https://dockmux.example.com/sessions/ses_1' }
+        capabilities: { ...allCapabilities, webUrl: 'https://dutydeck.example.com/sessions/ses_1' }
       }));
       for (const element of elements) {
         expect(element.tag).toBe('button');
@@ -378,7 +378,7 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
     // 按钮会占用整卡 ~24KB / 180 组件的额度，操作区必须保持紧凑。
     for (const state of allStates) {
       const elements = buildLarkCardActions(context(state, {
-        capabilities: { ...allCapabilities, webUrl: 'https://dockmux.example.com/sessions/ses_1' }
+        capabilities: { ...allCapabilities, webUrl: 'https://dutydeck.example.com/sessions/ses_1' }
       }));
       expect(elements.length).toBeLessThanOrEqual(larkCardActionBudget.maxButtons);
       // 每个按钮 = button 自身 + text.plain_text 两个组件。

@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { builtinAgents } from '@dockmux/config';
-import { createRepositories } from '@dockmux/storage';
-import { agentConfigSchema } from '@dockmux/shared';
-import { normalizeAcpxEvent } from '@dockmux/acp-client';
-import { correlateToolCalls, selectProtocol } from '@dockmux/runtime';
+import { builtinAgents } from '@dutydeck/config';
+import { createRepositories } from '@dutydeck/storage';
+import { agentConfigSchema } from '@dutydeck/shared';
+import { normalizeAcpxEvent } from '@dutydeck/acp-client';
+import { correlateToolCalls, selectProtocol } from '@dutydeck/runtime';
 
 describe('acceptance foundations (specified before implementation)', () => {
   it('requires approval by default', () => {

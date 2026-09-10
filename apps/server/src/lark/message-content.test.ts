@@ -8,12 +8,12 @@ describe('parseLarkMessageContent', () => {
       content: [[{ tag: 'text', text: '旧格式内容' }]],
       content_v2: [[
         { tag: 'text', text: '切到 ' },
-        { tag: 'text', text: 'feat/dockmux-migration' },
+        { tag: 'text', text: 'feat/dutydeck-migration' },
         { tag: 'text', text: ' 并 push 当前代码' }
       ]]
     });
     expect(await parseLarkMessageContent('post', content)).toEqual({
-      text: '切到 feat/dockmux-migration 并 push 当前代码',
+      text: '切到 feat/dutydeck-migration 并 push 当前代码',
       resources: []
     });
   });

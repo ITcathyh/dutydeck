@@ -14,7 +14,7 @@ describe('server directory browser', () => {
   const url = (path: string) => `/api/system/directories?path=${encodeURIComponent(path)}`;
 
   beforeEach(async () => {
-    temp = await mkdtemp(join(tmpdir(), 'dockmux-directories-'));
+    temp = await mkdtemp(join(tmpdir(), 'dutydeck-directories-'));
     root = join(temp, 'workspace');
     await mkdir(join(root, 'project'), { recursive: true });
     await mkdir(join(temp, 'outside'));

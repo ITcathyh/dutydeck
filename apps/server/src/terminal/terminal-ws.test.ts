@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import Fastify, { type FastifyInstance } from 'fastify';
 import WebSocket from 'ws';
 import type { IncomingMessage } from 'node:http';
-import type { PolicyDecision, TerminalStream } from '@dockmux/shared';
+import type { PolicyDecision, TerminalStream } from '@dutydeck/shared';
 import {
   registerTerminalRoutes,
   type TerminalRouteAuth,
@@ -305,8 +305,8 @@ describe('terminal WS proxy', () => {
     const { port } = await startServer(providerFrom({ s1: fake.handle }), { mode: 'open', check: () => false });
     const ws = await connect(port, '/api/terminal/s1', {
       host: `127.0.0.1:${port}`,
-      origin: 'https://dockmux.example',
-      'x-forwarded-host': 'dockmux.example',
+      origin: 'https://dutydeck.example',
+      'x-forwarded-host': 'dutydeck.example',
       'x-forwarded-proto': 'https'
     });
     const frame = nextMessage(ws);
@@ -341,7 +341,7 @@ describe('terminal WS proxy', () => {
     const auth: TerminalRouteAuth = { check: token => token === 'good-token' };
     const { port } = await startServer(providerFrom({ s1: fake.handle }), auth);
 
-    const ws = await connect(port, '/api/terminal/s1', { cookie: 'dockmux_access=good-token' });
+    const ws = await connect(port, '/api/terminal/s1', { cookie: 'dutydeck_access=good-token' });
     const frame = nextMessage(ws);
     fake.emitData('cookie-ok');
     expect(await frame).toEqual({ type: 'data', data: 'cookie-ok' });
@@ -351,7 +351,7 @@ describe('terminal WS proxy', () => {
   it('浏览器 cookie 的 WS 必须来自相同 Origin', async () => {
     const auth: TerminalRouteAuth = { check: token => token === 'good-token' };
     const { port } = await startServer(providerFrom({ s1: createFakeStream().handle }), auth);
-    const rejected = await expectUpgradeRejected(port, '/api/terminal/s1', { host: `127.0.0.1:${port}`, origin: 'https://evil.example', cookie: 'dockmux_access=good-token' });
+    const rejected = await expectUpgradeRejected(port, '/api/terminal/s1', { host: `127.0.0.1:${port}`, origin: 'https://evil.example', cookie: 'dutydeck_access=good-token' });
     expect(rejected.status).toBe(403);
     expect(JSON.parse(rejected.body)).toEqual({ type: 'error', message: 'origin not allowed' });
   });

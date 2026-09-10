@@ -43,7 +43,7 @@ describe('WorkspaceOverview', () => {
 
   it('展示现有 Session 数据的工作区与状态投影', () => {
     const archived = { ...session('6', '/repo/archive', 'completed'), archivedAt: '2026-08-30T00:00:00Z' };
-    render(<WorkspaceOverview sessions={[session('1', '/repo/dockmux', 'thinking'), session('2', '/repo/dockmux', 'created'), session('3', '/repo/api', 'idle'), session('4', '/repo/api', 'failed'), session('5', '/repo/web', 'completed'), archived]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '优化工作台', status: 'running', queuedCount: 0, updatedAt: '' }, '2': { sessionId: '2', taskId: 't2', prompt: '等待调度', status: 'queued', queuedCount: 1, updatedAt: '' } }} agents={agents} loading={false} larkBots={[makeSimpleBot()]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
+    render(<WorkspaceOverview sessions={[session('1', '/repo/dutydeck', 'thinking'), session('2', '/repo/dutydeck', 'created'), session('3', '/repo/api', 'idle'), session('4', '/repo/api', 'failed'), session('5', '/repo/web', 'completed'), archived]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '优化工作台', status: 'running', queuedCount: 0, updatedAt: '' }, '2': { sessionId: '2', taskId: 't2', prompt: '等待调度', status: 'queued', queuedCount: 1, updatedAt: '' } }} agents={agents} loading={false} larkBots={[makeSimpleBot()]} view="all" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);
     const filters = screen.getByRole('region', { name: '任务筛选' });
     // 筛选芯片就是 workbenchViewOrder 这一份常量，标签改文案不需要动这里。
     expect(workbenchViewOrder.map(view => within(filters).getByRole('button', { name: new RegExp(workbenchViewLabels[view]) }))).toHaveLength(5);
@@ -65,7 +65,7 @@ describe('WorkspaceOverview', () => {
   it('创建、选择任务与打开飞书均保持可达', async () => {
     const user = userEvent.setup();
     const onCreate = vi.fn(); const onSelect = vi.fn(); const onOpenLarkSetup = vi.fn(); const onViewChange = vi.fn();
-    render(<WorkspaceOverview sessions={[session('1', '/repo/dockmux', 'idle')]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '优化工作台', status: 'queued', queuedCount: 1, updatedAt: '' } }} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={onViewChange} onSelect={onSelect} onCreate={onCreate} onOpenAgentSetup={() => {}} onOpenLarkSetup={onOpenLarkSetup}/>);
+    render(<WorkspaceOverview sessions={[session('1', '/repo/dutydeck', 'idle')]} summaries={{ '1': { sessionId: '1', taskId: 't1', prompt: '优化工作台', status: 'queued', queuedCount: 1, updatedAt: '' } }} agents={agents} loading={false} larkBots={[]} view="all" onViewChange={onViewChange} onSelect={onSelect} onCreate={onCreate} onOpenAgentSetup={() => {}} onOpenLarkSetup={onOpenLarkSetup}/>);
     await user.click(screen.getByRole('button', { name: /创建任务/ }));
     await user.click(screen.getByRole('button', { name: /优化工作台/ }));
     await user.click(screen.getByRole('button', { name: /已归档/ }));

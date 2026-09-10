@@ -9,7 +9,7 @@ import {
   type PolicyEvaluator,
   type RepositoryBundle,
   type Session,
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 import { extractBearerToken, extractCookie, isLoopbackHost, tokensEqual } from './auth/auth.js';
 
 export const installationOwnerPrincipalId = 'principal_installation_owner';

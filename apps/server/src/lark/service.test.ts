@@ -25,7 +25,7 @@ describe('Lark card service', () => {
     const bounded = boundLarkCardElements(elements);
     expect(Buffer.byteLength(JSON.stringify(bounded), 'utf8')).toBeLessThanOrEqual(larkCardSnapshotLimits.bytes);
     expect(componentCount(bounded)).toBeLessThanOrEqual(larkCardSnapshotLimits.components);
-    expect(JSON.stringify(bounded)).toContain('dockmux_snapshot_omission');
+    expect(JSON.stringify(bounded)).toContain('dutydeck_snapshot_omission');
     expect(bounded.length).toBeLessThan(elements.length);
   });
   const components = (value: any): any[] => {
@@ -135,7 +135,7 @@ describe('Lark card service', () => {
     expect(running.config).toMatchObject({ streaming_mode: true, summary: { content: expect.stringContaining('执行中') } });
     const loading0: any = buildLarkCard({ state: 'running', elapsedSeconds: 0 });
     const loading1: any = buildLarkCard({ state: 'running', elapsedSeconds: 1 });
-    expect(loading0.header).toMatchObject({ template: 'blue', title: { content: 'Dockmux' } });
+    expect(loading0.header).toMatchObject({ template: 'blue', title: { content: 'Dutydeck' } });
     expect(byId(loading0, 'task_status')).toMatchObject({ tag: 'div', icon: { tag: 'standard_icon', token: 'loading_outlined', color: 'grey' } });
     // 0 秒不写耗时：这一格要么是首帧、要么是这张卡不会再更新，「已用时 0s」两种情况下都是假信息。
     expect(byId(loading0, 'task_status').text.content).not.toContain('已用时');
@@ -178,7 +178,7 @@ describe('Lark card service', () => {
   it('passes CLI Markdown through unchanged for every state', () => {
     const markdown = `### 自定义阶段\n\n${'very-long-command '.repeat(8)}\n\n🟢 业务自行决定展示数量`;
     const card: any = buildLarkCard({ state: 'running', markdown });
-    expect(card.header).toMatchObject({ template: 'blue', title: { content: 'Dockmux' } });
+    expect(card.header).toMatchObject({ template: 'blue', title: { content: 'Dutydeck' } });
     expect(card.body.elements.some((element: any) => element.content === markdown)).toBe(true);
   });
 
@@ -217,7 +217,7 @@ describe('Lark card service', () => {
       agentName: huge,
       taskId: huge,
       sessionId: huge,
-      webBaseUrl: `https://dockmux.example/${huge}`,
+      webBaseUrl: `https://dutydeck.example/${huge}`,
       loadingImageKey: huge,
       markdown: huge
     });
@@ -304,7 +304,7 @@ describe('Lark card service', () => {
   });
 
   it('reports missing bot configuration without exposing secrets', () => {
-    expect(larkConfigurationStatus({ LARK_APP_ID: 'cli_test' })).toMatchObject({ configured: false, listening: false, missing: ['LARK_APP_SECRET'], defaultAgentName: 'Dockmux' });
+    expect(larkConfigurationStatus({ LARK_APP_ID: 'cli_test' })).toMatchObject({ configured: false, listening: false, missing: ['LARK_APP_SECRET'], defaultAgentName: 'Dutydeck' });
     expect(larkConfigurationStatus({}, { appId: 'cli_input', appSecret: 'secret_input', agentName: 'Input Agent' })).toMatchObject({ configured: true, listening: false, missing: [], defaultAgentName: 'Input Agent' });
     expect(larkConfigurationStatus({ LARK_CHAT_ID: 'oc_group' })).toMatchObject({ defaultReceiveIdConfigured: true, defaultReceiveIdType: 'chat_id' });
   });

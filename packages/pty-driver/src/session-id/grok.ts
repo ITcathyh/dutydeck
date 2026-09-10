@@ -1,7 +1,7 @@
 /**
  * Grok Build native session-id lookup.
  *
- * dockmux pins Grok's session id at spawn (`grok --session-id <uuid>`), so the
+ * dutydeck pins Grok's session id at spawn (`grok --session-id <uuid>`), so the
  * happy path is a directory-existence check, not a scan. Grok organises
  * sessions per working directory:
  *
@@ -16,7 +16,7 @@
  * `{timestamp, session_id, prompt, is_bash}` line per submit, written at
  * submit time. The bucket is already cwd-scoped, and the marker inside
  * `prompt` is per-session unique, so a hit is unambiguous. Scanning runs
- * back-to-front so the newest submit naming this dockmux session wins.
+ * back-to-front so the newest submit naming this dutydeck session wins.
  */
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
@@ -60,7 +60,7 @@ export const grokSessionIdLookup: SessionIdLookup = {
 
   resolve({ sessionId, cwd, env }: SessionIdLookupContext): string | undefined {
     const bucket = resolveGrokCwdBucketDir(cwd, env);
-    // Fast path: dockmux pinned the id via --session-id and Grok accepted it
+    // Fast path: dutydeck pinned the id via --session-id and Grok accepted it
     // (the session directory exists under this cwd's bucket).
     if (sessionId && existsSync(join(bucket, sessionId))) return sessionId;
     if (!isUsableMarker(sessionId)) return undefined;

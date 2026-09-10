@@ -8,13 +8,13 @@ import { RunDetailTabs, RunHeader } from './RunHeader';
 import { permissionLabels } from './ui';
 
 const agent: Agent = { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'full-trust' };
-const session: Session = { id: 's1', agentId: 'codex', state: 'thinking', cwd: '/repo/dockmux', permissionMode: 'full-trust', runId: 'run-abc1234', createdAt: '', updatedAt: '' };
+const session: Session = { id: 's1', agentId: 'codex', state: 'thinking', cwd: '/repo/dutydeck', permissionMode: 'full-trust', runId: 'run-abc1234', createdAt: '', updatedAt: '' };
 const queued: Task = { id: 't1', sessionId: 's1', prompt: '补充测试', status: 'queued', createdAt: '', updatedAt: '' };
 
 describe('RunHeader', () => {
   it('集中展示 workspace、任务状态、下一步与队列', () => {
     render(<RunHeader session={session} agent={agent} taskPrompt="优化飞书任务卡片" streamStatus="open" queuedTasks={[queued]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
-    expect(screen.getByText('dockmux')).toBeTruthy();
+    expect(screen.getByText('dutydeck')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '优化飞书任务卡片' })).toBeTruthy();
     expect(screen.getByText('思考中')).toBeTruthy();
     expect(screen.getByText(nextActionForState('thinking'))).toBeTruthy();

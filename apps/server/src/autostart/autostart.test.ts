@@ -70,7 +70,7 @@ function linuxResponder(world: LinuxWorld = {}): Responder {
   };
 }
 
-describe('Dockmux 开机自启', () => {
+describe('Dutydeck 开机自启', () => {
   let tmp: string;
 
   const HOME = '/home/tester';
@@ -81,7 +81,7 @@ describe('Dockmux 开机自启', () => {
       root: tmp,
       homeDir: HOME,
       execPath: '/usr/local/node/v22.12.0/bin/node',
-      cliPath: '/usr/local/lib/node_modules/dockmux/dist/cli.js',
+      cliPath: '/usr/local/lib/node_modules/dutydeck/dist/cli.js',
       runCommand: log.run,
       username: 'tester',
       uid: 501,
@@ -94,7 +94,7 @@ describe('Dockmux 开机自启', () => {
   const linuxUnit = () => join(tmp, HOME, '.config', 'systemd', 'user', AUTOSTART_LINUX_UNIT);
 
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), 'dockmux-autostart-'));
+    tmp = mkdtempSync(join(tmpdir(), 'dutydeck-autostart-'));
   });
 
   afterEach(() => {
@@ -114,12 +114,12 @@ describe('Dockmux 开机自启', () => {
     const plist = readFileSync(macPlist(), 'utf8');
     expect(plist).toContain(`<string>${AUTOSTART_MACOS_LABEL}</string>`);
     expect(plist).toContain('<string>/usr/local/node/v22.12.0/bin/node</string>');
-    expect(plist).toContain('<string>/usr/local/lib/node_modules/dockmux/dist/cli.js</string>');
+    expect(plist).toContain('<string>/usr/local/lib/node_modules/dutydeck/dist/cli.js</string>');
     expect(plist).toContain('<string>start</string>');
     expect(plist).toContain('<key>KeepAlive</key>\n    <false/>');
     expect(plist).toContain('<string>/usr/local/bin:/usr/bin:/bin</string>');
     // 日志目录必须提前建好，否则 launchd 会因为 StandardOutPath 不可写而起不来
-    expect(existsSync(join(tmp, HOME, '.dockmux', 'logs'))).toBe(true);
+    expect(existsSync(join(tmp, HOME, '.dutydeck', 'logs'))).toBe(true);
   });
 
   it('macOS: enable 只注册引导钩子，绝不 bootstrap / start 服务', async () => {
@@ -130,7 +130,7 @@ describe('Dockmux 开机自启', () => {
     expect(log.calls.filter(call => /bootstrap|load|kickstart|\bstart\b/.test(call))).toEqual([]);
     expect(log.calls).toEqual([`launchctl print gui/501/${AUTOSTART_MACOS_LABEL}`]);
     expect(result.notices.some(notice => notice.includes('下次登录'))).toBe(true);
-    expect(result.notices.some(notice => notice.includes('dockmux start'))).toBe(true);
+    expect(result.notices.some(notice => notice.includes('dutydeck start'))).toBe(true);
   });
 
   it('macOS: 重复 enable 内容一致时 changed 为 false 且不重写文件', async () => {
@@ -199,7 +199,7 @@ describe('Dockmux 开机自启', () => {
     // 绝不允许出现停服务的调用
     expect(log.calls.some(call => /\bstop\b|\bkill\b/.test(call))).toBe(false);
     expect(result.notices.some(notice => notice.includes('不受影响'))).toBe(true);
-    expect(result.notices.some(notice => notice.includes('dockmux stop'))).toBe(true);
+    expect(result.notices.some(notice => notice.includes('dutydeck stop'))).toBe(true);
   });
 
   it('macOS: 未注册时 disable 是无副作用的 changed=false', async () => {
@@ -223,8 +223,8 @@ describe('Dockmux 开机自启', () => {
     const unit = readFileSync(linuxUnit(), 'utf8');
     expect(unit).toContain('Type=oneshot');
     expect(unit).toContain('RemainAfterExit=yes');
-    expect(unit).toContain('ExecStart=/usr/local/node/v22.12.0/bin/node /usr/local/lib/node_modules/dockmux/dist/cli.js start');
-    expect(unit).toContain('ExecStop=/usr/local/node/v22.12.0/bin/node /usr/local/lib/node_modules/dockmux/dist/cli.js stop');
+    expect(unit).toContain('ExecStart=/usr/local/node/v22.12.0/bin/node /usr/local/lib/node_modules/dutydeck/dist/cli.js start');
+    expect(unit).toContain('ExecStop=/usr/local/node/v22.12.0/bin/node /usr/local/lib/node_modules/dutydeck/dist/cli.js stop');
     expect(unit).toContain('WantedBy=default.target');
     expect(unit).toContain('Environment=PATH=/usr/local/bin:/usr/bin:/bin');
   });
@@ -238,7 +238,7 @@ describe('Dockmux 开机自启', () => {
     expect(log.calls.some(call => /systemctl --user (start|restart|kickstart)/.test(call))).toBe(false);
     expect(log.calls).toContain('systemctl --user daemon-reload');
     expect(result.notices.some(notice => notice.includes('下次开机'))).toBe(true);
-    expect(result.notices.some(notice => notice.includes('dockmux start'))).toBe(true);
+    expect(result.notices.some(notice => notice.includes('dutydeck start'))).toBe(true);
   });
 
   it('Linux: linger 未开启时给出带真实用户名的警告', async () => {
@@ -278,7 +278,7 @@ describe('Dockmux 开机自启', () => {
 
   it('Linux: cli 路径漂移时重写 unit 并 daemon-reload', async () => {
     await autostartEnable(options('linux', commandLog(linuxResponder())));
-    const drifted: AutostartOptions = { cliPath: '/usr/local/lib/node_modules/dockmux/dist/cli.js', execPath: '/opt/node24/bin/node' };
+    const drifted: AutostartOptions = { cliPath: '/usr/local/lib/node_modules/dutydeck/dist/cli.js', execPath: '/opt/node24/bin/node' };
 
     const status = await autostartStatus(options('linux', commandLog(linuxResponder({ isEnabled: true })), drifted));
     expect(status.state.stale).toBe(true);
@@ -320,7 +320,7 @@ describe('Dockmux 开机自启', () => {
     const error = await rejection(autostartEnable(options('linux', log)));
     expect(error.code).toBe('systemd-unavailable');
     expect(error.message).toContain('user systemd');
-    expect(error.notices.join('\n')).toContain('/usr/local/lib/node_modules/dockmux/dist/cli.js start');
+    expect(error.notices.join('\n')).toContain('/usr/local/lib/node_modules/dutydeck/dist/cli.js start');
     // 失败时不许留下半成品 unit
     expect(existsSync(linuxUnit())).toBe(false);
   });
@@ -356,7 +356,7 @@ describe('Dockmux 开机自启', () => {
     expect(log.calls.some(call => call.includes('--now'))).toBe(false);
     expect(log.calls.some(call => /systemctl --user stop/.test(call))).toBe(false);
     expect(result.notices.some(notice => notice.includes('不受影响'))).toBe(true);
-    expect(result.notices.some(notice => notice.includes('dockmux stop'))).toBe(true);
+    expect(result.notices.some(notice => notice.includes('dutydeck stop'))).toBe(true);
     expect(result.notices.some(notice => notice.includes('仍是 active'))).toBe(true);
   });
 

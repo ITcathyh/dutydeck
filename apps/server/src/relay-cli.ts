@@ -1,4 +1,4 @@
-import { RelayCliError, RelayHttpClient, relayAskExitCodes, type RelayClientOptions } from '@dockmux/relay';
+import { RelayCliError, RelayHttpClient, relayAskExitCodes, type RelayClientOptions } from '@dutydeck/relay';
 
 export interface RelaySessionCliOptions {
   timeout?: string;
@@ -9,8 +9,8 @@ export interface RelaySessionCliOptions {
 const sessionPath = (suffix: string) => `/sessions/self/${suffix}`;
 
 /**
- * `dockmux session send` —— 非阻塞推送。
- * 成功后 stdout 打印一行 JSON（与其它 dockmux 子命令一致）。
+ * `dutydeck session send` —— 非阻塞推送。
+ * 成功后 stdout 打印一行 JSON（与其它 dutydeck 子命令一致）。
  */
 export async function runSessionSend(text: string, options: RelayClientOptions = {}) {
   const client = new RelayHttpClient(options);
@@ -25,10 +25,10 @@ export interface RelayAskResult {
 }
 
 /**
- * `dockmux session ask` —— 阻塞提问。
+ * `dutydeck session ask` —— 阻塞提问。
  *
  * 返回值交给 cli.ts 决定 stdout / 退出码：答案走 stdout 裸文本（便于
- * `answer=$(dockmux session ask "...")`），提示信息走 stderr。
+ * `answer=$(dutydeck session ask "...")`），提示信息走 stderr。
  */
 export async function runSessionAsk(
   question: string,

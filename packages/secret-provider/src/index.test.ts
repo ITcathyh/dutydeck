@@ -15,7 +15,7 @@ const roots: string[] = [];
 const bundle = () => Buffer.from(JSON.stringify({ schema_version: 1, kind: 'lark_app_credential', app_id: 'cli_fixture', app_secret: 'SECRET_CANARY' }));
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), 'dockmux-secrets-'));
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-secrets-'));
   roots.push(root);
   const directory = join(root, 'secrets');
   return { root, directory, provider: new LocalFileSecretProvider(directory, { createDirectory: true }) };
@@ -47,7 +47,7 @@ describe('LocalFileSecretProvider', () => {
   });
 
   it('rejects loose directories and never follows a provider or value symlink', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'dockmux-secrets-links-'));
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-secrets-links-'));
     roots.push(root);
     const loose = join(root, 'loose');
     await mkdir(loose, { mode: 0o755 });
@@ -120,7 +120,7 @@ describe('LocalFileSecretProvider', () => {
   });
 
   it('derives the provider beside the persisted database only', () => {
-    expect(secretDirectoryForDatabase('/srv/dockmux/dockmux.db')).toBe('/srv/dockmux/secrets');
+    expect(secretDirectoryForDatabase('/srv/dutydeck/dutydeck.db')).toBe('/srv/dutydeck/secrets');
     expect(() => secretDirectoryForDatabase(':memory:')).toThrowError(SecretProviderError);
   });
 });

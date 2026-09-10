@@ -1,5 +1,5 @@
 {
-  "name": "@dockmux/secret-provider",
+  "name": "@dutydeck/secret-provider",
   "version": "0.1.0",
   "private": true,
   "type": "module",

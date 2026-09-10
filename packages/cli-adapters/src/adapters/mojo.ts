@@ -14,7 +14,7 @@ import type { CliAdapter, PtyLike } from '../types.js';
  * 它反而提供了干净的 headless 控制面（`-p --background` + `mojo session
  * get|respond|confirm|cancel`，统一的单行 JSON 信封），几乎 1:1 映射到 riff 式
  * 的 API-backed 后端：botmux 由 MojoBackend 把 write() 翻译成 mojo CLI 调用。
- * dockmux 尚无对应后端，形态如实保留。
+ * dutydeck 尚无对应后端，形态如实保留。
  *
  * 以上基于 @byted/mojo 1.0.10（linux-x64）实测。
  */

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { CreateScheduleDefinitionInput } from '@dockmux/shared';
+import type { CreateScheduleDefinitionInput } from '@dutydeck/shared';
 import { createRepositories, scheduleWriterLeaseKey } from './index.js';
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 7, 30, 0, minutes)).toISOString();
@@ -10,7 +10,7 @@ function definition(id: string, options: Partial<CreateScheduleDefinitionInput> 
     id, channelBotId: 'bot-schedule', name: `Schedule ${id}`,
     trigger: { kind: 'interval', everySeconds: 3600, anchorAt: at(0) }, timezone: 'Asia/Shanghai',
     dstPolicy: { gap: 'skip', overlap: 'first' }, delivery: { mode: 'chat', chatRef: 'chat_ref', continuation: 'chat_root' },
-    payloadRef: 'payload_ref', sourceOwnership: 'dockmux', sourceNamespace: 'dockmux-fixture', sourceEnabled: false,
+    payloadRef: 'payload_ref', sourceOwnership: 'dutydeck', sourceNamespace: 'dutydeck-fixture', sourceEnabled: false,
     ...options
   };
 }

@@ -1,5 +1,5 @@
 /**
- * `dockmux setup` —— 首次运行引导向导。
+ * `dutydeck setup` —— 首次运行引导向导。
  *
  * 设计约束（每一条都对应一个真实踩坑）：
  *
@@ -123,7 +123,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
 
   try {
     if (!json) {
-      ui.section('Dockmux 首次配置向导');
+      ui.section('Dutydeck 首次配置向导');
       ui.keyValues([['工作区', cwd], ['配置文件', envFile]]);
       if (mode === 'update') {
         ui.status('info', '检测到已有配置，本次为增量更新', `${existing.size} 项`);
@@ -137,12 +137,12 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     if (!json) {
       if (detected.length === 0) {
         ui.status('warn', '未检测到任何已安装的 Agent CLI');
-        ui.hint('Dockmux 只驱动本机已安装且已完成供应商认证的 Agent CLI。');
+        ui.hint('Dutydeck 只驱动本机已安装且已完成供应商认证的 Agent CLI。');
         ui.hint('安装其中任意一个后重跑本向导，例如 Claude Code / Codex / Gemini。');
-        ui.command('dockmux setup');
+        ui.command('dutydeck setup');
       } else {
         for (const agent of detected) ui.status('ok', agent.name, agent.version ?? agent.command);
-        ui.hint('以上为已安装的 CLI。认证状态请用 dockmux doctor 单独体检。');
+        ui.hint('以上为已安装的 CLI。认证状态请用 dutydeck doctor 单独体检。');
       }
     }
     if (detected.length === 0) {
@@ -151,7 +151,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
 
     // ---- 步骤 2：默认工作目录 ----
     if (!json) ui.section('2/4 默认工作目录');
-    const currentCwd = existing.get('DOCKMUX_DEFAULT_CWD');
+    const currentCwd = existing.get('DUTYDECK_DEFAULT_CWD');
     let defaultCwd: string | undefined;
     if (options.cwd !== undefined) {
       // flag 路径和提问路径共用同一个 validator，杜绝漂移。
@@ -174,25 +174,25 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
         validate: raw => validateWorkingDirectory(raw)
       });
     }
-    if (defaultCwd !== currentCwd) updates.DOCKMUX_DEFAULT_CWD = defaultCwd;
+    if (defaultCwd !== currentCwd) updates.DUTYDECK_DEFAULT_CWD = defaultCwd;
     // 沿用 .env 里的旧值是唯一没过 validateWorkingDirectory 的路径：目录可能在写入
     // 之后被删掉了。所以校验要落在这里，而不是所有路径之后（那时新填的值必然已存在）。
     // 且警告的计算绝不能放进 if (!json)：机器调用方看不到人类输出，恰恰最需要这条结构化警告。
     const reusedStaleCwd = defaultCwd === currentCwd && !existsSync(defaultCwd);
     if (reusedStaleCwd) {
-      warnings.push(`.env 记录的默认工作目录已不存在：${defaultCwd}。用 dockmux setup --cwd <目录> 指定一个新的。`);
+      warnings.push(`.env 记录的默认工作目录已不存在：${defaultCwd}。用 dutydeck setup --cwd <目录> 指定一个新的。`);
     }
     if (!json) {
       ui.status(reusedStaleCwd ? 'warn' : defaultCwd === currentCwd ? 'ok' : 'done', '默认工作目录', defaultCwd);
       if (reusedStaleCwd) {
         ui.hint('这个目录已经不存在了，任务会起不来。改成一个已存在的目录：');
-        ui.command('dockmux setup --cwd <绝对路径>');
+        ui.command('dutydeck setup --cwd <绝对路径>');
       }
     }
 
     // ---- 步骤 3：监听设置 ----
     if (!json) ui.section('3/4 监听设置');
-    const currentPort = existing.get('DOCKMUX_PORT');
+    const currentPort = existing.get('DUTYDECK_PORT');
     let port: string | undefined = currentPort;
     if (options.port !== undefined) port = validatePort(options.port);
     else if (!currentPort && interactive && !assumeYes) {
@@ -203,12 +203,12 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
         validate: validatePort
       });
     } else if (!currentPort) port = '4310';
-    if (port !== currentPort) updates.DOCKMUX_PORT = port;
-    if (options.localOnly === true) updates.DOCKMUX_LOCAL_ONLY = 'true';
+    if (port !== currentPort) updates.DUTYDECK_PORT = port;
+    if (options.localOnly === true) updates.DUTYDECK_LOCAL_ONLY = 'true';
     if (!json) {
       ui.status(port === currentPort ? 'ok' : 'done', '监听端口', port);
       if (options.localOnly === true) ui.status('done', '仅本机可访问', '127.0.0.1');
-      else ui.hint('远程浏览器访问需要 access token：dockmux auth token');
+      else ui.hint('远程浏览器访问需要 access token：dutydeck auth token');
     }
 
     // ---- 步骤 4：飞书绑定（可选，会产生对外副作用）----
@@ -230,7 +230,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
       if (!json) {
         ui.status('skip', '已跳过飞书绑定');
         ui.hint('稍后绑定：');
-        ui.command('dockmux setup --lark-app-id cli_xxx');
+        ui.command('dutydeck setup --lark-app-id cli_xxx');
       }
     } else {
       const validated = validateAppId(appId);
@@ -268,7 +268,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     const written: WriteEnvResult = writeEnv(envFile, updates);
 
     const next = written.changed
-      ? 'dockmux start'
+      ? 'dutydeck start'
       : '配置已是目标状态，无需改动。';
     const result: SetupResult = {
       ok: true, action: 'setup', mode,
@@ -289,18 +289,18 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     for (const warning of warnings) ui.status('warn', warning);
 
     const summary = [
-      { text: '启动 Dockmux（后台常驻）', command: 'dockmux start' },
+      { text: '启动 Dutydeck（后台常驻）', command: 'dutydeck start' },
       { text: '打开工作台', command: `http://127.0.0.1:${port ?? '4310'}` },
-      { text: '体检本机环境与配置', command: 'dockmux doctor' },
-      { text: '开机自启（下次登录生效）', command: 'dockmux autostart enable' }
+      { text: '体检本机环境与配置', command: 'dutydeck doctor' },
+      { text: '开机自启（下次登录生效）', command: 'dutydeck autostart enable' }
     ];
-    if (lark === undefined) summary.push({ text: '稍后绑定飞书机器人', command: 'dockmux setup --lark-app-id cli_xxx' });
+    if (lark === undefined) summary.push({ text: '稍后绑定飞书机器人', command: 'dutydeck setup --lark-app-id cli_xxx' });
     ui.summary('接下来做什么', summary);
     return result;
   } catch (error) {
     // 中断与「非交互下缺输入」是两类完全不同的失败，必须给不同的下一步。
     if (error instanceof PromptUnavailableError) {
-      const next = `dockmux setup ${error.remedyFlag} 或 dockmux setup --yes`;
+      const next = `dutydeck setup ${error.remedyFlag} 或 dutydeck setup --yes`;
       if (json) ui.json(fail(error.code, error.message, next));
       else {
         ui.status('fail', error.message);
@@ -310,7 +310,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
       return fail(error.code, error.message, next);
     }
     if (error instanceof PromptAbortedError) {
-      const next = 'dockmux setup';
+      const next = 'dutydeck setup';
       if (json) ui.json(fail(error.code, error.message, next));
       else {
         ui.status('skip', error.message);
@@ -320,7 +320,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
       return fail(error.code, error.message, next);
     }
     const message = error instanceof Error ? error.message : String(error);
-    const next = 'dockmux setup';
+    const next = 'dutydeck setup';
     if (json) ui.json(fail('SETUP_FAILED', message, next));
     else {
       ui.status('fail', message);

@@ -5,7 +5,7 @@ import { access, readdir, realpath, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { RuntimeError } from '@dockmux/shared';
+import { RuntimeError } from '@dutydeck/shared';
 import { discoverSkills } from './skill-catalog.js';
 
 const execFileAsync = promisify(execFile);

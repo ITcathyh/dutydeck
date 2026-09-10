@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AgentEvent } from '@dockmux/shared';
+import type { AgentEvent } from '@dutydeck/shared';
 import { renderLarkCardElements, renderLarkTrace } from './card-renderer.js';
 import { buildLarkCard } from './service.js';
 
@@ -43,14 +43,14 @@ describe('renderLarkCardElements 视觉快照', () => {
 
   it('running 态：进展文本 + 进行中的工具调用', () => {
     expect(buildLarkCard({
-      agentName: 'Dockmux', state: 'running', taskName: '验证 Dockmux 测试', taskId: 'task-running', elapsedSeconds: 2,
+      agentName: 'Dutydeck', state: 'running', taskName: '验证 Dutydeck 测试', taskId: 'task-running', elapsedSeconds: 2,
       elements: renderLarkCardElements(runningEvents, config, false)
     })).toMatchSnapshot();
   });
 
   it('completed 态：思考 + 工具调用/结果 + 终态输出', () => {
     expect(buildLarkCard({
-      agentName: 'Dockmux', state: 'completed', taskName: '验证 Dockmux 测试', taskId: 'task-completed', elapsedSeconds: 2,
+      agentName: 'Dutydeck', state: 'completed', taskName: '验证 Dutydeck 测试', taskId: 'task-completed', elapsedSeconds: 2,
       elements: renderLarkCardElements(completedEvents, config, true)
     })).toMatchSnapshot();
   });
@@ -61,7 +61,7 @@ describe('renderLarkCardElements 视觉快照', () => {
       event(2, 'permission_request', t1, { id: 'permission-1', title: '高危操作：删除构建缓存目录', status: 'pending', options: ['allow_once', 'reject_once'] })
     ];
     expect(buildLarkCard({
-      agentName: 'Dockmux', state: 'running', taskName: '清理构建缓存', taskId: 'task-approval', elapsedSeconds: 2,
+      agentName: 'Dutydeck', state: 'running', taskName: '清理构建缓存', taskId: 'task-approval', elapsedSeconds: 2,
       elements: renderLarkCardElements(events, config, false)
     })).toMatchSnapshot();
   });

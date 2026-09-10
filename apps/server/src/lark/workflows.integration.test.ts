@@ -3,10 +3,10 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRepositories } from '@dockmux/storage';
-import { DockmuxRuntime, type AgentDriver } from '@dockmux/runtime';
-import { RelayAskBroker } from '@dockmux/relay';
-import type { AgentConfig } from '@dockmux/shared';
+import { createRepositories } from '@dutydeck/storage';
+import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
+import { RelayAskBroker } from '@dutydeck/relay';
+import type { AgentConfig } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
@@ -23,12 +23,12 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
 async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean; answerChunks?: string[] } = {}) {
-  const cwd = await mkdtemp(join(tmpdir(), 'dockmux-lark-workflows-'));
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflows-'));
   const repos = createRepositories(join(cwd, 'state.db'));
   let broker!: RelayAskBroker;
   let release: (() => void) | undefined;
   const send = vi.fn(); const resolvePermission = vi.fn();
-  const runtime = new DockmuxRuntime(repos, {
+  const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
       const driver: AgentDriver = {
@@ -263,7 +263,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.coordinator.handle(event('om_task', '修改实现'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
     const request = (await h.interactions()).find(item => item.kind === 'permission')!;
-    const value = { dockmux_workflow: 'approve', request_id: request.id, generation: request.boot };
+    const value = { dutydeck_workflow: 'approve', request_id: request.id, generation: request.boot };
     expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: 'om_forged', chatId: 'oc_group' })).toMatchObject({ type: 'error' });
     expect(await h.coordinator.handleAction(value, 'ou_bob', { messageId: request.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'error' });
     expect(h.resolvePermission).not.toHaveBeenCalled();
@@ -297,7 +297,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const restored = h.createCoordinator();
     try {
       await restored.initializeWorkflows(h.config); await restored.startReconciliation(h.config);
-      expect(await restored.handleAction({ dockmux_workflow: 'approve', request_id: request.id, generation: request.boot }, 'ou_alice', { messageId: request.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'error' });
+      expect(await restored.handleAction({ dutydeck_workflow: 'approve', request_id: request.id, generation: request.boot }, 'ou_alice', { messageId: request.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'error' });
       expect(h.resolvePermission).not.toHaveBeenCalled();
     } finally { restored.stop(); }
   });
@@ -459,7 +459,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
   it('restores a failed task with its original attachment/document material and separate user goal', async () => {
     const h = await harness();
     const fileMessageId = `om_workflow_file_${randomUUID()}`;
-    cleanups.push(() => rm(join(tmpdir(), 'dockmux', 'lark-resources', fileMessageId), { recursive: true, force: true }));
+    cleanups.push(() => rm(join(tmpdir(), 'dutydeck', 'lark-resources', fileMessageId), { recursive: true, force: true }));
     h.send.mockImplementationOnce(() => { throw new Error('synthetic execution failure'); });
     h.service.getMessage.mockResolvedValueOnce({ messageId: fileMessageId, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'file',
       rawContent: JSON.stringify({ file_key: 'file_reference', file_name: 'evidence.txt' }), sender: { type: 'user' }, mentions: [] });
@@ -520,7 +520,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     try {
       await restored.initializeWorkflows(h.config);
       await restored.reconcile(h.config);
-      const value = { dockmux_workflow: 'changes', request_id: record.id, generation: record.boot };
+      const value = { dutydeck_workflow: 'changes', request_id: record.id, generation: record.boot };
       expect(await restored.handleAction(value, 'ou_bob', { messageId: 'om_card_2', chatId: 'oc_group' })).toMatchObject({ type: 'error' });
       expect(await restored.handleAction(value, 'ou_alice', { messageId: 'om_card_2', chatId: 'oc_group' })).toMatchObject({ type: 'success' });
       await restored.handle(event('om_revision', '增加一个例子', { parentId: 'om_card_2', rootId: 'om_branch', threadId: 'omt_branch' }), h.config);
@@ -535,7 +535,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.completed();
     expect(h.cards.get('om_card_2')).toMatchObject({ agentName: 'Mock' });
     const record = await seedLegacyResult(h);
-    expect(await h.coordinator.handleAction({ dockmux_workflow: 'accept', request_id: record.id, generation: record.boot },
+    expect(await h.coordinator.handleAction({ dutydeck_workflow: 'accept', request_id: record.id, generation: record.boot },
       'ou_alice', { messageId: 'om_card_2', chatId: 'oc_group' })).toMatchObject({ type: 'success' });
     // 验收是对结果卡的原地覆盖。这里漏传执行宿主名，卡上的 Claude Code / Codex
     // 就会被服务端兜底名改写，读者再也看不出这轮任务是哪个 CLI 跑的。

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentConfig, AgentDriver, ChannelMapping, Session, TaskRecord } from '@dockmux/shared';
-import { createRepositories } from '@dockmux/storage';
-import { DockmuxRuntime } from '@dockmux/runtime';
+import type { AgentConfig, AgentDriver, ChannelMapping, Session, TaskRecord } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
+import { DutydeckRuntime } from '@dutydeck/runtime';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -885,17 +885,17 @@ describe('/retry 在 coordinator 重建后', () => {
 });
 
 /**
- * 离线集成回归：真实 SQLite repositories + 真实 DockmuxRuntime + 假 driver。
+ * 离线集成回归：真实 SQLite repositories + 真实 DutydeckRuntime + 假 driver。
  *
  * 上面那些用例的 runtime 是数组替身，证明不了「命令恢复」在真的持久化层上成立——
  * task 状态由 runtime 自己写库、mapping 由 saveCardTask 自己落盘，两者的字段约定
  * 只有跑一遍真实实现才验得出来。这里全程合成数据、不碰网络、不改 ACPX 环境注入，
  * finally 关库。
  */
-describe('SQLite + DockmuxRuntime 的命令恢复集成', () => {
+describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
   // command 只是一个永不被执行的占位：下面注入了 driverFactory，AcpxAdapter 不会被构造，
   // 也就不存在启动真实 CLI / ACP provider 的路径。probe 同样是替身，不去探测本机命令。
-  const unusedCommand = '/nonexistent/dockmux-test-agent-never-executed';
+  const unusedCommand = '/nonexistent/dutydeck-test-agent-never-executed';
   const agentFor = (cwd: string): AgentConfig => ({
     id: 'codex', name: 'Codex', command: unusedCommand, args: [], protocol: 'acp',
     cwd, env: {}, permissionMode: 'ask', timeout: 10,
@@ -929,11 +929,11 @@ describe('SQLite + DockmuxRuntime 的命令恢复集成', () => {
 
   it('重建 coordinator 后按库里的真实任务状态中断，并按落盘 mapping 恢复原 prompt 重试', async () => {
     // runtime 会真的 mkdir 会话 cwd，必须用一个可写的临时目录。
-    const workspace = await mkdtemp(join(tmpdir(), 'dockmux-lark-recovery-'));
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-lark-recovery-'));
     const repos = createRepositories(':memory:');
     const integrationConfig = { ...config, workspace };
     const { driver, release } = stalledDriver();
-    const runtime = new DockmuxRuntime(repos, {
+    const runtime = new DutydeckRuntime(repos, {
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: () => driver
     });

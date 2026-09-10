@@ -7,7 +7,7 @@ import type { PtyLike } from './types.js';
  * runner 不驱动 TUI：它逐字节读 stdin，只在看到行尾换行时入队一条消息。
  * 每条消息是一行控制行：
  *
- *     ::dockmux-<id>:<base64(JSON)>\n
+ *     ::dutydeck-<id>:<base64(JSON)>\n
  *
  * 整行一次性写入会撑爆 pane pty 的 ~4KB 输入缓冲，所以按小 chunk 分块、
  * chunk 之间留节流；chunk 之间绝不插换行——runner 自己累积半行，只在最终

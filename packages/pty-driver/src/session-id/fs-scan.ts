@@ -4,7 +4,7 @@
  * Every helper is best-effort: a missing/unreadable/hostile path yields an
  * empty result rather than an exception. Resume must never fail because a
  * CLI's data directory looks unexpected — the driver degrades to treating
- * the dockmux session id as the CLI session id.
+ * the dutydeck session id as the CLI session id.
  */
 import { closeSync, existsSync, openSync, opendirSync, readSync, statSync } from 'node:fs';
 import type { Dirent } from 'node:fs';

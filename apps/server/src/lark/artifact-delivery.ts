@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { open, realpath } from 'node:fs/promises';
 import { basename, relative, resolve } from 'node:path';
-import type { ConfigRepository } from '@dockmux/shared';
+import type { ConfigRepository } from '@dutydeck/shared';
 import { AgentGroupToolError } from './agent-tools.js';
 
 export const artifactFileLimit = 30 * 1024 * 1024;
@@ -19,7 +19,7 @@ export interface ArtifactClient {
 interface Record { fingerprint: string; target: ArtifactTarget; image: boolean; providerUuid: string; providerKey?: string; messageId?: string; chatId?: string; leaseUntil?: number; state: 'uploading' | 'uploaded' | 'sending' | 'sent' }
 const keyFor = (sessionId: string, key: string) => `lark.artifact_delivery.${sessionId}.${createHash('sha256').update(key).digest('hex')}`;
 const stableKey = (sessionId: string, source: string, target: ArtifactTarget, image: boolean) => `artifact-${createHash('sha256').update(JSON.stringify({ sessionId, source, target, image })).digest('hex').slice(0, 40)}`;
-const providerUuidFor = (sessionId: string, key: string) => `dockmux-${createHash('sha256').update(`${sessionId}\0${key}`).digest('hex').slice(0, 40)}`;
+const providerUuidFor = (sessionId: string, key: string) => `dutydeck-${createHash('sha256').update(`${sessionId}\0${key}`).digest('hex').slice(0, 40)}`;
 
 export async function readArtifact(cwd: string, input: string, image: boolean) {
   const root = await realpath(cwd);

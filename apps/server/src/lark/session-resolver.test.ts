@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Session } from '@dockmux/shared';
+import type { Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import {
   larkGroupKey,

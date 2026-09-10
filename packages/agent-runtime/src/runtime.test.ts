@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createRepositories } from '@dockmux/storage';
-import type { AgentConfig, Session, ToolRiskPolicy } from '@dockmux/shared';
-import { DockmuxRuntime, type AgentDriver, type DriverFactory } from './index.js';
+import { createRepositories } from '@dutydeck/storage';
+import type { AgentConfig, Session, ToolRiskPolicy } from '@dutydeck/shared';
+import { DutydeckRuntime, type AgentDriver, type DriverFactory } from './index.js';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,7 +11,7 @@ const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath
 function harness(options: { onSend?: (emit: (event: any) => void) => void; exitOnSend?: number; driverIdleTimeoutMs?: number; sessionEnvironment?: (session: Session) => Record<string, string>; sessionPrompt?: (session: Session, prompt: string) => string | Promise<string>; resolvePermission?: (id: string, approved: boolean) => Promise<boolean> } = {}) {
   const repos = createRepositories(':memory:'); let emit!: (event: any) => void; let exit!: (code: number | null) => void; const configuredAgents: AgentConfig[] = [];
   const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { options.onSend?.(emit); if (options.exitOnSend) exit(options.exitOnSend); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}), resolvePermission: vi.fn(options.resolvePermission ?? (async () => true)), setModel: vi.fn(async () => {}), setReasoningEffort: vi.fn(async () => {}), setPermissionMode: vi.fn() };
-  const runtime = new DockmuxRuntime(repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (configuredAgent, _p, onEvent, onExit) => { configuredAgents.push(configuredAgent); emit = onEvent; exit = onExit; return driver; }, driverIdleTimeoutMs: options.driverIdleTimeoutMs, sessionEnvironment: options.sessionEnvironment, sessionPrompt: options.sessionPrompt });
+  const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (configuredAgent, _p, onEvent, onExit) => { configuredAgents.push(configuredAgent); emit = onEvent; exit = onExit; return driver; }, driverIdleTimeoutMs: options.driverIdleTimeoutMs, sessionEnvironment: options.sessionEnvironment, sessionPrompt: options.sessionPrompt });
   return { repos, runtime, driver, configuredAgents, emit: (event: any) => emit(event), exit: (code: number | null) => exit(code) };
 }
 
@@ -229,8 +229,8 @@ describe('runtime lifecycle acceptance', () => {
   });
 
   it('restores queued execution context and risk policy from a real database after restart', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'dockmux-runtime-recovery-'));
-    const database = join(directory, 'dockmux.db');
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-runtime-recovery-'));
+    const database = join(directory, 'dutydeck.db');
     const timestamp = new Date().toISOString();
     const riskPolicy: ToolRiskPolicy = { enabled: true, authorized: true, pattern: 'rm\\s', actorEmail: 'owner@example.com', reason: 'approved in Lark' };
     const seeded = createRepositories(database);
@@ -256,7 +256,7 @@ describe('runtime lifecycle acceptance', () => {
       stop: vi.fn(async () => {}),
       setRiskPolicy: vi.fn()
     };
-    const restored = new DockmuxRuntime(repos, {
+    const restored = new DutydeckRuntime(repos, {
       driverIdleTimeoutMs: 0,
       driverFactory: (_configured, _protocol, onEvent) => { emit = onEvent; return driver; }
     });
@@ -297,7 +297,7 @@ describe('runtime lifecycle acceptance', () => {
   });
 
   it('cleans up a turn when risk policy persistence fails and continues later queued work', async () => {
-    const directory = await mkdtemp(join(tmpdir(), 'dockmux-risk-write-'));
+    const directory = await mkdtemp(join(tmpdir(), 'dutydeck-risk-write-'));
     const invalidCwd = join(directory, 'not-a-directory');
     await writeFile(invalidCwd, 'file blocks nested security directory');
     const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'answer' } }) });
@@ -394,7 +394,7 @@ describe('runtime lifecycle acceptance', () => {
   it('reconnects a persisted completed session before its next turn', async () => {
     const first = harness({ onSend: emit => emit({ type: 'text', data: { text: 'answer' } }) }); await first.runtime.initialize([agent]); const session = await first.runtime.start({ agentId: 'mock' }); await first.runtime.send(session.id, 'before restart');
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
-    const restored = new DockmuxRuntime(first.repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => driver });
+    const restored = new DutydeckRuntime(first.repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => driver });
     await restored.send(session.id, 'after restart');
     expect(driver.start).toHaveBeenCalledOnce(); expect(driver.send).toHaveBeenCalledWith('after restart');
     expect((await restored.getTasks(session.id)).map(task => task.prompt)).toEqual(['before restart', 'after restart']); first.repos.close();
@@ -408,7 +408,7 @@ describe('runtime lifecycle acceptance', () => {
     await first.repos.agents.save({ ...agent, systemPrompt: 'new global prompt' });
     let configured: AgentConfig | undefined;
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
-    const restored = new DockmuxRuntime(first.repos, { driverFactory: current => { configured = current; return driver; } });
+    const restored = new DutydeckRuntime(first.repos, { driverFactory: current => { configured = current; return driver; } });
     await restored.send(session.id, 'after restart');
     expect(configured?.systemPrompt).toBe('session prompt');
     first.repos.close();
@@ -592,7 +592,7 @@ describe('runtime lifecycle acceptance', () => {
     const repos = createRepositories(':memory:');
     const callbacks: Array<(event: any) => void> = [];
     const drivers: AgentDriver[] = [];
-    const runtime = new DockmuxRuntime(repos, {
+    const runtime = new DutydeckRuntime(repos, {
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_configured, _protocol, onEvent) => {
         callbacks.push(onEvent);
@@ -641,7 +641,7 @@ describe('runtime lifecycle acceptance', () => {
     first.repos.tasks.save = save;
     let emit!: (event: any) => void;
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => emit({ type: 'text', data: { text: 'recovered' } })), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
-    const restored = new DockmuxRuntime(first.repos, {
+    const restored = new DutydeckRuntime(first.repos, {
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_configured, _protocol, onEvent) => { emit = onEvent; return driver; }
     });
@@ -654,7 +654,7 @@ describe('runtime lifecycle acceptance', () => {
   });
 
   it('returns an explicit error for unsupported pause/resume', async () => { const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await expect(h.runtime.pause(s.id)).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY', statusCode: 422 }); h.repos.close(); });
-  it('returns a clear dependency error when a scanned Agent becomes unavailable', async () => { const h = harness(); const unavailable = { ...agent, id: 'trae', name: 'Trae', command: 'missing-trae' }; const runtime = new DockmuxRuntime(h.repos, { probe: () => ({ protocol: 'acp', available: false, detail: 'command disappeared after scan', pause: false, resume: true }) }); await runtime.initialize([unavailable]); await expect(runtime.start({ agentId: 'trae' })).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE' }); h.repos.close(); });
+  it('returns a clear dependency error when a scanned Agent becomes unavailable', async () => { const h = harness(); const unavailable = { ...agent, id: 'trae', name: 'Trae', command: 'missing-trae' }; const runtime = new DutydeckRuntime(h.repos, { probe: () => ({ protocol: 'acp', available: false, detail: 'command disappeared after scan', pause: false, resume: true }) }); await runtime.initialize([unavailable]); await expect(runtime.start({ agentId: 'trae' })).rejects.toMatchObject({ code: 'AGENT_UNAVAILABLE' }); h.repos.close(); });
 
   it('marks a turn failed when the agent stops mid-thinking without final text', async () => {
     const h = harness({ onSend: emit => emit({ type: 'thinking', data: { text: 'still thinking' } }) });
@@ -805,7 +805,7 @@ describe('multi-driver routing', () => {
     const repos = createRepositories(':memory:');
     const legacy: AgentConfig = { ...ptyAgent, id: 'legacy-pty', protocol: 'pty', permissionMode: 'ask' };
     const factory = vi.fn();
-    const runtime = new DockmuxRuntime(repos, { probe: () => ({ protocol: 'pty' as const, available: true, pause: false, resume: true }), driverFactory: factory });
+    const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'pty' as const, available: true, pause: false, resume: true }), driverFactory: factory });
     await repos.agents.save(legacy);
     await runtime.initialize([legacy]);
     await expect(runtime.start({ agentId: legacy.id })).rejects.toMatchObject({ code: 'PERMISSION_MODE_UNSUPPORTED', statusCode: 422 });
@@ -819,7 +819,7 @@ describe('multi-driver routing', () => {
     let emit!: (event: any) => void;
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { emit({ type: 'text', data: { text: 'answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
     let routedProtocol: string | undefined;
-    const runtime = new DockmuxRuntime(repos, {
+    const runtime = new DutydeckRuntime(repos, {
       probe: ptyProbe,
       ptyDriverFactory: ptyDriverFactory ?? ((_agent, protocol, onEvent) => { routedProtocol = protocol; emit = onEvent; return driver; })
     });
@@ -857,7 +857,7 @@ describe('multi-driver routing', () => {
 
   it('rejects pty-cli sessions when no ptyDriverFactory is injected', async () => {
     const repos = createRepositories(':memory:');
-    const runtime = new DockmuxRuntime(repos, { probe: ptyProbe });
+    const runtime = new DutydeckRuntime(repos, { probe: ptyProbe });
     await repos.agents.save(ptyAgent);
     await runtime.initialize([ptyAgent]);
     await expect(runtime.start({ agentId: 'mock-pty' })).rejects.toMatchObject({ code: 'DRIVER_UNAVAILABLE', statusCode: 503 });
@@ -869,7 +869,7 @@ describe('multi-driver routing', () => {
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
     const custom = vi.fn(() => driver);
     const ptyFallback = vi.fn(() => driver);
-    const runtime = new DockmuxRuntime(repos, { probe: ptyProbe, driverFactory: custom, ptyDriverFactory: ptyFallback });
+    const runtime = new DutydeckRuntime(repos, { probe: ptyProbe, driverFactory: custom, ptyDriverFactory: ptyFallback });
     await repos.agents.save(ptyAgent);
     await runtime.initialize([ptyAgent]);
     await runtime.start({ agentId: 'mock-pty' });
@@ -920,7 +920,7 @@ describe('driver exit subscription', () => {
   });
 });
 
-describe('publishSessionEvent — 带外事件入口（@dockmux/relay 的落点）', () => {
+describe('publishSessionEvent — 带外事件入口（@dutydeck/relay 的落点）', () => {
   // 这个入口存在的**唯一理由**就是「不能直接调 repos.events.append()」：
   // 那样只落库，既不通知在线 SSE 订阅者，也不推进 runtime 的序号计数器。
   // 下面两条把这个理由本身钉成契约——此前它只写在注释里，把实现换成
@@ -1068,7 +1068,7 @@ describe('publishSessionEvent — 带外事件入口（@dockmux/relay 的落点�
 describe('重启后的忙碌态回收', () => {
   /*
     2026-09-03 线上实测：4310 实例上 3 个会话卡在 thinking，界面一直放呼吸动画，
-    而它们的 cwd(/tmp/dockmux-test) 早被删除、任务记录已经是 failed——
+    而它们的 cwd(/tmp/dutydeck-test) 早被删除、任务记录已经是 failed——
     **会话态与任务态互相矛盾**，用户分不出「真在想」和「进程三天前就死了」。
 
     原有三条回收分支都漏了这种形状：第一条只认 created/starting/failed 且无任务记录，
@@ -1080,7 +1080,7 @@ describe('重启后的忙碌态回收', () => {
     const repos = createRepositories(':memory:');
     await repos.agents.save(agent);
     await seed(repos);
-    const runtime = new DockmuxRuntime(repos, { probe: () => ({ protocol: 'acp' as const, available: true, pause: false, resume: true }), driverFactory: () => ({ start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) }) });
+    const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'acp' as const, available: true, pause: false, resume: true }), driverFactory: () => ({ start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) }) });
     await runtime.initialize([agent]);
     return { repos, runtime };
   };

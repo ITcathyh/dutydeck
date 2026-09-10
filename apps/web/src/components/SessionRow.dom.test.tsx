@@ -7,7 +7,7 @@ const makeSession = (state: string, archivedAt?: string): Session => ({
   id: 'session-1',
   agentId: 'codex',
   state,
-  cwd: '/tmp/dockmux-project',
+  cwd: '/tmp/dutydeck-project',
   runId: 'run-1',
   createdAt: '2026-08-27T00:00:00.000Z',
   updatedAt: '2026-08-27T00:00:00.000Z',
@@ -87,7 +87,7 @@ describe('SessionRow 身份信息的可达性', () => {
   // 同名会在 describe 作用域里遮蔽它，而 renderRow 用的是外层那个——两者一旦混用，
   // 取到的 session 与用例意图不符，且不会有任何报错。
   const sessionWith = (extra: Partial<Session> = {}): Session => ({
-    id: 'session-1', agentId: 'codex', state: 'idle', cwd: '/tmp/dockmux-project',
+    id: 'session-1', agentId: 'codex', state: 'idle', cwd: '/tmp/dutydeck-project',
     runId: 'run-1', createdAt: '2026-08-27T00:00:00.000Z', updatedAt: '2026-08-27T00:00:00.000Z', ...extra
   });
   const agent = { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'full-trust' } as const;

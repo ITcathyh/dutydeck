@@ -4,26 +4,26 @@ import { existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync 
 import { spawn } from 'node:child_process';
 
 /**
- * Self-managed background daemon for the Dockmux local session server.
+ * Self-managed background daemon for the Dutydeck local session server.
  *
- * `dockmux start` re-spawns itself out of band (a `child_process.spawn` with
+ * `dutydeck start` re-spawns itself out of band (a `child_process.spawn` with
  * `detached: true`) and waits for the child to report ready — or to die — before
  * exiting, leaving a background child that owns the server. That child records
- * its PID plus metadata under the working directory's `.dockmux/daemon/` so
+ * its PID plus metadata under the working directory's `.dutydeck/daemon/` so
  * `stop` / `restart` / `status` can locate and control it without any external
  * supervisor (no pm2 / systemd).
  *
  * Parent vs. daemon child split is signalled through the
- * `DOCKMUX_DAEMONIZED` environment variable set on the respawned child.
+ * `DUTYDECK_DAEMONIZED` environment variable set on the respawned child.
  */
 
-export const DAEMON_ENV_FLAG = 'DOCKMUX_DAEMONIZED';
-export const DAEMON_CWD_ENV = 'DOCKMUX_DAEMON_CWD';
-export const DAEMON_STARTED_AT_ENV = 'DOCKMUX_DAEMON_STARTED_AT';
+export const DAEMON_ENV_FLAG = 'DUTYDECK_DAEMONIZED';
+export const DAEMON_CWD_ENV = 'DUTYDECK_DAEMON_CWD';
+export const DAEMON_STARTED_AT_ENV = 'DUTYDECK_DAEMON_STARTED_AT';
 
-export const PID_FILE = 'dockmux.pid';
-export const STATE_FILE = 'dockmux.state.json';
-export const LOG_FILE = 'dockmux.log';
+export const PID_FILE = 'dutydeck.pid';
+export const STATE_FILE = 'dutydeck.state.json';
+export const LOG_FILE = 'dutydeck.log';
 
 export interface DaemonState {
   pid: number;
@@ -48,12 +48,12 @@ export interface DaemonPaths {
 
 /** Default daemon directory relative to the working directory. */
 export function defaultDaemonDir(cwd = process.cwd()): string {
-  return join(cwd, '.dockmux', 'daemon');
+  return join(cwd, '.dutydeck', 'daemon');
 }
 
 /** Path to the global pointer file that records the last-started daemon directory. */
 export function lastDaemonDirPointerFile(home = process.env.HOME ?? homedir()): string {
-  return join(home, '.dockmux', 'last-daemon-dir');
+  return join(home, '.dutydeck', 'last-daemon-dir');
 }
 
 /** Read the last-started daemon directory from the global pointer, if any. */
@@ -79,8 +79,8 @@ export function writeLastDaemonDir(dir: string, home = process.env.HOME ?? homed
  * Priority:
  * 1. The daemon directory under the current working directory, IF it points at
  *    a live daemon process (stale pid files are ignored).
- * 2. The directory recorded in `~/.dockmux/last-daemon-dir`. It remains the
- *    canonical Dockmux root even while the daemon is stopped, preventing a
+ * 2. The directory recorded in `~/.dutydeck/last-daemon-dir`. It remains the
+ *    canonical Dutydeck root even while the daemon is stopped, preventing a
  *    later start from silently creating a second database under another cwd.
  * 3. The current working directory's daemon directory on the very first run.
  */
@@ -169,7 +169,7 @@ export function daemonCwd(dir: string, fallback = process.cwd()): string {
   return readDaemonStatus(dir)?.cwd || fallback;
 }
 
-/** Whether this process is the daemonized child spawned by `dockmux start`. */
+/** Whether this process is the daemonized child spawned by `dutydeck start`. */
 export function isDaemonChild(env: NodeJS.ProcessEnv = process.env): boolean {
   return env[DAEMON_ENV_FLAG] === '1';
 }
@@ -206,7 +206,7 @@ export interface DaemonChildHandle {
 }
 
 /**
- * 把当前 `dockmux` 进程在后台重新拉起一份，stdout / stderr 重定向进守护日志。
+ * 把当前 `dutydeck` 进程在后台重新拉起一份，stdout / stderr 重定向进守护日志。
  *
  * 这里刻意不用 `daemonize-process`：它在 spawn 完成后立刻 `exit(0)` 掉父进程，
  * 于是「服务到底起来没有」永远没人检查——端口被占用时子进程 EADDRINUSE 死掉，
@@ -218,10 +218,10 @@ export interface DaemonChildHandle {
  */
 export function daemonize(options: DaemonizeOptions = {}): DaemonChildHandle {
   const cwd = options.cwd ?? process.cwd();
-  const logFile = daemonPaths(cwd ? join(cwd, '.dockmux', 'daemon') : defaultDaemonDir()).logFile;
+  const logFile = daemonPaths(cwd ? join(cwd, '.dutydeck', 'daemon') : defaultDaemonDir()).logFile;
   const fd = openLogFd(logFile);
   const script = process.argv[1];
-  if (script === undefined) throw new Error('无法确定 Dockmux 自身的入口脚本，无法启动后台服务。');
+  if (script === undefined) throw new Error('无法确定 Dutydeck 自身的入口脚本，无法启动后台服务。');
 
   const child = spawn(process.execPath, [...process.execArgv, script, ...process.argv.slice(2)], {
     cwd,

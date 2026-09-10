@@ -8,7 +8,7 @@ import {
   type PolicyDecision,
   type RepositoryBundle,
   type ScheduleDefinition
-} from '@dockmux/shared';
+} from '@dutydeck/shared';
 
 export type ScheduleManagementRepositories = Pick<RepositoryBundle,
   'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'archivedHammerIntegrations'>;
@@ -100,7 +100,7 @@ export async function registerScheduleManagementRoutes(app: FastifyInstance, opt
   app.post('/api/foundation/schedules', async (request, reply) => {
     await requireWrite(request, 'schedule.create');
     const body = parse(createBodySchema, request.body);
-    const definition = await repositories().scheduleDefinitions.create({ ...body, sourceOwnership: 'dockmux', sourceNamespace: `dockmux:${body.channelBotId}`, sourceEnabled: false });
+    const definition = await repositories().scheduleDefinitions.create({ ...body, sourceOwnership: 'dutydeck', sourceNamespace: `dutydeck:${body.channelBotId}`, sourceEnabled: false });
     return reply.code(201).send(await detail(definition));
   });
   app.patch<{ Params: { id: string } }>('/api/foundation/schedules/:id', async (request, reply) => {

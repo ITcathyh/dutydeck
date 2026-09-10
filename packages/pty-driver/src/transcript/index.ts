@@ -20,7 +20,7 @@
  * unacceptable runtime dependency here), gemini/kimi (no on-disk
  * transcript). Those keep the raw_terminal fallback.
  */
-import type { NormalizedDriverEvent } from '@dockmux/shared';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import type { CliPathEnv } from '../cli-paths.js';
 import type { TranscriptEventSource } from './tail.js';
 import { ClaudeTranscriptTailer, type ClaudeTranscriptTailerOptions } from './claude.js';
@@ -61,10 +61,10 @@ export interface CreateTranscriptTailerOptions {
   /** Explicit transcript path (skips directory resolution + switching). */
   transcriptPath?: string;
   /**
-   * dockmux's session id, used to identify WHICH transcript in a shared
+   * dutydeck's session id, used to identify WHICH transcript in a shared
    * location belongs to this session.
    *
-   * Several CLIs key their transcript location by cwd alone, so every dockmux
+   * Several CLIs key their transcript location by cwd alone, so every dutydeck
    * session started in one repo writes into the same directory. Resolving by
    * recency there silently attaches a sibling's transcript: the timeline then
    * shows another session's answer, or the turn is failed as "no final output"

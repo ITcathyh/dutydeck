@@ -1,4 +1,4 @@
-import type { AgentEvent } from '@dockmux/shared';
+import type { AgentEvent } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 
@@ -28,14 +28,14 @@ export const isLarkMessageUnupdatable = (error: unknown): error is LarkServiceEr
 
 const rejectedDeltaElement = (changedCount: number): LarkCardElement => ({
   tag: 'markdown',
-  element_id: 'dockmux_rejected_delta',
-  content: `<font color='orange'>本次新增或变化的 ${Math.max(1, changedCount)} 个内容区块未通过飞书审核，已保留上一次成功内容；完整增量请在 Dockmux Web 查看。</font>`,
+  element_id: 'dutydeck_rejected_delta',
+  content: `<font color='orange'>本次新增或变化的 ${Math.max(1, changedCount)} 个内容区块未通过飞书审核，已保留上一次成功内容；完整增量请在 Dutydeck Web 查看。</font>`,
   text_size: 'notation',
   margin: '8px 0px 0px 0px'
 });
 
 export function patchRejectedCardDelta(previous: LarkCardElement[] = [], current: LarkCardElement[] = []): LarkCardElement[] {
-  const baseline = previous.filter(element => element.element_id !== 'dockmux_rejected_delta');
+  const baseline = previous.filter(element => element.element_id !== 'dutydeck_rejected_delta');
   const same = (left: LarkCardElement, right: LarkCardElement) => JSON.stringify(left) === JSON.stringify(right);
   let prefix = 0;
   while (prefix < baseline.length && prefix < current.length && same(baseline[prefix]!, current[prefix]!)) prefix++;
@@ -231,7 +231,7 @@ const stripEnvAssignments = (value: string) =>
 // 重叠从长到短试：终端滚动一行时新帧与尾部有 rows-1 行重叠，取最长的才不会把整屏重新
 // 追加一遍。已知取舍——内容高度周期性（例如「失败/重试」两行循环）且每帧滚动量整除该周期
 // 时，贪心会匹配到比真实滚动更长的重叠，把中间几轮折叠掉。失败方向是少显示重复行，
-// 不会拼出不存在的内容，完整记录在 Dockmux Web。
+// 不会拼出不存在的内容，完整记录在 Dutydeck Web。
 const mergeTerminalFrames = (frames: string[]) => {
   const output: string[] = [];
   for (const frame of frames) {
@@ -770,7 +770,7 @@ const buildEvidenceElement = (allGroups: TraceGroup[]): LarkCardElement | undefi
 
 const traceOmissionElement = (omittedGroupCount: number, margin: string): LarkCardElement => ({
   tag: 'markdown', element_id: 'trace_omission',
-  content: `<font color='grey'>另有 ${omittedGroupCount} 个更早阶段未展示，完整记录见 Dockmux Web</font>`,
+  content: `<font color='grey'>另有 ${omittedGroupCount} 个更早阶段未展示，完整记录见 Dutydeck Web</font>`,
   text_size: 'notation', margin
 });
 
@@ -859,7 +859,7 @@ export function renderLarkCardElements(
   const elements: LarkCardElement[] = [];
 
   if (compensation) {
-    elements.push({ tag: 'markdown', content: "<font color='orange'>原运行卡片未能更新，Dockmux 已补发终态结果。</font>", text_size: 'notation', margin: '0px 0px 8px 0px' });
+    elements.push({ tag: 'markdown', content: "<font color='orange'>原运行卡片未能更新，Dutydeck 已补发终态结果。</font>", text_size: 'notation', margin: '0px 0px 8px 0px' });
   }
   elements.push(...permissionEntries.map(permissionAlert));
   elements.push(...errorEntries.map(errorAlert));

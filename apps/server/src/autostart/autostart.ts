@@ -4,22 +4,22 @@ import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 
 /**
- * Dockmux 开机自启（boot hook）注册。
+ * Dutydeck 开机自启（boot hook）注册。
  *
- * macOS  —— 写入 `~/Library/LaunchAgents/com.dockmux.server.plist`，由 launchd 在
- *           下次登录时加载并执行 `dockmux start`。
- * Linux  —— 写入 `~/.config/systemd/user/dockmux.service` 并 `systemctl --user
+ * macOS  —— 写入 `~/Library/LaunchAgents/com.dutydeck.server.plist`，由 launchd 在
+ *           下次登录时加载并执行 `dutydeck start`。
+ * Linux  —— 写入 `~/.config/systemd/user/dutydeck.service` 并 `systemctl --user
  *           enable`（不带 `--now`），由 user systemd 在下次开机/登录时拉起。
  *
  * 三条硬约束（都来自真实事故，改动前务必读完）：
  *
  * 1. **enable ≠ start，disable ≠ stop。**
  *    `autostartEnable()` 只注册引导钩子：macOS 上绝不执行 `launchctl bootstrap`
- *    （plist 里带 `RunAtLoad`，一 bootstrap 就会立刻拉起 `dockmux start`，用户只是
+ *    （plist 里带 `RunAtLoad`，一 bootstrap 就会立刻拉起 `dutydeck start`，用户只是
  *    想登记自启却被顺手启动了服务）；Linux 上 `systemctl --user enable` 绝不带
- *    `--now`。守护进程的生命周期只由 `dockmux start` / `dockmux stop` 掌管，
+ *    `--now`。守护进程的生命周期只由 `dutydeck start` / `dutydeck stop` 掌管，
  *    `autostartDisable()` 同理不会停掉正在跑的守护进程（systemd 不带 `--now`
- *    就不会执行 ExecStop；launchd 的 job 进程在 `dockmux start` 派生出脱离的
+ *    就不会执行 ExecStop；launchd 的 job 进程在 `dutydeck start` 派生出脱离的
  *    daemon 后就已经退出，bootout 没有活进程可杀）。
  *
  * 2. **幂等 + 漂移重写。** nvm 换版本、npm 升级都会让 `execPath` / `cliPath` 变化，
@@ -45,7 +45,7 @@ export interface AutostartState {
   enabled: boolean;          // boot hook registered
   running?: boolean;         // service currently loaded/active, if knowable
   unitPath?: string;         // plist or unit file path
-  label: string;             // e.g. 'com.dockmux.server' / 'dockmux.service'
+  label: string;             // e.g. 'com.dutydeck.server' / 'dutydeck.service'
   /** Linux only: whether loginctl linger is on for this user. */
   lingerEnabled?: boolean;
   /** True when the on-disk unit no longer matches what we would write now. */
@@ -75,10 +75,10 @@ export interface AutostartOptions {
   platform?: string;
   /** 默认 `os.homedir()`。unit 路径、日志目录、WorkingDirectory 都由它派生。 */
   homeDir?: string;
-  /** 启动 Dockmux 的可执行文件，默认 `process.execPath`（即当前 node）。 */
+  /** 启动 Dutydeck 的可执行文件，默认 `process.execPath`（即当前 node）。 */
   execPath?: string;
   /**
-   * Dockmux 入口脚本绝对路径，默认 `resolve(process.argv[1])`。
+   * Dutydeck 入口脚本绝对路径，默认 `resolve(process.argv[1])`。
    * cli.ts 应显式传 `fileURLToPath(import.meta.url)`：打包后它就是 `dist/cli.js`，
    * 比 `join(pkgRoot,'dist','cli.js')` 这类拼接更不容易在换安装形态后失效。
    */
@@ -91,9 +91,9 @@ export interface AutostartOptions {
    * unit 写到 `<tmp>/home/tester/...`。`homeDir` 本身已在 `root` 里时不重复拼接。
    */
   root?: string;
-  /** 引导钩子的工作目录，默认 `homeDir`（`dockmux start` 会据此定位 daemon 目录）。 */
+  /** 引导钩子的工作目录，默认 `homeDir`（`dutydeck start` 会据此定位 daemon 目录）。 */
   workingDir?: string;
-  /** 自启日志目录，默认 `<homeDir>/.dockmux/logs`。 */
+  /** 自启日志目录，默认 `<homeDir>/.dutydeck/logs`。 */
   logDir?: string;
   /** 写进 unit 的 PATH，默认取安装时 shell 的 `process.env.PATH`。 */
   pathEnv?: string;
@@ -119,8 +119,8 @@ export class AutostartError extends Error {
   }
 }
 
-export const AUTOSTART_MACOS_LABEL = 'com.dockmux.server';
-export const AUTOSTART_LINUX_UNIT = 'dockmux.service';
+export const AUTOSTART_MACOS_LABEL = 'com.dutydeck.server';
+export const AUTOSTART_LINUX_UNIT = 'dutydeck.service';
 
 const DARWIN_FALLBACK_PATH = '/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin';
 const LINUX_FALLBACK_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
@@ -190,7 +190,7 @@ function resolveOptions(options: AutostartOptions = {}): ResolvedAutostart {
   const root = options.root ?? '/';
   const homeDir = underRoot(root, options.homeDir ?? homedir());
   const entry = process.argv[1];
-  const label = platform === 'linux' ? AUTOSTART_LINUX_UNIT : platform === 'darwin' ? AUTOSTART_MACOS_LABEL : 'dockmux';
+  const label = platform === 'linux' ? AUTOSTART_LINUX_UNIT : platform === 'darwin' ? AUTOSTART_MACOS_LABEL : 'dutydeck';
   const unitPath = platform === 'darwin'
     ? join(homeDir, 'Library', 'LaunchAgents', `${AUTOSTART_MACOS_LABEL}.plist`)
     : platform === 'linux'
@@ -202,9 +202,9 @@ function resolveOptions(options: AutostartOptions = {}): ResolvedAutostart {
     label,
     unitPath,
     execPath: options.execPath ?? process.execPath,
-    cliPath: options.cliPath ?? (entry ? resolve(entry) : 'dockmux'),
+    cliPath: options.cliPath ?? (entry ? resolve(entry) : 'dutydeck'),
     workingDir: options.workingDir ?? homeDir,
-    logDir: options.logDir ?? join(homeDir, '.dockmux', 'logs'),
+    logDir: options.logDir ?? join(homeDir, '.dutydeck', 'logs'),
     pathEnv: options.pathEnv ?? process.env.PATH ?? (platform === 'darwin' ? DARWIN_FALLBACK_PATH : LINUX_FALLBACK_PATH),
     username: options.username ?? currentUsername(),
     uid: options.uid ?? currentUid(),
@@ -234,7 +234,7 @@ function renderPlist(config: ResolvedAutostart): string {
   // RunAtLoad=true 是"下次登录自动启动"的唯一开关：launchd 只在登录时加载
   // ~/Library/LaunchAgents/*.plist，没有 RunAtLoad（也没有别的触发条件）的 agent
   // 永远不会被执行，自启就形同虚设。真正会"立刻启动"的是 `launchctl bootstrap`，
-  // 所以 enable 路径绝不调用它 —— 见文件头约束 1。KeepAlive=false：`dockmux start`
+  // 所以 enable 路径绝不调用它 —— 见文件头约束 1。KeepAlive=false：`dutydeck start`
   // 派生出脱离的 daemon 后自身即退出，KeepAlive 会被 launchd 理解为崩溃而反复重启。
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -269,12 +269,12 @@ function renderPlist(config: ResolvedAutostart): string {
 }
 
 function renderUnit(config: ResolvedAutostart): string {
-  // Type=oneshot + RemainAfterExit=yes：`dockmux start` 会把服务交给脱离的
+  // Type=oneshot + RemainAfterExit=yes：`dutydeck start` 会把服务交给脱离的
   // daemon 子进程后立即返回，若不 RemainAfterExit，systemd 会在 ExecStart 退出的
   // 瞬间把 unit 判为 inactive(dead) 并回收整个 cgroup，刚起来的 daemon 会被一起杀掉。
   const start = `${systemdQuote(config.execPath)} ${systemdQuote(config.cliPath)}`;
   return `[Unit]
-Description=Dockmux 本地会话服务器
+Description=Dutydeck 本地会话服务器
 After=network-online.target
 Wants=network-online.target
 
@@ -300,7 +300,7 @@ function renderDesired(config: ResolvedAutostart): string {
 function unsupported(config: ResolvedAutostart): AutostartError {
   return new AutostartError(
     'unsupported-platform',
-    `当前平台 ${config.rawPlatform} 不支持 dockmux 开机自启：仅支持 macOS（launchd）与 Linux（user systemd）。`,
+    `当前平台 ${config.rawPlatform} 不支持 dutydeck 开机自启：仅支持 macOS（launchd）与 Linux（user systemd）。`,
     [`可以在开机脚本里手动调用：${config.execPath} ${config.cliPath} start`]
   );
 }
@@ -356,7 +356,7 @@ async function inspectDarwin(config: ResolvedAutostart): Promise<AutostartState>
     `launchd 已加载: ${loaded === undefined ? '未知（launchctl 无法执行）' : loaded ? '是' : '否'}`
   ];
   if (onDisk !== undefined && onDisk !== desired) {
-    details.push('plist 内容与当前 node / dockmux 路径不一致（可能换过 node 版本或升级过 npm 包）');
+    details.push('plist 内容与当前 node / dutydeck 路径不一致（可能换过 node 版本或升级过 npm 包）');
   }
   return {
     platform: 'darwin',
@@ -400,7 +400,7 @@ async function inspectLinux(config: ResolvedAutostart): Promise<AutostartState> 
     details.push(`loginctl linger: ${linger === undefined ? '未知（loginctl 无法执行）' : linger ? '是' : '否（注销后服务会被停止）'}`);
   }
   if (onDisk !== undefined && onDisk !== desired) {
-    details.push('unit 内容与当前 node / dockmux 路径不一致（可能换过 node 版本或升级过 npm 包）');
+    details.push('unit 内容与当前 node / dutydeck 路径不一致（可能换过 node 版本或升级过 npm 包）');
   }
   return {
     platform: 'linux',
@@ -429,19 +429,19 @@ function unsupportedState(config: ResolvedAutostart): AutostartState {
 function statusNotices(state: AutostartState, config: ResolvedAutostart): string[] {
   const notices: string[] = [];
   if (!state.supported) {
-    notices.push(`当前平台 ${config.rawPlatform} 不支持 dockmux 开机自启：仅支持 macOS（launchd）与 Linux（user systemd）。`);
+    notices.push(`当前平台 ${config.rawPlatform} 不支持 dutydeck 开机自启：仅支持 macOS（launchd）与 Linux（user systemd）。`);
     return notices;
   }
   if (!state.enabled) {
-    notices.push('开机自启未注册。运行 dockmux autostart enable 注册。');
+    notices.push('开机自启未注册。运行 dutydeck autostart enable 注册。');
   } else if (state.running === false) {
     // 关键：文件在 ≠ 服务在跑。绝不能把"已注册"当成"运行中"回显。
-    notices.push('开机自启已注册，但守护进程当前未在运行（要到下次登录/开机才会拉起）。要立即启动请运行 dockmux start。');
+    notices.push('开机自启已注册，但守护进程当前未在运行（要到下次登录/开机才会拉起）。要立即启动请运行 dutydeck start。');
   } else if (state.running === undefined) {
-    notices.push('开机自启已注册，但无法确认守护进程是否在运行。可运行 dockmux status 查看守护进程状态。');
+    notices.push('开机自启已注册，但无法确认守护进程是否在运行。可运行 dutydeck status 查看守护进程状态。');
   }
   if (state.stale) {
-    notices.push(`磁盘上的 ${state.platform === 'darwin' ? 'plist' : 'unit'} 与当前期望内容不一致（启动路径已变），重新运行 dockmux autostart enable 刷新。`);
+    notices.push(`磁盘上的 ${state.platform === 'darwin' ? 'plist' : 'unit'} 与当前期望内容不一致（启动路径已变），重新运行 dutydeck autostart enable 刷新。`);
   }
   if (state.platform === 'linux' && state.enabled && state.lingerEnabled === false) {
     notices.push(lingerNotice(config));
@@ -484,7 +484,7 @@ async function enableDarwin(config: ResolvedAutostart): Promise<AutostartResult>
     changed ? `已写入 LaunchAgent: ${unitPath}` : `LaunchAgent 已是最新，无需改动: ${unitPath}`,
     '开机自启已注册，将在下次登录时生效。',
     // 约束 1：这里没有 launchctl bootstrap，所以本次调用不会启动任何东西。
-    '本次不会启动守护进程；要立即启动请运行 dockmux start。'
+    '本次不会启动守护进程；要立即启动请运行 dutydeck start。'
   ];
   if (changed && loadedBefore) {
     notices.push(`launchd 里仍是旧配置，重新登录后生效（想立刻刷新可先手动执行 launchctl bootout gui/${config.uid}/${config.label}）。`);
@@ -512,7 +512,7 @@ function systemdUnavailable(config: ResolvedAutostart): AutostartError {
     '当前会话连不上 user systemd（缺少 DBus / 容器环境），无法注册开机自启。',
     [
       `回退方案：把下面这条命令写进系统级 cron / rc.local / 你使用的 init：${config.execPath} ${config.cliPath} start`,
-      '或在有 systemd --user 的桌面会话里重新运行 dockmux autostart enable。'
+      '或在有 systemd --user 的桌面会话里重新运行 dutydeck autostart enable。'
     ]
   );
 }
@@ -548,7 +548,7 @@ async function enableLinux(config: ResolvedAutostart): Promise<AutostartResult> 
 
   notices.push(
     '开机自启已注册，将在下次开机/登录时生效。',
-    '本次不会启动守护进程；要立即启动请运行 dockmux start。'
+    '本次不会启动守护进程；要立即启动请运行 dutydeck start。'
   );
   // 约束 2：linger 关着的话，注销就等于杀服务 —— 必须带上真实用户名的提示。
   if (linger === false) notices.push(lingerNotice(config));
@@ -587,7 +587,7 @@ export async function autostartEnable(options: AutostartOptions = {}): Promise<A
 
 // ─── disable ─────────────────────────────────────────────────────────────────
 
-const DAEMON_UNTOUCHED_NOTICE = '当前正在运行的守护进程不受影响；要停止它请运行 dockmux stop。';
+const DAEMON_UNTOUCHED_NOTICE = '当前正在运行的守护进程不受影响；要停止它请运行 dutydeck stop。';
 
 function removeIfPresent(path: string): boolean {
   if (readTextFile(path) === undefined) return false;
@@ -602,7 +602,7 @@ async function disableDarwin(config: ResolvedAutostart): Promise<AutostartResult
   let bootedOut = false;
 
   if (loadedBefore) {
-    // bootout 只是把 job 从 launchd 注册表里摘掉。`dockmux start` 起的 daemon 是
+    // bootout 只是把 job 从 launchd 注册表里摘掉。`dutydeck start` 起的 daemon 是
     // detached 的，launchd 的 job 进程早已退出，这里没有活进程会被杀 —— 约束 1。
     const bootout = await config.run('launchctl', ['bootout', `gui/${config.uid}/${config.label}`]);
     if (bootout.status === 0) bootedOut = true;

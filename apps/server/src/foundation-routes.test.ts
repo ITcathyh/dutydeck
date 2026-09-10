@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { buildApp } from './app.js';
-import { createRepositories } from '@dockmux/storage';
+import { createRepositories } from '@dutydeck/storage';
 
 const apps: Array<Awaited<ReturnType<typeof buildApp>>> = [];
 const repositories: Array<ReturnType<typeof createRepositories>> = [];
