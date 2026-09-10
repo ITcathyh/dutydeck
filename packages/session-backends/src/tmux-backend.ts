@@ -27,7 +27,7 @@
  */
 import { execFileSync, spawnSync, spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
-import { openSync, closeSync, unlinkSync } from 'node:fs';
+import { openSync, closeSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -256,6 +256,12 @@ export class TmuxBackend implements SessionBackend {
 
   spawn(bin: string, args: string[], opts: SpawnOptions): void {
     if (this.started) throw new TmuxError('tmux spawn() called twice');
+    // Node reports a missing spawn cwd as "spawnSync tmux ENOENT" too.
+    let validCwd = false;
+    try { validCwd = statSync(opts.cwd).isDirectory(); } catch { /* Missing or inaccessible directory. */ }
+    if (!validCwd) {
+      throw new TmuxError(`工作目录不可用：${opts.cwd}。请在机器人或任务设置中选择已存在且可访问的目录。`);
+    }
     this.started = true;
     this.cols = opts.cols;
     this.rows = opts.rows;
