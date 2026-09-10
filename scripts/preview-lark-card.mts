@@ -22,11 +22,17 @@ import {
   renderLarkResultElements
 } from '../apps/server/src/lark/card-renderer.js';
 import { boundLarkCardElements, buildLarkCard } from '../apps/server/src/lark/service.js';
+import { buildLarkTaskDashboard } from '../apps/server/src/lark/task-dashboard.js';
 
-// 仍在执行的步骤没有 completedAt，耗时按 Date.now() 兜底计算。基线钉死在某个日期时，
-// 这类步骤会渲染出「80m 12s」——那是基线到今天的距离，不是步骤耗时，改版前后并排看时
-// 它是一处每天都在变的假差异。基线跟随当前整分钟，同一分钟内重跑结果一致。
-const base = Math.floor(Date.now() / 60_000) * 60_000 - 90_000;
+// 仍在执行的步骤没有 completedAt，耗时按 Date.now() 兜底计算——渲染结果因此依赖「现在」。
+// 基线跟随当前时钟时，同一份数据两次跑图会得到不同的耗时（跨整分钟就变），并排复核时
+// 那是一处每分钟都在动的假差异，比真实改动还显眼。所以基线和「现在」一起钉死：
+// 整个预览完全确定，cards.json 可以直接 diff。
+const base = Date.parse('2026-09-10T08:00:00.000Z');
+// 「现在」取 base+75s，让运行态场景自洽：卡片头部写的任务已用时是 74s，
+// 未结束步骤的耗时必须小于它，否则会渲染出「单步比整轮还久」这种不可能的读数。
+// 脚本是一次性进程，渲染完即退出，不必还原 Date.now。
+Date.now = () => base + 75_000;
 const t = (seconds: number) => new Date(base + seconds * 1_000).toISOString();
 const event = (sequence: number, type: AgentEvent['type'], seconds: number, data: Record<string, unknown>): AgentEvent =>
   ({ id: `e${sequence}`, sessionId: 'ses_preview', sequence, type, timestamp: t(seconds), data });
@@ -111,11 +117,32 @@ const workflowCard = (kind: 'permission' | 'ask') => buildLarkCard({
       ? '缓存目录里 pnpm 占 3.2G、playwright 占 880M。整个删掉，还是只清 pnpm？'
       : '高危操作：删除 ~/.cache/pnpm 目录（3.2G）' } },
     { tag: 'markdown', content: kind === 'ask'
-      ? '回复此卡片，或发送 `/answer wf_preview_ask 你的回答`。'
-      : '仅对本次工具调用生效。也可发送 `/approve wf_preview_permission` 或 `/reject wf_preview_permission`。' },
+      ? '回复此卡片即可回答。'
+      : '仅对本次工具调用生效。' },
     ...(kind === 'permission' ? [workflowButton('approve', '批准一次'), workflowButton('reject', '拒绝')] : [])
   ]
 });
+
+// /tasks、/approve、/reject、/answer 和验收回执都由 coordinator 的 workflowReply 发出，
+// 成功走 completed、需要读者再做点什么的走 failed。下面两张卡分别覆盖这两条分支，
+// 按它的真实入参构造：没有 webBaseUrl、没有 capabilities、readOnly。
+const commandReceiptCard = (taskName: string, elements: Array<Record<string, any>>) => buildLarkCard({
+  agentName: 'Claude Code', state: 'completed', readOnly: true, permissionMode: 'ask',
+  taskId: 'om_preview_cmd', taskName, elements
+});
+
+// 相对时间要看得出档位差别（分钟 / 小时 / 天），所以按固定偏移构造，并把同一个
+// dashboardNow 传给渲染器——否则每次跑图这些值都在动，并排复核时全是假差异。
+const dashboardNow = base;
+const ago = (minutes: number) => new Date(dashboardNow - minutes * 60_000).toISOString();
+const workspace = '/data00/home/huangyuhang.edu/ai/dockmux';
+const appLink = 'https://applink.feishu.cn/client/chat/open?openChatId=oc_preview';
+const dashboardEntries = [
+  { taskId: 't1', title: '看看发送的消息卡片能不能做大规模重构优化', workspace, status: 'waiting_for_permission', updatedAt: ago(12), url: appLink },
+  { taskId: 't2', title: '拉取群会话历史消息', workspace, status: 'running', updatedAt: ago(3), url: appLink },
+  { taskId: 't3', title: '构建并重启服务端', workspace, status: 'failed', updatedAt: ago(60 * 30), url: appLink },
+  { taskId: 't4', title: '确认飞书卡片渲染链路', workspace, status: 'completed', updatedAt: ago(60 * 5), url: appLink }
+];
 
 const scenarios: Scenario[] = [
   {
@@ -194,6 +221,21 @@ const scenarios: Scenario[] = [
       elapsedSeconds: 43, sessionId: 'ses_preview', webBaseUrl: web, retryable: true,
       capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: true, canRefresh: false, webUrl: `${web}/sessions/ses_preview` },
       elements: boundLarkCardElements(renderLarkProcessElements(failedRun, config, true))
+    })
+  },
+  {
+    id: 'command-tasks',
+    label: '命令回执 · /tasks 任务导航',
+    note: '一屏能扫完 4 个任务：每行只剩逐行不同的东西，工作区提到了表头。',
+    card: commandReceiptCard('任务导航', buildLarkTaskDashboard(dashboardEntries, 1, dashboardNow).elements)
+  },
+  {
+    id: 'command-error',
+    label: '命令回执 · 权限被拒',
+    note: '拒绝、报错和「命令可能没生效」都走这张卡，颜色必须和文字说的是同一件事。',
+    card: buildLarkCard({
+      agentName: 'Claude Code', state: 'failed', readOnly: true, retryable: false, permissionMode: 'ask',
+      taskId: 'om_preview_cmd_error', taskName: '任务操作', markdown: '当前账号无权修改此任务。'
     })
   }
 ];
