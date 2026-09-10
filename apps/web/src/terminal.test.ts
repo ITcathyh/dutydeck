@@ -16,6 +16,13 @@ describe('terminalWsUrl', () => {
 });
 
 describe('parseTerminalFrame', () => {
+  it('accepts a dimensioned snapshot and rejects unusable dimensions', () => {
+    const screen = { type: 'snapshot', data: 'screen', cols: 80, rows: 24 };
+    expect(parseTerminalFrame(JSON.stringify(screen))).toEqual(screen);
+    for (const cols of [0, -1, 2.5, '80', null]) {
+      expect(parseTerminalFrame(JSON.stringify({ ...screen, cols }))).toBeUndefined();
+    }
+  });
   it('parses the three valid server frame shapes', () => {
     expect(parseTerminalFrame('{"type":"data","data":"hello"}')).toEqual({ type: 'data', data: 'hello' });
     expect(parseTerminalFrame('{"type":"exit","code":0}')).toEqual({ type: 'exit', code: 0 });

@@ -246,6 +246,7 @@ export class TmuxBackend implements SessionBackend {
   private readonly dataCbs: Array<(d: string) => void> = [];
   private readonly exitCbs: Array<(code: number | null, signal: string | null) => void> = [];
   private exitTimer: NodeJS.Timeout | null = null;
+  initialScreen?: { data: string; cols: number; rows: number };
 
   constructor(sessionName: string, options: TmuxBackendOptions = {}) {
     this.sessionName = sessionName;
@@ -416,10 +417,10 @@ export class TmuxBackend implements SessionBackend {
       // ours; the higher-level lease/fencing layer is responsible for
       // preventing two live daemons from attaching concurrently.
       runTmux(['pipe-pane', '-t', this.sessionName]);
-      this.startCapture();
+      this.startCapture(true);
       this.startExitWatcher();
     } catch (err) {
-      this.cleanup();
+      this.detach();
       throw err;
     }
   }
@@ -546,7 +547,7 @@ export class TmuxBackend implements SessionBackend {
   /** Arm output capture: per-session tmp file + `tail -F` child + pipe-pane
    *  subscription. Shared by spawn() (new session) and attach() (existing
    *  session); the file is removed by cleanup() on kill/detach. */
-  private startCapture(): void {
+  private startCapture(restoreScreen = false): void {
     this.pipePath = join(tmpdir(), `dutydeck-tmux-${randomBytes(8).toString('hex')}.log`);
     closeSync(openSync(this.pipePath, 'w')); // ensure it exists before tail -F
     this.tail = spawn('tail', ['-n', '+1', '-F', this.pipePath], {
@@ -570,7 +571,35 @@ export class TmuxBackend implements SessionBackend {
     this.tail.on('error', () => { /* tail missing/killed — output goes quiet */ });
 
     // -o opens only when no pipe is set yet; detach() cancels it.
-    runTmux(['pipe-pane', '-o', '-t', this.sessionName, `cat >> ${shellescape(this.pipePath)}`]);
+    const pipe = ['pipe-pane', '-o', '-t', this.sessionName, `cat >> ${shellescape(this.pipePath)}`];
+    if (!restoreScreen) { runTmux(pipe); return; }
+
+    // One tmux command queue captures the existing screen/history and then
+    // starts the incremental pipe, without a gap between two client calls.
+    const fields = ['pane_width', 'pane_height', 'cursor_x', 'cursor_y', 'alternate_on',
+      'cursor_flag', 'keypad_cursor_flag', 'mouse_standard_flag', 'mouse_button_flag',
+      'mouse_all_flag', 'mouse_sgr_flag', 'mouse_utf8_flag', 'insert_flag', 'wrap_flag',
+      'origin_flag', 'scroll_region_upper', 'scroll_region_lower'];
+    const captured = runTmux([
+      'display-message', '-p', '-t', this.sessionName, fields.map(key => `#{${key}}`).join('|'), ';',
+      'capture-pane', '-p', '-e', '-t', this.sessionName, '-S', '-5000', ';', ...pipe,
+    ]);
+    const boundary = captured.indexOf('\n');
+    const values = captured.slice(0, boundary).trim().split('|').map(Number);
+    const [cols, rows, x, y, alternate, cursor, cursorKeys, mouse, mouseButton, mouseAll, sgr, utf8, insert, wrap, origin, top, bottom] = values;
+    if (!cols || !rows || boundary < 0) throw new TmuxError('Could not capture terminal dimensions');
+    let data = '\x1bc' + (alternate ? '\x1b[?1049h' : '');
+    data += captured.slice(boundary + 1).replace(/\n$/, '').replace(/\n/g, '\r\n');
+    data += `\x1b[0m\x1b[${top! + 1};${bottom! + 1}r`;
+    for (const [mode, enabled] of [[25, cursor], [1, cursorKeys], [1000, mouse], [1002, mouseButton],
+      [1003, mouseAll], [1006, sgr], [1005, utf8], [7, wrap], [6, origin]]) {
+      if (enabled) data += `\x1b[?${mode}h`;
+    }
+    if (!cursor) data += '\x1b[?25l';
+    if (!wrap) data += '\x1b[?7l';
+    if (insert) data += '\x1b[4h';
+    data += `\x1b[${y! + 1 - (origin ? top! : 0)};${x! + 1}H`;
+    this.initialScreen = { data, cols, rows };
   }
 
   private writeOwnershipMarker(): void {

@@ -175,3 +175,29 @@ describe('persistent task recovery across a reopened database', () => {
     expect(backend.prompts).toEqual(['first']);
   });
 });
+
+it('reattaches a completed terminal once after restart without starting or changing the task', async () => {
+  const file = database();
+  const backend = persistentTurn();
+  const first = open(file, backend.factory);
+  await first.runtime.initialize([agent]);
+  const session = await first.runtime.start({ agentId: agent.id });
+  session.state = 'completed';
+  await first.repos.sessions.save(session);
+  await close(first);
+  const attached: AgentDriver = {
+    start: vi.fn(async () => {}), resume: vi.fn(async () => {}), send: vi.fn(async () => {}),
+    interrupt: vi.fn(async () => {}), stop: vi.fn(async () => {}), attachTerminal: vi.fn(() => true)
+  };
+  const factory = vi.fn(() => attached);
+  const second = open(file, factory);
+  await second.runtime.initialize([agent]);
+  const before = await second.runtime.getSession(session.id);
+  expect(await Promise.all([second.runtime.getTerminalDriver(session.id), second.runtime.getTerminalDriver(session.id)])).toEqual([attached, attached]);
+  expect(factory).toHaveBeenCalledOnce();
+  expect(attached.attachTerminal).toHaveBeenCalledOnce();
+  expect(attached.start).not.toHaveBeenCalled();
+  expect(attached.resume).not.toHaveBeenCalled();
+  expect(attached.send).not.toHaveBeenCalled();
+  expect(await second.runtime.getSession(session.id)).toEqual(before);
+});

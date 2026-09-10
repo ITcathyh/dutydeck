@@ -258,6 +258,36 @@ export class DutydeckRuntime {
   getSession(id: string) { return this.repos.sessions.get(id); }
   /** 只读访问当前内存中的 driver 实例（如终端 WS 代理取 createTerminalStream）；未连接/已释放时返回 undefined。 */
   getDriver(sessionId: string): AgentDriver | undefined { return this.drivers.get(sessionId); }
+  /** Restore an idle persistent terminal for viewing without resuming a task. */
+  async getTerminalDriver(sessionId: string): Promise<AgentDriver | undefined> {
+    const existing = this.drivers.get(sessionId);
+    if (existing) return existing;
+    const observedGeneration = this.sessionGenerations.get(sessionId);
+    const session = await this.repos.sessions.get(sessionId);
+    if (!session || session.archivedAt || session.protocol !== 'pty-cli'
+      || !['idle', 'completed', 'interrupted'].includes(session.state)) return undefined;
+    const agent = await this.repos.agents.get(session.agentId);
+    if (this.shuttingDown || this.hardInterrupts.has(sessionId)) return undefined;
+    const connected = this.drivers.get(sessionId);
+    if (connected) return connected;
+    if (!agent || this.sessionGenerations.get(sessionId) !== observedGeneration) return undefined;
+    const generation = this.nextSessionGeneration(sessionId);
+    const driver = this.factory(this.configureAgentForSession(agent, session), session.protocol,
+      this.onDriverEvent(session, generation), code => {
+        if (this.drivers.get(sessionId) !== driver) return;
+        this.notifyDriverExit(sessionId, code);
+        this.drivers.delete(sessionId);
+      }, sessionId);
+    try {
+      if (!driver.attachTerminal?.()) { await driver.stop(); return undefined; }
+      this.drivers.set(sessionId, driver);
+      this.touch(sessionId);
+      return driver;
+    } catch (error) {
+      await driver.stop();
+      throw error;
+    }
+  }
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
@@ -447,6 +477,8 @@ export class DutydeckRuntime {
     if (existing) return existing;
     const agent = await this.repos.agents.get(session.agentId);
     if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
+    const connected = this.drivers.get(session.id);
+    if (connected) return connected;
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${session.agentId}`, 404);
     const configured = this.configureAgentForSession(agent, session);
     const generation = this.nextSessionGeneration(session.id);

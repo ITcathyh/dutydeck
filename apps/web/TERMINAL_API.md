@@ -24,11 +24,13 @@ Web 工作台“终端”标签与服务端之间的实时终端协议。服务�
 
 ```ts
 type TerminalServerFrame =
+  | { type: 'snapshot'; data: string; cols: number; rows: number } // 初始屏幕和保留的历史
   | { type: 'data'; data: string }      // PTY 屏幕输出（含 ANSI 转义序列），原样写进 xterm
   | { type: 'exit'; code: number | null } // PTY 进程已退出；code 为退出码，被信号终止时为 null
   | { type: 'error'; message: string };  // 终端/会话异常的人类可读说明
 ```
 
+- `snapshot` 帧：每次连接先发送。客户端重置终端，按快照尺寸恢复 ANSI 内容、光标和鼠标模式，再 fit 到容器并发送 resize；恢复期间不调整尺寸。最多保留 5000 行终端历史（tmux 恢复以实际保留量为限）。
 - `data` 帧：`data` 是 PTY 的原始输出字节流（按 UTF-8 解码后的字符串），可包含颜色、光标定位等 ANSI 序列，客户端原样 `term.write`，不做转义。
 - `exit` 帧：进程生命周期结束。客户端在屏幕上追加一行暗色提示 `[进程已退出，code=<code>]`。**发完 exit 后服务端可以关闭连接**；客户端会自动重连（见第 5 节），重连后从当前屏幕继续。
 - `error` 帧：会话不存在、PTY 未启动等异常。客户端追加一行暗色错误提示。error 帧之后连接是否关闭由服务端决定。
@@ -42,12 +44,12 @@ type TerminalClientFrame =
 ```
 
 - `input` 帧：`data` 是 xterm `onData` 的原始输入，服务端原样写入 PTY master，不做换行转换。
-- `resize` 帧：**由客户端驱动**。客户端在连接建立成功后、以及容器尺寸变化（`ResizeObserver` + FitAddon 重新计算）后各发一次，`cols`/`rows` 为 xterm 当前行列数。服务端收到后应对 PTY 执行 `TIOCSWINSZ`（等价操作）。
+- `resize` 帧：**由客户端驱动**。客户端在初始快照写入完成后、以及容器尺寸变化（`ResizeObserver` + FitAddon 重新计算）后各发一次，`cols`/`rows` 为 xterm 当前行列数。服务端收到后应对 PTY 执行 `TIOCSWINSZ`（等价操作）。
 
 ## 4. 生命周期
 
-1. 客户端 mount 即建立 WebSocket；连接成功后服务端**立即开始推当前屏幕输出流**（PTY 的实时输出）。
-2. **无历史回放保证**：服务端不承诺缓存断线前的输出。客户端重连成功后不请求历史，保留当前屏幕内容，仅追加一行暗色 `[已重新连接]` 提示，然后继续接收实时流。
+1. 客户端 mount 即建立 WebSocket；连接成功后服务端先推送 `snapshot`，随后按顺序发送增量输出。
+2. 重连同样恢复快照，即使 PTY 没有新输出也能显示已有内容。服务重启后，空闲会话可接回仍存活且归属本会话的 tmux 终端，不启动新任务。
 3. 服务端应在 PTY 进程退出时发 `exit` 帧；会话被销毁/归档时可发 `error` 帧后关闭。
 4. 客户端卸载（切走终端 tab、关闭会话详情）时主动 `close()`，服务端应据此清理该连接对应的资源（同一 session 允许多个并发连接，各自独立推流）。
 
@@ -65,6 +67,7 @@ type TerminalClientFrame =
   │── GET /api/terminal/sess-1 (Upgrade) ─────►│  校验同源 cookie，Upgrade 成功
   │◄────────────── 101 Switching ──────────────│
   │                                            │
+  │◄─ {"type":"snapshot","data":"...","cols":120,"rows":32} ─│
   │── {"type":"resize","cols":120,"rows":32} ─►│  PTY 设置窗口大小
   │◄─ {"type":"data","data":"$ ls\r\n"} ───────│  PTY 实时输出（回显）
   │◄─ {"type":"data","data":"src\r\n"} ────────│
@@ -75,7 +78,7 @@ type TerminalClientFrame =
   │                                            │
   │  (网络抖动，连接断开)                         │
   │── 1s 后重连，再次 Upgrade ─────────────────►│
-  │◄─ {"type":"data","data":"...当前屏幕流..."} ─│  不回放历史，直接推实时流
+  │◄─ {"type":"snapshot","data":"...","cols":120,"rows":32} ─│
   │                                            │
   │◄─ {"type":"exit","code":0} ────────────────│  PTY 进程退出
   │  (客户端显示 [进程已退出，code=0])            │

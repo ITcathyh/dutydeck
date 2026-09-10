@@ -315,10 +315,6 @@ export class PtyCliDriver implements AgentDriver {
     try {
       this.reattachTmux(sessionName, false, state.transcript);
       this.markTmuxReattached();
-      // pipe-pane only receives future redraws. Capture the current render so
-      // an offline-completed turn can be settled even when the pane is quiet.
-      const screen = this.backend instanceof TmuxBackend ? this.backend.captureCurrentScreen() : null;
-      if (screen) this.feedRecoveredScreen(screen);
     } catch (err) {
       this.turnActive = false;
       this.awaitingRecoveryTranscript = false;
@@ -576,9 +572,28 @@ export class PtyCliDriver implements AgentDriver {
   createTerminalStream(): TerminalStream {
     const local = new Set<(data: string) => void>();
     return {
-      onData: cb => {
-        local.add(cb);
-        this.terminalSubscribers.add(cb);
+      onData: (cb, onSnapshot) => {
+        let ready = !onSnapshot || !this.snapshot;
+        const pending: string[] = [];
+        const forward = (data: string) => { if (ready) cb(data); else pending.push(data); };
+        local.add(forward);
+        this.terminalSubscribers.add(forward);
+        const capture = () => {
+          const snapshot = this.snapshot;
+          if (!snapshot || !onSnapshot) return;
+          snapshot.capture(screen => {
+            if (!local.has(forward) || !this.terminalSubscribers.has(forward)) return;
+            if (snapshot !== this.snapshot) { pending.length = 0; capture(); return; }
+            onSnapshot(screen);
+            for (const data of pending) {
+              if (!local.has(forward)) return;
+              cb(data);
+            }
+            pending.length = 0;
+            ready = true;
+          });
+        };
+        if (!ready) capture();
       },
       write: data => {
         this.backend.write(data);
@@ -594,9 +609,29 @@ export class PtyCliDriver implements AgentDriver {
     };
   }
 
+  attachTerminal(): boolean {
+    if (this.started) return !this.stopped;
+    const name = this.tmuxSessionName();
+    // Failed viewing must never destroy a surviving pane during cleanup.
+    this.recoveryRejected = true;
+    if (!name || TmuxBackend.probeSession(name) !== 'exists') return false;
+    try {
+      this.reattachTmux(name, false);
+      this.markTmuxReattached();
+      this.recoveryRejected = false;
+      return true;
+    } catch (error) {
+      this.teardownWiring();
+      // Ownership failures happen before attach installs a pipe.
+      if (this.backend instanceof TmuxBackend && this.backend.initialScreen) this.backend.detach();
+      throw error;
+    }
+  }
+
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
   private wire(backend: SessionBackend, restoreTranscript?: DriverTurnRecovery['transcript']): void {
-    this.snapshot = new TerminalSnapshot(DEFAULT_COLS, DEFAULT_ROWS);
+    const initial = backend instanceof TmuxBackend ? backend.initialScreen : undefined;
+    this.snapshot = new TerminalSnapshot(initial?.cols ?? DEFAULT_COLS, initial?.rows ?? DEFAULT_ROWS);
     this.idleDetector = new IdleDetector({
       completionPattern: this.adapter.completionPattern,
       idleToBusyPattern: this.adapter.idleToBusyPattern,
@@ -632,6 +667,7 @@ export class PtyCliDriver implements AgentDriver {
     });
 
     backend.onData(data => {
+      if (backend !== this.backend || this.stopped) return;
       this.idleDetector?.feed(data);
       this.snapshot?.write(data);
       for (const cb of this.terminalSubscribers) cb(data);
@@ -640,6 +676,7 @@ export class PtyCliDriver implements AgentDriver {
       if (this.turnActive) this.turnHasOutput = true;
     });
     backend.onExit(code => this.handleExit(code, backend));
+    if (initial) this.feedRecoveredScreen(initial.data);
 
     // The tailer must resolve the CLI's data dir from the environment the CLI
     // CHILD got, never the daemon's: mergedEnv strips CLAUDE_* from the child,

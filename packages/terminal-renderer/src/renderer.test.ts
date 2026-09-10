@@ -112,3 +112,25 @@ describe('TerminalSnapshot', () => {
     snap.dispose();
   });
 });
+
+it('serializes history, cursor, alternate screen and mouse encoding at the queued boundary', async () => {
+  const source = new TerminalSnapshot(40, 4);
+  const restored = new TerminalSnapshot(40, 4);
+  try {
+    source.write('old 1\r\nold 2\r\nold 3\r\nold 4\r\nnormal prompt');
+    source.write('\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?25l\x1b[?2004h\x1b[2;3H\x1b[31mALT');
+    const screen = await new Promise<{ data: string }>(resolve => source.capture(resolve));
+    expect(screen.data).toContain('\x1b[?1006h');
+    expect(screen.data).toContain('\x1b[?25l');
+    await restored.writeAndFlush(screen.data);
+    expect(restored.xterm.buffer.active.type).toBe('alternate');
+    expect(restored.xterm.modes.mouseTrackingMode).toBe('vt200');
+    expect(restored.xterm.modes.bracketedPasteMode).toBe(true);
+    expect(restored.xterm.buffer.active.cursorX).toBe(5);
+    expect(restored.xterm.buffer.active.cursorY).toBe(1);
+    await restored.writeAndFlush('\x1b[?1049l');
+    expect(restored.xterm.buffer.active.baseY).toBe(1);
+    expect(restored.xterm.buffer.active.getLine(0)?.translateToString(true)).toBe('old 1');
+    expect(restored.viewportText()).toContain('normal prompt');
+  } finally { source.dispose(); restored.dispose(); }
+});
