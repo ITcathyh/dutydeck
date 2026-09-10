@@ -8,6 +8,8 @@ packages/*/dist/
 *.log
 .DS_Store
 .dutydeck/
+# 升级期仍会存在：迁移前、或迁移因目标已存在而跳过时，旧状态目录还留在原地。
+.dockmux/
 apps/server/public
 *.tsbuildinfo
 
