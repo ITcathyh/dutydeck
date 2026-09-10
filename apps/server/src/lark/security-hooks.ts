@@ -35,6 +35,10 @@ const adapterFor = (agentId?: string) => {
   return normalized ? adapters[normalized] : undefined;
 };
 const markerFor = (adapter: HookAdapter) => `dutydeck-lark-high-risk-guard-${adapter.id}.mjs`;
+// 改名前装好的 hook 条目里是这个文件名，且命令是绝对路径。找不到它就会在同一个事件下
+// 追加第二条：老条目指向的老脚本读 process.env.dockmux_session_id（新 runtime 不再注入），
+// 拿不到就直接放行——风控看着还在，实际已经失效。
+const legacyMarkerFor = (adapter: HookAdapter) => `dockmux-lark-high-risk-guard-${adapter.id}.mjs`;
 const paths = (adapter: HookAdapter, workspace: string) => ({
   hooksPath: join(workspace, adapter.configDirectory, adapter.configFile),
   scriptPath: adapter.kind === 'pi-extension'
@@ -181,7 +185,10 @@ async function installJsonHook(adapter: HookAdapter, workspace: string) {
   const entry = adapter.kind === 'cursor-json'
     ? { command, matcher: '.*', timeout: 5, failClosed: true }
     : { matcher: '.*', hooks: [{ type: 'command', command, timeout: 5, statusMessage: 'Dutydeck 高危操作风险检查' }] };
-  const existingIndex = entries.findIndex((item: unknown) => JSON.stringify(item).includes(markerFor(adapter)));
+  const existingIndex = entries.findIndex((item: unknown) => {
+    const serialized = JSON.stringify(item);
+    return serialized.includes(markerFor(adapter)) || serialized.includes(legacyMarkerFor(adapter));
+  });
   if (existingIndex >= 0) entries[existingIndex] = entry;
   else entries.push(entry);
   await writeFile(hooksPath, `${JSON.stringify({ ...config, ...(adapter.kind === 'cursor-json' ? { version: 1 } : {}), hooks: { ...hooks, [adapter.eventKey!]: entries } }, null, 2)}\n`, { mode: 0o600 });

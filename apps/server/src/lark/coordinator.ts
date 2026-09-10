@@ -1082,9 +1082,14 @@ export class LarkMessageCoordinator {
 
   async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
     const workflow = value as Record<string, unknown> | null;
-    if (workflow && typeof workflow.dutydeck_workflow === 'string') {
+    // 按钮的 callback value 存在飞书服务器上，不在本地：改名前发出的审批卡带的是
+    // dockmux_workflow，升级后仍挂在群里等人点。两个键都认，老卡片才不会变成死按钮。
+    const workflowAction = workflow && typeof workflow.dutydeck_workflow === 'string'
+      ? workflow.dutydeck_workflow
+      : workflow && typeof workflow.dockmux_workflow === 'string' ? workflow.dockmux_workflow : undefined;
+    if (workflow && workflowAction !== undefined) {
       if (!this.workflows || !context?.messageId || !context.chatId || !this.reconcileConfig) return { type: 'error', content: '卡片身份不完整或已失效。' };
-      const action = workflow.dutydeck_workflow;
+      const action = workflowAction;
       if (!['approve', 'reject', 'accept', 'changes'].includes(action)) return { type: 'error', content: '无法识别任务操作。' };
       try {
         const content = await this.workflows.respond({ appId: this.reconcileConfig.appId, chatId: context.chatId, cardId: context.messageId,

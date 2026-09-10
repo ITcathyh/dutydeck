@@ -76,6 +76,19 @@ function quoteIfNeeded(value: string): string {
 }
 
 const MANAGED_BANNER = '# 由 dutydeck setup 写入';
+const LEGACY_MANAGED_BANNER = '# 由 dockmux setup 写入';
+
+/**
+ * 改名前的 setup 写下的是 `DOCKMUX_*`。不认它就会在文件末尾再追加一份 `DUTYDECK_*`，
+ * 同一项配置在文件里出现两次，而用户之后改的多半是眼熟的那个旧名——改了却不生效。
+ */
+const LEGACY_ENV_PREFIX = 'DOCKMUX_';
+const CURRENT_ENV_PREFIX = 'DUTYDECK_';
+function managedKeyForLegacy(key: string, pending: Map<string, string | undefined>): string | undefined {
+  if (!key.startsWith(LEGACY_ENV_PREFIX)) return undefined;
+  const renamed = `${CURRENT_ENV_PREFIX}${key.slice(LEGACY_ENV_PREFIX.length)}`;
+  return pending.has(renamed) ? renamed : undefined;
+}
 
 /**
  * 把 updates 合并进原文件内容，返回新内容。
@@ -92,18 +105,21 @@ export function mergeEnvContent(original: string, updates: Record<string, string
     const trimmed = line.trim();
     const separator = trimmed.indexOf('=');
     if (trimmed === '' || trimmed.startsWith('#') || separator <= 0) {
-      output.push(line);
+      // 这条 banner 是本模块自己写的，改名后就地更新；用户手写的注释一律不碰。
+      output.push(trimmed === LEGACY_MANAGED_BANNER ? MANAGED_BANNER : line);
       continue;
     }
     const key = trimmed.slice(0, separator).trim();
-    if (!pending.has(key)) {
+    // 旧名就地升级成新名，保住它在文件里的位置和上下文注释。
+    const managed = pending.has(key) ? key : managedKeyForLegacy(key, pending);
+    if (managed === undefined) {
       output.push(line);
       continue;
     }
-    const value = pending.get(key);
-    pending.delete(key);
+    const value = pending.get(managed);
+    pending.delete(managed);
     // undefined = 删除：整行丢弃。
-    if (value !== undefined) output.push(`${key}=${quoteIfNeeded(value)}`);
+    if (value !== undefined) output.push(`${managed}=${quoteIfNeeded(value)}`);
   }
 
   const additions = [...pending.entries()].filter((entry): entry is [string, string] => entry[1] !== undefined);

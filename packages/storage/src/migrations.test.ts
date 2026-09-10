@@ -39,7 +39,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -238,6 +238,56 @@ describe('storage migrations', () => {
     expect(db.prepare('SELECT revision, state, desired_listener_state, full_trust_confirmed FROM channel_bots WHERE id = ?').get('bot-v11'))
       .toEqual({ revision: 1, state: 'disabled', desired_listener_state: 'disabled', full_trust_confirmed: 0 })
     for (const table of ['channel_bot_policies', 'group_bindings', 'remote_chat_facts', 'role_assignments']) expect(db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({ count: 0 })
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('v15 把 v13 写死在 CHECK 约束里的旧品牌名重建掉，并改写已有行', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 14)) {
+      migration.up(db)
+      record.run(migration.version, '2026-09-01T00:00:00.000Z')
+    }
+    db.prepare(`INSERT INTO channel_bots (id, schema_version, revision, channel, external_app_id, display_name, brand, state, desired_listener_state, full_trust_confirmed, created_at, updated_at) VALUES (?, 1, 1, 'lark', ?, ?, 'feishu', 'disabled', 'disabled', 0, ?, ?)`)
+      .run('bot-legacy', 'cli_legacy', 'Legacy Bot', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+    // 还原成改名前的落盘形态：v13 当时把 'dockmux' 写进了约束，老库磁盘上至今还是它。
+    const original = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'schedule_definitions'").get() as { sql: string }
+    db.exec('DROP TABLE schedule_definitions')
+    db.exec(original.sql.replace("'dutydeck'", "'dockmux'"))
+    db.prepare(`INSERT INTO schedule_definitions (
+      id, schema_version, revision, channel_bot_id, name, trigger_kind, interval_seconds, interval_anchor_at,
+      timezone, dst_gap_policy, dst_overlap_policy, delivery_mode, chat_ref, continuation_policy, payload_ref,
+      source_ownership, source_namespace, source_enabled, state, desired_executor_state, current_generation,
+      created_at, updated_at
+    ) VALUES (?, 1, 1, ?, ?, 'interval', 3600, ?, 'Asia/Shanghai', 'skip', 'first', 'chat', ?, 'same_thread', ?, 'dockmux', 'ns', 1, 'staged', 'disabled', 1, ?, ?)`)
+      .run('sched-legacy', 'bot-legacy', '旧库里的排程', '2026-09-01T00:00:00.000Z', 'chat-1', 'payload-1',
+           '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+
+    runMigrations(db)
+
+    const rebuilt = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'schedule_definitions'").get() as { sql: string }
+    expect(rebuilt.sql).toContain("source_ownership IN ('dutydeck', 'botmux')")
+    expect(rebuilt.sql).not.toContain("'dockmux'")
+    expect(db.prepare('SELECT source_ownership, name FROM schedule_definitions WHERE id = ?').get('sched-legacy'))
+      .toEqual({ source_ownership: 'dutydeck', name: '旧库里的排程' })
+    // 索引必须跟着重建回来，否则唯一性保护在重建后就没了
+    const indexes = (db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='schedule_definitions'").all() as Array<{ name: string }>).map(row => row.name)
+    expect(indexes).toContain('schedule_definitions_source')
+    expect(indexes).toContain('schedule_definitions_bot_state')
+    expect(db.pragma('integrity_check', { simple: true })).toBe('ok')
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('v15 在已经是新名字的库上什么都不做', () => {
+    const db = new Database(':memory:')
+    runMigrations(db)
+    const before = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'schedule_definitions'").get() as { sql: string }
+    runMigrations(db)
+    const after = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'schedule_definitions'").get() as { sql: string }
+    expect(after.sql).toBe(before.sql)
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
     db.close()
   })

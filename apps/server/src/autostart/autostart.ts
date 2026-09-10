@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
 
@@ -121,6 +121,18 @@ export class AutostartError extends Error {
 
 export const AUTOSTART_MACOS_LABEL = 'com.dutydeck.server';
 export const AUTOSTART_LINUX_UNIT = 'dutydeck.service';
+
+// 改名前注册的引导项还在原地，且仍指向旧的 dockmux 程序。新版只认新名字，
+// 会报「未注册」并劝你再注册一个——于是下次登录两个引导项各拉起一个进程抢同一个端口，
+// 先起来的那个赢，另一个 EADDRINUSE 退出。
+const LEGACY_MACOS_LABEL = 'com.dockmux.server';
+const LEGACY_LINUX_UNIT = 'dockmux.service';
+
+function legacyUnitPath(config: ResolvedAutostart): string | undefined {
+  if (!config.unitPath) return undefined;
+  const name = config.platform === 'darwin' ? `${LEGACY_MACOS_LABEL}.plist` : LEGACY_LINUX_UNIT;
+  return join(dirname(config.unitPath), name);
+}
 
 const DARWIN_FALLBACK_PATH = '/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin';
 const LINUX_FALLBACK_PATH = '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin';
@@ -445,6 +457,10 @@ function statusNotices(state: AutostartState, config: ResolvedAutostart): string
   }
   if (state.platform === 'linux' && state.enabled && state.lingerEnabled === false) {
     notices.push(lingerNotice(config));
+  }
+  const legacy = legacyUnitPath(config);
+  if (legacy && existsSync(legacy)) {
+    notices.push(`还留着改名前的开机自启项 ${legacy}，它指向旧的 dockmux 程序。请先删掉它再注册新的，否则下次登录会拉起两个进程抢同一个端口。`);
   }
   return notices;
 }

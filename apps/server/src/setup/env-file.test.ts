@@ -33,6 +33,29 @@ afterEach(async () => {
 });
 
 describe('mergeEnvContent', () => {
+  it('把改名前写下的 DOCKMUX_ 受管键就地升级，不在末尾追加第二份', () => {
+    const legacy = [
+      '# 由 dockmux setup 写入',
+      'DOCKMUX_DEFAULT_CWD=/home/u',
+      'DOCKMUX_PORT=4310',
+      'DOCKMUX_HOST=10.0.0.1'
+    ].join('\n');
+    const merged = mergeEnvContent(legacy, { DUTYDECK_PORT: '4400' });
+    expect(merged).toContain('DUTYDECK_PORT=4400');
+    expect(merged).not.toContain('DOCKMUX_PORT');
+    // 没有参与本次更新的旧键保持原样，交给运行时的 adoptLegacyEnv 兜底
+    expect(merged).toContain('DOCKMUX_DEFAULT_CWD=/home/u');
+    expect(merged).toContain('# 由 dutydeck setup 写入');
+    expect(merged).not.toContain('# 由 dockmux setup 写入');
+    expect(merged.match(/PORT=/g)).toHaveLength(1);
+  });
+
+  it('不碰名字里带 DOCKMUX_ 但不受管的键', () => {
+    const merged = mergeEnvContent('DOCKMUX_CUSTOM_THING=keep\n', { DUTYDECK_PORT: '4400' });
+    expect(merged).toContain('DOCKMUX_CUSTOM_THING=keep');
+    expect(merged).toContain('DUTYDECK_PORT=4400');
+  });
+
   const handwritten = [
     '# 用户自己的注释：不要被向导吃掉',
     'MY_OWN_KEY=keep-me',

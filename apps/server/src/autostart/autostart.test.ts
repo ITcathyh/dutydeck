@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   AUTOSTART_LINUX_UNIT,
   AUTOSTART_MACOS_LABEL,
@@ -99,6 +99,29 @@ describe('Dutydeck 开机自启', () => {
 
   afterEach(() => {
     rmSync(tmp, { recursive: true, force: true });
+  });
+
+  // ─── 改名遗留 ──────────────────────────────────────────────────────────────
+
+  it('Linux: 提示还留着改名前的 dockmux.service', async () => {
+    const legacy = join(tmp, HOME, '.config', 'systemd', 'user', 'dockmux.service');
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, '[Unit]\n');
+    const result = await autostartStatus(options('linux', commandLog(linuxResponder())));
+    expect(result.notices.some(notice => notice.includes('dockmux.service'))).toBe(true);
+  });
+
+  it('macOS: 提示还留着改名前的 com.dockmux.server.plist', async () => {
+    const legacy = join(tmp, HOME, 'Library', 'LaunchAgents', 'com.dockmux.server.plist');
+    mkdirSync(dirname(legacy), { recursive: true });
+    writeFileSync(legacy, '<plist/>');
+    const result = await autostartStatus(options('darwin', commandLog(macNotLoaded)));
+    expect(result.notices.some(notice => notice.includes('com.dockmux.server.plist'))).toBe(true);
+  });
+
+  it('没有遗留引导项时不产生这条提示', async () => {
+    const result = await autostartStatus(options('linux', commandLog(linuxResponder())));
+    expect(result.notices.some(notice => notice.includes('dockmux'))).toBe(false);
   });
 
   // ─── macOS ────────────────────────────────────────────────────────────────

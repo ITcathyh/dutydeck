@@ -35,7 +35,10 @@ const rejectedDeltaElement = (changedCount: number): LarkCardElement => ({
 });
 
 export function patchRejectedCardDelta(previous: LarkCardElement[] = [], current: LarkCardElement[] = []): LarkCardElement[] {
-  const baseline = previous.filter(element => element.element_id !== 'dutydeck_rejected_delta');
+  // previous 来自库里存的上一版快照，改名前存下的用的是旧 id。
+  // 只按新 id 过滤会让旧提示留在原地，再叠一条新的上去。
+  const baseline = previous.filter(element =>
+    element.element_id !== 'dutydeck_rejected_delta' && element.element_id !== 'dockmux_rejected_delta');
   const same = (left: LarkCardElement, right: LarkCardElement) => JSON.stringify(left) === JSON.stringify(right);
   let prefix = 0;
   while (prefix < baseline.length && prefix < current.length && same(baseline[prefix]!, current[prefix]!)) prefix++;

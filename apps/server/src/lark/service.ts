@@ -258,7 +258,9 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
   const upsertOmissionNotice = (els: Array<Record<string, unknown>>, count: number) => {
     if (count <= 0) return;
     const notice = omissionNotice(count);
-    const index = els.findIndex(element => element.element_id === 'dutydeck_snapshot_omission');
+    // 同上：旧快照里的省略提示 id 是 dockmux_ 前缀，认不出来就会 upsert 成第二条。
+    const index = els.findIndex(element =>
+      element.element_id === 'dutydeck_snapshot_omission' || element.element_id === 'dockmux_snapshot_omission');
     if (index >= 0) els[index] = notice;
     else {
       const firstGroup = els.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
