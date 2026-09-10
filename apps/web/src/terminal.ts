@@ -2,6 +2,7 @@
 // 帧格式见 apps/web/TERMINAL_API.md。
 
 export type TerminalServerFrame =
+  | { type: 'snapshot'; data: string; cols: number; rows: number }
   | { type: 'data'; data: string }
   | { type: 'exit'; code: number | null }
   | { type: 'error'; message: string };
@@ -28,6 +29,11 @@ export function parseTerminalFrame(raw: string): TerminalServerFrame | undefined
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
   const record = parsed as Record<string, unknown>;
   switch (record.type) {
+    case 'snapshot':
+      return typeof record.data === 'string'
+        && typeof record.cols === 'number' && Number.isInteger(record.cols) && record.cols > 0
+        && typeof record.rows === 'number' && Number.isInteger(record.rows) && record.rows > 0
+        ? { type: 'snapshot', data: record.data, cols: record.cols, rows: record.rows } : undefined;
     case 'data':
       return typeof record.data === 'string' ? { type: 'data', data: record.data } : undefined;
     case 'exit':

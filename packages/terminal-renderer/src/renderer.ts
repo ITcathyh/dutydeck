@@ -8,7 +8,9 @@
  * [baseY, baseY + rows), which keeps text consistent for alt-screen CLIs
  * (Claude Code) where scrollback isn't meaningful.
  */
-import xtermHeadless from '@xterm/headless';
+import xtermHeadless, { type ITerminalAddon } from '@xterm/headless';
+import { SerializeAddon } from '@xterm/addon-serialize';
+import type { TerminalScreen } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
 
 const { Terminal } = xtermHeadless;
@@ -82,9 +84,27 @@ function readViewportText(
 export class TerminalSnapshot {
   private terminal: InstanceType<typeof Terminal>;
   private lastHash = '';
+  private readonly serializer = new SerializeAddon();
+  private sgrMouse = false;
+  private cursorVisible = true;
 
   constructor(cols: number = DEFAULT_COLS, rows: number = DEFAULT_ROWS) {
-    this.terminal = new Terminal({ cols, rows, allowProposedApi: true });
+    this.terminal = new Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
+    // The addon uses the shared buffer API; its typings require browser-only members.
+    this.terminal.loadAddon(this.serializer as unknown as ITerminalAddon);
+    // SerializeAddon restores tracking, but omits the SGR mouse encoding.
+    for (const final of ['h', 'l']) {
+      this.terminal.parser.registerCsiHandler({ prefix: '?', final }, params => {
+        if (params.includes(1006)) this.sgrMouse = final === 'h';
+        if (params.includes(25)) this.cursorVisible = final === 'h';
+        return false;
+      });
+    }
+    this.terminal.parser.registerEscHandler({ final: 'c' }, () => {
+      this.sgrMouse = false;
+      this.cursorVisible = true;
+      return false;
+    });
   }
 
   /** Feed raw PTY data into the virtual terminal. */
@@ -105,6 +125,15 @@ export class TerminalSnapshot {
         reject(error);
       }
     });
+  }
+
+  /** Capture at a parsed-write boundary, before later queued writes are parsed. */
+  capture(callback: (screen: TerminalScreen) => void): void {
+    this.terminal.write('', () => callback({
+      data: this.serializer.serialize() + (this.sgrMouse ? '\x1b[?1006h' : '')
+        + (this.cursorVisible ? '' : '\x1b[?25l'),
+      cols: this.terminal.cols, rows: this.terminal.rows
+    }));
   }
 
   /** Resize the virtual terminal. */

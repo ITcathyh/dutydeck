@@ -71,11 +71,12 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
     let ws: WebSocket | undefined;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     let attempt = 0;
-    let connectedOnce = false;
     let disposed = false;
+    let waitingForSnapshot = true;
+    let restoring = false;
 
     const sendResize = () => {
-      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      if (!waitingForSnapshot && !restoring && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     };
     const sendInput = (data: string) => {
       if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }));
@@ -85,18 +86,33 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
 
     function connect() {
       if (disposed) return;
+      waitingForSnapshot = true;
+      restoring = false;
       ws = new WebSocket(terminalWsUrl(sessionId));
+      const connection = ws;
       ws.onopen = () => {
         attempt = 0;
-        // 服务端不保证缓存历史，重连后保留当前屏幕内容，仅提示一行
-        if (connectedOnce) term.write('\r\n\x1b[90m[已重新连接]\x1b[0m\r\n');
-        connectedOnce = true;
         sendResize();
       };
       ws.onmessage = event => {
         const frame = parseTerminalFrame(String(event.data));
         if (!frame) return;
-        if (frame.type === 'data') term.write(frame.data);
+        if (frame.type === 'snapshot') {
+          waitingForSnapshot = false;
+          restoring = true;
+          term.reset();
+          term.resize(frame.cols, frame.rows);
+          term.write(frame.data, () => {
+            if (disposed || ws !== connection) return;
+            restoring = false;
+            tryFit();
+            sendResize();
+          });
+        } else if (frame.type === 'data') {
+          // Compatibility with streams that do not provide snapshots.
+          if (waitingForSnapshot) { waitingForSnapshot = false; sendResize(); }
+          term.write(frame.data);
+        }
         else if (frame.type === 'exit') term.write(`\r\n\x1b[90m[进程已退出，code=${frame.code}]\x1b[0m\r\n`);
         else term.write(`\r\n\x1b[90m[终端错误] ${frame.message}\x1b[0m\r\n`);
       };
@@ -114,6 +130,7 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
     // 容器尺寸变化时：先按新宽度复算字号（字号换档字宽就变，反过来 fit 出来的是旧字号下的列数），
     // 再 fit 并把新的行列数通知服务端
     const observer = new ResizeObserver(() => {
+      if (restoring) return;
       const next = terminalFontSize(host.clientWidth);
       if (term.options.fontSize !== next) term.options.fontSize = next;
       tryFit();

@@ -118,6 +118,33 @@ function closed(ws: WebSocket): Promise<void> {
 }
 
 describe('terminal WS proxy', () => {
+  it('awaits terminal restoration and sends the initial screen before live output', async () => {
+    const fake = createFakeStream();
+    fake.stream.onData = (onData, onSnapshot) => {
+      onSnapshot?.({ data: 'quiet screen', cols: 80, rows: 24 });
+      onData('next');
+    };
+    const { port } = await startServer({ async lookupTerminalStream() {
+      await Promise.resolve();
+      return { status: 'ready', handle: fake.handle };
+    } });
+    const frames: unknown[] = [];
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/api/terminal/s1`);
+    ws.on('message', data => frames.push(JSON.parse(data.toString())));
+    await vi.waitFor(() => expect(frames).toEqual([
+      { type: 'snapshot', data: 'quiet screen', cols: 80, rows: 24 },
+      { type: 'data', data: 'next' },
+    ]));
+    ws.close();
+  });
+
+  it('rejects a failed asynchronous attachment without an unhandled rejection', async () => {
+    const { port } = await startServer({ async lookupTerminalStream() { throw new Error('attachment unavailable'); } });
+    expect(await expectUpgradeRejected(port, '/api/terminal/s1')).toEqual({
+      status: 503, body: JSON.stringify({ type: 'error', message: 'attachment unavailable' })
+    });
+  });
+
   it('在 provider lookup 和每次写入前执行统一终端权限边界', async () => {
     const fake = createFakeStream();
     const authorize = vi.fn(async (_request: IncomingMessage, _sessionId: string, action: 'terminal.read' | 'terminal.write'): Promise<PolicyDecision> => action === 'terminal.read'

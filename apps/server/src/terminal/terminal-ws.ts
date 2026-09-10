@@ -18,7 +18,7 @@ export type TerminalStreamLookup =
 
 /** runtime driver 终端流的只读访问器，由 service 在 app 组装时注入。 */
 export interface TerminalStreamProvider {
-  lookupTerminalStream(sessionId: string): TerminalStreamLookup;
+  lookupTerminalStream(sessionId: string): TerminalStreamLookup | Promise<TerminalStreamLookup>;
 }
 
 /** WS 认证钩子（由 auth 模块提供，负责人接线）；不传 = 不认证（loopback 场景） */
@@ -96,7 +96,10 @@ function bindConnection(
   };
 
   // PTY 输出 → data 帧
-  stream.onData(data => sendFrame({ type: 'data', data }));
+  stream.onData(
+    data => sendFrame({ type: 'data', data }),
+    screen => sendFrame({ type: 'snapshot', ...screen }),
+  );
   // 进程退出 → exit 帧后主动关闭
   handle.onExit(code => {
     sendFrame({ type: 'exit', code });
@@ -263,7 +266,12 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
         }
       }
 
-      const lookup = options.provider.lookupTerminalStream(sessionId);
+      let lookup: TerminalStreamLookup;
+      try { lookup = await options.provider.lookupTerminalStream(sessionId); }
+      catch (error) {
+        rejectUpgrade(socket, 503, 'Service Unavailable', errorMessage(error));
+        return;
+      }
       if (lookup.status === 'no-session') {
         rejectUpgrade(socket, 404, 'Not Found', 'session not found');
         return;
@@ -272,6 +280,7 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
         rejectUpgrade(socket, 400, 'Bad Request', 'terminal stream not supported for this session');
         return;
       }
+      if (socket.destroyed) { lookup.handle.stream.dispose(); return; }
 
       wss.handleUpgrade(request, socket, head, ws => {
         active.add(ws);

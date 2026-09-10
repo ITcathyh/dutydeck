@@ -190,12 +190,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id) }),
     sessionPrompt: (session, prompt) => agentTools.promptForSession(session, prompt)
   });
-  // 终端 WS 代理的会话→终端流访问器，走 runtime 的只读 getDriver 访问器（Team Core 已交付）。
-  // driver 不实现 createTerminalStream（ACP 形态）→ unsupported；driver 未连接/已释放 → no-session。
-  // onExit 信号走 runtime.onDriverExit 正式订阅（Team Core 已交付），不再匹配 error 事件文本。
+  // Reattach surviving idle terminals after a daemon restart, without starting a task.
   const terminalProvider: TerminalStreamProvider = {
-    lookupTerminalStream(sessionId) {
-      const driver = runtime.getDriver(sessionId);
+    async lookupTerminalStream(sessionId) {
+      const driver = await runtime.getTerminalDriver(sessionId);
       if (!driver) return { status: 'no-session' };
       const stream = driver.createTerminalStream?.();
       if (!stream) return { status: 'unsupported' };

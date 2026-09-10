@@ -89,12 +89,20 @@ export interface AgentDriver {
    * 每次调用返回一个新的订阅；dispose 后不得再回调。
    */
   createTerminalStream?(): TerminalStream;
+  /** Attach only to an existing owned terminal; never launch or submit a task. */
+  attachTerminal?(): boolean;
+}
+
+export interface TerminalScreen {
+  data: string;
+  cols: number;
+  rows: number;
 }
 
 /** 原始终端流：屏幕输出 + 输入注入 + 尺寸调整 */
 export interface TerminalStream {
-  /** 订阅 PTY 输出（UTF-8 字节，含 ANSI 转义） */
-  onData(callback: (data: string) => void): void;
+  /** 可选恢复当前屏幕，然后按顺序订阅后续 PTY 输出。 */
+  onData(callback: (data: string) => void, onSnapshot?: (screen: TerminalScreen) => void): void;
   /** 向终端注入输入（键盘字节） */
   write(data: string): void;
   /** 调整终端尺寸 */
