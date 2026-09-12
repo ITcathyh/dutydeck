@@ -34,7 +34,7 @@
  *   node scripts/e2e-smoke.mjs --port 14500 --verbose
  *   node scripts/e2e-smoke.mjs --server-entry /tmp/install/node_modules/dutydeck/dist/cli.js
  */
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, readFileSync, realpathSync } from 'node:fs';
 import { tmpdir, homedir } from 'node:os';
@@ -327,6 +327,13 @@ async function main() {
   const claudeDataDir = join(dataDir, 'claude');
   const workspace = join(dataDir, 'workspace');
   for (const dir of [binDir, claudeDataDir, workspace]) mkdirSync(dir, { recursive: true });
+  const git = args => execFileSync('git', ['-C', workspace, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git(['init']);
+  const skillRelativePath = '.agents/skills/smoke-evidence/SKILL.md';
+  mkdirSync(dirname(join(workspace, skillRelativePath)), { recursive: true });
+  writeFileSync(join(workspace, skillRelativePath), '---\nname: smoke-evidence\ndescription: Smoke test skill delivery\n---\nSKILL_BODY_DELIVERY_MARKER\n');
+  git(['add', '.']);
+  git(['-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', '-c', 'commit.gpgsign=false', 'commit', '-m', 'smoke fixture']);
 
   // ── 1. 启动 server ───────────────────────────────────────────────────────
   step('启动 server');
@@ -471,6 +478,12 @@ async function main() {
   });
 
   let browserSessionId;
+  let browserWorkspace;
+  onCleanup('删除本轮创建的独立工作目录', () => {
+    if (!browserWorkspace) return;
+    git(['worktree', 'remove', '--force', browserWorkspace]);
+    if (REAL) rmSync(join(homedir(), '.claude', 'projects', browserWorkspace.replace(/[^A-Za-z0-9-]/g, '-')), { recursive: true, force: true });
+  });
   onCleanup('关闭浏览器创建的任务运行', async () => {
     if (!browserSessionId) return;
     const stopped = await request('POST', `/api/sessions/${browserSessionId}/stop`);
@@ -531,7 +544,7 @@ async function main() {
   const browserPrompt = REAL ? '回复一句话：browser smoke ok' : 'browser product journey';
   await createTaskForm.getByLabel('任务目标').fill(browserPrompt);
 
-  const agentSelect = createTaskForm.locator('button[aria-haspopup="listbox"]').first();
+  const agentSelect = createTaskForm.getByText('执行任务的 Agent', { exact: true }).locator('..').getByRole('button');
   await agentSelect.click();
   const browserAgentName = REAL ? 'Claude Code' : 'Mock Claude';
   // Option 的 accessible name 还会包含版本号，因此按 Agent 名称子串匹配。
@@ -555,6 +568,8 @@ async function main() {
   assert(typeof browserSession?.id === 'string' && browserSession.id.startsWith('ses_'),
     `浏览器创建了真实任务运行：${browserSession?.id}`);
   browserSessionId = browserSession.id;
+  browserWorkspace = browserSession.cwd;
+  assert(browserWorkspace !== workspace && existsSync(join(browserWorkspace, skillRelativePath)), 'Web 默认创建独立工作目录，保留已提交的项目 Skill');
 
   const browserSendResponse = await waitFor('浏览器派发任务目标', () => productResponses.find(response => {
     const url = new URL(response.url());
@@ -572,7 +587,37 @@ async function main() {
       throw new Error(`浏览器任务已完成但最终回复未展示。页面末尾文本：\n${visibleText}`, { cause: error });
     }
     ok('Mock Agent 的最终回复已展示在真实浏览器任务详情中');
+    await page.getByLabel('消息', { exact: true }).fill('/smoke-evidence');
+    await page.getByRole('button', { name: /smoke-evidence 项目/ }).click();
+    const skillSend = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/sessions/${browserSessionId}/send`);
+    await page.getByRole('button', { name: '发送消息', exact: true }).click();
+    const sentSkill = await skillSend;
+    assert(sentSkill.status() === 202 && sentSkill.request().postDataJSON().skillRequests?.[0] === join(browserWorkspace, skillRelativePath), '浏览器发送 Skill 的完整路径');
+    await waitFor('Skill 正文经真实 PTY 到达假 CLI', async () => {
+      const tasks = await request('GET', `/api/sessions/${browserSessionId}/tasks`);
+      return tasks.json?.some(task => task.status === 'completed' && task.skillDeliveries?.[0]?.name === 'smoke-evidence');
+    });
+    await page.getByText(/MOCK_CONTINUED:[\s\S]*SKILL_BODY_DELIVERY_MARKER/).last().waitFor({ state: 'visible', timeout: 20_000 });
+    ok('Skill 正文经快照与 PTY 投递，最终回复包含独有标记');
   }
+
+  await page.getByRole('button', { name: '工作目录、验证与自动化', exact: true }).click();
+  const deliveryPanel = page.getByRole('dialog', { name: '工作目录与自动化' });
+  await deliveryPanel.waitFor({ state: 'visible' });
+  if (process.platform === 'linux') {
+    await deliveryPanel.getByLabel('验证命令').fill('git status --porcelain');
+    await deliveryPanel.getByRole('button', { name: '执行验证', exact: true }).click();
+    await deliveryPanel.getByText('验证通过', { exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
+    ok('浏览器执行真实验证命令并展示通过证据');
+  }
+  await deliveryPanel.getByText('新建定时计划', { exact: true }).click();
+  await deliveryPanel.getByLabel('计划名称').fill('smoke disabled schedule');
+  await deliveryPanel.getByLabel('执行指令', { exact: true }).fill('This schedule must remain disabled');
+  await deliveryPanel.getByRole('button', { name: '保存计划', exact: true }).click();
+  await deliveryPanel.getByText('smoke disabled schedule · 已停用', { exact: true }).waitFor({ state: 'visible' });
+  const automation = await request('GET', `/api/sessions/${browserSessionId}/automation`);
+  assert(automation.json?.schedules.length === 1 && automation.json.schedules[0].enabled === false && automation.json.occurrences.length === 0, '浏览器保存计划后保持停用，未生成自动轮次');
+  await deliveryPanel.getByRole('button', { name: '关闭', exact: true }).click();
 
   await browser.close();
   browser = undefined;

@@ -14,6 +14,7 @@ export type ScheduleManagementRepositories = Pick<RepositoryBundle,
   'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'archivedHammerIntegrations'>;
 
 export interface ScheduleManagementOptions {
+  uiEntryReady?: boolean;
   repositories?: ScheduleManagementRepositories;
   authorize?: (request: FastifyRequest, action: PolicyAction) => boolean | PolicyDecision | Promise<boolean | PolicyDecision>;
 }
@@ -31,13 +32,13 @@ function capability(options: ScheduleManagementOptions) {
     permissionEvaluatorWired,
     writesEnabled: repositoriesWired && permissionEvaluatorWired,
     executorWired: false as const,
-    uiEntryReady: false as const,
+    uiEntryReady: options.uiEntryReady ?? false,
     readiness: !repositoriesWired ? 'repository_unwired' as const : !permissionEvaluatorWired ? 'permission_unwired' as const : 'offline_management_ready' as const,
     blockers: [
       ...(!repositoriesWired ? [{ code: 'schedule_repository_unwired', message: 'Schedule foundation repository is not wired', action: 'Inject the optional v13 repository bundle' }] : []),
       ...(!permissionEvaluatorWired ? [{ code: 'schedule_permission_evaluator_unwired', message: 'Schedule management permission evaluator is not wired', action: 'Inject owner/admin authorization' }] : []),
       { code: 'schedule_executor_unavailable', message: 'Schedule executor is not implemented', action: 'Keep every definition staged and disabled' },
-      { code: 'schedule_ui_entry_unwired', message: 'Schedule panel is not mounted in the shared UI shell', action: 'A single UI shell owner must add the navigation entry' }
+      ...(!options.uiEntryReady ? [{ code: 'schedule_ui_entry_unwired', message: 'Schedule panel is not mounted in the shared UI shell', action: 'Mount the schedule management panel' }] : [])
     ]
   };
 }

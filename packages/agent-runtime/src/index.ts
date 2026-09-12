@@ -1,17 +1,21 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, RepositoryBundle, Session, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy } from '@dutydeck/shared';
-import { DriverDetachedError, DriverRecoveryError, makeId, now, RuntimeError } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PublicTaskRecord, RepositoryBundle, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceResponse } from '@dutydeck/shared';
+import { DriverDetachedError, DriverRecoveryError, makeId, now, RuntimeError, workspaceModes } from '@dutydeck/shared';
 import { AcpxAdapter } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { WorkspaceManager } from './workspace.js';
+import { VerificationManager } from './verification.js';
 
 // 没有可接管任务或可恢复队列时，这些忙碌状态需要在启动时回收。
 const RECOVERABLE_BUSY_STATES = ['starting', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting'] as const satisfies readonly Session['state'][];
 
 /** `includes` 在 as const 数组上不接受更宽的入参；用类型谓词而不是 `as` 强转，保住穷尽性检查。 */
 const isRecoverableBusy = (state: Session['state']): boolean => (RECOVERABLE_BUSY_STATES as readonly string[]).includes(state);
+const isTaskFenceRevocation = (error: unknown): error is RuntimeError => error instanceof RuntimeError
+  && (error.code === 'SESSION_AUTOMATION_TASK_REVOKED' || error.code === 'SESSION_AUTOMATION_TASK_STALE_HEAD');
 
 export function selectProtocol(probes: ProbeMatrix): 'acp' | 'jsonl' | 'pipe' | 'pty' {
   if (probes.acp) return 'acp';
@@ -37,6 +41,8 @@ export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
 
 export interface RuntimeOptions {
   authorizeExecution?: (sessionId: string, actorId?: string) => Promise<void>;
+  /** Revalidate the accepted task's external authority immediately before execution. */
+  authorizeTask?: (session: Session, task: TaskRecord, phase: 'prepare' | 'submit') => Promise<void>;
   resolveRiskPolicy?: (sessionId: string, fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>;
   acpxCommand?: string;
   driverFactory?: DriverFactory;
@@ -51,6 +57,11 @@ export interface RuntimeOptions {
   cleanupIntervalMs?: number;
   sessionEnvironment?: (session: Session) => Record<string, string>;
   sessionPrompt?: (session: Session, prompt: string) => string | Promise<string>;
+  workspaceRoot?: string;
+  prepareTaskPrompt?: (session: Session, prompt: string, skillRequests?: string[]) => Promise<{
+    agentPrompt: string;
+    skillDeliveries?: SkillDeliveryMetadata[];
+  }>;
 }
 
 export class DutydeckRuntime {
@@ -79,8 +90,15 @@ export class DutydeckRuntime {
   private shuttingDown = false;
   private readonly taskRuns = new Set<Promise<unknown>>();
   private readonly replayedEvents = new Map<string, Set<string>>();
+  private readonly workspaces: WorkspaceManager;
+  private readonly verifications: VerificationManager;
+  private readonly verifyingSessions = new Set<string>();
+  private readonly verificationDeferredTasks = new Map<string, Set<string>>();
+  private readonly blockedVerificationSessions = new Map<string, string>();
 
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
+    this.workspaces = new WorkspaceManager(repos.config, options.workspaceRoot);
+    this.verifications = new VerificationManager(repos.config);
     const ptyDriverFactory = options.ptyDriverFactory;
     this.factory = options.driverFactory ?? ((agent, protocol, onEvent, onExit, sessionId) => {
       if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, onEvent, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}) });
@@ -100,6 +118,16 @@ export class DutydeckRuntime {
   }
 
   private touch(sessionId: string) { this.lastActivity.set(sessionId, Date.now()); }
+  private assertVerificationRecoverySafe(sessionId: string) {
+    const reason = this.blockedVerificationSessions.get(sessionId);
+    if (reason) {
+      throw new RuntimeError(
+        'VERIFICATION_RECOVERY_BLOCKED',
+        `Verification recovery is unresolved; restart the Dutydeck service after the process is safely reaped: ${reason}`,
+        409
+      );
+    }
+  }
   private permissionKey(sessionId: string, permissionId: string) { return `${sessionId}:${permissionId}`; }
   private enqueueDriverEvent(session: Session, event: NormalizedDriverEvent, generation: number) {
     const previous = this.driverEventChains.get(session.id) ?? Promise.resolve();
@@ -184,6 +212,9 @@ export class DutydeckRuntime {
   }
 
   async initialize(agents: AgentConfig[]) {
+    const blockedVerifications = await this.verifications.interruptRunning();
+    this.blockedVerificationSessions.clear();
+    for (const [sessionId, error] of blockedVerifications) this.blockedVerificationSessions.set(sessionId, error);
     // Configuration is the source of truth on every boot and removes built-ins
     // that are no longer discovered from the ACPX registry.
     const configuredIds = new Set(agents.map(agent => agent.id));
@@ -191,8 +222,39 @@ export class DutydeckRuntime {
     for (const agent of agents) await this.repos.agents.save(agent);
     for (const session of await this.repos.sessions.list()) {
       if (session.archivedAt) continue;
+      let workspace = await this.workspaces.get(session.id);
+      if (workspace) { session.workspaceMode = workspace.mode; session.workspaceSourceCwd = workspace.sourceCwd; }
+      const verificationRecoveryError = blockedVerifications.get(session.id);
+      if (verificationRecoveryError) {
+        session.state = 'failed'; session.error = verificationRecoveryError; session.updatedAt = now();
+        await this.repos.sessions.save(session);
+        const queued = (await this.repos.tasks.listBySession(session.id)).filter(task => task.status === 'queued');
+        if (queued.length) this.queues.set(session.id, queued);
+        continue;
+      }
+      if (workspace?.state === 'preparing') {
+        try {
+          workspace = await this.workspaces.prepare(session.id, workspace.sourceCwd, workspace.mode);
+          session.cwd = workspace.cwd; session.workspaceMode = workspace.mode; session.workspaceSourceCwd = workspace.sourceCwd;
+          session.state = 'idle'; session.error = undefined; session.updatedAt = now();
+          await this.repos.artifacts.ensureLocalProject(session.cwd);
+          await this.repos.sessions.save(session);
+        } catch (error) {
+          session.state = 'failed'; session.error = error instanceof Error ? error.message : String(error); session.updatedAt = now();
+          await this.repos.sessions.save(session);
+          continue;
+        }
+      }
+      if (workspace?.state === 'ready') {
+        try { await this.workspaces.validate(workspace); }
+        catch (error) {
+          session.state = 'failed'; session.error = error instanceof Error ? error.message : String(error); session.updatedAt = now();
+          await this.repos.sessions.save(session);
+          continue;
+        }
+      }
       const persistedTasks = await this.repos.tasks.listBySession(session.id);
-      if (!persistedTasks.length && ['created', 'starting', 'failed'].includes(session.state)) {
+      if (!persistedTasks.length && ['created', 'starting', 'failed'].includes(session.state) && workspace?.state !== 'failed') {
         const message = session.error ?? 'Dutydeck 守护进程重启，未完成启动的会话已回收';
         session.state = 'failed';
         session.error = message;
@@ -254,18 +316,39 @@ export class DutydeckRuntime {
     }
   }
   listAgents() { return this.repos.agents.list(); }
-  listSessions() { return this.repos.sessions.list(); }
-  getSession(id: string) { return this.repos.sessions.get(id); }
+  async listSessions() { return Promise.all((await this.repos.sessions.list()).map(session => this.withWorkspaceMode(session))); }
+  async getSession(id: string) { const session = await this.repos.sessions.get(id); return session ? this.withWorkspaceMode(session) : undefined; }
+  async getWorkspace(id: string): Promise<WorkspaceResponse | undefined> {
+    const workspace = await this.workspaces.get(id);
+    if (workspace?.state === 'ready') await this.workspaces.validate(workspace);
+    return workspace;
+  }
+  async getVerifications(id: string): Promise<VerificationResponse[]> {
+    const session = await this.repos.sessions.get(id);
+    if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
+    return this.verifications.list(id, session.cwd);
+  }
+
+  private async withWorkspaceMode(session: Session): Promise<Session> {
+    const workspace = await this.workspaces.get(session.id);
+    return workspace ? { ...session, workspaceMode: workspace.mode, workspaceSourceCwd: workspace.sourceCwd } : session;
+  }
   /** 只读访问当前内存中的 driver 实例（如终端 WS 代理取 createTerminalStream）；未连接/已释放时返回 undefined。 */
-  getDriver(sessionId: string): AgentDriver | undefined { return this.drivers.get(sessionId); }
+  getDriver(sessionId: string): AgentDriver | undefined {
+    if (this.blockedVerificationSessions.has(sessionId)) return undefined;
+    return this.drivers.get(sessionId);
+  }
   /** Restore an idle persistent terminal for viewing without resuming a task. */
   async getTerminalDriver(sessionId: string): Promise<AgentDriver | undefined> {
+    this.assertVerificationRecoverySafe(sessionId);
     const existing = this.drivers.get(sessionId);
     if (existing) return existing;
     const observedGeneration = this.sessionGenerations.get(sessionId);
     const session = await this.repos.sessions.get(sessionId);
     if (!session || session.archivedAt || session.protocol !== 'pty-cli'
       || !['idle', 'completed', 'interrupted'].includes(session.state)) return undefined;
+    const workspace = await this.workspaces.get(sessionId);
+    if (workspace) await this.workspaces.validate(workspace);
     const agent = await this.repos.agents.get(session.agentId);
     if (this.shuttingDown || this.hardInterrupts.has(sessionId)) return undefined;
     const connected = this.drivers.get(sessionId);
@@ -292,6 +375,36 @@ export class DutydeckRuntime {
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
+
+  async runVerification(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse> {
+    this.assertVerificationRecoverySafe(id);
+    if (this.verifyingSessions.has(id)) throw new RuntimeError('VERIFICATION_IN_PROGRESS', 'Verification is already running', 409);
+    this.verifyingSessions.add(id);
+    const deferredTasks = new Set<string>();
+    this.verificationDeferredTasks.set(id, deferredTasks);
+    try {
+      const { session } = await this.active(id);
+      if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot verify while session is ${session.state}`, 409);
+      await this.options.authorizeExecution?.(id, actorId);
+      const persistedTasks = await this.repos.tasks.listBySession(id);
+      const eligibleTasks = persistedTasks.filter(task => !deferredTasks.has(task.id));
+      const preexistingQueue = (this.queues.get(id) ?? []).some(task => !deferredTasks.has(task.id));
+      if (this.activeTurns.has(id) || this.queueRuns.has(id) || preexistingQueue
+        || eligibleTasks.some(task => task.status === 'running' || task.status === 'queued')) {
+        throw new RuntimeError('SESSION_BUSY', 'Wait for Agent execution and its queue to finish before verification', 409);
+      }
+      const workspace = await this.workspaces.get(id);
+      if (workspace) await this.workspaces.validate(workspace);
+      return await this.verifications.run(
+        id, session.cwd, input, actorId, eligibleTasks.at(-1)?.id,
+        () => this.options.authorizeExecution?.(id, actorId) ?? Promise.resolve()
+      );
+    } finally {
+      this.verifyingSessions.delete(id);
+      this.verificationDeferredTasks.delete(id);
+      this.scheduleQueue(id);
+    }
+  }
 
   /**
    * 外部来源事件写入（通用回传通道 @dutydeck/relay 使用）。
@@ -351,17 +464,25 @@ export class DutydeckRuntime {
     await this.emit(task.sessionId, 'task', { task: this.publicTask(task) });
   }
 
-  private publicTask(task: TaskRecord): Omit<TaskRecord, 'executionContext'> {
+  private publicTask(task: TaskRecord): PublicTaskRecord {
     const { executionContext: _executionContext, ...visible } = task;
-    return visible;
+    return { ...visible, ...(task.executionContext?.skillDeliveries?.length ? { skillDeliveries: task.executionContext.skillDeliveries } : {}) };
   }
 
-  private executionContext(agentPrompt: string, riskPolicy?: ToolRiskPolicy, actorId?: string): TaskExecutionContext {
+  private executionContext(agentPrompt: string, riskPolicy?: ToolRiskPolicy, actorId?: string, skillDeliveries?: SkillDeliveryMetadata[]): TaskExecutionContext {
     return {
       agentPrompt,
       ...(actorId ? { actorId } : {}),
-      ...(riskPolicy ? { riskPolicy } : {})
+      ...(riskPolicy ? { riskPolicy } : {}),
+      ...(skillDeliveries?.length ? { skillDeliveries } : {})
     };
+  }
+
+  private async prepareTask(session: Session, agentPrompt: string, skillRequests?: string[]): Promise<{ agentPrompt: string; skillDeliveries?: SkillDeliveryMetadata[] }> {
+    if (skillRequests?.length && !this.options.prepareTaskPrompt) {
+      throw new RuntimeError('SKILL_DELIVERY_UNAVAILABLE', 'This Runtime has no Skill delivery resolver', 503);
+    }
+    return this.options.prepareTaskPrompt?.(session, agentPrompt, skillRequests) ?? { agentPrompt };
   }
 
   subscribe(sessionId: string, listener: (event: AgentEvent) => void) {
@@ -430,19 +551,45 @@ export class DutydeckRuntime {
   }
 
   async start(input: StartSessionInput): Promise<Session> {
+    if (!input || typeof input !== 'object' || typeof input.agentId !== 'string' || !input.agentId.trim()) {
+      throw new RuntimeError('INVALID_SESSION_INPUT', 'agentId must be a non-empty string', 400);
+    }
+    if (input.cwd !== undefined && (typeof input.cwd !== 'string' || !input.cwd.trim())) {
+      throw new RuntimeError('INVALID_WORKSPACE_SOURCE', 'cwd must be a non-empty string', 400);
+    }
+    if (input.workspaceMode !== undefined && !(workspaceModes as readonly unknown[]).includes(input.workspaceMode)) {
+      throw new RuntimeError('INVALID_WORKSPACE_MODE', 'workspaceMode must be shared or worktree', 400);
+    }
     const agent = await this.repos.agents.get(input.agentId);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${input.agentId}`, 404);
-    const configured = { ...agent, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
-    const capability = (this.options.probe ?? probeAgent)(configured, this.options.acpxCommand);
+    const sourceCwd = input.cwd ?? agent.cwd ?? process.cwd();
+    const workspaceMode = input.workspaceMode ?? 'shared';
+    const initialConfigured = { ...agent, cwd: sourceCwd, model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
+    const capability = (this.options.probe ?? probeAgent)(initialConfigured, this.options.acpxCommand);
     if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
     if (capability.protocol === 'pty') {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Legacy PTY transport cannot enforce a permission posture or expose interactive approval; use an ACP or PTY CLI Agent', 422);
     }
-    if (capability.protocol === 'pty-cli' && configured.permissionMode !== 'ask' && configured.permissionMode !== 'full-trust') {
+    if (capability.protocol === 'pty-cli' && initialConfigured.permissionMode !== 'ask' && initialConfigured.permissionMode !== 'full-trust') {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode', 422);
     }
-    const session: Session = { id: makeId('ses'), agentId: agent.id, state: 'created', cwd: configured.cwd!, model: configured.model, reasoningEffort: configured.reasoningEffort, permissionMode: configured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: configured.systemPrompt };
-    await this.repos.artifacts.ensureLocalProject(session.cwd);
+    const session: Session = { id: makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
+    await this.repos.sessions.save(session);
+    let workspace: WorkspaceResponse;
+    try {
+      workspace = await this.workspaces.prepare(session.id, sourceCwd, workspaceMode);
+      session.cwd = workspace.cwd;
+      session.workspaceSourceCwd = workspace.sourceCwd;
+      await this.repos.artifacts.ensureLocalProject(session.cwd);
+      await this.repos.sessions.save(session);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      session.state = 'failed'; session.error = message; session.updatedAt = now();
+      await this.repos.sessions.save(session);
+      await this.repos.artifacts.saveError(session.id, message);
+      throw new RuntimeError('WORKSPACE_PREPARATION_FAILED', `Session ${session.id}: ${message}`, 422);
+    }
+    const configured = { ...agent, cwd: session.cwd, model: session.model, reasoningEffort: session.reasoningEffort, permissionMode: session.permissionMode ?? agent.permissionMode };
     await this.repos.sessions.save(session);
     await this.saveState(session, 'starting');
     const generation = this.nextSessionGeneration(session.id);
@@ -467,18 +614,23 @@ export class DutydeckRuntime {
     const session = await this.repos.sessions.get(id);
     if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
+    const workspace = await this.workspaces.get(id);
+    if (workspace) { session.workspaceMode = workspace.mode; session.workspaceSourceCwd = workspace.sourceCwd; }
     if (session.archivedAt) throw new RuntimeError('SESSION_ARCHIVED', 'Archived sessions are read-only', 409);
     const driver = this.drivers.get(id);
     return { session, driver };
   }
 
   private async reconnect(session: Session, start = true) {
+    this.assertVerificationRecoverySafe(session.id);
     const existing = this.drivers.get(session.id);
     if (existing) return existing;
     const agent = await this.repos.agents.get(session.agentId);
     if (this.shuttingDown) throw new RuntimeError('RUNTIME_SHUTTING_DOWN', 'Dutydeck is shutting down', 503);
     const connected = this.drivers.get(session.id);
     if (connected) return connected;
+    const workspace = await this.workspaces.get(session.id);
+    if (workspace) await this.workspaces.validate(workspace);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${session.agentId}`, 404);
     const configured = this.configureAgentForSession(agent, session);
     const generation = this.nextSessionGeneration(session.id);
@@ -507,9 +659,11 @@ export class DutydeckRuntime {
   }
 
   private async executeTask(id: string, task: TaskRecord, recovering: boolean) {
+    this.assertVerificationRecoverySafe(id);
     const { session } = await this.active(id);
     if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot send while session is ${session.state}`, 409);
     if (this.activeTurns.has(id)) throw new RuntimeError('TURN_IN_PROGRESS', 'Wait for the current response to finish', 409);
+    if (this.verifyingSessions.has(id)) throw new RuntimeError('VERIFICATION_IN_PROGRESS', 'Wait for verification to finish', 409);
     this.activeTurns.add(id);
     this.activeTasks.set(id, task);
     this.driverStopReasons.delete(id);
@@ -519,6 +673,7 @@ export class DutydeckRuntime {
     let submissionStarted = false;
     try {
       await this.options.authorizeExecution?.(id, task.executionContext?.actorId);
+      await this.options.authorizeTask?.(session, task, 'prepare');
       const driver = await this.reconnect(session, !recovering);
       const { agentPrompt = task.prompt, riskPolicy } = task.executionContext ?? {};
       // 每个任务都明确设置（或清除）策略，避免复用会话沿用上一个
@@ -546,6 +701,9 @@ export class DutydeckRuntime {
         await this.saveState(session, 'thinking');
         const resolvedAgentPrompt = await this.options.sessionPrompt?.(session, agentPrompt) ?? agentPrompt;
         if (this.shuttingDown) throw new DriverDetachedError();
+        await this.options.authorizeExecution?.(id, task.executionContext?.actorId);
+        await this.options.authorizeTask?.(session, task, 'submit');
+        if (this.shuttingDown) throw new DriverDetachedError();
         submissionStarted = true;
         await driver.send(resolvedAgentPrompt);
       }
@@ -569,6 +727,11 @@ export class DutydeckRuntime {
       const daemonDetached = error instanceof DriverDetachedError
         || error instanceof RuntimeError && error.code === 'RUNTIME_SHUTTING_DOWN';
       if (this.shuttingDown && daemonDetached && task.executionContext?.recovery) return this.publicTask(task);
+      if (!submissionStarted && isTaskFenceRevocation(error)) {
+        await this.saveTask(task, 'interrupted');
+        await this.saveState(session, 'interrupted');
+        return this.publicTask(task);
+      }
       if (error instanceof DriverRecoveryError) {
         await this.saveTask(task, 'interrupted');
         await this.cancelSessionQueue(id);
@@ -603,12 +766,17 @@ export class DutydeckRuntime {
     return this.publicTask(task);
   }
 
-  async send(id: string, prompt: string, agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string) {
-    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'running', executionContext: this.executionContext(agentPrompt, riskPolicy, actorId), createdAt: now(), updatedAt: now() };
+  async send(id: string, prompt: string, agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, skillRequests?: string[]) {
+    this.assertVerificationRecoverySafe(id);
+    const { session } = await this.active(id);
+    if (this.verifyingSessions.has(id)) throw new RuntimeError('VERIFICATION_IN_PROGRESS', 'Wait for verification to finish', 409);
+    const prepared = await this.prepareTask(session, agentPrompt, skillRequests);
+    const task: TaskRecord = { id: makeId('task'), sessionId: id, prompt, status: 'running', executionContext: this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries), createdAt: now(), updatedAt: now() };
     return this.runTask(id, task);
   }
 
-  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string) {
+  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[]) {
+    this.assertVerificationRecoverySafe(id);
     const stableId = idempotencyKey ? 'task_' + createHash('sha256').update(id + '\0' + idempotencyKey).digest('hex') : undefined;
     const replay = (task: TaskRecord) => {
       if (task.sessionId !== id || task.prompt !== prompt || task.executionContext?.actorId !== actorId) throw new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'This delivery key belongs to a different task request', 409);
@@ -621,7 +789,8 @@ export class DutydeckRuntime {
     }
     const { session } = await this.active(id);
     if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot send while session is ${session.state}`, 409);
-    const task: TaskRecord = { id: stableId ?? makeId('task'), sessionId: id, prompt, status: 'queued', executionContext: this.executionContext(agentPrompt, riskPolicy, actorId), createdAt: now(), updatedAt: now() };
+    const prepared = await this.prepareTask(session, agentPrompt, skillRequests);
+    const task: TaskRecord = { id: stableId ?? makeId('task'), sessionId: id, prompt, status: 'queued', executionContext: this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries), createdAt: now(), updatedAt: now() };
     if (stableId && !await this.repos.tasks.create!(task)) {
       const existing = await this.repos.tasks.get!(stableId);
       if (!existing) throw new RuntimeError('TASK_IDEMPOTENCY_CONFLICT', 'Task acceptance changed; retry the message', 409);
@@ -631,6 +800,7 @@ export class DutydeckRuntime {
     const queuedAhead = queue.length + (this.activeTurns.has(id) ? 1 : 0);
     if (mode === 'interrupt') queue.unshift(task); else queue.push(task);
     this.queues.set(id, queue);
+    this.verificationDeferredTasks.get(id)?.add(task.id);
     await this.saveTask(task, 'queued');
     if (mode === 'interrupt' && this.activeTurns.has(id)) await this.terminateCurrentTurn(id);
     this.scheduleQueue(id);
@@ -638,19 +808,30 @@ export class DutydeckRuntime {
   }
 
   private scheduleQueue(id: string) {
-    if (this.shuttingDown || this.queueRuns.has(id) || this.activeTurns.has(id)) return;
+    if (this.shuttingDown || this.queueRuns.has(id) || this.activeTurns.has(id) || this.verifyingSessions.has(id)
+      || this.blockedVerificationSessions.has(id) || !(this.queues.get(id)?.length)) return;
     const run = this.drainQueue(id); this.queueRuns.set(id, run);
-    void run.finally(() => { if (this.queueRuns.get(id) === run) this.queueRuns.delete(id); });
+    void run.finally(() => {
+      if (this.queueRuns.get(id) !== run) return;
+      this.queueRuns.delete(id);
+      if (!this.shuttingDown && this.queues.get(id)?.length) this.scheduleQueue(id);
+    });
   }
 
   private async drainQueue(id: string) {
-    while (!this.shuttingDown && !this.activeTurns.has(id)) {
+    while (!this.shuttingDown && !this.activeTurns.has(id) && !this.verifyingSessions.has(id) && !this.blockedVerificationSessions.has(id)) {
       const queue = this.queues.get(id);
       const task = queue?.shift();
       if (!task) { this.queues.delete(id); return; }
       if (!queue?.length) this.queues.delete(id);
       try { await this.runTask(id, task); }
-      catch {
+      catch (error) {
+        if (error instanceof RuntimeError && error.code === 'VERIFICATION_IN_PROGRESS') {
+          const pending = this.queues.get(id) ?? [];
+          pending.unshift(task);
+          this.queues.set(id, pending);
+          return;
+        }
         if (this.shuttingDown) return;
         // A prompt/SDK failure only fails the current task. recoverSessionAfterTask
         // restores a reusable shared session to idle, so later queued work must
@@ -819,6 +1000,7 @@ export class DutydeckRuntime {
    * (see its `handleExit`), which is why there is no timing guard here.
    */
   async resume(id: string) {
+    this.assertVerificationRecoverySafe(id);
     const { session } = await this.active(id);
     const agent = await this.repos.agents.get(session.agentId);
     if (!agent?.capabilities.resume) throw new RuntimeError('UNSUPPORTED_CAPABILITY', `Agent ${agent?.name ?? session.agentId} does not support resume`, 422);
@@ -860,10 +1042,24 @@ export class DutydeckRuntime {
     return stopped;
   }
   async restart(id: string) {
+    this.assertVerificationRecoverySafe(id);
     const { session } = await this.active(id);
     await this.stop(id);
     const agent = await this.repos.agents.get(session.agentId);
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent config was removed', 404);
+    const workspace = await this.workspaces.get(id);
+    if (workspace) {
+      try {
+        const prepared = await this.workspaces.prepare(id, workspace.sourceCwd, workspace.mode);
+        session.cwd = prepared.cwd;
+        session.workspaceMode = prepared.mode;
+        session.workspaceSourceCwd = prepared.sourceCwd;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        await this.saveState(session, 'failed', message);
+        throw new RuntimeError('WORKSPACE_PREPARATION_FAILED', `Session ${session.id}: ${message}`, 422);
+      }
+    }
     session.runId = makeId('run'); session.error = undefined;
     const configured = this.configureAgentForSession(agent, session);
     const generation = this.nextSessionGeneration(session.id);
@@ -977,6 +1173,7 @@ export class DutydeckRuntime {
     this.shuttingDown = true;
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     await this.cleanupRun;
+    await this.verifications.stop();
     const drivers = [...this.drivers.values()];
     this.drivers.clear();
     await Promise.allSettled(drivers.map(driver => driver.stop()));

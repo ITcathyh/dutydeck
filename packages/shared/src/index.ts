@@ -265,9 +265,12 @@ export interface Session {
   updatedAt: string;
   error?: string;
   systemPrompt?: string;
+  workspaceMode?: import('./workspace.js').WorkspaceMode;
+  /** Canonical cwd requested before an optional managed worktree was allocated. */
+  workspaceSourceCwd?: string;
 }
 
-export interface StartSessionInput { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string }
+export interface StartSessionInput { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; workspaceMode?: import('./workspace.js').WorkspaceMode }
 export interface SendInput { prompt: string }
 export interface AgentCapabilities { protocol: Exclude<Protocol, 'auto'>; available: boolean; detail?: string; pause: boolean; resume: boolean }
 
@@ -292,11 +295,21 @@ export interface TaskExecutionContext {
   actorId?: string;
   /** 实际发送给 Agent 的 prompt；可能包含来源通道补充的上下文。 */
   agentPrompt: string;
+  /** Metadata for the immutable Skill content already included in agentPrompt. */
+  skillDeliveries?: SkillDeliveryMetadata[];
   riskPolicy?: ToolRiskPolicy;
   /** Original turn's output boundary; never exposed in public task responses. */
   recovery?: import('./driver.js').DriverTurnRecovery;
 }
+export interface SkillDeliveryMetadata {
+  name: string;
+  path: string;
+  source: 'workspace' | 'user';
+  digest: string;
+  mode: 'prompt';
+}
 export interface TaskRecord { id: string; sessionId: string; prompt: string; status: string; executionContext?: TaskExecutionContext; createdAt: string; updatedAt: string }
+export type PublicTaskRecord = Omit<TaskRecord, 'executionContext'> & { skillDeliveries?: SkillDeliveryMetadata[] };
 export interface TaskRepository {
   save(task: TaskRecord): Promise<void>;
   listBySession(sessionId: string): Promise<TaskRecord[]>;
@@ -409,3 +422,7 @@ export const makeId = (prefix: string) => `${prefix}_${crypto.randomUUID()}`;
 export * from './driver.js';
 export * from './group-policy.js';
 export * from './schedule-foundation.js';
+export * from './workspace.js';
+export * from './verification.js';
+
+export * from './session-automation.js';

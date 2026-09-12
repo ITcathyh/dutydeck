@@ -241,7 +241,7 @@ export const larkSessionMatchesScope = (session: Session, config: StoredLarkConf
   && session.sourceId === sourceId
   && (session.id === launchSessionId || config.managedGroup || session.agentId === config.defaultAgentId)
   && !session.archivedAt
-  && (session.id === launchSessionId || config.managedGroup || !config.workspace || session.cwd === config.workspace)
+  && (session.id === launchSessionId || config.managedGroup || !config.workspace || (session.workspaceSourceCwd ?? session.cwd) === config.workspace)
   && (session.id === launchSessionId || config.managedGroup || !config.defaultModel || session.model === config.defaultModel)
   && Boolean(session.id === launchSessionId || config.managedGroup || !config.defaultReasoningEffort || session.reasoningEffort === config.defaultReasoningEffort);
 

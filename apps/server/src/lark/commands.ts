@@ -105,6 +105,7 @@ export function parseSlashCommand(text: unknown): ParsedSlashCommand | undefined
  * 把必填方法也纳入门控，可以保证任何缺失都收敛成 `unavailable`，而不是一个执行时才爆的 intent。
  */
 export interface LarkCommandCapabilities {
+  ci?: boolean;
   tasks?: boolean;
   answer?: boolean;
   approval?: boolean;
@@ -136,7 +137,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'help' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject';
+export type LarkCommandName = 'ci' | 'help' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -169,6 +170,7 @@ export interface LarkCommandDefinition {
  *             由 coordinator 当作普通请求走完整建任务链路，命令层不自己派发。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
+  { name: 'ci', summary: '等待当前提交的 GitHub Actions、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true, unavailableReason: '当前机器人未接入 GitHub Actions 自动续作。' },
   { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
   { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
   { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },
@@ -209,7 +211,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   {
     name: 'new',
     summary: '结束当前会话上下文；带上任务内容可以同时开启新会话并立刻派发这个任务',
-    usage: '/new 或 /new <任务内容>；指定首轮配置：/new [--cwd 绝对路径] [--model 模型] [--effort 强度] -- 任务内容',
+    usage: '/new 或 /new <任务内容>；指定首轮配置：/new [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容',
     mutating: true,
     requires: capabilities => capabilities.stop,
     unavailableReason: '当前 Dutydeck 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'

@@ -185,7 +185,7 @@ export class LarkMessageCoordinator {
       authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
     },
     private readonly groupManager?: LarkGroupManager,
-    private readonly workflowOptions: { store?: ConfigRepository; broker?: RelayAskBroker } = {},
+    private readonly workflowOptions: { store?: ConfigRepository; broker?: RelayAskBroker; automation?: import('../session-automation.js').SessionAutomationService } = {},
   ) {
     if (workflowOptions.store) {
       this.inbox = new LarkTaskInbox(workflowOptions.store);
@@ -658,7 +658,7 @@ export class LarkMessageCoordinator {
     const commandAccess = event.chatType === 'group' ? await this.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'task.view_result') : undefined;
     const allowlisted = commandAccess?.allowed ?? await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, group.sessionId);
     const route = routeLarkCommand(prompt, {
-      capabilities: { ...larkCommandCapabilities(this.runtime), tasks: Boolean(this.workflows && this.cardMappings && this.runtime.getTasks), answer: Boolean(this.workflows && this.workflowOptions.broker), approval: Boolean(this.workflows && this.runtime.resolvePermission && this.runtime.getPendingPermissions) },
+      capabilities: { ...larkCommandCapabilities(this.runtime), ci: Boolean(this.workflowOptions.automation), tasks: Boolean(this.workflows && this.cardMappings && this.runtime.getTasks), answer: Boolean(this.workflows && this.workflowOptions.broker), approval: Boolean(this.workflows && this.runtime.resolvePermission && this.runtime.getPendingPermissions) },
       operator: { kind: botSender ? 'bot' : 'user', allowlisted }
     });
     if (route.kind === 'not_a_command') return undefined;
@@ -730,6 +730,27 @@ export class LarkMessageCoordinator {
         return 'handled';
       }
 
+      if (route.command === 'ci') {
+        const automation = this.workflowOptions.automation;
+        if (!automation || !sessionId) throw new Error('当前话题还没有可用的工作项，请先发送任务。');
+        if (!event.senderOpenId || !await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) throw new Error('当前账号没有操作此任务的权限。');
+        const [action, argument, ...extra] = route.args;
+        if (action === 'wait' && !extra.length) {
+          const item = await automation.subscribeCi(sessionId, argument ? { workflow: argument } : {}, event.senderOpenId);
+          await replyCard('等待 GitHub Actions', `已等待 ${item.repository.slug} 的提交 ${item.headSha.slice(0, 12)}。\n\n截止：${item.expiresAt}\n取消：/ci cancel ${item.id}`);
+        } else if (action === 'cancel' && argument && !extra.length) {
+          const items = await automation.listBySession(sessionId, event.senderOpenId);
+          const item = items.subscriptions.find(value => value.id === argument);
+          if (!item) throw new Error('此工作项中找不到该等待记录。');
+          await automation.cancelCi(sessionId, item.id, { expectedRevision: item.revision }, event.senderOpenId);
+          await replyCard('已取消 CI 等待', '尚未开始的自动续作不会再执行。已经运行的任务可通过 /cancel 中断。');
+        } else if (!action) {
+          const items = await automation.listBySession(sessionId, event.senderOpenId);
+          const labels: Record<string, string> = { waiting: '等待中', dispatching: '提交中', accepted: '续作已接收', completed: '续作已结束', cancelled: '已取消', expired: '已过期', stale_head: '提交已变化', session_inactive: '会话已结束', revoked: '权限已撤销', error: '查询失败' };
+          await replyCard('CI 等待记录', items.subscriptions.slice(0, 10).map(item => `${labels[item.status] ?? item.status} · ${item.repository.slug} · ${item.headSha.slice(0, 12)}\n${item.error ?? ''}\n/ci cancel ${item.id}`).join('\n\n') || '尚无等待记录。发送 /ci wait [工作流文件名或 ID] 等待当前提交。');
+        } else throw new Error('用法：/ci、/ci wait [工作流文件名或 ID]、/ci cancel 等待编号');
+        return 'handled';
+      }
       if (route.command === 'status') {
         await replyCard('任务状态', await this.describeChatStatus(config, sessionId, latestTask));
         return 'handled';

@@ -136,6 +136,22 @@ macOS 使用 launchd（`~/Library/LaunchAgents/com.dutydeck.server.plist`），L
 
 Markdown、代码块、工具调用和终端视图均按需渲染。长历史不会在首屏全量读取或一次性挂载到 DOM。
 
+## 工作目录、验证与自动续作
+
+任务详情的「工作目录、验证与自动化」提供以下操作：
+
+- Web 新建任务默认使用独立 Git worktree，从源目录当前提交创建分支，不带入未提交改动。非 Git 目录或需要原有未提交文件时，选择「直接使用所选目录」。后续追问复用同一目录，准备失败不会回退到共享目录；归档保留全部工作文件。依赖安装由任务在独立目录中执行。
+- Linux 上填写验证命令后，Dutydeck 在该目录执行，保存退出码、有限输出、时间和代码指纹，并关联最近一轮任务。验证与同一 Runtime 内的 Agent 执行互斥；验证期间或之后代码变化时，旧证据失效。Agent 自述测试通过不会产生验证记录。验证进程使用最小环境；默认超时 5 分钟，最长 15 分钟，保留最多 128 KiB 输出。
+- 输入框选择 Skill 时，按规范路径保存所选版本的正文和 SHA256，并加入本轮指令。同名项目/个人 Skill 可分别选择；排队或重启后使用已保存版本。当前投递方式为 prompt 内容注入，不修改用户配置。
+- 定时计划绑定本工作项，可用间隔、指定时间或 Cron，支持时区和夏令时规则。先保存为停用状态，再显式启用；同一计划不重叠，服务离线后最多补一次。可选择仅在当前提交出现新的 GitHub 失败构建时运行。
+- GitHub Actions 等待绑定本目录 `origin` 的 github.com 仓库和当前 HEAD，可限定工作流，默认等待 24 小时、最长 7 天。查询中已出现且匹配的工作流全部结束后，向原工作项追加指令；提交变化、取消、过期或权限撤销会阻止尚未开始的续作。后台每分钟检查，无需公开 webhook。任务忙碌时排队，结果通知失败只重试通知。
+
+飞书原话题也支持 `/ci` 查看记录、`/ci wait [工作流文件名或 ID]` 开始等待、`/ci cancel <等待编号>` 取消；结果回到创建等待或计划时保存的话题位置。已开始的续作可通过 `/cancel` 中断。
+
+私有仓库或匿名限流时，在启动 Dutydeck 的服务端环境设置 `DUTYDECK_GITHUB_TOKEN`，也兼容 `GH_TOKEN` / `GITHUB_TOKEN`。使用具备目标仓库 Actions 读取权限的令牌；令牌不通过页面提交，也不保存进自动任务记录。接口权限与返回字段见 [GitHub Workflow Runs 文档](https://docs.github.com/en/rest/actions/workflow-runs)。
+
+这里运行的是 DutyDeck 自有、绑定现有工作项的自动任务。控制中心 foundation 定义和 Botmux 导入计划仍保持禁用，不自动接管来源进程。worktree 隔离可写目录，不隔离宿主凭据、文件系统或网络。
+
 ## 远程浏览器访问
 
 Dutydeck 默认只监听 `127.0.0.1:4310`，本机使用无需登录。需要局域网访问时显式使用 `--host 0.0.0.0`；远程监听默认要求所有来源（包括反向代理的 loopback 回源）通过访问令牌认证。监听接口与鉴权是独立配置，`--host` 本身不会关闭安全门禁。
@@ -199,11 +215,11 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 - 私聊文本直接创建任务；群聊遵循机器人当前唤醒策略，默认需要 @。回复问题卡可以直接回答原提问。
 - Dutydeck 先保存入站消息，再用固定 `OK` 确认收到；随后在触发消息或对应话题下回复可变进度卡。解析失败也会给出可见失败回执。
 - 排队、运行、待决策、完成、中断和失败使用不同视觉层级。
-- 运行态只保留少量合并后的有效进展；最终结论更新在原任务卡上。只有原卡确定不可更新时才补发唯一替代卡。
+- 运行态只保留少量合并后的有效进展；结束时冻结进度卡，再发送独立结果消息。超过卡片容量的完整结果以 Markdown 文件交付。
 - 默认完成通知隐藏详细 trace，只保留简短证据摘要并提供 Web 详情入口；显式关闭隐藏时，详细轨迹仍以折叠区提供。
 - 回复结果卡可以沿用原上下文继续工作；私聊可直接继续发送。重试会创建新的进度卡，保留上一轮的结果卡。
 - 卡片不展示模型私有思维链。工具参数、输出、错误和终端摘要在进入卡片前会做敏感信息清理并受卡片总大小预算约束。
-- daemon 重启后，运行中的任务明确中断，未完成交付的卡片与持久化终态对账。入站任务、问题状态和文件交付均持久保存；已有旧版验收记录保持可用。
+- daemon 重启后，具备原生 transcript 游标且仍持有原 tmux 会话的 PTY 轮次可续接和重放，指令不会重发；无法确认原轮次时明确中断。未完成交付与持久化终态对账。入站任务、问题和文件交付均持久保存；旧版验收记录保持可用，新结果不要求逐项验收。
 
 任务导航、材料收集、问答审批及文件回传的用法见[飞书完整工作流程](docs/feishu-workflows.md)。
 
@@ -213,7 +229,7 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 /new --cwd "/absolute/path/to/project" --model 模型名 --effort high -- 任务内容
 ```
 
-三个选项均可省略；使用选项时，任务内容前必须加 `--`。目录须为服务器上已存在的绝对路径，模型和推理强度须受当前 Agent 支持。参数校验成功后才结束旧会话；选择会沿用到后续追问和服务重启，下一次裸 `/new` 会恢复机器人默认配置。受管群的目录、模型覆盖需要相应管理权限。
+还可添加 `--workspace worktree`，从当前 Git 提交创建独立工作目录；默认仍直接使用原目录。所有选项均可省略；使用选项时，任务内容前必须加 `--`。目录须为服务器上已存在的绝对路径，模型和推理强度须受当前 Agent 支持。参数校验成功后才结束旧会话；选择会沿用到后续追问和服务重启，下一次裸 `/new` 会恢复机器人默认配置。受管群的目录、模型覆盖需要相应管理权限。
 
 ### 接入机器人
 
@@ -337,6 +353,15 @@ POST /api/sessions
 GET  /api/sessions
 GET  /api/sessions/summaries
 POST /api/sessions/:id/send
+GET  /api/sessions/:id/capabilities
+GET  /api/sessions/:id/workspace
+GET  /api/sessions/:id/verifications
+POST /api/sessions/:id/verifications
+GET  /api/sessions/:id/automation
+POST /api/sessions/:id/automation/schedules
+PATCH /api/sessions/:id/automation/schedules/:scheduleId
+POST /api/sessions/:id/automation/ci
+POST /api/sessions/:id/automation/ci/:subscriptionId/cancel
 POST /api/sessions/:id/interrupt
 POST /api/sessions/:id/restart
 POST /api/sessions/:id/permissions/:permissionId

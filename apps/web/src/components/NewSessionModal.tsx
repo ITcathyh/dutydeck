@@ -48,6 +48,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
   const qc = useQueryClient();
   const [agentId, setAgentId] = useState('codex');
   const [cwd, setCwd] = useState('');
+  const [workspaceMode, setWorkspaceMode] = useState<'shared' | 'worktree'>('worktree');
   const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
   const selectedAgent = agents.find(agent => agent.id === agentId);
@@ -69,7 +70,7 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
   }, [agents, agentId]);
   const create = useMutation({
     mutationFn: async () => {
-      const session = createdSession ?? await api.create({ agentId, permissionMode, ...(cwd ? { cwd } : {}), ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) });
+      const session = createdSession ?? await api.create({ agentId, permissionMode, workspaceMode, ...(cwd ? { cwd } : {}), ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) });
       if (!createdSession) setCreatedSession(session);
       const result = await api.send(session.id, goal.trim(), 'queue');
       return { session, task: result.task };
@@ -132,6 +133,9 @@ export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, ag
             disabled={Boolean(createdSession)}
           />
           <fieldset disabled={Boolean(createdSession)} className="contents disabled:opacity-60">
+            <SelectField label="工作目录方式">
+              <CompactSelect value={workspaceMode} options={[{ value: 'worktree', label: '独立 Git 工作目录', meta: '从当前提交创建分支；后续追问复用，不带入未提交改动' }, { value: 'shared', label: '直接使用所选目录', meta: '适用于非 Git 目录，或需要使用现有未提交改动' }]} onChange={value => setWorkspaceMode(value as 'shared' | 'worktree')} placeholder="选择工作目录方式" disabledText=""/>
+            </SelectField>
             <SelectField label="执行任务的 Agent">
               <AgentSelect agents={agents} value={agentId} onChange={value => { const nextAgent = agents.find(agent => agent.id === value); setAgentId(value); setPermissionMode(initialPermissionMode(nextAgent)); setFullTrustConfirmed(false); setModel(''); setReasoningEffort(''); }}/>
             </SelectField>

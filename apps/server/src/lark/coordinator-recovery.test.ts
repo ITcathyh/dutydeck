@@ -123,6 +123,27 @@ const statusMarkdown = (service: ReturnType<typeof cardService>) =>
   String(service.send.mock.calls.find(([input]: any[]) => input.taskName === '任务状态')?.[0]?.markdown ?? '');
 
 describe('飞书命令在 coordinator 重建后的会话定位', () => {
+  it('CI wait/list/cancel reuse the persisted topic session and captured actor', async () => {
+    const { runtime } = persistentRuntime();
+    const first = coordinatorFor(runtime, cardService());
+    await first.handle(dm('om_initial', '先创建工作项'), config);
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    const subscription = { id: 'ci_1', revision: 3, repository: { slug: 'owner/repo' }, headSha: 'a'.repeat(40), expiresAt: '2026-09-13T00:00:00.000Z', status: 'waiting' };
+    const automation = { subscribeCi: vi.fn(async () => subscription), listBySession: vi.fn(async () => ({ subscriptions: [subscription] })), cancelCi: vi.fn(async () => ({ ...subscription, status: 'cancelled' })) };
+    const service = cardService();
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
+    try {
+      await coordinator.handle(dm('om_ci_wait', '/ci wait ci.yml'), config);
+      await vi.waitFor(() => expect(automation.subscribeCi).toHaveBeenCalledWith('ses_1', { workflow: 'ci.yml' }, 'ou_user_a'));
+      await coordinator.handle(dm('om_ci_list', '/ci'), config);
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: 'CI 等待记录', markdown: expect.stringContaining('owner/repo') })));
+      await coordinator.handle(dm('om_ci_cancel', '/ci cancel ci_1'), config);
+      await vi.waitFor(() => expect(automation.cancelCi).toHaveBeenCalledWith('ses_1', 'ci_1', { expectedRevision: 3 }, 'ou_user_a'));
+      expect(runtime.start).toHaveBeenCalledOnce();
+      expect(runtime.send).toHaveBeenCalledOnce();
+    } finally { first.stop(); coordinator.stop(); }
+  });
+
   it('/status 报告持久化会话的 Agent、工作区与状态，而不是「尚未创建」', async () => {
     const { runtime } = persistentRuntime();
     const first = cardService();

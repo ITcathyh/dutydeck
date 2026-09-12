@@ -2,11 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { buildPrompt, commandsFromEvents, contextStatsFromEvents, getModelReadiness, replaceSlashQuery, slashQuery } from './composer-utils';
 
 describe('composer slash references', () => {
-  it('builds file and skill references with the shared slash syntax', () => {
+  it('can invoke a selected skill without additional text', () => {
+    expect(buildPrompt('', [{ id: 's', kind: 'skill', label: 'review', value: '/repo/.agents/skills/review/SKILL.md' }])).toBe('请按所选 Skill 执行。');
+    expect(buildPrompt('', [])).toBe('');
+  });
+  it('keeps file references in text while skills travel as structured selections', () => {
     expect(buildPrompt('检查这里', [
       { id: 'f', kind: 'file', label: 'App.tsx', value: '/repo/App.tsx' },
       { id: 's', kind: 'skill', label: 'review', value: 'review' }
-    ])).toBe('/file /repo/App.tsx\n\n/skills review\n\n检查这里');
+    ])).toBe('/file /repo/App.tsx\n\n检查这里');
   });
 
   it('detects and replaces the slash token at the caret', () => {

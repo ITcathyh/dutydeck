@@ -3,9 +3,12 @@ import { readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfig, type AppConfig } from '@dutydeck/config';
 import { createRepositories } from '@dutydeck/storage';
-import { type DriverFactory, type PolicyAction } from '@dutydeck/shared';
+import { installationOwnerTaskActor, type DriverFactory, type PolicyAction } from '@dutydeck/shared';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
+import { SessionAutomationService } from './session-automation.js';
+import { createAutomationIntegration } from './automation-integration.js';
+import { prepareSkillPrompt } from './skill-delivery.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
 import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
@@ -180,7 +183,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     ptyDrivers.add(driver);
     return driver;
   };
-  const runtime = new DutydeckRuntime(repos, {
+  const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
+    authorizeTask: (_session, task, phase) => automation.authorizeTask(task, phase),
     authorizeExecution: (sessionId, actorId) => groupManager.beginTurn(sessionId, actorId),
     resolveRiskPolicy: (sessionId, fallback) => groupManager.riskPolicy(sessionId, fallback),
     acpxCommand: config.acpxCommand,
@@ -188,8 +192,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     cleanupIntervalMs: config.cleanupIntervalMs,
     sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id) }),
+    prepareTaskPrompt: (session, prompt, skills) => prepareSkillPrompt(session.cwd, prompt, skills),
     sessionPrompt: (session, prompt) => agentTools.promptForSession(session, prompt)
   });
+  const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
+  const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration,
+    githubToken: env.DUTYDECK_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN });
+  let automationTimer: NodeJS.Timeout | undefined;
   // Reattach surviving idle terminals after a daemon restart, without starting a task.
   const terminalProvider: TerminalStreamProvider = {
     async lookupTerminalStream(sessionId) {
@@ -230,6 +239,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       webRoot,
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
+        automation,
         relayBroker,
         env,
         config: repos.config,
@@ -258,7 +268,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       relay: { runtime, capabilities: relayCapabilities, broker: relayBroker },
       foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef, isLiveManagedBot: id => groupManager.isLiveManagedBot(id) },
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
-      schedule: { repositories: repos, authorize: foundationManagementAuthorizer },
+      schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true },
+      automation: { service: automation, authorize: async (request, sessionId, action) => {
+        const principal = await resolveInstallationPrincipal(request);
+        if (!principal) return false;
+        const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary: 'session', action, request });
+        return { ...decision, actorId: installationOwnerTaskActor };
+      } },
       executionPolicy: {
         authorize: async (request, sessionId, boundary, action) => await groupManager.authorizeSession(sessionId, action, true) ?? foundationExecution.authorizeSessionId(sessionId, {
           boundary,
@@ -268,8 +284,14 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       },
     });
     await app.listen(listenOptions(config));
+    const tick = () => { void automation.tick().catch(error => app?.log.warn({ error }, '自动任务轮询失败')); };
+    automationTimer = setInterval(tick, 60_000);
+    automationTimer.unref();
+    tick();
   } catch (error) {
     if (tokenRefresh) clearInterval(tokenRefresh);
+    if (automationTimer) clearInterval(automationTimer);
+    await automation.close();
     capabilities.close(); await runtime.shutdown(); repos.close(); throw error;
   }
   return {
@@ -279,6 +301,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       if (closed) return;
       closed = true;
       if (tokenRefresh) clearInterval(tokenRefresh);
+      if (automationTimer) clearInterval(automationTimer);
+      await automation.close();
       // 先唤醒所有阻塞中的 ask，再关 app：否则长轮询请求会拖住 app.close()。
       relayBroker.close();
       // A normal daemon stop/restart detaches Dutydeck-owned tmux sessions.

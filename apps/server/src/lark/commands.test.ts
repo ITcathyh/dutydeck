@@ -87,6 +87,13 @@ describe('parseSlashCommand 唯一的命令形状校验器', () => {
 });
 
 describe('注册表与能力门（诚实表达能力）', () => {
+  it('CI commands require the automation service and normal operator authorization', () => {
+    expect(routeLarkCommand('/ci wait ci.yml', context()).kind).toBe('unavailable');
+    const caps = capabilities({ ci: true });
+    expect(routeLarkCommand('/ci wait ci.yml', context({ capabilities: caps }))).toMatchObject({ kind: 'intent', command: 'ci', args: ['wait', 'ci.yml'] });
+    expect(renderLarkCommandHelp(caps).text).toContain('/ci wait');
+    expect(routeLarkCommand('/ci cancel ci_1', context({ capabilities: caps, operator: { kind: 'user', allowlisted: false } })).kind).toBe('denied');
+  });
   it('注册表里的命令名与别名本身都满足命令形状规则', () => {
     for (const definition of larkCommandRegistry) {
       for (const key of [definition.name, ...(definition.aliases ?? [])]) {

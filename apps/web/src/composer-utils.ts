@@ -16,10 +16,9 @@ export function getModelReadiness({ loaded, loading, switching, failed }: { load
 }
 
 export function buildPrompt(message: string, references: ComposerReference[]) {
-  const referenceLines = references.map(reference => reference.kind === 'file'
-    ? `/file ${reference.value}`
-    : `/skills ${reference.value}`);
-  return [...referenceLines, message.trim()].filter(Boolean).join('\n\n');
+  const referenceLines = references.filter(reference => reference.kind === 'file').map(reference => `/file ${reference.value}`);
+  const prompt = [...referenceLines, message.trim()].filter(Boolean).join('\n\n');
+  return prompt || (references.some(reference => reference.kind === 'skill') ? '请按所选 Skill 执行。' : '');
 }
 
 export function slashQuery(value: string, caret = value.length) {

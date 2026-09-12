@@ -4,15 +4,15 @@ import { getCliAdapter } from '@dutydeck/cli-adapters';
 import type { AgentConfig } from '@dutydeck/shared';
 import { discoverAgentModels } from '../agent-models.js';
 
-export interface LarkLaunchOptions { cwd?: string; model?: string; reasoningEffort?: string }
-export const larkNewSessionUsage = '/new [--cwd 绝对路径] [--model 模型] [--effort 强度] -- 任务内容';
+export interface LarkLaunchOptions { cwd?: string; model?: string; reasoningEffort?: string; workspaceMode?: 'shared' | 'worktree' }
+export const larkNewSessionUsage = '/new [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容';
 
 /** Only the option header is tokenized; the task body is never shell-parsed. */
 export function parseLarkNewSession(input: string): { prompt: string; launchOptions?: LarkLaunchOptions } {
   const body = input.trim();
   if (!body.startsWith('--')) return { prompt: body };
   const launchOptions: LarkLaunchOptions = {};
-  const fields = { '--cwd': 'cwd', '--model': 'model', '--effort': 'reasoningEffort' } as const;
+  const fields = { '--cwd': 'cwd', '--model': 'model', '--effort': 'reasoningEffort', '--workspace': 'workspaceMode' } as const;
   let remaining = body;
   const invalid = () => new Error(`首轮参数格式不正确。用法：${larkNewSessionUsage}；路径含空格时用引号包围。`);
   const token = () => {
@@ -31,7 +31,10 @@ export function parseLarkNewSession(input: string): { prompt: string; launchOpti
     if (!field || launchOptions[field] !== undefined) throw invalid();
     const value = token();
     if (!value.trim() || value.startsWith('--')) throw invalid();
-    launchOptions[field] = value;
+    if (field === 'workspaceMode') {
+      if (value !== 'shared' && value !== 'worktree') throw invalid();
+      launchOptions.workspaceMode = value;
+    } else launchOptions[field] = value;
   }
   throw invalid();
 }

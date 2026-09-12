@@ -21,6 +21,7 @@ type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?
 type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 export interface LarkRoutesOptions {
+  automation?: import('../session-automation.js').SessionAutomationService;
   relayBroker?: RelayAskBroker;
   groupManager?: LarkGroupManager;
   env?: NodeJS.ProcessEnv;
@@ -49,6 +50,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   const listeningDisabled = options.listeningDisabled === true;
   const listener = options.listener ?? new LarkLongConnectionListenerPool(app.log, {
     runtime: options.runtime,
+    automation: options.automation,
     workflowStore: options.config,
     relayBroker: options.relayBroker,
     cardMappings: options.cardMappings,

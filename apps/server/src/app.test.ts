@@ -26,6 +26,23 @@ afterEach(async () => {
 });
 
 describe('HTTP API boundary', () => {
+  it('reports observed driver support without claiming recovery or attaching a process', async () => {
+    const driver = { createTerminalStream: vi.fn(), recover: vi.fn() };
+    const runtime = { getSession: vi.fn(async () => ({ id: 's1', protocol: 'pty-cli' })), getDriver: vi.fn(() => driver), getTerminalDriver: vi.fn() } as any;
+    const app = await buildApp(runtime); apps.push(app);
+    const response = await app.inject({ method: 'GET', url: '/api/sessions/s1/capabilities' });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ terminal: 'available', structuredApproval: 'unavailable', turnRecovery: 'unverified' });
+    expect(runtime.getTerminalDriver).not.toHaveBeenCalled();
+    expect(driver.createTerminalStream).not.toHaveBeenCalled();
+    runtime.getDriver.mockReturnValue(undefined);
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/s1/capabilities' })).json()).toMatchObject({ terminal: 'unverified', structuredApproval: 'unverified' });
+    const denied = await buildApp(runtime, { executionPolicy: { authorize: async () => ({ allowed: false, action: 'task.view_result', code: 'forbidden', reason: 'denied', source: 'integration' }) } }); apps.push(denied);
+    runtime.getDriver.mockClear();
+    expect((await denied.inject({ method: 'GET', url: '/api/sessions/s1/capabilities' })).statusCode).toBe(403);
+    expect(runtime.getDriver).not.toHaveBeenCalled();
+  });
+
   it('checks the session execution adapter before invoking runtime mutations', async () => {
     const runtime = { dispatch: vi.fn() } as any;
     const authorize = vi.fn(async (_request: any, _sessionId: string, _boundary: any, action: any) => ({
@@ -418,7 +435,20 @@ describe('HTTP API boundary', () => {
     for (const action of ['interrupt', 'pause', 'resume', 'stop', 'restart']) expect((await app.inject({ method: 'POST', url: `/api/sessions/s1/${action}` })).statusCode).toBe(200);
     expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/archive' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'PUT', url: '/api/sessions/s1/permission-mode', payload: { mode: 'ask' } })).statusCode).toBe(404);
-    expect(runtime.start).toHaveBeenCalledWith({ agentId: 'mock', model: 'model-selected-in-web', reasoningEffort: 'high' }); expect(runtime.dispatch).toHaveBeenCalledWith('s1', 'hello', 'queue'); expect(runtime.setModel).toHaveBeenCalledWith('s1', 'model-b'); expect(runtime.setReasoningEffort).toHaveBeenCalledWith('s1', 'high'); expect(runtime.cancelQueued).toHaveBeenCalledWith('s1', 't1'); expect(runtime.steerQueued).toHaveBeenCalledWith('s1', 't1'); expect(runtime.stop).toHaveBeenCalledOnce();
+    expect(runtime.start).toHaveBeenCalledWith({ agentId: 'mock', model: 'model-selected-in-web', reasoningEffort: 'high' }); expect(runtime.dispatch).toHaveBeenCalledWith('s1', 'hello', 'queue', 'hello', undefined, undefined, undefined, undefined); expect(runtime.setModel).toHaveBeenCalledWith('s1', 'model-b'); expect(runtime.setReasoningEffort).toHaveBeenCalledWith('s1', 'high'); expect(runtime.cancelQueued).toHaveBeenCalledWith('s1', 't1'); expect(runtime.steerQueued).toHaveBeenCalledWith('s1', 't1'); expect(runtime.stop).toHaveBeenCalledOnce();
+  });
+
+  it('passes exact selected Skill paths and enforces shell authority for verification', async () => {
+    const runtime = { dispatch: vi.fn(async () => ({ id: 't1' })), runVerification: vi.fn(async () => ({ status: 'passed' })) };
+    const authorize = vi.fn(async (_request: unknown, _id: string, _boundary: string, action: string) => ({ allowed: action !== 'terminal.write', source: 'owner', code: 'denied_shell', reason: 'terminal access required' }));
+    const app = await buildApp(runtime as any, { executionPolicy: { authorize } as any }); apps.push(app);
+    const path = '/project/.agents/skills/check/SKILL.md';
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'check', skillRequests: [path] } })).statusCode).toBe(202);
+    expect(runtime.dispatch).toHaveBeenCalledWith('s1', 'check', 'queue', 'check', undefined, 'installation_owner', undefined, [path]);
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'check', skillRequests: ['/ok', 3] } })).statusCode).toBe(400);
+    expect(runtime.dispatch).toHaveBeenCalledTimes(1);
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/verifications', payload: { command: 'echo unsafe' } })).statusCode).toBe(403);
+    expect(runtime.runVerification).not.toHaveBeenCalled();
   });
 
   it('projects the first task goal and current queued count as a cross-session run summary', async () => {
