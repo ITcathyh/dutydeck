@@ -25,7 +25,7 @@ Dutydeck 是本地优先的 Agent 工程工作台。飞书机器人是下达任�
 全局安装后，一条命令完成引导：
 
 ```bash
-pnpm add -g @bytedance/dutydeck --registry=http://bnpm.byted.org
+pnpm add -g @byted/dutydeck --registry=http://bnpm.byted.org
 dutydeck setup
 dutydeck start
 ```
