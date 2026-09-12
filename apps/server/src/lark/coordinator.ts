@@ -1,13 +1,14 @@
 import type { RelayAskBroker } from '@dutydeck/relay';
 import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
+import { parseLarkNewSession, validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext } from './task-context.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { defaultHighRiskPattern, defaultLarkTraceLimit, larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
-import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
+import type { LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
 import {
   loadLarkTaskEvents,
@@ -69,7 +70,7 @@ export type LarkGroup = {
    */
   pendingSession?: Promise<Session | undefined>;
 };
-type LarkRetryPrompt = { prompt: string; materialPrompt: string };
+type LarkCommandPrompt = { prompt: string; materialPrompt?: string; launchOptions?: LarkLaunchOptions; epoch?: number };
 export type LarkTaskState = 'queued' | 'running' | 'interrupting' | 'interrupted' | 'completed' | 'failed';
 export type LarkTask = {
   id: string;
@@ -80,6 +81,7 @@ export type LarkTask = {
   inbox?: LarkInboxRecord;
   resumeTask?: TaskRecord;
   retryMaterialPrompt?: string;
+  launchOptions?: LarkLaunchOptions;
   restoring?: boolean;
   config: StoredLarkConfig;
   state: LarkTaskState;
@@ -573,7 +575,7 @@ export class LarkMessageCoordinator {
     let resources: LarkMessageResource[];
     let scopeId: string;
     try {
-      ({ prompt, resources } = await parsePrompt(event));
+      ({ prompt, resources } = await parsePrompt(event, this.botOpenId));
       // 路由解析（话题群种子 / 普通群回复模式 / legacy）与 group key 共用同一 scopeId，
       // 保证同一会话的消息串行化到同一个 group。
       scopeId = await resolveLarkScopeId(event, config, this.chatModeResolver);
@@ -613,11 +615,13 @@ export class LarkMessageCoordinator {
       return;
     }
     let retryMaterialPrompt = inbox?.request?.materialPrompt;
+    let launchOptions = inbox?.request?.launchOptions;
+    let commandEpoch: number | undefined;
     if (typeof commandRoute === 'string') prompt = commandRoute;
-    else if (commandRoute) { prompt = commandRoute.prompt; retryMaterialPrompt = commandRoute.materialPrompt; }
-    if (inbox && !inbox.request) await this.inbox!.update(inbox, { state: 'received', request: { prompt, scopeId, resources, ...(retryMaterialPrompt ? { materialPrompt: retryMaterialPrompt } : {}) } });
+    else if (commandRoute) { prompt = commandRoute.prompt; retryMaterialPrompt = commandRoute.materialPrompt; launchOptions = commandRoute.launchOptions; commandEpoch = commandRoute.epoch; }
+    if (inbox && !inbox.request) await this.inbox!.update(inbox, { state: 'received', request: { prompt, scopeId, resources, ...(retryMaterialPrompt ? { materialPrompt: retryMaterialPrompt } : {}), ...(launchOptions ? { launchOptions } : {}) } });
     // 空 @ 消息（仅 @ 机器人无文字）仍需创建任务，由 runTurn 拉取聊天记录做兜底意图判断。
-    const task: LarkTask = { id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), config, state: 'queued', events: [], restoring: recovering, turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: group.epoch ?? 0, acknowledgementReactionId };
+    const task: LarkTask = { id: event.messageId, group, event, prompt, resources, inbox, retryMaterialPrompt, launchOptions, ...(inbox?.cardId ? { cardMessageId: inbox.cardId } : {}), config, state: 'queued', events: [], restoring: recovering, turn: (inbox?.turn ?? 1) - 1, scopeId, epoch: commandEpoch ?? group.epoch ?? 0, acknowledgementReactionId };
     this.tasks.set(task.id, task);
     if (this.tasks.size > 5_000) this.tasks.delete(this.tasks.keys().next().value!);
     group.tail = group.tail.then(() => this.runTurn(task)).catch(async error => {
@@ -648,7 +652,7 @@ export class LarkMessageCoordinator {
     group: LarkGroup,
     scopeId: string,
     acknowledgementReactionId?: string
-  ): Promise<'handled' | string | LarkRetryPrompt | undefined> {
+  ): Promise<'handled' | string | LarkCommandPrompt | undefined> {
     if (!parseSlashCommand(prompt)) return undefined;
     const botSender = event.senderType === 'app' || event.senderType === 'bot';
     const commandAccess = event.chatType === 'group' ? await this.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'task.view_result') : undefined;
@@ -710,7 +714,7 @@ export class LarkMessageCoordinator {
     scopeId: string,
     replyCard: (taskName: string, markdown: string, options?: { elements?: LarkCardElement[]; failed?: boolean }) => Promise<void>,
     acknowledgementReactionId?: string
-  ): Promise<'handled' | string | LarkRetryPrompt> {
+  ): Promise<'handled' | string | LarkCommandPrompt> {
     // 最近一轮任务：/cancel 与 /retry 需要它，按插入顺序取该 group 的最后一个任务。
     const latestTask = [...this.tasks.values()].reverse().find(task => task.group === group);
 
@@ -803,12 +807,18 @@ export class LarkMessageCoordinator {
       }
       if (route.command === 'new') {
         // 任务内容随 /new 一起到达时，本条消息既要结束旧上下文、又要派发新任务。
-        const goal = route.argsText.trim();
-        const retired = await this.retireScopeSession(group, config, event, scopeId);
+        const request = parseLarkNewSession(route.argsText);
+        const beforeValidation = group.epoch ?? 0;
+        if (request.launchOptions) request.launchOptions = await this.validateNewSession(config, event, request.launchOptions);
+        if (beforeValidation !== (group.epoch ?? 0)) throw new Error('已有更新的 /new 请求，请在新上下文中重新发送。');
+        const retirement = this.retireScopeSession(group, config, event, scopeId);
+        const epoch = group.epoch;
+        const retired = await retirement;
+        const goal = request.prompt;
         if (goal) {
           // reaction 仍挂在原消息上，交给随后的建任务链路按正常节奏撤销——
           // 这里不发命令回执，因为用户马上会收到这条新任务的进度卡。
-          return goal;
+          return { ...request, epoch };
         }
         await replyCard(
           '/new 已受理',
@@ -863,7 +873,7 @@ export class LarkMessageCoordinator {
     config: StoredLarkConfig,
     event: LarkMessageEvent,
     target: { id: string; sessionId: string }
-  ): Promise<LarkRetryPrompt | undefined> {
+  ): Promise<LarkCommandPrompt | undefined> {
     if (!this.cardMappings) return undefined;
     const mappings = await this.cardMappings.list(larkCardChannel(config.appId));
     for (const mapping of mappings) {
@@ -886,7 +896,7 @@ export class LarkMessageCoordinator {
    * 好过让 /status 谎称没有会话、让 /new 在什么都没停掉的情况下回「已受理」。
    */
   private async findScopeSession(config: StoredLarkConfig, event: LarkMessageEvent, scopeId: string, group: LarkGroup) {
-    const session = await findPersistedLarkSession(this.runtime, config, event.chatId, event.chatType, scopeId);
+    const session = await findPersistedLarkSession(this.runtime, config, event.chatId, event.chatType, scopeId, this.cardMappings);
     return session && !group.retiredSessionIds?.has(session.id) ? session : undefined;
   }
 
@@ -914,7 +924,7 @@ export class LarkMessageCoordinator {
   private async retireScopeSession(group: LarkGroup, config: StoredLarkConfig, event: LarkMessageEvent, scopeId: string) {
     group.epoch = (group.epoch ?? 0) + 1;
     // 查询失败不吞：调用方会把异常变成一条「命令执行失败」的回执。
-    const persisted = await listPersistedLarkSessions(this.runtime, config, event.chatId, event.chatType, scopeId);
+    const persisted = await listPersistedLarkSessions(this.runtime, config, event.chatId, event.chatType, scopeId, this.cardMappings);
     const pendingSessionId = (await group.pendingSession?.catch(() => undefined))?.id;
     const targets = new Set([
       ...persisted.filter(session => !['failed', 'stopped'].includes(session.state)).map(session => session.id),
@@ -958,6 +968,8 @@ export class LarkMessageCoordinator {
     }
     const workspace = session?.cwd ?? config.workspace;
     if (workspace) lines.push(`**工作区**：${larkCommandEcho(workspace, 160)}`);
+    if (session?.model) lines.push(`**模型**：${larkCommandEcho(session.model, 128)}`);
+    if (session?.reasoningEffort) lines.push(`**推理强度**：${larkCommandEcho(session.reasoningEffort, 32)}`);
     if (session && config.workspace && session.cwd !== config.workspace) {
       lines.push(`**配置的工作区**：${larkCommandEcho(config.workspace, 160)}（下一个新会话生效）`);
     }
@@ -1284,10 +1296,26 @@ export class LarkMessageCoordinator {
     return true;
   }
 
-  private async sessionFor(group: LarkGroup, config: StoredLarkConfig, chatId: string, chatType: LarkMessageEvent['chatType'], scopeId: string) {
+  private async validateNewSession(config: StoredLarkConfig, event: LarkMessageEvent, options: LarkLaunchOptions) {
+    if (!this.cardMappings) throw new Error('当前运行时不支持保存首轮会话配置。');
+    const actions: PolicyAction[] = [...(options.cwd ? ['run.change_cwd' as const] : []), ...(options.model || options.reasoningEffort ? ['run.change_model' as const] : [])];
+    for (const action of actions) {
+      await this.requireExecution('session', action);
+      if (config.managedGroup) {
+        const decision = await this.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, action);
+        if (!decision?.allowed) throw new Error(decision?.reason ?? '当前账号没有修改会话目录或模型的权限。');
+      }
+    }
+    const agent = (await this.runtime.listAgents?.())?.find(item => item.id === config.defaultAgentId);
+    if (!agent) throw new Error('机器人尚未配置可用的默认 Agent。');
+    return validateLarkLaunchOptions(options, { ...agent, ...(config.workspace ? { cwd: config.workspace } : {}),
+      ...(config.defaultModel ? { model: config.defaultModel } : {}), permissionMode: larkPermissionMode(config) });
+  }
+
+  private async sessionFor(group: LarkGroup, config: StoredLarkConfig, chatId: string, chatType: LarkMessageEvent['chatType'], scopeId: string, launchOptions?: LarkLaunchOptions) {
     // 建会话期间把 promise 挂到 group 上：并发的 /new 需要等它落地，才能把这条
     // 刚建出来的会话一起停掉，而不是让它在 /new 之后变成一个没人管的新上下文。
-    const pending = resolveLarkSession(this.runtime, this.log, group, config, chatId, chatType, scopeId);
+    const pending = resolveLarkSession(this.runtime, this.log, group, config, chatId, chatType, scopeId, this.cardMappings, launchOptions);
     const tracked = pending.catch(() => undefined);
     group.pendingSession = tracked;
     try { return await pending; }
@@ -1316,15 +1344,19 @@ export class LarkMessageCoordinator {
       const lines = await Promise.all(messages.map(async item => {
         const sender = item.sender.name || item.sender.id || '未知用户';
         // 合并转发消息不自动展开，只返回占位提示；Agent 可通过群协作工具按 message_id 拉取转发内容。
-        const parsed = await parseLarkMessageContent(item.messageType, item.rawContent, {
-          messageId: item.messageId
-        });
-        let text = parsed.text;
-        for (const mention of item.mentions) {
-          if (mention.key) text = text.replaceAll(mention.key, '');
-          if (mention.name) text = text.replace(new RegExp(`@${mention.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), '');
-        }
-        text = text.trim();
+        const parsed = await parsePrompt({
+          messageId: item.messageId,
+          chatId: item.chatId ?? event.chatId,
+          chatType: event.chatType,
+          messageType: item.messageType,
+          content: item.rawContent,
+          mentions: item.mentions.map(mention => ({
+            key: mention.key ?? '',
+            name: mention.name ?? '',
+            ...(mention.id && (mention.idType === 'open_id' || mention.id.startsWith('ou_')) ? { openId: mention.id } : {})
+          }))
+        }, this.botOpenId);
+        const text = parsed.prompt;
         return `${sender}: ${text || '[图片/文件/卡片等非文字消息]'}`;
       }));
       return `[Dutydeck 空消息兜底]\n用户仅 @ 了机器人而未发送任何文字内容。以下是当前会话最近的聊天记录，仅用于识别指代。${confirmationRule}\n\n[最近聊天记录]\n${lines.join('\n')}`;
@@ -1445,7 +1477,9 @@ export class LarkMessageCoordinator {
       // 附件下载与身份解析都可能很慢，期间用户可能已经 /new。此刻建会话等于把旧请求
       // 送进一个用户已经宣布结束的上下文，还会顺带创建一条新会话污染新上下文。
       if (this.supersededTurn(task)) return;
-      session = resumeTask ? (await this.runtime.getSession(resumeTask.sessionId))! : task.inbox?.sessionId ? (await this.runtime.getSession(task.inbox.sessionId))! : await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId);
+      if (task.launchOptions && task.restoring && !resumeTask && !task.inbox?.sessionId) task.launchOptions = await this.validateNewSession(config, event, task.launchOptions);
+      if (this.supersededTurn(task)) return;
+      session = resumeTask ? (await this.runtime.getSession(resumeTask.sessionId))! : task.inbox?.sessionId ? (await this.runtime.getSession(task.inbox.sessionId))! : await this.sessionFor(group, config, event.chatId, event.chatType, task.scopeId, task.launchOptions);
       if (!session) throw new LarkServiceError('LARK_SESSION_MISSING', '原任务会话已不存在，请重新发送目标。', 409);
       // 建会话本身也可能卡住（runtime.start 未返回）。回来后再确认一次，
       // 并把这条会话交给 /new 收走，不留下一个游离的新上下文。
@@ -1463,6 +1497,7 @@ export class LarkMessageCoordinator {
       return;
     }
     task.sessionId = session.id;
+    cardContext.workspace = session.cwd;
     await this.groupManager?.recordRun(session, config, event, task.scopeId);
     let materialPrompt = task.retryMaterialPrompt ?? prompt;
     let contextCommit: (() => Promise<void>) | undefined;
@@ -1761,7 +1796,7 @@ export class LarkMessageCoordinator {
     const injected: string[] = [];
     injected.push(`[Dutydeck 机器人身份]
 - 机器人名称：${config.name ?? config.appId}
-- App ID：${config.appId}${config.workspace ? `\n- 工作区：${config.workspace}` : ''}`);
+- App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     if (event.chatType === 'group' && config.groupToolsEnabled && config.groupToolsAllowSend) {
       injected.push(`[Dutydeck 飞书当前消息 · 系统上下文]

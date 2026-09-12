@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import type { Session } from '@dutydeck/shared';
+import type { ChannelMappingRepository, Session } from '@dutydeck/shared';
+import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
@@ -72,15 +73,62 @@ export const larkSourceId = (config: StoredLarkConfig, chatId: string, chatType:
   return scopeId === chatType ? base : `${base}:${scopeId}`;
 };
 
-export async function parsePrompt(event: LarkMessageEvent) {
+const selfMentionMarker = '\u0000dutydeck-self-mention\u0000';
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const removeMentionToken = (text: string, token: string) => text.replace(
+  new RegExp(`([^\\S\\r\\n]*)${escapeRegExp(token)}([^\\S\\r\\n]*)`, 'g'),
+  (_match, before: string, after: string) => before && after ? ' ' : ''
+);
+
+const markSelfRichTextMentions = (content: string, botOpenId?: string) => {
+  if (!botOpenId) return content;
+  let parsed: unknown;
+  try { parsed = JSON.parse(content); }
+  catch { return content; }
+  const visit = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(visit);
+    if (!value || typeof value !== 'object') return value;
+    const node = value as Record<string, unknown>;
+    const property = node.property && typeof node.property === 'object' && !Array.isArray(node.property)
+      ? node.property as Record<string, unknown>
+      : undefined;
+    const id = node.id && typeof node.id === 'object' && !Array.isArray(node.id)
+      ? node.id as Record<string, unknown>
+      : undefined;
+    const openId = [node.user_id, node.open_id, id?.open_id, property?.user_id, property?.open_id]
+      .find(candidate => typeof candidate === 'string');
+    if (node.tag === 'at' && openId === botOpenId) return { tag: 'text', text: selfMentionMarker };
+    return Object.fromEntries(Object.entries(node).map(([key, child]) => [key, visit(child)]));
+  };
+  return JSON.stringify(visit(parsed));
+};
+
+export async function parsePrompt(event: LarkMessageEvent, botOpenId?: string) {
+  if (event.mentions.some(mention => typeof mention.key !== 'string' || typeof mention.name !== 'string')) {
+    throw new Error('飞书消息包含无效的 mention 数据');
+  }
   // 合并转发（merge_forward）消息不自动展开，只返回带 message_id 的占位提示；
   // Agent 如需查看转发内容，可通过群协作工具按 message_id 拉取。
-  const parsed = await parseLarkMessageContent(event.messageType, event.content, {
+  const content = event.messageType === 'post' || event.messageType === 'rich_text'
+    ? markSelfRichTextMentions(event.content, botOpenId)
+    : event.content;
+  const parsed = await parseLarkMessageContent(event.messageType, content, {
     messageId: event.messageId
   });
-  let text = parsed.text;
-  for (const mention of event.mentions) {
-    text = text.replaceAll(mention.key, '').replace(new RegExp(`@${mention.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g'), '');
+  let text = removeMentionToken(parsed.text, selfMentionMarker);
+  // 飞书 text 消息用 mention key 占位。按 key 长度倒序替换，避免 @_user_1
+  // 先破坏 @_user_10；只有 open_id 精确等于当前 bot 的占位才删除。
+  for (const mention of [...event.mentions].sort((left, right) => right.key.length - left.key.length)) {
+    const key = mention.key?.trim();
+    if (!key) continue;
+    if (botOpenId && mention.openId === botOpenId) {
+      text = removeMentionToken(text, key);
+      continue;
+    }
+    const name = mention.name?.trim();
+    text = text.replaceAll(key, name ? `@${name}` : key);
   }
   return { prompt: text.trim(), resources: parsed.resources };
 }
@@ -188,14 +236,14 @@ export async function resolveLarkScopeId(
  * 否则会出现「/new 说没有绑定会话、下一条消息却复用了旧上下文」这种自相矛盾的行为。
  * 判据刻意不含 state：命令需要能看见失败/已停止的会话并如实报告，是否可复用由调用方决定。
  */
-export const larkSessionMatchesScope = (session: Session, config: StoredLarkConfig, sourceId: string) =>
+export const larkSessionMatchesScope = (session: Session, config: StoredLarkConfig, sourceId: string, launchSessionId?: string) =>
   session.source === 'lark'
   && session.sourceId === sourceId
-  && (config.managedGroup || session.agentId === config.defaultAgentId)
+  && (session.id === launchSessionId || config.managedGroup || session.agentId === config.defaultAgentId)
   && !session.archivedAt
-  && (config.managedGroup || !config.workspace || session.cwd === config.workspace)
-  && (config.managedGroup || !config.defaultModel || session.model === config.defaultModel)
-  && Boolean(config.managedGroup || !config.defaultReasoningEffort || session.reasoningEffort === config.defaultReasoningEffort);
+  && (session.id === launchSessionId || config.managedGroup || !config.workspace || session.cwd === config.workspace)
+  && (session.id === launchSessionId || config.managedGroup || !config.defaultModel || session.model === config.defaultModel)
+  && Boolean(session.id === launchSessionId || config.managedGroup || !config.defaultReasoningEffort || session.reasoningEffort === config.defaultReasoningEffort);
 
 /**
  * 只读定位当前上下文的持久化会话，供聊天命令在 coordinator 重建后使用。
@@ -209,9 +257,10 @@ export async function findPersistedLarkSession(
   config: StoredLarkConfig,
   chatId: string,
   chatType: LarkMessageEvent['chatType'],
-  scopeId: string
+  scopeId: string,
+  mappings?: ChannelMappingRepository
 ): Promise<Session | undefined> {
-  const sessions = await listPersistedLarkSessions(runtime, config, chatId, chatType, scopeId);
+  const sessions = await listPersistedLarkSessions(runtime, config, chatId, chatType, scopeId, mappings);
   return sessions[sessions.length - 1];
 }
 
@@ -226,12 +275,15 @@ export async function listPersistedLarkSessions(
   config: StoredLarkConfig,
   chatId: string,
   chatType: LarkMessageEvent['chatType'],
-  scopeId: string
+  scopeId: string,
+  mappings?: ChannelMappingRepository
 ): Promise<Session[]> {
   if (!runtime.listSessions || !config.defaultAgentId) return [];
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
+  const binding = await mappings?.get(`lark-launch:${config.appId}`, sourceId);
+  const launch = binding?.channel === `lark-launch:${config.appId}` && binding.externalId === sourceId ? binding : undefined;
   const sessions = await runtime.listSessions();
-  return sessions.filter(session => larkSessionMatchesScope(session, config, sourceId));
+  return sessions.filter(session => larkSessionMatchesScope(session, config, sourceId, launch?.sessionId));
 }
 
 export async function resolveLarkSession(
@@ -241,7 +293,9 @@ export async function resolveLarkSession(
   config: StoredLarkConfig,
   chatId: string,
   chatType: LarkMessageEvent['chatType'],
-  scopeId: string
+  scopeId: string,
+  mappings?: ChannelMappingRepository,
+  launchOptions?: LarkLaunchOptions
 ): Promise<Session> {
   if (!config.defaultAgentId) throw new LarkServiceError('LARK_AGENT_CONFIG_REQUIRED', '机器人尚未配置默认 Agent，请在 Dutydeck 飞书设置的“Agent 与风险控制”中完成配置。', 409);
   if (!larkExecutionConfirmed(config)) throw new LarkServiceError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '飞书无人值守任务尚未获得完全信任确认，请在 Dutydeck 飞书设置中确认后重试。', 409);
@@ -257,11 +311,33 @@ export async function resolveLarkSession(
     && (larkPermissionMode(config) !== 'ask' || session.protocol === 'acp');
   const configKey = larkSessionConfigKey(config);
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
+  const binding = await mappings?.get(`lark-launch:${config.appId}`, sourceId);
+  const launch = binding?.channel === `lark-launch:${config.appId}` && binding.externalId === sourceId ? binding : undefined;
+  const launchConfigKey = launch?.extra ? (JSON.parse(launch.extra) as { baseConfigKey?: string }).baseConfigKey : undefined;
+  const launchCompatible = (session: Session) => session.id !== launch?.sessionId || launchConfigKey === configKey;
+  const saveLaunchBinding = async (session: Session) => {
+    if (!launchOptions && !launch) return;
+    if (launch?.sessionId === session.id && launchConfigKey === configKey) return;
+    try {
+      if (!mappings) throw new Error('当前运行时不支持保存首轮会话配置。');
+      await mappings.save({ id: `lark-launch:${sourceId}`, channel: `lark-launch:${config.appId}`, externalId: sourceId,
+        sessionId: session.id, extra: JSON.stringify({ baseConfigKey: configKey }), createdAt: new Date().toISOString() });
+    } catch (error) {
+      await runtime.stop?.(session.id);
+      throw error;
+    }
+  };
+  const requestedConfig = launchOptions ? { ...config, workspace: launchOptions.cwd ?? config.workspace,
+    defaultModel: launchOptions.model ?? config.defaultModel, defaultReasoningEffort: launchOptions.reasoningEffort ?? config.defaultReasoningEffort } : config;
+  const matchesRequest = (session: Session) => larkSessionMatchesScope(session, launchOptions ? { ...requestedConfig, managedGroup: undefined } : config, sourceId, launchOptions ? undefined : launch?.sessionId);
   if (group.sessionId && !group.retiredSessionIds?.has(group.sessionId)) {
     const existing = await runtime.getSession(group.sessionId);
     const reusable = existing && !['failed', 'stopped'].includes(existing.state);
     if (reusable && (config.managedGroup || group.sessionConfigKey === configKey)) {
-      if (compatible(existing)) return existing;
+      if (compatible(existing) && launchCompatible(existing) && (!launchOptions || matchesRequest(existing))) {
+        await saveLaunchBinding(existing);
+        return existing;
+      }
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书权限姿态已变更，停止旧 Session 并创建新运行');
       await stopForConfiguration(existing);
     }
@@ -274,13 +350,15 @@ export async function resolveLarkSession(
   group.sessionConfigKey = undefined;
   if (runtime.listSessions) {
     const sessions = await runtime.listSessions();
-    const existing = [...sessions].reverse().find(item => larkSessionMatchesScope(item, config, sourceId)
+    // A recovered first turn may have started successfully before its binding was saved.
+    const existing = [...sessions].reverse().find(item => matchesRequest(item)
       && !['failed', 'stopped'].includes(item.state)
       // /new 退休掉的会话不得再被复用：runtime.stop 可能尚未落库（会话仍是 idle），
       // 此时并发到达的消息会把用户刚要求结束的上下文重新绑回来。
       && !group.retiredSessionIds?.has(item.id));
     if (existing) {
-      if (compatible(existing)) {
+      if (compatible(existing) && launchCompatible(existing)) {
+        await saveLaunchBinding(existing);
         group.sessionId = existing.id;
         group.sessionConfigKey = configKey;
         log.info({ sessionId: existing.id, appId: config.appId, chatId }, '复用已持久化的飞书 Session');
@@ -295,6 +373,7 @@ export async function resolveLarkSession(
     ...(config.workspace ? { cwd: config.workspace } : {}),
     ...(config.defaultModel ? { model: config.defaultModel } : {}),
     ...(config.defaultReasoningEffort ? { reasoningEffort: config.defaultReasoningEffort } : {}),
+    ...launchOptions,
     permissionMode: larkPermissionMode(config),
     source: 'lark',
     sourceId
@@ -303,6 +382,7 @@ export async function resolveLarkSession(
     await runtime.stop?.(session.id);
     throw new LarkServiceError('LARK_APPROVAL_UNSUPPORTED', '飞书逐项确认仅支持 ACP Agent；此 Agent 的原生确认需在终端完成。', 422);
   }
+  await saveLaunchBinding(session);
   group.sessionId = session.id;
   group.sessionConfigKey = configKey;
   return session;

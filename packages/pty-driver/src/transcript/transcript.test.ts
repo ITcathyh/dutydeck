@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
-import { ClaudeTranscriptTailer, resolveClaudeTranscriptPath } from './claude.js';
+import { ClaudeTranscriptTailer, mapClaudeEntry, resolveClaudeTranscriptPath } from './claude.js';
 import { CodexTranscriptTailer, resolveCodexRolloutPath } from './codex.js';
 import { createTranscriptTailer } from './index.js';
 import { JsonlTailer } from './tail.js';
@@ -56,6 +56,34 @@ function sourceId(path: string, offset: number, rawLine: string, eventIndex: num
 }
 
 describe('ClaudeTranscriptTailer (explicit path)', () => {
+  it('maps a provider synthetic placeholder to a structured retryable error', () => {
+    const entry = {
+      type: 'assistant',
+      isApiErrorMessage: false,
+      message: {
+        role: 'assistant',
+        model: '<synthetic>',
+        stop_reason: 'stop_sequence',
+        content: [{ type: 'text', text: 'No response requested.' }],
+      },
+    };
+
+    expect(mapClaudeEntry(entry)).toEqual([{
+      type: 'error',
+      data: {
+        message: 'Claude 未产生模型回复，请重试此任务。',
+        code: 'provider_no_model_reply',
+        retryable: true,
+      },
+    }]);
+    expect(mapClaudeEntry({ ...entry, isApiErrorMessage: true })).toBeUndefined();
+    expect(mapClaudeEntry({ ...entry, isSidechain: true })).toBeUndefined();
+    expect(mapClaudeEntry({
+      ...entry,
+      message: { ...entry.message, model: 'claude-opus-4-8', content: [{ type: 'text', text: 'real answer' }] },
+    })).toEqual([{ type: 'text', data: { text: 'real answer' } }]);
+  });
+
   it('flushes complete records once and retains a partial line for the next flush', () => {
     const dir = makeTempDir('claude-flush');
     const file = join(dir, 'session.jsonl');

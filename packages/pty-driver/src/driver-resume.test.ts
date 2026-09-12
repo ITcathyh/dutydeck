@@ -516,7 +516,11 @@ describe('PtyCliDriver resume session id resolution', () => {
     const cwd = makeTempDir('codex-cwd');
     setEnv('CODEX_HOME', makeTempDir('codex-empty'));
 
-    const adapter = recordingAdapter({ id: 'codex', fixturePath });
+    let preparations = 0;
+    const adapter: RecordingAdapter = {
+      ...recordingAdapter({ id: 'codex', fixturePath }),
+      prepareInput: () => { preparations++; },
+    };
     const driver = driverFor(adapter, cwd);
     await driver.resume();
     await driver.send('after restart');
@@ -524,6 +528,7 @@ describe('PtyCliDriver resume session id resolution', () => {
     expect(adapter.resumeIds).toEqual([SESSION_ID]);
     expect(adapter.prompts).toEqual(['after restart']);
     expect(adapter.prompts[0]).not.toContain(buildSessionMarker(SESSION_ID));
+    expect(preparations).toBe(1);
 
     await driver.stop();
   }, 30_000);

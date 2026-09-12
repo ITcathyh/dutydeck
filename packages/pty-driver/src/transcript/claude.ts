@@ -169,6 +169,19 @@ export function mapClaudeEntry(entry: any): NormalizedDriverEvent[] | undefined 
   if (role === 'assistant') {
     // API-error lines are execution metadata, not model answers.
     if (entry.isApiErrorMessage === true) return undefined;
+    // Claude can persist a provider-generated assistant placeholder when no
+    // model call happened. Treat the exact provider model sentinel as a
+    // retryable terminal failure; its text is not an assistant reply.
+    if (entry.message?.model === '<synthetic>') {
+      return [{
+        type: 'error',
+        data: {
+          message: 'Claude 未产生模型回复，请重试此任务。',
+          code: 'provider_no_model_reply',
+          retryable: true,
+        },
+      }];
+    }
     const content = entry.message?.content;
     if (typeof content === 'string') {
       return content.length > 0 ? [{ type: 'text', data: { text: content } }] : undefined;

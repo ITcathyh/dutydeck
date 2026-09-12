@@ -7,6 +7,7 @@ import {
   larkReplyContext,
   larkSessionConfigKey,
   larkSourceId,
+  parsePrompt,
   resolveLarkSession,
   resolveLarkScopeId,
   type LarkChatModeResolver
@@ -33,6 +34,69 @@ const groupEvent = (overrides: Partial<LarkMessageEvent> = {}): LarkMessageEvent
 });
 
 const staticResolver = (mode: 'topic' | 'group' | 'p2p'): LarkChatModeResolver => async () => mode;
+
+describe('parsePrompt mention identity', () => {
+  it('removes only the current bot mention and renders other mention keys as readable names', async () => {
+    const event = groupEvent({
+      content: JSON.stringify({ text: '@_user_3 请让 @_user_1 和 @_user_2 review Dutydeck；@_user_4' }),
+      mentions: [
+        { key: '@_user_1', name: '张三', openId: 'ou_human', mentionedType: 'user' },
+        { key: '@_user_2', name: 'Peer.Bot+(beta)', openId: 'ou_peer', mentionedType: 'bot' },
+        { key: '@_user_3', name: 'Dutydeck', openId: 'ou_self', mentionedType: 'bot' },
+        { key: '@_user_4', name: 'Dutydeck', openId: 'ou_other', mentionedType: 'bot' }
+      ]
+    });
+
+    await expect(parsePrompt(event, 'ou_self')).resolves.toMatchObject({
+      prompt: '请让 @张三 和 @Peer.Bot+(beta) review Dutydeck；@Dutydeck'
+    });
+  });
+
+  it('keeps every mention readable when the current bot identity is unknown', async () => {
+    const event = groupEvent({
+      content: JSON.stringify({ text: '@_user_1 请 @_user_10 review' }),
+      mentions: [
+        { key: '@_user_1', name: '张三', openId: 'ou_human', mentionedType: 'user' },
+        { key: '@_user_10', name: 'PeerBot', openId: 'ou_peer', mentionedType: 'bot' }
+      ]
+    });
+
+    await expect(parsePrompt(event)).resolves.toMatchObject({ prompt: '@张三 请 @PeerBot review' });
+  });
+
+  it('replaces longer mention keys first when one key prefixes another', async () => {
+    const event = groupEvent({
+      content: JSON.stringify({ text: '@_user_10 和 @_user_1' }),
+      mentions: [
+        { key: '@_user_1', name: '甲', openId: 'ou_one' },
+        { key: '@_user_10', name: '甲十', openId: 'ou_ten' }
+      ]
+    });
+
+    await expect(parsePrompt(event, 'ou_none')).resolves.toMatchObject({ prompt: '@甲十 和 @甲' });
+  });
+
+  it('uses rich-text at-node identity and does not remove same-name people or plain text', async () => {
+    const event = groupEvent({
+      messageType: 'post',
+      content: JSON.stringify({ title: '安排', content: [[
+        { tag: 'text', text: '请 ' },
+        { tag: 'at', user_id: 'ou_peer', user_name: 'Duty.deck+(A)' },
+        { tag: 'text', text: ' 与 ' },
+        { tag: 'at', user_id: 'ou_self', user_name: 'Duty.deck+(A)' },
+        { tag: 'text', text: ' review Duty.deck+(A)' }
+      ]] }),
+      mentions: [
+        { key: '@_user_1', name: 'Duty.deck+(A)', openId: 'ou_peer' },
+        { key: '@_user_2', name: 'Duty.deck+(A)', openId: 'ou_self' }
+      ]
+    });
+
+    await expect(parsePrompt(event, 'ou_self')).resolves.toMatchObject({
+      prompt: '安排\n\n请 @Duty.deck+(A) 与 review Duty.deck+(A)'
+    });
+  });
+});
 
 describe('resolveLarkScopeId legacy 行为（未配置回复模式）', () => {
   it('群聊有 thread_id 时按 thread_id 隔离（无 resolver 不触发 API）', async () => {

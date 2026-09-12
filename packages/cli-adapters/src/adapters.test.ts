@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ALL_CLI_IDS, createCliAdapter, getCliAdapter } from './factory.js';
 import { createClaudeCodeAdapter } from './adapters/claude-code.js';
 import { createCodexAdapter } from './adapters/codex.js';
@@ -117,12 +117,17 @@ describe('codex', () => {
     expect(args).toContain('--dangerously-bypass-hook-trust');
     expect(args).toContain('--no-alt-screen');
     expect(args).toContain('check_for_update_on_startup=false');
+    const nudgeIndex = safeArgs.indexOf('notice.hide_rate_limit_model_nudge=true');
+    expect(nudgeIndex).toBeGreaterThan(0);
+    expect(safeArgs[nudgeIndex - 1]).toBe('-c');
+    expect(args).toContain('notice.hide_rate_limit_model_nudge=true');
   });
 
   it('resume=true：resume 子命令 + id 收尾', () => {
     const args = adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'codex-sid' });
     expect(args[0]).toBe('resume');
     expect(args[args.length - 1]).toBe('codex-sid');
+    expect(args.indexOf('notice.hide_rate_limit_model_nudge=true')).toBeLessThan(args.indexOf('codex-sid'));
     // 无 resumeSessionId 时新起会话，不猜 id
     const fresh = adapter.buildArgs({ sessionId: SID, resume: true });
     expect(fresh[0]).not.toBe('resume');
@@ -144,6 +149,59 @@ describe('codex', () => {
     expect(adapter.readyPattern).toBeInstanceOf(RegExp);
     expect(adapter.capabilities.resume).toBe(true);
     expect(adapter.buildResumeCommand?.('codex-sid')).toEqual(['resume', 'codex-sid']);
+  });
+
+  it('首轮输入等待 Codex 启动字段离开 loading', async () => {
+    vi.useFakeTimers();
+    try {
+      let screen = [
+        '│ model: loading │',
+        '│ directory: loading │',
+        '› Ask Codex',
+      ].join('\n');
+      expect(adapter.prepareInput).toBeTypeOf('function');
+      let settled = false;
+      const pending = adapter.prepareInput!({ write() {}, readScreen: () => screen }, { sessionId: SID })
+        .then(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(false);
+
+      screen = [
+        '│ model: gpt-5.5 │',
+        '│ directory: /tmp/workspace │',
+        '› Ask Codex',
+      ].join('\n');
+      await vi.advanceTimersByTimeAsync(100);
+      await pending;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('兼容没有 loading 状态栏的 Codex composer', async () => {
+    expect(adapter.prepareInput).toBeTypeOf('function');
+    await expect(adapter.prepareInput!(
+      { write() {}, readScreen: () => 'Codex\n› Ask Codex' },
+      { sessionId: SID },
+    )).resolves.toBeUndefined();
+  });
+
+  it('启动字段持续 loading 时有界失败', async () => {
+    vi.useFakeTimers();
+    try {
+      expect(adapter.prepareInput).toBeTypeOf('function');
+      const pending = adapter.prepareInput!(
+        { write() {}, readScreen: () => '│ model: loading │\n│ directory: loading │\n› Ask Codex' },
+        { sessionId: SID },
+      );
+      const rejected = expect(pending).rejects.toThrow(/Codex.*就绪/);
+      await vi.advanceTimersByTimeAsync(31_000);
+      await rejected;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

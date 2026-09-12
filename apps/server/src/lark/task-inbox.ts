@@ -1,3 +1,4 @@
+import type { LarkLaunchOptions } from './new-session.js';
 import { randomUUID } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
 import type { LarkMessageResource } from './message-content.js';
@@ -13,7 +14,7 @@ export interface LarkInboxRecord {
   cardId?: string;
   taskId?: string;
   turn?: number;
-  request?: { prompt: string; scopeId: string; resources: LarkMessageResource[]; materialPrompt?: string };
+  request?: { prompt: string; scopeId: string; resources: LarkMessageResource[]; materialPrompt?: string; launchOptions?: LarkLaunchOptions };
   materials?: { prompt: string; cursor?: LarkContextCursor; readMessageIds: string[]; contextBefore?: string };
   error?: string;
 }

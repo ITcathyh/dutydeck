@@ -707,6 +707,7 @@ describe('runtime lifecycle acceptance', () => {
     const h = harness({ onSend: emit => {
       emit({ type: 'text', data: { text: 'partial answer' } });
       emit({ type: 'error', data: { message: 'terminal SDK error' } });
+      emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     } });
     await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
 
