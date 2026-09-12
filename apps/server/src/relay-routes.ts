@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
+import { RuntimeError } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import {
   RelayAskBroker,
@@ -123,12 +124,16 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
   });
 
   app.get<{ Params: { id: string } }>('/api/relay/sessions/:id/asks', async (request, reply) => {
-    try { return service.listPending(request.params.id); }
+    try {
+      if ((await runtime?.getSession(request.params.id))?.source === 'work_item') throw new RuntimeError('WORK_ITEM_MANAGED_SESSION', '请从目标查看和回答步骤提问', 403);
+      return service.listPending(request.params.id);
+    }
     catch (error) { return handleRelayError(error, reply); }
   });
 
   app.post<{ Params: { id: string; askId: string }; Body: { answer?: string } }>('/api/relay/sessions/:id/asks/:askId/answer', async (request, reply) => {
     try {
+      if ((await runtime?.getSession(request.params.id))?.source === 'work_item') throw new RuntimeError('WORK_ITEM_MANAGED_SESSION', '请从目标查看和回答步骤提问', 403);
       const ask = await service.answer(request.params.id, request.params.askId, request.body ?? {});
       return { ok: true, ask };
     } catch (error) { return handleRelayError(error, reply); }

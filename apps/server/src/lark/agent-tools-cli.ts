@@ -21,7 +21,7 @@ interface GroupToolClientOptions {
   fetcher?: typeof globalThis.fetch;
 }
 
-class AgentGroupToolHttpClient {
+export class AgentGroupToolHttpClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly fetcher: typeof globalThis.fetch;

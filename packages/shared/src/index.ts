@@ -426,3 +426,4 @@ export * from './workspace.js';
 export * from './verification.js';
 
 export * from './session-automation.js';
+export * from './work-items.js';

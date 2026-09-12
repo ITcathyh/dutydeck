@@ -1,3 +1,4 @@
+import { AgentGroupToolError } from './lark/agent-tools.js';
 import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { readFile } from 'node:fs/promises';
@@ -12,6 +13,8 @@ import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProv
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
 import { registerFoundationManagementRoutes, type FoundationManagementOptions } from './foundation-routes.js';
 import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from './schedule-routes.js';
+import { registerWorkItemTools, type WorkItemToolsOptions } from './work-item-tools.js';
+import { registerWorkItemRoutes, type WorkItemRouteOptions } from './work-item-routes.js';
 import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } from './session-automation-routes.js';
 import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
 
@@ -47,6 +50,8 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  workItems?: WorkItemRouteOptions;
+  workItemTools?: WorkItemToolsOptions;
   automation?: SessionAutomationRouteOptions;
   webRoot?: string;
   lark?: LarkRoutesOptions;
@@ -83,6 +88,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   app.addHook('preClose', async () => { for (const stream of streams) stream.end(); streams.clear(); });
 
   app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof AgentGroupToolError) return reply.code(error.statusCode).send(error.response());
     if (error instanceof RuntimeError || error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
   });
@@ -114,6 +120,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   await registerIdentityPreflightRoutes(app, options.identityPreflight);
   await registerScheduleManagementRoutes(app, options.schedule);
   if (options.automation) await registerSessionAutomationRoutes(app, options.automation);
+  if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
+  if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));

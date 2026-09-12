@@ -121,6 +121,7 @@ export interface CliHandlers {
   larkSend?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   larkUpdate?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   identityPreflight?(channelBotId: string, options: IdentityPreflightCliOptions): void | Promise<void>;
+  work?(operation: string, args: string[], options?: { file?: string; key?: string; turn?: string }): void | Promise<void>;
   groupSelf?(): void | Promise<void>;
   groupPeers?(): void | Promise<void>;
   groupMembers?(): void | Promise<void>;
@@ -300,6 +301,14 @@ Examples:
     .argument('<channel-bot-id>', 'Staged or disabled ChannelBot ID')
     .option('--group-binding <id>', 'Limit verification to a GroupBinding (repeatable)', (value: string, previous: string[]) => [...previous, value], [])
     .action((channelBotId, options) => handlers.identityPreflight?.(channelBotId, options));
+
+  const work = program.command('work').description('Arrange durable goals, Agent steps and reusable workflows in the current Feishu conversation').requiredOption('--turn <token>', 'Current task capability supplied by Dutydeck');
+  const workOptions = (options: { file?: string; key?: string } = {}) => ({ ...options, turn: work.opts().turn as string });
+  for (const operation of ['list', 'templates', 'agents', 'skills']) work.command(operation).action(() => handlers.work?.(operation, [], workOptions()));
+  work.command('show <id>').action(id => handlers.work?.('show', [id], workOptions()));
+  work.command('create').requiredOption('--file <path>', 'JSON plan with goal and a stable idempotencyKey').action(options => handlers.work?.('create', [], workOptions(options)));
+  work.command('save <id> <name>').action((id, name) => handlers.work?.('save', [id, name], workOptions()));
+  work.command('run <template> <version> <goal>').requiredOption('--key <key>', 'Stable request key for this run').action((id, version, goal, options) => handlers.work?.('run', [id, version, goal], workOptions(options)));
 
   const group = program.command('group').description('Collaborate with Agents in the current Lark group');
   group.command('self')

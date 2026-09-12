@@ -40,6 +40,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   onArchive(): void;
   onToggleRaw(): void;
 }) {
+  const managed = session.source === 'work_item';
   const workspace = workspaceName(session.cwd);
   const taskGoal = taskPrompt?.trim() || '未命名任务';
   // 状态文案、是否呼吸、能否重新启动全部来自同一个判断，见 ui.tsx:effectiveStatus。
@@ -48,7 +49,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   const status = effectiveStatus(session);
   // nextActionForState 的入参只有 state，拿不到 archivedAt，改签名会波及
   // workspace-model 里 attentionReasonForSession 等调用点；归档分支放在这里。
-  const nextAction = status.archived ? '已归档任务只读；可查看历史记录，不能再下指令' : nextActionForState(session.state);
+  const nextAction = managed ? '此步骤由目标管理；请从原目标处理授权、重试或停止' : status.archived ? '已归档任务只读；可查看历史记录，不能再下指令' : nextActionForState(session.state);
   // 下一步提示让用户「查看失败详情」，但详情页原先根本没有失败详情，只有总览页有。
   // 脱敏管线在 workspace-model:sessionErrorSummary，这里只读不改。
   // 归档任务同样要能看到：历史失败原因是只读信息，不是可操作项。
@@ -80,9 +81,9 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
-        {status.busy && <IconButton label="中断当前任务" onClick={onInterrupt}><Square size={14}/></IconButton>}
+        {status.busy && !managed && <IconButton label="中断当前任务" onClick={onInterrupt}><Square size={14}/></IconButton>}
         {session.systemPrompt && <IconButton label="查看系统提示词" onClick={onOpenPrompt}><BookOpen size={14}/></IconButton>}
-        {!status.archived && <IconButton label="归档任务" onClick={onArchive}><Archive size={15}/></IconButton>}
+        {!status.archived && !managed && <IconButton label="归档任务" onClick={onArchive}><Archive size={15}/></IconButton>}
         <Button aria-label="原始日志" variant="secondary" tone={rawVisible ? 'inverse' : 'default'} disabled={!rawAvailable} onClick={onToggleRaw} icon={rawVisible ? <PanelRightOpen size={14}/> : <Terminal size={14}/>}><span className="hidden sm:inline">日志</span></Button>
       </div>
     </div>
@@ -97,7 +98,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
       <strong className="shrink-0 text-caption font-semibold text-secondary">{status.label}</strong>
       <span className="hidden text-caption text-subtle sm:inline">/</span>
       <span className="min-w-0 flex-1 truncate text-caption text-subtle">{nextAction}</span>
-      {status.recoverable && <Button variant="danger" size="sm" loading={restarting} onClick={onRestart}>重新启动</Button>}
+      {status.recoverable && !managed && <Button variant="danger" size="sm" loading={restarting} onClick={onRestart}>重新启动</Button>}
       {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
       <ConnectionState status={streamStatus}/>
     </div>

@@ -73,6 +73,10 @@ export interface AgentDriver {
   recover?(state: DriverTurnRecovery): Promise<void>;
   /** 停止驱动并清理子进程。discardSession=true 时同时清除持久化会话状态。 */
   stop(options?: { discardSession?: boolean }): Promise<void>;
+  /** Authoritative post-stop resource probe. True means this driver's owned
+   * execution resource is gone; a resolved stop(), detach, or rejected adoption
+   * alone is not proof. Unsupported drivers must omit this or return false. */
+  isStopped?(): Promise<boolean>;
   /** 裁决一个挂起的权限请求。返回是否成功兑现。 */
   resolvePermission?(id: string, approved: boolean): Promise<boolean>;
   /** 切换模型（不支持的实现可不实现）。 */

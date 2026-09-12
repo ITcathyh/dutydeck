@@ -1,3 +1,4 @@
+import type { CreateWorkItemInput, WorkItem, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceResponse, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription } from '@dutydeck/shared';
 import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dutydeck/shared';
 
@@ -174,7 +175,18 @@ export const eventsUrl = (id: string, query: EventWindowQuery = {}) => {
   return `/api/sessions/${id}/events${suffix ? `?${suffix}` : ''}`;
 };
 export const RUN_SUMMARY_ENDPOINT = '/api/sessions/summaries';
+export type WorkItemRequest = { stepId: string; sessionId: string; taskId: string; requestId: string; kind: 'permission' | 'question'; text: string };
 export const api = {
+  workItemRequests: (sessionId: string, id: string) => json<WorkItemRequest[]>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/requests`, { cache: 'no-store' }),
+  respondWorkItemRequest: (sessionId: string, id: string, input: { stepId: string; taskId: string; requestId: string; kind: 'permission' | 'question'; answer: string }) => json<unknown>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/respond`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  workItems: (sessionId: string) => json<{ items: WorkItem[]; templates: WorkTemplate[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items`, { cache: 'no-store' }),
+  workItem: (sessionId: string, id: string) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}`, { cache: 'no-store' }),
+  createWorkItem: (sessionId: string, input: CreateWorkItemInput) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  cancelWorkItem: (sessionId: string, id: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/cancel`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ expectedRevision }) }),
+  retryWorkStep: (sessionId: string, id: string, stepId: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/retry`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stepId, expectedRevision }) }),
+  answerWorkStep: (sessionId: string, id: string, stepId: string, answer: string, expectedRevision: number) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/answer`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ stepId, answer, expectedRevision }) }),
+  saveWorkTemplate: (sessionId: string, id: string, name: string) => json<WorkTemplate>(`/api/sessions/${encodeURIComponent(sessionId)}/work-items/${encodeURIComponent(id)}/template`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
+  runWorkTemplate: (sessionId: string, id: string, input: { version: number; goal: string; idempotencyKey: string }) => json<WorkItem>(`/api/sessions/${encodeURIComponent(sessionId)}/work-templates/${encodeURIComponent(id)}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   automation: (id: string) => json<SessionAutomationList>(`/api/sessions/${id}/automation`),
   createSchedule: (id: string, input: CreateSessionScheduleInput) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   updateSchedule: (id: string, scheduleId: string, input: UpdateSessionScheduleInput) => json<{ schedule: SessionSchedule }>(`/api/sessions/${id}/automation/schedules/${scheduleId}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
