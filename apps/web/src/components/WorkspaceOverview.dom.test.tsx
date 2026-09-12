@@ -34,6 +34,57 @@ const makeSimpleBot = (overrides: Partial<LarkBotConfig> = {}): LarkBotConfig =>
 });
 const baseProps = { sessions: [], summaries: {}, agents, loading: false, larkBots: [] as LarkBotConfig[], view: 'all' as const, onViewChange: () => {}, onSelect: () => {}, onCreate: () => {}, onOpenAgentSetup: () => {}, onOpenLarkSetup: () => {} };
 
+describe('WorkspaceOverview 批量清理选择', () => {
+  const sessions = [session('1', '/repo/done', 'completed'), session('2', '/repo/busy', 'thinking'), { ...session('3', '/repo/managed', 'completed'), source: 'work_item' }, { ...session('4', '/repo/archived', 'completed'), archivedAt: '2026-09-12T00:00:00Z' }];
+
+  it('全选只包含当前筛选下的可清理任务，勾选不会打开详情', async () => {
+    const user = userEvent.setup();
+    const onBulkArchive = vi.fn(); const onSelect = vi.fn();
+    render(<WorkspaceOverview {...baseProps} sessions={sessions} view="completed" onBulkArchive={onBulkArchive} onSelect={onSelect}/>);
+    await user.click(screen.getByRole('button', { name: '批量清理' }));
+    expect(screen.getByRole('button', { name: '清理所选任务' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('checkbox', { name: '选择任务：managed' }).hasAttribute('disabled')).toBe(true);
+    await user.click(screen.getByRole('checkbox', { name: '全选当前视图' }));
+    expect(screen.getByText('已选 1 个任务')).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '清理所选任务' }));
+    expect(onBulkArchive).toHaveBeenCalledWith(['1']);
+    expect(onSelect).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('checkbox', { name: '全选当前视图' }));
+    expect(screen.getByRole('button', { name: '清理所选任务' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('支持单选与半选；刷新不自动勾选新任务，已归档项从选择中移除', async () => {
+    const user = userEvent.setup(); const onBulkArchive = vi.fn();
+    const { rerender } = render(<WorkspaceOverview {...baseProps} sessions={sessions} onBulkArchive={onBulkArchive}/>);
+    await user.click(screen.getByRole('button', { name: '批量清理' }));
+    await user.click(screen.getByRole('checkbox', { name: '选择任务：done' }));
+    expect((screen.getByRole('checkbox', { name: '全选当前视图' }) as HTMLInputElement).indeterminate).toBe(true);
+    const refreshed = [...sessions.map(item => item.id === '1' ? { ...item, archivedAt: '2026-09-12T01:00:00Z' } : item), session('5', '/repo/new', 'completed')];
+    rerender(<WorkspaceOverview {...baseProps} sessions={refreshed} onBulkArchive={onBulkArchive}/>);
+    expect(screen.getByText('已选 0 个任务')).toBeTruthy();
+    expect((screen.getByRole('checkbox', { name: '选择任务：new' }) as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByRole('button', { name: '清理所选任务' }).hasAttribute('disabled')).toBe(true);
+  });
+
+  it('切换筛选或退出多选会清空选择，已归档视图不提供清理入口', async () => {
+    const user = userEvent.setup(); const onBulkArchive = vi.fn();
+    const { rerender } = render(<WorkspaceOverview {...baseProps} sessions={sessions} onBulkArchive={onBulkArchive}/>);
+    await user.click(screen.getByRole('button', { name: '批量清理' }));
+    await user.click(screen.getByRole('checkbox', { name: '全选当前视图' }));
+    rerender(<WorkspaceOverview {...baseProps} sessions={sessions} view="completed" onBulkArchive={onBulkArchive}/>);
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '批量清理' }));
+    expect(screen.getByText('已选 0 个任务')).toBeTruthy();
+    await user.click(screen.getByRole('checkbox', { name: '全选当前视图' }));
+    await user.click(screen.getByRole('button', { name: '退出多选' }));
+    await user.click(screen.getByRole('button', { name: '批量清理' }));
+    expect(screen.getByText('已选 0 个任务')).toBeTruthy();
+    rerender(<WorkspaceOverview {...baseProps} sessions={sessions} view="archived" onBulkArchive={onBulkArchive}/>);
+    expect(screen.queryByRole('checkbox')).toBeNull();
+    expect(screen.queryByRole('button', { name: '批量清理' })).toBeNull();
+  });
+});
+
 describe('WorkspaceOverview', () => {
   it('does not claim work is in progress when both tasks and Agents are empty', () => {
     render(<WorkspaceOverview {...baseProps} sessions={[]} agents={[]}/>);
