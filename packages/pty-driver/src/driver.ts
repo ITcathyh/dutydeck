@@ -70,6 +70,9 @@ export class PtyCliDriver implements AgentDriver {
   /** 一轮任务进行中：send() 置 true，completed 发出后置 false。 */
   private turnActive = false;
   private firstPromptSent = false;
+  /** A new CLI process may need startup preparation even when it resumed an
+   * existing conversation and therefore must not receive first-prompt context. */
+  private inputPrepared = false;
   /** 本轮是否已收到 CLI 的实质性输出（text/thinking/tool）。
    *  idle 检测在 CLI 启动期（splash 屏静止）会误判为空闲，必须等至少
    *  一条实质事件后才允许 completed。 */
@@ -210,8 +213,11 @@ export class PtyCliDriver implements AgentDriver {
     try {
       // Startup confirmation is outside a turn: a static confirmation menu
       // must never be mistaken for an idle, completed agent response.
-      if (isFirstPrompt && this.adapter.prepareInput) {
-        await Promise.race([this.adapter.prepareInput(this.submissionBackend(submission), this.sessionContext()), writeCancelled]);
+      if (!this.inputPrepared) {
+        if (this.adapter.prepareInput) {
+          await Promise.race([this.adapter.prepareInput(this.submissionBackend(submission), this.sessionContext()), writeCancelled]);
+        }
+        this.inputPrepared = true;
       }
       this.turnActive = true;
       this.turnHasOutput = false;
@@ -336,6 +342,12 @@ export class PtyCliDriver implements AgentDriver {
 
   async interrupt(): Promise<void> {
     if (this.stopped) return;
+    // prepareInput and delayed writeInput steps run before send() begins
+    // waiting for turn completion. Fence that submission before signalling the
+    // backend so a late poll or delayed Enter cannot submit after interrupt.
+    const interruptError = new Error('Driver interrupted');
+    this.cancelActiveSubmission(interruptError);
+    this.turnWriteReject?.(interruptError);
     this.backend.interrupt();
     // 不主动发 completed——等 idle 检测到 prompt 回归自然完成（turnActive 仍为 true）。
     this.emitEvent({ type: 'status', data: { state: 'interrupted' } });
@@ -472,6 +484,7 @@ export class PtyCliDriver implements AgentDriver {
   private markResumed(): void {
     this.started = true;
     this.firstPromptSent = true;
+    this.inputPrepared = false;
   }
 
   /** tmux reattach restores the exact first-prompt state saved on the owned
@@ -481,6 +494,7 @@ export class PtyCliDriver implements AgentDriver {
     this.started = true;
     this.firstPromptSent = this.backend instanceof TmuxBackend
       && this.backend.getDutydeckMetadata('first_prompt_sent') === 'true';
+    this.inputPrepared = this.firstPromptSent;
   }
 
   /**
@@ -696,8 +710,8 @@ export class PtyCliDriver implements AgentDriver {
     });
     if (this.transcript) {
       this.transcript.onEvent(e => {
-        // 标记本轮已有实质输出（text/thinking/tool_*），解除 idle 闸门。
-        if (e.type === 'text' || e.type === 'thinking' || e.type === 'tool_call' || e.type === 'tool_result') {
+        // 标记本轮已有实质输出或结构化失败，解除 idle 闸门。
+        if (e.type === 'text' || e.type === 'thinking' || e.type === 'tool_call' || e.type === 'tool_result' || e.type === 'error') {
           this.turnHasOutput = true;
           this.awaitingRecoveryTranscript = false;
         }
@@ -863,6 +877,7 @@ export class PtyCliDriver implements AgentDriver {
 
   private respawn(args: string[]): void {
     this.teardownWiring();
+    this.inputPrepared = false;
     // 会话名必须在 kill 之前取：kill 之后旧后端就不该再被问了。
     const tmuxName = this.backend instanceof TmuxBackend
       ? (this.tmuxSessionName() ?? this.sessionId)

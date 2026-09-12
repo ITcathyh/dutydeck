@@ -221,7 +221,12 @@ describe('Lark message coordinator', () => {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-empty' })),
       send: vi.fn(async () => ({ messageId: 'om_empty_card' })), deleteReaction: vi.fn(async () => {}), update: vi.fn(async () => ({})),
       listChatMessages: vi.fn(async () => ({
-        items: [{ messageId: 'om_previous', messageType: 'text', createTime: '1', sender: { id: 'ou_user', name: 'Alice' }, rawContent: '{"text":"把这个目录删掉"}', mentions: [], deleted: false, updated: false }],
+        items: [{ messageId: 'om_previous', messageType: 'text', createTime: '1', sender: { id: 'ou_user', name: 'Alice' },
+          rawContent: '{"text":"@_self 请 @_human 和 @_peer 把这个目录删掉"}', mentions: [
+            { key: '@_self', name: 'Dutydeck', id: 'ou_bot', idType: 'open_id' },
+            { key: '@_human', name: '张三', id: 'ou_human', idType: 'open_id' },
+            { key: '@_peer', name: 'PeerBot', id: 'ou_peer', idType: 'open_id' }
+          ], deleted: false, updated: false }],
         hasMore: false
       }))
     };
@@ -230,6 +235,9 @@ describe('Lark message coordinator', () => {
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     const contextualPrompt = runtime.send.mock.calls[0]?.[1];
     expect(contextualPrompt).toContain('把这个目录删掉');
+    expect(contextualPrompt).toContain('Alice: 请 @张三 和 @PeerBot 把这个目录删掉');
+    expect(contextualPrompt).not.toContain('@_');
+    expect(contextualPrompt).not.toContain('@Dutydeck');
     expect(contextualPrompt).toContain('必须先复述你对用户意图的理解并询问确认');
     expect(contextualPrompt).toContain('不得执行命令、写入文件、发送消息或触发其他副作用');
   });

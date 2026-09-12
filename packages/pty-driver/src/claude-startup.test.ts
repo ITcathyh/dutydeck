@@ -131,6 +131,37 @@ describe('PtyCliDriver Claude startup preparation', () => {
     expect(writes).toBe(0);
   });
 
+  it('rejects a send interrupted during preparation and never invokes writeInput', async () => {
+    let writes = 0;
+    let interrupts = 0;
+    let releasePreparation: (() => void) | undefined;
+    let onData: (data: string) => void = () => {};
+    const backend: SessionBackend = {
+      kind: 'pty', sessionName: undefined, spawn() {},
+      write() { writes++; onData('DONE'); return true; },
+      resize() {}, interrupt() { interrupts++; }, kill() {},
+      onData(callback) { onData = callback; }, onExit() {},
+    };
+    const adapter: CliAdapter = {
+      id: 'preparing-cli', capabilities: {}, buildArgs: () => [],
+      completionPattern: /DONE/,
+      prepareInput: () => new Promise(resolve => { releasePreparation = resolve; }),
+      writeInput: target => { target.write('prompt'); },
+    };
+    const driver = new PtyCliDriver({
+      agent: agentConfig(fixture, dir), adapter, backend, onEvent: () => {}, onExit: () => {}, sessionId: 'interrupt-preparing',
+    });
+    await driver.start();
+    const sending = driver.send('must not be written');
+    await waitFor('prepare invoked', () => releasePreparation !== undefined);
+    await driver.interrupt();
+    releasePreparation?.();
+    await expect(sending).rejects.toThrow('Driver interrupted');
+    expect(interrupts).toBe(1);
+    expect(writes).toBe(0);
+    await driver.stop();
+  });
+
   it('stops a real Claude trust preparation before its retry can write a prompt', async () => {
     const writes: string[] = [];
     let inputWrites = 0;
