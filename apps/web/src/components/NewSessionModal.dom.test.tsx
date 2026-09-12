@@ -33,7 +33,7 @@ describe('NewSessionModal create → dispatch', () => {
     await user.type(screen.getByLabelText('任务目标'), '修复登录超时');
     await user.click(submit);
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith(session, task));
-    expect(create).toHaveBeenCalledWith({ agentId: 'codex', permissionMode: 'ask' });
+    expect(create).toHaveBeenCalledWith({ agentId: 'codex', permissionMode: 'ask', workspaceMode: 'worktree' });
     expect(create).toHaveBeenCalledTimes(1);
     expect(send).toHaveBeenCalledWith('s1', '修复登录超时', 'queue');
   });

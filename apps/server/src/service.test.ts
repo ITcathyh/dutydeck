@@ -442,11 +442,9 @@ describe('production schedule foundation wiring', () => {
       const capabilities = await call(firstBase, '/api/foundation/schedules/capabilities');
       expect(capabilities.body).toMatchObject({
         repositoriesWired: true, permissionEvaluatorWired: true, writesEnabled: true,
-        executorWired: false, uiEntryReady: false, readiness: 'offline_management_ready'
+        executorWired: false, uiEntryReady: true, readiness: 'offline_management_ready'
       });
-      expect(capabilities.body.blockers.map((item: { code: string }) => item.code)).toEqual(expect.arrayContaining([
-        'schedule_executor_unavailable', 'schedule_ui_entry_unwired'
-      ]));
+      expect(capabilities.body.blockers.map((item: { code: string }) => item.code)).toEqual(['schedule_executor_unavailable']);
 
       const created = await call(firstBase, '/api/foundation/schedules', { method: 'POST', body: JSON.stringify(scheduleBody) });
       expect(created.response.status).toBe(201);

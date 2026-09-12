@@ -40,6 +40,22 @@ const baseProps = {
 
 const sendButton = () => screen.getByRole('button', { name: /发送消息|模型/ });
 
+describe('Composer Skill 选择', () => {
+  it.each(['click', 'enter'])('%s 保存完整路径并显示名称', async method => {
+    const user = userEvent.setup();
+    const onReferencesChange = vi.fn();
+    const skill = { name: 'smoke-evidence', description: '检查投递', path: '/repo/.agents/skills/smoke-evidence/SKILL.md', source: 'workspace' as const };
+    const { rerender } = render(<Composer {...baseProps} value="/smoke-evidence" skills={[skill]} onReferencesChange={onReferencesChange}/>);
+    if (method === 'click') await user.click(screen.getByRole('button', { name: /smoke-evidence/ }));
+    else { await user.click(screen.getByLabelText('消息')); await user.keyboard('{Enter}'); }
+    const expected = [{ id: `skill-${skill.path}`, kind: 'skill' as const, label: skill.name, value: skill.path }];
+    expect(onReferencesChange).toHaveBeenCalledWith(expected);
+    rerender(<Composer {...baseProps} references={expected}/>);
+    expect(screen.getByText('/skills smoke-evidence')).toBeTruthy();
+    expect(screen.queryByText(`/skills ${skill.path}`)).toBeNull();
+  });
+});
+
 describe('Composer 发送门禁', () => {
   it('有文本且 idle → 发送按钮可用，点击回调 onSubmit', async () => {
     const user = userEvent.setup();

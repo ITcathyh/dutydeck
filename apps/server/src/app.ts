@@ -12,6 +12,7 @@ import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProv
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
 import { registerFoundationManagementRoutes, type FoundationManagementOptions } from './foundation-routes.js';
 import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from './schedule-routes.js';
+import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } from './session-automation-routes.js';
 import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
 
 const contentTypes: Record<string, string> = {
@@ -46,6 +47,7 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  automation?: SessionAutomationRouteOptions;
   webRoot?: string;
   lark?: LarkRoutesOptions;
   system?: SystemRoutesOptions;
@@ -111,6 +113,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   await registerFoundationManagementRoutes(app, options.foundation);
   await registerIdentityPreflightRoutes(app, options.identityPreflight);
   await registerScheduleManagementRoutes(app, options.schedule);
+  if (options.automation) await registerSessionAutomationRoutes(app, options.automation);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
@@ -141,7 +144,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     }));
     return summaries.filter(Boolean);
   });
-  app.post<{ Body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode } }>('/api/sessions', async request => {
+  app.post<{ Body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: 'shared' | 'worktree' } }>('/api/sessions', async request => {
     if (request.body.permissionMode !== undefined && !permissionModes.includes(request.body.permissionMode)) throw new RuntimeError('INVALID_PERMISSION_MODE', `Unknown permission mode: ${String(request.body.permissionMode)}`, 400);
     return runtime.start(request.body);
   });
@@ -149,15 +152,44 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
     return (await runtime.getSession(request.params.id)) ?? reply.code(404).send({ error: { code: 'SESSION_NOT_FOUND', message: 'Session not found' } });
   });
-  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' } }>('/api/sessions/:id/send', async (request, reply) => {
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/capabilities', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
+    const session = await runtime.getSession(request.params.id);
+    if (!session) throw new RuntimeError('SESSION_NOT_FOUND', 'Session not found', 404);
+    const driver = runtime.getDriver(request.params.id);
+    const availability = (supported: boolean) => !driver ? 'unverified' : supported ? 'available' : 'unavailable';
+    return {
+      observedAt: new Date().toISOString(), protocol: session.protocol,
+      structuredApproval: availability(typeof driver?.resolvePermission === 'function'),
+      terminal: availability(typeof driver?.createTerminalStream === 'function'),
+      turnRecovery: driver && !driver.recover ? 'unavailable' : 'unverified',
+      verification: process.platform === 'linux' ? 'available' : 'unavailable',
+      localFileDelivery: process.platform === 'linux' ? 'available' : 'unavailable'
+    };
+  });
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/workspace', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
+    return await runtime.getWorkspace(request.params.id) ?? null;
+  });
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/verifications', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
+    return runtime.getVerifications(request.params.id);
+  });
+  app.post<{ Params: { id: string }; Body: { command: string; timeoutSeconds?: number } }>('/api/sessions/:id/verifications', async request => {
+    const decision = await requireSessionExecution(request, request.params.id, 'session', 'terminal.write');
+    return runtime.runVerification(request.params.id, request.body, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
+  });
+  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt'; skillRequests?: string[] } }>('/api/sessions/:id/send', async (request, reply) => {
     const prompt = request.body?.prompt?.trim();
     const mode = request.body?.mode ?? 'queue';
     if (!prompt) throw new RuntimeError('INVALID_PROMPT', 'Prompt must not be empty', 400);
     if (mode !== 'queue' && mode !== 'interrupt') throw new RuntimeError('INVALID_SEND_MODE', `Unknown send mode: ${String(mode)}`, 400);
+    const skillRequests = request.body.skillRequests;
+    if (skillRequests !== undefined && (!Array.isArray(skillRequests) || skillRequests.length > 16 || skillRequests.some(path => typeof path !== 'string' || !path.trim() || path.length > 4096))) throw new RuntimeError('INVALID_SKILL_REQUESTS', '请选择目录中的 Skill，最多 16 项', 400);
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'turn.append');
     const task = decision?.source === 'owner'
-      ? await runtime.dispatch(request.params.id, prompt, mode, prompt, undefined, installationOwnerTaskActor)
-      : await runtime.dispatch(request.params.id, prompt, mode);
+      ? await runtime.dispatch(request.params.id, prompt, mode, prompt, undefined, installationOwnerTaskActor, undefined, skillRequests)
+      : await runtime.dispatch(request.params.id, prompt, mode, prompt, undefined, undefined, undefined, skillRequests);
     return reply.code(202).send({ accepted: true, task });
   });
   app.patch<{ Params: { id: string }; Body: { model?: string; reasoningEffort?: string } }>('/api/sessions/:id/config', async request => {

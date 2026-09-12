@@ -86,7 +86,7 @@ function CommandPanel({ commands, skills, onChoose, onPickSkill }: { commands: V
       <span className="grid h-7 w-7 shrink-0 place-items-center rounded-sm bg-warning-soft text-warning"><Sparkles size={13}/></span>
       <span className="min-w-0">
         <span className="block text-body font-medium text-primary">{skill.name}</span>
-        <span className="block truncate text-caption text-subtle">{skill.description || skill.path}</span>
+        <span className="block truncate text-caption text-subtle">{skill.source === 'workspace' ? '项目' : '个人'} · {skill.path}</span>
       </span>
     </button>)}
     {/*
@@ -279,7 +279,7 @@ export function Composer({ state, session, value, references, sending, mode, que
       event.preventDefault();
       const firstAvailable = visibleCommands.find(command => command.available);
       if (firstAvailable) chooseCommand(firstAvailable);
-      else { removeSlash(); addReference('skill', visibleSkills[0]!.name, visibleSkills[0]!.name); }
+      else { removeSlash(); addReference('skill', visibleSkills[0]!.name, visibleSkills[0]!.path); }
       return;
     }
     if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (canSend) onSubmit(); }
@@ -300,7 +300,7 @@ export function Composer({ state, session, value, references, sending, mode, que
           commands={visibleCommands}
           skills={visibleSkills}
           onChoose={chooseCommand}
-          onPickSkill={skill => { removeSlash(); addReference('skill', skill.name, skill.name); }}
+          onPickSkill={skill => { removeSlash(); addReference('skill', skill.name, skill.path); }}
         />
       </Popover>
 

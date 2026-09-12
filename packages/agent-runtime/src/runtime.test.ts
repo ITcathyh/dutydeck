@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, Session, ToolRiskPolicy } from '@dutydeck/shared';
+import { RuntimeError } from '@dutydeck/shared';
 import { DutydeckRuntime, type AgentDriver, type DriverFactory } from './index.js';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -8,10 +9,10 @@ import { join } from 'node:path';
 
 const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
 
-function harness(options: { onSend?: (emit: (event: any) => void) => void; exitOnSend?: number; driverIdleTimeoutMs?: number; sessionEnvironment?: (session: Session) => Record<string, string>; sessionPrompt?: (session: Session, prompt: string) => string | Promise<string>; resolvePermission?: (id: string, approved: boolean) => Promise<boolean> } = {}) {
+function harness(options: { onSend?: (emit: (event: any) => void) => void; exitOnSend?: number; driverIdleTimeoutMs?: number; sessionEnvironment?: (session: Session) => Record<string, string>; sessionPrompt?: (session: Session, prompt: string) => string | Promise<string>; resolvePermission?: (id: string, approved: boolean) => Promise<boolean>; authorizeTask?: NonNullable<ConstructorParameters<typeof DutydeckRuntime>[1]>['authorizeTask'] } = {}) {
   const repos = createRepositories(':memory:'); let emit!: (event: any) => void; let exit!: (code: number | null) => void; const configuredAgents: AgentConfig[] = [];
   const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { options.onSend?.(emit); if (options.exitOnSend) exit(options.exitOnSend); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}), resolvePermission: vi.fn(options.resolvePermission ?? (async () => true)), setModel: vi.fn(async () => {}), setReasoningEffort: vi.fn(async () => {}), setPermissionMode: vi.fn() };
-  const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (configuredAgent, _p, onEvent, onExit) => { configuredAgents.push(configuredAgent); emit = onEvent; exit = onExit; return driver; }, driverIdleTimeoutMs: options.driverIdleTimeoutMs, sessionEnvironment: options.sessionEnvironment, sessionPrompt: options.sessionPrompt });
+  const runtime = new DutydeckRuntime(repos, { probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: (configuredAgent, _p, onEvent, onExit) => { configuredAgents.push(configuredAgent); emit = onEvent; exit = onExit; return driver; }, driverIdleTimeoutMs: options.driverIdleTimeoutMs, sessionEnvironment: options.sessionEnvironment, sessionPrompt: options.sessionPrompt, authorizeTask: options.authorizeTask });
   return { repos, runtime, driver, configuredAgents, emit: (event: any) => emit(event), exit: (code: number | null) => exit(code) };
 }
 
@@ -228,6 +229,30 @@ describe('runtime lifecycle acceptance', () => {
     await h.runtime.shutdown(); h.repos.close();
   });
 
+  it('interrupts a queued task revoked at the final submission fence without sending or recording an error', async () => {
+    const firstGate = deferred();
+    const phases: string[] = [];
+    const h = harness({
+      authorizeTask: async (_session, task, phase) => {
+        phases.push(`${task.prompt}:${phase}`);
+        if (task.prompt === 'revoked' && phase === 'submit') throw new RuntimeError('SESSION_AUTOMATION_TASK_REVOKED', 'automation was disabled', 409);
+      }
+    });
+    h.driver.send = vi.fn(async prompt => {
+      if (prompt === 'first') await firstGate.promise;
+      h.emit({ type: 'text', data: { text: `answer:${prompt}` } });
+    });
+    await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id });
+    await h.runtime.dispatch(session.id, 'first'); await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledWith('first'));
+    const revoked = await h.runtime.dispatch(session.id, 'revoked');
+    firstGate.resolve();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.id === revoked.id)?.status).toBe('interrupted'));
+    expect(h.driver.send).toHaveBeenCalledTimes(1);
+    expect(phases).toContain('revoked:submit');
+    expect((await h.runtime.getEvents(session.id)).filter(event => event.type === 'error')).toEqual([]);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
   it('restores queued execution context and risk policy from a real database after restart', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dutydeck-runtime-recovery-'));
     const database = join(directory, 'dutydeck.db');
@@ -299,13 +324,15 @@ describe('runtime lifecycle acceptance', () => {
   it('cleans up a turn when risk policy persistence fails and continues later queued work', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dutydeck-risk-write-'));
     const invalidCwd = join(directory, 'not-a-directory');
-    await writeFile(invalidCwd, 'file blocks nested security directory');
+    await mkdir(invalidCwd);
     const h = harness({ onSend: emit => emit({ type: 'text', data: { text: 'answer' } }) });
     const policy: ToolRiskPolicy = { enabled: true, authorized: true, pattern: 'rm\\s' };
     h.driver.setRiskPolicy = vi.fn();
     try {
       await h.runtime.initialize([agent]);
       const session = await h.runtime.start({ agentId: 'mock', cwd: invalidCwd });
+      await rm(invalidCwd, { recursive: true });
+      await writeFile(invalidCwd, 'file blocks nested security directory');
       const failed = await h.runtime.dispatch(session.id, 'guarded work', 'queue', 'guarded agent prompt', policy);
       await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(task => task.id === failed.id)?.status).toBe('failed'));
       expect(h.driver.setRiskPolicy).toHaveBeenCalledWith(policy);

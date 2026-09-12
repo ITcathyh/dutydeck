@@ -1,3 +1,4 @@
+import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { AgentConfig, AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
@@ -20,7 +21,7 @@ export type ListenerLog = {
 };
 
 export interface LarkRuntime {
-  start(input: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string }): Promise<Session>;
+  start(input: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: 'shared' | 'worktree'; source?: string; sourceId?: string }): Promise<Session>;
   listAgents?(): Promise<Array<Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig>>>;
   listSessions?(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
@@ -58,6 +59,7 @@ export interface LarkListener {
 }
 
 export interface LarkLongConnectionListenerOptions {
+  automation?: SessionAutomationService;
   workflowStore?: ConfigRepository;
   relayBroker?: RelayAskBroker;
   groupManager?: LarkGroupManager;
@@ -114,7 +116,7 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, broker: this.options.relayBroker },
+      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation },
     ) : undefined;
     await coordinator?.initializeWorkflows(config);
     try { await coordinator?.startReconciliation(config); }

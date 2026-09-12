@@ -36,6 +36,11 @@ describe('/new first-turn options', () => {
     expect(() => parseLarkNewSession(input)).toThrow();
   });
 
+  it('accepts explicit worktree isolation and rejects unknown modes', () => {
+    expect(parseLarkNewSession('--workspace worktree -- 修复问题')).toEqual({ prompt: '修复问题', launchOptions: { workspaceMode: 'worktree' } });
+    expect(() => parseLarkNewSession('--workspace typo -- 修复问题')).toThrow();
+  });
+
   it('validates a real directory without changing the caller options', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-new-'));
     directories.push(cwd);
