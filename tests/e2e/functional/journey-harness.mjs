@@ -71,7 +71,7 @@ export const OVERLAYS = [
   { panel: 'settings', search: '?panel=settings&section=agents', dialog: 'Dutydeck 设置与接入' },
   { panel: 'lark-setup', search: '?panel=lark-setup', dialog: '绑定飞书 Bot' },
   { panel: 'groups', search: '?panel=groups', dialog: '群配置与权限' },
-  { panel: 'automation', search: '?panel=automation', dialog: 'Schedule 离线管理' },
+  { panel: 'automation', search: '?panel=automation', dialog: '任务自动化' },
 ];
 
 /**

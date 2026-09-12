@@ -31,9 +31,11 @@ export type PrimaryNav = 'tasks' | 'bots' | 'groups';
 
 export type AppRoute = { kind: 'overview' } | { kind: 'session'; sessionId: string } | { kind: 'not-found' };
 
+export type LarkSetupTarget = 'new' | { appId: string };
+
 export type OverlayRoute =
   | { kind: 'settings'; section: ControlCenterSection }
-  | { kind: 'lark-setup' }
+  | { kind: 'lark-setup'; target?: LarkSetupTarget }
   | { kind: 'groups' }
   | { kind: 'automation' };
 
@@ -72,7 +74,7 @@ const overlayFromSearch = (search: string): OverlayRoute | undefined => {
       const section = params.get('section');
       return { kind: 'settings', section: isControlCenterSection(section) ? section : 'agents' };
     }
-    case 'lark-setup': return { kind: 'lark-setup' };
+    case 'lark-setup': return { kind: 'lark-setup', ...(params.get('mode') === 'new' ? { target: 'new' as const } : params.get('targetAppId') ? { target: { appId: params.get('targetAppId')! } } : {}) };
     case 'groups': return { kind: 'groups' };
     case 'automation': return { kind: 'automation' };
     default: return undefined;
@@ -119,6 +121,10 @@ export const appLocationPath = ({ route, nav, appId, chatId, overlay }: AppLocat
   if (overlay) {
     params.set('panel', overlay.kind);
     if (overlay.kind === 'settings') params.set('section', overlay.section);
+    if (overlay.kind === 'lark-setup' && overlay.target) {
+      if (overlay.target === 'new') params.set('mode', 'new');
+      else params.set('targetAppId', overlay.target.appId);
+    }
   }
   const query = params.toString();
   return query ? `${base}?${query}` : base;

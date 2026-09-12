@@ -27,6 +27,7 @@ export interface VerificationRecord {
 }
 
 export interface VerificationResponse extends VerificationRecord {
-  /** `true` when tracked or untracked repository content changed after this run. */
+  /** Conservatively true if the recorded result cannot establish the current code version. */
   stale: boolean;
+  staleReason?: 'code_changed' | 'changed_during_run' | 'current_fingerprint_unavailable' | 'record_fingerprint_missing';
 }

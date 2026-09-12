@@ -8,16 +8,16 @@ import type { Session } from '../api';
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project/worktree', state: 'completed', runId: 'r', createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' };
 
-function mount(state = session.state) {
+function mount(state = session.state, options: { missingFingerprint?: boolean; evidenceFailure?: boolean } = {}) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
     requests.push({ url: String(url), init });
     const body = String(url).endsWith('/capabilities') ? { structuredApproval: 'available', terminal: 'unavailable', verification: 'available', localFileDelivery: 'available' }
       : String(url).endsWith('/workspace') ? { cwd: session.cwd, mode: 'worktree', state: 'ready', branch: 'dutydeck/session/s1' }
       : String(url).endsWith('/automation') ? { schedules: [], subscriptions: [], occurrences: [] }
-      : String(url).endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, exitCode: 0, output: 'old evidence', startedAt: session.createdAt }]
+      : String(url).endsWith('/verifications') ? init?.method === 'POST' ? { id: 'v2', status: 'passed' } : [{ id: 'v1', command: 'pnpm test', status: 'passed', stale: true, staleReason: options.missingFingerprint ? 'current_fingerprint_unavailable' : 'code_changed', exitCode: 0, output: 'old evidence', startedAt: session.createdAt }]
       : { subscription: { id: 'ci1', status: 'waiting' } };
-    return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify(body), { status: options.evidenceFailure && String(url).endsWith('/verifications') ? 503 : 200, headers: { 'content-type': 'application/json' } });
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state }} tasks={[]} onClose={() => {}}/></QueryClientProvider>);
@@ -37,6 +37,18 @@ describe('work item delivery panel', () => {
     await user.click(screen.getByRole('button', { name: '开始等待' }));
     await waitFor(() => expect(requests.some(item => item.url === '/api/sessions/s1/automation/ci' && item.init?.body === JSON.stringify({ workflow: 'ci.yml', ttlSeconds: 86400 }))).toBe(true));
     expect(screen.getByText('已开始等待当前提交的 GitHub Actions；续作开始前可取消等待。')).toBeTruthy();
+  });
+
+  it('describes unreadable fingerprints without claiming code changed', async () => {
+    mount('completed', { missingFingerprint: true });
+    await screen.findByText('验证通过 · 无法确认当前版本');
+    expect(screen.queryByText('验证通过 · 代码已变化')).toBeNull();
+  });
+
+  it('does not claim there are no records after a failed evidence read', async () => {
+    mount('completed', { evidenceFailure: true });
+    await screen.findByRole('alert');
+    expect(screen.queryByText('尚无平台执行的验证记录。')).toBeNull();
   });
 
   it('keeps verification disabled while the Agent is working', async () => {

@@ -622,9 +622,10 @@ async function main() {
     await deliveryPanel.getByText('验证通过', { exact: true }).waitFor({ state: 'visible', timeout: 20_000 });
     ok('浏览器执行真实验证命令并展示通过证据');
   }
-  await deliveryPanel.getByText('新建定时计划', { exact: true }).click();
+  await deliveryPanel.getByText('为此任务创建计划', { exact: true }).click();
   await deliveryPanel.getByLabel('计划名称').fill('smoke disabled schedule');
   await deliveryPanel.getByLabel('执行指令', { exact: true }).fill('This schedule must remain disabled');
+  await deliveryPanel.getByLabel('触发方式').selectOption('interval');
   await deliveryPanel.getByRole('button', { name: '保存计划', exact: true }).click();
   await deliveryPanel.getByText('smoke disabled schedule · 已停用', { exact: true }).waitFor({ state: 'visible' });
   const automation = await request('GET', `/api/sessions/${browserSessionId}/automation`);

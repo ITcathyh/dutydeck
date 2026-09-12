@@ -1,3 +1,4 @@
+import type { LarkSetupTarget } from '../app-route';
 import { useState, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
@@ -31,7 +32,7 @@ import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../
 export type BotManagementProps = {
   selectedAppId?: string;
   onSelectBot(appId: string): void;
-  onOpenLarkSetup(): void;
+  onOpenLarkSetup(target?: LarkSetupTarget): void;
   onSelectGroup(chatId: string, appId?: string): void;
   agents: Agent[];
   larkListeningDisabled?: boolean;
@@ -313,7 +314,7 @@ export function BotManagement({
             统一配置飞书 Bot 的默认执行 Agent、模型、工作目录与触发规则。
           </p>
         </div>
-        <Button variant="primary" onClick={onOpenLarkSetup} className="shrink-0 text-caption">
+        <Button variant="primary" onClick={() => onOpenLarkSetup('new')} className="shrink-0 text-caption">
           <Plus size={14} className="mr-1.5" />
           添加飞书 Bot
         </Button>
@@ -453,7 +454,7 @@ export function BotManagement({
                         在飞书打开
                       </a>
                     )}
-                    <Button variant="secondary" size="sm" onClick={onOpenLarkSetup}>
+                    <Button variant="secondary" size="sm" onClick={() => onOpenLarkSetup({ appId: activeBot.appId })}>
                       重新绑定 / 更新凭据
                     </Button>
                     <IconButton

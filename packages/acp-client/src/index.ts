@@ -4,6 +4,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs
 import { fileURLToPath } from 'node:url';
 import { createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeEvent, type AcpRuntimeHandle, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy } from '@dutydeck/shared';
+import { permissionDisplayText } from '@dutydeck/shared';
 import { testRegexWithTimeout } from './regex-timeout.js';
 
 // 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
@@ -118,13 +119,26 @@ export function normalizeAcpxEvent(input: unknown): NormalizedDriverEvent | unde
   if (kind === 'text') return { type: 'text', data: { text: update.content?.text ?? event.text ?? event.message ?? '' } };
   if (kind === 'agent_thought_chunk' || kind === 'thinking') return { type: 'thinking', data: { text: update.content?.text ?? event.text ?? '' } };
   if (kind === 'tool_call' || kind === 'tool_call_update' || kind === 'tool_result') { const complete = statusMap[update.status] ?? (kind === 'tool_result' ? 'completed' : 'running'); return { type: complete === 'completed' || complete === 'failed' ? 'tool_result' : 'tool_call', data: { id: update.toolCallId ?? event.toolCallId ?? event.id, name: update.title ?? event.title ?? event.name ?? 'tool', input: update.rawInput ?? event.rawInput ?? event.input, output: update.rawOutput ?? event.rawOutput ?? event.output, status: complete } }; }
-  if (kind === 'permission_request' || kind === 'permission_escalation') return { type: 'permission_request', data: { id: event.requestId ?? event.id ?? update.toolCallId, toolCallId: update.toolCallId, title: update.title ?? event.toolTitle ?? 'Permission required', options: update.options ?? [], status: 'pending' } };
+  if (kind === 'permission_request' || kind === 'permission_escalation') return { type: 'permission_request', data: { id: event.requestId ?? event.id ?? update.toolCallId, toolCallId: update.toolCallId, ...permissionFacts({ ...update, title: update.title ?? event.toolTitle }), options: update.options ?? [], status: 'pending' } };
   if (kind === 'usage_update') return { type: 'status', data: { state: 'usage', used: event.used, size: event.size, breakdown: event.breakdown, cost: event.cost } };
   if (kind === 'available_commands_update') return { type: 'status', data: { state: 'commands', availableCommands: event.availableCommands ?? update.availableCommands ?? [] } };
   if (kind === 'error') return { type: 'error', data: { message: event.message ?? event.error?.message ?? 'Agent error', detail: event } };
   if (kind === 'done' || kind === 'completed' || kind === 'result' || event.result?.stopReason) return { type: 'completed', data: { stopReason: event.stopReason ?? event.result?.stopReason ?? 'end_turn' } };
   if (kind === 'status') return { type: 'status', data: { state: event.text ?? event.state ?? 'running', ...event } };
   return { type: 'raw_terminal', data: { text: JSON.stringify(input) }, raw: JSON.stringify(input) };
+}
+
+function permissionFacts(tool: any, secrets: string[] = []) {
+  const input = tool?.rawInput ?? tool?.input;
+  const fields = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+  const clean = (value: unknown) => permissionDisplayText(value, secrets);
+  const cwd = clean(fields.cwd ?? fields.workdir ?? fields.working_directory);
+  const resource = clean(fields.path ?? fields.file_path ?? fields.url ?? tool?.locations?.[0]?.path);
+  const command = clean(fields.command ?? fields.cmd);
+  return {
+    title: clean(fields.description) || clean(tool?.title) || 'Agent 请求执行受控操作',
+    ...(cwd || resource || command ? { operation: { source: 'acp_tool_call' as const, ...(cwd ? { cwd } : {}), ...(resource ? { resource } : {}), ...(command ? { command } : {}) } } : {})
+  };
 }
 
 function shellQuote(value: string) { return `'${value.replaceAll("'", "'\\''")}'`; }
@@ -177,6 +191,8 @@ export class AcpxAdapter implements AgentDriver {
       nonInteractivePermissions: 'fail', timeoutMs: agent.timeout * 1000,
       onPermissionRequest: async request => {
         const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
+        const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
+        const facts = permissionFacts(raw.toolCall, secrets);
         const candidate = flattenRiskText({ title: raw.toolCall?.title, input: raw.toolCall?.rawInput ?? raw.toolCall?.input ?? raw }).join('\n');
         let riskPolicy = this.riskPolicy;
         if (this.options.resolveRiskPolicy) {
@@ -186,7 +202,7 @@ export class AcpxAdapter implements AgentDriver {
         if (riskPolicy?.enabled && !riskPolicy.authorized) {
           try {
             if (await testRegexWithTimeout(riskPolicy.pattern, candidate)) {
-              this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${raw.toolCall?.title ?? 'tool'}`, options: [], status: 'rejected' } });
+              this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${facts.title}`, options: [], status: 'rejected' } });
               return { outcome: 'reject_once' };
             }
           } catch (error) {
@@ -197,7 +213,7 @@ export class AcpxAdapter implements AgentDriver {
         if (this.permissionMode === 'full-trust') return { outcome: 'allow_once' };
         if (this.permissionMode === 'deny-all') return { outcome: 'reject_once' };
         if (this.permissionMode === 'approve-reads' && /read|search|fetch/i.test(String(request.inferredKind ?? ''))) return { outcome: 'allow_once' };
-        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: raw.toolCall?.title ?? 'Permission required', options: raw.options ?? [], status: 'pending' } });
+        this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, ...facts, options: (raw.options ?? []).map((option: any) => ({ id: option.optionId, label: permissionDisplayText(option.name, secrets, 100), kind: option.kind })), status: 'pending' } });
         return new Promise<AcpPermissionDecision>(resolve => this.pendingPermissions.set(id, resolve));
       }
     });

@@ -167,6 +167,20 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
 
 const validPage = (page: number) => Number.isFinite(page) && Number.isInteger(page) && page >= 1 ? page : 1;
 
+const navigation = (page: number, totalPages: number) => ({
+  tag: 'column_set', element_id: 'task_dashboard_navigation', flex_mode: 'none',
+  columns: [
+    ...(page > 1 ? [{ label: '上一页', page: page - 1 }] : []),
+    { label: '刷新', page },
+    ...(page < totalPages ? [{ label: '下一页', page: page + 1 }] : [])
+  ].map(item => ({
+    tag: 'column', width: 'auto', elements: [{
+      tag: 'button', type: 'default', text: { tag: 'plain_text', content: item.label },
+      behaviors: [{ type: 'callback', value: { dutydeck_task_dashboard: 'page', page: item.page } }]
+    }]
+  }))
+});
+
 export function buildLarkTaskDashboard(
   entries: LarkTaskDashboardEntry[],
   page = 1,
@@ -181,7 +195,7 @@ export function buildLarkTaskDashboard(
 
   if (!ordered.length) {
     return {
-      elements: [markdown('task_dashboard_empty', '暂无可查看的任务，可发送目标开始工作。')],
+      elements: [markdown('task_dashboard_empty', '暂无可查看的任务，可发送目标开始工作。'), navigation(1, 1)],
       page: 1,
       totalPages: 1
     };
@@ -210,6 +224,7 @@ export function buildLarkTaskDashboard(
   });
 
   const nextPage = currentPage < totalPages ? currentPage + 1 : 1;
+  elements.push(navigation(currentPage, totalPages));
   elements.push(markdown(
     'task_dashboard_footer',
     totalPages > 1 ? `发送 \`/tasks ${nextPage}\` 查看${currentPage < totalPages ? '下一页' : '第 1 页'}。` : '发送 `/tasks` 刷新任务列表。'

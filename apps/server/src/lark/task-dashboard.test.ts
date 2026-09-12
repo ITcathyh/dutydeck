@@ -67,11 +67,21 @@ describe('buildLarkTaskDashboard', () => {
   it('renders the empty state without inventing a task row', () => {
     const result = buildLarkTaskDashboard([]);
 
-    expect(result).toEqual({
-      elements: [{ tag: 'markdown', element_id: 'task_dashboard_empty', content: '暂无可查看的任务，可发送目标开始工作。' }],
-      page: 1,
-      totalPages: 1
-    });
+    expect(result).toMatchObject({ page: 1, totalPages: 1 });
+    expect(result.elements[0]).toEqual({ tag: 'markdown', element_id: 'task_dashboard_empty', content: '暂无可查看的任务，可发送目标开始工作。' });
+    expect(rows(result.elements)).toHaveLength(0);
+    expect(result.elements[1]?.columns[0].elements[0]).toMatchObject({ text: { content: '刷新' }, behaviors: [{ type: 'callback', value: { dutydeck_task_dashboard: 'page', page: 1 } }] });
+  });
+
+  it('offers working page callbacks without out-of-range buttons', () => {
+    const entries = Array.from({ length: 21 }, (_, index) => entry({ taskId: String(index) }));
+    const buttons = (page: number) => buildLarkTaskDashboard(entries, page).elements
+      .find(item => item.element_id === 'task_dashboard_navigation')!.columns.map((column: any) => column.elements[0]);
+    expect(buttons(1).map((button: any) => button.text.content)).toEqual(['刷新', '下一页']);
+    expect(buttons(2).map((button: any) => button.behaviors[0].value)).toEqual([
+      { dutydeck_task_dashboard: 'page', page: 1 }, { dutydeck_task_dashboard: 'page', page: 2 }, { dutydeck_task_dashboard: 'page', page: 3 }
+    ]);
+    expect(buttons(3).map((button: any) => button.text.content)).toEqual(['上一页', '刷新']);
   });
 
   it('uses bounded plain text for the real target and retains reasonable root workspaces', () => {
@@ -87,7 +97,7 @@ describe('buildLarkTaskDashboard', () => {
     expect(statusLine(rows(result.elements)[0]!)).toContain('时间未知');
     expect(summary).not.toContain('a'.repeat(20));
     expect(JSON.stringify(result.elements)).not.toContain('secret-task-id');
-    expect(result.elements[3]?.tag).toBe('markdown');
+    expect(result.elements.find(item => item.element_id === 'task_dashboard_footer')?.tag).toBe('markdown');
   });
 
   it('renders update time as a relative age and lifts a shared workspace into the header', () => {

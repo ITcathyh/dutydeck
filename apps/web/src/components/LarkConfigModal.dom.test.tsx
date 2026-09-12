@@ -43,12 +43,12 @@ const collection = (overrides: Partial<LarkBotConfig> = {}): LarkConfig => ({
   listeningDisabled: false
 });
 
-function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' = 'acp') {
+function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 'agent' = 'acp', target?: import('../app-route').LarkSetupTarget) {
   vi.spyOn(api, 'larkConfig').mockResolvedValue(config);
   vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
   vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={() => {}}/></QueryClientProvider>);
+  render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={target} onClose={() => {}}/></QueryClientProvider>);
 }
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -283,7 +283,7 @@ describe('LarkConfigModal 模态外壳契约', () => {
     // 一次 Escape 只关最上面一层：确认框收起，向导与填了一半的表单必须还在。
     await user.keyboard('{Escape}');
     await waitFor(() => expect(screen.queryByText('稍后再完成配置？')).toBeNull());
-    expect(screen.getByRole('dialog', { name: '绑定飞书 Bot' })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: '更新飞书 Bot：测试机器人' })).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -387,5 +387,48 @@ describe('LarkConfigModal ask permission posture', () => {
     await user.click(await screen.findByRole('option', { name: /飞书逐项确认/ }));
     expect(await screen.findByText(/当前 Agent 尚未确认支持 ACP/)).toBeTruthy();
     await waitFor(() => expect((screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement).disabled).toBe(true));
+  });
+});
+
+
+describe('LarkConfigModal explicit selection', () => {
+  it('updates the requested third Bot and leaves the first Bot untouched', async () => {
+    const bots = Array.from({ length: 4 }, (_, i) => ({ ...bot, appId: `cli_${i}`, name: `机器人${i}`, tabLabel: `机器人${i}`, setupComplete: true }));
+    const config = { configured: true, bots, listeningDisabled: false };
+    const before = structuredClone(bots[0]);
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(config);
+    renderModal(config, 'acp', { appId: 'cli_2' });
+    await screen.findByRole('heading', { name: '更新飞书 Bot：机器人2' });
+    expect((screen.getByLabelText('App ID') as HTMLInputElement).value).toBe('cli_2');
+    await userEvent.type(screen.getByPlaceholderText('已保存'), 'replacement-secret');
+    await userEvent.click(screen.getByRole('button', { name: '下一步' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ originalAppId: 'cli_2', appId: 'cli_2', appSecret: 'replacement-secret', stage: 'lark' })));
+    expect(save).toHaveBeenCalledOnce();
+    expect(bots[0]).toEqual(before);
+  });
+
+  it('explicit new opens an empty form even when Bots already exist', async () => {
+    renderModal(collection({ setupComplete: true }), 'acp', 'new');
+    const appId = await screen.findByLabelText('App ID');
+    expect((appId as HTMLInputElement).value).toBe('');
+    expect(screen.queryByRole('button', { name: '删除配置' })).toBeNull();
+    expect(screen.getByRole('heading', { name: '绑定飞书 Bot' })).toBeTruthy();
+  });
+
+  it('a removed explicit target never silently edits the first Bot', async () => {
+    renderModal(collection({ setupComplete: true }), 'acp', { appId: 'cli_removed' });
+    expect(await screen.findByText(/找不到指定机器人/)).toBeTruthy();
+    expect(screen.queryByLabelText('App ID')).toBeNull();
+    expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('switch labels toggle their controls and targets are at least 44px on both axes', async () => {
+    renderModal();
+    const control = await screen.findByRole('switch', { name: '监听飞书消息' });
+    expect(control.className).toContain('min-h-11');
+    expect(control.className).toContain('min-w-11');
+    expect(control.getAttribute('aria-checked')).toBe('false');
+    await userEvent.click(screen.getByText('监听飞书消息', { selector: 'label' }));
+    expect(control.getAttribute('aria-checked')).toBe('true');
   });
 });

@@ -1,4 +1,5 @@
 import { ArrowDown, MessageSquare } from 'lucide-react';
+import type { ReactNode } from 'react';
 import type { TimelineEvent, TimelineSection } from '../timeline';
 import { useTimelineAutoScroll } from '../useTimelineAutoScroll';
 import { Button, EmptyState, Skeleton } from './primitives';
@@ -19,6 +20,7 @@ export type TimelineViewProps = {
   hasOngoingActivity: boolean;
   latestUserIndex: number;
   activeOutputLabel: string;
+  footer?: ReactNode;
 };
 
 /*
@@ -84,7 +86,7 @@ function TimelineBody({ timelineSections, activeOutputLabel, onResolvePermission
   </>;
 }
 
-export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, hasEarlier, onLoadEarlier, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel }: TimelineViewProps) {
+export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, hasEarlier, onLoadEarlier, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer }: TimelineViewProps) {
   const timelineScroll = useTimelineAutoScroll(activeSessionId, timeline, awaitingAnswer);
   const loadEarlier = async () => {
     const container = timelineScroll.containerRef.current;
@@ -112,6 +114,7 @@ export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, h
                 latestUserIndex={latestUserIndex}
               />
             : <TimelineEmptyState/>}
+        {!eventsLoading && timeline.length > 0 && footer}
       </div>
     </div>
     {!timelineScroll.isFollowing && <ScrollToBottomButton onClick={timelineScroll.scrollToBottom}/>}
