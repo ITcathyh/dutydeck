@@ -94,6 +94,15 @@ function parse(raw: string): StoredVerificationRecord {
   catch { throw new RuntimeError('VERIFICATION_RECORD_INVALID', 'Verification record is invalid', 500); }
 }
 
+function verificationFreshness(record: VerificationRecord, current?: string): Pick<VerificationResponse, 'stale' | 'staleReason'> {
+  const staleReason = record.beforeFingerprint && record.afterFingerprint && record.beforeFingerprint !== record.afterFingerprint ? 'changed_during_run'
+    : current && record.afterFingerprint && current !== record.afterFingerprint ? 'code_changed'
+    : !current ? 'current_fingerprint_unavailable'
+    : !record.beforeFingerprint || !record.afterFingerprint ? 'record_fingerprint_missing'
+    : undefined;
+  return { stale: Boolean(staleReason), ...(staleReason ? { staleReason } : {}) };
+}
+
 export class VerificationManager {
   private readonly controllers = new Set<AbortController>();
   private readonly runs = new Set<Promise<VerificationResponse>>();
@@ -148,12 +157,8 @@ export class VerificationManager {
       .sort((left, right) => right.startedAt.localeCompare(left.startedAt))
       .map(record => {
         const { processStage: _processStage, processIdentity: _processIdentity, ...visible } = record;
-        return {
-        ...visible,
-        stale: !current || !record.beforeFingerprint || !record.afterFingerprint
-          || record.beforeFingerprint !== record.afterFingerprint
-          || current !== record.afterFingerprint
-      }; });
+        return { ...visible, ...verificationFreshness(record, current) };
+      });
   }
 
   run(sessionId: string, cwd: string, input: VerificationCommandInput, actorId?: string, taskId?: string, beforeCommand?: () => Promise<void>): Promise<VerificationResponse> {
@@ -227,7 +232,7 @@ export class VerificationManager {
     };
     await this.replace(completed, active);
     const { processStage: _processStage, processIdentity: _processIdentity, ...visible } = completed;
-    return { ...visible, stale: !afterFingerprint || beforeFingerprint !== afterFingerprint };
+    return { ...visible, ...verificationFreshness(completed, afterFingerprint) };
   }
 }
 

@@ -231,7 +231,21 @@ describe('user-command verification evidence', () => {
     await writeFile(join(source, 'tracked.txt'), 'changed later\n');
     const listed = await h.runtime.getVerifications(session.id);
     expect(listed[0]!.startedAt >= listed.at(-1)!.startedAt).toBe(true);
-    expect(listed.find(item => item.id === passed.id)?.stale).toBe(true);
+    expect(listed.find(item => item.id === passed.id)).toMatchObject({ stale: true, staleReason: 'code_changed' });
+  });
+
+  it('keeps missing and unreadable fingerprints stale without asserting that code changed', async () => {
+    const source = repository(); const h = open(':memory:'); await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: agent.id, cwd: source });
+    expect(await h.runtime.getVerifications(session.id)).toEqual([]);
+    const passed = await h.runtime.runVerification(session.id, { command: 'true' });
+    const storageKey = `runtime_verification:${session.id}:${passed.id}`;
+    const stored = JSON.parse((await h.repos.config.get(storageKey))!);
+    delete stored.beforeFingerprint;
+    await h.repos.config.set(storageKey, JSON.stringify(stored));
+    expect(await h.runtime.getVerifications(session.id)).toEqual([expect.objectContaining({ status: 'passed', stale: true, staleReason: 'record_fingerprint_missing' })]);
+    rmSync(join(source, '.git'), { recursive: true, force: true });
+    expect(await h.runtime.getVerifications(session.id)).toEqual([expect.objectContaining({ status: 'passed', stale: true, staleReason: 'current_fingerprint_unavailable' })]);
   });
 
   it('does not inherit service credentials and redacts retained output across chunks and the cap boundary', async () => {
@@ -275,7 +289,7 @@ process.stdout.write(marker.slice(4));
     const h = open(':memory:'); await h.runtime.initialize([agent]);
     const session = await h.runtime.start({ agentId: agent.id, cwd: source });
     const changed = await h.runtime.runVerification(session.id, { command: `${process.execPath} -e "require('fs').appendFileSync('tracked.txt','command change\\n')"` });
-    expect(changed).toMatchObject({ status: 'unverified', stale: true, error: 'Repository content changed during verification' });
+    expect(changed).toMatchObject({ status: 'unverified', stale: true, staleReason: 'changed_during_run', error: 'Repository content changed during verification' });
     expect(changed.beforeFingerprint).not.toBe(changed.afterFingerprint);
     mkdirSync(join(source, '.dutydeck'), { recursive: true }); writeFileSync(join(source, '.dutydeck', 'generated'), 'ignored');
     expect((await h.runtime.getVerifications(session.id)).find(item => item.id === changed.id)?.stale).toBe(true);

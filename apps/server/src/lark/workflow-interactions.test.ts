@@ -112,6 +112,25 @@ const deferred = () => {
 };
 
 describe('persistent Lark workflow interactions', () => {
+  it('shows supplied tool facts and one-request scope in the permission card', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_facts', title: '运行检查', status: 'pending', operation: { source: 'acp_tool_call', cwd: '/work/project', resource: '/work/project/config.ts', command: 'pnpm test --token=synthetic-secret' } }];
+      const { runtime } = makeRuntime([runningTask()], permissions);
+      const { service, reply } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      const card = JSON.stringify(reply.mock.calls);
+      expect(card).toContain('来源：执行端工具请求');
+      expect(card).toContain('目录：/work/project');
+      expect(card).toContain('资源：/work/project/config.ts');
+      expect(card).toContain('pnpm test --token=[REDACTED]');
+      expect(card).not.toContain('synthetic-secret');
+      expect(card).toContain('本次选择只处理这一条请求');
+      expect(card).toContain('允许本次');
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('retries an undelivered live permission with the same UUID and excludes concurrent deliveries', async () => {
     const { directory, repositories } = await openDatabase();
     const at = Date.now();

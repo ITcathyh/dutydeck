@@ -33,7 +33,7 @@ export type SessionListProps = {
   onOpenLarkSetup(): void;
   /** 群与权限草稿（?panel=groups）。 */
   onOpenGroups(): void;
-  /** 定时任务草稿与预览（?panel=automation）。 */
+  /** 任务执行计划与导入草稿（?panel=automation）。 */
   onOpenSchedules(): void;
   /**
    * 主区一级视图。任务 / 机器人 / 群聊三选一，任何时刻只有一个为真；
@@ -124,7 +124,8 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
    * 有 19 个真页面；dutydeck 全站只有两个页面 + 四个浮层，抄 5 组只会得到 5 个空壳）。
    *
    * · 接入 —— 让任务能从外部进来：Agent 是执行者，飞书是消息入口。
-   * · 自动化 —— 让任务不靠人点也能发生：群策略、定时。两项当前都只有草稿态。
+   * · 自动化 —— 让任务不靠人点也能发生：群策略当前只有草稿态；定时入口查看
+   *   任务执行计划，导入定义另存为草稿。
    *
    * 刻意**不放**进来的（都已有常驻可见入口，第二份只是噪音）：
    * · 任务中心 / 回首页 —— 顶栏品牌位（TopBar 的 onGoHome）。
@@ -161,21 +162,22 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
     ] },
     { id: 'automation', title: '自动化', items: [
       /*
-        下面两项的 hint 是**能力声明**，不是描述性文案，改动前先读 SidebarNav 的
-        头注释。两者都不是「暂未完成」而是类型层面写死的：
-        `FoundationCapability.runtimeWired` 与 `ScheduleCapability.executorWired`
-        的类型都是字面量 `false`（api.ts），服务端恒挂对应 blocker。
+        hint 是**能力声明**，不是描述性文案，改动前先读 SidebarNav 的头注释。
 
-        用词逐字取自目标面板自己的说法（GroupPolicyModal「尚未接入运行时」、
-        ControlCenterModal「不会自动执行」），不另造一套——两处各写各的早晚漂移。
+        群策略不是「暂未完成」而是类型层面写死的：`FoundationCapability.runtimeWired`
+        是字面量 `false`（api.ts），服务端恒挂对应 blocker，用词逐字取自
+        GroupPolicyModal「尚未接入运行时」。
 
-        门控刻意不做：`disabled` 会让用户既进不去也看不到为什么。两个面板自己
-        都会把 blockers 列全，进得去才读得到。而且这两项的可用性判定要读
-        foundationApi/scheduleApi 的 capabilities，为了给侧栏画个灰按钮就多拉两个
-        查询，代价与收益不成比例。
+        定时入口展示真实 session 自动化总览：任务内创建并启用的计划会按时运行，
+        导入定义仅保存为草稿，hint 与 ControlCenterModal 自动化分区同源，不统称
+        「不会自动执行」。
+
+        门控刻意不做：`disabled` 会让用户既进不去也看不到为什么。面板自己会把
+        状态列全，进得去才读得到；而且可用性判定要读 foundationApi/scheduleApi
+        的 capabilities，为了给侧栏画个灰按钮就多拉两个查询，代价与收益不成比例。
       */
       { id: 'groups', label: '群与权限', hint: '策略草稿 · 尚未接入运行时', Icon: Users, onClick: onOpenGroups },
-      { id: 'schedules', label: '定时任务', hint: '草稿与预览 · 不会自动执行', Icon: CalendarClock, onClick: onOpenSchedules }
+      { id: 'schedules', label: '定时任务', hint: '任务执行计划与草稿', Icon: CalendarClock, onClick: onOpenSchedules }
     ] }
   ];
 

@@ -25,7 +25,7 @@ describe('App 集成冒烟（SSR 静态渲染）', () => {
     const html = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(App)));
     expect(html).toContain('工作区');
     expect(html).toContain('Agent 与设置');
-    expect(html).toContain('飞书协作');
+    expect(html).toContain('协作入口');
     // 侧栏不再有 7 项状态导航，也不再有「绑定 Bot」按钮。
     expect(html).not.toContain('任务视图');
     expect(html).not.toContain('绑定 Bot');

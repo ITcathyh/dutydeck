@@ -5,9 +5,7 @@ import { api, type Session, type Task } from '../api';
 import { Banner, Button, Dialog, Field, IconButton, Input, Spinner } from './primitives';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
 
-const verificationLabels: Record<string, string> = {
-  running: '验证中', passed: '验证通过', failed: '验证失败', timed_out: '验证超时', interrupted: '验证中断', unverified: '无法确认代码版本'
-};
+import { verificationLabel } from './verification-presentation';
 
 export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Session; tasks: Task[]; onClose(): void }) {
   const qc = useQueryClient();
@@ -50,16 +48,16 @@ export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Ses
           {verificationUnavailable && <Banner tone="warning">平台验证当前需要 Linux，才能在服务异常退出后确认并清理原验证进程。</Banner>}
           {busy && !verificationUnavailable && <p className="text-caption text-subtle">本会话正在执行，结束后可启动验证。</p>}
           {(verify.error || evidence.error) && <Banner tone="danger">{(verify.error ?? evidence.error)?.message}</Banner>}
-          {evidence.isLoading ? <Spinner label="读取验证记录"/> : !evidence.data?.length && <p className="text-caption text-subtle">尚无平台执行的验证记录。</p>}
+          {evidence.isLoading ? <Spinner label="读取验证记录"/> : !evidence.error && !evidence.data?.length && <p className="text-caption text-subtle">尚无平台执行的验证记录。</p>}
           {evidence.data?.map(record => <details key={record.id} className="rounded-lg border border-default p-3">
-            <summary className="cursor-pointer text-caption"><strong>{verificationLabels[record.status] ?? record.status}{record.stale ? ' · 代码已变化' : ''}</strong> · {record.command}</summary>
+            <summary className="cursor-pointer text-caption"><strong>{verificationLabel(record)}</strong> · {record.command}</summary>
             <p className="mt-2 text-caption text-subtle">{new Date(record.startedAt).toLocaleString()} · {record.exitCode === undefined ? '无退出码' : `退出码 ${record.exitCode}`}</p>
             {record.error && <p className="mt-1 text-caption text-danger">{record.error}</p>}
             <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded bg-muted p-2 text-caption">{record.output || '无命令输出'}</pre>
             {record.outputTruncated && <p className="text-caption text-warning">输出超过记录上限，已截断。</p>}
           </details>)}
         </section>
-        <SessionAutomationPanel session={session}/>
+        <SessionAutomationPanel session={session} taskTitle={tasks.find(task => task.prompt.trim())?.prompt}/>
         <section className="space-y-2">
           <h3 className="text-body font-semibold">Skill 投递记录</h3>
           {!skillTasks.length && <p className="text-caption text-subtle">尚无明确选中的 Skill。发送时可在输入框选择。</p>}

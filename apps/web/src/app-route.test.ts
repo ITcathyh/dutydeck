@@ -110,3 +110,12 @@ describe('反向序列化', () => {
     }
   });
 });
+
+
+it('round-trips explicit Bot editing and new modes without changing the underlying selected Bot', () => {
+  for (const target of ['new' as const, { appId: 'cli_two' }]) {
+    const location = { route: { kind: 'overview' as const }, nav: 'bots' as const, appId: 'cli_original', overlay: { kind: 'lark-setup' as const, target } };
+    const url = new URL(appLocationPath(location), 'http://localhost');
+    expect(parseAppLocation(url.pathname, url.search)).toEqual(location);
+  }
+});

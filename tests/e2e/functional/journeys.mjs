@@ -590,7 +590,7 @@ async function main() {
       { name: UI.settingsEntry, dialog: 'Dutydeck 设置与接入', panel: 'settings', required: true, label: '设置与接入' },
       { name: /飞书接入|绑定.*Bot|飞书 Bot|管理飞书/, dialog: '绑定飞书 Bot', panel: 'lark-setup', required: false, label: '飞书接入' },
       { name: /群配置|群与权限/, dialog: '群配置与权限', panel: 'groups', required: false, label: '群与权限' },
-      { name: /定时任务|自动化|Schedule/, dialog: 'Schedule 离线管理', panel: 'automation', required: false, label: '定时任务' },
+      { name: /定时任务|自动化|Schedule/, dialog: '任务自动化', panel: 'automation', required: false, label: '定时任务' },
     ];
 
     for (const candidate of candidates) {

@@ -27,6 +27,17 @@ function mockAppApi({ agents = [agent()], sessions = [], summaries = [], events 
   vi.spyOn(api, 'skills').mockResolvedValue([]);
   vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: false, bots: [], listeningDisabled: false });
   vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
+  vi.spyOn(api, 'sessionCapabilities').mockResolvedValue({
+    observedAt: '2026-08-30T00:00:00Z',
+    protocol: 'acp',
+    structuredApproval: 'available',
+    terminal: 'available',
+    turnRecovery: 'available',
+    verification: 'available',
+    localFileDelivery: 'available',
+  });
+  vi.spyOn(api, 'verifications').mockResolvedValue([]);
+  vi.spyOn(api, 'automation').mockResolvedValue({ schedules: [], subscriptions: [], occurrences: [] });
 }
 
 function renderApp() {
@@ -306,17 +317,28 @@ describe('App browser navigation and shell states', () => {
     expect(document.activeElement).toBe(timelineTab);
   });
 
-  it('keeps raw logs as a drawer until the 2xl breakpoint', async () => {
+  it.each([false, true])('raw logs use a modal below 2xl and a side panel above it (wide=%s)', async wide => {
+    vi.stubGlobal('matchMedia', vi.fn((query: string) => ({ matches: query === '(min-width: 1536px)' ? wide : false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')], events: [{ id: 'raw-1', sequence: 1, type: 'raw_terminal', timestamp: '2026-08-30T00:00:00Z', data: { text: 'raw output' }, raw: 'raw output' }] });
-    renderApp();
-
+    const { container } = renderApp();
     const rawButton = await screen.findByRole('button', { name: '原始日志' });
     await waitFor(() => expect(rawButton.hasAttribute('disabled')).toBe(false));
     await userEvent.click(rawButton);
-    const drawer = screen.getByText('原始日志', { selector: 'div' }).closest('aside');
-    expect(drawer?.className).toContain('2xl:static');
-    expect(drawer?.className).not.toContain('lg:static');
+    if (wide) {
+      expect(screen.getByRole('complementary', { name: '原始日志' })).toBeTruthy();
+      expect(screen.queryByRole('dialog', { name: '原始日志' })).toBeNull();
+      expect(container.hasAttribute('inert')).toBe(false);
+    } else {
+      const dialog = screen.getByRole('dialog', { name: '原始日志' });
+      expect(dialog.getAttribute('aria-modal')).toBe('true');
+      await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
+      expect(container.hasAttribute('inert')).toBe(true);
+      await userEvent.keyboard('{Escape}');
+      expect(screen.queryByRole('dialog', { name: '原始日志' })).toBeNull();
+      await waitFor(() => expect(document.activeElement).toBe(rawButton));
+      expect(container.hasAttribute('inert')).toBe(false);
+    }
   });
 });
 
@@ -654,7 +676,7 @@ describe('App 飞书 Bot 状态读取失败', () => {
     mockAppApi();
     const spy = vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_cached', name: '缓存机器人', setupComplete: true, listening: true, activeListening: true } as never] });
     const { client } = renderApp();
-    expect(await screen.findByText('监听已启动')).toBeTruthy();
+    expect(await within(screen.getByRole('complementary', { name: '协作入口' })).findByText('1 个机器人 · 监听已启动')).toBeTruthy();
 
     // 缓存已经有「监听已启动」，这一次 refetch 失败：状态必须降级为未确认。
     spy.mockRejectedValue(new Error('lark api down'));
@@ -711,7 +733,7 @@ describe('App 飞书 Bot 状态读取失败', () => {
     mockAppApi();
     const spy = vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_cached', name: '缓存机器人', setupComplete: true, listening: true, activeListening: true } as never] });
     const { client } = renderApp();
-    expect(await screen.findByText('监听已启动')).toBeTruthy();
+    expect(await within(screen.getByRole('complementary', { name: '协作入口' })).findByText('1 个机器人 · 监听已启动')).toBeTruthy();
     const dialog = await openSettings();
     await openLarkSection(dialog);
 

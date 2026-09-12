@@ -59,6 +59,24 @@ describe('acpx ACP boundary', () => {
     expect(Object.keys(env).every(key => /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
   });
 
+  it('retains only bounded redacted tool facts from a real ACP permission exchange', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-permission-facts-')); dirs.push(cwd);
+    const events: any[] = [];
+    const adapter = new AcpxAdapter({ ...agentConfig(), cwd, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], env: { mock_secret: 'synthetic-env-secret' } }, { sessionKey: 'permission-facts', onEvent: event => events.push(event) });
+    try {
+      await adapter.start();
+      const sending = adapter.send('permission details');
+      await expect.poll(() => events.find(event => event.type === 'permission_request')).toBeTruthy();
+      const request = events.find(event => event.type === 'permission_request').data;
+      expect(request).toMatchObject({ title: '运行项目测试', toolCallId: 'permission-tool', operation: { source: 'acp_tool_call', cwd: '/work/project', resource: '/work/project/config.ts', command: 'pnpm test --token=[REDACTED] && echo [REDACTED]' }, options: [{ id: 'allow', label: 'Allow', kind: 'allow_once' }, { id: 'deny', label: 'Deny', kind: 'reject_once' }] });
+      expect(JSON.stringify(request)).not.toMatch(/synthetic-(cli|env)-secret|PRIVATE FILE CONTENT|DO NOT DISPLAY/);
+      expect(await adapter.resolvePermission(request.id, true)).toBe(true);
+      expect(await adapter.resolvePermission(request.id, true)).toBe(false);
+      await sending;
+      expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"allow"'))).toBe(true);
+    } finally { await adapter.stop(); }
+  });
+
   it('maps ACP cancel to acpx cancel and retains the session', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-cancel-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');

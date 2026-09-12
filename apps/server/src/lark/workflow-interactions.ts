@@ -1,3 +1,4 @@
+import { permissionDisplayText } from '@dutydeck/shared';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
 import type { RelayAskBroker } from '@dutydeck/relay';
@@ -67,7 +68,7 @@ export class LarkWorkflowInteractions {
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
     await this.service.update({ messageId: record.cardId, taskId: record.id, taskName: '确认本次操作', permissionMode: 'ask', state: 'running', statusLabel: '等待审批', awaitingHuman: true, readOnly: true,
-      elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: '上次提交未送达执行端，请重新批准或拒绝。' }, button(record, 'approve', '批准一次'), button(record, 'reject', '拒绝')] }).catch(() => undefined);
+      elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: '上次提交未送达执行端，请重新批准或拒绝。' }, button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] }).catch(() => undefined);
   }
   async expireTask(appId: string, taskId: string) {
     for (const record of await this.list(appId)) {
@@ -113,7 +114,16 @@ export class LarkWorkflowInteractions {
     } else if (event.type === 'permission_request' && data.status === 'pending' && this.runtime.resolvePermission && this.runtime.getPendingPermissions) {
       const request = data as PermissionRequestData;
       if (!(await this.runtime.getPendingPermissions(context.sessionId)).some(item => item.id === request.id)) return;
-      kind = 'permission'; nativeId = request.id; question = request.title;
+      kind = 'permission'; nativeId = request.id;
+      const operation = request.operation;
+      question = [permissionDisplayText(request.title) || 'Agent 请求执行受控操作',
+        ...(operation?.source === 'acp_tool_call' ? [
+          '来源：执行端工具请求',
+          ...(operation.cwd ? [`目录：${permissionDisplayText(operation.cwd)}`] : []),
+          ...(operation.resource ? [`资源：${permissionDisplayText(operation.resource)}`] : []),
+          ...(operation.command ? [`命令（已脱敏）：${permissionDisplayText(operation.command)}`] : [])
+        ] : ['执行端未提供详细操作。'])
+      ].join('\n');
     } else return;
     const created = await this.create(context, kind, nativeId, question);
     const record = created.record;
@@ -132,8 +142,8 @@ export class LarkWorkflowInteractions {
       // 命令本身的可发现性由 `/help` 承担（commands.ts:173-175 已列出三条命令及其用法）。
       { tag: 'markdown', content: kind === 'ask'
         ? '回复此卡片即可回答。'
-        : '仅对本次工具调用生效。' },
-      ...(kind === 'permission' ? [button(record, 'approve', '批准一次'), button(record, 'reject', '拒绝')] : [])
+        : '本次选择只处理这一条请求，不改变后续授权方式。' },
+      ...(kind === 'permission' ? [button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] : [])
     ];
     try {
       if (!await this.live(record)) { await this.move(record, 'expired'); return; }

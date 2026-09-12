@@ -225,6 +225,8 @@ export interface ToolCallData {
 export interface PermissionRequestData {
   id: string;
   toolCallId?: string;
+  /** Bounded, redacted facts supplied by the ACP tool call; never raw input. */
+  operation?: { source: 'acp_tool_call'; cwd?: string; resource?: string; command?: string };
   title: string;
   options?: Array<{ id: string; label: string; kind?: string }>;
   status: 'pending' | 'approved' | 'rejected';
@@ -427,3 +429,5 @@ export * from './verification.js';
 
 export * from './session-automation.js';
 export * from './work-items.js';
+
+export * from './permission-display.js';

@@ -14,6 +14,7 @@ export type NewSessionModalProps = {
   onOpenAgentSetup?(): void;
   onCreated(session: Session, task: Task): void;
   agents: Agent[];
+  initialAgentId?: string;
   capabilities?: { platform: string; directoryPicker: boolean; filePicker: boolean };
 };
 
@@ -44,16 +45,16 @@ function SelectField({ label, children }: { label: string; children: React.React
   return <div><span className="text-caption font-medium text-secondary">{label}</span>{children}</div>;
 }
 
-export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, agents, capabilities }: NewSessionModalProps) {
+export function NewSessionModal({ open, onClose, onOpenAgentSetup, onCreated, agents, initialAgentId, capabilities }: NewSessionModalProps) {
   const qc = useQueryClient();
-  const [agentId, setAgentId] = useState('codex');
+  const [agentId, setAgentId] = useState(initialAgentId ?? 'codex');
   const [cwd, setCwd] = useState('');
   const [workspaceMode, setWorkspaceMode] = useState<'shared' | 'worktree'>('worktree');
   const [model, setModel] = useState('');
   const [reasoningEffort, setReasoningEffort] = useState('');
   const selectedAgent = agents.find(agent => agent.id === agentId);
   const legacyPtyUnsupported = isLegacyPtyAgent(selectedAgent);
-  const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => initialPermissionMode(agents.find(agent => agent.id === 'codex') ?? agents[0]));
+  const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => initialPermissionMode(agents.find(agent => agent.id === (initialAgentId ?? 'codex')) ?? agents[0]));
   const [fullTrustConfirmed, setFullTrustConfirmed] = useState(false);
   const [goal, setGoal] = useState('');
   const [createdSession, setCreatedSession] = useState<Session>();

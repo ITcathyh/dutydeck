@@ -266,26 +266,40 @@ describe('WorkspaceOverview', () => {
       expect(screen.getByText('已配置监听，但服务监听尚未启动')).toBeTruthy();
     });
 
-    it('完整就绪并启动监听：展示监听已启动，说明可到飞书发送消息，并提供 AppLink', () => {
-      render(<WorkspaceOverview {...baseProps} larkBots={[makeBot({ appId: 'cli_abc_123' })]} />);
-      expect(screen.getByText('监听已启动')).toBeTruthy();
-      expect(screen.getByText('监听已启动，可到飞书发送消息')).toBeTruthy();
-      const link = screen.getByRole('link', { name: /在飞书中打开/ });
-      expect(link.getAttribute('href')).toBe('lark://applink.feishu.cn/client/bot/open?appId=cli_abc_123');
-      // 契约 §9：可点目标 ≥40px。这是个 <a>，没有 Button 原语的 h-10 兜底，必须自己带。
-      expect(/(?:^|\s)min-h-10(?:\s|$)/.test(link.className)).toBe(true);
-      // 浏览器里点这个 scheme 需要装了客户端才有反应，文案必须说明。
-      expect(link.textContent).toContain('需客户端');
+    it('正常机器人只展示监听摘要，管理入口进入已有机器人页面', async () => {
+      const onManageBots = vi.fn(); const onOpenLarkSetup = vi.fn();
+      render(<WorkspaceOverview {...baseProps} larkBots={Array.from({ length: 4 }, (_, i) => makeBot({ appId: `cli_${i}`, name: `机器人${i}` }))} onManageBots={onManageBots} onOpenLarkSetup={onOpenLarkSetup}/>);
+      expect(screen.getByText('4 个机器人 · 监听已启动')).toBeTruthy();
+      expect(screen.queryByText('机器人0')).toBeNull();
+      expect(screen.queryByText(/消息已送达/)).toBeNull();
+      expect(screen.queryByText(/需要检查/)).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: '管理飞书 Bot' }));
+      expect(onManageBots).toHaveBeenCalledOnce();
+      expect(onOpenLarkSetup).not.toHaveBeenCalled();
     });
 
-    it('多 Bot 混合状态：综合概括如实展示，绝不谎称全部已接入', () => {
+    it('多 Bot 混合状态：综合概括如实展示，异常可展开且不重复列正常机器人', async () => {
       render(<WorkspaceOverview {...baseProps} larkBots={[
         makeBot({ appId: 'bot_active', name: '在线Bot' }),
         makeBot({ appId: 'bot_paused', name: '暂停Bot', listening: false })
       ]} />);
       expect(screen.getByText('2 个机器人 · 1 个监听中')).toBeTruthy();
-      expect(screen.getByText('在线Bot')).toBeTruthy();
+      expect(screen.queryByText('在线Bot')).toBeNull();
+      const details = screen.getByText('暂停Bot').closest('details')!;
+      expect(details.open).toBe(false);
+      await userEvent.click(screen.getByText('1 个机器人需要检查'));
+      expect(details.open).toBe(true);
       expect(screen.getByText('暂停Bot')).toBeTruthy();
+    });
+
+    it('状态读取失败不沿用缓存宣布正常，也不误读为尚未配置', async () => {
+      const onRetryLarkBots = vi.fn();
+      render(<WorkspaceOverview {...baseProps} larkBots={[makeBot()]} larkBotsFailed onRetryLarkBots={onRetryLarkBots}/>);
+      expect(screen.getByText('1 个机器人 · 状态未确认')).toBeTruthy();
+      expect(screen.queryByText(/监听已启动/)).toBeNull();
+      expect(screen.queryByText('尚未配置机器人')).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: '重试' }));
+      expect(onRetryLarkBots).toHaveBeenCalledOnce();
     });
 
     it('加载中状态：展示骨架屏与读取中提示，不谎报尚未配置', () => {

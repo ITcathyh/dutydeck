@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { foundationApi, scheduleApi, type FoundationCapability, type GroupMatrix, type LarkBotConfig, type ScheduleCapability } from '../api';
@@ -36,6 +36,16 @@ describe('ControlCenterModal information architecture', () => {
     await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
     await userEvent.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the selected Agent when creating from either card', async () => {
+    mocks(); const onCreateTask = vi.fn();
+    renderModal({ agents: [{ id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'ask' }, { id: 'claude-code', name: 'Claude Code', protocol: 'pty-cli', permissionMode: 'ask' }], onCreateTask });
+    for (const [name, id] of [['Codex', 'codex'], ['Claude Code', 'claude-code']]) {
+      const card = screen.getByRole('heading', { name }).closest('article')!;
+      await userEvent.click(within(card).getByRole('button', { name: '用它创建任务' }));
+      expect(onCreateTask).toHaveBeenLastCalledWith(id);
+    }
   });
 
   it('shows one progressive control shell, trusted-machine context and actionable SecretRef CLI guidance', async () => {
@@ -117,7 +127,32 @@ describe('ControlCenterModal information architecture', () => {
     await userEvent.click(await screen.findByRole('button', { name: '检查 Bot 设置' }));
     expect(onOpenLarkSetup).toHaveBeenCalledOnce();
     await userEvent.click(screen.getByRole('button', { name: /自动化/ }));
-    await userEvent.click(await screen.findByRole('button', { name: '编辑与预览自动化' }));
+    await userEvent.click(await screen.findByRole('button', { name: '查看任务计划' }));
+    expect(onOpenSchedules).toHaveBeenCalledOnce();
+  });
+
+  /*
+    任务自动化是真实 session 自动化总览，与 Foundation capabilities 无关：
+    repositoriesWired=false 时主按钮仍可点，只保留「导入草稿不会自动执行」的说明。
+  */
+  it('任务计划入口不受 Foundation 能力禁用，且只声明导入草稿不自动执行', async () => {
+    const scheduleUnwired: ScheduleCapability = { ...scheduleReady, repositoriesWired: false };
+    vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(foundationReady);
+    vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue(matrix);
+    vi.spyOn(foundationApi, 'secretRefs').mockResolvedValue({ secretRefs: [] });
+    vi.spyOn(scheduleApi, 'capabilities').mockResolvedValue(scheduleUnwired);
+    vi.spyOn(scheduleApi, 'list').mockResolvedValue({ capabilities: scheduleUnwired, schedules: [] });
+    const onOpenSchedules = vi.fn();
+    renderModal({ initialSection: 'automation', onOpenSchedules });
+    const button = await screen.findByRole('button', { name: '查看任务计划' });
+    expect(button.hasAttribute('disabled')).toBe(false);
+    expect(screen.getByText('导入草稿不会自动执行')).toBeTruthy();
+    expect(screen.getByText(/任务内创建并启用的计划会按时运行/)).toBeTruthy();
+    // 不再把「全部自动化不执行」或执行器技术阻断误报给用户。
+    expect(screen.queryByText(/当前版本不会自动执行/)).toBeNull();
+    expect(screen.queryByText(/自动化执行器尚未接入/)).toBeNull();
+    expect(screen.queryByText(/schedule_executor_unavailable/)).toBeNull();
+    await userEvent.click(button);
     expect(onOpenSchedules).toHaveBeenCalledOnce();
   });
 

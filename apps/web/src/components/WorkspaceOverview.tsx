@@ -16,7 +16,7 @@ import {
 import { fallbackRunTitle } from '../run-summary';
 import { Badge, Button, Card, EmptyState, Skeleton, StatusBadge } from './primitives';
 import { createTaskAffordance } from './ui';
-import { buildLarkBotAppLink, formatLarkNavSummary, projectLarkBotStatus } from '../lark-status';
+import { formatLarkNavSummary, projectLarkBotStatus } from '../lark-status';
 
 type OverviewProps = {
   sessions: Session[];
@@ -37,6 +37,7 @@ type OverviewProps = {
   onCreate(): void;
   onOpenAgentSetup(): void;
   onOpenLarkSetup(): void;
+  onManageBots?(): void;
 };
 
 const filterIcons: Record<WorkbenchView, typeof Radio> = {
@@ -80,24 +81,25 @@ function TaskRow({ session, summary, agent, section, onSelect }: {
     type="button"
     data-task-priority={section}
     onClick={() => onSelect(session.id)}
-    className="group flex min-h-[72px] w-full items-start gap-3 border-t border-subtle px-4 py-3 text-left first:border-t-0 hover:bg-hover sm:items-center sm:px-5"
+    className="group grid min-h-[72px] w-full grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 border-t border-subtle px-4 py-3 text-left first:border-t-0 hover:bg-hover sm:flex sm:items-center sm:gap-3 sm:px-5"
   >
     {/* 徽标文案与归档优先判据都来自 effectiveStatus，由 StatusBadge 单点消费；这里不再拼配色字符串。 */}
     <span className="mt-0.5 shrink-0 sm:mt-0"><StatusBadge session={session}/></span>
     <span className="min-w-0 flex-1">
-      <strong className="block truncate text-body font-semibold text-primary" title={summary?.prompt}>{summary?.prompt ?? fallbackRunTitle(session.source)}</strong>
+      <strong className="block text-body font-semibold text-primary sm:truncate" title={summary?.prompt}>{summary?.prompt ?? fallbackRunTitle(session.source)}</strong>
       <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-secondary">
         <span>{workspaceName(session.cwd)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
         {section === 'attention' && <><span aria-hidden="true">·</span><span className="font-medium text-primary">{attentionReasonForSession(session)}</span></>}
         {queuedCommands > 0 && <span className="rounded-sm bg-queued-soft px-1.5 py-0.5 font-medium text-queued">待执行指令 {queuedCommands} 条</span>}
       </span>
     </span>
-    <span className="flex shrink-0 flex-col items-end gap-1 text-caption text-subtle">
+    <span className="col-span-2 flex shrink-0 items-center justify-between gap-1 text-caption text-subtle sm:flex-col sm:items-end">
       <span title={updatedAt ? new Date(updatedAt).toLocaleString('zh-CN') : undefined}>更新于 {relativeTime}</span>
+      {session.state === 'waiting_for_permission' && <span className="font-medium text-action sm:hidden">查看审批 →</span>}
       {/* runId 是契约 §2 点名允许 text-meta 的低频元数据。 */}
       <span className="hidden font-mono text-meta sm:block">{shortRunId(session)}</span>
     </span>
-    <ArrowRight aria-hidden="true" size={16} className="mt-1 shrink-0 text-subtle group-hover:text-action sm:mt-0"/>
+    <ArrowRight aria-hidden="true" size={16} className="hidden shrink-0 text-subtle group-hover:text-action sm:block"/>
   </button>;
 }
 
@@ -163,7 +165,7 @@ function TaskListEmpty({ firstUse, hasAgents, createTask }: {
     `getByRole('button', { name: '绑定飞书 Bot' })` 直接抛 found multiple elements。
     现有用例全部恰好绕开了那个组合，所以它一直没被发现。
 
-    飞书 Bot 是 agent 交互核心，绑定/管理是首屏唯一强主 CTA（Bot 概览卡片里那颗）；
+    首次绑定是引导卡片里的主 CTA；
     Web 创建任务是次操作，这里用 secondary。
   */
   return <Card padding="lg">
@@ -176,137 +178,41 @@ function TaskListEmpty({ firstUse, hasAgents, createTask }: {
   </Card>;
 }
 
-/**
- * 首屏上段：飞书 Bot 概览。
- *
- * 飞书 Bot 是 agent 交互核心，所以这块在任务列表之前，主操作是绑定或管理 Bot。
- *
- * 状态一律走 lark-status.ts 的投影，与侧栏共用同一份判据。这里不允许出现
- * `bots.length ? '已接入' : …` 这类判断：有配置记录不等于能收消息——
- * setupComplete=false、listening=false、全局 listeningDisabled、
- * activeListening=false 四种情况下都收不到，而它们都有 bots.length > 0。
- *
- * `as="aside"` 与 `aria-label="协作入口"` 不能改：tests/e2e/visual/palette.spec.ts
- * 用 `aside[aria-label="协作入口"]` 这个 CSS 选择器量卡片表面色是否偏绿。那是
- * **色板护栏**，与飞书语义无关——它只需要「某张卡片」。改标签会让护栏静默失效
- * （选择器匹配不到就没有断言对象），不会变红。
- */
-function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisabled, failed, retrying, onRetry, onOpenLarkSetup, onOpenAgentSetup }: {
+/** 接入摘要与异常沿用侧栏的真实状态投影；首次使用保留完整引导。 */
+function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisabled, failed, retrying, onRetry, onOpenLarkSetup, onOpenAgentSetup, onManageBots }: {
   bots: LarkBotConfig[];
   agents: Agent[];
   loading: boolean;
   agentsLoading: boolean;
   listeningDisabled: boolean;
-  /** larkConfig 查询失败：isLoading 已是 false、data 是 undefined，不能读成「没有 Bot」。 */
   failed: boolean;
   retrying: boolean;
   onRetry(): void;
   onOpenLarkSetup(): void;
   onOpenAgentSetup(): void;
+  onManageBots(): void;
 }) {
   const summary = formatLarkNavSummary({ bots, listeningDisabled, loading, failed });
-  const hasBots = bots.length > 0;
-  // Agent 还在检测时不能说「没有 Agent」——与 headlineFor 的 agentsLoading 分支同一条纪律。
+  const firstUse = !loading && !failed && bots.length === 0;
   const noAgents = agents.length === 0 && !agentsLoading;
+  const exceptions = bots.map(bot => ({ bot, status: projectLarkBotStatus(bot, listeningDisabled, loading, failed) })).filter(({ status }) => status.key !== 'listening');
 
-  return <Card as="aside" aria-label="协作入口">
-    <div className="flex flex-col gap-3 border-b border-subtle pb-4 sm:flex-row sm:items-center sm:justify-between">
-      <div className="flex items-center gap-3">
-        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-info-soft text-info"><MessageSquare size={19}/></span>
-        <div className="min-w-0">
-          <p className="text-caption font-medium text-secondary">飞书协作</p>
-          <h2 className="text-title font-semibold text-primary">飞书机器人</h2>
-          <p className="mt-0.5 text-caption text-secondary">{summary}</p>
-        </div>
-      </div>
-      {/* 首屏唯一强主 CTA。文案随是否已有 Bot 改口，但层级不变。 */}
-      <Button variant="primary" onClick={onOpenLarkSetup} icon={hasBots ? <Settings2 size={15}/> : <Plus size={15}/>}>{hasBots ? '管理飞书 Bot' : '绑定飞书 Bot'}</Button>
+  return <Card as="aside" aria-label="协作入口" padding="sm">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="flex min-w-0 items-center gap-2"><MessageSquare size={18} className="shrink-0 text-info"/><div><h2 className="text-body font-semibold text-primary">飞书机器人</h2><p className="text-caption text-secondary">{summary}</p></div></div>
+      <Button variant={firstUse ? 'primary' : 'secondary'} onClick={firstUse ? onOpenLarkSetup : onManageBots} icon={firstUse ? <Plus size={15}/> : <Settings2 size={15}/>}>{firstUse ? '绑定飞书 Bot' : '管理飞书 Bot'}</Button>
     </div>
-
-    {/*
-      缺 Agent 是「机器人收到消息也执行不了」，必须说出后果并给入口；但它不是门禁，
-      不阻塞用户先把 Bot 配好（两件事可以任意顺序做完）。
-    */}
-    {noAgents && <div className="mt-3.5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-warning-border bg-warning-soft px-3.5 py-2.5 text-caption text-warning">
-      <span className="flex min-w-0 items-center gap-2"><AlertTriangle size={15} className="shrink-0"/>尚未检测到本机可用 Agent，机器人收到消息后无法执行任务。</span>
-      {/* size 保持默认 md（h-10）：契约 §9 的 40px 触控下限对这颗按钮同样成立，sm 档只有 32px。 */}
-      <Button variant="secondary" onClick={onOpenAgentSetup}>准备 Agent</Button>
-    </div>}
-
-    {/*
-      读取失败必须单列一档，且与下面的列表并存而不是互斥：larkConfig 失败后
-      isLoading=false、data=undefined，若只靠下面的 `!hasBots` 分支就会说
-      「尚未配置飞书机器人」——把「读不到」说成「没有」，正是规范 §6.2 点名的
-      那类谎报。有缓存时下面仍列出 Bot，但每张卡片都投影成「状态未确认」，
-      不沿用旧值宣称在线。
-    */}
-    {!loading && failed && <div className="mt-3.5 rounded-md border border-warning-border bg-warning-soft p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="flex items-center gap-2 text-body font-semibold text-warning"><AlertTriangle size={15} className="shrink-0"/>无法读取飞书接入状态</h3>
-          <p className="mt-1 text-caption text-warning">{hasBots ? '已有配置记录，但这一次状态读取失败，无法确认机器人当前能否收到消息。' : '状态读取失败，因此无法判断是否已配置机器人。配置入口仍然可用。'}</p>
-        </div>
-        <Button variant="secondary" loading={retrying} disabled={retrying} onClick={onRetry}>{retrying ? '重试中…' : '重试'}</Button>
-      </div>
-    </div>}
-
-    {loading
-      ? <div className="mt-4"><Skeleton variant="block" lines={2}/></div>
-      : !hasBots
-        // 读取失败时不渲染「尚未配置」引导：上面的失败卡已经说明状态未知。
-        ? failed ? null : <div className="mt-3.5 rounded-md bg-muted p-4">
-          <h3 className="text-body font-semibold text-primary">尚未配置飞书机器人</h3>
-          <p className="mt-1 text-body text-secondary">绑定后在飞书私聊发送工程目标，或在群聊中 @机器人 下达任务；发送 <code className="rounded-sm bg-surface px-1.5 py-0.5 font-mono text-meta text-primary">/help</code> 查看可用操作。</p>
-          <div className="mt-3 flex flex-wrap items-center gap-4 text-caption text-secondary">
-            <span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>私聊发目标</span>
-            <span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>群聊 @机器人</span>
-            <span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>/help 查看操作</span>
-          </div>
-        </div>
-        : <div className="mt-3.5 space-y-3">
-          {/* 状态未确认时不重复承诺「进度与结果会回到同一条对话」。 */}
-          {!failed && <p className="text-caption text-secondary">在飞书私聊发送工程目标或在群聊 @机器人 下达任务，进度与结果会回到同一条对话；发送 /help 查看可用操作。</p>}
-          <div className="grid gap-3 sm:grid-cols-2">
-            {bots.map(bot => {
-              const status = projectLarkBotStatus(bot, listeningDisabled, false, failed);
-              const agent = agents.find(item => item.id === bot.defaultAgentId);
-              const appLink = buildLarkBotAppLink(bot.appId);
-              const botName = bot.name || bot.tabLabel || bot.appId;
-              return <div key={bot.appId} className="flex flex-col justify-between rounded-md border border-subtle bg-muted p-3.5">
-                <div>
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <strong className="block truncate text-body font-semibold text-primary" title={botName}>{botName}</strong>
-                      {/* App ID 是契约 §2 点名允许 text-meta 的低频元数据。 */}
-                      <span className="block truncate font-mono text-meta text-subtle" title={bot.appId}>App ID: {bot.appId}</span>
-                    </div>
-                    <Badge tone={status.tone}>{status.label}</Badge>
-                  </div>
-                  <p className="mt-1.5 text-caption text-secondary">{status.description}</p>
-                  <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-caption text-subtle">
-                    {/* defaultAgentId 可能是空字符串（未选 Agent 时服务端就存 ''），
-                        `??` 只挡 undefined，会让这里渲染成「Agent：· 工作区」。 */}
-                    <span>Agent：{agent?.name || bot.defaultAgentId?.trim() || '未指定'}</span><span aria-hidden="true">·</span><span>工作区：{bot.workspace?.trim() ? workspaceName(bot.workspace) : '未限定'}</span>
-                  </div>
-                </div>
-                {/*
-                  官方 AppLink（飞书官网示例 https://www.feishu.cn/content/7270877743058698268）。
-                  协议与域名写死在 lark-status.ts，appId 经 encodeURIComponent，不猜 ID 也不自造协议。
-                  必须标明「需客户端」：浏览器点这个 scheme 没装客户端时什么也不会发生。
-                */}
-                <div className="mt-3 flex items-center justify-between gap-2 border-t border-subtle pt-2.5 text-caption">
-                  {appLink
-                    ? <a href={appLink} className="inline-flex min-h-10 items-center gap-1 font-medium text-action hover:underline">在飞书中打开<span className="text-meta text-subtle">（需客户端）</span></a>
-                    : <span className="inline-flex min-h-10 items-center text-subtle">在飞书客户端搜索「{botName}」</span>}
-                </div>
-              </div>;
-            })}
-          </div>
-        </div>}
+    {noAgents && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning-border bg-warning-soft p-3 text-caption text-warning"><span>尚未检测到本机可用 Agent，机器人收到消息后无法执行任务。</span><Button variant="secondary" onClick={onOpenAgentSetup}>准备 Agent</Button></div>}
+    {loading ? <div className="mt-3"><Skeleton variant="row"/></div> : failed ? <div className="mt-3 rounded-md border border-warning-border bg-warning-soft p-3 text-caption text-warning"><h3 className="font-semibold">无法读取飞书接入状态</h3><p className="mt-1">{bots.length ? '已有配置记录，但这一次状态读取失败，无法确认机器人当前能否收到消息。' : '状态读取失败，因此无法判断是否已配置机器人。配置入口仍然可用。'}</p><Button variant="secondary" className="mt-2" loading={retrying} disabled={retrying} onClick={onRetry}>{retrying ? '重试中…' : '重试'}</Button></div> : firstUse ? <div className="mt-3 rounded-md bg-muted p-4">
+      <h3 className="text-body font-semibold text-primary">尚未配置飞书机器人</h3>
+      <p className="mt-1 text-body text-secondary">绑定后在飞书私聊发送工程目标，或在群聊中 @机器人 下达任务；发送 <code className="rounded-sm bg-surface px-1.5 py-0.5 font-mono text-meta text-primary">/help</code> 查看可用操作。</p>
+      <div className="mt-3 flex flex-wrap items-center gap-4 text-caption text-secondary"><span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>私聊发目标</span><span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>群聊 @机器人</span><span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>/help 查看操作</span></div>
+    </div> : null}
+    {!loading && exceptions.length > 0 && <details className="mt-2"><summary className="min-h-11 cursor-pointer py-3 text-caption font-medium text-warning">{exceptions.length} 个机器人需要检查</summary><div className="space-y-2">{exceptions.map(({ bot, status }) => <div key={bot.appId} className="rounded-md bg-muted p-3"><div className="flex flex-wrap items-center gap-2"><strong className="text-body font-medium">{bot.name || bot.tabLabel || bot.appId}</strong><Badge tone={status.tone}>{status.label}</Badge></div><p className="mt-1 text-caption text-secondary">{status.description}</p></div>)}</div></details>}
   </Card>;
 }
 
-export function WorkspaceOverview({ sessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, onSelect, onCreate, onOpenAgentSetup, onOpenLarkSetup }: OverviewProps) {
+export function WorkspaceOverview({ sessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, onSelect, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
   const counts = workbenchCounts(sessions, summaries);
   const ordered = orderSessionsForWorkbench(sessions, view, summaries);
   const selectedLabel = workbenchViewLabels[view];
@@ -319,7 +225,7 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
   const hasTasks = sections.length > 0 && ordered.length > 0;
 
   return <div className="min-h-0 flex-1 overflow-y-auto bg-canvas">
-    <section aria-labelledby="workspace-overview-title" className="mx-auto w-full max-w-[1120px] px-4 pb-12 pt-14 sm:px-8 sm:pt-8 lg:px-10">
+    <section aria-labelledby="workspace-overview-title" className="mx-auto w-full max-w-[1120px] px-4 pb-12 pt-6 sm:px-8 sm:pt-8 lg:px-10">
       <header className="flex flex-col gap-4 border-b border-default pb-5 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="text-body font-medium text-secondary">任务中心</p>
@@ -329,7 +235,7 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
         </div>
         {/*
           这里只放「创建任务」一枚控件，且是**次操作**：飞书 Bot 是 agent 交互核心，
-          首屏的强主 CTA 是下面 Bot 概览里的「绑定/管理飞书 Bot」，同屏只允许一个。
+          首次使用时的强主 CTA 是下面 Bot 概览里的「绑定飞书 Bot」。
           搜索、外观切换、快捷键帮助都在全局顶栏（TopBar）里常驻：它们此前在这里也
           各有一份，但 App.tsx 的调用点从加上顶栏那天起就不再传 onOpenSearch /
           onOpenShortcuts / themeControl，三段代码因此永不渲染。留着不是「备用」——
@@ -342,9 +248,9 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
         </div>
       </header>
 
-      {/* 首屏上段：Bot 能不能收到我的话。任务列表在它之后。 */}
+      {/* 已有 Bot 用紧凑摘要，给待处理任务留出首屏。 */}
       <div className="mt-6">
-        <LarkBotsOverview bots={larkBots} agents={agents} loading={larkBotsLoading} agentsLoading={agentsLoading} listeningDisabled={larkListeningDisabled} failed={larkBotsFailed} retrying={larkBotsRetrying} onRetry={() => onRetryLarkBots?.()} onOpenLarkSetup={onOpenLarkSetup} onOpenAgentSetup={onOpenAgentSetup}/>
+        <LarkBotsOverview bots={larkBots} agents={agents} loading={larkBotsLoading} agentsLoading={agentsLoading} listeningDisabled={larkListeningDisabled} failed={larkBotsFailed} retrying={larkBotsRetrying} onRetry={() => onRetryLarkBots?.()} onOpenLarkSetup={onOpenLarkSetup} onOpenAgentSetup={onOpenAgentSetup} onManageBots={onManageBots}/>
       </div>
 
       <section aria-label="任务筛选" className="-mx-1 mt-6 overflow-x-auto px-1 pb-1">

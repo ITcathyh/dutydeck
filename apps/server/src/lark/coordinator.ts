@@ -306,7 +306,7 @@ export class LarkMessageCoordinator {
     event: LarkMessageEvent, config: StoredLarkConfig, markdown: string,
     options: { elements?: LarkCardElement[]; failed?: boolean; taskName?: string } = {}
   ) {
-    await sendTaskCard(this.service, event, {
+    return sendTaskCard(this.service, event, {
       taskId: event.messageId, taskName: options.taskName ?? '任务操作',
       state: options.failed ? 'failed' : 'completed', readOnly: true,
       permissionMode: larkPermissionMode(config), markdown, ...(options.elements ? { elements: options.elements } : {}),
@@ -354,7 +354,12 @@ export class LarkMessageCoordinator {
     }
     try {
       if (parsed?.name === 'tasks') {
-        await this.workflowReply(event, config, '', { taskName: '任务导航', elements: await this.taskDashboard(event, config, Number(parsed.args[0] ?? 1)) }); return true;
+        const card = await this.workflowReply(event, config, '', { taskName: '任务导航', elements: await this.taskDashboard(event, config, Number(parsed.args[0] ?? 1)) });
+        await this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
+          messageId: event.messageId, chatId: event.chatId, chatType: event.chatType,
+          senderOpenId: event.senderOpenId, messageType: 'text', content: '', mentions: []
+        } satisfies LarkMessageEvent));
+        return true;
       }
       if (quoted?.kind === 'result' && prompt.trim() === '验收通过') {
         const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId: quoted.id, action: 'accept' });
@@ -1140,6 +1145,30 @@ export class LarkMessageCoordinator {
 
   async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
     const workflow = value as Record<string, unknown> | null;
+    if (workflow && typeof workflow === 'object' && 'dutydeck_task_dashboard' in workflow) {
+      if (workflow.dutydeck_task_dashboard !== 'page' || typeof workflow.page !== 'number'
+        || !Number.isSafeInteger(workflow.page) || workflow.page < 1) return { type: 'error', content: '无法识别任务列表页码。' };
+      if (!context?.messageId || !context.chatId || !operatorOpenId || !this.reconcileConfig || !this.workflowOptions.store) {
+        return { type: 'error', content: '任务列表已失效，请重新发送 /tasks。' };
+      }
+      try {
+        const saved = await this.workflowOptions.store.get(`lark.task_dashboard.${this.reconcileConfig.appId}.${context.messageId}`);
+        if (!saved) return { type: 'warning', content: '任务列表已失效，请重新发送 /tasks。' };
+        const event = JSON.parse(saved) as LarkMessageEvent;
+        if (event.chatId !== context.chatId || event.senderOpenId !== operatorOpenId) {
+          return { type: 'warning', content: '请发送 /tasks 查看你自己的任务列表。' };
+        }
+        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
+        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法刷新任务列表。' };
+        const elements = await this.taskDashboard(event, config, workflow.page);
+        await this.service.update({ messageId: context.messageId, taskId: event.messageId, taskName: '任务导航',
+          state: 'completed', readOnly: true, permissionMode: larkPermissionMode(config), elements });
+        return { type: 'success', content: '任务列表已更新。' };
+      } catch (error) {
+        this.log.warn({ error }, '刷新任务列表失败');
+        return { type: 'error', content: '刷新失败，请稍后重试或重新发送 /tasks。' };
+      }
+    }
     if (workflow && typeof workflow.dutydeck_work_item === 'string') {
       if (!this.workflowOptions.workbench || !this.reconcileConfig || !context) return { type: 'error', content: '目标卡片已失效。' };
       try { return { type: 'success', content: await this.workflowOptions.workbench.callback(workflow, operatorOpenId, context, this.reconcileConfig) }; }

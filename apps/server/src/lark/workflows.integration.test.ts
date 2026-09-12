@@ -244,6 +244,44 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     } finally { restored.stop(); }
   });
 
+  it('paginates the same task card after restart and checks callback identity and live access', async () => {
+    const h = await harness();
+    for (let index = 0; index < 11; index++) {
+      await h.coordinator.handle(event(index === 0 ? 'om_task' : `om_task_${index}`, `目标 ${index}`, { threadId: `omt_${index}`, rootId: `om_root_${index}` }), h.config);
+    }
+    await vi.waitFor(async () => expect((await h.repos.channelMappings.list(`lark-card:${h.config.appId}`))
+      .filter(mapping => JSON.parse(mapping.extra ?? '{}').final_delivery_state === 'delivered')).toHaveLength(11));
+    await h.coordinator.handle(event('om_dashboard', '/tasks', { chatType: 'p2p', chatId: 'oc_dm' }), h.config);
+    const [cardId, first] = [...h.cards].find(([, card]) => card.taskId === 'om_dashboard')!;
+    const next = first.elements.find((element: any) => element.element_id === 'task_dashboard_navigation').columns.at(-1).elements[0].behaviors[0].value;
+    expect(next).toEqual({ dutydeck_task_dashboard: 'page', page: 2 });
+    h.coordinator.stop();
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      const context = { messageId: cardId, chatId: 'oc_dm' };
+      const updates = h.service.update.mock.calls.length;
+      expect(await restored.handleAction(next, 'ou_bob', context)).toMatchObject({ type: 'warning' });
+      expect(await restored.handleAction(next, 'ou_alice', { ...context, chatId: 'oc_other' })).toMatchObject({ type: 'warning' });
+      expect(await restored.handleAction(next, 'ou_alice', { ...context, messageId: 'om_forged' })).toMatchObject({ type: 'warning' });
+      expect(await restored.handleAction({ ...next, page: 1.5 }, 'ou_alice', context)).toMatchObject({ type: 'error' });
+      expect(h.service.update).toHaveBeenCalledTimes(updates);
+      expect(await restored.handleAction(next, 'ou_alice', context)).toMatchObject({ type: 'success' });
+      const second = h.cards.get(cardId);
+      expect(JSON.stringify(second)).toContain('第 2/2 页');
+      expect(second.elements.filter((element: any) => element.element_id?.startsWith('task_row_'))).toHaveLength(1);
+      expect(h.send).toHaveBeenCalledTimes(11);
+      h.service.listChatMembers.mockResolvedValue({ items: [{ memberId: 'ou_bob' }], hasMore: false });
+      expect(await restored.handleAction(next, 'ou_alice', context)).toMatchObject({ type: 'success' });
+      expect(JSON.stringify(h.cards.get(cardId))).toContain('暂无可查看的任务');
+      expect(JSON.stringify(h.cards.get(cardId))).not.toContain('目标 ');
+      await h.repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...h.config, listening: false }]));
+      const beforeDisabled = h.service.update.mock.calls.length;
+      expect(await restored.handleAction(next, 'ou_alice', context)).toMatchObject({ type: 'warning' });
+      expect(h.service.update).toHaveBeenCalledTimes(beforeDisabled);
+    } finally { restored.stop(); }
+  });
+
   it('answers the original Relay waiter by quoting its card without creating another task or result feedback', async () => {
     const h = await harness('ask');
     await h.coordinator.handle(event('om_task', '开始工作'), h.config);

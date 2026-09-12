@@ -1,3 +1,4 @@
+import type { LarkSetupTarget } from '../app-route';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, Bot, Check, ExternalLink, Eye, EyeOff, FolderOpen, Plus, Trash2, Wrench, X } from 'lucide-react';
@@ -9,7 +10,7 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { MemberNameTagInput } from './MemberNameTagInput';
 
-export type LarkConfigModalProps = { agents: Agent[]; onClose(): void };
+export type LarkConfigModalProps = { agents: Agent[]; target?: LarkSetupTarget; onClose(): void };
 
 /*
   四个手写开关（primitives 里没有 Switch 原语）。轨道是真正的胶囊滑块，
@@ -18,19 +19,20 @@ export type LarkConfigModalProps = { agents: Agent[]; onClose(): void };
   关态轨道用 `bg-neutral-solid`：`border-strong` 只登记在 borderColor 里，没有同名的
   背景语义类，而中性实心灰正是「关闭」该有的语义。
 */
-function Switch({ label, checked, disabled, onToggle }: { label: string; checked: boolean; disabled?: boolean; onToggle(): void }) {
+function Switch({ id, label, checked, disabled, onToggle }: { id: string; label: string; checked: boolean; disabled?: boolean; onToggle(): void }) {
   return <button
     type="button"
+    id={id}
     role="switch"
     aria-label={label}
     aria-checked={checked}
     disabled={disabled}
     onClick={onToggle}
-    className={`ml-auto flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors duration-fast ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring disabled:cursor-not-allowed ${checked && !disabled ? 'bg-inverse' : 'bg-neutral-solid'}`}
-  ><span className={`h-4 w-4 rounded-full bg-surface shadow-card transition-transform ${checked ? 'translate-x-4' : 'translate-x-0'}`}/></button>;
+    className="ml-auto flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring disabled:cursor-not-allowed"
+  ><span className={`flex h-5 w-9 items-center rounded-full p-0.5 transition-colors duration-fast ease-out ${checked && !disabled ? 'bg-inverse' : 'bg-neutral-solid'}`}><span className={`h-4 w-4 rounded-full bg-surface shadow-card transition-transform ${checked ? 'translate-x-4' : 'translate-x-0'}`}/></span></button>;
 }
 
-export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
+export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProps) {
   const qc = useQueryClient();
   const config = useQuery({ queryKey: ['lark-config'], queryFn: api.larkConfig });
   const capabilities = useQuery({ queryKey: ['system-capabilities'], queryFn: api.systemCapabilities });
@@ -61,10 +63,10 @@ export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
   }, [agentOptions.data, agentOptions.isFetching, defaultReasoningEffort]);
   useEffect(() => {
     if (!config.data || selectedAppId !== null) return;
-    const firstBot = config.data.bots[0];
-    setSelectedAppId(firstBot?.appId ?? '');
-    setStep(firstBot && !firstBot.setupComplete ? 2 : 1);
-  }, [config.data, selectedAppId]);
+    const initialBot = target && target !== 'new' ? config.data.bots.find(bot => bot.appId === target.appId) : target === 'new' ? undefined : config.data.bots[0];
+    setSelectedAppId(target && target !== 'new' ? target.appId : initialBot?.appId ?? '');
+    setStep(!target && initialBot && !initialBot.setupComplete ? 2 : 1);
+  }, [config.data, selectedAppId, target]);
   useEffect(() => {
     if (!config.data || selectedAppId === null) return;
     if (hydratedSelection.current === selectedAppId) return;
@@ -94,9 +96,10 @@ export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
   const pickWorkspace = useMutation({ mutationFn: api.selectDirectory, onSuccess: result => setWorkspace(result.path) });
   const agentCapabilitiesPending = step === 2 && Boolean(defaultAgentId) && !agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching);
   const agentCapabilitiesReady = step !== 2 || Boolean(agentOptions.data);
-  const canSave = step === 1
+  const missingTarget = Boolean(selectedAppId && config.data && !current);
+  const canSave = !missingTarget && (step === 1
     ? Boolean(appId.trim() && (current || appSecret.trim()) && (!restrictUsers || allowedUserNames.length) && Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000)
-    : Boolean(current && defaultAgentId && (permissionMode === 'ask' ? agentOptions.data?.source === 'acp' : fullTrustConfirmed) && agentCapabilitiesReady && (riskControlMode === 'off' || highRiskPatternValidation.valid) && !legacyHighRiskNeedsMigration && (riskControlMode !== 'enforced' || enforcedHookReady));
+    : Boolean(current && defaultAgentId && (permissionMode === 'ask' ? agentOptions.data?.source === 'acp' : fullTrustConfirmed) && agentCapabilitiesReady && (riskControlMode === 'off' || highRiskPatternValidation.valid) && !legacyHighRiskNeedsMigration && (riskControlMode !== 'enforced' || enforcedHookReady)));
   const formError = save.error ?? remove.error ?? pickWorkspace.error ?? inspect.error ?? startOpenPlatformSetup.error ?? openPlatformJob.error ?? installHook.error ?? (agentOptions.data ? undefined : agentOptions.error) ?? hookStatus.error ?? config.error;
   const permissionSettingsUrl = /^cli_[\w-]+$/.test(appId.trim()) ? `https://open.larkoffice.com/app/${encodeURIComponent(appId.trim())}/auth` : undefined;
   const permissionRelatedError = Boolean(formError && /权限|permission|通讯录|邮箱|open[_ ]?id|资源点|visible range/i.test(formError.message));
@@ -116,16 +119,16 @@ export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
   */
   const dismissible = !confirmation && !save.isPending && !remove.isPending;
   return <>
-  <Dialog open onClose={requestClose} label="绑定飞书 Bot" size="md" closeOnEscape={dismissible} closeOnScrim={dismissible}>
+  <Dialog open onClose={requestClose} label={current ? `更新飞书 Bot：${current.name}` : '绑定飞书 Bot'} size="md" closeOnEscape={dismissible} closeOnScrim={dismissible}>
     {/* <form> 插在 Dialog 与 Header/Body/Footer 之间会打断 flex 链，所以自己接上。 */}
     <form onSubmit={event => { event.preventDefault(); if (canSave) save.mutate(); }} className="flex min-h-0 flex-1 flex-col">
-      <Dialog.Header className="flex-wrap"><div className="min-w-0 flex-1"><h2 className="text-body font-semibold text-primary">绑定飞书 Bot</h2><p className="mt-0.5 text-caption text-subtle">Bot 负责收发消息，Agent 负责执行任务</p></div><div className="order-3 mt-2 flex w-full shrink-0 items-center justify-end gap-0.5 sm:order-none sm:ml-auto sm:mt-0 sm:w-auto"><a href="https://open.larkoffice.com/app" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">飞书开发者后台<ExternalLink size={12}/></a><a href="https://open.larkoffice.com/page/launcher?from=backend_oneclick" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-secondary transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">快速创建应用<ExternalLink size={12}/></a></div><IconButton label="关闭" onClick={requestClose}><X size={15}/></IconButton></Dialog.Header>
+      <Dialog.Header className="flex-wrap"><div className="min-w-0 flex-1"><h2 className="text-body font-semibold text-primary">{current ? `更新飞书 Bot：${current.name}` : '绑定飞书 Bot'}</h2><p className="mt-0.5 text-caption text-subtle">Bot 负责收发消息，Agent 负责执行任务</p></div><div className="order-3 mt-2 flex w-full shrink-0 items-center justify-end gap-0.5 sm:order-none sm:ml-auto sm:mt-0 sm:w-auto"><a href="https://open.larkoffice.com/app" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">飞书开发者后台<ExternalLink size={12}/></a><a href="https://open.larkoffice.com/page/launcher?from=backend_oneclick" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-secondary transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">快速创建应用<ExternalLink size={12}/></a></div><IconButton label="关闭" onClick={requestClose}><X size={15}/></IconButton></Dialog.Header>
       <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-subtle bg-muted px-3 py-2">
         {config.data?.bots.map(bot => <button key={bot.appId} type="button" onClick={() => { setSelectedAppId(bot.appId); setStep(bot.setupComplete ? 1 : 2); }} className={`flex h-10 max-w-[250px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === bot.appId ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Bot size={13} className="shrink-0"/><span title={bot.name} className="min-w-0 max-w-32 truncate">{bot.tabLabel}</span>{bot.setupComplete ? <span title="配置完成" className="shrink-0"><Badge tone="success"><Check size={9}/>已配置</Badge></span> : <span className="shrink-0"><Badge tone="warning">待配置</Badge></span>}{bot.activeListening && !config.data?.listeningDisabled && bot.listening && <span title="监听已启动" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-solid"/>}</button>)}
         <button type="button" onClick={() => { setSelectedAppId(''); setStep(1); }} className={`flex h-10 shrink-0 items-center gap-1 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === '' ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Plus size={13}/>新增机器人</button>
       </div>
       <Dialog.Body className="space-y-3.5">
-        {config.isLoading ? <Skeleton variant="row" lines={3}/> : <>
+        {config.isLoading ? <Skeleton variant="row" lines={3}/> : missingTarget ? <Banner tone="warning">找不到指定机器人。请选择已有机器人或点击新增机器人。</Banner> : <>
           <div className="mb-1 grid grid-cols-2 rounded-md bg-muted p-1"><button type="button" onClick={() => setStep(1)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out ${step === 1 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">1</span>连接飞书应用</button><button type="button" disabled={!current} onClick={() => setStep(2)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out disabled:opacity-40 ${step === 2 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">2</span>选择 Agent 并启用</button></div>
           <p className="-mt-1 text-caption text-subtle">{step === 1 ? '填写飞书应用凭据并配置必要能力；成员范围可以留空，稍后再收紧。' : '选择处理飞书消息的 Agent、确认工作方式并启用监听。'}</p>
           {agents.length === 0 && <Banner tone="warning" role="alert">当前没有可用 Agent。你可以先保存飞书应用，但完成绑定前需要安装并登录 Agent CLI，然后重启 Dutydeck。</Banner>}
@@ -180,7 +183,7 @@ export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
             <div className="flex items-start justify-between gap-3"><div><div className="text-caption font-medium text-secondary">可调用机器人的其他机器人</div><p className="mt-0.5 text-caption text-subtle">输入机器人名称；保存时在群成员中解析为 open_id。已配置的群协作 peer 机器人默认放行，无需填写。</p></div></div>
             <div className="mt-3 space-y-2.5">
               <div><div className="text-caption font-medium text-subtle">机器人名称</div><MemberNameTagInput value={allowedBotNames} onChange={setAllowedBotNames} placeholder="输入机器人名称后按 Enter"/><p className="mt-1 text-caption text-subtle">留空则仅允许 peer 机器人（如下方开关开启）。</p></div>
-              <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><div className="text-caption font-medium text-primary">群协作 peer 机器人默认放行</div><div className="mt-0.5 text-caption text-subtle">开启后，已配置的群协作 peer 机器人无需加入上方名单即可调用；关闭后仅上方名单内的机器人可调用。</div></div><Switch label="群协作 peer 机器人默认放行" checked={peerBotsAllowed} onToggle={() => setPeerBotsAllowed(value => !value)}/></div>
+              <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-peer-bots" className="cursor-pointer text-caption font-medium text-primary">群协作 peer 机器人默认放行</label><div className="mt-0.5 text-caption text-subtle">开启后，已配置的群协作 peer 机器人无需加入上方名单即可调用；关闭后仅上方名单内的机器人可调用。</div></div><Switch id="lark-switch-peer-bots" label="群协作 peer 机器人默认放行" checked={peerBotsAllowed} onToggle={() => setPeerBotsAllowed(value => !value)}/></div>
             </div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
@@ -192,7 +195,7 @@ export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
           <Field label="操作确认方式" hint="飞书逐项确认支持 ACP Agent；修改后在会话空闲时应用，新操作仍受群权限与高危策略约束。"><CompactSelect options={[{ value: 'full-trust', label: '完全信任：自动执行操作' }, { value: 'ask', label: '飞书逐项确认：等待批准后执行' }]} value={permissionMode} placeholder="选择操作确认方式" disabledText="" onChange={value => setPermissionMode(value as 'ask' | 'full-trust')}/></Field>
           {permissionMode === 'ask' && agentOptions.data?.source !== 'acp' && <p className="text-caption text-warning">当前 Agent 尚未确认支持 ACP，请选择支持 ACP 的 Agent 后保存。</p>}
           {permissionMode === 'full-trust' && <label className="flex items-start gap-2.5 rounded-md border border-warning-border bg-warning-soft px-3 py-2.5"><input type="checkbox" checked={fullTrustConfirmed} onChange={event => setFullTrustConfirmed(event.target.checked)} className="mt-0.5 h-4 w-4 rounded-sm border-warning-solid"/><span><span className="block text-caption font-semibold text-warning">确认飞书任务以 full-trust 运行</span><span className="mt-0.5 block text-caption text-warning">无人值守 Agent 可执行本机命令和修改文件；取消确认后不能保存完全信任配置；也可以切换为飞书逐项确认。</span></span></label>}
-          <div className={`flex items-center rounded-md bg-surface px-3 py-2.5 shadow-card ${config.data?.listeningDisabled ? 'opacity-50' : ''}`}><div className="min-w-0"><div className="text-body font-medium text-primary">监听飞书消息</div><div className="mt-0.5 text-caption text-subtle">{config.data?.listeningDisabled ? '本次启动已通过 --no-lark-listen 禁用，保存值不受影响' : !listening ? '保持关闭，仅保存机器人配置' : current?.activeListening ? '监听已启动，可到飞书发送消息' : '完成配置后立即接收机器人消息'}</div></div><Switch label="监听飞书消息" checked={listening} disabled={config.data?.listeningDisabled} onToggle={() => setListening(value => !value)}/></div>
+          <div className={`flex items-center rounded-md bg-surface px-3 py-2.5 shadow-card ${config.data?.listeningDisabled ? 'opacity-50' : ''}`}><div className="min-w-0"><label htmlFor="lark-switch-listening" className="cursor-pointer text-body font-medium text-primary">监听飞书消息</label><div className="mt-0.5 text-caption text-subtle">{config.data?.listeningDisabled ? '本次启动已通过 --no-lark-listen 禁用，保存值不受影响' : !listening ? '保持关闭，仅保存机器人配置' : current?.activeListening ? '监听已启动，可到飞书发送消息' : '完成配置后立即接收机器人消息'}</div></div><Switch id="lark-switch-listening" label="监听飞书消息" checked={listening} disabled={config.data?.listeningDisabled} onToggle={() => setListening(value => !value)}/></div>
           {!agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching) ? <div className="flex min-h-10 items-center rounded-md bg-muted px-2.5"><Spinner label="正在读取 Agent 配置"/></div> : <>
             {agentOptions.data?.source === 'acp' && agentOptions.data.models.length > 0 && <div><span className="text-caption font-medium text-secondary">默认模型</span><CompactSelect options={[{ value: '', label: agentOptions.data.defaultModel ? `Agent 默认 (${agentOptions.data.defaultModel})` : '使用 Agent 默认模型' }, ...agentOptions.data.models.map(item => ({ value: item.id, label: item.name, meta: item.name === item.id ? undefined : item.id }))]} value={defaultModel} placeholder="选择默认模型" disabledText="" onChange={value => { setDefaultModel(value); setDefaultReasoningEffort(''); }}/></div>}
             {agentOptions.data?.source === 'acp' && agentOptions.data.reasoningEfforts.length > 0 && <div><span className="text-caption font-medium text-secondary">推理强度</span><CompactSelect options={[{ value: '', label: agentOptions.data.defaultReasoningEffort ? `Agent 默认 (${agentOptions.data.defaultReasoningEffort})` : '使用 Agent 默认强度' }, ...agentOptions.data.reasoningEfforts.map(item => ({ value: item.id, label: item.name }))]} value={defaultReasoningEffort} placeholder="选择推理强度" disabledText="" onChange={setDefaultReasoningEffort}/></div>}
@@ -200,7 +203,7 @@ export function LarkConfigModal({ agents, onClose }: LarkConfigModalProps) {
           <Field label="预注入 Prompt（可选，默认空）" hint="每轮飞书对话都会在用户请求前隐式注入，不会在 Agent 聊天记录中重复显示为用户消息。">
             <Textarea value={preInjectPrompt} onChange={event => setPreInjectPrompt(event.target.value)} rows={3} placeholder="例如：请始终使用中文回答，并优先给出结论。" className="resize-y"/>
           </Field>
-          <div className="rounded-md bg-surface px-3 py-2.5 shadow-card"><div className="flex items-center"><div className="min-w-0"><div className="text-body font-medium text-primary">启用 Agent 群协作工具</div><div className="mt-0.5 text-caption text-subtle">允许 Agent 在当前飞书群发现其他已配置 Agent，并读取增量消息</div></div><Switch label="启用 Agent 群协作工具" checked={groupToolsEnabled} onToggle={() => setGroupToolsEnabled(value => !value)}/></div>{groupToolsEnabled && <div className="mt-3 flex items-center border-t border-subtle pt-3"><div className="min-w-0"><div className="text-caption font-medium text-primary">允许 Agent 发消息与 @交接</div><div className="mt-0.5 text-caption text-subtle">关闭后仅保留 self、peers、messages 和 wait 只读能力</div></div><Switch label="允许 Agent 发消息与 @交接" checked={groupToolsAllowSend} onToggle={() => setGroupToolsAllowSend(value => !value)}/></div>}<p className="mt-2 text-caption text-subtle">缺少群成员、消息或发消息权限时，Agent 会停止对应操作并给出管理员授权链接；不会索要 App Secret。</p></div>
+          <div className="rounded-md bg-surface px-3 py-2.5 shadow-card"><div className="flex items-center"><div className="min-w-0"><label htmlFor="lark-switch-group-tools" className="cursor-pointer text-body font-medium text-primary">启用 Agent 群协作工具</label><div className="mt-0.5 text-caption text-subtle">允许 Agent 在当前飞书群发现其他已配置 Agent，并读取增量消息</div></div><Switch id="lark-switch-group-tools" label="启用 Agent 群协作工具" checked={groupToolsEnabled} onToggle={() => setGroupToolsEnabled(value => !value)}/></div>{groupToolsEnabled && <div className="mt-3 flex items-center border-t border-subtle pt-3"><div className="min-w-0"><label htmlFor="lark-switch-group-send" className="cursor-pointer text-caption font-medium text-primary">允许 Agent 发消息与 @交接</label><div className="mt-0.5 text-caption text-subtle">关闭后仅保留 self、peers、messages 和 wait 只读能力</div></div><Switch id="lark-switch-group-send" label="允许 Agent 发消息与 @交接" checked={groupToolsAllowSend} onToggle={() => setGroupToolsAllowSend(value => !value)}/></div>}<p className="mt-2 text-caption text-subtle">缺少群成员、消息或发消息权限时，Agent 会停止对应操作并给出管理员授权链接；不会索要 App Secret。</p></div>
           <div className="rounded-md bg-surface px-3 py-2.5 shadow-card">
             <Field label="风险控制" hint="关闭：不附加限制；约束提示：向 Agent 注入高危操作约束；强制拦截：同时由 Agent Hook 拦截高危工具调用。">
               {/* 可访问名必须逐字保持「风险控制」：测试用 getByRole('combobox', { name: '风险控制' }) 定位。 */}

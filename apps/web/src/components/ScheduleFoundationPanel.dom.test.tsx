@@ -82,7 +82,7 @@ describe('ScheduleFoundationPanel offline-only journey', () => {
     vi.spyOn(scheduleApi, 'list').mockResolvedValue(list);
     vi.spyOn(scheduleApi, 'archivedIntegrations').mockResolvedValue({ integrations: [] });
     const { container } = renderPanel();
-    const dialog = await screen.findByRole('dialog', { name: 'Schedule 离线管理' });
+    const dialog = await screen.findByRole('dialog', { name: '定时任务草稿' });
     expect(container.contains(dialog)).toBe(false);
     expect(document.body.contains(dialog)).toBe(true);
   });
@@ -94,7 +94,7 @@ describe('ScheduleFoundationPanel offline-only journey', () => {
     vi.spyOn(scheduleApi, 'list').mockResolvedValue(list);
     vi.spyOn(scheduleApi, 'archivedIntegrations').mockResolvedValue({ integrations: [] });
     renderPanel();
-    const dialog = await screen.findByRole('dialog', { name: 'Schedule 离线管理' });
+    const dialog = await screen.findByRole('dialog', { name: '定时任务草稿' });
     expect(dialog.getAttribute('aria-modal')).toBe('true');
     await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true));
   });
@@ -106,7 +106,7 @@ describe('ScheduleFoundationPanel offline-only journey', () => {
     vi.spyOn(scheduleApi, 'archivedIntegrations').mockResolvedValue({ integrations: [] });
     const onClose = vi.fn();
     renderPanel(onClose);
-    await screen.findByRole('dialog', { name: 'Schedule 离线管理' });
+    await screen.findByRole('dialog', { name: '定时任务草稿' });
     await userEvent.keyboard('{Escape}');
     expect(onClose).toHaveBeenCalledOnce();
   });
@@ -125,6 +125,6 @@ describe('ScheduleFoundationPanel offline-only journey', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: '保存中…' }).getAttribute('aria-busy')).toBe('true'));
     await userEvent.keyboard('{Escape}');
     expect(onClose).not.toHaveBeenCalled();
-    expect(screen.getByRole('dialog', { name: 'Schedule 离线管理' })).toBeTruthy();
+    expect(screen.getByRole('dialog', { name: '定时任务草稿' })).toBeTruthy();
   });
 });

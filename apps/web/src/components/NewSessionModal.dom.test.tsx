@@ -38,6 +38,20 @@ describe('NewSessionModal create → dispatch', () => {
     expect(send).toHaveBeenCalledWith('s1', '修复登录超时', 'queue');
   });
 
+  it.each(['codex', 'claude-code'])('submits the Agent selected by its source card: %s', async initialAgentId => {
+    const agents = [agent, { ...agent, id: 'claude-code', name: 'Claude Code' }];
+    const created = { ...session, agentId: initialAgentId };
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const create = vi.spyOn(api, 'create').mockResolvedValue(created);
+    vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(<QueryClientProvider client={client}><NewSessionModal open initialAgentId={initialAgentId} agents={agents} onClose={() => {}} onCreated={() => {}}/></QueryClientProvider>);
+    expect(screen.getByRole('button', { name: initialAgentId === 'codex' ? /Codex/ : /Claude Code/ })).toBeTruthy();
+    await userEvent.type(screen.getByLabelText('任务目标'), '修复登录超时');
+    await userEvent.click(screen.getByRole('button', { name: '创建并执行' }));
+    await waitFor(() => expect(create).toHaveBeenCalledWith({ agentId: initialAgentId, permissionMode: 'ask', workspaceMode: 'worktree' }));
+  });
+
   it('PTY 只暴露真实支持的权限姿态，并说明交互确认发生在终端', async () => {
     const user = userEvent.setup();
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });

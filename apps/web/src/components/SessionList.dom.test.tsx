@@ -169,16 +169,20 @@ describe('SessionList 功能导航区', () => {
   /**
    * 硬约束：导航项不得声称它不做的功能。
    *
-   * 群与权限的 `runtimeWired`、定时任务的 `executorWired` 在 api.ts 里都是字面量
-   * `false`——不是「暂未完成」而是类型层面写死的。本仓有过 /help 承诺「可用命令
-   * 列表」却没有列表的教训，composer-commands.ts 也记着两条因为空承诺被删掉的命令。
-   * 这条用例把限制钉进可及名：措辞可以改，但「进去之后拿不到运行时」这件事必须
-   * 在点进去之前就说清楚。
+   * 群与权限的 `runtimeWired` 在 api.ts 里是字面量 `false`——不是「暂未完成」
+   * 而是类型层面写死的。本仓有过 /help 承诺「可用命令列表」却没有列表的教训，
+   * composer-commands.ts 也记着两条因为空承诺被删掉的命令。这条用例把限制钉进
+   * 可及名：措辞可以改，但「进去之后拿不到运行时」这件事必须在点进去之前就
+   * 说清楚。
+   *
+   * 定时任务入口是真实 session 自动化总览：任务内计划会按时运行，只有导入定义
+   * 是草稿，所以 hint 只说「任务执行计划与草稿」，不把整个入口统称「不会自动执行」。
    */
-  it('对只有草稿态的目的地如实标注限制，不做成空承诺', () => {
+  it('群与权限如实标注运行时限制；定时任务只标注导入草稿，不统称不执行', () => {
     render(<SessionList {...baseProps} open/>);
     expect(screen.getByRole('button', { name: /群与权限.*尚未接入运行时/ })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /定时任务.*不会自动执行/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /定时任务.*任务执行计划与草稿/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /定时任务.*不会自动执行/ })).toBeNull();
   });
 
   it('飞书入口按真实状态如实改口，拒绝虚假声明', () => {

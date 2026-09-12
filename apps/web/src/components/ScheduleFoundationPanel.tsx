@@ -59,21 +59,21 @@ export function ScheduleFoundationPanel({ open, onClose }: { open: boolean; onCl
   // 无从知道 revision 到底推没推上去。preview 同理——转圈时关掉面板，结果无处可落。
   const busy = save.isPending || preview.isPending;
 
-  return <Dialog open={open} onClose={onClose} label="Schedule 离线管理" size="lg" closeOnEscape={!busy} closeOnScrim={!busy}>
+  return <Dialog open={open} onClose={onClose} label="定时任务草稿" size="lg" closeOnEscape={!busy} closeOnScrim={!busy}>
     <Dialog.Header>
       <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-queued-soft text-queued"><CalendarClock size={18}/></span>
       <div className="min-w-0 flex-1">
         <div className="text-meta font-semibold uppercase tracking-[.12em] text-queued">Offline management · edit / preview only</div>
-        <h2 className="mt-1 text-title font-semibold text-primary">Schedule 定义与触发预览</h2>
-        <p className="mt-1 text-caption text-subtle">只能维护 staged/disabled 定义；不会启动 timer、创建真实 Run 或接管 Botmux schedule。</p>
+        <h2 className="mt-1 text-title font-semibold text-primary">定时任务草稿</h2>
+        <p className="mt-1 text-caption text-subtle">本区只保存和预览导入/管理草稿，不会自动执行。任务自动化请返回「任务计划」。</p>
       </div>
-      <IconButton label="关闭 Schedule 管理" onClick={onClose}><X size={16}/></IconButton>
+      <IconButton label="关闭草稿管理" onClick={onClose}><X size={16}/></IconButton>
     </Dialog.Header>
     <Dialog.Body className="p-5">
       {capabilities.isLoading && <div className="flex min-h-40 items-center justify-center"><Spinner label="正在读取 Schedule 管理能力…"/></div>}
       {capabilities.isError && <Banner tone="danger">Schedule 能力读取失败：{capabilities.error.message}</Banner>}
-      {capability && <Banner tone="warning" title={<span className="inline-flex items-center gap-2"><ShieldAlert size={15}/>执行器保持不可用</span>}>
-        <p>当前仅提供离线定义、CAS 编辑和下一次触发预览；控制中心入口已就绪。</p>
+      {capability && <Banner tone="warning" title={<span className="inline-flex items-center gap-2"><ShieldAlert size={15}/>本区仅保存草稿</span>}>
+        <p>草稿保留禁用状态；预览时间不代表已经安排执行。</p>
         <div className="mt-2 flex flex-wrap gap-2">{visibleCapabilityBlockers.map(blocker => <span key={blocker.code} title={blocker.action}><Badge tone="warning">{blocker.code}</Badge></span>)}</div>
       </Banner>}
       {capability?.repositoriesWired === false && <EmptyState tone="neutral" icon={<CalendarClock size={22}/>} title="Schedule v13 仓储尚未注入" description="服务会返回 machine-readable `SCHEDULE_REPOSITORY_UNWIRED`；不会降级成内存执行。"/>}
