@@ -171,8 +171,8 @@ const write = entry => appendFileSync(file, JSON.stringify(entry) + '\\n');
 // 让 transcript tailer 在发送 prompt 前就能订阅，避免把最终输出错过成 raw-only。
 appendFileSync(file, '');
 
-// readyPattern：❯ —— 不打印它，idle-detector 永远不会判定空闲
-process.stdout.write((resumed ? 'Mock Claude CLI (resumed)' : 'Mock Claude CLI') + '\\r\\n\\u276f ');
+// 启动检测要求 Claude 版本行和独立的 ❯ 提示符。
+process.stdout.write('Claude Code v2.1.267 (mock)' + (resumed ? ' (resumed)' : '') + '\\r\\n\\u276f ');
 
 let buffer = '';
 let composedPrompt = '';
@@ -195,7 +195,7 @@ const submitPrompt = rawPrompt => {
     const marker = resumed ? 'MOCK_RESUMED' : currentTurn > 1 ? 'MOCK_CONTINUED' : 'MOCK_REPLY';
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
     // completionPattern：✳ Worked for Ns
-    process.stdout.write('\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
+    process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
   }, 300);
 };
 

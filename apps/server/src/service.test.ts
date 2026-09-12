@@ -253,7 +253,7 @@ describe('production PTY backend injection', () => {
       `#!${process.execPath}`,
       "import { appendFileSync, existsSync } from 'node:fs';",
       "process.stdin.setRawMode(true); process.stdin.setEncoding('utf8');",
-      "process.stdout.write('❯ ready\\r\\n'); let input = '';",
+      "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n'); let input = '';",
       // The real adapter pastes a multiline routing block, then Enter commits it.
       "process.stdin.on('data', data => {",
       "  input += data; const end = input.indexOf('\\x1b[201~');",
@@ -262,7 +262,7 @@ describe('production PTY backend injection', () => {
       "  process.stdout.write('\\x1b[2J\\x1b[HWorking (esc to interrupt)\\r\\n');",
       "  const timer = setInterval(() => {",
       "    if (!existsSync('finish')) return; clearInterval(timer);",
-      "    process.stdout.write('\\x1b[2J\\x1b[H✳ Worked for 1s\\r\\n❯ ready\\r\\n');",
+      "    process.stdout.write('\\x1b[2J\\x1b[HClaude Code v2.1.267 (mock)\\r\\n✳ Worked for 1s\\r\\n❯ \\r\\n');",
       '  }, 50);',
       '});', ''
     ].join('\n'));
@@ -334,9 +334,9 @@ describe('production PTY backend injection', () => {
     const fakeRunner = join(root, 'fake-claude-runner.sh');
     writeFileSync(fakeRunner, [
       '#!/bin/sh',
-      "printf '❯ ready\\n'",
+      "printf 'Claude Code v2.1.267 (mock)\\n❯ \\n'",
       'while IFS= read -r line; do',
-      "  printf 'handled:%s\\n✳ Worked for 1s\\n❯ ready\\n' \"$line\"",
+      "  printf '\\033[2J\\033[HClaude Code v2.1.267 (mock)\\nhandled:%s\\n✳ Worked for 1s\\n❯ \\n' \"$line\"",
       'done',
       '',
     ].join('\n'));
