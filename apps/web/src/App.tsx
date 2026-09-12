@@ -63,6 +63,7 @@ export default function App() {
   const rawSideBySide = useMediaQuery('(min-width: 1536px)');
   const toggleRawPanel = useCallback(() => { if (!rawVisible) captureDialogOpener(); toggleRaw(); }, [rawVisible, toggleRaw]);
   const [archiveConfirm, setArchiveConfirm] = useState(false);
+  const [bulkArchiveIds, setBulkArchiveIds] = useState<string[]>([]);
   const [systemPromptOpen, setSystemPromptOpen] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [composerReferences, setComposerReferences] = useState<ComposerReference[]>([]);
@@ -277,6 +278,28 @@ export default function App() {
   }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'cancel-queued', title: '取消待执行指令失败', description: error.message }); } });
   const steerQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.steerQueued(sessionId, taskId), onSuccess: (_result, variables) => { setActionError(undefined); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
   const archive = useMutation({ mutationFn: (sessionId: string) => api.archive(sessionId), onSuccess: result => { qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); setArchiveConfirm(false); selectSession(undefined); toastStore.push({ kind: 'success', key: 'archive', title: '任务已归档', description: '历史指令和执行记录仍可在「已归档」筛选中查看。' }); }, onError: error => setActionError(error.message) });
+  const bulkArchive = useMutation({
+    mutationFn: async (ids: string[]) => {
+      const archived = new Map<string, Session>();
+      const failures: Array<{ id: string; message: string }> = [];
+      for (const id of new Set(ids)) {
+        try { archived.set(id, await api.archive(id)); }
+        catch (error) { failures.push({ id, message: error instanceof Error ? error.message : String(error) }); }
+      }
+      return { archived, failures };
+    },
+    onSuccess: async ({ archived, failures }) => {
+      await qc.cancelQueries({ queryKey: ['sessions'], exact: true });
+      qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => archived.get(session.id) ?? session));
+      setBulkArchiveIds(failures.map(failure => failure.id));
+      toastStore.push({
+        kind: failures.length ? archived.size ? 'warning' : 'error' : 'success',
+        key: 'bulk-archive',
+        title: failures.length ? `已清理 ${archived.size} 个任务，${failures.length} 个失败` : `已清理 ${archived.size} 个任务`,
+        description: failures.length ? '失败项已保留，可重试。' : '历史指令和执行记录可在「已归档」中查看。'
+      });
+    }
+  });
   const restart = useMutation({ mutationFn: api.restart, onSuccess: result => { setActionError(undefined); qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); void qc.invalidateQueries({ queryKey: ['sessions'] }); void qc.invalidateQueries({ queryKey: ['events', activeSessionId] }); void qc.invalidateQueries({ queryKey: ['tasks', activeSessionId] }); toastStore.push({ kind: 'success', key: 'restart', title: '任务已重新启动', description: '这是一个全新的 Agent 进程，会从空白上下文开始；之前的对话不会带过来。' }); }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'restart', title: '重新启动失败', description: error.message }); } });
   const resolvePermission = useMutation({ mutationFn: ({ sessionId, permissionId, approved }: { sessionId: string; permissionId: string; approved: boolean }) => api.permission(sessionId, permissionId, approved), onSuccess: (_result, variables) => { qc.setQueryData<EventWindow>(['events', variables.sessionId], current => { if (!current) return current; const next = current.events.map(event => event.type === 'permission_request' && (event.data.id === variables.permissionId || event.id === variables.permissionId) ? { ...event, data: { ...event.data, status: variables.approved ? 'approved' : 'rejected' } } : event); return createEventWindow(next, current.hasEarlier); }); }, onError: error => setActionError(error.message) });
   const loadEarlier = useMutation({ mutationFn: async () => { const before = oldestSequence(events.data); if (before === undefined || !activeSessionId) return [] as DockEvent[]; return api.events(activeSessionId, { before, limit: EVENT_PAGE_SIZE, direction: 'backward' }); }, onSuccess: older => { if (!activeSessionId) return; qc.setQueryData<EventWindow>(['events', activeSessionId], current => mergeOlderEvents(current, older, older.length >= EVENT_PAGE_SIZE)); }, onError: error => setActionError(error.message) });
@@ -297,7 +320,7 @@ export default function App() {
   const act = async (action: string) => { try { setActionError(undefined); await api.action(activeSessionId!, action); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); } };
 
   // 有浮层占用键盘时整套快捷键停用，避免和弹窗内的按键语义打架。
-  const overlayOpen = Boolean(overlay) || newOpen || archiveConfirm || systemPromptOpen || paletteOpen || helpOpen || deliveryPanelOpen || (rawVisible && !rawSideBySide);
+  const overlayOpen = Boolean(overlay) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || deliveryPanelOpen || (rawVisible && !rawSideBySide);
   const shortcutHandlers = useMemo(() => ({
     'command-palette': openPalette,
     'toggle-help': () => setHelpOpen(open => !open),
@@ -413,7 +436,7 @@ export default function App() {
             ? <aside aria-label="原始日志" className="ui-side-panel flex w-[420px] shrink-0 flex-col border-l border-code-border bg-code-surface text-code-header-text"><div className="flex h-11 items-center border-b border-code-border px-3 text-caption font-medium"><Terminal size={13} className="mr-2"/>原始日志<span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={14}/></IconButton></span></div><pre className="m-0 flex-1 overflow-auto whitespace-pre-wrap border-0 bg-code-surface p-4 font-mono text-meta leading-5 text-code-header-text">{raw || '当前任务暂无原始输出。'}</pre></aside>
             : <Dialog open onClose={toggleRawPanel} label="原始日志" size="lg"><Dialog.Header><Terminal size={16}/><h2 className="text-title font-semibold">原始日志</h2><span className="ml-auto"><IconButton label="关闭原始日志" onClick={toggleRawPanel}><PanelRightClose size={16}/></IconButton></span></Dialog.Header><Dialog.Body className="bg-code-surface"><pre tabIndex={0} aria-label="原始日志内容" className="m-0 whitespace-pre-wrap border-0 bg-code-surface font-mono text-meta leading-5 text-code-header-text">{raw || '当前任务暂无原始输出。'}</pre></Dialog.Body></Dialog>)}
         </div>
-      </> : <WorkspaceOverview sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={workbenchView} onViewChange={setWorkbenchView} onSelect={selectSession} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
+      </> : <WorkspaceOverview sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} loading={sessions.isLoading} agentsLoading={agents.isLoading} larkBots={larkConfig.data?.bots ?? []} larkBotsLoading={larkConfig.isLoading} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false} larkBotsFailed={larkConfig.isError} larkBotsRetrying={larkConfig.isFetching} onRetryLarkBots={() => void larkConfig.refetch()} view={workbenchView} onViewChange={setWorkbenchView} onSelect={selectSession} onBulkArchive={ids => { captureDialogOpener(); bulkArchive.reset(); setBulkArchiveIds(ids); }} onCreate={openCreateTask} onOpenAgentSetup={() => openSettings('agents')} onOpenLarkSetup={() => openLarkSetup('new')} onManageBots={() => setPrimaryNav('bots')}/>}
     </main>
     </div>
     {newOpen && <NewSessionModal open initialAgentId={newAgentId} onClose={() => setNewOpen(false)} onOpenAgentSetup={() => { setNewOpen(false); openSettings('agents'); }} onCreated={(session, task) => { setRunSummaries(current => ({ ...current, [session.id]: { sessionId: session.id, taskId: task.id, prompt: task.prompt, status: task.status, queuedCount: task.status === 'queued' ? 1 : 0, updatedAt: task.updatedAt || task.createdAt } })); void qc.invalidateQueries({ queryKey: ['sessions'] }); selectSession(session.id); setNewOpen(false); setActionError(undefined); }} agents={agents.data ?? []} capabilities={systemCapabilities.data}/>}
@@ -425,6 +448,7 @@ export default function App() {
       <Dialog.Body><Suspense fallback={<Spinner label="正在读取任务自动化…"/>}><AutomationOverview sessions={visibleSessions} summaries={runSummaries} onSelectSession={id => { applySessionSelection(id); navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId }, { replace: true }); }}/></Suspense></Dialog.Body>
     </Dialog>}
     <ConfirmDialog open={archiveConfirm} tone="danger" title="归档此任务？" description="归档后任务将变为只读且无法恢复，历史指令和执行记录会继续保留。" confirmLabel="确认归档" busy={archive.isPending} error={archive.error?.message} onCancel={() => { if (!archive.isPending) setArchiveConfirm(false); }} onConfirm={() => { if (active) archive.mutate(active.id); }}/>
+    <ConfirmDialog open={bulkArchiveIds.length > 0} tone="danger" title={`清理所选的 ${bulkArchiveIds.length} 个任务？`} description="所选任务将归档为只读且无法恢复；正在执行的任务会停止，排队指令会取消。历史指令和执行记录会保留，可在「已归档」中查看。" confirmLabel={bulkArchive.data?.failures.length ? '重试失败项' : '确认清理'} busy={bulkArchive.isPending} error={bulkArchive.data?.failures.length ? `${bulkArchive.data.failures.length} 个任务未清理。首个错误：${bulkArchive.data.failures[0].message}` : undefined} onCancel={() => { if (!bulkArchive.isPending) setBulkArchiveIds([]); }} onConfirm={() => { if (bulkArchiveIds.length && !bulkArchive.isPending) bulkArchive.mutate(bulkArchiveIds); }}/>
     <SystemPromptModal open={systemPromptOpen} session={active} onClose={() => setSystemPromptOpen(false)}/>
     <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} actions={paletteActions} onSelectSession={selectSession}/>
     <ShortcutHelpSheet open={helpOpen} onClose={() => setHelpOpen(false)} available={shortcutsAvailable}/>

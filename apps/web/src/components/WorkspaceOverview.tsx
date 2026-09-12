@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { AlertTriangle, Archive, ArrowRight, CheckCircle2, CircleDot, MessageSquare, Plus, Radio, Settings2 } from 'lucide-react';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
 import {
@@ -34,6 +35,7 @@ type OverviewProps = {
   view: WorkbenchView;
   onViewChange(view: WorkbenchView): void;
   onSelect(id: string): void;
+  onBulkArchive?(ids: string[]): void;
   onCreate(): void;
   onOpenAgentSetup(): void;
   onOpenLarkSetup(): void;
@@ -67,21 +69,26 @@ const sectionCopy: Record<WorkbenchTaskSection, { title: string; description: st
   recent: { title: '已完成', description: '已交付且没有后续排队指令的任务' }
 };
 
-function TaskRow({ session, summary, agent, section, onSelect }: {
+function TaskRow({ session, summary, agent, section, onSelect, selection }: {
   session: Session;
   summary?: RunSummary;
   agent?: Agent;
   section: WorkbenchTaskSection;
   onSelect(id: string): void;
+  selection?: { checked: boolean; disabled: boolean; onChange(): void };
 }) {
   const updatedAt = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(updatedAt);
   const queuedCommands = summary?.queuedCount ?? 0;
-  return <button
+  return <div className="flex border-t border-subtle first:border-t-0">
+    {selection && <label className="flex min-h-10 min-w-10 shrink-0 cursor-pointer items-center justify-center pl-2" title={selection.disabled ? '此步骤由目标管理，请从原目标处理' : undefined}>
+      <input type="checkbox" aria-label={`选择任务：${summary?.prompt ?? workspaceName(session.cwd)}`} checked={selection.checked} disabled={selection.disabled} onChange={selection.onChange} className="h-4 w-4 accent-action"/>
+    </label>}
+    <button
     type="button"
     data-task-priority={section}
     onClick={() => onSelect(session.id)}
-    className="group grid min-h-[72px] w-full grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 border-t border-subtle px-4 py-3 text-left first:border-t-0 hover:bg-hover sm:flex sm:items-center sm:gap-3 sm:px-5"
+    className="group grid min-h-[72px] w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 px-4 py-3 text-left hover:bg-hover sm:flex sm:items-center sm:gap-3 sm:px-5"
   >
     {/* 徽标文案与归档优先判据都来自 effectiveStatus，由 StatusBadge 单点消费；这里不再拼配色字符串。 */}
     <span className="mt-0.5 shrink-0 sm:mt-0"><StatusBadge session={session}/></span>
@@ -100,7 +107,7 @@ function TaskRow({ session, summary, agent, section, onSelect }: {
       <span className="hidden font-mono text-meta sm:block">{shortRunId(session)}</span>
     </span>
     <ArrowRight aria-hidden="true" size={16} className="hidden shrink-0 text-subtle group-hover:text-action sm:block"/>
-  </button>;
+  </button></div>;
 }
 
 /**
@@ -212,9 +219,18 @@ function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisab
   </Card>;
 }
 
-export function WorkspaceOverview({ sessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, onSelect, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
+export function WorkspaceOverview({ sessions, summaries, agents, loading, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, larkBotsRetrying = false, onRetryLarkBots, view, onViewChange, onSelect, onBulkArchive, onCreate, onOpenAgentSetup, onOpenLarkSetup, onManageBots = onOpenLarkSetup }: OverviewProps) {
+  const [selecting, setSelecting] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  useEffect(() => { setSelecting(false); setSelectedIds([]); }, [view]);
+  useEffect(() => {
+    setSelectedIds(current => current.filter(id => sessions.some(session => session.id === id && !session.archivedAt && session.source !== 'work_item')));
+  }, [sessions]);
   const counts = workbenchCounts(sessions, summaries);
   const ordered = orderSessionsForWorkbench(sessions, view, summaries);
+  const selectable = ordered.filter(session => !session.archivedAt && session.source !== 'work_item');
+  const selected = selectable.filter(session => selectedIds.includes(session.id)).map(session => session.id);
+  const allSelected = selectable.length > 0 && selected.length === selectable.length;
   const selectedLabel = workbenchViewLabels[view];
   const createTask = createTaskAffordance({ agents, agentsLoading, onCreate, onPrepareAgents: onOpenAgentSetup });
   const sections: Array<{ id: WorkbenchTaskSection; sessions: Session[] }> = view === 'all'
@@ -270,6 +286,18 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
         </div>
       </section>
 
+      {onBulkArchive && !pending && view !== 'archived' && (selectable.length > 0 || selecting) && <div className="mt-4 flex flex-wrap items-center gap-2" aria-label="批量清理任务">
+        {selecting ? <>
+          <label className="flex min-h-10 cursor-pointer items-center gap-2 px-2 text-caption text-secondary">
+            <input type="checkbox" aria-label="全选当前视图" checked={allSelected} disabled={!selectable.length} ref={node => { if (node) node.indeterminate = selected.length > 0 && !allSelected; }} onChange={() => setSelectedIds(allSelected ? [] : selectable.map(session => session.id))} className="h-4 w-4 accent-action"/>
+            全选当前视图
+          </label>
+          <span role="status" className="text-caption text-secondary">已选 {selected.length} 个任务</span>
+          <Button variant="danger" disabled={!selected.length} icon={<Archive size={15}/>} onClick={() => onBulkArchive(selected)}>清理所选任务</Button>
+          <Button variant="ghost" onClick={() => { setSelecting(false); setSelectedIds([]); }}>退出多选</Button>
+        </> : <Button variant="secondary" icon={<Archive size={15}/>} onClick={() => setSelecting(true)}>批量清理</Button>}
+      </div>}
+
       {/* Bot 概览已占据首屏上段，任务列表在这里独占整个宽度，不再留右侧次列。 */}
       <div className="mt-5">
         <section aria-label="任务列表" className="min-w-0">
@@ -295,7 +323,7 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
                   <h2 id={`task-section-${section.id}`} className="text-title font-semibold text-primary">{view === 'all' ? sectionCopy[section.id].title : selectedLabel}</h2>
                   {view === 'all' && <p className="mt-0.5 text-caption text-secondary">{sectionCopy[section.id].description}</p>}
                 </div>
-                <Card padding="none" className="overflow-hidden">{section.sessions.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={onSelect}/>)}</Card>
+                <Card padding="none" className="overflow-hidden">{section.sessions.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={onSelect} selection={selecting ? { checked: selected.includes(session.id), disabled: session.source === 'work_item', onChange: () => setSelectedIds(current => current.includes(session.id) ? current.filter(id => id !== session.id) : [...current, session.id]) } : undefined}/>)}</Card>
               </section>)}</div>
               : <TaskListEmpty firstUse={view === 'all' && sessions.length === 0} hasAgents={agents.length > 0} createTask={createTask}/>}
         </section>

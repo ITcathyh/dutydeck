@@ -55,6 +55,101 @@ afterEach(() => {
   window.history.replaceState(null, '', '/');
 });
 
+describe('App 批量清理', () => {
+  function setup() {
+    const sessions = [session('s1', 'completed'), session('s2', 'thinking')];
+    mockAppApi({ sessions, summaries: [summary('s1', '已完成目标'), summary('s2', '运行中目标')] });
+    return sessions;
+  }
+
+  async function selectAll(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(await screen.findByRole('button', { name: '批量清理' }));
+    await user.click(screen.getByRole('checkbox', { name: '全选当前视图' }));
+    await user.click(screen.getByRole('button', { name: '清理所选任务' }));
+    return screen.getByRole('alertdialog', { name: '清理所选的 2 个任务？' });
+  }
+
+  it('二次确认前不写入，取消保留选择，成功后历史仍能从已归档查看', async () => {
+    const user = userEvent.setup(); const sessions = setup();
+    const archive = vi.spyOn(api, 'archive').mockImplementation(async id => ({ ...sessions.find(item => item.id === id)!, state: 'stopped', archivedAt: '2026-09-12T00:00:00Z' }));
+    const { client } = renderApp();
+    const dialog = await selectAll(user);
+    expect(dialog.textContent).toContain('正在执行的任务会停止，排队指令会取消');
+    expect(archive).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: '取消' }));
+    expect(screen.getByText('已选 2 个任务')).toBeTruthy();
+    expect(archive).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: '清理所选任务' }));
+    await user.click(screen.getByRole('button', { name: '确认清理' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(archive.mock.calls.map(([id]) => id).sort()).toEqual(['s1', 's2']);
+    expect(client.getQueryData<Session[]>(['sessions'])?.every(item => item.archivedAt)).toBe(true);
+    expect(screen.getByText('当前视图没有任务')).toBeTruthy();
+    const filters = screen.getByRole('region', { name: '任务筛选' });
+    await user.click(within(filters).getByRole('button', { name: '已归档 2' }));
+    const list = screen.getByRole('region', { name: '任务列表' });
+    expect(within(list).getByRole('button', { name: /已完成目标/ })).toBeTruthy();
+    expect(within(list).getByRole('button', { name: /运行中目标/ })).toBeTruthy();
+  });
+
+  it('部分失败仍继续清理其余任务，重试只提交失败项', async () => {
+    const user = userEvent.setup(); const sessions = setup();
+    let fail = true;
+    const archive = vi.spyOn(api, 'archive').mockImplementation(async id => {
+      if (id === 's2' && fail) throw new Error('暂时无法停止任务');
+      return { ...sessions.find(item => item.id === id)!, state: 'stopped', archivedAt: '2026-09-12T00:00:00Z' };
+    });
+    const { client } = renderApp();
+    await selectAll(user);
+    await user.click(screen.getByRole('button', { name: '确认清理' }));
+    const retry = await screen.findByRole('button', { name: '重试失败项' });
+    expect(screen.getByRole('alertdialog', { name: '清理所选的 1 个任务？' }).textContent).toContain('暂时无法停止任务');
+    expect(archive.mock.calls.map(([id]) => id)).toEqual(['s2', 's1']);
+    expect(client.getQueryData<Session[]>(['sessions'])?.find(item => item.id === 's1')?.archivedAt).toBeTruthy();
+    expect(client.getQueryData<Session[]>(['sessions'])?.find(item => item.id === 's2')?.archivedAt).toBeUndefined();
+    fail = false;
+    await user.click(retry);
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(archive.mock.calls.map(([id]) => id)).toEqual(['s2', 's1', 's2']);
+    expect(screen.getByText('当前视图没有任务')).toBeTruthy();
+  });
+
+  it('执行中禁止重复提交、取消和 Escape，完成后更新列表', async () => {
+    const user = userEvent.setup(); const sessions = setup();
+    let release!: (value: Session) => void;
+    const archive = vi.spyOn(api, 'archive').mockImplementationOnce(() => new Promise<Session>(resolve => { release = resolve; })).mockResolvedValue({ ...sessions[0], state: 'stopped', archivedAt: '2026-09-12T00:00:00Z' });
+    renderApp();
+    await selectAll(user);
+    await user.dblClick(screen.getByRole('button', { name: '确认清理' }));
+    expect(archive).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: '处理中' }).hasAttribute('disabled')).toBe(true);
+    expect(screen.getByRole('button', { name: '取消' }).hasAttribute('disabled')).toBe(true);
+    await user.keyboard('{Escape}5');
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+    await act(async () => release({ ...sessions[1], state: 'stopped', archivedAt: '2026-09-12T00:00:00Z' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    expect(archive).toHaveBeenCalledTimes(2);
+    expect(screen.getByText('当前视图没有任务')).toBeTruthy();
+  });
+
+  it('归档前发起的旧列表响应不能让已清理任务重新出现', async () => {
+    const user = userEvent.setup(); const sessions = setup();
+    vi.spyOn(api, 'archive').mockImplementation(async id => ({ ...sessions.find(item => item.id === id)!, state: 'stopped', archivedAt: '2026-09-12T00:00:00Z' }));
+    const { client } = renderApp();
+    await selectAll(user);
+    let release!: (value: Session[]) => void;
+    vi.mocked(api.sessions).mockImplementationOnce(() => new Promise<Session[]>(resolve => { release = resolve; }));
+    let refresh!: Promise<void>;
+    act(() => { refresh = client.refetchQueries({ queryKey: ['sessions'], exact: true }); });
+    await waitFor(() => expect(release).toBeTypeOf('function'));
+    await user.click(screen.getByRole('button', { name: '确认清理' }));
+    await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+    await act(async () => { release(sessions); await refresh; });
+    expect(client.getQueryData<Session[]>(['sessions'])?.every(item => item.archivedAt)).toBe(true);
+    expect(screen.getByText('当前视图没有任务')).toBeTruthy();
+  });
+});
+
 describe('App mobile navigation accessibility', () => {
   it('makes the background inert, moves focus into navigation, and restores focus on Escape', async () => {
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
