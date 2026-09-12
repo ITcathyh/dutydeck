@@ -1,6 +1,6 @@
 {
   "name": "dutydeck",
-  "version": "0.1.29",
+  "version": "0.0.1",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
