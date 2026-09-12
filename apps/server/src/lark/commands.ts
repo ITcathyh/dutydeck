@@ -106,6 +106,8 @@ export function parseSlashCommand(text: unknown): ParsedSlashCommand | undefined
  */
 export interface LarkCommandCapabilities {
   ci?: boolean;
+  schedule?: boolean;
+  work?: boolean;
   tasks?: boolean;
   answer?: boolean;
   approval?: boolean;
@@ -137,7 +139,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'ci' | 'help' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject';
+export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'help' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -170,6 +172,8 @@ export interface LarkCommandDefinition {
  *             由 coordinator 当作普通请求走完整建任务链路，命令层不自己派发。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
+  { name: 'work', summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
+  { name: 'schedule', summary: '查看、创建、启用或停用此话题的定时任务', usage: '/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', mutating: true, requires: c => c.schedule === true, unavailableReason: '当前服务未接入定时任务。' },
   { name: 'ci', summary: '等待当前提交的 GitHub Actions、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true, unavailableReason: '当前机器人未接入 GitHub Actions 自动续作。' },
   { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
   { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },

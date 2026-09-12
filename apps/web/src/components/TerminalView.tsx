@@ -26,7 +26,7 @@ const COARSE_MEDIA = '(pointer: coarse)';
 
 // PTY 实时终端视图：xterm.js 直连 WebSocket，协议见 apps/web/TERMINAL_API.md
 // showKeyBar 显式指定是否渲染快捷键条；不传时按媒体查询判断（jsdom 查不出粗指针，所以留出这个口子）
-export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: string; className?: string; showKeyBar?: boolean }) {
+export function TerminalView({ sessionId, className, showKeyBar, readOnly = false }: { sessionId: string; className?: string; showKeyBar?: boolean; readOnly?: boolean }) {
   // xterm 会往 hostRef 里塞自己的 DOM，所以它必须是一个 React 不放子节点的空容器：
   // 快捷键条挂在外层 wrapper 上，两边各管一棵子树，React 的 diff 不会和 xterm 抢节点。
   const hostRef = useRef<HTMLDivElement>(null);
@@ -50,7 +50,8 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
       fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       // 字号由容器宽度反推：窄视口自动缩小换更多列数，见 terminalFontSize 的注释
       fontSize: terminalFontSize(host.clientWidth),
-      cursorBlink: true,
+      cursorBlink: !readOnly,
+      disableStdin: readOnly,
       scrollback: 5000,
       theme: readTerminalTheme()
     });
@@ -79,7 +80,7 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
       if (!waitingForSnapshot && !restoring && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
     };
     const sendInput = (data: string) => {
-      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }));
+      if (!readOnly && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'input', data }));
     };
     // 快捷键条按下后把焦点还给终端：软键盘不收起，用户点完快捷键能接着打字
     sendInputRef.current = (data: string) => { sendInput(data); try { term.focus(); } catch { /* 终端已销毁 */ } };
@@ -162,10 +163,10 @@ export function TerminalView({ sessionId, className, showKeyBar }: { sessionId: 
       ws?.close();
       term.dispose();
     };
-  }, [sessionId]);
+  }, [sessionId, readOnly]);
 
   const onKey = useCallback((data: string) => sendInputRef.current(data), []);
-  const keyBarVisible = showKeyBar ?? wideEnoughForKeys;
+  const keyBarVisible = !readOnly && (showKeyBar ?? wideEnoughForKeys);
 
   // 滚动模式禁用触屏长按菜单；实际滚动由 bindTerminalTouchScroll 处理。
   const touchScroll = coarsePointer && !selectMode;

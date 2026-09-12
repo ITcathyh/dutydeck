@@ -15,7 +15,7 @@ const RECOVERABLE_BUSY_STATES = ['starting', 'thinking', 'running_tool', 'waitin
 /** `includes` 在 as const 数组上不接受更宽的入参；用类型谓词而不是 `as` 强转，保住穷尽性检查。 */
 const isRecoverableBusy = (state: Session['state']): boolean => (RECOVERABLE_BUSY_STATES as readonly string[]).includes(state);
 const isTaskFenceRevocation = (error: unknown): error is RuntimeError => error instanceof RuntimeError
-  && (error.code === 'SESSION_AUTOMATION_TASK_REVOKED' || error.code === 'SESSION_AUTOMATION_TASK_STALE_HEAD');
+  && (error.code === 'SESSION_AUTOMATION_TASK_REVOKED' || error.code === 'SESSION_AUTOMATION_TASK_STALE_HEAD' || error.code === 'WORK_ITEM_TASK_REVOKED');
 
 export function selectProtocol(probes: ProbeMatrix): 'acp' | 'jsonl' | 'pipe' | 'pty' {
   if (probes.acp) return 'acp';
@@ -93,6 +93,7 @@ export class DutydeckRuntime {
   private readonly workspaces: WorkspaceManager;
   private readonly verifications: VerificationManager;
   private readonly verifyingSessions = new Set<string>();
+  private readonly startingWorkSessions = new Set<string>();
   private readonly verificationDeferredTasks = new Map<string, Set<string>>();
   private readonly blockedVerificationSessions = new Map<string, string>();
 
@@ -222,6 +223,14 @@ export class DutydeckRuntime {
     for (const agent of agents) await this.repos.agents.save(agent);
     for (const session of await this.repos.sessions.list()) {
       if (session.archivedAt) continue;
+      if (session.source === 'work_item') {
+        const tasks = await this.repos.tasks.listBySession(session.id);
+        try { await this.options.authorizeExecution?.(session.id, tasks.at(-1)?.executionContext?.actorId); }
+        catch {
+          for (const task of tasks) if (task.status === 'queued') await this.saveTask(task, 'cancelled');
+          continue;
+        }
+      }
       let workspace = await this.workspaces.get(session.id);
       if (workspace) { session.workspaceMode = workspace.mode; session.workspaceSourceCwd = workspace.sourceCwd; }
       const verificationRecoveryError = blockedVerifications.get(session.id);
@@ -550,7 +559,47 @@ export class DutydeckRuntime {
     if (eventId) this.replayedEvents.get(session.id)?.add(eventId);
   }
 
+  getActiveTaskContext(sessionId: string): { taskId: string; actorId?: string } | undefined {
+    const task = this.activeTasks.get(sessionId);
+    return task ? { taskId: task.id, actorId: task.executionContext?.actorId } : undefined;
+  }
+
   async start(input: StartSessionInput): Promise<Session> {
+    if (input?.source === 'work_item') throw new RuntimeError('INVALID_WORK_SESSION', 'Work-item sessions require the internal admission API', 403);
+    return this.startSession(input);
+  }
+
+  /** Internal orchestration entry: mapping and authority must be durable before birth. */
+  async startWorkItemSession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
+    if (input.source !== 'work_item' || !input.sourceId || !/^ses_work_[a-f0-9]{64}$/.test(stableSessionId)) {
+      throw new RuntimeError('INVALID_WORK_SESSION', 'Invalid work-item session identity', 400);
+    }
+    await beforeStart();
+    const existing = await this.repos.sessions.get(stableSessionId);
+    if (existing) {
+      if (existing.source !== 'work_item' || existing.sourceId !== input.sourceId || existing.agentId !== input.agentId) {
+        throw new RuntimeError('WORK_SESSION_CONFLICT', 'Work-item session identity conflict', 409);
+      }
+      return existing;
+    }
+    if (this.startingWorkSessions.has(stableSessionId)) throw new RuntimeError('WORK_SESSION_STARTING', 'Work session start is already in progress', 409);
+    this.startingWorkSessions.add(stableSessionId);
+    try { return await this.startSession(input, { id: stableSessionId, beforeStart }); }
+    finally { this.startingWorkSessions.delete(stableSessionId); }
+  }
+
+  /** A persisted stopped flag alone is not evidence that a previous process stopped. */
+  async stopWorkItemSession(sessionId: string): Promise<boolean> {
+    const session = await this.repos.sessions.get(sessionId);
+    if (session?.source !== 'work_item') throw new RuntimeError('INVALID_WORK_SESSION', 'Not a work-item session', 409);
+    const driver = this.drivers.get(sessionId);
+    if (!driver) return false;
+    const startupPending = this.startingWorkSessions.has(sessionId);
+    await this.stop(sessionId);
+    return !startupPending && await driver.isStopped?.() === true;
+  }
+
+  private async startSession(input: StartSessionInput, owned?: { id: string; beforeStart: () => Promise<void> }): Promise<Session> {
     if (!input || typeof input !== 'object' || typeof input.agentId !== 'string' || !input.agentId.trim()) {
       throw new RuntimeError('INVALID_SESSION_INPUT', 'agentId must be a non-empty string', 400);
     }
@@ -573,10 +622,11 @@ export class DutydeckRuntime {
     if (capability.protocol === 'pty-cli' && initialConfigured.permissionMode !== 'ask' && initialConfigured.permissionMode !== 'full-trust') {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode', 422);
     }
-    const session: Session = { id: makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
+    const session: Session = { id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     await this.repos.sessions.save(session);
     let workspace: WorkspaceResponse;
     try {
+      await owned?.beforeStart();
       workspace = await this.workspaces.prepare(session.id, sourceCwd, workspaceMode);
       session.cwd = workspace.cwd;
       session.workspaceSourceCwd = workspace.sourceCwd;
@@ -591,11 +641,12 @@ export class DutydeckRuntime {
     }
     const configured = { ...agent, cwd: session.cwd, model: session.model, reasoningEffort: session.reasoningEffort, permissionMode: session.permissionMode ?? agent.permissionMode };
     await this.repos.sessions.save(session);
+    await owned?.beforeStart();
     await this.saveState(session, 'starting');
     const generation = this.nextSessionGeneration(session.id);
     const driver = this.factory(this.configureAgentForSession(configured, session), capability.protocol, this.onDriverEvent(session, generation), code => { if (this.sessionGenerations.get(session.id) !== generation) return; this.notifyDriverExit(session.id, code); if (code && session.state !== 'stopped' && !this.interruptedTurns.has(session.id) && !this.hardInterrupts.has(session.id)) void this.saveState(session, 'failed', `Agent exited with code ${code}`).then(() => this.emit(session.id, 'error', { message: `Agent exited with code ${code}` })); }, session.id);
     this.drivers.set(session.id, driver);
-    try { await driver.start(); this.touch(session.id); await this.saveState(session, 'idle'); return session; }
+    try { await driver.start(); await owned?.beforeStart(); this.touch(session.id); await this.saveState(session, 'idle'); return session; }
     catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.hardInterrupts.add(session.id);
@@ -728,7 +779,7 @@ export class DutydeckRuntime {
         || error instanceof RuntimeError && error.code === 'RUNTIME_SHUTTING_DOWN';
       if (this.shuttingDown && daemonDetached && task.executionContext?.recovery) return this.publicTask(task);
       if (!submissionStarted && isTaskFenceRevocation(error)) {
-        await this.saveTask(task, 'interrupted');
+        await this.saveTask(task, error.code === 'WORK_ITEM_TASK_REVOKED' ? 'cancelled' : 'interrupted');
         await this.saveState(session, 'interrupted');
         return this.publicTask(task);
       }
@@ -789,7 +840,9 @@ export class DutydeckRuntime {
     }
     const { session } = await this.active(id);
     if (['stopped', 'failed'].includes(session.state)) throw new RuntimeError('INVALID_STATE', `Cannot send while session is ${session.state}`, 409);
+    if (session.source === 'work_item') await this.options.authorizeExecution?.(id, actorId);
     const prepared = await this.prepareTask(session, agentPrompt, skillRequests);
+    if (session.source === 'work_item') await this.options.authorizeExecution?.(id, actorId);
     const task: TaskRecord = { id: stableId ?? makeId('task'), sessionId: id, prompt, status: 'queued', executionContext: this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries), createdAt: now(), updatedAt: now() };
     if (stableId && !await this.repos.tasks.create!(task)) {
       const existing = await this.repos.tasks.get!(stableId);

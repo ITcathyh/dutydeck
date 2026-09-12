@@ -7,6 +7,7 @@ import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dash
 import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
+import { executeScheduleCommand } from './schedule-command.js';
 import { defaultHighRiskPattern, defaultLarkTraceLimit, larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
@@ -185,7 +186,7 @@ export class LarkMessageCoordinator {
       authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
     },
     private readonly groupManager?: LarkGroupManager,
-    private readonly workflowOptions: { store?: ConfigRepository; broker?: RelayAskBroker; automation?: import('../session-automation.js').SessionAutomationService } = {},
+    private readonly workflowOptions: { store?: ConfigRepository; broker?: RelayAskBroker; automation?: import('../session-automation.js').SessionAutomationService; workbench?: import('./workbench.js').LarkWorkbench } = {},
   ) {
     if (workflowOptions.store) {
       this.inbox = new LarkTaskInbox(workflowOptions.store);
@@ -658,7 +659,7 @@ export class LarkMessageCoordinator {
     const commandAccess = event.chatType === 'group' ? await this.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'task.view_result') : undefined;
     const allowlisted = commandAccess?.allowed ?? await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, group.sessionId);
     const route = routeLarkCommand(prompt, {
-      capabilities: { ...larkCommandCapabilities(this.runtime), ci: Boolean(this.workflowOptions.automation), tasks: Boolean(this.workflows && this.cardMappings && this.runtime.getTasks), answer: Boolean(this.workflows && this.workflowOptions.broker), approval: Boolean(this.workflows && this.runtime.resolvePermission && this.runtime.getPendingPermissions) },
+      capabilities: { ...larkCommandCapabilities(this.runtime), ci: Boolean(this.workflowOptions.automation), schedule: Boolean(this.workflowOptions.automation), work: Boolean(this.workflowOptions.workbench), tasks: Boolean(this.workflows && this.cardMappings && this.runtime.getTasks), answer: Boolean(this.workflows && this.workflowOptions.broker), approval: Boolean(this.workflows && this.runtime.resolvePermission && this.runtime.getPendingPermissions) },
       operator: { kind: botSender ? 'bot' : 'user', allowlisted }
     });
     if (route.kind === 'not_a_command') return undefined;
@@ -730,6 +731,30 @@ export class LarkMessageCoordinator {
         return 'handled';
       }
 
+      if (route.command === 'work') {
+        const workbench = this.workflowOptions.workbench;
+        if (!workbench) throw new Error('当前服务尚未接入目标工作台。');
+        if (!sessionId && !route.args.length) {
+          await replyCard('Dutydeck 工作台', '在此话题描述目标，或发送 `/work research 研究目标`，Dutydeck 会分配两个独立分析步骤并汇总成果。已有目标可用 `/work` 查看，常用流程可用 `/work templates` 查看。');
+          return 'handled';
+        }
+        const parentSessionId = sessionId ?? (await this.sessionFor(group, config, event.chatId, event.chatType, scopeId)).id;
+        await workbench.command(parentSessionId, route.argsText, event, config);
+        if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
+        return 'handled';
+      }
+      if (route.command === 'schedule') {
+        const automation = this.workflowOptions.automation;
+        if (!automation) throw new Error('当前服务未接入定时任务。');
+        if (!event.senderOpenId || !await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) throw new Error('当前账号没有操作此任务的权限。');
+        if (!sessionId && !route.args.length) {
+          await replyCard('定时任务', '此话题暂无计划。发送 `/schedule every 分钟 指令` 创建停用的计划，再按回执核对并启用。');
+          return 'handled';
+        }
+        const parentSessionId = sessionId ?? (await this.sessionFor(group, config, event.chatId, event.chatType, scopeId)).id;
+        await replyCard('定时任务', await executeScheduleCommand(automation, this.workflowOptions.store, parentSessionId, route.argsText, event, config));
+        return 'handled';
+      }
       if (route.command === 'ci') {
         const automation = this.workflowOptions.automation;
         if (!automation || !sessionId) throw new Error('当前话题还没有可用的工作项，请先发送任务。');
@@ -1115,6 +1140,11 @@ export class LarkMessageCoordinator {
 
   async handleAction(value: unknown, operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
     const workflow = value as Record<string, unknown> | null;
+    if (workflow && typeof workflow.dutydeck_work_item === 'string') {
+      if (!this.workflowOptions.workbench || !this.reconcileConfig || !context) return { type: 'error', content: '目标卡片已失效。' };
+      try { return { type: 'success', content: await this.workflowOptions.workbench.callback(workflow, operatorOpenId, context, this.reconcileConfig) }; }
+      catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
+    }
     // 按钮的 callback value 存在飞书服务器上，不在本地：改名前发出的审批卡带的是
     // dockmux_workflow，升级后仍挂在群里等人点。两个键都认，老卡片才不会变成死按钮。
     const workflowAction = workflow && typeof workflow.dutydeck_workflow === 'string'

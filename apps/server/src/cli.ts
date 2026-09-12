@@ -7,6 +7,7 @@ import { createCliProgram, environmentFromCli, type CliOptions } from './cli-pro
 import { startLocalServer } from './service.js';
 import { runLarkSend, runLarkUpdate } from './lark/cli.js';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
+import { runWorkCommand } from './work-item-cli.js';
 import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupSendFile, runGroupWait } from './lark/agent-tools-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { RelayCliError } from '@dutydeck/relay';
@@ -299,6 +300,7 @@ async function main() {
       output(result);
       if (result.status === 'blocked') process.exitCode = 2;
     },
+    work: async (operation, args, options) => { output(await runWorkCommand(operation, args, options)); },
     groupSelf: async () => { output(await runGroupSelf()); },
     groupPeers: async () => { output(await runGroupPeers()); },
     groupMembers: async () => { output(await runGroupMembers()); },

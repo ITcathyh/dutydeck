@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -93,6 +93,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     await waitFor(() => expect(firstBackend.getDutydeckMetadata('turn_id')).toBe(checkpoint?.turnId));
     first.prepareForDaemonShutdown();
     await first.stop();
+    expect(await first.isStopped()).toBe(false);
     await expect(sent).rejects.toBeInstanceOf(DriverDetachedError);
 
     const events: NormalizedDriverEvent[] = [];
@@ -156,10 +157,39 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       });
       await expect(driver.recover({ ...state, turnId })).rejects.toBeInstanceOf(DriverRecoveryError);
       await driver.stop({ discardSession: true });
+      expect(await driver.isStopped()).toBe(false);
       expect(TmuxBackend.probeSession(f.name)).toBe('exists');
       expect(new TmuxBackend(f.name, { ownerId: f.ownerId }).getPid()).toBe(pid);
       expect(prompts).toEqual([]);
     }
+  }, 45_000);
+
+  it.each(['throw', 'return'] as const)('does not prove a live pane stopped when kill fails by %s', async failure => {
+    const f = fixture();
+    const backend = new TmuxBackend(f.name, { ownerId: f.ownerId });
+    const driver = new PtyCliDriver({ agent: config(f.cwd), adapter: shellAdapter([]), backend, onEvent() {}, onExit() {}, sessionId });
+    await driver.start();
+    const pid = backend.getPid();
+    const kill = vi.spyOn(backend, 'kill').mockImplementation(() => { if (failure === 'throw') throw new Error('kill unavailable'); });
+    try {
+      await expect(driver.stop()).resolves.toBeUndefined();
+      expect(TmuxBackend.probeSession(f.name)).toBe('exists');
+      expect(backend.getPid()).toBe(pid);
+      expect(await driver.isStopped()).toBe(false);
+    } finally { kill.mockRestore(); backend.kill(); }
+  }, 45_000);
+
+  it('proves an explicitly killed owned pane is absent and preserves an unrelated pane', async () => {
+    const f = fixture(); const other = fixture();
+    const backend = new TmuxBackend(f.name, { ownerId: f.ownerId });
+    const unrelated = new TmuxBackend(other.name, { ownerId: 'dutydeck:unrelated' });
+    unrelated.spawn('/bin/sh', ['-c', 'sleep 30'], { cwd: other.cwd, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '' } });
+    const driver = new PtyCliDriver({ agent: config(f.cwd), adapter: shellAdapter([]), backend, onEvent() {}, onExit() {}, sessionId });
+    try {
+      await driver.start(); await driver.stop();
+      expect(await driver.isStopped()).toBe(true);
+      expect(TmuxBackend.probeSession(other.name)).toBe('exists');
+    } finally { unrelated.kill(); }
   }, 45_000);
 
   it('detaches a temporary attachment when transcript restore rejects a truncated cursor', async () => {
@@ -186,6 +216,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       transcript: { ...checkpoint.transcript, offset: checkpoint.transcript.offset + 1 },
     })).rejects.toBeInstanceOf(DriverRecoveryError);
     await rejected.stop({ discardSession: true });
+    expect(await rejected.isStopped()).toBe(false);
     expect(TmuxBackend.probeSession(f.name)).toBe('exists');
 
     // If the failed driver left its pipe-pane capture behind, `-o` prevents

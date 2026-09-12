@@ -62,6 +62,7 @@ export class PtyCliDriver implements AgentDriver {
 
   private started = false;
   private stopped = false;
+  private stoppedPid: number | undefined;
   /** Normal daemon shutdown preserves a persistent backend; explicit
    * session stop/restart still destroys it. Set only by the service
    * composition root immediately before runtime.shutdown(). */
@@ -546,6 +547,7 @@ export class PtyCliDriver implements AgentDriver {
   async stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    if (this.backend instanceof PtyBackend) this.stoppedPid = this.backend.getPid() ?? undefined;
     const tmuxBackend = this.backend instanceof TmuxBackend ? this.backend : undefined;
     const preservePersistentSession = this.detachOnStop
       && !options.discardSession
@@ -581,6 +583,18 @@ export class PtyCliDriver implements AgentDriver {
     }
     // onExit 由 backend 的 exit 事件驱动（kill 会触发）；若后端已自行退出，
     // handleExit 早已回调过，exitReported 保证恰好一次。
+  }
+
+  async isStopped(): Promise<boolean> {
+    if (!this.stopped || this.recoveryRejected || this.detachOnStop) return false;
+    if (this.backend instanceof TmuxBackend) {
+      // A failed kill or owner mismatch can leave the pane alive even though
+      // the backend's local exited flag is already set. Probe the server.
+      return TmuxBackend.probeSession(this.backend.sessionName) === 'missing';
+    }
+    if (!(this.backend instanceof PtyBackend) || this.stoppedPid === undefined) return false;
+    try { process.kill(this.stoppedPid, 0); return false; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
   }
 
   createTerminalStream(): TerminalStream {

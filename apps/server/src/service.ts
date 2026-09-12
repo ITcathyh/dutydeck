@@ -3,9 +3,15 @@ import { readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfig, type AppConfig } from '@dutydeck/config';
 import { createRepositories } from '@dutydeck/storage';
-import { installationOwnerTaskActor, type DriverFactory, type PolicyAction } from '@dutydeck/shared';
+import { installationOwnerTaskActor, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
+import { WorkItemService } from './work-items.js';
+import { WorkItemInteractions } from './work-item-interactions.js';
+import { LarkWorkbench } from './lark/workbench.js';
+import { createLarkCardService } from './lark/service.js';
+import { createWorkbenchFetch } from './workbench-fetch.js';
+import { authorizeWorkItemInteraction, workItemRiskPolicy } from './work-item-policy.js';
 import { SessionAutomationService } from './session-automation.js';
 import { createAutomationIntegration } from './automation-integration.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
@@ -154,10 +160,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       action,
     }),
   };
-  const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
+  const workbenchHttp = createWorkbenchFetch();
+  const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
     env,
     groupToolsCommand: options.groupToolsCommand,
+    workbenchTask: sessionId => runtime.getActiveTaskContext(sessionId),
     executionPolicy: legacyExecutionPolicy,
     groupManager,
   });
@@ -184,9 +192,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return driver;
   };
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
-    authorizeTask: (_session, task, phase) => automation.authorizeTask(task, phase),
-    authorizeExecution: (sessionId, actorId) => groupManager.beginTurn(sessionId, actorId),
-    resolveRiskPolicy: (sessionId, fallback) => groupManager.riskPolicy(sessionId, fallback),
+    authorizeTask: async (session, task, phase) => { await automation.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
+    authorizeExecution: async (sessionId, actorId) => { if (!await workItems.authorizeExecution(sessionId, actorId)) await groupManager.beginTurn(sessionId, actorId); },
+    resolveRiskPolicy: async (sessionId, fallback) => {
+      const binding = await workItems.parentForSession(sessionId);
+      return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch) : groupManager.riskPolicy(sessionId, fallback);
+    },
     acpxCommand: config.acpxCommand,
     ptyDriverFactory,
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
@@ -195,9 +206,31 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     prepareTaskPrompt: (session, prompt, skills) => prepareSkillPrompt(session.cwd, prompt, skills),
     sessionPrompt: (session, prompt) => agentTools.promptForSession(session, prompt)
   });
-  const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
+  const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
   const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration,
     githubToken: env.DUTYDECK_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN });
+  const authorizeWorkAgent = async (sessionId: string, actorId: string, agentId: string) => {
+    const parent = await runtime.getSession(sessionId);
+    if (!parent || !await automationIntegration.authorize(sessionId, actorId)) return false;
+    if (parent.agentId === agentId || parent.source !== 'lark') return true;
+    const [appId, chatId, chatType] = parent.sourceId?.split(':') ?? [];
+    if (chatType !== 'group' || !appId || !chatId) return true;
+    const owner = actorId === installationOwnerTaskActor;
+    const decision = await groupManager.authorize(appId, chatId, owner ? undefined : actorId, 'run.change_agent', sessionId, { installationOwner: owner });
+    return decision?.allowed ?? true;
+  };
+  const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => app?.log.warn(...args as [unknown, string]) } });
+  const workItems: WorkItemService = new WorkItemService({ repositories: repos, runtime, authorize: automationIntegration.authorize, authorizeAgent: authorizeWorkAgent,
+    prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), deliver: item => workbench.deliver(item), notify: (item, actorId) => workbench.notify(item, actorId) });
+  const authorizeSessionRequest = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> => {
+    const session = await runtime.getSession(sessionId);
+    if (session?.source === 'work_item') {
+      const binding = await workItems.parentForSession(sessionId);
+      if (!binding || !['task.view_result', 'terminal.read'].includes(action)) return { allowed: false, action, code: 'WORK_ITEM_MANAGED_SESSION', reason: '此会话由目标编排管理，请在目标中操作步骤', source: 'integration' };
+      sessionId = binding.parentSessionId;
+    }
+    return await groupManager.authorizeSession(sessionId, action, true) ?? foundationExecution.authorizeSessionId(sessionId, { boundary, action, request });
+  };
   let automationTimer: NodeJS.Timeout | undefined;
   // Reattach surviving idle terminals after a daemon restart, without starting a task.
   const terminalProvider: TerminalStreamProvider = {
@@ -231,6 +264,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       });
     }
   }, createRelayAskStore(repos.config));
+  const workInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, (sessionId, actorId, action) => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch));
   try {
     await relayBroker.initialize();
     await runtime.initialize(config.agents);
@@ -240,6 +274,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
         automation,
+        workbench,
         relayBroker,
         env,
         config: repos.config,
@@ -259,16 +294,18 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       terminal: {
         provider: terminalProvider,
         auth: { mode, allowUnauthenticated: mode === 'local', check: presented => !!presented && tokensEqual(presented, activeToken) },
-        authorize: async (request, sessionId, action) => await groupManager.authorizeSession(sessionId, action, true) ?? foundationExecution.authorizeSessionId(sessionId, {
-          boundary: 'terminal',
-          action,
-          request,
-        }),
+        authorize: (request, sessionId, action) => authorizeSessionRequest(request, sessionId, 'terminal', action),
       },
       relay: { runtime, capabilities: relayCapabilities, broker: relayBroker },
       foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef, isLiveManagedBot: id => groupManager.isLiveManagedBot(id) },
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
       schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true },
+      workItemTools: { runtime, work: workItems, tools: agentTools },
+      workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
+        if (!await resolveInstallationPrincipal(request)) return false;
+        const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary: 'session', action, request });
+        return { ...decision, actorId: installationOwnerTaskActor };
+      } },
       automation: { service: automation, authorize: async (request, sessionId, action) => {
         const principal = await resolveInstallationPrincipal(request);
         if (!principal) return false;
@@ -276,14 +313,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         return { ...decision, actorId: installationOwnerTaskActor };
       } },
       executionPolicy: {
-        authorize: async (request, sessionId, boundary, action) => await groupManager.authorizeSession(sessionId, action, true) ?? foundationExecution.authorizeSessionId(sessionId, {
-          boundary,
-          action,
-          request,
-        }),
+        authorize: (request, sessionId, boundary, action) => authorizeSessionRequest(request, sessionId, boundary, action),
       },
     });
     await app.listen(listenOptions(config));
+    workItems.start();
     const tick = () => { void automation.tick().catch(error => app?.log.warn({ error }, '自动任务轮询失败')); };
     automationTimer = setInterval(tick, 60_000);
     automationTimer.unref();
@@ -291,6 +325,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   } catch (error) {
     if (tokenRefresh) clearInterval(tokenRefresh);
     if (automationTimer) clearInterval(automationTimer);
+    workbench.close(); workbenchHttp.close();
+    await workItems.close();
     await automation.close();
     capabilities.close(); await runtime.shutdown(); repos.close(); throw error;
   }
@@ -302,6 +338,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       closed = true;
       if (tokenRefresh) clearInterval(tokenRefresh);
       if (automationTimer) clearInterval(automationTimer);
+      workbench.close(); workbenchHttp.close();
+      await workItems.close();
       await automation.close();
       // 先唤醒所有阻塞中的 ask，再关 app：否则长轮询请求会拖住 app.close()。
       relayBroker.close();

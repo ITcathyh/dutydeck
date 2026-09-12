@@ -178,15 +178,17 @@ let buffer = '';
 let composedPrompt = '';
 let bracketedPaste = false;
 let turn = 0;
+let confirmTurn;
 const bracketedPasteStart = '\\u001b[200~';
 const bracketedPasteEnd = '\\u001b[201~';
 
 const submitPrompt = rawPrompt => {
   const prompt = rawPrompt.trim();
   if (!prompt) return;
+  if (confirmTurn) { if (prompt === 'y') { const finish = confirmTurn; confirmTurn = undefined; finish(); } return; }
   const currentTurn = ++turn;
   process.stdout.write('\\r\\nworking\\r\\n');
-  setTimeout(() => {
+  const finish = () => {
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu_mock_1', name: 'Bash', input: { command: 'echo mock' } }] } });
     write({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_mock_1', content: 'mock' }] } });
@@ -196,7 +198,9 @@ const submitPrompt = rawPrompt => {
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: marker + ': ' + prompt }] } });
     // completionPattern：✳ Worked for Ns
     process.stdout.write('\\u001b[2J\\u001b[HClaude Code v2.1.267 (mock)\\r\\n\\u2733 Worked for 1s\\r\\n\\u276f ');
-  }, 300);
+  };
+  if (prompt.includes('SMOKE_TERMINAL_CONFIRM')) { confirmTurn = finish; process.stdout.write('CONFIRM_WAITING: type y to continue\\r\\n'); }
+  else setTimeout(finish, 300);
 };
 
 process.stdin.setEncoding('utf8');
@@ -349,6 +353,14 @@ async function main() {
   // 正确通道是下面 agent.env：它在剥离之后合并，既真的送进 CLI、也正是
   // tailer 现在解析的那份 env。
   serverEnv.NODE_ENV = 'production';
+  if (!REAL) {
+    const tmux = execFileSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim();
+    const socket = join(dataDir, 'tmux.sock');
+    const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+    writeFileSync(join(binDir, 'tmux'), `#!/bin/sh\nexec ${quote(tmux)} -S ${quote(socket)} "$@"\n`, { mode: 0o755 });
+    onCleanup('关闭本轮独立 tmux 服务及目标终端', () => { try { execFileSync(tmux, ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* No sessions remain. */ } });
+  }
+
 
   // MOCK 模式的 CLI 数据目录：假 CLI 没有登录概念，隔离到临时目录即可。
   //
@@ -619,6 +631,57 @@ async function main() {
   assert(automation.json?.schedules.length === 1 && automation.json.schedules[0].enabled === false && automation.json.occurrences.length === 0, '浏览器保存计划后保持停用，未生成自动轮次');
   await deliveryPanel.getByRole('button', { name: '关闭', exact: true }).click();
 
+  if (!REAL) {
+    step('浏览器创建并完成多步骤目标');
+    await page.getByRole('button', { name: '目标、步骤与成果', exact: true }).click();
+    const workPanel = page.getByRole('dialog', { name: '目标、步骤与成果' });
+    await workPanel.getByText('新建目标或复用模板', { exact: true }).click();
+    await workPanel.getByLabel('本次目标').fill('Compare independent evidence and produce a complete report');
+    for (const label of ['方案分析 Agent', '风险分析 Agent', '汇总 Agent']) await workPanel.getByLabel(label).selectOption('claude-code');
+    const workResponse = page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === `/api/sessions/${browserSessionId}/work-items`);
+    await workPanel.getByRole('button', { name: '开始目标', exact: true }).click();
+    const startedWork = await workResponse;
+    assert(startedWork.status() === 200, `浏览器持久接收目标（实际 ${startedWork.status()}）`);
+    const work = await startedWork.json();
+    const completedWork = await waitFor('真实 PTY 执行两个独立步骤并汇总', async () => {
+      const response = await request('GET', `/api/sessions/${browserSessionId}/work-items/${work.id}`);
+      if (response.json?.status === 'failed' || response.json?.status === 'blocked') throw new Error(JSON.stringify(response.json));
+      return response.json?.status === 'completed' ? response.json : undefined;
+    }, { timeoutMs: 60000, intervalMs: 500 });
+    assert(completedWork.steps.every(step => step.status === 'completed'), '全部三个目标步骤完成');
+    const children = completedWork.steps.map(step => step.attempts[0].sessionId);
+    assert(new Set(children).size === 3 && !children.includes(browserSessionId), '三个步骤使用独立后台 Session');
+    assert(completedWork.output?.text.includes('MOCK_REPLY:') && /^[0-9a-f]{64}$/.test(completedWork.output.digest), '最终成果含真实 CLI 输出与内容指纹');
+    await workPanel.getByRole('region', { name: '最终成果' }).waitFor({ state: 'visible', timeout: 10000 });
+    ok('浏览器显示完整成果');
+    const extraTurn = await request('POST', `/api/sessions/${children[0]}/send`, { prompt: 'must not run' });
+    assert(extraTurn.status === 403, '后台步骤拒绝绕过目标追加指令');
+    await workPanel.getByText('保存为流程模板', { exact: true }).click();
+    await workPanel.getByLabel('模板名称').fill('smoke research workflow');
+    await workPanel.getByRole('button', { name: '保存模板', exact: true }).click();
+    await workPanel.getByText('已保存流程模板「smoke research workflow」。', { exact: true }).waitFor({ state: 'visible' });
+    const templates = await request('GET', `/api/sessions/${browserSessionId}/work-items`);
+    assert(templates.json.templates[0]?.version === 1, '浏览器保存不可变流程版本');
+    await workPanel.getByRole('button', { name: '关闭目标详情', exact: true }).click();
+    const confirm = await request('POST', `/api/sessions/${browserSessionId}/work-items`, { goal: 'SMOKE_TERMINAL_CONFIRM', idempotencyKey: 'terminal-confirm', plan: {
+      title: '终端人工确认', outputStepId: 'confirm', steps: [{ id: 'confirm', title: '人工确认', kind: 'agent', agentId: 'claude-code', instruction: 'SMOKE_TERMINAL_CONFIRM', dependsOn: [] }]
+    } });
+    assert(confirm.status === 200, '接收需要终端确认的目标');
+    const confirmBase = `/api/sessions/${browserSessionId}/work-items/${confirm.json.id}`;
+    const terminal = await waitFor('获取真实 PTY 的确认画面', async () => {
+      const view = await request('GET', `${confirmBase}/terminal/confirm`);
+      return view.status === 200 && view.json.screen.includes('CONFIRM_WAITING') ? view.json : undefined;
+    }, { timeoutMs: 20000 });
+    const staleInput = await request('POST', `${confirmBase}/terminal-input`, { stepId: 'confirm', taskId: 'stale-task', text: 'y' });
+    assert(staleInput.status === 409, '旧指令不能向当前终端写入');
+    const input = await request('POST', `${confirmBase}/terminal-input`, { stepId: 'confirm', taskId: terminal.taskId, text: 'y' });
+    assert(input.status === 200, '人工确认经受控入口写入真实 PTY');
+    await waitFor('终端确认后目标完成', async () => (await request('GET', confirmBase)).json?.status === 'completed');
+    ok('真实 CLI 收到确认后产生成果，目标正常完成');
+    const lateInput = await request('POST', `${confirmBase}/terminal-input`, { stepId: 'confirm', taskId: terminal.taskId, text: 'y' });
+    assert(lateInput.status === 409, '已完成步骤拒绝终端续写');
+
+  }
   await browser.close();
   browser = undefined;
   const stoppedBrowserSession = await request('POST', `/api/sessions/${browserSessionId}/stop`);

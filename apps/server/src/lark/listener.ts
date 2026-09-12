@@ -60,6 +60,7 @@ export interface LarkListener {
 
 export interface LarkLongConnectionListenerOptions {
   automation?: SessionAutomationService;
+  workbench?: import('./workbench.js').LarkWorkbench;
   workflowStore?: ConfigRepository;
   relayBroker?: RelayAskBroker;
   groupManager?: LarkGroupManager;
@@ -116,7 +117,7 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation },
+      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench },
     ) : undefined;
     await coordinator?.initializeWorkflows(config);
     try { await coordinator?.startReconciliation(config); }

@@ -1,5 +1,6 @@
+import { workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
-import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
 import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dutydeck/shared';
@@ -83,6 +84,16 @@ export class LarkAgentToolCapabilityRegistry {
     return `v1.${digest}`;
   }
 
+  workbenchTurnToken(sessionId: string, taskId: string) {
+    return createHmac('sha256', this.signingSecret).update(`dutydeck-work-turn-v1\0${sessionId}\0${taskId}`).digest('base64url');
+  }
+
+  assertWorkbenchTurn(sessionId: string, taskId: string, presented?: string) {
+    const expected = Buffer.from(this.workbenchTurnToken(sessionId, taskId));
+    const actual = Buffer.from(presented ?? '');
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('WORK_ITEM_TURN_EXPIRED', '编排凭证不属于当前指令，请使用本轮提供的 work 命令。', 403);
+  }
+
   environmentFor(session: Session): Record<string, string> {
     const binding = larkAgentSessionBinding(session);
     if (!binding) return {};
@@ -148,6 +159,7 @@ export interface LarkGroupToolClient {
 }
 
 export interface LarkAgentToolsOptions {
+  workbenchTask?: (sessionId: string) => { taskId: string } | undefined;
   groupManager?: LarkGroupManager;
   env?: NodeJS.ProcessEnv;
   fetcher?: typeof globalThis.fetch;
@@ -327,6 +339,13 @@ export class LarkAgentToolsService {
     }
   }
 
+  assertWorkbenchTurn(sessionId: string, taskId: string, presented?: string) { this.capabilities.assertWorkbenchTurn(sessionId, taskId, presented); }
+
+  async workbenchContext(token?: string) {
+    const context = await this.context(token, 'group_tools.read');
+    return { sessionId: context.sessionId };
+  }
+
   async self(token?: string) {
     const context = await this.context(token, 'group_tools.read');
     let bot: LarkBotInfo;
@@ -428,7 +447,9 @@ export class LarkAgentToolsService {
     if (!binding) return prompt;
     let config = await readLarkConfig(this.configs, binding.appId);
     if (!config?.groupToolsEnabled) return prompt;
-    return `${larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand)}\n\n${prompt}`;
+    const task = this.options.workbenchTask?.(session.id);
+    const workCommand = `${this.options.groupToolsCommand ?? "dutydeck"} work --turn ${task ? this.capabilities.workbenchTurnToken(session.id, task.taskId) : ""}`;
+    return `${larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand)}\n\n${task ? workbenchAgentPrompt(workCommand) + "\n\n" : ""}${prompt}`;
   }
 
   async isConfiguredPeer(appId: string, chatId: string, senderOpenId: string) {

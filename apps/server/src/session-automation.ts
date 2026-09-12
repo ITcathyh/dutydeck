@@ -232,14 +232,17 @@ export class SessionAutomationService {
     };
   }
 
-  async createSchedule(sessionId: string, rawInput: CreateSessionScheduleInput, actorId?: string): Promise<PublicSessionSchedule> {
+  async createSchedule(sessionId: string, rawInput: CreateSessionScheduleInput, actorId?: string, receipt?: { key: string; prepareDelivery?: (id: string) => Promise<void> }): Promise<PublicSessionSchedule> {
     await this.requireAuthorized(sessionId, actorId);
     const session = await this.requireSession(sessionId);
     if (!isSessionRunnable(session)) throw new RuntimeError('SESSION_NOT_ACTIVE', 'Session is not active', 409);
     const input = createSessionScheduleInputSchema.parse(rawInput);
+    const id = receipt ? `schedule_${createHash('sha256').update(JSON.stringify([sessionId, actorId, receipt.key])).digest('hex')}` : `schedule_${randomUUID()}`;
+    const existing = receipt ? await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value)) : undefined;
+    if (existing) return publicSchedule(existing.value);
     const now = iso(this.clock());
     const condition = input.condition.kind === 'always' ? input.condition : await this.githubCondition(session, input.condition);
-    const id = `schedule_${randomUUID()}`;
+    await receipt?.prepareDelivery?.(id);
     await this.options.prepareDelivery?.(sessionId, id);
     const schedule = sessionScheduleSchema.parse({
       schemaVersion: 1,
@@ -259,7 +262,13 @@ export class SessionAutomationService {
       updatedAt: now
     });
     nextDue(schedule, this.clock());
-    if (!await this.createRecord(scheduleKey(schedule.id), schedule)) throw new RuntimeError('SESSION_AUTOMATION_CONFLICT', 'Schedule identifier already exists', 409);
+    if (!await this.createRecord(scheduleKey(schedule.id), schedule)) {
+      if (receipt) {
+        const saved = await this.getRecord(scheduleKey(id), value => sessionScheduleSchema.parse(value));
+        if (saved) return publicSchedule(saved.value);
+      }
+      throw new RuntimeError('SESSION_AUTOMATION_CONFLICT', 'Schedule identifier already exists', 409);
+    }
     return publicSchedule(schedule);
   }
 
