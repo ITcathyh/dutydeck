@@ -23,9 +23,43 @@ export const LARK_COMMON_TENANT_SCOPES = [
 
 export const LARK_COMMON_USER_SCOPES = [] as const;
 
-const REQUIRED_EVENT = 'im.message.receive_v1';
+/**
+ * 必须订阅的事件列表。沿用「条件增量 add」：只提交当前订阅里缺失的事件，
+ * 已存在的绝不重复添加；提交后回读校验全部生效才继续发版。
+ * 对外只读导出（/repair 确认卡需要如实列出要补的事件）。
+ */
+export const LARK_REQUIRED_EVENTS = [
+  'im.message.receive_v1',
+  // bot 入群事件：P0-5 欢迎语依赖它；存量应用靠 /repair 增量补上。
+  'im.chat.member.bot.added_v1',
+] as const;
 const REQUIRED_CALLBACK = 'card.action.trigger';
 const LONG_CONNECTION_MODE = 4;
+
+/** 配置流程的可观测步骤，供 /repair 如实回显每一步结果。 */
+export type LarkOpenPlatformConfigureStep =
+  | 'scope_update'
+  | 'robot_enable'
+  | 'event_mode'
+  | 'event_subscribe'
+  | 'callback_mode'
+  | 'callback_subscribe'
+  | 'version_create'
+  | 'publish_commit'
+  | 'publish_verify';
+
+export interface LarkOpenPlatformConfigureStepDetail {
+  /** event_subscribe：本次增量补上的事件名。 */
+  addedEvents?: string[];
+  /** version_create / publish_commit：创建出的版本 ID。 */
+  versionId?: string;
+}
+
+export interface LarkOpenPlatformConfigureOptions {
+  creatorUserId?: string;
+  /** 每个阶段完成后回调一次；失败阶段不会回调。 */
+  onStep?: (step: LarkOpenPlatformConfigureStep, detail?: LarkOpenPlatformConfigureStepDetail) => void;
+}
 
 export interface LarkOpenPlatformConfigurationResult {
   status: 'ready';
@@ -50,8 +84,9 @@ interface VisibilitySuggest { departments: string[]; members: string[]; groups: 
 export async function configureLarkOpenPlatformApp(
   client: LarkOpenPlatformClient,
   appId: string,
-  options: { creatorUserId?: string } = {},
+  options: LarkOpenPlatformConfigureOptions = {},
 ): Promise<LarkOpenPlatformConfigurationResult> {
+  const onStep = options.onStep ?? (() => undefined);
   if (!isValidLarkAppId(appId)) {
     throw new LarkOpenPlatformConfigurationError('invalid_app_id', '飞书应用 ID 格式无效，应为 cli_*');
   }
@@ -70,15 +105,18 @@ export async function configureLarkOpenPlatformApp(
   const scopeReadback = await post(client, `/developers/v1/scope/all/${appId}`, undefined,
     'scope_verification_read_failed', '回读飞书权限配置失败');
   verifyRequiredScopes(scopeReadback, scopeIds);
+  onStep('scope_update');
 
   await post(client, `/developers/v1/robot/switch/${appId}`, {
     clientId: appId,
     enable: true,
   }, 'robot_enable_failed', '启用飞书机器人能力失败');
+  onStep('robot_enable');
   await post(client, `/developers/v1/event/switch/${appId}`, {
     clientId: appId,
     eventMode: LONG_CONNECTION_MODE,
   }, 'event_mode_failed', '启用飞书长连接事件模式失败');
+  onStep('event_mode');
 
   let eventState = parseEventState(await post(
     client,
@@ -87,12 +125,14 @@ export async function configureLarkOpenPlatformApp(
     'event_read_failed',
     '读取飞书事件订阅失败',
   ));
-  if (!eventState.names.includes(REQUIRED_EVENT)) {
+  // 增量补权：只 add 缺失事件，已订阅事件保持原样、不重复提交。
+  const missingEvents = LARK_REQUIRED_EVENTS.filter(name => !eventState.names.includes(name));
+  if (missingEvents.length > 0) {
     await post(client, `/developers/v1/event/update/${appId}`, {
       clientId: appId,
       operation: 'add',
       events: [],
-      appEvents: [REQUIRED_EVENT],
+      appEvents: missingEvents,
       userEvents: [],
       eventMode: LONG_CONNECTION_MODE,
     }, 'event_update_failed', '订阅飞书消息事件失败');
@@ -103,8 +143,9 @@ export async function configureLarkOpenPlatformApp(
       'event_read_failed',
       '回读飞书事件订阅失败',
     ));
+    onStep('event_subscribe', { addedEvents: [...missingEvents] });
   }
-  if (eventState.mode !== LONG_CONNECTION_MODE || !eventState.names.includes(REQUIRED_EVENT)) {
+  if (eventState.mode !== LONG_CONNECTION_MODE || LARK_REQUIRED_EVENTS.some(name => !eventState.names.includes(name))) {
     throw new LarkOpenPlatformConfigurationError(
       'event_verification_failed',
       '飞书消息事件或长连接模式未生效',
@@ -130,6 +171,7 @@ export async function configureLarkOpenPlatformApp(
       'callback_read_failed',
       '回读飞书回调模式失败',
     ));
+    onStep('callback_mode');
   }
   if (!callbackState.names.includes(REQUIRED_CALLBACK)) {
     await post(client, `/developers/v1/callback/update/${appId}`, {
@@ -145,6 +187,7 @@ export async function configureLarkOpenPlatformApp(
       'callback_read_failed',
       '回读飞书卡片回调失败',
     ));
+    onStep('callback_subscribe');
   }
   if (callbackState.mode !== LONG_CONNECTION_MODE || !callbackState.names.includes(REQUIRED_CALLBACK)) {
     throw new LarkOpenPlatformConfigurationError(
@@ -179,8 +222,10 @@ export async function configureLarkOpenPlatformApp(
       '飞书应用版本创建成功但未返回版本 ID，已停止发布',
     );
   }
+  onStep('version_create', { versionId });
   await post(client, `/developers/v1/publish/commit/${appId}/${versionId}`, { clientId: appId },
     'publish_failed', '发布飞书应用版本失败');
+  onStep('publish_commit', { versionId });
   const published = await post(client, `/developers/v1/app_version/list/${appId}`, {},
     'publish_verification_read_failed', '发布请求已提交，但回读发布状态失败，请核对该应用版本');
   const versions = asRecord(asRecord(published).data).versions;
@@ -195,11 +240,12 @@ export async function configureLarkOpenPlatformApp(
   if (asRecord(version).versionStatus !== 2) {
     throw new LarkOpenPlatformConfigurationError('publish_verification_failed', '发布请求已提交，但该版本尚未确认发布，请核对开放平台状态');
   }
+  onStep('publish_verify', { versionId });
 
   return {
     status: 'ready',
     scopeCount: LARK_COMMON_TENANT_SCOPES.length,
-    eventCount: 1,
+    eventCount: LARK_REQUIRED_EVENTS.length,
     callbackCount: 1,
     versionId,
   };

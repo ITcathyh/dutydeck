@@ -5,7 +5,7 @@ import { createCliProgram } from '../cli-program.js';
 import { createCliUi } from '../cli-ui.js';
 import { runLarkCreate, type LarkCreateCliResult } from './create-cli.js';
 import { LarkAppCreationJobManager } from './app-creation.js';
-import { LARK_COMMON_TENANT_SCOPES } from './open-platform-configurator.js';
+import { LARK_COMMON_TENANT_SCOPES, LARK_REQUIRED_EVENTS } from './open-platform-configurator.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 import type { ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
 
@@ -28,7 +28,7 @@ async function harness(tty = true, versionStatus = 2) {
     if (path.includes('/scope/update/')) { scopes = true; return { code: 0 }; }
     if (path.includes('/robot/switch/') || path.includes('/event/switch/')) return { code: 0 };
     if (path.includes('/event/update/')) { events = true; return { code: 0 }; }
-    if (path === '/developers/v1/event/cli_created') return { data: { eventMode: 4, appEvents: events ? ['im.message.receive_v1'] : [] } };
+    if (path === '/developers/v1/event/cli_created') return { data: { eventMode: 4, appEvents: events ? [...LARK_REQUIRED_EVENTS] : [] } };
     if (path.includes('/callback/switch/')) { callbackMode = 4; return { code: 0 }; }
     if (path.includes('/callback/update/')) { callbacks = true; return { code: 0 }; }
     if (path === '/developers/v1/callback/cli_created') return { data: { callbackMode, callbacks: callbacks ? ['card.action.trigger'] : [] } };
