@@ -244,6 +244,52 @@ describe('production PTY backend injection', () => {
   const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
   const tmuxIt = tmuxAvailable ? it : it.skip;
 
+  tmuxIt('runs a custom command with the Claude adapter alongside the original agent', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-custom-claude-'));
+    temporaryDirectories.push(root);
+    const runner = join(root, 'runner.mjs');
+    writeFileSync(runner, [
+      `#!${process.execPath}`,
+      "import { writeFileSync } from 'node:fs';",
+      "if (process.argv.includes('--version')) { console.log('fixture 1.0'); process.exit(0); }",
+      "writeFileSync(process.argv[2], JSON.stringify(process.argv.slice(3)));",
+      "process.stdout.write('Claude Code v2.1.267 (mock)\\n❯ \\n');",
+      'setInterval(() => {}, 1000);', '',
+    ].join('\n'));
+    chmodSync(runner, 0o700);
+    const service = await startLocalServer({
+      webRoot: root,
+      env: {
+        ...process.env, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
+        DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: join(root, 'dutydeck.db'),
+        DUTYDECK_AUTH: 'false', DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+        DUTYDECK_AGENTS_JSON: JSON.stringify(['claude-code', 'ccflash'].map(id => ({
+          id, name: id, command: runner, args: [join(root, `${id}.json`), '--wrapper-profile', id],
+          ...(id === 'ccflash' ? { adapterId: 'claude-code' } : {}), protocol: 'pty-cli',
+          permissionMode: 'ask', env: { CLAUDE_CONFIG_DIR: root },
+        }))),
+      },
+    });
+    const sessions: string[] = [];
+    try {
+      for (const agentId of ['claude-code', 'ccflash']) {
+        const session = await service.runtime.start({ agentId, model: 'gateway/custom[1m]' });
+        sessions.push(session.id);
+        tmuxSessions.push(createProductionPtyBackend(session.id).sessionName);
+        expect(session.agentId).toBe(agentId);
+        const dump = join(root, `${agentId}.json`);
+        await vi.waitFor(() => expect(existsSync(dump)).toBe(true));
+        expect(JSON.parse(readFileSync(dump, 'utf8'))).toEqual([
+          '--wrapper-profile', agentId, '--session-id', session.id.replace(/^ses_/, ''),
+          '--model', 'gateway/custom[1m]', '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
+        ]);
+      }
+    } finally {
+      for (const id of sessions) await service.runtime.stop(id);
+      await service.close();
+    }
+  }, 30_000);
+
   tmuxIt.each([false, true])('recovers an in-flight task through a full service restart (completed offline: %s)', async offline => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-service-turn-recovery-'));
     temporaryDirectories.push(root);

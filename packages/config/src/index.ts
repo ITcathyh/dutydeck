@@ -88,7 +88,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, ptyContribution
   const agents = new Map(builtinAgents(defaultCwd, ptyContributions).map(agent => [agent.id, agent]));
   for (const agent of extra) {
     const configured = agentConfigSchema.parse(agent);
-    if (commandExists(configured.command)) agents.set(configured.id, { ...configured, cwd: configured.cwd ?? defaultCwd, version: configured.version ?? cliVersion(configured.command) });
+    // A custom CLI wrapper may change local settings even for --version.
+    const customCli = configured.protocol === 'pty-cli' && configured.adapterId;
+    if (commandExists(configured.command)) agents.set(configured.id, { ...configured, cwd: configured.cwd ?? defaultCwd, version: configured.version ?? (customCli ? undefined : cliVersion(configured.command)) });
   }
   return appConfigSchema.parse({
     host: env.DUTYDECK_LOCAL_ONLY === 'true' ? '127.0.0.1' : env.DUTYDECK_HOST,

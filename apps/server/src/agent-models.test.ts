@@ -1,7 +1,9 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { AcpRuntime } from 'acpx/runtime';
+import { agentConfigSchema } from '@dutydeck/shared';
 import { AgentModelProbeTimeoutError, discoverAgentModels, modelsFromAcpStatus, probeModelsThroughAcpRuntime } from './agent-models.js';
 
 const probeInput = { sessionKey: 'probe', agent: 'codex', mode: 'oneshot' as const };
@@ -19,6 +21,38 @@ function runtime(overrides: Partial<AcpRuntime>): AcpRuntime {
 }
 
 describe('ACP-first Agent model discovery', () => {
+  it.each([undefined, 'claude-code'])('does not launch a PTY command as ACP (adapter: %s)', async adapterId => {
+    const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
+    // This command really advertises bridged-model if an ACP probe is started.
+    const agent = agentConfigSchema.parse({
+      id: `ccflash-${crypto.randomUUID()}`, name: 'CCFlash', command: process.execPath,
+      args: [fixture], protocol: 'pty-cli', adapterId, model: 'gemini-custom-flash',
+      env: { MOCK_VENDOR_TOKEN: 'model-probe-secret' }
+    });
+    await expect(discoverAgentModels(agent, undefined, true)).resolves.toEqual({
+      models: [], defaultModel: 'gemini-custom-flash', reasoningEfforts: [], source: 'agent'
+    });
+  });
+
+  it('reads a custom CLI default from the current profile without reusing a cached model', async () => {
+    const agent = agentConfigSchema.parse({ id: 'ccflash', name: 'CCFlash', command: process.execPath,
+      protocol: 'pty-cli', adapterId: 'claude-code', model: 'first-model' });
+    expect((await discoverAgentModels(agent)).defaultModel).toBe('first-model');
+    expect((await discoverAgentModels({ ...agent, model: 'second-model' })).defaultModel).toBe('second-model');
+  });
+
+  it('never executes a custom wrapper when refreshing its model metadata', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-pty-models-'));
+    const marker = join(root, 'executed');
+    const agent = agentConfigSchema.parse({ id: 'ccflash-marker', name: 'CCFlash', command: process.execPath,
+      args: ['-e', "require('node:fs').writeFileSync(process.argv[1], 'started')", marker],
+      protocol: 'pty-cli', adapterId: 'claude-code' });
+    try {
+      await expect(discoverAgentModels(agent, undefined, true)).resolves.toEqual({ models: [], reasoningEfforts: [], source: 'agent' });
+      expect(existsSync(marker)).toBe(false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   it('uses Agent-advertised model identifiers and display names', () => {
     expect(modelsFromAcpStatus({
       models: { currentModelId: 'model-a', availableModelIds: ['model-a', 'model-b'] },

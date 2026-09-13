@@ -170,11 +170,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     groupManager,
   });
   // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
-  // agent.id 即 adapter id（contributions 的 id 与 adapterId 一致）；自定义 pty-cli agent
-  // 需用已知 adapter id 作为 agent id。
+  // 自定义命令可通过 adapterId 复用已有 CLI 家族，同时保留独立 agent id。
   const ptyDrivers = new Set<PtyCliDriver>();
   const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId) => {
-    const adapter = createCliAdapter(agent.id);
+    const adapter = createCliAdapter(agent.adapterId ?? agent.id);
     let driver: PtyCliDriver;
     driver = createPtyCliDriver({
       agent,

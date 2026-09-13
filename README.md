@@ -329,6 +329,60 @@ Dutydeck 启动时读取 ACPX 注册表，并检查对应供应商 CLI。只有�
 
 工作目录优先级为：创建运行时的 `cwd`、Agent 配置的 `cwd`、进程级 `--cwd`。自定义 ACP 进程需通过 stdio 支持初始化、创建/加载 Session、Prompt、流式更新、权限请求与取消。
 
+### Claude Code 使用自定义命令或网关
+
+自定义 CLI 的显示名称与交互方式可以分别配置：`id` 是独立配置的名称，`adapterId: "claude-code"` 让它复用 Claude Code 的输入、输出与上下文恢复。`protocol` 使用 `pty-cli`，可与默认 Claude Code 同时存在。
+
+例如将以下条目加入 `DUTYDECK_AGENTS_JSON`，复用本机 `ccflash` 启动脚本：
+
+```json
+{
+  "id": "ccflash",
+  "name": "CCFlash (Claude Code)",
+  "protocol": "pty-cli",
+  "adapterId": "claude-code",
+  "command": "/absolute/path/to/cliproxyapi/ccflash.sh",
+  "model": "gemini-3.8-flash-high",
+  "permissionMode": "full-trust"
+}
+```
+
+后台进程不会加载交互式 shell 的别名。若 `ccflash` 是 alias，请填它指向的可执行脚本绝对路径；`command` 不展开 `$HOME` 或 `~`。脚本须接受并转发 Claude CLI 参数（如 `"$@"`），包括创建与恢复会话所需参数。若脚本自带 `--dangerously-skip-permissions`，应明确配置为 `full-trust`；需要 `ask` 时使用不强制跳过权限的启动方式。
+
+如果启动脚本会临时替换全局 `~/.claude/settings.json`，多个任务可能互相干扰。后台并发任务建议直接启动 `claude`，通过独立 settings 文件连接同一个 CPA 网关：
+
+```json
+{
+  "id": "ccflash",
+  "name": "CCFlash (Claude Code / CPA)",
+  "protocol": "pty-cli",
+  "adapterId": "claude-code",
+  "command": "claude",
+  "args": ["--settings", "/absolute/path/to/ccflash.settings.json"],
+  "model": "gemini-3.8-flash-high",
+  "permissionMode": "ask"
+}
+```
+
+`ccflash.settings.json` 示例（地址、密钥和模型按自己的网关填写；文件保存在仓库外，并限制为仅当前用户可读写）：
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8320",
+    "ANTHROPIC_AUTH_TOKEN": "replace-with-your-cpa-token",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "gemini-3.8-flash-high",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "gemini-3.8-flash-high",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gemini-3.8-flash-high",
+    "CLAUDE_CODE_SUBAGENT_MODEL": "gemini-3.8-flash-high"
+  }
+}
+```
+
+`--settings` 使用 Claude Code 的[配置优先级](https://code.claude.com/docs/en/settings#settings-precedence)覆盖用户和项目中同名的设置，无需改写全局文件。CLI 配置的 `args` 会在首次启动和恢复时保留；Dutydeck 生成的会话、模型与权限参数追加在其后。使用 `full-trust` 时，Dutydeck 将网关 settings 和权限设置合并到仅当前用户可读写的会话副本，保留网关配置且不改写原文件。
+
+保存配置并重启 Dutydeck 后，可在 Web 新建任务或机器人默认 Agent 中选择 `CCFlash`。它的默认模型由配置或脚本决定，Dutydeck 不会为了探测版本或模型启动自定义 CLI，也不提供运行中的 PTY 模型切换。飞书 `/new --model 模型名 -- 任务内容` 可以为新任务覆盖模型，前提是脚本接受传入的模型参数。
+
 主要环境变量：
 
 | 变量 | 默认值/用途 |

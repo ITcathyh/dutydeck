@@ -48,4 +48,17 @@ describe('working directory configuration', () => {
     const configured = loadConfig({ DUTYDECK_DEFAULT_CWD: '/tmp/agent-buddy-project', DUTYDECK_AGENTS_JSON: JSON.stringify([custom]) });
     expect(configured.agents.find(agent => agent.id === 'custom')?.cwd).toBe('/tmp/custom-agent-project');
   });
+
+  it('keeps a custom Claude CLI profile alongside the built-in agents', () => {
+    const custom = {
+      id: 'ccflash', name: 'CCFlash (Claude Code)', command: process.execPath,
+      protocol: 'pty-cli', adapterId: 'claude-code', model: 'gemini-custom-flash',
+      args: ['--settings', '/private/ccflash-settings.json'],
+      env: { ANTHROPIC_BASE_URL: 'http://127.0.0.1:8320' }
+    };
+    const configured = loadConfig({ DUTYDECK_AGENTS_JSON: JSON.stringify([custom]) });
+    expect(configured.agents.find(agent => agent.id === 'ccflash')).toMatchObject(custom);
+    expect(configured.agents.find(agent => agent.id === 'ccflash')?.version).toBeUndefined();
+    for (const builtin of builtinAgents()) expect(configured.agents).toContainEqual(builtin);
+  });
 });
