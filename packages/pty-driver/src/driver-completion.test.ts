@@ -21,6 +21,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
   let events: NormalizedDriverEvent[];
   let transcript: string;
   let submitted: boolean;
+  let holdSubmission: Promise<void> | undefined;
 
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -31,6 +32,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     writeFileSync(transcript, '');
     events = [];
     submitted = false;
+    holdSubmission = undefined;
     const backend: SessionBackend = {
       kind: 'pty', spawn() {}, write() {}, resize() {}, kill() {}, onExit() {},
       onData(callback) { output = callback; },
@@ -40,7 +42,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
       agent: { id: 'claude-code', name: 'Claude', command: 'unused', args: [], protocol: 'pty-cli', cwd: directory,
         env: { CLAUDE_CONFIG_DIR: directory }, permissionMode: 'full-trust', timeout: 60,
         capabilities: { pause: false, resume: true }, builtin: false },
-      adapter: { ...createCliAdapter('claude-code'), writeInput() { submitted = true; } },
+      adapter: { ...createCliAdapter('claude-code'), writeInput() { submitted = true; return holdSubmission; } },
       backend, sessionId: 'ses_completion-fixture', onEvent: event => events.push(event), onExit() {}
     });
     await driver.start();
@@ -101,6 +103,67 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     expect(events.filter(event => ['text', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['text', 'completed']);
     await vi.advanceTimersByTimeAsync(300);
     expect(events.filter(event => event.type === 'text')).toHaveLength(1);
+  });
+
+  it.each(['Frolicking', 'Sautéing'])('keeps the next turn open when an old duration line remains above %s', async verb => {
+    const first = driver.send('你是谁');
+    await waitForSubmission();
+    answer(transcript, '我是测试助手。');
+    const previous = '我是测试助手。\n✻ Cogitated for 6s · done 12:11 PM';
+    output(repaint(`${previous}\n❯\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(600);
+    await first;
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+
+    // Replays the 2026-09-13 failed turn: the completion line belongs to the
+    // previous answer; the current footer only says "paste again to expand".
+    let settled = false;
+    const second = driver.send('你是什么模型').then(() => { settled = true; });
+    await Promise.resolve();
+    output(repaint(`${previous}\n❯ 你是什么模型\n✻ ${verb}…\n\n❯\n paste again to expand`));
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(settled).toBe(false);
+    // Cursor-only status redraws do not carry the old completion or spinner.
+    output('\x1b[7;1H paste again to expand');
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(settled).toBe(false);
+    answer(transcript, '当前模型是测试模型。');
+    output(repaint(`${previous}\n当前模型是测试模型。\n✻ Sautéed for 6s · done 12:11 PM\n❯\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(600);
+    await second;
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(2);
+    const result = events.findIndex(event => event.type === 'text' && event.data.text === '当前模型是测试模型。');
+    expect(result).toBeGreaterThan(0);
+    expect(result).toBeLessThan(events.findLastIndex(event => event.type === 'completed'));
+  });
+
+  it('does not close the turn while multiline input is still being submitted over an old completion screen', async () => {
+    let release!: () => void;
+    holdSubmission = new Promise(resolve => { release = resolve; });
+    const pending = driver.send('新的多行输入');
+    await waitForSubmission();
+    output(repaint(`上轮答案\n✻ Cogitated for 6s\n❯ 正在粘贴新问题\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(events.some(event => event.type === 'completed')).toBe(false);
+    output(repaint('✻ Frolicking…\n paste again to expand'));
+    release();
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(events.some(event => event.type === 'completed')).toBe(false);
+    answer(transcript);
+    output(repaint(`${finalText}\n✻ Cooked for 6s\n❯\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(600);
+    await pending;
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+  });
+
+  it('ignores a quoted animated status when the current completion line appears later', async () => {
+    const pending = driver.send('解释状态符号');
+    await waitForSubmission();
+    answer(transcript, '示例：\n✻ Frolicking…\n表示还在工作。');
+    output(repaint(`示例：\n✻ Frolicking…\n表示还在工作。\n✻ Cooked for 6s\n❯\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(600);
+    await pending;
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
   });
 
   it('can still finish after interruption clears the busy footer without a duration marker', async () => {
