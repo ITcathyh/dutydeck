@@ -85,9 +85,11 @@ function backupBeforeV10(sqlite: Database.Database, filename: string) {
 }
 
 function decodeTask(row: typeof tasks.$inferSelect): TaskRecord {
+  const { interruptedByActor, ...rest } = row;
   return {
-    ...row,
-    executionContext: row.executionContext ? JSON.parse(row.executionContext) : undefined
+    ...rest,
+    executionContext: row.executionContext ? JSON.parse(row.executionContext) : undefined,
+    ...(interruptedByActor ? { interruptedByActor } : {})
   } as TaskRecord;
 }
 

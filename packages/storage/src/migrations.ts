@@ -489,6 +489,18 @@ export const migrations: Migration[] = [
         CREATE INDEX schedule_definitions_bot_state ON schedule_definitions(channel_bot_id, state, updated_at DESC);
       `)
     }
+  },
+  {
+    version: 16,
+    name: 'tasks_add_interrupted_by_actor',
+    up(db) {
+      // 中断操作者（飞书点按人 open_id）与任务发起人 executionContext.actorId 语义不同，单列承接。
+      // 测试夹具可能手工标记早期迁移已应用却没真建 tasks 表；真实升级路径里 v1 已建表。
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
+        .get();
+      if (tasksExists) ensureColumn(db, 'tasks', 'interrupted_by_actor', 'interrupted_by_actor TEXT')
+    }
   }
 ]
 

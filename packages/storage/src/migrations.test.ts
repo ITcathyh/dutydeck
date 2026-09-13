@@ -39,7 +39,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -289,6 +289,26 @@ describe('storage migrations', () => {
     const after = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'schedule_definitions'").get() as { sql: string }
     expect(after.sql).toBe(before.sql)
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('v16 给 tasks 补 interrupted_by_actor 列，旧任务读回为 undefined', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 15)) {
+      migration.up(db)
+      record.run(migration.version, '2026-09-01T00:00:00.000Z')
+    }
+    db.prepare('INSERT INTO tasks (id, session_id, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('task_legacy', 'ses_legacy', 'old', 'running', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+
+    runMigrations(db)
+
+    expect(columnNames(db, 'tasks')).toContain('interrupted_by_actor')
+    // 迁移前的历史行该列为 NULL，仓储读出归一化为缺省而非 null。
+    expect(db.prepare('SELECT interrupted_by_actor FROM tasks WHERE id = ?').get('task_legacy'))
+      .toEqual({ interrupted_by_actor: null })
     db.close()
   })
 
