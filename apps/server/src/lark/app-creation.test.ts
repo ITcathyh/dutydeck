@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { LarkAppCreationJobManager } from './app-creation.js';
-import { OpenPlatformRequestError, type ConnectedOpenPlatformSession, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
+import { OpenPlatformRequestError, OpenPlatformSessionError, type ConnectedOpenPlatformSession, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 
 const id = 'dfe543ed-a565-46af-8f04-552fd038df58';
@@ -56,6 +56,24 @@ it('creates once, durably saves credentials privately and configures creator vis
   const restarted = new LarkAppCreationJobManager(h.options);
   expect(await restarted.start(id, 'Ignored duplicate name')).toMatchObject({ status: 'completed', name: 'My Bot' });
   expect(h.connect).toHaveBeenCalledOnce();
+});
+
+it('distinguishes a confirmed scan followed by a session failure from icon upload failure', async () => {
+  const login = harness();
+  login.connect.mockImplementation(async options => {
+    await options?.onQrUpdate?.({ qrPayload: 'qr', status: 'scan_confirmed' });
+    throw new OpenPlatformSessionError('console', new Error('private-credential-canary'));
+  });
+  await login.manager.start(id, 'Bot'); await login.manager.wait(id);
+  expect(await login.manager.get(id)).toMatchObject({ status: 'failed', scanConfirmed: true, retryable: true, error: expect.stringContaining('扫码后无法建立飞书开放平台会话') });
+  expect(JSON.stringify(await login.manager.get(id))).not.toContain('private-credential-canary');
+  expect(login.postForm).not.toHaveBeenCalled();
+
+  const icon = harness();
+  icon.postForm.mockRejectedValueOnce(new Error('private-credential-canary'));
+  await icon.manager.start(id, 'Bot'); await icon.manager.wait(id);
+  expect(await icon.manager.get(id)).toMatchObject({ status: 'failed', retryable: true, error: expect.stringContaining('登录已完成，但机器人图标上传失败') });
+  expect(icon.postJson).not.toHaveBeenCalled();
 });
 
 it.each(['login', 'qr', 'upload'] as const)('cancels during %s without creating after an awaited callback returns', async stage => {

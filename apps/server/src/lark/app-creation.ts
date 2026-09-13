@@ -4,7 +4,7 @@ import QRCode from 'qrcode';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 import { configureLarkOpenPlatformApp, isValidLarkAppId } from './open-platform-configurator.js';
-import { connectLarkOpenPlatformSession, OpenPlatformRequestError } from './open-platform-session.js';
+import { connectLarkOpenPlatformSession, OpenPlatformRequestError, OpenPlatformSessionError } from './open-platform-session.js';
 
 export interface LarkAppCreationJob {
   id: string;
@@ -179,7 +179,7 @@ export class LarkAppCreationJobManager {
   }
   private async run(id: string) {
     let retryable = true;
-    let message = '开放平台登录或图标准备失败，请重新扫码重试';
+    let message = '飞书开放平台登录失败，请重新扫码重试';
     try {
       const connected = await (this.options.connect ?? connectLarkOpenPlatformSession)({
         forceLogin: true,
@@ -192,6 +192,7 @@ export class LarkAppCreationJobManager {
         },
       });
       if (await this.cancelled(id)) return;
+      message = '登录已完成，但读取账号信息或保存创建进度失败，请重试';
       const { client, owner } = connected;
       if (!owner.userId || !owner.tenantId || !owner.userName || !owner.tenantName) throw new Error('incomplete owner');
       const originalOwner = await this.options.config.get(ownerKey(id));
@@ -206,6 +207,7 @@ export class LarkAppCreationJobManager {
       if (!await this.update(id, { accountName: owner.userName, tenantName: owner.tenantName, scanConfirmed: true })) return;
       let appId = this.jobs.get(id)!.appId;
       if (!appId) {
+        message = '登录已完成，但机器人图标上传失败，请重试；尚未创建应用';
         const form = new FormData();
         form.append('file', new Blob([Buffer.from(LARK_APP_ICON_BASE64, 'base64')], { type: 'image/png' }), 'dutydeck.png');
         form.append('uploadType', '4');
@@ -256,8 +258,9 @@ export class LarkAppCreationJobManager {
       await this.update(id, { status: 'configuring' });
       await (this.options.configure ?? configureLarkOpenPlatformApp)(client, appId, { creatorUserId: owner.userId });
       await this.update(id, { status: 'completed', retryable: false });
-    } catch {
+    } catch (error) {
       // Never copy upstream errors: they may contain cookies, secrets or private IDs.
+      if (error instanceof OpenPlatformSessionError) message = error.message;
       try { await this.update(id, { status: 'failed', retryable, error: message }); }
       catch { /* The persisted boundary remains fail-closed if storage is unavailable. */ }
     }
