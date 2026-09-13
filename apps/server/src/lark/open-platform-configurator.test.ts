@@ -4,6 +4,7 @@ import {
   configureLarkOpenPlatformApp,
   LARK_COMMON_TENANT_SCOPES,
   LARK_COMMON_USER_SCOPES,
+  LARK_REQUIRED_EVENTS,
   type LarkOpenPlatformClient,
 } from './open-platform-configurator.js';
 
@@ -51,7 +52,7 @@ function harness(options: {
   let callbackRead = 0;
   let scopeRead = 0;
   let versionRead = 0;
-  const eventStates = options.events ?? [{ data: { eventMode: 4, appEvents: ['im.message.receive_v1'] } }];
+  const eventStates = options.events ?? [{ data: { eventMode: 4, appEvents: [...LARK_REQUIRED_EVENTS] } }];
   const callbackStates = options.callbacks ?? [{ data: { callbackMode: 4, callbacks: ['card.action.trigger'] } }];
   const client: LarkOpenPlatformClient = {
     postJson: vi.fn(async (path: string, body?: Record<string, unknown>) => {
@@ -137,10 +138,14 @@ describe('configureLarkOpenPlatformApp', () => {
     expect(result).toEqual({
       status: 'ready',
       scopeCount: 16,
-      eventCount: 1,
+      eventCount: 2,
       callbackCount: 1,
       versionId: 'version-2',
     });
+    expect(LARK_REQUIRED_EVENTS).toEqual([
+      'im.message.receive_v1',
+      'im.chat.member.bot.added_v1',
+    ]);
     expect(calls.find(call => call.path.includes('/scope/update/'))?.body).toMatchObject({
       appScopeIDs: LARK_COMMON_TENANT_SCOPES.map((_, index) => `tenant-${index + 1}`),
       userScopeIDs: [],
@@ -151,11 +156,11 @@ describe('configureLarkOpenPlatformApp', () => {
     expect(calls.some(call => call.path.includes('/callback/switch/'))).toBe(false);
   });
 
-  it('adds only missing message event/card callback, switches callback mode, and verifies both by rereading', async () => {
+  it('adds only the missing bot.added event without resubscribing receive_v1, switches callback mode, and verifies by rereading', async () => {
     const { client, calls } = harness({
       events: [
-        { data: { eventMode: 4, appEvents: ['existing.event'] } },
         { data: { eventMode: 4, appEvents: ['existing.event', 'im.message.receive_v1'] } },
+        { data: { eventMode: 4, appEvents: ['existing.event', 'im.message.receive_v1', 'im.chat.member.bot.added_v1'] } },
       ],
       callbacks: [
         { data: { callbackMode: 1, callbacks: ['existing.callback'] } },
@@ -169,7 +174,7 @@ describe('configureLarkOpenPlatformApp', () => {
       clientId: 'cli_test',
       operation: 'add',
       events: [],
-      appEvents: ['im.message.receive_v1'],
+      appEvents: ['im.chat.member.bot.added_v1'],
       userEvents: [],
       eventMode: 4,
     });
@@ -181,6 +186,27 @@ describe('configureLarkOpenPlatformApp', () => {
     });
     expect(calls.filter(call => /\/event\/cli_test$/.test(call.path))).toHaveLength(2);
     expect(calls.filter(call => /\/callback\/cli_test$/.test(call.path))).toHaveLength(3);
+  });
+
+  it('submits every missing required event exactly once when the app predates both subscriptions', async () => {
+    const { client, calls } = harness({
+      events: [
+        { data: { eventMode: 4, appEvents: ['existing.event'] } },
+        { data: { eventMode: 4, appEvents: ['existing.event', ...LARK_REQUIRED_EVENTS] } },
+      ],
+    });
+
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready', eventCount: 2 });
+    const updateBodies = calls.filter(call => call.path.includes('/event/update/'));
+    // 只提交一次增量 add，且两个必需事件各出现一次、已有事件不重提。
+    expect(updateBodies).toHaveLength(1);
+    expect(updateBodies[0]!.body?.appEvents).toEqual(LARK_REQUIRED_EVENTS);
+  });
+
+  it('does not touch the event subscription when both required events are already present', async () => {
+    const { client, calls } = harness();
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready' });
+    expect(calls.some(call => call.path.includes('/event/update/'))).toBe(false);
   });
 
   it('fails closed when any required scope is absent or only exists in the user bucket', async () => {

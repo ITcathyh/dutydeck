@@ -148,6 +148,15 @@ export function writeOpenPlatformSessionCookies(
  * Reuses a private cache first, then falls back to Feishu Web QR login. A
  * readable owner identity is mandatory: silently configuring under an unknown
  * account could publish the app into the wrong enterprise.
+ *
+ * Known limitation: the cached session is per-OS-user, not per-app. This
+ * function takes no appId and does not verify that the cached owner manages the
+ * caller's target app. Dutydeck deployments are single-tenant/single-account in
+ * practice, and every downstream configurator request addresses the explicit
+ * target appId (app IDs are globally unique), so a foreign cached account fails
+ * those writes with an authorization error rather than publishing another app.
+ * If multi-account support is ever added, key the cookie cache by appId and
+ * verify ownership before reuse.
  */
 export async function connectLarkOpenPlatformSession(
   options: ConnectOpenPlatformSessionOptions = {},
