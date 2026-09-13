@@ -1,4 +1,4 @@
-import { RelayError, type RelayEventPublisher } from './types.js';
+import { RelayError, type RelayAskChoice, type RelayEventPublisher } from './types.js';
 import { RelayAskBroker, type RelayAskOutcome } from './ask-broker.js';
 import { RelayCapabilityRegistry, relayBearerToken } from './capability.js';
 
@@ -6,7 +6,7 @@ import { RelayCapabilityRegistry, relayBearerToken } from './capability.js';
 export const relayMessageMaxLength = 32_000;
 
 export interface RelaySendInput { text?: string }
-export interface RelayAskInput { question?: string; timeoutMs?: number }
+export interface RelayAskInput { question?: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }
 export interface RelayAnswerInput { answer?: string }
 
 function requireText(value: string | undefined, code: string, label: string) {
@@ -41,7 +41,12 @@ export class RelayService {
   async ask(authorization: string | undefined, sessionId: string | undefined, input: RelayAskInput): Promise<RelayAskOutcome> {
     const capability = await this.capabilities.resolve(relayBearerToken(authorization), sessionId);
     const question = requireText(input.question, 'RELAY_QUESTION_REQUIRED', '提问内容');
-    return this.broker.register({ sessionId: capability.sessionId, question, timeoutMs: input.timeoutMs });
+    return this.broker.register({
+      sessionId: capability.sessionId, question, timeoutMs: input.timeoutMs,
+      // 不能用 truthy：choices:null 必须进 broker 的校验抛 400，而不是被静默当成普通提问登记。
+      ...(input.choices !== undefined ? { choices: input.choices } : {}),
+      ...(input.multiple === true ? { multiple: true } : {})
+    });
   }
 
   /** 从 token 反解会话 id，供路由在注册终态唤醒时使用 */

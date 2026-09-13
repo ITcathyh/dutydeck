@@ -32,6 +32,16 @@ export interface RelayPublishInput {
   kind: RelayMessageKind;
   text: string;
   askId?: string;
+  /** kind === 'ask' 时携带的结构化选项；消费方可据此渲染单选/多选卡片 */
+  choices?: RelayAskChoice[];
+  /** 选项是否允许多选；仅在 choices 存在时有意义 */
+  multiple?: boolean;
+}
+
+/** 结构化提问选项：value 缺省时以 label 作为最终答案文本 */
+export interface RelayAskChoice {
+  label: string;
+  value?: string;
 }
 
 /** 事件流投递端口 */
@@ -64,6 +74,10 @@ export interface RelayAskRecord {
   expiresAt: string;
   answer?: string;
   reason?: string;
+  /** 结构化选项；缺省表示自由文本提问，渲染侧维持原样 */
+  choices?: RelayAskChoice[];
+  /** 是否多选；缺省/false 为单选，仅在 choices 存在时有意义 */
+  multiple?: boolean;
 }
 
 export interface RelayAskStore {
