@@ -231,7 +231,6 @@ const callbackButton = (definition: LarkCardActionDefinition, taskId: string, tu
   tag: 'button',
   text: { tag: 'plain_text', content: definition.label },
   type: definition.buttonType,
-  size: 'small',
   behaviors: [{ type: 'callback', value: callbackValue(definition.action, taskId, turn) }],
   margin: '0px',
   element_id: definition.elementId
