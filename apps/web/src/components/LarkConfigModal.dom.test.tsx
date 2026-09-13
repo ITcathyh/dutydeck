@@ -392,6 +392,42 @@ describe('LarkConfigModal ask permission posture', () => {
 
 
 describe('LarkConfigModal explicit selection', () => {
+  it('opens and focuses a separate new Bot form when the add button is clicked', async () => {
+    const user = userEvent.setup();
+    const config = collection({ setupComplete: true });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ ...config, bots: [...config.bots, { ...bot, appId: 'cli_new' }] });
+    renderModal(config, 'acp', { appId: bot.appId });
+    await waitFor(() => expect((screen.getByLabelText('App ID') as HTMLInputElement).value).toBe(bot.appId));
+    await user.click(screen.getByRole('button', { name: /选择 Agent 并启用/ }));
+    await user.click(screen.getByRole('button', { name: '新增机器人' }));
+
+    const appId = await screen.findByLabelText('App ID') as HTMLInputElement;
+    await waitFor(() => expect(document.activeElement).toBe(appId));
+    expect(appId.value).toBe('');
+    expect(screen.getByRole('status').textContent).toContain('正在新增机器人');
+    expect(screen.getByRole('button', { name: '新增机器人' }).getAttribute('aria-pressed')).toBe('true');
+    expect(screen.queryByRole('button', { name: '删除配置' })).toBeNull();
+    expect((screen.getByRole('button', { name: /选择 Agent 并启用/ }) as HTMLButtonElement).disabled).toBe(true);
+    await user.type(appId, 'cli_new');
+    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'new-secret');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]?.[0]).toMatchObject({ stage: 'lark', appId: 'cli_new', appSecret: 'new-secret' });
+    expect(save.mock.calls[0]?.[0]).not.toHaveProperty('originalAppId');
+  });
+
+  it('focuses the App ID when add is clicked again without discarding the new draft', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true }), 'acp', 'new');
+    const appId = await screen.findByLabelText('App ID') as HTMLInputElement;
+    await user.type(appId, 'cli_draft');
+    await user.type(screen.getByPlaceholderText('输入 App Secret'), 'draft-secret');
+    await user.click(screen.getByRole('button', { name: '新增机器人' }));
+    await waitFor(() => expect(document.activeElement).toBe(appId));
+    expect(appId.value).toBe('cli_draft');
+    expect((screen.getByPlaceholderText('输入 App Secret') as HTMLInputElement).value).toBe('draft-secret');
+  });
+
   it('updates the requested third Bot and leaves the first Bot untouched', async () => {
     const bots = Array.from({ length: 4 }, (_, i) => ({ ...bot, appId: `cli_${i}`, name: `机器人${i}`, tabLabel: `机器人${i}`, setupComplete: true }));
     const config = { configured: true, bots, listeningDisabled: false };
@@ -399,7 +435,7 @@ describe('LarkConfigModal explicit selection', () => {
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(config);
     renderModal(config, 'acp', { appId: 'cli_2' });
     await screen.findByRole('heading', { name: '更新飞书 Bot：机器人2' });
-    expect((screen.getByLabelText('App ID') as HTMLInputElement).value).toBe('cli_2');
+    await waitFor(() => expect((screen.getByLabelText('App ID') as HTMLInputElement).value).toBe('cli_2'));
     await userEvent.type(screen.getByPlaceholderText('已保存'), 'replacement-secret');
     await userEvent.click(screen.getByRole('button', { name: '下一步' }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ originalAppId: 'cli_2', appId: 'cli_2', appSecret: 'replacement-secret', stage: 'lark' })));
