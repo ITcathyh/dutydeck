@@ -14,6 +14,52 @@ import { LarkAppCreationPanel } from './LarkAppCreationPanel';
 export type LarkConfigModalProps = { agents: Agent[]; target?: LarkSetupTarget; onClose(): void };
 
 /*
+  S7 Web 出口健康提示的 web 侧分类。apps/web 不能依赖 apps/server，
+  规则与文案必须与 apps/server/src/lark/config.ts 的 describeWebBaseUrlReachability
+  保持一致；改动分类规则时两边同步，测试各自钉一份边界矩阵。
+*/
+const webBaseUrlUnsetMessage = '未配置公网 Web 地址：审批/问答卡片没有网页出口，手机无法打开详情。';
+const webBaseUrlLocalMessage = 'Web 地址只在本机或内网可达：手机外网打不开，卡片上的“查看详情”没有出口。';
+const webBaseUrlInvalidMessage = 'Web 地址不是合法的 http(s) 链接：卡片上的“查看详情”不会渲染，请改为手机可达的公网地址。';
+
+function describeWebBaseUrlReachability(webBaseUrl: string): { kind: 'unset' | 'local' | 'public'; message?: string } {
+  const trimmed = webBaseUrl.trim();
+  if (!trimmed) return { kind: 'unset', message: webBaseUrlUnsetMessage };
+  // ftp:// 等非 http(s) 协议不能补成 https://（new URL 会把主机名误读成协议段），直接判不可用。
+  const scheme = /^([a-z][a-z0-9+.-]*):\/\//i.exec(trimmed);
+  if (scheme && !/^https?$/i.test(scheme[1]!)) return { kind: 'local', message: webBaseUrlInvalidMessage };
+  // normalizeWebBaseUrl 会把非 http(s) 输入误补成 https://<原串>（ftp://x → https://ftp://x），
+  // 归一化后的存储态会在主机段内出现第二个 ://；hydrate 回填的是存储态，需同样判畸形，避免警示漏报。
+  // 只看首个路径分隔符之前的主机段，避免误伤路径或参数里自带 URL 的合法公网地址。
+  if (/^[a-z][a-z0-9+.-]*:\/\/[^/]*:\/\//i.test(trimmed)) return { kind: 'local', message: webBaseUrlInvalidMessage };
+  let parsed: URL;
+  try {
+    parsed = new URL(scheme ? trimmed : `https://${trimmed}`);
+  } catch {
+    return { kind: 'local', message: webBaseUrlInvalidMessage };
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { kind: 'local', message: webBaseUrlInvalidMessage };
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (!hostname) return { kind: 'local', message: webBaseUrlInvalidMessage };
+  const local = hostname === 'localhost' || hostname === '::1' || hostname.endsWith('.local') || (() => {
+    if (hostname.includes(':')) {
+      const firstHextet = parseInt(hostname.slice(0, 4), 16);
+      return Number.isInteger(firstHextet) && ((firstHextet >= 0xfe80 && firstHextet <= 0xfebf) || (firstHextet >= 0xfc00 && firstHextet <= 0xfdff));
+    }
+    const parts = hostname.split('.');
+    if (parts.length === 4 && parts.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255)) {
+      const [first = 0, second = 0] = parts.map(Number);
+      return first === 0 || first === 10 || first === 127
+        || (first === 169 && second === 254)
+        || (first === 172 && second >= 16 && second <= 31)
+        || (first === 192 && second === 168);
+    }
+    return false;
+  })();
+  return local ? { kind: 'local', message: webBaseUrlLocalMessage } : { kind: 'public' };
+}
+
+/*
   四个手写开关（primitives 里没有 Switch 原语）。轨道是真正的胶囊滑块，
   契约 §3 允许 rounded-full。aria-label 必填：靠旁边的文本认不出这是哪个开关。
 
@@ -45,8 +91,9 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const hydratedSelection = useRef<string | null>(null);
   const form = useRef<HTMLFormElement>(null);
   const enableListeningAfterNewBot = useRef(false);
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null); const [step, setStep] = useState<1 | 2>(1); const [name, setName] = useState(''); const [workspace, setWorkspace] = useState(''); const [webBaseUrl, setWebBaseUrl] = useState(typeof window !== 'undefined' ? window.location.origin : ''); const [appId, setAppId] = useState(''); const [appSecret, setAppSecret] = useState(''); const [restrictUsers, setRestrictUsers] = useState(false); const [allowedUserNames, setAllowedUserNames] = useState<string[]>([]); const [allowedBotNames, setAllowedBotNames] = useState<string[]>([]); const [peerBotsAllowed, setPeerBotsAllowed] = useState(true); const [defaultAgentId, setDefaultAgentId] = useState(''); const [defaultModel, setDefaultModel] = useState(''); const [defaultReasoningEffort, setDefaultReasoningEffort] = useState(''); const [fullTrustConfirmed, setFullTrustConfirmed] = useState(false); const [permissionMode, setPermissionMode] = useState<'ask' | 'full-trust'>('full-trust'); const [preInjectPrompt, setPreInjectPrompt] = useState(''); const [groupToolsEnabled, setGroupToolsEnabled] = useState(false); const [groupToolsAllowSend, setGroupToolsAllowSend] = useState(false); const [highRiskAllowedUserNames, setHighRiskAllowedUserNames] = useState<string[]>([]); const [highRiskPattern, setHighRiskPattern] = useState(''); const [riskControlMode, setRiskControlMode] = useState<RiskControlMode>('off'); const [showSecret, setShowSecret] = useState(false); const [listening, setListening] = useState(false); const [pushIntervalMs, setPushIntervalMs] = useState(1000); const [traceLimit, setTraceLimit] = useState('50');
+  const [selectedAppId, setSelectedAppId] = useState<string | null>(null); const [step, setStep] = useState<1 | 2>(1); const [name, setName] = useState(''); const [workspace, setWorkspace] = useState(''); const [webBaseUrl, setWebBaseUrl] = useState(typeof window !== 'undefined' ? window.location.origin : ''); const [appId, setAppId] = useState(''); const [appSecret, setAppSecret] = useState(''); const [restrictUsers, setRestrictUsers] = useState(false); const [allowedUserNames, setAllowedUserNames] = useState<string[]>([]); const [allowedBotNames, setAllowedBotNames] = useState<string[]>([]); const [peerBotsAllowed, setPeerBotsAllowed] = useState(true); const [defaultAgentId, setDefaultAgentId] = useState(''); const [defaultModel, setDefaultModel] = useState(''); const [defaultReasoningEffort, setDefaultReasoningEffort] = useState(''); const [fullTrustConfirmed, setFullTrustConfirmed] = useState(false); const [permissionMode, setPermissionMode] = useState<'ask' | 'full-trust'>('full-trust'); const [preInjectPrompt, setPreInjectPrompt] = useState(''); const [groupToolsEnabled, setGroupToolsEnabled] = useState(false); const [groupToolsAllowSend, setGroupToolsAllowSend] = useState(false); const [highRiskAllowedUserNames, setHighRiskAllowedUserNames] = useState<string[]>([]); const [highRiskPattern, setHighRiskPattern] = useState(''); const [riskControlMode, setRiskControlMode] = useState<RiskControlMode>('off'); const [showSecret, setShowSecret] = useState(false); const [listening, setListening] = useState(false); const [pushIntervalMs, setPushIntervalMs] = useState(1000); const [traceLimit, setTraceLimit] = useState('50'); const [structuredAskCards, setStructuredAskCards] = useState(false); const [groupCardMention, setGroupCardMention] = useState(false);
   const current = config.data?.bots.find(bot => bot.appId === selectedAppId);
+  const webBaseUrlReachability = useMemo(() => describeWebBaseUrlReachability(webBaseUrl), [webBaseUrl]);
   const highRiskPatternValidation = useMemo(() => validateHighRiskPattern(highRiskPattern), [highRiskPattern]);
   const hookStatus = useQuery({ queryKey: ['lark-hook-status', current?.appId, defaultAgentId], queryFn: () => api.larkHookStatus(current!.appId, defaultAgentId), enabled: Boolean(current && defaultAgentId && riskControlMode === 'enforced' && step === 2) });
   const agentOptions = useQuery({ queryKey: agentModelsQueryKey(defaultAgentId, defaultModel), queryFn: () => loadAgentModels(defaultAgentId, defaultModel || undefined), enabled: Boolean(defaultAgentId), initialData: () => readCachedAgentModels(defaultAgentId, defaultModel || undefined), initialDataUpdatedAt: 0, refetchOnMount: 'always', staleTime: 5 * 60_000 });
@@ -80,12 +127,12 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
     setName(bot?.name ?? ''); setWorkspace(bot?.workspace ?? ''); setWebBaseUrl(bot?.webBaseUrl ?? (typeof window !== 'undefined' ? window.location.origin : '')); setAppId(bot?.appId ?? ''); setAppSecret(''); setOpenPlatformJobId(''); setRestrictUsers(Boolean(bot?.allowedUsers.length || bot?.allowedEmails.length)); setAllowedUserNames((bot?.allowedUsers ?? []).map(user => user.name)); setAllowedBotNames((bot?.allowedBots ?? []).map(b => b.name)); setPeerBotsAllowed(bot?.peerBotsAllowed !== false);
     setDefaultAgentId(agents.some(agent => agent.id === bot?.defaultAgentId) ? bot?.defaultAgentId ?? '' : agents[0]?.id ?? '');
     setDefaultModel(bot?.defaultModel ?? ''); setDefaultReasoningEffort(bot?.defaultReasoningEffort ?? ''); setFullTrustConfirmed(bot?.fullTrustConfirmed ?? false); setPermissionMode(bot?.permissionMode ?? 'full-trust'); setListening(enableListeningAfterNewBot.current ? true : bot?.listening ?? true); enableListeningAfterNewBot.current = false; setPushIntervalMs(bot?.pushIntervalMs ?? 1000); setTraceLimit((bot?.traceLimit ?? 10).toString());
-    setPreInjectPrompt(bot?.preInjectPrompt ?? ''); setGroupToolsEnabled(bot?.groupToolsEnabled ?? false); setGroupToolsAllowSend(bot?.groupToolsAllowSend ?? false); setHighRiskAllowedUserNames((bot?.highRiskAllowedUsers ?? []).map(user => user.name)); setHighRiskPattern(bot?.highRiskPattern ?? ''); setRiskControlMode(bot?.riskControlMode ?? 'off');
+    setPreInjectPrompt(bot?.preInjectPrompt ?? ''); setGroupToolsEnabled(bot?.groupToolsEnabled ?? false); setGroupToolsAllowSend(bot?.groupToolsAllowSend ?? false); setStructuredAskCards(bot?.structuredAskCards ?? false); setGroupCardMention(bot?.groupCardMention ?? false); setHighRiskAllowedUserNames((bot?.highRiskAllowedUsers ?? []).map(user => user.name)); setHighRiskPattern(bot?.highRiskPattern ?? ''); setRiskControlMode(bot?.riskControlMode ?? 'off');
   }, [config.data, agents, selectedAppId]);
   const inspect = useMutation({ mutationFn: () => api.inspectLarkBot({ appId: appId.trim(), appSecret: appSecret.trim() }), onSuccess: result => setName(result.appName) });
   const save = useMutation({
     mutationFn: () => step === 1
-      ? api.saveLarkConfig({ stage: 'lark', ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), workspace: workspace.trim(), webBaseUrl: webBaseUrl.trim(), allowedUserNames: restrictUsers ? allowedUserNames : [], allowedEmails: [], allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit) })
+      ? api.saveLarkConfig({ stage: 'lark', ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), workspace: workspace.trim(), webBaseUrl: webBaseUrl.trim(), structuredAskCards, groupCardMention, allowedUserNames: restrictUsers ? allowedUserNames : [], allowedEmails: [], allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit) })
       : api.saveLarkConfig({ stage: 'agent', originalAppId: current!.appId, defaultAgentId, defaultModel, defaultReasoningEffort, fullTrustConfirmed, permissionMode, preInjectPrompt, listening, groupToolsEnabled, groupToolsAllowSend, highRiskAllowedUserNames, highRiskAllowedEmails: [], highRiskPattern, riskControlMode }),
     onSuccess: data => { if (step === 1 && !current) enableListeningAfterNewBot.current = true; qc.setQueryData(['lark-config'], data); const savedId = appId.trim(); setSelectedAppId(savedId); setAppSecret(''); void qc.invalidateQueries({ queryKey: ['lark-hook-status', savedId] }); if (step === 1) setStep(2); else onClose(); }
   });
@@ -197,6 +244,12 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
           <Field label="Web 访问地址（可选）" hint="配置后，飞书卡片底部会显示“查看详情”链接，指向该域名下的任务 Trace 页面。">
             <Input value={webBaseUrl} onChange={event => setWebBaseUrl(event.target.value)} placeholder="https://dutydeck.example.com" className="font-mono"/>
           </Field>
+          {/* S7：留空或只绑本机/内网时，卡片的“查看详情”在手机上注定打不开，必须就地提示，不做公网兜底。 */}
+          {webBaseUrlReachability.kind !== 'public' && <Banner tone="warning">{webBaseUrlReachability.message}</Banner>}
+          <div className="space-y-2.5 border-t border-subtle pt-3.5">
+            <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-structured-ask" className="cursor-pointer text-caption font-medium text-primary">结构化问答卡片（实验能力，默认关闭）</label><div className="mt-0.5 text-caption text-subtle">问答卡渲染单选、多选与输入框等结构化组件；低版本飞书客户端可能不支持，会回退为引用卡片回复。</div></div><Switch id="lark-switch-structured-ask" label="结构化问答卡片（实验能力，默认关闭）" checked={structuredAskCards} onToggle={() => setStructuredAskCards(value => !value)}/></div>
+            <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-group-mention" className="cursor-pointer text-caption font-medium text-primary">群卡片 @ 发起人（实验能力，默认关闭）</label><div className="mt-0.5 text-caption text-subtle">群内审批卡与结果卡 @ 发起人，免打扰时也能亮屏提醒；触达效果尚待真机验证，私聊不受影响。</div></div><Switch id="lark-switch-group-mention" label="群卡片 @ 发起人（实验能力，默认关闭）" checked={groupCardMention} onToggle={() => setGroupCardMention(value => !value)}/></div>
+          </div>
           {!current && <Button variant="secondary" fullWidth icon={<Bot size={12}/>} loading={inspect.isPending} disabled={!appId.trim() || !appSecret.trim()} onClick={() => inspect.mutate()}>校验凭证并识别机器人名称</Button>}
           <div className="border-t border-subtle pt-3.5">
             <div className="flex items-start justify-between gap-3"><div><div className="text-caption font-medium text-secondary">可使用机器人的成员</div><p className="mt-0.5 text-caption text-subtle">输入飞书真实姓名；保存时解析为稳定的 open_id，不读取邮箱。</p></div><div className="flex shrink-0 rounded-md bg-muted p-0.5"><button type="button" onClick={() => setRestrictUsers(false)} className={`min-h-10 rounded-sm px-2 text-caption font-medium ${!restrictUsers ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}>所有人</button><button type="button" onClick={() => setRestrictUsers(true)} className={`min-h-10 rounded-sm px-2 text-caption font-medium ${restrictUsers ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}>指定成员</button></div></div>

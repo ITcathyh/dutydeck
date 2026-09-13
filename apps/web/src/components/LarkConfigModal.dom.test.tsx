@@ -462,7 +462,8 @@ describe('LarkConfigModal explicit selection', () => {
     const appId = await screen.findByLabelText('App ID') as HTMLInputElement;
     await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('新机器人名称')));
     expect(appId.value).toBe('');
-    expect(screen.getByRole('status').textContent).toContain('正在新增机器人');
+    // 高级设置内还有一条 Web 出口警告 role=status，取回全部状态节点后按文案断言。
+    expect(screen.getAllByRole('status').some(el => el.textContent?.includes('正在新增机器人'))).toBe(true);
     expect(screen.getByRole('button', { name: '新增机器人' }).getAttribute('aria-pressed')).toBe('true');
     expect(screen.queryByRole('button', { name: '删除配置' })).toBeNull();
     expect((screen.getByRole('button', { name: /选择 Agent 并启用/ }) as HTMLButtonElement).disabled).toBe(true);
@@ -524,5 +525,90 @@ describe('LarkConfigModal explicit selection', () => {
     expect(control.getAttribute('aria-checked')).toBe('false');
     await userEvent.click(screen.getByText('监听飞书消息', { selector: 'label' }));
     expect(control.getAttribute('aria-checked')).toBe('true');
+  });
+});
+
+/*
+  S7：webBaseUrl 留空或只绑本机/内网时，卡片「查看详情」在手机外网注定打不开，
+  设置 UI 必须就地给出警告；公网地址不打扰。分类规则与服务端 config.ts 各钉一份矩阵。
+*/
+describe('LarkConfigModal S7 Web 出口健康提示', () => {
+  const openAdvanced = async () => {
+    await userEvent.setup().click(await screen.findByText('访问范围与高级设置（可选）'));
+  };
+
+  it('公网 Web 地址不显示警告', async () => {
+    renderModal(collection({ setupComplete: true, webBaseUrl: 'https://dutydeck.example.com' }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced();
+    expect(screen.queryByText(/没有网页出口|内网可达|合法的 http\(s\) 链接/)).toBeNull();
+  });
+
+  it('内网地址显示“手机外网打不开”警告', async () => {
+    renderModal(collection({ setupComplete: true, webBaseUrl: 'http://127.0.0.1:8080' }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced();
+    expect(screen.getByText(/Web 地址只在本机或内网可达/)).toBeTruthy();
+  });
+
+  it('清空地址变为未配置警告，输入公网地址后警告消失', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true, webBaseUrl: 'http://127.0.0.1:8080' }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced();
+    const input = screen.getByLabelText('Web 访问地址（可选）') as HTMLInputElement;
+    await user.clear(input);
+    expect(screen.getByText(/未配置公网 Web 地址/)).toBeTruthy();
+    await user.type(input, 'https://dutydeck.example.com');
+    expect(screen.queryByText(/没有网页出口|内网可达/)).toBeNull();
+  });
+
+  it('历史存储的非 http(s) 补协议产物（第二个 ://）仍给出畸形提示', async () => {
+    renderModal(collection({ setupComplete: true, webBaseUrl: 'https://ftp://dutydeck.example.com' }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced();
+    expect(screen.getByText(/不是合法的 http\(s\) 链接/)).toBeTruthy();
+  });
+
+  it('参数里自带 URL 的公网地址（第二个 :// 在 query 中）不误报', async () => {
+    renderModal(collection({ setupComplete: true, webBaseUrl: 'https://dutydeck.example.com/?redirect=https://other.example.com' }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced();
+    expect(screen.queryByText(/没有网页出口|内网可达|合法的 http\(s\) 链接/)).toBeNull();
+  });
+});
+
+describe('LarkConfigModal 实验卡片开关', () => {
+  it('默认关闭，文案标明实验能力与默认关闭', async () => {
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await userEvent.setup().click(await screen.findByText('访问范围与高级设置（可选）'));
+    const ask = screen.getByRole('switch', { name: '结构化问答卡片（实验能力，默认关闭）' });
+    const mention = screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' });
+    expect(ask.getAttribute('aria-checked')).toBe('false');
+    expect(mention.getAttribute('aria-checked')).toBe('false');
+    expect(screen.getByText(/低版本飞书客户端可能不支持/)).toBeTruthy();
+    expect(screen.getByText(/触达效果尚待真机验证/)).toBeTruthy();
+  });
+
+  it('回填服务端已开启的开关', async () => {
+    renderModal(collection({ setupComplete: true, structuredAskCards: true, groupCardMention: true }));
+    await screen.findByPlaceholderText('已保存');
+    await userEvent.setup().click(await screen.findByText('访问范围与高级设置（可选）'));
+    expect(screen.getByRole('switch', { name: '结构化问答卡片（实验能力，默认关闭）' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' }).getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('切换后随第一步保存写入配置', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await user.click(await screen.findByText('访问范围与高级设置（可选）'));
+    await user.click(screen.getByRole('switch', { name: '结构化问答卡片（实验能力，默认关闭）' }));
+    await user.click(screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' }));
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', structuredAskCards: true, groupCardMention: true });
   });
 });
