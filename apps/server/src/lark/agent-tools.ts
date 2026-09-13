@@ -1,6 +1,6 @@
 import { workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
 import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dutydeck/shared';
@@ -276,6 +276,24 @@ const normalizeLimit = (value?: number) => {
 };
 
 const escapeAtName = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+// 无显式幂等键时，按「会话 + 群 + 发送目标（--to 对象 / --reply-to 回复目标）+ 归一化内容」派生
+// 确定性 UUIDv5 形态的去重键，让无 key 的失败重试也命中飞书平台 uuid 去重。
+// 作用域是同一会话内的重试：chat_id 只按应用隔离、不按会话隔离，因此必须纳入 sessionId，
+// 避免同群两个不同会话输出相同内容（如两条「已完成」）被平台折叠。
+// 任一维度不同摘要即不同，绝不会把不同消息合并。空白归一化与发送路由保持一致，防止空格绕过合并。
+const deterministicSendUuid = (input: { sessionId: string; chatId: string; content: string; to: string; replyTo: string; inThread: boolean }) => {
+  const fingerprint = JSON.stringify({
+    session: input.sessionId,
+    chat: input.chatId,
+    ...(input.to ? { to: input.to } : {}),
+    ...(input.replyTo ? { replyTo: input.replyTo, ...(input.inThread ? { thread: true } : {}) } : {}),
+    content: input.content
+  });
+  const hex = createHash('sha256').update(fingerprint).digest('hex');
+  // 组装为合法 UUID：第三段首位置版本号 5，第四段首两位置 RFC 4122 variant 10。
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+};
 
 export class LarkAgentToolsService {
   private readonly clients = new Map<string, { secret: string; client: LarkGroupToolClient }>();
@@ -585,7 +603,15 @@ export class LarkAgentToolsService {
     const content = input.content?.trim();
     if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
     if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
-    const idempotencyKey = input.idempotencyKey?.trim() || `dutydeck-${randomUUID()}`;
+    const idempotencyKey = input.idempotencyKey?.trim() || deterministicSendUuid({
+      sessionId: context.sessionId,
+      chatId: context.chatId,
+      content,
+      // --to 的匹配规则是 trim 后大小写不敏感，指纹做同样归一化，避免空白/大小写差异绕过合并。
+      to: input.to?.trim().toLowerCase() ?? '',
+      replyTo: input.replyTo?.trim() ?? '',
+      inThread: input.inThread === true
+    });
     if (idempotencyKey.length > 50) throw new AgentGroupToolError('INVALID_IDEMPOTENCY_KEY', 'idempotencyKey 不能超过 50 个字符。', 400);
     if (input.inThread && !input.replyTo?.trim()) {
       throw new AgentGroupToolError('GROUP_THREAD_REPLY_TARGET_REQUIRED', '话题内回复必须同时传入 replyTo；请使用当前消息或 messages 返回的 om_* messageId。', 400);
@@ -664,7 +690,8 @@ ${allowSend ? `- ${command} group send <内容> [--to <Agent/成员名称、appI
 - messages 返回的消息列表中，合并转发（merge_forward）消息只显示占位提示和 message_id，不会自动展开。如需查看转发的具体内容，请调用 ${command} group message <message_id> 按 message_id 拉取。
 - ${allowSend ? `需要其他 Agent 协助时先调用 peers 或 bots；返回的机器人中，带 agentId 字段的是本 Dutydeck 实例管理的可协作 Agent，不带 agentId 的是群内其他机器人。需要 @群内人类用户时先调用 members。再用 send --to 明确目标；名称重名时使用 appId 或 openId，不要臆测。
 - 发送前先判断消息归属：延续某条提问、回答某个话题或补充该话题结论时，使用 send --reply-to <该消息的 om_* messageId> --in-thread；独立公告、新任务或不应归入原讨论的内容，使用 send 且不要传 --reply-to/--in-thread。不要因为“能回复”就机械回复，也不要把 omt_* threadId 当作 reply-to。
-- 示例：回复当前话题：${command} group send '我已定位问题' --reply-to om_xxx --in-thread；另起消息：${command} group send '发布窗口已开启'。` : '可以发现和读取同群 Agent 与成员，但不得尝试发送、回复或 @交接。'}
+- 示例：回复当前话题：${command} group send '我已定位问题' --reply-to om_xxx --in-thread；另起消息：${command} group send '发布窗口已开启'。
+- 发送失败后重试必须携带与首次完全相同的稳定 --idempotency-key；不同内容绝不能复用同一个 key。未携带 key 时，系统在当前会话内按「当前群 + 发送目标（--to 对象或 --reply-to 回复目标）+ 内容」指纹自动去重：同群同目标同内容的重试不会重复发送，目标或内容任一不同都绝不会被合并，不同会话之间也不会互相折叠。` : '可以发现和读取同群 Agent 与成员，但不得尝试发送、回复或 @交接。'}
 - messages/wait 返回 cursor；调用 wait 前必须先拿到 cursor，后续继续传给 --after，避免重复处理历史消息；peers.securityLimited=true 表示发现结果不完整，应明确告知用户。不要无目的地无限轮询。
 - 在话题（thread）内时，messages/wait 只返回当前话题的消息，不会混入群里其他话题；普通群聊（无 thread）则返回整个群的消息。
 - 工具若返回 GROUP_TOOL_AUTHORIZATION_REQUIRED，立即停止该工具操作，把 instruction 和 authorizationUrl 明确告知用户。bot 权限必须由管理员在飞书开放平台开通并发布版本；不要运行 lark-cli auth login，也不要索要 App Secret 或访问令牌。

@@ -44,9 +44,11 @@ async function setup(
   clients: Record<string, LarkGroupToolClient>,
   groupToolsCommand?: string,
   executionPolicy?: LarkAgentToolsOptions['executionPolicy'],
+  chatId = 'oc_group',
+  sessionId = 'ses_lark',
 ) {
   const repos = createRepositories(':memory:'); repositories.push(repos);
-  const activeSession = session();
+  const activeSession = session({ id: sessionId, sourceId: `cli_current:${chatId}:group` });
   await repos.sessions.save(activeSession);
   await repos.config.set(larkBotsConfigKey, JSON.stringify([
     { appId: 'cli_current', appSecret: 'secret-current', name: 'Current Bot', defaultAgentId: 'codex', groupToolsEnabled: true, groupToolsAllowSend: true },
@@ -290,5 +292,79 @@ describe('Agent group collaboration domain service', () => {
     await expect(tools.send(token, { content: '缺少目标', inThread: true })).rejects.toMatchObject({ code: 'GROUP_THREAD_REPLY_TARGET_REQUIRED' });
     await expect(tools.send(token, { content: '错误目标', replyTo: 'omt_topic', inThread: true })).rejects.toMatchObject({ code: 'INVALID_GROUP_REPLY_TARGET' });
     expect(current.getMessage).not.toHaveBeenCalledWith('omt_topic');
+  });
+
+  it('derives a deterministic uuid from chat, target and content when no idempotency key is given', async () => {
+    const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+    const current = fakeClient({
+      listChatMembers: vi.fn(async input => ({
+        items: input.memberTypes?.includes('user')
+          ? [
+              { memberId: 'ou_human', openId: 'ou_human', memberType: 'user' as const, name: '伟哥' },
+              { memberId: 'ou_other', openId: 'ou_other', memberType: 'user' as const, name: '阿强' }
+            ]
+          : [],
+        hasMore: false, securityLimited: false
+      }))
+    });
+    const { tools, token } = await setup({ cli_current: current });
+    const sendKey = (index: number) => vi.mocked(current.sendText).mock.calls[index]![0].idempotencyKey!;
+    const replyKey = (index: number) => vi.mocked(current.replyText).mock.calls[index]![0].idempotencyKey!;
+
+    // 无 key 时同群同内容重试派生同一 UUID，且为合法 UUID 形态、不超过 50 字符。
+    await tools.send(token, { content: '发布窗口已开启' });
+    await tools.send(token, { content: '发布窗口已开启' });
+    expect(sendKey(0)).toBe(sendKey(1));
+    expect(sendKey(0)).toMatch(uuidPattern);
+    expect(sendKey(0)).toHaveLength(36);
+    expect(sendKey(0).length).toBeLessThanOrEqual(50);
+    expect(sendKey(0)).not.toContain('dutydeck-');
+
+    // 内容首尾空白归一化不会绕过合并；内容不同一定不同值。
+    await tools.send(token, { content: '  发布窗口已开启  ' });
+    expect(sendKey(2)).toBe(sendKey(0));
+    await tools.send(token, { content: '发布窗口已关闭' });
+    expect(sendKey(3)).not.toBe(sendKey(0));
+
+    // --to 目标参与指纹：trim 归一化后同目标同值，不同目标不同值。
+    await tools.send(token, { content: '请处理', to: ' 伟哥 ' });
+    await tools.send(token, { content: '请处理', to: '伟哥' });
+    expect(sendKey(4)).toBe(sendKey(5));
+    await tools.send(token, { content: '请处理', to: '阿强' });
+    expect(sendKey(6)).not.toBe(sendKey(4));
+
+    // 回复目标与话题形态参与指纹：同目标同值，换回复消息或换话题形态不同值。
+    await tools.send(token, { content: '收到', replyTo: 'om_root', inThread: true });
+    await tools.send(token, { content: '收到', replyTo: 'om_root', inThread: true });
+    expect(replyKey(0)).toBe(replyKey(1));
+    await tools.send(token, { content: '收到', replyTo: 'om_other', inThread: true });
+    expect(replyKey(2)).not.toBe(replyKey(0));
+    await tools.send(token, { content: '收到', replyTo: 'om_root' });
+    expect(replyKey(3)).not.toBe(replyKey(0));
+
+    // 显式 key trim 后原样优先，不改写为派生 UUID。
+    await tools.send(token, { content: '发布窗口已开启', idempotencyKey: '  agent-supplied-key  ' });
+    expect(sendKey(7)).toBe('agent-supplied-key');
+    expect(sendKey(7)).not.toMatch(uuidPattern);
+
+    // 超长内容仍稳定且 UUID 长度不受内容长度影响。
+    const longContent = '很长'.repeat(5_000);
+    await tools.send(token, { content: longContent });
+    await tools.send(token, { content: longContent });
+    expect(sendKey(8)).toBe(sendKey(9));
+    expect(sendKey(8)).toMatch(uuidPattern);
+    expect(sendKey(8).length).toBeLessThanOrEqual(50);
+
+    // 不同群即使会话与内容相同也不复用 UUID。
+    const other = fakeClient();
+    const otherSetup = await setup({ cli_current: other }, undefined, undefined, 'oc_other');
+    await otherSetup.tools.send(otherSetup.token, { content: '发布窗口已开启' });
+    expect(vi.mocked(other.sendText).mock.calls[0]![0].idempotencyKey).not.toBe(sendKey(0));
+
+    // 同群不同会话即使内容完全相同也不复用 UUID，避免两条独立回复被平台折叠。
+    const otherSession = fakeClient();
+    const sessionSetup = await setup({ cli_current: otherSession }, undefined, undefined, 'oc_group', 'ses_other');
+    await sessionSetup.tools.send(sessionSetup.token, { content: '发布窗口已开启' });
+    expect(vi.mocked(otherSession.sendText).mock.calls[0]![0].idempotencyKey).not.toBe(sendKey(0));
   });
 });
