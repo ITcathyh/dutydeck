@@ -9,6 +9,11 @@ const FEISHU_LOGIN_REDIRECT = 'https://ask.feishu.cn/';
 const FEISHU_APP_ID = '12';
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const FEISHU_CONSOLE_ORIGINS = new Set(['https://open.feishu.cn', 'https://open.larkoffice.com']);
+const FEISHU_LOGIN_ORIGINS = new Set([
+  ...FEISHU_CONSOLE_ORIGINS,
+  'https://accounts.feishu.cn', 'https://passport.feishu.cn', 'https://login.feishu.cn', 'https://ask.feishu.cn',
+  'https://accounts.larkoffice.com', 'https://passport.larkoffice.com',
+]);
 const DEFAULT_BROWSER_USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36';
 const FEISHU_COMMON_HEADERS = {
@@ -49,6 +54,20 @@ export interface OpenPlatformSessionClient {
 export class OpenPlatformRequestError extends Error {
   constructor(message: string, readonly statusCode: number, readonly apiCode?: number) {
     super(message);
+  }
+}
+
+const sessionFailureMessages = {
+  qr_login: '飞书扫码登录失败，请重新扫码重试',
+  login_redirect: '扫码已确认，但飞书登录跳转未完成，请检查网络后重试',
+  console: '扫码后无法建立飞书开放平台会话，请检查网络后重试',
+  owner: '开放平台未返回当前登录账号和企业信息；为避免配置到错误企业，已停止操作',
+  cache: '登录成功，但本地登录缓存保存失败，请检查目录权限',
+} as const;
+export class OpenPlatformSessionError extends Error {
+  constructor(readonly phase: keyof typeof sessionFailureMessages, cause?: unknown) {
+    const known = cause instanceof Error && ['等待飞书扫码超时', '飞书登录二维码已过期', '开放平台请求超时'].includes(cause.message);
+    super(known ? cause.message : sessionFailureMessages[phase], { cause });
   }
 }
 
@@ -155,17 +174,19 @@ export async function connectLarkOpenPlatformSession(
   }
 
   const jar = new CookieJar([], requestTimeoutMs);
-  await loginWithQr(jar, fetcher, options);
+  try { await loginWithQr(jar, fetcher, options); }
+  catch (error) { throw error instanceof OpenPlatformSessionError ? error : new OpenPlatformSessionError('qr_login', error); }
   let connected: Awaited<ReturnType<typeof createClient>>;
   try {
     connected = await createClient(jar, fetcher);
   } catch (error) {
-    throw new Error(`无法建立飞书开放平台会话：${safeOpenPlatformError(error)}`);
+    throw new OpenPlatformSessionError('console', error);
   }
   if (!connected.owner) {
-    throw new Error('开放平台未返回当前登录账号和企业信息；为避免配置到错误企业，已停止操作');
+    throw new OpenPlatformSessionError('owner');
   }
-  writeOpenPlatformSessionCookies(sessionFile, jar.toJSON());
+  try { writeOpenPlatformSessionCookies(sessionFile, jar.toJSON()); }
+  catch (error) { throw new OpenPlatformSessionError('cache', error); }
   return { ...connected, owner: connected.owner, source: 'qr_login' };
 }
 
@@ -174,7 +195,7 @@ async function createClient(
   fetcher: typeof fetch,
 ): Promise<{ client: OpenPlatformSessionClient; owner: OpenPlatformOwnerIdentity | null }> {
   const page = await jar.fetch(fetcher, `${FEISHU_CONSOLE_ORIGIN}/app`, { method: 'GET' }, {
-    allowedOrigins: FEISHU_CONSOLE_ORIGINS,
+    allowedOrigins: FEISHU_LOGIN_ORIGINS,
   });
   if (!page.response.ok) throw new Error(`开放平台页面 HTTP ${page.response.status}`);
   const html = await page.response.text();
@@ -286,10 +307,15 @@ async function loginWithQr(
     if (status === 5) throw new Error('飞书登录二维码已过期');
     if (pickString(data, ['next_step']) === 'enter_app') {
       const crossLoginUri = pickString(step, ['cross_login_uri']);
-      if (crossLoginUri) {
-        if (!isTrustedFeishuAuthUrl(crossLoginUri)) throw new Error('飞书登录返回了不受信任的跳转地址');
-        await jar.fetch(fetcher, crossLoginUri, { method: 'GET' });
-      }
+      try {
+        if (crossLoginUri) {
+          if (!isTrustedFeishuAuthUrl(crossLoginUri)) throw new Error('飞书登录返回了不受信任的跳转地址');
+          await jar.fetch(fetcher, crossLoginUri, { method: 'GET' }, { allowedOrigins: FEISHU_LOGIN_ORIGINS });
+        }
+        // Complete the redirect URI supplied to QR init before opening the developer console.
+        const landed = await jar.fetch(fetcher, FEISHU_LOGIN_REDIRECT, { method: 'GET' }, { allowedOrigins: FEISHU_LOGIN_ORIGINS });
+        if (!landed.response.ok) throw new Error('飞书登录落地页请求失败');
+      } catch (error) { throw new OpenPlatformSessionError('login_redirect', error); }
       return;
     }
     const remainingAfterPollMs = maxWaitMs - (Date.now() - startedAt);

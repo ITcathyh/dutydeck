@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   connectLarkOpenPlatformSession,
+  OpenPlatformSessionError,
   defaultOpenPlatformSessionFilePath,
   readOpenPlatformSessionCookies,
   safeOpenPlatformError,
@@ -119,6 +120,7 @@ describe('Open Platform session cache', () => {
           headers: { 'set-cookie': 'session=fresh-cookie; Domain=.feishu.cn; Path=/; Secure; HttpOnly' },
         });
       }
+      if (url === 'https://ask.feishu.cn/') return new Response('signed in');
       throw new Error(`unexpected ${url}`);
     }) as typeof fetch;
 
@@ -152,6 +154,7 @@ describe('Open Platform session cache', () => {
       if (url === 'https://open.feishu.cn/app') {
         return new Response('<script>window.csrfToken="csrf-but-no-owner";</script>', { status: 200 });
       }
+      if (url === 'https://ask.feishu.cn/') return new Response('signed in');
       throw new Error(`unexpected ${url}`);
     }) as typeof fetch;
 
@@ -304,4 +307,77 @@ it.each([503, 404])('preserves HTTP %s classification for external-write retry d
     ? new Response(consoleHtml()) : Response.json({ code: 1, msg: 'rejected' }, { status })) as typeof fetch;
   const { client } = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
   await expect(client.postJson('/developers/v1/manifest/upsert_by_template', {})).rejects.toMatchObject({ statusCode: status });
+});
+
+it('completes the QR landing page and real Feishu dual-domain SSO route before reading the console identity', async () => {
+  const file = join(temporaryDirectory(), 'session.json');
+  const requests: string[] = [];
+  let landed = false; let loginReads = 0;
+  const redirect = (location: string) => new Response(null, { status: 302, headers: { location } });
+  const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    const path = url.origin + url.pathname;
+    requests.push(path);
+    const cookies = new Headers(init?.headers).get('cookie') ?? '';
+    if (url.pathname === '/accounts/qrlogin/init') return Response.json({ code: 0, data: { step_info: { token: 'private-qr' } } }, { headers: { 'x-flow-key': 'private-flow' } });
+    if (url.pathname === '/accounts/qrlogin/polling') return Response.json({ code: 0, data: { next_step: 'enter_app', step_info: { status: 3 } } }, { headers: { 'set-cookie': 'session=feishu-session; Domain=.feishu.cn; Path=/; Secure' } });
+    if (path === 'https://ask.feishu.cn/') {
+      expect(cookies).toContain('session=feishu-session');
+      landed = true;
+      return new Response('signed in');
+    }
+    if (path === 'https://open.feishu.cn/app') {
+      expect(landed).toBe(true);
+      return redirect('https://open.larkoffice.com/app');
+    }
+    if (path === 'https://open.larkoffice.com/app') return cookies.includes('dual=office-session')
+      ? new Response(consoleHtml()) : redirect('https://accounts.larkoffice.com/accounts/page/login');
+    if (path === 'https://accounts.larkoffice.com/accounts/page/login') return redirect('https://accounts.feishu.cn/accounts/page/login');
+    if (path === 'https://accounts.feishu.cn/accounts/page/login') return redirect(++loginReads === 1
+      ? 'https://login.feishu.cn/accounts/trap' : 'https://accounts.feishu.cn/accounts/web/dual_domain/save_cookie');
+    if (path === 'https://login.feishu.cn/accounts/trap') return redirect('https://accounts.feishu.cn/accounts/page/login');
+    if (path === 'https://accounts.feishu.cn/accounts/web/dual_domain/save_cookie') return redirect('https://accounts.larkoffice.com/accounts/web/dual_domain/do_sync_cookies');
+    if (path === 'https://accounts.larkoffice.com/accounts/web/dual_domain/do_sync_cookies') {
+      expect(cookies).not.toContain('feishu-session');
+      return new Response(null, { status: 302, headers: { location: 'https://open.larkoffice.com/app', 'set-cookie': 'dual=office-session; Domain=.larkoffice.com; Path=/; Secure; HttpOnly' } });
+    }
+    throw new Error(`Unexpected endpoint: ${path}`);
+  }) as typeof fetch;
+  const connected = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl, forceLogin: true, pollIntervalMs: 0 });
+  expect(connected.source).toBe('qr_login');
+  expect(connected.client.apiOrigin).toBe('https://open.larkoffice.com');
+  expect(connected.owner).toMatchObject({ userName: 'Alice', tenantName: 'Acme' });
+  expect(readOpenPlatformSessionCookies(file)).toEqual(expect.arrayContaining([expect.objectContaining({ name: 'dual', value: 'office-session' })]));
+  expect(requests.filter(path => path === 'https://ask.feishu.cn/')).toHaveLength(1);
+  expect(requests).toContain('https://login.feishu.cn/accounts/trap');
+});
+
+it.each(['https://attacker.example/collect', 'https://open.larkoffice.com.attacker.example/collect'])('blocks untrusted login redirects to %s', async target => {
+  const file = join(temporaryDirectory(), 'session.json');
+  const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/accounts/qrlogin/init')) return Response.json({ code: 0, data: { step_info: { token: 'private-qr' } } }, { headers: { 'x-flow-key': 'private-flow' } });
+    if (url.includes('/accounts/qrlogin/polling')) return Response.json({ code: 0, data: { next_step: 'enter_app', step_info: { status: 3 } } });
+    if (url === 'https://ask.feishu.cn/') return new Response(null, { status: 302, headers: { location: target } });
+    throw new Error('Untrusted endpoint was reached');
+  }) as typeof fetch;
+  await expect(connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl, forceLogin: true, pollIntervalMs: 0 })).rejects.toMatchObject({ phase: 'login_redirect' });
+  expect(fetchImpl).toHaveBeenCalledTimes(3);
+  expect(readOpenPlatformSessionCookies(file)).toBeNull();
+});
+
+it('reports a console-stage failure without copying upstream credentials into its public message', async () => {
+  const file = join(temporaryDirectory(), 'session.json');
+  const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.includes('/accounts/qrlogin/init')) return Response.json({ code: 0, data: { step_info: { token: 'private-qr' } } }, { headers: { 'x-flow-key': 'private-flow' } });
+    if (url.includes('/accounts/qrlogin/polling')) return Response.json({ code: 0, data: { next_step: 'enter_app', step_info: { status: 3 } } });
+    if (url === 'https://ask.feishu.cn/') return new Response('signed in');
+    throw new Error('raw upstream credential canary');
+  }) as typeof fetch;
+  const error = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl, forceLogin: true, pollIntervalMs: 0 }).catch(error => error);
+  expect(error).toBeInstanceOf(OpenPlatformSessionError);
+  expect(error).toMatchObject({ phase: 'console', message: expect.stringContaining('扫码后无法建立') });
+  expect(error.message).not.toContain('canary');
+  expect(readOpenPlatformSessionCookies(file)).toBeNull();
 });
