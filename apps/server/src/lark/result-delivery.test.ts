@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
-import { larkResultKey, sendLarkResult } from './result-delivery.js';
+import { larkResultKey, patchLarkCard, sendLarkResult } from './result-delivery.js';
 import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';
 
 const event = (sequence: number, type: AgentEvent['type'], data: any): AgentEvent => ({
@@ -91,5 +91,33 @@ describe('separate process and complete result messages', () => {
     expect(result?.content).toBe(Array.from({ length: 1600 }, (_, index) => `${index}`).join('\n'));
     expect(runtime.getRecentEvents.mock.calls.map(call => call[1])).toEqual([500, 1000, 2000]);
     expect(JSON.stringify(result)).not.toContain('另一轮');
+  });
+});
+
+describe('patchLarkCard 整卡 PATCH 与回退判定', () => {
+  const cardInput = (elements: Array<Record<string, unknown>>) => ({ state: 'running' as const, taskId: 'task1',
+    readOnly: true, elements, idempotencyKey: 'patch-key' });
+
+  it('整卡覆盖被点击消息并回传 messageId', async () => {
+    const update = vi.fn(async (input: any) => ({ messageId: input.messageId }));
+    const result = await patchLarkCard({ update } as any, { messageId: 'om_clicked' }, cardInput([{ tag: 'markdown', content: '最新状态' }]), log);
+    expect(result).toEqual({ messageId: 'om_clicked' });
+    expect(update).toHaveBeenCalledOnce();
+    expect(update.mock.calls[0]![0]).toMatchObject({ messageId: 'om_clicked' });
+    const body = JSON.stringify(update.mock.calls[0]![0]);
+    expect(body).toContain('最新状态');
+  });
+
+  it('最终结果超出卡片预算时不做 PATCH，交调用方回退发新卡', async () => {
+    const update = vi.fn(async () => ({ messageId: 'om_clicked' }));
+    const elements = [{ tag: 'markdown', element_id: 'final_output', content: 'x'.repeat(30_000) }];
+    await expect(patchLarkCard({ update } as any, { messageId: 'om_clicked' }, cardInput(elements), log)).resolves.toBeNull();
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('平台 PATCH 失败时记录告警并返回 null', async () => {
+    const update = vi.fn(async () => { throw new Error('message too old'); });
+    await expect(patchLarkCard({ update } as any, { messageId: 'om_old' }, cardInput([{ tag: 'markdown', content: '状态' }]), log)).resolves.toBeNull();
+    expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_old' }), expect.any(String));
   });
 });

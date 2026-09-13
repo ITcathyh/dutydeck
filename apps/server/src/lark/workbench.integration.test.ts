@@ -2,13 +2,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { agentConfigSchema, type AgentDriver, type WorkPlan } from '@dutydeck/shared';
+import { agentConfigSchema, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
 import { WorkItemService } from '../work-items.js';
+import type { WorkItemRequest } from '../work-item-interactions.js';
 import { WorkItemInteractions } from '../work-item-interactions.js';
-import { LarkWorkbench, researchWorkPlan } from './workbench.js';
+import { LarkWorkbench, researchWorkPlan, workItemElements, workNoticeFingerprint } from './workbench.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -90,6 +91,48 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
   const settle = async () => { await vi.waitFor(async () => expect((await runtime.listSessions()).filter(session => session.source === 'work_item').every(session => ['completed', 'failed', 'stopped'].includes(session.state))).toBe(true)); };
   return { directory, repos, runtime, work, broker, approval, terminalWrites, tools, capabilities, interactions, workbench, coordinator, app, client, config, cards, prompts, permissionCalls, releases, parent, item, settle };
 }
+
+describe('亮屏指纹与卡片元素（纯函数）', () => {
+  const baseItem = (status: WorkItem['status'], stepStatus: WorkItem['steps'][number]['status']): WorkItem => ({
+    id: 'work_1', parentSessionId: 'ses_1', title: '研究目标', goal: '比较两个方案', revision: 2, status,
+    plan: { title: '研究目标', outputStepId: 'alpha', steps: [
+      { id: 'alpha', title: '独立研究', kind: 'agent', agentId: 'alpha', instruction: '独立完成研究', dependsOn: [] }
+    ] },
+    steps: [{ id: 'alpha', status: stepStatus, attempts: [] }],
+    createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z',
+    delivery: { status: 'not_requested', attempts: 0 }
+  });
+  const question = (text: string): WorkItemRequest[] =>
+    [{ stepId: 'alpha', sessionId: 'ses_child', taskId: 'task_1', requestId: 'req_1', kind: 'question', text }];
+
+  it('N2 回归②：焦点态不变（含 running→completed）指纹一致，错误文案变化也不换指纹', () => {
+    expect(workNoticeFingerprint(baseItem('completed', 'completed'))).toBe(workNoticeFingerprint(baseItem('running', 'running')));
+    expect(workNoticeFingerprint(baseItem('running', 'pending'))).toBe(workNoticeFingerprint(baseItem('running', 'running')));
+    expect(workNoticeFingerprint(baseItem('waiting', 'running'), question('问题 A')))
+      .toBe(workNoticeFingerprint(baseItem('waiting', 'running'), question('问题 A 的文案完全改写但 requestId 不变')));
+  });
+
+  it('N2 回归①的判定基础：waiting / blocked / failed 或新待决请求出现必换指纹', () => {
+    const running = workNoticeFingerprint(baseItem('running', 'running'));
+    expect(workNoticeFingerprint(baseItem('waiting', 'waiting'))).not.toBe(running);
+    expect(workNoticeFingerprint(baseItem('failed', 'failed'))).not.toBe(running);
+    expect(workNoticeFingerprint(baseItem('running', 'running'), question('新问题'))).not.toBe(running);
+    const requests = question('同一问题');
+    const replaced: WorkItemRequest[] = [{ ...requests[0]!, requestId: 'req_2' }];
+    expect(workNoticeFingerprint(baseItem('waiting', 'running'), replaced)).not.toBe(workNoticeFingerprint(baseItem('waiting', 'running'), requests));
+  });
+
+  it('S5：agent 有显示名时展示「名称（agentId）」，名称缺失或与 id 相同则只显示 agentId', () => {
+    const item = baseItem('running', 'running');
+    const named = JSON.stringify(workItemElements(item, [], { agentNames: { alpha: '调研专家' } }));
+    expect(named).toContain('调研专家（alpha）');
+    const fallback = JSON.stringify(workItemElements(item));
+    expect(fallback).toContain(' · alpha');
+    expect(fallback).not.toContain('（alpha）');
+    const sameName = JSON.stringify(workItemElements(item, [], { agentNames: { alpha: 'alpha' } }));
+    expect(sameName).not.toContain('（alpha）');
+  });
+});
 
 describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
   it('starts one goal from Feishu, runs two independent Agents, joins and delivers to the originating topic', async () => {
@@ -270,6 +313,92 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await vi.waitFor(async () => expect((await f.work.get(parent.id, waiting.id, 'ou_alice')).delivery.status).toBe('delivered'));
     expect(f.prompts).toHaveLength(count);
     expect((await f.work.get(parent.id, waiting.id, 'ou_alice')).output?.text).toBeTruthy();
+  });
+
+  // 构造一个含 wait 步骤、首个 tick 后停在 waiting 并已亮屏推卡的目标。
+  async function startWaitingWork(f: Awaited<ReturnType<typeof fixture>>) {
+    await f.coordinator.handle(message('om_goal', '/work research 开始'), f.config);
+    const parentId = (await f.parent()).id;
+    const first = (await f.work.listBySession(parentId, 'ou_alice'))[0]!;
+    await f.work.cancel(parentId, first.id, first.revision, 'ou_alice');
+    const plan: WorkPlan = { title: '需补充资料', outputStepId: 'report', steps: [
+      { id: 'input', title: '选择资料', kind: 'wait', instruction: '请提供资料链接', dependsOn: [] },
+      { id: 'report', title: '汇总', kind: 'agent', agentId: 'alpha', instruction: '综合两个来源', dependsOn: ['input'] }
+    ] };
+    await f.workbench.recordOrigin(parentId, 'waiting', message('om_wait', ''), f.config);
+    const created = await f.work.create(parentId, { goal: '根据资料总结', plan, idempotencyKey: 'waiting' }, 'ou_alice');
+    await f.work.tick();
+    await vi.waitFor(() => expect(f.cards.some(card => JSON.stringify(card.input).includes('/work answer'))).toBe(true));
+    const card = f.cards.find(card => JSON.stringify(card.input).includes('/work answer'))!;
+    return { parentId, workId: created.id, card };
+  }
+
+  const findButton = (card: { input: any }, operation: string) =>
+    card.input.elements.find((element: any) => element.tag === 'button' && element.behaviors?.[0]?.value?.dutydeck_work_item === operation).behaviors[0].value;
+
+  it('N2：wait 步骤出现必推新卡；同一焦点剧集重复 notify 只原位 PATCH 不推新卡', async () => {
+    const f = await fixture();
+    const { workId, card } = await startWaitingWork(f);
+    expect(card.input.elements.some((element: any) => element.tag === 'form' && String(element.name).startsWith('work_answer_'))).toBe(true);
+    const mapping = await f.repos.channelMappings.get(`lark-work-card:${f.config.appId}`, card.messageId);
+    expect(JSON.parse(mapping!.extra!)).toMatchObject({ workId, chatId: 'oc_group', messageId: card.messageId });
+    const answerCards = () => f.cards.filter(candidate => JSON.stringify(candidate.input).includes('/work answer'));
+    expect(answerCards()).toHaveLength(1);
+    // 第二个 tick 焦点态仍为 waiting：指纹相同，只能 PATCH 已发出的卡。
+    await f.work.tick();
+    await vi.waitFor(() => expect(f.client.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: card.messageId })));
+    expect(answerCards()).toHaveLength(1);
+  });
+
+  it('P0-3：表单回调一次性 CAS 推进 waiting 步骤；listener 未合入 form_value 时 fail-closed', async () => {
+    const f = await fixture();
+    const { parentId, workId, card } = await startWaitingWork(f);
+    const form = card.input.elements.find((element: any) => element.tag === 'form' && String(element.name).startsWith('work_answer_'));
+    const value = form.elements.find((element: any) => element.form_action_type === 'submit').behaviors[0].value;
+    const context = { messageId: card.messageId, chatId: 'oc_group' };
+    const missing = await f.coordinator.handleAction({ ...value }, 'ou_alice', context);
+    expect(missing).toMatchObject({ type: 'error' });
+    expect(String(missing.content)).toContain('请填写回答内容');
+    expect((await f.work.listBySession(parentId, 'ou_alice')).find(item => item.id === workId)!.status).toBe('waiting');
+    const result = await f.coordinator.handleAction({ ...value, form_value: { answer: '  https://example.com/data  ' } }, 'ou_alice', context);
+    expect(result).toMatchObject({ type: 'success' });
+    const updated = (await f.work.listBySession(parentId, 'ou_alice')).find(item => item.id === workId)!;
+    expect(updated.steps.find(step => step.id === 'input')?.answer).toBe('https://example.com/data');
+    expect(updated.steps.find(step => step.id === 'input')?.status).not.toBe('waiting');
+    await vi.waitFor(() => expect(f.client.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: card.messageId })));
+  });
+
+  it('P0-3：回调先回 toast 再整卡 PATCH 被点消息，并把新 revision 写回 mapping', async () => {
+    const f = await fixture();
+    const { card } = await startWaitingWork(f);
+    const cancel = findButton(card, 'cancel');
+    const result = await f.coordinator.handleAction({ ...cancel }, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' });
+    expect(result).toMatchObject({ type: 'success', content: '目标状态已更新' });
+    expect(f.client.update).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      const mapping = await f.repos.channelMappings.get(`lark-work-card:${f.config.appId}`, card.messageId);
+      expect(JSON.parse(mapping!.extra!).revision).toBeGreaterThan(cancel.revision);
+    });
+    expect(f.client.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: card.messageId }));
+  });
+
+  it('P0-3：被点消息 PATCH 失败时回退发送新卡，并为新卡登记 mapping', async () => {
+    const f = await fixture();
+    const { parentId, workId, card } = await startWaitingWork(f);
+    f.client.update.mockImplementation(async (input: any) => {
+      if (input.messageId === card.messageId) throw new Error('message too old');
+      return { messageId: input.messageId };
+    });
+    const cancel = findButton(card, 'cancel');
+    const before = f.cards.length;
+    const result = await f.coordinator.handleAction({ ...cancel }, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' });
+    expect(result).toMatchObject({ type: 'success' });
+    await vi.waitFor(async () => {
+      const mappings = (await f.repos.channelMappings.list(`lark-work-card:${f.config.appId}`))
+        .filter(mapping => mapping.sessionId === parentId).map(mapping => ({ externalId: mapping.externalId, extra: JSON.parse(mapping.extra!) }));
+      expect(mappings.some(mapping => mapping.externalId !== card.messageId && mapping.extra.workId === workId)).toBe(true);
+    });
+    expect(f.cards.length).toBeGreaterThan(before);
   });
 
   it('creates a disabled Feishu schedule once and enables/disables it using the existing executor', async () => {

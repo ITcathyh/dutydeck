@@ -14,6 +14,8 @@ import {
   terminalTaskStates
 } from './card-renderer.js';
 import { larkResultKey, sendLarkResult } from './result-delivery.js';
+import { RECOVERY_TRACKING_NOTE } from './recovery-notes.js';
+import { isGroupChat, renderGroupMention } from './card-mentions.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 
@@ -110,7 +112,7 @@ export async function performLarkCardReconcile(input: {
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
           ...(Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length
             ? { elements: persisted.last_successful_elements }
-            : { markdown: 'Dutydeck 已恢复任务状态，正在继续跟踪执行进度。' })
+            : { markdown: RECOVERY_TRACKING_NOTE })
         });
         await cardMappings.save({
           ...mapping,
@@ -197,7 +199,14 @@ export async function performLarkCardReconcile(input: {
     let finalMessageId: string | undefined;
     let finalElements: Array<Record<string, any>> | undefined;
     try {
-      const elements = [...renderLarkResultElements(events),
+      // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
+      // 保证消息不重发，@ 也不会重复。默认关闭时本元素不存在，卡面逐字节不变。
+      const mention = config.groupCardMention === true && isGroupChat(persisted.chat_type) && persisted.sender_open_id
+        ? renderGroupMention(persisted.sender_open_id)
+        : undefined;
+      const elements = [
+        ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : []),
+        ...renderLarkResultElements(events),
         ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : [])];
       const result = await sendLarkResult(service, {
         chatId: persisted.chat_id,

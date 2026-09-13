@@ -36,3 +36,28 @@ export async function sendLarkResult(
     : await service.send({ ...input, chatId: target.chatId });
   return { ...result, elements: fits ? input.elements : undefined };
 }
+
+/**
+ * 以普通卡片 PATCH 整卡覆盖被点击的消息（非流式，延迟再久也不影响原消息可转发）。
+ *
+ * 返回 null 表示调用方应回退为发送新卡，两种情形：
+ * 1. 卡内含最终结果且超出卡片预算——PATCH 不能附带文件，硬覆盖会把长结果截断成假凭证；
+ * 2. 平台更新失败（消息被撤回、超过更新窗口等）。
+ */
+export async function patchLarkCard(
+  service: LarkCardService,
+  target: { messageId: string },
+  input: LarkCardInput & { elements: Array<Record<string, any>> },
+  log: { warn: (...args: any[]) => void }
+): Promise<{ messageId: string } | null> {
+  const output = input.elements.find(element => element.element_id === 'final_output')?.content;
+  const card = buildLarkCard(input);
+  const fits = !output || card.body.elements.some(element => element.element_id === 'final_output' && 'content' in element && element.content === output);
+  if (!fits) return null;
+  try {
+    return await service.update({ ...input, messageId: target.messageId });
+  } catch (error) {
+    log.warn({ error, messageId: target.messageId }, 'PATCH 更新卡片失败，回退为发送新卡');
+    return null;
+  }
+}
