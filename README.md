@@ -239,7 +239,26 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 
 创建开始前可以取消；关闭窗口只关闭视图，再次打开“新增机器人”可继续查看本次进度。请求与应用 ID 会保存，安全重试沿用同一应用；创建或发布结果未知时，先到飞书后台核对，页面不会自动再建一个应用。
 
-已有应用也可以使用 CLI 向导，它驱动的是与 Web 相同的自动配置能力：
+CLI 也支持扫码创建，和 Dashboard 共用创建任务、凭据保存与失败恢复逻辑：
+
+```bash
+dutydeck lark create "Dutydeck 助手"
+dutydeck lark create "CCFlash 助手" --agent ccflash --full-trust --listen
+dutydeck restart  # 让运行中的服务加载新增机器人的监听配置；尚未启动时用 dutydeck start
+```
+
+`--agent` 使用执行 Agent ID，支持已配置的 `ccflash` 等自定义模型配置；`--full-trust` 明确允许无人值守执行。可用 `--workspace /absolute/path` 指定工作目录。省略 Agent 时保存草稿，稍后在 Dashboard 完成设置。创建与续跑需要交互终端扫码；每次新建都会确认飞书账号与企业，成功表示已提交发布，是否通过审核需到开放平台确认。
+
+CLI 会在创建前输出任务 ID 和续跑命令，中断后沿用同一任务，避免重复创建应用：
+
+```bash
+dutydeck lark create --resume <任务-ID>
+dutydeck lark create --resume <任务-ID> --status --json  # 只查询，不扫码、不重试
+```
+
+默认沿用本机 daemon 的数据库；可用 `--database /absolute/path/dutydeck.db` 指定，输出的续跑命令会保留该路径。`--json` 仅用于状态查询，不等待扫码，也不输出二维码或凭据。
+
+已有应用仍使用 CLI 向导，它驱动的是与 Web 相同的自动配置能力：
 
 ```bash
 dutydeck setup --lark-app-id cli_xxx
