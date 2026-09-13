@@ -6,7 +6,7 @@ import { Banner, Button, Field, Input, Spinner } from './primitives';
 
 const pendingKey = 'dutydeck:lark-app-creation';
 type CreationRequest = { requestId: string; name: string };
-const terminal = (job?: LarkAppCreationJob) => Boolean(job && ['completed', 'failed', 'cancelled'].includes(job.status));
+const terminal = (job?: LarkAppCreationJob) => Boolean(job && ['completed', 'pending_review', 'failed', 'cancelled'].includes(job.status));
 
 function readPending(): CreationRequest | undefined {
   try {
@@ -33,7 +33,7 @@ function requestId(): string {
 }
 
 export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
-  onCreated(appId: string, configured: boolean): Promise<void>;
+  onCreated(appId: string, configured: boolean, pendingReview?: boolean): Promise<void>;
   onBusyChange(busy: boolean): void;
 }) {
   const qc = useQueryClient();
@@ -59,7 +59,11 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
     onSuccess: update,
   });
   const finish = useMutation({
-    mutationFn: async (appId: string) => { await onCreated(appId, job.data?.status === 'completed'); remember(); },
+    mutationFn: async (appId: string) => {
+      if (job.data?.status === 'pending_review') await onCreated(appId, true, true);
+      else await onCreated(appId, job.data?.status === 'completed');
+      remember();
+    },
   });
   const state = job.data;
   const busy = start.isPending || action.isPending || finish.isPending || Boolean(request && !terminal(state));
@@ -102,6 +106,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
       {state?.status === 'creating' && <Spinner label="正在创建飞书应用并保存凭据…"/>}
       {state?.status === 'configuring' && <Spinner label="应用已创建，正在配置权限、事件和发布版本…"/>}
       {state?.status === 'completed' && <Banner tone="success">应用已创建并完成配置，正在打开 Agent 设置。</Banner>}
+      {state?.status === 'pending_review' && <Banner tone="warning">应用已完成配置并提交发布，正在等待飞书管理员审核。可以继续选择 Agent，审核通过后生效。</Banner>}
       {state?.status === 'failed' && <Banner tone="danger">{state.error ?? '创建未完成'}{state.appId && <div className="mt-1">应用 {state.appId} 已创建，可继续处理这个应用。</div>}</Banner>}
       {state?.status === 'cancelled' && <p role="status" className="text-caption text-secondary">已取消创建，尚未创建飞书应用。</p>}
       {(job.error || start.error) && !state && <Banner tone="warning">暂时无法获取创建进度。重新连接会继续查询本次创建。<Button variant="ghost" loading={start.isPending} onClick={create}>重新连接</Button></Banner>}
@@ -110,7 +115,8 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
       <div className="flex flex-wrap gap-2">
         {state && ['preparing', 'waiting_for_scan'].includes(state.status) && <Button loading={action.isPending} onClick={() => action.mutate('cancel')}>取消创建</Button>}
         {state?.status === 'failed' && state.retryable && <Button loading={action.isPending} onClick={() => action.mutate('retry')}>重试本次创建</Button>}
-        {(state?.status === 'failed' && state.botSaved || state?.status === 'completed' && finish.isError) && state.appId && <Button loading={finish.isPending} onClick={() => finish.mutate(state.appId!)}>继续配置已创建的机器人</Button>}
+        {((state?.status === 'failed' || state?.status === 'pending_review') && state.botSaved || state?.status === 'completed' && finish.isError) && state.appId && <Button loading={finish.isPending} onClick={() => finish.mutate(state.appId!)}>继续配置已创建的机器人</Button>}
+        {state?.status === 'pending_review' && state.appId && <a href={`https://open.larkoffice.com/app/${encodeURIComponent(state.appId)}`} target="_blank" rel="noreferrer" className="inline-flex min-h-10 items-center gap-1 text-caption font-medium text-action underline">查看审核进度<ExternalLink size={12}/></a>}
         {state?.status === 'failed' && <a href={state.appId ? `https://open.larkoffice.com/app/${encodeURIComponent(state.appId)}` : 'https://open.larkoffice.com/app'} target="_blank" rel="noreferrer" className="inline-flex min-h-10 items-center gap-1 text-caption font-medium text-action underline">到飞书后台核对应用<ExternalLink size={12}/></a>}
         {state?.status === 'failed' && !state.retryable && <Button variant="ghost" onClick={reset}>已核对，开始新的创建</Button>}
         {state?.status === 'cancelled' && <Button onClick={reset}>重新开始</Button>}

@@ -43,7 +43,8 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
     else {
       if (result.job) ui.keyValues([['任务', result.job.id], ['状态', result.job.status], ...(result.job.appId ? [['应用', result.job.appId] as [string, string]] : [])]);
       if (result.error) ui.status('fail', result.error);
-      if (result.job?.status === 'completed') ui.status('done', '应用已创建、配置并提交发布', '是否通过审核请到飞书开放平台确认');
+      if (result.job?.status === 'completed') ui.status('done', '应用已创建、配置并发布，已回读确认');
+      if (result.job?.status === 'pending_review') ui.notice('应用已完成配置并提交发布，正在等待飞书管理员审核。');
       if (result.bot?.defaultAgentId) ui.status('ok', '执行 Agent', result.bot.defaultAgentId);
       if (result.restartRequired) ui.hint('监听配置已保存；启动或重启 Dutydeck 后生效。');
       ui.hint(result.next);
@@ -107,7 +108,8 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
     }
     if (!job) throw new LarkCreateCliError('无法读取创建任务，请使用上面的任务 ID 查询。');
     let bot = job.appId ? await readLarkConfig(context.config, job.appId) : undefined;
-    if (!options.status && job.status === 'completed' && options.agent) {
+    const configured = job.status === 'completed' || job.status === 'pending_review';
+    if (!options.status && configured && options.agent) {
       if (!bot) throw new LarkCreateCliError('应用已创建，但本地机器人配置不存在，请在 Dashboard 核对。');
       const listening = options.listen ?? bot.listening;
       if (bot.defaultAgentId !== options.agent || !bot.fullTrustConfirmed || bot.permissionMode === 'ask' || (workspace !== undefined && bot.workspace !== workspace) || bot.listening !== listening) {
@@ -119,14 +121,15 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
         bot = bots.find(value => value.appId === job!.appId)!;
       }
     }
-    const restartRequired = !options.status && job.status === 'completed' && bot?.listening === true;
+    const restartRequired = !options.status && configured && bot?.listening === true;
     let instruction = next;
     if (job.status === 'completed') instruction = bot?.defaultAgentId
       ? bot.listening ? `监听配置已保存。请执行：dutydeck restart --database ${quote(context.database)}（尚未启动时用 dutydeck start --database ${quote(context.database)}）` : '机器人已配置，监听未启用；可在 Dashboard 启用。'
       : `凭据已保存。可在 Dashboard 选择 Agent，或执行：${resume} --agent <Agent-ID> --full-trust --listen`;
+    else if (job.status === 'pending_review') instruction = `版本已提交审核，审核通过后生效。查看审核进度：https://open.feishu.cn/app/${job.appId}${bot?.defaultAgentId ? '' : '；可在 Dashboard 继续选择执行 Agent。'}${bot?.listening ? ` 监听配置已保存。请执行：dutydeck restart --database ${quote(context.database)}（尚未启动时用 dutydeck start --database ${quote(context.database)}）` : ''}`;
     else if (active(job)) instruction = `任务仍在原进程运行，请在原终端或 Dashboard 查看扫码进度。查询：${resume} --status --json`;
     else if (!job.retryable) instruction = `请到 https://open.feishu.cn/app 核对应用状态${job.botSaved ? '，并在 Dashboard 继续配置已保存的机器人' : ''}；本任务不会自动创建第二个应用。`;
-    return finish({ ok: job.status === 'completed' || (options.status === true && active(job)), job: publicJob(), ...(bot ? { bot: publicLarkConfig(bot) } : {}), ...(restartRequired ? { restartRequired } : {}), next: instruction, ...(job.error ? { error: job.error } : {}) });
+    return finish({ ok: configured || (options.status === true && active(job)), job: publicJob(), ...(bot ? { bot: publicLarkConfig(bot) } : {}), ...(restartRequired ? { restartRequired } : {}), next: instruction, ...(job.error ? { error: job.error } : {}) });
   } catch (error) {
     // Only locally generated validation messages are surfaced; the manager redacts upstream failures.
     return finish({ ok: false, job: publicJob(), next, error: error instanceof LarkCreateCliError || error instanceof LarkAppCreationError || error instanceof InvalidWorkingDirectoryError || error instanceof LarkServiceError ? error.message : '本地存储操作失败，请使用同一任务 ID 查询；不要重新创建应用。' });

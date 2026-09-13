@@ -108,6 +108,24 @@ describe('one-click Lark app creation', () => {
     expect(start).not.toHaveBeenCalled();
   });
 
+  it('shows submitted review without a retry or new-create action and permits Agent setup', async () => {
+    const user = userEvent.setup();
+    sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));
+    const start = vi.spyOn(api, 'createLarkApp');
+    const retry = vi.spyOn(api, 'retryLarkAppCreation');
+    vi.spyOn(api, 'larkAppCreationJob').mockResolvedValue({ ...waiting(), status: 'pending_review', appId: 'cli_existing', botSaved: true });
+    const { onCreated, busy } = renderPanel();
+    await screen.findByText(/正在等待飞书管理员审核/);
+    expect(screen.getByRole('link', { name: '查看审核进度' }).getAttribute('href')).toBe('https://open.larkoffice.com/app/cli_existing');
+    expect(screen.queryByRole('button', { name: '重试本次创建' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '已核对，开始新的创建' })).toBeNull();
+    await waitFor(() => expect(busy).toHaveBeenLastCalledWith(false));
+    await user.click(screen.getByRole('button', { name: '继续配置已创建的机器人' }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('cli_existing', true, true));
+    expect(start).not.toHaveBeenCalled();
+    expect(retry).not.toHaveBeenCalled();
+  });
+
   it('cancels a waiting QR and does not let an older poll restore it', async () => {
     const user = userEvent.setup();
     sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));

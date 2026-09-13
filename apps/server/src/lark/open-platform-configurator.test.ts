@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import draftCatalog from './fixtures/scope-catalog-draft.json';
 import {
   configureLarkOpenPlatformApp,
   LARK_COMMON_TENANT_SCOPES,
@@ -40,6 +41,7 @@ function harness(options: {
   callbacks?: unknown[];
   visibility?: unknown;
   versions?: unknown;
+  published?: unknown;
   created?: unknown;
   failAt?: string;
   secret?: string;
@@ -48,6 +50,7 @@ function harness(options: {
   let eventRead = 0;
   let callbackRead = 0;
   let scopeRead = 0;
+  let versionRead = 0;
   const eventStates = options.events ?? [{ data: { eventMode: 4, appEvents: ['im.message.receive_v1'] } }];
   const callbackStates = options.callbacks ?? [{ data: { callbackMode: 4, callbacks: ['card.action.trigger'] } }];
   const client: LarkOpenPlatformClient = {
@@ -66,6 +69,7 @@ function harness(options: {
       if (/\/callback\/cli_test$/.test(path)) return callbackStates[Math.min(callbackRead++, callbackStates.length - 1)];
       if (path.includes('/visible/online/')) return options.visibility ?? visibility;
       if (path.includes('/app_version/list/')) {
+        if (versionRead++ > 0) return options.published ?? { data: { versions: [{ versionId: 'version-2', versionStatus: 2 }] } };
         return options.versions ?? { data: { versions: [{ appVersion: '1.0.0' }] } };
       }
       if (path.includes('/app_version/create/')) return options.created ?? { data: { versionId: 'version-2' } };
@@ -77,6 +81,35 @@ function harness(options: {
 }
 
 describe('configureLarkOpenPlatformApp', () => {
+  it('publishes with the actual console draft catalog, including five pending application permissions', async () => {
+    const { client, calls } = harness({ catalog: draftCatalog });
+    expect(draftCatalog.data.scopes.filter(scope => scope.scopeType2ScopeStatus['2'] === 1)).toHaveLength(5);
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready' });
+    expect(calls.find(call => call.path.includes('/scope/update/'))?.body?.appScopeIDs).toEqual(
+      LARK_COMMON_TENANT_SCOPES.map(name => draftCatalog.data.scopes.find(scope => scope.name === name)!.id),
+    );
+    expect(calls.some(call => call.path.includes('/publish/commit/'))).toBe(true);
+  });
+
+  it('rejects a numeric user-only scope instead of treating it as unbucketed', async () => {
+    const data = structuredClone(draftCatalog);
+    data.data.scopes[0]!.scopeType = [1];
+    const { client, calls } = harness({ catalog: data });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).rejects.toMatchObject({ code: 'scope_catalog_incomplete' });
+    expect(calls.some(call => call.path.includes('/scope/update/'))).toBe(false);
+  });
+
+  it.each([0, 2, 3, 4, undefined])('rejects tenant status %s even if the user and aggregate status are enabled', async status => {
+    const readback = structuredClone(draftCatalog);
+    Object.assign(readback.data.scopes[0]!, {
+      scopeType: [1, 2], status: 5,
+      scopeType2ScopeStatus: { '1': 5, ...(status === undefined ? {} : { '2': status }) },
+    });
+    const { client, calls } = harness({ catalogs: [draftCatalog, readback] });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).rejects.toMatchObject({ code: 'scope_verification_failed' });
+    expect(calls.some(call => call.path.includes('/app_version/create/'))).toBe(false);
+  });
+
   it('uses the exact minimal common scope set and keeps an already-ready subscription idempotent', async () => {
     expect(LARK_COMMON_TENANT_SCOPES).toEqual([
       'contact:contact.base:readonly',
@@ -243,6 +276,7 @@ describe('configureLarkOpenPlatformApp', () => {
         },
       },
       created: { code: 0, data: { appVersion: { version_id: 'draft-205' } } },
+      published: { data: { versions: [{ versionId: 'draft-205', versionStatus: 2 }] } },
     });
     const result = await configureLarkOpenPlatformApp(client, 'cli_test');
     expect(calls.find(call => call.path.includes('/app_version/create/'))?.body).toMatchObject({
@@ -254,11 +288,25 @@ describe('configureLarkOpenPlatformApp', () => {
         departments: [], members: ['ou_blocked'], groups: [], isAll: 0,
       },
     });
-    expect(calls.at(-1)).toEqual({
+    expect(calls.at(-2)).toEqual({
       path: '/developers/v1/publish/commit/cli_test/draft-205',
       body: { clientId: 'cli_test' },
     });
     expect(result.versionId).toBe('draft-205');
+    expect(calls.at(-1)?.path).toBe('/developers/v1/app_version/list/cli_test');
+  });
+
+  it.each([
+    [0, 'publish_verification_failed'],
+    [1, 'publish_pending_review'],
+    [3, 'publish_verification_failed'],
+    [undefined, 'publish_verification_failed'],
+  ])('does not report success when commit succeeds but the new version has status %s', async (versionStatus, code) => {
+    const { client } = harness({ published: { data: { versions: [
+      { versionId: 'old-published-version', versionStatus: 2 },
+      { versionId: 'version-2', versionStatus },
+    ] } } });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).rejects.toMatchObject({ code });
   });
 
   it('never exposes a secret through either success results or transport errors', async () => {

@@ -20,12 +20,14 @@ await runtime.initialize([agent]);
 await saveLarkConfig(repositories.config, repositories.agents, { appId: 'cli_previous', appSecret: 'previous-secret-canary', name: '已有机器人', listening: false });
 const previous = await readLarkConfig(repositories.config, 'cli_previous');
 const secret = 'created-secret-canary-never-in-browser';
+const pendingReview = process.env.DUTYDECK_E2E_PENDING_REVIEW === '1';
 const calls: Array<{ path: string; body?: unknown }> = [];
 let releaseScan!: () => void;
 let scopesEnabled = false;
 let eventEnabled = false;
 let callbackEnabled = false;
 let callbackMode = 0;
+let published = false;
 const jobs = new LarkAppCreationJobManager({
   config: repositories.config,
   agents: repositories.agents,
@@ -49,7 +51,7 @@ const jobs = new LarkAppCreationJobManager({
           calls.push({ path, body });
           if (path.endsWith('/manifest/upsert_by_template')) return { code: 0, data: { ClientID: 'cli_created' } };
           if (path === '/developers/v1/secret/cli_created') return { code: 0, data: { secret } };
-          if (path.includes('/scope/all/')) return { code: 0, data: { appScopeList: LARK_COMMON_TENANT_SCOPES.map((scopeName, i) => ({ scopeId: `scope-${i}`, scopeName, status: scopesEnabled ? 5 : 0 })) } };
+          if (path.includes('/scope/all/')) return { code: 0, data: { appScopeList: LARK_COMMON_TENANT_SCOPES.map((scopeName, i) => ({ scopeId: `scope-${i}`, scopeName, status: published ? 5 : scopesEnabled ? 1 : 0 })) } };
           if (path.includes('/scope/update/')) { scopesEnabled = true; return { code: 0 }; }
           if (path.includes('/robot/switch/') || path.includes('/event/switch/')) return { code: 0 };
           if (path.includes('/event/update/')) { eventEnabled = true; return { code: 0 }; }
@@ -57,12 +59,12 @@ const jobs = new LarkAppCreationJobManager({
           if (path.includes('/callback/switch/')) { callbackMode = 4; return { code: 0 }; }
           if (path.includes('/callback/update/')) { callbackEnabled = true; return { code: 0 }; }
           if (path === '/developers/v1/callback/cli_created') return { code: 0, data: { callbackMode, callbacks: callbackEnabled ? ['card.action.trigger'] : [] } };
-          if (path.includes('/app_version/list/')) return { code: 0, data: { versions: [] } };
+          if (path.includes('/app_version/list/')) return { code: 0, data: { versions: published ? [{ versionId: 'first-version', appVersion: '0.0.1', versionStatus: pendingReview ? 1 : 2 }] : [] } };
           if (path.includes('/app_version/create/')) {
             assert.deepEqual((body as any).visibleSuggest.members, ['creator-user']);
             return { code: 0, data: { versionId: 'first-version' } };
           }
-          if (path.includes('/publish/commit/')) return { code: 0 };
+          if (path.includes('/publish/commit/')) { published = true; return { code: 0 }; }
           throw new Error(`Unexpected synthetic endpoint: ${path}`);
         },
       },
@@ -109,6 +111,12 @@ try {
   await expect(dialog.getByAltText('创建机器人：飞书登录二维码')).toBeVisible();
   assert.equal(calls.filter(call => call.path.includes('/manifest/')).length, 0);
   releaseScan();
+  if (pendingReview) {
+    await expect(dialog.getByText(/正在等待飞书管理员审核/)).toBeVisible({ timeout: 15_000 });
+    await expect(dialog.getByRole('link', { name: '查看审核进度' })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: '重试本次创建' })).toHaveCount(0);
+    await dialog.getByRole('button', { name: '继续配置已创建的机器人' }).click();
+  }
   await expect(dialog.getByRole('heading', { name: '更新飞书 Bot：扫码创建的助手' })).toBeVisible({ timeout: 15_000 });
   await expect(dialog.getByText('默认 Agent', { exact: true })).toBeVisible();
   await expect(dialog.getByRole('button', { name: 'CCFlash (Claude Code / CPA)', exact: true })).toBeVisible();

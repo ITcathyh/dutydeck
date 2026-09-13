@@ -1,0 +1,205 @@
+{
+  "code": 0,
+  "data": {
+    "scopes": [
+      {
+        "id": "100032",
+        "name": "contact:contact.base:readonly",
+        "scopeType": [
+          1,
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 1
+        },
+        "status": 1
+      },
+      {
+        "id": "14",
+        "name": "contact:user.base:readonly",
+        "scopeType": [
+          1,
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 1
+        },
+        "status": 1
+      },
+      {
+        "id": "1",
+        "name": "contact:user.email:readonly",
+        "scopeType": [
+          1,
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 1
+        },
+        "status": 1
+      },
+      {
+        "id": "20012",
+        "name": "im:message.group_msg",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 1
+        },
+        "status": 1
+      },
+      {
+        "id": "1015383",
+        "name": "im:message.group_msg.include_bot:read",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 1
+        },
+        "status": 1
+      },
+      {
+        "id": "8",
+        "name": "contact:user.id:readonly",
+        "scopeType": [
+          1,
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "1014185",
+        "name": "im:chat.members:read",
+        "scopeType": [
+          2,
+          1
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "1014181",
+        "name": "im:chat:read",
+        "scopeType": [
+          2,
+          1
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "20001",
+        "name": "im:message",
+        "scopeType": [
+          2,
+          1
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "1015186",
+        "name": "im:message.group_at_msg.include_bot:readonly",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "3001",
+        "name": "im:message.group_at_msg:readonly",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "3000",
+        "name": "im:message.p2p_msg:readonly",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "1014175",
+        "name": "im:message.reactions:write_only",
+        "scopeType": [
+          2,
+          1
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "20008",
+        "name": "im:message:readonly",
+        "scopeType": [
+          1,
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "20004",
+        "name": "im:message:update",
+        "scopeType": [
+          1,
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "id": "20009",
+        "name": "im:resource",
+        "scopeType": [
+          2,
+          1
+        ],
+        "scopeType2ScopeStatus": {
+          "1": 0,
+          "2": 5
+        },
+        "status": 5
+      }
+    ]
+  }
+}

@@ -3,13 +3,13 @@ import type { AgentRepository, ConfigRepository } from '@dutydeck/shared';
 import QRCode from 'qrcode';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
-import { configureLarkOpenPlatformApp, isValidLarkAppId } from './open-platform-configurator.js';
+import { configureLarkOpenPlatformApp, isValidLarkAppId, LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
 import { connectLarkOpenPlatformSession, OpenPlatformRequestError, OpenPlatformSessionError } from './open-platform-session.js';
 
 export interface LarkAppCreationJob {
   id: string;
   name: string;
-  status: 'preparing' | 'waiting_for_scan' | 'creating' | 'configuring' | 'completed' | 'failed' | 'cancelled';
+  status: 'preparing' | 'waiting_for_scan' | 'creating' | 'configuring' | 'completed' | 'pending_review' | 'failed' | 'cancelled';
   appId?: string;
   botSaved?: boolean;
   qrDataUrl?: string;
@@ -261,7 +261,19 @@ export class LarkAppCreationJobManager {
     } catch (error) {
       // Never copy upstream errors: they may contain cookies, secrets or private IDs.
       if (error instanceof OpenPlatformSessionError) message = error.message;
-      try { await this.update(id, { status: 'failed', retryable, error: message }); }
+      if (error instanceof LarkOpenPlatformConfigurationError) {
+        message = `应用草稿已保存：${error.message}（${error.code}）。请继续处理该应用`;
+        // Permission/event/visibility failures precede version creation, so the known app is safe to resume.
+        retryable = [
+          'scope_catalog_read_failed', 'scope_catalog_incomplete', 'scope_update_failed',
+          'scope_verification_read_failed', 'scope_verification_failed', 'robot_enable_failed',
+          'event_mode_failed', 'event_read_failed', 'event_update_failed', 'event_verification_failed',
+          'callback_read_failed', 'callback_mode_failed', 'callback_update_failed', 'callback_verification_failed',
+          'version_list_failed', 'version_list_unreadable', 'visibility_read_failed', 'visibility_unreadable',
+        ].includes(error.code);
+      }
+      const pendingReview = error instanceof LarkOpenPlatformConfigurationError && error.code === 'publish_pending_review';
+      try { await this.update(id, { status: pendingReview ? 'pending_review' : 'failed', retryable, error: pendingReview ? undefined : message }); }
       catch { /* The persisted boundary remains fail-closed if storage is unavailable. */ }
     }
   }
