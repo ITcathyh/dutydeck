@@ -7,7 +7,7 @@
  *   2. GET /api/agents —— 断言 ACP agent 与 pty-cli agent 都被发现
  *   3. 真实 Chromium 打开首页，验证创建任务 / 绑定 Bot 主入口，
  *      并通过页面创建、执行一个 mock Agent 任务
- *   4. 创建 pty-cli 会话（claude-code）→ 发消息 → SSE 收事件流
+ *   4. 创建 pty-cli 会话（mock ccflash / real claude-code）→ 发消息 → SSE 收事件流
  *      断言：收到 thinking/text、最终 completed、session state 变 completed
  *   5. resume 后仍能继续对话：POST /resume → 再发一轮 → 用 SSE 游标确认是新事件
  *      而不是历史回放，避免单测通过但真实环境不可用
@@ -374,10 +374,9 @@ async function main() {
 
   if (!REAL) {
     const mockPath = writeMockCli(binDir, claudeDataDir);
-    // 覆盖内置 claude-code agent 的 command 指向假 CLI。
-    // id 必须仍是 'claude-code'：pty 驱动工厂按 agent.id 找适配器，未知 id 会抛错。
+    // 原 Claude 和自定义 ccflash 共用假 CLI，验证 adapterId 与 agent id 分离。
     // 给 version 是为了跳过 cliVersion() 的三次 spawnSync 探测。
-    serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify([{
+    const mockAgent = {
       id: 'claude-code',
       name: 'Mock Claude',
       command: mockPath,
@@ -391,6 +390,10 @@ async function main() {
       capabilities: { pause: false, resume: true },
       builtin: false,
       version: 'mock-1.0'
+    };
+    serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify([mockAgent, {
+      ...mockAgent, id: 'ccflash', name: 'Mock CCFlash', adapterId: 'claude-code',
+      args: ['--wrapper-profile', 'flash'], model: 'gemini-custom-flash', version: undefined
     }]);
     debug('假 CLI', mockPath);
   } else {
@@ -474,6 +477,10 @@ async function main() {
   if (!REAL) {
     assert(claudeCode.name === 'Mock Claude' && claudeCode.version === 'mock-1.0',
       'mock Agent 的公开名称与版本已生效（未使用真实 claude）');
+    assert(ptyAgents.some(agent => agent.id === 'ccflash' && agent.name === 'Mock CCFlash'), '自定义 CCFlash 与原 Claude 同时可选');
+    const models = await request('GET', '/api/agents/ccflash/models');
+    assert(models.status === 200 && models.json.defaultModel === 'gemini-custom-flash' && models.json.models.length === 0,
+      '自定义 CLI 返回配置默认模型，不尝试 ACP 探测');
   }
   const leakedAgentFields = ['command', 'args', 'cwd', 'env', 'systemPrompt', 'reasoningEffort', 'timeout', 'capabilities', 'builtin']
     .filter(field => Object.hasOwn(claudeCode, field));
@@ -691,7 +698,7 @@ async function main() {
 
   // ── 4. pty-cli 会话 + SSE ────────────────────────────────────────────────
   step('创建 pty-cli 任务运行并通过 SSE 收事件流');
-  const created = await request('POST', '/api/sessions', { agentId: 'claude-code', cwd: workspace });
+  const created = await request('POST', '/api/sessions', { agentId: REAL ? 'claude-code' : 'ccflash', cwd: workspace });
   assert(created.status === 200, `POST /api/sessions 返回 200（实际 ${created.status}）`);
   const session = created.json;
   assert(typeof session?.id === 'string' && session.id.startsWith('ses_'), `任务运行已创建：${session?.id}`);

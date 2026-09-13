@@ -54,7 +54,7 @@ export async function validateLarkLaunchOptions(options: LarkLaunchOptions, agen
   if (!result.model && !result.reasoningEffort) return result;
 
   if (agent.protocol === 'pty-cli') {
-    const adapter = getCliAdapter(agent.id);
+    const adapter = getCliAdapter(agent.adapterId ?? agent.id);
     const context = { sessionId: '00000000-0000-4000-8000-000000000000', cwd: result.cwd ?? agent.cwd, permissionMode: agent.permissionMode };
     for (const [field, label] of [['model', '模型'], ['reasoningEffort', '推理强度']] as const) {
       if (!result[field]) continue;

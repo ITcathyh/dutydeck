@@ -28,6 +28,8 @@ export const agentConfigSchema = z.object({
   command: z.string().min(1),
   args: z.array(z.string()).default([]),
   protocol: z.enum(protocols).default('auto'),
+  /** CLI behavior to reuse for a custom pty-cli command; defaults to id. */
+  adapterId: z.string().min(1).optional(),
   model: z.string().optional(),
   reasoningEffort: z.string().optional(),
   version: z.string().optional(),

@@ -60,6 +60,15 @@ describe('/new first-turn options', () => {
     await expect(validateLarkLaunchOptions({ model: 'x' }, { ...agent, protocol: 'jsonl' })).rejects.toThrow('协议');
   });
 
+  it('validates custom Claude commands through their declared adapter', async () => {
+    const custom = { ...agent, id: 'ccflash', name: 'CCFlash', adapterId: 'claude-code' };
+    await expect(validateLarkLaunchOptions({ model: 'gateway/custom[1m]' }, custom)).resolves.toEqual({ model: 'gateway/custom[1m]' });
+    await expect(validateLarkLaunchOptions({ reasoningEffort: 'high' }, custom)).rejects.toThrow('推理强度');
+    await expect(validateLarkLaunchOptions({ model: '--other-flag' }, custom)).rejects.toThrow('模型');
+    await expect(validateLarkLaunchOptions({ model: 'custom' }, { ...custom, adapterId: 'unknown' })).rejects.toThrow('模型');
+    await expect(validateLarkLaunchOptions({ model: 'custom' }, { ...custom, adapterId: undefined })).rejects.toThrow('模型');
+  });
+
   it('validates ACP choices against provider metadata for the effective model', async () => {
     const acpAgent = { ...agent, protocol: 'acp' as const, model: 'configured-model' };
     vi.mocked(discoverAgentModels).mockResolvedValue({ models: [{ id: 'selected-model', name: 'Selected' }], reasoningEfforts: [{ id: 'high', name: 'High' }], source: 'acp' });

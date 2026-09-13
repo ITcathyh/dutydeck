@@ -13,11 +13,12 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
+import { createClaudeCodeAdapter } from '@dutydeck/cli-adapters';
 import { PtyBackend, TmuxBackend, isTmuxAvailable } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 import { buildSessionMarker } from './session-id/index.js';
@@ -236,6 +237,108 @@ describe('PtyCliDriver session marker injection', () => {
 // ─── resume session-id resolution ──────────────────────────────────────────
 
 describe('PtyCliDriver resume session id resolution', () => {
+
+  it('keeps wrapper arguments before Claude arguments on start and repeated resume', async () => {
+    const cwd = makeTempDir('custom-claude-argv');
+    const argvDump = join(cwd, 'argv.jsonl');
+    const wrapper = join(cwd, 'wrapper.mjs');
+    writeFileSync(wrapper, `
+      import { appendFileSync } from 'node:fs';
+      appendFileSync(${JSON.stringify(argvDump)}, JSON.stringify(process.argv.slice(2)) + '\\n');
+      process.stdout.write('Claude Code v2.1.267 (mock)\\n❯ \\n');
+      setInterval(() => {}, 1000);
+    `, 'utf8');
+    const adapter = createClaudeCodeAdapter();
+    const model = 'gateway/custom[1m]';
+    const args = [wrapper, '--wrapper-profile', 'flash profile'];
+    const driver = new PtyCliDriver({
+      agent: agentConfig({ id: 'ccflash', adapterId: 'claude-code', cwd, args, model, env: { CLAUDE_CONFIG_DIR: cwd } }),
+      adapter, backend: new PtyBackend(), onEvent: () => {}, onExit: () => {}, sessionId: SESSION_ID,
+    });
+    const launches = () => readFileSync(argvDump, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
+    try {
+      await driver.start();
+      await waitForAssert(() => expect(launches()).toHaveLength(1));
+      expect(launches()[0]).toEqual(['--wrapper-profile', 'flash profile', ...adapter.buildArgs({ sessionId: SESSION_ID, model, permissionMode: 'full-trust' })]);
+      for (let count = 2; count <= 3; count++) {
+        await driver.resume();
+        await waitForAssert(() => expect(launches()).toHaveLength(count));
+        expect(launches()[count - 1]).toEqual(['--wrapper-profile', 'flash profile', ...adapter.buildArgs({ sessionId: SESSION_ID, resume: true, resumeSessionId: SESSION_ID, model, permissionMode: 'full-trust' })]);
+      }
+      expect(args).toEqual([wrapper, '--wrapper-profile', 'flash profile']);
+    } finally { await driver.stop(); }
+  });
+
+  it.each(['fresh', 'fragment'] as const)('preserves wrapper arguments when resume falls back to %s', async fallback => {
+    const cwd = makeTempDir('custom-fallback-argv');
+    const argvDump = join(cwd, 'argv.json');
+    const wrapper = join(cwd, 'wrapper.mjs');
+    writeFileSync(wrapper, `
+      import { writeFileSync } from 'node:fs';
+      writeFileSync(${JSON.stringify(argvDump)}, JSON.stringify(process.argv.slice(2)));
+      setInterval(() => {}, 1000);
+    `, 'utf8');
+    const adapter: CliAdapter = {
+      id: 'wrapper-fallback', capabilities: { resume: true },
+      buildArgs: () => fallback === 'fresh' ? ['--fresh'] : [],
+      buildResumeCommand: () => fallback === 'fresh' ? null : ['--resume', 'fixture-session'],
+      writeInput: () => {},
+    };
+    const driver = new PtyCliDriver({
+      agent: agentConfig({ cwd, args: [wrapper, '--wrapper-profile', 'flash'] }),
+      adapter, backend: new PtyBackend(), onEvent: () => {}, onExit: () => {}, sessionId: SESSION_ID,
+    });
+    try {
+      await driver.resume();
+      const argv = await waitForAssert(() => JSON.parse(readFileSync(argvDump, 'utf8')) as string[]);
+      expect(argv).toEqual(['--wrapper-profile', 'flash', ...(fallback === 'fresh' ? ['--fresh'] : ['--resume', 'fixture-session'])]);
+    } finally { await driver.stop(); }
+  });
+
+  it.each([false, true])('loads merged private settings on start and repeated resume (fresh fallback: %s)', async fresh => {
+    const cwd = makeTempDir('merged-settings');
+    const dump = join(cwd, 'launches.jsonl');
+    const wrapper = join(cwd, 'wrapper.mjs');
+    const source = join(cwd, 'gateway.json');
+    writeFileSync(wrapper, `
+      import { appendFileSync, readFileSync } from 'node:fs';
+      const args = process.argv.slice(2);
+      const path = args[args.indexOf('--settings') + 1];
+      appendFileSync(${JSON.stringify(dump)}, JSON.stringify({ args, settings: JSON.parse(readFileSync(path, 'utf8')) }) + '\\n');
+      setInterval(() => {}, 1000);
+    `);
+    const adapter = createClaudeCodeAdapter();
+    if (fresh) adapter.buildResumeCommand = () => null;
+    const driver = new PtyCliDriver({
+      agent: agentConfig({ cwd, args: [wrapper, '--settings', 'gateway.json'], env: { CLAUDE_CONFIG_DIR: cwd } }),
+      adapter, backend: new PtyBackend(), onEvent: () => {}, onExit: () => {}, sessionId: SESSION_ID,
+    });
+    const launches = () => readFileSync(dump, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    let privateDirectory: string | undefined;
+    try {
+      for (let launch = 1; launch <= 3; launch++) {
+        const original = JSON.stringify({ env: { TOKEN: `fixture-secret-${launch}` }, permissions: { allow: ['Read'] } });
+        writeFileSync(source, original);
+        if (launch === 1) await driver.start();
+        else await driver.resume();
+        await waitForAssert(() => expect(launches()).toHaveLength(launch));
+        const actual = launches()[launch - 1];
+        expect(actual.settings).toEqual({ env: { TOKEN: `fixture-secret-${launch}` }, skipDangerousModePermissionPrompt: true,
+          permissions: { allow: ['Read'], defaultMode: 'bypassPermissions' } });
+        expect(actual.args.join(' ')).not.toContain('fixture-secret');
+        expect(actual.args.filter((arg: string) => arg === '--settings')).toHaveLength(1);
+        const path = actual.args.at(-1);
+        privateDirectory = dirname(path);
+        expect(statSync(privateDirectory).mode & 0o777).toBe(0o700);
+        expect(statSync(path).mode & 0o777).toBe(0o600);
+        expect(readFileSync(source, 'utf8')).toBe(original);
+      }
+      writeFileSync(source, '{"TOKEN":"fixture-secret",bad}');
+      await expect(driver.resume()).rejects.toThrow('Invalid Claude --settings');
+      expect(launches()).toHaveLength(3);
+    } finally { await driver.stop(); }
+    await waitForAssert(() => expect(existsSync(privateDirectory!)).toBe(false));
+  });
   let fixturePath: string;
 
   beforeEach(() => {
@@ -792,6 +895,43 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     sessions.push(name);
     return name;
   }
+
+  it('preserves merged settings on daemon detach and cleans them after adopted-session stop', async () => {
+    const cwd = makeTempDir('settings-detach');
+    const dump = join(cwd, 'settings-path');
+    const wrapper = join(cwd, 'wrapper.mjs');
+    writeFileSync(wrapper, `
+      import { writeFileSync } from 'node:fs';
+      const args = process.argv.slice(2);
+      writeFileSync(${JSON.stringify(dump)}, args[args.indexOf('--settings') + 1]);
+      setInterval(() => {}, 1000);
+    `);
+    const name = tmuxName();
+    const agent = agentConfig({ cwd, args: [wrapper, '--settings={"env":{"TOKEN":"fixture-secret"}}'], env: { CLAUDE_CONFIG_DIR: cwd } });
+    const create = () => new PtyCliDriver({ agent, adapter: createClaudeCodeAdapter(), backend: new TmuxBackend(name),
+      onEvent: () => {}, onExit: () => {}, sessionId: name });
+    const original = create();
+    let adopted: PtyCliDriver | undefined;
+    let path: string | undefined;
+    try {
+      await original.start();
+      path = await waitForAssert(() => readFileSync(dump, 'utf8'));
+      original.prepareForDaemonShutdown();
+      await original.stop();
+      // A late exit notification from the detached observer must not remove
+      // settings while the persistent CLI pane is still alive.
+      (original as unknown as { handleExit(code: number): void }).handleExit(0);
+      expect(existsSync(path)).toBe(true);
+      adopted = create();
+      await adopted.start();
+      expect(existsSync(path)).toBe(true);
+      expect(readFileSync(dump, 'utf8')).toBe(path);
+    } finally {
+      if (adopted) await adopted.stop();
+      else await original.stop({ discardSession: true });
+    }
+    await waitForAssert(() => expect(existsSync(dirname(path!))).toBe(false));
+  });
 
   /** A shell as the fake CLI: `resume()` must reattach to the LIVE pane
    *  rather than respawn, so the adapter's resume command must never run. */

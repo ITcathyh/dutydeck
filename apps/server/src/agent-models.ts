@@ -113,12 +113,17 @@ async function discoverThroughCli(agentId: string): Promise<AgentModel[]> {
 
 const cache = new Map<string, { expiresAt: number; value: AgentModelsResult }>();
 export async function discoverAgentModels(agent: AgentConfig, model?: string, forceRefresh = false): Promise<AgentModelsResult> {
+  // Interactive wrappers may have startup side effects and do not speak ACP.
+  // Their configured default is enough to launch; do not start them to probe it.
+  if (agent.protocol === 'pty-cli' && agent.adapterId) {
+    return { models: [], ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'agent' };
+  }
   const cacheKey = `${agent.id}\u0000${agent.command}\u0000${agent.args.join('\u0000')}\u0000${agent.version ?? ''}\u0000${model ?? ''}`;
   const cached = cache.get(cacheKey);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) return cached.value;
 
   let value: AgentModelsResult | undefined;
-  try { value = await discoverThroughAcp(agent, model); }
+  try { if (agent.protocol === 'acp' || agent.protocol === 'auto') value = await discoverThroughAcp(agent, model); }
   catch { /* The provider CLI may still expose models without starting an ACP session. */ }
   if (!value?.models.length) {
     try {

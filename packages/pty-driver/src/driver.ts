@@ -15,6 +15,7 @@ import { IdleDetector } from './idle-detector.js';
 import { createTranscriptTailer, type TranscriptEventSource } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
 import { randomUUID } from 'node:crypto';
+import { ClaudeSettings } from './claude-settings.js';
 
 export interface PtyCliDriverOptions {
   agent: AgentConfig;
@@ -59,6 +60,7 @@ export class PtyCliDriver implements AgentDriver {
 
   private backend: SessionBackend;
   private readonly cwd: string;
+  private readonly claudeSettings: ClaudeSettings;
 
   private started = false;
   private stopped = false;
@@ -132,6 +134,7 @@ export class PtyCliDriver implements AgentDriver {
     this.stoppedCallback = opts.onStopped;
     this.backend = opts.backend ?? new PtyBackend();
     this.cwd = opts.agent.cwd ?? process.cwd();
+    this.claudeSettings = new ClaudeSettings(this.adapter.id, this.sessionId);
     this.cliSessionId = opts.cliSessionId;
   }
 
@@ -162,14 +165,14 @@ export class PtyCliDriver implements AgentDriver {
       }
     }
 
-    this.started = true;
-    this.lastArgs = this.adapter.buildArgs({
+    this.lastArgs = this.claudeSettings.args(this.agent.args, this.adapter.buildArgs({
       sessionId: this.sessionId,
       cwd: this.agent.cwd,
       model: this.agent.model,
       reasoningEffort: this.agent.reasoningEffort,
       permissionMode: this.agent.permissionMode,
-    });
+    }), this.cwd);
+    this.started = true;
     this.backend.spawn(this.agent.command, this.lastArgs, {
       cwd: this.cwd,
       cols: DEFAULT_COLS,
@@ -581,6 +584,7 @@ export class PtyCliDriver implements AgentDriver {
     } finally {
       this.stoppedCallback?.();
     }
+    if (!preservePersistentSession && !this.recoveryRejected && await this.isStopped()) this.claudeSettings.cleanup();
     // onExit 由 backend 的 exit 事件驱动（kill 会触发）；若后端已自行退出，
     // handleExit 早已回调过，exitReported 保证恰好一次。
   }
@@ -765,6 +769,9 @@ export class PtyCliDriver implements AgentDriver {
     this.exitReported = true;
     this.stopped = true;
     this.teardownWiring();
+    if (!(this.backend instanceof TmuxBackend) || TmuxBackend.probeSession(this.backend.sessionName) === 'missing') {
+      this.claudeSettings.cleanup();
+    }
     // 若本轮仍在进行，driver 退出 = 本轮失败，reject send() 的等待者。
     if (this.turnActive) {
       this.turnActive = false;
@@ -890,6 +897,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private respawn(args: string[]): void {
+    const launchArgs = this.claudeSettings.args(this.agent.args, args, this.cwd);
     this.teardownWiring();
     this.inputPrepared = false;
     // 会话名必须在 kill 之前取：kill 之后旧后端就不该再被问了。
@@ -907,8 +915,8 @@ export class PtyCliDriver implements AgentDriver {
     const ownerId = previousBackend instanceof TmuxBackend ? previousBackend.ownerId : undefined;
     const backend = tmuxName !== undefined ? new TmuxBackend(tmuxName, { ownerId }) : new PtyBackend();
     this.backend = backend;
-    this.lastArgs = args;
-    backend.spawn(this.agent.command, args, {
+    this.lastArgs = launchArgs;
+    backend.spawn(this.agent.command, this.lastArgs, {
       cwd: this.cwd,
       cols: DEFAULT_COLS,
       rows: DEFAULT_ROWS,
