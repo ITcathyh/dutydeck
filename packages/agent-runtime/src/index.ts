@@ -938,11 +938,25 @@ export class DutydeckRuntime {
     await Promise.all(queue.map(task => this.saveTask(task, 'cancelled')));
   }
 
-  async interrupt(id: string, expectedTaskId?: string) {
+  /**
+   * 中断当前轮次。
+   *
+   * actor 为操作者的通道身份字符串（飞书侧传 open_id），仅用于落库归属展示：
+   * 记在活动任务上，随该任务的终态 saveTask 一并持久化到 TaskRecord.interruptedByActor。
+   * 它不是任务发起人（executionContext.actorId），不得混用；未传时行为与旧调用完全一致。
+   * 驱动中断与轮次终态落库之间存在竞态窗口，故拿到活动任务后先把操作者写库一次，
+   * 避免终态写库前进程退出导致归属丢失。
+   */
+  async interrupt(id: string, expectedTaskId?: string, actor?: string) {
     const { session, driver } = await this.active(id);
     if (!driver) throw new RuntimeError('SESSION_DISCONNECTED', 'Session is disconnected', 409);
     const task = expectedTaskId ? this.activeTasks.get(id) : undefined;
     if (expectedTaskId && (!task || task.id !== expectedTaskId)) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);
+    const interruptedTask = task ?? this.activeTasks.get(id);
+    if (actor?.trim() && interruptedTask) {
+      interruptedTask.interruptedByActor = actor.trim();
+      try { await this.repos.tasks.save({ ...interruptedTask, updatedAt: now() }); } catch { /* 终态写库会再落一次，这里失败不阻断中断 */ }
+    }
     if (this.activeTurns.has(id)) this.interruptedTurns.add(id);
     await this.saveState(session, 'interrupting');
     if (expectedTaskId && this.activeTasks.get(id) !== task) throw new RuntimeError('TASK_NOT_ACTIVE', 'The requested task is no longer active', 409);

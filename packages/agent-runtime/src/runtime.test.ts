@@ -450,6 +450,47 @@ describe('runtime lifecycle acceptance', () => {
   });
 
   it('interrupt cancels only the current turn and retains the session', async () => { const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' }); await h.runtime.interrupt(s.id); expect(h.driver.interrupt).toHaveBeenCalledOnce(); expect((await h.runtime.getSession(s.id))?.state).toBe('interrupted'); h.repos.close(); });
+
+  it('persists the interrupt actor on the active task before and at the terminal write', async () => {
+    const gate = deferred();
+    const h = harness();
+    h.driver.send = vi.fn(async () => { await gate.promise; });
+    // 包一层真实 SQLite 仓储：验证 runtime 落库载荷带上操作者（存储层列迁移在集成清单中另行接线）。
+    const persist = h.repos.tasks.save.bind(h.repos.tasks);
+    const saveTask = vi.fn(async (task: Parameters<typeof persist>[0]) => persist(task));
+    h.repos.tasks.save = saveTask;
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    const sending = h.runtime.send(s.id, 'work', undefined, undefined, 'ou_owner');
+    await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(s.id)).toBeTruthy());
+    const taskId = h.runtime.getActiveTaskContext(s.id)!.taskId;
+    await h.runtime.interrupt(s.id, taskId, ' ou_operator ');
+    // 终态落库前先写一次：即使进程在轮次收尾前退出，重启后仍能看到中断操作者。
+    expect(saveTask).toHaveBeenCalledWith(expect.objectContaining({ id: taskId, interruptedByActor: 'ou_operator' }));
+    gate.resolve();
+    await sending;
+    const terminal = saveTask.mock.calls.map(call => call[0]).reverse().find(task => task.id === taskId && task.status === 'interrupted');
+    expect(terminal).toMatchObject({ id: taskId, status: 'interrupted', interruptedByActor: 'ou_operator' });
+    // 中断操作者不是任务发起人：executionContext.actorId 仍保留原发起人。
+    expect(terminal?.executionContext?.actorId).toBe('ou_owner');
+    h.repos.close();
+  });
+
+  it('leaves interruptedByActor unset when interrupt is called without an actor', async () => {
+    const gate = deferred();
+    const h = harness();
+    h.driver.send = vi.fn(async () => { await gate.promise; });
+    await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
+    const sending = h.runtime.send(s.id, 'work');
+    await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(s.id)).toBeTruthy());
+    const taskId = h.runtime.getActiveTaskContext(s.id)!.taskId;
+    await h.runtime.interrupt(s.id, taskId);
+    gate.resolve();
+    await sending;
+    const terminal = (await h.repos.tasks.listBySession(s.id)).find(task => task.id === taskId)!;
+    expect(terminal.status).toBe('interrupted');
+    expect(terminal.interruptedByActor).toBeUndefined();
+    h.repos.close();
+  });
   it('does not interrupt a replacement task when authorization finished for an older task', async () => {
     const secondTurn = deferred();
     const h = harness(); await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });

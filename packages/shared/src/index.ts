@@ -312,7 +312,9 @@ export interface SkillDeliveryMetadata {
   digest: string;
   mode: 'prompt';
 }
-export interface TaskRecord { id: string; sessionId: string; prompt: string; status: string; executionContext?: TaskExecutionContext; createdAt: string; updatedAt: string }
+export interface TaskRecord { id: string; sessionId: string; prompt: string; status: string; executionContext?: TaskExecutionContext; createdAt: string; updatedAt: string
+  /** 中断操作者的通道身份（如飞书 open_id）；与任务发起人 executionContext.actorId 语义不同，仅在被中断时落库。 */
+  interruptedByActor?: string }
 export type PublicTaskRecord = Omit<TaskRecord, 'executionContext'> & { skillDeliveries?: SkillDeliveryMetadata[] };
 export interface TaskRepository {
   save(task: TaskRecord): Promise<void>;
