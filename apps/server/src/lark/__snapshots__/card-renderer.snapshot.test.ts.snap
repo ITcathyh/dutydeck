@@ -235,7 +235,6 @@ exports[`renderLarkCardElements 视觉快照 > running 态：进展文本 + 进�
                 ],
                 "element_id": "interrupt",
                 "margin": "0px",
-                "size": "small",
                 "tag": "button",
                 "text": {
                   "content": "中断",
@@ -378,7 +377,6 @@ exports[`renderLarkCardElements 视觉快照 > 待审批态：高风险操作使
                 ],
                 "element_id": "interrupt",
                 "margin": "0px",
-                "size": "small",
                 "tag": "button",
                 "text": {
                   "content": "中断",
