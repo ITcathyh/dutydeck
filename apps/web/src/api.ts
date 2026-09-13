@@ -28,6 +28,10 @@ export type LarkBotConfig = {
   activeListening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
+  /** P0-2 结构化问答卡片总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
+  structuredAskCards?: boolean;
+  /** P0-4 群内卡片 @ 发起人总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
+  groupCardMention?: boolean;
   pushIntervalMs: number;
   traceLimit?: number;
   hideTraceOnComplete: boolean;
@@ -247,6 +251,8 @@ export const api = {
     listening?: boolean;
     groupToolsEnabled?: boolean;
     groupToolsAllowSend?: boolean;
+    structuredAskCards?: boolean;
+    groupCardMention?: boolean;
     pushIntervalMs?: number;
     traceLimit?: number | null;
     allowedUsers?: LarkAllowedUser[];

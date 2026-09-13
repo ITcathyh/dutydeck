@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { larkBotsConfigKey, larkCredentialsConfigKey, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
+import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
 
 const createRepository = (initial: Record<string, string> = {}): ConfigRepository => {
   const store = new Map<string, string>(Object.entries(initial));
@@ -272,5 +272,134 @@ describe('Lark permission posture persistence', () => {
     await expect(saveLarkConfig(createRepository(), undefined, {
       appId: 'cli_invalid', appSecret: 'secret', permissionMode: 'approve-all' as any
     })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400 });
+  });
+});
+
+describe('describeWebBaseUrlReachability S7 分类矩阵', () => {
+  it('未配置：空串、空白、null/undefined 归 unset 且带提示', () => {
+    for (const value of [undefined, null, '', '   ', '\t']) {
+      const result = describeWebBaseUrlReachability(value);
+      expect(result.kind).toBe('unset');
+      expect(result.message).toContain('未配置公网 Web 地址');
+    }
+  });
+
+  it.each([
+    ['http://localhost'],
+    ['https://localhost:8080'],
+    ['localhost:3000'],
+    ['127.0.0.1'],
+    ['https://127.0.0.1:3000/'],
+    ['127.1.2.3'],
+    ['0.0.0.0'],
+    ['http://0.0.0.0:8080'],
+    ['https://[::1]/'],
+    ['machine.local'],
+    ['10.0.0.1'],
+    ['10.255.255.255'],
+    ['192.168.1.1'],
+    ['172.16.0.1'],
+    ['172.31.255.255'],
+    ['169.254.10.20'],
+    ['http://[fe80::1]']
+  ])('本机/内网地址 %s 归 local 且带提示', value => {
+    const result = describeWebBaseUrlReachability(value);
+    expect(result.kind).toBe('local');
+    expect(result.message).toContain('内网');
+  });
+
+  it.each([
+    ['172.15.255.255'],
+    ['172.32.0.1'],
+    ['8.8.8.8'],
+    ['http://1.1.1.1'],
+    ['dutydeck.example.com'],
+    ['https://dutydeck.example.com/path'],
+    ['https://dutydeck.example.com/'],
+    // 路径/参数里自带 URL（含 ://）是合法公网地址，畸形守护只看主机段，不能误伤。
+    ['https://dutydeck.example.com/?redirect=https://other.example.com'],
+    ['https://dutydeck.example.com/path#https://other.example.com']
+  ])('公网域名/IP %s 归 public 且无提示', value => {
+    const result = describeWebBaseUrlReachability(value);
+    expect(result.kind).toBe('public');
+    expect(result.message).toBeUndefined();
+  });
+
+  it('畸形输入无法渲染成可用出口，归 local 并给出专属提示', () => {
+    for (const value of ['https://', 'not a url', 'ftp://dutydeck.example.com']) {
+      const result = describeWebBaseUrlReachability(value);
+      expect(result.kind).toBe('local');
+      expect(result.message).toContain('合法的 http(s) 链接');
+    }
+  });
+
+  it('归一化存储态的非 http(s) 补协议产物（含第二个 ://）同样判畸形，不漏报', () => {
+    // normalizeWebBaseUrl('ftp://dutydeck.example.com') 的实际存储值；启动日志拿到的是存储态。
+    for (const value of ['https://ftp://dutydeck.example.com', 'http://ssh://dutydeck.example.com']) {
+      const result = describeWebBaseUrlReachability(value);
+      expect(result.kind).toBe('local');
+      expect(result.message).toContain('合法的 http(s) 链接');
+    }
+  });
+});
+
+describe('Lark 实验卡片开关归一化', () => {
+  it('旧配置缺省两个开关时读回均为 false，并在公开视图暴露布尔值', async () => {
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret' }]));
+    expect(config.structuredAskCards).toBe(false);
+    expect(config.groupCardMention).toBe(false);
+    expect(publicLarkConfig(config)).toMatchObject({ structuredAskCards: false, groupCardMention: false });
+  });
+
+  it('存量配置显式 true 时归一化保留 true，非布尔脏值回落 false', async () => {
+    const repository = seedBots([
+      { appId: 'cli_on', appSecret: 'secret', structuredAskCards: true, groupCardMention: true },
+      { appId: 'cli_dirty', appSecret: 'secret', structuredAskCards: 'yes', groupCardMention: 1 }
+    ]);
+    const [on, dirty] = await readLarkConfigs(repository);
+    expect(on!.structuredAskCards).toBe(true);
+    expect(on!.groupCardMention).toBe(true);
+    expect(dirty!.structuredAskCards).toBe(false);
+    expect(dirty!.groupCardMention).toBe(false);
+  });
+
+  it('保存时显式 true 往返落库，缺省保存按 false 落库', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, {
+      appId: 'cli_test', appSecret: 'secret', structuredAskCards: true, groupCardMention: true
+    });
+    const [config] = await readLarkConfigs(repository);
+    expect(config.structuredAskCards).toBe(true);
+    expect(config.groupCardMention).toBe(true);
+    const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted).toMatchObject({ structuredAskCards: true, groupCardMention: true });
+
+    await saveLarkConfig(repository, undefined, { appId: 'cli_default', appSecret: 'secret' });
+    const configs = await readLarkConfigs(repository);
+    expect(configs.find(item => item.appId === 'cli_default')).toMatchObject({ structuredAskCards: false, groupCardMention: false });
+    const [persistedDefault] = JSON.parse((await repository.get(larkBotsConfigKey))!).filter((bot: any) => bot.appId === 'cli_default');
+    expect(persistedDefault).toMatchObject({ structuredAskCards: false, groupCardMention: false });
+  });
+
+  it('再次保存未带开关时继承现值；显式 false 可以关闭已开启项', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, {
+      appId: 'cli_test', appSecret: 'secret', structuredAskCards: true, groupCardMention: true
+    });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_test', appId: 'cli_test', appSecret: 'secret', preInjectPrompt: 'hi' });
+    let [config] = await readLarkConfigs(repository);
+    expect(config.structuredAskCards).toBe(true);
+    expect(config.groupCardMention).toBe(true);
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_test', appId: 'cli_test', appSecret: 'secret', structuredAskCards: false });
+    [config] = await readLarkConfigs(repository);
+    expect(config.structuredAskCards).toBe(false);
+    expect(config.groupCardMention).toBe(true);
+  });
+
+  it('公开集合视图同样暴露两个开关', async () => {
+    const repository = seedBots([{ appId: 'cli_test', appSecret: 'secret', structuredAskCards: true }]);
+    const collection = publicLarkConfigs(await readLarkConfigs(repository));
+    expect(collection.bots[0]).toMatchObject({ structuredAskCards: true, groupCardMention: false });
   });
 });
