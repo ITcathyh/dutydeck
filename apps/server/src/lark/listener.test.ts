@@ -1,8 +1,31 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
-import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkMessageCoordinator, patchRejectedCardDelta, renderLarkCardElements, renderLarkTrace } from './listener.js';
+import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkMessageCoordinator, patchRejectedCardDelta, renderLarkCardElements, renderLarkTrace } from './listener.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
+
+// 仅「监听接入层」用例需要截获 SDK 的事件注册；其余协调器用例直接构造 coordinator，
+// 不受此 mock 影响（它们传入的是手写 service 替身，永不实例化 lark.Client）。
+const larkSdkHarness = vi.hoisted(() => {
+  const handlers: Record<string, (event: any) => unknown> = {};
+  return {
+    handlers,
+    reset: () => { for (const key of Object.keys(handlers)) delete handlers[key]; }
+  };
+});
+vi.mock('@larksuiteoapi/node-sdk', () => ({
+  LoggerLevel: { warn: 'warn' },
+  EventDispatcher: class {
+    register(registered: Record<string, (event: any) => unknown>) {
+      Object.assign(larkSdkHarness.handlers, registered);
+      return this;
+    }
+  },
+  WSClient: class {
+    async start() { /* 长连接不在测试中真正建立 */ }
+    close() { /* no-op */ }
+  }
+}));
 
 const config: StoredLarkConfig = {
   appId: 'cli_test', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true,
@@ -983,8 +1006,9 @@ describe('Lark message coordinator', () => {
     coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
 
-    await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1');
+    await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '正在取消任务' });
+    // P0-3：卡片操作者作为 actor 透传给 interrupt，落库 interrupted_by_actor；send 模式无 runtimeTaskId。
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', undefined, 'ou_operator');
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'interrupted' }));
     finishInterrupt();
     // 中断态就地写回第一张卡；它保留重试入口，不是零操作的只读收据。
@@ -1048,7 +1072,7 @@ describe('Lark message coordinator', () => {
     // 心跳一次都还没发生，直接拿这个 value 点：必须被接受。
     expect(service.update).not.toHaveBeenCalled();
     await expect(coordinator.handleAction(callbackValue)).resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1');
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', undefined, undefined);
     finishTurn();
     coordinator.stop();
   });
@@ -1075,7 +1099,7 @@ describe('Lark message coordinator', () => {
     // 线上遗留卡片不带 turn，必须继续可用，不能因为这次加固把老卡片全废掉。
     await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_turned' }))
       .resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2');
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2', undefined);
   });
 
   /**
@@ -1170,7 +1194,7 @@ describe('Lark message coordinator', () => {
     // 新一轮仍然活着：刷新与取消都还能作用在它身上，没被旧轮的 cleanup 清掉。
     await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '已拉取最新状态' });
     await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2');
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2', undefined);
     // 新一轮的终态落在新卡上，旧卡 om_card_1 始终没被改写成第二轮的结论。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: newCardId, state: 'interrupted' })));
     expect(service.update.mock.calls.filter(([input]: any[]) => input.messageId === 'om_card_1' && input.state === 'interrupted')).toHaveLength(0);
@@ -1249,7 +1273,7 @@ describe('Lark message coordinator', () => {
 
     // 取消/中断请求发出，但 runtime 那一侧挂住不返回。
     await expect(coordinator.handleAction({ action, task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: toast });
-    if (action === 'interrupt') expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-1');
+    if (action === 'interrupt') expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-1', undefined);
     else expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-1');
 
     // runtime 自己把第一轮判为 interrupted（事件流），于是任务可重试。
@@ -2567,5 +2591,151 @@ describe('Lark trace rendering', () => {
       ], { ...config, hideTraceOnComplete: true }, true);
       expect(elements.find((element: any) => element.element_id === 'final_output'), type).toBeUndefined();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0-5 欢迎语：监听接入层（真实 LarkCardService + 内存 kv，SDK 事件为手动派发）
+// ---------------------------------------------------------------------------
+describe('Lark long connection listener 欢迎语', () => {
+  interface StartHarnessOptions {
+    records?: Record<string, string>;
+    runtime?: any;
+    failMessages?: boolean;
+  }
+
+  const memoryKv = (records: Record<string, string> = {}) => {
+    const store = new Map(Object.entries(records));
+    return {
+      get: vi.fn(async (key: string) => store.get(key)),
+      set: vi.fn(async (key: string, value: string) => { store.set(key, value); }),
+      compareAndSet: vi.fn(async (key: string, expected: string | undefined, value: string) => {
+        if (store.get(key) !== expected) return false;
+        store.set(key, value);
+        return true;
+      })
+    };
+  };
+
+  const startHarness = async (options: StartHarnessOptions = {}) => {
+    larkSdkHarness.reset();
+    const posts: Array<{ url: string; body: any }> = [];
+    const jsonResponse = (data: unknown) => ({ ok: true, json: async () => ({ code: 0, ...(typeof data === 'object' && data !== null ? data : {}) }), headers: new Map() });
+    const errorResponse = () => ({ ok: false, json: async () => ({ code: 230001, msg: 'forced failure' }), headers: new Map() });
+    const fetcher = vi.fn(async (url: string | URL, init?: any) => {
+      const target = String(url);
+      if (target.includes('/tenant_access_token/')) return jsonResponse({ tenant_access_token: 't', expire: 7200 });
+      if (target.includes('/bot/v3/info')) return jsonResponse({ bot: { open_id: 'ou_bot', app_name: 'Dutydeck' } });
+      if (target.includes('/open-apis/im/')) {
+        if (init?.method === 'POST' && target.includes('/im/v1/messages')) {
+          const body = JSON.parse(init.body as string);
+          // failMessages 只让欢迎卡发送失败（幂等键 lark_welcome_*），coordinator 的卡片照常送达。
+          if (options.failMessages === true && typeof body.uuid === 'string' && body.uuid.startsWith('lark_welcome_')) {
+            return errorResponse();
+          }
+          posts.push({ url: target, body });
+          return jsonResponse({ data: { message_id: `om_${posts.length}`, chat_id: body.receive_id } });
+        }
+        return jsonResponse({ data: { message_id: 'om_x', reaction_id: 'r1' } });
+      }
+      return jsonResponse({});
+    });
+    const kv = memoryKv(options.records);
+    const listener = new LarkLongConnectionListener(
+      { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      { fetcher: fetcher as any, welcomeStore: kv as any, ...(options.runtime ? { runtime: options.runtime } : {}) }
+    );
+    await listener.start(config);
+    return { listener, handlers: larkSdkHarness.handlers, posts, kv };
+  };
+
+  const messageEvent = (overrides: any = {}) => ({
+    message: {
+      message_id: overrides.messageId ?? `om_${Math.random().toString(36).slice(2)}`,
+      chat_id: overrides.chatId ?? 'oc_dm',
+      chat_type: overrides.chatType ?? 'p2p',
+      message_type: 'text',
+      content: JSON.stringify({ text: overrides.text ?? '你好' }),
+      ...(overrides.mentions ? { mentions: overrides.mentions } : {})
+    },
+    sender: { sender_id: { open_id: 'ou_sender' }, sender_type: 'user' }
+  });
+
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  const welcomeTitles = (posts: Array<{ body: any }>) => posts
+    .map(post => {
+      try { return JSON.parse(post.body.content) as any; } catch { return undefined; }
+    })
+    .filter(Boolean);
+
+  it('bot 入群事件只发一次欢迎卡，重复事件不重发', async () => {
+    const { listener, handlers, posts } = await startHarness();
+    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_group' });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e2', chat_id: 'oc_group' });
+    await flush();
+    expect(posts).toHaveLength(1);
+    const card = welcomeTitles(posts)[0]!;
+    expect(JSON.stringify(card)).toContain('Dutydeck 机器人已入群');
+    listener.stop();
+  });
+
+  it('重启后 kv 已有「已欢迎」记录时不再发入群欢迎', async () => {
+    const { listener, handlers, posts } = await startHarness({
+      records: { 'lark.welcomed.cli_test.oc_existing': JSON.stringify({ at: '2026-09-12T00:00:00.000Z' }) }
+    });
+    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_existing' });
+    await flush();
+    expect(posts).toHaveLength(0);
+    listener.stop();
+  });
+
+  it('群聊普通消息不触发欢迎语', async () => {
+    const { listener, handlers, posts } = await startHarness();
+    // 未 @机器人 的群消息：coordinator 不唤醒，欢迎语也只允许在 p2p 触发。
+    handlers['im.message.receive_v1']!(messageEvent({ chatType: 'group', chatId: 'oc_group', text: '大家好' }));
+    await flush();
+    expect(posts).toHaveLength(0);
+    // 入群事件照常只影响该群自己的去重键。
+    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_group' });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(welcomeTitles(posts)[0])).toContain('机器人已入群');
+    listener.stop();
+  });
+
+  it('私聊首条消息发一次私聊欢迎，重复消息不重发，且消息正常 dispatch', async () => {
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const { listener, handlers, posts } = await startHarness({ runtime });
+
+    handlers['im.message.receive_v1']!(messageEvent({ messageId: 'om_dm_1', text: '第一句' }));
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(1));
+    handlers['im.message.receive_v1']!(messageEvent({ messageId: 'om_dm_2', text: '第二句' }));
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
+
+    const welcomeCards = welcomeTitles(posts).filter(card => JSON.stringify(card).includes('欢迎使用 Dutydeck'));
+    expect(welcomeCards).toHaveLength(1);
+    listener.stop();
+  });
+
+  it('欢迎卡发送失败不阻断消息 dispatch，且失败后不重发欢迎', async () => {
+    const runtime = {
+      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
+      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    };
+    const { listener, handlers, posts, kv } = await startHarness({ runtime, failMessages: true });
+
+    handlers['im.message.receive_v1']!(messageEvent({ messageId: 'om_dm_fail', text: '照常派发' }));
+    // 欢迎卡发送失败：任务仍必须进入 runtime。
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    // 欢迎标记已认领，下一条消息也不会再尝试欢迎。
+    handlers['im.message.receive_v1']!(messageEvent({ messageId: 'om_dm_fail_2', text: '再说一句' }));
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
+    const welcomeCards = welcomeTitles(posts).filter(card => JSON.stringify(card).includes('欢迎使用 Dutydeck'));
+    expect(welcomeCards).toHaveLength(0);
+    expect(await kv.get('lark.welcomed.cli_test.oc_dm')).toBeTruthy();
+    listener.stop();
   });
 });

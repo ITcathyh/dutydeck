@@ -7,7 +7,10 @@ import type { StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError } from './service.js';
 import { setLarkGateLog } from './api-gate.js';
 import { getChatMode } from './chat-mode.js';
+import { larkCommandCapabilities } from './commands.js';
 import { LarkMessageCoordinator } from './coordinator.js';
+import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
+import { describeWebBaseUrlReachability } from './config.js';
 
 // 飞书长连接监听：只负责 WebSocket 事件接入、事件组装与协调器装配。
 // 消息协调见 coordinator.ts，卡片渲染见 card-renderer.ts，会话路由见 session-resolver.ts，
@@ -33,7 +36,7 @@ export interface LarkRuntime {
   getTasks?(id: string): Promise<TaskRecord[]>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;
-  interrupt(id: string, expectedTaskId?: string): Promise<unknown>;
+  interrupt(id: string, expectedTaskId?: string, actor?: string): Promise<unknown>;
   cancelQueued?(id: string, taskId: string): Promise<unknown>;
   subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
@@ -66,6 +69,11 @@ export interface LarkLongConnectionListenerOptions {
   groupManager?: LarkGroupManager;
   runtime?: LarkRuntime;
   cardMappings?: ChannelMappingRepository;
+  /**
+   * 欢迎语去重标记的 kv 存储（必须持久化，保证重启不重发）；
+   * 缺省时回退复用 workflowStore，两者都没有则不启用欢迎语。
+   */
+  welcomeStore?: ConfigRepository;
   env?: NodeJS.ProcessEnv;
   fetcher?: typeof globalThis.fetch;
   peerBotAuthorized?: (appId: string, chatId: string, senderOpenId: string) => Promise<boolean>;
@@ -81,6 +89,7 @@ export interface LarkLongConnectionListenerOptions {
 export class LarkLongConnectionListener implements LarkListener {
   private client?: lark.WSClient;
   private coordinator?: LarkMessageCoordinator;
+  private welcome?: LarkWelcomeService;
   private credentials?: string;
   private config?: StoredLarkConfig;
   listening = false;
@@ -91,6 +100,12 @@ export class LarkLongConnectionListener implements LarkListener {
     // api-gate 是模块级单例（per-appId 限流状态必须跨会话共享），没有构造注入点。
     // 在监听装配处接上真实日志，让限流等待、退避重试和熔断跳闸可观测。
     setLarkGateLog(this.log);
+    // S7：webBaseUrl 留空/仅本机可达时，审批问答卡没有手机可达的网页出口。
+    // 每次启动（含同凭证早退路径）都明示，不静默降级成「看似可用」。
+    const webReachability = describeWebBaseUrlReachability(config.webBaseUrl);
+    if (webReachability.kind !== 'public' && webReachability.message) {
+      this.log.warn({ appId: config.appId, kind: webReachability.kind }, webReachability.message);
+    }
     const credentials = `${config.appId}\u0000${config.appSecret}`;
     if (this.listening && this.credentials === credentials) {
       this.config = config;
@@ -122,10 +137,43 @@ export class LarkLongConnectionListener implements LarkListener {
     await coordinator?.initializeWorkflows(config);
     try { await coordinator?.startReconciliation(config); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账启动失败，继续建立消息监听'); }
+    // 欢迎语：kv 必须是持久化存储，重启后才能靠标记不重发；无存储则不启用。
+    const welcomeKv = this.options.welcomeStore ?? this.options.workflowStore;
+    if (welcomeKv) {
+      const capabilities = this.options.runtime
+        ? {
+          ...larkCommandCapabilities(this.options.runtime),
+          // 与 coordinator.routeChatCommand 的 /tasks 能力判定保持同源。
+          tasks: Boolean(this.options.workflowStore && this.options.cardMappings && this.options.runtime.getTasks)
+        }
+        : undefined;
+      this.welcome = createLarkWelcomeService({
+        appId: config.appId,
+        kv: welcomeKv,
+        ...(capabilities ? { capabilities } : {}),
+        log: this.log,
+        send: (chatId, content) => service.send({
+          chatId,
+          state: 'completed',
+          readOnly: true,
+          retryable: false,
+          taskName: content.title,
+          elements: content.elements,
+          idempotencyKey: `lark_welcome_${chatId}`.slice(0, 50)
+        }).then(() => undefined)
+      });
+    }
     const dispatcher = new lark.EventDispatcher({ loggerLevel: lark.LoggerLevel.warn }).register({
       'im.message.receive_v1': event => {
         const message = event.message;
         this.log.info({ messageId: message.message_id, chatId: message.chat_id, chatType: message.chat_type }, '收到飞书消息事件');
+        // 私聊首次消息欢迎：只发一次（kv 去重），失败不抛错，且绝不等待它、不阻断消息 dispatch。
+        // 群聊普通消息不发欢迎；bot 入群欢迎走 im.chat.member.bot.added_v1。
+        if (message.chat_type === 'p2p' && message.chat_id) {
+          this.welcome?.welcomeP2pChat(message.chat_id).catch(error => {
+            this.log.error({ error, chatId: message.chat_id }, '处理飞书私聊欢迎失败，继续派发消息');
+          });
+        }
         coordinator?.handle({
           messageId: message.message_id,
           chatId: message.chat_id,
@@ -144,9 +192,31 @@ export class LarkLongConnectionListener implements LarkListener {
       },
       'card.action.trigger': async (event: any) => {
         const operatorOpenId = event.operator?.open_id;
-        const result = await coordinator?.handleAction(event.action?.value, operatorOpenId, { messageId: event.context?.open_message_id ?? event.open_message_id, chatId: event.context?.open_chat_id ?? event.open_chat_id });
+        // JSON 2.0 表单（结构化问答的多选/自由文本、workbench 步骤答题）提交值在 form_value，
+        // 按钮回调值在 action.value；合并后下游统一读 value，表单值挂在 value.form_value。
+        // 未合并时表单类回调必然拿不到答案，属 fail-closed 接线点。
+        const actionValue = event.action?.value;
+        const formValue = event.action?.form_value;
+        const value = formValue ? { ...actionValue, form_value: formValue } : actionValue;
+        const result = await coordinator?.handleAction(value, operatorOpenId, {
+          messageId: event.context?.open_message_id ?? event.open_message_id,
+          chatId: event.context?.open_chat_id ?? event.open_chat_id,
+          // overflow 菜单：behaviors.value 全组共用，被点选项只在 action.option。
+          // 传给主控做白名单门（目前只放行 'reject'），防 multi_url 等未证实项误触发回调。
+          ...(event.action?.tag === 'overflow' ? { actionTag: 'overflow', option: event.action.option } : {})
+        });
         if (!result) return;
         return { toast: result };
+      },
+      // bot 被拉入群：发一次入群欢迎卡（welcome 内部 kv 去重，重复事件/重启不重发）。
+      // 存量应用需先经 /repair 增量订阅该事件并发布通过审核后才能收到。
+      'im.chat.member.bot.added_v1': (event: any) => {
+        const chatId = typeof event?.chat_id === 'string' ? event.chat_id : '';
+        this.log.info({ chatId, eventId: event?.event_id }, '收到飞书机器人入群事件');
+        if (!chatId || !this.welcome) return;
+        this.welcome.welcomeBotAdded(chatId).catch(error => {
+          this.log.error({ error, chatId }, '处理飞书机器人入群欢迎失败');
+        });
       },
       // 入站 reaction 显式登记为 no-op：机器人自己加/撤 `OK` 回执会回流成事件，
       // 用户手动贴表情也会。两者都不得驱动任务，也不应落到未知事件分支产生日志噪音。
@@ -188,6 +258,7 @@ export class LarkLongConnectionListener implements LarkListener {
     this.coordinator?.stop();
     this.client = undefined;
     this.coordinator = undefined;
+    this.welcome = undefined;
     this.credentials = undefined;
     this.config = undefined;
     this.listening = false;
