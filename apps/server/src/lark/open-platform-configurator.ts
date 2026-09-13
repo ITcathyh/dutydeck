@@ -50,6 +50,7 @@ interface VisibilitySuggest { departments: string[]; members: string[]; groups: 
 export async function configureLarkOpenPlatformApp(
   client: LarkOpenPlatformClient,
   appId: string,
+  options: { creatorUserId?: string } = {},
 ): Promise<LarkOpenPlatformConfigurationResult> {
   if (!isValidLarkAppId(appId)) {
     throw new LarkOpenPlatformConfigurationError('invalid_app_id', '飞书应用 ID 格式无效，应为 cli_*');
@@ -152,12 +153,17 @@ export async function configureLarkOpenPlatformApp(
     );
   }
 
-  const visibilityPayload = await post(client, `/developers/v1/visible/online/${appId}`, {},
-    'visibility_read_failed', '读取飞书应用可见范围失败');
-  const visibility = parseVisibility(visibilityPayload);
   const versionPayload = await post(client, `/developers/v1/app_version/list/${appId}`, {},
     'version_list_failed', '读取飞书应用版本失败');
   const appVersion = nextVersion(versionPayload);
+  const firstRelease = (asRecord(asRecord(versionPayload).data).versions as unknown[]).length === 0;
+  const visibility = firstRelease && options.creatorUserId
+    ? {
+      whiteList: { departments: [], members: [options.creatorUserId], groups: [], isAll: 0 as const },
+      blackList: { departments: [], members: [], groups: [], isAll: 0 as const },
+    }
+    : parseVisibility(await post(client, `/developers/v1/visible/online/${appId}`, {},
+      'visibility_read_failed', '读取飞书应用可见范围失败'));
   const created = await post(client, `/developers/v1/app_version/create/${appId}`, {
     appVersion,
     mobileDefaultAbility: 'bot',

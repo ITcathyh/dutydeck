@@ -9,6 +9,7 @@ import { Badge, Banner, Button, Dialog, Field, IconButton, Input, Select, Skelet
 import { ConfirmDialog } from './ConfirmDialog';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { MemberNameTagInput } from './MemberNameTagInput';
+import { LarkAppCreationPanel } from './LarkAppCreationPanel';
 
 export type LarkConfigModalProps = { agents: Agent[]; target?: LarkSetupTarget; onClose(): void };
 
@@ -38,6 +39,8 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const capabilities = useQuery({ queryKey: ['system-capabilities'], queryFn: api.systemCapabilities });
   const [confirmation, setConfirmation] = useState<'incomplete' | 'discard' | 'delete'>();
   const [openPlatformJobId, setOpenPlatformJobId] = useState('');
+  const [creationBusy, setCreationBusy] = useState(false);
+  const [creationNeedsSetup, setCreationNeedsSetup] = useState('');
   const hydratedSelection = useRef<string | null>(null);
   const form = useRef<HTMLFormElement>(null);
   const enableListeningAfterNewBot = useRef(false);
@@ -98,7 +101,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const agentCapabilitiesPending = step === 2 && Boolean(defaultAgentId) && !agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching);
   const agentCapabilitiesReady = step !== 2 || Boolean(agentOptions.data);
   const missingTarget = Boolean(selectedAppId && config.data && !current);
-  const canSave = !missingTarget && (step === 1
+  const canSave = !creationBusy && !missingTarget && (step === 1
     ? Boolean(appId.trim() && (current || appSecret.trim()) && (!restrictUsers || allowedUserNames.length) && Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000)
     : Boolean(current && defaultAgentId && (permissionMode === 'ask' ? agentOptions.data?.source === 'acp' : fullTrustConfirmed) && agentCapabilitiesReady && (riskControlMode === 'off' || highRiskPatternValidation.valid) && !legacyHighRiskNeedsMigration && (riskControlMode !== 'enforced' || enforcedHookReady)));
   const formError = save.error ?? remove.error ?? pickWorkspace.error ?? inspect.error ?? startOpenPlatformSetup.error ?? openPlatformJob.error ?? installHook.error ?? (agentOptions.data ? undefined : agentOptions.error) ?? hookStatus.error ?? config.error;
@@ -120,9 +123,19 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   */
   const dismissible = !confirmation && !save.isPending && !remove.isPending;
   const addBot = () => {
+    const focusName = selectedAppId === '' && (appId || appSecret) ? 'appId' : 'newAppName';
     setSelectedAppId('');
     setStep(1);
-    requestAnimationFrame(() => form.current?.querySelector<HTMLInputElement>('input[name="appId"]')?.focus());
+    requestAnimationFrame(() => form.current?.querySelector<HTMLInputElement>(`input[name="${focusName}"]`)?.focus());
+  };
+  const onAppCreated = async (createdAppId: string, configured: boolean) => {
+    const latest = await api.larkConfig();
+    if (!latest.bots.some(bot => bot.appId === createdAppId)) throw new Error('尚未读取到已创建机器人的配置，请重试连接。');
+    enableListeningAfterNewBot.current = configured;
+    setCreationNeedsSetup(configured ? '' : createdAppId);
+    qc.setQueryData(['lark-config'], latest);
+    setSelectedAppId(createdAppId);
+    setStep(configured ? 2 : 1);
   };
   return <>
   <Dialog open onClose={requestClose} label={current ? `更新飞书 Bot：${current.name}` : '绑定飞书 Bot'} size="md" closeOnEscape={dismissible} closeOnScrim={dismissible}>
@@ -130,15 +143,19 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
     <form ref={form} onSubmit={event => { event.preventDefault(); if (canSave) save.mutate(); }} className="flex min-h-0 flex-1 flex-col">
       <Dialog.Header className="flex-wrap"><div className="min-w-0 flex-1"><h2 className="text-body font-semibold text-primary">{current ? `更新飞书 Bot：${current.name}` : '绑定飞书 Bot'}</h2><p className="mt-0.5 text-caption text-subtle">Bot 负责收发消息，Agent 负责执行任务</p></div><div className="order-3 mt-2 flex w-full shrink-0 items-center justify-end gap-0.5 sm:order-none sm:ml-auto sm:mt-0 sm:w-auto"><a href="https://open.larkoffice.com/app" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">飞书开发者后台<ExternalLink size={12}/></a><a href="https://open.larkoffice.com/page/launcher?from=backend_oneclick" target="_blank" rel="noreferrer" className="flex min-h-10 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 text-caption font-medium text-secondary transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">快速创建应用<ExternalLink size={12}/></a></div><IconButton label="关闭" onClick={requestClose}><X size={15}/></IconButton></Dialog.Header>
       <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-subtle bg-muted px-3 py-2">
-        {config.data?.bots.map(bot => <button key={bot.appId} type="button" onClick={() => { setSelectedAppId(bot.appId); setStep(bot.setupComplete ? 1 : 2); }} className={`flex h-10 max-w-[250px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === bot.appId ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Bot size={13} className="shrink-0"/><span title={bot.name} className="min-w-0 max-w-32 truncate">{bot.tabLabel}</span>{bot.setupComplete ? <span title="配置完成" className="shrink-0"><Badge tone="success"><Check size={9}/>已配置</Badge></span> : <span className="shrink-0"><Badge tone="warning">待配置</Badge></span>}{bot.activeListening && !config.data?.listeningDisabled && bot.listening && <span title="监听已启动" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-solid"/>}</button>)}
-        <button type="button" aria-pressed={selectedAppId === ''} onClick={addBot} className={`flex h-10 shrink-0 items-center gap-1 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === '' ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Plus size={13}/>新增机器人</button>
+        {config.data?.bots.map(bot => <button key={bot.appId} type="button" disabled={creationBusy} onClick={() => { setSelectedAppId(bot.appId); setStep(bot.setupComplete ? 1 : 2); }} className={`flex h-10 max-w-[250px] shrink-0 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === bot.appId ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Bot size={13} className="shrink-0"/><span title={bot.name} className="min-w-0 max-w-32 truncate">{bot.tabLabel}</span>{bot.setupComplete ? <span title="配置完成" className="shrink-0"><Badge tone="success"><Check size={9}/>已配置</Badge></span> : <span className="shrink-0"><Badge tone="warning">待配置</Badge></span>}{bot.activeListening && !config.data?.listeningDisabled && bot.listening && <span title="监听已启动" className="h-1.5 w-1.5 shrink-0 rounded-full bg-success-solid"/>}</button>)}
+        <button type="button" disabled={creationBusy} aria-pressed={selectedAppId === ''} onClick={addBot} className={`flex h-10 shrink-0 items-center gap-1 rounded-md px-2.5 text-caption font-medium transition-colors duration-fast ease-out ${selectedAppId === '' ? 'border border-default bg-surface text-primary shadow-card' : 'border border-transparent text-subtle hover:bg-hover hover:text-primary'}`}><Plus size={13}/>新增机器人</button>
       </div>
       <Dialog.Body className="space-y-3.5">
         {config.isLoading ? <Skeleton variant="row" lines={3}/> : missingTarget ? <Banner tone="warning">找不到指定机器人。请选择已有机器人或点击新增机器人。</Banner> : <>
           <div className="mb-1 grid grid-cols-2 rounded-md bg-muted p-1"><button type="button" onClick={() => setStep(1)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out ${step === 1 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">1</span>连接飞书应用</button><button type="button" disabled={!current} onClick={() => setStep(2)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out disabled:opacity-40 ${step === 2 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">2</span>选择 Agent 并启用</button></div>
-          <p role={selectedAppId === '' ? 'status' : undefined} className="-mt-1 text-caption text-subtle">{step === 1 ? current ? '填写飞书应用凭据并配置必要能力；成员范围可以留空，稍后再收紧。' : '正在新增机器人。填写新应用的 App ID 和 App Secret，再点击“下一步”；尚未创建飞书应用时，可点击右上角“快速创建应用”。' : '选择处理飞书消息的 Agent、确认工作方式并启用监听。'}</p>
+          <p role={selectedAppId === '' ? 'status' : undefined} className="-mt-1 text-caption text-subtle">{step === 1 ? current ? '填写飞书应用凭据并配置必要能力；成员范围可以留空，稍后再收紧。' : '正在新增机器人。可以扫码创建新应用，或填写已有应用的 App ID 和 App Secret，再点击“下一步”。' : '选择处理飞书消息的 Agent、确认工作方式并启用监听。'}</p>
           {agents.length === 0 && <Banner tone="warning" role="alert">当前没有可用 Agent。你可以先保存飞书应用，但完成绑定前需要安装并登录 Agent CLI，然后重启 Dutydeck。</Banner>}
           {step === 1 ? <>
+          {current?.appId === creationNeedsSetup && openPlatformJob.data?.status !== 'completed' && <Banner tone="warning">应用已创建，自动配置尚未完成。请先点击“自动配置”，或到飞书后台核对权限和发布状态。</Banner>}
+          {!current && <LarkAppCreationPanel onCreated={onAppCreated} onBusyChange={setCreationBusy}/>}
+          <fieldset disabled={creationBusy} className="space-y-3.5 disabled:opacity-50">
+          {!current && <h3 className="text-caption font-semibold text-secondary">已有飞书应用？填写凭据手动绑定</h3>}
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="机器人名称"><Input value={name} readOnly placeholder="校验凭证后自动识别" className="bg-muted font-mono text-subtle"/></Field>
             <Field label="App ID"><Input name="appId" value={appId} onChange={event => { setAppId(event.target.value); setName(''); setOpenPlatformJobId(''); }} placeholder="cli_xxx" autoComplete="off" className="font-mono"/></Field>
@@ -196,6 +213,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
             <Field label="飞书推送间隔" hint="500-20000 ms"><Input type="number" min={500} max={20000} step={100} value={pushIntervalMs} onChange={event => setPushIntervalMs(Number(event.target.value))} className="font-mono"/></Field>
             <Field label="Trace 阶段上限" hint="默认 50；心跳渲染时最多保留最近 N 个执行阶段，超过飞书 24KB / 180 组件限制时仍会自动裁剪较早记录。"><Input type="number" min={1} max={200} step={1} value={traceLimit} onChange={event => setTraceLimit(event.target.value)} className="font-mono"/></Field>
           </div></div></details>
+          </fieldset>
           </> : <>
           <div><span className="text-caption font-medium text-secondary">默认 Agent</span><AgentSelect agents={agents} value={defaultAgentId} onChange={value => { setDefaultAgentId(value); setDefaultModel(''); setDefaultReasoningEffort(''); }}/></div>
           <Field label="操作确认方式" hint="飞书逐项确认支持 ACP Agent；修改后在会话空闲时应用，新操作仍受群权限与高危策略约束。"><CompactSelect options={[{ value: 'full-trust', label: '完全信任：自动执行操作' }, { value: 'ask', label: '飞书逐项确认：等待批准后执行' }]} value={permissionMode} placeholder="选择操作确认方式" disabledText="" onChange={value => setPermissionMode(value as 'ask' | 'full-trust')}/></Field>
@@ -249,7 +267,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
         「删除配置」用 ghost + 危险文字色，不用 variant="danger" 的实心底：它待在
         次要位置，实心红会把视觉重量压过右侧真正的主操作（下一步 / 完成配置）。
       */}
-      <Dialog.Footer className="justify-start">{current ? <Button variant="ghost" icon={<Trash2 size={13}/>} className="text-danger hover:bg-danger-soft hover:text-danger" onClick={() => { remove.reset(); setConfirmation('delete'); }}>删除配置</Button> : <span className="text-caption text-subtle">App ID 将作为唯一主键，不能重复配置</span>}{step === 2 && <span className="ml-auto"><Button variant="ghost" onClick={() => setStep(1)}>上一步</Button></span>}<span className={step === 2 ? '' : 'ml-auto'}><Button variant="ghost" onClick={requestClose}>{step === 2 && current && !current.setupComplete ? '稍后完成' : '取消'}</Button></span><Button type="submit" variant="secondary" tone="inverse" className="min-w-20" disabled={!canSave || save.isPending}>{save.isPending ? (step === 1 ? '验证中' : '保存中') : agentCapabilitiesPending ? '读取模型中' : step === 1 ? '下一步' : '完成配置'}</Button></Dialog.Footer>
+      <Dialog.Footer className="justify-start">{current ? <Button variant="ghost" icon={<Trash2 size={13}/>} className="text-danger hover:bg-danger-soft hover:text-danger" onClick={() => { remove.reset(); setConfirmation('delete'); }}>删除配置</Button> : <span className="text-caption text-subtle">App ID 将作为唯一主键，不能重复配置</span>}{step === 2 && <span className="ml-auto"><Button variant="ghost" onClick={() => setStep(1)}>上一步</Button></span>}<span className={step === 2 ? '' : 'ml-auto'}><Button variant="ghost" onClick={requestClose}>{creationBusy ? '稍后查看' : step === 2 && current && !current.setupComplete ? '稍后完成' : '取消'}</Button></span><Button type="submit" variant="secondary" tone="inverse" className="min-w-20" disabled={!canSave || save.isPending}>{save.isPending ? (step === 1 ? '验证中' : '保存中') : agentCapabilitiesPending ? '读取模型中' : step === 1 ? '下一步' : '完成配置'}</Button></Dialog.Footer>
     </form>
   </Dialog>
   <ConfirmDialog

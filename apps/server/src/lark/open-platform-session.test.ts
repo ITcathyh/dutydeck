@@ -272,3 +272,36 @@ describe('Open Platform client error safety', () => {
     expect(redacted).not.toContain('123');
   });
 });
+
+it('posts multipart with authenticated console headers and a browser-generated boundary', async () => {
+  const file = join(temporaryDirectory(), 'session.json');
+  writeOpenPlatformSessionCookies(file, [cookie()]);
+  let request: RequestInit | undefined;
+  const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    if (String(input).endsWith('/app')) return new Response(consoleHtml());
+    request = init;
+    return Response.json({ code: 0, data: { url: 'https://example.invalid/icon' } });
+  }) as typeof fetch;
+  const { client } = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
+  const form = new FormData();
+  form.append('file', new Blob(['fixture'], { type: 'image/png' }), 'icon.png');
+  expect(await client.postForm('/developers/v1/app/upload/image', form)).toMatchObject({ code: 0 });
+  expect(request?.body).toBe(form);
+  const headers = new Headers(request?.headers);
+  expect(headers.get('content-type')).toBeNull();
+  expect(headers.get('x-csrf-token')).toBe('private-csrf-value');
+  expect(headers.get('cookie')).toContain('private-cookie-value');
+  expect(headers.get('origin')).toBe('https://open.feishu.cn');
+  await expect(client.postForm('https://evil.invalid/upload', form)).rejects.toThrow('仅允许');
+  await expect(client.postForm('/developers/v1/../upload', form)).rejects.toThrow('仅允许');
+  expect(fetchImpl).toHaveBeenCalledTimes(2);
+});
+
+it.each([503, 404])('preserves HTTP %s classification for external-write retry decisions', async status => {
+  const file = join(temporaryDirectory(), 'session.json');
+  writeOpenPlatformSessionCookies(file, [cookie()]);
+  const fetchImpl = vi.fn(async (input: string | URL | Request) => String(input).endsWith('/app')
+    ? new Response(consoleHtml()) : Response.json({ code: 1, msg: 'rejected' }, { status })) as typeof fetch;
+  const { client } = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
+  await expect(client.postJson('/developers/v1/manifest/upsert_by_template', {})).rejects.toMatchObject({ statusCode: status });
+});

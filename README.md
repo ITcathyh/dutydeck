@@ -233,7 +233,13 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 
 ### 接入机器人
 
-最快路径是 CLI 向导，它驱动的是与 Web 相同的自动配置能力：
+新建应用可以在 Web 点击“新增机器人”，填写名称后点击“扫码创建机器人”。用飞书扫码确认账号和企业，Dutydeck 会通过开放平台的一键创建模板建立应用，保存凭据，配置必要权限、长连接事件及卡片回调，并发布首个版本。初次发布的可见范围包含创建者。
+
+创建完成后自动进入 Agent 设置；选择执行 Agent（例如 CCFlash）、确认操作方式并完成配置后才启用监听。App Secret 直接保存到本地服务端，无需复制到页面。已有应用仍可填写凭据手动绑定。
+
+创建开始前可以取消；关闭窗口只关闭视图，再次打开“新增机器人”可继续查看本次进度。请求与应用 ID 会保存，安全重试沿用同一应用；创建或发布结果未知时，先到飞书后台核对，页面不会自动再建一个应用。
+
+已有应用也可以使用 CLI 向导，它驱动的是与 Web 相同的自动配置能力：
 
 ```bash
 dutydeck setup --lark-app-id cli_xxx
@@ -254,8 +260,8 @@ dutydeck setup --lark-app-id cli_xxx --force-login   # 换开放平台账号
 3. 自动配置会增量导入 Dutydeck 需要的 16 项消息、群聊、附件与联系人权限，启用机器人，设置长连接 `im.message.receive_v1` 与 `card.action.trigger`，回读验证后发布新版本。存量应用的可见范围会在发版前完整读回并原样保留；无法确认时停止发版。
 4. 填写 App Secret、工作区与 Agent，明确确认无人值守 `full-trust` 后启用监听，并把机器人加入目标群。
 
-无论走哪条路径，App Secret 都属于机密，应使用 `dutydeck secret set` 从隐藏输入或
-`--value-fd` 录入，向导和 CLI 都不会回显或记录它。用 `dutydeck doctor` 可以确认飞书
+通过 CLI 录入 App Secret 时，使用 `dutydeck secret set` 的隐藏输入或
+`--value-fd`，向导和 CLI 都不会回显或记录它。用 `dutydeck doctor` 可以确认飞书
 配置是否完整、监听是否可能生效。
 
 自动配置不是保存门禁，也不会申请用户身份发消息权限；需要时仍可在开发者后台手动配置。开放平台 Cookie 只写入本机 `~/.dutydeck/feishu-open-platform-session.json`（私有权限），不会返回浏览器、进入日志或交给 Agent。

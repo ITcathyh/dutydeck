@@ -281,3 +281,22 @@ describe('configureLarkOpenPlatformApp', () => {
     expect(JSON.stringify(error)).not.toContain(secret);
   });
 });
+
+it('uses only the creator for the first version without requiring an online visibility record', async () => {
+  const { client, calls } = harness({ versions: { data: { versions: [] } } });
+  await configureLarkOpenPlatformApp(client, 'cli_test', { creatorUserId: 'creator-private-id' });
+  expect(calls.some(call => call.path.includes('/visible/online/'))).toBe(false);
+  expect(calls.find(call => call.path.includes('/app_version/create/'))?.body).toMatchObject({
+    visibleSuggest: { departments: [], members: ['creator-private-id'], groups: [], isAll: 0 },
+    blackVisibleSuggest: { departments: [], members: [], groups: [], isAll: 0 },
+  });
+});
+
+it('preserves existing published visibility even when a creator is supplied', async () => {
+  const { client, calls } = harness();
+  await configureLarkOpenPlatformApp(client, 'cli_test', { creatorUserId: 'new-scanned-user' });
+  expect(calls.find(call => call.path.includes('/app_version/create/'))?.body).toMatchObject({
+    visibleSuggest: { departments: ['od_engineering'], members: ['ou_owner'], groups: ['g_team'], isAll: 1 },
+    blackVisibleSuggest: { departments: [], members: ['ou_blocked'], groups: [], isAll: 0 },
+  });
+});

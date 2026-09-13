@@ -51,7 +51,7 @@ function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 
   render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={target} onClose={() => {}}/></QueryClientProvider>);
 }
 
-afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+afterEach(() => { cleanup(); sessionStorage.clear(); vi.restoreAllMocks(); });
 
 describe('LarkConfigModal risk control', () => {
   it('configures the required Lark capabilities without making it another save gate', async () => {
@@ -392,6 +392,48 @@ describe('LarkConfigModal ask permission posture', () => {
 
 
 describe('LarkConfigModal explicit selection', () => {
+  it('returns a partially configured created Bot to connection setup with an explicit warning', async () => {
+    const id = '10000000-0000-4000-8000-000000000001';
+    sessionStorage.setItem('dutydeck:lark-app-creation', JSON.stringify({ requestId: id, name: '测试机器人' }));
+    const save = vi.spyOn(api, 'saveLarkConfig');
+    vi.spyOn(api, 'larkAppCreationJob').mockResolvedValue({ id, name: '测试机器人', appId: bot.appId, botSaved: true, status: 'failed', retryable: false, error: '发布未完成', createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z' });
+    renderModal(collection(), 'acp', 'new');
+    await userEvent.click(await screen.findByRole('button', { name: '继续配置已创建的机器人' }));
+    await screen.findByText('应用已创建，自动配置尚未完成。请先点击“自动配置”，或到飞书后台核对权限和发布状态。');
+    await waitFor(() => expect((screen.getByLabelText('App ID') as HTMLInputElement).value).toBe(bot.appId));
+    expect(screen.queryByRole('switch', { name: '监听飞书消息' })).toBeNull();
+    expect(save).not.toHaveBeenCalled();
+  });
+
+  it('opens the automatically created Bot for Agent setup without copying or submitting its credentials', async () => {
+    const user = userEvent.setup();
+    const existing = collection({ setupComplete: true });
+    const created = { ...bot, appId: 'cli_created', name: '新助手', tabLabel: '新助手' };
+    const saved = { ...existing, bots: [...existing.bots, created] };
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(saved);
+    const start = vi.spyOn(api, 'createLarkApp').mockImplementation(async input => {
+      vi.mocked(api.larkConfig).mockResolvedValue(saved);
+      return { id: input.requestId, name: input.name, appId: created.appId, botSaved: true, status: 'completed', retryable: false, createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z' };
+    });
+    vi.spyOn(api, 'larkAppCreationJob').mockImplementation(async id => ({ id, name: '新助手', appId: created.appId, botSaved: true, status: 'completed', retryable: false, createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z' }));
+    renderModal(existing, 'acp', { appId: bot.appId });
+    await screen.findByRole('heading', { name: '更新飞书 Bot：测试机器人' });
+    await user.click(screen.getByRole('button', { name: '新增机器人' }));
+    await user.clear(screen.getByLabelText('新机器人名称'));
+    await user.type(screen.getByLabelText('新机器人名称'), '新助手');
+    await user.keyboard('{Enter}');
+    await screen.findByRole('heading', { name: '更新飞书 Bot：新助手' });
+    await screen.findByText('默认 Agent');
+    expect(start).toHaveBeenCalledOnce();
+    expect(save).not.toHaveBeenCalled();
+    expect(screen.getByRole('switch', { name: '监听飞书消息' }).getAttribute('aria-checked')).toBe('true');
+    await user.click(screen.getByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ }));
+    await user.click(screen.getByRole('button', { name: '完成配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'agent', originalAppId: 'cli_created', fullTrustConfirmed: true, listening: true });
+    expect(save.mock.calls[0]![0]).not.toHaveProperty('appSecret');
+  });
+
   it('opens and focuses a separate new Bot form when the add button is clicked', async () => {
     const user = userEvent.setup();
     const config = collection({ setupComplete: true });
@@ -402,7 +444,7 @@ describe('LarkConfigModal explicit selection', () => {
     await user.click(screen.getByRole('button', { name: '新增机器人' }));
 
     const appId = await screen.findByLabelText('App ID') as HTMLInputElement;
-    await waitFor(() => expect(document.activeElement).toBe(appId));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText('新机器人名称')));
     expect(appId.value).toBe('');
     expect(screen.getByRole('status').textContent).toContain('正在新增机器人');
     expect(screen.getByRole('button', { name: '新增机器人' }).getAttribute('aria-pressed')).toBe('true');

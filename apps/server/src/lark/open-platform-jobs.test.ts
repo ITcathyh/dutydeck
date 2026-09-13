@@ -16,7 +16,7 @@ const result: OpenPlatformConfigurationResult = {
   versionId: 'version-public-id',
 };
 
-const client = { apiOrigin: 'https://open.feishu.cn', postJson: vi.fn(async () => ({ code: 0 })) };
+const client = { apiOrigin: 'https://open.feishu.cn', postJson: vi.fn(async () => ({ code: 0 })), postForm: vi.fn(async () => ({ code: 0 })) };
 const connected = (): ConnectedOpenPlatformSession => ({
   source: 'qr_login',
   client,

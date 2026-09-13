@@ -123,6 +123,21 @@ export type LarkOpenPlatformSetupJob = {
   result?: { status: 'ready'; scopeCount: number; eventCount: number; callbackCount: number; versionId: string };
   error?: string;
 };
+export type LarkAppCreationJob = {
+  id: string;
+  name: string;
+  status: 'preparing' | 'waiting_for_scan' | 'creating' | 'configuring' | 'completed' | 'failed' | 'cancelled';
+  appId?: string;
+  botSaved?: boolean;
+  qrDataUrl?: string;
+  scanConfirmed?: boolean;
+  accountName?: string;
+  tenantName?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+  retryable: boolean;
+};
 export type Session = { id: string; agentId: string; state: string; cwd: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string };
 export type DockEvent = { id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
@@ -211,6 +226,10 @@ export const api = {
   larkConfig: () => json<LarkConfig>('/api/lark/config'),
   startLarkOpenPlatformSetup: (appId: string, forceLogin = false) => json<LarkOpenPlatformSetupJob>('/api/lark/open-platform/configure', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, forceLogin }) }),
   larkOpenPlatformSetupJob: (jobId: string) => json<LarkOpenPlatformSetupJob>(`/api/lark/open-platform/jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
+  createLarkApp: (input: { requestId: string; name: string }) => json<LarkAppCreationJob>('/api/lark/apps/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
+  larkAppCreationJob: (jobId: string) => json<LarkAppCreationJob>(`/api/lark/apps/create/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
+  cancelLarkAppCreation: (jobId: string) => json<LarkAppCreationJob>(`/api/lark/apps/create/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' }),
+  retryLarkAppCreation: (jobId: string) => json<LarkAppCreationJob>(`/api/lark/apps/create/${encodeURIComponent(jobId)}/retry`, { method: 'POST' }),
   inspectLarkBot: (body: { appId: string; appSecret: string }) => json<{ appName: string; openId: string; avatarUrl?: string; activateStatus?: number }>('/api/lark/bot/inspect', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   saveLarkConfig: (body: {
     stage: 'lark' | 'agent';
