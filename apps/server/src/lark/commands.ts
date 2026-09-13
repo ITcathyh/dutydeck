@@ -22,12 +22,16 @@
  *    绝不会变成一个执行不了的 intent。Dutydeck 今天支撑不了的命令（/cwd、/model、/agent）
  *    直接不注册，宁可少而诚实。
  *
- * 4. `/help` **渲染只用 markdown**：飞书卡片 schema 2.0 拒绝 `note` 标签（ErrCode 200861），
- *    因此 /help 用 markdown 元素 + 分页渲染，元素数与字节数都有界。
+ * 4. `/help` **正文只用 markdown**：飞书卡片 schema 2.0 拒绝 `note` 标签（ErrCode 200861），
+ *    因此命令说明用 markdown 元素 + 分页渲染；分页导航是 callback 按钮（action `help_page`，
+ *    只读、不改任何状态，属于回调白名单动作），元素数与字节数都有界。
  *
  * 5. **未识别的 /xxx 归一化后透传**：见 {@link normalizeLarkPassthroughPrompt}。归一化后的
  *    文本不再以 `/` 开头，因此无论被谁再解析一次都不可能被认成内建命令——避免用户用
- *    `/status` 之类的字面量在后续环节「影子」掉真正的内建命令。
+ *    `/status` 之类的字面量在后续环节「影子」掉真正的内建命令。拼写接近可用命令时，
+ *    {@link routeLarkCommand} 会额外产出一条「你是不是想用」提示（见
+ *    {@link suggestLarkCommand}）；提示与透传文本是两个字段，只用于回执展示，
+ *    **绝不改写、也不拼入**发给 Agent 的 prompt。
  */
 
 // ---------------------------------------------------------------------------
@@ -139,7 +143,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'help' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject';
+export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -184,6 +188,12 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     summary: '列出当前可用的 Dutydeck 命令及其用法',
     usage: '/help [页码]',
     mutating: false
+  },
+  {
+    name: 'repair',
+    summary: '诊断并一键补齐飞书应用权限、事件订阅与卡片回调（执行前二次确认，不会自动发布）',
+    usage: '/repair',
+    mutating: true
   },
   {
     name: 'status',
@@ -275,6 +285,74 @@ export function normalizeLarkPassthroughPrompt(raw: unknown): string {
   const body = typeof raw === 'string' ? raw.trim() : '';
   if (body.startsWith(larkPassthroughMarker)) return body;
   return `${larkPassthroughMarker}\n以下内容不是 Dutydeck 命令，请按普通用户请求处理：\n${body}`;
+}
+
+// ---------------------------------------------------------------------------
+// 未知命令的「你是不是想用」建议（只提示，不阻断、不改写透传）
+// ---------------------------------------------------------------------------
+
+/** 编辑距离命中阈值：与未知命令名距离 ≤2 的可用命令才提示。 */
+const maxSuggestionDistance = 2;
+/** 最多同时提示的候选数；多候选按编辑距离升序。 */
+const maxSuggestionCount = 3;
+
+/** 标准 Levenshtein 距离。命令名上限 32 字符，直接 DP 即可，无需剪枝。 */
+function levenshtein(left: string, right: string): number {
+  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    let previous = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= right.length; j++) {
+      const current = row[j]!;
+      const cost = left[i - 1] === right[j - 1] ? 0 : 1;
+      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, previous + cost);
+      previous = current;
+    }
+  }
+  return row[right.length]!;
+}
+
+/**
+ * 为未识别的 `/xxx` 找「你是不是想用」候选，返回候选命令 token（不含前导 `/`）。
+ *
+ * 严格规则：
+ * - 入参必须本身符合命令名形态（{@link commandNamePattern}）。本函数只应在
+ *   verdict=unknown_command 后调用——多段路径（/usr/bin/bash）在 parseSlashCommand
+ *   阶段就不是命令，普通消息也进不来；这里再校一次是防御性边界，保证单测直接调用时
+ *   路径串与任意文本也不会误报。
+ * - 候选只取自**当前可用**命令（{@link listLarkCommands}，已按 capabilities 过滤
+ *   unavailable 状态），含别名；停用命令不提示。
+ * - 命中条件：编辑距离 ≤2，或任一方是另一方前缀（如 /sch → /schedule）。
+ * - 排序：编辑距离升序（前缀命中也按真实距离参与排序，远距离前缀不会压过近距离笔误），
+ *   距离相同按字典序；每条命令只留最接近的一个 token，最多 {@link maxSuggestionCount} 个。
+ * 无候选返回 undefined。
+ */
+export function suggestLarkCommand(name: unknown, capabilities: LarkCommandCapabilities): string[] | undefined {
+  if (typeof name !== 'string') return undefined;
+  const normalized = name.trim().toLowerCase();
+  if (!commandNamePattern.test(normalized)) return undefined;
+  const matches: Array<{ token: string; distance: number }> = [];
+  for (const definition of listLarkCommands(capabilities)) {
+    let best: { token: string; distance: number } | undefined;
+    for (const token of [definition.name, ...(definition.aliases ?? [])]) {
+      const distance = levenshtein(normalized, token);
+      const hit = distance <= maxSuggestionDistance
+        || normalized.startsWith(token)
+        || token.startsWith(normalized);
+      if (hit && (!best || distance < best.distance)) best = { token, distance };
+    }
+    if (best) matches.push(best);
+  }
+  if (!matches.length) return undefined;
+  matches.sort((left, right) => left.distance - right.distance || left.token.localeCompare(right.token));
+  return matches.slice(0, maxSuggestionCount).map(item => item.token);
+}
+
+/** 把候选 token 格式化成回执提示文案；调用方保证 tokens 非空且已去重排序。 */
+function formatLarkCommandSuggestion(tokens: readonly string[]): string {
+  const quoted = tokens.map(token => `\`/${token}\``);
+  const target = quoted.length === 1 ? quoted[0]! : `${quoted.slice(0, -1).join('、')} 或 ${quoted[quoted.length - 1]}`;
+  return `你是不是想用 ${target}？`;
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +456,8 @@ export interface LarkCommandHelpOptions {
 }
 
 export interface LarkCommandHelp {
+  /** 卡片标题（coordinator 以此作为 taskName / raw card header 文案）。 */
+  title: string;
   elements: LarkCardElement[];
   /** 纯文本兜底（私聊可直接发文本消息）。 */
   text: string;
@@ -403,6 +483,76 @@ const markdownElement = (elementId: string, content: string, textSize: 'normal' 
   text_size: textSize,
   margin: textSize === 'small' ? '4px 0px' : '0px'
 });
+
+/** /help 卡片标题，同时是任务卡 taskName 与翻页 raw card 的 header 文案。 */
+export const larkHelpCardTitle = '命令帮助';
+/** help_page 回调 value 里的白名单动作标记；'1' 是动作版本号，不随页码变化。 */
+const helpPageAction = '1';
+
+/** 构造 /help 翻页回调 value。page 由渲染侧夹取后写入，序列化为字符串（与既有回调风格一致）。 */
+const helpPageCallbackValue = (page: number): Record<string, string> => ({ dutydeck_help_page: helpPageAction, page: String(page) });
+
+/**
+ * 解析 help_page 回调 value。宽进严出，风格对齐 parseLarkCardActionValue：
+ * 接受 JSON 字符串或对象、page 接受字符串或数字；动作标记不符、数组/null、页码为
+ * 空串/小数/0/负数/非安全整数一律返回 undefined，绝不抛异常。
+ *
+ * 这里只能保证 page 是 ≥1 的合法整数（下界）；上界夹取由
+ * {@link renderLarkCommandHelp} 负责——总页数取决于当前运行时能力，解析层不持有
+ * capabilities，越界页码交给渲染侧夹到最后一页。
+ */
+export function parseLarkHelpPageValue(value: unknown): { page: number } | undefined {
+  let parsed: unknown = value;
+  if (typeof parsed === 'string') {
+    const text = parsed.trim();
+    if (!text) return undefined;
+    try { parsed = JSON.parse(text); } catch { return undefined; }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined;
+  const record = parsed as Record<string, unknown>;
+  if (record.dutydeck_help_page !== helpPageAction) return undefined;
+  const rawPage = record.page;
+  const numericPage = typeof rawPage === 'string' && rawPage.trim() ? Number(rawPage)
+    : typeof rawPage === 'number' ? rawPage
+      : Number.NaN;
+  if (!Number.isSafeInteger(numericPage) || numericPage < 1) return undefined;
+  return { page: numericPage };
+}
+
+/**
+ * /help 底部分页按钮。边界页的按钮直接隐藏（与 task-dashboard 的分页范式一致）；
+ * 单页时返回 undefined，不渲染任何导航元素。
+ *
+ * help_page 是**只读白名单动作**：点击只让 coordinator 用相同入参重建同一屏 /help，
+ * 不改变任务/会话状态，因此不需要一次性 CAS，也不需要任务上下文；
+ * 但它展示的命令清单与 /help 同源，接线时仍应走与 /help 相同的白名单可见性校验。
+ */
+const helpNavigation = (page: number, totalPages: number): LarkCardElement | undefined => {
+  if (totalPages <= 1) return undefined;
+  const items: Array<{ id: string; label: string; target: number }> = [
+    ...(page > 1 ? [{ id: 'command_help_prev', label: '上一页', target: page - 1 }] : []),
+    ...(page < totalPages ? [{ id: 'command_help_next', label: '下一页', target: page + 1 }] : [])
+  ];
+  return {
+    tag: 'column_set',
+    element_id: 'command_help_navigation',
+    flex_mode: 'none',
+    horizontal_spacing: '8px',
+    margin: '4px 0px 0px 0px',
+    columns: items.map(item => ({
+      tag: 'column',
+      width: 'auto',
+      vertical_align: 'center',
+      elements: [{
+        tag: 'button',
+        element_id: item.id,
+        type: 'default',
+        text: { tag: 'plain_text', content: item.label },
+        behaviors: [{ type: 'callback', value: helpPageCallbackValue(item.target) }]
+      }]
+    }))
+  };
+};
 
 /**
  * 渲染 /help。只列出当前上下文中**真的可用**的命令；分页保证元素数与字节数有界，
@@ -431,12 +581,15 @@ export function renderLarkCommandHelp(
     ...(totalPages > 1 ? [`发送 \`/help ${page < totalPages ? page + 1 : 1}\` 查看${page < totalPages ? '下一页' : '第 1 页'}。`] : []),
     '未列出的 `/xxx` 会作为普通文字交给 Agent 处理，不会被当作 Dutydeck 命令。'
   ];
+  const navigation = helpNavigation(page, totalPages);
 
   return {
+    title: larkHelpCardTitle,
     elements: [
       markdownElement('command_help_header', header),
       markdownElement('command_help_body', body),
-      markdownElement('command_help_footer', footerLines.join('\n'), 'small')
+      markdownElement('command_help_footer', footerLines.join('\n'), 'small'),
+      ...(navigation ? [navigation] : [])
     ],
     text: [header, body, footerLines.join('\n')].join('\n\n'),
     page,
@@ -451,8 +604,12 @@ export function renderLarkCommandHelp(
 export type LarkCommandRoute =
   /** 不是命令：coordinator 按今天的流程正常建任务。 */
   | { kind: 'not_a_command' }
-  /** 未识别的 /xxx：promptText 已归一化，可直接当普通请求交给 Agent。 */
-  | { kind: 'unknown_command'; parsed: ParsedSlashCommand; promptText: string }
+  /**
+   * 未识别的 /xxx：promptText 已归一化，可直接当普通请求交给 Agent。
+   * suggestion 是拼写近似可用命令时的「你是不是想用」回执提示，与 promptText 完全隔离：
+   * 只供 coordinator 附在任务回执上展示，绝不拼入 promptText（提示不阻断、不改写透传）。
+   */
+  | { kind: 'unknown_command'; parsed: ParsedSlashCommand; promptText: string; suggestion?: string }
   /** 命令层已自己产出回执（目前只有 /help），coordinator 直接发只读卡片或文本。 */
   | { kind: 'reply'; command: LarkCommandName; parsed: ParsedSlashCommand; elements: LarkCardElement[]; text: string }
   /** 命令存在但当前运行时支撑不了：回执 reason，绝不产生 intent。 */
@@ -478,8 +635,17 @@ export function routeLarkCommand(text: unknown, context: LarkCommandContext): La
   switch (evaluated.verdict) {
     case 'not_a_command':
       return { kind: 'not_a_command' };
-    case 'unknown':
-      return { kind: 'unknown_command', parsed: evaluated.parsed, promptText: normalizeLarkPassthroughPrompt(evaluated.parsed.raw) };
+    case 'unknown': {
+      // 建议与透传文本分开产出：候选只来自当前可用命令（capabilities 已过滤），
+      // 且只挂在回执字段上，promptText 原样归一化后交给 Agent。
+      const candidates = suggestLarkCommand(evaluated.parsed.name, context.capabilities);
+      return {
+        kind: 'unknown_command' as const,
+        parsed: evaluated.parsed,
+        promptText: normalizeLarkPassthroughPrompt(evaluated.parsed.raw),
+        ...(candidates?.length ? { suggestion: formatLarkCommandSuggestion(candidates) } : {})
+      };
+    }
     case 'unavailable':
       return { kind: 'unavailable', command: evaluated.definition.name, parsed: evaluated.parsed, reason: evaluated.reason };
     case 'denied':
