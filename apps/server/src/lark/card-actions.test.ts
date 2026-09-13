@@ -357,7 +357,8 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
         expect(typeof element.text?.content).toBe('string');
         expect(String(element.text?.content).trim().length).toBeGreaterThan(0);
         expect(element.element_id).toBeTruthy();
-        expect(element.size).toBe('small');
+        // 主操作按钮走默认尺寸：small 在手机上点击面积偏小，且与其他卡片按钮不一致。
+        expect(element.size).toBeUndefined();
       }
     }
   });
@@ -397,7 +398,6 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
       tag: 'button',
       text: { tag: 'plain_text', content: '中断' },
       type: 'danger',
-      size: 'small',
       behaviors: [{ type: 'callback', value: { action: 'interrupt', task_id: 'task-running', turn: '0' } }],
       margin: '0px',
       element_id: 'interrupt'
