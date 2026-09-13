@@ -1,3 +1,5 @@
+import { LarkAppCreationJobManager } from './app-creation.js';
+import { registerLarkAppCreationRoutes } from './app-creation-routes.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import { registerLarkGroupManagementRoutes, type LarkGroupManager } from './group-management.js';
 import type { FastifyInstance } from 'fastify';
@@ -35,6 +37,7 @@ export interface LarkRoutesOptions {
   runtime?: DutydeckRuntime;
   listeningDisabled?: boolean;
   agentTools?: LarkAgentToolsService;
+  appCreationJobs?: Pick<LarkAppCreationJobManager, 'start' | 'get' | 'cancel' | 'retry'>;
   openPlatformJobs?: Pick<OpenPlatformConfigurationJobManager, 'start' | 'get'>;
   /** StoredLarkConfig is the isolated legacy path during the compatibility period. */
   executionPolicy?: {
@@ -91,6 +94,9 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   app.addHook('onClose', async () => listener.stop());
   await registerLarkAgentToolRoutes(app, options.agentTools);
   await registerLarkGroupManagementRoutes(app, options.groupManager);
+  await registerLarkAppCreationRoutes(app, options.appCreationJobs ?? (options.config
+    ? new LarkAppCreationJobManager({ config: options.config, agents: options.agents, fetcher })
+    : undefined));
 
   app.get('/api/lark/status', async () => ({
     ...larkConfigurationStatus(env, await storedBot()),

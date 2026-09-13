@@ -169,7 +169,7 @@ function connected(options: {
 } = {}): ConnectedOpenPlatformSession {
   return {
     source: options.source ?? 'cache',
-    client: options.client ?? sessionClient(),
+    client: { ...(options.client ?? sessionClient()), postForm: vi.fn(async () => ({ code: 0 })) },
     owner: {
       userId: SECRETS.userId,
       userName: '张三',

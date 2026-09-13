@@ -42,6 +42,14 @@ export interface OpenPlatformOwnerIdentity {
 export interface OpenPlatformSessionClient {
   readonly apiOrigin: string;
   postJson(path: string, body?: unknown): Promise<unknown>;
+  postForm(path: string, body: FormData): Promise<unknown>;
+}
+
+/** A rejected request is distinct from a lost response to an external write. */
+export class OpenPlatformRequestError extends Error {
+  constructor(message: string, readonly statusCode: number, readonly apiCode?: number) {
+    super(message);
+  }
 }
 
 export type OpenPlatformQrStatus = 'waiting_for_scan' | 'scan_confirmed';
@@ -179,41 +187,43 @@ async function createClient(
   }
   const referer = page.finalUrl;
   const owner = extractOpenPlatformOwnerIdentity(html);
+  const post = async (path: string, body: unknown, multipart = false): Promise<unknown> => {
+    if (!/^\/developers\/v1(?:\/|$)/.test(path) || /[?#]/.test(path) || path.split('/').some(part => part === '.' || part === '..')) {
+      throw new Error('开放平台客户端仅允许访问 /developers/v1/*');
+    }
+    const hasBody = body !== undefined;
+    const response = await jar.fetch(fetcher, `${apiOrigin}${path}`, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json, text/plain, */*',
+        origin: apiOrigin,
+        referer,
+        'x-csrf-token': csrf,
+        ...(hasBody && !multipart ? { 'content-type': 'application/json' } : {}),
+      },
+      body: multipart ? body as FormData : hasBody ? JSON.stringify(body) : undefined,
+    }, {
+      allowCrossOriginRedirects: false,
+      allowedOrigins: new Set([apiOrigin]),
+    });
+    const payload = await readJson(response.response);
+    if (!response.response.ok) {
+      throw new OpenPlatformRequestError(safeOpenPlatformError(
+        `开放平台请求失败（HTTP ${response.response.status}，${path}）：${payloadMessage(payload)}`,
+      ), response.response.status);
+    }
+    const code = numericCode(payload);
+    if (code !== undefined && code !== 0) {
+      throw new OpenPlatformRequestError(safeOpenPlatformError(
+        `开放平台请求失败（code=${code}，${path}）：${payloadMessage(payload)}`,
+      ), response.response.status, code);
+    }
+    return payload;
+  };
   const client: OpenPlatformSessionClient = {
     apiOrigin,
-    async postJson(path, body) {
-      if (!/^\/developers\/v1(?:\/|$)/.test(path) || /[?#]/.test(path) || path.split('/').some(part => part === '.' || part === '..')) {
-        throw new Error('开放平台客户端仅允许访问 /developers/v1/*');
-      }
-      const hasBody = body !== undefined;
-      const response = await jar.fetch(fetcher, `${apiOrigin}${path}`, {
-        method: 'POST',
-        headers: {
-          accept: 'application/json, text/plain, */*',
-          origin: apiOrigin,
-          referer,
-          'x-csrf-token': csrf,
-          ...(hasBody ? { 'content-type': 'application/json' } : {}),
-        },
-        body: hasBody ? JSON.stringify(body) : undefined,
-      }, {
-        allowCrossOriginRedirects: false,
-        allowedOrigins: new Set([apiOrigin]),
-      });
-      const payload = await readJson(response.response);
-      if (!response.response.ok) {
-        throw new Error(safeOpenPlatformError(
-          `开放平台请求失败（HTTP ${response.response.status}，${path}）：${payloadMessage(payload)}`,
-        ));
-      }
-      const code = numericCode(payload);
-      if (code !== undefined && code !== 0) {
-        throw new Error(safeOpenPlatformError(
-          `开放平台请求失败（code=${code}，${path}）：${payloadMessage(payload)}`,
-        ));
-      }
-      return payload;
-    },
+    postJson: (path, body) => post(path, body),
+    postForm: (path, body) => post(path, body, true),
   };
   return { client, owner };
 }
