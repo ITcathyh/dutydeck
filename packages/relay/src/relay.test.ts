@@ -5,6 +5,7 @@ import {
   RelayError,
   RelayService,
   loadOrCreateRelaySigningSecret,
+  relayAskMaxChoices,
   relayCommandEnvKey,
   relaySigningSecretConfigKey,
   relayTokenEnvKey,
@@ -233,5 +234,75 @@ describe('relay ask', () => {
     for (const timeoutMs of [0, -1, 999, 3_600_001, 1.5]) {
       await expect(broker.register({ sessionId: 'ses_a', question: 'q', timeoutMs })).rejects.toMatchObject({ code: 'RELAY_INVALID_TIMEOUT' });
     }
+  });
+
+  it('passes normalized choices and multiple through the record, the ask event, and the terminal record', async () => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const registry = new RelayCapabilityRegistry(sessionLookup({ ses_a: liveSession('ses_a') }), 'http://x', 'secret');
+    const service = new RelayService(registry, publisher, broker);
+
+    const pending = service.ask(bearer(registry.tokenFor('ses_a')), 'ses_a', {
+      question: '选哪个？', multiple: true,
+      choices: [{ label: '  选项甲  ' }, { label: '选项乙', value: '  b  ' }, { label: '选项丙', value: '' }]
+    });
+    await vi.waitFor(() => expect(broker.listPending('ses_a')).toHaveLength(1));
+    const record = broker.listPending('ses_a')[0]!;
+    expect(record.choices).toEqual([{ label: '选项甲' }, { label: '选项乙', value: 'b' }, { label: '选项丙' }]);
+    expect(record.multiple).toBe(true);
+    // ask 事件同步携带选项，消费方无需回查即可渲染结构化卡片
+    expect(published[0]).toMatchObject({
+      sessionId: 'ses_a', kind: 'ask', text: '选哪个？', multiple: true,
+      choices: [{ label: '选项甲' }, { label: '选项乙', value: 'b' }, { label: '选项丙' }]
+    });
+
+    const askId = record.id;
+    await service.answer('ses_a', askId, { answer: 'b' });
+    await expect(pending).resolves.toMatchObject({ status: 'answered', answer: 'b', askId });
+    // 终态历史记录保留选项，重启/对账后仍可辨认这是结构化提问
+    expect(broker.get(askId)).toMatchObject({ status: 'answered', multiple: true, choices: record.choices });
+  });
+
+  it('omits choice keys for plain asks and ignores multiple without choices', async () => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const pending = broker.register({ sessionId: 'ses_a', question: 'q', timeoutMs: 60_000, multiple: true });
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    expect(broker.listPending()[0]?.choices).toBeUndefined();
+    expect(broker.listPending()[0]?.multiple).toBeUndefined();
+    expect(published[0]).not.toHaveProperty('choices');
+    expect(published[0]).not.toHaveProperty('multiple');
+    broker.cancelSession('ses_a');
+    await expect(pending).resolves.toMatchObject({ status: 'cancelled' });
+  });
+
+  it('rejects choices:null at the service layer instead of silently dropping it', async () => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    const registry = new RelayCapabilityRegistry(sessionLookup({ ses_a: liveSession('ses_a') }), 'http://x', 'secret');
+    const service = new RelayService(registry, publisher, broker);
+    await expect(service.ask(bearer(registry.tokenFor('ses_a')), 'ses_a', { question: 'q', choices: null as unknown as any[] }))
+      .rejects.toMatchObject({ code: 'RELAY_INVALID_CHOICES', statusCode: 400 });
+    expect(broker.listPending()).toHaveLength(0);
+    expect(published).toEqual([]);
+  });
+
+  it.each([
+    ['空数组', []],
+    ['超过上限', Array.from({ length: relayAskMaxChoices + 1 }, () => ({ label: 'x' }))],
+    ['不是数组', 'nope'],
+    ['元素不是对象', ['x']],
+    ['label 为空白', [{ label: '  ' }]],
+    ['label 超长', [{ label: 'x'.repeat(201) }]],
+    ['value 超长', [{ label: 'x', value: 'y'.repeat(201) }]],
+    ['label 重复', [{ label: 'x' }, { label: 'x' }]],
+    ['value 与另一项 label 相同', [{ label: 'x' }, { label: 'y', value: 'x' }]]
+  ])('rejects malformed choices: %s', async (_name, choices) => {
+    const { published, publisher } = recordingPublisher();
+    const broker = new RelayAskBroker(publisher);
+    await expect(broker.register({ sessionId: 'ses_a', question: 'q', timeoutMs: 60_000, choices: choices as any }))
+      .rejects.toMatchObject({ code: 'RELAY_INVALID_CHOICES', statusCode: 400 });
+    expect(broker.listPending()).toHaveLength(0);
+    expect(published).toEqual([]);
   });
 });

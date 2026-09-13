@@ -1,14 +1,52 @@
 import { randomUUID } from 'node:crypto';
-import { RelayError, type RelayAskRecord, type RelayAskStore, type RelayEventPublisher } from './types.js';
+import { RelayError, type RelayAskChoice, type RelayAskRecord, type RelayAskStore, type RelayEventPublisher } from './types.js';
 
 export const relayAskDefaultTimeoutMs = 300_000;
 export const relayAskMinTimeoutMs = 1_000;
 export const relayAskMaxTimeoutMs = 3_600_000;
+/** 结构化选项的 schema 级上限；IM 卡片侧还有自己的整卡预算，可能渲染更少 */
+export const relayAskMaxChoices = 50;
+export const relayAskChoiceMaxLength = 200;
 
 export type RelayAskOutcome =
   | { status: 'answered'; answer: string; askId: string }
   | { status: 'expired'; askId: string }
   | { status: 'cancelled'; askId: string; reason: string };
+
+/**
+ * 校验并归一化结构化选项。非法形态直接 400——这是 HTTP 边界后的唯一收口，
+ * 持久化记录与发布事件都只可能携带这里归一化过的 choices。
+ * 以 value（缺省时为 label）去重，否则卡片端会出现两个点按结果完全相同的选项。
+ */
+function normalizeChoices(input: unknown): RelayAskChoice[] | undefined {
+  if (input === undefined) return undefined;
+  const invalid = (message: string) => new RelayError('RELAY_INVALID_CHOICES', message, 400);
+  if (!Array.isArray(input) || input.length === 0 || input.length > relayAskMaxChoices) {
+    throw invalid(`提问选项必须是 1-${relayAskMaxChoices} 个的数组。`);
+  }
+  const choices: RelayAskChoice[] = [];
+  const answers = new Set<string>();
+  for (const item of input) {
+    if (!item || typeof item !== 'object') throw invalid('提问选项必须包含非空 label。');
+    const label = String((item as { label?: unknown }).label ?? '').trim();
+    if (!label || label.length > relayAskChoiceMaxLength) {
+      throw invalid(`选项文案长度必须在 1-${relayAskChoiceMaxLength} 字符之间。`);
+    }
+    const rawValue = (item as { value?: unknown }).value;
+    let value: string | undefined;
+    if (rawValue !== undefined && rawValue !== null) {
+      const trimmed = String(rawValue).trim();
+      // 显式传空串等价于不传 value，以 label 作为答案文本，避免卡片端出现空值选项。
+      if (trimmed.length > relayAskChoiceMaxLength) throw invalid(`选项值长度必须在 1-${relayAskChoiceMaxLength} 字符之间。`);
+      value = trimmed || undefined;
+    }
+    const answer = value ?? label;
+    if (answers.has(answer)) throw invalid('选项的 value（未提供 value 时为文案）不能重复。');
+    answers.add(answer);
+    choices.push(value ? { label, value } : { label });
+  }
+  return choices;
+}
 
 interface PendingAsk {
   record: RelayAskRecord;
@@ -50,7 +88,7 @@ export class RelayAskBroker {
     }
   }
 
-  async register(input: { sessionId: string; question: string; timeoutMs?: number }): Promise<RelayAskOutcome> {
+  async register(input: { sessionId: string; question: string; timeoutMs?: number; choices?: RelayAskChoice[]; multiple?: boolean }): Promise<RelayAskOutcome> {
     await this.ready;
     if (this.closed) throw new RelayError('RELAY_CLOSED', 'Dutydeck 提问通道已关闭。', 409);
     const question = input.question.trim();
@@ -59,9 +97,14 @@ export class RelayAskBroker {
     if (!Number.isInteger(timeoutMs) || timeoutMs < relayAskMinTimeoutMs || timeoutMs > relayAskMaxTimeoutMs) {
       throw new RelayError('RELAY_INVALID_TIMEOUT', '超时必须是 ' + relayAskMinTimeoutMs + '-' + relayAskMaxTimeoutMs + ' 之间的整数毫秒。', 400);
     }
+    // multiple 只在 choices 存在时成立，避免「多选但没有选项」的自相矛盾记录。
+    const choices = normalizeChoices(input.choices);
+    const multiple = choices !== undefined && input.multiple === true;
     const record: RelayAskRecord = {
       id: 'ask_' + randomUUID(), sessionId: input.sessionId, question, status: 'pending',
-      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + timeoutMs).toISOString()
+      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
+      ...(choices ? { choices } : {}),
+      ...(multiple ? { multiple: true } : {})
     };
     if (this.store && !await this.store.compareAndSet(undefined, record)) throw new RelayError('RELAY_ASK_CONFLICT', '无法登记提问。', 409);
     let resolve!: PendingAsk['resolve'];
@@ -78,7 +121,11 @@ export class RelayAskBroker {
     try {
       if (this.closed) await this.finish(ask, { status: 'cancelled', askId: record.id, reason: 'Dutydeck 服务已关闭' });
       else await Promise.race([
-        this.publisher.publish(input.sessionId, { kind: 'ask', text: question, askId: record.id }),
+        this.publisher.publish(input.sessionId, {
+          kind: 'ask', text: question, askId: record.id,
+          ...(record.choices ? { choices: record.choices } : {}),
+          ...(record.multiple ? { multiple: true } : {})
+        }),
         ask.outcome.then(() => undefined)
       ]);
     } catch (error) {

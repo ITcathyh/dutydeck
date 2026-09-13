@@ -15,6 +15,7 @@
  */
 export {
   RelayError,
+  type RelayAskChoice,
   type RelayAskRecord,
   type RelayAskStatus,
   type RelayAskStore,
@@ -42,6 +43,8 @@ export {
   relayAskDefaultTimeoutMs,
   relayAskMaxTimeoutMs,
   relayAskMinTimeoutMs,
+  relayAskMaxChoices,
+  relayAskChoiceMaxLength,
   type RelayAskOutcome
 } from './ask-broker.js';
 
