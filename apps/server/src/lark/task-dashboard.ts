@@ -1,4 +1,14 @@
+import { safeLarkWebUrl } from './card-actions.js';
+
+export interface LarkTaskDashboardPendingApproval {
+  /** workflow-interactions 里的交互 id；审批 value 必须带它走 respond 的一次性 CAS。 */
+  requestId: string;
+  /** LarkWorkflowInteractions.boot，回调时做世代校验。 */
+  generation: string;
+}
+
 export interface LarkTaskDashboardEntry {
+  /** runtime 任务 id，仅为主控组装/排序使用，渲染层绝不输出到卡片。 */
   taskId: string;
   title: string;
   workspace: string;
@@ -6,6 +16,19 @@ export interface LarkTaskDashboardEntry {
   updatedAt: string;
   url?: string;
   feedback?: 'pending' | 'accepted' | 'needs_changes';
+  /**
+   * 行内取消/中断/重试的回调任务标识：飞书消息 id（主控 tasks Map 的键）。
+   * 缺省时不渲染这三类按钮——没有它主控无法定位任务，只会是死按钮。
+   */
+  actionTaskId?: string;
+  /** 当前轮次，原样写进回调 value（字符串形态），主控据此做 stale 校验。 */
+  turn?: number;
+  /** 带待决审批时，主操作固定为「审批」，优先于状态默认操作。 */
+  pendingApproval?: LarkTaskDashboardPendingApproval;
+  /** 任务发起人 open_id，仅供主控判断他人操作的二次确认，渲染层不展示。 */
+  ownerOpenId?: string;
+  /** 显式不可重试（例如被 /new 作废）时，失败/中断行不出现重试。 */
+  retryable?: boolean;
 }
 
 export interface LarkTaskDashboardResult {
@@ -17,7 +40,6 @@ export interface LarkTaskDashboardResult {
 const PAGE_SIZE = 10;
 const MAX_TITLE_CHARS = 120;
 const MAX_WORKSPACE_CHARS = 120;
-const MAX_URL_CHARS = 512;
 
 const waitingStatuses = new Set(['waiting_for_permission', 'waiting_for_answer', 'failed', 'interrupted']);
 const runningStatuses = new Set(['queued', 'running', 'thinking', 'running_tool']);
@@ -103,18 +125,9 @@ const relativeTime = (value: unknown, now: number) => {
   return new Date(at).toISOString().slice(0, 10);
 };
 
-const validAppLink = (value: unknown) => {
-  const candidate = typeof value === 'string' ? value.trim() : '';
-  if (!candidate || candidate.length > MAX_URL_CHARS || /[\u0000-\u0020]/u.test(candidate)) return undefined;
-  try {
-    const url = new URL(candidate);
-    if (url.protocol !== 'https:' || url.username || url.password || url.port) return undefined;
-    if (url.hostname !== 'applink.feishu.cn' && url.hostname !== 'applink.larksuite.com') return undefined;
-    return candidate;
-  } catch {
-    return undefined;
-  }
-};
+// 行 Web 出口与进度卡共用同一份链接校验（card-actions.ts 的 safeLarkWebUrl），
+// 不在本模块另写一套白名单。
+const validAppLink = (value: unknown) => safeLarkWebUrl(typeof value === 'string' ? value : undefined);
 
 const markdown = (elementId: string, content: string) => ({
   tag: 'markdown', element_id: elementId, content
@@ -122,6 +135,99 @@ const markdown = (elementId: string, content: string) => ({
 
 const escapeCardInline = (value: string) =>
   value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+
+const MAX_ACTION_TASK_ID_CHARS = 256;
+
+/** 回调任务标识必须是非空飞书消息 id；缺了它主控的 tasks Map 无法定位任务，宁可不渲染。 */
+const validActionTaskId = (value: unknown) => {
+  const id = typeof value === 'string' ? value.trim() : '';
+  return id && id.length <= MAX_ACTION_TASK_ID_CHARS ? id : undefined;
+};
+
+/** turn 与 card-actions.ts 同一口径：非负有限整数向下取整，脏数据视为「不带轮次」。 */
+const validTurn = (value: unknown) =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.floor(value) : undefined;
+
+/** 审批身份两要素缺一不可，否则按钮点了必然撞 CAS 失效，属于死按钮。 */
+const validApproval = (value: LarkTaskDashboardEntry['pendingApproval']) => {
+  if (!value) return undefined;
+  const requestId = typeof value.requestId === 'string' ? value.requestId.trim() : '';
+  const generation = typeof value.generation === 'string' ? value.generation.trim() : '';
+  return requestId && generation ? { requestId, generation } : undefined;
+};
+
+/**
+ * 取消/中断/重试的回调 value，与 card-actions.ts 的 callbackValue 完全同构
+ * （{action,task_id,turn} 全字符串字段），主控 parseLarkCardActionValue 可直接解析。
+ * 缺轮次时省略 turn，兼容主控的遗留卡片路径（按任务当前轮处理）。
+ */
+const taskActionValue = (action: 'cancel' | 'interrupt' | 'retry', taskId: string, turn: number | undefined) => ({
+  action,
+  task_id: taskId,
+  ...(turn === undefined ? {} : { turn: String(turn) })
+});
+
+/** 审批回调 value 与 workflow-interactions.ts 的按钮同形，主控只能走 respond 的一次性决议 CAS。 */
+const workflowActionValue = (action: 'approve' | 'reject', approval: NonNullable<LarkTaskDashboardEntry['pendingApproval']>) => ({
+  dutydeck_workflow: action,
+  request_id: approval.requestId,
+  generation: approval.generation
+});
+
+type RowPrimaryAction = {
+  label: string;
+  buttonType: 'default' | 'primary' | 'danger';
+  value: Record<string, string>;
+};
+
+/**
+ * 每行只给一个主操作（终裁 P0-1）：
+ * 待决审批优先于一切；否则 queued→取消、running 系（running/thinking/running_tool）→中断、
+ * failed/interrupted→重试（retryable === false 除外）；终态与等待回答不渲染主操作。
+ */
+const primaryRowAction = (
+  entry: LarkTaskDashboardEntry,
+  approval: LarkTaskDashboardPendingApproval | undefined
+): RowPrimaryAction | undefined => {
+  if (approval) return { label: '审批', buttonType: 'primary', value: workflowActionValue('approve', approval) };
+  const taskId = validActionTaskId(entry.actionTaskId);
+  if (!taskId) return undefined;
+  const turn = validTurn(entry.turn);
+  const status = String(entry.status ?? '').trim().toLowerCase();
+  if (status === 'queued') {
+    return { label: '取消', buttonType: 'default', value: taskActionValue('cancel', taskId, turn) };
+  }
+  if (status === 'running' || status === 'thinking' || status === 'running_tool') {
+    return { label: '中断', buttonType: 'danger', value: taskActionValue('interrupt', taskId, turn) };
+  }
+  if ((status === 'failed' || status === 'interrupted') && entry.retryable !== false) {
+    return { label: '重试', buttonType: 'primary', value: taskActionValue('retry', taskId, turn) };
+  }
+  return undefined;
+};
+
+/**
+ * 次要操作收进 JSON 2.0 overflow 菜单，避免手机上每行一堵按钮墙。
+ * 注意 overflow 的 behaviors.value 是全组共用的，被点选项只通过回调 event.action.option 区分
+ * （官方组件文档，2026-09-13 核证），所以这里约束：一个菜单至多放一个回调型选项，
+ * 共用 value 就是该动作的完整回调值；「返回原会话」只配 multi_url 跳转。
+ * 仅有跳转选项时整个菜单不挂 behaviors，结构上不可能发出回调。
+ */
+const rowOverflow = (
+  rowIndex: number,
+  url: string | undefined,
+  approval: LarkTaskDashboardPendingApproval | undefined
+): Record<string, any> | undefined => {
+  const options: Array<Record<string, any>> = [];
+  if (approval) options.push({ text: { tag: 'plain_text', content: '拒绝' }, value: 'reject' });
+  if (url) {
+    options.push({ text: { tag: 'plain_text', content: '返回原会话' }, value: 'open_chat', multi_url: { url } });
+  }
+  if (!options.length) return undefined;
+  const element: Record<string, any> = { tag: 'overflow', element_id: `row_more_${rowIndex}`, options };
+  if (approval) element.behaviors = [{ type: 'callback', value: workflowActionValue('reject', approval) }];
+  return element;
+};
 
 const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorkspace?: string) => {
   const entry = item.entry;
@@ -134,25 +240,33 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
   const location = sharedWorkspace ? '' : ` · ${workspace}`;
   const summary = `${title}\n${statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}`;
   const url = validAppLink(entry.url);
+  const approval = validApproval(entry.pendingApproval);
+  const primary = primaryRowAction(entry, approval);
+  const overflow = rowOverflow(rowIndex, url, approval);
   const summaryElement = {
     tag: 'div',
     text: { tag: 'plain_text', content: summary, lines: 3 },
     width: 'auto',
     margin: '0px'
   };
+  const hasTrailing = Boolean(primary || overflow);
   const columns: Array<Record<string, any>> = [{
-    tag: 'column', width: url ? 'weighted' : 'auto', ...(url ? { weight: 1 } : {}),
+    tag: 'column', width: hasTrailing ? 'weighted' : 'auto', ...(hasTrailing ? { weight: 1 } : {}),
     vertical_align: 'center', elements: [summaryElement]
   }];
-  if (url) {
+  if (primary) {
     columns.push({
       tag: 'column', width: 'auto', vertical_align: 'center', elements: [{
         tag: 'button',
-        type: 'default',
-        text: { tag: 'plain_text', content: '返回原会话' },
-        behaviors: [{ type: 'open_url', default_url: url }]
+        element_id: `row_act_${rowIndex}`,
+        type: primary.buttonType,
+        text: { tag: 'plain_text', content: primary.label },
+        behaviors: [{ type: 'callback', value: primary.value }]
       }]
     });
+  }
+  if (overflow) {
+    columns.push({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [overflow] });
   }
   return {
     tag: 'column_set',

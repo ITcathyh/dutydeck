@@ -3,10 +3,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { RelayAskBroker } from '@dutydeck/relay';
+import { RelayAskBroker, type RelayAskChoice } from '@dutydeck/relay';
 import { createRepositories } from '@dutydeck/storage';
 import { createRelayAskStore } from '../relay-ask-store.js';
-import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
+import { buildLarkCard, larkCardSafeLimits } from './service.js';
+import { LarkWorkflowInteractions, countCardComponents, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import type { LarkCardService } from './service.js';
 import type { AgentEvent, PermissionRequestData, TaskRecord } from '@dutydeck/shared';
 import type { LarkMessageEvent, LarkRuntime } from './listener.js';
@@ -398,5 +399,284 @@ describe('permission interaction retry after Runtime pre-consumption faults', ()
       repositories.close();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('structured ask cards (P0-2)', () => {
+  interface StructuredHarness {
+    directory: string;
+    repositories: ReturnType<typeof createRepositories>;
+    service: LarkCardService;
+    reply: ReturnType<typeof vi.fn>;
+    broker: RelayAskBroker;
+    workflow: LarkWorkflowInteractions;
+    ask: (index: number, choices?: RelayAskChoice[], multiple?: boolean, question?: string)
+      => Promise<{ waiting: Promise<unknown>; askId: string; ctx: LarkInteractionContext; event: AgentEvent }>;
+    cleanup: () => Promise<void>;
+    cardAt: (index: number) => Record<string, any>;
+  }
+
+  const setupHarness = async (): Promise<StructuredHarness> => {
+    const { directory, repositories } = await openDatabase();
+    const { runtime } = makeRuntime([runningTask()], []);
+    const { service, reply } = makeService();
+    const broker = new RelayAskBroker({ publish: async () => undefined }, createRelayAskStore(repositories.config));
+    const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, broker, async () => true);
+    const ask: StructuredHarness['ask'] = async (index, choices, multiple = false, question = '怎么继续？') => {
+      // 先前提问可能仍在 pending，也可能已被回答：按「出现新 id」等待本次登记完成，
+      // 不能只看 pending 数量，否则会取到上一个 ask 的 id。
+      const before = new Set(broker.listPending().map(item => item.id));
+      const waiting = broker.register({
+        sessionId: 'ses_one', question, timeoutMs: 60_000,
+        ...(choices ? { choices } : {}), ...(multiple ? { multiple: true } : {})
+      });
+      let registerError: unknown;
+      void waiting.catch(error => { registerError = error; });
+      await vi.waitFor(() => {
+        if (registerError) throw registerError;
+        if (!broker.listPending().some(item => !before.has(item.id))) throw new Error('提问尚未登记');
+      });
+      const askId = broker.listPending().find(item => !before.has(item.id))!.id;
+      const ctx = context({ event: larkMessage({ messageId: `om_structured_${index}` }) });
+      return { waiting, askId, ctx, event: agentEvent('text', { relay: 'ask', askId }) };
+    };
+    return {
+      directory, repositories, service, reply, broker, workflow, ask,
+      cleanup: async () => { repositories.close(); await rm(directory, { recursive: true, force: true }); },
+      cardAt: index => reply.mock.calls[index]![0] as Record<string, any>
+    };
+  };
+
+  const findRecord = async (workflow: LarkWorkflowInteractions, askId: string) =>
+    (await workflow.list('app_one')).find(record => record.nativeId === askId)!;
+
+  it('开关缺省时：带选项的 ask 与无选项 ask 逐字节一致，均为经典文本卡', async () => {
+    const h = await setupHarness();
+    try {
+      const plain = await h.ask(0);
+      const withChoices = await h.ask(1, [{ label: '跑测试' }, { label: '直接合并' }]);
+      await h.workflow.observe(plain.ctx, plain.event);
+      await h.workflow.observe(withChoices.ctx, withChoices.event);
+      const classic = [
+        { tag: 'div', text: { tag: 'plain_text', content: '怎么继续？' } },
+        { tag: 'markdown', content: '回复此卡片即可回答。' }
+      ];
+      expect(h.cardAt(0).elements).toEqual(classic);
+      expect(JSON.stringify(h.cardAt(1).elements)).toBe(JSON.stringify(h.cardAt(0).elements));
+      for (const card of [h.cardAt(0), h.cardAt(1)]) {
+        expect(JSON.stringify(card.elements)).not.toContain('form');
+        expect(card.webBaseUrl).toBeUndefined();
+      }
+      const records = await h.workflow.list('app_one');
+      expect(records).toHaveLength(2);
+      expect(records.every(record => record.structured === undefined && record.multiple === undefined)).toBe(true);
+    } finally { await h.cleanup(); }
+  });
+
+  it('单选：每个选项一个回调按钮，点按经同一 CAS 把选项 value 送达 broker', async () => {
+    const h = await setupHarness();
+    try {
+      const single = await h.ask(0, [{ label: '跑全部测试', value: 'test' }, { label: '直接合并' }]);
+      await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true });
+      const card = h.cardAt(0);
+      const buttons = card.elements.filter((element: any) => element.tag === 'button');
+      expect(buttons.map((button: any) => button.text.content)).toEqual(['跑全部测试', '直接合并']);
+      const record = await findRecord(h.workflow, single.askId);
+      expect(buttons[0]).toMatchObject({ behaviors: [{ value: { dutydeck_workflow: 'answer', request_id: record.id, generation: record.boot, answer: 'test' } }] });
+      expect(buttons[1]).toMatchObject({ behaviors: [{ value: { answer: '直接合并' } }] });
+      expect(JSON.stringify(card.elements)).toContain('引用本卡片');
+      expect(record).toMatchObject({ structured: true });
+      expect(record.multiple).toBeUndefined();
+
+      // 伪造回调值先于 CAS 被拒，卡片保持 pending 可继续点按
+      await expect(h.workflow.respond(responseInput(record, { answer: 'not-an-option' })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_CHOICE_INVALID' });
+      expect((await findRecord(h.workflow, single.askId)).state).toBe('pending');
+
+      // 合法点按走与审批相同的 generation CAS + broker.answer，一次性决议
+      const response = await h.workflow.respond(responseInput(record, { answer: 'test' }));
+      expect(response).toBe('回答已送达原任务。');
+      await expect(single.waiting).resolves.toMatchObject({ status: 'answered', answer: 'test' });
+
+      // 引用卡片回复是自由文本兜底，不经过选项校验（低版本客户端入口）
+      const quoted = await h.ask(1, [{ label: '选项甲' }]);
+      await h.workflow.observe(quoted.ctx, quoted.event, { structuredAskCards: true });
+      const quotedRecord = await findRecord(h.workflow, quoted.askId);
+      await h.workflow.respond(responseInput(quotedRecord, { callback: false, cardId: undefined, generation: undefined, answer: '我自己的答案' }));
+      await expect(quoted.waiting).resolves.toMatchObject({ status: 'answered', answer: '我自己的答案' });
+    } finally { await h.cleanup(); }
+  });
+
+  it('多选：原生表单收集所选值，提交时经 selected 一次性 CAS 合并送达', async () => {
+    const h = await setupHarness();
+    try {
+      const choices = [{ label: '甲', value: 'a' }, { label: '乙', value: 'b' }, { label: '丙', value: 'c' }];
+      const multiple = await h.ask(0, choices, true);
+      await h.workflow.observe(multiple.ctx, multiple.event, { structuredAskCards: true });
+      const form = h.cardAt(0).elements.find((element: any) => element.tag === 'form');
+      expect(form).toBeDefined();
+      const select = form.elements.find((element: any) => element.tag === 'multi_select_static');
+      expect(select).toMatchObject({ name: 'answer', options: [{ value: 'a' }, { value: 'b' }, { value: 'c' }] });
+      const submit = form.elements.find((element: any) => element.tag === 'button');
+      expect(submit).toMatchObject({ form_action_type: 'submit', behaviors: [{ value: { dutydeck_workflow: 'answer', multiple: true } }] });
+      // form 必须位于卡片 body 根层级（JSON 2.0 不允许嵌进其它组件）
+      const assembled = buildLarkCard({ state: 'running', permissionMode: 'ask', elements: h.cardAt(0).elements });
+      expect(assembled.body.elements.some((element: any) => element.tag === 'form')).toBe(true);
+
+      const record = await findRecord(h.workflow, multiple.askId);
+      expect(record).toMatchObject({ structured: true, multiple: true });
+      await expect(h.workflow.respond(responseInput(record, { selected: [] })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_CHOICE_INVALID' });
+      await expect(h.workflow.respond(responseInput(record, { selected: ['a', 'x'] })))
+        .rejects.toMatchObject({ code: 'LARK_ANSWER_CHOICE_INVALID' });
+      expect((await findRecord(h.workflow, multiple.askId)).state).toBe('pending');
+
+      await h.workflow.respond(responseInput(record, { selected: ['c', 'a', 'a'] }));
+      // 去重后按提交顺序合并成一条答案文本
+      await expect(multiple.waiting).resolves.toMatchObject({ status: 'answered', answer: 'c、a' });
+    } finally { await h.cleanup(); }
+  });
+
+  it('自由文本：无选项 ask 在开关开启时渲染 input 表单（max_length 1000），文本回答照常决议', async () => {
+    const h = await setupHarness();
+    try {
+      const free = await h.ask(0);
+      await h.workflow.observe(free.ctx, free.event, { structuredAskCards: true });
+      const form = h.cardAt(0).elements.find((element: any) => element.tag === 'form');
+      expect(form).toBeDefined();
+      expect(form.elements.find((element: any) => element.tag === 'input'))
+        .toMatchObject({ name: 'answer', input_type: 'multiline_text', max_length: 1000 });
+      expect(form.elements.find((element: any) => element.tag === 'multi_select_static')).toBeUndefined();
+      const submit = form.elements.find((element: any) => element.tag === 'button');
+      expect(submit).toMatchObject({ form_action_type: 'submit', behaviors: [{ value: { dutydeck_workflow: 'answer' } }] });
+      const record = await findRecord(h.workflow, free.askId);
+      expect(record.structured).toBeUndefined();
+      await h.workflow.respond(responseInput(record, { answer: '先只跑 smoke 用例' }));
+      await expect(free.waiting).resolves.toMatchObject({ status: 'answered', answer: '先只跑 smoke 用例' });
+    } finally { await h.cleanup(); }
+  });
+
+  it('升级前持久化的旧 ask 记录（无 structured 标记）：即使以卡片回调提交任意文本，也按自由文本接受', async () => {
+    const h = await setupHarness();
+    try {
+      // broker 侧带选项，但交互记录是旧版本持久化的（没有 structured/multiple）
+      const legacy = await h.ask(0, [{ label: '选项甲', value: 'a' }]);
+      const record: LarkInteraction = {
+        appId: 'app_one', sessionId: 'ses_one', taskId: 'task_one', turn: 1, event: larkMessage(),
+        id: 'interaction_legacy', boot: h.workflow.boot, kind: 'ask', nativeId: legacy.askId,
+        question: '怎么继续？', state: 'pending', cardId: 'om_legacy_card', updatedAt: new Date().toISOString()
+      };
+      await persistInteraction(h.repositories.config, record);
+      await h.workflow.respond(responseInput(record, { cardId: 'om_legacy_card', answer: '完全自由的文本' }));
+      await expect(legacy.waiting).resolves.toMatchObject({ status: 'answered', answer: '完全自由的文本' });
+    } finally { await h.cleanup(); }
+  });
+
+  it('CAS：重复回调只决议一次，第二击只拿到 stale，冻结只画一次', async () => {
+    const h = await setupHarness();
+    try {
+      const single = await h.ask(0, [{ label: '跑全部测试', value: 'test' }, { label: '直接合并' }]);
+      await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true });
+      const record = await findRecord(h.workflow, single.askId);
+      const outcomes = await Promise.allSettled([
+        h.workflow.respond(responseInput(record, { answer: 'test' })),
+        h.workflow.respond(responseInput(record, { answer: 'test' }))
+      ]);
+      expect(outcomes.filter(outcome => outcome.status === 'fulfilled')).toHaveLength(1);
+      expect(outcomes.filter(outcome => outcome.status === 'rejected')).toHaveLength(1);
+      expect((outcomes.find(outcome => outcome.status === 'rejected') as PromiseRejectedResult).reason)
+        .toMatchObject({ code: 'LARK_INTERACTION_EXPIRED' });
+      await expect(single.waiting).resolves.toMatchObject({ status: 'answered', answer: 'test' });
+      expect(h.broker.get(single.askId)).toMatchObject({ status: 'answered' });
+      // renderClosed 只画一次冻结卡，第二击不产生重复 PATCH
+      expect(h.service.update).toHaveBeenCalledTimes(1);
+    } finally { await h.cleanup(); }
+  });
+
+  it('过期 generation 的回调只被拒绝，不触碰 broker，当前代点击仍正常决议', async () => {
+    const h = await setupHarness();
+    try {
+      const single = await h.ask(0, [{ label: '跑全部测试', value: 'test' }]);
+      await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true });
+      const record = await findRecord(h.workflow, single.askId);
+      await expect(h.workflow.respond(responseInput(record, { generation: 'boot_other' })))
+        .rejects.toMatchObject({ code: 'LARK_INTERACTION_EXPIRED' });
+      expect(h.broker.get(single.askId)?.status).toBe('pending');
+      expect(h.service.update).not.toHaveBeenCalled();
+      await h.workflow.respond(responseInput(record, { answer: 'test' }));
+      await expect(single.waiting).resolves.toMatchObject({ status: 'answered', answer: 'test' });
+    } finally { await h.cleanup(); }
+  });
+
+  it('选项集超出整卡预算时回落为经典文本卡，回落卡仍在 24KB/180 预算内', async () => {
+    const h = await setupHarness();
+    try {
+      // 50 个近 200 字选项（relay schema 上限）：每个选项在按钮里出现两次（文案 + 回调值），
+      // 整卡约 30KB，触发字节预算回落。
+      const choices: RelayAskChoice[] = Array.from({ length: 50 }, (_, index) =>
+        ({ label: `选项${String(index).padStart(2, '0')}${'内'.repeat(195)}` }));
+      const oversized = await h.ask(0, choices);
+      await h.workflow.observe(oversized.ctx, oversized.event, { structuredAskCards: true });
+      const card = h.cardAt(0);
+      expect(card.elements.some((element: any) => element.tag === 'form')).toBe(false);
+      expect(card.elements.some((element: any) => element.tag === 'button')).toBe(false);
+      expect(card.elements).toContainEqual({ tag: 'markdown', content: '回复此卡片即可回答。' });
+      // 回落卡真整卡试算必须达标，不能把超预算内容原样发给飞书
+      const assembled = buildLarkCard({
+        state: 'running', statusLabel: '等待回答', awaitingHuman: true, readOnly: true,
+        taskName: 'Agent 需要你的回答', permissionMode: 'ask', elements: card.elements
+      });
+      expect(Buffer.byteLength(JSON.stringify(assembled), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+      expect(countCardComponents(assembled)).toBeLessThanOrEqual(larkCardSafeLimits.components);
+    } finally { await h.cleanup(); }
+  });
+
+  it('群 @ 开启且选项超预算回落时：@ 元素保留、问题正文不被提示语下标错位覆盖', async () => {
+    const h = await setupHarness();
+    try {
+      // 同预算体量（约 30KB）触发回落；同时开启群 @：元素序列变为 [group_mention, 问题div, hint]。
+      const choices: RelayAskChoice[] = Array.from({ length: 50 }, (_, index) =>
+        ({ label: `选项${String(index).padStart(2, '0')}${'内'.repeat(195)}` }));
+      const oversized = await h.ask(0, choices, false, '请选择发布范围');
+      const groupCtx = context({ event: larkMessage({ messageId: 'om_group_ask', senderOpenId: 'ou_alice' }) });
+      await h.workflow.observe(groupCtx, oversized.event, { structuredAskCards: true, groupMention: true });
+      const card = h.cardAt(0);
+      expect(card.elements[0]).toMatchObject({ tag: 'markdown', element_id: 'group_mention', content: '<at user_id="ou_alice">成员</at>' });
+      // 回落只能替换 hint 自身：严禁按固定下标写 elements[1]，否则群 @ 开启时覆盖的是问题正文。
+      expect(card.elements[1]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: '请选择发布范围' } });
+      expect(card.elements.some((element: any) => element.tag === 'form')).toBe(false);
+      expect(card.elements).toContainEqual({ tag: 'markdown', content: '回复此卡片即可回答。' });
+      expect(JSON.stringify(card.elements)).not.toContain('点选下方选项');
+    } finally { await h.cleanup(); }
+  });
+
+  it('组件计数与 service.ts 同口径：带 tag 的对象递归计 1', () => {
+    expect(countCardComponents([{ tag: 'a' }, { tag: 'b', children: [{ tag: 'c' }] }])).toBe(3);
+    expect(countCardComponents(Array.from({ length: 181 }, () => ({ tag: 'markdown' })))).toBe(181);
+  });
+
+  it('webBaseUrl 仅在开关开启且地址合法时透传，未配置/非法/开关关闭均不渲染', async () => {
+    const h = await setupHarness();
+    try {
+      const withChoices = await h.ask(0, [{ label: '选项甲' }]);
+      await h.workflow.observe(withChoices.ctx, withChoices.event,
+        { structuredAskCards: true, webBaseUrl: 'https://dutydeck.example.com' });
+      expect(h.cardAt(0).webBaseUrl).toBe('https://dutydeck.example.com');
+
+      const illegal = await h.ask(1, [{ label: '选项乙' }]);
+      await h.workflow.observe(illegal.ctx, illegal.event,
+        { structuredAskCards: true, webBaseUrl: 'javascript:alert(1)' });
+      expect(h.cardAt(1).webBaseUrl).toBeUndefined();
+
+      const flagOff = await h.ask(2, [{ label: '选项丙' }]);
+      await h.workflow.observe(flagOff.ctx, flagOff.event,
+        { structuredAskCards: false, webBaseUrl: 'https://dutydeck.example.com' });
+      expect(h.cardAt(2).webBaseUrl).toBeUndefined();
+
+      const trimmed = await h.ask(3);
+      await h.workflow.observe(trimmed.ctx, trimmed.event,
+        { structuredAskCards: true, webBaseUrl: '  https://x.example.com  ' });
+      expect(h.cardAt(3).webBaseUrl).toBe('https://x.example.com');
+    } finally { await h.cleanup(); }
   });
 });
