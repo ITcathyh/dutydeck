@@ -181,6 +181,20 @@ export async function configureLarkOpenPlatformApp(
   }
   await post(client, `/developers/v1/publish/commit/${appId}/${versionId}`, { clientId: appId },
     'publish_failed', '发布飞书应用版本失败');
+  const published = await post(client, `/developers/v1/app_version/list/${appId}`, {},
+    'publish_verification_read_failed', '发布请求已提交，但回读发布状态失败，请核对该应用版本');
+  const versions = asRecord(asRecord(published).data).versions;
+  const version = Array.isArray(versions)
+    ? versions.find(item => extractVersionId(item) === versionId)
+    : undefined;
+  // Console versionStatus: 2 = published, 1 = under review, 0 = not submitted.
+  // A successful commit response alone does not prove publication.
+  if (asRecord(version).versionStatus === 1) {
+    throw new LarkOpenPlatformConfigurationError('publish_pending_review', '应用版本已提交，正在等待飞书管理员审核');
+  }
+  if (asRecord(version).versionStatus !== 2) {
+    throw new LarkOpenPlatformConfigurationError('publish_verification_failed', '发布请求已提交，但该版本尚未确认发布，请核对开放平台状态');
+  }
 
   return {
     status: 'ready',
@@ -250,15 +264,18 @@ function collectScopeEntries(value: unknown, bucket: ScopeBucket | undefined, ou
   }
   if (!isRecord(value)) return;
   const explicitBucket = scopeBucket(value.scopeType) ?? scopeBucket(value.identity) ?? bucket;
+  const buckets = Array.isArray(value.scopeType)
+    ? [...new Set(value.scopeType.map(scopeBucket).filter((item): item is ScopeBucket => Boolean(item)))]
+    : [explicitBucket];
   const name = pickString(value, ['scope_name', 'scopeName', 'name', 'key', 'scopeKey']);
   const id = pickString(value, ['id', 'scope_id', 'scopeId', 'scopeID']);
   const status = finiteNumber(value.status);
-  if (name && id) out.push({
-    ...(explicitBucket ? { bucket: explicitBucket } : {}),
-    ...(status === undefined ? {} : { status }),
-    name,
-    id,
-  });
+  if (name && id) for (const identity of buckets) {
+    const identityStatus = identity && isRecord(value.scopeType2ScopeStatus)
+      ? finiteNumber(value.scopeType2ScopeStatus[identity === 'tenant' ? '2' : '1'])
+      : status;
+    out.push({ ...(identity ? { bucket: identity } : {}), status: identityStatus, name, id });
+  }
   for (const [key, child] of Object.entries(value)) {
     if (child && typeof child === 'object') {
       collectScopeEntries(child, bucketFromContainer(key) ?? explicitBucket, out);
@@ -269,14 +286,16 @@ function collectScopeEntries(value: unknown, bucket: ScopeBucket | undefined, ou
 function verifyRequiredScopes(payload: unknown, scopeIds: string[]): void {
   const catalog: ScopeEntry[] = [];
   collectScopeEntries(payload, undefined, catalog);
+  // Console states: 1 = selected in draft (待发布), 5 = enabled (已开通).
+  // Requiring enabled before publication prevents new permissions from ever being submitted.
   const verifiedIds = new Set(catalog
-    .filter(entry => entry.status === 5)
+    .filter(entry => entry.bucket !== 'user' && (entry.status === 1 || entry.status === 5))
     .map(entry => entry.id));
   const missing = scopeIds.filter(id => !verifiedIds.has(id));
   if (missing.length > 0) {
     throw new LarkOpenPlatformConfigurationError(
       'scope_verification_failed',
-      `飞书有 ${missing.length} 项必需权限未在更新后生效，已停止发布`,
+      `飞书有 ${missing.length} 项必需应用权限未加入待发布草稿或已开通列表，已停止发布`,
     );
   }
 }
@@ -288,6 +307,8 @@ function bucketFromContainer(key: string): ScopeBucket | undefined {
 }
 
 function scopeBucket(value: unknown): ScopeBucket | undefined {
+  if (value === 2) return 'tenant';
+  if (value === 1) return 'user';
   if (typeof value !== 'string') return undefined;
   if (/^(?:app|client|tenant)$/i.test(value)) return 'tenant';
   if (/^user$/i.test(value)) return 'user';

@@ -14,17 +14,17 @@ const uuid = 'dfe543ed-a565-46af-8f04-552fd038df58';
 const repos: ReturnType<typeof createRepositories>[] = [];
 afterEach(() => { for (const repo of repos.splice(0)) repo.close(); });
 
-async function harness(tty = true) {
+async function harness(tty = true, versionStatus = 2) {
   const repositories = createRepositories(':memory:');
   repos.push(repositories);
   await repositories.agents.save(agentConfigSchema.parse({ id: 'ccflash', name: 'CCFlash', protocol: 'pty-cli', adapterId: 'claude-code', command: process.execPath, model: 'gemini-3.8-flash-high' }));
   let stdout = ''; let stderr = '';
   const ui = createCliUi({ tty, color: false, stdout: { write: text => { stdout += text; } }, stderr: { write: text => { stderr += text; } } });
-  let scopes = false; let events = false; let callbacks = false; let callbackMode = 0;
+  let scopes = false; let events = false; let callbacks = false; let callbackMode = 0; let published = false;
   const postJson = vi.fn(async (path: string, body?: Record<string, unknown>): Promise<unknown> => {
     if (path.includes('/manifest/upsert_by_template')) return { data: { ClientID: 'cli_created' } };
     if (path.includes('/secret/')) return { data: { secret } };
-    if (path.includes('/scope/all/')) return { data: { appScopeList: LARK_COMMON_TENANT_SCOPES.map((scopeName, i) => ({ scopeId: `s-${i}`, scopeName, status: scopes ? 5 : 0 })) } };
+    if (path.includes('/scope/all/')) return { data: { appScopeList: LARK_COMMON_TENANT_SCOPES.map((scopeName, i) => ({ scopeId: `s-${i}`, scopeName, status: published && versionStatus === 2 ? 5 : scopes ? 1 : 0 })) } };
     if (path.includes('/scope/update/')) { scopes = true; return { code: 0 }; }
     if (path.includes('/robot/switch/') || path.includes('/event/switch/')) return { code: 0 };
     if (path.includes('/event/update/')) { events = true; return { code: 0 }; }
@@ -32,12 +32,12 @@ async function harness(tty = true) {
     if (path.includes('/callback/switch/')) { callbackMode = 4; return { code: 0 }; }
     if (path.includes('/callback/update/')) { callbacks = true; return { code: 0 }; }
     if (path === '/developers/v1/callback/cli_created') return { data: { callbackMode, callbacks: callbacks ? ['card.action.trigger'] : [] } };
-    if (path.includes('/app_version/list/')) return { data: { versions: [] } };
+    if (path.includes('/app_version/list/')) return { data: { versions: published ? [{ versionId: 'first-version', appVersion: '0.0.1', versionStatus }] : [] } };
     if (path.includes('/app_version/create/')) {
       expect(body?.visibleSuggest).toMatchObject({ members: ['private-user'] });
       return { data: { versionId: 'first-version' } };
     }
-    if (path.includes('/publish/commit/')) return { code: 0 };
+    if (path.includes('/publish/commit/')) { published = true; return { code: 0 }; }
     throw new Error(`Unexpected endpoint: ${path}`);
   });
   const postForm = vi.fn(async (_path: string, form: FormData) => {
@@ -87,6 +87,24 @@ it('saves a draft without an Agent, then completes that same bot on resume', asy
   const resumed = await runLarkCreate(undefined, { resume: first.job!.id, agent: 'ccflash', fullTrust: true }, h.context);
   expect(resumed).toMatchObject({ ok: true, bot: { defaultAgentId: 'ccflash', listening: false } });
   expect(h.connect).toHaveBeenCalledOnce();
+});
+
+it('reports a real configurator review result and binds the requested Agent without publishing twice', async () => {
+  const h = await harness(true, 1);
+  const result = await runLarkCreate('Bot', { agent: 'ccflash', fullTrust: true, listen: true }, h.context);
+  expect(result).toMatchObject({ ok: true, job: { status: 'pending_review', retryable: false }, bot: { defaultAgentId: 'ccflash' }, next: expect.stringContaining('审核通过后生效') });
+  expect(result).not.toHaveProperty('error');
+  expect(h.output()).toContain('正在等待飞书管理员审核');
+  expect(h.output()).not.toContain('已回读确认');
+  expect(result.next).toContain("dutydeck restart --database '/tmp/Bot'\\''s state.db'");
+  expect(result.next).toContain("dutydeck start --database '/tmp/Bot'\\''s state.db'");
+  const count = h.postJson.mock.calls.length;
+  const resumed = await runLarkCreate(undefined, { resume: result.job!.id }, h.context);
+  expect(resumed.job?.status).toBe('pending_review');
+  expect(h.postJson).toHaveBeenCalledTimes(count);
+  const queried = await runLarkCreate(undefined, { resume: result.job!.id, status: true, json: true }, h.context);
+  expect(queried).toMatchObject({ ok: true, job: { status: 'pending_review' } });
+  expect(h.postJson).toHaveBeenCalledTimes(count);
 });
 
 it.each([

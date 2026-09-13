@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { LarkAppCreationJobManager } from './app-creation.js';
+import { LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
 import { OpenPlatformRequestError, OpenPlatformSessionError, type ConnectedOpenPlatformSession, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 
@@ -154,6 +155,43 @@ it('preserves an already-saved app and never replays uncertain configuration', a
   expect(h.postJson.mock.calls.some(([path]) => path.includes('/secret/'))).toBe(false);
   await expect(h.manager.retry(id)).rejects.toMatchObject({ statusCode: 409 });
 });
+
+it('reports a permission failure and resumes configuration of the same saved app', async () => {
+  const h = harness();
+  h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError('scope_verification_failed', '必需应用权限未加入待发布草稿'));
+  await h.manager.start(id, 'Bot'); await h.manager.wait(id);
+  expect(await h.manager.get(id)).toMatchObject({
+    status: 'failed', botSaved: true, retryable: true,
+    error: expect.stringContaining('必需应用权限未加入待发布草稿（scope_verification_failed）'),
+  });
+  const restarted = new LarkAppCreationJobManager(h.options);
+  await restarted.retry(id); await restarted.wait(id);
+  expect(await restarted.get(id)).toMatchObject({ status: 'completed', appId: 'cli_created' });
+  expect(h.configure).toHaveBeenCalledTimes(2);
+  expect(h.postJson.mock.calls.filter(([path]) => path.includes('upsert_by_template'))).toHaveLength(1);
+  expect(h.postJson.mock.calls.filter(([path]) => path.includes('/secret/'))).toHaveLength(1);
+});
+
+it('preserves a submitted review as a distinct terminal state without replaying publication', async () => {
+  const h = harness();
+  h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError('publish_pending_review', '应用版本已提交，正在等待飞书管理员审核'));
+  await h.manager.start(id, 'Bot'); await h.manager.wait(id);
+  const restarted = new LarkAppCreationJobManager(h.options);
+  expect(await restarted.get(id)).toMatchObject({ status: 'pending_review', appId: 'cli_created', botSaved: true, retryable: false });
+  expect(await restarted.get(id)).not.toHaveProperty('error');
+  await expect(restarted.retry(id)).rejects.toMatchObject({ statusCode: 409 });
+  expect(h.configure).toHaveBeenCalledOnce();
+});
+
+it.each(['version_create_failed', 'version_verification_failed', 'publish_failed', 'publish_verification_failed', 'unknown_future_failure'])(
+  'never replays an uncertain configuration failure: %s', async code => {
+    const h = harness();
+    h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError(code, '配置未完成'));
+    await h.manager.start(id, 'Bot'); await h.manager.wait(id);
+    expect(await h.manager.get(id)).toMatchObject({ status: 'failed', botSaved: true, retryable: false });
+    await expect(h.manager.retry(id)).rejects.toMatchObject({ statusCode: 409 });
+  },
+);
 
 it.each(['creating', 'configuring'] as const)('recovers interrupted %s fail-closed without external writes', async status => {
   const h = harness();

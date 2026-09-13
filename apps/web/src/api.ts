@@ -126,7 +126,7 @@ export type LarkOpenPlatformSetupJob = {
 export type LarkAppCreationJob = {
   id: string;
   name: string;
-  status: 'preparing' | 'waiting_for_scan' | 'creating' | 'configuring' | 'completed' | 'failed' | 'cancelled';
+  status: 'preparing' | 'waiting_for_scan' | 'creating' | 'configuring' | 'completed' | 'pending_review' | 'failed' | 'cancelled';
   appId?: string;
   botSaved?: boolean;
   qrDataUrl?: string;

@@ -392,6 +392,22 @@ describe('LarkConfigModal ask permission posture', () => {
 
 
 describe('LarkConfigModal explicit selection', () => {
+  it('continues a submitted review directly to Agent settings and preserves the review notice', async () => {
+    const id = '10000000-0000-4000-8000-000000000001';
+    sessionStorage.setItem('dutydeck:lark-app-creation', JSON.stringify({ requestId: id, name: '测试机器人' }));
+    const setup = vi.spyOn(api, 'startLarkOpenPlatformSetup');
+    const save = vi.spyOn(api, 'saveLarkConfig');
+    vi.spyOn(api, 'larkAppCreationJob').mockResolvedValue({ id, name: '测试机器人', appId: bot.appId, botSaved: true, status: 'pending_review', retryable: false, createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z' });
+    renderModal(collection(), 'acp', 'new');
+    await userEvent.click(await screen.findByRole('button', { name: '继续配置已创建的机器人' }));
+    await screen.findByText('默认 Agent');
+    await screen.findByText('应用已提交发布，正在等待飞书管理员审核。可以先保存 Agent 设置，审核通过后生效。');
+    expect(screen.queryByText(/自动配置尚未完成/)).toBeNull();
+    expect(screen.queryByRole('button', { name: '自动配置', exact: true })).toBeNull();
+    expect(setup).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+  });
+
   it('returns a partially configured created Bot to connection setup with an explicit warning', async () => {
     const id = '10000000-0000-4000-8000-000000000001';
     sessionStorage.setItem('dutydeck:lark-app-creation', JSON.stringify({ requestId: id, name: '测试机器人' }));

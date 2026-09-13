@@ -41,6 +41,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const [openPlatformJobId, setOpenPlatformJobId] = useState('');
   const [creationBusy, setCreationBusy] = useState(false);
   const [creationNeedsSetup, setCreationNeedsSetup] = useState('');
+  const [creationPendingReview, setCreationPendingReview] = useState('');
   const hydratedSelection = useRef<string | null>(null);
   const form = useRef<HTMLFormElement>(null);
   const enableListeningAfterNewBot = useRef(false);
@@ -128,11 +129,12 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
     setStep(1);
     requestAnimationFrame(() => form.current?.querySelector<HTMLInputElement>(`input[name="${focusName}"]`)?.focus());
   };
-  const onAppCreated = async (createdAppId: string, configured: boolean) => {
+  const onAppCreated = async (createdAppId: string, configured: boolean, pendingReview = false) => {
     const latest = await api.larkConfig();
     if (!latest.bots.some(bot => bot.appId === createdAppId)) throw new Error('尚未读取到已创建机器人的配置，请重试连接。');
     enableListeningAfterNewBot.current = configured;
     setCreationNeedsSetup(configured ? '' : createdAppId);
+    setCreationPendingReview(pendingReview ? createdAppId : '');
     qc.setQueryData(['lark-config'], latest);
     setSelectedAppId(createdAppId);
     setStep(configured ? 2 : 1);
@@ -151,6 +153,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
           <div className="mb-1 grid grid-cols-2 rounded-md bg-muted p-1"><button type="button" onClick={() => setStep(1)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out ${step === 1 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">1</span>连接飞书应用</button><button type="button" disabled={!current} onClick={() => setStep(2)} className={`min-h-10 rounded-md px-3 text-caption font-medium transition-colors duration-fast ease-out disabled:opacity-40 ${step === 2 ? 'bg-surface text-primary shadow-card' : 'text-subtle'}`}><span className="mr-1.5 inline-grid h-5 w-5 place-items-center rounded-full bg-inverse text-meta text-on-inverse">2</span>选择 Agent 并启用</button></div>
           <p role={selectedAppId === '' ? 'status' : undefined} className="-mt-1 text-caption text-subtle">{step === 1 ? current ? '填写飞书应用凭据并配置必要能力；成员范围可以留空，稍后再收紧。' : '正在新增机器人。可以扫码创建新应用，或填写已有应用的 App ID 和 App Secret，再点击“下一步”。' : '选择处理飞书消息的 Agent、确认工作方式并启用监听。'}</p>
           {agents.length === 0 && <Banner tone="warning" role="alert">当前没有可用 Agent。你可以先保存飞书应用，但完成绑定前需要安装并登录 Agent CLI，然后重启 Dutydeck。</Banner>}
+          {current?.appId === creationPendingReview && <Banner tone="warning">应用已提交发布，正在等待飞书管理员审核。可以先保存 Agent 设置，审核通过后生效。</Banner>}
           {step === 1 ? <>
           {current?.appId === creationNeedsSetup && openPlatformJob.data?.status !== 'completed' && <Banner tone="warning">应用已创建，自动配置尚未完成。请先点击“自动配置”，或到飞书后台核对权限和发布状态。</Banner>}
           {!current && <LarkAppCreationPanel onCreated={onAppCreated} onBusyChange={setCreationBusy}/>}
