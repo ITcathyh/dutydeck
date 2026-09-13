@@ -75,6 +75,8 @@ export interface CliAdapter {
   busyPattern?: RegExp;
   /** Current rendered footer evidence that vetoes screen-derived completion. */
   screenBusyPattern?: RegExp;
+  /** Animated status line in the rendered viewport; a later completion line supersedes it. */
+  screenActivityPattern?: RegExp;
   idleToBusyPattern?: RegExp;
   readyPattern?: RegExp;
   staticBusyPattern?: RegExp;

@@ -233,6 +233,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
 
     completionPattern: CLAUDE_FAMILY_COMPLETION_RE,
     screenBusyPattern: /\besc to interrupt\b/i,
+    screenActivityPattern: /^\s*[*·✢✳✶✻✽]\s+\p{L}[\p{L} '-]*(?:…|\.{3})(?:[ \t].*)?$/u,
     readyPattern: /❯/,
   };
 }

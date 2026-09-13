@@ -676,7 +676,12 @@ export class PtyCliDriver implements AgentDriver {
       // Streaming can pause with an old prompt still on screen. Only the
       // current footer counts; earlier busy text may remain in the answer.
       const footer = this.snapshot?.lastLine() ?? '';
-      if (this.adapter.screenBusyPattern?.test(footer)) {
+      // Claude can hide its interrupt footer behind a paste hint. Its latest
+      // status line still shows activity below the previous turn's duration.
+      const activity = this.adapter.screenActivityPattern;
+      const statusLine = activity ? this.snapshot?.viewportText().split('\n').reverse()
+        .find(line => activity.test(line) || this.adapter.completionPattern?.test(line)) : undefined;
+      if (this.activeSubmission || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))) {
         // Keep checking even if the next redraw only clears the footer.
         this.idleDetector?.reset();
         this.idleDetector?.seedReadyEvidence();
