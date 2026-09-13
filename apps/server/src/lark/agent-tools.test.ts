@@ -108,6 +108,65 @@ describe('Agent group collaboration domain service', () => {
     await expect(tools.self(token)).rejects.toMatchObject({ code: 'GROUP_TOOL_SESSION_EXPIRED', statusCode: 401 });
   });
 
+  it('distinguishes a thread root message from a native thread ID in session bindings', () => {
+    expect(larkAgentSessionBinding(session({ sourceId: 'cli_current:oc_group:group:thread:om_root' }))).toEqual({ sessionId: 'ses_lark', appId: 'cli_current', chatId: 'oc_group', chatType: 'group', threadRootMessageId: 'om_root' });
+    expect(larkAgentSessionBinding(session({ sourceId: 'cli_current:oc_group:group:thread:omt_topic' }))).toEqual({ sessionId: 'ses_lark', appId: 'cli_current', chatId: 'oc_group', chatType: 'group', threadId: 'omt_topic' });
+  });
+
+  it.each(['om_root', 'omt_topic'])('keeps reads and replies within the thread bound by %s', async scope => {
+    const current = fakeClient({
+      getMessage: vi.fn(async id => ({ ...message(id, '1000', 'scoped'), threadId: id === 'om_other' ? 'omt_other' : 'omt_topic' }))
+    });
+    const { repos, activeSession, tools, token } = await setup({ cli_current: current });
+    await repos.sessions.save({ ...activeSession, sourceId: `cli_current:oc_group:group:thread:${scope}` });
+    const initial = await tools.messages(token);
+    await tools.wait(token, { after: initial.cursor, timeoutMs: 0 });
+    expect(current.listChatMessages).toHaveBeenCalledWith({ threadId: 'omt_topic', order: 'desc', pageSize: 20 });
+    expect(current.listChatMessages).toHaveBeenCalledWith(expect.objectContaining({ threadId: 'omt_topic', order: 'asc' }));
+    if (scope === 'omt_topic') expect(current.getMessage).not.toHaveBeenCalled();
+    await expect(tools.message(token, { messageId: 'om_reply' })).resolves.toMatchObject({ messageId: 'om_reply', threadId: 'omt_topic' });
+    await expect(tools.message(token, { messageId: 'om_other' })).rejects.toMatchObject({ code: 'GROUP_MESSAGE_OUT_OF_SCOPE' });
+    await expect(tools.send(token, { content: 'blocked', replyTo: 'om_other', inThread: true })).rejects.toMatchObject({ code: 'GROUP_REPLY_OUT_OF_SCOPE' });
+    await expect(tools.sendFile(token, { path: 'report.txt', replyTo: 'om_other', inThread: true })).rejects.toMatchObject({ code: 'GROUP_MESSAGE_OUT_OF_SCOPE' });
+    expect(current.replyText).not.toHaveBeenCalled();
+    await tools.send(token, { content: 'scoped', replyTo: 'om_reply', inThread: true, idempotencyKey: 'thread-reply' });
+    expect(current.replyText).toHaveBeenCalledWith({ messageId: 'om_reply', text: 'scoped', replyInThread: true, idempotencyKey: 'thread-reply' });
+  });
+
+  it.each([undefined, 'om_not_a_thread'])('does not broaden reads when a root has no native thread ID (%s)', async threadId => {
+    const current = fakeClient({ getMessage: vi.fn(async id => ({ ...message(id, '1000', 'root'), threadId })) });
+    const { repos, activeSession, tools, token } = await setup({ cli_current: current });
+    await repos.sessions.save({ ...activeSession, sourceId: 'cli_current:oc_group:group:thread:om_root' });
+    await expect(tools.messages(token)).rejects.toMatchObject({ code: 'GROUP_THREAD_UNAVAILABLE', statusCode: 409 });
+    await expect(tools.message(token, { messageId: 'om_other' })).rejects.toMatchObject({ code: 'GROUP_THREAD_UNAVAILABLE' });
+    expect(current.listChatMessages).not.toHaveBeenCalled();
+    await expect(tools.self(token)).resolves.toMatchObject({ chatId: 'oc_group' });
+    await expect(tools.message(token, { messageId: 'om_root' })).resolves.toMatchObject({ messageId: 'om_root' });
+    await tools.send(token, { content: 'start the topic', replyTo: 'om_root', inThread: true });
+    expect(current.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_root', replyInThread: true }));
+    vi.mocked(current.getMessage).mockImplementation(async id => ({ ...message(id, '1000', 'root'), threadId: 'omt_created' }));
+    await tools.messages(token);
+    expect(current.listChatMessages).toHaveBeenCalledWith({ threadId: 'omt_created', order: 'desc', pageSize: 20 });
+  });
+
+  it('rejects a root lookup belonging to a different chat', async () => {
+    const current = fakeClient({ getMessage: vi.fn(async id => ({ ...message(id, '1000', 'other'), chatId: 'oc_other', threadId: 'omt_other' })) });
+    const { repos, activeSession, tools, token } = await setup({ cli_current: current });
+    await repos.sessions.save({ ...activeSession, sourceId: 'cli_current:oc_group:group:thread:om_root' });
+    await expect(tools.messages(token)).rejects.toMatchObject({ code: 'GROUP_MESSAGE_OUT_OF_SCOPE', statusCode: 403 });
+    expect(current.listChatMessages).not.toHaveBeenCalled();
+    await expect(tools.send(token, { content: 'blocked', replyTo: 'om_root', inThread: true })).rejects.toMatchObject({ code: 'GROUP_REPLY_OUT_OF_SCOPE' });
+    expect(current.replyText).not.toHaveBeenCalled();
+  });
+
+  it('reports root lookup failures without falling back to group history', async () => {
+    const current = fakeClient({ getMessage: vi.fn(async () => { throw new LarkServiceError('LARK_MESSAGE_NOT_FOUND', 'Root was deleted', 404); }) });
+    const { repos, activeSession, tools, token } = await setup({ cli_current: current });
+    await repos.sessions.save({ ...activeSession, sourceId: 'cli_current:oc_group:group:thread:om_root' });
+    await expect(tools.messages(token)).rejects.toMatchObject({ code: 'GROUP_TOOL_LARK_ERROR', statusCode: 404 });
+    expect(current.listChatMessages).not.toHaveBeenCalled();
+  });
+
   it('keeps the same scoped token across service restarts with a persisted signing secret', async () => {
     const repos = createRepositories(':memory:'); repositories.push(repos);
     const activeSession = session();

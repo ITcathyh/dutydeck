@@ -22,7 +22,7 @@ export const groupToolsSigningSecretConfigKey = 'lark.group_tools.signing_secret
 const maxMessageLimit = 50;
 const maxWaitTimeoutMs = 30_000;
 
-export interface LarkAgentSessionBinding { sessionId: string; appId: string; chatId: string; chatType: 'group' | 'p2p'; threadId?: string }
+export interface LarkAgentSessionBinding { sessionId: string; appId: string; chatId: string; chatType: 'group' | 'p2p'; threadId?: string; threadRootMessageId?: string }
 
 export function larkAgentSessionBinding(session: Pick<Session, 'id' | 'source' | 'sourceId'>): LarkAgentSessionBinding | undefined {
   if (session.source !== 'lark' || !session.sourceId) return;
@@ -36,11 +36,10 @@ export function larkAgentSessionBinding(session: Pick<Session, 'id' | 'source' |
   // 持久化为 chatId 的 ou_* 记录，避免升级后旧会话突然失去工具能力。
   if (chatType === 'group') {
     if (!chatId.startsWith('oc_')) return;
-    // sourceId 格式：${appId}:${chatId}:group:${scopeId}
-    // scopeId 可能是 thread:${threadId}、user:${openId} 或 message:${messageId}
-    const scopeType = parts[3];
-    const threadId = scopeType === 'thread' ? parts[4] : undefined;
-    return { sessionId: session.id, appId, chatId, chatType: 'group', ...(threadId ? { threadId } : {}) };
+    // thread 路由可锚到根消息 om_*，不能直接作为原生话题 omt_* 查询。
+    const scope = parts[3] === 'thread' ? parts[4] : undefined;
+    return { sessionId: session.id, appId, chatId, chatType: 'group',
+      ...(scope?.startsWith('om_') ? { threadRootMessageId: scope } : scope ? { threadId: scope } : {}) };
   }
   if (chatType === 'p2p') {
     if (!chatId.startsWith('oc_') && !chatId.startsWith('ou_')) return;
@@ -484,7 +483,8 @@ export class LarkAgentToolsService {
     const after = GroupMessageCursor.parse(input.after);
     // 话题内的消息拉取优先按 threadId 限定范围，避免拿到群里其他话题的消息；
     // 非话题群聊（按 user/message 隔离）则按 chatId 拉取整个群。
-    const container = context.threadId ? { threadId: context.threadId } : { chatId: context.chatId };
+    const threadId = await this.resolveThreadId(context);
+    const container = threadId ? { threadId } : { chatId: context.chatId };
     if (!after) {
       const requestStartedAt = Date.now();
       const result = await this.authorized(context, 'messages', () => context.client.listChatMessages({ ...container, order: 'desc', pageSize: limit }));
@@ -524,7 +524,7 @@ export class LarkAgentToolsService {
       throw new AgentGroupToolError('INVALID_GROUP_MESSAGE_ID', 'messageId 只能使用 om_* 消息 ID。', 400);
     }
     const message = await this.authorized(context, 'message', () => context.client.getMessage(messageId));
-    this.assertMessageScope(context, message);
+    await this.assertMessageScope(context, message);
     // 拉取单条消息时，若为合并转发（merge_forward），展开其转发的子消息内容。
     const parsed = await parseLarkMessageContent(message.messageType, message.rawContent, {
       messageId: message.messageId,
@@ -547,9 +547,21 @@ export class LarkAgentToolsService {
     };
   }
 
-  private assertMessageScope(context: ToolContext, message: LarkChatMessage) {
-    if (message.chatId !== context.chatId) throw new AgentGroupToolError('GROUP_MESSAGE_OUT_OF_SCOPE', '消息不属于当前飞书群，已拒绝读取。', 403);
-    if (context.threadId && message.threadId !== context.threadId) throw new AgentGroupToolError('GROUP_MESSAGE_OUT_OF_SCOPE', '消息不属于当前绑定话题，已拒绝读取。', 403);
+  private async resolveThreadId(context: ToolContext): Promise<string | undefined> {
+    if (context.threadId || !context.threadRootMessageId) return context.threadId;
+    const root = await this.authorized(context, 'message', () => context.client.getMessage(context.threadRootMessageId!));
+    if (root.chatId !== context.chatId) throw new AgentGroupToolError('GROUP_MESSAGE_OUT_OF_SCOPE', '话题根消息不属于当前飞书群，已拒绝读取。', 403);
+    if (!root.threadId?.startsWith('omt_')) throw new AgentGroupToolError('GROUP_THREAD_UNAVAILABLE', '当前根消息尚无可读取的原生话题，已拒绝扩大到全群读取。', 409);
+    context.threadId = root.threadId;
+    return root.threadId;
+  }
+
+  private async assertMessageScope(context: ToolContext, message: LarkChatMessage, reply = false) {
+    const code = reply ? 'GROUP_REPLY_OUT_OF_SCOPE' : 'GROUP_MESSAGE_OUT_OF_SCOPE';
+    if (message.chatId !== context.chatId) throw new AgentGroupToolError(code, '消息不属于当前飞书群，已拒绝访问。', 403);
+    if (context.threadRootMessageId === message.messageId) return;
+    const threadId = await this.resolveThreadId(context);
+    if (threadId && message.threadId !== threadId) throw new AgentGroupToolError(code, '消息不属于当前绑定话题，已拒绝访问。', 403);
   }
 
   async wait(token: string | undefined, input: { after?: string; limit?: number; timeoutMs?: number } = {}) {
@@ -602,7 +614,7 @@ export class LarkAgentToolsService {
     if (input.replyTo?.trim()) {
       const replyTo = input.replyTo.trim();
       const original = await this.authorized(context, 'reply', () => context.client.getMessage(replyTo));
-      if (original.chatId !== context.chatId || (context.threadId && original.threadId !== context.threadId)) throw new AgentGroupToolError('GROUP_REPLY_OUT_OF_SCOPE', 'replyTo 不属于当前飞书群或话题，已拒绝跨范围回复。', 403);
+      await this.assertMessageScope(context, original, true);
       return this.authorized(context, 'reply', () => context.client.replyText({
         messageId: replyTo, text, ...(input.inThread ? { replyInThread: true } : {}), idempotencyKey
       }));
@@ -615,7 +627,7 @@ export class LarkAgentToolsService {
     if (!context.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
     const path = input.path?.trim(); if (!path) throw new AgentGroupToolError('ARTIFACT_PATH_REQUIRED', 'path 不能为空。', 400);
     if (input.inThread && !input.replyTo?.trim()) throw new AgentGroupToolError('GROUP_THREAD_REPLY_TARGET_REQUIRED', '话题内回复必须同时传入 replyTo。', 400);
-    if (input.replyTo) { const original = await this.authorized(context, 'reply', () => context.client.getMessage(input.replyTo!.trim())); this.assertMessageScope(context, original); }
+    if (input.replyTo) { const original = await this.authorized(context, 'reply', () => context.client.getMessage(input.replyTo!.trim())); await this.assertMessageScope(context, original); }
     const { session } = await this.capabilities.resolveSession(token);
     const client = context.client;
     const target = input.replyTo ? { chatId: context.chatId, replyTo: input.replyTo.trim(), ...(input.inThread ? { inThread: true } : {}) } : { chatId: context.chatId };
