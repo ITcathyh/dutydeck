@@ -39,6 +39,17 @@ export interface LarkCliOptions {
 
 export interface IdentityPreflightCliOptions { groupBinding?: string[] }
 
+export interface LarkCreateCliOptions {
+  resume?: string;
+  status?: boolean;
+  json?: boolean;
+  agent?: string;
+  workspace?: string;
+  listen?: boolean;
+  fullTrust?: boolean;
+  database?: string;
+}
+
 export interface AgentGroupCliOptions {
   after?: string;
   limit?: string;
@@ -119,6 +130,7 @@ export interface CliHandlers {
   secretRotate?(id: string, options: SecretRotateCliOptions): void | Promise<void>;
   secretRemove?(id: string, options: SecretRemoveCliOptions): void | Promise<void>;
   larkSend?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
+  larkCreate?(name: string | undefined, options: LarkCreateCliOptions): void | Promise<void>;
   larkUpdate?(markdown: string | undefined, options: LarkCliOptions): void | Promise<void>;
   identityPreflight?(channelBotId: string, options: IdentityPreflightCliOptions): void | Promise<void>;
   work?(operation: string, args: string[], options?: { file?: string; key?: string; turn?: string }): void | Promise<void>;
@@ -283,7 +295,33 @@ Examples:
   $ dutydeck autostart status
   $ dutydeck autostart status --json`);
 
-  const lark = program.command('lark').description('Send and update Dutydeck Lark cards');
+  const lark = program.command('lark').description('Create Lark bots and send or update Dutydeck cards');
+  lark.command('create')
+    .description('Scan a QR code to create, configure and submit a new Feishu bot for publication')
+    .argument('[name]', 'New bot name (1–50 characters); omit when resuming')
+    .option('--resume <id>', 'Continue the same creation job; safely retry a failed job without recreating its app')
+    .option('--status', 'Only inspect the --resume job; never scan, retry or change Agent settings')
+    .option('--json', 'Emit one JSON line; requires --status because creation needs a terminal QR scan')
+    .option('--agent <id>', 'Execution Agent ID, including custom profiles such as ccflash')
+    .option('--workspace <directory>', 'Existing absolute Agent working directory')
+    .option('--full-trust', 'Allow the selected Agent to execute unattended Lark tasks with full trust')
+    .option('--listen', 'Save listening as enabled; apply with dutydeck start/restart')
+    .action((name, options, command) => handlers.larkCreate?.(name, {
+      ...options,
+      ...(typeof command.optsWithGlobals().database === 'string' ? { database: command.optsWithGlobals().database as string } : {}),
+    }))
+    .addHelpText('after', `
+Behaviour:
+  创建和续跑需要交互终端；每次新建都会重新扫码确认账号与企业。
+  App Secret 仅保存到本地数据库；创建完成后可直接选择执行 Agent，也可在 Dashboard 继续。
+  中断后用输出的 --resume 命令续跑；创建或发布结果未知时停止重试，避免重复创建应用。
+  数据库默认沿用本机 daemon，可用全局 --database 指定。监听配置在启动/重启服务后生效。
+
+Examples:
+  $ dutydeck lark create "Dutydeck 助手"
+  $ dutydeck lark create "CCFlash 助手" --agent ccflash --full-trust --listen
+  $ dutydeck lark create --resume <job-id>
+  $ dutydeck lark create --resume <job-id> --status --json`);
   addCardOptions(lark.command('send')
     .description('Send a new Dutydeck card')
     .argument('[markdown]', 'Final Markdown or fallback card content')
@@ -484,6 +522,7 @@ Examples:
   $ dutydeck daemon start --port 4310
   $ dutydeck daemon status
   $ dutydeck acpk agents list --json
+  $ dutydeck lark create "CCFlash 助手" --agent ccflash --full-trust --listen
   $ dutydeck lark send "**任务已完成**"
   $ dutydeck lark update "**最新结果**" --message-id om_xxx
   $ dutydeck lark preflight bot-id --group-binding binding-id

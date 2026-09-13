@@ -64,6 +64,20 @@ describe('Dutydeck CLI', () => {
     expect(larkSend).toHaveBeenCalledWith('**done**', expect.objectContaining({ agentName: 'My Agent', receiveId: 'user@example.com', receiveIdType: 'email', taskId: 'task-1', appId: 'cli_test', readOnly: true }));
   });
 
+  it.each(['before', 'after'])('parses Lark creation and global database %s the subcommand', async position => {
+    const larkCreate = vi.fn();
+    const database = ['--database', '/tmp/bot creation.db'];
+    const args = ['lark', 'create', 'CCFlash 助手', '--agent', 'ccflash', '--full-trust', '--listen', '--workspace', '/tmp/project'];
+    await createCliProgram('0.0.6', { larkCreate }).parseAsync(['node', 'dutydeck', ...(position === 'before' ? [...database, ...args] : [...args, ...database])]);
+    expect(larkCreate).toHaveBeenCalledWith('CCFlash 助手', { agent: 'ccflash', fullTrust: true, listen: true, workspace: '/tmp/project', database: '/tmp/bot creation.db' });
+  });
+
+  it('parses read-only Lark creation status without a new name or unrelated global credentials', async () => {
+    const larkCreate = vi.fn();
+    await createCliProgram('0.0.6', { larkCreate }).parseAsync(['node', 'dutydeck', '--lark-app-secret', 'never-forward', 'lark', 'create', '--resume', 'job-id', '--status', '--json']);
+    expect(larkCreate).toHaveBeenCalledWith(undefined, { resume: 'job-id', status: true, json: true });
+  });
+
   it('requires a message id for lark update', async () => {
     const larkUpdate = vi.fn();
     const program = createCliProgram('0.0.6', { larkUpdate }).exitOverride();

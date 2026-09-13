@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { createCliProgram, environmentFromCli, type CliOptions } from './cli-program.js';
 import { startLocalServer } from './service.js';
 import { runLarkSend, runLarkUpdate } from './lark/cli.js';
+import { runLarkCreate } from './lark/create-cli.js';
+import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { runWorkCommand } from './work-item-cli.js';
 import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupSendFile, runGroupWait } from './lark/agent-tools-cli.js';
@@ -294,6 +296,22 @@ async function main() {
     secretRotate: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRotate(id, options, context))); },
     secretRemove: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRemove(id, options, context))); },
     larkSend: async (markdown, options) => { output(await runLarkSend(markdown, options)); },
+    larkCreate: async (name, options) => {
+      const configured = options.database
+        ? loadConfig({ ...process.env, DUTYDECK_DATABASE_URL: options.database }).databaseUrl
+        : readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl;
+      const repositories = createRepositories(configured);
+      try {
+        // Persisted profiles match the daemon; first-run profiles also include DUTYDECK_AGENTS_JSON.
+        const agents = {
+          ...repositories.agents,
+          get: async (id: string) => await repositories.agents.get(id) ?? loadConfig(process.env, PTY_AGENT_CONTRIBUTIONS).agents.find(agent => agent.id === id),
+          list: async () => [...new Map([...loadConfig(process.env, PTY_AGENT_CONTRIBUTIONS).agents, ...await repositories.agents.list()].map(agent => [agent.id, agent])).values()],
+        };
+        const result = await runLarkCreate(name, options, { config: repositories.config, agents, database: configured });
+        if (!result.ok) process.exitCode = 1;
+      } finally { repositories.close(); }
+    },
     larkUpdate: async (markdown, options) => { output(await runLarkUpdate(markdown, options)); },
     identityPreflight: async (channelBotId, options) => {
       const result = await runIdentityPreflightCli(channelBotId, options);
