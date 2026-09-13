@@ -403,7 +403,7 @@ describe('LarkConfigModal explicit selection', () => {
     await screen.findByText('默认 Agent');
     await screen.findByText('应用已提交发布，正在等待飞书管理员审核。可以先保存 Agent 设置，审核通过后生效。');
     expect(screen.queryByText(/自动配置尚未完成/)).toBeNull();
-    expect(screen.queryByRole('button', { name: '自动配置', exact: true })).toBeNull();
+    expect(screen.queryByRole('button', { name: '自动配置' })).toBeNull();
     expect(setup).not.toHaveBeenCalled();
     expect(save).not.toHaveBeenCalled();
   });
