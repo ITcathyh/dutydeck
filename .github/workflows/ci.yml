@@ -1,13 +1,25 @@
 name: CI
 
-on:
+'on':
   push:
     branches: [master]
   pull_request:
+  schedule:
+    # 每天 UTC 18:17（北京时间次日 02:17）触发全量已构建扩展套件；schedule 仅在默认分支 (master) 生效
+    - cron: '17 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -20,11 +32,23 @@ jobs:
           node-version: 22
           cache: 'pnpm'
 
-      - run: pnpm install --frozen-lockfile
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
-      - run: pnpm typecheck
+      - name: Install tmux and Playwright Chromium system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y tmux
+          pnpm exec playwright install --with-deps chromium
 
-      - run: pnpm test
+      # 内部包 dist 产物需要在类型检查前生成
+      - name: Build packages and application
+        run: pnpm build
+
+      - name: Type check
+        run: pnpm typecheck
+
+      - name: Unit and integration tests
+        run: pnpm test
         env:
           ANTHROPIC_BASE_URL: ''
           ANTHROPIC_MODEL: ''
@@ -32,4 +56,21 @@ jobs:
           ANTHROPIC_API_KEY: ''
           CLAUDE_CODE_OAUTH_TOKEN: ''
 
-      - run: pnpm build
+      # PR 与 master push 仅运行核心已构建套件（复用 pnpm build 产物，不重复执行 build）
+      - name: Run Core E2E Tests (PR & Master)
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: pnpm e2e:core:run
+
+      # 定时任务与手动触发仅运行全量扩展套件（复用 pnpm build 产物）
+      - name: Run Full E2E Tests (Daily Schedule & Dispatch)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        run: pnpm e2e:full:run
+
+      - name: Upload E2E Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts
+          path: artifacts/e2e/
+          retention-days: 14
+          if-no-files-found: ignore
