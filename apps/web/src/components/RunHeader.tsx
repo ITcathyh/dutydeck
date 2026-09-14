@@ -1,7 +1,7 @@
 import { Archive, BookOpen, ChevronRight, Folder, MessageSquare, PanelRightOpen, Square, Terminal } from 'lucide-react';
 import type { Agent, Session, Task } from '../api';
 import type { StreamStatus } from '../sse';
-import { nextActionForState, sessionErrorSummary, shortRunId, workspaceName } from '../workspace-model';
+import { nextActionForState, sessionErrorSummary, sessionWorkspaceName, shortRunId } from '../workspace-model';
 import { Badge, Banner, Button, IconButton, Tabs } from './primitives';
 import { effectiveStatus, permissionLabels, stateTone } from './ui';
 
@@ -41,7 +41,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   onToggleRaw(): void;
 }) {
   const managed = session.source === 'work_item';
-  const workspace = workspaceName(session.cwd);
+  const workspace = sessionWorkspaceName(session);
   const taskGoal = taskPrompt?.trim() || '未命名任务';
   // 状态文案、是否呼吸、能否重新启动全部来自同一个判断，见 ui.tsx:effectiveStatus。
   // 这里曾经四处直接读 session.state，归档任务因此显示「思考中」+ 呼吸动画，

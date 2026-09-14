@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { RunSummary, Session } from './api';
 import type { WorkbenchView } from './workspace-model';
-import { attentionReasonForSession, formatRelativeTime, groupSessionsByWorkspace, needsAttention, orderSessionsForWorkbench, sessionErrorSummary, sessionMatchesView, workbenchCounts, workbenchTaskSection, workbenchViewLabels, workbenchViewOrder, workspaceName } from './workspace-model';
+import { attentionReasonForSession, formatRelativeTime, groupSessionsByWorkspace, needsAttention, normalizeWorkspacePath, orderSessionsForWorkbench, sessionErrorSummary, sessionMatchesView, sessionWorkspaceDirectory, sessionWorkspaceName, workbenchCounts, workbenchTaskSection, workbenchViewLabels, workbenchViewOrder, workspaceName } from './workspace-model';
 
 const session = (id: string, cwd: string, state: string, updatedAt: string): Session => ({ id, cwd, state, updatedAt, createdAt: updatedAt, agentId: 'codex', runId: `run-${id}` });
 
@@ -14,6 +14,63 @@ describe('workspace model', () => {
     ]);
     expect(groups.map(group => group.name)).toEqual(['alpha', 'beta']);
     expect(groups[0].sessions.map(item => item.id)).toEqual(['3', '1']);
+  });
+
+  it('同源的两个独立 worktree 任务归为一个项目，且实际执行目录原样保留', () => {
+    const groups = groupSessionsByWorkspace([
+      { ...session('one', '/home/u/.dutydeck/workspaces/ses_one', 'idle', '2026-09-14T00:00:00Z'), workspaceMode: 'worktree', workspaceSourceCwd: '/repo/project' },
+      { ...session('two', '/home/u/.dutydeck/workspaces/ses_two', 'thinking', '2026-09-14T01:00:00Z'), workspaceMode: 'worktree', workspaceSourceCwd: '/repo/project/' }
+    ]);
+    // 尾斜杠归一化后两个任务落在同一个源项目下。
+    expect(groups).toHaveLength(1);
+    expect(groups[0].name).toBe('project');
+    expect(groups[0].cwd).toBe('/repo/project');
+    expect(groups[0].sessions.map(item => item.id).sort()).toEqual(['one', 'two']);
+    // 分组键是源目录，但每条任务的实际执行目录（终端 / API 语义用）必须原样保留。
+    expect(groups[0].sessions.map(item => item.cwd).sort()).toEqual([
+      '/home/u/.dutydeck/workspaces/ses_one',
+      '/home/u/.dutydeck/workspaces/ses_two'
+    ]);
+  });
+
+  it('不同源目录的独立任务仍然分开，shared 任务与 worktree 任务按源目录区分', () => {
+    const groups = groupSessionsByWorkspace([
+      { ...session('wt-a', '/home/u/.dutydeck/workspaces/ses_a', 'idle', '2026-09-14T00:00:00Z'), workspaceMode: 'worktree', workspaceSourceCwd: '/repo/alpha' },
+      { ...session('wt-b', '/home/u/.dutydeck/workspaces/ses_b', 'idle', '2026-09-14T00:00:00Z'), workspaceMode: 'worktree', workspaceSourceCwd: '/repo/beta' },
+      // shared 任务没有 workspaceSourceCwd，按 cwd 自身分组。
+      session('shared', '/repo/gamma', 'idle', '2026-09-14T00:00:00Z')
+    ]);
+    expect(groups.map(group => group.name).sort()).toEqual(['alpha', 'beta', 'gamma']);
+  });
+
+  it('旧 session 没有 workspaceSourceCwd 时回退按 cwd 聚合', () => {
+    const legacy = session('old', '/repo/legacy/', 'idle', '2026-09-14T00:00:00Z');
+    expect(sessionWorkspaceDirectory(legacy)).toBe('/repo/legacy');
+    expect(sessionWorkspaceName(legacy)).toBe('legacy');
+    const groups = groupSessionsByWorkspace([legacy, session('new', '/repo/legacy', 'idle', '2026-09-14T00:01:00Z')]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].name).toBe('legacy');
+  });
+
+  it('归档的同源 worktree 任务在归档视图下仍归一个项目', () => {
+    const make = (id: string, cwd: string): Session => ({
+      ...session(id, cwd, 'completed', '2026-09-14T00:00:00Z'),
+      archivedAt: '2026-09-14T02:00:00Z',
+      workspaceMode: 'worktree',
+      workspaceSourceCwd: '/repo/project'
+    });
+    const groups = groupSessionsByWorkspace([
+      make('one', '/home/u/.dutydeck/workspaces/ses_one'),
+      make('two', '/home/u/.dutydeck/workspaces/ses_two')
+    ], 'archived');
+    expect(groups).toHaveLength(1);
+    expect(groups[0].sessions.map(item => item.id).sort()).toEqual(['one', 'two']);
+  });
+
+  it('normalizeWorkspacePath 去尾斜杠与空白，全是斜杠时回退到原始 trim 值', () => {
+    expect(normalizeWorkspacePath('/repo/project/')).toBe('/repo/project');
+    expect(normalizeWorkspacePath('  /repo/project  ')).toBe('/repo/project');
+    expect(normalizeWorkspacePath('/')).toBe('/');
   });
 
   it('按任务数计状态，并把待执行指令数作为独立口径', () => {

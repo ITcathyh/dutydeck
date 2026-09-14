@@ -32,10 +32,11 @@ export function taskSearchTerms(query: string): string[] {
 /** 一个任务在各字段上的候选检索串：工作区同时收录短名与完整 cwd，Agent 同时收录展示名与原始 id。 */
 export function taskSearchCandidates(session: Session, summary?: RunSummary, agent?: Agent): Record<TaskSearchField, string[]> {
   const cwd = session.cwd?.trim() ?? '';
+  const sourceCwd = session.workspaceSourceCwd?.trim() || cwd;
   const unique = (values: Array<string | undefined>) => [...new Set(values.map(value => normalizeSearchQuery(value ?? '')).filter(Boolean))];
   return {
     goal: unique([summary?.prompt, summary?.prompt?.trim() ? undefined : fallbackRunTitle(session.source)]),
-    workspace: unique([workspaceName(cwd), cwd]),
+    workspace: unique([workspaceName(sourceCwd), sourceCwd, workspaceName(cwd), cwd]),
     agent: unique([agent?.name, session.agentId])
   };
 }

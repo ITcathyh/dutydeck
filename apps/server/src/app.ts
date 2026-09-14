@@ -179,6 +179,18 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
     return await runtime.getWorkspace(request.params.id) ?? null;
   });
+  app.get<{ Params: { id: string } }>('/api/sessions/:id/workspace/cleanup', async request => {
+    await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
+    return runtime.getWorkspaceCleanupPreview(request.params.id);
+  });
+  app.post<{ Params: { id: string }; Body: { fingerprint?: string } }>('/api/sessions/:id/workspace/cleanup', async request => {
+    await requireSessionExecution(request, request.params.id, 'high_risk', 'high_risk.execute');
+    const fingerprint = request.body?.fingerprint;
+    if (typeof fingerprint !== 'string' || !fingerprint.trim()) {
+      throw new RuntimeError('INVALID_FINGERPRINT', '清理请求必须提供有效的工作区指纹', 400);
+    }
+    return runtime.cleanWorkspace(request.params.id, fingerprint.trim());
+  });
   app.get<{ Params: { id: string } }>('/api/sessions/:id/verifications', async request => {
     await requireSessionExecution(request, request.params.id, 'session', 'task.view_result');
     return runtime.getVerifications(request.params.id);

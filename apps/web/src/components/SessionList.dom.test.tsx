@@ -147,6 +147,59 @@ describe('SessionList 工作区折叠', () => {
 });
 
 /**
+ * 独立 worktree 任务的项目聚合。
+ *
+ * 同一源仓库（workspaceSourceCwd）的两个任务，实际执行目录分别是
+ * ~/.dutydeck/workspaces/ses_one 与 ses_two。若侧栏按执行目录分组，
+ * 这两个任务会被显示成两个 ses_* 「项目」，项目导航失去意义。
+ * 这里守的是：组按源目录聚合、组头标题与 title 显示源目录、展开后两条真实任务都在，
+ * 且点击任务仍按真实 session id 选中。
+ */
+describe('SessionList 同源 worktree 项目聚合', () => {
+  const worktreeSession = (id: string, source: string): Session => ({
+    id,
+    agentId: 'codex',
+    state: 'idle',
+    cwd: `/home/u/.dutydeck/workspaces/${id}`,
+    workspaceMode: 'worktree',
+    workspaceSourceCwd: source,
+    runId: `run-${id}`,
+    createdAt: '',
+    updatedAt: ''
+  });
+
+  it('同源两个 worktree 归一个 project 组，展开后两条任务都按真实 id 可选', async () => {
+    const user = userEvent.setup();
+    const onSelect = vi.fn();
+    const sessions = [worktreeSession('ses_one', '/repo/project'), worktreeSession('ses_two', '/repo/project/')];
+    const summaries: Record<string, RunSummary> = {
+      ses_one: { sessionId: 'ses_one', taskId: 't1', prompt: '任务一', status: 'idle', queuedCount: 0, updatedAt: '' },
+      ses_two: { sessionId: 'ses_two', taskId: 't2', prompt: '任务二', status: 'idle', queuedCount: 0, updatedAt: '' }
+    };
+    render(<SessionList {...baseProps} open sessions={sessions} summaries={summaries} onSelect={onSelect}/>);
+    // 只有一个组，标题与 title 都指向源项目，而不是 ses_one / ses_two。
+    const header = screen.getByRole('button', { name: /^project/ });
+    expect(header.getAttribute('title')).toBe('/repo/project');
+    expect(header.textContent).toContain('2');
+    expect(screen.queryByRole('button', { name: /^ses_one/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^ses_two/ })).toBeNull();
+    await user.click(header);
+    const first = screen.getByRole('button', { name: /任务一/ });
+    const second = screen.getByRole('button', { name: /任务二/ });
+    expect(first).toBeTruthy();
+    expect(second).toBeTruthy();
+    await user.click(second);
+    expect(onSelect).toHaveBeenCalledWith('ses_two');
+  });
+
+  it('不同源目录的 worktree 仍分成不同项目组', () => {
+    render(<SessionList {...baseProps} open sessions={[worktreeSession('ses_one', '/repo/alpha'), worktreeSession('ses_two', '/repo/beta')]}/>);
+    expect(screen.getByRole('button', { name: /^alpha/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^beta/ })).toBeTruthy();
+  });
+});
+
+/**
  * 侧栏底部功能导航。
  *
  * 重做前整个侧栏只有三个可见字符串，一半的目的地（群与权限、定时任务）只能靠

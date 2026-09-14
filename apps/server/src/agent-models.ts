@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -111,27 +112,86 @@ async function discoverThroughCli(agentId: string): Promise<AgentModel[]> {
   return definition.parse(stdout);
 }
 
+export const AGENT_MODEL_CACHE_TTL_MS = 5 * 60_000;
+
+export function computeAgentModelProbeKey(agent: AgentConfig, requestedModel?: string): string {
+  const envEntries = Object.entries(agent.env ?? {}).sort(([a], [b]) => a.localeCompare(b));
+  const payload = JSON.stringify({
+    id: agent.id,
+    protocol: agent.protocol ?? 'auto',
+    command: agent.command,
+    args: agent.args ?? [],
+    cwd: agent.cwd ?? process.cwd(),
+    permissionMode: agent.permissionMode ?? 'ask',
+    timeout: agent.timeout ?? 600,
+    version: agent.version ?? '',
+    adapterId: agent.adapterId ?? '',
+    defaultModel: agent.model ?? '',
+    requestedModel: requestedModel ?? '',
+    env: envEntries
+  });
+  const digest = createHash('sha256').update(payload).digest('hex');
+  return `${agent.id}:${digest}`;
+}
+
 const cache = new Map<string, { expiresAt: number; value: AgentModelsResult }>();
+const inFlight = new Map<string, Promise<AgentModelsResult>>();
+
+export function clearAgentModelsCacheForTesting(): void {
+  cache.clear();
+  inFlight.clear();
+}
+
 export async function discoverAgentModels(agent: AgentConfig, model?: string, forceRefresh = false): Promise<AgentModelsResult> {
   // Interactive wrappers may have startup side effects and do not speak ACP.
   // Their configured default is enough to launch; do not start them to probe it.
   if (agent.protocol === 'pty-cli' && agent.adapterId) {
     return { models: [], ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'agent' };
   }
-  const cacheKey = `${agent.id}\u0000${agent.command}\u0000${agent.args.join('\u0000')}\u0000${agent.version ?? ''}\u0000${model ?? ''}`;
-  const cached = cache.get(cacheKey);
-  if (!forceRefresh && cached && cached.expiresAt > Date.now()) return cached.value;
-
-  let value: AgentModelsResult | undefined;
-  try { if (agent.protocol === 'acp' || agent.protocol === 'auto') value = await discoverThroughAcp(agent, model); }
-  catch { /* The provider CLI may still expose models without starting an ACP session. */ }
-  if (!value?.models.length) {
-    try {
-      const models = await discoverThroughCli(agent.id);
-      if (models.length) value = { models, ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'cli' };
-    } catch { /* Fall through to the Agent's configured default. */ }
+  const cacheKey = computeAgentModelProbeKey(agent, model);
+  if (!forceRefresh) {
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
   }
-  value ??= { models: [], ...(agent.model ? { defaultModel: agent.model, source: 'agent' as const } : {}), reasoningEfforts: [] };
-  cache.set(cacheKey, { expiresAt: Date.now() + 5 * 60_000, value });
-  return value;
+
+  // 同一探测配置下的 in-flight 复用（含并发 refresh：refresh 绕过已完成缓存，但不重复当前正在进行的探测）。
+  const pending = inFlight.get(cacheKey);
+  if (pending) return pending;
+
+  const promise: Promise<AgentModelsResult> = Promise.resolve()
+    .then(async () => {
+      let value: AgentModelsResult | undefined;
+      try {
+        if (agent.protocol === 'acp' || agent.protocol === 'auto') {
+          value = await discoverThroughAcp(agent, model);
+        }
+      } catch {
+        /* The provider CLI may still expose models without starting an ACP session. */
+      }
+      if (!value?.models.length) {
+        try {
+          const models = await discoverThroughCli(agent.id);
+          if (models.length) {
+            value = { models, ...(agent.model ? { defaultModel: agent.model } : {}), reasoningEfforts: [], source: 'cli' };
+          }
+        } catch {
+          /* Fall through to the Agent's configured default. */
+        }
+      }
+      value ??= { models: [], ...(agent.model ? { defaultModel: agent.model, source: 'agent' as const } : {}), reasoningEfforts: [] };
+
+      // 仅成功探测到可用模型时才按 TTL 缓存；探测失败或没有可用模型的 fallback 不缓存，以便后续正常请求能及时重试。
+      if (value.models.length > 0) {
+        cache.set(cacheKey, { expiresAt: Date.now() + AGENT_MODEL_CACHE_TTL_MS, value });
+      }
+      return value;
+    })
+    .finally(() => {
+      if (inFlight.get(cacheKey) === promise) {
+        inFlight.delete(cacheKey);
+      }
+    });
+
+  inFlight.set(cacheKey, promise);
+  return promise;
 }
