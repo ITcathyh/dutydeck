@@ -12,7 +12,7 @@ import {
   workbenchTaskSection,
   workbenchViewLabels,
   workbenchViewOrder,
-  workspaceName
+  sessionWorkspaceName
 } from '../workspace-model';
 import { fallbackRunTitle } from '../run-summary';
 import { Badge, Button, Card, EmptyState, Skeleton, StatusBadge } from './primitives';
@@ -82,7 +82,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
   const queuedCommands = summary?.queuedCount ?? 0;
   return <div className="flex border-t border-subtle first:border-t-0">
     {selection && <label className="flex min-h-10 min-w-10 shrink-0 cursor-pointer items-center justify-center pl-2" title={selection.disabled ? '此步骤由目标管理，请从原目标处理' : undefined}>
-      <input type="checkbox" aria-label={`选择任务：${summary?.prompt ?? workspaceName(session.cwd)}`} checked={selection.checked} disabled={selection.disabled} onChange={selection.onChange} className="h-4 w-4 accent-action"/>
+      <input type="checkbox" aria-label={`选择任务：${summary?.prompt ?? sessionWorkspaceName(session)}`} checked={selection.checked} disabled={selection.disabled} onChange={selection.onChange} className="h-4 w-4 accent-action"/>
     </label>}
     <button
     type="button"
@@ -95,7 +95,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
     <span className="min-w-0 flex-1">
       <strong className="block text-body font-semibold text-primary sm:truncate" title={summary?.prompt}>{summary?.prompt ?? fallbackRunTitle(session.source)}</strong>
       <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-secondary">
-        <span>{workspaceName(session.cwd)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
+        <span>{sessionWorkspaceName(session)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
         {section === 'attention' && <><span aria-hidden="true">·</span><span className="font-medium text-primary">{attentionReasonForSession(session)}</span></>}
         {queuedCommands > 0 && <span className="rounded-sm bg-queued-soft px-1.5 py-0.5 font-medium text-queued">待执行指令 {queuedCommands} 条</span>}
       </span>

@@ -42,9 +42,32 @@ const failedStates = new Set(['failed', 'stopped']);
 const taskSectionRank: Record<WorkbenchTaskSection, number> = { attention: 0, active: 1, recent: 2 };
 const errorSummaryLimit = 140;
 
+export function normalizeWorkspacePath(path: string): string {
+  const trimmed = path.trim();
+  const stripped = trimmed.replace(/[\\/]+$/, '');
+  return stripped || trimmed;
+}
+
 export function workspaceName(cwd: string): string {
-  const normalized = cwd.trim().replace(/[\\/]+$/, '');
+  const normalized = normalizeWorkspacePath(cwd);
   return normalized.split(/[\\/]/).filter(Boolean).at(-1) || cwd || '未命名工作区';
+}
+
+/**
+ * 获取 Session 的项目源目录：
+ * 优先取 workspaceSourceCwd（独立工作区所基于的源仓库目录），兜底取 cwd（共享工作区或旧 session），
+ * 并进行统一的路径规范化（去除尾斜杠与空白）。
+ */
+export function sessionWorkspaceDirectory(session: Pick<Session, 'cwd' | 'workspaceSourceCwd'>): string {
+  const raw = session.workspaceSourceCwd?.trim() || session.cwd;
+  return normalizeWorkspacePath(raw);
+}
+
+/**
+ * 获取 Session 的项目展示标签名（基于规范化源目录）。
+ */
+export function sessionWorkspaceName(session: Pick<Session, 'cwd' | 'workspaceSourceCwd'>): string {
+  return workspaceName(sessionWorkspaceDirectory(session));
 }
 
 /**
@@ -151,16 +174,16 @@ export function groupSessionsByWorkspace(sessions: Session[], view: WorkbenchVie
   const groups = new Map<string, Session[]>();
   for (const session of sessions) {
     if (!sessionMatchesView(session, view, summaries[session.id])) continue;
-    const cwd = session.cwd.trim().replace(/[\\/]+$/, '') || session.cwd;
-    groups.set(cwd, [...(groups.get(cwd) ?? []), session]);
+    const dir = sessionWorkspaceDirectory(session);
+    groups.set(dir, [...(groups.get(dir) ?? []), session]);
   }
-  return [...groups.entries()].map(([cwd, entries]) => {
+  return [...groups.entries()].map(([dir, entries]) => {
     const sorted = orderSessionsForWorkbench(entries, view, summaries);
     const latest = [...entries].sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt))[0];
     return {
-      id: cwd,
-      cwd,
-      name: workspaceName(cwd),
+      id: dir,
+      cwd: dir,
+      name: workspaceName(dir),
       sessions: sorted,
       queuedCount: sorted.reduce((count, session) => count + (summaries[session.id]?.queuedCount ?? 0), 0),
       updatedAt: latest?.updatedAt || latest?.createdAt || ''

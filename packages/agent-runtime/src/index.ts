@@ -1,13 +1,20 @@
 import { EventEmitter } from 'node:events';
 import { createHash } from 'node:crypto';
-import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PublicTaskRecord, RepositoryBundle, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceResponse } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PublicTaskRecord, RepositoryBundle, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { DriverDetachedError, DriverRecoveryError, makeId, now, RuntimeError, workspaceModes } from '@dutydeck/shared';
 import { AcpxAdapter } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, realpath, writeFile } from 'node:fs/promises';
+import { join, sep } from 'node:path';
 import { WorkspaceManager } from './workspace.js';
 import { VerificationManager } from './verification.js';
+
+function isSameOrIntersectingPath(a: string, b: string): boolean {
+  if (a === b) return true;
+  const sepWithA = a.endsWith(sep) ? a : a + sep;
+  const sepWithB = b.endsWith(sep) ? b : b + sep;
+  return a.startsWith(sepWithB) || b.startsWith(sepWithA);
+}
 
 // 没有可接管任务或可恢复队列时，这些忙碌状态需要在启动时回收。
 const RECOVERABLE_BUSY_STATES = ['starting', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting'] as const satisfies readonly Session['state'][];
@@ -96,6 +103,9 @@ export class DutydeckRuntime {
   private readonly startingWorkSessions = new Set<string>();
   private readonly verificationDeferredTasks = new Map<string, Set<string>>();
   private readonly blockedVerificationSessions = new Map<string, string>();
+  private readonly cleaningDirs = new Map<string, string>();
+  private readonly preparingWorkspaces = new Map<string, Set<string>>();
+  private readonly cleaningRuns = new Map<string, Promise<WorkspaceCleanupResult>>();
 
   constructor(private readonly repos: RepositoryBundle, private readonly options: RuntimeOptions = {}) {
     this.workspaces = new WorkspaceManager(repos.config, options.workspaceRoot);
@@ -331,6 +341,223 @@ export class DutydeckRuntime {
     const workspace = await this.workspaces.get(id);
     if (workspace?.state === 'ready') await this.workspaces.validate(workspace);
     return workspace;
+  }
+  async getWorkspaceCleanupPreview(sessionId: string): Promise<WorkspaceCleanupPreview> {
+    const session = await this.repos.sessions.get(sessionId);
+    if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${sessionId}`, 404);
+    if (!session.archivedAt) throw new RuntimeError('SESSION_NOT_ARCHIVED', '仅已归档任务可清理工作目录', 409);
+
+    const workspace = await this.workspaces.get(sessionId);
+    if (!workspace) throw new RuntimeError('WORKSPACE_NOT_FOUND', `Workspace record not found for session: ${sessionId}`, 404);
+
+    if (workspace.mode !== 'worktree') {
+      return {
+        sessionId,
+        path: workspace.cwd,
+        branch: workspace.branch,
+        canClean: false,
+        blockers: [{ code: 'SHARED_WORKSPACE', message: '共享工作目录不可清理' }],
+        fingerprint: '',
+        cleanedAt: undefined
+      };
+    }
+
+    if (workspace.state === 'cleaned' || workspace.cleanedAt) {
+      return {
+        sessionId,
+        path: workspace.repoRoot ?? workspace.cwd,
+        branch: workspace.branch,
+        canClean: false,
+        blockers: [],
+        fingerprint: '',
+        cleanedAt: workspace.cleanedAt
+      };
+    }
+
+    const runtimeBlockers: WorkspaceCleanupBlocker[] = [];
+    const targetRoot = await realpath(workspace.repoRoot ?? workspace.cwd).catch(() => workspace.repoRoot ?? workspace.cwd);
+
+    for (const [cleaningDir, cleaningSessionId] of this.cleaningDirs) {
+      if (cleaningSessionId !== sessionId && isSameOrIntersectingPath(targetRoot, cleaningDir)) {
+        runtimeBlockers.push({ code: 'WORKSPACE_BUSY', message: '工作目录正在清理中' });
+      }
+    }
+
+    for (const [preparingPath, sessionSet] of this.preparingWorkspaces) {
+      if (sessionSet.size > 0 && isSameOrIntersectingPath(targetRoot, preparingPath)) {
+        runtimeBlockers.push({ code: 'WORKSPACE_PREPARING', message: '同工作目录正在准备启动新会话' });
+        break;
+      }
+    }
+
+    const intersectingSessionIds = new Set<string>([sessionId]);
+    try {
+      const allSessions = await this.repos.sessions.list();
+      for (const other of allSessions) {
+        if (other.id === sessionId) continue;
+        let otherDir = other.cwd;
+        try {
+          const otherWorkspace = await this.workspaces.get(other.id);
+          if (otherWorkspace?.repoRoot) {
+            otherDir = otherWorkspace.repoRoot;
+          }
+        } catch {
+          // ignore error reading other workspace
+        }
+        const otherCanonical = await realpath(otherDir).catch(() => otherDir);
+        if (isSameOrIntersectingPath(targetRoot, otherCanonical)) {
+          intersectingSessionIds.add(other.id);
+          if (!other.archivedAt) {
+            runtimeBlockers.push({ code: 'ACTIVE_SESSION_CONFLICT', message: `同工作目录存在未归档会话: ${other.id}` });
+          }
+          if (this.drivers.has(other.id)) {
+            runtimeBlockers.push({ code: 'SESSION_BUSY', message: `同工作目录存在活动驱动会话: ${other.id}` });
+          }
+          if (this.activeTurns.has(other.id) || (this.queues.get(other.id)?.length ?? 0) > 0 || this.queueRuns.has(other.id)) {
+            runtimeBlockers.push({ code: 'SESSION_BUSY', message: `同工作目录存在排队或执行中的任务: ${other.id}` });
+          }
+          if (this.verifyingSessions.has(other.id) || this.blockedVerificationSessions.has(other.id)) {
+            runtimeBlockers.push({ code: 'VERIFICATION_RUNNING', message: `同工作目录存在正在执行或未恢复的验证任务: ${other.id}` });
+          }
+        }
+      }
+    } catch (err) {
+      runtimeBlockers.push({ code: 'SESSION_CHECK_FAILED', message: `检查同目录会话清单失败: ${err instanceof Error ? err.message : String(err)}` });
+    }
+
+    if (this.drivers.has(sessionId)) {
+      runtimeBlockers.push({ code: 'SESSION_BUSY', message: '当前会话仍有未断开的驱动连接' });
+    }
+    if (this.activeTurns.has(sessionId) || (this.queues.get(sessionId)?.length ?? 0) > 0 || this.queueRuns.has(sessionId)) {
+      runtimeBlockers.push({ code: 'SESSION_BUSY', message: '当前会话仍有活跃任务' });
+    }
+    if (this.verifyingSessions.has(sessionId) || this.blockedVerificationSessions.has(sessionId)) {
+      runtimeBlockers.push({ code: 'VERIFICATION_RUNNING', message: '当前会话存在正在执行或未恢复的验证任务' });
+    }
+
+    // 检查所有相交会话及存储中的持久 running verification；捕获任何未知/读取异常作为明确 blocker
+    try {
+      if (this.repos.config.list) {
+        const rawVerifications = await this.repos.config.list('runtime_verification:');
+        for (const item of rawVerifications) {
+          try {
+            const v = JSON.parse(item.value);
+            if (v.status === 'running') {
+              let vDir = v.cwd;
+              const vCanonical = vDir ? await realpath(vDir).catch(() => vDir) : undefined;
+              if ((vCanonical && isSameOrIntersectingPath(targetRoot, vCanonical)) || intersectingSessionIds.has(v.sessionId)) {
+                runtimeBlockers.push({ code: 'VERIFICATION_RUNNING', message: `工作目录存在未完成的验证任务: 会话 ${v.sessionId}` });
+              }
+            }
+          } catch (parseErr) {
+            runtimeBlockers.push({ code: 'VERIFICATION_CHECK_FAILED', message: `验证记录损坏: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}` });
+          }
+        }
+      }
+    } catch (err) {
+      runtimeBlockers.push({ code: 'VERIFICATION_CHECK_FAILED', message: `读取持久化验证记录失败: ${err instanceof Error ? err.message : String(err)}` });
+    }
+
+    const safety = await this.workspaces.checkSafety(workspace);
+    if (safety.cleanedAt) {
+      return {
+        sessionId,
+        path: targetRoot,
+        branch: workspace.branch,
+        canClean: false,
+        blockers: [],
+        fingerprint: '',
+        cleanedAt: safety.cleanedAt
+      };
+    }
+
+    const allBlockers = [...runtimeBlockers, ...safety.blockers];
+    return {
+      sessionId,
+      path: targetRoot,
+      branch: workspace.branch,
+      canClean: allBlockers.length === 0,
+      blockers: allBlockers,
+      fingerprint: safety.fingerprint,
+      cleanedAt: undefined
+    };
+  }
+
+  cleanWorkspace(sessionId: string, fingerprint: string): Promise<WorkspaceCleanupResult> {
+    const existingRun = this.cleaningRuns.get(sessionId);
+    if (existingRun) return existingRun;
+
+    let targetRoot: string | undefined;
+    let run!: Promise<WorkspaceCleanupResult>;
+    run = Promise.resolve().then(async () => {
+      const session = await this.repos.sessions.get(sessionId);
+      if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${sessionId}`, 404);
+      if (!session.archivedAt) throw new RuntimeError('SESSION_NOT_ARCHIVED', '仅已归档任务可清理工作目录', 409);
+
+      const workspace = await this.workspaces.get(sessionId);
+      if (!workspace) throw new RuntimeError('WORKSPACE_NOT_FOUND', `Workspace record not found for session: ${sessionId}`, 404);
+      if (workspace.mode !== 'worktree') throw new RuntimeError('CANNOT_CLEAN_SHARED', '共享工作目录不可清理', 409);
+
+      if (workspace.state === 'cleaned' || workspace.cleanedAt) {
+        return {
+          ok: true,
+          sessionId,
+          path: workspace.repoRoot ?? workspace.cwd,
+          cleanedAt: workspace.cleanedAt!
+        };
+      }
+
+      const preview = await this.getWorkspaceCleanupPreview(sessionId);
+      if (preview.cleanedAt) {
+        return {
+          ok: true,
+          sessionId,
+          path: preview.path,
+          cleanedAt: preview.cleanedAt
+        };
+      }
+      if (preview.fingerprint !== fingerprint) {
+        throw new RuntimeError('WORKSPACE_FINGERPRINT_MISMATCH', '工作目录状态已变化，请重新检查', 409);
+      }
+      if (!preview.canClean) {
+        const first = preview.blockers[0];
+        throw new RuntimeError(first?.code ?? 'CANNOT_CLEAN', first?.message ?? '工作目录当前无法安全清理', 409);
+      }
+
+      targetRoot = await realpath(workspace.repoRoot ?? workspace.cwd).catch(() => workspace.repoRoot ?? workspace.cwd);
+      this.cleaningDirs.set(targetRoot, sessionId);
+
+      const finalPreview = await this.getWorkspaceCleanupPreview(sessionId);
+      if (finalPreview.cleanedAt) {
+        return {
+          ok: true,
+          sessionId,
+          path: finalPreview.path,
+          cleanedAt: finalPreview.cleanedAt
+        };
+      }
+      if (!finalPreview.canClean || finalPreview.fingerprint !== fingerprint) {
+        throw new RuntimeError('WORKSPACE_FINGERPRINT_MISMATCH', '工作目录状态已变化，请重新检查', 409);
+      }
+
+      const cleaned = await this.workspaces.removeWorktree(workspace, workspace.revision, fingerprint);
+      return {
+        ok: true,
+        sessionId,
+        path: cleaned.repoRoot ?? cleaned.cwd,
+        cleanedAt: cleaned.cleanedAt!
+      };
+    }).finally(() => {
+      if (targetRoot && this.cleaningDirs.get(targetRoot) === sessionId) {
+        this.cleaningDirs.delete(targetRoot);
+      }
+      if (this.cleaningRuns.get(sessionId) === run) {
+        this.cleaningRuns.delete(sessionId);
+      }
+    });
+
+    this.cleaningRuns.set(sessionId, run);
+    return run;
   }
   async getVerifications(id: string): Promise<VerificationResponse[]> {
     const session = await this.repos.sessions.get(id);
@@ -625,6 +852,27 @@ export class DutydeckRuntime {
     const session: Session = { id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     await this.repos.sessions.save(session);
     let workspace: WorkspaceResponse;
+    const canonicalSource = await realpath(sourceCwd).catch(() => sourceCwd);
+    const canonicalWorkspaceRoot = await realpath(this.workspaces.root).catch(() => this.workspaces.root);
+    const canonicalTarget = workspaceMode === 'worktree' ? join(canonicalWorkspaceRoot, session.id) : canonicalSource;
+    const pathsToProtect = canonicalTarget === canonicalSource ? [canonicalSource] : [canonicalSource, canonicalTarget];
+
+    for (const [cleaningDir] of this.cleaningDirs) {
+      for (const p of pathsToProtect) {
+        if (isSameOrIntersectingPath(cleaningDir, p)) {
+          throw new RuntimeError('WORKSPACE_CONFLICT', '工作区目录正在清理中，无法启动会话', 409);
+        }
+      }
+    }
+
+    for (const p of pathsToProtect) {
+      let set = this.preparingWorkspaces.get(p);
+      if (!set) {
+        set = new Set();
+        this.preparingWorkspaces.set(p, set);
+      }
+      set.add(session.id);
+    }
     try {
       await owned?.beforeStart();
       workspace = await this.workspaces.prepare(session.id, sourceCwd, workspaceMode);
@@ -638,6 +886,16 @@ export class DutydeckRuntime {
       await this.repos.sessions.save(session);
       await this.repos.artifacts.saveError(session.id, message);
       throw new RuntimeError('WORKSPACE_PREPARATION_FAILED', `Session ${session.id}: ${message}`, 422);
+    } finally {
+      for (const p of pathsToProtect) {
+        const set = this.preparingWorkspaces.get(p);
+        if (set) {
+          set.delete(session.id);
+          if (set.size === 0) {
+            this.preparingWorkspaces.delete(p);
+          }
+        }
+      }
     }
     const configured = { ...agent, cwd: session.cwd, model: session.model, reasoningEffort: session.reasoningEffort, permissionMode: session.permissionMode ?? agent.permissionMode };
     await this.repos.sessions.save(session);
@@ -1240,6 +1498,9 @@ export class DutydeckRuntime {
     this.shuttingDown = true;
     if (this.cleanupTimer) clearInterval(this.cleanupTimer);
     await this.cleanupRun;
+    if (this.cleaningRuns.size > 0) {
+      await Promise.allSettled([...this.cleaningRuns.values()]);
+    }
     await this.verifications.stop();
     const drivers = [...this.drivers.values()];
     this.drivers.clear();
@@ -1258,6 +1519,8 @@ export class DutydeckRuntime {
     this.replayedEvents.clear();
     this.sequences.clear(); this.permissions.clear(); this.permissionResolutions.clear(); this.sessionGenerations.clear(); this.lastActivity.clear(); this.activeTurns.clear(); this.activeTasks.clear(); this.interruptedTurns.clear(); this.hardInterrupts.clear(); this.turnErrors.clear(); this.driverEventChains.clear(); this.driverEventErrors.clear();
     for (const waiters of this.turnWaiters.values()) for (const resolve of waiters) resolve();
-    this.turnWaiters.clear(); this.queues.clear(); this.queueRuns.clear(); this.emitter.removeAllListeners();
+    this.turnWaiters.clear(); this.queues.clear(); this.queueRuns.clear();
+    this.cleaningRuns.clear(); this.cleaningDirs.clear(); this.preparingWorkspaces.clear();
+    this.emitter.removeAllListeners();
   }
 }

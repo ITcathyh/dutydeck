@@ -51,6 +51,16 @@ describe('taskSearchHaystack', () => {
     expect(taskSearchHaystack(session('1', { source: 'lark' })).goal).toBe('来自飞书的任务');
     expect(taskSearchHaystack(session('2'), summary('2', '   ')).goal).toBe('尚未获取任务目标');
   });
+
+  it('独立 worktree 任务同时可按源项目目录和实际执行目录检索', () => {
+    const haystack = taskSearchHaystack(session('1', {
+      cwd: '/home/u/.dutydeck/workspaces/ses_one',
+      workspaceMode: 'worktree',
+      workspaceSourceCwd: '/repo/project'
+    }));
+    // 源项目短名/全路径在前（项目导航口径），实际执行目录仍可被检索到。
+    expect(haystack.workspace).toBe('project /repo/project ses_one /home/u/.dutydeck/workspaces/ses_one');
+  });
 });
 
 describe('searchTasks 匹配语义', () => {

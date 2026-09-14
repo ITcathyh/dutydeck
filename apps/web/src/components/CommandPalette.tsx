@@ -4,7 +4,7 @@ import type { Agent, RunSummary, Session } from '../api';
 import { fallbackRunTitle } from '../run-summary';
 import { searchTasks, taskSearchTerms, type TaskSearchField, type TaskSearchMatch } from '../task-search';
 import { useDialogFocus } from '../useDialogFocus';
-import { attentionReasonForSession, formatRelativeTime, shortRunId, workbenchTaskSection, workspaceName } from '../workspace-model';
+import { attentionReasonForSession, formatRelativeTime, sessionWorkspaceName, shortRunId, workbenchTaskSection } from '../workspace-model';
 import { Kbd, StatusBadge } from './primitives';
 
 export type CommandAction = {
@@ -229,7 +229,7 @@ function TaskOption({ optionRef, match, summary, agent, optionId, active, onHove
     <span className="min-w-0 flex-1">
       <span className="block truncate text-body font-medium text-primary" title={goal}>{goal}</span>
       <span className="mt-0.5 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-caption text-secondary">
-        <span>{workspaceName(session.cwd)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
+        <span>{sessionWorkspaceName(session)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
         <span aria-hidden="true">·</span><span title={updatedAt ? new Date(updatedAt).toLocaleString('zh-CN') : undefined}>更新于 {formatRelativeTime(updatedAt)}</span>
         {queuedCommands > 0 && <span className="rounded-sm bg-queued-soft px-1.5 text-queued">待执行指令 {queuedCommands} 条</span>}
         {fields.length > 0 && <span className="text-subtle">命中 {fields.map(field => fieldLabels[field]).join('、')}</span>}
