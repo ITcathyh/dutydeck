@@ -1060,37 +1060,45 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     makeEvent(4, 'text', { role: 'assistant', text: '全部通过。' }, t(16))
   ];
 
-  it('P1. process 运行态：无根 header、总面板展开、标题 plain_text、用时 16.224→16s', () => {
+  it('P1. process 运行态：恢复根 header（任务名/Agent）、总面板展开、短摘要 plain_text、用时 16.224→16s', () => {
     const elements = boundLarkCardElements(renderLarkProcessElements(runningEvents, config));
     const card: any = buildLarkCard({
       cardKind: 'process', state: 'running', taskName: '自动化流水线', agentName: 'Claude Code',
       taskId: 'om_p1', elapsedSeconds: 16.224, elements
     });
-    expect(card.header).toBeUndefined();
+    expect(card.header).toBeDefined();
+    expect(card.header.title).toMatchObject({ tag: 'plain_text', content: '自动化流水线' });
+    expect(card.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Claude Code' });
+    expect(card.header.template).toBe('blue');
+
     const overview = card.body.elements[0];
     expect(overview).toMatchObject({ tag: 'collapsible_panel', element_id: 'task_overview', expanded: true });
-    // 标题必须是 plain_text（任务名不被当成 markdown），且断言到 tag 而不只是包含字符串。
+    // 摘要保持纯文本；任务名和 Agent 已由根 header 单独承载。
     expect(overview.header.title).toMatchObject({ tag: 'plain_text' });
     const title = overview.header.title.content as string;
-    expect(title).toContain('执行过程 · 自动化流水线 · 执行中');
-    expect(title).toContain('Claude Code');
-    expect(title).toContain('用时 16s');
+    expect(title).toBe('执行记录 · 执行中 · 用时 16s');
     expect(title).not.toContain('16.224');
+    expect(title).not.toContain('自动化流水线');
+    expect(title).not.toContain('Claude Code');
     // 操作按钮在总面板外。
     expect(card.body.elements.some((el: any) => el.element_id === 'task_action_row')).toBe(true);
     expect(JSON.stringify(overview)).not.toContain('task_action_row');
   });
 
-  it('P2. process 完成态：总面板收起，单 trace 组摊平（无 trace_overview 嵌套）', () => {
+  it('P2. process 完成态：恢复根 header、总面板收起，单 trace 组摊平（无 trace_overview 嵌套）', () => {
     const elements = boundLarkCardElements(renderLarkProcessElements(completedEvents, config, true));
     const card: any = buildLarkCard({
       cardKind: 'process', state: 'completed', taskName: '构建', agentName: 'Codex',
       taskId: 'om_p2', elapsedSeconds: 20, elements
     });
+    expect(card.header).toBeDefined();
+    expect(card.header.title).toMatchObject({ tag: 'plain_text', content: '构建' });
+    expect(card.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Codex' });
+
     const overview = card.body.elements[0];
     expect(overview).toMatchObject({ tag: 'collapsible_panel', element_id: 'task_overview', expanded: false });
     expect(overview.header.title.tag).toBe('plain_text');
-    expect(overview.header.title.content).toContain('执行过程 · 构建 · 已完成');
+    expect(overview.header.title.content).toBe('执行记录 · 已完成 · 用时 20s');
     // 旧的 trace_overview 总套壳必须消失，唯一阶段被摊平进总面板。
     expect(byId(card, 'trace_overview')).toBeUndefined();
     // process 页脚不重复用时。
@@ -1113,17 +1121,21 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(queued.body.elements[0]).toMatchObject({ element_id: 'task_overview', expanded: true });
   });
 
-  it('P5. 无 trace 的首帧/异常卡：标题用 div plain_text，不产生折叠箭头，不编造等待文案', () => {
+  it('P5. 无 trace 的首帧/异常卡：恢复根 header，短摘要用 div plain_text，不产生折叠箭头，不编造等待文案', () => {
     // queued 首帧：有普通等待正文，但没有 trace，不应渲染可展开面板。
     const queued: any = buildLarkCard({
       cardKind: 'process', state: 'queued', taskName: '拉取消息', agentName: 'Codex', elapsedSeconds: 16.224,
       elements: [{ tag: 'markdown', content: '任务已接收，正在准备执行…', text_size: 'normal', margin: '0px' }]
     });
+    expect(queued.header).toBeDefined();
+    expect(queued.header.title).toMatchObject({ tag: 'plain_text', content: '拉取消息' });
+    expect(queued.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Codex' });
+
     const qOverview = queued.body.elements[0];
     expect(qOverview).toMatchObject({ tag: 'div', element_id: 'task_overview' });
-    expect(qOverview.text).toMatchObject({ tag: 'plain_text' });
-    expect(qOverview.text.content).toContain('执行过程 · 拉取消息 · 排队中');
-    expect(qOverview.text.content).toContain('用时 16s');
+    expect(qOverview.text).toMatchObject({ tag: 'plain_text', content: '执行记录 · 排队中 · 用时 16s' });
+    expect(qOverview.text.content).not.toContain('16.224');
+    expect(qOverview.text.content).not.toContain('拉取消息');
     // 原等待正文原样跟在摘要后。
     expect(queued.body.elements[1]).toMatchObject({ tag: 'markdown', content: '任务已接收，正在准备执行…' });
     expect(JSON.stringify(queued)).not.toContain('down-small-ccm');
@@ -1131,24 +1143,36 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     // 只有一条 error 的 failed：renderer 仅产出 execution_alert_0，不得追加“正在思考中”。
     const errorElements = renderLarkProcessElements([makeEvent(1, 'error', { message: '连接失败' })], config, true);
     const failed: any = buildLarkCard({ cardKind: 'process', state: 'failed', taskName: '看不懂', agentName: 'Codex', elements: errorElements });
+    expect(failed.header).toBeDefined();
+    expect(failed.header.title).toMatchObject({ tag: 'plain_text', content: '看不懂' });
+    expect(failed.header.subtitle).toMatchObject({ tag: 'plain_text', content: 'Codex' });
+
     const fOverview = failed.body.elements[0];
     expect(fOverview).toMatchObject({ tag: 'div', element_id: 'task_overview' });
     expect(fOverview.text.tag).toBe('plain_text');
-    expect(fOverview.text.content).toContain('执行过程 · 看不懂 · 已失败');
+    expect(fOverview.text.content).toBe('执行记录 · 已失败');
     expect(JSON.stringify(failed)).not.toContain('正在思考中');
     // 异常提示在总面板（此处为摘要 div）之外。
     expect(failed.body.elements.some((el: any) => el.element_id === 'execution_alert_0')).toBe(true);
   });
 
-  it('P6. 任务名/Agent 名中的 markdown 与 at 标签在 plain_text 标题中原样保留，不被解释', () => {
+  it('P6. 任务名/Agent 名中的 markdown 与 at 标签在根 header plain_text 标题中原样保留，不被解释', () => {
     const card: any = buildLarkCard({
       cardKind: 'process', state: 'queued', taskName: '说明 **bold** [x](https://a) <at id=all></at>',
       agentName: 'Agent <font color=red>red</font>',
       elements: [{ tag: 'markdown', content: '任务已接收，正在准备执行…', text_size: 'normal', margin: '0px' }]
     });
+    expect(card.header).toBeDefined();
+    expect(card.header.title).toMatchObject({
+      tag: 'plain_text',
+      content: '说明 **bold** [x](https://a) <at id=all></at>'
+    });
+    expect(card.header.subtitle).toMatchObject({
+      tag: 'plain_text',
+      content: 'Agent <font color=red>red</font>'
+    });
     const title = card.body.elements[0].text.content as string;
-    expect(title).toContain('执行过程 · 说明 **bold** [x](https://a) <at id=all></at> · 排队中');
-    expect(title).toContain('Agent <font color=red>red</font>');
+    expect(title).toBe('执行记录 · 排队中');
     expect(card.body.elements[0].text.tag).toBe('plain_text');
   });
 
@@ -1224,6 +1248,10 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     const card: any = buildLarkCard({ cardKind: 'process', state: 'completed', taskName: '大任务', agentName: 'Codex', elapsedSeconds: 99, elements });
     expect(Buffer.byteLength(JSON.stringify(card), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
     expect(components(card).length).toBeLessThanOrEqual(larkCardSafeLimits.components);
+    expect(card.header).toMatchObject({
+      title: { tag: 'plain_text', content: '大任务' },
+      subtitle: { tag: 'plain_text', content: 'Codex' }
+    });
     expect(card.config.summary.content.startsWith('执行过程 · 大任务')).toBe(true);
 
     // 触发正文兜底：无 trace 组的超大正文，裁剪循环无组可删，走截断兜底。
@@ -1232,10 +1260,13 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     const huge = [{ tag: 'markdown', content: 'A'.repeat(40_000), text_size: 'normal_v2', margin: '0px' }];
     const fallback: any = buildLarkCard({ cardKind: 'process', state: 'failed', taskName: '超大', agentName: 'AgentX', elapsedSeconds: 3, elements: huge });
     expect(Buffer.byteLength(JSON.stringify(fallback), 'utf8')).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+    expect(fallback.header).toMatchObject({
+      title: { tag: 'plain_text', content: '超大' },
+      subtitle: { tag: 'plain_text', content: 'AgentX' }
+    });
+    expect(fallback.config.summary.content.startsWith('执行过程 · 超大')).toBe(true);
     const overviewText = fallback.body.elements.find((el: any) => el.element_id === 'task_overview')?.text?.content ?? '';
-    expect(overviewText).toContain('执行过程 · 超大 · 已失败');
-    expect(overviewText).toContain('AgentX');
-    expect(overviewText).toContain('用时 3s');
+    expect(overviewText).toBe('执行记录 · 已失败 · 用时 3s');
     // 兜底裁剪提示有稳定 ID。
     expect(fallback.body.elements.some((el: any) =>
       el.element_id === 'dutydeck_fallback_omission' || el.element_id === 'dutydeck_hard_fallback_omission')).toBe(true);
@@ -1247,5 +1278,61 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(card.header).toBeDefined();
     expect(byId(card, 'task_overview')).toBeUndefined();
     expect(card.body.elements[0]).toMatchObject({ tag: 'column_set', element_id: 'task_action_row' });
+  });
+
+  it('截图形态真实 raw_terminal：process 无 current_bg 容器与兜底 current_title，终端记录仍保留；generic 保留原形态', () => {
+    const rawEvents: AgentEvent[] = [
+      makeEvent(1, 'raw_terminal', { text: '$ git status\nOn branch master\nnothing to commit' })
+    ];
+
+    // 1. process 运行态
+    const processElements = renderLarkProcessElements(rawEvents, config, false);
+    const processCard: any = buildLarkCard({
+      cardKind: 'process', state: 'running', taskName: '检查状态', agentName: 'Codex', elements: processElements
+    });
+
+    // 根 header 正常存在
+    expect(processCard.header).toBeDefined();
+    expect(processCard.header.title.content).toBe('检查状态');
+
+    // 没有 current_bg 容器（已被摊平）
+    const allComponents = components(processCard);
+    expect(allComponents.some(el => el.background_style === 'current_bg')).toBe(false);
+
+    // 没有兜底 current_title
+    expect(byId(processCard, 'current_title')).toBeUndefined();
+
+    // 终端记录仍存在
+    expect(JSON.stringify(processCard)).toContain('On branch master');
+
+    // 2. 同一 events 的 generic 视图（保持原行为）
+    const genericElements = renderLarkCardElements(rawEvents, config, false);
+    const genericCard: any = buildLarkCard({
+      state: 'running', taskName: '检查状态', agentName: 'Codex', elements: genericElements
+    });
+
+    // generic 仍有带 current_bg 的容器与 current_title
+    const genericComponents = components(genericCard);
+    expect(genericComponents.some(el => el.background_style === 'current_bg')).toBe(true);
+    const genericTitle = byId(genericCard, 'current_title');
+    expect(genericTitle).toBeDefined();
+    expect(genericTitle.content).toContain('正在执行…');
+    expect(JSON.stringify(genericCard)).toContain('On branch master');
+  });
+
+  it('真实旁白即使用词为“正在执行…”，依然作为有效旁白保留 current_title', () => {
+    const narrativeEvents: AgentEvent[] = [
+      makeEvent(1, 'text', { role: 'assistant', text: '正在执行…' }),
+      makeEvent(2, 'raw_terminal', { text: '$ pnpm build\nDone.' })
+    ];
+    const processElements = renderLarkProcessElements(narrativeEvents, config, false);
+    const processCard: any = buildLarkCard({
+      cardKind: 'process', state: 'running', taskName: '构建任务', agentName: 'Codex', elements: processElements
+    });
+    // 有真实旁白时，即便内容就是“正在执行…”，也要保留该 current_title，且在 process 中被摊平进总面板
+    const currentTitle = byId(processCard, 'current_title');
+    expect(currentTitle).toBeDefined();
+    expect(currentTitle.content).toBe('正在执行…');
+    expect(JSON.stringify(processCard)).toContain('Done.');
   });
 });
