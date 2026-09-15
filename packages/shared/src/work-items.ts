@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { AttemptResultV1 } from './task-execution.js';
 
 const stepId = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/);
 export const workStepDefinitionSchema = z.object({
@@ -50,9 +51,14 @@ export const createWorkItemSchema = z.object({
   idempotencyKey: z.string().trim().min(1).max(200)
 }).strict();
 export type CreateWorkItemInput = z.infer<typeof createWorkItemSchema>;
+export type WorkItemBlockReason = 'reconcile_required' | 'legacy_output_unresolved' | 'legacy_input_unresolved' | 'admission_conflict';
 export interface WorkAttempt {
   id: string; number: number; sessionId?: string; taskId?: string;
   status: 'preparing' | 'accepted' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'blocked';
+  runtimeAttemptId?: string;
+  result?: AttemptResultV1;
+  resultBoundary?: 'verified' | 'legacy_output_unresolved';
+  blockReason?: WorkItemBlockReason;
   output?: { text: string; digest: string }; error?: string; createdAt: string; updatedAt: string;
 }
 export interface WorkStep {

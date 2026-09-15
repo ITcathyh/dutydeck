@@ -5,7 +5,7 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { StoredLarkConfig } from './config.js';
+import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
 
@@ -21,10 +21,10 @@ import type { LarkMessageEvent } from './listener.js';
 
 const config: StoredLarkConfig = {
   appId: 'cli_test', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex',
-  fullTrustConfirmed: true, listening: true, preInjectPrompt: '',
+  fullTrustConfirmed: true, listening: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false,
   groupToolsEnabled: false, groupToolsAllowSend: false,
   pushIntervalMs: 1_000, hideTraceOnComplete: false,
-  allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [],
+  allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [],
   highRiskPattern: 'rm\\b', riskControlMode: 'off'
 };
 
@@ -56,9 +56,9 @@ function persistentRuntime(options: { stopGate?: Promise<void>; sendGate?: Promi
       const session = sessions.find(item => item.id === id);
       if (session) session.state = 'stopped';
     }),
-    send: vi.fn(async () => { if (options.sendGate) await options.sendGate; }),
-    interrupt: vi.fn(async () => {}),
-    cancelQueued: vi.fn(async () => {}),
+    send: vi.fn(async (..._args: any[]) => { if (options.sendGate) await options.sendGate; }),
+    interrupt: vi.fn(async (..._args: any[]) => {}),
+    cancelQueued: vi.fn(async (..._args: any[]) => {}),
     getTasks: vi.fn(async (id: string) => (tasks.get(id) ?? []).map(task => ({ ...task }))),
     subscribe: vi.fn(() => vi.fn())
   };
@@ -97,11 +97,11 @@ const persistedCard = (overrides: Partial<PersistedLarkCardTask> = {}): Persiste
 
 function cardService() {
   return {
-    addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
-    deleteReaction: vi.fn(async () => {}),
-    send: vi.fn(async () => ({ messageId: 'om_card' })),
-    update: vi.fn(async () => ({ messageId: 'om_card' })),
-    getUserEmails: vi.fn(async () => ['outsider@example.com'])
+    addReaction: vi.fn(async (..._args: any[]) => ({ reactionId: 'reaction-1' })),
+    deleteReaction: vi.fn(async (..._args: any[]) => {}),
+    send: vi.fn(async (_input: any) => ({ messageId: 'om_card' })),
+    update: vi.fn(async (_input: any) => ({ messageId: 'om_card' })),
+    getUserEmails: vi.fn(async (..._args: any[]) => ['outsider@example.com'])
   };
 }
 
@@ -172,7 +172,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await coordinatorFor(runtime, first).handle(dm('om_first', '先跑一轮'), config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     sessions[0]!.state = 'failed';
-    tasks.set('ses_1', [{ id: 'rt_1', status: 'running' }, { id: 'rt_2', status: 'queued' }, { id: 'rt_3', status: 'queued' }]);
+    tasks.set('ses_1', [runtimeTask({ id: 'rt_1', sessionId: 'ses_1', status: 'running' }), runtimeTask({ id: 'rt_2', sessionId: 'ses_1', status: 'queued' }), runtimeTask({ id: 'rt_3', sessionId: 'ses_1', status: 'queued' })]);
 
     const service = cardService();
     await coordinatorFor(runtime, service).handle(dm('om_status', '/status'), config);
@@ -923,17 +923,26 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
     capabilities: { pause: false, resume: true }, builtin: false
   });
 
-  /** 假 driver：send 一直挂起，让任务真实停在 running，可被 interrupt 收回。 */
+  /** 假 driver：首轮 send 挂起直到 interrupt 发所属 completed(cancelled) 并让 send 返回（与真实 transport 中断后 turn 收口一致）；之后新轮次正常完成。 */
   function stalledDriver() {
-    let releaseTurn!: () => void;
+    let emitEvent!: (event: import('@dutydeck/shared').NormalizedDriverEvent) => void;
+    let resolveTurn: (() => void) | undefined;
+    let interrupted = false;
     const driver: AgentDriver = {
       start: vi.fn(async () => {}),
-      send: vi.fn(async () => { await new Promise<void>(resolve => { releaseTurn = resolve; }); }),
-      interrupt: vi.fn(async () => { releaseTurn?.(); }),
+      send: vi.fn(async () => {
+        if (interrupted) {
+          emitEvent({ type: 'text', data: { text: '重试结果' } });
+          emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
+          return;
+        }
+        await new Promise<void>(resolve => { resolveTurn = resolve; });
+      }),
+      interrupt: vi.fn(async () => { interrupted = true; emitEvent({ type: 'completed', data: { stopReason: 'cancelled' } }); resolveTurn?.(); resolveTurn = undefined; }),
       resume: vi.fn(async () => {}),
-      stop: vi.fn(async () => { releaseTurn?.(); })
+      stop: vi.fn(async () => { resolveTurn?.(); resolveTurn = undefined; })
     };
-    return { driver, release: () => releaseTurn?.() };
+    return { driver, bind: (emit: (event: import('@dutydeck/shared').NormalizedDriverEvent) => void) => { emitEvent = emit; } };
   }
 
   /** 每张卡片一个可区分的合成 messageId，用来分辨旧卡与重试新卡。 */
@@ -951,21 +960,23 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
   it('重建 coordinator 后按库里的真实任务状态中断，并按落盘 mapping 恢复原 prompt 重试', async () => {
     // runtime 会真的 mkdir 会话 cwd，必须用一个可写的临时目录。
     const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-lark-recovery-'));
-    const repos = createRepositories(':memory:');
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const integrationConfig = { ...config, workspace };
-    const { driver, release } = stalledDriver();
+    const { driver, bind } = stalledDriver();
     const runtime = new DutydeckRuntime(repos, {
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
-      driverFactory: () => driver
+      driverFactory: (_agent, _protocol, emit) => { bind(emit); return driver; }
     });
     try {
       await runtime.initialize([agentFor(workspace)]);
+      await repos.config.set(larkBotsConfigKey, JSON.stringify([integrationConfig]));
 
       const service = trackedCardService('om_first');
       const first = new LarkMessageCoordinator(
         runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
-        undefined, repos.channelMappings
+        undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config }
       );
+      await first.initializeWorkflows(integrationConfig);
       // 一轮真实任务：driver 挂住，任务留在 running，卡片 mapping 落盘。
       void first.handle(dm('om_real', '把回归跑一遍'), integrationConfig);
       await vi.waitFor(async () => {
@@ -976,6 +987,9 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
       const sessionId = (await repos.sessions.list())[0]!.id;
       await vi.waitFor(async () =>
         expect((await repos.tasks.listBySession(sessionId))[0]?.status).toBe('running'));
+      // 中断语义针对的是已提交并挂在 send 中的一轮：必须等到 driver 真实收到 send，
+      // 否则任务还停在受控准备阶段，Runtime 会按准备中断回收，验不到提交后中断。
+      await vi.waitFor(() => expect(driver.send).toHaveBeenCalled());
       await vi.waitFor(async () =>
         expect(await repos.channelMappings.list('lark-card:cli_test')).not.toHaveLength(0));
       const originalTaskId = (await repos.tasks.listBySession(sessionId))[0]!.id;
@@ -987,16 +1001,16 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
       const cancelService = trackedCardService('om_cancel');
       const restarted = new LarkMessageCoordinator(
         runtime as any, cancelService as any, silentLog(), Math.random, 'ou_bot',
-        undefined, repos.channelMappings
+        undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config }
       );
+      await restarted.initializeWorkflows(integrationConfig);
       await restarted.handle(dm('om_cancel', '/cancel'), integrationConfig);
       await vi.waitFor(() => expect(cancelService.send).toHaveBeenCalledWith(
         expect.objectContaining({ taskName: '/cancel 已受理' })));
-      expect(driver.interrupt).toHaveBeenCalled();
+      await vi.waitFor(() => expect(driver.interrupt).toHaveBeenCalled());
       // 全程只可能用到注入的假 driver：它确实承接了这一轮，真实 CLI/ACP 从未被启动。
       expect(driver.start).toHaveBeenCalled();
       expect(driver.send).toHaveBeenCalled();
-      release();
       // 中断就该落成 interrupted：放宽到 failed/completed 会让「没真的中断」也蒙混过关。
       await vi.waitFor(async () =>
         expect((await repos.tasks.listBySession(sessionId)).find(task => task.id === originalTaskId)?.status)
@@ -1007,8 +1021,9 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
       const retryService = trackedCardService('om_retry');
       const retrying = new LarkMessageCoordinator(
         runtime as any, retryService as any, silentLog(), Math.random, 'ou_bot',
-        undefined, repos.channelMappings
+        undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config }
       );
+      await retrying.initializeWorkflows(integrationConfig);
       void retrying.handle(dm('om_retry', '/retry'), integrationConfig);
       await vi.waitFor(async () =>
         expect((await repos.tasks.listBySession(sessionId)).length).toBeGreaterThan(before));
@@ -1035,7 +1050,6 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
         expect(freshExtra.card_message_id).toBe('om_retry_card_1');
         expect(freshExtra.runtime_task_id).toBe(latest.id);
       });
-      release();
     } finally {
       // 活着的 runtime 必须先停，否则断言失败时会在 driver 仍持有会话的情况下关库。
       await runtime.shutdown().catch(() => undefined);

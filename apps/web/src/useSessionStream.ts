@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
-import { api, type Session, type Task } from './api';
+import { api, type Session } from './api';
 import { EVENT_PAGE_SIZE, mergeLiveEvent, mergeReconciledEvents, newestSequence, type EventWindow } from './event-history';
-import { SessionStream, applyStatusEvent, upsertTask, type StreamStatus } from './sse';
+import { SessionStream, applyStatusEvent, type StreamStatus } from './sse';
 
 // 订阅当前任务的 SSE 事件流，把事件 merge 进 TanStack Query 缓存；
 // 断线时由 SessionStream 按指数退避自动重连（原生 EventSource 重连会自动带 Last-Event-ID header）
@@ -40,7 +40,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
         if (newest > 0 && event.sequence > newest + 1) reconcileEvents(newest, event.sequence);
         qc.setQueryData<EventWindow>(['events', sessionId], cached => mergeLiveEvent(cached, event));
         if (event.type === 'status') qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === sessionId ? applyStatusEvent(session, event) : session));
-        if (event.type === 'task' && event.data.task) qc.setQueryData<Task[]>(['tasks', sessionId], current => upsertTask(current, event.data.task));
+        if (event.type === 'task') void qc.invalidateQueries({ queryKey: ['tasks', sessionId], exact: true });
       },
       onStatus: next => {
         setStatus(next);

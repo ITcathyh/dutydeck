@@ -36,11 +36,11 @@ describe('Agent group tool HTTP boundary', () => {
 
   it.each(['reply', 'topic seed', 'new topic', 'native thread'])('resolves %s routing through persisted sessions and the real Lark client', async scenario => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-thread-tools-'));
-    const repos = createRepositories(':memory:');
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
-      driverFactory: () => ({ start: async () => {}, stop: async () => {}, send: async () => {}, resume: async () => {}, interrupt: async () => {} })
+      driverFactory: (_agent, _proto, emit) => ({ start: async () => {}, stop: async () => {}, send: async () => { emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }, resume: async () => {}, interrupt: async () => {} })
     });
     const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310');
     const app = Fastify();
@@ -55,7 +55,7 @@ describe('Agent group tool HTTP boundary', () => {
       };
       const scope = await resolveLarkScopeId(event, config, scenario === 'topic seed' ? async () => 'topic' : undefined);
       expect(scope).toBe(scenario === 'native thread' ? 'thread:omt_topic' : 'thread:om_root');
-      const resolved = await resolveLarkSession(runtime, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, { tail: Promise.resolve() }, config, event.chatId, event.chatType, scope, repos.mappings);
+      const resolved = await resolveLarkSession(runtime, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, { tail: Promise.resolve() }, config, event.chatId, event.chatType, scope, repos.channelMappings);
       const persisted = (await repos.sessions.get(resolved.id))!;
       const token = capabilities.environmentFor(persisted).dutydeck_group_tools_token!;
       const headers = { authorization: `Bearer ${token}` };

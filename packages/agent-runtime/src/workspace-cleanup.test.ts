@@ -59,15 +59,17 @@ function driverFactory(sent: string[] = []): DriverFactory {
     send: vi.fn(async prompt => {
       sent.push(prompt);
       emit({ type: 'text', data: { text: 'done' } });
+      emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     }),
     interrupt: vi.fn(async () => {}),
     resume: vi.fn(async () => {}),
+    isStopped: async () => true,
     stop: vi.fn(async () => {})
   });
 }
 
 function open(database: string, options: RuntimeOptions = {}, sent: string[] = []) {
-  const repos = createRepositories(database);
+  const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: driverFactory(sent),
@@ -163,6 +165,7 @@ describe('managed workspace cleanup', () => {
     await h.runtime.initialize([agent]);
 
     const session = await h.runtime.start({ agentId: agent.id, cwd: source, workspaceMode: 'worktree' });
+    await h.runtime.stop(session.id);
     await expect(h.runtime.getWorkspaceCleanupPreview(session.id)).rejects.toMatchObject({
       code: 'SESSION_NOT_ARCHIVED',
       statusCode: 409
@@ -379,16 +382,8 @@ describe('managed workspace cleanup', () => {
     await h.runtime.archive(first.id);
 
     // 在同目录下创建一个未归档的 Session
-    const otherSession = {
-      id: 'ses_sibling',
-      agentId: agent.id,
-      state: 'idle' as const,
-      cwd: firstWorkspace.repoRoot!,
-      runId: 'run_sibling',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    await h.repos.sessions.save(otherSession);
+    const sibling = await h.runtime.start({ agentId: agent.id, cwd: firstWorkspace.repoRoot!, workspaceMode: 'shared' });
+    await h.runtime.stop(sibling.id);
 
     const preview = await h.runtime.getWorkspaceCleanupPreview(first.id);
     expect(preview.canClean).toBe(false);

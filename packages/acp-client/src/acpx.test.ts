@@ -168,7 +168,7 @@ describe('acpx ACP boundary', () => {
     await expect(sending).resolves.toBeUndefined();
   });
 
-  it('recreates a persistent ACP session when the agent no longer recognizes its id', async () => {
+  it('preserves the original persistent session and fails when the agent no longer recognizes its id', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-stale-session-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
     const config = { id: 'mock', name: 'Mock', command: process.execPath, args: [fixture], protocol: 'acp' as const, cwd, env: { mock_acp_reject_unknown_load: '1' }, permissionMode: 'deny-all' as const, timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
@@ -176,7 +176,11 @@ describe('acpx ACP boundary', () => {
     await first.start(); await first.stop();
     const second = new AcpxAdapter(config, { sessionKey: 'same-dutydeck-session', onEvent() {} });
     await expect(second.start()).resolves.toBeUndefined();
-    await expect(second.send('after stale session')).resolves.toBeUndefined();
+    const store=createRuntimeStore({stateDir:join(cwd,'.dutydeck','acpx')});
+    const before=await store.load('same-dutydeck-session');
+    await expect(second.send('after stale session')).rejects.toThrow(/could not be resumed/);
+    expect((await store.load('same-dutydeck-session'))?.acpSessionId).toBe(before?.acpSessionId);
+    expect((await store.load('same-dutydeck-session'))?.acpx?.reset_on_next_ensure).not.toBe(true);
     await second.stop();
   });
 

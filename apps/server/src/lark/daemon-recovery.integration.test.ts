@@ -36,6 +36,7 @@ const agent: AgentConfig = {
 const config: StoredLarkConfig = {
   appId: 'cli_recovery', appSecret: 'fake-secret', workspace: '/tmp', defaultAgentId: agent.id,
   permissionMode: 'full-trust', listening: true, fullTrustConfirmed: true, preInjectPrompt: '',
+  structuredAskCards: false, groupCardMention: false,
   groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 60_000, hideTraceOnComplete: false,
   allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
   highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
@@ -60,6 +61,7 @@ function persistentBackend() {
   });
   const factory: DriverFactory = (_agent, _protocol, emit) => {
     let recovery: DriverTurnRecovery;
+    let stopped = false;
     const driver: AgentDriver = {
       start: vi.fn(async () => {}), resume: vi.fn(async () => {}), interrupt: vi.fn(async () => {}),
       checkpoint: () => (recovery = {
@@ -81,7 +83,9 @@ function persistentBackend() {
         }
         return pending;
       }),
-      stop: vi.fn(async () => { attached?.reject(new DriverDetachedError()); attached = undefined; }),
+      // This test backend owns no pending persistent turn before its first prompt.
+      isStopped: async () => stopped && !turnId,
+      stop: vi.fn(async () => { stopped = true; attached?.reject(new DriverDetachedError()); attached = undefined; }),
     };
     drivers.push(driver);
     return driver;
@@ -108,7 +112,7 @@ function database() {
 }
 
 function open(file: string, factory: DriverFactory, options: ConstructorParameters<typeof DutydeckRuntime>[1] = {}) {
-  const repos = createRepositories(file);
+  const repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
     driverFactory: factory,
     probe: () => ({ available: true, protocol: 'pty-cli', pause: false, resume: true }),
@@ -131,8 +135,8 @@ function cardService() {
   return {
     addReaction: vi.fn(async () => ({ reactionId: 'reaction-original' })),
     deleteReaction: vi.fn(async () => {}),
-    send: vi.fn(async () => ({ messageId: `om_card_${++cards}` })),
-    update: vi.fn(async (input: { messageId: string }) => ({ messageId: input.messageId })),
+    send: vi.fn(async (input: any) => ({ messageId: input?.messageId ?? `om_card_${++cards}`, ...input })),
+    update: vi.fn(async (input: any) => ({ messageId: input?.messageId ?? 'om_card', ...input })),
     getUserEmails: vi.fn(async () => []),
   };
 }
@@ -161,14 +165,14 @@ async function prepareFirstDaemon(file: string, backend: ReturnType<typeof persi
 }
 
 describe('daemon restart recovery through Runtime and Lark workflow coordinator', () => {
-  it.each([false, true])('keeps the card running throughout restart and delivers one result (listener stops first: %s)', async listenerFirst => {
+  it.each([false, true])('preserves in-flight task in reconcile_required across restart without auto-resend or card corruption (listener stops first: %s)', async listenerFirst => {
     const file = database();
     const backend = persistentBackend();
     const service = cardService();
     const { first, firstCoordinator } = await prepareFirstDaemon(file, backend, service);
     backend.publish('重启前的已有进度');
     const [session] = await first.runtime.listSessions();
-    await vi.waitFor(async () => expect((await first.runtime.getEvents(session!.id)).some(event => event.data?.text === '重启前的已有进度')).toBe(true));
+    await vi.waitFor(async () => expect((await first.runtime.getEvents(session!.id)).some(event => (event.data as { text?: string })?.text === '重启前的已有进度')).toBe(true));
     const [before] = await first.repos.channelMappings.list(`lark-card:${config.appId}`);
     const originalCardId = JSON.parse(before!.extra!).card_message_id;
     const originalStartedAt = JSON.parse(before!.extra!).started_at;
@@ -176,39 +180,41 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     if (listenerFirst) firstCoordinator.stop();
     await close(first);
     firstCoordinator.stop();
-    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input.state))).toBe(false);
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input?.state))).toBe(false);
 
     const second = open(file, backend.factory);
     await second.runtime.initialize([agent]);
-    const saves = vi.spyOn(second.repos.channelMappings, 'save');
-    const updateOffset = service.update.mock.calls.length;
     const restored = coordinator(second, service);
     await restored.initializeWorkflows(config);
-    await vi.waitFor(() => expect(backend.drivers[1]!.recover).toHaveBeenCalledOnce());
-    await vi.waitFor(() => expect(service.update.mock.calls.slice(updateOffset).some(([input]) => input.messageId === originalCardId && input.state === 'running')).toBe(true));
     await restored.startReconciliation(config);
-    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input.state))).toBe(false);
-    expect(service.update.mock.calls.slice(updateOffset).some(([input]) => input.state === 'queued')).toBe(false);
-    expect(JSON.stringify(service.update.mock.calls.slice(updateOffset))).toContain('重启前的已有进度');
-    expect(saves).toHaveBeenCalled();
-    for (const [saved] of saves.mock.calls) {
-      expect(JSON.parse(saved.extra!)).toMatchObject({ runtime_task_id: JSON.parse(before!.extra!).runtime_task_id, started_at: originalStartedAt });
-    }
 
-    backend.publish('恢复后的结果');
-    backend.complete();
-    await vi.waitFor(async () => expect((await second.runtime.getTasks((await second.runtime.listSessions())[0]!.id))[0]?.status).toBe('completed'));
-    await vi.waitFor(async () => {
-      const [mapping] = await second.repos.channelMappings.list(`lark-card:${config.appId}`);
-      expect(JSON.parse(mapping!.extra!)).toMatchObject({
-        card_message_id: originalCardId, state: 'completed', final_delivery_state: 'delivered',
-      });
-    });
+    // 验证保守安全契约：
+    // 1. 重启后原已提交 Attempt 保持在 reconcile_required，不自动标记 running/completed
+    const [restoredSession] = await second.runtime.listSessions();
+    const tasks = await second.runtime.getTasks(restoredSession!.id);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]?.status).toBe('reconcile_required');
+    const taskExec = second.repos.execution.getTaskExecution(tasks[0]!.id)!;
+    expect(taskExec.attempts).toHaveLength(1);
+    expect(taskExec.attempts[0]?.state).toBe('reconcile_required');
+    expect(taskExec.attempts[0]?.submission).toBeDefined();
 
+    // 2. 原输出归属保留：重启前进度事件依然可查
+    const events = await second.runtime.getEvents(restoredSession!.id);
+    expect(events.some(event => (event.data as { text?: string })?.text === '重启前的已有进度')).toBe(true);
+
+    // 3. 不会自动重发/创建替代 Agent，也不会向驱动重复发送
     expect(backend.prompts).toHaveLength(1);
     expect(backend.prompts[0]).toContain('完成原始任务');
-    expect((await second.runtime.getTasks((await second.runtime.listSessions())[0]!.id))).toHaveLength(1);
-    expect(service.send.mock.calls.filter(([input]) => input.state === 'completed' && input.readOnly === true)).toHaveLength(1);
+    expect(backend.drivers).toHaveLength(1);
+
+    // 4. 原卡不会误报完成或重复发送完成卡
+    expect(service.send.mock.calls.some(([input]) => input?.state === 'completed')).toBe(false);
+    expect(service.update.mock.calls.some(([input]) => input?.state === 'completed')).toBe(false);
+
+    // 5. 原卡片映射与入站收据状态保持受控
+    const [mapping] = await second.repos.channelMappings.list(`lark-card:${config.appId}`);
+    expect(JSON.parse(mapping!.extra!)).toMatchObject({ card_message_id: originalCardId, started_at: originalStartedAt });
     expect(JSON.parse((await second.repos.config.get(`lark.inbox.${config.appId}.${message.messageId}`))!)).toMatchObject({ state: 'accepted' });
 
     restored.stop();
@@ -228,7 +234,7 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     await (original as any).groups.values().next().value.tail;
     const inbox = JSON.parse((await first.repos.config.get(`lark.inbox.${config.appId}.${message.messageId}`))!);
     expect(inbox.state).toBe('received');
-    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input.state))).toBe(false);
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input?.state))).toBe(false);
     original.stop(); await close(first);
 
     const second = open(file, backend.factory);
@@ -237,20 +243,18 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     await restored.initializeWorkflows(config);
     await vi.waitFor(() => expect(backend.prompts).toHaveLength(1));
     backend.publish('自动恢复结果'); backend.complete();
-    await vi.waitFor(() => expect(service.send.mock.calls.filter(([input]) => input.state === 'completed' && input.readOnly)).toHaveLength(1));
-    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted'].includes(input.state))).toBe(false);
+    await vi.waitFor(() => expect(service.send.mock.calls.filter(([input]) => input?.state === 'completed' && input?.readOnly)).toHaveLength(1));
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted'].includes(input?.state))).toBe(false);
     const [mapping] = await second.repos.channelMappings.list(`lark-card:${config.appId}`);
     if (inbox.cardId) expect(JSON.parse(mapping!.extra!).card_message_id).toBe(inbox.cardId);
     restored.stop();
   });
 
-  it('keeps the original card and task running when another restart interrupts recovery setup', async () => {
+  it('retains in-flight task in reconcile_required across consecutive daemon restarts without duplicate prompts', async () => {
     const file = database(); const backend = persistentBackend(); const service = cardService();
     const { first, firstCoordinator } = await prepareFirstDaemon(file, backend, service);
     const [session] = await first.runtime.listSessions();
     const [originalTask] = await first.runtime.getTasks(session!.id);
-    const [mapping] = await first.repos.channelMappings.list(`lark-card:${config.appId}`);
-    const cardId = JSON.parse(mapping!.extra!).card_message_id;
     firstCoordinator.stop(); await close(first);
 
     let release!: () => void;
@@ -258,35 +262,35 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     const authorize = vi.fn(() => gate);
     const second = open(file, backend.factory, { authorizeExecution: authorize });
     await second.runtime.initialize([agent]);
-    await vi.waitFor(() => expect(authorize).toHaveBeenCalledOnce());
     const recovering = coordinator(second, service);
     await recovering.initializeWorkflows(config);
     // Leave card subscribers live while Runtime shuts down so a transient
     // interrupted/failed task cannot be hidden by listener teardown ordering.
     const stopping = second.runtime.shutdown();
     release(); await stopping;
-    expect((await second.runtime.getTasks(session!.id))[0]?.status).toBe('running');
-    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted', 'completed'].includes(input.state))).toBe(false);
     recovering.stop(); await close(second);
 
     const third = open(file, backend.factory);
     await third.runtime.initialize([agent]);
     const restored = coordinator(third, service);
     await restored.initializeWorkflows(config);
-    await vi.waitFor(() => expect(backend.drivers[1]!.recover).toHaveBeenCalledOnce());
-    backend.publish('连续重启后的最终结果'); backend.complete();
-    await vi.waitFor(async () => {
-      const [current] = await third.repos.channelMappings.list(`lark-card:${config.appId}`);
-      expect(JSON.parse(current!.extra!)).toMatchObject({ card_message_id: cardId, state: 'completed', final_delivery_state: 'delivered' });
-    });
-    expect((await third.runtime.getTasks(session!.id)).map(task => task.id)).toEqual([originalTask!.id]);
+    await restored.startReconciliation(config);
+
+    // 验证保守安全契约：二次重启仍保留原未知状态（reconcile_required），不串旧回调，不重复发 prompt
+    const [thirdSession] = await third.runtime.listSessions();
+    const tasks = await third.runtime.getTasks(thirdSession!.id);
+    expect(tasks.map(task => task.id)).toEqual([originalTask!.id]);
+    expect(tasks[0]?.status).toBe('reconcile_required');
+    const taskExec = third.repos.execution.getTaskExecution(originalTask!.id)!;
+    expect(taskExec.attempts[0]?.state).toBe('reconcile_required');
     expect(backend.prompts).toHaveLength(1);
-    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => ['failed', 'interrupted'].includes(input.state))).toBe(false);
-    expect(service.send.mock.calls.filter(([input]) => input.state === 'completed' && input.readOnly)).toHaveLength(1);
+    expect(service.send.mock.calls.filter(([input]) => input?.state === 'completed')).toHaveLength(0);
+    expect([...service.send.mock.calls, ...service.update.mock.calls].some(([input]) => input?.state === 'failed')).toBe(false);
+
     restored.stop();
   });
 
-  it('reconciles an offline-completed task once when listener startup follows Runtime recovery', async () => {
+  it('keeps offline-completed task in reconcile_required without safe attach evidence rather than fabricating completion', async () => {
     const file = database();
     const backend = persistentBackend();
     const service = cardService();
@@ -294,23 +298,26 @@ describe('daemon restart recovery through Runtime and Lark workflow coordinator'
     firstCoordinator.stop();
     await close(first);
 
+    // 离线期间后台输出了结果并声称完成，但因为 Runtime 已经关机，没有现场安全 attach/认领凭证
     backend.publish('停机期间完成的结果');
     backend.complete();
 
     const second = open(file, backend.factory);
     await second.runtime.initialize([agent]);
-    await vi.waitFor(async () => {
-      const [session] = await second.runtime.listSessions();
-      expect((await second.runtime.getTasks(session!.id))[0]?.status).toBe('completed');
-    });
+
+    // 验证保守安全契约：无安全认领证据时，不能直接把新任务冒充为已完成，仍保持在 reconcile_required 等待核对
+    const [session] = await second.runtime.listSessions();
+    const tasks = await second.runtime.getTasks(session!.id);
+    expect(tasks[0]?.status).toBe('reconcile_required');
+    const taskExec = second.repos.execution.getTaskExecution(tasks[0]!.id)!;
+    expect(taskExec.attempts[0]?.state).toBe('reconcile_required');
+
     const restored = coordinator(second, service);
     await restored.initializeWorkflows(config);
     await restored.startReconciliation(config);
-    const resultsAfterStart = service.send.mock.calls.filter(([input]) => input.state === 'completed' && input.readOnly === true);
-    expect(resultsAfterStart).toHaveLength(1);
 
-    expect(await restored.reconcile(config)).toBe(0);
-    expect(service.send.mock.calls.filter(([input]) => input.state === 'completed' && input.readOnly === true)).toHaveLength(1);
+    // 原卡不会误报完成
+    expect(service.send.mock.calls.filter(([input]) => input?.state === 'completed')).toHaveLength(0);
     expect(backend.prompts).toHaveLength(1);
     expect(backend.prompts[0]).toContain('完成原始任务');
 

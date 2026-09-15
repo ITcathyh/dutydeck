@@ -597,7 +597,15 @@ async function main() {
   assert(browserSendResponse.status() === 202,
     `浏览器 POST /send 返回 202（实际 ${browserSendResponse.status()}）`);
   await page.waitForURL(url => url.pathname === `/sessions/${browserSessionId}`, { timeout: 20_000 });
-  await page.getByLabel('已完成', { exact: true }).waitFor({ state: 'visible', timeout: REAL ? 150_000 : 60_000 });
+  // Task/Attempt 是完成权威：一轮结束后 Session 回到 idle/persistent，不再置 completed。
+  // 轮询真实 tasks 接口等待该轮 Task 结算，再由后续页面断言验证浏览器可见的最终输出。
+  await waitFor('浏览器任务的 Task 状态变为 completed', async () => {
+    const tasksResponse = await request('GET', `/api/sessions/${browserSessionId}/tasks`);
+    const browserTasks = tasksResponse.json ?? [];
+    const failed = browserTasks.find(task => task.status === 'failed');
+    if (failed) throw new Error(`浏览器任务失败：${JSON.stringify(failed)}`);
+    return browserTasks.some(task => task.status === 'completed') ? browserTasks : undefined;
+  }, { timeoutMs: REAL ? 150_000 : 60_000 });
   if (!REAL) {
     try {
       await page.getByText(/MOCK_REPLY:/).last().waitFor({ state: 'visible', timeout: 20_000 });
@@ -734,11 +742,17 @@ async function main() {
   const completedEvent = events.find(item => item.type === 'completed').event;
   assert(typeof completedEvent.sequence === 'number' && completedEvent.sequence > 0, 'completed 事件带 sequence（SSE id: 游标可用）');
 
-  const finalState = await waitFor('任务运行状态变为 completed', async () => {
-    const current = await request('GET', `/api/sessions/${session.id}`);
-    return current.json?.state === 'completed' ? current.json : undefined;
+  // Task/Attempt 是完成权威：一轮结算后 Session 保持 idle/persistent，等待下一条指令。
+  const firstTaskId = sent.json?.task?.id;
+  const finalTask = await waitFor('任务状态变为 completed', async () => {
+    const tasksResponse = await request('GET', `/api/sessions/${session.id}/tasks`);
+    const target = (tasksResponse.json ?? []).find(task => task.id === firstTaskId);
+    if (target?.status === 'failed') throw new Error(`任务失败：${JSON.stringify(target)}`);
+    return target?.status === 'completed' ? target : undefined;
   }, { timeoutMs: 20_000 });
-  assert(finalState.state === 'completed', '任务运行 state = completed');
+  assert(finalTask.status === 'completed', 'Task state = completed（Attempt 已结算）');
+  const finalState = await request('GET', `/api/sessions/${session.id}`);
+  assert(finalState.json?.state === 'idle', '一轮结束后任务运行保持 idle/persistent，可继续接收指令（实际 ' + finalState.json?.state + '）');
 
   if (!REAL) {
     const assistantText = events.filter(item => item.type === 'text').map(item => item.event.data?.text ?? '').join('');

@@ -31,6 +31,13 @@ const principalId = (appId: string, openId: string) => `principal_${hash(`${appI
 const fingerprint = (config: StoredLarkConfig) => hash(`${config.brand ?? 'feishu'}\0${config.appId}\0${config.appSecret}`);
 const parse = <T>(value: string | undefined): T | undefined => value ? JSON.parse(value) as T : undefined;
 const deny = (action: PolicyAction, reason: string): PolicyDecision => ({ allowed: false, action, code: 'LARK_GROUP_POLICY_DENIED', reason, source: 'explicit_deny' });
+const buildRunContext = (session: Session, config: StoredLarkConfig, event: Pick<LarkMessageEvent, 'chatId' | 'chatType' | 'senderOpenId'>, scopeId: string): RunContext | undefined => {
+  if (!config.managedGroup || !event.senderOpenId) return undefined;
+  return {
+    appId: config.appId, chatId: event.chatId, bindingId: config.managedGroup.bindingId, principalId: principalId(config.appId, event.senderOpenId), openId: event.senderOpenId,
+    sourceId: larkSourceId(config, event.chatId, event.chatType, scopeId), revision: config.managedGroup.revision, agentId: session.agentId, cwd: session.cwd, model: session.model, reasoningEffort: session.reasoningEffort
+  };
+};
 const patchSchema = groupBindingSchema.pick({ agentOverride: true, workspaceOverride: true, modelOverride: true, reasoningOverride: true, routingOverride: true, accessOverride: true, groupToolsOverride: true, oncall: true, state: true }).partial();
 const roleCreateSchema = z.object({ kind: z.literal('create'), principalId: z.string(), role: z.enum(['can_talk', 'can_operate']), operateScope: z.enum(['none', 'own_runs', 'group_runs']), actionGates: z.object({ terminalWrite: z.boolean(), highRisk: z.boolean(), groupToolsSend: z.boolean() }) }).strict();
 const roleUpdateSchema = z.object({ kind: z.literal('update'), id: z.string(), expectedRevision: z.number().int().positive(), patch: z.object({ state: z.enum(['active', 'revoked']).optional(), operateScope: z.enum(['none', 'own_runs', 'group_runs']).optional(), actionGates: z.object({ terminalWrite: z.boolean(), highRisk: z.boolean(), groupToolsSend: z.boolean() }).optional() }).strict() }).strict();
@@ -340,8 +347,8 @@ export class LarkGroupManager {
       if (existing.appId !== config.appId || existing.chatId !== event.chatId) throw new RuntimeError('LARK_RUN_SCOPE_MISMATCH', '任务上下文不属于当前群。', 403);
       return;
     }
-    const value: RunContext = { appId: config.appId, chatId: event.chatId, bindingId: config.managedGroup.bindingId, principalId: principalId(config.appId, event.senderOpenId), openId: event.senderOpenId,
-      sourceId: larkSourceId(config, event.chatId, event.chatType, scopeId), revision: config.managedGroup.revision, agentId: session.agentId, cwd: session.cwd, model: session.model, reasoningEffort: session.reasoningEffort };
+    const value = buildRunContext(session, config, event, scopeId);
+    if (!value) return;
     if (this.repos.config.compareAndSet) await this.repos.config.compareAndSet(runKey(session.id), undefined, JSON.stringify(value));
     else await this.repos.config.set(runKey(session.id), JSON.stringify(value));
   }
@@ -359,21 +366,68 @@ export class LarkGroupManager {
     return this.authorize(appId, chatId, undefined, action, sessionId, { installationOwner });
   }
 
-  async beginTurn(sessionId: string, actorId?: string) {
-    let run = parse<RunContext>(await this.repos.config.get(runKey(sessionId)));
+  async prepareTurn(sessionId: string, actorId?: string): Promise<(() => Promise<void>) | undefined> {
+    const run = parse<RunContext>(await this.repos.config.get(runKey(sessionId)));
     const owner = actorId === installationOwnerTaskActor;
     // Tasks queued before activation have no verified actor; never borrow a later task's identity.
     if (run && !actorId) throw new RuntimeError('LARK_TASK_ACTOR_REQUIRED', '此排队任务缺少可验证的发起人，请重新发送。', 403);
     const decision = run ? await this.authorize(run.appId, run.chatId, owner ? undefined : actorId, 'turn.append', sessionId, { installationOwner: owner }) : await this.authorizeSession(sessionId, 'turn.append', owner);
     if (decision && !decision.allowed) throw new RuntimeError(decision.code, decision.reason, 403);
-    if (!run && decision && owner) {
-      const session = (await this.repos.sessions.get(sessionId))!;
-      const [appId, chatId, chatType, ...scope] = session.sourceId!.split(':');
-      const config = await this.resolved(await this.config(appId!), chatId!);
-      await this.recordRun(session, config, { chatId: chatId!, chatType: chatType!, senderOpenId: actorId }, scope.join(':') || chatType!);
-      run = parse<RunContext>(await this.repos.config.get(runKey(sessionId)));
+    if (!decision) return undefined;
+
+    let targetScope: { appId: string; chatId: string; bindingId: string } | undefined;
+    const hadRun = Boolean(run);
+    let candidateRun: RunContext | undefined;
+
+    if (run) {
+      targetScope = { appId: run.appId, chatId: run.chatId, bindingId: run.bindingId };
+    } else if (owner) {
+      const session = await this.repos.sessions.get(sessionId);
+      const [appId, chatId, chatType, ...scope] = session?.sourceId?.split(':') ?? [];
+      if (!session || session.source !== 'lark' || !appId || !chatId || chatType !== 'group') return undefined;
+      const config = await this.resolved(await this.config(appId), chatId);
+      const scopeId = scope.join(':') || chatType;
+      candidateRun = buildRunContext(session, config, { chatId, chatType, senderOpenId: actorId }, scopeId);
+      if (!candidateRun) return undefined;
+      targetScope = { appId: candidateRun.appId, chatId: candidateRun.chatId, bindingId: candidateRun.bindingId };
+    } else {
+      return undefined;
     }
-    if (run && actorId) await this.repos.config.set(runKey(sessionId), JSON.stringify({ ...run, activeOpenId: actorId }));
+
+    return async () => {
+      const current = parse<RunContext>(await this.repos.config.get(runKey(sessionId)));
+      if (hadRun && !current) {
+        throw new RuntimeError('LARK_RUN_SCOPE_MISMATCH', '任务上下文已被删除。', 403);
+      }
+      if (current) {
+        if (current.appId !== targetScope.appId || current.chatId !== targetScope.chatId || current.bindingId !== targetScope.bindingId) {
+          throw new RuntimeError('LARK_RUN_SCOPE_MISMATCH', '任务上下文不属于当前群。', 403);
+        }
+        const nextRun: RunContext = { ...current, ...(actorId ? { activeOpenId: actorId } : {}) };
+        await this.repos.config.set(runKey(sessionId), JSON.stringify(nextRun));
+        return;
+      }
+      if (candidateRun) {
+        const toWrite: RunContext = { ...candidateRun, ...(actorId ? { activeOpenId: actorId } : {}) };
+        if (this.repos.config.compareAndSet) {
+          const inserted = await this.repos.config.compareAndSet(runKey(sessionId), undefined, JSON.stringify(toWrite));
+          if (inserted === false) {
+            const raced = parse<RunContext>(await this.repos.config.get(runKey(sessionId)));
+            if (!raced || raced.appId !== targetScope.appId || raced.chatId !== targetScope.chatId || raced.bindingId !== targetScope.bindingId) {
+              throw new RuntimeError('LARK_RUN_SCOPE_MISMATCH', '任务上下文不属于当前群。', 403);
+            }
+            await this.repos.config.set(runKey(sessionId), JSON.stringify({ ...raced, ...(actorId ? { activeOpenId: actorId } : {}) }));
+          }
+        } else {
+          await this.repos.config.set(runKey(sessionId), JSON.stringify(toWrite));
+        }
+      }
+    };
+  }
+
+  async beginTurn(sessionId: string, actorId?: string) {
+    const commit = await this.prepareTurn(sessionId, actorId);
+    await commit?.();
   }
 
   async riskPolicy(sessionId: string, fallback?: ToolRiskPolicy): Promise<ToolRiskPolicy | undefined> {

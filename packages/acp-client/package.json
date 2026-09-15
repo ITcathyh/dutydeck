@@ -19,7 +19,11 @@
     "dist/index.js",
     "dist/index.js.map",
     "dist/index.d.ts",
-    "agents"
+    "agents",
+    "src/regex-timeout.ts",
+    "dist/regex-timeout.js",
+    "dist/regex-timeout.js.map",
+    "dist/regex-timeout.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

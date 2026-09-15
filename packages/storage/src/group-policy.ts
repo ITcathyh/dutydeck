@@ -409,7 +409,7 @@ export function createWp1aRepositories(sqlite: Database.Database): Wp1aRepositor
     roleAssignments: { get: getRole, create: createRole, update: updateRole },
     config: {
       get: key => (sqlite.prepare('SELECT value FROM configs WHERE key = ?').get(key) as { value: string } | undefined)?.value,
-      set: (key, value) => { sqlite.prepare('INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value); }
+      set: (key, value) => { if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); sqlite.prepare('INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(key, value); }
     }
   };
   const transact = async <T>(work: (repositories: GroupPolicyTransactionContext) => T): Promise<T> => {

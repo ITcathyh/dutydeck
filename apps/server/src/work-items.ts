@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto';
-import { createWorkItemSchema, installationOwnerTaskActor, RuntimeError, workPlanSchema, type CreateWorkItemInput, type PermissionMode, type RepositoryBundle, type Session, type TaskRecord, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
+import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, RuntimeError, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
+import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
+import { readAttemptResult } from './task-results.js';
 
 const PREFIX = 'work_item:';
 const TEMPLATES = 'work_template:';
-const OUTPUT_BYTES = 512 * 1024;
 const TIMEOUT_MS = 60 * 60_000;
 const PREPARE_TIMEOUT_MS = 60_000;
 async function bounded<T>(operation: Promise<T>, milliseconds: number): Promise<T> {
@@ -26,12 +27,18 @@ interface FrozenAgent { fingerprint: string; permissionMode: PermissionMode }
 interface StoredWork {
   item: WorkItem;
   actorId: string;
+  /** 结构化执行操作者，仅从创建时已验证的父 Session/App 事实形成，不随公开投影返回。 */
+  actor?: ExecutionActor;
+  /** 取消本次工作的操作者，安装者代取消后重开仍沿用该身份停止。 */
+  cancellationActor?: ExecutionActor;
   inputHash: string;
   parentFingerprint: string;
   cwd: string;
   riskPolicy?: ToolRiskPolicy;
   agents: Record<string, FrozenAgent>;
   stoppedAttempts: string[];
+  /** attempt.id -> 固定 TaskAdmissionV1，私有，绝不进入 WorkItem 公开投影。 */
+  admissions?: Record<string, TaskAdmissionV1>;
 }
 interface StoredTemplate { template: WorkTemplate; actorId: string }
 interface RecordState { raw: string; value: StoredWork }
@@ -92,8 +99,17 @@ export class WorkItemService {
   private async records(): Promise<StoredWork[]> {
     return (await this.repos.config.list!(PREFIX)).map(row => JSON.parse(row.value) as StoredWork);
   }
+  /** 公开投影：item 本身不含 admission/actor 等私有执行材料（它们只存在 StoredWork 外层）。 */
+  private view(record: StoredWork): WorkItem { return structuredClone(record.item); }
   private parentFingerprint(session: Session) {
     return fingerprint({ agentId: session.agentId, cwd: session.cwd, permissionMode: session.permissionMode, model: session.model, reasoningEffort: session.reasoningEffort, systemPrompt: session.systemPrompt, source: session.source, sourceId: session.sourceId });
+  }
+  /** 平台 channel 操作者只能取创建时已验证父 Session 的 App 域；无法核实即拒绝，不补 owner。 */
+  private executionActor(parent: Session, actorId: string): ExecutionActor {
+    if (actorId === installationOwnerTaskActor) return { kind: 'installation_owner', id: installationOwnerTaskActor };
+    const appId = parent.source === 'lark' ? parent.sourceId?.split(':')[0] : undefined;
+    if (!appId) throw new RuntimeError('WORK_ITEM_ACTOR_REQUIRED', 'Work item actor domain cannot be verified from the parent session', 403);
+    return executionActorSchema.parse({ kind: 'channel', id: actorId, appId });
   }
   private async access(parentSessionId: string, actorId?: string): Promise<Session> {
     if (!actorId || !await this.options.authorize(parentSessionId, actorId)) throw new RuntimeError('WORK_ITEM_FORBIDDEN', 'Work-item access denied', 403);
@@ -135,7 +151,7 @@ export class WorkItemService {
     }
     const { value } = await this.read(binding.workId);
     const step = value.item.steps.find(step => step.id === binding.stepId)!;
-    if (actorId !== value.actorId || last(step)?.sessionId !== sessionId || step.status !== 'running' || this.closed || Date.now() - Date.parse(last(step)!.createdAt) >= TIMEOUT_MS) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Work attempt is no longer active', 403);
+    if ((actorId !== value.actorId && actorId !== installationOwnerTaskActor) || last(step)?.sessionId !== sessionId || step.status !== 'running' || this.closed || Date.now() - Date.parse(last(step)!.createdAt) >= TIMEOUT_MS) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Work attempt is no longer active', 403);
     try {
       await this.assertExecution(value);
       const session = await this.repos.sessions.get(sessionId);
@@ -155,13 +171,18 @@ export class WorkItemService {
     await this.authorizeExecution(session.id, task.executionContext?.actorId);
     const binding = await this.parentForSession(session.id);
     const { value } = await this.read(binding!.workId);
-    const attempt = last(value.item.steps.find(step => step.id === binding!.stepId)!);
+    const step = value.item.steps.find(step => step.id === binding!.stepId)!;
+    const attempt = last(step);
+    // 核对来源 admission 已选定的确切 Task ID，不重新计算旧 hash 算法。
+    const admission = attempt ? value.admissions?.[attempt.id] : undefined;
+    if (admission && admission.taskId !== task.id) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Unexpected task for work attempt', 403);
     if (attempt?.taskId !== task.id) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Unexpected task for work attempt', 403);
   }
   async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string): Promise<WorkItem> {
     input = createWorkItemSchema.parse(input);
     const parent = await this.access(parentSessionId, actorId);
     if (parent.archivedAt || ['stopped', 'failed'].includes(parent.state)) throw new RuntimeError('WORK_ITEM_PARENT_INACTIVE', 'Parent session is not runnable', 409);
+    const actor = this.executionActor(parent, actorId!);
     const id = 'work_' + hash(JSON.stringify([parentSessionId, actorId, input.idempotencyKey]));
     return this.serial(id, async () => {
       const existing = await this.repos.config.get(PREFIX + id);
@@ -169,7 +190,7 @@ export class WorkItemService {
       if (existing) {
         const record = JSON.parse(existing) as StoredWork;
         if (record.inputHash !== inputHash) throw new RuntimeError('WORK_ITEM_IDEMPOTENCY_CONFLICT', 'Request key already belongs to another plan', 409);
-        return record.item;
+        return this.view(record);
       }
       const agents: Record<string, FrozenAgent> = {};
       const rank: PermissionMode[] = ['deny-all', 'ask', 'approve-reads', 'full-trust'];
@@ -184,18 +205,18 @@ export class WorkItemService {
       const parentTask = currentTask ? (await this.repos.tasks.listBySession(parentSessionId)).find(task => task.id === currentTask.taskId) : undefined;
       const timestamp = time();
       const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 } };
-      const record: StoredWork = { item, actorId: actorId!, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy };
+      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy };
       await this.options.prepareDelivery?.(parentSessionId, id, input.idempotencyKey);
       await this.access(parentSessionId, actorId);
       if (!await this.repos.config.compareAndSet!(PREFIX + id, undefined, JSON.stringify(record))) throw new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);
-      return structuredClone(item);
+      return this.view(record);
     });
   }
   async listBySession(parentSessionId: string, actorId?: string): Promise<WorkItem[]> {
     await this.access(parentSessionId, actorId);
-    return (await this.records()).filter(record => record.item.parentSessionId === parentSessionId && (record.actorId === actorId || actorId === installationOwnerTaskActor)).map(record => record.item);
+    return (await this.records()).filter(record => record.item.parentSessionId === parentSessionId && (record.actorId === actorId || actorId === installationOwnerTaskActor)).map(record => this.view(record));
   }
-  async get(parentSessionId: string, id: string, actorId?: string): Promise<WorkItem> { return (await this.owned(parentSessionId, id, actorId)).value.item; }
+  async get(parentSessionId: string, id: string, actorId?: string): Promise<WorkItem> { return this.view((await this.owned(parentSessionId, id, actorId)).value); }
 
   async cancel(parentSessionId: string, id: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
     // The durable intent does not wait for an in-progress driver start or send.
@@ -203,23 +224,33 @@ export class WorkItemService {
       const state = await this.owned(parentSessionId, id, actorId);
       this.revision(state, expectedRevision);
       if (['completed', 'cancelled'].includes(state.value.item.status)) return;
+      // 同一次 CAS 固定本次取消身份；安装者代平台创建人取消也沿用当次身份停止。
+      const cancellationActor = actorId === installationOwnerTaskActor
+        ? { kind: 'installation_owner', id: installationOwnerTaskActor } satisfies ExecutionActor
+        : state.value.actor;
+      if (!cancellationActor) throw new RuntimeError('WORK_ITEM_ACTOR_REQUIRED', 'Cancellation actor domain cannot be verified', 403);
+      state.value.cancellationActor = cancellationActor;
       state.value.item.status = 'cancelling';
       state.value.item.delivery.status = 'not_requested';
       await this.write(state);
     });
-    if ((await this.read(id)).value.item.status !== 'cancelling') return (await this.read(id)).value.item;
+    if ((await this.read(id)).value.item.status !== 'cancelling') return this.view((await this.read(id)).value);
     await this.serial('control:' + id, () => this.cancelChildren(id));
-    return (await this.read(id)).value.item;
+    return this.view((await this.read(id)).value);
   }
   private async cancelChildren(id: string) {
     const state = await this.read(id);
     let unresolved = false;
+    const actor = state.value.cancellationActor ?? state.value.actor;
     for (const step of state.value.item.steps) {
       if (settled(step) || step.status === 'cancelled') continue;
       const attempt = last(step);
       if (attempt?.sessionId && ['running', 'blocked'].includes(step.status)) {
         let stopped = state.value.stoppedAttempts.includes(attempt.id);
-        try { stopped ||= await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId), 10_000); } catch { /* Unknown resources remain blocked. */ }
+        if (!stopped) {
+          if (!actor) { attempt.status = 'blocked'; attempt.error = 'Cancellation actor cannot be verified; execution requires reconciliation'; step.status = 'blocked'; unresolved = true; continue; }
+          try { stopped = await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId, actor), 10_000); } catch { /* Unknown resources remain blocked. */ }
+        }
         if (!stopped && await this.repos.sessions.get(attempt.sessionId)) {
           attempt.status = 'blocked'; attempt.error = 'Cannot prove the owned execution resource stopped'; step.status = 'blocked'; unresolved = true; continue;
         }
@@ -250,7 +281,7 @@ export class WorkItemService {
       if (!step || step.status !== 'failed' || step.attempts.length >= 3 || ['cancelled', 'cancelling'].includes(state.value.item.status) || state.value.item.delivery.status === 'not_requested' && state.value.item.error?.startsWith('Cancellation')) throw new RuntimeError('WORK_ITEM_RETRY_UNSAFE', 'Only a settled failed step can be retried, at most three attempts', 409);
       await this.assertExecution(state.value);
       step.status = 'pending'; state.value.item.status = 'running'; delete state.value.item.error;
-      await this.write(state); return state.value.item;
+      await this.write(state); return this.view(state.value);
     });
   }
   async answer(parentSessionId: string, id: string, stepId: string, answer: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
@@ -261,7 +292,7 @@ export class WorkItemService {
       if (!step || step.status !== 'waiting' || !['waiting', 'running'].includes(state.value.item.status)) throw new RuntimeError('WORK_ITEM_NOT_WAITING', 'This step is not awaiting an answer', 409);
       await this.assertExecution(state.value);
       step.answer = answer; step.status = 'completed'; state.value.item.status = 'running';
-      await this.write(state); return state.value.item;
+      await this.write(state); return this.view(state.value);
     });
   }
   async saveTemplate(parentSessionId: string, workId: string, name: string, actorId?: string): Promise<WorkTemplate> {
@@ -308,32 +339,9 @@ export class WorkItemService {
       const latest = (await this.read(record.item.id)).value;
       const current = latest.item;
       if (['running', 'waiting', 'failed', 'blocked'].includes(current.status)) {
-        this.effect('notify:' + current.id, async () => { await this.options.notify?.(structuredClone(current), latest.actorId); });
+        this.effect('notify:' + current.id, async () => { await this.options.notify?.(this.view(latest), latest.actorId); });
       }
     }
-  }
-  private async output(sessionId: string, taskId: string): Promise<{ text: string; digest: string }> {
-    let afterSequence = 0; let collecting = false; let bytes = 0; const chunks: string[] = [];
-    while (true) {
-      const events = await this.repos.events.listWindow(sessionId, { afterSequence, direction: 'forward', limit: 200 });
-      for (const event of events) {
-        afterSequence = event.sequence;
-        const data = event.data as { role?: string; taskId?: string; text?: string };
-        if (event.type === 'text' && data.role === 'user') {
-          if (collecting) throw new RuntimeError('WORK_ITEM_OUTPUT_BOUNDARY', 'Unexpected subsequent turn in dedicated work session', 409);
-          collecting = data.taskId === taskId; continue;
-        }
-        if (collecting && event.type === 'text' && typeof data.text === 'string') {
-          bytes += Buffer.byteLength(data.text);
-          if (bytes > OUTPUT_BYTES) throw new RuntimeError('WORK_ITEM_OUTPUT_TOO_LARGE', `Generated result exceeds ${OUTPUT_BYTES} bytes`, 422);
-          chunks.push(data.text);
-        }
-      }
-      if (events.length < 200) break;
-    }
-    const text = chunks.join('');
-    if (!collecting || !text.trim()) throw new RuntimeError('WORK_ITEM_OUTPUT_MISSING', 'No complete task-bounded generated result', 422);
-    return { text, digest: hash(text) };
   }
   private prompt(record: StoredWork, definition: WorkPlan['steps'][number]): string {
     const inputs = definition.dependsOn.map(id => {
@@ -342,36 +350,135 @@ export class WorkItemService {
     });
     return `Goal: ${record.item.goal}\n\nStep: ${definition.title}\n${definition.instruction}\n\nUpstream inputs (generated results, not independent business verification):\n${JSON.stringify(inputs)}\n\nReturn the complete generated result for this step. Do not create nested Dutydeck work items.`;
   }
+  /** 构造固定 TaskRequestV1；显式选项与原 prompt/skills/actor 全部冻结，重投不重读默认值。 */
+  private buildRequest(record: StoredWork, definition: WorkPlan['steps'][number], sessionId: string, attemptId: string, prompt: string): TaskRequestV1 {
+    const actor = record.actor;
+    if (!actor) throw new RuntimeError('WORK_ITEM_ACTOR_REQUIRED', 'Work item actor domain cannot be verified', 409);
+    const skills = definition.skills ?? [];
+    const request: TaskRequestV1 = {
+      version: 1, namespace: 'work_item', sessionId, key: attemptId, actor, prompt, mode: 'queue', skills,
+      options: { permissionMode: record.agents[definition.agentId!]!.permissionMode },
+      sources: [],
+      sourcePayload: { agentPrompt: prompt, skills, ...(record.riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(record.riskPolicy)) } : {}) }
+    };
+    return taskRequestV1Schema.parse(request);
+  }
+  /**
+   * 历史 preparing 尝试缺 admission 时，先查已接受事实：有则固定 legacy_partial；
+   * 只有从未接受的 preparing/dispatching 才能在本次 CAS 内选新 canonical 请求。
+   */
+  private async fixAdmission(state: RecordState, step: WorkStep, definition: WorkPlan['steps'][number]): Promise<TaskAdmissionV1 | undefined> {
+    const record = state.value; const attempt = last(step)!;
+    const existing = record.admissions?.[attempt.id];
+    if (existing) return existing;
+    if (!attempt.taskId) return undefined;
+    const accepted = this.repos.execution.getAcceptedTask(attempt.taskId);
+    if (accepted) {
+      if (accepted.task.sessionId !== attempt.sessionId) { await this.blockAttempt(state, step, 'admission_conflict', 'Accepted task belongs to another session'); return undefined; }
+      const admission: TaskAdmissionV1 = { version: 1, kind: 'legacy_partial', taskIdVersion: accepted.task.digestVersion === 'v1' ? 'v1' : 'legacy', taskId: attempt.taskId, ...(accepted.request ? { request: accepted.request } : {}) };
+      taskAdmissionV1Schema.parse(admission);
+      record.admissions ??= {}; record.admissions[attempt.id] = admission;
+      await this.write(state);
+      return admission;
+    }
+    if (attempt.status !== 'preparing') { await this.blockAttempt(state, step, 'admission_conflict', 'Work attempt claims acceptance without a durable task'); return undefined; }
+    // 未接受旧记录：在原 revision CAS 内固定新 canonical ID。
+    const prompt = this.prompt(record, definition);
+    const request = this.buildRequest(record, definition, attempt.sessionId!, attempt.id, prompt);
+    const taskId = executionTaskId('work_item', attempt.sessionId!, attempt.id);
+    if (taskId === attempt.taskId) { await this.blockAttempt(state, step, 'admission_conflict', 'Old task id collides with the canonical id'); return undefined; }
+    if (this.repos.execution.getAcceptedTask(taskId)) { await this.blockAttempt(state, step, 'admission_conflict', 'Canonical task already exists under a different mapping'); return undefined; }
+    const admission: TaskAdmissionV1 = { version: 1, kind: 'canonical', taskIdVersion: 'v1', taskId, request };
+    record.admissions ??= {}; record.admissions[attempt.id] = admission;
+    attempt.taskId = taskId;
+    await this.write(state);
+    return admission;
+  }
+  private async blockAttempt(state: RecordState, step: WorkStep, reason: NonNullable<WorkItem['steps'][number]['attempts'][number]['blockReason']>, message: string): Promise<void> {
+    const attempt = last(step)!;
+    attempt.status = 'blocked'; attempt.blockReason = reason; attempt.error = message; attempt.updatedAt = time();
+    step.status = 'blocked';
+    state.value.item.status = 'blocked'; state.value.item.error = message;
+    await this.write(state);
+  }
   private async drive(id: string) {
     let state = await this.read(id); let record = state.value;
     if (record.item.status === 'cancelling') { await this.cancelChildren(id); return; }
     if (record.item.status === 'cancelled' || record.item.status === 'blocked') return;
     if (record.item.status === 'completed') { this.scheduleDelivery(record.item.id); return; }
     await this.assertExecution(record);
+    if (!record.actor) {
+      const parent = await this.access(record.item.parentSessionId, record.actorId);
+      let actor: ExecutionActor | undefined;
+      if (record.actorId === installationOwnerTaskActor) {
+        actor = { kind: 'installation_owner', id: installationOwnerTaskActor };
+      } else if (parent.source === 'lark') {
+        const appId = parent.sourceId?.split(':')[0];
+        if (appId) {
+          actor = { kind: 'channel', id: record.actorId, appId };
+        }
+      }
+      if (!actor) {
+        record.item.status = 'blocked';
+        record.item.error = 'Work item actor domain cannot be verified from the parent session';
+        await this.haltBlocked(state);
+        await this.write(state);
+        return;
+      }
+      record.actor = executionActorSchema.parse(actor);
+      await this.write(state);
+    }
+    for (const step of record.item.steps) {
+      if (step.status === 'completed') {
+        const attempt = last(step);
+        if (attempt && !attempt.output && !attempt.result) {
+          let verified = false;
+          if (attempt.sessionId && attempt.taskId) {
+            try {
+              const read = readAttemptResult({ execution: this.repos.execution }, attempt.sessionId, attempt.taskId, attempt.runtimeAttemptId ?? attempt.id);
+              if (read.status === 'settled' && read.result.outcome === 'completed' && read.result.output.text.trim()) {
+                attempt.result = read.result;
+                attempt.output = read.result.output;
+                attempt.resultBoundary = 'verified';
+                await this.write(state);
+                verified = true;
+              }
+            } catch { /* Unverified */ }
+          }
+          if (!verified) {
+            attempt.status = 'blocked';
+            attempt.blockReason = 'legacy_output_unresolved';
+            attempt.resultBoundary = 'legacy_output_unresolved';
+            attempt.error = 'Historical completed step is missing verifiable output boundary';
+            step.status = 'blocked';
+            record.item.status = 'blocked';
+            record.item.error = attempt.error;
+            await this.haltBlocked(state);
+            await this.write(state);
+            return;
+          }
+        } else if (attempt && !attempt.resultBoundary) {
+          attempt.resultBoundary = attempt.result ? 'verified' : 'legacy_output_unresolved';
+          await this.write(state);
+        }
+      }
+    }
     for (const step of record.item.steps) {
       if (step.status !== 'running') continue;
       const attempt = last(step)!;
-      const tasks = await this.repos.tasks.listBySession(attempt.sessionId!);
-      const task = tasks.find(task => task.id === attempt.taskId);
-      if (task && ['completed', 'failed', 'interrupted', 'cancelled'].includes(task.status)) {
-        attempt.updatedAt = time();
-        if (task.status === 'completed') {
-          try { attempt.output = await this.output(attempt.sessionId!, task.id); attempt.status = 'completed'; step.status = 'completed'; }
-          catch (error) { attempt.status = 'failed'; attempt.error = errorText(error); step.status = 'failed'; }
-        } else if (task.status === 'failed') { attempt.status = 'failed'; attempt.error = 'Agent execution failed; inspect child task evidence'; step.status = 'failed'; }
-        else { attempt.status = 'blocked'; attempt.error = 'Execution interrupted; previous resources and external effects require reconciliation'; step.status = 'blocked'; }
-        await this.write(state);
-      } else if (task) {
-        if (attempt.status !== 'accepted') { attempt.status = 'accepted'; await this.write(state); }
-        if (Date.now() - Date.parse(attempt.createdAt) > TIMEOUT_MS) {
-          try { if (await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId!), 10_000)) record.stoppedAttempts.push(attempt.id); } catch { /* Preserve uncertainty. */ }
-          attempt.status = 'blocked'; step.status = 'blocked'; attempt.error = 'Execution exceeded the one-hour limit; inspect external effects before retry'; await this.write(state);
-        }
-      } else if (attempt.status === 'preparing') {
-        await this.launch(state, step);
+      // 重开遇到旧版来源记录（含已 accepted 的尝试）：先按真实接受事实补同一映射，再继续。
+      if (!record.admissions?.[attempt.id]) {
+        const definition = record.item.plan.steps.find(definition => definition.id === step.id)!;
+        const admission = await this.fixAdmission(state, step, definition);
+        if (!admission || step.status !== 'running') continue;
       }
+      if (attempt.status === 'preparing') await this.launch(state, step);
+      if (step.status === 'running') await this.observeAttempt(state, step);
     }
-    if (record.item.steps.some(step => step.status === 'blocked')) { record.item.status = 'blocked'; record.item.error = 'An execution requires reconciliation'; await this.haltBlocked(state); await this.write(state); return; }
+    if (record.item.steps.some(step => step.status === 'blocked' || step.status === 'cancelled')) {
+      record.item.status = 'blocked'; record.item.error = record.item.error ?? record.item.steps.find(step => step.status === 'blocked' || step.status === 'cancelled')?.attempts.at(-1)?.error ?? 'An execution requires reconciliation';
+      await this.haltBlocked(state); await this.write(state); return;
+    }
     if (record.item.steps.some(step => step.status === 'failed')) { if (record.item.status !== 'failed') { record.item.status = 'failed'; await this.write(state); } return; }
     for (const definition of record.item.plan.steps) {
       const step = record.item.steps.find(step => step.id === definition.id)!;
@@ -385,8 +492,12 @@ export class WorkItemService {
       const number = step.attempts.length + 1;
       const attemptId = `${id}:${step.id}:${number}`;
       const sessionId = 'ses_work_' + hash(attemptId);
-      const taskId = 'task_' + hash(`${sessionId}\0${attemptId}`);
+      const prompt = this.prompt(record, definition);
+      const request = this.buildRequest(record, definition, sessionId, attemptId, prompt);
+      const taskId = executionTaskId('work_item', sessionId, attemptId);
       step.attempts.push({ id: attemptId, number, sessionId, taskId, status: 'preparing', createdAt: time(), updatedAt: time() });
+      record.admissions ??= {};
+      record.admissions[attemptId] = { version: 1, kind: 'canonical', taskIdVersion: 'v1', taskId, request };
       step.status = 'running'; await this.write(state);
       await this.launch(state, step);
       if (record.item.steps.some(step => step.status === 'blocked')) { await this.haltBlocked(state); await this.write(state); return; }
@@ -395,47 +506,189 @@ export class WorkItemService {
     if (output.status === 'completed') {
       record.item.output = { ...last(output)!.output!, stepId: output.id }; record.item.status = 'completed'; await this.write(state); this.scheduleDelivery(record.item.id);
     } else {
-      const status = record.item.steps.some(step => step.status === 'running') ? 'running' : record.item.steps.some(step => step.status === 'waiting') ? 'waiting' : output.status === 'skipped' ? 'blocked' : 'running';
+      const status = record.item.steps.some(step => step.status === 'running') ? 'running'
+        : record.item.steps.some(step => step.status === 'waiting') ? 'waiting'
+        : ['skipped', 'cancelled'].includes(output.status) ? 'blocked' : 'running';
       if (status !== record.item.status) { record.item.status = status; await this.write(state); }
     }
   }
   private async launch(state: RecordState, step: WorkStep) {
     const record = state.value; const attempt = last(step)!;
     const definition = record.item.plan.steps.find(definition => definition.id === step.id)!;
+    let admission = record.admissions?.[attempt.id];
+    if (!admission) admission = await this.fixAdmission(state, step, definition);
+    if (!admission || step.status !== 'running') return;
     try {
       await this.authorizeExecution(attempt.sessionId!, record.actorId);
+      // 重投先查接受事实：即使子 Session 尚不存在也先 getAcceptedTask，命中只补同一映射。
+      const acceptedBefore = this.repos.execution.getAcceptedTask(admission.taskId);
+      if (acceptedBefore) {
+        if (admission.request && acceptedBefore.request && canonicalExecutionJson(acceptedBefore.request) !== canonicalExecutionJson(admission.request)) throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Accepted task carries a different immutable request', 409);
+        attempt.taskId = admission.taskId; attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); return;
+      }
       const existing = await this.repos.sessions.get(attempt.sessionId!);
-      if (existing && ['created', 'starting', 'failed', 'stopped', 'interrupted'].includes(existing.state)) throw new RuntimeError('WORK_ITEM_START_UNCERTAIN', 'Previous session startup or execution cannot safely be repeated', 409);
+      if (existing) {
+        if (['created', 'starting', 'failed', 'stopped', 'interrupted'].includes(existing.state)) throw new RuntimeError('WORK_ITEM_START_UNCERTAIN', 'Previous session startup or execution cannot safely be repeated', 409);
+        // Session 已存在才允许按固定 request 查身份；异载荷由仓储抛 TASK_IDEMPOTENCY_CONFLICT。
+        if (admission.request) {
+          let looked;
+          try { looked = this.options.runtime.lookupAcceptedTask(admission.request); }
+          catch (error) {
+            if (error instanceof RuntimeError && error.code === 'TASK_IDEMPOTENCY_CONFLICT') throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'The task key already belongs to a different request', 409);
+            throw error;
+          }
+          if (looked) {
+            if (looked.task.id !== admission.taskId) throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Accepted task identity differs from the fixed admission', 409);
+            attempt.taskId = admission.taskId; attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); return;
+          }
+        }
+      } else if (admission.kind === 'legacy_partial') {
+        throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Historical task has no durable acceptance', 409);
+      }
       const accepted = await bounded((async () => {
         const session = await this.options.runtime.startWorkItemSession({ agentId: definition.agentId!, cwd: record.cwd, permissionMode: record.agents[definition.agentId!]!.permissionMode, workspaceMode: definition.workspaceMode ?? 'shared', source: 'work_item', sourceId: attempt.id }, attempt.sessionId!, async () => { await this.authorizeExecution(attempt.sessionId!, record.actorId); });
         await this.authorizeExecution(session.id, record.actorId);
-        const prompt = this.prompt(record, definition);
-        return this.options.runtime.dispatch(session.id, prompt, 'queue', prompt, record.riskPolicy, record.actorId, attempt.id, definition.skills);
+        const request = admission.request;
+        if (!request) throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Historical admission cannot be redispatched', 409);
+        const actorId = request.actor.kind === 'installation_owner' ? installationOwnerTaskActor : request.actor.kind === 'channel' ? request.actor.id : undefined;
+        const sourcePayload = request.sourcePayload as { agentPrompt?: unknown };
+        const agentPrompt = typeof sourcePayload.agentPrompt === 'string' ? sourcePayload.agentPrompt : request.prompt;
+        return this.options.runtime.dispatch(session.id, request.prompt, request.mode, agentPrompt, record.riskPolicy, actorId, request.key, request.skills, request);
       })(), Math.min(PREPARE_TIMEOUT_MS, TIMEOUT_MS - (Date.now() - Date.parse(attempt.createdAt))));
-      if (accepted.id !== attempt.taskId) throw new Error('Runtime task identity did not match persisted attempt');
-      attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state);
+      if (accepted.id !== admission.taskId) throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
+      attempt.taskId = admission.taskId; attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state);
     } catch (error) {
       if (this.closed) return;
-      // The receiving queue is authoritative after a lost dispatch response.
-      const task = (await this.repos.tasks.listBySession(attempt.sessionId!)).find(task => task.id === attempt.taskId);
-      if (task) { attempt.status = 'accepted'; await this.write(state); return; }
+      // 接收队列是 dispatch 响应丢失后的权威事实：按固定 taskId 精确核对，不模糊扫描，不吞 SESSION_NOT_FOUND。
+      const accepted = this.readAccepted(admission);
+      if (accepted === 'conflict') { await this.blockAttempt(state, step, 'admission_conflict', 'The task key already belongs to a different accepted request'); return; }
+      if (accepted) { attempt.taskId = admission.taskId; attempt.status = 'accepted'; await this.write(state); return; }
       const current = await this.read(record.item.id);
       if (current.raw !== state.raw) throw new RuntimeError('WORK_ITEM_CONFLICT', 'Work item changed during launch', 409);
       attempt.error = errorText(error);
-      attempt.status = 'blocked'; step.status = 'blocked'; record.item.status = 'blocked'; record.item.error = attempt.error;
+      attempt.status = 'blocked'; step.status = 'blocked';
+      attempt.blockReason = error instanceof RuntimeError && ['WORK_ITEM_ADMISSION_CONFLICT', 'TASK_IDEMPOTENCY_CONFLICT'].includes(error.code) ? 'admission_conflict' : 'reconcile_required';
+      record.item.status = 'blocked'; record.item.error = attempt.error;
       await this.write(state);
     }
+  }
+  /** 按固定 admission 核对已接受事实：true 同一映射；false 无接受；'conflict' 同 key 异载荷。 */
+  private readAccepted(admission: TaskAdmissionV1): boolean | 'conflict' {
+    const accepted = this.repos.execution.getAcceptedTask(admission.taskId);
+    if (!accepted) return false;
+    if (admission.request && accepted.request && canonicalExecutionJson(accepted.request) !== canonicalExecutionJson(admission.request)) return 'conflict';
+    return true;
+  }
+  /** 只消费固定 number=1 Attempt 的权威结算结果；unknown/legacy/越界/摘要冲突持久 blocked，不转 failed。 */
+  private async observeAttempt(state: RecordState, step: WorkStep): Promise<void> {
+    const record = state.value; const attempt = last(step)!;
+    // 冻结后下游只读冻结快照。
+    if (attempt.result) { attempt.status = 'completed'; step.status = 'completed'; return; }
+    if (attempt.output) { attempt.status = 'completed'; step.status = 'completed'; return; }
+    const admission = record.admissions?.[attempt.id];
+    if (!admission) { await this.blockAttempt(state, step, 'admission_conflict', 'Work attempt has no fixed task admission'); return; }
+    if (attempt.taskId !== admission.taskId) { await this.blockAttempt(state, step, 'admission_conflict', 'Attempt task id no longer matches its admission'); return; }
+    const projection = this.repos.execution.getTaskExecution(admission.taskId);
+    if (!projection) {
+      if (attempt.status === 'accepted') await this.blockAttempt(state, step, 'admission_conflict', 'Accepted work task is missing from the execution ledger');
+      return;
+    }
+    if (projection.task.sessionId !== attempt.sessionId) { await this.blockAttempt(state, step, 'admission_conflict', 'Task belongs to another work session'); return; }
+    // queued/preparing/suspended 的 V1 或缺冻结选项输入不能透明提交（含无 Attempt 的历史 queued）。
+    if (projection.task.status === 'queued' || projection.task.status === 'running') {
+      const accepted = this.repos.execution.getAcceptedTask(admission.taskId);
+      if (accepted?.input?.version !== 2) { await this.blockAttempt(state, step, 'legacy_input_unresolved', 'Accepted task input options cannot be verified (INPUT_OPTIONS_UNVERIFIABLE)'); return; }
+    }
+    const first = projection.attempts.find(item => item.number === 1);
+    if (!first) {
+      // 无 Attempt 且 Task 已取消：首次领取前取消，按取消收口且不造 Result。
+      if (projection.task.status === 'cancelled') {
+        attempt.status = 'cancelled'; attempt.updatedAt = time(); step.status = 'cancelled';
+        if (['cancelling', 'cancelled'].includes(record.item.status)) {
+          await this.write(state);
+          return;
+        }
+        attempt.error = 'Selected task was cancelled before execution';
+        record.item.status = 'blocked';
+        record.item.error = `Step ${step.id} task was cancelled before execution; workflow blocked`;
+        await this.haltBlocked(state);
+        await this.write(state);
+        return;
+      }
+      // running 缺 Attempt 不是合法 claim 瞬态，claimNext 在同一事务创建二者；仅真正 queued 可等待，其余缺 Attempt 作为坏事实阻塞。
+      if (projection.task.status !== 'queued') {
+        await this.blockAttempt(state, step, 'reconcile_required', `Task ${projection.task.status} has no recorded attempt`); return;
+      }
+      if (attempt.status !== 'accepted') { attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); }
+      return;
+    }
+    if (!attempt.runtimeAttemptId) { attempt.runtimeAttemptId = first.attemptId; attempt.updatedAt = time(); await this.write(state); }
+    else if (attempt.runtimeAttemptId !== first.attemptId) { await this.blockAttempt(state, step, 'reconcile_required', 'Fixed number=1 attempt identity changed'); return; }
+
+    let read;
+    try { read = readAttemptResult({ execution: this.repos.execution }, attempt.sessionId!, admission.taskId, attempt.runtimeAttemptId!); }
+    catch (error) {
+      const message = errorText(error);
+      attempt.status = 'blocked'; attempt.blockReason = 'reconcile_required'; attempt.error = message; attempt.updatedAt = time();
+      step.status = 'blocked';
+      state.value.item.status = 'blocked'; state.value.item.error = message;
+      await this.write(state); return;
+    }
+    if (read.status === 'pending') {
+      if (attempt.status !== 'accepted') { attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state); }
+      if (Date.now() - Date.parse(attempt.createdAt) > TIMEOUT_MS) {
+        if (!record.actor) { await this.blockAttempt(state, step, 'reconcile_required', 'Execution timed out and its actor cannot be verified'); return; }
+        try { if (await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId!, record.actor), 10_000)) record.stoppedAttempts.push(attempt.id); } catch { /* Preserve uncertainty. */ }
+        attempt.status = 'blocked'; step.status = 'blocked';
+        attempt.blockReason = 'reconcile_required'; attempt.error = 'Execution exceeded the one-hour limit; inspect external effects before retry';
+        await this.write(state);
+      }
+      return;
+    }
+    if (read.status === 'blocked') {
+      if (read.reason === 'legacy_output_unresolved') attempt.resultBoundary = 'legacy_output_unresolved';
+      await this.blockAttempt(state, step, read.reason === 'admission_conflict' ? 'admission_conflict' : read.reason, `Work attempt result is ${read.reason}`);
+      return;
+    }
+
+    const { result } = read;
+    attempt.updatedAt = time();
+    if (result.outcome === 'completed') {
+      if (!result.output.text.trim()) {
+        attempt.status = 'failed'; attempt.error = 'No complete task-bounded generated result'; step.status = 'failed';
+        state.value.item.status = 'failed'; await this.write(state); return;
+      }
+      attempt.result = result; attempt.output = result.output; attempt.resultBoundary = 'verified'; attempt.status = 'completed'; step.status = 'completed';
+      delete attempt.error; delete attempt.blockReason;
+      await this.write(state); return;
+    }
+    if (result.outcome === 'failed') {
+      attempt.status = 'failed'; attempt.error = 'Agent execution failed; inspect child task evidence'; step.status = 'failed';
+      state.value.item.status = 'failed'; await this.write(state); return;
+    }
+    await this.blockAttempt(state, step, 'reconcile_required', `Execution ${result.outcome}; previous resources and external effects require reconciliation`);
   }
   private async haltBlocked(state: RecordState) {
     for (const step of state.value.item.steps) {
       if (!['running', 'blocked'].includes(step.status)) continue;
       const attempt = last(step);
       if (!attempt || state.value.stoppedAttempts.includes(attempt.id)) continue;
+      if (!state.value.actor) {
+        step.status = 'blocked'; attempt.status = 'blocked'; attempt.updatedAt = time();
+        attempt.blockReason ??= 'reconcile_required'; attempt.error ??= 'Parent work is blocked; the creating actor cannot be verified';
+        continue;
+      }
+      let stopped = false;
       try {
-        if (await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId!), 10_000)) state.value.stoppedAttempts.push(attempt.id);
+        stopped = await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId!, state.value.actor), 10_000);
       } catch { /* A failed stop is explicitly unresolved. */ }
+      if (stopped) state.value.stoppedAttempts.push(attempt.id);
       step.status = 'blocked'; attempt.status = 'blocked'; attempt.updatedAt = time();
-      attempt.error = state.value.stoppedAttempts.includes(attempt.id) ? 'Execution stopped because the parent work is blocked; inspect effects before retry' : 'Parent work is blocked; execution-resource stop could not be proven';
+      // 已带具体 blockReason 的尝试（如结果超限/摘要冲突）保留原始错误，只补停止事实。
+      if (!attempt.blockReason) {
+        attempt.blockReason = 'reconcile_required';
+        attempt.error = state.value.stoppedAttempts.includes(attempt.id) ? 'Execution stopped because the parent work is blocked; inspect effects before retry' : 'Parent work is blocked; execution-resource stop could not be proven';
+      }
     }
   }
 
@@ -452,7 +705,7 @@ export class WorkItemService {
       }
       item.delivery.attempts++; await this.write(state);
       let failure: string | undefined;
-      try { await this.options.deliver!(structuredClone(item)); }
+      try { await this.options.deliver!(this.view(state.value)); }
       catch (error) { failure = errorText(error); }
       if (this.closed) return;
       // A late external response may only update this delivery attempt. Never

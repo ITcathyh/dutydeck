@@ -104,12 +104,16 @@ function verificationFreshness(record: VerificationRecord, current?: string): Pi
 }
 
 export class VerificationManager {
-  private readonly controllers = new Set<AbortController>();
-  private readonly runs = new Set<Promise<VerificationResponse>>();
+  private readonly controllers = new Map<AbortController, string>();
+  private readonly runs = new Map<Promise<VerificationResponse>, string>();
 
-  constructor(private readonly config: ConfigRepository) {}
+  constructor(private readonly config: ConfigRepository, private readonly commit?: (sessionId: string, operation: () => Promise<void>) => Promise<void>) {}
 
-  private async replace(record: StoredVerificationRecord, expected?: StoredVerificationRecord): Promise<void> {
+  private replace(record: StoredVerificationRecord, expected?: StoredVerificationRecord): Promise<void> {
+    const write = () => this.replaceRecord(record, expected);
+    return this.commit ? this.commit(record.sessionId, write) : write();
+  }
+  private async replaceRecord(record: StoredVerificationRecord, expected?: StoredVerificationRecord): Promise<void> {
     const storageKey = key(record.sessionId, record.id);
     const expectedRaw = expected ? JSON.stringify(expected) : undefined;
     if (this.config.compareAndSet) {
@@ -163,17 +167,22 @@ export class VerificationManager {
 
   run(sessionId: string, cwd: string, input: VerificationCommandInput, actorId?: string, taskId?: string, beforeCommand?: () => Promise<void>): Promise<VerificationResponse> {
     const controller = new AbortController();
-    this.controllers.add(controller);
+    this.controllers.set(controller, sessionId);
     const run = this.execute(sessionId, cwd, input, actorId, taskId, controller.signal, beforeCommand);
-    this.runs.add(run);
+    this.runs.set(run, sessionId);
     const cleanup = () => { this.controllers.delete(controller); this.runs.delete(run); };
     void run.then(cleanup, cleanup);
     return run;
   }
 
   async stop(): Promise<void> {
-    for (const controller of this.controllers) controller.abort();
-    await Promise.allSettled([...this.runs]);
+    for (const controller of this.controllers.keys()) controller.abort();
+    await Promise.allSettled([...this.runs.keys()]);
+  }
+
+  async stopSession(sessionId: string): Promise<void> {
+    for (const [controller, id] of this.controllers) if (id === sessionId) controller.abort();
+    await Promise.allSettled([...this.runs].filter(([, id]) => id === sessionId).map(([run]) => run));
   }
 
   private async execute(sessionId: string, cwd: string, input: VerificationCommandInput, actorId: string | undefined, taskId: string | undefined, signal: AbortSignal, beforeCommand?: () => Promise<void>): Promise<VerificationResponse> {
@@ -326,6 +335,8 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
     let timedOut = false;
     let interrupted = false;
     let terminated = false;
+    let closed = false;
+    let identityRun: Promise<void> | undefined;
     let spawnError: string | undefined;
     const capture = (chunk: Buffer | string) => {
       const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -341,6 +352,7 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
     child.once('error', error => { spawnError = error.message; });
     const terminate = () => {
       terminated = true;
+      if (closed) return;
       try {
         if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
         else child.kill('SIGKILL');
@@ -355,7 +367,7 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
     }, timeoutMs);
     timer.unref?.();
     child.once('spawn', () => {
-      void (async () => {
+      identityRun = (async () => {
         const identity = child.pid ? await readLinuxProcessIdentity(child.pid, marker) : undefined;
         if (!identity || identity.processGroupId !== child.pid) throw new Error('Unable to establish verification process identity');
         await onIdentity(identity);
@@ -368,13 +380,19 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
       });
     });
     child.once('close', code => {
+      closed = true;
+      terminated = true;
       clearTimeout(timer);
       signal.removeEventListener('abort', onAbort);
-      const raw = Buffer.concat(chunks);
-      const redacted = redact(raw, secrets);
-      if (raw.length > MAX_OUTPUT_BYTES || redacted.length > MAX_OUTPUT_BYTES) outputTruncated = true;
-      const output = redacted.subarray(0, MAX_OUTPUT_BYTES).toString('utf8');
-      resolve({ ...(code !== null ? { exitCode: code } : {}), output, outputTruncated, timedOut, interrupted, ...(spawnError ? { error: spawnError } : {}) });
+      // Process exit can precede the identity read/commit. Keep that continuation
+      // inside the tracked run so stop/shutdown cannot close storage ahead of it.
+      void (identityRun ?? Promise.resolve()).then(() => {
+        const raw = Buffer.concat(chunks);
+        const redacted = redact(raw, secrets);
+        if (raw.length > MAX_OUTPUT_BYTES || redacted.length > MAX_OUTPUT_BYTES) outputTruncated = true;
+        const output = redacted.subarray(0, MAX_OUTPUT_BYTES).toString('utf8');
+        resolve({ ...(code !== null ? { exitCode: code } : {}), output, outputTruncated, timedOut, interrupted, ...(spawnError ? { error: spawnError } : {}) });
+      });
     });
   });
 }

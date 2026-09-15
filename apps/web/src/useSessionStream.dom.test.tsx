@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, type DockEvent, type Session } from './api';
+import { api, type DockEvent, type Session, type Task } from './api';
 import { createEventWindow } from './event-history';
 import type { MockableEventSource } from './sse';
 import { useSessionStream } from './useSessionStream';
@@ -45,5 +45,142 @@ describe('useSessionStream reconciliation', () => {
     act(() => MockEventSource.instances[0]!.emit('text', event(13)));
     await waitFor(() => expect(eventLoader).toHaveBeenCalledWith('s1', { after: 11, limit: 200, direction: 'forward' }));
     await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([10, 11, 12, 13]));
+  });
+
+  it('已有 Task 收到局部状态事件期间原 prompt/metadata 仍可渲染，回读后更新 status', async () => {
+    const existingTask: Task = {
+      id: 'task-1',
+      sessionId: 's1',
+      prompt: '  fix startup bug  ',
+      status: 'running',
+      createdAt: '2026-09-15T00:00:00.000Z',
+      updatedAt: '2026-09-15T00:00:00.000Z',
+    };
+    const partialTaskEvent: DockEvent = {
+      id: 'evt-task-1',
+      sequence: 1,
+      type: 'task',
+      timestamp: '2026-09-15T00:00:01.000Z',
+      data: { task: { id: 'task-1', status: 'completed', revision: 2 } },
+    };
+
+    let releaseGate!: () => void;
+    const gate = new Promise<void>(resolve => { releaseGate = resolve; });
+    let fetchCount = 0;
+    const taskLoader = vi.fn(async () => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        return [existingTask];
+      }
+      await gate;
+      return [{ ...existingTask, status: 'completed' }];
+    });
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    function Harness() {
+      useSessionStream('s1', 'r1', true);
+      const { data: tasks = [] } = useQuery({ queryKey: ['tasks', 's1'], queryFn: taskLoader });
+      return (
+        <div>
+          {tasks.map(t => (
+            <span key={t.id} data-testid={`task-${t.id}`}>
+              {t.prompt.trim()}:{t.status}
+            </span>
+          ))}
+        </div>
+      );
+    }
+
+    try {
+      render(
+        <QueryClientProvider client={client}>
+          <Harness />
+        </QueryClientProvider>
+      );
+
+      await waitFor(() => expect(screen.getByTestId('task-task-1').textContent).toBe('fix startup bug:running'));
+
+      act(() => {
+        MockEventSource.instances[0]!.emit('task', partialTaskEvent);
+      });
+
+      // 回读 gate 尚未释放期间，旧缓存依然保持完整，渲染 prompt.trim 绝不白屏崩溃
+      expect(screen.getByTestId('task-task-1').textContent).toBe('fix startup bug:running');
+      expect(taskLoader.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+      releaseGate();
+      await waitFor(() => expect(screen.getByTestId('task-task-1').textContent).toBe('fix startup bug:completed'));
+    } finally {
+      releaseGate();
+    }
+  });
+
+  it('未知新 Task 或空缓存收到局部事件，不插入不完整对象，回读完整列表后新 Task 可见', async () => {
+    const newTask: Task = {
+      id: 'task-2',
+      sessionId: 's1',
+      prompt: '  fresh task prompt  ',
+      status: 'running',
+      createdAt: '2026-09-15T00:00:00.000Z',
+      updatedAt: '2026-09-15T00:00:00.000Z',
+    };
+    const unknownTaskEvent: DockEvent = {
+      id: 'evt-task-2',
+      sequence: 1,
+      type: 'task',
+      timestamp: '2026-09-15T00:00:01.000Z',
+      data: { task: { id: 'task-2', status: 'running', revision: 1 } },
+    };
+
+    let releaseGate!: () => void;
+    const gate = new Promise<void>(resolve => { releaseGate = resolve; });
+    let fetchCount = 0;
+    const taskLoader = vi.fn(async () => {
+      fetchCount += 1;
+      if (fetchCount === 1) {
+        return [];
+      }
+      await gate;
+      return [newTask];
+    });
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    function Harness() {
+      useSessionStream('s1', 'r1', true);
+      const { data: tasks = [] } = useQuery({ queryKey: ['tasks', 's1'], queryFn: taskLoader });
+      return (
+        <div>
+          {tasks.map(t => (
+            <span key={t.id} data-testid={`task-${t.id}`}>
+              {t.prompt.trim()}:{t.status}
+            </span>
+          ))}
+        </div>
+      );
+    }
+
+    try {
+      render(
+        <QueryClientProvider client={client}>
+          <Harness />
+        </QueryClientProvider>
+      );
+
+      await waitFor(() => expect(taskLoader).toHaveBeenCalledTimes(1));
+      expect(screen.queryByTestId('task-task-2')).toBeNull();
+
+      act(() => {
+        MockEventSource.instances[0]!.emit('task', unknownTaskEvent);
+      });
+
+      // 回读完成前，绝不向缓存插入缺失 prompt 的残缺对象，渲染 prompt.trim 绝不抛错
+      expect(screen.queryByTestId('task-task-2')).toBeNull();
+      expect(taskLoader.mock.calls.length).toBeGreaterThanOrEqual(2);
+
+      releaseGate();
+      await waitFor(() => expect(screen.getByTestId('task-task-2').textContent).toBe('fresh task prompt:running'));
+    } finally {
+      releaseGate();
+    }
   });
 });

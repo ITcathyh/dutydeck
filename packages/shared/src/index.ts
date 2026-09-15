@@ -1,22 +1,15 @@
 import { z } from 'zod';
-import safeRegex from 'safe-regex2';
+import {
+  channelBotBrands,
+  permissionModes,
+  type ChannelBotBrand,
+  type PermissionMode
+} from './configuration-primitives.js';
 
-export const highRiskPatternMaxLength = 4_096;
-export type RegexPatternValidation = { valid: true } | { valid: false; error: string };
-
-export function validateHighRiskPattern(pattern: string): RegexPatternValidation {
-  if (!pattern.trim()) return { valid: false, error: '请输入高危操作正则表达式' };
-  if (pattern.length > highRiskPatternMaxLength) return { valid: false, error: `正则表达式不能超过 ${highRiskPatternMaxLength} 个字符` };
-  try { new RegExp(pattern, 'i'); }
-  catch (error) { return { valid: false, error: `正则表达式语法错误：${error instanceof Error ? error.message : String(error)}` }; }
-  if (!safeRegex(pattern)) return { valid: false, error: '正则表达式可能造成灾难性回溯，请移除嵌套量词或拆分复杂表达式' };
-  return { valid: true };
-}
+export * from './configuration-primitives.js';
 
 export const protocols = ['auto', 'acp', 'jsonl', 'pipe', 'pty', 'pty-cli'] as const;
 export type Protocol = (typeof protocols)[number];
-export const permissionModes = ['ask', 'approve-reads', 'deny-all', 'full-trust'] as const;
-export type PermissionMode = (typeof permissionModes)[number];
 export const sessionStates = ['created', 'starting', 'idle', 'thinking', 'running_tool', 'waiting_for_permission', 'interrupting', 'interrupted', 'completed', 'failed', 'stopped'] as const;
 export type SessionState = (typeof sessionStates)[number];
 export const eventTypes = ['text', 'thinking', 'tool_call', 'tool_result', 'permission_request', 'status', 'error', 'completed', 'task', 'raw_terminal'] as const;
@@ -107,8 +100,6 @@ export type UpdateSecretRefInput = z.infer<typeof updateSecretRefInputSchema>;
 
 export const channelBotStates = ['staged', 'disabled'] as const;
 export type ChannelBotState = (typeof channelBotStates)[number];
-export const channelBotBrands = ['feishu', 'lark'] as const;
-export type ChannelBotBrand = (typeof channelBotBrands)[number];
 
 /**
  * WP0 cannot represent an enabled listener or confirmed full trust. Later work
@@ -243,6 +234,9 @@ export interface ToolRiskPolicy {
 }
 
 export interface AgentEvent<T = unknown> {
+  taskId?: string;
+  attemptId?: string;
+  settlementId?: string;
   id: string;
   sessionId: string;
   sequence: number;
@@ -312,15 +306,31 @@ export interface SkillDeliveryMetadata {
   digest: string;
   mode: 'prompt';
 }
-export interface TaskRecord { id: string; sessionId: string; prompt: string; status: string; executionContext?: TaskExecutionContext; createdAt: string; updatedAt: string
+export interface TaskRecord {
+  revision?: number;
+  digestVersion?: 'v1' | 'legacy_unverifiable';
+  currentAttemptId?: string;
+  id: string;
+  sessionId: string;
+  prompt: string;
+  status: string;
+  executionContext?: TaskExecutionContext;
+  createdAt: string;
+  updatedAt: string;
   /** 中断操作者的通道身份（如飞书 open_id）；与任务发起人 executionContext.actorId 语义不同，仅在被中断时落库。 */
-  interruptedByActor?: string }
-export type PublicTaskRecord = Omit<TaskRecord, 'executionContext'> & { skillDeliveries?: SkillDeliveryMetadata[] };
+  interruptedByActor?: string;
+  /** 内部队列排序序号，仅对 status=queued 有序排列，不向 PublicTaskRecord 暴露。 */
+  queuePosition?: number;
+}
+export type PublicTaskRecord = Omit<TaskRecord, 'executionContext' | 'queuePosition'> & { skillDeliveries?: SkillDeliveryMetadata[] };
 export interface TaskRepository {
   save(task: TaskRecord): Promise<void>;
   listBySession(sessionId: string): Promise<TaskRecord[]>;
   get?(id: string): Promise<TaskRecord | undefined>;
   create?(task: TaskRecord): Promise<boolean>;
+  enqueue?(task: TaskRecord, position: 'front' | 'back'): Promise<{ task: TaskRecord; created: boolean }>;
+  promoteQueued?(sessionId: string, taskId: string): Promise<TaskRecord | undefined>;
+  listQueued?(sessionId: string): Promise<TaskRecord[]>;
 }
 export interface EventWindowOptions {
   afterSequence?: number;
@@ -329,6 +339,7 @@ export interface EventWindowOptions {
   direction?: 'forward' | 'backward';
 }
 export interface EventRepository {
+  highWaterMark(sessionId: string): number;
   append(event: AgentEvent): Promise<void>;
   list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>;
   listRecent(sessionId: string, limit: number): Promise<AgentEvent[]>;
@@ -396,6 +407,8 @@ export interface FoundationRepository {
 }
 
 export interface RepositoryBundle {
+  control: import('./database-control.js').DatabaseControl;
+  execution: import('./task-execution.js').ExecutionRepository;
   agents: AgentRepository;
   sessions: SessionRepository;
   tasks: TaskRepository;
@@ -435,3 +448,12 @@ export * from './session-automation.js';
 export * from './work-items.js';
 
 export * from './permission-display.js';
+
+export * from './database-control.js';
+
+export * from './task-execution.js';
+
+export * from './bot-configuration.js';
+export * from './bot-configuration-scope.js';
+
+export * from './driver-resources.js';

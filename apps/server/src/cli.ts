@@ -25,6 +25,7 @@ import { BotmuxImportError } from '@dutydeck/botmux-importer';
 import { BotmuxImportCliError, runBotmuxArchive, runBotmuxDiscover, runBotmuxPlan } from './botmux-import-cli.js';
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { SecretCliError, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
+import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseUpgradeExecution } from './database-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 import { runSetup } from './setup/setup.js';
 import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
@@ -337,7 +338,9 @@ async function main() {
       if (rendered.stdout) process.stdout.write(rendered.stdout);
       if (rendered.stderr) process.stderr.write(rendered.stderr);
       process.exitCode = rendered.exitCode;
-    }
+    },
+    databaseExecutionStatus: async options => { output(await runDatabaseExecutionStatus(options)); },
+    databaseUpgradeExecution: async options => { output(await runDatabaseUpgradeExecution(options)); }
   });
   await program.parseAsync();
 }
@@ -349,7 +352,7 @@ try {
   else if (error instanceof BotmuxImportError || error instanceof BotmuxImportCliError) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   }
-  else if (error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
+  else if (error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   // setup 的三类错误自带中文说明和「该补哪个 flag」，直接原样呈现，不要压成 JSON 或堆栈。
   else if (error instanceof PromptUnavailableError || error instanceof PromptAbortedError || error instanceof InvalidWorkingDirectoryError) {
     process.stderr.write(`${error.message}\n`);
