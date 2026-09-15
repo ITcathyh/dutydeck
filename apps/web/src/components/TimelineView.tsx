@@ -1,5 +1,5 @@
 import { ArrowDown, MessageSquare } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import type { TimelineEvent, TimelineSection } from '../timeline';
 import { useTimelineAutoScroll } from '../useTimelineAutoScroll';
 import { Button, EmptyState, Skeleton } from './primitives';
@@ -21,6 +21,7 @@ export type TimelineViewProps = {
   latestUserIndex: number;
   activeOutputLabel: string;
   footer?: ReactNode;
+  renderProgress?: (emptyState: ReactNode) => ReactNode;
 };
 
 /*
@@ -86,8 +87,16 @@ function TimelineBody({ timelineSections, activeOutputLabel, onResolvePermission
   </>;
 }
 
-export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, hasEarlier, onLoadEarlier, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer }: TimelineViewProps) {
+export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, hasEarlier, onLoadEarlier, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress }: TimelineViewProps) {
+  const progressRef = useRef<HTMLDivElement>(null);
   const timelineScroll = useTimelineAutoScroll(activeSessionId, timeline, awaitingAnswer);
+  useEffect(() => {
+    const progress = progressRef.current;
+    if (!progress || !timelineScroll.isFollowing || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => timelineScroll.followContentResize());
+    observer.observe(progress);
+    return () => observer.disconnect();
+  }, [activeSessionId, timelineScroll.isFollowing]);
   const loadEarlier = async () => {
     const container = timelineScroll.containerRef.current;
     const previousHeight = container?.scrollHeight ?? 0;
@@ -113,7 +122,8 @@ export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, h
                 timeline={timeline}
                 latestUserIndex={latestUserIndex}
               />
-            : <TimelineEmptyState/>}
+            : !renderProgress && <TimelineEmptyState/>}
+        {renderProgress && <div ref={progressRef}>{renderProgress(!eventsLoading && !timeline.length ? <TimelineEmptyState/> : null)}</div>}
         {!eventsLoading && timeline.length > 0 && footer}
       </div>
     </div>

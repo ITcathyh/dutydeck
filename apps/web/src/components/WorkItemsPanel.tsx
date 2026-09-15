@@ -1,14 +1,17 @@
 import { useRef, useState, type RefObject } from 'react';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { CreateWorkItemInput, WorkItem, WorkPlan, WorkTemplate } from '@dutydeck/shared';
 import { X } from 'lucide-react';
 import { api, type Agent, type Session, type WorkItemRequest } from '../api';
 import { Banner, Button, Dialog, Field, IconButton, Input, Select, Spinner, Textarea } from './primitives';
 
-const statusLabels: Record<string, string> = { pending: '待执行', preparing: '准备中', accepted: '执行端已接收', running: '执行中', waiting: '等待回答', completed: '已完成', failed: '失败', interrupted: '已中断', skipped: '已跳过', cancelling: '正在取消', cancelled: '已取消', blocked: '需要处理' };
+import { useWorkItems, useWorkItemRequests, workStatusLabels as statusLabels } from './workItemQueries';
+
 const deliveryLabels = { pending: '等待送达', delivered: '已送达', error: '送达失败', not_requested: '未请求通知' };
 type Submission = { signature: string; key: string } | undefined;
-type Props = { session: Session; agents: Agent[]; onSelectSession(id: string): void };
+type Props = { session: Session; agents: Agent[]; onSelectSession(id: string): void; control?: {
+  open: boolean; selectedId: string; onOpenChange(open: boolean): void; onSelectItem(id: string): void;
+} };
 type Action =
   | { kind: 'respond'; item: WorkItem; request: WorkItemRequest; answer: string }
   | { kind: 'create'; input: CreateWorkItemInput }
@@ -23,14 +26,18 @@ export function WorkItemsPanel(props: Props) {
   return <SessionWorkItems key={props.session.id} {...props}/>;
 }
 
-function SessionWorkItems({ session, agents, onSelectSession }: Props) {
-  const [open, setOpen] = useState(false);
-  const [selectedId, setSelectedId] = useState('');
+function SessionWorkItems({ session, agents, onSelectSession, control }: Props) {
+  const [localOpen, setLocalOpen] = useState(false);
+  const [localSelectedId, setLocalSelectedId] = useState('');
+  const open = control?.open ?? localOpen;
+  const setOpen = control?.onOpenChange ?? setLocalOpen;
+  const selectedId = control?.selectedId ?? localSelectedId;
+  const setSelectedId = control?.onSelectItem ?? setLocalSelectedId;
   const [notice, setNotice] = useState('');
   const submission = useRef<Submission>(undefined);
   const qc = useQueryClient();
   const queryKey = ['work-items', session.id];
-  const records = useQuery({ queryKey, queryFn: () => api.workItems(session.id), enabled: open, refetchInterval: open ? 5_000 : false });
+  const records = useWorkItems(session.id, open);
   const mutation = useMutation({
     mutationFn: async (action: Action): Promise<unknown> => {
       switch (action.kind) {
@@ -58,8 +65,8 @@ function SessionWorkItems({ session, agents, onSelectSession }: Props) {
   const readOnly = Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
   const disabled = readOnly || mutation.isPending || records.isFetching || records.isError || !records.data;
   const items = records.data?.items ?? [];
-  const selected = items.find(item => item.id === selectedId) ?? items[0];
-  const requests = useQuery({ queryKey: ['work-item-requests', session.id, selected?.id], queryFn: () => api.workItemRequests(session.id, selected!.id), enabled: open && Boolean(selected?.steps.some(step => step.status === 'running')), refetchInterval: open ? 5_000 : false });
+  const selected = selectedId ? items.find(item => item.id === selectedId) : items[0];
+  const requests = useWorkItemRequests(session.id, selected, open);
   const act = (action: Action) => { if (!disabled) { setNotice(''); mutation.mutate(action); } };
 
   return <>
@@ -77,7 +84,9 @@ function SessionWorkItems({ session, agents, onSelectSession }: Props) {
         {!readOnly && <CreateGoal submission={submission} agents={agents} templates={records.data?.templates ?? []} disabled={disabled} onSubmit={action => { setNotice(''); return mutation.mutateAsync(action); }}/>}
         {records.isSuccess && !items.length && <p className="text-body text-secondary">当前会话还没有工作项目标。可以创建研究目标，或从飞书 /work 发起。</p>}
         {!!items.length && <section className="space-y-3" aria-label="当前会话的目标">
+          {selectedId && !selected && <p className="text-caption text-warning">此目标已不在当前列表中，请重新选择目标。</p>}
           <Field label="选择目标"><Select value={selected?.id ?? ''} onChange={event => { setSelectedId(event.target.value); setNotice(''); mutation.reset(); }} disabled={mutation.isPending}>
+            {!selected && <option value="" disabled>请选择目标</option>}
             {items.map(item => <option key={item.id} value={item.id}>{item.title} · {statusLabels[item.status]}</option>)}
           </Select></Field>
           {selected?.steps.some(step => step.status === 'running') && <section aria-label="执行中的授权与提问" className="space-y-3">

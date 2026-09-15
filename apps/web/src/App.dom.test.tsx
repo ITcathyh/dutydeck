@@ -37,6 +37,8 @@ function mockAppApi({ agents = [agent()], sessions = [], summaries = [], events 
     localFileDelivery: 'available',
   });
   vi.spyOn(api, 'verifications').mockResolvedValue([]);
+  vi.spyOn(api, 'workItems').mockResolvedValue({ items: [], templates: [] });
+  vi.spyOn(api, 'workItemRequests').mockResolvedValue([]);
   vi.spyOn(api, 'automation').mockResolvedValue({ schedules: [], subscriptions: [], occurrences: [] });
 }
 

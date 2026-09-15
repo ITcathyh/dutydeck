@@ -46,5 +46,10 @@ export function useTimelineAutoScroll(scopeKey: string | undefined, contentVersi
     if (container) container.scrollTop = container.scrollHeight;
   };
 
-  return { containerRef, isFollowing, onScroll, scrollToBottom };
+  const followContentResize = () => {
+    const container = containerRef.current;
+    if (container && followingRef.current) container.scrollTop = container.scrollHeight;
+  };
+
+  return { containerRef, isFollowing, onScroll, scrollToBottom, followContentResize };
 }
