@@ -11,30 +11,32 @@ export async function sendLarkResult(
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
   log: { warn: (...args: any[]) => void }
 ) {
-  const output = input.elements.find(element => element.element_id === 'final_output')?.content;
-  const card = buildLarkCard(input);
+  // 独立最终结果卡统一走 result 布局；调用方无需（也不允许按消息形态）自行判定。
+  const resultInput: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string } = { ...input, cardKind: 'result' };
+  const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
+  const card = buildLarkCard(resultInput);
   const fits = !output || card.body.elements.some(element => element.element_id === 'final_output' && 'content' in element && element.content === output);
   // A result must never pass through the trace snapshot's truncation fallback.
   // Oversized answers are delivered as the single result message's Markdown file.
-  const acceptance = input.elements.some(element => element.element_id === 'workflow_accept')
+  const acceptance = resultInput.elements.some(element => element.element_id === 'workflow_accept')
     ? '\n\n---\n\n结果验收：回复本文件消息「验收通过」即可确认；需要修改时，回复本文件消息并说明修改要求。'
     : '';
   const fileKey = fits ? undefined : await service.uploadFile({
-    data: Buffer.from(`${output}${acceptance}`, 'utf8'), filename: '执行结果.md', idempotencyKey: input.idempotencyKey
+    data: Buffer.from(`${output}${acceptance}`, 'utf8'), filename: '执行结果.md', idempotencyKey: resultInput.idempotencyKey
   });
   if (target.replyMessageId && typeof service.reply === 'function') {
     try {
-      const reply = { messageId: target.replyMessageId, ...(target.replyInThread ? { replyInThread: true } : {}), idempotencyKey: input.idempotencyKey };
-      const result = fileKey ? await service.replyFile({ ...reply, fileKey }) : await service.reply({ ...input, ...reply });
-      return { ...result, elements: fits ? input.elements : undefined };
+      const reply = { messageId: target.replyMessageId, ...(target.replyInThread ? { replyInThread: true } : {}), idempotencyKey: resultInput.idempotencyKey };
+      const result = fileKey ? await service.replyFile({ ...reply, fileKey }) : await service.reply({ ...resultInput, ...reply });
+      return { ...result, elements: fits ? resultInput.elements : undefined };
     } catch (error) {
       log.warn({ error, messageId: target.replyMessageId, chatId: target.chatId }, '回复执行结果失败，回退为会话内发送');
     }
   }
   const result = fileKey
-    ? await service.sendFile({ chatId: target.chatId, fileKey, idempotencyKey: input.idempotencyKey })
-    : await service.send({ ...input, chatId: target.chatId });
-  return { ...result, elements: fits ? input.elements : undefined };
+    ? await service.sendFile({ chatId: target.chatId, fileKey, idempotencyKey: resultInput.idempotencyKey })
+    : await service.send({ ...resultInput, chatId: target.chatId });
+  return { ...result, elements: fits ? resultInput.elements : undefined };
 }
 
 /**
