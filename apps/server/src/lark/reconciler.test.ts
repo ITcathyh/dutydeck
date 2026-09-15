@@ -118,13 +118,15 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
       expect.objectContaining({
         messageId: 'om_card_msg-2',
         state: 'completed',
-        readOnly: true
+        readOnly: true,
+        cardKind: 'process'
       })
     );
     expect(service.send).toHaveBeenCalledWith(
       expect.objectContaining({
         state: 'completed',
-        readOnly: true
+        readOnly: true,
+        cardKind: 'result'
       })
     );
 

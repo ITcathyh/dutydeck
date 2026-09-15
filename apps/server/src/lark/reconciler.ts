@@ -64,6 +64,7 @@ export async function performLarkCardReconcile(input: {
         try {
           await service.update({
             ...cardContext,
+            cardKind: 'process',
             messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config),
             state: persisted.state as 'completed' | 'failed' | 'interrupted',
@@ -102,6 +103,7 @@ export async function performLarkCardReconcile(input: {
         if (!persisted.recovery_read_only) try {
           await service.update({
             ...cardContext,
+            cardKind: 'process',
             messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config),
             state: runtimeTask.status === 'queued' ? 'queued' : 'running',
@@ -148,6 +150,7 @@ export async function performLarkCardReconcile(input: {
         try {
           await service.update({
             ...cardContext,
+            cardKind: 'process',
             messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config),
             state,
@@ -177,6 +180,7 @@ export async function performLarkCardReconcile(input: {
         try {
           await service.update({
             ...cardContext,
+            cardKind: 'process',
             messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config),
             state,

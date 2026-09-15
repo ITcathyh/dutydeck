@@ -152,7 +152,7 @@ const scenarios: Scenario[] = [
     card: buildLarkCard({
       agentName: 'Claude Code', state: 'running', taskName: '看看发送的消息卡片能不能做进一步优化，提高卡片美观性和信噪比',
       taskId: 'om_preview_running', elapsedSeconds: 74, sessionId: 'ses_preview', webBaseUrl: web,
-      capabilities: liveCapabilities,
+      capabilities: liveCapabilities, cardKind: 'process',
       elements: boundLarkCardElements(renderLarkProcessElements(multiStage, config))
     })
   },
@@ -163,7 +163,7 @@ const scenarios: Scenario[] = [
     card: buildLarkCard({
       agentName: 'Codex', state: 'running', taskName: '拉取群会话历史消息', taskId: 'om_preview_terminal',
       elapsedSeconds: 19, sessionId: 'ses_preview', webBaseUrl: web,
-      capabilities: liveCapabilities,
+      capabilities: liveCapabilities, cardKind: 'process',
       elements: boundLarkCardElements(renderLarkProcessElements(terminalHeavy, config))
     })
   },
@@ -174,7 +174,7 @@ const scenarios: Scenario[] = [
     card: buildLarkCard({
       agentName: 'Claude Code', state: 'running', taskName: '清理构建缓存释放磁盘', taskId: 'om_preview_approval',
       elapsedSeconds: 8, sessionId: 'ses_preview', webBaseUrl: web,
-      capabilities: liveCapabilities,
+      capabilities: liveCapabilities, cardKind: 'process',
       elements: boundLarkCardElements(renderLarkProcessElements(approvalRun, config))
     })
   },
@@ -197,7 +197,7 @@ const scenarios: Scenario[] = [
     card: buildLarkCard({
       agentName: 'Claude Code', state: 'completed', taskName: '确认飞书卡片渲染链路', taskId: 'om_preview_done',
       elapsedSeconds: 142, sessionId: 'ses_preview', webBaseUrl: web, readOnly: true,
-      capabilities: doneCapabilities,
+      capabilities: doneCapabilities, cardKind: 'process',
       elements: boundLarkCardElements(renderLarkProcessElements(completedRun, config, true))
     })
   },
@@ -208,7 +208,7 @@ const scenarios: Scenario[] = [
     card: buildLarkCard({
       agentName: 'Claude Code', state: 'completed', taskName: '确认飞书卡片渲染链路', taskId: 'om_preview_done',
       elapsedSeconds: 142, sessionId: 'ses_preview', webBaseUrl: web, readOnly: true,
-      capabilities: doneCapabilities,
+      capabilities: doneCapabilities, cardKind: 'result',
       elements: renderLarkResultElements(completedRun)
     })
   },
@@ -220,6 +220,7 @@ const scenarios: Scenario[] = [
       agentName: 'Claude Code', state: 'failed', taskName: '构建并重启服务端', taskId: 'om_preview_failed',
       elapsedSeconds: 43, sessionId: 'ses_preview', webBaseUrl: web, retryable: true,
       capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: true, canRefresh: false, webUrl: `${web}/sessions/ses_preview` },
+      cardKind: 'process',
       elements: boundLarkCardElements(renderLarkProcessElements(failedRun, config, true))
     })
   },
@@ -327,9 +328,16 @@ function renderElement(element: any, theme: Theme): string {
   switch (element.tag) {
     case 'markdown':
       return wrap(`${icon(element.icon, theme)}<span style="font-size:${fontSize(element.text_size, theme)}">${markdown(element.content, theme)}</span>`);
+    // collapsible_panel.header.title 可以是 plain_text（过程卡总标题）。纯文本不做
+    // markdown 解析，只转义并保留换行，否则任务名里的 **、[]()、<at> 会被当成格式。
+    case 'plain_text':
+      return wrap(`<span style="font-size:${fontSize(element.text_size, theme)}">${esc(String(element.content ?? '')).replace(/\n/g, '<br>')}</span>`);
     case 'div': {
       const color = tint(element.text?.text_color, theme);
-      return wrap(`${icon(element.icon, theme)}<span style="${color ? `color:${color};` : ''}font-size:${fontSize(element.text?.text_size, theme)}">${markdown(element.text?.content ?? '', theme)}</span>`);
+      const text = element.text?.tag === 'plain_text'
+        ? esc(String(element.text?.content ?? '')).replace(/\n/g, '<br>')
+        : markdown(element.text?.content ?? '', theme);
+      return wrap(`${icon(element.icon, theme)}<span style="${color ? `color:${color};` : ''}font-size:${fontSize(element.text?.text_size, theme)}">${text}</span>`);
     }
     case 'button': {
       const kind = element.type === 'danger' ? 'danger'

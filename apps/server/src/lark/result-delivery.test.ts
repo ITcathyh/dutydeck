@@ -71,6 +71,17 @@ describe('separate process and complete result messages', () => {
     expect(larkResultKey('om_next_process')).not.toBe(larkResultKey('om_process'));
   });
 
+  it('reply/send/fallback 卡一律强制 cardKind=result，即使调用方未设置或误传', async () => {
+    const service = {
+      reply: vi.fn(async () => ({ messageId: 'om_reply' })),
+      send: vi.fn(async () => ({ messageId: 'om_send' }))
+    };
+    await expect(sendLarkResult(service as any, { chatId: 'oc_group' }, { ...input('答案'), cardKind: undefined }, log)).resolves.toMatchObject({ messageId: 'om_send' });
+    expect(service.send.mock.calls[0]![0]).toMatchObject({ cardKind: 'result' });
+    await expect(sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question' }, { ...input('答案'), cardKind: 'process' as any }, log)).resolves.toMatchObject({ messageId: 'om_reply' });
+    expect(service.reply.mock.calls[0]![0]).toMatchObject({ cardKind: 'result' });
+  });
+
   it('does not replace a rejected result with a misleading delivered placeholder', async () => {
     const error = new LarkServiceError('LARK_OPENAPI_ERROR', 'rejected', 502, { upstreamCode: 230028 });
     const service = { send: vi.fn(async () => { throw error; }), uploadFile: vi.fn() };

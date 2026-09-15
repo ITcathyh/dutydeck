@@ -287,9 +287,12 @@ describe('Lark message coordinator', () => {
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'completed' }));
     finish();
     // 终态冻结过程卡，并单独送达只读结果卡。
-    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card', state: 'completed' })));
+    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card', state: 'completed', cardKind: 'process' })));
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledTimes(2));
-    expect(service.send.mock.calls[1]?.[0]).toMatchObject({ state: 'completed', readOnly: true });
+    expect(service.send.mock.calls[1]?.[0]).toMatchObject({ state: 'completed', readOnly: true, cardKind: 'result' });
+    // 首张过程卡与心跳/终态 PATCH 一律 process，只有独立结果消息是 result。
+    expect(service.send.mock.calls[0]?.[0]).toMatchObject({ cardKind: 'process' });
+    expect(service.update.mock.calls.every(([input]) => (input as any).cardKind === 'process')).toBe(true);
 
     // 轮次结束后 requestUpdate 已清空：刷新必须诚实地说不可用，而不是假装成功。
     await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_refresh' }))

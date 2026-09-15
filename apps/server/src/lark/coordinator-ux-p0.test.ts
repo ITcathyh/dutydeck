@@ -414,6 +414,12 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
       { dutydeck_workflow: 'accept', request_id: inlineId, generation: 'legacy_boot' },
       'ou_alice', { messageId: inlineSaved.final_message_id, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
     expect(inline.service.addReaction.mock.calls.filter(([id]) => id === inlineSaved.final_message_id)).toHaveLength(0);
+    // 结果反馈 PATCH 的是独立结果卡，必须标 result；过程卡冻结帧仍是 process。
+    await vi.waitFor(() => expect(inline.service.update).toHaveBeenCalledWith(
+      expect.objectContaining({ messageId: inlineSaved.final_message_id, cardKind: 'result' })));
+    expect(inline.service.update.mock.calls
+      .filter(([input]) => input.messageId === inlineSaved.card_message_id)
+      .every(([input]) => input.cardKind === 'process')).toBe(true);
 
     // final_message_id === card_message_id（终态 PATCH 在过程卡自身的旧形态）：不加 reaction。
     const same = await harness();
