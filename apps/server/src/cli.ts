@@ -25,7 +25,7 @@ import { BotmuxImportError } from '@dutydeck/botmux-importer';
 import { BotmuxImportCliError, runBotmuxArchive, runBotmuxDiscover, runBotmuxPlan } from './botmux-import-cli.js';
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { SecretCliError, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
-import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseUpgradeExecution } from './database-cli.js';
+import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseRetireLegacy, runDatabaseUpgradeExecution } from './database-cli.js';
 import { IdentityPreflightCliError, runIdentityPreflightCli } from './identity-preflight-cli.js';
 import { runSetup } from './setup/setup.js';
 import { PromptAbortedError, PromptUnavailableError } from './setup/prompts.js';
@@ -340,7 +340,8 @@ async function main() {
       process.exitCode = rendered.exitCode;
     },
     databaseExecutionStatus: async options => { output(await runDatabaseExecutionStatus(options)); },
-    databaseUpgradeExecution: async options => { output(await runDatabaseUpgradeExecution(options)); }
+    databaseUpgradeExecution: async options => { output(await runDatabaseUpgradeExecution(options)); },
+    databaseRetireLegacy: async options => { output(await runDatabaseRetireLegacy(options)); }
   });
   await program.parseAsync();
 }

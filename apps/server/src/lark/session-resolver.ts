@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import type { ChannelMappingRepository, Session } from '@dutydeck/shared';
+import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage';
 import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
@@ -348,8 +349,12 @@ export async function resolveLarkSession(
   }
   group.sessionId = undefined;
   group.sessionConfigKey = undefined;
+  let retiredLegacy = false;
   if (runtime.listSessions) {
     const sessions = await runtime.listSessions();
+    retiredLegacy = sessions.some(item => item.archivedAt && item.state === 'stopped'
+      && item.error?.includes(LEGACY_RETIREMENT_NOTICE)
+      && item.source === 'lark' && item.sourceId === sourceId);
     // A recovered first turn may have started successfully before its binding was saved.
     const existing = [...sessions].reverse().find(item => matchesRequest(item)
       && !['failed', 'stopped'].includes(item.state)
@@ -385,5 +390,6 @@ export async function resolveLarkSession(
   await saveLaunchBinding(session);
   group.sessionId = session.id;
   group.sessionConfigKey = configKey;
+  if (retiredLegacy) group.legacyUpgradeSessionId = session.id;
   return session;
 }

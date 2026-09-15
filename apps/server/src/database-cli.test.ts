@@ -1,14 +1,16 @@
 import Database from 'better-sqlite3';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
+import { dutydeckPtySessionName } from '@dutydeck/pty-driver';
 import {
   DatabaseCliError,
   runDatabaseExecutionStatus,
+  runDatabaseRetireLegacy,
   runDatabaseUpgradeExecution
 } from './database-cli.js';
 
@@ -672,5 +674,76 @@ describe('database-cli', () => {
         }
       });
     });
+  });
+});
+
+describe('database retire-legacy command', () => {
+  const directories: string[] = [];
+  const sockets: string[] = [];
+  afterEach(() => {
+    for (const socket of sockets.splice(0)) { try { execFileSync('tmux', ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch {} }
+    for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  });
+  const directory = (prefix: string) => { const value = mkdtempSync(join(tmpdir(), prefix)); directories.push(value); return value; };
+  const scope = (database: string, tmuxSocket: string) => ({ database, hostname: hostname(), uid: process.getuid!(), tmuxSocket });
+  const legacyDatabase = async () => {
+    const file = join(directory('dutydeck-db-retire-'), 'test.db');
+    const repositories = createRepositories(file);
+    const time = '2026-09-15T00:00:00.000Z';
+    await repositories.sessions.save({ id: 'ses_cli', agentId: 'ccflash', state: 'completed', cwd: '/workspace', protocol: 'pty-cli', runId: 'run_cli', createdAt: time, updatedAt: time });
+    await repositories.tasks.save({ id: 'task_cli', sessionId: 'ses_cli', prompt: 'done', status: 'completed', createdAt: time, updatedAt: time });
+    repositories.execution.upgradeLegacy(); repositories.close();
+    return file;
+  };
+
+  it('retires a migrated session in an explicit private tmux scope and replays idempotently', async () => {
+    const file = await legacyDatabase();
+    const tmuxDirectory = directory('dutydeck-retire-scope-'); chmodSync(tmuxDirectory, 0o700);
+    const tmuxSocket = join(tmuxDirectory, 'socket'); sockets.push(tmuxSocket);
+    execFileSync('tmux', ['-S', tmuxSocket, 'new-session', '-d', '-s', 'unrelated', 'sleep', '60']);
+    const first = await runDatabaseRetireLegacy(scope(file, tmuxSocket));
+    expect(first.sessions).toEqual([{ sessionId: 'ses_cli', status: 'retired' }]);
+    expect(first).toMatchObject({ retired: 1, replayed: 0, blocked: 0 });
+    await expect(runDatabaseRetireLegacy(scope(file, tmuxSocket))).resolves.toMatchObject({ retired: 0, replayed: 1, blocked: 0 });
+    const check = createRepositories(file);
+    expect(await check.sessions.get('ses_cli')).toMatchObject({ state: 'stopped', archivedAt: expect.any(String), error: expect.stringContaining('原上下文未自动恢复') });
+    check.close();
+  });
+
+  it('checks maintenance isolation before stopping an owned tmux target', async () => {
+    const file = await legacyDatabase();
+    const live = createRepositories(file, { mode: 'runtime', upgrade: 'never' });
+    const claim = live.control.attachRuntime('runtime-test');
+    const tmuxDirectory = directory('dutydeck-live-scope-'); chmodSync(tmuxDirectory, 0o700);
+    const tmuxSocket = join(tmuxDirectory, 'socket'); sockets.push(tmuxSocket);
+    const target = dutydeckPtySessionName('ses_cli');
+    execFileSync('tmux', ['-S', tmuxSocket, 'new-session', '-d', '-s', target, 'sleep', '60']);
+    execFileSync('tmux', ['-S', tmuxSocket, 'set-option', '-t', target, '@dutydeck_owner_id', 'dutydeck:ses_cli']);
+    await expect(runDatabaseRetireLegacy(scope(file, tmuxSocket))).rejects.toMatchObject({ code: 'DATABASE_RUNTIME_STILL_ATTACHED' });
+    expect(() => execFileSync('tmux', ['-S', tmuxSocket, 'has-session', '-t', `=${target}`])).not.toThrow();
+    claim.release(); live.close();
+  });
+
+  it('reports one unsupported session as blocked while retiring another verified session', async () => {
+    const file = join(directory('dutydeck-db-mixed-retire-'), 'test.db');
+    const repositories = createRepositories(file);
+    const time = '2026-09-15T00:00:00.000Z';
+    for (const [id, protocol] of [['ses_bad', 'jsonl'], ['ses_corrupt', 'pty-cli'], ['ses_good', 'pty-cli']] as const) {
+      await repositories.sessions.save({ id, agentId: 'ccflash', state: 'completed', cwd: '/workspace', protocol, runId: `run_${id}`, createdAt: time, updatedAt: time });
+      await repositories.tasks.save({ id: `task_${id}`, sessionId: id, prompt: 'done', status: 'completed', createdAt: time, updatedAt: time });
+    }
+    repositories.execution.upgradeLegacy(); repositories.close();
+    const corrupt = new Database(file);
+    corrupt.prepare("INSERT INTO configs VALUES ('legacy_retirement:ses_corrupt','{invalid')").run(); corrupt.close();
+    const tmuxDirectory = directory('dutydeck-mixed-scope-'); chmodSync(tmuxDirectory, 0o700);
+    const tmuxSocket = join(tmuxDirectory, 'socket'); sockets.push(tmuxSocket);
+    execFileSync('tmux', ['-S', tmuxSocket, 'new-session', '-d', '-s', 'unrelated', 'sleep', '60']);
+    const result = await runDatabaseRetireLegacy(scope(file, tmuxSocket));
+    expect(result).toMatchObject({ retired: 1, blocked: 2, replayed: 0 });
+    expect(result.sessions).toEqual([
+      { sessionId: 'ses_bad', status: 'blocked', code: 'LEGACY_RETIREMENT_PROTOCOL_UNSUPPORTED', detail: 'jsonl' },
+      { sessionId: 'ses_corrupt', status: 'blocked', code: 'LEGACY_RETIREMENT_DATABASE_BLOCKED', detail: 'LEGACY_RETIREMENT_RECEIPT_INVALID' },
+      { sessionId: 'ses_good', status: 'retired' }
+    ]);
   });
 });

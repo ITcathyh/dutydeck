@@ -62,6 +62,8 @@ import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
 export type LarkGroup = {
   sessionId?: string;
   sessionConfigKey?: string;
+  /** Newly created replacement for a maintenance-retired legacy context. */
+  legacyUpgradeSessionId?: string;
   tail: Promise<void>;
   /**
    * 被 /new 结束的会话 id。runtime.stop 落库前会话状态仍是 idle，此刻并发到达的消息
@@ -1867,12 +1869,16 @@ export class LarkMessageCoordinator {
       return;
     }
     task.sessionId = session.id;
+    const legacyUpgradeNote = task.group.legacyUpgradeSessionId === session.id
+      ? '这是升级后创建的新上下文；旧会话历史仍可查看，但原上下文未自动恢复。'
+      : undefined;
+    if (legacyUpgradeNote) task.group.legacyUpgradeSessionId = undefined;
     // P0-7：pty/pty-cli 任务的工具确认只能在电脑前响应，首卡、排队卡与每帧心跳都如实标注。
     const protocolNote = protocolModeNote(session.protocol, larkPermissionMode(config));
     // S3：未知命令近似提示只追加到卡面，绝不进入 prompt（materialPrompt 保持原文）。
     // S8：replayed 置位后排队 PATCH 也带恢复注记；心跳帧的同名元素在 update() 内另拼。
     const withCardNotes = (markdown: string): string =>
-      [markdown, protocolNote, task.replayedNote ? replayedRecoveryNote() : undefined,
+      [markdown, legacyUpgradeNote, protocolNote, task.replayedNote ? replayedRecoveryNote() : undefined,
         task.commandSuggestion ? `${task.commandSuggestion} 原文仍会作为普通请求执行。` : undefined]
         .filter((part): part is string => Boolean(part)).join('\n\n');
     cardContext.workspace = session.cwd;

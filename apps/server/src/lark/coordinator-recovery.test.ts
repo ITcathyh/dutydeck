@@ -1,13 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import type { AgentConfig, AgentDriver, ChannelMapping, Session, TaskRecord } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { chmod, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
+import { runDatabaseRetireLegacy } from '../database-cli.js';
 
 /**
  * 进程重启（coordinator 重建）后的飞书日常闭环回归。
@@ -220,6 +222,29 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
     expect(runtime.start).toHaveBeenCalledTimes(2);
     expect(runtime.send.mock.calls[1]?.[0]).toBe('ses_2');
+  });
+
+  it('an archived migrated topic accepts /new and labels the replacement as a new context', async () => {
+    const { runtime, sessions } = persistentRuntime();
+    sessions.push({
+      id: 'ses_legacy', agentId: 'ccflash', state: 'stopped', cwd: '/old/workspace', permissionMode: 'full-trust',
+      source: 'lark', sourceId: 'cli_test:ou_user_a:p2p', archivedAt: '2026-09-15T01:00:00.000Z',
+      error: '升级已结束旧会话，历史记录保留；原上下文未自动恢复，请用 /new 新建。',
+      runId: 'run_legacy', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-09-15T01:00:00.000Z'
+    });
+    const service = cardService();
+    const restarted = coordinatorFor(runtime, service);
+    await restarted.handle(dm('om_new_legacy', '/new'), config);
+    await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
+    expect(runtime.stop).not.toHaveBeenCalled();
+
+    await restarted.handle(dm('om_after_upgrade', '继续处理新目标'), config);
+    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
+    expect(runtime.start).toHaveBeenCalledOnce();
+    expect(runtime.send.mock.calls[0]?.[0]).not.toBe('ses_legacy');
+    expect(service.send).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'running', markdown: expect.stringContaining('升级后创建的新上下文')
+    }));
   });
 
   it('/new 任务内容在一条消息里完成新建与派发，且只派发一次', async () => {
@@ -1054,6 +1079,73 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
       // 活着的 runtime 必须先停，否则断言失败时会在 driver 仍持有会话的情况下关库。
       await runtime.shutdown().catch(() => undefined);
       repos.close();
+      await rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('retires a real migrated SQLite topic, then /new creates one fresh session without replaying the old prompt', async () => {
+    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-lark-legacy-'));
+    const database = join(workspace, 'legacy.db');
+    const tmuxDirectory = join(workspace, 'tmux');
+    const tmuxSocket = join(tmuxDirectory, 'socket');
+    await mkdir(tmuxDirectory); await chmod(tmuxDirectory, 0o700);
+    let runtime: DutydeckRuntime | undefined;
+    let repos: ReturnType<typeof createRepositories> | undefined;
+    try {
+      const legacy = createRepositories(database);
+      const time = '2026-09-15T00:00:00.000Z';
+      await legacy.sessions.save({
+        id: 'ses_legacy_topic', agentId: 'codex', state: 'completed', cwd: workspace, protocol: 'pty-cli',
+        permissionMode: 'full-trust', source: 'lark', sourceId: 'cli_test:ou_user_a:p2p', runId: 'run_legacy_topic',
+        createdAt: time, updatedAt: time
+      });
+      await legacy.tasks.save({ id: 'task_legacy_topic', sessionId: 'ses_legacy_topic', prompt: '旧 prompt 不得重发', status: 'completed',
+        executionContext: { agentPrompt: '旧 prompt 不得重发' }, createdAt: time, updatedAt: time });
+      legacy.execution.upgradeLegacy(); legacy.close();
+      execFileSync('tmux', ['-S', tmuxSocket, 'new-session', '-d', '-s', 'unrelated', 'sleep', '60']);
+      await expect(runDatabaseRetireLegacy({ database, hostname: hostname(), uid: process.getuid!(), tmuxSocket }))
+        .resolves.toMatchObject({ retired: 1, blocked: 0 });
+
+      repos = createRepositories(database, { mode: 'runtime', upgrade: 'never' });
+      let emitEvent!: (event: import('@dutydeck/shared').NormalizedDriverEvent) => void;
+      const driver: AgentDriver = {
+        start: vi.fn(async () => {}),
+        send: vi.fn(async () => { emitEvent({ type: 'text', data: { text: '新结果' } }); emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } }); }),
+        interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {})
+      };
+      runtime = new DutydeckRuntime(repos, {
+        probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+        driverFactory: (_agent, _protocol, emit) => { emitEvent = emit; return driver; }
+      });
+      await runtime.initialize([agentFor(workspace)]);
+      const integrationConfig = { ...config, workspace };
+      await repos.config.set(larkBotsConfigKey, JSON.stringify([integrationConfig]));
+      const service = trackedCardService('om_legacy');
+      const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot',
+        undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
+      await coordinator.initializeWorkflows(integrationConfig);
+      await coordinator.handle(dm('om_new_legacy_real', '/new'), integrationConfig);
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
+      await coordinator.handle(dm('om_new_goal_real', '执行新目标'), integrationConfig);
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '执行新目标' })));
+      await vi.waitFor(async () => {
+        const current = (await repos!.sessions.list()).find(item => item.id !== 'ses_legacy_topic');
+        expect(current && (await repos!.tasks.listBySession(current.id)).at(-1)?.status).toBe('completed');
+      }, { timeout: 5_000 });
+      expect(driver.send).toHaveBeenCalledOnce();
+      const sessions = await repos.sessions.list();
+      const oldSession = sessions.find(item => item.id === 'ses_legacy_topic')!;
+      const newSession = sessions.find(item => item.id !== oldSession.id)!;
+      expect(oldSession).toMatchObject({ state: 'stopped', archivedAt: expect.any(String), error: expect.stringContaining('原上下文未自动恢复') });
+      expect(newSession.id).not.toBe(oldSession.id);
+      expect(driver.send).toHaveBeenCalledOnce();
+      expect(JSON.stringify(driver.send.mock.calls)).not.toContain('旧 prompt 不得重发');
+      expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('升级后创建的新上下文') }));
+      expect((await repos.tasks.listBySession(oldSession.id))[0]?.prompt).toBe('旧 prompt 不得重发');
+    } finally {
+      await runtime?.shutdown().catch(() => undefined);
+      try { repos?.close(); } catch {}
+      try { execFileSync('tmux', ['-S', tmuxSocket, 'kill-server'], { stdio: 'ignore' }); } catch {}
       await rm(workspace, { recursive: true, force: true });
     }
   });

@@ -232,9 +232,13 @@ describe('真实 Runtime + LarkGroupManager 群身份提交与停止/重启', ()
       releaseWrite();
       await stopping;
       const bobOutcome = await bobTurn;
-      expect(bobOutcome.ok).toBe(false); if (!bobOutcome.ok) expect(bobOutcome.error).toMatchObject({ code: 'OPERATION_REVOKED' });
+      // Task 已在 admission 阶段持久化；执行 commit 后被 stop 撤销，因此 send
+      // 返回 durable cancelled 终态，而不是在 admission promise 上抛错。
+      expect(bobOutcome).toMatchObject({ ok: true, task: { status: 'cancelled' } });
+      const bobAttempt = h.repos.execution.getTaskExecution(bobOutcome.ok ? bobOutcome.task.id : '')?.currentAttempt;
+      expect(bobAttempt).toMatchObject({ state: 'settled', outcome: 'cancelled', submissionState: 'not_submitted' });
       expect(JSON.parse((await h.repos.config.get(runKey(id)))!).activeOpenId).toBe(BOB);
-      // bob 的任务在提交后、driver.send 前随旧生命周期撤销，未触达 driver。
+      // bob 的 actor commit 已完成，但任务仍在 driver.send 前随旧生命周期撤销。
       expect(h.drivers[0]!.sentPrompts).toEqual([]);
 
       // 新运行由 carol 执行：旧写（bob）不得迟到覆盖 carol 的身份。
@@ -254,19 +258,34 @@ describe('真实 Runtime + LarkGroupManager 群身份提交与停止/重启', ()
 
   it('commit 时发现 RunContext 已被删除则拒绝，不复活旧快照且不触达 driver', async () => {
     const id = h.session.id;
-    // send 后对 runKey 的读取依次为：prepareTurn 取 run（第 1 次）、authorize 校验归属
-    // （第 2 次）、commit 复查当前值（第 3 次）。让 commit 的读取返回 undefined，
-    // 精确模拟准备与提交之间原记录被删除。
+    // admission 只校验并丢弃 commit；把第 2 次 prepareTurn（execution prepare）
+    // 返回的 commit 包起来，只在它真正复查 RunContext 时模拟记录消失。
     const realGet = h.repos.config.get.bind(h.repos.config);
-    let runReads = 0;
+    let hideRunContext = false;
     vi.spyOn(h.repos.config, 'get').mockImplementation(async (key: string) => {
-      if (key === runKey(id)) { runReads += 1; if (runReads === 3) return undefined; }
+      if (key === runKey(id) && hideRunContext) return undefined;
       return realGet(key);
     });
-
-    await expect(h.runtime.send(id, 'bob 越权任务', undefined, undefined, BOB)).rejects.toMatchObject({
-      code: 'LARK_RUN_SCOPE_MISMATCH'
+    const realPrepareTurn = h.manager.prepareTurn.bind(h.manager);
+    let prepareCalls = 0;
+    vi.spyOn(h.manager, 'prepareTurn').mockImplementation(async (sessionId, actorId) => {
+      const commit = await realPrepareTurn(sessionId, actorId);
+      prepareCalls += 1;
+      if (prepareCalls !== 2 || !commit) return commit;
+      return async () => {
+        hideRunContext = true;
+        try { await commit(); } finally { hideRunContext = false; }
+      };
     });
+
+    const task = await h.runtime.send(id, 'bob 越权任务', undefined, undefined, BOB);
+    expect(task.status).toBe('failed');
+    const attempt = h.repos.execution.getTaskExecution(task.id)?.currentAttempt;
+    expect(attempt).toMatchObject({
+      state: 'settled', outcome: 'failed', submissionState: 'not_submitted',
+      settlement: { kind: 'not_submitted', reason: '任务上下文已被删除。' }
+    });
+    expect(prepareCalls).toBe(2);
     expect(h.drivers[0]!.send).not.toHaveBeenCalled();
     // commit 拒绝后不得复活/覆盖：真实记录仍是 alice 的活动身份。
     expect(JSON.parse((await h.repos.config.get(runKey(id)))!).activeOpenId).toBe(ALICE);

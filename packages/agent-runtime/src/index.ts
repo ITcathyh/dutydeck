@@ -243,9 +243,9 @@ export class DutydeckRuntime {
     const token = owner(id, this.workspaceReaders);
     return this.mutations.run(token, () => this.mutations.wait(operation));
   }
-  private async authorize(id: string, actorId?: string) {
+  private async authorize(id: string, actorId?: string, activate = false) {
     const commit = await this.mutations.wait(() => this.options.authorizeExecution?.(id, actorId) ?? Promise.resolve());
-    if (commit) await this.mutations.write(id, commit);
+    if (activate && commit) await this.mutations.write(id, commit);
     this.mutations.check();
   }
   private async driverOperation<T>(driver: AgentDriver, operation: () => Promise<T>) {
@@ -1356,7 +1356,7 @@ export class DutydeckRuntime {
     try {
       const { session } = await this.active(id);
       const input = this.acceptedInput(task);
-      await this.authorize(id, task.executionContext?.actorId);
+      await this.authorize(id, task.executionContext?.actorId, true);
       await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'prepare') ?? Promise.resolve());
       const driver = await this.configureTaskDriver(session, input.executionOptions);
       await this.applyRiskPolicy(session, driver, task.executionContext?.riskPolicy);
@@ -1371,7 +1371,7 @@ export class DutydeckRuntime {
           finally { controlled.endPreparation(operation); }
         });
       }
-      await this.authorize(id, task.executionContext?.actorId);
+      await this.authorize(id, task.executionContext?.actorId, true);
       await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'submit') ?? Promise.resolve());
       await this.flushDriverEvents(id);
       await this.emit(id, 'text', { text: task.prompt, role: 'user', taskId: task.id });

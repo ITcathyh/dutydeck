@@ -41,6 +41,7 @@ import { tmpdir, homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import net from 'node:net';
 import { chromium } from '@playwright/test';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -55,8 +56,23 @@ const value = (name, fallback) => {
 };
 const REAL = flag('real');
 const VERBOSE = flag('verbose');
-// 默认端口刻意避开 14310 与 4310：不要撞上开发者本地正在跑的实例
-const PORT = Number(value('port', '14387'));
+const ARTIFACT_DIR = process.env.DUTYDECK_E2E_ARTIFACT_DIR || value('artifact-dir', '');
+if (ARTIFACT_DIR) mkdirSync(ARTIFACT_DIR, { recursive: true });
+
+async function getAvailablePort() {
+  return new Promise((resolvePort, rejectPort) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on('error', rejectPort);
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolvePort(port));
+    });
+  });
+}
+
+const requestedPort = Number(value('port', '14387'));
+const PORT = requestedPort === 0 ? await getAvailablePort() : requestedPort;
 const TIMEOUT_MS = Number(value('timeout', REAL ? '300000' : '120000'));
 const SERVER_ENTRY = resolve(value('server-entry', join(REPO, 'apps/server/dist/cli.js')));
 
@@ -68,6 +84,9 @@ const POLLUTING_ENV = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'ANTHROPIC_AUTH_
 const BASE = `http://127.0.0.1:${PORT}`;
 let stepNumber = 0;
 const results = [];
+let activeContext;
+let activePage;
+const serverLogGlobal = [];
 const log = (...args) => console.log(...args);
 const debug = (...args) => { if (VERBOSE) console.log('   ·', ...args); };
 const ok = message => { results.push({ ok: true, message }); log(`   ✓ ${message}`); };
@@ -353,11 +372,17 @@ async function main() {
   // 正确通道是下面 agent.env：它在剥离之后合并，既真的送进 CLI、也正是
   // tailer 现在解析的那份 env。
   serverEnv.NODE_ENV = 'production';
+  serverEnv.PATH = `${binDir}:${process.env.PATH || ''}`;
   if (!REAL) {
+    const serverHome = join(dataDir, 'home');
+    mkdirSync(serverHome, { recursive: true });
+    serverEnv.HOME = serverHome;
     const tmux = execFileSync('sh', ['-c', 'command -v tmux'], { encoding: 'utf8' }).trim();
     const socket = join(dataDir, 'tmux.sock');
     const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
     writeFileSync(join(binDir, 'tmux'), `#!/bin/sh\nexec ${quote(tmux)} -S ${quote(socket)} "$@"\n`, { mode: 0o755 });
+    serverEnv.TMUX_TMPDIR = join(dataDir, 'tmux-tmp');
+    mkdirSync(serverEnv.TMUX_TMPDIR, { recursive: true });
     onCleanup('关闭本轮独立 tmux 服务及目标终端', () => { try { execFileSync(tmux, ['-S', socket, 'kill-server'], { stdio: 'ignore' }); } catch { /* No sessions remain. */ } });
   }
 
@@ -438,8 +463,20 @@ async function main() {
   });
 
   const serverLog = [];
-  server.stdout.on('data', chunk => { serverLog.push(String(chunk)); if (VERBOSE) process.stdout.write(`   | ${chunk}`); });
-  server.stderr.on('data', chunk => { serverLog.push(String(chunk)); if (VERBOSE) process.stderr.write(`   | ${chunk}`); });
+  let serverStdout = '';
+  server.stdout.on('data', chunk => {
+    const text = String(chunk);
+    serverStdout += text;
+    serverLog.push(text);
+    serverLogGlobal.push(text);
+    if (VERBOSE) process.stdout.write(`   | ${chunk}`);
+  });
+  server.stderr.on('data', chunk => {
+    const text = String(chunk);
+    serverLog.push(text);
+    serverLogGlobal.push(text);
+    if (VERBOSE) process.stderr.write(`   | ${chunk}`);
+  });
   let serverExit;
   server.on('exit', code => { serverExit = code; });
 
@@ -447,16 +484,20 @@ async function main() {
     if (serverExit !== undefined) return;
     // 杀整个进程组（-pid）：PTY 里的 CLI 是 server 的子进程，单杀 server 会留孤儿
     try { process.kill(-server.pid, 'SIGTERM'); } catch { try { server.kill('SIGTERM'); } catch { /* 已退出 */ } }
-    const deadline = Date.now() + 8_000;
-    while (serverExit === undefined && Date.now() < deadline) await sleep(100);
+    const deadline = Date.now() + 1_500;
+    while (serverExit === undefined && Date.now() < deadline) await sleep(50);
     if (serverExit === undefined) {
       try { process.kill(-server.pid, 'SIGKILL'); } catch { try { server.kill('SIGKILL'); } catch { /* 已退出 */ } }
-      await sleep(500);
+      const killDeadline = Date.now() + 500;
+      while (serverExit === undefined && Date.now() < killDeadline) await sleep(50);
     }
   });
 
   await waitFor('server 就绪', async () => {
     if (serverExit !== undefined) throw new Error(`server 提前退出（code ${serverExit}）：\n${serverLog.join('')}`);
+    // 严格匹配 spawned CLI stdout 中的完整成功监听串 + 本轮端口（禁止 stderr 独立判定，禁止模糊匹配）
+    const hasListened = serverStdout.includes('Dutydeck UI and API listening on') && serverStdout.includes(String(PORT));
+    if (!hasListened) return false;
     const response = await request('GET', '/health');
     return response.status === 200 && response.json?.ok === true;
   }, { timeoutMs: 45_000 });
@@ -511,7 +552,14 @@ async function main() {
   });
 
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+  activeContext = context;
+  if (ARTIFACT_DIR) {
+    try {
+      await context.tracing.start({ screenshots: true, snapshots: true });
+    } catch {}
+  }
   const page = await context.newPage();
+  activePage = page;
   page.on('pageerror', error => debug('browser pageerror', error.message));
   page.on('requestfailed', failed => debug('browser requestfailed', failed.method(), failed.url(), failed.failure()?.errorText));
   const productResponses = [];
@@ -845,28 +893,80 @@ async function main() {
   assert(missingApi.status === 404 && missingApi.json?.error?.code === 'NOT_FOUND', '未知 /api/* 路径返回 404 JSON（未被 SPA 回落吞掉）');
 }
 
-// ── 入口 ───────────────────────────────────────────────────────────────────
+// ── 入口与有界收尾 ──────────────────────────────────────────────────────────
 let exitCode = 0;
+let finalizePromise = null;
+
+function safeFinalize(reason, targetExitCode) {
+  if (finalizePromise) return finalizePromise;
+  exitCode = targetExitCode;
+
+  finalizePromise = (async () => {
+    // 1. 在关闭任何资源前，先保留现场证据
+    if (ARTIFACT_DIR) {
+      if (activeContext) {
+        if (activePage && !activePage.isClosed() && targetExitCode !== 0) {
+          try {
+            await activePage.screenshot({ path: join(ARTIFACT_DIR, 'smoke-failure.png'), timeout: 5_000 });
+          } catch {}
+        }
+        try {
+          if (targetExitCode !== 0) {
+            await Promise.race([
+              activeContext.tracing.stop({ path: join(ARTIFACT_DIR, 'smoke-trace.zip') }),
+              sleep(5_000)
+            ]);
+          } else {
+            await Promise.race([
+              activeContext.tracing.stop(),
+              sleep(5_000)
+            ]);
+          }
+        } catch {}
+      }
+      try {
+        writeFileSync(join(ARTIFACT_DIR, 'server.log'), serverLogGlobal.join(''), 'utf8');
+        writeFileSync(join(ARTIFACT_DIR, 'smoke-results.json'), JSON.stringify({
+          testedAt: new Date().toISOString(),
+          real: REAL,
+          port: PORT,
+          passed: targetExitCode === 0,
+          reason,
+          assertionsCount: results.length,
+          results
+        }, null, 2), 'utf8');
+      } catch {}
+    }
+
+    // 2. 释放资源
+    await runCleanup();
+  })();
+
+  return finalizePromise;
+}
+
 const watchdog = setTimeout(() => {
-  log(`\n✗ 全局超时（${TIMEOUT_MS}ms），强制清理`);
-  exitCode = 1;
-  runCleanup().finally(() => process.exit(1));
+  log(`\n✗ 全局超时（${TIMEOUT_MS}ms），有界清理`);
+  safeFinalize(`全局超时（${TIMEOUT_MS}ms）`, 1).finally(() => process.exit(1));
 }, TIMEOUT_MS);
 watchdog.unref();
 
-const onSignal = signal => { log(`\n收到 ${signal}，清理后退出`); runCleanup().finally(() => process.exit(130)); };
+const onSignal = signal => {
+  log(`\n收到 ${signal}，有界清理`);
+  safeFinalize(`收到 ${signal}`, 130).finally(() => process.exit(130));
+};
 process.on('SIGINT', () => onSignal('SIGINT'));
 process.on('SIGTERM', () => onSignal('SIGTERM'));
 
 try {
   await main();
   log(`\n✓ 冒烟通过：${results.length} 项断言全部成立`);
+  await safeFinalize('冒烟通过', 0);
 } catch (error) {
-  exitCode = 1;
   log(`\n✗ 冒烟失败：${error instanceof Error ? error.message : String(error)}`);
   if (VERBOSE && error instanceof Error && error.stack) log(error.stack);
+  await safeFinalize(`冒烟失败: ${error instanceof Error ? error.message : String(error)}`, 1);
 } finally {
   clearTimeout(watchdog);
-  await runCleanup();
 }
 process.exit(exitCode);

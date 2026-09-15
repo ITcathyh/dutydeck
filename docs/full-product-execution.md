@@ -1,8 +1,8 @@
 # Dutydeck 本轮交付与验收
 
-工作目录：`/data00/home/huangyuhang.edu/ai/dutydeck-full-product-20260914`。分支：`feat/full-product-parity-20260914`，集成基线 `b1520be`。原共享 checkout 未修改。
+工作目录：`/data00/home/huangyuhang.edu/ai/dutydeck-full-product-20260914`。分支：`feat/full-product-parity-20260914`。本轮整合产品改动 `c3fb147` 与本地 master 的验收套件 `dfc9462`，补齐旧会话迁移后合回 master 部署。
 
-2026-09-15 按用户要求停止扩功能，本轮现有改动已完成集成、独立复核和本地端到端验收。尚未全面追平 Botmux。普通开发由 ccflash 在独立 worktree 完成，controller 负责设计、整合与验收；全程未读取 memory、个人知识库或历史会话。
+2026-09-15 按用户要求停止扩功能，本轮现有改动已完成集成、独立复核和本地端到端验收。尚未全面追平 Botmux。普通开发由 ccflash 在独立 worktree 完成，迁移和权限边界由独立 agent 复核修正，controller 负责设计、整合与验收。未读取 memory、个人知识库或个人 Agent 历史；旧库仅用于迁移元数据核验和历史保真比对。
 
 ## 改了什么
 
@@ -13,7 +13,8 @@
 | ACP 与普通进程驱动 | 保存原提交和原生会话归属；JSONL/Pipe 等待完整结果与输出尾声，避免提前报失败 | 使用真实 AcpxAdapter、持久 session key 和本地进程验证；真实供应商未验收 |
 | 工作项与自动化 | 按原任务的固定执行尝试读取完整结果；修复来源错接、CI 阻塞原因丢失、迟到回调覆盖取消或完成状态 | 不承诺真实外部消息恰好送达一次 |
 | 工作台与 Web | 修复卡片回执尚未写回时误拒当前任务；任务状态事件触发完整数据回读，避免局部字段覆盖缓存导致白屏 | 保留现有界面与查询方式，没有增加新的状态合并框架 |
-| 数据库维护 | 增加只读状态查询、显式离线升级、迁移排他与回滚保护；全新库直接启用执行账本 | 旧库仍需停服务后显式升级 |
+| 数据库维护与旧会话 | 增加只读状态查询、显式离线升级和精确资源核验；旧会话保留历史后归档，已有归档时间不变；迁移回执可重复执行 | 先停服务并备份；原上下文未自动恢复，后续消息创建新会话，无法核实的资源继续阻止迁移 |
+| 群聊权限 | 排队只检查权限，任务实际执行时才切换发送者身份，并在提交前重查授权 | 真实 ACP fixture 验证 Alice 被拒绝、Bob 排队不影响 Alice，Bob 执行时使用自己的权限 |
 | Bot 配置和凭据 | 增加 V2 表结构、读取、事务、六个基础配置命令和五个凭据命令，检查当前权限、引用、版本与重放 | 属于存储组件；尚未统一接入管理界面、监听器和全部旧入口 |
 
 新 supervisor、PID namespace、工作流引擎接入、更多执行器与远端设备控制未继续开发。Mira、Riff、Mojo 按用户要求排除。
@@ -24,17 +25,17 @@
 |---|---|
 | 完整构建（包、Web、server） | `pnpm build` 通过 |
 | workspace 类型检查 | `pnpm typecheck` 通过；相关修改测试另有组件 strict 检查 |
-| 后端全量测试 | 191 文件，3179 通过、0 失败、7 跳过 |
+| 后端全量测试 | 193 文件，3206 通过、0 失败、7 跳过 |
 | 前端全量测试 | 81 文件，1038 通过、0 失败、0 跳过 |
-| 全量合计 | 两个 Vitest project 均完整运行：272 文件，4217 通过、0 失败、7 跳过 |
-| Chromium 终端回归 | 10/10 通过：桌面/移动端滚动、刷新后的历史、真实 tmux 重连 |
-| 构建产物的产品冒烟 | 实际 CLI、SQLite、HTTP、SSE、WebSocket、Chromium、tmux/PTY 全流程通过，exit 0 |
-| 完整集成差异独立复核 | 162 个改动文件核对通过，无未解决的阻塞 finding |
-| 实际打包 | shared/storage/runtime/acp-client/transports/server 六包成功；解包后的 CLI `--help` 成功，无测试或 node_modules 混入 |
+| 全量合计 | 两个 Vitest project 均完整运行：274 文件，4244 通过、0 失败、7 跳过 |
+| 合并后的完整端到端验收 | 6/6 一次通过、无重试：产品冒烟、两条工作台浏览器流程、群聊权限与重启续聊、两条 Bot 创建流程 |
+| 旧库完整链路 | 真实临时 SQLite 迁移 → `/new` → 新会话、新任务完成；旧 prompt 不重发，原记录与旧归档时间保留 |
+| 独立复核 | 产品改动前段复核通过；新增迁移与权限发现的问题均修复并重新验收，无未解决阻塞项 |
+| 前段已完成的检查 | Chromium 终端 10/10；六包实际打包与解包后 CLI `--help` 通过 |
 
-后端通过后只改了四个 Web 文件；其余 545 个源码/配置文件逐个哈希核对未变。最终 Web 合入后再次完成完整构建和 workspace 类型检查。7 条跳过来自本机不可用的 Zellij/zmx 实机后端测试，不计作通过。
+上述全量结果来自迁移、权限修复与 master 验收套件全部合入后的同一工作树。构建与类型检查顺序执行；验收目录另做 strict TypeScript 检查。7 条跳过来自本机不可用的 Zellij/zmx 实机后端测试，不计作通过。
 
-产品冒烟实际经过：首次使用与 Bot 绑定入口、创建任务与显示最终回复、Skill 正文投递、执行验证命令、三步骤目标与成果、目标终端人工确认、同一进程续聊、递增事件游标、终端 WebSocket、静态页面和 API 404。Agent 使用本地模拟 CLI，浏览器、数据库、网络接口与终端进程真实运行；未调用真实模型或飞书。临时进程、私有 tmux 和目录已清理。脚本末尾的“68 项”是旧的固定文案，本记录以实际命令退出和经过的流程为依据。
+产品冒烟实际经过：首次使用与 Bot 绑定入口、创建任务与显示最终回复、Skill 正文投递、执行验证命令、三步骤目标与成果、目标终端人工确认、同一进程续聊、递增事件游标、终端 WebSocket、静态页面和 API 404。Agent 使用本地模拟 CLI，浏览器、数据库、网络接口与终端进程真实运行；未调用真实模型或飞书。验收按固定 Task ID 核对完成状态，检查每项冒烟结果与实际断言数一致。
 
 复现命令（从本 worktree 执行）：
 
@@ -43,15 +44,14 @@ pnpm build
 pnpm typecheck
 pnpm exec vitest run --project node --maxWorkers 2
 pnpm exec vitest run --project web --maxWorkers 2
-pnpm exec playwright test --config tests/e2e/terminal/playwright.config.ts --workers 1
-node scripts/e2e-smoke.mjs --port 14573
+CI=1 pnpm e2e:full:run
 ```
 
-详细证据位于 `/tmp/dutydeck-full-product-20260914/`：`closeout-backend-gate.json`、`closeout-final-gate.json`、两个 `closeout-*-tests.json`、`closeout-terminal-browser.receipt.json`、`closeout-integrated-independent-review.report.md`。独立复核还实际重跑了两个自动化并发反例与 41 条 Web 回归；这些数字不重复加进全量总数。
+详细证据位于 `/tmp/dutydeck-full-product-20260914/`：`merge-deploy-final-gate.json`、两个 `merge-deploy-final-*-tests.json`、`legacy-final-review.report.md` 和 `actor-final-fix.report.md`。部署与真实历史保真结果保存在该目录的 `deploy-master-20260915/`。定向复核测试不重复加进全量总数。
 
 ## 使用与限制
 
-- 旧数据库查询和离线升级见 [数据库命令](database-execution.md)。本轮未操作用户的真实数据库、生产服务或飞书消息。
+- 旧数据库查询、离线升级和会话归档见 [数据库命令](database-execution.md)。部署按用户授权进行；实际结果以部署回执和历史保真回读为准。
 - 重启后无法确认原执行资源归属时，任务保持待核对且不自动重发。终端能重新显示，不代表任务已自动恢复执行。
 - Bot V2 配置组件尚未完成产品入口切换，不宣称新配置体系已全面生效。
 - 真实模型供应商、真实飞书、macOS/Windows、远端部署与完整 Botmux 迁移均未完成端到端验收。

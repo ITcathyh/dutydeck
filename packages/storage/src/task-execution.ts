@@ -5,7 +5,8 @@ import {
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
   type ExecutionTask, type ExecutionUpgradeCounts, type ExecutionUpgradeSnapshot, type QueueAction, type RecoveryDecisionInput, type ResourceCheckRef, type Session,
-  type SessionFence, type TaskAttempt, type TaskRequestV1, type NativeContextSelection, type NativeContextRef, type NativeContextBinding
+  type SessionFence, type TaskAttempt, type TaskRequestV1, type NativeContextSelection, type NativeContextRef, type NativeContextBinding,
+  type LegacyRetirementCandidate, type LegacyRetirementReceipt, type LegacyRetirementResult
 } from '@dutydeck/shared';
 import type { OpenControl } from './database-control.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
@@ -24,6 +25,7 @@ function json(value: unknown) { return JSON.stringify(value); }
 function stable(value: unknown) { return canonicalExecutionJson(value); }
 function same(a: unknown, b: unknown) { return stable(a) === stable(b); }
 function timestamp() { return new Date().toISOString(); }
+export const LEGACY_RETIREMENT_NOTICE = '升级已结束旧会话，历史记录保留；原上下文未自动恢复，请用 /new 新建。';
 function rowJson<T>(row: unknown): T | undefined { return row ? JSON.parse((row as { json: string }).json) as T : undefined; }
 function noCredentials(value: unknown): void {
   if (!value || typeof value !== 'object') return;
@@ -286,6 +288,138 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       : 0;
     return { tasks: tasksCount, attempts: attemptsCount, resources: resourcesCount, registeredAccess };
   };
+  const legacyResourceId = (sessionId: string) => `legacy_resource_${hash(sessionId)}`;
+  const retirementKey = (sessionId: string) => `legacy_retirement:${sessionId}`;
+  const retirementSnapshotDigest = (sessionId: string): string => {
+    const rows = (sql: string, ...params: unknown[]) => db.prepare(sql).all(...params);
+    return hash(stable({
+      session: db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId),
+      tasks: rows('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,rowid', sessionId),
+      requests: rows('SELECT * FROM task_requests WHERE session_id=? ORDER BY task_id', sessionId),
+      attempts: rows('SELECT * FROM task_attempts WHERE session_id=? ORDER BY number,id', sessionId),
+      queueActions: rows('SELECT * FROM task_queue_actions WHERE session_id=? ORDER BY id', sessionId),
+      resources: rows('SELECT * FROM driver_resources WHERE session_id=? ORDER BY rowid', sessionId),
+      decisions: rows('SELECT * FROM recovery_decisions WHERE session_id=? ORDER BY id', sessionId),
+      events: rows('SELECT * FROM events WHERE session_id=? ORDER BY sequence,id', sessionId),
+      toolCalls: rows('SELECT * FROM tool_calls WHERE session_id=? ORDER BY id', sessionId),
+      permissions: rows('SELECT * FROM permission_requests WHERE session_id=? ORDER BY id', sessionId),
+      errors: rows('SELECT * FROM errors WHERE session_id=? ORDER BY id', sessionId),
+      channelMappings: rows('SELECT * FROM channel_mappings WHERE session_id=? ORDER BY id', sessionId),
+      runtimeConfigs: rows("SELECT key,value FROM configs WHERE key IN (?,?,?,?,?,?,?) OR substr(key,1,length(?))=? OR key LIKE ? ESCAPE '\\' ORDER BY key",
+        `runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_driver_configuration:${sessionId}`,
+        `runtime_native_context:${sessionId}`, `runtime_native_context:${sessionId}:revision`, `lark.run-context.${sessionId}`,
+        retirementKey(sessionId), `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId}:`,
+        `lark.context.%.${sessionId.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')}`)
+    }));
+  };
+  const legacyRetirementBlockers = (s: Session): ExecutionBlocker[] => {
+    const result: ExecutionBlocker[] = [];
+    if (!['idle', 'interrupted', 'completed', 'failed', 'stopped'].includes(s.state)) {
+      result.push({ sessionId: s.id, code: 'LEGACY_RETIREMENT_SESSION_ACTIVE', detail: s.state });
+    }
+    const expectedResourceId = legacyResourceId(s.id);
+    const sessionResources = resources(s.id);
+    const legacyResource = sessionResources.find(item => item.resourceId === expectedResourceId);
+    if (!legacyResource || legacyResource.kind !== 'legacy' || legacyResource.stage !== 'unknown'
+      || legacyResource.controller.instanceId !== 'legacy_unverified' || legacyResource.controller.generation !== 0) {
+      result.push({ sessionId: s.id, code: 'LEGACY_RETIREMENT_NOT_MIGRATED' });
+    }
+    if (sessionResources.some(item => item.resourceId !== expectedResourceId && !resourceSafe(item))) {
+      result.push({ sessionId: s.id, code: 'LEGACY_RETIREMENT_OTHER_RESOURCE_UNSAFE' });
+    }
+    const nonterminal = db.prepare("SELECT id FROM tasks WHERE session_id=? AND status NOT IN ('completed','failed','interrupted','cancelled') ORDER BY id").all(s.id) as Array<{ id: string }>;
+    result.push(...nonterminal.map(item => ({ sessionId: s.id, taskId: item.id, code: 'LEGACY_RETIREMENT_TASK_ACTIVE' })));
+    const unsettled = db.prepare("SELECT task_id FROM task_attempts WHERE session_id=? AND state!='settled' ORDER BY id").all(s.id) as Array<{ task_id: string }>;
+    result.push(...unsettled.map(item => ({ sessionId: s.id, taskId: item.task_id, code: 'LEGACY_RETIREMENT_ATTEMPT_UNSETTLED' })));
+    if (db.prepare("SELECT 1 FROM task_queue_actions WHERE session_id=? AND state='pending' LIMIT 1").get(s.id)) {
+      result.push({ sessionId: s.id, code: 'LEGACY_RETIREMENT_QUEUE_ACTION_PENDING' });
+    }
+    result.push(...externalBlockers(s.id));
+    return result;
+  };
+  const readRetirementReceipt = (sessionId: string): LegacyRetirementReceipt | undefined => {
+    const row = db.prepare('SELECT value FROM configs WHERE key=?').get(retirementKey(sessionId)) as { value: string } | undefined;
+    return row ? parse(taskExecutionSchemas.legacyRetirementReceiptSchema, JSON.parse(row.value)) : undefined;
+  };
+  const listLegacyRetirementCandidates = (): LegacyRetirementCandidate[] => {
+    control.assertMaintenance(db);
+    if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+    const entity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
+    const rows = db.prepare("SELECT id FROM sessions WHERE EXISTS (SELECT 1 FROM driver_resources WHERE session_id=sessions.id AND id LIKE 'legacy_resource_%') ORDER BY id").all() as Array<{ id: string }>;
+    return rows.map(row => {
+      const s = session(row.id);
+      let receipt: LegacyRetirementReceipt | undefined;
+      const candidateBlockers: ExecutionBlocker[] = [];
+      try { receipt = readRetirementReceipt(s.id); }
+      catch (error) {
+        candidateBlockers.push({ sessionId: s.id, code: 'LEGACY_RETIREMENT_RECEIPT_INVALID', detail: error instanceof Error ? error.message : String(error) });
+      }
+      if (!receipt) {
+        try { candidateBlockers.push(...legacyRetirementBlockers(s)); }
+        catch (error) {
+          candidateBlockers.push({ sessionId: s.id, code: 'LEGACY_RETIREMENT_METADATA_INVALID', detail: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      return {
+        sessionId: s.id, runId: s.runId, databaseEntity: entity,
+        snapshotDigest: receipt?.snapshotDigest ?? retirementSnapshotDigest(s.id),
+        agentId: s.agentId, cwd: s.cwd, ...(s.protocol ? { protocol: s.protocol } : {}),
+        state: s.state, ...(s.archivedAt ? { archivedAt: s.archivedAt } : {}),
+        ...(receipt ? { receipt } : {}), blockers: receipt ? [] : candidateBlockers
+      };
+    });
+  };
+  const retireLegacySession = (rawReceipt: LegacyRetirementReceipt): LegacyRetirementResult => {
+    const receipt = parse(taskExecutionSchemas.legacyRetirementReceiptSchema, rawReceipt);
+    const { receiptId, ...receiptContent } = receipt;
+    if (receiptId !== `legacy_retirement_${hash(stable(receiptContent))}`) fail('LEGACY_RETIREMENT_RECEIPT_INVALID');
+    return db.transaction((): LegacyRetirementResult => {
+        control.assertMaintenance(db);
+        if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+        const existing = readRetirementReceipt(receipt.sessionId);
+        if (existing) {
+          if (!same(existing, receipt)) fail('LEGACY_RETIREMENT_RECEIPT_CONFLICT');
+          const retired = session(receipt.sessionId);
+          const currentEntity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
+          if (retired.runId !== receipt.runId || retired.state !== 'stopped' || retired.archivedAt !== receipt.archivedAt
+            || !retired.error?.includes(LEGACY_RETIREMENT_NOTICE) || receipt.databaseEntity !== currentEntity) fail('LEGACY_RETIREMENT_FINAL_STATE_CONFLICT');
+          return { session: retired, receipt: existing, replayed: true };
+        }
+        const s = checkSession(receipt);
+        const entity = (db.prepare('SELECT entity FROM dutydeck_control WHERE id=1').get() as { entity: string }).entity;
+        if (receipt.databaseEntity !== entity) fail('LEGACY_RETIREMENT_DATABASE_CONFLICT');
+        if (s.protocol !== receipt.protocol) fail('LEGACY_RETIREMENT_PROTOCOL_CONFLICT');
+        const retirementBlockers = legacyRetirementBlockers(s);
+        if (retirementBlockers.length) fail('LEGACY_RETIREMENT_BLOCKED', json(retirementBlockers));
+        if (retirementSnapshotDigest(s.id) !== receipt.snapshotDigest) fail('LEGACY_RETIREMENT_SNAPSHOT_CONFLICT');
+        if (receipt.archivedAt !== (s.archivedAt ?? receipt.verifiedAt)) fail('LEGACY_RETIREMENT_ARCHIVE_CONFLICT');
+        if (receipt.evidence.kind === 'pty_tmux_absent') {
+          const readable = s.id.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 48) || 'session';
+          const expectedTargetName = `dutydeck-${readable}-${hash(s.id).slice(0, 16)}`;
+          if (receipt.protocol !== 'pty-cli' || receipt.evidence.owner !== `dutydeck:${s.id}`
+            || receipt.evidence.targetName !== expectedTargetName) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
+          if (receipt.evidence.outcome === 'stopped_owned' && !receipt.evidence.targetId) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
+          if (receipt.evidence.outcome === 'already_missing' && (receipt.evidence.targetId || receipt.evidence.paneProcesses.length)) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
+        } else if (receipt.protocol !== 'acp' || receipt.evidence.acpxRecordId !== s.id
+          || !receipt.evidence.recordPath.endsWith(`/sessions/${encodeURIComponent(s.id)}.json`)) fail('LEGACY_RETIREMENT_EVIDENCE_CONFLICT');
+        const error = s.error?.includes(LEGACY_RETIREMENT_NOTICE) ? s.error : [s.error, LEGACY_RETIREMENT_NOTICE].filter(Boolean).join('\n\n');
+        const updated = db.prepare("UPDATE sessions SET state='stopped',archived_at=?,error=?,updated_at=? WHERE id=? AND run_id=? AND archived_at IS ?")
+          .run(receipt.archivedAt, error, receipt.verifiedAt, s.id, s.runId, s.archivedAt ?? null);
+        if (updated.changes !== 1) fail('LEGACY_RETIREMENT_SNAPSHOT_CONFLICT');
+        db.prepare('INSERT INTO configs (key,value) VALUES (?,?)').run(retirementKey(s.id), stable(receipt));
+        return { session: session(s.id), receipt, replayed: false };
+      }).immediate();
+  };
+  const beginLegacyRetirement = () => {
+    control.beginUpgrade();
+    let closed = false;
+    const open = () => { if (closed) fail('DATABASE_MAINTENANCE_REQUIRED'); };
+    return {
+      listCandidates() { open(); return listLegacyRetirementCandidates(); },
+      retireSession(receipt: LegacyRetirementReceipt) { open(); return retireLegacySession(receipt); },
+      close() { if (!closed) { closed = true; control.finishUpgrade(); } }
+    };
+  };
   const collectAllBlockers = (): ExecutionBlocker[] => {
     const allSessions = db.prepare('SELECT id FROM sessions ORDER BY id').all() as Array<{ id: string }>;
     const result: ExecutionBlocker[] = [];
@@ -293,6 +427,18 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       result.push(...blockers(row.id));
     }
     return result;
+  };
+  const legacySummary = () => {
+    const sessionIds = db.prepare("SELECT DISTINCT session_id FROM driver_resources WHERE json_extract(json,'$.kind')='legacy' AND json_extract(json,'$.stage')='unknown'").pluck().all() as string[];
+    let retiredSessions = 0;
+    for (const sessionId of sessionIds) {
+      let receipt: LegacyRetirementReceipt | undefined;
+      try { receipt = readRetirementReceipt(sessionId); } catch { continue; }
+      if (!receipt) continue;
+      const s = session(sessionId);
+      if (s.state === 'stopped' && s.archivedAt === receipt.archivedAt && s.error?.includes(LEGACY_RETIREMENT_NOTICE)) retiredSessions += 1;
+    }
+    return { unresolvedSessions: sessionIds.length - retiredSessions, retiredSessions, evidenceIncomplete: sessionIds.length };
   };
   const upgradeLegacy = (): ExecutionUpgradeSnapshot => {
     control.beginUpgrade();
@@ -308,7 +454,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           return {
             before,
             after: { authority: 'ledger_v1', counts: readUpgradeCounts() },
-            blockers: collectAllBlockers()
+            blockers: collectAllBlockers(), legacy: legacySummary()
           };
         }
         const terminal = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
@@ -316,7 +462,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const s = session(row.id);
           const f = { sessionId: s.id, runId: s.runId };
           const controller = { accessId: control.accessId, instanceId: 'legacy_unverified', generation: 0 };
-          saveResource({ ...f, resourceId: `legacy_resource_${hash(s.id)}`, kind: 'legacy', revision: 1, controller, stage: 'unknown', observations: [], createdAt: timestamp() });
+          saveResource({ ...f, resourceId: legacyResourceId(s.id), kind: 'legacy', revision: 1, controller, stage: 'unknown', observations: [], createdAt: timestamp() });
           const oldTasks = (db.prepare('SELECT id FROM tasks WHERE session_id=? ORDER BY created_at,rowid').all(s.id) as Array<{ id: string }>).map(r => task(r.id)!);
           const ambiguous = oldTasks.filter(t => t.status !== 'queued' && !terminal.has(t.status)).length > 1;
           for (const t of oldTasks) {
@@ -346,7 +492,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         db.prepare("UPDATE execution_authority SET authority='ledger_v1' WHERE id=1").run();
         const afterAuthority = authority();
         const after = { authority: afterAuthority, counts: readUpgradeCounts() };
-        return { before, after, blockers: collectAllBlockers() };
+        return { before, after, blockers: collectAllBlockers(), legacy: legacySummary() };
       }).immediate();
     } finally {
       // Atomic rollback keeps legacy authoritative; never leave a live failed conversion in maintenance.
@@ -355,7 +501,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     }
   };
   return {
-    authority, upgradeLegacy, lookupAccepted: lookup, getAcceptedTask,
+    authority, upgradeLegacy, beginLegacyRetirement, lookupAccepted: lookup, getAcceptedTask,
     getResources: resources,
     getNativeContext(sessionId) { const selection = nativeSelection(sessionId); return selection ? {selection,resource:nativeResource(sessionId,selection.context)} : undefined; },
     getSessionResourceBlockers: sessionId => blockers(sessionId),

@@ -18,7 +18,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "benchmark": "pnpm --filter @dutydeck/web build && node --expose-gc --import tsx scripts/benchmark-history.mts && node --expose-gc --import tsx scripts/benchmark-browser.mts",
-    "smoke": "node scripts/e2e-smoke.mjs"
+    "smoke": "node scripts/e2e-smoke.mjs",
+    "e2e": "pnpm build && pnpm e2e:core:run",
+    "e2e:core:run": "playwright test -c tests/e2e/acceptance/playwright.config.ts --project=core",
+    "e2e:full": "pnpm build && pnpm e2e:full:run",
+    "e2e:full:run": "playwright test -c tests/e2e/acceptance/playwright.config.ts"
   },
   "devDependencies": {
     "@dutydeck/acp-client": "workspace:*",
