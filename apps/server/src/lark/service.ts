@@ -592,10 +592,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const hasExplicitlyExpandedTrace = traceElements.some(el => el.expanded === true);
     const overviewExpanded = defaultExpanded || hasExplicitlyExpandedTrace;
 
-    const overviewTitleFirstLine = `执行过程 · ${compactTaskName || 'Dutydeck'} · ${statusLabelText}`;
     const elapsedPart = elapsedSeconds > 0 ? ` · 用时 ${elapsedLabel(elapsedSeconds)}` : '';
-    const overviewTitleSecondLine = `${agentName}${elapsedPart}`;
-    const overviewTitleText = `${overviewTitleFirstLine}\n${overviewTitleSecondLine}`;
+    const overviewTitleText = `执行记录 · ${statusLabelText}${elapsedPart}`;
 
     let panelInnerElements: Record<string, unknown>[] = [];
     if (state === 'running') {
@@ -620,8 +618,13 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ]
       } : currentGroup;
       const historyGroups = traceElements.filter(el => el !== currentGroup);
+      const currentStageElements = currentStage
+        ? (currentStage.tag === 'interactive_container' && Array.isArray(currentStage.elements)
+          ? (currentStage.elements as Record<string, unknown>[])
+          : [currentStage])
+        : [];
       panelInnerElements = [
-        ...(currentStage ? [currentStage] : []),
+        ...currentStageElements,
         ...historyGroups,
         ...otherElements
       ];
@@ -741,9 +744,6 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ]
       }
     };
-    if (isProcessCard) {
-      return baseCard;
-    }
     return {
       ...baseCard,
       header: {
@@ -814,13 +814,20 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   if (withinLimits(fallbackCard)) return fallbackCard;
   // All caller-controlled fields have already been bounded. This last constant-size shape is the
   // hard safety net for unexpected Card schema overhead or deeply nested third-party elements.
+  const waitingForApproval = state === 'running' && hasPendingApproval(sourceMainElements);
   const hardFallbackSummaryPrefix = isProcessCard ? '执行过程 · ' : isResultCard ? '执行结果 · ' : '';
   const hardFallbackSummary = `${hardFallbackSummaryPrefix}${taskName} · ${liveTitle}`;
   if (isProcessCard) {
     const elapsedPart = elapsedSeconds > 0 ? ` · 用时 ${elapsedLabel(elapsedSeconds)}` : '';
-    const overviewTitleText = `执行过程 · ${compactTaskName || 'Dutydeck'} · ${liveTitle}\n${agentName}${elapsedPart}`;
+    const overviewTitleText = `执行记录 · ${liveTitle}${elapsedPart}`;
     return {
       schema: '2.0',
+      header: {
+        title: { tag: 'plain_text', content: compactTaskName || 'Dutydeck' },
+        subtitle: { tag: 'plain_text', content: agentName },
+        template: waitingForApproval ? 'orange' : presentation.template,
+        padding: '10px 12px 8px 12px'
+      },
       config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: hardFallbackSummary } },
       body: {
         direction: 'vertical', padding: '10px 12px',

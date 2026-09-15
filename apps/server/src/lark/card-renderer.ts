@@ -689,7 +689,7 @@ const historyGroupPanel = (
   };
 };
 
-const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardElement => {
+const currentRunningStagePanel = (group: TraceGroup, index: number, showFallbackTitle = true): LarkCardElement => {
   const records = stageRecords(group.actions);
   const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
   const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
@@ -719,8 +719,10 @@ const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardEle
     ? `　<font color='${stageStatus.color}'>● ${stageStatus.label}</font>`
     : '';
 
-  const elements: LarkCardElement[] = [
-    {
+  const elements: LarkCardElement[] = [];
+  const omitFallbackTitle = !showFallbackTitle && !narrativeText && !primaryTool && records.length > 0;
+  if (!omitFallbackTitle) {
+    elements.push({
       tag: 'markdown',
       element_id: 'current_title',
       // 「Agent 此刻在做什么」是运行态卡片的信息主体，用正文字号；
@@ -728,8 +730,8 @@ const currentRunningStagePanel = (group: TraceGroup, index: number): LarkCardEle
       content: `${escapeCardInline(currentTitle)}${statusSuffix}`,
       text_size: 'normal',
       margin: '0px'
-    }
-  ];
+    });
+  }
 
   for (let actionIndex = 0; actionIndex < records.length; actionIndex++) {
     elements.push(stageRecordPanel(records[actionIndex]!, `${index}_${actionIndex}`, '0px'));
@@ -895,7 +897,7 @@ export function renderLarkCardElements(
         if (omittedGroupCount) elements.push(traceOmissionElement(omittedGroupCount, '4px 0px 2px 0px'));
         elements.push(...historyGroups.map((group, index) => historyGroupPanel(group, index, true, false)));
       }
-      elements.push(currentRunningStagePanel(currentGroup, groups.length - 1));
+      elements.push(currentRunningStagePanel(currentGroup, groups.length - 1, view !== 'process'));
     }
   }
   if (!elements.length) elements.push({ tag: 'markdown', content: completed ? '执行过程已结束，结果见单独的结果消息。' : '正在思考中…', text_size: 'normal', margin: '0px' });
