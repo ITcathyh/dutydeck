@@ -73,7 +73,7 @@ async function fakeLark() {
 }
 
 async function seed(database: string) {
-  const repositories = createRepositories(database);
+  const repositories = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
   try {
     const reference = await repositories.secretRefs.create({
       id: 'secret-preflight', kind: 'lark_app_secret', provider: 'local-file-v1', referenceKey: 'service.preflight', status: 'configured',

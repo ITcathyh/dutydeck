@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { DatabaseCliError } from './database-cli.js';
 
 export interface CliOptions {
   host?: string;
@@ -109,6 +110,10 @@ export interface SecretRotateCliOptions extends SecretValueCliOptions { expected
 export interface SecretRemoveCliOptions { expectedRevision: string; database?: string }
 export interface SecretListCliOptions { database?: string }
 
+export interface DatabaseExecutionCliOptions { database: string }
+export type DatabaseExecutionStatusCliOptions = DatabaseExecutionCliOptions;
+export type DatabaseUpgradeExecutionCliOptions = DatabaseExecutionCliOptions;
+
 export interface CliHandlers {
   serve?(options: CliOptions): void | Promise<void>;
   setup?(options: SetupCliProgramOptions): void | Promise<void>;
@@ -145,6 +150,8 @@ export interface CliHandlers {
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
+  databaseExecutionStatus?(options: DatabaseExecutionStatusCliOptions): void | Promise<void>;
+  databaseUpgradeExecution?(options: DatabaseUpgradeExecutionCliOptions): void | Promise<void>;
 }
 
 const addCardOptions = (command: Command) => command
@@ -210,6 +217,14 @@ const setupOptionsFrom = (options: SetupCliProgramOptions, command: Command): Se
   if (merged.skipLark === true) picked.skipLark = true;
   if (merged.forceLogin === true) picked.forceLogin = true;
   return picked;
+};
+
+const databaseOptionsFrom = (options: { database?: string }, command: Command): DatabaseExecutionCliOptions => {
+  const merged = { ...command.optsWithGlobals(), ...options } as Record<string, unknown>;
+  if (typeof merged.database !== 'string' || !merged.database.trim()) {
+    throw new DatabaseCliError('DATABASE_OPTION_REQUIRED', '--database option is required');
+  }
+  return { database: merged.database as string };
 };
 
 export function createCliProgram(version: string, handlers: CliHandlers = {}) {
@@ -475,6 +490,16 @@ Examples:
     .option('--rotate', 'Generate a new token, invalidating the previous one')
     .action(options => handlers.authToken?.(options));
 
+  const database = program.command('database').description('Inspect and upgrade Dutydeck execution database ledger');
+  database.command('execution-status')
+    .description('Inspect the execution schema and authority of a database in read-only mode')
+    .option('--database <path>', 'SQLite database path')
+    .action((options, command) => handlers.databaseExecutionStatus?.(databaseOptionsFrom(options, command)));
+  database.command('upgrade-execution')
+    .description('Upgrade a legacy Dutydeck database to execution ledger_v1 under maintenance isolation')
+    .option('--database <path>', 'SQLite database path')
+    .action((options, command) => handlers.databaseUpgradeExecution?.(databaseOptionsFrom(options, command)));
+
   const addProcessCommands = (parent: Command) => {
     parent.command('start')
       .description('Start the Dutydeck server in the background')
@@ -537,6 +562,8 @@ Examples:
   $ dutydeck secret list
   $ dutydeck secret set team-bot --value-fd 0
   $ dutydeck secret rotate team-bot --expected-revision 1 --value-fd 0
+  $ dutydeck database execution-status --database /path/to/dutydeck.db
+  $ dutydeck database upgrade-execution --database /path/to/dutydeck.db
   $ dutydeck --version`);
 }
 

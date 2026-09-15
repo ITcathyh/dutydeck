@@ -86,7 +86,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // pty-cli agent 发现：PTY_AGENT_CONTRIBUTIONS 经 loadConfig 合并进 config.agents
   // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；id 冲突时 ACPX 优先）。
   const config = loadConfig(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS);
-  const repos = createRepositories(config.databaseUrl);
+  const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
+  const setupCleanup: Array<() => unknown> = [];
+  let closeResources = async () => {
+    const results = await Promise.allSettled(setupCleanup.reverse().map(close => Promise.resolve().then(close)));
+    repos.close();
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+    if (errors.length) throw new AggregateError(errors, 'Dutydeck setup cleanup failed');
+  };
+  try {
   let localSecretProvider: LocalFileSecretProvider | undefined;
   try {
     localSecretProvider = new LocalFileSecretProvider(secretDirectoryForDatabase(config.databaseUrl), { createDirectory: true });
@@ -109,11 +117,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   }) : undefined;
   let groupToolsSigningSecret: string;
   try { groupToolsSigningSecret = await loadOrCreateGroupToolsSigningSecret(repos.config); }
-  catch (error) { repos.close(); throw error; }
+  catch (error) { throw error; }
   let relaySigningSecret: string;
   try { relaySigningSecret = await loadOrCreateRelaySigningSecret(repos.config); }
-  catch (error) { repos.close(); throw error; }
+  catch (error) { throw error; }
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, localApiBaseUrl(config), groupToolsSigningSecret);
+  setupCleanup.push(() => capabilities.close());
   // 通用回传通道：与飞书无关，任何来源的会话（含 Web 工作台创建的 pty-cli）都注入凭证。
   // command 前缀复用 groupToolsCommand 算出的运行期绝对路径——静态文案拿不到它，
   // 经 env 下发后由 @dutydeck/relay 的 relayHintLines() 在提示块里读回。
@@ -142,6 +151,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       getAuthToken(repos.config).then(current => { if (current) activeToken = current; }).catch(() => {});
     }, 5_000);
     tokenRefresh.unref();
+    setupCleanup.push(() => { if (tokenRefresh) clearInterval(tokenRefresh); });
   } else {
     process.stderr.write('[dutydeck] WARNING: authentication is disabled. Everyone who can reach this address can view tasks, control Agents, and access terminals. Use only on a trusted network or behind upstream authentication.\n');
   }
@@ -161,6 +171,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     }),
   };
   const workbenchHttp = createWorkbenchFetch();
+  setupCleanup.push(() => workbenchHttp.close());
   const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
     env,
@@ -192,7 +203,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   };
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     authorizeTask: async (session, task, phase) => { await automation.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
-    authorizeExecution: async (sessionId, actorId) => { if (!await workItems.authorizeExecution(sessionId, actorId)) await groupManager.beginTurn(sessionId, actorId); },
+    authorizeExecution: async (sessionId, actorId) => {
+      // work item 授权先行判断并自行短路；其余会话把 prepareTurn 返回的可选本地提交
+      // 交回 Runtime，由其短写序列在归属校验后执行（prepare 不写运行身份）。
+      if (await workItems.authorizeExecution(sessionId, actorId)) return;
+      return groupManager.prepareTurn(sessionId, actorId);
+    },
     resolveRiskPolicy: async (sessionId, fallback) => {
       const binding = await workItems.parentForSession(sessionId);
       return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch) : groupManager.riskPolicy(sessionId, fallback);
@@ -205,9 +221,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     prepareTaskPrompt: (session, prompt, skills) => prepareSkillPrompt(session.cwd, prompt, skills),
     sessionPrompt: (session, prompt) => agentTools.promptForSession(session, prompt)
   });
+  setupCleanup.push(() => runtime.shutdown());
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
   const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration,
     githubToken: env.DUTYDECK_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN });
+  setupCleanup.push(() => automation.close());
   const authorizeWorkAgent = async (sessionId: string, actorId: string, agentId: string) => {
     const parent = await runtime.getSession(sessionId);
     if (!parent || !await automationIntegration.authorize(sessionId, actorId)) return false;
@@ -219,8 +237,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return decision?.allowed ?? true;
   };
   const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => app?.log.warn(...args as [unknown, string]) } });
+  setupCleanup.push(() => workbench.close());
   const workItems: WorkItemService = new WorkItemService({ repositories: repos, runtime, authorize: automationIntegration.authorize, authorizeAgent: authorizeWorkAgent,
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), deliver: item => workbench.deliver(item), notify: (item, actorId) => workbench.notify(item, actorId) });
+  setupCleanup.push(() => workItems.close());
   const authorizeSessionRequest = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> => {
     const session = await runtime.getSession(sessionId);
     if (session?.source === 'work_item') {
@@ -253,7 +273,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     }
   };
   let app: Awaited<ReturnType<typeof buildApp>> | undefined;
-  let closed = false;
+  let closeRun: Promise<void> | undefined;
   const relayBroker = new RelayAskBroker({
     async publish(sessionId, input) {
       await runtime.publishSessionEvent(sessionId, 'text', {
@@ -264,7 +284,25 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     }
   }, createRelayAskStore(repos.config));
   const workInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, (sessionId, actorId, action) => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch));
-  try {
+  closeResources = () => {
+    if (!closeRun) closeRun = (async () => {
+      if (tokenRefresh) clearInterval(tokenRefresh);
+      if (automationTimer) clearInterval(automationTimer);
+      const errors: unknown[] = [];
+      const settle = async (operations: Array<() => unknown>) => {
+        const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
+        errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
+      };
+      await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => automation.close()]);
+      // Wake blocked asks before waiting for HTTP shutdown.
+      await settle([() => relayBroker.close(), ...[...ptyDrivers].map(driver => () => driver.prepareForDaemonShutdown())]);
+      await settle([() => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
+      await settle([() => capabilities.close()]);
+      await settle([() => repos.close()]);
+      if (errors.length) throw new AggregateError(errors, 'Dutydeck did not shut down cleanly');
+    })();
+    return closeRun;
+  };
     await relayBroker.initialize();
     await runtime.initialize(config.agents);
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
@@ -321,36 +359,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     automationTimer = setInterval(tick, 60_000);
     automationTimer.unref();
     tick();
+  return { config, runtime, close: closeResources };
   } catch (error) {
-    if (tokenRefresh) clearInterval(tokenRefresh);
-    if (automationTimer) clearInterval(automationTimer);
-    workbench.close(); workbenchHttp.close();
-    await workItems.close();
-    await automation.close();
-    capabilities.close(); await runtime.shutdown(); repos.close(); throw error;
+    try { await closeResources(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Dutydeck startup and cleanup failed'); }
+    throw error;
   }
-  return {
-    config,
-    runtime,
-    async close() {
-      if (closed) return;
-      closed = true;
-      if (tokenRefresh) clearInterval(tokenRefresh);
-      if (automationTimer) clearInterval(automationTimer);
-      workbench.close(); workbenchHttp.close();
-      await workItems.close();
-      await automation.close();
-      // 先唤醒所有阻塞中的 ask，再关 app：否则长轮询请求会拖住 app.close()。
-      relayBroker.close();
-      // A normal daemon stop/restart detaches Dutydeck-owned tmux sessions.
-      // Explicit session stop/restart never passes through here and continues
-      // to destroy its backend as requested by the user.
-      for (const driver of ptyDrivers) driver.prepareForDaemonShutdown();
-      const results = await Promise.allSettled([relayBroker.flush(), app?.close() ?? Promise.resolve(), runtime.shutdown()]);
-      capabilities.close();
-      repos.close();
-      const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
-      if (errors.length) throw new AggregateError(errors, 'Dutydeck did not shut down cleanly');
-    }
-  };
 }

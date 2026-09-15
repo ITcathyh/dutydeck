@@ -1,3 +1,4 @@
+import Database from 'better-sqlite3';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,7 +25,7 @@ const plan: WorkPlan = {
 interface Call { sessionId: string; prompt: string; finish: (text: string, failed?: boolean) => void }
 async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confirmed') {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-work-items-'));
-  const repos = createRepositories(join(directory, 'test.db'));
+  const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agents = ['alpha', 'beta'].map(id => agentConfigSchema.parse({ id, name: id, command: 'fake', protocol: 'acp', cwd: directory, permissionMode: 'ask' }));
   const calls: Call[] = []; const stopped: string[] = [];
   let beforeSubmit: (() => Promise<void>) | undefined;
@@ -41,9 +42,12 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
     authorizeTask: (session, task, phase) => service.authorizeTask(session, task, phase),
     driverFactory: (_agent, _protocol, onEvent, _onExit, sessionId) => {
       let current: (() => void) | undefined;
+      // 真实驱动被 stop 杀死时，挂起中的 start() 必须随之结束；fixture 用 stop 信号竞速外部启动门禁。
+      let killStartup: ((error: Error) => void) | undefined;
+      const startupKilled = () => new Promise<void>((_resolve, reject) => { killStartup = reject; });
       return {
-        start: async () => { if (sessionId.startsWith('ses_work_')) await beforeStart?.(); }, resume: async () => {}, interrupt: async () => { current?.(); },
-        stop: async () => { stopped.push(sessionId); current?.(); },
+        start: async () => { if (sessionId.startsWith('ses_work_')) await Promise.race([beforeStart?.() ?? Promise.resolve(), startupKilled()]); }, resume: async () => {}, interrupt: async () => { current?.(); },
+        stop: async () => { stopped.push(sessionId); killStartup?.(new Error('driver stopped during startup')); current?.(); },
         ...(stopProof === 'missing' ? {} : { isStopped: async () => stopProof === 'confirmed' && stopped.includes(sessionId) }),
         send: (prompt: string) => new Promise<void>(resolve => {
           current = () => { onEvent({ type: 'completed', data: { stopReason: 'cancelled' } }); resolve(); };
@@ -58,9 +62,10 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
   });
   const makeService = () => new WorkItemService({ repositories: repos, runtime, authorize: async (_id, actor) => allowed && (actor === 'ou_owner' || actor === 'installation_owner'), authorizeAgent: async (_parent, _actor, id) => !deniedAgents.has(id), deliver: deliveries, notify: notifications });
   runtime = makeRuntime(); service = makeService(); await runtime.initialize(agents);
-  const parent = await runtime.start({ agentId: 'alpha', cwd: directory, source: 'lark', permissionMode: 'ask' });
+  const parent = await runtime.start({ agentId: 'alpha', cwd: directory, source: 'lark', sourceId: 'cli_app:ou_owner:root_message', permissionMode: 'ask' });
   cleanup.push(async () => { await service.close(); await runtime.shutdown(); await repos.close(); await rm(directory, { recursive: true, force: true }); });
   return {
+    directory,
     repos, agents, parent, calls, stopped, deliveries, notifications,
     holdStart(action: () => Promise<void>) { beforeStart = action; },
     get service() { return service; }, get runtime() { return runtime; },
@@ -192,15 +197,24 @@ describe('WorkItemService with real Runtime and SQLite', () => {
   });
   it('fences an accepted task before driver.send when cancellation wins preparation', async () => {
     const f = await fixture(); let release!: () => void;
-    const gate = new Promise<void>(resolve => { release = resolve; }); f.holdSubmit(() => gate);
-    const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' }); await f.tick();
-    const current = await f.get(item.id); const attempt = current.steps[0]!.attempts[0]!;
-    await eventually(async () => (await f.repos.tasks.listBySession(attempt.sessionId!))[0]?.status === 'running');
-    const cancelling = f.service.cancel(f.parent.id, item.id, current.revision, 'ou_owner');
-    await eventually(async () => (await f.get(item.id)).status === 'cancelling'); release();
-    await cancelling; await f.tick();
-    expect(f.calls).toHaveLength(0); expect((await f.get(item.id)).status).toBe('cancelled');
-    expect((await f.repos.tasks.listBySession(attempt.sessionId!))[0]?.status).toBe('cancelled');
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let enteredResolve!: () => void;
+    const entered = new Promise<void>(resolve => { enteredResolve = resolve; });
+    f.holdSubmit(async () => { enteredResolve(); await gate; });
+    try {
+      const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' }); await f.tick();
+      await entered;
+      const current = await f.get(item.id); const attempt = current.steps[0]!.attempts[0]!;
+      expect(f.calls).toHaveLength(0);
+      const cancelling = f.service.cancel(f.parent.id, item.id, current.revision, 'ou_owner');
+      await eventually(async () => (await f.repos.tasks.listBySession(attempt.sessionId!))[0]?.status === 'cancelled');
+      release();
+      await cancelling; await f.tick();
+      expect(f.calls).toHaveLength(0); expect((await f.get(item.id)).status).toBe('cancelled');
+      expect((await f.repos.tasks.listBySession(attempt.sessionId!))[0]?.status).toBe('cancelled');
+    } finally {
+      release?.();
+    }
   });
 
   it('serializes a live permission decision and a cancellation intent', async () => {
@@ -224,13 +238,20 @@ describe('WorkItemService with real Runtime and SQLite', () => {
   it('rejects oversized generated output without truncating or advancing the join', async () => {
     const f = await fixture(); const item = await f.create({ ...plan, steps: [plan.steps[0]!], outputStepId: 'a' }); await f.tick(); await eventually(async () => f.calls.length === 1);
     await f.finish(f.calls[0]!, 'x'.repeat(512 * 1024 + 1)); await f.tick();
-    const failed = await f.get(item.id); expect(failed.status).toBe('failed'); expect(failed.output).toBeUndefined();
-    expect(failed.steps[0]!.attempts[0]!.error).toContain('exceeds'); expect(f.deliveries).not.toHaveBeenCalled();
+    // 新账本契约：超限是明确结果读取错误，持久 blocked，不允许转 failed 后重试，也不截断交付。
+    const blocked = await f.get(item.id); expect(blocked.status).toBe('blocked'); expect(blocked.output).toBeUndefined();
+    expect(blocked.steps[0]!.attempts[0]!.blockReason).toBe('reconcile_required');
+    expect(blocked.steps[0]!.attempts[0]!.error).toContain('exceeds'); expect(f.deliveries).not.toHaveBeenCalled();
+    await expect(f.service.retryStep(f.parent.id, item.id, 'a', blocked.revision, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_RETRY_UNSAFE' });
   });
 
-  it('blocks parent source drift and rejects new work on stopped parents', async () => {
+  it('guards parent identity against direct writes and blocks on configuration drift or stopped parents', async () => {
     const f = await fixture(); const item = await f.create();
-    await f.repos.sessions.save({ ...(await f.repos.sessions.get(f.parent.id))!, sourceId: 'different-group' }); await f.tick();
+    // 1. 父 Session 身份字段受仓储保护，旧直接写口必须抛 EXECUTION_LEDGER_REQUIRED 拒绝非法篡改
+    const parentSession = (await f.repos.sessions.get(f.parent.id))!;
+    await expect(f.repos.sessions.save({ ...parentSession, sourceId: 'different-group' })).rejects.toMatchObject({ code: 'EXECUTION_LEDGER_REQUIRED' });
+    // 2. 通过合法配置变化（如 model）制造指纹漂移，验证来源检测到配置漂移后持久 blocked
+    await f.repos.sessions.save({ ...parentSession, model: 'drifted-model' }); await f.tick();
     expect((await f.get(item.id)).status).toBe('blocked');
     await f.runtime.stop(f.parent.id);
     await expect(f.create(plan, 'stopped')).rejects.toMatchObject({ code: 'WORK_ITEM_PARENT_INACTIVE' });
@@ -272,7 +293,8 @@ describe('WorkItemService with real Runtime and SQLite', () => {
       expect((await f.get(item.id)).status).toBe('blocked');
       release();
     } finally { vi.useRealTimers(); release(); }
-    await eventually(async () => (await f.repos.sessions.get((await f.get(item.id)).steps[0]!.attempts[0]!.sessionId!))?.state === 'failed');
+    // 启动被限时停止栅栏：子 Session 必为终态（failed 或 stopped），迟到 start 不能复活执行。
+    await eventually(async () => ['failed', 'stopped'].includes((await f.repos.sessions.get((await f.get(item.id)).steps[0]!.attempts[0]!.sessionId!))?.state ?? ''));
     expect(f.calls).toHaveLength(0); expect(f.deliveries).not.toHaveBeenCalled();
     await expect(f.service.retryStep(f.parent.id, item.id, 'a', (await f.get(item.id)).revision, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_RETRY_UNSAFE' });
     f.holdStart(async () => {});
@@ -286,10 +308,11 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     f.deny(); await f.tick(); f.allow();
     const blocked = await f.get(item.id); expect(blocked.status).toBe('blocked');
     const attempt = blocked.steps[0]!.attempts[0]!;
-    // Even a terminal task and persisted stopped session do not prove the
-    // resource is gone: the concrete driver may have refused adoption/kill.
-    const task = (await f.repos.tasks.listBySession(attempt.sessionId!))[0]!;
-    await f.repos.tasks.save({ ...task, status: 'cancelled' });
+    // 即使 Task 已终态（在数据库中落为 cancelled），没有物理停止证明仍不代表资源安全；cancellation 仍必须 blocked。
+    const db = new Database(join(f.directory, 'test.db'));
+    try {
+      db.prepare("UPDATE tasks SET status = 'cancelled' WHERE id = ?").run(attempt.taskId);
+    } finally { db.close(); }
     const cancelled = await f.service.cancel(f.parent.id, item.id, blocked.revision, 'ou_owner');
     expect(cancelled.status).toBe('blocked'); expect(cancelled.steps[0]!.status).toBe('blocked');
     expect(JSON.parse((await f.repos.config.get('work_item:' + item.id))!).stoppedAttempts).toEqual([]);
@@ -321,7 +344,10 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect(f.deliveries.mock.calls.filter(([item]) => item.id === first.id)).toHaveLength(1);
     expect((await f.get(first.id)).delivery.status).toBe('pending');
     const started = Date.now(); await f.service.close(); expect(Date.now() - started).toBeLessThan(500);
-    const read = vi.spyOn(f.repos.config, 'get'); const write = vi.spyOn(f.repos.config, 'compareAndSet');
+    const read = vi.spyOn(f.repos.config, 'get');
+    if (!f.repos.config.compareAndSet) throw new Error('compareAndSet required');
+    const configWithCas = f.repos.config as Required<Pick<typeof f.repos.config, 'compareAndSet'>> & typeof f.repos.config;
+    const write = vi.spyOn(configWithCas, 'compareAndSet');
     try {
       releaseNotify(); releaseDelivery(); await new Promise(resolve => setTimeout(resolve, 30));
       expect(read).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled();

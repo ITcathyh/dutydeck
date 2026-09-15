@@ -1,3 +1,4 @@
+import type { DriverContext, DriverSubmission, DriverSubmissionInput, DriverResourceCapabilities, OperationPermit } from './driver-resources.js';
 import type { EventType, PermissionMode, ToolRiskPolicy } from './index.js';
 
 /**
@@ -15,7 +16,8 @@ import type { EventType, PermissionMode, ToolRiskPolicy } from './index.js';
  *  - 事件必须按发生顺序回调；运行时按 session 串行化消费，不要求实现方自己排队。
  *  - 一轮任务结束时必须且只能发一次 `completed` 事件（stopReason 见下）。
  *  - 任何无法解析的输出一律发 `raw_terminal`，绝不丢数据。
- *  - driver 崩溃/子进程退出时调 onExit；运行时据此把会话置 failed。
+ *  - driver 崩溃/未处理的实例级子进程退出时调 onExit；运行时据此把会话置 failed 并取消后续队列。
+ *    注意：轮次内执行失败通过所属 send 报告，驱动内部回收或迟到的非当前进程退出不调用 onExit。
  */
 
 /** 归一化驱动事件：9+1 类，data 形态见各类型注释 */
@@ -61,12 +63,20 @@ export class DriverRecoveryError extends Error {
 export interface AgentDriver {
   /** 启动/确保会话就绪（ACP ensureSession / PTY spawn CLI）。失败必须抛错。 */
   start(): Promise<void>;
-  /** 发送一轮 prompt。实现负责在轮次结束时发 completed 事件。 */
-  send(prompt: string): Promise<void>;
+  /**
+   * 发送一轮 prompt 并等待该轮次结束。
+   * 实现必须在确认该轮提交成功且收到明确归一化的 completed 事件后才完成 Promise，
+   * 且必须先向运行时投递本轮全部事件再完成 Promise。轮次失败（提交失败/超时/异常退出）必须 reject。
+   */
+  send(prompt: string | DriverSubmission): Promise<void>;
+  /** Finish all asynchronous turn preparation before the durable submission intent. */
+  prepareTurn?(input: DriverSubmissionInput, operation: OperationPermit): Promise<void>;
+  prepareSubmission?(input: DriverSubmissionInput): Omit<DriverSubmission, 'operation' | 'onAccepted'>;
+  resourceCapabilities?: DriverResourceCapabilities;
   /** 中断当前轮次（保留会话，可再 send）。 */
   interrupt(): Promise<void>;
-  /** 重连/恢复持久会话（ACP resume / tmux reattach / CLI --resume）。 */
-  resume(): Promise<void>;
+  /** 重连/恢复持久会话；受控驱动的新增资源使用本次显式许可。 */
+  resume(operation?: OperationPermit): Promise<void>;
   /** Capture the output boundary before submitting a new turn, if recoverable. */
   checkpoint?(): DriverTurnRecovery | undefined;
   /** Attach to the original live backend and await this turn without resending its prompt. */
@@ -81,6 +91,8 @@ export interface AgentDriver {
   resolvePermission?(id: string, approved: boolean): Promise<boolean>;
   /** 切换模型（不支持的实现可不实现）。 */
   setModel?(model: string): Promise<void>;
+  configureNative?(request: import('./driver-resources.js').NativeConfigurationRequest): Promise<import('./driver-resources.js').NativeConfigurationProof>;
+  nativeConfiguration?(): { model?: string; reasoningEffort?: string };
   /** 切换推理强度。 */
   setReasoningEffort?(reasoningEffort: string): Promise<void>;
   /** 设置高危工具风险策略（full-trust 之外的门禁由实现强制执行）。 */
@@ -119,13 +131,14 @@ export interface TerminalStream {
  * 驱动工厂签名（运行时按 agent.protocol 路由到具体工厂）。
  * protocol: 'acp' | 'jsonl' | 'pipe' | 'pty' | 'pty-cli'（pty-cli 使用 Dutydeck PTY 适配层）
  */
-export type DriverFactory = (
+export type DriverFactory = ((
   agent: import('./index.js').AgentConfig,
   protocol: string,
   onEvent: (event: NormalizedDriverEvent) => void,
   onExit: (code: number | null) => void,
-  sessionId: string
-) => AgentDriver;
+  sessionId: string,
+  context: DriverContext
+) => AgentDriver) & { controlledResources?: (protocol: string) => boolean };
 
 /** 驱动能力描述（用于 /api/agents 展示与会话创建时的协议选择） */
 export interface DriverDescriptor {

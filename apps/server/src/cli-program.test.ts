@@ -243,4 +243,28 @@ describe('Dutydeck CLI', () => {
     expect(capture('enable')).toContain('dutydeck start');
     expect(capture('disable')).toContain('dutydeck stop');
   });
+
+  it('parses database execution-status and upgrade-execution commands', async () => {
+    const databaseExecutionStatus = vi.fn();
+    const databaseUpgradeExecution = vi.fn();
+    const program = createCliProgram('0.0.6', { databaseExecutionStatus, databaseUpgradeExecution });
+
+    await program.parseAsync(['node', 'dutydeck', 'database', 'execution-status', '--database', '/tmp/target.db']);
+    expect(databaseExecutionStatus).toHaveBeenCalledWith(expect.objectContaining({ database: '/tmp/target.db' }));
+
+    await program.parseAsync(['node', 'dutydeck', 'database', 'upgrade-execution', '--database', '/tmp/target.db']);
+    expect(databaseUpgradeExecution).toHaveBeenCalledWith(expect.objectContaining({ database: '/tmp/target.db' }));
+  });
+
+  it('requires --database for database execution-status and upgrade-execution subcommands', async () => {
+    const databaseExecutionStatus = vi.fn();
+    const databaseUpgradeExecution = vi.fn();
+    const program1 = createCliProgram('0.0.6', { databaseExecutionStatus }).exitOverride().configureOutput({ writeErr: () => {} });
+    await expect(program1.parseAsync(['node', 'dutydeck', 'database', 'execution-status'])).rejects.toThrow();
+    expect(databaseExecutionStatus).not.toHaveBeenCalled();
+
+    const program2 = createCliProgram('0.0.6', { databaseUpgradeExecution }).exitOverride().configureOutput({ writeErr: () => {} });
+    await expect(program2.parseAsync(['node', 'dutydeck', 'database', 'upgrade-execution'])).rejects.toThrow();
+    expect(databaseUpgradeExecution).not.toHaveBeenCalled();
+  });
 });

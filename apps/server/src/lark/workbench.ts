@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createWorkbenchFetch } from '../workbench-fetch.js';
-import { RuntimeError, type RepositoryBundle, type WorkItem, type WorkPlan } from '@dutydeck/shared';
+import { RuntimeError, type AcceptedTask, type RepositoryBundle, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { WorkItemService } from '../work-items.js';
 import type { WorkItemInteractions, WorkItemRequest } from '../work-item-interactions.js';
@@ -139,15 +139,31 @@ export class LarkWorkbench {
     if (await this.repos.config.get(storedKey)) return;
     let target: Target | undefined = JSON.parse(await this.repos.config.get(originKey(sessionId, key)) ?? 'null') ?? undefined;
     if (!target) {
-      const taskId = this.runtime.getActiveTaskContext(sessionId)?.taskId;
+      const active = this.runtime.getActiveTaskContext(sessionId);
+      const taskId = active?.taskId;
       const cards = (await this.repos.channelMappings.list(`lark-card:${appId}`)).filter(value => value.sessionId === sessionId).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       for (const card of cards) {
         let saved: PersistedLarkCardTask;
         try { saved = JSON.parse(card.extra ?? 'null'); } catch { continue; }
         if (!saved || saved.app_id !== appId || saved.chat_id !== chatId || !saved.reply_message_id) continue;
-        if (taskId && saved.runtime_task_id !== taskId) {
-          const expected = `task_${digest(`${sessionId}\0lark:${appId}:${card.externalId}:${saved.turn}`)}`;
-          if (saved.runtime_task_id || expected !== taskId) continue;
+        if (saved.scope_id && session.sourceId && !session.sourceId.endsWith(`:${saved.scope_id}`) && session.sourceId !== `${appId}:${chatId}:${saved.scope_id}`) continue;
+        if (taskId) {
+          if (saved.runtime_task_id) {
+            if (saved.runtime_task_id !== taskId) continue;
+          } else {
+            let accepted: AcceptedTask | undefined;
+            try {
+              accepted = this.repos.execution.getAcceptedTask(taskId);
+            } catch {
+              continue;
+            }
+            const req = accepted?.request;
+            if (!req) continue;
+            if (req.sessionId !== sessionId) continue;
+            if (req.namespace !== 'runtime') continue;
+            if (req.key !== `lark:${appId}:${card.externalId}:${saved.turn}`) continue;
+            if (req.actor.kind !== 'channel' || req.actor.appId !== appId || (saved.sender_open_id && req.actor.id !== saved.sender_open_id)) continue;
+          }
         }
         target = { appId: appId!, chatId: chatId!, replyMessageId: saved.reply_message_id, replyInThread: saved.reply_in_thread === true };
         break;

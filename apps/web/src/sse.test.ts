@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DockEvent, Session, Task } from './api';
-import { Backoff, SessionStream, applyStatusEvent, maxSequence, mergeDockEvent, nextBackoffDelay, upsertTask, type MockableEventSource, type StreamStatus } from './sse';
+import type { DockEvent, Session } from './api';
+import { Backoff, SessionStream, applyStatusEvent, maxSequence, mergeDockEvent, nextBackoffDelay, type MockableEventSource, type StreamStatus } from './sse';
 
 const makeEvent = (sequence: number, type = 'text', data: unknown = {}): DockEvent => ({ id: `e${sequence}`, sequence, type, timestamp: '', data });
 const makeSession = (overrides: Partial<Session> = {}): Session => ({ id: 's1', agentId: 'a1', state: 'idle', cwd: '/tmp', runId: 'r1', createdAt: '', updatedAt: '', ...overrides });
-const makeTask = (id: string, overrides: Partial<Task> = {}): Task => ({ id, sessionId: 's1', prompt: `p-${id}`, status: 'queued', createdAt: '', updatedAt: '', ...overrides });
 
 describe('nextBackoffDelay', () => {
   it('按 1000 * 2^attempt 增长并封顶 30000', () => {
@@ -113,25 +112,6 @@ describe('applyStatusEvent', () => {
   it('不认识的 state → 原样返回（同一引用）', () => {
     const original = makeSession();
     expect(applyStatusEvent(original, makeEvent(1, 'status', { state: 'bogus' }))).toBe(original);
-  });
-});
-
-describe('upsertTask', () => {
-  it('空缓存 → [task]', () => {
-    expect(upsertTask(undefined, makeTask('t1'))).toEqual([makeTask('t1')]);
-    expect(upsertTask([], makeTask('t1'))).toEqual([makeTask('t1')]);
-  });
-
-  it('同 id → 替换（去重后追加到末尾，与 App.tsx 原逻辑一致）', () => {
-    const updated = makeTask('t1', { status: 'running' });
-    const result = upsertTask([makeTask('t1'), makeTask('t2')], updated);
-    expect(result).toHaveLength(2);
-    expect(result[0]).toEqual(makeTask('t2'));
-    expect(result[1]).toEqual(updated);
-  });
-
-  it('不同 id → 追加', () => {
-    expect(upsertTask([makeTask('t1')], makeTask('t2'))).toEqual([makeTask('t1'), makeTask('t2')]);
   });
 });
 

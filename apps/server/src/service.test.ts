@@ -61,6 +61,8 @@ describe('server access mode', () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-open-'));
     temporaryDirectories.push(root);
     const database = join(root, 'dutydeck.db');
+    const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    seed.close();
     const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const service = await startLocalServer({
       webRoot: root,
@@ -87,6 +89,9 @@ describe('server access mode', () => {
   it('wires no-auth trusted-devhost management while all foundation execution stays staged and blocked', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-foundation-service-'));
     temporaryDirectories.push(root);
+    const database = join(root, 'dutydeck.db');
+    const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    seed.close();
     const port = await freePort();
     const service = await startLocalServer({
       webRoot: root,
@@ -96,7 +101,7 @@ describe('server access mode', () => {
         DUTYDECK_HOST: '0.0.0.0',
         DUTYDECK_PORT: String(port),
         DUTYDECK_DEFAULT_CWD: root,
-        DUTYDECK_DATABASE_URL: join(root, 'dutydeck.db'),
+        DUTYDECK_DATABASE_URL: database,
         DUTYDECK_AUTH: 'false',
         DUTYDECK_DISABLE_LARK_LISTENER: 'true',
         DUTYDECK_AGENTS_JSON: '[]'
@@ -183,6 +188,8 @@ describe('server access mode', () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-foundation-token-'));
     temporaryDirectories.push(root);
     const database = join(root, 'dutydeck.db');
+    const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    seed.close();
     const port = await freePort();
     const service = await startLocalServer({
       webRoot: root,
@@ -221,7 +228,7 @@ describe('server access mode', () => {
 describe('production PTY backend injection', () => {
   it('always selects a namespaced, owned tmux backend for Dutydeck sessions', () => {
     const backend = createProductionPtyBackend('ses/test:one', {
-      isAvailable: kind => kind === 'tmux',
+      isAvailable: (kind: string) => kind === 'tmux',
       probeSession: () => 'missing',
     });
 
@@ -229,14 +236,14 @@ describe('production PTY backend injection', () => {
     expect(backend.sessionName).toMatch(/^dutydeck-ses-test-one-[a-f0-9]{16}$/);
     expect(backend.ownerId).toBe('dutydeck:ses/test:one');
     expect(createProductionPtyBackend('ses/test:one', {
-      isAvailable: kind => kind === 'tmux',
+      isAvailable: (kind: string) => kind === 'tmux',
       probeSession: () => 'missing',
     }).sessionName).toBe(backend.sessionName);
   });
 
   it('fails loudly instead of downgrading production sessions to PtyBackend', () => {
     expect(() => createProductionPtyBackend('ses-no-tmux', {
-      isAvailable: () => false,
+      isAvailable: (kind: string) => false,
       probeSession: () => 'missing',
     })).toThrow(/tmux backend is unavailable/i);
   });
@@ -247,6 +254,9 @@ describe('production PTY backend injection', () => {
   tmuxIt('runs a custom command with the Claude adapter alongside the original agent', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-custom-claude-'));
     temporaryDirectories.push(root);
+    const database = join(root, 'dutydeck.db');
+    const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    seed.close();
     const runner = join(root, 'runner.mjs');
     writeFileSync(runner, [
       `#!${process.execPath}`,
@@ -261,7 +271,7 @@ describe('production PTY backend injection', () => {
       webRoot: root,
       env: {
         ...process.env, NODE_ENV: 'test', DUTYDECK_HOST: '127.0.0.1', DUTYDECK_PORT: String(await freePort()),
-        DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: join(root, 'dutydeck.db'),
+        DUTYDECK_DEFAULT_CWD: root, DUTYDECK_DATABASE_URL: database,
         DUTYDECK_AUTH: 'false', DUTYDECK_DISABLE_LARK_LISTENER: 'true',
         DUTYDECK_AGENTS_JSON: JSON.stringify(['claude-code', 'ccflash'].map(id => ({
           id, name: id, command: runner, args: [join(root, `${id}.json`), '--wrapper-profile', id],
@@ -290,10 +300,12 @@ describe('production PTY backend injection', () => {
     }
   }, 30_000);
 
-  tmuxIt.each([false, true])('recovers an in-flight task through a full service restart (completed offline: %s)', async offline => {
+  tmuxIt.each([false, true])('preserves an in-flight task in reconcile_required across service restart without duplicate submission (completed offline: %s)', async offline => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-service-turn-recovery-'));
     temporaryDirectories.push(root);
     const database = join(root, 'dutydeck.db');
+    const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    seed.close();
     const runner = join(root, 'runner.mjs');
     writeFileSync(runner, [
       `#!${process.execPath}`,
@@ -342,8 +354,12 @@ describe('production PTY backend injection', () => {
       await first.close();
       const persisted = createRepositories(database);
       try {
-        expect((await persisted.tasks.listBySession(session.id))[0]?.status).toBe('running');
-        expect((await persisted.tasks.listBySession(session.id))[0]?.executionContext?.recovery?.turnId)
+        const persistedTasks = await persisted.tasks.listBySession(session.id);
+        expect(persistedTasks[0]?.status).toBe('reconcile_required');
+        const taskExec = persisted.execution.getTaskExecution(task.id)!;
+        expect(taskExec.attempts).toHaveLength(1);
+        expect(taskExec.attempts[0]?.state).toBe('reconcile_required');
+        expect(taskExec.attempts[0]?.submission?.recovery?.turnId)
           .toBe(backend.getDutydeckMetadata('turn_id'));
       } finally { persisted.close(); }
       const complete = () => { record('final answer'); writeFileSync(join(root, 'finish'), ''); };
@@ -352,19 +368,17 @@ describe('production PTY backend injection', () => {
         await vi.waitFor(() => expect(backend.captureCurrentScreen()).toContain('Worked for 1s'));
       }
       restored = await startLocalServer({ webRoot: root, env: await serverEnv() });
-      if (!offline) {
-        await vi.waitFor(() => expect(restored!.runtime.getDriver(session.id)).toBeDefined());
-        expect((await restored.runtime.getTasks(session.id))[0]?.status).toBe('running');
-        complete();
-      }
-      await vi.waitFor(async () => expect((await restored!.runtime.getTasks(session.id))[0]?.status, (await restored!.runtime.getSession(session.id))?.error).toBe('completed'), { timeout: 10_000 });
+      const tasksAfter = await restored.runtime.getTasks(session.id);
+      expect(tasksAfter).toHaveLength(1);
+      expect(tasksAfter[0]?.id).toBe(task.id);
+      expect(tasksAfter[0]?.status).toBe('reconcile_required');
       expect(backend.getPid()).toBe(originalPid);
       expect(readFileSync(join(root, 'submissions'), 'utf8')).toBe('submitted\n');
       expect((await restored.runtime.getTasks(session.id)).map(item => item.id)).toEqual([task.id]);
       const events = await restored.runtime.getEvents(session.id);
       expect(events.filter(event => event.type === 'text').map(event => (event.data as any).text))
-        .toEqual(['recover this exact task', 'before restart', 'final answer']);
-      expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+        .toEqual(['recover this exact task', 'before restart']);
+      expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
       expect(events.filter(event => event.type === 'error')).toEqual([]);
       await restored.runtime.stop(session.id);
     } finally {
@@ -373,16 +387,23 @@ describe('production PTY backend injection', () => {
     }
   }, 60_000);
 
-  tmuxIt('keeps a completed Dutydeck Run on the same pane across a service restart', async () => {
+  tmuxIt('preserves pane across service restart with durable queued task blocked from unverified execution', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-persistent-pty-'));
     temporaryDirectories.push(root);
     const database = join(root, 'dutydeck.db');
+    const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    seed.close();
     const fakeRunner = join(root, 'fake-claude-runner.sh');
     writeFileSync(fakeRunner, [
       '#!/bin/sh',
       "printf 'Claude Code v2.1.267 (mock)\\n❯ \\n'",
       'while IFS= read -r line; do',
       "  printf '\\033[2J\\033[HClaude Code v2.1.267 (mock)\\nhandled:%s\\n✳ Worked for 1s\\n❯ \\n' \"$line\"",
+      '  for f in "$CLAUDE_CONFIG_DIR"/projects/*/*.jsonl; do',
+      '    if [ -f "$f" ]; then',
+      '      printf \'{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"handled:%s"}],"stop_reason":"end_turn"}}\\n\' "$line" >> "$f"',
+      '    fi',
+      '  done',
       'done',
       '',
     ].join('\n'));
@@ -403,43 +424,70 @@ describe('production PTY backend injection', () => {
         command: fakeRunner,
         protocol: 'pty-cli',
         permissionMode: 'ask',
+        env: { CLAUDE_CONFIG_DIR: root },
         capabilities: { pause: false, resume: false },
       }]),
     });
 
     const first = await startLocalServer({ webRoot: root, env: await serverEnv() });
-    const session = await first.runtime.start({ agentId: 'claude-code' });
-    const backend = createProductionPtyBackend(session.id);
-    tmuxSessions.push(backend.sessionName);
-    await first.runtime.send(session.id, 'before daemon restart');
-    const originalPid = Number(spawnSync(
-      'tmux',
-      ['display-message', '-p', '-t', backend.sessionName, '#{pane_pid}'],
-      { encoding: 'utf8' },
-    ).stdout.trim());
-    expect(originalPid).toBeGreaterThan(0);
+    let restored: Awaited<ReturnType<typeof startLocalServer>> | undefined;
+    let sessionName: string | undefined;
+    try {
+      const session = await first.runtime.start({ agentId: 'claude-code' });
+      const backend = createProductionPtyBackend(session.id);
+      sessionName = backend.sessionName;
+      tmuxSessions.push(backend.sessionName);
 
-    await first.close();
-    expect(spawnSync('tmux', ['has-session', '-t', backend.sessionName]).status).toBe(0);
+      // 先构造真实 assistant transcript 并断言首轮 completed
+      const project = join(root, 'projects', realpathSync(root).replace(/[^A-Za-z0-9-]/g, '-'));
+      mkdirSync(project, { recursive: true });
+      const transcript = join(project, session.id.replace(/^ses_/, '') + '.jsonl');
+      writeFileSync(transcript, '');
 
-    const restored = await startLocalServer({ webRoot: root, env: await serverEnv() });
-    expect(restored.runtime.getDriver(session.id)).toBeUndefined();
-    await restored.runtime.send(session.id, 'after daemon restart');
-    const restoredPid = Number(spawnSync(
-      'tmux',
-      ['display-message', '-p', '-t', backend.sessionName, '#{pane_pid}'],
-      { encoding: 'utf8' },
-    ).stdout.trim());
-    expect(restoredPid).toBe(originalPid);
-    expect((await restored.runtime.getTasks(session.id)).map(task => task.prompt)).toEqual([
-      'before daemon restart',
-      'after daemon restart',
-    ]);
+      const firstTask = await first.runtime.send(session.id, 'before daemon restart');
+      expect(firstTask.status).toBe('completed');
+      expect((await first.runtime.getTasks(session.id))[0]?.status).toBe('completed');
 
-    await restored.runtime.stop(session.id);
-    expect(spawnSync('tmux', ['has-session', '-t', backend.sessionName]).status).not.toBe(0);
-    await restored.close();
-  }, 30_000);
+      const originalPid = Number(spawnSync(
+        'tmux',
+        ['display-message', '-p', '-t', backend.sessionName, '#{pane_pid}'],
+        { encoding: 'utf8' },
+      ).stdout.trim());
+      expect(originalPid).toBeGreaterThan(0);
+
+      await first.close();
+      expect(spawnSync('tmux', ['has-session', '-t', backend.sessionName]).status).toBe(0);
+
+      // 重开后同原 pane 仍在，新任务可 durable queued 但资源未证不继续发送
+      restored = await startLocalServer({ webRoot: root, env: await serverEnv() });
+      expect(restored.runtime.getDriver(session.id)).toBeUndefined();
+
+      const restoredPid = Number(spawnSync(
+        'tmux',
+        ['display-message', '-p', '-t', backend.sessionName, '#{pane_pid}'],
+        { encoding: 'utf8' },
+      ).stdout.trim());
+      expect(restoredPid).toBe(originalPid);
+
+      const nextTask = await restored.runtime.dispatch(session.id, 'after daemon restart');
+      expect(nextTask.status).toBe('queued');
+      expect((await restored.runtime.getTasks(session.id)).map(task => task.prompt)).toEqual([
+        'before daemon restart',
+        'after daemon restart',
+      ]);
+      expect((await restored.runtime.getTasks(session.id))[1]?.status).toBe('queued');
+
+      // 资源未被安全认领时，stop 不得静默回收该 pane：必须保留 stop blocker 并拒绝，
+      // 而不是假装已干净停止。service 关闭时 pane 保持存活，由本测试的 afterEach 清理。
+      await expect(restored.runtime.stop(session.id)).rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
+    } finally {
+      await first.close();
+      await restored?.close();
+    }
+    // 资源未经安全认领时，service 关闭不得自动 kill 这个原 pane（保守保留待人工核对）；
+    // tmux 会话由 afterEach 的 kill-session 兜底清理。
+    expect(spawnSync('tmux', ['has-session', '-t', sessionName]).status).toBe(0);
+  }, 60_000);
 });
 
 describe('production schedule foundation wiring', () => {
@@ -447,7 +495,7 @@ describe('production schedule foundation wiring', () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-schedule-service-'));
     temporaryDirectories.push(root);
     const database = join(root, 'dutydeck.db');
-    const bootstrap = createRepositories(database);
+    const bootstrap = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
     await bootstrap.secretRefs.create({
       id: 'secret-schedule-service', kind: 'generic', provider: 'local-file-v1', referenceKey: 'schedule.service.ref', status: 'configured'
     });

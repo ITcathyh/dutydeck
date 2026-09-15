@@ -39,7 +39,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -312,6 +312,107 @@ describe('storage migrations', () => {
     db.close()
   })
 
+  it('v17 给 tasks 补 queue_position 列并保持可空', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 16)) {
+      migration.up(db)
+      record.run(migration.version, '2026-09-01T00:00:00.000Z')
+    }
+    db.prepare('INSERT INTO tasks (id, session_id, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('task_running', 'ses_a', 'running task', 'running', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+
+    runMigrations(db)
+
+    expect(columnNames(db, 'tasks')).toContain('queue_position')
+    // 非 queued 任务不回填，保持 NULL。
+    expect(db.prepare('SELECT queue_position FROM tasks WHERE id = ?').get('task_running'))
+      .toEqual({ queue_position: null })
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('v17 按每 session created_at、rowid 稳定顺序给存量 queued 任务回填 1..N', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 16)) {
+      migration.up(db)
+      record.run(migration.version, '2026-09-01T00:00:00.000Z')
+    }
+    const insert = db.prepare('INSERT INTO tasks (id, session_id, prompt, status, execution_context, interrupted_by_actor, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+    // ses_a：三个 queued，created_at 相同，靠 rowid 决定先后；一个 running 不参与。
+    insert.run('a1', 'ses_a', 'a-one', 'queued', null, null, '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+    insert.run('a2', 'ses_a', 'a-two', 'queued', null, null, '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+    insert.run('a3', 'ses_a', 'a-three', 'running', null, null, '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+    insert.run('a4', 'ses_a', 'a-four', 'queued', null, null, '2026-09-02T00:00:00.000Z', '2026-09-02T00:00:00.000Z')
+    // ses_b：独立从 1 开始。
+    insert.run('b1', 'ses_b', 'b-one', 'queued', null, null, '2026-09-03T00:00:00.000Z', '2026-09-03T00:00:00.000Z')
+    // 已经有位置的 queued 行不被回填改动。模拟列已存在的库：手工补列后预置 42，
+    // v17 的 ensureColumn 会跳过补列，回填只处理 NULL 位置行。
+    insert.run('b2', 'ses_b', 'b-two', 'queued', null, null, '2026-09-04T00:00:00.000Z', '2026-09-04T00:00:00.000Z')
+    db.exec('ALTER TABLE tasks ADD COLUMN queue_position INTEGER')
+    db.prepare('UPDATE tasks SET queue_position = 42 WHERE id = ?').run('b2')
+
+    runMigrations(db)
+
+    const positions = (ids: string[]) => ids.map(id => {
+      const row = db.prepare('SELECT queue_position, created_at, updated_at, status, execution_context FROM tasks WHERE id = ?').get(id) as Record<string, unknown>
+      return [id, row.queue_position]
+    })
+    expect(positions(['a1', 'a2', 'a4'])).toEqual([['a1', 1], ['a2', 2], ['a4', 3]])
+    expect(db.prepare('SELECT queue_position FROM tasks WHERE id = ?').get('a3')).toEqual({ queue_position: null })
+    expect(db.prepare('SELECT queue_position FROM tasks WHERE id = ?').get('b1')).toEqual({ queue_position: 1 })
+    // 已有位置不被覆盖。
+    expect(db.prepare('SELECT queue_position FROM tasks WHERE id = ?').get('b2')).toEqual({ queue_position: 42 })
+    // 其他字段不被迁移改写。
+    const untouched = db.prepare('SELECT created_at, updated_at, status, execution_context FROM tasks WHERE id = ?').get('a1')
+    expect(untouched).toEqual({
+      created_at: '2026-09-01T00:00:00.000Z',
+      updated_at: '2026-09-01T00:00:00.000Z',
+      status: 'queued',
+      execution_context: null
+    })
+    db.close()
+  })
+
+  it('v17 重复执行迁移不改变已回填顺序', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 16)) {
+      migration.up(db)
+      record.run(migration.version, '2026-09-01T00:00:00.000Z')
+    }
+    db.prepare('INSERT INTO tasks (id, session_id, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('q1', 'ses_a', 'one', 'queued', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z')
+    db.prepare('INSERT INTO tasks (id, session_id, prompt, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run('q2', 'ses_a', 'two', 'queued', '2026-09-02T00:00:00.000Z', '2026-09-02T00:00:00.000Z')
+
+    runMigrations(db)
+    const afterFirst = db.prepare('SELECT id, queue_position FROM tasks ORDER BY queue_position').all()
+    runMigrations(db)
+    const afterSecond = db.prepare('SELECT id, queue_position FROM tasks ORDER BY queue_position').all()
+    expect(afterSecond).toEqual(afterFirst)
+    expect(afterSecond).toEqual([
+      { id: 'q1', queue_position: 1 },
+      { id: 'q2', queue_position: 2 }
+    ])
+    db.close()
+  })
+
+  it('v17 在缺 tasks 表的模拟夹具上按既有模式跳过', () => {
+    const db = new Database(':memory:')
+    // 模拟 v16 测试夹具：手工标记迁移已应用，但根本没有 tasks 表。
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (let version = 1; version <= 16; version++) record.run(version, '2026-09-01T00:00:00.000Z')
+    expect(() => migrations[16]!.up(db)).not.toThrow()
+    expect(tableNames(db)).not.toContain('tasks')
+    db.close()
+  })
+
   it('adds v13 Schedule ledgers as disabled control-plane tables without creating runtime work', () => {
     const db = new Database(':memory:')
     db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
@@ -418,7 +519,9 @@ describe('storage migrations', () => {
     const journalFilename = `${filename}-journal`
     await writeFile(journalFilename, 'runtime-sensitive-data', { mode: 0o644 })
     repositories.close()
-    expect(await mode(journalFilename)).toBe(0o600)
+    // The final control transaction may remove SQLite's obsolete rollback journal.
+    // If retained, its permissions must remain private.
+    expect(await mode(journalFilename).catch(error => error.code === 'ENOENT' ? 0o600 : Promise.reject(error))).toBe(0o600)
   })
 
   it('createRepositories runs migrations and round-trips agents', async () => {

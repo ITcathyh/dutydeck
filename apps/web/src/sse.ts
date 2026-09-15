@@ -1,4 +1,4 @@
-import type { DockEvent, Session, Task } from './api';
+import type { DockEvent, Session } from './api';
 
 // 服务端 SSE 流支持的事件类型（与 App.tsx 现有监听列表保持一致）
 export const STREAM_EVENT_TYPES = ['text', 'thinking', 'tool_call', 'tool_result', 'permission_request', 'status', 'task', 'error', 'completed', 'raw_terminal'] as const;
@@ -44,11 +44,6 @@ export function applyStatusEvent(session: Session, event: DockEvent): Session {
     ...(typeof event.data.model === 'string' ? { model: event.data.model } : {}),
     ...(typeof event.data.reasoningEffort === 'string' ? { reasoningEffort: event.data.reasoningEffort } : {})
   };
-}
-
-// task 事件写入 tasks 缓存：同 id 替换，否则追加
-export function upsertTask(tasks: Task[] | undefined, task: Task): Task[] {
-  return [...(tasks ?? []).filter(item => item.id !== task.id), task];
 }
 
 // 退避状态机：next() 返回当前 attempt 的延迟并把 attempt + 1；连接成功后 reset()

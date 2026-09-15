@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { createRepositories } from '@dutydeck/storage';
-import type { AgentConfig, AgentDriver, DriverFactory, Session, VerificationRecord } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, DriverFactory, Session, TaskRequestV1, VerificationRecord } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { DutydeckRuntime, type RuntimeOptions } from './index.js';
 import { WorkspaceManager } from './workspace.js';
@@ -49,13 +49,17 @@ function repository(subdirectory = false) {
 function driverFactory(sent: string[] = [], start = vi.fn(async () => {})): DriverFactory {
   return (_agent, _protocol, emit) => ({
     start,
-    send: vi.fn(async prompt => { sent.push(prompt); emit({ type: 'text', data: { text: 'done' } }); }),
-    interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {})
+    send: vi.fn(async prompt => {
+      sent.push(prompt);
+      emit({ type: 'text', data: { text: 'done' } });
+      emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    }),
+    interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {})
   });
 }
 
 function open(database: string, options: RuntimeOptions = {}, sent: string[] = []) {
-  const repos = createRepositories(database);
+  const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: driverFactory(sent), driverIdleTimeoutMs: 0, ...options
@@ -77,13 +81,13 @@ describe('managed Session workspaces', () => {
     writeFileSync(join(source, 'untracked.txt'), 'keep me\n');
     const workspaceRoot = temporary('dutydeck-workspaces-');
     const startedCwds: string[] = [];
-    const repos = createRepositories(':memory:');
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
       workspaceRoot, driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: configured => {
         startedCwds.push(configured.cwd!);
-        return { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
+        return { start: vi.fn(async () => {}), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}) };
       }
     });
     repositories.push(repos); runtimes.push(runtime);
@@ -121,11 +125,11 @@ describe('managed Session workspaces', () => {
     }
   });
 
-  it('persists a failed preparation, starts no driver, and can retry the same owned intent', async () => {
+  it('persists a failed preparation, starts no driver, and stays blocked from automatic restart', async () => {
     const source = temporary('dutydeck-late-git-');
     const workspaceRoot = temporary('dutydeck-workspaces-');
     const start = vi.fn(async () => {});
-    const repos = createRepositories(':memory:');
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
       workspaceRoot, driverIdleTimeoutMs: 0,
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
@@ -139,13 +143,18 @@ describe('managed Session workspaces', () => {
     expect(await runtime.getWorkspace(failed!.id)).toMatchObject({ state: 'failed', sourceCwd: source });
     expect(start).not.toHaveBeenCalled();
 
+    // Even after the underlying source becomes a valid repository, the frozen
+    // ledger treats the failed workspace as a persistent recovery blocker: a
+    // restart does not transparently re-prepare it and no driver is spawned.
+    // A safe re-prepare entry point is a later recovery unit (see report).
     git(source, 'init', '-q'); git(source, 'config', 'user.email', 'test@example.com'); git(source, 'config', 'user.name', 'Dutydeck Test');
     writeFileSync(join(source, 'code.txt'), 'ready\n'); git(source, 'add', '.'); git(source, 'commit', '-qm', 'baseline');
-    await expect(runtime.restart(failed!.id)).resolves.toMatchObject({ state: 'idle', workspaceMode: 'worktree' });
-    expect(start).toHaveBeenCalledOnce();
+    await expect(runtime.restart(failed!.id)).rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
+    expect(await runtime.getSession(failed!.id)).toMatchObject({ state: 'failed' });
+    expect(start).not.toHaveBeenCalled();
   });
 
-  it('refuses a persisted worktree whose branch identity changed and retains it on archive', async () => {
+  it('rejects reopen when a persisted worktree branch identity changed and retains the worktree', async () => {
     const source = repository();
     const database = join(temporary('dutydeck-db-'), 'runtime.db');
     const workspaceRoot = temporary('dutydeck-workspaces-');
@@ -155,20 +164,20 @@ describe('managed Session workspaces', () => {
     const workspace = (await first.runtime.getWorkspace(session.id))!;
     await first.runtime.stop(session.id);
     expect(existsSync(workspace.repoRoot!)).toBe(true);
-    const persisted = (await first.repos.sessions.get(session.id))!;
-    await first.repos.sessions.save({ ...persisted, state: 'idle' });
     await close(first);
     git(workspace.repoRoot!, 'checkout', '--detach', '-q');
     const second = open(database, { workspaceRoot });
-    await second.runtime.initialize([agent]);
-    expect(await second.runtime.getSession(session.id)).toMatchObject({ state: 'failed', error: expect.stringContaining('no longer belongs') });
-    await second.runtime.archive(session.id);
+    // Reopen proves the worktree identity before attaching the Session; a branch
+    // drift is a hard failure rather than a silently rewritten workspace.
+    await expect(second.runtime.initialize([agent])).rejects.toMatchObject({ code: 'WORKSPACE_OWNERSHIP_MISMATCH' });
     expect(existsSync(workspace.repoRoot!)).toBe(true);
+    await second.runtime.shutdown().catch(() => {});
+    second.repos.close();
   });
 
   it('persists fixed worktree intent before Git mutation and reuses it after source HEAD advances', async () => {
     const source = repository(); const workspaceRoot = temporary('dutydeck-workspaces-');
-    const repos = createRepositories(':memory:'); repositories.push(repos);
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' }); repositories.push(repos);
     const compareAndSet = repos.config.compareAndSet!.bind(repos.config);
     let simulateCrash = true;
     repos.config.compareAndSet = async (key, expected, value) => {
@@ -190,12 +199,15 @@ describe('managed Session workspaces', () => {
     await expect(manager.prepare('ses_crash', temporary('dutydeck-other-source-'), 'worktree')).rejects.toMatchObject({ code: 'WORKSPACE_OWNERSHIP_MISMATCH' });
   });
 
-  it('recovers a SQLite-persisted preparing workspace on Runtime initialization without archiving the Session', async () => {
+  it('blocks unrecovered preparing workspace on Runtime initialization without archiving the Session, preserving intent and baseline', async () => {
     const source = repository(); const workspaceRoot = temporary('dutydeck-workspaces-');
     const database = join(temporary('dutydeck-db-'), 'runtime.db');
-    const seeded = createRepositories(database);
+    const seeded = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
     const timestamp = new Date().toISOString();
-    await seeded.sessions.save({ id: 'ses_runtime_crash', agentId: agent.id, state: 'created', cwd: source, protocol: 'acp', runId: 'run_crash', createdAt: timestamp, updatedAt: timestamp });
+    const claim = seeded.control.attachRuntime('seed');
+    const bound = seeded.execution.bind(claim);
+    bound.createSession({ id: 'ses_runtime_crash', agentId: agent.id, state: 'created', cwd: source, protocol: 'acp', runId: 'run_crash', createdAt: timestamp, updatedAt: timestamp });
+    claim.release();
     const compareAndSet = seeded.config.compareAndSet!.bind(seeded.config);
     seeded.config.compareAndSet = async (key, expected, value) => {
       const state = (JSON.parse(value) as { state?: string }).state;
@@ -209,8 +221,14 @@ describe('managed Session workspaces', () => {
     writeFileSync(join(source, 'new-head.txt'), 'new head\n'); git(source, 'add', '.'); git(source, 'commit', '-qm', 'advance source');
 
     const recovered = open(database, { workspaceRoot }); await recovered.runtime.initialize([agent]);
-    expect(await recovered.runtime.getSession('ses_runtime_crash')).toMatchObject({ state: 'idle', archivedAt: null, workspaceMode: 'worktree' });
-    expect(await recovered.runtime.getWorkspace('ses_runtime_crash')).toMatchObject({ state: 'ready', baselineCommit: fixedBaseline });
+    const blockers = (recovered.runtime as any).resourceBlockers('ses_runtime_crash');
+    expect(blockers.some((b: any) => b.code === 'WORKSPACE_RECOVERY_REQUIRED')).toBe(true);
+    expect(await recovered.runtime.getSession('ses_runtime_crash')).toMatchObject({ state: 'created', archivedAt: null });
+    // Assert the persisted preparing intent and its fixed baseline commit remain untouched.
+    const intentAfter = await (recovered.runtime as any).workspaces.get('ses_runtime_crash');
+    expect(intentAfter?.state).toBe('preparing');
+    expect(intentAfter?.baselineCommit).toBe(fixedBaseline);
+    expect(existsSync(intentAfter!.repoRoot!)).toBe(true);
   });
 });
 
@@ -326,7 +344,7 @@ process.stdout.write(marker.slice(4));
   });
 
   it('keeps verification mutually exclusive with active and queued Agent work and rechecks authorization', async () => {
-    const source = repository(); const sent: string[] = []; const authorize = vi.fn(async () => {});
+    const source = repository(); const sent: string[] = []; const authorize = vi.fn(async (_session?: unknown, actorId?: string) => { void _session; void actorId; });
     const h = open(':memory:', { authorizeExecution: authorize }, sent); await h.runtime.initialize([agent]);
     const session = await h.runtime.start({ agentId: agent.id, cwd: source });
     const verifying = h.runtime.runVerification(session.id, { command: `${process.execPath} -e "setTimeout(()=>{},300)"` }, 'owner');
@@ -340,7 +358,7 @@ process.stdout.write(marker.slice(4));
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
     const busyDriver: AgentDriver = { start: async () => {}, send: () => gate, interrupt: async () => {}, resume: async () => {}, stop: async () => { release(); } };
-    const busyRepos = createRepositories(':memory:');
+    const busyRepos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const busy = new DutydeckRuntime(busyRepos, { driverIdleTimeoutMs: 0, probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }), driverFactory: () => busyDriver });
     repositories.push(busyRepos); runtimes.push(busy);
     await busy.initialize([agent]); const busySession = await busy.start({ agentId: agent.id, cwd: source });
@@ -354,7 +372,11 @@ process.stdout.write(marker.slice(4));
     let releaseAuthorization!: () => void;
     const authorization = new Promise<void>(resolve => { releaseAuthorization = resolve; });
     let blockAuthorization = false;
-    const authorize = vi.fn(async () => { if (blockAuthorization) await authorization; });
+    // Only the verification's entry authorization is held. The frozen ledger
+    // also authorizes at Task acceptance (and again before its command), so
+    // those later calls must pass rather than dead-locking the admitted queue.
+    let entryHeld = false;
+    const authorize = vi.fn(async () => { if (blockAuthorization && !entryHeld) { entryHeld = true; await authorization; } });
     const h = open(':memory:', { authorizeExecution: authorize }, sent); await h.runtime.initialize([agent]);
     const session = await h.runtime.start({ agentId: agent.id, cwd: source });
     const priorTask = withPriorTask ? await h.runtime.send(session.id, 'earlier completed work') : undefined;
@@ -387,38 +409,60 @@ process.stdout.write(marker.slice(4));
 
   it('keeps a Session execution-blocked when persisted verification process identity cannot be recovered', async () => {
     const source = repository(); const database = join(temporary('dutydeck-db-'), 'runtime.db');
+    const owner = { kind: 'installation_owner' as const, id: 'installation_owner' as const };
     const first = open(database); await first.runtime.initialize([agent]);
     const session = await first.runtime.start({ agentId: agent.id, cwd: source });
+    // Establish a real accepted queued Task instead of writing a raw task row.
+    const queued = await first.runtime.dispatch(session.id, 'deferred work');
+    expect(queued.status).toBe('queued');
     const record: VerificationRecord = {
       schemaVersion: 1, revision: 1, id: 'verification_unknown_process', sessionId: session.id,
       command: 'unknown legacy command', cwd: source, status: 'running', startedAt: new Date().toISOString(),
       output: '', outputTruncated: false
     };
     await first.repos.config.set(`runtime_verification:${session.id}:${record.id}`, JSON.stringify({ ...record, processStage: 'command_started' }));
-    await first.repos.tasks.save({ id: 'queued_before_crash', sessionId: session.id, prompt: 'deferred work', status: 'queued', executionContext: { agentPrompt: 'deferred work' }, createdAt: record.startedAt, updatedAt: record.startedAt });
     await close(first);
 
     const factory = vi.fn(driverFactory());
     const second = open(database, { driverFactory: factory });
     await second.runtime.initialize([agent]);
-    expect(await second.runtime.getSession(session.id)).toMatchObject({ state: 'failed', error: expect.stringContaining('process identity is missing') });
+    // The unresolved process is a resource blocker; the Session is not falsely
+    // declared failed/stopped and the workspace stays ready.
+    expect(await second.runtime.getSession(session.id)).toMatchObject({ state: 'idle', error: null });
     expect(await second.runtime.getWorkspace(session.id)).toMatchObject({ state: 'ready' });
     expect(await second.runtime.getVerifications(session.id)).toEqual([expect.objectContaining({ id: record.id, status: 'running' })]);
 
-    const blocked = { code: 'VERIFICATION_RECOVERY_BLOCKED', statusCode: 409 };
-    await expect(second.runtime.restart(session.id)).rejects.toMatchObject(blocked);
-    await expect(second.runtime.resume(session.id)).rejects.toMatchObject(blocked);
-    await expect(second.runtime.send(session.id, 'must not run')).rejects.toMatchObject(blocked);
-    await expect(second.runtime.dispatch(session.id, 'must not queue')).rejects.toMatchObject(blocked);
-    await expect(second.runtime.getTerminalDriver(session.id)).rejects.toMatchObject(blocked);
-    await expect(second.runtime.runVerification(session.id, { command: 'true' })).rejects.toMatchObject(blocked);
+    const restartBlocked = { code: 'VERIFICATION_RECOVERY_BLOCKED', statusCode: 409 };
+
+    // New work is still admitted (resource blockers never reject acceptance)
+    // but stays queued and never reaches a driver while the blocker is present.
+    // Assert this before restart/resume/archive, whose failed transitions revoke
+    // the live session lifecycle token.
+    const admitted = await second.runtime.dispatch(session.id, 'must not run');
+    expect(admitted.status).toBe('queued');
+    await new Promise(resolve => setTimeout(resolve, 120));
+    expect(factory).not.toHaveBeenCalled();
+    expect(await second.runtime.getTasks(session.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: queued.id, status: 'queued' }),
+      expect.objectContaining({ id: admitted.id, status: 'queued' })
+    ]));
+
+    await expect(second.runtime.restart(session.id)).rejects.toMatchObject(restartBlocked);
+    await expect(second.runtime.getTerminalDriver(session.id)).rejects.toMatchObject(restartBlocked);
+    await expect(second.runtime.runVerification(session.id, { command: 'true' })).rejects.toMatchObject(restartBlocked);
+    await expect(second.runtime.resume(session.id)).rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
+    await expect(second.runtime.archive(session.id, owner)).rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
     expect(second.runtime.getDriver(session.id)).toBeUndefined();
     expect(factory).not.toHaveBeenCalled();
 
-    await expect(second.runtime.stop(session.id)).resolves.toBeUndefined();
-    expect(await second.runtime.getSession(session.id)).toMatchObject({ state: 'stopped' });
-    expect(await second.runtime.getTasks(session.id)).toEqual([expect.objectContaining({ id: 'queued_before_crash', status: 'cancelled' })]);
-    await expect(second.runtime.archive(session.id)).resolves.toMatchObject({ archivedAt: expect.any(String) });
+    // Stopping with a real owner cancels the queued Tasks, but the unresolved
+    // verification resource still blocks the Session lifecycle transition.
+    await expect(second.runtime.stop(session.id, owner)).rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
+    expect(await second.runtime.getSession(session.id)).toMatchObject({ state: 'idle' });
+    expect(await second.runtime.getTasks(session.id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: queued.id, status: 'cancelled' }),
+      expect.objectContaining({ id: admitted.id, status: 'cancelled' })
+    ]));
     expect(await second.runtime.getVerifications(session.id)).toHaveLength(1);
   });
 
@@ -426,6 +470,9 @@ process.stdout.write(marker.slice(4));
     if (process.platform !== 'linux') return;
     const source = repository(); const directory = temporary('dutydeck-crash-verification-');
     const database = join(directory, 'runtime.db'); const marker = join(directory, 'writes.log');
+    // Pre-create the database with the frozen ledger authority so the spawned
+    // legacy-opener fixture attaches to an existing ledger_v1 database.
+    createRepositories(database, { newDatabaseAuthority: 'ledger_v1' }).close();
     const writer = join(source, 'verification-writer.mjs');
     writeFileSync(writer, `import { appendFileSync } from 'node:fs';\nconst file=process.argv[2];\nsetInterval(()=>appendFileSync(file,'x'),20);\n`);
     const fixture = join(process.cwd(), 'packages/agent-runtime/tests/fixtures/verification-crash.mts');
@@ -488,7 +535,7 @@ process.stdout.write(marker.slice(4));
 describe('immutable task prompt preparation', () => {
   it.each(['acp', 'pty-cli'] as const)('delivers prepared prompt content through the %s driver', async protocol => {
     const source = repository(); const sent: string[] = [];
-    const repos = createRepositories(':memory:');
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
     const runtime = new DutydeckRuntime(repos, {
       driverIdleTimeoutMs: 0,
       probe: () => ({ protocol, available: true, pause: false, resume: true }),
@@ -509,10 +556,19 @@ describe('immutable task prompt preparation', () => {
       const content = await readFile(skill, 'utf8');
       return { agentPrompt: `${prompt}\n[skill]\n${content}`, skillDeliveries: requests?.map(name => ({ name, path: skill, source: 'workspace' as const, digest: createHash('sha256').update(content).digest('hex'), mode: 'prompt' as const })) };
     });
-    const first = open(database, { prepareTaskPrompt: prepare, authorizeExecution: () => gate, sessionPrompt: (_session, prompt) => `[run]\n${prompt}` });
+    // Acceptance authorizes once so the Task is admitted and its prompt snapshot
+    // is frozen; execution-time authorization then holds the claimed Attempt so
+    // the queued work survives shutdown and is replayed from the frozen input.
+    let acceptanceAuthorized = false;
+    const authorizeExecution = vi.fn(async () => { if (!acceptanceAuthorized) { acceptanceAuthorized = true; return; } await gate; });
+    const first = open(database, { prepareTaskPrompt: prepare, authorizeExecution, sessionPrompt: (_session, prompt) => `[run]\n${prompt}` });
     await first.runtime.initialize([agent]); const session = await first.runtime.start({ agentId: agent.id, cwd: source });
-    const accepted = await first.runtime.dispatch(session.id, 'do work', 'queue', 'channel prompt', undefined, 'owner', 'delivery-1', ['skill-a']);
-    const replay = await first.runtime.dispatch(session.id, 'do work', 'queue', 'channel prompt changed but ignored by replay', undefined, 'owner', 'delivery-1', ['skill-a']);
+    const envelope: TaskRequestV1 = { version: 1, namespace: 'runtime', sessionId: session.id, key: 'delivery-1', prompt: 'do work', mode: 'queue', actor: { kind: 'installation_owner', id: 'installation_owner' }, skills: ['skill-a'], options: {}, sources: [], sourcePayload: { agentPrompt: 'channel prompt', skills: ['skill-a'] } };
+    const accepted = await first.runtime.dispatch(session.id, 'do work', 'queue', 'channel prompt', undefined, 'installation_owner', 'delivery-1', ['skill-a'], envelope);
+    // The redelivered request reuses the accepted Task by its immutable envelope
+    // even though the caller now passes freshly downloaded prompt bytes; the
+    // frozen snapshot wins and prepare is not re-run.
+    const replay = await first.runtime.dispatch(session.id, 'do work', 'queue', 'channel prompt changed but ignored by replay', undefined, 'installation_owner', 'delivery-1', ['skill-a'], envelope);
     expect(replay).toMatchObject({ id: accepted.id, replayed: true }); expect(prepare).toHaveBeenCalledOnce();
     expect(accepted.skillDeliveries).toEqual([expect.objectContaining({ name: 'skill-a', path: skill, mode: 'prompt' })]);
     expect(accepted).not.toHaveProperty('executionContext');
@@ -551,7 +607,9 @@ describe('immutable task prompt preparation', () => {
     order.length = 0;
     await h.runtime.dispatch(session.id, 'work');
     await vi.waitFor(() => expect(order).toContain('send'));
-    expect(order).toEqual(['execution', 'task:prepare', 'execution', 'task:submit', 'send']);
+    // Authorization runs at acceptance, again immediately before prepare, and a
+    // third time before submission; task authority gates prepare and submit.
+    expect(order).toEqual(['execution', 'execution', 'task:prepare', 'execution', 'task:submit', 'send']);
   });
 
   it('rechecks task authority after asynchronous prompt preparation and does not submit when revoked', async () => {
@@ -570,7 +628,9 @@ describe('immutable task prompt preparation', () => {
     await h.runtime.initialize([agent]); const session = await h.runtime.start({ agentId: agent.id, cwd: source });
     const task = await h.runtime.dispatch(session.id, 'will be revoked');
     await started; revoked = true; releasePrompt();
-    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(item => item.id === task.id)?.status).toBe('interrupted'));
+    // A stale-HEAD authorization rejection happens before submission, so the
+    // frozen ledger settles the unsubmitted Attempt as cancelled (not interrupted).
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(item => item.id === task.id)?.status).toBe('cancelled'));
     expect(sent).toEqual([]);
     expect((await h.runtime.getEvents(session.id)).some(event => event.type === 'error')).toBe(false);
   });

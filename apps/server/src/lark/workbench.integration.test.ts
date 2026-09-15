@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { agentConfigSchema, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
+import { RuntimeError, agentConfigSchema, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
@@ -26,7 +26,7 @@ const message = (id: string, text: string, actor = 'ou_alice'): LarkMessageEvent
 
 async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'normal') {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-workbench-'));
-  const repos = createRepositories(join(directory, 'state.db'));
+  const repos = createRepositories(join(directory, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const cards: Array<{ messageId: string; input: any }> = [];
   const prompts: Array<{ sessionId: string; prompt: string }> = [];
   const releases = new Map<string, () => void>();
@@ -43,8 +43,9 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
     sessionEnvironment: session => capabilities.environmentFor(session),
     sessionPrompt: (session, prompt) => tools.promptForSession(session, prompt),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => ({
-      start: async () => {}, interrupt: async () => releases.get(sessionId)?.(), stop: async () => releases.get(sessionId)?.(),
-      send: async prompt => {
+      start: async () => {}, resume: async () => {}, interrupt: async () => releases.get(sessionId)?.(), stop: async () => releases.get(sessionId)?.(),
+      send: async promptOrSubmission => {
+        const prompt = typeof promptOrSubmission === 'string' ? promptOrSubmission : promptOrSubmission.prompt;
         prompts.push({ sessionId, prompt });
         if (mode === 'held' || mode === 'permission' || mode === 'terminal') {
           const wait = new Promise<void>(resolve => releases.set(sessionId, resolve));
@@ -59,8 +60,8 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
     } satisfies AgentDriver)
   });
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://localhost', 'fixture-signing-key');
-  tools = new LarkAgentToolsService(capabilities, repos.config, { workbenchTask: id => runtime.getActiveTaskContext(id) });
-  const broker = new RelayAskBroker({ publish: async (id, input) => { await runtime.publishSessionEvent(id, 'text', { text: input.text, relay: input.kind, askId: input.askId }); } });
+  tools = new LarkAgentToolsService(capabilities, repos.config, { workbenchTask: (id: string) => runtime.getActiveTaskContext(id) });
+  const broker = new RelayAskBroker({ publish: async (id: string, input: any) => { await runtime.publishSessionEvent(id, 'text', { text: input.text, relay: input.kind, askId: input.askId }); } });
   const createCard = vi.fn(async (input: any) => {
     const messageId = `om_card_${cards.length + 1}`;
     cards.push({ messageId, input });
@@ -78,7 +79,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
   const agents = ['alpha', 'beta'].map(id => agentConfigSchema.parse({ id, name: id, command: 'fixture', protocol: 'acp', permissionMode: 'ask', cwd: directory }));
   await runtime.initialize(agents);
   const config: StoredLarkConfig = { appId: 'cli_workbench', appSecret: 'fixture-secret', workspace: directory, defaultAgentId: 'alpha', permissionMode: 'ask', listening: true,
-    fullTrustConfirmed: true, preInjectPrompt: '', groupToolsEnabled: true, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
+    fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: true, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   const coordinator = new LarkMessageCoordinator(runtime, client as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, broker, workbench });
@@ -88,7 +89,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
   cleanup.push(async () => { coordinator.stop(); workbench.close(); await work.close(); broker.close(); for (const release of releases.values()) release(); await app.close(); await runtime.shutdown(); capabilities.close(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   const parent = async () => (await runtime.listSessions()).find(session => session.source === 'lark')!;
   const item = async () => (await work.listBySession((await parent()).id, 'ou_alice'))[0]!;
-  const settle = async () => { await vi.waitFor(async () => expect((await runtime.listSessions()).filter(session => session.source === 'work_item').every(session => ['completed', 'failed', 'stopped'].includes(session.state))).toBe(true)); };
+  const settle = async () => { await vi.waitFor(async () => { const children = (await runtime.listSessions()).filter(session => session.source === 'work_item'); const tasks = (await Promise.all(children.map(s => runtime.getTasks(s.id)))).flat(); expect(tasks.length).toBeGreaterThan(0); expect(tasks.every(t => ['completed','failed','cancelled','interrupted'].includes(t.status))).toBe(true); }); };
   return { directory, repos, runtime, work, broker, approval, terminalWrites, tools, capabilities, interactions, workbench, coordinator, app, client, config, cards, prompts, permissionCalls, releases, parent, item, settle };
 }
 
@@ -193,7 +194,7 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await expect(f.interactions.respond(item.parentSessionId, item.id, { ...input, answer: 'approve' }, 'ou_alice')).rejects.toMatchObject({ statusCode: 403 });
     expect(f.permissionCalls).not.toHaveBeenCalled();
     await f.interactions.respond(item.parentSessionId, item.id, { ...input, answer: 'reject' }, 'ou_alice');
-    expect(f.permissionCalls).toHaveBeenCalledWith(request.requestId, false);
+    expect(f.permissionCalls).toHaveBeenCalledWith(`permit_${request.sessionId}`, false);
   });
 
   it('keeps legacy relay answers closed for managed children and rejects answers after cancellation', async () => {
@@ -285,6 +286,56 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     f.releases.get(parent.id)!();
     await vi.waitFor(() => expect(f.runtime.getActiveTaskContext(parent.id)).toBeUndefined());
     await expect(runWorkCommand('list', [], { turn }, { env, fetcher: fetcher as typeof fetch })).rejects.toMatchObject({ statusCode: 403 });
+  });
+
+  it('prepareDelivery rejects on wrong namespace, wrong App, wrong turn, or missing legacy source when runtime_task_id is missing', async () => {
+    const f = await fixture('held');
+    await f.coordinator.handle(message('om_delivery_narrow', '测试交付来源绑定的窄拒绝'), f.config);
+    await vi.waitFor(() => expect(f.prompts).toHaveLength(1));
+    const parent = await f.parent();
+
+    const cards = await f.repos.channelMappings.list(`lark-card:${f.config.appId}`);
+    const cardMapping = cards.find(c => c.sessionId === parent.id)!;
+    const originalExtra = JSON.parse(cardMapping.extra!);
+
+    // 1. 模拟回执尚未落库（删掉 runtime_task_id）
+    // 1a. 错 turn: saved.turn 设为 9999
+    await f.repos.channelMappings.save({ ...cardMapping, extra: JSON.stringify({ ...originalExtra, runtime_task_id: undefined, turn: 9999 }) });
+    await expect(f.workbench.prepareDelivery(parent.id, 'work_wrong_turn', 'key_wrong_turn')).rejects.toMatchObject({
+      code: 'WORK_ITEM_ORIGIN_MISSING'
+    });
+
+    // 1b. 错 App: saved.app_id 设为 'cli_other_app'
+    await f.repos.channelMappings.save({ ...cardMapping, extra: JSON.stringify({ ...originalExtra, runtime_task_id: undefined, app_id: 'cli_other_app' }) });
+    await expect(f.workbench.prepareDelivery(parent.id, 'work_wrong_app', 'key_wrong_app')).rejects.toMatchObject({
+      code: 'WORK_ITEM_ORIGIN_MISSING'
+    });
+
+    // 1c. 错 namespace: 当前任务接受记录不是 'runtime'
+    const getAccepted = f.repos.execution.getAcceptedTask.bind(f.repos.execution);
+    const spy = vi.spyOn(f.repos.execution, 'getAcceptedTask').mockImplementation((tid: string) => {
+      const real = getAccepted(tid);
+      if (!real) return undefined;
+      return { ...real, request: real.request ? { ...real.request, namespace: 'work_item' as any } : undefined };
+    });
+    await f.repos.channelMappings.save({ ...cardMapping, extra: JSON.stringify({ ...originalExtra, runtime_task_id: undefined }) });
+    await expect(f.workbench.prepareDelivery(parent.id, 'work_wrong_ns', 'key_wrong_ns')).rejects.toMatchObject({
+      code: 'WORK_ITEM_ORIGIN_MISSING'
+    });
+    spy.mockRestore();
+
+    // 1d. legacy 缺来源：getAcceptedTask 抛 EXECUTION_AUTHORITY_LEGACY
+    const legacySpy = vi.spyOn(f.repos.execution, 'getAcceptedTask').mockImplementation(() => {
+      throw new RuntimeError('EXECUTION_AUTHORITY_LEGACY', 'Legacy execution authority', 409);
+    });
+    await expect(f.workbench.prepareDelivery(parent.id, 'work_legacy_missing', 'key_legacy_missing')).rejects.toMatchObject({
+      code: 'WORK_ITEM_ORIGIN_MISSING'
+    });
+    legacySpy.mockRestore();
+
+    // 恢复原卡片映射并放行
+    await f.repos.channelMappings.save({ ...cardMapping, extra: JSON.stringify(originalExtra) });
+    f.releases.get(parent.id)!();
   });
 
   it('retains a failed delivery without running Agents again and accepts only the correct wait owner', async () => {

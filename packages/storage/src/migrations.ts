@@ -1,4 +1,6 @@
 import type Database from 'better-sqlite3'
+import { createTaskExecutionSchema } from './task-execution-migration.js'
+import { createBotConfigurationSchema } from './bot-configuration-migration.js'
 
 export interface Migration {
   version: number
@@ -476,10 +478,8 @@ export const migrations: Migration[] = [
         .join(', ')
       const target = columns.map(name => `"${name}"`).join(', ')
 
-      // schedule_generations / schedule_occurrences / schedule_watermarks 以 ON DELETE RESTRICT 引用本表，
-      // 中途 DROP 必然违反外键。事务内 PRAGMA foreign_keys 是空操作，只能用 defer 把检查推到提交时——
-      // 那时表已按原名重建且行数不变，引用重新成立。
-      db.pragma('defer_foreign_keys = ON')
+      // The migration transaction disables FK enforcement before BEGIN and
+      // verifies all references before COMMIT; deferring DROP's checks is insufficient.
       db.exec(rebuilt)
       db.exec(`INSERT INTO schedule_definitions_rebrand (${target}) SELECT ${selected} FROM schedule_definitions`)
       db.exec('DROP TABLE schedule_definitions')
@@ -501,10 +501,83 @@ export const migrations: Migration[] = [
         .get();
       if (tasksExists) ensureColumn(db, 'tasks', 'interrupted_by_actor', 'interrupted_by_actor TEXT')
     }
-  }
+  },
+  {
+    version: 17,
+    name: 'tasks_add_queue_position',
+    up(db) {
+      // 队列内部稳定排序字段。对现有 status='queued' 且 NULL 位置的任务按每 session created_at、rowid
+      // 稳定顺序赋 1..N；不改变 created_at/updated_at/status/execution_context 等其他字段。
+      const tasksExists = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'")
+        .get();
+      if (!tasksExists) return;
+
+      ensureColumn(db, 'tasks', 'queue_position', 'queue_position INTEGER');
+
+      const queuedWithoutPos = db.prepare(`
+        SELECT id, session_id
+        FROM tasks
+        WHERE status = 'queued' AND queue_position IS NULL
+        ORDER BY session_id ASC, created_at ASC, rowid ASC
+      `).all() as Array<{ id: string; session_id: string }>;
+
+      if (queuedWithoutPos.length > 0) {
+        const updateStmt = db.prepare('UPDATE tasks SET queue_position = ? WHERE id = ?');
+        let currentSession = '';
+        let pos = 0;
+        for (const row of queuedWithoutPos) {
+          if (row.session_id !== currentSession) {
+            currentSession = row.session_id;
+            pos = 1;
+          } else {
+            pos += 1;
+          }
+          updateStmt.run(pos, row.id);
+        }
+      }
+    }
+  },
+  { version: 18, name: 'task_execution_schema_only', up: createTaskExecutionSchema },
+  { version: 19, name: 'bot_configuration_storage_base', up: createBotConfigurationSchema }
 ]
 
+/** Own the outer transaction required by SQLite's table-rebuild procedure. */
+export function withMigrationTransaction(db: Database.Database, work: () => void): void {
+  if (db.inTransaction) throw new Error('DATABASE_MIGRATION_REQUIRES_OUTER_TRANSACTION')
+  const foreignKeys = db.pragma('foreign_keys', { simple: true }) as number
+  let failed = false
+  let failure: unknown
+  try {
+    db.pragma('foreign_keys = OFF')
+    if (db.pragma('foreign_keys', { simple: true }) !== 0) throw new Error('DATABASE_MIGRATION_FOREIGN_KEYS_NOT_DISABLED')
+    db.transaction(() => {
+      work()
+      const violations = db.pragma('foreign_key_check') as unknown[]
+      if (violations.length) throw new Error(`DATABASE_MIGRATION_FOREIGN_KEY_CHECK_FAILED: ${JSON.stringify(violations)}`)
+    }).immediate()
+  } catch (error) {
+    failed = true
+    failure = error
+    throw error
+  } finally {
+    try {
+      db.pragma(`foreign_keys = ${foreignKeys}`)
+      if (db.pragma('foreign_keys', { simple: true }) !== foreignKeys) throw new Error('DATABASE_MIGRATION_FOREIGN_KEYS_NOT_RESTORED')
+    } catch (restoreError) {
+      const errors = failed ? [failure, restoreError] : [restoreError]
+      try { if (db.open) db.close() } catch (closeError) { errors.push(closeError) }
+      throw new AggregateError(errors, 'Database migration foreign key restoration failed')
+    }
+  }
+}
+
 export function runMigrations(db: Database.Database): void {
+  if (!db.inTransaction) {
+    withMigrationTransaction(db, () => runMigrations(db))
+    return
+  }
+  if (db.pragma('foreign_keys', { simple: true }) !== 0) throw new Error('DATABASE_MIGRATION_REQUIRES_FOREIGN_KEYS_DISABLED')
   db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
   const appliedVersions = new Set(
     (db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map(row => row.version)
@@ -517,4 +590,11 @@ export function runMigrations(db: Database.Database): void {
       recordApplied.run(migration.version, new Date().toISOString())
     })()
   }
+}
+
+export function needsMigration(db: Database.Database): boolean {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()) return true;
+  const applied = new Set((db.prepare('SELECT version FROM schema_migrations').all() as Array<{ version: number }>).map(row => row.version));
+  if ([...applied].some(version => !migrations.some(migration => migration.version === version))) throw new Error('DATABASE_SCHEMA_TOO_NEW');
+  return migrations.some(migration => !applied.has(migration.version));
 }

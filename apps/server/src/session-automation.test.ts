@@ -4,14 +4,22 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { sessionScheduleOccurrenceSchema, type RepositoryBundle, type Session, type TaskRecord } from '@dutydeck/shared';
-import { createRepositories } from '@dutydeck/storage';
+import {
+  canonicalExecutionJson,
+  sessionScheduleOccurrenceSchema,
+  type AttemptResultV1,
+  type RepositoryBundle,
+  type RuntimeControlClaim,
+  type Session,
+  type TaskRecord,
+  type TaskRequestV1
+} from '@dutydeck/shared';
+import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionAutomationService, type SessionAutomationRuntime } from './session-automation.js';
 
 const run = promisify(execFile);
-const cleanups: Array<() => Promise<void> | void> = [];
-const shaTask = (sessionId: string, key: string) => `task_${createHash('sha256').update(`${sessionId}\0${key}`).digest('hex')}`;
+const cleanups: Array<() => void | Promise<void>> = [];
 
 async function gitRepository() {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-automation-git-'));
@@ -39,37 +47,132 @@ function githubResponse(headSha: string, runs: Array<{ id: number; conclusion?: 
   })) }), { status: 200, headers: { 'content-type': 'application/json' } });
 }
 
-function mockRuntime(repositories: Pick<RepositoryBundle, 'sessions' | 'tasks'>, options: { crashAfterAcceptance?: boolean } = {}) {
-  const dispatches: TaskRecord[] = [];
-  const runtime: SessionAutomationRuntime = {
-    getSession: id => repositories.sessions.get(id),
-    async dispatch(sessionId, prompt, _mode, agentPrompt, _risk, actorId, idempotencyKey) {
-      const id = shaTask(sessionId, idempotencyKey);
-      const now = new Date().toISOString();
-      const task: TaskRecord = { id, sessionId, prompt, status: 'queued', executionContext: { agentPrompt, ...(actorId ? { actorId } : {}) }, createdAt: now, updatedAt: now };
-      if (await repositories.tasks.create!(task)) dispatches.push(task);
-      if (options.crashAfterAcceptance) throw new Error('process crashed after acceptance');
-      return { id, status: 'queued' };
-    }
-  };
-  return { runtime, dispatches };
+type Repos = ReturnType<typeof createRepositories>;
+interface HarnessSession { id: string; runId: string }
+interface BoundRuntime extends SessionAutomationRuntime {
+  dispatches: TaskRecord[];
+  /** 经真实账本领取并结算 number=1 Attempt；不通过遗留 tasks.save 伪造状态。 */
+  settleTask(taskId: string, outcome?: 'completed' | 'failed' | 'interrupted', text?: string): void;
+  /** 首次领取前经账本取消一个仍 queued（无 Attempt）的任务。 */
+  cancelQueuedTask(taskId: string): void;
+  /** number=1 以 unknown 结算后 retry，number=2 成功；用于验证来源仍固定 number=1。 */
+  settleAttempt1UnknownThenAttempt2Completes(taskId: string, text?: string): void;
 }
 
-async function fixture(options: { database?: string; clock?: Date; fetch?: typeof fetch; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, taskId: string, occurrenceId: string) => Promise<void> } = {}) {
+const claims = new WeakMap<Repos, RuntimeControlClaim>();
+function bound(repos: Repos) {
+  let claim = claims.get(repos);
+  if (!claim) { claim = repos.control.attachRuntime('automation-test'); claims.set(repos, claim); }
+  return repos.execution.bind(claim);
+}
+
+function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { crashAfterAcceptance?: boolean } = {}): BoundRuntime {
+  const dispatches: TaskRecord[] = [];
+  const acceptedInput = (request: TaskRequestV1) => {
+    const actorId = request.actor.kind === 'unspecified' ? undefined : request.actor.id;
+    const executionContext: Record<string, unknown> = {
+      agentPrompt: (request.sourcePayload as { agentPrompt?: string }).agentPrompt ?? request.prompt,
+      ...(actorId ? { actorId } : {})
+    };
+    const content: any = {
+      version: 2 as const,
+      prompt: request.prompt,
+      executionContext,
+      contentSources: [],
+      executionOptions: request.options.permissionMode ? { permissionMode: request.options.permissionMode } : {}
+    };
+    const { digest: _digest, ...unsigned } = content;
+    content.digest = createHash('sha256').update(canonicalExecutionJson(unsigned)).digest('hex');
+    return content;
+  };
+  const runtime: BoundRuntime = {
+    dispatches,
+    async getSession(id) { return repos.sessions.get(id); },
+    async dispatch(sessionId, prompt, _mode, _agentPrompt, _risk, _actorId, _idempotencyKey, _skills, supplied) {
+      if (!supplied) throw new Error('Automation dispatch must reuse the frozen request');
+      const x = bound(repos);
+      const committed = x.acceptTask({ sessionId, runId: harnessSession.runId }, supplied, acceptedInput(supplied), 'back');
+      dispatches.push(committed.task!);
+      if (options.crashAfterAcceptance) throw new Error('process crashed after acceptance');
+      return { id: committed.task!.id, status: committed.task!.status };
+    },
+    settleTask(taskId, outcome = 'completed', text = 'target result') {
+      const task = repos.execution.getTaskExecution(taskId)!.task;
+      const x = bound(repos);
+      const accepted = repos.execution.getAcceptedTask(taskId)!;
+      const runId = harnessSession.runId;
+      const claimed = x.claimNext({ sessionId: task.sessionId, runId });
+      const attempt = claimed!.attempt!;
+      let fence: any = { sessionId: task.sessionId, runId, taskId, attemptId: attempt.attemptId, expectedRevision: attempt.revision };
+      x.appendEvent(fence, { id: `out:${taskId}`, type: 'text', data: { role: 'assistant', text } });
+      x.markSubmissionPending(fence, { submissionId: `sub:${taskId}`, inputDigest: (accepted.input as { digest: string }).digest, resourceRefs: [], authorizationRefs: [] });
+      const current = repos.execution.getTaskExecution(taskId)!.attempts.find(item => item.attemptId === attempt.attemptId)!;
+      fence = { ...fence, expectedRevision: current.revision };
+      const digest = createHash('sha256').update(text, 'utf8').digest('hex');
+      x.settleAttempt(fence, `set:${taskId}`, { kind: 'driver_result', submissionId: `sub:${taskId}`, outcome, outputDigest: digest, stopReason: 'end_turn', complete: true });
+    },
+    cancelQueuedTask(taskId) {
+      const task = repos.execution.getTaskExecution(taskId)!.task;
+      bound(repos).cancelQueued(
+        { sessionId: task.sessionId, runId: harnessSession.runId },
+        taskId,
+        task.revision,
+        { decisionId: `cancel:${taskId}`, actor: { kind: 'channel', id: 'ou_owner', appId: 'cli_app' }, action: 'cancel', evidenceRefs: ['test'], resourceChecks: [] }
+      );
+    },
+    /** 把 number=1 Attempt 以 driver_result unknown 结算（reconcile_required），再经 retry 让 number=2 成功。 */
+    settleAttempt1UnknownThenAttempt2Completes(taskId: string, text = 'second attempt result') {
+      const x = bound(repos);
+      const runId = harnessSession.runId;
+      const claim1 = x.claimNext({ sessionId: harnessSession.id, runId })!;
+      const a1 = claim1.attempt!;
+      let fence: any = { sessionId: harnessSession.id, runId, taskId, attemptId: a1.attemptId, expectedRevision: a1.revision };
+      x.appendEvent(fence, { id: `think:${taskId}`, type: 'thinking', data: { text: 'no final text' } });
+      // unknown：manual confirm_result 决策固化 unknown outcome（number=1 缺可靠输出边界）。
+      x.settleAttempt(fence, `unknown:${taskId}`, {
+        kind: 'manual',
+        outcome: 'unknown',
+        decision: { decisionId: `decision-unknown:${taskId}`, actor: { kind: 'channel', id: 'ou_owner', appId: 'cli_app' }, action: 'confirm_result', evidenceRefs: ['operator'], resourceChecks: [] }
+      });
+      const settled1 = repos.execution.getTaskExecution(taskId)!.attempts.find(i => i.attemptId === a1.attemptId)!;
+      fence = { ...fence, expectedRevision: settled1.revision };
+      // retry 创建 number=2（suspended/not_submitted），再领取并成功结算。
+      x.retryAttempt(fence, { decisionId: `retry:${taskId}`, actor: { kind: 'channel', id: 'ou_owner', appId: 'cli_app' }, action: 'retry', allowDuplicateEffects: true, evidenceRefs: ['operator'], resourceChecks: [] }, []);
+      const claim2 = x.claimNext({ sessionId: harnessSession.id, runId })!;
+      const a2 = claim2.attempt!;
+      expect(a2.number).toBe(2);
+      let fence2: any = { sessionId: harnessSession.id, runId, taskId, attemptId: a2.attemptId, expectedRevision: a2.revision };
+      const accepted = repos.execution.getAcceptedTask(taskId)!;
+      x.appendEvent(fence2, { id: `out2:${taskId}`, type: 'text', data: { role: 'assistant', text } });
+      x.markSubmissionPending(fence2, { submissionId: `sub2:${taskId}`, inputDigest: (accepted.input as { digest: string }).digest, resourceRefs: [], authorizationRefs: [] });
+      const cur2 = repos.execution.getTaskExecution(taskId)!.attempts.find(i => i.attemptId === a2.attemptId)!;
+      fence2 = { ...fence2, expectedRevision: cur2.revision };
+      const digest = createHash('sha256').update(text, 'utf8').digest('hex');
+      x.settleAttempt(fence2, `set2:${taskId}`, { kind: 'driver_result', submissionId: `sub2:${taskId}`, outcome: 'completed', outputDigest: digest, stopReason: 'end_turn', complete: true });
+    }
+  };
+  return runtime;
+}
+
+async function fixture(options: { database?: string; clock?: Date; fetch?: typeof fetch; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void> } = {}) {
   const directory = options.database ? undefined : await mkdtemp(join(tmpdir(), 'dutydeck-automation-db-'));
   if (directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const database = options.database ?? join(directory!, 'dutydeck.db');
-  const repositories = createRepositories(database);
-  cleanups.push(() => repositories.close());
+  const repositories = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+  cleanups.push(() => { const claim = claims.get(repositories); claim?.release(); repositories.close(); });
   const cwd = await gitRepository();
-  const session: Session = { id: `ses_${Math.random()}`, agentId: 'codex', state: 'idle', cwd, runId: 'run_1', createdAt: '2026-09-12T00:00:00.000Z', updatedAt: '2026-09-12T00:00:00.000Z' };
-  await repositories.sessions.save(session);
+  // 平台 actor 必须带可核对 App 域：使用真实 lark 来源会话，禁止伪造安装者。
+  const claim = repositories.control.attachRuntime('automation-test');
+  claims.set(repositories, claim);
+  const nowIso = '2026-09-12T00:00:00.000Z';
+  const session: Session = { id: `ses_${Math.random()}`, agentId: 'codex', state: 'idle', cwd, runId: 'run_1', source: 'lark', sourceId: 'cli_app:oc_chat:group', permissionMode: 'ask', createdAt: nowIso, updatedAt: nowIso };
+  repositories.execution.bind(claim).createSession({ id: session.id, runId: session.runId, agentId: session.agentId, cwd, state: 'idle', source: 'lark', sourceId: session.sourceId, permissionMode: 'ask', createdAt: nowIso, updatedAt: nowIso });
   const now = { value: options.clock ?? new Date('2026-09-12T00:00:00.000Z') };
-  const mocked = mockRuntime(repositories, { crashAfterAcceptance: options.crashAfterAcceptance });
+  const mocked = ledgerRuntime(repositories, { id: session.id, runId: session.runId }, { crashAfterAcceptance: options.crashAfterAcceptance });
   const allowed = { value: true };
   const service = new SessionAutomationService({
     repositories,
-    runtime: mocked.runtime,
+    runtime: mocked,
     authorize: async () => allowed.value,
     githubFetch: options.fetch ?? (vi.fn(async () => githubResponse((await run('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim())) as typeof fetch),
     clock: () => new Date(now.value),
@@ -93,12 +196,11 @@ const scheduleInput = {
 };
 
 describe('SessionAutomationService schedules', () => {
-  it('stays disabled until explicit enable and two SQLite-backed services claim one occurrence', async () => {
+  it('stays disabled until explicit enable and two services sharing one runtime ledger claim one occurrence', async () => {
     const first = await fixture();
-    const secondRepositories = createRepositories(first.database);
-    cleanups.push(() => secondRepositories.close());
-    const secondRuntime = mockRuntime(secondRepositories);
-    const second = new SessionAutomationService({ repositories: secondRepositories, runtime: secondRuntime.runtime, authorize: async () => true, clock: () => new Date(first.now.value) });
+    // 多个自动化服务共享同一个 runtime 账本连接（执行账本只允许一个 runtime owner）；
+    // 第二服务仍通过 Config CAS 竞争领取，只有一个 occurrence 被处理。
+    const second = new SessionAutomationService({ repositories: first.repositories, runtime: first, authorize: async () => true, clock: () => new Date(first.now.value) });
     cleanups.push(() => second.close());
 
     const created = await first.service.createSchedule(first.session.id, scheduleInput, 'ou_owner');
@@ -129,8 +231,8 @@ describe('SessionAutomationService schedules', () => {
     expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
 
     const [task] = await h.repositories.tasks.listBySession(h.session.id);
-    await h.repositories.tasks.save({ ...task!, status: 'completed', updatedAt: h.now.value.toISOString() });
-    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h.runtime, authorize: async () => true, clock: () => new Date(h.now.value) });
+    h.settleTask(task!.id);
+    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value) });
     cleanups.push(() => restored.close());
     await restored.tick();
     expect(await h.repositories.tasks.listBySession(h.session.id)).toHaveLength(1);
@@ -209,10 +311,7 @@ describe('SessionAutomationService schedules', () => {
     const firstTick = first.service.tick();
     await vi.waitFor(() => expect(calls).toBe(2));
 
-    const secondRepositories = createRepositories(first.database);
-    cleanups.push(() => secondRepositories.close());
-    const secondRuntime = mockRuntime(secondRepositories);
-    const second = new SessionAutomationService({ repositories: secondRepositories, runtime: secondRuntime.runtime, authorize: async () => true, githubFetch: request, clock: () => new Date(first.now.value) });
+    const second = new SessionAutomationService({ repositories: first.repositories, runtime: first, authorize: async () => true, githubFetch: request, clock: () => new Date(first.now.value) });
     cleanups.push(() => second.close());
     first.now.value = new Date('2026-09-12T00:01:32.000Z');
     await second.tick();
@@ -258,11 +357,21 @@ describe('SessionAutomationService schedules', () => {
         delivery: { status: 'not_requested', attempts: 0, updatedAt: timestamp }, createdAt: timestamp, updatedAt: timestamp
       })));
     }
-    const terminalTask: TaskRecord = { id: 'task_terminal', sessionId: h.session.id, prompt: 'done', status: 'completed', createdAt: timestamp, updatedAt: timestamp };
-    const activeTask: TaskRecord = { id: 'task_active', sessionId: h.session.id, prompt: 'active', status: 'queued', createdAt: timestamp, updatedAt: timestamp };
-    await h.repositories.tasks.save(terminalTask);
-    await h.repositories.tasks.save(activeTask);
-    for (const [id, taskId] of [['zzzy_terminal', terminalTask.id], ['zzzz_active', activeTask.id]] as const) {
+    // 经真实账本接受两条任务：一条结算完成，一条仍 queued；occurrence 不带 admission，由 refresh 固定 legacy_partial。
+    const accept = (key: string) => {
+      const id = executionTaskId('schedule', h.session.id, key);
+      const x = bound(h.repositories);
+      const request: TaskRequestV1 = { version: 1, namespace: 'schedule', key, sessionId: h.session.id, actor: { kind: 'channel', id: 'ou_owner', appId: 'cli_app' }, prompt: 'x', mode: 'queue', skills: [], options: { permissionMode: 'ask' }, sources: [], sourcePayload: { agentPrompt: 'x', skills: [] } };
+      const input: any = { version: 2, prompt: 'x', executionContext: { agentPrompt: 'x', actorId: 'ou_owner' }, contentSources: [], executionOptions: { permissionMode: 'ask' } };
+      const { digest: _digest, ...unsigned } = input;
+      input.digest = createHash('sha256').update(canonicalExecutionJson(unsigned)).digest('hex');
+      x.acceptTask({ sessionId: h.session.id, runId: 'run_1' }, request, input, 'back');
+      return id;
+    };
+    const terminalId = accept('session-automation:schedule:zzzy_terminal');
+    const activeId = accept('session-automation:schedule:zzzz_active');
+    h.settleTask(terminalId);
+    for (const [id, taskId] of [['zzzy_terminal', terminalId], ['zzzz_active', activeId]] as const) {
       await h.repositories.config.set(`session_automation/occurrence/${id}`, JSON.stringify(sessionScheduleOccurrenceSchema.parse({
         schemaVersion: 1, id, revision: 1, scheduleId: created.id, sessionId: h.session.id, generation: 2,
         scheduledForUtc: timestamp, conditionStatus: 'passed', runStatus: 'accepted', taskId,
@@ -280,8 +389,8 @@ describe('SessionAutomationService schedules', () => {
     const enabledCandidate = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
     const disabledCandidate = await h.service.createSchedule(h.session.id, { ...scheduleInput, name: 'Cannot enable later' }, 'ou_owner');
     const enabled = await h.service.updateSchedule(h.session.id, enabledCandidate.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
-    const archived = { ...h.session, state: 'stopped' as const, archivedAt: '2026-09-12T00:00:30.000Z', updatedAt: '2026-09-12T00:00:30.000Z' };
-    await h.repositories.sessions.save(archived);
+    const boundX = bound(h.repositories);
+    boundX.patchSession({ sessionId: h.session.id, runId: 'run_1' }, { state: 'stopped', archivedAt: '2026-09-12T00:00:30.000Z' });
     await expect(h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_NOT_ACTIVE' });
     await expect(h.service.updateSchedule(h.session.id, disabledCandidate.id, { expectedRevision: 1, enabled: true }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_NOT_ACTIVE' });
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
@@ -336,7 +445,7 @@ describe('SessionAutomationService schedules', () => {
     h.now.value = new Date('2026-09-12T00:01:01.000Z');
     await h.service.tick();
     const [cancelledTask] = await h.repositories.tasks.listBySession(h.session.id);
-    await h.repositories.tasks.save({ ...cancelledTask!, status: 'cancelled', updatedAt: h.now.value.toISOString() });
+    h.cancelQueuedTask(cancelledTask!.id);
 
     await h.service.tick();
     const cancelledOccurrence = (await h.service.listBySession(h.session.id)).occurrences[0];
@@ -361,6 +470,25 @@ describe('SessionAutomationService schedules', () => {
     await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: enabled.revision, enabled: false }, 'ou_owner');
     await expect(h.service.authorizeTask(task!, 'submit')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_TASK_REVOKED' });
   });
+
+  it('keeps a source blocked on the number=1 unknown attempt even when a later attempt succeeds', async () => {
+    const h = await fixture();
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await h.service.tick();
+    const [task] = await h.repositories.tasks.listBySession(h.session.id);
+    // number=1 unknown，retry 后 number=2 成功。
+    h.settleAttempt1UnknownThenAttempt2Completes(task!.id);
+    await h.service.tick();
+    const occurrence = (await h.service.listBySession(h.session.id)).occurrences[0]!;
+    expect(occurrence.runStatus).toBe('blocked');
+    expect((occurrence as { blockReason?: string }).blockReason).toBe('reconcile_required');
+    // blocked 来源持续挡下一次触发：推进到下一分钟也不创建新 occurrence。
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    await h.service.tick();
+    expect((await h.service.listBySession(h.session.id)).occurrences).toHaveLength(1);
+  });
 });
 
 describe('SessionAutomationService GitHub CI subscriptions', () => {
@@ -369,7 +497,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     const prepared: string[] = [];
     const service = new SessionAutomationService({
       repositories: h.repositories,
-      runtime: h.runtime,
+      runtime: h,
       authorize: async () => true,
       prepareDelivery: async (sessionId, id) => {
         expect(sessionId).toBe(h.session.id);
@@ -421,7 +549,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     const persisted = JSON.parse((await h.repositories.config.get(`session_automation/ci/${subscription.id}`))!) as { dispatchPrompt: string };
 
     h.now.value = new Date('2026-09-12T00:00:31.000Z');
-    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h.runtime, authorize: async () => true, githubFetch: vi.fn(async () => githubResponse(head, [{ id: 999, conclusion: 'success', name: 'different later result' }])) as typeof fetch, clock: () => new Date(h.now.value) });
+    const restored = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, githubFetch: vi.fn(async () => githubResponse(head, [{ id: 999, conclusion: 'success', name: 'different later result' }])) as typeof fetch, clock: () => new Date(h.now.value) });
     cleanups.push(() => restored.close());
     await restored.tick();
     release();
@@ -528,7 +656,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     const created = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
     const [task] = await h.repositories.tasks.listBySession(h.session.id);
-    await h.repositories.tasks.save({ ...task!, status: 'cancelled', updatedAt: h.now.value.toISOString() });
+    h.cancelQueuedTask(task!.id);
 
     await h.service.tick();
     expect((await h.service.listBySession(h.session.id)).subscriptions.find(item => item.id === created.id)).toMatchObject({
@@ -547,19 +675,19 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     const subscription = await h.service.subscribeCi(h.session.id, { ttlSeconds: 600 }, 'ou_owner');
     await h.service.tick();
     const [task] = await h.repositories.tasks.listBySession(h.session.id);
-    await h.repositories.tasks.save({ ...task!, status: 'completed', updatedAt: new Date().toISOString() });
+    h.settleTask(task!.id);
     await h.service.tick();
     expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'error', attempts: 1 });
     await h.service.tick();
     expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'delivered', attempts: 2 });
     expect(deliver).toHaveBeenCalledTimes(2);
-    expect(deliver).toHaveBeenLastCalledWith(h.session.id, task?.id, subscription.id, subscription.id);
+    expect(deliver).toHaveBeenLastCalledWith(h.session.id, expect.objectContaining({ taskId: task?.id }), subscription.id, subscription.id);
     expect(h.dispatches).toHaveLength(1);
   });
 
   it('rejects protected reads and writes when no service authorizer is wired', async () => {
     const h = await fixture();
-    const service = new SessionAutomationService({ repositories: h.repositories, runtime: h.runtime });
+    const service = new SessionAutomationService({ repositories: h.repositories, runtime: h });
     cleanups.push(() => service.close());
     await expect(service.listBySession(h.session.id)).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_AUTH_UNWIRED' });
     await expect(service.subscribeCi(h.session.id, {})).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_AUTH_UNWIRED' });

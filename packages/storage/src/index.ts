@@ -3,16 +3,21 @@ import { and, asc, desc, eq, gt, lt } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
-import type { AgentConfig, AgentEvent, RepositoryBundle, Session, TaskRecord } from '@dutydeck/shared';
+import type { AgentConfig, AgentEvent, RepositoryBundle, RepositoryOpenOptions, Session, TaskRecord } from '@dutydeck/shared';
 import { agentConfigs, channelMappings, configs, errors, events, machines, permissionRequests, projects, sessions, tasks, toolCalls } from './schema.js';
-import { runMigrations } from './migrations.js';
+import { RuntimeError } from '@dutydeck/shared';
+import { createTaskExecutionRepository } from './task-execution.js';
+import { needsMigration, runMigrations, withMigrationTransaction } from './migrations.js';
 import { createFoundationRepositories } from './foundation.js';
 import { createWp1aRepositories } from './group-policy.js';
 import { createScheduleFoundationRepositories } from './schedule-foundation.js';
+import { canonicalDatabase, openDatabaseControl } from './database-control.js';
 export * from './schema.js';
+export * from './task-execution.js';
 export * from './foundation.js';
 export * from './group-policy.js';
 export * from './schedule-foundation.js';
+export * from './execution-inspection.js';
 
 export const EVENT_WINDOW_DEFAULT_LIMIT = 200;
 export const EVENT_WINDOW_MAX_LIMIT = 1_000;
@@ -51,7 +56,6 @@ function prepareDatabaseFile(filename: string): void {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
     }
   }
-  chmodSync(filename, PRIVATE_FILE_MODE);
 }
 
 function restrictDatabaseFiles(filename: string): void {
@@ -84,38 +88,80 @@ function backupBeforeV10(sqlite: Database.Database, filename: string) {
   sqlite.exec(`VACUUM INTO '${backupFilename.replaceAll("'", "''")}'`);
 }
 
-function decodeTask(row: typeof tasks.$inferSelect): TaskRecord {
-  const { interruptedByActor, ...rest } = row;
+type TaskRowLike = typeof tasks.$inferSelect | {
+  id: string;
+  session_id: string;
+  prompt: string;
+  status: string;
+  execution_context: string | null;
+  interrupted_by_actor?: string | null;
+  queue_position?: number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+function decodeTask(row: TaskRowLike): TaskRecord {
+  const sessionId = 'sessionId' in row ? row.sessionId : row.session_id;
+  const executionContextRaw = 'executionContext' in row ? row.executionContext : row.execution_context;
+  const interruptedByActor = 'interruptedByActor' in row ? row.interruptedByActor : row.interrupted_by_actor;
+  const queuePosition = 'queuePosition' in row ? row.queuePosition : row.queue_position;
+  const createdAt = 'createdAt' in row ? row.createdAt : row.created_at;
+  const updatedAt = 'updatedAt' in row ? row.updatedAt : row.updated_at;
+
   return {
-    ...rest,
-    executionContext: row.executionContext ? JSON.parse(row.executionContext) : undefined,
-    ...(interruptedByActor ? { interruptedByActor } : {})
-  } as TaskRecord;
+    id: row.id,
+    sessionId,
+    prompt: row.prompt,
+    status: row.status,
+    executionContext: executionContextRaw ? JSON.parse(executionContextRaw) : undefined,
+    ...(interruptedByActor ? { interruptedByActor } : {}),
+    ...(queuePosition !== null && queuePosition !== undefined ? { queuePosition } : {}),
+    createdAt,
+    updatedAt
+  };
 }
 
-export function createRepositories(filename: string): RepositoryBundle {
+export function createRepositories(filename: string, options: RepositoryOpenOptions = {}): RepositoryBundle {
   if (filename !== ':memory:') {
     prepareDatabaseDirectory(filename);
     prepareDatabaseFile(filename);
+    filename = canonicalDatabase(filename);
     restrictDatabaseFiles(filename);
   }
-  const sqlite = new Database(filename);
+  const control = openDatabaseControl(filename, options);
+  let sqlite: Database.Database;
+  try { sqlite = new Database(filename); } catch (error) { control.close(); throw error; }
   try {
     sqlite.pragma('foreign_keys = ON');
+    const migrate = needsMigration(sqlite) || control.needsRecovery();
+    if (migrate) control.beginUpgrade();
     sqlite.pragma('journal_mode = WAL');
-    backupBeforeV10(sqlite, filename);
-    runMigrations(sqlite);
+    if (migrate) {
+      backupBeforeV10(sqlite, filename);
+      withMigrationTransaction(sqlite, () => {
+        control.assertMaintenance(sqlite);
+        const fresh = !sqlite.prepare("SELECT 1 FROM main.sqlite_schema WHERE name NOT GLOB 'sqlite_*' AND name NOT IN ('dutydeck_control', 'dutydeck_access') LIMIT 1").get();
+        runMigrations(sqlite);
+        if (fresh && options.newDatabaseAuthority === 'ledger_v1') {
+          const changed = sqlite.prepare("UPDATE execution_authority SET authority='ledger_v1' WHERE id=1 AND authority='legacy'").run();
+          if (changed.changes !== 1) throw new RuntimeError('DATABASE_BOOTSTRAP_FAILED', 'New database authority was not initialized', 500);
+        }
+      });
+      control.finishUpgrade();
+    }
     if (filename !== ':memory:') restrictDatabaseFiles(filename);
-  } catch (error) {
-    sqlite.close();
-    if (filename !== ':memory:') restrictDatabaseFiles(filename);
-    throw error;
-  }
   const db = drizzle(sqlite);
+  const execution = createTaskExecutionRepository(sqlite, control);
+  const legacyWrite = <T>(work: () => T): T => sqlite.transaction(() => {
+    if (execution.authority() !== 'legacy') throw new RuntimeError('EXECUTION_LEDGER_REQUIRED', 'Execution writes require a bound ledger command', 409);
+    return work();
+  }).immediate();
   const foundationRepositories = createFoundationRepositories(sqlite);
   const wp1aRepositories = createWp1aRepositories(sqlite);
   const scheduleRepositories = createScheduleFoundationRepositories(sqlite);
   return {
+    control,
+    execution,
     agents: {
       async list() { return db.select().from(agentConfigs).all().map(r => JSON.parse(r.json)); },
       async get(id) { const r = db.select().from(agentConfigs).where(eq(agentConfigs.id, id)).get(); return r ? JSON.parse(r.json) : undefined; },
@@ -125,7 +171,18 @@ export function createRepositories(filename: string): RepositoryBundle {
     sessions: {
       async list() { return db.select().from(sessions).orderBy(asc(sessions.createdAt)).all() as Session[]; },
       async get(id) { return db.select().from(sessions).where(eq(sessions.id, id)).get() as Session | undefined; },
-      async save(s) { db.insert(sessions).values(s).onConflictDoUpdate({ target: sessions.id, set: s }).run(); }
+      async save(s) {
+        sqlite.transaction(() => {
+          if (execution.authority() === 'ledger_v1') {
+            const current = db.select().from(sessions).where(eq(sessions.id, s.id)).get();
+            if (!current) throw new RuntimeError('EXECUTION_LEDGER_REQUIRED', 'Session creation requires a bound ledger command', 409);
+            for (const key of ['state', 'runId', 'archivedAt', 'error', 'agentId', 'cwd', 'source', 'sourceId', 'protocol', 'createdAt'] as const) {
+              if ((current[key] ?? null) !== (s[key] ?? null)) throw new RuntimeError('EXECUTION_LEDGER_REQUIRED', `Session ${key} requires a bound ledger command`, 409);
+            }
+            db.update(sessions).set({ model: s.model, reasoningEffort: s.reasoningEffort, systemPrompt: s.systemPrompt, permissionMode: s.permissionMode, updatedAt: s.updatedAt }).where(eq(sessions.id, s.id)).run();
+          } else db.insert(sessions).values(s).onConflictDoUpdate({ target: sessions.id, set: s }).run();
+        }).immediate();
+      }
     },
     tasks: {
       async get(id) {
@@ -134,16 +191,110 @@ export function createRepositories(filename: string): RepositoryBundle {
       },
       async create(task) {
         const row = { ...task, executionContext: task.executionContext ? JSON.stringify(task.executionContext) : null };
-        return db.insert(tasks).values(row).onConflictDoNothing({ target: tasks.id }).run().changes === 1;
+        return legacyWrite(() => db.insert(tasks).values(row).onConflictDoNothing({ target: tasks.id }).run().changes === 1);
       },
       async save(t) {
         const row = { ...t, executionContext: t.executionContext ? JSON.stringify(t.executionContext) : null };
-        db.insert(tasks).values(row).onConflictDoUpdate({ target: tasks.id, set: row }).run();
+        legacyWrite(() => db.insert(tasks).values(row).onConflictDoUpdate({ target: tasks.id, set: row }).run());
       },
-      async listBySession(sessionId) { return db.select().from(tasks).where(eq(tasks.sessionId, sessionId)).orderBy(asc(tasks.createdAt)).all().map(decodeTask); }
+      async listBySession(sessionId) {
+        return db.select().from(tasks).where(eq(tasks.sessionId, sessionId)).orderBy(asc(tasks.createdAt)).all().map(decodeTask);
+      },
+      async enqueue(task, position) {
+        if (task.status !== 'queued') {
+          throw new Error(`Cannot enqueue task with status '${task.status}': status must be 'queued'`);
+        }
+
+        return legacyWrite(() => {
+          const existing = sqlite.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id) as TaskRowLike | undefined;
+          if (existing) {
+            return {
+              task: decodeTask(existing),
+              created: false
+            };
+          }
+
+          const stats = sqlite.prepare(`
+            SELECT
+              MIN(COALESCE(queue_position, 0)) AS min_pos,
+              MAX(COALESCE(queue_position, 0)) AS max_pos
+            FROM tasks
+            WHERE session_id = ? AND status = 'queued'
+          `).get(task.sessionId) as { min_pos: number | null; max_pos: number | null } | undefined;
+
+          const minVal = stats?.min_pos !== null && stats?.min_pos !== undefined ? Number(stats.min_pos) : 0;
+          const maxVal = stats?.max_pos !== null && stats?.max_pos !== undefined ? Number(stats.max_pos) : 0;
+
+          const calculatedPosition = position === 'front'
+            ? Math.min(0, minVal) - 1
+            : Math.max(0, maxVal) + 1;
+
+          const executionContextJson = task.executionContext ? JSON.stringify(task.executionContext) : null;
+          const interruptedByActor = task.interruptedByActor ?? null;
+
+          sqlite.prepare(`
+            INSERT INTO tasks (
+              id, session_id, prompt, status, execution_context, interrupted_by_actor,
+              queue_position, created_at, updated_at
+            ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+          `).run(
+            task.id,
+            task.sessionId,
+            task.prompt,
+            executionContextJson,
+            interruptedByActor,
+            calculatedPosition,
+            task.createdAt,
+            task.updatedAt
+          );
+
+          const inserted = sqlite.prepare('SELECT * FROM tasks WHERE id = ?').get(task.id) as TaskRowLike;
+          return {
+            task: decodeTask(inserted),
+            created: true
+          };
+        });
+      },
+      async promoteQueued(sessionId, taskId) {
+        return legacyWrite(() => {
+          const row = sqlite.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRowLike | undefined;
+          if (!row) {
+            return undefined;
+          }
+          const rowSessionId = 'sessionId' in row ? row.sessionId : row.session_id;
+          if (rowSessionId !== sessionId || row.status !== 'queued') {
+            return undefined;
+          }
+
+          const stats = sqlite.prepare(`
+            SELECT MIN(COALESCE(queue_position, 0)) AS min_pos
+            FROM tasks
+            WHERE session_id = ? AND status = 'queued'
+          `).get(sessionId) as { min_pos: number | null } | undefined;
+
+          const minVal = stats?.min_pos !== null && stats?.min_pos !== undefined ? Number(stats.min_pos) : 0;
+          const newPosition = Math.min(0, minVal) - 1;
+          const updatedAt = new Date().toISOString();
+
+          sqlite.prepare('UPDATE tasks SET queue_position = ?, updated_at = ? WHERE id = ?').run(newPosition, updatedAt, taskId);
+
+          const updated = sqlite.prepare('SELECT * FROM tasks WHERE id = ?').get(taskId) as TaskRowLike;
+          return decodeTask(updated);
+        });
+      },
+      async listQueued(sessionId) {
+        const rows = sqlite.prepare(`
+          SELECT *
+          FROM tasks
+          WHERE session_id = ? AND status = 'queued'
+          ORDER BY COALESCE(queue_position, 0) ASC, created_at ASC, rowid ASC
+        `).all(sessionId) as TaskRowLike[];
+        return rows.map(decodeTask);
+      }
     },
     events: {
-      async append(e) { db.insert(events).values({ ...e, data: JSON.stringify(e.data) }).run(); },
+      highWaterMark(sessionId) { return (sqlite.prepare('SELECT COALESCE(MAX(sequence),0) AS sequence FROM events WHERE session_id=?').get(sessionId) as { sequence: number }).sequence; },
+      async append(e) { legacyWrite(() => db.insert(events).values({ ...e, data: JSON.stringify(e.data) }).run()); },
       async list(sessionId, afterSequence = 0) { return db.select().from(events).where(and(eq(events.sessionId, sessionId), gt(events.sequence, afterSequence))).orderBy(asc(events.sequence)).all().map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[]; },
       async listRecent(sessionId, limit) {
         const rows = db.select().from(events).where(eq(events.sessionId, sessionId)).orderBy(desc(events.sequence)).limit(limit).all();
@@ -163,11 +314,12 @@ export function createRepositories(filename: string): RepositoryBundle {
     },
     config: {
       async get(key) { return db.select().from(configs).where(eq(configs.key, key)).get()?.value; },
-      async set(key, value) { db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
+      async set(key, value) { if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
       async list(prefix) {
         return sqlite.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix) as Array<{ key: string; value: string }>;
       },
       async compareAndSet(key, expected, value) {
+        if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
         return expected === undefined
           ? sqlite.prepare('INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, value).changes === 1
           : sqlite.prepare('UPDATE configs SET value = ? WHERE key = ? AND value = ?').run(value, key, expected).changes === 1;
@@ -188,9 +340,23 @@ export function createRepositories(filename: string): RepositoryBundle {
     ...wp1aRepositories,
     ...scheduleRepositories,
     close() {
+      control.assertClosable();
       if (filename !== ':memory:') restrictDatabaseFiles(filename);
-      sqlite.close();
+      if (sqlite.open) sqlite.close();
       if (filename !== ':memory:') restrictDatabaseFiles(filename);
+      control.close();
     }
   };
+  } catch (error) {
+    try {
+      if (sqlite.open) sqlite.close();
+      if (filename !== ':memory:') restrictDatabaseFiles(filename);
+      control.close();
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], 'Database open and cleanup failed');
+    }
+    throw error;
+  }
 }
+
+export { childProcessIdentity, observeProcess } from './process-identity.js';

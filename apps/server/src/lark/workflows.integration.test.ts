@@ -24,33 +24,52 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
 });
 async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean; answerChunks?: string[] } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflows-'));
-  const repos = createRepositories(join(cwd, 'state.db'));
+  const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
   let release: (() => void) | undefined;
   const send = vi.fn(); const resolvePermission = vi.fn();
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
+      let currentRelease: (() => void) | undefined;
+      let currentCancelled = false;
+      const cancelCurrent = () => {
+        if (kind === 'permission') emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'rejected', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
+        currentCancelled = true;
+        emit({ type: 'completed', data: { stopReason: 'cancelled' } });
+        currentRelease?.();
+        currentRelease = undefined;
+      };
       const driver: AgentDriver = {
-        start: async () => {}, stop: async () => { release?.(); }, interrupt: async () => { release?.(); },
+        start: async () => {}, resume: async () => {}, stop: async () => cancelCurrent(), interrupt: async () => cancelCurrent(),
         send: async prompt => {
-          send(prompt);
+          try { send(prompt); } catch (error) { emit({ type: 'error', data: { message: String(error) } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
+          currentCancelled = false;
           if (kind === 'ask') {
             const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？' });
-            emit({ type: 'text', data: { text: `已收到：${result.answer}` } });
+            if (result.status === 'answered') {
+              emit({ type: 'text', data: { text: `已收到：${result.answer}` } });
+            }
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
           } else if (kind === 'permission') {
-            const waiting = new Promise<void>(done => { release = done; });
             emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'pending', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
-            await waiting;
+            await new Promise<void>(done => { currentRelease = done; });
+            if (currentCancelled) return;
+            currentRelease = undefined;
             emit({ type: 'text', data: { text: '审批处理完成' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
           } else if (options.answerChunks) {
             emit({ type: 'text', data: { text: '正在检查执行结果' } });
             emit({ type: 'tool_call', data: { id: 'tool_check', name: 'Bash', input: { command: 'pnpm test' }, status: 'running' } });
             emit({ type: 'tool_result', data: { id: 'tool_check', output: '125 passed', status: 'completed' } });
             for (const text of options.answerChunks) emit({ type: 'text', data: { text } });
-          } else emit({ type: 'text', data: { text: '工作已完成' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          } else {
+            emit({ type: 'text', data: { text: '工作已完成' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          }
         },
-        resolvePermission: async (id, approved) => { resolvePermission(id, approved); release?.(); return true; }
+        resolvePermission: async (id, approved) => { resolvePermission(id, approved); emit({ type: 'permission_request', data: { id, title: '修改文件', status: approved ? 'approved' : 'rejected', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } }); currentRelease?.(); currentRelease = undefined; return true; }
       };
       return driver;
     }
@@ -60,7 +79,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]);
   const config: StoredLarkConfig = { appId: 'cli_workflows', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
-    fullTrustConfirmed: true, preInjectPrompt: '', groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
+    fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   let groupManager: LarkGroupManager | undefined;
@@ -108,7 +127,11 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   cleanups.push(async () => { coordinator.stop(); broker.close(); release?.(); await broker.flush(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   const interactions = async () => (await repos.config.list!(`lark.interaction.${config.appId}.`)).map(row => JSON.parse(row.value) as LarkInteraction);
   const completed = async () => {
-    await vi.waitFor(async () => expect((await runtime.listSessions()).some(session => session.state === 'completed')).toBe(true));
+    await vi.waitFor(async () => {
+      const sessions = await runtime.listSessions();
+      const tasks = (await Promise.all(sessions.map(s => runtime.getTasks(s.id)))).flat();
+      expect(tasks.some(t => t.status === 'completed')).toBe(true);
+    });
     await vi.waitFor(async () => expect((await repos.channelMappings.list(`lark-card:${config.appId}`)).some(mapping => {
       const saved = JSON.parse(mapping.extra ?? '{}');
       return mapping.externalId === 'om_task' && saved.state === 'completed' && saved.final_delivery_state === 'delivered';
@@ -347,7 +370,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const alicePermission = (await h.interactions()).find(item => item.kind === 'permission' && item.state === 'pending')!;
 
     await h.coordinator.handle(event('om_bob_task', 'Bob 的任务', { senderOpenId: 'ou_bob' }), h.config);
-    await h.runtime.resolvePermission!(alicePermission.sessionId, 'native_permission', true);
+    await h.runtime.resolvePermission!(alicePermission.sessionId, alicePermission.nativeId, true);
     await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(2));
     await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'permission' && item.state === 'pending' && item.event.senderOpenId === 'ou_bob')).toBe(true));
 
@@ -370,10 +393,10 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
       await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(3));
       const tasks = await h.runtime.getTasks(session!.id);
       const retried = tasks.at(-1)!;
-      expect((await h.repos.tasks.get(retried.id))?.executionContext?.actorId).toBe('ou_bob');
+      expect((await h.repos.tasks.get!(retried.id))?.executionContext?.actorId).toBe('ou_bob');
       const retryPermission = (await h.interactions()).find(item => item.kind === 'permission' && item.state === 'pending' && item.event.senderOpenId === 'ou_bob');
       expect(retryPermission).toBeDefined();
-      await h.runtime.resolvePermission!(retryPermission!.sessionId, 'native_permission', true);
+      await h.runtime.resolvePermission!(retryPermission!.sessionId, retryPermission!.nativeId, true);
       await vi.waitFor(async () => expect((await h.runtime.getTasks(session!.id)).at(-1)?.status).toBe('completed'));
     } finally { restored.stop(); }
   });
@@ -395,7 +418,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(outcomes.filter(outcome => outcome.type === 'success')).toHaveLength(1);
     const [session] = await h.runtime.listSessions();
     const retried = (await h.runtime.getTasks(session!.id)).at(-1)!;
-    expect((await h.repos.tasks.get(retried.id))?.executionContext?.actorId).toBe('ou_bob');
+    expect((await h.repos.tasks.get!(retried.id))?.executionContext?.actorId).toBe('ou_bob');
   });
 
   it('replays a crash between Runtime acceptance and inbox bookkeeping without dispatching the task again', async () => {
@@ -592,6 +615,6 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     const [session] = await h.runtime.listSessions();
     const tasks = await h.runtime.getTasks(session!.id);
     expect(tasks.map(task => task.prompt)).toEqual(['生成初稿', '补充一个例子']);
-    expect(await h.repos.tasks.get(tasks[1]!.id)).toMatchObject({ sessionId: session!.id, prompt: '补充一个例子' });
+    expect(await h.repos.tasks.get!(tasks[1]!.id)).toMatchObject({ sessionId: session!.id, prompt: '补充一个例子' });
   });
 });

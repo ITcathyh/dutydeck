@@ -14,9 +14,37 @@
   },
   "files": [
     "src/index.ts",
+    "src/ownership.ts",
+    "src/persistent-event-publisher.ts",
+    "src/process-environment.ts",
+    "src/verification.ts",
+    "src/workspace.ts",
     "dist/index.js",
     "dist/index.js.map",
-    "dist/index.d.ts"
+    "dist/index.d.ts",
+    "dist/ownership.js",
+    "dist/ownership.js.map",
+    "dist/ownership.d.ts",
+    "dist/persistent-event-publisher.js",
+    "dist/persistent-event-publisher.js.map",
+    "dist/persistent-event-publisher.d.ts",
+    "dist/process-environment.js",
+    "dist/process-environment.js.map",
+    "dist/process-environment.d.ts",
+    "dist/verification.js",
+    "dist/verification.js.map",
+    "dist/verification.d.ts",
+    "dist/workspace.js",
+    "dist/workspace.js.map",
+    "dist/workspace.d.ts",
+    "src/ledger.ts",
+    "dist/ledger.js",
+    "dist/ledger.js.map",
+    "dist/ledger.d.ts",
+    "src/driver-context.ts",
+    "dist/driver-context.js",
+    "dist/driver-context.js.map",
+    "dist/driver-context.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -27,7 +55,8 @@
   "dependencies": {
     "@dutydeck/shared": "workspace:*",
     "@dutydeck/acp-client": "workspace:*",
-    "@dutydeck/transports": "workspace:*"
+    "@dutydeck/transports": "workspace:*",
+    "@dutydeck/storage": "workspace:*"
   },
   "devDependencies": {
     "typescript": "5.8.3",

@@ -908,6 +908,30 @@ export const renderLarkProcessElements = (events: AgentEvent[], config: Pick<Sto
 export const renderLarkResultElements = (events: AgentEvent[]) =>
   renderLarkCardElements(events, { hideTraceOnComplete: true }, true, false, undefined, 'result');
 
+export function renderLarkResultTextElements(text: string): LarkCardElement[] {
+  const finalText = redactTraceText(text).trim();
+  const elements: LarkCardElement[] = [];
+  if (finalText) {
+    elements.push({
+      tag: 'markdown',
+      element_id: 'final_output',
+      content: finalText,
+      text_align: 'left',
+      text_size: 'normal_v2',
+      margin: '0px'
+    });
+  } else {
+    elements.push({
+      tag: 'markdown',
+      element_id: 'result_missing',
+      content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。",
+      text_size: 'normal',
+      margin: '4px 0px'
+    });
+  }
+  return elements;
+}
+
 export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit'>, _completed = false) {
   let entries = compactTrace(events);
   if (config.traceLimit) entries = entries.slice(-config.traceLimit);

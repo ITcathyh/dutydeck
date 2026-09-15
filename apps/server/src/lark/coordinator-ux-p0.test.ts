@@ -49,7 +49,7 @@ async function harness(
 ) {
   const protocol = options.protocol ?? 'acp';
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-uxp0-'));
-  const repos = createRepositories(join(cwd, 'state.db'));
+  const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
   let release: (() => void) | undefined;
   const gate = new Promise<void>(done => { release = done; });
@@ -57,31 +57,61 @@ async function harness(
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol, available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, _sessionId) => {
+      // 每次 send 都是独立的一轮：permission 模式重新发审批并等待本轮 release；
+      // interrupt/stop 在当前轮上发所属 completed(cancelled) 并让 send 收口，
+      // 不短路后续新任务（与真实 transport 收到取消后事件驱动结算一致）。
+      let currentRelease: (() => void) | undefined;
+      let currentCancelled = false;
+      const cancelCurrent = () => {
+        // 中断后真实 CLI 会把待决审批回成非 pending（这里 resolved/rejected），
+        // Runtime 据此清掉 pending permission；否则下一轮因旧审批未决无法申领 driver。
+        emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'rejected', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
+        currentCancelled = true;
+        emit({ type: 'completed', data: { stopReason: 'cancelled' } });
+        currentRelease?.();
+        currentRelease = undefined;
+      };
       const driver: AgentDriver = {
         start: async () => {},
-        stop: async () => { if (mode !== 'hang') release?.(); },
-        interrupt: async () => { release?.(); },
+        resume: async () => {},
+        stop: async () => cancelCurrent(),
+        interrupt: async () => cancelCurrent(),
         send: async prompt => {
           send(prompt);
+          currentCancelled = false;
           if (mode === 'permission') {
-            const waiting = new Promise<void>(done => { release = done; });
             emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'pending', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
-            await waiting;
+            await new Promise<void>(done => { currentRelease = done; });
+            if (currentCancelled) return;
+            currentRelease = undefined;
             emit({ type: 'text', data: { text: '审批处理完成' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
           } else if (mode === 'hang') {
             emit({ type: 'text', data: { text: '执行中' } });
             await gate;
             emit({ type: 'text', data: { text: '工作已完成' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
           } else if (options.answerChunks) {
             for (const text of options.answerChunks) emit({ type: 'text', data: { text } });
-          } else emit({ type: 'text', data: { text: '工作已完成' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          } else {
+            emit({ type: 'text', data: { text: '工作已完成' } });
+            emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+          }
         },
-        resolvePermission: async (id, approved) => { resolvePermission(id, approved); release?.(); return true; }
+        resolvePermission: async (id, approved) => {
+          resolvePermission(id, approved);
+          // 批准同样回一条非 pending 审批事件，清除待决记录后再放 send 续跑。
+          emit({ type: 'permission_request', data: { id, title: '修改文件', status: approved ? 'approved' : 'rejected', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
+          currentRelease?.();
+          currentRelease = undefined;
+          return true;
+        }
       };
       return driver;
     }
   });
-  broker = new RelayAskBroker({ publish: async (sessionId, input) => { await runtime.publishSessionEvent(sessionId, 'text', { text: input.text, relay: input.kind, askId: input.askId }); } }, createRelayAskStore(repos.config));
+  broker = new RelayAskBroker({ publish: async (sessionId: string, input: any) => { await runtime.publishSessionEvent(sessionId, 'text', { text: input.text, relay: input.kind, askId: input.askId }); } }, createRelayAskStore(repos.config));
   await broker.initialize();
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol, cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]);
@@ -93,7 +123,7 @@ async function harness(
     return realInterrupt(sessionId, runtimeTaskId, actor);
   }) as typeof runtime.interrupt;
   const config: StoredLarkConfig = { appId: 'cli_uxp0', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
-    fullTrustConfirmed: true, preInjectPrompt: '', groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1_000, hideTraceOnComplete: false,
+    fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1_000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
     ...options.configPatch };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
@@ -105,11 +135,11 @@ async function harness(
     uploadFile: vi.fn(async () => `file_${Math.random()}`), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
     update: vi.fn(async (input: any) => { cards.set(input.messageId, input); return { messageId: input.messageId }; }),
     addReaction: vi.fn(async (messageId: string, emojiType = 'OK') => ({ messageId, reactionId: `reaction_${messageId}_${emojiType}` })),
-    deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async () => []),
+    deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async (_openIds?: string[]) => [] as string[]),
     listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice' }, { memberId: 'ou_bob' }], hasMore: false })),
-    listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
+    listChatMessages: vi.fn(async () => ({ items: [] as any[], hasMore: false })),
     getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', threadId: 'omt_topic', messageType: 'text', rawContent: JSON.stringify({ text: '已核实的引用材料' }), sender: { type: 'user' }, mentions: [] })),
-    getMessageItems: vi.fn(async () => []),
+    getMessageItems: vi.fn(async () => [] as any[]),
     downloadMessageResource: vi.fn(async () => ({ data: new Uint8Array([65, 66, 67]), contentType: 'text/plain' })),
     readDocument: vi.fn(async (url: string) => ({ url, title: '需求', text: '文档中的明确验收条件' }))
   };

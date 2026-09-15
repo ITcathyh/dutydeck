@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { mkdir, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve, sep } from 'node:path';
-import type { ConfigRepository, SessionWorkspace, WorkspaceCleanupBlocker, WorkspaceMode } from '@dutydeck/shared';
+import type { ConfigRepository, SessionWorkspaceProof, SessionWorkspace, WorkspaceCleanupBlocker, WorkspaceMode } from '@dutydeck/shared';
 import { now, RuntimeError } from '@dutydeck/shared';
 import { minimalToolEnvironment } from './process-environment.js';
 
@@ -139,16 +139,16 @@ function workspaceKey(sessionId: string) { return WORKSPACE_KEY_PREFIX + session
 export class WorkspaceManager {
   readonly root: string;
 
-  constructor(private readonly config: ConfigRepository, root?: string) {
+  constructor(private readonly config: ConfigRepository, root?: string, private readonly commit?: (sessionId: string, operation: () => Promise<void>) => Promise<void>) {
     this.root = resolve(root ?? join(homedir(), '.dutydeck', 'workspaces'));
   }
 
-  async get(sessionId: string): Promise<SessionWorkspace | undefined> {
+  async get(sessionId: string, recoverCleaning = true): Promise<SessionWorkspace | undefined> {
     const raw = await this.config.get(workspaceKey(sessionId));
     if (!raw) return undefined;
     try {
       const parsed = JSON.parse(raw) as SessionWorkspace;
-      return await this.tryRecoverCleaning(parsed);
+      return recoverCleaning ? await this.tryRecoverCleaning(parsed) : parsed;
     }
     catch (err) {
       if (err instanceof RuntimeError) throw err;
@@ -156,7 +156,21 @@ export class WorkspaceManager {
     }
   }
 
-  private async replace(record: SessionWorkspace, expected: SessionWorkspace | undefined): Promise<void> {
+  async proof(sessionId: string, expectedCwd: string): Promise<SessionWorkspaceProof> {
+    const raw = await this.config.get(workspaceKey(sessionId));
+    if (!raw) throw new RuntimeError('WORKSPACE_NOT_FOUND', 'Workspace proof is missing', 409);
+    const record: SessionWorkspace = JSON.parse(raw);
+    if (record.sessionId !== sessionId || record.state !== 'ready') throw new RuntimeError('WORKSPACE_NOT_READY', 'Workspace proof is not ready', 409);
+    await this.validate(record);
+    if (await this.config.get(workspaceKey(sessionId)) !== raw) throw new RuntimeError('WORKSPACE_CONFLICT', 'Workspace changed during verification', 409);
+    return { expectedCwd, workspaceRevision: record.revision, workspaceDigest: createHash('sha256').update(raw).digest('hex') };
+  }
+
+  private replace(record: SessionWorkspace, expected: SessionWorkspace | undefined): Promise<void> {
+    const write = () => this.replaceRecord(record, expected);
+    return this.commit ? this.commit(record.sessionId, write) : write();
+  }
+  private async replaceRecord(record: SessionWorkspace, expected: SessionWorkspace | undefined): Promise<void> {
     const key = workspaceKey(record.sessionId);
     const expectedRaw = expected ? JSON.stringify(expected) : undefined;
     if (this.config.compareAndSet) {
