@@ -458,11 +458,13 @@ GET  /api/agents
 pnpm test
 pnpm typecheck
 pnpm build
+pnpm e2e
 pnpm smoke
 pnpm benchmark
 ```
 
-- `pnpm smoke` 使用隔离的假 CLI 验证发现 Agent、创建运行、SSE、继续对话、终端 WebSocket 和生产 Web。
+- `pnpm e2e` 执行常态化端到端回归验证，构建当前源码并在真实 Chromium 浏览器下运行核心用例套件（测试矩阵、环境依赖与 CI 策略详见 [验收矩阵与 E2E 规范](tests/e2e/README.md)）。
+- `pnpm smoke` 使用隔离的假 CLI 验证发现 Agent、创建运行、SSE、继续对话、终端 WebSocket 和生产 Web，用于手动排障。
 - `node scripts/e2e-smoke.mjs --real` 使用本机真实 Claude CLI 执行同一关键链路，会调用模型并可能产生费用，必须显式运行。
 - `pnpm benchmark` 构建 Web 后写入临时磁盘 SQLite 的 5 万事件，并用真实无头 Chromium 检查首屏、分页、实时增量、浏览器堆、100 次 SSE 重连、服务端内存和入口 gzip 预算；超出任一预算即失败。
 
@@ -470,7 +472,7 @@ pnpm benchmark
 
 - [产品定义](docs/product-1.0.md)
 - [架构](docs/architecture-1.0.md)
-- [验收矩阵](docs/acceptance-1.0.md)
+- [验收矩阵](tests/e2e/README.md)
 - [包边界审计](docs/package-boundaries-1.0.md)
 - [远程开发机控制面指南](docs/remote-devhost-control-plane.md)
 - [Botmux 只读迁移 CLI](docs/botmux-import-cli.md)

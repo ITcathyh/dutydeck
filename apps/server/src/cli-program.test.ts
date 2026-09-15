@@ -256,6 +256,19 @@ describe('Dutydeck CLI', () => {
     expect(databaseUpgradeExecution).toHaveBeenCalledWith(expect.objectContaining({ database: '/tmp/target.db' }));
   });
 
+  it('requires and forwards an explicit legacy deployment scope for retirement', async () => {
+    const databaseRetireLegacy = vi.fn();
+    const program = createCliProgram('0.0.6', { databaseRetireLegacy });
+    await program.parseAsync(['node', 'dutydeck', 'database', 'retire-legacy', '--database', '/tmp/target.db',
+      '--hostname', 'host-a', '--uid', '1001', '--tmux-socket', '/tmp/tmux-1001/default', '--acpx-directory', '/tmp/acpx']);
+    expect(databaseRetireLegacy).toHaveBeenCalledWith({ database: '/tmp/target.db', hostname: 'host-a', uid: 1001,
+      tmuxSocket: '/tmp/tmux-1001/default', acpxDirectory: '/tmp/acpx' });
+
+    const missingScope = createCliProgram('0.0.6', { databaseRetireLegacy });
+    await expect(missingScope.parseAsync(['node', 'dutydeck', 'database', 'retire-legacy', '--database', '/tmp/target.db']))
+      .rejects.toMatchObject({ code: 'LEGACY_RETIREMENT_HOST_REQUIRED' });
+  });
+
   it('requires --database for database execution-status and upgrade-execution subcommands', async () => {
     const databaseExecutionStatus = vi.fn();
     const databaseUpgradeExecution = vi.fn();

@@ -311,7 +311,7 @@ it('restores promoted and successive front queue positions after SQLite is close
   } finally { await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
-it('commits each acceptance and execution authority and waits for WorkItem admission before birth', async () => {
+it('checks admission and commits only execution authority after WorkItem admission', async () => {
   const phases: string[] = []; let next = 0;
   const h = await fixture({
     authorizeExecution: async () => {
@@ -338,7 +338,7 @@ it('commits each acceptance and execution authority and waits for WorkItem admis
     h.runs[0]!.driver.send = vi.fn(async input => { phases.push('send'); await send(input); });
     await h.runtime.dispatch(h.session.id, 'work');
     await h.runs[0]!.sent.promise;
-    expect(phases).toEqual(['prepare:1', 'commit:1', 'prepare:2', 'commit:2', 'task:prepare', 'prepare:3', 'commit:3', 'task:submit', 'send']);
+    expect(phases).toEqual(['prepare:1', 'prepare:2', 'commit:2', 'task:prepare', 'prepare:3', 'commit:3', 'task:submit', 'send']);
   } finally { gate.resolve(); await workItemSession; }
 });
 
@@ -537,4 +537,152 @@ it('does not let the delivery of an old promotion stop a new task', async () => 
     await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(queued.id)!.task.status).toBe('completed'));
     expect(h.repos.execution.getTaskExecution(originalAttempt.taskId)!.currentAttempt!.state).toBe('settled');
   } finally { paused = false; gate.resolve(); secondTail.resolve(); await Promise.allSettled([old, steering]); }
+});
+
+it('idle admission checks authority without committing an actor', async () => {
+  let activeActor = 'alice';
+  const phases: string[] = [];
+  const entered = deferred(), gate = deferred();
+  const h = await fixture({
+    authorizeExecution: async (_sessionId, actorId) => {
+      phases.push(`authorize:${actorId}`);
+      return async () => { phases.push(`commit:${actorId}`); activeActor = actorId ?? 'none'; };
+    },
+    prepareTaskPrompt: async (_session, prompt) => {
+      entered.resolve(); await gate.promise;
+      return { agentPrompt: prompt };
+    }
+  });
+  const session = await h.runtime.start({ agentId: agent.id, source: 'lark', sourceId: 'cli_test:oc_test:group:thread:om_idle' });
+  await vi.waitFor(() => expect(h.runs).toHaveLength(2));
+  const run = h.runs[1]!;
+  run.driver.send = vi.fn(async () => {
+    run.emit({ type: 'text', data: { text: 'answer' } });
+    run.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+  });
+
+  const accepting = h.runtime.dispatch(session.id, 'bob task', 'queue', undefined, undefined, 'bob');
+  try {
+    await entered.promise;
+    expect(phases).toEqual(['authorize:bob']);
+    expect(activeActor).toBe('alice');
+    gate.resolve();
+    const task = await accepting;
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(item => item.id === task.id)?.status).toBe('completed'));
+    expect(activeActor).toBe('bob');
+  } finally { gate.resolve(); await accepting; }
+});
+
+it('queued actor does not mutate active actor while previous task is running, and switches when started', async () => {
+  let activeActor = 'none';
+  const h = await fixture({
+    authorizeExecution: async (_sessionId, actorId) => {
+      return async () => {
+        activeActor = actorId ?? 'none';
+      };
+    }
+  });
+
+  const session = await h.runtime.start({
+    agentId: agent.id,
+    source: 'lark',
+    sourceId: 'cli_test:oc_test:group:thread:om_root'
+  });
+  await vi.waitFor(() => expect(h.runs).toHaveLength(2));
+  const run = h.runs[1]!;
+
+  const aliceEntered = deferred(), aliceGate = deferred();
+  const driver = run.driver;
+  driver.send = vi.fn(async input => {
+    if (input === 'alice task') {
+      aliceEntered.resolve();
+      await aliceGate.promise;
+      run.emit({ type: 'text', data: { text: 'alice answer' } });
+      run.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+      return;
+    }
+    run.emit({ type: 'text', data: { text: 'bob answer' } });
+    run.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+  });
+
+  const aliceTurn = h.runtime.send(session.id, 'alice task', undefined, undefined, 'alice');
+  await aliceEntered.promise;
+  expect(activeActor).toBe('alice');
+
+  const bobTask = await h.runtime.dispatch(session.id, 'bob task', 'queue', undefined, undefined, 'bob');
+  expect(bobTask.status).toBe('queued');
+  expect(activeActor).toBe('alice');
+
+  aliceGate.resolve();
+  await aliceTurn;
+  await vi.waitFor(() => expect(activeActor).toBe('bob'));
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(session.id)).find(item => item.id === bobTask.id)?.status).toBe('completed'));
+  expect(driver.send).toHaveBeenCalledWith('bob task');
+});
+
+it('rejects execution when authorization is revoked before submission', async () => {
+  let revoked = false;
+  const phases: string[] = [];
+  const prepareAuthorized = deferred(), prepareGate = deferred();
+  const h = await fixture({
+    authorizeExecution: async (_sessionId, actorId) => {
+      phases.push(`authorize:${actorId}`);
+      if (revoked) {
+        phases.push('reject:submit');
+        throw new RuntimeError('AUTHORIZATION_REVOKED', 'Permission revoked', 403);
+      }
+      return async () => { phases.push(`commit:${actorId}`); };
+    },
+    authorizeTask: async (_session, _task, phase) => {
+      phases.push(`task:${phase}`);
+      if (phase === 'prepare') { prepareAuthorized.resolve(); await prepareGate.promise; }
+    }
+  });
+
+  const session = await h.runtime.start({
+    agentId: agent.id,
+    source: 'lark',
+    sourceId: 'cli_test:oc_test:group:thread:om_root'
+  });
+  await vi.waitFor(() => expect(h.runs).toHaveLength(2));
+
+  const task = await h.runtime.dispatch(session.id, 'will revoke', 'queue', undefined, undefined, 'alice');
+  expect(task.status).toBe('queued');
+  await prepareAuthorized.promise;
+  expect(phases).toEqual(['authorize:alice', 'authorize:alice', 'commit:alice', 'task:prepare']);
+  revoked = true;
+  prepareGate.resolve();
+  await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(task.id)?.currentAttempt).toMatchObject({ state: 'settled', outcome: 'failed', submissionState: 'not_submitted' }));
+  expect(phases).toEqual(['authorize:alice', 'authorize:alice', 'commit:alice', 'task:prepare', 'authorize:alice', 'reject:submit']);
+  expect(h.runs[1]!.driver.send).not.toHaveBeenCalled();
+});
+
+it('busy verification and another actor cancelling queued work do not replace the active actor', async () => {
+  let activeActor = 'none';
+  const authorizedActors: Array<string | undefined> = [];
+  const h = await fixture({
+    authorizeExecution: async (_sessionId, actorId) => {
+      authorizedActors.push(actorId);
+      return async () => { activeActor = actorId ?? 'none'; };
+    }
+  });
+  const session = await h.runtime.start({ agentId: agent.id, source: 'lark', sourceId: 'cli_test:oc_test:group:thread:om_controls' });
+  await vi.waitFor(() => expect(h.runs).toHaveLength(2));
+  const run = h.runs[1]!;
+  const aliceTurn = h.runtime.send(session.id, 'alice task', undefined, undefined, 'alice');
+  await run.sent.promise;
+  expect(activeActor).toBe('alice');
+
+  const queued = await h.runtime.dispatch(session.id, 'bob task', 'queue', undefined, undefined, 'bob');
+  await expect(h.runtime.runVerification(session.id, { command: 'true' }, 'verifier')).rejects.toMatchObject({ code: 'SESSION_BUSY' });
+  expect(activeActor).toBe('alice');
+  const cancelled = await h.runtime.cancelQueued(session.id, queued.id, 'canceller');
+  expect(cancelled.status).toBe('cancelled');
+  expect(activeActor).toBe('alice');
+  expect(authorizedActors).toEqual(expect.arrayContaining(['bob', 'verifier', 'canceller']));
+
+  run.emit({ type: 'text', data: { text: 'alice answer' } });
+  run.emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+  run.done.resolve();
+  expect((await aliceTurn).status).toBe('completed');
 });

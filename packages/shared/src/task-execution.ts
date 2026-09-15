@@ -227,10 +227,41 @@ export interface ExecutionUpgradeSnapshot {
     counts: ExecutionUpgradeCounts;
   };
   blockers: ExecutionBlocker[];
+  legacy: { unresolvedSessions: number; retiredSessions: number; evidenceIncomplete: number };
+}
+export type LegacyRetirementEvidence =
+  | {
+      kind: 'pty_tmux_absent'; socketPath: string; targetName: string; owner: string;
+      outcome: 'already_missing' | 'stopped_owned'; targetId?: string;
+      paneProcesses: ResourceCreatorIdentity[];
+    }
+  | {
+      kind: 'acp_recorded_agent_pid_absent'; recordPath: string; acpxRecordId: string;
+      pid: number; agentStartedAt: string;
+    };
+export interface LegacyRetirementReceipt extends SessionFence {
+  version: 1; receiptId: string; databaseEntity: string; snapshotDigest: string;
+  protocol: 'pty-cli' | 'acp'; verifiedAt: string; archivedAt: string;
+  verifier: { hostname: string; uid: number; process: ResourceCreatorIdentity };
+  evidence: LegacyRetirementEvidence;
+}
+export interface LegacyRetirementCandidate extends SessionFence {
+  databaseEntity: string; snapshotDigest: string; agentId: string; cwd: string;
+  protocol?: Session['protocol']; state: Session['state']; archivedAt?: string;
+  receipt?: LegacyRetirementReceipt; blockers: ExecutionBlocker[];
+}
+export interface LegacyRetirementResult {
+  session: Session; receipt: LegacyRetirementReceipt; replayed: boolean;
+}
+export interface LegacyRetirementMaintenance {
+  listCandidates(): LegacyRetirementCandidate[];
+  retireSession(receipt: LegacyRetirementReceipt): LegacyRetirementResult;
+  close(): void;
 }
 export interface ExecutionRepository {
   authority(): 'legacy' | 'ledger_v1';
   upgradeLegacy(): ExecutionUpgradeSnapshot;
+  beginLegacyRetirement(): LegacyRetirementMaintenance;
   bind(claim: RuntimeControlClaim): BoundExecutionRepository;
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   getAcceptedTask(taskId: string): AcceptedTask | undefined;
@@ -260,10 +291,29 @@ const creationClosureSchema = z.object({
   closureId: id, provenanceDigest: executionDigestSchema, expectedRevision: z.number().int().positive().safe(), validator: activeControllerSchema,
   evidence: z.object({ version: z.literal(1), state: z.literal('dead'), creator: creatorIdentitySchema, observer: creatorIdentitySchema, observedAt: z.string().datetime() }).strict()
 }).strict();
+const legacyRetirementEvidenceSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('pty_tmux_absent'), socketPath: id, targetName: id, owner: id,
+    outcome: z.enum(['already_missing', 'stopped_owned']), targetId: id.optional(),
+    paneProcesses: z.array(creatorIdentitySchema)
+  }).strict(),
+  z.object({
+    kind: z.literal('acp_recorded_agent_pid_absent'), recordPath: id, acpxRecordId: id,
+    pid: z.number().int().positive().safe(), agentStartedAt: z.string().datetime()
+  }).strict()
+]);
+const legacyRetirementReceiptSchema = fenceSchema.extend({
+  version: z.literal(1), receiptId: id, databaseEntity: id, snapshotDigest: executionDigestSchema,
+  protocol: z.enum(['pty-cli', 'acp']), verifiedAt: z.string().datetime(), archivedAt: z.string().datetime(),
+  verifier: z.object({
+    hostname: id, uid: z.number().int().nonnegative().safe(), process: creatorIdentitySchema
+  }).strict(),
+  evidence: legacyRetirementEvidenceSchema
+}).strict();
 export const taskExecutionSchemas = {
   nativeRestore: z.object({operationId:id,context:nativeContextRefSchema,expectedRevision:z.number().int().positive().safe(),selectionRevision:z.number().int().positive().safe(),proofId:id,identity:nativeIdentitySchema}).strict(),
   driverSubmission: z.object({taskId:id,attemptId:id,submissionId:id,driverInstanceId:id,inputDigest:executionDigestSchema}).strict(),
-  creatorIdentitySchema, nativeReserve: z.object({resourceId:id,parentResourceId:id,expected:nativeContextExpectedSchema}).strict(),
+  creatorIdentitySchema, legacyRetirementReceiptSchema, nativeReserve: z.object({resourceId:id,parentResourceId:id,expected:nativeContextExpectedSchema}).strict(),
   nativeIdentitySchema, nativeSelectionSchema, nativeBindingSchema, nativeReplacementSchema, nativeContextExpectedSchema, nativeContextRefSchema,
   id, revision: z.number().int().positive().safe(), fenceSchema,
   attemptFenceSchema: fenceSchema.extend({ taskId: id, attemptId: id, expectedRevision: z.number().int().positive().safe() }),

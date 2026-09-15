@@ -113,6 +113,12 @@ export interface SecretListCliOptions { database?: string }
 export interface DatabaseExecutionCliOptions { database: string }
 export type DatabaseExecutionStatusCliOptions = DatabaseExecutionCliOptions;
 export type DatabaseUpgradeExecutionCliOptions = DatabaseExecutionCliOptions;
+export interface DatabaseRetireLegacyCliOptions extends DatabaseExecutionCliOptions {
+  hostname: string;
+  uid: number;
+  tmuxSocket?: string;
+  acpxDirectory?: string;
+}
 
 export interface CliHandlers {
   serve?(options: CliOptions): void | Promise<void>;
@@ -152,6 +158,7 @@ export interface CliHandlers {
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
   databaseExecutionStatus?(options: DatabaseExecutionStatusCliOptions): void | Promise<void>;
   databaseUpgradeExecution?(options: DatabaseUpgradeExecutionCliOptions): void | Promise<void>;
+  databaseRetireLegacy?(options: DatabaseRetireLegacyCliOptions): void | Promise<void>;
 }
 
 const addCardOptions = (command: Command) => command
@@ -225,6 +232,18 @@ const databaseOptionsFrom = (options: { database?: string }, command: Command): 
     throw new DatabaseCliError('DATABASE_OPTION_REQUIRED', '--database option is required');
   }
   return { database: merged.database as string };
+};
+const databaseRetirementOptionsFrom = (options: { database?: string; hostname?: string; uid?: string; tmuxSocket?: string; acpxDirectory?: string }, command: Command): DatabaseRetireLegacyCliOptions => {
+  const database = databaseOptionsFrom(options, command);
+  const merged = command.optsWithGlobals() as typeof options;
+  const host = merged.hostname?.trim();
+  if (!host) throw new DatabaseCliError('LEGACY_RETIREMENT_HOST_REQUIRED', '--hostname option is required');
+  if (!/^\d+$/.test(merged.uid ?? '') || !Number.isSafeInteger(Number(merged.uid))) throw new DatabaseCliError('LEGACY_RETIREMENT_UID_REQUIRED', '--uid must be a non-negative integer');
+  return {
+    ...database, hostname: host, uid: Number(merged.uid),
+    ...(merged.tmuxSocket ? { tmuxSocket: merged.tmuxSocket } : {}),
+    ...(merged.acpxDirectory ? { acpxDirectory: merged.acpxDirectory } : {})
+  };
 };
 
 export function createCliProgram(version: string, handlers: CliHandlers = {}) {
@@ -499,6 +518,14 @@ Examples:
     .description('Upgrade a legacy Dutydeck database to execution ledger_v1 under maintenance isolation')
     .option('--database <path>', 'SQLite database path')
     .action((options, command) => handlers.databaseUpgradeExecution?.(databaseOptionsFrom(options, command)));
+  database.command('retire-legacy')
+    .description('Verify and archive migrated legacy sessions under maintenance isolation')
+    .option('--database <path>', 'SQLite database path')
+    .option('--hostname <hostname>', 'Exact hostname of the stopped legacy service')
+    .option('--uid <uid>', 'Exact numeric uid of the stopped legacy service')
+    .option('--tmux-socket <path>', 'Exact tmux socket used by legacy PTY sessions')
+    .option('--acpx-directory <path>', 'Trusted migrated acpx directory for legacy ACP metadata')
+    .action((options, command) => handlers.databaseRetireLegacy?.(databaseRetirementOptionsFrom(options, command)));
 
   const addProcessCommands = (parent: Command) => {
     parent.command('start')
@@ -564,6 +591,7 @@ Examples:
   $ dutydeck secret rotate team-bot --expected-revision 1 --value-fd 0
   $ dutydeck database execution-status --database /path/to/dutydeck.db
   $ dutydeck database upgrade-execution --database /path/to/dutydeck.db
+  $ dutydeck database retire-legacy --database /path/to/dutydeck.db --hostname host-a --uid 1001 --tmux-socket /tmp/tmux-1001/default --acpx-directory /path/to/acpx
   $ dutydeck --version`);
 }
 
