@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { WorkItem } from '@dutydeck/shared';
+import { workPlanSchema, type WorkItem } from '@dutydeck/shared';
 import { api, type Agent, type Session } from '../api';
 import { WorkItemProgress } from './WorkItemProgress';
 import { WorkItemsPanel } from './WorkItemsPanel';
@@ -11,17 +11,95 @@ import { TimelineView } from './TimelineView';
 
 const time = '2026-09-12T00:00:00Z';
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project', state: 'completed', runId: 'r', createdAt: time, updatedAt: time };
-const agents: Agent[] = [{ id: 'a', name: '分析 Agent', protocol: 'acp', permissionMode: 'ask' }];
+const agents: Agent[] = [
+  { id: 'a', name: '分析 Agent', protocol: 'acp', permissionMode: 'ask' },
+  { id: 'b', name: '总结 Agent', protocol: 'acp', permissionMode: 'ask' },
+];
+
 const goal = (patch: Partial<WorkItem> = {}): WorkItem => ({
   id: 'w1', parentSessionId: 's1', title: '调查目标', goal: '检查实际证据', revision: 7, status: 'running',
-  plan: { title: '调查流程', steps: [
-    { id: 'research', title: '独立分析', kind: 'agent', agentId: 'a', instruction: '检查来源', dependsOn: [] },
-    { id: 'review', title: '负责人意见', kind: 'wait', instruction: '是否补充材料？', dependsOn: ['research'] }
-  ], outputStepId: 'research' },
-  steps: [{ id: 'research', status: 'running', attempts: [{ id: 'a2', number: 2, status: 'accepted', sessionId: 'child/2', createdAt: time, updatedAt: time }] }, { id: 'review', status: 'pending', attempts: [] }],
-  delivery: { status: 'not_requested', attempts: 0 }, createdAt: time, updatedAt: time, ...patch
+  plan: {
+    title: '调查流程',
+    steps: [
+      { id: 'research', title: '独立分析', kind: 'agent', agentId: 'a', instruction: '检查来源', dependsOn: [] },
+      { id: 'review', title: '负责人意见', kind: 'wait', instruction: '是否补充材料？', dependsOn: ['research'] },
+      { id: 'summary', title: '整理总结', kind: 'agent', agentId: 'b', instruction: '汇总结论', dependsOn: ['review'] },
+    ],
+    outputStepId: 'summary',
+  },
+  steps: [
+    { id: 'research', status: 'running', attempts: [{ id: 'a2', number: 2, status: 'accepted', sessionId: 'child/2', createdAt: time, updatedAt: time }] },
+    { id: 'review', status: 'pending', attempts: [] },
+    { id: 'summary', status: 'pending', attempts: [] },
+  ],
+  delivery: { status: 'not_requested', attempts: 0 },
+  createdAt: time,
+  updatedAt: time,
+  ...patch,
 });
-const completed = () => goal({ status: 'completed', steps: [{ ...goal().steps[0], status: 'completed' }, { id: 'review', status: 'skipped', attempts: [] }], output: { text: '最终成果正文', digest: 'sha-final', stepId: 'research' } });
+
+const completed = (patch: Partial<WorkItem> = {}): WorkItem => goal({
+  status: 'completed',
+  steps: [
+    { id: 'research', status: 'completed', attempts: [{ id: 'a2', number: 2, status: 'completed', sessionId: 'child/2', createdAt: time, updatedAt: time }] },
+    { id: 'review', status: 'completed', attempts: [], answer: '无需补充' },
+    { id: 'summary', status: 'completed', attempts: [{ id: 'a3', number: 1, status: 'completed', sessionId: 'child/3', createdAt: time, updatedAt: time }] },
+  ],
+  output: { text: '最终成果正文', digest: 'sha-final', stepId: 'summary' },
+  ...patch,
+});
+
+const failed = (patch: Partial<WorkItem> = {}): WorkItem => goal({
+  status: 'failed',
+  steps: [
+    {
+      id: 'research',
+      status: 'failed',
+      attempts: [{ id: 'a2', number: 2, status: 'failed', sessionId: 'child/2', error: '当前执行离线', createdAt: time, updatedAt: time }],
+    },
+    { id: 'review', status: 'pending', attempts: [] },
+    { id: 'summary', status: 'pending', attempts: [] },
+  ],
+  ...patch,
+});
+
+const skippedGoal = (): WorkItem => ({
+  id: 'w-skip',
+  parentSessionId: 's1',
+  title: '条件目标',
+  goal: '检查跳过逻辑',
+  revision: 1,
+  status: 'completed',
+  plan: {
+    title: '条件流程',
+    steps: [
+      { id: 'gate', title: '前置确认', kind: 'wait', instruction: '是否补充调查？', dependsOn: [] },
+      { id: 'optional', title: '补充分析', kind: 'agent', agentId: 'a', instruction: '执行补充分析', dependsOn: ['gate'], when: { stepId: 'gate', equals: 'yes' } },
+      { id: 'summary', title: '整理总结', kind: 'agent', agentId: 'b', instruction: '汇总结论', dependsOn: ['gate', 'optional'] },
+    ],
+    outputStepId: 'summary',
+  },
+  steps: [
+    { id: 'gate', status: 'completed', attempts: [], answer: 'no' },
+    { id: 'optional', status: 'skipped', attempts: [] },
+    { id: 'summary', status: 'completed', attempts: [{ id: 'a-sum', number: 1, status: 'completed', sessionId: 'child/sum', createdAt: time, updatedAt: time }] },
+  ],
+  output: { text: '跳过流程成果', digest: 'sha-skip', stepId: 'summary' },
+  delivery: { status: 'not_requested', attempts: 0 },
+  createdAt: time,
+  updatedAt: time,
+});
+
+const parallelPlan = {
+  title: '并行调查流程',
+  steps: [
+    { id: 'research', title: '独立分析', kind: 'agent' as const, agentId: 'a', instruction: '检查来源', dependsOn: [] },
+    { id: 'review', title: '负责人意见', kind: 'wait' as const, instruction: '是否补充材料？', dependsOn: [] },
+    { id: 'summary', title: '整理总结', kind: 'agent' as const, agentId: 'b', instruction: '汇总结论', dependsOn: ['research', 'review'] },
+  ],
+  outputStepId: 'summary',
+};
+
 const records = (items: WorkItem[]) => ({ items, templates: [] });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
@@ -52,32 +130,79 @@ describe('WorkItemProgress', () => {
     expect(screen.queryByText('下达第一个任务')).toBeNull();
   });
   it('collapses on completion, preserves manual expansion on refresh, and expands on restart or failure', async () => {
-    const view = mount(); await screen.findByRole('button', { name: '收起目标：调查目标' });
+    const view = mount([goal()]); await screen.findByRole('button', { name: '收起目标：调查目标' });
+    await view.update([failed()]);
+    expect(screen.getByRole('button', { name: '收起目标：调查目标' }).getAttribute('aria-expanded')).toBe('true');
+    await userEvent.click(screen.getByRole('button', { name: '收起目标：调查目标' }));
+    expect(screen.getByRole('button', { name: '展开目标：调查目标' }).getAttribute('aria-expanded')).toBe('false');
+    await view.update([{
+      ...failed(),
+      status: 'running',
+      revision: 8,
+      steps: failed().steps.map(step => (step.id === 'research' ? { ...step, status: 'pending' } : step)),
+    }]);
+    expect(screen.getByRole('button', { name: '收起目标：调查目标' }).getAttribute('aria-expanded')).toBe('true');
     await view.update([completed()]);
     expect(screen.getByRole('button', { name: '展开目标：调查目标' }).getAttribute('aria-expanded')).toBe('false');
-    expect(screen.getByText('完成 1/2 步 · 跳过 1 步')).toBeTruthy();
+    expect(screen.getByText('完成 3/3 步')).toBeTruthy();
     expect(screen.queryByRole('list', { name: '进度步骤' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: '展开目标：调查目标' }));
     await view.update([{ ...completed(), revision: 9, updatedAt: '2026-09-13T00:00:00Z' }]);
     expect(screen.getByRole('list', { name: '进度步骤' })).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: '收起目标：调查目标' }));
-    await view.update([goal()]);
-    expect(screen.getByRole('button', { name: '收起目标：调查目标' })).toBeTruthy();
-    await view.update([completed()]);
-    await view.update([goal({ status: 'failed', steps: [{ id: 'research', status: 'failed', attempts: [] }] })]);
-    expect(screen.getByRole('button', { name: '收起目标：调查目标' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: '收起目标：调查目标' }).getAttribute('aria-expanded')).toBe('true');
+  });
+  it('renders skipped steps without counting them as completed', async () => {
+    mount([skippedGoal()]);
+    expect(await screen.findByText('完成 2/3 步 · 跳过 1 步')).toBeTruthy();
+    expect(screen.queryByRole('list', { name: '进度步骤' })).toBeNull();
   });
   it('keeps waiting and latest failure visible when collapsed and removes recovered errors', async () => {
-    const failed = goal({ status: 'failed', steps: [{ ...goal().steps[0], status: 'failed', attempts: [{ ...goal().steps[0].attempts[0], status: 'failed', error: '当前执行离线' }] }, { id: 'review', status: 'waiting', attempts: [] }] });
-    const view = mount([failed]);
+    const failedParallel = goal({
+      plan: parallelPlan,
+      status: 'failed',
+      steps: [
+        { ...goal().steps[0], status: 'failed', attempts: [{ ...goal().steps[0].attempts[0], status: 'failed', error: '当前执行离线' }] },
+        { id: 'review', status: 'waiting', attempts: [] },
+        { id: 'summary', status: 'pending', attempts: [] },
+      ],
+    });
+    const view = mount([failedParallel]);
     await userEvent.click(await screen.findByRole('button', { name: '收起目标：调查目标' }));
     expect(screen.getByText('失败：独立分析；等待回答：负责人意见')).toBeTruthy();
     expect(screen.getByText('独立分析：当前执行离线')).toBeTruthy();
     expect(screen.getByRole('button', { name: '查看详情 / 处理' })).toBeTruthy();
-    await view.update([goal()]); expect(screen.queryByText('独立分析：当前执行离线')).toBeNull();
+    await view.update([{
+      ...failedParallel,
+      status: 'running',
+      revision: failedParallel.revision + 1,
+      steps: failedParallel.steps.map(step => (step.id === 'research' ? { ...step, status: 'pending' } : step)),
+    }]);
+    expect(screen.queryByText('独立分析：当前执行离线')).toBeNull();
+    expect(screen.getByText('当前执行离线')).toBeTruthy();
+  });
+  it('shows waiting step when upstream research is completed and review is waiting', async () => {
+    const waitingGoal = goal({
+      status: 'waiting',
+      steps: [
+        { id: 'research', status: 'completed', attempts: [{ id: 'a2', number: 2, status: 'completed', sessionId: 'child/2', createdAt: time, updatedAt: time }] },
+        { id: 'review', status: 'waiting', attempts: [] },
+        { id: 'summary', status: 'pending', attempts: [] },
+      ],
+    });
+    mount([waitingGoal]);
+    expect(await screen.findByText('等待回答：负责人意见')).toBeTruthy();
+    expect(screen.getByRole('button', { name: '查看详情 / 处理' })).toBeTruthy();
   });
   it.each(['blocked', 'cancelling', 'cancelled'] as const)('retains the real %s semantics', async status => {
-    mount([goal({ status, steps: [{ id: 'research', status: status === 'blocked' ? 'blocked' : 'cancelled', attempts: [] }] })]);
+    const stepStatus = status === 'blocked' ? 'blocked' : 'cancelled';
+    mount([goal({
+      status,
+      steps: [
+        { id: 'research', status: stepStatus, attempts: [{ id: 'a2', number: 2, status: stepStatus, sessionId: 'child/2', createdAt: time, updatedAt: time }] },
+        { id: 'review', status: 'pending', attempts: [] },
+        { id: 'summary', status: 'pending', attempts: [] },
+      ],
+    })]);
     const article = await screen.findByRole('article');
     expect(within(article).getAllByText(status === 'blocked' ? '需要处理' : status === 'cancelling' ? '正在取消' : '已取消').length).toBeGreaterThan(0);
   });
@@ -157,9 +282,16 @@ describe('WorkItemProgress', () => {
     expect(view.fetchItems).toHaveBeenCalledTimes(reads); expect(screen.queryByRole('article')).toBeNull();
   });
   it.each([{ archivedAt: time }, { state: 'failed' as const }, { state: 'stopped' as const }])('opens read-only details for ended or archived sessions: %j', async patch => {
-    mount([goal({ status: 'failed', steps: [{ id: 'research', status: 'failed', attempts: [] }] })], { ...session, ...patch });
+    mount([failed()], { ...session, ...patch });
     await userEvent.click(await screen.findByRole('button', { name: '查看详情' }));
     expect(screen.getByRole('button', { name: '取消目标' }).hasAttribute('disabled')).toBe(true);
     expect(screen.getByRole('button', { name: '重试此步骤' }).hasAttribute('disabled')).toBe(true); expect(screen.queryByLabelText('本次目标')).toBeNull();
+  });
+  it('validates common fixtures against workPlanSchema', () => {
+    expect(workPlanSchema.safeParse(goal().plan).success).toBe(true);
+    expect(workPlanSchema.safeParse(completed().plan).success).toBe(true);
+    expect(workPlanSchema.safeParse(failed().plan).success).toBe(true);
+    expect(workPlanSchema.safeParse(skippedGoal().plan).success).toBe(true);
+    expect(workPlanSchema.safeParse(parallelPlan).success).toBe(true);
   });
 });
