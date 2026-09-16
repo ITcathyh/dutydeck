@@ -3,6 +3,8 @@ import { RelayCliError, RelayHttpClient, relayAskExitCodes, type RelayClientOpti
 export interface RelaySessionCliOptions {
   timeout?: string;
   json?: boolean;
+  choices?: string;
+  multiple?: boolean;
 }
 
 /** 会话 id 由服务端从 token 反解；CLI 只需把 token 带上，路径里的 id 用占位符。 */
@@ -35,6 +37,14 @@ export async function runSessionAsk(
   cliOptions: RelaySessionCliOptions = {},
   options: RelayClientOptions = {}
 ): Promise<RelayAskResult> {
+  let choices: unknown;
+  if (cliOptions.choices !== undefined) {
+    try { choices = JSON.parse(cliOptions.choices); }
+    catch { throw new RelayCliError('--choices 必须是有效的 JSON 选项数组。', relayAskExitCodes.usage, 'RELAY_INVALID_CHOICES'); }
+  }
+  if (cliOptions.multiple && cliOptions.choices === undefined) {
+    throw new RelayCliError('--multiple 必须与 --choices 一起使用。', relayAskExitCodes.usage, 'RELAY_INVALID_CHOICES');
+  }
   let timeoutMs: number | undefined;
   if (cliOptions.timeout !== undefined) {
     const seconds = Number(cliOptions.timeout);
@@ -46,6 +56,9 @@ export async function runSessionAsk(
   const client = new RelayHttpClient(options);
   const payload = await client.post(sessionPath('ask'), {
     question,
+    // RelayAskBroker owns choice shape, length, and duplicate-value validation.
+    ...(cliOptions.choices === undefined ? {} : { choices }),
+    ...(cliOptions.multiple ? { multiple: true } : {}),
     ...(timeoutMs === undefined ? {} : { timeoutMs })
   });
   return payload as unknown as RelayAskResult;

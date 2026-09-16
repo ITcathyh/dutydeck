@@ -14,6 +14,7 @@ export interface LarkInboxRecord {
   cardId?: string;
   taskId?: string;
   turn?: number;
+  workflowRequestId?: string;
   request?: { prompt: string; scopeId: string; resources: LarkMessageResource[]; materialPrompt?: string; launchOptions?: LarkLaunchOptions };
   materials?: { prompt: string; cursor?: LarkContextCursor; readMessageIds: string[]; contextBefore?: string };
   error?: string;
@@ -38,7 +39,7 @@ export class LarkTaskInbox {
     const next = { ...record, boot: this.boot };
     return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
   }
-  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'event'>>) {
+  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'event' | 'workflowRequestId'>>) {
     const next = { ...record, ...patch };
     if (!await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next))) {
       throw new Error('Lark inbox claim was lost');

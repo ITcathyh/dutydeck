@@ -436,6 +436,45 @@ export class LarkMessageCoordinator {
     return true;
   }
 
+  private async routePendingAsk(event: LarkMessageEvent, config: StoredLarkConfig, prompt: string, resources: LarkMessageResource[], scopeId: string, inbox: LarkInboxRecord | undefined, recovering: boolean): Promise<boolean> {
+    if (!this.workflows || !event.senderOpenId || event.senderType !== 'user' || !['text', 'post', 'rich_text'].includes(event.messageType)
+      || !prompt.trim() || resources.length || parseSlashCommand(prompt)
+      // Ordinary topic replies point at the topic root. A different parent
+      // is an explicit quote and must retain its existing routing semantics.
+      || event.parentId && (!event.threadId || event.parentId !== event.rootId)) return false;
+    let requestId = inbox?.workflowRequestId;
+    if (!requestId) {
+      // Recovery must not reinterpret an old message as a reply to a new ask.
+      if (recovering) return false;
+      const candidates: LarkInteraction[] = [];
+      for (const record of await this.workflows.pendingAsks(config.appId)) {
+        if (record.event.threadId && event.threadId && record.event.threadId !== event.threadId) continue;
+        const originalRoot = record.event.rootId ?? (record.event.threadId ? record.event.messageId : undefined);
+        const replyRoot = event.rootId ?? (event.threadId ? event.messageId : undefined);
+        if (originalRoot !== replyRoot) continue;
+        if (record.event.chatId === event.chatId && record.event.senderOpenId === event.senderOpenId
+          && await resolveLarkScopeId(record.event, config, this.chatModeResolver) === scopeId) candidates.push(record);
+      }
+      if (!candidates.length) return false;
+      if (candidates.length > 1) {
+        if (inbox) await this.inbox!.update(inbox, { state: 'command' });
+        await this.workflowReply(event, config, '当前有多个问题等待回答，请引用要回答的提问卡片回复。');
+        return true;
+      }
+      requestId = candidates[0]!.id;
+      // Pin the waiter before answering: if acknowledgement fails or the
+      // daemon restarts, this message can never answer a later question.
+      if (inbox) await this.inbox!.update(inbox, { workflowRequestId: requestId });
+    }
+    try {
+      const result = await this.workflows.respond({ appId: config.appId, chatId: event.chatId, actorId: event.senderOpenId, requestId, action: 'answer', answer: prompt });
+      await this.workflowReply(event, config, result);
+    } catch (error) {
+      await this.workflowReply(event, config, error instanceof Error ? error.message : String(error), { failed: true });
+    }
+    return true;
+  }
+
   private async requireExecution(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction) {
     if (!this.executionPolicy) return;
     const decision = await this.executionPolicy.authorize(boundary, action);
@@ -679,7 +718,8 @@ export class LarkMessageCoordinator {
     }
     if (inbox?.request) { prompt = inbox.request.prompt; resources = inbox.request.resources; scopeId = inbox.request.scopeId; }
     const workflowScope = { id: scopeId };
-    if (!inbox?.request && await this.routeWorkflow(event, config, prompt, workflowScope)) {
+    if (!inbox?.request && (await this.routeWorkflow(event, config, prompt, workflowScope)
+      || await this.routePendingAsk(event, config, prompt, resources, workflowScope.id, inbox, recovering))) {
       if (inbox) await this.inbox!.update(inbox, { state: 'accepted' });
       if (acknowledgementReactionId) await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
       return;
