@@ -1458,6 +1458,9 @@ export class LarkMessageCoordinator {
         }
         const task = (await this.runtime.getTasks?.(mapping.sessionId))?.find(item => item.id === saved.runtime_task_id);
         if (!task) return { type: 'warning', content: '原任务记录不存在，无法导出。' };
+        if (task.status === 'queued' || task.status === 'cancelled') {
+          return { type: 'warning', content: '任务尚未执行，暂无执行记录可导出。' };
+        }
         // The platform callback has a short deadline. Authorize first, then
         // deliver to the persisted chat/topic, never to callback-supplied IDs.
         void (async () => {

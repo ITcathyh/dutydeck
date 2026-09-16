@@ -276,6 +276,55 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     } finally { restored.stop(); }
   });
 
+  it('returns warning on export callback for queued or cancelled tasks without exporting files or altering tasks', async () => {
+    const h = await harness('permission');
+    await h.coordinator.handle(event('om_running_task', '前置长任务'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'permission' && item.state === 'pending')).toBe(true));
+    const permission = (await h.interactions()).find(item => item.kind === 'permission' && item.state === 'pending')!;
+
+    await h.coordinator.handle(event('om_queued_task', '排队中的任务'), h.config);
+    await vi.waitFor(async () => {
+      const mapping = (await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).find(item => item.externalId === 'om_queued_task');
+      expect(mapping).toBeDefined();
+    });
+
+    const [mapping] = (await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).filter(item => item.externalId === 'om_queued_task');
+    const saved = JSON.parse(mapping!.extra!);
+    const task = (await h.runtime.getTasks(mapping!.sessionId)).find(item => item.id === saved.runtime_task_id);
+    expect(task?.status).toBe('queued');
+
+    const exportValue = { dutydeck_export_trace: 'download', task_id: 'om_queued_task', turn: String(saved.turn ?? 0) };
+    const queuedCallback = { messageId: saved.card_message_id, chatId: 'oc_group' };
+
+    const queuedOutcome = await h.coordinator.handleAction(exportValue, 'ou_alice', queuedCallback);
+    expect(queuedOutcome).toEqual({ type: 'warning', content: '任务尚未执行，暂无执行记录可导出。' });
+    expect(h.service.uploadFile).not.toHaveBeenCalled();
+    expect(h.service.replyFile).not.toHaveBeenCalled();
+    expect(h.service.sendFile).not.toHaveBeenCalled();
+    const taskAfterQueuedAttempt = (await h.runtime.getTasks(mapping!.sessionId)).find(item => item.id === saved.runtime_task_id);
+    expect(taskAfterQueuedAttempt?.status).toBe('queued');
+
+    await h.runtime.cancelQueued(mapping!.sessionId, saved.runtime_task_id, 'ou_alice');
+    await vi.waitFor(async () => {
+      const current = (await h.runtime.getTasks(mapping!.sessionId)).find(item => item.id === saved.runtime_task_id);
+      expect(current?.status).toBe('cancelled');
+    });
+
+    const cancelledOutcome = await h.coordinator.handleAction(exportValue, 'ou_alice', queuedCallback);
+    expect(cancelledOutcome).toEqual({ type: 'warning', content: '任务尚未执行，暂无执行记录可导出。' });
+    expect(h.service.uploadFile).not.toHaveBeenCalled();
+    expect(h.service.replyFile).not.toHaveBeenCalled();
+    expect(h.service.sendFile).not.toHaveBeenCalled();
+    const taskAfterCancelledAttempt = (await h.runtime.getTasks(mapping!.sessionId)).find(item => item.id === saved.runtime_task_id);
+    expect(taskAfterCancelledAttempt?.status).toBe('cancelled');
+
+    await h.runtime.resolvePermission!(permission.sessionId, permission.nativeId, true);
+    await vi.waitFor(async () => {
+      const current = (await h.runtime.getTasks(mapping!.sessionId)).find(item => item.id === permission.taskId);
+      expect(current?.status).toBe('completed');
+    });
+  });
+
   it('delivers exactly a retained process card and a complete streamed result, then leaves both unchanged on recovery', async () => {
     const answerChunks = Array.from({ length: 1700 }, (_, index) => `line${index}\n`);
     const answer = answerChunks.join('').trim();

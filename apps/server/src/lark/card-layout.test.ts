@@ -1362,6 +1362,30 @@ describe('公开执行记录的可执行入口', () => {
     expect(JSON.stringify(withWeb)).toContain('https://dock.example/sessions/ses_1');
   });
 
+  it('排队中与已取消任务即使开启 recordExport 也无导出按钮与引导，排队取消入口保留', () => {
+    const queuedCard = buildLarkCard({
+      state: 'queued',
+      cardKind: 'process',
+      taskId: 'om_queued',
+      turn: 1,
+      recordExport: true,
+      capabilities: { canCancelQueued: true, canInterrupt: false, canRetry: false, canRefresh: false }
+    });
+    expect(byId(queuedCard, 'export_trace')).toBeUndefined();
+    expect(JSON.stringify(queuedCard)).not.toContain('可点击「导出执行记录」');
+    expect(byId(queuedCard, 'cancel')).toBeDefined();
+
+    const cancelledCard = buildLarkCard({
+      state: 'cancelled',
+      cardKind: 'process',
+      taskId: 'om_cancelled',
+      turn: 1,
+      recordExport: true
+    });
+    expect(byId(cancelledCard, 'export_trace')).toBeUndefined();
+    expect(JSON.stringify(cancelledCard)).not.toContain('可点击「导出执行记录」');
+  });
+
   it('重试成功后的失败计数仅陈述历史，完整公开记录保留失败证据', () => {
     const events = [
       makeEvent(1, 'tool_result', { id: 'first', name: 'test', output: 'temporary failure', status: 'failed' }),

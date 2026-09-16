@@ -435,7 +435,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       }]
     });
   }
-  const exportElements = input.recordExport && input.taskId && Number.isSafeInteger(input.turn) ? [{
+  const exportElements = input.recordExport && input.taskId && Number.isSafeInteger(input.turn) && state !== 'queued' && state !== 'cancelled' ? [{
     tag: 'button', element_id: 'export_trace', text: { tag: 'plain_text', content: '导出执行记录' }, type: 'default',
     behaviors: [{ type: 'callback', value: { dutydeck_export_trace: 'download', task_id: taskId, turn: String(input.turn) } }]
   }] : [];
