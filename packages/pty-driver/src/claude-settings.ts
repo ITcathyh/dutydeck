@@ -56,7 +56,16 @@ export class ClaudeSettings {
     if (user.value === undefined || generated.value === undefined) return [...userArgs, ...generatedArgs];
     const original = readSettings(user.value, cwd);
     const overrides = readSettings(generated.value, cwd);
-    const merged = { ...original, ...overrides, permissions: { ...original.permissions as object, ...overrides.permissions as object } };
+    const merged = { ...original, ...overrides,
+      ...((original.permissions || overrides.permissions) ? { permissions: { ...original.permissions as object, ...overrides.permissions as object } } : {}),
+      ...(object(overrides.hooks) ? { hooks: {
+        ...original.hooks as object,
+        ...Object.fromEntries(Object.entries(overrides.hooks).map(([event, hooks]) => {
+          const existing = object(original.hooks) ? original.hooks[event] : undefined;
+          return [event, [...(Array.isArray(existing) ? existing : []), ...(Array.isArray(hooks) ? hooks : [])]];
+        })),
+      } } : {}),
+    };
     try { mkdirSync(this.directory, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
     this.assertPrivateDirectory();

@@ -53,7 +53,7 @@ export function relayHintLines(env: RelayPromptEnv = {}): string[] {
   return [
     `需要在轮次中途主动告知用户时，用 ${command} session send "内容"——立刻送达，不必等本轮结束。`,
     `需要用户决策才能继续时，用 ${command} session ask "问题"：命令会阻塞，用户回答后答案从 stdout 返回（退出码 0）；超时退出 124，通道不可用退出 3。不要自己猜测用户的选择。`,
-    `问题有明确选项时，用 ${command} session ask "选哪个方案？" --choices '[{"label":"方案甲","value":"a"},{"label":"方案乙","value":"b"}]'；允许多选时再加 --multiple。label 是展示文案，按钮或表单提交返回 value（省略则返回 label），文字回复按原文返回；没有固定选项时不传 --choices。选项会传给卡片，飞书开启 structuredAskCards 后显示选择按钮或多选框。`,
+    `问题有明确选项时，用 ${command} session ask "选哪个方案？" --choices '[{"label":"方案甲","value":"a"},{"label":"方案乙","value":"b"}]'；允许多选时再加 --multiple。label 是展示文案，按钮或表单提交返回 value（省略则返回 label），文字回复按原文返回；没有固定选项时不传 --choices。选项会传给卡片，飞书默认显示选择按钮或多选框；显式关闭 structuredAskCards 时展示文字选项并引用卡片回答。`,
     `${command} 必须原样使用上面给出的完整路径，不要改用 PATH 中的其他 dutydeck——其它安装的凭证在本会话无效。`
   ];
 }

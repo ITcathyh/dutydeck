@@ -210,4 +210,28 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
     expect(events.find(event => event.type === 'text')?.data.text).toBe(text);
   });
+
+  it('completes from rendered screen when incremental ANSI redraw splits or overwrites completion marker cells', async () => {
+    let settled = false;
+    const pending = driver.send('Ask the fixture question using AskUserQuestion.').then(() => { settled = true; });
+    await waitForSubmission();
+    // Native AskUserQuestion hook is pending: activity line with "paste again" footer.
+    // Raw chunks here never carry a completion marker, and the turn must not finish.
+    output(repaint(`❯ Ask the fixture question using AskUserQuestion.\n· Churning… (running PreToolUse hook · 0s)\n paste again to expand`));
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(settled).toBe(false);
+    expect(events.some(event => event.type === 'completed')).toBe(false);
+
+    // Incremental ANSI redraw after the answer: absolute cursor moves overwrite
+    // only changed cells, leaving the raw chunk without the literal completion
+    // word (`✻` plus `ed for 1s`); only TerminalSnapshot reconstructs `Churned`.
+    answer(transcript, '增量完成输出');
+    output('\x1b[2;1H✻\x1b[2;8Hed for 1s\x1b[K');
+    // Allow TerminalSnapshot debounce barrier and completion delay to observe the fully reconstructed screen.
+    await vi.advanceTimersByTimeAsync(800);
+    await pending;
+    expect(settled).toBe(true);
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+    expect(events.some(event => event.type === 'text' && event.data.text === '增量完成输出')).toBe(true);
+  });
 });

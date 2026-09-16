@@ -24,6 +24,8 @@ export interface LarkInteraction extends LarkInteractionContext {
   question: string;
   state: 'pending' | 'resolving' | 'answered' | 'approved' | 'rejected' | 'expired' | 'accepted' | 'needs_changes';
   cardId?: string;
+  relatedCardIds?: string[];
+  expiresAt?: string;
   updatedAt: string;
   actorId?: string;
   /** ask 渲染时是否带结构化选项（单选/多选）；缺省为自由文本问答 */
@@ -31,8 +33,9 @@ export interface LarkInteraction extends LarkInteractionContext {
   /** structured=true 时是否多选；缺省/false 为单选 */
   multiple?: boolean;
 }
+const deadlineText = (expiresAt: string) => `${new Date(expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）`;
 const prefix = (appId: string) => `lark.interaction.${appId}.`;
-const stale = () => new LarkServiceError('LARK_INTERACTION_EXPIRED', '此操作已处理或失效，请查看最新任务状态。', 409);
+const stale = () => new LarkServiceError('LARK_INTERACTION_EXPIRED', '此操作已处理或失效。需要继续时，请发送新消息重新提问。', 409);
 const button = (record: LarkInteraction, action: string, label: string): LarkCardElement => ({
   tag: 'button', element_id: `workflow_${action}`, text: { tag: 'plain_text', content: label }, type: action === 'approve' ? 'primary' : 'default',
   behaviors: [{ type: 'callback', value: { dutydeck_workflow: action, request_id: record.id, generation: record.boot } }]
@@ -99,6 +102,7 @@ const structuredCardBudgetHeadroomBytes = 1024;
 export class LarkWorkflowInteractions {
   readonly boot = randomUUID();
   private closed = false;
+  private readonly closedCards = new Set<string>();
   private readonly delivering = new Set<string>();
   private readonly retryAfter = new Map<string, number>();
   constructor(
@@ -116,7 +120,9 @@ export class LarkWorkflowInteractions {
   }
   async initialize(appId: string) {
     for (const record of await this.list(appId)) {
-      if (record.kind !== 'result' && ['pending', 'resolving'].includes(record.state)) {
+      if (record.kind !== 'result' && record.state === 'expired') {
+        await this.renderClosed(record, this.expiryMessage(record));
+      } else if (record.kind !== 'result' && ['pending', 'resolving'].includes(record.state)) {
         // 快照与 move 之间记录可能已被旧协调器的 in-flight 终态处理移走（stop 不拦截
         // detached 续跑）；那种情况下重启收敛的目标已经达成，重读确认后不再重复处理，
         // 绝不能把别人的 resolved 决议倒回 expired。
@@ -130,15 +136,31 @@ export class LarkWorkflowInteractions {
           if (!['pending', 'resolving'].includes(stored.state)) continue;
           target = stored;
         }
-        await this.renderClosed(target, '原任务已失去确认上下文，此卡已失效。');
+        await this.renderClosed(target, this.expiryMessage(target));
       }
     }
   }
+  private expiryMessage(record: LarkInteraction) {
+    return `${record.expiresAt ? `回答截止时间：${deadlineText(record.expiresAt)}。\n\n` : ''}此请求已结束，不再接受回答或批准。需要继续时，请发送新消息重新提问，不要回复这张旧卡。`;
+  }
+  /** Heartbeats also repair persisted cards whose broker waiter has already ended. */
+  async reconcile(appId: string, taskId?: string) {
+    let unresolved = 0;
+    for (let record of await this.list(appId)) {
+      if (record.kind === 'result' || (taskId && record.taskId !== taskId)) continue;
+      if (record.state === 'pending' && !await this.live(record)) {
+        if (record.kind === 'ask' && this.broker?.get(record.nativeId)?.status === 'answering') continue;
+        try { record = await this.move(record, 'expired'); } catch { continue; }
+      }
+      if (record.state === 'expired' && !await this.renderClosed(record, this.expiryMessage(record))) unresolved++;
+    }
+    return unresolved;
+  }
   private async renderClosed(record: LarkInteraction, message: string) {
-    if (!record.cardId || record.kind === 'result') return;
-    await this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.kind === 'ask' ? 'Agent 提问' : '本次操作确认',
+    if (!record.cardId || record.kind === 'result' || this.closedCards.has(`${record.cardId}:${record.state}`)) return true;
+    return this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.kind === 'ask' ? 'Agent 提问' : '本次操作确认',
       permissionMode: 'ask', state: record.state === 'expired' ? 'interrupted' : 'completed', statusLabel: record.state === 'expired' ? '已失效' : '已处理',
-      readOnly: true, elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: message }] }).catch(() => undefined);
+      readOnly: true, elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: message }] }).then(() => { this.closedCards.add(`${record.cardId}:${record.state}`); return true; }).catch(() => false);
   }
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
@@ -148,7 +170,7 @@ export class LarkWorkflowInteractions {
   async expireTask(appId: string, taskId: string) {
     for (const record of await this.list(appId)) {
       if (record.taskId !== taskId || record.kind === 'result' || record.state !== 'pending') continue;
-      try { await this.renderClosed(await this.move(record, 'expired'), '本轮任务已结束，此请求不再接受回答或批准。'); }
+      try { await this.renderClosed(await this.move(record, 'expired'), this.expiryMessage(record)); }
       catch { /* A concurrently accepted decision owns this request. */ }
     }
   }
@@ -166,7 +188,7 @@ export class LarkWorkflowInteractions {
     kind: LarkInteraction['kind'],
     nativeId: string,
     question: string,
-    structured?: Pick<LarkInteraction, 'structured' | 'multiple'>
+    structured?: Pick<LarkInteraction, 'structured' | 'multiple' | 'expiresAt'>
   ) {
     const id = this.interactionId(context, kind, nativeId);
     const record: LarkInteraction = {
@@ -186,7 +208,7 @@ export class LarkWorkflowInteractions {
     return next;
   }
   /**
-   * options.structuredAskCards：结构化问答卡总开关（来自 config，默认缺省即关闭）。
+   * options.structuredAskCards：结构化问答卡总开关（来自 config，默认开启，显式 false 关闭）。
    * 关闭时使用文本卡并展示可读选项；开启后：带选项的 ask 渲染单选按钮组/多选表单，
    * 无选项的 ask 渲染自由文本 input 表单。低版本客户端仍可引用本卡片直接回复。
    * options.webBaseUrl：仅在传入且为合法 http(s) 地址时透传给结构化 ask 卡，未配置不渲染、无公网兜底。
@@ -205,12 +227,14 @@ export class LarkWorkflowInteractions {
     let question: string;
     let askChoices: RelayAskChoice[] | undefined;
     let askMultiple = false;
+    let expiresAt: string | undefined;
     if (event.type === 'text' && data.relay === 'ask' && this.broker) {
       const ask = this.broker.get(String(data.askId));
       if (!ask || ask.status !== 'pending' || ask.sessionId !== context.sessionId) return;
       kind = 'ask'; nativeId = ask.id; question = ask.question;
       askChoices = Array.isArray(ask.choices) ? ask.choices : undefined;
       askMultiple = ask.multiple === true;
+      expiresAt = ask.expiresAt;
     } else if (event.type === 'permission_request' && data.status === 'pending' && this.runtime.resolvePermission && this.runtime.getPendingPermissions) {
       const request = data as PermissionRequestData;
       if (!(await this.runtime.getPendingPermissions(context.sessionId)).some(item => item.id === request.id)) return;
@@ -225,11 +249,11 @@ export class LarkWorkflowInteractions {
         ] : ['执行端未提供详细操作。'])
       ].join('\n');
     } else return;
-    const structuredOn = options.structuredAskCards === true && kind === 'ask';
+    const structuredOn = options.structuredAskCards !== false && kind === 'ask';
     const structuredChoices = structuredOn && askChoices && askChoices.length > 0 ? askChoices : undefined;
     const created = await this.create(
       context, kind, nativeId, question,
-      structuredChoices ? { structured: true, ...(askMultiple ? { multiple: true } : {}) } : undefined
+      { ...(expiresAt ? { expiresAt } : {}), ...(structuredChoices ? { structured: true, ...(askMultiple ? { multiple: true } : {}) } : {}) }
     );
     const record = created.record;
     if (record.state !== 'pending' || record.cardId || this.delivering.has(record.id) || (this.retryAfter.get(record.id) ?? 0) > Date.now()) return;
@@ -257,6 +281,7 @@ export class LarkWorkflowInteractions {
       // 而不做那个回落，等于把这条备用路径一起删掉——命令会以「请填写请求编号」失败，
       // 而那个编号已经没有任何卡会显示。
       // 命令本身的可发现性由 `/help` 承担（commands.ts:173-175 已列出三条命令及其用法）。
+      ...(record.expiresAt ? [{ tag: 'markdown', content: `回答截止时间：${deadlineText(record.expiresAt)}。超时后请发送新消息重新提问。` }] : []),
       hintElement,
       ...(kind === 'permission' ? [button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] : [])
     ];
@@ -302,7 +327,15 @@ export class LarkWorkflowInteractions {
         taskId: record.id, taskName: kind === 'ask' ? 'Agent 需要你的回答' : '确认本次操作', permissionMode: 'ask', elements,
         ...(safeWebBaseUrl ? { webBaseUrl: safeWebBaseUrl } : {}),
         idempotencyKey: `workflow_${record.id}` });
-      await this.bindCard(record, card.messageId);
+      let bound: LarkInteraction;
+      try { bound = await this.bindCard(record, card.messageId); }
+      catch {
+        const current = await this.store.get(this.key(record));
+        if (!current) throw stale();
+        bound = await this.bindCard(JSON.parse(current), card.messageId);
+      }
+      if (bound.state === 'expired') await this.renderClosed(bound, this.expiryMessage(bound));
+      else await this.reconcile(context.appId, context.taskId);
       this.retryAfter.delete(record.id);
     } catch (error) {
       // The waiter remains valid when delivery fails. A later task heartbeat
@@ -330,11 +363,21 @@ export class LarkWorkflowInteractions {
     return projectedBytes <= larkCardSafeLimits.bytes - structuredCardBudgetHeadroomBytes
       && projectedComponents <= larkCardSafeLimits.components;
   }
-  async result(context: LarkInteractionContext, cardId: string) {
+  async result(context: LarkInteractionContext, cardId: string, relatedCardIds?: string[]) {
     const raw = await this.store.get(prefix(context.appId) + this.interactionId(context, 'result', context.taskId));
     if (!raw) return [];
     let record = JSON.parse(raw) as LarkInteraction;
-    if (record.cardId !== cardId) record = await this.bindCard(record, cardId);
+    for (;;) {
+      const next = { ...record, cardId, ...(relatedCardIds ? { relatedCardIds } : {}) };
+      if (JSON.stringify(record) === JSON.stringify(next)) break;
+      if (await this.store.compareAndSet!(this.key(record), JSON.stringify(record), JSON.stringify(next))) {
+        record = next;
+        break;
+      }
+      const current = await this.store.get(this.key(record));
+      if (!current) throw stale();
+      record = JSON.parse(current) as LarkInteraction;
+    }
     return record.state === 'pending' ? [
       { tag: 'markdown', element_id: 'workflow_result_status', content: '执行已结束。请验收结果；需要修改时，回复此卡片并说明要求。' },
       button(record, 'accept', '验收通过'), button(record, 'changes', '需要修改')
@@ -361,14 +404,18 @@ export class LarkWorkflowInteractions {
     if (record.event.chatId !== input.chatId || record.appId !== input.appId || !record.cardId) throw stale();
     if (input.callback && (input.cardId !== record.cardId || input.generation !== record.boot)) throw stale();
     const expectedKind = input.action === 'answer' ? 'ask' : ['approve', 'reject'].includes(input.action) ? 'permission' : 'result';
-    if (record.kind !== expectedKind || record.state !== 'pending') throw stale();
+    if (record.kind !== expectedKind) throw stale();
     const policy: PolicyAction = input.action === 'approve' ? 'high_risk.execute' : 'run.interrupt';
     if (!await this.authorize(record, input.actorId, policy)) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权操作此任务。', 403);
+    if (record.state !== 'pending') {
+      if (record.state === 'expired') await this.renderClosed(record, this.expiryMessage(record));
+      throw stale();
+    }
     if (record.kind === 'result') {
       record = await this.move(record, input.action === 'accept' ? 'accepted' : 'needs_changes', input.actorId);
       return input.action === 'accept' ? '已记录验收通过。' : '已记录需要修改。请回复结果卡片，说明具体修改要求。';
     }
-    if (!await this.live(record)) { await this.move(record, 'expired'); throw stale(); }
+    if (!await this.live(record)) { await this.renderClosed(await this.move(record, 'expired'), this.expiryMessage(record)); throw stale(); }
     // 结构化卡只接受选项集合内的提交值：单选值来自按钮 value，多选值来自表单 form_value。
     // 校验在 resolving CAS 之前，失败时卡片保持 pending，读者仍可引用卡片回复。
     let answerText = '';
@@ -416,7 +463,7 @@ export class LarkWorkflowInteractions {
         await this.renderPendingPermission(pending);
         throw error;
       }
-      await this.move(record, 'expired');
+      await this.renderClosed(await this.move(record, 'expired'), this.expiryMessage(record));
       throw error;
     }
     const state = input.action === 'answer' ? 'answered' : input.action === 'approve' ? 'approved' : 'rejected';
@@ -427,6 +474,6 @@ export class LarkWorkflowInteractions {
   }
   async quoted(appId: string, event: LarkMessageEvent) {
     if (!event.parentId) return undefined;
-    return (await this.list(appId)).find(record => record.cardId === event.parentId && record.event.chatId === event.chatId);
+    return (await this.list(appId)).find(record => (record.cardId === event.parentId || record.kind === 'result' && record.relatedCardIds?.includes(event.parentId!)) && record.event.chatId === event.chatId);
   }
 }

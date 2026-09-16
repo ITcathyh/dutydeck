@@ -661,3 +661,15 @@ describe('未知命令「你是不是想用」建议（S3）', () => {
     expect(route.kind).toBe('unavailable');
   });
 });
+
+describe('控制命令明确拼错只纠正，不执行或自动改写', () => {
+  it.each(['/cancle', '/mew', '/rettry', '/stpo'])('%s 返回纠正回执', text => {
+    expect(routeLarkCommand(text, context())).toMatchObject({ kind: 'correction', text: expect.stringContaining('不会交给 Agent') });
+  });
+  it('控制能力缺失也不能把取消笔误变成新任务', () => {
+    expect(routeLarkCommand('/cancle', context({ capabilities: capabilities({ interrupt: false, cancelQueued: false, stop: false }) }))).toMatchObject({ kind: 'correction' });
+  });
+  it.each(['/resume', '/usr/bin/bash', '/tmp', '/model', '/review'])('%s 继续交给 CLI', text => {
+    expect(['unknown_command', 'not_a_command']).toContain(routeLarkCommand(text, context()).kind);
+  });
+});

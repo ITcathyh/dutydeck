@@ -1,3 +1,4 @@
+import type { ExecutionActor } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -28,16 +29,17 @@ export interface LarkRuntime {
   listAgents?(): Promise<Array<Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig>>>;
   listSessions?(): Promise<Session[]>;
   getSession(id: string): Promise<Session | undefined>;
-  stop?(id: string): Promise<unknown>;
+  stop?(id: string, actor?: ExecutionActor): Promise<unknown>;
   send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<unknown>;
   dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string): Promise<{ id: string; status: string; queuedAhead?: number; replayed?: boolean }>;
   getPendingPermissions?(id: string): PermissionRequestData[] | Promise<PermissionRequestData[]>;
   resolvePermission?(id: string, requestId: string, approved: boolean): Promise<unknown>;
   getTasks?(id: string): Promise<TaskRecord[]>;
+  getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string }>; activeTaskId?: string }>;
   getEvents?(id: string, afterSequence?: number): Promise<AgentEvent[]>;
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;
   interrupt(id: string, expectedTaskId?: string, actor?: string): Promise<unknown>;
-  cancelQueued?(id: string, taskId: string): Promise<unknown>;
+  cancelQueued?(id: string, taskId: string, actorId?: string): Promise<unknown>;
   subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
 
@@ -150,6 +152,16 @@ export class LarkLongConnectionListener implements LarkListener {
       this.welcome = createLarkWelcomeService({
         appId: config.appId,
         kv: welcomeKv,
+        routing: async (chatId, chatType) => {
+          const current = this.config ?? config;
+          try {
+            const effective = chatType === 'group' && this.options.groupManager
+              ? await this.options.groupManager.resolved(current, chatId) : current;
+            return { ...effective, ...(chatType === 'group' ? { chatMode: await chatModeResolver(current.appId, chatId) } : {}) };
+          } catch {
+            return { ...current, unavailableReason: '无法确认当前群配置与触发方式。' };
+          }
+        },
         ...(capabilities ? { capabilities } : {}),
         log: this.log,
         send: (chatId, content) => service.send({

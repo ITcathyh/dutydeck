@@ -45,7 +45,7 @@ type HarnessMode = 'normal' | 'permission' | 'hang';
 
 async function harness(
   mode: HarnessMode = 'normal',
-  options: { protocol?: 'acp' | 'pty-cli'; configPatch?: Partial<StoredLarkConfig>; answerChunks?: string[]; managedGroup?: boolean } = {}
+  options: { protocol?: 'acp' | 'pty-cli'; configPatch?: Partial<StoredLarkConfig>; answerChunks?: string[]; managedGroup?: boolean; executionPolicy?: ConstructorParameters<typeof LarkMessageCoordinator>[8] } = {}
 ) {
   const protocol = options.protocol ?? 'acp';
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-uxp0-'));
@@ -160,7 +160,7 @@ async function harness(
     await groupManager.sync(config.appId);
     await groupManager.save(config.appId, 'oc_group', { expectedRevision: 0, patch: {} });
   }
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config, broker });
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
@@ -358,16 +358,17 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
     expect(h.service.replyFile).toHaveBeenCalledOnce();
     const [mapping] = await h.repos.channelMappings.list(h.channel);
     const saved = JSON.parse(mapping!.extra!);
-    expect(saved.final_elements).toBeUndefined();
+    expect(saved.final_elements).toEqual(expect.arrayContaining([expect.objectContaining({ element_id: 'result_attachment' })]));
+    expect(saved.final_attachment_message_id).toBeTruthy();
     const id = createHash('sha256').update([h.config.appId, mapping!.sessionId, saved.runtime_task_id, saved.turn, 'result', saved.runtime_task_id, ''].join('\0')).digest('hex').slice(0, 24);
     const record: LarkInteraction = {
       appId: h.config.appId, sessionId: mapping!.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
       event: event(mapping!.externalId, saved.prompt, { chatId: saved.chat_id, chatType: saved.chat_type, threadId: saved.thread_id, senderOpenId: saved.sender_open_id, mentions: [] }),
       id, boot: 'legacy_boot', kind: 'result', nativeId: saved.runtime_task_id, question: '结果验收', state: 'pending',
-      cardId: saved.final_message_id, updatedAt: new Date().toISOString()
+      cardId: saved.final_message_id, relatedCardIds: [saved.final_attachment_message_id], updatedAt: new Date().toISOString()
     };
     await h.repos.config.set(`lark.interaction.${h.config.appId}.${id}`, JSON.stringify(record));
-    return { h, record, fileMessageId: saved.final_message_id as string };
+    return { h, record, fileMessageId: saved.final_attachment_message_id as string };
   }
 
   it('引用文件消息「验收通过」补一次 CheckMark 并落 kv，二次对账不重复', async () => {
@@ -392,7 +393,7 @@ describe('S4 文件型结果验收 reaction：先查 kv 后写、重启不重复
     const changes = await fileHarness();
     expect(await changes.h.coordinator.handleAction(
       { dutydeck_workflow: 'changes', request_id: changes.record.id, generation: changes.record.boot },
-      'ou_alice', { messageId: changes.fileMessageId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+      'ou_alice', { messageId: changes.record.cardId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
     await vi.waitFor(() => expect(changes.h.service.addReaction.mock.calls
       .filter(([messageId, emojiType]) => messageId === changes.fileMessageId && emojiType === 'Typing')).toHaveLength(1));
 
@@ -565,21 +566,15 @@ describe('P0-6 /repair 二次确认回调：串应用/监听/白名单/人类四
   });
 });
 
-describe('S3 未知命令近似建议只上卡面，原文不改写进入 Agent', () => {
-  it('/mew 提示 /new，但 runtime.send 收到的仍是 /mew', async () => {
+describe('控制命令纠错不执行', () => {
+  it.each(['/mew', '/cancle'])('%s 明确拼错时只提示纠正', async typo => {
     const h = await harness();
-    await h.coordinator.handle(event('om_typo', '/mew'), h.config);
-    await vi.waitFor(() => expect(h.send).toHaveBeenCalled());
-    // 进 Agent 的是经统一包装的「非命令原文」材料：必须保留 /mew 原文，绝不改写成建议的 /new。
-    const agentPrompt = String(h.send.mock.calls[0]![0]);
-    expect(agentPrompt).toContain('/mew');
-    expect(agentPrompt).toContain('不是 Dutydeck 命令');
-    expect(agentPrompt).not.toMatch(/^\s*\/new\b/m);
+    await h.coordinator.handle(event('om_typo', typo), h.config);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(await h.runtime.listSessions()).toHaveLength(0);
     const card = h.service.reply.mock.calls.map(([input]) => input).find(input => input.taskId === 'om_typo')!;
-    expect(card).toBeTruthy();
-    expect(String(card.markdown)).toContain('你是不是想用');
-    expect(String(card.markdown)).toContain('/new');
-    expect(String(card.markdown)).toContain('原文仍会作为普通请求执行');
+    expect(card.markdown).toContain('未执行');
+    expect(card.markdown).toContain('请确认后重新发送');
   });
 });
 
@@ -754,10 +749,69 @@ describe('复核回归：queue_summary 是瞬态读数，不冻结进 last_succe
     try {
       const before = h.service.update.mock.calls.length;
       await restored.reconcile(h.config);
-      const replayed = h.service.update.mock.calls.slice(before).map(([input]) => input)
-        .filter(input => Array.isArray(input.elements));
+      const replayed = h.service.update.mock.calls.slice(before).map(([input]) => input);
+      // 恢复重绘只允许当前恢复事实（markdown 注记），绝不重放冻结 trace，也不带陈旧排队摘要。
       expect(replayed.length).toBeGreaterThan(0);
+      expect(replayed.some(input => Array.isArray(input.elements))).toBe(false);
       expect(replayed.some(input => JSON.stringify(input).includes('queue_summary'))).toBe(false);
     } finally { restored.stop(); }
+  });
+});
+
+describe('飞书输入明确反馈与提问生命周期', () => {
+  it('真实 broker 超时后一个心跳内关闭卡；点击与引用旧卡均不新建任务', async () => {
+    const h = await harness('hang', { configPatch: { structuredAskCards: true } });
+    await h.coordinator.handle(event('om_expiry_task', '等我的回答'), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(1));
+    const [session] = await h.runtime.listSessions();
+    const waiting = h.broker.register({ sessionId: session!.id, question: '选哪个？', choices: [{ label: '继续' }], timeoutMs: 1_000 });
+    let record!: LarkInteraction;
+    await vi.waitFor(async () => {
+      record = (await h.interactions()).find(item => item.kind === 'ask')!;
+      expect(record?.cardId).toBeTruthy();
+    });
+    expect(JSON.stringify(h.cards.get(record.cardId!))).toContain('回答截止时间');
+    const value = callbackValues(h.cards.get(record.cardId!)).find(item => item.dutydeck_workflow === 'answer')!;
+    expect(await waiting).toMatchObject({ status: 'expired' });
+    await vi.waitFor(() => expect(h.cards.get(record.cardId!)).toMatchObject({ statusLabel: '已失效', readOnly: true }), { timeout: 1_500 });
+    expect(callbackValues(h.cards.get(record.cardId!))).toHaveLength(0);
+    expect(JSON.stringify(h.cards.get(record.cardId!))).toContain('重新提问');
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: record.cardId!, chatId: 'oc_group' })).toMatchObject({ type: 'error', content: expect.stringContaining('失效') });
+    await h.coordinator.handle(event('om_expired_reply', '继续', { parentId: record.cardId }), h.config);
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(await h.runtime.getTasks(session!.id)).toHaveLength(1);
+  });
+
+  it.each(['denied', 'disabled'] as const)('%s 群明确人类请求给原因和下一步；闲聊及其他机器人静默，重复和重启去重', async mode => {
+    const h = await harness('normal', { managedGroup: true });
+    const bot = (await h.groupManager!.groups()).groups[0]!.bots[0]!;
+    const bob = (await h.groupManager!.members(h.config.appId, 'oc_group')).members.find(item => item.openId === 'ou_bob')!;
+    await h.groupManager!.save(h.config.appId, 'oc_group', { expectedRevision: bot.binding!.revision,
+      patch: mode === 'disabled' ? { state: 'disabled' } : { accessOverride: { mode: 'allowlist', principalIds: [bob.principalId] } } });
+    const request = event(`om_${mode}`, '开始任务');
+    await Promise.all([h.coordinator.handle(request, h.config), h.coordinator.handle(request, h.config)]);
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.service.reply).toHaveBeenCalledTimes(1);
+    expect(h.service.reply.mock.calls[0]![0].markdown).toContain('请求未执行');
+    expect(h.service.reply.mock.calls[0]![0].markdown).toContain('管理员');
+    await h.coordinator.handle(event('om_chatter', '普通聊天', { mentions: [] }), h.config);
+    await h.coordinator.handle(event('om_other_bot', '其他机器人请求', { senderType: 'app' }), h.config);
+    await h.coordinator.handle(event('om_wrong_target', '开始', { mentions: [{ key: '@_user_1', name: 'Other', openId: 'ou_other_bot', mentionedType: 'bot' }] }), h.config);
+    expect(h.service.reply).toHaveBeenCalledTimes(1);
+    const restarted = h.createCoordinator();
+    try { await restarted.handle(request, h.config); } finally { restarted.stop(); }
+    expect(h.service.reply).toHaveBeenCalledTimes(1);
+  });
+
+  it('只读/help无需执行能力，发起任务仍被执行门拒绝', async () => {
+    const h = await harness('normal', { executionPolicy: { integrationMode: 'legacy_unmanaged',
+      authorize: async (_boundary, action) => ({ allowed: false, action, code: 'test_denied', reason: '机器人运行权限尚未确认。', source: 'explicit_deny' }) } });
+    await h.coordinator.handle(event('om_view_help', '/help'), h.config);
+    expect(JSON.stringify(h.service.reply.mock.calls)).toContain('/help');
+    expect(JSON.stringify(h.service.reply.mock.calls)).not.toContain('请求未执行');
+    await h.coordinator.handle(event('om_view_task', '执行任务'), h.config);
+    expect(h.service.reply.mock.calls.at(-1)![0].markdown).toContain('请求未执行');
+    expect(h.service.reply.mock.calls.at(-1)![0].markdown).toContain('运行权限尚未确认');
+    expect(h.send).not.toHaveBeenCalled();
   });
 });

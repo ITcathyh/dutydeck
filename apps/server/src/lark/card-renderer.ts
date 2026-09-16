@@ -29,7 +29,7 @@ export const isLarkMessageUnupdatable = (error: unknown): error is LarkServiceEr
 const rejectedDeltaElement = (changedCount: number): LarkCardElement => ({
   tag: 'markdown',
   element_id: 'dutydeck_rejected_delta',
-  content: `<font color='orange'>本次新增或变化的 ${Math.max(1, changedCount)} 个内容区块未通过飞书审核，已保留上一次成功内容；完整增量请在 Dutydeck Web 查看。</font>`,
+  content: `<font color='orange'>本次新增或变化的 ${Math.max(1, changedCount)} 个内容区块未通过飞书审核，已保留上一次成功内容。</font>`,
   text_size: 'notation',
   margin: '8px 0px 0px 0px'
 });
@@ -754,7 +754,7 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
 
 // 「N 个工具已结束」是纯计数：任务进入终态本身就意味着步骤都结束了，这一行不改变
 // 任何判断，却挂在最终答案正下方跟答案抢注意力——结果卡上尤其明显。
-// 只有失败数要求读者做点什么，所以只在有失败时才出现。
+// 有失败时只陈述历史事实，不据此推断业务目标仍未完成。
 const buildEvidenceElement = (allGroups: TraceGroup[]): LarkCardElement | undefined => {
   const failedCount = allGroups.flatMap(group => group.actions)
     .filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result')
@@ -766,16 +766,16 @@ const buildEvidenceElement = (allGroups: TraceGroup[]): LarkCardElement | undefi
     element_id: 'evidence',
     // 不写「详情见执行记录」：失败数按全部阶段统计，而卡片只渲染最近五个阶段，
     // 失败发生在更早的阶段时，那句指引会把读者送到一份没有失败记录的执行记录里。
-    content: `<font color='orange'>${failedCount} 个步骤执行失败</font>`,
+    content: `<font color='grey'>执行中曾有 ${failedCount} 个步骤失败，历史记录不代表仍有未解决问题。</font>`,
     text_size: 'notation',
     margin: '4px 0px 0px 0px',
-    icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'orange' }
+    icon: { tag: 'standard_icon', token: 'info_outlined', color: 'grey' }
   };
 };
 
 const traceOmissionElement = (omittedGroupCount: number, margin: string): LarkCardElement => ({
   tag: 'markdown', element_id: 'trace_omission',
-  content: `<font color='grey'>另有 ${omittedGroupCount} 个更早阶段未展示，完整记录见 Dutydeck Web</font>`,
+  content: `<font color='grey'>另有 ${omittedGroupCount} 个更早阶段未展示。</font>`,
   text_size: 'notation', margin
 });
 
@@ -948,4 +948,22 @@ export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkCon
     if (entry.type === 'raw_terminal') return `**终端**${fenced(redactTraceText(String(data.text ?? '')))}`;
     return '';
   }).filter(Boolean).join('\n\n---\n\n');
+}
+
+/** Full public execution record: do not export internal analysis or opaque PTY
+ * screens, which may contain a CLI's private reasoning. No visual trace limits. */
+export function renderLarkRecordExport(events: AgentEvent[]): string {
+  const sections = compactTrace(events).flatMap(entry => {
+    const data = entry.data;
+    const time = entry.timestamp;
+    if (entry.type === 'text') return [`## ${time} · Agent\n\n${redactTraceText(String(data.text ?? ''))}`];
+    if (entry.type === 'tool_call' || entry.type === 'tool_result') {
+      return [`## ${time} · 工具 ${redactTraceText(String(data.name ?? 'tool'))}\n\n状态：${redactTraceText(String(data.status ?? (entry.type === 'tool_result' ? 'completed' : 'running')))}\n\n输入${fenced(redactTraceValue(data.input))}\n\n输出${fenced(redactTraceValue(data.output))}`];
+    }
+    if (entry.type === 'permission_request') return [`## ${time} · 权限请求\n\n${redactTraceText(String(data.title ?? ''))}\n\n状态：${redactTraceText(String(data.status ?? 'pending'))}`];
+    if (entry.type === 'error') return [`## ${time} · 错误\n\n${redactTraceText(String(data.message ?? 'Agent 执行未完全成功'))}`];
+    return [];
+  });
+  return '# 公开执行记录\n\n包含本轮公开输出、工具输入输出、审批及错误；已脱敏，不含内部分析、用户原始请求与原始终端屏幕。\n\n'
+    + (sections.join('\n\n---\n\n') || '本轮没有可导出的结构化公开记录。');
 }

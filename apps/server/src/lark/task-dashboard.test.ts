@@ -48,7 +48,7 @@ describe('buildLarkTaskDashboard', () => {
     expect(rowText(renderedRows[0]!)).toContain('等待回答');
     expect(rowText(renderedRows[2]!)).toContain('执行工具');
     expect(rowText(renderedRows[4]!)).toContain('已完成');
-    expect(rowText(renderedRows[5]!)).toContain('已结束');
+    expect(rowText(renderedRows[5]!)).toContain('状态待核对');
   });
 
   it('clamps invalid pages and keeps each page at most ten task rows', () => {
@@ -173,7 +173,7 @@ describe('buildLarkTaskDashboard', () => {
       { status: 'failed', label: '重试', action: 'retry', type: 'primary' },
       { status: 'interrupted', label: '重试', action: 'retry', type: 'primary' },
       { status: 'completed' },
-      { status: 'cancelled' },
+      { status: 'cancelled', action: 'retry', label: '重试', type: 'primary' },
       { status: 'waiting_for_answer' },
       { status: 'unknown_status' }
     ];

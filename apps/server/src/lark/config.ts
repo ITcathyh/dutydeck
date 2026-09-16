@@ -56,7 +56,7 @@ export interface StoredLarkConfig {
   listening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
-  /** P0-2 结构化问答卡片总开关，默认关闭；真机版本核查通过后才建议开启。 */
+  /** 结构化问答卡片总开关，默认开启；显式 false 使用文字选项与引用回复。 */
   structuredAskCards: boolean;
   /** P0-4 群内审批卡/结果卡 @ 发起人总开关，默认关闭；触达效果真机验证通过后才建议开启。 */
   groupCardMention: boolean;
@@ -371,7 +371,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     listening: parsed.listening === true,
     groupToolsEnabled: parsed.groupToolsEnabled === true,
     groupToolsAllowSend: parsed.groupToolsEnabled === true && parsed.groupToolsAllowSend === true,
-    structuredAskCards: parsed.structuredAskCards === true,
+    structuredAskCards: parsed.structuredAskCards === undefined || parsed.structuredAskCards === true,
     groupCardMention: parsed.groupCardMention === true,
     pushIntervalMs: Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20_000 ? pushIntervalMs : defaultLarkPushIntervalMs,
     traceLimit,
@@ -445,7 +445,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   activeListening: activeAppIds.has(config.appId),
   groupToolsEnabled: config.groupToolsEnabled,
   groupToolsAllowSend: config.groupToolsAllowSend,
-  structuredAskCards: config.structuredAskCards === true,
+  structuredAskCards: config.structuredAskCards !== false,
   groupCardMention: config.groupCardMention === true,
   pushIntervalMs: config.pushIntervalMs,
   traceLimit: config.traceLimit ?? defaultLarkTraceLimit,
@@ -497,7 +497,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const listening = input.listening ?? current?.listening ?? false;
   const groupToolsEnabled = input.groupToolsEnabled ?? current?.groupToolsEnabled ?? false;
   const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
-  const structuredAskCards = input.structuredAskCards ?? current?.structuredAskCards ?? false;
+  const structuredAskCards = input.structuredAskCards ?? current?.structuredAskCards ?? true;
   const groupCardMention = input.groupCardMention ?? current?.groupCardMention ?? false;
   const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
   const traceLimit = input.traceLimit === undefined ? current?.traceLimit ?? defaultLarkTraceLimit : input.traceLimit ?? defaultLarkTraceLimit;

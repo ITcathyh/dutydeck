@@ -13,6 +13,8 @@ export interface LarkTaskDashboardEntry {
   title: string;
   workspace: string;
   status: string;
+  detail?: string;
+  blocked?: boolean;
   updatedAt: string;
   url?: string;
   feedback?: 'pending' | 'accepted' | 'needs_changes';
@@ -41,13 +43,15 @@ const PAGE_SIZE = 10;
 const MAX_TITLE_CHARS = 120;
 const MAX_WORKSPACE_CHARS = 120;
 
-const waitingStatuses = new Set(['waiting_for_permission', 'waiting_for_answer', 'failed', 'interrupted']);
+const waitingStatuses = new Set(['waiting_for_permission', 'waiting_for_answer', 'failed', 'interrupted', 'reconcile_required', 'legacy_unresolved']);
 const runningStatuses = new Set(['queued', 'running', 'thinking', 'running_tool']);
 
 const statusLabels: Record<string, string> = {
   waiting_for_permission: '等待审批',
   waiting_for_answer: '等待回答',
   failed: '失败',
+  reconcile_required: '需要核对',
+  legacy_unresolved: '需要核对',
   interrupted: '已中断',
   queued: '排队中',
   running: '执行中',
@@ -88,7 +92,7 @@ const workspaceName = (value: unknown) => {
 
 const statusLabel = (status: unknown) => {
   const key = String(status ?? '').trim().toLowerCase();
-  return statusLabels[key] ?? '已结束';
+  return statusLabels[key] ?? '状态待核对';
 };
 
 const groupForStatus = (status: unknown): DashboardGroup => {
@@ -200,7 +204,7 @@ const primaryRowAction = (
   if (status === 'running' || status === 'thinking' || status === 'running_tool') {
     return { label: '中断', buttonType: 'danger', value: taskActionValue('interrupt', taskId, turn) };
   }
-  if ((status === 'failed' || status === 'interrupted') && entry.retryable !== false) {
+  if ((status === 'failed' || status === 'interrupted' || status === 'cancelled') && entry.retryable !== false) {
     return { label: '重试', buttonType: 'primary', value: taskActionValue('retry', taskId, turn) };
   }
   return undefined;
@@ -238,7 +242,7 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
   // 就说明了自己是什么。全部任务在同一个工作区时（单机常态）它更是逐行重复同一个词，
   // 这时提到表头写一次，行内只留真正逐行不同的东西。
   const location = sharedWorkspace ? '' : ` · ${workspace}`;
-  const summary = `${title}\n${statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}`;
+  const summary = `${title}\n${entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${entry.detail ? `\n${entry.detail}` : ''}`;
   const url = validAppLink(entry.url);
   const approval = validApproval(entry.pendingApproval);
   const primary = primaryRowAction(entry, approval);
@@ -300,7 +304,7 @@ export function buildLarkTaskDashboard(
   page = 1,
   now = Date.now()
 ): LarkTaskDashboardResult {
-  const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
+  const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
   const ordered = ([0, 1, 2] as DashboardGroup[]).flatMap(group => indexed
     .filter(item => item.group === group)
     .sort((left, right) => timestamp(right.entry.updatedAt) - timestamp(left.entry.updatedAt)));
