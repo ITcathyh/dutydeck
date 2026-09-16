@@ -158,6 +158,7 @@ export interface CliHandlers {
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
+  sessionNativeAsk?(): void | Promise<void>;
   databaseExecutionStatus?(options: DatabaseExecutionStatusCliOptions): void | Promise<void>;
   databaseUpgradeExecution?(options: DatabaseUpgradeExecutionCliOptions): void | Promise<void>;
   databaseRetireLegacy?(options: DatabaseRetireLegacyCliOptions): void | Promise<void>;
@@ -442,6 +443,9 @@ Routing guidance:
   // 与 `dutydeck group send` 分层并存——group 面向飞书群里的其他人/机器人，
   // session 面向「发起本会话的用户」，落点是会话事件流（Web 时间线 / 卡片）。
   const session = program.command('session').description('Relay messages to the user who owns the current Dutydeck session');
+  session.command('native-ask')
+    .description('Bridge a native Claude AskUserQuestion hook from stdin to the current session')
+    .action(() => handlers.sessionNativeAsk?.());
   session.command('send')
     .description('Push a message to the user now, without waiting for the turn to end')
     .argument('<text>', 'Message content')

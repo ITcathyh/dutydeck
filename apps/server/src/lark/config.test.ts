@@ -344,11 +344,11 @@ describe('describeWebBaseUrlReachability S7 分类矩阵', () => {
 });
 
 describe('Lark 实验卡片开关归一化', () => {
-  it('旧配置缺省两个开关时读回均为 false，并在公开视图暴露布尔值', async () => {
+  it('旧配置缺省时结构化问答开启，群提及关闭，并在公开视图暴露布尔值', async () => {
     const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret' }]));
-    expect(config.structuredAskCards).toBe(false);
+    expect(config.structuredAskCards).toBe(true);
     expect(config.groupCardMention).toBe(false);
-    expect(publicLarkConfig(config)).toMatchObject({ structuredAskCards: false, groupCardMention: false });
+    expect(publicLarkConfig(config)).toMatchObject({ structuredAskCards: true, groupCardMention: false });
   });
 
   it('存量配置显式 true 时归一化保留 true，非布尔脏值回落 false', async () => {
@@ -363,7 +363,7 @@ describe('Lark 实验卡片开关归一化', () => {
     expect(dirty!.groupCardMention).toBe(false);
   });
 
-  it('保存时显式 true 往返落库，缺省保存按 false 落库', async () => {
+  it('保存时显式 true 往返落库，缺省保存问答开启、群提及关闭', async () => {
     const repository = createRepository();
     await saveLarkConfig(repository, undefined, {
       appId: 'cli_test', appSecret: 'secret', structuredAskCards: true, groupCardMention: true
@@ -376,9 +376,9 @@ describe('Lark 实验卡片开关归一化', () => {
 
     await saveLarkConfig(repository, undefined, { appId: 'cli_default', appSecret: 'secret' });
     const configs = await readLarkConfigs(repository);
-    expect(configs.find(item => item.appId === 'cli_default')).toMatchObject({ structuredAskCards: false, groupCardMention: false });
+    expect(configs.find(item => item.appId === 'cli_default')).toMatchObject({ structuredAskCards: true, groupCardMention: false });
     const [persistedDefault] = JSON.parse((await repository.get(larkBotsConfigKey))!).filter((bot: any) => bot.appId === 'cli_default');
-    expect(persistedDefault).toMatchObject({ structuredAskCards: false, groupCardMention: false });
+    expect(persistedDefault).toMatchObject({ structuredAskCards: true, groupCardMention: false });
   });
 
   it('再次保存未带开关时继承现值；显式 false 可以关闭已开启项', async () => {

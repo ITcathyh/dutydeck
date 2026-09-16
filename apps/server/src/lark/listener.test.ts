@@ -326,7 +326,7 @@ describe('Lark message coordinator', () => {
       capabilities: expect.objectContaining({ canCancelQueued: true })
     })));
     await expect(coordinator.handleAction({ action: 'cancel', task_id: 'om_queued' })).resolves.toEqual({ type: 'success', content: '正在取消排队任务' });
-    expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'rt_1');
+    expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'rt_1', undefined);
   });
 
   it('rejects malformed and unknown card action values through the shared validator', async () => {
@@ -837,7 +837,7 @@ describe('Lark message coordinator', () => {
     expect(runtime.dispatch.mock.calls.map(call => call.slice(1, 3))).toEqual([['第一条', 'queue'], ['第二条', 'queue']]);
     expect(runtime.dispatch.mock.calls.every(call => call.length === 4)).toBe(true);
     expect(runtime.dispatch.mock.calls[1]?.[3]).toContain('[Dutydeck 安全策略 · 自动注入]');
-    expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: '正在排队，前面还有 1 个任务…' }));
+    expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('正在排队，前面还有 1 个任务…') }));
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('前面还有 0 个任务') }));
     expect(runtime.send).not.toHaveBeenCalled();
     expect(runtime.start).toHaveBeenCalledOnce();
@@ -1014,6 +1014,9 @@ describe('Lark message coordinator', () => {
     expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', undefined, 'ou_operator');
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'interrupted' }));
     finishInterrupt();
+    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ statusLabel: '等待停止确认' })));
+    expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'interrupted' }));
+    finishFirst();
     // 中断态就地写回第一张卡；它保留重试入口，不是零操作的只读收据。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_progress_1', state: 'interrupted' })));
     const interruptedCall = service.update.mock.calls.find(([input]: any[]) => input.messageId === 'om_progress_1' && input.state === 'interrupted')?.[0];
@@ -1037,7 +1040,7 @@ describe('Lark message coordinator', () => {
     expect(service.send).toHaveBeenCalledTimes(4);
     expect(runtime.send).toHaveBeenNthCalledWith(2, 'ses_1', '执行任务', expect.any(String));
 
-    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'warning', content: '只有失败或已中断的任务可以重试' });
+    await expect(coordinator.handleAction({ action: 'retry', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'warning', content: '只有失败、已中断或已取消的任务可以重试' });
     expect(runtime.send).toHaveBeenCalledTimes(2);
     expect(service.send).toHaveBeenCalledTimes(4);
   });
@@ -1198,6 +1201,8 @@ describe('Lark message coordinator', () => {
     await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '已拉取最新状态' });
     await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '正在取消任务' });
     expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2', undefined);
+    expect(service.update.mock.calls.filter(([input]: any[]) => input.messageId === newCardId && input.state === 'interrupted')).toHaveLength(0);
+    emit(agentEvent(22, 'task', { task: { id: 'runtime-2', status: 'interrupted' } }));
     // 新一轮的终态落在新卡上，旧卡 om_card_1 始终没被改写成第二轮的结论。
     await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: newCardId, state: 'interrupted' })));
     expect(service.update.mock.calls.filter(([input]: any[]) => input.messageId === 'om_card_1' && input.state === 'interrupted')).toHaveLength(0);
@@ -1277,7 +1282,7 @@ describe('Lark message coordinator', () => {
     // 取消/中断请求发出，但 runtime 那一侧挂住不返回。
     await expect(coordinator.handleAction({ action, task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: toast });
     if (action === 'interrupt') expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-1', undefined);
-    else expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-1');
+    else expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-1', undefined);
 
     // runtime 自己把第一轮判为 interrupted（事件流），于是任务可重试。
     emit(agentEvent(11, 'task', { task: { id: 'runtime-1', status: 'interrupted' } }));
@@ -1448,7 +1453,7 @@ describe('Lark message coordinator', () => {
     coordinator.stop();
   });
 
-  it('cancels a queued task from its card and flips the card to interrupted', async () => {
+  it('cancels a queued task from its card and flips the card to cancelled', async () => {
     const listeners = new Set<(event: AgentEvent) => void>();
     let nextTask = 0;
     const runtime = {
@@ -1477,13 +1482,13 @@ describe('Lark message coordinator', () => {
     coordinator.handle(message('om_first', '第一条'), config);
     coordinator.handle(message('om_second', '第二条'), config);
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
-    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: '正在排队，前面还有 1 个任务…' })));
+    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('正在排队，前面还有 1 个任务…') })));
 
-    expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'queued', markdown: '正在排队，前面还有 1 个任务…' }));
+    expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'queued', markdown: expect.stringContaining('正在排队，前面还有 1 个任务…') }));
     await expect(coordinator.handleAction({ action: 'cancel', task_id: 'om_second' })).resolves.toEqual({ type: 'success', content: '正在取消排队任务' });
-    expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-2');
+    expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-2', undefined);
     expect(runtime.interrupt).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'interrupted' })));
+    await vi.waitFor(() => expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ state: 'cancelled' })));
     coordinator.stop();
   });
 
@@ -1506,7 +1511,7 @@ describe('Lark message coordinator', () => {
     (coordinator as any).tasks.set(internalTask.id, internalTask);
 
     await expect(coordinator.handleAction({ action: 'cancel', task_id: internalTask.id })).resolves.toEqual({ type: 'success', content: '正在取消排队任务' });
-    await vi.waitFor(() => expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-promoted'));
+    await vi.waitFor(() => expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-promoted', undefined));
     expect(runtime.interrupt).not.toHaveBeenCalled();
     expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ runtimeTaskId: 'runtime-promoted' }), '取消飞书排队任务失败');
     coordinator.stop();

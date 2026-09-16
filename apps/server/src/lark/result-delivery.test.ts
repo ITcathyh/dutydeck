@@ -1,4 +1,8 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createRepositories } from '@dutydeck/storage';
 import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
 import { larkResultKey, patchLarkCard, sendLarkResult } from './result-delivery.js';
@@ -50,17 +54,33 @@ describe('separate process and complete result messages', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
-  it('delivers an oversized Unicode answer as one complete file in the same thread', async () => {
-    const text = `开头\n${'完整结果🙂'.repeat(5000)}\n末尾`;
-    const service = { uploadFile: vi.fn(async () => 'file_full'), replyFile: vi.fn(async () => ({ messageId: 'om_file' })),
-      reply: vi.fn(), send: vi.fn(), sendFile: vi.fn() };
-    const result = await sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question', replyInThread: true }, input(text), log);
-    expect(Buffer.from(service.uploadFile.mock.calls[0]![0].data).toString('utf8')).toBe(text);
-    expect(service.replyFile).toHaveBeenCalledExactlyOnceWith({ messageId: 'om_question', replyInThread: true, fileKey: 'file_full', idempotencyKey: larkResultKey('om_process') });
-    expect(service.reply).not.toHaveBeenCalled();
+  it('delivers oversized Unicode intact with a named summary, mention and existing acceptance controls', async () => {
+    const text = `尚待用户扫码，创建尚未完成。\n${'完整结果🙂'.repeat(5000)}\n末尾`;
+    const service = { uploadFile: vi.fn(async (_input: any) => 'file_full'), replyFile: vi.fn(async (_input: any) => ({ messageId: 'om_file' })),
+      reply: vi.fn(async (_input: any) => ({ messageId: 'om_summary' })), send: vi.fn(), sendFile: vi.fn() };
+    const original = input(text);
+    original.elements.push({ tag: 'markdown', element_id: 'group_mention', content: '<at user_id="ou_owner">成员</at>' },
+      { tag: 'button', element_id: 'workflow_accept', text: { tag: 'plain_text', content: '验收通过' } });
+    const result = await sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question', replyInThread: true },
+      { ...original, taskName: '创建机器人', turn: 1, recordExport: true }, log);
+    const uploaded = Buffer.from(service.uploadFile.mock.calls[0]![0].data).toString('utf8');
+    expect(uploaded).toBe(`${text}\n\n---\n\n结果验收：回复本文件消息「验收通过」即可确认；需要修改时，回复本文件消息并说明修改要求。`);
+    expect(service.uploadFile.mock.calls[0]![0].filename).toBe('创建机器人.md');
+    expect(service.replyFile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_question', replyInThread: true, fileKey: 'file_full' }));
+    expect(service.reply).toHaveBeenCalledOnce();
+    const summary = service.reply.mock.calls[0]![0];
+    expect(summary.idempotencyKey).not.toBe(service.replyFile.mock.calls[0]![0].idempotencyKey);
+    const card = buildLarkCard(summary);
+    expect(card.header.title.content).toBe('执行结果 · 创建机器人');
+    expect(card.config.summary.content).toContain('本轮结束');
+    expect(JSON.stringify(card)).toContain('尚待用户扫码，创建尚未完成。');
+    expect(JSON.stringify(card)).toContain('正文开头节选（非完整结论）');
+    expect(JSON.stringify(card)).toContain('workflow_accept');
+    expect(JSON.stringify(card)).toContain('<at user_id=');
+    expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThan(24 * 1024);
+    expect(result).toMatchObject({ messageId: 'om_summary', attachmentMessageId: 'om_file', elements: summary.elements });
     expect(service.send).not.toHaveBeenCalled();
     expect(service.sendFile).not.toHaveBeenCalled();
-    expect(result).toMatchObject({ messageId: 'om_file', elements: undefined });
   });
 
   it('uses the same result UUID for reply fallback and propagates a failed delivery', async () => {
@@ -130,5 +150,41 @@ describe('patchLarkCard 整卡 PATCH 与回退判定', () => {
     const update = vi.fn(async () => { throw new Error('message too old'); });
     await expect(patchLarkCard({ update } as any, { messageId: 'om_old' }, cardInput([{ tag: 'markdown', content: '状态' }]), log)).resolves.toBeNull();
     expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_old' }), expect.any(String));
+  });
+});
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
+
+describe('durable multi-message result delivery', () => {
+  it('reopens SQLite after summary failure and sends only the missing summary, then replays both receipts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dutydeck-result-restart-'));
+    let repos = createRepositories(join(dir, 'state.db'));
+    cleanups.push(async () => { repos.close(); await rm(dir, { recursive: true, force: true }); });
+    let unavailable = true;
+    const providerMessages = new Map<string, string>();
+    const accepted = async (value: any) => {
+      if (unavailable && !value.fileKey) throw new Error('provider temporarily unavailable');
+      if (!providerMessages.has(value.idempotencyKey)) providerMessages.set(value.idempotencyKey, `om_${providerMessages.size}`);
+      return { messageId: providerMessages.get(value.idempotencyKey)! };
+    };
+    const service = { uploadFile: vi.fn(async (_value: any) => 'file_key'), replyFile: vi.fn(accepted), sendFile: vi.fn(accepted), reply: vi.fn(accepted), send: vi.fn(accepted) };
+    const original = input('完整结果🙂'.repeat(5000));
+    const target = { chatId: 'oc_group', replyMessageId: 'om_question', replyInThread: true };
+    await expect(sendLarkResult(service as any, target, original, log, repos.config)).rejects.toThrow('temporarily unavailable');
+    expect(providerMessages.size).toBe(1);
+    expect(service.replyFile).toHaveBeenCalledOnce();
+    repos.close();
+    repos = createRepositories(join(dir, 'state.db'));
+    unavailable = false;
+    const result = await sendLarkResult(service as any, target, original, log, repos.config);
+    expect(result).toMatchObject({ messageId: 'om_1', attachmentMessageId: 'om_0' });
+    expect(service.uploadFile).toHaveBeenCalledOnce();
+    expect(service.replyFile).toHaveBeenCalledOnce();
+    expect(providerMessages.size).toBe(2);
+    const calls = service.reply.mock.calls.length;
+    expect(await sendLarkResult(service as any, target, original, log, repos.config)).toEqual(result);
+    expect(service.reply).toHaveBeenCalledTimes(calls);
+    expect(providerMessages.size).toBe(2);
   });
 });

@@ -323,7 +323,7 @@ describe('Lark card layout renderer->bound->build integration', () => {
       makeEvent(5, 'text', { text: '执行完成，但有步骤失败。' })
     ];
     const failedCard = buildLarkCard({ state: 'completed', elements: renderLarkCardElements(failedEvents, config, true) });
-    expect(byId(failedCard, 'evidence').content).toContain('1 个步骤执行失败');
+    expect(byId(failedCard, 'evidence').content).toContain('执行中曾有 1 个步骤失败');
     expect(byId(failedCard, 'evidence').content).not.toContain('3 个步骤');
   });
 
@@ -767,7 +767,7 @@ export function restoreSession(sessionId: string) {
 
     const card = buildLarkCard({ state: 'completed', elements: renderLarkCardElements(events, config, true) });
     const evidence = byId(card, 'evidence');
-    expect(evidence.content).toContain('1 个步骤执行失败');
+    expect(evidence.content).toContain('执行中曾有 1 个步骤失败');
     expect(evidence.content).not.toContain('执行记录');
     // 该失败的工具确实已经不在卡上，所以计数行不能声称详情可查。
     expect(JSON.stringify(card)).not.toContain('missing.json');
@@ -1133,7 +1133,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
 
     const qOverview = queued.body.elements[0];
     expect(qOverview).toMatchObject({ tag: 'div', element_id: 'task_overview' });
-    expect(qOverview.text).toMatchObject({ tag: 'plain_text', content: '执行记录 · 排队中 · 用时 16s' });
+    expect(qOverview.text).toMatchObject({ tag: 'plain_text', content: '执行记录 · 排队中 · 排队等待 16s' });
     expect(qOverview.text.content).not.toContain('16.224');
     expect(qOverview.text.content).not.toContain('拉取消息');
     // 原等待正文原样跟在摘要后。
@@ -1334,5 +1334,46 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(currentTitle).toBeDefined();
     expect(currentTitle.content).toBe('正在执行…');
     expect(JSON.stringify(processCard)).toContain('Done.');
+  });
+});
+
+
+describe('公开执行记录的可执行入口', () => {
+  it('未配置 Web 时，裁剪与旧审核快照指向可用导出按钮，硬预算回退仍保留入口', () => {
+    const sources = [
+      [{ tag: 'markdown', element_id: 'trace_omission', content: '另有 6 个更早阶段未展示，完整记录见 Dutydeck Web' }],
+      [{ tag: 'markdown', element_id: 'dutydeck_rejected_delta', content: '新增内容未通过飞书审核；完整增量请在 Dutydeck Web 查看。' }],
+      [{ tag: 'markdown', element_id: 'final_output', content: '超长输出'.repeat(10000) }]
+    ];
+    for (const elements of sources) {
+      const card = buildLarkCard({ state: 'completed', cardKind: 'process', taskId: 'om_original', turn: 3, recordExport: true, readOnly: true, elements });
+      expect(byId(card, 'export_trace')).toMatchObject({ behaviors: [{ value: { dutydeck_export_trace: 'download', task_id: 'om_original', turn: '3' } }] });
+      expect(JSON.stringify(card)).toContain('可点击「导出执行记录」');
+      expect(JSON.stringify(card)).not.toContain('Dutydeck Web');
+      expect(JSON.stringify(card)).not.toContain('查看详情');
+      expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
+      expect(components(card).length).toBeLessThanOrEqual(larkCardSafeLimits.components);
+    }
+    const unavailable = buildLarkCard({ cardKind: 'process', elements: sources[0] });
+    expect(byId(unavailable, 'export_trace')).toBeUndefined();
+    expect(JSON.stringify(unavailable)).not.toMatch(/Dutydeck Web|可点击|查看详情/);
+    const withWeb = buildLarkCard({ cardKind: 'process', elements: sources[0], sessionId: 'ses_1', webBaseUrl: 'https://dock.example' });
+    expect(JSON.stringify(withWeb)).toContain('完整记录见「查看详情」');
+    expect(JSON.stringify(withWeb)).toContain('https://dock.example/sessions/ses_1');
+  });
+
+  it('重试成功后的失败计数仅陈述历史，完整公开记录保留失败证据', () => {
+    const events = [
+      makeEvent(1, 'tool_result', { id: 'first', name: 'test', output: 'temporary failure', status: 'failed' }),
+      makeEvent(2, 'text', { text: '重试检查' }),
+      makeEvent(3, 'tool_result', { id: 'retry', name: 'test', output: 'all passed', status: 'completed' }),
+      makeEvent(4, 'text', { text: '测试已通过，待用户扫码。' })
+    ];
+    const card = buildLarkCard({ cardKind: 'result', state: 'completed', elements: renderLarkResultElements(events, config) });
+    expect(byId(card, 'evidence').content).toContain('执行中曾有 1 个步骤失败');
+    expect(byId(card, 'evidence').content).toContain('历史记录不代表仍有未解决问题');
+    expect(byId(card, 'evidence').icon.color).toBe('grey');
+    expect(JSON.stringify(card)).toContain('本轮结束');
+    expect(JSON.stringify(card)).toContain('待用户扫码');
   });
 });

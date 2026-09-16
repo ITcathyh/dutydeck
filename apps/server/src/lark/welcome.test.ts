@@ -165,3 +165,27 @@ describe('createLarkWelcomeService', () => {
     expect(send).not.toHaveBeenCalled();
   });
 });
+
+describe('欢迎卡使用生效路由策略', () => {
+  it.each(['always', 'topic', 'never', 'ambient'] as const)('%s 给出可触发的帮助和续聊示例', mentionPolicy => {
+    const card = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy, chatMode: 'topic' } });
+    expect(card.markdown).toContain(mentionPolicy === 'never' || mentionPolicy === 'ambient' ? '`/help`' : '`@我 /help`');
+    expect(card.markdown).toContain('原任务话题');
+    if (mentionPolicy === 'always') expect(card.markdown).toContain('每条任务消息和续聊都需要');
+    if (mentionPolicy === 'topic') expect(card.markdown).toContain('原任务话题内续聊可直接回复');
+  });
+  it('私聊thread模式解释顶层新任务和原话题续聊', () => {
+    const card = buildWelcomeCardContent({ chatType: 'p2p', routing: { p2pMode: 'thread' } });
+    expect(card.markdown).toContain('每条顶层消息发起新任务');
+    expect(card.markdown).toContain('/status 也请在原话题发送');
+  });
+});
+
+ it('欢迎服务在发送时读取当前路由配置', async () => {
+   const send = vi.fn(async (_chatId: string, _content: ReturnType<typeof buildWelcomeCardContent>) => {});
+   const routing = vi.fn(async () => ({ mentionPolicy: 'topic' as const, chatMode: 'topic' as const }));
+   const welcome = createLarkWelcomeService({ appId: 'app_current', kv: { get: async () => undefined, set: async () => {} }, send, routing });
+   await welcome.welcomeBotAdded('oc_topic');
+   expect(routing).toHaveBeenCalledWith('oc_topic', 'group');
+   expect(send.mock.calls[0]![1].markdown).toContain('原任务话题内续聊可直接回复');
+ });

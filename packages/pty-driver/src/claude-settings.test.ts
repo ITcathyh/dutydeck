@@ -4,7 +4,9 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
+import type { SessionBackend } from '@dutydeck/session-backends';
 import { ClaudeSettings } from './claude-settings.js';
+import { PtyCliDriver } from './driver.js';
 
 const directories: string[] = [];
 const settings: ClaudeSettings[] = [];
@@ -23,6 +25,67 @@ const fixture = (adapterId = 'claude-code') => {
 };
 
 describe('Claude settings composition', () => {
+  it.each(['ask', 'full-trust'] as const)('adds only the native question hook and preserves existing hooks in %s mode', permissionMode => {
+    const { cwd, helper, sessionId } = fixture();
+    const generated = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode, env: {
+      dutydeck_relay_url: 'http://localhost/api/relay', dutydeck_relay_token: 'fixture-secret',
+      dutydeck_relay_command: "'/usr/bin/node' '/opt/dutydeck/cli.js'",
+    } });
+    const original = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'check-shell' }] }],
+      SessionStart: [{ hooks: [{ type: 'command', command: 'start' }] }] }, permissions: { deny: ['Bash(rm *)'] } };
+    const argv = helper.args(['--settings', JSON.stringify(original)], generated, cwd);
+    expect(argv.join(' ')).not.toContain('fixture-secret');
+    const composed = JSON.parse(readFileSync(argv.at(-1)!, 'utf8'));
+    expect(composed.hooks.PreToolUse[0]).toEqual(original.hooks.PreToolUse[0]);
+    expect(composed.hooks.PreToolUse[1]).toEqual({ matcher: '^AskUserQuestion$', hooks: [{
+      type: 'command', command: "'/usr/bin/node' '/opt/dutydeck/cli.js' session native-ask", timeout: 1230,
+    }] });
+    expect(composed.hooks.SessionStart).toEqual(original.hooks.SessionStart);
+    expect(composed.permissions.deny).toEqual(['Bash(rm *)']);
+    expect(composed.permissions.defaultMode).toBe(permissionMode === 'full-trust' ? 'bypassPermissions' : undefined);
+  });
+
+  it('installs the native question hook during driver startup using agent.env', async () => {
+    const { cwd, sessionId } = fixture();
+    let spawnedArgs: string[] = [];
+    const backend: SessionBackend = {
+      kind: 'pty', spawn(_command, args) { spawnedArgs = args; }, write() {}, resize() {},
+      kill() {}, onData() {}, onExit() {},
+    };
+    const driver = new PtyCliDriver({
+      agent: {
+        id: 'claude-code', name: 'Claude', command: 'claude', args: ['--settings', JSON.stringify({ theme: 'dark' })],
+        protocol: 'pty-cli', cwd, permissionMode: 'full-trust', timeout: 60,
+        env: {
+          dutydeck_relay_url: 'http://localhost/api/relay',
+          dutydeck_relay_token: 'fixture-secret',
+          dutydeck_relay_command: "'/usr/bin/node' '/opt/dutydeck/cli.js'",
+        },
+        capabilities: { pause: false, resume: true }, builtin: false,
+      },
+      adapter: createCliAdapter('claude-code'),
+      backend, sessionId, onEvent: () => {}, onExit: () => {},
+    });
+    try {
+      await driver.start();
+      expect(spawnedArgs.join(' ')).not.toContain('fixture-secret');
+      const settingsIndex = spawnedArgs.indexOf('--settings');
+      expect(settingsIndex).toBeGreaterThanOrEqual(0);
+      const settingsPath = spawnedArgs[settingsIndex + 1]!;
+      expect(existsSync(settingsPath)).toBe(true);
+      const composed = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      expect(composed.theme).toBe('dark');
+      expect(composed.hooks.PreToolUse).toEqual([{
+        matcher: '^AskUserQuestion$',
+        hooks: [{
+          type: 'command', command: "'/usr/bin/node' '/opt/dutydeck/cli.js' session native-ask", timeout: 1230,
+        }],
+      }]);
+    } finally {
+      await driver.stop();
+    }
+  });
+
   it.each(['claude-code', 'seed', 'relay', 'genius'])('preserves user settings and permissions for %s without credentials in argv', adapterId => {
     const { cwd, helper, generated } = fixture(adapterId);
     const original = JSON.stringify({ env: { ANTHROPIC_AUTH_TOKEN: 'fixture-secret', ANTHROPIC_BASE_URL: 'http://fixture.invalid' },

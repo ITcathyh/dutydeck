@@ -127,7 +127,7 @@ describe('Lark card service', () => {
     expect(byId(queued, 'task_status').text.content).toContain("<text_tag color='grey'>排队中</text_tag>");
     expect(byId(failed, 'task_status').text.content).toContain('已失败');
     expect(byId(failed, 'task_status').text.content).not.toContain('text_tag');
-    expect(byId(interrupted, 'task_status').text.content).toContain('已取消');
+    expect(byId(interrupted, 'task_status').text.content).toContain('已中断');
     expect(byId(interrupted, 'task_status').text.content).not.toContain('text_tag');
     expect(byId(interrupted, 'retry')).toMatchObject({ behaviors: [{ value: { action: 'retry', task_id: 'interrupted' } }] });
     expect(byId(running, 'task_action_row')).toBe(running.body.elements[0]);
@@ -300,7 +300,7 @@ describe('Lark card service', () => {
     expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'task_elapsed')).toBeUndefined();
     expect(byId(buildLarkCard({ state: 'completed', elements: trace }), 'trace_overview').header.title.content).not.toContain('部分失败');
     expect(byId(buildLarkCard({ state: 'failed', elements: trace }), 'task_status').text.content).toContain('已失败');
-    expect(byId(buildLarkCard({ state: 'interrupted', elements: trace }), 'task_status').text.content).toContain('已取消');
+    expect(byId(buildLarkCard({ state: 'interrupted', elements: trace }), 'task_status').text.content).toContain('已中断');
   });
 
   it('reports missing bot configuration without exposing secrets', () => {

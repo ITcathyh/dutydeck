@@ -22,7 +22,7 @@ export type LarkCardElement = Record<string, any>;
 export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh';
 
 /** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
-export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted';
+export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'reconcile_required' | 'legacy_unresolved';
 
 /**
  * 能力必须由调用方显式传入，不能在本模块内猜。
@@ -133,7 +133,7 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     label: '重试',
     hint: '查看失败详情，修正后重新运行',
     buttonType: 'primary',
-    states: ['failed', 'interrupted'],
+    states: ['failed', 'interrupted', 'cancelled'],
     capable: capabilities => capabilities.canRetry,
     // 明确标记为不可重试的任务（例如配置错误、权限不足）不提供重试入口。
     guard: context => context.retryable !== false,

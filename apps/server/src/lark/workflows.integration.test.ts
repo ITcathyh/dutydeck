@@ -6,14 +6,14 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
-import type { AgentConfig } from '@dutydeck/shared';
+import type { AgentConfig, AgentEvent } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
-import { LarkServiceError } from './service.js';
+import { buildLarkCard, LarkServiceError } from './service.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -22,7 +22,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
-async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean; answerChunks?: string[]; askTimeoutMs?: number } = {}) {
+async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflows-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
@@ -62,6 +62,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
             emit({ type: 'text', data: { text: '正在检查执行结果' } });
             emit({ type: 'tool_call', data: { id: 'tool_check', name: 'Bash', input: { command: 'pnpm test' }, status: 'running' } });
             emit({ type: 'tool_result', data: { id: 'tool_check', output: '125 passed', status: 'completed' } });
+            for (const item of options.traceEvents ?? []) emit(item);
             for (const text of options.answerChunks) emit({ type: 'text', data: { text } });
             emit({ type: 'completed', data: { stopReason: 'end_turn' } });
           } else {
@@ -147,7 +148,7 @@ async function seedLegacyResult(h: Awaited<ReturnType<typeof harness>>) {
   const record: LarkInteraction = {
     appId: h.config.appId, sessionId: mapping!.sessionId, taskId: saved.runtime_task_id, turn: saved.turn,
     event: event(mapping!.externalId, saved.prompt, { chatId: saved.chat_id, chatType: saved.chat_type, threadId: saved.thread_id, senderOpenId: saved.sender_open_id, mentions: [] }),
-    id, boot: 'legacy_boot', kind: 'result', nativeId: saved.runtime_task_id, question: '结果验收', state: 'pending', cardId: saved.final_message_id,
+    id, boot: 'legacy_boot', kind: 'result', nativeId: saved.runtime_task_id, question: '结果验收', state: 'pending', cardId: saved.final_message_id, relatedCardIds: saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined,
     updatedAt: new Date().toISOString()
   };
   await h.repos.config.set(`lark.interaction.${h.config.appId}.${id}`, JSON.stringify(record));
@@ -155,19 +156,23 @@ async function seedLegacyResult(h: Awaited<ReturnType<typeof harness>>) {
 }
 
 describe('Feishu workflows through coordinator, Runtime and persistent storage', () => {
-  it('delivers one oversized result file without feedback controls, then continues in the same session', async () => {
+  it('delivers a complete oversized file and summary without imposing feedback, then continues in the same session', async () => {
     const answer = `开头\n${'完整结果🙂'.repeat(5000)}\n末尾`;
     const h = await harness('normal', { answerChunks: [answer] });
     await h.coordinator.handle(event('om_task', '生成长结果'), h.config);
     await h.completed();
-    expect(h.service.reply).toHaveBeenCalledOnce();
+    expect(h.service.reply).toHaveBeenCalledTimes(2);
     expect(h.service.replyFile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_task', replyInThread: true }));
-    expect(h.cards.size).toBe(2);
+    expect(h.cards.size).toBe(3);
     const fileText = Buffer.from([...h.files.values()][0]!).toString('utf8');
-    expect(fileText.startsWith(answer)).toBe(true);
+    expect(fileText).toBe(answer);
     expect(fileText).not.toContain('验收通过');
     const process = structuredClone(h.cards.get('om_card_1'));
     const file = structuredClone(h.cards.get('om_card_2'));
+    const summary = structuredClone(h.cards.get('om_card_3'));
+    expect(summary.taskName).toBe('生成长结果');
+    expect(JSON.stringify(summary)).toContain('正文开头节选');
+    expect(JSON.stringify(summary)).not.toContain('workflow_accept');
     expect(JSON.stringify(file)).not.toContain('workflow_accept');
     expect(await h.interactions()).toEqual([]);
     await h.coordinator.handle(event('om_revision', '补充一个例子', { parentId: 'om_card_2' }), h.config);
@@ -175,6 +180,100 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(await h.runtime.listSessions()).toHaveLength(1);
     expect(h.cards.get('om_card_1')).toEqual(process);
     expect(h.cards.get('om_card_2')).toEqual(file);
+    expect(h.cards.get('om_card_3')).toEqual(summary);
+  });
+
+  it('retains named long-result summary and file across coordinator restart without another mention or message', async () => {
+    const h = await harness('normal', { answerChunks: ['需要用户继续扫码。\n' + '正文'.repeat(15000)] });
+    h.config.groupCardMention = true;
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    await h.coordinator.handle(event('om_task', '创建应用'), h.config);
+    await h.completed();
+    const [mapping] = await h.repos.channelMappings.list(`lark-card:${h.config.appId}`);
+    const saved = JSON.parse(mapping!.extra!);
+    expect(saved).toMatchObject({ final_message_id: 'om_card_3', final_attachment_message_id: 'om_card_2', progress_frozen: true });
+    expect(h.cards.get(saved.final_message_id).elements.filter((item: any) => item.element_id === 'group_mention')).toHaveLength(1);
+    const before = structuredClone([...h.cards]);
+    h.coordinator.stop();
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      expect(await restored.reconcile(h.config)).toBe(0);
+      expect(await restored.reconcile(h.config)).toBe(0);
+      expect([...h.cards]).toEqual(before);
+      expect(h.service.replyFile).toHaveBeenCalledOnce();
+      expect(h.service.reply).toHaveBeenCalledTimes(2);
+    } finally { restored.stop(); }
+  });
+
+  it.each(['om_card_2', 'om_card_3'])('authorizes either quoted result attachment or summary against one existing acceptance record: %s', async quotedId => {
+    const h = await harness('normal', { answerChunks: ['全文'.repeat(16000)] });
+    await h.coordinator.handle(event('om_task', '长结果验收'), h.config);
+    await h.completed();
+    const record = await seedLegacyResult(h);
+    h.coordinator.stop();
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      await restored.reconcile(h.config);
+      await restored.handle(event('om_unauthorized_accept', '验收通过', { senderOpenId: 'ou_bob', parentId: quotedId }), h.config);
+      expect((await h.interactions()).find(item => item.id === record.id)?.state).toBe('pending');
+      await restored.handle(event('om_authorized_accept', '验收通过', { parentId: quotedId }), h.config);
+      expect((await h.interactions()).find(item => item.id === record.id)?.state).toBe('accepted');
+      expect(h.send).toHaveBeenCalledOnce();
+      expect(h.cards.get('om_card_3').elements.find((item: any) => item.element_id === 'workflow_result_status')?.content).toBe('验收：已通过');
+      expect(h.service.addReaction).toHaveBeenCalledWith('om_card_2', 'CheckMark');
+    } finally { restored.stop(); }
+  });
+
+  it('exports only this task’s untruncated public events after restart, with permissions, redaction and deduplication', async () => {
+    const privateThought = 'PRIVATE_REASONING_MARKER';
+    const screen = 'OPAQUE_TERMINAL_REASONING';
+    const longOutput = `START\n${'public detail\n'.repeat(1500)}END`;
+    const chunks = ['最终结果'];
+    const h = await harness('normal', { answerChunks: chunks, traceEvents: [
+      { type: 'thinking', data: { text: privateThought } },
+      { type: 'raw_terminal', data: { text: screen } },
+      { type: 'tool_result', data: { id: 'detailed', name: 'Bash', status: 'completed',
+        input: { token: 'INPUT_CREDENTIAL', command: 'curl --password CLI_CREDENTIAL' },
+        output: { detail: longOutput, access_token: 'OUTPUT_CREDENTIAL', text: 'Authorization: Bearer HEADER_CREDENTIAL' } } }
+    ] });
+    await h.coordinator.handle(event('om_task', 'USER_ORIGINAL_SECRET_REQUEST'), h.config);
+    await h.completed();
+    const summary = h.cards.get('om_card_2');
+    const card = buildLarkCard(summary);
+    const value = (card.body.elements.find((item: any) => item.element_id === 'export_trace') as any).behaviors[0].value;
+    chunks.splice(0, 1, 'LATER_TASK_PRIVATE_OUTPUT');
+    await h.coordinator.handle(event('om_later_task', '另一个目标'), h.config);
+    await vi.waitFor(async () => expect((await h.repos.channelMappings.list('lark-card:cli_workflows')).some(item => item.externalId === 'om_later_task' && JSON.parse(item.extra ?? '{}').final_delivery_state === 'delivered')).toBe(true));
+    h.coordinator.stop();
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      await restored.startReconciliation(h.config);
+      const callback = { messageId: 'om_card_2', chatId: 'oc_group' };
+      expect(await restored.handleAction(value, 'ou_mallory', callback)).toMatchObject({ type: 'warning' });
+      expect(await restored.handleAction(value, 'ou_alice', { ...callback, chatId: 'oc_other' })).toMatchObject({ type: 'warning' });
+      expect(await restored.handleAction(value, 'ou_alice', { ...callback, messageId: 'om_forged' })).toMatchObject({ type: 'warning' });
+      expect(await restored.handleAction({ ...value, turn: '999' }, 'ou_alice', callback)).toMatchObject({ type: 'warning' });
+      expect(h.service.uploadFile).not.toHaveBeenCalled();
+      expect(await restored.handleAction(value, 'ou_alice', callback)).toMatchObject({ type: 'success' });
+      await vi.waitFor(() => expect(h.service.replyFile).toHaveBeenCalledOnce());
+      const text = Buffer.from([...h.files.values()][0]!).toString('utf8');
+      expect(text).toContain(longOutput.replaceAll('\n', '\\n'));
+      expect(text).toContain('最终结果');
+      for (const secret of [privateThought, screen, 'INPUT_CREDENTIAL', 'CLI_CREDENTIAL', 'OUTPUT_CREDENTIAL', 'HEADER_CREDENTIAL', 'USER_ORIGINAL_SECRET_REQUEST', 'LATER_TASK_PRIVATE_OUTPUT']) expect(text).not.toContain(secret);
+      expect(text).toContain('[REDACTED]');
+      expect(text).toContain('不含内部分析');
+      expect(h.service.replyFile).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_task', replyInThread: true }));
+      expect(await restored.handleAction(value, 'ou_alice', callback)).toMatchObject({ type: 'success' });
+      await vi.waitFor(async () => expect((await h.repos.config.list!('lark.delivery.trace_')).length).toBe(2));
+      expect(h.service.uploadFile).toHaveBeenCalledOnce();
+      expect(h.service.replyFile).toHaveBeenCalledOnce();
+      h.config.allowedUsers = [{ openId: 'ou_someone_else', name: 'Other' }];
+      await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+      expect(await restored.handleAction(value, 'ou_alice', callback)).toMatchObject({ type: 'warning' });
+    } finally { restored.stop(); }
   });
 
   it('delivers exactly a retained process card and a complete streamed result, then leaves both unchanged on recovery', async () => {

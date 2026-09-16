@@ -761,6 +761,21 @@ export class DutydeckRuntime {
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
   getEventWindow(id: string, options?: EventWindowOptions) { return this.repos.events.listWindow(id, options); }
   async getTasks(id: string) { return (await this.repos.tasks.listBySession(id)).map(task => this.publicTask(task)); }
+  async getTaskRecovery(id: string, taskId: string) {
+    const projection = this.repos.execution.getTaskExecution(taskId);
+    if (!projection || projection.task.sessionId !== id) throw new RuntimeError('TASK_NOT_FOUND', 'Task not found in this session', 404);
+    const reusable = this.localResources.reusableIds(id);
+    const blockers = projection.blockers.filter(block => !(block.code === 'DRIVER_RESOURCE_UNSAFE' && block.resourceId && reusable.has(block.resourceId)));
+    const tasks = await this.getTasks(id);
+    const active = tasks.find(task => task.id !== taskId && ['running', 'reconcile_required', 'legacy_unresolved'].includes(task.status));
+    if (active && active.status !== 'running') blockers.push({ code: 'PREVIOUS_RESULT_UNKNOWN', sessionId: id });
+    if (projection.task.status === 'queued' && this.queueBlocked.has(id)) {
+      blockers.push({ code: 'QUEUE_START_CHECK_FAILED', sessionId: id });
+    }
+    return { status: projection.task.status, blockers: [...new Set(blockers.map(block => block.code))].map(code => ({ code })),
+      ...(active ? { activeTaskId: active.id } : {}) };
+  }
+
 
   async runVerification(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse> {
     return this.scoped(id, async () => {
@@ -1593,7 +1608,10 @@ export class DutydeckRuntime {
     this.scheduleQueue(ref.sessionId);
   }
   async cancelQueued(id: string, taskId: string, actorId?: string, expectedRevision?: number, decisionId = makeId('cancel')) {
-    return this.scoped(id, async () => {
+    this.assertReady();
+    // Cancelling unsubmitted input remains safe even after a failed stop revoked
+    // the driver's lifecycle. The durable session fence and actor still apply.
+    return this.mutations.run(owner(id), async () => {
       const { session } = await this.active(id);
       await this.authorize(id, actorId);
       const committed = await this.mutations.write(id, async () => {
@@ -1601,7 +1619,18 @@ export class DutydeckRuntime {
         if (!task) throw new RuntimeError('QUEUED_TASK_NOT_FOUND', 'Queued task is missing', 404);
         return this.wake(this.bound().cancelQueued(this.fence(session), taskId, expectedRevision ?? task.revision, { decisionId, actor: this.actor(session, actorId), action: 'cancel', evidenceRefs: ['runtime:queue-cancel'], resourceChecks: [] }));
       });
-      await this.projectQueue(id); return this.publicTask(committed.task!);
+      const queue = this.queues.get(id);
+      if (queue) {
+        const next = queue.filter(item => item.id !== taskId);
+        if (next.length) this.queues.set(id, next);
+        else this.queues.delete(id);
+      }
+      try {
+        await this.projectQueue(id);
+      } catch {
+        this.queueBlocked.add(id);
+      }
+      return this.publicTask(committed.task!);
     });
   }
   async steerQueued(id: string, taskId: string, actorId?: string, expectedRevision?: number, operationId = makeId('promote')) {
@@ -1764,8 +1793,20 @@ export class DutydeckRuntime {
     this.mutations.check(token);
     await this.mutations.run(token, () => this.loadStopBlock(id));
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
+    // Validate every fallible identity check before signalling a process. A
+    // rejected /new must not leave the current task stopped and its queue alive.
+    if ((await this.queuedTasks(id)).length && (!actor || actor.kind === 'unspecified')) {
+      throw new RuntimeError('ACTOR_REQUIRED', 'A named actor is required to stop a session with queued tasks', 403);
+    }
+    if (actor && actor.kind !== 'unspecified') {
+      this.bound().authorizeNativeContextControl(this.fence(session), actor);
+      if (actor.kind !== 'installation_owner') {
+        await this.options.authorizeExecution?.(id, actor.id);
+      }
+    }
     await this.revokeSession(id, true, 'stopped', false, false, undefined, actor);
     this.mutations.check(token);
+    if (this.resourceBlockers(id).length) throw new RuntimeError('SESSION_RESOURCE_BLOCKED', '原执行进程尚未确认安全停止；请联系管理员核对，当前会话未安全结束。', 409);
   }
   async stop(id: string, actor?: ExecutionActor) {
     this.assertReady();

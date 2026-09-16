@@ -186,6 +186,7 @@ describe('persistent Lark workflow interactions', () => {
       tasks[0]!.status = 'completed';
       await expect(workflow.respond(validAsk)).rejects.toMatchObject({ code: 'LARK_INTERACTION_EXPIRED' });
       expect((await workflow.list('app_one')).find(record => record.id === ask.id)?.state).toBe('expired');
+      expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: ask.cardId, statusLabel: '已失效', readOnly: true }));
 
       tasks[0]!.status = 'running';
       permissions.splice(0);
@@ -442,7 +443,7 @@ describe('structured ask cards (P0-2)', () => {
     };
     return {
       directory, repositories, service, reply, broker, workflow, ask,
-      cleanup: async () => { repositories.close(); await rm(directory, { recursive: true, force: true }); },
+      cleanup: async () => { broker.close(); await broker.flush(); repositories.close(); await rm(directory, { recursive: true, force: true }); },
       cardAt: index => reply.mock.calls[index]![0] as Record<string, any>
     };
   };
@@ -455,14 +456,14 @@ describe('structured ask cards (P0-2)', () => {
     try {
       const plain = await h.ask(0);
       const withChoices = await h.ask(1, [{ label: '跑测试' }, { label: '直接合并' }]);
-      await h.workflow.observe(plain.ctx, plain.event);
+      await h.workflow.observe(plain.ctx, plain.event, { structuredAskCards: false });
       await h.workflow.observe(withChoices.ctx, withChoices.event, { structuredAskCards: false });
       const classic = [
         { tag: 'div', text: { tag: 'plain_text', content: '怎么继续？' } },
         { tag: 'markdown', content: '请引用本卡片回复你的答案。' }
       ];
-      expect(h.cardAt(0).elements).toEqual(classic);
-      expect(h.cardAt(1).elements).toEqual([...classic,
+      expect(h.cardAt(0).elements.filter((element: any) => !element.content?.startsWith('回答截止时间'))).toEqual(classic);
+      expect(h.cardAt(1).elements.filter((element: any) => !element.content?.startsWith('回答截止时间'))).toEqual([...classic,
         { tag: 'div', text: { tag: 'plain_text', content: '可选项：\n1. 跑测试\n2. 直接合并' } }
       ]);
       for (const card of [h.cardAt(0), h.cardAt(1)]) {
@@ -480,7 +481,7 @@ describe('structured ask cards (P0-2)', () => {
     const h = await setupHarness();
     try {
       const single = await h.ask(0, [{ label: '跑全部测试', value: 'test' }, { label: '直接合并' }]);
-      await h.workflow.observe(single.ctx, single.event, { structuredAskCards: true });
+      await h.workflow.observe(single.ctx, single.event);
       const card = h.cardAt(0);
       const buttons = card.elements.filter((element: any) => element.tag === 'button');
       expect(buttons.map((button: any) => button.text.content)).toEqual(['跑全部测试', '直接合并']);
@@ -613,14 +614,31 @@ describe('structured ask cards (P0-2)', () => {
     } finally { await h.cleanup(); }
   });
 
-  it('选项集超出整卡预算时回落为经典文本卡，回落卡仍在 24KB/180 预算内', async () => {
+  it('发送卡片期间超时收敛仍绑定消息并移除刚发出的按钮', async () => {
+    const h = await setupHarness();
+    let deliver!: (value: { messageId: string }) => void;
+    try {
+      h.reply.mockImplementationOnce(() => new Promise(resolve => { deliver = resolve; }));
+      const ask = await h.ask(0, [{ label: '继续' }]);
+      const sending = h.workflow.observe(ask.ctx, ask.event);
+      await vi.waitFor(() => expect(h.reply).toHaveBeenCalledTimes(1));
+      await h.workflow.expireTask(ask.ctx.appId, ask.ctx.taskId);
+      deliver({ messageId: 'om_delayed_card' });
+      await sending;
+      expect(await findRecord(h.workflow, ask.askId)).toMatchObject({ state: 'expired', cardId: 'om_delayed_card' });
+      expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_delayed_card', statusLabel: '已失效' }));
+      expect(JSON.stringify(vi.mocked(h.service.update).mock.calls)).not.toContain('callback');
+    } finally { await h.cleanup(); }
+  });
+
+  it.each([false, true])('选项集超预算回落文字且24KB/180内（multiple=%s）', async multiple => {
     const h = await setupHarness();
     try {
       // 50 个近 200 字选项（relay schema 上限）：每个选项在按钮里出现两次（文案 + 回调值），
       // 整卡约 30KB，触发字节预算回落。
       const choices: RelayAskChoice[] = Array.from({ length: 50 }, (_, index) =>
         ({ label: `选项${String(index).padStart(2, '0')}${'内'.repeat(195)}` }));
-      const oversized = await h.ask(0, choices);
+      const oversized = await h.ask(0, choices, multiple);
       await h.workflow.observe(oversized.ctx, oversized.event, { structuredAskCards: true });
       const card = h.cardAt(0);
       expect(card.elements.some((element: any) => element.tag === 'form')).toBe(false);
@@ -685,5 +703,51 @@ describe('structured ask cards (P0-2)', () => {
         { structuredAskCards: true, webBaseUrl: '  https://x.example.com  ' });
       expect(h.cardAt(3).webBaseUrl).toBe('https://x.example.com');
     } finally { await h.cleanup(); }
+  });
+});
+
+describe('过期卡持久修复与结果附件引用', () => {
+  it('旧expired记录在重启修复失败后可重试，成功只更新一次且无按钮', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const { runtime } = makeRuntime([], []);
+      const { service } = makeService();
+      const update = vi.mocked(service.update);
+      update.mockRejectedValueOnce(new Error('temporary network error'));
+      await persistInteraction(repositories.config, interaction({ state: 'expired', expiresAt: '2026-09-16T01:00:00.000Z' }));
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.initialize('app_one');
+      await workflow.reconcile('app_one');
+      await workflow.reconcile('app_one');
+      expect(update).toHaveBeenCalledTimes(2);
+      expect(update.mock.calls[1]![0]).toMatchObject({ statusLabel: '已失效', readOnly: true });
+      expect(JSON.stringify(update.mock.calls[1])).toContain('2026/9/16 09:00:00（北京时间）');
+      expect(JSON.stringify(update.mock.calls[1])).not.toContain('callback');
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('摘要和附件引用同一旧验收，鉴权与一次性决议不变，附件不能伪造主卡回调', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const { runtime, resolvePermission } = makeRuntime([], []);
+      const { service } = makeService();
+      const authorize = vi.fn(async (_record: LarkInteraction, actor: string) => actor === 'user_one');
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, authorize);
+      const ctx = context();
+      await persistInteraction(repositories.config, legacyResult(ctx));
+      await Promise.all([workflow.result(ctx, 'om_summary', ['om_attachment']), workflow.result(ctx, 'om_summary', ['om_attachment'])]);
+      await workflow.result(ctx, 'om_summary'); // refresh without attachment argument preserves its quoted entry
+      const summary = await workflow.quoted(ctx.appId, larkMessage({ parentId: 'om_summary' }));
+      const attached = await workflow.quoted(ctx.appId, larkMessage({ parentId: 'om_attachment' }));
+      expect(summary?.id).toBeTruthy();
+      expect(attached).toEqual(summary);
+      expect(await workflow.quoted('app_two', larkMessage({ parentId: 'om_attachment' }))).toBeUndefined();
+      expect(await workflow.quoted(ctx.appId, larkMessage({ parentId: 'om_attachment', chatId: 'oc_other' }))).toBeUndefined();
+      await expect(workflow.respond(responseInput(summary!, { action: 'accept', actorId: 'other', callback: false }))).rejects.toMatchObject({ code: 'LARK_INTERACTION_DENIED' });
+      await expect(workflow.respond(responseInput(summary!, { action: 'accept', cardId: 'om_attachment' }))).rejects.toMatchObject({ code: 'LARK_INTERACTION_EXPIRED' });
+      await workflow.respond(responseInput(attached!, { action: 'accept', callback: false }));
+      await expect(workflow.respond(responseInput(summary!, { action: 'accept', callback: false }))).rejects.toMatchObject({ code: 'LARK_INTERACTION_EXPIRED' });
+      expect(resolvePermission).not.toHaveBeenCalled();
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });

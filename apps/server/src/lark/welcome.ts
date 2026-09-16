@@ -8,6 +8,10 @@
 //    硬约束是「同一 chat 重启/重复事件不重发」，发卡失败的代价（少一次欢迎）小于重发打扰。
 // 4. 本模块不 import service.ts（网络层），发送动作由调用方以 send 回调注入。
 
+import type { StoredLarkConfig } from './config.js';
+
+export type WelcomeRouting = Pick<StoredLarkConfig, 'mentionPolicy' | 'p2pMode' | 'groupReplyMode'> & { chatMode?: 'group' | 'topic' | 'p2p'; unavailableReason?: string };
+
 import {
   listLarkCommands,
   type LarkCardElement,
@@ -56,6 +60,7 @@ const markdownElement = (elementId: string, content: string): LarkCardElement =>
 export function buildWelcomeCardContent(input: {
   chatType: 'group' | 'p2p';
   capabilities?: LarkCommandCapabilities;
+  routing?: WelcomeRouting;
 }): WelcomeCardContent {
   const available = listLarkCommands(input.capabilities ?? {
     getSession: false, send: false, dispatch: false, interrupt: false, cancelQueued: false,
@@ -70,14 +75,24 @@ export function buildWelcomeCardContent(input: {
 
   if (input.chatType === 'group') {
     const intro = '我是 **Dutydeck**，可以在群里帮你跑任务、盯进度并把结果发回本群。';
+    const routing = input.routing;
+    const policy = routing?.mentionPolicy ?? 'always';
+    const direct = policy === 'never' || policy === 'ambient';
+    const trigger = direct ? '' : '@我 ';
     const usage = [
-      '在群里 **@我** 下达任务；被 @ 后直接补充任务内容即可。',
-      '私聊我则随时可以直接发任务，不需要 @。'
+      ...(routing?.unavailableReason ? [`当前尚不能执行任务：${routing.unavailableReason} 请管理员确认群配置生效后，再使用下面的示例。`] : []),
+      policy === 'always' ? '每条任务消息和续聊都需要 **@我**。'
+        : policy === 'topic' ? '新任务先 **@我**；在我已接手的原任务话题内续聊可直接回复。'
+        : '本群普通消息也会触发任务；请直接发送完整请求。其他机器人仍需明确 @我。',
+      `例如：\`${trigger}帮我查看项目状态\`；帮助：\`${trigger}/help\`。`,
+      routing?.chatMode === 'topic' || ['new-topic', 'chat-topic'].includes(routing?.groupReplyMode ?? '')
+        ? '继续任务请回原任务话题回复；新任务请另发顶层消息。'
+        : routing?.groupReplyMode === 'shared' ? '本群顶层消息共享任务上下文；独立工作请另开话题。'
+        : '普通群顶层消息按发送人延续上下文；同一话题内共享上下文。',
+      '有多个机器人时，@你要使用的那个机器人。'
     ].join('\n');
-    const commands = commandLines.length
-      ? `常用命令：\n${commandLines.join('\n')}`
-      : '发送 `/help` 可以查看当前能用的全部命令。';
-    const footer = '发送 `/help` 查看全部命令与用法；未识别的 `/xxx` 会当作普通任务文字处理。';
+    const commands = commandLines.length ? `常用命令：\n${commandLines.join('\n')}` : `发送 \`${trigger}/help\` 查看命令。`;
+    const footer = `发送 \`${trigger}/help\` 查看全部命令与用法；明显拼错的控制命令会提示纠正，其他 CLI 命令和路径交给 Agent。`;
     const markdown = [intro, '', usage, '', commands, '', footer].join('\n');
     return {
       title: 'Dutydeck 机器人已入群',
@@ -94,7 +109,7 @@ export function buildWelcomeCardContent(input: {
   const commands = commandLines.length
     ? `常用命令：\n${commandLines.join('\n')}`
     : '发送 `/help` 可以查看当前能用的全部命令。';
-  const footer = '发送 `/help` 查看全部命令与用法。';
+  const footer = `${input.routing?.p2pMode === 'thread' ? '每条顶层消息发起新任务；继续任务请回原任务话题回复，/status 也请在原话题发送。' : '直接继续发消息会沿用当前上下文。'}\n发送 \`/help\` 查看全部命令与用法。`;
   const markdown = [intro, '', commands, '', footer].join('\n');
   return {
     title: '欢迎使用 Dutydeck',
@@ -115,6 +130,7 @@ export interface CreateLarkWelcomeServiceOptions {
   capabilities?: LarkCommandCapabilities;
   log?: WelcomeLog;
   now?: () => Date;
+  routing?: (chatId: string, chatType: 'group' | 'p2p') => Promise<WelcomeRouting>;
 }
 
 export interface LarkWelcomeService {
@@ -155,7 +171,7 @@ export function createLarkWelcomeService(options: CreateLarkWelcomeServiceOption
     }
     if (!claimed) return;
     try {
-      await options.send(chatId, buildWelcomeCardContent({ chatType, ...(options.capabilities ? { capabilities: options.capabilities } : {}) }));
+      await options.send(chatId, buildWelcomeCardContent({ chatType, routing: await options.routing?.(chatId, chatType), ...(options.capabilities ? { capabilities: options.capabilities } : {}) }));
     } catch (error) {
       // 标记已认领：不重发；只留日志。消息 dispatch 不依赖本调用结果。
       options.log?.warn({ error, appId: options.appId, chatId }, '发送飞书欢迎卡失败，已记录欢迎标记不重发');

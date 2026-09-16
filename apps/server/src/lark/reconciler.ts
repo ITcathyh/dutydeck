@@ -1,4 +1,5 @@
-import type { ChannelMapping, ChannelMappingRepository, TaskRecord } from '@dutydeck/shared';
+import { describeLarkTaskRecovery } from './task-recovery.js';
+import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRecord } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, type LarkCardService } from './service.js';
 import {
@@ -37,6 +38,7 @@ export async function performLarkCardReconcile(input: {
   log: ListenerLog;
   config: StoredLarkConfig;
   channel: string;
+  deliveryStore?: ConfigRepository;
   resultElements?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, cardId: string) => Promise<Array<Record<string, any>>>;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
@@ -73,6 +75,8 @@ export async function performLarkCardReconcile(input: {
             elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
             sessionId: mapping.sessionId,
             readOnly: true,
+            recordExport: Boolean(persisted.runtime_task_id),
+            turn: persisted.turn,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             ...(legacyElements ? { elements: legacyElements } : {})
           });
@@ -97,39 +101,38 @@ export async function performLarkCardReconcile(input: {
         ?? [...runtimeTasks].reverse().find(item => item.prompt === persisted.prompt && Date.parse(item.createdAt) >= persisted.started_at - 5_000);
       if (!runtimeTask) { unresolved++; continue; }
       if (!terminalTaskStates.has(runtimeTask.status)) {
-        // The coordinator's in-memory action map is intentionally not restored.
-        // Remove stale cancel/interrupt actions immediately while reconciliation
-        // keeps polling the durable Runtime task to its terminal state.
-        if (!persisted.recovery_read_only) try {
+        const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
+          ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status) : undefined;
+        const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
+          ? runtimeTask.status : runtimeTask.status === 'queued' ? 'queued' : 'running';
+        const canCancel = state === 'queued' && Boolean(runtime.cancelQueued && persisted.sender_open_id);
+        // Repaint whenever durable recovery facts change, including older cards
+        // already marked read-only. Never retain an old thinking/queued trace.
+        const statusKey = JSON.stringify([state, recovery?.markdown, canCancel]);
+        if (persisted.recovery_status_key !== statusKey) try {
           await service.update({
-            ...cardContext,
-            cardKind: 'process',
-            messageId: persisted.card_message_id,
-            permissionMode: larkPermissionMode(config),
-            state: runtimeTask.status === 'queued' ? 'queued' : 'running',
-            taskId: mapping.externalId,
-            taskName: persisted.task_name,
+            ...cardContext, cardKind: 'process', messageId: persisted.card_message_id,
+            permissionMode: larkPermissionMode(config), state,
+            ...(recovery ? { statusLabel: recovery.label } : {}),
+            taskId: mapping.externalId, taskName: persisted.task_name,
             elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
-            sessionId: mapping.sessionId,
-            readOnly: true,
+            sessionId: mapping.sessionId, readOnly: !canCancel, turn: persisted.turn ?? 0,
+            recordExport: Number.isInteger(persisted.turn),
+            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false },
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-            ...(Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length
-              ? { elements: persisted.last_successful_elements }
-              : { markdown: RECOVERY_TRACKING_NOTE })
+            markdown: recovery?.markdown ?? RECOVERY_TRACKING_NOTE
           });
-          await cardMappings.save({
-            ...mapping,
-            extra: JSON.stringify({ ...persisted, runtime_task_id: runtimeTask.id, recovery_read_only: true })
-          });
+          await cardMappings.save({ ...mapping,
+            extra: JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey }) });
         } catch (error) {
-          log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '恢复中的飞书卡片切换只读失败');
+          log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '恢复中的飞书卡片刷新失败');
         }
         unresolved++;
         continue;
       }
-      let state: 'completed' | 'failed' | 'interrupted' = runtimeTask.status === 'completed'
+      let state: 'completed' | 'failed' | 'interrupted' | 'cancelled' = runtimeTask.status === 'completed'
         ? 'completed'
-        : runtimeTask.status === 'failed' ? 'failed' : 'interrupted';
+        : runtimeTask.status === 'failed' ? 'failed' : runtimeTask.status === 'cancelled' ? 'cancelled' : 'interrupted';
       const recentLimit = Math.max((config.traceLimit ?? defaultLarkTraceLimit) * 30, 500);
       let events;
       try { events = await loadLarkTaskEvents(runtime, mapping.sessionId, runtimeTask.id, recentLimit); }
@@ -159,6 +162,8 @@ export async function performLarkCardReconcile(input: {
             elapsedSeconds,
             sessionId: mapping.sessionId,
             readOnly: true,
+            recordExport: Boolean(persisted.runtime_task_id),
+            turn: persisted.turn,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             elements: currentElements
           });
@@ -189,6 +194,8 @@ export async function performLarkCardReconcile(input: {
             elapsedSeconds,
             sessionId: mapping.sessionId,
             readOnly: true,
+            recordExport: Boolean(persisted.runtime_task_id),
+            turn: persisted.turn,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             elements: patchedElements
           });
@@ -202,6 +209,7 @@ export async function performLarkCardReconcile(input: {
       }
       if (!updated && isLarkMessageUnupdatable(lastError)) updated = true;
       let finalMessageId: string | undefined;
+      let finalAttachmentMessageId: string | undefined;
       let finalElements: Array<Record<string, any>> | undefined;
       let resultCallbackFailed = false;
       try {
@@ -222,15 +230,16 @@ export async function performLarkCardReconcile(input: {
         }, {
           ...cardContext, permissionMode: larkPermissionMode(config), state,
           taskId: mapping.externalId, taskName: persisted.task_name,
-          elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true,
+          elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true, recordExport: true,
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
           elements, idempotencyKey: larkResultKey(persisted.card_message_id)
-        }, log);
+        }, log, input.deliveryStore);
+        finalAttachmentMessageId = result.attachmentMessageId;
         finalMessageId = result.messageId;
         finalElements = result.elements;
         if (completed && input.resultElements) {
           try {
-            await input.resultElements(mapping, persisted, finalMessageId);
+            await input.resultElements(mapping, { ...persisted, final_attachment_message_id: finalAttachmentMessageId }, finalMessageId);
           } catch (callbackError) {
             resultCallbackFailed = true;
             log.warn({ error: callbackError, messageId: persisted.card_message_id, finalMessageId, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果回调写入失败，稍后重试');
@@ -248,7 +257,7 @@ export async function performLarkCardReconcile(input: {
         extra: JSON.stringify({
           ...persisted, runtime_task_id: runtimeTask.id, state,
           progress_frozen: updated,
-          ...(finalMessageId ? { final_message_id: finalMessageId, final_delivery_state: 'delivered', final_elements: finalElements } : {}),
+          ...(finalMessageId ? { final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements } : {}),
           last_successful_elements: deliveredElements
         })
       });

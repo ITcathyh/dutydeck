@@ -238,8 +238,10 @@ describe('Runtime uses the execution ledger', () => {
     const active = await h.runtime.dispatch(h.session.id, 'active'); await entered.promise;
     const queued = await h.runtime.dispatch(h.session.id, 'queued');
     await expect(h.runtime.stop(h.session.id)).rejects.toMatchObject({ code: 'ACTOR_REQUIRED' });
-    expect(h.repos.execution.getTaskExecution(active.id)?.currentAttempt?.state).toBe('reconcile_required');
+    expect(h.repos.execution.getTaskExecution(active.id)?.currentAttempt?.state).toBe('active');
     expect(h.repos.execution.getTaskExecution(queued.id)?.task.status).toBe('queued');
+    expect(await h.driver().isStopped()).toBe(false);
+    expect(h.runtime.getDriver(h.session.id)).toBeDefined();
     expect(h.sent).toEqual(['active']);
     await expect(h.runtime.archive(h.session.id)).rejects.toMatchObject({ code: 'ACTOR_REQUIRED' });
     await expect(h.runtime.restart(h.session.id)).rejects.toMatchObject({ code: 'ACTOR_REQUIRED' });

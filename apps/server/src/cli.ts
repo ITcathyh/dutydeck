@@ -12,6 +12,7 @@ import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { runWorkCommand } from './work-item-cli.js';
 import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupSendFile, runGroupWait } from './lark/agent-tools-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
+import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
 import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { daemonRestart, daemonStart, daemonStatus, daemonStop, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
@@ -330,6 +331,10 @@ async function main() {
     groupSendFile: async (path, options) => { output(await runGroupSendFile(path, options)); },
     groupWait: async options => { output(await runGroupWait(options)); },
     sessionSend: async text => { output(await runSessionSend(text)); },
+    sessionNativeAsk: async () => {
+      const result = await runNativeAskHook(await readNativeAskPayload(process.stdin));
+      if (result) process.stdout.write(`${result}\n`);
+    },
     sessionAsk: async (question, options) => {
       // ask 有自己的 stdout/退出码契约（答案裸文本走 stdout，提示走 stderr），
       // 不能套用通用的 output()：调用方要能 `answer=$(dutydeck session ask ...)`。

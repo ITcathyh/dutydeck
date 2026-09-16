@@ -20,7 +20,7 @@ function retryAfterMsFromHeaders(headers: Headers | undefined): number | undefin
   return best === undefined ? undefined : best * 1000;
 }
 
-export const larkCardStates = ['queued', 'running', 'completed', 'failed', 'interrupted'] as const;
+export const larkCardStates = ['queued', 'running', 'completed', 'failed', 'interrupted', 'cancelled', 'reconcile_required', 'legacy_unresolved'] as const;
 export type LarkCardState = (typeof larkCardStates)[number];
 export const larkReceiveIdTypes = ['open_id', 'union_id', 'user_id', 'email', 'chat_id'] as const;
 export type LarkReceiveIdType = (typeof larkReceiveIdTypes)[number];
@@ -41,6 +41,8 @@ export interface LarkCardInput {
   loadingImageKey?: string;
   idempotencyKey?: string;
   readOnly?: boolean;
+  /** Read-only export callback, bound to a persisted task by the coordinator. */
+  recordExport?: boolean;
   permissionMode?: PermissionMode;
   /** Override the lifecycle label without changing the machine state. */
   statusLabel?: string;
@@ -65,7 +67,7 @@ export interface LarkCardInput {
    * 按钮状态覆写：卡片视觉状态只有 5 种（LarkCardState），但任务状态机多一个
    * interrupting。需要按 interrupting 收敛按钮时用它，不改变卡片配色与标题。
    */
-  actionState?: 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted';
+  actionState?: LarkCardState | 'interrupting';
 }
 export interface LarkSendInput extends LarkCardInput { receiveId?: string; receiveIdType?: LarkReceiveIdType; chatId?: string }
 export interface LarkReplyInput extends LarkCardInput { messageId: string; replyInThread?: boolean; replyRootId?: string }
@@ -194,7 +196,10 @@ const statePresentation = {
   running: { title: '正在执行', color: 'wathet', template: 'blue' },
   completed: { title: '已完成', color: 'green', template: 'green' },
   failed: { title: '已失败', color: 'red', template: 'red' },
-  interrupted: { title: '已取消', color: 'grey', template: 'grey' }
+  interrupted: { title: '已中断', color: 'grey', template: 'grey' },
+  cancelled: { title: '已取消', color: 'grey', template: 'grey' },
+  reconcile_required: { title: '需要核对', color: 'orange', template: 'orange' },
+  legacy_unresolved: { title: '需要核对', color: 'orange', template: 'orange' }
 } as const;
 const elapsedLabel = (seconds: number) => {
   const value = Math.max(0, Math.floor(seconds));
@@ -253,7 +258,7 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
     && cardComponents(value) <= larkCardSnapshotLimits.components;
   const omissionNotice = (count: number) => ({
     tag: 'markdown', element_id: 'dutydeck_snapshot_omission',
-    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组；完整记录请在 Dutydeck Web 查看。</font>`,
+    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组。</font>`,
     text_size: 'x-small', margin: '4px 0px'
   });
   const upsertOmissionNotice = (els: Array<Record<string, unknown>>, count: number) => {
@@ -279,7 +284,7 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
         ?? (mainElements.find(element => element.tag === 'markdown') as any)?.content ?? '内容过长');
       return [
         { tag: 'markdown', element_id: 'final_output', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
-        { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起；完整记录请在 Dutydeck Web 查看。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
+        { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
       ];
     }
     const group = mainElements[groupIndex] as Record<string, unknown>;
@@ -367,7 +372,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const explicitStatusLabel = Boolean(input.statusLabel?.trim());
   const liveTitle = explicitStatusLabel
     ? clipCardField(input.statusLabel!.trim(), 32)
-    : state === 'running' ? '执行中' : presentation.title;
+    : state === 'running' ? '执行中' : state === 'completed' && input.cardKind === 'result' ? '本轮结束' : presentation.title;
   const compactTaskName = taskName;
   // 操作按钮统一由 card-actions.ts 这一唯一事实源决定：渲染端与 coordinator 回调端
   // 共用同一张能力表，因此不可能出现「界面上有按钮但回调拒绝执行」的死按钮。
@@ -430,9 +435,22 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       }]
     });
   }
+  const exportElements = input.recordExport && input.taskId && Number.isSafeInteger(input.turn) ? [{
+    tag: 'button', element_id: 'export_trace', text: { tag: 'plain_text', content: '导出执行记录' }, type: 'default',
+    behaviors: [{ type: 'callback', value: { dutydeck_export_trace: 'download', task_id: taskId, turn: String(input.turn) } }]
+  }] : [];
+  const recordHint = exportElements.length ? '可点击「导出执行记录」获取公开执行记录。'
+    : footerDetailUrl ? '完整记录见「查看详情」。' : '';
   const sourceMainElements: Array<Record<string, unknown>> = input.elements?.length
     ? JSON.parse(JSON.stringify(input.elements))
     : [{ tag: 'markdown', content, text_align: 'left', text_size: 'normal_v2', margin: '0px' }];
+  // Old persisted snapshots can still contain a Web-only instruction. Present
+  // only an access path that this exact card actually offers.
+  for (const element of sourceMainElements) {
+    if (!/(?:omission|rejected_delta)$/.test(String(element.element_id ?? '')) || typeof element.content !== 'string') continue;
+    element.content = element.content.replace(/(?:；|，)?完整(?:记录|增量)(?:请在 Dutydeck Web 查看。|见 Dutydeck Web)/g, '')
+      .replace('请在 Dutydeck Web 查看完整记录。', '') + (recordHint ? `\n${recordHint}` : '');
+  }
   const hasPendingApproval = (elements: Array<Record<string, unknown>>) => elements.some(element =>
     typeof element.element_id === 'string' && element.element_id.startsWith('risk_alert_pending_')
   ) || input.awaitingHuman === true;
@@ -592,7 +610,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const hasExplicitlyExpandedTrace = traceElements.some(el => el.expanded === true);
     const overviewExpanded = defaultExpanded || hasExplicitlyExpandedTrace;
 
-    const elapsedPart = elapsedSeconds > 0 ? ` · 用时 ${elapsedLabel(elapsedSeconds)}` : '';
+    const elapsedPart = elapsedSeconds > 0 ? ` · ${state === 'queued' ? '排队等待' : '用时'} ${elapsedLabel(elapsedSeconds)}` : '';
     const overviewTitleText = `执行记录 · ${statusLabelText}${elapsedPart}`;
 
     let panelInnerElements: Record<string, unknown>[] = [];
@@ -736,7 +754,11 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       body: {
         direction: 'vertical' as const, vertical_spacing: '8px' as const, padding: '10px 12px 10px 12px' as const,
         elements: [
-          ...arrange(mainElements),
+          ...arrange(mainElements.map(element => {
+            if (!recordHint || !/(?:omission|rejected_delta)$/.test(String(element.element_id ?? '')) || typeof element.content !== 'string' || element.content.includes(recordHint)) return element;
+            return { ...element, content: `${element.content}\n${recordHint}` };
+          })),
+          ...exportElements,
           ...(footerColumns.length ? [{
             tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
             columns: footerColumns
@@ -760,7 +782,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const withinLimits = (card: unknown) => cardBytes(card) <= larkCardSafeLimits.bytes && cardComponents(card) <= larkCardSafeLimits.components;
   const omissionNotice = (count: number) => ({
     tag: 'markdown', element_id: 'dutydeck_omission',
-    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组；完整记录请在 Dutydeck Web 查看。</font>`,
+    content: `<font color='grey'>内容较长，已省略 ${count} 个较早执行分组。</font>`,
     text_size: 'x-small', margin: '4px 0px'
   });
   const upsertOmissionNotice = (elements: Array<Record<string, unknown>>, count: number) => {
@@ -809,7 +831,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     ?? content ?? '内容过长');
   const fallbackCard = assemble([
     { tag: 'markdown', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
-    { tag: 'markdown', element_id: 'dutydeck_fallback_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起；完整记录请在 Dutydeck Web 查看。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
+    { tag: 'markdown', element_id: 'dutydeck_fallback_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
   ]);
   if (withinLimits(fallbackCard)) return fallbackCard;
   // All caller-controlled fields have already been bounded. This last constant-size shape is the
@@ -818,7 +840,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const hardFallbackSummaryPrefix = isProcessCard ? '执行过程 · ' : isResultCard ? '执行结果 · ' : '';
   const hardFallbackSummary = `${hardFallbackSummaryPrefix}${taskName} · ${liveTitle}`;
   if (isProcessCard) {
-    const elapsedPart = elapsedSeconds > 0 ? ` · 用时 ${elapsedLabel(elapsedSeconds)}` : '';
+    const elapsedPart = elapsedSeconds > 0 ? ` · ${state === 'queued' ? '排队等待' : '用时'} ${elapsedLabel(elapsedSeconds)}` : '';
     const overviewTitleText = `执行记录 · ${liveTitle}${elapsedPart}`;
     return {
       schema: '2.0',
@@ -841,9 +863,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           {
             tag: 'markdown',
             element_id: 'dutydeck_hard_fallback_omission',
-            content: '卡片内容超过飞书安全预算，详细内容已收起。请在 Dutydeck Web 查看完整记录。',
+            content: `卡片内容超过飞书安全预算，详细内容已收起。${recordHint}`,
             text_size: 'normal'
-          }
+          },
+          ...exportElements
         ]
       }
     };
@@ -859,7 +882,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       direction: 'vertical', padding: '10px 12px',
       elements: [
         { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
-        { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: '卡片内容超过飞书安全预算，详细内容已收起。请在 Dutydeck Web 查看完整记录。', text_size: 'normal' }
+        { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: `卡片内容超过飞书安全预算，详细内容已收起。${recordHint}`, text_size: 'normal' },
+        ...exportElements
       ]
     }
   };

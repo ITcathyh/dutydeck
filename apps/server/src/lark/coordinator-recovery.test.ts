@@ -200,7 +200,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
 
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '任务状态' })));
     const markdown = statusMarkdown(service);
-    expect(markdown).toContain('尚未创建');
+    expect(markdown).toContain('请回原话题查询');
     expect(markdown).not.toContain('ses_web');
     expect(markdown).not.toContain('ses_other_app');
     expect(markdown).not.toContain('ses_archived');
@@ -216,7 +216,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await restarted.handle(dm('om_new', '/new'), config);
 
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
-    expect(runtime.stop).toHaveBeenCalledWith('ses_1');
+    expect(runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' });
 
     await restarted.handle(dm('om_next', '接着做'), config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
@@ -256,7 +256,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await coordinatorFor(runtime, service).handle(dm('om_new_goal', '/new 跑一遍回归测试'), config);
 
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
-    expect(runtime.stop).toHaveBeenCalledWith('ses_1');
+    expect(runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' });
     // 新任务必须落到新会话，且原文（不含命令名）只派发一次。
     expect(runtime.send.mock.calls[1]?.[0]).toBe('ses_2');
     expect(runtime.send.mock.calls[1]?.[1]).toBe('跑一遍回归测试');
@@ -277,7 +277,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     const restarted = coordinatorFor(runtime, service);
     // /new 的 stop 尚未落库（会话还是 idle），此刻另一条消息已经进入队列。
     const newCommand = restarted.handle(dm('om_new', '/new'), config);
-    await vi.waitFor(() => expect(runtime.stop).toHaveBeenCalledWith('ses_1'));
+    await vi.waitFor(() => expect(runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' }));
     const concurrent = restarted.handle(dm('om_concurrent', '同时到达'), config);
     releaseStop();
     await Promise.all([newCommand, concurrent]);
@@ -318,7 +318,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
     // 关键断言：长任务仍卡在 send 里，/new 已经把旧会话停掉了。
     expect(runtime.send).toHaveBeenCalledOnce();
-    expect(runtime.stop).toHaveBeenCalledWith('ses_1');
+    expect(runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' });
     expect(String(service.send.mock.calls.find(([input]: any[]) => input.taskName === '/new 已受理')?.[0]?.markdown ?? ''))
       .toContain('已结束当前会话');
 
@@ -346,7 +346,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await newCommand;
 
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
-    expect(runtime.stop).toHaveBeenCalledWith('ses_1');
+    expect(runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' });
     expect(String(service.send.mock.calls.find(([input]: any[]) => input.taskName === '/new 已受理')?.[0]?.markdown ?? ''))
       .toContain('已结束当前会话');
     // 被作废的那一轮绝不能把旧 prompt 发进一个用户已经宣布结束的上下文，
@@ -416,7 +416,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
 
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '任务状态' })));
     const markdown = statusMarkdown(service);
-    expect(markdown).toContain('尚未创建');
+    expect(markdown).toContain('请回原话题查询');
     expect(markdown).not.toContain('ses_1');
   });
 });
@@ -467,8 +467,8 @@ describe('私聊话题与 App 的持久化隔离', () => {
     const service = cardService();
     await coordinatorFor(runtime, service).handle(dm('om_new', '/new'), otherApp);
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
-    expect(runtime.stop).toHaveBeenCalledWith('ses_2');
-    expect(runtime.stop).not.toHaveBeenCalledWith('ses_1');
+    expect(runtime.stop).toHaveBeenCalledWith('ses_2', { kind: 'channel', id: 'ou_user_a', appId: 'cli_other' });
+    expect(runtime.stop).not.toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_user_a', appId: 'cli_other' });
   });
 });
 
@@ -497,7 +497,7 @@ describe('/new 结束当前 scope 的全部可复用会话', () => {
     const service = cardService();
     await coordinatorFor(runtime, service).handle(dm('om_new', '/new'), config);
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
-    expect(runtime.stop).toHaveBeenCalledWith('ses_old_idle');
+    expect(runtime.stop).toHaveBeenCalledWith('ses_old_idle', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' });
 
     // 「已结束」之后的下一条普通消息必须开新会话，不能选回 ses_old_idle。
     await coordinatorFor(runtime, cardService()).handle(dm('om_next', '下一条'), config);
@@ -515,7 +515,7 @@ describe('/new 结束当前 scope 的全部可复用会话', () => {
 
     await coordinatorFor(runtime, cardService()).handle(dm('om_new', '/new 跑一遍回归'), config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
-    for (const id of ['ses_a', 'ses_b']) expect(runtime.stop).toHaveBeenCalledWith(id);
+    for (const id of ['ses_a', 'ses_b']) expect(runtime.stop).toHaveBeenCalledWith(id, { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' });
     expect(runtime.start).toHaveBeenCalledOnce();
     // 目标派发进的是新建的那条，不是任何一条旧会话。
     expect(['ses_a', 'ses_b', 'ses_c']).not.toContain(runtime.send.mock.calls[0]?.[0]);
@@ -536,7 +536,7 @@ describe('/new 结束当前 scope 的全部可复用会话', () => {
     const service = cardService();
     await coordinatorFor(runtime, service).handle(dm('om_new', '/new'), config);
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
-    expect(runtime.stop).toHaveBeenCalledWith('ses_here');
+    expect(runtime.stop).toHaveBeenCalledWith('ses_here', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' });
     expect(runtime.stop).toHaveBeenCalledTimes(1);
   });
 
@@ -546,7 +546,7 @@ describe('/new 结束当前 scope 的全部可复用会话', () => {
 
     const group = coordinatorFor(runtime, cardService());
     await group.handle(dm('om_new_1', '/new'), config);
-    await vi.waitFor(() => expect(runtime.stop).toHaveBeenCalledWith('ses_only'));
+    await vi.waitFor(() => expect(runtime.stop).toHaveBeenCalledWith('ses_only', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' }));
 
     runtime.stop.mockClear();
     await group.handle(dm('om_new_2', '/new'), config);
@@ -569,7 +569,7 @@ describe('/new 结束当前 scope 的全部可复用会话', () => {
     await group.handle(dm('om_new_2', '/new'), config);
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
     expect(runtime.stop).toHaveBeenCalledTimes(2);
-    expect(runtime.stop).toHaveBeenNthCalledWith(2, 'ses_stubborn');
+    expect(runtime.stop).toHaveBeenNthCalledWith(2, 'ses_stubborn', { kind: 'channel', id: 'ou_user_a', appId: 'cli_test' });
     expect(sessions.find(item => item.id === 'ses_stubborn')?.state).toBe('stopped');
   });
 
@@ -606,7 +606,7 @@ describe('/cancel 在 coordinator 重建后', () => {
     const service = cardService();
     await coordinatorFor(runtime, service).handle(dm('om_cancel', '/cancel'), config);
 
-    await vi.waitFor(() => expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'rt_queued'));
+    await vi.waitFor(() => expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'rt_queued', 'ou_user_a'));
     expect(runtime.interrupt).not.toHaveBeenCalled();
     expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/cancel 已受理' }));
   });

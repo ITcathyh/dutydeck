@@ -26,7 +26,7 @@
  *    因此命令说明用 markdown 元素 + 分页渲染；分页导航是 callback 按钮（action `help_page`，
  *    只读、不改任何状态，属于回调白名单动作），元素数与字节数都有界。
  *
- * 5. **未识别的 /xxx 归一化后透传**：见 {@link normalizeLarkPassthroughPrompt}。归一化后的
+ * 5. **明确控制命令笔误只提示纠正，其余未识别的 /xxx 归一化后透传**：见 {@link normalizeLarkPassthroughPrompt}。归一化后的
  *    文本不再以 `/` 开头，因此无论被谁再解析一次都不可能被认成内建命令——避免用户用
  *    `/status` 之类的字面量在后续环节「影子」掉真正的内建命令。拼写接近可用命令时，
  *    {@link routeLarkCommand} 会额外产出一条「你是不是想用」提示（见
@@ -604,6 +604,8 @@ export function renderLarkCommandHelp(
 export type LarkCommandRoute =
   /** 不是命令：coordinator 按今天的流程正常建任务。 */
   | { kind: 'not_a_command' }
+  /** 明确控制命令笔误：只提示重发，不进入 Agent 或执行猜测的命令。 */
+  | { kind: 'correction'; command: string; text: string }
   /**
    * 未识别的 /xxx：promptText 已归一化，可直接当普通请求交给 Agent。
    * suggestion 是拼写近似可用命令时的「你是不是想用」回执提示，与 promptText 完全隔离：
@@ -636,8 +638,18 @@ export function routeLarkCommand(text: unknown, context: LarkCommandContext): La
     case 'not_a_command':
       return { kind: 'not_a_command' };
     case 'unknown': {
-      // 建议与透传文本分开产出：候选只来自当前可用命令（capabilities 已过滤），
-      // 且只挂在回执字段上，promptText 原样归一化后交给 Agent。
+      // 控制命令的单字符误拼/相邻换位只纠正，即使当前执行能力不可用也不建任务。
+      const name = evaluated.parsed.name;
+      const controls = larkCommandRegistry
+        .flatMap(command => ['cancel', 'retry', 'new'].includes(command.name) ? [command.name, ...(command.aliases ?? [])] : []);
+      const close = controls.filter(candidate => {
+        if (levenshtein(name, candidate) === 1) return true;
+        return name.length === candidate.length && [...name].some((_, index) =>
+          index + 1 < name.length && name.slice(0, index) + name[index + 1] + name[index] + name.slice(index + 2) === candidate);
+      });
+      if (close.length === 1) return { kind: 'correction', command: close[0]!,
+        text: `未执行：\`/${name}\` 不是已知控制命令。你可能想输入 \`/${close[0]}\`；请确认后重新发送。本条消息不会交给 Agent。` };
+      // 其他候选只挂在回执上，原文仍交给 Agent。
       const candidates = suggestLarkCommand(evaluated.parsed.name, context.capabilities);
       return {
         kind: 'unknown_command' as const,

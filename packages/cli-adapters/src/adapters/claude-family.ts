@@ -1,5 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
+import { relayCommandFrom, relayEnabled } from '@dutydeck/relay';
 
 /**
  * Claude Code 家族共用实现（claude-code / seed / relay）。
@@ -196,7 +197,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     id,
     capabilities: { resume: true },
 
-    buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode }: AdapterSessionContext): string[] {
+    buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode, env }: AdapterSessionContext): string[] {
       // dutydeck sessionId 形如 "ses_<uuid>"，--session-id/--resume 只接受裸 UUID。
       const uuid = sessionId.replace(/^ses_/, '');
       const args: string[] = [];
@@ -212,6 +213,16 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
         args.push('--model', model.trim());
       }
       pushClaudeFamilyBypassArgs(args, permissionMode);
+      if (relayEnabled(env)) {
+        const index = args.indexOf('--settings');
+        const settings = index < 0 ? {} : JSON.parse(args[index + 1]!);
+        const value = JSON.stringify({ ...settings, hooks: { PreToolUse: [{
+          matcher: '^AskUserQuestion$',
+          hooks: [{ type: 'command', command: `${relayCommandFrom(env)} session native-ask`, timeout: 1230 }],
+        }] } });
+        if (index < 0) args.push('--settings', value);
+        else args[index + 1] = value;
+      }
       // PlanMode 的审批 TUI 在 IM 场景无法驱动，直接禁掉。
       args.push('--disallowed-tools', 'EnterPlanMode,ExitPlanMode');
       return args;

@@ -72,6 +72,7 @@ export class PtyCliDriver implements AgentDriver {
   private exitReported = false;
   /** 一轮任务进行中：send() 置 true，completed 发出后置 false。 */
   private turnActive = false;
+  private interruptPending = false;
   private firstPromptSent = false;
   /** A new CLI process may need startup preparation even when it resumed an
    * existing conversation and therefore must not receive first-prompt context. */
@@ -112,6 +113,7 @@ export class PtyCliDriver implements AgentDriver {
   private snapshot: TerminalSnapshot | undefined;
   private transcript: TranscriptEventSource | undefined;
   private rawTerminalTimer: ReturnType<typeof setTimeout> | undefined;
+  private renderedCompletionTimer: ReturnType<typeof setTimeout> | undefined;
   private lastRawTerminalText = '';
   /** createTerminalStream 订阅者集合，driver 级持有，rewire 后继续生效。 */
   private readonly terminalSubscribers = new Set<(data: string) => void>();
@@ -171,6 +173,7 @@ export class PtyCliDriver implements AgentDriver {
       model: this.agent.model,
       reasoningEffort: this.agent.reasoningEffort,
       permissionMode: this.agent.permissionMode,
+      env: this.agent.env,
     }), this.cwd);
     this.started = true;
     this.backend.spawn(this.agent.command, this.lastArgs, {
@@ -224,9 +227,11 @@ export class PtyCliDriver implements AgentDriver {
         this.inputPrepared = true;
       }
       this.turnActive = true;
+      this.interruptPending = false;
       this.turnHasOutput = false;
       this.turnStartedAt = Date.now();
       this.awaitingRecoveryTranscript = false;
+      this.clearRenderedCompletion();
       this.idleDetector?.reset();
       completion = new Promise<void>((resolve, reject) => {
         this.turnResolve = resolve;
@@ -352,14 +357,11 @@ export class PtyCliDriver implements AgentDriver {
     const interruptError = new Error('Driver interrupted');
     this.cancelActiveSubmission(interruptError);
     this.turnWriteReject?.(interruptError);
+    this.interruptPending = this.turnActive;
     this.backend.interrupt();
-    // 不主动发 completed——等 idle 检测到 prompt 回归自然完成（turnActive 仍为 true）。
-    this.emitEvent({ type: 'status', data: { state: 'interrupted' } });
-    // 但 send() 的等待者需要被唤醒——interrupt 后 runtime 会走 interrupted 路径。
-    this.turnActive = false;
-    this.turnResolve?.();
-    this.turnResolve = null;
-    this.turnReject = null;
+    // Ctrl-C only requests cancellation. Keep send() and Runtime's attempt open
+    // until idle detection observes the prompt; a busy or silent pane is not proof.
+    this.emitEvent({ type: 'status', data: { state: 'interrupting' } });
   }
 
   async resume(): Promise<void> {
@@ -696,7 +698,8 @@ export class PtyCliDriver implements AgentDriver {
       // when it was written between the tailer's polling ticks.
       this.transcript?.flush();
       this.turnActive = false;
-      this.emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
+      this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending ? 'cancelled' : 'end_turn' } });
+      this.interruptPending = false;
       this.turnResolve?.();
       this.turnResolve = null;
       this.turnReject = null;
@@ -758,6 +761,7 @@ export class PtyCliDriver implements AgentDriver {
       clearTimeout(this.rawTerminalTimer);
       this.rawTerminalTimer = undefined;
     }
+    this.clearRenderedCompletion();
   }
 
   private handleExit(code: number | null, source?: SessionBackend): void {
@@ -798,12 +802,58 @@ export class PtyCliDriver implements AgentDriver {
     const timer = setTimeout(() => {
       this.rawTerminalTimer = undefined;
       const text = this.snapshot?.text() ?? '';
-      if (text === this.lastRawTerminalText) return;
-      this.lastRawTerminalText = text;
-      this.emitEvent({ type: 'raw_terminal', data: { text } });
+      if (text !== this.lastRawTerminalText) {
+        this.lastRawTerminalText = text;
+        this.emitEvent({ type: 'raw_terminal', data: { text } });
+      }
+      this.checkRenderedCompletion();
     }, RAW_TERMINAL_THROTTLE_MS);
     timer.unref();
     this.rawTerminalTimer = timer;
+  }
+
+  private clearRenderedCompletion(): void {
+    if (this.renderedCompletionTimer) {
+      clearTimeout(this.renderedCompletionTimer);
+      this.renderedCompletionTimer = undefined;
+    }
+  }
+
+  private hasRenderedCompletionEvidence(): boolean {
+    if (!this.turnActive || this.awaitingRecoveryTranscript || this.activeSubmission) return false;
+    if (!this.turnHasOutput) return false;
+    const completion = this.adapter.completionPattern;
+    if (!completion) return false;
+    const activity = this.adapter.screenActivityPattern;
+    const lines = (this.snapshot?.viewportText() ?? '').split('\n').reverse();
+    const statusLine = activity
+      ? lines.find(line => activity.test(line) || completion.test(line))
+      : lines.find(line => completion.test(line));
+    if (!statusLine || !completion.test(statusLine) || (activity && activity.test(statusLine))) return false;
+    const footer = this.snapshot?.lastLine() ?? '';
+    if (this.adapter.screenBusyPattern?.test(footer)) return false;
+    return true;
+  }
+
+  /** 当增量 ANSI 重绘导致原始 chunk 未包含完整完成标记时，从已重构的当前视口探测完成证据。 */
+  private checkRenderedCompletion(): void {
+    if (!this.hasRenderedCompletionEvidence()) {
+      this.clearRenderedCompletion();
+      return;
+    }
+    if (!this.renderedCompletionTimer) {
+      const timer = setTimeout(() => {
+        this.renderedCompletionTimer = undefined;
+        this.checkRenderedCompletionFinal();
+      }, 500);
+      timer.unref();
+      this.renderedCompletionTimer = timer;
+    }
+  }
+
+  private checkRenderedCompletionFinal(): void {
+    if (!this.hasRenderedCompletionEvidence()) return;
+    this.idleDetector?.fireIdle();
   }
 
   private sessionContext(): AdapterSessionContext {

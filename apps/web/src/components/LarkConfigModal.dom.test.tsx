@@ -579,13 +579,13 @@ describe('LarkConfigModal S7 Web 出口健康提示', () => {
 });
 
 describe('LarkConfigModal 实验卡片开关', () => {
-  it('默认关闭，文案标明实验能力与默认关闭', async () => {
+  it('问答默认开启，群提及保持默认关闭', async () => {
     renderModal(collection({ setupComplete: true }));
     await screen.findByPlaceholderText('已保存');
     await userEvent.setup().click(await screen.findByText('访问范围与高级设置（可选）'));
-    const ask = screen.getByRole('switch', { name: '结构化问答卡片（实验能力，默认关闭）' });
+    const ask = screen.getByRole('switch', { name: '结构化问答卡片（默认开启）' });
     const mention = screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' });
-    expect(ask.getAttribute('aria-checked')).toBe('false');
+    expect(ask.getAttribute('aria-checked')).toBe('true');
     expect(mention.getAttribute('aria-checked')).toBe('false');
     expect(screen.getByText(/低版本飞书客户端可能不支持/)).toBeTruthy();
     expect(screen.getByText(/触达效果尚待真机验证/)).toBeTruthy();
@@ -595,7 +595,7 @@ describe('LarkConfigModal 实验卡片开关', () => {
     renderModal(collection({ setupComplete: true, structuredAskCards: true, groupCardMention: true }));
     await screen.findByPlaceholderText('已保存');
     await userEvent.setup().click(await screen.findByText('访问范围与高级设置（可选）'));
-    expect(screen.getByRole('switch', { name: '结构化问答卡片（实验能力，默认关闭）' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('switch', { name: '结构化问答卡片（默认开启）' }).getAttribute('aria-checked')).toBe('true');
     expect(screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' }).getAttribute('aria-checked')).toBe('true');
   });
 
@@ -605,10 +605,10 @@ describe('LarkConfigModal 实验卡片开关', () => {
     renderModal(collection({ setupComplete: true }));
     await screen.findByPlaceholderText('已保存');
     await user.click(await screen.findByText('访问范围与高级设置（可选）'));
-    await user.click(screen.getByRole('switch', { name: '结构化问答卡片（实验能力，默认关闭）' }));
+    await user.click(screen.getByRole('switch', { name: '结构化问答卡片（默认开启）' }));
     await user.click(screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' }));
     await user.click(screen.getByRole('button', { name: '下一步' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
-    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', structuredAskCards: true, groupCardMention: true });
+    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', structuredAskCards: false, groupCardMention: true });
   });
 });

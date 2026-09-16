@@ -144,7 +144,7 @@ describe('Lark /new first-turn launch options', () => {
     await coordinator.handle(dm('om_override', `/new --cwd ${override} --model gpt-5.5 --effort high -- run checks`), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
 
-    expect(h.runtime.stop).toHaveBeenCalledWith('ses_1');
+    expect(h.runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_alice', appId: 'cli_new_session' });
     expect(h.runtime.start).toHaveBeenNthCalledWith(2, {
       agentId: 'codex', cwd: canonical, model: 'gpt-5.5', reasoningEffort: 'high',
       permissionMode: 'full-trust', source: 'lark', sourceId: 'cli_new_session:ou_alice:p2p'
@@ -186,7 +186,7 @@ describe('Lark /new first-turn launch options', () => {
 
     await coordinator.handle(dm('om_bare', '/new'), h.config);
     await vi.waitFor(() => expect(h.service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/new 已受理' })));
-    expect(h.runtime.stop).toHaveBeenCalledWith('ses_1');
+    expect(h.runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_alice', appId: 'cli_new_session' });
     await coordinator.handle(dm('om_default', 'use defaults'), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
     expect(h.runtime.start).toHaveBeenNthCalledWith(2, expect.objectContaining({
@@ -230,7 +230,7 @@ describe('Lark /new first-turn launch options', () => {
     await coordinator.handle(dm('om_a', `/new --cwd ${override} --model gpt-a --effort high -- A`), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
     await coordinator.handle(dm('om_reset', '/new'), h.config);
-    await vi.waitFor(() => expect(h.runtime.stop).toHaveBeenCalledWith('ses_1'));
+    await vi.waitFor(() => expect(h.runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_alice', appId: 'cli_new_session' }));
     await coordinator.handle(dm('om_b', 'B'), h.config);
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
     const sourceId = larkSourceId(h.config, 'ou_alice', 'p2p', 'p2p');
@@ -281,7 +281,7 @@ describe('Lark /new first-turn launch options', () => {
     await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
     expect(authorize.mock.calls.some((call: any[]) => call[3] === 'run.change_cwd')).toBe(true);
     expect(authorize.mock.calls.some((call: any[]) => call[3] === 'run.change_model')).toBe(true);
-    expect(h.runtime.stop).toHaveBeenCalledWith('ses_1');
+    expect(h.runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_alice', appId: 'cli_new_session' });
   });
 
   it('applies non-managed execution-policy gates for cwd and model before retiring the old session', async () => {
