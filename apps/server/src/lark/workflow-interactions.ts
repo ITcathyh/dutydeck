@@ -187,11 +187,11 @@ export class LarkWorkflowInteractions {
   }
   /**
    * options.structuredAskCards：结构化问答卡总开关（来自 config，默认缺省即关闭）。
-   * 关闭时 ask 卡渲染与历史行为逐字节一致；开启后：带选项的 ask 渲染单选按钮组/多选表单，
+   * 关闭时使用文本卡并展示可读选项；开启后：带选项的 ask 渲染单选按钮组/多选表单，
    * 无选项的 ask 渲染自由文本 input 表单。低版本客户端仍可引用本卡片直接回复。
    * options.webBaseUrl：仅在传入且为合法 http(s) 地址时透传给结构化 ask 卡，未配置不渲染、无公网兜底。
    * options.groupMention：群 @ 发起人开关（P0-4，默认关闭）。开启且为群聊时在审批/问答卡
-   * 最前方插入 @ 发起人元素；关闭时 ask/permission 卡与历史逐字节一致。
+   * 最前方插入 @ 发起人元素；关闭时不添加 @ 元素。
    */
   async observe(
     context: LarkInteractionContext,
@@ -241,7 +241,9 @@ export class LarkWorkflowInteractions {
     // 提示语元素单独持有引用：结构化选项超预算回落为纯文本卡时，要替换的始终是这一条提示，
     // 不能写死下标——群 @ 开启时它前面还会插入 group_mention，下标会错位覆盖问题正文。
     const hintElement: LarkCardElement = { tag: 'markdown', content: kind === 'ask'
-      ? (structuredOn ? '点选下方选项提交；也可引用本卡片直接回复你的答案。' : '回复此卡片即可回答。')
+      ? (structuredOn
+        ? structuredChoices ? '点选下方选项提交；也可引用本卡片直接回复你的答案。' : '在下方填写答案并点击提交；也可引用本卡片直接回复你的答案。'
+        : '请引用本卡片回复你的答案。')
       : '本次选择只处理这一条请求，不改变后续授权方式。' };
     const elements: LarkCardElement[] = [
       ...(groupMentionTag ? [{ tag: 'markdown', element_id: 'group_mention', content: groupMentionTag }] : []),
@@ -275,9 +277,23 @@ export class LarkWorkflowInteractions {
     // 引用卡片回复仍可用；自由文本表单体积恒定，必然在预算内。
     if (structuredParts && this.withinAskCardBudget([...elements, ...structuredParts], safeWebBaseUrl)) {
       elements.push(...structuredParts);
-    } else if (structuredOn && kind === 'ask') {
-      // 回落文本卡时提示语必须一起换，否则读者会看到「点选下方选项」却没有选项。
-      hintElement.content = '回复此卡片即可回答。';
+    } else if (kind === 'ask') {
+      hintElement.content = '请引用本卡片回复你的答案。';
+      if (askChoices?.length) {
+        // Text mode still has to show what the user is choosing. Keep labels
+        // as plain text and reserve space for an explicit truncation notice.
+        const labels = askChoices.map((choice, index) => `${index + 1}. ${choice.label}`);
+        let visible = labels.length;
+        let choicesElement: LarkCardElement;
+        do {
+          const omitted = visible < labels.length ? `\n还有 ${labels.length - visible} 个选项未展示，请引用本卡片说明你的选择。` : '';
+          choicesElement = { tag: 'div', text: { tag: 'plain_text', content: `可选项：\n${labels.slice(0, visible).join('\n')}${omitted}` } };
+          if (this.withinAskCardBudget([...elements, choicesElement], safeWebBaseUrl)) break;
+          visible--;
+        } while (visible >= 0);
+        if (visible >= 0) elements.push(choicesElement);
+        else hintElement.content = '选项过多，当前卡片无法完整展示。请引用本卡片说明你的选择。';
+      }
     }
     try {
       if (!await this.live(record)) { await this.move(record, 'expired'); return; }
@@ -330,6 +346,13 @@ export class LarkWorkflowInteractions {
     return record.kind === 'ask'
       ? this.broker?.get(record.nativeId)?.status === 'pending'
       : (await this.runtime.getPendingPermissions?.(record.sessionId))?.some(item => item.id === record.nativeId) === true;
+  }
+  async pendingAsks(appId: string) {
+    const pending: LarkInteraction[] = [];
+    for (const record of await this.list(appId)) {
+      if (record.kind === 'ask' && record.state === 'pending' && record.cardId && await this.live(record)) pending.push(record);
+    }
+    return pending;
   }
   async respond(input: { appId: string; chatId: string; actorId?: string; requestId: string; action: 'answer' | 'approve' | 'reject' | 'accept' | 'changes'; answer?: string; selected?: string[]; cardId?: string; generation?: string; callback?: boolean }) {
     const raw = await this.store.get(prefix(input.appId) + input.requestId);

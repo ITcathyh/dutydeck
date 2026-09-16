@@ -22,7 +22,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
-async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean; answerChunks?: string[] } = {}) {
+async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean; answerChunks?: string[]; askTimeoutMs?: number } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflows-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
@@ -46,7 +46,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
           try { send(prompt); } catch (error) { emit({ type: 'error', data: { message: String(error) } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
           currentCancelled = false;
           if (kind === 'ask') {
-            const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？' });
+            const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？', timeoutMs: options.askTimeoutMs });
             if (result.status === 'answered') {
               emit({ type: 'text', data: { text: `已收到：${result.answer}` } });
             }
@@ -317,6 +317,149 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.coordinator.handle(event('om_duplicate', `/answer ${ask.id} 方案 B`), h.config);
     expect(h.send).toHaveBeenCalledOnce();
     expect((await h.interactions()).some(item => item.kind === 'result')).toBe(false);
+  });
+
+  it('answers the original Relay waiter from an ordinary owner reply in the same topic without queueing a task', async () => {
+    const h = await harness('ask');
+    await h.coordinator.handle(event('om_task', '帮我选择 CLI'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(event('om_answer', '@_user_1 bdev-codex', { parentId: 'om_root' }), h.config);
+    expect(h.broker.get(ask.nativeId)).toMatchObject({ status: 'answered', answer: 'bdev-codex' });
+    await h.completed();
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(await h.runtime.getTasks(ask.sessionId)).toEqual([expect.objectContaining({ id: ask.taskId, status: 'completed' })]);
+    const inbox = JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.om_answer`))!);
+    expect(inbox).toMatchObject({ state: 'accepted', workflowRequestId: ask.id });
+  });
+
+  it.each([
+    ['another requester', { senderOpenId: 'ou_bob' }],
+    ['another topic', { rootId: 'om_other_root', threadId: 'omt_other' }],
+    ['another chat', { chatId: 'oc_other' }],
+    ['an explicit quote', { parentId: 'om_other_message' }],
+    ['an attachment', { messageType: 'file', content: JSON.stringify({ file_key: 'file_answer', file_name: 'answer.txt' }) }]
+  ] as Array<[string, Partial<LarkMessageEvent>]>)('keeps %s on the task route instead of answering a pending ask', async (_name, patch) => {
+    const h = await harness('ask');
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(event('om_unrelated', '另外一个目标', patch), h.config);
+    await vi.waitFor(async () => {
+      const tasks = (await Promise.all((await h.runtime.listSessions()).map(session => h.runtime.getTasks(session.id)))).flat();
+      expect(tasks).toHaveLength(2);
+    });
+    expect(h.broker.get(ask.nativeId)?.status).toBe('pending');
+    expect(JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.om_unrelated`))!).workflowRequestId).toBeUndefined();
+  });
+
+  it('accepts a plain multiline post as the answer to the current question', async () => {
+    const h = await harness('ask');
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(event('om_post_answer', '', { parentId: 'om_root', messageType: 'post', content: JSON.stringify({ zh_cn: {
+      title: '', content: [[{ tag: 'text', text: 'bdev-codex' }], [{ tag: 'text', text: '先执行测试' }]]
+    } }) }), h.config);
+    expect(h.broker.get(ask.nativeId)).toMatchObject({ status: 'answered', answer: 'bdev-codex\n\n先执行测试' });
+    await h.completed();
+    expect(await h.runtime.getTasks(ask.sessionId)).toHaveLength(1);
+  });
+
+  it('does not cross native topics even when the configured session scope is shared', async () => {
+    const h = await harness('ask');
+    h.config.groupReplyMode = 'chat';
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    await h.coordinator.handle(event('om_task', '开始工作', { rootId: undefined }), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(event('om_other_topic', '新话题目标', { rootId: undefined, threadId: 'omt_other' }), h.config);
+    await vi.waitFor(async () => expect(await h.runtime.getTasks(ask.sessionId)).toHaveLength(2));
+    expect(h.broker.get(ask.nativeId)?.status).toBe('pending');
+  });
+
+  it('does not answer another bot application’s pending question', async () => {
+    const h = await harness('ask');
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    const other = { ...h.config, appId: 'cli_other' };
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config, other]));
+    await h.coordinator.handle(event('om_other_bot', '其他机器人的任务'), other);
+    await vi.waitFor(async () => expect((await h.runtime.listSessions()).length).toBe(2));
+    expect(h.broker.get(ask.nativeId)?.status).toBe('pending');
+  });
+
+  it('keeps slash commands out of the pending answer and execution queue', async () => {
+    const h = await harness('ask');
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(event('om_tasks', '/tasks', { parentId: 'om_root' }), h.config);
+    expect(h.broker.get(ask.nativeId)?.status).toBe('pending');
+    expect(await h.runtime.getTasks(ask.sessionId)).toHaveLength(1);
+    expect(h.send).toHaveBeenCalledOnce();
+  });
+
+  it('requires a quoted question when multiple live asks share the requester and topic, without queueing the answer', async () => {
+    const h = await harness('ask');
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    const other = h.broker.register({ sessionId: ask.sessionId, question: '另外一个问题？', timeoutMs: 60_000 });
+    await vi.waitFor(async () => expect((await h.interactions()).filter(item => item.kind === 'ask' && item.cardId)).toHaveLength(2));
+    await h.coordinator.handle(event('om_ambiguous', 'bdev-codex', { parentId: 'om_root' }), h.config);
+    expect(h.broker.listPending(ask.sessionId)).toHaveLength(2);
+    expect(await h.runtime.getTasks(ask.sessionId)).toHaveLength(1);
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('多个问题等待回答') }));
+    await h.broker.cancelSession(ask.sessionId, 'test cleanup');
+    await other;
+  });
+
+  it('never applies a duplicate or an interrupted acknowledgement to a later ask', async () => {
+    const h = await harness('ask');
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const first = (await h.interactions()).find(item => item.kind === 'ask')!;
+    const answerEvent = event('om_answer', 'bdev-codex', { parentId: 'om_root' });
+    await h.coordinator.handle(answerEvent, h.config);
+    await h.completed();
+    await h.coordinator.handle(event('om_next', '下一个任务'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'ask' && item.nativeId !== first.nativeId && item.cardId)).toBe(true));
+    const next = (await h.interactions()).find(item => item.kind === 'ask' && item.nativeId !== first.nativeId)!;
+    await h.coordinator.handle(answerEvent, h.config);
+    expect(h.broker.get(next.nativeId)?.status).toBe('pending');
+
+    // Simulate a crash after answering the pinned waiter but before inbox ACK.
+    const key = `lark.inbox.${h.config.appId}.om_answer`;
+    const stored = JSON.parse((await h.repos.config.get(key))!);
+    await h.repos.config.set(key, JSON.stringify({ ...stored, state: 'received', boot: 'previous_listener' }));
+    h.coordinator.stop();
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      await restored.startReconciliation(h.config);
+      await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(key))!).state).toBe('accepted'));
+      expect(h.broker.get(next.nativeId)?.status).toBe('pending');
+      expect(await h.runtime.getTasks(first.sessionId)).toHaveLength(2);
+      expect(h.send).toHaveBeenCalledTimes(2);
+    } finally { restored.stop(); }
+  });
+
+  it('rejects an expired quoted ask without converting the reply into another task or a newer answer', async () => {
+    const h = await harness('ask', { askTimeoutMs: 1_000 });
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const first = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await vi.waitFor(() => expect(h.broker.get(first.nativeId)?.status).toBe('expired'), { timeout: 2_000 });
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(first.sessionId))[0]?.status).toBe('failed'));
+    await h.coordinator.handle(event('om_next', '下一个任务'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'ask' && item.nativeId !== first.nativeId && item.cardId)).toBe(true));
+    const next = (await h.interactions()).find(item => item.kind === 'ask' && item.nativeId !== first.nativeId)!;
+    await h.coordinator.handle(event('om_stale_answer', '过时的答案', { parentId: first.cardId }), h.config);
+    expect(h.broker.get(next.nativeId)?.status).toBe('pending');
+    expect(await h.runtime.getTasks(first.sessionId)).toHaveLength(2);
+    expect(h.send).toHaveBeenCalledTimes(2);
   });
 
   it('binds an ACP approval to the real card and current authority; simultaneous approvals resolve only once', async () => {

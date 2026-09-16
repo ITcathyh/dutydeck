@@ -71,6 +71,8 @@ export interface SessionRelayCliOptions {
   timeout?: string;
   /** 以 JSON 输出结果而非裸答案 */
   json?: boolean;
+  choices?: string;
+  multiple?: boolean;
 }
 
 export interface AuthTokenCliOptions {
@@ -448,6 +450,8 @@ Routing guidance:
     .description('Ask the user a question and block until they answer')
     .argument('<question>', 'Question to ask')
     .option('--timeout <seconds>', 'Seconds to wait for an answer (default: 300)')
+    .option('--choices <json>', 'JSON array of {label, value?} options; card selections return value or label, text replies return verbatim')
+    .option('--multiple', 'Allow multiple selections (requires --choices)')
     .option('--json', 'Print the full result as JSON instead of the bare answer')
     .action((question, options) => handlers.sessionAsk?.(question, options))
     .addHelpText('after', `
@@ -460,7 +464,8 @@ Exit codes:
 Examples:
   $ dutydeck session send "已完成迁移，正在跑回归"
   $ answer=$(dutydeck session ask "要继续发布吗？") && echo "user said: $answer"
-  $ dutydeck session ask "选哪个方案？" --timeout 60 --json`);
+  $ dutydeck session ask "选哪个方案？" --choices '[{"label":"方案甲","value":"a"},{"label":"方案乙","value":"b"}]' --timeout 60
+  $ dutydeck session ask "要检查哪些项？" --choices '[{"label":"代码"},{"label":"文档"}]' --multiple --json`);
 
   const botmux = program.command('botmux').description('Inspect Botmux data with the read-only migration importer');
   addBotmuxSourceOptions(botmux.command('discover')

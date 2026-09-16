@@ -450,21 +450,24 @@ describe('structured ask cards (P0-2)', () => {
   const findRecord = async (workflow: LarkWorkflowInteractions, askId: string) =>
     (await workflow.list('app_one')).find(record => record.nativeId === askId)!;
 
-  it('开关缺省时：带选项的 ask 与无选项 ask 逐字节一致，均为经典文本卡', async () => {
+  it('开关关闭时保留文本卡，选项仍以可读文本显示', async () => {
     const h = await setupHarness();
     try {
       const plain = await h.ask(0);
       const withChoices = await h.ask(1, [{ label: '跑测试' }, { label: '直接合并' }]);
       await h.workflow.observe(plain.ctx, plain.event);
-      await h.workflow.observe(withChoices.ctx, withChoices.event);
+      await h.workflow.observe(withChoices.ctx, withChoices.event, { structuredAskCards: false });
       const classic = [
         { tag: 'div', text: { tag: 'plain_text', content: '怎么继续？' } },
-        { tag: 'markdown', content: '回复此卡片即可回答。' }
+        { tag: 'markdown', content: '请引用本卡片回复你的答案。' }
       ];
       expect(h.cardAt(0).elements).toEqual(classic);
-      expect(JSON.stringify(h.cardAt(1).elements)).toBe(JSON.stringify(h.cardAt(0).elements));
+      expect(h.cardAt(1).elements).toEqual([...classic,
+        { tag: 'div', text: { tag: 'plain_text', content: '可选项：\n1. 跑测试\n2. 直接合并' } }
+      ]);
       for (const card of [h.cardAt(0), h.cardAt(1)]) {
         expect(JSON.stringify(card.elements)).not.toContain('form');
+        expect(card.elements.some((element: any) => element.tag === 'button')).toBe(false);
         expect(card.webBaseUrl).toBeUndefined();
       }
       const records = await h.workflow.list('app_one');
@@ -544,6 +547,8 @@ describe('structured ask cards (P0-2)', () => {
       await h.workflow.observe(free.ctx, free.event, { structuredAskCards: true });
       const form = h.cardAt(0).elements.find((element: any) => element.tag === 'form');
       expect(form).toBeDefined();
+      expect(JSON.stringify(h.cardAt(0).elements)).toContain('在下方填写答案并点击提交');
+      expect(JSON.stringify(h.cardAt(0).elements)).not.toContain('点选下方选项');
       expect(form.elements.find((element: any) => element.tag === 'input'))
         .toMatchObject({ name: 'answer', input_type: 'multiline_text', max_length: 1000 });
       expect(form.elements.find((element: any) => element.tag === 'multi_select_static')).toBeUndefined();
@@ -620,7 +625,9 @@ describe('structured ask cards (P0-2)', () => {
       const card = h.cardAt(0);
       expect(card.elements.some((element: any) => element.tag === 'form')).toBe(false);
       expect(card.elements.some((element: any) => element.tag === 'button')).toBe(false);
-      expect(card.elements).toContainEqual({ tag: 'markdown', content: '回复此卡片即可回答。' });
+      expect(card.elements).toContainEqual({ tag: 'markdown', content: '请引用本卡片回复你的答案。' });
+      expect(JSON.stringify(card.elements)).toContain('可选项：');
+      expect(JSON.stringify(card.elements)).toMatch(/还有 \d+ 个选项未展示/);
       // 回落卡真整卡试算必须达标，不能把超预算内容原样发给飞书
       const assembled = buildLarkCard({
         state: 'running', statusLabel: '等待回答', awaitingHuman: true, readOnly: true,
@@ -645,7 +652,7 @@ describe('structured ask cards (P0-2)', () => {
       // 回落只能替换 hint 自身：严禁按固定下标写 elements[1]，否则群 @ 开启时覆盖的是问题正文。
       expect(card.elements[1]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: '请选择发布范围' } });
       expect(card.elements.some((element: any) => element.tag === 'form')).toBe(false);
-      expect(card.elements).toContainEqual({ tag: 'markdown', content: '回复此卡片即可回答。' });
+      expect(card.elements).toContainEqual({ tag: 'markdown', content: '请引用本卡片回复你的答案。' });
       expect(JSON.stringify(card.elements)).not.toContain('点选下方选项');
     } finally { await h.cleanup(); }
   });
