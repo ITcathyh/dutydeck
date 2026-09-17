@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { useQueries } from '@tanstack/react-query';
+import { type Query, useQueries } from '@tanstack/react-query';
 import { api, ApiError, type RunSummary, type Session } from '../api';
 import { Banner, Button, Card, EmptyState, Spinner } from './primitives';
 import { ScheduleFoundationPanel } from './ScheduleFoundationPanel';
@@ -17,7 +17,12 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession }
   const currentPage = Math.min(page, pageCount - 1);
   const pageSessions = sessions.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   const queries = useQueries({ queries: pageSessions.map(session => ({
-    queryKey: ['automation', session.id], queryFn: () => api.automation(session.id), retry: false, enabled: !selected
+    queryKey: ['automation', session.id],
+    queryFn: () => api.automation(session.id),
+    retry: false,
+    enabled: !selected,
+    refetchInterval: (query: Query) => query.state.error ? false : 10_000,
+    refetchIntervalInBackground: false
   })) });
   const selectedSession = sessions.find(session => session.id === selected?.sessionId);
 

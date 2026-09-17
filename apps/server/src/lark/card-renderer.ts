@@ -24,7 +24,7 @@ export const isLarkCardContentRejected = (error: unknown): error is LarkServiceE
   && [230028, 230099].includes(Number(error.details?.upstreamCode));
 
 export const isLarkMessageUnupdatable = (error: unknown): error is LarkServiceError => error instanceof LarkServiceError
-  && [230012, 230030].includes(Number(error.details?.upstreamCode));
+  && [230012, 230030, 230031].includes(Number(error.details?.upstreamCode));
 
 const rejectedDeltaElement = (changedCount: number): LarkCardElement => ({
   tag: 'markdown',

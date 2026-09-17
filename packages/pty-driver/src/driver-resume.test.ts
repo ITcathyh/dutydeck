@@ -252,7 +252,7 @@ describe('PtyCliDriver resume session id resolution', () => {
     const model = 'gateway/custom[1m]';
     const args = [wrapper, '--wrapper-profile', 'flash profile'];
     const driver = new PtyCliDriver({
-      agent: agentConfig({ id: 'ccflash', adapterId: 'claude-code', cwd, args, model, env: { CLAUDE_CONFIG_DIR: cwd } }),
+      agent: agentConfig({ id: 'ccflash', adapterId: 'claude-code', cwd, args, model }),
       adapter, backend: new PtyBackend(), onEvent: () => {}, onExit: () => {}, sessionId: SESSION_ID,
     });
     const launches = () => readFileSync(argvDump, 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
@@ -310,7 +310,7 @@ describe('PtyCliDriver resume session id resolution', () => {
     const adapter = createClaudeCodeAdapter();
     if (fresh) adapter.buildResumeCommand = () => null;
     const driver = new PtyCliDriver({
-      agent: agentConfig({ cwd, args: [wrapper, '--settings', 'gateway.json'], env: { CLAUDE_CONFIG_DIR: cwd } }),
+      agent: agentConfig({ cwd, args: [wrapper, '--settings', 'gateway.json'] }),
       adapter, backend: new PtyBackend(), onEvent: () => {}, onExit: () => {}, sessionId: SESSION_ID,
     });
     const launches = () => readFileSync(dump, 'utf8').trim().split('\n').map(line => JSON.parse(line));
@@ -338,6 +338,66 @@ describe('PtyCliDriver resume session id resolution', () => {
       expect(launches()).toHaveLength(3);
     } finally { await driver.stop(); }
     await waitForAssert(() => expect(existsSync(privateDirectory!)).toBe(false));
+  });
+
+  it('promotes agent.env into settings on start and repeated resume', async () => {
+    const cwd = makeTempDir('merged-settings-agent-env');
+    const dump = join(cwd, 'launches.jsonl');
+    const wrapper = join(cwd, 'wrapper.mjs');
+    const source = join(cwd, 'gateway.json');
+    writeFileSync(wrapper, `
+      import { appendFileSync, readFileSync } from 'node:fs';
+      const args = process.argv.slice(2);
+      const path = args[args.indexOf('--settings') + 1];
+      appendFileSync(${JSON.stringify(dump)}, JSON.stringify({ args, settings: JSON.parse(readFileSync(path, 'utf8')) }) + '\\n');
+      setInterval(() => {}, 1000);
+    `);
+    const adapter = createClaudeCodeAdapter();
+    const driver = new PtyCliDriver({
+      agent: agentConfig({
+        cwd,
+        args: [wrapper, '--settings', 'gateway.json'],
+        env: {
+          CLAUDE_CONFIG_DIR: cwd,
+          ANTHROPIC_BASE_URL: 'http://agent.invalid',
+          AGENT_TOKEN: 'secret-agent-token',
+        },
+      }),
+      adapter, backend: new PtyBackend(), onEvent: () => {}, onExit: () => {}, sessionId: SESSION_ID,
+    });
+    const launches = () => readFileSync(dump, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    try {
+      const userSettings = JSON.stringify({
+        env: { ANTHROPIC_BASE_URL: 'http://user.invalid', USER_EXTRA: 'user-val' },
+        permissions: { allow: ['Read'] },
+      });
+      writeFileSync(source, userSettings);
+      await driver.start();
+      await waitForAssert(() => expect(launches()).toHaveLength(1));
+      let actual = launches()[0];
+      expect(actual.settings.env).toEqual({
+        ANTHROPIC_BASE_URL: 'http://agent.invalid',
+        USER_EXTRA: 'user-val',
+        CLAUDE_CONFIG_DIR: cwd,
+        AGENT_TOKEN: 'secret-agent-token',
+      });
+      expect(actual.args.join(' ')).not.toContain('secret-agent-token');
+      expect(actual.args.join(' ')).not.toContain('http://agent.invalid');
+
+      await driver.resume();
+      await waitForAssert(() => expect(launches()).toHaveLength(2));
+      actual = launches()[1];
+      expect(actual.settings.env).toEqual({
+        ANTHROPIC_BASE_URL: 'http://agent.invalid',
+        USER_EXTRA: 'user-val',
+        CLAUDE_CONFIG_DIR: cwd,
+        AGENT_TOKEN: 'secret-agent-token',
+      });
+      expect(actual.args.join(' ')).not.toContain('secret-agent-token');
+      expect(actual.args.join(' ')).not.toContain('http://agent.invalid');
+    } finally {
+      await driver.stop();
+    }
   });
   let fixturePath: string;
 

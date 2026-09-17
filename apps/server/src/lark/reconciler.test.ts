@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ChannelMapping, TaskRecord } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
 import type { StoredLarkConfig } from './config.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import { performLarkCardReconcile } from './reconciler.js';
@@ -35,6 +36,31 @@ const createMapping = (id: string, externalId: string, sessionId: string, task: 
   };
 };
 
+const createMemoryChannelMappingRepo = (initialMappings: ChannelMapping[] = []) => {
+  const mappings = initialMappings.map(m => ({ ...m }));
+  return {
+    mappings,
+    list: vi.fn(async () => mappings.map(m => ({ ...m }))),
+    get: vi.fn(async (channel: string, externalId: string) => mappings.find(m => m.channel === channel && m.externalId === externalId)),
+    save: vi.fn(async (saved: ChannelMapping) => {
+      const idx = mappings.findIndex(m => m.id === saved.id);
+      if (idx >= 0) mappings[idx] = { ...saved };
+      else mappings.push({ ...saved });
+    }),
+    compareAndSetExtra: vi.fn(async (id: string, expectedExtra: string | null | undefined, extra: string) => {
+      const row = mappings.find(m => m.id === id);
+      if (!row) return false;
+      const current = row.extra ?? null;
+      const expected = expectedExtra ?? null;
+      if (current === expected) {
+        row.extra = extra;
+        return true;
+      }
+      return false;
+    })
+  };
+};
+
 describe('performLarkCardReconcile 异常边界与可靠性', () => {
   it('第一条已交付结果回调抛错，后续需要补偿的健康条目仍被处理', async () => {
     const startedAt = Date.now() - 5_000;
@@ -59,15 +85,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
       progress_frozen: false
     });
 
-    const mappings = [mapping1, mapping2];
-    const cardMappings = {
-      list: vi.fn(async () => mappings.map(m => ({ ...m }))),
-      get: vi.fn(),
-      save: vi.fn(async (saved: ChannelMapping) => {
-        const target = mappings.find(m => m.id === saved.id);
-        if (target) target.extra = saved.extra;
-      })
-    };
+    const cardMappings = createMemoryChannelMappingRepo([mapping1, mapping2]);
 
     const runtime = {
       getTasks: vi.fn(async (sessionId: string) => sessionId === 'ses-2' ? [runtimeTask2] : []),
@@ -131,7 +149,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
     );
 
     // 第二条 mapping 的持久化状态已更新为 delivered
-    const savedMapping2 = JSON.parse(mappings[1]!.extra);
+    const savedMapping2 = JSON.parse(cardMappings.mappings[1]!.extra);
     expect(savedMapping2).toMatchObject({
       final_delivery_state: 'delivered',
       final_message_id: 'om_final_2',
@@ -168,15 +186,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
       state: 'running'
     });
 
-    const mappings = [mapping1, mapping2];
-    const cardMappings = {
-      list: vi.fn(async () => mappings.map(m => ({ ...m }))),
-      get: vi.fn(),
-      save: vi.fn(async (saved: ChannelMapping) => {
-        const target = mappings.find(m => m.id === saved.id);
-        if (target) target.extra = saved.extra;
-      })
-    };
+    const cardMappings = createMemoryChannelMappingRepo([mapping1, mapping2]);
 
     const runtime = {
       getTasks: vi.fn(async (sessionId: string) => {
@@ -213,7 +223,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
 
     // 第二条正常补偿
     expect(service.send).toHaveBeenCalledTimes(1);
-    const savedMapping2 = JSON.parse(mappings[1]!.extra);
+    const savedMapping2 = JSON.parse(cardMappings.mappings[1]!.extra);
     expect(savedMapping2.final_delivery_state).toBe('delivered');
   });
 
@@ -235,18 +245,14 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
       runtime_task_id: runtimeTask2.id, state: 'running'
     });
 
-    const mappings = [mapping1, mapping2];
-    const cardMappings = {
-      list: vi.fn(async () => mappings.map(m => ({ ...m }))),
-      get: vi.fn(),
-      save: vi.fn(async (saved: ChannelMapping) => {
-        if (saved.id === 'map-1') {
-          throw new Error('SQLite disk I/O error on map-1');
-        }
-        const target = mappings.find(m => m.id === saved.id);
-        if (target) target.extra = saved.extra;
-      })
-    };
+    const cardMappings = createMemoryChannelMappingRepo([mapping1, mapping2]);
+    const origCas = cardMappings.compareAndSetExtra;
+    cardMappings.compareAndSetExtra = vi.fn(async (id: string, expectedExtra: string | null | undefined, extra: string) => {
+      if (id === 'map-1') {
+        throw new Error('SQLite disk I/O error on map-1');
+      }
+      return origCas(id, expectedExtra, extra);
+    });
 
     const runtime = {
       getTasks: vi.fn(async (sessionId: string) => sessionId === 'ses-1' ? [runtimeTask1] : [runtimeTask2]),
@@ -279,7 +285,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
     );
 
     // 第二条成功保存
-    const savedMapping2 = JSON.parse(mappings[1]!.extra);
+    const savedMapping2 = JSON.parse(cardMappings.mappings[1]!.extra);
     expect(savedMapping2.final_delivery_state).toBe('delivered');
     expect(savedMapping2.final_message_id).toBe('om_final');
   });
@@ -290,7 +296,8 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
         throw new Error('Database connection lost');
       }),
       get: vi.fn(),
-      save: vi.fn()
+      save: vi.fn(),
+      compareAndSetExtra: vi.fn()
     };
 
     const runtime = {
@@ -319,11 +326,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
       progress_frozen: true
     });
 
-    const cardMappings = {
-      list: vi.fn(async () => [mapping]),
-      get: vi.fn(),
-      save: vi.fn()
-    };
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
 
     const runtime = {
       getTasks: vi.fn(async () => []),
@@ -346,6 +349,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
     expect(service.update).not.toHaveBeenCalled();
     expect(service.send).not.toHaveBeenCalled();
     expect(cardMappings.save).not.toHaveBeenCalled();
+    expect(cardMappings.compareAndSetExtra).not.toHaveBeenCalled();
   });
 
   it('结果发送成功但 resultElements 失败时持久化 final_message_id，下一轮对账重试回调且不重复发送结果消息', async () => {
@@ -364,15 +368,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
       progress_frozen: false
     });
 
-    const mappings = [mapping];
-    const cardMappings = {
-      list: vi.fn(async () => mappings.map(m => ({ ...m }))),
-      get: vi.fn(),
-      save: vi.fn(async (saved: ChannelMapping) => {
-        const target = mappings.find(m => m.id === saved.id);
-        if (target) target.extra = saved.extra;
-      })
-    };
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
 
     const runtime = {
       getTasks: vi.fn(async () => [runtimeTask]),
@@ -414,7 +410,7 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
     expect(service.send).toHaveBeenCalledTimes(1);
 
     // 但 mapping 中已持久化 final_message_id 与 delivered 状态，保障不重复发送
-    const persistedAfterRound1 = JSON.parse(mappings[0]!.extra);
+    const persistedAfterRound1 = JSON.parse(cardMappings.mappings[0]!.extra);
     expect(persistedAfterRound1.final_delivery_state).toBe('delivered');
     expect(persistedAfterRound1.final_message_id).toBe('om_final_retry');
 
@@ -435,5 +431,494 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
     // 第二轮对账完全收敛
     expect(round2Unresolved).toBe(0);
     expect(callbackAttempts).toBeGreaterThanOrEqual(2);
+  });
+
+  it('连续两轮对账遇到 230031 错误只 PATCH 一次并持久冻结，不再重复重试', async () => {
+    let patchCalls = 0;
+    const mapping = createMapping('map-expired', 'msg-expired', 'ses-expired', {
+      state: 'completed',
+      final_delivery_state: 'delivered',
+      final_message_id: 'om_result_delivered',
+      progress_frozen: false
+    });
+
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
+
+    const runtime = {
+      getTasks: vi.fn(async () => []),
+      getEvents: vi.fn(async () => [])
+    };
+
+    const { LarkServiceError } = await import('./service.js');
+    const service = {
+      update: vi.fn(async () => {
+        patchCalls++;
+        throw new LarkServiceError('LARK_OPENAPI_ERROR', 'message update expired', 502, { upstreamCode: 230031 });
+      }),
+      send: vi.fn()
+    };
+
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    // 第一轮对账：PATCH 返回 230031，应识别为 permanent 不可更新，就地持久冻结
+    const round1Unresolved = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+
+    expect(round1Unresolved).toBe(0);
+    expect(patchCalls).toBe(1);
+    expect(cardMappings.compareAndSetExtra).toHaveBeenCalledTimes(1);
+    const persistedAfterRound1 = JSON.parse(cardMappings.mappings[0]!.extra);
+    expect(persistedAfterRound1.progress_frozen).toBe(true);
+
+    // 第二轮对账：已持久冻结，不得再次 PATCH
+    const round2Unresolved = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+
+    expect(round2Unresolved).toBe(0);
+    expect(patchCalls).toBe(1); // 断言只 PATCH 一次
+  });
+
+  it('运行态连续多轮：running 首次 230031 -> 落库 freeze -> 下轮 running 不 PATCH -> runtime completed 只交付一次独立 result、随后不重发', async () => {
+    let patchCalls = 0;
+    let sendCalls = 0;
+    const startedAt = Date.now() - 5_000;
+    let runtimeTask: TaskRecord = {
+      id: 'task-run-multi',
+      sessionId: 'ses-run-multi',
+      prompt: 'Prompt run-multi',
+      status: 'running',
+      createdAt: new Date(startedAt).toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const mapping = createMapping('map-run-multi', 'msg-run-multi', 'ses-run-multi', {
+      runtime_task_id: runtimeTask.id,
+      state: 'running',
+      progress_frozen: false
+    });
+
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
+
+    const runtime = {
+      getTasks: vi.fn(async () => [runtimeTask]),
+      getEvents: vi.fn(async () => [{ id: 1, type: 'text', data: { text: '完成结果' } }])
+    };
+
+    const { LarkServiceError } = await import('./service.js');
+    const service = {
+      update: vi.fn(async () => {
+        patchCalls++;
+        throw new LarkServiceError('LARK_OPENAPI_ERROR', 'message update expired', 502, { upstreamCode: 230031 });
+      }),
+      send: vi.fn(async () => {
+        sendCalls++;
+        return { messageId: 'om_final_result' };
+      })
+    };
+
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    // 轮次 1：runtimeTask 为 running，PATCH 过程卡返回 230031 -> 应当落库 freeze，且 unresolved=1 保持继续轮询
+    const round1 = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+    expect(round1).toBe(1);
+    expect(patchCalls).toBe(1);
+    expect(sendCalls).toBe(0);
+    expect(JSON.parse(cardMappings.mappings[0]!.extra).progress_frozen).toBe(true);
+
+    // 轮次 2：runtimeTask 仍为 running -> 不再 PATCH 过程卡，保持 unresolved=1 轮询
+    const round2 = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+    expect(round2).toBe(1);
+    expect(patchCalls).toBe(1); // 未再发起 PATCH！
+    expect(sendCalls).toBe(0);
+
+    // 轮次 3：runtimeTask 变为 completed -> 终态对账：过程卡因为 progress_frozen 不再 PATCH，直接交付独立结果
+    runtimeTask = { ...runtimeTask, status: 'completed', updatedAt: new Date().toISOString() };
+    const round3 = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+    expect(round3).toBe(0);
+    expect(patchCalls).toBe(1); // 过程卡仍未被 PATCH
+    expect(sendCalls).toBe(1); // 独立结果卡发送 1 次
+    const extraAfterComplete = JSON.parse(cardMappings.mappings[0]!.extra);
+    expect(extraAfterComplete.final_delivery_state).toBe('delivered');
+    expect(extraAfterComplete.final_message_id).toBe('om_final_result');
+    expect(extraAfterComplete.progress_frozen).toBe(true);
+
+    // 轮次 4：后续例行对账 -> 过程卡不 PATCH，结果卡不重发，彻底收敛
+    const round4 = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+    expect(round4).toBe(0);
+    expect(patchCalls).toBe(1);
+    expect(sendCalls).toBe(1);
+  });
+
+  it('初始 mapping 已有 progress_frozen 但 runtime 仍 running 的重启入口：跳过过程卡 PATCH 但保持 unresolved 轮询', async () => {
+    let patchCalls = 0;
+    const startedAt = Date.now() - 5_000;
+    const runtimeTask: TaskRecord = {
+      id: 'task-frozen-running',
+      sessionId: 'ses-frozen-running',
+      prompt: 'Prompt frozen-running',
+      status: 'running',
+      createdAt: new Date(startedAt).toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const mapping = createMapping('map-frozen-running', 'msg-frozen-running', 'ses-frozen-running', {
+      runtime_task_id: runtimeTask.id,
+      state: 'running',
+      progress_frozen: true // 初始已冻结
+    });
+
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
+
+    const runtime = {
+      getTasks: vi.fn(async () => [runtimeTask]),
+      getEvents: vi.fn(async () => [])
+    };
+
+    const service = {
+      update: vi.fn(async () => {
+        patchCalls++;
+        return { messageId: 'om_card' };
+      }),
+      send: vi.fn()
+    };
+
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    const unresolved = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+
+    expect(unresolved).toBe(1); // 保持轮询状态，不全局跳过任务
+    expect(patchCalls).toBe(0); // 过程卡绝不被 PATCH！
+    expect(service.send).not.toHaveBeenCalled();
+  });
+
+  it('非终态对账写回冻结前做 CAS 与轮次检查：外部并发已修改时放弃写入旧 mapping', async () => {
+    const startedAt = Date.now() - 5_000;
+    let runtimeTask: TaskRecord = {
+      id: 'task-cas',
+      sessionId: 'ses-cas',
+      prompt: 'Prompt cas',
+      status: 'running',
+      createdAt: new Date(startedAt).toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const mapping = createMapping('map-cas', 'msg-cas', 'ses-cas', {
+      runtime_task_id: runtimeTask.id,
+      state: 'running',
+      turn: 1,
+      card_message_id: 'om_card_turn1',
+      progress_frozen: false
+    });
+
+    // 模拟在 I/O 执行期间，新一轮 turn 已将 mapping 覆盖为 turn 2
+    const currentNewTurnMapping: ChannelMapping = {
+      ...mapping,
+      extra: JSON.stringify({
+        ...JSON.parse(mapping.extra),
+        turn: 2,
+        card_message_id: 'om_card_turn2',
+        progress_frozen: false
+      })
+    };
+
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
+
+    const runtime = {
+      getTasks: vi.fn(async () => [runtimeTask]),
+      getEvents: vi.fn(async () => [])
+    };
+
+    const { LarkServiceError } = await import('./service.js');
+    const service = {
+      update: vi.fn(async () => {
+        // 模拟在 PATCH 执行期间，外部并发将存储中的 mapping 更新为 turn 2
+        cardMappings.mappings[0] = { ...currentNewTurnMapping };
+        throw new LarkServiceError('LARK_OPENAPI_ERROR', 'message update expired', 502, { upstreamCode: 230031 });
+      }),
+      send: vi.fn(async () => ({ messageId: 'om_final_cas' }))
+    };
+
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    // 第一轮对账：PATCH 返回 230031，但写回前 CAS 发现已被修改为 turn 2
+    const round1Unresolved = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+
+    // 关键校验：因为存储中 extra 已经变更为 turn 2 / 新卡，旧的 230031 绝不能覆盖保存 mapping
+    expect(cardMappings.mappings[0]!.extra).toBe(currentNewTurnMapping.extra);
+    // 关键校验：即使 CAS 冲突放弃写回，仍保留 unresolved=1 保持对账轮询，绝不能提前停掉
+    expect(round1Unresolved).toBe(1);
+
+    // 完整生命周期闭环：下一轮 runtimeTask 变为 completed，基于当前最新 mapping 能够正常交付独立结果并收敛
+    runtimeTask = { ...runtimeTask, status: 'completed', updatedAt: new Date().toISOString() };
+    runtime.getTasks = vi.fn(async () => [runtimeTask]);
+    runtime.getEvents = vi.fn(async () => [{ id: 1, type: 'text', data: { text: 'CAS 任务完成输出' } }]);
+    service.update = vi.fn(async () => ({ messageId: 'om_card_turn2' }));
+
+    const round2Unresolved = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+
+    expect(round2Unresolved).toBe(0);
+    expect(service.send).toHaveBeenCalledTimes(1);
+    const finalExtra = JSON.parse(cardMappings.mappings[0]!.extra);
+    expect(finalExtra).toMatchObject({
+      turn: 2,
+      final_delivery_state: 'delivered',
+      final_message_id: 'om_final_cas',
+      state: 'completed'
+    });
+  });
+
+  it('非终态对账 PATCH 成功但写回时发现 CAS 变化：放弃写入但不漏掉 unresolved=1，后续终态正常交付', async () => {
+    const startedAt = Date.now() - 5_000;
+    let runtimeTask: TaskRecord = {
+      id: 'task-cas-success',
+      sessionId: 'ses-cas-success',
+      prompt: 'Prompt cas success',
+      status: 'running',
+      createdAt: new Date(startedAt).toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    const mapping = createMapping('map-cas-succ', 'msg-cas-succ', 'ses-cas-succ', {
+      runtime_task_id: runtimeTask.id,
+      state: 'running',
+      turn: 1,
+      card_message_id: 'om_card_turn1',
+      progress_frozen: false
+    });
+
+    const currentModifiedMapping: ChannelMapping = {
+      ...mapping,
+      extra: JSON.stringify({
+        ...JSON.parse(mapping.extra),
+        retry_material_prompt: '并发更新的材料'
+      })
+    };
+
+    const cardMappings = createMemoryChannelMappingRepo([mapping]);
+
+    const runtime = {
+      getTasks: vi.fn(async () => [runtimeTask]),
+      getEvents: vi.fn(async () => [])
+    };
+
+    const service = {
+      update: vi.fn(async () => {
+        // 模拟在 PATCH 期间外部并发更新了 extra
+        cardMappings.mappings[0] = { ...currentModifiedMapping };
+        return { messageId: 'om_card_turn1' };
+      }),
+      send: vi.fn(async () => ({ messageId: 'om_final_succ' }))
+    };
+
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+    const round1Unresolved = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+
+    // PATCH 虽然成功，但写回前 CAS 发现 extra 已被修改，故放弃保存旧 mapping
+    expect(service.update).toHaveBeenCalledTimes(1);
+    expect(cardMappings.mappings[0]!.extra).toBe(currentModifiedMapping.extra);
+    // 依然保留 unresolved=1 保持跟踪
+    expect(round1Unresolved).toBe(1);
+
+    // 下一轮 runtimeTask 变为 completed，交付独立结果并收敛
+    runtimeTask = { ...runtimeTask, status: 'completed', updatedAt: new Date().toISOString() };
+    runtime.getTasks = vi.fn(async () => [runtimeTask]);
+    runtime.getEvents = vi.fn(async () => [{ id: 1, type: 'text', data: { text: '成功完成' } }]);
+
+    const round2Unresolved = await performLarkCardReconcile({
+      runtime: runtime as any,
+      service: service as any,
+      cardMappings: cardMappings as any,
+      log: log as any,
+      config,
+      channel: 'lark-card:cli_test'
+    });
+
+    expect(round2Unresolved).toBe(0);
+    expect(service.send).toHaveBeenCalledTimes(1);
+    const finalExtra = JSON.parse(cardMappings.mappings[0]!.extra);
+    expect(finalExtra).toMatchObject({
+      retry_material_prompt: '并发更新的材料',
+      final_delivery_state: 'delivered',
+      final_message_id: 'om_final_succ',
+      state: 'completed'
+    });
+  });
+
+  it('真实 SQLite + 真实 performLarkCardReconcile 竞态回归：在快照读取后、条件更新前并发写入新 turn，原子 CAS 失败且不覆盖新 mapping', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const startedAt = Date.now() - 5_000;
+      let runtimeTask: TaskRecord = {
+        id: 'task-sqlite-race',
+        sessionId: 'ses-sqlite-race',
+        prompt: 'Prompt sqlite race',
+        status: 'running',
+        createdAt: new Date(startedAt).toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      const turn1Mapping = createMapping('map-sqlite-race', 'msg-sqlite-race', 'ses-sqlite-race', {
+        runtime_task_id: runtimeTask.id,
+        state: 'running',
+        turn: 1,
+        card_message_id: 'om_card_turn1',
+        progress_frozen: false
+      });
+
+      // 先在真实 SQLite 中 seed turn 1 初始数据
+      await repos.channelMappings.save(turn1Mapping);
+
+      const turn2Mapping: ChannelMapping = {
+        ...turn1Mapping,
+        extra: JSON.stringify({
+          ...JSON.parse(turn1Mapping.extra),
+          turn: 2,
+          card_message_id: 'om_card_turn2',
+          progress_frozen: false
+        })
+      };
+
+      // 包装 repo.compareAndSetExtra：在首次调用时先并发保存 turn2Mapping，再执行真正的 SQLite CAS
+      const origCompareAndSetExtra = repos.channelMappings.compareAndSetExtra.bind(repos.channelMappings);
+      let casCallCount = 0;
+      repos.channelMappings.compareAndSetExtra = vi.fn(async (id: string, expectedExtra: string | null | undefined, extra: string) => {
+        casCallCount++;
+        if (casCallCount === 1) {
+          // 模拟在旧快照 list 之后、CAS 之前，外部并发事务先保存了 turn 2
+          await repos.channelMappings.save(turn2Mapping);
+        }
+        return origCompareAndSetExtra(id, expectedExtra, extra);
+      });
+
+      const runtime = {
+        getTasks: vi.fn(async () => [runtimeTask]),
+        getEvents: vi.fn(async () => [{ id: 1, type: 'text', data: { text: '真实输出' } }])
+      };
+
+      const { LarkServiceError } = await import('./service.js');
+      const service = {
+        update: vi.fn(async () => {
+          throw new LarkServiceError('LARK_OPENAPI_ERROR', 'message update expired', 502, { upstreamCode: 230031 });
+        }),
+        send: vi.fn(async () => ({ messageId: 'om_final_sqlite' }))
+      };
+
+      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+
+      // 第一轮对账：快照读到 turn 1，PATCH 报 230031，尝试 CAS 冻结；
+      // 但在 CAS 执行前先并发写入了 turn 2，真实 SQLite CAS 必须返回 false
+      const round1Unresolved = await performLarkCardReconcile({
+        runtime: runtime as any,
+        service: service as any,
+        cardMappings: repos.channelMappings,
+        log: log as any,
+        config,
+        channel: 'lark-card:cli_test'
+      });
+
+      // 1. 第一轮保持跟踪，unresolved > 0
+      expect(round1Unresolved).toBeGreaterThan(0);
+
+      // 2. 真实 SQLite 中的数据仍然是 turn 2，绝不能被旧的 turn 1 / progress_frozen 覆盖
+      const persistedInDb = await repos.channelMappings.get('lark-card:cli_test', 'msg-sqlite-race');
+      expect(persistedInDb).toBeDefined();
+      const parsedDbExtra = JSON.parse(persistedInDb!.extra);
+      expect(parsedDbExtra.turn).toBe(2);
+      expect(parsedDbExtra.card_message_id).toBe('om_card_turn2');
+      expect(parsedDbExtra.progress_frozen).toBe(false);
+
+      // 3. 后续跟踪：runtimeTask 变为 completed，第二轮基于最新 turn 2 正常对账完成交付并收敛
+      runtimeTask = { ...runtimeTask, status: 'completed', updatedAt: new Date().toISOString() };
+      service.update = vi.fn(async () => ({ messageId: 'om_card_turn2' }));
+
+      const round2Unresolved = await performLarkCardReconcile({
+        runtime: runtime as any,
+        service: service as any,
+        cardMappings: repos.channelMappings,
+        log: log as any,
+        config,
+        channel: 'lark-card:cli_test'
+      });
+
+      expect(round2Unresolved).toBe(0);
+      expect(service.send).toHaveBeenCalledTimes(1);
+      const finalInDb = await repos.channelMappings.get('lark-card:cli_test', 'msg-sqlite-race');
+      const finalDbExtra = JSON.parse(finalInDb!.extra);
+      expect(finalDbExtra.turn).toBe(2);
+      expect(finalDbExtra.final_delivery_state).toBe('delivered');
+      expect(finalDbExtra.final_message_id).toBe('om_final_sqlite');
+      expect(finalDbExtra.progress_frozen).toBe(true);
+    } finally {
+      repos.close();
+    }
   });
 });

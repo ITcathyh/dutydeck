@@ -163,4 +163,142 @@ describe('Claude settings composition', () => {
     replacement.cleanup();
     expect(existsSync(dirname(newPath))).toBe(false);
   });
+
+  it.each(['ask', 'full-trust'] as const)('merges explicit agent.env into settings.env with highest priority in %s mode', permissionMode => {
+    const { cwd, helper, sessionId } = fixture();
+    const generated = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode });
+    const original = {
+      env: { ANTHROPIC_BASE_URL: 'http://user.invalid', USER_EXTRA: 'user-val', OVERRIDDEN: 'from-user' },
+      permissions: { allow: ['Read'] },
+      theme: 'dark',
+    };
+    const explicitEnv = {
+      ANTHROPIC_BASE_URL: 'http://agent.invalid',
+      OVERRIDDEN: 'from-agent',
+      AGENT_EXTRA: 'agent-val',
+    };
+    const argv = helper.args(['--settings', JSON.stringify(original)], generated, cwd, explicitEnv);
+    expect(argv.join(' ')).not.toContain('http://agent.invalid');
+    expect(argv.join(' ')).not.toContain('from-agent');
+    const settingsIndex = argv.indexOf('--settings');
+    expect(settingsIndex).toBeGreaterThanOrEqual(0);
+    const settingsPath = argv[settingsIndex + 1]!;
+    expect(existsSync(settingsPath)).toBe(true);
+    const composed = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    expect(composed.env).toEqual({
+      ANTHROPIC_BASE_URL: 'http://agent.invalid',
+      USER_EXTRA: 'user-val',
+      OVERRIDDEN: 'from-agent',
+      AGENT_EXTRA: 'agent-val',
+    });
+    expect(composed.permissions.allow).toEqual(['Read']);
+    if (permissionMode === 'full-trust') {
+      expect(composed.permissions.defaultMode).toBe('bypassPermissions');
+      expect(composed.skipDangerousModePermissionPrompt).toBe(true);
+    }
+    expect(composed.theme).toBe('dark');
+  });
+
+  it('creates 0700 directory and 0600 settings file for env-only when user has no settings in ask mode', () => {
+    const { cwd, helper, sessionId } = fixture();
+    const ask = createCliAdapter('claude-code').buildArgs({ sessionId, permissionMode: 'ask' });
+    const explicitEnv = {
+      ANTHROPIC_AUTH_TOKEN: 'secret-agent-token',
+      ANTHROPIC_BASE_URL: 'http://agent.invalid',
+    };
+    const argv = helper.args([], ask, cwd, explicitEnv);
+    expect(argv.join(' ')).not.toContain('secret-agent-token');
+    const settingsIndex = argv.indexOf('--settings');
+    expect(settingsIndex).toBeGreaterThanOrEqual(0);
+    const settingsPath = argv[settingsIndex + 1]!;
+    expect(statSync(dirname(settingsPath)).mode & 0o777).toBe(0o700);
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+    const composed = JSON.parse(readFileSync(settingsPath, 'utf8'));
+    expect(composed).toEqual({
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'secret-agent-token',
+        ANTHROPIC_BASE_URL: 'http://agent.invalid',
+      },
+    });
+    expect(composed.env.PATH).toBeUndefined();
+    expect(composed.env.HOME).toBeUndefined();
+  });
+
+  it.each([
+    '{"env":"string-type"}',
+    '{"env":12345}',
+    '{"env":["array-type"]}',
+    '{"env":{"SECRET":["nested-array"]}}',
+    '{"env":{"SECRET":{"nested":"object"}}}',
+    '{"env":{"SECRET":123}}',
+  ])('rejects bad settings.env type without echoing contents: %s', value => {
+    const { cwd, helper, generated } = fixture();
+    expect(() => helper.args(['--settings', value], generated, cwd, { SAFE: 'val' })).toThrow('Invalid Claude --settings');
+    try {
+      helper.args(['--settings', value], generated, cwd, { SAFE: 'val' });
+    } catch (error) {
+      expect(String(error)).not.toContain('SECRET');
+      expect(String(error)).not.toContain('nested');
+    }
+  });
+
+  it('does not touch non-Claude adapters even when explicit agent.env is provided', () => {
+    const { cwd, sessionId } = fixture();
+    const nonClaude = new ClaudeSettings('codex', sessionId);
+    const user = ['--custom-flag'];
+    const generated = ['--codex-arg'];
+    const explicitEnv = { ANTHROPIC_AUTH_TOKEN: 'should-not-leak' };
+    const result = nonClaude.args(user, generated, cwd, explicitEnv);
+    expect(result).toEqual([...user, ...generated]);
+  });
+
+  it.each(['ask', 'full-trust'] as const)('driver promotes explicit agent.env into settings file during start in %s mode', async permissionMode => {
+    const { cwd, sessionId } = fixture();
+    let spawnedArgs: string[] = [];
+    const backend: SessionBackend = {
+      kind: 'pty', spawn(_command, args) { spawnedArgs = args; }, write() {}, resize() {},
+      kill() {}, onData() {}, onExit() {},
+    };
+    const userSettings = {
+      theme: 'dark',
+      env: { BASE_URL: 'http://user.invalid', USER_KEY: 'user-token' },
+      permissions: { allow: ['Read'] },
+    };
+    const driver = new PtyCliDriver({
+      agent: {
+        id: 'claude-code', name: 'Claude', command: 'claude',
+        args: ['--settings', JSON.stringify(userSettings)],
+        protocol: 'pty-cli', cwd, permissionMode, timeout: 60,
+        env: {
+          BASE_URL: 'http://agent.invalid',
+          AGENT_KEY: 'secret-agent-token',
+        },
+        capabilities: { pause: false, resume: true }, builtin: false,
+      },
+      adapter: createCliAdapter('claude-code'),
+      backend, sessionId, onEvent: () => {}, onExit: () => {},
+    });
+    try {
+      await driver.start();
+      expect(spawnedArgs.join(' ')).not.toContain('secret-agent-token');
+      expect(spawnedArgs.join(' ')).not.toContain('http://agent.invalid');
+      const settingsIndex = spawnedArgs.indexOf('--settings');
+      expect(settingsIndex).toBeGreaterThanOrEqual(0);
+      const settingsPath = spawnedArgs[settingsIndex + 1]!;
+      expect(existsSync(settingsPath)).toBe(true);
+      expect(statSync(dirname(settingsPath)).mode & 0o777).toBe(0o700);
+      expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+      const composed = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      expect(composed.theme).toBe('dark');
+      expect(composed.permissions.allow).toEqual(['Read']);
+      expect(composed.env).toEqual({
+        BASE_URL: 'http://agent.invalid',
+        USER_KEY: 'user-token',
+        AGENT_KEY: 'secret-agent-token',
+      });
+      expect(composed.env.PATH).toBeUndefined();
+    } finally {
+      await driver.stop();
+    }
+  });
 });

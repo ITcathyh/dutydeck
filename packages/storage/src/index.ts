@@ -328,7 +328,10 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     channelMappings: {
       async get(channel, externalId) { return db.select().from(channelMappings).where(and(eq(channelMappings.channel, channel), eq(channelMappings.externalId, externalId))).get(); },
       async list(channel) { return db.select().from(channelMappings).where(eq(channelMappings.channel, channel)).all(); },
-      async save(mapping) { db.insert(channelMappings).values(mapping).onConflictDoUpdate({ target: channelMappings.id, set: mapping }).run(); }
+      async save(mapping) { db.insert(channelMappings).values(mapping).onConflictDoUpdate({ target: channelMappings.id, set: mapping }).run(); },
+      async compareAndSetExtra(id, expectedExtra, extra) {
+        return sqlite.prepare('UPDATE channel_mappings SET extra = ? WHERE id = ? AND extra IS ?').run(extra, id, expectedExtra ?? null).changes === 1;
+      }
     },
     artifacts: {
       async ensureLocalProject(cwd) { const time = new Date().toISOString(); db.insert(machines).values({ id: 'local', name: 'Local machine', metadata: '{}', createdAt: time, updatedAt: time }).onConflictDoNothing().run(); db.insert(projects).values({ id: `local:${cwd}`, machineId: 'local', name: cwd.split('/').filter(Boolean).at(-1) ?? cwd, cwd, createdAt: time, updatedAt: time }).onConflictDoUpdate({ target: projects.id, set: { cwd, updatedAt: time } }).run(); },

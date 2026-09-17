@@ -93,4 +93,100 @@ describe('parseLarkMessageContent', () => {
     const withoutMessageId = await parseLarkMessageContent('merge_forward', '"Merged and Forwarded Message"', { fetchMessageItems: async () => [] });
     expect(withoutMessageId.text).toContain('合并转发');
   });
+
+  describe('富文本消息顶层 files[] 附件提取与去重', () => {
+    it('支持平铺 content 与顶层 files[] 附件', async () => {
+      const content = JSON.stringify({
+        title: '',
+        content: [[{ tag: 'text', text: '请查看平铺附件说明' }]],
+        files: [{ file_key: 'file_flat_1', file_name: 'manual.pdf' }]
+      });
+      const result = await parseLarkMessageContent('post', content);
+      expect(result.text).toBe('请查看平铺附件说明\n\n[文件「manual.pdf」]');
+      expect(result.resources).toEqual([
+        { key: 'file_flat_1', type: 'file', label: '文件「manual.pdf」', fileName: 'manual.pdf' }
+      ]);
+    });
+
+    it('支持本地化 zh_cn/en_us 与 content_v2 及顶层 files[]', async () => {
+      const contentZh = JSON.stringify({
+        zh_cn: {
+          title: '项目需求',
+          content: [[{ tag: 'text', text: '详见附件文档' }]]
+        },
+        files: [{ file_key: 'file_zh_1', file_name: 'brief.docx' }]
+      });
+      const resultZh = await parseLarkMessageContent('post', contentZh);
+      expect(resultZh.text).toBe('项目需求\n\n详见附件文档\n\n[文件「brief.docx」]');
+      expect(resultZh.resources).toEqual([
+        { key: 'file_zh_1', type: 'file', label: '文件「brief.docx」', fileName: 'brief.docx' }
+      ]);
+
+      const contentEn = JSON.stringify({
+        en_us: {
+          title: 'Specs',
+          content_v2: [[{ tag: 'text', text: 'See attached spec' }]]
+        },
+        files: [{ file_key: 'file_en_1', file_name: 'spec.pdf' }]
+      });
+      const resultEn = await parseLarkMessageContent('rich_text', contentEn);
+      expect(resultEn.text).toBe('Specs\n\nSee attached spec\n\n[文件「spec.pdf」]');
+      expect(resultEn.resources).toEqual([
+        { key: 'file_en_1', type: 'file', label: '文件「spec.pdf」', fileName: 'spec.pdf' }
+      ]);
+    });
+
+    it('正文 inline 附件与顶层 files[] 存在同 key 时去重，仅留一份', async () => {
+      const content = JSON.stringify({
+        content: [[
+          { tag: 'text', text: '正文提及：' },
+          { tag: 'file', file_key: 'file_dup_1', file_name: 'dup.pdf' }
+        ]],
+        files: [
+          { file_key: 'file_dup_1', file_name: 'dup.pdf' },
+          { file_key: 'file_unique_2', file_name: 'unique.xlsx' }
+        ]
+      });
+      const result = await parseLarkMessageContent('post', content);
+      expect(result.text).toBe('正文提及：[文件「dup.pdf」]\n\n[文件「unique.xlsx」]');
+      expect(result.resources).toEqual([
+        { key: 'file_dup_1', type: 'file', label: '文件「dup.pdf」', fileName: 'dup.pdf' },
+        { key: 'file_unique_2', type: 'file', label: '文件「unique.xlsx」', fileName: 'unique.xlsx' }
+      ]);
+    });
+
+    it('附件 only 消息正文为空时，保留附件 marker 保证文本非空', async () => {
+      const content = JSON.stringify({
+        title: '',
+        content: [],
+        files: [{ file_key: 'file_only_1', file_name: 'only.xlsx' }]
+      });
+      const result = await parseLarkMessageContent('post', content);
+      expect(result.text).toBe('[文件「only.xlsx」]');
+      expect(result.resources).toEqual([
+        { key: 'file_only_1', type: 'file', label: '文件「only.xlsx」', fileName: 'only.xlsx' }
+      ]);
+    });
+
+    it('安全过滤顶层 files[] 中的畸形 descriptor（null/缺key/非对象等）', async () => {
+      const content = JSON.stringify({
+        content: [[{ tag: 'text', text: '测试畸形描述' }]],
+        files: [
+          null,
+          undefined,
+          'not_an_object',
+          {},
+          { file_name: 'missing_key.pdf' },
+          { file_key: '' },
+          { file_key: '   ' },
+          { file_key: 'file_valid_key', file_name: 'valid.pdf' }
+        ]
+      });
+      const result = await parseLarkMessageContent('post', content);
+      expect(result.text).toBe('测试畸形描述\n\n[文件「valid.pdf」]');
+      expect(result.resources).toEqual([
+        { key: 'file_valid_key', type: 'file', label: '文件「valid.pdf」', fileName: 'valid.pdf' }
+      ]);
+    });
+  });
 });
