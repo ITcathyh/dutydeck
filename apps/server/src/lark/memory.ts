@@ -101,6 +101,14 @@ export class LarkMemoryError extends RuntimeError {
 
 const maxWriteAttempts = 5;
 
+/** 凭据模式：显式的 key/token 赋值，或 40 位以上连续的 base64/hex。 */
+const credentialAssignmentPattern = /(api[_-]?key|token|secret|password|passwd|bearer)\s*[:=]/i;
+const longOpaqueSecretPattern = /[A-Za-z0-9+/=]{40,}/;
+
+export function looksLikeLarkMemoryCredential(text: string): boolean {
+  return credentialAssignmentPattern.test(text) || longOpaqueSecretPattern.test(text);
+}
+
 export function normalizeLarkMemoryContent(value: unknown): string {
   const text = (typeof value === 'string' ? value : '')
     .replace(/\r\n?/g, '\n')
@@ -282,6 +290,9 @@ export class LarkMemoryStore {
 
   private addTo(entries: LarkMemoryEntry[], input: AddLarkMemoryInput): { entries: LarkMemoryEntry[]; created: LarkMemoryEntry } {
     const content = normalizeLarkMemoryContent(input.content);
+    if (looksLikeLarkMemoryCredential(content)) {
+      throw new LarkMemoryError('MEMORY_CREDENTIAL_REJECTED', '记忆内容疑似包含凭据（密钥、令牌或密码），不保存。', 400);
+    }
     const topic = normalizeLarkMemoryTopic(input.topic);
     const supersedes = input.supersedes?.length ? [...new Set(input.supersedes)] : undefined;
 
@@ -292,6 +303,12 @@ export class LarkMemoryStore {
           throw new LarkMemoryError('MEMORY_SUPERSEDE_TARGET_INVALID', `被替换的记忆条目 ${sId} 不存在或已失效。`, 400);
         }
       }
+    }
+
+    const remainingLive = entries.filter(e => !e.deletedAt && !supersedes?.includes(e.id));
+    const activeTopics = new Set(remainingLive.map(e => e.topic));
+    if (!activeTopics.has(topic) && activeTopics.size >= larkMemoryLimits.topics) {
+      throw new LarkMemoryError('MEMORY_TOPIC_LIMIT_REACHED', `本聊天的记忆主题已达 ${larkMemoryLimits.topics} 个上限，请复用现有主题或先整理。`, 409);
     }
 
     const nowIso = this.now().toISOString();
@@ -538,7 +555,7 @@ const sourceLabels: Record<LarkMemorySource, string> = {
 
 /**
  * /memory 的 markdown 正文：按主题分页。
- * 以「主题」为分页单位，每页最多 6 个主题且累计条目 ≤ 30。
+ * 将主题 × 条目拉平成有序序列，按每页 ≤ 30 条且 ≤ 6 个主题切页；跨页主题在续页标题标注（续）。
  */
 export function renderLarkMemoryList(
   byTopic: Map<string, LarkMemoryEntry[]>,
@@ -555,44 +572,78 @@ export function renderLarkMemoryList(
     };
   }
 
-  const topics = [...byTopic.keys()];
-  const pageSize = options?.pageSize ?? 6;
-  const totalPages = Math.max(1, Math.ceil(topics.length / pageSize));
+  const maxTopicsPerPage = options?.pageSize ?? 6;
+  const maxEntriesPerPage = 30;
+
+  interface PageBlock {
+    topic: string;
+    totalTopicEntries: number;
+    entries: LarkMemoryEntry[];
+    isContinued: boolean;
+  }
+
+  interface PageData {
+    blocks: PageBlock[];
+    entryCount: number;
+  }
+
+  const pages: PageData[] = [];
+  let currentPage: PageData = { blocks: [], entryCount: 0 };
+
+  for (const [topic, rawEntries] of byTopic.entries()) {
+    if (!rawEntries.length) continue;
+    const sortedEntries = [...rawEntries].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    const totalTopicEntries = sortedEntries.length;
+    let entryIndex = 0;
+
+    while (entryIndex < totalTopicEntries) {
+      const topicAlreadyOnPage = currentPage.blocks.some(b => b.topic === topic);
+      if (
+        currentPage.entryCount >= maxEntriesPerPage ||
+        (!topicAlreadyOnPage && currentPage.blocks.length >= maxTopicsPerPage)
+      ) {
+        pages.push(currentPage);
+        currentPage = { blocks: [], entryCount: 0 };
+      }
+
+      const spaceLeft = maxEntriesPerPage - currentPage.entryCount;
+      const entriesLeft = totalTopicEntries - entryIndex;
+      const take = Math.min(spaceLeft, entriesLeft);
+      const slice = sortedEntries.slice(entryIndex, entryIndex + take);
+      const isContinued = entryIndex > 0;
+
+      currentPage.blocks.push({
+        topic,
+        totalTopicEntries,
+        entries: slice,
+        isContinued
+      });
+      currentPage.entryCount += take;
+      entryIndex += take;
+    }
+  }
+
+  if (currentPage.blocks.length > 0) {
+    pages.push(currentPage);
+  }
+
+  const totalPages = Math.max(1, pages.length);
   const page = Math.max(1, Math.min(options?.page ?? 1, totalPages));
-  const pageTopics = topics.slice((page - 1) * pageSize, page * pageSize);
+  const targetPage = pages[page - 1] ?? { blocks: [], entryCount: 0 };
 
   const lastConsolidation = state.lastConsolidationAt
     ? state.lastConsolidationAt.slice(0, 16).replace('T', ' ')
     : '尚未整理';
 
-  const maxEntriesPerPage = 30;
-  let accumulated = 0;
   const topicBlocks: string[] = [];
-
-  for (const topic of pageTopics) {
-    const allTopicEntries = byTopic.get(topic) ?? [];
-    const k = allTopicEntries.length;
-    const budget = Math.max(0, maxEntriesPerPage - accumulated);
-    let shownEntries: LarkMemoryEntry[];
-    let omitted = 0;
-    if (k <= budget) {
-      shownEntries = allTopicEntries;
-      accumulated += k;
-    } else {
-      shownEntries = allTopicEntries.slice(k - budget);
-      omitted = k - budget;
-      accumulated += budget;
-    }
-
-    const lines = shownEntries.map(e => {
+  for (const block of targetPage.blocks) {
+    const lines = block.entries.map(e => {
       const src = sourceLabels[e.source] ?? e.source;
       const date = e.createdAt.slice(0, 10);
       return `- \`${e.id}\` · ${src} · ${date} · ${clip(e.content, maxListedContentChars)}`;
     });
-    if (omitted > 0) {
-      lines.push(`  （该主题另有 ${omitted} 条）`);
-    }
-    topicBlocks.push(`**${topic}（${k} 条）**\n${lines.join('\n')}`);
+    const headerTitle = block.isContinued ? `${block.topic}（续）` : `${block.topic}（${block.totalTopicEntries} 条）`;
+    topicBlocks.push(`**${headerTitle}**\n${lines.join('\n')}`);
   }
 
   const text = [

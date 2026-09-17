@@ -17,6 +17,7 @@ import type { StoredLarkConfig } from './config.js';
 import {
   LarkMemoryError,
   larkMemoryLimits,
+  looksLikeLarkMemoryCredential,
   normalizeLarkMemoryContent,
   normalizeLarkMemoryTopic,
   type LarkMemoryBatchStep,
@@ -52,12 +53,6 @@ export const larkMemoryPipelineRules = {
   resultReads: 3,
   resultRetryMs: 500
 } as const;
-
-/** 凭据模式：显式的 key/token 赋值，或 40 位以上连续的 base64/hex。 */
-const credentialAssignmentPattern = /(api[_-]?key|token|secret|password|passwd|bearer)\s*[:=]/i;
-const longOpaqueSecretPattern = /[A-Za-z0-9+/=]{40,}/;
-
-const hasCredential = (text: string) => credentialAssignmentPattern.test(text) || longOpaqueSecretPattern.test(text);
 
 /** 归一化后用于查重：忽略空白与大小写差异。 */
 const dedupeKey = (content: string) => content.replace(/\s+/g, '').toLowerCase();
@@ -151,7 +146,7 @@ export function gateExtractionFacts(
     catch (error) { reject(error instanceof Error ? error.message : '主题不合法'); continue; }
 
     if (typeof raw.evidence !== 'string' || !evidence.has(raw.evidence)) { reject('evidence 不是本次输入里的轮次 taskId'); continue; }
-    if (hasCredential(content)) { reject('内容疑似包含凭据'); continue; }
+    if (looksLikeLarkMemoryCredential(content)) { reject('内容疑似包含凭据'); continue; }
     if (seen.has(dedupeKey(content))) { reject('与已有记忆重复'); continue; }
     if (!topics.has(topic) && topics.size >= limits.topics) { reject(`主题数量已达 ${limits.topics} 上限`); continue; }
     if (live >= limits.liveEntries) { reject(`本聊天记忆已达 ${limits.liveEntries} 条上限`); continue; }
@@ -202,7 +197,7 @@ export function gateConsolidationActions(
     let content: string;
     try { content = normalizeLarkMemoryContent(value); }
     catch (error) { violations.push(`${label} 的内容不合法：${error instanceof Error ? error.message : '未知原因'}`); return undefined; }
-    if (hasCredential(content)) { violations.push(`${label} 的内容疑似包含凭据`); return undefined; }
+    if (looksLikeLarkMemoryCredential(content)) { violations.push(`${label} 的内容疑似包含凭据`); return undefined; }
     return content;
   };
 

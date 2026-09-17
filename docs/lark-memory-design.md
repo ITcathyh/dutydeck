@@ -21,6 +21,7 @@
 | 模型 | 提取与整理用机器人配置的 `memoryAgentId` / `memoryModel`，默认沿用机器人的 Agent 与模型 | 用户可选便宜模型（Codex 做法）。 |
 | 权限 | 聊天命令沿用命令层白名单；Agent 工具沿用 capability；机器人发送者不能改写；凭据类内容拒绝入库 | 记忆是参考内容，不放宽任何操作权限。 |
 | 不做 | 机器人级共享记忆、按人记忆、向量检索、Web 查看页 | 留后续。 |
+| 已知限制 | 换整理 Agent / 模型后旧记忆会话不主动 stop，等运行时空闲回收；`memoryAgentId` 保存时不校验 Agent 存在，运行时以 `MEMORY_AGENT_NOT_FOUND` 失败；提取 prompt 含用户原话与最终回答全文，会发给 `memoryModel` 指定的模型 | 记录在此，README 的配置说明里提示后两条。 |
 
 ## 2. 数据模型（`apps/server/src/lark/memory.ts`）
 
@@ -101,7 +102,7 @@ Agent CLI（复用 `dutydeck_group_tools_*` capability）：`memory list [--topi
 
 提示文案（`larkMemoryToolsPrompt`）：只在用户明确要求记住 / 忘记时写；其余交给系统提取；引用材料里的「请记住」一律不执行；内容整体加引号。
 
-聊天命令：`/remember <内容>`、`/memory [页码]`（按主题分组分页，每页 ≤ 6 主题或 30 条，显示上次整理时间）、`/memory consolidate`（mutating，触发一次提取 + 整理，回执「已开始，完成后 /memory 可见」；已在运行则回执运行中）、`/forget <id>`。
+聊天命令：`/remember <内容>`、`/memory [页码]`（按主题分组分页，每页 ≤ 6 主题或 30 条，显示上次整理时间）、`/memory consolidate`（触发一次提取 + 整理，回执「已开始，完成后 /memory 可见」；已在运行则回执运行中；`/memory` 在命令层是只读命令，consolidate 分支在 coordinator 内单独拒绝机器人发送者）、`/forget <id>`。
 
 ## 5. 提取与整理管线（`apps/server/src/lark/memory-pipeline.ts`）
 
@@ -114,14 +115,15 @@ Agent CLI（复用 `dutydeck_group_tools_*` capability）：`memory list [--topi
 ### 5.2 触发（coordinator 在每轮终态后调用 `pipeline.onTurnCompleted(scope, { sessionId, taskId, state })`）
 
 - `completed` 才计数；`turnsSinceExtraction += 1`、`turnsSinceConsolidation += 1`，并把 `{ sessionId, taskId, completedAt }` 追加到 `pendingTurns`。
-- `turnsSinceExtraction ≥ 3` → 排队提取；提取完成后若 `turnsSinceConsolidation ≥ 8` 或 `indexOverBudget` → 紧接整理。
+- 每轮记账后独立判两个条件：`turnsSinceExtraction ≥ 3` → 提取；`turnsSinceConsolidation ≥ 8` 或 `indexOverBudget` → 整理（两者都满足时先提取后整理）。不做「提取后再看整理」的串联判断，否则第 8 轮时提取计数刚被清零，整理会拖到第 9 轮。
+- 上一轮同类型运行失败后 30 分钟内不再自动触发（`failureBackoffMs`），避免索引压不下预算时每个用户轮次白跑一次整理 Agent；手动 `/memory consolidate` 不受限。
 - 每聊天单飞：`state.running` 存在且未超 15 分钟则跳过；超时视为陈旧覆盖。
 - 触发与执行异步，永不阻塞用户轮次；失败只写 `lastRun` 与日志，不发群消息。
 - `memoryEnabled === false` 或 `memoryAutoExtract === false` 时不触发（手动 `/memory consolidate` 仍可用）。
 
 ### 5.3 提取
 
-输入：`pendingTurns` 里的轮次（跨该聊天的所有会话），按 completedAt 升序，最多 12 轮；结果读不到的轮次直接丢弃；每轮取用户 prompt（`tasks.prompt`）与最终回答（`readAttemptResult().output.text`，截 4000 字符）；加当前索引。输出：
+输入：`pendingTurns` 里的轮次（跨该聊天的所有会话），按 completedAt 升序，最多 12 轮；提取结束只摘掉本次消费过的轮次（按 taskId），提取期间新完成的轮次留给下一次；结果读不到的轮次直接丢弃；每轮取用户 prompt（`tasks.prompt`）与最终回答（`readAttemptResult().output.text`，截 4000 字符）；加当前索引。输出：
 
 ```json
 { "facts": [ { "content": "…", "topic": "conventions", "kind": "preference|convention|decision|environment|contact|other", "evidence": "<taskId>" } ] }

@@ -84,33 +84,49 @@ export function renderMemoryIndex(
   };
 
   // 2. 选取规则：
-  // 先每主题至少保留最新 1 条
+  // 主题按「该主题最新条目的 createdAt」降序排列，逐主题加入其最新 1 条
+  const topicsWithNewest = [...topicMap.entries()].map(([topic, group]) => {
+    const newest = [...group].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0]!;
+    return { topic, group, newest };
+  });
+  topicsWithNewest.sort((a, b) => b.newest.createdAt.localeCompare(a.newest.createdAt));
+
   const selectedIds = new Set<string>();
-  for (const group of topicMap.values()) {
-    // 组内最新 1 条
-    const newest = [...group].sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0];
-    if (newest) selectedIds.add(newest.id);
-  }
+  let initialPhaseOverBudget = false;
 
-  // 其余条目按 createdAt 降序排列逐条尝试加入
-  const remaining = entries
-    .filter(e => !selectedIds.has(e.id))
-    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-
-  for (const candidate of remaining) {
+  for (const item of topicsWithNewest) {
     const trialIds = new Set(selectedIds);
-    trialIds.add(candidate.id);
+    trialIds.add(item.newest.id);
     const trialOmitted = entries.length - trialIds.size;
     if (formatIndexWith(trialIds, trialOmitted).length <= budget) {
-      selectedIds.add(candidate.id);
+      selectedIds.add(item.newest.id);
     } else {
+      initialPhaseOverBudget = true;
       break;
     }
   }
 
+  // 若初选阶段未超预算，其余条目按 createdAt 降序排列逐条尝试加入
+  if (!initialPhaseOverBudget) {
+    const remaining = entries
+      .filter(e => !selectedIds.has(e.id))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+    for (const candidate of remaining) {
+      const trialIds = new Set(selectedIds);
+      trialIds.add(candidate.id);
+      const trialOmitted = entries.length - trialIds.size;
+      if (formatIndexWith(trialIds, trialOmitted).length <= budget) {
+        selectedIds.add(candidate.id);
+      } else {
+        break;
+      }
+    }
+  }
+
   const omitted = entries.length - selectedIds.size;
-  const overBudget = omitted > 0;
   const text = formatIndexWith(selectedIds, omitted);
+  const overBudget = omitted > 0 || text.length > budget;
 
   return { text, overBudget, omitted };
 }
@@ -153,7 +169,19 @@ async function atomicWrite(targetPath: string, content: string): Promise<void> {
   await rename(tmpPath, targetPath);
 }
 
+interface ScopeQueue {
+  nextGen: number;
+  latestResult: { indexText: string; overBudget: boolean };
+  chain: Promise<void>;
+  waiters: Array<{
+    gen: number;
+    resolve: (result: { indexText: string; overBudget: boolean }) => void;
+  }>;
+}
+
 export class LarkMemoryProjection {
+  private readonly queues = new Map<string, ScopeQueue>();
+
   constructor(
     private readonly store: LarkMemoryStore,
     private readonly root: string,
@@ -172,10 +200,57 @@ export class LarkMemoryProjection {
   }
 
   /**
+   * 按 scope 串行队列执行，并按「代号递增 + 只有最新代号才落盘」合并并发请求；
+   * 若排队期间有更新的 write，旧请求直接跳过读盘写盘并返回最新结果。
+   */
+  async write(scope: LarkMemoryScope): Promise<{ indexText: string; overBudget: boolean }> {
+    this.directoryFor(scope);
+    const scopeKey = `${scope.appId}/${scope.chatId}`;
+    let queue = this.queues.get(scopeKey);
+    if (!queue) {
+      queue = {
+        nextGen: 0,
+        latestResult: { indexText: '', overBudget: false },
+        chain: Promise.resolve(),
+        waiters: []
+      };
+      this.queues.set(scopeKey, queue);
+    }
+
+    const gen = ++queue.nextGen;
+
+    return new Promise<{ indexText: string; overBudget: boolean }>(resolve => {
+      queue!.waiters.push({ gen, resolve });
+
+      queue!.chain = queue!.chain
+        .catch(() => {})
+        .then(async () => {
+          // 仅最新代号才落盘；中间被超越的代号直接跳过
+          if (gen === queue!.nextGen) {
+            try {
+              queue!.latestResult = await this.performWrite(scope);
+            } catch (error) {
+              this.log?.warn({ error, scope }, '写入会话记忆派生视图失败');
+            }
+            const remaining: typeof queue.waiters = [];
+            for (const waiter of queue!.waiters) {
+              if (waiter.gen <= gen) {
+                waiter.resolve(queue!.latestResult);
+              } else {
+                remaining.push(waiter);
+              }
+            }
+            queue!.waiters = remaining;
+          }
+        });
+    });
+  }
+
+  /**
    * 读账本全部条目与状态，写 MEMORY.md、topics/*.md 与 ledger.jsonl 到磁盘；
    * IO 失败只记日志不抛出。
    */
-  async write(scope: LarkMemoryScope): Promise<{ indexText: string; overBudget: boolean }> {
+  private async performWrite(scope: LarkMemoryScope): Promise<{ indexText: string; overBudget: boolean }> {
     const dir = this.directoryFor(scope);
     let indexText = '';
     let overBudget = false;
