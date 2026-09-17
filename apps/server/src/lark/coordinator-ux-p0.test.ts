@@ -339,7 +339,8 @@ describe('S2 /help 只读翻页鉴权', () => {
 
     expect(await h.coordinator.handleAction(nextPage, 'ou_alice', context)).toMatchObject({ type: 'success' });
     expect(h.service.update).toHaveBeenCalledTimes(before + 1);
-    expect(String(h.service.update.mock.calls.at(-1)![0].markdown)).toContain('第 2/2 页');
+    // 只断言翻到了第 2 页；总页数随注册表里可用命令数变化（当前 13 条、每页 6 条）。
+    expect(String(h.service.update.mock.calls.at(-1)![0].markdown)).toMatch(/第 2\/\d+ 页/);
 
     await h.saveConfig({ listening: false });
     expect(await h.coordinator.handleAction(nextPage, 'ou_alice', context)).toMatchObject({ type: 'warning' });

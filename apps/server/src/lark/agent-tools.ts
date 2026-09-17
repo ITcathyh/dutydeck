@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
 import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dutydeck/shared';
 import { parseLarkMessageContent } from './message-content.js';
+import { larkMemoryToolsPrompt } from './memory.js';
 import { readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import {
   createLarkCardService,
@@ -363,6 +364,18 @@ export class LarkAgentToolsService {
     return { sessionId: context.sessionId };
   }
 
+  /**
+   * 会话记忆工具的上下文：只要求 capability 仍指向一条存活的飞书会话、机器人仍存在。
+   * 不经过群协作开关与 group_tools 策略——记忆读写的对象是本聊天自己的记忆，不是群消息。
+   */
+  async memoryContext(token?: string): Promise<LarkAgentSessionBinding> {
+    const binding = await this.capabilities.resolve(token);
+    if (!await readLarkConfig(this.configs, binding.appId)) {
+      throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
+    }
+    return binding;
+  }
+
   async self(token?: string) {
     const context = await this.context(token, 'group_tools.read');
     let bot: LarkBotInfo;
@@ -462,11 +475,16 @@ export class LarkAgentToolsService {
   async promptForSession(session: Session, prompt: string) {
     const binding = larkAgentSessionBinding(session);
     if (!binding) return prompt;
-    let config = await readLarkConfig(this.configs, binding.appId);
-    if (!config?.groupToolsEnabled) return prompt;
-    const task = this.options.workbenchTask?.(session.id);
-    const workCommand = `${this.options.groupToolsCommand ?? "dutydeck"} work --turn ${task ? this.capabilities.workbenchTurnToken(session.id, task.taskId) : ""}`;
-    return `${larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand)}\n\n${task ? workbenchAgentPrompt(workCommand) + "\n\n" : ""}${prompt}`;
+    const config = await readLarkConfig(this.configs, binding.appId);
+    if (!config) return prompt;
+    // 记忆工具对所有飞书会话（含私聊、关闭群协作的机器人）开放；群协作与编排提示仍按原开关。
+    const blocks = [larkMemoryToolsPrompt(this.options.groupToolsCommand)];
+    if (config.groupToolsEnabled) {
+      blocks.push(larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand));
+      const task = this.options.workbenchTask?.(session.id);
+      if (task) blocks.push(workbenchAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${this.capabilities.workbenchTurnToken(session.id, task.taskId)}`));
+    }
+    return `${blocks.join('\n\n')}\n\n${prompt}`;
   }
 
   async isConfiguredPeer(appId: string, chatId: string, senderOpenId: string) {

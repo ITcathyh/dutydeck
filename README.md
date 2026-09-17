@@ -231,6 +231,18 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 
 还可添加 `--workspace worktree`，从当前 Git 提交创建独立工作目录；默认仍直接使用原目录。所有选项均可省略；使用选项时，任务内容前必须加 `--`。目录须为服务器上已存在的绝对路径，模型和推理强度须受当前 Agent 支持。参数校验成功后才结束旧会话；选择会沿用到后续追问和服务重启，下一次裸 `/new` 会恢复机器人默认配置。受管群的目录、模型覆盖需要相应管理权限。
 
+### 会话记忆
+
+每个聊天（私聊或群）有一份跨会话的长期记忆：`/new`、话题切换和服务重启都不会丢，私聊与各群之间互不可见。每轮任务开头会把记忆作为参考内容带给 Agent，并随任务记录一起保存，事后能核对 Agent 当时看到了哪几条。
+
+```text
+/remember 这个群的回复统一用中文    保存一条记忆，回执给出编号
+/memory                              查看本聊天的记忆与编号
+/forget mem_1a2b3c4d                 删除指定编号的记忆
+```
+
+Agent 在执行中也能维护记忆：你说“记住…”时它会调用 `dutydeck memory add` 并确认；发现会跨任务复用的稳定事实（偏好、项目约定、已定决策）时也会保存。删除只打标记不抹掉历史，单条 1000 字符、每个聊天 200 条，注入 prompt 时最多带最新 60 条。记忆只是参考内容，不会放宽任何操作权限。设计与边界见 [飞书会话记忆](docs/lark-memory-design.md)。
+
 ### 接入机器人
 
 新建应用可以在 Web 点击“新增机器人”，填写名称后点击“扫码创建机器人”。用飞书扫码确认账号和企业，Dutydeck 会通过开放平台的一键创建模板建立应用，保存凭据，配置必要权限、长连接事件及卡片回调，并发布首个版本。初次发布的可见范围包含创建者。
@@ -326,6 +338,14 @@ dutydeck group wait --after '<cursor>' --timeout-ms 15000
 ```
 
 群工具 capability 精确绑定运行、机器人和群聊。App Secret 与飞书访问令牌不会交给 Agent。ACPX Session 只写入 snake_case 的 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`；旧大写键仅能在读取边界兼容。
+
+同一份 capability 也承载会话记忆工具，私聊和关闭群协作的机器人同样可用：
+
+```bash
+dutydeck memory list
+dutydeck memory add '项目用 pnpm，测试命令是 pnpm test'
+dutydeck memory remove mem_1a2b3c4d
+```
 
 ## Agent 配置
 

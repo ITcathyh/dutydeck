@@ -222,6 +222,20 @@ describe('Agent group collaboration domain service', () => {
     await expect(tools.promptForSession(session({ sourceId: 'cli_current:oc_p2p:p2p' }), '继续处理')).resolves.toContain('group send-file');
   });
 
+  it('teaches memory tools to every Lark session, even when group collaboration is off', async () => {
+    const { tools } = await setup({ cli_current: fakeClient() }, "'/usr/bin/node' '/app/cli.js'");
+    const enabled = await tools.promptForSession(session(), '继续处理');
+    expect(enabled.indexOf('[Dutydeck 会话记忆工具]')).toBeGreaterThanOrEqual(0);
+    expect(enabled.indexOf('[Dutydeck 会话记忆工具]')).toBeLessThan(enabled.indexOf('[Dutydeck 飞书会话工具]'));
+    expect(enabled).toContain("'/usr/bin/node' '/app/cli.js' memory add");
+    expect(enabled.endsWith('继续处理')).toBe(true);
+    const disabled = await tools.promptForSession(session({ sourceId: 'cli_disabled:oc_p2p:p2p' }), '继续处理');
+    expect(disabled).toContain("'/usr/bin/node' '/app/cli.js' memory list");
+    expect(disabled).not.toContain('group send');
+    expect(disabled).not.toContain('[Dutydeck 目标编排]');
+    await expect(tools.promptForSession(session({ source: 'web', sourceId: undefined }), '继续处理')).resolves.toBe('继续处理');
+  });
+
   it('uses opaque cursors for incremental reads and mentions a discovered target when sending', async () => {
     const first = message('om_1', '1000', 'one'); const second = message('om_2', '2000', 'two'); const third = message('om_3', '3000', 'three');
     const current = fakeClient({

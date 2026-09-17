@@ -106,6 +106,16 @@ describe('Dutydeck CLI', () => {
     expect(groupWait).toHaveBeenCalledWith(expect.objectContaining({ after: 'cursor-2', timeoutMs: '30000' }));
   });
 
+  it('parses chat memory maintenance commands', async () => {
+    const memoryList = vi.fn(); const memoryAdd = vi.fn(); const memoryRemove = vi.fn();
+    await createCliProgram('0.0.6', { memoryList }).parseAsync(['node', 'dutydeck', 'memory', 'list']);
+    await createCliProgram('0.0.6', { memoryAdd }).parseAsync(['node', 'dutydeck', 'memory', 'add', '这个群的回复统一用中文']);
+    await createCliProgram('0.0.6', { memoryRemove }).parseAsync(['node', 'dutydeck', 'memory', 'remove', 'mem_1a2b3c4d']);
+    expect(memoryList).toHaveBeenCalledOnce();
+    expect(memoryAdd).toHaveBeenCalledWith('这个群的回复统一用中文');
+    expect(memoryRemove).toHaveBeenCalledWith('mem_1a2b3c4d');
+  });
+
   it('parses the daemon start command with serve options', async () => {
     const daemonStart = vi.fn();
     const program = createCliProgram('0.0.6', { daemonStart });
