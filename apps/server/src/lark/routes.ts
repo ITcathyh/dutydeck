@@ -14,6 +14,7 @@ import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
 import type { LarkAgentToolsService } from './agent-tools.js';
 import type { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryProjection } from './memory-view.js';
+import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import {
   openPlatformConfigurationJobs,
   type OpenPlatformConfigurationJobManager,
@@ -45,6 +46,7 @@ export interface LarkRoutesOptions {
     store: LarkMemoryStore;
     projection: LarkMemoryProjection;
     command?: string;
+    pipeline?: LarkMemoryPipeline;
   };
   /** StoredLarkConfig is the isolated legacy path during the compatibility period. */
   executionPolicy?: {

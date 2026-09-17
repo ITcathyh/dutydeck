@@ -8,6 +8,7 @@ import { collectLarkTaskContext } from './task-context.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkMemoryId, LarkMemoryStore, renderLarkMemoryList } from './memory.js';
 import { LarkMemoryProjection, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
+import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
@@ -223,6 +224,7 @@ export class LarkMessageCoordinator {
         store: LarkMemoryStore;
         projection: LarkMemoryProjection;
         command?: string;
+        pipeline?: LarkMemoryPipeline;
       };
     } = {},
   ) {
@@ -1007,7 +1009,21 @@ export class LarkMessageCoordinator {
         const scope = { appId: config.appId, chatId: event.chatId };
         if (route.command === 'memory') {
           if (route.args[0] === 'consolidate') {
-            await replyCard('/memory consolidate 未执行', '整理功能尚未接入。', { failed: true });
+            // /memory 整体是只读命令，但 consolidate 会改写账本：这里单独挡住机器人发送者，
+            // 与 /remember、/forget 的 mutating 口径一致。
+            if (event.senderType === 'app' || event.senderType === 'bot') {
+              await replyCard('/memory consolidate 未执行', '机器人发送者不能整理本聊天的记忆。', { failed: true });
+              return 'handled';
+            }
+            const pipeline = this.workflowOptions.memory?.pipeline;
+            if (!pipeline) {
+              await replyCard('/memory consolidate 未执行', '整理功能未启用。', { failed: true });
+              return 'handled';
+            }
+            const outcome = await pipeline.requestConsolidation(scope, { ...(event.senderOpenId ? { actorId: event.senderOpenId } : {}) });
+            if (outcome === 'started') await replyCard('会话记忆整理', '**已开始整理，完成后 `/memory` 可见。**');
+            else if (outcome === 'running') await replyCard('/memory consolidate 未执行', '**整理正在进行中。**', { failed: true });
+            else await replyCard('/memory consolidate 未执行', '本机器人已关闭会话记忆。', { failed: true });
             return 'handled';
           }
           let page: number | undefined;
@@ -2576,6 +2592,12 @@ export class LarkMessageCoordinator {
           task.state = resolvedState;
           if (runtimeTaskId) await this.workflows?.expireTask(config.appId, runtimeTaskId);
           await deliverTerminal(resolvedState, resolvedState === 'completed').finally(cleanup);
+          // 记忆提取排在终态交付之后，且只记真实 dispatch 过的完成轮次；失败只留日志。
+          const memoryPipeline = this.workflowOptions.memory?.pipeline;
+          if (memoryPipeline && resolvedState === 'completed' && runtimeTaskId) {
+            void memoryPipeline.onTurnCompleted({ appId: config.appId, chatId: event.chatId }, { sessionId: session.id, taskId: runtimeTaskId })
+              .catch(error => this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: runtimeTaskId }, '飞书会话记忆后台提取触发失败'));
+          }
         })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));
       };
       const receive = (agentEvent: AgentEvent) => {

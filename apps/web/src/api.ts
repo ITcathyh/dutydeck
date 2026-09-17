@@ -30,6 +30,14 @@ export type LarkBotConfig = {
   activeListening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
+  /** 会话记忆开关，服务端恒返回布尔；旧服务端缺省按开启处理。 */
+  memoryEnabled?: boolean;
+  /** 后台自动提取与整理开关，服务端恒返回布尔；旧服务端缺省按开启处理。 */
+  memoryAutoExtract?: boolean;
+  /** 跑提取与整理的 Agent；空表示沿用机器人默认 Agent。 */
+  memoryAgentId?: string;
+  /** 跑提取与整理的模型；空表示沿用默认模型。 */
+  memoryModel?: string;
   /** P0-2 结构化问答卡片总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
   structuredAskCards?: boolean;
   /** P0-4 群内卡片 @ 发起人总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
@@ -255,6 +263,10 @@ export const api = {
     listening?: boolean;
     groupToolsEnabled?: boolean;
     groupToolsAllowSend?: boolean;
+    memoryEnabled?: boolean;
+    memoryAutoExtract?: boolean;
+    memoryAgentId?: string;
+    memoryModel?: string;
     structuredAskCards?: boolean;
     groupCardMention?: boolean;
     pushIntervalMs?: number;

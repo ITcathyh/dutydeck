@@ -47,12 +47,14 @@ export interface LarkMemoryEntry {
 
 interface StoredLarkMemory { v: 1; entries: LarkMemoryEntry[] }
 
+export interface LarkMemoryPendingTurn { sessionId: string; taskId: string; completedAt: string }
+
 export interface LarkMemoryState {
   v: 1;
   turnsSinceExtraction: number;
   turnsSinceConsolidation: number;
-  /** 已提取到的任务位置：taskId 集合太大，用「最后一个完成任务的 createdAt + taskId」游标。 */
-  extractionCursor?: { taskCreatedAt: string; taskId: string };
+  /** 待提取的已完成轮次；coordinator 每个 completed 轮次追加一条，提取消费后移除。 */
+  pendingTurns?: LarkMemoryPendingTurn[];
   lastExtractionAt?: string;
   lastConsolidationAt?: string;
   indexOverBudget?: boolean;
@@ -149,6 +151,13 @@ export interface AddLarkMemoryInput {
   supersedes?: string[];
 }
 
+export type LarkMemoryBatchStep =
+  | { op: 'add'; input: AddLarkMemoryInput }
+  | { op: 'remove'; id: string; deletedBy?: string }
+  | { op: 'retopic'; id: string; topic: string };
+
+export interface LarkMemoryBatchResult { added: LarkMemoryEntry[]; removed: number; retopiced: number }
+
 export interface LarkMemoryStoreOptions {
   now?: () => Date;
   newId?: () => string;
@@ -200,64 +209,12 @@ export class LarkMemoryStore {
   }
 
   async add(scope: LarkMemoryScope, input: AddLarkMemoryInput): Promise<LarkMemoryEntry> {
-    const content = normalizeLarkMemoryContent(input.content);
-    const topic = normalizeLarkMemoryTopic(input.topic);
-    const supersedes = input.supersedes?.length ? [...new Set(input.supersedes)] : undefined;
     let created!: LarkMemoryEntry;
-
     await this.mutate(scope, entries => {
-      if (supersedes && supersedes.length > 0) {
-        const liveMap = new Map(entries.filter(e => !e.deletedAt).map(e => [e.id, e]));
-        for (const sId of supersedes) {
-          if (!liveMap.has(sId)) {
-            throw new LarkMemoryError('MEMORY_SUPERSEDE_TARGET_INVALID', `被替换的记忆条目 ${sId} 不存在或已失效。`, 400);
-          }
-        }
-      }
-
-      const nowIso = this.now().toISOString();
-      const ids = new Set(entries.map(entry => entry.id));
-      let id = this.newId();
-      while (ids.has(id)) id = this.newId();
-
-      created = {
-        id,
-        content,
-        source: input.source,
-        topic,
-        createdAt: nowIso,
-        ...(input.createdBy ? { createdBy: input.createdBy } : {}),
-        ...(input.messageId ? { messageId: input.messageId } : {}),
-        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-        ...(input.taskId ? { taskId: input.taskId } : {}),
-        ...(supersedes?.length ? { supersedes } : {})
-      };
-
-      const next = [...entries];
-      if (supersedes && supersedes.length > 0) {
-        const deleteActor = input.source === 'consolidation' ? 'consolidation' : (input.createdBy ?? input.source);
-        for (let i = 0; i < next.length; i++) {
-          const item = next[i]!;
-          if (supersedes.includes(item.id) && !item.deletedAt) {
-            next[i] = {
-              ...item,
-              supersededBy: id,
-              deletedAt: nowIso,
-              deletedBy: deleteActor
-            };
-          }
-        }
-      }
-
-      const liveCount = next.filter(entry => !entry.deletedAt).length;
-      if (liveCount >= larkMemoryLimits.liveEntries) {
-        throw new LarkMemoryError('MEMORY_LIMIT_REACHED', `本聊天的记忆已达 ${larkMemoryLimits.liveEntries} 条上限，请先删除不再需要的记忆。`, 409);
-      }
-
-      next.push(created);
-      return pruneTombstones(next);
+      const outcome = this.addTo(entries, input);
+      created = outcome.created;
+      return outcome.entries;
     });
-
     this.notifyChange(scope);
     return created;
   }
@@ -266,12 +223,9 @@ export class LarkMemoryStore {
   async remove(scope: LarkMemoryScope, id: string, deletedBy?: string): Promise<LarkMemoryEntry | undefined> {
     let removed: LarkMemoryEntry | undefined;
     await this.mutate(scope, entries => {
-      const index = entries.findIndex(entry => entry.id === id && !entry.deletedAt);
-      if (index < 0) { removed = undefined; return undefined; }
-      removed = { ...entries[index]!, deletedAt: this.now().toISOString(), ...(deletedBy ? { deletedBy } : {}) };
-      const next = [...entries];
-      next[index] = removed;
-      return pruneTombstones(next);
+      const outcome = this.removeFrom(entries, id, deletedBy);
+      removed = outcome?.removed;
+      return outcome?.entries;
     });
     if (removed) this.notifyChange(scope);
     return removed;
@@ -279,18 +233,127 @@ export class LarkMemoryStore {
 
   /** 修改条目的主题。不存在或已删除时返回 undefined。 */
   async retopic(scope: LarkMemoryScope, id: string, topic: string): Promise<LarkMemoryEntry | undefined> {
-    const normalizedTopic = normalizeLarkMemoryTopic(topic);
     let updated: LarkMemoryEntry | undefined;
     await this.mutate(scope, entries => {
-      const index = entries.findIndex(entry => entry.id === id && !entry.deletedAt);
-      if (index < 0) { updated = undefined; return undefined; }
-      updated = { ...entries[index]!, topic: normalizedTopic };
-      const next = [...entries];
-      next[index] = updated;
-      return next;
+      const outcome = this.retopicIn(entries, id, topic);
+      updated = outcome?.updated;
+      return outcome?.entries;
     });
     if (updated) this.notifyChange(scope);
     return updated;
+  }
+
+  /**
+   * 在一次 CAS 里顺序执行多步写入；任一步失败整批不落盘。
+   * 整理必须原子生效：先 add 后 remove/retopic 分成多次 add/remove 调用的话，
+   * 中途失败会留下「新条目已写入、旧条目还在」的半成品账本。
+   */
+  async applyBatch(scope: LarkMemoryScope, steps: LarkMemoryBatchStep[]): Promise<LarkMemoryBatchResult> {
+    if (!steps.length) return { added: [], removed: 0, retopiced: 0 };
+    let result!: LarkMemoryBatchResult;
+    await this.mutate(scope, entries => {
+      let current = entries;
+      const added: LarkMemoryEntry[] = [];
+      let removed = 0;
+      let retopiced = 0;
+      for (const step of steps) {
+        if (step.op === 'add') {
+          const outcome = this.addTo(current, step.input);
+          current = outcome.entries;
+          added.push(outcome.created);
+        } else if (step.op === 'remove') {
+          const outcome = this.removeFrom(current, step.id, step.deletedBy);
+          if (!outcome) throw new LarkMemoryError('MEMORY_BATCH_TARGET_INVALID', `记忆条目 ${step.id} 不存在或已删除。`, 409);
+          current = outcome.entries;
+          removed += 1;
+        } else {
+          const outcome = this.retopicIn(current, step.id, step.topic);
+          if (!outcome) throw new LarkMemoryError('MEMORY_BATCH_TARGET_INVALID', `记忆条目 ${step.id} 不存在或已删除。`, 409);
+          current = outcome.entries;
+          retopiced += 1;
+        }
+      }
+      result = { added, removed, retopiced };
+      return current;
+    });
+    this.notifyChange(scope);
+    return result;
+  }
+
+  private addTo(entries: LarkMemoryEntry[], input: AddLarkMemoryInput): { entries: LarkMemoryEntry[]; created: LarkMemoryEntry } {
+    const content = normalizeLarkMemoryContent(input.content);
+    const topic = normalizeLarkMemoryTopic(input.topic);
+    const supersedes = input.supersedes?.length ? [...new Set(input.supersedes)] : undefined;
+
+    if (supersedes && supersedes.length > 0) {
+      const liveMap = new Map(entries.filter(e => !e.deletedAt).map(e => [e.id, e]));
+      for (const sId of supersedes) {
+        if (!liveMap.has(sId)) {
+          throw new LarkMemoryError('MEMORY_SUPERSEDE_TARGET_INVALID', `被替换的记忆条目 ${sId} 不存在或已失效。`, 400);
+        }
+      }
+    }
+
+    const nowIso = this.now().toISOString();
+    const ids = new Set(entries.map(entry => entry.id));
+    let id = this.newId();
+    while (ids.has(id)) id = this.newId();
+
+    const created: LarkMemoryEntry = {
+      id,
+      content,
+      source: input.source,
+      topic,
+      createdAt: nowIso,
+      ...(input.createdBy ? { createdBy: input.createdBy } : {}),
+      ...(input.messageId ? { messageId: input.messageId } : {}),
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(input.taskId ? { taskId: input.taskId } : {}),
+      ...(supersedes?.length ? { supersedes } : {})
+    };
+
+    const next = [...entries];
+    if (supersedes && supersedes.length > 0) {
+      const deleteActor = input.source === 'consolidation' ? 'consolidation' : (input.createdBy ?? input.source);
+      for (let i = 0; i < next.length; i++) {
+        const item = next[i]!;
+        if (supersedes.includes(item.id) && !item.deletedAt) {
+          next[i] = {
+            ...item,
+            supersededBy: id,
+            deletedAt: nowIso,
+            deletedBy: deleteActor
+          };
+        }
+      }
+    }
+
+    const liveCount = next.filter(entry => !entry.deletedAt).length;
+    if (liveCount >= larkMemoryLimits.liveEntries) {
+      throw new LarkMemoryError('MEMORY_LIMIT_REACHED', `本聊天的记忆已达 ${larkMemoryLimits.liveEntries} 条上限，请先删除不再需要的记忆。`, 409);
+    }
+
+    next.push(created);
+    return { entries: pruneTombstones(next), created };
+  }
+
+  private removeFrom(entries: LarkMemoryEntry[], id: string, deletedBy?: string): { entries: LarkMemoryEntry[]; removed: LarkMemoryEntry } | undefined {
+    const index = entries.findIndex(entry => entry.id === id && !entry.deletedAt);
+    if (index < 0) return undefined;
+    const removed: LarkMemoryEntry = { ...entries[index]!, deletedAt: this.now().toISOString(), ...(deletedBy ? { deletedBy } : {}) };
+    const next = [...entries];
+    next[index] = removed;
+    return { entries: pruneTombstones(next), removed };
+  }
+
+  private retopicIn(entries: LarkMemoryEntry[], id: string, topic: string): { entries: LarkMemoryEntry[]; updated: LarkMemoryEntry } | undefined {
+    const normalizedTopic = normalizeLarkMemoryTopic(topic);
+    const index = entries.findIndex(entry => entry.id === id && !entry.deletedAt);
+    if (index < 0) return undefined;
+    const updated: LarkMemoryEntry = { ...entries[index]!, topic: normalizedTopic };
+    const next = [...entries];
+    next[index] = updated;
+    return { entries: next, updated };
   }
 
   /** 搜索有效条目：大小写不敏感匹配正文，可选主题过滤，按创建时间倒序。 */
@@ -326,7 +389,7 @@ export class LarkMemoryStore {
           v: 1,
           turnsSinceExtraction: parsed.turnsSinceExtraction,
           turnsSinceConsolidation: parsed.turnsSinceConsolidation,
-          ...(parsed.extractionCursor ? { extractionCursor: parsed.extractionCursor } : {}),
+          ...(Array.isArray(parsed.pendingTurns) ? { pendingTurns: parsed.pendingTurns } : {}),
           ...(parsed.lastExtractionAt ? { lastExtractionAt: parsed.lastExtractionAt } : {}),
           ...(parsed.lastConsolidationAt ? { lastConsolidationAt: parsed.lastConsolidationAt } : {}),
           ...(parsed.indexOverBudget !== undefined ? { indexOverBudget: parsed.indexOverBudget } : {}),
@@ -340,6 +403,19 @@ export class LarkMemoryStore {
 
   /** CAS 更新状态。patch 中字段值为 undefined 表示删除该字段。 */
   async updateState(scope: LarkMemoryScope, patch: Partial<Omit<LarkMemoryState, 'v'>>): Promise<LarkMemoryState> {
+    return (await this.mutateState(scope, () => patch))!;
+  }
+
+  /**
+   * 在 CAS 循环内基于最新状态算 patch；updater 返回 undefined 表示放弃写入（返回 undefined）。
+   *
+   * 计数与单飞占位不能用固定 patch：`updateState` 冲突重试时会把同一份绝对值重放一遍，
+   * 并发的两轮记账会互相覆盖，两个触发者也会同时抢到 `running`。
+   */
+  async mutateState(
+    scope: LarkMemoryScope,
+    updater: (current: LarkMemoryState) => Partial<Omit<LarkMemoryState, 'v'>> | undefined
+  ): Promise<LarkMemoryState | undefined> {
     const key = larkMemoryStateKey(scope);
     for (let attempt = 0; attempt < maxWriteAttempts; attempt++) {
       const raw = await this.configs.get(key);
@@ -350,6 +426,8 @@ export class LarkMemoryStore {
           if (parsed && parsed.v === 1) current = parsed as LarkMemoryState;
         } catch {}
       }
+      const patch = updater(current);
+      if (!patch) return undefined;
       const next: LarkMemoryState = { ...current };
       for (const [k, value] of Object.entries(patch)) {
         if (value === undefined) {

@@ -55,6 +55,10 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     listening: bot.listening ?? true,
     groupToolsEnabled: bot.groupToolsEnabled ?? false,
     groupToolsAllowSend: bot.groupToolsAllowSend ?? false,
+    memoryEnabled: bot.memoryEnabled ?? true,
+    memoryAutoExtract: bot.memoryAutoExtract ?? true,
+    memoryAgentId: bot.memoryAgentId ?? '',
+    memoryModel: bot.memoryModel ?? '',
     riskControlMode: bot.riskControlMode ?? 'off',
     highRiskPattern: bot.highRiskPattern ?? ''
   };
@@ -73,6 +77,10 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   if ((original.listening ?? true) !== draft.listening) return true;
   if ((original.groupToolsEnabled ?? false) !== draft.groupToolsEnabled) return true;
   if ((original.groupToolsAllowSend ?? false) !== draft.groupToolsAllowSend) return true;
+  if ((original.memoryEnabled ?? true) !== draft.memoryEnabled) return true;
+  if ((original.memoryAutoExtract ?? true) !== draft.memoryAutoExtract) return true;
+  if ((original.memoryAgentId ?? '') !== draft.memoryAgentId) return true;
+  if ((original.memoryModel ?? '') !== draft.memoryModel) return true;
   if ((original.riskControlMode ?? 'off') !== draft.riskControlMode) return true;
   if ((original.highRiskPattern ?? '') !== draft.highRiskPattern) return true;
   return false;
@@ -216,6 +224,10 @@ export function BotManagement({
       listening: draft.listening,
       groupToolsEnabled: draft.groupToolsEnabled,
       groupToolsAllowSend: draft.groupToolsAllowSend,
+      memoryEnabled: draft.memoryEnabled,
+      memoryAutoExtract: draft.memoryAutoExtract,
+      memoryAgentId: draft.memoryAgentId,
+      memoryModel: draft.memoryModel,
       riskControlMode: draft.riskControlMode,
       highRiskPattern: draft.highRiskPattern,
       fullTrustConfirmed,
@@ -591,6 +603,57 @@ export function BotManagement({
                     placeholder="可选，例如：在回复前先用中文确认要点"
                   />
                 </Field>
+
+                <div className="space-y-3 border-t border-subtle pt-4">
+                  <h4 className="text-caption font-semibold text-primary">会话记忆</h4>
+                  <label className="flex items-center gap-2 text-caption">
+                    <input
+                      type="checkbox"
+                      checked={currentDraft.memoryEnabled}
+                      onChange={e => updateCurrentDraft({ memoryEnabled: e.target.checked })}
+                      className="rounded border-default text-action focus:ring-action"
+                    />
+                    <span>启用会话记忆</span>
+                  </label>
+                  {currentDraft.memoryEnabled && (
+                    <>
+                      <label className="flex items-center gap-2 text-caption">
+                        <input
+                          type="checkbox"
+                          checked={currentDraft.memoryAutoExtract}
+                          onChange={e => updateCurrentDraft({ memoryAutoExtract: e.target.checked })}
+                          className="rounded border-default text-action focus:ring-action"
+                        />
+                        <span>自动提取与整理</span>
+                      </label>
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div>
+                          <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-memory-agent">
+                            整理 Agent
+                          </label>
+                          <Select
+                            id="bot-memory-agent"
+                            value={currentDraft.memoryAgentId}
+                            onChange={e => updateCurrentDraft({ memoryAgentId: e.target.value })}
+                          >
+                            <option value="">沿用机器人默认 Agent</option>
+                            {agents.map(agent => (
+                              <option key={agent.id} value={agent.id}>{agent.name}</option>
+                            ))}
+                          </Select>
+                        </div>
+                        <Field label="整理模型" hint="留空则沿用默认模型。">
+                          <Input
+                            value={currentDraft.memoryModel}
+                            onChange={e => updateCurrentDraft({ memoryModel: e.target.value })}
+                            placeholder="可选，例如 gpt-4o-mini"
+                          />
+                        </Field>
+                      </div>
+                    </>
+                  )}
+                  <p className="text-caption text-subtle">记忆按聊天隔离，仅作为参考内容注入，不授予操作权限。</p>
+                </div>
               </Card>
 
               {/* 区块 2：参与的群聊 */}
