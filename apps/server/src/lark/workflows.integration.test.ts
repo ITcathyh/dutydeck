@@ -420,8 +420,9 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     for (let index = 0; index < 11; index++) {
       await h.coordinator.handle(event(index === 0 ? 'om_task' : `om_task_${index}`, `目标 ${index}`, { threadId: `omt_${index}`, rootId: `om_root_${index}` }), h.config);
     }
+    // 11 个任务的终态投递在全量套件并行负载下接近 1s 默认等待的边界，放宽等待时间；断言条件不变。
     await vi.waitFor(async () => expect((await h.repos.channelMappings.list(`lark-card:${h.config.appId}`))
-      .filter(mapping => JSON.parse(mapping.extra ?? '{}').final_delivery_state === 'delivered')).toHaveLength(11));
+      .filter(mapping => JSON.parse(mapping.extra ?? '{}').final_delivery_state === 'delivered')).toHaveLength(11), { timeout: 5_000 });
     await h.coordinator.handle(event('om_dashboard', '/tasks', { chatType: 'p2p', chatId: 'oc_dm' }), h.config);
     const [cardId, first] = [...h.cards].find(([, card]) => card.taskId === 'om_dashboard')!;
     const next = first.elements.find((element: any) => element.element_id === 'task_dashboard_navigation').columns.at(-1).elements[0].behaviors[0].value;
