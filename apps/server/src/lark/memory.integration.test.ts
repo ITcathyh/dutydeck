@@ -214,4 +214,14 @@ describe('Lark chat memory through the coordinator', () => {
     await vi.waitFor(() => expect(h.lastCardText()).toContain('未执行'));
     expect(await h.memoryStore.list({ appId: 'cli_memory', chatId: 'oc_group' })).toEqual([]);
   });
+
+  it('rejects credentials in /remember with failed receipt and does not persist to memory store', async () => {
+    const h = await harness();
+    await h.coordinator.handle(event('om_cred', '/remember token: secret123456789'), h.config);
+    await h.waitCards(1);
+    expect(h.lastCardText()).toContain('"state":"failed"');
+    expect(h.lastCardText()).toContain('记忆内容疑似包含凭据');
+    const stored = await h.memoryStore.list({ appId: 'cli_memory', chatId: 'oc_group' });
+    expect(stored).toEqual([]);
+  });
 });

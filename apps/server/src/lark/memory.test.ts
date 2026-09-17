@@ -8,6 +8,7 @@ import {
   larkMemoryStateKey,
   LarkMemoryStore,
   larkMemoryToolsPrompt,
+  looksLikeLarkMemoryCredential,
   normalizeLarkMemoryTopic,
   renderLarkMemoryList,
   type LarkMemoryEntry,
@@ -51,6 +52,19 @@ describe('normalizeLarkMemoryTopic', () => {
     expect(() => normalizeLarkMemoryTopic('---')).toThrow(LarkMemoryError);
     expect(() => normalizeLarkMemoryTopic('___')).toThrow(LarkMemoryError);
     expect(() => normalizeLarkMemoryTopic('中文主题')).toThrow(LarkMemoryError);
+  });
+});
+
+describe('looksLikeLarkMemoryCredential', () => {
+  it('detects credential assignment patterns and long opaque secrets', () => {
+    expect(looksLikeLarkMemoryCredential('token: abc')).toBe(true);
+    expect(looksLikeLarkMemoryCredential('api_key: sk-123456')).toBe(true);
+    expect(looksLikeLarkMemoryCredential('password = mysecret')).toBe(true);
+    expect(looksLikeLarkMemoryCredential('bearer: token123')).toBe(true);
+    expect(looksLikeLarkMemoryCredential('0123456789abcdef0123456789abcdef01234567')).toBe(true);
+    expect(looksLikeLarkMemoryCredential('a1b2c3d4e5'.repeat(4))).toBe(true);
+    expect(looksLikeLarkMemoryCredential('用 pnpm 跑测试')).toBe(false);
+    expect(looksLikeLarkMemoryCredential('项目使用 React 框架')).toBe(false);
   });
 });
 
@@ -122,7 +136,8 @@ describe('LarkMemoryStore', () => {
   });
 
   it('searches entries with case-insensitivity, topic filtering and limit clamping', async () => {
-    const { repos, memory } = store();
+    let time = 0;
+    const { repos, memory } = store({ now: () => new Date(Date.UTC(2026, 8, 17, 0, 0, time++)) });
     await memory.add(scope, { content: 'Frontend uses React', source: 'agent', topic: 'frontend' });
     await memory.add(scope, { content: 'Backend uses Node', source: 'agent', topic: 'backend' });
     await memory.add(scope, { content: 'React native for mobile', source: 'agent', topic: 'mobile' });
@@ -140,6 +155,34 @@ describe('LarkMemoryStore', () => {
     const clamped = await memory.search(scope, { query: 'uses', limit: 1 });
     expect(clamped).toHaveLength(1);
 
+    repos.close();
+  });
+
+  it('rejects credential patterns on add with MEMORY_CREDENTIAL_REJECTED across all sources', async () => {
+    const { repos, memory } = store();
+    await expect(memory.add(scope, { content: 'token: abc', source: 'user' }))
+      .rejects.toMatchObject({ code: 'MEMORY_CREDENTIAL_REJECTED', statusCode: 400 });
+    await expect(memory.add(scope, { content: '0123456789abcdef0123456789abcdef01234567', source: 'agent' }))
+      .rejects.toMatchObject({ code: 'MEMORY_CREDENTIAL_REJECTED', statusCode: 400 });
+    await expect(memory.add(scope, { content: 'api_key=sk-12345678', source: 'extraction' }))
+      .rejects.toMatchObject({ code: 'MEMORY_CREDENTIAL_REJECTED', statusCode: 400 });
+
+    const safe = await memory.add(scope, { content: '用 pnpm 跑测试', source: 'user' });
+    expect(safe.content).toBe('用 pnpm 跑测试');
+    repos.close();
+  });
+
+  it('rejects 13th new topic but permits reusing existing topics when topic limit reached', async () => {
+    const { repos, memory } = store();
+    for (let i = 0; i < 12; i++) {
+      await memory.add(scope, { content: `主题内容 ${i}`, source: 'agent', topic: `topic-${i}` });
+    }
+
+    await expect(memory.add(scope, { content: '超出主题数上限', source: 'user', topic: 'topic-12' }))
+      .rejects.toMatchObject({ code: 'MEMORY_TOPIC_LIMIT_REACHED', statusCode: 409 });
+
+    const reused = await memory.add(scope, { content: '复用旧主题', source: 'user', topic: 'topic-0' });
+    expect(reused.topic).toBe('topic-0');
     repos.close();
   });
 
@@ -271,7 +314,7 @@ describe('renderLarkMemoryList', () => {
     expect(page2.text).not.toContain('**topic-1');
   });
 
-  it('limits accumulated entries per page to 30 and notes omitted entries per topic', () => {
+  it('paginates 35 entries in one topic across 2 pages with continuation header on page 2', () => {
     const byTopic = new Map<string, LarkMemoryEntry[]>();
     const entries: LarkMemoryEntry[] = [];
     for (let i = 0; i < 35; i++) {
@@ -279,10 +322,62 @@ describe('renderLarkMemoryList', () => {
     }
     byTopic.set('general', entries);
 
-    const result = renderLarkMemoryList(byTopic, { ...dummyState, lastConsolidationAt: undefined });
-    expect(result.text).toContain('上次整理 尚未整理');
-    expect(result.text).toContain('**general（35 条）**');
-    expect(result.text).toContain('（该主题另有 5 条）');
+    const page1 = renderLarkMemoryList(byTopic, { ...dummyState, lastConsolidationAt: undefined }, { page: 1 });
+    expect(page1.totalPages).toBe(2);
+    expect(page1.page).toBe(1);
+    expect(page1.text).toContain('上次整理 尚未整理');
+    expect(page1.text).toContain('**general（35 条）**');
+    expect(page1.text).not.toContain('（续）');
+    expect(page1.text).not.toContain('该主题另有');
+    for (let i = 0; i < 30; i++) {
+      expect(page1.text).toContain(entries[i]!.id);
+    }
+    for (let i = 30; i < 35; i++) {
+      expect(page1.text).not.toContain(entries[i]!.id);
+    }
+
+    const page2 = renderLarkMemoryList(byTopic, { ...dummyState, lastConsolidationAt: undefined }, { page: 2 });
+    expect(page2.totalPages).toBe(2);
+    expect(page2.page).toBe(2);
+    expect(page2.text).toContain('**general（续）**');
+    expect(page2.text).not.toContain('该主题另有');
+    for (let i = 30; i < 35; i++) {
+      expect(page2.text).toContain(entries[i]!.id);
+    }
+    for (let i = 0; i < 30; i++) {
+      expect(page2.text).not.toContain(entries[i]!.id);
+    }
+  });
+
+  it('paginates 7 topics with 1 entry each across 2 pages', () => {
+    const byTopic = new Map<string, LarkMemoryEntry[]>();
+    for (let i = 1; i <= 7; i++) {
+      byTopic.set(`topic-${i}`, [makeEntry(`mem_${i}`, `topic-${i}`, `内容 ${i}`)]);
+    }
+
+    const page1 = renderLarkMemoryList(byTopic, dummyState, { page: 1 });
+    expect(page1.totalPages).toBe(2);
+    expect(page1.page).toBe(1);
+    expect(page1.text).toContain('**topic-1（1 条）**');
+    expect(page1.text).toContain('**topic-6（1 条）**');
+    expect(page1.text).not.toContain('**topic-7');
+
+    const page2 = renderLarkMemoryList(byTopic, dummyState, { page: 2 });
+    expect(page2.totalPages).toBe(2);
+    expect(page2.page).toBe(2);
+    expect(page2.text).toContain('**topic-7（1 条）**');
+    expect(page2.text).not.toContain('**topic-1');
+  });
+
+  it('returns totalPages when page number is out of bounds', () => {
+    const byTopic = new Map<string, LarkMemoryEntry[]>();
+    for (let i = 1; i <= 7; i++) {
+      byTopic.set(`topic-${i}`, [makeEntry(`mem_${i}`, `topic-${i}`, `内容 ${i}`)]);
+    }
+
+    const overflow = renderLarkMemoryList(byTopic, dummyState, { page: 99 });
+    expect(overflow.totalPages).toBe(2);
+    expect(overflow.page).toBe(2);
   });
 });
 

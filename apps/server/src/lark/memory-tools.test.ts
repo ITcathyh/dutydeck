@@ -121,6 +121,15 @@ describe('Lark memory agent tools', () => {
     const blank = await app.inject({ method: 'POST', url: larkMemoryToolsPath, headers: headers(groupSession), payload: { content: '   ' } });
     expect(blank.statusCode).toBe(400);
 
+    const credential = await app.inject({
+      method: 'POST',
+      url: larkMemoryToolsPath,
+      headers: headers(groupSession),
+      payload: { content: 'token: abcdef12345' }
+    });
+    expect(credential.statusCode).toBe(400);
+    expect(credential.json().error.code).toBe('MEMORY_CREDENTIAL_REJECTED');
+
     const forged = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: { authorization: 'Bearer v1.forged' } });
     expect(forged.statusCode).toBe(401);
     expect(forged.json().error.code).toBe('GROUP_TOOL_UNAUTHORIZED');

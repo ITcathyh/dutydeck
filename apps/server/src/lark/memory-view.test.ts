@@ -81,6 +81,17 @@ describe('renderMemoryIndex', () => {
     expect(tightResult.text).toContain('mem_b2');
     expect(tightResult.text).toContain(`另有 ${tightResult.omitted} 条未列出：memory show <topic> 或 memory search <关键词>`);
   });
+
+  it('caps initial per-topic selection under budget: 20 topics * 160 chars yields <= 3000 chars and overBudget true', () => {
+    const entries: LarkMemoryEntry[] = [];
+    for (let i = 0; i < 20; i++) {
+      entries.push(entry(`mem_${i.toString(16).padStart(8, '0')}`, `topic-${i}`, 'a'.repeat(160), 'user', 10 + (i % 10)));
+    }
+    const result = renderMemoryIndex(entries, dummyState, { budget: 3000 });
+    expect(result.text.length).toBeLessThanOrEqual(3000);
+    expect(result.overBudget).toBe(true);
+    expect(result.omitted).toBeGreaterThan(0);
+  });
 });
 
 describe('renderTopicFile and renderLedgerJsonl', () => {
@@ -201,6 +212,84 @@ describe('LarkMemoryProjection', () => {
     await store.add(scope, { content: '一些内容', source: 'user' });
     await expect(projection.write(scope)).resolves.toBeDefined();
     expect(log.warn).toHaveBeenCalledWith(expect.anything(), '写入会话记忆派生视图失败');
+    repos.close();
+  });
+
+  it('serializes writes per scope: 3 consecutive writes with store mutations settle with latest state', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-test-projection-serial-'));
+    tempDirs.push(root);
+
+    const repos = createRepositories(':memory:');
+    const store = new LarkMemoryStore(repos.config);
+    const projection = new LarkMemoryProjection(store, root);
+
+    await store.add(scope, { content: '条目 1', source: 'user', topic: 'topic-1' });
+    const p1 = projection.write(scope);
+
+    await store.add(scope, { content: '条目 2', source: 'user', topic: 'topic-2' });
+    const p2 = projection.write(scope);
+
+    const live = await store.list(scope);
+    const entry1 = live.find(e => e.topic === 'topic-1')!;
+    await store.remove(scope, entry1.id);
+    await store.add(scope, { content: '条目 3', source: 'agent', topic: 'topic-3' });
+    const p3 = projection.write(scope);
+
+    const results = await Promise.all([p1, p2, p3]);
+    expect(results).toHaveLength(3);
+
+    const dir = projection.directoryFor(scope);
+    const memoryMd = await readFile(join(dir, 'MEMORY.md'), 'utf8');
+    expect(memoryMd).not.toContain('条目 1');
+    expect(memoryMd).toContain('条目 2');
+    expect(memoryMd).toContain('条目 3');
+
+    const topicFiles = await readdir(join(dir, 'topics'));
+    expect(topicFiles).not.toContain('topic-1.md');
+    expect(topicFiles).toContain('topic-2.md');
+    expect(topicFiles).toContain('topic-3.md');
+
+    repos.close();
+  });
+
+  it('does not block writes across different scopes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dutydeck-test-projection-scopes-'));
+    tempDirs.push(root);
+
+    const repos = createRepositories(':memory:');
+    const store = new LarkMemoryStore(repos.config);
+    const projection = new LarkMemoryProjection(store, root);
+
+    const scopeA: LarkMemoryScope = { appId: 'cli_bot', chatId: 'oc_chat_a' };
+    const scopeB: LarkMemoryScope = { appId: 'cli_bot', chatId: 'oc_chat_b' };
+
+    await store.add(scopeA, { content: 'A 内容', source: 'user', topic: 'general' });
+    await store.add(scopeB, { content: 'B 内容', source: 'user', topic: 'general' });
+
+    let unblockA!: () => void;
+    const aBlocked = new Promise<void>(resolve => { unblockA = resolve; });
+    let aStarted = false;
+
+    const originalListAll = store.listAll.bind(store);
+    vi.spyOn(store, 'listAll').mockImplementation(async targetScope => {
+      if (targetScope.chatId === 'oc_chat_a') {
+        aStarted = true;
+        await aBlocked;
+      }
+      return originalListAll(targetScope);
+    });
+
+    const writeAPromise = projection.write(scopeA);
+    await vi.waitFor(() => expect(aStarted).toBe(true));
+
+    let bDone = false;
+    const writeBPromise = projection.write(scopeB).then(res => { bDone = true; return res; });
+    await vi.waitFor(() => expect(bDone).toBe(true));
+    expect(await writeBPromise).toBeDefined();
+
+    unblockA();
+    expect(await writeAPromise).toBeDefined();
+
     repos.close();
   });
 });
