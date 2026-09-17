@@ -57,6 +57,8 @@ export interface LarkMemoryState {
   indexOverBudget?: boolean;
   running?: { kind: 'extraction' | 'consolidation'; sessionId?: string; startedAt: string };
   lastRun?: { kind: 'extraction' | 'consolidation'; at: string; ok: boolean; added: number; superseded: number; retired: number; retopiced: number; rejected: number; error?: string };
+  /** 分操作类型的最近失败时间，退避只看自己那一格；成功时清除 */
+  lastFailureAt?: { extraction?: string; consolidation?: string };
 }
 ```
 
@@ -108,7 +110,7 @@ Agent CLI（复用 `dutydeck_group_tools_*` capability）：`memory list [--topi
 
 ### 5.1 运行方式
 
-在独立的运行时会话里跑一轮 Agent：`runtime.start({ agentId: memoryAgentId ?? defaultAgentId, model: memoryModel ?? defaultModel, cwd: <该聊天的视图目录>, permissionMode: 'deny-all', source: 'lark-memory', sourceId: '<appId>:<chatId>:memory' })`，复用同一会话（按 sourceId 查找；stopped/failed 则新建）；`runtime.dispatch(sessionId, prompt, 'queue', agentPrompt)`；订阅事件或轮询 `getTasks` 等到终态；`readAttemptResult` 取最终文本；解析其中**最后一个** ```json 代码块。超时 10 分钟则 `interrupt` 并记失败。Agent 被告知只输出 JSON，不调用任何工具；`deny-all` 保证它即使调用工具也会被自动拒绝而不悬挂。
+在独立的运行时会话里跑一轮 Agent：`runtime.start({ agentId: memoryAgentId ?? defaultAgentId, model: memoryModel ?? defaultModel, cwd: <该聊天的视图目录>, permissionMode: 'deny-all'（PTY CLI Agent 不支持时降级为 'ask'）, source: 'lark-memory', sourceId: '<appId>:<chatId>:memory' })`，复用同一会话（按 sourceId 查找；stopped/failed 则新建）；`runtime.dispatch(sessionId, prompt, 'queue', agentPrompt)`；订阅事件或轮询 `getTasks` 等到终态；`readAttemptResult` 取最终文本；解析其中**最后一个** ```json 代码块。超时 10 分钟则 `interrupt` 并记失败。Agent 被告知只输出 JSON，不调用任何工具；ACP Agent 用 `deny-all`，即使调用工具也会被自动拒绝。运行时对 PTY CLI Agent 只接受 `ask` / `full-trust`，管线收到 `PERMISSION_MODE_UNSUPPORTED` 后按 `deny-all → ask` 顺序重试一次，两种都不行记 `MEMORY_AGENT_UNSUPPORTED`；`ask` 模式下 PTY 的审批只能在终端完成，Agent 若违规调用工具会等到超时被 `interrupt` 并进入退避。会话复用要求 agentId、生效模型（`memoryModel ?? defaultModel ?? agent.model`）与 permissionMode 都一致。
 
 不从用户会话 fork 的原因：ACP 无 fork，PTY fork 会争抢同一 tmux 会话；成本差异用「输入只含请求 + 最终回答（各轮 ≤ 4 KB）」控制。
 
@@ -116,7 +118,8 @@ Agent CLI（复用 `dutydeck_group_tools_*` capability）：`memory list [--topi
 
 - `completed` 才计数；`turnsSinceExtraction += 1`、`turnsSinceConsolidation += 1`，并把 `{ sessionId, taskId, completedAt }` 追加到 `pendingTurns`。
 - 每轮记账后独立判两个条件：`turnsSinceExtraction ≥ 3` → 提取；`turnsSinceConsolidation ≥ 8` 或 `indexOverBudget` → 整理（两者都满足时先提取后整理）。不做「提取后再看整理」的串联判断，否则第 8 轮时提取计数刚被清零，整理会拖到第 9 轮。
-- 上一轮同类型运行失败后 30 分钟内不再自动触发（`failureBackoffMs`），避免索引压不下预算时每个用户轮次白跑一次整理 Agent；手动 `/memory consolidate` 不受限。
+- 上一轮同类型运行失败后 30 分钟内不再自动触发（`failureBackoffMs`，按 `lastFailureAt` 分类型判断），避免索引压不下预算时每个用户轮次白跑一次整理 Agent；手动 `/memory consolidate` 不受限。
+- 一次触发最多连跑 3 轮（每轮提取、整理各至多一次）：提取成功后 `turnsSinceExtraction` 置为剩余 `pendingTurns` 数，仍到期就紧接再跑，避免忙碌聊天的待提取轮次积压；每轮重读配置，`memoryEnabled` / `memoryAutoExtract` 关掉即停。
 - 每聊天单飞：`state.running` 存在且未超 15 分钟则跳过；超时视为陈旧覆盖。
 - 触发与执行异步，永不阻塞用户轮次；失败只写 `lastRun` 与日志，不发群消息。
 - `memoryEnabled === false` 或 `memoryAutoExtract === false` 时不触发（手动 `/memory consolidate` 仍可用）。

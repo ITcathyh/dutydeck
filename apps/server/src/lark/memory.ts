@@ -58,6 +58,8 @@ export interface LarkMemoryState {
   lastExtractionAt?: string;
   lastConsolidationAt?: string;
   indexOverBudget?: boolean;
+  /** 各类型最近一次失败的时间；退避只看自己这一类，成功后清除。lastRun 只代表最近一次运行。 */
+  lastFailureAt?: { extraction?: string; consolidation?: string };
   running?: { kind: 'extraction' | 'consolidation'; sessionId?: string; startedAt: string };
   lastRun?: {
     kind: 'extraction' | 'consolidation';
@@ -410,6 +412,7 @@ export class LarkMemoryStore {
           ...(parsed.lastExtractionAt ? { lastExtractionAt: parsed.lastExtractionAt } : {}),
           ...(parsed.lastConsolidationAt ? { lastConsolidationAt: parsed.lastConsolidationAt } : {}),
           ...(parsed.indexOverBudget !== undefined ? { indexOverBudget: parsed.indexOverBudget } : {}),
+          ...(parsed.lastFailureAt ? { lastFailureAt: parsed.lastFailureAt } : {}),
           ...(parsed.running ? { running: parsed.running } : {}),
           ...(parsed.lastRun ? { lastRun: parsed.lastRun } : {})
         };
