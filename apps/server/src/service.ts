@@ -17,6 +17,7 @@ import { createAutomationIntegration } from './automation-integration.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
+import { LarkMemoryStore } from './lark/memory.js';
 import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
@@ -338,6 +339,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
       schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true },
       workItemTools: { runtime, work: workItems, tools: agentTools },
+      // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
+      memoryTools: { tools: agentTools, store: new LarkMemoryStore(repos.config), runtime },
       workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
         if (!await resolveInstallationPrincipal(request)) return false;
         const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary: 'session', action, request });

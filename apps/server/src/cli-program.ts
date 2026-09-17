@@ -156,6 +156,9 @@ export interface CliHandlers {
   groupSend?(content: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupSendFile?(path: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
+  memoryList?(): void | Promise<void>;
+  memoryAdd?(content: string): void | Promise<void>;
+  memoryRemove?(id: string): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
   sessionNativeAsk?(): void | Promise<void>;
@@ -438,6 +441,20 @@ Routing guidance:
     .option('--limit <count>', 'Maximum messages to return (1-50)', '20')
     .option('--timeout-ms <milliseconds>', 'Long-poll timeout (0-30000)', '15000')
     .action(options => handlers.groupWait?.(options));
+
+  // 会话记忆：与 group 同一套 capability，但对私聊和关闭群协作的机器人同样可用。
+  const memory = program.command('memory').description('Read and maintain the long-term memory of the current Lark chat');
+  memory.command('list')
+    .description('List the memories saved for this chat, with their ids')
+    .action(() => handlers.memoryList?.());
+  memory.command('add')
+    .description('Save one durable fact, preference or convention for this chat')
+    .argument('<content>', 'One-sentence memory (at most 1000 characters)')
+    .action(content => handlers.memoryAdd?.(content));
+  memory.command('remove')
+    .description('Delete a memory of this chat by id')
+    .argument('<id>', 'Memory id shown by list (mem_*)')
+    .action(id => handlers.memoryRemove?.(id));
 
   // 通用回传通道：任何来源的会话内 CLI 都能使用，不限飞书。
   // 与 `dutydeck group send` 分层并存——group 面向飞书群里的其他人/机器人，

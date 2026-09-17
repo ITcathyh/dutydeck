@@ -14,6 +14,7 @@ import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions 
 import { registerFoundationManagementRoutes, type FoundationManagementOptions } from './foundation-routes.js';
 import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from './schedule-routes.js';
 import { registerWorkItemTools, type WorkItemToolsOptions } from './work-item-tools.js';
+import { registerLarkMemoryTools, type LarkMemoryToolsOptions } from './lark/memory-tools.js';
 import { registerWorkItemRoutes, type WorkItemRouteOptions } from './work-item-routes.js';
 import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } from './session-automation-routes.js';
 import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
@@ -52,6 +53,7 @@ export interface SessionExecutionPolicy {
 export interface BuildAppOptions {
   workItems?: WorkItemRouteOptions;
   workItemTools?: WorkItemToolsOptions;
+  memoryTools?: LarkMemoryToolsOptions;
   automation?: SessionAutomationRouteOptions;
   webRoot?: string;
   lark?: LarkRoutesOptions;
@@ -122,6 +124,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.automation) await registerSessionAutomationRoutes(app, options.automation);
   if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
+  if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
