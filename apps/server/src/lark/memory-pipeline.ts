@@ -18,6 +18,7 @@ import { readAttemptResult, type AttemptResultRepositories } from '../task-resul
 import { RuntimeError, type AgentConfig, type AgentEvent, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import {
+  isLarkMemoryId,
   LarkMemoryError,
   larkMemoryLimits,
   looksLikeLarkMemoryCredential,
@@ -124,7 +125,16 @@ export function parseLastJsonBlock(text: string): unknown {
 // ---------------------------------------------------------------------------
 
 export interface LarkMemoryAcceptedFact { content: string; topic: string; evidence: string }
-export interface LarkMemoryRejectedFact { fact: unknown; reason: string }
+
+export interface LarkMemoryRejectedFact {
+  /** 原始条目，只供调用方与测试核对，绝不能整条进日志。 */
+  fact: unknown;
+  reason: string;
+  /** 以下三项是可安全落日志的摘要：被拒的事实往往正是凭据本身。 */
+  evidence?: string;
+  topic?: string;
+  contentLength: number;
+}
 
 /**
  * 逐条核对提取结果。被拒的条目不影响其余条目，只计入 `rejected` 并由调用方记日志。
@@ -142,19 +152,33 @@ export function gateExtractionFacts(
   let live = existing.length;
 
   for (const fact of input.facts) {
-    const reject = (reason: string) => rejected.push({ fact, reason });
+    const raw = (fact && typeof fact === 'object' && !Array.isArray(fact) ? fact : {}) as { content?: unknown; topic?: unknown; evidence?: unknown };
+    const contentLength = typeof raw.content === 'string' ? raw.content.length : 0;
+    // 主题与证据都只有认出来之后才进摘要：没认出来的那一版是 Agent 原样吐出的文本，
+    // 直接写日志等于给凭据换一条落盘的路。
+    let safeTopic: string | undefined;
+    let safeEvidence: string | undefined;
+    const reject = (reason: string) => rejected.push({
+      fact, reason, contentLength,
+      ...(safeEvidence ? { evidence: safeEvidence } : {}),
+      ...(safeTopic ? { topic: safeTopic } : {})
+    });
     if (!fact || typeof fact !== 'object' || Array.isArray(fact)) { reject('条目不是对象'); continue; }
-    const raw = fact as { content?: unknown; topic?: unknown; evidence?: unknown };
 
     let content: string;
     try { content = normalizeLarkMemoryContent(raw.content); }
     catch (error) { reject(error instanceof Error ? error.message : '内容不合法'); continue; }
 
     let topic: string;
+    // 归一化失败的原始报错里带着主题原文，不能外传，换成固定说明。
     try { topic = normalizeLarkMemoryTopic(raw.topic); }
-    catch (error) { reject(error instanceof Error ? error.message : '主题不合法'); continue; }
+    catch { reject('主题标识不合法，必须是小写字母或数字开头的 slug'); continue; }
+    // 归一化只做小写化与非法字符替换，`sk-live-9f8e7d`、`ghp_abc123def456` 这类凭据本身
+    // 就是合法 slug，会原样穿过。只有账本里已经有的主题才认得出来，才敢写进日志。
+    if (topics.has(topic)) safeTopic = topic;
 
     if (typeof raw.evidence !== 'string' || !evidence.has(raw.evidence)) { reject('evidence 不是本次输入里的轮次 taskId'); continue; }
+    safeEvidence = raw.evidence;
     if (looksLikeLarkMemoryCredential(content)) { reject('内容疑似包含凭据'); continue; }
     if (seen.has(dedupeKey(content))) { reject('与已有记忆重复'); continue; }
     if (!topics.has(topic) && topics.size >= limits.topics) { reject(`主题数量已达 ${limits.topics} 上限`); continue; }
@@ -195,7 +219,14 @@ export function gateConsolidationActions(
   const useIds = (ids: string[], label: string): boolean => {
     if (new Set(ids).size !== ids.length) { violations.push(`${label} 的记忆编号有重复`); return false; }
     for (const id of ids) {
-      if (!live.has(id)) { violations.push(`${label} 引用了不存在或已失效的记忆 ${id}`); return false; }
+      if (!live.has(id)) {
+        // 认不出来的 id 不回显：它是 Agent 自由输出的字符串，而整理 prompt 里列了全部记忆原文，
+        // 它把某条记忆抄进 id 就等于把内容写进日志和下一轮 prompt。存活过的编号回显才有意义。
+        violations.push(isLarkMemoryId(id)
+          ? `${label} 引用了不存在或已失效的记忆 ${id}`
+          : `${label} 的记忆编号格式不合法，应形如 mem_1a2b3c4d`);
+        return false;
+      }
       if (touched.has(id)) { violations.push(`记忆 ${id} 在多个动作里重复出现`); return false; }
     }
     for (const id of ids) touched.add(id);
@@ -211,12 +242,14 @@ export function gateConsolidationActions(
   };
 
   const checkTopic = (value: unknown, fallback: string, label: string): string | undefined => {
+    // 不回传归一化的原始报错：它把主题原文嵌在消息里，而违规清单既进日志也回灌 prompt。
     try { return value === undefined || value === null || value === '' ? fallback : normalizeLarkMemoryTopic(value); }
-    catch (error) { violations.push(`${label} 的主题不合法：${error instanceof Error ? error.message : '未知原因'}`); return undefined; }
+    catch { violations.push(`${label} 的主题不合法，必须是小写字母或数字开头的 slug`); return undefined; }
   };
 
-  for (const action of input.actions) {
-    if (!action || typeof action !== 'object' || Array.isArray(action)) { violations.push('动作不是对象'); continue; }
+  for (const [index, action] of input.actions.entries()) {
+    const position = `第 ${index + 1} 个动作`;
+    if (!action || typeof action !== 'object' || Array.isArray(action)) { violations.push(`${position}不是对象`); continue; }
     const raw = action as { op?: unknown; id?: unknown; ids?: unknown; content?: unknown; topic?: unknown };
 
     if (raw.op === 'noop') continue;
@@ -274,15 +307,22 @@ export function gateConsolidationActions(
       continue;
     }
 
-    violations.push(`不认识的动作 ${String(raw.op)}`);
+    // op 同样不回显原文，只报位置。
+    violations.push(`${position}的 op 不是 merge / update / retire / retopic / noop 之一`);
   }
 
   const projectedEntries = [...projected.values()];
   const perTopic = new Map<string, number>();
   for (const entry of projectedEntries) perTopic.set(entry.topic, (perTopic.get(entry.topic) ?? 0) + 1);
   if (perTopic.size > limits.topics) violations.push(`整理后主题数 ${perTopic.size} 超过上限 ${limits.topics}`);
+  // 同上：Agent 自选的新主题名可能就是凭据，只有账本里已有的主题才点名。
+  const knownTopics = new Set(existing.map(entry => entry.topic));
   for (const [topic, count] of perTopic) {
-    if (count > limits.entriesPerTopic) violations.push(`整理后主题 ${topic} 有 ${count} 条，超过上限 ${limits.entriesPerTopic}`);
+    if (count > limits.entriesPerTopic) {
+      violations.push(knownTopics.has(topic)
+        ? `整理后主题 ${topic} 有 ${count} 条，超过上限 ${limits.entriesPerTopic}`
+        : `整理后有一个新主题下挂了 ${count} 条，超过上限 ${limits.entriesPerTopic}`);
+    }
   }
   if (projectedEntries.length > limits.liveEntries) violations.push(`整理后共 ${projectedEntries.length} 条，超过上限 ${limits.liveEntries}`);
 
@@ -476,7 +516,9 @@ export class LarkMemoryPipeline {
 
       const gate = gateExtractionFacts({ facts: parsed.facts, evidenceTaskIds: materials.map(item => item.taskId) }, entries);
       if (gate.rejected.length) {
-        this.options.log.warn({ scope, rejected: gate.rejected }, '会话记忆提取有条目未通过门禁');
+        // 逐字段挑出来写，不要整条 rejected：被拒的事实里常常就是凭据。
+        const summary = gate.rejected.map(({ reason, evidence, topic, contentLength }) => ({ reason, evidence, topic, contentLength }));
+        this.options.log.warn({ scope, rejected: summary }, '会话记忆提取有条目未通过门禁');
       }
       const applied = await this.options.store.applyBatch(scope, gate.accepted.map(fact => ({
         op: 'add' as const,
@@ -517,8 +559,8 @@ export class LarkMemoryPipeline {
   }
 
   /** 读取各轮的用户请求与最终回答；读不到结果的轮次直接丢弃，不算失败。 */
-  private async collectTurns(turns: LarkMemoryPendingTurn[]): Promise<Array<{ taskId: string; prompt: string; answer: string }>> {
-    const materials: Array<{ taskId: string; prompt: string; answer: string }> = [];
+  private async collectTurns(turns: LarkMemoryPendingTurn[]): Promise<LarkMemoryTurnMaterial[]> {
+    const materials: LarkMemoryTurnMaterial[] = [];
     for (const turn of [...turns].sort((left, right) => left.completedAt.localeCompare(right.completedAt))) {
       try {
         const attemptId = this.attemptIdFor(turn.taskId);
@@ -528,7 +570,15 @@ export class LarkMemoryPipeline {
         if (read.status !== 'settled' || read.result.outcome !== 'completed') continue;
         const answer = read.result.output.text.trim();
         if (!answer) continue;
-        materials.push({ taskId: turn.taskId, prompt: task.prompt, answer: answer.slice(0, larkMemoryPipelineRules.answerChars) });
+        // output.text 是整轮 assistant 文本的拼接，结论在末尾：从头截会把结论丢掉，
+        // 把中途放弃的方案当成证据，所以保留末尾并在 prompt 里标明只给了一段。
+        const clipped = answer.length > larkMemoryPipelineRules.answerChars;
+        materials.push({
+          taskId: turn.taskId,
+          prompt: task.prompt,
+          answer: clipped ? answer.slice(-larkMemoryPipelineRules.answerChars) : answer,
+          clipped
+        });
       } catch (error) {
         this.options.log.warn({ error, turn }, '读取待提取轮次结果失败，跳过该轮');
       }
@@ -544,10 +594,16 @@ export class LarkMemoryPipeline {
     try {
       const entries = await this.options.store.list(scope);
       const state = await this.options.store.getState(scope);
+      // 整理期间用户轮次还在完成、计数还在涨；无条件清零会把这些增量抹掉，把下一次整理推迟。
+      const countedBefore = state.turnsSinceConsolidation;
       if (!entries.length) {
         return await this.settle(scope, {
           kind: 'consolidation', ok: true, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0
-        }, () => ({ turnsSinceConsolidation: 0, indexOverBudget: false, lastConsolidationAt: this.now().toISOString() }));
+        }, current => ({
+          turnsSinceConsolidation: Math.max(0, current.turnsSinceConsolidation - countedBefore),
+          indexOverBudget: false,
+          lastConsolidationAt: this.now().toISOString()
+        }));
       }
 
       const session = await this.memorySession(scope, config);
@@ -583,7 +639,11 @@ export class LarkMemoryPipeline {
       // 一次磁盘故障就能把它卡在 true，之后每个用户轮次都白跑一轮整理。门禁已保证索引落进预算。
       return await this.settle(scope, {
         kind: 'consolidation', ok: true, added: applied.added.length, superseded, retired: applied.removed, retopiced: applied.retopiced, rejected: 0
-      }, () => ({ turnsSinceConsolidation: 0, indexOverBudget: false, lastConsolidationAt: this.now().toISOString() }));
+      }, current => ({
+        turnsSinceConsolidation: Math.max(0, current.turnsSinceConsolidation - countedBefore),
+        indexOverBudget: false,
+        lastConsolidationAt: this.now().toISOString()
+      }));
     } catch (error) {
       this.options.log.error({ error, scope, actorId }, '会话记忆整理失败');
       return this.settle(scope, {
@@ -739,8 +799,12 @@ function errorCode(error: unknown): string {
 
 const noToolsNotice = '你在一个只读的整理任务里，不要调用任何工具、不要读写文件、不要执行命令，直接输出结论。';
 
-export function buildExtractionPrompt(indexText: string, turns: Array<{ taskId: string; prompt: string; answer: string }>): string {
-  const rounds = turns.map(turn => `### 轮次 ${turn.taskId}\n用户：${turn.prompt}\n回答：${turn.answer}`).join('\n\n');
+export interface LarkMemoryTurnMaterial { taskId: string; prompt: string; answer: string; clipped?: boolean }
+
+export function buildExtractionPrompt(indexText: string, turns: LarkMemoryTurnMaterial[]): string {
+  const rounds = turns
+    .map(turn => `### 轮次 ${turn.taskId}\n用户：${turn.prompt}\n回答${turn.clipped ? '（回答较长，仅保留末尾部分）' : ''}：${turn.answer}`)
+    .join('\n\n');
   return [
     '[Dutydeck 会话记忆 · 后台提取]',
     noToolsNotice,

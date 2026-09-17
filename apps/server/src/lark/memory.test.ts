@@ -186,6 +186,35 @@ describe('LarkMemoryStore', () => {
     repos.close();
   });
 
+  it('applyBatch 的主题上限按批次终态判定，中间态短暂超限不算违规', async () => {
+    const { repos, memory } = store();
+    const last: string[] = [];
+    for (let i = 0; i < 12; i++) {
+      const entry = await memory.add(scope, { content: `主题内容 ${i}`, source: 'agent', topic: `topic-${i}` });
+      last.push(entry.id);
+    }
+
+    // 「退掉 topic-11 的最后一条 + 新开一个主题」终态仍是 12 个主题：批次必须放行。
+    const applied = await memory.applyBatch(scope, [
+      { op: 'add', input: { content: '新主题的一条', source: 'consolidation', topic: 'brand-new' } },
+      { op: 'remove', id: last[11]!, deletedBy: 'consolidation' }
+    ]);
+    expect(applied.added).toHaveLength(1);
+    expect(applied.removed).toBe(1);
+    const topics = new Set((await memory.list(scope)).map(entry => entry.topic));
+    expect(topics.size).toBe(12);
+    expect(topics.has('brand-new')).toBe(true);
+    expect(topics.has('topic-11')).toBe(false);
+
+    // 只加不退仍然超限，整批不写。
+    const before = await memory.listAll(scope);
+    await expect(memory.applyBatch(scope, [
+      { op: 'add', input: { content: '第十三个主题', source: 'consolidation', topic: 'one-too-many' } }
+    ])).rejects.toMatchObject({ code: 'MEMORY_TOPIC_LIMIT_REACHED', statusCode: 409 });
+    expect(await memory.listAll(scope)).toEqual(before);
+    repos.close();
+  });
+
   it('groups entries by topic in appearance order, with entries sorted by createdAt ascending', async () => {
     let time = 0;
     const { repos, memory } = store({ now: () => new Date(Date.UTC(2026, 8, 17, 0, 0, time++)) });

@@ -268,7 +268,9 @@ export class LarkMemoryStore {
       let retopiced = 0;
       for (const step of steps) {
         if (step.op === 'add') {
-          const outcome = this.addTo(current, step.input);
+          // 批内先 add 后 remove/retopic，中间态可能短暂多出一个主题；主题上限改到批次末尾统一判，
+          // 否则「退掉某主题最后一条 + 新开一个主题」这种终态合法的整理计划会被中间态误杀。
+          const outcome = this.addTo(current, step.input, { deferTopicLimit: true });
           current = outcome.entries;
           added.push(outcome.created);
         } else if (step.op === 'remove') {
@@ -283,6 +285,12 @@ export class LarkMemoryStore {
           retopiced += 1;
         }
       }
+      if (added.length) {
+        const topics = new Set(current.filter(entry => !entry.deletedAt).map(entry => entry.topic));
+        if (topics.size > larkMemoryLimits.topics) {
+          throw new LarkMemoryError('MEMORY_TOPIC_LIMIT_REACHED', `本聊天的记忆主题已达 ${larkMemoryLimits.topics} 个上限，请复用现有主题或先整理。`, 409);
+        }
+      }
       result = { added, removed, retopiced };
       return current;
     });
@@ -290,7 +298,11 @@ export class LarkMemoryStore {
     return result;
   }
 
-  private addTo(entries: LarkMemoryEntry[], input: AddLarkMemoryInput): { entries: LarkMemoryEntry[]; created: LarkMemoryEntry } {
+  private addTo(
+    entries: LarkMemoryEntry[],
+    input: AddLarkMemoryInput,
+    options: { deferTopicLimit?: boolean } = {}
+  ): { entries: LarkMemoryEntry[]; created: LarkMemoryEntry } {
     const content = normalizeLarkMemoryContent(input.content);
     if (looksLikeLarkMemoryCredential(content)) {
       throw new LarkMemoryError('MEMORY_CREDENTIAL_REJECTED', '记忆内容疑似包含凭据（密钥、令牌或密码），不保存。', 400);
@@ -307,10 +319,12 @@ export class LarkMemoryStore {
       }
     }
 
-    const remainingLive = entries.filter(e => !e.deletedAt && !supersedes?.includes(e.id));
-    const activeTopics = new Set(remainingLive.map(e => e.topic));
-    if (!activeTopics.has(topic) && activeTopics.size >= larkMemoryLimits.topics) {
-      throw new LarkMemoryError('MEMORY_TOPIC_LIMIT_REACHED', `本聊天的记忆主题已达 ${larkMemoryLimits.topics} 个上限，请复用现有主题或先整理。`, 409);
+    if (!options.deferTopicLimit) {
+      const remainingLive = entries.filter(e => !e.deletedAt && !supersedes?.includes(e.id));
+      const activeTopics = new Set(remainingLive.map(e => e.topic));
+      if (!activeTopics.has(topic) && activeTopics.size >= larkMemoryLimits.topics) {
+        throw new LarkMemoryError('MEMORY_TOPIC_LIMIT_REACHED', `本聊天的记忆主题已达 ${larkMemoryLimits.topics} 个上限，请复用现有主题或先整理。`, 409);
+      }
     }
 
     const nowIso = this.now().toISOString();

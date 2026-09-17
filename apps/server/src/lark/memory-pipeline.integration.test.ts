@@ -34,7 +34,7 @@ type MemoryReply = { text: string; delayMs?: number };
 /** 记忆会话的 start 入参；用例用它断言权限模式与复用次数。 */
 type StartInput = { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode };
 
-async function harness(options: { timeoutMs?: number; agentModel?: string; startGuard?: (input: StartInput) => void } = {}) {
+async function harness(options: { timeoutMs?: number; agentModel?: string; userAnswer?: string; startGuard?: (input: StartInput) => void } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-pipeline-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
@@ -61,7 +61,7 @@ async function harness(options: { timeoutMs?: number; agentModel?: string; start
             return;
           }
           prompts.push(prompt);
-          emit({ type: 'text', data: { text: '工作已完成' } });
+          emit({ type: 'text', data: { text: options.userAnswer ?? '工作已完成' } });
           emit({ type: 'completed', data: { stopReason: 'end_turn' } });
         }
       };
@@ -552,10 +552,98 @@ describe('Lark memory pipeline through the coordinator', () => {
     const h = await harness();
     // 空账本是唯一一条不写派生视图的整理成功路径：这里不显式清标记，它就会卡在 true，
     // 之后每个用户轮次都判定整理到期，drain 还会连跑 3 轮。
-    await h.store.updateState(scope, { indexOverBudget: true });
+    await h.store.updateState(scope, { indexOverBudget: true, turnsSinceConsolidation: 8 });
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ kind: 'consolidation', ok: true, added: 0 });
     expect((await h.store.getState(scope)).indexOverBudget).toBe(false);
+    // 空账本早退也走同一套递减，别漏掉。
+    expect((await h.store.getState(scope)).turnsSinceConsolidation).toBe(0);
     expect(h.memoryPrompts).toEqual([]);
+  });
+
+  it('被门禁拒绝的凭据不会原文进日志，也不会回灌重试 prompt', async () => {
+    const h = await harness();
+    // 三个出口各埋一个凭据：fact 的 content、fact 的 evidence、整理动作的 id 与 op。
+    const secrets = ['abc123DEADBEEFabc123DEADBEEF', 'hunter2', 'sk-LIVE-9f8e7d', '身份证 11010119900307'];
+    h.setResponder(prompt => {
+      if (prompt.includes('后台提取')) {
+        const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
+        return { text: jsonBlock({ facts: [
+          { content: `token: ${secrets[0]}`, topic: 'environment', kind: 'environment', evidence: taskId },
+          { content: '部署脚本在 scripts/deploy.sh', topic: 'stack', kind: 'convention', evidence: `用户说 password: ${secrets[1]}` }
+        ] }) };
+      }
+      return { text: jsonBlock({ actions: [
+        { op: 'retire', id: `用户的 api_key=${secrets[2]}` },
+        { op: `把记忆改成 ${secrets[3]}`, id: 'mem_00000000' }
+      ] }) };
+    });
+
+    await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
+    await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
+
+    await h.runTurns(3);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 0, rejected: 2 });
+    }, { timeout: 10_000 });
+    await h.waitIdle();
+
+    // 整理侧的违规清单既进日志又回灌下一轮 prompt，两条路都要干净。
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_GATE_REJECTED' });
+    await h.waitIdle();
+
+    expect((await h.store.list(scope)).map(entry => entry.content)).toEqual(['这个群的回复统一用中文']);
+    // Error.message 不可枚举，直接 JSON.stringify 看不进去，必须显式展开。
+    const logged = JSON.stringify(
+      [...h.log.info.mock.calls, ...h.log.warn.mock.calls, ...h.log.error.mock.calls],
+      // pino 对 error 只写自有可枚举字段，message / stack 反而看不到：两边都展开才不留盲区。
+      (_key, value) => (value instanceof Error ? { name: value.name, message: value.message, stack: value.stack, ...value } : value)
+    );
+    const retryPrompts = h.memoryPrompts.filter(prompt => prompt.includes('违规清单：'));
+    expect(retryPrompts).toHaveLength(1);
+    for (const secret of secrets) {
+      expect(logged).not.toContain(secret);
+      expect(retryPrompts[0]).not.toContain(secret);
+    }
+    expect(logged).toContain('内容疑似包含凭据');
+    expect(logged).toContain('evidence 不是本次输入里的轮次 taskId');
+  });
+
+  it('回答过长时保留末尾结论，并在 prompt 里标明只给了一段', async () => {
+    const tail = '结论：部署脚本在 scripts/deploy.sh';
+    const head = '过程开头标记' + '中间叙述'.repeat(1_200);
+    const h = await harness({ userAnswer: `${head}\n${tail}` });
+    h.setResponder(() => ({ text: jsonBlock({ facts: [] }) }));
+
+    await h.runTurns(3);
+    await vi.waitFor(() => expect(h.memoryPrompts.filter(prompt => prompt.includes('后台提取'))).toHaveLength(1), { timeout: 10_000 });
+    await h.waitIdle();
+
+    const extraction = h.memoryPrompts.find(prompt => prompt.includes('后台提取'))!;
+    expect(extraction).toContain(tail);
+    expect(extraction).not.toContain('过程开头标记');
+    expect(extraction).toContain('回答（回答较长，仅保留末尾部分）：');
+  });
+
+  it('整理期间完成的轮次不被清零抹掉', async () => {
+    const h = await harness();
+    h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }), delayMs: 600 }));
+    await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
+    await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
+
+    // 自动提取会抢同一个单飞占位，这里只考察整理的计数收口。
+    const quiet = await h.setConfig({ memoryAutoExtract: false });
+    await h.store.updateState(scope, { turnsSinceConsolidation: 8 });
+    const consolidation = h.pipeline.runConsolidation(scope);
+    await h.runTurns(2, quiet);
+    // 记账发生在轮次交付之后，runTurns 返回时未必已落盘；没等到 10 就说明这两轮没落在
+    // 整理运行期间，后面的断言会变成空断言（清零实现也能得 2），所以这里必须先卡住。
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).turnsSinceConsolidation).toBe(10);
+    }, { timeout: 2_000 });
+    expect(await consolidation).toMatchObject({ kind: 'consolidation', ok: true });
+
+    // 8 轮被这次整理消化掉，运行期间新完成的 2 轮必须留下。
+    expect((await h.store.getState(scope)).turnsSinceConsolidation).toBe(2);
   });
 
   it('记忆会话超时：中断该任务、记失败并清掉 running', async () => {

@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import {
+  buildExtractionPrompt,
   gateConsolidationActions,
   gateExtractionFacts,
   indexOverBudgetViolation,
@@ -108,6 +109,108 @@ describe('gateExtractionFacts', () => {
   });
 });
 
+describe('被拒条目的日志摘要', () => {
+  it('摘要里没有内容原文，非法主题也不外传', () => {
+    const secret = 'token: abc123DEADBEEF';
+    const result = gateExtractionFacts({
+      facts: [
+        { content: secret, topic: 'conventions', evidence: 'task_1' },
+        { content: '主题非法的一条', topic: '中文主题', evidence: 'task_1' }
+      ],
+      evidenceTaskIds: ['task_1']
+    }, [entry({ id: 'mem_00000001', content: '既有条目', topic: 'conventions' })]);
+
+    expect(result.accepted).toEqual([]);
+    expect(result.rejected).toHaveLength(2);
+    // 原始条目仍保留，供调用方核对；但日志只能取这几个字段。
+    const summary = result.rejected.map(({ reason, evidence, topic, contentLength }) => ({ reason, evidence, topic, contentLength }));
+    expect(JSON.stringify(summary)).not.toContain('abc123');
+    expect(JSON.stringify(summary)).not.toContain('中文主题');
+    expect(summary[0]).toEqual({ reason: '内容疑似包含凭据', evidence: 'task_1', topic: 'conventions', contentLength: secret.length });
+    expect(summary[1]!.topic).toBeUndefined();
+  });
+
+  it('账本里没有的主题不进摘要：凭据本身可能就是合法 slug', () => {
+    const result = gateExtractionFacts({
+      facts: [{ content: 'token: abc123DEADBEEF', topic: 'ghp_abc123def456', evidence: 'task_1' }],
+      evidenceTaskIds: ['task_1']
+    }, []);
+
+    const summary = result.rejected.map(({ reason, evidence, topic, contentLength }) => ({ reason, evidence, topic, contentLength }));
+    expect(JSON.stringify(summary)).not.toContain('ghp_abc123def456');
+    expect(summary[0]!.topic).toBeUndefined();
+  });
+
+  it('evidence 不在本次输入里时，摘要不回显它的原文', () => {
+    const result = gateExtractionFacts({
+      facts: [{ content: '后端用 Go', topic: 'stack', evidence: '用户说 password: hunter2' }],
+      evidenceTaskIds: ['task_1']
+    }, []);
+
+    const summary = result.rejected.map(({ reason, evidence, topic, contentLength }) => ({ reason, evidence, topic, contentLength }));
+    expect(JSON.stringify(summary)).not.toContain('hunter2');
+    expect(summary[0]!.evidence).toBeUndefined();
+  });
+
+  it('整理的违规清单不回传主题原文', () => {
+    const existing = [{ id: 'mem_a1', content: '后端用 Go', source: 'extraction' as const, topic: 'stack', createdAt: '2026-09-17T10:00:00.000Z' }];
+    const result = gateConsolidationActions({ actions: [{ op: 'retopic', id: 'mem_a1', topic: '中文主题' }] }, existing);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.violations.join(' ')).not.toContain('中文主题');
+  });
+
+  it('整理的违规清单不回显记忆编号原文与未知动作名', () => {
+    const existing = [{ id: 'mem_a1', content: '后端用 Go', source: 'extraction' as const, topic: 'stack', createdAt: '2026-09-17T10:00:00.000Z' }];
+    const result = gateConsolidationActions({
+      actions: [
+        { op: 'retire', id: '用户的 api_key=sk-LIVE-abc123' },
+        { op: '把 mem_a1 改成 用户住在 XX 路 1 号', id: 'mem_a1' }
+      ]
+    }, existing);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const text = result.violations.join(' ');
+    expect(text).not.toContain('sk-LIVE-abc123');
+    expect(text).not.toContain('XX 路');
+    // 只报位置，够 Agent 下一轮定位到是哪个动作。
+    expect(text).toContain('第 2 个动作');
+  });
+
+  it('每主题超限的报错不点名 Agent 自选的新主题', () => {
+    const existing = Array.from({ length: larkMemoryLimits.entriesPerTopic + 1 }, (_, i) =>
+      entry({ id: `mem_${String(i).padStart(8, '0')}`, content: `第 ${i} 条记忆`, topic: 'stack' }));
+    const result = gateConsolidationActions({
+      actions: existing.map(item => ({ op: 'retopic', id: item.id, topic: 'ghp_abc123def456' }))
+    }, existing);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    const text = result.violations.join(' ');
+    expect(text).not.toContain('ghp_abc123def456');
+    expect(text).toContain(`${larkMemoryLimits.entriesPerTopic + 1} 条`);
+  });
+
+  it('格式合法但已失效的编号仍可以回显，便于 Agent 自查', () => {
+    const result = gateConsolidationActions({ actions: [{ op: 'retire', id: 'mem_deadbeef' }] }, []);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.violations.join(' ')).toContain('mem_deadbeef');
+  });
+});
+
+describe('buildExtractionPrompt', () => {
+  it('回答被截断时标明只保留了末尾', () => {
+    const prompt = buildExtractionPrompt('', [
+      { taskId: 'task_1', prompt: '问题', answer: '结论在这里', clipped: true },
+      { taskId: 'task_2', prompt: '问题', answer: '完整回答' }
+    ]);
+    expect(prompt).toContain('回答（回答较长，仅保留末尾部分）：结论在这里');
+    expect(prompt).toContain('回答：完整回答');
+  });
+});
+
 describe('gateConsolidationActions', () => {
   const base = [
     entry({ id: 'mem_a1', content: '后端用 Go', topic: 'stack' }),
@@ -135,7 +238,7 @@ describe('gateConsolidationActions', () => {
   });
 
   it('引用不存在的 id 或同一 id 出现两次都算违规', () => {
-    expect(gate([{ op: 'retire', id: 'mem_zzz' }])).toMatchObject({ ok: false });
+    expect(gate([{ op: 'retire', id: 'mem_ffffffff' }])).toMatchObject({ ok: false });
     const duplicated = gate([{ op: 'retire', id: 'mem_a1' }, { op: 'retopic', id: 'mem_a1', topic: 'stack' }]);
     expect(duplicated.ok).toBe(false);
     if (duplicated.ok) return;

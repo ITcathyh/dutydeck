@@ -21,7 +21,7 @@
 | 模型 | 提取与整理用机器人配置的 `memoryAgentId` / `memoryModel`，默认沿用机器人的 Agent 与模型 | 用户可选便宜模型（Codex 做法）。 |
 | 权限 | 聊天命令沿用命令层白名单；Agent 工具沿用 capability；机器人发送者不能改写；凭据类内容拒绝入库 | 记忆是参考内容，不放宽任何操作权限。 |
 | 不做 | 机器人级共享记忆、按人记忆、向量检索、Web 查看页 | 留后续。 |
-| 已知限制 | 换整理 Agent / 模型后旧记忆会话不主动 stop，等运行时空闲回收；`memoryAgentId` 保存时不校验 Agent 存在，运行时以 `MEMORY_AGENT_NOT_FOUND` 失败；提取 prompt 含用户原话与最终回答全文，会发给 `memoryModel` 指定的模型 | 记录在此，README 的配置说明里提示后两条。 |
+| 已知限制 | 换整理 Agent / 模型后旧记忆会话不主动 stop，等运行时空闲回收；`memoryAgentId` 保存时不校验 Agent 存在，运行时以 `MEMORY_AGENT_NOT_FOUND` 失败；提取 prompt 含用户原话与最终回答末尾，会发给 `memoryModel` 指定的模型；成功路径的状态收口若遇到 CAS 冲突耗尽重试，账本已写入但本轮会被记成 `ok=false`（只影响退避与展示，不丢数据） | 记录在此，README 的配置说明里提示模型与 Agent 两条。 |
 
 ## 2. 数据模型（`apps/server/src/lark/memory.ts`）
 
@@ -126,13 +126,13 @@ Agent CLI（复用 `dutydeck_group_tools_*` capability）：`memory list [--topi
 
 ### 5.3 提取
 
-输入：`pendingTurns` 里的轮次（跨该聊天的所有会话），按 completedAt 升序，最多 12 轮；提取结束只摘掉本次消费过的轮次（按 taskId），提取期间新完成的轮次留给下一次；结果读不到的轮次直接丢弃；每轮取用户 prompt（`tasks.prompt`）与最终回答（`readAttemptResult().output.text`，截 4000 字符）；加当前索引。输出：
+输入：`pendingTurns` 里的轮次（跨该聊天的所有会话），按 completedAt 升序，最多 12 轮；提取结束只摘掉本次消费过的轮次（按 taskId），提取期间新完成的轮次留给下一次；结果读不到的轮次直接丢弃；每轮取用户 prompt（`tasks.prompt`）与最终回答（`readAttemptResult().output.text` 是整轮 assistant 文本的拼接，取最后一段回答或末尾 4000 字符，保住结论而不是过程叙述）；加当前索引。输出：
 
 ```json
 { "facts": [ { "content": "…", "topic": "conventions", "kind": "preference|convention|decision|environment|contact|other", "evidence": "<taskId>" } ] }
 ```
 
-门禁（确定性，全部通过才写入）：`content` 归一化后 1–1000 字符；`topic` 合法 slug 且写入后主题总数 ≤ 12；`evidence` 是本次输入里的 taskId；与有效条目归一化后不完全重复；不含凭据模式（`/(api[_-]?key|token|secret|password|passwd|bearer)\s*[:=]/i` 或 40+ 位连续 base64/hex）；单次 ≤ 10 条；有效总数 ≤ 200。写入 `source: 'extraction'`、`taskId: evidence`、`sessionId: 提取会话`。被拒条目计入 `rejected` 并记日志。
+门禁（确定性，全部通过才写入）：`content` 归一化后 1–1000 字符；`topic` 合法 slug 且写入后主题总数 ≤ 12；`evidence` 是本次输入里的 taskId；与有效条目归一化后不完全重复；不含凭据模式（`/(api[_-]?key|token|secret|password|passwd|bearer)\s*[:=]/i` 或 40+ 位连续 base64/hex）；单次 ≤ 10 条；有效总数 ≤ 200。写入 `source: 'extraction'`、`taskId: evidence`、`sessionId: 提取会话`。被拒条目计入 `rejected` 并记日志；日志只含原因、已校验的证据 taskId、账本里已有的主题与内容长度，不含内容原文（被拒的往往正是凭据，而凭据本身可能是合法 slug 或任意字符串，未认出来的主题 / 证据 / 记忆编号一律不回显）。
 
 ### 5.4 整理
 
@@ -150,7 +150,7 @@ Agent CLI（复用 `dutydeck_group_tools_*` capability）：`memory list [--topi
 
 门禁：所有 id 有效且未重复出现；`merge` 至少 2 个 id；`merge` / `update` 不得涉及 `source=user` 条目（用户条目只允许 `retire` / `retopic`）；新内容 1–1000 字符、无凭据模式；应用后主题 ≤ 12、每主题 ≤ 30、总数 ≤ 200；应用后索引 ≤ 预算，否则本轮判失败。任一违规 → 把违规清单附回 prompt 重试一次；仍失败则整轮不写入，`lastRun.ok=false`。
 
-应用：`merge` / `update` = `add({ source: 'consolidation', supersedes: ids })`；`retire` = `remove(id, 'consolidation')`；`retopic` = `retopic()`。全部通过后一次性写账本（单个 CAS 写），再重建视图，清零 `turnsSinceConsolidation`。
+应用：`merge` / `update` = `add({ source: 'consolidation', supersedes: ids })`；`retire` = `remove(id, 'consolidation')`；`retopic` = `retopic()`。全部通过后一次性写账本（`applyBatch`，单个 CAS 写；主题 ≤ 12 按批次终态校验，允许「先加新主题、再退掉旧主题」的中间态），再重建视图；`turnsSinceConsolidation` 减去 claim 时的快照值而不是清零，整理期间完成的轮次不丢计数。
 
 ### 5.5 配置（legacy `StoredLarkConfig`）
 
