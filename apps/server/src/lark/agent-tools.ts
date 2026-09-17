@@ -370,8 +370,12 @@ export class LarkAgentToolsService {
    */
   async memoryContext(token?: string): Promise<LarkAgentSessionBinding> {
     const binding = await this.capabilities.resolve(token);
-    if (!await readLarkConfig(this.configs, binding.appId)) {
+    const config = await readLarkConfig(this.configs, binding.appId);
+    if (!config) {
       throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
+    }
+    if (config.memoryEnabled === false) {
+      throw new AgentGroupToolError('MEMORY_DISABLED', '当前飞书机器人已关闭会话记忆。', 403);
     }
     return binding;
   }
@@ -477,14 +481,16 @@ export class LarkAgentToolsService {
     if (!binding) return prompt;
     const config = await readLarkConfig(this.configs, binding.appId);
     if (!config) return prompt;
-    // 记忆工具对所有飞书会话（含私聊、关闭群协作的机器人）开放；群协作与编排提示仍按原开关。
-    const blocks = [larkMemoryToolsPrompt(this.options.groupToolsCommand)];
+    const blocks: string[] = [];
+    if (config.memoryEnabled !== false) {
+      blocks.push(larkMemoryToolsPrompt(this.options.groupToolsCommand));
+    }
     if (config.groupToolsEnabled) {
       blocks.push(larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand));
       const task = this.options.workbenchTask?.(session.id);
       if (task) blocks.push(workbenchAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${this.capabilities.workbenchTurnToken(session.id, task.taskId)}`));
     }
-    return `${blocks.join('\n\n')}\n\n${prompt}`;
+    return blocks.length ? `${blocks.join('\n\n')}\n\n${prompt}` : prompt;
   }
 
   async isConfiguredPeer(appId: string, chatId: string, senderOpenId: string) {

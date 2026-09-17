@@ -18,14 +18,21 @@ const session = (id: string, sourceId: string): Session => ({
   id, agentId: 'codex', state: 'idle', cwd: '/tmp', source: 'lark', sourceId, runId: 'run_1', createdAt: '', updatedAt: ''
 });
 
-async function setup(options: { actorId?: string } = {}) {
+async function setup(options: { actorId?: string; memoryEnabled?: boolean } = {}) {
   const repos = createRepositories(':memory:'); repositories.push(repos);
   const groupSession = session('ses_group', 'cli_bot:oc_group:group');
   const p2pSession = session('ses_p2p', 'cli_bot:oc_p2p:p2p');
   await repos.sessions.save(groupSession);
   await repos.sessions.save(p2pSession);
   // 群协作关闭的机器人：记忆工具仍必须可用。
-  await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_bot', appSecret: 'secret', name: 'Bot', defaultAgentId: 'codex', groupToolsEnabled: false }]));
+  await repos.config.set(larkBotsConfigKey, JSON.stringify([{
+    appId: 'cli_bot',
+    appSecret: 'secret',
+    name: 'Bot',
+    defaultAgentId: 'codex',
+    groupToolsEnabled: false,
+    memoryEnabled: options.memoryEnabled ?? true
+  }]));
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310');
   const tools = new LarkAgentToolsService(capabilities, repos.config, {});
   const store = new LarkMemoryStore(repos.config);
@@ -49,10 +56,21 @@ describe('Lark memory agent tools', () => {
     expect(empty.statusCode).toBe(200);
     expect(empty.json()).toEqual({ chatId: 'oc_group', entries: [] });
 
-    const added = await app.inject({ method: 'POST', url: larkMemoryToolsPath, headers: headers(groupSession), payload: { content: '项目用 pnpm，测试命令 pnpm test' } });
+    const added = await app.inject({
+      method: 'POST',
+      url: larkMemoryToolsPath,
+      headers: headers(groupSession),
+      payload: { content: '项目用 pnpm，测试命令 pnpm test', topic: 'conventions' }
+    });
     expect(added.statusCode).toBe(200);
     const entry = added.json().entry;
-    expect(entry).toMatchObject({ content: '项目用 pnpm，测试命令 pnpm test', source: 'agent', sessionId: 'ses_group', createdBy: 'ou_alice' });
+    expect(entry).toMatchObject({
+      content: '项目用 pnpm，测试命令 pnpm test',
+      source: 'agent',
+      topic: 'conventions',
+      sessionId: 'ses_group',
+      createdBy: 'ou_alice'
+    });
     expect(entry.id).toMatch(/^mem_[0-9a-f]{8}$/);
 
     // 同一机器人的私聊会话看不到群里的记忆：作用域来自 token 绑定，不来自请求体。
@@ -64,6 +82,28 @@ describe('Lark memory agent tools', () => {
 
     const listed = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: headers(groupSession) });
     expect(listed.json().entries).toEqual([entry]);
+
+    // GET with topic filter
+    const filtered = await app.inject({ method: 'GET', url: `${larkMemoryToolsPath}?topic=conventions`, headers: headers(groupSession) });
+    expect(filtered.json().entries).toEqual([entry]);
+    const emptyTopic = await app.inject({ method: 'GET', url: `${larkMemoryToolsPath}?topic=other`, headers: headers(groupSession) });
+    expect(emptyTopic.json().entries).toEqual([]);
+
+    // show 单个主题
+    const showConventions = await app.inject({ method: 'GET', url: `${larkMemoryToolsPath}/topics/conventions`, headers: headers(groupSession) });
+    expect(showConventions.statusCode).toBe(200);
+    expect(showConventions.json()).toEqual({ chatId: 'oc_group', topic: 'conventions', entries: [entry] });
+    const showEmpty = await app.inject({ method: 'GET', url: `${larkMemoryToolsPath}/topics/nonexistent`, headers: headers(groupSession) });
+    expect(showEmpty.statusCode).toBe(200);
+    expect(showEmpty.json()).toEqual({ chatId: 'oc_group', topic: 'nonexistent', entries: [] });
+
+    // search 搜索
+    const searchMatch = await app.inject({ method: 'GET', url: `${larkMemoryToolsPath}/search?q=pnpm`, headers: headers(groupSession) });
+    expect(searchMatch.statusCode).toBe(200);
+    expect(searchMatch.json()).toEqual({ chatId: 'oc_group', query: 'pnpm', entries: [entry] });
+    const searchMiss = await app.inject({ method: 'GET', url: `${larkMemoryToolsPath}/search?q=yarn`, headers: headers(groupSession) });
+    expect(searchMiss.statusCode).toBe(200);
+    expect(searchMiss.json()).toEqual({ chatId: 'oc_group', query: 'yarn', entries: [] });
 
     const removed = await app.inject({ method: 'DELETE', url: `${larkMemoryToolsPath}/${entry.id}`, headers: headers(groupSession) });
     expect(removed.statusCode).toBe(200);
@@ -91,5 +131,12 @@ describe('Lark memory agent tools', () => {
     expect(orphan.statusCode).toBe(404);
     expect(orphan.json().error.code).toBe('GROUP_TOOL_BOT_NOT_FOUND');
     expect(await repos.config.get(larkMemoryKey({ appId: 'cli_bot', chatId: 'oc_group' }))).toBeUndefined();
+  });
+
+  it('rejects memory access with 403 MEMORY_DISABLED when memoryEnabled is false', async () => {
+    const { app, groupSession, headers } = await setup({ memoryEnabled: false });
+    const res = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: headers(groupSession) });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('MEMORY_DISABLED');
   });
 });

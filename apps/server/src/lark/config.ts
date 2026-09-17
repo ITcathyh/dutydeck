@@ -56,6 +56,8 @@ export interface StoredLarkConfig {
   listening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
+  /** 会话记忆开关，默认开启；false 时不注入记忆，命令与工具不可用。 */
+  memoryEnabled?: boolean;
   /** 结构化问答卡片总开关，默认开启；显式 false 使用文字选项与引用回复。 */
   structuredAskCards: boolean;
   /** P0-4 群内审批卡/结果卡 @ 发起人总开关，默认关闭；触达效果真机验证通过后才建议开启。 */
@@ -107,6 +109,7 @@ export interface SaveLarkConfigInput {
   listening?: boolean;
   groupToolsEnabled?: boolean;
   groupToolsAllowSend?: boolean;
+  memoryEnabled?: boolean;
   /** P0-2 结构化问答卡片总开关；缺省继承当前配置，仍缺省按关闭处理。 */
   structuredAskCards?: boolean;
   /** P0-4 群内卡片 @ 发起人总开关；缺省继承当前配置，仍缺省按关闭处理。 */
@@ -157,6 +160,7 @@ export interface PublicLarkConfig {
   activeListening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
+  memoryEnabled: boolean;
   structuredAskCards: boolean;
   groupCardMention: boolean;
   pushIntervalMs: number;
@@ -371,6 +375,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     listening: parsed.listening === true,
     groupToolsEnabled: parsed.groupToolsEnabled === true,
     groupToolsAllowSend: parsed.groupToolsEnabled === true && parsed.groupToolsAllowSend === true,
+    memoryEnabled: parsed.memoryEnabled !== false,
     structuredAskCards: parsed.structuredAskCards === undefined || parsed.structuredAskCards === true,
     groupCardMention: parsed.groupCardMention === true,
     pushIntervalMs: Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20_000 ? pushIntervalMs : defaultLarkPushIntervalMs,
@@ -445,6 +450,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   activeListening: activeAppIds.has(config.appId),
   groupToolsEnabled: config.groupToolsEnabled,
   groupToolsAllowSend: config.groupToolsAllowSend,
+  memoryEnabled: config.memoryEnabled !== false,
   structuredAskCards: config.structuredAskCards !== false,
   groupCardMention: config.groupCardMention === true,
   pushIntervalMs: config.pushIntervalMs,
@@ -497,6 +503,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const listening = input.listening ?? current?.listening ?? false;
   const groupToolsEnabled = input.groupToolsEnabled ?? current?.groupToolsEnabled ?? false;
   const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
+  const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? true;
   const structuredAskCards = input.structuredAskCards ?? current?.structuredAskCards ?? true;
   const groupCardMention = input.groupCardMention ?? current?.groupCardMention ?? false;
   const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
@@ -559,6 +566,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     listening,
     groupToolsEnabled,
     groupToolsAllowSend,
+    memoryEnabled,
     structuredAskCards,
     groupCardMention,
     pushIntervalMs,

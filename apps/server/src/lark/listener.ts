@@ -10,6 +10,8 @@ import { setLarkGateLog } from './api-gate.js';
 import { getChatMode } from './chat-mode.js';
 import { larkCommandCapabilities } from './commands.js';
 import { LarkMessageCoordinator } from './coordinator.js';
+import type { LarkMemoryStore } from './memory.js';
+import type { LarkMemoryProjection } from './memory-view.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
 import { describeWebBaseUrlReachability } from './config.js';
 
@@ -81,6 +83,11 @@ export interface LarkLongConnectionListenerOptions {
   peerBotAuthorized?: (appId: string, chatId: string, senderOpenId: string) => Promise<boolean>;
   /** 群形态查询（话题群 vs 普通群）；未注入时默认走 chat-mode.ts 的 getChatMode（带缓存）。 */
   chatModeResolver?: (appId: string, chatId: string) => Promise<'topic' | 'group' | 'p2p'>;
+  memory?: {
+    store: LarkMemoryStore;
+    projection: LarkMemoryProjection;
+    command?: string;
+  };
   /** Existing StoredLarkConfig listeners are always explicitly legacy_unmanaged. */
   executionPolicy?: {
     integrationMode: 'legacy_unmanaged';
@@ -134,7 +141,7 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench },
+      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory },
     ) : undefined;
     await coordinator?.initializeWorkflows(config);
     try { await coordinator?.startReconciliation(config); }

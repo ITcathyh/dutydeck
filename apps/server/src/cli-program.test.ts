@@ -107,12 +107,20 @@ describe('Dutydeck CLI', () => {
   });
 
   it('parses chat memory maintenance commands', async () => {
-    const memoryList = vi.fn(); const memoryAdd = vi.fn(); const memoryRemove = vi.fn();
-    await createCliProgram('0.0.6', { memoryList }).parseAsync(['node', 'dutydeck', 'memory', 'list']);
-    await createCliProgram('0.0.6', { memoryAdd }).parseAsync(['node', 'dutydeck', 'memory', 'add', '这个群的回复统一用中文']);
+    const memoryList = vi.fn();
+    const memoryShow = vi.fn();
+    const memorySearch = vi.fn();
+    const memoryAdd = vi.fn();
+    const memoryRemove = vi.fn();
+    await createCliProgram('0.0.6', { memoryList }).parseAsync(['node', 'dutydeck', 'memory', 'list', '--topic', 'conventions']);
+    await createCliProgram('0.0.6', { memoryShow }).parseAsync(['node', 'dutydeck', 'memory', 'show', 'backend']);
+    await createCliProgram('0.0.6', { memorySearch }).parseAsync(['node', 'dutydeck', 'memory', 'search', 'pnpm', '--topic', 'frontend', '--limit', '10']);
+    await createCliProgram('0.0.6', { memoryAdd }).parseAsync(['node', 'dutydeck', 'memory', 'add', '这个群的回复统一用中文', '--topic', 'general']);
     await createCliProgram('0.0.6', { memoryRemove }).parseAsync(['node', 'dutydeck', 'memory', 'remove', 'mem_1a2b3c4d']);
-    expect(memoryList).toHaveBeenCalledOnce();
-    expect(memoryAdd).toHaveBeenCalledWith('这个群的回复统一用中文');
+    expect(memoryList).toHaveBeenCalledWith(expect.objectContaining({ topic: 'conventions' }));
+    expect(memoryShow).toHaveBeenCalledWith('backend');
+    expect(memorySearch).toHaveBeenCalledWith('pnpm', expect.objectContaining({ topic: 'frontend', limit: '10' }));
+    expect(memoryAdd).toHaveBeenCalledWith('这个群的回复统一用中文', expect.objectContaining({ topic: 'general' }));
     expect(memoryRemove).toHaveBeenCalledWith('mem_1a2b3c4d');
   });
 

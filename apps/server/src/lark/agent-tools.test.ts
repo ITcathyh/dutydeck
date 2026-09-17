@@ -223,17 +223,27 @@ describe('Agent group collaboration domain service', () => {
   });
 
   it('teaches memory tools to every Lark session, even when group collaboration is off', async () => {
-    const { tools } = await setup({ cli_current: fakeClient() }, "'/usr/bin/node' '/app/cli.js'");
+    const { tools, repos } = await setup({ cli_current: fakeClient() }, "'/usr/bin/node' '/app/cli.js'");
     const enabled = await tools.promptForSession(session(), '继续处理');
     expect(enabled.indexOf('[Dutydeck 会话记忆工具]')).toBeGreaterThanOrEqual(0);
     expect(enabled.indexOf('[Dutydeck 会话记忆工具]')).toBeLessThan(enabled.indexOf('[Dutydeck 飞书会话工具]'));
     expect(enabled).toContain("'/usr/bin/node' '/app/cli.js' memory add");
+    expect(enabled).toContain("'/usr/bin/node' '/app/cli.js' memory show");
+    expect(enabled).toContain("'/usr/bin/node' '/app/cli.js' memory search");
     expect(enabled.endsWith('继续处理')).toBe(true);
     const disabled = await tools.promptForSession(session({ sourceId: 'cli_disabled:oc_p2p:p2p' }), '继续处理');
     expect(disabled).toContain("'/usr/bin/node' '/app/cli.js' memory list");
     expect(disabled).not.toContain('group send');
     expect(disabled).not.toContain('[Dutydeck 目标编排]');
     await expect(tools.promptForSession(session({ source: 'web', sourceId: undefined }), '继续处理')).resolves.toBe('继续处理');
+
+    // memoryEnabled 为 false 时不拼提示
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([
+      { appId: 'cli_current', appSecret: 'secret-current', name: 'Current Bot', defaultAgentId: 'codex', groupToolsEnabled: true, groupToolsAllowSend: true, memoryEnabled: false }
+    ]));
+    const memoryOff = await tools.promptForSession(session(), '继续处理');
+    expect(memoryOff).not.toContain('[Dutydeck 会话记忆工具]');
+    expect(memoryOff).toContain('[Dutydeck 飞书会话工具]');
   });
 
   it('uses opaque cursors for incremental reads and mentions a discovered target when sending', async () => {

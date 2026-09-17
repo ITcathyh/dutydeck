@@ -11,7 +11,7 @@ import { PTY_AGENT_CONTRIBUTIONS } from '@dutydeck/pty-driver';
 import { acpkPassThroughArgs, runAcpk } from './acpk.js';
 import { runWorkCommand } from './work-item-cli.js';
 import { AgentGroupToolCliError, runGroupBots, runGroupMembers, runGroupMessage, runGroupMessages, runGroupPeers, runGroupSelf, runGroupSend, runGroupSendFile, runGroupWait } from './lark/agent-tools-cli.js';
-import { runMemoryAdd, runMemoryList, runMemoryRemove } from './lark/memory-cli.js';
+import { runMemoryAdd, runMemoryList, runMemoryRemove, runMemorySearch, runMemoryShow } from './lark/memory-cli.js';
 import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
@@ -331,8 +331,13 @@ async function main() {
     groupSend: async (content, options) => { output(await runGroupSend(content, options)); },
     groupSendFile: async (path, options) => { output(await runGroupSendFile(path, options)); },
     groupWait: async options => { output(await runGroupWait(options)); },
-    memoryList: async () => { output(await runMemoryList()); },
-    memoryAdd: async content => { output(await runMemoryAdd(content)); },
+    memoryList: async options => { output(await runMemoryList(options)); },
+    memoryShow: async topic => { output(await runMemoryShow(topic)); },
+    memorySearch: async (query, options) => {
+      const limit = options?.limit ? Number(options.limit) : undefined;
+      output(await runMemorySearch(query, { topic: options?.topic, limit }));
+    },
+    memoryAdd: async (content, options) => { output(await runMemoryAdd(content, options)); },
     memoryRemove: async id => { output(await runMemoryRemove(id)); },
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionNativeAsk: async () => {

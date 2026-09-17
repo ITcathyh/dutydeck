@@ -156,8 +156,10 @@ export interface CliHandlers {
   groupSend?(content: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupSendFile?(path: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
-  memoryList?(): void | Promise<void>;
-  memoryAdd?(content: string): void | Promise<void>;
+  memoryList?(options?: { topic?: string }): void | Promise<void>;
+  memoryShow?(topic: string): void | Promise<void>;
+  memorySearch?(query: string, options?: { topic?: string; limit?: string }): void | Promise<void>;
+  memoryAdd?(content: string, options?: { topic?: string }): void | Promise<void>;
   memoryRemove?(id: string): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
@@ -446,11 +448,23 @@ Routing guidance:
   const memory = program.command('memory').description('Read and maintain the long-term memory of the current Lark chat');
   memory.command('list')
     .description('List the memories saved for this chat, with their ids')
-    .action(() => handlers.memoryList?.());
+    .option('--topic <slug>', 'Filter memories by topic slug')
+    .action(options => handlers.memoryList?.(options));
+  memory.command('show')
+    .description('Show full memories under a specific topic')
+    .argument('<topic>', 'Topic slug')
+    .action(topic => handlers.memoryShow?.(topic));
+  memory.command('search')
+    .description('Search memories by keyword')
+    .argument('<query>', 'Keyword to search for')
+    .option('--topic <slug>', 'Filter by topic slug')
+    .option('--limit <count>', 'Maximum entries to return (default: 20, max: 50)')
+    .action((query, options) => handlers.memorySearch?.(query, options));
   memory.command('add')
     .description('Save one durable fact, preference or convention for this chat')
     .argument('<content>', 'One-sentence memory (at most 1000 characters)')
-    .action(content => handlers.memoryAdd?.(content));
+    .option('--topic <slug>', 'Topic slug (defaults to general)')
+    .action((content, options) => handlers.memoryAdd?.(content, options));
   memory.command('remove')
     .description('Delete a memory of this chat by id')
     .argument('<id>', 'Memory id shown by list (mem_*)')
