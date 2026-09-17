@@ -200,6 +200,55 @@ describe('BotManagement component', () => {
   });
 });
 
+describe('BotManagement 会话记忆', () => {
+  it('旧配置缺字段时默认开启，关闭总开关后隐藏下属设置', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+
+    const enabled = screen.getByRole('checkbox', { name: '启用会话记忆' }) as HTMLInputElement;
+    expect(enabled.checked).toBe(true);
+    expect((screen.getByRole('checkbox', { name: '自动提取与整理' }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByLabelText('整理 Agent')).toBeTruthy();
+    expect(screen.getByText('记忆按聊天隔离，仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
+    // 只是默认值，没有改动过，不应该报「有未保存的修改」。
+    expect(screen.queryByText(/有未保存的修改/)).toBeNull();
+
+    await user.click(enabled);
+    expect(screen.queryByRole('checkbox', { name: '自动提取与整理' })).toBeNull();
+    expect(screen.queryByLabelText('整理 Agent')).toBeNull();
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+  });
+
+  it('保存时带上四个记忆字段', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const saveSpy = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, revision: 4 }], listeningDisabled: false });
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+
+    await user.click(screen.getByRole('checkbox', { name: '自动提取与整理' }));
+    await user.selectOptions(screen.getByLabelText('整理 Agent'), 'codex');
+    await user.type(screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({
+      memoryEnabled: true, memoryAutoExtract: false, memoryAgentId: 'codex', memoryModel: 'gpt-4o-mini'
+    })));
+  });
+});
+
 describe('BotManagement 布局与状态诚实', () => {
   it('桌面 list/detail，窄屏进详情后有返回列表的路', async () => {
     vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });

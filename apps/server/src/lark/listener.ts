@@ -12,6 +12,7 @@ import { larkCommandCapabilities } from './commands.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryProjection } from './memory-view.js';
+import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
 import { describeWebBaseUrlReachability } from './config.js';
 
@@ -87,6 +88,7 @@ export interface LarkLongConnectionListenerOptions {
     store: LarkMemoryStore;
     projection: LarkMemoryProjection;
     command?: string;
+    pipeline?: LarkMemoryPipeline;
   };
   /** Existing StoredLarkConfig listeners are always explicitly legacy_unmanaged. */
   executionPolicy?: {

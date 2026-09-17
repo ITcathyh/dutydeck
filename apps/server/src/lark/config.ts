@@ -58,6 +58,12 @@ export interface StoredLarkConfig {
   groupToolsAllowSend: boolean;
   /** 会话记忆开关，默认开启；false 时不注入记忆，命令与工具不可用。 */
   memoryEnabled?: boolean;
+  /** 后台自动提取与整理开关，默认开启；false 时只有 /memory consolidate 能手动触发。 */
+  memoryAutoExtract?: boolean;
+  /** 跑提取与整理的 Agent；缺省沿用 defaultAgentId。 */
+  memoryAgentId?: string;
+  /** 跑提取与整理的模型；缺省沿用 defaultModel。 */
+  memoryModel?: string;
   /** 结构化问答卡片总开关，默认开启；显式 false 使用文字选项与引用回复。 */
   structuredAskCards: boolean;
   /** P0-4 群内审批卡/结果卡 @ 发起人总开关，默认关闭；触达效果真机验证通过后才建议开启。 */
@@ -110,6 +116,9 @@ export interface SaveLarkConfigInput {
   groupToolsEnabled?: boolean;
   groupToolsAllowSend?: boolean;
   memoryEnabled?: boolean;
+  memoryAutoExtract?: boolean;
+  memoryAgentId?: string;
+  memoryModel?: string;
   /** P0-2 结构化问答卡片总开关；缺省继承当前配置，仍缺省按关闭处理。 */
   structuredAskCards?: boolean;
   /** P0-4 群内卡片 @ 发起人总开关；缺省继承当前配置，仍缺省按关闭处理。 */
@@ -161,6 +170,9 @@ export interface PublicLarkConfig {
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
   memoryEnabled: boolean;
+  memoryAutoExtract: boolean;
+  memoryAgentId?: string;
+  memoryModel?: string;
   structuredAskCards: boolean;
   groupCardMention: boolean;
   pushIntervalMs: number;
@@ -376,6 +388,9 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     groupToolsEnabled: parsed.groupToolsEnabled === true,
     groupToolsAllowSend: parsed.groupToolsEnabled === true && parsed.groupToolsAllowSend === true,
     memoryEnabled: parsed.memoryEnabled !== false,
+    memoryAutoExtract: parsed.memoryAutoExtract !== false,
+    ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
+    ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
     structuredAskCards: parsed.structuredAskCards === undefined || parsed.structuredAskCards === true,
     groupCardMention: parsed.groupCardMention === true,
     pushIntervalMs: Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20_000 ? pushIntervalMs : defaultLarkPushIntervalMs,
@@ -451,6 +466,9 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   groupToolsEnabled: config.groupToolsEnabled,
   groupToolsAllowSend: config.groupToolsAllowSend,
   memoryEnabled: config.memoryEnabled !== false,
+  memoryAutoExtract: config.memoryAutoExtract !== false,
+  ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
+  ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
   structuredAskCards: config.structuredAskCards !== false,
   groupCardMention: config.groupCardMention === true,
   pushIntervalMs: config.pushIntervalMs,
@@ -504,6 +522,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const groupToolsEnabled = input.groupToolsEnabled ?? current?.groupToolsEnabled ?? false;
   const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
   const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? true;
+  const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
+  const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
+  const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;
   const structuredAskCards = input.structuredAskCards ?? current?.structuredAskCards ?? true;
   const groupCardMention = input.groupCardMention ?? current?.groupCardMention ?? false;
   const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
@@ -567,6 +588,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     groupToolsEnabled,
     groupToolsAllowSend,
     memoryEnabled,
+    memoryAutoExtract,
+    ...(memoryAgentId ? { memoryAgentId } : {}),
+    ...(memoryModel ? { memoryModel } : {}),
     structuredAskCards,
     groupCardMention,
     pushIntervalMs,

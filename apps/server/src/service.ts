@@ -21,6 +21,7 @@ import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
 import { LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
+import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
 import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
@@ -322,6 +323,18 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       memoryRoot,
       { warn: (obj, msg) => app?.log.warn(obj, msg) }
     );
+    const memoryPipeline = new LarkMemoryPipeline({
+      runtime,
+      repos: { execution: repos.execution },
+      store: memoryStore,
+      projection: memoryProjection,
+      readConfig: async appId => (await readLarkConfigs(repos.config)).find(bot => bot.appId === appId),
+      log: {
+        info: (obj, msg) => app?.log.info(obj, msg),
+        warn: (obj, msg) => app?.log.warn(obj, msg),
+        error: (obj, msg) => app?.log.error(obj, msg)
+      }
+    });
     app = await buildApp(runtime, {
       webRoot,
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
@@ -340,7 +353,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         memory: {
           store: memoryStore,
           projection: memoryProjection,
-          command: options.groupToolsCommand ?? 'dutydeck'
+          command: options.groupToolsCommand ?? 'dutydeck',
+          pipeline: memoryPipeline
         },
         listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
       },

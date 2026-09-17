@@ -42,6 +42,10 @@ export type BotDraft = {
   listening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
+  memoryEnabled: boolean;
+  memoryAutoExtract: boolean;
+  memoryAgentId: string;
+  memoryModel: string;
   riskControlMode: 'off' | 'guidance' | 'enforced';
   highRiskPattern: string;
 };

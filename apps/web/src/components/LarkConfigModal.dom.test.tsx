@@ -391,6 +391,44 @@ describe('LarkConfigModal ask permission posture', () => {
 });
 
 
+describe('LarkConfigModal 会话记忆', () => {
+  it('默认开启两个开关，关闭总开关后隐藏下属设置', async () => {
+    const user = userEvent.setup();
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+
+    expect((screen.getByRole('switch', { name: '启用会话记忆' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
+    expect((screen.getByRole('switch', { name: '自动提取与整理' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText('整理 Agent')).toBeTruthy();
+    expect(screen.getByText('记忆按聊天隔离，仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
+
+    await user.click(screen.getByRole('switch', { name: '启用会话记忆' }));
+    expect(screen.queryByRole('switch', { name: '自动提取与整理' })).toBeNull();
+    expect(screen.queryByText('整理 Agent')).toBeNull();
+  });
+
+  it('保存时带上四个记忆字段', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
+    renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex' }));
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+
+    await user.click(screen.getByRole('switch', { name: '自动提取与整理' }));
+    await user.click(screen.getByRole('button', { name: /沿用机器人默认 Agent/ }));
+    await user.click(await screen.findByRole('option', { name: 'Claude' }));
+    await user.type(screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
+
+    const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      memoryEnabled: true, memoryAutoExtract: false, memoryAgentId: 'claude', memoryModel: 'gpt-4o-mini'
+    })));
+  });
+});
+
 describe('LarkConfigModal explicit selection', () => {
   it('continues a submitted review directly to Agent settings and preserves the review notice', async () => {
     const id = '10000000-0000-4000-8000-000000000001';

@@ -138,10 +138,10 @@ describe('Lark chat memory through the coordinator', () => {
     await h.waitCards(4);
     expect(h.lastCardText()).toContain('页码超出范围');
 
-    // /memory consolidate 尚未接入
+    // 没有接入管线时 /memory consolidate 如实回「未启用」，不假装已排队。
     await h.coordinator.handle(event('om_consolidate', '/memory consolidate'), h.config);
     await h.waitCards(5);
-    expect(h.lastCardText()).toContain('整理功能尚未接入');
+    expect(h.lastCardText()).toContain('整理功能未启用');
 
     // 记忆命令本身绝不进入 Agent：到此为止 driver 没收到任何 prompt。
     expect(h.prompts).toEqual([]);
