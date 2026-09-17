@@ -12,6 +12,8 @@ import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listene
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
 import type { LarkAgentToolsService } from './agent-tools.js';
+import type { LarkMemoryStore } from './memory.js';
+import type { LarkMemoryProjection } from './memory-view.js';
 import {
   openPlatformConfigurationJobs,
   type OpenPlatformConfigurationJobManager,
@@ -39,6 +41,11 @@ export interface LarkRoutesOptions {
   agentTools?: LarkAgentToolsService;
   appCreationJobs?: Pick<LarkAppCreationJobManager, 'start' | 'get' | 'cancel' | 'retry'>;
   openPlatformJobs?: Pick<OpenPlatformConfigurationJobManager, 'start' | 'get'>;
+  memory?: {
+    store: LarkMemoryStore;
+    projection: LarkMemoryProjection;
+    command?: string;
+  };
   /** StoredLarkConfig is the isolated legacy path during the compatibility period. */
   executionPolicy?: {
     integrationMode: 'legacy_unmanaged';
@@ -63,6 +70,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     fetcher,
     executionPolicy: options.executionPolicy,
     groupManager: options.groupManager,
+    memory: options.memory,
     peerBotAuthorized: (appId, chatId, senderOpenId) => options.agentTools?.isConfiguredPeer(appId, chatId, senderOpenId) ?? Promise.resolve(false)
   });
   const syncListeners = async (configs: Awaited<ReturnType<typeof readLarkConfigs>>) => {

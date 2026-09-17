@@ -6,7 +6,8 @@ import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
 import { parseLarkNewSession, validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext } from './task-context.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
-import { isLarkMemoryId, LarkMemoryStore, renderLarkMemoryList, renderLarkMemoryPrompt } from './memory.js';
+import { isLarkMemoryId, LarkMemoryStore, renderLarkMemoryList } from './memory.js';
+import { LarkMemoryProjection, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
@@ -213,11 +214,21 @@ export class LarkMessageCoordinator {
       authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
     },
     private readonly groupManager?: LarkGroupManager,
-    private readonly workflowOptions: { store?: ConfigRepository; broker?: RelayAskBroker; automation?: import('../session-automation.js').SessionAutomationService; workbench?: import('./workbench.js').LarkWorkbench } = {},
+    private readonly workflowOptions: {
+      store?: ConfigRepository;
+      broker?: RelayAskBroker;
+      automation?: import('../session-automation.js').SessionAutomationService;
+      workbench?: import('./workbench.js').LarkWorkbench;
+      memory?: {
+        store: LarkMemoryStore;
+        projection: LarkMemoryProjection;
+        command?: string;
+      };
+    } = {},
   ) {
+    this.memory = workflowOptions.memory?.store;
     if (workflowOptions.store) {
       this.inbox = new LarkTaskInbox(workflowOptions.store);
-      this.memory = new LarkMemoryStore(workflowOptions.store);
       this.workflows = new LarkWorkflowInteractions(workflowOptions.store, runtime, service, workflowOptions.broker,
         (record, actor, action) => this.authorizeInteraction(record, actor, action));
     }
@@ -828,7 +839,7 @@ export class LarkMessageCoordinator {
       tasks: Boolean(this.workflows && this.cardMappings && this.runtime.getTasks),
       answer: Boolean(this.workflows && this.workflowOptions.broker),
       approval: Boolean(this.workflows && this.runtime.resolvePermission && this.runtime.getPendingPermissions),
-      memory: Boolean(this.memory)
+      memory: Boolean(this.workflowOptions.memory)
     };
   }
 
@@ -988,10 +999,35 @@ export class LarkMessageCoordinator {
       // 记忆命令的授权就是命令层的白名单门（发言人能在本聊天用命令，就能维护本聊天的记忆），
       // 作用域固定为当前聊天，不接受参数指定别的群。
       if (route.command === 'remember' || route.command === 'memory' || route.command === 'forget') {
+        if (config.memoryEnabled === false) {
+          await replyCard(`/${route.command} 未执行`, '本机器人已关闭会话记忆。', { failed: true });
+          return 'handled';
+        }
         const memory = this.memory!;
         const scope = { appId: config.appId, chatId: event.chatId };
         if (route.command === 'memory') {
-          await replyCard('会话记忆', renderLarkMemoryList(await memory.list(scope)));
+          if (route.args[0] === 'consolidate') {
+            await replyCard('/memory consolidate 未执行', '整理功能尚未接入。', { failed: true });
+            return 'handled';
+          }
+          let page: number | undefined;
+          if (route.args.length > 0) {
+            page = Number(route.args[0]);
+            if (!Number.isInteger(page) || page < 1) {
+              await replyCard('/memory 未执行', '**用法：`/memory [页码]` 或 `/memory consolidate`**', { failed: true });
+              return 'handled';
+            }
+          }
+          const [byTopic, state] = await Promise.all([
+            memory.byTopic(scope),
+            memory.getState(scope)
+          ]);
+          const result = renderLarkMemoryList(byTopic, state, { page });
+          if (page !== undefined && page > result.totalPages) {
+            await replyCard('/memory 未执行', `**页码超出范围，共 ${result.totalPages} 页。**\n\n发送 \`/memory 1\` 查看第一页。`, { failed: true });
+            return 'handled';
+          }
+          await replyCard('会话记忆', result.text);
           return 'handled';
         }
         if (route.command === 'remember') {
@@ -999,7 +1035,7 @@ export class LarkMessageCoordinator {
             await replyCard('/remember 未执行', '**用法：`/remember <要记住的内容>`**\n\n例如：`/remember 这个群的回复统一用中文`。', { failed: true });
             return 'handled';
           }
-          const entry = await memory.add(scope, { content: route.argsText, source: 'user',
+          const entry = await memory.add(scope, { content: route.argsText, source: 'user', topic: 'general',
             ...(event.senderOpenId ? { createdBy: event.senderOpenId } : {}), messageId: event.messageId });
           await replyCard('已记住', `**已保存为本聊天记忆 \`${entry.id}\`。**\n\n${larkCommandEcho(entry.content, 200)}\n\n之后本聊天的每轮任务都会带给 Agent。查看：\`/memory\`；删除：\`/forget ${entry.id}\`。`);
           return 'handled';
@@ -2453,9 +2489,19 @@ export class LarkMessageCoordinator {
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     // 会话记忆随 agentPrompt 一起冻结进任务账本：事后能核对这一轮 Agent 看到的是哪几条记忆。
     // 读取失败只丢本轮注入并留日志，不阻断任务。
-    if (this.memory) {
+    if (config.memoryEnabled !== false && this.workflowOptions.memory) {
       try {
-        const memoryBlock = renderLarkMemoryPrompt(await this.memory.list({ appId: config.appId, chatId: event.chatId }));
+        const { store, projection, command } = this.workflowOptions.memory;
+        const scope = { appId: config.appId, chatId: event.chatId };
+        const [entries, state] = await Promise.all([
+          store.list(scope),
+          store.getState(scope)
+        ]);
+        const index = renderMemoryIndex(entries, state);
+        const memoryBlock = renderLarkMemoryInjection(index.text, {
+          command: command ?? 'dutydeck',
+          directory: projection.directoryFor(scope)
+        });
         if (memoryBlock) injected.push(memoryBlock);
       } catch (error) {
         this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: task.id }, '读取飞书会话记忆失败，本轮不注入记忆');

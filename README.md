@@ -233,15 +233,15 @@ ACP 的待处理权限会出现在对应运行记录旁，可直接允许或拒�
 
 ### 会话记忆
 
-每个聊天（私聊或群）有一份跨会话的长期记忆：`/new`、话题切换和服务重启都不会丢，私聊与各群之间互不可见。每轮任务开头会把记忆作为参考内容带给 Agent，并随任务记录一起保存，事后能核对 Agent 当时看到了哪几条。
+每个聊天（私聊或群）有一份跨会话的长期记忆：`/new`、话题切换和服务重启都不会丢，私聊与各群之间互不可见。每轮任务开头会常驻注入紧凑索引（`MEMORY.md`，≤ 3000 字符），Agent 需要时可通过 `memory show` 或 `memory search` 按需拉取主题正文与细节，并随任务记录一起保存，事后能核对 Agent 当时看到了哪些索引。管理员可通过 `memoryEnabled` 开关控制机器人是否启用会话记忆。
 
 ```text
 /remember 这个群的回复统一用中文    保存一条记忆，回执给出编号
-/memory                              查看本聊天的记忆与编号
+/memory [页码]                       按主题分页查看本聊天的记忆与编号
 /forget mem_1a2b3c4d                 删除指定编号的记忆
 ```
 
-Agent 在执行中也能维护记忆：你说“记住…”时它会调用 `dutydeck memory add` 并确认；发现会跨任务复用的稳定事实（偏好、项目约定、已定决策）时也会保存。删除只打标记不抹掉历史，单条 1000 字符、每个聊天 200 条，注入 prompt 时最多带最新 60 条。记忆只是参考内容，不会放宽任何操作权限。设计与边界见 [飞书会话记忆](docs/lark-memory-design.md)。
+Agent 在执行中也能维护记忆：用户明确要求“记住…”时它会调用 `dutydeck memory add` 并确认，需要细节时可使用 `dutydeck memory show <topic>` 或 `dutydeck memory search <关键词>`。删除只打标记不抹掉历史，单条 1000 字符、每个聊天 200 条。记忆只是参考内容，不会放宽任何操作权限。设计与边界见 [飞书会话记忆](docs/lark-memory-design.md)。
 
 ### 接入机器人
 
@@ -342,8 +342,10 @@ dutydeck group wait --after '<cursor>' --timeout-ms 15000
 同一份 capability 也承载会话记忆工具，私聊和关闭群协作的机器人同样可用：
 
 ```bash
-dutydeck memory list
-dutydeck memory add '项目用 pnpm，测试命令是 pnpm test'
+dutydeck memory list [--topic <slug>]
+dutydeck memory show <topic>
+dutydeck memory search '<关键词>' [--topic <slug>]
+dutydeck memory add '项目用 pnpm，测试命令是 pnpm test' [--topic <slug>]
 dutydeck memory remove mem_1a2b3c4d
 ```
 

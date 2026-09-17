@@ -4,6 +4,8 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfig, type AppConfig } from '@dutydeck/config';
 import { createRepositories } from '@dutydeck/storage';
 import { installationOwnerTaskActor, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { WorkItemService } from './work-items.js';
@@ -18,6 +20,7 @@ import { prepareSkillPrompt } from './skill-delivery.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
 import { LarkMemoryStore } from './lark/memory.js';
+import { LarkMemoryProjection } from './lark/memory-view.js';
 import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
@@ -307,6 +310,18 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     await relayBroker.initialize();
     await runtime.initialize(config.agents);
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
+    const memoryRoot = config.databaseUrl === ':memory:'
+      ? join(tmpdir(), 'dutydeck-memory')
+      : join(dirname(resolve(config.databaseUrl)), 'memory');
+    let memoryProjection!: LarkMemoryProjection;
+    const memoryStore = new LarkMemoryStore(repos.config, {
+      onChange: scope => memoryProjection.write(scope)
+    });
+    memoryProjection = new LarkMemoryProjection(
+      memoryStore,
+      memoryRoot,
+      { warn: (obj, msg) => app?.log.warn(obj, msg) }
+    );
     app = await buildApp(runtime, {
       webRoot,
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
@@ -321,7 +336,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         runtime,
         agentTools,
         executionPolicy: legacyExecutionPolicy,
-    groupManager,
+        groupManager,
+        memory: {
+          store: memoryStore,
+          projection: memoryProjection,
+          command: options.groupToolsCommand ?? 'dutydeck'
+        },
         listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
       },
       auth: {
@@ -340,7 +360,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true },
       workItemTools: { runtime, work: workItems, tools: agentTools },
       // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
-      memoryTools: { tools: agentTools, store: new LarkMemoryStore(repos.config), runtime },
+      memoryTools: { tools: agentTools, store: memoryStore, runtime },
       workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
         if (!await resolveInstallationPrincipal(request)) return false;
         const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary: 'session', action, request });
