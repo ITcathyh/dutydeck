@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
-import type { AgentConfig } from '@dutydeck/shared';
+import { RuntimeError, type AgentConfig, type PermissionMode } from '@dutydeck/shared';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -31,7 +31,10 @@ const jsonBlock = (value: unknown) => `分析完成。\n\n\`\`\`json\n${JSON.str
 /** 记忆会话的回复计划：文本，外加可选的延迟（用来构造超时与单飞场景）。 */
 type MemoryReply = { text: string; delayMs?: number };
 
-async function harness(options: { timeoutMs?: number } = {}) {
+/** 记忆会话的 start 入参；用例用它断言权限模式与复用次数。 */
+type StartInput = { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode };
+
+async function harness(options: { timeoutMs?: number; agentModel?: string; startGuard?: (input: StartInput) => void } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-pipeline-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
@@ -65,7 +68,8 @@ async function harness(options: { timeoutMs?: number } = {}) {
       return driver;
     }
   });
-  const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+  const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false,
+    ...(options.agentModel ? { model: options.agentModel } : {}) };
   await runtime.initialize([agent]);
 
   const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
@@ -98,9 +102,12 @@ async function harness(options: { timeoutMs?: number } = {}) {
   // 只有 interrupt 走替身：超时用例要断言管线确实发了中断，又不能让真实中断与 mock driver 的
   // 延迟回复互相抢同一个任务的终态。
   const memoryInterrupt = vi.fn(async (_id: string, _taskId?: string) => {});
+  // start 也走替身：记录每次入参，并让用例模拟 runtime 拒绝某个权限模式（PTY 类 Agent）。
+  const startCalls: StartInput[] = [];
   const pipeline = new LarkMemoryPipeline({
     runtime: {
-      start: input => runtime.start(input),
+      start: input => { startCalls.push(input); options.startGuard?.(input); return runtime.start(input); },
+      listAgents: () => runtime.listAgents(),
       listSessions: () => runtime.listSessions(),
       dispatch: (id, prompt, mode, agentPrompt) => runtime.dispatch(id, prompt, mode, agentPrompt),
       getTasks: id => runtime.getTasks(id),
@@ -128,6 +135,16 @@ async function harness(options: { timeoutMs?: number } = {}) {
     await repos.config.set(larkBotsConfigKey, JSON.stringify([next]));
     return next;
   };
+  /**
+   * 等管线彻底停下来。
+   * drain 会连跑多轮，release 与下一次 claim 之间有空隙，只看一眼可能刚好落在空隙里，
+   * 用例就会在 drain 还在飞行时结束，后续写入会打到已经关掉的库上。
+   */
+  const waitIdle = () => vi.waitFor(async () => {
+    expect((await store.getState(scope)).running).toBeUndefined();
+    await new Promise(resolve => setTimeout(resolve, 80));
+    expect((await store.getState(scope)).running).toBeUndefined();
+  }, { timeout: 15_000 });
   const lastCardText = () => JSON.stringify(cards.at(-1) ?? {});
   const waitPrompts = (count: number) => vi.waitFor(() => expect(prompts).toHaveLength(count), { timeout: 15_000 });
   /** 跑 n 个普通任务轮次，逐轮等待 driver 收到 prompt。 */
@@ -141,7 +158,7 @@ async function harness(options: { timeoutMs?: number } = {}) {
 
   return {
     cwd, repos, runtime, coordinator, store, projection, pipeline, config, cards, prompts, memoryPrompts, log,
-    memoryInterrupt, lastCardText, waitPrompts, runTurns, setConfig,
+    memoryInterrupt, startCalls, lastCardText, waitIdle, waitPrompts, runTurns, setConfig,
     setResponder: (next: (prompt: string) => MemoryReply) => { respond = next; }
   };
 }
@@ -172,7 +189,7 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(state.pendingTurns ?? []).toEqual([]);
     expect(state.turnsSinceExtraction).toBe(0);
     expect(state.lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1, rejected: 0 });
-    expect(state.running).toBeUndefined();
+    await h.waitIdle();
 
     // 记忆会话与用户会话相互独立，且以 deny-all 运行。
     const memorySession = (await h.runtime.listSessions()).find(session => session.source === 'lark-memory');
@@ -233,7 +250,7 @@ describe('Lark memory pipeline through the coordinator', () => {
     const state = await h.store.getState(scope);
     expect(state.turnsSinceConsolidation).toBe(0);
     expect(state.lastConsolidationAt).toBeTruthy();
-    expect(state.running).toBeUndefined();
+    await h.waitIdle();
   });
 
   it('门禁拒绝改写用户条目：重试一次仍违规则整轮不写入', async () => {
@@ -261,7 +278,7 @@ describe('Lark memory pipeline through the coordinator', () => {
     const live = await h.store.list(scope);
     expect(live).toHaveLength(1);
     expect(live[0]).toMatchObject({ source: 'user', content: '这个群的回复统一用中文' });
-    expect((await h.store.getState(scope)).running).toBeUndefined();
+    await h.waitIdle();
   });
 
   it('/memory consolidate 单飞：运行中的第二次请求回「整理正在进行中」', async () => {
@@ -315,7 +332,7 @@ describe('Lark memory pipeline through the coordinator', () => {
     await vi.waitFor(async () => {
       expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'consolidation', ok: true });
     }, { timeout: 10_000 });
-    expect((await h.store.getState(scope)).running).toBeUndefined();
+    await h.waitIdle();
     expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(1);
   });
 
@@ -362,6 +379,183 @@ describe('Lark memory pipeline through the coordinator', () => {
     const after = (await h.runtime.listSessions()).filter(session => session.source === 'lark-memory');
     expect(after).toHaveLength(2);
     expect(after.some(session => session.model === 'cheap-model')).toBe(true);
+  });
+
+  it('PTY 类 Agent 拒绝 deny-all 时降级成 ask 重试一次', async () => {
+    const h = await harness({
+      // PTY CLI 只认 ask / full-trust：runtime 对 deny-all 抛 PERMISSION_MODE_UNSUPPORTED。
+      startGuard: input => {
+        if (input.permissionMode === 'deny-all') {
+          throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode', 422);
+        }
+      }
+    });
+    h.setResponder(prompt => {
+      if (!prompt.includes('后台提取')) return { text: jsonBlock({ actions: [{ op: 'noop' }] }) };
+      const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
+      return { text: jsonBlock({ facts: [{ content: '部署脚本在 scripts/deploy.sh', topic: 'environment', kind: 'environment', evidence: taskId }] }) };
+    });
+
+    await h.runTurns(3);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1 });
+    }, { timeout: 10_000 });
+
+    expect(h.startCalls.map(call => call.permissionMode)).toEqual(['deny-all', 'ask']);
+    const memorySession = (await h.runtime.listSessions()).find(session => session.source === 'lark-memory');
+    expect(memorySession).toMatchObject({ permissionMode: 'ask' });
+
+    // 降级后的 ask 会话要能被复用，不能每轮再试一次 deny-all。
+    await h.runTurns(3);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).pendingTurns ?? []).toEqual([]);
+    }, { timeout: 10_000 });
+    expect(h.startCalls).toHaveLength(2);
+  });
+
+  it('两种权限模式都起不来时记 MEMORY_AGENT_UNSUPPORTED 并清掉 running', async () => {
+    const h = await harness({
+      startGuard: () => { throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Legacy PTY transport cannot enforce a permission posture', 422); }
+    });
+    await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
+    await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
+
+    const run = await h.pipeline.runConsolidation(scope);
+    expect(run).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_AGENT_UNSUPPORTED' });
+    expect(h.startCalls.map(call => call.permissionMode)).toEqual(['deny-all', 'ask']);
+
+    const state = await h.store.getState(scope);
+    expect(state.running).toBeUndefined();
+    expect(state.lastFailureAt?.consolidation).toBeTruthy();
+  });
+
+  it('提取期间新完成的轮次会接着被消费，计数跟着剩余队列走', async () => {
+    const h = await harness();
+    h.setResponder(prompt => {
+      if (!prompt.includes('后台提取')) return { text: jsonBlock({ actions: [{ op: 'noop' }] }) };
+      const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
+      return { text: jsonBlock({ facts: [{ content: `轮次 ${taskId} 的事实`, topic: 'environment', kind: 'environment', evidence: taskId }] }), delayMs: 400 };
+    });
+
+    // 先关自动触发，攒够 3 轮后手动跑一次提取，好在它执行期间再塞 3 轮进来。
+    const manual = await h.setConfig({ memoryAutoExtract: false });
+    await h.runTurns(3, manual);
+    const extraction = h.pipeline.runExtraction(scope);
+    await h.runTurns(3, manual);
+    expect(await extraction).toMatchObject({ kind: 'extraction', ok: true });
+
+    const afterFirst = await h.store.getState(scope);
+    expect(afterFirst.pendingTurns).toHaveLength(3);
+    expect(afterFirst.turnsSinceExtraction).toBe(3);
+
+    // 打开自动触发后，下一轮完成会把剩下的 3 条也消费掉。
+    const auto = await h.setConfig({ memoryAutoExtract: true });
+    await h.runTurns(1, auto);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).pendingTurns ?? []).toEqual([]);
+    }, { timeout: 15_000 });
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台提取')).length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('drain 在一次触发里连跑：提取运行期间攒下的轮次不必等下一条消息', async () => {
+    const h = await harness();
+    h.setResponder(prompt => {
+      if (!prompt.includes('后台提取')) return { text: jsonBlock({ actions: [{ op: 'noop' }] }) };
+      return { text: jsonBlock({ facts: [] }), delayMs: 400 };
+    });
+
+    await h.runTurns(3);
+    // 第一轮提取还在跑（mock 延迟 400ms），这 3 轮只会记账，不会另起一次运行。
+    await h.runTurns(3);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).pendingTurns ?? []).toEqual([]);
+    }, { timeout: 15_000 });
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台提取')).length).toBeGreaterThanOrEqual(2);
+    await h.waitIdle();
+  });
+
+  it('整理失败后，一次成功的提取不会解除整理的退避', async () => {
+    const h = await harness();
+    h.setResponder(prompt => {
+      if (prompt.includes('后台提取')) {
+        const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
+        return { text: jsonBlock({ facts: [{ content: `轮次 ${taskId} 的事实`, topic: 'environment', kind: 'environment', evidence: taskId }] }) };
+      }
+      return { text: '整理故意不给 JSON 代码块' };
+    });
+
+    await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
+    await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
+
+    await h.pipeline.runConsolidation(scope);
+    expect((await h.store.getState(scope)).lastFailureAt?.consolidation).toBeTruthy();
+
+    // 先让提取也失败一次，才能验证「成功时清除的是自己这一类」而不是空断言。
+    h.setResponder(() => ({ text: '提取也故意不给 JSON 代码块' }));
+    // 必须是真跑过的轮次：没有可读结果的轮次会走「无素材」成功早退，记不上失败。
+    await h.runTurns(1);
+    await h.pipeline.runExtraction(scope);
+    const failed = await h.store.getState(scope);
+    expect(failed.lastFailureAt?.extraction).toBeTruthy();
+    expect(failed.lastFailureAt?.consolidation).toBeTruthy();
+
+    // 退避会挡住自动提取；用手动入口跑一次成功的提取，验证只清掉提取那一格。
+    h.setResponder(prompt => {
+      if (prompt.includes('后台提取')) {
+        const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
+        return { text: jsonBlock({ facts: [{ content: `轮次 ${taskId} 的事实`, topic: 'environment', kind: 'environment', evidence: taskId }] }) };
+      }
+      return { text: '整理故意不给 JSON 代码块' };
+    });
+
+    // 一次成功的提取会覆盖 lastRun，但不该把整理的失败时间戳一起抹掉。
+    await h.runTurns(3);
+    await h.pipeline.runExtraction(scope);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true });
+    }, { timeout: 15_000 });
+    const state = await h.store.getState(scope);
+    expect(state.lastFailureAt?.consolidation).toBeTruthy();
+    expect(state.lastFailureAt?.extraction).toBeUndefined();
+
+    // 计数早已越过整理阈值，但退避仍在，不能再起整理。
+    const before = h.memoryPrompts.filter(prompt => prompt.includes('后台整理')).length;
+    await h.store.updateState(scope, { turnsSinceConsolidation: 20 });
+    await h.runTurns(1);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(before);
+  });
+
+  it('机器人不配模型时按 Agent 自身的模型复用会话，改了模型才新建', async () => {
+    const h = await harness({ agentModel: 'agent-default-model' });
+    h.setResponder(() => ({ text: jsonBlock({ facts: [] }) }));
+
+    await h.runTurns(3);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true });
+    }, { timeout: 10_000 });
+    expect(h.startCalls).toHaveLength(1);
+
+    await h.runTurns(3);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).pendingTurns ?? []).toEqual([]);
+    }, { timeout: 10_000 });
+    expect(h.startCalls).toHaveLength(1);
+
+    const cheaper = await h.setConfig({ memoryModel: 'cheap-model' });
+    await h.runTurns(3, cheaper);
+    await vi.waitFor(() => expect(h.startCalls).toHaveLength(2), { timeout: 10_000 });
+    expect(h.startCalls.at(-1)).toMatchObject({ model: 'cheap-model' });
+  });
+
+  it('整理成功后自己清掉 indexOverBudget，不再每轮重复触发', async () => {
+    const h = await harness();
+    // 空账本是唯一一条不写派生视图的整理成功路径：这里不显式清标记，它就会卡在 true，
+    // 之后每个用户轮次都判定整理到期，drain 还会连跑 3 轮。
+    await h.store.updateState(scope, { indexOverBudget: true });
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ kind: 'consolidation', ok: true, added: 0 });
+    expect((await h.store.getState(scope)).indexOverBudget).toBe(false);
+    expect(h.memoryPrompts).toEqual([]);
   });
 
   it('记忆会话超时：中断该任务、记失败并清掉 running', async () => {
