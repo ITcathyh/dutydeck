@@ -99,7 +99,17 @@ export async function parseLarkMessageContent(
     const title = String(body?.title ?? '').trim();
     const rows = Array.isArray(body?.content_v2) ? body.content_v2 : Array.isArray(body?.content) ? body.content : [];
     const paragraphs = rows.map((row: unknown) => renderNode(row).trim()).filter(Boolean);
-    return { text: [title, ...paragraphs].filter(Boolean).join('\n\n'), resources };
+    const topLevelFiles = Array.isArray(parsed?.files) ? parsed.files : Array.isArray(body?.files) ? body.files : [];
+    const fileMarkers: string[] = [];
+    for (const file of topLevelFiles) {
+      const descriptor = asRecord(file);
+      if (!descriptor) continue;
+      const fileKey = typeof descriptor.file_key === 'string' ? descriptor.file_key.trim() : '';
+      if (!fileKey) continue;
+      const marker = addResource('file', fileKey, descriptor.file_name ?? descriptor.name);
+      if (marker) fileMarkers.push(marker);
+    }
+    return { text: [title, ...paragraphs, ...fileMarkers].filter(Boolean).join('\n\n'), resources };
   }
 
   if (messageType === 'interactive') {

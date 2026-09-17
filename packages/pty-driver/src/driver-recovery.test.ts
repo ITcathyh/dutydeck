@@ -45,8 +45,9 @@ function shellAdapter(prompts: string[]): CliAdapter {
 }
 
 function config(cwd: string): AgentConfig {
+  // Fake CLI 接受 Claude 生成的 CLI 参数（如 --settings 路径），外层 shell 通过 -c 吸收参数后进入交互式 shell。
   return {
-    id: 'claude-code', name: 'Claude fixture', command: '/bin/sh', args: [], protocol: 'pty-cli', cwd,
+    id: 'claude-code', name: 'Claude fixture', command: '/bin/sh', args: ['-c', 'exec /bin/sh'], protocol: 'pty-cli', cwd,
     env: { CLAUDE_CONFIG_DIR: cwd }, permissionMode: 'full-trust', timeout: 60,
     capabilities: { pause: false, resume: true }, builtin: false,
   } as AgentConfig;

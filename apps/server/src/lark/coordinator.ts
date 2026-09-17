@@ -2249,6 +2249,10 @@ export class LarkMessageCoordinator {
            */
           const stale = () => this.stopped || pending.turn !== task.turn;
           if (stale()) continue;
+          // 过程卡已被永久冻结：停止向已确认永久不可更新的卡 PATCH，避免重复浪费 API 调用。
+          if (task.progressFrozen && pending.input.messageId === task.cardMessageId) {
+            continue;
+          }
           // 终态卡片是交付契约的一部分，值得多试几次；运行态心跳丢一帧无所谓。
           // 注意与 api-gate 的分层关系：gate 在 HTTP 层已做 429/5xx 退避重试
           // （默认 3 次），这里是业务层重试。持续 429 时两层会相乘，单次终态更新
@@ -2274,6 +2278,7 @@ export class LarkMessageCoordinator {
             } catch (error) {
               lastError = error;
               if (isLarkCardContentRejected(error)) { contentRejected = true; break; }
+              if (isLarkMessageUnupdatable(error)) break;
               if (isLarkMessageRateLimit(error)) {
                 cardRateLimitFailures += 1;
                 cardRateLimitedUntil = Date.now() + larkRateLimitBackoffMs(cardRateLimitFailures);
@@ -2304,10 +2309,27 @@ export class LarkMessageCoordinator {
             }
           }
           if (stale()) continue;
-          if (lastError && pending.terminal) {
+          if (lastError) {
             if (isLarkMessageUnupdatable(lastError)) {
-              task.progressFrozen = true;
-            } else {
+              // 异步失败处理必须捕获并核对当前 card id/轮次，旧卡失败不能冻结新卡/新任务。
+              if (!this.stopped && pending.turn === task.turn && pending.input.messageId === task.cardMessageId) {
+                task.progressFrozen = true;
+                try {
+                  await this.saveCardTask(task, pending.input.state ?? task.state);
+                } catch (saveError) {
+                  this.log.warn({ error: saveError, taskId: task.id, messageId: deliveredMessageId }, '持久化卡片冻结状态失败，等待对账');
+                  this.scheduleReconcile();
+                }
+              } else {
+                this.log.info({
+                  taskId: task.id,
+                  pendingTurn: pending.turn,
+                  taskTurn: task.turn,
+                  pendingMessageId: pending.input.messageId,
+                  currentCardMessageId: task.cardMessageId
+                }, '旧轮次或旧卡的不可更新错误，跳过冻结以保护当前卡片');
+              }
+            } else if (pending.terminal) {
               this.log.warn({ error: lastError, messageId: pending.input.messageId }, '执行过程卡更新失败，等待对账；结果仍将独立交付');
               this.scheduleReconcile();
             }
@@ -2377,6 +2399,7 @@ export class LarkMessageCoordinator {
       if (state === 'queued' && task.state === 'running') return Promise.resolve({ delivered: false } as CardUpdateOutcome);
       if (timer) { clearTimeout(timer); timer = undefined; }
       const terminal = state === 'completed' || state === 'failed' || state === 'interrupted' || state === 'cancelled';
+      if (!terminal && task.progressFrozen) return Promise.resolve({ delivered: false } as CardUpdateOutcome);
       let elements: LarkCardElement[] = boundLarkCardElements(renderLarkProcessElements(task.events, config, terminal));
       const recovery = task.sessionId && task.runtimeTaskId && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(state)
         ? await describeLarkTaskRecovery(this.runtime, task.sessionId, task.runtimeTaskId, state) : undefined;

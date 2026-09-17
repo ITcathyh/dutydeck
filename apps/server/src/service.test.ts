@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer } from 'node:net';
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { getAuthToken } from './auth/auth.js';
 import { accessMode, createProductionPtyBackend, listenOptions, startLocalServer } from './service.js';
@@ -276,7 +276,13 @@ describe('production PTY backend injection', () => {
         DUTYDECK_AGENTS_JSON: JSON.stringify(['claude-code', 'ccflash'].map(id => ({
           id, name: id, command: runner, args: [join(root, `${id}.json`), '--wrapper-profile', id],
           ...(id === 'ccflash' ? { adapterId: 'claude-code' } : {}), protocol: 'pty-cli',
-          permissionMode: 'ask', env: { CLAUDE_CONFIG_DIR: root },
+          permissionMode: 'ask',
+          env: {
+            CLAUDE_CONFIG_DIR: root,
+            dutydeck_relay_url: 'http://127.0.0.1:9/fixture-relay',
+            dutydeck_relay_token: 'fixture-relay-token',
+            dutydeck_relay_command: 'dutydeck-fixture',
+          },
         }))),
       },
     });
@@ -289,9 +295,31 @@ describe('production PTY backend injection', () => {
         expect(session.agentId).toBe(agentId);
         const dump = join(root, `${agentId}.json`);
         await vi.waitFor(() => expect(existsSync(dump)).toBe(true));
-        expect(JSON.parse(readFileSync(dump, 'utf8'))).toEqual([
+        const rawArgv: string[] = JSON.parse(readFileSync(dump, 'utf8'));
+        const settingsCount = rawArgv.filter(arg => arg === '--settings').length;
+        expect(settingsCount).toBe(1);
+        const settingsIndex = rawArgv.indexOf('--settings');
+        const settingsPath = rawArgv[settingsIndex + 1]!;
+        expect(existsSync(settingsPath)).toBe(true);
+        expect(statSync(dirname(settingsPath)).mode & 0o777).toBe(0o700);
+        expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+
+        const argvWithoutSettings = [...rawArgv.slice(0, settingsIndex), ...rawArgv.slice(settingsIndex + 2)];
+        expect(argvWithoutSettings).toEqual([
           '--wrapper-profile', agentId, '--session-id', session.id.replace(/^ses_/, ''),
           '--model', 'gateway/custom[1m]', '--disallowed-tools', 'EnterPlanMode,ExitPlanMode',
+        ]);
+        expect(rawArgv.join(' ')).not.toContain('fixture-relay-token');
+
+        const settingsJson = JSON.parse(readFileSync(settingsPath, 'utf8'));
+        expect(settingsJson.env?.CLAUDE_CONFIG_DIR).toBe(root);
+        expect(settingsJson.env?.dutydeck_relay_token).toMatch(/^(?:fixture-relay-token|v1\.)/);
+        expect(rawArgv.join(' ')).not.toContain(settingsJson.env?.dutydeck_relay_token);
+        expect(settingsJson.hooks.PreToolUse).toEqual([
+          {
+            matcher: '^AskUserQuestion$',
+            hooks: [{ type: 'command', command: 'dutydeck-fixture session native-ask', timeout: 1230 }],
+          },
         ]);
       }
     } finally {

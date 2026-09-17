@@ -174,7 +174,7 @@ export class PtyCliDriver implements AgentDriver {
       reasoningEffort: this.agent.reasoningEffort,
       permissionMode: this.agent.permissionMode,
       env: this.agent.env,
-    }), this.cwd);
+    }), this.cwd, this.agent.env);
     this.started = true;
     this.backend.spawn(this.agent.command, this.lastArgs, {
       cwd: this.cwd,
@@ -952,7 +952,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private respawn(args: string[]): void {
-    const launchArgs = this.claudeSettings.args(this.agent.args, args, this.cwd);
+    const launchArgs = this.claudeSettings.args(this.agent.args, args, this.cwd, this.agent.env);
     this.teardownWiring();
     this.inputPrepared = false;
     // 会话名必须在 kill 之前取：kill 之后旧后端就不该再被问了。

@@ -357,6 +357,7 @@ export interface ChannelMappingRepository {
   get(channel: string, externalId: string): Promise<ChannelMapping | undefined>;
   list(channel: string): Promise<ChannelMapping[]>;
   save(mapping: ChannelMapping): Promise<void>;
+  compareAndSetExtra(id: string, expectedExtra: string | null | undefined, extra: string): Promise<boolean>;
 }
 export interface ArtifactRepository {
   ensureLocalProject(cwd: string): Promise<void>;

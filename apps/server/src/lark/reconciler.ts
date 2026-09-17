@@ -80,13 +80,18 @@ export async function performLarkCardReconcile(input: {
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             ...(legacyElements ? { elements: legacyElements } : {})
           });
-          await cardMappings.save({ ...mapping, extra: JSON.stringify({ ...persisted, progress_frozen: true }) });
+          const saved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, progress_frozen: true }));
+          if (!saved) unresolved++;
         } catch (error) {
           // 过程卡已被删除或过了可更新期：它永远不可能再收敛，重试只是每轮空打一次 API。
           // 结论早已作为另一条消息送达，这里不发任何卡片，就地记为已冻结即可。
           if (isLarkMessageUnupdatable(error)) {
-            await cardMappings.save({ ...mapping, extra: JSON.stringify({ ...persisted, progress_frozen: true }) });
-            log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '执行过程卡已不可更新，就地收敛不再重试');
+            const saved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, progress_frozen: true }));
+            if (saved) {
+              log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '执行过程卡已不可更新，就地收敛不再重试');
+            } else {
+              unresolved++;
+            }
             continue;
           }
           unresolved++;
@@ -101,6 +106,10 @@ export async function performLarkCardReconcile(input: {
         ?? [...runtimeTasks].reverse().find(item => item.prompt === persisted.prompt && Date.parse(item.createdAt) >= persisted.started_at - 5_000);
       if (!runtimeTask) { unresolved++; continue; }
       if (!terminalTaskStates.has(runtimeTask.status)) {
+        unresolved++;
+        if (persisted.progress_frozen) {
+          continue;
+        }
         const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
           ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status) : undefined;
         const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
@@ -122,12 +131,19 @@ export async function performLarkCardReconcile(input: {
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             markdown: recovery?.markdown ?? RECOVERY_TRACKING_NOTE
           });
-          await cardMappings.save({ ...mapping,
-            extra: JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey }) });
+          await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey }));
         } catch (error) {
-          log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '恢复中的飞书卡片刷新失败');
+          if (isLarkMessageUnupdatable(error)) {
+            const saved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
+              ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey, progress_frozen: true
+            }));
+            if (saved) {
+              log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '恢复中运行态过程卡已永久不可更新，就地冻结过程卡，继续保持任务轮询等待结果');
+            }
+          } else {
+            log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '恢复中的飞书卡片刷新失败');
+          }
         }
-        unresolved++;
         continue;
       }
       let state: 'completed' | 'failed' | 'interrupted' | 'cancelled' = runtimeTask.status === 'completed'
@@ -173,6 +189,7 @@ export async function performLarkCardReconcile(input: {
         } catch (error) {
           lastError = error;
           if (isLarkCardContentRejected(error)) { contentRejected = true; break; }
+          if (isLarkMessageUnupdatable(error)) break;
           if (attempt < 3) {
             const delay = isLarkMessageRateLimit(error) ? larkRateLimitBackoffMs(attempt) : attempt * 300;
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -249,19 +266,21 @@ export async function performLarkCardReconcile(input: {
         log.warn({ error, messageId: persisted.card_message_id, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果交付待下次对账重试');
       }
       if (!updated || !finalMessageId || resultCallbackFailed) unresolved++;
-      // A newer turn or live delivery may have updated the mapping during I/O.
-      const current = (await cardMappings.list(channel)).find(item => item.id === mapping.id);
-      if (current?.extra !== mapping.extra) continue;
-      await cardMappings.save({
-        ...mapping,
-        extra: JSON.stringify({
-          ...persisted, runtime_task_id: runtimeTask.id, state,
-          progress_frozen: updated,
-          ...(finalMessageId ? { final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements } : {}),
-          last_successful_elements: deliveredElements
-        })
-      });
-      log.info({ messageId: persisted.card_message_id, finalMessageId, state, progressFrozen: updated }, '飞书过程与结果消息对账完成');
+      // 原子 CAS：只有 mapping.extra 仍是本轮读到的旧快照时才写回，避免在 PATCH/结果发送
+      // 在途期间新一轮 turn 已 save 后，旧快照把新 turn/新卡覆盖回旧值并误冻结。
+      const casSaved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
+        ...persisted, runtime_task_id: runtimeTask.id, state,
+        progress_frozen: updated,
+        ...(finalMessageId ? { final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements } : {}),
+        last_successful_elements: deliveredElements
+      }));
+      if (casSaved) {
+        log.info({ messageId: persisted.card_message_id, finalMessageId, state, progressFrozen: updated }, '飞书过程与结果消息对账完成');
+      } else {
+        // CAS 失败说明映射已被更新的一轮/实时链路写过：不覆盖，多跑一轮继续跟踪。
+        unresolved++;
+        log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '飞书卡片映射在对账期间已被更新，放弃旧快照写回并继续跟踪');
+      }
     } catch (error) {
       unresolved++;
       log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '对账单条卡片映射处理异常，稍后重试');
