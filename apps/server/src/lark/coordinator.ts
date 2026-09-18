@@ -747,7 +747,10 @@ export class LarkMessageCoordinator {
     const mentionPolicy = config.mentionPolicy ?? 'always';
     const continuedTopic = mentionPolicy === 'topic' && this.groupManager
       ? await this.groupManager.ownsTopic(config, event, await resolveLarkScopeId(event, config, this.chatModeResolver)) : false;
-    const legacyWake = Boolean(quotedWorkflow) || event.chatType === 'p2p' || (event.chatType === 'group' && (mentionsBot || !botSender && (continuedTopic || mentionPolicy === 'never' || mentionPolicy === 'ambient')));
+    // ambient 与 never 的区别在这里：ambient 在消息指名了别人时让路，只接没有指名任何人的消息。
+    // 本分支已排除 mentionsBot，所以此处出现的任何 mention 都是「点了别人」。
+    const ambientOpen = mentionPolicy === 'ambient' && !event.mentions.length;
+    const legacyWake = Boolean(quotedWorkflow) || event.chatType === 'p2p' || (event.chatType === 'group' && (mentionsBot || !botSender && (continuedTopic || mentionPolicy === 'never' || ambientOpen)));
     // Known commands retain their existing wake and authorization rules; unknown /paths remain material.
     const commandInteraction = !botSender && recognizedCommand && legacyWake;
     // Observation precedes wake filtering and every visible acknowledgement.

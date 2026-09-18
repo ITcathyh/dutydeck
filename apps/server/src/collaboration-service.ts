@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { RuntimeError, canonicalExecutionJson, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
+import { RuntimeError, canonicalExecutionJson, countDecisionUsage, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
 
 export type CollaborationRepositories = Pick<RepositoryBundle, 'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'scheduleLeases'> & { collaboration: CollaborationRepository };
 export type CollaborationAuthorization = (scope: CollaborationScope, actorId: string, action: 'read' | 'write' | 'manage' | 'execute' | 'deliver') => Promise<boolean>;
@@ -71,7 +71,25 @@ export class CollaborationService {
     const repo = this.repositories.collaboration;
     const [snapshot, followups, records, decisions, actions, activities, feedback] = await Promise.all([repo.snapshot(scope), repo.listFollowups(scope), repo.listMandates(scope), repo.listDecisions(scope), repo.listActions(scope), repo.listActivities(scope), repo.listFeedback(scope)]);
     const mandates = await Promise.all(records.map(async mandate => ({ ...mandate, schedule: await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId), nextDueAt: (await this.repositories.scheduleWatermarks.get(mandate.scheduleDefinitionId))?.nextDueAt })));
-    return { snapshot, followups, mandates, decisions, actions, activities, feedback };
+    return { snapshot, followups, mandates, decisions, actions, activities, feedback, usage: await this.usage(scope, snapshot) };
+  }
+  /**
+   * 本小时用量。判定要花模型调用，observe 影子模式同样花却从不发言，
+   * 所以用量必须能单独看到，而不是让调用方从 decisions 列表里自己数。
+   */
+  private async usage(scope: CollaborationScope, snapshot: CollaborationSnapshot) {
+    const since = (this.options.now?.() ?? new Date()).getTime() - 3_600_000;
+    const repo = this.repositories.collaboration;
+    // 两个列表的服务端硬上限都是 500，传更大的数只会被静默截断。
+    const [recentDecisions, recentActions] = await Promise.all([repo.listDecisions(scope, DECISION_WINDOW_LIMIT), repo.listActions(scope, DECISION_WINDOW_LIMIT)]);
+    const decisionWindowComplete = recentDecisions.length < DECISION_WINDOW_LIMIT || Date.parse(recentDecisions.at(-1)!.createdAt) < since;
+    return {
+      decisionsLastHour: countDecisionUsage(recentDecisions, since),
+      maxDecisionsPerHour: snapshot.settings.maxDecisionsPerHour,
+      decisionWindowComplete,
+      repliesLastHour: recentActions.filter(item => item.kind === 'participation.reply' && ['intent', 'sending', 'succeeded', 'unknown'].includes(item.status) && Date.parse(item.createdAt) >= since).length,
+      maxProactivePerHour: snapshot.settings.maxProactivePerHour
+    };
   }
   async updateSettings(scope: CollaborationScope, actorId: string, body: Parameters<CollaborationRepository['updateSettings']>[1]) {
     await this.require(scope, actorId, 'manage');

@@ -49,7 +49,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -441,6 +441,28 @@ describe('storage migrations', () => {
     expect(db.prepare('SELECT revision, state, desired_listener_state FROM channel_bots WHERE id = ?').get('bot-v13')).toEqual({ revision: 1, state: 'disabled', desired_listener_state: 'disabled' })
     expect(db.prepare('SELECT COUNT(*) AS count FROM tasks').get()).toEqual({ count: 0 })
     expect(db.prepare('SELECT COUNT(*) AS count FROM sessions').get()).toEqual({ count: 0 })
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('v22 给按旧 v20 建好的库补上判定预算列，默认 60 且不动已有行', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 20)) {
+      migration.up(db)
+      record.run(migration.version, '2026-09-01T00:00:00.000Z')
+    }
+    // 旧版 v20 建表没有这一列，现在的 v20 已经带上；删掉才能还原线上旧库的形态。
+    db.exec('ALTER TABLE collaboration_settings DROP COLUMN max_decisions_per_hour')
+    db.prepare(`INSERT INTO collaboration_settings (app_id, chat_id, revision, participation, instructions, notifications_paused, max_proactive_per_hour, retention_days, policy_version, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('cli_legacy', 'oc_legacy', 3, 'observe', '旧群指令', 0, 2, 30, 'v1', '2026-09-01T00:00:00.000Z')
+
+    runMigrations(db)
+
+    expect(columnNames(db, 'collaboration_settings')).toContain('max_decisions_per_hour')
+    expect(db.prepare('SELECT participation, instructions, max_proactive_per_hour, max_decisions_per_hour FROM collaboration_settings WHERE app_id = ?').get('cli_legacy'))
+      .toEqual({ participation: 'observe', instructions: '旧群指令', max_proactive_per_hour: 2, max_decisions_per_hour: 60 })
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
     db.close()
   })
