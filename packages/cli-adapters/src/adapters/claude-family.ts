@@ -6,8 +6,8 @@ import { relayCommandFrom, relayEnabled } from '@dutydeck/relay';
  * Claude Code 家族共用实现（claude-code / seed / relay）。
  *
  * Seed 与 Relay 是 Claude Code 的 fork（Relay 是 Seed 的当前发行名）：flag、
- * slash 命令、落盘会话布局逐字同构，只有二进制名、鉴权和数据根不同——而数据根
- * 定位、鉴权路径、transcript 桥都是 botmux 的基建，精简契约里不存在。所以三者
+ * slash 命令、落盘会话布局逐字同构，只有二进制名、鉴权和数据根不同——当前契约
+ * 不做复杂路径定位或桥接。所以三者
  * 在 dutydeck 侧真正的差异只剩 `id`，其余「命令行参数 + 输入时序 + idle pattern」
  * 完全一致，收敛到这里，避免三份逐字复制各自漂移。
  */
@@ -228,8 +228,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
       return args;
     },
 
-    // 会话上下文（路由块）由 driver 拼到首轮 prompt 前（契约统一走 prompt
-    // 前缀，不再走 botmux 的 --append-system-prompt）。
+    // 会话上下文（路由块）由 driver 拼到首轮 prompt 前（契约统一走 prompt 前缀）。
     injectSessionContext(ctx: AdapterSessionContext): string {
       return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },

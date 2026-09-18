@@ -10,7 +10,7 @@ import {
 /**
  * Stable, Dutydeck-only tmux namespace. The hash keeps arbitrary/custom
  * session ids out of tmux target syntax while the readable prefix makes
- * operator diagnostics recognizable. BotMux session names are never probed.
+ * operator diagnostics recognizable. External session names are never probed.
  */
 export function dutydeckPtySessionName(sessionId: string): string {
   const readable = sessionId.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 48) || 'session';

@@ -150,7 +150,7 @@ Markdown、代码块、工具调用和终端视图均按需渲染。长历史不
 
 私有仓库或匿名限流时，在启动 Dutydeck 的服务端环境设置 `DUTYDECK_GITHUB_TOKEN`，也兼容 `GH_TOKEN` / `GITHUB_TOKEN`。使用具备目标仓库 Actions 读取权限的令牌；令牌不通过页面提交，也不保存进自动任务记录。接口权限与返回字段见 [GitHub Workflow Runs 文档](https://docs.github.com/en/rest/actions/workflow-runs)。
 
-这里运行的是 DutyDeck 自有、绑定现有工作项的自动任务。控制中心 foundation 定义和 Botmux 导入计划仍保持禁用，不自动接管来源进程。worktree 隔离可写目录，不隔离宿主凭据、文件系统或网络。
+这里运行的是 Dutydeck 自有、绑定现有工作项的自动任务。控制中心 foundation 定义和历史数据导入计划仍保持禁用，不自动接管来源进程。worktree 隔离可写目录，不隔离宿主凭据、文件系统或网络。
 
 ## 远程浏览器访问
 
@@ -187,7 +187,7 @@ DUTYDECK_AUTH=false dutydeck start --host 0.0.0.0
 
 > 警告：关闭鉴权后，任何能访问该地址的人都能查看任务、控制 Agent 和访问终端。只能用于可信网络或具备上游认证的代理之后，绝不能把它直接暴露到不可信网络或公网。
 
-从 `--no-auth` 启动、浏览器控制中心、SecretRef 安全录入、staged 群配置、Schedule 预览到 Botmux 只读迁移检查的端到端说明，见 [远程开发机上的 Dutydeck 控制面](docs/remote-devhost-control-plane.md)。其中会明确区分“Dutydeck 无访问 token”和“飞书 App 仍需 credentials”，并列出当前所有 NO-ACTIVATION 限制。
+从 `--no-auth` 启动、浏览器控制中心、SecretRef 安全录入、staged 群配置、Schedule 预览到历史数据只读迁移检查的端到端说明，见 [远程开发机上的 Dutydeck 控制面](docs/remote-devhost-control-plane.md)。其中会明确区分“Dutydeck 无访问 token”和“飞书 App 仍需 credentials”，并列出当前所有 NO-ACTIVATION 限制。
 
 高级场景可使用 `--host <address>` 指定接口。不要把未启用 TLS 的服务直接暴露到不可信网络。
 
@@ -508,8 +508,8 @@ pnpm benchmark
 - [验收矩阵](tests/e2e/README.md)
 - [包边界审计](docs/package-boundaries-1.0.md)
 - [远程开发机控制面指南](docs/remote-devhost-control-plane.md)
-- [Botmux 只读迁移 CLI](docs/botmux-import-cli.md)
+- [历史数据只读迁移 CLI](docs/legacy-import-cli.md)
 
 ## Historical / Provenance
 
-Dutydeck 的部分 ACP 工作台、飞书桥接、CLI 适配与终端实现来自早期内部原型的演进。来源只用于保留版权、许可证和代码考古信息，不定义当前产品模型。历史说明见 [Provenance](docs/architecture.md)；如需追溯具体实现，请以 Git 历史和对应源文件版权声明为准。
+Dutydeck 的部分 ACP 工作台、飞书桥接、CLI 适配与终端实现来自早期内部原型的演进。来源只用于保留版权、许可证和代码考古信息，不定义当前产品模型。完整第三方来源与开源许可证声明见 [Third-Party Notices](THIRD_PARTY_NOTICES.md)；如需追溯具体实现，请以 Git 历史和对应源文件版权声明为准。

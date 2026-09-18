@@ -33,16 +33,14 @@ export function createGeniusAdapter(): CliAdapter {
       return args;
     },
 
-    // botmux 走 --append-system-prompt 注入共用提示（所以它把 systemHints 置空、
-    // 标记自注入）；精简契约统一改为 driver 把返回块拼到首轮 prompt 前。
+    // 统一由 driver 把返回块拼到首轮 prompt 前作为会话上下文。
     injectSessionContext(ctx: AdapterSessionContext): string {
       return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // 整段发送 + 单个 Enter 提交（不走 bracketed paste）。
-      // botmux 在这之后还会读 transcript JSONL 确认提交是否落地、必要时补发
-      // 至多 3 次 Enter；精简契约的 writeInput 无返回通道，这层校验略去。
+      // 精简契约的 writeInput 无返回通道，不进行额外的提交落地重试校验。
       if (backend.sendText) backend.sendText(prompt);
       else backend.write(prompt);
       await delay(200);

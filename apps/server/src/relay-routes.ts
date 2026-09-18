@@ -100,7 +100,7 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
 
   app.addHook('onClose', async () => {
     for (const sessionId of [...watched.keys()]) unwatch(sessionId);
-    // daemon 关停也要唤醒，等价于 botmux ask broker 的 invalidateAll
+    // daemon 关停也要唤醒并取消所有等待中的 ask 请求
     broker.close();
   });
 

@@ -19,8 +19,7 @@ export function createAidenAdapter(): CliAdapter {
       return args;
     },
 
-    // botmux 给 aiden 挂了共用 shell 提示（systemHints），精简契约里改为由
-    // driver 把返回块拼到首轮 prompt 前。
+    // 由 driver 把返回块拼到首轮 prompt 前作为会话上下文。
     injectSessionContext(ctx: AdapterSessionContext): string {
       return buildDutydeckRoutingBlock(ctx.locale, ctx.env);
     },
@@ -41,6 +40,6 @@ export function createAidenAdapter(): CliAdapter {
       return ['--resume', sessionId];
     },
 
-    // 无完成标记可依赖，idle 判定只靠静默（botmux: quiescence only）。
+    // 无完成标记可依赖，idle 判定只靠静默（quiescence only）。
   };
 }

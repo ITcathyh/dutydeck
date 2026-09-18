@@ -10,7 +10,7 @@ const publicDir = resolve(serverRoot, 'public');
 const aliases = new Map([
   ['acpx/runtime', fileURLToPath(import.meta.resolve('acpx/runtime'))],
   ['@dutydeck/acp-client', 'packages/acp-client/src/index.ts'],
-  ['@dutydeck/botmux-importer', 'packages/botmux-importer/src/index.ts'],
+  ['@dutydeck/legacy-importer', 'packages/legacy-importer/src/index.ts'],
   ['@dutydeck/cli-adapters', 'packages/cli-adapters/src/index.ts'],
   ['@dutydeck/config', 'packages/config/src/index.ts'],
   ['@dutydeck/pty-driver', 'packages/pty-driver/src/index.ts'],
@@ -36,7 +36,7 @@ await build({
   platform: 'node',
   target: 'node22',
   packages: 'external',
-  sourcemap: true,
+  sourcemap: false,
   plugins: [{
     name: 'dutydeck-workspace',
     setup(buildApi) {
@@ -55,3 +55,4 @@ const assetsDir = resolve(serverRoot, 'dist/assets');
 mkdirSync(assetsDir, { recursive: true });
 cpSync(resolve(serverRoot, 'src/lark/assets/dutydeck-bouncing-ball.webp'), resolve(assetsDir, 'dutydeck-bouncing-ball.webp'));
 cpSync(resolve(serverRoot, 'src/lark/assets/SVG-SPINNERS-LICENSE.txt'), resolve(assetsDir, 'SVG-SPINNERS-LICENSE.txt'));
+cpSync(resolve(workspaceRoot, 'THIRD_PARTY_NOTICES.md'), resolve(assetsDir, 'THIRD_PARTY_NOTICES.md'));

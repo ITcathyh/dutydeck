@@ -23,8 +23,8 @@ import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
 import { loadConfig } from '@dutydeck/config';
 import { createRepositories } from '@dutydeck/storage';
 import { runAuthTokenCommand } from './auth/auth.js';
-import { BotmuxImportError } from '@dutydeck/botmux-importer';
-import { BotmuxImportCliError, runBotmuxArchive, runBotmuxDiscover, runBotmuxPlan } from './botmux-import-cli.js';
+import { LegacyImportError } from '@dutydeck/legacy-importer';
+import { LegacyImportCliError, runLegacyArchive, runLegacyDiscover, runLegacyPlan } from './legacy-import-cli.js';
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
 import { SecretCliError, runSecretList, runSecretRemove, runSecretRotate, runSecretSet, type SecretCliContext } from './secret-cli.js';
 import { DatabaseCliError, runDatabaseExecutionStatus, runDatabaseRetireLegacy, runDatabaseUpgradeExecution } from './database-cli.js';
@@ -188,7 +188,7 @@ async function main() {
     return;
   }  // 开机项里要写的是「真实的 CLI 入口」。用 import.meta.url 解析到当前正在执行的
   // dist/cli.js，而不是拼 pkgRoot/dist/cli.js——后者在打包成单文件二进制时会指向
-  // 一个进程外不存在的虚拟路径，导致开机项静默失效（botmux 踩过这个坑）。
+  // 一个进程外不存在的虚拟路径，导致开机项静默失效。
   const autostartOptions = () => ({ cliPath: fileURLToPath(import.meta.url) });
   const output = (result: unknown) => process.stdout.write(`${JSON.stringify({ ok: true, ...result as object })}\n`);
   const daemonServe: (options: CliOptions, onReady?: () => void) => Promise<void> = (options, onReady) => serve(options, onReady);
@@ -291,9 +291,9 @@ async function main() {
         repos.close();
       }
     },
-    botmuxDiscover: runBotmuxDiscover,
-    botmuxPlan: runBotmuxPlan,
-    botmuxArchive: runBotmuxArchive,
+    legacyDiscover: runLegacyDiscover,
+    legacyPlan: runLegacyPlan,
+    legacyArchive: runLegacyArchive,
     secretList: async options => { output(await withSecretContext(options.database, runSecretList)); },
     secretSet: async (id, options) => { output(await withSecretContext(options.database, context => runSecretSet(id, options, context))); },
     secretRotate: async (id, options) => { output(await withSecretContext(options.database, context => runSecretRotate(id, options, context))); },
@@ -364,7 +364,7 @@ try {
   await main();
 } catch (error) {
   if (error instanceof AgentGroupToolCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: error.error })}\n`);
-  else if (error instanceof BotmuxImportError || error instanceof BotmuxImportCliError) {
+  else if (error instanceof LegacyImportError || error instanceof LegacyImportCliError) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   }
   else if (error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);

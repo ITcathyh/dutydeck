@@ -5,7 +5,7 @@
  *
  * apps/web/src 有 510 条 dom 测试，但它们**全部 mock 掉 api 层**（`vi.spyOn(api, 'send')`）。
  * 它们证明的是「点了按钮会调用 api.send」，证明不了「指令真的到了 Agent 并且回复真的
- * 流回了界面」。tests/e2e/botmux-parity 是后端策略契约，零 UI 覆盖。中间这段真实链路
+ * 流回了界面」。tests/e2e/integration-contracts 是后端策略契约，零 UI 覆盖。中间这段真实链路
  * 由本目录负责。
  *
  * ## 与 scripts/e2e-harness.mjs 的关系

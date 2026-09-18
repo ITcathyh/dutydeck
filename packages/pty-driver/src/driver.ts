@@ -199,7 +199,7 @@ export class PtyCliDriver implements AgentDriver {
     if (isFirstPrompt) {
       // 首轮 prompt 前注入路由块：适配器自带 injectSessionContext 的用它
       // （claude-code/grok），其余用默认 DUTYDECK_SHELL_HINTS 块——教 CLI
-      // 自己正跑在无人值守桥接会话里（botmux 对大多数 CLI 同样注入）。
+      // 自己正跑在无人值守桥接会话里。
       const block = this.adapter.injectSessionContext
         ? this.adapter.injectSessionContext(this.sessionContext())
         : buildDutydeckRoutingBlock(this.sessionContext().locale, this.agent.env);

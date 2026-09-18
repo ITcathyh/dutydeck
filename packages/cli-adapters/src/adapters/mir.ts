@@ -5,9 +5,7 @@ import { writeRunnerInput } from '../runner-input.js';
  * Mir CLI（mircli）适配器 —— runner 类：不驱动 TUI，而是由一个 Node runner
  * 以非交互 Print Mode（`mircli -p`）逐轮调用本地 mircli。
  *
- * ⚠️ dutydeck 未移植 botmux 的 runner 脚本：**agent 的 command 必须指向对应的
- * mir runner**（botmux 侧是 `node dist/mir-runner.js`），本适配器只产出 runner
- * 的参数，不解析任何 bin 路径。
+ * ⚠️ 本适配器只构建 runner 参数，command 须指向已安装 runner，不含路径探测/鉴权/沙箱管理。
  *
  * 与 `mira` 适配器的区别：
  *   - `mira` → Mira Web API（云端编排 + 远端 sandbox；chat/search）。
@@ -19,7 +17,7 @@ import { writeRunnerInput } from '../runner-input.js';
  * dutydeck 再叠一层路由块）。
  */
 
-/** value 为 undefined 或空串就跳过（对齐 botmux 的 pushOpt 语义）。 */
+/** value 为 undefined 或空串就跳过。 */
 function pushOpt(args: string[], key: string, value: string | undefined): void {
   if (value === undefined || value.length === 0) return;
   args.push(key, value);

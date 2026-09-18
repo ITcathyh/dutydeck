@@ -9,7 +9,7 @@ export type ArtifactDisposition =
   | 'excluded_with_reason'
   | 'blocked_unknown';
 
-export interface BotmuxImportArtifact {
+export interface LegacyImportArtifact {
   artifact_ref: string;
   kind: string;
   authority: ArtifactAuthority;
@@ -20,14 +20,14 @@ export interface BotmuxImportArtifact {
   blocker_codes: string[];
 }
 
-export interface BotmuxImportBlocker {
+export interface LegacyImportBlocker {
   code: string;
   scope: 'global' | 'app' | 'artifact';
   scope_ref?: string;
   next_step: string;
 }
 
-export interface BotmuxSecretRequirement {
+export interface LegacySecretRequirement {
   secret_ref: string;
   app_ref?: string;
   kind: 'lark_app_secret' | 'agent_env' | 'connector_credential' | 'unknown_secret';
@@ -35,14 +35,14 @@ export interface BotmuxSecretRequirement {
   persisted_value: false;
 }
 
-export interface BotmuxOwnerLocator {
+export interface LegacyOwnerLocator {
   principal_ref: string;
   kind: 'email' | 'mobile' | 'open_id' | 'union_id' | 'unknown';
   app_ref: string;
   validation_state: 'not_checked';
 }
 
-export interface BotmuxOncallBinding {
+export interface LegacyOncallBinding {
   binding_ref: string;
   chat_ref: string;
   cwd_ref?: string;
@@ -51,7 +51,7 @@ export interface BotmuxOncallBinding {
   target_state: 'staged_only';
 }
 
-export interface BotmuxArchivedHammerIntegration {
+export interface LegacyArchivedHammerIntegration {
   schema_version: 1;
   kind: 'hammer';
   source_system: 'botmux';
@@ -64,7 +64,7 @@ export interface BotmuxArchivedHammerIntegration {
   blocker_code: 'hammer_executor_unavailable';
 }
 
-export interface BotmuxChannelBotPlan {
+export interface LegacyChannelBotPlan {
   app_ref: string;
   source_state: 'current';
   cli_id: string;
@@ -74,22 +74,22 @@ export interface BotmuxChannelBotPlan {
   effective_mention_mode: 'always' | 'topic' | 'never' | 'ambient';
   default_cwd_ref?: string;
   default_cwd_kind: 'absolute' | 'home_relative' | 'relative' | 'unset';
-  owner_locators: BotmuxOwnerLocator[];
-  oncall_bindings: BotmuxOncallBinding[];
+  owner_locators: LegacyOwnerLocator[];
+  oncall_bindings: LegacyOncallBinding[];
   hammer_archived: boolean;
-  archived_integrations: BotmuxArchivedHammerIntegration[];
+  archived_integrations: LegacyArchivedHammerIntegration[];
   target_state: 'staged_only';
   eligibility: false;
   blocker_codes: string[];
 }
 
-export interface BotmuxRetiredBotPlan {
+export interface LegacyRetiredBotPlan {
   app_ref: string;
   source_state: 'retired_or_unknown';
   disposition: 'archive_only';
 }
 
-export interface BotmuxSchedulePlan {
+export interface LegacySchedulePlan {
   schedule_ref: string;
   app_ref?: string;
   source_enabled: boolean;
@@ -105,7 +105,7 @@ export interface BotmuxSchedulePlan {
   blocker_codes: string[];
 }
 
-export interface BotmuxImportSummary {
+export interface LegacyImportSummary {
   current_channel_bots: number;
   retired_channel_bots: number;
   oncall_group_bindings: number;
@@ -124,7 +124,7 @@ export interface BotmuxImportSummary {
   activation_ready_apps: 0;
 }
 
-export interface BotmuxPrivateMigrationPlan {
+export interface LegacyPrivateMigrationPlan {
   schema_version: 1;
   parser_version: string;
   plan_id: string;
@@ -141,13 +141,13 @@ export interface BotmuxPrivateMigrationPlan {
     archive_snapshot_id: null;
     cutover_watermark: null;
   };
-  summary: BotmuxImportSummary;
-  channel_bots: BotmuxChannelBotPlan[];
-  retired_bots: BotmuxRetiredBotPlan[];
-  schedules: BotmuxSchedulePlan[];
-  artifacts: BotmuxImportArtifact[];
-  secret_requirements: BotmuxSecretRequirement[];
-  blockers: BotmuxImportBlocker[];
+  summary: LegacyImportSummary;
+  channel_bots: LegacyChannelBotPlan[];
+  retired_bots: LegacyRetiredBotPlan[];
+  schedules: LegacySchedulePlan[];
+  artifacts: LegacyImportArtifact[];
+  secret_requirements: LegacySecretRequirement[];
+  blockers: LegacyImportBlocker[];
   forbidden_capabilities: readonly [
     'write_dutydeck_db',
     'modify_botmux_source',
@@ -162,7 +162,7 @@ export interface BotmuxPrivateMigrationPlan {
   };
 }
 
-export interface BotmuxRedactedManifest {
+export interface LegacyRedactedManifest {
   schema_version: 1;
   parser_version: string;
   plan_id: string;
@@ -176,7 +176,7 @@ export interface BotmuxRedactedManifest {
     archive_snapshot_id: null;
     cutover_watermark: null;
   };
-  summary: BotmuxImportSummary;
+  summary: LegacyImportSummary;
   channel_bots: Array<{
     app_ref: string;
     cli_id: string;
@@ -184,12 +184,12 @@ export interface BotmuxRedactedManifest {
     oncall_bindings: number;
     owner_locators: number;
     hammer_archived: boolean;
-    archived_integrations: BotmuxArchivedHammerIntegration[];
+    archived_integrations: LegacyArchivedHammerIntegration[];
     target_state: 'staged_only';
     eligibility: false;
     blocker_codes: string[];
   }>;
-  retired_bots: BotmuxRetiredBotPlan[];
+  retired_bots: LegacyRetiredBotPlan[];
   schedules: Array<{
     schedule_ref: string;
     app_ref?: string;
@@ -202,13 +202,13 @@ export interface BotmuxRedactedManifest {
     blocker_codes: string[];
   }>;
   artifact_counts: Record<ArtifactDisposition, number>;
-  secret_requirement_counts: Record<BotmuxSecretRequirement['kind'], number>;
-  blockers: BotmuxImportBlocker[];
-  forbidden_capabilities: BotmuxPrivateMigrationPlan['forbidden_capabilities'];
-  eligibility: BotmuxPrivateMigrationPlan['eligibility'];
+  secret_requirement_counts: Record<LegacySecretRequirement['kind'], number>;
+  blockers: LegacyImportBlocker[];
+  forbidden_capabilities: LegacyPrivateMigrationPlan['forbidden_capabilities'];
+  eligibility: LegacyPrivateMigrationPlan['eligibility'];
 }
 
-export interface BotmuxDiscoveryManifest {
+export interface LegacyDiscoveryManifest {
   schema_version: 1;
   source_instance_ref: string;
   config_path_ref: string;
@@ -218,7 +218,7 @@ export interface BotmuxDiscoveryManifest {
   blocker_codes: string[];
 }
 
-export interface DiscoverBotmuxOptions {
+export interface DiscoverLegacyOptions {
   source_home?: string;
   bots_config?: string;
   data_dir?: string;
@@ -230,10 +230,10 @@ export interface DiscoverBotmuxOptions {
 export interface PrivateArchiveOptions {
   destination: string;
   encryption_key: Uint8Array;
-  key_derivation?: BotmuxArchiveKeyDerivation;
+  key_derivation?: LegacyArchiveKeyDerivation;
 }
 
-export interface BotmuxArchiveKeyDerivation {
+export interface LegacyArchiveKeyDerivation {
   algorithm: 'scrypt';
   salt_base64: string;
   key_length_bytes: 32;
@@ -242,13 +242,13 @@ export interface BotmuxArchiveKeyDerivation {
   parallelization: number;
 }
 
-export interface BotmuxPrivateArchiveManifest {
+export interface LegacyPrivateArchiveManifest {
   schema_version: 1;
   archive_snapshot_id: string;
   created_at: string;
   source_instance_ref: string;
   encryption: 'aes-256-gcm';
-  key_derivation?: BotmuxArchiveKeyDerivation;
+  key_derivation?: LegacyArchiveKeyDerivation;
   files: Array<{
     artifact_ref: string;
     kind: string;
@@ -260,13 +260,13 @@ export interface BotmuxPrivateArchiveManifest {
   live_config_written: false;
 }
 
-export class BotmuxImportError extends Error {
+export class LegacyImportError extends Error {
   constructor(
     readonly code: string,
     message: string,
     readonly artifact_ref?: string
   ) {
     super(message);
-    this.name = 'BotmuxImportError';
+    this.name = 'LegacyImportError';
   }
 }

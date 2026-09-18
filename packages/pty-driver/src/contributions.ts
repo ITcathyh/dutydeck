@@ -2,8 +2,8 @@
  * pty-cli 驱动的内置 Agent 贡献清单。
  *
  * id/adapterId 与 @dutydeck/cli-adapters 的适配器 id 一致；
- * command 按 botmux src/adapters/cli/registry.ts 的 RAW_CLI_EXECUTABLES 核对；
- * capabilities.resume 按 botmux 各适配器 buildArgs 的实际 resume 支持核对
+ * command 按各 CLI 常见可执行文件名核对；
+ * capabilities.resume 按各适配器 buildArgs 的实际 resume 支持核对
  * （gemini 适配器明确 always start fresh，无 resume）。
  * pause 全 false：这些供应商 CLI 没有可由 Dutydeck 可靠兑现的暂停语义。
  *
@@ -16,7 +16,7 @@
 export interface PtyAgentContribution {
   /** 与 adapter id 一致 */
   id: string;
-  /** 展示名（对齐 botmux CLI_DISPLAY_NAMES） */
+  /** 展示名 */
   name: string;
   /** 可执行文件名 */
   command: string;
@@ -61,16 +61,16 @@ export const PTY_AGENT_CONTRIBUTIONS: PtyAgentContribution[] = [
   // 让它们出现在 UI 列表里、用户一点就失败：
   //
   //  - mir / dsh / codex-app 是 runner 类：适配器 buildArgs 产出的是 *runner* 的
-  //    参数，而 botmux 的 runner 脚本尚未移植。botmux RAW_CLI_EXECUTABLES 里登记的
+  //    参数，外部 runner 脚本尚未接入。其内部登记的
   //    `mircli` / `dsh-jsonrpc-agent` / `codex` 是 runner 自己再去 spawn 的**二段
   //    依赖**，不是 argv 的接收方。尤其 codex-app 的 `codex` 在多数开发机上真实
   //    存在，commandExists 会放行它，于是 runner 参数被喂给真实 codex 而失败。
-  //  - mojo 的 worker 从不 spawn 它（botmux 侧由 MojoBackend 按回合 shell out），
-  //    没有 MojoBackend 就没有执行主体。
-  //  - riff / mira 是 API-backed，botmux 对二者的 command 显式写 `undefined`
-  //    （真实工作在 RiffBackend / mira runner 里），本接口 command 必填，无从填写。
+  //  - mojo 的 worker 从不直接 spawn 它（需要外部后端按回合调度），
+  //    当前没有对应后端作为执行主体。
+  //  - riff / mira 是 API-backed，底层由外部后端/HTTP 处理，不通过本地 command 启动，
+  //    本接口 command 必填，无从填写。
   //
-  // 移植 runner / 对应后端后，把 command 改指向 runner 入口（botmux 侧形如
+  // 接入 runner / 对应后端后，把 command 改指向 runner 入口（形如
   // `node dist/<id>-runner.js`）再登记。
 ];
 

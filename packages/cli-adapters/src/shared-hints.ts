@@ -1,8 +1,8 @@
 /**
- * 会话提示块注入机制（移植自 botmux `shared-hints.ts`，精简形态）。
+ * 会话提示块注入机制。Third-party attribution: see THIRD_PARTY_NOTICES.md.
  *
- * botmux 版教 CLI 用 `botmux send` 回传消息；dutydeck 的对应命令是
- * `dutydeck session send` / `dutydeck session ask`（通用回传通道，见 @dutydeck/relay）。
+ * 用于引导 CLI 了解环境，并在需要时通过 `dutydeck session send` /
+ * `dutydeck session ask`（通用回传通道，见 @dutydeck/relay）回传消息。
  * 注入机制保留：
  *
  *  - 不实现 `injectSessionContext` 的适配器（codex / gemini / opencode /
@@ -10,7 +10,7 @@
  *    首轮 prompt 前。
  *  - 实现 `injectSessionContext` 的适配器（claude-code / grok）：适配器返回
  *    上下文块，driver 同样拼进首轮 prompt 前。契约统一走 prompt 前缀，
- *    不再走 botmux 的 `--append-system-prompt` / `--rules` flag。
+ *    不走 `--append-system-prompt` / `--rules` 等 CLI 专用 flag。
  *
  * ## 为什么回传命令这几行要「运行期算」
  *

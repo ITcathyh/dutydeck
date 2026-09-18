@@ -211,10 +211,8 @@ test.describe('命令面板', () => {
   /**
    * 护栏：命令面板必须在**每条路由**上都能唤起。
    *
-   * botmux 的 Cmd+K 只在 `#/insights` 一个页面有效，其余 22 条路由是哑的
-   * （docs/botmux-dashboard-anatomy.md）。dutydeck 的命令面板是全局的——这一块
-   * 我们本来就比参照物更好。「对齐 botmux」不包括把这个能力对齐掉，所以钉一条
-   * 断言在这里：改版期间任何人把面板挂载点从 App 根挪进某个页面组件，这条会红。
+   * dutydeck 的命令面板是全局的，不应退化为仅单页面有效。改版设计不包括把这个能力对齐掉，
+   * 所以钉一条断言在这里：改版期间任何人把面板挂载点从 App 根挪进某个页面组件，这条会红。
    */
   test('[绿·护栏] 命令面板在详情页同样可唤起（不许退化成单页面功能）', async ({ dock }) => {
     await dock.setViewportSize(VIEWPORTS.desktop);

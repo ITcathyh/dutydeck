@@ -1,6 +1,6 @@
 import type { PermissionMode } from '@dutydeck/shared';
 
-/** buildArgs 的会话上下文（从 botmux 20+ 字段瘦身到这些） */
+/** buildArgs 的会话上下文（精简字段集） */
 export interface AdapterSessionContext {
   sessionId: string;
   cwd?: string;

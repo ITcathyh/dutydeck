@@ -79,9 +79,8 @@ function submitEnter(backend: PtyLike, attempts = 3): boolean {
 /**
  * oh-my-pi 原生 TUI（`omp`）适配器。
  *
- * 未移植的能力：botmux 给每个会话分配独立的 `--session-dir`（OMP 没有
- * `--session-id`，目录隔离是唯一手段），目录路径由 botmux 的 HOME +
- * session id 推出。精简契约里适配器不能碰文件系统 / homedir，所以
+ * 当前不支持的能力：暂不支持为每个会话分配独立的 `--session-dir`（OMP 没有
+ * `--session-id`，目录隔离是唯一手段）。精简契约里适配器不能碰文件系统 / homedir，所以
  * `--session-dir` 无法构造——多会话共享 OMP 默认目录，resume 只能靠
  * driver 交回精确的 transcript 路径。
  */
@@ -112,7 +111,7 @@ export function createOhMyPiAdapter(): CliAdapter {
     buildArgs({ resume, resumeSessionId, model, cwd, permissionMode }: AdapterSessionContext): string[] {
       const args = ['--no-title'];
       // OMP 的 `--resume` 吃的是 transcript 文件路径，不是会话 id
-      // （botmux 靠扫描 session 目录里最新的 .jsonl 得到它，该探测已丢弃）。
+      // （不进行扫描 session 目录最新 .jsonl 的文件系统探测）。
       const usable = usableResumeId(resumeSessionId);
       if (resume && usable) args.push('--resume', usable);
       if (permissionMode === 'full-trust') args.push('--approval-mode', 'yolo');

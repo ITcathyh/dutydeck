@@ -7,7 +7,7 @@
 // 用法：
 //   node scripts/shoot-redesign.mjs before   → docs/assets/redesign-before/
 //   node scripts/shoot-redesign.mjs after    → docs/assets/redesign-after/
-//   node scripts/shoot-redesign.mjs before --botmux   顺带截 botmux dashboard 参照
+//   node scripts/shoot-redesign.mjs before --reference   顺带截参照 UI（兼容 --botmux 别名）
 //
 // 命名 {page}-{viewport}-{theme}.png，同一格子的 before/after 文件名完全一致，
 // 便于左右并排肉眼复核。
@@ -19,10 +19,10 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const BASE = process.env.DUTYDECK_E2E_BASE_URL ?? 'http://10.37.33.49:4310';
-const BOTMUX = process.env.BOTMUX_DASHBOARD_URL ?? 'http://127.0.0.1:7891';
+const REFERENCE_URL = process.env.REFERENCE_DASHBOARD_URL ?? process.env.BOTMUX_DASHBOARD_URL ?? 'http://127.0.0.1:7891';
 
 const tag = process.argv[2] ?? 'before';
-const withBotmux = process.argv.includes('--botmux');
+const withReference = process.argv.includes('--reference') || process.argv.includes('--botmux');
 const outDir = resolve(ROOT, `docs/assets/redesign-${tag}`);
 
 const VIEWPORTS = { desktop: { width: 1440, height: 900 }, mobile: { width: 390, height: 844 } };
@@ -95,21 +95,21 @@ for (const [vpName, viewport] of Object.entries(VIEWPORTS)) {
   }
 }
 
-// botmux 参照：只在服务确实活着时截，没跑就跳过，不去硬启别人的守护进程。
-if (withBotmux) {
+// 参照 UI：只在服务确实活着时截，没跑就跳过，不去硬启外部服务的守护进程。
+if (withReference) {
   let alive = false;
-  try { alive = (await fetch(BOTMUX, { signal: AbortSignal.timeout(4000) })).ok; } catch {}
+  try { alive = (await fetch(REFERENCE_URL, { signal: AbortSignal.timeout(4000) })).ok; } catch {}
   if (!alive) {
-    console.log('— botmux dashboard 未运行，跳过参照截图');
+    console.log('— 参照 dashboard 未运行，跳过参照截图');
   } else {
     for (const [vpName, viewport] of Object.entries(VIEWPORTS)) {
       const page = await browser.newPage({ viewport });
-      const file = `reference-botmux-${vpName}.png`;
+      const file = `reference-${vpName}.png`;
       try {
-        await page.goto(BOTMUX, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+        await page.goto(REFERENCE_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
         await page.waitForTimeout(4000);
         await page.screenshot({ path: resolve(outDir, file), fullPage: false });
-        manifest.push({ file, page: 'reference-botmux', viewport: vpName, theme: 'dark', url: BOTMUX, ok: true });
+        manifest.push({ file, page: 'reference', viewport: vpName, theme: 'dark', url: REFERENCE_URL, ok: true });
         console.log('✓', file);
       } catch (err) {
         console.log('✗', file, '—', String(err).split('\n')[0]);

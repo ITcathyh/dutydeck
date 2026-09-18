@@ -2,7 +2,7 @@
 
 断言**真实渲染的计算样式**，不是源码里的类名字符串——类名对了但 CSS 没生效
 （token 没定义、被更高优先级覆盖、Tailwind 没生成那条规则）在类名断言里是绿的，
-在这里是红的。这是 `tests/e2e/botmux-parity/`（全是后端契约）没覆盖的那块洞。
+在这里是红的。这是 `tests/e2e/integration-contracts/`（全是后端契约）没覆盖的那块洞。
 
 ## 跑
 
@@ -58,13 +58,13 @@ G-B 恰好等于 1；留 1 的容差会把要抓的缺陷整个放过去（实�
 ## 截图存档
 
 ```bash
-node scripts/shoot-redesign.mjs before --botmux   # 改造前基线 + botmux 参照
-node scripts/shoot-redesign.mjs after             # 改造后
+node scripts/shoot-redesign.mjs before --reference   # 改造前基线 + 参照系统对照（兼容 --botmux）
+node scripts/shoot-redesign.mjs after                # 改造后
 ```
 
 写到 `docs/assets/redesign-{tag}/`，命名 `{page}-{viewport}-{theme}.png`，
 同一格子的 before/after 文件名完全一致，便于并排比。附 `manifest.json` 记录
 来源 URL 与时间。
 
-`--botmux` 只在 botmux dashboard 确实活着时才截，没跑就跳过，不去硬启别人的
+`--reference`（兼容 `--botmux`）只在参照系统 dashboard 确实活着时才截，没跑就跳过，不去硬启别人的
 守护进程。

@@ -18,8 +18,8 @@ try {
 } catch { /* best effort */ }
 
 /**
- * PtyBackend — node-pty backed session. Ported from botmux's
- * adapters/backend/pty-backend.ts (core only: no claude-code adapter hooks).
+ * PtyBackend — node-pty backed session. Third-party attribution: see THIRD_PARTY_NOTICES.md.
+ * Core session backend implementation without external adapter hooks.
  *
  * There is no shared backing server here, so per-session env (opts.injectEnv)
  * is merged straight into the child env.

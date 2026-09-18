@@ -6,7 +6,7 @@
 
 现有 live 配置能运行。`lark.bots` 保存凭据、监听意图和执行默认值，listener 直接消费它；群管理另外写 ChannelBot、SecretRef 元数据和群身份事实，但仍从 legacy 配置计算策略。generic 路径可以保存管理对象、写本地凭据和做身份预检；其 schema、授权器与 listener 都明确禁止激活。Botmux import 只有 discover、plan、archive，尚未把计划写入 Dutydeck 数据库。
 
-因此交付必须包含配置归并、实际导入、激活与撤销，不能把 `desiredListenerState` 改成布尔开关就算完成。具体证据见 [ChannelBot schema](../packages/shared/src/index.ts)、[执行授权](../apps/server/src/foundation-policy.ts)、[群管理](../apps/server/src/lark/group-management.ts)、[listener pool](../apps/server/src/lark/listener.ts) 和 [导入 CLI](../apps/server/src/botmux-import-cli.ts)。
+因此交付必须包含配置归并、实际导入、激活与撤销，不能把 `desiredListenerState` 改成布尔开关就算完成。具体证据见 [ChannelBot schema](../packages/shared/src/index.ts)、[执行授权](../apps/server/src/foundation-policy.ts)、[群管理](../apps/server/src/lark/group-management.ts)、[listener pool](../apps/server/src/lark/listener.ts) 和 [导入 CLI](../apps/server/src/legacy-import-cli.ts)。
 
 还有一个需要先复现的 listener 竞争：pool 在 `await listener.start` 后才登记实例；其间 stop 或删除看不到尚在启动的对象。P1 需用进入启动的停点证明并修复，不能将正常启停测试当作覆盖。
 

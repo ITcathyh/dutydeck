@@ -70,7 +70,7 @@ export interface RuntimeOptions {
   acpxCommand?: string;
   driverFactory?: DriverFactory;
   /**
-   * pty-cli 协议驱动工厂（botmux 适配器栈，由 @dutydeck/pty-driver 提供）。
+   * pty-cli 协议驱动工厂（PTY 适配器驱动栈，由 @dutydeck/pty-driver 提供）。
    * 仅在未注入自定义 driverFactory 时生效：agent.protocol === 'pty-cli' 的会话路由到它。
    * 未提供时创建 pty-cli 会话会抛 DRIVER_UNAVAILABLE。
    */

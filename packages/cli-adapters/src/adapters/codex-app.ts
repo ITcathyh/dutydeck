@@ -5,16 +5,14 @@ import { writeRunnerInput } from '../runner-input.js';
  * Codex App 适配器 —— runner 类：由一个 Node runner 通过 app-server 协议
  * （`codex app-server`）驱动 Codex，不驱动 TUI。
  *
- * ⚠️ dutydeck 未移植 botmux 的 runner 脚本：**agent 的 command 必须指向对应的
- * codex-app runner**（botmux 侧是 `node dist/codex-app-runner.js`），本适配器只
- * 产出 runner 的参数，不解析 bin 路径。
+ * ⚠️ 本适配器只构建 runner 参数，command 须指向已安装 runner，不含路径探测/鉴权/沙箱管理。
  *
  * Codex App 的 thread 由 runner 经 app-server 协议恢复，没有稳定的用户可见 CLI
  * deeplink 能精确定位一个 desktop thread，故不实现 buildResumeCommand。runner
  * 自己注入上下文，也就不实现 injectSessionContext。
  */
 
-/** value 为 undefined 或空串就跳过（对齐 botmux 的 pushOpt 语义）。 */
+/** value 为 undefined 或空串就跳过。 */
 function pushOpt(args: string[], key: string, value: string | undefined): void {
   if (value === undefined || value.length === 0) return;
   args.push(key, value);
@@ -26,7 +24,7 @@ export function createCodexAppAdapter(): CliAdapter {
     // resume 能力位为否：buildArgs 虽能接 --thread-id（driver 回填
     // resumeSessionId 时可用），但没有 buildResumeCommand——thread id 是
     // app-server 铸的，driver 的 resume() 只拿得到 dutydeck sessionId，拼出来
-    // 必然指向不存在的 thread。botmux 同样返回 null。
+    // 必然指向不存在的 thread，故返回 null。
     capabilities: {},
 
     buildArgs({ sessionId, resume, resumeSessionId, cwd, model, reasoningEffort, locale }: AdapterSessionContext): string[] {

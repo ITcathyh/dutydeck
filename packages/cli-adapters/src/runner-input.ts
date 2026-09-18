@@ -1,8 +1,8 @@
 import type { PtyLike } from './types.js';
 
 /**
- * runner 类适配器的 stdin 分块注入 + 控制行协议（移植自 botmux
- * `runner-input.ts`，去掉 turnId / trustedCaller 关联）。
+ * runner 类适配器的 stdin 分块注入 + 控制行协议。
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
  *
  * runner 不驱动 TUI：它逐字节读 stdin，只在看到行尾换行时入队一条消息。
  * 每条消息是一行控制行：

@@ -1,8 +1,8 @@
 /**
  * ZellijBackend — session backend backed by a persistent zellij session.
  *
- * Ported core from botmux's adapters/backend/zellij-backend.ts (+ the
- * dump-screen / list-panes knowledge from zellij-observe-backend.ts).
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
+ * Includes dump-screen / list-panes knowledge and protocol implementation.
  *
  * Architecture: **pty-under-zellij**. Unlike TmuxBackend (which never attaches
  * and replicates output with pipe-pane), the zellij client IS a node-pty:
@@ -22,7 +22,7 @@
  *     so session env reaches the CLI only — never the zellij server's
  *     environment (the client itself runs on a scrubbed allowlist env).
  *
- * Deliberately NOT ported from botmux: the socket-probe pid attribution (see
+ * Core scope excludes: socket-probe pid attribution (see
  * findServerPid), the adopt/observe polling backend, sandbox/wrapper-shell
  * integration, liveness gating, destroy-result reporting.
  */
@@ -212,14 +212,12 @@ export function parseChildPids(psOut: string, parent: number): number[] {
 /**
  * Session-name → server-pid lookup by argv tail.
  *
- * CAVEAT (botmux ships a stronger version): `zellij action rename-session`
+ * CAVEAT: `zellij action rename-session`
  * renames the session's SOCKET FILE while the server's argv keeps the
  * spawn-time path forever, and a freed name is reusable — so a name-keyed
- * lookup can in principle bind to a different session's server. botmux defends
- * against that with a socket-probe child that attributes an accept() to a
- * specific pid; that machinery is deliberately NOT ported here. dutydeck owns
- * its session names and never renames them, so the argv-tail match (botmux's
- * own non-Linux path) is sufficient.
+ * lookup can in principle bind to a different session's server.
+ * Dutydeck owns its session names and never renames them, so the argv-tail match
+ * is sufficient.
  */
 export function findZellijServerPid(sessionName: string): number | null {
   try {
@@ -305,8 +303,8 @@ export class ZellijBackend implements SessionBackend {
    * sessions" ({ok:true, sessions:[]}) — the basis of the tri-state probe.
    *
    * NB: `zellij list-sessions` exits **1** when there are no live sessions at
-   * all, printing "No active zellij sessions found." to stderr. botmux runs
-   * this through execFileSync, whose throw collapses that authoritative
+   * all, printing "No active zellij sessions found." to stderr. Running
+   * this through execFileSync would collapse that authoritative
    * "provably zero sessions" answer into 'unknown'. Here spawnSync is used
    * instead so the empty case stays authoritative: exit 1 with no session
    * lines is {ok:true, sessions:[]} → a clean 'missing'.

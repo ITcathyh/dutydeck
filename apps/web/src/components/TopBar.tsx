@@ -46,12 +46,11 @@ export type TopBarProps = {
 
   ## 高度只有一个值
 
-  botmux 的顶栏有个 off-by-4 的历史 bug：--topbar-h(56px) 只被侧栏的 top 消费，
-  顶栏自己用的是另一个 --topbar-height(60px)，两值不等（契约 §15）。这里只用
-  h-topbar 一个来源，侧栏的让位与顶栏的高度必然对齐。
+  避免因历史中 `--topbar-h(56px)` 与 `--topbar-height(60px)` 双变量不一致导致 4px 错位（契约 §15）。
+  这里只用 h-topbar 一个来源，确保侧栏的让位与顶栏的高度严格对齐。
 
-  分隔线用 border-b border-default，不复刻 botmux 的 ::after 两端淡出渐变线——
-  那需要一条 linear-gradient 字面量，而契约禁止组件里出现颜色字面量。
+  分隔线用 border-b border-default，采用标准语义边框而非硬编码 linear-gradient 渐变线，
+  符合契约对颜色字面量的约束。
 */
 export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcuts, themePreference, themeResolved, onThemeChange, hidden }: TopBarProps) {
   return <header

@@ -1,6 +1,6 @@
-# Botmux 近期改动吸收与验证
+# 兼容性改动吸收与基线验证报告（2026-09-17）
 
-已将富文本附件、过期卡片收敛、Claude 配置优先级和自动化总览刷新融入 Dutydeck。
+Dutydeck 已完成富文本附件解析、过期卡片收敛、Claude 配置优先级与自动化总览刷新等关键能力的吸收与验证。
 
 | 改动 | 行为 |
 |---|---|
@@ -26,13 +26,13 @@ env -u ANTHROPIC_BASE_URL -u ANTHROPIC_MODEL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPI
 
 ## 调研阶段基线分析与上游取舍（修复前快照）
 
-> **说明**：以下内容为实施前的基线调研报告快照（分析日期 2026-09-17，基于 Dutydeck 源码基线 `2173d2e` 与已 rebase 的 Botmux `ba847cae5d190e6c87a3c57452074921be3d1c58`）。当时 Dutydeck 业务代码尚未修改，记录了当时通过离线探针确认的缺口分析与上游 28 个提交的取舍依据，供历史追溯参考。
+> **说明与来源集中声明**：以下内容为实施前的基线调研报告快照（分析日期 2026-09-17，基于 Dutydeck 源码基线 `2173d2e` 与上游参考仓库 https://github.com/deepcoldy/botmux commit `ba847cae5d190e6c87a3c57452074921be3d1c58`）。当时 Dutydeck 业务代码尚未修改，记录了当时通过离线探针确认的缺口分析与上游 28 个提交的取舍依据，供历史追溯参考。第三方许可声明详见根目录 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
 ### 1. 调研期初始建议与优先级评估（历史快照）
 
 本轮最值得融入 Dutydeck 的是**富文本附件识别、过期卡片停止重试、Claude 配置优先级**。另外，自动化总览存在外部状态刷新缺口。共享目录并发保护适合按使用场景补充，不能直接引入全局目录锁。
 
-分析日期：2026-09-17。Dutydeck 源码基线为 `2173d2e`；Botmux 已执行 `git fetch origin`、`git rebase origin/master`，从 `ad184ae3` 更新到 `ba847cae5d190e6c87a3c57452074921be3d1c58`。本地原先没有独有提交，本次无冲突，更新后 HEAD 与刚拉取的 origin/master 相同。差异为 28 个提交、231 个文件，提交日期覆盖 9 月 14—17 日。两边原有未跟踪文件均保留。
+分析日期：2026-09-17。Dutydeck 源码基线为 `2173d2e`；上游仓库已执行 `git fetch origin`、`git rebase origin/master`，从 `ad184ae3` 更新到 `ba847cae5d190e6c87a3c57452074921be3d1c58`。本地原先没有独有提交，本次无冲突，更新后 HEAD 与刚拉取的 origin/master 相同。差异为 28 个提交、231 个文件，提交日期覆盖 9 月 14—17 日。两边原有未跟踪文件均保留。
 
 本次交付是源码更新与分析；Dutydeck 业务代码未修改，没有部署或重启服务。以下判断依据双方当前实现、定向测试和离线功能探针，不把旧追平方案中的状态视为当前状态。
 

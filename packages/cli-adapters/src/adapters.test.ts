@@ -857,9 +857,9 @@ describe('PTY_AGENT_CONTRIBUTIONS 覆盖度', () => {
   // 下面这些适配器已移植可用，但**都不能由 dutydeck 直接 spawn**，登记进去只会
   // 让它们出现在 UI 列表里、用户一点就失败（尤其 codex-app 的 `codex` 在多数
   // 开发机上真实存在，commandExists 会放行，于是 runner 参数被喂给真实 codex）：
-  //   riff / mira  —— API-backed，botmux 的 RAW_CLI_EXECUTABLES 对二者写 undefined
+  //   riff / mira  —— API-backed 后端，不通过本地 command spawn
   //   mir/dsh/codex-app —— runner 类，buildArgs 产出的是 runner 参数，
-  //                        而 dutydeck 尚未移植 botmux 的 runner 脚本
+  //                        而外部 runner 脚本未接入
   //   mojo        —— 执行主体是 MojoBackend（按回合 shell out），尚未移植
   //   mtr         —— 可执行文件名与常见网络诊断工具冲突；在能可靠指纹识别前
   //                        仅允许通过 DUTYDECK_AGENTS_JSON 显式配置

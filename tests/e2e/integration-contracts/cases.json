@@ -91,7 +91,7 @@
       "coverage": ["remote_open_http", "remote_open_sse", "remote_open_terminal_ws", "same_origin"],
       "execution": "remote_opt_in",
       "expectation": "pass",
-      "command": ["node", "tests/e2e/botmux-parity/checks/remote-open.mjs"],
+      "command": ["node", "tests/e2e/integration-contracts/checks/remote-open.mjs"],
       "required_env": ["DUTYDECK_PARITY_BASE_URL", "DUTYDECK_PARITY_SESSION_ID", "DUTYDECK_PARITY_REMOTE_OPEN_ACK"],
       "safety": [
         "runner requires --allow-remote-open",
@@ -137,11 +137,11 @@
       "coverage": ["importer_read_only"],
       "execution": "offline",
       "expectation": "pass",
-      "command": ["node", "node_modules/tsx/dist/cli.mjs", "tests/e2e/botmux-parity/checks/importer-read-only.mts"],
+      "command": ["node", "node_modules/tsx/dist/cli.mjs", "tests/e2e/integration-contracts/checks/importer-read-only.mts"],
       "fixtures": ["fixtures/importer"],
       "evidence_sources": [
-        "dutydeck:packages/botmux-importer/src/importer.ts",
-        "dutydeck:packages/botmux-importer/src/archive.ts"
+        "dutydeck:packages/legacy-importer/src/importer.ts",
+        "dutydeck:packages/legacy-importer/src/archive.ts"
       ],
       "assertions": [
         "production_cutover is NO_GO and activation_ready is false",
@@ -158,12 +158,12 @@
       "expectation": "pass",
       "command": [
         "node", "node_modules/vitest/vitest.mjs", "run",
-        "apps/server/src/botmux-import-cli.blackbox.test.ts",
+        "apps/server/src/legacy-import-cli.blackbox.test.ts",
         "--project", "node"
       ],
       "evidence_sources": [
-        "dutydeck:apps/server/src/botmux-import-cli.blackbox.test.ts",
-        "dutydeck:apps/server/src/botmux-import-cli.ts"
+        "dutydeck:apps/server/src/legacy-import-cli.blackbox.test.ts",
+        "dutydeck:apps/server/src/legacy-import-cli.ts"
       ],
       "assertions": [
         "the CLI exposes discover, plan and archive but no apply/stage/activate/cutover/resume command",
@@ -178,7 +178,7 @@
       "coverage": ["daemon_restart_reattach"],
       "execution": "offline",
       "expectation": "pass",
-      "command": ["node", "tests/e2e/botmux-parity/checks/wp2-service-restart.mjs"],
+      "command": ["node", "tests/e2e/integration-contracts/checks/wp2-service-restart.mjs"],
       "fixtures": ["fixtures/restart-run.json"],
       "evidence_sources": [
         "dutydeck:apps/server/src/service.test.ts",
@@ -366,9 +366,9 @@
       "coverage": ["identity_preflight", "secret_provider", "staged_fail_closed"],
       "execution": "offline",
       "expectation": "pass",
-      "command": ["node", "tests/e2e/botmux-parity/checks/identity-preflight.mjs"],
+      "command": ["node", "tests/e2e/integration-contracts/checks/identity-preflight.mjs"],
       "evidence_sources": [
-        "dutydeck:tests/e2e/botmux-parity/checks/identity-preflight.mjs",
+        "dutydeck:tests/e2e/integration-contracts/checks/identity-preflight.mjs",
         "dutydeck:apps/server/src/lark/identity-preflight.test.ts",
         "dutydeck:apps/server/src/identity-preflight.service.test.ts",
         "dutydeck:apps/server/src/identity-preflight-cli.test.ts"

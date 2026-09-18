@@ -31,7 +31,7 @@ import { createCodexAppAdapter } from './adapters/codex-app.js';
 
 /**
  * 已知 CLI id 全集。**从 `factories` 的键派生**，而不是手写第二份清单：
- * botmux 的同名常量曾因手写副本两次静默漏项（少了 reasonix / mojo）——
+ * 避免手写副本可能漏项——
  * 一个 `CliId[]` 字面量只会检查「有没有多余成员」，从不检查「有没有漏」。
  */
 const factories = {

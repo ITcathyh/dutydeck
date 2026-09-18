@@ -10,7 +10,6 @@
   },
   "files": [
     "dist/cli.js",
-    "dist/cli.js.map",
     "dist/agents",
     "dist/assets",
     "public",
@@ -44,7 +43,7 @@
     "zod": "3.25.67"
   },
   "devDependencies": {
-    "@dutydeck/botmux-importer": "workspace:*",
+    "@dutydeck/legacy-importer": "workspace:*",
     "@dutydeck/cli-adapters": "workspace:*",
     "@dutydeck/pty-driver": "workspace:*",
     "@dutydeck/relay": "workspace:*",

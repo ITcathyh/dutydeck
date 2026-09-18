@@ -6,16 +6,14 @@ import { writeRunnerInput } from '../runner-input.js';
  * Mira（Mira Web API）适配器 —— runner 类：云端编排 + 远端 sandbox，没有本地
  * 二进制，全部经由一个 Node runner 走 HTTP。
  *
- * ⚠️ dutydeck 未移植 botmux 的 runner 脚本：**agent 的 command 必须指向对应的
- * mira runner**（botmux 侧是 `node dist/mira-runner.js`），本适配器只产出 runner
- * 的参数，不解析任何 bin 路径。
+ * ⚠️ 本适配器只构建 runner 参数，command 须指向已安装 runner，不含路径探测/鉴权/沙箱管理。
  *
  * 续接靠持久化的 Mira 会话 id（`--mira-session-id`）在 runner 内部完成，没有等价
  * 的用户可见 CLI 命令，故不实现 buildResumeCommand。runner 自己注入上下文，也就
  * 不实现 injectSessionContext。
  */
 
-/** value 为 undefined 或空串就跳过（对齐 botmux 的 pushOpt 语义）。 */
+/** value 为 undefined 或空串就跳过。 */
 function pushOpt(args: string[], key: string, value: string | undefined): void {
   if (value === undefined || value.length === 0) return;
   args.push(key, value);
@@ -42,7 +40,7 @@ export function createMiraAdapter(): CliAdapter {
     },
 
     // 入参必须是 Mira 自己铸的会话 id（`--mira-session-id` 的唯一形态）。
-    // dutydeck sessionId 顶替不了，恢复不到正确会话 → 返回 null（botmux 同样如此），
+    // dutydeck sessionId 顶替不了，恢复不到正确会话 → 返回 null，
     // driver 据此改起新会话。
     buildResumeCommand(sessionId: string): string[] | null {
       if (isDutydeckSessionId(sessionId)) return null;

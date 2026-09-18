@@ -1,8 +1,8 @@
-# Dutydeck 完整产品与 Botmux 能力追平方案
+# Dutydeck 完整产品能力规划与基线对照方案
 
 分析基线：2026-09-14，Dutydeck 5e2743e，Botmux e8c9bbdf。只使用当前源码、现存项目文档和本会话的验证结果，没有读取 memory、个人知识库或历史 session。本文固定完整终态与验收范围；开发进展另见 [实施记录](full-product-execution.md)，不能将方案中的要求视为已实现。
 
-**建议继续以 Dutydeck 为产品主体，保留现有任务、群协作、工作目录与验证能力，统一运行和管理模型，复用 Botmux 已有明确边界的组件。完整交付覆盖执行器、会话流转、工作流、自动化、插件、远端设备、飞书扩展、桌面与运维、迁移回滚。各批次用于安排依赖，全部验收完成才称为能力追平。**
+**建议继续以 Dutydeck 为产品主体，保留现有任务、群协作、工作目录与验证能力，统一运行和管理模型，吸收已有明确边界的原型组件。完整交付覆盖执行器、会话流转、工作流、自动化、插件、远端设备、飞书扩展、桌面与运维、迁移回滚。各批次用于安排依赖，全部验收完成才视为能力对齐。**
 
 ## 1. 追平的范围要固定到用户能力
 
@@ -144,7 +144,7 @@ Botmux 中心管理服务实现没有在本轮仓库检查中得到验证。P7 �
 | U07 发布、升级、回滚和数据恢复 | 多平台包、渠道、签名/公证、更新锁与候选健康检查 | 有 build、update、daemon 与自启，缺完整发布回滚链 | P8 发布包与更新候选验证，失败保留可用版本；数据库迁移/备份恢复与程序回滚策略配套，公布平台支持矩阵 |
 | U08 完整迁移 | 源产品有成熟配置/历史/实例/插件等状态，不能仅迁移 Bot 名称 | importer 仅 discover/plan/archive，明确 NO_GO | P9 交付逐对象映射、冲突处理、激活、单消费者/单写入者切换、核账与可恢复回滚 |
 
-证据：[Dashboard 路由](../../botmux/src/dashboard/web/dashboard-routes.ts)、[Workbench](../../botmux/src/dashboard/web/agent-workbench-page.tsx)、[预览代理](../../botmux/src/dashboard/preview-proxy.ts)、[桌面入口](../../botmux/src/desktop/main.ts)、[Botmux 发布](../../botmux/.github/workflows/release.yml)、[Dutydeck UI](../apps/web/src/App.tsx)、[构建](../apps/server/scripts/build.mjs)、[CI](../.github/workflows/ci.yml)、[导入器](../packages/botmux-importer/src/importer.ts)。
+证据：[Dashboard 路由](../../botmux/src/dashboard/web/dashboard-routes.ts)、[Workbench](../../botmux/src/dashboard/web/agent-workbench-page.tsx)、[预览代理](../../botmux/src/dashboard/preview-proxy.ts)、[桌面入口](../../botmux/src/desktop/main.ts)、[Botmux 发布](../../botmux/.github/workflows/release.yml)、[Dutydeck UI](../apps/web/src/App.tsx)、[构建](../apps/server/scripts/build.mjs)、[CI](../.github/workflows/ci.yml)、[导入器](../packages/legacy-importer/src/importer.ts)。
 
 不复制的项目单独明确：退役 V2 触发和旧命令、历史包管理器/进程管理器兼容格式、特定 JSONL 布局、短 UUID 习惯、Office 游戏化页面和非必要动效。这些不影响上述工程用户能力。也不照搬源产品已知弱点，例如缺 checksum 时继续安装、长期访问 token 放在链接中；角色库已具备本 Bot 子树检查，但不能因此把同 Bot 内个人角色可见性当作硬身份隔离。
 
@@ -222,7 +222,7 @@ CLI 输入协议、原生会话发现、输出解析、持久后端探测、插�
 | P6 飞书工作入口与交付 | 私聊/普通群/话题/项目群；材料选择、历史和总结；角色切换、群共享白板；ASR/TTS；文档评论；会议消费者与受控输出；反馈、可操作卡片 | lark coordinator/独立事件源、task-context、delivery | 文本主线依赖 P1/P2，协作依赖 P4；每种事件源都有重复投递、撤销和交付失败恢复用例 |
 | P7 Web、桌面与远端设备 | 统一任务中心/模板/自动化；终端、预览、附件、白板与待办；资源和使用分析；桌面入口；团队/设备绑定与远端执行 | apps/web、desktop shell、设备客户端及可部署控制中继 | 依赖稳定的 P0/P1/P2 接口；本地无需远端服务，远端路径需可独立部署、端到端运行和撤销设备 |
 | P8 安装、发布与支持 | 空白机器安装、自启、doctor、健康检查、升级回滚、数据库备份恢复、渠道/签名校验、完整用户文档 | server build/setup/update/autostart、CI 和发布工程 | 可先做包装契约，最后集成全部能力；在承诺 OS/架构上从发布包验证，不能只跑源码 |
-| P9 Botmux 完整迁移 | 差异映射、导入/绑定、会话与任务历史、计划/模板/插件配置转换、切换/核账/回滚；保留无法自动迁移项 | botmux-importer、P1/P5/P7 管理和迁移控制器 | 依赖所有被迁移能力；完成双消费者/双调度写入隔离与真实演练，不能以 archive 成功验收 |
+| P9 历史数据完整迁移 | 差异映射、导入/绑定、会话与任务历史、计划/模板/插件配置转换、切换/核账/回滚；保留无法自动迁移项 | legacy-importer、P1/P5/P7 管理和迁移控制器 | 依赖所有被迁移能力；完成双消费者/双调度写入隔离与真实演练，不能以 archive 成功验收 |
 | P10 全产品验收 | 能力矩阵、跨入口真实旅程、故障注入、性能/资源、发布包和迁移报告；修复全部阻塞项 | tests/e2e、发布流水线、文档及支持样本 | 所有包集成后执行；必交付能力不存在 blocked/skip/仅 mock 的替代通过 |
 
 实施顺序：先完成 P0，并冻结 P1 的身份和管理模型、P2 的执行器契约；随后可并行推进执行器/插件、飞书入口、安装包装与 UI；工作流和统一自动化接在稳定内核上；最后完成跨设备、迁移与发布包集成验收。每一批都保持现有用户旅程可运行，但中间批次不冠以“已完全追平”。

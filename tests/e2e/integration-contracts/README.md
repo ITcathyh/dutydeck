@@ -1,4 +1,4 @@
-# Botmux parity E2E assets
+# Integration contract E2E assets
 
 This directory is an executable acceptance inventory, not an activation tool. It records what Dutydeck can prove today, what is deliberately blocked, and what requires an externally fenced opt-in environment.
 
@@ -71,25 +71,25 @@ The WP4 offline identity case starts only ephemeral loopback fake-Lark HTTP serv
 Self-check validates the manifest, required coverage, case dispositions, allowlisted command shapes, fixture containment and synthetic-value policy. It executes no test case:
 
 ```bash
-node tests/e2e/botmux-parity/runner.mjs --self-check
+node tests/e2e/integration-contracts/runner.mjs --self-check
 ```
 
 List cases without executing them:
 
 ```bash
-node tests/e2e/botmux-parity/runner.mjs --list
+node tests/e2e/integration-contracts/runner.mjs --list
 ```
 
 Run all offline cases. Expected-blocked and opt-in cases are emitted as such and are not executed. Every case gets a private `HOME`, `TMPDIR`, `TMUX_TMPDIR`, ephemeral port setting, and sanitized environment; any command failure or isolated tmux residue makes the suite exit non-zero:
 
 ```bash
-node tests/e2e/botmux-parity/runner.mjs --run-offline
+node tests/e2e/integration-contracts/runner.mjs --run-offline
 ```
 
 Run one offline case:
 
 ```bash
-node tests/e2e/botmux-parity/runner.mjs --run-case importer-redaction-no-go-source-immutable
+node tests/e2e/integration-contracts/runner.mjs --run-case importer-redaction-no-go-source-immutable
 ```
 
 Outputs are NDJSON and finish with exact `pass`, `fail`, `skip`, and `expected_blocked` counts. The custom checks suppress raw errors so an unexpected URL/path/session never appears in normal output.
@@ -113,7 +113,7 @@ The base URL must contain only scheme/host/port. Userinfo, query, fragment and n
 DUTYDECK_PARITY_BASE_URL=http://devbox.example:4310 \
 DUTYDECK_PARITY_SESSION_ID=dedicated_synthetic_session \
 DUTYDECK_PARITY_REMOTE_OPEN_ACK=read_only_dedicated_instance \
-node tests/e2e/botmux-parity/runner.mjs \
+node tests/e2e/integration-contracts/runner.mjs \
   --run-case remote-dev-open-mode-no-token \
   --allow-remote-open
 ```
@@ -136,14 +136,14 @@ The repository deliberately contains no real-Lark driver and no credential looku
 8. Validate the file locally:
 
 ```bash
-node tests/e2e/botmux-parity/runner.mjs \
+node tests/e2e/integration-contracts/runner.mjs \
   --validate-real-lark-preflight /private/path/preflight.json
 ```
 
 9. Confirm the repository case remains a skip even after valid preflight; the actual message/listener driver must live in the externally fenced operator environment:
 
 ```bash
-node tests/e2e/botmux-parity/runner.mjs \
+node tests/e2e/integration-contracts/runner.mjs \
   --run-case real-lark-dedicated-test-app \
   --allow-real-lark \
   --preflight /private/path/preflight.json

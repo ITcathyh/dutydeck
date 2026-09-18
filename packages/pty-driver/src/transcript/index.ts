@@ -14,9 +14,9 @@
  *                 carrying thinking AND tool calls AND tool results with
  *                 stable ids, for zero native dependencies.
  *
- * Deliberately NOT ported: cursor (records no tool results at all — the
+ * Deliberately not supported: cursor (records no tool results at all — the
  * JSONL would only add final text the screen stream already carries),
- * hermes/mtr (botmux reaches their SQLite by shelling out to python3, an
+ * hermes/mtr (requires querying SQLite via python3, an
  * unacceptable runtime dependency here), gemini/kimi (no on-disk
  * transcript). Those keep the raw_terminal fallback.
  */
@@ -94,8 +94,8 @@ export interface CreateTranscriptTailerOptions {
  *
  * `seed` / `relay` are Claude Code forks and share its transcript dialect and
  * per-project JSONL layout verbatim (both are built by the same
- * `createClaudeFamilyAdapter` factory here, and botmux's ported adapters
- * confirm the on-disk shape). They differ only in WHERE that tree is rooted,
+ * `createClaudeFamilyAdapter` factory here, which follows the on-disk shape).
+ * They differ only in WHERE that tree is rooted,
  * which is exactly what the `env` passthrough above resolves: whoever spawns
  * them must point `CLAUDE_CONFIG_DIR` at the fork's own data root through
  * `agent.env` — Seed's `<pkg>/.claude-runtime`, Relay's `~/.relay`. Without

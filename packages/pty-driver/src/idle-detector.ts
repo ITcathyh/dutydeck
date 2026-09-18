@@ -1,10 +1,11 @@
 /**
- * Idle detection state machine — ported verbatim from botmux
- * (src/utils/idle-detector.ts). The ONLY intentional difference is the
- * constructor: botmux takes a CliAdapter, dutydeck takes a plain IdlePatterns
- * bag so pty-driver internals do not reverse-depend on cli-adapters types.
+ * Idle detection state machine.
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
  *
- * Strategy logic is byte-for-byte the botmux original — do NOT "simplify":
+ * The detector takes a plain IdlePatterns bag so pty-driver internals do not
+ * reverse-depend on cli-adapters types.
+ *
+ * Strategy logic and boundary policies:
  *   - Strategy 1: CLI completion marker → 500ms delayed idle
  *   - Strategy 2: quiescence (2000ms PTY silence) + spinner guard (3000ms)
  *   - readyPattern gating (quiescence suppressed until the prompt renders)
@@ -16,8 +17,7 @@
 
 export type IdleEvidenceSource = 'screen' | 'external';
 
-/** Pattern bag driving the detector. Mirrors the optional pattern fields of
- *  botmux's CliAdapter; every field is optional. */
+/** Pattern bag driving the detector; every field is optional. */
 export interface IdlePatterns {
   completionPattern?: RegExp;
   idleToBusyPattern?: RegExp;
@@ -96,7 +96,7 @@ export class IdleDetector {
   }
 
   feed(data: string): void {
-    // A botmux-owned submit calls reset() before writing input, but adopted
+    // A programmatic submit calls reset() before writing input, but adopted
     // panes can also receive local terminal input while we are already idle.
     // Treat any later PTY data as a fresh cycle so that local work can become
     // idle and flush transcript-driven fallback output.
@@ -280,7 +280,7 @@ export class IdleDetector {
   private markIdle(source: IdleEvidenceSource): void {
     this.isIdle = true;
     // Arm before the callback: markPromptReady may synchronously flush queued
-    // botmux input and call reset(), which must win and disarm this edge.
+    // input and call reset(), which must win and disarm this edge.
     this.busyTransitionArmed = true;
     this.outputTail = '';
     this.clearTimer();

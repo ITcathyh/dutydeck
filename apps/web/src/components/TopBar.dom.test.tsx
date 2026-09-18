@@ -66,9 +66,8 @@ describe('TopBar 全局入口', () => {
 
   it('顶栏高度只走 h-topbar 这一个来源', () => {
     /*
-      botmux 的顶栏有个 off-by-4 的历史 bug：--topbar-h(56px) 只被侧栏的 top 消费，
-      顶栏自己用的是另一个 --topbar-height(60px)，于是侧栏顶边和顶栏底边差 4px
-      （契约 §15）。这里断言顶栏高度只有 token 一个来源，任意值写法会被
+      避免因顶栏与侧栏使用不同的高度变量（如 56px 与 60px）导致 4px 错位（契约 §15）。
+      这里断言顶栏高度只有 token 一个来源，任意值写法会被
       design-consistency.test.ts 拦下，但「换成另一个 token」只有这条能拦。
     */
     const { container } = renderTopBar();

@@ -1,6 +1,6 @@
 /**
- * Session backend contract — PTY and tmux implementations.
- * Ported from botmux's adapters/backend layer (core only).
+ * Session backend contract — PTY and terminal multiplexer implementations.
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
  */
 
 export interface SpawnOptions {

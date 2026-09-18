@@ -5,17 +5,15 @@ import { writeRunnerInput } from '../runner-input.js';
  * dsh（DeepSeek Harness）适配器 —— runner 类：由一个 Node runner 以 JSON-RPC
  * 桥接 `dsh-jsonrpc-agent`，不驱动 TUI（TUI 形态见 dsh-tui 适配器）。
  *
- * ⚠️ dutydeck 未移植 botmux 的 runner 脚本：**agent 的 command 必须指向对应的
- * dsh runner**（botmux 侧是 `node dist/dsh-runner.js`），本适配器只产出 runner
- * 的参数，不解析 bin 路径、也不做任何文件系统副作用（botmux 里为文件沙盒预建
- * ~/.dsh 目录的 mkdirSync 在 dutydeck 精简契约下不适用）。
+ * ⚠️ 本适配器只构建 runner 参数，command 须指向已安装 runner，不含路径探测/鉴权/沙箱管理
+ * （不自动为文件沙盒预建目录等文件系统副作用）。
  *
  * 会话活在 runner 的 JSON-RPC 连接内部，没有稳定的用户可见 CLI deeplink 可以
  * 恢复，故不实现 buildResumeCommand。runner 自己注入上下文，也就不实现
  * injectSessionContext。
  */
 
-/** value 为 undefined 或空串就跳过（对齐 botmux 的 pushOpt 语义）。 */
+/** value 为 undefined 或空串就跳过。 */
 function pushOpt(args: string[], key: string, value: string | undefined): void {
   if (value === undefined || value.length === 0) return;
   args.push(key, value);

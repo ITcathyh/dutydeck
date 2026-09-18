@@ -39,8 +39,8 @@ export function createCodexAdapter(): CliAdapter {
       if (cwd) {
         args.push('-C', cwd);
       }
-      // 只做精确 id 续接；无 resumeSessionId 时新起会话（botmux 的
-      // history.jsonl 反查已随 transcript 机制一起丢弃）。
+      // 只做精确 id 续接；无 resumeSessionId 时新起会话（不支持通过
+      // history.jsonl 模糊反查）。
       const usable = usableResumeId(resumeSessionId);
       if (resume && usable) {
         return ['resume', ...args, usable];
