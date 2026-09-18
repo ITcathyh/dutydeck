@@ -3,7 +3,7 @@ import { StrictMode, useState } from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { api, ApiError, type Agent, type LarkBotConfig, type ManagedGroup } from '../api';
+import { api, ApiError, collaborationApi, type Agent, type LarkBotConfig, type ManagedGroup, type CollaborationOverview } from '../api';
 import type { GroupBinding, RoleAssignment } from '@dutydeck/shared';
 import { resetDrafts } from '../draft-store';
 import { GroupManagement } from './GroupManagement';
@@ -921,5 +921,88 @@ describe('GroupManagement 保存期间切换对象与继续编辑', () => {
       roleChanges: undefined,
       patch: expect.objectContaining({ oncall: true })
     })));
+  });
+
+  describe('通用协作面板集成', () => {
+    const collabOverview = (appId: string, chatId: string): CollaborationOverview => ({
+      snapshot: {
+        scope: { appId, chatId },
+        contextRevision: 1,
+        settings: {
+          scope: { appId, chatId },
+          revision: 1,
+          participation: 'off',
+          instructions: '',
+          notificationsPaused: false,
+          maxProactivePerHour: 6,
+          retentionDays: 30,
+          policyVersion: 'v1',
+          updatedAt: '2026-09-18T00:00:00.000Z'
+        },
+        observations: [],
+        followups: [],
+        mandates: []
+      },
+      followups: [],
+      mandates: [],
+      decisions: [],
+      actions: [],
+      activities: [],
+      feedback: []
+    });
+
+    it('选中群后按群 + Bot scope 请求协作数据，403 显示错误而不是空白', async () => {
+      stubBaseQueries();
+      vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: mockGroups });
+      const getOverview = vi
+        .spyOn(collaborationApi, 'getOverview')
+        .mockRejectedValue(new ApiError('forbidden', 'FORBIDDEN', 403));
+
+      renderWithClient(
+        <GroupManagement
+          selectedChatId="oc_chat_1"
+          selectedAppId="cli_dev"
+          onSelectGroup={() => {}}
+          onNavigateToBot={() => {}}
+          agents={mockAgents}
+        />
+      );
+
+      await waitFor(() => expect(getOverview).toHaveBeenCalledWith('cli_dev', 'oc_chat_1'));
+      expect(await screen.findByText(/权限不足/)).toBeTruthy();
+      expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+    });
+
+    it('切换群后协作面板按新 scope 重新请求，不串旧群草稿', async () => {
+      stubBaseQueries();
+      vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: mockGroups });
+      const getOverview = vi
+        .spyOn(collaborationApi, 'getOverview')
+        .mockImplementation(async (appId, chatId) => collabOverview(appId, chatId));
+
+      const props = {
+        selectedChatId: 'oc_chat_1',
+        selectedAppId: 'cli_dev',
+        onSelectGroup: () => {},
+        onNavigateToBot: () => {},
+        agents: mockAgents
+      };
+      const client = new QueryClient({
+        defaultOptions: { queries: { retry: false }, mutations: { retry: false } }
+      });
+      const { rerender } = render(
+        <QueryClientProvider client={client}><GroupManagement {...props} /></QueryClientProvider>
+      );
+
+      await waitFor(() => expect(getOverview).toHaveBeenCalledWith('cli_dev', 'oc_chat_1'));
+
+      // 父层切换群（URL 状态变化）后重渲染，面板必须按新 scope 请求。
+      rerender(
+        <QueryClientProvider client={client}>
+          <GroupManagement {...props} selectedChatId="oc_chat_2" selectedAppId="cli_dev" />
+        </QueryClientProvider>
+      );
+      await waitFor(() => expect(getOverview).toHaveBeenCalledWith('cli_dev', 'oc_chat_2'));
+    });
   });
 });

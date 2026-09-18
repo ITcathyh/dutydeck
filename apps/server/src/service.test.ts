@@ -408,7 +408,14 @@ describe('production PTY backend injection', () => {
         .toEqual(['recover this exact task', 'before restart']);
       expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
       expect(events.filter(event => event.type === 'error')).toEqual([]);
-      await restored.runtime.stop(session.id);
+      // Restarted resources lack a stop proof even with an explicit owner.
+      await expect(restored.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' }))
+        .rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
+      expect(backend.getPid()).toBe(originalPid);
+      expect(spawnSync('tmux', ['has-session', '-t', backend.sessionName]).status).toBe(0);
+      expect((await restored.runtime.getTasks(session.id)).map(item => ({ id: item.id, status: item.status })))
+        .toEqual([{ id: task.id, status: 'reconcile_required' }]);
+      expect(readFileSync(join(root, 'submissions'), 'utf8')).toBe('submitted\n');
     } finally {
       await first.close();
       await restored?.close();
@@ -507,7 +514,13 @@ describe('production PTY backend injection', () => {
 
       // 资源未被安全认领时，stop 不得静默回收该 pane：必须保留 stop blocker 并拒绝，
       // 而不是假装已干净停止。service 关闭时 pane 保持存活，由本测试的 afterEach 清理。
-      await expect(restored.runtime.stop(session.id)).rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
+      await expect(restored.runtime.stop(session.id)).rejects.toMatchObject({ code: 'ACTOR_REQUIRED' });
+      expect((await restored.runtime.getTasks(session.id))[1]?.status).toBe('queued');
+      expect(backend.getPid()).toBe(originalPid);
+      await expect(restored.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' }))
+        .rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
+      expect((await restored.runtime.getTasks(session.id))[1]?.status).toBe('cancelled');
+      expect(backend.getPid()).toBe(originalPid);
     } finally {
       await first.close();
       await restored?.close();
@@ -519,7 +532,7 @@ describe('production PTY backend injection', () => {
 });
 
 describe('production schedule foundation wiring', () => {
-  it('persists offline schedule management across restarts without exposing an executor or dispatch route', async () => {
+  it('keeps legacy schedules blocked across restarts while wiring only the collaboration executor', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-schedule-service-'));
     temporaryDirectories.push(root);
     const database = join(root, 'dutydeck.db');
@@ -564,9 +577,9 @@ describe('production schedule foundation wiring', () => {
       const capabilities = await call(firstBase, '/api/foundation/schedules/capabilities');
       expect(capabilities.body).toMatchObject({
         repositoriesWired: true, permissionEvaluatorWired: true, writesEnabled: true,
-        executorWired: false, uiEntryReady: true, readiness: 'offline_management_ready'
+        executorWired: true, executableNamespace: 'collaboration', uiEntryReady: true, readiness: 'offline_management_ready'
       });
-      expect(capabilities.body.blockers.map((item: { code: string }) => item.code)).toEqual(['schedule_executor_unavailable']);
+      expect(capabilities.body.blockers).toEqual([]);
 
       const created = await call(firstBase, '/api/foundation/schedules', { method: 'POST', body: JSON.stringify(scheduleBody) });
       expect(created.response.status).toBe(201);
@@ -580,6 +593,11 @@ describe('production schedule foundation wiring', () => {
       expect(created.body.readiness.blockers.map((item: { code: string }) => item.code)).toEqual(expect.arrayContaining([
         'schedule_staged_disabled', 'schedule_lease_required', 'schedule_executor_unavailable'
       ]));
+      const enableLegacy = await call(firstBase, '/api/foundation/schedules/schedule-service', {
+        method: 'PATCH', body: JSON.stringify({ expectedRevision: 1, state: 'enabled' })
+      });
+      expect(enableLegacy.response.status).toBe(409);
+      expect(enableLegacy.body.error.code).toBe('SCHEDULE_ENABLE_FORBIDDEN');
       for (const privateValue of ['private_schedule_chat_ref', 'private_schedule_cwd_ref', 'private_schedule_payload_ref']) {
         expect(JSON.stringify(created.body)).not.toContain(privateValue);
       }

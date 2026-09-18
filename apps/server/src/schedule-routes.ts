@@ -15,6 +15,7 @@ export type ScheduleManagementRepositories = Pick<RepositoryBundle,
 
 export interface ScheduleManagementOptions {
   uiEntryReady?: boolean;
+  collaborationExecutorWired?: boolean;
   repositories?: ScheduleManagementRepositories;
   authorize?: (request: FastifyRequest, action: PolicyAction) => boolean | PolicyDecision | Promise<boolean | PolicyDecision>;
 }
@@ -31,13 +32,14 @@ function capability(options: ScheduleManagementOptions) {
     repositoriesWired,
     permissionEvaluatorWired,
     writesEnabled: repositoriesWired && permissionEvaluatorWired,
-    executorWired: false as const,
+    executorWired: options.collaborationExecutorWired ?? false,
+    executableNamespace: options.collaborationExecutorWired ? 'collaboration' : undefined,
     uiEntryReady: options.uiEntryReady ?? false,
     readiness: !repositoriesWired ? 'repository_unwired' as const : !permissionEvaluatorWired ? 'permission_unwired' as const : 'offline_management_ready' as const,
     blockers: [
       ...(!repositoriesWired ? [{ code: 'schedule_repository_unwired', message: 'Schedule foundation repository is not wired', action: 'Inject the optional v13 repository bundle' }] : []),
       ...(!permissionEvaluatorWired ? [{ code: 'schedule_permission_evaluator_unwired', message: 'Schedule management permission evaluator is not wired', action: 'Inject owner/admin authorization' }] : []),
-      { code: 'schedule_executor_unavailable', message: 'Schedule executor is not implemented', action: 'Keep every definition staged and disabled' },
+      ...(!options.collaborationExecutorWired ? [{ code: 'schedule_executor_unavailable', message: 'Collaboration executor is not wired', action: 'Keep definitions disabled until the executor is wired' }] : []),
       ...(!options.uiEntryReady ? [{ code: 'schedule_ui_entry_unwired', message: 'Schedule panel is not mounted in the shared UI shell', action: 'Mount the schedule management panel' }] : [])
     ]
   };
@@ -106,6 +108,8 @@ export async function registerScheduleManagementRoutes(app: FastifyInstance, opt
   });
   app.patch<{ Params: { id: string } }>('/api/foundation/schedules/:id', async (request, reply) => {
     await requireWrite(request, 'schedule.update');
+    const target = await repositories().scheduleDefinitions.get(request.params.id);
+    if (target?.sourceNamespace === 'collaboration') throw new RuntimeError('COLLABORATION_MANAGED_SCHEDULE', 'Update this schedule through its delegation to preserve version binding', 409);
     const body = parse(updateScheduleDefinitionInputSchema, request.body);
     try { return await detail(await repositories().scheduleDefinitions.update(request.params.id, body)); }
     catch (error) {

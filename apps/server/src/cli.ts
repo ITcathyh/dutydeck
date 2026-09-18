@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runCollaboration } from './collaboration-cli.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { loadEnvFile } from 'node:process';
@@ -321,6 +322,7 @@ async function main() {
       output(result);
       if (result.status === 'blocked') process.exitCode = 2;
     },
+    collaborate: async (operation, id, options) => { output(await runCollaboration(operation, id, options)); },
     work: async (operation, args, options) => { output(await runWorkCommand(operation, args, options)); },
     groupSelf: async () => { output(await runGroupSelf()); },
     groupPeers: async () => { output(await runGroupPeers()); },

@@ -125,6 +125,7 @@ export interface DatabaseRetireLegacyCliOptions extends DatabaseExecutionCliOpti
 }
 
 export interface CliHandlers {
+  collaborate?(operation: string, id: string | undefined, options: { json?: string; file?: string; turn?: string }): void | Promise<void>;
   serve?(options: CliOptions): void | Promise<void>;
   setup?(options: SetupCliProgramOptions): void | Promise<void>;
   doctor?(options: DoctorCliOptions): void | Promise<void>;
@@ -447,6 +448,11 @@ Routing guidance:
     .action(options => handlers.groupWait?.(options));
 
   // 会话记忆：与 group 同一套 capability，但对私聊和关闭群协作的机器人同样可用。
+  program.command('collaborate <operation> [id]').description('Manage generic group follow-ups and ongoing mandates')
+    .option('--json <json>', 'Structured operation parameters').option('--file <path>', 'Read operation parameters from JSON file')
+    .requiredOption('--turn <token>', 'Current task authorization token')
+    .action((operation, id, options) => handlers.collaborate?.(operation, id, options));
+
   const memory = program.command('memory').description('Read and maintain the long-term memory of the current Lark chat');
   memory.command('list')
     .description('List the memories saved for this chat, with their ids')

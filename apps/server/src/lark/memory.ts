@@ -47,7 +47,7 @@ export interface LarkMemoryEntry {
 
 interface StoredLarkMemory { v: 1; entries: LarkMemoryEntry[] }
 
-export interface LarkMemoryPendingTurn { sessionId: string; taskId: string; completedAt: string }
+export interface LarkMemoryPendingTurn { sessionId: string; taskId: string; completedAt: string; senderId?: string; senderKind?: 'human' | 'bot'; sourceMessageId?: string }
 
 export interface LarkMemoryState {
   v: 1;

@@ -166,6 +166,20 @@ export class WorkItemService {
     catch (error) { throw new RuntimeError('WORK_ITEM_TASK_REVOKED', errorText(error), 403); }
     return true;
   }
+  /** This only authorizes stopping a durably owned child, never starting or resuming it. */
+  async authorizeControl(sessionId: string, actor: ExecutionActor): Promise<boolean> {
+    const binding = await this.parentForSession(sessionId);
+    if (!binding) {
+      if ((await this.repos.sessions.get(sessionId))?.source === 'work_item') throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Orphaned work-item session', 403);
+      return false;
+    }
+    const { value } = await this.read(binding.workId);
+    const session = await this.repos.sessions.get(sessionId);
+    const attempt = value.item.steps.flatMap(step => step.attempts).find(attempt => attempt.sessionId === sessionId);
+    const allowed = [value.actor, value.cancellationActor].filter(Boolean).some(recorded => canonicalExecutionJson(recorded) === canonicalExecutionJson(actor));
+    if (!allowed || !attempt || session?.source !== 'work_item' || session.sourceId !== attempt.id) throw new RuntimeError('WORK_ITEM_FORBIDDEN', 'Actor does not own this managed execution resource', 403);
+    return true;
+  }
   async authorizeTask(session: Session, task: TaskRecord, _phase: 'prepare' | 'submit'): Promise<void> {
     if (session.source !== 'work_item') return;
     await this.authorizeExecution(session.id, task.executionContext?.actorId);

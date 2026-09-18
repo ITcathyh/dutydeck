@@ -59,6 +59,7 @@
     "@dutydeck/storage": "workspace:*"
   },
   "devDependencies": {
+    "acpx": "0.13.0",
     "typescript": "5.8.3",
     "vitest": "3.2.4"
   }

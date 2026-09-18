@@ -23,6 +23,7 @@ import {
   type CreateScheduleDefinitionInput,
   type FenceScheduleLeaseInput,
   type ScheduleDefinition,
+  type ScheduleExecutionFence,
   type ScheduleDefinitionRepository,
   type ScheduleGeneration,
   type ScheduleGenerationRepository,
@@ -49,7 +50,7 @@ interface DefinitionRow {
   created_at: string; updated_at: string;
 }
 interface GenerationRow { id: string; schema_version: number; schedule_definition_id: string; generation: number; definition_revision: number; definition_hash: string; timezone: string; identity_ref: string | null; secret_ref: string | null; state: string; created_at: string }
-interface OccurrenceRow { id: string; schema_version: number; revision: number; schedule_definition_id: string; schedule_generation_id: string; generation: number; scheduled_for_utc: string; idempotency_key: string; state: string; intent_kind: string; created_at: string; updated_at: string }
+interface OccurrenceRow { lease_key?: string | null; lease_fence_token?: number | null; holder_id?: string | null; error?: string | null; id: string; schema_version: number; revision: number; schedule_definition_id: string; schedule_generation_id: string; generation: number; scheduled_for_utc: string; idempotency_key: string; state: string; intent_kind: string; created_at: string; updated_at: string }
 interface WatermarkRow { schedule_definition_id: string; schema_version: number; revision: number; last_planned_occurrence_key: string | null; last_claimed_occurrence_key: string | null; last_started_occurrence_key: string | null; last_settled_occurrence_key: string | null; next_due_at: string | null; updated_at: string }
 interface LeaseRow { id: string; schema_version: number; revision: number; lease_key: string; generation: number; holder_id: string | null; holder_identity_ref: string | null; secret_ref: string | null; state: string; schedule_set_hash: string; fence_token: number; renewed_at: string | null; expires_at: string | null; created_at: string; updated_at: string }
 interface HammerRow { id: string; schema_version: number; revision: number; channel_bot_id: string; kind: string; source_system: string; source_enabled: number; hammer_mode: string; enforce_gates: number; skills_injection: string; state: string; executor_state: string; blocker_code: string; created_at: string; updated_at: string }
@@ -81,7 +82,7 @@ function decodeGeneration(row: GenerationRow): ScheduleGeneration {
   return scheduleGenerationSchema.parse({ schemaVersion: row.schema_version, id: row.id, scheduleDefinitionId: row.schedule_definition_id, generation: row.generation, definitionRevision: row.definition_revision, definitionHash: row.definition_hash, timezone: row.timezone, identityRef: row.identity_ref ?? undefined, secretRef: row.secret_ref ?? undefined, state: row.state, createdAt: row.created_at });
 }
 function decodeOccurrence(row: OccurrenceRow): ScheduleOccurrence {
-  return scheduleOccurrenceSchema.parse({ schemaVersion: row.schema_version, id: row.id, revision: row.revision, scheduleDefinitionId: row.schedule_definition_id, scheduleGenerationId: row.schedule_generation_id, generation: row.generation, scheduledForUtc: row.scheduled_for_utc, idempotencyKey: row.idempotency_key, state: row.state, intentKind: row.intent_kind, createdAt: row.created_at, updatedAt: row.updated_at });
+  return scheduleOccurrenceSchema.parse({ schemaVersion: row.schema_version, id: row.id, revision: row.revision, scheduleDefinitionId: row.schedule_definition_id, scheduleGenerationId: row.schedule_generation_id, generation: row.generation, scheduledForUtc: row.scheduled_for_utc, idempotencyKey: row.idempotency_key, state: row.state, intentKind: row.intent_kind, leaseKey: row.lease_key ?? undefined, leaseFenceToken: row.lease_fence_token ?? undefined, holderId: row.holder_id ?? undefined, error: row.error ?? undefined, createdAt: row.created_at, updatedAt: row.updated_at });
 }
 function decodeWatermark(row: WatermarkRow): ScheduleWatermark {
   return scheduleWatermarkSchema.parse({ schemaVersion: row.schema_version, scheduleDefinitionId: row.schedule_definition_id, revision: row.revision, lastPlannedOccurrenceKey: row.last_planned_occurrence_key ?? undefined, lastClaimedOccurrenceKey: row.last_claimed_occurrence_key ?? undefined, lastStartedOccurrenceKey: row.last_started_occurrence_key ?? undefined, lastSettledOccurrenceKey: row.last_settled_occurrence_key ?? undefined, nextDueAt: row.next_due_at ?? undefined, updatedAt: row.updated_at });
@@ -99,7 +100,7 @@ function definitionSemantic(definition: ScheduleDefinition) {
 }
 function generationId(definitionId: string, generation: number) { return `schedule_generation_${hash(`${definitionId}\0${generation}`).slice(0, 24)}`; }
 function occurrenceIdentity(definition: ScheduleDefinition, scheduledForUtc: string) {
-  const sourceId = definition.sourceScheduleRef ?? definition.id;
+  const sourceId = (definition.sourceScheduleRef ?? definition.id) + (definition.sourceNamespace === 'collaboration' ? `:${definition.currentGeneration}` : '');
   const digest = hash(`${definition.sourceNamespace}\0${sourceId}\0${scheduledForUtc}`);
   return { idempotencyKey: `occ_${digest}`, id: `schedule_occurrence_${digest.slice(0, 24)}` };
 }
@@ -142,7 +143,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
       .run(kind, entity.id, before?.revision ?? null, entity.revision, before ? JSON.stringify(before) : null, hash(entity), new Date().toISOString());
   };
   const insertGeneration = (definition: ScheduleDefinition) => {
-    const entity = scheduleGenerationSchema.parse({ schemaVersion: 1, id: generationId(definition.id, definition.currentGeneration), scheduleDefinitionId: definition.id, generation: definition.currentGeneration, definitionRevision: definition.revision, definitionHash: hash(definitionSemantic(definition)), timezone: definition.timezone, identityRef: definition.identityRef, secretRef: definition.secretRef, state: 'staged_disabled', createdAt: definition.updatedAt });
+    const entity = scheduleGenerationSchema.parse({ schemaVersion: 1, id: generationId(definition.id, definition.currentGeneration), scheduleDefinitionId: definition.id, generation: definition.currentGeneration, definitionRevision: definition.revision, definitionHash: hash(definitionSemantic(definition)), timezone: definition.timezone, identityRef: definition.identityRef, secretRef: definition.secretRef, state: definition.state === 'enabled' ? 'enabled' : 'staged_disabled', createdAt: definition.updatedAt });
     sqlite.prepare('INSERT INTO schedule_generations (id, schema_version, schedule_definition_id, generation, definition_revision, definition_hash, timezone, identity_ref, secret_ref, state, created_at) VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
       .run(entity.id, entity.scheduleDefinitionId, entity.generation, entity.definitionRevision, entity.definitionHash, entity.timezone, entity.identityRef ?? null, entity.secretRef ?? null, entity.state, entity.createdAt);
     return entity;
@@ -203,18 +204,24 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
       delivery: input.delivery ?? current.delivery, cwdRef: input.cwdRef === null ? undefined : input.cwdRef ?? current.cwdRef,
       payloadRef: input.payloadRef ?? current.payloadRef, identityRef: input.identityRef === null ? undefined : input.identityRef ?? current.identityRef,
       secretRef: input.secretRef === null ? undefined : input.secretRef ?? current.secretRef, state: input.state ?? current.state,
-      desiredExecutorState: 'disabled', updatedAt: new Date().toISOString()
+      desiredExecutorState: (input.state ?? current.state) === 'enabled' ? 'enabled' : 'disabled', updatedAt: new Date().toISOString()
     });
+    if (next.state === 'enabled' && (next.sourceNamespace !== 'collaboration' || next.sourceOwnership !== 'dutydeck' || !next.identityRef || secretStatus(next.secretRef) !== 'configured')) throw new RuntimeError('SCHEDULE_ENABLE_FORBIDDEN', 'Only validated collaboration schedules can be enabled', 409);
     assertSecret(next.secretRef); previewNextSchedule(next, new Date(0));
     const trigger = next.trigger;
-    const result = sqlite.prepare(`UPDATE schedule_definitions SET revision = ?, name = ?, description = ?, trigger_kind = ?, at_local_datetime = ?, interval_seconds = ?, interval_anchor_at = ?, cron_expression = ?, timezone = ?, dst_gap_policy = ?, dst_overlap_policy = ?, delivery_mode = ?, chat_ref = ?, root_message_ref = ?, continuation_policy = ?, cwd_ref = ?, payload_ref = ?, identity_ref = ?, secret_ref = ?, state = ?, desired_executor_state = 'disabled', current_generation = ?, updated_at = ? WHERE id = ? AND revision = ?`)
+    const result = sqlite.prepare(`UPDATE schedule_definitions SET revision = ?, name = ?, description = ?, trigger_kind = ?, at_local_datetime = ?, interval_seconds = ?, interval_anchor_at = ?, cron_expression = ?, timezone = ?, dst_gap_policy = ?, dst_overlap_policy = ?, delivery_mode = ?, chat_ref = ?, root_message_ref = ?, continuation_policy = ?, cwd_ref = ?, payload_ref = ?, identity_ref = ?, secret_ref = ?, state = ?, desired_executor_state = ?, current_generation = ?, updated_at = ? WHERE id = ? AND revision = ?`)
       .run(next.revision, next.name, next.description ?? null, trigger.kind, trigger.kind === 'at' ? trigger.localDateTime : null,
         trigger.kind === 'interval' ? trigger.everySeconds : null, trigger.kind === 'interval' ? trigger.anchorAt : null,
         trigger.kind === 'cron' ? trigger.expression : null, next.timezone, next.dstPolicy.gap, next.dstPolicy.overlap,
         next.delivery.mode, next.delivery.chatRef, next.delivery.rootMessageRef ?? null, next.delivery.continuation, next.cwdRef ?? null,
-        next.payloadRef, next.identityRef ?? null, next.secretRef ?? null, next.state, next.currentGeneration, next.updatedAt, id, input.expectedRevision);
+        next.payloadRef, next.identityRef ?? null, next.secretRef ?? null, next.state, next.desiredExecutorState, next.currentGeneration, next.updatedAt, id, input.expectedRevision);
     if (result.changes !== 1) throw revisionConflict('ScheduleDefinition', id);
     insertGeneration(next); recordVersion('schedule_definition', next, current);
+    if (next.sourceNamespace === 'collaboration') {
+      const nextDue = next.state === 'enabled' ? (input.nextDueAt !== undefined ? input.nextDueAt : previewNextSchedule(next, new Date(next.updatedAt))?.scheduledForUtc) : undefined;
+      sqlite.prepare('UPDATE schedule_watermarks SET revision=revision+1,next_due_at=?,updated_at=? WHERE schedule_definition_id=?').run(nextDue ?? null,next.updatedAt,id);
+      sqlite.prepare("UPDATE schedule_occurrences SET state='suppressed',revision=revision+1,error='Schedule generation changed',updated_at=? WHERE schedule_definition_id=? AND state IN ('planned','claimed')").run(next.updatedAt,id);
+    }
     return next;
   };
 
@@ -272,6 +279,23 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     if (result.changes !== 1) throw leaseConflict('Lease changed concurrently'); recordVersion('schedule_lease', next, current); return next;
   };
 
+  const advanceOccurrence = (id: string, expectedRevision: number, state: ScheduleOccurrence['state'], fence: ScheduleExecutionFence, error?: string) => transact(() => {
+    const current = getOccurrence(id); if (!current) throw notFound('ScheduleOccurrence', id);
+    if (current.revision !== expectedRevision) throw revisionConflict('ScheduleOccurrence', id);
+    const definition = getDefinition(current.scheduleDefinitionId)!;
+    const lease = getLease(fence.leaseKey);
+    if (fence.leaseKey !== scheduleWriterLeaseKey(definition.channelBotId) || !lease || lease.state !== 'held' || lease.holderId !== fence.holderId || lease.fenceToken !== fence.fenceToken || !lease.expiresAt || lease.expiresAt <= fence.now) throw leaseConflict('Occurrence requires a current writer fence');
+    if (definition.sourceNamespace !== 'collaboration' || definition.sourceOwnership !== 'dutydeck') throw new RuntimeError('SCHEDULE_EXECUTOR_UNAVAILABLE', 'Legacy schedules cannot execute', 409);
+    const transitions: Record<string, string[]> = { planned: ['claimed','suppressed'], claimed: ['claimed','running','suppressed'], running: ['running','settled','failed','unknown','suppressed'], unknown: ['running','settled','failed','suppressed'] };
+    if (!transitions[current.state]?.includes(state)) throw new RuntimeError('SCHEDULE_OCCURRENCE_STATE_CONFLICT', 'Invalid occurrence transition', 409);
+    if (['claimed','running'].includes(state) && (current.generation !== definition.currentGeneration || definition.state !== 'enabled')) throw new RuntimeError('SCHEDULE_GENERATION_STALE', 'Schedule changed before execution', 409);
+    const next = scheduleOccurrenceSchema.parse({ ...current, revision: current.revision + 1, state, leaseKey: fence.leaseKey, leaseFenceToken: fence.fenceToken, holderId: fence.holderId, error, updatedAt: fence.now });
+    sqlite.prepare('UPDATE schedule_occurrences SET revision=?,state=?,lease_key=?,lease_fence_token=?,holder_id=?,error=?,updated_at=? WHERE id=? AND revision=?').run(next.revision,state,fence.leaseKey,fence.fenceToken,fence.holderId,error ?? null,fence.now,id,expectedRevision);
+    const column = state === 'claimed' ? 'last_claimed_occurrence_key' : state === 'running' ? 'last_started_occurrence_key' : 'last_settled_occurrence_key';
+    if (state !== 'unknown') sqlite.prepare(`UPDATE schedule_watermarks SET revision=revision+1,${column}=?,updated_at=? WHERE schedule_definition_id=?`).run(next.idempotencyKey,fence.now,definition.id);
+    return next;
+  });
+
   return {
     scheduleDefinitions: {
       async list(limit) { return (sqlite.prepare('SELECT * FROM schedule_definitions ORDER BY updated_at DESC, id LIMIT ?').all(bounded(limit)) as DefinitionRow[]).map(decodeDefinition); },
@@ -289,11 +313,14 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
       async listByDefinition(id, limit) { return (sqlite.prepare('SELECT * FROM schedule_generations WHERE schedule_definition_id = ? ORDER BY generation DESC LIMIT ?').all(id, bounded(limit)) as GenerationRow[]).map(decodeGeneration); }
     },
     scheduleOccurrences: {
+      async listUnsettled(id) { return (sqlite.prepare("SELECT * FROM schedule_occurrences WHERE schedule_definition_id=? AND state IN ('planned','claimed','running','unknown') ORDER BY scheduled_for_utc").all(id) as OccurrenceRow[]).map(decodeOccurrence); },
+      async advance(id, revision, state, fence, error) { return advanceOccurrence(id, revision, state, fence, error); },
       async get(id) { return getOccurrence(id); },
       async listByDefinition(id, limit) { return (sqlite.prepare('SELECT * FROM schedule_occurrences WHERE schedule_definition_id = ? ORDER BY scheduled_for_utc DESC LIMIT ?').all(id, bounded(limit)) as OccurrenceRow[]).map(decodeOccurrence); },
-      async recordPlanned(definitionId, scheduledForUtc, nextDueAt) {
+      async recordPlanned(definitionId, scheduledForUtc, nextDueAt, expectedGeneration) {
         return transact(() => {
           const definition = getDefinition(definitionId); if (!definition) throw notFound('ScheduleDefinition', definitionId);
+          if (expectedGeneration !== undefined && definition.currentGeneration !== expectedGeneration) throw new RuntimeError('SCHEDULE_GENERATION_STALE', 'Schedule generation changed before planning', 409);
           const generation = getCurrentGeneration(definition); if (!generation) throw new RuntimeError('SCHEDULE_GENERATION_MISSING', 'Current Schedule generation is missing', 409);
           const utc = new Date(scheduledForUtc); if (!Number.isFinite(utc.getTime()) || utc.toISOString() !== scheduledForUtc) throw new RuntimeError('SCHEDULE_OCCURRENCE_TIME_INVALID', 'Occurrence must use canonical UTC ISO time', 400);
           if (nextDueAt !== undefined) {

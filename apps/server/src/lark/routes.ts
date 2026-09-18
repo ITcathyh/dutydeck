@@ -1,3 +1,4 @@
+import type { LarkGroupParticipation } from './group-participation.js';
 import { LarkAppCreationJobManager } from './app-creation.js';
 import { registerLarkAppCreationRoutes } from './app-creation-routes.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
@@ -26,6 +27,7 @@ type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?
 type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]; allowedBotNames?: string[]; highRiskAllowedUserNames?: string[] };
 
 export interface LarkRoutesOptions {
+  participation?: LarkGroupParticipation;
   workbench?: import('./workbench.js').LarkWorkbench;
   automation?: import('../session-automation.js').SessionAutomationService;
   relayBroker?: RelayAskBroker;
@@ -63,6 +65,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   const listeningDisabled = options.listeningDisabled === true;
   const listener = options.listener ?? new LarkLongConnectionListenerPool(app.log, {
     runtime: options.runtime,
+    participation: options.participation,
     automation: options.automation,
     workbench: options.workbench,
     workflowStore: options.config,

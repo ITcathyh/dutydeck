@@ -76,7 +76,7 @@ export interface LarkMessageResult { messageId: string; chatId?: string }
 export interface LarkReactionResult { messageId: string; reactionId: string; emojiType: string }
 export interface LarkBotInfo { appName: string; openId: string; avatarUrl?: string; activateStatus?: number }
 export interface LarkApplicationIdentityCheck { verified: true; reportedAppId?: string; tenantKey?: string }
-export interface LarkChatPreflightInfo { chatMode?: string; chatStatus?: string }
+export interface LarkChatPreflightInfo { chatMode?: string; chatStatus?: string; name?: string; description?: string }
 export interface LarkIdentityResolutionCheck { verified: true; sampleOpenId: string; sampleEmails: string[] }
 export interface LarkMessageResourceResult { data: Uint8Array; contentType?: string }
 export type LarkChatMemberType = 'user' | 'bot';
@@ -1322,7 +1322,9 @@ export class LarkCardService {
     const chat = payload.data ?? {};
     const chatMode = String(chat.chat_mode ?? '').trim() || undefined;
     const chatStatus = String(chat.chat_status ?? '').trim() || undefined;
-    return { ...(chatMode ? { chatMode } : {}), ...(chatStatus ? { chatStatus } : {}) };
+    const name = typeof chat.name === 'string' ? chat.name : undefined;
+    const description = typeof chat.description === 'string' ? chat.description : undefined;
+    return { ...(chatMode ? { chatMode } : {}), ...(chatStatus ? { chatStatus } : {}), ...(name ? { name } : {}), ...(description ? { description } : {}) };
   }
 
   /** The tenant token implicitly identifies the bot whose membership is read. */

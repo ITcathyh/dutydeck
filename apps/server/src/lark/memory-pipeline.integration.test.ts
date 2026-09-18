@@ -201,6 +201,22 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(h.prompts.at(-1)).toContain('部署脚本在 scripts/deploy.sh');
   });
 
+  it('records human provenance and excludes bot turns from automatic fact extraction', async () => {
+    const h = await harness();
+    const manual = await h.setConfig({ memoryAutoExtract: false });
+    await h.runTurns(1, manual);
+    await h.coordinator.handle(event('om_bot_material', '机器人转述，不代表用户决定', { senderType: 'app', senderOpenId: 'ou_other_bot' }), manual);
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).pendingTurns).toHaveLength(2));
+    const pending = (await h.store.getState(scope)).pendingTurns!;
+    expect(pending.find(turn => turn.senderKind === 'human')).toMatchObject({ senderId: 'ou_alice', sourceMessageId: expect.stringContaining('om_turn_') });
+    expect(pending.find(turn => turn.senderKind === 'bot')).toMatchObject({ senderId: 'ou_other_bot', sourceMessageId: 'om_bot_material' });
+    await h.pipeline.runExtraction(scope);
+    expect(h.memoryPrompts.at(-1)).toContain('发送者：human ou_alice');
+    expect(h.memoryPrompts.at(-1)).not.toContain('机器人转述，不代表用户决定');
+    expect(h.memoryPrompts.at(-1)).not.toContain('om_bot_material');
+    await h.waitIdle();
+  });
+
   it('memoryAutoExtract=false 时不自动触发，但仍然记账', async () => {
     const h = await harness();
     const disabled = await h.setConfig({ memoryAutoExtract: false });

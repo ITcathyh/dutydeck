@@ -1,3 +1,6 @@
+import { createCollaborationIntegration } from './collaboration-integration.js';
+import { renderMemoryIndex } from './lark/memory-view.js';
+import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
@@ -42,6 +45,7 @@ import {
 } from './foundation-policy.js';
 
 export interface StartLocalServerOptions {
+  configureCollaborationExtensions?: (extensions: CollaborationExtensions) => void;
   env?: NodeJS.ProcessEnv;
   webRoot?: string;
   groupToolsCommand?: string;
@@ -178,10 +182,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const workbenchHttp = createWorkbenchFetch();
   setupCleanup.push(() => workbenchHttp.close());
   const groupManager: LarkGroupManager = new LarkGroupManager(repos, { env, fetcher: workbenchHttp.fetch, onPolicyChanged: (): Promise<void> => groupManager.refreshPolicies(runtime) });
+  let readCollaborationMemory: (scope: import('@dutydeck/shared').CollaborationScope) => Promise<string> = async () => '';
+  let collaboration: ReturnType<typeof createCollaborationIntegration> | undefined;
   const agentTools = new LarkAgentToolsService(capabilities, repos.config, {
     env,
     groupToolsCommand: options.groupToolsCommand,
     workbenchTask: sessionId => runtime.getActiveTaskContext(sessionId),
+    authorizeTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action) ?? Promise.resolve(),
     executionPolicy: legacyExecutionPolicy,
     groupManager,
   });
@@ -207,14 +214,22 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return driver;
   };
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
-    authorizeTask: async (session, task, phase) => { await automation.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
+    authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
+    authorizeControl: async (sessionId, actor, _action) => {
+      if (await workItems.authorizeControl(sessionId, actor)) return;
+      if (await collaboration?.background.authorizeControl(sessionId, actor)) return;
+      if (actor.kind !== 'installation_owner' && actor.kind !== 'unspecified') await groupManager.prepareTurn(sessionId, actor.id);
+    },
     authorizeExecution: async (sessionId, actorId) => {
+      if (await collaboration?.background.authorizeExecution(sessionId, actorId)) return;
       // work item 授权先行判断并自行短路；其余会话把 prepareTurn 返回的可选本地提交
       // 交回 Runtime，由其短写序列在归属校验后执行（prepare 不写运行身份）。
       if (await workItems.authorizeExecution(sessionId, actorId)) return;
       return groupManager.prepareTurn(sessionId, actorId);
     },
     resolveRiskPolicy: async (sessionId, fallback) => {
+      const background = await collaboration?.riskPolicy(sessionId, fallback);
+      if (background) return background.policy;
       const binding = await workItems.parentForSession(sessionId);
       return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch) : groupManager.riskPolicy(sessionId, fallback);
     },
@@ -256,6 +271,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return await groupManager.authorizeSession(sessionId, action, true) ?? foundationExecution.authorizeSessionId(sessionId, { boundary, action, request });
   };
   let automationTimer: NodeJS.Timeout | undefined;
+  let collaborationTimer: NodeJS.Timeout | undefined;
   // Reattach surviving idle terminals after a daemon restart, without starting a task.
   const terminalProvider: TerminalStreamProvider = {
     async lookupTerminalStream(sessionId) {
@@ -293,6 +309,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     if (!closeRun) closeRun = (async () => {
       if (tokenRefresh) clearInterval(tokenRefresh);
       if (automationTimer) clearInterval(automationTimer);
+      if (collaborationTimer) clearInterval(collaborationTimer);
       const errors: unknown[] = [];
       const settle = async (operations: Array<() => unknown>) => {
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
@@ -301,13 +318,20 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => automation.close()]);
       // Wake blocked asks before waiting for HTTP shutdown.
       await settle([() => relayBroker.close(), ...[...ptyDrivers].map(driver => () => driver.prepareForDaemonShutdown())]);
-      await settle([() => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
+      await settle([() => collaboration?.close(), () => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
       await settle([() => capabilities.close()]);
       await settle([() => repos.close()]);
       if (errors.length) throw new AggregateError(errors, 'Dutydeck did not shut down cleanly');
     })();
     return closeRun;
   };
+    collaboration = createCollaborationIntegration({ repositories: repos, runtime, groups: groupManager,
+      workspaceRoot: config.databaseUrl === ':memory:' ? join(tmpdir(), 'dutydeck-decisions') : join(dirname(resolve(config.databaseUrl)), 'decisions'),
+      client: bot => createLarkCardService(env, workbenchHttp.fetch, bot), configureExtensions: options.configureCollaborationExtensions,
+      readMemory: scope => readCollaborationMemory(scope),
+      listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
+      log: { warn: (details, message) => app?.log.warn(details, message) } });
+    setupCleanup.push(() => collaboration?.close());
     await relayBroker.initialize();
     await runtime.initialize(config.agents);
     const webRoot = options.webRoot ?? fileURLToPath(new URL('../public', import.meta.url));
@@ -335,10 +359,18 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         error: (obj, msg) => app?.log.error(obj, msg)
       }
     });
+    readCollaborationMemory = async scope => {
+      const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === scope.appId);
+      return bot?.memoryEnabled === false ? '' : renderMemoryIndex(await memoryStore.list(scope), await memoryStore.getState(scope)).text;
+    };
     app = await buildApp(runtime, {
       webRoot,
+      collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
+        authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,
+        bootstrap: scope => collaboration!.participation.bootstrap(scope), prepareSettings: (scope, patch) => collaboration!.prepareSettings(scope, patch), onChange: scope => collaboration!.onChange(scope) },
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
+        participation: collaboration.participation,
         automation,
         workbench,
         relayBroker,
@@ -371,7 +403,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       relay: { runtime, capabilities: relayCapabilities, broker: relayBroker },
       foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef, isLiveManagedBot: id => groupManager.isLiveManagedBot(id) },
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
-      schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true },
+      schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true, collaborationExecutorWired: true },
       workItemTools: { runtime, work: workItems, tools: agentTools },
       // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
       memoryTools: { tools: agentTools, store: memoryStore, runtime },
@@ -396,6 +428,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     automationTimer = setInterval(tick, 60_000);
     automationTimer.unref();
     tick();
+    let lastCollaborationPrune = 0;
+    const tickCollaboration = () => {
+      if (Date.now() - lastCollaborationPrune > 3_600_000) { lastCollaborationPrune = Date.now(); void collaboration!.prune().catch(error => app?.log.warn({ error }, '群上下文保留期清理失败')); }
+      void collaboration!.scheduler.tick().catch(error => app?.log.warn({ error }, '群委托轮询失败')); };
+    collaborationTimer = setInterval(tickCollaboration, 5_000);
+    collaborationTimer.unref(); tickCollaboration();
   return { config, runtime, close: closeResources };
   } catch (error) {
     try { await closeResources(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'Dutydeck startup and cleanup failed'); }

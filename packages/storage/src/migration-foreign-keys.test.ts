@@ -76,9 +76,17 @@ describe('foreign keys across migration table rebuilds', () => {
       if (row.source_ownership === 'dockmux') row.source_ownership = 'dutydeck'
     }
     for (const row of expected.channel_bots) Object.assign(row, { authorization_revision: null, connection_generation: null, platform_display_name: null });
+    // v21 adds four execution-tracking columns to schedule_occurrences; existing rows must carry explicit NULLs.
+    for (const row of expected.schedule_occurrences as Array<Record<string, unknown>>) {
+      Object.assign(row, { lease_key: null, lease_fence_token: null, holder_id: null, error: null });
+    }
     expect(snapshot(db)).toEqual(expected)
+    // Explicitly verify every migrated occurrence row has the four new v21 columns present and NULL.
+    for (const row of db.prepare('SELECT lease_key, lease_fence_token, holder_id, error FROM schedule_occurrences ORDER BY rowid').all() as Array<Record<string, unknown>>) {
+      expect(row).toEqual({ lease_key: null, lease_fence_token: null, holder_id: null, error: null });
+    }
     expect(tables.map(table => db.pragma(`foreign_key_list(${table})`))).toEqual(beforeReferences)
-    expect(version(db)).toBe(19)
+    expect(version(db)).toBe(21)
     expect(db.pragma('foreign_keys', { simple: true })).toBe(foreignKeys)
     expect(db.pragma('foreign_key_check')).toEqual([])
     expect(db.pragma('integrity_check', { simple: true })).toBe('ok')
@@ -186,6 +194,6 @@ describe('foreign keys across migration table rebuilds', () => {
     inspect.close()
     const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' })
     try { expect(repos.execution.authority()).toBe('legacy') } finally { repos.close() }
-    expect(version(open(path))).toBe(19)
+    expect(version(open(path))).toBe(21)
   })
 })

@@ -64,6 +64,8 @@ export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
 
 export interface RuntimeOptions {
   authorizeExecution?: (sessionId: string, actorId?: string) => Promise<void | (() => Promise<void>)>;
+  /** Stopping an owned resource remains permitted after its execution authority is revoked. */
+  authorizeControl?: (sessionId: string, actor: ExecutionActor, action: 'stop') => Promise<void>;
   /** Revalidate the accepted task's external authority immediately before execution. */
   authorizeTask?: (session: Session, task: TaskRecord, phase: 'prepare' | 'submit') => Promise<void>;
   resolveRiskPolicy?: (sessionId: string, fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>;
@@ -999,6 +1001,32 @@ export class DutydeckRuntime {
     });
   }
 
+  /** The caller must persist the delegation admission before creating this session. */
+  private readonly backgroundStarts = new Map<string, Promise<Session>>();
+  async startBackgroundSession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
+    this.assertReady();
+    if (input.source !== 'lark' || !/^[^:]+:[^:]+:group:collaboration:.+$/.test(input.sourceId ?? '') || !/^ses_collab_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode === 'worktree') {
+      throw new RuntimeError('INVALID_BACKGROUND_SESSION', 'Background sessions require a stable authorized Lark group scope and shared workspace', 400);
+    }
+    await beforeStart();
+    const pending = this.backgroundStarts.get(stableSessionId);
+    if (pending) { await pending; return this.startBackgroundSession(input, stableSessionId, beforeStart); }
+    const agent = await this.repos.agents.get(input.agentId);
+    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Background Agent not found', 404);
+    const existing = await this.repos.sessions.get(stableSessionId);
+    if (existing) {
+      const expected = { source: input.source, sourceId: input.sourceId, agentId: input.agentId, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode, systemPrompt: agent.systemPrompt };
+      if (Object.entries(expected).some(([key, value]) => (existing[key as keyof Session] ?? undefined) !== (value ?? undefined))) throw new RuntimeError('BACKGROUND_SESSION_CONFLICT', 'Background session immutable configuration changed', 409);
+      return existing;
+    }
+    // Recheck after the asynchronous reads before reserving the stable identity.
+    const raced = this.backgroundStarts.get(stableSessionId);
+    if (raced) { await raced; return this.startBackgroundSession(input, stableSessionId, beforeStart); }
+    const start = this.startSession(input, { id: stableSessionId, beforeStart });
+    this.backgroundStarts.set(stableSessionId, start);
+    try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
+  }
+
   /** A persisted stopped flag alone is not evidence that a previous process stopped. */
   async stopWorkItemSession(sessionId: string, actor: ExecutionActor): Promise<boolean> {
     this.assertReady();
@@ -1801,7 +1829,8 @@ export class DutydeckRuntime {
     if (actor && actor.kind !== 'unspecified') {
       this.bound().authorizeNativeContextControl(this.fence(session), actor);
       if (actor.kind !== 'installation_owner') {
-        await this.options.authorizeExecution?.(id, actor.id);
+        if (this.options.authorizeControl) await this.options.authorizeControl(id, actor, 'stop');
+        else await this.options.authorizeExecution?.(id, actor.id);
       }
     }
     await this.revokeSession(id, true, 'stopped', false, false, undefined, actor);

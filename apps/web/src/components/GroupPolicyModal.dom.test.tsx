@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { ApiError, foundationApi, type FoundationCapability, type GroupMatrix } from '../api';
+import { ApiError, collaborationApi, foundationApi, type FoundationCapability, type GroupMatrix } from '../api';
 import { GroupPolicyModal } from './GroupPolicyModal';
 import type { GroupBinding } from '@dutydeck/shared';
 
@@ -171,5 +171,20 @@ describe('GroupPolicyModal 模态外壳契约', () => {
     await userEvent.keyboard('{Escape}');
     expect(onClose).not.toHaveBeenCalled();
     expect(screen.getByRole('dialog', { name: '群配置与权限' })).toBeTruthy();
+  });
+
+  it('opens the shared generic collaboration panel scoped to bot externalAppId + chat, and surfaces 403', async () => {
+    vi.spyOn(foundationApi, 'capabilities').mockResolvedValue(ready);
+    vi.spyOn(foundationApi, 'groupMatrix').mockResolvedValue(matrix);
+    vi.spyOn(foundationApi, 'secretRefs').mockResolvedValue({ secretRefs: [] });
+    const getOverview = vi
+      .spyOn(collaborationApi, 'getOverview')
+      .mockRejectedValue(new ApiError('forbidden', 'FORBIDDEN', 403));
+    renderModal();
+    await userEvent.click(await screen.findByRole('button', { name: '通用协作' }));
+    await waitFor(() => expect(getOverview).toHaveBeenCalledWith('cli_ui', 'chat-ui'));
+    // 二级协作弹层打开，403 必须显式报错而不是空白成功。
+    expect(await screen.findByRole('dialog', { name: /通用协作/ })).toBeTruthy();
+    expect(await screen.findByText(/权限不足/)).toBeTruthy();
   });
 });

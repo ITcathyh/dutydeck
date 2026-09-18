@@ -2735,6 +2735,8 @@ describe('Lark long connection listener 欢迎语', () => {
     records?: Record<string, string>;
     runtime?: any;
     failMessages?: boolean;
+    noWelcome?: boolean;
+    participation?: any;
   }
 
   const memoryKv = (records: Record<string, string> = {}) => {
@@ -2776,7 +2778,7 @@ describe('Lark long connection listener 欢迎语', () => {
     const kv = memoryKv(options.records);
     const listener = new LarkLongConnectionListener(
       { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      { fetcher: fetcher as any, welcomeStore: kv as any, ...(options.runtime ? { runtime: options.runtime } : {}) }
+      { fetcher: fetcher as any, ...(options.noWelcome ? {} : { welcomeStore: kv as any }), ...(options.participation ? { participation: options.participation } : {}), ...(options.runtime ? { runtime: options.runtime } : {}) }
     );
     await listener.start(config);
     return { listener, handlers: larkSdkHarness.handlers, posts, kv };
@@ -2800,6 +2802,18 @@ describe('Lark long connection listener 欢迎语', () => {
       try { return JSON.parse(post.body.content) as any; } catch { return undefined; }
     })
     .filter(Boolean);
+
+  it('initializes group context without a welcome store and recovers existing scopes on startup', async () => {
+    const participation = { bootstrap: vi.fn(async () => undefined), recover: vi.fn(async () => {}), closeApp: vi.fn() };
+    const { listener, handlers, posts } = await startHarness({ noWelcome: true, participation });
+    expect(participation.recover).toHaveBeenCalledWith(config.appId);
+    handlers['im.chat.member.bot.added_v1']!({ event_id: 'context_join', chat_id: 'oc_context' });
+    await flush();
+    expect(participation.bootstrap).toHaveBeenCalledWith({ appId: config.appId, chatId: 'oc_context' });
+    expect(posts).toHaveLength(0);
+    listener.stop();
+    expect(participation.closeApp).toHaveBeenCalledWith(config.appId);
+  });
 
   it('bot 入群事件只发一次欢迎卡，重复事件不重发', async () => {
     const { listener, handlers, posts } = await startHarness();
