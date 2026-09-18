@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "document": {
+      "content": "<fragment mode=\"section\" requested-start=\"doxcnIKNnQ8h5QTPcXw3H3ZNU4e\"><h3 id=\"doxcnIKNnQ8h5QTPcXw3H3ZNU4e\" seq=\"auto\" seq-level=\"auto\" seq-marker=\"1.2\">分业务线归因</h3><ul><li id=\"doxcnqfa9GCTwAIcpk3GSpqESeb\"><b><span background-color=\"rgb(251,191,188)\">成本劣化业务线</span></b><ul><li id=\"PqxfdhBgFoqXf1xud7UcFVUsn2d\">Video Conferencing<ul><li id=\"Iq3vdvoP5oZJU5xfmN0c9dDanxe\">声纹新增 音频技术 商品的用量，用于提升声纹的正确率，增加了一部分成本。</li></ul></li><li id=\"Ms8edU9aZo4w5pxvzeHcc071nPe\">AI：<span text-color=\"rgb(143,149,158)\">910B4新卡开始推帐</span></li><li id=\"EPgWdViusoF984xyCyJczVHlnxA\">Drive</li></ul><p id=\"WkGDdarRvo0gvixpImhcrz0ynFb\" text-indent=\"1\"><span text-color=\"rgb(143,149,158)\">NetLink 统计口径浮动</span></p><ul><li id=\"LfFFdxaXeosEX4xRlGBcohvQnfh\">Security，上游业务流量上涨导致的主要核心资源上涨<ul><li id=\"Asd1dZb8iopgLpxj0XWc4GKlnde\">RocketMQ，上游开平网关、passport、aily 大模型输入输出等场景平台安全检测流量上涨</li><li id=\"Ks3idQfLOox2UZx5f65ceM03n1f\">高速缓存CACHE，商业化策略中心客户增加；开平网关、passport、aily 大模型输入输出等平台策略场景调用增加</li><li id=\"JuWOdtBaKoWbtqxyBtxcaYdsnyc\">Bernard推理服务平台，Agent安全治理，行为风控流量上涨</li></ul></li><li id=\"AKfwdCjtPo0O0wxcw6zcFRM7nDc\">App Client</li><li id=\"OZCJdHDsmoLwdXxnKwYcEimpnNd\">Data Platform<ul><li id=\"Mbktd9RuTos757xwHKxcmDXqnif\">HDFS：业务数据增量持续增长，存储资源紧张，8.25 扩容15PB</li><li id=\"ImFKdx4s5oOBHlxZmZecbm0xn6f\">YARN：业务数据量增长，流式资源不足，影响任务稳定性、SLA， 8.6 扩容 1000core  / 10TB </li></ul></li></ul></li><li id=\"doxcncMvWai5OnfvNmmDDGMTp7b\"><b><span background-color=\"rgba(183,237,177,0.8)\">成本优化业务线</span></b><ul><li id=\"NBordmOrMovVzExt04HcmuRynlc\">Email：<br/><span text-color=\"rgb(143,149,158)\">BGP 带宽用量降低</span><br/><span text-color=\"rgb(143,149,158)\">域名与网站计费项变动</span><br/><span text-color=\"rgb(143,149,158)\">NDB 存储计费项切换</span></li><li id=\"V3kDdpm7qo9m29x5G27cbBeInVd\">公共资源+根数据</li></ul></li></ul></fragment>",
+      "document_id": "IkTYduzTnoFqgsxbaPZcwjHXnUc",
+      "revision_id": 757
+    }
+  }
+}

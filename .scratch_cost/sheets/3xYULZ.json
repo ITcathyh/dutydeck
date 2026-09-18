@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "actual_range": "A1:D7",
+    "annotated_csv": "[row=1] 单位：人民币万元,2026年8月,2026年7月,26.08 vs 26.07\n[row=2] RTC成本,\"1,320\",\"1,458\",-138\n[row=3] --SaaS RTC成本,\"1,324\",\"1,436\",-112\n[row=4] --私有化RTC成本,92,89,3\n[row=5] RTS成本,18,29,-11\n[row=6] 抽帧切片成本,4,4,0\n[row=7] 内网媒体部署抵扣金额,-117,-99,-18",
+    "col_count": 4,
+    "col_indices": [
+      "A",
+      "B",
+      "C",
+      "D"
+    ],
+    "current_region": "A1:D7",
+    "has_more": false,
+    "revision": 560,
+    "row_count": 7,
+    "row_indices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7
+    ],
+    "warning_message": "①定位行号：必须直接读取 annotated_csv 中每行开头的 [row=N] 前缀（N 即为实际表格行号），不要自己数行，不要用\"序号/ID/编号\"列的值推导（这些列可能跳号或从非 1 开始，会全盘错位）；②定位列字母：必须用 col_indices[j]，不要手数。"
+  }
+}

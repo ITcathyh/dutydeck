@@ -1,0 +1,47 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "actual_range": "A1:H21",
+    "annotated_csv": "[row=1] 序号,业务线,商品名称,总成本,环比,变化值,趋势图,归因\n[row=2] 1,IM,Abase,¥109.99万,101.26%,¥55.34万,,abase1 单价上调+账单 true up\n[row=3] 2,Search,ES服务平台,¥285.98万,10.58%,¥27.35万,,true up 影响\n[row=4] 3,公共资源+根数据,研发商品中心-Dev Infra,¥128.12万,22.46%,¥23.50万,,\n[row=5] 4,Service Architecture,云数据库-ByteNDB,¥60.10万,28.58%,¥13.36万,,\"上个月有两天漏推, 本月正常\"\n[row=6] 5,IM,云数据库-mysql,¥92.54万,14.23%,¥11.52万,,true up 影响\n[row=7] 6,Service Architecture,Abase,¥21.45万,104.26%,¥10.95万,,\"1. true up 影响\n2. 上个月有漏账单\"\n[row=8] 7,AI,Bernard推理服务平台,¥72.88万,16.35%,¥10.24万,,TrueUP\n[row=9] 8,公共资源+根数据,MDCDN_NCN,¥14.73万,183.35%,¥9.53万,,\n[row=10] 9,Email,海外内部互联专线,¥9.41万,23693.64%,¥9.37万,,新增计费项\n[row=11] 10,Infra,bytedts,¥6.48万,3437.10%,¥6.30万,,\"一批无归属的 dts 任务临时挂靠到 Infra, 后续会分摊到具体业务线\"\n[row=12] 11,Security,云数据库-mysql,¥48.88万,14.46%,¥6.18万,,true up 影响\n[row=13] 12,Email,ES服务平台,¥73.17万,7.97%,¥5.40万,,true up\n[row=14] 13,Service Architecture,云数据库-mysql,¥49.52万,10.85%,¥4.85万,,true up\n[row=15] 14,IM,ByteUSS,¥4.40万, ,¥4.40万,,海外容灾，首次计费\n[row=16] 15,Open Platform,云数据库-mysql,¥23.00万,19.65%,¥3.78万,,true up\n[row=17] 16,Search,Abase,¥15.17万,32.57%,¥3.73万,,true up\n[row=18] 17,Drive,MDCDN_NCN,¥3.63万,5134855.44%,¥3.63万,,\"之前不推账单的计费项, 现在开始收费\n之前只计了 sg 和 jp 的收费, 现在海外全区域计费\"\n[row=19] 18,Security,云数据库-ByteNDB,¥14.24万,32.38%,¥3.48万,,true up 影响\n[row=20] 19,AnyCross,云数据库-mysql,¥18.03万,23.59%,¥3.44万,,true up\n[row=21] 20,Infra,BBONE专线,¥3.60万,829.79%,¥3.21万,,上个月账单少推了",
+    "col_count": 8,
+    "col_indices": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E",
+      "F",
+      "G",
+      "H"
+    ],
+    "current_region": "A1:H21",
+    "has_more": false,
+    "revision": 560,
+    "row_count": 21,
+    "row_indices": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21
+    ],
+    "warning_message": "①定位行号：必须直接读取 annotated_csv 中每行开头的 [row=N] 前缀（N 即为实际表格行号），不要自己数行，不要用\"序号/ID/编号\"列的值推导（这些列可能跳号或从非 1 开始，会全盘错位）；②定位列字母：必须用 col_indices[j]，不要手数。"
+  }
+}

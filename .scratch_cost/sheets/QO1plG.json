@@ -1,0 +1,21 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "actual_range": "A1:A2",
+    "annotated_csv": "[row=1] \n[row=2] ",
+    "col_count": 1,
+    "col_indices": [
+      "A"
+    ],
+    "current_region": "A1:A2",
+    "has_more": false,
+    "revision": 560,
+    "row_count": 2,
+    "row_indices": [
+      1,
+      2
+    ],
+    "warning_message": "①定位行号：必须直接读取 annotated_csv 中每行开头的 [row=N] 前缀（N 即为实际表格行号），不要自己数行，不要用\"序号/ID/编号\"列的值推导（这些列可能跳号或从非 1 开始，会全盘错位）；②定位列字母：必须用 col_indices[j]，不要手数。"
+  }
+}

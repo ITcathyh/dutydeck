@@ -1,0 +1,11 @@
+{
+  "ok": true,
+  "identity": "user",
+  "data": {
+    "document": {
+      "content": "<fragment mode=\"section\" requested-start=\"doxcnKNa22zcsc9kDWyozy82VQq\"><h3 id=\"doxcnKNa22zcsc9kDWyozy82VQq\" seq=\"auto\" seq-level=\"auto\" seq-marker=\"1.3\">分业务线归因</h3><ul><li id=\"doxcnhdXgYXuoHy9AefQ6i2eqz2\"><span background-color=\"rgb(251,191,188)\">成本劣化业务线</span><ul><li id=\"LnxFd0DDeo8uEoxGkbZc0UWOnOc\">IM</li><li id=\"FkNvdQFMioWmGqxVvdecEFFTnUh\">Search<ul><li id=\"GFqbdonq4ouJKUx3AmYcfRfBnGe\">账单<span text-color=\"rgb(143,149,158)\">true up</span></li></ul></li><li id=\"HQCHdxaTCowRESxdYtZcK6MJn9h\">Service Architecture<ul><li id=\"Gx1WdP5yaonheexM6BkcRubKnuf\">受 NDB/Abase 上月账单漏推对比影响</li></ul></li><li id=\"SW8AdzKezoq3ZwxgbzScPA6Vn9g\">Email<br/>新增海外内部互联专线计费项<br/>TrueUp账单</li><li id=\"TImEdqaQeoC249xLoiocSpeVnwd\">Open Platform<ul><li id=\"LAlhd7usUorqwCxoGh2cC94OnXf\">mysql 受true up 影响</li></ul></li></ul><p id=\"doxcni8qMIktC2pRtV9fTRFGrrM\"></p></li><li id=\"doxcn8MGL9jRg4n2i6Ge7m9oldg\"><b><span background-color=\"rgba(183,237,177,0.8)\">成本优化业务线</span></b><ul><li id=\"GHGSdtOOGoiY8Mx0Lx8cAN3qnGd\">Drive<ul><li id=\"GqtjdzuSco3XtMxFAcqclvi4nmc\">云数据库-mysql:成本分摊了给dola</li></ul></li><li id=\"STZUdjKenoY3E6xWHeNcluzdnng\">Lark QA<ul><li id=\"UxXtdmamyoB7RhxNVLScNBJWnle\">cv监控tos存储增加一个月过期实效逻辑</li></ul></li><li id=\"Ud1Tdc7yAo0GuMxvvu8cfF6onrf\">考勤<ul><li id=\"BNHfdS7EXouRovxaKiVcB1gYnRf\">回收了之前切流用的临时ck资源</li></ul></li><li id=\"Y6nndCwk4on1tVx4mTqccp15n4g\">AI<ul><li id=\"SWDdd5fcfo2g7rxl11bc5riYntn\">TrueUp账单</li></ul></li><li id=\"J7g8dlgZ2oJEqCxQ6Z3cOm8pnte\">Creation：<ul><li id=\"BJQFdVxkToVpEcxjXHLcRxHnnng\">Abase2有大库缩容、部分组件成本分摊给Dola</li><li id=\"ZT0xdKpJRoSsblxafYecRV0UnJf\">TCE有漏单</li></ul></li><li id=\"NnvxdmcV2oiPGQxFH46c01FMn5e\">Infra<ul><li id=\"YGtydj1D6odIMLxJu3TccJshnsd\">主要是系统云服务 TTP 调账影响</li></ul></li></ul></li></ul><p id=\"doxcnklGGAvb2tI6DI6ym3dmnJc\"></p><p id=\"doxcnHt3arrF6YprJwl5LTNUXvd\"></p></fragment>",
+      "document_id": "IkTYduzTnoFqgsxbaPZcwjHXnUc",
+      "revision_id": 757
+    }
+  }
+}
