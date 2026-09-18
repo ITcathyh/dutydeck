@@ -46,6 +46,71 @@ describe('group observation and selective participation through the coordinator'
     expect(await h.repository.listObservations(scope)).toEqual([]);
     expect(h.decide).not.toHaveBeenCalled();
   });
+  it('ambient yields to a message addressed at someone else, while never still wakes', async () => {
+    const mentionsOther = { mentions: [{ key: '@_user_1', name: '同事', openId: 'ou_other' }] };
+    const ambient = await harness('off');
+    await ambient.coordinator.handle(message('om_other', '@_user_1 你看下这个', mentionsOther), { ...config, mentionPolicy: 'ambient' });
+    await ambient.participation.flush(scope);
+    expect(ambient.runtime.send).not.toHaveBeenCalled();
+    expect(ambient.service.addReaction).not.toHaveBeenCalled();
+    const never = await harness('off');
+    await never.coordinator.handle(message('om_other', '@_user_1 你看下这个', mentionsOther), { ...config, mentionPolicy: 'never' });
+    await vi.waitFor(() => expect(never.runtime.send).toHaveBeenCalledOnce());
+  });
+  it('ambient yields even when the message addressed at someone else carries a slash command', async () => {
+    // 让路是彻底的：点名了别人的消息里就算带斜杠命令也不接。commandInteraction 由 legacyWake 推导，
+    // always 策略下未被 @ 的同一条命令同样不触发，这里只是把 ambient 归到同一侧并锁住。
+    const mentionsOther = { mentions: [{ key: '@_user_1', name: '同事', openId: 'ou_other' }] };
+    const h = await harness('off');
+    await h.coordinator.handle(message('om_cmd', '@_user_1 /help', mentionsOther), { ...config, mentionPolicy: 'ambient' });
+    await h.participation.flush(scope);
+    expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+    expect(h.service.reply).not.toHaveBeenCalled();
+    expect(h.service.send).not.toHaveBeenCalled();
+    // 没有点名任何人时同一条命令照常处理。
+    const open = await harness('off');
+    await open.coordinator.handle(message('om_cmd', '/help'), { ...config, mentionPolicy: 'ambient' });
+    await vi.waitFor(() => expect(open.service.reply.mock.calls.length + open.service.send.mock.calls.length).toBeGreaterThan(0));
+  });
+  it('stops calling the decider once the hourly decision budget is exhausted', async () => {
+    const h = await harness();
+    await h.repository.updateSettings(scope, { expectedRevision: 1, maxDecisionsPerHour: 1 }, 'owner');
+    await h.coordinator.handle(message('om_1', '第一条'), { ...config, mentionPolicy: 'never' });
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    await h.coordinator.handle(message('om_2', '第二条'), { ...config, mentionPolicy: 'never' });
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    const decisions = await h.repository.listDecisions(scope);
+    expect(decisions[0]).toMatchObject({ action: 'silent', status: 'suppressed' });
+    expect(decisions[0]!.reason).toContain('判定预算');
+  });
+  it('does not let budget-gated records consume the next window', async () => {
+    const h = await harness();
+    await h.repository.updateSettings(scope, { expectedRevision: 1, maxDecisionsPerHour: 1 }, 'owner');
+    await h.coordinator.handle(message('om_1', '第一条'), { ...config, mentionPolicy: 'never' });
+    await h.participation.flush(scope);
+    await h.coordinator.handle(message('om_2', '第二条'), { ...config, mentionPolicy: 'never' });
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    // 被闸门挡下的记录不消耗预算：上限抬到 2 时，只有那一次真实判定计入。
+    await h.repository.updateSettings(scope, { expectedRevision: 2, maxDecisionsPerHour: 2 }, 'owner');
+    await h.coordinator.handle(message('om_3', '第三条'), { ...config, mentionPolicy: 'never' });
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledTimes(2);
+  });
+  it('writes at most one gate record per hour so gated rows cannot fill the counting window', async () => {
+    const h = await harness();
+    await h.repository.updateSettings(scope, { expectedRevision: 1, maxDecisionsPerHour: 0 }, 'owner');
+    for (const index of [1, 2, 3, 4, 5]) {
+      await h.coordinator.handle(message(`om_${index}`, `第 ${index} 条`), { ...config, mentionPolicy: 'never' });
+      await h.participation.flush(scope);
+    }
+    expect(h.decide).not.toHaveBeenCalled();
+    // 五条消息只留一条闸门记录：否则超限期间每条消息写一条，500 条统计窗口会被闸门记录占满。
+    expect(await h.repository.listDecisions(scope)).toHaveLength(1);
+  });
   it('persists an unmentioned message before silence, with no reaction, card, or runtime task', async () => {
     const h = await harness();
     await h.coordinator.handle(message(), { ...config, mentionPolicy: 'never' });

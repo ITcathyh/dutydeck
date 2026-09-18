@@ -16,6 +16,11 @@ export const collaborationSettingsSchema = z.object({
   instructions: z.string().max(8000).default(''),
   notificationsPaused: z.boolean().default(false),
   maxProactivePerHour: z.number().int().min(0).max(60).default(6),
+  /**
+   * 每小时最多运行多少次参与判定。判定本身要花模型调用，observe 影子模式同样计入。
+   * 上限取 500：统计窗口一次最多读 500 条判定，超过这个数就无法自证用量。
+   */
+  maxDecisionsPerHour: z.number().int().min(0).max(500).default(60),
   retentionDays: z.number().int().min(1).max(365).default(30),
   policyVersion: z.string().min(1).max(64).default('v1'),
   updatedAt: z.string().datetime()
@@ -28,6 +33,7 @@ export const updateCollaborationSettingsInputSchema = z.object({
   instructions: z.string().max(8000).optional(),
   notificationsPaused: z.boolean().optional(),
   maxProactivePerHour: z.number().int().min(0).max(60).optional(),
+  maxDecisionsPerHour: z.number().int().min(0).max(500).optional(),
   retentionDays: z.number().int().min(1).max(365).optional(),
   policyVersion: z.string().min(1).max(64).optional()
 }).strict().refine(input => Object.keys(input).some(key => key !== 'expectedRevision'), {
@@ -341,6 +347,19 @@ export type DecisionAction = (typeof decisionActions)[number];
 
 export const decisionStatuses = ['candidate', 'suppressed', 'sent', 'failed'] as const;
 export type DecisionStatus = (typeof decisionStatuses)[number];
+
+/** 标记「判定还没发生就被闸门挡下」的记录。这类记录不代表一次模型调用。 */
+export const DECISION_BUDGET_GATE = 'decision_budget';
+/** 判定用量统计窗口一次读多少条；与 listDecisions 的服务端硬上限一致，便于识别窗口读不全。 */
+export const DECISION_WINDOW_LIMIT = 500;
+
+/**
+ * 统计窗口内真正跑过模型的判定条数。
+ * 被闸门挡下的记录必须排除：否则一旦超限，后续每条消息都会再记一条，用量永远降不回来。
+ */
+export function countDecisionUsage(decisions: Array<Pick<CollaborationDecision, 'createdAt' | 'inputSnapshot'>>, sinceMs: number): number {
+  return decisions.filter(item => Date.parse(item.createdAt) >= sinceMs && (item.inputSnapshot as { gate?: unknown }).gate !== DECISION_BUDGET_GATE).length;
+}
 
 export const boundedJsonRecordSchema = z
   .record(z.string(), z.unknown())

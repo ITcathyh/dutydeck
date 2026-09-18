@@ -53,6 +53,19 @@ it('binds a mutation to the active actor and turn, scopes stable retries and rej
   expect((await send()).json().followup.id).not.toBe(first.json().followup.id);
   f.endTask(); expect((await send()).statusCode).toBe(403);
 });
+it('reports hourly decision and reply usage so shadow-mode cost is visible', async () => {
+  const f = await fixture(); const url = '/api/lark/groups/cli_one/oc_one/collaboration';
+  const headers = { authorization: 'Bearer management' };
+  const fresh = (await f.app.inject({ url, headers })).json();
+  expect(fresh.usage).toMatchObject({ decisionsLastHour: 0, maxDecisionsPerHour: 60, maxProactivePerHour: 6, decisionWindowComplete: true });
+  const record = (id: string, patch: Record<string, unknown> = {}) => f.repos.collaboration.recordDecision({
+    id, scope, contextRevision: 0, policyVersion: 'v1', action: 'silent', reason: '', evidenceIds: [],
+    status: 'suppressed', inputSnapshot: {}, createdAt: new Date().toISOString(), ...patch });
+  await record('decision_real');
+  await record('decision_gated', { inputSnapshot: { gate: 'decision_budget' } });
+  // 真实判定计入用量，被闸门挡下的记录不计入，否则超限后用量永远降不回来。
+  expect((await f.app.inject({ url, headers })).json().usage.decisionsLastHour).toBe(1);
+});
 it('validates management auth, scoped paths and optimistic revisions through HTTP', async () => {
   const f = await fixture(); const url = '/api/lark/groups/cli_one/oc_one/collaboration';
   expect((await f.app.inject({ url })).statusCode).toBe(403);

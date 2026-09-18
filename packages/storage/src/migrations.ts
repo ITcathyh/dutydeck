@@ -543,7 +543,10 @@ export const migrations: Migration[] = [
   { version: 18, name: 'task_execution_schema_only', up: createTaskExecutionSchema },
   { version: 19, name: 'bot_configuration_storage_base', up: createBotConfigurationSchema },
   { version: 20, name: 'collaboration_foundation', up: createCollaborationSchema },
-  { version: 21, name: 'collaboration_schedule_execution', up: createScheduleExecutionSchema }
+  { version: 21, name: 'collaboration_schedule_execution', up: createScheduleExecutionSchema },
+  // collaboration_settings 建表在 v20，这里单独加列，让已按旧 v20 建好的库也能升级。
+  // 默认 60：判定远比主动发言频繁，约等于每分钟一次的持续上限。
+  { version: 22, name: 'collaboration_decision_budget', up(db) { ensureColumn(db, 'collaboration_settings', 'max_decisions_per_hour', 'max_decisions_per_hour INTEGER NOT NULL DEFAULT 60 CHECK (max_decisions_per_hour >= 0 AND max_decisions_per_hour <= 500)') } }
 ]
 
 /** Own the outer transaction required by SQLite's table-rebuild procedure. */

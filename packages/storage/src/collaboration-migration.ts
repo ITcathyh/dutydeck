@@ -18,6 +18,7 @@ export function createCollaborationSchema(db: Database.Database): void {
       instructions TEXT NOT NULL CHECK (length(instructions) <= 8000),
       notifications_paused INTEGER NOT NULL CHECK (notifications_paused IN (0, 1)),
       max_proactive_per_hour INTEGER NOT NULL CHECK (max_proactive_per_hour >= 0 AND max_proactive_per_hour <= 60),
+      max_decisions_per_hour INTEGER NOT NULL DEFAULT 60 CHECK (max_decisions_per_hour >= 0 AND max_decisions_per_hour <= 500),
       retention_days INTEGER NOT NULL CHECK (retention_days >= 1 AND retention_days <= 365),
       policy_version TEXT NOT NULL CHECK (length(policy_version) <= 64),
       updated_at TEXT NOT NULL,

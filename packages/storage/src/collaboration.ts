@@ -184,6 +184,7 @@ interface SettingsRow {
   instructions: string;
   notifications_paused: number;
   max_proactive_per_hour: number;
+  max_decisions_per_hour: number;
   retention_days: number;
   policy_version: string;
   updated_at: string;
@@ -197,6 +198,7 @@ function rowToSettings(row: SettingsRow): CollaborationSettings {
     instructions: row.instructions,
     notificationsPaused: row.notifications_paused === 1,
     maxProactivePerHour: row.max_proactive_per_hour,
+    maxDecisionsPerHour: row.max_decisions_per_hour,
     retentionDays: row.retention_days,
     policyVersion: row.policy_version,
     updatedAt: row.updated_at
@@ -503,6 +505,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           instructions: validatedPatch.instructions ?? currentSettings.instructions,
           notificationsPaused: validatedPatch.notificationsPaused ?? currentSettings.notificationsPaused,
           maxProactivePerHour: validatedPatch.maxProactivePerHour ?? currentSettings.maxProactivePerHour,
+          maxDecisionsPerHour: validatedPatch.maxDecisionsPerHour ?? currentSettings.maxDecisionsPerHour,
           retentionDays: validatedPatch.retentionDays ?? currentSettings.retentionDays,
           policyVersion: validatedPatch.policyVersion ?? currentSettings.policyVersion,
           updatedAt: updatedTime
@@ -511,14 +514,15 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
         sqlite.prepare(`
           INSERT INTO collaboration_settings (
             app_id, chat_id, revision, participation, instructions, notifications_paused,
-            max_proactive_per_hour, retention_days, policy_version, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            max_proactive_per_hour, max_decisions_per_hour, retention_days, policy_version, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(app_id, chat_id) DO UPDATE SET
             revision = excluded.revision,
             participation = excluded.participation,
             instructions = excluded.instructions,
             notifications_paused = excluded.notifications_paused,
             max_proactive_per_hour = excluded.max_proactive_per_hour,
+            max_decisions_per_hour = excluded.max_decisions_per_hour,
             retention_days = excluded.retention_days,
             policy_version = excluded.policy_version,
             updated_at = excluded.updated_at
@@ -530,6 +534,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           newSettings.instructions,
           newSettings.notificationsPaused ? 1 : 0,
           newSettings.maxProactivePerHour,
+          newSettings.maxDecisionsPerHour,
           newSettings.retentionDays,
           newSettings.policyVersion,
           newSettings.updatedAt

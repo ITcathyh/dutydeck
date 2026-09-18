@@ -157,6 +157,6 @@ describe('atomic new database authority', () => {
         INSERT INTO schedule_watermarks (schedule_definition_id,schema_version,revision,updated_at) VALUES ('schedule',1,1,'2026-09-14');`);
     });
     expect(open(path).execution.authority()).toBe('legacy');
-    inspect(path, db => { expect(db.prepare("SELECT sql FROM sqlite_schema WHERE name='schedule_definitions'").pluck().get()).toContain("'dutydeck'"); expect(db.prepare('SELECT source_ownership,name FROM schedule_definitions').get()).toEqual({source_ownership:'dutydeck',name:'preserved'}); expect(db.prepare('SELECT schedule_definition_id FROM schedule_watermarks').pluck().get()).toBe('schedule'); expect(db.pragma('foreign_key_check')).toEqual([]); expect(db.pragma('integrity_check', { simple: true })).toBe('ok'); expect(db.prepare('SELECT COUNT(*) FROM schema_migrations').pluck().get()).toBe(21); });
+    inspect(path, db => { expect(db.prepare("SELECT sql FROM sqlite_schema WHERE name='schedule_definitions'").pluck().get()).toContain("'dutydeck'"); expect(db.prepare('SELECT source_ownership,name FROM schedule_definitions').get()).toEqual({source_ownership:'dutydeck',name:'preserved'}); expect(db.prepare('SELECT schedule_definition_id FROM schedule_watermarks').pluck().get()).toBe('schedule'); expect(db.pragma('foreign_key_check')).toEqual([]); expect(db.pragma('integrity_check', { simple: true })).toBe('ok'); expect(db.prepare('SELECT COUNT(*) FROM schema_migrations').pluck().get()).toBe(22); });
   });
 });

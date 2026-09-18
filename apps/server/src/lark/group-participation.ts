@@ -1,4 +1,4 @@
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, countDecisionUsage } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
@@ -203,6 +203,21 @@ export class LarkGroupParticipation {
       && current.settings.participation !== 'off' && (!deliver || current.settings.participation === 'selective' && !current.settings.notificationsPaused
         && await this.options.authorize(scope, 'policy:group-participation', 'deliver')) && !this.closed && !slot.stopped;
   }
+  /**
+   * 返回拦截理由，通过则返回 undefined。
+   * 只统计真正跑过模型的判定：被闸门挡下的记录不计入，否则一旦超限就再也降不回来。
+   */
+  private async decisionBudget(scope: CollaborationScope, limit: number): Promise<string | undefined> {
+    const since = this.now().getTime() - 3_600_000;
+    const recent = await this.options.repository.listDecisions(scope, DECISION_WINDOW_LIMIT);
+    const used = countDecisionUsage(recent, since);
+    // 取满上限且最旧一条仍在窗口内时，窗口没有读全，用量只会被低估，按超限处理。
+    // 上限 500 同时是 maxDecisionsPerHour 的最大值，所以走到这一步时用量本来就已经超配置。
+    if (recent.length >= DECISION_WINDOW_LIMIT && Date.parse(recent.at(-1)!.createdAt) >= since) {
+      return `判定预算窗口不完整：最近 ${DECISION_WINDOW_LIMIT} 条判定都落在本小时内`;
+    }
+    return used >= limit ? `判定预算已用尽：本小时 ${used}/${limit}` : undefined;
+  }
   private async decide(scope: CollaborationScope, pending: Pending, slot: Slot) {
     await this.bootstrapper.ensure(scope);
     const repo = this.options.repository;
@@ -212,6 +227,17 @@ export class LarkGroupParticipation {
     if (!trigger) return;
     const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
     if (await repo.getDecision(scope, id)) return;
+    // 判定本身要花一次模型调用，observe 影子模式同样花。闸门必须在调用之前，
+    // 否则每条新消息都会先付费再被发言预算挡下。
+    const gate = await this.decisionBudget(scope, snapshot.settings.maxDecisionsPerHour);
+    if (gate) {
+      // 留痕让用量可见，但按小时分桶而不是按 contextRevision：recordDecision 遇到已存在的 id 直接返回，
+      // 所以每群每小时最多写一条。否则超限期间每条消息都写一条，闸门记录会把 500 条统计窗口占满。
+      const gateId = `decision_gate_${digest([scope, Math.floor(this.now().getTime() / 3_600_000)])}`;
+      await repo.recordDecision({ id: gateId, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion,
+        action: 'silent', reason: gate, evidenceIds: [trigger.id], status: 'suppressed', inputSnapshot: { gate: DECISION_BUDGET_GATE }, createdAt: this.now().toISOString() });
+      return;
+    }
     let result: ParticipationResult;
     const inputSnapshot = snapshot as unknown as Record<string, unknown>;
     try {
