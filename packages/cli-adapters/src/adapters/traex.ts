@@ -92,8 +92,8 @@ export function createTraexAdapter(): CliAdapter {
       if (cwd) {
         args.push('-C', cwd);
       }
-      // 只做精确 id 续接；无 resumeSessionId 时新起会话（botmux 的 history
-      // 反查已随 transcript 机制一起丢弃）。
+      // 只做精确 id 续接；无 resumeSessionId 时新起会话（不支持 history
+      // 反查机制）。
       const usable = usableResumeId(resumeSessionId);
       if (resume && usable) {
         return ['resume', ...args, usable];

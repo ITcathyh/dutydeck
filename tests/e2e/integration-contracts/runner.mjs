@@ -156,7 +156,7 @@ function validateManifest() {
 
   const identityCase = manifest.cases.find(item => item.id === 'app-chat-identity-preflight');
   invariant(identityCase?.execution === 'offline' && identityCase?.expectation === 'pass', 'IDENTITY_PREFLIGHT_OFFLINE_CASE_MISSING');
-  invariant(identityCase.command.join(' ') === 'node tests/e2e/botmux-parity/checks/identity-preflight.mjs', 'IDENTITY_PREFLIGHT_EVIDENCE_TARGET_MISSING');
+  invariant(identityCase.command.join(' ') === 'node tests/e2e/integration-contracts/checks/identity-preflight.mjs', 'IDENTITY_PREFLIGHT_EVIDENCE_TARGET_MISSING');
 
   const realLarkCase = manifest.cases.find(item => item.id === 'real-lark-dedicated-test-app');
   invariant(realLarkCase?.execution === 'real_lark_opt_in' && realLarkCase?.expectation === 'skip', 'REAL_LARK_CASE_MUST_REMAIN_OPT_IN_SKIP');
@@ -255,7 +255,7 @@ function execute(item) {
     if (allowedRemoteKeys.has(key)) return true;
     return !/(?:TOKEN|SECRET|COOKIE|CREDENTIAL|AUTHORIZATION|LARK|FEISHU|BOTMUX|DUTYDECK_)/i.test(key);
   }));
-  const privateRoot = mkdtempSync(resolve(tmpdir(), 'dutydeck-botmux-parity-case-'));
+  const privateRoot = mkdtempSync(resolve(tmpdir(), 'dutydeck-integration-contracts-case-'));
   const isolatedHome = resolve(privateRoot, 'home');
   const isolatedTmp = resolve(privateRoot, 'tmp');
   const isolatedTmux = resolve(privateRoot, 'tmux');
@@ -342,12 +342,12 @@ function disposition(item, args) {
 function usage() {
   return [
     'Usage:',
-    '  node tests/e2e/botmux-parity/runner.mjs --self-check',
-    '  node tests/e2e/botmux-parity/runner.mjs --list',
-    '  node tests/e2e/botmux-parity/runner.mjs --run-offline',
-    '  node tests/e2e/botmux-parity/runner.mjs --run-case <id> [--allow-remote-open]',
-    '  node tests/e2e/botmux-parity/runner.mjs --validate-real-lark-preflight <private-file>',
-    '  node tests/e2e/botmux-parity/runner.mjs --run-case real-lark-dedicated-test-app --allow-real-lark --preflight <private-file>',
+    '  node tests/e2e/integration-contracts/runner.mjs --self-check',
+    '  node tests/e2e/integration-contracts/runner.mjs --list',
+    '  node tests/e2e/integration-contracts/runner.mjs --run-offline',
+    '  node tests/e2e/integration-contracts/runner.mjs --run-case <id> [--allow-remote-open]',
+    '  node tests/e2e/integration-contracts/runner.mjs --validate-real-lark-preflight <private-file>',
+    '  node tests/e2e/integration-contracts/runner.mjs --run-case real-lark-dedicated-test-app --allow-real-lark --preflight <private-file>',
   ].join('\n');
 }
 

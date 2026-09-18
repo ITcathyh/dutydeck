@@ -161,7 +161,7 @@ describe('PTY_AGENT_CONTRIBUTIONS', () => {
     }
   });
 
-  it('命令名与 botmux RAW_CLI_EXECUTABLES 一致', () => {
+  it('命令名与标准 CLI 约定一致', () => {
     const byId = Object.fromEntries(PTY_AGENT_CONTRIBUTIONS.map(c => [c.id, c.command]));
     expect(byId).toMatchObject({
       'claude-code': 'claude',

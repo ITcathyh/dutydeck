@@ -13,8 +13,8 @@ import {
  * - 顶栏：整条红。现在 DOM 里唯一的 `<header>` 是总览页内容区里的页头（高 113px，
  *   透明底，随内容滚动），不是应用级顶栏。判据必须能区分二者——所以断言的是
  *   「存在一个横跨主区、贴顶不滚动、高 56px 的 banner」，光找 `<header>` 会被
- *   内容页头蒙混过关。56px 是我们统一后的单值，botmux 实际渲染 60px 是它的
- *   off-by-4 bug，不复刻（见 redesign-contract.ts 的 TOPBAR_HEIGHT 注释）。
+ *   内容页头蒙混过关。56px 是我们统一后的单值，确保侧栏与顶栏严格对齐，避免 4px
+ *   错位偏差（见 redesign-contract.ts 的 TOPBAR_HEIGHT 注释）。
  * - 侧栏宽度：红。桌面实测 292px（`md:w-[292px]`）。
  * - 侧栏形态：红。现在是 `fixed inset-y-0 left-0` 贴边通栏，圆角 0、左边距 0；
  *   目标是四周留白的悬浮卡片。
@@ -106,7 +106,7 @@ test.describe('骨架 · 侧栏宽度与形态', () => {
       .toBeGreaterThanOrEqual(SIDEBAR_CARD.minRadius);
   });
 
-  test('[红→绿] 侧栏顶边与顶栏底边对齐（不复刻 botmux 的 off-by-4）', async ({ dock }) => {
+  test('[红→绿] 侧栏顶边与顶栏底边对齐（避免 4px 错位偏差）', async ({ dock }) => {
     await dock.setViewportSize(VIEWPORTS.desktop);
     await dock.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded' });
     await settle(dock);
@@ -118,10 +118,10 @@ test.describe('骨架 · 侧栏宽度与形态', () => {
     const topbar = bars.find(b => b.y <= 2 && b.w >= VIEWPORTS.desktop.width * 0.5);
     test.skip(!topbar, '还没有应用顶栏，对齐无从谈起（见顶栏那条断言）');
     const sideTop = await dock.locator(sidebar).evaluate(el => Math.round(el.getBoundingClientRect().y));
-    // botmux 侧栏 top = --topbar-h(56) + 16，而 topbar 实际 60px，于是差 4px。
+    // 侧栏 top = --topbar-h(56) + 16，若顶栏高度不一致会出现错位。
     // 我们两处共用同一个 56px，侧栏顶边应恰好落在「顶栏底边 + 留白」上。
     const gap = sideTop - ((topbar?.y ?? 0) + (topbar?.h ?? 0));
-    expect(gap, `侧栏顶边比顶栏底边低 ${gap}px，应 ≥ 0（负值即 botmux 那个 off-by-4）`).toBeGreaterThanOrEqual(0);
+    expect(gap, `侧栏顶边比顶栏底边低 ${gap}px，应 ≥ 0（避免负值错位）`).toBeGreaterThanOrEqual(0);
   });
 
   test('[绿] 移动端侧栏默认收起、不撑出横向滚动', async ({ dock }) => {
@@ -207,7 +207,7 @@ test.describe('骨架 · 侧栏分组导航区', () => {
     await dock.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded' });
     await settle(dock);
 
-    // botmux 侧栏是 19 项分 5 组（概览/协作/数字员工/分析/管理，anatomy §A2 的 NAV_GROUPS）。
+    // 侧栏按业务域进行分组（概览/协作/数字员工/分析/管理等）。
     // 只把功能链接平铺出来不算改对——平铺是不可读的，分组才是这块导航的价值。
     //
     // 「一组」的可执行定义：一个 <nav>/role=group/<section>/<ul> 容器，里面有一个
@@ -233,8 +233,8 @@ test.describe('骨架 · 侧栏分组导航区', () => {
     await dock.setViewportSize(VIEWPORTS.desktop);
     await dock.goto(`${BASE_URL}/`, { waitUntil: 'domcontentloaded' });
     await settle(dock);
-    // botmux 的 `.sidebar-create-actions` 在**顶部**、用虚线边框 + 6% accent 底
-    // 与实线导航项区分（anatomy §A2）。dutydeck 现在只有一颗实心「创建任务」，
+    // 侧栏创建操作区在**顶部**、用虚线边框 + 6% accent 底
+    // 与实线导航项区分。dutydeck 现在只有一颗实心「创建任务」，
     // 与下方列表没有形态区隔。这里断言「创建操作位于所有导航条目之上」。
     const layout = await dock.locator(sidebar).evaluate(el => {
       const create = [...el.querySelectorAll('button,a')].find(b => /创建/.test(b.textContent ?? ''));

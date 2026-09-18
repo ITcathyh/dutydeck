@@ -1,15 +1,14 @@
 /**
  * Session backend selection — which multiplexer a session should run on.
  *
- * Simplified port of botmux's adapters/backend/session-backend-selector.ts.
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
  * The rules that matter, and why:
  *
  *  - **tmux is the default.** Not "tmux if available" — unconditionally.
  *  - **A persistent backend that isn't available does NOT silently become pty.**
- *    botmux learned this the hard way: picking pty whenever the tmux probe
- *    failed meant hosts with a broken tmux silently ran on pty and then hit
- *    pty's entire problem set (no survival across a daemon restart, …) with the
- *    user never knowing they had been downgraded. Callers get an explicit
+ *    Picking pty whenever the tmux probe failed would mean hosts with a broken tmux
+ *    silently run on pty and then hit pty's problem set (no survival across a daemon
+ *    restart, etc.) without the user knowing they were downgraded. Callers get an explicit
  *    'unavailable' decision to surface, not a quiet downgrade.
  *  - **pty is reachable only as an explicit opt-in** — an outright request for
  *    it — plus the one narrow automatic case below.

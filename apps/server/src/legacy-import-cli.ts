@@ -4,13 +4,13 @@ import { readSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { Writable } from 'node:stream';
 import {
-  BotmuxImportError,
-  BotmuxPlanHandle,
-  discoverBotmuxSource,
-  type BotmuxArchiveKeyDerivation,
-  type BotmuxRedactedManifest
-} from '@dutydeck/botmux-importer';
-import type { BotmuxArchiveCliOptions, BotmuxSourceCliOptions } from './cli-program.js';
+  LegacyImportError,
+  LegacyPlanHandle,
+  discoverLegacySource,
+  type LegacyArchiveKeyDerivation,
+  type LegacyRedactedManifest
+} from '@dutydeck/legacy-importer';
+import type { LegacyArchiveCliOptions, LegacySourceCliOptions } from './cli-program.js';
 
 const PASSPHRASE_MIN_BYTES = 16;
 const PASSPHRASE_MAX_BYTES = 1024;
@@ -18,20 +18,20 @@ const SCRYPT_COST = 16_384;
 const SCRYPT_BLOCK_SIZE = 8;
 const SCRYPT_PARALLELIZATION = 1;
 
-export class BotmuxImportCliError extends Error {
+export class LegacyImportCliError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
-    this.name = 'BotmuxImportCliError';
+    this.name = 'LegacyImportCliError';
   }
 }
 
-interface BotmuxCliIo {
+interface LegacyCliIo {
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WriteStream;
   stderr: NodeJS.WriteStream;
 }
 
-const processIo: BotmuxCliIo = {
+const processIo: LegacyCliIo = {
   stdin: process.stdin,
   stdout: process.stdout,
   stderr: process.stderr
@@ -57,14 +57,14 @@ async function writePrivateJson(path: string, value: unknown): Promise<void> {
       await handle.close();
     }
   } catch {
-    throw new BotmuxImportCliError(
+    throw new LegacyImportCliError(
       'OUTPUT_FILE_UNAVAILABLE',
       'Output must be a new regular file in a writable directory'
     );
   }
 }
 
-function sourceOptions(options: BotmuxSourceCliOptions, fingerprintKey: Uint8Array) {
+function sourceOptions(options: LegacySourceCliOptions, fingerprintKey: Uint8Array) {
   return {
     ...(options.sourceHome ? { source_home: options.sourceHome } : {}),
     ...(options.botsConfig ? { bots_config: options.botsConfig } : {}),
@@ -74,10 +74,10 @@ function sourceOptions(options: BotmuxSourceCliOptions, fingerprintKey: Uint8Arr
   };
 }
 
-async function withPlan<T>(options: BotmuxSourceCliOptions, operation: (manifest: BotmuxRedactedManifest, handle: BotmuxPlanHandle) => Promise<T>): Promise<T> {
+async function withPlan<T>(options: LegacySourceCliOptions, operation: (manifest: LegacyRedactedManifest, handle: LegacyPlanHandle) => Promise<T>): Promise<T> {
   const fingerprintKey = randomBytes(32);
   try {
-    const discovery = await discoverBotmuxSource(sourceOptions(options, fingerprintKey));
+    const discovery = await discoverLegacySource(sourceOptions(options, fingerprintKey));
     const handle = discovery.createPlan();
     return await operation(handle.createRedactedManifest(), handle);
   } finally {
@@ -85,14 +85,19 @@ async function withPlan<T>(options: BotmuxSourceCliOptions, operation: (manifest
   }
 }
 
-export async function runBotmuxDiscover(options: BotmuxSourceCliOptions, io: BotmuxCliIo = processIo): Promise<void> {
+/** JSON 输出里的 command 字段：canonical `migrate` 用 migrate.*，兼容别名 `botmux` 保持历史值 botmux.*。 */
+function commandName(action: 'discover' | 'plan' | 'archive', invokedAs: 'migrate' | 'botmux' | undefined): string {
+  return `${invokedAs === 'migrate' ? 'migrate' : 'botmux'}.${action}`;
+}
+
+export async function runLegacyDiscover(options: LegacySourceCliOptions, io: LegacyCliIo = processIo): Promise<void> {
   const fingerprintKey = randomBytes(32);
   try {
-    const discovery = await discoverBotmuxSource(sourceOptions(options, fingerprintKey));
+    const discovery = await discoverLegacySource(sourceOptions(options, fingerprintKey));
     const plan = discovery.createPlan().createRedactedManifest();
     const report = {
       schema_version: 1,
-      command: 'botmux.discover',
+      command: commandName('discover', options.invokedAs),
       allowed_mode: 'read_only_plan',
       production_cutover: 'NO_GO',
       discovery: discovery.manifest,
@@ -111,11 +116,11 @@ export async function runBotmuxDiscover(options: BotmuxSourceCliOptions, io: Bot
   }
 }
 
-export async function runBotmuxPlan(options: BotmuxSourceCliOptions, io: BotmuxCliIo = processIo): Promise<void> {
+export async function runLegacyPlan(options: LegacySourceCliOptions, io: LegacyCliIo = processIo): Promise<void> {
   await withPlan(options, async (manifest, handle) => {
     if (options.output) {
       await handle.writeRedactedManifest(options.output);
-      io.stdout.write(render({ ok: true, command: 'botmux.plan', production_cutover: 'NO_GO', output_written: true }, options.json === true));
+      io.stdout.write(render({ ok: true, command: commandName('plan', options.invokedAs), production_cutover: 'NO_GO', output_written: true }, options.json === true));
       return;
     }
     io.stdout.write(render(manifest, options.json === true));
@@ -132,11 +137,11 @@ function trimSingleLineEnding(bytes: Buffer): Buffer {
 function validatePassphrase(bytes: Buffer): Buffer {
   if (bytes.includes(0)) {
     bytes.fill(0);
-    throw new BotmuxImportCliError('ARCHIVE_PASSPHRASE_INVALID', 'Archive passphrase must be a single text value without NUL bytes');
+    throw new LegacyImportCliError('ARCHIVE_PASSPHRASE_INVALID', 'Archive passphrase must be a single text value without NUL bytes');
   }
   if (bytes.byteLength < PASSPHRASE_MIN_BYTES || bytes.byteLength > PASSPHRASE_MAX_BYTES) {
     bytes.fill(0);
-    throw new BotmuxImportCliError(
+    throw new LegacyImportCliError(
       'ARCHIVE_PASSPHRASE_INVALID',
       `Archive passphrase must contain ${PASSPHRASE_MIN_BYTES}-${PASSPHRASE_MAX_BYTES} UTF-8 bytes`
     );
@@ -146,11 +151,11 @@ function validatePassphrase(bytes: Buffer): Buffer {
 
 function parsePassphraseFd(value: string): number {
   if (!/^(?:0|[3-9]|[1-9][0-9]+)$/.test(value)) {
-    throw new BotmuxImportCliError('ARCHIVE_PASSPHRASE_FD_INVALID', 'Passphrase file descriptor must be 0 or an integer greater than 2');
+    throw new LegacyImportCliError('ARCHIVE_PASSPHRASE_FD_INVALID', 'Passphrase file descriptor must be 0 or an integer greater than 2');
   }
   const fd = Number(value);
   if (!Number.isSafeInteger(fd) || fd > 65_535) {
-    throw new BotmuxImportCliError('ARCHIVE_PASSPHRASE_FD_INVALID', 'Passphrase file descriptor is outside the supported range');
+    throw new LegacyImportCliError('ARCHIVE_PASSPHRASE_FD_INVALID', 'Passphrase file descriptor is outside the supported range');
   }
   return fd;
 }
@@ -168,15 +173,15 @@ function readPassphraseFd(value: string): Buffer {
       if (total > PASSPHRASE_MAX_BYTES + 2) {
         chunk.fill(0);
         for (const prior of chunks) prior.fill(0);
-        throw new BotmuxImportCliError('ARCHIVE_PASSPHRASE_INVALID', 'Archive passphrase input is too large');
+        throw new LegacyImportCliError('ARCHIVE_PASSPHRASE_INVALID', 'Archive passphrase input is too large');
       }
       chunks.push(Buffer.from(chunk.subarray(0, count)));
       chunk.fill(0);
     }
   } catch (error) {
-    if (error instanceof BotmuxImportCliError) throw error;
+    if (error instanceof LegacyImportCliError) throw error;
     for (const chunk of chunks) chunk.fill(0);
-    throw new BotmuxImportCliError('ARCHIVE_PASSPHRASE_READ_FAILED', 'Archive passphrase could not be read from the requested file descriptor');
+    throw new LegacyImportCliError('ARCHIVE_PASSPHRASE_READ_FAILED', 'Archive passphrase could not be read from the requested file descriptor');
   }
   const joined = Buffer.concat(chunks);
   for (const chunk of chunks) chunk.fill(0);
@@ -185,7 +190,7 @@ function readPassphraseFd(value: string): Buffer {
   return validatePassphrase(trimmed);
 }
 
-async function hiddenQuestion(prompt: string, io: BotmuxCliIo): Promise<Buffer> {
+async function hiddenQuestion(prompt: string, io: LegacyCliIo): Promise<Buffer> {
   io.stderr.write(prompt);
   const mutedOutput = new Writable({ write(_chunk, _encoding, callback) { callback(); } });
   const readline = createInterface({ input: io.stdin, output: mutedOutput, terminal: true });
@@ -197,13 +202,13 @@ async function hiddenQuestion(prompt: string, io: BotmuxCliIo): Promise<Buffer> 
   }
 }
 
-async function readInteractivePassphrase(io: BotmuxCliIo): Promise<Buffer> {
+async function readInteractivePassphrase(io: LegacyCliIo): Promise<Buffer> {
   const first = validatePassphrase(await hiddenQuestion('Archive passphrase: ', io));
   let second: Buffer | undefined;
   try {
     second = validatePassphrase(await hiddenQuestion('Confirm archive passphrase: ', io));
     if (first.byteLength !== second.byteLength || !timingSafeEqual(first, second)) {
-      throw new BotmuxImportCliError('ARCHIVE_PASSPHRASE_MISMATCH', 'Archive passphrase confirmation did not match');
+      throw new LegacyImportCliError('ARCHIVE_PASSPHRASE_MISMATCH', 'Archive passphrase confirmation did not match');
     }
     return first;
   } catch (error) {
@@ -214,18 +219,18 @@ async function readInteractivePassphrase(io: BotmuxCliIo): Promise<Buffer> {
   }
 }
 
-async function archivePassphrase(options: BotmuxArchiveCliOptions, io: BotmuxCliIo): Promise<Buffer> {
+async function archivePassphrase(options: LegacyArchiveCliOptions, io: LegacyCliIo): Promise<Buffer> {
   if (options.passphraseFd !== undefined) return readPassphraseFd(options.passphraseFd);
   if (io.stdin.isTTY === true && io.stderr.isTTY === true) return readInteractivePassphrase(io);
-  throw new BotmuxImportCliError(
+  throw new LegacyImportCliError(
     'ARCHIVE_PASSPHRASE_INPUT_REQUIRED',
     'Non-interactive archive requires explicit --passphrase-fd; passphrase values are never accepted in arguments or environment variables'
   );
 }
 
-function deriveArchiveKey(passphrase: Buffer): Promise<{ key: Buffer; metadata: BotmuxArchiveKeyDerivation }> {
+function deriveArchiveKey(passphrase: Buffer): Promise<{ key: Buffer; metadata: LegacyArchiveKeyDerivation }> {
   const salt = randomBytes(16);
-  const metadata: BotmuxArchiveKeyDerivation = {
+  const metadata: LegacyArchiveKeyDerivation = {
     algorithm: 'scrypt',
     salt_base64: salt.toString('base64'),
     key_length_bytes: 32,
@@ -241,13 +246,13 @@ function deriveArchiveKey(passphrase: Buffer): Promise<{ key: Buffer; metadata: 
       maxmem: 64 * 1024 * 1024
     }, (error, key) => {
       salt.fill(0);
-      if (error) reject(new BotmuxImportCliError('ARCHIVE_KEY_DERIVATION_FAILED', 'Archive encryption key derivation failed'));
+      if (error) reject(new LegacyImportCliError('ARCHIVE_KEY_DERIVATION_FAILED', 'Archive encryption key derivation failed'));
       else resolve({ key: Buffer.from(key), metadata });
     });
   });
 }
 
-export async function runBotmuxArchive(options: BotmuxArchiveCliOptions, io: BotmuxCliIo = processIo): Promise<void> {
+export async function runLegacyArchive(options: LegacyArchiveCliOptions, io: LegacyCliIo = processIo): Promise<void> {
   const passphrase = await archivePassphrase(options, io);
   let archiveKey: Buffer | undefined;
   try {
@@ -261,7 +266,7 @@ export async function runBotmuxArchive(options: BotmuxArchiveCliOptions, io: Bot
       });
       io.stdout.write(render({
         schema_version: 1,
-        command: 'botmux.archive',
+        command: commandName('archive', options.invokedAs),
         allowed_mode: 'private_archive_only',
         production_cutover: 'NO_GO',
         archive,
@@ -271,8 +276,8 @@ export async function runBotmuxArchive(options: BotmuxArchiveCliOptions, io: Bot
       }, options.json === true));
     });
   } catch (error) {
-    if (error instanceof BotmuxImportError || error instanceof BotmuxImportCliError) throw error;
-    throw new BotmuxImportCliError('ARCHIVE_FAILED', 'Private archive could not be created');
+    if (error instanceof LegacyImportError || error instanceof LegacyImportCliError) throw error;
+    throw new LegacyImportCliError('ARCHIVE_FAILED', 'Private archive could not be created');
   } finally {
     passphrase.fill(0);
     archiveKey?.fill(0);

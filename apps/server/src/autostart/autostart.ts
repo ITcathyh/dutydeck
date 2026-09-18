@@ -23,7 +23,7 @@ import { dirname, join, resolve, sep } from 'node:path';
  *    daemon 后就已经退出，bootout 没有活进程可杀）。
  *
  * 2. **幂等 + 漂移重写。** nvm 换版本、npm 升级都会让 `execPath` / `cliPath` 变化，
- *    磁盘上的 unit 会静默失效（botmux 曾因此在重启后再也起不来，且没有任何报错）。
+ *    避免磁盘上的 unit 路径静默失效导致重启后无法拉起且无报错。
  *    所以每次都渲染期望内容并与磁盘比对：一致就 `changed: false` 什么都不写，不一致
  *    才重写；`autostartStatus()` 用 `stale: true` 把这种漂移暴露出来。
  *

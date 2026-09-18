@@ -12,21 +12,21 @@ import {
 } from './safe-reader.js';
 import type {
   ArtifactDisposition,
-  BotmuxChannelBotPlan,
-  BotmuxDiscoveryManifest,
-  BotmuxImportArtifact,
-  BotmuxImportBlocker,
-  BotmuxImportSummary,
-  BotmuxPrivateArchiveManifest,
-  BotmuxPrivateMigrationPlan,
-  BotmuxRedactedManifest,
-  BotmuxRetiredBotPlan,
-  BotmuxSchedulePlan,
-  BotmuxSecretRequirement,
-  DiscoverBotmuxOptions,
+  LegacyChannelBotPlan,
+  LegacyDiscoveryManifest,
+  LegacyImportArtifact,
+  LegacyImportBlocker,
+  LegacyImportSummary,
+  LegacyPrivateArchiveManifest,
+  LegacyPrivateMigrationPlan,
+  LegacyRedactedManifest,
+  LegacyRetiredBotPlan,
+  LegacySchedulePlan,
+  LegacySecretRequirement,
+  DiscoverLegacyOptions,
   PrivateArchiveOptions
 } from './types.js';
-import { BotmuxImportError } from './types.js';
+import { LegacyImportError } from './types.js';
 
 const PARSER_VERSION = 'botmux-read-only-v1';
 const VALID_APP_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -140,7 +140,7 @@ const KNOWN_DATA_ENTRY = new RegExp([
 
 type JsonObject = Record<string, unknown>;
 
-interface InternalArtifact extends BotmuxImportArtifact {
+interface InternalArtifact extends LegacyImportArtifact {
   absolute_path?: string;
   snapshot?: StableFileSnapshot;
   archive_eligible: boolean;
@@ -149,7 +149,7 @@ interface InternalArtifact extends BotmuxImportArtifact {
 
 interface InternalState {
   key: Uint8Array;
-  plan: BotmuxPrivateMigrationPlan;
+  plan: LegacyPrivateMigrationPlan;
   artifacts: InternalArtifact[];
   archive_files: ArchiveSourceFile[];
 }
@@ -162,7 +162,7 @@ function parseJson(bytes: Uint8Array, artifactRef: string): unknown {
   try {
     return JSON.parse(Buffer.from(bytes).toString('utf8'));
   } catch {
-    throw new BotmuxImportError('SOURCE_JSON_INVALID', 'Botmux source JSON is invalid', artifactRef);
+    throw new LegacyImportError('SOURCE_JSON_INVALID', 'Botmux source JSON is invalid', artifactRef);
   }
 }
 
@@ -174,13 +174,13 @@ function ownerKind(value: string): 'email' | 'mobile' | 'open_id' | 'union_id' |
   return 'unknown';
 }
 
-function cwdKind(value: unknown): BotmuxChannelBotPlan['default_cwd_kind'] {
+function cwdKind(value: unknown): LegacyChannelBotPlan['default_cwd_kind'] {
   if (typeof value !== 'string' || !value.trim()) return 'unset';
   if (value === '~' || value.startsWith('~/')) return 'home_relative';
   return isAbsolute(value) ? 'absolute' : 'relative';
 }
 
-function artifactCounts(artifacts: readonly BotmuxImportArtifact[]): Record<ArtifactDisposition, number> {
+function artifactCounts(artifacts: readonly LegacyImportArtifact[]): Record<ArtifactDisposition, number> {
   const counts: Record<ArtifactDisposition, number> = {
     mapped: 0,
     archive_only: 0,
@@ -199,9 +199,9 @@ function uniqueSorted(values: Iterable<string>): string[] {
 }
 
 function addBlocker(
-  blockers: BotmuxImportBlocker[],
+  blockers: LegacyImportBlocker[],
   code: string,
-  scope: BotmuxImportBlocker['scope'],
+  scope: LegacyImportBlocker['scope'],
   nextStep: string,
   scopeRef?: string
 ): void {
@@ -229,7 +229,7 @@ async function pathMetadata(path: string, artifactRef: string): Promise<{ size: 
       kind: info.isFile() ? 'file' : info.isDirectory() ? 'directory' : 'other'
     };
   } catch {
-    throw new BotmuxImportError('SOURCE_ARTIFACT_UNREADABLE', 'Botmux source artifact metadata is unavailable', artifactRef);
+    throw new LegacyImportError('SOURCE_ARTIFACT_UNREADABLE', 'Botmux source artifact metadata is unavailable', artifactRef);
   }
 }
 
@@ -241,15 +241,15 @@ async function recursiveFiles(root: string, key: Uint8Array, kind: string): Prom
       const child = join(directory, entry.name);
       if (entry.kind === 'file') output.push({ path: child, ref: opaqueRef(kind, key, child) });
       else if (entry.kind === 'directory') await visit(child);
-      else throw new BotmuxImportError('SOURCE_ARTIFACT_INVALID', 'Botmux archive source contains an unsupported file type', opaqueRef('artifact', key, child));
+      else throw new LegacyImportError('SOURCE_ARTIFACT_INVALID', 'Botmux archive source contains an unsupported file type', opaqueRef('artifact', key, child));
     }
   };
   await visit(root);
   return output;
 }
 
-export class BotmuxPlanHandle {
-  readonly private_plan: BotmuxPrivateMigrationPlan;
+export class LegacyPlanHandle {
+  readonly private_plan: LegacyPrivateMigrationPlan;
   #state: InternalState;
 
   constructor(state: InternalState) {
@@ -257,9 +257,9 @@ export class BotmuxPlanHandle {
     this.private_plan = state.plan;
   }
 
-  createRedactedManifest(): BotmuxRedactedManifest {
+  createRedactedManifest(): LegacyRedactedManifest {
     const plan = this.private_plan;
-    const secretRequirementCounts: BotmuxRedactedManifest['secret_requirement_counts'] = {
+    const secretRequirementCounts: LegacyRedactedManifest['secret_requirement_counts'] = {
       lark_app_secret: 0,
       agent_env: 0,
       connector_credential: 0,
@@ -324,11 +324,11 @@ export class BotmuxPlanHandle {
         await handle.close();
       }
     } catch {
-      throw new BotmuxImportError('REDACTED_MANIFEST_WRITE_FAILED', 'Redacted manifest could not be written to a new private file');
+      throw new LegacyImportError('REDACTED_MANIFEST_WRITE_FAILED', 'Redacted manifest could not be written to a new private file');
     }
   }
 
-  async createPrivateArchive(options: PrivateArchiveOptions): Promise<BotmuxPrivateArchiveManifest> {
+  async createPrivateArchive(options: PrivateArchiveOptions): Promise<LegacyPrivateArchiveManifest> {
     return writePrivateArchive(
       this.private_plan,
       this.#state.archive_files,
@@ -338,8 +338,8 @@ export class BotmuxPlanHandle {
   }
 }
 
-export class BotmuxDiscovery {
-  readonly manifest: BotmuxDiscoveryManifest;
+export class LegacyDiscovery {
+  readonly manifest: LegacyDiscoveryManifest;
   #state: InternalState;
 
   constructor(state: InternalState) {
@@ -355,14 +355,14 @@ export class BotmuxDiscovery {
     };
   }
 
-  createPlan(): BotmuxPlanHandle {
-    return new BotmuxPlanHandle(this.#state);
+  createPlan(): LegacyPlanHandle {
+    return new LegacyPlanHandle(this.#state);
   }
 }
 
-export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Promise<BotmuxDiscovery> {
+export async function discoverLegacySource(options: DiscoverLegacyOptions): Promise<LegacyDiscovery> {
   if (options.fingerprint_key.byteLength < 32) {
-    throw new BotmuxImportError('FINGERPRINT_KEY_INVALID', 'Fingerprint key must contain at least 32 bytes');
+    throw new LegacyImportError('FINGERPRINT_KEY_INVALID', 'Fingerprint key must contain at least 32 bytes');
   }
   const key = new Uint8Array(options.fingerprint_key);
   const env = options.env ?? {};
@@ -380,7 +380,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
     const breadcrumbRef = opaqueRef('artifact', key, breadcrumbPath);
     const breadcrumb = await stableReadFile(breadcrumbPath, breadcrumbRef, { secret: true });
     const value = Buffer.from(breadcrumb.bytes).toString('utf8').trim();
-    if (!value) throw new BotmuxImportError('DATA_BREADCRUMB_INVALID', 'Botmux data breadcrumb is empty', breadcrumbRef);
+    if (!value) throw new LegacyImportError('DATA_BREADCRUMB_INVALID', 'Botmux data breadcrumb is empty', breadcrumbRef);
     dataPathInput = isAbsolute(value) ? value : resolve(sourceHome, value);
   }
   dataPathInput ??= join(sourceHome, 'data');
@@ -391,7 +391,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
   const sourceInstanceRef = opaqueRef('source', key, `${configPath}\0${dataPath}`);
   const artifacts: InternalArtifact[] = [];
   const archiveFiles: ArchiveSourceFile[] = [];
-  const blockers: BotmuxImportBlocker[] = [];
+  const blockers: LegacyImportBlocker[] = [];
   const integrityParts: Array<{ artifact_ref: string; digest: string }> = [];
   const archiveParts: Array<{ artifact_ref: string; digest: string }> = [];
   let unknownConfigFields = 0;
@@ -447,7 +447,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
     excluded_secret: true
   }, { secret: true });
   const registry = parseJson(registryArtifact.snapshot!.bytes, registryArtifact.artifact_ref);
-  if (!Array.isArray(registry)) throw new BotmuxImportError('BOT_REGISTRY_INVALID', 'Botmux bot registry must be an array', registryArtifact.artifact_ref);
+  if (!Array.isArray(registry)) throw new LegacyImportError('BOT_REGISTRY_INVALID', 'Botmux bot registry must be an array', registryArtifact.artifact_ref);
 
   let backupBots: JsonObject[] = [];
   const backupPath = join(sourceHome, 'bots.json.bak');
@@ -465,8 +465,8 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
     backupBots = Array.isArray(value) ? value.map(asObject).filter((item): item is JsonObject => Boolean(item)) : [];
   }
 
-  const channelBots: BotmuxChannelBotPlan[] = [];
-  const secretRequirements: BotmuxSecretRequirement[] = [];
+  const channelBots: LegacyChannelBotPlan[] = [];
+  const secretRequirements: LegacySecretRequirement[] = [];
   const appRefByRaw = new Map<string, string>();
   const botCanonical: unknown[] = [];
   const distinctOwnerRefs = new Set<string>();
@@ -553,7 +553,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
 
     const hammer = asObject(raw.hammer);
     let hammerArchived = false;
-    const archivedIntegrations: BotmuxChannelBotPlan['archived_integrations'] = [];
+    const archivedIntegrations: LegacyChannelBotPlan['archived_integrations'] = [];
     if (hammer) {
       for (const field of Object.keys(hammer)) {
         if (!HANDLED_HAMMER_FIELDS.has(field)) {
@@ -612,7 +612,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
       persisted_value: false
     });
 
-    const channelBot: BotmuxChannelBotPlan = {
+    const channelBot: LegacyChannelBotPlan = {
       app_ref: appRef,
       source_state: 'current',
       cli_id: cliId,
@@ -653,7 +653,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
   channelBots.sort((left, right) => left.app_ref.localeCompare(right.app_ref));
 
   const currentRawAppIds = new Set(appRefByRaw.keys());
-  const retiredBots: BotmuxRetiredBotPlan[] = [];
+  const retiredBots: LegacyRetiredBotPlan[] = [];
   for (const raw of backupBots) {
     const rawAppId = typeof raw.larkAppId === 'string' ? raw.larkAppId.trim() : '';
     if (!rawAppId || currentRawAppIds.has(rawAppId)) continue;
@@ -702,7 +702,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
     addBlocker(blockers, 'global_config_requires_review', 'artifact', 'Add explicit typed handling for every global Botmux setting before future staging.', artifact.artifact_ref);
   }
 
-  const schedules: BotmuxSchedulePlan[] = [];
+  const schedules: LegacySchedulePlan[] = [];
   const scheduleCanonical: unknown[] = [];
   const scheduleAppIds = uniqueSorted([...currentRawAppIds, ...backupBots.map(raw => typeof raw.larkAppId === 'string' ? raw.larkAppId : '').filter(Boolean)]);
   for (const rawAppId of scheduleAppIds) {
@@ -751,7 +751,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
         'schedule_executor_unavailable',
         ...(enabled ? ['enabled_schedule_requires_single_writer'] : [])
       ]);
-      const schedule: BotmuxSchedulePlan = {
+      const schedule: LegacySchedulePlan = {
         schedule_ref: opaqueRef('schedule', key, `${taskAppId}\0${sourceScheduleId}`),
         ...(appRef ? { app_ref: appRef } : {}),
         source_enabled: enabled,
@@ -979,7 +979,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
   const roles = artifacts.filter(item => ['roles', 'team_roles', 'role_profiles'].includes(item.kind)).length;
   const unknownArtifacts = artifacts.filter(item => item.disposition === 'blocked_unknown').length;
   const enabledSchedules = schedules.filter(item => item.source_enabled).length;
-  const summary: BotmuxImportSummary = {
+  const summary: LegacyImportSummary = {
     current_channel_bots: channelBots.length,
     retired_channel_bots: retiredBots.length,
     oncall_group_bindings: channelBots.reduce((total, bot) => total + bot.oncall_bindings.length, 0),
@@ -1011,7 +1011,7 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
   const planId = `plan_${stableFingerprint({ source_instance_ref: sourceInstanceRef, apply_fingerprint: applyFingerprint }).slice(0, 24)}`;
   const generatedAt = (options.now ?? (() => new Date()))().toISOString();
 
-  const plan: BotmuxPrivateMigrationPlan = {
+  const plan: LegacyPrivateMigrationPlan = {
     schema_version: 1,
     parser_version: PARSER_VERSION,
     plan_id: planId,
@@ -1049,9 +1049,9 @@ export async function discoverBotmuxSource(options: DiscoverBotmuxOptions): Prom
     }
   };
 
-  return new BotmuxDiscovery({ key, plan, artifacts, archive_files: archiveFiles });
+  return new LegacyDiscovery({ key, plan, artifacts, archive_files: archiveFiles });
 }
 
-export async function planBotmuxImport(options: DiscoverBotmuxOptions): Promise<BotmuxPlanHandle> {
-  return (await discoverBotmuxSource(options)).createPlan();
+export async function planLegacyImport(options: DiscoverLegacyOptions): Promise<LegacyPlanHandle> {
+  return (await discoverLegacySource(options)).createPlan();
 }

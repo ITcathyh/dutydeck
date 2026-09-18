@@ -4,7 +4,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import * as publicApi from './index.js';
-import { BotmuxImportError, discoverBotmuxSource, planBotmuxImport } from './index.js';
+import {
+  LegacyImportError,
+  discoverLegacySource,
+  planLegacyImport
+} from './index.js';
 
 const FIXTURE = {
   appA: 'cli_fixture_alpha',
@@ -47,7 +51,7 @@ interface FixtureTree {
 }
 
 async function createFixture(options: { unknownField?: boolean; unknownArtifact?: boolean } = {}): Promise<FixtureTree> {
-  const root = await mkdtemp(join(tmpdir(), 'dutydeck-botmux-importer-'));
+  const root = await mkdtemp(join(tmpdir(), 'dutydeck-legacy-importer-'));
   dirs.push(root);
   const sourceHome = join(root, 'source-home');
   const dataDir = join(sourceHome, 'data');
@@ -191,7 +195,7 @@ afterEach(async () => {
 describe('Botmux read-only importer', () => {
   it('discovers a synthetic host, emits blockers, and never exposes paths, identities, prompts, or secrets', async () => {
     const fixture = await createFixture({ unknownField: true, unknownArtifact: true });
-    const discovery = await discoverBotmuxSource({
+    const discovery = await discoverLegacySource({
       source_home: fixture.sourceHome,
       fingerprint_key: fingerprintKey,
       now: () => new Date('2026-08-30T00:00:00.000Z')
@@ -290,29 +294,29 @@ describe('Botmux read-only importer', () => {
       fingerprint_key: fingerprintKey,
       now: () => new Date('2026-08-30T00:00:00.000Z')
     };
-    const first = await planBotmuxImport(options);
-    const second = await planBotmuxImport(options);
+    const first = await planLegacyImport(options);
+    const second = await planLegacyImport(options);
     expect(second.private_plan.source.apply_fingerprint).toBe(first.private_plan.source.apply_fingerprint);
     expect(second.private_plan.plan_id).toBe(first.private_plan.plan_id);
 
     const sessions = JSON.parse(await readFile(fixture.sessionPath, 'utf8')) as Record<string, unknown>;
     sessions.fixture_history_only = { sessionId: 'fixture_history_only', larkAppId: FIXTURE.appA, status: 'closed', scope: 'thread' };
     await privateJson(fixture.sessionPath, sessions);
-    const historyChanged = await planBotmuxImport(options);
+    const historyChanged = await planLegacyImport(options);
     expect(historyChanged.private_plan.source.apply_fingerprint).toBe(first.private_plan.source.apply_fingerprint);
     expect(historyChanged.private_plan.source.archive_candidate_fingerprint).not.toBe(first.private_plan.source.archive_candidate_fingerprint);
 
     const schedule = JSON.parse(await readFile(fixture.schedulePath, 'utf8')) as Record<string, any>;
     schedule.fixture_task.prompt = 'FIXTURE_CHANGED_SCHEDULE_PROMPT';
     await privateJson(fixture.schedulePath, schedule);
-    const scheduleChanged = await planBotmuxImport(options);
+    const scheduleChanged = await planLegacyImport(options);
     expect(scheduleChanged.private_plan.source.apply_fingerprint).not.toBe(first.private_plan.source.apply_fingerprint);
   });
 
   it('does not mutate the source and writes only encrypted private archive artifacts', async () => {
     const fixture = await createFixture();
     const before = await treeDigest(fixture.sourceHome);
-    const handle = await planBotmuxImport({
+    const handle = await planLegacyImport({
       source_home: fixture.sourceHome,
       fingerprint_key: fingerprintKey,
       now: () => new Date('2026-08-30T00:00:00.000Z')
@@ -365,10 +369,10 @@ describe('Botmux read-only importer', () => {
     await rm(join(fixture.sourceHome, 'bots.json'));
     await symlink(realRegistry, join(fixture.sourceHome, 'bots.json'));
 
-    await expect(discoverBotmuxSource({
+    await expect(discoverLegacySource({
       source_home: fixture.sourceHome,
       fingerprint_key: fingerprintKey
-    })).rejects.toMatchObject<Partial<BotmuxImportError>>({ code: 'SOURCE_FILE_INVALID' });
+    })).rejects.toMatchObject<Partial<LegacyImportError>>({ code: 'SOURCE_FILE_INVALID' });
 
     const exportedNames = Object.keys(publicApi);
     expect(exportedNames.some(name => /apply|activate|cutover|resume/i.test(name))).toBe(false);

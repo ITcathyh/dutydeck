@@ -26,8 +26,7 @@ async function requestSessionIdOnce(backend: PtyLike): Promise<void> {
  * Kiro CLI（`kiro-cli chat`）适配器。
  *
  * Kiro 会话 id 由 CLI 自己分配，只能通过 TUI 的 `/session-id` 斜杠命令回显——
- * 首次写入前敲一次，让 id 出现在屏幕上供 driver 捕获（botmux 靠这条把
- * cliSessionId 抓回来；dutydeck 尚无捕获管道，命令仍保留，屏幕上有 id 才有
+ * 首次写入前敲一次，让 id 出现在屏幕上供捕获（当前命令保留，屏幕上有 id 才有
  * 后续接入的可能）。
  */
 export function createKiroCliAdapter(): CliAdapter {

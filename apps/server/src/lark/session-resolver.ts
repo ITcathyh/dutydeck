@@ -12,8 +12,8 @@ import type { LarkChatMode } from './chat-mode.js';
 import type { LarkGroup } from './coordinator.js';
 import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
 
-// 会话路由与资源物化辅助（从 listener.ts 拆分）。
-// 路由规则移植自 botmux 的 decideRouting：thread_id 是「是否真在话题里」的权威信号
+// 会话路由与资源物化辅助（从 listener.ts 拆分）。Third-party attribution: see THIRD_PARTY_NOTICES.md.
+// 路由规则：thread_id 是「是否真在话题里」的权威信号
 // （root_id 可能被引用气泡误带），话题群种子消息按 message_id 开新话题，普通群按
 // groupReplyMode 配置路由；配置缺失时保持 dutydeck legacy 行为。
 
@@ -174,7 +174,7 @@ export async function materializeLarkResources(messageId: string, prompt: string
 }
 
 /**
- * 计算消息的会话隔离 scope（移植 botmux decideRouting）：
+ * 计算消息的会话隔离 scope（基于路由决策规则）：
  *   - root_id + thread_id     → thread:${rootId}（真实话题回复，锚到话题根；所有模式一致）
  *   - 话题群 + 无真实话题      → thread:${messageId}（话题群种子消息）
  *   - p2pMode === 'thread'    → 每条顶层 DM 是新话题 thread:${messageId}；

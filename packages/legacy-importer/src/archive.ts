@@ -3,11 +3,11 @@ import { chmod, mkdir, open } from 'node:fs/promises';
 import { join } from 'node:path';
 import { sha256, stableFingerprint, stableJson } from './fingerprint.js';
 import type {
-  BotmuxPrivateArchiveManifest,
-  BotmuxPrivateMigrationPlan,
+  LegacyPrivateArchiveManifest,
+  LegacyPrivateMigrationPlan,
   PrivateArchiveOptions
 } from './types.js';
-import { BotmuxImportError } from './types.js';
+import { LegacyImportError } from './types.js';
 
 export interface ArchiveSourceFile {
   artifact_ref: string;
@@ -37,23 +37,23 @@ async function privateWrite(path: string, bytes: string | Uint8Array): Promise<v
 }
 
 export async function writePrivateArchive(
-  plan: BotmuxPrivateMigrationPlan,
+  plan: LegacyPrivateMigrationPlan,
   sourceFiles: readonly ArchiveSourceFile[],
   excludedSecretArtifacts: number,
   options: PrivateArchiveOptions
-): Promise<BotmuxPrivateArchiveManifest> {
+): Promise<LegacyPrivateArchiveManifest> {
   if (options.encryption_key.byteLength !== 32) {
-    throw new BotmuxImportError('ARCHIVE_KEY_INVALID', 'Private archive encryption key must be exactly 32 bytes');
+    throw new LegacyImportError('ARCHIVE_KEY_INVALID', 'Private archive encryption key must be exactly 32 bytes');
   }
   try {
     await mkdir(options.destination, { recursive: false, mode: 0o700 });
     if (process.platform !== 'win32') await chmod(options.destination, 0o700);
   } catch {
-    throw new BotmuxImportError('ARCHIVE_DESTINATION_UNAVAILABLE', 'Private archive destination must be a new writable directory');
+    throw new LegacyImportError('ARCHIVE_DESTINATION_UNAVAILABLE', 'Private archive destination must be a new writable directory');
   }
 
   try {
-    const files: BotmuxPrivateArchiveManifest['files'] = [];
+    const files: LegacyPrivateArchiveManifest['files'] = [];
     for (const source of [...sourceFiles].sort((left, right) => left.artifact_ref.localeCompare(right.artifact_ref))) {
       const encrypted = encrypt(source.bytes, options.encryption_key);
       const filename = `${source.artifact_ref}.enc`;
@@ -67,7 +67,7 @@ export async function writePrivateArchive(
     }
 
     const archiveSnapshotId = `archive_${stableFingerprint(files).slice(0, 24)}`;
-    const manifest: BotmuxPrivateArchiveManifest = {
+    const manifest: LegacyPrivateArchiveManifest = {
       schema_version: 1,
       archive_snapshot_id: archiveSnapshotId,
       created_at: new Date().toISOString(),
@@ -84,7 +84,7 @@ export async function writePrivateArchive(
     await privateWrite(join(options.destination, 'migration-plan.json'), `${stableJson(plan)}\n`);
     return manifest;
   } catch (error) {
-    if (error instanceof BotmuxImportError) throw error;
-    throw new BotmuxImportError('ARCHIVE_WRITE_FAILED', 'Private archive could not be written completely');
+    if (error instanceof LegacyImportError) throw error;
+    throw new LegacyImportError('ARCHIVE_WRITE_FAILED', 'Private archive could not be written completely');
   }
 }

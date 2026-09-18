@@ -78,7 +78,7 @@ pnpm exec playwright show-trace artifacts/e2e/<run-id>/test-results/<case>/trace
 
 - **CI 执行策略**：PR 与 master push 运行 core 套件，定时 UTC 18:17（北京时间次日 02:17）与手动 dispatch 运行 full 套件；无论成败保留产物 14 天；schedule 需推入默认分支后生效，required checks 需在托管端按需设置。
 - **真实环境边界**：真实模型/真实飞书未纳入，另需专用测试环境与凭据。
-- **存量脚本边界**：既有 `tests/e2e/visual`、`tests/e2e/terminal`、`tests/e2e/botmux-parity` 及独立 product 脚本未纳入此常态化 CI gate。
+- **存量脚本边界**：既有 `tests/e2e/visual`、`tests/e2e/terminal`、`tests/e2e/integration-contracts` 及独立 product 脚本未纳入此常态化 CI gate。
 
 ## 5. 新增用例规范
 

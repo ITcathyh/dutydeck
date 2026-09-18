@@ -26,8 +26,7 @@ export function createOpenCodeAdapter(): CliAdapter {
       }
       // 首轮 prompt 走 --prompt：Bubble Tea TUI 启动期的 stdin 写入可能丢失。
       // 注意：`-s` resume 下 --prompt 会被 OpenCode 静默忽略——driver 需要在
-      // resume 时把首轮 prompt 改走 writeInput（botmux 靠
-      // initialPromptArgsIgnoredOnResume 标记，精简契约里由 driver 自行处理）。
+      // resume 时把首轮 prompt 改走 writeInput（精简契约里由 driver 自行处理）。
       if (initialPrompt) {
         args.push('--prompt', initialPrompt);
       }

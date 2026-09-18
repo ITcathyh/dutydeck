@@ -265,8 +265,8 @@ describe('SessionList 功能导航区', () => {
    * 分组必须是「真 heading + 可点条目」的结构，不是平铺。
    *
    * 视觉验收脚本认的是 nav/section/ul 容器里的 h2/h3/h4/[role=heading]——裸 <span>
-   * 标题不计入分组。平铺 4 个链接读不出层次，分组才是这块导航的价值（botmux 19 项
-   * 分 5 组，anatomy §A2）。这条用例在 e2e 之外再守一次，因为 e2e 要起浏览器。
+   * 标题不计入分组。平铺 4 个链接读不出层次，分组才是这块导航的价值（按业务域划分各组导航）。
+   * 这条用例在 e2e 之外再守一次，因为 e2e 要起浏览器。
    */
   it('导航是分组结构：每组都有真 heading 和至少一个条目', () => {
     const { container } = render(<SessionList {...baseProps} open/>);
@@ -285,7 +285,7 @@ describe('SessionList 功能导航区', () => {
 
   /**
    * 触控目标（契约 §9）：移动端侧栏是 fixed 抽屉，这里全是触控。
-   * botmux 的 36px 导航项档位刻意不引进——它是纯桌面英文界面。
+   * 导航项高度需满足移动端触控要求（不采用过窄的 36px 档位）。
    */
   it('导航项满足触控下限，且键盘可达', async () => {
     render(<SessionList {...baseProps} open/>);

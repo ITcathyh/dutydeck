@@ -79,15 +79,17 @@ export interface AuthTokenCliOptions {
   rotate?: boolean;
 }
 
-export interface BotmuxSourceCliOptions {
+export interface LegacySourceCliOptions {
   sourceHome?: string;
   botsConfig?: string;
   dataDir?: string;
   output?: string;
   json?: boolean;
+  /** 实际调用的命令组：canonical migrate 或兼容别名 botmux，决定 JSON 输出的 command 字段。 */
+  invokedAs?: 'migrate' | 'botmux';
 }
 
-export interface BotmuxArchiveCliOptions extends BotmuxSourceCliOptions {
+export interface LegacyArchiveCliOptions extends LegacySourceCliOptions {
   output: string;
   passphraseFd?: string;
 }
@@ -135,9 +137,9 @@ export interface CliHandlers {
   daemonStatus?(options: DoctorCliOptions): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
   authToken?(options: AuthTokenCliOptions): void | Promise<void>;
-  botmuxDiscover?(options: BotmuxSourceCliOptions): void | Promise<void>;
-  botmuxPlan?(options: BotmuxSourceCliOptions): void | Promise<void>;
-  botmuxArchive?(options: BotmuxArchiveCliOptions): void | Promise<void>;
+  legacyDiscover?(options: LegacySourceCliOptions): void | Promise<void>;
+  legacyPlan?(options: LegacySourceCliOptions): void | Promise<void>;
+  legacyArchive?(options: LegacyArchiveCliOptions): void | Promise<void>;
   secretList?(options: SecretListCliOptions): void | Promise<void>;
   secretSet?(id: string, options: SecretValueCliOptions): void | Promise<void>;
   secretRotate?(id: string, options: SecretRotateCliOptions): void | Promise<void>;
@@ -199,7 +201,7 @@ const addServerOptions = (command: Command) => command
   .option('--lark-base-url <url>', 'Lark OpenAPI base URL')
   .option('--no-lark-listen', 'Disable Lark message listening for this process without changing saved configuration');
 
-const addBotmuxSourceOptions = (command: Command) => command
+const addLegacySourceOptions = (command: Command) => command
   .option('--source-home <directory>', 'Botmux source home to inspect')
   .option('--bots-config <file>', 'Exact Botmux bot registry file to inspect')
   .option('--data-dir <directory>', 'Exact Botmux data directory to inspect')
@@ -502,20 +504,27 @@ Examples:
   $ dutydeck session ask "选哪个方案？" --choices '[{"label":"方案甲","value":"a"},{"label":"方案乙","value":"b"}]' --timeout 60
   $ dutydeck session ask "要检查哪些项？" --choices '[{"label":"代码"},{"label":"文档"}]' --multiple --json`);
 
-  const botmux = program.command('botmux').description('Inspect Botmux data with the read-only migration importer');
-  addBotmuxSourceOptions(botmux.command('discover')
-    .description('Discover and classify source artifacts without changing either system')
-    .option('--output <file>', 'Write the redacted report to a new private file'))
-    .action(options => handlers.botmuxDiscover?.(options));
-  addBotmuxSourceOptions(botmux.command('plan')
-    .description('Create a redacted NO_GO migration plan without writing Dutydeck data')
-    .option('--output <file>', 'Write the redacted manifest to a new private file'))
-    .action(options => handlers.botmuxPlan?.(options));
-  addBotmuxSourceOptions(botmux.command('archive')
-    .description('Copy eligible artifacts into a new encrypted private archive')
-    .requiredOption('--output <directory>', 'New private archive directory')
-    .option('--passphrase-fd <fd>', 'Read the archive passphrase from an explicitly supplied file descriptor'))
-    .action(options => handlers.botmuxArchive?.(options));
+  // canonical 命令是 `dutydeck migrate`；`dutydeck botmux` 保留为兼容别名，二者行为完全一致。
+  // 别名输出的 JSON command 字段必须保持历史值（botmux.discover/plan/archive），由 action 按 invokedAs 区分。
+  const addMigrateCommands = (parent: Command, invokedAs: 'migrate' | 'botmux') => {
+    addLegacySourceOptions(parent.command('discover')
+      .description('Discover and classify source artifacts without changing either system')
+      .option('--output <file>', 'Write the redacted report to a new private file'))
+      .action(options => handlers.legacyDiscover?.({ ...options, invokedAs }));
+    addLegacySourceOptions(parent.command('plan')
+      .description('Create a redacted NO_GO migration plan without writing Dutydeck data')
+      .option('--output <file>', 'Write the redacted manifest to a new private file'))
+      .action(options => handlers.legacyPlan?.({ ...options, invokedAs }));
+    addLegacySourceOptions(parent.command('archive')
+      .description('Copy eligible artifacts into a new encrypted private archive')
+      .requiredOption('--output <directory>', 'New private archive directory')
+      .option('--passphrase-fd <fd>', 'Read the archive passphrase from an explicitly supplied file descriptor'))
+      .action(options => handlers.legacyArchive?.({ ...options, invokedAs }));
+  };
+  const migrate = program.command('migrate').description('Inspect legacy Botmux data with the read-only migration importer');
+  addMigrateCommands(migrate, 'migrate');
+  const botmux = program.command('botmux').description('Deprecated alias for `dutydeck migrate`');
+  addMigrateCommands(botmux, 'botmux');
 
   const secret = program.command('secret').description('Manage local SecretRef metadata and encrypted-channel credentials without printing values');
   secret.command('list')
@@ -623,9 +632,9 @@ Examples:
   $ dutydeck group send "请检查接口" --to cli_peer
   $ dutydeck session send "已完成迁移，正在跑回归"
   $ dutydeck session ask "要继续发布吗？"
-  $ dutydeck botmux discover --source-home /tmp/botmux-fixture --json
-  $ dutydeck botmux plan --source-home /tmp/botmux-fixture --output /tmp/redacted-plan.json
-  $ dutydeck botmux archive --source-home /tmp/botmux-fixture --output /tmp/private-archive
+  $ dutydeck migrate discover --source-home /tmp/legacy-fixture --json
+  $ dutydeck migrate plan --source-home /tmp/legacy-fixture --output /tmp/redacted-plan.json
+  $ dutydeck migrate archive --source-home /tmp/legacy-fixture --output /tmp/private-archive
   $ dutydeck secret list
   $ dutydeck secret set team-bot --value-fd 0
   $ dutydeck secret rotate team-bot --expected-revision 1 --value-fd 0

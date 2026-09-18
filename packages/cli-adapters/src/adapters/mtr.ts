@@ -11,8 +11,7 @@ const MTR_SESSION_ID_BODY_LEN = 26;
 
 /**
  * 由 dutydeck sessionId 确定性推导 mtr 会话 id：去掉 `ses_` 前缀与 uuid 连字符，
- * 取前 26 位十六进制凑成 `ses_<26>`（botmux 用 sha256+base62 生成同样长度的 id，
- * 这里改用 uuid 自身的熵——同样确定性，且 hex 是任何可能字符集的子集）。
+ * 取前 26 位十六进制凑成 `ses_<26>`（使用 uuid 自身的熵——同样确定性，且 hex 是任何可能字符集的子集）。
  *
  * 确定性是关键：fresh spawn 用 `--set-session` 把这个 id 钉下去，之后 resume
  * 重算一遍就能精确命中同一会话，不必额外持久化 CLI 侧 id。

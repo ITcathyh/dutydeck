@@ -2,9 +2,10 @@
  * Headless terminal snapshot: feeds PTY data into an @xterm/headless
  * instance and exposes the current viewport as cleaned plain text.
  *
- * Ported from botmux src/utils/terminal-renderer.ts; the cleaning pipeline
- * (box-drawing strip, prompt-line filter, blank trim) is preserved verbatim.
- * Snapshot semantics match botmux's PNG path: both read the current viewport
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
+ *
+ * The cleaning pipeline (box-drawing strip, prompt-line filter, blank trim)
+ * cleans terminal noise. Snapshot semantics read the current viewport
  * [baseY, baseY + rows), which keeps text consistent for alt-screen CLIs
  * (Claude Code) where scrollback isn't meaningful.
  */

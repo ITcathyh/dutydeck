@@ -216,8 +216,8 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
             batchGetIdByEmail: email => bot.batchGetIdByEmail(email),
             batchGetIdByMobile: mobile => bot.batchGetIdByMobile(mobile)
           };
-          // 新建 bot：没有来源 app 可转换，ou_ 一律拒绝（对齐 botmux「No open_id can
-          // belong to an app that does not exist yet」）。
+          // 新建 bot：没有来源 app 可转换，ou_ 一律拒绝（open_id 仅对签发它的应用有效，
+          // 尚未存在的目标应用无法归属任何已有的 open_id）。
           if (!existing) {
             throw new LarkServiceError('LARK_OWNER_OPENID_CROSS_APP',
               `保存新机器人时不能直接使用 app-scoped open_id（${rawOpenIdEntries.join(', ')}）：open_id 只对签发它的应用有效，新应用还不存在、无法归属任何 open_id。请改用完整邮箱、手机号或 on_ union_id，或先在目标应用下通过姓名解析。`,
@@ -231,10 +231,9 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
               `以下白名单 open_id 无法通过目标应用校验，不能保存：${unusable.join(', ')}。open_id 只对签发它的应用有效，跨应用复制会导致 owner 被锁死。请改用完整邮箱、手机号或 on_ union_id，或先在目标应用下通过姓名解析。`,
               400);
           }
-          // 归一化：能解析成 union_id 的 ou_ 在 botmux 里会替换为 on_ 落库。dutydeck
-          // 的 allowedUsers 只存 ou_（config.ts 归一化丢弃非 ou_ 条目，运行时按
-          // open_id 匹配），且这些 ou_ 已通过目标 app 校验、就是该 app 自己的
-          // open_id，故仍以 ou_ 形态保存；on_ 形态待 schema 支持 union_id 白名单后
+          // 归一化：dutydeck 的 allowedUsers 约定只存 ou_（config.ts 归一化过滤非 ou_ 条目，
+          // 运行时按 open_id 匹配），且这些 ou_ 已通过目标 app 校验、就是该 app 自己的
+          // open_id，故以 ou_ 形态保存；on_ 形态待 schema 支持 union_id 白名单后
           // 再启用。inconclusive 的条目保留原值。
           const normalizedEntries = await normalizeOwnerEntries(rawOpenIdEntries, lookup);
           const normalizedByOpenId = new Map(rawOpenIdEntries.map((entry, index) => [entry, normalizedEntries[index] ?? entry]));

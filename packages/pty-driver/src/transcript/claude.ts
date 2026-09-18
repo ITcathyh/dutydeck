@@ -3,9 +3,9 @@
  *
  * Claude stores sessions at <dataDir>/projects/<projectKey>/<sessionId>.jsonl
  * where dataDir = $CLAUDE_CONFIG_DIR (or ~/.claude) and projectKey = the
- * REALPATH of cwd with every non-[A-Za-z0-9-] char replaced by '-' (ported
- * from botmux transcript-resolver.ts, including the realpath-not-lexical
- * rule: a symlinked cwd must resolve to the same key the CLI used).
+ * REALPATH of cwd with every non-[A-Za-z0-9-] char replaced by '-'
+ * (realpath-not-lexical rule: a symlinked cwd must resolve to the same key the CLI used).
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
  *
  * Entry mapping (per dutydeck driver contract):
  *   assistant message.content[]:

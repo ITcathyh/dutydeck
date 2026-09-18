@@ -1,8 +1,8 @@
 /**
  * ZmxBackend — session backend backed by a persistent zmx session.
  *
- * Ported core from botmux's adapters/backend/zmx-backend.ts (2.7k lines there;
- * this is the multiplexer protocol only).
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
+ * Core multiplexer protocol implementation.
  *
  * zmx is a standalone terminal multiplexer (github.com/neurosnap/zmx) whose CLI
  * is a control plane rather than an attach client — which shapes this backend:
@@ -21,12 +21,11 @@
  *     allowlist env, so nothing session-specific reaches the zmx daemon.
  *   - `zmx kill <name> --force` destroys a session.
  *
- * Deliberately NOT ported: the ready/release launch handshake with nonce files,
- * session/transport/gate LABELS and the same-name-replacement detection built
- * on them, ambiguous-submission journalling and fail-closed composer recovery,
- * tail reconnect/backoff state machine, sandbox and wrapper-shell integration.
- * Those defend against botmux's multi-tenant fleet semantics; dutydeck owns its
- * session names.
+ * Not implemented: the ready/release launch handshake with nonce files,
+ * session/transport/gate labels and same-name-replacement detection,
+ * ambiguous-submission journalling and fail-closed composer recovery,
+ * tail reconnect/backoff, sandbox and wrapper-shell integration.
+ * Dutydeck owns its session names directly.
  */
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, openSync, closeSync, fstatSync, readSync } from 'node:fs';

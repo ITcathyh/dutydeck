@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest';
 /*
   设计系统 token 的守卫（契约 §12.7：把数值白名单抄进测试）。
 
-  botmux 的教训是这份契约的由来：它定义了 8 档字号 token，实际引用 41 次，
-  硬编码 px 上千次。**Token 没有强制力就只是愿望。** 这里守四件事：
+  设计系统契约守卫：避免字号与颜色 token 定义后缺乏约束导致硬编码 px 散落。
+  **Token 没有强制力就只是愿望。** 这里守四件事：
   1. 标度的数值与契约表格逐字一致——改档位必须同时改契约；
   2. 三层主题声明的顺序与结构不被打乱（顺序错了，显式浅色/深色选择会失效）；
   3. 灰阶的**色相**不再走偏（2026-09-03 重做的起因，见下面那条断言的注释）；
@@ -103,8 +103,8 @@ describe('设计 token 与契约一致', () => {
     expect(declared('--duration-normal')).toBe('180ms');
   });
 
-  it('布局骨架 2 档，对齐 botmux dashboard（契约 §6）', () => {
-    // 侧栏宽度曾在 SessionList.tsx 里硬编码 292px，比 botmux 宽 44px。
+  it('布局骨架 2 档标准尺寸（契约 §6）', () => {
+    // 侧栏宽度曾在 SessionList.tsx 里硬编码 292px，需统一规范为标准 248px。
     expect(declared('--topbar-h')).toBe('56px');
     expect(declared('--sidebar-w')).toBe('248px');
   });
@@ -124,10 +124,10 @@ describe('设计 token 与契约一致', () => {
     expect(declared('--main-inset')).not.toMatch(/\d+px/);
   });
 
-  it('不复制 botmux 的 topbar off-by-4 bug（契约 §15）', () => {
+  it('保证单一顶栏高度声明，避免 4px 错位（契约 §15）', () => {
     /*
-      botmux 有两个顶栏高度 token：--topbar-h(56px) 只被侧栏的 top 消费，
-      顶栏自己用的是 --topbar-height(60px)。侧栏因此比顶栏低 4px。
+      统一使用单一顶栏高度 token：避免同时存在 --topbar-h(56px) 和
+      --topbar-height(60px) 导致侧栏与顶栏产生 4px 错位。
       那是 bug 不是设计，抄样式时极易连着抄进来。
 
       只扫**声明**不扫注释：上面 tokens.css 里正解释着这个 bug，字面量 naive 匹配
@@ -162,7 +162,7 @@ describe('设计 token 与契约一致', () => {
     /*
       重做前 dutydeck 的全部中性色都是 G > B——页面底 #f5f7f6、正文 #17201f、
       边框 #dce3e1，肉眼读作「脏」和「旧」。这是用户说「太难看」最直接的来源，
-      不是细节不精致。对齐 botmux 后统一为冷灰蓝：**绿通道不得高于蓝通道**。
+      不是细节不精致。统一设计规范为冷灰蓝：**绿通道不得高于蓝通道**。
 
       只约束中性色。语义色不在此列——绿色的「成功」就该是绿的，
       warning / attention 是暖黄，它们的 G > B 是正确的。
@@ -181,7 +181,7 @@ describe('设计 token 与契约一致', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('品牌色是靛蓝，不是墨绿（对齐 botmux dashboard）', () => {
+  it('品牌色是靛蓝，不是墨绿（符合设计规范）', () => {
     expect(lightLayer['--action-primary']).toBe('#4f56e8');
     expect(darkLayer['--action-primary']).toBe('#7b82f5');
     expect(mediaLayer['--action-primary']).toBe('#7b82f5');
@@ -197,7 +197,7 @@ describe('设计 token 与契约一致', () => {
     /*
       重做前 33 个 --sidebar-* 是一套双主题恒深色的独立盘：浅色主题下左边杵一条
       深色导航条，和内容区割裂，共享原语套上去还会「深字压深底」。
-      botmux 的侧栏跟随主题，它的 tokens 里根本没有 sidebar 专用色。
+      侧栏设计跟随主题，采用系统表面色而不是独立分叉的专用色。
 
       token 名保留（消费方还在引用），但值必须是 var() 引用而非自带字面量，
       且只在浅色层声明一次——深色层重新声明就意味着又分叉出了独立盘。
@@ -297,7 +297,7 @@ describe('tailwind 语义类映射', () => {
     expect(config).toContain("'shell-gap': 'var(--shell-gap)'");
     expect(config).toContain("'main-inset': 'var(--main-inset)'");
     expect(config).toContain("'shell-top': 'calc(var(--topbar-h) + var(--shell-gap))'");
-    // botmux 四态里 need / idle 的 soft 变体此前没有类，圆点只能用实色。
+    // 四态信号色里 attention / neutral 的 soft 变体此前没有类，圆点只能用实色。
     expect(config).toContain("'attention-soft': 'var(--status-attention-soft)'");
     expect(config).toContain("'neutral-soft': 'var(--status-neutral-soft)'");
   });

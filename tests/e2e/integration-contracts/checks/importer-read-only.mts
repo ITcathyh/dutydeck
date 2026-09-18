@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { planBotmuxImport } from '../../../../packages/botmux-importer/src/index.ts';
+import { planLegacyImport } from '../../../../packages/legacy-importer/src/index.ts';
 
 const checkDirectory = dirname(fileURLToPath(import.meta.url));
 const fixtureDirectory = resolve(checkDirectory, '../fixtures/importer');
@@ -85,7 +85,7 @@ async function treeDigest(root: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const tempRoot = await mkdtemp(join(tmpdir(), 'dutydeck-botmux-parity-'));
+  const tempRoot = await mkdtemp(join(tmpdir(), 'dutydeck-integration-contracts-'));
   try {
     const sourceHome = join(tempRoot, 'source-home');
     const dataDirectory = join(sourceHome, 'data');
@@ -96,7 +96,7 @@ async function main(): Promise<void> {
     }
 
     const before = await treeDigest(sourceHome);
-    const handle = await planBotmuxImport({
+    const handle = await planLegacyImport({
       source_home: sourceHome,
       fingerprint_key: fingerprintKey,
       now: () => new Date('2026-08-30T00:00:00.000Z'),

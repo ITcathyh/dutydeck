@@ -1,8 +1,7 @@
 /**
  * TmuxBackend — session backend backed by a detached tmux session.
  *
- * Ported core from botmux's adapters/backend/tmux-backend.ts +
- * tmux-pipe-backend.ts. Architecture (no PTY, no attach):
+ * Architecture (no PTY, no attach). Third-party attribution: see THIRD_PARTY_NOTICES.md.
  *   - `tmux new-session -d -s <name> -x <cols> -y <rows> -c <cwd>` starts a
  *     bare shell in a detached session (spawnSync, env-scrubbed client).
  *   - Session-specific env is staged with `set-environment -t <session>`, the
@@ -20,7 +19,7 @@
  *     (connect refused, lost server, timeout) prove nothing and never tear
  *     the session down.
  *
- * Deliberately NOT ported from botmux: adopt/observe mode, ambiguous
+ * Deliberately omitted: adopt/observe mode, ambiguous
  * submission journal, sandbox integration, onAccessUrl/onTaskDone/onTurnFinal
  * hooks, destroySession fencing, captureInputState/capturePaneInputModes,
  * screen-settling heuristics.
@@ -90,7 +89,7 @@ export class TmuxOwnershipError extends TmuxError {
   }
 }
 
-// ─── Classification helpers (ported from botmux tmux-backend.ts) ───────────
+// ─── Classification helpers ────────────────────────────────────────────────
 
 /**
  * CONNECTION-level failures — the client never got an answer from the shared
@@ -223,7 +222,7 @@ export interface TmuxBackendOptions {
   /**
    * Stable Dutydeck-owned identity expected on spawn/attach.  When present,
    * attach refuses sessions without the exact marker.  This is what prevents
-   * the production driver from adopting BotMux or unrelated user tmux panes.
+   * the production driver from adopting external or unrelated user tmux panes.
    */
   ownerId?: string;
 }
@@ -318,8 +317,7 @@ export class TmuxBackend implements SessionBackend {
   /**
    * Write literal text to the pane. Never throws: a tmux failure returns
    * false (the driver treats that as "not sent"). An authoritative
-   * session-missing answer is converted to onExit, mirroring botmux's
-   * guardedSend — the CLI exited and the pane is gone.
+   * session-missing answer is converted to onExit (guarded send) — the CLI exited and the pane is gone.
    */
   write(data: string): boolean {
     if (this.exited || !this.started) return false;
@@ -379,7 +377,7 @@ export class TmuxBackend implements SessionBackend {
     this.cleanup();
     // An owner-bound backend may be a not-yet-attached restoration handle.
     // If its name now points at an unmarked/foreign pane, cleanup after a
-    // failed attach must never destroy that pane (including BotMux history).
+    // failed attach must never destroy that pane (preserving external session history).
     if (this.ownerId !== undefined && TmuxBackend.sessionOwner(this.sessionName) !== this.ownerId) return;
     try { runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 }); } catch { /* already gone */ }
   }
@@ -663,8 +661,8 @@ export class TmuxBackend implements SessionBackend {
    * session dies with its last pane), so fire onExit. A dead pane pid
    * (process.kill ESRCH) is equally decisive. Server-level failures
    * (connect refused, lost server, timeout) prove nothing and are ignored:
-   * misreading a busy-but-stalled server as "session gone" once mass-tore
-   * down live sessions in botmux, so this watcher never acts on them.
+   * misreading a busy-but-stalled server as "session gone" could mass-tear
+   * down live sessions, so this watcher never acts on them.
    *
    * NB: `display-message` alone is NOT sufficient — on tmux 3.3a it exits 0
    * with EMPTY output for a just-destroyed session, which a throw-based

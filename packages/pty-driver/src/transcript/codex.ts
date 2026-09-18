@@ -10,8 +10,7 @@
  * resolveCodexRolloutPath); the newest-by-mtime scan remains only for callers
  * with no session in mind, where a single running session makes it unambiguous.
  *
- * Entry mapping (per dutydeck driver contract; field names from botmux
- * codex-transcript.ts):
+ * Entry mapping (per dutydeck driver contract; see THIRD_PARTY_NOTICES.md):
  *   response_item reasoning                       → thinking
  *   response_item function_call / custom_tool_call
  *     / local_shell_call / web_search_call        → tool_call (status 'running')

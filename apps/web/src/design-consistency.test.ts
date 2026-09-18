@@ -7,10 +7,10 @@ import { describe, expect, it } from 'vitest';
 
   ## 为什么必须有这组测试
 
-  botmux 定义了 8 档字号 token，实际引用 41 次，硬编码 px 上千次——**token 没有
-  强制力就只是愿望**。dutydeck 自己也有同样的病历：`docs/interaction-design-2026-08-30.md`
-  §7.3 早就写明「正文 14px、辅助文字不回退到 8–10px」，重构前却有 90 处 10px、
-  8 处 9px。规范写在文档里没人会去读，写成测试才拦得住。
+  如果只定义字号 token 而缺乏自动化约束，极易导致硬编码 px 散落各处——**token 没有
+  强制力就只是愿望**。dutydeck 自身历史实现也有类似情况：`docs/interaction-design-2026-08-30.md`
+  §7.3 明确规定「正文 14px、辅助文字不回退到 8–10px」，但重构前仍散落 90 处 10px、
+  8 处 9px。规范写在文档里容易被遗漏，写成测试断言才拦得住。
 
   ## 白名单的纪律
 

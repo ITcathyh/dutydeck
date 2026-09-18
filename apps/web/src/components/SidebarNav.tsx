@@ -76,8 +76,7 @@ export function SidebarNav({ groups }: SidebarNavProps) {
       {/*
         组标题必须是真 heading：视觉验收脚本认的是
         h2/h3/h4/[role=heading]/legend/.nav-group-title，裸 <span> 不计入分组——
-        「只有条目没标题」是平铺不是分组，而分组才是这块导航的价值所在
-        （botmux 19 项分 5 组，anatomy §A2）。
+        「只有条目没标题」是平铺不是分组，而按业务域分组才是这块导航的价值所在。
       */}
       <h2 id={`sidebar-nav-${group.id}`} className="px-2 pb-1 pt-1.5 text-meta font-semibold tracking-[.08em] text-sidebar-text-muted">{group.title}</h2>
       {group.items.map(item => <button
@@ -89,8 +88,8 @@ export function SidebarNav({ groups }: SidebarNavProps) {
           高 48px（两行：body 22 + caption 18 + py），按契约 §3「半径 ≈ 高度/3.5」
           取 rounded-lg（14px），与同为多行的 SessionRow 一致。
 
-          触控目标 §9 要求 ≥40px，48px 有余量——botmux 导航项是 36px，那一档
-          刻意不引进：它是纯桌面界面，dutydeck 在 <md 时这里是 fixed 抽屉，是触控界面。
+          触控目标 §9 要求 ≥40px，48px 有余量——不采用过窄的 36px 档位，
+          确保在移动端 (<md) 作为抽屉展开时符合触控标准。
 
           不写 focus-visible:outline-none。index.css 给所有 button 定义了
           2px 实心 focus 环，覆盖掉它就要在这里重新造一个等价物；nav 容器的

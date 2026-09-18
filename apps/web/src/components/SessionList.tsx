@@ -56,7 +56,7 @@ export type SessionListProps = {
  * ## 浮动卡片，不是栅格列
  *
  * `fixed` + `inset-*-shell-gap` + `top-shell-top`，四周留 16px 空隙、带圆角和阴影，
- * 视觉上浮在画布之上（对齐 botmux `style.css:8201-8215`）。主区靠 `ml-main-inset`
+ * 视觉上浮在画布之上。主区靠 `ml-main-inset`
  * 让位，那半边是 Team-Shell 的。两边必须同源：`--main-inset` 就定义成
  * `sidebar-w + shell-gap*2`，所以这里的 left/right 插入只能是 `shell-gap`，
  * 写死数字会在有人改 `--sidebar-w` 时留下空隙或压住正文，且没有任何测试会红。
@@ -120,8 +120,8 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
   /**
    * 导航项的选取。**每一项都是在补一条原本没有常驻入口的路**，不是把已有按钮再抄一份。
    *
-   * 分两组，切的是「配置什么」而不是 botmux 那种业务域划分（它 19 项分 5 组是因为
-   * 有 19 个真页面；dutydeck 全站只有两个页面 + 四个浮层，抄 5 组只会得到 5 个空壳）。
+   * 分两组，切的是「配置什么」的聚焦划分（dutydeck 当前核心聚焦在接入与自动化两类场景，
+   * 避免划分过多导致空壳分组）。
    *
    * · 接入 —— 让任务能从外部进来：Agent 是执行者，飞书是消息入口。
    * · 自动化 —— 让任务不靠人点也能发生：群策略当前只有草稿态；定时入口查看
@@ -190,7 +190,7 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
       桌面端才变成四周留白的浮动卡片。两套定位共用一个节点、只靠 md: 前缀切换，
       不做两份 DOM——抽屉的 inert/aria-hidden 与焦点管理只写一次才不会漏。
 
-      shadow 在两端都保留（botmux 桌面端也有）：抽屉浮在遮罩之上，卡片浮在画布之上，
+      shadow 在移动端和桌面端都保留：抽屉浮在遮罩之上，卡片浮在画布之上，
       都需要与背后拉开层次。
     */
     className={`fixed inset-y-0 left-0 z-drawer flex w-sidebar flex-col overflow-hidden border-r border-sidebar-border bg-sidebar-surface text-sidebar-text shadow-sidebar transition-transform duration-normal ease-emphasized md:bottom-shell-gap md:left-shell-gap md:top-shell-top md:translate-x-0 md:rounded-lg md:border ${open ? 'translate-x-0' : '-translate-x-full'}`}

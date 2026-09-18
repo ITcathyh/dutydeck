@@ -1,7 +1,7 @@
 import * as lark from '@larksuiteoapi/node-sdk';
 
-// 飞书群形态查询（话题群 vs 普通群）。
-// 移植自 botmux 的 getChatMode：Lark 客户端允许随时把群在「普通模式/话题模式」间切换，
+// 飞书群形态查询（话题群 vs 普通群）。Third-party attribution: see THIRD_PARTY_NOTICES.md.
+// Lark 客户端允许随时把群在「普通模式/话题模式」间切换，
 // 该切换写的是 group_message_type（'chat' ↔ 'thread'），而 chat_mode 是建群时的拓扑分类、
 // 转换后仍保持 'group'。所以两者都要认：chat_mode === 'topic' 或 group_message_type === 'thread'
 // 都判定为话题群。查询结果做进程内缓存（TTL 5 分钟），避免每条消息都打一次 OpenAPI。
@@ -65,7 +65,7 @@ function parseChatMode(data: unknown): LarkChatMode | undefined {
 /**
  * 查询群形态（带缓存）。宽容默认：任何无法确认的情况（网络错误、权限不足、未知枚举）
  * 都按 'group' 处理并缓存——把话题群误判成普通群（顶层平铺）比把普通群误判成话题群
- * （每条消息强拆话题）更安全，与 botmux getChatMode 的 lenient 行为一致。
+ * （每条消息强拆话题）更安全。
  * 本函数永不抛异常。
  */
 export async function getChatMode(

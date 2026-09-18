@@ -25,7 +25,7 @@ export function createOpenCode2Adapter(): CliAdapter {
 
     buildArgs({ resume, resumeSessionId }: AdapterSessionContext): string[] {
       const args: string[] = [];
-      // 只做精确 id 续接；无有效 id 时新起会话（botmux 的 SQLite 反查已丢弃）。
+      // 只做精确 id 续接；无有效 id 时新起会话（不支持 SQLite 数据库模糊反查）。
       // 绝不带无效 id 启动：`Session not found` 会让进程立即退出。
       if (resume && resumeSessionId && OPENCODE_SESSION_ID_RE.test(resumeSessionId)) {
         args.push('--session', resumeSessionId);

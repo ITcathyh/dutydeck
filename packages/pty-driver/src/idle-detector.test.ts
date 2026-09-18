@@ -1,5 +1,6 @@
 /**
- * Unit tests for IdleDetector (dutydeck port of botmux's idle-detector).
+ * Unit tests for IdleDetector.
+ * Third-party attribution: see THIRD_PARTY_NOTICES.md.
  *
  * Run: pnpm vitest run packages/pty-driver/src/idle-detector.test.ts
  */

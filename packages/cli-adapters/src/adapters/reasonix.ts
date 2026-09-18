@@ -9,11 +9,9 @@ const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, m
  * Reasonix 每轮结束后不发稳定的就绪标记，也没有可靠的 busy 标记，
  * 就绪判定完全靠 PTY 静默（quiescence）。
  *
- * 未移植的能力：botmux 从 `~/.reasonix/projects/<cwd>/sessions` 下的 lease
- * 文件（按 CLI 进程树的 pid 匹配，含 PID namespace 穿透）反查出会话 stem，
- * 那就是 `--resume` 接受的标识符，并在首次输入时把它捕获成 cliSessionId。
- * 精简契约里适配器不能读文件系统 / 拿不到 CLI pid，这套捕获无法表达——
- * 没有 driver 交回的精确 id 时，每次重启都会新起会话。
+ * 当前不支持的能力：不支持从 lease 文件（按进程树 pid 匹配）反查会话 stem
+ * 来捕获 cliSessionId。精简契约里适配器不能读文件系统 / 拿不到 CLI pid，
+ * 这套捕获无法表达——没有 driver 交回的精确 id 时，每次重启都会新起会话。
  * 也绝不用 `reasonix session list`：它报的是 `session_<hmac>` 这类不透明机器
  * id（只有 `session show|status|recovery` 查询面接受），而且首轮持久化之前
  * 根本不列出该会话。
