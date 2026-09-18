@@ -35,11 +35,21 @@ const BUSINESS_TABLES = [
   'schedule_watermarks',
   'schedule_leases',
   'archived_integrations',
-  'schedule_entity_versions'
+  'schedule_entity_versions',
+  'collaboration_scopes',
+  'collaboration_settings',
+  'collaboration_observations',
+  'collaboration_bootstraps',
+  'collaboration_followups',
+  'collaboration_mandates',
+  'collaboration_decisions',
+  'collaboration_feedbacks',
+  'collaboration_actions',
+  'collaboration_activities'
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 

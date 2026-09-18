@@ -3,7 +3,7 @@ import { z } from 'zod';
 const utcTimestamp = z.string().datetime({ offset: true });
 const localDateTime = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/, 'Expected a local ISO date-time without an offset');
 
-export const scheduleDefinitionStates = ['staged', 'disabled'] as const;
+export const scheduleDefinitionStates = ['staged', 'disabled', 'enabled'] as const;
 export const scheduleOwnerships = ['dutydeck', 'botmux'] as const;
 export const scheduleDstGapPolicies = ['skip', 'shift_forward'] as const;
 export const scheduleDstOverlapPolicies = ['first', 'second'] as const;
@@ -46,7 +46,7 @@ export const scheduleDefinitionSchema = z.object({
   sourceScheduleRef: z.string().min(1).optional(),
   sourceEnabled: z.boolean(),
   state: z.enum(scheduleDefinitionStates),
-  desiredExecutorState: z.literal('disabled'),
+  desiredExecutorState: z.enum(['disabled', 'enabled']),
   currentGeneration: z.number().int().positive(),
   createdAt: utcTimestamp,
   updatedAt: utcTimestamp
@@ -72,7 +72,8 @@ export const updateScheduleDefinitionInputSchema = z.object({
   payloadRef: z.string().min(1).optional(),
   identityRef: z.string().min(1).nullable().optional(),
   secretRef: z.string().min(1).nullable().optional(),
-  state: z.enum(scheduleDefinitionStates).optional()
+  state: z.enum(scheduleDefinitionStates).optional(),
+  nextDueAt: utcTimestamp.nullable().optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== 'expectedRevision'), { message: 'At least one field must be updated' });
 export type UpdateScheduleDefinitionInput = z.infer<typeof updateScheduleDefinitionInputSchema>;
 
@@ -86,12 +87,12 @@ export const scheduleGenerationSchema = z.object({
   timezone: z.string().min(1),
   identityRef: z.string().min(1).optional(),
   secretRef: z.string().min(1).optional(),
-  state: z.literal('staged_disabled'),
+  state: z.enum(['staged_disabled', 'enabled']),
   createdAt: utcTimestamp
 }).strict();
 export type ScheduleGeneration = z.infer<typeof scheduleGenerationSchema>;
 
-export const scheduleOccurrenceStates = ['planned', 'source_owned_pending', 'settled', 'suppressed'] as const;
+export const scheduleOccurrenceStates = ['planned', 'source_owned_pending', 'claimed', 'running', 'unknown', 'failed', 'settled', 'suppressed'] as const;
 export const scheduleOccurrenceSchema = z.object({
   schemaVersion: z.literal(1),
   id: z.string().min(1),
@@ -103,6 +104,10 @@ export const scheduleOccurrenceSchema = z.object({
   idempotencyKey: z.string().regex(/^occ_[a-f0-9]{64}$/),
   state: z.enum(scheduleOccurrenceStates),
   intentKind: z.literal('task_run_snapshot'),
+  leaseKey: z.string().optional(),
+  leaseFenceToken: z.number().int().nonnegative().optional(),
+  holderId: z.string().optional(),
+  error: z.string().optional(),
   createdAt: utcTimestamp,
   updatedAt: utcTimestamp
 }).strict();
@@ -193,7 +198,7 @@ export type ScheduleBlockerCode = typeof scheduleBlockerCodes[number];
 export interface ScheduleBlocker { code: ScheduleBlockerCode; message: string; action: string }
 
 export interface ScheduleReadiness {
-  executionEligible: false;
+  executionEligible: boolean;
   nextOccurrence?: SchedulePreview;
   blockers: ScheduleBlocker[];
 }
@@ -223,7 +228,7 @@ export interface ScheduleTaskRunIntent {
     identityRef?: string;
     secretRef?: string;
   };
-  dispatchAllowed: false;
+  dispatchAllowed: boolean;
   blockerCodes: ScheduleBlockerCode[];
 }
 
@@ -236,10 +241,13 @@ export interface ScheduleDefinitionRepository {
   readiness(id: string, now?: string): Promise<ScheduleReadiness>;
 }
 export interface ScheduleGenerationRepository { get(id: string): Promise<ScheduleGeneration | undefined>; listByDefinition(id: string, limit?: number): Promise<ScheduleGeneration[]> }
+export interface ScheduleExecutionFence { leaseKey: string; holderId: string; fenceToken: number; now: string }
 export interface ScheduleOccurrenceRepository {
   get(id: string): Promise<ScheduleOccurrence | undefined>;
+  listUnsettled(definitionId: string): Promise<ScheduleOccurrence[]>;
   listByDefinition(id: string, limit?: number): Promise<ScheduleOccurrence[]>;
-  recordPlanned(definitionId: string, scheduledForUtc: string, nextDueAt?: string): Promise<{ occurrence: ScheduleOccurrence; created: boolean }>;
+  advance(id: string, expectedRevision: number, state: ScheduleOccurrence['state'], fence: ScheduleExecutionFence, error?: string): Promise<ScheduleOccurrence>;
+  recordPlanned(definitionId: string, scheduledForUtc: string, nextDueAt?: string, expectedGeneration?: number): Promise<{ occurrence: ScheduleOccurrence; created: boolean }>;
 }
 export interface ScheduleWatermarkRepository { get(definitionId: string): Promise<ScheduleWatermark | undefined> }
 export interface ScheduleLeaseRepository {
@@ -388,7 +396,7 @@ export function scheduleReadiness(
 ): ScheduleReadiness {
   const blockers: ScheduleBlocker[] = [];
   const add = (code: ScheduleBlockerCode, message: string, action: string) => blockers.push({ code, message, action });
-  add('schedule_staged_disabled', 'Schedule is staged and disabled', 'Review the definition; this foundation cannot enable it');
+  if (definition.state !== 'enabled' || definition.desiredExecutorState !== 'enabled') add('schedule_staged_disabled', 'Schedule is disabled', 'Enable through its collaboration mandate');
   if (!generation) add('schedule_generation_missing', 'No immutable generation is pinned', 'Create a disabled generation from the current revision');
   else if (generation.generation !== definition.currentGeneration || generation.definitionRevision !== definition.revision) add('schedule_generation_stale', 'Pinned generation does not match the current definition revision', 'Create a new disabled generation');
   if (!definition.identityRef) add('schedule_identity_required', 'A validated App identity reference is required', 'Complete identity preflight and attach its reference');
@@ -400,10 +408,10 @@ export function scheduleReadiness(
   else if (lease.state !== 'held') add('schedule_lease_not_held', 'Schedule writer lease is not held', 'Keep execution blocked until a fenced holder is established');
   else if (!lease.expiresAt || new Date(lease.expiresAt) <= now) add('schedule_lease_expired', 'Schedule writer lease is expired', 'Renew using matching revision, generation and fence token');
   if (definition.sourceOwnership === 'botmux' && definition.sourceEnabled) add('botmux_source_schedule_enabled', 'Botmux still owns an enabled source Schedule', 'Fence and drain the source writer before any future handoff');
-  add('schedule_executor_unavailable', 'Schedule executor has not been implemented', 'Keep this definition disabled until a separately reviewed executor exists');
+  if (definition.sourceNamespace !== 'collaboration' || definition.sourceOwnership !== 'dutydeck') add('schedule_executor_unavailable', 'Only collaboration schedules have an executor', 'Keep legacy definitions disabled');
   let nextOccurrence: SchedulePreview | undefined;
   try { nextOccurrence = previewNextSchedule(definition, now); } catch { /* surfaced as no preview by the management layer */ }
-  return { executionEligible: false, ...(nextOccurrence ? { nextOccurrence } : {}), blockers };
+  return { executionEligible: blockers.length === 0, ...(nextOccurrence ? { nextOccurrence } : {}), blockers };
 }
 
 export function buildScheduleTaskRunIntent(definition: ScheduleDefinition, generation: ScheduleGeneration, occurrence: ScheduleOccurrence, blockers: ScheduleBlocker[]): ScheduleTaskRunIntent {
@@ -413,7 +421,7 @@ export function buildScheduleTaskRunIntent(definition: ScheduleDefinition, gener
     scheduledForUtc: occurrence.scheduledForUtc,
     task: { source: 'schedule', payloadRef: definition.payloadRef, status: 'intent_only' },
     runSnapshot: { sourceKind: 'schedule', sourceDefinitionRevision: generation.definitionRevision, sourceGeneration: generation.generation, channelBotId: definition.channelBotId, ...(definition.groupBindingId ? { groupBindingId: definition.groupBindingId } : {}), ...(generation.identityRef ? { identityRef: generation.identityRef } : {}), ...(generation.secretRef ? { secretRef: generation.secretRef } : {}) },
-    dispatchAllowed: false,
+    dispatchAllowed: definition.sourceNamespace === 'collaboration' && definition.state === 'enabled' && generation.generation === definition.currentGeneration && occurrence.generation === generation.generation && blockers.length === 0,
     blockerCodes: blockers.map(blocker => blocker.code)
   };
 }

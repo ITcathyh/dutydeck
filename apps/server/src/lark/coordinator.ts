@@ -1,3 +1,4 @@
+import type { LarkGroupParticipation } from './group-participation.js';
 import { createHash } from 'node:crypto';
 import { describeLarkTaskRecovery } from './task-recovery.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
@@ -38,6 +39,7 @@ import {
   larkHelpCardTitle,
   parseLarkHelpPageValue,
   parseSlashCommand,
+  resolveLarkCommand,
   renderLarkCommandHelp,
   routeLarkCommand,
   type LarkCommandRoute
@@ -216,6 +218,7 @@ export class LarkMessageCoordinator {
     },
     private readonly groupManager?: LarkGroupManager,
     private readonly workflowOptions: {
+      participation?: LarkGroupParticipation;
       store?: ConfigRepository;
       broker?: RelayAskBroker;
       automation?: import('../session-automation.js').SessionAutomationService;
@@ -463,6 +466,30 @@ export class LarkMessageCoordinator {
     return true;
   }
 
+  private async pendingAskCandidates(event: LarkMessageEvent, config: StoredLarkConfig, scopeId: string): Promise<LarkInteraction[]> {
+    const candidates: LarkInteraction[] = [];
+    for (const record of await this.workflows?.pendingAsks(config.appId) ?? []) {
+      if (record.event.threadId && event.threadId && record.event.threadId !== event.threadId) continue;
+      const originalRoot = record.event.rootId ?? (record.event.threadId ? record.event.messageId : undefined);
+      const replyRoot = event.rootId ?? (event.threadId ? event.messageId : undefined);
+      if (originalRoot !== replyRoot) continue;
+      if (record.event.chatId === event.chatId && record.event.senderOpenId === event.senderOpenId
+        && await resolveLarkScopeId(record.event, config, this.chatModeResolver) === scopeId) candidates.push(record);
+    }
+    return candidates;
+  }
+
+  private async continuesPendingAsk(event: LarkMessageEvent, config: StoredLarkConfig): Promise<boolean> {
+    if (!this.workflows || !event.senderOpenId || event.senderType !== 'user' || !['text', 'post', 'rich_text'].includes(event.messageType)
+      || event.parentId && (!event.threadId || event.parentId !== event.rootId)) return false;
+    try {
+      const { prompt, resources } = await parsePrompt(event, this.botOpenId);
+      if (!prompt.trim() || resources.length || parseSlashCommand(prompt)) return false;
+      const scopeId = await resolveLarkScopeId(event, config, this.chatModeResolver);
+      return (await this.pendingAskCandidates(event, config, scopeId)).length > 0;
+    } catch { return false; }
+  }
+
   private async routePendingAsk(event: LarkMessageEvent, config: StoredLarkConfig, prompt: string, resources: LarkMessageResource[], scopeId: string, inbox: LarkInboxRecord | undefined, recovering: boolean): Promise<boolean> {
     if (!this.workflows || !event.senderOpenId || event.senderType !== 'user' || !['text', 'post', 'rich_text'].includes(event.messageType)
       || !prompt.trim() || resources.length || parseSlashCommand(prompt)
@@ -473,15 +500,7 @@ export class LarkMessageCoordinator {
     if (!requestId) {
       // Recovery must not reinterpret an old message as a reply to a new ask.
       if (recovering) return false;
-      const candidates: LarkInteraction[] = [];
-      for (const record of await this.workflows.pendingAsks(config.appId)) {
-        if (record.event.threadId && event.threadId && record.event.threadId !== event.threadId) continue;
-        const originalRoot = record.event.rootId ?? (record.event.threadId ? record.event.messageId : undefined);
-        const replyRoot = event.rootId ?? (event.threadId ? event.messageId : undefined);
-        if (originalRoot !== replyRoot) continue;
-        if (record.event.chatId === event.chatId && record.event.senderOpenId === event.senderOpenId
-          && await resolveLarkScopeId(record.event, config, this.chatModeResolver) === scopeId) candidates.push(record);
-      }
+      const candidates = await this.pendingAskCandidates(event, config, scopeId);
       if (!candidates.length) return false;
       if (candidates.length > 1) {
         if (inbox) await this.inbox!.update(inbox, { state: 'command' });
@@ -708,11 +727,16 @@ export class LarkMessageCoordinator {
     }
     const quotedWorkflow = await this.workflows?.quoted(config.appId, event);
     const mentionsBot = this.botOpenId ? event.mentions.some(mention => mention.openId === this.botOpenId) : event.mentions.some(mention => mention.mentionedType === 'bot');
-    if (this.stopped || this.handledMessages.has(event.messageId)) return;
+    if (this.stopped) return;
     const botSender = event.senderType === 'app' || event.senderType === 'bot';
     const explicit = !botSender && (event.chatType === 'p2p' || mentionsBot || Boolean(quotedWorkflow));
     let helpOnly = false;
-    try { helpOnly = parseSlashCommand((await parsePrompt(event, this.botOpenId)).prompt)?.name === 'help'; } catch { /* normal parser reports malformed content below */ }
+    let recognizedCommand = false;
+    try {
+      const parsed = parseSlashCommand((await parsePrompt(event, this.botOpenId)).prompt);
+      helpOnly = parsed?.name === 'help';
+      recognizedCommand = Boolean(parsed && resolveLarkCommand(parsed));
+    } catch { /* normal parser reports malformed content below */ }
     const entryAction: PolicyAction = helpOnly ? 'task.view_result' : 'task.create';
     try {
       if (event.chatType === 'group' && this.groupManager) config = await this.groupManager.resolved(config, event.chatId);
@@ -723,7 +747,15 @@ export class LarkMessageCoordinator {
     const mentionPolicy = config.mentionPolicy ?? 'always';
     const continuedTopic = mentionPolicy === 'topic' && this.groupManager
       ? await this.groupManager.ownsTopic(config, event, await resolveLarkScopeId(event, config, this.chatModeResolver)) : false;
-    const shouldWake = Boolean(quotedWorkflow) || event.chatType === 'p2p' || (event.chatType === 'group' && (mentionsBot || !botSender && (continuedTopic || mentionPolicy === 'never' || mentionPolicy === 'ambient')));
+    const legacyWake = Boolean(quotedWorkflow) || event.chatType === 'p2p' || (event.chatType === 'group' && (mentionsBot || !botSender && (continuedTopic || mentionPolicy === 'never' || mentionPolicy === 'ambient')));
+    // Known commands retain their existing wake and authorization rules; unknown /paths remain material.
+    const commandInteraction = !botSender && recognizedCommand && legacyWake;
+    // Observation precedes wake filtering and every visible acknowledgement.
+    const pendingAskContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && await this.continuesPendingAsk(event, config));
+    const participation = await this.workflowOptions.participation?.handle(event, config, { explicit: explicit || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId });
+    if (this.handledMessages.has(event.messageId)) return;
+    if (participation?.enabled && !explicit && !pendingAskContinuation && !commandInteraction) return;
+    const shouldWake = legacyWake || Boolean(participation?.enabled && pendingAskContinuation);
     if (shouldWake && event.chatType === 'group' && this.groupManager) {
       const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, entryAction, undefined, { memberObserved: !recovering });
       if (decision && !decision.allowed) {
@@ -2525,6 +2557,12 @@ export class LarkMessageCoordinator {
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
     injected.push('[飞书结果说明] 最终回复先用一两句话说明用户目标已完成什么、还有什么未完成及需要用户做什么；有交付物再给入口。等待扫码、外部批准或用户操作时明确写出，不把本轮结束写成目标已完成；无需展开执行日志。');
+    if (event.chatType === 'group' && this.workflowOptions.participation) {
+      const observedContext = await this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId });
+      if (observedContext) injected.push(observedContext);
+      const instructions = await this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId });
+      if (instructions.trim()) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${instructions.trim()}`);
+    }
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     // 会话记忆随 agentPrompt 一起冻结进任务账本：事后能核对这一轮 Agent 看到的是哪几条记忆。
     // 读取失败只丢本轮注入并留日志，不阻断任务。
@@ -2618,7 +2656,7 @@ export class LarkMessageCoordinator {
           // 记忆提取排在终态交付之后，且只记真实 dispatch 过的完成轮次；失败只留日志。
           const memoryPipeline = this.workflowOptions.memory?.pipeline;
           if (memoryPipeline && resolvedState === 'completed' && runtimeTaskId) {
-            void memoryPipeline.onTurnCompleted({ appId: config.appId, chatId: event.chatId }, { sessionId: session.id, taskId: runtimeTaskId })
+            void memoryPipeline.onTurnCompleted({ appId: config.appId, chatId: event.chatId }, { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: event.messageId })
               .catch(error => this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: runtimeTaskId }, '飞书会话记忆后台提取触发失败'));
           }
         })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));

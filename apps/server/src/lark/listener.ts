@@ -1,3 +1,4 @@
+import type { LarkGroupParticipation } from './group-participation.js';
 import type { ExecutionActor } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
@@ -53,6 +54,7 @@ export interface LarkMessageEvent {
   rootId?: string;
   parentId?: string;
   threadId?: string;
+  createTime?: string;
   messageType: string;
   content: string;
   senderOpenId?: string;
@@ -67,6 +69,7 @@ export interface LarkListener {
 }
 
 export interface LarkLongConnectionListenerOptions {
+  participation?: LarkGroupParticipation;
   automation?: SessionAutomationService;
   workbench?: import('./workbench.js').LarkWorkbench;
   workflowStore?: ConfigRepository;
@@ -143,9 +146,10 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory },
+      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation },
     ) : undefined;
     await coordinator?.initializeWorkflows(config);
+    void this.options.participation?.recover(config.appId).catch(error => this.log.warn({ error, appId: config.appId }, '群观察恢复失败'));
     try { await coordinator?.startReconciliation(config); }
     catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账启动失败，继续建立消息监听'); }
     // 欢迎语：kv 必须是持久化存储，重启后才能靠标记不重发；无存储则不启用。
@@ -202,6 +206,7 @@ export class LarkLongConnectionListener implements LarkListener {
           ...(message.root_id ? { rootId: message.root_id } : {}),
           ...(message.parent_id ? { parentId: message.parent_id } : {}),
           ...(message.thread_id ? { threadId: message.thread_id } : {}),
+          ...(message.create_time ? { createTime: message.create_time } : {}),
           messageType: message.message_type,
           content: message.content,
           ...(event.sender?.sender_id?.open_id ? { senderOpenId: event.sender.sender_id.open_id } : {}),
@@ -234,8 +239,9 @@ export class LarkLongConnectionListener implements LarkListener {
       'im.chat.member.bot.added_v1': (event: any) => {
         const chatId = typeof event?.chat_id === 'string' ? event.chat_id : '';
         this.log.info({ chatId, eventId: event?.event_id }, '收到飞书机器人入群事件');
-        if (!chatId || !this.welcome) return;
-        this.welcome.welcomeBotAdded(chatId).catch(error => {
+        if (!chatId) return;
+        void this.options.participation?.bootstrap({ appId: config.appId, chatId }).catch(error => this.log.warn({ error, chatId }, '入群上下文初始化失败'));
+        this.welcome?.welcomeBotAdded(chatId).catch(error => {
           this.log.error({ error, chatId }, '处理飞书机器人入群欢迎失败');
         });
       },
@@ -275,6 +281,7 @@ export class LarkLongConnectionListener implements LarkListener {
   }
 
   stop() {
+    if (this.config) this.options.participation?.closeApp(this.config.appId);
     this.client?.close();
     this.coordinator?.stop();
     this.client = undefined;

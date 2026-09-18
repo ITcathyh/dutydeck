@@ -240,6 +240,9 @@ importers:
         specifier: workspace:*
         version: link:../transports
     devDependencies:
+      acpx:
+        specifier: 0.13.0
+        version: 0.13.0(patch_hash=0c8cb8fd6ed92c99953c64500fe18f60cb0c473ec7ad8e40783a1919b0c397f9)
       typescript:
         specifier: 5.8.3
         version: 5.8.3

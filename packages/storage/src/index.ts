@@ -11,12 +11,15 @@ import { needsMigration, runMigrations, withMigrationTransaction } from './migra
 import { createFoundationRepositories } from './foundation.js';
 import { createWp1aRepositories } from './group-policy.js';
 import { createScheduleFoundationRepositories } from './schedule-foundation.js';
+import { createCollaborationRepository } from './collaboration.js';
 import { canonicalDatabase, openDatabaseControl } from './database-control.js';
 export * from './schema.js';
 export * from './task-execution.js';
 export * from './foundation.js';
 export * from './group-policy.js';
 export * from './schedule-foundation.js';
+export * from './collaboration.js';
+export * from './collaboration-migration.js';
 export * from './execution-inspection.js';
 
 export const EVENT_WINDOW_DEFAULT_LIMIT = 200;
@@ -159,6 +162,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   const foundationRepositories = createFoundationRepositories(sqlite);
   const wp1aRepositories = createWp1aRepositories(sqlite);
   const scheduleRepositories = createScheduleFoundationRepositories(sqlite);
+  const collaboration = createCollaborationRepository(sqlite);
   return {
     control,
     execution,
@@ -342,6 +346,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     ...foundationRepositories,
     ...wp1aRepositories,
     ...scheduleRepositories,
+    collaboration,
     close() {
       control.assertClosable();
       if (filename !== ':memory:') restrictDatabaseFiles(filename);

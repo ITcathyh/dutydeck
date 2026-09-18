@@ -1,3 +1,4 @@
+import { LarkGroupParticipation } from './group-participation.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
@@ -22,7 +23,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
-async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number } = {}) {
+async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { participation?: LarkGroupParticipation; participationMode?: 'observe' | 'selective'; mentionPolicy?: StoredLarkConfig['mentionPolicy']; managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflows-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
@@ -80,7 +81,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]);
   const config: StoredLarkConfig = { appId: 'cli_workflows', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
-    fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
+    mentionPolicy: options.mentionPolicy, fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   let groupManager: LarkGroupManager | undefined;
@@ -121,11 +122,17 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
     readDocument: vi.fn(async (url: string) => ({ url, title: '需求', text: '文档中的明确验收条件' }))
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config, broker });
+  let participation = options.participation;
+  if (options.participationMode) {
+    await repos.collaboration.updateSettings({ appId: config.appId, chatId: 'oc_group' }, { expectedRevision: 0, participation: options.participationMode }, 'manager');
+    participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: { decide: async () => ({ action: 'silent', reason: '普通材料', evidenceIds: [], updates: [] }) },
+      authorize: async () => true, readConfig: async () => config, serviceFor: () => service as any, debounceMs: 10000 });
+  }
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config, broker, participation });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
-  cleanups.push(async () => { coordinator.stop(); broker.close(); release?.(); await broker.flush(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
+  cleanups.push(async () => { coordinator.stop(); participation?.closeApp?.(config.appId); broker.close(); release?.(); await broker.flush(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   const interactions = async () => (await repos.config.list!(`lark.interaction.${config.appId}.`)).map(row => JSON.parse(row.value) as LarkInteraction);
   const completed = async () => {
     await vi.waitFor(async () => {
@@ -500,6 +507,56 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     });
     expect(h.broker.get(ask.nativeId)?.status).toBe('pending');
     expect(JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.om_unrelated`))!).workflowRequestId).toBeUndefined();
+  });
+
+  it('routes a same-actor pending answer without @ before selective participation, but does not consume other actors', async () => {
+    const handle = vi.fn(async () => ({ enabled: true, instructions: '' }));
+    const h = await harness('ask', { participation: { handle, instructions: async () => '', taskContext: async () => '' } as unknown as LarkGroupParticipation });
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(event('om_other_actor', '不能代表别人回答', { senderOpenId: 'ou_bob', mentions: [] }), h.config);
+    expect(h.broker.get(ask.nativeId)?.status).toBe('pending');
+    await h.coordinator.handle(event('om_plain_answer', '先执行测试', { mentions: [] }), h.config);
+    expect(h.broker.get(ask.nativeId)).toMatchObject({ status: 'answered', answer: '先执行测试' });
+    expect(handle).toHaveBeenLastCalledWith(expect.objectContaining({ messageId: 'om_plain_answer' }), expect.anything(), expect.objectContaining({ explicit: true }));
+    await h.completed();
+    expect(await h.runtime.getTasks(ask.sessionId)).toHaveLength(1);
+  });
+
+  it.each(['observe', 'selective'] as const)('%s retains unmentioned stop/help under ambient, never, and owned-topic rules without granting other actors control', async mode => {
+    for (const mentionPolicy of ['ambient', 'never', 'topic'] as const) {
+      const h = await harness('permission', { managedGroup: true, participationMode: mode, mentionPolicy });
+      await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+      await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+      const request = (await h.interactions()).find(item => item.kind === 'permission')!;
+      const interrupt = vi.spyOn(h.runtime, 'interrupt');
+      await h.coordinator.handle(event('om_unknown', '/tmp', { mentions: [] }), h.config);
+      expect(await h.repos.config.get(`lark.inbox.${h.config.appId}.om_unknown`)).toBeUndefined();
+      await h.coordinator.handle(event('om_denied_stop', '/stop', { senderOpenId: 'ou_bob', mentions: [] }), h.config);
+      expect(interrupt).not.toHaveBeenCalled();
+      expect([...h.cards.values()].some(card => card.taskId === 'om_denied_stop' && card.state === 'failed')).toBe(true);
+      expect((await h.runtime.getTasks(request.sessionId))[0]!.status).not.toBe('interrupted');
+      await h.coordinator.handle(event('om_help', '/help', { mentions: [] }), h.config);
+      expect([...h.cards.values()].some(card => card.taskId === 'om_help')).toBe(true);
+      await h.coordinator.handle(event('om_stop', '/stop', { mentions: [] }), h.config);
+      await vi.waitFor(() => expect(interrupt).toHaveBeenCalledOnce());
+      await vi.waitFor(async () => expect((await h.runtime.getTasks(request.sessionId))[0]!.status).toBe('interrupted'));
+      expect(await h.runtime.getTasks(request.sessionId)).toHaveLength(1);
+      expect(h.send).toHaveBeenCalledOnce();
+      const observed = await h.repos.collaboration.listObservations({ appId: h.config.appId, chatId: 'oc_group' });
+      expect(observed.find(item => item.messageId === 'om_stop')!.refs).toContain('dutydeck:explicit');
+    }
+  });
+
+  it.each(['observe', 'selective'] as const)('%s does not expand mention-only command wake rules', async mode => {
+    const h = await harness('permission', { managedGroup: true, participationMode: mode, mentionPolicy: 'always' });
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    const interrupt = vi.spyOn(h.runtime, 'interrupt');
+    await h.coordinator.handle(event('om_silent_stop', '/stop', { mentions: [] }), h.config);
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(await h.repos.config.get(`lark.inbox.${h.config.appId}.om_silent_stop`)).toBeUndefined();
   });
 
   it('accepts a plain multiline post as the answer to the current question', async () => {

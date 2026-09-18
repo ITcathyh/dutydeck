@@ -408,6 +408,7 @@ export interface FoundationRepository {
 }
 
 export interface RepositoryBundle {
+  collaboration: import('./collaboration.js').CollaborationRepository;
   control: import('./database-control.js').DatabaseControl;
   execution: import('./task-execution.js').ExecutionRepository;
   agents: AgentRepository;
@@ -458,3 +459,5 @@ export * from './bot-configuration.js';
 export * from './bot-configuration-scope.js';
 
 export * from './driver-resources.js';
+
+export * from './collaboration.js';

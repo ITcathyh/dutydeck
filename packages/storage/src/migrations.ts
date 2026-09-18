@@ -1,6 +1,8 @@
+import { createScheduleExecutionSchema } from './schedule-execution-migration.js'
 import type Database from 'better-sqlite3'
 import { createTaskExecutionSchema } from './task-execution-migration.js'
 import { createBotConfigurationSchema } from './bot-configuration-migration.js'
+import { createCollaborationSchema } from './collaboration-migration.js'
 
 export interface Migration {
   version: number
@@ -539,7 +541,9 @@ export const migrations: Migration[] = [
     }
   },
   { version: 18, name: 'task_execution_schema_only', up: createTaskExecutionSchema },
-  { version: 19, name: 'bot_configuration_storage_base', up: createBotConfigurationSchema }
+  { version: 19, name: 'bot_configuration_storage_base', up: createBotConfigurationSchema },
+  { version: 20, name: 'collaboration_foundation', up: createCollaborationSchema },
+  { version: 21, name: 'collaboration_schedule_execution', up: createScheduleExecutionSchema }
 ]
 
 /** Own the outer transaction required by SQLite's table-rebuild procedure. */

@@ -27,6 +27,7 @@ import type {
 import { Badge, Banner, Button, Card, EmptyState, Input, Select, Spinner } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
+import { CollaborationPanel } from './CollaborationPanel';
 import { useDraftStore, type GroupAccessMode, type GroupBotDraft } from '../draft-store';
 import { toastStore } from '../useToasts';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
@@ -1379,6 +1380,16 @@ export function GroupManagement({
                     </div>
                   </div>
                 </div>
+              )}
+
+              {/* 通用协作管理：按群 + Bot 隔离，panel 内部以 appId:chatId 为 key 重建 */}
+              {activeBotEntry && (
+                <CollaborationPanel
+                  appId={activeBotEntry.appId}
+                  chatId={activeGroup.chatId}
+                  groupName={activeGroup.name}
+                  botName={botsMap.get(activeBotEntry.appId)?.name}
+                />
               )}
             </div>
           )}

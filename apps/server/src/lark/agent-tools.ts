@@ -1,3 +1,4 @@
+import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
@@ -159,6 +160,7 @@ export interface LarkGroupToolClient {
 }
 
 export interface LarkAgentToolsOptions {
+  authorizeTool?: (sessionId: string, action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send' | 'memory') => Promise<{ actorId: string } | void>;
   workbenchTask?: (sessionId: string) => { taskId: string } | undefined;
   groupManager?: LarkGroupManager;
   env?: NodeJS.ProcessEnv;
@@ -329,6 +331,7 @@ export class LarkAgentToolsService {
 
   private async context(token: string | undefined, action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send'): Promise<ToolContext> {
     const binding = await this.capabilities.resolve(token);
+    const toolAuthority = await this.options.authorizeTool?.(binding.sessionId, action);
     if (this.options.executionPolicy) {
       const decision = await this.options.executionPolicy.authorize('group_tools', action);
       if (!decision.allowed) throw new AgentGroupToolError(decision.code, decision.reason, 403, {
@@ -339,8 +342,9 @@ export class LarkAgentToolsService {
     let config = await readLarkConfig(this.configs, binding.appId);
     if (!config) throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
     if (this.options.groupManager) {
-      const decision = await this.options.groupManager.authorizeSession(binding.sessionId, action)
-        ?? await this.options.groupManager.authorize(binding.appId, binding.chatId, undefined, action, binding.sessionId);
+      const decision = toolAuthority
+        ? await this.options.groupManager.authorize(binding.appId, binding.chatId, toolAuthority.actorId === 'installation_owner' ? undefined : toolAuthority.actorId, action, undefined, { installationOwner: toolAuthority.actorId === 'installation_owner' })
+        : await this.options.groupManager.authorizeSession(binding.sessionId, action) ?? await this.options.groupManager.authorize(binding.appId, binding.chatId, undefined, action, binding.sessionId);
       if (decision && !decision.allowed) throw new AgentGroupToolError(decision.code, decision.reason, 403);
       config = await this.options.groupManager.resolved(config, binding.chatId);
     }
@@ -370,6 +374,7 @@ export class LarkAgentToolsService {
    */
   async memoryContext(token?: string): Promise<LarkAgentSessionBinding> {
     const binding = await this.capabilities.resolve(token);
+    await this.options.authorizeTool?.(binding.sessionId, 'memory');
     const config = await readLarkConfig(this.configs, binding.appId);
     if (!config) {
       throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
@@ -488,7 +493,11 @@ export class LarkAgentToolsService {
     if (config.groupToolsEnabled) {
       blocks.push(larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand));
       const task = this.options.workbenchTask?.(session.id);
-      if (task) blocks.push(workbenchAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${this.capabilities.workbenchTurnToken(session.id, task.taskId)}`));
+      if (task) {
+        const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
+        blocks.push(workbenchAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${turn}`));
+        if (binding.chatType === 'group' && session.sourceId?.split(':')[3] !== 'collaboration') blocks.push(collaborationAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} collaborate --turn ${turn}`));
+      }
     }
     return blocks.length ? `${blocks.join('\n\n')}\n\n${prompt}` : prompt;
   }

@@ -4,6 +4,14 @@ import { Bot, MessageSquare, Users, X } from 'lucide-react';
 import { ApiError, foundationApi, type GroupMatrixCell, type PublicSecretRef } from '../api';
 import type { GroupBinding, PublicChannelBotFoundation, UpdateGroupBindingInput } from '@dutydeck/shared';
 import { Badge, Banner, Button, Card, Dialog, EmptyState, Field, IconButton, Select, Spinner } from './primitives';
+import { CollaborationPanel } from './CollaborationPanel';
+
+type CollaborationScopeTarget = {
+  appId: string;
+  chatId: string;
+  groupName: string;
+  botName: string;
+};
 
 type Draft = {
   bindingId: string;
@@ -52,7 +60,7 @@ function Fact({ label, children }: { label: string; children: ReactNode }) {
   </div>;
 }
 
-function CellCard({ cell, writesEnabled, creating, createError, onCreate, onEdit }: { cell: GroupMatrixCell; writesEnabled: boolean; creating: boolean; createError?: Error; onCreate(): void; onEdit(binding: GroupBinding): void }) {
+function CellCard({ cell, bot, writesEnabled, creating, createError, onCreate, onEdit, onOpenCollaboration }: { cell: GroupMatrixCell; bot: PublicChannelBotFoundation; writesEnabled: boolean; creating: boolean; createError?: Error; onCreate(): void; onEdit(binding: GroupBinding): void; onOpenCollaboration(target: CollaborationScopeTarget): void }) {
   const displayName = cell.remoteFact?.displayName ?? cell.externalChatId;
   return <Card as="article">
     <div className="flex items-start gap-3">
@@ -71,7 +79,8 @@ function CellCard({ cell, writesEnabled, creating, createError, onCreate, onEdit
     </div>
     {cell.blockers.length > 0 && <div className="mt-3 space-y-1.5">{cell.blockers.map(blocker => <Banner key={blocker.code} tone="warning"><strong>{blocker.code}</strong><br/>下一步：{blocker.action}</Banner>)}</div>}
     {createError && <div className="mt-3"><Banner tone="danger">{createError instanceof ApiError && createError.status === 403 ? '需要 owner/admin 权限才能创建绑定。' : `创建失败：${createError.message}`}</Banner></div>}
-    <div className="mt-3 flex justify-end">
+    <div className="mt-3 flex justify-end gap-2">
+      <Button variant="ghost" onClick={() => onOpenCollaboration({ appId: bot.externalAppId, chatId: cell.externalChatId, groupName: displayName, botName: bot.displayName })}>通用协作</Button>
       <Button
         variant="secondary"
         disabled={!writesEnabled || creating}
@@ -128,6 +137,8 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
   const [draft, setDraft] = useState<Draft>();
   const [conflict, setConflict] = useState<GroupBinding>();
   const [botConflicts, setBotConflicts] = useState<Record<string, PublicChannelBotFoundation>>({});
+  // 通用协作面板的目标 scope；与静态禁用策略编辑互不影响。
+  const [collaborationTarget, setCollaborationTarget] = useState<CollaborationScopeTarget>();
   const save = useMutation({
     mutationFn: (current: Draft) => foundationApi.updateGroupBinding(current.bindingId, bindingUpdate(current)),
     onSuccess: async () => { setDraft(undefined); setConflict(undefined); await queryClient.invalidateQueries({ queryKey: ['foundation-group-matrix'] }); },
@@ -150,12 +161,13 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
     }),
     onSuccess: async () => { await queryClient.invalidateQueries({ queryKey: ['foundation-group-matrix'] }); }
   });
-  useEffect(() => { if (!open) { setDraft(undefined); setConflict(undefined); setBotConflicts({}); save.reset(); } }, [open]);
+  useEffect(() => { if (!open) { setDraft(undefined); setConflict(undefined); setBotConflicts({}); setCollaborationTarget(undefined); save.reset(); } }, [open]);
   const capability = capabilities.data;
   const permissionBlocked = capability && !capability.permissionEvaluatorWired;
   // 写操作进行中时不允许 Escape / 点遮罩关闭：会把一个已经发出的 CAS 写请求丢在半路。
   const busy = save.isPending || saveBotSecret.isPending || createBinding.isPending;
-  return <Dialog open={open} onClose={onClose} label="群配置与权限" size="lg" closeOnEscape={!busy} closeOnScrim={!busy}>
+  // 通用协作二级 Dialog 打开时，外层不能被同一个 Escape 一起关掉。
+  return <Dialog open={open} onClose={onClose} label="群配置与权限" size="lg" closeOnEscape={!busy && !collaborationTarget} closeOnScrim={!busy && !collaborationTarget}>
     <Dialog.Header>
       <span className="grid h-10 w-10 shrink-0 place-items-center rounded-md bg-action-soft text-action"><MessageSquare size={18}/></span>
       <div className="min-w-0 flex-1">
@@ -206,11 +218,13 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
           return <CellCard
             key={cell.externalChatId}
             cell={cell}
+            bot={entry.bot}
             writesEnabled={Boolean(capability?.writesEnabled)}
             creating={creatingThis}
             createError={failedThis ? createBinding.error : undefined}
             onCreate={() => createBinding.mutate({ channelBotId: entry.bot.id, externalChatId: cell.externalChatId })}
             onEdit={binding => { setDraft(draftFromBinding(binding)); setConflict(undefined); save.reset(); }}
+            onOpenCollaboration={setCollaborationTarget}
           />;
         })}</div>
       </section>)}</div>
@@ -247,5 +261,33 @@ export function GroupPolicyModal({ open, onClose }: { open: boolean; onClose(): 
         <Button type="submit" variant="secondary" tone="inverse" loading={save.isPending} disabled={!capability?.writesEnabled}>{save.isPending ? '保存中…' : '保存禁用态策略'}</Button>
       </div>
     </form>}
+
+    {/* 通用协作管理：只读/编辑真实运行配置，与上方 staged/disabled 静态策略完全独立 */}
+    {collaborationTarget && (
+      <Dialog
+        open
+        onClose={() => setCollaborationTarget(undefined)}
+        label={`通用协作 · ${collaborationTarget.botName} · ${collaborationTarget.groupName}`}
+        size="xl"
+      >
+        <Dialog.Header>
+          <div className="min-w-0 flex-1">
+            <h2 className="truncate text-title font-semibold text-primary">群通用协作管理</h2>
+            <p className="mt-1 text-caption text-subtle">
+              {collaborationTarget.botName} · {collaborationTarget.groupName}（{collaborationTarget.chatId}）。此处读取和修改的是真实协作配置，不等同于上方未接管的禁用态策略。
+            </p>
+          </div>
+          <IconButton label="关闭通用协作" onClick={() => setCollaborationTarget(undefined)}><X size={16}/></IconButton>
+        </Dialog.Header>
+        <Dialog.Body>
+          <CollaborationPanel
+            appId={collaborationTarget.appId}
+            chatId={collaborationTarget.chatId}
+            groupName={collaborationTarget.groupName}
+            botName={collaborationTarget.botName}
+          />
+        </Dialog.Body>
+      </Dialog>
+    )}
   </Dialog>;
 }

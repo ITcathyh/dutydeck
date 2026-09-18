@@ -38,6 +38,7 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
     probe: (() => ({ available: true, protocol: 'acp', acp: true, jsonl: false, pipe: false, pty: false })) as any,
     authorizeExecution: async (id, actor) => { await service.authorizeExecution(id, actor); },
+    authorizeControl: async (id, actor) => { await service.authorizeControl(id, actor); },
     sessionPrompt: async (session, prompt) => { if (session.source === 'work_item') await beforeSubmit?.(); return prompt; },
     authorizeTask: (session, task, phase) => service.authorizeTask(session, task, phase),
     driverFactory: (_agent, _protocol, onEvent, _onExit, sessionId) => {
@@ -149,6 +150,19 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect((await f.get(item.id)).steps.find(step => step.id === 'b')?.status).toBe('skipped');
     await f.finish(f.calls[0]!, 'Approved research'); await f.tick(); await eventually(async () => f.calls.length === 2);
     expect(f.calls[1]!.prompt).toContain('Approved research');
+  });
+
+  it('denies a foreign actor or App when stopping an owned child after execution revocation', async () => {
+    const f = await fixture(); const item = await f.create(); await f.tick();
+    await eventually(async () => f.calls.length === 2);
+    const child = f.calls[0]!.sessionId;
+    await expect(f.runtime.stopWorkItemSession(child, { kind: 'channel', id: 'ou_other', appId: 'cli_app' })).rejects.toMatchObject({ code: 'WORK_ITEM_FORBIDDEN' });
+    await expect(f.runtime.stopWorkItemSession(child, { kind: 'channel', id: 'ou_owner', appId: 'other_app' })).rejects.toMatchObject({ code: 'TASK_ACTOR_CONFLICT' });
+    expect(f.stopped).not.toContain(child);
+    f.deny(); await f.tick();
+    expect(f.stopped).toContain(child);
+    await expect(f.service.authorizeExecution(child, 'ou_owner')).rejects.toMatchObject({ code: 'WORK_ITEM_TASK_REVOKED' });
+    expect((await f.get(item.id).catch(() => undefined))).toBeUndefined();
   });
 
   it('only retries the failed branch and preserves succeeded siblings', async () => {
@@ -315,6 +329,7 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     } finally { db.close(); }
     const cancelled = await f.service.cancel(f.parent.id, item.id, blocked.revision, 'ou_owner');
     expect(cancelled.status).toBe('blocked'); expect(cancelled.steps[0]!.status).toBe('blocked');
+    expect(f.stopped).toContain(attempt.sessionId);
     expect(JSON.parse((await f.repos.config.get('work_item:' + item.id))!).stoppedAttempts).toEqual([]);
     expect(f.deliveries).not.toHaveBeenCalled();
   });

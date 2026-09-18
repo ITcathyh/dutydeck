@@ -3,6 +3,7 @@ import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, Workspa
 import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dutydeck/shared';
 
 export type { WorkspaceCleanupPreview, WorkspaceCleanupResult };
+export type { ScheduleTrigger };
 export type PermissionMode = 'ask' | 'approve-reads' | 'deny-all' | 'full-trust';
 export type { WorkspaceMode };
 export type Agent = PublicAgent;
@@ -325,4 +326,318 @@ export const scheduleApi = {
   preview: (id: string, after?: string) => json<{ scheduleId: string; preview?: SchedulePreview; executionEligible: false; blockers: ScheduleBlocker[] }>(`/api/foundation/schedules/${encodeURIComponent(id)}/preview${after ? `?after=${encodeURIComponent(after)}` : ''}`, { cache: 'no-store' }),
   update: (id: string, input: UpdateScheduleDefinitionInput) => json<ScheduleDetail>(`/api/foundation/schedules/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   archivedIntegrations: (channelBotId: string) => json<{ integrations: ArchivedHammerIntegration[] }>(`/api/foundation/schedules/archived-integrations?channelBotId=${encodeURIComponent(channelBotId)}`, { cache: 'no-store' })
+};
+
+// ==================== Collaboration Types & API ====================
+
+export type CollaborationScope = {
+  appId: string;
+  chatId: string;
+};
+
+export type CollaborationParticipation = 'off' | 'observe' | 'selective';
+
+export type CollaborationSettings = {
+  scope: CollaborationScope;
+  revision: number;
+  participation: CollaborationParticipation;
+  instructions: string;
+  notificationsPaused: boolean;
+  maxProactivePerHour: number;
+  retentionDays: number;
+  policyVersion: string;
+  updatedAt: string;
+};
+
+export type CollaborationObservation = {
+  id: string;
+  scope: CollaborationScope;
+  sequence: number;
+  source: string;
+  eventId: string;
+  occurredAt: string;
+  receivedAt: string;
+  senderId?: string;
+  senderKind: 'human' | 'bot' | 'system';
+  threadId?: string;
+  messageId?: string;
+  text: string;
+  refs: string[];
+  origin: 'live' | 'history' | 'external';
+  missing: string[];
+  revision: number;
+};
+
+export type CollaborationBootstrap = {
+  scope: CollaborationScope;
+  status: 'pending' | 'running' | 'complete' | 'partial' | 'failed';
+  cursor?: string;
+  lastEventAt?: string;
+  missing: string[];
+  updatedAt: string;
+};
+
+export type CollaborationFollowupStep = {
+  id: string;
+  label: string;
+  status: 'open' | 'done';
+};
+
+export type CollaborationFollowup = {
+  id: string;
+  scope: CollaborationScope;
+  revision: number;
+  goal: string;
+  status: 'open' | 'completed' | 'cancelled';
+  progress: string;
+  steps: CollaborationFollowupStep[];
+  ownerId?: string;
+  dueAt?: string;
+  result?: string;
+  sourceRefs: string[];
+  taskIds: string[];
+  externalRefs: string[];
+  fields: Record<string, string>;
+  createdBy: string;
+  updatedBy: string;
+  provenance: 'observed' | 'inferred' | 'confirmed';
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CollaborationMandate = {
+  id: string;
+  scope: CollaborationScope;
+  revision: number;
+  goal: string;
+  status: 'active' | 'paused' | 'cancelled' | 'completed';
+  requesterId: string;
+  sourceRefs: string[];
+  followupId?: string;
+  scheduleDefinitionId: string;
+  mode: 'notify' | 'agent';
+  prompt: string;
+  condition: 'always' | 'followup_open' | 'no_progress';
+  deliveryPaused: boolean;
+  catchupPolicy: 'skip' | 'coalesce';
+  lastProgressRevision?: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CollaborationMandateDetail = CollaborationMandate & {
+  schedule?: PublicScheduleDefinition;
+  nextDueAt?: string;
+};
+
+export type CollaborationDecision = {
+  id: string;
+  scope: CollaborationScope;
+  contextRevision: number;
+  policyVersion: string;
+  action: 'silent' | 'reply' | 'act';
+  reason: string;
+  evidenceIds: string[];
+  status: 'candidate' | 'suppressed' | 'sent' | 'failed';
+  response?: string;
+  inputSnapshot: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type CollaborationFeedback = {
+  id: string;
+  scope: CollaborationScope;
+  decisionId: string;
+  actorId: string;
+  correction: string;
+  expectedAction?: 'silent' | 'reply' | 'act';
+  createdAt: string;
+};
+
+export type CollaborationAction = {
+  id: string;
+  scope: CollaborationScope;
+  revision: number;
+  kind: string;
+  mandateId?: string;
+  mandateRevision?: number;
+  scheduleGeneration?: number;
+  contextRevision?: number;
+  followupRevision?: number;
+  requesterId: string;
+  inputDigest: string;
+  payload: Record<string, unknown>;
+  status: 'intent' | 'sending' | 'succeeded' | 'failed' | 'unknown' | 'suppressed';
+  receipt?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CollaborationActivity = {
+  id: string;
+  scope: CollaborationScope;
+  entityKind: 'followup' | 'mandate' | 'settings';
+  entityId: string;
+  revision: number;
+  actorId: string;
+  sourceRefs: string[];
+  provenance: 'observed' | 'inferred' | 'confirmed';
+  summary: string;
+  createdAt: string;
+};
+
+export type CollaborationSnapshot = {
+  scope: CollaborationScope;
+  contextRevision: number;
+  settings: CollaborationSettings;
+  observations: CollaborationObservation[];
+  followups: CollaborationFollowup[];
+  mandates: CollaborationMandate[];
+  bootstrap?: CollaborationBootstrap;
+};
+
+export type CollaborationOverview = {
+  snapshot: CollaborationSnapshot;
+  followups: CollaborationFollowup[];
+  mandates: CollaborationMandateDetail[];
+  decisions: CollaborationDecision[];
+  actions: CollaborationAction[];
+  activities: CollaborationActivity[];
+  feedback: CollaborationFeedback[];
+};
+
+export type UpdateCollaborationSettingsInput = {
+  expectedRevision: number;
+  participation?: CollaborationParticipation;
+  instructions?: string;
+  notificationsPaused?: boolean;
+  maxProactivePerHour?: number;
+  retentionDays?: number;
+  policyVersion?: string;
+};
+
+export type CreateCollaborationFollowupInput = {
+  id: string;
+  goal: string;
+  progress?: string;
+  steps?: Array<{ id: string; label: string; status: 'open' | 'done' }>;
+  ownerId?: string;
+  dueAt?: string;
+  sourceRefs?: string[];
+  fields?: Record<string, string>;
+};
+
+export type UpdateCollaborationFollowupInput = {
+  expectedRevision: number;
+  goal?: string;
+  status?: 'open' | 'completed' | 'cancelled';
+  progress?: string;
+  steps?: Array<{ id: string; label: string; status: 'open' | 'done' }>;
+  ownerId?: string | null;
+  dueAt?: string | null;
+  result?: string;
+  sourceRefs?: string[];
+  taskIds?: string[];
+  externalRefs?: string[];
+  fields?: Record<string, string>;
+  provenance?: 'observed' | 'inferred' | 'confirmed';
+};
+
+export type CreateCollaborationMandateInput = {
+  id: string;
+  goal: string;
+  followupId?: string;
+  mode: 'notify' | 'agent';
+  prompt: string;
+  condition?: 'always' | 'followup_open' | 'no_progress';
+  trigger: ScheduleTrigger;
+  timezone: string;
+  catchupPolicy?: 'skip' | 'coalesce';
+  sourceRefs?: string[];
+};
+
+export type UpdateCollaborationMandateInput = {
+  expectedRevision: number;
+  goal?: string;
+  status?: 'active' | 'paused' | 'cancelled' | 'completed';
+  prompt?: string;
+  deliveryPaused?: boolean;
+  trigger?: ScheduleTrigger;
+  timezone?: string;
+  condition?: 'always' | 'followup_open' | 'no_progress';
+  catchupPolicy?: 'skip' | 'coalesce';
+};
+
+export type CreateCollaborationFeedbackInput = {
+  correction: string;
+  expectedAction?: 'silent' | 'reply' | 'act';
+};
+
+export type CollaborationReplayInput = {
+  decisionIds: string[];
+  policyVersion?: string;
+};
+
+export type CollaborationReplayResultItem = {
+  decisionId: string;
+  status: 'passed' | 'failed' | 'missing';
+  expected?: string;
+  actual?: string;
+  reason?: string;
+};
+
+export type CollaborationReplayResponse = {
+  results: CollaborationReplayResultItem[];
+  passed: number;
+  failed: number;
+  missing: number;
+};
+
+export const collaborationApi = {
+  getOverview: (appId: string, chatId: string) =>
+    json<CollaborationOverview>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration`,
+      { cache: 'no-store' }
+    ),
+  updateSettings: (appId: string, chatId: string, body: UpdateCollaborationSettingsInput) =>
+    json<{ settings: CollaborationSettings }>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/settings`,
+      { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    ),
+  createFollowup: (appId: string, chatId: string, body: CreateCollaborationFollowupInput) =>
+    json<{ followup: CollaborationFollowup }>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/followups`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    ),
+  updateFollowup: (appId: string, chatId: string, id: string, body: UpdateCollaborationFollowupInput) =>
+    json<{ followup: CollaborationFollowup }>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/followups/${encodeURIComponent(id)}`,
+      { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    ),
+  createMandate: (appId: string, chatId: string, body: CreateCollaborationMandateInput) =>
+    json<{ mandate: CollaborationMandate; schedule?: PublicScheduleDefinition }>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/mandates`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    ),
+  updateMandate: (appId: string, chatId: string, id: string, body: UpdateCollaborationMandateInput) =>
+    json<{ mandate: CollaborationMandate; schedule?: PublicScheduleDefinition }>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/mandates/${encodeURIComponent(id)}`,
+      { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    ),
+  addFeedback: (appId: string, chatId: string, decisionId: string, body: CreateCollaborationFeedbackInput) =>
+    json<{ feedback: CollaborationFeedback }>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/decisions/${encodeURIComponent(decisionId)}/feedback`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    ),
+  replay: (appId: string, chatId: string, body: CollaborationReplayInput) =>
+    json<CollaborationReplayResponse>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/replay`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }
+    ),
+  bootstrap: (appId: string, chatId: string) =>
+    json<{ bootstrap: CollaborationBootstrap }>(
+      `/api/lark/groups/${encodeURIComponent(appId)}/${encodeURIComponent(chatId)}/collaboration/bootstrap`,
+      { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }
+    )
 };

@@ -1,0 +1,164 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, expect, it, vi } from 'vitest';
+import { agentConfigSchema, installationOwnerTaskActor, type AgentDriver } from '@dutydeck/shared';
+import { createRepositories } from '@dutydeck/storage';
+import { DutydeckRuntime } from '@dutydeck/runtime';
+import { createCollaborationIntegration } from './collaboration-integration.js';
+import { LarkGroupManager } from './lark/group-management.js';
+import { readLarkConfig, saveLarkConfig } from './lark/config.js';
+import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './lark/agent-tools.js';
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => { for (const close of cleanups.splice(0)) await close(); });
+const scope = { appId: 'cli_collaboration', chatId: 'oc_group' };
+async function eventually(check: () => Promise<boolean>) {
+  for (let count = 0; count < 100; count++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
+  throw new Error('Condition did not converge');
+}
+async function fixture() {
+  const directory = await mkdtemp(join(tmpdir(), 'collaboration-wiring-'));
+  const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
+  const agent = agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: 'fake', protocol: 'acp', cwd: directory, permissionMode: 'full-trust' });
+  await repos.agents.save(agent);
+  await saveLarkConfig(repos.config, repos.agents, { ...scope, appSecret: 'synthetic', defaultAgentId: agent.id, workspace: directory, fullTrustConfirmed: true, listening: true, groupToolsEnabled: true, groupToolsAllowSend: true, riskControlMode: 'enforced', highRiskPattern: 'rm\\s' });
+  let members = ['ou_alice'];
+  const client = {
+    getBotInfo: async () => ({ appName: 'Agent', openId: 'ou_bot' }),
+    checkApplicationIdentity: async () => ({ verified: true, reportedAppId: scope.appId, tenantKey: 'synthetic' }),
+    listChats: async () => ({ items: [{ chatId: scope.chatId, name: '文档协作', external: false }], hasMore: false }),
+    listChatMembers: async () => ({ items: members.map(openId => ({ memberId: openId, openId, name: openId, memberType: 'user' })), hasMore: false, securityLimited: false }),
+    getUserEmails: async () => [],
+    getChatPreflightInfo: async () => ({ name: '文档协作', description: '讨论资料进度' }),
+    listMessages: vi.fn(async () => ({ items: [], hasMore: false })),
+    sendText: vi.fn(async () => ({ messageId: 'om_result', chatId: scope.chatId })),
+    replyText: vi.fn(async () => ({ messageId: 'om_reply', chatId: scope.chatId }))
+  };
+  const groups = new LarkGroupManager(repos, { client: () => client as any });
+  await groups.sync(scope.appId);
+  const group = await groups.save(scope.appId, scope.chatId, { expectedRevision: 0, patch: {} });
+  let collaboration: ReturnType<typeof createCollaborationIntegration>;
+  const calls: Array<{ sessionId: string; prompt: string; finish(text: string): void }> = [];
+  const stopped: string[] = [];
+  const runtime = new DutydeckRuntime(repos, {
+    workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
+    probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any,
+    authorizeExecution: async (id, actor) => { await collaboration.background.authorizeExecution(id, actor); },
+    authorizeTask: (session, task) => collaboration.background.authorizeTask(session, task),
+    authorizeControl: async (id, actor) => { await collaboration.background.authorizeControl(id, actor); },
+    resolveRiskPolicy: async (id, fallback) => (await collaboration.riskPolicy(id, fallback))?.policy,
+    driverFactory: (_agent, _protocol, onEvent, _exit, sessionId) => {
+      let end: (() => void) | undefined;
+      return {
+        start: async () => {}, resume: async () => {},
+        stop: async () => { stopped.push(sessionId); end?.(); }, isStopped: async () => stopped.includes(sessionId),
+        interrupt: async () => { end?.(); },
+        send: (prompt: string) => new Promise<void>(resolve => {
+          end = () => { onEvent({ type: 'completed', data: { stopReason: 'cancelled' } }); resolve(); };
+          calls.push({ sessionId, prompt, finish(text) { onEvent({ type: 'text', data: { text } }); onEvent({ type: 'completed', data: { stopReason: 'end_turn' } }); end = undefined; resolve(); } });
+        })
+      } satisfies AgentDriver;
+    }
+  });
+  collaboration = createCollaborationIntegration({ repositories: repos, runtime, groups, workspaceRoot: directory, client: () => client as any });
+  await runtime.initialize([agent]);
+  let clock = new Date();
+  collaboration.scheduler.options.now = () => clock;
+  collaboration.service.options.now = () => clock;
+  cleanups.push(async () => { await collaboration.close(); await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); });
+  const create = (id = 'review') => collaboration.service.createMandate(scope, 'ou_alice', { id, goal: '检查资料进展', mode: 'agent', prompt: '总结还缺的资料', condition: 'always', trigger: { kind: 'interval', everySeconds: 60, anchorAt: clock.toISOString() }, timezone: 'UTC' });
+  return { repos, runtime, collaboration, groups, client, group, calls, stopped, create,
+    advance() { clock = new Date(clock.getTime() + 60_000); }, revoke() { members = []; } };
+}
+
+it('uses real saved group bindings, runs one frozen background task and delivers its result once', async () => {
+  const f = await fixture();
+  expect((await f.groups.owner(scope.appId))?.activeGroups).toContain(f.group.binding!.id);
+  expect(f.group.binding!.id).not.toBe(scope.chatId);
+  expect(await f.collaboration.authorize(scope, 'ou_alice', 'execute')).toBe(true);
+  await f.create(); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const call = f.calls[0]!;
+  expect(call.prompt).toContain('总结还缺的资料');
+  const sessions = await f.runtime.listSessions();
+  expect(sessions.filter(session => session.id.startsWith('ses_collab_'))).toHaveLength(1);
+  await f.collaboration.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  const policy = (await f.collaboration.riskPolicy(call.sessionId))?.policy;
+  expect(policy).toMatchObject({ enabled: true, authorized: false, pattern: 'rm\\s' });
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, riskControlMode: 'off' });
+  expect(await f.collaboration.riskPolicy(call.sessionId, policy)).toEqual({ policy: undefined });
+  const capabilities = new LarkAgentToolCapabilityRegistry(f.repos.sessions, 'http://localhost:1');
+  const tools = new LarkAgentToolsService(capabilities, f.repos.config, { groupManager: f.groups, clientFactory: () => f.client as any, authorizeTool: (id, action) => f.collaboration.background.authorizeTool(id, action) });
+  const session = (await f.runtime.getSession(call.sessionId))!;
+  const token = capabilities.environmentFor(session).dutydeck_group_tools_token;
+  expect(await tools.workbenchContext(token)).toMatchObject({ sessionId: call.sessionId });
+  await expect(tools.send(token, { content: 'duplicate' })).rejects.toMatchObject({ code: 'COLLABORATION_MANAGED_DELIVERY' });
+  capabilities.close();
+  call.finish('仍缺最终核对。');
+  await eventually(async () => (await f.repos.tasks.listBySession(call.sessionId)).every(task => !['queued', 'running'].includes(task.status)));
+  await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
+  expect(f.client.sendText).toHaveBeenCalledTimes(1);
+  expect(f.client.sendText.mock.calls[0]?.[0]).toMatchObject({ chatId: scope.chatId, text: '仍缺最终核对。' });
+  expect(f.calls).toHaveLength(1);
+});
+
+it('physically stops the original task after cancellation and rejects forged or revoked identities', async () => {
+  const f = await fixture(); const { mandate } = await f.create(); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const id = f.calls[0]!.sessionId;
+  await expect(f.collaboration.background.authorizeExecution(id, 'ou_other')).rejects.toMatchObject({ code: 'COLLABORATION_EXECUTION_REVOKED' });
+  await expect(f.runtime.stop(id, { kind: 'channel', appId: 'cli_foreign', id: 'ou_alice' })).rejects.toBeDefined();
+  await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: mandate.revision, status: 'cancelled' });
+  await f.collaboration.scheduler.tick();
+  expect(f.stopped).toContain(id); expect(f.client.sendText).not.toHaveBeenCalled();
+  expect((await f.collaboration.riskPolicy(id))?.policy).toMatchObject({ authorized: false, pattern: '.*' });
+  expect(await f.collaboration.authorize(scope, 'ou_alice', 'manage')).toBe(false);
+  expect(await f.collaboration.authorize(scope, installationOwnerTaskActor, 'manage')).toBe(true);
+});
+
+it('stores immutable instruction versions and fails closed when the current group is revoked', async () => {
+  const f = await fixture();
+  const patch = await f.collaboration.prepareSettings(scope, { expectedRevision: 0, participation: 'observe', instructions: '只补充遗漏' });
+  await f.collaboration.service.updateSettings(scope, installationOwnerTaskActor, patch);
+  expect(patch.policyVersion).toBe('revision-1');
+  await expect(f.collaboration.prepareSettings(scope, { expectedRevision: 1, instructions: '改为每条都回复', policyVersion: 'revision-1' })).rejects.toMatchObject({ code: 'COLLABORATION_POLICY_VERSION_CONFLICT' });
+  await expect(f.collaboration.prepareSettings(scope, { expectedRevision: 0, instructions: '过期草稿' })).rejects.toMatchObject({ code: 'COLLABORATION_REVISION_CONFLICT' });
+  await f.create(); f.advance(); await f.collaboration.scheduler.tick(); await eventually(async () => f.calls.length === 1);
+  const session = (await f.runtime.getSession(f.calls[0]!.sessionId))!;
+  const capabilities = new LarkAgentToolCapabilityRegistry(f.repos.sessions, 'http://localhost');
+  const tools = new LarkAgentToolsService(capabilities, f.repos.config, { authorizeTool: (id, action) => f.collaboration.background.authorizeTool(id, action) });
+  const token = capabilities.environmentFor(session).dutydeck_group_tools_token;
+  expect(await tools.memoryContext(token)).toMatchObject({ sessionId: session.id });
+  f.revoke();
+  await expect(tools.memoryContext(token)).rejects.toMatchObject({ code: 'COLLABORATION_EXECUTION_REVOKED' });
+  capabilities.close();
+  expect(await f.collaboration.authorize(scope, 'ou_alice', 'execute')).toBe(false);
+  expect((await f.collaboration.riskPolicy(f.calls[0]!.sessionId))?.policy).toMatchObject({ authorized: false, pattern: '.*' });
+});
+
+it('keeps one real background execution while toggling delivery and resumes only its result', async () => {
+  const f = await fixture(); const { mandate } = await f.create(); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const call = f.calls[0]!;
+  const paused = await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: mandate.revision, deliveryPaused: true });
+  await f.collaboration.scheduler.tick();
+  expect(f.stopped).not.toContain(call.sessionId);
+  expect(await f.collaboration.background.authorizeExecution(call.sessionId, 'ou_alice')).toBe(true);
+  await f.collaboration.service.updateMandate(scope, 'ou_alice', mandate.id, { expectedRevision: paused.mandate.revision, deliveryPaused: false });
+  await f.collaboration.scheduler.tick(); expect(f.calls).toHaveLength(1);
+  call.finish('已核对资料。');
+  await eventually(async () => (await f.repos.tasks.listBySession(call.sessionId)).every(task => !['queued', 'running'].includes(task.status)));
+  await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
+  expect(await f.repos.collaboration.listActions(scope)).toEqual(expect.arrayContaining([expect.objectContaining({kind: 'schedule_delivery', status: 'succeeded'})]));
+  expect(f.client.sendText).toHaveBeenCalledTimes(1); expect(f.calls).toHaveLength(1);
+});
+
+it('applies the live execution gate to registered external actions, including local owner calls', async () => {
+  const f = await fixture();
+  const execute = vi.fn(async () => ({ receipt: 'external-result' }));
+  f.collaboration.extensions.registerAction('document-export', { parse: input => input, execute });
+  await f.groups.save(scope.appId, scope.chatId, { expectedRevision: f.group.binding!.revision, patch: { state: 'disabled' } });
+  await expect(f.collaboration.extensions.execute('document-export', scope, installationOwnerTaskActor, 'export-one', {})).rejects.toMatchObject({ code: 'COLLABORATION_FORBIDDEN' });
+  expect(execute).not.toHaveBeenCalled();
+});

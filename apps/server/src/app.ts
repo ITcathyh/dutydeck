@@ -1,3 +1,5 @@
+import { ZodError } from 'zod';
+import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { AgentGroupToolError } from './lark/agent-tools.js';
 import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyRequest } from 'fastify';
@@ -51,6 +53,7 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  collaboration?: CollaborationRouteOptions;
   workItems?: WorkItemRouteOptions;
   workItemTools?: WorkItemToolsOptions;
   memoryTools?: LarkMemoryToolsOptions;
@@ -90,6 +93,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   app.addHook('preClose', async () => { for (const stream of streams) stream.end(); streams.clear(); });
 
   app.setErrorHandler((error, _request, reply) => {
+    if (error instanceof ZodError) return reply.code(400).send({ error: { code: 'INVALID_INPUT', message: error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ') } });
     if (error instanceof AgentGroupToolError) return reply.code(error.statusCode).send(error.response());
     if (error instanceof RuntimeError || error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
     reply.code(500).send({ error: { code: 'INTERNAL_ERROR', message: error.message } });
@@ -125,6 +129,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);
+  if (options.collaboration) await registerCollaborationRoutes(app, options.collaboration);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
