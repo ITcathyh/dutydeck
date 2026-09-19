@@ -31,7 +31,7 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
   let beforeSubmit: (() => Promise<void>) | undefined;
   let beforeStart: (() => Promise<void>) | undefined;
   const deniedAgents = new Set<string>();
-  let allowed = true; let service: WorkItemService; let runtime: DutydeckRuntime;
+  let allowed = true; let gated = false; let service: WorkItemService; let runtime: DutydeckRuntime;
   const deliveries = vi.fn(async (_item: WorkItem) => {});
   const notifications = vi.fn(async (_item: WorkItem, _actorId: string) => {});
   const makeRuntime = () => new DutydeckRuntime(repos, {
@@ -61,7 +61,7 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
       } satisfies AgentDriver;
     }
   });
-  const makeService = () => new WorkItemService({ repositories: repos, runtime, authorize: async (_id, actor) => allowed && (actor === 'ou_owner' || actor === 'installation_owner'), authorizeAgent: async (_parent, _actor, id) => !deniedAgents.has(id), deliver: deliveries, notify: notifications });
+  const makeService = () => new WorkItemService({ repositories: repos, runtime, authorize: async (_id, actor) => allowed && (actor === 'ou_owner' || actor === 'installation_owner'), authorizeAgent: async (_parent, _actor, id) => !deniedAgents.has(id), requireConfirmation: () => gated, deliver: deliveries, notify: notifications });
   runtime = makeRuntime(); service = makeService(); await runtime.initialize(agents);
   const parent = await runtime.start({ agentId: 'alpha', cwd: directory, source: 'lark', sourceId: 'cli_app:ou_owner:root_message', permissionMode: 'ask' });
   cleanup.push(async () => { await service.close(); await runtime.shutdown(); await repos.close(); await rm(directory, { recursive: true, force: true }); });
@@ -71,6 +71,7 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
     holdStart(action: () => Promise<void>) { beforeStart = action; },
     get service() { return service; }, get runtime() { return runtime; },
     deny() { allowed = false; }, allow() { allowed = true; }, denyAgent(id: string) { deniedAgents.add(id); }, holdSubmit(action: () => Promise<void>) { beforeSubmit = action; },
+    gate(on = true) { gated = on; },
     async recreateService() { await service.close(); service = makeService(); },
     async reboot() { await service.close(); await runtime.shutdown(); runtime = makeRuntime(); service = makeService(); await runtime.initialize(agents); },
     create: (custom = plan, key = 'request-1') => service.create(parent.id, { goal: 'Compare evidence', plan: custom, idempotencyKey: key }, 'ou_owner'),
@@ -107,6 +108,43 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect(done.delivery.status).toBe('delivered');
     await f.tick(); expect(f.deliveries).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(done)).not.toContain('ou_owner');
+  });
+
+  it('holds a gated plan until a human confirms and dispatches nothing before that, across a restart', async () => {
+    const f = await fixture(); f.gate();
+    const item = await f.create();
+    expect(item.status).toBe('awaiting_confirmation');
+    for (let round = 0; round < 3; round++) await f.tick();
+    expect(f.calls).toHaveLength(0);
+    expect((await f.runtime.listSessions()).filter(session => session.source === 'work_item')).toHaveLength(0);
+    expect((await f.get(item.id)).steps.every(step => step.status === 'pending' && !step.attempts.length)).toBe(true);
+    await f.reboot(); await f.tick();
+    expect((await f.get(item.id)).status).toBe('awaiting_confirmation');
+    expect(f.calls).toHaveLength(0);
+    const pending = await f.get(item.id);
+    await expect(f.service.confirm(f.parent.id, item.id, pending.revision, 'ou_other')).rejects.toMatchObject({ statusCode: 403 });
+    await expect(f.service.confirm(f.parent.id, item.id, pending.revision + 5, 'ou_owner')).rejects.toMatchObject({ statusCode: 409 });
+    await f.tick(); expect(f.calls).toHaveLength(0);
+    expect((await f.service.confirm(f.parent.id, item.id, pending.revision, 'ou_owner')).status).toBe('running');
+    await expect(f.service.confirm(f.parent.id, item.id, pending.revision + 1, 'ou_owner')).rejects.toMatchObject({ statusCode: 409 });
+    await f.tick(); await eventually(async () => f.calls.length === 2);
+  });
+
+  it('refuses to turn an unconfirmed plan into a reusable template', async () => {
+    const f = await fixture(); f.gate();
+    const item = await f.create();
+    await expect(f.service.saveTemplate(f.parent.id, item.id, '未确认流程', 'ou_owner')).rejects.toMatchObject({ code: 'WORK_TEMPLATE_UNCONFIRMED' });
+    await f.service.confirm(f.parent.id, item.id, item.revision, 'ou_owner');
+    expect((await f.service.saveTemplate(f.parent.id, item.id, '已确认流程', 'ou_owner')).version).toBe(1);
+  });
+
+  it('cancels a gated plan without ever starting a step', async () => {
+    const f = await fixture(); f.gate();
+    const item = await f.create();
+    await f.service.cancel(f.parent.id, item.id, item.revision, 'ou_owner');
+    expect((await f.get(item.id)).status).toBe('cancelled');
+    await f.tick(); expect(f.calls).toHaveLength(0);
+    await expect(f.service.confirm(f.parent.id, item.id, (await f.get(item.id)).revision, 'ou_owner')).rejects.toMatchObject({ statusCode: 409 });
   });
 
   it('recovers a lost accepted response without sending a second prompt', async () => {

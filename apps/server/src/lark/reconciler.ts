@@ -14,9 +14,9 @@ import {
   renderLarkResultElements,
   terminalTaskStates
 } from './card-renderer.js';
-import { larkResultKey, sendLarkResult } from './result-delivery.js';
+import { deliverLarkCompletionReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
 import { RECOVERY_TRACKING_NOTE } from './recovery-notes.js';
-import { isGroupChat, renderGroupMention } from './card-mentions.js';
+import { senderGroupMention } from './card-mentions.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 
@@ -26,7 +26,9 @@ const persistedCardTask = (value?: string | null): PersistedLarkCardTask | undef
   if (!value) return;
   try {
     const parsed = JSON.parse(value) as Partial<PersistedLarkCardTask>;
-    if (!parsed.app_id || !parsed.chat_id || !parsed.card_message_id || !parsed.task_name || !parsed.state || !Number.isFinite(parsed.started_at)) return;
+    // card_message_id 可以缺席：中间进展静默的那些轮次根本没发过程卡，
+    // 但结果仍然要靠对账补发，映射不能被当成损坏记录丢掉。
+    if (!parsed.app_id || !parsed.chat_id || !parsed.task_name || !parsed.state || !Number.isFinite(parsed.started_at)) return;
     return parsed as PersistedLarkCardTask;
   } catch { return; }
 };
@@ -40,6 +42,8 @@ export async function performLarkCardReconcile(input: {
   channel: string;
   deliveryStore?: ConfigRepository;
   resultElements?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, cardId: string) => Promise<Array<Record<string, any>>>;
+  /** 按记录所属会话解析生效配置（群级呈现覆盖）。缺省时全部按 Bot 级配置补发。 */
+  resolveConfig?: (saved: PersistedLarkCardTask) => Promise<StoredLarkConfig>;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
@@ -53,15 +57,19 @@ export async function performLarkCardReconcile(input: {
     try {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
+      // 呈现开关可以按群覆盖：补发方式必须按这条记录所属会话的生效配置决定。
+      const effective = (await input.resolveConfig?.(persisted)) ?? config;
       const terminalPersisted = terminalTaskStates.has(persisted.state);
       const alreadyDelivered = terminalPersisted
-        && persisted.final_delivery_state === 'delivered'
-        && Boolean(persisted.final_message_id);
+        && ((persisted.final_delivery_state === 'delivered' && Boolean(persisted.final_message_id))
+          // 只贴表情的终态没有结果消息 id，它本身就是「已交付」。
+          || persisted.final_delivery_state === 'reaction');
       // 旧版单卡结果已经交付，保留历史消息，不追发。
-      if (alreadyDelivered && persisted.final_message_id === persisted.card_message_id) continue;
+      if (alreadyDelivered && persisted.final_message_id && persisted.final_message_id === persisted.card_message_id) continue;
       if (alreadyDelivered) {
-        if (persisted.state === 'completed' && input.resultElements) await input.resultElements(mapping, persisted, persisted.final_message_id!);
-        if (persisted.progress_frozen) continue;
+        if (persisted.state === 'completed' && persisted.final_message_id && input.resultElements) await input.resultElements(mapping, persisted, persisted.final_message_id);
+        // 没有过程卡就没有可冻结的对象，直接收敛。
+        if (persisted.progress_frozen || !persisted.card_message_id) continue;
         const legacyElements = persisted.last_successful_elements?.length ? persisted.last_successful_elements : undefined;
         try {
           await service.update({
@@ -107,7 +115,8 @@ export async function performLarkCardReconcile(input: {
       if (!runtimeTask) { unresolved++; continue; }
       if (!terminalTaskStates.has(runtimeTask.status)) {
         unresolved++;
-        if (persisted.progress_frozen) {
+        // 静默轮次没有过程卡可刷；任务仍在跑，继续跟踪到终态。
+        if (persisted.progress_frozen || !persisted.card_message_id) {
           continue;
         }
         const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
@@ -160,17 +169,19 @@ export async function performLarkCardReconcile(input: {
       if (state === 'completed' && hasUnresolvedToolCalls(events)) state = 'failed';
       const completed = state === 'completed';
       const elapsedSeconds = Math.max(0, (Date.parse(runtimeTask.updatedAt) - persisted.started_at) / 1_000);
-      let updated = Boolean(persisted.progress_frozen);
+      const cardMessageId = persisted.card_message_id;
+      // 没有过程卡的轮次直接视为「过程已收敛」，只补结果这条腿。
+      let updated = Boolean(persisted.progress_frozen) || !cardMessageId;
       let lastError: unknown;
       let contentRejected = false;
       const currentElements = boundLarkCardElements(renderLarkProcessElements(events, config, true));
       let deliveredElements = persisted.last_successful_elements;
-      for (let attempt = 1; !updated && attempt <= 3; attempt++) {
+      for (let attempt = 1; !updated && cardMessageId && attempt <= 3; attempt++) {
         try {
           await service.update({
             ...cardContext,
             cardKind: 'process',
-            messageId: persisted.card_message_id,
+            messageId: cardMessageId,
             permissionMode: larkPermissionMode(config),
             state,
             taskId: mapping.externalId,
@@ -197,13 +208,13 @@ export async function performLarkCardReconcile(input: {
         }
       }
       // 内容被拒绝只允许原地降级，不允许因此另发一条消息。
-      if (!updated && contentRejected && Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length) {
+      if (!updated && cardMessageId && contentRejected && Array.isArray(persisted.last_successful_elements) && persisted.last_successful_elements.length) {
         const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
         try {
           await service.update({
             ...cardContext,
             cardKind: 'process',
-            messageId: persisted.card_message_id,
+            messageId: cardMessageId,
             permissionMode: larkPermissionMode(config),
             state,
             taskId: mapping.externalId,
@@ -228,13 +239,20 @@ export async function performLarkCardReconcile(input: {
       let finalMessageId: string | undefined;
       let finalAttachmentMessageId: string | undefined;
       let finalElements: Array<Record<string, any>> | undefined;
+      let reactionDelivered = false;
       let resultCallbackFailed = false;
       try {
+        // 完成时只贴表情：重启补发同样不发结果卡，只补那一枚表情。
+        // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
+        if (completed && effective.completionReactionOnly === true) {
+          reactionDelivered = await deliverLarkCompletionReaction(
+            service, { appId: persisted.app_id, messageId: mapping.externalId }, log, input.deliveryStore);
+        } else {
         // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
         // 保证消息不重发，@ 也不会重复。默认关闭时本元素不存在，卡面逐字节不变。
-        const mention = config.groupCardMention === true && isGroupChat(persisted.chat_type) && persisted.sender_open_id
-          ? renderGroupMention(persisted.sender_open_id)
-          : undefined;
+        // 发起人是机器人时同样不 @ 回去：刷屏事故里最容易触发的恰好是重启对账这条路。
+        const mention = senderGroupMention(config.groupCardMention, {
+          chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type });
         const elements = [
           ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : []),
           ...renderLarkResultElements(events),
@@ -249,7 +267,7 @@ export async function performLarkCardReconcile(input: {
           taskId: mapping.externalId, taskName: persisted.task_name,
           elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true, recordExport: true,
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-          elements, idempotencyKey: larkResultKey(persisted.card_message_id)
+          elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn))
         }, log, input.deliveryStore);
         finalAttachmentMessageId = result.attachmentMessageId;
         finalMessageId = result.messageId;
@@ -262,20 +280,23 @@ export async function performLarkCardReconcile(input: {
             log.warn({ error: callbackError, messageId: persisted.card_message_id, finalMessageId, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果回调写入失败，稍后重试');
           }
         }
+        }
       } catch (error) {
         log.warn({ error, messageId: persisted.card_message_id, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果交付待下次对账重试');
       }
-      if (!updated || !finalMessageId || resultCallbackFailed) unresolved++;
+      if (!updated || (!finalMessageId && !reactionDelivered) || resultCallbackFailed) unresolved++;
       // 原子 CAS：只有 mapping.extra 仍是本轮读到的旧快照时才写回，避免在 PATCH/结果发送
       // 在途期间新一轮 turn 已 save 后，旧快照把新 turn/新卡覆盖回旧值并误冻结。
       const casSaved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
         ...persisted, runtime_task_id: runtimeTask.id, state,
         progress_frozen: updated,
-        ...(finalMessageId ? { final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements } : {}),
+        ...(finalMessageId
+          ? { final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements }
+          : reactionDelivered ? { final_delivery_state: 'reaction' } : {}),
         last_successful_elements: deliveredElements
       }));
       if (casSaved) {
-        log.info({ messageId: persisted.card_message_id, finalMessageId, state, progressFrozen: updated }, '飞书过程与结果消息对账完成');
+        log.info({ messageId: persisted.card_message_id, finalMessageId, reactionDelivered, state, progressFrozen: updated }, '飞书过程与结果消息对账完成');
       } else {
         // CAS 失败说明映射已被更新的一轮/实时链路写过：不覆盖，多跑一轮继续跟踪。
         unresolved++;

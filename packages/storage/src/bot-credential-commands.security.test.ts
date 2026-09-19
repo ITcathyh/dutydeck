@@ -80,7 +80,9 @@ function samplePolicyInput() {
       groupCardMention: false,
       pushIntervalMs: 1000,
       traceLimit: 10,
-      hideTraceOnComplete: false
+      hideTraceOnComplete: false,
+      completionReactionOnly: false,
+      silentProgress: false
     },
     groupToolsPolicy: {
       readCeiling: false,

@@ -1,4 +1,5 @@
 import { RuntimeError, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, countDecisionUsage } from '@dutydeck/shared';
+import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD, countBotTurnUsage } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
@@ -24,6 +25,8 @@ export interface GroupParticipationOptions {
 }
 type Pending = { event: LarkMessageEvent; config: StoredLarkConfig };
 type Slot = { pending?: Pending; timer?: NodeJS.Timeout; running?: Promise<void>; stopped: boolean };
+/** 一次回合门禁的结论：放行返回 undefined，拦下返回可直接落日志的理由。 */
+export type BotTurnGate = string | undefined;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const keyFor = (scope: CollaborationScope) => JSON.stringify([scope.appId, scope.chatId]);
 
@@ -32,6 +35,12 @@ export class LarkGroupParticipation {
   private closed = false;
   private readonly active = new Set<Promise<unknown>>();
   private readonly slots = new Map<string, Slot>();
+  /** 同一话题内连续由机器人触发的回合数；人类触发的回合把它清零。 */
+  private readonly botTurnDepth = new Map<string, number>();
+  /** 已判定超出机器人预算的群 → 该结论的短期有效期（ms）。刷屏时避免每条消息都读一次统计窗口。 */
+  private readonly botBudgetExhausted = new Map<string, number>();
+  /** 每群一条门禁串行链。门禁是跨 await 的读-改-写，并发进入会让同一份用量被重复放行。 */
+  private readonly botTurnChain = new Map<string, Promise<unknown>>();
   private readonly bootstrapper: LarkContextBootstrap;
   constructor(private readonly options: GroupParticipationOptions) {
     this.bootstrapper = new LarkContextBootstrap({ ...options, authorize: scope => options.authorize(scope, undefined, 'observe') });
@@ -217,6 +226,87 @@ export class LarkGroupParticipation {
       return `判定预算窗口不完整：最近 ${DECISION_WINDOW_LIMIT} 条判定都落在本小时内`;
     }
     return used >= limit ? `判定预算已用尽：本小时 ${used}/${limit}` : undefined;
+  }
+  /**
+   * 机器人互相 @ 的硬门禁，与 participation 设置无关。
+   *
+   * 唤醒判据里的 mentionsBot 分支不受 `!botSender` 约束，访问控制在没配成员名单时
+   * 又对任何机器人一律放行——两个机器人互相 @ 就能无限往返。这里是唯一封口的地方。
+   * 它只读自己的状态，不看 participation 开关：participation 默认 off，而事故恰好
+   * 发生在默认配置上。（真实接线见 service.ts，participation 实例始终存在。）
+   *
+   * 按群串行执行：coordinator.handle 由长连接 fire-and-forget 调起，同一 tick 到达的
+   * 多条机器人消息会并发进来。不串行的话它们会读到同一份深度与用量后一起放行——
+   * 而「同一 tick 涌进一批」正是刷屏事故的形态，门禁必须在这里就是准的。
+   * decide() 靠 enqueue/drain 的按群 slot 拿到同样的保证。
+   *
+   * 返回拦截理由，放行返回 undefined。调用方拦下后只留日志与门禁记录，不向群里发消息。
+   */
+  guardBotTurn(event: LarkMessageEvent, config: StoredLarkConfig, input: { botOpenId?: string }): Promise<BotTurnGate> {
+    if (this.closed || event.chatType !== 'group') return Promise.resolve(undefined);
+    const key = keyFor({ appId: config.appId, chatId: event.chatId });
+    const run = (this.botTurnChain.get(key) ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => this.checkBotTurn(event, config, input));
+    this.botTurnChain.set(key, run.catch(() => undefined));
+    return this.track(() => run);
+  }
+  private async checkBotTurn(event: LarkMessageEvent, config: StoredLarkConfig, input: { botOpenId?: string }): Promise<BotTurnGate> {
+    const scope = { appId: config.appId, chatId: event.chatId };
+    const chatKey = keyFor(scope);
+    const topicKey = `${chatKey}::${event.threadId ?? ''}`;
+    const bot = event.senderType === 'app' || event.senderType === 'bot' || Boolean(input.botOpenId && event.senderOpenId === input.botOpenId);
+    if (!bot) { this.botTurnDepth.delete(topicKey); return undefined; }
+    const depth = (this.botTurnDepth.get(topicKey) ?? 0) + 1;
+    if (depth > BOT_LOOP_DEPTH_LIMIT) {
+      // 深度不再往上累加：挡住之后每条消息都在这里返回，不读库也不写库。
+      const reason = `同一话题内已连续 ${BOT_LOOP_DEPTH_LIMIT} 轮由机器人触发，在人类发言前不再响应`;
+      await this.recordBotGate(scope, reason, 'depth');
+      return reason;
+    }
+    const now = this.now().getTime();
+    // 预算是滑动一小时，缓存只是「刷屏时别每条消息都读一次库」的短期结论，
+    // 因此只缓存几秒：过期后重新按滑动窗口判，名额一到点就能放出来。
+    if ((this.botBudgetExhausted.get(chatKey) ?? 0) > now) return `机器人触发的回合已用尽本小时预算（上限 ${BOT_TURN_LIMIT_PER_HOUR}）`;
+    const since = now - 3_600_000;
+    const recent = await this.options.repository.listDecisions(scope, DECISION_WINDOW_LIMIT);
+    const used = countBotTurnUsage(recent, since);
+    // 与 decisionBudget 同一形态：窗口取满且最旧一条仍在本小时内时用量只会被低估，按超限处理。
+    const windowIncomplete = recent.length >= DECISION_WINDOW_LIMIT && Date.parse(recent.at(-1)!.createdAt) >= since;
+    if (windowIncomplete || used >= BOT_TURN_LIMIT_PER_HOUR) {
+      this.botBudgetExhausted.set(chatKey, now + 10_000);
+      const reason = windowIncomplete
+        ? `机器人预算窗口不完整：最近 ${DECISION_WINDOW_LIMIT} 条记录都落在本小时内`
+        : `机器人触发的回合已用尽本小时预算：${used}/${BOT_TURN_LIMIT_PER_HOUR}`;
+      await this.recordBotGate(scope, reason, 'budget');
+      return reason;
+    }
+    await this.options.repository.recordDecision({
+      id: `decision_bot_turn_${digest([scope, event.messageId])}`, scope, contextRevision: 0, policyVersion: 'bot-loop-guard',
+      action: 'silent', reason: `机器人触发的回合 ${used + 1}/${BOT_TURN_LIMIT_PER_HOUR}，同话题连续第 ${depth} 轮`,
+      evidenceIds: [], status: 'suppressed',
+      inputSnapshot: { gate: BOT_TURN_RECORD, messageId: event.messageId, ...(event.threadId ? { threadId: event.threadId } : {}) },
+      createdAt: this.now().toISOString()
+    });
+    // 先 delete 再 set：Map 对已存在的键不会移到末尾，不删就等于按「最早插入」淘汰，
+    // 正在刷屏的话题反而可能被丢掉、连续深度归零，回路上限从此拦不住它。
+    this.botTurnDepth.delete(topicKey);
+    this.botTurnDepth.set(topicKey, depth);
+    // 话题键只增不减，长驻进程会累积；上限与 coordinator 的 handledMessages 同款，惰性丢最久未用的。
+    if (this.botTurnDepth.size > 5_000) this.botTurnDepth.delete(this.botTurnDepth.keys().next().value!);
+    return undefined;
+  }
+  /**
+   * 门禁留痕按小时分桶：recordDecision 遇到已存在的 id 直接返回，所以每群每小时每类最多一条。
+   * 按每条消息写会让几百条门禁记录把 500 条统计窗口占满，用量从此再也读不准。
+   */
+  private async recordBotGate(scope: CollaborationScope, reason: string, kind: 'depth' | 'budget') {
+    const hour = Math.floor(this.now().getTime() / 3_600_000);
+    await this.options.repository.recordDecision({
+      id: `decision_bot_gate_${digest([scope, hour, kind])}`, scope, contextRevision: 0, policyVersion: 'bot-loop-guard',
+      action: 'silent', reason, evidenceIds: [], status: 'suppressed',
+      inputSnapshot: { gate: BOT_LOOP_GATE, kind }, createdAt: this.now().toISOString()
+    }).catch(error => this.options.log?.warn({ error, scope, kind }, '机器人回合门禁留痕失败'));
   }
   private async decide(scope: CollaborationScope, pending: Pending, slot: Slot) {
     await this.bootstrapper.ensure(scope);

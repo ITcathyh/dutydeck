@@ -42,6 +42,10 @@ export async function registerWorkItemRoutes(app: FastifyInstance, options: Work
   });
   app.post<{ Params: Params }>(base, async request => options.service.create(request.params.sessionId, workInput(createWorkItemSchema, request.body), await actor(request, request.params.sessionId)));
   app.get<{ Params: Params }>(`${base}/:id`, async request => options.service.get(request.params.sessionId, request.params.id, await actor(request, request.params.sessionId, true)));
+  app.post<{ Params: Params }>(`${base}/:id/confirm`, async request => {
+    const input = workInput(revisionInput, request.body);
+    return options.service.confirm(request.params.sessionId, request.params.id, input.expectedRevision, await actor(request, request.params.sessionId));
+  });
   app.post<{ Params: Params }>(`${base}/:id/cancel`, async request => {
     const input = workInput(revisionInput, request.body);
     return options.service.cancel(request.params.sessionId, request.params.id, input.expectedRevision, await actor(request, request.params.sessionId));

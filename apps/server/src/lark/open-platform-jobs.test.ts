@@ -11,6 +11,7 @@ import type {
 const result: OpenPlatformConfigurationResult = {
   status: 'ready',
   scopeCount: 16,
+  skippedScopes: [],
   eventCount: 1,
   callbackCount: 1,
   versionId: 'version-public-id',

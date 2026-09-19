@@ -751,3 +751,146 @@ describe('过期卡持久修复与结果附件引用', () => {
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });
+
+describe('conservative urgency in workflow interactions', () => {
+  it('is disabled by default and reconcile makes zero urgentApp calls', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_default_off', title: '执行受控操作', status: 'pending' }];
+      const { runtime } = makeRuntime([runningTask()], permissions);
+      const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] });
+      const service = { reply: vi.fn(async () => ({ messageId: 'om_card_off' })), update: vi.fn(async () => {}), urgentApp } as unknown as LarkCardService;
+      // Default: no urgent option passed -> must be OFF by default
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+
+      const ctx = context({ event: larkMessage({ senderOpenId: 'ou_requester' }) });
+      await workflow.observe(ctx, agentEvent('permission_request', permissions[0]));
+
+      // 15 minutes later (well past default 10min threshold)
+      const fifteenMinLater = Date.now() + 15 * 60 * 1000;
+      const viNow = vi.spyOn(Date, 'now').mockReturnValue(fifteenMinLater);
+      try {
+        // Reconcile must not make any urgentApp calls!
+        await workflow.reconcile(ctx.appId);
+        expect(urgentApp).not.toHaveBeenCalled();
+
+        // checkAndUrgePending returns empty result and does not call urgentApp
+        const result = await workflow.checkAndUrgePending(ctx.appId, { now: fifteenMinLater });
+        expect(result.checked).toBe(0);
+        expect(result.urged).toHaveLength(0);
+        expect(urgentApp).not.toHaveBeenCalled();
+      } finally {
+        viNow.mockRestore();
+      }
+    } finally {
+      repositories.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('runs urgency in reconcile when explicitly enabled', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_enabled_on', title: '执行受控操作', status: 'pending' }];
+      const { runtime } = makeRuntime([runningTask()], permissions);
+      const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] });
+      const service = { reply: vi.fn(async () => ({ messageId: 'om_card_on' })), update: vi.fn(async () => {}), urgentApp } as unknown as LarkCardService;
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true, {
+        urgent: true
+      });
+
+      const ctx = context({ event: larkMessage({ senderOpenId: 'ou_requester' }) });
+      await workflow.observe(ctx, agentEvent('permission_request', permissions[0]));
+
+      // 15 minutes later
+      const fifteenMinLater = Date.now() + 15 * 60 * 1000;
+      const viNow = vi.spyOn(Date, 'now').mockReturnValue(fifteenMinLater);
+      try {
+        await workflow.reconcile(ctx.appId);
+        expect(urgentApp).toHaveBeenCalledTimes(1);
+        expect(urgentApp).toHaveBeenCalledWith({
+          messageId: 'om_card_on',
+          userIdList: ['ou_requester'],
+          userIdType: 'open_id'
+        });
+      } finally {
+        viNow.mockRestore();
+      }
+    } finally {
+      repositories.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('urges pending cards that exceeded the 10-minute threshold when explicitly enabled and persists urgentAt', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_urgent', title: '执行受控操作', status: 'pending' }];
+      const { runtime } = makeRuntime([runningTask()], permissions);
+      const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] });
+      const service = { reply: vi.fn(async () => ({ messageId: 'om_card_perm' })), update: vi.fn(), urgentApp } as unknown as LarkCardService;
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true, {
+        urgent: true
+      });
+
+      const ctx = context({ event: larkMessage({ senderOpenId: 'ou_requester' }) });
+      await workflow.observe(ctx, agentEvent('permission_request', permissions[0]));
+
+      // 5 minutes later: should not urge yet
+      const fiveMinLater = Date.now() + 5 * 60 * 1000;
+      const resultEarly = await workflow.checkAndUrgePending(ctx.appId, { now: fiveMinLater });
+      expect(resultEarly.urged).toHaveLength(0);
+      expect(urgentApp).not.toHaveBeenCalled();
+
+      // 12 minutes later: should urge
+      const twelveMinLater = Date.now() + 12 * 60 * 1000;
+      const resultUrged = await workflow.checkAndUrgePending(ctx.appId, { now: twelveMinLater });
+      expect(resultUrged.urged).toHaveLength(1);
+      expect(urgentApp).toHaveBeenCalledWith({
+        messageId: 'om_card_perm',
+        userIdList: ['ou_requester'],
+        userIdType: 'open_id'
+      });
+
+      // Subsequent check: already urged, should skip
+      const resultDuplicate = await workflow.checkAndUrgePending(ctx.appId, { now: twelveMinLater + 60000 });
+      expect(resultDuplicate.urged).toHaveLength(0);
+      expect(urgentApp).toHaveBeenCalledTimes(1);
+
+      // Verify persistent record has urgentAt set
+      const records = await workflow.list(ctx.appId);
+      expect(records[0]?.urgentAt).toBeDefined();
+    } finally {
+      repositories.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('supports configuring custom thresholdMs and maxPerHourPerChat via options.urgent', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions: PermissionRequestData[] = [{ id: 'perm_custom', title: '执行受控操作', status: 'pending' }];
+      const { runtime } = makeRuntime([runningTask()], permissions);
+      const urgentApp = vi.fn().mockResolvedValue({ invalidUserIdList: [] });
+      const service = { reply: vi.fn(async () => ({ messageId: 'om_card_custom' })), update: vi.fn(), urgentApp } as unknown as LarkCardService;
+
+      // Custom 3-minute threshold
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true, {
+        urgent: { thresholdMs: 3 * 60 * 1000, maxPerHourPerChat: 1 }
+      });
+
+      const ctx = context({ event: larkMessage({ senderOpenId: 'ou_requester' }) });
+      await workflow.observe(ctx, agentEvent('permission_request', permissions[0]));
+
+      // 4 minutes later: exceeds 3-minute custom threshold, so should urge
+      const fourMinLater = Date.now() + 4 * 60 * 1000;
+      const result = await workflow.checkAndUrgePending(ctx.appId, { now: fourMinLater });
+      expect(result.urged).toHaveLength(1);
+      expect(urgentApp).toHaveBeenCalledTimes(1);
+    } finally {
+      repositories.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+});
+

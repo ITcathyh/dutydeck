@@ -3,8 +3,12 @@ import type { AgentRepository, ConfigRepository } from '@dutydeck/shared';
 import QRCode from 'qrcode';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
-import { configureLarkOpenPlatformApp, isValidLarkAppId, LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
+import { configureLarkOpenPlatformApp, isValidLarkAppId, larkSlashCommandDefinitions, LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
 import { connectLarkOpenPlatformSession, OpenPlatformRequestError, OpenPlatformSessionError } from './open-platform-session.js';
+import { createLarkCardService } from './service.js';
+
+/** 与 repair.ts 同一个判据：这条权限被跳过时命令菜单不可用，同步注定 403，不必发请求。 */
+const SLASH_COMMAND_SCOPE = 'application:app_slash_command:write';
 
 export interface LarkAppCreationJob {
   id: string;
@@ -33,6 +37,8 @@ interface Options {
   connect?: typeof connectLarkOpenPlatformSession;
   configure?: typeof configureLarkOpenPlatformApp;
   save?: typeof saveLarkConfig;
+  /** 默认用新应用自己的机器人凭据同步斜杠命令；测试注入替身。 */
+  syncSlashCommands?: (input: { appId: string; appSecret: string }) => Promise<unknown>;
   qrDataUrl?: (payload: string) => Promise<string>;
   now?: () => Date;
 }
@@ -256,7 +262,8 @@ export class LarkAppCreationJobManager {
       retryable = false;
       message = '应用草稿已保存，但自动配置或发布未完成；请继续配置该机器人并核对开放平台状态';
       await this.update(id, { status: 'configuring' });
-      await (this.options.configure ?? configureLarkOpenPlatformApp)(client, appId, { creatorUserId: owner.userId });
+      const configured = await (this.options.configure ?? configureLarkOpenPlatformApp)(client, appId, { creatorUserId: owner.userId });
+      await this.syncSlashCommands(appId, configured?.skippedScopes ?? []);
       await this.update(id, { status: 'completed', retryable: false });
     } catch (error) {
       // Never copy upstream errors: they may contain cookies, secrets or private IDs.
@@ -276,6 +283,28 @@ export class LarkAppCreationJobManager {
       try { await this.update(id, { status: pendingReview ? 'pending_review' : 'failed', retryable, error: pendingReview ? undefined : message }); }
       catch { /* The persisted boundary remains fail-closed if storage is unavailable. */ }
     }
+  }
+
+  /**
+   * 首配完成后同步一次原生斜杠命令（飞书输入框里的 `/` 菜单）。
+   *
+   * 时机与 /repair 相同，依据也相同：application:app_slash_command:write 是刚补进草稿的
+   * 权限，要等版本确认发布之后才对 tenant_access_token 生效，发布前写必然 403。
+   * configureLarkOpenPlatformApp 正常返回就意味着它内部的 publish_verify 已经通过；
+   * 审核中（publish_pending_review）会抛错走上面的 catch，同样不会走到这里。
+   *
+   * 任何失败都只是没有命令菜单——那是输入便利，不改变「应用已建好并配置完成」的结论，
+   * 因此一律吞掉，不把建应用判成失败；用户随时可以再跑一次 /repair 补齐。
+   */
+  private async syncSlashCommands(appId: string, skippedScopes: readonly string[]) {
+    if (skippedScopes.includes(SLASH_COMMAND_SCOPE)) return;
+    try {
+      const saved = await readLarkConfig(this.options.config, appId);
+      if (!saved?.appSecret) return;
+      if (this.options.syncSlashCommands) await this.options.syncSlashCommands({ appId, appSecret: saved.appSecret });
+      else await createLarkCardService(process.env, this.options.fetcher, { appId, appSecret: saved.appSecret })
+        .syncSlashCommands(larkSlashCommandDefinitions());
+    } catch { /* 命令菜单缺失不改变建应用的结论；重跑 /repair 可补齐。 */ }
   }
 }
 

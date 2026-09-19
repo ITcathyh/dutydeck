@@ -12,6 +12,8 @@ export interface LarkTaskDashboardEntry {
   taskId: string;
   title: string;
   workspace: string;
+  /** Agent 显示名；主控取不到名字时传 agentId，取不到任何信息时不传（行内与表头都不写 Agent）。 */
+  agent?: string;
   status: string;
   detail?: string;
   blocked?: boolean;
@@ -42,6 +44,7 @@ export interface LarkTaskDashboardResult {
 const PAGE_SIZE = 10;
 const MAX_TITLE_CHARS = 120;
 const MAX_WORKSPACE_CHARS = 120;
+const MAX_AGENT_CHARS = 64;
 
 const waitingStatuses = new Set(['waiting_for_permission', 'waiting_for_answer', 'failed', 'interrupted', 'reconcile_required', 'legacy_unresolved']);
 const runningStatuses = new Set(['queued', 'running', 'thinking', 'running_tool']);
@@ -88,6 +91,12 @@ const workspaceName = (value: unknown) => {
   const withoutTrailingSeparators = raw.replace(/[\\/]+$/u, '');
   const segment = withoutTrailingSeparators.split(/[\\/]/u).filter(Boolean).at(-1);
   return compactText(segment || raw, MAX_WORKSPACE_CHARS, '未指定工作区');
+};
+
+/** Agent 显示名；缺省返回 undefined，调用方据此完全不渲染 Agent（不编造「未知 Agent」）。 */
+const agentName = (value: unknown) => {
+  const raw = String(value ?? '').trim();
+  return raw ? compactText(raw, MAX_AGENT_CHARS, raw) : undefined;
 };
 
 const statusLabel = (status: unknown) => {
@@ -233,16 +242,18 @@ const rowOverflow = (
   return element;
 };
 
-const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorkspace?: string) => {
+const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorkspace?: string, sharedAgent?: string) => {
   const entry = item.entry;
   const title = compactText(entry.title, MAX_TITLE_CHARS, '未命名任务');
   const workspace = workspaceName(entry.workspace);
+  const agent = agentName(entry.agent);
   const feedback = entry.feedback ? ` · 验收：${({ pending: '待验收', accepted: '已通过', needs_changes: '需要修改' })[entry.feedback]}` : '';
   // 「状态：」「工作区：」这类标签词占了每行前四个字，而「等待审批」「dutydeck」自己
   // 就说明了自己是什么。全部任务在同一个工作区时（单机常态）它更是逐行重复同一个词，
-  // 这时提到表头写一次，行内只留真正逐行不同的东西。
+  // 这时提到表头写一次，行内只留真正逐行不同的东西。Agent 同一口径。
   const location = sharedWorkspace ? '' : ` · ${workspace}`;
-  const summary = `${title}\n${entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${entry.detail ? `\n${entry.detail}` : ''}`;
+  const executor = agent && !sharedAgent ? ` · ${agent}` : '';
+  const summary = `${title}\n${entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${entry.detail ? `\n${entry.detail}` : ''}`;
   const url = validAppLink(entry.url);
   const approval = validApproval(entry.pendingApproval);
   const primary = primaryRowAction(entry, approval);
@@ -323,12 +334,16 @@ export function buildLarkTaskDashboard(
   // 全部任务同在一个工作区时，工作区名从每一行提到表头。
   const workspaces = new Set(ordered.map(item => workspaceName(item.entry.workspace)));
   const sharedWorkspace = workspaces.size === 1 ? [...workspaces][0] : undefined;
+  // Agent 同一口径；任一行缺 Agent 信息就不提到表头，避免表头替缺失的行做担保。
+  const agents = ordered.map(item => agentName(item.entry.agent));
+  const sharedAgent = agents.every(Boolean) && new Set(agents).size === 1 ? agents[0] : undefined;
   // 不写「任务导航」标题：卡片 header 已经是这四个字（coordinator.ts 的 workflowReply
   // 用 taskName: '任务导航' 发出这张卡），正文再写一遍就是紧挨着的两行同名标题。
   const elements: Array<Record<string, any>> = [markdown(
     'task_dashboard_header',
     [`第 ${currentPage}/${totalPages} 页，共 ${ordered.length} 项。`,
-      sharedWorkspace && `工作区：${escapeCardInline(sharedWorkspace)}`]
+      sharedWorkspace && `工作区：${escapeCardInline(sharedWorkspace)}`,
+      sharedAgent && `Agent：${escapeCardInline(sharedAgent)}`]
       .filter(Boolean).join(' · ')
   )];
   let lastGroup: DashboardGroup | undefined;
@@ -338,7 +353,7 @@ export function buildLarkTaskDashboard(
       const groupCount = ordered.filter(candidate => candidate.group === item.group).length;
       elements.push(markdown(`task_dashboard_group_${item.group}`, `**${groupLabels[item.group]}**（${groupCount}）`));
     }
-    elements.push(taskRow(item, (currentPage - 1) * PAGE_SIZE + index, now, sharedWorkspace));
+    elements.push(taskRow(item, (currentPage - 1) * PAGE_SIZE + index, now, sharedWorkspace, sharedAgent));
   });
 
   const nextPage = currentPage < totalPages ? currentPage + 1 : 1;

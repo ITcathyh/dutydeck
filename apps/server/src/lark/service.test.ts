@@ -615,4 +615,190 @@ describe('Lark card service', () => {
     await expect(wiki.readDocument('https://feishu.cn/wiki/wiki_token')).rejects.toMatchObject({ code: 'UNSUPPORTED_DOCUMENT_TYPE' });
     expect(wikiFetcher).toHaveBeenCalledTimes(2);
   });
+
+  it('sends in-app urgent request for a single message to target users', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { invalid_user_id_list: [] } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const result = await service.urgentApp({
+      messageId: 'om_target_msg',
+      userIdList: ['ou_user_1', 'ou_user_2'],
+      userIdType: 'open_id'
+    });
+    expect(result).toEqual({ invalidUserIdList: [] });
+    expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/messages/om_target_msg/urgent_app?user_id_type=open_id');
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({
+      user_id_list: ['ou_user_1', 'ou_user_2']
+    });
+  });
+
+  it('validates urgentApp inputs and handles API errors', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 230001, msg: 'message not found' }, 400));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+
+    await expect(service.urgentApp({ messageId: '', userIdList: ['ou_1'] }))
+      .rejects.toMatchObject({ code: 'LARK_NOT_CONFIGURED' });
+    await expect(service.urgentApp({ messageId: 'om_1', userIdList: [] }))
+      .rejects.toMatchObject({ code: 'INVALID_URGENT_INPUT' });
+    await expect(service.urgentApp({ messageId: 'om_not_found', userIdList: ['ou_1'] }))
+      .rejects.toBeInstanceOf(LarkServiceError);
+  });
+
+  it('safeUrgentApp catches failures and returns undefined without throwing', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 99991663, msg: 'urgent failed' }, 500));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const warn = vi.fn();
+
+    const result = await service.safeUrgentApp(
+      { messageId: 'om_card', userIdList: ['ou_target'] },
+      { warn }
+    );
+    expect(result).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0]?.[1]).toContain('加急');
+  });
+
+  it('pins, unpins, and lists message pins', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { pin: { message_id: 'om_pin_msg', chat_id: 'oc_pin_chat' } } }))
+      .mockResolvedValueOnce(response({ code: 0 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [{ message_id: 'om_pin_msg', chat_id: 'oc_pin_chat' }], has_more: false } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+
+    const pinResult = await service.pin('om_pin_msg');
+    expect(pinResult).toEqual({ messageId: 'om_pin_msg', chatId: 'oc_pin_chat' });
+    expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/pins');
+    expect(JSON.parse(String(fetcher.mock.calls[1]?.[1]?.body))).toEqual({ message_id: 'om_pin_msg' });
+
+    await expect(service.unpin('om_pin_msg')).resolves.toBeUndefined();
+    expect(fetcher.mock.calls[2]?.[0]).toContain('/open-apis/im/v1/pins/om_pin_msg');
+    expect(fetcher.mock.calls[2]?.[1]?.method).toBe('DELETE');
+
+    const listResult = await service.listPins('oc_pin_chat');
+    expect(listResult).toEqual({
+      items: [{ messageId: 'om_pin_msg', chatId: 'oc_pin_chat' }],
+      hasMore: false,
+      pageToken: undefined
+    });
+    expect(fetcher.mock.calls[3]?.[0]).toContain('/open-apis/im/v1/pins?chat_id=oc_pin_chat');
+  });
+
+  it('syncs native slash commands with the tenant token, creating and updating only what differs', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [
+        { command_id: 'cmd_help', command: 'help', description: { default_value: '旧说明' } },
+        { command_id: 'cmd_tasks', command: '/tasks', description: { default_value: '看任务' } },
+        { command_id: 'cmd_manual', command: 'manual_command', description: { default_value: '人手工加的' } }
+      ] } }))
+      .mockResolvedValueOnce(response({ code: 0, data: { command_id: 'cmd_new' } }))
+      .mockResolvedValueOnce(response({ code: 0, data: {} }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+
+    await expect(service.syncSlashCommands([
+      { command: 'help', description: '新说明' },
+      { command: 'tasks', description: '看任务' },
+      { command: 'repair', description: '一键修复' }
+    ])).resolves.toEqual({ created: ['repair'], updated: ['help'] });
+
+    // 列表走 tenant token 的 GET；控制台会话那条路（cookie + CSRF + /developers/v1/*）不再参与。
+    expect(fetcher.mock.calls[1]?.[0]).toBe('https://open.feishu.cn/open-apis/application/v7/app_slash_commands');
+    expect(fetcher.mock.calls[1]?.[1]?.method).toBe('GET');
+    expect((fetcher.mock.calls[1]?.[1]?.headers as any).authorization).toBe('Bearer token');
+    // 取值变化用 PUT /:command_id，新增用 POST；远端多出来的 manual_command 一个字都不碰。
+    expect(fetcher.mock.calls[2]?.[0]).toBe('https://open.feishu.cn/open-apis/application/v7/app_slash_commands/cmd_help');
+    expect(fetcher.mock.calls[2]?.[1]?.method).toBe('PUT');
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({ command: 'help', description: { default_value: '新说明' } });
+    expect(fetcher.mock.calls[3]?.[0]).toBe('https://open.feishu.cn/open-apis/application/v7/app_slash_commands');
+    expect(fetcher.mock.calls[3]?.[1]?.method).toBe('POST');
+    expect(JSON.parse(String(fetcher.mock.calls[3]?.[1]?.body))).toEqual({ command: 'repair', description: { default_value: '一键修复' } });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(fetcher.mock.calls.some(call => String(call[0]).includes('manual_command'))).toBe(false);
+  });
+
+  it('follows the slash command list pagination so later pages are not mistaken for missing commands', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: {
+        items: [{ command_id: 'cmd_help', command: 'help', description: { default_value: '看帮助' } }],
+        has_more: true, page_token: 'page-2'
+      } }))
+      .mockResolvedValueOnce(response({ code: 0, data: {
+        items: [{ command_id: 'cmd_tasks', command: 'tasks', description: { default_value: '看任务' } }],
+        has_more: false
+      } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+
+    // 第二页里的 tasks 已经存在：把分页当不存在会把它当成缺失去重复创建，逐条撞唯一性失败。
+    await expect(service.syncSlashCommands([
+      { command: 'help', description: '看帮助' },
+      { command: 'tasks', description: '看任务' }
+    ])).resolves.toEqual({ created: [], updated: [] });
+
+    expect(fetcher.mock.calls[1]?.[0]).toBe('https://open.feishu.cn/open-apis/application/v7/app_slash_commands');
+    expect(fetcher.mock.calls[2]?.[0]).toBe('https://open.feishu.cn/open-apis/application/v7/app_slash_commands?page_token=page-2');
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops after one slash command list request when the response carries no continuation marker', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      // 没有 has_more / page_token：按全量处理，不再多请求一次。
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [{ command_id: 'cmd_help', command: 'help', description: { default_value: '看帮助' } }] } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await expect(service.syncSlashCommands([{ command: 'help', description: '看帮助' }])).resolves.toEqual({ created: [], updated: [] });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('stops paging when the server keeps echoing the same page token', async () => {
+    const fetcher = vi.fn().mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }));
+    // 每次新建 Response：同一个实例的 body 只能读一次。
+    fetcher.mockImplementation(async () => response({ code: 0, data: { items: [], has_more: true, page_token: 'stuck' } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await expect(service.syncSlashCommands([])).resolves.toEqual({ created: [], updated: [] });
+    // token 不再变化就停：同步不会被一个坏响应卡死。
+    expect(fetcher.mock.calls.length).toBeLessThanOrEqual(4);
+  });
+
+  it('reports no slash command writes when the remote list already matches', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [{ command_id: 'cmd_help', command: 'help', description: { default_value: '看帮助' } }] } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await expect(service.syncSlashCommands([{ command: 'help', description: '看帮助' }])).resolves.toEqual({ created: [], updated: [] });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it('surfaces a slash command permission failure as a LarkServiceError instead of swallowing it', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 99991672, msg: 'no permission' }, 403));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    await expect(service.syncSlashCommands([{ command: 'help', description: '看帮助' }]))
+      .rejects.toMatchObject({ code: 'LARK_OPENAPI_ERROR', details: { upstreamCode: 99991672 } });
+  });
+
+  it('safePin and safeUnpin catch failures and do not throw', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 230002, msg: 'pin forbidden' }, 403))
+      .mockResolvedValueOnce(response({ code: 230003, msg: 'unpin not found' }, 404));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test', LARK_API_RETRY_MAX_ATTEMPTS: '0' }, fetcher as typeof fetch);
+    const warn = vi.fn();
+
+    const pinRes = await service.safePin('om_fail_pin', { warn });
+    expect(pinRes).toBeUndefined();
+    expect(warn).toHaveBeenCalled();
+
+    warn.mockClear();
+    const unpinRes = await service.safeUnpin('om_fail_unpin', { warn });
+    expect(unpinRes).toBe(false);
+    expect(warn).toHaveBeenCalled();
+  });
 });

@@ -12,14 +12,17 @@ import {
   groupBindingStates,
   groupReplyModes,
   groupToolOverrideModes,
+  inheritPresentationOverride,
   mentionPolicies,
   operateScopes,
   policyActions,
+  presentationOverrideSchema,
+  presentationSettingsSchema,
   roleAssignmentSchema,
   type PolicyAction,
   type RoleAssignment
 } from './group-policy.js';
-export { roleAssignmentSchema, type RoleAssignment };
+export { roleAssignmentSchema, presentationOverrideSchema, inheritPresentationOverride, type RoleAssignment };
 
 export type GroupBindingState = (typeof groupBindingStates)[number];
 export type GroupReplyMode = (typeof groupReplyModes)[number];
@@ -282,14 +285,8 @@ export const channelBotPolicyExecutionV2Schema = z.object({
 }).strict();
 export type ChannelBotPolicyExecutionV2 = z.infer<typeof channelBotPolicyExecutionV2Schema>;
 
-export const channelBotPolicyPresentationV2Schema = z.object({
-  webBaseUrl: z.string().url().nullable().optional(),
-  structuredAskCards: z.boolean(),
-  groupCardMention: z.boolean(),
-  pushIntervalMs: z.number().int().min(500).max(20000),
-  traceLimit: z.number().int().positive(),
-  hideTraceOnComplete: z.boolean()
-}).strict();
+/** Bot 级呈现设置；群级 presentationOverride 逐字段覆盖它（见 group-policy.ts）。 */
+export const channelBotPolicyPresentationV2Schema = presentationSettingsSchema;
 export type ChannelBotPolicyPresentationV2 = z.infer<typeof channelBotPolicyPresentationV2Schema>;
 
 export const channelBotPolicyGroupToolsBaseSchema = z.object({
@@ -397,7 +394,7 @@ export const groupBindingV2Schema = z.object({
   routingOverride: routingOverrideSchemaV2,
   accessOverride: accessOverrideSchemaV2,
   groupToolsOverride: groupToolsOverrideSchemaV2,
-  presentationOverride: z.object({ mode: z.literal('inherit') }).strict(),
+  presentationOverride: presentationOverrideSchema,
   reviewReasons: z.array(z.string().regex(/^[a-z0-9_]+$/)),
   createdAt: timestampSchema,
   updatedAt: timestampSchema
@@ -582,7 +579,7 @@ export const createGroupBindingV2FieldsSchema = z.object({
   }),
   accessOverride: accessOverrideSchemaV2.default({ mode: 'inherit', principalIds: [] }),
   groupToolsOverride: groupToolsOverrideSchemaV2.default({ read: 'inherit', discover: 'inherit', send: 'inherit' }),
-  presentationOverride: z.object({ mode: z.literal('inherit') }).default({ mode: 'inherit' }),
+  presentationOverride: presentationOverrideSchema.default(inheritPresentationOverride),
   reviewReasons: z.array(z.string().regex(/^[a-z0-9_]+$/)).default([])
 }).strict();
 export type CreateGroupBindingV2Fields = z.infer<typeof createGroupBindingV2FieldsSchema>;
@@ -599,6 +596,7 @@ export const groupBindingPatchV2Schema = z.object({
   routingOverride: routingOverrideSchemaV2.optional(),
   accessOverride: accessOverrideSchemaV2.optional(),
   groupToolsOverride: groupToolsOverrideSchemaV2.optional(),
+  presentationOverride: presentationOverrideSchema.optional(),
   reviewReasons: z.array(z.string().regex(/^[a-z0-9_]+$/)).optional()
 }).strict().refine(val => Object.keys(val).length > 0, { message: 'At least one field must be updated' });
 export type GroupBindingPatchV2 = z.infer<typeof groupBindingPatchV2Schema>;

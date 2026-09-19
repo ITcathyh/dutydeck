@@ -47,6 +47,8 @@ export interface WorkItemServiceOptions {
   runtime: DutydeckRuntime;
   authorize: (parentSessionId: string, actorId?: string) => Promise<boolean>;
   authorizeAgent?: (parentSessionId: string, actorId: string, agentId: string) => Promise<boolean>;
+  /** 计划是否需要人工确认后才入队；create 的显式实参优先于这里的默认判定。 */
+  requireConfirmation?: (parent: Session) => boolean | Promise<boolean>;
   prepareDelivery?: (parentSessionId: string, workId: string, idempotencyKey: string) => Promise<void>;
   deliver?: (item: WorkItem) => Promise<void>;
   notify?: (item: WorkItem, actorId: string) => Promise<void>;
@@ -192,10 +194,12 @@ export class WorkItemService {
     if (admission && admission.taskId !== task.id) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Unexpected task for work attempt', 403);
     if (attempt?.taskId !== task.id) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Unexpected task for work attempt', 403);
   }
-  async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string): Promise<WorkItem> {
+  /** confirmation 显式为 true/false 时覆盖默认闸门判定；工具与 HTTP 入口一律不传，只走默认判定。 */
+  async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string, confirmation?: boolean): Promise<WorkItem> {
     input = createWorkItemSchema.parse(input);
     const parent = await this.access(parentSessionId, actorId);
     if (parent.archivedAt || ['stopped', 'failed'].includes(parent.state)) throw new RuntimeError('WORK_ITEM_PARENT_INACTIVE', 'Parent session is not runnable', 409);
+    const gated = confirmation ?? Boolean(await this.options.requireConfirmation?.(parent));
     const actor = this.executionActor(parent, actorId!);
     const id = 'work_' + hash(JSON.stringify([parentSessionId, actorId, input.idempotencyKey]));
     return this.serial(id, async () => {
@@ -218,7 +222,7 @@ export class WorkItemService {
       const currentTask = this.options.runtime.getActiveTaskContext(parentSessionId);
       const parentTask = currentTask ? (await this.repos.tasks.listBySession(parentSessionId)).find(task => task.id === currentTask.taskId) : undefined;
       const timestamp = time();
-      const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 } };
+      const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: gated ? 'awaiting_confirmation' : 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 } };
       const record: StoredWork = { item, actorId: actorId!, actor, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy };
       await this.options.prepareDelivery?.(parentSessionId, id, input.idempotencyKey);
       await this.access(parentSessionId, actorId);
@@ -231,6 +235,17 @@ export class WorkItemService {
     return (await this.records()).filter(record => record.item.parentSessionId === parentSessionId && (record.actorId === actorId || actorId === installationOwnerTaskActor)).map(record => this.view(record));
   }
   async get(parentSessionId: string, id: string, actorId?: string): Promise<WorkItem> { return this.view((await this.owned(parentSessionId, id, actorId)).value); }
+
+  /** 人工确认后计划才入队；确认者走与其它目标操作相同的授权判定。 */
+  async confirm(parentSessionId: string, id: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
+    return this.serial(id, async () => {
+      const state = await this.owned(parentSessionId, id, actorId); this.revision(state, expectedRevision);
+      if (state.value.item.status !== 'awaiting_confirmation') throw new RuntimeError('WORK_ITEM_NOT_AWAITING_CONFIRMATION', 'This plan is not awaiting confirmation', 409);
+      await this.assertExecution(state.value);
+      state.value.item.status = 'running';
+      await this.write(state); return this.view(state.value);
+    });
+  }
 
   async cancel(parentSessionId: string, id: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
     // The durable intent does not wait for an in-progress driver start or send.
@@ -312,6 +327,8 @@ export class WorkItemService {
   async saveTemplate(parentSessionId: string, workId: string, name: string, actorId?: string): Promise<WorkTemplate> {
     if (!name.trim() || name.length > 200) throw new RuntimeError('WORK_TEMPLATE_NAME_INVALID', 'Template name must contain 1–200 characters');
     const { value } = await this.owned(parentSessionId, workId, actorId);
+    // 没被人确认过的计划不能变成模板：否则以后 /work run 只让人看到模板名，绕过了预览。
+    if (value.item.status === 'awaiting_confirmation') throw new RuntimeError('WORK_TEMPLATE_UNCONFIRMED', 'Confirm the plan before saving it as a reusable template', 409);
     const id = 'template_' + hash(JSON.stringify([parentSessionId, actorId, name.trim()]));
     return this.serial(id, async () => {
       const records = (await this.repos.config.list!(TEMPLATES + id + ':')).map(row => JSON.parse(row.value) as StoredTemplate);
@@ -325,10 +342,10 @@ export class WorkItemService {
     await this.access(parentSessionId, actorId);
     return (await this.repos.config.list!(TEMPLATES)).map(row => JSON.parse(row.value) as StoredTemplate).filter(record => record.template.parentSessionId === parentSessionId && (record.actorId === actorId || actorId === installationOwnerTaskActor)).map(record => record.template);
   }
-  async runTemplate(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string): Promise<WorkItem> {
+  async runTemplate(parentSessionId: string, templateId: string, version: number, goal: string, idempotencyKey: string, actorId?: string, confirmation?: boolean): Promise<WorkItem> {
     const template = (await this.listTemplates(parentSessionId, actorId)).find(template => template.id === templateId && template.version === version);
     if (!template) throw new RuntimeError('WORK_TEMPLATE_NOT_FOUND', 'Template version not found', 404);
-    return this.create(parentSessionId, { goal, plan: template.plan, idempotencyKey }, actorId);
+    return this.create(parentSessionId, { goal, plan: template.plan, idempotencyKey }, actorId, confirmation);
   }
   tick(): Promise<void> {
     if (this.closed) return Promise.resolve();
@@ -352,7 +369,7 @@ export class WorkItemService {
       if (this.closed) break;
       const latest = (await this.read(record.item.id)).value;
       const current = latest.item;
-      if (['running', 'waiting', 'failed', 'blocked'].includes(current.status)) {
+      if (['awaiting_confirmation', 'running', 'waiting', 'failed', 'blocked'].includes(current.status)) {
         this.effect('notify:' + current.id, async () => { await this.options.notify?.(this.view(latest), latest.actorId); });
       }
     }
@@ -418,6 +435,8 @@ export class WorkItemService {
   private async drive(id: string) {
     let state = await this.read(id); let record = state.value;
     if (record.item.status === 'cancelling') { await this.cancelChildren(id); return; }
+    // 待确认的计划只是持久记录，确认前不做任何执行准备，也不派发步骤。
+    if (record.item.status === 'awaiting_confirmation') return;
     if (record.item.status === 'cancelled' || record.item.status === 'blocked') return;
     if (record.item.status === 'completed') { this.scheduleDelivery(record.item.id); return; }
     await this.assertExecution(record);

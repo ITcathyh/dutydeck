@@ -57,7 +57,7 @@ function policyInput() {
     },
     presentation: {
       webBaseUrl: null, structuredAskCards: false, groupCardMention: false,
-      pushIntervalMs: 1000, traceLimit: 10, hideTraceOnComplete: false
+      pushIntervalMs: 1000, traceLimit: 10, hideTraceOnComplete: false, completionReactionOnly: false, silentProgress: false
     },
     groupToolsPolicy: {
       readCeiling: false, discoverCeiling: false, sendCeiling: false,
@@ -430,7 +430,7 @@ describe('F3: App/brand change retains full-trust confirmation history; coverage
         },
         presentation: {
           webBaseUrl: null, structuredAskCards: false, groupCardMention: false,
-          pushIntervalMs: 1000, traceLimit: 10, hideTraceOnComplete: false
+          pushIntervalMs: 1000, traceLimit: 10, hideTraceOnComplete: false, completionReactionOnly: false, silentProgress: false
         },
         groupToolsPolicy: { readCeiling: false, discoverCeiling: false, sendCeiling: false, readDefault: false, discoverDefault: false, sendDefault: false },
         createdAt: time, updatedAt: time

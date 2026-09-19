@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   botChangeRefSchema, botConfigPatchV2Schema, botSnapshotSchema, canonicalExecutionJson,
-  RuntimeError, type ManagementActor
+  inheritPresentationOverride, RuntimeError, type ManagementActor
 } from '@dutydeck/shared';
 import { runMigrations } from './migrations.js';
 import { createConfigurationReader } from './bot-configuration-reader.js';
@@ -52,7 +52,7 @@ function seedBot(db: Database.Database, id = 'bot_a', secret: string | null = nu
     VALUES (?,2,1,?,'{}',?,?,?,?,?,?,?)`).run(`policy_${id}`, id,
     JSON.stringify({ p2pMode: 'chat', groupReplyMode: 'runtime_default', mentionPolicy: 'always' }), JSON.stringify(access),
     JSON.stringify({ permissionMode: 'ask', preInjectPrompt: null, highRiskAccess: { p2p: risk, managedGroup: risk, newGroup: risk }, riskControlMode: 'off', highRiskPattern: '.*' }),
-    JSON.stringify({ webBaseUrl: null, structuredAskCards: false, groupCardMention: false, pushIntervalMs: 1000, traceLimit: 10, hideTraceOnComplete: false }),
+    JSON.stringify({ webBaseUrl: null, structuredAskCards: false, groupCardMention: false, pushIntervalMs: 1000, traceLimit: 10, hideTraceOnComplete: false, completionReactionOnly: false, silentProgress: false }),
     JSON.stringify({ readCeiling: false, discoverCeiling: false, sendCeiling: false, readDefault: false, discoverDefault: false, sendDefault: false }), time, time);
 }
 
@@ -71,7 +71,7 @@ function binding(db: Database.Database, id: string, botId = 'bot_a') {
     VALUES (?,2,1,?,?,'enabled','managed_group',0,?,?,?,?,?,?,?,?,?,'[]',?,?)`)
     .run(id, botId, `chat_${id}`, ...Array<string>(5).fill(inherit),
       JSON.stringify({ groupReplyMode: { mode: 'inherit' }, mentionPolicy: { mode: 'inherit' } }), inherit,
-      JSON.stringify({ read: 'inherit', discover: 'inherit', send: 'inherit' }), inherit, time, time);
+      JSON.stringify({ read: 'inherit', discover: 'inherit', send: 'inherit' }), JSON.stringify(inheritPresentationOverride), time, time);
 }
 
 function request(patch: Partial<Input> = {}): Input {

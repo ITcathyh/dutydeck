@@ -54,7 +54,7 @@ function policyInput() {
     },
     presentation: {
       webBaseUrl: null, structuredAskCards: false, groupCardMention: false,
-      pushIntervalMs: 1000, traceLimit: 10, hideTraceOnComplete: false
+      pushIntervalMs: 1000, traceLimit: 10, hideTraceOnComplete: false, completionReactionOnly: false, silentProgress: false
     },
     groupToolsPolicy: {
       readCeiling: false, discoverCeiling: false, sendCeiling: false,

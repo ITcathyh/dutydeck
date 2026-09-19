@@ -4,7 +4,7 @@ import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError, collaborationApi, type Agent, type LarkBotConfig, type ManagedGroup, type CollaborationOverview } from '../api';
-import type { GroupBinding, RoleAssignment } from '@dutydeck/shared';
+import { inheritPresentationOverride, type GroupBinding, type RoleAssignment } from '@dutydeck/shared';
 import { resetDrafts } from '../draft-store';
 import { GroupManagement } from './GroupManagement';
 
@@ -59,7 +59,7 @@ const makeBinding = (overrides: Partial<GroupBinding> = {}): GroupBinding => ({
   routingOverride: { groupReplyMode: { mode: 'inherit' }, mentionPolicy: { mode: 'inherit' } },
   accessOverride: { mode: 'inherit', principalIds: [] },
   groupToolsOverride: { read: 'inherit', discover: 'inherit', send: 'inherit' },
-  presentationOverride: { mode: 'inherit' },
+  presentationOverride: inheritPresentationOverride,
   reviewReasons: [],
   createdAt: '2026-09-01T00:00:00.000Z',
   updatedAt: '2026-09-01T00:00:00.000Z',
@@ -382,6 +382,93 @@ describe('GroupManagement', () => {
           patch: expect.objectContaining({ modelOverride: { mode: 'clear' } })
         })
       );
+    });
+  });
+
+  it('群级呈现覆盖可在高级区改，并按逐字段结构提交', async () => {
+    const user = userEvent.setup();
+    stubBaseQueries();
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: mockGroups });
+    const saveSpy = vi.spyOn(api, 'updateGroupBotBinding').mockResolvedValue(mockGroups[0].bots[0]);
+
+    renderWithClient(
+      <GroupManagement
+        selectedChatId="oc_chat_1"
+        selectedAppId="cli_dev"
+        onSelectGroup={() => {}}
+        onNavigateToBot={() => {}}
+        agents={mockAgents}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByText(/正在配置/)).toBeTruthy());
+    await user.click(screen.getByRole('button', { name: /群工具与值班设置/ }));
+
+    await user.selectOptions(screen.getByLabelText('完成时只贴表情、不发结果卡'), 'on');
+    await user.selectOptions(screen.getByLabelText('中间进展静默'), 'on');
+    await user.selectOptions(screen.getByLabelText('群卡片 @ 发起人'), 'off');
+    await user.selectOptions(screen.getByLabelText('Trace 阶段上限'), 'set');
+    await user.clear(screen.getByLabelText('本群 Trace 阶段上限值'));
+    await user.type(screen.getByLabelText('本群 Trace 阶段上限值'), '4');
+
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith(
+        'cli_dev',
+        'oc_chat_1',
+        expect.objectContaining({
+          patch: expect.objectContaining({
+            presentationOverride: {
+              structuredAskCards: { mode: 'inherit' },
+              groupCardMention: { mode: 'set', value: false },
+              pushIntervalMs: { mode: 'inherit' },
+              traceLimit: { mode: 'set', value: 4 },
+              hideTraceOnComplete: { mode: 'inherit' },
+              completionReactionOnly: { mode: 'set', value: true },
+              silentProgress: { mode: 'set', value: true }
+            }
+          })
+        })
+      );
+    });
+  });
+
+  it('呈现数字项填不合法时挡住保存并说明原因，而不是悄悄退回继承', async () => {
+    const user = userEvent.setup();
+    stubBaseQueries();
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: mockGroups });
+    const saveSpy = vi.spyOn(api, 'updateGroupBotBinding').mockResolvedValue(mockGroups[0].bots[0]);
+
+    renderWithClient(
+      <GroupManagement
+        selectedChatId="oc_chat_1"
+        selectedAppId="cli_dev"
+        onSelectGroup={() => {}}
+        onNavigateToBot={() => {}}
+        agents={mockAgents}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByText(/正在配置/)).toBeTruthy());
+    await user.click(screen.getByRole('button', { name: /群工具与值班设置/ }));
+    await user.selectOptions(screen.getByLabelText('推送间隔'), 'set');
+    await user.clear(screen.getByLabelText('本群推送间隔毫秒'));
+    await user.type(screen.getByLabelText('本群推送间隔毫秒'), '100');
+
+    expect(screen.getByText('本群推送间隔要填 500-20000 之间的整数。')).toBeTruthy();
+    expect((screen.getByRole('button', { name: /保存配置/ }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.clear(screen.getByLabelText('本群推送间隔毫秒'));
+    await user.type(screen.getByLabelText('本群推送间隔毫秒'), '800');
+    await user.click(screen.getByRole('button', { name: /保存配置/ }));
+
+    await waitFor(() => {
+      expect(saveSpy).toHaveBeenCalledWith('cli_dev', 'oc_chat_1', expect.objectContaining({
+        patch: expect.objectContaining({
+          presentationOverride: expect.objectContaining({ pushIntervalMs: { mode: 'set', value: 800 } })
+        })
+      }));
     });
   });
 

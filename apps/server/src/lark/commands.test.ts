@@ -112,7 +112,7 @@ describe('注册表与能力门（诚实表达能力）', () => {
 
   it('全能力时列出全部命令', () => {
     expect(listLarkCommands(fullCapabilities).map(item => item.name))
-      .toEqual(['help', 'repair', 'status', 'cancel', 'retry', 'new']);
+      .toEqual(['help', 'repair', 'status', 'cancel', 'retry', 'new', 'agents', 'queue']);
   });
 
   it('缺少 interrupt 与 cancelQueued 时 /cancel 从 /help 消失并路由为 unavailable，不产生 intent', () => {
@@ -153,7 +153,7 @@ describe('注册表与能力门（诚实表达能力）', () => {
 
   it('getTasks 缺失不影响任何命令可用性（/status 只是少一个排队口径）', () => {
     const caps = capabilities({ getTasks: false });
-    expect(listLarkCommands(caps).map(item => item.name)).toEqual(['help', 'repair', 'status', 'cancel', 'retry', 'new']);
+    expect(listLarkCommands(caps).map(item => item.name)).toEqual(['help', 'repair', 'status', 'cancel', 'retry', 'new', 'agents']);
   });
 
   it('能力全缺时只剩 /help 与 /repair（二者不依赖运行时能力），其余全部 unavailable，绝不产生 intent', () => {
@@ -351,13 +351,13 @@ describe('/help 渲染', () => {
 
   it('分页有界：每页只渲染 pageSize 条，页码可越界夹取', () => {
     const first = renderLarkCommandHelp(fullCapabilities, { page: 1, pageSize: 2 });
-    expect(first.totalPages).toBe(3);
+    expect(first.totalPages).toBe(4);
     expect(first.page).toBe(1);
     expect(first.text).toContain('/help');
     expect(first.text).not.toContain('/retry');
 
     const last = renderLarkCommandHelp(fullCapabilities, { page: 99, pageSize: 2 });
-    expect(last.page).toBe(3);
+    expect(last.page).toBe(4);
     const zero = renderLarkCommandHelp(fullCapabilities, { page: 0, pageSize: 2 });
     expect(zero.page).toBe(1);
     const negative = renderLarkCommandHelp(fullCapabilities, { page: -5, pageSize: 0 });
@@ -391,7 +391,7 @@ describe('/help 渲染', () => {
     const route = routeLarkCommand('/help 2', context({ helpPageSize: 2 }));
     expect(route.kind).toBe('reply');
     if (route.kind !== 'reply') throw new Error('unreachable');
-    expect(route.text).toContain('第 2/3 页');
+    expect(route.text).toContain('第 2/4 页');
     for (const element of route.elements.filter(item => item.tag === 'markdown')) {
       expect(element.tag).toBe('markdown');
     }
@@ -400,7 +400,7 @@ describe('/help 渲染', () => {
   it('非数字页码退回第 1 页，不抛异常', () => {
     const route = routeLarkCommand('/help abc', context({ helpPageSize: 2 }));
     expect(route.kind).toBe('reply');
-    expect(route.kind === 'reply' && route.text).toContain('第 1/3 页');
+    expect(route.kind === 'reply' && route.text).toContain('第 1/4 页');
   });
 
   it('没有任何可用命令时给出诚实的空态说明', () => {
@@ -498,7 +498,7 @@ describe('/help 上一页/下一页（S2）', () => {
 
   it('首页只显示下一页，回调 value 形态为 {dutydeck_help_page, page:String(n)}', () => {
     const help = renderLarkCommandHelp(fullCapabilities, { page: 1, pageSize: 2 });
-    expect(help.totalPages).toBe(3);
+    expect(help.totalPages).toBe(4);
     const { nav, buttons } = navigation(help);
     expect(nav).toBeDefined();
     expect(buttons).toEqual([
@@ -507,10 +507,10 @@ describe('/help 上一页/下一页（S2）', () => {
   });
 
   it('末页只显示上一页，指回 totalPages-1', () => {
-    const help = renderLarkCommandHelp(fullCapabilities, { page: 3, pageSize: 2 });
+    const help = renderLarkCommandHelp(fullCapabilities, { page: 4, pageSize: 2 });
     const { buttons } = navigation(help);
     expect(buttons).toEqual([
-      { id: 'command_help_prev', label: '上一页', value: { dutydeck_help_page: '1', page: '2' } }
+      { id: 'command_help_prev', label: '上一页', value: { dutydeck_help_page: '1', page: '3' } }
     ]);
   });
 
@@ -523,7 +523,7 @@ describe('/help 上一页/下一页（S2）', () => {
 
   it('渲染侧越界夹取：超出末页时停在末页且没有下一页', () => {
     const help = renderLarkCommandHelp(fullCapabilities, { page: 99, pageSize: 2 });
-    expect(help.page).toBe(3);
+    expect(help.page).toBe(4);
     const { buttons } = navigation(help);
     expect(buttons.map(button => button.id)).toEqual(['command_help_prev']);
   });
@@ -568,7 +568,7 @@ describe('parseLarkHelpPageValue 宽进严出（S2）', () => {
     const parsed = parseLarkHelpPageValue({ dutydeck_help_page: '1', page: '99' })!;
     expect(parsed).toEqual({ page: 99 });
     const help = renderLarkCommandHelp(fullCapabilities, { page: parsed.page, pageSize: 2 });
-    expect(help.page).toBe(3);
+    expect(help.page).toBe(4);
   });
 });
 
@@ -671,5 +671,55 @@ describe('控制命令明确拼错只纠正，不执行或自动改写', () => {
   });
   it.each(['/resume', '/usr/bin/bash', '/tmp', '/model', '/review'])('%s 继续交给 CLI', text => {
     expect(['unknown_command', 'not_a_command']).toContain(routeLarkCommand(text, context()).kind);
+  });
+});
+
+describe('指挥命令的注册与能力门', () => {
+  it('/agents 依赖 listAgents，缺失时只会 unavailable', () => {
+    expect(routeLarkCommand('/agents', context({ capabilities: capabilities() }))).toMatchObject({ kind: 'intent', command: 'agents' });
+    const off = routeLarkCommand('/agents', context({ capabilities: capabilities({ listAgents: false }) }));
+    expect(off).toMatchObject({ kind: 'unavailable', command: 'agents' });
+    if (off.kind === 'unavailable') expect(off.reason).toContain('listAgents');
+  });
+
+  it('/queue 需要读得到队列且至少有一种队列操作', () => {
+    expect(routeLarkCommand('/queue', context({ capabilities: capabilities() }))).toMatchObject({ kind: 'intent', command: 'queue' });
+    expect(routeLarkCommand('/queue', context({ capabilities: capabilities({ getTasks: false }) }))).toMatchObject({ kind: 'unavailable' });
+    expect(routeLarkCommand('/queue', context({ capabilities: capabilities({ cancelQueued: false, steerQueued: false }) }))).toMatchObject({ kind: 'unavailable' });
+    expect(routeLarkCommand('/queue top 2', context({ capabilities: capabilities({ cancelQueued: false, steerQueued: true }) })))
+      .toMatchObject({ kind: 'intent', command: 'queue', args: ['top', '2'] });
+  });
+
+  it('/steer 只在运行时真有队首提升能力时存在', () => {
+    expect(routeLarkCommand('/steer 换个方向', context({ capabilities: capabilities() }))).toMatchObject({ kind: 'unavailable', command: 'steer' });
+    expect(routeLarkCommand('/steer 换个方向', context({ capabilities: capabilities({ steerQueued: true }) })))
+      .toMatchObject({ kind: 'intent', command: 'steer', argsText: '换个方向' });
+    expect(routeLarkCommand('/steer 换个方向', context({ capabilities: capabilities({ steerQueued: true, dispatch: false }) })))
+      .toMatchObject({ kind: 'unavailable', command: 'steer' });
+  });
+
+  it('/grant 与 /revoke 依赖群策略，未接入时停用', () => {
+    expect(routeLarkCommand('/grant', context({ capabilities: capabilities() }))).toMatchObject({ kind: 'unavailable', command: 'grant' });
+    expect(routeLarkCommand('/revoke', context({ capabilities: capabilities() }))).toMatchObject({ kind: 'unavailable', command: 'revoke' });
+    expect(routeLarkCommand('/grant', context({ capabilities: capabilities({ groupPolicy: true }) }))).toMatchObject({ kind: 'intent', command: 'grant' });
+    expect(routeLarkCommand('/revoke', context({ capabilities: capabilities({ groupPolicy: true }) }))).toMatchObject({ kind: 'intent', command: 'revoke' });
+  });
+
+  it('改授权与改队列的命令一律拒绝机器人发送者，只读的 /agents 不拒绝', () => {
+    const caps = capabilities({ groupPolicy: true, steerQueued: true });
+    for (const text of ['/grant', '/revoke', '/queue cancel 1', '/steer 改一下']) {
+      expect(routeLarkCommand(text, { capabilities: caps, operator: { kind: 'bot', allowlisted: true } })).toMatchObject({ kind: 'denied' });
+    }
+    expect(routeLarkCommand('/agents', { capabilities: caps, operator: { kind: 'bot', allowlisted: true } })).toMatchObject({ kind: 'intent' });
+  });
+
+  it('新命令都带 requires 与 unavailableReason，与既有条目口径一致', () => {
+    for (const name of ['agents', 'queue', 'steer', 'grant', 'revoke']) {
+      const definition = larkCommandRegistry.find(item => item.name === name);
+      expect(definition, name).toBeDefined();
+      expect(definition!.requires, name).toBeTypeOf('function');
+      expect(definition!.unavailableReason, name).toBeTruthy();
+      expect(definition!.usage, name).toContain(`/${name}`);
+    }
   });
 });

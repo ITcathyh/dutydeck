@@ -38,6 +38,63 @@ export const routingOverrideSchema = z.object({
   mentionPolicy: mentionOverrideSchema
 }).strict();
 
+const booleanOverrideSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('inherit') }).strict(),
+  z.object({ mode: z.literal('set'), value: z.boolean() }).strict()
+]);
+const pushIntervalOverrideSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('inherit') }).strict(),
+  z.object({ mode: z.literal('set'), value: z.number().int().min(500).max(20000) }).strict()
+]);
+// 上限 200 与界面一致。群级 traceLimit 会以 traceLimit * 30 的规模驱动事件回放，
+// 不封顶就等于让群配置可以拖垮一次重放。
+const traceLimitOverrideSchema = z.discriminatedUnion('mode', [
+  z.object({ mode: z.literal('inherit') }).strict(),
+  z.object({ mode: z.literal('set'), value: z.number().int().min(1).max(200) }).strict()
+]);
+
+/**
+ * Bot 级呈现设置。群级 presentationOverride 逐字段覆盖它。
+ *
+ * webBaseUrl 是这套部署的控制台地址，不是「机器人说多少话」的一档，所以它只有
+ * Bot 级、没有群级覆盖；其余每一项都可以按群单独设定。
+ */
+export const presentationSettingsSchema = z.object({
+  webBaseUrl: z.string().url().nullable().optional(),
+  structuredAskCards: z.boolean(),
+  groupCardMention: z.boolean(),
+  pushIntervalMs: z.number().int().min(500).max(20000),
+  traceLimit: z.number().int().positive(),
+  hideTraceOnComplete: z.boolean(),
+  /** 完成时只对触发消息贴表情，不再发结果卡。默认关闭。 */
+  completionReactionOnly: z.boolean(),
+  /** 中间进展完全静默，只保留最终结果。默认关闭。 */
+  silentProgress: z.boolean()
+}).strict();
+export type PresentationSettings = z.infer<typeof presentationSettingsSchema>;
+
+export const presentationOverrideSchema = z.object({
+  structuredAskCards: booleanOverrideSchema,
+  groupCardMention: booleanOverrideSchema,
+  pushIntervalMs: pushIntervalOverrideSchema,
+  traceLimit: traceLimitOverrideSchema,
+  hideTraceOnComplete: booleanOverrideSchema,
+  completionReactionOnly: booleanOverrideSchema,
+  silentProgress: booleanOverrideSchema
+}).strict();
+export type PresentationOverride = z.infer<typeof presentationOverrideSchema>;
+
+/** 全继承的群级呈现覆盖：新建绑定的默认值，也是旧 `{ mode: 'inherit' }` 的迁移目标。 */
+export const inheritPresentationOverride: PresentationOverride = {
+  structuredAskCards: { mode: 'inherit' },
+  groupCardMention: { mode: 'inherit' },
+  pushIntervalMs: { mode: 'inherit' },
+  traceLimit: { mode: 'inherit' },
+  hideTraceOnComplete: { mode: 'inherit' },
+  completionReactionOnly: { mode: 'inherit' },
+  silentProgress: { mode: 'inherit' }
+};
+
 export const accessOverrideSchema = z.object({
   mode: z.enum(['inherit', 'owner_only', 'allowlist', 'all_chat_members', 'disabled']),
   principalIds: z.array(opaquePrincipalIdSchema).default([])
@@ -72,7 +129,7 @@ export const groupBindingSchema = z.object({
   routingOverride: routingOverrideSchema,
   accessOverride: accessOverrideSchema,
   groupToolsOverride: groupToolsOverrideSchema,
-  presentationOverride: z.object({ mode: z.literal('inherit') }).strict(),
+  presentationOverride: presentationOverrideSchema,
   reviewReasons: z.array(z.string().regex(/^[a-z0-9_]+$/)),
   createdAt: timestampSchema,
   updatedAt: timestampSchema
@@ -92,6 +149,7 @@ export const createGroupBindingInputSchema = z.object({
   routingOverride: routingOverrideSchema.default({ groupReplyMode: { mode: 'inherit' }, mentionPolicy: { mode: 'inherit' } }),
   accessOverride: accessOverrideSchema.default({ mode: 'inherit', principalIds: [] }),
   groupToolsOverride: groupToolsOverrideSchema.default({ read: 'inherit', discover: 'inherit', send: 'inherit' }),
+  presentationOverride: presentationOverrideSchema.default(inheritPresentationOverride),
   reviewReasons: z.array(z.string().regex(/^[a-z0-9_]+$/)).default([])
 }).strict();
 export type CreateGroupBindingInput = z.input<typeof createGroupBindingInputSchema>;
@@ -108,6 +166,7 @@ export const updateGroupBindingInputSchema = z.object({
   routingOverride: routingOverrideSchema.optional(),
   accessOverride: accessOverrideSchema.optional(),
   groupToolsOverride: groupToolsOverrideSchema.optional(),
+  presentationOverride: presentationOverrideSchema.optional(),
   reviewReasons: z.array(z.string().regex(/^[a-z0-9_]+$/)).optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== 'expectedRevision'), { message: 'At least one field must be updated' });
 export type UpdateGroupBindingInput = z.infer<typeof updateGroupBindingInputSchema>;
@@ -374,6 +433,7 @@ export const updateRoleAssignmentInputSchema = z.object({
 export type UpdateRoleAssignmentInput = z.infer<typeof updateRoleAssignmentInputSchema>;
 
 export interface ExplainedValue<T> { value: T | undefined; source: 'group_override' | 'group_clear' | 'bot_default' | 'system_default' | 'unconfigured' }
+export type EffectiveGroupPresentation = { [K in keyof PresentationOverride]: ExplainedValue<Extract<PresentationOverride[K], { mode: 'set' }>['value']> };
 export interface EffectiveGroupConfig {
   agent: ExplainedValue<string>;
   workspace: ExplainedValue<string>;
@@ -386,6 +446,7 @@ export interface EffectiveGroupConfig {
   };
   access: { mode: 'owner_only' | 'allowlist' | 'all_chat_members' | 'disabled'; principalIds: string[]; source: 'group_override' | 'bot_default' };
   groupTools: Record<'read' | 'discover' | 'send', { allowed: boolean; source: 'group_override' | 'bot_default' | 'bot_ceiling'; requested: boolean }>;
+  presentation: EffectiveGroupPresentation;
   talkGrant: 'none' | 'owner_only' | 'allowlist' | 'all_chat_members' | 'oncall_chat_members';
   explanations: string[];
 }
@@ -396,7 +457,28 @@ function resolveStringOverride(override: { mode: 'inherit' | 'set' | 'clear'; va
   return fallback ? { value: fallback, source: 'bot_default' } : { value: undefined, source: 'unconfigured' };
 }
 
-export function resolveGroupEffectiveConfig(policy: ChannelBotGroupPolicy | undefined, binding: GroupBinding): EffectiveGroupConfig {
+/**
+ * 群级呈现覆盖 + Bot 级呈现默认 = 本群实际的呈现设置。
+ *
+ * 这里不能沿用 resolveStringOverride 的真值判断：呈现项多半是布尔，`false` 是一个
+ * 真实取值，按假值处理会把「Bot 已显式关掉」误报成 unconfigured。
+ */
+export function resolveGroupPresentation(override: PresentationOverride, defaults?: Partial<PresentationSettings>): EffectiveGroupPresentation {
+  const field = <T>(item: { mode: 'inherit' | 'set'; value?: T }, fallback: T | undefined): ExplainedValue<T> =>
+    item.mode === 'set' ? { value: item.value, source: 'group_override' }
+      : fallback === undefined ? { value: undefined, source: 'unconfigured' } : { value: fallback, source: 'bot_default' };
+  return {
+    structuredAskCards: field(override.structuredAskCards, defaults?.structuredAskCards),
+    groupCardMention: field(override.groupCardMention, defaults?.groupCardMention),
+    pushIntervalMs: field(override.pushIntervalMs, defaults?.pushIntervalMs),
+    traceLimit: field(override.traceLimit, defaults?.traceLimit),
+    hideTraceOnComplete: field(override.hideTraceOnComplete, defaults?.hideTraceOnComplete),
+    completionReactionOnly: field(override.completionReactionOnly, defaults?.completionReactionOnly),
+    silentProgress: field(override.silentProgress, defaults?.silentProgress)
+  };
+}
+
+export function resolveGroupEffectiveConfig(policy: ChannelBotGroupPolicy | undefined, binding: GroupBinding, presentationDefaults?: Partial<PresentationSettings>): EffectiveGroupConfig {
   const defaults: ChannelBotGroupPolicy['defaults'] = policy?.defaults ?? safeChannelBotGroupPolicyDefaults.defaults;
   const routingDefaults = policy?.routingDefaults ?? safeChannelBotGroupPolicyDefaults.routingDefaults;
   const accessDefault = policy?.accessPolicy ?? safeChannelBotGroupPolicyDefaults.accessPolicy;
@@ -426,6 +508,7 @@ export function resolveGroupEffectiveConfig(policy: ChannelBotGroupPolicy | unde
     routing: { groupReplyMode, mentionPolicy },
     access,
     groupTools: { read: tool('read'), discover: tool('discover'), send: tool('send') },
+    presentation: resolveGroupPresentation(binding.presentationOverride, presentationDefaults),
     talkGrant,
     explanations: [
       `Agent: ${binding.agentOverride.mode === 'inherit' ? '继承 Bot 默认' : '使用群级覆盖'}`,

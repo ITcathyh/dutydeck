@@ -2,14 +2,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RuntimeError, agentConfigSchema, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
+import { RuntimeError, agentConfigSchema, workPlanConfirmationRequired, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
 import { WorkItemService } from '../work-items.js';
 import type { WorkItemRequest } from '../work-item-interactions.js';
 import { WorkItemInteractions } from '../work-item-interactions.js';
-import { LarkWorkbench, researchWorkPlan, workItemElements, workNoticeFingerprint } from './workbench.js';
+import { LarkWorkbench, composeWorkPlan, researchWorkPlan, workItemElements, workNoticeFingerprint } from './workbench.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -74,7 +74,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
   let interactions!: WorkItemInteractions;
   const authorize = async (_id: string, actor?: string) => ['ou_alice', 'ou_bob', 'installation_owner'].includes(actor ?? '');
   const workbench = new LarkWorkbench(repos, runtime, () => work, () => interactions, authorize, { client: () => client as any, log });
-  work = new WorkItemService({ repositories: repos, runtime, authorize, prepareDelivery: (sid, id, key) => workbench.prepareDelivery(sid, id, key), deliver: item => workbench.deliver(item), notify: (item, actor) => workbench.notify(item, actor) });
+  work = new WorkItemService({ repositories: repos, runtime, authorize, requireConfirmation: workPlanConfirmationRequired, prepareDelivery: (sid, id, key) => workbench.prepareDelivery(sid, id, key), deliver: item => workbench.deliver(item), notify: (item, actor) => workbench.notify(item, actor) });
   interactions = new WorkItemInteractions(work, runtime, broker, approval);
   const agents = ['alpha', 'beta'].map(id => agentConfigSchema.parse({ id, name: id, command: 'fixture', protocol: 'acp', permissionMode: 'ask', cwd: directory }));
   await runtime.initialize(agents);
@@ -123,6 +123,23 @@ describe('亮屏指纹与卡片元素（纯函数）', () => {
     expect(workNoticeFingerprint(baseItem('waiting', 'running'), replaced)).not.toBe(workNoticeFingerprint(baseItem('waiting', 'running'), requests));
   });
 
+  it('待确认卡只列计划：分工、依赖、工作区与开始执行/取消计划，不出现执行期入口', () => {
+    const preview: WorkItem = { ...baseItem('awaiting_confirmation', 'pending'),
+      plan: { title: '两步编排', outputStepId: 'report', steps: [
+        { id: 'alpha', title: '独立研究', kind: 'agent', agentId: 'alpha', instruction: '独立完成研究', dependsOn: [], workspaceMode: 'worktree' },
+        { id: 'report', title: '汇总并交付', kind: 'agent', agentId: 'beta', instruction: '综合上游成果', dependsOn: ['alpha'] }
+      ] },
+      steps: [{ id: 'alpha', status: 'pending', attempts: [] }, { id: 'report', status: 'pending', attempts: [] }] };
+    const elements = workItemElements(preview, [], { agentNames: { alpha: '调研专家' } });
+    const rendered = JSON.stringify(elements);
+    expect(rendered).toContain('调研专家（alpha）');
+    expect(rendered).toContain('独立 worktree');
+    expect(rendered).toContain('依赖：独立研究');
+    const operations = elements.flatMap(element => element.behaviors?.map((behavior: any) => behavior.value.dutydeck_work_item) ?? []);
+    expect(operations).toEqual(['confirm', 'cancel', 'show']);
+    expect(rendered).not.toContain('/work answer');
+  });
+
   it('S5：agent 有显示名时展示「名称（agentId）」，名称缺失或与 id 相同则只显示 agentId', () => {
     const item = baseItem('running', 'running');
     const named = JSON.stringify(workItemElements(item, [], { agentNames: { alpha: '调研专家' } }));
@@ -140,6 +157,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     const f = await fixture();
     await f.coordinator.handle(message('om_goal', '/work research 比较两个方案'), f.config);
     expect((await f.item()).plan.steps).toHaveLength(3);
+    // 人手输入的固定模板不过闸门：本人即发起人，直接开跑。
+    expect((await f.item()).status).toBe('running');
     await f.work.tick(); await f.settle();
     expect(f.prompts).toHaveLength(2);
     expect(new Set(f.prompts.map(value => value.sessionId)).size).toBe(2);
@@ -161,6 +180,210 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     expect(template.version).toBe(1);
     const run = await f.app.inject({ method: 'POST', url: `/api/sessions/${item.parentSessionId}/work-templates/${template.id}/run`, payload: { version: 1, goal: '比较新的材料', idempotencyKey: 'next' } });
     expect(run.statusCode).toBe(200); expect(run.json().plan).toEqual(item.plan);
+  });
+
+  it('群聊里 Agent 提交的计划先进待确认：确认前不派发任何步骤，只有目标发起人能确认', async () => {
+    const f = await fixture('held');
+    await f.coordinator.handle(message('om_gate', '为这个目标安排独立研究'), f.config);
+    await vi.waitFor(() => expect(f.prompts).toHaveLength(1));
+    const parent = await f.parent();
+    const active = f.runtime.getActiveTaskContext(parent.id)!;
+    const env = f.capabilities.environmentFor(parent);
+    const turn = f.capabilities.workbenchTurnToken(parent.id, active.taskId);
+    expect(f.prompts[0]!.prompt).toContain('awaiting_confirmation');
+    expect(f.prompts[0]!.prompt).toContain('不提供代替用户回答等待、批准权限或确认计划的入口');
+    const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await f.app.inject({ method: init?.method as any ?? 'GET', url: new URL(String(url)).pathname, headers: Object.fromEntries(new Headers(init?.headers)), ...(init?.body ? { payload: String(init.body) } : {}) });
+      return new Response(response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } });
+    };
+    const path = join(f.directory, 'plan.json');
+    await writeFile(path, JSON.stringify({ goal: '独立目标', plan: researchWorkPlan(['alpha', 'beta']), idempotencyKey: 'gated' }));
+    const created = await runWorkCommand('create', [], { file: path, turn }, { env, fetcher: fetcher as typeof fetch }) as unknown as WorkItem;
+    expect(created.status).toBe('awaiting_confirmation');
+
+    // 闸门核心：确认前 tick 多轮也不得起任何子 Session、不得下发任何 prompt。
+    await f.work.tick(); await f.work.tick(); await f.work.tick();
+    expect((await f.runtime.listSessions()).filter(session => session.source === 'work_item')).toHaveLength(0);
+    expect(f.prompts).toHaveLength(1);
+    expect((await f.work.get(parent.id, created.id, 'ou_alice')).steps.every(step => !step.attempts.length)).toBe(true);
+
+    const confirmCard = () => f.cards.find(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm'));
+    await vi.waitFor(() => expect(confirmCard()).toBeDefined());
+    const card = confirmCard()!;
+    const value = card.input.elements.find((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm').behaviors[0].value;
+    expect((await f.coordinator.handleAction(value, 'ou_bob', { messageId: card.messageId, chatId: 'oc_group' })).type).toBe('error');
+    expect((await f.work.get(parent.id, created.id, 'ou_alice')).status).toBe('awaiting_confirmation');
+    expect(f.prompts).toHaveLength(1);
+
+    expect((await f.coordinator.handleAction(value, 'ou_alice', { messageId: card.messageId, chatId: 'oc_group' })).type).toBe('success');
+    expect((await f.work.get(parent.id, created.id, 'ou_alice')).status).toBe('running');
+    await f.work.tick();
+    await vi.waitFor(() => expect(f.prompts.length).toBeGreaterThan(1));
+  });
+
+  it('人可以自己起一次编排：/work plan 拼出计划、先出一张待确认卡，确认后才执行', async () => {
+    const f = await fixture();
+    await f.coordinator.handle(message('om_plan', '/work plan 调研可行方案；核查风险与反例'), f.config);
+    const item = await f.item();
+    expect(item.status).toBe('awaiting_confirmation');
+    expect(item.plan.steps.map(step => step.id)).toEqual(['step1', 'step2', 'report']);
+    expect(item.plan.steps[2]!.dependsOn).toEqual(['step1', 'step2']);
+    await f.work.tick(); await f.work.tick();
+    expect(f.prompts).toHaveLength(0);
+    const preview = () => f.cards.filter(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm'));
+    const confirmCards = preview();
+    expect(confirmCards).toHaveLength(1);
+    // 卡头必须说「待确认」并按等待人的样式渲染，不能顶着「执行中」和转圈图标。
+    expect(confirmCards[0]!.input).toMatchObject({ statusLabel: '待确认', awaitingHuman: true });
+    // 重放同一条命令（同一 messageId → 同一目标）不得再推一张一样的卡。
+    await f.workbench.command(item.parentSessionId, 'plan 调研可行方案；核查风险与反例', message('om_plan', ''), f.config);
+    expect(preview()).toHaveLength(1);
+    const value = confirmCards[0]!.input.elements.find((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm').behaviors[0].value;
+    expect((await f.coordinator.handleAction(value, 'ou_alice', { messageId: confirmCards[0]!.messageId, chatId: 'oc_group' })).type).toBe('success');
+    await f.work.tick(); await f.settle();
+    expect(f.prompts).toHaveLength(2);
+    await expect(f.workbench.command(item.parentSessionId, `plan 只有一步`, message('om_plan_bad', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_PLAN_STEPS_REQUIRED' });
+    // 超长分段要给出可读报错，而不是把 zod 的校验 JSON 贴到卡上。
+    await expect(f.workbench.command(item.parentSessionId, `plan ${'很'.repeat(30_001)}；第二步`, message('om_plan_long', ''), f.config)).rejects.toMatchObject({ code: 'WORK_ITEM_PLAN_STEP_TOO_LONG' });
+  });
+
+  it('待确认卡只出一张：通知侧与命令侧抢同一条剧集键，抢到的才发', async () => {
+    const f = await fixture();
+    const confirmCards = () => f.cards.filter(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm'));
+    await f.coordinator.handle(message('om_plan', '/work plan 调研可行方案；核查风险'), f.config);
+    const parent = (await f.parent()).id;
+    expect(confirmCards()).toHaveLength(1);
+    await f.workbench.recordOrigin(parent, 'om_race', message('om_race', '/work plan 另起一个；再核查'), f.config);
+    const item = await f.work.create(parent, { goal: '另起一个；再核查', plan: composeWorkPlan(['另起一个', '再核查'], ['alpha', 'beta']), idempotencyKey: 'om_race' }, 'ou_alice', true);
+    expect(item.status).toBe('awaiting_confirmation');
+    // 1 秒心跳与命令侧并发落在同一条剧集上：两侧都必须用 CAS 抢键，群里只能出现一张卡。
+    await Promise.all([f.workbench.notify(item, 'ou_alice'), f.workbench.notify(item, 'ou_alice')]);
+    expect(confirmCards()).toHaveLength(2);
+  });
+
+  it('发送失败不把待确认闸门静默丢掉：退避到期后补发一张，已发出的不再重发', async () => {
+    const f = await fixture();
+    const confirmCards = () => f.cards.filter(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm'));
+    await f.coordinator.handle(message('om_plan', '/work plan 调研可行方案；核查风险'), f.config);
+    const parent = (await f.parent()).id;
+    const before = confirmCards().length;
+    await f.workbench.recordOrigin(parent, 'om_retry', message('om_retry', '/work plan 补发用例；再核查'), f.config);
+    const item = await f.work.create(parent, { goal: '补发用例；再核查', plan: composeWorkPlan(['补发用例', '再核查'], ['alpha', 'beta']), idempotencyKey: 'om_retry' }, 'ou_alice', true);
+    const key = `workbench.notice.${item.id}.${workNoticeFingerprint(item, [])}`;
+
+    // 一次瞬时发送失败：回复和它的兜底发送都打不通。
+    const [reply, send] = [f.client.reply, f.client.send];
+    f.client.reply = vi.fn(async () => { throw new Error('feishu unavailable'); }) as any;
+    f.client.send = vi.fn(async () => { throw new Error('feishu unavailable'); }) as any;
+    await expect(f.workbench.notify(item, 'ou_alice')).rejects.toThrow();
+    Object.assign(f.client, { reply, send });
+    expect(confirmCards()).toHaveLength(before);
+
+    // 键被置回可重试，并且带退避：1 秒心跳不会把一次失败放大成每秒一次的飞书请求。
+    const failed = await f.repos.config.get(key);
+    expect(failed).toMatch(/^failed:1:\d+$/);
+    expect(Number(failed!.split(':')[2])).toBeGreaterThan(Date.now() + 1_000);
+
+    // 退避未到期时重入只原位 PATCH，不补卡。
+    await f.workbench.notify(item, 'ou_alice');
+    expect(confirmCards()).toHaveLength(before);
+
+    // 退避到期后的下一轮心跳把这张待确认卡补出来——闸门不会因为一次失败就消失。
+    await f.repos.config.set(key, 'failed:1:0');
+    await f.workbench.notify(item, 'ou_alice');
+    expect(confirmCards()).toHaveLength(before + 1);
+
+    // 已经发出去的卡是终态，后续心跳只 PATCH，不会再发一遍。
+    expect(await f.repos.config.get(key)).toBe('sent');
+    await f.workbench.notify(item, 'ou_alice');
+    await f.workbench.notify(item, 'ou_alice');
+    expect(confirmCards()).toHaveLength(before + 1);
+  });
+
+  it('命令侧与通知侧共用同一把锁：/work plan 发送失败后由心跳补发，不重复也不丢', async () => {
+    const f = await fixture();
+    const confirmCards = () => f.cards.filter(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm'));
+    await f.coordinator.handle(message('om_plan', '/work plan 调研可行方案；核查风险'), f.config);
+    const parent = (await f.parent()).id;
+    const before = confirmCards().length;
+
+    const [reply, send] = [f.client.reply, f.client.send];
+    f.client.reply = vi.fn(async () => { throw new Error('feishu unavailable'); }) as any;
+    f.client.send = vi.fn(async () => { throw new Error('feishu unavailable'); }) as any;
+    await expect(f.workbench.command(parent, 'plan 命令侧补发；再核查', message('om_plan_fail', ''), f.config)).rejects.toThrow();
+    Object.assign(f.client, { reply, send });
+    expect(confirmCards()).toHaveLength(before);
+
+    const item = (await f.work.listBySession(parent, 'ou_alice')).find(value => value.title.startsWith('命令侧补发'))!;
+    // 计划已落库停在待确认，卡却没发出去——命令侧必须把键置回可重试，否则闸门就此静默消失。
+    expect(item.status).toBe('awaiting_confirmation');
+    const key = `workbench.notice.${item.id}.${workNoticeFingerprint(item, [])}`;
+    expect(await f.repos.config.get(key)).toMatch(/^failed:1:\d+$/);
+
+    await f.repos.config.set(key, 'failed:1:0');
+    await f.workbench.notify(item, 'ou_alice');
+    expect(confirmCards()).toHaveLength(before + 1);
+    // 补发之后命令重放也不会再推一张：两侧看的是同一把锁的同一个终态。
+    await f.workbench.command(parent, 'plan 命令侧补发；再核查', message('om_plan_fail', ''), f.config);
+    expect(confirmCards()).toHaveLength(before + 1);
+  });
+
+  it('持有者发送耗时超过租约时仍只留下一张待确认卡：两条路径用同一个幂等键', async () => {
+    const f = await fixture();
+    const confirmCards = () => f.cards.filter(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm'));
+    await f.coordinator.handle(message('om_plan', '/work plan 调研可行方案；核查风险'), f.config);
+    const parent = (await f.parent()).id;
+    const before = confirmCards().length;
+
+    // 飞书按 uuid 收拢重复发送：同一个幂等键只产生一条消息。
+    const byIdempotencyKey = new Map<string, { messageId: string }>();
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let firstSend = true;
+    const deliver = async (input: any) => {
+      // 第一次发送撞上频控退避，耗时超过租约。
+      if (firstSend) { firstSend = false; await held; }
+      const existing = byIdempotencyKey.get(input.idempotencyKey);
+      if (existing) return existing;
+      const result = { messageId: `om_dedup_${byIdempotencyKey.size + 1}` };
+      byIdempotencyKey.set(input.idempotencyKey, result);
+      f.cards.push({ messageId: result.messageId, input });
+      return result;
+    };
+    Object.assign(f.client, { reply: vi.fn(deliver), send: vi.fn(deliver) });
+
+    const running = f.workbench.command(parent, 'plan 长发送；再核查', message('om_hold', ''), f.config);
+    const item = await vi.waitFor(async () => {
+      const found = (await f.work.listBySession(parent, 'ou_alice')).find(value => value.title.startsWith('长发送'));
+      expect(found).toBeDefined();
+      return found!;
+    });
+    const key = `workbench.notice.${item.id}.${workNoticeFingerprint(item, [])}`;
+    await vi.waitFor(async () => expect(await f.repos.config.get(key)).toMatch(/^sending:1:\d+$/));
+
+    // 租约到期，但持有者还卡在发送里：心跳这一侧会合法地抢到锁，再发一次。
+    await f.repos.config.set(key, 'sending:1:0');
+    await f.workbench.notify(item, 'ou_alice');
+    release();
+    await running;
+
+    // 两次发送用的是同一个幂等键，飞书把第二次收拢掉，群里仍然只有一张。
+    expect(confirmCards()).toHaveLength(before + 1);
+    expect(byIdempotencyKey.size).toBe(1);
+  });
+
+  it('HTTP 也能确认待确认的计划，确认前 REST 层不会启动任何步骤', async () => {
+    const f = await fixture();
+    await f.coordinator.handle(message('om_rest', '/work plan 先调研；再核查'), f.config);
+    const parent = await f.parent();
+    const item = await f.item();
+    expect(item.status).toBe('awaiting_confirmation');
+    const stale = await f.app.inject({ method: 'POST', url: `/api/sessions/${parent.id}/work-items/${item.id}/confirm`, payload: { expectedRevision: item.revision + 3 } });
+    expect(stale.statusCode).toBe(409);
+    await f.work.tick(); expect(f.prompts).toHaveLength(0);
+    const confirmed = await f.app.inject({ method: 'POST', url: `/api/sessions/${parent.id}/work-items/${item.id}/confirm`, payload: { expectedRevision: item.revision } });
+    expect(confirmed.statusCode).toBe(200);
+    expect(confirmed.json().status).toBe('running');
   });
 
   it('sends native permission requests to the main topic and rejects copied cards, wrong owners and duplicate decisions', async () => {
@@ -279,7 +502,7 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await writeFile(path, JSON.stringify({ goal: '独立目标', plan: researchWorkPlan(['alpha', 'beta']), idempotencyKey: 'delegation' }));
     await expect(runWorkCommand('create', [], { file: path, turn: 'old-turn' }, { env, fetcher: fetcher as typeof fetch })).rejects.toMatchObject({ statusCode: 403 });
     const created = await runWorkCommand('create', [], { file: path, turn }, { env, fetcher: fetcher as typeof fetch });
-    expect(created).toMatchObject({ status: 'running', parentSessionId: parent.id });
+    expect(created).toMatchObject({ status: 'awaiting_confirmation', parentSessionId: parent.id });
     expect(await runWorkCommand('create', [], { file: path, turn }, { env, fetcher: fetcher as typeof fetch })).toMatchObject({ id: created.id });
     const unauthorized = await f.app.inject({ method: 'POST', url: '/api/lark/agent-tools/work-items', headers: { authorization: `Bearer ${env.dutydeck_group_tools_token}` }, payload: { goal: 'x', plan: researchWorkPlan(['alpha']), idempotencyKey: 'no-turn' } });
     expect(unauthorized.statusCode).toBe(403);
@@ -349,7 +572,7 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
       { id: 'report', title: '汇总', kind: 'agent', agentId: 'alpha', instruction: '综合两个来源', dependsOn: ['input'] }
     ] };
     await f.workbench.recordOrigin(parent.id, 'waiting', message('om_wait', ''), f.config);
-    let waiting = await f.work.create(parent.id, { goal: '根据资料总结', plan, idempotencyKey: 'waiting' }, 'ou_alice');
+    let waiting = await f.work.create(parent.id, { goal: '根据资料总结', plan, idempotencyKey: 'waiting' }, 'ou_alice', false);
     await f.work.tick(); waiting = await f.work.get(parent.id, waiting.id, 'ou_alice');
     expect(waiting.status).toBe('waiting');
     await expect(f.work.answer(parent.id, waiting.id, 'input', '秘密资料', waiting.revision, 'ou_bob')).rejects.toMatchObject({ code: 'WORK_ITEM_FORBIDDEN' });
@@ -377,7 +600,7 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
       { id: 'report', title: '汇总', kind: 'agent', agentId: 'alpha', instruction: '综合两个来源', dependsOn: ['input'] }
     ] };
     await f.workbench.recordOrigin(parentId, 'waiting', message('om_wait', ''), f.config);
-    const created = await f.work.create(parentId, { goal: '根据资料总结', plan, idempotencyKey: 'waiting' }, 'ou_alice');
+    const created = await f.work.create(parentId, { goal: '根据资料总结', plan, idempotencyKey: 'waiting' }, 'ou_alice', false);
     await f.work.tick();
     await vi.waitFor(() => expect(f.cards.some(card => JSON.stringify(card.input).includes('/work answer'))).toBe(true));
     const card = f.cards.find(card => JSON.stringify(card.input).includes('/work answer'))!;

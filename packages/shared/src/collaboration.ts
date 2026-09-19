@@ -352,13 +352,40 @@ export type DecisionStatus = (typeof decisionStatuses)[number];
 export const DECISION_BUDGET_GATE = 'decision_budget';
 /** 判定用量统计窗口一次读多少条；与 listDecisions 的服务端硬上限一致，便于识别窗口读不全。 */
 export const DECISION_WINDOW_LIMIT = 500;
+/** 标记「一次由机器人触发的回合」。计入机器人预算，不是一次模型判定。 */
+export const BOT_TURN_RECORD = 'bot_turn';
+/** 标记「机器人回合被 loop guard 挡下」。既不是判定，也不消耗机器人预算。 */
+export const BOT_LOOP_GATE = 'bot_loop_gate';
+/** 每群每小时允许的机器人触发回合数。默认比人类判定预算严得多：机器人之间不会自己停。 */
+export const BOT_TURN_LIMIT_PER_HOUR = 6;
+/** 同一话题内连续「机器人往返」的轮数上限；中间出现人类触发的回合即归零。 */
+export const BOT_LOOP_DEPTH_LIMIT = 3;
+
+/** 不代表一次模型判定的记录标记，统计判定用量时必须全部排除。 */
+const nonDecisionGates = new Set<string>([DECISION_BUDGET_GATE, BOT_TURN_RECORD, BOT_LOOP_GATE]);
+const gateOf = (item: Pick<CollaborationDecision, 'inputSnapshot'>) => String((item.inputSnapshot as { gate?: unknown }).gate ?? '');
 
 /**
  * 统计窗口内真正跑过模型的判定条数。
  * 被闸门挡下的记录必须排除：否则一旦超限，后续每条消息都会再记一条，用量永远降不回来。
  */
 export function countDecisionUsage(decisions: Array<Pick<CollaborationDecision, 'createdAt' | 'inputSnapshot'>>, sinceMs: number): number {
-  return decisions.filter(item => Date.parse(item.createdAt) >= sinceMs && (item.inputSnapshot as { gate?: unknown }).gate !== DECISION_BUDGET_GATE).length;
+  return decisions.filter(item => Date.parse(item.createdAt) >= sinceMs && !nonDecisionGates.has(gateOf(item))).length;
+}
+
+/**
+ * 纯记账行：机器人回合每放行一次写一条，只为让预算可数。
+ * 它不是判定也不是闸门，没有给人读的内容，列判定历史时应当滤掉——
+ * 否则活跃几小时后，判定列表里就只剩记账行，真正的判定被挤出窗口。
+ */
+export const isBotTurnRecord = (item: Pick<CollaborationDecision, 'inputSnapshot'>): boolean => gateOf(item) === BOT_TURN_RECORD;
+
+/**
+ * 统计窗口内由机器人触发的回合数，与人类判定用量分开计。
+ * 同样排除闸门记录：被挡下的回合不是一次回合，否则超限之后预算永远降不回来。
+ */
+export function countBotTurnUsage(decisions: Array<Pick<CollaborationDecision, 'createdAt' | 'inputSnapshot'>>, sinceMs: number): number {
+  return decisions.filter(item => Date.parse(item.createdAt) >= sinceMs && isBotTurnRecord(item)).length;
 }
 
 export const boundedJsonRecordSchema = z

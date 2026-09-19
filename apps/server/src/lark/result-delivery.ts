@@ -1,10 +1,48 @@
 import { createHash } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
+import { COMPLETION_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
 import { buildLarkCard, type LarkCardInput, type LarkCardService } from './service.js';
 
 // Live delivery and restart reconciliation share one provider UUID per process card.
 export const larkResultKey = (processMessageId: string) =>
   `result_${createHash('sha256').update(processMessageId).digest('hex').slice(0, 40)}`;
+
+/**
+ * 静默进展下没有过程卡，改用「任务 id + 轮次」当结果幂等锚点。
+ * 实时链路与重启对账必须算出同一个串，否则对账会把同一份结果再发一次。
+ */
+export const larkSilentResultAnchor = (taskId: string, turn: number | undefined) => `silent:${taskId}:${turn ?? 0}`;
+
+/**
+ * 完成时只贴表情：对原始请求消息贴一次完成表情。
+ *
+ * 先查 kv 幂等键再调平台再写回，重启对账反复进入时命中即返，绝不重复打表情。
+ *
+ * 返回是否确实送达：这一枚表情是开关打开后用户唯一能看到的完成信号，贴失败还记成
+ * 「已交付」，用户就什么都收不到了。失败只 warn（不抛），由调用方留给对账重试。
+ */
+export async function deliverLarkCompletionReaction(
+  service: Pick<LarkCardService, 'addReaction'>,
+  input: { appId: string; messageId: string },
+  log: DeliveryLog,
+  store?: ConfigRepository
+): Promise<boolean> {
+  const key = reactionDedupeKey(input.appId, input.messageId, COMPLETION_REACTION_EMOJI);
+  try {
+    if (await store?.get(key)) return true;
+    const result = await service.addReaction(input.messageId, COMPLETION_REACTION_EMOJI);
+    const record: ReactionRecord = {
+      messageId: result.messageId, emojiType: COMPLETION_REACTION_EMOJI,
+      reactionId: result.reactionId, createdAt: new Date().toISOString()
+    };
+    if (store?.compareAndSet) await store.compareAndSet(key, undefined, JSON.stringify(record));
+    else await store?.set(key, JSON.stringify(record));
+    return true;
+  } catch (error) {
+    log.warn({ error, key }, '完成表情写入失败，等待对账重试');
+    return false;
+  }
+}
 
 type DeliveryTarget = { chatId: string; replyMessageId?: string; replyInThread?: boolean };
 type DeliveryLog = { warn: (...args: any[]) => void };
@@ -71,7 +109,9 @@ export async function sendLarkResult(
       ...input.elements.filter(element => element.element_id === 'group_mention'),
       { tag: 'div', element_id: 'final_output', text: { tag: 'plain_text', content: `正文开头节选（非完整结论）：\n${Array.from(String(output)).slice(0, 1000).join('')}…` } },
       { tag: 'div', element_id: 'result_attachment', text: { tag: 'plain_text', content: `完整正文已发送为附件「${filename}」。未完成事项与下一步请以全文为准；可引用本卡或附件反馈。` } },
-      ...input.elements.filter(element => ['evidence', 'workflow_result_status', 'workflow_accept', 'workflow_changes'].includes(String(element.element_id)))
+      // 验证状态行必须跟着摘要卡走：结果转成附件后，卡上只剩节选，
+      // 「这份结论有没有被平台验证过」比节选本身更需要留在能看见的地方。
+      ...input.elements.filter(element => ['evidence', 'verification_status', 'workflow_result_status', 'workflow_accept', 'workflow_changes'].includes(String(element.element_id)))
     ];
   }
   const elements = resultInput.elements;

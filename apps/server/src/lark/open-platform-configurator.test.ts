@@ -1,10 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
+// 该 fixture 是 console 实抓，唯一例外是标了 `_synthetic` 的四行
+// （application:app_slash_command:write、im:message:urgent_app、im:pin、task:task:write
+// 的真实 scope id 未知，手工补入以便权限映射与发布测试能跑，一律按已开通填）。
 import draftCatalog from './fixtures/scope-catalog-draft.json';
+import { larkCommandRegistry } from './commands.js';
 import {
   configureLarkOpenPlatformApp,
+  formatCommandDescription,
+  larkSlashCommandDefinitions,
   LARK_COMMON_TENANT_SCOPES,
   LARK_COMMON_USER_SCOPES,
   LARK_REQUIRED_EVENTS,
+  LARK_TENANT_SCOPES,
+  MAX_SLASH_COMMAND_DESCRIPTION_LENGTH,
   type LarkOpenPlatformClient,
 } from './open-platform-configurator.js';
 
@@ -58,6 +66,9 @@ function harness(options: {
     postJson: vi.fn(async (path: string, body?: Record<string, unknown>) => {
       calls.push({ path, ...(body === undefined ? {} : { body }) });
       if (path === options.failAt) throw new Error(`transport leaked ${options.secret ?? ''}`);
+      // 与真实控制台会话客户端一致：只放行 /developers/v1/*（open-platform-session.ts 的路径白名单）。
+      // 放宽这里会让「用错传输层」的缺陷继续被测试掩盖。
+      if (!/^\/developers\/v1(?:\/|$)/.test(path)) throw new Error(`开放平台客户端仅允许访问 /developers/v1/*: ${path}`);
       if (path.includes('/scope/all/')) {
         const catalogs = options.catalogs ?? [options.catalog ?? catalog()];
         return catalogs[Math.min(scopeRead++, catalogs.length - 1)];
@@ -94,7 +105,8 @@ describe('configureLarkOpenPlatformApp', () => {
 
   it('rejects a numeric user-only scope instead of treating it as unbucketed', async () => {
     const data = structuredClone(draftCatalog);
-    data.data.scopes[0]!.scopeType = [1];
+    // 必须挑一项 base 权限：feature 权限缺失只会被跳过，证明不了「user bucket 不算数」。
+    data.data.scopes.find(scope => scope.name === 'im:message')!.scopeType = [1];
     const { client, calls } = harness({ catalog: data });
     await expect(configureLarkOpenPlatformApp(client, 'cli_test')).rejects.toMatchObject({ code: 'scope_catalog_incomplete' });
     expect(calls.some(call => call.path.includes('/scope/update/'))).toBe(false);
@@ -113,6 +125,7 @@ describe('configureLarkOpenPlatformApp', () => {
 
   it('uses the exact minimal common scope set and keeps an already-ready subscription idempotent', async () => {
     expect(LARK_COMMON_TENANT_SCOPES).toEqual([
+      'application:app_slash_command:write',
       'contact:contact.base:readonly',
       'contact:user.base:readonly',
       'contact:user.email:readonly',
@@ -128,7 +141,10 @@ describe('configureLarkOpenPlatformApp', () => {
       'im:message.reactions:write_only',
       'im:message:readonly',
       'im:message:update',
+      'im:message:urgent_app',
+      'im:pin',
       'im:resource',
+      'task:task:write',
     ]);
     expect(LARK_COMMON_USER_SCOPES).toEqual([]);
 
@@ -137,7 +153,8 @@ describe('configureLarkOpenPlatformApp', () => {
 
     expect(result).toEqual({
       status: 'ready',
-      scopeCount: 16,
+      scopeCount: 20,
+      skippedScopes: [],
       eventCount: 2,
       callbackCount: 1,
       versionId: 'version-2',
@@ -209,13 +226,58 @@ describe('configureLarkOpenPlatformApp', () => {
     expect(calls.some(call => call.path.includes('/event/update/'))).toBe(false);
   });
 
-  it('fails closed when any required scope is absent or only exists in the user bucket', async () => {
-    const { client, calls } = harness({ catalog: catalog(LARK_COMMON_TENANT_SCOPES.slice(1)) });
+  it('fails closed when any base scope is absent or only exists in the user bucket', async () => {
+    const { client, calls } = harness({
+      catalog: catalog(LARK_COMMON_TENANT_SCOPES.filter(name => name !== 'im:message')),
+    });
     await expect(configureLarkOpenPlatformApp(client, 'cli_test')).rejects.toMatchObject({
       code: 'scope_catalog_incomplete',
     });
     expect(calls.some(call => call.path.includes('/scope/update/'))).toBe(false);
     expect(calls.some(call => call.path.includes('/robot/switch/'))).toBe(false);
+  });
+
+  it('skips a feature scope missing from the tenant catalog and still publishes', async () => {
+    const present = LARK_COMMON_TENANT_SCOPES.filter(name => name !== 'task:task:write');
+    const { client, calls } = harness({ catalog: catalog(present) });
+
+    const result = await configureLarkOpenPlatformApp(client, 'cli_test');
+
+    expect(result).toMatchObject({ status: 'ready', scopeCount: 19, skippedScopes: ['task:task:write'] });
+    // 申请清单里不得出现跳过项的 id，回读校验也不得因为它失败。
+    expect(calls.find(call => call.path.includes('/scope/update/'))?.body?.appScopeIDs)
+      .toEqual(present.map((_, index) => `tenant-${index + 1}`));
+    expect(calls.some(call => call.path.includes('/publish/commit/'))).toBe(true);
+  });
+
+  it('skips every missing feature scope at once and reports them through onStep', async () => {
+    const featureScopes = LARK_TENANT_SCOPES.filter(scope => scope.tier === 'feature').map(scope => scope.name);
+    const present = LARK_COMMON_TENANT_SCOPES.filter(name => !featureScopes.includes(name));
+    const { client } = harness({ catalog: catalog(present) });
+    const steps: Array<[string, unknown]> = [];
+
+    const result = await configureLarkOpenPlatformApp(client, 'cli_test', {
+      onStep: (step, detail) => steps.push([step, detail]),
+    });
+
+    expect(featureScopes).toEqual([
+      'application:app_slash_command:write',
+      'im:message:urgent_app',
+      'im:pin',
+      'task:task:write',
+    ]);
+    expect(result).toMatchObject({ status: 'ready', scopeCount: 16, skippedScopes: featureScopes });
+    expect(steps.find(([step]) => step === 'scope_update')?.[1]).toEqual({ skippedScopes: featureScopes });
+  });
+
+  it('does not report skipped scopes when the catalog is complete', async () => {
+    const { client } = harness();
+    const steps: Array<[string, unknown]> = [];
+    const result = await configureLarkOpenPlatformApp(client, 'cli_test', {
+      onStep: (step, detail) => steps.push([step, detail]),
+    });
+    expect(result.skippedScopes).toEqual([]);
+    expect(steps.find(([step]) => step === 'scope_update')?.[1]).toBeUndefined();
   });
 
   it('accepts the real console catalog shape when entries omit identity buckets', async () => {
@@ -372,5 +434,40 @@ it('preserves existing published visibility even when a creator is supplied', as
   expect(calls.find(call => call.path.includes('/app_version/create/'))?.body).toMatchObject({
     visibleSuggest: { departments: ['od_engineering'], members: ['ou_owner'], groups: ['g_team'], isAll: 1 },
     blackVisibleSuggest: { departments: [], members: ['ou_blocked'], groups: [], isAll: 0 },
+  });
+});
+
+describe('native slash commands', () => {
+  it('includes application:app_slash_command:write in LARK_COMMON_TENANT_SCOPES with alphabetical sort', () => {
+    expect(LARK_COMMON_TENANT_SCOPES).toContain('application:app_slash_command:write');
+    const sorted = [...LARK_COMMON_TENANT_SCOPES].sort();
+    expect(LARK_COMMON_TENANT_SCOPES).toEqual(sorted);
+    // 分级只认 LARK_TENANT_SCOPES 这张表，不靠名字前缀猜。
+    expect(LARK_TENANT_SCOPES.find(scope => scope.name === 'application:app_slash_command:write')?.tier).toBe('feature');
+    expect(LARK_TENANT_SCOPES.filter(scope => scope.tier === 'base')).toHaveLength(16);
+  });
+
+  it('never routes slash command requests through the console session client', async () => {
+    const { client, calls } = harness();
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).resolves.toMatchObject({ status: 'ready' });
+    // 控制台会话带的是 cookie + CSRF，打的是控制台域；/open-apis/* 只认 tenant token。
+    // 发版流程里出现任何一条 /open-apis 请求，都说明传输层又选错了。
+    expect(calls.every(call => call.path.startsWith('/developers/v1/'))).toBe(true);
+    expect(calls.some(call => call.path.includes('app_slash_commands'))).toBe(false);
+  });
+
+  it('turns the registry into命令菜单目标状态：不带前导斜杠、说明按上限截断', () => {
+    const definitions = larkSlashCommandDefinitions();
+    expect(definitions).toHaveLength(larkCommandRegistry.length);
+    expect(definitions.some(definition => definition.command.startsWith('/'))).toBe(false);
+    expect(definitions.map(definition => definition.command)).toEqual(larkCommandRegistry.map(command => command.name));
+    expect(definitions.every(definition => definition.description.length <= MAX_SLASH_COMMAND_DESCRIPTION_LENGTH)).toBe(true);
+  });
+
+  it('truncates summaries exceeding MAX_SLASH_COMMAND_DESCRIPTION_LENGTH without error', () => {
+    const longSummary = 'A'.repeat(150);
+    const formatted = formatCommandDescription(longSummary);
+    expect(formatted).toHaveLength(MAX_SLASH_COMMAND_DESCRIPTION_LENGTH);
+    expect(formatted).toBe('A'.repeat(100));
   });
 });

@@ -117,11 +117,15 @@ export interface LarkCommandCapabilities {
   approval?: boolean;
   /** coordinator 持有会话记忆存储（workflowStore）时为 true；/remember、/memory、/forget 依赖它。 */
   memory?: boolean;
+  /** coordinator 持有群策略（LarkGroupManager）时为 true；/grant、/revoke 依赖它。 */
+  groupPolicy?: boolean;
   getSession: boolean;
   send: boolean;
   dispatch: boolean;
   interrupt: boolean;
   cancelQueued: boolean;
+  /** runtime.steerQueued（把排队中的一轮提到队首）。可选方法，缺失时 /steer 与 /queue top 停用。 */
+  steerQueued?: boolean;
   stop: boolean;
   getTasks: boolean;
   listAgents: boolean;
@@ -129,7 +133,7 @@ export interface LarkCommandCapabilities {
 }
 
 const capabilityKeys = [
-  'getSession', 'send', 'dispatch', 'interrupt', 'cancelQueued',
+  'getSession', 'send', 'dispatch', 'interrupt', 'cancelQueued', 'steerQueued',
   'stop', 'getTasks', 'listAgents', 'listSessions'
 ] as const satisfies readonly (keyof LarkCommandCapabilities)[];
 
@@ -145,7 +149,7 @@ export function larkCommandCapabilities(runtime: unknown): LarkCommandCapabiliti
 // 命令注册表
 // ---------------------------------------------------------------------------
 
-export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget';
+export type LarkCommandName = 'work' | 'schedule' | 'ci' | 'help' | 'repair' | 'status' | 'cancel' | 'retry' | 'new' | 'tasks' | 'answer' | 'approve' | 'reject' | 'remember' | 'memory' | 'forget' | 'agents' | 'queue' | 'steer' | 'grant' | 'revoke';
 
 export interface LarkCommandDefinition {
   name: LarkCommandName;
@@ -233,10 +237,54 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   {
     name: 'new',
     summary: '结束当前会话上下文；带上任务内容可以同时开启新会话并立刻派发这个任务',
-    usage: '/new 或 /new <任务内容>；指定首轮配置：/new [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容',
+    usage: '/new 或 /new <任务内容>；指定首轮配置：/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容',
     mutating: true,
     requires: capabilities => capabilities.stop,
     unavailableReason: '当前 Dutydeck 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'
+  },
+  {
+    name: 'agents',
+    summary: '列出本机可用的 Agent、版本与本机器人当前默认使用的那个',
+    usage: '/agents',
+    mutating: false,
+    requires: capabilities => capabilities.listAgents,
+    unavailableReason: '当前 Dutydeck 运行时无法列出本机 Agent（缺少 listAgents），/agents 只能给出空承诺，已停用。'
+  },
+  {
+    name: 'queue',
+    // 列出队列本身只读，但取消与提到队首会改变待执行的内容：整条命令按改状态处理，
+    // 与 /cancel 同一道白名单门，避免「只读入口带着写操作」两套口径。
+    summary: '查看本会话待执行的指令，并取消其中一条或把它提到队首',
+    usage: '/queue；/queue cancel <编号>；/queue top <编号>',
+    mutating: true,
+    requires: capabilities => capabilities.getTasks && (capabilities.cancelQueued || capabilities.steerQueued === true),
+    unavailableReason: '当前 Dutydeck 运行时读不到队列或无法操作队列（缺少 getTasks，且 cancelQueued 与 steerQueued 都不可用），/queue 已停用。'
+  },
+  {
+    name: 'steer',
+    // 诚实边界：Dutydeck 运行时没有「向正在执行的这一轮注入内容」的原语，
+    // 只有把排队中的一轮提到队首（steerQueued）。命令因此只承诺后者，回执里如实说明。
+    summary: '把一条内容尽快插进来执行；当前 Agent 不支持真正插话，会排到队首并中断这一轮',
+    usage: '/steer <内容>',
+    mutating: true,
+    requires: capabilities => capabilities.dispatch && capabilities.steerQueued === true,
+    unavailableReason: '当前 Dutydeck 运行时无法把一条指令提到队首（缺少 dispatch 或 steerQueued），/steer 做不到任何插话效果，已停用。'
+  },
+  {
+    name: 'grant',
+    summary: '把本群的对话权限放开给全部群成员，或把被 @ 的成员加进名单',
+    usage: '/grant；/grant @成员',
+    mutating: true,
+    requires: capabilities => capabilities.groupPolicy === true,
+    unavailableReason: '当前机器人没有接入群策略（缺少群绑定管理），/grant 无法修改任何授权，已停用。'
+  },
+  {
+    name: 'revoke',
+    summary: '收回本群的对话权限，或把被 @ 的成员移出名单',
+    usage: '/revoke；/revoke @成员',
+    mutating: true,
+    requires: capabilities => capabilities.groupPolicy === true,
+    unavailableReason: '当前机器人没有接入群策略（缺少群绑定管理），/revoke 无法修改任何授权，已停用。'
   }
 ];
 

@@ -4,7 +4,7 @@ import type { LarkGroupManager } from './group-management.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
-import type { ConfigRepository, PolicyAction, PolicyDecision, Session, SessionRepository } from '@dutydeck/shared';
+import { workPlanConfirmationRequired, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository } from '@dutydeck/shared';
 import { parseLarkMessageContent } from './message-content.js';
 import { larkMemoryToolsPrompt } from './memory.js';
 import { readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -495,7 +495,7 @@ export class LarkAgentToolsService {
       const task = this.options.workbenchTask?.(session.id);
       if (task) {
         const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
-        blocks.push(workbenchAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${turn}`));
+        blocks.push(workbenchAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${turn}`, workPlanConfirmationRequired(session)));
         if (binding.chatType === 'group' && session.sourceId?.split(':')[3] !== 'collaboration') blocks.push(collaborationAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} collaborate --turn ${turn}`));
       }
     }

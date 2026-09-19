@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { LocalFileSecretProvider } from '@dutydeck/secret-provider';
-import type { ChannelBotFoundation, GroupBinding, SecretRefMetadata } from '@dutydeck/shared';
+import { inheritPresentationOverride, type ChannelBotFoundation, type GroupBinding, type SecretRefMetadata } from '@dutydeck/shared';
 import { IdentityPreflightError, LarkIdentityPreflightProbe } from './identity-preflight.js';
 
 const roots: string[] = [];
@@ -45,7 +45,7 @@ const groupBinding = (id = 'binding-1', externalChatId = 'oc_private_chat'): Gro
   routingOverride: { groupReplyMode: { mode: 'inherit' }, mentionPolicy: { mode: 'inherit' } },
   accessOverride: { mode: 'inherit', principalIds: [] },
   groupToolsOverride: { read: 'inherit', discover: 'inherit', send: 'inherit' },
-  presentationOverride: { mode: 'inherit' },
+  presentationOverride: inheritPresentationOverride,
   reviewReasons: [],
   createdAt: checkedAt.toISOString(),
   updatedAt: checkedAt.toISOString(),

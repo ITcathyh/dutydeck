@@ -5,14 +5,14 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ApiError, collaborationApi, foundationApi, type FoundationCapability, type GroupMatrix } from '../api';
 import { GroupPolicyModal } from './GroupPolicyModal';
-import type { GroupBinding } from '@dutydeck/shared';
+import { inheritPresentationOverride, resolveGroupPresentation, type GroupBinding } from '@dutydeck/shared';
 
 const timestamp = '2026-08-30T00:00:00.000Z';
 const binding: GroupBinding = {
   schemaVersion: 1, id: 'binding-ui', revision: 1, channelBotId: 'bot-ui', externalChatId: 'chat-ui', state: 'staged', oncall: true,
   agentOverride: { mode: 'inherit' }, workspaceOverride: { mode: 'inherit' }, modelOverride: { mode: 'inherit' }, reasoningOverride: { mode: 'inherit' }, rolePolicyOverride: { mode: 'inherit' },
   routingOverride: { groupReplyMode: { mode: 'set', value: 'chat-topic' }, mentionPolicy: { mode: 'set', value: 'topic' } },
-  accessOverride: { mode: 'inherit', principalIds: [] }, groupToolsOverride: { read: 'inherit', discover: 'deny', send: 'allow' }, presentationOverride: { mode: 'inherit' }, reviewReasons: [], createdAt: timestamp, updatedAt: timestamp
+  accessOverride: { mode: 'inherit', principalIds: [] }, groupToolsOverride: { read: 'inherit', discover: 'deny', send: 'allow' }, presentationOverride: inheritPresentationOverride, reviewReasons: [], createdAt: timestamp, updatedAt: timestamp
 };
 const ready: FoundationCapability = { schemaVersion: 1, repositoriesWired: true, permissionEvaluatorWired: true, secretInspectorWired: true, runtimeWired: false, writesEnabled: true, readiness: 'offline_management_ready', blockers: [{ code: 'production_execution_unwired', message: '生产消息与执行入口尚未接入', action: '等待 WP1b 执行入口接线' }] };
 const matrix: GroupMatrix = {
@@ -21,7 +21,7 @@ const matrix: GroupMatrix = {
     bot: { schemaVersion: 1, id: 'bot-ui', revision: 1, channel: 'lark', externalAppId: 'cli_ui', displayName: 'UI Bot', brand: 'feishu', state: 'staged', desiredListenerState: 'disabled', fullTrustConfirmed: false, createdAt: timestamp, updatedAt: timestamp, credentialStatus: 'missing', blockerCodes: ['channel_bot_credential_required', 'channel_bot_activation_unavailable'] },
     cells: [{
       externalChatId: 'chat-ui', remoteFact: { schemaVersion: 1, id: 'fact-ui', revision: 1, channelBotId: 'bot-ui', externalChatId: 'chat-ui', membershipState: 'member', chatType: 'topic_group', displayName: '研发群', observedAt: timestamp, lastSuccessAt: timestamp, expiresAt: '2026-08-30T00:15:00.000Z', createdAt: timestamp, updatedAt: timestamp }, desiredPolicy: binding,
-      effectiveSummary: { agent: { value: 'codex', source: 'bot_default' }, workspace: { value: undefined, source: 'unconfigured' }, model: { value: undefined, source: 'unconfigured' }, reasoningEffort: { value: undefined, source: 'unconfigured' }, rolePolicyRef: { value: undefined, source: 'unconfigured' }, routing: { groupReplyMode: { value: 'chat-topic', source: 'group_override' }, mentionPolicy: { value: 'topic', source: 'group_override' } }, access: { mode: 'owner_only', principalIds: [], source: 'bot_default' }, groupTools: { read: { allowed: true, requested: true, source: 'bot_default' }, discover: { allowed: false, requested: false, source: 'group_override' }, send: { allowed: false, requested: true, source: 'bot_ceiling' } }, talkGrant: 'oncall_chat_members', explanations: [] },
+      effectiveSummary: { agent: { value: 'codex', source: 'bot_default' }, workspace: { value: undefined, source: 'unconfigured' }, model: { value: undefined, source: 'unconfigured' }, reasoningEffort: { value: undefined, source: 'unconfigured' }, rolePolicyRef: { value: undefined, source: 'unconfigured' }, routing: { groupReplyMode: { value: 'chat-topic', source: 'group_override' }, mentionPolicy: { value: 'topic', source: 'group_override' } }, access: { mode: 'owner_only', principalIds: [], source: 'bot_default' }, groupTools: { read: { allowed: true, requested: true, source: 'bot_default' }, discover: { allowed: false, requested: false, source: 'group_override' }, send: { allowed: false, requested: true, source: 'bot_ceiling' } }, presentation: resolveGroupPresentation(inheritPresentationOverride), talkGrant: 'oncall_chat_members', explanations: [] },
       permissionSummary: { talkSource: 'oncall_chat_members', canTalkAssignments: 0, canOperateAssignments: 1, adminAssignments: 0, independentGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } }, severity: 'blocked', blockers: [{ code: 'channel_bot_credential_required', action: '配置 SecretRef 引用' }], primaryAction: { id: 'review_effective_config', label: '查看有效配置' }
     }]
   }]

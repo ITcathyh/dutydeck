@@ -89,7 +89,9 @@ describe('bot configuration reader', () => {
     groupCardMention: true,
     pushIntervalMs: 1000,
     traceLimit: 50,
-    hideTraceOnComplete: false
+    hideTraceOnComplete: false,
+    completionReactionOnly: false,
+    silentProgress: false
   };
 
   const sampleGroupToolsPolicy = {
@@ -226,7 +228,7 @@ describe('bot configuration reader', () => {
           '{"mode":"inherit"}', '{"mode":"inherit"}', '{"mode":"inherit"}', '{"mode":"inherit"}',
           '{"mode":"inherit"}', '{"groupReplyMode":{"mode":"inherit"},"mentionPolicy":{"mode":"inherit"}}',
           '{"mode":"inherit","principalIds":[]}', '{"read":"inherit","discover":"inherit","send":"inherit"}',
-          '{"mode":"inherit"}', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+          '{"structuredAskCards":{"mode":"inherit"},"groupCardMention":{"mode":"inherit"},"pushIntervalMs":{"mode":"inherit"},"traceLimit":{"mode":"inherit"},"hideTraceOnComplete":{"mode":"inherit"},"completionReactionOnly":{"mode":"inherit"},"silentProgress":{"mode":"inherit"}}', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
         )
       `);
 
@@ -753,7 +755,7 @@ describe('bot configuration reader', () => {
           '{"p2pMode":"chat","groupReplyMode":"runtime_default","mentionPolicy":"always"}',
           '{"humanTalk":{"p2p":{"mode":"owner_only"},"managedGroup":{"mode":"owner_only"},"newGroup":{"mode":"owner_only"}},"botTalk":{"p2p":{"mode":"allowlist","selectors":[],"peerEnabled":false},"managedGroup":{"mode":"allowlist","selectors":[],"peerEnabled":false},"newGroup":{"mode":"allowlist","selectors":[],"peerEnabled":false}},"defaultOperate":{"rules":[]},"p2pOperate":{"mode":"none"}}',
           '{"permissionMode":"ask","preInjectPrompt":null,"highRiskAccess":{"p2p":{"mode":"entry_authorized"},"managedGroup":{"mode":"entry_authorized"},"newGroup":{"mode":"entry_authorized"}},"riskControlMode":"off","highRiskPattern":".*"}',
-          '{"webBaseUrl":null,"structuredAskCards":false,"groupCardMention":false,"pushIntervalMs":1000,"traceLimit":10,"hideTraceOnComplete":false}',
+          '{"webBaseUrl":null,"structuredAskCards":false,"groupCardMention":false,"pushIntervalMs":1000,"traceLimit":10,"hideTraceOnComplete":false,"completionReactionOnly":false,"silentProgress":false}',
           '{"readCeiling":false,"discoverCeiling":false,"sendCeiling":false,"readDefault":false,"discoverDefault":false,"sendDefault":false}',
           '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
         )
@@ -1253,7 +1255,7 @@ describe('bot configuration reader', () => {
           '{"mode":"inherit"}', '{"mode":"inherit"}', '{"mode":"inherit"}', '{"mode":"inherit"}',
           '{"mode":"inherit"}', '{"groupReplyMode":{"mode":"inherit"},"mentionPolicy":{"mode":"inherit"}}',
           '{"mode":"inherit","principalIds":[]}', '{"read":"inherit","discover":"inherit","send":"inherit"}',
-          '{"mode":"inherit"}', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+          '{"structuredAskCards":{"mode":"inherit"},"groupCardMention":{"mode":"inherit"},"pushIntervalMs":{"mode":"inherit"},"traceLimit":{"mode":"inherit"},"hideTraceOnComplete":{"mode":"inherit"},"completionReactionOnly":{"mode":"inherit"},"silentProgress":{"mode":"inherit"}}', '[]', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
         )
       `).run(bindingId, botId);
 

@@ -4,15 +4,15 @@ import { getCliAdapter } from '@dutydeck/cli-adapters';
 import type { AgentConfig } from '@dutydeck/shared';
 import { discoverAgentModels } from '../agent-models.js';
 
-export interface LarkLaunchOptions { cwd?: string; model?: string; reasoningEffort?: string; workspaceMode?: 'shared' | 'worktree' }
-export const larkNewSessionUsage = '/new [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容';
+export interface LarkLaunchOptions { agentId?: string; cwd?: string; model?: string; reasoningEffort?: string; workspaceMode?: 'shared' | 'worktree' }
+export const larkNewSessionUsage = '/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容';
 
 /** Only the option header is tokenized; the task body is never shell-parsed. */
 export function parseLarkNewSession(input: string): { prompt: string; launchOptions?: LarkLaunchOptions } {
   const body = input.trim();
   if (!body.startsWith('--')) return { prompt: body };
   const launchOptions: LarkLaunchOptions = {};
-  const fields = { '--cwd': 'cwd', '--model': 'model', '--effort': 'reasoningEffort', '--workspace': 'workspaceMode' } as const;
+  const fields = { '--agent': 'agentId', '--cwd': 'cwd', '--model': 'model', '--effort': 'reasoningEffort', '--workspace': 'workspaceMode' } as const;
   let remaining = body;
   const invalid = () => new Error(`首轮参数格式不正确。用法：${larkNewSessionUsage}；路径含空格时用引号包围。`);
   const token = () => {
@@ -39,12 +39,27 @@ export function parseLarkNewSession(input: string): { prompt: string; launchOpti
   throw invalid();
 }
 
-export async function validateLarkLaunchOptions(options: LarkLaunchOptions, agent: Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig>): Promise<LarkLaunchOptions> {
+export async function validateLarkLaunchOptions(
+  options: LarkLaunchOptions,
+  agent: Pick<AgentConfig, 'id' | 'name'> & Partial<AgentConfig>,
+  /** 机器人配置里的「别名 → 绝对路径」表；非绝对路径的 --cwd 先查这张表，命中后仍走下面同一套校验。 */
+  workspaceAliases?: Record<string, string>
+): Promise<LarkLaunchOptions> {
   const result = { ...options };
+  // 形态校验挡住明显不是 Agent 编号的输入；是否真实存在由调用方对着 runtime.listAgents 判断。
+  if (result.agentId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(result.agentId)) throw new Error('Agent 编号格式不正确。');
   if (result.cwd) {
-    if (!isAbsolute(result.cwd)) throw new Error('--cwd 必须是服务器上的绝对路径。');
+    // 绝对路径永远直通：别名表不得遮蔽用户明确写出的路径。命中别名后走的仍是同一套校验。
+    // 查表必须用 hasOwn：直接下标会命中 Object.prototype 上的 constructor / toString 等，
+    // 把一个函数当成路径交给下面的校验，用户拿到的就是英文 TypeError 而不是这里的中文提示。
+    const alias = workspaceAliases && Object.hasOwn(workspaceAliases, result.cwd) ? workspaceAliases[result.cwd] : undefined;
+    const requested = isAbsolute(result.cwd) ? result.cwd : alias ?? result.cwd;
+    if (!isAbsolute(requested)) {
+      const names = Object.keys(workspaceAliases ?? {});
+      throw new Error(names.length ? `--cwd 必须是服务器上的绝对路径，或以下别名之一：${names.join('、')}。` : '--cwd 必须是服务器上的绝对路径。');
+    }
     try {
-      const canonical = await realpath(result.cwd);
+      const canonical = await realpath(requested);
       if (!(await stat(canonical)).isDirectory()) throw new Error('not a directory');
       result.cwd = canonical;
     } catch { throw new Error('--cwd 必须指向服务器上已存在的目录。'); }

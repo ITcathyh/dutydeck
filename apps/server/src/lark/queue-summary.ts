@@ -35,8 +35,11 @@ export interface QueueSummaryElement {
 /** 换行折叠为空格（先做，保证一条任务只占一行）。 */
 const normalizeLine = (value: string) => value.replace(/\s+/g, ' ').trim();
 
-/** & < > 转义在截断之后做：避免把 &amp; 这类实体截成半截裸文本。 */
-const escapeLine = (value: string) =>
+/**
+ * & < > 转义在截断之后做：避免把 &amp; 这类实体截成半截裸文本。
+ * 导出给 /queue 的回执复用：回显同一批 prompt，必须用同一份转义，否则 <at> 会在卡面变成真的 @。
+ */
+export const escapeLarkPromptEcho = (value: string) =>
   value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
 /** 按码点截断原文并补省略号：不在 emoji 代理对中间下刀；返回值原文长度 = limit + 1。 */
@@ -69,7 +72,7 @@ export function renderQueueSummary(tasks: readonly QueueSummaryTask[]): string |
     if (shown >= QUEUE_SUMMARY_MAX_ITEMS) break;
     const raw = normalizeLine(task.prompt ?? '');
     const prompt = raw
-      ? escapeLine(clipCodePoints(raw, QUEUE_SUMMARY_PER_ITEM_CHARS - 1))
+      ? escapeLarkPromptEcho(clipCodePoints(raw, QUEUE_SUMMARY_PER_ITEM_CHARS - 1))
       : '（无描述）';
     const line = `${shown + 1}. ${prompt}`;
     const remainingAfter = queued.length - (shown + 1);

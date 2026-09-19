@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { REMOTE_FACT_EXPIRED_AT, type CreateRoleAssignmentInput } from '@dutydeck/shared';
+import { REMOTE_FACT_EXPIRED_AT, inheritPresentationOverride, type CreateRoleAssignmentInput } from '@dutydeck/shared';
 import { createRepositories } from './index.js';
 
 async function createBot(repositories: ReturnType<typeof createRepositories>, id = 'bot-1') {
@@ -22,6 +22,31 @@ describe('WP1a group policy repositories', () => {
     const updated = await repositories.groupBindings.update(binding.id, { expectedRevision: 1, state: 'disabled', oncall: true, routingOverride: { groupReplyMode: { mode: 'set', value: 'chat-topic' }, mentionPolicy: { mode: 'set', value: 'topic' } } });
     expect(updated).toMatchObject({ revision: 2, state: 'disabled', oncall: true });
     await expect(repositories.groupBindings.update(binding.id, { expectedRevision: 1, oncall: false })).rejects.toMatchObject({ code: 'FOUNDATION_REVISION_CONFLICT' });
+    repositories.close();
+  });
+
+  it('persists per-field presentation overrides across create and update', async () => {
+    const repositories = createRepositories(':memory:');
+    await createBot(repositories);
+    const binding = await repositories.groupBindings.create({ id: 'binding-presentation', channelBotId: 'bot-1', externalChatId: 'chat-presentation' });
+    expect(binding.presentationOverride).toEqual(inheritPresentationOverride);
+
+    const updated = await repositories.groupBindings.update(binding.id, {
+      expectedRevision: 1,
+      presentationOverride: {
+        ...inheritPresentationOverride,
+        groupCardMention: { mode: 'set', value: true },
+        traceLimit: { mode: 'set', value: 3 },
+        completionReactionOnly: { mode: 'set', value: true },
+        silentProgress: { mode: 'set', value: true }
+      }
+    });
+    expect(updated.presentationOverride).toMatchObject({
+      groupCardMention: { mode: 'set', value: true }, traceLimit: { mode: 'set', value: 3 },
+      completionReactionOnly: { mode: 'set', value: true }, silentProgress: { mode: 'set', value: true }
+    });
+    // 真读回来，确认写进了 presentation_override_json 而不是只活在内存里。
+    expect((await repositories.groupBindings.get(binding.id))!.presentationOverride).toEqual(updated.presentationOverride);
     repositories.close();
   });
 

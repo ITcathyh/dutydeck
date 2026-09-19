@@ -580,6 +580,7 @@ function mutateRelatedCommand(db: Database.Database): ConfigurationCommand<Mutat
               routingOverride: b.patch.routingOverride !== undefined ? b.patch.routingOverride : existing.routingOverride,
               accessOverride: b.patch.accessOverride !== undefined ? b.patch.accessOverride : existing.accessOverride,
               groupToolsOverride: b.patch.groupToolsOverride !== undefined ? b.patch.groupToolsOverride : existing.groupToolsOverride,
+              presentationOverride: b.patch.presentationOverride !== undefined ? b.patch.presentationOverride : existing.presentationOverride,
               reviewReasons: b.patch.reviewReasons !== undefined ? b.patch.reviewReasons : existing.reviewReasons
             };
             if (canonicalExecutionJson(candidate) !== canonicalExecutionJson(existing)) {

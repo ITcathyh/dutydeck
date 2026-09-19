@@ -3,7 +3,7 @@ import type { ExecutionActor } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import * as lark from '@larksuiteoapi/node-sdk';
-import type { AgentConfig, AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
+import type { AgentConfig, AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy, VerificationCommandInput, VerificationResponse } from '@dutydeck/shared';
 import type { LarkGroupManager } from './group-management.js';
 import type { StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError } from './service.js';
@@ -44,6 +44,11 @@ export interface LarkRuntime {
   getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]>;
   interrupt(id: string, expectedTaskId?: string, actor?: string): Promise<unknown>;
   cancelQueued?(id: string, taskId: string, actorId?: string): Promise<unknown>;
+  /** 把排队中的一轮提到队首（会中断当前正在执行的那一轮）。/queue top 与 /steer 的唯一原语。 */
+  steerQueued?(id: string, taskId: string, actorId?: string): Promise<unknown>;
+  /** 平台验证记录，最新在前，含代码指纹与 stale 判定。 */
+  getVerifications?(id: string): Promise<VerificationResponse[]>;
+  runVerification?(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse>;
   subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
 
@@ -170,7 +175,14 @@ export class LarkLongConnectionListener implements LarkListener {
           try {
             const effective = chatType === 'group' && this.options.groupManager
               ? await this.options.groupManager.resolved(current, chatId) : current;
-            return { ...effective, ...(chatType === 'group' ? { chatMode: await chatModeResolver(current.appId, chatId) } : {}) };
+            // 身份边界文案的触发条件：托管群看生效的 access（值班群等同全员），
+            // 未托管群看部署级白名单是否为空——两种形态下「全员都能使唤」的判据不同。
+            const access = chatType === 'group' && this.options.groupManager
+              ? await this.options.groupManager.groupAccess(current.appId, chatId) : undefined;
+            const allChatMembers = access
+              ? access.oncall || access.effective.mode === 'all_chat_members'
+              : !current.allowedUsers.length && !current.allowedEmails.length;
+            return { ...effective, ...(chatType === 'group' ? { chatMode: await chatModeResolver(current.appId, chatId), allChatMembers } : {}) };
           } catch {
             return { ...current, unavailableReason: '无法确认当前群配置与触发方式。' };
           }

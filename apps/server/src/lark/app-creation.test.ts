@@ -30,10 +30,12 @@ function harness() {
     await options.onQrUpdate?.({ status: 'waiting_for_scan', qrPayload: 'private-qr-token' });
     return connected;
   });
-  const configure = vi.fn(async () => ({ status: 'ready' as const, scopeCount: 16, eventCount: 1, callbackCount: 1, versionId: 'v1' }));
-  const options = { config, connect, configure, qrDataUrl: vi.fn(async () => 'data:image/png;base64,private-qr') };
+  const configure = vi.fn(async (): Promise<{ status: 'ready'; scopeCount: number; skippedScopes: string[]; eventCount: number; callbackCount: number; versionId: string }> =>
+    ({ status: 'ready', scopeCount: 16, skippedScopes: [], eventCount: 1, callbackCount: 1, versionId: 'v1' }));
+  const syncSlashCommands = vi.fn(async (_input: { appId: string; appSecret: string }) => ({ created: [], updated: [] }));
+  const options = { config, connect, configure, syncSlashCommands, qrDataUrl: vi.fn(async () => 'data:image/png;base64,private-qr') };
   const manager = new LarkAppCreationJobManager(options);
-  return { records, config, connected, connect, configure, postJson, postForm, options, manager };
+  return { records, config, connected, connect, configure, syncSlashCommands, postJson, postForm, options, manager };
 }
 
 it('creates once, durably saves credentials privately and configures creator visibility', async () => {
@@ -299,4 +301,45 @@ it('refuses a repository without atomic compare-and-set before login or external
   await expect(manager.start(id, 'Bot')).rejects.toMatchObject({ statusCode: 503 });
   expect(h.connect).not.toHaveBeenCalled();
   expect(h.records.size).toBe(0);
+});
+
+describe('首配后的原生斜杠命令同步', () => {
+  it('发布确认通过后用新应用自己的凭据同步一次，新建的机器人立刻就有命令菜单', async () => {
+    const h = harness();
+    await h.manager.start(id, 'My Bot');
+    await h.manager.wait(id);
+    expect(await h.manager.get(id)).toMatchObject({ status: 'completed' });
+    // 权限要等版本确认发布之后才对 tenant token 生效，所以必须排在 configure 之后。
+    expect(h.syncSlashCommands).toHaveBeenCalledExactlyOnceWith({ appId: 'cli_created', appSecret: 'test-private-secret' });
+    expect(h.syncSlashCommands.mock.invocationCallOrder[0]!).toBeGreaterThan(h.configure.mock.invocationCallOrder[0]!);
+  });
+
+  it('企业权限目录缺少斜杠命令权限时不发这个注定 403 的请求', async () => {
+    const h = harness();
+    h.configure.mockResolvedValueOnce({ status: 'ready', scopeCount: 15, skippedScopes: ['application:app_slash_command:write'], eventCount: 1, callbackCount: 1, versionId: 'v1' });
+    await h.manager.start(id, 'My Bot');
+    await h.manager.wait(id);
+    expect(await h.manager.get(id)).toMatchObject({ status: 'completed' });
+    expect(h.syncSlashCommands).not.toHaveBeenCalled();
+  });
+
+  it('同步失败不改变建应用的结论：应用仍然是已完成，只是暂时没有命令菜单', async () => {
+    const h = harness();
+    h.syncSlashCommands.mockRejectedValueOnce(new Error('private upstream failure'));
+    await h.manager.start(id, 'My Bot');
+    await h.manager.wait(id);
+    const job = await h.manager.get(id);
+    expect(job).toMatchObject({ status: 'completed', retryable: false });
+    expect(job!.error).toBeUndefined();
+    expect(JSON.stringify(job)).not.toContain('private upstream failure');
+  });
+
+  it('审核中时不同步：版本没生效，写命令必然 403', async () => {
+    const h = harness();
+    h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError('publish_pending_review', '应用版本已提交，正在等待飞书管理员审核'));
+    await h.manager.start(id, 'My Bot');
+    await h.manager.wait(id);
+    expect(await h.manager.get(id)).toMatchObject({ status: 'pending_review' });
+    expect(h.syncSlashCommands).not.toHaveBeenCalled();
+  });
 });

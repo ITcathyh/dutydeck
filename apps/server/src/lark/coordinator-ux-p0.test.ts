@@ -486,6 +486,18 @@ describe('P0-4 群卡 @ 发起人：默认关字节不变，开启只在审批/�
     expect(JSON.stringify([...dm.cards.values()])).not.toContain('<at');
   });
 
+  it('发起人是机器人时终态卡不 @ 回去，发送方类型落库供重启对账同口径判断', async () => {
+    // 机器人之间互相 @ 正是刷屏回路的燃料：回执卡不该再往回路里添一次 @。
+    const h = await harness('normal', { configPatch: { groupCardMention: true } });
+    await h.coordinator.handle(event('om_bot_task', '完成目标', { senderOpenId: 'ou_peer_bot', senderType: 'app' }), h.config);
+    await h.waitDelivered(1);
+    expect(JSON.stringify([...h.cards.values()])).not.toContain('group_mention');
+    expect(JSON.stringify([...h.cards.values()])).not.toContain('<at');
+    // 重启对账补发走的是持久化记录，没有 sender_type 就只能凭 open_id 判断，@ 会重新漏出去。
+    const mapping = (await h.repos.channelMappings.list(h.channel)).find(item => item.externalId === 'om_bot_task')!;
+    expect(JSON.parse(mapping.extra!).sender_type).toBe('app');
+  });
+
   it('重启对账补发不重复：终态消息保持恰好一枚 @，且不新发结果卡', async () => {
     const h = await harness('normal', { configPatch: { groupCardMention: true } });
     await h.coordinator.handle(event('om_task', '完成目标'), h.config);

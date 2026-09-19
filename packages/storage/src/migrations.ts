@@ -546,8 +546,51 @@ export const migrations: Migration[] = [
   { version: 21, name: 'collaboration_schedule_execution', up: createScheduleExecutionSchema },
   // collaboration_settings 建表在 v20，这里单独加列，让已按旧 v20 建好的库也能升级。
   // 默认 60：判定远比主动发言频繁，约等于每分钟一次的持续上限。
-  { version: 22, name: 'collaboration_decision_budget', up(db) { ensureColumn(db, 'collaboration_settings', 'max_decisions_per_hour', 'max_decisions_per_hour INTEGER NOT NULL DEFAULT 60 CHECK (max_decisions_per_hour >= 0 AND max_decisions_per_hour <= 500)') } }
+  { version: 22, name: 'collaboration_decision_budget', up(db) { ensureColumn(db, 'collaboration_settings', 'max_decisions_per_hour', 'max_decisions_per_hour INTEGER NOT NULL DEFAULT 60 CHECK (max_decisions_per_hour >= 0 AND max_decisions_per_hour <= 500)') } },
+  // 呈现设置从 Bot 级下沉到群级：presentationOverride 由 `{"mode":"inherit"}` 改成逐字段结构，
+  // Bot 级 presentation 增加两档静默形态。两列都是既有的 JSON 列，只改内容不改表结构，
+  // 但已经建好的旧库里存的还是旧形态，读出来会被 schema 拒掉，所以在这里就地改写。
+  { version: 23, name: 'group_presentation_override_fields', up: migratePresentationOverrides }
 ]
+
+const INHERIT_PRESENTATION_OVERRIDE = {
+  structuredAskCards: { mode: 'inherit' },
+  groupCardMention: { mode: 'inherit' },
+  pushIntervalMs: { mode: 'inherit' },
+  traceLimit: { mode: 'inherit' },
+  hideTraceOnComplete: { mode: 'inherit' },
+  completionReactionOnly: { mode: 'inherit' },
+  silentProgress: { mode: 'inherit' }
+}
+
+function migratePresentationOverrides(db: Database.Database): void {
+  const tableExists = (name: string) => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name))
+
+  if (tableExists('group_bindings')) {
+    const rows = db.prepare('SELECT id, presentation_override_json FROM group_bindings').all() as Array<{ id: string; presentation_override_json: string }>
+    const update = db.prepare('UPDATE group_bindings SET presentation_override_json = ? WHERE id = ?')
+    for (const row of rows) {
+      let current: unknown
+      try { current = JSON.parse(row.presentation_override_json) } catch { current = undefined }
+      // 已经是逐字段结构（七项齐全）就不动；旧的 inherit-only 形态和任何别的内容都重写成全继承。
+      const keys = current && typeof current === 'object' && !Array.isArray(current) ? current as Record<string, unknown> : undefined
+      if (keys && Object.keys(INHERIT_PRESENTATION_OVERRIDE).every(key => key in keys)) continue
+      update.run(JSON.stringify(INHERIT_PRESENTATION_OVERRIDE), row.id)
+    }
+  }
+
+  if (!tableExists('channel_bot_policies')) return
+  const policies = db.prepare('SELECT id, presentation_json FROM channel_bot_policies WHERE presentation_json IS NOT NULL').all() as Array<{ id: string; presentation_json: string }>
+  const updatePolicy = db.prepare('UPDATE channel_bot_policies SET presentation_json = ? WHERE id = ?')
+  for (const policy of policies) {
+    let current: Record<string, unknown>
+    try { current = JSON.parse(policy.presentation_json) as Record<string, unknown> } catch { continue }
+    if (!current || typeof current !== 'object' || Array.isArray(current)) continue
+    if ('completionReactionOnly' in current && 'silentProgress' in current) continue
+    // 两档都默认关闭：升级不改变任何现存 Bot 的说话量。
+    updatePolicy.run(JSON.stringify({ completionReactionOnly: false, silentProgress: false, ...current }), policy.id)
+  }
+}
 
 /** Own the outer transaction required by SQLite's table-rebuild procedure. */
 export function withMigrationTransaction(db: Database.Database, work: () => void): void {
