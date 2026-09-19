@@ -13,6 +13,36 @@ import { LarkAppCreationPanel } from './LarkAppCreationPanel';
 
 export type LarkConfigModalProps = { agents: Agent[]; target?: LarkSetupTarget; onClose(): void };
 
+/** `/new --cwd <别名>` 别名表的编辑行；两端留空的行在保存时丢弃。 */
+type WorkspaceAliasRow = { alias: string; path: string };
+
+/*
+  两个阈值的下限必须和 apps/server/src/lark/config.ts 的 saveLarkConfig 校验一致，
+  否则用户填完、点保存才被服务端拒绝。
+  加急 ≥60 秒：更短就等于卡片一发出去就推强提醒横幅，那不叫「提醒无人处理」。
+  置顶 ≥1 秒：置顶随时可撤、终态自动撤，不需要同样的下限。
+*/
+const minUrgentThresholdSeconds = 60;
+const minPinAfterSeconds = 1;
+
+/** 秒 ↔ 毫秒：这两项在配置里是毫秒，但让人按秒填才读得懂。空串表示沿用服务端默认。 */
+const secondsFromMs = (value: number | undefined) => value === undefined ? '' : String(Math.round(value / 1000));
+const msFromSeconds = (value: string) => {
+  const seconds = Number(value.trim());
+  return value.trim() && Number.isFinite(seconds) ? Math.round(seconds * 1000) : undefined;
+};
+
+/** 编辑行折回后端接受的别名表；同名后写覆盖先写，与服务端归一化口径一致。 */
+const workspaceAliasTable = (rows: readonly WorkspaceAliasRow[]): Record<string, string> => {
+  const table: Record<string, string> = {};
+  for (const row of rows) {
+    const alias = row.alias.trim();
+    const path = row.path.trim();
+    if (alias && path) table[alias] = path;
+  }
+  return table;
+};
+
 /*
   S7 Web 出口健康提示的 web 侧分类。apps/web 不能依赖 apps/server，
   规则与文案必须与 apps/server/src/lark/config.ts 的 describeWebBaseUrlReachability
@@ -91,7 +121,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const hydratedSelection = useRef<string | null>(null);
   const form = useRef<HTMLFormElement>(null);
   const enableListeningAfterNewBot = useRef(false);
-  const [selectedAppId, setSelectedAppId] = useState<string | null>(null); const [step, setStep] = useState<1 | 2>(1); const [name, setName] = useState(''); const [workspace, setWorkspace] = useState(''); const [webBaseUrl, setWebBaseUrl] = useState(typeof window !== 'undefined' ? window.location.origin : ''); const [appId, setAppId] = useState(''); const [appSecret, setAppSecret] = useState(''); const [restrictUsers, setRestrictUsers] = useState(false); const [allowedUserNames, setAllowedUserNames] = useState<string[]>([]); const [allowedBotNames, setAllowedBotNames] = useState<string[]>([]); const [peerBotsAllowed, setPeerBotsAllowed] = useState(true); const [defaultAgentId, setDefaultAgentId] = useState(''); const [defaultModel, setDefaultModel] = useState(''); const [defaultReasoningEffort, setDefaultReasoningEffort] = useState(''); const [fullTrustConfirmed, setFullTrustConfirmed] = useState(false); const [permissionMode, setPermissionMode] = useState<'ask' | 'full-trust'>('full-trust'); const [preInjectPrompt, setPreInjectPrompt] = useState(''); const [groupToolsEnabled, setGroupToolsEnabled] = useState(false); const [groupToolsAllowSend, setGroupToolsAllowSend] = useState(false); const [memoryEnabled, setMemoryEnabled] = useState(true); const [memoryAutoExtract, setMemoryAutoExtract] = useState(true); const [memoryAgentId, setMemoryAgentId] = useState(''); const [memoryModel, setMemoryModel] = useState(''); const [highRiskAllowedUserNames, setHighRiskAllowedUserNames] = useState<string[]>([]); const [highRiskPattern, setHighRiskPattern] = useState(''); const [riskControlMode, setRiskControlMode] = useState<RiskControlMode>('off'); const [showSecret, setShowSecret] = useState(false); const [listening, setListening] = useState(false); const [pushIntervalMs, setPushIntervalMs] = useState(1000); const [traceLimit, setTraceLimit] = useState('50'); const [structuredAskCards, setStructuredAskCards] = useState(true); const [groupCardMention, setGroupCardMention] = useState(false);
+  const [selectedAppId, setSelectedAppId] = useState<string | null>(null); const [step, setStep] = useState<1 | 2>(1); const [name, setName] = useState(''); const [workspace, setWorkspace] = useState(''); const [webBaseUrl, setWebBaseUrl] = useState(typeof window !== 'undefined' ? window.location.origin : ''); const [appId, setAppId] = useState(''); const [appSecret, setAppSecret] = useState(''); const [restrictUsers, setRestrictUsers] = useState(false); const [allowedUserNames, setAllowedUserNames] = useState<string[]>([]); const [allowedBotNames, setAllowedBotNames] = useState<string[]>([]); const [peerBotsAllowed, setPeerBotsAllowed] = useState(true); const [defaultAgentId, setDefaultAgentId] = useState(''); const [defaultModel, setDefaultModel] = useState(''); const [defaultReasoningEffort, setDefaultReasoningEffort] = useState(''); const [fullTrustConfirmed, setFullTrustConfirmed] = useState(false); const [permissionMode, setPermissionMode] = useState<'ask' | 'full-trust'>('full-trust'); const [preInjectPrompt, setPreInjectPrompt] = useState(''); const [groupToolsEnabled, setGroupToolsEnabled] = useState(false); const [groupToolsAllowSend, setGroupToolsAllowSend] = useState(false); const [memoryEnabled, setMemoryEnabled] = useState(true); const [memoryAutoExtract, setMemoryAutoExtract] = useState(true); const [memoryAgentId, setMemoryAgentId] = useState(''); const [memoryModel, setMemoryModel] = useState(''); const [highRiskAllowedUserNames, setHighRiskAllowedUserNames] = useState<string[]>([]); const [highRiskPattern, setHighRiskPattern] = useState(''); const [riskControlMode, setRiskControlMode] = useState<RiskControlMode>('off'); const [showSecret, setShowSecret] = useState(false); const [listening, setListening] = useState(false); const [pushIntervalMs, setPushIntervalMs] = useState(1000); const [traceLimit, setTraceLimit] = useState('50'); const [structuredAskCards, setStructuredAskCards] = useState(true); const [groupCardMention, setGroupCardMention] = useState(false); const [completionReactionOnly, setCompletionReactionOnly] = useState(false); const [silentProgress, setSilentProgress] = useState(false); const [workspaceAliasRows, setWorkspaceAliasRows] = useState<WorkspaceAliasRow[]>([]); const [verificationCommand, setVerificationCommand] = useState(''); const [urgentEnabled, setUrgentEnabled] = useState(false); const [urgentThresholdSeconds, setUrgentThresholdSeconds] = useState(''); const [urgentMaxPerHourPerChat, setUrgentMaxPerHourPerChat] = useState(''); const [pinLongTasks, setPinLongTasks] = useState(false); const [pinAfterSeconds, setPinAfterSeconds] = useState('');
   const current = config.data?.bots.find(bot => bot.appId === selectedAppId);
   const webBaseUrlReachability = useMemo(() => describeWebBaseUrlReachability(webBaseUrl), [webBaseUrl]);
   const highRiskPatternValidation = useMemo(() => validateHighRiskPattern(highRiskPattern), [highRiskPattern]);
@@ -127,12 +157,14 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
     setName(bot?.name ?? ''); setWorkspace(bot?.workspace ?? ''); setWebBaseUrl(bot?.webBaseUrl ?? (typeof window !== 'undefined' ? window.location.origin : '')); setAppId(bot?.appId ?? ''); setAppSecret(''); setOpenPlatformJobId(''); setRestrictUsers(Boolean(bot?.allowedUsers.length || bot?.allowedEmails.length)); setAllowedUserNames((bot?.allowedUsers ?? []).map(user => user.name)); setAllowedBotNames((bot?.allowedBots ?? []).map(b => b.name)); setPeerBotsAllowed(bot?.peerBotsAllowed !== false);
     setDefaultAgentId(agents.some(agent => agent.id === bot?.defaultAgentId) ? bot?.defaultAgentId ?? '' : agents[0]?.id ?? '');
     setDefaultModel(bot?.defaultModel ?? ''); setDefaultReasoningEffort(bot?.defaultReasoningEffort ?? ''); setFullTrustConfirmed(bot?.fullTrustConfirmed ?? false); setPermissionMode(bot?.permissionMode ?? 'full-trust'); setListening(enableListeningAfterNewBot.current ? true : bot?.listening ?? true); enableListeningAfterNewBot.current = false; setPushIntervalMs(bot?.pushIntervalMs ?? 1000); setTraceLimit((bot?.traceLimit ?? 10).toString());
-    setPreInjectPrompt(bot?.preInjectPrompt ?? ''); setGroupToolsEnabled(bot?.groupToolsEnabled ?? false); setGroupToolsAllowSend(bot?.groupToolsAllowSend ?? false); setMemoryEnabled(bot?.memoryEnabled ?? true); setMemoryAutoExtract(bot?.memoryAutoExtract ?? true); setMemoryAgentId(bot?.memoryAgentId ?? ''); setMemoryModel(bot?.memoryModel ?? ''); setStructuredAskCards(bot?.structuredAskCards ?? true); setGroupCardMention(bot?.groupCardMention ?? false); setHighRiskAllowedUserNames((bot?.highRiskAllowedUsers ?? []).map(user => user.name)); setHighRiskPattern(bot?.highRiskPattern ?? ''); setRiskControlMode(bot?.riskControlMode ?? 'off');
+    setPreInjectPrompt(bot?.preInjectPrompt ?? ''); setGroupToolsEnabled(bot?.groupToolsEnabled ?? false); setGroupToolsAllowSend(bot?.groupToolsAllowSend ?? false); setMemoryEnabled(bot?.memoryEnabled ?? true); setMemoryAutoExtract(bot?.memoryAutoExtract ?? true); setMemoryAgentId(bot?.memoryAgentId ?? ''); setMemoryModel(bot?.memoryModel ?? ''); setStructuredAskCards(bot?.structuredAskCards ?? true); setGroupCardMention(bot?.groupCardMention ?? false); setCompletionReactionOnly(bot?.completionReactionOnly ?? false); setSilentProgress(bot?.silentProgress ?? false); setWorkspaceAliasRows(Object.entries(bot?.workspaceAliases ?? {}).map(([alias, path]) => ({ alias, path }))); setVerificationCommand(bot?.verificationCommand ?? '');
+    setUrgentEnabled(bot?.urgentEnabled ?? false); setUrgentThresholdSeconds(secondsFromMs(bot?.urgentThresholdMs)); setUrgentMaxPerHourPerChat(bot?.urgentMaxPerHourPerChat === undefined ? '' : String(bot.urgentMaxPerHourPerChat)); setPinLongTasks(bot?.pinLongTasks ?? false); setPinAfterSeconds(secondsFromMs(bot?.pinAfterMs));
+    setHighRiskAllowedUserNames((bot?.highRiskAllowedUsers ?? []).map(user => user.name)); setHighRiskPattern(bot?.highRiskPattern ?? ''); setRiskControlMode(bot?.riskControlMode ?? 'off');
   }, [config.data, agents, selectedAppId]);
   const inspect = useMutation({ mutationFn: () => api.inspectLarkBot({ appId: appId.trim(), appSecret: appSecret.trim() }), onSuccess: result => setName(result.appName) });
   const save = useMutation({
     mutationFn: () => step === 1
-      ? api.saveLarkConfig({ stage: 'lark', ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), workspace: workspace.trim(), webBaseUrl: webBaseUrl.trim(), structuredAskCards, groupCardMention, allowedUserNames: restrictUsers ? allowedUserNames : [], allowedEmails: [], allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit) })
+      ? api.saveLarkConfig({ stage: 'lark', ...(current ? { originalAppId: current.appId } : {}), appId: appId.trim(), ...(appSecret.trim() ? { appSecret: appSecret.trim() } : {}), workspace: workspace.trim(), workspaceAliases: workspaceAliasTable(workspaceAliasRows), verificationCommand: verificationCommand.trim(), webBaseUrl: webBaseUrl.trim(), structuredAskCards, groupCardMention, completionReactionOnly, silentProgress, urgentEnabled, urgentThresholdMs: urgentThresholdMs ?? null, urgentMaxPerHourPerChat: urgentQuota ?? null, pinLongTasks, pinAfterMs: pinAfterMs ?? null, allowedUserNames: restrictUsers ? allowedUserNames : [], allowedEmails: [], allowedBotNames, peerBotsAllowed, pushIntervalMs, traceLimit: Number(traceLimit) })
       : api.saveLarkConfig({ stage: 'agent', originalAppId: current!.appId, defaultAgentId, defaultModel, defaultReasoningEffort, fullTrustConfirmed, permissionMode, preInjectPrompt, listening, groupToolsEnabled, groupToolsAllowSend, memoryEnabled, memoryAutoExtract, memoryAgentId, memoryModel, highRiskAllowedUserNames, highRiskAllowedEmails: [], highRiskPattern, riskControlMode }),
     onSuccess: data => { if (step === 1 && !current) enableListeningAfterNewBot.current = true; qc.setQueryData(['lark-config'], data); const savedId = appId.trim(); setSelectedAppId(savedId); setAppSecret(''); void qc.invalidateQueries({ queryKey: ['lark-hook-status', savedId] }); if (step === 1) setStep(2); else onClose(); }
   });
@@ -149,8 +181,20 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
   const agentCapabilitiesPending = step === 2 && Boolean(defaultAgentId) && !agentOptions.data && (agentOptions.isLoading || agentOptions.isFetching);
   const agentCapabilitiesReady = step !== 2 || Boolean(agentOptions.data);
   const missingTarget = Boolean(selectedAppId && config.data && !current);
+  // 服务端会静默丢掉指向相对路径的别名，所以这里必须先挡住：别名存不进去却不报错，
+  // 用户下次 `/new --cwd <别名>` 才会发现，那时已经无从追查。
+  const invalidWorkspaceAliases = workspaceAliasRows.filter(row => row.alias.trim() && row.path.trim() && !row.path.trim().startsWith('/'));
+  // 服务端会直接拒绝越界阈值，所以这里先挡住：填完点保存才被拒是最没必要的一次往返。
+  const urgentThresholdMs = msFromSeconds(urgentThresholdSeconds);
+  const urgentQuota = urgentMaxPerHourPerChat.trim() ? Number(urgentMaxPerHourPerChat.trim()) : undefined;
+  const pinAfterMs = msFromSeconds(pinAfterSeconds);
+  const reminderErrors = [
+    urgentThresholdSeconds.trim() && (urgentThresholdMs === undefined || urgentThresholdMs < minUrgentThresholdSeconds * 1000) ? `加急等待时间至少 ${minUrgentThresholdSeconds} 秒，留空表示用默认的 10 分钟。` : '',
+    urgentMaxPerHourPerChat.trim() && (urgentQuota === undefined || !Number.isInteger(urgentQuota) || urgentQuota < 1) ? '每群每小时加急次数必须是不小于 1 的整数，留空表示用默认的 3 次。' : '',
+    pinAfterSeconds.trim() && (pinAfterMs === undefined || pinAfterMs < minPinAfterSeconds * 1000) ? `置顶等待时间至少 ${minPinAfterSeconds} 秒，留空表示用默认的 10 分钟。` : ''
+  ].filter(Boolean);
   const canSave = !creationBusy && !missingTarget && (step === 1
-    ? Boolean(appId.trim() && (current || appSecret.trim()) && (!restrictUsers || allowedUserNames.length) && Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000)
+    ? Boolean(appId.trim() && (current || appSecret.trim()) && (!restrictUsers || allowedUserNames.length) && !invalidWorkspaceAliases.length && !reminderErrors.length && Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000)
     : Boolean(current && defaultAgentId && (permissionMode === 'ask' ? agentOptions.data?.source === 'acp' : fullTrustConfirmed) && agentCapabilitiesReady && (riskControlMode === 'off' || highRiskPatternValidation.valid) && !legacyHighRiskNeedsMigration && (riskControlMode !== 'enforced' || enforcedHookReady)));
   const formError = save.error ?? remove.error ?? pickWorkspace.error ?? inspect.error ?? startOpenPlatformSetup.error ?? openPlatformJob.error ?? installHook.error ?? (agentOptions.data ? undefined : agentOptions.error) ?? hookStatus.error ?? config.error;
   const permissionSettingsUrl = /^cli_[\w-]+$/.test(appId.trim()) ? `https://open.larkoffice.com/app/${encodeURIComponent(appId.trim())}/auth` : undefined;
@@ -231,7 +275,7 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
             <div className="flex items-start gap-3"><div className="min-w-0 flex-1"><div className="text-caption font-semibold text-primary">自动配置飞书能力</div><p className="mt-0.5 text-caption text-subtle">一次配置消息、群聊、附件、联系人、长连接事件与卡片回调，共 16 项必要权限，并保留当前应用可见范围后发布。</p></div><div className="flex shrink-0 items-center gap-1"><Button variant="secondary" size="sm" icon={<Wrench size={11}/>} loading={startOpenPlatformSetup.isPending || ['preparing', 'configuring'].includes(openPlatformJob.data?.status ?? '')} disabled={!appId.trim() || ['waiting_for_scan'].includes(openPlatformJob.data?.status ?? '')} onClick={() => startOpenPlatformSetup.mutate(false)}>{openPlatformJob.data?.status === 'failed' ? '重试' : openPlatformJob.data?.status === 'completed' ? '重新配置' : '自动配置'}</Button>{openPlatformJob.data?.status === 'failed' && <Button variant="ghost" size="sm" disabled={startOpenPlatformSetup.isPending} onClick={() => startOpenPlatformSetup.mutate(true)}>更换账号</Button>}</div></div>
             {openPlatformJob.data?.status === 'waiting_for_scan' && openPlatformJob.data.qrDataUrl && <div className="mt-3 flex items-center gap-3 rounded-md bg-surface p-2.5"><img src={openPlatformJob.data.qrDataUrl} alt="飞书开放平台登录二维码" className="h-28 w-28 rounded-md bg-surface"/><div className="text-caption text-subtle"><div className="font-medium text-primary">{openPlatformJob.data.scanConfirmed ? '已扫码，等待飞书确认' : '请用飞书扫码'}</div><div className="mt-1">仅用于登录开发者后台并配置当前 App ID；Cookie 私密保存在本机，不会读取或展示 App Secret。</div></div></div>}
             {openPlatformJob.data?.status === 'configuring' && <div className="mt-2 text-caption text-subtle">正在为 {openPlatformJob.data.accountName ?? '当前账号'} · {openPlatformJob.data.tenantName ?? '当前企业'} 配置并回读验证…</div>}
-            {openPlatformJob.data?.status === 'completed' && <div className="mt-2"><Banner tone="success"><div className="flex items-center gap-1.5 font-medium"><Check size={11}/>已为 {openPlatformJob.data.accountName ?? '当前账号'} · {openPlatformJob.data.tenantName ?? '当前企业'} 完成配置并发布</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5"><span>{openPlatformJob.data.result?.scopeCount ?? 16} 项权限</span><span>{openPlatformJob.data.result?.eventCount ?? 1} 个事件</span><span>{openPlatformJob.data.result?.callbackCount ?? 1} 个回调</span>{openPlatformJob.data.result?.versionId && <span className="font-mono">版本 {openPlatformJob.data.result.versionId}</span>}</div></Banner></div>}
+            {openPlatformJob.data?.status === 'completed' && <div className="mt-2"><Banner tone="success"><div className="flex items-center gap-1.5 font-medium"><Check size={11}/>已为 {openPlatformJob.data.accountName ?? '当前账号'} · {openPlatformJob.data.tenantName ?? '当前企业'} 完成配置并发布</div><div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5"><span>{openPlatformJob.data.result?.scopeCount ?? 16} 项权限</span><span>{openPlatformJob.data.result?.eventCount ?? 1} 个事件</span><span>{openPlatformJob.data.result?.callbackCount ?? 1} 个回调</span>{openPlatformJob.data.result?.versionId && <span className="font-mono">版本 {openPlatformJob.data.result.versionId}</span>}</div>{Boolean(openPlatformJob.data.result?.skippedScopes?.length) && <div className="mt-1">本企业权限目录缺少 {openPlatformJob.data.result!.skippedScopes!.join('、')}，已跳过未申请，对应功能不可用。</div>}</Banner></div>}
             {openPlatformJob.data?.status === 'failed' && <div className="mt-2"><Banner tone="danger">{openPlatformJob.data.error ?? '自动配置失败，请重试'}</Banner></div>}
           </div>
           <Field label="默认工作区" hint="飞书创建的新任务默认在这个代码目录执行。">
@@ -246,9 +290,43 @@ export function LarkConfigModal({ agents, target, onClose }: LarkConfigModalProp
           </Field>
           {/* S7：留空或只绑本机/内网时，卡片的“查看详情”在手机上注定打不开，必须就地提示，不做公网兜底。 */}
           {webBaseUrlReachability.kind !== 'public' && <Banner tone="warning">{webBaseUrlReachability.message}</Banner>}
+          <div className="border-t border-subtle pt-3.5">
+            <div className="text-caption font-medium text-secondary">工作区别名（可选）</div>
+            <p className="mt-0.5 text-caption text-subtle">飞书里用 <code>/new --cwd 别名</code> 切换到对应目录；路径必须是绝对路径。留空表示只用上面的默认工作区。</p>
+            <div className="mt-2.5 space-y-2">
+              {workspaceAliasRows.map((row, index) => <div key={index} className="flex items-center gap-2">
+                <Input id={`lark-alias-name-${index}`} aria-label={`别名 ${index + 1}`} value={row.alias} placeholder="别名" className="w-32 shrink-0 font-mono" onChange={event => setWorkspaceAliasRows(rows => rows.map((item, position) => position === index ? { ...item, alias: event.target.value } : item))}/>
+                <Input id={`lark-alias-path-${index}`} aria-label={`别名 ${index + 1} 的绝对路径`} value={row.path} placeholder="/绝对/路径" className="font-mono" onChange={event => setWorkspaceAliasRows(rows => rows.map((item, position) => position === index ? { ...item, path: event.target.value } : item))}/>
+                <IconButton label={`删除第 ${index + 1} 个别名`} tone="danger" onClick={() => setWorkspaceAliasRows(rows => rows.filter((_, position) => position !== index))}><Trash2 size={13}/></IconButton>
+              </div>)}
+              <Button variant="secondary" icon={<Plus size={12}/>} onClick={() => setWorkspaceAliasRows(rows => [...rows, { alias: '', path: '' }])}>添加别名</Button>
+            </div>
+            {invalidWorkspaceAliases.length > 0 && <div className="mt-2"><Banner tone="warning">别名路径必须以 / 开头的绝对路径，否则保存时会被丢弃：{invalidWorkspaceAliases.map(row => row.alias.trim()).join('、')}</Banner></div>}
+          </div>
+          <Field label="验证命令（可选）" hint="结果卡的验证状态与“运行验证”按钮依赖它；留空时结果卡不提验证，也不显示该按钮。命令在上面的工作区里执行。">
+            <Input value={verificationCommand} onChange={event => setVerificationCommand(event.target.value)} placeholder="pnpm test" className="font-mono"/>
+          </Field>
           <div className="space-y-2.5 border-t border-subtle pt-3.5">
             <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-structured-ask" className="cursor-pointer text-caption font-medium text-primary">结构化问答卡片（默认开启）</label><div className="mt-0.5 text-caption text-subtle">问答卡渲染单选、多选与输入框等结构化组件；低版本飞书客户端可能不支持，会回退为引用卡片回复。</div></div><Switch id="lark-switch-structured-ask" label="结构化问答卡片（默认开启）" checked={structuredAskCards} onToggle={() => setStructuredAskCards(value => !value)}/></div>
             <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-group-mention" className="cursor-pointer text-caption font-medium text-primary">群卡片 @ 发起人（实验能力，默认关闭）</label><div className="mt-0.5 text-caption text-subtle">群内审批卡与结果卡 @ 发起人，免打扰时也能亮屏提醒；触达效果尚待真机验证，私聊不受影响。</div></div><Switch id="lark-switch-group-mention" label="群卡片 @ 发起人（实验能力，默认关闭）" checked={groupCardMention} onToggle={() => setGroupCardMention(value => !value)}/></div>
+            <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-completion-reaction" className="cursor-pointer text-caption font-medium text-primary">完成时只贴表情、不发结果卡（默认关闭）</label><div className="mt-0.5 text-caption text-subtle">任务完成时只对原消息贴一个表情，不再发结果卡；想看结果仍可在 Web 里查。可在群配置里按群覆盖。</div></div><Switch id="lark-switch-completion-reaction" label="完成时只贴表情、不发结果卡（默认关闭）" checked={completionReactionOnly} onToggle={() => setCompletionReactionOnly(value => !value)}/></div>
+            <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-silent-progress" className="cursor-pointer text-caption font-medium text-primary">中间进展静默（默认关闭）</label><div className="mt-0.5 text-caption text-subtle">执行期间不发中间进展，只保留最终结果。可在群配置里按群覆盖。</div></div><Switch id="lark-switch-silent-progress" label="中间进展静默（默认关闭）" checked={silentProgress} onToggle={() => setSilentProgress(value => !value)}/></div>
+            <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-urgent" className="cursor-pointer text-caption font-medium text-primary">长时间没人处理时发加急（默认关闭）</label><div className="mt-0.5 text-caption text-subtle">审批卡或提问卡挂太久时，给该回答的那个人推一条飞书应用内加急，免打扰也会亮屏。只加急要回答的人，不会加急全群。</div></div><Switch id="lark-switch-urgent" label="长时间没人处理时发加急（默认关闭）" checked={urgentEnabled} onToggle={() => setUrgentEnabled(value => !value)}/></div>
+            {urgentEnabled && <div className="flex gap-2 pl-3">
+              <div className="flex-1"><Field label="加急前等待（秒）" hint={`留空用默认的 10 分钟；最少 ${minUrgentThresholdSeconds} 秒。`}>
+                <Input inputMode="numeric" value={urgentThresholdSeconds} placeholder="600" onChange={event => setUrgentThresholdSeconds(event.target.value)}/>
+              </Field></div>
+              <div className="flex-1"><Field label="每群每小时最多加急" hint="留空用默认的 3 次。">
+                <Input inputMode="numeric" value={urgentMaxPerHourPerChat} placeholder="3" onChange={event => setUrgentMaxPerHourPerChat(event.target.value)}/>
+              </Field></div>
+            </div>}
+            <div className="flex items-center rounded-md bg-surface px-3 py-2 shadow-card"><div className="min-w-0"><label htmlFor="lark-switch-pin" className="cursor-pointer text-caption font-medium text-primary">长任务进度卡置顶（默认关闭）</label><div className="mt-0.5 text-caption text-subtle">任务跑够设定时长后把进度卡置顶到会话顶部，任务结束自动取消置顶。置顶会出现在所有群成员的会话里。</div></div><Switch id="lark-switch-pin" label="长任务进度卡置顶（默认关闭）" checked={pinLongTasks} onToggle={() => setPinLongTasks(value => !value)}/></div>
+            {pinLongTasks && <div className="pl-3">
+              <Field label="跑多久算长任务（秒）" hint={`留空用默认的 10 分钟；最少 ${minPinAfterSeconds} 秒。`}>
+                <Input inputMode="numeric" value={pinAfterSeconds} placeholder="600" onChange={event => setPinAfterSeconds(event.target.value)}/>
+              </Field>
+            </div>}
+            {reminderErrors.length > 0 && <Banner tone="warning">{reminderErrors.join('')}</Banner>}
           </div>
           {!current && <Button variant="secondary" fullWidth icon={<Bot size={12}/>} loading={inspect.isPending} disabled={!appId.trim() || !appSecret.trim()} onClick={() => inspect.mutate()}>校验凭证并识别机器人名称</Button>}
           <div className="border-t border-subtle pt-3.5">

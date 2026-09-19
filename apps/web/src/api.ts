@@ -43,6 +43,24 @@ export type LarkBotConfig = {
   structuredAskCards?: boolean;
   /** P0-4 群内卡片 @ 发起人总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
   groupCardMention?: boolean;
+  /** `/new --cwd <别名>` 的别名表；没有别名时字段缺席。 */
+  workspaceAliases?: Record<string, string>;
+  /** 结果卡验证状态依赖的验证命令；未配置时字段缺席，结果卡不提验证。 */
+  verificationCommand?: string;
+  /** 完成时只贴表情、不发结果卡；旧服务端缺省按关闭处理。 */
+  completionReactionOnly?: boolean;
+  /** 中间进展静默，只保留最终结果；旧服务端缺省按关闭处理。 */
+  silentProgress?: boolean;
+  /** 卡片长时间无人处理时发加急提醒；服务端恒返回布尔，旧服务端缺省按关闭处理。 */
+  urgentEnabled?: boolean;
+  /** 触发加急的等待时长；服务端未配置时字段缺席，按模块默认处理。 */
+  urgentThresholdMs?: number;
+  /** 单个会话每小时的加急上限；服务端未配置时字段缺席，按模块默认处理。 */
+  urgentMaxPerHourPerChat?: number;
+  /** 长任务自动置顶；服务端恒返回布尔，旧服务端缺省按关闭处理。 */
+  pinLongTasks?: boolean;
+  /** 触发置顶的运行时长；服务端未配置时字段缺席，按模块默认处理。 */
+  pinAfterMs?: number;
   pushIntervalMs: number;
   traceLimit?: number;
   hideTraceOnComplete: boolean;
@@ -135,7 +153,7 @@ export type LarkOpenPlatformSetupJob = {
   scanConfirmed?: boolean;
   accountName?: string;
   tenantName?: string;
-  result?: { status: 'ready'; scopeCount: number; eventCount: number; callbackCount: number; versionId: string };
+  result?: { status: 'ready'; scopeCount: number; eventCount: number; callbackCount: number; versionId: string; skippedScopes?: string[] };
   error?: string;
 };
 export type LarkAppCreationJob = {
@@ -254,6 +272,8 @@ export const api = {
     appId?: string;
     appSecret?: string;
     workspace?: string;
+    workspaceAliases?: Record<string, string>;
+    verificationCommand?: string;
     webBaseUrl?: string;
     defaultAgentId?: string;
     defaultModel?: string;
@@ -270,6 +290,14 @@ export const api = {
     memoryModel?: string;
     structuredAskCards?: boolean;
     groupCardMention?: boolean;
+    completionReactionOnly?: boolean;
+    silentProgress?: boolean;
+    urgentEnabled?: boolean;
+    /** null = 清回模块默认（前端清空输入框就送 null）；undefined = 不改这一项。 */
+    urgentThresholdMs?: number | null;
+    urgentMaxPerHourPerChat?: number | null;
+    pinLongTasks?: boolean;
+    pinAfterMs?: number | null;
     pushIntervalMs?: number;
     traceLimit?: number | null;
     allowedUsers?: LarkAllowedUser[];
@@ -291,7 +319,7 @@ export const api = {
   deleteLarkConfig: (appId: string) => json<LarkConfig>(`/api/lark/config/${encodeURIComponent(appId)}`, { method: 'DELETE' }),
   managementGroups: () => json<{ groups: ManagedGroup[] }>('/api/lark/management/groups', { cache: 'no-store' }),
   syncGroups: (appId: string) => json<{ groups: ManagedGroup[]; error?: string }>(`/api/lark/bots/${encodeURIComponent(appId)}/sync-groups`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }),
-  updateGroupBotBinding: (appId: string, chatId: string, body: { expectedRevision: number; patch: Partial<Pick<GroupBinding, 'agentOverride' | 'workspaceOverride' | 'modelOverride' | 'reasoningOverride' | 'routingOverride' | 'accessOverride' | 'groupToolsOverride' | 'oncall' | 'state'>>; roleChanges?: RoleChange[] }) => json<ManagedGroupBot>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  updateGroupBotBinding: (appId: string, chatId: string, body: { expectedRevision: number; patch: Partial<Pick<GroupBinding, 'agentOverride' | 'workspaceOverride' | 'modelOverride' | 'reasoningOverride' | 'routingOverride' | 'accessOverride' | 'groupToolsOverride' | 'presentationOverride' | 'oncall' | 'state'>>; roleChanges?: RoleChange[] }) => json<ManagedGroupBot>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   groupMembers: (appId: string, chatId: string, pageToken?: string) => json<GroupMembersResult>(`/api/lark/bots/${encodeURIComponent(appId)}/groups/${encodeURIComponent(chatId)}/members${pageToken ? `?pageToken=${encodeURIComponent(pageToken)}` : ''}`, { cache: 'no-store' }),
   systemDirectories: (path?: string) => json<SystemDirectoriesResult>(`/api/system/directories${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
   larkHookStatus: (appId: string, agentId?: string) => {

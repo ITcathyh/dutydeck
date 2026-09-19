@@ -60,6 +60,8 @@ function catalog(granted: readonly string[] = LARK_COMMON_TENANT_SCOPES): unknow
 interface ConfigureShape {
   /** 已生效的权限；缺项会让 scopes 变成 done。 */
   grantedScopes?: readonly string[];
+  /** 租户权限目录里没有、configurator 本次跳过未申请的 feature 权限。 */
+  skippedScopes?: readonly string[];
   /** 事件本来是否已订阅；false 时会走 /event/update/。 */
   eventSubscribed?: boolean;
   /** 回调本来是否已就绪；false 时会走 /callback/switch/ + /callback/update/。 */
@@ -78,6 +80,7 @@ interface ConfigureShape {
 function fakeConfigure(shape: ConfigureShape = {}) {
   const {
     grantedScopes = LARK_COMMON_TENANT_SCOPES,
+    skippedScopes = [],
     eventSubscribed = true,
     callbackReady = true,
     versionId = 'version-2',
@@ -120,7 +123,8 @@ function fakeConfigure(shape: ConfigureShape = {}) {
     return {
       status: 'ready',
       // 刻意保留真实实现的硬编码值：lark-bind 不许把它们当成实测数据转述。
-      scopeCount: LARK_COMMON_TENANT_SCOPES.length,
+      scopeCount: LARK_COMMON_TENANT_SCOPES.length - skippedScopes.length,
+      skippedScopes: [...skippedScopes],
       eventCount: 1,
       callbackCount: 1,
       versionId,
@@ -280,7 +284,8 @@ describe('bindLarkApp', () => {
     const result = await promise;
 
     expect(levelOf(result, 'scopes')).toBe('done');
-    expect(result.steps.find(step => step.key === 'scopes')?.detail).toContain('4');
+    // 20 项里已生效 12 项，实测缺口就是 8 项。
+    expect(result.steps.find(step => step.key === 'scopes')?.detail).toContain('本次补齐 8 项');
     expect(levelOf(result, 'events')).toBe('done');
     // 回调本来就好，不能被顺带标成 done。
     expect(levelOf(result, 'callback')).toBe('ok');
@@ -560,7 +565,7 @@ describe('bindLarkApp', () => {
     }));
   });
 
-  it('不把 configurator 硬编码的 16/1/1 当成实测数据转述', async () => {
+  it('不把 configurator 硬编码的 eventCount/callbackCount 当成实测数据转述', async () => {
     const shape: ConfigureShape = { grantedScopes: LARK_COMMON_TENANT_SCOPES.slice(0, 10) };
     const { promise } = run({
       assumeYes: true,
@@ -569,11 +574,34 @@ describe('bindLarkApp', () => {
     });
     const result = await promise;
 
-    // 实测缺 6 项，configurator 只会说 16。报「16 项已配置」就是假绿灯。
+    // 实测缺 10 项。直接转述 configurator 的 scopeCount（20）就是假绿灯。
     const scopes = result.steps.find(step => step.key === 'scopes');
     expect(scopes?.level).toBe('done');
-    expect(scopes?.detail).toContain('6');
+    expect(scopes?.detail).toContain('本次补齐 10 项');
     expect(JSON.stringify(result)).not.toContain('scopeCount');
     expect(JSON.stringify(result)).not.toContain('eventCount');
+  });
+
+  it('目录缺少功能权限时照常完成，跳过项进 detail 与 warnings，且不计入权限缺口', async () => {
+    const skippedScopes = ['task:task:write'];
+    const shape: ConfigureShape = {
+      // 除了被跳过的那一项，其余权限本来就已生效：缺口应当是 0，而不是 1。
+      grantedScopes: LARK_COMMON_TENANT_SCOPES.filter(name => !skippedScopes.includes(name)),
+      skippedScopes,
+    };
+    const { promise } = run({
+      assumeYes: true,
+      connect: vi.fn(async () => connected({ client: sessionClient(shape) })),
+      configure: fakeConfigure(shape),
+    });
+    const result = await promise;
+
+    expect(result.outcome).toBe('ready');
+    expect(result.versionId).toBe('version-2');
+    const scopes = result.steps.find(step => step.key === 'scopes');
+    expect(scopes?.level).toBe('ok');
+    expect(scopes?.detail).toContain('19 项权限本来就已生效');
+    expect(scopes?.detail).toContain('task:task:write');
+    expect(result.warnings.some(warning => warning.includes('task:task:write'))).toBe(true);
   });
 });

@@ -10,7 +10,15 @@
 
 import type { StoredLarkConfig } from './config.js';
 
-export type WelcomeRouting = Pick<StoredLarkConfig, 'mentionPolicy' | 'p2pMode' | 'groupReplyMode'> & { chatMode?: 'group' | 'topic' | 'p2p'; unavailableReason?: string };
+export type WelcomeRouting = Pick<StoredLarkConfig, 'mentionPolicy' | 'p2pMode' | 'groupReplyMode'> & {
+  chatMode?: 'group' | 'topic' | 'p2p';
+  unavailableReason?: string;
+  /**
+   * 本群所有成员都能让机器人执行任务（托管群 access=all_chat_members/值班，
+   * 或未托管且未配置任何白名单）。为 true 时群欢迎卡必须写明执行身份边界。
+   */
+  allChatMembers?: boolean;
+};
 
 import {
   listLarkCommands,
@@ -92,13 +100,19 @@ export function buildWelcomeCardContent(input: {
       '有多个机器人时，@你要使用的那个机器人。'
     ].join('\n');
     const commands = commandLines.length ? `常用命令：\n${commandLines.join('\n')}` : `发送 \`${trigger}/help\` 查看命令。`;
+    // 身份边界：机器人以部署这台服务的系统账号执行，worktree 只隔离可写目录，
+    // 不隔离宿主凭据、文件系统与网络。全员可用时这句必须出现在入群第一屏。
+    const boundary = routing?.allChatMembers
+      ? '本群所有成员都能让我执行任务。我用的是**部署这台 Dutydeck 的系统账号**：它能读写的文件、它的凭据和网络，我在执行任务时都能用到。请按这个前提决定在群里派什么任务。'
+      : undefined;
     const footer = `发送 \`${trigger}/help\` 查看全部命令与用法；明显拼错的控制命令会提示纠正，其他 CLI 命令和路径交给 Agent。`;
-    const markdown = [intro, '', usage, '', commands, '', footer].join('\n');
+    const markdown = [intro, '', usage, ...(boundary ? ['', boundary] : []), '', commands, '', footer].join('\n');
     return {
       title: 'Dutydeck 机器人已入群',
       markdown,
       elements: [
         markdownElement('welcome_intro', `${intro}\n\n${usage}`),
+        ...(boundary ? [markdownElement('welcome_identity', boundary)] : []),
         markdownElement('welcome_commands', commands),
         markdownElement('welcome_footer', footer)
       ]

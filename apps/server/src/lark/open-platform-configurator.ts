@@ -1,25 +1,57 @@
+import { larkCommandRegistry } from './commands.js';
+import type { LarkSlashCommandDefinition } from './service.js';
+
+/**
+ * 开放平台控制台会话客户端：带的是登录 cookie + CSRF，只打控制台域的
+ * `/developers/v1/*`。租户 OpenAPI（`/open-apis/*`）认的是 tenant_access_token，
+ * 是另一套凭据，不走这个客户端——原生斜杠命令同步见 LarkCardService.syncSlashCommands。
+ */
 export interface LarkOpenPlatformClient {
   postJson(path: string, body?: Record<string, unknown>): Promise<unknown>;
 }
 
-export const LARK_COMMON_TENANT_SCOPES = [
-  'contact:contact.base:readonly',
-  'contact:user.base:readonly',
-  'contact:user.email:readonly',
-  'contact:user.id:readonly',
-  'im:chat.members:read',
-  'im:chat:read',
-  'im:message',
-  'im:message.group_at_msg.include_bot:readonly',
-  'im:message.group_at_msg:readonly',
-  'im:message.group_msg',
-  'im:message.group_msg.include_bot:read',
-  'im:message.p2p_msg:readonly',
-  'im:message.reactions:write_only',
-  'im:message:readonly',
-  'im:message:update',
-  'im:resource',
-] as const;
+/**
+ * 租户权限分级。
+ *
+ * base：消息收发的必要条件，租户权限目录里缺任何一项都说明这个应用根本跑不起来，
+ *       必须中止自动配置与发版（缺了还发版 = 发一个收不到消息的机器人）。
+ * feature：只支撑单个功能。目录里没有时跳过该项并如实汇报，不阻断发版——
+ *       否则一个租户目录里缺一项功能权限，会连带让没开这些功能的用户丢掉自动配置能力。
+ */
+export type LarkTenantScopeTier = 'base' | 'feature';
+export interface LarkTenantScope {
+  name: string;
+  tier: LarkTenantScopeTier;
+  /** feature 项跳过时用来说明「跳过后哪个功能不可用」。 */
+  feature?: string;
+}
+
+export const LARK_TENANT_SCOPES: readonly LarkTenantScope[] = [
+  { name: 'application:app_slash_command:write', tier: 'feature', feature: '原生斜杠命令注册' },
+  { name: 'contact:contact.base:readonly', tier: 'base' },
+  { name: 'contact:user.base:readonly', tier: 'base' },
+  { name: 'contact:user.email:readonly', tier: 'base' },
+  { name: 'contact:user.id:readonly', tier: 'base' },
+  { name: 'im:chat.members:read', tier: 'base' },
+  { name: 'im:chat:read', tier: 'base' },
+  { name: 'im:message', tier: 'base' },
+  { name: 'im:message.group_at_msg.include_bot:readonly', tier: 'base' },
+  { name: 'im:message.group_at_msg:readonly', tier: 'base' },
+  { name: 'im:message.group_msg', tier: 'base' },
+  { name: 'im:message.group_msg.include_bot:read', tier: 'base' },
+  { name: 'im:message.p2p_msg:readonly', tier: 'base' },
+  { name: 'im:message.reactions:write_only', tier: 'base' },
+  { name: 'im:message:readonly', tier: 'base' },
+  { name: 'im:message:update', tier: 'base' },
+  { name: 'im:message:urgent_app', tier: 'feature', feature: '卡片加急' },
+  { name: 'im:pin', tier: 'feature', feature: '卡片置顶' },
+  { name: 'im:resource', tier: 'base' },
+  // 任务智能体通道（task-agent.ts）：读「我负责的」任务 + 写任务记录都用这一项。
+  { name: 'task:task:write', tier: 'feature', feature: '飞书任务智能体通道' },
+];
+
+/** 申请清单（字母序），与 LARK_TENANT_SCOPES 同源。 */
+export const LARK_COMMON_TENANT_SCOPES: readonly string[] = LARK_TENANT_SCOPES.map(scope => scope.name);
 
 export const LARK_COMMON_USER_SCOPES = [] as const;
 
@@ -53,6 +85,8 @@ export interface LarkOpenPlatformConfigureStepDetail {
   addedEvents?: string[];
   /** version_create / publish_commit：创建出的版本 ID。 */
   versionId?: string;
+  /** scope_update：租户权限目录里没有、本次跳过未申请的 feature 权限名。 */
+  skippedScopes?: string[];
 }
 
 export interface LarkOpenPlatformConfigureOptions {
@@ -63,7 +97,13 @@ export interface LarkOpenPlatformConfigureOptions {
 
 export interface LarkOpenPlatformConfigurationResult {
   status: 'ready';
+  /** 本次真正申请的权限项数；被跳过的 feature 权限不计入。 */
   scopeCount: number;
+  /**
+   * 租户权限目录里没有、本次跳过未申请的 feature 权限名。
+   * 这里列出的是「本次跳过」——对应功能不可用，但不阻断发版。
+   */
+  skippedScopes: string[];
   eventCount: number;
   callbackCount: number;
   versionId: string;
@@ -93,7 +133,7 @@ export async function configureLarkOpenPlatformApp(
 
   const catalogPayload = await post(client, `/developers/v1/scope/all/${appId}`, undefined,
     'scope_catalog_read_failed', '读取飞书权限目录失败');
-  const scopeIds = mapRequiredScopes(catalogPayload);
+  const { ids: scopeIds, skipped: skippedScopes } = mapRequiredScopes(catalogPayload);
   await post(client, `/developers/v1/scope/update/${appId}`, {
     clientId: appId,
     appScopeIDs: scopeIds,
@@ -104,8 +144,9 @@ export async function configureLarkOpenPlatformApp(
   }, 'scope_update_failed', '配置飞书常用权限失败');
   const scopeReadback = await post(client, `/developers/v1/scope/all/${appId}`, undefined,
     'scope_verification_read_failed', '回读飞书权限配置失败');
+  // 回读只校验本次真正申请的 id；被跳过的 feature 权限没有 id，自然不参与校验。
   verifyRequiredScopes(scopeReadback, scopeIds);
-  onStep('scope_update');
+  onStep('scope_update', skippedScopes.length ? { skippedScopes: [...skippedScopes] } : undefined);
 
   await post(client, `/developers/v1/robot/switch/${appId}`, {
     clientId: appId,
@@ -244,7 +285,8 @@ export async function configureLarkOpenPlatformApp(
 
   return {
     status: 'ready',
-    scopeCount: LARK_COMMON_TENANT_SCOPES.length,
+    scopeCount: scopeIds.length,
+    skippedScopes,
     eventCount: LARK_REQUIRED_EVENTS.length,
     callbackCount: 1,
     versionId,
@@ -274,25 +316,52 @@ async function post(
   }
 }
 
-function mapRequiredScopes(payload: unknown): string[] {
+export const MAX_SLASH_COMMAND_DESCRIPTION_LENGTH = 100;
+
+export function formatCommandDescription(summary: string): string {
+  const trimmed = summary.trim();
+  if (trimmed.length <= MAX_SLASH_COMMAND_DESCRIPTION_LENGTH) return trimmed;
+  return trimmed.slice(0, MAX_SLASH_COMMAND_DESCRIPTION_LENGTH);
+}
+
+/**
+ * 注册表 → 飞书原生斜杠命令的目标状态（纯函数）。command 不带前导斜杠，
+ * 说明按飞书的长度上限截断。执行方是 LarkCardService.syncSlashCommands。
+ */
+export function larkSlashCommandDefinitions(): LarkSlashCommandDefinition[] {
+  return larkCommandRegistry.map(definition => ({
+    command: definition.name.replace(/^\//, '').trim(),
+    description: formatCommandDescription(definition.summary),
+  }));
+}
+
+/**
+ * 把权限清单映射成租户权限目录里的 id。
+ *
+ * base 权限缺失或映射不唯一 → 抛 scope_catalog_incomplete，中止自动配置与发版。
+ * feature 权限同样情况 → 不申请、计入 skipped，由调用方如实汇报，发版照常继续。
+ */
+function mapRequiredScopes(payload: unknown): { ids: string[]; skipped: string[] } {
   const catalog: ScopeEntry[] = [];
   collectScopeEntries(payload, undefined, catalog);
   const ids: string[] = [];
   const missing: string[] = [];
-  for (const name of LARK_COMMON_TENANT_SCOPES) {
+  const skipped: string[] = [];
+  for (const scope of LARK_TENANT_SCOPES) {
     const tenantMatches = [...new Set(catalog
-      .filter(entry => entry.bucket === 'tenant' && entry.name === name)
+      .filter(entry => entry.bucket === 'tenant' && entry.name === scope.name)
       .map(entry => entry.id))];
     // The current Feishu console catalog omits identity buckets entirely for
     // some tenants. Prefer an explicit tenant entry; otherwise accept exactly
     // one unbucketed entry. A user-bucket-only entry must never satisfy a
     // tenant permission.
     const unbucketedMatches = [...new Set(catalog
-      .filter(entry => entry.bucket === undefined && entry.name === name)
+      .filter(entry => entry.bucket === undefined && entry.name === scope.name)
       .map(entry => entry.id))];
     const matches = tenantMatches.length > 0 ? tenantMatches : unbucketedMatches;
     if (matches.length === 1) ids.push(matches[0]!);
-    else missing.push(name);
+    else if (scope.tier === 'feature') skipped.push(scope.name);
+    else missing.push(scope.name);
   }
   if (missing.length > 0) {
     throw new LarkOpenPlatformConfigurationError(
@@ -300,7 +369,7 @@ function mapRequiredScopes(payload: unknown): string[] {
       `飞书权限目录缺少或无法唯一映射 ${missing.length} 项必需权限`,
     );
   }
-  return ids;
+  return { ids, skipped };
 }
 
 function collectScopeEntries(value: unknown, bucket: ScopeBucket | undefined, out: ScopeEntry[]): void {

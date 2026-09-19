@@ -1,5 +1,6 @@
 import { validateHighRiskPattern, type AgentRepository, type ConfigRepository } from '@dutydeck/shared';
 import { isAbsolute } from 'node:path';
+import { hostname, userInfo } from 'node:os';
 import { LarkServiceError } from './service.js';
 
 export const larkBotsConfigKey = 'lark.bots';
@@ -22,6 +23,11 @@ export interface StoredLarkConfig {
   appSecret: string;
   name?: string;
   workspace?: string;
+  /**
+   * `/new --cwd <别名>` 的「别名 → 服务器绝对路径」表。缺省或空表时 --cwd 的行为完全不变，
+   * 仍然只接受绝对路径；别名命中后走的也是同一套目录存在性与权限校验。
+   */
+  workspaceAliases?: Record<string, string>;
   webBaseUrl?: string;
   defaultAgentId?: string;
   defaultModel?: string;
@@ -68,9 +74,31 @@ export interface StoredLarkConfig {
   structuredAskCards: boolean;
   /** P0-4 群内审批卡/结果卡 @ 发起人总开关，默认关闭；触达效果真机验证通过后才建议开启。 */
   groupCardMention: boolean;
+  /**
+   * 平台验证命令：在会话工作目录真实执行，记录退出码、有限输出与代码指纹。
+   * 未配置时结果卡不提验证，也不给「运行验证」按钮——不能暗示一个不存在的能力。
+   */
+  verificationCommand?: string;
+  /**
+   * 长时间无人处理的审批/提问卡是否发飞书应用内加急，默认关闭：加急是收件人手机上的
+   * 强提醒横幅，升级不能替用户打开它。
+   */
+  urgentEnabled: boolean;
+  /** 卡片发出多久仍无人处理才加急（毫秒），缺省由 workflow-urgent 按 10 分钟处理。 */
+  urgentThresholdMs?: number;
+  /** 每个群每小时最多加急几次，缺省由 workflow-urgent 按 3 次处理。 */
+  urgentMaxPerHourPerChat?: number;
+  /** 长任务进度卡是否自动置顶，默认关闭：置顶会改写群成员的会话列表。 */
+  pinLongTasks: boolean;
+  /** 任务跑多久算长任务（毫秒），缺省按 10 分钟处理。 */
+  pinAfterMs?: number;
   pushIntervalMs: number;
   traceLimit?: number;
   hideTraceOnComplete: boolean;
+  /** 完成时只对触发消息贴表情，不再发结果卡，默认关闭。可被群级 presentationOverride 覆盖。 */
+  completionReactionOnly: boolean;
+  /** 中间进展完全静默，只保留最终结果，默认关闭。可被群级 presentationOverride 覆盖。 */
+  silentProgress: boolean;
   allowedUsers: LarkAllowedUser[];
   allowedEmails: string[];
   allowedBots: LarkAllowedUser[];
@@ -80,6 +108,16 @@ export interface StoredLarkConfig {
   highRiskPattern: string;
   riskControlMode: RiskControlMode;
 }
+
+/**
+ * 机器人执行任务时真正使用的宿主身份：部署这台 Dutydeck 的系统账号。
+ * 群里任何人下达的任务都以它运行，因此 /status 必须如实写出来。读取失败时退回占位符，
+ * 绝不让一条说明身份的文案自己把命令打挂。
+ */
+export const larkExecutionIdentity = (): string => {
+  try { return `${userInfo().username}@${hostname()}`; }
+  catch { return '未知账号@未知主机'; }
+};
 
 export const larkPermissionMode = (config: Pick<StoredLarkConfig, 'permissionMode'>) => config.permissionMode === 'ask' ? 'ask' as const : 'full-trust' as const;
 export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissionMode' | 'fullTrustConfirmed'>) => larkPermissionMode(config) === 'ask' || config.fullTrustConfirmed === true;
@@ -93,6 +131,8 @@ export interface SaveLarkConfigInput {
   appSecret?: string;
   name?: string;
   workspace?: string;
+  /** `/new --cwd <别名>` 的别名表；未提供时保留既有别名，传空表示清空。 */
+  workspaceAliases?: Record<string, string>;
   webBaseUrl?: string;
   defaultAgentId?: string;
   defaultModel?: string;
@@ -123,9 +163,23 @@ export interface SaveLarkConfigInput {
   structuredAskCards?: boolean;
   /** P0-4 群内卡片 @ 发起人总开关；缺省继承当前配置，仍缺省按关闭处理。 */
   groupCardMention?: boolean;
+  /** 平台验证命令；缺省继承当前配置，空白串视为未配置。 */
+  verificationCommand?: string;
+  /** 卡片加急总开关；缺省继承当前配置，仍缺省按关闭处理。 */
+  urgentEnabled?: boolean;
+  /** 加急超时阈值（毫秒），必须 ≥ 60000；缺省继承当前配置，null 表示清回模块默认。 */
+  urgentThresholdMs?: number | null;
+  /** 每群每小时加急上限，必须是 ≥ 1 的整数；缺省继承当前配置，null 表示清回模块默认。 */
+  urgentMaxPerHourPerChat?: number | null;
+  /** 长任务置顶总开关；缺省继承当前配置，仍缺省按关闭处理。 */
+  pinLongTasks?: boolean;
+  /** 长任务判定时长（毫秒），必须 ≥ 1000；缺省继承当前配置，null 表示清回模块默认。 */
+  pinAfterMs?: number | null;
   pushIntervalMs?: number;
   traceLimit?: number | null;
   hideTraceOnComplete?: boolean;
+  completionReactionOnly?: boolean;
+  silentProgress?: boolean;
   allowedUsers?: LarkAllowedUser[];
   allowedEmails?: string[];
   allowedBots?: LarkAllowedUser[];
@@ -154,6 +208,8 @@ export interface PublicLarkConfig {
   tabLabel: string;
   setupComplete: boolean;
   workspace?: string;
+  /** `/new --cwd <别名>` 的别名表；没有别名时整个字段缺席。 */
+  workspaceAliases?: Record<string, string>;
   webBaseUrl?: string;
   defaultAgentId?: string;
   defaultModel?: string;
@@ -175,9 +231,18 @@ export interface PublicLarkConfig {
   memoryModel?: string;
   structuredAskCards: boolean;
   groupCardMention: boolean;
+  /** 平台验证命令；未配置时飞书结果卡不提验证，也不给「运行验证」按钮。 */
+  verificationCommand?: string;
+  urgentEnabled: boolean;
+  urgentThresholdMs?: number;
+  urgentMaxPerHourPerChat?: number;
+  pinLongTasks: boolean;
+  pinAfterMs?: number;
   pushIntervalMs: number;
   traceLimit?: number;
   hideTraceOnComplete: boolean;
+  completionReactionOnly: boolean;
+  silentProgress: boolean;
   allowedUsers: LarkAllowedUser[];
   allowedEmails: string[];
   allowedBots: LarkAllowedUser[];
@@ -283,6 +348,19 @@ const normalizeAllowedUsers = (value: unknown): LarkAllowedUser[] => {
   return [...users.values()];
 };
 
+/** 只保留指向绝对路径的别名；全部无效时返回 undefined，配置里就不会留下一张空表。 */
+const normalizeWorkspaceAliases = (value: unknown): Record<string, string> | undefined => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const aliases: Record<string, string> = {};
+  for (const [alias, target] of Object.entries(value)) {
+    const name = alias.trim();
+    const path = typeof target === 'string' ? target.trim() : '';
+    if (!name || !path || !isAbsolute(path)) continue;
+    aliases[name] = path;
+  }
+  return Object.keys(aliases).length > 0 ? aliases : undefined;
+};
+
 const normalizeP2pMode = (value: unknown): 'chat' | 'thread' | undefined =>
   value === 'chat' || value === 'thread' ? value : undefined;
 
@@ -305,6 +383,23 @@ const normalizeStartupCommands = (value: unknown): string[] | undefined => {
   if (!Array.isArray(value)) return undefined;
   const commands = value.map(item => String(item).trim()).filter(Boolean);
   return commands.length > 0 ? commands : undefined;
+};
+
+/** 加急阈值下限 1 分钟：更短就等于卡片一发出去就推强提醒横幅，那不叫「提醒无人处理」。 */
+export const minLarkUrgentThresholdMs = 60_000;
+/** 长任务判定下限 1 秒：置顶随时可撤、终态自动撤，不需要和强提醒一样的下限。 */
+export const minLarkPinAfterMs = 1_000;
+
+/** 毫秒阈值：非法或低于下限的值整条丢弃，回落各自模块的内置默认。 */
+const normalizeDelayMs = (value: unknown, minimum: number): number | undefined => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= minimum ? parsed : undefined;
+};
+
+/** 每群每小时加急上限：≥ 1 的整数，其余丢弃回落默认。 */
+const normalizeUrgentQuota = (value: unknown): number | undefined => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : undefined;
 };
 
 const normalizeDisplayName = (value: unknown): string | undefined => {
@@ -371,6 +466,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     appSecret: parsed.appSecret,
     ...(parsed.name?.trim() ? { name: parsed.name.trim() } : {}),
     ...(parsed.workspace?.trim() ? { workspace: parsed.workspace.trim() } : {}),
+    ...(normalizeWorkspaceAliases(parsed.workspaceAliases) ? { workspaceAliases: normalizeWorkspaceAliases(parsed.workspaceAliases)! } : {}),
     ...(normalizeWebBaseUrl(parsed.webBaseUrl) ? { webBaseUrl: normalizeWebBaseUrl(parsed.webBaseUrl) } : {}),
     ...(parsed.defaultAgentId ? { defaultAgentId: parsed.defaultAgentId } : {}),
     ...(parsed.defaultModel ? { defaultModel: parsed.defaultModel } : {}),
@@ -393,9 +489,17 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
     structuredAskCards: parsed.structuredAskCards === undefined || parsed.structuredAskCards === true,
     groupCardMention: parsed.groupCardMention === true,
+    ...(parsed.verificationCommand?.trim() ? { verificationCommand: parsed.verificationCommand.trim() } : {}),
+    urgentEnabled: parsed.urgentEnabled === true,
+    ...(normalizeDelayMs(parsed.urgentThresholdMs, minLarkUrgentThresholdMs) !== undefined ? { urgentThresholdMs: normalizeDelayMs(parsed.urgentThresholdMs, minLarkUrgentThresholdMs)! } : {}),
+    ...(normalizeUrgentQuota(parsed.urgentMaxPerHourPerChat) !== undefined ? { urgentMaxPerHourPerChat: normalizeUrgentQuota(parsed.urgentMaxPerHourPerChat)! } : {}),
+    pinLongTasks: parsed.pinLongTasks === true,
+    ...(normalizeDelayMs(parsed.pinAfterMs, minLarkPinAfterMs) !== undefined ? { pinAfterMs: normalizeDelayMs(parsed.pinAfterMs, minLarkPinAfterMs)! } : {}),
     pushIntervalMs: Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20_000 ? pushIntervalMs : defaultLarkPushIntervalMs,
     traceLimit,
     hideTraceOnComplete: parsed.hideTraceOnComplete !== false,
+    completionReactionOnly: parsed.completionReactionOnly === true,
+    silentProgress: parsed.silentProgress === true,
     allowedUsers: normalizeAllowedUsers(parsed.allowedUsers),
     allowedEmails: normalizeEmails(parsed.allowedEmails),
     allowedBots: normalizeAllowedUsers(parsed.allowedBots),
@@ -450,6 +554,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   tabLabel: duplicateNames.has((config.name ?? config.appId).toLowerCase()) ? `${config.name ?? config.appId} · ${config.appId}` : config.name ?? config.appId,
   setupComplete: Boolean(config.defaultAgentId && larkExecutionConfirmed(config)),
   ...(config.workspace ? { workspace: config.workspace } : {}),
+  ...(config.workspaceAliases ? { workspaceAliases: config.workspaceAliases } : {}),
   ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
   ...(config.defaultAgentId ? { defaultAgentId: config.defaultAgentId } : {}),
   ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
@@ -460,6 +565,12 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.groupReplyMode ? { groupReplyMode: config.groupReplyMode } : {}),
   ...(config.brand ? { brand: config.brand } : {}),
   ...(config.displayName ? { displayName: config.displayName } : {}),
+  ...(config.verificationCommand ? { verificationCommand: config.verificationCommand } : {}),
+  urgentEnabled: config.urgentEnabled === true,
+  ...(config.urgentThresholdMs !== undefined ? { urgentThresholdMs: config.urgentThresholdMs } : {}),
+  ...(config.urgentMaxPerHourPerChat !== undefined ? { urgentMaxPerHourPerChat: config.urgentMaxPerHourPerChat } : {}),
+  pinLongTasks: config.pinLongTasks === true,
+  ...(config.pinAfterMs !== undefined ? { pinAfterMs: config.pinAfterMs } : {}),
   preInjectPrompt: config.preInjectPrompt,
   listening: config.listening,
   activeListening: activeAppIds.has(config.appId),
@@ -474,6 +585,8 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   pushIntervalMs: config.pushIntervalMs,
   traceLimit: config.traceLimit ?? defaultLarkTraceLimit,
   hideTraceOnComplete: config.hideTraceOnComplete,
+  completionReactionOnly: config.completionReactionOnly === true,
+  silentProgress: config.silentProgress === true,
   allowedUsers: config.allowedUsers,
   allowedEmails: config.allowedEmails,
   allowedBots: config.allowedBots,
@@ -516,6 +629,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const appSecret = input.appSecret?.trim() || current?.appSecret;
   const name = input.name === undefined ? current?.name : input.name.trim() || undefined;
   const workspace = input.workspace === undefined ? current?.workspace : input.workspace.trim() || undefined;
+  const workspaceAliases = input.workspaceAliases === undefined ? current?.workspaceAliases : normalizeWorkspaceAliases(input.workspaceAliases);
   const webBaseUrl = input.webBaseUrl === undefined ? current?.webBaseUrl : normalizeWebBaseUrl(input.webBaseUrl);
   const defaultAgentId = input.defaultAgentId?.trim() || current?.defaultAgentId;
   const listening = input.listening ?? current?.listening ?? false;
@@ -530,6 +644,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
   const traceLimit = input.traceLimit === undefined ? current?.traceLimit ?? defaultLarkTraceLimit : input.traceLimit ?? defaultLarkTraceLimit;
   const hideTraceOnComplete = input.hideTraceOnComplete ?? current?.hideTraceOnComplete ?? true;
+  const completionReactionOnly = input.completionReactionOnly ?? current?.completionReactionOnly ?? false;
+  const silentProgress = input.silentProgress ?? current?.silentProgress ?? false;
   const defaultModel = input.defaultModel === undefined ? current?.defaultModel : input.defaultModel.trim() || undefined;
   const defaultReasoningEffort = input.defaultReasoningEffort === undefined ? current?.defaultReasoningEffort : input.defaultReasoningEffort.trim() || undefined;
   const fullTrustConfirmed = input.fullTrustConfirmed ?? current?.fullTrustConfirmed ?? false;
@@ -541,6 +657,13 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const startupCommands = input.startupCommands === undefined ? current?.startupCommands : normalizeStartupCommands(input.startupCommands);
   const brand = input.brand === undefined ? current?.brand : normalizeBrand(input.brand);
   const displayName = input.displayName === undefined ? current?.displayName : normalizeDisplayName(input.displayName);
+  const verificationCommand = input.verificationCommand === undefined ? current?.verificationCommand : input.verificationCommand.trim() || undefined;
+  const urgentEnabled = input.urgentEnabled ?? current?.urgentEnabled ?? false;
+  // 三个阈值都用 null 表示「清回模块默认」，与 traceLimit 同一口径；不传才是继承现值。
+  const urgentThresholdMs = input.urgentThresholdMs === undefined ? current?.urgentThresholdMs : input.urgentThresholdMs ?? undefined;
+  const urgentMaxPerHourPerChat = input.urgentMaxPerHourPerChat === undefined ? current?.urgentMaxPerHourPerChat : input.urgentMaxPerHourPerChat ?? undefined;
+  const pinLongTasks = input.pinLongTasks ?? current?.pinLongTasks ?? false;
+  const pinAfterMs = input.pinAfterMs === undefined ? current?.pinAfterMs : input.pinAfterMs ?? undefined;
   const preInjectPrompt = input.preInjectPrompt === undefined ? current?.preInjectPrompt ?? '' : input.preInjectPrompt.trim();
   const allowedUsers = input.allowedUsers === undefined ? current?.allowedUsers ?? [] : normalizeAllowedUsers(input.allowedUsers);
   const allowedEmails = input.allowedEmails === undefined ? current?.allowedEmails ?? [] : normalizeEmails(input.allowedEmails);
@@ -556,6 +679,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (workspace && !isAbsolute(workspace)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Workspace must be an absolute path', 400);
   if (!Number.isInteger(pushIntervalMs) || pushIntervalMs < 500 || pushIntervalMs > 20_000) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Push interval must be an integer between 500 and 20000 milliseconds', 400);
   if (!Number.isInteger(traceLimit) || traceLimit < 1) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Trace limit must be a positive integer', 400);
+  if (urgentThresholdMs !== undefined && (!Number.isInteger(urgentThresholdMs) || urgentThresholdMs < minLarkUrgentThresholdMs)) throw new LarkServiceError('INVALID_LARK_CONFIG', `Urgent threshold must be an integer of at least ${minLarkUrgentThresholdMs} milliseconds`, 400);
+  if (urgentMaxPerHourPerChat !== undefined && (!Number.isInteger(urgentMaxPerHourPerChat) || urgentMaxPerHourPerChat < 1)) throw new LarkServiceError('INVALID_LARK_CONFIG', 'Urgent hourly limit must be a positive integer', 400);
+  if (pinAfterMs !== undefined && (!Number.isInteger(pinAfterMs) || pinAfterMs < minLarkPinAfterMs)) throw new LarkServiceError('INVALID_LARK_CONFIG', `Pin delay must be an integer of at least ${minLarkPinAfterMs} milliseconds`, 400);
   const patternValidation = validateHighRiskPattern(highRiskPattern);
   if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
   if (agents && defaultAgentId && !(await agents.get(defaultAgentId))) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown default Agent: ${defaultAgentId}`, 400);
@@ -571,6 +697,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     appSecret,
     ...(name ? { name } : {}),
     ...(workspace ? { workspace } : {}),
+    ...(workspaceAliases ? { workspaceAliases } : {}),
     ...(webBaseUrl ? { webBaseUrl } : {}),
     ...(defaultAgentId ? { defaultAgentId } : {}),
     ...(defaultModel ? { defaultModel } : {}),
@@ -593,9 +720,17 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(memoryModel ? { memoryModel } : {}),
     structuredAskCards,
     groupCardMention,
+    ...(verificationCommand ? { verificationCommand } : {}),
+    urgentEnabled,
+    ...(urgentThresholdMs !== undefined ? { urgentThresholdMs } : {}),
+    ...(urgentMaxPerHourPerChat !== undefined ? { urgentMaxPerHourPerChat } : {}),
+    pinLongTasks,
+    ...(pinAfterMs !== undefined ? { pinAfterMs } : {}),
     pushIntervalMs,
     traceLimit,
     hideTraceOnComplete,
+    completionReactionOnly,
+    silentProgress,
     allowedUsers,
     allowedEmails,
     allowedBots,

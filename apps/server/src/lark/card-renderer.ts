@@ -1,4 +1,4 @@
-import type { AgentEvent } from '@dutydeck/shared';
+import type { AgentEvent, VerificationResponse, VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
 
@@ -966,4 +966,74 @@ export function renderLarkRecordExport(events: AgentEvent[]): string {
   });
   return '# 公开执行记录\n\n包含本轮公开输出、工具输入输出、审批及错误；已脱敏，不含内部分析、用户原始请求与原始终端屏幕。\n\n'
     + (sections.join('\n\n---\n\n') || '本轮没有可导出的结构化公开记录。');
+}
+
+/** 结果卡上验证状态行的 element_id。结果重发与卡片 PATCH 都靠它定位并整行替换。 */
+export const LARK_VERIFICATION_ELEMENT_ID = 'verification_status';
+
+/** 记录自身的结论用词。这里刻意不叫「已验证」：失效的记录同样会用到它们。 */
+const verificationOutcomeLabels: Record<VerificationStatus, string> = {
+  running: '执行中', passed: '通过', failed: '失败', timed_out: '超时', interrupted: '中断', unverified: '结论未确认'
+};
+
+const verificationStaleReasons: Record<NonNullable<VerificationResponse['staleReason']>, string> = {
+  code_changed: '验证之后代码已变化',
+  changed_during_run: '验证期间代码发生变化',
+  current_fingerprint_unavailable: '无法确认当前代码版本',
+  record_fingerprint_missing: '记录缺少代码指纹'
+};
+
+const verificationTime = (value: string | undefined): string => {
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? `${new Date(parsed).toISOString().replace('T', ' ').slice(0, 16)} UTC` : '时间未记录';
+};
+
+/**
+ * 结果卡的验证状态行。
+ *
+ * 这条信息在飞书侧此前一个字都没有，而「说做完了其实没做完」正是最常见的失望来源：
+ * 验证命令在目标目录真实执行并留下退出码、有限输出、时间与代码指纹，Agent 自述
+ * 测试通过不会产生任何验证记录，两者必须在卡上分得开。
+ *
+ * 三条硬规则：
+ * 1. 没配验证命令 → 整行不渲染（返回 undefined），也不给按钮，不暗示不存在的能力；
+ * 2. 记录 stale（代码已变／验证期间变／指纹缺失）→ 必须显示为失效，绝不能显示成已验证；
+ * 3. 已验证要给出足以自行核对的信息：退出码、代码指纹前若干位、验证时间。
+ */
+export function renderLarkVerificationElement(input: {
+  command?: string;
+  latest?: VerificationResponse;
+  /** 这张卡上是否同时渲染了「运行验证」按钮；false 时不写「可点按钮」的指引。 */
+  canRun?: boolean;
+}): LarkCardElement | undefined {
+  const command = input.command?.trim();
+  if (!command) return undefined;
+  // 命令与 error 都会被原样印在群里，一律走 truncateTrace（内含 redactTraceValue 脱敏）。
+  const label = `\`${truncateTrace(command, 120)}\``;
+  const run = input.canRun ? '可点「运行验证」执行。' : '';
+  const record = input.latest;
+  let content: string;
+  if (!record) {
+    content = `<text_tag color='grey'>未验证</text_tag>　平台没有执行过 ${label}；Agent 自述测试通过不产生验证记录。${run}`;
+  } else if (record.status === 'running') {
+    content = `<text_tag color='blue'>验证执行中</text_tag>　正在执行 ${label}，结论以完成后的记录为准。`;
+  } else {
+    const outcome = verificationOutcomeLabels[record.status] ?? '结论未知';
+    const exit = record.exitCode === undefined ? '无退出码' : `退出码 ${record.exitCode}`;
+    const time = verificationTime(record.completedAt ?? record.startedAt);
+    if (record.stale) {
+      const reason = record.staleReason ? verificationStaleReasons[record.staleReason] : '无法确认当前代码版本';
+      content = `<text_tag color='orange'>验证已失效</text_tag>　${label} 上次${outcome}（${exit}，${time}），但${reason}，不能用来判断当前代码。${run}`;
+    } else if (record.status === 'passed') {
+      const fingerprint = record.afterFingerprint ? `代码指纹 ${record.afterFingerprint.slice(0, 12)}` : '代码指纹缺失';
+      content = `<text_tag color='green'>已验证</text_tag>　${label} ${exit}　${fingerprint}　${time}`;
+    } else {
+      content = `<text_tag color='red'>验证${outcome}</text_tag>　${label} ${exit}　${time}${record.error ? `　${truncateTrace(record.error, 200)}` : ''}${run ? `　${run}` : ''}`;
+    }
+  }
+  return {
+    tag: 'markdown', element_id: LARK_VERIFICATION_ELEMENT_ID, content,
+    text_size: 'notation', margin: '4px 0px 0px 0px',
+    icon: { tag: 'standard_icon', token: 'info_outlined', color: 'grey' }
+  };
 }

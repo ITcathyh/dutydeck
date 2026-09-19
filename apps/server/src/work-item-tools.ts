@@ -56,7 +56,8 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
   });
 }
 
-export const workbenchAgentPrompt = (command = 'dutydeck work') => `[Dutydeck 目标编排]
+/** confirmation=true 表示本话题的计划要等人工确认才派发，提示词必须如实告知 Agent。 */
+export const workbenchAgentPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 目标编排]
 用户要求多 Agent 独立协作、可重复工作流或分阶段等待时，可通过以下本机工具安排后台步骤。普通单步工作直接完成。
 - ${command} agents：查询本实例配置的 Agent ID。配置存在不证明工具已授权。
 - ${command} skills：发现当前工作区的 Skill。步骤可用 skills:["名称"] 选择；内容在步骤接收时固定，不能据名称宣称工具已授权。
@@ -66,4 +67,6 @@ export const workbenchAgentPrompt = (command = 'dutydeck work') => `[Dutydeck �
 人工补充使用 kind:wait 的步骤，instruction 写具体问题，省略 agentId。可给后续步骤设置 when:{stepId:"上游等待ID",equals:"期望的完整回答"} 来选择分支。所有步骤必须通向一个不带条件的最终agent步骤。不要将普通完成反馈强制变为人工等待。
 - ${command} save <目标编号> <流程名称>：保存不可变模板版本。
 - ${command} run <模板编号> <版本> <新目标> --key <稳定请求键>：复用指定版本。
-收到目标编号说明计划已持久接收，不表示执行成功。向用户简述分工和编号后结束本轮；Dutydeck 会回传等待和最终成果，不要轮询占住父任务或另行重复发送最终报告。失败或结果未知时不要自动创建替代目标，先报告并由用户决定重试。工具不提供代替用户回答等待或批准权限的入口。`;
+${confirmation
+  ? '收到目标编号说明计划已持久接收，但状态是 awaiting_confirmation：一个步骤都还没派发。Dutydeck 会在本话题发出待确认卡片，用户点「开始执行」后才入队，点「取消计划」即作废。向用户简述分工和编号、说明需要其在卡片上确认后结束本轮，不要轮询确认结果。'
+  : '收到目标编号说明计划已持久接收，不表示执行成功。向用户简述分工和编号后结束本轮。'}Dutydeck 会回传等待和最终成果，不要轮询占住父任务或另行重复发送最终报告。失败或结果未知时不要自动创建替代目标，先报告并由用户决定重试。工具不提供代替用户回答等待、批准权限或确认计划的入口。`;

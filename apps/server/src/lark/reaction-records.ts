@@ -21,6 +21,14 @@ export const ACCEPTANCE_REACTION_EMOJI = {
 
 export type AcceptanceAction = keyof typeof ACCEPTANCE_REACTION_EMOJI;
 
+/**
+ * 「完成时只贴表情」贴在**原始请求消息**上的 emoji_type 短名。
+ *
+ * 与验收对勾同字形但不同位置、不同语义：验收贴在结果附件上，这一枚贴在用户那条请求上，
+ * 意思只有一个——这一轮做完了。开关关闭时永不出现，失败终态也永不出现（失败仍发结果卡）。
+ */
+export const COMPLETION_REACTION_EMOJI = 'CheckMark';
+
 /** 取验收决议对应的 emoji_type 短名；未知 action 返回 undefined，由调用方放弃 reaction。 */
 export function reactionEmojiForAcceptance(action: string): string | undefined {
   return (ACCEPTANCE_REACTION_EMOJI as Record<string, string>)[action];

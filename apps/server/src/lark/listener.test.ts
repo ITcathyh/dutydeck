@@ -2737,6 +2737,7 @@ describe('Lark long connection listener 欢迎语', () => {
     failMessages?: boolean;
     noWelcome?: boolean;
     participation?: any;
+    configPatch?: Partial<StoredLarkConfig>;
   }
 
   const memoryKv = (records: Record<string, string> = {}) => {
@@ -2780,7 +2781,7 @@ describe('Lark long connection listener 欢迎语', () => {
       { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       { fetcher: fetcher as any, ...(options.noWelcome ? {} : { welcomeStore: kv as any }), ...(options.participation ? { participation: options.participation } : {}), ...(options.runtime ? { runtime: options.runtime } : {}) }
     );
-    await listener.start(config);
+    await listener.start({ ...config, ...options.configPatch });
     return { listener, handlers: larkSdkHarness.handlers, posts, kv };
   };
 
@@ -2824,6 +2825,22 @@ describe('Lark long connection listener 欢迎语', () => {
     expect(posts).toHaveLength(1);
     const card = welcomeTitles(posts)[0]!;
     expect(JSON.stringify(card)).toContain('Dutydeck 机器人已入群');
+    listener.stop();
+  });
+
+  it('未配置白名单的群里所有人都能使唤机器人时，入群欢迎卡写明执行身份边界', async () => {
+    const { listener, handlers, posts } = await startHarness();
+    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_group' });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(welcomeTitles(posts)[0])).toContain('部署这台 Dutydeck 的系统账号');
+    listener.stop();
+  });
+
+  it('配置了白名单时不再宣称全员可用，也就不加这句', async () => {
+    const { listener, handlers, posts } = await startHarness({ configPatch: { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] } });
+    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_group' });
+    await vi.waitFor(() => expect(posts).toHaveLength(1));
+    expect(JSON.stringify(welcomeTitles(posts)[0])).not.toContain('部署这台 Dutydeck 的系统账号');
     listener.stop();
   });
 

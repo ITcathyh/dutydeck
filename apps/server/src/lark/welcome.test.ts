@@ -189,3 +189,21 @@ describe('欢迎卡使用生效路由策略', () => {
    expect(routing).toHaveBeenCalledWith('oc_topic', 'group');
    expect(send.mock.calls[0]![1].markdown).toContain('原任务话题内续聊可直接回复');
  });
+
+describe('欢迎卡的身份边界说明', () => {
+  it('群里所有成员都能使唤时，明说机器人用的是部署者的身份', () => {
+    const card = buildWelcomeCardContent({ chatType: 'group', capabilities: { ...fullCapabilities }, routing: { allChatMembers: true } });
+    expect(card.markdown).toContain('本群所有成员');
+    expect(card.markdown).toContain('部署这台 Dutydeck 的系统账号');
+    expect(card.elements.every(element => element.tag === 'markdown')).toBe(true);
+  });
+
+  it('群没有对全员开放、或是私聊时不加这句', () => {
+    expect(buildWelcomeCardContent({ chatType: 'group', capabilities: { ...fullCapabilities }, routing: { allChatMembers: false } }).markdown)
+      .not.toContain('部署这台 Dutydeck 的系统账号');
+    expect(buildWelcomeCardContent({ chatType: 'group', capabilities: { ...fullCapabilities } }).markdown)
+      .not.toContain('部署这台 Dutydeck 的系统账号');
+    expect(buildWelcomeCardContent({ chatType: 'p2p', capabilities: { ...fullCapabilities }, routing: { allChatMembers: true } }).markdown)
+      .not.toContain('部署这台 Dutydeck 的系统账号');
+  });
+});

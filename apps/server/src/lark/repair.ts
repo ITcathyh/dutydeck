@@ -7,16 +7,32 @@
 // 3. 本模块不 import open-platform-session（登录态/网络层），开发者 client 由 deps 注入；
 //    测试一律注入 mock client，绝不真实发版。
 // 4. 回调 value 形态为 { dutydeck_repair: 'run' }，宽进严出，风格对齐 parseLarkCardActionValue。
+// 5. 原生斜杠命令同步走的是另一套凭据（机器人 tenant_access_token），只能在发布确认生效
+//    之后跑一次，且失败不阻断——见 syncSlashCommandsAfterPublish。
 
 import {
   configureLarkOpenPlatformApp,
   isValidLarkAppId,
+  larkSlashCommandDefinitions,
   LARK_REQUIRED_EVENTS,
   type LarkOpenPlatformClient,
   type LarkOpenPlatformConfigureStep,
   type LarkOpenPlatformConfigureStepDetail,
 } from './open-platform-configurator.js';
+import { createLarkCardService, LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkCardElement } from './commands.js';
+
+/** 原生斜杠命令写在机器人租户凭据下，与开放平台控制台会话无关。 */
+export type LarkSlashCommandSyncClient = Pick<LarkCardService, 'syncSlashCommands'>;
+
+/** 同步要用到的那项 feature 权限；目录里没有它时整步跳过，不去撞一个必然 403 的写请求。 */
+const SLASH_COMMAND_SCOPE = 'application:app_slash_command:write';
+
+export type RepairSlashCommandOutcome =
+  | { status: 'configured' }
+  | { status: 'completed'; created: string[]; updated: string[] }
+  | { status: 'failed'; reason: string }
+  | { status: 'skipped'; reason: 'scope_missing' | 'credentials_missing' };
 
 export interface RepairCardContent {
   title: string;
@@ -29,13 +45,19 @@ export interface OpenPlatformRepairDeps {
   connectClient(appId: string): Promise<{ client: LarkOpenPlatformClient }>;
   /** 默认走真实 configurator；测试注入替身。 */
   configure?: typeof configureLarkOpenPlatformApp;
+  /**
+   * 该应用的机器人客户端（LarkCardService 即可直接传）。不注入时按 env 里同一应用的
+   * 凭据构造；env 里是别的应用或没有密钥，就如实报「未拿到凭据、本次未同步」，
+   * 绝不拿另一个应用的 token 去写斜杠命令。
+   */
+  slashCommandClient?: LarkSlashCommandSyncClient;
 }
 
-export type RepairStepStatus = Extract<LarkOpenPlatformConfigureStep, string>;
+export type RepairStepStatus = LarkOpenPlatformConfigureStep | 'slash_command_sync';
 
 export interface RepairStepReport {
   step: RepairStepStatus;
-  detail?: LarkOpenPlatformConfigureStepDetail;
+  detail?: LarkOpenPlatformConfigureStepDetail & { slashCommands?: RepairSlashCommandOutcome };
 }
 
 export type OpenPlatformRepairResult =
@@ -118,20 +140,47 @@ const stepLabels: Record<RepairStepStatus, string> = {
   callback_subscribe: '订阅卡片回调',
   version_create: '创建应用版本',
   publish_commit: '提交版本发布',
-  publish_verify: '回读发布审核状态'
+  publish_verify: '回读发布审核状态',
+  slash_command_sync: '同步原生斜杠命令'
 };
 
 /** 已完成步骤的中文清单（审核态回显的一部分）。 */
 function formatSteps(steps: RepairStepReport[]): string {
   if (steps.length === 0) return '本次没有成功完成任何步骤。';
   return steps.map((report, index) => {
-    const suffix = report.detail?.addedEvents?.length
-      ? `（新增 ${report.detail.addedEvents.join('、')}）`
-      : report.step === 'version_create' || report.step === 'publish_commit'
-        ? report.detail?.versionId ? `（版本 ${report.detail.versionId}）` : ''
-        : '';
+    const suffix = report.detail?.slashCommands
+      ? formatSlashCommandOutcome(report.detail.slashCommands)
+      : report.detail?.addedEvents?.length
+        ? `（新增 ${report.detail.addedEvents.join('、')}）`
+        // 跳过的功能权限必须出现在回显里，否则用户会以为对应功能已经开通。
+        : report.detail?.skippedScopes?.length
+          ? `（本企业权限目录缺少 ${report.detail.skippedScopes.join('、')}，已跳过，对应功能不可用）`
+          : report.step === 'version_create' || report.step === 'publish_commit'
+            ? report.detail?.versionId ? `（版本 ${report.detail.versionId}）` : ''
+            : '';
     return `${index + 1}. ${stepLabels[report.step]}${suffix}`;
   }).join('\n');
+}
+
+/** 口径与其它步骤一致：已满足报「已配置」，本次真改报「已完成」，失败如实报失败。 */
+function formatSlashCommandOutcome(outcome: RepairSlashCommandOutcome): string {
+  switch (outcome.status) {
+    case 'configured':
+      return '（已配置：飞书上的命令与当前版本一致，未改动）';
+    case 'completed': {
+      const parts = [
+        ...(outcome.created.length ? [`新增 ${outcome.created.join('、')}`] : []),
+        ...(outcome.updated.length ? [`更新 ${outcome.updated.join('、')}`] : []),
+      ];
+      return `（已完成：${parts.join('；')}）`;
+    }
+    case 'failed':
+      return `（**失败**：${outcome.reason}。输入框里的 \`/\` 命令菜单未更新，命令本身仍可直接输入使用）`;
+    case 'skipped':
+      return outcome.reason === 'scope_missing'
+        ? `（本企业权限目录缺少 ${SLASH_COMMAND_SCOPE}，已跳过，命令菜单不可用）`
+        : '（**未同步**：本次没有拿到该应用的机器人凭据，命令菜单未更新）';
+  }
 }
 
 /**
@@ -169,6 +218,10 @@ export async function runOpenPlatformRepair(
       ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
       onStep: recordStep
     });
+    // 只在这里同步：application:app_slash_command:write 是本次刚补进草稿的权限，
+    // 要等版本确认发布（publish_verify 通过）之后才对 tenant_access_token 生效；
+    // 发布之前写必然 403。审核中（pending_review）走下面的 catch，同样不会同步。
+    steps.push({ step: 'slash_command_sync', detail: { slashCommands: await syncSlashCommandsAfterPublish(deps, appId, result.skippedScopes) } });
     return { status: 'repaired', appId, versionId: result.versionId, steps };
   } catch (error) {
     // configurator 的错误码与中文 message 都是静态白名单（post() 已剥掉传输层细节）；
@@ -190,6 +243,45 @@ export async function runOpenPlatformRepair(
       code, reason, hint: repairFailureHint(code), steps
     };
   }
+}
+
+/**
+ * 发布确认生效后同步一次原生斜杠命令。任何失败都收敛成 outcome，绝不抛出——
+ * 命令菜单只是输入便利，机器人本身照常收发消息，不能让它把 /repair 判成失败。
+ */
+async function syncSlashCommandsAfterPublish(
+  deps: OpenPlatformRepairDeps,
+  appId: string,
+  skippedScopes: readonly string[],
+): Promise<RepairSlashCommandOutcome> {
+  if (skippedScopes.includes(SLASH_COMMAND_SCOPE)) return { status: 'skipped', reason: 'scope_missing' };
+  let client: LarkSlashCommandSyncClient;
+  try {
+    client = deps.slashCommandClient ?? envSlashCommandClient(appId);
+  } catch {
+    return { status: 'skipped', reason: 'credentials_missing' };
+  }
+  try {
+    const { created, updated } = await client.syncSlashCommands(larkSlashCommandDefinitions());
+    return created.length || updated.length ? { status: 'completed', created, updated } : { status: 'configured' };
+  } catch (error) {
+    return { status: 'failed', reason: slashCommandFailureReason(error) };
+  }
+}
+
+/** env 里必须正好是同一个应用的凭据；否则宁可不同步，也不拿别的应用的 token 去写。 */
+function envSlashCommandClient(appId: string): LarkSlashCommandSyncClient {
+  if (process.env.LARK_APP_ID?.trim() !== appId) throw new Error('credentials_missing');
+  return createLarkCardService(process.env, undefined, { appId });
+}
+
+/**
+ * 与本模块既有口径一致：外部错误原文可能带凭据，不进群聊卡片。
+ * 飞书的业务码是可定位的，允许回显；其余一律换成通用文案。
+ */
+function slashCommandFailureReason(error: unknown): string {
+  const upstreamCode = error instanceof LarkServiceError ? error.details?.upstreamCode : undefined;
+  return typeof upstreamCode === 'number' ? `飞书返回错误码 ${upstreamCode}` : '请求未成功';
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +327,7 @@ export function buildRepairConfirmCard(appId: string): RepairCardContent {
     `- 校验并补齐必需权限，增量订阅缺失事件（不重复添加已有项）：${LARK_REQUIRED_EVENTS.join('、')}`,
     '- 校验长连接模式与卡片回调（card.action.trigger）。',
     '- 创建新应用版本并**提交发布**。',
+    '- 发布确认生效后，同步一次输入框里的 `/` 命令菜单（只新增或更新本机器人的命令，不删除任何已有命令）。',
     '',
     '注意：提交版本发布是不可撤销操作；企业自建应用需飞书管理员审核，**审核通过前新事件不会生效**。',
     '确认无误后点击下方按钮执行；取消则不要点击，本卡不会触发任何改动。'

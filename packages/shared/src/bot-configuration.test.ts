@@ -24,6 +24,7 @@ import {
   groupBindingV2Schema,
   highRiskRuleSchema,
   identitySelectorSchema,
+  inheritPresentationOverride,
   legacyConversionInputSchema,
   listBotsOptionsSchema,
   listVersionsOptionsSchema,
@@ -356,7 +357,9 @@ describe('Bot Configuration V2 Schemas and Contracts', () => {
           groupCardMention: true,
           pushIntervalMs: 1000,
           traceLimit: 50,
-          hideTraceOnComplete: false
+          hideTraceOnComplete: false,
+          completionReactionOnly: false,
+          silentProgress: false
         },
         groupToolsPolicy: {
           readCeiling: true,
@@ -433,7 +436,9 @@ describe('Bot Configuration V2 Schemas and Contracts', () => {
         groupCardMention: true,
         pushIntervalMs: 500,
         traceLimit: 50,
-        hideTraceOnComplete: false
+        hideTraceOnComplete: false,
+        completionReactionOnly: false,
+        silentProgress: false
       };
 
       expect(() => channelBotPolicyPresentationV2Schema.parse(valid)).not.toThrow();
@@ -476,7 +481,7 @@ describe('Bot Configuration V2 Schemas and Contracts', () => {
         },
         accessOverride: { mode: 'inherit', principalIds: [] },
         groupToolsOverride: { read: 'inherit', discover: 'allow', send: 'deny' },
-        presentationOverride: { mode: 'inherit' },
+        presentationOverride: inheritPresentationOverride,
         reviewReasons: ['initial_binding'],
         createdAt: '2026-09-14T00:00:00.000Z',
         updatedAt: '2026-09-14T00:00:00.000Z'
@@ -718,7 +723,9 @@ describe('Bot Configuration V2 Schemas and Contracts', () => {
             groupCardMention: true,
             pushIntervalMs: 500,
             traceLimit: 50,
-            hideTraceOnComplete: false
+            hideTraceOnComplete: false,
+            completionReactionOnly: false,
+            silentProgress: false
           },
           groupToolsPolicy: {
             readCeiling: false,
@@ -927,7 +934,7 @@ describe('Bot Configuration V2 Schemas and Contracts', () => {
         },
         accessOverride: { mode: 'inherit', principalIds: [] },
         groupToolsOverride: { read: 'inherit', discover: 'inherit', send: 'inherit' },
-        presentationOverride: { mode: 'inherit' },
+        presentationOverride: inheritPresentationOverride,
         reviewReasons: [],
         createdAt: '2026-09-01T00:00:00.000Z',
         updatedAt: '2026-09-01T00:00:00.000Z'
@@ -988,7 +995,9 @@ describe('Bot Configuration V2 Schemas and Contracts', () => {
         groupCardMention: true,
         pushIntervalMs: 500,
         traceLimit: 50,
-        hideTraceOnComplete: false
+        hideTraceOnComplete: false,
+        completionReactionOnly: false,
+        silentProgress: false
       },
       groupToolsPolicy: {
         readCeiling: false,
@@ -1025,7 +1034,7 @@ describe('Bot Configuration V2 Schemas and Contracts', () => {
       },
       accessOverride: { mode: 'inherit', principalIds: [] },
       groupToolsOverride: { read: 'inherit', discover: 'inherit', send: 'inherit' },
-      presentationOverride: { mode: 'inherit' },
+      presentationOverride: inheritPresentationOverride,
       reviewReasons: [],
       createdAt: '2026-09-14T00:00:00.000Z',
       updatedAt: '2026-09-14T00:00:00.000Z',

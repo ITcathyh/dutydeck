@@ -19,7 +19,7 @@
 export type LarkCardElement = Record<string, any>;
 
 /** 回调型操作。查看详情是 open_url 链接按钮，不是回调，故不在此列。 */
-export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh';
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify';
 
 /** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
 export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'reconcile_required' | 'legacy_unresolved';
@@ -38,6 +38,12 @@ export interface LarkCardCapabilities {
   canRetry: boolean;
   /** handleAction 已支持 refresh，且该任务仍持有 requestUpdate 心跳句柄。 */
   canRefresh: boolean;
+  /**
+   * 该工作区配置了验证命令、runtime 提供 runVerification、会话还在，且当前没有
+   * 一份「能证明当前代码」的验证记录。缺省不声明即为 false：没配验证命令的工作区
+   * 绝不能看到这个按钮，那会暗示一个不存在的能力。
+   */
+  canVerify?: boolean;
   /** 已解析好的深链，仅在配置了 webBaseUrl 时提供。 */
   webUrl?: string;
 }
@@ -84,6 +90,12 @@ type LarkCardActionDefinition = {
   capable: (capabilities: LarkCardCapabilities) => boolean;
   /** 状态与能力之外的附加约束（例如 retryable === false 的任务不给重试）。 */
   guard?: (context: LarkCardActionContext) => boolean;
+  /**
+   * 允许出现在只读收据上。只有「不改写已交付结论」的操作才能置位：
+   * 验证只在工作目录里跑一条命令并新增一条独立证据，卡上的结论一个字都不动。
+   * 其余四个操作都会改变任务状态，必须继续被只读规则挡住。
+   */
+  readOnlyReceipt?: boolean;
   /** 是否为该状态的唯一主操作；主操作排在最前，视觉上最突出。 */
   primary: boolean;
 };
@@ -140,6 +152,19 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     primary: false
   },
   {
+    action: 'verify',
+    elementId: 'verify',
+    label: '运行验证',
+    hint: '在工作目录执行已配置的验证命令，记录退出码与代码指纹',
+    buttonType: 'default',
+    // 排队/执行中不给：验证要求会话空闲，runtime 会直接回 SESSION_BUSY。
+    // cancelled 也不给：任务没跑过，没有需要验证的改动。
+    states: ['completed', 'failed', 'interrupted'],
+    capable: capabilities => capabilities.canVerify === true,
+    primary: false,
+    readOnlyReceipt: true
+  },
+  {
     action: 'refresh',
     elementId: 'refresh',
     label: '刷新',
@@ -189,13 +214,14 @@ export const safeLarkWebUrl = (value: string | undefined): string | undefined =>
  * 渲染侧共用同一函数，因此「界面上出现的按钮」与「后端接受的回调」严格等价。
  */
 export function isLarkCardActionAvailable(action: LarkCardActionName, context: LarkCardActionContext): boolean {
-  // 只读收据不接受任何操作：卡片一旦冻结就是历史凭证，
-  // 在上面执行操作等于改写已经交付给用户的结论。
-  if (context.readOnly) return false;
-  // 没有可用 taskId 时任何回调都无法被 coordinator 定位到任务，等于死按钮。
-  if (!normalizedTaskId(context.taskId)) return false;
   const definition = definitionFor(action);
   if (!definition) return false;
+  // 只读收据不接受改写结论的操作：卡片一旦冻结就是历史凭证，
+  // 在上面执行取消/中断/重试等于改写已经交付给用户的结论。
+  // readOnlyReceipt 是唯一例外，含义见该字段说明。
+  if (context.readOnly && !definition.readOnlyReceipt) return false;
+  // 没有可用 taskId 时任何回调都无法被 coordinator 定位到任务，等于死按钮。
+  if (!normalizedTaskId(context.taskId)) return false;
   if (!definition.states.includes(context.state)) return false;
   if (!definition.capable(context.capabilities)) return false;
   return definition.guard ? definition.guard(context) : true;
@@ -239,20 +265,20 @@ const callbackButton = (definition: LarkCardActionDefinition, taskId: string, tu
 /**
  * 渲染侧入口：返回当前状态下应该出现的按钮，没有可用操作时返回空数组。
  *
- * 只读卡片返回空数组是硬规则：只读卡是已交付的历史凭证，
- * 提供任何按钮都会变成「假操作」——点了要么被拒绝，要么改写已交付的结论。
+ * 只读卡片只保留 readOnlyReceipt 操作：只读卡是已交付的历史凭证，
+ * 任何会改写结论的按钮都是「假操作」——点了要么被拒绝，要么改写已交付的结论。
+ * 验证是唯一例外，它只新增一条独立证据，卡上的结论一个字都不动。
  * 配置了合法 webBaseUrl 时，页脚的 [查看详情] 链接是收据的 Web 出口；
  * 未配置或深链非法时页脚整行不渲染，此时只读卡确实没有任何出口——
  * 那是缺配置的后果，不能靠在这里补一个注定失败的按钮来掩盖。
  *
  * 这里刻意**不**渲染「查看详情」按钮：页脚已经有同一个链接，顶部再放一个
- * 就是同一去向的两个入口。顶部操作行只留真正改变任务状态的动作。
+ * 就是同一去向的两个入口。
  *
  * 注意：这里返回的是扁平按钮列表，不含 column_set 包装，
  * 由调用方决定放进状态行的哪一列（多按钮时需要放宽既有的 72px 列宽）。
  */
 export function buildLarkCardActions(context: LarkCardActionContext): LarkCardElement[] {
-  if (context.readOnly) return [];
   const taskId = normalizedTaskId(context.taskId);
   const turn = normalizedTurn(context.turn);
   const elements: LarkCardElement[] = [];

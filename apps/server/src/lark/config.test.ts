@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { hostname, userInfo } from 'node:os';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
+import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, larkExecutionIdentity, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
 
 const createRepository = (initial: Record<string, string> = {}): ConfigRepository => {
   const store = new Map<string, string>(Object.entries(initial));
@@ -401,5 +402,94 @@ describe('Lark 实验卡片开关归一化', () => {
     const repository = seedBots([{ appId: 'cli_test', appSecret: 'secret', structuredAskCards: true }]);
     const collection = publicLarkConfigs(await readLarkConfigs(repository));
     expect(collection.bots[0]).toMatchObject({ structuredAskCards: true, groupCardMention: false });
+  });
+});
+
+describe('工作目录别名表与执行身份', () => {
+  it('只保留指向绝对路径的别名，空表归一化为不存在', async () => {
+    const repository = seedBots([{
+      appId: 'cli_test', appSecret: 'secret',
+      workspaceAliases: { 项目: '  /srv/project  ', 相对: 'relative/path', 空: '   ', 数字: 42, '': '/srv/x' }
+    }]);
+    const [config] = await readLarkConfigs(repository);
+    expect(config.workspaceAliases).toEqual({ 项目: '/srv/project' });
+
+    const [empty] = await readLarkConfigs(seedBots([{ appId: 'cli_test', appSecret: 'secret', workspaceAliases: { 相对: 'relative' } }]));
+    expect(empty.workspaceAliases).toBeUndefined();
+    const [absent] = await readLarkConfigs(seedBots([{ appId: 'cli_test', appSecret: 'secret' }]));
+    expect(absent.workspaceAliases).toBeUndefined();
+  });
+
+  it('保存时沿用同一套归一化，未提供时保留既有别名', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_test', appSecret: 'secret', workspaceAliases: { 项目: '/srv/project', 坏: 'relative' } });
+    let [config] = await readLarkConfigs(repository);
+    expect(config.workspaceAliases).toEqual({ 项目: '/srv/project' });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_test', appId: 'cli_test', appSecret: 'secret', preInjectPrompt: 'hi' });
+    [config] = await readLarkConfigs(repository);
+    expect(config.workspaceAliases).toEqual({ 项目: '/srv/project' });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_test', appId: 'cli_test', appSecret: 'secret', workspaceAliases: {} });
+    [config] = await readLarkConfigs(repository);
+    expect(config.workspaceAliases).toBeUndefined();
+  });
+
+  it('执行身份给出部署这台服务的真实系统账号与主机名', () => {
+    expect(larkExecutionIdentity()).toBe(`${userInfo().username}@${hostname()}`);
+  });
+});
+
+describe('加急与置顶开关归一化', () => {
+  it('旧配置缺省时两项都关闭，阈值字段整条缺席', async () => {
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret' }]));
+    // 加急是飞书里的强提醒横幅，置顶会改写别人的群会话列表：升级不能替用户打开任何一个。
+    expect(config.urgentEnabled).toBe(false);
+    expect(config.pinLongTasks).toBe(false);
+    expect(config.urgentThresholdMs).toBeUndefined();
+    expect(config.urgentMaxPerHourPerChat).toBeUndefined();
+    expect(config.pinAfterMs).toBeUndefined();
+    expect(publicLarkConfig(config)).toMatchObject({ urgentEnabled: false, pinLongTasks: false });
+  });
+
+  it('显式打开并调阈值时往返落库，非法阈值整条丢弃回落模块默认', async () => {
+    const repository = seedBots([
+      { appId: 'cli_on', appSecret: 'secret', urgentEnabled: true, urgentThresholdMs: 180_000, urgentMaxPerHourPerChat: 1, pinLongTasks: true, pinAfterMs: 300_000 },
+      { appId: 'cli_dirty', appSecret: 'secret', urgentEnabled: 'yes', urgentThresholdMs: -1, urgentMaxPerHourPerChat: 0, pinLongTasks: 1, pinAfterMs: 'soon' }
+    ]);
+    const [on, dirty] = await readLarkConfigs(repository);
+    expect(on).toMatchObject({ urgentEnabled: true, urgentThresholdMs: 180_000, urgentMaxPerHourPerChat: 1, pinLongTasks: true, pinAfterMs: 300_000 });
+    expect(dirty!.urgentEnabled).toBe(false);
+    expect(dirty!.pinLongTasks).toBe(false);
+    expect(dirty!.urgentThresholdMs).toBeUndefined();
+    expect(dirty!.urgentMaxPerHourPerChat).toBeUndefined();
+    expect(dirty!.pinAfterMs).toBeUndefined();
+  });
+
+  it('保存时缺省两项都关闭，显式 true 落库，再保存未带开关时继承现值', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_default', appSecret: 'secret' });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ urgentEnabled: false, pinLongTasks: false });
+
+    await saveLarkConfig(repository, undefined, {
+      originalAppId: 'cli_default', appId: 'cli_default', appSecret: 'secret',
+      urgentEnabled: true, urgentThresholdMs: 120_000, urgentMaxPerHourPerChat: 2, pinLongTasks: true, pinAfterMs: 600_000
+    });
+    const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted).toMatchObject({ urgentEnabled: true, urgentThresholdMs: 120_000, urgentMaxPerHourPerChat: 2, pinLongTasks: true, pinAfterMs: 600_000 });
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_default', appId: 'cli_default', appSecret: 'secret', preInjectPrompt: 'hi' });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ urgentEnabled: true, urgentThresholdMs: 120_000, pinLongTasks: true });
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_default', appId: 'cli_default', appSecret: 'secret', urgentEnabled: false, pinLongTasks: false });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ urgentEnabled: false, pinLongTasks: false });
+  });
+
+  it('保存越界阈值直接拒绝，而不是悄悄写进去', async () => {
+    const repository = createRepository();
+    await expect(saveLarkConfig(repository, undefined, { appId: 'cli_bad', appSecret: 'secret', urgentEnabled: true, urgentThresholdMs: 500 }))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    await expect(saveLarkConfig(repository, undefined, { appId: 'cli_bad', appSecret: 'secret', urgentEnabled: true, urgentMaxPerHourPerChat: 0 }))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
+    await expect(saveLarkConfig(repository, undefined, { appId: 'cli_bad', appSecret: 'secret', pinLongTasks: true, pinAfterMs: 100 }))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
   });
 });

@@ -108,7 +108,7 @@ describe('inspectExecutionDatabase', () => {
     const result = inspectExecutionDatabase(dbPath);
     expect(result.status).toBe('legacy');
     expect(result.authority).toBe('legacy');
-    expect(result.schemaVersion).toBe(22);
+    expect(result.schemaVersion).toBe(23);
     expect(result.counts?.tasks).toBe(1);
     expect(result.counts?.attempts).toBe(0);
     expect(result.counts?.resources).toBe(0);
@@ -168,7 +168,7 @@ describe('inspectExecutionDatabase', () => {
     const result = inspectExecutionDatabase(dbPath);
     expect(result.status).toBe('ledger_v1');
     expect(result.authority).toBe('ledger_v1');
-    expect(result.schemaVersion).toBe(22);
+    expect(result.schemaVersion).toBe(23);
     expect(result.counts?.tasks).toBe(1);
     expect(result.counts?.attempts).toBe(1);
     expect(result.counts?.resources).toBe(1);
@@ -181,7 +181,7 @@ describe('inspectExecutionDatabase', () => {
 
     const result = inspectExecutionDatabase(dbPath);
     expect(result.status).toBe('legacy');
-    expect(result.schemaVersion).toBe(22);
+    expect(result.schemaVersion).toBe(23);
 
     const db = new Database(dbPath, { readonly: true });
     try {

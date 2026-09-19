@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   LarkOpenPlatformConfigurationError,
+  larkSlashCommandDefinitions,
   type LarkOpenPlatformClient,
   type LarkOpenPlatformConfigureOptions,
 } from './open-platform-configurator.js';
+import { LarkServiceError } from './service.js';
 import {
   buildRepairConfirmCard,
   parseRepairCardActionValue,
@@ -14,7 +16,7 @@ import {
 const appId = 'cli_repair_test';
 
 /** 构造 configurator 替身：按预设推进 onStep，最后返回成功或抛出指定错误。 */
-function configureStub(mode: 'published' | 'review' | 'event_failure' | 'secret_failure') {
+function configureStub(mode: 'published' | 'review' | 'event_failure' | 'secret_failure' | 'slash_scope_missing') {
   return vi.fn(async (_client: LarkOpenPlatformClient, targetAppId: string, options?: LarkOpenPlatformConfigureOptions) => {
     const onStep = options?.onStep ?? (() => undefined);
     expect(targetAppId).toBe(appId);
@@ -34,8 +36,9 @@ function configureStub(mode: 'published' | 'review' | 'event_failure' | 'secret_
       // 非 configurator 白名单错误：原始 message 含敏感信息，结果卡不得回显。
       throw new Error('socket reset app-secret-LEAK-cookie=session-LEAK');
     }
+    const skippedScopes = mode === 'slash_scope_missing' ? ['application:app_slash_command:write'] : [];
     onStep('publish_verify', { versionId: 'v-9' });
-    return { status: 'ready' as const, scopeCount: 16, eventCount: 2, callbackCount: 1, versionId: 'v-9' };
+    return { status: 'ready' as const, scopeCount: 16, skippedScopes, eventCount: 2, callbackCount: 1, versionId: 'v-9' };
   });
 }
 
@@ -120,7 +123,7 @@ describe('runOpenPlatformRepair', () => {
     expect(configure).toHaveBeenCalledWith(mockClient, appId, expect.objectContaining({ onStep: expect.any(Function) }));
     expect(result.steps.map(step => step.step)).toEqual([
       'scope_update', 'robot_enable', 'event_mode', 'event_subscribe',
-      'version_create', 'publish_commit', 'publish_verify'
+      'version_create', 'publish_commit', 'publish_verify', 'slash_command_sync'
     ]);
     expect(result.steps.find(step => step.step === 'event_subscribe')?.detail?.addedEvents)
       .toEqual(['im.chat.member.bot.added_v1']);
@@ -184,6 +187,109 @@ describe('runOpenPlatformRepair', () => {
     expect(result).toMatchObject({ status: 'failed', code: 'connect_failed' });
     expect(JSON.stringify(result)).not.toContain('LEAK');
     expect(configure).not.toHaveBeenCalled();
+  });
+
+  it('发布确认生效后才同步斜杠命令，本次真改按「已完成」如实回显', async () => {
+    const syncSlashCommands = vi.fn(async () => ({ created: ['work'], updated: ['help'] }));
+    const result = await runOpenPlatformRepair(
+      { connectClient: async () => ({ client: mockClient }), configure: configureStub('published'), slashCommandClient: { syncSlashCommands } },
+      { appId, confirmed: true }
+    );
+    expect(result.status).toBe('repaired');
+    if (result.status !== 'repaired') throw new Error('expected repaired');
+    // 权限是本次刚补进草稿的，发布确认之前写必然 403：同步只能排在 publish_verify 之后。
+    expect(result.steps.at(-1)?.step).toBe('slash_command_sync');
+    expect(result.steps.findIndex(step => step.step === 'publish_verify'))
+      .toBeLessThan(result.steps.findIndex(step => step.step === 'slash_command_sync'));
+    expect(syncSlashCommands).toHaveBeenCalledWith(larkSlashCommandDefinitions());
+    const card = renderRepairResultCard(result);
+    expect(card.markdown).toContain('同步原生斜杠命令');
+    expect(card.markdown).toContain('已完成：新增 work；更新 help');
+  });
+
+  it('远端已与当前命令一致时报「已配置」，不谎称本次改过', async () => {
+    const result = await runOpenPlatformRepair(
+      { connectClient: async () => ({ client: mockClient }), configure: configureStub('published'),
+        slashCommandClient: { syncSlashCommands: async () => ({ created: [], updated: [] }) } },
+      { appId, confirmed: true }
+    );
+    expect(renderRepairResultCard(result).markdown).toContain('已配置：飞书上的命令与当前版本一致');
+  });
+
+  it('同步失败：卡上如实报失败，但不阻断修复结论，也不回显内部诊断', async () => {
+    const result = await runOpenPlatformRepair(
+      { connectClient: async () => ({ client: mockClient }), configure: configureStub('published'),
+        slashCommandClient: { syncSlashCommands: async () => { throw new LarkServiceError('LARK_OPENAPI_ERROR', 'no permission cookie=session-LEAK', 502, { upstreamCode: 99991672 }); } } },
+      { appId, confirmed: true }
+    );
+    // 命令菜单只是输入便利：同步失败不能把已发布的修复判成失败。
+    expect(result.status).toBe('repaired');
+    const card = renderRepairResultCard(result);
+    expect(card.markdown).toContain('同步原生斜杠命令（**失败**：飞书返回错误码 99991672');
+    expect(card.markdown).not.toContain('已配置：飞书上的命令');
+    expect(JSON.stringify(result) + card.markdown).not.toContain('LEAK');
+  });
+
+  it('权限目录缺少 application:app_slash_command:write 时整步跳过，不发写请求', async () => {
+    const syncSlashCommands = vi.fn();
+    const result = await runOpenPlatformRepair(
+      { connectClient: async () => ({ client: mockClient }), configure: configureStub('slash_scope_missing'), slashCommandClient: { syncSlashCommands } },
+      { appId, confirmed: true }
+    );
+    expect(syncSlashCommands).not.toHaveBeenCalled();
+    expect(renderRepairResultCard(result).markdown).toContain('本企业权限目录缺少 application:app_slash_command:write，已跳过');
+  });
+
+  it('审核中不同步：权限尚未生效，绝不去写命令菜单', async () => {
+    const syncSlashCommands = vi.fn();
+    const result = await runOpenPlatformRepair(
+      { connectClient: async () => ({ client: mockClient }), configure: configureStub('review'), slashCommandClient: { syncSlashCommands } },
+      { appId, confirmed: true }
+    );
+    expect(result.status).toBe('pending_review');
+    expect(syncSlashCommands).not.toHaveBeenCalled();
+    expect(renderRepairResultCard(result).markdown).not.toContain('同步原生斜杠命令');
+  });
+
+  it('没注入客户端时按 env 里同一应用的凭据走 tenant token 同步', async () => {
+    vi.stubEnv('LARK_APP_ID', appId);
+    vi.stubEnv('LARK_APP_SECRET', 'secret_test');
+    const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(json({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(json({ code: 0, data: { items: larkSlashCommandDefinitions().map((definition, index) => ({
+        command_id: `cmd-${index}`, command: definition.command, description: { default_value: definition.description }
+      })) } }));
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const result = await runOpenPlatformRepair(
+        { connectClient: async () => ({ client: mockClient }), configure: configureStub('published') },
+        { appId, confirmed: true }
+      );
+      expect(renderRepairResultCard(result).markdown).toContain('已配置：飞书上的命令与当前版本一致');
+      expect(String(fetcher.mock.calls[1]?.[0])).toContain('/open-apis/application/v7/app_slash_commands');
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('env 里是另一个应用的凭据时不同步，也绝不拿它去写别的应用', async () => {
+    vi.stubEnv('LARK_APP_ID', 'cli_another_app');
+    vi.stubEnv('LARK_APP_SECRET', 'secret_test');
+    const fetcher = vi.fn();
+    vi.stubGlobal('fetch', fetcher);
+    try {
+      const result = await runOpenPlatformRepair(
+        { connectClient: async () => ({ client: mockClient }), configure: configureStub('published') },
+        { appId, confirmed: true }
+      );
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(renderRepairResultCard(result).markdown).toContain('**未同步**：本次没有拿到该应用的机器人凭据');
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
   });
 
   it('三态文案各自包含正确的状态结论', () => {

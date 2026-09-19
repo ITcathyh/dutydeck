@@ -72,8 +72,20 @@ export type GroupBotDraft = {
   toolRead: 'inherit' | 'allow' | 'deny';
   toolDiscover: 'inherit' | 'allow' | 'deny';
   toolSend: 'inherit' | 'allow' | 'deny';
+  /** 群级呈现覆盖。布尔项三态：继承 Bot 默认 / 本群开 / 本群关。 */
+  presentationStructuredAskCards: PresentationToggle;
+  presentationGroupCardMention: PresentationToggle;
+  presentationHideTraceOnComplete: PresentationToggle;
+  presentationCompletionReactionOnly: PresentationToggle;
+  presentationSilentProgress: PresentationToggle;
+  presentationPushIntervalMode: 'inherit' | 'set';
+  presentationPushIntervalValue: string;
+  presentationTraceLimitMode: 'inherit' | 'set';
+  presentationTraceLimitValue: string;
   roleChanges: RoleChange[];
 };
+
+export type PresentationToggle = 'inherit' | 'on' | 'off';
 
 type DraftStore = {
   botDrafts: Record<string, BotDraft>;

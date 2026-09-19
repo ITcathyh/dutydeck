@@ -107,16 +107,16 @@ describe('飞书卡片操作按钮：状态收敛', () => {
   });
 });
 
-describe('飞书卡片操作按钮：只读收据零按钮', () => {
+describe('飞书卡片操作按钮：只读收据不接受改写结论的操作', () => {
   it('readOnly 的每个终态都渲染零按钮', () => {
-    // 卡片进入终态即冻结为收据。收据上出现任何按钮都是「假操作」：
+    // 卡片进入终态即冻结为收据。收据上出现任何改写结论的按钮都是「假操作」：
     // 要么被后端拒绝，要么改写已经交付给用户的结论。
     for (const state of terminalStates) {
       expect(buildLarkCardActions(context(state, { readOnly: true }))).toEqual([]);
     }
   });
 
-  it('readOnly 在任意状态、任意能力下都零按钮，连查看详情链接也不渲染', () => {
+  it('readOnly 在任意状态、任意能力下都不给改写结论的四个操作，连查看详情链接也不渲染', () => {
     for (const state of allStates) {
       const elements = buildLarkCardActions(context(state, {
         readOnly: true,
@@ -125,7 +125,23 @@ describe('飞书卡片操作按钮：只读收据零按钮', () => {
       expect(elements).toEqual([]);
       for (const action of ['cancel', 'interrupt', 'retry', 'refresh'] as LarkCardActionName[]) {
         expect(isLarkCardActionAvailable(action, context(state, { readOnly: true }))).toBe(false);
+        // 能力全开也一样：只读规则不看能力。
+        expect(isLarkCardActionAvailable(action, context(state, { readOnly: true, capabilities: { ...allCapabilities, canVerify: true } }))).toBe(false);
       }
+    }
+  });
+
+  it('运行验证是唯一的例外，且只在跑过的终态上出现', () => {
+    // 验证只在工作目录跑一条命令、新增一条独立证据，卡上的结论一个字都不动，
+    // 所以它是闭集里唯一允许出现在收据上的操作。
+    const verifiable = new Set(['completed', 'failed', 'interrupted']);
+    for (const state of allStates) {
+      const readOnly = context(state, { readOnly: true, capabilities: { ...allCapabilities, canVerify: true } });
+      expect(isLarkCardActionAvailable('verify', readOnly), state).toBe(verifiable.has(state));
+      expect(buildLarkCardActions(readOnly).map(element => element.element_id), state)
+        .toEqual(verifiable.has(state) ? ['verify'] : []);
+      // 没声明 canVerify（没配验证命令的工作区）时永远不出现。
+      expect(isLarkCardActionAvailable('verify', context(state, { readOnly: true })), state).toBe(false);
     }
   });
 });

@@ -49,7 +49,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -463,6 +463,43 @@ describe('storage migrations', () => {
     expect(columnNames(db, 'collaboration_settings')).toContain('max_decisions_per_hour')
     expect(db.prepare('SELECT participation, instructions, max_proactive_per_hour, max_decisions_per_hour FROM collaboration_settings WHERE app_id = ?').get('cli_legacy'))
       .toEqual({ participation: 'observe', instructions: '旧群指令', max_proactive_per_hour: 2, max_decisions_per_hour: 60 })
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('v23 把旧库里 inherit-only 的群呈现覆盖升级成逐字段结构，并补齐两项 Bot 呈现默认', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    for (const migration of migrations.slice(0, 20)) {
+      migration.up(db)
+      record.run(migration.version, '2026-09-01T00:00:00.000Z')
+    }
+    const at = '2026-09-01T00:00:00.000Z'
+    db.prepare(`INSERT INTO channel_bots (id, schema_version, revision, authorization_revision, connection_generation, channel, external_app_id, display_name, brand, state, desired_listener_state, full_trust_confirmed, created_at, updated_at) VALUES (?, 2, 1, 1, 1, 'lark', ?, ?, 'feishu', 'enabled', 'receiving', 0, ?, ?)`)
+      .run('bot-v23', 'cli_v23', 'V23 Bot', at, at)
+    db.prepare(`INSERT INTO channel_bot_policies (id, schema_version, revision, channel_bot_id, defaults_json, routing_defaults_json, access_policy_json, execution_json, presentation_json, group_tools_policy_json, created_at, updated_at) VALUES (?, 2, 1, ?, '{}', '{}', '{}', '{}', ?, '{}', ?, ?)`)
+      .run('policy-v23', 'bot-v23', JSON.stringify({ structuredAskCards: true, groupCardMention: true, pushIntervalMs: 1500, traceLimit: 12, hideTraceOnComplete: false }), at, at)
+    const legacyOverrides = ['{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}']
+    db.prepare(`INSERT INTO group_bindings (id, schema_version, revision, channel_bot_id, external_chat_id, state, access_profile, oncall, agent_override_json, workspace_override_json, model_override_json, reasoning_override_json, role_policy_override_json, routing_override_json, access_override_json, group_tools_override_json, presentation_override_json, review_reasons_json, created_at, updated_at) VALUES (?, 1, 1, ?, ?, 'staged', NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)`)
+      .run('binding-v23-one', 'bot-v23', 'oc_one', ...legacyOverrides, '{"mode":"inherit"}', at, at)
+    db.prepare(`INSERT INTO group_bindings (id, schema_version, revision, channel_bot_id, external_chat_id, state, access_profile, oncall, agent_override_json, workspace_override_json, model_override_json, reasoning_override_json, role_policy_override_json, routing_override_json, access_override_json, group_tools_override_json, presentation_override_json, review_reasons_json, created_at, updated_at) VALUES (?, 2, 1, ?, ?, 'enabled', 'managed_group', 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?)`)
+      .run('binding-v23-two', 'bot-v23', 'oc_two', ...legacyOverrides, '{"mode":"inherit"}', at, at)
+
+    runMigrations(db)
+
+    const inheritAll = {
+      structuredAskCards: { mode: 'inherit' }, groupCardMention: { mode: 'inherit' },
+      pushIntervalMs: { mode: 'inherit' }, traceLimit: { mode: 'inherit' }, hideTraceOnComplete: { mode: 'inherit' },
+      completionReactionOnly: { mode: 'inherit' }, silentProgress: { mode: 'inherit' }
+    }
+    for (const id of ['binding-v23-one', 'binding-v23-two']) {
+      expect(JSON.parse(db.prepare('SELECT presentation_override_json FROM group_bindings WHERE id = ?').pluck().get(id) as string)).toEqual(inheritAll)
+    }
+    // 迁移只补呈现列，不动 revision、也不动别的覆盖列。
+    expect(db.prepare('SELECT revision, group_tools_override_json FROM group_bindings WHERE id = ?').get('binding-v23-one')).toEqual({ revision: 1, group_tools_override_json: '{}' })
+    expect(JSON.parse(db.prepare('SELECT presentation_json FROM channel_bot_policies WHERE id = ?').pluck().get('policy-v23') as string))
+      .toEqual({ structuredAskCards: true, groupCardMention: true, pushIntervalMs: 1500, traceLimit: 12, hideTraceOnComplete: false, completionReactionOnly: false, silentProgress: false })
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
     db.close()
   })

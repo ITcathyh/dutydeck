@@ -511,7 +511,9 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
 
   it('routes a same-actor pending answer without @ before selective participation, but does not consume other actors', async () => {
     const handle = vi.fn(async () => ({ enabled: true, instructions: '' }));
-    const h = await harness('ask', { participation: { handle, instructions: async () => '', taskContext: async () => '' } as unknown as LarkGroupParticipation });
+    // guardBotTurn 是机器人回合门禁的入口，coordinator 在唤醒前必调；缺了它整条链路会按
+    // 「门禁判定失败」保守拦下，所以这个替身必须给出放行结论（本用例的发送方都是人类）。
+    const h = await harness('ask', { participation: { handle, instructions: async () => '', taskContext: async () => '', guardBotTurn: async () => undefined } as unknown as LarkGroupParticipation });
     await h.coordinator.handle(event('om_task', '开始工作'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
     const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
@@ -801,10 +803,17 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
   it('replays a received waiter after mapping persistence fails without dispatching a second runtime task', async () => {
     const h = await harness('ask');
     const saveMapping = h.repos.channelMappings.save.bind(h.repos.channelMappings);
+    const casMapping = h.repos.channelMappings.compareAndSetExtra.bind(h.repos.channelMappings);
     let failRuntimeMapping = true;
+    // 存储故障必须挡住两条写路径：协调器对已存在的记录走 compareAndSetExtra（与对账同一把锁），
+    // 只挡 save 等于没挡住，这条用例声称的「mapping persistence fails」就不成立。
     h.repos.channelMappings.save = async mapping => {
       if (failRuntimeMapping && JSON.parse(mapping.extra ?? '{}').runtime_task_id) throw new Error('synthetic mapping outage');
       await saveMapping(mapping);
+    };
+    h.repos.channelMappings.compareAndSetExtra = async (id, expected, extra) => {
+      if (failRuntimeMapping && JSON.parse(extra || '{}').runtime_task_id) throw new Error('synthetic mapping outage');
+      return casMapping(id, expected, extra);
     };
     await h.coordinator.handle(event('om_task', '等待恢复'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
@@ -815,6 +824,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     h.coordinator.stop();
     failRuntimeMapping = false;
     h.repos.channelMappings.save = saveMapping;
+    h.repos.channelMappings.compareAndSetExtra = casMapping;
     const restored = h.createCoordinator();
     try {
       await restored.initializeWorkflows(h.config);
@@ -897,10 +907,17 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     let release!: () => void;
     const gate = new Promise<void>(done => { release = done; });
     const save = h.repos.channelMappings.save.bind(h.repos.channelMappings);
+    const cas = h.repos.channelMappings.compareAndSetExtra.bind(h.repos.channelMappings);
     let blocked = false;
+    // 终态落库既可能走 save（新建记录），也可能走 compareAndSetExtra（记录已存在）；
+    // 两条都要能被卡住，否则这条用例卡不到「结果已送达、映射还没落库」那个窗口。
     h.repos.channelMappings.save = async mapping => {
       if (JSON.parse(mapping.extra ?? '{}').final_delivery_state === 'delivered' && !blocked) { blocked = true; await gate; }
       await save(mapping);
+    };
+    h.repos.channelMappings.compareAndSetExtra = async (id, expected, extra) => {
+      if (JSON.parse(extra || '{}').final_delivery_state === 'delivered' && !blocked) { blocked = true; await gate; }
+      return cas(id, expected, extra);
     };
     try {
       await h.coordinator.handle(event('om_task', '生成最终结果'), h.config);

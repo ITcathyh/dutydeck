@@ -326,3 +326,32 @@ describe('buildLarkTaskDashboard', () => {
     }
   });
 });
+
+describe('任务行的 Agent 与工作区', () => {
+  it('Agent 与工作区逐行显示，缺 Agent 名时退化成 agentId', () => {
+    const result = buildLarkTaskDashboard([
+      entry({ taskId: 'a', title: '甲', agent: 'Claude Code', workspace: '/srv/alpha' }),
+      entry({ taskId: 'b', title: '乙', agent: 'codex-cli', workspace: '/srv/beta' })
+    ]);
+    const renderedRows = rows(result.elements);
+    expect(rowText(renderedRows[0]!)).toContain('Claude Code');
+    expect(rowText(renderedRows[0]!)).toContain('alpha');
+    expect(rowText(renderedRows[1]!)).toContain('codex-cli');
+    expect(headerText(result.elements)).not.toContain('Agent：');
+  });
+
+  it('全部任务同用一个 Agent / 工作区时提到表头，行内不再逐行重复', () => {
+    const result = buildLarkTaskDashboard([
+      entry({ taskId: 'a', title: '甲', agent: 'Claude Code', workspace: '/srv/alpha' }),
+      entry({ taskId: 'b', title: '乙', agent: 'Claude Code', workspace: '/srv/alpha' })
+    ]);
+    expect(headerText(result.elements)).toContain('Agent：Claude Code');
+    expect(headerText(result.elements)).toContain('工作区：alpha');
+    for (const row of rows(result.elements)) expect(rowText(row)).not.toContain('Claude Code');
+  });
+
+  it('没有 Agent 信息时不编造，表头与行内都不出现 Agent 字样', () => {
+    const result = buildLarkTaskDashboard([entry({ taskId: 'a', title: '甲', workspace: '/srv/alpha' })]);
+    expect(JSON.stringify(result.elements)).not.toContain('Agent');
+  });
+});

@@ -36,6 +36,22 @@ describe('/new first-turn options', () => {
     expect(() => parseLarkNewSession(input)).toThrow();
   });
 
+  it('parses --agent alongside the other first-turn options', () => {
+    expect(parseLarkNewSession('--agent ccflash -- 修复问题')).toEqual({ prompt: '修复问题', launchOptions: { agentId: 'ccflash' } });
+    expect(parseLarkNewSession('--agent claude-code --model opus -- 修复问题')).toEqual({
+      prompt: '修复问题', launchOptions: { agentId: 'claude-code', model: 'opus' }
+    });
+    // 同一个 flag 出现两次仍然是格式错误，和既有字段同口径。
+    expect(() => parseLarkNewSession('--agent a --agent b -- 任务')).toThrow();
+    expect(() => parseLarkNewSession('--agent -- 任务')).toThrow();
+  });
+
+  it('rejects an agent id that could not name a real agent', async () => {
+    await expect(validateLarkLaunchOptions({ agentId: 'has space' }, agent)).rejects.toThrow('Agent');
+    await expect(validateLarkLaunchOptions({ agentId: '' }, agent)).rejects.toThrow();
+    expect(await validateLarkLaunchOptions({ agentId: 'ccflash' }, { ...agent, id: 'ccflash' })).toEqual({ agentId: 'ccflash' });
+  });
+
   it('accepts explicit worktree isolation and rejects unknown modes', () => {
     expect(parseLarkNewSession('--workspace worktree -- 修复问题')).toEqual({ prompt: '修复问题', launchOptions: { workspaceMode: 'worktree' } });
     expect(() => parseLarkNewSession('--workspace typo -- 修复问题')).toThrow();
@@ -78,5 +94,26 @@ describe('/new first-turn options', () => {
     expect(discoverAgentModels).toHaveBeenLastCalledWith(acpAgent, 'configured-model');
     await expect(validateLarkLaunchOptions({ model: 'unknown' }, acpAgent)).rejects.toThrow('模型');
     await expect(validateLarkLaunchOptions({ reasoningEffort: 'xhigh' }, acpAgent)).rejects.toThrow('推理强度');
+  });
+});
+
+describe('--cwd 工作目录别名', () => {
+  it('别名先查表再走既有绝对路径校验；别名表为空时行为完全不变', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-alias-'));
+    directories.push(cwd);
+    expect(await validateLarkLaunchOptions({ cwd: '项目' }, agent, { 项目: cwd })).toEqual({ cwd });
+    // 别名指向的目录同样要真实存在，不因为是别名就跳过校验。
+    await expect(validateLarkLaunchOptions({ cwd: '坏的' }, agent, { 坏的: join(cwd, 'missing') })).rejects.toThrow('目录');
+    // 未命中的别名仍按绝对路径校验，报错文案会列出可用别名。
+    await expect(validateLarkLaunchOptions({ cwd: '别的' }, agent, { 项目: cwd })).rejects.toThrow('项目');
+    // 别名表为空：错误文案与既有一致，不提别名。
+    await expect(validateLarkLaunchOptions({ cwd: '项目' }, agent, {})).rejects.toThrow('--cwd 必须是服务器上的绝对路径。');
+    await expect(validateLarkLaunchOptions({ cwd: '项目' }, agent)).rejects.toThrow('--cwd 必须是服务器上的绝对路径。');
+    // 绝对路径永远直通，别名表不会遮蔽它。
+    expect(await validateLarkLaunchOptions({ cwd }, agent, { [cwd]: '/not/used' })).toEqual({ cwd });
+    // 原型链上的键不是别名：查表命中 Object.prototype.constructor 会把函数当路径，必须仍走中文提示。
+    for (const inherited of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      await expect(validateLarkLaunchOptions({ cwd: inherited }, agent, { 项目: cwd })).rejects.toThrow('项目');
+    }
   });
 });

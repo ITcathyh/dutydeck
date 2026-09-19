@@ -74,8 +74,38 @@ export interface LarkReplyInput extends LarkCardInput { messageId: string; reply
 export interface LarkUpdateInput extends LarkCardInput { messageId: string }
 export interface LarkMessageResult { messageId: string; chatId?: string }
 export interface LarkReactionResult { messageId: string; reactionId: string; emojiType: string }
+export type LarkUrgentUserIdType = 'open_id' | 'union_id' | 'user_id';
+export interface LarkUrgentAppInput {
+  messageId: string;
+  userIdList: string[];
+  userIdType?: LarkUrgentUserIdType;
+}
+export interface LarkUrgentResult {
+  invalidUserIdList: string[];
+}
+export interface LarkPinResult {
+  messageId: string;
+  chatId?: string;
+}
+export interface LarkPinItem {
+  messageId: string;
+  chatId?: string;
+  operatorId?: string;
+  operatorIdType?: string;
+  createTime?: string;
+}
+export interface LarkPinsResult {
+  items: LarkPinItem[];
+  hasMore: boolean;
+  pageToken?: string;
+}
 export interface LarkBotInfo { appName: string; openId: string; avatarUrl?: string; activateStatus?: number }
 export interface LarkApplicationIdentityCheck { verified: true; reportedAppId?: string; tenantKey?: string }
+/** 一条原生斜杠命令：command 不带前导斜杠，应用内唯一。 */
+export interface LarkSlashCommandDefinition { command: string; description: string }
+/** 单应用上限 100 条，翻页轮数按此封顶即可覆盖全量。 */
+const MAX_SLASH_COMMAND_PAGES = 10;
+export interface LarkSlashCommandSyncResult { created: string[]; updated: string[] }
 export interface LarkChatPreflightInfo { chatMode?: string; chatStatus?: string; name?: string; description?: string }
 export interface LarkIdentityResolutionCheck { verified: true; sampleOpenId: string; sampleEmails: string[] }
 export interface LarkMessageResourceResult { data: Uint8Array; contentType?: string }
@@ -1239,6 +1269,94 @@ export class LarkCardService {
     });
   }
 
+  async urgentApp(input: LarkUrgentAppInput): Promise<LarkUrgentResult> {
+    const messageId = required(input?.messageId, 'messageId');
+    const userIdList = (Array.isArray(input?.userIdList) ? input.userIdList : [])
+      .map(id => String(id ?? '').trim())
+      .filter(Boolean);
+    if (!userIdList.length) {
+      throw new LarkServiceError('INVALID_URGENT_INPUT', 'userIdList must contain at least one user ID', 400);
+    }
+    const userIdType = input.userIdType ?? 'open_id';
+    const payload = await this.request(
+      `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/urgent_app?user_id_type=${encodeURIComponent(userIdType)}`,
+      {
+        method: 'POST',
+        body: { user_id_list: userIdList }
+      }
+    );
+    const invalidList = Array.isArray(payload.data?.invalid_user_id_list)
+      ? payload.data.invalid_user_id_list.map((id: unknown) => String(id))
+      : [];
+    return { invalidUserIdList: invalidList };
+  }
+
+  async safeUrgentApp(input: LarkUrgentAppInput, log?: { warn?: (details: unknown, msg?: string) => void }): Promise<LarkUrgentResult | undefined> {
+    try {
+      return await this.urgentApp(input);
+    } catch (error) {
+      log?.warn?.({ error, messageId: input?.messageId, userIdList: input?.userIdList }, '飞书应用内加急失败，不影响主任务');
+      return undefined;
+    }
+  }
+
+  async pin(messageId: string): Promise<LarkPinResult> {
+    const resolvedMessageId = required(messageId, 'messageId');
+    const payload = await this.request('/open-apis/im/v1/pins', {
+      method: 'POST',
+      body: { message_id: resolvedMessageId }
+    });
+    return {
+      messageId: resolvedMessageId,
+      chatId: payload.data?.pin?.chat_id ? String(payload.data.pin.chat_id) : undefined
+    };
+  }
+
+  async safePin(messageId: string, log?: { warn?: (details: unknown, msg?: string) => void }): Promise<LarkPinResult | undefined> {
+    try {
+      return await this.pin(messageId);
+    } catch (error) {
+      log?.warn?.({ error, messageId }, '飞书卡片置顶失败，不影响主任务');
+      return undefined;
+    }
+  }
+
+  async unpin(messageId: string): Promise<void> {
+    const resolvedMessageId = required(messageId, 'messageId');
+    await this.request(`/open-apis/im/v1/pins/${encodeURIComponent(resolvedMessageId)}`, {
+      method: 'DELETE'
+    });
+  }
+
+  async safeUnpin(messageId: string, log?: { warn?: (details: unknown, msg?: string) => void }): Promise<boolean> {
+    try {
+      await this.unpin(messageId);
+      return true;
+    } catch (error) {
+      log?.warn?.({ error, messageId }, '飞书取消卡片置顶失败，不影响主任务');
+      return false;
+    }
+  }
+
+  async listPins(chatId: string, pageToken?: string): Promise<LarkPinsResult> {
+    const resolvedChatId = required(chatId, 'chatId');
+    const query = new URLSearchParams({ chat_id: resolvedChatId });
+    if (pageToken) query.set('page_token', pageToken);
+    const payload = await this.request(`/open-apis/im/v1/pins?${query}`, { method: 'GET' });
+    const items = (Array.isArray(payload.data?.items) ? payload.data.items : []).map((item: any) => ({
+      messageId: String(item.message_id ?? ''),
+      chatId: item.chat_id ? String(item.chat_id) : undefined,
+      operatorId: item.operator_id ? String(item.operator_id) : undefined,
+      operatorIdType: item.operator_id_type ? String(item.operator_id_type) : undefined,
+      createTime: item.create_time ? String(item.create_time) : undefined
+    }));
+    return {
+      items,
+      hasMore: Boolean(payload.data?.has_more),
+      pageToken: payload.data?.page_token ? String(payload.data.page_token) : undefined
+    };
+  }
+
   async downloadMessageResource(messageId: string, fileKey: string, type: 'image' | 'file'): Promise<LarkMessageResourceResult> {
     const resolvedMessageId = required(messageId, 'messageId');
     const resolvedFileKey = required(fileKey, 'fileKey');
@@ -1312,6 +1430,52 @@ export class LarkCardService {
     const reportedAppId = String(application.app_id ?? application.appId ?? '').trim() || undefined;
     const tenantKey = String(application.tenant_key ?? application.tenantKey ?? '').trim() || undefined;
     return { verified: true, ...(reportedAppId ? { reportedAppId } : {}), ...(tenantKey ? { tenantKey } : {}) };
+  }
+
+  /**
+   * 把注册表里的命令同步成应用的原生斜杠命令（飞书输入框里的 `/` 菜单）。
+   *
+   * 走的是本类的 tenant_access_token，而不是开放平台控制台会话：控制台会话带的是
+   * 登录 cookie + CSRF、打的是控制台域，`/open-apis/*` 只认 tenant token，两者不能混用。
+   * 因此这里同时复用 api-gate 的 per-appId 限流/退避/熔断与 LarkServiceError 归一化。
+   *
+   * 列表按飞书列表接口的惯例翻页（`has_more` + `page_token`，对齐 listPins）：
+   * 响应没给续页标记就是全量，给了就接着取。把分页当不存在的代价是——首页之外的既有
+   * 命令会被当成「不存在」而重复创建，逐条撞唯一性失败。翻页轮数按单应用 100 条上限封顶，
+   * 服务端若一直回同一个 token 也不会把同步卡死。
+   * 只增不改别人：远端存在而注册表里没有的命令可能是人手工加的，绝不删除。
+   * 写操作需要权限 application:app_slash_command:write。
+   */
+  async syncSlashCommands(definitions: readonly LarkSlashCommandDefinition[]): Promise<LarkSlashCommandSyncResult> {
+    const existing = new Map<string, { commandId: string; description: string }>();
+    let pageToken: string | undefined;
+    for (let page = 0; page < MAX_SLASH_COMMAND_PAGES; page += 1) {
+      const query = pageToken ? `?page_token=${encodeURIComponent(pageToken)}` : '';
+      const payload = await this.request(`/open-apis/application/v7/app_slash_commands${query}`, { method: 'GET' });
+      for (const item of Array.isArray(payload.data?.items) ? payload.data.items : []) {
+        const commandId = String(item?.command_id ?? '').trim();
+        const command = String(item?.command ?? '').replace(/^\//, '').trim();
+        if (!commandId || !command) continue;
+        existing.set(command, { commandId, description: String(item?.description?.default_value ?? '').trim() });
+      }
+      const next = String(payload.data?.page_token ?? '').trim();
+      if (payload.data?.has_more !== true || !next || next === pageToken) break;
+      pageToken = next;
+    }
+    const created: string[] = [];
+    const updated: string[] = [];
+    for (const definition of definitions) {
+      const body = { command: definition.command, description: { default_value: definition.description } };
+      const hit = existing.get(definition.command);
+      if (!hit) {
+        await this.request('/open-apis/application/v7/app_slash_commands', { body });
+        created.push(definition.command);
+      } else if (hit.description !== definition.description) {
+        await this.request(`/open-apis/application/v7/app_slash_commands/${encodeURIComponent(hit.commandId)}`, { method: 'PUT', body });
+        updated.push(definition.command);
+      }
+    }
+    return { created, updated };
   }
 
   /** Read-only metadata needed to classify a configured GroupBinding. */
@@ -1517,6 +1681,14 @@ export class LarkCardService {
       }
       throw error;
     }
+  }
+
+  /**
+   * 飞书任务智能体通道（task-agent.ts）唯一的出网入口：复用本类的 tenant token 缓存、
+   * api-gate 的 per-appId 限流/退避/熔断与 LarkServiceError 归一化，不另起 HTTP 客户端。
+   */
+  async callOpenApi(path: string, options: { method?: string; body?: unknown } = {}): Promise<any> {
+    return await this.request(path, options);
   }
 
   private async requestForm(path: string, form: FormData) {

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { RuntimeError, canonicalExecutionJson, countDecisionUsage, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
+import { RuntimeError, canonicalExecutionJson, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
 
 export type CollaborationRepositories = Pick<RepositoryBundle, 'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'scheduleLeases'> & { collaboration: CollaborationRepository };
 export type CollaborationAuthorization = (scope: CollaborationScope, actorId: string, action: 'read' | 'write' | 'manage' | 'execute' | 'deliver') => Promise<boolean>;
@@ -69,7 +69,11 @@ export class CollaborationService {
   async get(scope: CollaborationScope, actorId: string) {
     await this.require(scope, actorId, 'read');
     const repo = this.repositories.collaboration;
-    const [snapshot, followups, records, decisions, actions, activities, feedback] = await Promise.all([repo.snapshot(scope), repo.listFollowups(scope), repo.listMandates(scope), repo.listDecisions(scope), repo.listActions(scope), repo.listActivities(scope), repo.listFeedback(scope)]);
+    // 机器人回合是纯记账行，每群每小时最多 6 条却没有可读内容；不滤掉的话
+    // 默认 50 条的判定历史几小时后就只剩它们，真正的判定看不见了。闸门记录保留：
+    // 那一条写着「为什么不再出声」，正是操作者要看的。
+    const [snapshot, followups, records, allDecisions, actions, activities, feedback] = await Promise.all([repo.snapshot(scope), repo.listFollowups(scope), repo.listMandates(scope), repo.listDecisions(scope, DECISION_WINDOW_LIMIT), repo.listActions(scope), repo.listActivities(scope), repo.listFeedback(scope)]);
+    const decisions = allDecisions.filter(item => !isBotTurnRecord(item)).slice(0, 50);
     const mandates = await Promise.all(records.map(async mandate => ({ ...mandate, schedule: await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId), nextDueAt: (await this.repositories.scheduleWatermarks.get(mandate.scheduleDefinitionId))?.nextDueAt })));
     return { snapshot, followups, mandates, decisions, actions, activities, feedback, usage: await this.usage(scope, snapshot) };
   }

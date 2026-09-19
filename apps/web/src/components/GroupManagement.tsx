@@ -22,13 +22,14 @@ import {
 } from '../api';
 import type {
   GroupBinding,
+  PresentationOverride,
   RoleAssignment
 } from '@dutydeck/shared';
 import { Badge, Banner, Button, Card, EmptyState, Input, Select, Spinner } from './primitives';
 import { AgentSelect, CompactSelect } from './CompactSelect';
 import { DirectoryPicker } from './DirectoryPicker';
 import { CollaborationPanel } from './CollaborationPanel';
-import { useDraftStore, type GroupAccessMode, type GroupBotDraft } from '../draft-store';
+import { useDraftStore, type GroupAccessMode, type GroupBotDraft, type PresentationToggle } from '../draft-store';
 import { toastStore } from '../useToasts';
 import { agentModelsQueryKey, loadAgentModels, readCachedAgentModels } from '../model-cache';
 
@@ -76,6 +77,15 @@ const mentionPolicyLabels: Record<string, string> = { always: '每次都需要 @
  */
 export const groupBotDraftKey = (groupKey: string, appId: string) => `${groupKey}:${appId}`;
 
+/** 群级呈现里的布尔项。顺序即界面顺序。 */
+const PRESENTATION_TOGGLES = [
+  { key: 'presentationCompletionReactionOnly', label: '完成时只贴表情、不发结果卡', hint: '开启后任务完成只对原消息贴一个表情，不再发结果卡。' },
+  { key: 'presentationSilentProgress', label: '中间进展静默', hint: '开启后不发中间进展，只保留最终结果。' },
+  { key: 'presentationGroupCardMention', label: '群卡片 @ 发起人', hint: '群内审批卡与结果卡是否 @ 发起人。' },
+  { key: 'presentationHideTraceOnComplete', label: '完成后折叠执行过程', hint: '结果卡里是否默认收起执行过程。' },
+  { key: 'presentationStructuredAskCards', label: '结构化问答卡片', hint: '问答用结构化组件还是文字选项。' }
+] as const satisfies ReadonlyArray<{ key: keyof GroupBotDraft; label: string; hint: string }>;
+
 /** 两份群草稿的**用户可编辑内容**是否相同。baseRevision 是元数据，不参与比较。 */
 function sameGroupDraftContent(left: GroupBotDraft, right: GroupBotDraft): boolean {
   const strip = ({ baseRevision: _ignored, ...rest }: GroupBotDraft) => rest;
@@ -84,6 +94,62 @@ function sameGroupDraftContent(left: GroupBotDraft, right: GroupBotDraft): boole
 
 /** 一次保存提交所固定下来的东西。见 saveMutation 的注释。 */
 type GroupSaveVariables = { key: string; appId: string; chatId: string; draft: GroupBotDraft };
+
+/*
+  群级呈现覆盖 <-> 草稿。
+
+  布尔项在界面上是三态（继承 / 本群开 / 本群关），不是复选框：复选框只能表达开与
+  关，表达不了「跟随 Bot 默认」，一渲染就等于替用户做了选择。
+*/
+const toggleFromOverride = (item: { mode: 'inherit' | 'set'; value?: boolean }): PresentationToggle =>
+  item.mode === 'set' ? (item.value ? 'on' : 'off') : 'inherit';
+const toggleToOverride = (toggle: PresentationToggle): { mode: 'inherit' } | { mode: 'set'; value: boolean } =>
+  toggle === 'inherit' ? { mode: 'inherit' } : { mode: 'set', value: toggle === 'on' };
+
+function presentationDraft(binding?: GroupBinding) {
+  const override = binding?.presentationOverride;
+  return {
+    presentationStructuredAskCards: override ? toggleFromOverride(override.structuredAskCards) : 'inherit' as const,
+    presentationGroupCardMention: override ? toggleFromOverride(override.groupCardMention) : 'inherit' as const,
+    presentationHideTraceOnComplete: override ? toggleFromOverride(override.hideTraceOnComplete) : 'inherit' as const,
+    presentationCompletionReactionOnly: override ? toggleFromOverride(override.completionReactionOnly) : 'inherit' as const,
+    presentationSilentProgress: override ? toggleFromOverride(override.silentProgress) : 'inherit' as const,
+    presentationPushIntervalMode: override?.pushIntervalMs.mode === 'set' ? 'set' as const : 'inherit' as const,
+    presentationPushIntervalValue: override?.pushIntervalMs.mode === 'set' ? String(override.pushIntervalMs.value) : '',
+    presentationTraceLimitMode: override?.traceLimit.mode === 'set' ? 'set' as const : 'inherit' as const,
+    presentationTraceLimitValue: override?.traceLimit.mode === 'set' ? String(override.traceLimit.value) : ''
+  };
+}
+
+/** 数字项填不出合法值时的提示；返回 undefined 表示可以保存。 */
+function presentationInputError(draft: GroupBotDraft): string | undefined {
+  const pushIntervalMs = Number(draft.presentationPushIntervalValue);
+  const traceLimit = Number(draft.presentationTraceLimitValue);
+  if (draft.presentationPushIntervalMode === 'set' && !(Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000)) {
+    return '本群推送间隔要填 500-20000 之间的整数。';
+  }
+  if (draft.presentationTraceLimitMode === 'set' && !(Number.isInteger(traceLimit) && traceLimit >= 1 && traceLimit <= 200)) {
+    return '本群 Trace 阶段上限要填 1-200 之间的整数。';
+  }
+  return undefined;
+}
+
+function presentationOverrideFromDraft(draft: GroupBotDraft): PresentationOverride {
+  const pushIntervalMs = Number(draft.presentationPushIntervalValue);
+  const traceLimit = Number(draft.presentationTraceLimitValue);
+  return {
+    structuredAskCards: toggleToOverride(draft.presentationStructuredAskCards),
+    groupCardMention: toggleToOverride(draft.presentationGroupCardMention),
+    // 数字项填不出合法值时退回继承，而不是提交一个服务端必然拒绝的 0。
+    pushIntervalMs: draft.presentationPushIntervalMode === 'set' && Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20000
+      ? { mode: 'set', value: pushIntervalMs } : { mode: 'inherit' },
+    traceLimit: draft.presentationTraceLimitMode === 'set' && Number.isInteger(traceLimit) && traceLimit > 0
+      ? { mode: 'set', value: traceLimit } : { mode: 'inherit' },
+    hideTraceOnComplete: toggleToOverride(draft.presentationHideTraceOnComplete),
+    completionReactionOnly: toggleToOverride(draft.presentationCompletionReactionOnly),
+    silentProgress: toggleToOverride(draft.presentationSilentProgress)
+  };
+}
 
 function initialDraftFromBinding(binding?: GroupBinding): GroupBotDraft {
   if (!binding) {
@@ -106,6 +172,7 @@ function initialDraftFromBinding(binding?: GroupBinding): GroupBotDraft {
       toolRead: 'inherit',
       toolDiscover: 'inherit',
       toolSend: 'inherit',
+      ...presentationDraft(),
       roleChanges: []
     };
   }
@@ -129,6 +196,7 @@ function initialDraftFromBinding(binding?: GroupBinding): GroupBotDraft {
     toolRead: binding.groupToolsOverride.read,
     toolDiscover: binding.groupToolsOverride.discover,
     toolSend: binding.groupToolsOverride.send,
+    ...presentationDraft(binding),
     roleChanges: []
   };
 }
@@ -294,6 +362,7 @@ export function GroupManagement({
   };
 
   // 检查是否有未保存修改
+  const presentationError = currentDraft ? presentationInputError(currentDraft) : undefined;
   const isDirty = useMemo(() => {
     if (!activeBotEntry || !currentDraft) return false;
     const initial = initialDraftFromBinding(activeBotEntry.binding);
@@ -386,6 +455,8 @@ export function GroupManagement({
           discover: draft.toolDiscover,
           send: draft.toolSend
         },
+        // 「机器人在本群说多少话」：逐字段覆盖 Bot 级呈现设置，没动过的项保持 inherit。
+        presentationOverride: presentationOverrideFromDraft(draft),
         /*
           谁能在本群使用这个 Bot。这一项与 oncall / 角色是三件不同的事：
           accessOverride 决定「本群的访问范围」，角色决定「具体某个人能做什么」，
@@ -407,7 +478,7 @@ export function GroupManagement({
           别人保存过之后再拿刷新到的版本提交，CAS 会放行并覆盖对方的修改。
         */
         expectedRevision: draft.baseRevision,
-        patch: patch as any,
+        patch,
         roleChanges: draft.roleChanges.length > 0 ? draft.roleChanges : undefined
       });
     },
@@ -1344,6 +1415,75 @@ export function GroupManagement({
                             </Select>
                           </div>
                         </div>
+
+                        {/* 本群里机器人说多少话。每一项都可以只在这个群改，不影响同一个 Bot 的其他群。 */}
+                        <div className="space-y-3 border-t border-subtle pt-4 text-caption">
+                          <div className="font-medium text-primary">本群消息呈现</div>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            {PRESENTATION_TOGGLES.map(({ key, label, hint }) => (
+                              <div key={key}>
+                                <label className="mb-1 block font-medium text-secondary">{label}</label>
+                                <Select
+                                  aria-label={label}
+                                  value={currentDraft[key]}
+                                  onChange={e => updateDraft({ [key]: e.target.value as PresentationToggle })}
+                                >
+                                  <option value="inherit">继承 Bot 默认</option>
+                                  <option value="on">本群开启</option>
+                                  <option value="off">本群关闭</option>
+                                </Select>
+                                <div className="mt-1 text-meta text-subtle">{hint}</div>
+                              </div>
+                            ))}
+                            <div>
+                              <label className="mb-1 block font-medium text-secondary">Trace 阶段上限</label>
+                              <Select
+                                aria-label="Trace 阶段上限"
+                                value={currentDraft.presentationTraceLimitMode}
+                                onChange={e => updateDraft({ presentationTraceLimitMode: e.target.value as 'inherit' | 'set' })}
+                              >
+                                <option value="inherit">继承 Bot 默认</option>
+                                <option value="set">本群单独设置</option>
+                              </Select>
+                              {currentDraft.presentationTraceLimitMode === 'set' && (
+                                <Input
+                                  aria-label="本群 Trace 阶段上限值"
+                                  className="mt-1 font-mono"
+                                  type="number"
+                                  min={1}
+                                  max={200}
+                                  value={currentDraft.presentationTraceLimitValue}
+                                  onChange={e => updateDraft({ presentationTraceLimitValue: e.target.value })}
+                                />
+                              )}
+                              <div className="mt-1 text-meta text-subtle">心跳卡片最多保留几个执行阶段。</div>
+                            </div>
+                            <div>
+                              <label className="mb-1 block font-medium text-secondary">推送间隔</label>
+                              <Select
+                                aria-label="推送间隔"
+                                value={currentDraft.presentationPushIntervalMode}
+                                onChange={e => updateDraft({ presentationPushIntervalMode: e.target.value as 'inherit' | 'set' })}
+                              >
+                                <option value="inherit">继承 Bot 默认</option>
+                                <option value="set">本群单独设置</option>
+                              </Select>
+                              {currentDraft.presentationPushIntervalMode === 'set' && (
+                                <Input
+                                  aria-label="本群推送间隔毫秒"
+                                  className="mt-1 font-mono"
+                                  type="number"
+                                  min={500}
+                                  max={20000}
+                                  step={100}
+                                  value={currentDraft.presentationPushIntervalValue}
+                                  onChange={e => updateDraft({ presentationPushIntervalValue: e.target.value })}
+                                />
+                              )}
+                              <div className="mt-1 text-meta text-subtle">500-20000 毫秒；改卡片的刷新节奏。</div>
+                            </div>
+                          </div>
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1351,7 +1491,9 @@ export function GroupManagement({
                   {/* 底部聚合保存条 */}
                   <div className="flex flex-wrap items-center justify-between gap-3 border-t border-subtle pt-4">
                     <div className="text-caption text-subtle">
-                      {isDirty ? (
+                      {presentationError ? (
+                        <span className="font-medium text-danger">{presentationError}</span>
+                      ) : isDirty ? (
                         <span className="font-medium text-warning">● 有未保存的修改</span>
                       ) : (
                         <span>已保存。</span>
@@ -1370,7 +1512,7 @@ export function GroupManagement({
                       </Button>
                       <Button
                         variant="primary"
-                        disabled={!isDirty}
+                        disabled={!isDirty || Boolean(presentationError)}
                         loading={savingThisBot}
                         onClick={submitSave}
                       >

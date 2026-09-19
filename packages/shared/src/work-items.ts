@@ -67,9 +67,18 @@ export interface WorkStep {
 }
 export interface WorkItem {
   id: string; parentSessionId: string; title: string; goal: string; revision: number;
-  status: 'running' | 'waiting' | 'failed' | 'completed' | 'cancelling' | 'cancelled' | 'blocked';
+  /** awaiting_confirmation：计划已持久接收但尚未入队，等人工确认后才允许派发任何步骤。 */
+  status: 'awaiting_confirmation' | 'running' | 'waiting' | 'failed' | 'completed' | 'cancelling' | 'cancelled' | 'blocked';
   plan: WorkPlan; steps: WorkStep[]; createdAt: string; updatedAt: string;
   output?: { text: string; digest: string; stepId: string }; error?: string;
   delivery: { status: 'pending' | 'delivered' | 'error' | 'not_requested'; attempts: number; error?: string };
 }
 export interface WorkTemplate { id: string; parentSessionId: string; name: string; version: number; plan: WorkPlan; createdAt: string }
+/**
+ * 编排闸门的默认判定：群聊里 Agent 提出的计划必须先给人确认，
+ * 单聊只有发起人自己在场、下一句就能改口，默认直接执行。
+ * 人手输入的命令由调用方显式覆盖，不走这里。
+ */
+export function workPlanConfirmationRequired(session: { source?: string | null; sourceId?: string | null }): boolean {
+  return session.source === 'lark' && (session.sourceId ?? '').split(':')[2] === 'group';
+}

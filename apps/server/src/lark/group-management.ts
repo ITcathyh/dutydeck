@@ -5,12 +5,12 @@ import { isAbsolute } from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import {
-  RuntimeError, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
+  RuntimeError, canonicalExecutionJson, createGroupBindingInputSchema, createRoleAssignmentInputSchema, evaluatePolicyAction, installationOwnerTaskActor,
   groupBindingSchema, remoteChatFactValidity, resolveGroupEffectiveConfig, updateRoleAssignmentInputSchema,
   type ChannelBotGroupPolicy, type EffectiveGroupConfig, type GroupBinding, type PolicyAction,
-  type PolicyDecision, type RepositoryBundle, type RoleAssignment, type Session, type ToolRiskPolicy
+  type PolicyDecision, type PresentationSettings, type RepositoryBundle, type RoleAssignment, type Session, type ToolRiskPolicy
 } from '@dutydeck/shared';
-import { larkExecutionConfirmed, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { defaultLarkTraceLimit, larkExecutionConfirmed, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError, type LarkCardService, type LarkChat } from './service.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkSourceId } from './session-resolver.js';
@@ -38,7 +38,17 @@ const buildRunContext = (session: Session, config: StoredLarkConfig, event: Pick
     sourceId: larkSourceId(config, event.chatId, event.chatType, scopeId), revision: config.managedGroup.revision, agentId: session.agentId, cwd: session.cwd, model: session.model, reasoningEffort: session.reasoningEffort
   };
 };
-const patchSchema = groupBindingSchema.pick({ agentOverride: true, workspaceOverride: true, modelOverride: true, reasoningOverride: true, routingOverride: true, accessOverride: true, groupToolsOverride: true, oncall: true, state: true }).partial();
+const patchSchema = groupBindingSchema.pick({ agentOverride: true, workspaceOverride: true, modelOverride: true, reasoningOverride: true, routingOverride: true, accessOverride: true, groupToolsOverride: true, presentationOverride: true, oncall: true, state: true }).partial();
+/** Bot 级呈现默认；群级 presentationOverride 逐字段覆盖它。 */
+const presentationDefaults = (config: StoredLarkConfig): PresentationSettings => ({
+  structuredAskCards: config.structuredAskCards !== false,
+  groupCardMention: config.groupCardMention === true,
+  pushIntervalMs: config.pushIntervalMs,
+  traceLimit: config.traceLimit ?? defaultLarkTraceLimit,
+  hideTraceOnComplete: config.hideTraceOnComplete,
+  completionReactionOnly: config.completionReactionOnly === true,
+  silentProgress: config.silentProgress === true
+});
 const roleCreateSchema = z.object({ kind: z.literal('create'), principalId: z.string(), role: z.enum(['can_talk', 'can_operate']), operateScope: z.enum(['none', 'own_runs', 'group_runs']), actionGates: z.object({ terminalWrite: z.boolean(), highRisk: z.boolean(), groupToolsSend: z.boolean() }) }).strict();
 const roleUpdateSchema = z.object({ kind: z.literal('update'), id: z.string(), expectedRevision: z.number().int().positive(), patch: z.object({ state: z.enum(['active', 'revoked']).optional(), operateScope: z.enum(['none', 'own_runs', 'group_runs']).optional(), actionGates: z.object({ terminalWrite: z.boolean(), highRisk: z.boolean(), groupToolsSend: z.boolean() }).optional() }).strict() }).strict();
 const saveSchema = z.object({ expectedRevision: z.number().int().nonnegative(), patch: patchSchema, roleChanges: z.array(z.discriminatedUnion('kind', [roleCreateSchema, roleUpdateSchema])).max(200).optional() }).strict();
@@ -105,7 +115,7 @@ export class LarkGroupManager {
       this.repos.remoteIdentityFacts.getByChannelBot(owner.channelBotId), this.repos.roleAssignments.listByChannelBot(owner.channelBotId, 500), this.repos.channelBots.get(owner.channelBotId)
     ]);
     const validity = owner.fingerprint !== fingerprint(config) ? 'credential_mismatch' : fact ? remoteChatFactValidity(fact, identity, this.now()) : 'unknown';
-    const effective = binding ? resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), binding) : undefined;
+    const effective = binding ? resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), binding, presentationDefaults(config)) : undefined;
     if (effective && binding?.routingOverride.groupReplyMode.mode === 'inherit' && !config.groupReplyMode) effective.routing.groupReplyMode = { value: undefined, source: 'unconfigured' };
     const enabled = Boolean(binding && binding.state === 'staged' && owner.activeGroups.includes(binding.id) && bot?.state !== 'disabled');
     const applied = enabled && validity === 'valid' && fact?.membershipState === 'member' && larkExecutionConfirmed(config);
@@ -209,14 +219,18 @@ export class LarkGroupManager {
     if (!owner) throw new RuntimeError('LARK_GROUP_SYNC_REQUIRED', '请先同步此 Bot 的群聊。', 409);
     const detail = await this.detail(config, owner, chatId);
     const disabling = input.patch.accessOverride?.mode === 'disabled' || ['disabled', 'archived', 'needs_review'].includes(input.patch.state ?? '');
+    // 「群身份已失效时仍允许撤销角色」的唯一逃生口：patch 必须逐字段等于现状。
+    // 这里用确定性序列化而不是 JSON.stringify——后者把键序算进比较，
+    // 任何一次字段重排都会让已迁移的绑定再也走不进这个分支，
+    // 「群失效时撤销某人角色」会在最需要它的时候报 409。
     const revokingOnly = Boolean(detail.binding && input.roleChanges?.length && input.roleChanges.every(change => change.kind === 'update' && change.patch.state === 'revoked')
-      && Object.entries(input.patch).every(([key, value]) => JSON.stringify(value) === JSON.stringify(detail.binding![key as keyof GroupBinding])));
+      && Object.entries(input.patch).every(([key, value]) => canonicalExecutionJson(value) === canonicalExecutionJson(detail.binding![key as keyof GroupBinding])));
     const reducingAccess = disabling || revokingOnly;
     if (!reducingAccess && (detail.validity !== 'valid' || detail.membership !== 'member')) throw new RuntimeError('LARK_GROUP_VERIFY_REQUIRED', '请先同步并确认 Bot 在此群中。', 409);
     if (!reducingAccess && !larkExecutionConfirmed(config)) throw new RuntimeError('LARK_FULL_TRUST_CONFIRMATION_REQUIRED', '请先在 Bot 接入设置中确认无人值守运行权限。', 409);
     const { state: _state, ...newOverrides } = input.patch;
     const projected = detail.binding ? { ...detail.binding, ...input.patch } : createGroupBindingInputSchema.parse({ id: `live_binding_${hash(`${appId}\0${chatId}`)}`, channelBotId: owner.channelBotId, externalChatId: chatId, ...newOverrides });
-    const effective = resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), projected as GroupBinding);
+    const effective = resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), projected as GroupBinding, presentationDefaults(config));
     const executionChanged = !detail.binding || (['agentOverride', 'workspaceOverride', 'modelOverride', 'reasoningOverride'] as const).some(key => input.patch[key] !== undefined && JSON.stringify(input.patch[key]) !== JSON.stringify(detail.binding![key]));
     if (!disabling && executionChanged) {
       const agent = effective.agent.value ? await this.repos.agents.get(effective.agent.value) : undefined;
@@ -273,6 +287,35 @@ export class LarkGroupManager {
     return this.detail(await this.config(appId), (await this.owner(appId))!, chatId);
   }
 
+  /**
+   * 本群当前的授权口径与绑定版本号，供聊天内 /grant、/revoke 做「读—改—写」。
+   * 群还没同步或还没绑定时返回 undefined：此时聊天里没有可改的授权，命令必须如实拒绝，
+   * 而不是替用户新建一份群配置。
+   */
+  async groupAccess(appId: string, chatId: string) {
+    const config = await readLarkConfig(this.repos.config, appId);
+    const owner = config ? await this.owner(appId) : undefined;
+    if (!config || !owner) return undefined;
+    const detail = await this.detail(config, owner, chatId);
+    return detail.binding
+      ? { revision: detail.binding.revision, override: detail.binding.accessOverride, effective: detail.effective!.access, oncall: detail.binding.oncall }
+      : undefined;
+  }
+
+  /**
+   * 把群成员 open_id 解析成策略 principal 并登记身份（{@link save} 的作用域校验要求已登记）。
+   * 不是本群成员、或不是 ou_ 形态的 open_id 一律返回 undefined —— 调用方据此拒绝，
+   * 绝不能把一个解析不出来的人静默写进名单。
+   */
+  async resolveGroupPrincipal(appId: string, chatId: string, openId: string) {
+    const config = await readLarkConfig(this.repos.config, appId);
+    if (!config || !openId.startsWith('ou_')) return undefined;
+    if (!await this.isMember(config, chatId, openId)) return undefined;
+    const id = principalId(appId, openId);
+    await this.repos.config.set(`lark.principal.${id}`, JSON.stringify({ appId, openId, name: openId }));
+    return id;
+  }
+
   private async runtimeDetail(config: StoredLarkConfig, owner: LiveOwner, chatId: string) {
     let detail = await this.detail(config, owner, chatId);
     if (detail.binding && detail.validity !== 'valid' && detail.binding.state === 'staged') {
@@ -288,9 +331,19 @@ export class LarkGroupManager {
     if (!detail.binding) return config;
     if (!detail.applied) throw new RuntimeError('LARK_GROUP_NOT_APPLIED', detail.error ?? '群配置尚未生效。', 403);
     const effective = detail.effective!;
+    const presentation = effective.presentation;
     return { ...config, defaultAgentId: effective.agent.value, workspace: effective.workspace.value, defaultModel: effective.model.value, defaultReasoningEffort: effective.reasoningEffort.value,
       groupReplyMode: effective.routing.groupReplyMode.value, mentionPolicy: effective.routing.mentionPolicy.value, groupToolsEnabled: effective.groupTools.read.allowed || effective.groupTools.discover.allowed || effective.groupTools.send.allowed,
-      groupToolsAllowSend: effective.groupTools.send.allowed, managedGroup: { bindingId: detail.binding.id, revision: detail.binding.revision } } satisfies StoredLarkConfig;
+      groupToolsAllowSend: effective.groupTools.send.allowed,
+      // 呈现逐字段落到本群的运行配置上；未解析出来的项保留 Bot 级取值。
+      structuredAskCards: presentation.structuredAskCards.value ?? config.structuredAskCards,
+      groupCardMention: presentation.groupCardMention.value ?? config.groupCardMention,
+      pushIntervalMs: presentation.pushIntervalMs.value ?? config.pushIntervalMs,
+      traceLimit: presentation.traceLimit.value ?? config.traceLimit,
+      hideTraceOnComplete: presentation.hideTraceOnComplete.value ?? config.hideTraceOnComplete,
+      completionReactionOnly: presentation.completionReactionOnly.value ?? config.completionReactionOnly,
+      silentProgress: presentation.silentProgress.value ?? config.silentProgress,
+      managedGroup: { bindingId: detail.binding.id, revision: detail.binding.revision } } satisfies StoredLarkConfig;
   }
 
   private async isMember(config: StoredLarkConfig, chatId: string, openId: string) {

@@ -4,6 +4,7 @@ import { createRepositories } from '@dutydeck/storage';
 import type { StoredLarkConfig } from './config.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
 import { performLarkCardReconcile } from './reconciler.js';
+import { COMPLETION_REACTION_EMOJI } from './reaction-records.js';
 
 const config: StoredLarkConfig = {
   appId: 'cli_test', appSecret: 'secret', workspace: '/workspace', defaultAgentId: 'codex',
@@ -920,5 +921,142 @@ describe('performLarkCardReconcile 异常边界与可靠性', () => {
     } finally {
       repos.close();
     }
+  });
+});
+
+describe('performLarkCardReconcile 遵守群级呈现开关', () => {
+  const completedTask = (sessionId: string): TaskRecord => ({
+    id: `task-${sessionId}`, sessionId, prompt: `Prompt ${sessionId}`, status: 'completed',
+    createdAt: new Date(Date.now() - 6_000).toISOString(), updatedAt: new Date().toISOString()
+  });
+
+  const reconcileHarness = (mappings: ChannelMapping[], tasks: Record<string, TaskRecord[]>) => {
+    const cardMappings = createMemoryChannelMappingRepo(mappings);
+    const runtime = {
+      getTasks: vi.fn(async (sessionId: string) => tasks[sessionId] ?? []),
+      getEvents: vi.fn(async () => [{ id: 1, type: 'text', data: { text: '结果内容' } }])
+    };
+    const service = {
+      update: vi.fn(async (input: any) => ({ messageId: input.messageId })),
+      send: vi.fn(async () => ({ messageId: 'om_final', elements: [] })),
+      reply: vi.fn(async () => ({ messageId: 'om_final', elements: [] })),
+      addReaction: vi.fn(async (messageId: string, emojiType: string) => ({ messageId, reactionId: `r_${emojiType}` }))
+    };
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    return { cardMappings, runtime, service, log };
+  };
+
+  it('completionReactionOnly 开启时，重启补发只贴表情，不补结果卡', async () => {
+    const task = completedTask('ses-react');
+    const mapping = createMapping('map-react', 'om_req_react', 'ses-react', { runtime_task_id: task.id, state: 'running', turn: 1 });
+    const h = reconcileHarness([mapping], { 'ses-react': [task] });
+
+    const unresolved = await performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test',
+      resolveConfig: async () => ({ ...config, completionReactionOnly: true })
+    });
+
+    expect(unresolved).toBe(0);
+    expect(h.service.send).not.toHaveBeenCalled();
+    expect(h.service.reply).not.toHaveBeenCalled();
+    expect(h.service.addReaction).toHaveBeenCalledWith('om_req_react', COMPLETION_REACTION_EMOJI);
+    const saved = JSON.parse(h.cardMappings.mappings[0]!.extra!);
+    expect(saved.final_delivery_state).toBe('reaction');
+    expect(saved.final_message_id).toBeUndefined();
+    // 过程卡仍然被冻结成终态，不会停在「执行中」。
+    expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_card_om_req_react', state: 'completed' }));
+  });
+
+  it('completionReactionOnly 开启但终态是失败时，仍然补发结果卡', async () => {
+    const task = { ...completedTask('ses-fail'), status: 'failed' as const };
+    const mapping = createMapping('map-fail', 'om_req_fail', 'ses-fail', { runtime_task_id: task.id, state: 'running', turn: 1 });
+    const h = reconcileHarness([mapping], { 'ses-fail': [task] });
+
+    await performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test',
+      resolveConfig: async () => ({ ...config, completionReactionOnly: true })
+    });
+
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+    expect(h.service.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(h.cardMappings.mappings[0]!.extra!).final_delivery_state).toBe('delivered');
+  });
+
+  it('只贴表情的已交付记录不会在下一轮对账里被再贴一次或补一张结果卡', async () => {
+    const task = completedTask('ses-done');
+    const mapping = createMapping('map-done', 'om_req_done', 'ses-done', {
+      runtime_task_id: task.id, state: 'completed', turn: 1, final_delivery_state: 'reaction', progress_frozen: true
+    });
+    const h = reconcileHarness([mapping], { 'ses-done': [task] });
+
+    const unresolved = await performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test',
+      resolveConfig: async () => ({ ...config, completionReactionOnly: true })
+    });
+
+    expect(unresolved).toBe(0);
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+    expect(h.service.send).not.toHaveBeenCalled();
+    expect(h.service.update).not.toHaveBeenCalled();
+  });
+
+  it('静默轮次没有过程卡也照样补发结果：映射不被当成损坏记录丢掉', async () => {
+    const task = completedTask('ses-silent');
+    const mapping = createMapping('map-silent', 'om_req_silent', 'ses-silent', {
+      runtime_task_id: task.id, state: 'running', turn: 1, card_message_id: undefined
+    });
+    const h = reconcileHarness([mapping], { 'ses-silent': [task] });
+
+    const unresolved = await performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test',
+      resolveConfig: async () => ({ ...config, silentProgress: true })
+    });
+
+    expect(unresolved).toBe(0);
+    // 没有过程卡就不打任何 PATCH，但结果这条腿必须补上。
+    expect(h.service.update).not.toHaveBeenCalled();
+    expect(h.service.send).toHaveBeenCalledTimes(1);
+    const saved = JSON.parse(h.cardMappings.mappings[0]!.extra!);
+    expect(saved.final_message_id).toBe('om_final');
+    expect(saved.final_delivery_state).toBe('delivered');
+  });
+
+  it('两个开关都开的静默轮次补发只剩一枚表情，且不触碰任何卡片', async () => {
+    const task = completedTask('ses-both');
+    const mapping = createMapping('map-both', 'om_req_both', 'ses-both', {
+      runtime_task_id: task.id, state: 'running', turn: 1, card_message_id: undefined
+    });
+    const h = reconcileHarness([mapping], { 'ses-both': [task] });
+
+    const unresolved = await performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test',
+      resolveConfig: async () => ({ ...config, silentProgress: true, completionReactionOnly: true })
+    });
+
+    expect(unresolved).toBe(0);
+    expect(h.service.update).not.toHaveBeenCalled();
+    expect(h.service.send).not.toHaveBeenCalled();
+    expect(h.service.addReaction).toHaveBeenCalledWith('om_req_both', COMPLETION_REACTION_EMOJI);
+    expect(JSON.parse(h.cardMappings.mappings[0]!.extra!).final_delivery_state).toBe('reaction');
+  });
+
+  it('不给 resolveConfig 时按 Bot 级配置补发，既有行为不变', async () => {
+    const task = completedTask('ses-plain');
+    const mapping = createMapping('map-plain', 'om_req_plain', 'ses-plain', { runtime_task_id: task.id, state: 'running', turn: 1 });
+    const h = reconcileHarness([mapping], { 'ses-plain': [task] });
+
+    await performLarkCardReconcile({
+      runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+      config, channel: 'lark-card:cli_test'
+    });
+
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+    expect(h.service.send).toHaveBeenCalledTimes(1);
+    expect(h.service.update).toHaveBeenCalled();
   });
 });

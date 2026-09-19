@@ -11,7 +11,8 @@
 //   1. 只用于需要人行动或终态的卡（审批/问答/完成/失败/被他人中断），且只 @ 任务发起人；
 //   2. 排队卡、心跳卡永不使用（仅 PATCH，不承担触达，终裁 §6 通知策略）；
 //   3. 私聊（p2p）永不使用（无必要，调用前先过 isGroupChat）；
-//   4. V1 真机核查通过前，不得承诺卡内 @ 的锁屏触达效果。
+//   4. V1 真机核查通过前，不得承诺卡内 @ 的锁屏触达效果；
+//   5. 发起人是机器人时永不使用：机器人之间互相 @ 正是刷屏回路的燃料。
 
 /** 飞书 open_id 属性位只放行平台 ID 字符集，异常值拒绝产出标签，杜绝属性注入。 */
 const SAFE_OPEN_ID = /^[A-Za-z0-9_-]+$/;
@@ -37,4 +38,21 @@ export function renderGroupMention(openId: string, displayName?: string): string
   if (!id || !SAFE_OPEN_ID.test(id)) return undefined;
   const name = displayName?.trim() ? escapeAtName(displayName.trim()) : FALLBACK_DISPLAY_NAME;
   return `<at user_id="${id}">${name}</at>`;
+}
+
+/** 飞书事件里的机器人发送方。仓内 sender_type 字面量为 'user' / 'app' / 'bot'。 */
+export function isBotSenderType(senderType: string | undefined): boolean {
+  return senderType === 'app' || senderType === 'bot';
+}
+
+/**
+ * 群内卡片 @ 回发起人的唯一入口，一次性落实上述约束 1、3 与 5。
+ * 调用方只判「这张卡该不该 @」，不再各自重复拼开关、群聊与发送方类型三个条件。
+ */
+export function senderGroupMention(
+  enabled: boolean | undefined,
+  event: { chatType?: string; senderOpenId?: string; senderType?: string }
+): string | undefined {
+  if (enabled !== true || !isGroupChat(event.chatType) || !event.senderOpenId || isBotSenderType(event.senderType)) return undefined;
+  return renderGroupMention(event.senderOpenId);
 }

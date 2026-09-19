@@ -7,9 +7,10 @@
  * 三个必须记住的设计约束（都来自线上事故）：
  *
  * 1. **绝不亮假绿灯。** `configureLarkOpenPlatformApp` 是一次不透明的 await：
- *    它不发任何进度事件，返回值里的 scopeCount/eventCount/callbackCount 是硬编码
- *    常量（16/1/1），不是实测值。所以我们不能把它的返回值当成「测量结果」转述。
- *    真正诚实的做法见下面 (2)。
+ *    它不发任何进度事件，返回值里的 eventCount/callbackCount 是硬编码常量（1/1），
+ *    不是实测值。所以我们不能把它的返回值当成「测量结果」转述。真正诚实的做法见下面 (2)。
+ *    唯一例外是 skippedScopes：租户权限目录里没有、因此本次根本没申请的 feature 权限，
+ *    只有 configurator 知道，观察调用推不出来，必须由它带回来照实说。
  *
  * 2. **包一层 postJson 来观察真实发生的调用。** configurator 的很多步骤是条件式、
  *    幂等的：只有在权限缺失时 `/scope/update/` 才有意义，只有事件缺失时才会
@@ -178,12 +179,13 @@ function firstCatalog(calls: readonly ObservedCall[]): unknown {
 }
 
 /**
- * 统计目录里**尚未生效**的必需权限数量。
+ * 统计目录里**尚未生效**、且本次确实申请了的权限数量。
  *
- * 与 configurator 返回的 scopeCount 不同，这是实测值：它硬编码 16，
- * 不管实际生效情况；我们要的是「这次到底缺几项」。
+ * 与 configurator 返回的 scopeCount 不同，这是实测值：scopeCount 只说「申请了几项」，
+ * 我们要的是「这次到底补了几项」。目录里没有、本次跳过的 feature 权限不参与计数——
+ * 它根本没被申请，算成「缺口」就等于报一个永远补不上的假账。
  */
-function missingScopeCount(catalog: unknown): number | undefined {
+function missingScopeCount(catalog: unknown, applied: readonly string[]): number | undefined {
   if (catalog === undefined) return undefined;
   const granted = new Set<string>();
   const walk = (value: unknown): void => {
@@ -202,7 +204,7 @@ function missingScopeCount(catalog: unknown): number | undefined {
     }
   };
   walk(catalog);
-  return LARK_COMMON_TENANT_SCOPES.filter(scope => !granted.has(scope)).length;
+  return applied.filter(scope => !granted.has(scope)).length;
 }
 
 /**
@@ -217,10 +219,19 @@ function missingScopeCount(catalog: unknown): number | undefined {
  *   version          /app_version/create/ + versionId → done，否则 warn
  *   publish          /publish/commit/           → 只报「已提交」，永不报「已发布」
  */
-function deriveSteps(calls: readonly ObservedCall[], versionId: string | undefined): LarkBindStepResult[] {
+function deriveSteps(
+  calls: readonly ObservedCall[],
+  versionId: string | undefined,
+  skippedScopes: readonly string[] = [],
+): LarkBindStepResult[] {
   const steps: LarkBindStepResult[] = [];
 
-  const missing = missingScopeCount(firstCatalog(calls));
+  const applied = LARK_COMMON_TENANT_SCOPES.filter(scope => !skippedScopes.includes(scope));
+  const missing = missingScopeCount(firstCatalog(calls), applied);
+  // 跳过项要出现在这一步的 detail 里：不说等于让用户以为功能已经开了。
+  const skippedNote = skippedScopes.length
+    ? `；本企业权限目录里没有 ${skippedScopes.length} 项功能权限（${skippedScopes.join('、')}），已跳过，对应功能不可用`
+    : '';
   if (!called(calls, '/scope/all/')) {
     steps.push({ key: 'scopes', label: '未读取权限目录', level: 'skip', detail: '未执行' });
   } else if (missing === undefined || missing > 0) {
@@ -228,16 +239,16 @@ function deriveSteps(calls: readonly ObservedCall[], versionId: string | undefin
       key: 'scopes',
       label: '已补齐机器人所需权限',
       level: 'done',
-      detail: missing === undefined
+      detail: (missing === undefined
         ? '已写入必需权限并回读校验'
-        : `本次补齐 ${missing} 项（共 ${LARK_COMMON_TENANT_SCOPES.length} 项必需权限）`,
+        : `本次补齐 ${missing} 项（共申请 ${applied.length} 项）`) + skippedNote,
     });
   } else {
     steps.push({
       key: 'scopes',
       label: '机器人所需权限已齐备',
       level: 'ok',
-      detail: `${LARK_COMMON_TENANT_SCOPES.length} 项必需权限本来就已生效，本次无需改动`,
+      detail: `${applied.length} 项权限本来就已生效，本次无需改动` + skippedNote,
     });
   }
 
@@ -435,7 +446,11 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
   }
 
   const versionId = configured.versionId || undefined;
-  const steps = deriveSteps(observed.calls, versionId);
+  const skippedScopes = configured.skippedScopes ?? [];
+  const steps = deriveSteps(observed.calls, versionId, skippedScopes);
+  if (skippedScopes.length) {
+    warnings.push(`本企业权限目录里没有以下功能权限，已跳过未申请，对应功能不可用：${skippedScopes.join('、')}。`);
+  }
   warnings.push(PUBLISH_CONFIRM_WARNING);
   if (!versionId) warnings.push('未获得新版本号，无法确认发布对象，请到管理台检查应用版本。');
 

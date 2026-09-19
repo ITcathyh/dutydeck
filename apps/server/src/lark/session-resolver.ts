@@ -329,6 +329,7 @@ export async function resolveLarkSession(
     }
   };
   const requestedConfig = launchOptions ? { ...config, workspace: launchOptions.cwd ?? config.workspace,
+    defaultAgentId: launchOptions.agentId ?? config.defaultAgentId,
     defaultModel: launchOptions.model ?? config.defaultModel, defaultReasoningEffort: launchOptions.reasoningEffort ?? config.defaultReasoningEffort } : config;
   const matchesRequest = (session: Session) => larkSessionMatchesScope(session, launchOptions ? { ...requestedConfig, managedGroup: undefined } : config, sourceId, launchOptions ? undefined : launch?.sessionId);
   if (group.sessionId && !group.retiredSessionIds?.has(group.sessionId)) {

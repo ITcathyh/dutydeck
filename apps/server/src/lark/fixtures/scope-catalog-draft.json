@@ -3,6 +3,18 @@
   "data": {
     "scopes": [
       {
+        "_synthetic": "Dutydeck 手工补入，非 console 实抓：真实 scope id 未知，此处的 id 仅用于让权限映射与发布测试跑通。",
+        "id": "30001",
+        "name": "application:app_slash_command:write",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 5
+        },
+        "status": 5
+      },
+      {
         "id": "100032",
         "name": "contact:contact.base:readonly",
         "scopeType": [
@@ -188,6 +200,30 @@
         "status": 5
       },
       {
+        "_synthetic": "Dutydeck 手工补入，非 console 实抓：真实 scope id 未知，此处的 id 仅用于让权限映射与发布测试跑通。",
+        "id": "20101",
+        "name": "im:message:urgent_app",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "_synthetic": "Dutydeck 手工补入，非 console 实抓：真实 scope id 未知，此处的 id 仅用于让权限映射与发布测试跑通。",
+        "id": "20102",
+        "name": "im:pin",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 5
+        },
+        "status": 5
+      },
+      {
         "id": "20009",
         "name": "im:resource",
         "scopeType": [
@@ -196,6 +232,18 @@
         ],
         "scopeType2ScopeStatus": {
           "1": 0,
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "_synthetic": "Dutydeck 手工补入，非 console 实抓：task:task:write 的真实 scope id 未知，此处的 id 仅用于让权限映射与发布测试跑通。",
+        "id": "1016001",
+        "name": "task:task:write",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
           "2": 5
         },
         "status": 5

@@ -304,7 +304,7 @@ dutydeck setup --lark-app-id cli_xxx --force-login   # 换开放平台账号
 
 1. 在飞书开放平台创建企业自建应用，取得 App ID 与 App Secret。
 2. 在 Web 的“飞书指挥台”填写 App ID，点击“自动配置”。Dutydeck 会复用本机私密登录态；没有可用登录态时显示飞书二维码。
-3. 自动配置会增量导入 Dutydeck 需要的 16 项消息、群聊、附件与联系人权限，启用机器人，设置长连接 `im.message.receive_v1` 与 `card.action.trigger`，回读验证后发布新版本。存量应用的可见范围会在发版前完整读回并原样保留；无法确认时停止发版。
+3. 自动配置会增量导入 Dutydeck 需要的权限：16 项消息、群聊、附件与联系人基础权限是消息收发的必要条件，企业权限目录里缺任何一项都会停止配置与发版；另外 4 项功能权限（原生斜杠命令、卡片加急、卡片置顶、飞书任务智能体通道）在目录里没有时跳过并如实汇报，不阻断发版，只是对应功能不可用。随后启用机器人，设置长连接 `im.message.receive_v1` 与 `card.action.trigger`，回读验证后发布新版本。存量应用的可见范围会在发版前完整读回并原样保留；无法确认时停止发版。
 4. 填写 App Secret、工作区与 Agent，明确确认无人值守 `full-trust` 后启用监听，并把机器人加入目标群。
 
 通过 CLI 录入 App Secret 时，使用 `dutydeck secret set` 的隐藏输入或 `--value-fd`，向导和 CLI 都不会回显或记录它。用 `dutydeck doctor` 可以确认飞书配置是否完整、监听是否可能生效。

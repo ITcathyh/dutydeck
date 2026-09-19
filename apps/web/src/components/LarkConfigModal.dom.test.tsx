@@ -650,3 +650,193 @@ describe('LarkConfigModal 实验卡片开关', () => {
     expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', structuredAskCards: false, groupCardMention: true });
   });
 });
+
+
+describe('LarkConfigModal 工作区别名与验证命令', () => {
+  const openAdvanced = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(await screen.findByText('访问范围与高级设置（可选）'));
+  };
+
+  it('回填服务端已保存的别名表与验证命令', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true, workspaceAliases: { web: '/srv/web', api: '/srv/api' }, verificationCommand: 'pnpm test' }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    expect((screen.getByLabelText('别名 1') as HTMLInputElement).value).toBe('web');
+    expect((screen.getByLabelText('别名 1 的绝对路径') as HTMLInputElement).value).toBe('/srv/web');
+    expect((screen.getByLabelText('别名 2') as HTMLInputElement).value).toBe('api');
+    expect((screen.getByLabelText('别名 2 的绝对路径') as HTMLInputElement).value).toBe('/srv/api');
+    expect((screen.getByLabelText('验证命令（可选）') as HTMLInputElement).value).toBe('pnpm test');
+  });
+
+  it('新增一条别名并随第一步保存写入，既有别名不丢', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true, workspaceAliases: { web: '/srv/web' }, verificationCommand: 'pnpm test' }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.click(screen.getByRole('button', { name: '添加别名' }));
+    await user.type(screen.getByLabelText('别名 2'), 'api');
+    await user.type(screen.getByLabelText('别名 2 的绝对路径'), '/srv/api');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({
+      stage: 'lark',
+      workspaceAliases: { web: '/srv/web', api: '/srv/api' },
+      verificationCommand: 'pnpm test'
+    });
+  });
+
+  it('删除别名后保存写入剩下的表', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true, workspaceAliases: { web: '/srv/web', api: '/srv/api' } }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.click(screen.getByRole('button', { name: '删除第 1 个别名' }));
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ workspaceAliases: { api: '/srv/api' } });
+  });
+
+  it('相对路径别名挡住保存并就地说明，改成绝对路径后恢复', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.click(screen.getByRole('button', { name: '添加别名' }));
+    await user.type(screen.getByLabelText('别名 1'), 'web');
+    await user.type(screen.getByLabelText('别名 1 的绝对路径'), 'srv/web');
+    expect(screen.getByText(/别名路径必须以 \/ 开头的绝对路径/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.clear(screen.getByLabelText('别名 1 的绝对路径'));
+    await user.type(screen.getByLabelText('别名 1 的绝对路径'), '/srv/web');
+    expect(screen.queryByText(/别名路径必须以 \/ 开头的绝对路径/)).toBeNull();
+    expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('清空验证命令后保存送空串，让服务端清掉旧配置', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true, verificationCommand: 'pnpm test' }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.clear(screen.getByLabelText('验证命令（可选）'));
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ verificationCommand: '' });
+  });
+});
+
+describe('LarkConfigModal 加急与置顶开关', () => {
+  const openAdvanced = async (user: ReturnType<typeof userEvent.setup>) => {
+    await user.click(await screen.findByText('访问范围与高级设置（可选）'));
+  };
+
+  it('默认关闭，且关着时不显示阈值输入框', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    expect((screen.getByRole('switch', { name: '长时间没人处理时发加急（默认关闭）' }) as HTMLElement).getAttribute('aria-checked')).toBe('false');
+    expect((screen.getByRole('switch', { name: '长任务进度卡置顶（默认关闭）' }) as HTMLElement).getAttribute('aria-checked')).toBe('false');
+    expect(screen.queryByLabelText('加急前等待（秒）')).toBeNull();
+    expect(screen.queryByLabelText('跑多久算长任务（秒）')).toBeNull();
+  });
+
+  it('回填服务端已保存的开关与阈值，毫秒按秒显示', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({
+      setupComplete: true,
+      urgentEnabled: true, urgentThresholdMs: 180_000, urgentMaxPerHourPerChat: 2,
+      pinLongTasks: true, pinAfterMs: 300_000
+    } as Partial<LarkBotConfig>));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    expect((screen.getByRole('switch', { name: '长时间没人处理时发加急（默认关闭）' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
+    expect((screen.getByLabelText('加急前等待（秒）') as HTMLInputElement).value).toBe('180');
+    expect((screen.getByLabelText('每群每小时最多加急') as HTMLInputElement).value).toBe('2');
+    expect((screen.getByLabelText('跑多久算长任务（秒）') as HTMLInputElement).value).toBe('300');
+  });
+
+  it('打开开关并填阈值后随第一步保存写入，秒折回毫秒', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.click(screen.getByRole('switch', { name: '长时间没人处理时发加急（默认关闭）' }));
+    await user.type(screen.getByLabelText('加急前等待（秒）'), '120');
+    await user.type(screen.getByLabelText('每群每小时最多加急'), '2');
+    await user.click(screen.getByRole('switch', { name: '长任务进度卡置顶（默认关闭）' }));
+    await user.type(screen.getByLabelText('跑多久算长任务（秒）'), '90');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({
+      stage: 'lark', urgentEnabled: true, urgentThresholdMs: 120_000, urgentMaxPerHourPerChat: 2,
+      pinLongTasks: true, pinAfterMs: 90_000
+    });
+  });
+
+  it('清空阈值后送 null，让服务端清回模块默认', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+    renderModal(collection({ setupComplete: true, urgentEnabled: true, urgentThresholdMs: 180_000 } as Partial<LarkBotConfig>));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.clear(screen.getByLabelText('加急前等待（秒）'));
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ urgentEnabled: true, urgentThresholdMs: null });
+  });
+
+  it('低于下限的阈值就地挡住保存，改回合法值后恢复', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.click(screen.getByRole('switch', { name: '长时间没人处理时发加急（默认关闭）' }));
+    await user.type(screen.getByLabelText('加急前等待（秒）'), '30');
+    expect(screen.getByText(/加急等待时间至少 60 秒/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
+
+    await user.clear(screen.getByLabelText('加急前等待（秒）'));
+    await user.type(screen.getByLabelText('加急前等待（秒）'), '60');
+    expect(screen.queryByText(/加急等待时间至少 60 秒/)).toBeNull();
+    expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('置顶等待时间同样有下限，且与加急的下限不同', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ setupComplete: true }));
+    await screen.findByPlaceholderText('已保存');
+    await openAdvanced(user);
+
+    await user.click(screen.getByRole('switch', { name: '长任务进度卡置顶（默认关闭）' }));
+    await user.type(screen.getByLabelText('跑多久算长任务（秒）'), '0');
+    expect(screen.getByText(/置顶等待时间至少 1 秒/)).toBeTruthy();
+    expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(true);
+
+    // 1 秒对置顶是合法的——它可撤销、终态自动撤，不需要和强提醒一样的下限。
+    await user.clear(screen.getByLabelText('跑多久算长任务（秒）'));
+    await user.type(screen.getByLabelText('跑多久算长任务（秒）'), '1');
+    expect(screen.queryByText(/置顶等待时间至少 1 秒/)).toBeNull();
+    expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});

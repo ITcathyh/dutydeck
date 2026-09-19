@@ -13,11 +13,11 @@ import type { PersistedLarkCardTask } from './coordinator.js';
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
 const originKey = (sessionId: string, key: string) => `workbench.origin.${digest(`${sessionId}\0${key}`)}`;
 interface Target { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean }
-const labels: Record<string, string> = { pending: '待执行', running: '执行中', waiting: '待你补充', completed: '已完成', failed: '执行失败', blocked: '需要处理', cancelling: '正在停止', cancelled: '已取消', skipped: '已跳过' };
+const labels: Record<string, string> = { awaiting_confirmation: '待确认', pending: '待执行', running: '执行中', waiting: '待你补充', completed: '已完成', failed: '执行失败', blocked: '需要处理', cancelling: '正在停止', cancelled: '已取消', skipped: '已跳过' };
 
 // 只有这些焦点态允许触发新消息；running/pending 等正常流转只允许 PATCH。
 // completed 不在此列：目标完成卡走独立的 deliver 通道，notify 对 completed 直接跳过。
-const focusStatuses = new Set(['waiting', 'blocked', 'failed']);
+const focusStatuses = new Set(['awaiting_confirmation', 'waiting', 'blocked', 'failed']);
 const focusOf = (status: string) => focusStatuses.has(status) ? status : '';
 
 /**
@@ -39,6 +39,26 @@ function workHasFocus(item: WorkItem, requests: WorkItemRequest[]) {
     || requests.length > 0;
 }
 
+/**
+ * 亮屏剧集键的取值。终态 `sent` / `patched` 一旦写下就永不重抢，重试不会把已经发出的卡再发一遍。
+ * 两个可重抢的中间态都带「第几次尝试 + 什么时候可以再抢」：
+ *   sending:<次数>:<租约到期>  已认领、发送在途。租约是崩溃护栏——守护进程在认领与发送之间
+ *                              退出时，键不会永久停在「在途」把待确认闸门静默掉。
+ *   failed:<次数>:<可重试时刻> 发送真的失败了。退避后下一轮心跳重抢重发。
+ * 预览卡本身就是那道人工闸门，静默丢掉它比多发一张卡更糟；但 1 秒心跳会重入 notify，
+ * 所以重试必须退避，不能把一次发送失败放大成每秒一次的飞书请求。
+ */
+const NOTICE_SEND_LEASE_MS = 30_000;
+const NOTICE_RETRY_BASE_MS = 2_000;
+const NOTICE_RETRY_MAX_MS = 60_000;
+const noticeSending = (attempts: number, now: number) => `sending:${attempts}:${now + NOTICE_SEND_LEASE_MS}`;
+const noticeRetry = (attempts: number, now: number) =>
+  `failed:${attempts}:${now + Math.min(NOTICE_RETRY_MAX_MS, NOTICE_RETRY_BASE_MS * 2 ** (attempts - 1))}`;
+const parseNoticeClaim = (value: string | undefined) => {
+  const match = /^(?:sending|failed):(\d+):(\d+)$/.exec(value ?? '');
+  return match ? { attempts: Number(match[1]), readyAt: Number(match[2]) } : undefined;
+};
+
 export interface WorkItemElementOptions {
   /** agentId → 显示名（来自 runtime.listAgents）；缺失或与 id 相同则只显示 agentId。 */
   agentNames?: Record<string, string>;
@@ -55,9 +75,33 @@ export function researchWorkPlan(agents: string[]): WorkPlan {
   };
 }
 
+/**
+ * 人手发起的编排：每个分号段落是一个并行步骤，最后自动追加一步汇总。
+ * 步数上限交给 workPlanSchema（最多 12 步），这里只在用户侧先给出可读的报错。
+ */
+export function composeWorkPlan(segments: string[], agents: string[]): WorkPlan {
+  if (!agents.length) throw new RuntimeError('WORK_ITEM_NO_AGENT', '请先配置一个 Agent', 409);
+  if (segments.length < 2) throw new RuntimeError('WORK_ITEM_PLAN_STEPS_REQUIRED', '用法：`/work plan 第一步；第二步`。用「；」分隔要分头推进的步骤，汇总步骤会自动追加。', 400);
+  if (segments.length > 11) throw new RuntimeError('WORK_ITEM_PLAN_TOO_MANY', '最多 11 个分头步骤，汇总步骤会自动追加。', 400);
+  // 步骤指令要留出下面追加的提示；超长在这里说清楚，别让 workPlanSchema 抛出整串校验 JSON。
+  if (segments.some(value => value.length > 30_000)) throw new RuntimeError('WORK_ITEM_PLAN_STEP_TOO_LONG', '单个步骤描述过长，请拆短后重试。', 400);
+  // 按码点截断，避免 emoji 被切成半个代理项。
+  const title = (value: string) => [...value].slice(0, 40).join('');
+  const steps = segments.map((instruction, index) => ({
+    id: `step${index + 1}`, title: title(instruction), kind: 'agent' as const, agentId: agents[index % agents.length]!,
+    instruction: `${instruction}\n\n只完成这一步，输出完整成果与可核查来源，明确未验证的部分。本步与其它步骤并行运行且共用同一工作区，不要同时改动同一批文件。`,
+    dependsOn: [] as string[], workspaceMode: 'shared' as const
+  }));
+  return {
+    title: title(segments[0]!), outputStepId: 'report',
+    steps: [...steps, { id: 'report', title: '汇总并交付', kind: 'agent', agentId: agents[0]!, dependsOn: steps.map(step => step.id), workspaceMode: 'shared',
+      instruction: '综合上游各步骤的成果，解释分歧，输出完整可交付结论。保留来源与未验证之处。' }]
+  };
+}
+
 export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [], options: WorkItemElementOptions = {}) {
   const action = (operation: string, label: string, extra = {}) => ({
-    tag: 'button', text: { tag: 'plain_text', content: label }, type: operation === 'show' ? 'primary' : 'default',
+    tag: 'button', text: { tag: 'plain_text', content: label }, type: ['show', 'confirm'].includes(operation) ? 'primary' : 'default',
     behaviors: [{ type: 'callback', value: { dutydeck_work_item: operation, work_id: item.id, parent_session_id: item.parentSessionId, revision: item.revision, ...extra } }]
   });
   // S5：卡面显示 agent 名称而不是裸 agentId；名称与 id 不同时把 id 留作灰色副文案，便于排查。
@@ -78,6 +122,21 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
   const elements: Array<Record<string, any>> = [
     { tag: 'markdown', content: `**${labels[item.status] ?? item.status} · ${item.title}**\n\n${item.goal.slice(0, 2000)}` }
   ];
+  // 闸门：确认前只展示计划本身（分工、依赖、工作区），不展示执行期的重试/回答入口。
+  if (item.status === 'awaiting_confirmation') {
+    const titles = new Map(item.plan.steps.map(definition => [definition.id, definition.title]));
+    elements.push({ tag: 'markdown', content: '以下步骤尚未开始执行，确认后才会派发。' });
+    item.plan.steps.forEach((definition, index) => {
+      const facts = [
+        ...(definition.kind === 'wait' ? ['等待你补充'] : [agentLine(definition.agentId).replace(/^ · /, ''), definition.workspaceMode === 'worktree' ? '独立 worktree' : '共享工作区']),
+        definition.dependsOn.length ? `依赖：${definition.dependsOn.map(id => titles.get(id) ?? id).join('、')}` : '无依赖',
+        ...(definition.when ? [`仅当「${titles.get(definition.when.stepId) ?? definition.when.stepId}」回答「${definition.when.equals}」`] : [])
+      ];
+      elements.push({ tag: 'markdown', content: `**${index + 1}. ${definition.title}**\n${facts.join(' · ')}\n${definition.instruction.slice(0, 600)}` });
+    });
+    elements.push(action('confirm', '开始执行'), action('cancel', '取消计划'), action('show', '刷新目标'));
+    return elements;
+  }
   for (const step of item.steps) {
     const definition = item.plan.steps.find(value => value.id === step.id)!;
     const attempt = step.attempts.at(-1);
@@ -198,6 +257,8 @@ export class LarkWorkbench {
   private async cardInput(item: WorkItem, config: StoredLarkConfig, requests: WorkItemRequest[]) {
     return {
       state: this.cardState(item),
+      // 待确认不是「执行中」：换标题、去掉转圈图标、转成停下来等人的色带，卡头别和卡身说反话。
+      ...(item.status === 'awaiting_confirmation' ? { statusLabel: '待确认', awaitingHuman: true } : {}),
       readOnly: true, retryable: false, taskId: item.id, taskName: item.title, sessionId: item.parentSessionId,
       // S7：有配置就透传 Web 出口，未配置时 buildLarkCard 不渲染，不做公网兜底。
       webBaseUrl: config.webBaseUrl, elements: workItemElements(item, requests, { agentNames: await this.agentNames() })
@@ -252,6 +313,33 @@ export class LarkWorkbench {
     await this.send(item, target, config, `work_${digest(`${item.id}\0${item.output?.digest}`).slice(0, 40)}`);
   }
 
+  /**
+   * 抢一条亮屏剧集：键不存在，或上一次认领的租约/退避已到期，才算抢到。
+   * 抢到的一方负责发；没抢到的一方只原位 PATCH，不推新消息。
+   */
+  private async claimNotice(key: string): Promise<{ claimed: boolean; attempts: number }> {
+    const now = Date.now();
+    if (await this.repos.config.compareAndSet!(key, undefined, noticeSending(1, now))) return { claimed: true, attempts: 1 };
+    const current = await this.repos.config.get(key);
+    const pending = parseNoticeClaim(current);
+    // sent / patched 解析不出来，到点前的 sending / failed 也不放行：两者都不该重发。
+    if (!pending || now < pending.readyAt) return { claimed: false, attempts: 0 };
+    const attempts = pending.attempts + 1;
+    return { claimed: await this.repos.config.compareAndSet!(key, current!, noticeSending(attempts, now)), attempts };
+  }
+
+  /** 发出去了才把剧集键落成终态；失败置回带退避的可重试态，让下一轮心跳能把这张卡补出来。 */
+  private async deliverNotice(key: string, attempts: number, send: () => Promise<void>) {
+    try {
+      await send();
+    } catch (error) {
+      await this.repos.config.set(key, noticeRetry(attempts, Date.now()))
+        .catch(writeError => this.options.log.warn({ error: writeError, key }, '目标卡片剧集键回退失败'));
+      throw error;
+    }
+    await this.repos.config.set(key, 'sent');
+  }
+
   async notify(item: WorkItem, actorId: string) {
     this.assertOpen();
     if (!await this.authorize(item.parentSessionId, actorId)) return;
@@ -269,23 +357,36 @@ export class LarkWorkbench {
     if (!config) return;
     const fingerprint = workNoticeFingerprint(current, requests);
     const key = `workbench.notice.${current.id}.${fingerprint}`;
-    if (await this.repos.config.get(key)) {
+    const focused = workHasFocus(current, requests);
+    // 剧集键必须先抢再发，且与命令侧（command 的 previewKey）用同一把锁：
+    // 「读—发—写」之间隔着授权、取目标、读配置和一次真实的飞书往返，1 秒心跳的
+    // notify 与刚落库的命令会双双读到空键，群里就会出现两张一模一样的待确认卡。
+    const claim = await this.claimNotice(key);
+    if (!claim.claimed) {
       // N2：同一焦点剧集内（含 running→completed、错误文案变化）只原位 PATCH，不推新消息。
       await this.patchLatestCard(current, config, requests)
         .catch(error => this.options.log.warn({ error, workId: current.id }, '目标卡片 PATCH 失败'));
       return;
     }
-    if (workHasFocus(current, requests)) {
+    if (focused) {
       // 进入 waiting/blocked/failed 或出现新待决请求才允许亮屏。
-      await this.send(current, target, config, `work_${digest(key).slice(0, 40)}`, requests);
-      this.assertOpen();
-      await this.repos.config.set(key, 'sent');
+      await this.deliverNotice(key, claim.attempts, async () => {
+        await this.send(current, target, config, `work_${digest(key).slice(0, 40)}`, requests);
+        this.assertOpen();
+      });
     } else {
-      // 离开焦点（如 waiting 已被回答）：只 PATCH 不亮屏，同时登记剧集键避免后续重复判断。
+      // 离开焦点（如 waiting 已被回答）：只 PATCH 不亮屏，剧集键落终态，后续不再重复判断。
       await this.patchLatestCard(current, config, requests)
         .catch(error => this.options.log.warn({ error, workId: current.id }, '目标卡片 PATCH 失败'));
       await this.repos.config.set(key, 'patched');
     }
+  }
+
+  /** 本话题里该操作者可用的 Agent，机器人默认 Agent 排在最前。 */
+  private async allowedAgents(sessionId: string, actorId: string, config: StoredLarkConfig) {
+    const agents = await this.runtime.listAgents();
+    const allowed = (await Promise.all(agents.map(async agent => !this.options.authorizeAgent || await this.options.authorizeAgent(sessionId, actorId, agent.id) ? agent.id : undefined))).filter((id): id is string => Boolean(id));
+    return [...(config.defaultAgentId && allowed.includes(config.defaultAgentId) ? [config.defaultAgentId] : []), ...allowed.filter(id => id !== config.defaultAgentId)];
   }
 
   async command(sessionId: string, argsText: string, event: LarkMessageEvent, config: StoredLarkConfig) {
@@ -295,19 +396,27 @@ export class LarkWorkbench {
     const target: Target = { appId: config.appId, chatId: event.chatId, replyMessageId: event.messageId, replyInThread: event.chatType === 'group' };
     let item: WorkItem | undefined;
     let text: string | undefined;
+    let previewKey: string | undefined;
     if (action === 'research') {
       const goal = argsText.replace(/^research\s*/i, '').trim();
       if (!goal) throw new RuntimeError('WORK_ITEM_GOAL_REQUIRED', '用法：/work research 研究目标', 400);
-      const agents = await this.runtime.listAgents();
-      const allowed = (await Promise.all(agents.map(async agent => !this.options.authorizeAgent || await this.options.authorizeAgent(sessionId, actorId, agent.id) ? agent.id : undefined))).filter((id): id is string => Boolean(id));
-      const selected = [...(config.defaultAgentId && allowed.includes(config.defaultAgentId) ? [config.defaultAgentId] : []), ...allowed.filter(id => id !== config.defaultAgentId)];
       await this.recordOrigin(sessionId, event.messageId, event, config);
-      item = await this.work().create(sessionId, { goal, plan: researchWorkPlan(selected), idempotencyKey: event.messageId }, actorId);
+      // 人手输入的固定模板，本人即发起人，直接执行不再加确认闸门。
+      item = await this.work().create(sessionId, { goal, plan: researchWorkPlan(await this.allowedAgents(sessionId, actorId, config)), idempotencyKey: event.messageId }, actorId, false);
+    } else if (action === 'plan') {
+      const goal = argsText.replace(/^plan\s*/i, '').trim();
+      const segments = goal.split(/[;；\n]+/).map(value => value.trim()).filter(Boolean);
+      const plan = composeWorkPlan(segments, await this.allowedAgents(sessionId, actorId, config));
+      await this.recordOrigin(sessionId, event.messageId, event, config);
+      // 人手起的编排也先出预览卡：步骤是自动拼的，确认前不派发。
+      item = await this.work().create(sessionId, { goal, plan, idempotencyKey: event.messageId }, actorId, true);
+      // 这张待确认卡与 1 秒心跳里的 notify 争同一条剧集；用 CAS 定谁发，群里只会出现一张。
+      previewKey = `workbench.notice.${item.id}.${workNoticeFingerprint(item, [])}`;
     } else if (action === 'run' && id && rest.length >= 2) {
       const version = Number(rest[0]);
       if (!Number.isInteger(version) || version < 1) throw new RuntimeError('WORK_ITEM_TEMPLATE_VERSION', '请指定流程版本号', 400);
       await this.recordOrigin(sessionId, event.messageId, event, config);
-      item = await this.work().runTemplate(sessionId, id, version, rest.slice(1).join(' '), event.messageId, actorId);
+      item = await this.work().runTemplate(sessionId, id, version, rest.slice(1).join(' '), event.messageId, actorId, false);
     } else if (action === 'templates') {
       const templates = await this.work().listTemplates(sessionId, actorId);
       text = templates.map(value => `**${value.name} · v${value.version}**\n\`/work run ${value.id} ${value.version} 新目标\``).join('\n\n') || '尚无流程。完成一个目标后，可用 /work save 目标编号 流程名称 保存。';
@@ -319,8 +428,9 @@ export class LarkWorkbench {
         await this.interactions().terminalInput(sessionId, id, { stepId: rest[0], taskId: rest[1], ...(action === 'input' ? { text: rest.slice(2).join(' ') } : { key: rest[2] }) }, actorId);
         text = `已向当前步骤发送${action === 'input' ? '文字' : '按键'}。\n\n\`/work terminal ${id} ${rest[0]}\``;
       }
-    } else if (id && ['show', 'cancel', 'retry', 'answer', 'save', 'requests', 'respond'].includes(action!)) {
+    } else if (id && ['show', 'confirm', 'cancel', 'retry', 'answer', 'save', 'requests', 'respond'].includes(action!)) {
       item = await this.work().get(sessionId, id, actorId);
+      if (action === 'confirm') item = await this.work().confirm(sessionId, id, item.revision, actorId);
       if (action === 'cancel') item = await this.work().cancel(sessionId, id, item.revision, actorId);
       if (action === 'retry') item = await this.work().retryStep(sessionId, id, rest[0] ?? '', item.revision, actorId);
       if (action === 'answer') item = await this.work().answer(sessionId, id, rest[0] ?? '', rest.slice(1).join(' '), item.revision, actorId);
@@ -336,12 +446,25 @@ export class LarkWorkbench {
       }
     } else if (!action) {
       const items = await this.work().listBySession(sessionId, actorId);
-      text = '**Dutydeck 工作台**\n\n直接描述目标，让 Dutydeck 安排步骤、选择 Agent 并交付成果。\n\n' + (items.slice(0, 8).map(value => `**${labels[value.status]} · ${value.title}**\n\`/work show ${value.id}\``).join('\n\n') || '此话题暂无目标。') + '\n\n快速开始：`/work research 研究目标`\n常用流程：`/work templates`\n定时与 CI：`/schedule`、`/ci`';
-    } else throw new RuntimeError('WORK_ITEM_COMMAND_INVALID', '用法：/work；/work research 目标；/work show 编号；/work templates；/work run 流程编号 版本 目标；/work save 目标编号 名称；/work answer 目标编号 步骤编号 回答', 400);
+      text = '**Dutydeck 工作台**\n\n直接描述目标，让 Dutydeck 安排步骤、选择 Agent 并交付成果。\n\n' + (items.slice(0, 8).map(value => `**${labels[value.status]} · ${value.title}**\n\`/work show ${value.id}\``).join('\n\n') || '此话题暂无目标。') + '\n\n快速开始：`/work research 研究目标`\n自己编排：`/work plan 第一步；第二步`（先出待确认卡）\n常用流程：`/work templates`\n定时与 CI：`/schedule`、`/ci`';
+    } else throw new RuntimeError('WORK_ITEM_COMMAND_INVALID', '用法：/work；/work research 目标；/work plan 用分号分隔的多个步骤；/work show 编号；/work templates；/work run 流程编号 版本 目标；/work save 目标编号 名称；/work answer 目标编号 步骤编号 回答', 400);
     if (text) {
       await sendLarkResult(this.client(config), target, { state: 'completed', readOnly: true, retryable: false, taskId: event.messageId, taskName: 'Dutydeck 工作台',
         elements: [{ tag: 'markdown', element_id: 'final_output', content: text }], idempotencyKey: `work_${digest(event.messageId).slice(0, 40)}` }, this.options.log);
-    } else if (item) await this.send(item, target, config, `work_${digest(event.messageId).slice(0, 40)}`, await this.interactions().list(sessionId, item.id, actorId));
+    } else if (item) {
+      const current = item;
+      // 没抢到说明 notify 已经把同一张待确认卡推进话题，这里不再重复推送；
+      // 抢到了就负责发，发失败要把键置回可重试，别让待确认闸门静默消失（与 notify 同一套）。
+      const claim = previewKey ? await this.claimNotice(previewKey) : undefined;
+      if (claim && !claim.claimed) return;
+      const requests = await this.interactions().list(sessionId, current.id, actorId);
+      // 待确认卡的幂等键取剧集键，与 notify 侧完全一致：租约只挡得住「持有者崩了」，
+      // 挡不住「持有者还在发」——一次撞上频控退避的发送可以超过租约，另一条路径就会
+      // 合法地抢到锁再发一次。同一个幂等键让飞书把第二次收拢掉，群里仍只有一张。
+      const send = () => this.send(current, target, config, `work_${digest(previewKey ?? event.messageId).slice(0, 40)}`, requests);
+      if (previewKey && claim) await this.deliverNotice(previewKey, claim.attempts, send);
+      else await send();
+    }
   }
 
   async callback(value: Record<string, any>, actorId: string | undefined, context: { messageId?: string; chatId?: string }, config: StoredLarkConfig) {
@@ -359,6 +482,9 @@ export class LarkWorkbench {
     if (stale) {
       // revision CAS 失败：别人已经推进过目标，本次点击不再落操作，直接把最新状态发回话题。
       toast = '目标状态已变化，已刷新最新卡片';
+    } else if (operation === 'confirm') {
+      await this.work().confirm(mapping.sessionId, item.id, Number(value.revision), actorId);
+      toast = '计划已确认，开始执行';
     } else if (operation === 'cancel') {
       await this.work().cancel(mapping.sessionId, item.id, Number(value.revision), actorId);
     } else if (operation === 'retry') {

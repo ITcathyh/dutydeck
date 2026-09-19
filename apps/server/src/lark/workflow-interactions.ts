@@ -8,6 +8,7 @@ import type { LarkCardService } from './service.js';
 import { safeLarkWebUrl } from './card-actions.js';
 import { isGroupChat, renderGroupMention } from './card-mentions.js';
 import type { LarkCardElement } from './card-renderer.js';
+import { LarkUrgentManager, type LarkUrgentCheckResult } from './workflow-urgent.js';
 
 export interface LarkInteractionContext {
   appId: string;
@@ -32,6 +33,12 @@ export interface LarkInteraction extends LarkInteractionContext {
   structured?: boolean;
   /** structured=true 时是否多选；缺省/false 为单选 */
   multiple?: boolean;
+  /** 已加急时间戳（ISO 字符串），每条卡片最多加急一次 */
+  urgentAt?: string;
+  /** 卡片创建并绑定时间戳 */
+  cardCreatedAt?: string;
+  /** 目标提问/审批人 openId（缺省为 context.event.senderOpenId） */
+  targetUserId?: string;
 }
 const deadlineText = (expiresAt: string) => `${new Date(expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）`;
 const prefix = (appId: string) => `lark.interaction.${appId}.`;
@@ -98,6 +105,19 @@ export const countCardComponents = (value: unknown): number => {
 /** 给 reply 时才注入的 header/agentName 等固定开销留 1KB 余量，按 24KB/180 做真整卡试算。 */
 const structuredCardBudgetHeadroomBytes = 1024;
 
+export interface LarkWorkflowUrgentOptions {
+  enabled?: boolean;
+  /** 卡片发出后无人处理的加急超时阈值（毫秒），默认 10 分钟 (600,000ms) */
+  thresholdMs?: number;
+  /** 每个群每小时最多加急次数，默认 3 次 */
+  maxPerHourPerChat?: number;
+}
+
+export interface LarkWorkflowInteractionsOptions {
+  urgentManager?: LarkUrgentManager;
+  urgent?: boolean | LarkWorkflowUrgentOptions;
+}
+
 /** Persisted cards identify a live waiter; history never recreates executable approvals. */
 export class LarkWorkflowInteractions {
   readonly boot = randomUUID();
@@ -105,14 +125,51 @@ export class LarkWorkflowInteractions {
   private readonly closedCards = new Set<string>();
   private readonly delivering = new Set<string>();
   private readonly retryAfter = new Map<string, number>();
+  urgentManager?: LarkUrgentManager;
+  /** 当前生效的加急设置签名；相同就不重建 manager，避免每次对账都丢掉内存去重。 */
+  private urgentSignature?: string;
   constructor(
     private readonly store: ConfigRepository,
     private readonly runtime: LarkRuntime,
     private readonly service: LarkCardService,
     private readonly broker: RelayAskBroker | undefined,
-    private readonly authorize: (record: LarkInteraction, actor: string, action: PolicyAction) => Promise<boolean>
+    private readonly authorize: (record: LarkInteraction, actor: string, action: PolicyAction) => Promise<boolean>,
+    options?: LarkWorkflowInteractionsOptions
   ) {
     if (!store.compareAndSet || !store.list) throw new Error('Lark workflows require persistent CAS and prefix listing');
+    this.configureUrgent(options?.urgent, options?.urgentManager);
+  }
+
+  /**
+   * 按当前配置决定要不要加急，以及用什么阈值。
+   *
+   * 加急开关在 Bot 配置里，而构造协调器时还读不到配置，所以必须能在拿到配置之后再落一次；
+   * 传 false / undefined 会把已有的 manager 撤掉——把开关关掉的人期待的正是「立刻不再发」。
+   * 设置没变时保留原 manager，否则每次对账重建都会丢掉它的内存去重。
+   */
+  configureUrgent(urgent: boolean | LarkWorkflowUrgentOptions | undefined, urgentManager?: LarkUrgentManager) {
+    const enabled = typeof urgent === 'boolean'
+      ? urgent
+      : (typeof urgent === 'object' && urgent !== null && urgent.enabled !== false);
+    if (!enabled) { this.urgentManager = undefined; this.urgentSignature = undefined; return; }
+    const config = typeof urgent === 'object' && urgent !== null ? urgent : {};
+    const signature = JSON.stringify([config.thresholdMs ?? null, config.maxPerHourPerChat ?? null, Boolean(urgentManager)]);
+    if (this.urgentManager && this.urgentSignature === signature) return;
+    this.urgentSignature = signature;
+    this.urgentManager = urgentManager ?? new LarkUrgentManager({
+      service: this.service,
+      thresholdMs: config.thresholdMs,
+      maxPerHourPerChat: config.maxPerHourPerChat,
+      onUrged: async (record, urgentAt) => {
+        try {
+          const current = await this.store.get(this.key(record));
+          if (!current) return;
+          const parsed = JSON.parse(current) as LarkInteraction;
+          const next = { ...parsed, urgentAt };
+          await this.store.compareAndSet!(this.key(record), current, JSON.stringify(next));
+        } catch { /* best effort */ }
+      }
+    });
   }
   private key(record: Pick<LarkInteraction, 'appId' | 'id'>) { return prefix(record.appId) + record.id; }
   async list(appId: string): Promise<LarkInteraction[]> {
@@ -154,7 +211,15 @@ export class LarkWorkflowInteractions {
       }
       if (record.state === 'expired' && !await this.renderClosed(record, this.expiryMessage(record))) unresolved++;
     }
+    if (this.urgentManager) {
+      await this.checkAndUrgePending(appId).catch(() => undefined);
+    }
     return unresolved;
+  }
+  async checkAndUrgePending(appId: string, options?: { now?: number }): Promise<LarkUrgentCheckResult> {
+    if (!this.urgentManager) return { checked: 0, urged: [], skippedRateLimited: [], skippedNotEligible: [], failed: [] };
+    const records = await this.list(appId);
+    return this.urgentManager.checkAndUrge(records, options?.now);
   }
   private async renderClosed(record: LarkInteraction, message: string) {
     if (!record.cardId || record.kind === 'result' || this.closedCards.has(`${record.cardId}:${record.state}`)) return true;
@@ -203,7 +268,8 @@ export class LarkWorkflowInteractions {
     return { record, created: true };
   }
   private async bindCard(record: LarkInteraction, cardId: string) {
-    const next = { ...record, cardId };
+    const now = new Date().toISOString();
+    const next = { ...record, cardId, cardCreatedAt: record.cardCreatedAt ?? now, updatedAt: now };
     if (!await this.store.compareAndSet!(this.key(record), JSON.stringify(record), JSON.stringify(next))) throw stale();
     return next;
   }

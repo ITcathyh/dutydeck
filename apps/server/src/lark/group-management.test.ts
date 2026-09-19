@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { agentConfigSchema, type RepositoryBundle, type Session } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { buildApp } from '../app.js';
@@ -113,6 +114,40 @@ describe('live group configuration', () => {
     await expect(manager.save('cli_two', 'oc_one', { expectedRevision: 0, patch: {}, roleChanges: [{ kind: 'create', principalId: a.principalId, role: 'can_talk', operateScope: 'none', actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } }] })).rejects.toMatchObject({ code: 'LARK_PRINCIPAL_SCOPE_MISMATCH' });
   });
 
+  it('folds per-group presentation overrides into the resolved runtime config', async () => {
+    const initial = await save();
+    const inherited = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
+    // 未覆盖时逐字段沿用 Bot 默认，两档新静默形态默认关闭。
+    expect(inherited).toMatchObject({ groupCardMention: false, hideTraceOnComplete: true, traceLimit: 50, pushIntervalMs: 1000, completionReactionOnly: false, silentProgress: false });
+
+    const overridden = await manager.save('cli_one', 'oc_one', {
+      expectedRevision: initial.binding!.revision,
+      patch: {
+        presentationOverride: {
+          structuredAskCards: { mode: 'inherit' },
+          groupCardMention: { mode: 'set', value: true },
+          pushIntervalMs: { mode: 'set', value: 5000 },
+          traceLimit: { mode: 'set', value: 3 },
+          hideTraceOnComplete: { mode: 'set', value: false },
+          completionReactionOnly: { mode: 'set', value: true },
+          silentProgress: { mode: 'set', value: true }
+        }
+      }
+    });
+    expect(overridden.effective!.presentation).toMatchObject({
+      groupCardMention: { value: true, source: 'group_override' },
+      traceLimit: { value: 3, source: 'group_override' },
+      completionReactionOnly: { value: true, source: 'group_override' },
+      silentProgress: { value: true, source: 'group_override' }
+    });
+    const resolved = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
+    expect(resolved).toMatchObject({ groupCardMention: true, hideTraceOnComplete: false, traceLimit: 3, pushIntervalMs: 5000, completionReactionOnly: true, silentProgress: true });
+    // 只对被覆盖的群生效；同 Bot 的另一个群仍是 Bot 默认。
+    await save('cli_one', 'oc_two');
+    expect(await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_two'))
+      .toMatchObject({ groupCardMention: false, traceLimit: 50, completionReactionOnly: false, silentProgress: false });
+  });
+
   it('applies current tool ceilings and group disablement to an already recorded session', async () => {
     const initial = await save();
     const config = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
@@ -194,6 +229,30 @@ describe('live group configuration', () => {
     time = new Date(time.getTime() + 2 * 60 * 60_000);
     const disabled = await manager.save('cli_one', 'oc_one', { expectedRevision: restored.binding!.revision, patch: { accessOverride: { mode: 'disabled', principalIds: [] } } });
     expect(disabled.binding!.accessOverride.mode).toBe('disabled');
+  });
+
+  it('revokes a role while the group evidence is stale even when the stored binding json uses a different key order', async () => {
+    const first = await save('cli_one', 'oc_one');
+    const alice = (await manager.members('cli_one', 'oc_one')).members[0]!;
+    const granted = await manager.save('cli_one', 'oc_one', { expectedRevision: first.binding!.revision, patch: {},
+      roleChanges: [{ kind: 'create', principalId: alice.principalId, role: 'can_operate', operateScope: 'group_runs', actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } }] });
+    // 库里那一行的键序由写它的那段代码决定（migration 是手写字面量），不跟着 schema 声明序走。
+    // 这里把同一份取值按相反键序写回列里，锁住「逐字段等于现状」的判定不看键序。
+    const reordered = Object.fromEntries(Object.entries(granted.binding!.presentationOverride).reverse());
+    expect(JSON.stringify(reordered)).not.toBe(JSON.stringify(granted.binding!.presentationOverride));
+    const rawDb = new Database(join(dir, 'state.sqlite'));
+    try { rawDb.prepare('UPDATE group_bindings SET presentation_override_json = ? WHERE id = ?').run(JSON.stringify(reordered), granted.binding!.id); }
+    finally { rawDb.close(); }
+    // 证据过期 → 群身份不再 valid，撤销角色只能靠 revokingOnly 这个逃生口放行。
+    time = new Date(time.getTime() + 2 * 60 * 60_000);
+    // Web 保存时无条件带上 presentationOverride：取值与现状一致，仍必须走得进逃生口。
+    const revoked = await manager.save('cli_one', 'oc_one', { expectedRevision: granted.binding!.revision, patch: { presentationOverride: granted.binding!.presentationOverride },
+      roleChanges: [{ kind: 'update', id: granted.roles[0]!.id, expectedRevision: granted.roles[0]!.revision, patch: { state: 'revoked' } }] });
+    expect(revoked.roles[0]!.state).toBe('revoked');
+    // 取值真的不同时，逃生口必须关上：群身份已失效，这次保存不是纯撤销。
+    time = new Date(time.getTime() + 2 * 60 * 60_000);
+    await expect(manager.save('cli_one', 'oc_one', { expectedRevision: revoked.binding!.revision, patch: { presentationOverride: { ...granted.binding!.presentationOverride, silentProgress: { mode: 'set', value: true } } },
+      roleChanges: [{ kind: 'update', id: revoked.roles[0]!.id, expectedRevision: revoked.roles[0]!.revision, patch: { state: 'revoked' } }] })).rejects.toMatchObject({ code: 'LARK_GROUP_VERIFY_REQUIRED' });
   });
 
   it('does not treat a quoted group message as continuation of a Bot-owned topic', async () => {

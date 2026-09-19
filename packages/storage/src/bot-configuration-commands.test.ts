@@ -9,6 +9,7 @@ import {
   RuntimeError,
   createBotV2Schema,
   botRelatedMutationSchema,
+  inheritPresentationOverride,
   type CreateBotV2,
   type BotChangeRef,
   type BotConfigPatchV2,
@@ -74,7 +75,9 @@ function samplePolicyInput() {
       groupCardMention: false,
       pushIntervalMs: 1000,
       traceLimit: 10,
-      hideTraceOnComplete: false
+      hideTraceOnComplete: false,
+      completionReactionOnly: false,
+      silentProgress: false
     },
     groupToolsPolicy: {
       readCeiling: false,
@@ -592,7 +595,10 @@ describe('bot-configuration-commands: mutateRelated', () => {
           id: 'binding_group_1',
           channelBotId: 'bot_test',
           expectedRevision: 1,
-          patch: { oncall: true }
+          patch: {
+            oncall: true,
+            presentationOverride: { ...inheritPresentationOverride, silentProgress: { mode: 'set', value: true } }
+          }
         }
       ],
       roles: [
@@ -611,6 +617,7 @@ describe('bot-configuration-commands: mutateRelated', () => {
     expect(updated2.bot.authorizationRevision).toBe(3);
     expect(updated2.bindings[0]?.revision).toBe(2);
     expect(updated2.bindings[0]?.oncall).toBe(true);
+    expect(updated2.bindings[0]?.presentationOverride.silentProgress).toEqual({ mode: 'set', value: true });
     expect(updated2.roles[0]?.revision).toBe(2);
     expect(updated2.roles[0]?.state).toBe('revoked');
   });
