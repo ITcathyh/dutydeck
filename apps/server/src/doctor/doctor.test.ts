@@ -560,11 +560,17 @@ describe('lark', () => {
     expect(check.remedy).toBeTruthy();
   });
 
-  it('listening 但未确认完全信任为 warn —— 它永远连不上', async () => {
+  it('完全信任模式未确认时，提示选择询问模式或确认完全信任', async () => {
     const check = find(await runDoctor({ json: true }, withBots([bot({ listening: true, fullTrustConfirmed: false })])), 'lark.full-trust')!;
     expect(check.level).toBe('warn');
     expect(check.remedy).toContain('完全信任');
     expect(check.command).toContain('cli_ok');
+  });
+
+  it('ask 模式允许监听，不要求确认完全信任', async () => {
+    const report = await runDoctor({ json: true }, withBots([bot({ listening: true, permissionMode: 'ask', fullTrustConfirmed: false })]));
+    expect(find(report, 'lark.full-trust')).toBeUndefined();
+    expect(find(report, 'lark.setup-complete')).toBeUndefined();
   });
 
   it('缺默认 Agent 为 warn', async () => {
