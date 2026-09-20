@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { RuntimeError, canonicalExecutionJson, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
+import { RuntimeError, canonicalExecutionJson, countDecisionUsage, isBotTurnRecord, previewNextSchedule, scheduleDeliverySchema, scheduleTriggerSchema, DECISION_WINDOW_LIMIT, type CollaborationMandate, type CollaborationRepository, type CollaborationScope, type CollaborationSnapshot, type CreateScheduleDefinitionInput, type RepositoryBundle, type ScheduleDefinition } from '@dutydeck/shared';
 
 export type CollaborationRepositories = Pick<RepositoryBundle, 'scheduleDefinitions' | 'scheduleGenerations' | 'scheduleOccurrences' | 'scheduleWatermarks' | 'scheduleLeases'> & { collaboration: CollaborationRepository };
 export type CollaborationAuthorization = (scope: CollaborationScope, actorId: string, action: 'read' | 'write' | 'manage' | 'execute' | 'deliver') => Promise<boolean>;
@@ -119,13 +119,20 @@ export class CollaborationService {
     const followup = await this.repositories.collaboration.getFollowup(scope, id); if (!followup) throw missing();
     return followup;
   }
+  private nextOneOff(definition: CreateScheduleDefinitionInput, operation: '创建' | '改期'): string | undefined {
+    if (definition.trigger.kind !== 'at') return undefined;
+    const now = this.now(), timestamp = now.toISOString();
+    const next = previewNextSchedule({ ...definition, schemaVersion: 1, revision: 1, state: 'staged', desiredExecutorState: 'disabled', currentGeneration: 1, createdAt: timestamp, updatedAt: timestamp }, now);
+    if (!next) throw new RuntimeError('COLLABORATION_SCHEDULE_TIME_PASSED', `一次性执行时间已过或不可用，计划未${operation}。请选择未来的执行时间。`, 400);
+    return next.scheduledForUtc;
+  }
   async createMandate(scope: CollaborationScope, actorId: string, body: unknown) {
     await this.require(scope, actorId, 'write');
     const input = createMandateSchema.parse(body), id = input.id;
     return this.serial(idFor(scope, id), async () => {
-      await this.command(scope, actorId, id, 'create_mandate', input);
       const previous = await this.repositories.collaboration.getMandate(scope, id);
       if (previous) {
+        await this.command(scope, actorId, id, 'create_mandate', input);
         if (previous.requesterId !== actorId || previous.goal !== input.goal || previous.prompt !== input.prompt || previous.mode !== input.mode) throw conflict();
         return { mandate: previous, schedule: await this.reconcileMandate(previous) };
       }
@@ -137,10 +144,13 @@ export class CollaborationService {
       if (delivery.chatRef !== scope.chatId || delivery.rootMessageRef && (!this.options.validateDelivery || !await this.options.validateDelivery(scope, delivery))) throw new RuntimeError('COLLABORATION_DESTINATION_CONFLICT', 'Delivery must remain in the authorized chat', 400);
       const definition = { id: scheduleId, ...refs, name: input.goal.slice(0, 200), trigger: input.trigger, timezone: input.timezone, dstPolicy: { gap: 'skip' as const, overlap: 'first' as const }, delivery, payloadRef: binding({ id, scope, revision: 1 }), sourceOwnership: 'dutydeck' as const, sourceNamespace: 'collaboration', sourceScheduleRef: scheduleId, sourceEnabled: false };
       let schedule = await this.repositories.scheduleDefinitions.get(scheduleId);
+      if (input.trigger.kind === 'at') await this.require(scope, actorId, 'execute');
+      const nextDueAt = this.nextOneOff(definition, '创建');
+      await this.command(scope, actorId, id, 'create_mandate', input);
       if (!schedule) schedule = await this.repositories.scheduleDefinitions.create(definition);
       else if (schedule.payloadRef !== definition.payloadRef || JSON.stringify(schedule.trigger) !== JSON.stringify(input.trigger) || schedule.timezone !== input.timezone || JSON.stringify(schedule.delivery) !== JSON.stringify(delivery)) throw conflict();
       const mandate = await this.repositories.collaboration.createMandate({ id, scope, goal: input.goal, requesterId: actorId, status: 'active', sourceRefs: input.sourceRefs, followupId: input.followupId, scheduleDefinitionId: schedule.id, mode: input.mode, prompt: input.prompt, condition: input.condition, deliveryPaused: false, catchupPolicy: input.catchupPolicy, ...(followup ? { lastProgressRevision: followup.revision } : {}) });
-      return { mandate, schedule: await this.reconcileMandate(mandate) };
+      return { mandate, schedule: await this.reconcileMandate(mandate, schedule, nextDueAt) };
     });
   }
   async updateMandate(scope: CollaborationScope, actorId: string, id: string, body: unknown) {
@@ -161,9 +171,6 @@ export class CollaborationService {
           return { mandate: changed, schedule };
         }
       }
-      // Across processes only one mutation payload may prepare a given revision.
-      // Otherwise one request could commit a mandate over another request's trigger.
-      await this.command(scope, actorId, `${id}:${input.expectedRevision}`, 'update_mandate', input);
       const old = await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId); if (!old) throw missing();
       // The schedule first becomes non-executable and points to the future mandate revision.
       // A crash after the mandate commit can recover the already-persisted trigger.
@@ -171,19 +178,27 @@ export class CollaborationService {
       const followup = (patch.condition ?? mandate.condition) === 'no_progress' ? await this.followup(scope, mandate.followupId) : undefined;
       const changes = { ...patch, goal: patch.goal ?? mandate.goal, ...(followup ? { lastProgressRevision: followup.revision } : {}) };
       const target = { ...mandate, ...changes, revision: mandate.revision + 1 };
+      const rescheduled = { ...old, trigger: input.trigger ?? old.trigger, timezone: input.timezone ?? old.timezone };
+      const changingTime = input.trigger !== undefined || input.timezone !== undefined;
+      if (changingTime && rescheduled.trigger.kind === 'at' && target.status === 'active') await this.require(scope, mandate.requesterId, 'execute');
+      const nextDueAt = changingTime ? this.nextOneOff(rescheduled, '改期') : undefined;
+      // Across processes only one mutation payload may prepare a given revision.
+      // Otherwise one request could commit a mandate over another request's trigger.
+      await this.command(scope, actorId, `${id}:${input.expectedRevision}`, 'update_mandate', input);
       const prepared = await this.repositories.scheduleDefinitions.update(old.id, { expectedRevision: old.revision, state: 'disabled', payloadRef: binding(target, executionDigest(target)), ...(input.trigger ? { trigger: input.trigger } : {}), ...(input.timezone ? { timezone: input.timezone } : {}), ...(input.goal ? { name: input.goal.slice(0, 200) } : {}) });
       const changed = await this.repositories.collaboration.updateMandate(scope, id, { ...changes, expectedRevision }, actorId);
-      return { mandate: changed, schedule: await this.reconcileMandate(changed, prepared) };
+      return { mandate: changed, schedule: await this.reconcileMandate(changed, prepared, nextDueAt) };
     });
   }
-  async reconcileMandate(mandate: CollaborationMandate, known?: ScheduleDefinition): Promise<ScheduleDefinition | undefined> {
+  async reconcileMandate(mandate: CollaborationMandate, known?: ScheduleDefinition, acceptedNextDueAt?: string): Promise<ScheduleDefinition | undefined> {
     const schedule = known ?? await this.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId);
     if (!schedule) return undefined;
     if (!scheduleMatchesMandate(schedule, mandate)) return schedule;
     if (mandate.status !== 'active') return schedule.state === 'disabled' ? schedule : this.repositories.scheduleDefinitions.update(schedule.id, { expectedRevision: schedule.revision, state: 'disabled' });
     if (schedule.state === 'enabled') return schedule;
     await this.require(mandate.scope, mandate.requesterId, 'execute');
-    const nextDueAt = previewNextSchedule(schedule, this.now())?.scheduledForUtc;
+    // Preserve the accepted one-off instant if the authorization recheck crossed it.
+    const nextDueAt = acceptedNextDueAt ?? previewNextSchedule(schedule, this.now())?.scheduledForUtc;
     return this.repositories.scheduleDefinitions.update(schedule.id, { expectedRevision: schedule.revision, state: 'enabled', payloadRef: binding(mandate, executionDigest(mandate)), nextDueAt: nextDueAt ?? null });
   }
 }

@@ -53,6 +53,97 @@ it('enforces stable create inputs, chat scope, mandate ownership and stale revis
   await expect(f.service.updateMandate(scope, 'requester', created.mandate.id, { expectedRevision: 1, status: 'cancelled' })).rejects.toMatchObject({ code: 'COLLABORATION_REVISION_CONFLICT' });
 });
 
+it('creates a future one-off, executes once and accepts its original create retry after it is due', async () => {
+  const f = await fixture(new Date('2026-09-20T05:30:00.000Z'));
+  const input = { trigger: { kind: 'at', localDateTime: '2026-09-20T13:31:00' }, timezone: 'Asia/Shanghai' };
+  const { mandate, schedule } = await f.create(input);
+  expect(schedule?.state).toBe('enabled');
+  expect(await f.repos.scheduleWatermarks.get(mandate.scheduleDefinitionId)).toMatchObject({ nextDueAt: '2026-09-20T05:31:00.000Z' });
+  f.advance();
+  expect((await f.create(input)).mandate).toEqual(mandate);
+  await f.executor().tick();
+  expect(f.deliver).toHaveBeenCalledOnce();
+  expect((await f.create(input)).mandate).toEqual(mandate);
+  await f.executor().tick(); expect(f.deliver).toHaveBeenCalledOnce();
+  const paused = await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, status: 'paused' });
+  expect(paused.mandate.status).toBe('paused');
+  const cancelled = await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 2, status: 'cancelled' });
+  expect(cancelled.mandate.status).toBe('cancelled');
+});
+
+it.each(['13:29:59', '13:30:00'])('rejects a new one-off at %s with no persisted command or schedule', async time => {
+  const f = await fixture(new Date('2026-09-20T05:30:00.000Z'));
+  await expect(f.create({ trigger: { kind: 'at', localDateTime: `2026-09-20T${time}` }, timezone: 'Asia/Shanghai' }))
+    .rejects.toMatchObject({ code: 'COLLABORATION_SCHEDULE_TIME_PASSED', statusCode: 400, message: expect.stringContaining('计划未创建。请选择未来的执行时间') });
+  expect(await f.repos.collaboration.listMandates(scope)).toEqual([]);
+  expect(await f.repos.scheduleDefinitions.list()).toEqual([]);
+  expect(await f.repos.collaboration.listActions(scope)).toEqual([]);
+});
+
+it.each(['scope', 'delivery', 'execute'])('rechecks a new one-off after async %s validation consumed its remaining time', async stage => {
+  const f = await fixture(new Date('2026-09-20T05:30:00.000Z'));
+  const input = { trigger: { kind: 'at', localDateTime: '2026-09-20T05:31:00' } };
+  if (stage === 'scope') {
+    const original = f.service.options.resolveScheduleScope;
+    f.service.options.resolveScheduleScope = async scope => { f.advance(120_000); return original(scope); };
+  } else if (stage === 'delivery') {
+    f.service.options.validateDelivery = async () => { f.advance(120_000); return true; };
+  } else {
+    f.service.options.authorize = async (_scope, _actor, action) => { if (action === 'execute') f.advance(120_000); return true; };
+  }
+  await expect(f.create({ ...input, ...(stage === 'delivery' ? { delivery: { mode: 'thread', chatRef: 'chat', rootMessageRef: 'om_root', continuation: 'same_thread' } } : {}) }))
+    .rejects.toMatchObject({ code: 'COLLABORATION_SCHEDULE_TIME_PASSED', statusCode: 400 });
+  expect(await f.repos.collaboration.listMandates(scope)).toEqual([]);
+  expect(await f.repos.scheduleDefinitions.list()).toEqual([]);
+  expect(await f.repos.collaboration.listActions(scope)).toEqual([]);
+});
+
+it.each(['trigger', 'timezone'])('rejects an expired one-off %s update without changing the original plan', async field => {
+  const f = await fixture(new Date('2026-09-20T05:30:00.000Z'));
+  const { mandate } = await f.create({ trigger: { kind: 'at', localDateTime: '2026-09-20T05:31:00' } });
+  const schedule = await f.repos.scheduleDefinitions.get(mandate.scheduleDefinitionId);
+  const watermark = await f.repos.scheduleWatermarks.get(mandate.scheduleDefinitionId);
+  const actions = await f.repos.collaboration.listActions(scope);
+  const patch = field === 'trigger' ? { trigger: { kind: 'at', localDateTime: '2026-09-20T05:29:59' } } : { timezone: 'Asia/Shanghai' };
+  await expect(f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, ...patch }))
+    .rejects.toMatchObject({ code: 'COLLABORATION_SCHEDULE_TIME_PASSED', statusCode: 400, message: expect.stringContaining('计划未改期。请选择未来的执行时间') });
+  expect(await f.repos.collaboration.getMandate(scope, mandate.id)).toEqual(mandate);
+  expect(await f.repos.scheduleDefinitions.get(mandate.scheduleDefinitionId)).toEqual(schedule);
+  expect(await f.repos.scheduleWatermarks.get(mandate.scheduleDefinitionId)).toEqual(watermark);
+  expect(await f.repos.collaboration.listActions(scope)).toEqual(actions);
+});
+
+it.each(['create', 'update'])('preserves the accepted one-off instant when %s activation authorization crosses it', async operation => {
+  const f = await fixture(new Date('2026-09-20T05:30:00.000Z'));
+  const existing = operation === 'update' ? await f.create() : undefined;
+  let checks = 0;
+  f.service.options.authorize = async (_scope, _actor, action) => {
+    if (action === 'execute' && ++checks === 2) f.advance(120_000);
+    return true;
+  };
+  const trigger = { kind: 'at', localDateTime: '2026-09-20T05:31:00' };
+  const result = existing
+    ? await f.service.updateMandate(scope, 'requester', existing.mandate.id, { expectedRevision: 1, trigger })
+    : await f.create({ trigger });
+  expect(checks).toBe(2);
+  expect(result.schedule?.state).toBe('enabled');
+  expect(await f.repos.scheduleWatermarks.get(result.mandate.scheduleDefinitionId)).toMatchObject({ nextDueAt: '2026-09-20T05:31:00.000Z' });
+  await f.executor().tick(); expect(f.deliver).toHaveBeenCalledOnce();
+  expect(await f.repos.scheduleOccurrences.listByDefinition(result.mandate.scheduleDefinitionId)).toEqual([expect.objectContaining({ scheduledForUtc: '2026-09-20T05:31:00.000Z', state: 'settled' })]);
+});
+
+it('leaves the original plan unchanged when rescheduling authorization outlasts a future one-off', async () => {
+  const f = await fixture(new Date('2026-09-20T05:30:00.000Z'));
+  const { mandate, schedule } = await f.create();
+  const actions = await f.repos.collaboration.listActions(scope);
+  f.service.options.authorize = async (_scope, _actor, action) => { if (action === 'execute') f.advance(120_000); return true; };
+  await expect(f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, trigger: { kind: 'at', localDateTime: '2026-09-20T05:31:00' } }))
+    .rejects.toMatchObject({ code: 'COLLABORATION_SCHEDULE_TIME_PASSED' });
+  expect(await f.repos.collaboration.getMandate(scope, mandate.id)).toEqual(mandate);
+  expect(await f.repos.scheduleDefinitions.get(mandate.scheduleDefinitionId)).toEqual(schedule);
+  expect(await f.repos.collaboration.listActions(scope)).toEqual(actions);
+});
+
 it('recovers a crash after mandate commit using the prepared reschedule and rejects an old request afterwards', async () => {
   const f = await fixture(); const { mandate } = await f.create();
   const original = f.repos.scheduleDefinitions.update.bind(f.repos.scheduleDefinitions);
@@ -117,14 +208,67 @@ it('cancels the old pending Agent after delegation cancellation and suppresses i
   expect(executeAgent).toHaveBeenCalledTimes(1); expect(f.deliver).not.toHaveBeenCalled();
 });
 
-it('suppresses a result whose source context changed while the Agent was running', async () => {
+it('delivers the frozen scheduled summary when an unrelated follow-up is added during analysis', async () => {
   const f = await fixture(); await f.create({ mode: 'agent' });
   let completed = false;
   const run = f.executor({ executeAgent: async () => completed ? { status: 'completed', text: 'Old summary' } : { status: 'pending' } });
   f.advance(); await run.tick();
   await f.service.createFollowup(scope, 'requester', { id: 'new', goal: 'New information' }); completed = true;
-  await run.tick(); expect(f.deliver).not.toHaveBeenCalled();
-  expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')).toMatchObject({ status: 'suppressed' });
+  await run.tick(); await run.tick(); expect(f.deliver).toHaveBeenCalledOnce();
+  expect(f.deliver.mock.calls[0]![0].snapshot.followups).toEqual([]);
+  expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')).toMatchObject({ status: 'succeeded' });
+});
+
+it.each(['human', 'bot'] as const)('delivers the original scheduled summary after %s messages roll the observation window and bootstrap cursor', async senderKind => {
+  const f = await fixture();
+  await f.repos.collaboration.saveBootstrap({ scope, status: 'complete', missing: [], lastEventAt: f.now().toISOString(), updatedAt: f.now().toISOString() });
+  await f.repos.collaboration.observe({ scope, source: 'lark.message', eventId: 'original', occurredAt: f.now().toISOString(), receivedAt: f.now().toISOString(), senderKind: 'human', text: 'ATLAS recovered after three timeouts', refs: [], origin: 'live', missing: [] });
+  await f.create({ mode: 'agent' });
+  let completed = false;
+  const executeAgent = vi.fn(async (input: Parameters<NonNullable<ScheduleExecutorOptions['executeAgent']>>[0]) => {
+    await input.assertCurrent(); return completed ? { status: 'completed' as const, text: 'ATLAS recovered after three timeouts' } : { status: 'pending' as const };
+  });
+  const run = f.executor({ executeAgent }); f.advance(); await run.tick();
+  const frozen = executeAgent.mock.calls[0]![0].snapshot;
+  for (let index = 0; index < 31; index++) await f.repos.collaboration.observe({ scope, source: 'lark.message', eventId: `appended-${index}`, occurredAt: f.now().toISOString(), receivedAt: f.now().toISOString(), senderKind, ...(senderKind === 'bot' ? { senderId: scope.appId } : {}), text: senderKind === 'bot' ? 'Confirm this operation' : 'Another group discussion', refs: [], origin: senderKind === 'bot' ? 'history' : 'live', missing: [] });
+  await f.repos.collaboration.saveBootstrap({ scope, status: 'complete', missing: [], lastEventAt: f.now().toISOString(), updatedAt: f.now().toISOString() });
+  expect((await f.repos.collaboration.snapshot(scope)).observations.some(item => item.eventId === 'original')).toBe(false);
+  completed = true; await run.tick(); await run.tick();
+  expect(executeAgent).toHaveBeenCalledTimes(2); expect(f.deliver).toHaveBeenCalledOnce();
+  expect(executeAgent.mock.calls[1]![0].snapshot).toEqual(frozen);
+  expect(f.deliver.mock.calls[0]![0].snapshot).toEqual(frozen);
+  expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')).toMatchObject({ status: 'succeeded' });
+});
+
+it.each(['execute', 'deliver', 'completed', 'progress', 'paused', 'deliveryPaused', 'notificationsPaused', 'reschedule'] as const)('still suppresses scheduled output on %s changes even when ordinary chat also advances', async change => {
+  const f = await fixture();
+  const { followup } = await f.service.createFollowup(scope, 'requester', { id: 'tracked', goal: 'Finish the material' });
+  const { mandate } = await f.create({ mode: 'agent', followupId: followup.id, condition: 'followup_open' });
+  let completed = false, revoked = false;
+  const run = f.executor({ authorize: async (_scope, _actor, action) => !(revoked && action === change), cancelAgent: async () => {}, executeAgent: async () => completed ? { status: 'completed', text: 'Do not send' } : { status: 'pending' } });
+  f.advance(); await run.tick();
+  await f.repos.collaboration.observe({ scope, source: 'lark.message', eventId: 'new-chat', occurredAt: f.now().toISOString(), receivedAt: f.now().toISOString(), senderKind: 'human', text: 'Unrelated discussion', refs: [], origin: 'live', missing: [] });
+  if (change === 'execute' || change === 'deliver') revoked = true;
+  else if (change === 'completed') await f.service.updateFollowup(scope, 'requester', followup.id, { expectedRevision: 1, status: 'completed' });
+  else if (change === 'progress') await f.service.updateFollowup(scope, 'requester', followup.id, { expectedRevision: 1, progress: 'First part completed' });
+  else if (change === 'notificationsPaused') await f.service.updateSettings(scope, 'requester', { expectedRevision: 0, notificationsPaused: true });
+  else await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, ...(change === 'paused' ? { status: 'paused' } : change === 'deliveryPaused' ? { deliveryPaused: true } : { trigger: { kind: 'interval', everySeconds: 600, anchorAt: f.now().toISOString() } }) });
+  completed = true; await run.tick();
+  expect(f.deliver).not.toHaveBeenCalled();
+  expect(await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId)).toEqual([expect.objectContaining({ state: 'suppressed' })]);
+});
+
+it('checks original history coverage even when model input truncation adds its own missing markers', async () => {
+  const f = await fixture();
+  await f.repos.collaboration.saveBootstrap({ scope, status: 'complete', missing: [], updatedAt: f.now().toISOString() });
+  await f.repos.collaboration.observe({ scope, source: 'lark.message', eventId: 'large-message', occurredAt: f.now().toISOString(), receivedAt: f.now().toISOString(), senderKind: 'human', text: 'x'.repeat(12_000), refs: [], origin: 'live', missing: [] });
+  await f.create({ mode: 'agent' });
+  const executeAgent = vi.fn(async () => ({ status: 'completed' as const, text: 'Bounded summary' }));
+  f.advance(); await f.executor({ executeAgent }).tick();
+  expect(f.deliver).toHaveBeenCalledOnce();
+  expect(f.deliver.mock.calls[0]![0].snapshot.bootstrap?.status).toBe('partial');
+  const actions = await f.repos.collaboration.listActions(scope);
+  expect(actions.find(action => action.kind === 'schedule_delivery')!.payload.coverageSignature).toBe(actions.find(action => action.kind === 'schedule_agent')!.payload.coverageSignature);
 });
 
 it('honors progress, group notification pause, authorization and bounded downtime catch-up', async () => {
@@ -335,7 +479,7 @@ it.each(['mandate', 'group'] as const)('delivers one original result when %s not
   expect(delivery).toMatchObject({ status: 'succeeded' });
 });
 
-it.each(['message', 'progress', 'bootstrap'] as const)('still suppresses an old result after notification toggles plus new %s evidence', async change => {
+it.each(['message', 'progress', 'bootstrap'] as const)('uses frozen scheduled material after new %s evidence, retaining associated progress and coverage guards', async change => {
   const f = await fixture();
   const { followup } = await f.service.createFollowup(scope, 'requester', { id: 'tracked', goal: 'Collect remaining material' });
   const { mandate } = await f.create({ mode: 'agent', followupId: followup.id });
@@ -348,12 +492,13 @@ it.each(['message', 'progress', 'bootstrap'] as const)('still suppresses an old 
   else await f.repos.collaboration.saveBootstrap({ scope, status: 'partial', missing: ['History coverage changed'], updatedAt: f.now().toISOString() });
   await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 2, deliveryPaused: false });
   completed = true; await run.tick();
-  expect(f.deliver).not.toHaveBeenCalled();
-  expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')).toMatchObject({ status: 'suppressed' });
+  // Appended chat is not a revocation; associated progress and history coverage still invalidate delivery.
+  expect(f.deliver).toHaveBeenCalledTimes(change === 'message' ? 1 : 0);
+  expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')).toMatchObject({ status: change === 'message' ? 'succeeded' : 'suppressed' });
 });
 
 
-it.each([true, false])('checks bootstrap evidence without relying on context revision (changed evidence: %s)', async changedEvidence => {
+it.each(['missing', 'status', 'timestamp'] as const)('checks bootstrap %s without relying on context revision', async change => {
   const f = await fixture();
   const bootstrap = { scope, status: 'complete' as const, missing: [], updatedAt: f.now().toISOString() };
   await f.repos.collaboration.saveBootstrap(bootstrap);
@@ -361,11 +506,12 @@ it.each([true, false])('checks bootstrap evidence without relying on context rev
   let completed = false;
   const run = f.executor({ executeAgent: async () => completed ? { status: 'completed', text: 'Analysis' } : { status: 'pending' } });
   f.advance(); await run.tick(); const before = await f.repos.collaboration.snapshot(scope);
-  await f.repos.collaboration.saveBootstrap({ ...bootstrap, missing: changedEvidence ? ['An earlier page is unavailable'] : [], updatedAt: f.now().toISOString() });
+  f.advance(1);
+  await f.repos.collaboration.saveBootstrap({ ...bootstrap, status: change === 'status' ? 'partial' : 'complete', missing: change === 'missing' ? ['An earlier page is unavailable'] : [], updatedAt: f.now().toISOString() });
   expect((await f.repos.collaboration.snapshot(scope)).contextRevision).toBe(before.contextRevision);
   completed = true; await run.tick();
-  expect(f.deliver).toHaveBeenCalledTimes(changedEvidence ? 0 : 1);
-  expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')).toMatchObject({ status: changedEvidence ? 'suppressed' : 'succeeded' });
+  expect(f.deliver).toHaveBeenCalledTimes(change === 'timestamp' ? 1 : 0);
+  expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')).toMatchObject({ status: change === 'timestamp' ? 'succeeded' : 'suppressed' });
 });
 
 

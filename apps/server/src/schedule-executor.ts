@@ -24,6 +24,7 @@ export interface ScheduleExecutorOptions {
   holderId?: string;
 }
 const hash = (value: unknown) => createHash('sha256').update(canonicalExecutionJson(value)).digest('hex');
+const bootstrapSignature = (snapshot: CollaborationSnapshot) => hash({ status: snapshot.bootstrap?.status ?? null, missing: snapshot.bootstrap?.missing ?? [] });
 const actionId = (occurrence: ScheduleOccurrence, kind: string) => `collaboration_${kind}_${occurrence.idempotencyKey}`;
 const terminal = (state: string) => ['settled','failed','suppressed'].includes(state);
 const stale = () => new RuntimeError('COLLABORATION_EXECUTION_STALE', 'Delegation, context or authorization changed', 409);
@@ -62,7 +63,7 @@ export class ScheduleExecutor {
   private async advance(occurrence: ScheduleOccurrence, state: ScheduleOccurrence['state'], lease: ScheduleLease, error?: string) {
     return this.repos.scheduleOccurrences.advance(occurrence.id, occurrence.revision, state, this.fence(lease), error);
   }
-  private async valid(mandate: CollaborationMandate, schedule: ScheduleDefinition, snapshot: CollaborationSnapshot, lease: ScheduleLease, phase: 'execute' | 'deliver', contextSignature?: string) {
+  private async valid(mandate: CollaborationMandate, schedule: ScheduleDefinition, snapshot: CollaborationSnapshot, lease: ScheduleLease, phase: 'execute' | 'deliver', coverageSignature?: string) {
     if (this.closed) throw stale();
     const [current, definition, writer, latest] = await Promise.all([this.repos.collaboration.getMandate(mandate.scope, mandate.id), this.repos.scheduleDefinitions.get(schedule.id), this.repos.scheduleLeases.getByKey(lease.leaseKey), this.repos.collaboration.snapshot(mandate.scope)]);
     const readiness = definition && await this.repos.scheduleDefinitions.readiness(definition.id, this.now().toISOString());
@@ -71,7 +72,9 @@ export class ScheduleExecutor {
     if (canonicalExecutionJson(executionSettings(latest.settings)) !== canonicalExecutionJson(executionSettings(snapshot.settings))) throw stale();
     if (phase === 'deliver') {
       if (current.deliveryPaused || latest.settings.notificationsPaused) throw stale();
-      if (collaborationContextSignature(latest) !== (contextSignature ?? collaborationContextSignature(snapshot))) throw stale();
+      // Scheduled work uses its frozen material; appended chat and history cursors do not revoke it.
+      // Coverage changes still invalidate the result, as do the live plan/permission/follow-up checks.
+      if (bootstrapSignature(latest) !== (coverageSignature ?? bootstrapSignature(snapshot))) throw stale();
     }
     if (!await this.options.authorize(mandate.scope, mandate.requesterId, phase)) throw stale();
     const followup = current.followupId ? await this.repos.collaboration.getFollowup(current.scope, current.followupId) : undefined;
@@ -80,12 +83,12 @@ export class ScheduleExecutor {
     if (current.condition === 'no_progress' && followup?.revision !== current.lastProgressRevision) throw stale();
     if (this.closed) throw stale();
   }
-  private async begin(mandate: CollaborationMandate, schedule: ScheduleDefinition, occurrence: ScheduleOccurrence, snapshot: CollaborationSnapshot, kind: string, payload: Record<string, unknown>, contextSignature = collaborationContextSignature(snapshot)) {
-    payload = JSON.parse(JSON.stringify({ ...payload, contextSignature })) as Record<string, unknown>;
+  private async begin(mandate: CollaborationMandate, schedule: ScheduleDefinition, occurrence: ScheduleOccurrence, snapshot: CollaborationSnapshot, kind: string, payload: Record<string, unknown>, contextSignature = collaborationContextSignature(snapshot), coverageSignature = bootstrapSignature(snapshot)) {
+    payload = JSON.parse(JSON.stringify({ ...payload, contextSignature, coverageSignature })) as Record<string, unknown>;
     return this.repos.collaboration.beginAction({ id: actionId(occurrence, kind), scope: mandate.scope, kind: `schedule_${kind}`, mandateId: mandate.id, mandateRevision: mandate.revision, scheduleGeneration: schedule.currentGeneration, contextRevision: snapshot.contextRevision, ...(mandate.followupId ? { followupRevision: snapshot.followups.find(item => item.id === mandate.followupId)?.revision } : {}), requesterId: mandate.requesterId, inputDigest: hash(payload), payload });
   }
   private input(mandate: CollaborationMandate, schedule: ScheduleDefinition, occurrence: ScheduleOccurrence, snapshot: CollaborationSnapshot, lease: ScheduleLease, action: CollaborationAction, phase: 'execute' | 'deliver'): ScheduleExecutionInput {
-    return { scope: mandate.scope, actorId: mandate.requesterId, mandate, schedule, occurrence, snapshot, actionId: action.id, action, assertCurrent: () => this.valid(mandate, schedule, snapshot, lease, phase, typeof action.payload.contextSignature === 'string' ? action.payload.contextSignature : undefined) };
+    return { scope: mandate.scope, actorId: mandate.requesterId, mandate, schedule, occurrence, snapshot, actionId: action.id, action, assertCurrent: () => this.valid(mandate, schedule, snapshot, lease, phase, typeof action.payload.coverageSignature === 'string' ? action.payload.coverageSignature : undefined) };
   }
   private async actionState(action: CollaborationAction, status: CollaborationAction['status'], receipt?: string, error?: string) {
     return this.repos.collaboration.updateAction(action.scope, action.id, { expectedRevision: action.revision, status, ...(receipt !== undefined ? { receipt } : {}), ...(error !== undefined ? { error } : {}) });
@@ -140,6 +143,7 @@ export class ScheduleExecutor {
     if (terminal(occurrence.state)) return;
     const fullSnapshot = await this.repos.collaboration.snapshot(mandate.scope);
     const contextSignature = collaborationContextSignature(fullSnapshot);
+    const coverageSignature = bootstrapSignature(fullSnapshot);
     const snapshot = boundCollaborationSnapshot(fullSnapshot, mandate.followupId);
     const agentId = actionId(occurrence, 'agent'), deliveryId = actionId(occurrence, 'delivery');
     let agent = await this.repos.collaboration.getAction(mandate.scope, agentId);
@@ -174,7 +178,7 @@ export class ScheduleExecutor {
     let content = mandate.prompt;
     if (mandate.mode === 'agent') {
       if (!this.options.executeAgent) { await this.advance(occurrence, 'failed', lease, 'Agent execution integration is unavailable'); return; }
-      if (!agent) agent = (await this.begin(mandate, schedule, occurrence, snapshot, 'agent', { prompt: mandate.prompt, snapshot }, contextSignature)).action;
+      if (!agent) agent = (await this.begin(mandate, schedule, occurrence, snapshot, 'agent', { prompt: mandate.prompt, snapshot }, contextSignature, coverageSignature)).action;
 
       if (agent.status === 'failed' || agent.status === 'suppressed') { await this.advance(occurrence, agent.status === 'failed' ? 'failed' : 'suppressed', lease, agent.error); return; }
       if (agent.status !== 'succeeded') {
@@ -193,13 +197,13 @@ export class ScheduleExecutor {
           await this.actionState(agent, status, result.receipt, result.error ?? 'Agent result is not proven');
           await this.advance(occurrence, status, lease, result.error); return;
         }
-        if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, 'delivery', { text: result.text, delivery: schedule.delivery, snapshot: agent.payload.snapshot }, typeof agent.payload.contextSignature === 'string' ? agent.payload.contextSignature : undefined)).action;
+        if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, 'delivery', { text: result.text, delivery: schedule.delivery, snapshot: agent.payload.snapshot }, typeof agent.payload.contextSignature === 'string' ? agent.payload.contextSignature : undefined, typeof agent.payload.coverageSignature === 'string' ? agent.payload.coverageSignature : undefined)).action;
         agent = await this.actionState(agent, 'succeeded', result.receipt ?? 'completed');
       }
       if (!delivery) { await this.advance(occurrence, 'unknown', lease, 'Completed agent result has no persisted delivery content'); return; }
       content = delivery.payload.text as string;
     }
-    if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, snapshot, 'delivery', { text: content, delivery: schedule.delivery, snapshot }, contextSignature)).action;
+    if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, snapshot, 'delivery', { text: content, delivery: schedule.delivery, snapshot }, contextSignature, coverageSignature)).action;
     if (delivery.status === 'failed' || delivery.status === 'suppressed') { await this.advance(occurrence, delivery.status === 'failed' ? 'failed' : 'suppressed', lease, delivery.error); return; }
     const originalSnapshot = delivery.payload.snapshot as CollaborationSnapshot;
     const input = this.input(mandate, schedule, occurrence, originalSnapshot, lease, delivery, 'deliver');
