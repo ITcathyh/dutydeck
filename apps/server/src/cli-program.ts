@@ -349,10 +349,10 @@ Examples:
     .option('--status', 'Only inspect the --resume job; never scan, retry or change Agent settings')
     .option('--json', 'Emit one JSON line; create using a valid cached login and never render a QR code')
     .option('--force-login', 'Scan again to choose another account; requires an interactive terminal')
-    .option('--agent <id>', 'Execution Agent ID, including custom profiles such as ccflash')
+    .option('--agent <id>', 'Execution Agent ID, including ccflash; defaults to asking before actions')
     .option('--workspace <directory>', 'Existing absolute Agent working directory')
     .option('--full-trust', 'Allow the selected Agent to execute unattended Lark tasks with full trust')
-    .option('--listen', 'Save listening as enabled; apply with dutydeck start/restart')
+    .option('--listen', 'Enable listening and connect the bot to the running local service')
     .action((name, options, command) => handlers.larkCreate?.(name, {
       ...options,
       ...(typeof command.optsWithGlobals().database === 'string' ? { database: command.optsWithGlobals().database as string } : {}),
@@ -363,11 +363,12 @@ Behaviour:
   有效登录态支持非交互创建及 --json；无有效登录态时停止，并输出 --resume 续跑命令。
   App Secret 仅保存到本地数据库；创建完成后可直接选择执行 Agent，也可在 Dashboard 继续。
   中断后用输出的 --resume 命令续跑；创建或发布结果未知时停止重试，避免重复创建应用。
-  数据库默认沿用本机 daemon，可用全局 --database 指定。监听配置在启动/重启服务后生效。
+  数据库默认沿用本机 daemon，可用全局 --database 指定。--listen 会尝试动态接通同一数据库的本机服务。
+  首次绑定 Agent 默认逐次询问；只有显式 --full-trust 才启用无人值守执行，续跑保留已确认的模式。
 
 Examples:
   $ dutydeck lark create "Dutydeck 助手"
-  $ dutydeck lark create "CCFlash 助手" --agent ccflash --full-trust --listen
+  $ dutydeck lark create "CCFlash 助手" --agent ccflash --listen
   $ dutydeck lark create --resume <job-id>
   $ dutydeck lark create --resume <job-id> --status --json`);
   addCardOptions(lark.command('send')
@@ -632,7 +633,7 @@ Examples:
   $ dutydeck daemon start --port 4310
   $ dutydeck daemon status
   $ dutydeck acpk agents list --json
-  $ dutydeck lark create "CCFlash 助手" --agent ccflash --full-trust --listen
+  $ dutydeck lark create "CCFlash 助手" --agent ccflash --listen
   $ dutydeck lark send "**任务已完成**"
   $ dutydeck lark update "**最新结果**" --message-id om_xxx
   $ dutydeck lark preflight bot-id --group-binding binding-id

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { createRepositories } from '@dutydeck/storage';
+import { agentConfigSchema } from '@dutydeck/shared';
 import { defaultDaemonDir, writeLastDaemonDir, writeState } from '../daemon/daemon.js';
 
 const cli = fileURLToPath(new URL('../cli.ts', import.meta.url));
@@ -68,4 +69,31 @@ it('exposes create in built-in help and returns a resumable login failure in non
   const sqlite = new Database(database, { readonly: true });
   try { expect(sqlite.prepare("SELECT count(*) AS count FROM configs WHERE key LIKE 'lark.app_creation.%'").get()).toEqual({ count: 1 }); }
   finally { sqlite.close(); }
+});
+
+
+it('binds a resumed bot in ask mode and reports unavailable hot-add without requesting a restart', async () => {
+  const { root, cwd, database } = fixture();
+  const repositories = createRepositories(database);
+  await repositories.agents.save(agentConfigSchema.parse({ id: 'ccflash', name: 'CCFlash', protocol: 'pty-cli', adapterId: 'claude-code', command: process.execPath }));
+  await repositories.config.set(`lark.app_creation.${uuid}`, JSON.stringify({ id: uuid, name: 'Bot', status: 'completed', appId: 'cli_created', botSaved: true, retryable: false, createdAt: 'now', updatedAt: 'now' }));
+  await repositories.config.set('lark.bots', JSON.stringify([{ appId: 'cli_created', appSecret: 'SECRET_CANARY', listening: false, riskControlMode: 'off' }]));
+  repositories.close();
+  const result = invoke(root, cwd, ['--database', database, 'lark', 'create', '--resume', uuid, '--agent', 'ccflash', '--listen', '--json']);
+  expect(result.status, result.stderr).toBe(1);
+  expect(result.stdout.trim().split('\n')).toHaveLength(1);
+  expect(JSON.parse(result.stdout)).toMatchObject({ ok: false, job: { status: 'completed' }, bot: { permissionMode: 'ask', fullTrustConfirmed: false, listening: true, activeListening: false }, listener: { activeListening: false }, next: expect.stringContaining('启动服务') });
+  expect(result.stdout).not.toContain('restartRequired');
+  expect(result.stdout + result.stderr).not.toContain('SECRET_CANARY');
+  expect(result.stderr).toBe('');
+  const sqlite = new Database(database, { readonly: true });
+  let before: unknown;
+  try { before = sqlite.prepare('SELECT key, value FROM configs ORDER BY key').all(); }
+  finally { sqlite.close(); }
+  const read = invoke(root, cwd, ['--database', database, 'lark', 'create', '--resume', uuid, '--status', '--json']);
+  expect(read.status, read.stderr).toBe(0);
+  expect(JSON.parse(read.stdout)).not.toHaveProperty('listener');
+  const after = new Database(database, { readonly: true });
+  try { expect(after.prepare('SELECT key, value FROM configs ORDER BY key').all()).toEqual(before); }
+  finally { after.close(); }
 });
