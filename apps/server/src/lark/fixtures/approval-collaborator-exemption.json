@@ -1,0 +1,46 @@
+{
+  "code": 0,
+  "data": {
+    "applyInstanceInfo": {
+      "applyNodes": [
+        {
+          "nodeName": "发起",
+          "nodeType": "",
+          "nodeUser": [
+            {
+              "approver": {
+                "id": "creator",
+                "name": "创建者"
+              }
+            }
+          ]
+        },
+        {
+          "nodeName": "仅协作者免审策略",
+          "nodeType": "自动通过",
+          "nodeUser": []
+        },
+        {
+          "nodeCcUser": [
+            {
+              "approver": {
+                "id": "cc-user",
+                "name": "抄送人"
+              }
+            }
+          ],
+          "nodeName": "仅协作者免审抄送",
+          "nodeType": "",
+          "nodeUser": []
+        },
+        {
+          "nodeName": "结束",
+          "nodeType": "",
+          "nodeUser": []
+        }
+      ]
+    },
+    "canAutoApproval": false
+  },
+  "msg": ""
+}

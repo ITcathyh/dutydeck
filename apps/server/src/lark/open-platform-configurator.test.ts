@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 // 的真实 scope id 未知，手工补入以便权限映射与发布测试能跑，一律按已开通填）。
 import draftCatalog from './fixtures/scope-catalog-draft.json';
 import newAppPrivileges from './fixtures/new-app-privileges.json';
+import automaticApproval from './fixtures/approval-collaborator-exemption.json';
 import { larkCommandRegistry } from './commands.js';
 import {
   configureLarkOpenPlatformApp,
@@ -57,12 +58,15 @@ function harness(options: {
   secret?: string;
   privileges?: unknown;
   ignorePrivilegeUpdate?: boolean;
+  draftDetail?: unknown;
+  approval?: unknown;
 } = {}): { client: LarkOpenPlatformClient; calls: Call[] } {
   const calls: Call[] = [];
   let eventRead = 0;
   let callbackRead = 0;
   let scopeRead = 0;
   let versionRead = 0;
+  let versionBody: Record<string, unknown> | undefined;
   let privileges = structuredClone(options.privileges ?? { data: { privileges: [] } });
   const eventStates = options.events ?? [{ data: { eventMode: 4, appEvents: [...LARK_REQUIRED_EVENTS] } }];
   const callbackStates = options.callbacks ?? [{ data: { callbackMode: 4, callbacks: ['card.action.trigger'] } }];
@@ -93,7 +97,16 @@ function harness(options: {
         if (versionRead++ > 0) return options.published ?? { data: { versions: [{ versionId: 'version-2', versionStatus: 2 }] } };
         return options.versions ?? { data: { versions: [{ appVersion: '1.0.0' }] } };
       }
-      if (path.includes('/app_version/create/')) return options.created ?? { data: { versionId: 'version-2' } };
+      if (path.includes('/app_version/create/')) {
+        versionBody = body;
+        return options.created ?? { data: { versionId: 'version-2' } };
+      }
+      if (path.includes('/app_version/detail/')) return options.draftDetail ?? { data: {
+        versionId: 'version-2', versionStatus: 0,
+        visibleRange: { whiteList: versionBody?.visibleSuggest, blackList: versionBody?.blackVisibleSuggest },
+        changeAppShareConfig: { b2cShareSplitConfigSuggest: { b2cGroupChatShareEnable: false, b2cP2PChatShareEnable: false, b2cP2PChatNeedAudit: false } },
+      } };
+      if (path.includes('/approval_nodes/get/')) return options.approval ?? automaticApproval;
       if (path.includes('/publish/commit/')) return { code: 0 };
       throw new Error(`unexpected endpoint: ${path}`);
     }),
@@ -102,6 +115,87 @@ function harness(options: {
 }
 
 describe('configureLarkOpenPlatformApp', () => {
+  it('uses the real collaborator exemption flow despite canAutoApproval=false and a CC recipient', async () => {
+    const { client, calls } = harness({ versions: { data: { versions: [] } } });
+    await configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true, creatorUserId: 'creator' });
+    expect(automaticApproval.data.canAutoApproval).toBe(false);
+    const prediction = calls.findIndex(call => call.path.includes('/approval_nodes/get/'));
+    expect(calls[prediction]?.body).toEqual({
+      visibleSuggest: { departments: [], members: ['creator'], groups: [], isAll: 0 },
+      blackVisibleSuggest: { departments: [], members: [], groups: [], isAll: 0 },
+      b2cShareSplitConfigSuggest: { b2cGroupChatShareEnable: false, b2cP2PChatShareEnable: false, b2cP2PChatNeedAudit: false },
+      versionId: 'version-2', notCalculateFlow: false,
+    });
+    expect(calls[prediction + 1]?.path).toContain('/publish/commit/');
+  });
+
+  it.each([
+    { nodeName: '业务方必要性确认', nodeType: '或签', nodeUser: [{ approver: { id: 'human' } }] },
+    { nodeName: '业务方必要性确认', nodeType: '自动通过', nodeUser: [{ approver: { id: 'human' } }] },
+    { nodeName: '权限确认', nodeType: '审批人规则为空，自动通过', nodeUser: [] },
+    { nodeName: '未知节点', nodeType: '自动通过' },
+    { nodeName: '结束', nodeType: '或签', nodeUser: [{ approver: { id: 'human' } }] },
+    { nodeName: '未知抄送节点', nodeType: '或签', nodeUser: [], nodeCcUser: [{ approver: { id: 'cc' } }] },
+  ])('never submits a new app with an unconfirmed or human approval gate: %j', async node => {
+    const { client, calls } = harness({ approval: { data: { canAutoApproval: true, applyInstanceInfo: { applyNodes: [node] } } } });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true })).rejects.toMatchObject({ code: 'publish_requires_review' });
+    expect(calls.some(call => call.path.includes('/publish/commit/'))).toBe(false);
+  });
+
+  it.each([undefined, [], [null], [{ nodeName: '发起', nodeType: '', nodeUser: [{ approver: { id: 'creator' } }] }, { nodeName: '结束', nodeType: '', nodeUser: [] }]])('does not submit an empty or malformed approval prediction: %j', async applyNodes => {
+    const { client, calls } = harness({ approval: { data: { canAutoApproval: true, applyInstanceInfo: { applyNodes } } } });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true })).rejects.toMatchObject({ code: 'approval_prediction_unreadable' });
+    expect(calls.some(call => call.path.includes('/publish/commit/'))).toBe(false);
+  });
+
+  it('reuses the unpublished app draft and checks its actual creator-only visibility', async () => {
+    const { client, calls } = harness({
+      versions: { data: { versions: [{ versionId: 'version-2', appVersion: '0.0.1', versionStatus: 0 }] } },
+      draftDetail: { data: { versionId: 'version-2', versionStatus: 0,
+        visibleRange: { whiteList: { departments: [], members: [{ id: 'creator' }], groups: [], isAll: 0 }, blackList: { departments: [], members: [], groups: [], isAll: 0 } },
+        changeAppShareConfig: { b2cShareSplitConfigSuggest: { b2cGroupChatShareEnable: false, b2cP2PChatShareEnable: false, b2cP2PChatNeedAudit: false } },
+      } },
+    });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true, creatorUserId: 'creator' })).resolves.toMatchObject({ versionId: 'version-2' });
+    expect(calls.some(call => call.path.includes('/app_version/create/'))).toBe(false);
+    expect(calls.some(call => call.path.includes('/visible/online/'))).toBe(false);
+    expect(calls.some(call => call.path.includes('/publish/commit/cli_test/version-2'))).toBe(true);
+  });
+
+  it('waits for an automatic approval to finish and submits the version only once', async () => {
+    vi.useFakeTimers();
+    try {
+      const { client, calls } = harness();
+      const delegate = client.postJson.bind(client);
+      let reads = 0;
+      client.postJson = async (path, body) => {
+        const result = await delegate(path, body);
+        if (path.includes('/app_version/list/') && ++reads === 2) return { data: { versions: [{ versionId: 'version-2', versionStatus: 1 }] } };
+        return result;
+      };
+      const pending = configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true });
+      await vi.runAllTimersAsync();
+      await expect(pending).resolves.toMatchObject({ status: 'ready' });
+      expect(reads).toBe(3);
+      expect(calls.filter(call => call.path.includes('/publish/commit/'))).toHaveLength(1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('stops before approval prediction if a draft has stale visibility', async () => {
+    const { client, calls } = harness({ versions: { data: { versions: [] } }, draftDetail: { data: {
+      versionId: 'version-2', versionStatus: 0, visibleRange: visibility.data,
+    } } });
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true, creatorUserId: 'creator' })).rejects.toMatchObject({ code: 'draft_visibility_mismatch' });
+    expect(calls.some(call => call.path.includes('/approval_nodes/get/') || call.path.includes('/publish/commit/'))).toBe(false);
+  });
+
+  it.each(['/app_version/detail/cli_test/version-2', '/approval_nodes/get/cli_test'])('does not submit when preflight transport fails at %s', async path => {
+    const { client, calls } = harness({ failAt: `/developers/v1${path}`, secret: 'COOKIE_CANARY' });
+    const error = await configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true }).catch(error => error);
+    expect(String(error)).not.toContain('COOKIE_CANARY');
+    expect(calls.some(call => call.path.includes('/publish/commit/'))).toBe(false);
+  });
+
   it('publishes with the actual console draft catalog, including five pending application permissions', async () => {
     const { client, calls } = harness({ catalog: draftCatalog });
     expect(draftCatalog.data.scopes.filter(scope => scope.scopeType2ScopeStatus['2'] === 1)).toHaveLength(5);

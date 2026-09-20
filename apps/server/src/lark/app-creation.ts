@@ -271,7 +271,7 @@ export class LarkAppCreationJobManager {
       if (error instanceof OpenPlatformSessionError) message = error.message;
       if (error instanceof LarkOpenPlatformConfigurationError) {
         message = `应用草稿已保存：${error.message}（${error.code}）。请继续处理该应用`;
-        // Permission/event/visibility failures precede version creation, so the known app is safe to resume.
+        // Preflight failures never submit a publication; retries reuse and verify the same draft.
         retryable = [
           'scope_catalog_read_failed', 'scope_catalog_incomplete', 'scope_update_failed',
           'scope_verification_read_failed', 'scope_verification_failed', 'robot_enable_failed',
@@ -279,6 +279,8 @@ export class LarkAppCreationJobManager {
           'callback_read_failed', 'callback_mode_failed', 'callback_update_failed', 'callback_verification_failed',
           'version_list_failed', 'version_list_unreadable', 'visibility_read_failed', 'visibility_unreadable',
           'privilege_read_failed', 'privilege_update_failed', 'privilege_verification_failed',
+          'draft_read_failed', 'draft_visibility_mismatch', 'approval_prediction_failed',
+          'approval_prediction_unreadable', 'publish_requires_review',
         ].includes(error.code);
       }
       const pendingReview = error instanceof LarkOpenPlatformConfigurationError && error.code === 'publish_pending_review';
