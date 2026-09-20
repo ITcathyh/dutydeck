@@ -87,7 +87,7 @@ export class LarkAppCreationJobManager {
     if (!repository.compareAndSet) throw new LarkAppCreationError(503, '配置存储不支持原子认领，无法安全创建应用');
     return repository.compareAndSet(key(id), expected, this.serialize(job));
   }
-  private async load(id: string): Promise<{ job: StoredJob; raw: string } | undefined> {
+  private async load(id: string, readOnly = false): Promise<{ job: StoredJob; raw: string } | undefined> {
     // Always read durable state: another instance may cancel, finish or claim a retry.
     for (;;) {
       const raw = await this.options.config.get(key(id));
@@ -97,19 +97,20 @@ export class LarkAppCreationJobManager {
       const safe = canCancel(job);
       job.status = 'failed';
       job.retryable = safe;
-      job.error = safe ? '服务已重启，请重新扫码继续' : '服务重启前的创建或发布结果未知，请到飞书开放平台核对，禁止自动重试';
+      job.error = safe ? '服务已重启，请重试继续' : '服务重启前的创建或发布结果未知，请到飞书开放平台核对，禁止自动重试';
       job.updatedAt = this.timestamp();
       delete job.runner;
-      if (job.appId && await readLarkConfig(this.options.config, job.appId)) job.botSaved = true;
+      if (job.appId && await readLarkConfig(this.options.config, job.appId, { readOnly })) job.botSaved = true;
+      if (readOnly) return { job, raw };
       if (await this.compareAndSet(id, raw, job)) return { job, raw: this.serialize(job) };
     }
   }
-  async get(id: string): Promise<LarkAppCreationJob | undefined> {
+  async get(id: string, options: { readOnly?: boolean } = {}): Promise<LarkAppCreationJob | undefined> {
     if (!isUuid(id)) return undefined;
-    const state = await this.load(id);
+    const state = await this.load(id, options.readOnly);
     return state && this.publicJob(state.job);
   }
-  async start(requestId: unknown, name: unknown): Promise<LarkAppCreationJob> {
+  async start(requestId: unknown, name: unknown, options: { forceLogin?: boolean } = {}): Promise<LarkAppCreationJob> {
     if (!isUuid(requestId) || typeof name !== 'string' || !name.trim() || name.trim().length > 50) {
       throw new LarkAppCreationError(400, '请提供有效的请求 ID 和 1–50 字机器人名称');
     }
@@ -121,7 +122,7 @@ export class LarkAppCreationJobManager {
         return this.publicJob((await this.load(requestId))!.job);
       }
       this.jobs.set(requestId, job);
-      this.launch(job.id);
+      this.launch(job.id, options);
       return this.publicJob(job);
     });
   }
@@ -139,7 +140,7 @@ export class LarkAppCreationJobManager {
       }
     });
   }
-  async retry(id: string): Promise<LarkAppCreationJob> {
+  async retry(id: string, options: { forceLogin?: boolean } = {}): Promise<LarkAppCreationJob> {
     return this.locked(id, async () => {
       const state = await this.load(id);
       if (!state) throw new LarkAppCreationError(404, '创建任务不存在');
@@ -150,14 +151,14 @@ export class LarkAppCreationJobManager {
       delete job.scanConfirmed;
       if (!await this.compareAndSet(id, raw, job)) throw new LarkAppCreationError(409, '任务已被其他服务实例认领，请刷新状态');
       this.jobs.set(id, job);
-      this.launch(id);
+      this.launch(id, options);
       return this.publicJob(job);
     });
   }
   async wait(id: string): Promise<void> { await this.runs.get(id); }
-  private launch(id: string) {
+  private launch(id: string, options: { forceLogin?: boolean }) {
     // Defer until the caller's state transaction has released its lock.
-    const run = Promise.resolve().then(() => this.run(id)).finally(() => this.runs.delete(id));
+    const run = Promise.resolve().then(() => this.run(id, options)).finally(() => this.runs.delete(id));
     this.runs.set(id, run);
   }
   private async cancelled(id: string) {
@@ -183,12 +184,12 @@ export class LarkAppCreationJobManager {
       }
     });
   }
-  private async run(id: string) {
+  private async run(id: string, options: { forceLogin?: boolean }) {
     let retryable = true;
     let message = '飞书开放平台登录失败，请重新扫码重试';
     try {
       const connected = await (this.options.connect ?? connectLarkOpenPlatformSession)({
-        forceLogin: true,
+        forceLogin: options.forceLogin === true,
         fetchImpl: this.options.fetcher,
         onQrUpdate: async update => {
           if (await this.cancelled(id)) return;
@@ -205,7 +206,7 @@ export class LarkAppCreationJobManager {
       if (await this.cancelled(id)) return;
       const identity = JSON.stringify({ userId: owner.userId, tenantId: owner.tenantId });
       if (originalOwner && originalOwner !== identity) {
-        message = '请使用首次扫码的同一账号和企业继续配置';
+        message = '请使用首次登录的同一账号和企业继续配置';
         throw new Error('owner mismatch');
       }
       await this.options.config.set(ownerKey(id), identity);
@@ -262,7 +263,7 @@ export class LarkAppCreationJobManager {
       retryable = false;
       message = '应用草稿已保存，但自动配置或发布未完成；请继续配置该机器人并核对开放平台状态';
       await this.update(id, { status: 'configuring' });
-      const configured = await (this.options.configure ?? configureLarkOpenPlatformApp)(client, appId, { creatorUserId: owner.userId });
+      const configured = await (this.options.configure ?? configureLarkOpenPlatformApp)(client, appId, { creatorUserId: owner.userId, newApp: true });
       await this.syncSlashCommands(appId, configured?.skippedScopes ?? []);
       await this.update(id, { status: 'completed', retryable: false });
     } catch (error) {
@@ -277,6 +278,7 @@ export class LarkAppCreationJobManager {
           'event_mode_failed', 'event_read_failed', 'event_update_failed', 'event_verification_failed',
           'callback_read_failed', 'callback_mode_failed', 'callback_update_failed', 'callback_verification_failed',
           'version_list_failed', 'version_list_unreadable', 'visibility_read_failed', 'visibility_unreadable',
+          'privilege_read_failed', 'privilege_update_failed', 'privilege_verification_failed',
         ].includes(error.code);
       }
       const pendingReview = error instanceof LarkOpenPlatformConfigurationError && error.code === 'publish_pending_review';

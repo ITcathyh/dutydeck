@@ -511,16 +511,16 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
   };
 }
 
-export async function readLarkConfigs(repository?: ConfigRepository): Promise<StoredLarkConfig[]> {
+export async function readLarkConfigs(repository?: ConfigRepository, options: { readOnly?: boolean } = {}): Promise<StoredLarkConfig[]> {
   const stored = await repository?.get(larkBotsConfigKey);
   if (stored) {
     try {
       const parsed = JSON.parse(stored);
       if (Array.isArray(parsed)) {
         const configs = parsed.map(item => normalizeStoredConfig(item)).filter((item): item is StoredLarkConfig => Boolean(item));
-        if (parsed.some(needsRiskControlMigration)) {
+        if (!options.readOnly && parsed.some(needsRiskControlMigration)) {
           if (repository?.compareAndSet) {
-            if (!await repository.compareAndSet(larkBotsConfigKey, stored, JSON.stringify(configs))) return readLarkConfigs(repository);
+            if (!await repository.compareAndSet(larkBotsConfigKey, stored, JSON.stringify(configs))) return readLarkConfigs(repository, options);
           } else await repository?.set(larkBotsConfigKey, JSON.stringify(configs));
         }
         return configs;
@@ -531,17 +531,17 @@ export async function readLarkConfigs(repository?: ConfigRepository): Promise<St
   if (!legacy) return [];
   try {
     const config = normalizeStoredConfig(JSON.parse(legacy));
-    if (config) {
+    if (config && !options.readOnly) {
       if (repository?.compareAndSet) {
-        if (!await repository.compareAndSet(larkBotsConfigKey, stored, JSON.stringify([config]))) return readLarkConfigs(repository);
+        if (!await repository.compareAndSet(larkBotsConfigKey, stored, JSON.stringify([config]))) return readLarkConfigs(repository, options);
       } else await repository?.set(larkBotsConfigKey, JSON.stringify([config]));
     }
     return config ? [config] : [];
   } catch { return []; }
 }
 
-export async function readLarkConfig(repository?: ConfigRepository, appId?: string): Promise<StoredLarkConfig | undefined> {
-  const configs = await readLarkConfigs(repository);
+export async function readLarkConfig(repository?: ConfigRepository, appId?: string, options: { readOnly?: boolean } = {}): Promise<StoredLarkConfig | undefined> {
+  const configs = await readLarkConfigs(repository, options);
   return appId ? configs.find(config => config.appId === appId) : configs[0];
 }
 

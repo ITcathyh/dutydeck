@@ -59,12 +59,12 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
   try {
     if (options.resume && name !== undefined) throw new LarkCreateCliError('--resume 与新机器人名称不能同时使用。');
     if (options.status && !options.resume) throw new LarkCreateCliError('--status 需要 --resume <任务 ID>。');
-    if (options.status && (options.agent || options.workspace || options.listen || options.fullTrust)) throw new LarkCreateCliError('--status 只查询状态，不能同时修改 Agent 或监听配置。');
+    if (options.status && (options.agent || options.workspace || options.listen || options.fullTrust || options.forceLogin)) throw new LarkCreateCliError('--status 只查询状态，不能同时重新登录或修改 Agent、监听配置。');
     if (!options.resume && (!name?.trim() || name.trim().length > 50)) throw new LarkCreateCliError('请提供 1–50 字机器人名称。');
     if (options.resume && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(options.resume)) throw new LarkCreateCliError('任务 ID 必须是有效的 UUID。');
     if ((options.listen || options.workspace || options.fullTrust) && !options.agent) throw new LarkCreateCliError('--listen、--workspace、--full-trust 需要同时指定 --agent <ID>。');
     if (options.agent && !options.fullTrust) throw new LarkCreateCliError('绑定执行 Agent 需要 --full-trust，明确允许飞书任务无人值守执行。');
-    if (!options.status && (options.json || !ui.tty)) throw new LarkCreateCliError('创建或续跑需要在终端扫码；请去掉 --json 并在交互终端执行。脚本可用 --resume <任务 ID> --status --json 查询。');
+    if (options.forceLogin && (options.json || !ui.tty)) throw new LarkCreateCliError('--force-login 需要交互终端扫码，请去掉 --json 后执行。');
     const workspace = options.workspace === undefined ? undefined : validateWorkingDirectory(options.workspace);
     if (options.agent && !await context.agents.get(options.agent)) {
       throw new LarkCreateCliError(`未知执行 Agent：${options.agent}。可用 ID：${(await context.agents.list()).map(agent => agent.id).join(', ') || '无'}。`);
@@ -80,7 +80,9 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
       connect: async connectOptions => {
         const connected = await (context.connect ?? connectLarkOpenPlatformSession)({
           ...connectOptions,
+          allowQrLogin: ui.tty && !options.json,
           onQrUpdate: async update => {
+            if (!ui.tty || options.json) return;
             await connectOptions?.onQrUpdate?.(update);
             if (update.status === 'scan_confirmed') ui.progress('已确认扫码，正在建立开放平台会话…');
             else if (renderedPayload !== update.qrPayload) {
@@ -90,24 +92,24 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
             }
           },
         });
-        ui.progress(`账号「${connected.owner.userName}」 / 企业「${connected.owner.tenantName}」；正在创建或继续配置…`);
+        if (!options.json) ui.progress(`账号「${connected.owner.userName}」 / 企业「${connected.owner.tenantName}」；正在创建或继续配置…`);
         return connected;
       },
     });
     if (options.resume) {
-      job = await manager.get(id);
+      job = await manager.get(id, { readOnly: options.status });
       if (!job) throw new LarkCreateCliError('创建任务不存在，请核对任务 ID 和 --database。');
     }
     if (!options.status) {
       // Print recovery information before the first request, including the exact database.
-      ui.notice(`中断后续跑同一任务：${next}`);
-      if (!job) job = await manager.start(id, name);
-      else if (job.status === 'failed' && job.retryable) job = await manager.retry(id);
+      if (!options.json) ui.notice(`中断后续跑同一任务：${next}`);
+      if (!job) job = await manager.start(id, name, { forceLogin: options.forceLogin });
+      else if (job.status === 'failed' && job.retryable) job = await manager.retry(id, { forceLogin: options.forceLogin });
       await manager.wait(id);
       job = await manager.get(id);
     }
     if (!job) throw new LarkCreateCliError('无法读取创建任务，请使用上面的任务 ID 查询。');
-    let bot = job.appId ? await readLarkConfig(context.config, job.appId) : undefined;
+    let bot = job.appId ? await readLarkConfig(context.config, job.appId, { readOnly: options.status }) : undefined;
     const configured = job.status === 'completed' || job.status === 'pending_review';
     if (!options.status && configured && options.agent) {
       if (!bot) throw new LarkCreateCliError('应用已创建，但本地机器人配置不存在，请在 Dashboard 核对。');

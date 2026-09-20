@@ -58,6 +58,7 @@ export class OpenPlatformRequestError extends Error {
 }
 
 const sessionFailureMessages = {
+  login_required: '本机登录态不可用，请在交互终端去掉 --json 后使用 --resume 续跑并扫码登录',
   qr_login: '飞书扫码登录失败，请重新扫码重试',
   login_redirect: '扫码已确认，但飞书登录跳转未完成，请检查网络后重试',
   console: '扫码后无法建立飞书开放平台会话，请检查网络后重试',
@@ -81,6 +82,7 @@ export interface OpenPlatformQrUpdate {
 export interface ConnectOpenPlatformSessionOptions {
   sessionFilePath?: string;
   forceLogin?: boolean;
+  allowQrLogin?: boolean;
   fetchImpl?: typeof fetch;
   pollIntervalMs?: number;
   maxWaitMs?: number;
@@ -181,6 +183,8 @@ export async function connectLarkOpenPlatformSession(
       }
     }
   }
+
+  if (options.allowQrLogin === false) throw new OpenPlatformSessionError('login_required');
 
   const jar = new CookieJar([], requestTimeoutMs);
   try { await loginWithQr(jar, fetcher, options); }

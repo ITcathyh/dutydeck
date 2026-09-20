@@ -5,7 +5,7 @@ import { api, type LarkAppCreationJob } from '../api';
 import { Banner, Button, Field, Input, Spinner } from './primitives';
 
 const pendingKey = 'dutydeck:lark-app-creation';
-type CreationRequest = { requestId: string; name: string };
+type CreationRequest = { requestId: string; name: string; forceLogin?: boolean };
 const terminal = (job?: LarkAppCreationJob) => Boolean(job && ['completed', 'pending_review', 'failed', 'cancelled'].includes(job.status));
 
 function readPending(): CreationRequest | undefined {
@@ -39,6 +39,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
   const qc = useQueryClient();
   const [request, setRequest] = useState(readPending);
   const [name, setName] = useState(request?.name ?? 'Dutydeck 助手');
+  const [forceLogin, setForceLogin] = useState(false);
   const completedId = useRef('');
   const update = async (job: LarkAppCreationJob) => {
     await qc.cancelQueries({ queryKey: ['lark-app-creation', job.id] });
@@ -53,9 +54,9 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
     refetchInterval: query => terminal(query.state.data) ? false : 1_000,
   });
   const action = useMutation({
-    mutationFn: (kind: 'cancel' | 'retry') => kind === 'cancel'
+    mutationFn: (kind: 'cancel' | 'retry' | 'retry-login') => kind === 'cancel'
       ? api.cancelLarkAppCreation(request!.requestId)
-      : api.retryLarkAppCreation(request!.requestId),
+      : api.retryLarkAppCreation(request!.requestId, kind === 'retry-login'),
     onSuccess: update,
   });
   const finish = useMutation({
@@ -77,7 +78,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
   }, [state, complete]);
 
   const create = () => {
-    const next = request ?? { requestId: requestId(), name: name.trim() };
+    const next = request ?? { requestId: requestId(), name: name.trim(), forceLogin };
     remember(next);
     setRequest(next);
     start.mutate(next);
@@ -91,14 +92,15 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
   return <section aria-label="一键创建飞书机器人" className="space-y-3 rounded-lg border border-action-border bg-action-soft p-3.5">
     <div>
       <h3 className="text-body font-semibold text-primary">一键创建飞书机器人</h3>
-      <p className="mt-1 text-caption text-secondary">用飞书扫码确认后，在所选企业创建应用，自动配置消息权限并发布，再选择执行 Agent。</p>
+      <p className="mt-1 text-caption text-secondary">优先使用本机已登录的飞书账号创建应用，自动配置消息权限并发布，再选择执行 Agent。登录失效时会提示扫码。</p>
     </div>
     {!request ? <>
       <Field label="新机器人名称"><Input name="newAppName" value={name} maxLength={50} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); if (name.trim()) create(); } }} placeholder="例如：研发助手"/></Field>
-      <Button variant="primary" icon={<QrCode size={15}/>} disabled={!name.trim()} onClick={create}>扫码创建机器人</Button>
+      <label className="flex items-center gap-2 text-caption text-secondary"><input type="checkbox" checked={forceLogin} onChange={event => setForceLogin(event.target.checked)}/>使用其他账号，重新扫码登录</label>
+      <Button variant="primary" icon={<QrCode size={15}/>} disabled={!name.trim()} onClick={create}>创建机器人</Button>
     </> : <>
       <p className="text-caption font-medium text-primary">{request.name}{state?.tenantName && ` · ${state.tenantName}`}{state?.accountName && ` · ${state.accountName}`}</p>
-      {(!state || state.status === 'preparing') && <Spinner label="正在准备飞书扫码登录…"/>}
+      {(!state || state.status === 'preparing') && <Spinner label="正在连接飞书开放平台…"/>}
       {state?.status === 'waiting_for_scan' && <div className="flex flex-wrap items-center gap-4">
         {state.qrDataUrl && <img src={state.qrDataUrl} alt="创建机器人：飞书登录二维码" className="h-40 w-40 rounded-md bg-surface"/>}
         <div className="space-y-2 text-caption text-secondary"><p role="status">{state.scanConfirmed ? '已扫码，请在飞书中确认账号和企业' : '请用飞书扫码，确认账号和企业'}</p><p>确认后开始创建，无需手动复制 App ID 或 App Secret。</p></div>
@@ -114,7 +116,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
       {error && <Banner tone="danger">{error.message}</Banner>}
       <div className="flex flex-wrap gap-2">
         {state && ['preparing', 'waiting_for_scan'].includes(state.status) && <Button loading={action.isPending} onClick={() => action.mutate('cancel')}>取消创建</Button>}
-        {state?.status === 'failed' && state.retryable && <Button loading={action.isPending} onClick={() => action.mutate('retry')}>重试本次创建</Button>}
+        {state?.status === 'failed' && state.retryable && <><Button loading={action.isPending} onClick={() => action.mutate('retry')}>重试本次创建</Button><Button variant="ghost" loading={action.isPending} onClick={() => action.mutate('retry-login')}>重新扫码后重试</Button></>}
         {((state?.status === 'failed' || state?.status === 'pending_review') && state.botSaved || state?.status === 'completed' && finish.isError) && state.appId && <Button loading={finish.isPending} onClick={() => finish.mutate(state.appId!)}>继续配置已创建的机器人</Button>}
         {state?.status === 'pending_review' && state.appId && <a href={`https://open.larkoffice.com/app/${encodeURIComponent(state.appId)}`} target="_blank" rel="noreferrer" className="inline-flex min-h-10 items-center gap-1 text-caption font-medium text-action underline">查看审核进度<ExternalLink size={12}/></a>}
         {state?.status === 'failed' && <a href={state.appId ? `https://open.larkoffice.com/app/${encodeURIComponent(state.appId)}` : 'https://open.larkoffice.com/app'} target="_blank" rel="noreferrer" className="inline-flex min-h-10 items-center gap-1 text-caption font-medium text-action underline">到飞书后台核对应用<ExternalLink size={12}/></a>}

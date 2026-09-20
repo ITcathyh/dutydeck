@@ -47,11 +47,11 @@ it('creates once, durably saves credentials privately and configures creator vis
   const job = await h.manager.get(id);
   expect(job).toMatchObject({ status: 'completed', botSaved: true, appId: 'cli_created', accountName: 'Alice', tenantName: 'Acme' });
   expect(h.connect).toHaveBeenCalledOnce();
-  expect(h.connect.mock.calls[0]![0]).toMatchObject({ forceLogin: true });
+  expect(h.connect.mock.calls[0]![0]).toMatchObject({ forceLogin: false });
   expect(h.postJson.mock.calls.filter(([path]) => path.includes('upsert_by_template'))).toHaveLength(1);
   expect(h.postJson.mock.calls[0]![1]).toMatchObject({ cid: id, appManifestTemplateID: 'developer_console' });
   expect(h.postForm.mock.calls[0]![1].get('uploadType')).toBe('4');
-  expect(h.configure).toHaveBeenCalledWith(h.connected.client, 'cli_created', { creatorUserId: 'private-user' });
+  expect(h.configure).toHaveBeenCalledWith(h.connected.client, 'cli_created', { creatorUserId: 'private-user', newApp: true });
   expect(await readLarkConfig(h.config, 'cli_created')).toMatchObject({ name: 'My Bot', appSecret: 'test-private-secret', listening: false });
   for (const value of [JSON.stringify(job), h.records.get(`lark.app_creation.${id}`)!]) {
     for (const secret of ['test-private-secret', 'private-user', 'private-tenant', 'private-qr']) expect(value).not.toContain(secret);
@@ -158,13 +158,13 @@ it('preserves an already-saved app and never replays uncertain configuration', a
   await expect(h.manager.retry(id)).rejects.toMatchObject({ statusCode: 409 });
 });
 
-it('reports a permission failure and resumes configuration of the same saved app', async () => {
+it.each(['scope_verification_failed', 'privilege_read_failed', 'privilege_update_failed', 'privilege_verification_failed'] as const)('resumes the same saved app after %s', async code => {
   const h = harness();
-  h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError('scope_verification_failed', '必需应用权限未加入待发布草稿'));
+  h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError(code, '必需应用权限未加入待发布草稿'));
   await h.manager.start(id, 'Bot'); await h.manager.wait(id);
   expect(await h.manager.get(id)).toMatchObject({
     status: 'failed', botSaved: true, retryable: true,
-    error: expect.stringContaining('必需应用权限未加入待发布草稿（scope_verification_failed）'),
+    error: expect.stringContaining(`必需应用权限未加入待发布草稿（${code}）`),
   });
   const restarted = new LarkAppCreationJobManager(h.options);
   await restarted.retry(id); await restarted.wait(id);
@@ -342,4 +342,30 @@ describe('首配后的原生斜杠命令同步', () => {
     expect(await h.manager.get(id)).toMatchObject({ status: 'pending_review' });
     expect(h.syncSlashCommands).not.toHaveBeenCalled();
   });
+});
+
+it('honors explicit login on start and safe retry while keeping request IDs idempotent', async () => {
+  const h = harness();
+  h.connect.mockRejectedValueOnce(new OpenPlatformSessionError('qr_login'));
+  await h.manager.start(id, 'Bot', { forceLogin: true }); await h.manager.wait(id);
+  expect(h.connect).toHaveBeenLastCalledWith(expect.objectContaining({ forceLogin: true }));
+  await h.manager.start(id, 'Bot', { forceLogin: false });
+  expect(h.connect).toHaveBeenCalledOnce();
+  await h.manager.retry(id, { forceLogin: true }); await h.manager.wait(id);
+  expect(h.connect).toHaveBeenLastCalledWith(expect.objectContaining({ forceLogin: true }));
+  expect(await h.manager.get(id)).toMatchObject({ status: 'completed' });
+  expect(h.postJson.mock.calls.filter(([path]) => path.includes('upsert_by_template'))).toHaveLength(1);
+});
+
+it.each([false, true])('rejects a changed cached or freshly scanned owner during retry (forceLogin=%s)', async forceLogin => {
+  const h = harness();
+  h.postJson.mockResolvedValueOnce({ data: { ClientID: 'cli_created' } }).mockRejectedValueOnce(new Error('secret temporarily unavailable'));
+  await h.manager.start(id, 'Bot'); await h.manager.wait(id);
+  h.connected.source = forceLogin ? 'qr_login' : 'cache';
+  h.connected.owner.tenantId = 'different-tenant';
+  await h.manager.retry(id, { forceLogin }); await h.manager.wait(id);
+  expect(h.connect).toHaveBeenLastCalledWith(expect.objectContaining({ forceLogin }));
+  expect(await h.manager.get(id)).toMatchObject({ status: 'failed', retryable: true, error: expect.stringContaining('同一账号和企业') });
+  expect(h.configure).not.toHaveBeenCalled();
+  expect(h.postJson.mock.calls.filter(([path]) => path.includes('upsert_by_template'))).toHaveLength(1);
 });

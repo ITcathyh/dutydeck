@@ -49,6 +49,7 @@ export interface LarkCreateCliOptions {
   listen?: boolean;
   fullTrust?: boolean;
   database?: string;
+  forceLogin?: boolean;
 }
 
 export interface AgentGroupCliOptions {
@@ -342,11 +343,12 @@ Examples:
 
   const lark = program.command('lark').description('Create Lark bots and send or update Dutydeck cards');
   lark.command('create')
-    .description('Scan a QR code to create, configure and submit a new Feishu bot for publication')
+    .description('Create, configure and submit a new Feishu bot using the local login session')
     .argument('[name]', 'New bot name (1–50 characters); omit when resuming')
     .option('--resume <id>', 'Continue the same creation job; safely retry a failed job without recreating its app')
     .option('--status', 'Only inspect the --resume job; never scan, retry or change Agent settings')
-    .option('--json', 'Emit one JSON line; requires --status because creation needs a terminal QR scan')
+    .option('--json', 'Emit one JSON line; create using a valid cached login and never render a QR code')
+    .option('--force-login', 'Scan again to choose another account; requires an interactive terminal')
     .option('--agent <id>', 'Execution Agent ID, including custom profiles such as ccflash')
     .option('--workspace <directory>', 'Existing absolute Agent working directory')
     .option('--full-trust', 'Allow the selected Agent to execute unattended Lark tasks with full trust')
@@ -357,7 +359,8 @@ Examples:
     }))
     .addHelpText('after', `
 Behaviour:
-  创建和续跑需要交互终端；每次新建都会重新扫码确认账号与企业。
+  创建和续跑优先复用本机登录态，失效时在交互终端扫码；--force-login 可重新选择账号。
+  有效登录态支持非交互创建及 --json；无有效登录态时停止，并输出 --resume 续跑命令。
   App Secret 仅保存到本地数据库；创建完成后可直接选择执行 Agent，也可在 Dashboard 继续。
   中断后用输出的 --resume 命令续跑；创建或发布结果未知时停止重试，避免重复创建应用。
   数据库默认沿用本机 daemon，可用全局 --database 指定。监听配置在启动/重启服务后生效。

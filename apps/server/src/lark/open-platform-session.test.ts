@@ -381,3 +381,30 @@ it('reports a console-stage failure without copying upstream credentials into it
   expect(error.message).not.toContain('canary');
   expect(readOpenPlatformSessionCookies(file)).toBeNull();
 });
+
+it.each(['missing', 'expired', 'invalid', 'valid', 'forced'] as const)('handles %s cache before any headless QR request', async kind => {
+  const file = join(temporaryDirectory(), 'session.json');
+  if (kind !== 'missing') writeOpenPlatformSessionCookies(file, [cookie(kind === 'expired' ? { expiresAt: Date.now() - 1000 } : {})]);
+  const onQrUpdate = vi.fn();
+  const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+    expect(String(input)).toBe('https://open.feishu.cn/app');
+    return new Response(kind === 'valid' ? consoleHtml() : '<html>login</html>');
+  }) as typeof fetch;
+  const promise = connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl, allowQrLogin: false, forceLogin: kind === 'forced', onQrUpdate });
+  if (kind === 'valid') await expect(promise).resolves.toMatchObject({ source: 'cache', owner: { userName: 'Alice' } });
+  else await expect(promise).rejects.toMatchObject({ phase: 'login_required', message: expect.stringContaining('--resume') });
+  expect(onQrUpdate).not.toHaveBeenCalled();
+  expect(fetchImpl).toHaveBeenCalledTimes(kind === 'valid' || kind === 'invalid' ? 1 : 0);
+});
+
+it('explicit re-login bypasses a valid cookie cache before requesting a QR', async () => {
+  const file = join(temporaryDirectory(), 'session.json');
+  writeOpenPlatformSessionCookies(file, [cookie()]);
+  const fetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    expect(String(input)).toContain('/accounts/qrlogin/init');
+    expect(new Headers(init?.headers).get('cookie')).toBeNull();
+    return Response.json({ code: 100, msg: 'fixture rejection' });
+  }) as typeof fetch;
+  await expect(connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl, forceLogin: true })).rejects.toMatchObject({ phase: 'qr_login' });
+  expect(fetchImpl).toHaveBeenCalledOnce();
+});

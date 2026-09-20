@@ -15,12 +15,16 @@ export async function registerLarkAppCreationRoutes(app: FastifyInstance, jobs?:
       });
     }
   };
-  app.post<{ Body: { requestId?: unknown; name?: unknown } }>('/api/lark/apps/create', (request, reply) =>
-    respond(reply, () => jobs!.start(request.body?.requestId, request.body?.name), 202));
+  const loginOptions = (body?: { forceLogin?: unknown }) => {
+    if (body?.forceLogin !== undefined && typeof body.forceLogin !== 'boolean') throw new LarkAppCreationError(400, 'forceLogin 必须是布尔值');
+    return { forceLogin: body?.forceLogin === true };
+  };
+  app.post<{ Body: { requestId?: unknown; name?: unknown; forceLogin?: unknown } }>('/api/lark/apps/create', (request, reply) =>
+    respond(reply, () => jobs!.start(request.body?.requestId, request.body?.name, loginOptions(request.body)), 202));
   app.get<{ Params: { jobId: string } }>('/api/lark/apps/create/:jobId', (request, reply) =>
     respond(reply, () => jobs!.get(request.params.jobId)));
   app.post<{ Params: { jobId: string } }>('/api/lark/apps/create/:jobId/cancel', (request, reply) =>
     respond(reply, () => jobs!.cancel(request.params.jobId)));
-  app.post<{ Params: { jobId: string } }>('/api/lark/apps/create/:jobId/retry', (request, reply) =>
-    respond(reply, () => jobs!.retry(request.params.jobId), 202));
+  app.post<{ Params: { jobId: string }; Body: { forceLogin?: unknown } }>('/api/lark/apps/create/:jobId/retry', (request, reply) =>
+    respond(reply, () => jobs!.retry(request.params.jobId, loginOptions(request.body)), 202));
 }

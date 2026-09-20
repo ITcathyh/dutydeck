@@ -1,0 +1,59 @@
+{
+  "data": {
+    "privileges": [
+      {
+        "bizId": "task",
+        "content": "{\"biz_id\":\"task\",\"resource\":\"manage_task_and_tasklist_members\",\"mode\":\"all\",\"description\":\"任务 - 创建、更新任务或清单时可指定的人员范围\\n\\t全部\\n\"}",
+        "isRequired": true,
+        "name": "创建、更新任务或清单时可指定的人员范围",
+        "organizationType": 1,
+        "privilegeStatus": 2,
+        "resource": "manage_task_and_tasklist_members",
+        "schema": "{\"biz_id\":\"task\",\"resource_id\":\"manage_task_and_tasklist_members\",\"resource_name\":\"创建、更新任务或清单时可指定的人员范围\",\"org_type\":1,\"schema_type\":1,\"schema_content\":{\"SelectionExpressionSchemaContent\":{\"fields\":[{\"id\":\"member\",\"name\":\"任务可指定的负责人、关注人，及清单可指定的协作人、订阅人、所有者\",\"type\":\"object\",\"multi\":false,\"operators\":[\"in\",\"notIn\"],\"data_source\":{\"type\":\"select_staff\",\"val\":\"\"},\"placeholder\":\"\",\"i18n_names\":{\"en-US\":\"Assignable task assignees/followers \\u0026 tasklist collaborators/subscribers/owners\",\"zh-CN\":\"任务可指定的负责人、关注人，及清单可指定的协作人、订阅人、所有者\"}}],\"select_mode_options\":[\"all\",\"part\",\"null\"],\"or_condition_group_number_limit\":1,\"default_value\":{\"mode\":\"part\",\"filters\":[{\"field\":\"member\",\"operator\":\"in\",\"value\":\"[{\\\"mode\\\":\\\"availability_of_app\\\",\\\"members\\\":[],\\\"departments\\\":[],\\\"groups\\\":[]}]\"}],\"expression\":\"1\"},\"fallback_value\":{\"mode\":\"all\"}}},\"i18n_resource_names\":{\"en-US\":\"Assignable user scope for creating and updating tasks or tasklists\",\"zh-CN\":\"创建、更新任务或清单时可指定的人员范围\"}}",
+        "schemaContent": {
+          "documentSchemaContent": {},
+          "selectionExpressionSchemaContent": {
+            "default_value": {
+              "expression": "1",
+              "filters": [
+                {
+                  "field": "member",
+                  "operator": "in",
+                  "value": "[{\"mode\":\"availability_of_app\",\"members\":[],\"departments\":[],\"groups\":[]}]"
+                }
+              ],
+              "mode": "part"
+            },
+            "fallback_value": {
+              "mode": "all"
+            },
+            "fields": [
+              {
+                "data_source": {
+                  "type": "select_staff",
+                  "val": ""
+                },
+                "id": "member",
+                "multi": false,
+                "name": "任务可指定的负责人、关注人，及清单可指定的协作人、订阅人、所有者",
+                "operators": [
+                  "in",
+                  "notIn"
+                ],
+                "placeholder": "",
+                "type": "object"
+              }
+            ],
+            "or_condition_group_number_limit": 1,
+            "select_mode_options": [
+              "all",
+              "part",
+              "null"
+            ]
+          }
+        },
+        "schemaType": 1
+      }
+    ]
+  }
+}

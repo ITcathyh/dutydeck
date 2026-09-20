@@ -52,16 +52,20 @@ it('finds the daemon database from another cwd and prints exactly one credential
   expect(JSON.parse(wrongDatabase.stdout)).toMatchObject({ ok: false, error: expect.stringContaining('不存在') });
 });
 
-it('exposes create in built-in help and refuses noninteractive creation with exit 1 and JSON diagnostics', () => {
+it('exposes create in built-in help and returns a resumable login failure in noninteractive creation', () => {
   const { root, cwd, database } = fixture();
   const help = invoke(root, cwd, ['lark', 'create', '--help']);
   expect(help.status, help.stderr).toBe(0);
   expect(help.stdout).toContain('--agent <id>');
   expect(help.stdout).toContain('ccflash');
+  expect(help.stdout).toContain('--force-login');
   const rejected = invoke(root, cwd, ['--database', database, 'lark', 'create', 'Bot', '--json']);
   expect(rejected.status, rejected.stderr).toBe(1);
-  expect(JSON.parse(rejected.stdout)).toMatchObject({ ok: false, error: expect.stringContaining('终端扫码') });
+  expect(JSON.parse(rejected.stdout)).toMatchObject({ ok: false, error: expect.stringContaining('交互终端') });
+  expect(rejected.stdout.trim().split('\n')).toHaveLength(1);
+  expect(rejected.stderr).toBe('');
+  expect(JSON.parse(rejected.stdout).next).toContain('--resume');
   const sqlite = new Database(database, { readonly: true });
-  try { expect(sqlite.prepare("SELECT count(*) AS count FROM configs WHERE key LIKE 'lark.app_creation.%'").get()).toEqual({ count: 0 }); }
+  try { expect(sqlite.prepare("SELECT count(*) AS count FROM configs WHERE key LIKE 'lark.app_creation.%'").get()).toEqual({ count: 1 }); }
   finally { sqlite.close(); }
 });
