@@ -67,9 +67,9 @@ describe('Dutydeck CLI', () => {
   it.each(['before', 'after'])('parses Lark creation and global database %s the subcommand', async position => {
     const larkCreate = vi.fn();
     const database = ['--database', '/tmp/bot creation.db'];
-    const args = ['lark', 'create', 'CCFlash 助手', '--agent', 'ccflash', '--full-trust', '--listen', '--workspace', '/tmp/project'];
+    const args = ['lark', 'create', 'CCFlash 助手', '--agent', 'ccflash', '--full-trust', '--listen', '--workspace', '/tmp/project', '--force-login'];
     await createCliProgram('0.0.6', { larkCreate }).parseAsync(['node', 'dutydeck', ...(position === 'before' ? [...database, ...args] : [...args, ...database])]);
-    expect(larkCreate).toHaveBeenCalledWith('CCFlash 助手', { agent: 'ccflash', fullTrust: true, listen: true, workspace: '/tmp/project', database: '/tmp/bot creation.db' });
+    expect(larkCreate).toHaveBeenCalledWith('CCFlash 助手', { agent: 'ccflash', fullTrust: true, listen: true, workspace: '/tmp/project', forceLogin: true, database: '/tmp/bot creation.db' });
   });
 
   it('parses read-only Lark creation status without a new name or unrelated global credentials', async () => {

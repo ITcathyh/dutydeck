@@ -42,12 +42,12 @@ describe('one-click Lark app creation', () => {
     expect(start).not.toHaveBeenCalled();
     await user.clear(screen.getByLabelText('新机器人名称'));
     await user.type(screen.getByLabelText('新机器人名称'), '研发助手');
-    await user.click(screen.getByRole('button', { name: '扫码创建机器人' }));
+    await user.click(screen.getByRole('button', { name: '创建机器人' }));
     expect(await screen.findByAltText('创建机器人：飞书登录二维码')).toBeTruthy();
     expect(start).toHaveBeenCalledOnce();
     const request = start.mock.calls[0]![0];
-    expect(request).toEqual({ requestId: expect.stringMatching(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/), name: '研发助手' });
-    expect(screen.queryByRole('button', { name: '扫码创建机器人' })).toBeNull();
+    expect(request).toEqual({ requestId: expect.stringMatching(/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/), name: '研发助手', forceLogin: false });
+    expect(screen.queryByRole('button', { name: '创建机器人' })).toBeNull();
     expect(JSON.parse(sessionStorage.getItem(pendingKey)!)).toEqual(request);
     await act(async () => { client.setQueryData(['lark-app-creation', request.requestId], { ...waiting(request.requestId), status: 'completed', appId: 'cli_created', botSaved: true }); });
     await waitFor(() => expect(onCreated).toHaveBeenCalledWith('cli_created', true));
@@ -61,7 +61,7 @@ describe('one-click Lark app creation', () => {
     const start = vi.spyOn(api, 'createLarkApp').mockRejectedValueOnce(new Error('response lost')).mockImplementation(async input => waiting(input.requestId));
     vi.spyOn(api, 'larkAppCreationJob').mockRejectedValue(new Error('temporarily unavailable'));
     renderPanel();
-    await user.click(screen.getByRole('button', { name: '扫码创建机器人' }));
+    await user.click(screen.getByRole('button', { name: '创建机器人' }));
     await user.click(await screen.findByRole('button', { name: '重新连接' }));
     await screen.findByAltText('创建机器人：飞书登录二维码');
     expect(start).toHaveBeenCalledTimes(2);
@@ -104,7 +104,7 @@ describe('one-click Lark app creation', () => {
     const retry = vi.spyOn(api, 'retryLarkAppCreation').mockResolvedValue(waiting());
     renderPanel();
     await user.click(await screen.findByRole('button', { name: '重试本次创建' }));
-    expect(retry).toHaveBeenCalledWith(id);
+    expect(retry).toHaveBeenCalledWith(id, false);
     expect(start).not.toHaveBeenCalled();
   });
 
@@ -143,4 +143,27 @@ describe('one-click Lark app creation', () => {
     expect(screen.queryByAltText('创建机器人：飞书登录二维码')).toBeNull();
     expect(screen.getByText('已取消创建，尚未创建飞书应用。')).toBeTruthy();
   });
+});
+
+it('allows choosing another account before creation and keeps that choice on reconnect', async () => {
+  const start = vi.spyOn(api, 'createLarkApp').mockRejectedValueOnce(new Error('response lost')).mockImplementation(async input => waiting(input.requestId));
+  vi.spyOn(api, 'larkAppCreationJob').mockRejectedValue(new Error('temporarily unavailable'));
+  renderPanel();
+  fireEvent.click(screen.getByRole('checkbox', { name: '使用其他账号，重新扫码登录' }));
+  fireEvent.click(screen.getByRole('button', { name: '创建机器人' }));
+  fireEvent.click(await screen.findByRole('button', { name: '重新连接' }));
+  await waitFor(() => expect(start).toHaveBeenCalledTimes(2));
+  expect(start.mock.calls[0]![0]).toMatchObject({ forceLogin: true });
+  expect(start.mock.calls[1]![0]).toEqual(start.mock.calls[0]![0]);
+});
+
+it('can request a fresh scan only for a safe retry of the same job', async () => {
+  sessionStorage.setItem(pendingKey, JSON.stringify({ requestId: id, name: '研发助手' }));
+  const start = vi.spyOn(api, 'createLarkApp');
+  vi.spyOn(api, 'larkAppCreationJob').mockResolvedValue({ ...waiting(), status: 'failed', appId: 'cli_existing', retryable: true });
+  const retry = vi.spyOn(api, 'retryLarkAppCreation').mockResolvedValue(waiting());
+  renderPanel();
+  fireEvent.click(await screen.findByRole('button', { name: '重新扫码后重试' }));
+  await waitFor(() => expect(retry).toHaveBeenCalledWith(id, true));
+  expect(start).not.toHaveBeenCalled();
 });

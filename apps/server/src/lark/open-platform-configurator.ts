@@ -91,6 +91,8 @@ export interface LarkOpenPlatformConfigureStepDetail {
 
 export interface LarkOpenPlatformConfigureOptions {
   creatorUserId?: string;
+  /** Only the app-creation job may opt in for its own not-yet-published app. */
+  newApp?: boolean;
   /** 每个阶段完成后回调一次；失败阶段不会回调。 */
   onStep?: (step: LarkOpenPlatformConfigureStep, detail?: LarkOpenPlatformConfigureStepDetail) => void;
 }
@@ -130,6 +132,11 @@ export async function configureLarkOpenPlatformApp(
   if (!isValidLarkAppId(appId)) {
     throw new LarkOpenPlatformConfigurationError('invalid_app_id', '飞书应用 ID 格式无效，应为 cli_*');
   }
+
+  const newAppVersions = options.newApp
+    ? await post(client, `/developers/v1/app_version/list/${appId}`, {}, 'version_list_failed', '读取飞书应用版本失败')
+    : undefined;
+  if (newAppVersions) nextVersion(newAppVersions);
 
   const catalogPayload = await post(client, `/developers/v1/scope/all/${appId}`, undefined,
     'scope_catalog_read_failed', '读取飞书权限目录失败');
@@ -237,9 +244,13 @@ export async function configureLarkOpenPlatformApp(
     );
   }
 
-  const versionPayload = await post(client, `/developers/v1/app_version/list/${appId}`, {},
+  const versionPayload = newAppVersions ?? await post(client, `/developers/v1/app_version/list/${appId}`, {},
     'version_list_failed', '读取飞书应用版本失败');
   const appVersion = nextVersion(versionPayload);
+  const priorVersions = asRecord(asRecord(versionPayload).data).versions as unknown[];
+  if (options.newApp && priorVersions.every(version => asRecord(version).versionStatus === 0)) {
+    await narrowNewAppPrivilegeRanges(client, appId);
+  }
   const firstRelease = (asRecord(asRecord(versionPayload).data).versions as unknown[]).length === 0;
   const visibility = firstRelease && options.creatorUserId
     ? {
@@ -313,6 +324,64 @@ async function post(
     // The injected transport may include cookies or app secrets in its error.
     // Keep the public error deterministic and credential-free.
     throw new LarkOpenPlatformConfigurationError(code, message);
+  }
+}
+
+async function narrowNewAppPrivilegeRanges(client: LarkOpenPlatformClient, appId: string): Promise<void> {
+  const read = async () => {
+    const payload = await post(client, `/developers/v1/privilege/all/${appId}`, {},
+      'privilege_read_failed', '读取新应用的数据范围失败，已停止发布');
+    const privileges = asRecord(asRecord(payload).data).privileges;
+    if (!Array.isArray(privileges)) throw new LarkOpenPlatformConfigurationError('privilege_read_failed', '新应用的数据范围结构不完整，已停止发布');
+    return privileges.map(asRecord);
+  };
+  const updates: Record<string, unknown>[] = [];
+  for (const privilege of await read()) {
+    if (privilege.isRequired !== true || privilege.schemaType !== 1 || privilege.organizationType !== 1) continue;
+    let content: Record<string, unknown>;
+    if (privilege.content !== undefined && typeof privilege.content !== 'string') continue;
+    try {
+      const parsed: unknown = JSON.parse(privilege.content || '{}');
+      if (!isRecord(parsed)) continue;
+      content = parsed;
+    } catch { continue; } // Preserve an existing range we cannot interpret.
+    if (content.mode === 'part') {
+      if (!Array.isArray(content.filters) || content.filters.length > 0) continue;
+    } else if (content.mode !== undefined && content.mode !== '' && content.mode !== 'all' && content.mode !== 'null') continue;
+    const fields = asRecord(asRecord(privilege.schemaContent).selectionExpressionSchemaContent).fields;
+    if (!Array.isArray(fields) || !fields.length || !fields.every(field => {
+      const value = asRecord(field);
+      return typeof value.id === 'string' && value.id.length > 0 && asRecord(value.data_source).type === 'select_staff'
+        && Array.isArray(value.operators) && value.operators.includes('in');
+    })) continue;
+    if (typeof privilege.bizId !== 'string' || typeof privilege.resource !== 'string') continue;
+    const filters = fields.map(field => ({ field: asRecord(field).id, operator: 'in',
+      value: JSON.stringify([{ mode: 'availability_of_app', members: [], departments: [], groups: [] }]) }));
+    updates.push({ ...privilege, content: JSON.stringify({ biz_id: privilege.bizId, resource: privilege.resource,
+      mode: 'part', filters, expression: filters.map((_, index) => index + 1).join(' and ') }) });
+  }
+  if (!updates.length) return;
+  await post(client, `/developers/v1/privilege/update/${appId}`, { clientId: appId, privileges: updates },
+    'privilege_update_failed', '收窄新应用的数据范围失败，已停止发布');
+  const actual = await read();
+  for (const expected of updates) {
+    const updated = actual.find(item => item.bizId === expected.bizId && item.resource === expected.resource);
+    let verified = false;
+    try {
+      const content = asRecord(JSON.parse(String(updated?.content)));
+      const wanted = asRecord(JSON.parse(String(expected.content)));
+      const filters = content.filters;
+      const wantedFilters = wanted.filters as Array<Record<string, unknown>>;
+      verified = content.mode === 'part' && content.expression === wanted.expression && Array.isArray(filters)
+        && filters.length === wantedFilters.length && wantedFilters.every((filter, index) => {
+          const value = asRecord(filters[index]);
+          const ranges: unknown = JSON.parse(String(value.value));
+          if (value.field !== filter.field || value.operator !== 'in' || !Array.isArray(ranges) || ranges.length !== 1) return false;
+          const range = asRecord(ranges[0]);
+          return range.mode === 'availability_of_app' && ['members', 'departments', 'groups'].every(key => Array.isArray(range[key]) && range[key].length === 0);
+        });
+    } catch { /* A successful write is not proof that the range was applied. */ }
+    if (!verified) throw new LarkOpenPlatformConfigurationError('privilege_verification_failed', '新应用的数据范围未确认收窄到应用可用范围，已停止发布');
   }
 }
 

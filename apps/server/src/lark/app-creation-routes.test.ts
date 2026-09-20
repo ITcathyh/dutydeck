@@ -14,7 +14,7 @@ it('exposes the fixed async create/read/cancel/retry contract with no-store resp
     expect(response.headers['cache-control']).toBe('no-store');
     expect(response.json()).toEqual(job);
   }
-  expect(jobs.start).toHaveBeenCalledWith('job', 'Bot');
+  expect(jobs.start).toHaveBeenCalledWith('job', 'Bot', { forceLogin: false });
   jobs.cancel.mockRejectedValueOnce(new LarkAppCreationError(409, '应用创建已经开始，无法取消'));
   expect((await app.inject({ method: 'POST', url: '/api/lark/apps/create/job/cancel' })).statusCode).toBe(409);
   jobs.start.mockRejectedValueOnce(new Error('private-cookie-value'));
@@ -27,5 +27,24 @@ it('exposes the fixed async create/read/cancel/retry contract with no-store resp
 it('returns 503 when durable config storage is unavailable', async () => {
   const app = Fastify(); await registerLarkAppCreationRoutes(app);
   expect((await app.inject({ method: 'POST', url: '/api/lark/apps/create', payload: {} })).statusCode).toBe(503);
+  await app.close();
+});
+
+it('passes explicit boolean login selection and rejects nonboolean values before starting or retrying', async () => {
+  const job = { id: 'job', name: 'Bot', status: 'preparing' as const, createdAt: 'now', updatedAt: 'now', retryable: false };
+  const jobs = { start: vi.fn(async () => job), get: vi.fn(async () => job), cancel: vi.fn(async () => job), retry: vi.fn(async () => job) };
+  const app = Fastify();
+  await registerLarkAppCreationRoutes(app, jobs);
+  for (const forceLogin of [true, false]) {
+    expect((await app.inject({ method: 'POST', url: '/api/lark/apps/create', payload: { requestId: 'job', name: 'Bot', forceLogin } })).statusCode).toBe(202);
+    expect(jobs.start).toHaveBeenLastCalledWith('job', 'Bot', { forceLogin });
+    expect((await app.inject({ method: 'POST', url: '/api/lark/apps/create/job/retry', payload: { forceLogin } })).statusCode).toBe(202);
+    expect(jobs.retry).toHaveBeenLastCalledWith('job', { forceLogin });
+  }
+  for (const forceLogin of ['true', 1, null]) for (const path of ['', '/job/retry']) {
+    expect((await app.inject({ method: 'POST', url: `/api/lark/apps/create${path}`, payload: { requestId: 'job', name: 'Bot', forceLogin } })).statusCode).toBe(400);
+  }
+  expect(jobs.start).toHaveBeenCalledTimes(2);
+  expect(jobs.retry).toHaveBeenCalledTimes(2);
   await app.close();
 });

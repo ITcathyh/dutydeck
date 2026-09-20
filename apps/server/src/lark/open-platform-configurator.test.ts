@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 // （application:app_slash_command:write、im:message:urgent_app、im:pin、task:task:write
 // 的真实 scope id 未知，手工补入以便权限映射与发布测试能跑，一律按已开通填）。
 import draftCatalog from './fixtures/scope-catalog-draft.json';
+import newAppPrivileges from './fixtures/new-app-privileges.json';
 import { larkCommandRegistry } from './commands.js';
 import {
   configureLarkOpenPlatformApp,
@@ -54,12 +55,15 @@ function harness(options: {
   created?: unknown;
   failAt?: string;
   secret?: string;
+  privileges?: unknown;
+  ignorePrivilegeUpdate?: boolean;
 } = {}): { client: LarkOpenPlatformClient; calls: Call[] } {
   const calls: Call[] = [];
   let eventRead = 0;
   let callbackRead = 0;
   let scopeRead = 0;
   let versionRead = 0;
+  let privileges = structuredClone(options.privileges ?? { data: { privileges: [] } });
   const eventStates = options.events ?? [{ data: { eventMode: 4, appEvents: [...LARK_REQUIRED_EVENTS] } }];
   const callbackStates = options.callbacks ?? [{ data: { callbackMode: 4, callbacks: ['card.action.trigger'] } }];
   const client: LarkOpenPlatformClient = {
@@ -69,6 +73,11 @@ function harness(options: {
       // 与真实控制台会话客户端一致：只放行 /developers/v1/*（open-platform-session.ts 的路径白名单）。
       // 放宽这里会让「用错传输层」的缺陷继续被测试掩盖。
       if (!/^\/developers\/v1(?:\/|$)/.test(path)) throw new Error(`开放平台客户端仅允许访问 /developers/v1/*: ${path}`);
+      if (path.includes('/privilege/all/')) return privileges;
+      if (path.includes('/privilege/update/')) {
+        if (!options.ignorePrivilegeUpdate) privileges = { data: { privileges: body?.privileges } };
+        return { code: 0 };
+      }
       if (path.includes('/scope/all/')) {
         const catalogs = options.catalogs ?? [options.catalog ?? catalog()];
         return catalogs[Math.min(scopeRead++, catalogs.length - 1)];
@@ -469,5 +478,55 @@ describe('native slash commands', () => {
     const formatted = formatCommandDescription(longSummary);
     expect(formatted).toHaveLength(MAX_SLASH_COMMAND_DESCRIPTION_LENGTH);
     expect(formatted).toBe('A'.repeat(100));
+  });
+});
+
+
+describe('new application data ranges', () => {
+  it('narrows the real template task-member range before first publication and verifies the saved filters', async () => {
+    const { client, calls } = harness({ versions: { data: { versions: [] } }, privileges: newAppPrivileges });
+    await configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true, creatorUserId: 'creator' });
+    const update = calls.find(call => call.path.includes('/privilege/update/'))!;
+    expect(update.body?.clientId).toBe('cli_test');
+    const privileges = update.body?.privileges as typeof newAppPrivileges.data.privileges;
+    expect(privileges).toHaveLength(1);
+    expect(privileges[0]).toMatchObject({ bizId: 'task', resource: 'manage_task_and_tasklist_members', schemaType: 1, organizationType: 1 });
+    const content = JSON.parse(privileges[0]!.content);
+    expect(content).toMatchObject({ mode: 'part', expression: '1', filters: [{ field: 'member', operator: 'in' }] });
+    expect(JSON.parse(content.filters[0].value)).toEqual([{ mode: 'availability_of_app', members: [], departments: [], groups: [] }]);
+    expect(calls.filter(call => call.path.includes('/privilege/all/'))).toHaveLength(2);
+    expect(calls.indexOf(update)).toBeLessThan(calls.findIndex(call => call.path.includes('/app_version/create/')));
+  });
+
+  it.each([{}, { creatorUserId: 'creator' }, { newApp: true, creatorUserId: 'creator' }])('preserves existing app ranges: %j', async options => {
+    const { client, calls } = harness({ versions: { data: { versions: [{ appVersion: '1.0.0', versionStatus: 2 }] } }, privileges: newAppPrivileges });
+    await configureLarkOpenPlatformApp(client, 'cli_test', options);
+    expect(calls.some(call => call.path.includes('/privilege/'))).toBe(false);
+  });
+
+  it('preserves custom, unreadable and unsupported ranges and ignores optional privileges', async () => {
+    const original = newAppPrivileges.data.privileges[0]!;
+    const privileges = [
+      { ...original, resource: 'custom', content: JSON.stringify({ mode: 'part', filters: [{ field: 'member', operator: 'in', value: 'owner-only' }] }) },
+      ...['not-json', 'null', '[]', '42', '{"mode":false}', '{"mode":"part","filters":"unknown"}', '{"mode":"part"}'].map((content, index) => ({ ...original, resource: `unreadable-${index}`, content })),
+      { ...original, resource: 'optional', isRequired: false },
+      { ...original, resource: 'external', organizationType: 2 },
+      { ...original, resource: 'mixed', schemaContent: { selectionExpressionSchemaContent: { fields: [{ id: 'place', data_source: { type: 'url' }, operators: ['in'] }] } } },
+    ];
+    const { client, calls } = harness({ versions: { data: { versions: [] } }, privileges: { data: { privileges } } });
+    await configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true, creatorUserId: 'creator' });
+    expect(calls.some(call => call.path.includes('/privilege/update/'))).toBe(false);
+  });
+
+  it.each([
+    { failAt: '/developers/v1/privilege/all/cli_test', code: 'privilege_read_failed' },
+    { failAt: '/developers/v1/privilege/update/cli_test', code: 'privilege_update_failed' },
+    { ignorePrivilegeUpdate: true, code: 'privilege_verification_failed' },
+  ])('does not publish when narrowing cannot be verified: $code', async options => {
+    const { client, calls } = harness({ versions: { data: { versions: [] } }, privileges: newAppPrivileges, ...options, secret: 'COOKIE_CANARY' });
+    const error = await configureLarkOpenPlatformApp(client, 'cli_test', { newApp: true, creatorUserId: 'creator' }).catch(error => error);
+    expect(error).toMatchObject({ code: options.code });
+    expect(String(error)).not.toContain('COOKIE_CANARY');
+    expect(calls.some(call => call.path.includes('/app_version/create/') || call.path.includes('/publish/commit/'))).toBe(false);
   });
 });
