@@ -169,6 +169,7 @@ const redactTraceText = (value: string) => value
   // Authorization is handled before generic assignments so "Bearer token" is removed as one value.
   .replace(/(\bauthorization\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n"',;&}]+)/gi, '$1[REDACTED]')
   .replace(/\bbearer\s+[^"'\s,;}&]+/gi, 'Bearer [REDACTED]')
+  .replace(/(--turn(?:\s+|=))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&]+)/g, '$1[REDACTED]')
   // Common CLI flags use a following argument instead of key=value.
   .replace(/(^|[^A-Za-z0-9_-])((?:--?)(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret[_-]?access[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)\s+)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gim, '$1$2[REDACTED]')
   .replace(/((?:\b(?:api[_-]?key|access[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)|\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|ACCESS_KEY|API_KEY)[A-Z0-9_]*)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi, '$1[REDACTED]');

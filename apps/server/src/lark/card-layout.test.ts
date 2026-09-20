@@ -432,6 +432,18 @@ export function restoreSession(sessionId: string) {
     expect(rendered).toContain('正常结论文本：任务已完成。');
   });
 
+  it.each(['--turn scoped_turn_secret', '--turn=scoped_turn_secret', '--turn "scoped_turn_secret"', "--turn='scoped_turn_secret'"])('hides collaboration capability %s in tool cards', flag => {
+    const command = `dutydeck collaborate ${flag} status`;
+    const events = [
+      makeEvent(1, 'tool_call', { id: 'collaborate', name: command, input: { command }, status: 'running' }),
+      makeEvent(2, 'tool_result', { id: 'collaborate', name: command, output: command, status: 'completed' })
+    ];
+    const rendered = JSON.stringify(buildLarkCard({ state: 'completed', elements: renderLarkCardElements(events, { ...config, hideTraceOnComplete: false }, true) }));
+    expect(rendered).not.toContain('scoped_turn_secret');
+    expect(rendered).toContain('[REDACTED]');
+    expect(rendered).toContain('dutydeck collaborate');
+  });
+
   it('8. budget bounds on multi-group cards: assert input exceeds snapshot limits, then assert bounded limits and key data preservation', () => {
     const manyEvents: AgentEvent[] = [
       makeEvent(1, 'permission_request', { id: 'perm_important', title: '核心权限保留', status: 'approved' })
