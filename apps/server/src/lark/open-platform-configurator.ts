@@ -248,10 +248,11 @@ export async function configureLarkOpenPlatformApp(
     'version_list_failed', '读取飞书应用版本失败');
   const appVersion = nextVersion(versionPayload);
   const priorVersions = asRecord(asRecord(versionPayload).data).versions as unknown[];
-  if (options.newApp && priorVersions.every(version => asRecord(version).versionStatus === 0)) {
+  const unpublishedNewApp = options.newApp && priorVersions.every(version => asRecord(version).versionStatus === 0);
+  if (unpublishedNewApp) {
     await narrowNewAppPrivilegeRanges(client, appId);
   }
-  const firstRelease = (asRecord(asRecord(versionPayload).data).versions as unknown[]).length === 0;
+  const firstRelease = priorVersions.length === 0 || unpublishedNewApp;
   const visibility = firstRelease && options.creatorUserId
     ? {
       whiteList: { departments: [], members: [options.creatorUserId], groups: [], isAll: 0 as const },
@@ -259,7 +260,12 @@ export async function configureLarkOpenPlatformApp(
     }
     : parseVisibility(await post(client, `/developers/v1/visible/online/${appId}`, {},
       'visibility_read_failed', '读取飞书应用可见范围失败'));
-  const created = await post(client, `/developers/v1/app_version/create/${appId}`, {
+  // A rejected preflight leaves a draft. Resume that same draft, then verify its
+  // actual visibility before predicting approval; never commit a stale range.
+  if (unpublishedNewApp && priorVersions.length > 1) {
+    throw new LarkOpenPlatformConfigurationError('version_list_unreadable', '新应用存在多个草稿，已停止自动发布');
+  }
+  const created = unpublishedNewApp && priorVersions.length === 1 ? priorVersions[0] : await post(client, `/developers/v1/app_version/create/${appId}`, {
     appVersion,
     mobileDefaultAbility: 'bot',
     pcDefaultAbility: 'bot',
@@ -275,18 +281,25 @@ export async function configureLarkOpenPlatformApp(
     );
   }
   onStep('version_create', { versionId });
+  if (options.newApp) await verifyAutomaticApproval(client, appId, versionId, visibility);
   await post(client, `/developers/v1/publish/commit/${appId}/${versionId}`, { clientId: appId },
     'publish_failed', '发布飞书应用版本失败');
   onStep('publish_commit', { versionId });
-  const published = await post(client, `/developers/v1/app_version/list/${appId}`, {},
-    'publish_verification_read_failed', '发布请求已提交，但回读发布状态失败，请核对该应用版本');
-  const versions = asRecord(asRecord(published).data).versions;
-  const version = Array.isArray(versions)
-    ? versions.find(item => extractVersionId(item) === versionId)
-    : undefined;
+  let version: unknown;
+  for (let attempt = 0; attempt < 10; attempt++) {
+    const published = await post(client, `/developers/v1/app_version/list/${appId}`, {},
+      'publish_verification_read_failed', '发布请求已提交，但回读发布状态失败，请核对该应用版本');
+    const versions = asRecord(asRecord(published).data).versions;
+    version = Array.isArray(versions) ? versions.find(item => extractVersionId(item) === versionId) : undefined;
+    // Even an automatic approval briefly reports status 1. Allow it to finish
+    // without resubmitting or reporting a human review based on that state alone.
+    if (!options.newApp || asRecord(version).versionStatus !== 1 || attempt === 9) break;
+    await new Promise(resolve => setTimeout(resolve, 1_000));
+  }
   // Console versionStatus: 2 = published, 1 = under review, 0 = not submitted.
   // A successful commit response alone does not prove publication.
   if (asRecord(version).versionStatus === 1) {
+    if (options.newApp) throw new LarkOpenPlatformConfigurationError('publish_verification_pending', '应用已按自动审批流程提交，尚未确认发布完成，请核对开放平台状态');
     throw new LarkOpenPlatformConfigurationError('publish_pending_review', '应用版本已提交，正在等待飞书管理员审核');
   }
   if (asRecord(version).versionStatus !== 2) {
@@ -302,6 +315,57 @@ export async function configureLarkOpenPlatformApp(
     callbackCount: 1,
     versionId,
   };
+}
+
+async function verifyAutomaticApproval(
+  client: LarkOpenPlatformClient,
+  appId: string,
+  versionId: string,
+  expectedVisibility: { whiteList: VisibilitySuggest; blackList: VisibilitySuggest },
+): Promise<void> {
+  const detail = asRecord(asRecord(await post(client, `/developers/v1/app_version/detail/${appId}/${versionId}`, {},
+    'draft_read_failed', '读取待发布草稿失败，尚未提交发布')).data);
+  if (detail.versionId !== versionId || detail.versionStatus !== 0) {
+    throw new LarkOpenPlatformConfigurationError('draft_unreadable', '无法确认待发布草稿，尚未提交发布');
+  }
+  const visibility = parseVisibility({ data: detail.visibleRange });
+  if (JSON.stringify(visibility) !== JSON.stringify(expectedVisibility)) {
+    throw new LarkOpenPlatformConfigurationError('draft_visibility_mismatch', '草稿可见范围与本次配置不一致，尚未提交发布');
+  }
+  const sharing = asRecord(asRecord(detail.changeAppShareConfig).b2cShareSplitConfigSuggest);
+  const sharingKeys = ['b2cGroupChatShareEnable', 'b2cP2PChatShareEnable', 'b2cP2PChatNeedAudit'] as const;
+  if (sharingKeys.some(key => typeof sharing[key] !== 'boolean')) {
+    throw new LarkOpenPlatformConfigurationError('draft_unreadable', '草稿分享范围结构不完整，尚未提交发布');
+  }
+  const prediction = await post(client, `/developers/v1/approval_nodes/get/${appId}`, {
+    visibleSuggest: visibility.whiteList,
+    blackVisibleSuggest: visibility.blackList,
+    b2cShareSplitConfigSuggest: Object.fromEntries(sharingKeys.map(key => [key, sharing[key]])),
+    versionId,
+    notCalculateFlow: false,
+  }, 'approval_prediction_failed', '读取发布审批预判失败，尚未提交发布');
+  const nodes = asRecord(asRecord(asRecord(prediction).data).applyInstanceInfo).applyNodes;
+  if (!Array.isArray(nodes) || !nodes.length || nodes.some(node => !isRecord(node) || typeof node.nodeName !== 'string')) {
+    throw new LarkOpenPlatformConfigurationError('approval_prediction_unreadable', '审批预判结构不完整，尚未提交发布');
+  }
+  const gates = nodes.map(asRecord).filter((node, index) => {
+    // Names alone do not identify a non-approval node. Match the console's
+    // explicit empty type and position/participants; unknown shapes fail closed.
+    if (node.nodeType !== '' || !Array.isArray(node.nodeUser)) return true;
+    if (index === 0 && ['发起', 'Initiate'].includes(String(node.nodeName)) && node.nodeUser.length === 1
+      && typeof asRecord(asRecord(node.nodeUser[0]).approver).id === 'string') return false;
+    if (index === nodes.length - 1 && ['结束', 'End'].includes(String(node.nodeName)) && node.nodeUser.length === 0) return false;
+    return !(Array.isArray(node.nodeCcUser) && node.nodeCcUser.length > 0 && node.nodeUser.length === 0);
+  });
+  if (!gates.length) {
+    throw new LarkOpenPlatformConfigurationError('approval_prediction_unreadable', '审批预判没有可确认的审批节点，尚未提交发布');
+  }
+  // canAutoApproval may be false even for the collaborator-only exemption.
+  // The actual flow must contain only explicit automatic gates and no approvers.
+  if (gates.some(node => !['自动通过', 'Auto approved'].includes(String(node.nodeType))
+    || !Array.isArray(node.nodeUser) || node.nodeUser.length !== 0)) {
+    throw new LarkOpenPlatformConfigurationError('publish_requires_review', '当前权限或数据范围仍需人工审批，已保留草稿且未提交审核');
+  }
 }
 
 export function isValidLarkAppId(value: string): boolean {

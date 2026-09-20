@@ -158,7 +158,7 @@ it('preserves an already-saved app and never replays uncertain configuration', a
   await expect(h.manager.retry(id)).rejects.toMatchObject({ statusCode: 409 });
 });
 
-it.each(['scope_verification_failed', 'privilege_read_failed', 'privilege_update_failed', 'privilege_verification_failed'] as const)('resumes the same saved app after %s', async code => {
+it.each(['scope_verification_failed', 'privilege_read_failed', 'privilege_update_failed', 'privilege_verification_failed', 'draft_read_failed', 'draft_visibility_mismatch', 'approval_prediction_failed', 'approval_prediction_unreadable', 'publish_requires_review'] as const)('resumes the same saved app after %s', async code => {
   const h = harness();
   h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError(code, '必需应用权限未加入待发布草稿'));
   await h.manager.start(id, 'Bot'); await h.manager.wait(id);
@@ -185,7 +185,7 @@ it('preserves a submitted review as a distinct terminal state without replaying 
   expect(h.configure).toHaveBeenCalledOnce();
 });
 
-it.each(['version_create_failed', 'version_verification_failed', 'publish_failed', 'publish_verification_failed', 'unknown_future_failure'])(
+it.each(['version_create_failed', 'version_verification_failed', 'publish_failed', 'publish_verification_failed', 'publish_verification_pending', 'unknown_future_failure'])(
   'never replays an uncertain configuration failure: %s', async code => {
     const h = harness();
     h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError(code, '配置未完成'));
