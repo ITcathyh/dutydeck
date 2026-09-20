@@ -199,6 +199,33 @@ it('resumes the same pending Agent action and sends its persisted result once', 
   expect(f.deliver.mock.calls[0]![0].text).toBe('Only the remaining section is missing');
 });
 
+it('keeps unchanged unknown occurrences stable and reconciles the same Agent once its result settles', async () => {
+  const f = await fixture(new Date('2026-09-20T05:30:00.000Z'));
+  const { mandate } = await f.create({ mode: 'agent', trigger: { kind: 'at', localDateTime: '2026-09-20T05:31:00' } });
+  let completed = false;
+  const executeAgent = vi.fn(async input => {
+    await input.assertCurrent();
+    return completed ? { status: 'completed' as const, text: 'Original result', receipt: 'task-one' }
+      : { status: 'unknown' as const, receipt: 'task-one', error: 'reconcile_required' };
+  });
+  const first = f.executor({ executeAgent }); f.advance(); await first.tick();
+  const [before] = await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId);
+  const watermark = await f.repos.scheduleWatermarks.get(mandate.scheduleDefinitionId);
+  expect(before?.state).toBe('unknown');
+  await first.tick(); await first.tick();
+  expect(await f.repos.scheduleOccurrences.get(before!.id)).toEqual(before);
+  expect(await f.repos.scheduleWatermarks.get(mandate.scheduleDefinitionId)).toEqual(watermark);
+  expect(f.deliver).not.toHaveBeenCalled();
+  await first.close(); f.advance(61_000);
+  const resumed = f.executor({ executeAgent, holderId: 'next-writer' }); await resumed.tick();
+  expect(await f.repos.scheduleOccurrences.get(before!.id)).toEqual(before);
+  completed = true; await resumed.tick(); await resumed.tick();
+  expect(f.deliver).toHaveBeenCalledOnce();
+  expect(await f.repos.scheduleOccurrences.get(before!.id)).toMatchObject({ state: 'settled' });
+  expect(new Set(executeAgent.mock.calls.map(([input]) => input.actionId)).size).toBe(1);
+  expect(executeAgent.mock.calls.filter(([input]) => !input.resume)).toHaveLength(1);
+});
+
 it('cancels the old pending Agent after delegation cancellation and suppresses its result', async () => {
   const f = await fixture(); const { mandate } = await f.create({ mode: 'agent' });
   const executeAgent = vi.fn(async () => ({ status: 'pending' as const, receipt: 'task-one' })), cancelAgent = vi.fn(async () => {});

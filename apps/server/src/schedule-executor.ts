@@ -174,7 +174,7 @@ export class ScheduleExecutor {
       return;
     }
     if (occurrence.state === 'planned' || occurrence.state === 'claimed') occurrence = await this.advance(occurrence, 'claimed', lease);
-    if (occurrence.state === 'claimed' || occurrence.state === 'running' || occurrence.state === 'unknown' && agent?.kind === 'schedule_agent') occurrence = await this.advance(occurrence, 'running', lease);
+    if (occurrence.state === 'claimed') occurrence = await this.advance(occurrence, 'running', lease);
     let content = mandate.prompt;
     if (mandate.mode === 'agent') {
       if (!this.options.executeAgent) { await this.advance(occurrence, 'failed', lease, 'Agent execution integration is unavailable'); return; }
@@ -191,11 +191,16 @@ export class ScheduleExecutor {
         }
         try { result = await this.options.executeAgent({ ...this.input(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, lease, agent, 'execute'), resume }); }
         catch (error) { result = { status: 'unknown', error: message(error) }; }
-        if (result.status === 'pending') return;
+        if (result.status === 'pending') {
+          if (occurrence.state === 'unknown') await this.advance(occurrence, 'running', lease);
+          return;
+        }
         if (result.status !== 'completed' || typeof result.text !== 'string') {
           const status = result.status === 'failed' ? 'failed' : 'unknown';
           await this.actionState(agent, status, result.receipt, result.error ?? 'Agent result is not proven');
-          await this.advance(occurrence, status, lease, result.error); return;
+          // Poll the original task without manufacturing new execution progress for an unchanged unknown result.
+          if (occurrence.state !== status) await this.advance(occurrence, status, lease, result.error);
+          return;
         }
         if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, agent.payload.snapshot as CollaborationSnapshot, 'delivery', { text: result.text, delivery: schedule.delivery, snapshot: agent.payload.snapshot }, typeof agent.payload.contextSignature === 'string' ? agent.payload.contextSignature : undefined, typeof agent.payload.coverageSignature === 'string' ? agent.payload.coverageSignature : undefined)).action;
         agent = await this.actionState(agent, 'succeeded', result.receipt ?? 'completed');
@@ -205,6 +210,7 @@ export class ScheduleExecutor {
     }
     if (!delivery) delivery = (await this.begin(mandate, schedule, occurrence, snapshot, 'delivery', { text: content, delivery: schedule.delivery, snapshot }, contextSignature, coverageSignature)).action;
     if (delivery.status === 'failed' || delivery.status === 'suppressed') { await this.advance(occurrence, delivery.status === 'failed' ? 'failed' : 'suppressed', lease, delivery.error); return; }
+    if (occurrence.state === 'unknown') occurrence = await this.advance(occurrence, 'running', lease);
     const originalSnapshot = delivery.payload.snapshot as CollaborationSnapshot;
     const input = this.input(mandate, schedule, occurrence, originalSnapshot, lease, delivery, 'deliver');
     try {

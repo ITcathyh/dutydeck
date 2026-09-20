@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
 import { agentConfigSchema, installationOwnerTaskActor, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
@@ -17,10 +17,10 @@ async function eventually(check: () => Promise<boolean>) {
   for (let count = 0; count < 100; count++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error('Condition did not converge');
 }
-async function fixture() {
+async function fixture(options: { realAcp?: boolean } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-wiring-'));
   const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
-  const agent = agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: 'fake', protocol: 'acp', cwd: directory, permissionMode: 'full-trust' });
+  const agent = agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: options.realAcp ? process.execPath : 'fake', ...(options.realAcp ? { args: [resolve('tests/fixtures/mock-acp-agent.mjs')], timeout: 2 } : {}), protocol: 'acp', cwd: directory, permissionMode: 'full-trust' });
   await repos.agents.save(agent);
   await saveLarkConfig(repos.config, repos.agents, { ...scope, appSecret: 'synthetic', defaultAgentId: agent.id, workspace: directory, fullTrustConfirmed: true, listening: true, groupToolsEnabled: true, groupToolsAllowSend: true, riskControlMode: 'enforced', highRiskPattern: 'rm\\s' });
   let members = ['ou_alice'];
@@ -32,7 +32,7 @@ async function fixture() {
     getUserEmails: async () => [],
     getChatPreflightInfo: async () => ({ name: '文档协作', description: '讨论资料进度' }),
     listMessages: vi.fn(async () => ({ items: [], hasMore: false })),
-    sendText: vi.fn(async () => ({ messageId: 'om_result', chatId: scope.chatId })),
+    sendText: vi.fn(async (_input: { text: string }) => ({ messageId: 'om_result', chatId: scope.chatId })),
     replyText: vi.fn(async () => ({ messageId: 'om_reply', chatId: scope.chatId }))
   };
   const groups = new LarkGroupManager(repos, { client: () => client as any });
@@ -48,7 +48,7 @@ async function fixture() {
     authorizeTask: (session, task) => collaboration.background.authorizeTask(session, task),
     authorizeControl: async (id, actor) => { await collaboration.background.authorizeControl(id, actor); },
     resolveRiskPolicy: async (id, fallback) => (await collaboration.riskPolicy(id, fallback))?.policy,
-    driverFactory: (_agent, _protocol, onEvent, _exit, sessionId) => {
+    driverFactory: options.realAcp ? undefined : (_agent, _protocol, onEvent, _exit, sessionId) => {
       let end: (() => void) | undefined;
       return {
         start: async () => {}, resume: async () => {},
@@ -67,10 +67,46 @@ async function fixture() {
   collaboration.scheduler.options.now = () => clock;
   collaboration.service.options.now = () => clock;
   cleanups.push(async () => { await collaboration.close(); await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); });
-  const create = (id = 'review') => collaboration.service.createMandate(scope, 'ou_alice', { id, goal: '检查资料进展', mode: 'agent', prompt: '总结还缺的资料', condition: 'always', trigger: { kind: 'interval', everySeconds: 60, anchorAt: clock.toISOString() }, timezone: 'UTC' });
+  const create = (id = 'review', prompt = '总结还缺的资料') => collaboration.service.createMandate(scope, 'ou_alice', { id, goal: '检查资料进展', mode: 'agent', prompt, condition: 'always', trigger: { kind: 'interval', everySeconds: 60, anchorAt: clock.toISOString() }, timezone: 'UTC' });
   return { repos, runtime, collaboration, groups, client, group, calls, stopped, create,
     advance() { clock = new Date(clock.getTime() + 60_000); }, revoke() { members = []; } };
 }
+
+it.each(['ask', undefined] as const)('runs unattended %s delegations through real ACP without leaving permission requests pending', async permissionMode => {
+  const f = await fixture({ realAcp: true });
+  const original = f.collaboration.background.options.resolveConfig;
+  f.collaboration.background.options.resolveConfig = async scope => ({ ...await original(scope), permissionMode });
+  await f.create('permission-summary', 'request permission'); f.advance(); await f.collaboration.scheduler.tick();
+  const session = (await f.runtime.listSessions()).find(item => item.id.startsWith('ses_collab_'))!;
+  await expect.poll(async () => (await f.runtime.getTasks(session.id))[0]?.status, { timeout: 6_000 }).toMatch(/completed|reconcile_required/);
+  expect((await f.runtime.getTasks(session.id))[0]?.status).toBe('completed');
+  expect(session.permissionMode).toBe('deny-all');
+  expect(await f.runtime.getPendingPermissions(session.id)).toEqual([]);
+  const events = await f.repos.events.listWindow(session.id, { limit: 100 });
+  expect(events.some(event => event.type === 'permission_request' && (event.data as { status?: string }).status === 'pending')).toBe(false);
+  await f.collaboration.scheduler.tick(); await f.collaboration.scheduler.tick();
+  expect(f.client.sendText).toHaveBeenCalledOnce();
+  expect(f.client.sendText.mock.calls[0]![0]).toMatchObject({ text: expect.stringContaining('deny') });
+  const tasks = await f.runtime.getTasks(session.id);
+  expect(tasks).toHaveLength(1);
+  expect(f.repos.execution.getTaskExecution(tasks[0]!.id)?.attempts).toEqual([expect.objectContaining({ state: 'settled', outcome: 'completed' })]);
+  const actions = await f.repos.collaboration.listActions(scope);
+  const request = actions.find(action => action.kind === 'agent_execution')!.payload.request as { prompt: string; options: { permissionMode: string } };
+  expect(request.options.permissionMode).toBe('deny-all');
+  expect(request.prompt).toContain('不调用工具');
+  expect(request.prompt).toContain('不能声称');
+});
+
+it.each(['approve-reads', 'full-trust'] as const)('retains explicit %s background tool policy', async permissionMode => {
+  const f = await fixture();
+  const original = f.collaboration.background.options.resolveConfig;
+  f.collaboration.background.options.resolveConfig = async scope => ({ ...await original(scope), permissionMode });
+  await f.create(); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  expect((await f.runtime.getSession(f.calls[0]!.sessionId))?.permissionMode).toBe(permissionMode);
+  expect(f.calls[0]!.prompt).not.toContain('不调用工具');
+  f.calls[0]!.finish('Done');
+});
 
 it('uses real saved group bindings, runs one frozen background task and delivers its result once', async () => {
   const f = await fixture();
