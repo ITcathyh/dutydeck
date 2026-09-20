@@ -263,6 +263,9 @@ export class LarkLongConnectionListener implements LarkListener {
       'im.message.reaction.created_v1': () => undefined,
       'im.message.reaction.deleted_v1': () => undefined
     });
+    let connected!: () => void;
+    let connectionFailed!: (error: unknown) => void;
+    const ready = new Promise<void>((resolve, reject) => { connected = resolve; connectionFailed = reject; });
     const client = new lark.WSClient({
       appId: config.appId,
       appSecret: config.appSecret,
@@ -273,13 +276,15 @@ export class LarkLongConnectionListener implements LarkListener {
       // 存活检测：超过该时长未收到任何入站帧（含 pong）则主动断开并触发重连，
       // 防止连接半开（TCP 看起来正常但实际已不通）时监听静默失效。
       wsConfig: { pingTimeout: 120 },
-      onReady: () => this.log.info({ appId: config.appId }, '飞书消息监听已连接'),
+      onReady: () => { connected(); this.log.info({ appId: config.appId }, '飞书消息监听已连接'); },
       onReconnecting: () => this.log.warn({ appId: config.appId }, '飞书消息监听正在重连'),
       onReconnected: () => this.log.info({ appId: config.appId }, '飞书消息监听已恢复'),
-      onError: error => this.log.error({ error, appId: config.appId }, '飞书消息监听异常')
+      onError: error => { connectionFailed(error); this.log.error({ error, appId: config.appId }, '飞书消息监听异常'); }
     });
+    const connectionTimeout = setTimeout(() => connectionFailed(new Error('WebSocket connection readiness timed out')), 20_000);
     try {
-      await client.start({ eventDispatcher: dispatcher });
+      // SDK start() returns before the handshake; only onReady confirms it.
+      await Promise.all([client.start({ eventDispatcher: dispatcher }), ready]);
       this.client = client;
       this.coordinator = coordinator;
       this.credentials = credentials;
@@ -289,7 +294,7 @@ export class LarkLongConnectionListener implements LarkListener {
       client.close();
       coordinator?.stop();
       throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to start Lark listener: ${error instanceof Error ? error.message : String(error)}`, 502);
-    }
+    } finally { clearTimeout(connectionTimeout); }
   }
 
   stop() {
@@ -314,13 +319,20 @@ export interface LarkListenerPool {
 
 export class LarkLongConnectionListenerPool implements LarkListenerPool {
   private readonly listeners = new Map<string, LarkLongConnectionListener>();
+  private syncTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}) {}
 
   get listening() { return this.listeners.size > 0; }
   get activeAppIds() { return [...this.listeners.keys()]; }
 
-  async sync(configs: StoredLarkConfig[]) {
+  sync(configs: StoredLarkConfig[]): Promise<void> {
+    const synced = this.syncTail.then(() => this.syncConfiguredListeners(configs));
+    this.syncTail = synced.catch(() => {});
+    return synced;
+  }
+
+  private async syncConfiguredListeners(configs: StoredLarkConfig[]) {
     const enabled = new Map(configs.filter(config => config.listening && larkExecutionConfirmed(config)).map(config => [config.appId, config]));
     for (const [appId, listener] of this.listeners) {
       if (enabled.has(appId)) continue;

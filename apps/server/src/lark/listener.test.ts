@@ -22,7 +22,8 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
     }
   },
   WSClient: class {
-    async start() { /* 长连接不在测试中真正建立 */ }
+    constructor(private readonly options: { onReady: () => void }) {}
+    async start() { this.options.onReady(); }
     close() { /* no-op */ }
   }
 }));
@@ -67,6 +68,26 @@ it('listens in ask mode without requiring full trust and stops when execution is
     expect(start).toHaveBeenCalledTimes(2);
     expect(stop).toHaveBeenCalledTimes(2);
   } finally { pool.stop(); start.mockRestore(); stop.mockRestore(); }
+});
+
+it('coalesces concurrent listener synchronization without opening duplicate connections', async () => {
+  let release!: () => void;
+  const connecting = new Promise<void>(resolve => { release = resolve; });
+  const start = vi.spyOn(LarkLongConnectionListener.prototype, 'start').mockImplementation(async function (this: LarkLongConnectionListener) {
+    if (!this.listening) { await connecting; this.listening = true; }
+  });
+  const stop = vi.spyOn(LarkLongConnectionListener.prototype, 'stop').mockImplementation(() => {});
+  const pool = new LarkLongConnectionListenerPool({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+  const first = pool.sync([config]);
+  const second = pool.sync([config]);
+  try {
+    await Promise.resolve();
+    expect(start).toHaveBeenCalledOnce();
+    release();
+    await Promise.all([first, second]);
+    expect(start.mock.contexts[0]).toBe(start.mock.contexts[1]);
+    expect(pool.activeAppIds).toEqual([config.appId]);
+  } finally { release(); await Promise.allSettled([first, second]); pool.stop(); start.mockRestore(); stop.mockRestore(); }
 });
 
 describe('Lark message coordinator', () => {

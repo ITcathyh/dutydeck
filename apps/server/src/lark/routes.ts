@@ -8,7 +8,7 @@ import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepos
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
 import { detectUnusableOwnerEntries, normalizeOwnerEntries, type ContactLookup } from './owner-identity.js';
-import { defaultHighRiskPattern, deleteLarkConfig, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
+import { defaultHighRiskPattern, deleteLarkConfig, larkExecutionConfirmed, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
 import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listener.js';
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
@@ -78,13 +78,20 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     memory: options.memory,
     peerBotAuthorized: (appId, chatId, senderOpenId) => options.agentTools?.isConfiguredPeer(appId, chatId, senderOpenId) ?? Promise.resolve(false)
   });
-  const syncListeners = async (configs: Awaited<ReturnType<typeof readLarkConfigs>>) => {
-    try { await listener.sync(configs); }
-    catch (firstError) {
-      app.log.warn({ error: firstError }, '飞书消息监听首次连接失败，正在自动重试');
-      try { await listener.sync(configs); }
-      catch (error) { app.log.error({ error }, '飞书消息监听连接失败，已保留监听配置'); }
-    }
+  let listenerSyncTail: Promise<void> = Promise.resolve();
+  const syncListeners = () => {
+    // Keep the retry in the same operation, so an old failed start cannot be
+    // retried after a newer stop. Read current settings when each attempt runs.
+    const synced = listenerSyncTail.then(async () => {
+      try { await listener.sync(await readLarkConfigs(options.config)); }
+      catch (firstError) {
+        app.log.warn({ error: firstError }, '飞书消息监听首次连接失败，正在自动重试');
+        try { await listener.sync(await readLarkConfigs(options.config)); }
+        catch (error) { app.log.error({ error }, '飞书消息监听连接失败，已保留监听配置'); }
+      }
+    });
+    listenerSyncTail = synced.catch(() => {});
+    return synced;
   };
   const storedBot = async (appId?: string) => {
     const stored = await readLarkConfig(options.config, appId);
@@ -102,8 +109,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     return service;
   };
 
-  const initialConfigs = await readLarkConfigs(options.config);
-  if (!listeningDisabled) await syncListeners(initialConfigs);
+  if (!listeningDisabled) await syncListeners();
   app.addHook('onClose', async () => listener.stop());
   await registerLarkAgentToolRoutes(app, options.agentTools);
   await registerLarkGroupManagementRoutes(app, options.groupManager);
@@ -120,6 +126,20 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     policyIntegration: options.executionPolicy?.integrationMode ?? 'legacy_unmanaged',
   }));
   app.get('/api/lark/config', async () => publicLarkConfigs(await readLarkConfigs(options.config), { activeAppIds: listener.activeAppIds, listeningDisabled }));
+  app.post<{ Params: { appId: string } }>('/api/lark/bots/:appId/listener/sync', async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const configs = await readLarkConfigs(options.config);
+    const bot = configs.find(config => config.appId === request.params.appId);
+    if (!bot) return reply.code(404).send({ error: { code: 'LARK_BOT_NOT_FOUND', message: '机器人配置不存在' } });
+    if (listeningDisabled || !bot.listening || !larkExecutionConfirmed(bot)) {
+      return reply.code(409).send({ error: { code: 'LARK_LISTENING_DISABLED', message: '当前服务或机器人配置未允许监听' } });
+    }
+    await syncListeners();
+    if (!listener.activeAppIds.includes(bot.appId)) {
+      return reply.code(503).send({ error: { code: 'LARK_LISTENER_START_FAILED', message: '监听连接未成功，已保留机器人配置' } });
+    }
+    return { appId: bot.appId, listening: true, activeListening: true };
+  });
   app.post<{ Body: { appId?: string; forceLogin?: boolean } }>('/api/lark/open-platform/configure', async (request, reply) => {
     reply.header('cache-control', 'no-store');
     const appId = request.body?.appId?.trim();
@@ -178,13 +198,13 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       const patternValidation = validateHighRiskPattern(pattern);
       if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
       const hook = await installLarkHook(config.defaultAgentId, config.workspace);
-      const saved = await saveLarkConfig(options.config, options.agents, {
+      await saveLarkConfig(options.config, options.agents, {
         stage: 'agent',
         originalAppId: config.appId,
         ...(request.body?.highRiskPattern !== undefined ? { highRiskPattern: request.body.highRiskPattern } : {}),
         riskControlMode: 'guidance'
       });
-      if (!listeningDisabled) await syncListeners(saved);
+      if (!listeningDisabled) await syncListeners();
       if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       return hook;
     } catch (error) {
@@ -274,7 +294,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         if (!hook.supported || !hook.installed || !hook.writable) throw new LarkServiceError('RISK_CONTROL_HOOK_NOT_READY', hook.reason ?? 'Install the selected Agent hook before enabling enforced risk control', 409);
       }
       const saved = await saveLarkConfig(options.config, options.agents, listeningDisabled ? { ...input, listening: undefined } : input);
-      if (!listeningDisabled) await syncListeners(saved);
+      if (!listeningDisabled) await syncListeners();
       if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       if (!options.service) service = undefined;
       return publicLarkConfigs(saved, { activeAppIds: listener.activeAppIds, listeningDisabled });
@@ -286,7 +306,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   app.delete<{ Params: { appId: string } }>('/api/lark/config/:appId', async (request, reply) => {
     try {
       const saved = await deleteLarkConfig(options.config, request.params.appId);
-      if (!listeningDisabled) await syncListeners(saved);
+      if (!listeningDisabled) await syncListeners();
       if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
       if (!options.service) service = undefined;
       return publicLarkConfigs(saved, { activeAppIds: listener.activeAppIds, listeningDisabled });

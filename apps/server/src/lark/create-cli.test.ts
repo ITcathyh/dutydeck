@@ -9,6 +9,7 @@ import { createCliUi } from '../cli-ui.js';
 import { runLarkCreate, type LarkCreateCliResult } from './create-cli.js';
 import { LarkAppCreationJobManager } from './app-creation.js';
 import { LARK_COMMON_TENANT_SCOPES, LARK_REQUIRED_EVENTS } from './open-platform-configurator.js';
+import automaticApproval from './fixtures/approval-collaborator-exemption.json';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 import { connectLarkOpenPlatformSession, writeOpenPlatformSessionCookies, OpenPlatformSessionError, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
 
@@ -23,6 +24,7 @@ async function harness(tty = true, versionStatus = 2) {
   await repositories.agents.save(agentConfigSchema.parse({ id: 'ccflash', name: 'CCFlash', protocol: 'pty-cli', adapterId: 'claude-code', command: process.execPath, model: 'gemini-3.8-flash-high' }));
   let stdout = ''; let stderr = '';
   const ui = createCliUi({ tty, color: false, stdout: { write: text => { stdout += text; } }, stderr: { write: text => { stderr += text; } } });
+  let versionBody: Record<string, unknown> | undefined;
   let scopes = false; let events = false; let callbacks = false; let callbackMode = 0; let published = false;
   const postJson = vi.fn(async (path: string, body?: Record<string, unknown>): Promise<unknown> => {
     if (path.includes('/manifest/upsert_by_template')) return { data: { ClientID: 'cli_created' } };
@@ -36,11 +38,18 @@ async function harness(tty = true, versionStatus = 2) {
     if (path.includes('/callback/switch/')) { callbackMode = 4; return { code: 0 }; }
     if (path.includes('/callback/update/')) { callbacks = true; return { code: 0 }; }
     if (path === '/developers/v1/callback/cli_created') return { data: { callbackMode, callbacks: callbacks ? ['card.action.trigger'] : [] } };
-    if (path.includes('/app_version/list/')) return { data: { versions: published ? [{ versionId: 'first-version', appVersion: '0.0.1', versionStatus }] : [] } };
+    if (path.includes('/app_version/list/')) return { data: { versions: published || versionBody ? [{ versionId: 'first-version', appVersion: '0.0.1', versionStatus: published ? versionStatus : 0 }] : [] } };
     if (path.includes('/app_version/create/')) {
+      versionBody = body;
       expect(body?.visibleSuggest).toMatchObject({ members: ['private-user'] });
       return { data: { versionId: 'first-version' } };
     }
+    if (path.includes('/app_version/detail/')) return { data: {
+      versionId: 'first-version', versionStatus: 0,
+      visibleRange: { whiteList: versionBody?.visibleSuggest, blackList: versionBody?.blackVisibleSuggest },
+      changeAppShareConfig: { b2cShareSplitConfigSuggest: { b2cGroupChatShareEnable: false, b2cP2PChatShareEnable: false, b2cP2PChatNeedAudit: false } },
+    } };
+    if (path.includes('/approval_nodes/get/')) return automaticApproval;
     if (path.includes('/publish/commit/')) { published = true; return { code: 0 }; }
     throw new Error(`Unexpected endpoint: ${path}`);
   });
@@ -52,8 +61,9 @@ async function harness(tty = true, versionStatus = 2) {
     if (options.allowQrLogin !== false) await options.onQrUpdate?.({ qrPayload: 'private-qr-token', status: 'waiting_for_scan' });
     return { source: 'qr_login' as const, owner: { userId: 'private-user', tenantId: 'private-tenant', userName: 'Alice', tenantName: 'Acme' }, client: { apiOrigin: 'https://open.feishu.cn', postJson, postForm } };
   });
-  const context = { config: repositories.config, agents: repositories.agents, database: "/tmp/Bot's state.db", ui, connect };
-  return { repositories, context, connect, postJson, postForm, output: () => stdout + stderr, stdout: () => stdout };
+  const syncListener = vi.fn(async () => ({ activeListening: true, message: '机器人监听已接通，可以在飞书中发送消息。' }));
+  const context = { syncListener, config: repositories.config, agents: repositories.agents, database: "/tmp/Bot's state.db", ui, connect };
+  return { repositories, context, syncListener, connect, postJson, postForm, output: () => stdout + stderr, stdout: () => stdout };
 }
 
 it('runs CLI parsing, real creation/configurator and SQLite through QR, publication and CCFlash selection', async () => {
@@ -63,7 +73,7 @@ it('runs CLI parsing, real creation/configurator and SQLite through QR, publicat
   let result!: LarkCreateCliResult;
   const program = createCliProgram('test', { larkCreate: async (name, options) => { result = await runLarkCreate(name, options, h.context); } });
   await program.parseAsync(['node', 'dutydeck', 'lark', 'create', 'CCFlash 助手', '--agent', 'ccflash', '--full-trust', '--listen', '--workspace', process.cwd()]);
-  expect(result).toMatchObject({ ok: true, job: { status: 'completed', appId: 'cli_created' }, bot: { defaultAgentId: 'ccflash', listening: true, activeListening: false, fullTrustConfirmed: true, workspace: process.cwd() }, restartRequired: true });
+  expect(result).toMatchObject({ ok: true, job: { status: 'completed', appId: 'cli_created' }, bot: { defaultAgentId: 'ccflash', listening: true, activeListening: true, fullTrustConfirmed: true, workspace: process.cwd() }, listener: { activeListening: true } });
   expect(h.connect).toHaveBeenCalledOnce();
   expect(h.postJson.mock.calls.filter(([path]) => path.includes('/manifest/'))).toHaveLength(1);
   expect(h.postJson.mock.calls.filter(([path]) => path.includes('/publish/commit/'))).toHaveLength(1);
@@ -73,9 +83,9 @@ it('runs CLI parsing, real creation/configurator and SQLite through QR, publicat
   expect(h.output()).toMatch(/[▀▄█]/);
   expect(h.output()).toContain('中断后续跑同一任务');
   expect(h.output()).toContain("--database '/tmp/Bot'\\''s state.db'");
-  expect(result.next).toContain('dutydeck restart');
-  expect(result.next).toContain("dutydeck restart --database '/tmp/Bot'\\''s state.db'");
-  expect(result.next).toContain("dutydeck start --database '/tmp/Bot'\\''s state.db'");
+  expect(result.next).toContain('监听已接通');
+  expect(result.next).not.toContain('restart');
+  expect(h.syncListener).toHaveBeenCalledWith('cli_created', h.context);
   for (const value of [h.output(), JSON.stringify(result)]) for (const canary of [secret, 'private-user', 'private-tenant', 'private-qr-token']) expect(value).not.toContain(canary);
   const before = await readLarkConfig(h.context.config, 'cli_created');
   await runLarkCreate(undefined, { resume: result.job!.id, agent: 'ccflash', fullTrust: true, listen: true, workspace: process.cwd() }, h.context);
@@ -92,26 +102,32 @@ it('saves a draft without an Agent, then completes that same bot on resume', asy
   expect(h.connect).toHaveBeenCalledOnce();
 });
 
-it('reports a real configurator review result and binds the requested Agent without publishing twice', async () => {
+it('keeps automatic publication timeout distinct from a human review and never reconnects or republishes', async () => {
   const h = await harness(true, 1);
-  const result = await runLarkCreate('Bot', { agent: 'ccflash', fullTrust: true, listen: true }, h.context);
-  expect(result).toMatchObject({ ok: true, job: { status: 'pending_review', retryable: false }, bot: { defaultAgentId: 'ccflash' }, next: expect.stringContaining('审核通过后生效') });
-  expect(result).not.toHaveProperty('error');
-  expect(h.output()).toContain('正在等待飞书管理员审核');
-  expect(h.output()).not.toContain('已回读确认');
-  expect(result.next).toContain("dutydeck restart --database '/tmp/Bot'\\''s state.db'");
-  expect(result.next).toContain("dutydeck start --database '/tmp/Bot'\\''s state.db'");
+  const result = await runLarkCreate('Bot', { agent: 'ccflash', listen: true }, h.context);
+  expect(result).toMatchObject({ ok: false, job: { status: 'failed', retryable: false }, error: expect.stringContaining('publish_verification_pending') });
+  expect(h.output()).not.toContain('正在等待飞书管理员审核');
+  expect(h.syncListener).not.toHaveBeenCalled();
+  expect(h.postJson.mock.calls.filter(([path]) => path.includes('/publish/commit/'))).toHaveLength(1);
   const count = h.postJson.mock.calls.length;
-  const resumed = await runLarkCreate(undefined, { resume: result.job!.id }, h.context);
-  expect(resumed.job?.status).toBe('pending_review');
-  expect(h.postJson).toHaveBeenCalledTimes(count);
-  const queried = await runLarkCreate(undefined, { resume: result.job!.id, status: true, json: true }, h.context);
-  expect(queried).toMatchObject({ ok: true, job: { status: 'pending_review' } });
+  expect(await runLarkCreate(undefined, { resume: result.job!.id }, h.context)).toMatchObject({ ok: false });
   expect(h.postJson).toHaveBeenCalledTimes(count);
 });
 
+it('reads a legacy pending-review job without connecting, configuring or publishing', async () => {
+  const h = await harness(false);
+  const raw = JSON.stringify({ id: uuid, name: 'Legacy', status: 'pending_review', appId: 'cli_created', botSaved: true, retryable: false, createdAt: 'now', updatedAt: 'now' });
+  await h.context.config.set(`lark.app_creation.${uuid}`, raw);
+  await saveLarkConfig(h.context.config, h.context.agents, { appId: 'cli_created', appSecret: secret, defaultAgentId: 'ccflash', permissionMode: 'ask', listening: true });
+  const result = await runLarkCreate(undefined, { resume: uuid, status: true, json: true }, h.context);
+  expect(result).toMatchObject({ ok: true, job: { status: 'pending_review' }, next: expect.stringContaining('审核通过后生效') });
+  expect(h.syncListener).not.toHaveBeenCalled();
+  expect(h.connect).not.toHaveBeenCalled();
+  expect(await h.context.config.get(`lark.app_creation.${uuid}`)).toBe(raw);
+});
+
 it.each([
-  { json: true, forceLogin: true }, { listen: true }, { agent: 'ccflash' }, { status: true },
+  { json: true, forceLogin: true }, { listen: true }, { status: true },
   { agent: 'unknown', fullTrust: true }, { agent: 'ccflash', fullTrust: true, workspace: '/nonexistent-dutydeck-fixture' },
 ])('rejects invalid or noninteractive creation before login: %j', async options => {
   const h = await harness();
@@ -275,4 +291,53 @@ it.each(['lark.bots', 'lark.credentials'])('status never migrates legacy Bot con
     expect(await h.context.config.get(`lark.app_creation.${uuid}`)).toBe(raw);
     expect(h.output()).not.toContain(secret);
   }
+});
+
+
+it('defaults Agent binding to ask and preserves it on resume without a full-trust flag', async () => {
+  const h = await harness();
+  const result = await runLarkCreate('Ask bot', { agent: 'ccflash', listen: true }, h.context);
+  expect(result).toMatchObject({ ok: true, bot: { permissionMode: 'ask', fullTrustConfirmed: false, activeListening: true } });
+  const before = await readLarkConfig(h.context.config, 'cli_created');
+  const resumed = await runLarkCreate(undefined, { resume: result.job!.id, agent: 'ccflash', listen: true }, h.context);
+  expect(resumed.bot).toMatchObject({ permissionMode: 'ask', fullTrustConfirmed: false, activeListening: true });
+  expect(await readLarkConfig(h.context.config, 'cli_created')).toEqual(before);
+  expect(h.syncListener).toHaveBeenCalledTimes(2);
+  expect(h.connect).toHaveBeenCalledOnce();
+});
+
+it('only upgrades ask to full trust when explicitly requested and retains the confirmed choice later', async () => {
+  const h = await harness();
+  const first = await runLarkCreate('Ask bot', { agent: 'ccflash' }, h.context);
+  const upgraded = await runLarkCreate(undefined, { resume: first.job!.id, agent: 'ccflash', fullTrust: true }, h.context);
+  expect(upgraded.bot).toMatchObject({ permissionMode: 'full-trust', fullTrustConfirmed: true });
+  const before = await readLarkConfig(h.context.config, 'cli_created');
+  expect(await runLarkCreate(undefined, { resume: first.job!.id, agent: 'ccflash' }, h.context)).toMatchObject({ bot: { permissionMode: 'full-trust', fullTrustConfirmed: true } });
+  expect(await readLarkConfig(h.context.config, 'cli_created')).toEqual(before);
+  expect(h.syncListener).not.toHaveBeenCalled();
+});
+
+it('reports an unconnected saved bot clearly and resumes the same app without restarting the service', async () => {
+  const h = await harness(false);
+  h.syncListener.mockResolvedValueOnce({ activeListening: false, message: '监听配置已保存，尚未确认接通。请启动服务后重试同一任务。' });
+  const result = await runLarkCreate('Ask bot', { agent: 'ccflash', listen: true, json: true }, h.context);
+  expect(result).toMatchObject({ ok: false, job: { status: 'completed' }, bot: { listening: true, activeListening: false }, listener: { activeListening: false }, next: expect.stringContaining('尚未确认接通') });
+  expect(result).not.toHaveProperty('restartRequired');
+  expect(result.next).not.toContain('restart');
+  expect(result.next).toContain(`--resume ${result.job!.id}`);
+  expect(JSON.parse(h.stdout())).toEqual(result);
+  expect(await runLarkCreate(undefined, { resume: result.job!.id }, h.context)).toMatchObject({ listener: { activeListening: true } });
+  expect(h.connect).toHaveBeenCalledOnce();
+});
+
+it('does not sync a listening completed bot during read-only status', async () => {
+  const h = await harness(false);
+  const result = await runLarkCreate('Ask bot', { agent: 'ccflash', listen: true }, h.context);
+  h.syncListener.mockClear();
+  const raw = await h.context.config.get('lark.bots');
+  const read = await runLarkCreate(undefined, { resume: result.job!.id, status: true, json: true }, h.context);
+  expect(read.bot).toMatchObject({ listening: true, activeListening: false });
+  expect(read).not.toHaveProperty('listener');
+  expect(h.syncListener).not.toHaveBeenCalled();
+  expect(await h.context.config.get('lark.bots')).toBe(raw);
 });
