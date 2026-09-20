@@ -15,7 +15,7 @@ import type { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryProjection } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
-import { describeWebBaseUrlReachability } from './config.js';
+import { describeWebBaseUrlReachability, larkExecutionConfirmed } from './config.js';
 
 // 飞书长连接监听：只负责 WebSocket 事件接入、事件组装与协调器装配。
 // 消息协调见 coordinator.ts，卡片渲染见 card-renderer.ts，会话路由见 session-resolver.ts，
@@ -321,7 +321,7 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
   get activeAppIds() { return [...this.listeners.keys()]; }
 
   async sync(configs: StoredLarkConfig[]) {
-    const enabled = new Map(configs.filter(config => config.listening && config.fullTrustConfirmed === true).map(config => [config.appId, config]));
+    const enabled = new Map(configs.filter(config => config.listening && larkExecutionConfirmed(config)).map(config => [config.appId, config]));
     for (const [appId, listener] of this.listeners) {
       if (enabled.has(appId)) continue;
       listener.stop();

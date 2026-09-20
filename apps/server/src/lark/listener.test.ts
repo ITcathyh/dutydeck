@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
-import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkMessageCoordinator, patchRejectedCardDelta, renderLarkCardElements, renderLarkTrace } from './listener.js';
+import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator, patchRejectedCardDelta, renderLarkCardElements, renderLarkTrace } from './listener.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
 
 // 仅「监听接入层」用例需要截获 SDK 的事件注册；其余协调器用例直接构造 coordinator，
@@ -46,6 +46,28 @@ const cardElements = (elements: any[]): any[] => elements.flatMap(element => {
 const groupTitle = (group: any) => group.header?.title?.content ?? group.elements?.find((el: any) => el.element_id === 'current_title')?.content ?? group.columns?.[0]?.elements?.[0]?.text?.content ?? '';
 const groupElements = (group: any) => group.elements ?? group.columns?.[0]?.elements ?? [];
 const messageMissingError = () => new LarkServiceError('LARK_OPENAPI_ERROR', 'message not found', 502, { upstreamCode: 230030 });
+
+it('listens in ask mode without requiring full trust and stops when execution is no longer confirmed', async () => {
+  const start = vi.spyOn(LarkLongConnectionListener.prototype, 'start').mockResolvedValue();
+  const stop = vi.spyOn(LarkLongConnectionListener.prototype, 'stop').mockImplementation(() => {});
+  const pool = new LarkLongConnectionListenerPool({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+  try {
+    const ask = { ...config, permissionMode: 'ask' as const, fullTrustConfirmed: false };
+    await pool.sync([ask]);
+    expect(pool.activeAppIds).toEqual([config.appId]);
+    expect(start).toHaveBeenCalledWith(ask);
+    await pool.sync([{ ...ask, permissionMode: 'full-trust' }]);
+    expect(pool.activeAppIds).toEqual([]);
+    expect(stop).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledOnce();
+    await pool.sync([{ ...config, permissionMode: 'full-trust', fullTrustConfirmed: true }]);
+    expect(pool.activeAppIds).toEqual([config.appId]);
+    await pool.sync([{ ...config, listening: false }]);
+    expect(pool.activeAppIds).toEqual([]);
+    expect(start).toHaveBeenCalledTimes(2);
+    expect(stop).toHaveBeenCalledTimes(2);
+  } finally { pool.stop(); start.mockRestore(); stop.mockRestore(); }
+});
 
 describe('Lark message coordinator', () => {
   it('runs listener, session and high-risk edges through the marked legacy policy adapter', async () => {

@@ -9,7 +9,7 @@
  *   · 每个 fail / warn 必须带 remedy，有可执行动作时必须带 command。
  *   · 任何字段都不得包含机密（app secret、access token）。
  */
-import { larkBotsConfigKey, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
+import { larkBotsConfigKey, larkExecutionConfirmed, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 import type {
   CheckLevel,
@@ -418,15 +418,14 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
       detail: `${view.bots.length} 个机器人：${names}（凭据齐备）`
     });
 
-    // listening 且 fullTrustConfirmed 才会真的起监听器；只 listening 的永远连不上。
-    const unconfirmed = view.bots.filter(bot => bot.listening && !bot.fullTrustConfirmed);
+    const unconfirmed = view.bots.filter(bot => bot.listening && !larkExecutionConfirmed(bot));
     if (unconfirmed.length > 0) {
       checks.push({
         id: 'lark.full-trust',
         label: '飞书完全信任确认',
         level: 'warn',
         detail: `${unconfirmed.length} 个机器人已开启监听但未确认完全信任：${unconfirmed.map(bot => bot.appId).join('、')}`,
-        remedy: '只有确认过「以完全信任模式无人值守运行」的机器人才会真正建立监听连接；未确认的会一直连不上。在 Web 面板的飞书配置里勾选确认，或重新走一遍配置向导。',
+        remedy: '在 Web 面板中选择逐次询问模式，或在需要无人值守执行时确认完全信任。',
         command: `dutydeck setup --lark-app-id ${unconfirmed[0]?.appId ?? '<应用ID>'}`,
         verify: 'dutydeck doctor --json'
       });
@@ -437,8 +436,8 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
         id: 'lark.setup-complete',
         label: '飞书配置完整度',
         level: 'warn',
-        detail: `${incomplete.length} 个机器人尚未配完（缺默认 Agent 或未确认完全信任）：${incomplete.map(bot => bot.appId).join('、')}`,
-        remedy: '缺少默认 Agent 的机器人收到消息后不知道该用哪个 Agent 处理。补上默认 Agent 并完成完全信任确认。',
+        detail: `${incomplete.length} 个机器人尚未配完（缺默认 Agent 或执行模式未确认）：${incomplete.map(bot => bot.appId).join('、')}`,
+        remedy: '补上默认 Agent，并选择逐次询问模式；如需无人值守执行，再确认完全信任。',
         command: `dutydeck setup --lark-app-id ${incomplete[0]?.appId ?? '<应用ID>'}`,
         verify: 'dutydeck doctor --json'
       });
