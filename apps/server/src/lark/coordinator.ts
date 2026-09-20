@@ -1006,7 +1006,8 @@ export class LarkMessageCoordinator {
     const pendingAskContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && await this.continuesPendingAsk(event, config));
     const participation = await this.workflowOptions.participation?.handle(event, config, { explicit: explicit || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId });
     if (this.handledMessages.has(event.messageId)) return;
-    if (participation?.enabled && !explicit && !pendingAskContinuation && !commandInteraction) return;
+    // 定向机器人交接仍走下方循环门禁和访问授权，不作为人类显式指令或主动判定。
+    if (participation?.enabled && !explicit && !pendingAskContinuation && !commandInteraction && !(botSender && legacyWake)) return;
     const shouldWake = legacyWake || Boolean(participation?.enabled && pendingAskContinuation);
     // 机器人互相 @ 的硬门禁。legacyWake 的 mentionsBot / quotedWorkflow 两支都不受 !botSender
     // 约束，访问控制在没配成员名单时又对机器人一律放行，所以刷屏回路只能在这里封口。

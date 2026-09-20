@@ -13,11 +13,13 @@ import { createCollaborationSchema } from '../../../../packages/storage/src/coll
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
 import {
   BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD,
-  countBotTurnUsage, countDecisionUsage, type CollaborationSnapshot
+  countBotTurnUsage, countDecisionUsage, type CollaborationSnapshot, type ConfigRepository
 } from '@dutydeck/shared';
 import { LarkGroupParticipation } from './group-participation.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { senderGroupMention } from './card-mentions.js';
+import { LarkWorkflowInteractions } from './workflow-interactions.js';
+import type { LarkGroupManager } from './group-management.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { StoredLarkConfig } from './config.js';
 
@@ -41,7 +43,7 @@ const humanMessage = (id: string, patch: Partial<LarkMessageEvent> = {}): LarkMe
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
-function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000Z') }) {
+function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000Z') }, options: { groupManager?: LarkGroupManager; workflow?: boolean } = {}) {
   const db = new Database(':memory:'); createCollaborationSchema(db);
   const repository = createCollaborationRepository(db);
   const service = {
@@ -51,9 +53,10 @@ function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000
     send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })),
     update: vi.fn(async () => ({ messageId: 'om_card' }))
   };
+  const decider = { decide: vi.fn(async (_c: StoredLarkConfig, _s: CollaborationSnapshot) => ({ action: 'silent' as const, reason: '', evidenceIds: [] })) };
   const participation = new LarkGroupParticipation({
     repository,
-    decider: { decide: vi.fn(async (_c: StoredLarkConfig, _s: CollaborationSnapshot) => ({ action: 'silent', reason: '', evidenceIds: [] })) },
+    decider,
     authorize: vi.fn(async () => true), readConfig: async () => config, serviceFor: () => service as any,
     readGroupDescription: async () => '门禁测试群', listScopes: async () => [scope], debounceMs: 10_000,
     now: () => clock.now
@@ -61,13 +64,23 @@ function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000
   const session = { id: 's1', protocol: 'acp', state: 'idle', agentId: 'mock', cwd: '/tmp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = {
     start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-    send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
+    send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}), resolvePermission: vi.fn(async () => {})
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const peerBotAuthorized = vi.fn(async () => true);
+  const records = new Map<string, string>([['lark.bots', JSON.stringify([config])]]);
+  const store: ConfigRepository = {
+    get: async key => records.get(key), set: async (key, value) => { records.set(key, value); },
+    list: async prefix => [...records].filter(([key]) => key.startsWith(prefix)).map(([key, value]) => ({ key, value })),
+    compareAndSet: async (key, expected, value) => {
+      if (records.get(key) !== expected) return false;
+      records.set(key, value); return true;
+    }
+  };
   const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
-    undefined, undefined, async () => 'group', undefined, undefined, { participation });
+    peerBotAuthorized, undefined, async () => 'group', undefined, options.groupManager, { participation, ...(options.workflow ? { store } : {}) });
   cleanups.push(async () => { coordinator.stop(); await participation.close(); if (db.open) db.close(); });
-  return { repository, participation, coordinator, runtime, service, log, clock };
+  return { repository, participation, coordinator, runtime, service, log, clock, decider, peerBotAuthorized, store };
 }
 
 const decisions = (h: ReturnType<typeof harness>) => h.repository.listDecisions(scope, 500);
@@ -75,6 +88,122 @@ const gateRecords = async (h: ReturnType<typeof harness>) =>
   (await decisions(h)).filter(item => (item.inputSnapshot as { gate?: string }).gate === BOT_LOOP_GATE);
 const turnRecords = async (h: ReturnType<typeof harness>) =>
   (await decisions(h)).filter(item => (item.inputSnapshot as { gate?: string }).gate === BOT_TURN_RECORD);
+
+describe.each(['off', 'observe', 'selective'] as const)('机器人定向交接（participation=%s）', mode => {
+  async function configuredHarness() {
+    const h = harness();
+    await h.repository.updateSettings(scope, { expectedRevision: 0, participation: mode }, 'owner');
+    return h;
+  }
+  const restrictedConfig: StoredLarkConfig = { ...config, groupToolsEnabled: true,
+    allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], riskControlMode: 'enforced' };
+
+  it.each(['peer', 'allowlist'] as const)('允许通过%s授权的机器人@，保留机器人身份与工具风险限制', async authorization => {
+    const h = await configuredHarness();
+    const current = authorization === 'peer' ? restrictedConfig : { ...restrictedConfig, peerBotsAllowed: false,
+      allowedBots: [{ openId: 'ou_peer_bot', name: 'Peer' }] };
+    if (authorization === 'allowlist') h.peerBotAuthorized.mockResolvedValue(false);
+    await h.coordinator.handle(botMessage('om_peer_request'), current);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    await h.participation.flush(scope);
+    expect(h.peerBotAuthorized).toHaveBeenCalledWith(scope.chatId, 'ou_peer_bot');
+    expect(h.runtime.send.mock.calls[0]).toEqual(expect.arrayContaining([expect.objectContaining({ enabled: true, authorized: false })]));
+    expect(h.decider.decide).not.toHaveBeenCalled();
+    expect(await turnRecords(h)).toHaveLength(1);
+    if (mode !== 'off') {
+      const observation = (await h.repository.listObservations(scope)).find(item => item.eventId === 'om_peer_request');
+      expect(observation?.senderKind).toBe('bot');
+      expect(observation?.refs).not.toContain('dutydeck:explicit');
+    }
+  });
+
+  it('未@的普通机器人消息不启动执行或只读判定', async () => {
+    const h = await configuredHarness();
+    await h.coordinator.handle(botMessage('om_bot_chat', { mentions: [] }), { ...restrictedConfig, mentionPolicy: 'never' });
+    await h.participation.flush(scope);
+    expect(h.runtime.start).not.toHaveBeenCalled();
+    expect(h.decider.decide).not.toHaveBeenCalled();
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+    expect(await turnRecords(h)).toHaveLength(0);
+  });
+
+  it.each(['untrusted', 'disabled'] as const)('拒绝%s的peer机器人，不绕过现有访问授权', async reason => {
+    const h = await configuredHarness();
+    h.peerBotAuthorized.mockResolvedValue(reason !== 'untrusted');
+    await h.coordinator.handle(botMessage('om_denied_peer'), { ...restrictedConfig, peerBotsAllowed: reason !== 'disabled' });
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskName: '访问被拒绝' })));
+    expect(h.runtime.start).not.toHaveBeenCalled();
+    expect(h.decider.decide).not.toHaveBeenCalled();
+  });
+
+  it.each(['depth', 'budget'] as const)('定向交接仍受%s循环门禁限制，拦截时不发回执', async gate => {
+    const h = await configuredHarness();
+    const limit = gate === 'depth' ? BOT_LOOP_DEPTH_LIMIT : BOT_TURN_LIMIT_PER_HOUR;
+    for (let index = 0; index < limit; index++) {
+      await h.participation.guardBotTurn(botMessage(`om_fill_${index}`, { threadId: gate === 'depth' ? 'omt_same' : `omt_${index}` }), restrictedConfig, { botOpenId: 'ou_bot' });
+    }
+    await h.coordinator.handle(botMessage('om_blocked', { threadId: gate === 'depth' ? 'omt_same' : 'omt_new' }), restrictedConfig);
+    expect(h.runtime.start).not.toHaveBeenCalled();
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+    expect(h.service.send).not.toHaveBeenCalled(); expect(h.service.reply).not.toHaveBeenCalled();
+    expect(h.service.sendText).not.toHaveBeenCalled(); expect(h.service.replyText).not.toHaveBeenCalled();
+    expect(await gateRecords(h)).toHaveLength(1);
+    expect(await turnRecords(h)).toHaveLength(limit);
+  });
+});
+
+describe('Tag托管群与引用工作流的机器人边界', () => {
+  it.each([true, false])('托管群授权allowed=%s决定能否接入机器人任务', async allowed => {
+    const groupManager = {
+      resolved: vi.fn(async (current: StoredLarkConfig) => ({ ...current, managedGroup: { bindingId: 'binding', revision: 1 } })),
+      authorize: vi.fn(async () => ({ allowed, code: allowed ? 'allowed' : 'talk_required', reason: '测试群授权' })),
+      recordRun: vi.fn(async () => {})
+    };
+    const h = harness(undefined, { groupManager: groupManager as any });
+    await h.repository.updateSettings(scope, { expectedRevision: 0, participation: 'selective' }, 'owner');
+    await h.coordinator.handle(botMessage('om_managed_peer'), config);
+    expect(groupManager.authorize).toHaveBeenCalledWith(scope.appId, scope.chatId, 'ou_peer_bot', 'task.create', undefined, { memberObserved: true });
+    if (allowed) {
+      await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+      expect(groupManager.recordRun).toHaveBeenCalled();
+      expect(h.service.addReaction).toHaveBeenCalledOnce();
+    } else {
+      expect(h.runtime.start).not.toHaveBeenCalled(); expect(h.runtime.send).not.toHaveBeenCalled();
+      expect(h.service.addReaction).not.toHaveBeenCalled();
+      expect(h.service.reply).not.toHaveBeenCalled(); expect(h.service.send).not.toHaveBeenCalled();
+      expect(h.service.replyText).not.toHaveBeenCalled(); expect(h.service.sendText).not.toHaveBeenCalled();
+    }
+    expect(h.decider.decide).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('无@引用审批仍拒绝机器人操作，depth门禁=%s时不发拒绝回执', async blocked => {
+    const h = harness(undefined, { workflow: true });
+    await h.repository.updateSettings(scope, { expectedRevision: 0, participation: 'selective' }, 'owner');
+    await h.store.set(`lark.interaction.${scope.appId}.permission`, JSON.stringify({
+      id: 'permission', appId: scope.appId, sessionId: 's1', taskId: 'task', turn: 1, boot: 'boot',
+      kind: 'permission', nativeId: 'native_permission', question: '批准操作？', state: 'pending',
+      cardId: 'om_permission', event: humanMessage('om_original'), updatedAt: h.clock.now.toISOString()
+    }));
+    const respond = vi.spyOn(LarkWorkflowInteractions.prototype, 'respond');
+    cleanups.push(() => { respond.mockRestore(); });
+    if (blocked) for (let index = 0; index < BOT_LOOP_DEPTH_LIMIT; index++) {
+      await h.participation.guardBotTurn(botMessage(`om_fill_${index}`), config, { botOpenId: 'ou_bot' });
+    }
+    await h.coordinator.handle(botMessage('om_quote', { mentions: [], parentId: 'om_permission', content: '{"text":"/approve"}' }), config);
+    expect(respond).not.toHaveBeenCalled(); expect(h.runtime.resolvePermission).not.toHaveBeenCalled();
+    expect(h.runtime.start).not.toHaveBeenCalled(); expect(h.runtime.send).not.toHaveBeenCalled();
+    expect(h.decider.decide).not.toHaveBeenCalled();
+    if (blocked) {
+      expect(h.service.addReaction).not.toHaveBeenCalled();
+      expect(h.service.reply).not.toHaveBeenCalled(); expect(h.service.send).not.toHaveBeenCalled();
+      expect(h.service.replyText).not.toHaveBeenCalled(); expect(h.service.sendText).not.toHaveBeenCalled();
+      expect(await gateRecords(h)).toHaveLength(1);
+    } else {
+      expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ markdown: '任务操作需由人类成员发起。' }));
+      expect(await turnRecords(h)).toHaveLength(1);
+    }
+  });
+});
 
 describe('多 bot 互相 @ 的硬门禁', () => {
   it('同一话题内连续机器人往返达到上限后停止响应', async () => {
