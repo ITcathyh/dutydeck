@@ -108,6 +108,25 @@ it.each(['approve-reads', 'full-trust'] as const)('retains explicit %s backgroun
   f.calls[0]!.finish('Done');
 });
 
+it('passes partial history coverage and omitted-context markers through the real runtime to the background driver', async () => {
+  const f = await fixture();
+  const bootstrap = { scope, status: 'partial' as const, missing: ['context_omitted:observations=50', 'Earlier alert history is outside this window'], updatedAt: new Date().toISOString() };
+  await f.repos.collaboration.saveBootstrap(bootstrap);
+  await f.repos.collaboration.observe({ scope, source: 'lark.message', eventId: 'recent', occurredAt: bootstrap.updatedAt, receivedAt: bootstrap.updatedAt, senderKind: 'human', text: 'Latest visible discussion', refs: [], origin: 'history', missing: [] });
+  await f.create('partial-summary'); f.advance(); await f.collaboration.scheduler.tick();
+  await eventually(async () => f.calls.length === 1);
+  const call = f.calls[0]!;
+  const material = JSON.parse(call.prompt.slice(call.prompt.lastIndexOf('\n\n') + 2));
+  expect(material.bootstrap).toEqual(bootstrap);
+  expect(material.observations).toEqual([expect.objectContaining({ eventId: 'recent', text: 'Latest visible discussion' })]);
+  expect(call.prompt).toContain('有限窗口');
+  expect(call.prompt).toContain('不能据此推断全天无异常');
+  expect(call.prompt).toContain('不得声称已完整查阅全天消息');
+  const action = (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution')!;
+  expect((action.payload.request as { prompt: string }).prompt).toBe(call.prompt);
+  call.finish('Only the supplied window was reviewed; earlier history is missing.');
+});
+
 it('uses real saved group bindings, runs one frozen background task and delivers its result once', async () => {
   const f = await fixture();
   expect((await f.groups.owner(scope.appId))?.activeGroups).toContain(f.group.binding!.id);
