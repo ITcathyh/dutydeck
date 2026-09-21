@@ -13,6 +13,7 @@ export const collaborationSettingsSchema = z.object({
   scope: collaborationScopeSchema,
   revision: z.number().int().min(0).default(0),
   participation: z.enum(collaborationParticipationModes).default('off'),
+  inheritParticipation: z.boolean().default(false),
   instructions: z.string().max(8000).default(''),
   notificationsPaused: z.boolean().default(false),
   maxProactivePerHour: z.number().int().min(0).max(60).default(6),
@@ -30,6 +31,7 @@ export type CollaborationSettings = z.infer<typeof collaborationSettingsSchema>;
 export const updateCollaborationSettingsInputSchema = z.object({
   expectedRevision: z.number().int().min(0),
   participation: z.enum(collaborationParticipationModes).optional(),
+  inheritParticipation: z.boolean().optional(),
   instructions: z.string().max(8000).optional(),
   notificationsPaused: z.boolean().optional(),
   maxProactivePerHour: z.number().int().min(0).max(60).optional(),

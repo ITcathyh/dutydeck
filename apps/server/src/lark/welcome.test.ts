@@ -207,3 +207,36 @@ describe('欢迎卡的身份边界说明', () => {
       .not.toContain('部署这台 Dutydeck 的系统账号');
   });
 });
+
+
+describe('欢迎卡使用生效群参与模式', () => {
+  it.each(['always', 'ambient'] as const)('selective 优先于 %s，说明判断与 OK 标记并保留身份边界', mentionPolicy => {
+    const card = buildWelcomeCardContent({ chatType: 'group', capabilities: fullCapabilities, routing: { mentionPolicy, participation: 'selective', allChatMembers: true } });
+    expect(card.markdown).toContain('Tag 按需参与');
+    expect(card.markdown).toContain('普通消息会先判断是否需要回复');
+    expect(card.markdown).toContain('决定回复时会添加 **OK** 处理标记');
+    expect(card.markdown).not.toContain('每条任务消息和续聊都需要');
+    expect(card.markdown).not.toContain('本群普通消息也会触发任务');
+    expect(card.markdown).toContain('部署这台 Dutydeck 的系统账号');
+    expect(card.markdown).toContain('/help');
+    expect(card.markdown).toContain('/cancel');
+  });
+
+  it('observe 明确普通消息只观察，不承诺自动回复或处理标记', () => {
+    const card = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy: 'ambient', participation: 'observe' } });
+    expect(card.markdown).toContain('普通消息只会被观察，不会自动回复');
+    expect(card.markdown).not.toContain('本群普通消息也会触发任务');
+    expect(card.markdown).not.toContain('OK');
+  });
+
+  it.each(['always', 'topic', 'never', 'ambient'] as const)('off 保留 %s 原欢迎文案', mentionPolicy => {
+    const original = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy } });
+    const disabled = buildWelcomeCardContent({ chatType: 'group', routing: { mentionPolicy, participation: 'off' } });
+    expect(disabled).toEqual(original);
+  });
+
+  it('私聊不受群参与模式影响', () => {
+    expect(buildWelcomeCardContent({ chatType: 'p2p', routing: { participation: 'selective' } }))
+      .toEqual(buildWelcomeCardContent({ chatType: 'p2p' }));
+  });
+});

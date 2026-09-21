@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
+import type { LarkLongConnectionListenerOptions } from './listener.js';
 import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator, patchRejectedCardDelta } from './listener.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
 
@@ -8,9 +9,15 @@ import { buildLarkCard, LarkServiceError } from './service.js';
 // 不受此 mock 影响（它们传入的是手写 service 替身，永不实例化 lark.Client）。
 const larkSdkHarness = vi.hoisted(() => {
   const handlers: Record<string, (event: any) => unknown> = {};
+  const wsStart = vi.fn();
+  const wsClose = vi.fn();
   return {
-    handlers,
-    reset: () => { for (const key of Object.keys(handlers)) delete handlers[key]; }
+    handlers, wsStart, wsClose,
+    reset: () => {
+      for (const key of Object.keys(handlers)) delete handlers[key];
+      wsStart.mockClear();
+      wsClose.mockClear();
+    }
   };
 });
 vi.mock('@larksuiteoapi/node-sdk', () => ({
@@ -23,8 +30,8 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
   },
   WSClient: class {
     constructor(private readonly options: { onReady: () => void }) {}
-    async start() { this.options.onReady(); }
-    close() { /* no-op */ }
+    async start() { larkSdkHarness.wsStart(); this.options.onReady(); }
+    close() { larkSdkHarness.wsClose(); }
   }
 }));
 
@@ -2315,6 +2322,7 @@ describe('Lark long connection listener 欢迎语', () => {
     records?: Record<string, string>;
     runtime?: any;
     configPatch?: Partial<StoredLarkConfig>;
+    listenerOptions?: Pick<LarkLongConnectionListenerOptions, 'participation' | 'groupManager'>;
   }
 
   const memoryKv = (records: Record<string, string> = {}) => {
@@ -2351,7 +2359,8 @@ describe('Lark long connection listener 欢迎语', () => {
     const kv = memoryKv(options.records);
     const listener = new LarkLongConnectionListener(
       { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      { fetcher: fetcher as any, welcomeStore: kv as any, ...(options.runtime ? { runtime: options.runtime } : {}) }
+      { fetcher: fetcher as any, welcomeStore: kv as any, chatModeResolver: async () => 'group',
+        ...options.listenerOptions, ...(options.runtime ? { runtime: options.runtime } : {}) }
     );
     await listener.start({ ...config, ...options.configPatch });
     return { listener, handlers: larkSdkHarness.handlers, posts, kv };
@@ -2362,6 +2371,72 @@ describe('Lark long connection listener 欢迎语', () => {
       try { return JSON.parse(post.body.content) as any; } catch { return undefined; }
     })
     .filter(Boolean);
+
+  it('同凭据修改默认参与模式只刷新一次，不重建连接或重复恢复', async () => {
+    const participation = {
+      recover: vi.fn(async () => {}), refresh: vi.fn(async () => {}), closeApp: vi.fn()
+    };
+    const { listener } = await startHarness({
+      configPatch: { defaultGroupParticipation: 'off' },
+      listenerOptions: { participation: participation as unknown as LarkLongConnectionListenerOptions['participation'] }
+    });
+    try {
+      expect(participation.recover).toHaveBeenCalledExactlyOnceWith(config.appId);
+      await listener.start({ ...config, defaultGroupParticipation: 'off', workspace: '/another' });
+      expect(participation.refresh).not.toHaveBeenCalled();
+      await listener.start({ ...config, defaultGroupParticipation: 'selective' });
+      await listener.start({ ...config, defaultGroupParticipation: 'selective', preInjectPrompt: 'updated' });
+      expect(participation.refresh).toHaveBeenCalledExactlyOnceWith(config.appId);
+      expect(participation.recover).toHaveBeenCalledOnce();
+      expect(participation.closeApp).not.toHaveBeenCalled();
+      expect(larkSdkHarness.wsStart).toHaveBeenCalledOnce();
+      expect(larkSdkHarness.wsClose).not.toHaveBeenCalled();
+      expect(listener.listening).toBe(true);
+    } finally { listener.stop(); }
+  });
+
+  it.each([
+    { defaultMode: 'off', effectiveMode: 'selective', text: '普通消息会先判断是否需要回复' },
+    { defaultMode: 'selective', effectiveMode: 'off', text: '原任务话题内续聊可直接回复' },
+    { defaultMode: 'selective', effectiveMode: 'observe', text: '普通消息只会被观察，不会自动回复' }
+  ] as const)('入群欢迎等群配置就绪并采用 $effectiveMode，覆盖 Bot 默认 $defaultMode', async ({ defaultMode, effectiveMode, text }) => {
+    let releaseGroup!: () => void;
+    const groupReady = new Promise<void>(resolve => { releaseGroup = resolve; });
+    const groupManager = {
+      ensureParticipationGroup: vi.fn(() => groupReady),
+      resolved: vi.fn(async (current: StoredLarkConfig) => ({ ...current, mentionPolicy: 'topic' as const })),
+      groupAccess: vi.fn(async () => undefined)
+    };
+    const participation = {
+      recover: vi.fn(async () => {}), closeApp: vi.fn(), bootstrap: vi.fn(async () => {}),
+      mode: vi.fn(async () => effectiveMode)
+    };
+    const { listener, handlers, posts } = await startHarness({
+      configPatch: { defaultGroupParticipation: defaultMode },
+      listenerOptions: {
+        groupManager: groupManager as unknown as LarkLongConnectionListenerOptions['groupManager'],
+        participation: participation as unknown as LarkLongConnectionListenerOptions['participation']
+      }
+    });
+    try {
+      handlers['im.chat.member.bot.added_v1']!({ event_id: 'e_effective', chat_id: 'oc_effective' });
+      await vi.waitFor(() => expect(groupManager.ensureParticipationGroup).toHaveBeenCalledExactlyOnceWith(config.appId, 'oc_effective'));
+      expect(groupManager.resolved).not.toHaveBeenCalled();
+      expect(participation.mode).not.toHaveBeenCalled();
+      expect(posts).toHaveLength(0);
+      releaseGroup();
+      await vi.waitFor(() => expect(posts).toHaveLength(1));
+      expect(groupManager.resolved).toHaveBeenCalledWith(expect.objectContaining({ defaultGroupParticipation: defaultMode }), 'oc_effective');
+      expect(participation.mode).toHaveBeenCalledExactlyOnceWith({ appId: config.appId, chatId: 'oc_effective' });
+      expect(groupManager.resolved.mock.invocationCallOrder[0]).toBeLessThan(participation.mode.mock.invocationCallOrder[0]!);
+      const card = JSON.stringify(welcomeTitles(posts)[0]);
+      expect(card).toContain(text);
+      expect(card).toContain('部署这台 Dutydeck 的系统账号');
+      expect(card).toContain('@我 /help');
+      if (effectiveMode === 'selective') expect(card).toContain('OK');
+      else expect(card).not.toContain('Tag 按需参与');
+    } finally { releaseGroup(); listener.stop(); }
+  });
 
   it('bot 入群事件触发欢迎卡分发冒烟', async () => {
     const { listener, handlers, posts } = await startHarness();

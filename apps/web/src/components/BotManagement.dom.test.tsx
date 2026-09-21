@@ -408,3 +408,45 @@ describe('BotManagement 保存期间切换对象与继续编辑', () => {
     await waitFor(() => expect(saveSpy).toHaveBeenLastCalledWith(expect.objectContaining({ workspace: '/data/projects/bot1-first-more', expectedRevision: 4 })));
   });
 });
+
+
+describe('Bot 默认群参与模式', () => {
+  it.each(['off', 'observe', 'selective'] as const)('加载 %s 并保存新的默认模式', async mode => {
+    const user = userEvent.setup();
+    let bot = { ...mockBot, defaultGroupParticipation: mode };
+    vi.spyOn(api, 'larkConfig').mockImplementation(async () => ({ configured: true, bots: [bot], listeningDisabled: false }));
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const nextMode = mode === 'selective' ? 'off' : 'selective';
+    const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async () => {
+      bot = { ...bot, revision: 4, defaultGroupParticipation: nextMode };
+      return { configured: true, bots: [bot], listeningDisabled: false };
+    });
+    renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    const select = await screen.findByRole('combobox', { name: '默认群参与模式' });
+    expect((select as HTMLSelectElement).value).toBe(mode);
+    expect(screen.getByText(/所有群默认先判断普通消息是否需要回复/)).toBeTruthy();
+    await user.selectOptions(select, nextMode);
+    expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      originalAppId: bot.appId, defaultGroupParticipation: nextMode, mentionPolicy: 'always', expectedRevision: 3
+    })));
+    await waitFor(() => expect(screen.queryByText(/有未保存的修改/)).toBeNull());
+    expect((screen.getByRole('combobox', { name: '默认群参与模式' }) as HTMLSelectElement).value).toBe(nextMode);
+  });
+
+  it('旧配置默认关闭，放弃修改会还原', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+    const select = await screen.findByRole('combobox', { name: '默认群参与模式' });
+    expect((select as HTMLSelectElement).value).toBe('off');
+    await user.selectOptions(select, 'observe');
+    await user.click(screen.getByRole('button', { name: '放弃修改' }));
+    expect((select as HTMLSelectElement).value).toBe('off');
+    expect(screen.queryByText(/有未保存的修改/)).toBeNull();
+  });
+});

@@ -97,6 +97,18 @@ export class LarkGroupParticipation {
       return this.options.repository.getBootstrap(scope);
     });
   }
+  async mode(scope: CollaborationScope) {
+    return (await this.options.repository.getSettings(scope)).participation;
+  }
+  refresh(appId: string): Promise<void> {
+    if (this.closed) return Promise.resolve();
+    return this.track(async () => {
+      for (const scope of await this.options.listScopes?.(appId) ?? []) {
+        if (this.closed) return;
+        await this.bootstrapper.ensure(scope, true);
+      }
+    });
+  }
   recover(appId: string): Promise<void> {
     if (this.closed) return Promise.resolve();
     return this.track(() => this.recoverApp(appId));

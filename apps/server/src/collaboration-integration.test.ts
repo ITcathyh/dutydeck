@@ -27,11 +27,13 @@ async function fixture(options: { realAcp?: boolean } = {}) {
   const client = {
     getBotInfo: async () => ({ appName: 'Agent', openId: 'ou_bot' }),
     checkApplicationIdentity: async () => ({ verified: true, reportedAppId: scope.appId, tenantKey: 'synthetic' }),
-    listChats: async () => ({ items: [{ chatId: scope.chatId, name: '文档协作', external: false }], hasMore: false }),
+    listChats: vi.fn(async () => ({ items: [{ chatId: scope.chatId, name: '文档协作', external: false }], hasMore: false })),
     listChatMembers: async () => ({ items: members.map(openId => ({ memberId: openId, openId, name: openId, memberType: 'user' })), hasMore: false, securityLimited: false }),
     getUserEmails: async () => [],
     getChatPreflightInfo: async () => ({ name: '文档协作', description: '讨论资料进度' }),
     listMessages: vi.fn(async () => ({ items: [], hasMore: false })),
+    listChatMessages: vi.fn(async () => ({ items: [], hasMore: false })),
+    addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}), listOwnReactions: vi.fn(async () => []),
     sendText: vi.fn(async (_input: { text: string }) => ({ messageId: 'om_result', chatId: scope.chatId })),
     replyText: vi.fn(async () => ({ messageId: 'om_reply', chatId: scope.chatId }))
   };
@@ -71,6 +73,80 @@ async function fixture(options: { realAcp?: boolean } = {}) {
   return { repos, runtime, collaboration, groups, client, group, calls, stopped, create,
     advance() { clock = new Date(clock.getTime() + 60_000); }, revoke() { members = []; } };
 }
+
+it('resolves Bot defaults on every read and keeps explicit group overrides until inheritance is restored', async () => {
+  const f = await fixture();
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  expect((await f.collaboration.service.get(scope, installationOwnerTaskActor)).snapshot.settings).toMatchObject({ revision: 0, participation: 'selective', inheritParticipation: true });
+  await f.collaboration.service.updateSettings(scope, installationOwnerTaskActor, { expectedRevision: 0, instructions: '简短回答' });
+  expect(await f.collaboration.service.repositories.collaboration.getSettings(scope)).toMatchObject({ participation: 'selective', inheritParticipation: true });
+  await f.collaboration.service.updateSettings(scope, installationOwnerTaskActor, { expectedRevision: 1, participation: 'off' });
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'observe' });
+  expect(await f.collaboration.service.repositories.collaboration.getSettings(scope)).toMatchObject({ participation: 'off', inheritParticipation: false });
+  await f.collaboration.service.updateSettings(scope, installationOwnerTaskActor, { expectedRevision: 2, inheritParticipation: true });
+  expect(await f.collaboration.service.repositories.collaboration.getSettings(scope)).toMatchObject({ participation: 'observe', inheritParticipation: true });
+  expect(await f.repos.collaboration.getSettings(scope)).toMatchObject({ participation: 'off', inheritParticipation: true });
+  expect(await f.collaboration.service.repositories.collaboration.getSettings({ ...scope, appId: 'another_bot' })).toMatchObject({ participation: 'off' });
+});
+
+it('discovers existing groups and handles a newly joined group without per-group setup or restarting the runtime', async () => {
+  const f = await fixture();
+  const second = { ...scope, chatId: 'oc_second' }, joined = { ...scope, chatId: 'oc_joined' };
+  f.client.listChats.mockResolvedValue({ items: [scope, second].map(item => ({ chatId: item.chatId, name: item.chatId, external: false })), hasMore: false });
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  await f.collaboration.participation.refresh(scope.appId);
+  expect((await f.collaboration.service.get(second, installationOwnerTaskActor)).snapshot.settings).toMatchObject({ participation: 'selective', inheritParticipation: true });
+  expect(await f.repos.collaboration.getSettings(second)).toMatchObject({ revision: 0, inheritParticipation: true });
+  f.client.listChats.mockResolvedValue({ items: [scope, second, joined].map(item => ({ chatId: item.chatId, name: item.chatId, external: false })), hasMore: false });
+  const config = (await readLarkConfig(f.repos.config, scope.appId))!;
+  await f.collaboration.participation.handle({ messageId: 'om_joined', chatId: joined.chatId, chatType: 'group', senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: '{"text":"帮我总结这里的进展"}', createTime: String(Date.now()), mentions: [] }, config, { explicit: false });
+  const flushing = f.collaboration.participation.flush(joined);
+  await eventually(async () => f.calls.length === 1);
+  const snapshot = JSON.parse(f.calls[0]!.prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
+  expect(snapshot.scope).toEqual(joined);
+  f.calls[0]!.finish(JSON.stringify({ action: 'reply', reason: '直接提问', evidenceIds: [snapshot.observations.find((item: any) => item.messageId === 'om_joined').id], updates: [] }));
+  await eventually(async () => f.calls.length === 2);
+  expect(f.client.addReaction).toHaveBeenCalledWith('om_joined', 'OK');
+  f.calls[1]!.finish('{"response":"目前可见材料不足，请补充具体进展。"}');
+  await flushing;
+  expect(f.client.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_joined', text: '目前可见材料不足，请补充具体进展。' }));
+  expect(f.client.deleteReaction).toHaveBeenCalledWith('om_joined', 'reaction');
+  expect((await f.collaboration.service.get(joined, installationOwnerTaskActor)).snapshot.settings).toMatchObject({ revision: 0, participation: 'selective', inheritParticipation: true });
+  expect((await f.groups.groups()).groups.every(item => item.bots.every(bot => bot.applied))).toBe(true);
+});
+
+it('keeps an unconfigured Bot and explicitly closed or disabled groups out of automatic participation', async () => {
+  const f = await fixture();
+  const closed = { ...scope, chatId: 'oc_closed' };
+  f.client.listChats.mockResolvedValue({ items: [scope, closed].map(item => ({ chatId: item.chatId, name: item.chatId, external: false })), hasMore: false });
+  await f.collaboration.participation.refresh(scope.appId);
+  expect(f.client.listChatMessages).not.toHaveBeenCalled();
+  expect((await f.groups.groups()).groups.find(item => item.chatId === closed.chatId)).toBeUndefined();
+  await f.repos.collaboration.updateSettings(closed, { expectedRevision: 0, participation: 'off' }, 'owner');
+  await f.groups.save(scope.appId, scope.chatId, { expectedRevision: f.group.binding!.revision, patch: { accessOverride: { mode: 'disabled', principalIds: [] } } });
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  await f.collaboration.participation.refresh(scope.appId);
+  expect(f.client.listChatMessages).not.toHaveBeenCalled();
+  expect((await f.groups.groups()).groups.find(item => item.chatId === closed.chatId)!.bots[0]!.binding).toBeUndefined();
+  expect((await f.groups.groupAccess(scope.appId, scope.chatId))!.effective.mode).toBe('disabled');
+  expect(f.calls).toHaveLength(0);
+});
+
+it('stops an inherited reply when the Bot default is disabled during response generation', async () => {
+  const f = await fixture();
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  await f.collaboration.participation.handle({ messageId: 'om_stop', chatId: scope.chatId, chatType: 'group', senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: '{"text":"回答一下"}', createTime: String(Date.now()), mentions: [] }, (await readLarkConfig(f.repos.config, scope.appId))!, { explicit: false });
+  const flushing = f.collaboration.participation.flush(scope);
+  await eventually(async () => f.calls.length === 1);
+  const snapshot = JSON.parse(f.calls[0]!.prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
+  f.calls[0]!.finish(JSON.stringify({ action: 'reply', reason: '直接提问', evidenceIds: [snapshot.observations.find((item: any) => item.messageId === 'om_stop').id], updates: [] }));
+  await eventually(async () => f.calls.length === 2);
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'off' });
+  f.calls[1]!.finish('{"response":"旧请求的答复"}'); await flushing;
+  expect(f.client.replyText).not.toHaveBeenCalled();
+  expect(f.client.deleteReaction).toHaveBeenCalledWith('om_stop', 'reaction');
+  expect((await f.repos.collaboration.listDecisions(scope))[0]!.status).toBe('suppressed');
+});
 
 it.each(['ask', undefined] as const)('runs unattended %s delegations through real ACP without leaving permission requests pending', async permissionMode => {
   const f = await fixture({ realAcp: true });

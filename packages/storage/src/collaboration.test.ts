@@ -24,6 +24,40 @@ describe('Collaboration Storage Repository', () => {
   });
 
   describe('Settings & ContextRevision & Scope Isolation', () => {
+    it('preserves inheritance on unrelated edits, persists explicit off, and restores inheritance with CAS', async () => {
+      const repos = createRepositories(':memory:');
+      try {
+        const collab = repos.collaboration;
+        const initial = await collab.getSettings(scopeA);
+        expect((await collab.snapshot(scopeA)).settings).toEqual(initial);
+        expect(initial).toMatchObject({ participation: 'off', inheritParticipation: true, revision: 0 });
+
+        const instructions = await collab.updateSettings(scopeA, { expectedRevision: 0, instructions: 'Keep replies short' }, 'actor');
+        expect(instructions).toMatchObject({ inheritParticipation: true, revision: 1 });
+        expect(await collab.getSettings(scopeA)).toEqual(instructions);
+        const budget = await collab.updateSettings(scopeA, { expectedRevision: 1, maxDecisionsPerHour: 10 }, 'actor');
+        expect(budget.inheritParticipation).toBe(true);
+
+        const explicit = await collab.updateSettings(scopeA, { expectedRevision: 2, participation: 'off' }, 'actor');
+        expect(explicit).toMatchObject({ participation: 'off', inheritParticipation: false, revision: 3 });
+        expect((await collab.snapshot(scopeA)).settings).toEqual(explicit);
+        const unrelated = await collab.updateSettings(scopeA, { expectedRevision: 3, notificationsPaused: true }, 'actor');
+        expect(unrelated.inheritParticipation).toBe(false);
+
+        const restored = await collab.updateSettings(scopeA, { expectedRevision: 4, inheritParticipation: true }, 'actor');
+        expect(restored).toMatchObject({ inheritParticipation: true, revision: 5 });
+        expect(await collab.getSettings(scopeA)).toEqual(restored);
+        expect(await collab.snapshot(scopeA)).toMatchObject({ contextRevision: 5, settings: restored });
+        await expect(collab.updateSettings(scopeA, { expectedRevision: 4, inheritParticipation: false }, 'actor')).rejects.toThrow(RuntimeError);
+
+        const inheritedWithMode = await collab.updateSettings(scopeA, { expectedRevision: 5, participation: 'selective', inheritParticipation: true }, 'actor');
+        expect(inheritedWithMode).toMatchObject({ participation: 'selective', inheritParticipation: true });
+        expect((await collab.snapshot(scopeA)).settings).toEqual(inheritedWithMode);
+      } finally {
+        repos.close();
+      }
+    });
+
     it('initializes default settings with revision 0, and updates with CAS and activity logging', async () => {
       const repos = createRepositories(':memory:');
       try {
@@ -31,6 +65,7 @@ describe('Collaboration Storage Repository', () => {
         const initial = await collab.getSettings(scopeA);
         expect(initial.revision).toBe(0);
         expect(initial.participation).toBe('off');
+        expect(initial.inheritParticipation).toBe(true);
         expect(initial.instructions).toBe('');
         expect(initial.notificationsPaused).toBe(false);
 
@@ -52,6 +87,7 @@ describe('Collaboration Storage Repository', () => {
         );
         expect(updated.revision).toBe(1);
         expect(updated.participation).toBe('observe');
+        expect(updated.inheritParticipation).toBe(false);
         expect(updated.instructions).toBe('Always be concise');
         expect(updated.maxProactivePerHour).toBe(10);
 

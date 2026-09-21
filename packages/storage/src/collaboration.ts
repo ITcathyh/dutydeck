@@ -181,6 +181,7 @@ interface SettingsRow {
   chat_id: string;
   revision: number;
   participation: 'off' | 'observe' | 'selective';
+  participation_inherited: number;
   instructions: string;
   notifications_paused: number;
   max_proactive_per_hour: number;
@@ -195,6 +196,7 @@ function rowToSettings(row: SettingsRow): CollaborationSettings {
     scope: { appId: row.app_id, chatId: row.chat_id },
     revision: row.revision,
     participation: row.participation,
+    inheritParticipation: row.participation_inherited === 1,
     instructions: row.instructions,
     notificationsPaused: row.notifications_paused === 1,
     maxProactivePerHour: row.max_proactive_per_hour,
@@ -453,6 +455,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           scope,
           revision: 0,
           participation: 'off',
+          inheritParticipation: true,
           instructions: '',
           notificationsPaused: false,
           maxProactivePerHour: 6,
@@ -480,6 +483,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
               scope,
               revision: 0,
               participation: 'off',
+              inheritParticipation: true,
               instructions: '',
               notificationsPaused: false,
               maxProactivePerHour: 6,
@@ -502,6 +506,8 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           scope,
           revision: newRevision,
           participation: validatedPatch.participation ?? currentSettings.participation,
+          inheritParticipation: validatedPatch.inheritParticipation
+            ?? (validatedPatch.participation === undefined ? currentSettings.inheritParticipation : false),
           instructions: validatedPatch.instructions ?? currentSettings.instructions,
           notificationsPaused: validatedPatch.notificationsPaused ?? currentSettings.notificationsPaused,
           maxProactivePerHour: validatedPatch.maxProactivePerHour ?? currentSettings.maxProactivePerHour,
@@ -513,12 +519,13 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
 
         sqlite.prepare(`
           INSERT INTO collaboration_settings (
-            app_id, chat_id, revision, participation, instructions, notifications_paused,
+            app_id, chat_id, revision, participation, participation_inherited, instructions, notifications_paused,
             max_proactive_per_hour, max_decisions_per_hour, retention_days, policy_version, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(app_id, chat_id) DO UPDATE SET
             revision = excluded.revision,
             participation = excluded.participation,
+            participation_inherited = excluded.participation_inherited,
             instructions = excluded.instructions,
             notifications_paused = excluded.notifications_paused,
             max_proactive_per_hour = excluded.max_proactive_per_hour,
@@ -531,6 +538,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
           scope.chatId,
           newSettings.revision,
           newSettings.participation,
+          newSettings.inheritParticipation ? 1 : 0,
           newSettings.instructions,
           newSettings.notificationsPaused ? 1 : 0,
           newSettings.maxProactivePerHour,
@@ -771,6 +779,7 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
               scope,
               revision: 0,
               participation: 'off',
+              inheritParticipation: true,
               instructions: '',
               notificationsPaused: false,
               maxProactivePerHour: 6,

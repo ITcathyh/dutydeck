@@ -1,6 +1,6 @@
 import { CollaborationDelivery } from './collaboration-delivery.js';
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, type CollaborationScope, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
+import { canonicalExecutionJson, installationOwnerTaskActor, RuntimeError, type CollaborationScope, type CollaborationSettings, type UpdateCollaborationSettingsInput, type PolicyAction, type RepositoryBundle, type ToolRiskPolicy } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { CollaborationService, type CollaborationAuthorization } from './collaboration-service.js';
 import { ScheduleExecutor } from './schedule-executor.js';
@@ -25,9 +25,24 @@ export interface CollaborationIntegrationOptions {
   readMemory?(scope: CollaborationScope): Promise<string>;
 }
 export function createCollaborationIntegration(options: CollaborationIntegrationOptions) {
-  const { repositories: repos, runtime, groups } = options;
+  const { repositories: stored, runtime, groups } = options;
+  // Keep the saved group override distinct from the effective Bot default. All collaboration
+  // consumers (including snapshots, bootstrap and management) use the same resolution.
+  const effectiveSettings = async (settings: CollaborationSettings): Promise<CollaborationSettings> => settings.inheritParticipation
+    ? { ...settings, participation: (await readLarkConfig(stored.config, settings.scope.appId))?.defaultGroupParticipation ?? 'off' }
+    : settings;
+  const repos: RepositoryBundle = { ...stored, collaboration: {
+    ...stored.collaboration,
+    getSettings: async scope => effectiveSettings(await stored.collaboration.getSettings(scope)),
+    updateSettings: async (scope, patch, actor) => effectiveSettings(await stored.collaboration.updateSettings(scope, patch, actor)),
+    snapshot: async (scope, limit) => {
+      const snapshot = await stored.collaboration.snapshot(scope, limit);
+      return { ...snapshot, settings: await effectiveSettings(snapshot.settings) };
+    }
+  } };
   const client = options.client ?? ((config: StoredLarkConfig) => createLarkCardService(process.env, globalThis.fetch, config));
   const known = async (scope: CollaborationScope) => {
+    await groups.ensureParticipationGroup(scope.appId, scope.chatId);
     const config = await readLarkConfig(repos.config, scope.appId);
     const owner = await groups.owner(scope.appId);
     const binding = owner && await repos.groupBindings.getByNaturalKey(owner.channelBotId, scope.chatId);
@@ -57,9 +72,9 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const scopeGrant = async (scope: CollaborationScope, action: 'observe' | 'deliver') => {
     try {
       const settings = await repos.collaboration.getSettings(scope);
-      if (settings.revision === 0 || settings.participation === 'off' || (action === 'deliver' && settings.notificationsPaused)) return false;
+      if (settings.participation === 'off' || (action === 'deliver' && settings.notificationsPaused)) return false;
       await live(scope);
-      // Participation was explicitly enabled through the owner-only settings endpoint.
+      // The owner enabled participation either for this group or in the Bot defaults.
       return policy(scope, installationOwnerTaskActor, action === 'observe' ? 'group_tools.read' : 'group_tools.send');
     } catch { return false; }
   };
@@ -79,8 +94,16 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       return followup.createdBy === actorId || followup.ownerId === actorId || await authorize(scope, actorId, 'manage');
     },
     listScopes: async appId => {
+      const config = await readLarkConfig(repos.config, appId);
+      if (config?.listening && config.defaultGroupParticipation && config.defaultGroupParticipation !== 'off' && larkExecutionConfirmed(config)) {
+        await groups.sync(appId);
+      }
       const owner = await groups.owner(appId);
-      return owner ? (await repos.groupBindings.listByChannelBot(owner.channelBotId)).map(binding => ({ appId, chatId: binding.externalChatId })) : [];
+      if (!owner) return [];
+      const bindings = await repos.groupBindings.listByChannelBot(owner.channelBotId);
+      const discovered = config?.defaultGroupParticipation && config.defaultGroupParticipation !== 'off'
+        ? await repos.remoteChatFacts.listByChannelBot(owner.channelBotId, 500) : [];
+      return [...new Set([...bindings.map(binding => binding.externalChatId), ...discovered.filter(fact => fact.membershipState === 'member').map(fact => fact.externalChatId)])].map(chatId => ({ appId, chatId }));
     },
     readGroupDescription: async (scope, config) => {
       const metadata = await client(config).getChatPreflightInfo(scope.chatId);

@@ -12,6 +12,7 @@ import type { StoredLarkConfig } from './config.js';
 
 export type WelcomeRouting = Pick<StoredLarkConfig, 'mentionPolicy' | 'p2pMode' | 'groupReplyMode'> & {
   chatMode?: 'group' | 'topic' | 'p2p';
+  participation?: 'off' | 'observe' | 'selective';
   unavailableReason?: string;
   /**
    * 本群所有成员都能让机器人执行任务（托管群 access=all_chat_members/值班，
@@ -89,7 +90,9 @@ export function buildWelcomeCardContent(input: {
     const trigger = direct ? '' : '@我 ';
     const usage = [
       ...(routing?.unavailableReason ? [`当前尚不能执行任务：${routing.unavailableReason} 请管理员确认群配置生效后，再使用下面的示例。`] : []),
-      policy === 'always' ? '每条任务消息和续聊都需要 **@我**。'
+      routing?.participation === 'selective' ? '本群已开启 **Tag 按需参与**：普通消息会先判断是否需要回复，决定回复时会添加 **OK** 处理标记。明确需要我执行任务时，可以 **@我**。'
+        : routing?.participation === 'observe' ? '本群普通消息只会被观察，不会自动回复。明确需要我执行任务时，可以 **@我**。'
+        : policy === 'always' ? '每条任务消息和续聊都需要 **@我**。'
         : policy === 'topic' ? '新任务先 **@我**；在我已接手的原任务话题内续聊可直接回复。'
         : '本群普通消息也会触发任务；请直接发送完整请求。其他机器人仍需明确 @我。',
       `例如：\`${trigger}帮我查看项目状态\`；帮助：\`${trigger}/help\`。`,

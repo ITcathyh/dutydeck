@@ -1019,6 +1019,7 @@ describe('GroupManagement 保存期间切换对象与继续编辑', () => {
           scope: { appId, chatId },
           revision: 1,
           participation: 'off',
+          inheritParticipation: false,
           instructions: '',
           notificationsPaused: false,
           maxProactivePerHour: 6,

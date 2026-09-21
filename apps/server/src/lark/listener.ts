@@ -127,9 +127,11 @@ export class LarkLongConnectionListener implements LarkListener {
     }
     const credentials = `${config.appId}\u0000${config.appSecret}`;
     if (this.listening && this.credentials === credentials) {
+      const participationChanged = this.config?.defaultGroupParticipation !== config.defaultGroupParticipation;
       this.config = config;
       try { await this.coordinator?.startReconciliation(config); }
       catch (error) { this.log.warn({ error, appId: config.appId }, '飞书卡片终态对账刷新失败，继续保持消息监听'); }
+      if (participationChanged) void this.options.participation?.refresh(config.appId).catch(error => this.log.warn({ error, appId: config.appId }, '默认群参与刷新失败'));
       return;
     }
     this.stop();
@@ -173,6 +175,7 @@ export class LarkLongConnectionListener implements LarkListener {
         routing: async (chatId, chatType) => {
           const current = this.config ?? config;
           try {
+            if (chatType === 'group') await this.options.groupManager?.ensureParticipationGroup(current.appId, chatId);
             const effective = chatType === 'group' && this.options.groupManager
               ? await this.options.groupManager.resolved(current, chatId) : current;
             // 身份边界文案的触发条件：托管群看生效的 access（值班群等同全员），
@@ -182,7 +185,8 @@ export class LarkLongConnectionListener implements LarkListener {
             const allChatMembers = access
               ? access.oncall || access.effective.mode === 'all_chat_members'
               : !current.allowedUsers.length && !current.allowedEmails.length;
-            return { ...effective, ...(chatType === 'group' ? { chatMode: await chatModeResolver(current.appId, chatId), allChatMembers } : {}) };
+            return { ...effective, ...(chatType === 'group' ? { chatMode: await chatModeResolver(current.appId, chatId), allChatMembers,
+              participation: await this.options.participation?.mode({ appId: current.appId, chatId }) } : {}) };
           } catch {
             return { ...current, unavailableReason: '无法确认当前群配置与触发方式。' };
           }

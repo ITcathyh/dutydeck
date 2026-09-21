@@ -38,6 +38,7 @@ export type BotDraft = {
   p2pMode: 'chat' | 'thread';
   groupReplyMode: '' | 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   mentionPolicy: 'always' | 'topic' | 'never' | 'ambient';
+  defaultGroupParticipation: 'off' | 'observe' | 'selective';
   preInjectPrompt: string;
   listening: boolean;
   groupToolsEnabled: boolean;

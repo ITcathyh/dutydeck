@@ -17,6 +17,7 @@ export type RiskControlMode = typeof riskControlModes[number];
 export interface StoredLarkConfig {
   revision?: number;
   mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
+  defaultGroupParticipation?: 'off' | 'observe' | 'selective';
   /** Runtime-only resolved group context; never serialized in the Bot configuration. */
   managedGroup?: { bindingId: string; revision: number; principalId?: string };
   appId: string;
@@ -125,6 +126,7 @@ export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissio
 export interface SaveLarkConfigInput {
   expectedRevision?: number;
   mentionPolicy?: StoredLarkConfig['mentionPolicy'];
+  defaultGroupParticipation?: StoredLarkConfig['defaultGroupParticipation'];
   stage?: 'lark' | 'agent';
   originalAppId?: string;
   appId?: string;
@@ -202,6 +204,7 @@ export interface SaveLarkConfigInput {
 export interface PublicLarkConfig {
   revision: number;
   mentionPolicy?: StoredLarkConfig['mentionPolicy'];
+  defaultGroupParticipation?: StoredLarkConfig['defaultGroupParticipation'];
   configured: true;
   appId: string;
   name: string;
@@ -367,6 +370,9 @@ const normalizeP2pMode = (value: unknown): 'chat' | 'thread' | undefined =>
 const normalizeGroupReplyMode = (value: unknown): StoredLarkConfig['groupReplyMode'] =>
   value === 'chat' || value === 'shared' || value === 'new-topic' || value === 'chat-topic' ? value : undefined;
 
+const normalizeDefaultGroupParticipation = (value: unknown): NonNullable<StoredLarkConfig['defaultGroupParticipation']> =>
+  value === 'observe' || value === 'selective' ? value : 'off';
+
 const normalizeBrand = (value: unknown): 'feishu' | 'lark' | undefined =>
   value === 'feishu' || value === 'lark' ? value : undefined;
 
@@ -463,6 +469,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     appId: parsed.appId.trim(),
     revision: Number.isInteger(parsed.revision) && Number(parsed.revision) > 0 ? parsed.revision : 1,
     mentionPolicy: parsed.mentionPolicy ?? 'always',
+    defaultGroupParticipation: normalizeDefaultGroupParticipation(parsed.defaultGroupParticipation),
     appSecret: parsed.appSecret,
     ...(parsed.name?.trim() ? { name: parsed.name.trim() } : {}),
     ...(parsed.workspace?.trim() ? { workspace: parsed.workspace.trim() } : {}),
@@ -550,6 +557,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   appId: config.appId,
   revision: config.revision ?? 1,
   mentionPolicy: config.mentionPolicy ?? 'always',
+  defaultGroupParticipation: normalizeDefaultGroupParticipation(config.defaultGroupParticipation),
   name: config.name ?? config.appId,
   tabLabel: duplicateNames.has((config.name ?? config.appId).toLowerCase()) ? `${config.name ?? config.appId} · ${config.appId}` : config.name ?? config.appId,
   setupComplete: Boolean(config.defaultAgentId && larkExecutionConfirmed(config)),
@@ -625,6 +633,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.mentionPolicy !== undefined && !['always', 'topic', 'never', 'ambient'].includes(input.mentionPolicy)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '提及方式无效。', 400);
   }
+  if (input.defaultGroupParticipation !== undefined && !['off', 'observe', 'selective'].includes(input.defaultGroupParticipation)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '默认群参与模式无效。', 400);
+  }
   const appId = input.appId?.trim() || current?.appId;
   const appSecret = input.appSecret?.trim() || current?.appSecret;
   const name = input.name === undefined ? current?.name : input.name.trim() || undefined;
@@ -693,6 +704,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const config: StoredLarkConfig = {
     revision: (current?.revision ?? (current ? 1 : 0)) + 1,
     mentionPolicy: input.mentionPolicy ?? current?.mentionPolicy ?? 'always',
+    defaultGroupParticipation: input.defaultGroupParticipation ?? current?.defaultGroupParticipation ?? 'off',
     appId,
     appSecret,
     ...(name ? { name } : {}),

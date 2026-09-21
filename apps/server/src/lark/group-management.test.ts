@@ -49,6 +49,34 @@ describe('live group configuration', () => {
     expect(JSON.stringify(groups)).not.toContain('synthetic_cli');
   });
 
+  it('coalesces inherited setup and never activates an unverified group', async () => {
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', defaultGroupParticipation: 'selective', listening: true });
+    await Promise.all(Array.from({ length: 5 }, () => manager.ensureParticipationGroup('cli_one', 'oc_one')));
+    const owner = (await manager.owner('cli_one'))!;
+    const binding = await repos.groupBindings.getByNaturalKey(owner.channelBotId, 'oc_one');
+    expect(binding?.revision).toBe(1);
+    expect(owner.activeGroups).toEqual([binding!.id]);
+    await expect(manager.ensureParticipationGroup('cli_one', 'oc_absent')).rejects.toMatchObject({ code: 'LARK_GROUP_VERIFY_REQUIRED' });
+    expect(await repos.groupBindings.getByNaturalKey(owner.channelBotId, 'oc_absent')).toBeUndefined();
+  });
+
+  it('does not activate a group when the Bot default is disabled during discovery', async () => {
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', defaultGroupParticipation: 'selective', listening: true });
+    let release!: () => void;
+    listChats.mockImplementationOnce(async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { items: [{ chatId: 'oc_new', name: '新群', external: false }], hasMore: false };
+    });
+    const preparing = manager.ensureParticipationGroup('cli_one', 'oc_new');
+    const rejected = expect(preparing).rejects.toMatchObject({ code: 'LARK_PARTICIPATION_DEFAULT_DISABLED' });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', defaultGroupParticipation: 'off' });
+    release();
+    await rejected;
+    const owner = (await manager.owner('cli_one'))!;
+    expect(await repos.groupBindings.getByNaturalKey(owner.channelBotId, 'oc_new')).toBeUndefined();
+  });
+
   it('persists independent App/group overrides, inheritance and explicit model clearing', async () => {
     const one = await save('cli_one', 'oc_one', { workspaceOverride: { mode: 'set', value: join(dir, 'one') }, modelOverride: { mode: 'set', value: 'model_one' } });
     await save('cli_one', 'oc_two', { workspaceOverride: { mode: 'set', value: join(dir, 'two') }, agentOverride: { mode: 'set', value: 'agent_two' } });

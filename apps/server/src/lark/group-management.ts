@@ -55,6 +55,7 @@ const saveSchema = z.object({ expectedRevision: z.number().int().nonnegative(), 
 
 export class LarkGroupManager {
   private readonly synchronizing = new Map<string, Promise<{ groups: ManagedGroup[] }>>();
+  private readonly preparingParticipation = new Map<string, Promise<void>>();
   constructor(readonly repos: RepositoryBundle, private readonly options: {
     client?: (config: StoredLarkConfig) => LarkCardService;
     now?: () => Date;
@@ -75,6 +76,32 @@ export class LarkGroupManager {
     return false;
   }
   async owner(appId: string) { return parse<LiveOwner>(await this.repos.config.get(ownerKey(appId))); }
+
+  /** A Bot-wide participation default authorizes inherited setup in verified joined groups. */
+  async ensureParticipationGroup(appId: string, chatId: string): Promise<void> {
+    const key = JSON.stringify([appId, chatId]);
+    const existing = this.preparingParticipation.get(key);
+    if (existing) return existing;
+    const pending = this.prepareParticipationGroup(appId, chatId);
+    this.preparingParticipation.set(key, pending);
+    try { await pending; } finally { if (this.preparingParticipation.get(key) === pending) this.preparingParticipation.delete(key); }
+  }
+  private async prepareParticipationGroup(appId: string, chatId: string) {
+    const config = await this.config(appId);
+    if (!config.listening || !config.defaultGroupParticipation || config.defaultGroupParticipation === 'off' || !larkExecutionConfirmed(config)) return;
+    const settings = await this.repos.collaboration.getSettings({ appId, chatId });
+    if (!settings.inheritParticipation && settings.participation === 'off') return;
+    let owner = await this.owner(appId);
+    // Existing bindings, including disabled or unapproved ones, remain under group control.
+    if (owner && await this.repos.groupBindings.getByNaturalKey(owner.channelBotId, chatId)) return;
+    const detail = owner && await this.detail(config, owner, chatId);
+    if (!detail || detail.validity !== 'valid' || detail.membership !== 'member') {
+      await this.sync(appId);
+      owner = await this.owner(appId);
+    }
+    if (!owner || await this.repos.groupBindings.getByNaturalKey(owner.channelBotId, chatId)) return;
+    await this.save(appId, chatId, { expectedRevision: 0, patch: {} }, true);
+  }
 
   private async ensureOwner(config: StoredLarkConfig) {
     let owner = await this.owner(config.appId);
@@ -210,11 +237,14 @@ export class LarkGroupManager {
     return { members: result, hasMore: page.hasMore, ...(page.pageToken ? { pageToken: page.pageToken } : {}) };
   }
 
-  async save(appId: string, chatId: string, body: unknown) {
+  async save(appId: string, chatId: string, body: unknown, requireParticipationDefault = false) {
     const parsed = saveSchema.safeParse(body);
     if (!parsed.success) throw new RuntimeError('INVALID_GROUP_CONFIG', '群配置字段或版本无效。', 400);
     const input = parsed.data;
     const config = await this.config(appId);
+    if (requireParticipationDefault && (!config.listening || !config.defaultGroupParticipation || config.defaultGroupParticipation === 'off')) {
+      throw new RuntimeError('LARK_PARTICIPATION_DEFAULT_DISABLED', '机器人默认群参与已关闭。', 409);
+    }
     const owner = await this.owner(appId);
     if (!owner) throw new RuntimeError('LARK_GROUP_SYNC_REQUIRED', '请先同步此 Bot 的群聊。', 409);
     const detail = await this.detail(config, owner, chatId);

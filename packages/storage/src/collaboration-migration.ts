@@ -15,6 +15,7 @@ export function createCollaborationSchema(db: Database.Database): void {
       chat_id TEXT NOT NULL,
       revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
       participation TEXT NOT NULL CHECK (participation IN ('off', 'observe', 'selective')),
+      participation_inherited INTEGER NOT NULL DEFAULT 0 CHECK (participation_inherited IN (0, 1)),
       instructions TEXT NOT NULL CHECK (length(instructions) <= 8000),
       notifications_paused INTEGER NOT NULL CHECK (notifications_paused IN (0, 1)),
       max_proactive_per_hour INTEGER NOT NULL CHECK (max_proactive_per_hour >= 0 AND max_proactive_per_hour <= 60),

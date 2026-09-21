@@ -69,6 +69,7 @@ You no longer need to stay glued to your terminal watching code stream line by l
 - 🧪 **Real Verification & Audit Trail**: Runs actual verification commands (`pnpm test`, `go test`, linter, etc.) on the host machine, storing exit codes, duration, and output proof.
 - 🧠 **Cross-Session Long-Term Memory**: Scoped memory per chat that survives `/new` resets and server reboots. Manual `/remember` storage plus background automatic fact extraction and periodic consolidation.
 - 👥 **Group Collaboration & Ongoing Delegation**: Configurable group participation (`off`, `observe`, `selective`) and natural language recurring delegation (e.g., "Summarize today's progress every weekday at 6 PM").
+  Set a Bot's default group participation to apply it to existing and newly joined groups without individual overrides. Groups can opt out or return to inheriting the default; saved overrides are preserved. Observation requires group read access, and Tag replies also require send access. Changes apply without restarting the listener.
 - 🔌 **Standard Agent Protocol Ecosystem**: Built-in standard `acpx@0.13.0` ACP support alongside a resilient PTY adapter for Claude Code and custom command-line tools.
 - 🎛️ **Zero-Friction DevOps & Self-Healing**: Includes `dutydeck setup` (interactive onboarding), `dutydeck doctor` (actionable diagnostic suite), and `dutydeck autostart` (native OS service registration).
 
