@@ -550,7 +550,8 @@ export const migrations: Migration[] = [
   // 呈现设置从 Bot 级下沉到群级：presentationOverride 由 `{"mode":"inherit"}` 改成逐字段结构，
   // Bot 级 presentation 增加两档静默形态。两列都是既有的 JSON 列，只改内容不改表结构，
   // 但已经建好的旧库里存的还是旧形态，读出来会被 schema 拒掉，所以在这里就地改写。
-  { version: 23, name: 'group_presentation_override_fields', up: migratePresentationOverrides }
+  { version: 23, name: 'group_presentation_override_fields', up: migratePresentationOverrides },
+  { version: 24, name: 'collaboration_participation_inheritance', up(db) { ensureColumn(db, 'collaboration_settings', 'participation_inherited', 'participation_inherited INTEGER NOT NULL DEFAULT 0 CHECK (participation_inherited IN (0, 1))') } }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

@@ -76,6 +76,7 @@ export type LarkBotConfig = {
   p2pMode?: 'chat' | 'thread';
   groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
+  defaultGroupParticipation?: 'off' | 'observe' | 'selective';
 };
 export type LarkConfig = { configured: boolean; bots: LarkBotConfig[]; listeningDisabled: boolean };
 
@@ -315,6 +316,7 @@ export const api = {
     p2pMode?: 'chat' | 'thread';
     groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
     mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
+    defaultGroupParticipation?: 'off' | 'observe' | 'selective';
   }) => json<LarkConfig>('/api/lark/config', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
   deleteLarkConfig: (appId: string) => json<LarkConfig>(`/api/lark/config/${encodeURIComponent(appId)}`, { method: 'DELETE' }),
   managementGroups: () => json<{ groups: ManagedGroup[] }>('/api/lark/management/groups', { cache: 'no-store' }),
@@ -369,6 +371,7 @@ export type CollaborationSettings = {
   scope: CollaborationScope;
   revision: number;
   participation: CollaborationParticipation;
+  inheritParticipation: boolean;
   instructions: string;
   notificationsPaused: boolean;
   maxProactivePerHour: number;
@@ -538,6 +541,7 @@ export type CollaborationOverview = {
 export type UpdateCollaborationSettingsInput = {
   expectedRevision: number;
   participation?: CollaborationParticipation;
+  inheritParticipation?: boolean;
   instructions?: string;
   notificationsPaused?: boolean;
   maxProactivePerHour?: number;

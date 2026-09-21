@@ -146,7 +146,8 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
   const isSettingsDirty = Boolean(
     draft &&
       currentSettings &&
-      (draft.participation !== currentSettings.participation ||
+      (draft.inheritParticipation !== currentSettings.inheritParticipation ||
+        (!draft.inheritParticipation && draft.participation !== currentSettings.participation) ||
         draft.instructions !== currentSettings.instructions ||
         draft.notificationsPaused !== currentSettings.notificationsPaused ||
         draft.maxProactivePerHour !== currentSettings.maxProactivePerHour)
@@ -156,7 +157,8 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
     mutationFn: (payload: CollaborationSettings) =>
       collaborationApi.updateSettings(appId, chatId, {
         expectedRevision: payload.revision,
-        participation: payload.participation,
+        inheritParticipation: payload.inheritParticipation,
+        ...(!payload.inheritParticipation && { participation: payload.participation }),
         instructions: payload.instructions,
         notificationsPaused: payload.notificationsPaused,
         maxProactivePerHour: payload.maxProactivePerHour
@@ -799,16 +801,19 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
             <>
               <div className="space-y-2">
                 <div className="text-body font-semibold text-primary">参与模式</div>
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {(['off', 'observe', 'selective'] as const).map(mode => {
-                    const selected = draft.participation === mode;
+                {currentSettings && <p className="text-caption text-subtle">当前生效：{participationLabels[currentSettings.participation].title}</p>}
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {(['inherit', 'off', 'observe', 'selective'] as const).map(mode => {
+                    const selected = mode === 'inherit' ? draft.inheritParticipation : !draft.inheritParticipation && draft.participation === mode;
                     return (
                       <button
                         key={mode}
                         type="button"
                         aria-pressed={selected}
                         onClick={() => {
-                          setSettingsDraft({ ...draft, participation: mode });
+                          setSettingsDraft(mode === 'inherit'
+                            ? { ...draft, inheritParticipation: true }
+                            : { ...draft, participation: mode, inheritParticipation: false });
                           setSettingsSuccess(false);
                         }}
                         className={`rounded-lg border p-3 text-left transition-colors ${
@@ -819,11 +824,11 @@ function CollaborationPanelInner({ appId, chatId, groupName, botName, className 
                       >
                         <div className="flex items-center justify-between">
                           <strong className="text-body font-medium text-primary">
-                            {participationLabels[mode].title}
+                            {mode === 'inherit' ? '跟随机器人默认' : participationLabels[mode].title}
                           </strong>
                           {selected && <Check size={16} className="text-action" />}
                         </div>
-                        <p className="mt-1 text-caption text-subtle">{participationLabels[mode].desc}</p>
+                        <p className="mt-1 text-caption text-subtle">{mode === 'inherit' ? '机器人默认参与模式变化时，本群同步生效' : participationLabels[mode].desc}</p>
                       </button>
                     );
                   })}

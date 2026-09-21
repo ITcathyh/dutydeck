@@ -17,6 +17,7 @@ const makeSettings = (overrides: Partial<CollaborationSettings> = {}): Collabora
   scope: { appId: 'cli_a', chatId: 'oc_a' },
   revision: 1,
   participation: 'off',
+  inheritParticipation: false,
   instructions: '',
   notificationsPaused: false,
   maxProactivePerHour: 6,
@@ -116,6 +117,47 @@ describe('CollaborationPanel scope 隔离与参与模式文案', () => {
 });
 
 describe('协作设置保存与版本冲突', () => {
+  it('加载继承模式及生效值，修改指令后保存仍跟随机器人默认', async () => {
+    const user = userEvent.setup();
+    const settings = makeSettings({ inheritParticipation: true, participation: 'selective' });
+    getOverview.mockResolvedValue(makeOverview(settings));
+    const update = vi.spyOn(collaborationApi, 'updateSettings').mockResolvedValue({ settings });
+    renderPanel();
+    const inherit = await screen.findByRole('button', { name: /跟随机器人默认/ });
+    expect(inherit.getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByText('当前生效：按需参与 (selective)')).toBeTruthy();
+    expect(screen.getByRole('button', { name: /按需参与/ }).getAttribute('aria-pressed')).toBe('false');
+    expect((screen.getByRole('button', { name: '保存设置' }) as HTMLButtonElement).disabled).toBe(true);
+    await user.type(screen.getByLabelText('长期指令'), '简短回复');
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0]![2]).toMatchObject({ inheritParticipation: true, instructions: '简短回复' });
+    expect(update.mock.calls[0]![2]).not.toHaveProperty('participation');
+  });
+
+  it('显式 off 覆盖继承，恢复继承仅切换标记也可以保存', async () => {
+    const user = userEvent.setup();
+    const settings = makeSettings({ inheritParticipation: true });
+    getOverview.mockResolvedValue(makeOverview(settings));
+    const update = vi.spyOn(collaborationApi, 'updateSettings').mockImplementation(async (_app, _chat, body) => {
+      const saved = { ...settings, ...body, revision: settings.revision + 1 };
+      getOverview.mockResolvedValue(makeOverview(saved));
+      return { settings: saved };
+    });
+    renderPanel();
+    await user.click(await screen.findByRole('button', { name: /保持原行为/ }));
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(1));
+    expect(update.mock.calls[0]![2]).toMatchObject({ inheritParticipation: false, participation: 'off' });
+    await waitFor(() => expect(screen.getByRole('button', { name: /保持原行为/ }).getAttribute('aria-pressed')).toBe('true'));
+    await user.click(screen.getByRole('button', { name: /跟随机器人默认/ }));
+    await user.click(screen.getByRole('button', { name: '保存设置' }));
+    await waitFor(() => expect(update).toHaveBeenCalledTimes(2));
+    expect(update.mock.calls[1]![2]).toMatchObject({ expectedRevision: 2, inheritParticipation: true });
+    expect(update.mock.calls[1]![2]).not.toHaveProperty('participation');
+    await waitFor(() => expect(screen.getByRole('button', { name: /跟随机器人默认/ }).getAttribute('aria-pressed')).toBe('true'));
+  });
+
   it('保存时带当前 expectedRevision，409 冲突保留草稿而不是谎报成功', async () => {
     const user = userEvent.setup();
     const updateSettings = vi

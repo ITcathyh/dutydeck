@@ -493,3 +493,49 @@ describe('加急与置顶开关归一化', () => {
       .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG' });
   });
 });
+
+
+describe('Bot default group participation', () => {
+  it.each(['off', 'observe', 'selective'] as const)('round-trips %s through storage and public config', async defaultGroupParticipation => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_test', appSecret: 'secret', defaultGroupParticipation });
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0].defaultGroupParticipation).toBe(defaultGroupParticipation);
+    const [config] = await readLarkConfigs(repository);
+    expect(config.defaultGroupParticipation).toBe(defaultGroupParticipation);
+    expect(publicLarkConfig(config).defaultGroupParticipation).toBe(defaultGroupParticipation);
+    expect(publicLarkConfigs([config]).bots[0].defaultGroupParticipation).toBe(defaultGroupParticipation);
+  });
+
+  it('defaults legacy and invalid stored values to off without changing mention or permissions', async () => {
+    const configs = await readLarkConfigs(seedBots([
+      { appId: 'cli_old', appSecret: 'secret', mentionPolicy: 'topic', permissionMode: 'ask' },
+      { appId: 'cli_invalid', appSecret: 'secret', defaultGroupParticipation: 'always' }
+    ]));
+    expect(configs.map(config => config.defaultGroupParticipation)).toEqual(['off', 'off']);
+    expect(publicLarkConfig(configs[0])).toMatchObject({ defaultGroupParticipation: 'off', mentionPolicy: 'topic', permissionMode: 'ask', fullTrustConfirmed: false });
+    expect(publicLarkConfig({ ...configs[0], defaultGroupParticipation: undefined }).defaultGroupParticipation).toBe('off');
+  });
+
+  it('updates only participation and inherits it on later partial saves', async () => {
+    const repository = seedBots([{
+      appId: 'cli_test', appSecret: 'secret', permissionMode: 'ask', mentionPolicy: 'topic',
+      workspace: '/srv/project', defaultAgentId: 'codex', defaultModel: 'model-a', listening: true,
+      allowedUsers: [{ openId: 'ou_owner', name: 'Owner' }], groupToolsEnabled: true, groupToolsAllowSend: false
+    }]);
+    const [before] = await readLarkConfigs(repository);
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_test', defaultGroupParticipation: 'selective' });
+    const [updated] = await readLarkConfigs(repository);
+    expect(updated).toEqual({ ...before, revision: 2, defaultGroupParticipation: 'selective' });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_test', preInjectPrompt: 'hello' });
+    expect((await readLarkConfigs(repository))[0].defaultGroupParticipation).toBe('selective');
+  });
+
+  it.each(['always', '', null, 1])('rejects invalid input %s without saving', async value => {
+    const repository = seedBots([{ appId: 'cli_test', appSecret: 'secret', riskControlMode: 'off' }]);
+    const before = await repository.get(larkBotsConfigKey);
+    await expect(saveLarkConfig(repository, undefined, {
+      originalAppId: 'cli_test', defaultGroupParticipation: value as 'off'
+    })).rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400 });
+    expect(await repository.get(larkBotsConfigKey)).toBe(before);
+  });
+});

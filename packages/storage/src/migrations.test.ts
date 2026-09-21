@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { AgentConfig } from '@dutydeck/shared'
 import { createRepositories, PRE_V10_BACKUP_SUFFIX } from './index.js'
-import { migrations, runMigrations } from './migrations.js'
+import { migrations, runMigrations, withMigrationTransaction } from './migrations.js'
 
 const BUSINESS_TABLES = [
   'agent_configs',
@@ -49,7 +49,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -465,6 +465,47 @@ describe('storage migrations', () => {
       .toEqual({ participation: 'observe', instructions: '旧群指令', max_proactive_per_hour: 2, max_decisions_per_hour: 60 })
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
     db.close()
+  })
+
+  it('v24 preserves all legacy participation modes as explicit overrides', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'collaboration-v24-'))
+    temporaryDirectories.push(directory)
+    const path = join(directory, 'legacy.sqlite')
+    const db = new Database(path)
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const at = '2026-09-01T00:00:00.000Z'
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    withMigrationTransaction(db, () => {
+      for (const migration of migrations.filter(item => item.version <= 23)) {
+        migration.up(db)
+        record.run(migration.version, at)
+      }
+    })
+    // The schema creator also supports fresh callers; remove the new column to reproduce v23.
+    db.exec('ALTER TABLE collaboration_settings DROP COLUMN participation_inherited')
+    expect(columnNames(db, 'collaboration_settings')).not.toContain('participation_inherited')
+    const insert = db.prepare(`INSERT INTO collaboration_settings (app_id, chat_id, revision, participation, instructions, notifications_paused, max_proactive_per_hour, retention_days, policy_version, updated_at) VALUES (?, ?, 3, ?, '旧指令', 0, 2, 30, 'v1', ?)`)
+    for (const participation of ['off', 'observe', 'selective']) insert.run('cli_legacy', participation, participation, at)
+    db.close()
+
+    const repos = createRepositories(path)
+    try {
+      for (const participation of ['off', 'observe', 'selective']) {
+        const scope = { appId: 'cli_legacy', chatId: participation }
+        const settings = await repos.collaboration.getSettings(scope)
+        expect(settings).toMatchObject({ participation, inheritParticipation: false, instructions: '旧指令', revision: 3, updatedAt: at })
+        expect((await repos.collaboration.snapshot(scope)).settings).toEqual(settings)
+      }
+      expect(await repos.collaboration.getSettings({ appId: 'cli_legacy', chatId: 'new' }))
+        .toMatchObject({ participation: 'off', inheritParticipation: true, revision: 0 })
+    } finally {
+      repos.close()
+    }
+    const migrated = new Database(path)
+    expect(appliedVersions(migrated)).toEqual(ALL_VERSIONS)
+    expect(migrated.prepare('SELECT participation_inherited FROM collaboration_settings').all())
+      .toEqual([{ participation_inherited: 0 }, { participation_inherited: 0 }, { participation_inherited: 0 }])
+    migrated.close()
   })
 
   it('v23 把旧库里 inherit-only 的群呈现覆盖升级成逐字段结构，并补齐两项 Bot 呈现默认', () => {

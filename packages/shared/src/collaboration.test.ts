@@ -48,6 +48,7 @@ describe('Collaboration Shared Schemas', () => {
       });
       expect(parsed.revision).toBe(0);
       expect(parsed.participation).toBe('off');
+      expect(parsed.inheritParticipation).toBe(false);
       expect(parsed.instructions).toBe('');
       expect(parsed.notificationsPaused).toBe(false);
       expect(parsed.maxProactivePerHour).toBe(6);
@@ -103,6 +104,12 @@ describe('Collaboration Shared Schemas', () => {
           updatedAt: validIso
         })
       ).toThrow();
+    });
+
+    it('accepts restoring inheritance without a participation override', () => {
+      expect(updateCollaborationSettingsInputSchema.parse({ expectedRevision: 1, inheritParticipation: true }))
+        .toEqual({ expectedRevision: 1, inheritParticipation: true });
+      expect(() => updateCollaborationSettingsInputSchema.parse({ expectedRevision: 1, inheritParticipation: 'true' })).toThrow();
     });
 
     it('validates update settings patch schema requires at least one updated field and expectedRevision', () => {

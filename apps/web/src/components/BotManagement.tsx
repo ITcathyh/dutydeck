@@ -51,6 +51,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     p2pMode: bot.p2pMode ?? 'chat',
     groupReplyMode: bot.groupReplyMode ?? '',
     mentionPolicy: bot.mentionPolicy ?? 'always',
+    defaultGroupParticipation: bot.defaultGroupParticipation ?? 'off',
     preInjectPrompt: bot.preInjectPrompt ?? '',
     listening: bot.listening ?? true,
     groupToolsEnabled: bot.groupToolsEnabled ?? false,
@@ -73,6 +74,7 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   if ((original.p2pMode ?? 'chat') !== draft.p2pMode) return true;
   if ((original.groupReplyMode ?? '') !== draft.groupReplyMode) return true;
   if ((original.mentionPolicy ?? 'always') !== draft.mentionPolicy) return true;
+  if ((original.defaultGroupParticipation ?? 'off') !== draft.defaultGroupParticipation) return true;
   if ((original.preInjectPrompt ?? '') !== draft.preInjectPrompt) return true;
   if ((original.listening ?? true) !== draft.listening) return true;
   if ((original.groupToolsEnabled ?? false) !== draft.groupToolsEnabled) return true;
@@ -220,6 +222,7 @@ export function BotManagement({
       p2pMode: draft.p2pMode,
       groupReplyMode: draft.groupReplyMode || undefined,
       mentionPolicy: draft.mentionPolicy,
+      defaultGroupParticipation: draft.defaultGroupParticipation,
       preInjectPrompt: draft.preInjectPrompt,
       listening: draft.listening,
       groupToolsEnabled: draft.groupToolsEnabled,
@@ -501,7 +504,7 @@ export function BotManagement({
                 <div>
                   <h3 className="text-body font-semibold text-primary">默认设置</h3>
                   <p className="mt-0.5 text-caption text-subtle">
-                    没有单独配置的群，以及私聊，都用这里的设置。改动只影响之后新开的对话。
+                    没有单独配置的群，以及私聊，都用这里的执行设置。执行设置用于新对话，群参与模式保存后生效。
                   </p>
                 </div>
 
@@ -593,6 +596,29 @@ export function BotManagement({
                       <option value="never">不用 @ 也会响应</option>
                     </Select>
                   </div>
+                </div>
+
+                <div>
+                  <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-default-group-participation">
+                    默认群参与模式
+                  </label>
+                  <Select
+                    id="bot-default-group-participation"
+                    value={currentDraft.defaultGroupParticipation}
+                    onChange={e => updateCurrentDraft({ defaultGroupParticipation: e.target.value as BotDraft['defaultGroupParticipation'] })}
+                  >
+                    <option value="off">关闭</option>
+                    <option value="observe">仅观察</option>
+                    <option value="selective">Tag 按需参与</option>
+                  </Select>
+                  <p className="mt-1.5 text-caption text-subtle">
+                    选择「Tag 按需参与」后，所有群默认先判断普通消息是否需要回复；决定回复时用 OK 标记开始处理。群可单独覆盖。关闭时沿用唤醒规则，仅观察时不自动回复普通消息。
+                  </p>
+                  {currentDraft.defaultGroupParticipation !== 'off' && (!currentDraft.groupToolsEnabled || currentDraft.defaultGroupParticipation === 'selective' && !currentDraft.groupToolsAllowSend) && (
+                    <p className="mt-1.5 text-caption text-warning">
+                      此模式需要在高级设置开启「允许它读取群聊内容」；Tag 回复还需要「允许它主动往群里发消息」。当前权限尚未满足。
+                    </p>
+                  )}
                 </div>
 
                 <Field label="每次任务前自动加一句话" hint="可选。会在每一轮对话前附加给 Agent，用来固定语言、格式或注意事项。">
