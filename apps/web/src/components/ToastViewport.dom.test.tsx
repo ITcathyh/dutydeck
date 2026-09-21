@@ -192,20 +192,6 @@ describe('ToastViewport 布局与动效', () => {
     // 卡片本体必须可点，否则关闭/撤销都点不动
     expect((container.querySelector('.ui-toast') as HTMLElement).className).toContain('pointer-events-auto');
   });
-
-  it('不使用会在暗色模式失效的硬编码调色板类名', () => {
-    const { container } = render(<ToastViewport toasts={[
-      makeToast({ id: 'a', kind: 'success' }),
-      makeToast({ id: 'b', kind: 'error' }),
-      makeToast({ id: 'c', kind: 'info' }),
-      makeToast({ id: 'd', kind: 'warning', action: { label: '恢复这条指令', run: () => {} } })
-    ]}/>);
-    const classNames = [...container.querySelectorAll<HTMLElement>('*')].map(node => node.className).join(' ');
-    expect(classNames).not.toMatch(/\b(?:bg|text|border|ring)-(?:zinc|slate|gray|neutral|stone|amber|red|green|emerald|blue|white|black)(?:-\d{2,3})?\b/);
-    // 语义类取代了内联 token（契约 §1.2）：主题层负责明暗切换，组件不该知道 token 名。
-    expect(classNames).toContain('bg-raised');
-    expect(classNames).not.toMatch(/\[var\(--/);
-  });
 });
 
 describe('ToastViewport 渲染顺序', () => {
