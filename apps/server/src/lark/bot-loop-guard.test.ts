@@ -53,7 +53,7 @@ function harness(clock: { now: Date } = { now: new Date('2026-09-18T10:00:00.000
     send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })),
     update: vi.fn(async () => ({ messageId: 'om_card' }))
   };
-  const decider = { decide: vi.fn(async (_c: StoredLarkConfig, _s: CollaborationSnapshot) => ({ action: 'silent' as const, reason: '', evidenceIds: [] })) };
+  const decider = { decide: vi.fn(async (_c: StoredLarkConfig, _s: CollaborationSnapshot) => ({ action: 'silent' as const, reason: '无需回复', evidenceIds: [], updates: [] })), respond: vi.fn() };
   const participation = new LarkGroupParticipation({
     repository,
     decider,

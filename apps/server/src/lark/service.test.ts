@@ -412,6 +412,56 @@ describe('Lark card service', () => {
     expect(fetcher.mock.calls[2]?.[1]?.method).toBe('DELETE');
   });
 
+  it('lists only the current app reactions across all pages', async () => {
+    const reaction = (id: string, operatorType: string, operatorId: string, emojiType = 'OK') => ({
+      reaction_id: id, operator: { operator_type: operatorType, operator_id: operatorId }, reaction_type: { emoji_type: emojiType }
+    });
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [
+        reaction('other-app', 'app', 'cli_other'), reaction('human', 'user', 'cli_test'), reaction('other-emoji', 'app', 'cli_test', 'SMILE')
+      ], has_more: true, page_token: 'page/2' } }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [reaction('own', 'app', 'cli_test')], has_more: false } }));
+    const service = createLarkCardService(configured, fetcher as typeof fetch);
+    await expect(service.listOwnReactions('om/input', 'OK')).resolves.toEqual([{ messageId: 'om/input', reactionId: 'own', emojiType: 'OK' }]);
+    expect(fetcher.mock.calls[1]?.[0]).toBe('https://open.feishu.cn/open-apis/im/v1/messages/om%2Finput/reactions?reaction_type=OK&user_id_type=open_id&page_size=50');
+    expect(fetcher.mock.calls[2]?.[0]).toContain('&page_token=page%2F2');
+    expect(fetcher.mock.calls[1]?.[1]?.method).toBe('GET');
+    expect(fetcher.mock.calls[2]?.[1]?.method).toBe('GET');
+  });
+
+  it.each([
+    { items: [], has_more: true },
+    { items: [], has_more: true, page_token: ' ' },
+    { items: [] },
+    { has_more: false },
+    { items: [{ operator: { operator_type: 'app', operator_id: 'cli_test' }, reaction_type: { emoji_type: 'OK' } }], has_more: false }
+  ])('rejects an incomplete reaction page instead of reporting no reactions: %j', async data => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data }));
+    const service = createLarkCardService(configured, fetcher as typeof fetch);
+    await expect(service.listOwnReactions('om_input', 'OK')).rejects.toMatchObject({ code: 'INVALID_LARK_RESPONSE' });
+  });
+
+  it('rejects repeated reaction page tokens instead of returning a partial list', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockImplementation(async () => response({ code: 0, data: { items: [], has_more: true, page_token: 'stuck' } }));
+    const service = createLarkCardService(configured, fetcher as typeof fetch);
+    await expect(service.listOwnReactions('om_input', 'OK')).rejects.toMatchObject({ code: 'INVALID_LARK_RESPONSE' });
+    expect(fetcher).toHaveBeenCalledTimes(3);
+  });
+
+  it('propagates a failed reaction page instead of reporting no reactions', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [], has_more: true, page_token: 'page-2' } }))
+      .mockResolvedValueOnce(response({ code: 99991672, msg: 'Access denied' }, 403));
+    const service = createLarkCardService(configured, fetcher as typeof fetch);
+    await expect(service.listOwnReactions('om_input', 'OK')).rejects.toMatchObject({ code: 'LARK_OPENAPI_ERROR' });
+  });
+
   it('downloads a message attachment with the tenant token', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))

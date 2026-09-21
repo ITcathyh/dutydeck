@@ -1561,6 +1561,15 @@ export function createCollaborationRepository(sqlite: Database.Database): Collab
       return rows.map(rowToAction);
     },
 
+    async listPendingActions(appId: string, kind: string): Promise<CollaborationAction[]> {
+      const rows = sqlite.prepare(`
+        SELECT * FROM collaboration_actions
+        WHERE app_id = ? AND kind = ? AND status IN ('intent', 'sending', 'unknown')
+        ORDER BY created_at ASC, id ASC
+      `).all(appId, kind) as ActionRow[];
+      return rows.map(rowToAction);
+    },
+
     async updateAction(scope: CollaborationScope, id: string, patch: UpdateActionInput): Promise<CollaborationAction> {
       const validatedPatch = updateActionInputSchema.parse(patch);
 

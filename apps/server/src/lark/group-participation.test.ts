@@ -16,7 +16,7 @@ const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'test', listen
   allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off' };
 const message = (id = 'om_1', text = '资料已提交', patch: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({ messageId: id, chatId: scope.chatId, chatType: 'group', messageType: 'text', content: JSON.stringify({ text }), createTime: '1789707600000', senderOpenId: 'ou_a', senderType: 'user', mentions: [], ...patch });
 const silent = (): ParticipationResult => ({ action: 'silent', reason: '没有新增信息', evidenceIds: [], updates: [] });
-const reply = (snapshot: CollaborationSnapshot): ParticipationResult => ({ action: 'reply', reason: '补充来源明确的新进展', evidenceIds: [snapshot.observations.find(item => item.origin === 'live')!.id], response: '材料已有进展', updates: [] });
+const reply = (snapshot: CollaborationSnapshot): ParticipationResult => ({ action: 'reply', reason: '补充来源明确的新进展', evidenceIds: [snapshot.observations.find(item => item.origin === 'live')!.id], updates: [] });
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
@@ -25,16 +25,17 @@ async function harness(mode: 'off' | 'observe' | 'selective' = 'selective', extr
   const repository = createCollaborationRepository(db);
   if (mode !== 'off') await repository.updateSettings(scope, { expectedRevision: 0, participation: mode }, 'owner');
   const service = { listChatMessages: vi.fn(async (_input: any) => ({ items: [] as any[], hasMore: false })), replyText: vi.fn(async () => ({ messageId: 'om_sent' })), sendText: vi.fn(async () => ({ messageId: 'om_sent' })),
-    addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}), send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })), update: vi.fn(async () => ({ messageId: 'om_card' })) };
+    listOwnReactions: vi.fn(async () => [] as Array<{ messageId: string; reactionId: string; emojiType: string }>), addReaction: vi.fn(async () => ({ reactionId: 'reaction' })), deleteReaction: vi.fn(async () => {}), send: vi.fn(async () => ({ messageId: 'om_card' })), reply: vi.fn(async () => ({ messageId: 'om_card' })), update: vi.fn(async () => ({ messageId: 'om_card' })) };
   const decide = vi.fn(async (_config: StoredLarkConfig, _snapshot: CollaborationSnapshot) => silent());
+  const respond = vi.fn(async (_config: StoredLarkConfig, _snapshot: CollaborationSnapshot, _decision: ParticipationResult, _triggerId: string) => '材料已有进展');
   const authorize = vi.fn(async (_scope: typeof scope, _actor: string | undefined, _action: string, _followup?: CollaborationFollowup) => true);
-  const options = { repository, decider: { decide }, authorize, readConfig: async () => config, serviceFor: () => service, readGroupDescription: async () => '测试群', listScopes: async () => [scope], debounceMs: 10000, ...extra };
+  const options = { repository, decider: { decide, respond }, authorize, readConfig: async () => config, serviceFor: () => service, readGroupDescription: async () => '测试群', listScopes: async () => [scope], debounceMs: 10000, ...extra };
   const participation = new LarkGroupParticipation(options);
   const session = { id: 's1', protocol: 'acp', state: 'idle', agentId: 'mock', cwd: '/tmp', permissionMode: 'ask', createdAt: '', updatedAt: '' };
   const runtime = { start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), send: vi.fn(async () => {}), interrupt: vi.fn(async () => {}) };
   const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, undefined, async () => 'group', undefined, undefined, { participation });
   cleanups.push(async () => { coordinator.stop(); await participation.close(); if (db.open) db.close(); });
-  return { db, repository, service, decide, authorize, participation, coordinator, runtime, options };
+  return { db, repository, service, decide, respond, authorize, participation, coordinator, runtime, options };
 }
 
 describe('group observation and selective participation through the coordinator', () => {
@@ -126,6 +127,7 @@ describe('group observation and selective participation through the coordinator'
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
     expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ action: 'reply', status: 'candidate' });
     expect(h.service.replyText).not.toHaveBeenCalled(); expect(await h.repository.listActions(scope)).toEqual([]);
+    expect(h.respond).not.toHaveBeenCalled(); expect(h.service.addReaction).not.toHaveBeenCalled();
   });
   it('explicit requests retain their ordinary execution and include manager instructions', async () => {
     const h = await harness('observe'); await h.repository.updateSettings(scope, { expectedRevision: 1, instructions: '简短并附来源' }, 'owner');
@@ -138,7 +140,7 @@ describe('group observation and selective participation through the coordinator'
     const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
     await h.coordinator.handle(message(), config); await h.coordinator.handle(message('om_2'), config); await h.participation.flush(scope);
     expect(h.decide).toHaveBeenCalledOnce(); expect(h.service.replyText).toHaveBeenCalledOnce();
-    const action = (await h.repository.listActions(scope))[0]!;
+    const action = (await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')!;
     expect(action).toMatchObject({ status: 'succeeded', requesterId: 'policy:group-participation', receipt: 'om_sent' });
     expect(h.authorize).toHaveBeenCalledWith(scope, 'policy:group-participation', 'deliver');
     expect((await h.repository.listDecisions(scope))[0]!.inputSnapshot).toHaveProperty('observations');
@@ -163,10 +165,10 @@ describe('group observation and selective participation through the coordinator'
     const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
     const update = h.repository.updateAction.bind(h.repository);
     vi.spyOn(h.repository, 'updateAction').mockImplementation(async (scope, id, patch) => {
-      const result = await update(scope, id, patch); if (patch.status === 'sending') h.authorize.mockResolvedValue(false); return result;
+      const result = await update(scope, id, patch); if (patch.status === 'sending' && id.startsWith('reply_')) h.authorize.mockResolvedValue(false); return result;
     });
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
-    expect(h.service.replyText).not.toHaveBeenCalled(); expect((await h.repository.listActions(scope))[0]!.status).toBe('suppressed');
+    expect(h.service.replyText).not.toHaveBeenCalled(); expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')!.status).toBe('suppressed');
   });
   it('rechecks context after waiting for the shared delivery guard', async () => {
     let entered!: () => void; const queued = new Promise<void>(resolve => { entered = resolve; });
@@ -178,22 +180,22 @@ describe('group observation and selective participation through the coordinator'
     await h.repository.updateSettings(scope, { expectedRevision: 1, notificationsPaused: true }, 'owner');
     release(); await flush;
     expect(h.service.replyText).not.toHaveBeenCalled();
-    expect((await h.repository.listActions(scope))[0]!.status).toBe('suppressed');
+    expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')!.status).toBe('suppressed');
   });
   it('a shared budget suppression before provider invocation is not an unknown network result', async () => {
     const h = await harness('selective', { withDelivery: async () => { throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Group notification budget exhausted', 409); } });
     h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
     expect(h.service.replyText).not.toHaveBeenCalled();
-    expect((await h.repository.listActions(scope))[0]!.status).toBe('suppressed');
+    expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')!.status).toBe('suppressed');
   });
 
   it('an unknown delivery is never resent, including rewritten wording for identical evidence', async () => {
     const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
     h.service.replyText.mockRejectedValueOnce(new Error('response lost'));
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
-    expect((await h.repository.listActions(scope))[0]!.status).toBe('unknown');
-    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), response: '换一种表达，材料已有进展' }));
+    expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')!.status).toBe('unknown');
+    h.respond.mockResolvedValue('换一种表达，材料已有进展');
     await h.coordinator.handle(message('om_2'), config); await h.participation.flush(scope);
     expect(h.service.replyText).toHaveBeenCalledOnce();
   });
@@ -202,6 +204,131 @@ describe('group observation and selective participation through the coordinator'
     await h.repository.updateSettings(scope, { expectedRevision: 1, maxProactivePerHour: 0 }, 'owner');
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
     expect(h.service.replyText).not.toHaveBeenCalled(); expect((await h.repository.listDecisions(scope))[0]!.status).toBe('suppressed');
+    expect(h.respond).not.toHaveBeenCalled(); expect(h.service.addReaction).not.toHaveBeenCalled();
+  });
+  it('acknowledges only after deciding to reply, before generation, and clears the exact reaction after sending', async () => {
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    let release!: () => void; const model = new Promise<void>(resolve => { release = resolve; });
+    h.respond.mockImplementation(async () => { await model; return '实际生成的回复'; });
+    await h.coordinator.handle(message(), config); const flush = h.participation.flush(scope);
+    try {
+      await vi.waitFor(() => expect(h.respond).toHaveBeenCalledOnce());
+      expect(h.service.addReaction).toHaveBeenCalledWith('om_1', 'OK');
+      expect(h.service.replyText).not.toHaveBeenCalled(); expect(h.service.deleteReaction).not.toHaveBeenCalled();
+      expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.ack')).toMatchObject({ status: 'sending', receipt: 'reaction', payload: { messageId: 'om_1' } });
+    } finally { release(); await flush; }
+    expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_1', text: '实际生成的回复' }));
+    expect(h.service.deleteReaction).toHaveBeenCalledWith('om_1', 'reaction');
+    expect(h.service.deleteReaction.mock.invocationCallOrder[0]).toBeGreaterThan(h.service.replyText.mock.invocationCallOrder[0]!);
+    expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ status: 'sent', response: '实际生成的回复' });
+  });
+  it('does not discard an acknowledged reply when another question arrives in the same group', async () => {
+    const h = await harness();
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id] }));
+    let release!: () => void; const model = new Promise<void>(resolve => { release = resolve; });
+    h.respond.mockImplementationOnce(async () => { await model; return '第一个问题的回答'; }).mockResolvedValue('第二个问题的回答');
+    await h.coordinator.handle(message('om_first', '第一个问题'), config); const flush = h.participation.flush(scope);
+    try {
+      await vi.waitFor(() => expect(h.respond).toHaveBeenCalledOnce());
+      await h.coordinator.handle(message('om_second', '第二个问题'), config);
+    } finally { release(); await flush; }
+    expect(h.service.replyText.mock.calls).toEqual([
+      [expect.objectContaining({ messageId: 'om_first', text: '第一个问题的回答' })],
+      [expect.objectContaining({ messageId: 'om_second', text: '第二个问题的回答' })]
+    ]);
+    expect(h.service.deleteReaction).toHaveBeenCalledTimes(2);
+  });
+  it.each(['pause', 'revoke', 'stop'])('clears an accepted reaction and suppresses the answer when %s occurs during generation', async kind => {
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    let release!: () => void; const model = new Promise<void>(resolve => { release = resolve; });
+    h.respond.mockImplementation(async () => { await model; return '回答'; });
+    await h.coordinator.handle(message(), config); const flush = h.participation.flush(scope);
+    try {
+      await vi.waitFor(() => expect(h.respond).toHaveBeenCalledOnce());
+      if (kind === 'pause') await h.repository.updateSettings(scope, { expectedRevision: 1, notificationsPaused: true }, 'owner');
+      if (kind === 'revoke') h.authorize.mockResolvedValue(false);
+      if (kind === 'stop') h.participation.closeApp(scope.appId);
+    } finally { release(); await flush; }
+    expect(h.service.replyText).not.toHaveBeenCalled();
+    expect(h.service.deleteReaction).toHaveBeenCalledWith('om_1', 'reaction');
+    expect((await h.repository.listDecisions(scope))[0]!.status).toBe('suppressed');
+  });
+  it('reports generation failure once and clears OK without leaking the internal error', async () => {
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    h.respond.mockRejectedValue(new Error('provider secret detail'));
+    await h.coordinator.handle(message(), config); await h.participation.flush(scope);
+    expect(h.service.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_1', text: '这次回复生成失败，请稍后重试。' }));
+    expect(h.service.deleteReaction).toHaveBeenCalledWith('om_1', 'reaction');
+    expect((await h.repository.listDecisions(scope))[0]!.status).toBe('failed');
+  });
+  it('still answers when adding OK fails', async () => {
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    h.service.addReaction.mockRejectedValue(new Error('reaction API unavailable'));
+    await h.coordinator.handle(message(), config); await h.participation.flush(scope);
+    expect(h.service.replyText).toHaveBeenCalledOnce(); expect(h.service.deleteReaction).not.toHaveBeenCalled();
+    expect((await h.repository.listDecisions(scope))[0]!.status).toBe('sent');
+  });
+  it('recovers failed reaction cleanup without replaying generation or sending', async () => {
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    h.service.deleteReaction.mockRejectedValueOnce(new Error('temporary failure'));
+    h.service.listOwnReactions.mockResolvedValue([{ messageId: 'om_1', reactionId: 'reaction', emojiType: 'OK' }]);
+    await h.coordinator.handle(message(), config); await h.participation.flush(scope);
+    expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.ack')).toMatchObject({ status: 'sending', receipt: 'reaction' });
+    await h.participation.recover(scope.appId); await h.participation.flush(scope);
+    expect(h.service.deleteReaction).toHaveBeenCalledTimes(2);
+    expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.ack')).toMatchObject({ status: 'succeeded' });
+    expect(h.respond).toHaveBeenCalledOnce(); expect(h.service.replyText).toHaveBeenCalledOnce();
+  });
+  it.each(['sending', 'unknown'] as const)('reconciles an OK whose add receipt was lost (%s)', async status => {
+    const h = await harness();
+    const begun = await h.repository.beginAction({ id: 'ack_lost', scope, kind: 'participation.ack', requesterId: 'policy:group-participation', inputDigest: 'lost', payload: { messageId: 'om_1' } });
+    const sending = await h.repository.updateAction(scope, begun.action.id, { expectedRevision: 1, status: 'sending' });
+    if (status === 'unknown') await h.repository.updateAction(scope, begun.action.id, { expectedRevision: sending.revision, status });
+    h.service.listOwnReactions.mockResolvedValue([{ messageId: 'om_1', reactionId: 'own_lost', emojiType: 'OK' }]);
+    await h.participation.recover(scope.appId);
+    expect(h.service.listOwnReactions).toHaveBeenCalledWith('om_1', 'OK');
+    expect(h.service.deleteReaction).toHaveBeenCalledExactlyOnceWith('om_1', 'own_lost');
+    expect((await h.repository.getAction(scope, 'ack_lost'))!.status).toBe('succeeded');
+    expect(h.respond).not.toHaveBeenCalled(); expect(h.service.replyText).not.toHaveBeenCalled();
+  });
+  it('finds pending cleanup older than the global action window', async () => {
+    const h = await harness();
+    await h.repository.beginAction({ id: 'ack_old', scope, kind: 'participation.ack', requesterId: 'policy:group-participation', inputDigest: 'old', payload: { messageId: 'om_1' } });
+    await h.repository.updateAction(scope, 'ack_old', { expectedRevision: 1, status: 'sending', receipt: 'own_old' });
+    for (let i = 0; i < 501; i++) {
+      await h.repository.beginAction({ id: `unrelated_${i}`, scope: { appId: 'another_app', chatId: 'other_chat' }, kind: 'unrelated', requesterId: 'owner', inputDigest: String(i), payload: {} });
+    }
+    await h.participation.recover(scope.appId);
+    expect(h.service.deleteReaction).toHaveBeenCalledExactlyOnceWith('om_1', 'own_old');
+    expect((await h.repository.getAction(scope, 'ack_old'))!.status).toBe('succeeded');
+  });
+  it('does not recover a new live reply that starts while old reaction cleanup is waiting', async () => {
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    await h.repository.beginAction({ id: 'ack_old', scope, kind: 'participation.ack', requesterId: 'policy:group-participation', inputDigest: 'old', payload: { messageId: 'om_old' } });
+    await h.repository.updateAction(scope, 'ack_old', { expectedRevision: 1, status: 'sending', receipt: 'old_reaction' });
+    let releaseCleanup!: () => void; const cleanup = new Promise<void>(resolve => { releaseCleanup = resolve; });
+    let releaseModel!: () => void; const model = new Promise<void>(resolve => { releaseModel = resolve; });
+    h.service.deleteReaction.mockImplementationOnce(async () => { await cleanup; });
+    h.respond.mockImplementationOnce(async () => { await model; return '新请求的回答'; });
+    const recovery = h.participation.recover(scope.appId);
+    let flush: Promise<void> | undefined;
+    try {
+      await vi.waitFor(() => expect(h.service.deleteReaction).toHaveBeenCalledWith('om_old', 'old_reaction'));
+      await h.coordinator.handle(message('om_new'), config); flush = h.participation.flush(scope);
+      await vi.waitFor(() => expect(h.respond).toHaveBeenCalledOnce());
+      releaseCleanup(); await recovery;
+      expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')).toMatchObject({ status: 'intent' });
+    } finally { releaseCleanup(); releaseModel(); await Promise.all([recovery, flush]); }
+    expect(h.service.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_new', text: '新请求的回答' }));
+    expect((await h.repository.listDecisions(scope))[0]!.status).toBe('sent');
+  });
+  it('finishes cleanup when a previous delete succeeded but its acknowledgement was lost', async () => {
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    h.service.deleteReaction.mockRejectedValueOnce(new Error('reaction already absent'));
+    h.service.listOwnReactions.mockResolvedValue([]);
+    await h.coordinator.handle(message(), config); await h.participation.flush(scope);
+    expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.ack')).toMatchObject({ status: 'succeeded' });
+    expect(h.service.replyText).toHaveBeenCalledOnce();
   });
   it('bot messages remain context and cannot create task authority or inferred changes', async () => {
     const h = await harness();
@@ -314,7 +441,7 @@ describe('participation shutdown and source completeness', () => {
     let drained = false; const close = h.participation.close().then(() => { drained = true; });
     try { await Promise.resolve(); expect(drained).toBe(false); }
     finally { release(); await Promise.all([flush, close]); }
-    expect((await h.repository.listActions(scope))[0]).toMatchObject({ status: 'succeeded', receipt: 'accepted-receipt' });
+    expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')).toMatchObject({ status: 'succeeded', receipt: 'accepted-receipt' });
     expect((await h.repository.listDecisions(scope))[0]!.status).toBe('sent');
   });
   it('includes accepted handle work outside decision slots in the drain', async () => {

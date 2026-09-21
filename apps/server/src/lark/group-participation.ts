@@ -1,20 +1,20 @@
 import { RuntimeError, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, countDecisionUsage } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD, countBotTurnUsage } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
-import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision } from '@dutydeck/shared';
+import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkCardService } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
-import { participationInput, parseParticipationResult, type ParticipationDecider, type ParticipationResult } from './readonly-decider.js';
+import { participationInput, parseParticipationResult, parseParticipationResponse, type ParticipationDecider, type ParticipationResult } from './readonly-decider.js';
 
 export interface GroupParticipationOptions {
   repository: CollaborationRepository;
   decider: ParticipationDecider;
   authorize(scope: CollaborationScope, actorId: string | undefined, action: 'observe' | 'update' | 'deliver', followup?: CollaborationFollowup): Promise<boolean>;
   readConfig(appId: string, chatId?: string): Promise<StoredLarkConfig | undefined>;
-  serviceFor(config: StoredLarkConfig): Pick<LarkCardService, 'listChatMessages' | 'sendText' | 'replyText'>;
+  serviceFor(config: StoredLarkConfig): Pick<LarkCardService, 'listChatMessages' | 'sendText' | 'replyText' | 'addReaction' | 'deleteReaction' | 'listOwnReactions'>;
   readMemory?(scope: CollaborationScope): Promise<string>;
   readGroupDescription?(scope: CollaborationScope, config: StoredLarkConfig): Promise<string>;
   withDelivery?<T>(scope: CollaborationScope, actionId: string, send: () => Promise<T>): Promise<T>;
@@ -30,7 +30,7 @@ export type BotTurnGate = string | undefined;
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const keyFor = (scope: CollaborationScope) => JSON.stringify([scope.appId, scope.chatId]);
 
-/** Observation and decision never enter the coordinator's acknowledgement/card path. */
+/** Silent decisions stay invisible; accepted replies own their processing reaction. */
 export class LarkGroupParticipation {
   private closed = false;
   private readonly active = new Set<Promise<unknown>>();
@@ -102,6 +102,22 @@ export class LarkGroupParticipation {
     return this.track(() => this.recoverApp(appId));
   }
   private async recoverApp(appId: string) {
+    const [acknowledgements, replies] = await Promise.all([
+      this.options.repository.listPendingActions(appId, 'participation.ack'),
+      this.options.repository.listPendingActions(appId, 'participation.reply')
+    ]);
+    // Reconcile persisted work before starting any new live backlog.
+    for (const action of acknowledgements) {
+      if (this.closed) return;
+      await this.clearAcknowledgement(action);
+    }
+    // Sending interrupted by a restart is an uncertain result, not a retryable failure.
+    for (const action of replies) {
+      if (this.closed) return;
+      if (!['intent', 'sending'].includes(action.status)) continue;
+      const sending = action.status === 'sending';
+      await this.options.repository.updateAction(action.scope, action.id, { expectedRevision: action.revision, status: sending ? 'unknown' : 'suppressed', error: sending ? 'Process stopped while sending; reconcile before retry' : 'Process stopped before delivery' }).catch(() => undefined);
+    }
     for (const scope of await this.options.listScopes?.(appId) ?? []) {
       if (this.closed) return;
       await this.bootstrapper.ensure(scope, true);
@@ -117,14 +133,6 @@ export class LarkGroupParticipation {
       const config = await this.options.readConfig(appId, scope.chatId);
       if (!config?.listening) continue;
       this.enqueue(scope, { config, event: { messageId: latest.messageId, chatId: scope.chatId, chatType: 'group', senderOpenId: latest.senderId, senderType: 'user', messageType: 'text', content: JSON.stringify({ text: latest.text }), threadId: latest.threadId, createTime: latest.occurredAt, mentions: [] } });
-    }
-    if (this.closed) return;
-    // Sending interrupted by a restart is an uncertain result, not a retryable failure.
-    for (const action of await this.options.repository.listActions(undefined, 500)) {
-      if (action.scope.appId === appId && action.kind === 'participation.reply' && ['intent', 'sending'].includes(action.status)) {
-        const sending = action.status === 'sending';
-        await this.options.repository.updateAction(action.scope, action.id, { expectedRevision: action.revision, status: sending ? 'unknown' : 'suppressed', error: sending ? 'Process stopped while sending; reconcile before retry' : 'Process stopped before delivery' }).catch(() => undefined);
-      }
     }
   }
   closeApp(appId: string) {
@@ -205,10 +213,10 @@ export class LarkGroupParticipation {
     slot.running = run;
     try { await run; } finally { slot.running = undefined; }
   }
-  private async current(scope: CollaborationScope, snapshot: CollaborationSnapshot, actorId: string, slot: Slot, deliver = false) {
+  private async current(scope: CollaborationScope, snapshot: CollaborationSnapshot, actorId: string, slot: Slot, deliver = false, accepted = false) {
     if (this.closed || slot.stopped || !(await this.options.readConfig(scope.appId, scope.chatId))?.listening || !await this.options.authorize(scope, undefined, 'observe')) return false;
     const current = await this.options.repository.snapshot(scope, 30);
-    return current.contextRevision === snapshot.contextRevision && current.settings.revision === snapshot.settings.revision
+    return (accepted || current.contextRevision === snapshot.contextRevision) && current.settings.revision === snapshot.settings.revision
       && current.settings.participation !== 'off' && (!deliver || current.settings.participation === 'selective' && !current.settings.notificationsPaused
         && await this.options.authorize(scope, 'policy:group-participation', 'deliver')) && !this.closed && !slot.stopped;
   }
@@ -333,13 +341,13 @@ export class LarkGroupParticipation {
     try {
       const config = await this.options.readConfig(scope.appId, scope.chatId);
       if (this.closed || slot.stopped || !config?.listening) return;
-      result = parseParticipationResult(JSON.stringify(await this.options.decider.decide(config, snapshot)), snapshot);
+      result = parseParticipationResult(JSON.stringify(await this.options.decider.decide(config, snapshot, trigger.id)), snapshot);
     } catch (error) {
       await repo.recordDecision({ id, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion, action: 'silent', reason: `Decision unavailable: ${error instanceof Error ? error.message.slice(0, 1500) : 'unknown'}`, evidenceIds: [trigger.id], status: 'failed', inputSnapshot, createdAt: this.now().toISOString() });
       return;
     }
     const decision: CollaborationDecision = { id, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion,
-      action: result.action, reason: result.reason, evidenceIds: result.evidenceIds, response: result.response, status: 'candidate', inputSnapshot, createdAt: this.now().toISOString() };
+      action: result.action, reason: result.reason, evidenceIds: result.evidenceIds, status: 'candidate', inputSnapshot, createdAt: this.now().toISOString() };
     await repo.recordDecision(decision);
     if (snapshot.settings.participation !== 'selective') return;
     if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot)) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
@@ -361,38 +369,100 @@ export class LarkGroupParticipation {
     if (budgetIncomplete || budget >= snapshot.settings.maxProactivePerHour) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     // Rewording the same evidence is not a new notification after unrelated context changes.
     const notificationKey = digest([result.evidenceIds.slice().sort(), pending.event.threadId ?? scope.chatId]);
-    const inputDigest = digest([notificationKey, result.response]);
+    const inputDigest = digest([notificationKey, id]);
     if (actions.some(item => item.kind === 'participation.reply' && item.payload.notificationKey === notificationKey && item.status !== 'suppressed' && item.status !== 'failed')) {
       await repo.updateDecision(scope, id, { status: 'suppressed' }); return;
     }
     const actionId = `reply_${digest([id, inputDigest])}`;
     const begun = await repo.beginAction({ id: actionId, scope, kind: 'participation.reply', requesterId: 'policy:group-participation', inputDigest,
-      contextRevision: snapshot.contextRevision, payload: { notificationKey, decisionId: id, messageId: pending.event.messageId, response: result.response!, settingsRevision: snapshot.settings.revision } });
+      contextRevision: snapshot.contextRevision, payload: { notificationKey, decisionId: id, messageId: pending.event.messageId, settingsRevision: snapshot.settings.revision } });
     if (!begun.created) return;
     if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true)) {
       await repo.updateAction(scope, actionId, { expectedRevision: begun.action.revision, status: 'suppressed' });
       await repo.updateDecision(scope, id, { status: 'suppressed' }); return;
     }
-    const sending = await repo.updateAction(scope, actionId, { expectedRevision: begun.action.revision, status: 'sending' });
+    // Once accepted, freeze the input. Unrelated new observations must not swallow an acknowledged request.
+    let action = begun.action;
+    let acknowledgement: CollaborationAction | undefined;
     let providerStarted = false;
     try {
+      const config = await this.options.readConfig(scope.appId, scope.chatId);
+      if (!config || !await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true, true)) {
+        throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Listener or authorization changed before acceptance', 409);
+      }
+      acknowledgement = await this.acknowledge(scope, pending.event.messageId, actionId, config);
+      if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true, true)) {
+        throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Listener or authorization changed before generation', 409);
+      }
+      let response: string;
+      let generationError: string | undefined;
+      try {
+        response = parseParticipationResponse(JSON.stringify({ response: await this.options.decider.respond(config, snapshot, result, trigger.id) }));
+      } catch (error) {
+        generationError = error instanceof Error ? error.message.slice(0, 1000) : 'Reply generation failed';
+        response = '这次回复生成失败，请稍后重试。';
+      }
+      await repo.updateDecision(scope, id, { status: generationError ? 'failed' : 'candidate', response });
+      action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'sending' });
       const send = async () => {
         // Shared group delivery serialization may wait: recheck inside the acquired guard.
-        if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true)) {
+        if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot, true, true)) {
           throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Context or authorization changed before delivery', 409);
         }
         const config = await this.options.readConfig(scope.appId, scope.chatId);
         if (this.closed || slot.stopped || !config?.listening) throw new RuntimeError('COLLABORATION_DELIVERY_SUPPRESSED', 'Listener stopped before delivery', 409);
         providerStarted = true;
-        return this.options.serviceFor(config).replyText({ messageId: pending.event.messageId, replyInThread: true, text: result.response!, idempotencyKey: actionId.slice(0, 50) });
+        return this.options.serviceFor(config).replyText({ messageId: pending.event.messageId, replyInThread: true, text: response, idempotencyKey: actionId.slice(0, 50) });
       };
       const sent = await (this.options.withDelivery ? this.options.withDelivery(scope, actionId, send) : send());
-      await repo.updateAction(scope, actionId, { expectedRevision: sending.revision, status: 'succeeded', receipt: sent.messageId });
-      await repo.updateDecision(scope, id, { status: 'sent' });
+      await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'succeeded', receipt: sent.messageId, ...(generationError ? { error: generationError } : {}) });
+      await repo.updateDecision(scope, id, { status: generationError ? 'failed' : 'sent' });
     } catch (error) {
       const suppressed = !providerStarted && error instanceof RuntimeError && error.code === 'COLLABORATION_DELIVERY_SUPPRESSED';
-      await repo.updateAction(scope, actionId, { expectedRevision: sending.revision, status: suppressed ? 'suppressed' : 'unknown', error: error instanceof Error ? error.message.slice(0, 1000) : 'Unknown delivery result' }).catch(() => undefined);
+      await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: suppressed ? 'suppressed' : providerStarted ? 'unknown' : 'failed', error: error instanceof Error ? error.message.slice(0, 1000) : 'Unknown delivery result' }).catch(() => undefined);
       await repo.updateDecision(scope, id, { status: suppressed ? 'suppressed' : 'failed' });
+    } finally {
+      if (acknowledgement) await this.clearAcknowledgement(acknowledgement);
+    }
+  }
+  private async acknowledge(scope: CollaborationScope, messageId: string, replyActionId: string, config: StoredLarkConfig): Promise<CollaborationAction> {
+    const repo = this.options.repository;
+    const begun = await repo.beginAction({ id: `ack_${digest(replyActionId)}`, scope, kind: 'participation.ack', requesterId: 'policy:group-participation',
+      inputDigest: digest([messageId, replyActionId]), payload: { messageId, replyActionId } });
+    let action = begun.action;
+    try {
+      action = await repo.updateAction(scope, action.id, { expectedRevision: action.revision, status: 'sending' });
+      const { reactionId } = await this.options.serviceFor(config).addReaction(messageId, 'OK');
+      action = { ...action, receipt: reactionId };
+      action = await repo.updateAction(scope, action.id, { expectedRevision: action.revision, status: 'sending', receipt: reactionId });
+    } catch (error) {
+      // A reaction failure must not discard the accepted answer.
+      this.options.log?.warn({ error, scope, messageId }, '群回复处理标记添加失败');
+      await repo.updateAction(scope, action.id, { expectedRevision: action.revision, status: 'unknown', receipt: action.receipt,
+        error: error instanceof Error ? error.message.slice(0, 1000) : 'Reaction result unknown' }).then(updated => { action = updated; }).catch(() => undefined);
+    }
+    return action;
+  }
+  private async clearAcknowledgement(action: CollaborationAction): Promise<void> {
+    try {
+      const config = await this.options.readConfig(action.scope.appId, action.scope.chatId);
+      if (!config) return;
+      const service = this.options.serviceFor(config);
+      const messageId = String(action.payload.messageId);
+      // An add may have succeeded before its receipt was saved. Only reconcile this app's OK.
+      const reactionIds = action.receipt ? [action.receipt] : (await service.listOwnReactions(messageId, 'OK')).map(item => item.reactionId);
+      // Removing our own marker is cleanup, including after pause, revocation or shutdown.
+      for (const reactionId of reactionIds) {
+        try { await service.deleteReaction(messageId, reactionId); }
+        catch (error) {
+          // A prior delete may have succeeded before its response or checkpoint was saved.
+          if ((await service.listOwnReactions(messageId, 'OK')).some(item => item.reactionId === reactionId)) throw error;
+        }
+      }
+      await this.options.repository.updateAction(action.scope, action.id, { expectedRevision: action.revision, status: action.status === 'intent' ? 'suppressed' : 'succeeded', error: null });
+    } catch (error) {
+      // Keep the reaction receipt durable so recovery can retry cleanup, never the reply.
+      this.options.log?.warn({ error, scope: action.scope, actionId: action.id }, '群回复处理标记清理失败');
     }
   }
   private async applyUpdates(scope: CollaborationScope, pending: Pending, trigger: CollaborationObservation, snapshot: CollaborationSnapshot, result: ParticipationResult, slot: Slot): Promise<CollaborationSnapshot | undefined> {

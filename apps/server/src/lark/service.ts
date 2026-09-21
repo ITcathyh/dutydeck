@@ -1269,6 +1269,36 @@ export class LarkCardService {
     });
   }
 
+  async listOwnReactions(messageId: string, emojiType: string): Promise<LarkReactionResult[]> {
+    const resolvedMessageId = required(messageId, 'messageId');
+    const resolvedEmojiType = required(emojiType, 'emojiType');
+    const query = new URLSearchParams({ reaction_type: resolvedEmojiType, user_id_type: 'open_id', page_size: '50' });
+    const seen = new Set<string>();
+    const reactions: LarkReactionResult[] = [];
+    while (true) {
+      const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}/reactions?${query}`, { method: 'GET' });
+      const data = payload.data;
+      if (!Array.isArray(data?.items) || typeof data.has_more !== 'boolean') {
+        throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reaction list response did not include items or has_more', 502);
+      }
+      for (const item of data.items) {
+        if (typeof item?.reaction_id !== 'string' || !item.reaction_id.trim()
+          || typeof item.operator?.operator_id !== 'string' || !item.operator.operator_id.trim()
+          || typeof item.operator?.operator_type !== 'string' || typeof item.reaction_type?.emoji_type !== 'string') {
+          throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reaction record is incomplete', 502);
+        }
+        if (item.operator.operator_type === 'app' && item.operator.operator_id === this.config.appId && item.reaction_type.emoji_type === resolvedEmojiType) {
+          reactions.push({ messageId: resolvedMessageId, reactionId: item.reaction_id, emojiType: resolvedEmojiType });
+        }
+      }
+      if (!data.has_more) return reactions;
+      const next = typeof data.page_token === 'string' ? data.page_token.trim() : '';
+      if (!next || seen.has(next)) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reaction pagination is incomplete', 502);
+      seen.add(next);
+      query.set('page_token', next);
+    }
+  }
+
   async urgentApp(input: LarkUrgentAppInput): Promise<LarkUrgentResult> {
     const messageId = required(input?.messageId, 'messageId');
     const userIdList = (Array.isArray(input?.userIdList) ? input.userIdList : [])
