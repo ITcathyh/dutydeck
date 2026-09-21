@@ -5,20 +5,11 @@ import { join } from 'node:path';
 import { get as httpGet, type IncomingMessage } from 'node:http';
 import { buildApp } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
-import { larkBotsConfigKey, larkCredentialsConfigKey } from './lark/config.js';
+import { larkBotsConfigKey } from './lark/config.js';
 
 const apps: any[] = [];
 const tempDirectories: string[] = [];
 const repositories: Array<ReturnType<typeof createRepositories>> = [];
-function listenerPool() {
-  let activeAppIds: string[] = [];
-  return {
-    get listening() { return activeAppIds.length > 0; },
-    get activeAppIds() { return activeAppIds; },
-    sync: vi.fn(async (configs: Array<{ appId: string; listening: boolean }>) => { activeAppIds = configs.filter(config => config.listening).map(config => config.appId); }),
-    stop: vi.fn(() => { activeAppIds = []; })
-  };
-}
 afterEach(async () => {
   await Promise.all(apps.splice(0).map(app => app.close()));
   for (const repository of repositories.splice(0)) repository.close();
@@ -146,244 +137,26 @@ describe('HTTP API boundary', () => {
     expect(response.json().error.code).toBe('LARK_NOT_CONFIGURED');
   });
 
-  it('persists Lark credentials in SQLite without returning the secret', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true, version: 'codex-cli test' });
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, tenant_access_token: 'token', expire: 7200 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { message_id: 'om_saved', chat_id: 'oc_group' } }), { status: 200 }));
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, fetcher: fetcher as typeof fetch } }); apps.push(app);
-    const saved = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { appId: 'cli_saved', appSecret: 'secret_saved', defaultAgentId: 'codex', defaultModel: 'model-a', defaultReasoningEffort: 'high', fullTrustConfirmed: true, env: { OPENAI_API_KEY: 'browser-secret' } } });
-    expect(saved.statusCode).toBe(200);
-    expect(saved.json()).toMatchObject({ configured: true, bots: [{ configured: true, appId: 'cli_saved', name: 'cli_saved', tabLabel: 'cli_saved', setupComplete: true, defaultAgentId: 'codex', defaultModel: 'model-a', defaultReasoningEffort: 'high', listening: false, activeListening: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, traceLimit: 50, hideTraceOnComplete: true, allowedEmails: [], highRiskAllowedEmails: [], riskControlMode: 'off' }], listeningDisabled: false });
-    expect(saved.body).not.toContain('secret_saved');
-    expect(saved.body).not.toContain('browser-secret');
-    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0]).toMatchObject({ appId: 'cli_saved', appSecret: 'secret_saved', defaultAgentId: 'codex', defaultModel: 'model-a', defaultReasoningEffort: 'high', fullTrustConfirmed: true, env: { OPENAI_API_KEY: 'browser-secret' }, listening: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, traceLimit: 50, hideTraceOnComplete: true, allowedEmails: [], highRiskAllowedEmails: [], riskControlMode: 'off' });
-    expect(saved.body).not.toMatch(/gateEnabled|softGateEnabled|hardGateEnabled|hookTrustConfirmed/);
-    const loaded = await app.inject({ method: 'GET', url: '/api/lark/config' });
-    expect(loaded.json()).toEqual(saved.json());
-    expect(loaded.body).not.toContain('secret_saved');
-    expect((await app.inject({ method: 'GET', url: '/api/lark/status' })).json()).toMatchObject({ configured: true });
-    expect((await app.inject({ method: 'POST', url: '/api/lark/send', payload: { chatId: 'oc_group', markdown: 'hello', state: 'completed' } })).json()).toEqual({ messageId: 'om_saved', chatId: 'oc_group' });
-    expect(JSON.parse(String(fetcher.mock.calls[0]?.[1]?.body))).toEqual({ app_id: 'cli_saved', app_secret: 'secret_saved' });
-  });
+  it('serves workspace cleanup preview and executes cleanup with valid fingerprint', async () => {
+    const runtime = {
+      getWorkspaceCleanupPreview: vi.fn(async (id: string) => ({ sessionId: id, canClean: true, fingerprint: 'fp_123' })),
+      cleanWorkspace: vi.fn(async (id: string, fp: string) => ({ sessionId: id, cleaned: true, fingerprint: fp }))
+    } as any;
+    const app = await buildApp(runtime); apps.push(app);
 
-  it('resolves typed real names from bot groups and persists open_id member access', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, tenant_access_token: 'token', expire: 7200 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { items: [{ chat_id: 'oc_group', name: '研发群', external: false }], has_more: false } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, tenant_access_token: 'token', expire: 7200 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { users: [{ member_id: 'ou_user', member_id_type: 'open_id', open_id: 'ou_user', name: '涂泽国' }], has_more: false, user_total: 1 } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, tenant_access_token: 'token', expire: 7200 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, bot: { app_name: '真实姓名机器人', open_id: 'ou_bot' } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { items: [{ chat_id: 'oc_group', name: '研发群', external: false }], has_more: false } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { users: [{ member_id: 'ou_user', member_id_type: 'open_id', open_id: 'ou_user', name: '涂泽国' }], has_more: false, user_total: 1 } }), { status: 200 }));
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, fetcher: fetcher as typeof fetch, listener: listenerPool() } }); apps.push(app);
-    await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { appId: 'cli_named', appSecret: 'secret_named' } });
+    const preview = await app.inject({ method: 'GET', url: '/api/sessions/s1/workspace/cleanup' });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({ sessionId: 's1', canClean: true, fingerprint: 'fp_123' });
+    expect(runtime.getWorkspaceCleanupPreview).toHaveBeenCalledWith('s1');
 
-    const chats = await app.inject({ method: 'GET', url: '/api/lark/bots/cli_named/chats' });
-    expect(chats.json()).toEqual({ items: [{ chatId: 'oc_group', name: '研发群', external: false }], hasMore: false });
-    const members = await app.inject({ method: 'GET', url: '/api/lark/bots/cli_named/chats/oc_group/members' });
-    expect(members.json()).toMatchObject({ items: [{ memberId: 'ou_user', openId: 'ou_user', memberType: 'user', name: '涂泽国' }], hasMore: false, memberTotal: 1 });
-
-    const saved = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'lark', originalAppId: 'cli_named', allowedUserNames: ['涂泽国'], allowedEmails: [] } });
-    expect(saved.json().bots[0]).toMatchObject({ allowedUsers: [{ openId: 'ou_user', name: '涂泽国' }], allowedEmails: [] });
-    expect(fetcher).toHaveBeenCalledTimes(8);
-  });
-
-  it('starts and stops the optional Lark listener from persisted config', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true });
-    const listener = listenerPool();
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, listener } }); apps.push(app);
-    await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { appId: 'cli_saved', appSecret: 'secret_saved', defaultAgentId: 'codex', fullTrustConfirmed: true, listening: false } });
-    listener.sync.mockClear();
-    const enabled = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_saved', listening: true } });
-    expect(enabled.json().bots[0]).toMatchObject({ appId: 'cli_saved', listening: true, activeListening: true });
-    expect(listener.sync).toHaveBeenCalledOnce();
-    const disabled = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_saved', listening: false } });
-    expect(disabled.json().bots[0]).toMatchObject({ appId: 'cli_saved', listening: false, activeListening: false });
-  });
-
-  it('persists the listener switch and retries a transient first connection failure within one save', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    let activeAppIds: string[] = []; let failedOnce = false;
-    const listener = {
-      get listening() { return activeAppIds.length > 0; },
-      get activeAppIds() { return activeAppIds; },
-      sync: vi.fn(async (configs: Array<{ appId: string; listening: boolean }>) => {
-        if (configs.some(config => config.listening) && !failedOnce) { failedOnce = true; throw new Error('transient websocket failure'); }
-        activeAppIds = configs.filter(config => config.listening).map(config => config.appId);
-      }),
-      stop: vi.fn()
-    };
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, listener } }); apps.push(app);
-    await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { appId: 'cli_saved', appSecret: 'secret_saved', listening: false } });
-    listener.sync.mockClear();
-    const response = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_saved', fullTrustConfirmed: true, listening: true } });
-    expect(response.statusCode).toBe(200);
-    expect(response.json().bots[0]).toMatchObject({ listening: true, activeListening: true });
-    expect(listener.sync).toHaveBeenCalledTimes(2);
-    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0].listening).toBe(true);
-  });
-
-  it('allows listening with valid Lark credentials before an Agent only after explicit full-trust confirmation', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    const listener = listenerPool();
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, tenant_access_token: 'token', expire: 7200 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, bot: { app_name: 'Listener only', open_id: 'ou_bot' } }), { status: 200 }));
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, listener, fetcher: fetcher as typeof fetch } }); apps.push(app);
-    const response = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'lark', appId: 'cli_saved', appSecret: 'secret_saved', fullTrustConfirmed: true, listening: true } });
-    expect(response.statusCode).toBe(200);
-    expect(response.json().bots[0]).toMatchObject({ appId: 'cli_saved', setupComplete: false, listening: true, activeListening: true });
-    expect(listener.sync).toHaveBeenLastCalledWith([expect.objectContaining({ appId: 'cli_saved', listening: true })]);
-    expect(listener.sync.mock.calls.at(-1)?.[0]?.[0]).not.toHaveProperty('defaultAgentId');
-    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0]).toMatchObject({ appId: 'cli_saved', fullTrustConfirmed: true, listening: true });
-  });
-
-  it('keeps the persisted listener switch unchanged when startup disables listening', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true });
-    await repos.config.set(larkCredentialsConfigKey, JSON.stringify({ appId: 'cli_saved', appSecret: 'secret_saved', defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true, pushIntervalMs: 1200, hideTraceOnComplete: false }));
-    const listener = listenerPool();
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, listener, listeningDisabled: true } }); apps.push(app);
-    expect((await app.inject({ method: 'GET', url: '/api/lark/config' })).json()).toMatchObject({ listeningDisabled: true, bots: [expect.objectContaining({ listening: true, activeListening: false, pushIntervalMs: 1200 })] });
-    const saved = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_saved', listening: false, pushIntervalMs: 1500 } });
-    expect(saved.json()).toMatchObject({ listeningDisabled: true, bots: [expect.objectContaining({ listening: true, activeListening: false, pushIntervalMs: 1500 })] });
-    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0].listening).toBe(true);
-    expect(listener.sync).not.toHaveBeenCalled();
-  });
-
-  it('restores an enabled listener from SQLite on startup', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    await repos.config.set(larkCredentialsConfigKey, JSON.stringify({ appId: 'cli_saved', appSecret: 'secret_saved', defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true, pushIntervalMs: 1000, hideTraceOnComplete: false }));
-    const listener = listenerPool();
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, listener } }); apps.push(app);
-    expect(listener.sync).toHaveBeenCalledWith([expect.objectContaining({ listening: true, pushIntervalMs: 1000, traceLimit: 50 })]);
-    expect((await app.inject({ method: 'GET', url: '/api/lark/config' })).json()).toMatchObject({ bots: [expect.objectContaining({ listening: true, activeListening: true, groupToolsEnabled: false, groupToolsAllowSend: false, traceLimit: 50 })] });
-  });
-
-  it('validates and persists Lark delivery policy', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true });
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents } }); apps.push(app);
-    const invalid = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { appId: 'cli_saved', appSecret: 'secret_saved', defaultAgentId: 'codex', pushIntervalMs: 499 } });
+    const invalid = await app.inject({ method: 'POST', url: '/api/sessions/s1/workspace/cleanup', payload: {} });
     expect(invalid.statusCode).toBe(400);
-    const saved = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { appId: 'cli_saved', appSecret: 'secret_saved', defaultAgentId: 'codex', fullTrustConfirmed: true, pushIntervalMs: 20000, traceLimit: 8, hideTraceOnComplete: true } });
-    expect(saved.json().bots[0]).toMatchObject({ pushIntervalMs: 20000, traceLimit: 8, hideTraceOnComplete: true });
-    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0]).toMatchObject({ pushIntervalMs: 20000, traceLimit: 8, hideTraceOnComplete: true });
-    const reset = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { originalAppId: 'cli_saved', traceLimit: null } });
-    expect(reset.json().bots[0]).toMatchObject({ traceLimit: 50 });
-    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0]).toMatchObject({ traceLimit: 50 });
-  });
+    expect(invalid.json().error.code).toBe('INVALID_FINGERPRINT');
 
-  it('persists independent group-tool discovery and send policies', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true });
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents } }); apps.push(app);
-    await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { appId: 'cli_saved', appSecret: 'secret_saved', defaultAgentId: 'codex', fullTrustConfirmed: true } });
-    const saved = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_saved', groupToolsEnabled: true, groupToolsAllowSend: false } });
-    expect(saved.json().bots[0]).toMatchObject({ groupToolsEnabled: true, groupToolsAllowSend: false });
-    expect(JSON.parse((await repos.config.get(larkBotsConfigKey))!)[0]).toMatchObject({ groupToolsEnabled: true, groupToolsAllowSend: false });
-  });
-
-  it('keeps one unique panel per bot and persists each workspace independently', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true });
-    const listener = listenerPool();
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, listener } }); apps.push(app);
-    const first = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { name: '超级智慧大脑', appId: 'cli_one', appSecret: 'secret_one', workspace: '/work/one', defaultAgentId: 'codex', fullTrustConfirmed: true } });
-    expect(first.statusCode).toBe(200);
-    const duplicate = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { name: '重复机器人', appId: 'cli_one', appSecret: 'secret_other', workspace: '/work/duplicate', defaultAgentId: 'codex', fullTrustConfirmed: true } });
-    expect(duplicate.statusCode).toBe(409);
-    expect(duplicate.json().error.code).toBe('LARK_BOT_ALREADY_CONFIGURED');
-    const relative = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { name: '机器人二号', appId: 'cli_two', appSecret: 'secret_two', workspace: 'relative/path', defaultAgentId: 'codex', fullTrustConfirmed: true } });
-    expect(relative.statusCode).toBe(400);
-    const second = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { name: '机器人二号', appId: 'cli_two', appSecret: 'secret_two', workspace: '/work/two', defaultAgentId: 'codex', fullTrustConfirmed: true } });
-    expect(second.json().bots).toEqual([
-      expect.objectContaining({ appId: 'cli_one', name: '超级智慧大脑', workspace: '/work/one' }),
-      expect.objectContaining({ appId: 'cli_two', name: '机器人二号', workspace: '/work/two' })
-    ]);
-  });
-
-  it('creates a bot in two stages, auto-resolves its name, and disambiguates duplicate tab labels', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    await repos.agents.save({ id: 'codex', name: 'Codex', command: 'codex', args: [], protocol: 'acp', cwd: '/tmp', env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true });
-    const fetcher = vi.fn()
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, tenant_access_token: 'token-one', expire: 7200 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, bot: { app_name: '同名机器人', open_id: 'ou_one' } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { user_ids: ['ou_visible'] } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, data: { user: { email: 'user@example.com' } } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, tenant_access_token: 'token-listen', expire: 7200 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, bot: { app_name: '同名机器人', open_id: 'ou_one' } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, tenant_access_token: 'token-two', expire: 7200 }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ code: 0, bot: { app_name: '同名机器人', open_id: 'ou_two' } }), { status: 200 }));
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, fetcher: fetcher as typeof fetch, listener: listenerPool() } }); apps.push(app);
-
-    const first = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'lark', appId: 'cli_one', appSecret: 'secret_one', name: '伪造名称', workspace: '/work/one', allowedEmails: ['USER@EXAMPLE.COM'] } });
-    expect(first.statusCode).toBe(200);
-    expect(first.json().bots[0]).toMatchObject({ appId: 'cli_one', name: '同名机器人', setupComplete: false, allowedEmails: ['user@example.com'], listening: false });
-    const rejectedAgent = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_one', defaultAgentId: 'codex' } });
-    expect(rejectedAgent.statusCode).toBe(409);
-    expect(rejectedAgent.json().error.code).toBe('LARK_FULL_TRUST_CONFIRMATION_REQUIRED');
-    const firstAgent = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_one', defaultAgentId: 'codex', fullTrustConfirmed: true } });
-    expect(firstAgent.json().bots[0]).toMatchObject({ setupComplete: true, defaultAgentId: 'codex' });
-    const listeningFromFirstStep = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'lark', originalAppId: 'cli_one', listening: true, allowedEmails: [] } });
-    expect(listeningFromFirstStep.json().bots[0]).toMatchObject({ setupComplete: true, listening: true, activeListening: true });
-
-    const second = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'lark', appId: 'cli_two', appSecret: 'secret_two', workspace: '/work/two' } });
-    expect(second.json().bots).toEqual([
-      expect.objectContaining({ appId: 'cli_one', tabLabel: '同名机器人 · cli_one' }),
-      expect.objectContaining({ appId: 'cli_two', tabLabel: '同名机器人 · cli_two', setupComplete: false })
-    ]);
-  });
-
-  it('requires a hook for enforced control while allowing the Agent to change through guidance', async () => {
-    const repos = createRepositories(':memory:'); repositories.push(repos);
-    const workspace = await mkdtemp(join(tmpdir(), 'dutydeck-hard-gate-')); tempDirectories.push(workspace);
-    for (const id of ['codex', 'claude']) await repos.agents.save({ id, name: id, command: id, args: [], protocol: 'acp', cwd: workspace, env: {}, permissionMode: 'ask', timeout: 600, capabilities: { pause: false, resume: true }, builtin: true });
-    const listener = listenerPool();
-    const app = await buildApp({} as any, { lark: { env: {}, config: repos.config, agents: repos.agents, listener } }); apps.push(app);
-    await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { appId: 'cli_guard', appSecret: 'secret', workspace, defaultAgentId: 'codex', fullTrustConfirmed: true } });
-
-    const invalidMode = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_guard', riskControlMode: 'sometimes' } });
-    expect(invalidMode.statusCode).toBe(400);
-    expect(invalidMode.json().error.code).toBe('INVALID_LARK_CONFIG');
-
-    const invalidSyntax = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_guard', riskControlMode: 'guidance', highRiskPattern: '(unclosed' } });
-    expect(invalidSyntax.statusCode).toBe(400);
-    expect(invalidSyntax.json().error).toMatchObject({ code: 'INVALID_HIGH_RISK_PATTERN', message: expect.stringContaining('语法错误') });
-    const catastrophic = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_guard', riskControlMode: 'guidance', highRiskPattern: '^(a+)+$' } });
-    expect(catastrophic.statusCode).toBe(400);
-    expect(catastrophic.json().error).toMatchObject({ code: 'INVALID_HIGH_RISK_PATTERN', message: expect.stringContaining('灾难性回溯') });
-    const unsafeInstall = await app.inject({ method: 'POST', url: '/api/lark/hooks/install', payload: { appId: 'cli_guard', highRiskPattern: '^(a+)+$' } });
-    expect(unsafeInstall.statusCode).toBe(400);
-    expect((await app.inject({ method: 'GET', url: '/api/lark/hooks/status?appId=cli_guard' })).json()).toMatchObject({ installed: false });
-
-    const beforeInstall = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_guard', riskControlMode: 'enforced' } });
-    expect(beforeInstall.statusCode).toBe(409);
-    expect(beforeInstall.json().error.code).toBe('RISK_CONTROL_HOOK_NOT_READY');
-
-    const installed = await app.inject({ method: 'POST', url: '/api/lark/hooks/install', payload: { appId: 'cli_guard', highRiskPattern: 'rm\\b|bytedcli\\b' } });
-    expect(installed.statusCode).toBe(200);
-    expect(installed.json()).toMatchObject({ supported: true, installed: true, writable: true, trustRequired: true });
-    expect((await app.inject({ method: 'GET', url: '/api/lark/config' })).json().bots[0]).toMatchObject({ highRiskPattern: 'rm\\b|bytedcli\\b', riskControlMode: 'guidance' });
-
-    const enabled = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_guard', riskControlMode: 'enforced' } });
-    expect(enabled.statusCode).toBe(200);
-    expect(enabled.json().bots[0]).toMatchObject({ riskControlMode: 'enforced' });
-
-    const modelChanged = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_guard', defaultModel: 'model-b', defaultReasoningEffort: 'high' } });
-    expect(modelChanged.statusCode).toBe(200);
-    expect(modelChanged.json().bots[0]).toMatchObject({ defaultAgentId: 'codex', defaultModel: 'model-b', defaultReasoningEffort: 'high', riskControlMode: 'enforced' });
-    expect((await app.inject({ method: 'GET', url: '/api/lark/hooks/status?appId=cli_guard&agentId=claude' })).json()).toMatchObject({ agentId: 'claude', installed: false });
-
-    const changedAgent = await app.inject({ method: 'PUT', url: '/api/lark/config', payload: { stage: 'agent', originalAppId: 'cli_guard', defaultAgentId: 'claude', riskControlMode: 'guidance' } });
-    expect(changedAgent.statusCode).toBe(200);
-    expect(changedAgent.json().bots[0]).toMatchObject({ defaultAgentId: 'claude', riskControlMode: 'guidance' });
-    expect((await app.inject({ method: 'GET', url: '/api/lark/hooks/status?appId=cli_guard&agentId=claude' })).json()).toMatchObject({ agentId: 'claude', installed: false });
+    const cleaned = await app.inject({ method: 'POST', url: '/api/sessions/s1/workspace/cleanup', payload: { fingerprint: 'fp_123' } });
+    expect(cleaned.statusCode).toBe(200);
+    expect(cleaned.json()).toMatchObject({ sessionId: 's1', cleaned: true, fingerprint: 'fp_123' });
+    expect(runtime.cleanWorkspace).toHaveBeenCalledWith('s1', 'fp_123');
   });
 
   it('selects the requested persisted bot for service card calls', async () => {

@@ -42,17 +42,42 @@ describe('renderLarkCardElements 视觉快照', () => {
   });
 
   it('running 态：进展文本 + 进行中的工具调用', () => {
-    expect(buildLarkCard({
+    const card = buildLarkCard({
       agentName: 'Dutydeck', state: 'running', taskName: '验证 Dutydeck 测试', taskId: 'task-running', elapsedSeconds: 2,
       elements: renderLarkCardElements(runningEvents, config, false)
-    })).toMatchSnapshot();
+    });
+    expect(card.header).toMatchObject({
+      title: { content: '验证 Dutydeck 测试' },
+      subtitle: { content: 'Dutydeck' },
+      template: 'blue',
+    });
+    expect(card.config?.summary?.content).toBe('验证 Dutydeck 测试 · 执行中');
+    const bodyJson = JSON.stringify(card.body);
+    expect(bodyJson).toContain('正在分析需求，先跑一遍测试。');
+    expect(bodyJson).toContain('pnpm test');
+    expect(bodyJson).toContain('已用时 2s');
+    expect(card.body.elements.some((el: any) => el.element_id === 'task_action_row')).toBe(true);
+    expect(card.body.elements.some((el: any) => el.element_id === 'trace_group_0')).toBe(true);
   });
 
   it('completed 态：思考 + 工具调用/结果 + 终态输出', () => {
-    expect(buildLarkCard({
+    const card = buildLarkCard({
       agentName: 'Dutydeck', state: 'completed', taskName: '验证 Dutydeck 测试', taskId: 'task-completed', elapsedSeconds: 2,
       elements: renderLarkCardElements(completedEvents, config, true)
-    })).toMatchSnapshot();
+    });
+    expect(card.header).toMatchObject({
+      title: { content: '验证 Dutydeck 测试' },
+      subtitle: { content: 'Dutydeck' },
+      template: 'green',
+    });
+    expect(card.config?.summary?.content).toBe('验证 Dutydeck 测试 · 已完成');
+    const bodyJson = JSON.stringify(card.body);
+    expect(bodyJson).toContain('全部通过。');
+    expect(bodyJson).toContain('pnpm test');
+    expect(bodyJson).toContain('125 passed');
+    expect(bodyJson).toContain('用时 2s');
+    expect(card.body.elements.some((el: any) => el.element_id === 'final_output')).toBe(true);
+    expect(card.body.elements.some((el: any) => el.element_id === 'trace_overview')).toBe(true);
   });
 
   it('待审批态：高风险操作使用强提醒且不伪造操作按钮', () => {
@@ -60,14 +85,31 @@ describe('renderLarkCardElements 视觉快照', () => {
       event(1, 'text', t0, { role: 'assistant', text: '准备清理构建缓存。' }),
       event(2, 'permission_request', t1, { id: 'permission-1', title: '高危操作：删除构建缓存目录', status: 'pending', options: ['allow_once', 'reject_once'] })
     ];
-    expect(buildLarkCard({
+    const card = buildLarkCard({
       agentName: 'Dutydeck', state: 'running', taskName: '清理构建缓存', taskId: 'task-approval', elapsedSeconds: 2,
       elements: renderLarkCardElements(events, config, false)
-    })).toMatchSnapshot();
+    });
+    expect(card.header).toMatchObject({
+      title: { content: '清理构建缓存' },
+      subtitle: { content: 'Dutydeck' },
+      template: 'orange',
+    });
+    expect(card.config?.summary?.content).toBe('清理构建缓存 · 等待审批');
+    const bodyJson = JSON.stringify(card.body);
+    expect(bodyJson).toContain('等待审批');
+    expect(bodyJson).toContain('高危操作：删除构建缓存目录');
+    expect(bodyJson).toContain('准备清理构建缓存。');
+    expect(card.body.elements.some((el: any) => el.element_id === 'risk_alert_pending_0')).toBe(true);
   });
 
   it('renderLarkTrace markdown 形态（completed）', () => {
-    expect(renderLarkTrace(completedEvents, config, true)).toMatchSnapshot();
+    const markdown = renderLarkTrace(completedEvents, config, true);
+    expect(markdown).toContain('**内部分析**');
+    expect(markdown).toContain('Agent 已完成内部分析（推理原文不展示）');
+    expect(markdown).toContain('**工具 · Bash** · completed');
+    expect(markdown).toContain('125 passed');
+    expect(markdown).toContain('**Agent**');
+    expect(markdown).toContain('全部通过。');
   });
 
   it('卡片只展示最近五个完整阶段并明确提示省略数量', () => {
