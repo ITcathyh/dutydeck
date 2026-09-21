@@ -8,6 +8,7 @@ import type { LarkCardService } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { LarkContextBootstrap, observationTime } from './context-bootstrap.js';
 import { participationInput, parseParticipationResult, parseParticipationResponse, type ParticipationDecider, type ParticipationResult } from './readonly-decider.js';
+import { boundCollaborationSnapshot } from '../collaboration-context.js';
 
 export interface GroupParticipationOptions {
   repository: CollaborationRepository;
@@ -23,7 +24,7 @@ export interface GroupParticipationOptions {
   debounceMs?: number;
   log?: { warn(details: unknown, message: string): void };
 }
-type Pending = { event: LarkMessageEvent; config: StoredLarkConfig };
+type Pending = { event: LarkMessageEvent; config: StoredLarkConfig; observation: CollaborationObservation };
 type Slot = { pending?: Pending; timer?: NodeJS.Timeout; running?: Promise<void>; stopped: boolean };
 /** 一次回合门禁的结论：放行返回 undefined，拦下返回可直接落日志的理由。 */
 export type BotTurnGate = string | undefined;
@@ -60,7 +61,7 @@ export class LarkGroupParticipation {
     // Called after the coordinator's normal task authorization; off only disables ambient participation.
     return (await this.options.repository.getSettings(scope)).instructions;
   }
-  private async snapshot(scope: CollaborationScope): Promise<CollaborationSnapshot> {
+  private async snapshot(scope: CollaborationScope, trigger?: CollaborationObservation): Promise<CollaborationSnapshot> {
     const materials: CollaborationObservation[] = [];
     const description = this.bootstrapper.material(scope);
     if (description) materials.push(description);
@@ -77,7 +78,12 @@ export class LarkGroupParticipation {
     }
     const snapshot = await this.options.repository.snapshot(scope, 30);
     const ids = new Set(materials.map(item => item.id));
-    return participationInput({ ...snapshot, observations: [...materials, ...snapshot.observations.filter(item => !ids.has(item.id))] });
+    const observations = [...materials, ...snapshot.observations.filter(item => !ids.has(item.id))];
+    // A first live message is persisted before history arrives; keep it even if that
+    // backfill pushes its sequence outside the recent observation window.
+    const currentTrigger = trigger && (observations.find(item => item.id === trigger.id) ?? trigger);
+    return participationInput({ ...snapshot, observations: currentTrigger
+      ? [...observations.filter(item => item.id !== currentTrigger.id), currentTrigger] : observations });
   }
   taskContext(scope: CollaborationScope): Promise<string> {
     if (this.closed) return Promise.resolve('');
@@ -144,7 +150,7 @@ export class LarkGroupParticipation {
       if (decisions.some(item => item.evidenceIds.includes(latest.id) || (item.inputSnapshot as unknown as CollaborationSnapshot)?.observations?.some(observation => observation.id === latest.id))) continue;
       const config = await this.options.readConfig(appId, scope.chatId);
       if (!config?.listening) continue;
-      this.enqueue(scope, { config, event: { messageId: latest.messageId, chatId: scope.chatId, chatType: 'group', senderOpenId: latest.senderId, senderType: 'user', messageType: 'text', content: JSON.stringify({ text: latest.text }), threadId: latest.threadId, createTime: latest.occurredAt, mentions: [] } });
+      this.enqueue(scope, { config, observation: latest, event: { messageId: latest.messageId, chatId: scope.chatId, chatType: 'group', senderOpenId: latest.senderId, senderType: 'user', messageType: 'text', content: JSON.stringify({ text: latest.text }), threadId: latest.threadId, createTime: latest.occurredAt, mentions: [] } });
     }
   }
   closeApp(appId: string) {
@@ -189,7 +195,7 @@ export class LarkGroupParticipation {
     // Bootstrap can run alongside explicit requests, but is awaited before ambient decisions.
     void this.bootstrapper.ensure(scope).catch(error => this.options.log?.warn({ error, scope }, '群上下文补读失败'));
     if ((result.created || result.changed) && !input.explicit && !bot && event.senderOpenId && event.senderOpenId !== input.botOpenId) {
-      this.enqueue(scope, { event, config });
+      this.enqueue(scope, { event, config, observation: result.observation });
     }
     return { enabled: true, instructions: settings.instructions };
   }
@@ -331,7 +337,7 @@ export class LarkGroupParticipation {
   private async decide(scope: CollaborationScope, pending: Pending, slot: Slot) {
     await this.bootstrapper.ensure(scope);
     const repo = this.options.repository;
-    let snapshot = await this.snapshot(scope);
+    let snapshot = await this.snapshot(scope, pending.observation);
     if (snapshot.settings.participation === 'off' || !await this.current(scope, snapshot, pending.event.senderOpenId!, slot)) return;
     const trigger = snapshot.observations.find(item => item.messageId === pending.event.messageId && item.origin === 'live' && item.senderKind === 'human');
     if (!trigger) return;
@@ -488,7 +494,7 @@ export class LarkGroupParticipation {
       // Account only for our own single state transition; any concurrent material change invalidates delivery.
       const after = participationInput(await this.options.repository.snapshot(scope, 30));
       if (after.contextRevision !== snapshot.contextRevision + 1) return { ...after, contextRevision: snapshot.contextRevision };
-      snapshot = after;
+      snapshot = boundCollaborationSnapshot({ ...after, observations: snapshot.observations });
     }
     return snapshot;
   }
