@@ -125,7 +125,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   let participation = options.participation;
   if (options.participationMode) {
     await repos.collaboration.updateSettings({ appId: config.appId, chatId: 'oc_group' }, { expectedRevision: 0, participation: options.participationMode }, 'manager');
-    participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: { decide: async () => ({ action: 'silent', reason: '普通材料', evidenceIds: [], updates: [] }) },
+    participation = new LarkGroupParticipation({ repository: repos.collaboration, decider: { decide: async () => ({ action: 'silent', reason: '普通材料', evidenceIds: [], updates: [] }), respond: vi.fn() },
       authorize: async () => true, readConfig: async () => config, serviceFor: () => service as any, debounceMs: 10000 });
   }
   const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config, broker, participation });

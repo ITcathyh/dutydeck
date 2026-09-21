@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -782,6 +782,66 @@ describe('Collaboration Storage Repository', () => {
   });
 
   describe('Actions: Idempotency, Parameter Conflict & Fail-Closed State Transitions', () => {
+    it('finds an old pending acknowledgement beyond 501 newer actions from another app without capping pending results', async () => {
+      const repos = createRepositories(':memory:');
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const collab = repos.collaboration;
+        vi.setSystemTime(isoTime1);
+        const { action } = await collab.beginAction({ id: 'old_ack', scope: scopeA, kind: 'participation.ack', requesterId: 'owner', inputDigest: 'old_ack' });
+        const pending = await collab.updateAction(scopeA, action.id, { expectedRevision: 1, status: 'sending', receipt: 'old_reaction' });
+        vi.setSystemTime(isoTime2);
+        for (let index = 0; index < 501; index++) {
+          const id = `new_ack_${index}`;
+          await collab.beginAction({ id, scope: scopeB, kind: 'participation.ack', requesterId: 'owner', inputDigest: id });
+        }
+        const recent = await collab.listActions(undefined, 1000);
+        expect(recent).toHaveLength(500);
+        expect(recent.some(item => item.id === action.id)).toBe(false);
+        expect(await collab.listPendingActions(scopeA.appId, 'participation.ack')).toEqual([pending]);
+        expect(await collab.listPendingActions(scopeB.appId, 'participation.ack')).toHaveLength(501);
+      } finally {
+        vi.useRealTimers();
+        repos.close();
+      }
+    });
+
+    it('isolates pending actions by app, kind and status across chats with stable creation and ID ordering', async () => {
+      const repos = createRepositories(':memory:');
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        const collab = repos.collaboration;
+        const begin = (id: string, scope = scopeA, kind = 'participation.ack') => collab.beginAction({ id, scope, kind, requesterId: 'owner', inputDigest: id });
+        vi.setSystemTime(isoTime2);
+        await begin('ack_z_sending');
+        await collab.updateAction(scopeA, 'ack_z_sending', { expectedRevision: 1, status: 'sending' });
+        const otherChat = { ...scopeA, chatId: 'oc_other_chat' };
+        await begin('ack_a_unknown', otherChat);
+        await collab.updateAction(otherChat, 'ack_a_unknown', { expectedRevision: 1, status: 'sending' });
+        await collab.updateAction(otherChat, 'ack_a_unknown', { expectedRevision: 2, status: 'unknown', receipt: 'uncertain_reaction' });
+        await begin('ack_b_intent');
+        for (const status of ['succeeded', 'failed', 'suppressed'] as const) {
+          const id = `terminal_${status}`;
+          await begin(id);
+          await collab.updateAction(scopeA, id, { expectedRevision: 1, status: 'sending' });
+          await collab.updateAction(scopeA, id, { expectedRevision: 2, status });
+        }
+        await begin('other_kind', scopeA, 'participation.reply');
+        await begin('other_app', scopeB);
+        vi.setSystemTime(isoTime1);
+        await begin('ack_zz_old');
+        const pending = await collab.listPendingActions(scopeA.appId, 'participation.ack');
+        expect(pending.map(action => action.id)).toEqual(['ack_zz_old', 'ack_a_unknown', 'ack_b_intent', 'ack_z_sending']);
+        expect(pending.map(action => action.status)).toEqual(['intent', 'unknown', 'intent', 'sending']);
+        expect((await collab.listPendingActions(scopeA.appId, 'participation.reply')).map(action => action.id)).toEqual(['other_kind']);
+        expect((await collab.listPendingActions(scopeB.appId, 'participation.ack')).map(action => action.id)).toEqual(['other_app']);
+        expect(await collab.listPendingActions('missing_app', 'participation.ack')).toEqual([]);
+      } finally {
+        vi.useRealTimers();
+        repos.close();
+      }
+    });
+
     it('returns existing action on identical parameters, conflicts 409 on parameter change', async () => {
       const repos = createRepositories(':memory:');
       try {

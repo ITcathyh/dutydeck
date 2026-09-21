@@ -538,6 +538,7 @@ export interface CollaborationRepository {
   beginAction(input: BeginActionInput): Promise<{ action: CollaborationAction; created: boolean }>;
   getAction(scope: CollaborationScope, id: string): Promise<CollaborationAction | undefined>;
   listActions(scope?: CollaborationScope, limit?: number): Promise<CollaborationAction[]>;
+  listPendingActions(appId: string, kind: string): Promise<CollaborationAction[]>;
   updateAction(scope: CollaborationScope, id: string, patch: UpdateActionInput): Promise<CollaborationAction>;
   listActivities(scope: CollaborationScope, limit?: number): Promise<CollaborationActivity[]>;
 }
