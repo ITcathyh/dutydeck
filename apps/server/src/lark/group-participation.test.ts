@@ -222,6 +222,25 @@ describe('group observation and selective participation through the coordinator'
     expect(h.service.deleteReaction.mock.invocationCallOrder[0]).toBeGreaterThan(h.service.replyText.mock.invocationCallOrder[0]!);
     expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ status: 'sent', response: '实际生成的回复' });
   });
+  it.each([false, true])('keeps the first question after bootstrapping over 30 older messages (update: %s)', async update => {
+    const h = await harness();
+    if (update) await h.repository.createFollowup({ id: 'follow_first', scope, goal: '整理进展', status: 'open', progress: '', steps: [], sourceRefs: [], taskIds: [], externalRefs: [], fields: {}, createdBy: 'ou_a', updatedBy: 'ou_a', provenance: 'confirmed' });
+    h.service.listChatMessages.mockResolvedValue({ items: Array.from({ length: 50 }, (_, index) => ({
+      messageId: `om_history_${index}`, chatId: scope.chatId, messageType: 'text', rawContent: JSON.stringify({ text: `历史材料 ${index}` }),
+      createTime: '1789700000000', sender: { id: 'ou_a', type: 'user' }, mentions: [], deleted: false, updated: false
+    })), hasMore: false });
+    h.decide.mockImplementation(async (_config, snapshot) => {
+      const result = reply(snapshot);
+      return { ...result, updates: update ? [{ followupId: 'follow_first', expectedRevision: 1, progress: '已提出整理请求', evidenceIds: result.evidenceIds }] : [] };
+    });
+    await h.coordinator.handle(message('om_first_question', '请总结本群的进展'), config);
+    await h.participation.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect(h.decide.mock.calls[0]![1].observations).toEqual(expect.arrayContaining([expect.objectContaining({ messageId: 'om_first_question', origin: 'live' })]));
+    expect(h.respond.mock.calls[0]![1].observations).toEqual(expect.arrayContaining([expect.objectContaining({ messageId: 'om_first_question', origin: 'live' })]));
+    expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_first_question' }));
+    expect(h.service.deleteReaction).toHaveBeenCalledWith('om_first_question', 'reaction');
+  });
   it('does not discard an acknowledged reply when another question arrives in the same group', async () => {
     const h = await harness();
     h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id] }));
