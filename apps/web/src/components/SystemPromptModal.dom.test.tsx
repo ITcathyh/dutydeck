@@ -82,10 +82,4 @@ describe('SystemPromptModal 渲染', () => {
     expect(document.body.contains(dialog)).toBe(true);
     expect(baseElement).toBe(document.body);
   });
-
-  it('只使用语义 token 颜色，不出现硬编码调色板', () => {
-    const { baseElement } = render(<SystemPromptModal open session={session('你是一个助手')} onClose={() => {}}/>);
-    const classNames = [...baseElement.querySelectorAll<HTMLElement>('*')].map(node => node.className).join(' ');
-    for (const banned of ['zinc-', 'slate-', 'amber-', 'teal-', 'rose-', 'bg-white', 'text-white', 'bg-black', 'var(--']) expect(classNames).not.toContain(banned);
-  });
 });

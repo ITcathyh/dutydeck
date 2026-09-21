@@ -748,12 +748,14 @@ describe('复核回归：queue_summary 是瞬态读数，不冻结进 last_succe
     }, { timeout: 6_000, interval: 200 });
 
     // 修复证据：崩溃前最后一帧成功 PATCH 后，落库的成功元素不含 queue_summary。
-    // 心跳间隔 1s：再等两拍确保含摘要的帧已完成 PATCH 与 saveCardTask（修复前此时期望必含摘要）。
-    await new Promise(resolve => setTimeout(resolve, 2_200));
-    const [mappingA] = (await h.repos.channelMappings.list(h.channel)).filter(item => item.externalId === 'om_a');
-    const frozenElements = JSON.parse(mappingA!.extra!).last_successful_elements as any[];
-    expect(Array.isArray(frozenElements)).toBe(true);
-    expect(frozenElements.length).toBeGreaterThan(0);
+    let frozenElements: any[] = [];
+    await vi.waitFor(async () => {
+      const [mappingA] = (await h.repos.channelMappings.list(h.channel)).filter(item => item.externalId === 'om_a');
+      const extra = mappingA?.extra ? JSON.parse(mappingA.extra) : null;
+      frozenElements = extra?.last_successful_elements;
+      expect(Array.isArray(frozenElements)).toBe(true);
+      expect(frozenElements.length).toBeGreaterThan(0);
+    }, { timeout: 3_000, interval: 50 });
     expect(frozenElements.some(element => element.element_id === 'queue_summary')).toBe(false);
 
     // 模拟守护进程重启：新 coordinator 尚未 adopt 任务时首轮对账先跑（reconciler.ts 的冻结元素重放路径）。

@@ -53,13 +53,14 @@ describe('createWorkbenchFetch', () => {
   });
 
   it('aborts a body still pending at the actual 15-second total deadline', async () => {
-    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => nativeTimeout(100));
     const response = await client.fetch(`${baseUrl}/body`);
     const body = response.text();
     expect(timeout).toHaveBeenCalledWith(15_000);
     await expect(body).rejects.toMatchObject({ name: expect.stringMatching(/^(AbortError|TimeoutError)$/) });
     await disconnected.promise;
-  }, 20_000);
+  });
 
   it('actually cancels a request that never receives headers at its deadline', async () => {
     const nativeTimeout = AbortSignal.timeout.bind(AbortSignal);
