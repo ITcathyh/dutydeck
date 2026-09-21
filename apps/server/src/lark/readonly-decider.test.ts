@@ -115,6 +115,28 @@ describe('read-only participation decision', () => {
     expect(() => parseParticipationResult(JSON.stringify({ ...replyDecision, updates: [{ followupId: 'f1', expectedRevision: 1, progress: 'x', evidenceIds: ['foreign'] }] }), snapshot())).toThrowError(expect.objectContaining({ code: 'COLLABORATION_INVALID_EVIDENCE' }));
   });
 
+  it('accepts frozen team evidence for replies but never for updates or as the local trigger', async () => {
+    const input = snapshot();
+    const teamScope = { ...scope, chatId: 'oc_other' };
+    const foreign = { ...input.observations[0]!, id: 'team_1', scope: teamScope };
+    input.teamContext = { query: '我的待办', searchedAt: stamp, sources: [{ scope: teamScope, name: '项目群', status: 'complete', missing: [] }], observations: [foreign] };
+    const decision = { ...replyDecision, evidenceIds: ['obs_1', 'team_1'] };
+    expect(parseParticipationResult(JSON.stringify(decision), input)).toEqual(decision);
+    expect(() => parseParticipationResult(JSON.stringify({ ...decision, updates: [{ followupId: 'f1', expectedRevision: 1, progress: '完成', evidenceIds: ['obs_1', 'team_1'] }] }), input)).toThrowError(expect.objectContaining({ code: 'COLLABORATION_INVALID_EVIDENCE' }));
+    const h = await harness([JSON.stringify(decision), '{"response":"项目群：待审核"}']);
+    await expect(h.decider.decide(config, input, 'team_1')).rejects.toMatchObject({ code: 'COLLABORATION_INVALID_TRIGGER' });
+    const forged = structuredClone(input); forged.observations[0]!.scope = teamScope;
+    await expect(h.decider.decide(config, forged, 'obs_1')).rejects.toMatchObject({ code: 'COLLABORATION_INVALID_TRIGGER' });
+    await h.decider.decide(config, input, 'obs_1');
+    await expect(h.decider.respond(config, input, decision, 'obs_1')).resolves.toBe('项目群：待审核');
+    for (const prompt of h.prompts) {
+      expect(prompt).toContain(JSON.stringify(input.teamContext));
+      expect(prompt).toContain('不要泛称无法跨群');
+      expect(prompt).toContain('不等于外部飞书任务系统');
+    }
+    expect(h.starts.every(agent => agent.permissionMode === 'deny-all')).toBe(true);
+  });
+
   it('accepts only bounded, nonblank response JSON with no state fields', () => {
     expect(parseParticipationResponse('```json\n{"response":"  回答\\n"}\n```')).toBe('回答');
     expect(parseParticipationResponse(JSON.stringify({ response: 'x'.repeat(8000) }))).toHaveLength(8000);

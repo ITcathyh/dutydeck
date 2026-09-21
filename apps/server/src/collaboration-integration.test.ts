@@ -148,6 +148,34 @@ it('stops an inherited reply when the Bot default is disabled during response ge
   expect((await f.repos.collaboration.listDecisions(scope))[0]!.status).toBe('suppressed');
 });
 
+it('reads another joined group for Tag without activating its participation or changing the reply destination', async () => {
+  const f = await fixture();
+  const personal = { ...scope, chatId: 'oc_personal' };
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  await f.repos.collaboration.updateSettings(personal, { expectedRevision: 0, participation: 'off' }, 'owner');
+  f.client.listChats.mockResolvedValue({ items: [{ chatId: scope.chatId, name: '测试群', external: false }, { chatId: personal.chatId, name: '个人待办', external: false }], hasMore: false });
+  f.client.listChatMessages.mockImplementation(async (input?: any) => ({ items: input.chatId === personal.chatId ? [{
+    messageId: 'om_capacity', chatId: personal.chatId, messageType: 'text', rawContent: '{"text":"推进容量扫描，监控 RDS 和 Abase 水位"}',
+    createTime: String(Date.now() - 10000), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false
+  }] : [], hasMore: false }));
+  await f.collaboration.participation.handle({ messageId: 'om_team_question', chatId: scope.chatId, chatType: 'group', senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: '{"text":"看看我的个人待办都有什么"}', createTime: String(Date.now()), mentions: [] }, (await readLarkConfig(f.repos.config, scope.appId))!, { explicit: false });
+  const flushing = f.collaboration.participation.flush(scope);
+  await eventually(async () => f.calls.length === 1);
+  const snapshot = JSON.parse(f.calls[0]!.prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
+  expect(snapshot.teamContext.sources).toEqual(expect.arrayContaining([expect.objectContaining({ scope: personal, name: '个人待办' })]));
+  const evidence = snapshot.teamContext.observations.find((item: any) => item.messageId === 'om_capacity');
+  expect(evidence.scope).toEqual(personal);
+  f.calls[0]!.finish(JSON.stringify({ action: 'reply', reason: '另一个可读群有相关材料', evidenceIds: [evidence.id], updates: [] }));
+  await eventually(async () => f.calls.length === 2);
+  expect(f.calls[1]!.prompt).toContain('推进容量扫描');
+  f.calls[1]!.finish('{"response":"「个人待办」群：推进容量扫描，监控 RDS 和 Abase 水位。"}');
+  await flushing;
+  expect(f.client.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_team_question', text: expect.stringContaining('个人待办') }));
+  expect((await f.repos.collaboration.getSettings(personal)).participation).toBe('off');
+  expect(await f.repos.groupBindings.getByNaturalKey((await f.groups.owner(scope.appId))!.channelBotId, personal.chatId)).toBeUndefined();
+  expect((await f.runtime.listSessions()).every(item => item.permissionMode === 'deny-all')).toBe(true);
+});
+
 it.each(['ask', undefined] as const)('runs unattended %s delegations through real ACP without leaving permission requests pending', async permissionMode => {
   const f = await fixture({ realAcp: true });
   const original = f.collaboration.background.options.resolveConfig;

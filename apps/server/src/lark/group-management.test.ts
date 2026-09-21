@@ -49,6 +49,44 @@ describe('live group configuration', () => {
     expect(JSON.stringify(groups)).not.toContain('synthetic_cli');
   });
 
+  it('allows read context in an unbound participation-off group without activating or syncing it', async () => {
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', listening: true, defaultGroupParticipation: 'off' });
+    const before = await manager.owner('cli_one');
+    listChats.mockClear();
+    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(true);
+    expect(await manager.owner('cli_one')).toEqual(before);
+    expect(await repos.groupBindings.getByNaturalKey(before!.channelBotId, 'oc_one')).toBeUndefined();
+    expect(listChats).not.toHaveBeenCalled();
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', groupToolsEnabled: false });
+    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(false);
+  });
+
+  it('enforces existing group read overrides and disablement for context reads', async () => {
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', listening: true });
+    const initial = await save();
+    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(true);
+    const denied = await manager.save('cli_one', 'oc_one', { expectedRevision: initial.binding!.revision,
+      patch: { groupToolsOverride: { read: 'deny', discover: 'inherit', send: 'inherit' } } });
+    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(false);
+    await manager.save('cli_one', 'oc_one', { expectedRevision: denied.binding!.revision,
+      patch: { groupToolsOverride: { read: 'inherit', discover: 'inherit', send: 'inherit' }, accessOverride: { mode: 'disabled', principalIds: [] } } });
+    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(false);
+  });
+
+  it('requires listener and active group and Bot state for context reads', async () => {
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', listening: false });
+    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(false);
+    await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', listening: true });
+    const initial = await save();
+    await manager.save('cli_one', 'oc_one', { expectedRevision: initial.binding!.revision, patch: { state: 'disabled' } });
+    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(false);
+    const owner = (await manager.owner('cli_one'))!;
+    const bot = (await repos.channelBots.get(owner.channelBotId))!;
+    await repos.channelBots.update(bot.id, { expectedRevision: bot.revision, state: 'disabled' });
+    expect(await manager.contextReadAllowed('cli_one', 'oc_two')).toBe(false);
+    expect(await manager.contextReadAllowed('cli_deleted', 'oc_one')).toBe(false);
+  });
+
   it('coalesces inherited setup and never activates an unverified group', async () => {
     await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', defaultGroupParticipation: 'selective', listening: true });
     await Promise.all(Array.from({ length: 5 }, () => manager.ensureParticipationGroup('cli_one', 'oc_one')));

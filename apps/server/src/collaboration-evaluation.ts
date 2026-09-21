@@ -47,8 +47,7 @@ function sameScope(target: CollaborationScope, actual?: CollaborationScope | nul
 }
 
 /**
- * 递归核对快照顶层及全部嵌套实体（settings/bootstrap/observations/followups/mandates）的 scope。
- * 返回首个跨 scope 原因；全部一致返回 undefined。
+ * 本群实体严格同 scope；团队材料只能来自同 app、已列明的来源群。
  */
 function findCrossScopeReason(scope: CollaborationScope, snapshot: CollaborationSnapshot): string | undefined {
   if (!sameScope(scope, snapshot.scope)) {
@@ -73,6 +72,21 @@ function findCrossScopeReason(scope: CollaborationScope, snapshot: Collaboration
   for (const mandate of snapshot.mandates) {
     if (!sameScope(scope, mandate.scope)) {
       return `Cross-scope mandate '${mandate.id}' detected in snapshot`;
+    }
+  }
+  const team = snapshot.teamContext;
+  if (team) {
+    if (team.sources.some(source => source.scope.appId !== scope.appId)) return 'Cross-app team source detected in snapshot';
+    const ids = new Set(snapshot.observations.map(item => item.id));
+    for (const item of team.observations) {
+      if (item.scope.appId !== scope.appId || !team.sources.some(source => sameScope(source.scope, item.scope))) {
+        return `Unlisted team observation scope '${item.id}' detected in snapshot`;
+      }
+      if (ids.has(item.id)) return `Duplicate team evidence '${item.id}' detected in snapshot`;
+      ids.add(item.id);
+      if (item.source !== 'lark.message' && !(['lark.team.followup', 'lark.team.memory'].includes(item.source) && item.origin === 'external')) {
+        return `Invalid team observation source or origin '${item.id}' detected in snapshot`;
+      }
     }
   }
   return undefined;
@@ -189,10 +203,16 @@ export class CollaborationEvaluation {
         continue;
       }
 
-      const observationMap = new Map(snapshot.observations.map(obs => [obs.id, obs]));
+      const teamGap = snapshot.teamContext?.sources.find(source => source.status !== 'complete' || source.missing.length);
+      if (teamGap) {
+        mark({ decisionId, status: 'missing', expected, reason: `Team source '${teamGap.scope.chatId}' contains missing elements: ${teamGap.missing.join(', ') || teamGap.status}` }, 'missing');
+        continue;
+      }
+      const observations = [...snapshot.observations, ...(snapshot.teamContext?.observations ?? [])];
+      const observationMap = new Map(observations.map(obs => [obs.id, obs]));
 
       // 任一 observation.missing 非空即材料不足（即使本次模型选 silent 或未引用该条）
-      const obsWithMissing = snapshot.observations.find(obs => obs.missing && obs.missing.length > 0);
+      const obsWithMissing = observations.find(obs => obs.missing && obs.missing.length > 0);
       if (obsWithMissing) {
         mark(
           {

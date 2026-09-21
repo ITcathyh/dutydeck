@@ -503,6 +503,19 @@ export const collaborationActivitySchema = z.object({
 }).strict();
 export type CollaborationActivity = z.infer<typeof collaborationActivitySchema>;
 
+export const collaborationTeamContextSchema = z.object({
+  query: z.string().max(2000),
+  searchedAt: z.string().datetime(),
+  sources: z.array(z.object({
+    scope: collaborationScopeSchema,
+    name: z.string().max(256),
+    status: z.enum(['complete', 'partial', 'unavailable']),
+    missing: z.array(z.string().max(256)).max(100)
+  }).strict()),
+  observations: z.array(collaborationObservationSchema)
+}).strict();
+export type CollaborationTeamContext = z.infer<typeof collaborationTeamContextSchema>;
+
 export const collaborationSnapshotSchema = z.object({
   scope: collaborationScopeSchema,
   contextRevision: z.number().int().min(0),
@@ -510,7 +523,8 @@ export const collaborationSnapshotSchema = z.object({
   observations: z.array(collaborationObservationSchema),
   followups: z.array(collaborationFollowupSchema),
   mandates: z.array(collaborationMandateSchema),
-  bootstrap: collaborationBootstrapSchema.optional()
+  bootstrap: collaborationBootstrapSchema.optional(),
+  teamContext: collaborationTeamContextSchema.optional()
 }).strict();
 export type CollaborationSnapshot = z.infer<typeof collaborationSnapshotSchema>;
 

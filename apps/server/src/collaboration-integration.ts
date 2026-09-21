@@ -9,6 +9,7 @@ import { CollaborationExtensions } from './collaboration-extensions.js';
 import { CollaborationEvaluation } from './collaboration-evaluation.js';
 import { LarkGroupParticipation } from './lark/group-participation.js';
 import { ReadonlyParticipationDecider } from './lark/readonly-decider.js';
+import { LarkTeamContextReader } from './lark/team-context.js';
 import { larkExecutionConfirmed, readLarkConfig, type StoredLarkConfig } from './lark/config.js';
 import type { LarkGroupManager } from './lark/group-management.js';
 import { createLarkCardService, type LarkCardService } from './lark/service.js';
@@ -84,10 +85,17 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     return groups.resolved(config, chatId);
   };
   const decider = new ReadonlyParticipationDecider({ runtime, repos: { execution: repos.execution }, workspaceRoot: options.workspaceRoot });
+  const teamContext = new LarkTeamContextReader({
+    repository: repos.collaboration, readConfig: appId => readLarkConfig(repos.config, appId), serviceFor: client,
+    canRead: scope => options.listeningDisabled ? Promise.resolve(false) : groups.contextReadAllowed(scope.appId, scope.chatId),
+    readMemory: options.readMemory
+  });
   const deliveries = new CollaborationDelivery(repos.collaboration);
   const participation = new LarkGroupParticipation({
     withDelivery: (scope, actionId, send) => deliveries.run(scope, actionId, send),
-    repository: repos.collaboration, decider, readConfig, serviceFor: client, readMemory: options.readMemory,
+    repository: repos.collaboration, decider, readConfig, serviceFor: client, readMemory: options.readMemory, log: options.log,
+    readTeamContext: (scope, query) => teamContext.read(scope, query),
+    authorizeTeamContext: (scope, context) => teamContext.authorize(scope, context),
     authorize: async (scope, actorId, action, followup) => {
       if (action === 'observe' || action === 'deliver') return scopeGrant(scope, action);
       if (!actorId || !followup || !await authorize(scope, actorId, 'write')) return false;
@@ -182,6 +190,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     evaluate: async (snapshot, version) => {
       const config = await readConfig(snapshot.scope.appId, snapshot.scope.chatId);
       if (!config) throw new RuntimeError('COLLABORATION_REPLAY_UNAVAILABLE', '原 Agent 配置已不可用。', 409);
+      if (snapshot.teamContext && !await teamContext.authorize(snapshot.scope, snapshot.teamContext)) throw new RuntimeError('COLLABORATION_CONTEXT_REVOKED', '原跨群材料当前已无读取权限。', 403);
       let instructions = snapshot.settings.instructions;
       if (version !== snapshot.settings.policyVersion) {
         const saved = await repos.config.get(policyKey(snapshot.scope, version));

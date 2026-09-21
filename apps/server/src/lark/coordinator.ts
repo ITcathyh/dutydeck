@@ -3159,7 +3159,7 @@ export class LarkMessageCoordinator {
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
     injected.push('[飞书结果说明] 最终回复先用一两句话说明用户目标已完成什么、还有什么未完成及需要用户做什么；有交付物再给入口。等待扫码、外部批准或用户操作时明确写出，不把本轮结束写成目标已完成；无需展开执行日志。');
     if (event.chatType === 'group' && this.workflowOptions.participation) {
-      const observedContext = await this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId });
+      const observedContext = await this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, prompt);
       if (observedContext) injected.push(observedContext);
       const instructions = await this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId });
       if (instructions.trim()) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${instructions.trim()}`);
