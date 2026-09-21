@@ -77,6 +77,21 @@ export class LarkGroupManager {
   }
   async owner(appId: string) { return parse<LiveOwner>(await this.repos.config.get(ownerKey(appId))); }
 
+  /** Read-only context policy; live membership and message access are checked by the reader. */
+  async contextReadAllowed(appId: string, chatId: string): Promise<boolean> {
+    const config = await readLarkConfig(this.repos.config, appId);
+    if (!config?.listening || !config.groupToolsEnabled || !larkExecutionConfirmed(config)) return false;
+    const owner = await this.owner(appId);
+    if (!owner) return true;
+    const bot = await this.repos.channelBots.get(owner.channelBotId);
+    if (bot?.state === 'disabled') return false;
+    const binding = await this.repos.groupBindings.getByNaturalKey(owner.channelBotId, chatId);
+    if (!binding) return true;
+    if (binding.state !== 'staged' || !owner.activeGroups.includes(binding.id)) return false;
+    const effective = resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), binding);
+    return effective.access.mode !== 'disabled' && effective.groupTools.read.allowed;
+  }
+
   /** A Bot-wide participation default authorizes inherited setup in verified joined groups. */
   async ensureParticipationGroup(appId: string, chatId: string): Promise<void> {
     const key = JSON.stringify([appId, chatId]);

@@ -13,6 +13,7 @@ import {
   collaborationScopeSchema,
   collaborationSettingsSchema,
   collaborationSnapshotSchema,
+  collaborationTeamContextSchema,
   createFeedbackInputSchema,
   createFollowupInputSchema,
   createMandateInputSchema,
@@ -30,6 +31,17 @@ import {
 describe('Collaboration Shared Schemas', () => {
   const validScope = { appId: 'cli_123', chatId: 'oc_456' };
   const validIso = '2026-09-18T12:00:00.000Z';
+
+  it('validates team source metadata and rejects malformed retrieval envelopes', () => {
+    const source = { scope: validScope, name: '团队群', status: 'complete', missing: [] };
+    const team = { query: '个人待办', searchedAt: validIso, sources: [source], observations: [] };
+    expect(collaborationTeamContextSchema.parse(team)).toEqual(team);
+    for (const patch of [{ query: 'x'.repeat(2001) }, { searchedAt: 'today' }, { extra: true },
+      { sources: [{ ...source, name: 'x'.repeat(257) }] }, { sources: [{ ...source, missing: Array(101).fill('gap') }] },
+      { sources: [{ ...source, status: 'invented' }] }]) {
+      expect(collaborationTeamContextSchema.safeParse({ ...team, ...patch }).success).toBe(false);
+    }
+  });
 
   describe('CollaborationScope', () => {
     it('accepts valid scope and rejects unknown fields or empty strings', () => {

@@ -79,6 +79,8 @@ export function boundCollaborationSnapshot(source: CollaborationSnapshot, follow
     prompt: text(item.prompt, 8192, 'mandates.prompt'), sourceRefs: list(item.sourceRefs, 4096, 'mandates.sourceRefs') });
   const result: CollaborationSnapshot = { ...source, scope: { ...source.scope }, settings: structuredClone(source.settings),
     observations: [], followups: [], mandates: [], ...(source.bootstrap ? { bootstrap: structuredClone(source.bootstrap) } : {}) };
+  // Team retrieval has its own sampling order; per-group sequence numbers are incomparable.
+  delete result.teamContext;
   // Leave space for the two aggregate gap markers and a newly synthesized bootstrap descriptor.
   let used = bytes(result) + 2048;
   const add = <T>(items: T[], item: T) => {
@@ -107,6 +109,49 @@ export function boundCollaborationSnapshot(source: CollaborationSnapshot, follow
   for (const entry of remaining) {
     const added = entry.kind === 'followups' ? add(result.followups, followup(entry.item)) : add(result.mandates, mandate(entry.item));
     if (!added) mark(omitted, entry.kind);
+  }
+  if (source.teamContext) {
+    const original = source.teamContext;
+    const team = structuredClone({ ...original, sources: original.sources.slice(0, 8), observations: [] as CollaborationObservation[] });
+    const scopeKey = (scope: CollaborationSnapshot['scope']) => JSON.stringify([scope.appId, scope.chatId]);
+    const scopes = new Set(team.sources.map(item => scopeKey(item.scope)));
+    let textBudget = 20_000;
+    for (const item of original.observations) {
+      if (team.observations.length >= 80 || !scopes.has(scopeKey(item.scope))) continue;
+      const clipped = item.text.slice(0, Math.min(4000, textBudget));
+      textBudget -= clipped.length;
+      const copy = structuredClone({ ...item, text: clipped, refs: list(item.refs, 2048, 'teamContext.refs'),
+        missing: missing(item.missing, clipped.length < item.text.length ? ['team_text_truncated'] : [], 2048).values });
+      if (clipped.length < item.text.length) mark(truncated, 'teamContext.text');
+      team.observations.push(copy);
+    }
+    const limited = team.sources.length < original.sources.length || team.observations.length < original.observations.length
+      || team.observations.some(item => item.missing.includes('team_text_truncated'));
+    for (const item of team.sources) {
+      item.missing = missing(item.missing, limited ? ['team_context_truncated'] : [], 2048).values;
+      if (limited && item.status === 'complete') item.status = 'partial';
+    }
+    // Local messages and linked state keep their original byte allocation. Team material
+    // fits only in the remaining envelope, including its source descriptors and JSON escapes.
+    const available = MAX_BYTES - used - 32;
+    const byteLimited = bytes(team) > available;
+    if (byteLimited) {
+      for (const item of team.sources) {
+        item.missing = missing(item.missing, ['team_byte_budget_reached'], 2048).values;
+        if (item.status === 'complete') item.status = 'partial';
+      }
+      mark(truncated, 'teamContext.bytes');
+    }
+    while (bytes(team) > available && (team.observations.length || team.sources.length || team.query.length)) {
+      if (team.observations.length) team.observations.pop();
+      else if (team.sources.length) team.sources.pop();
+      else team.query = team.query.slice(0, Math.floor(team.query.length / 2));
+    }
+    // The aggregate bootstrap gap survives even if no source descriptor fits.
+    mark(omitted, 'teamContext.sources', original.sources.length - team.sources.length);
+    mark(omitted, 'teamContext.observations', original.observations.length - team.observations.length);
+    if (bytes(team) <= available) result.teamContext = team;
+    else mark(omitted, 'teamContext');
   }
   const markers = [[omitted, 'context_omitted'], [truncated, 'context_truncated']] as const;
   const gaps = markers.flatMap(([counts, prefix]) => {

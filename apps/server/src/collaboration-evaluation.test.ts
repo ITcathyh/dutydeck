@@ -135,6 +135,25 @@ describe('CollaborationEvaluation', () => {
     expect(evaluate).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['valid', 'cross_app', 'unlisted', 'origin', 'schema', 'duplicate', 'partial'] as const)('validates frozen team evidence during replay: %s', async variant => {
+    const snapshot = makeSnapshot();
+    const teamObservation: CollaborationObservation = { ...snapshot.observations[0]!, id: 'team_followup', scope: scopeB, source: 'lark.team.followup', origin: 'external' };
+    snapshot.teamContext = { query: '我的待办', searchedAt: '2026-09-18T10:00:00.000Z',
+      sources: [{ scope: scopeB, name: '项目群', status: 'complete', missing: [] }], observations: [teamObservation] };
+    if (variant === 'cross_app') snapshot.teamContext.sources[0]!.scope = { ...scopeB, appId: 'foreign_bot' };
+    if (variant === 'unlisted') teamObservation.scope = { ...scopeB, chatId: 'unlisted' };
+    if (variant === 'origin') teamObservation.origin = 'live';
+    if (variant === 'schema') (teamObservation as any).origin = 'invented';
+    if (variant === 'duplicate') teamObservation.id = snapshot.observations[0]!.id;
+    if (variant === 'partial') snapshot.teamContext.sources[0]!.status = 'partial';
+    const { evaluation, repo, evaluate } = setupEvaluation(async () => ({ action: 'reply', reason: '项目群有待办', evidenceIds: [teamObservation.id] }));
+    await repo.recordDecision({ id: `dec_team_${variant}`, scope: scopeA, contextRevision: 1, policyVersion: 'v1', action: 'reply', reason: '团队材料',
+      evidenceIds: [teamObservation.id], status: 'sent', inputSnapshot: snapshot as unknown as Record<string, unknown>, createdAt: '2026-09-18T10:00:00.000Z' });
+    const result = await evaluation.replay(scopeA, { decisionIds: [`dec_team_${variant}`] });
+    expect(result.results[0]!.status).toBe(variant === 'valid' ? 'passed' : variant === 'schema' || variant === 'partial' ? 'missing' : 'failed');
+    expect(evaluate).toHaveBeenCalledTimes(variant === 'valid' ? 1 : 0);
+  });
+
   it('marks as missing when decision does not exist in scope and does not call evaluate', async () => {
     const { evaluation, evaluate } = setupEvaluation();
     const replayRes = await evaluation.replay(scopeA, { decisionIds: ['non_existent_dec'] });

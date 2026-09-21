@@ -14,6 +14,40 @@ const small = (): CollaborationSnapshot => ({ scope, contextRevision: 19, settin
 const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
 
 describe('bounded collaboration model context', () => {
+  it('bounds team sources and text independently without displacing the local trigger', () => {
+    const source = small();
+    const sources = Array.from({ length: 10 }, (_, i) => ({ scope: { ...scope, chatId: `team_${i}` }, name: `群${i}`, status: 'complete' as const, missing: [] }));
+    source.teamContext = { query: '我的待办', searchedAt: stamp, sources,
+      observations: Array.from({ length: 100 }, (_, i) => ({ ...observation(10000 + i), id: `team_obs_${i}`, scope: sources[i % 10]!.scope, text: '中文🙂'.repeat(3000), origin: 'history' })) };
+    const original = structuredClone(source);
+    const result = participationInput(source);
+    expect(result.observations).toEqual(source.observations);
+    expect(result.teamContext!.sources).toHaveLength(8);
+    expect(result.teamContext!.observations).toHaveLength(80);
+    expect(result.teamContext!.observations.reduce((sum, item) => sum + item.text.length, 0)).toBeLessThanOrEqual(20000);
+    expect(result.teamContext!.observations.every(item => item.text.length <= 4000 && result.teamContext!.sources.some(group => group.scope.chatId === item.scope.chatId))).toBe(true);
+    expect(result.teamContext!.sources.every(item => item.status === 'partial' && item.missing.includes('team_context_truncated'))).toBe(true);
+    expect(result.bootstrap!.missing.join(';')).toContain('teamContext.sources=2');
+    expect(size(result)).toBeLessThanOrEqual(512 * 1024);
+    expect(collaborationSnapshotSchema.parse(result)).toEqual(result);
+    expect(source).toEqual(original);
+  });
+
+  it('keeps the full byte bound with escaped team metadata and a nearly full local snapshot', () => {
+    const source = small();
+    source.followups = Array.from({ length: 90 }, (_, i) => ({ ...followup(`f${i}`), progress: '\u0000'.repeat(8000) }));
+    const local = boundCollaborationSnapshot(source);
+    source.teamContext = { query: '\u0000'.repeat(2000), searchedAt: stamp,
+      sources: [{ scope, name: '\u0000'.repeat(256), status: 'complete', missing: Array(100).fill('\u0000'.repeat(256)) }],
+      observations: Array.from({ length: 80 }, (_, i) => ({ ...observation(10000 + i), text: '\u0000'.repeat(16000), missing: Array(100).fill('\u0000'.repeat(256)) })) };
+    const result = boundCollaborationSnapshot(source);
+    expect(result.observations).toEqual(local.observations);
+    expect(result.followups).toEqual(local.followups);
+    expect(size(result)).toBeLessThanOrEqual(512 * 1024);
+    expect(collaborationSnapshotSchema.parse(result)).toEqual(result);
+    expect(result.bootstrap!.missing.join(';')).toContain('teamContext');
+  });
+
   it('preserves a small snapshot without invented gaps and returns independent nested copies', () => {
     const source = small(); const original = structuredClone(source);
     const result = boundCollaborationSnapshot(source, 'linked');
