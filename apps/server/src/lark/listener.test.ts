@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentEvent, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
-import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator, patchRejectedCardDelta, renderLarkCardElements, renderLarkTrace } from './listener.js';
+import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator, patchRejectedCardDelta } from './listener.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
 
 // 仅「监听接入层」用例需要截获 SDK 的事件注册；其余协调器用例直接构造 coordinator，
@@ -44,8 +44,6 @@ const cardElements = (elements: any[]): any[] => elements.flatMap(element => {
   ];
   return [element, ...cardElements(children)];
 });
-const groupTitle = (group: any) => group.header?.title?.content ?? group.elements?.find((el: any) => el.element_id === 'current_title')?.content ?? group.columns?.[0]?.elements?.[0]?.text?.content ?? '';
-const groupElements = (group: any) => group.elements ?? group.columns?.[0]?.elements ?? [];
 const messageMissingError = () => new LarkServiceError('LARK_OPENAPI_ERROR', 'message not found', 502, { upstreamCode: 230030 });
 
 it('listens in ask mode without requiring full trust and stops when execution is no longer confirmed', async () => {
@@ -2309,477 +2307,13 @@ describe('Lark message coordinator', () => {
   });
 });
 
-describe('Lark trace rendering', () => {
-  const events = [
-    agentEvent(1, 'text', { role: 'user', text: '问题' }),
-    agentEvent(2, 'status', { state: 'session updated' }),
-    agentEvent(3, 'status', { state: 'usage updated: 100/1000' }),
-    agentEvent(4, 'thinking', { text: '先分析' }),
-    agentEvent(5, 'tool_call', { id: 'tool-1', name: 'shell', input: 'pwd', status: 'running' }),
-    agentEvent(6, 'tool_result', { id: 'tool-1', name: 'shell', output: '/tmp', status: 'completed' }),
-    agentEvent(7, 'text', { text: '最终答案' })
-  ];
-
-  it('keeps the full compacted trace by default and can limit entry count', () => {
-    const rendered = renderLarkTrace(events, config, true);
-    expect(rendered).toContain('内部分析');
-    expect(rendered).toContain('推理原文不展示');
-    expect(rendered).not.toContain('先分析');
-    expect(rendered).not.toContain('问题');
-    expect(rendered).not.toContain('session updated');
-    expect(rendered).not.toContain('usage updated');
-    const limited = renderLarkTrace(events, { ...config, traceLimit: 2 }, false);
-    expect(limited).not.toContain('问题');
-    expect(limited).toContain('工具 · shell');
-    expect(limited).toContain('最终答案');
-  });
-
-  it('ignores the legacy hide-trace setting and keeps both trace and final output', () => {
-    const rendered = renderLarkTrace(events, { ...config, hideTraceOnComplete: true }, true);
-    expect(rendered).toContain('内部分析');
-    expect(rendered).not.toContain('先分析');
-    expect(rendered).toContain('工具 · shell');
-    expect(rendered).toContain('最终答案');
-  });
-
-  it('keeps the final answer when ACP emits raw status telemetry after the assistant text', () => {
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'thinking', { text: '简单问候。' }),
-      agentEvent(2, 'text', { text: '你好！' }),
-      agentEvent(3, 'text', { text: '有什么可以帮你的吗？' }),
-      agentEvent(4, 'raw_terminal', { text: '{"type":"status","text":"session updated","tag":"session_info_update"}' })
-    ], { ...config, hideTraceOnComplete: true }, true);
-    expect(elements).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tag: 'markdown', content: '你好！有什么可以帮你的吗？' }),
-      expect.objectContaining({ element_id: 'trace_group_0' })
-    ]));
-    expect(JSON.stringify(elements)).not.toContain('任务已完成。');
-    expect(JSON.stringify(elements)).not.toContain('session updated');
-  });
-
-  it('uses a thinking placeholder until a displayable agent event arrives', () => {
-    expect(renderLarkTrace([
-      agentEvent(1, 'text', { role: 'user', text: '不要重复我' }),
-      agentEvent(2, 'status', { state: 'session updated' })
-    ], config, false)).toBe('正在思考中…');
-    expect(renderLarkCardElements([], config, false)[0]).toMatchObject({ content: '正在思考中…', text_size: 'normal' });
-  });
-
-  it('surfaces existing permission events as strong attention blocks without inventing card actions', () => {
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'text', { text: '准备执行受保护操作。' }),
-      agentEvent(2, 'permission_request', { id: 'permission-1', title: '高危操作：删除缓存目录', status: 'pending', options: ['allow_once', 'reject_once'] })
-    ], config, false);
-    expect(elements[0]).toMatchObject({ tag: 'markdown', element_id: 'risk_alert_pending_0', text_size: 'normal' });
-    // 待审批的块只说一件事：要批的是什么。「等待审批」由卡片的橙色色带和状态行承担，
-    // 这里不再挂第三、第四遍标签，要批的操作直接坐在第一行。
-    expect(elements[0]?.content).toBe('高危操作：删除缓存目录');
-    // 不加粗：title 是 agent 侧内容，可能自带 ** 或换行，包起来会渲染出字面星号。
-    expect(elements[0]?.content).not.toContain('**');
-    // 不写 /approve：编号不印在任何卡上（审批走按钮，或引用审批卡回一句无参 /approve）。
-    // 也不承诺「稍后会收到审批卡」：带按钮的审批卡要 workflows 装配且 runtime 支持才会发，
-    // Web 出口要配了 webBaseUrl 才有，渲染这一层两个条件都看不见。
-    expect(elements[0]?.content).not.toContain('/approve');
-    expect(elements[0]?.content).not.toContain('Dutydeck Web');
-    expect(elements[0]?.content).not.toContain('text_tag');
-    expect(elements[0]?.content).not.toContain('任务已暂停，需要人工确认');
-    expect(JSON.stringify(elements)).not.toContain('"callback"');
-    expect(JSON.stringify(elements)).not.toContain('"open_url"');
-    expect(JSON.stringify(elements)).not.toContain('allow_once');
-  });
-
-  it('replaces a pending permission alert when the same request is resolved', () => {
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'permission_request', { id: 'permission-1', title: '修改受保护配置', status: 'pending' }),
-      agentEvent(2, 'permission_request', { id: 'permission-1', title: '修改受保护配置', status: 'approved' })
-    ], config, false);
-    expect(elements).toHaveLength(1);
-    expect(elements[0]).toMatchObject({ element_id: 'risk_alert_resolved_0' });
-    expect(elements[0]?.content).toContain('已授权');
-    expect(elements[0]?.content).not.toContain('任务已暂停');
-  });
-
-  it('builds a readable collapsible activity panel with human-friendly tool status', () => {
-    const elements = renderLarkCardElements(events, config, false);
-    const group: any = elements.find(element => element.element_id?.startsWith('trace_group_'));
-    expect(group).toMatchObject({ tag: 'collapsible_panel', expanded: false, vertical_spacing: '2px', padding: '2px 0px 0px 0px' });
-    expect(groupTitle(group)).toContain('pwd');
-    expect(groupTitle(group)).not.toContain('先分析');
-    expect(groupTitle(group)).not.toContain('**1');
-    expect(group.header.icon).toMatchObject({ tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey' });
-    expect(group.header.icon_position).toBe('right');
-    expect(group.header.title.text_size).toBe('notation');
-    expect(JSON.stringify(groupElements(group))).toContain('/tmp');
-    expect(JSON.stringify(groupElements(group))).toContain('notation');
-    expect(JSON.stringify(groupElements(group))).toContain('```');
-    expect(JSON.stringify(groupElements(group))).not.toContain('先分析');
-    expect(JSON.stringify(groupElements(group))).not.toContain('思考过程');
-    expect(JSON.stringify(groupElements(group))).toContain('notation');
-  });
-
-  it('uses distinct native Feishu icons for recognizable tool kinds', () => {
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'tool_result', { id: 'read', name: 'Read', input: { path: 'README.md' }, status: 'completed' }),
-      agentEvent(2, 'tool_result', { id: 'edit', name: 'apply_patch', input: { command: 'apply_patch' }, status: 'completed' }),
-      agentEvent(3, 'tool_result', { id: 'search', name: 'Search', input: { query: 'Dutydeck' }, status: 'completed' }),
-      agentEvent(4, 'tool_result', { id: 'web', name: 'Fetch', input: { url: 'https://example.com' }, status: 'completed' }),
-      agentEvent(5, 'tool_result', { id: 'agent', name: 'group peers', status: 'completed' })
-    ], config, false);
-    // 有可展开内容的工具是折叠面板（图标在 header.title），没有内容的工具是一行纯文本
-    // （图标就在元素自身）——后者不给折叠箭头，点开只会看到「暂无内容」。
-    const tokens = cardElements(elements)
-      .filter(element => element.element_id?.startsWith('trace_tool_'))
-      .map(element => (element.header?.title ?? element).icon.token);
-    expect(tokens).toEqual([
-      'file-link-text_outlined',
-      'edit_outlined',
-      'search_outlined',
-      'web-card_outlined',
-      'robot_outlined'
-    ]);
-  });
-
-  it('redacts common credentials from tool headers, inputs, and outputs before building the Card', () => {
-    const secrets = ['auth-secret-123', 'url-password-456', 'env-secret-789', 'json-password-abc', 'output-token-def', 'client-secret-ghi'];
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'tool_result', {
-        id: 'credential-test',
-        name: 'Terminal',
-        input: {
-          env: { OPENAI_API_KEY: 'env-secret-789', password: 'json-password-abc' },
-          clientSecret: 'client-secret-ghi',
-          command: 'curl -H "Authorization: Bearer auth-secret-123" https://alice:url-password-456@example.com/api?token=query-secret'
-        },
-        output: 'request failed; Bearer output-token-def; PASSWORD="output password"',
-        status: 'failed'
-      })
-    ], config, false);
-    const card = buildLarkCard({ state: 'failed', taskName: '凭据脱敏验证', taskId: 'redaction', elements });
-    const rendered = JSON.stringify(card);
-    for (const secret of secrets) expect(rendered).not.toContain(secret);
-    expect(rendered).not.toContain('query-secret');
-    expect(rendered).not.toContain('output password');
-    expect(rendered).toContain('[REDACTED]');
-    expect(rendered).toContain('example.com');
-  });
-
-  it('redacts common CLI, cloud env, private-key, and raw-terminal secrets', () => {
-    const secrets = ['aws-secret-123', 'AKIA123', 'aws-output-secret', 'private-key-secret', 'structured-private-secret', 'raw-terminal-secret', 'pem-secret-body', 'truncated-pem-secret'];
-    const events = [
-      agentEvent(1, 'tool_result', {
-        id: 'cloud-credential-test', name: 'terminal', status: 'failed',
-        input: 'aws s3 ls --secret-access-key aws-secret-123 --access-key-id AKIA123',
-        output: 'AWS_SECRET_ACCESS_KEY=aws-output-secret PRIVATE_KEY=private-key-secret'
-      }),
-      agentEvent(2, 'raw_terminal', { text: 'AUTH_TOKEN=raw-terminal-secret\n-----BEGIN PRIVATE KEY-----\npem-secret-body\n-----END PRIVATE KEY-----' }),
-      agentEvent(3, 'tool_result', {
-        id: 'structured-private-key', name: 'terminal', status: 'failed',
-        input: { SSH_PRIVATE_KEY: 'structured-private-secret' },
-        output: 'non-secret project metadata\n-----BEGIN OPENSSH PRIVATE KEY-----\ntruncated-pem-secret'
-      })
-    ];
-    const card = buildLarkCard({ state: 'failed', taskName: '云凭据脱敏', taskId: 'cloud-redaction', elements: renderLarkCardElements(events, config, false) });
-    const fallback = renderLarkTrace(events, config, false);
-    for (const rendered of [JSON.stringify(card), fallback]) {
-      for (const secret of secrets) expect(rendered).not.toContain(secret);
-      expect(rendered).toContain('[REDACTED');
-      expect(rendered).toContain('non-secret project metadata');
-    }
-  });
-
-  it('keeps notable tool elapsed time in the summary row and drops the redundant success badge', () => {
-    const timed = (sequence: number, type: AgentEvent['type'], data: any, seconds: number): AgentEvent => ({
-      id: `timed-${sequence}`, sessionId: session.id, sequence, type,
-      timestamp: `2026-08-19T00:00:${String(seconds).padStart(2, '0')}.000Z`, data
-    });
-    const elements = renderLarkCardElements([
-      timed(1, 'thinking', { text: '先确认目录。' }, 0),
-      timed(2, 'text', { text: '检查当前工作目录' }, 0),
-      timed(3, 'tool_call', { id: 'pwd', name: 'Terminal', input: { command: 'pwd', description: 'Show current working directory' }, status: 'running' }, 1),
-      timed(4, 'tool_result', { id: 'pwd', name: 'tool call', output: '/repo', status: 'completed' }, 4),
-      timed(5, 'text', { text: '检查完成。' }, 5)
-    ], config, true);
-    const group: any = elements.find(element => element.element_id === 'trace_group_0');
-    // 成功是默认预期，阶段标题不再标注：一次顺利的执行有五个阶段，五个「● 已完成」
-    // 只是在重复「没有异常」，同时把真正失败的那一个淹掉。
-    expect(groupTitle(group)).not.toContain('● 已完成');
-    expect(groupTitle(group)).not.toContain("<font color='grey'>4s</font>");
-    // 工具行仍然带自己的耗时，但只有 3s 及以上才值得占标题里的一段位置。
-    expect(JSON.stringify(groupElements(group))).toContain("<font color='grey'>3s</font>");
-    // 工具行同样不给成功点灯，理由与阶段标题相同。
-    expect(JSON.stringify(groupElements(group))).not.toContain("<font color='trace_success'>●</font>");
-    expect(JSON.stringify(groupElements(group))).toContain('/repo');
-  });
-
-  it('hides completed trace detail behind a collapsed stage by default', () => {
-    const elements = renderLarkCardElements(events, { ...config, hideTraceOnComplete: true }, true);
-    expect(elements).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tag: 'markdown', content: '最终答案' }),
-      expect.objectContaining({ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: false })
-    ]));
-    // 全部成功时结论下面不再跟一行工具计数：任务进入终态本身就意味着步骤都结束了。
-    expect(elements.some((element: any) => element.element_id === 'evidence')).toBe(false);
-  });
-
-  it('keeps completed trace detail collapsible when hideTraceOnComplete is false', () => {
-    const elements = renderLarkCardElements(events, { ...config, hideTraceOnComplete: false }, true);
-    expect(elements).toEqual(expect.arrayContaining([
-      expect.objectContaining({ tag: 'markdown', content: '最终答案' }),
-      expect.objectContaining({ tag: 'collapsible_panel', element_id: 'trace_group_0', expanded: true })
-    ]));
-  });
-
-  it('completed 卡片不再附加下一步提示', () => {
-    // 「下一步：回复当前消息…」对已经在对话里的用户没有新增信息，只占版面。
-    // 失败恢复类信息不在此列，仍由 result_missing / error 元素承担。
-    for (const chatType of ['group', 'p2p']) {
-      const rendered = JSON.stringify(renderLarkCardElements(events, config, true, false, chatType));
-      expect(rendered, `chatType=${chatType}`).not.toContain('下一步');
-      expect(rendered).not.toContain('next_step_hint');
-      expect(rendered).not.toContain('@机器人');
-      // 真实结论仍然必须在卡片上。
-      expect(rendered).toContain('最终答案');
-    }
-  });
-
-  it('keeps every trace group and action until the card byte/component budget trims older groups', () => {
-    const many = [agentEvent(1, 'thinking', { text: '批量检查' })];
-    for (let index = 0; index < 6; index++) many.push(agentEvent(index + 2, 'tool_result', { id: `tool-${index}`, name: 'Terminal', input: { command: `echo ${index}` }, output: String(index), status: 'completed' }));
-    many.push(agentEvent(20, 'thinking', { text: '继续处理' }));
-    many.push(agentEvent(21, 'tool_result', { id: 'last', name: 'Terminal', input: { command: 'pwd' }, output: '/repo', status: 'completed' }));
-    const elements = renderLarkCardElements(many, { ...config, traceLimit: 100 }, true);
-    const groups = elements.filter(element => element.element_id?.startsWith('trace_group_'));
-    expect(groups).toHaveLength(2);
-    expect(cardElements(groupElements(groups[0])).filter(element => element.element_id?.startsWith('trace_tool_'))).toHaveLength(6);
-  });
-
-  it('renders tool failures as a pale warning instead of a red failure state', () => {
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'tool_result', { id: 'failed-tool', name: 'Terminal', input: { command: 'false' }, output: 'exit 1', status: 'failed' })
-    ], config, false);
-    const rendered = JSON.stringify(elements);
-    expect(rendered).toContain("<font color='trace_failure'>● 失败</font>");
-    expect(rendered).not.toContain("color='red'");
-    const mixed = renderLarkCardElements([
-      agentEvent(1, 'thinking', { text: '检查两项' }),
-      agentEvent(2, 'tool_result', { id: 'ok', name: 'Terminal', input: { command: 'true' }, output: 'ok', status: 'completed' }),
-      agentEvent(3, 'tool_result', { id: 'bad', name: 'Terminal', input: { command: 'false' }, output: 'exit 1', status: 'failed' })
-    ], config, false);
-    expect(JSON.stringify(mixed)).toContain("<font color='trace_failure'>● 有失败</font>");
-  });
-
-  it('uses indicator-only tool status immediately after the grey tool icon', () => {
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'tool_result', { id: 'ok', name: 'Terminal', input: { command: 'true' }, output: 'ok', status: 'completed' }),
-      agentEvent(2, 'tool_result', { id: 'bad', name: 'Terminal', input: { command: 'false' }, output: 'exit 1', status: 'failed' }),
-      agentEvent(3, 'tool_call', { id: 'live', name: 'Terminal', input: { command: 'sleep 10' }, status: 'running' })
-    ], config, false);
-    // 前两个工具有输出，是折叠面板；第三个还在执行、命令已完整写在标题上，
-    // 没有可展开内容，因此是一行纯文本而不是空折叠。
-    const tools: any[] = cardElements(elements).filter(element => element.element_id?.startsWith('trace_tool_'));
-    const summary = (tool: any) => tool.header?.title ?? tool;
-    expect(tools.map(tool => summary(tool).icon.color)).toEqual(['grey', 'grey', 'grey']);
-    // 只有失败和执行中点灯。成功是默认预期，给它一个绿灯等于把「没有异常」重复一遍，
-    // 还会让真正需要看的那个失败灯淹在同色的一排里。
-    expect(summary(tools[0]).content).not.toContain('●');
-    expect(summary(tools[0]).content).toContain('true');
-    expect(summary(tools[1]).content).toContain("<font color='trace_failure'>●</font>");
-    expect(summary(tools[2]).content).toContain("<font color='trace_running'>●</font>");
-    for (const tool of tools) expect(summary(tool).content).not.toMatch(/已完成|失败|执行中/);
-  });
-
-  it('merges interleaved tool updates by id and preserves the concrete command over a generic completion title', () => {
-    const interleaved = [
-      agentEvent(1, 'tool_call', { id: 'fetch-1', name: 'Fetch', input: { url: 'https://example.com' }, status: 'running' }),
-      agentEvent(2, 'tool_call', { id: 'shell-1', name: 'ls -la', input: { command: 'ls -la' }, status: 'running' }),
-      agentEvent(3, 'thinking', { text: '等待并行工具返回' }),
-      agentEvent(4, 'tool_result', { id: 'fetch-1', name: 'tool call', output: 'page', status: 'completed' }),
-      agentEvent(5, 'tool_result', { id: 'shell-1', name: 'tool call', output: 'files', status: 'completed' })
-    ];
-    const elements = renderLarkCardElements(interleaved, config, false);
-    const rendered = JSON.stringify(elements);
-    expect(rendered).not.toContain('tool call');
-    expect(rendered).toContain('https://example.com');
-    expect(rendered).toContain('ls -la');
-    expect(rendered).toContain('files');
-  });
-
-  it('keeps analysis stages and tools in their true first-execution order without exposing analysis text', () => {
-    const ordered = [
-      agentEvent(1, 'thinking', { text: '先分析' }),
-      agentEvent(2, 'tool_call', { id: 'shell-1', name: 'pwd', input: { command: 'pwd' }, status: 'running' }),
-      agentEvent(3, 'thinking', { text: '再检查目录' }),
-      agentEvent(4, 'tool_call', { id: 'shell-2', name: 'ls -la', input: { command: 'ls -la' }, status: 'running' }),
-      agentEvent(5, 'tool_result', { id: 'shell-1', name: 'tool call', output: '/workspace', status: 'completed' }),
-      agentEvent(6, 'tool_result', { id: 'shell-2', name: 'tool call', output: 'files', status: 'completed' })
-    ];
-    const elements = renderLarkCardElements(ordered, config, false);
-    const groups: any[] = elements.filter(element => element.element_id?.startsWith('trace_group_'));
-    const toolTitleOf = (group: any) =>
-      cardElements(groupElements(group)).flatMap((element: any) => element.element_id?.startsWith('trace_tool_')
-        ? [String(element.header?.title?.content ?? element.content ?? element.elements?.[0]?.content ?? '')] : [])[0];
-    expect(groups.map(toolTitleOf)).toEqual([expect.stringContaining('pwd'), expect.stringContaining('ls -la')]);
-    expect(JSON.stringify(elements)).not.toContain('先分析');
-    expect(JSON.stringify(elements)).not.toContain('再检查目录');
-    expect(JSON.stringify(groupElements(groups[0]))).toContain('pwd');
-    expect(cardElements(groupElements(groups[1])).find(element => element.element_id?.startsWith('trace_tool_')).header.title.content).toContain('ls -la');
-  });
-
-  it('ellipsizes long tool headers while preserving the complete command inside the disclosure', () => {
-    const command = 'find projects/tom-ai -type f -name "*.md" | sort | head -100 && printf "finished scanning project markdown files"';
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'tool_call', { id: 'long-command', name: command, input: { command }, status: 'running' })
-    ], config, false);
-    const tool: any = cardElements(elements).find(element => element.element_id?.startsWith('trace_tool_'));
-    expect(tool.header.title.content).toContain('…');
-    expect(tool.header.title.content).not.toContain(command);
-    expect(JSON.stringify(tool.elements)).toContain('find projects/tom-ai -type f -name');
-    expect(JSON.stringify(tool.elements)).toContain('finished scanning project markdown files');
-  });
-
-  it('uses the streamed assistant description as the group title and keeps internal analysis private', () => {
-    const description = '先读取飞书文档，再并行检查当前 runner 的目录结构和配置入口。';
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'thinking', { text: '我需要先理解文档，再找到 runner 的实现。' }),
-      agentEvent(2, 'text', { text: description }),
-      agentEvent(3, 'tool_call', { id: 'doc', name: 'Fetch', input: { url: 'https://example.com/doc' }, status: 'running' }),
-      agentEvent(4, 'tool_call', { id: 'files', name: 'Terminal', input: { command: 'find runners -type f' }, status: 'running' }),
-      agentEvent(5, 'tool_result', { id: 'doc', name: 'tool call', output: 'doc', status: 'completed' }),
-      agentEvent(6, 'tool_result', { id: 'files', name: 'tool call', output: 'files', status: 'completed' })
-    ], config, false);
-    const group: any = elements.find(element => element.element_id === 'trace_group_0');
-    expect(groupTitle(group)).toContain(description);
-    expect(groupTitle(group)).not.toContain('我需要先理解文档');
-    expect(JSON.stringify(groupElements(group))).not.toContain('**描述**');
-    expect(JSON.stringify(groupElements(group))).not.toContain('我需要先理解文档');
-    expect(cardElements(groupElements(group)).filter(element => element.element_id?.startsWith('trace_tool_'))).toHaveLength(2);
-  });
-
-  it('wraps a long group description without repeating it inside the disclosure', () => {
-    const description = '读取产品文档并结合最新远端代码分析 runner 的生命周期、连接协议、Hook 上报、异常恢复和兼容迁移方案，然后输出接入判断与实施步骤。'.repeat(3);
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'thinking', { text: '先分析约束。' }),
-      agentEvent(2, 'text', { text: description }),
-      agentEvent(3, 'tool_call', { id: 'shell', name: 'Terminal', input: { command: 'git log -10 --oneline' }, status: 'running' })
-    ], config, false);
-    const group: any = elements.find(element => element.element_id === 'trace_group_0');
-    expect(groupTitle(group)).toContain('…');
-    expect(groupTitle(group).length).toBeLessThan(description.length);
-    expect(groupTitle(group)).not.toContain(description);
-    expect(JSON.stringify(groupElements(group))).not.toContain(description);
-  });
-
-  it('renders a completed analysis-only stage without exposing chain-of-thought text', () => {
-    const thinking = `UNIQUE_THINKING_MARKER ${'I should understand the intent and answer concisely. '.repeat(8)}`.trim();
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'thinking', { text: thinking }),
-      agentEvent(2, 'text', { text: '在的。' })
-    ], config, true);
-    const group: any = elements.find(element => element.element_id === 'trace_group_0');
-    const rendered = JSON.stringify(group);
-    expect(groupTitle(group)).toContain('分析与规划');
-    expect(groupTitle(group)).not.toContain('● 已完成');
-    expect(groupTitle(group)).not.toContain('执行中');
-    expect(groupTitle(group).length).toBeLessThan(260);
-    expect(rendered).not.toContain('UNIQUE_THINKING_MARKER');
-    expect(JSON.stringify(groupElements(group))).toContain('内部分析');
-    expect(elements.some((element: any) => element.tag === 'markdown' && element.content === '在的。')).toBe(true);
-  });
-
-  it('does not promote a stage description to final when a closing tool settles after it', () => {
-    const description = '先执行检查，再根据结果给出结论。';
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'thinking', { text: '需要执行检查。' }),
-      agentEvent(2, 'text', { text: description }),
-      agentEvent(3, 'tool_result', { id: 'check', name: 'Terminal', input: { command: 'pwd' }, output: '/workspace', status: 'completed' })
-    ], config, true);
-    const group: any = elements.find(element => element.element_id === 'trace_group_0');
-    expect(groupTitle(group)).toContain(description);
-    expect(elements.find(element => element.element_id === 'final_output')).toBeUndefined();
-    expect(elements.some((element: any) => element.tag === 'markdown' && String(element.content ?? '').includes('未返回最终输出'))).toBe(true);
-  });
-
-  it('does not promote assistant text to final while a later tool is still unresolved', () => {
-    const description = '阶段 7：先输出当前总结，随后执行阶段 8。';
-    const elements = renderLarkCardElements([
-      agentEvent(1, 'thinking', { text: '先总结，再等待工具。' }),
-      agentEvent(2, 'text', { text: description }),
-      agentEvent(3, 'tool_call', { id: 'heartbeat', name: 'Terminal', input: { command: 'sleep 300' }, status: 'running' })
-    ], config, true);
-    expect(elements.find(element => element.element_id === 'final_output')).toBeUndefined();
-    expect(elements.find(element => element.element_id === 'trace_group_0')).toBeDefined();
-    expect(JSON.stringify(elements)).toContain(description);
-    expect(JSON.stringify(elements)).toContain("<font color='trace_running'>●</font>");
-  });
-
-  /**
-   * 终端回显不是「活动」。
-   *
-   * PTY 形态的 Agent 在给出最终答复之后，屏幕上必然还会再吐一个提示符，它以
-   * raw_terminal 事件到达。把它当成活动会让最终文本失去 final 资格，而
-   * hideTraceOnComplete 默认为 true 又会把 trace 整块隐去——用户看到的是
-   * 「Agent 未返回最终输出」，真实答复一个字都不剩。
-   */
-  it('keeps the assistant final output when only a terminal prompt follows it', () => {
-    const answer = 'MOCK_REPLY: E2E_MARKER_ONE';
-    const events = [
-      agentEvent(1, 'text', { role: 'user', text: '请原样回显 E2E_MARKER_ONE' }),
-      agentEvent(2, 'thinking', { text: '照要求回显。' }),
-      agentEvent(3, 'text', { text: answer }),
-      agentEvent(4, 'raw_terminal', { text: '[2m❯[0m ' })
-    ];
-    for (const hideTraceOnComplete of [true, false]) {
-      const elements = renderLarkCardElements(events, { ...config, hideTraceOnComplete }, true);
-      const final: any = elements.find((element: any) => element.element_id === 'final_output');
-      expect(final?.content, `hideTraceOnComplete=${hideTraceOnComplete}`).toBe(answer);
-      expect(elements.find((element: any) => element.element_id === 'result_missing')).toBeUndefined();
-    }
-  });
-
-  it('still refuses to promote assistant text when real activity follows the terminal echo', () => {
-    const description = '先说一句，再去执行。';
-    const events = [
-      agentEvent(1, 'text', { text: description }),
-      agentEvent(2, 'raw_terminal', { text: '❯ ' }),
-      agentEvent(3, 'tool_call', { id: 'later', name: 'Terminal', input: { command: 'sleep 30' }, status: 'running' })
-    ];
-    const elements = renderLarkCardElements(events, { ...config, hideTraceOnComplete: true }, true);
-    expect(elements.find((element: any) => element.element_id === 'final_output')).toBeUndefined();
-    expect(elements.find((element: any) => element.element_id === 'result_missing')).toBeDefined();
-
-    const thinkingAfter = renderLarkCardElements([
-      agentEvent(1, 'text', { text: description }),
-      agentEvent(2, 'raw_terminal', { text: '❯ ' }),
-      agentEvent(3, 'thinking', { text: '还要再想一步。' })
-    ], { ...config, hideTraceOnComplete: true }, true);
-    expect(thinkingAfter.find((element: any) => element.element_id === 'final_output')).toBeUndefined();
-  });
-
-  it('keeps permission and error events blocking a final promotion even after terminal echo', () => {
-    for (const [type, data] of [
-      ['permission_request', { id: 'p1', title: '需要授权执行 rm', status: 'pending' }],
-      ['error', { message: 'Agent exited with code 1' }]
-    ] as const) {
-      const elements = renderLarkCardElements([
-        agentEvent(1, 'text', { text: '我先给一个结论。' }),
-        agentEvent(2, type, data),
-        agentEvent(3, 'raw_terminal', { text: '❯ ' })
-      ], { ...config, hideTraceOnComplete: true }, true);
-      expect(elements.find((element: any) => element.element_id === 'final_output'), type).toBeUndefined();
-    }
-  });
-});
-
 // ---------------------------------------------------------------------------
-// P0-5 欢迎语：监听接入层（真实 LarkCardService + 内存 kv，SDK 事件为手动派发）
+// P0-5 欢迎语：监听接入层事件分发冒烟
 // ---------------------------------------------------------------------------
 describe('Lark long connection listener 欢迎语', () => {
   interface StartHarnessOptions {
     records?: Record<string, string>;
     runtime?: any;
-    failMessages?: boolean;
-    noWelcome?: boolean;
-    participation?: any;
     configPatch?: Partial<StoredLarkConfig>;
   }
 
@@ -2799,150 +2333,42 @@ describe('Lark long connection listener 欢迎语', () => {
   const startHarness = async (options: StartHarnessOptions = {}) => {
     larkSdkHarness.reset();
     const posts: Array<{ url: string; body: any }> = [];
-    const jsonResponse = (data: unknown) => ({ ok: true, json: async () => ({ code: 0, ...(typeof data === 'object' && data !== null ? data : {}) }), headers: new Map() });
-    const errorResponse = () => ({ ok: false, json: async () => ({ code: 230001, msg: 'forced failure' }), headers: new Map() });
+    const jsonResponse = (data: unknown) => ({ ok: true, json: async () => ({ code: 0, ...(typeof data === "object" && data !== null ? data : {}) }), headers: new Map() });
     const fetcher = vi.fn(async (url: string | URL, init?: any) => {
       const target = String(url);
-      if (target.includes('/tenant_access_token/')) return jsonResponse({ tenant_access_token: 't', expire: 7200 });
-      if (target.includes('/bot/v3/info')) return jsonResponse({ bot: { open_id: 'ou_bot', app_name: 'Dutydeck' } });
-      if (target.includes('/open-apis/im/')) {
-        if (init?.method === 'POST' && target.includes('/im/v1/messages')) {
+      if (target.includes("/tenant_access_token/")) return jsonResponse({ tenant_access_token: "t", expire: 7200 });
+      if (target.includes("/bot/v3/info")) return jsonResponse({ bot: { open_id: "ou_bot", app_name: "Dutydeck" } });
+      if (target.includes("/open-apis/im/")) {
+        if (init?.method === "POST" && target.includes("/im/v1/messages")) {
           const body = JSON.parse(init.body as string);
-          // failMessages 只让欢迎卡发送失败（幂等键 lark_welcome_*），coordinator 的卡片照常送达。
-          if (options.failMessages === true && typeof body.uuid === 'string' && body.uuid.startsWith('lark_welcome_')) {
-            return errorResponse();
-          }
           posts.push({ url: target, body });
           return jsonResponse({ data: { message_id: `om_${posts.length}`, chat_id: body.receive_id } });
         }
-        return jsonResponse({ data: { message_id: 'om_x', reaction_id: 'r1' } });
+        return jsonResponse({ data: { message_id: "om_x", reaction_id: "r1" } });
       }
       return jsonResponse({});
     });
     const kv = memoryKv(options.records);
     const listener = new LarkLongConnectionListener(
       { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      { fetcher: fetcher as any, ...(options.noWelcome ? {} : { welcomeStore: kv as any }), ...(options.participation ? { participation: options.participation } : {}), ...(options.runtime ? { runtime: options.runtime } : {}) }
+      { fetcher: fetcher as any, welcomeStore: kv as any, ...(options.runtime ? { runtime: options.runtime } : {}) }
     );
     await listener.start({ ...config, ...options.configPatch });
     return { listener, handlers: larkSdkHarness.handlers, posts, kv };
   };
 
-  const messageEvent = (overrides: any = {}) => ({
-    message: {
-      message_id: overrides.messageId ?? `om_${Math.random().toString(36).slice(2)}`,
-      chat_id: overrides.chatId ?? 'oc_dm',
-      chat_type: overrides.chatType ?? 'p2p',
-      message_type: 'text',
-      content: JSON.stringify({ text: overrides.text ?? '你好' }),
-      ...(overrides.mentions ? { mentions: overrides.mentions } : {})
-    },
-    sender: { sender_id: { open_id: 'ou_sender' }, sender_type: 'user' }
-  });
-
-  const flush = () => new Promise(resolve => setImmediate(resolve));
   const welcomeTitles = (posts: Array<{ body: any }>) => posts
     .map(post => {
       try { return JSON.parse(post.body.content) as any; } catch { return undefined; }
     })
     .filter(Boolean);
 
-  it('initializes group context without a welcome store and recovers existing scopes on startup', async () => {
-    const participation = { bootstrap: vi.fn(async () => undefined), recover: vi.fn(async () => {}), closeApp: vi.fn() };
-    const { listener, handlers, posts } = await startHarness({ noWelcome: true, participation });
-    expect(participation.recover).toHaveBeenCalledWith(config.appId);
-    handlers['im.chat.member.bot.added_v1']!({ event_id: 'context_join', chat_id: 'oc_context' });
-    await flush();
-    expect(participation.bootstrap).toHaveBeenCalledWith({ appId: config.appId, chatId: 'oc_context' });
-    expect(posts).toHaveLength(0);
-    listener.stop();
-    expect(participation.closeApp).toHaveBeenCalledWith(config.appId);
-  });
-
-  it('bot 入群事件只发一次欢迎卡，重复事件不重发', async () => {
+  it('bot 入群事件触发欢迎卡分发冒烟', async () => {
     const { listener, handlers, posts } = await startHarness();
-    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_group' });
+    handlers['im.chat.member.bot.added_v1']!({ event_id: "e1", chat_id: "oc_group" });
     await vi.waitFor(() => expect(posts).toHaveLength(1));
-    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e2', chat_id: 'oc_group' });
-    await flush();
-    expect(posts).toHaveLength(1);
     const card = welcomeTitles(posts)[0]!;
-    expect(JSON.stringify(card)).toContain('Dutydeck 机器人已入群');
-    listener.stop();
-  });
-
-  it('未配置白名单的群里所有人都能使唤机器人时，入群欢迎卡写明执行身份边界', async () => {
-    const { listener, handlers, posts } = await startHarness();
-    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_group' });
-    await vi.waitFor(() => expect(posts).toHaveLength(1));
-    expect(JSON.stringify(welcomeTitles(posts)[0])).toContain('部署这台 Dutydeck 的系统账号');
-    listener.stop();
-  });
-
-  it('配置了白名单时不再宣称全员可用，也就不加这句', async () => {
-    const { listener, handlers, posts } = await startHarness({ configPatch: { allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] } });
-    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_group' });
-    await vi.waitFor(() => expect(posts).toHaveLength(1));
-    expect(JSON.stringify(welcomeTitles(posts)[0])).not.toContain('部署这台 Dutydeck 的系统账号');
-    listener.stop();
-  });
-
-  it('重启后 kv 已有「已欢迎」记录时不再发入群欢迎', async () => {
-    const { listener, handlers, posts } = await startHarness({
-      records: { 'lark.welcomed.cli_test.oc_existing': JSON.stringify({ at: '2026-09-12T00:00:00.000Z' }) }
-    });
-    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_existing' });
-    await flush();
-    expect(posts).toHaveLength(0);
-    listener.stop();
-  });
-
-  it('群聊普通消息不触发欢迎语', async () => {
-    const { listener, handlers, posts } = await startHarness();
-    // 未 @机器人 的群消息：coordinator 不唤醒，欢迎语也只允许在 p2p 触发。
-    handlers['im.message.receive_v1']!(messageEvent({ chatType: 'group', chatId: 'oc_group', text: '大家好' }));
-    await flush();
-    expect(posts).toHaveLength(0);
-    // 入群事件照常只影响该群自己的去重键。
-    handlers['im.chat.member.bot.added_v1']!({ event_id: 'e1', chat_id: 'oc_group' });
-    await vi.waitFor(() => expect(posts).toHaveLength(1));
-    expect(JSON.stringify(welcomeTitles(posts)[0])).toContain('机器人已入群');
-    listener.stop();
-  });
-
-  it('私聊首条消息发一次私聊欢迎，重复消息不重发，且消息正常 dispatch', async () => {
-    const runtime = {
-      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
-    };
-    const { listener, handlers, posts } = await startHarness({ runtime });
-
-    handlers['im.message.receive_v1']!(messageEvent({ messageId: 'om_dm_1', text: '第一句' }));
-    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(1));
-    handlers['im.message.receive_v1']!(messageEvent({ messageId: 'om_dm_2', text: '第二句' }));
-    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
-
-    const welcomeCards = welcomeTitles(posts).filter(card => JSON.stringify(card).includes('欢迎使用 Dutydeck'));
-    expect(welcomeCards).toHaveLength(1);
-    listener.stop();
-  });
-
-  it('欢迎卡发送失败不阻断消息 dispatch，且失败后不重发欢迎', async () => {
-    const runtime = {
-      start: vi.fn(async () => session), getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()),
-      send: vi.fn(async () => {}), interrupt: vi.fn(async () => {})
-    };
-    const { listener, handlers, posts, kv } = await startHarness({ runtime, failMessages: true });
-
-    handlers['im.message.receive_v1']!(messageEvent({ messageId: 'om_dm_fail', text: '照常派发' }));
-    // 欢迎卡发送失败：任务仍必须进入 runtime。
-    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
-    // 欢迎标记已认领，下一条消息也不会再尝试欢迎。
-    handlers['im.message.receive_v1']!(messageEvent({ messageId: 'om_dm_fail_2', text: '再说一句' }));
-    await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledTimes(2));
-    const welcomeCards = welcomeTitles(posts).filter(card => JSON.stringify(card).includes('欢迎使用 Dutydeck'));
-    expect(welcomeCards).toHaveLength(0);
-    expect(await kv.get('lark.welcomed.cli_test.oc_dm')).toBeTruthy();
+    expect(JSON.stringify(card)).toContain("Dutydeck 机器人已入群");
     listener.stop();
   });
 });

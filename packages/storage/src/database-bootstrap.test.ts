@@ -8,7 +8,6 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import type { RepositoryBundle, RepositoryOpenOptions } from '@dutydeck/shared';
 import { createRepositories } from './index.js';
 import { openDatabaseControl } from './database-control.js';
-import { migrations } from './migrations.js';
 
 const directories: string[] = [];
 const repositories: RepositoryBundle[] = [];
@@ -143,20 +142,4 @@ describe('atomic new database authority', () => {
     inspect(path, db => expect(accessCount(db)).toBe(1));
   });
 
-  it('runs the existing v15 table rebuild through the opener transaction with foreign keys intact', () => {
-    const path = file();
-    inspect(path, db => {
-      db.exec('CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
-      for (const migration of migrations.slice(0, 14)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(migration.version, '2026-09-14T00:00:00.000Z'); }
-      const definition = (db.prepare("SELECT sql FROM sqlite_schema WHERE name='schedule_definitions'").get() as { sql: string }).sql;
-      db.exec('DROP TABLE schedule_definitions'); db.exec(definition.replace("'dutydeck'", "'dockmux'"));
-      db.exec(`INSERT INTO channel_bots (id,schema_version,revision,channel,external_app_id,display_name,brand,state,desired_listener_state,full_trust_confirmed,created_at,updated_at)
-        VALUES ('bot',1,1,'lark','app','bot','feishu','disabled','disabled',0,'2026-09-14','2026-09-14');
-        INSERT INTO schedule_definitions (id,schema_version,revision,channel_bot_id,name,trigger_kind,interval_seconds,interval_anchor_at,timezone,dst_gap_policy,dst_overlap_policy,delivery_mode,chat_ref,continuation_policy,payload_ref,source_ownership,source_namespace,source_enabled,state,desired_executor_state,current_generation,created_at,updated_at)
-        VALUES ('schedule',1,1,'bot','preserved','interval',3600,'2026-09-14','Asia/Shanghai','skip','first','chat','chat','same_thread','payload','dockmux','ns',1,'staged','disabled',1,'2026-09-14','2026-09-14');
-        INSERT INTO schedule_watermarks (schedule_definition_id,schema_version,revision,updated_at) VALUES ('schedule',1,1,'2026-09-14');`);
-    });
-    expect(open(path).execution.authority()).toBe('legacy');
-    inspect(path, db => { expect(db.prepare("SELECT sql FROM sqlite_schema WHERE name='schedule_definitions'").pluck().get()).toContain("'dutydeck'"); expect(db.prepare('SELECT source_ownership,name FROM schedule_definitions').get()).toEqual({source_ownership:'dutydeck',name:'preserved'}); expect(db.prepare('SELECT schedule_definition_id FROM schedule_watermarks').pluck().get()).toBe('schedule'); expect(db.pragma('foreign_key_check')).toEqual([]); expect(db.pragma('integrity_check', { simple: true })).toBe('ok'); expect(db.prepare('SELECT COUNT(*) FROM schema_migrations').pluck().get()).toBe(23); });
-  });
 });

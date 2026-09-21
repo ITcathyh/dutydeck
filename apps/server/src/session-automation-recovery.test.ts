@@ -208,14 +208,16 @@ describe('SessionAutomation independent-review regression fixes', () => {
     const ticking = h.service.tick();
     await entered.promise;
 
+    vi.useFakeTimers();
     let closed = false;
     const closing = h.service.close().then(() => { closed = true; });
     try {
-      // 跨越旧 1 秒 (1000ms) 超时分支：等待 1150ms，停点未释放，close 仍未返回！
-      await new Promise(r => setTimeout(r, 1150));
+      // 跨越旧 1 秒 (1000ms) 超时分支：推进 1150ms，停点未释放，close 仍未返回！
+      await vi.advanceTimersByTimeAsync(1150);
       expect(closed).toBe(false);
       expect(h.dispatches).toHaveLength(0);
     } finally {
+      vi.useRealTimers();
       gate.resolve();
       await closing;
       await ticking;

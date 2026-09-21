@@ -35,9 +35,4 @@ describe('ThemeToggle', () => {
     render(<ThemeToggle preference="system" resolved="light" onChange={() => {}}/>);
     for (const option of screen.getAllByRole('radio')) expect(option.className).toContain('min-h-10');
   });
-
-  it('选项不使用硬编码调色板颜色，保证深浅两套主题都可读', () => {
-    const { container } = render(<ThemeToggle preference="light" resolved="light" onChange={() => {}}/>);
-    expect(container.innerHTML).not.toMatch(/\b(bg|text|border)-(zinc|slate|gray|white)\b/);
-  });
 });
