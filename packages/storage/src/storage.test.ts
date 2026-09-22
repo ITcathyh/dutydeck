@@ -49,3 +49,17 @@ describe('storage windows and task recovery context', () => {
     repos.close();
   });
 });
+
+it('decodes currentAttemptId from both Drizzle rows and raw SQLite retry rows', async () => {
+  const repos = createRepositories(':memory:');
+  try {
+    const task: TaskRecord = { id: 'task_attempt', sessionId: 'ses_attempt', prompt: 'task', status: 'queued',
+      currentAttemptId: 'attempt_current', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    await repos.tasks.save(task);
+    expect(await repos.tasks.get!(task.id)).toMatchObject({ currentAttemptId: 'attempt_current' });
+    expect((await repos.tasks.listBySession(task.sessionId))[0]).toMatchObject({ currentAttemptId: 'attempt_current' });
+    expect((await repos.tasks.enqueue!(task, 'back')).task).toMatchObject({ currentAttemptId: 'attempt_current' });
+    await repos.tasks.save({ ...task, id: 'legacy', currentAttemptId: undefined });
+    expect(await repos.tasks.get!('legacy')).not.toHaveProperty('currentAttemptId');
+  } finally { repos.close(); }
+});

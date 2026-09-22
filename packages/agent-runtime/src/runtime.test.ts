@@ -1443,3 +1443,30 @@ describe('publishSessionEvent — 带外事件入口（@dutydeck/relay 的落点
     await h.runtime.shutdown(); h.repos.close();
   }, 15_000);
 });
+
+it('exposes only the matching active attempt and preserves currentAttemptId through repository reads and restart', async () => {
+  const gate = deferred();
+  const h = harness();
+  h.driver.send = vi.fn(async () => { await gate.promise; h.emit({ type: 'text', data: { text: 'done' } }); h.emit({ type: 'completed', data: { stopReason: 'end_turn' } }); });
+  await h.runtime.initialize([agent]);
+  const session = await h.runtime.start({ agentId: 'mock' });
+  expect(h.runtime.getActiveTaskContext(session.id)).toBeUndefined();
+  const sending = h.runtime.send(session.id, 'answer');
+  await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeTruthy());
+  const active = h.runtime.getActiveTaskContext(session.id)!;
+  expect((await h.repos.tasks.get!(active.taskId))?.currentAttemptId).toBe(active.attemptId);
+  expect((await h.runtime.getTasks(session.id))[0]?.currentAttemptId).toBe(active.attemptId);
+  const owner = (h.runtime as any).attempts.get(session.id);
+  const ref = (h.runtime as any).attemptRefs.get(owner);
+  (h.runtime as any).attemptRefs.set(owner, { ...ref, taskId: 'another-task' });
+  expect(h.runtime.getActiveTaskContext(session.id)).toMatchObject({ taskId: active.taskId });
+  expect(h.runtime.getActiveTaskContext(session.id)?.attemptId).toBeUndefined();
+  (h.runtime as any).attemptRefs.set(owner, ref);
+  gate.resolve(); await sending; await h.runtime.shutdown();
+  const restarted = new DutydeckRuntime(h.repos);
+  try {
+    await restarted.initialize([agent]);
+    expect((await restarted.getTasks(session.id))[0]).toMatchObject({ id: active.taskId, currentAttemptId: active.attemptId, status: 'completed' });
+    expect(restarted.getActiveTaskContext(session.id)).toBeUndefined();
+  } finally { await restarted.shutdown(); h.repos.close(); }
+});

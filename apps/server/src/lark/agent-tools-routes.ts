@@ -12,6 +12,8 @@ interface GroupToolQuery {
 }
 
 interface GroupSendBody {
+  final?: boolean;
+  turn?: string;
   content?: string;
   to?: string;
   replyTo?: string;

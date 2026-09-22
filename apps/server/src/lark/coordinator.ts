@@ -1,3 +1,4 @@
+import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { createHash } from 'node:crypto';
 import { describeLarkTaskRecovery } from './task-recovery.js';
@@ -800,7 +801,13 @@ export class LarkMessageCoordinator {
           return config;
         }
       },
-      ...(this.workflows ? { resultElements: (mapping, saved, cardId) => this.reconciledResult(mapping, saved, cardId) } : {})
+      resultElements: (mapping, saved, cardId) => this.reconciledResult(mapping, saved, cardId),
+      terminalDecoration: async (mapping, saved, effective) => {
+        const restored = this.restoredCardTask(effective, mapping, saved);
+        const verification = await this.verificationView(restored, effective, saved.state as LarkCardActionState);
+        return { elements: verification.element ? [verification.element] : [],
+          cardInput: { capabilities: { ...this.capabilitiesForTask(restored), canVerify: verification.canRun } } };
+      }
     });
     unresolved += await this.workflows?.reconcile(config.appId) ?? 0;
     for (const record of await this.workflows?.list(config.appId) ?? []) {
@@ -3070,15 +3077,25 @@ export class LarkMessageCoordinator {
     const deliverTerminal = (state: 'completed' | 'failed' | 'interrupted' | 'cancelled', completed = false) => {
       if (task.finalDeliveredTurn === currentTurn && (task.finalMessageId || task.finalDeliveryState === 'reaction')) return Promise.resolve();
       if (terminalDelivery) return terminalDelivery;
-      terminalDelivery = (async () => {
+      terminalDelivery = withExplicitFinalLock(this.workflowOptions.store, task.runtimeTaskId ?? task.id, async () => {
         await update(state);
         // 终态先撤置顶：轮次校验之后再撤，重试开的新一轮会让上一轮的进度卡永远挂在置顶里。
         await this.unpinTaskCard(task);
         if (this.stopped || task.turn !== currentTurn) return;
+        const runtimeTask = state === 'completed' && task.sessionId && task.runtimeTaskId
+          ? (await this.runtime.getTasks?.(task.sessionId))?.find(item => item.id === task.runtimeTaskId) : undefined;
+        const finalContext = state === 'completed' && task.sessionId ? explicitFinalContext(
+          { externalId: task.id, sessionId: task.sessionId }, {
+            app_id: config.appId, chat_id: event.chatId, chat_type: event.chatType,
+            runtime_task_id: task.runtimeTaskId, task_name: prompt.slice(0, 80), prompt,
+            state, started_at: task.startedAt!, turn: currentTurn,
+            ...(event.chatType === 'group' ? { reply_message_id: event.messageId, reply_in_thread: Boolean(event.threadId?.trim()) } : {})
+          }, runtimeTask?.currentAttemptId) : undefined;
+        const explicit = await hasExplicitFinal(this.workflowOptions.store, finalContext);
         // 完成时只贴表情：成功终态改为在原消息上贴一枚表情，不再发结果卡。
         // 只对成功终态生效——失败/中断/取消仍必须发结果卡，一个表情等于把失败藏起来。
         // 任务通道的合成事件没有可贴的原消息，只能照常发结果卡，否则用户什么也收不到。
-        if (completionReactionOnly && state === 'completed' && !larkTaskAgentGuid(event.messageId)) {
+        if (!explicit && completionReactionOnly && state === 'completed' && !larkTaskAgentGuid(event.messageId)) {
           const reacted = await deliverLarkCompletionReaction(this.service, { appId: config.appId, messageId: event.messageId }, this.log, this.workflowOptions.store);
           if (this.stopped || task.turn !== currentTurn) return;
           // 贴失败就不记「已交付」：这枚表情是用户唯一能看到的完成信号，交给对账重试。
@@ -3098,7 +3115,7 @@ export class LarkMessageCoordinator {
         const verification = await this.verificationView(task, config, state);
         const elements = [
           ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : []),
-          ...renderLarkResultElements(task.events),
+          ...(explicit ? [] : renderLarkResultElements(task.events)),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
           ...(verification.element ? [verification.element] : [])];
         if (this.stopped || task.turn !== currentTurn) return;
@@ -3109,7 +3126,7 @@ export class LarkMessageCoordinator {
           capabilities: { ...this.capabilitiesForTask(task), canVerify: verification.canRun },
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
         };
-        const result = await sendLarkResult(this.service, {
+        const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements) ?? await sendLarkResult(this.service, {
           chatId: event.chatId,
           ...(event.chatType === 'group' ? { replyMessageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) } : {})
         }, { ...resultCardInput, elements, idempotencyKey: larkResultKey(task.cardMessageId ?? larkSilentResultAnchor(task.id, currentTurn)) }, this.log, this.workflowOptions.store);
@@ -3130,7 +3147,7 @@ export class LarkMessageCoordinator {
           const feedback = (await this.workflows.list(config.appId)).find(item => item.kind === 'result' && item.taskId === context.taskId && ['accepted', 'needs_changes'].includes(item.state));
           if (feedback) await this.refreshResultFeedback(config, feedback.id);
         }
-      })().catch(error => {
+      }).catch(error => {
         this.log.error({ error, taskId: task.id, state }, '交付飞书执行结果失败，等待对账补偿');
         this.scheduleReconcile();
       }).finally(() => { terminalDelivery = undefined; });
