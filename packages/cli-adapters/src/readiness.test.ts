@@ -461,3 +461,56 @@ describe('readiness review regressions through prepareInput', () => {
     }
   });
 });
+
+describe('upstream native startup layout compatibility', () => {
+  const traex = JSON.parse(readFileSync(join(__dirname, 'fixtures/traex-startup/native.json'), 'utf8')) as { loading: string; loaded: string };
+
+  it('holds the real TraeX loading frame then accepts its exact loaded placeholder and directory footer', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = createMockBackend(traex.loading);
+      let settled = false;
+      const pending = createTraexAdapter().prepareInput!(backend, { sessionId: SID }).then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(false);
+      backend.screenText = traex.loaded;
+      await vi.advanceTimersByTimeAsync(100);
+      await pending;
+      expect(settled).toBe(true);
+      expect(backend.writes).toEqual([]);
+      expect(backend.specialKeys).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('accepts the same TraeX initialized composer/footer when the banner has scrolled out', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = createMockBackend(traex.loaded.slice(traex.loaded.indexOf('❯')));
+      await createTraexAdapter().prepareInput!(backend, { sessionId: SID });
+      expect(backend.writes).toEqual([]);
+      expect(backend.specialKeys).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it.each(['~/Code/example', '/tmp/project'])('accepts the upstream compact Codex Context footer with directory %s', async directory => {
+    vi.useFakeTimers();
+    try {
+      const backend = createMockBackend(`› Ask Codex to do anything\n  custom-model medium · ${directory} · Context 85% used · weekly 38% left`);
+      await createCodexAdapter().prepareInput!(backend, { sessionId: SID });
+      expect(backend.writes).toEqual([]);
+      expect(backend.specialKeys).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('does not mistake a human filename substituted into the placeholder for an empty composer', async () => {
+    vi.useFakeTimers();
+    try {
+      const backend = createMockBackend(traex.loaded.replace('@filename', '@actual-file.ts'));
+      const rejected = expect(createTraexAdapter().prepareInput!(backend, { sessionId: SID })).rejects.toThrow(/就绪/);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejected;
+      expect(backend.writes).toEqual([]);
+      expect(backend.specialKeys).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+});
