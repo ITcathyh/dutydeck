@@ -1,13 +1,8 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
+import { pollScreenReady } from './screen-ready-helper.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
-const STARTUP_POLL_MS = 100;
-const STARTUP_TIMEOUT_MS = 30_000;
-
-const CODEX_STARTUP_PENDING_PATTERN = /│[ \t]+(?:model|directory):[ \t]+loading\b/;
-const CODEX_STARTUP_READY_PATTERN = /│[ \t]+model:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│[ \t\r\n]*│[ \t]+directory:[ \t]+(?!loading\b)[^│\s][^│\r\n]*│/;
-const CODEX_COMPOSER_PATTERN = /›(?!\s*\d+\.)/;
 
 /** Codex 活动态 busy 标记：turn 进行中重绘的状态行。 */
 const CODEX_ACTIVE_BUSY_PATTERN = /Working[^\r\n]{0,160}esc to interrupt/i;
@@ -49,22 +44,7 @@ export function createCodexAdapter(): CliAdapter {
     },
 
     async prepareInput(backend: PtyLike): Promise<void> {
-      if (!backend.readScreen) {
-        throw new Error('Codex startup readiness requires a terminal screen reader');
-      }
-
-      const startedAt = Date.now();
-      while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
-        const screen = backend.readScreen();
-        const pending = CODEX_STARTUP_PENDING_PATTERN.test(screen);
-        if (CODEX_STARTUP_READY_PATTERN.test(screen)) return;
-        // Older/non-standard banners may omit the model and directory cells.
-        // A composer is usable unless the same screen explicitly says startup
-        // is still loading.
-        if (!pending && CODEX_COMPOSER_PATTERN.test(screen)) return;
-        await delay(STARTUP_POLL_MS);
-      }
-      throw new Error('Codex 启动尚未就绪，请打开终端检查启动状态后再发送任务。');
+      await pollScreenReady(backend, 'Codex');
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
