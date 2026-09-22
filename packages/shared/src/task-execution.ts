@@ -116,7 +116,7 @@ export interface RecoveryDecisionInput {
 export type SettlementEvidence =
   | { kind: 'driver_result'; submissionId: string; outcome: 'completed' | 'failed' | 'interrupted'; outputDigest: string; stopReason: string; complete: true }
   | { kind: 'not_submitted'; outcome: 'failed' | 'cancelled'; reason: string }
-  | { kind: 'manual'; outcome: AttemptOutcome; decision: RecoveryDecisionInput };
+  | { kind: 'manual'; outcome: AttemptOutcome; decision: RecoveryDecisionInput; verifiedOutput?: { eventId: string; digest: string } };
 export interface ReconcileReason { reasonId: string; code: string; evidenceRefs: string[] }
 export type RecoveryEvidence =
   | { kind: 'unsubmitted_preparation'; decisionId: string; safeResources: ResourceCheckRef[] }
@@ -182,6 +182,7 @@ export interface BoundExecutionRepository {
   markSubmissionPending(f: AttemptFence, input: SubmissionIntent): CommitResult;
   markSubmitted(f: AttemptFence, receipt: SubmissionReceipt): CommitResult;
   settleAttempt(f: AttemptFence, settlementId: string, evidence: SettlementEvidence): CommitResult;
+  confirmAttemptRecovery(f: AttemptFence, settlementId: string, evidence: Extract<SettlementEvidence, { kind: 'manual' }>, verifiedOutputText?: string): CommitResult;
   suspendUnsubmitted(f: AttemptFence): CommitResult;
   cancelQueued(f: SessionFence, taskId: string, expectedTaskRevision: number, decision: RecoveryDecisionInput): CommitResult;
   markReconcileRequired(f: AttemptFence, reason: ReconcileReason): CommitResult;
@@ -203,6 +204,7 @@ export interface BoundExecutionRepository {
   assertDriverSubmission(f: SessionFence, input: {taskId:string;attemptId:string;submissionId:string;driverInstanceId:string;inputDigest:string}): void;
   authorizeNativeContextControl(f: SessionFence, actor: ExecutionActor): void;
   probePhysicalResource(f: SessionFence, resourceId: string, expectedRevision: number): DriverResource;
+  clearVerifiedStopBlock(f: SessionFence, expectedValue: string): boolean;
   confirmNativeContext(f: SessionFence, resourceId: string, expectedRevision: number, identity: NativeContextIdentity): NativeContextSelection;
   confirmNativeContextRestore(f: SessionFence, input: { operationId: string; context: NativeContextRef; expectedRevision: number; selectionRevision: number; proofId: string; identity: NativeContextIdentity }): NativeContextBinding;
   replaceNativeContext(f: SessionFence, decision: NativeContextReplacement): void;
@@ -324,7 +326,7 @@ export const taskExecutionSchemas = {
   sessionSchema: z.object({ id, agentId: id, state: z.enum(['created','starting','idle','thinking','running_tool','waiting_for_permission','interrupting','interrupted','completed','failed','stopped']), cwd: id, runId: id, createdAt: z.string().datetime(), updatedAt: z.string().datetime(), model: z.string().optional(), reasoningEffort: z.string().optional(), systemPrompt: z.string().optional(), permissionMode: z.enum(['ask','approve-reads','deny-all','full-trust']).optional(), source: id.optional(), sourceId: id.optional(), archivedAt: z.string().optional(), protocol: z.enum(['acp','jsonl','pipe','pty','pty-cli']).optional(), error: z.string().optional(), workspaceMode: z.enum(['shared','worktree']).optional(), workspaceSourceCwd: id.optional() }).strict(),
   driverResult: z.object({ kind:z.literal('driver_result'), submissionId:id, outcome:z.enum(['completed','failed','interrupted']), outputDigest:executionDigestSchema, stopReason:id, complete:z.literal(true) }).strict(),
   notSubmitted: z.object({ kind:z.literal('not_submitted'), outcome:z.enum(['failed','cancelled']), reason:id }).strict(),
-  manual: z.object({ kind:z.literal('manual'), outcome:z.enum(['completed','failed','interrupted','cancelled','unknown']), decision:decisionSchema }).strict(),
+  manual: z.object({ kind:z.literal('manual'), outcome:z.enum(['completed','failed','interrupted','cancelled','unknown']), decision:decisionSchema, verifiedOutput:z.object({eventId:id,digest:executionDigestSchema}).strict().optional() }).strict(),
   position: z.enum(['front','back']),
   queueOperation: z.object({ operationId:id, actor:executionActorSchema, interrupt:z.boolean() }).strict(),
   queueEvidence: z.object({ evidenceId:id, state:z.enum(['applied','blocked','obsolete']), reason:id, resourceChecks:resourceChecksSchema }).strict(),

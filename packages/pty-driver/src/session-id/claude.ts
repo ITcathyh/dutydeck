@@ -17,11 +17,11 @@
  * on recency: several dutydeck sessions can share a cwd, and picking the
  * newest jsonl among them would resume a sibling's conversation.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { claudeProjectDir } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from './fs-scan.js';
-import { isUsableMarker } from './marker.js';
+import { buildSessionMarker, isUsableMarker } from './marker.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
 
 /** Head window per candidate transcript. The marker rides the FIRST user
@@ -55,6 +55,23 @@ function entrySessionId(entry: any): string | undefined {
   return typeof id === 'string' && id.length > 0 ? id : undefined;
 }
 
+function markedSession(path: string, sessionId: string, requireMarker: boolean): string | undefined {
+  for (const entry of parseJsonlObjects(readHead(path, HEAD_BYTES))) {
+    if (entry?.isSidechain === true) continue;
+    if (requireMarker && (entry?.type !== 'user' || entry?.message?.role !== 'user')) continue;
+    if (!entryMentions(entry, requireMarker ? buildSessionMarker(sessionId) : sessionId)) continue;
+    return entrySessionId(entry) ?? (path.replace(/^.*\//, '').replace(/\.jsonl$/, '') || undefined);
+  }
+  return undefined;
+}
+
+/** A pinned native id may not be reused for a fresh launch, even when its marker is unreadable. */
+export function hasPinnedClaudeSession(adapterId: string, { sessionId, cwd, env }: SessionIdLookupContext): boolean {
+  if (!claudeSessionIdLookup.adapterIds.includes(adapterId)) return false;
+  try { lstatSync(join(claudeProjectDir(cwd, env), `${bareId(sessionId)}.jsonl`)); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
+}
+
 export const claudeSessionIdLookup: SessionIdLookup = {
   // Claude Code plus its two forks: same per-project JSONL layout, same
   // `sessionId`-per-entry field, same filename-is-the-session-id rule. Only
@@ -62,12 +79,18 @@ export const claudeSessionIdLookup: SessionIdLookup = {
   // CLAUDE_CONFIG_DIR must be set through `agent.env`).
   adapterIds: ['claude-code', 'seed', 'relay'],
 
-  resolve({ sessionId, cwd, env }: SessionIdLookupContext): string | undefined {
+  resolve({ sessionId, cwd, env, requireMarker }: SessionIdLookupContext): string | undefined {
     const projectDir = claudeProjectDir(cwd, env);
 
     // Fast path: dutydeck pinned the id via --session-id and Claude accepted it.
     const pinned = bareId(sessionId);
-    if (pinned && existsSync(join(projectDir, `${pinned}.jsonl`))) return pinned;
+    const pinnedPath = join(projectDir, `${pinned}.jsonl`);
+    if (pinned && existsSync(pinnedPath)) {
+      if (!requireMarker) return pinned;
+      // Do not let unrelated newer files push the exact pinned transcript out
+      // of the bounded scan. A conflicting pinned file must not be adopted.
+      return isUsableMarker(sessionId) ? markedSession(pinnedPath, sessionId, true) : undefined;
+    }
 
     if (!isUsableMarker(sessionId)) return undefined;
 
@@ -79,17 +102,8 @@ export const claudeSessionIdLookup: SessionIdLookup = {
     }).sort(byMtimeDesc).slice(0, MAX_CANDIDATES);
 
     for (const candidate of candidates) {
-      const entries = parseJsonlObjects(readHead(candidate.path, HEAD_BYTES));
-      for (const entry of entries) {
-        if (entry?.isSidechain === true) continue;
-        if (!entryMentions(entry, sessionId)) continue;
-        // Prefer the id the CLI recorded in the entry; fall back to the
-        // filename stem (Claude names the file after its session id).
-        const fromEntry = entrySessionId(entry);
-        if (fromEntry) return fromEntry;
-        const stem = candidate.path.replace(/^.*\//, '').replace(/\.jsonl$/, '');
-        return stem.length > 0 ? stem : undefined;
-      }
+      const found = markedSession(candidate.path, sessionId, !!requireMarker);
+      if (found) return found;
     }
     return undefined;
   },

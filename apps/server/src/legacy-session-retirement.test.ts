@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -76,6 +76,20 @@ describe('legacy retirement resource verification', () => {
     await expect(verify(candidate({ sessionId: 'ses_missing', runId: 'run_missing' }))).resolves.toMatchObject({
       status: 'ready', receipt: { evidence: { outcome: 'already_missing' } }
     });
+  });
+
+  it('keeps the batch socket bound after an absent first target and rejects a replacement server', async () => {
+    const socketPath = socket();
+    runTmux(socketPath, ['new-session', '-d', '-s', 'first_unrelated', 'sleep 60']);
+    const verify = createLegacyRetirementVerifier(options({ tmuxSocket: socketPath }));
+    await expect(verify(candidate())).resolves.toMatchObject({ status: 'ready', receipt: { evidence: { outcome: 'already_missing' } } });
+    const movedSocket = `${socketPath}-original`;
+    renameSync(socketPath, movedSocket); sockets.push(movedSocket);
+    const target = dutydeckPtySessionName('ses_private');
+    runTmux(socketPath, ['new-session', '-d', '-s', target, 'sleep 60']);
+    runTmux(socketPath, ['set-option', '-t', target, '@dutydeck_owner_id', 'dutydeck:ses_private']);
+    await expect(verify(candidate())).resolves.toMatchObject({ status: 'blocked', code: 'LEGACY_TMUX_SOCKET_CHANGED' });
+    expect(() => runTmux(socketPath, ['has-session', '-t', `=${target}`])).not.toThrow();
   });
 
   it('classifies an invalid socket path as blocked without touching another server', async () => {

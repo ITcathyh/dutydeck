@@ -101,7 +101,7 @@ async function harness(options: { timeoutMs?: number; agentModel?: string; userA
 
   // 只有 interrupt 走替身：超时用例要断言管线确实发了中断，又不能让真实中断与 mock driver 的
   // 延迟回复互相抢同一个任务的终态。
-  const memoryInterrupt = vi.fn(async (_id: string, _taskId?: string) => {});
+  const memoryInterrupt = vi.fn(async (_id: string, _taskId?: string, _actor?: string) => ({ interrupted: false, reason: 'test_unconfirmed' }));
   // start 也走替身：记录每次入参，并让用例模拟 runtime 拒绝某个权限模式（PTY 类 Agent）。
   const startCalls: StartInput[] = [];
   const pipeline = new LarkMemoryPipeline({
@@ -111,9 +111,12 @@ async function harness(options: { timeoutMs?: number; agentModel?: string; userA
       listSessions: () => runtime.listSessions(),
       dispatch: (id, prompt, mode, agentPrompt) => runtime.dispatch(id, prompt, mode, agentPrompt),
       getTasks: id => runtime.getTasks(id),
+      getTaskRecovery: (id, taskId) => runtime.getTaskRecovery(id, taskId),
+      cancelQueued: (id, taskId, actor, revision) => runtime.cancelQueued(id, taskId, actor, revision),
       interrupt: memoryInterrupt,
       subscribe: (id, listener) => runtime.subscribe(id, listener)
     },
+    controlActorId: 'installation_owner',
     repos: { execution: repos.execution },
     store,
     projection,
@@ -662,7 +665,7 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect((await h.store.getState(scope)).turnsSinceConsolidation).toBe(2);
   });
 
-  it('记忆会话超时：中断该任务、记失败并清掉 running', async () => {
+  it('记忆会话超时但中断未确认：保留原任务、报告恢复所需并清掉管线 running', async () => {
     const h = await harness({ timeoutMs: 30 });
     h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }), delayMs: 1_500 }));
 
@@ -670,12 +673,12 @@ describe('Lark memory pipeline through the coordinator', () => {
     await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
 
     const run = await h.pipeline.runConsolidation(scope);
-    expect(run).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_RUN_TIMEOUT' });
+    expect(run).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
     expect(h.memoryInterrupt).toHaveBeenCalledTimes(1);
 
     const state = await h.store.getState(scope);
     expect(state.running).toBeUndefined();
-    expect(state.lastRun).toMatchObject({ ok: false, error: 'MEMORY_RUN_TIMEOUT' });
+    expect(state.lastRun).toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
     expect(await h.store.list(scope)).toHaveLength(1);
   });
 });

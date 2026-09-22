@@ -61,6 +61,8 @@ export class DriverRecoveryError extends Error {
 
 /** Agent 驱动：一个实现 = 一种 Agent 接入形态 */
 export interface AgentDriver {
+  /** Runtime chooses whether uncertain execution must remain attached to its persistent session. */
+  prepareForDaemonShutdown?(preserveSession: boolean): void | Promise<void>;
   /** 启动/确保会话就绪（ACP ensureSession / PTY spawn CLI）。失败必须抛错。 */
   start(): Promise<void>;
   /**

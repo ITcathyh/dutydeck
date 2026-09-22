@@ -894,3 +894,27 @@ describe('conservative urgency in workflow interactions', () => {
   });
 });
 
+
+describe('过期审批跟随权威恢复状态', () => {
+  it('blocked and manually settled unknown requests show consistent cards and callback errors without approving', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const { runtime, resolvePermission } = makeRuntime([runningTask({ status: 'reconcile_required' })], []);
+      const recovery = vi.fn(async () => ({ status: 'reconcile_required', blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }], resolvedUnknown: false }));
+      runtime.getTaskRecovery = recovery;
+      const { service } = makeService();
+      const record = interaction({ kind: 'permission', state: 'expired' });
+      await persistInteraction(repositories.config, record);
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.initialize('app_one');
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls)).toContain('请联系管理员');
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls)).not.toContain('重新提问');
+      await expect(workflow.respond(responseInput(record, { action: 'approve' }))).rejects.toThrow('请联系管理员');
+      recovery.mockResolvedValue({ status: 'reconcile_required', blockers: [], resolvedUnknown: true });
+      await workflow.reconcile('app_one');
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls.at(-1))).toContain('可以继续发送新请求');
+      await expect(workflow.respond(responseInput(record, { action: 'approve' }))).rejects.toThrow('结果未确认');
+      expect(resolvePermission).not.toHaveBeenCalled();
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+});

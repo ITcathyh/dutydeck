@@ -1150,3 +1150,40 @@ describe('SQLite + DutydeckRuntime 的命令恢复集成', () => {
     }
   });
 });
+
+describe('实时静默轮次仍交付恢复异常', () => {
+  it('uses a separate durable receipt for buffered recovery events without marking final delivery', async () => {
+    const repos = createRepositories(':memory:');
+    const h = persistentRuntime();
+    let listener: ((event: any) => void) | undefined;
+    const runtime = {
+      ...h.runtime,
+      getEvents: vi.fn(async () => []),
+      getTaskRecovery: vi.fn(async () => ({ status: 'reconcile_required', blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] })),
+      subscribe: vi.fn((_id: string, callback: (event: any) => void) => { listener = callback; return () => { listener = undefined; }; }),
+      dispatch: vi.fn(async (id: string) => {
+        const task = runtimeTask({ id: 'unknown_task', sessionId: id, status: 'reconcile_required' });
+        h.tasks.set(id, [task]);
+        listener?.({ type: 'task', data: { task } });
+        return { ...task, status: 'queued' };
+      })
+    };
+    const service = cardService();
+    const log = silentLog();
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot',
+      undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
+    try {
+      await repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...config, silentProgress: true }]));
+      await coordinator.handle(dm('om_recovery_live', '执行任务'), { ...config, silentProgress: true });
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '任务恢复提醒', statusLabel: '需要核对' })), { timeout: 3000 });
+      listener?.({ type: 'task', data: { task: h.tasks.get('ses_1')![0] } });
+      await new Promise(resolve => setTimeout(resolve, 30));
+      expect(service.send.mock.calls.filter(([input]) => input.taskName === '任务恢复提醒')).toHaveLength(1);
+      const rows = await repos.channelMappings.list('lark-card:cli_test');
+      expect(rows).toHaveLength(1);
+      expect(JSON.parse(rows[0]!.extra!)).not.toHaveProperty('final_message_id');
+      expect(JSON.parse(rows[0]!.extra!)).not.toHaveProperty('final_delivery_state');
+      expect(await repos.config.list('lark.recovery.')).toHaveLength(1);
+    } finally { coordinator.stop(); repos.close(); }
+  });
+});

@@ -790,7 +790,8 @@ describe('飞书输入明确反馈与提问生命周期', () => {
     expect(await waiting).toMatchObject({ status: 'expired' });
     await vi.waitFor(() => expect(h.cards.get(record.cardId!)).toMatchObject({ statusLabel: '已失效', readOnly: true }), { timeout: 1_500 });
     expect(callbackValues(h.cards.get(record.cardId!))).toHaveLength(0);
-    expect(JSON.stringify(h.cards.get(record.cardId!))).toContain('重新提问');
+    expect(JSON.stringify(h.cards.get(record.cardId!))).toContain('/status');
+    expect(JSON.stringify(h.cards.get(record.cardId!))).not.toContain('重新提问');
     expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: record.cardId!, chatId: 'oc_group' })).toMatchObject({ type: 'error', content: expect.stringContaining('失效') });
     await h.coordinator.handle(event('om_expired_reply', '继续', { parentId: record.cardId }), h.config);
     expect(h.send).toHaveBeenCalledTimes(1);

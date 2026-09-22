@@ -56,3 +56,8 @@ export {
   type BackendSelection,
   type SelectBackendOptions,
 } from './backend-selector.js';
+export {
+  captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit,
+  type OwnedTmuxScope, type OwnedTmuxIdentity, type OwnedTmuxExitProof,
+  type PhysicalProcessIdentity, type ProcessProbe,
+} from './owned-tmux.js';

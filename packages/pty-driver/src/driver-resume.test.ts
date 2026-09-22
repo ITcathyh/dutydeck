@@ -20,6 +20,7 @@ import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { createClaudeCodeAdapter } from '@dutydeck/cli-adapters';
 import { PtyBackend, TmuxBackend, isTmuxAvailable } from '@dutydeck/session-backends';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { PtyCliDriver } from './driver.js';
 import { buildSessionMarker } from './session-id/index.js';
 
@@ -968,7 +969,8 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     `);
     const name = tmuxName();
     const agent = agentConfig({ cwd, args: [wrapper, '--settings={"env":{"TOKEN":"fixture-secret"}}'], env: { CLAUDE_CONFIG_DIR: cwd } });
-    const create = () => new PtyCliDriver({ agent, adapter: createClaudeCodeAdapter(), backend: new TmuxBackend(name),
+    const create = () => new PtyCliDriver({ agent, adapter: createClaudeCodeAdapter(), backend: new TmuxBackend(name, { ownerId: `dutydeck:${name}` }),
+      processProbe: { identify: childProcessIdentity, observe: observeProcess },
       onEvent: () => {}, onExit: () => {}, sessionId: name });
     const original = create();
     let adopted: PtyCliDriver | undefined;

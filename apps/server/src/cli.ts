@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { RecoveryCliError, runRecoveryCli } from './recovery-cli.js';
 import { runCollaboration } from './collaboration-cli.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -207,6 +208,7 @@ async function main() {
     } finally { repositories.close(); }
   };
   const program = createCliProgram(packageJson.version, {
+    recovery: async (operation, sessionId, options) => { output(await runRecoveryCli(operation, sessionId, options)); },
     serve,
     setup: async options => {
       const result = await runSetup(options);
@@ -372,7 +374,7 @@ try {
   else if (error instanceof LegacyImportError || error instanceof LegacyImportCliError) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   }
-  else if (error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
+  else if (error instanceof RecoveryCliError || error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   // setup 的三类错误自带中文说明和「该补哪个 flag」，直接原样呈现，不要压成 JSON 或堆栈。
   else if (error instanceof PromptUnavailableError || error instanceof PromptAbortedError || error instanceof InvalidWorkingDirectoryError) {
     process.stderr.write(`${error.message}\n`);

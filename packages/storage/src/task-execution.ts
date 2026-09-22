@@ -708,6 +708,23 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             a.receipt=receipt;a.submissionState='acknowledged';touch(t,a);return transitions(f,t,a);
           });
         }); },
+        confirmAttemptRecovery(f, settlementId, evidence, verifiedOutputText) { return write(owner => {
+          id.parse(settlementId);
+          if (evidence.verifiedOutput || (evidence.outcome === 'completed') !== (typeof verifiedOutputText === 'string')) fail('RECOVERY_OUTPUT_REQUIRED');
+          if (verifiedOutputText !== undefined && Buffer.byteLength(verifiedOutputText, 'utf8') > 512 * 1024) fail('TASK_RESULT_OUTPUT_TOO_LARGE');
+          parse(taskExecutionSchemas.manual, evidence);
+          if (evidence.decision.actor.kind !== 'installation_owner') fail('RECOVERY_OWNER_REQUIRED');
+          validateManagementActor(f, f.taskId, evidence.decision.actor);
+          return attemptCommand(f, `settlement:${settlementId}`, { evidence, ...(verifiedOutputText !== undefined ? { verifiedOutputText } : {}) }, () => {
+            const { t, a } = currentAttempt(f, owner, true);
+            assertResources(f, evidence.decision.resourceChecks);
+            if (verifiedOutputText === undefined) return settle(f, t, a, settlementId, evidence);
+            const eventId = `recovery_output_${hash(stable([f.sessionId, f.runId, f.taskId, f.attemptId, settlementId]))}`;
+            const event = append(f, { id: eventId, type: 'text', data: { role: 'assistant', text: verifiedOutputText, recovery: { decisionId: evidence.decision.decisionId, actor: evidence.decision.actor, evidenceRefs: evidence.decision.evidenceRefs } } }, a, settlementId);
+            const result = settle(f, t, a, settlementId, { ...evidence, verifiedOutput: { eventId, digest: hash(verifiedOutputText) } });
+            return { ...result, events: [event, ...result.events] };
+          });
+        }); },
         settleAttempt(f, settlementId, evidence) { return write(owner => {
           id.parse(settlementId);
           if (evidence.kind === 'manual') validateManagementActor(f,f.taskId,parse(taskExecutionSchemas.manual,evidence).decision.actor);
@@ -992,6 +1009,25 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             // This recovers the creation receipt, not an attached client or an active turn.
             saveResource(r);saveNativeSelection(f.sessionId,selection);return selection;
           });
+        }); },
+        clearVerifiedStopBlock(rawFence, expectedValue) { return write(() => {
+          const f = readFence(rawFence);
+          const key = `runtime_driver_stop_block:${f.sessionId}`;
+          const row = db.prepare('SELECT value FROM configs WHERE key=?').get(key) as { value: string } | undefined;
+          if (!row?.value) return false;
+          if (row.value !== expectedValue) fail('DRIVER_STOP_BLOCK_CONFLICT');
+          let block: { sessionId?: string; runId?: string };
+          try { block = JSON.parse(row.value); if (!block || typeof block !== 'object') fail('DRIVER_STOP_BLOCK_INVALID'); } catch { fail('DRIVER_STOP_BLOCK_INVALID'); }
+          if (block.sessionId !== f.sessionId || block.runId !== f.runId) fail('SESSION_RUN_CONFLICT');
+          // No ownership-based live exemption: every old physical resource must be proven gone.
+          const unsafe = blockers(f.sessionId).filter(item => item.code !== 'DRIVER_STOP_BLOCKED');
+          if (unsafe.length) fail('SESSION_RESOURCE_BLOCKED', json(unsafe));
+          const checks = resources(f.sessionId).map(r => ({ resourceId: r.resourceId, revision: r.revision, ...(r.observations.length ? { observation: r.observations.at(-1)! } : {}) }));
+          command(`clear_stop:${randomUUID()}`, { ...f, expectedValue, checks }, () => {
+            db.prepare("UPDATE configs SET value='' WHERE key=? AND value=?").run(key, expectedValue);
+            return { cleared: true };
+          });
+          return true;
         }); },
         probePhysicalResource(rawFence,resourceId,expectedRevision) {
           if(db.inTransaction)fail('RESOURCE_OBSERVATION_IN_TRANSACTION');

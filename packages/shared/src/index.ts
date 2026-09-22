@@ -461,3 +461,5 @@ export * from './bot-configuration-scope.js';
 export * from './driver-resources.js';
 
 export * from './collaboration.js';
+
+export * from './execution-recovery.js';

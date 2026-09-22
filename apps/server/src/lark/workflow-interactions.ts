@@ -1,3 +1,4 @@
+import { describeLarkTaskRecovery } from './task-recovery.js';
 import { permissionDisplayText } from '@dutydeck/shared';
 import { createHash, randomUUID } from 'node:crypto';
 import type { AgentEvent, ConfigRepository, PermissionRequestData, PolicyAction } from '@dutydeck/shared';
@@ -42,7 +43,7 @@ export interface LarkInteraction extends LarkInteractionContext {
 }
 const deadlineText = (expiresAt: string) => `${new Date(expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）`;
 const prefix = (appId: string) => `lark.interaction.${appId}.`;
-const stale = () => new LarkServiceError('LARK_INTERACTION_EXPIRED', '此操作已处理或失效。需要继续时，请发送新消息重新提问。', 409);
+const stale = () => new LarkServiceError('LARK_INTERACTION_EXPIRED', '此操作已处理或失效。请发送 `/status` 查看任务状态，不要重复操作旧卡。', 409);
 const button = (record: LarkInteraction, action: string, label: string): LarkCardElement => ({
   tag: 'button', element_id: `workflow_${action}`, text: { tag: 'plain_text', content: label }, type: action === 'approve' ? 'primary' : 'default',
   behaviors: [{ type: 'callback', value: { dutydeck_workflow: action, request_id: record.id, generation: record.boot } }]
@@ -178,7 +179,7 @@ export class LarkWorkflowInteractions {
   async initialize(appId: string) {
     for (const record of await this.list(appId)) {
       if (record.kind !== 'result' && record.state === 'expired') {
-        await this.renderClosed(record, this.expiryMessage(record));
+        await this.renderClosed(record, await this.expiryMessage(record));
       } else if (record.kind !== 'result' && ['pending', 'resolving'].includes(record.state)) {
         // 快照与 move 之间记录可能已被旧协调器的 in-flight 终态处理移走（stop 不拦截
         // detached 续跑）；那种情况下重启收敛的目标已经达成，重读确认后不再重复处理，
@@ -193,12 +194,17 @@ export class LarkWorkflowInteractions {
           if (!['pending', 'resolving'].includes(stored.state)) continue;
           target = stored;
         }
-        await this.renderClosed(target, this.expiryMessage(target));
+        await this.renderClosed(target, await this.expiryMessage(target));
       }
     }
   }
-  private expiryMessage(record: LarkInteraction) {
-    return `${record.expiresAt ? `回答截止时间：${deadlineText(record.expiresAt)}。\n\n` : ''}此请求已结束，不再接受回答或批准。需要继续时，请发送新消息重新提问，不要回复这张旧卡。`;
+  private async expiryMessage(record: LarkInteraction) {
+    const task = (await this.runtime.getTasks?.(record.sessionId))?.find(item => item.id === record.taskId);
+    const recovery = task ? await describeLarkTaskRecovery(this.runtime, record.sessionId, record.taskId, task.status) : undefined;
+    if (recovery?.blocked || recovery?.label === '已核对，结果未确认') {
+      return `此请求已失效，不再接受回答或批准。\n\n${recovery.markdown}`;
+    }
+    return `${record.expiresAt ? `回答截止时间：${deadlineText(record.expiresAt)}。\n\n` : ''}此请求已失效，不再接受回答或批准。发送 /status 查看任务状态，不要回复这张旧卡。`;
   }
   /** Heartbeats also repair persisted cards whose broker waiter has already ended. */
   async reconcile(appId: string, taskId?: string) {
@@ -209,7 +215,7 @@ export class LarkWorkflowInteractions {
         if (record.kind === 'ask' && this.broker?.get(record.nativeId)?.status === 'answering') continue;
         try { record = await this.move(record, 'expired'); } catch { continue; }
       }
-      if (record.state === 'expired' && !await this.renderClosed(record, this.expiryMessage(record))) unresolved++;
+      if (record.state === 'expired' && !await this.renderClosed(record, await this.expiryMessage(record))) unresolved++;
     }
     if (this.urgentManager) {
       await this.checkAndUrgePending(appId).catch(() => undefined);
@@ -222,10 +228,10 @@ export class LarkWorkflowInteractions {
     return this.urgentManager.checkAndUrge(records, options?.now);
   }
   private async renderClosed(record: LarkInteraction, message: string) {
-    if (!record.cardId || record.kind === 'result' || this.closedCards.has(`${record.cardId}:${record.state}`)) return true;
+    if (!record.cardId || record.kind === 'result' || this.closedCards.has(`${record.cardId}:${record.state}:${message}`)) return true;
     return this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.kind === 'ask' ? 'Agent 提问' : '本次操作确认',
       permissionMode: 'ask', state: record.state === 'expired' ? 'interrupted' : 'completed', statusLabel: record.state === 'expired' ? '已失效' : '已处理',
-      readOnly: true, elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: message }] }).then(() => { this.closedCards.add(`${record.cardId}:${record.state}`); return true; }).catch(() => false);
+      readOnly: true, elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: message }] }).then(() => { this.closedCards.add(`${record.cardId}:${record.state}:${message}`); return true; }).catch(() => false);
   }
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
@@ -235,7 +241,7 @@ export class LarkWorkflowInteractions {
   async expireTask(appId: string, taskId: string) {
     for (const record of await this.list(appId)) {
       if (record.taskId !== taskId || record.kind === 'result' || record.state !== 'pending') continue;
-      try { await this.renderClosed(await this.move(record, 'expired'), this.expiryMessage(record)); }
+      try { await this.renderClosed(await this.move(record, 'expired'), await this.expiryMessage(record)); }
       catch { /* A concurrently accepted decision owns this request. */ }
     }
   }
@@ -347,7 +353,7 @@ export class LarkWorkflowInteractions {
       // 而不做那个回落，等于把这条备用路径一起删掉——命令会以「请填写请求编号」失败，
       // 而那个编号已经没有任何卡会显示。
       // 命令本身的可发现性由 `/help` 承担（commands.ts:173-175 已列出三条命令及其用法）。
-      ...(record.expiresAt ? [{ tag: 'markdown', content: `回答截止时间：${deadlineText(record.expiresAt)}。超时后请发送新消息重新提问。` }] : []),
+      ...(record.expiresAt ? [{ tag: 'markdown', content: `回答截止时间：${deadlineText(record.expiresAt)}。超时后请发送 /status 查看任务状态。` }] : []),
       hintElement,
       ...(kind === 'permission' ? [button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] : [])
     ];
@@ -400,7 +406,7 @@ export class LarkWorkflowInteractions {
         if (!current) throw stale();
         bound = await this.bindCard(JSON.parse(current), card.messageId);
       }
-      if (bound.state === 'expired') await this.renderClosed(bound, this.expiryMessage(bound));
+      if (bound.state === 'expired') await this.renderClosed(bound, await this.expiryMessage(bound));
       else await this.reconcile(context.appId, context.taskId);
       this.retryAfter.delete(record.id);
     } catch (error) {
@@ -474,14 +480,22 @@ export class LarkWorkflowInteractions {
     const policy: PolicyAction = input.action === 'approve' ? 'high_risk.execute' : 'run.interrupt';
     if (!await this.authorize(record, input.actorId, policy)) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权操作此任务。', 403);
     if (record.state !== 'pending') {
-      if (record.state === 'expired') await this.renderClosed(record, this.expiryMessage(record));
+      if (record.state === 'expired') {
+        const message = await this.expiryMessage(record);
+        await this.renderClosed(record, message);
+        throw new LarkServiceError('LARK_INTERACTION_EXPIRED', message, 409);
+      }
       throw stale();
     }
     if (record.kind === 'result') {
       record = await this.move(record, input.action === 'accept' ? 'accepted' : 'needs_changes', input.actorId);
       return input.action === 'accept' ? '已记录验收通过。' : '已记录需要修改。请回复结果卡片，说明具体修改要求。';
     }
-    if (!await this.live(record)) { await this.renderClosed(await this.move(record, 'expired'), this.expiryMessage(record)); throw stale(); }
+    if (!await this.live(record)) {
+      const message = await this.expiryMessage(record);
+      await this.renderClosed(await this.move(record, 'expired'), message);
+      throw new LarkServiceError('LARK_INTERACTION_EXPIRED', message, 409);
+    }
     // 结构化卡只接受选项集合内的提交值：单选值来自按钮 value，多选值来自表单 form_value。
     // 校验在 resolving CAS 之前，失败时卡片保持 pending，读者仍可引用卡片回复。
     let answerText = '';
@@ -529,7 +543,7 @@ export class LarkWorkflowInteractions {
         await this.renderPendingPermission(pending);
         throw error;
       }
-      await this.renderClosed(await this.move(record, 'expired'), this.expiryMessage(record));
+      await this.renderClosed(await this.move(record, 'expired'), await this.expiryMessage(record));
       throw error;
     }
     const state = input.action === 'answer' ? 'answered' : input.action === 'approve' ? 'approved' : 'rejected';

@@ -5,6 +5,8 @@ import type { CliPathEnv } from '../cli-paths.js';
 export interface SessionIdLookupContext {
   /** dutydeck's session id — also the fingerprint injected into prompt #1. */
   sessionId: string;
+  /** Claude-family automatic reconnect requires a durable prompt marker, not only a matching filename. */
+  requireMarker?: boolean;
   /** The working directory the CLI was spawned in. */
   cwd: string;
   /**

@@ -42,7 +42,7 @@ export {
   isUsableMarker,
   MIN_MARKER_SESSION_ID_LENGTH,
 } from './marker.js';
-export { claudeSessionIdLookup } from './claude.js';
+export { claudeSessionIdLookup, hasPinnedClaudeSession } from './claude.js';
 export { codexSessionIdLookup, traexSessionIdLookup } from './codex.js';
 export { grokSessionIdLookup } from './grok.js';
 export {

@@ -6,7 +6,8 @@ import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfig, type AppConfig } from '@dutydeck/config';
-import { createRepositories } from '@dutydeck/storage';
+import { childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
+import { createPtyRetirementControl } from './pty-recovery.js';
 import { installationOwnerTaskActor, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -33,7 +34,6 @@ import {
   createPtyCliDriver,
   PTY_AGENT_CONTRIBUTIONS,
   type BackendProbes,
-  type PtyCliDriver,
 } from '@dutydeck/pty-driver';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { RelayAskBroker, RelayCapabilityRegistry, RelayService, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
@@ -196,26 +196,20 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   });
   // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
   // 自定义命令可通过 adapterId 复用已有 CLI 家族，同时保留独立 agent id。
-  const ptyDrivers = new Set<PtyCliDriver>();
   const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId) => {
     const adapter = createCliAdapter(agent.adapterId ?? agent.id);
-    let driver: PtyCliDriver;
-    driver = createPtyCliDriver({
+    return createPtyCliDriver({
       agent,
       adapter,
       backend: createProductionPtyBackend(sessionId),
+      processProbe: { identify: childProcessIdentity, observe: observeProcess },
       onEvent,
-      onExit: code => {
-        ptyDrivers.delete(driver);
-        onExit(code);
-      },
-      onStopped: () => ptyDrivers.delete(driver),
+      onExit,
       sessionId,
     });
-    ptyDrivers.add(driver);
-    return driver;
   };
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
+    ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }),
     authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
     authorizeControl: async (sessionId, actor, _action) => {
       if (await workItems.authorizeControl(sessionId, actor)) return;
@@ -320,7 +314,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       };
       await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => automation.close()]);
       // Wake blocked asks before waiting for HTTP shutdown.
-      await settle([() => relayBroker.close(), ...[...ptyDrivers].map(driver => () => driver.prepareForDaemonShutdown())]);
+      await settle([() => relayBroker.close()]);
       await settle([() => collaboration?.close(), () => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
       await settle([() => capabilities.close()]);
       await settle([() => repos.close()]);
@@ -352,6 +346,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     );
     const memoryPipeline = new LarkMemoryPipeline({
       runtime,
+      controlActorId: installationOwnerTaskActor,
       repos: { execution: repos.execution },
       store: memoryStore,
       projection: memoryProjection,
@@ -367,6 +362,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return bot?.memoryEnabled === false ? '' : renderMemoryIndex(await memoryStore.list(scope), await memoryStore.getState(scope)).text;
     };
     app = await buildApp(runtime, {
+      recovery: { authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
       webRoot,
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
         authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,

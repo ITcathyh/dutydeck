@@ -1,5 +1,5 @@
 diff --git a/dist/runtime.js b/dist/runtime.js
-index 3fb25ae..a8b1327 100644
+index 3fb25ae..983be86 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
 @@ -734,17 +734,32 @@ async function createOrLoadRuntimeSession(client, resumeSessionId, cwd) {
@@ -104,7 +104,7 @@ index 3fb25ae..a8b1327 100644
  	async createAndSaveRuntimeRecord(params) {
  		const { input, client, agentCommand, agentArgv, cwd, session } = params;
  		const record = createInitialRecord({
-@@ -986,6 +1047,7 @@ var AcpRuntimeManager = class {
+@@ -986,11 +1047,25 @@ var AcpRuntimeManager = class {
  				client: turn.client,
  				sessionId,
  				prompt: task.promptInput,
@@ -112,7 +112,25 @@ index 3fb25ae..a8b1327 100644
  				timeoutMs: task.input.timeoutMs ?? this.options.timeoutMs,
  				conversation: turn.conversation,
  				promptMessageId: turn.promptMessageId
-@@ -1014,7 +1076,7 @@ var AcpRuntimeManager = class {
+ 			});
+ 			await this.saveCompletedRuntimeTurn(turn, response.stopReason);
++			// Only the current prompt response proves a terminal provider failure.
++			// Session updates may describe an older turn or a retryable warning.
++			const air = response._meta?.jetbrains?.air;
++			const failure = air?.sessionFailure;
++			if (air?.version === 1 && failure?.severity === "error"
++				&& typeof failure.id === "string" && failure.id.length > 0
++				&& Number.isInteger(failure.revision) && failure.revision > 0
++				&& typeof failure.category === "string" && typeof failure.title === "string") {
++				task.settleResult({ status: "failed", error: {
++					code: "ACP_PROVIDER_TERMINAL_ERROR", message: failure.title, detailCode: failure.category
++				} });
++				return;
++			}
+ 			task.settleResult({
+ 				status: response.stopReason === "cancelled" ? "cancelled" : "completed",
+ 				...response.stopReason ? { stopReason: response.stopReason } : {}
+@@ -1014,7 +1089,7 @@ var AcpRuntimeManager = class {
  		applyConversation(record, conversation);
  		await this.options.sessionStore.save(record);
  		const pendingClient = await this.readPendingPersistentClient(record, { consume: true });
@@ -121,7 +139,7 @@ index 3fb25ae..a8b1327 100644
  		const turn = {
  			record,
  			conversation,
-@@ -1030,7 +1092,7 @@ var AcpRuntimeManager = class {
+@@ -1030,7 +1105,7 @@ var AcpRuntimeManager = class {
  		this.installRuntimeTurnEventHandlers(task, turn);
  		return turn;
  	}
@@ -130,7 +148,7 @@ index 3fb25ae..a8b1327 100644
  		return this.createClient({
  			agentCommand: record.agentCommand,
  			agentArgv: record.agentArgv,
-@@ -1040,7 +1102,7 @@ var AcpRuntimeManager = class {
+@@ -1040,7 +1115,7 @@ var AcpRuntimeManager = class {
  			nonInteractivePermissions: this.options.nonInteractivePermissions,
  			onPermissionRequest: this.options.onPermissionRequest,
  			verbose: this.options.verbose,
@@ -139,7 +157,7 @@ index 3fb25ae..a8b1327 100644
  		});
  	}
  	createRuntimeTurnCheckpoint(record, conversation, readAcpxState) {
-@@ -1271,6 +1333,22 @@ var AcpRuntimeManager = class {
+@@ -1271,6 +1346,22 @@ var AcpRuntimeManager = class {
  			}
  		};
  	}
@@ -162,7 +180,7 @@ index 3fb25ae..a8b1327 100644
  	async setMode(handle, mode, sessionMode = "persistent") {
  		const record = await this.requireRecord(handle.acpxRecordId ?? handle.sessionKey);
  		const controller = this.activeControllers.get(record.acpxRecordId);
-@@ -1303,7 +1381,9 @@ var AcpRuntimeManager = class {
+@@ -1303,7 +1394,9 @@ var AcpRuntimeManager = class {
  		await this.activeControllers.get(handle.acpxRecordId ?? handle.sessionKey)?.requestCancelActivePrompt();
  	}
  	async close(handle, options = {}) {
@@ -173,7 +191,7 @@ index 3fb25ae..a8b1327 100644
  		if (this.activeControllers.has(record.acpxRecordId)) this.closingActiveRecords.add(record.acpxRecordId);
  		await this.cancel(handle);
  		if (options.discardPersistentState) {
-@@ -1344,6 +1424,8 @@ var AcpRuntimeManager = class {
+@@ -1344,6 +1437,8 @@ var AcpRuntimeManager = class {
  	async requireRecord(sessionId) {
  		const record = await this.options.sessionStore.load(sessionId);
  		if (!record) throw new Error(`ACP session not found: ${sessionId}`);
@@ -182,7 +200,7 @@ index 3fb25ae..a8b1327 100644
  		return record;
  	}
  };
-@@ -1571,6 +1653,8 @@ var AcpxRuntime = class {
+@@ -1571,6 +1666,8 @@ var AcpxRuntime = class {
  			details: normalizeRuntimeDetails(report.details)
  		};
  	}
@@ -191,7 +209,7 @@ index 3fb25ae..a8b1327 100644
  	async ensureSession(input) {
  		const sessionName = input.sessionKey.trim();
  		if (!sessionName) throw new AcpRuntimeError("ACP_SESSION_INIT_FAILED", "ACP session key is required.");
-@@ -1582,7 +1666,7 @@ var AcpxRuntime = class {
+@@ -1582,7 +1679,7 @@ var AcpxRuntime = class {
  			mode: input.mode,
  			cwd: input.cwd ?? this.options.cwd,
  			resumeSessionId: input.resumeSessionId,
@@ -200,7 +218,7 @@ index 3fb25ae..a8b1327 100644
  		});
  		const handle = {
  			sessionKey: input.sessionKey,
-@@ -1614,7 +1698,7 @@ var AcpxRuntime = class {
+@@ -1614,7 +1711,7 @@ var AcpxRuntime = class {
  			sessionMode: state.mode,
  			requestId: input.requestId,
  			timeoutMs: input.timeoutMs,
@@ -209,7 +227,7 @@ index 3fb25ae..a8b1327 100644
  		}));
  		return {
  			requestId: input.requestId,
-@@ -1660,6 +1744,10 @@ var AcpxRuntime = class {
+@@ -1660,6 +1757,10 @@ var AcpxRuntime = class {
  		const { handle } = this.resolveManagerHandle(input.handle);
  		return await (await this.getManager()).getStatus(handle);
  	}
@@ -220,7 +238,7 @@ index 3fb25ae..a8b1327 100644
  	async setMode(input) {
  		const { handle, state } = this.resolveManagerHandle(input.handle);
  		await (await this.getManager()).setMode(handle, input.mode, state.mode);
-@@ -1725,6 +1813,6 @@ function createRuntimeStore(options) {
+@@ -1725,6 +1826,6 @@ function createRuntimeStore(options) {
  	return createFileSessionStore(options);
  }
  //#endregion
@@ -313,7 +331,7 @@ index 0a8e55a..c7427da 100644
  //# sourceMappingURL=runtime.d.ts.map
 \ No newline at end of file
 diff --git a/dist/live-checkpoint-CBecfnSH.js b/dist/live-checkpoint-CBecfnSH.js
-index 32fd9b0..588a5ed 100644
+index 32fd9b0..18e8998 100644
 --- a/dist/live-checkpoint-CBecfnSH.js
 +++ b/dist/live-checkpoint-CBecfnSH.js
 @@ -1356,6 +1356,8 @@ function parseAcpxState(raw) {
@@ -774,6 +792,25 @@ index 32fd9b0..588a5ed 100644
  			this.connection = params.connection;
  			this.agent = params.child;
  			this.initResult = initResult;
+@@ -4278,13 +4336,13 @@ var AcpClient = class {
+ 		}
+ 	}
+ 	async initializeProtocolConnection(connection, launch) {
++		const capabilities = resolveClientCapabilities({ devinAcp: launch.devinAcp, fs: this.options.fs !== false, terminal: this.options.terminal !== false });
+ 		const initializePromise = connection.initialize({
+ 			protocolVersion: PROTOCOL_VERSION,
+-			clientCapabilities: resolveClientCapabilities({
+-				devinAcp: launch.devinAcp,
+-				fs: this.options.fs !== false,
+-				terminal: this.options.terminal !== false
+-			}),
++			clientCapabilities: {
++				...capabilities,
++				_meta: { ...capabilities._meta, jetbrains: { air: { version: 1, capabilities: ["sessionFailure"] } } }
++			},
+ 			clientInfo: resolveClientInfo(launch.devinAcp)
+ 		});
+ 		const initialized = launch.geminiAcp ? await withTimeout(initializePromise, resolveGeminiAcpStartupTimeoutMs()) : await initializePromise;
 @@ -4297,7 +4355,7 @@ var AcpClient = class {
  		try {
  			params.child.kill();
@@ -838,6 +875,14 @@ index 32fd9b0..588a5ed 100644
  		await params.onPromptStarted?.();
  		const response = await withTimeout(promptPromise, params.timeoutMs);
  		await params.client.waitForSessionUpdatesIdle?.({
+@@ -6288,6 +6353,7 @@ async function runPromptTurn(params) {
+ 		recordPromptResponseUsage(params.conversation, response.usage, params.promptMessageId);
+ 		return {
+ 			stopReason: response.stopReason,
++			_meta: response._meta,
+ 			source: "rpc"
+ 		};
+ 	} catch (error) {
 diff --git a/dist/session-options-CTdZvr68.d.ts b/dist/session-options-CTdZvr68.d.ts
 index 3ec271c..67062f8 100644
 --- a/dist/session-options-CTdZvr68.d.ts

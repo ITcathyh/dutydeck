@@ -1,3 +1,4 @@
+import { registerRecoveryRoutes, type RecoveryRouteOptions } from './recovery-routes.js';
 import { ZodError } from 'zod';
 import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { AgentGroupToolError } from './lark/agent-tools.js';
@@ -53,6 +54,7 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  recovery?: RecoveryRouteOptions;
   collaboration?: CollaborationRouteOptions;
   workItems?: WorkItemRouteOptions;
   workItemTools?: WorkItemToolsOptions;
@@ -120,6 +122,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || userExempt?.(method, pathname) === true
     });
   }
+  registerRecoveryRoutes(app, runtime, options.recovery);
   if (options.terminal) registerTerminalRoutes(app, options.terminal);
   registerRelayRoutes(app, { ...options.relay, runtime: options.relay?.runtime ?? runtime });
   await registerFoundationManagementRoutes(app, options.foundation);
