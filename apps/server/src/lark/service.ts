@@ -162,6 +162,10 @@ export interface LarkChatMessage {
   deleted: boolean;
   updated: boolean;
   threadId?: string;
+  /** 话题根消息 ID（REST 详情字段 root_id，与 thread_id 独立）。 */
+  rootId?: string;
+  /** 上一条被回复消息 ID（REST 详情字段 parent_id）。 */
+  parentId?: string;
   /** 合并转发消息中，上一层级的消息 ID，仅在合并转发场景会有返回值。 */
   upperMessageId?: string;
 }
@@ -1144,6 +1148,10 @@ export class LarkCardService {
     }));
     const updateTime = String(item?.update_time ?? '').trim() || undefined;
     const threadId = String(item?.thread_id ?? '').trim() || undefined;
+    // root_id/parent_id 是消息详情的独立字段：root 锚话题根，parent 锚直接被回复消息，
+    // 不能用 upper_message_id（仅合并转发场景）顶替。
+    const rootId = String(item?.root_id ?? '').trim() || undefined;
+    const parentId = String(item?.parent_id ?? '').trim() || undefined;
     const itemChatId = String(item?.chat_id ?? '').trim() || undefined;
     const upperMessageId = String(item?.upper_message_id ?? '').trim() || undefined;
     return {
@@ -1151,6 +1159,7 @@ export class LarkCardService {
       sender: normalizedSender, rawContent: String(item?.body?.content ?? item?.content ?? ''), mentions,
       deleted: item?.deleted === true, updated: item?.updated === true,
       ...(itemChatId ? { chatId: itemChatId } : {}), ...(updateTime ? { updateTime } : {}), ...(threadId ? { threadId } : {}),
+      ...(rootId ? { rootId } : {}), ...(parentId ? { parentId } : {}),
       ...(upperMessageId ? { upperMessageId } : {})
     };
   }

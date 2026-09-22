@@ -16,6 +16,7 @@ import type { LarkMemoryProjection } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
 import { describeWebBaseUrlReachability, larkExecutionConfirmed } from './config.js';
+import { buildEditedMessageEvent } from './edited-message.js';
 
 // 飞书长连接监听：只负责 WebSocket 事件接入、事件组装与协调器装配。
 // 消息协调见 coordinator.ts，卡片渲染见 card-renderer.ts，会话路由见 session-resolver.ts，
@@ -265,7 +266,47 @@ export class LarkLongConnectionListener implements LarkListener {
       // 用户手动贴表情也会。两者都不得驱动任务，也不应落到未知事件分支产生日志噪音。
       // reaction 在本产品里只是「请求已接入」的单向回执，不是可交互的控制面。
       'im.message.reaction.created_v1': () => undefined,
-      'im.message.reaction.deleted_v1': () => undefined
+      'im.message.reaction.deleted_v1': () => undefined,
+      // 消息「修改」事件：解决「原消息发出时没 @ 本 bot（从未触发任务），用户编辑补 @」。
+      // 事件 payload 的正文/mentions 不可靠，一律只取 message_id 回读权威消息；原作者、
+      // 正文、mentions、话题字段全部以详情为准，编辑操作者绝不进入事件。是否已触发由
+      // coordinator 的持久 inbox 幂等保证：未唤醒时不 claim，已 claim 的消息不会重跑。
+      'im.message.updated_v1': (event: any) => {
+        if (!coordinator) return;
+        const eventMessageId = typeof event?.message?.message_id === 'string' ? event.message.message_id : '';
+        if (!eventMessageId) {
+          this.log.warn({ eventId: event?.event_id }, '飞书消息编辑事件缺少 message_id，忽略');
+          return;
+        }
+        return (async () => {
+          let detail;
+          try {
+            detail = await service.getMessage(eventMessageId);
+          } catch (error) {
+            // 权限错误/网络错误都不绕过：@ 状态无从确认，降级为忽略并记日志。
+            this.log.warn({ error, messageId: eventMessageId }, '回读编辑消息详情失败，忽略编辑事件');
+            return;
+          }
+          let editedEvent: LarkMessageEvent | undefined;
+          try {
+            editedEvent = await buildEditedMessageEvent({
+              eventMessageId, detail, botOpenId, appId: config.appId,
+              resolveChatType: chatModeResolver
+            });
+          } catch (error) {
+            // 群形态查询失败等：不猜测 chatType，不触发。
+            this.log.warn({ error, messageId: eventMessageId }, '解析编辑消息上下文失败，忽略编辑事件');
+            return;
+          }
+          if (!editedEvent) {
+            this.log.info({ messageId: eventMessageId }, '编辑消息不满足触发条件（已删除/非人类/未显式@本bot等），忽略');
+            return;
+          }
+          await coordinator.handle(editedEvent, this.config ?? config).catch(error => {
+            this.log.error({ error, messageId: eventMessageId, chatId: editedEvent!.chatId }, '处理飞书消息编辑事件失败');
+          });
+        })();
+      }
     });
     let connected!: () => void;
     let connectionFailed!: (error: unknown) => void;
