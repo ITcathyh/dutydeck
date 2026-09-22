@@ -103,8 +103,7 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
     // We are the detached child: own the server and publish self metadata.
     const meta = childMeta(env);
     const processIdentity = currentProcessIdentity();
-    writePidFile(dir, process.pid);
-    writeState(dir, {
+    const initialState: DaemonState = {
       pid: process.pid,
       processIdentity,
       ready: false,
@@ -112,7 +111,13 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
       cwd,
       database,
       ...addressFromCli(options, env)
-    });
+    };
+    const inspection = inspectDaemon(dir);
+    if (inspection.status === 'unverifiable') return unverifiedResult('start', inspection);
+    const previous = readDaemonStatus(dir);
+    if (previous && !sameGeneration(previous, initialState)) return changedResult('start');
+    writePidFile(dir, process.pid);
+    writeState(dir, initialState);
     writeLastDaemonDir(dir, env.HOME);
     await handlers.serve({ ...options, database }, () => markDaemonReady(dir, { ...addressFromCli(options, env), database }, meta.startedAt));
     const authEnabled = authEnabledFromCli(options, env);
