@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { createClaudeFamilyAdapter, prepareClaudeFamilyInput } from './claude-family.js';
 import type { PtyLike } from '../types.js';
 
+// The observed pane's last four nonempty lines are verbatim; history above is anonymized.
+const resumedComposer = readFileSync(new URL('../fixtures/claude-resume-ready/screen.txt', import.meta.url), 'utf8');
 const cwd = '/workspace/trusted-project';
 const trustScreen = (selected: 'No, exit' | 'Yes, I trust this folder', path = cwd) => [
   '─'.repeat(120), 'Accessing workspace:', '', path, '',
@@ -101,6 +104,21 @@ describe('Claude family startup trust confirmation', () => {
     expect(backend.writes).toEqual([]);
   });
 
+  it.each([resumedComposer, `❯ old request\nPrevious answer\n${resumedComposer}`])('accepts the captured resumed composer without a scrolled-away banner and writes no keys', async screen => {
+    vi.useFakeTimers();
+    try {
+      const backend = new TrustBackend(screen);
+      let ready = false;
+      const preparing = prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'full-trust' }).then(() => { ready = true; });
+      // Consume only in case the old predicate reaches its timeout after this assertion fails.
+      void preparing.catch(() => {});
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ready).toBe(true);
+      await preparing;
+      expect(backend.writes).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
   it('requires a screen reader instead of blindly submitting', async () => {
     await expect(prepareClaudeFamilyInput({ write: () => {} }, { sessionId: 'sid', cwd, permissionMode: 'full-trust' }))
       .rejects.toThrow('screen reader');
@@ -127,6 +145,14 @@ describe('Claude family startup trust confirmation', () => {
   it.each([
     ['partial trust page', trustScreen('No, exit').replace('Enter to confirm · Esc to cancel', '')],
     ['unknown setup prompt', 'Unknown setup\n────────\n❯\n────────'],
+    ['truncated resumed footer', resumedComposer.trimEnd().split('\n').slice(0, -1).join('\n')],
+    ['unknown resumed footer', resumedComposer.replace(/⏵⏵[^\n]*/, 'Press Enter to continue')],
+    ['unfinished composer', resumedComposer.replace('\n❯\n', '\n❯ unfinished input\n')],
+    ['historical empty prompt alongside composer', `❯\n${resumedComposer}`],
+    ['quoted historical composer followed by output', `${resumedComposer}More response text`],
+    ['permission choice above stale composer', `Permission required\n❯ 1. Yes\n  2. No\n${resumedComposer}`],
+    ['choice menu above stale composer', `Select an option\n❯ Continue\n${resumedComposer}`],
+    ['trust dialog above stale composer', `${trustScreen('No, exit')}\n${resumedComposer}`],
   ])('does not treat a %s as ready or write any key', async (_name, screen) => {
     vi.useFakeTimers();
     try {
