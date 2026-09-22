@@ -1,3 +1,4 @@
+import { childProcessIdentity } from '@dutydeck/storage';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -103,7 +104,7 @@ describe('Dutydeck daemon session', () => {
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},5000)'], { stdio: 'ignore' });
     const dir = defaultDaemonDir();
-    writeState(dir, { pid: child.pid!, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp, address: 'http://127.0.0.1:4310', authEnabled: false });
+    writeState(dir, { pid: child.pid!, processIdentity: childProcessIdentity(child.pid!), ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp, address: 'http://127.0.0.1:4310', authEnabled: false });
     const status = daemonStatus();
     expect(status.running).toBe(true);
     expect(status.pid).toBe(child.pid);
@@ -116,7 +117,7 @@ describe('Dutydeck daemon session', () => {
     const { spawn } = await import('node:child_process');
     const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { stdio: 'ignore' });
     const dir = defaultDaemonDir();
-    writeState(dir, { pid: child.pid!, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp });
+    writeState(dir, { pid: child.pid!, processIdentity: childProcessIdentity(child.pid!), ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp });
     const exited = new Promise(resolve => child.once('exit', resolve));
     const result = await daemonStop();
     await exited;
@@ -140,7 +141,7 @@ describe('Dutydeck daemon session', () => {
     // process boot and take the default termination action.
     await new Promise<void>(resolve => child.stdout!.once('data', () => resolve()));
     const dir = defaultDaemonDir();
-    writeState(dir, { pid: child.pid!, ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp });
+    writeState(dir, { pid: child.pid!, processIdentity: childProcessIdentity(child.pid!), ready: true, startedAt: '2024-01-01T00:00:00.000Z', cwd: tmp });
     const exited = new Promise<number | null>(resolve => child.once('exit', resolve));
     const result = await daemonStop();
     const code = await exited;
@@ -149,6 +150,22 @@ describe('Dutydeck daemon session', () => {
     expect(result.error).toBeUndefined();
     expect(readFileSync(marker, 'utf8')).toBe('ok');
     expect(readDaemonStatus(dir)).toBeUndefined();
+  });
+
+  it('does not signal a real unrelated PID occupant referenced by a stale birth identity', async () => {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},10000)'], { stdio: 'ignore' });
+    const exited = new Promise(resolve => child.once('exit', resolve));
+    try {
+      const identity = childProcessIdentity(child.pid!);
+      writeState(defaultDaemonDir(), { pid: child.pid!, processIdentity: { ...identity, start: 'stale-birth' }, ready: true, startedAt: 'old', cwd: tmp });
+      expect(await daemonStop()).toMatchObject({ ok: true, running: false, state: 'not-running' });
+      expect(pidAlive(child.pid!)).toBe(true);
+      expect(childProcessIdentity(child.pid!)).toEqual(identity);
+    } finally {
+      child.kill('SIGKILL');
+      await exited;
+    }
   });
 
   it('daemonStop reports not-running when nothing is recorded', async () => {

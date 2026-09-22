@@ -367,4 +367,4 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   }
 }
 
-export { childProcessIdentity, observeProcess } from './process-identity.js';
+export { childProcessIdentity, observeProcess, currentProcessIdentity, type ProcessIdentity } from './process-identity.js';

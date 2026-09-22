@@ -2,6 +2,11 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import {
+  childProcessIdentity,
+  currentProcessIdentity,
+  type ProcessIdentity
+} from '@dutydeck/storage';
 
 /**
  * Self-managed background daemon for the Dutydeck local session server.
@@ -37,6 +42,7 @@ export interface DaemonState {
   /** Missing or malformed legacy values are interpreted as enabled. */
   authEnabled?: boolean;
   stoppedAt?: string;
+  processIdentity?: ProcessIdentity;
 }
 
 export interface DaemonPaths {
@@ -73,12 +79,93 @@ export function writeLastDaemonDir(dir: string, home = process.env.HOME ?? homed
   writeFileSync(pointerFile, `${dir}\n`, 'utf8');
 }
 
+export type DaemonProcessStatus = 'verified' | 'stale' | 'unverifiable';
+
+export interface DaemonInspection {
+  status: DaemonProcessStatus;
+  pid?: number;
+  reason?: string;
+}
+
+/** A captured identity must contain every component before it can authorize signals. */
+function completeIdentity(identity: ProcessIdentity | undefined): identity is ProcessIdentity {
+  return !!identity && Number.isSafeInteger(identity.pid) && identity.pid > 0 &&
+    [identity.host, identity.boot, identity.namespace, identity.start].every(value => typeof value === 'string' && value.length > 0);
+}
+
+export function sameIdentity(left?: ProcessIdentity, right?: ProcessIdentity): boolean {
+  if (!left || !right) return left === right;
+  return (['host', 'boot', 'namespace', 'pid', 'start'] as const).every(key => left[key] === right[key]);
+}
+
+export function sameGeneration(left?: DaemonState, right?: DaemonState): boolean {
+  if (!left || !right) return left === right;
+  return left.pid === right.pid && left.startedAt === right.startedAt && sameIdentity(left.processIdentity, right.processIdentity);
+}
+
+export function inspectDaemonState(state: DaemonState | undefined): DaemonInspection {
+  if (!state) return { status: 'stale', reason: 'No daemon recorded' };
+  const pid = state.pid;
+  const result = (status: DaemonProcessStatus, reason: string): DaemonInspection => ({ status, pid, reason });
+  if (!Number.isSafeInteger(pid) || pid <= 0) return result('unverifiable', 'Invalid recorded daemon PID');
+  const saved = state.processIdentity;
+  if (!saved) return pidAlive(pid)
+    ? result('unverifiable', 'Live legacy daemon has no process identity')
+    : result('stale', 'Recorded process no longer exists');
+  if (!completeIdentity(saved) || saved.pid !== pid) return result('unverifiable', 'Incomplete recorded process identity');
+  try {
+    const local = currentProcessIdentity();
+    if (!completeIdentity(local)) return result('unverifiable', 'Local process identity unavailable');
+    if (local.host !== saved.host) return result('unverifiable', 'Recorded daemon belongs to another host');
+    if (local.boot !== saved.boot) return result('stale', 'Recorded daemon predates the current boot');
+    if (local.namespace !== saved.namespace) return result('unverifiable', 'Recorded daemon belongs to another PID namespace');
+    if (!pidAlive(pid)) return result('stale', 'Recorded process no longer exists');
+    let target: ProcessIdentity;
+    try {
+      target = childProcessIdentity(pid);
+    } catch (error) {
+      if (!pidAlive(pid)) return result('stale', 'Recorded process exited during inspection');
+      if ((error as Error).message === 'PROCESS_NAMESPACE_UNSUPPORTED') return result('stale', 'Target PID namespace changed');
+      return result('unverifiable', 'Cannot read target process identity');
+    }
+    if (!completeIdentity(target)) return result('unverifiable', 'Target process identity unavailable');
+    if (target.host !== saved.host) return result('unverifiable', 'Target host cannot be verified');
+    return sameIdentity(saved, target)
+      ? { status: 'verified', pid }
+      : result('stale', 'Recorded process identity changed (PID reused)');
+  } catch {
+    return result('unverifiable', 'Cannot read local process identity');
+  }
+}
+
+export function inspectDaemon(dir = defaultDaemonDir()): DaemonInspection {
+  try {
+    const raw = readFileSync(join(dir, STATE_FILE), 'utf8').trim();
+    if (!raw) return inspectDaemonState(undefined);
+    const state = JSON.parse(raw) as DaemonState;
+    if (!state || typeof state !== 'object') return { status: 'unverifiable', reason: 'Malformed daemon state' };
+    return inspectDaemonState(state);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ? { status: 'stale', reason: 'No daemon recorded' }
+      : { status: 'unverifiable', reason: 'Cannot read daemon state' };
+  }
+}
+
+/** Only remove the generation inspected by this operation. */
+export function clearGeneration(dir: string, expected?: DaemonState): boolean {
+  if (inspectDaemon(dir).status === 'unverifiable' || !sameGeneration(expected, readDaemonStatus(dir))) return false;
+  clearState(dir);
+  return true;
+}
+
 /**
  * Resolve which daemon directory to operate on.
  *
  * Priority:
  * 1. The daemon directory under the current working directory, IF it points at
- *    a live daemon process (stale pid files are ignored).
+ *    a verified or unverifiable daemon process (stale pid files are ignored, but
+ *    unverifiable state is preserved to avoid silent cross-directory fallback).
  * 2. The directory recorded in `~/.dutydeck/last-daemon-dir`. It remains the
  *    canonical Dutydeck root even while the daemon is stopped, preventing a
  *    later start from silently creating a second database under another cwd.
@@ -86,7 +173,10 @@ export function writeLastDaemonDir(dir: string, home = process.env.HOME ?? homed
  */
 export function resolveDaemonDir(cwd = process.cwd(), home = process.env.HOME ?? homedir()): string {
   const localDir = defaultDaemonDir(cwd);
-  if (isDaemonRunning(localDir)) return localDir;
+  const localInspection = inspectDaemon(localDir);
+  if (localInspection.status === 'verified' || localInspection.status === 'unverifiable') {
+    return localDir;
+  }
   const lastDir = readLastDaemonDir(home);
   if (lastDir && existsSync(lastDir)) return lastDir;
   return localDir;
@@ -104,7 +194,7 @@ export function pidAlive(pid: number): boolean {
     return true;
   } catch (error) {
     // ESRCH means the pid does not exist.
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
   }
 }
 
@@ -127,12 +217,10 @@ export function pidFromState(state?: DaemonState): number {
 }
 
 /**
- * True when a daemon recorded for `dir` is currently alive. A stale PID file
- * (its process no longer exists) counts as not running.
+ * True when a daemon recorded for `dir` is currently verified and alive.
  */
 export function isDaemonRunning(dir = defaultDaemonDir()): boolean {
-  const pid = pidFromState(readDaemonStatus(dir));
-  return pid > 0 && pidAlive(pid);
+  return inspectDaemon(dir).status === 'verified';
 }
 
 /** The PID read straight from the pid file (0 when absent/unreadable). */
@@ -196,6 +284,7 @@ export interface DaemonizeOptions {
 /** 已启动的后台子进程句柄。父进程据此判断「起来了」还是「当场就死了」。 */
 export interface DaemonChildHandle {
   pid: number;
+  processIdentity?: ProcessIdentity;
   /**
    * 子进程退出时 resolve。
    *
@@ -240,7 +329,9 @@ export function daemonize(options: DaemonizeOptions = {}): DaemonChildHandle {
   });
   // detached + unref：父进程退出后子进程继续活着，且不因它而卡住事件循环。
   child.unref();
-  return { pid: child.pid ?? 0, exited };
+  let processIdentity: ProcessIdentity | undefined;
+  try { if (child.pid) processIdentity = childProcessIdentity(child.pid); } catch { /* Startup will fail closed if identity cannot be captured. */ }
+  return { pid: child.pid ?? 0, processIdentity, exited };
 }
 
 /**
