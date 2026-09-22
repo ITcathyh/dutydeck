@@ -595,6 +595,26 @@ describe('Lark card service', () => {
     expect(requestUrl.searchParams.get('only_thread_root_messages')).toBe('false');
   });
 
+  it('normalizes independent thread/root/parent IDs from authoritative message detail without substituting upper_message_id', async () => {
+    const item = { message_id: 'om_edit', chat_id: 'oc_group', msg_type: 'text',
+      sender: { id: 'ou_author', id_type: 'open_id', sender_type: 'user' },
+      body: { content: '{"text":"edited"}' }, mentions: [{ id: 'ou_bot', id_type: 'open_id', key: '@_user_1' }],
+      thread_id: 'omt_thread', root_id: 'om_root', parent_id: 'om_parent', upper_message_id: 'om_forward' };
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [item] } }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [{ ...item, root_id: undefined, parent_id: undefined }] } }));
+    const service = createLarkCardService(configured, fetcher as typeof fetch);
+    await expect(service.getMessage('om_edit')).resolves.toMatchObject({
+      messageId: 'om_edit', threadId: 'omt_thread', rootId: 'om_root', parentId: 'om_parent', upperMessageId: 'om_forward',
+      sender: { id: 'ou_author', idType: 'open_id', type: 'user' }, mentions: [{ id: 'ou_bot', idType: 'open_id' }]
+    });
+    const noParent = await service.getMessage('om_edit');
+    expect(noParent.rootId).toBeUndefined();
+    expect(noParent.parentId).toBeUndefined();
+    expect(noParent.upperMessageId).toBe('om_forward');
+  });
+
   it('replies with an interactive card under a message so results land in the thread position', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))

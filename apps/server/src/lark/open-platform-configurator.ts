@@ -64,6 +64,7 @@ export const LARK_REQUIRED_EVENTS = [
   'im.message.receive_v1',
   // bot 入群事件：P0-5 欢迎语依赖它；存量应用靠 /repair 增量补上。
   'im.chat.member.bot.added_v1',
+  'im.message.updated_v1',
 ] as const;
 const REQUIRED_CALLBACK = 'card.action.trigger';
 const LONG_CONNECTION_MODE = 4;
