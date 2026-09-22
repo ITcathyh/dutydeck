@@ -1,13 +1,16 @@
+import { currentProcessIdentity } from '@dutydeck/storage';
 import {
   childMeta,
-  clearState,
+  clearGeneration,
+  inspectDaemon,
+  inspectDaemonState,
+  sameGeneration,
+  sameIdentity,
   daemonPaths,
   daemonize,
   daemonLogSize,
   defaultDaemonDir,
   isDaemonChild,
-  pidAlive,
-  pidFromState,
   readDaemonStatus,
   resolveDaemonDir,
   tailDaemonLog,
@@ -15,6 +18,8 @@ import {
   writePidFile,
   writeState,
   type DaemonChildHandle,
+  type DaemonInspection,
+  type DaemonProcessStatus,
   type DaemonState
 } from './daemon.js';
 import type { CliOptions } from '../cli-program.js';
@@ -25,6 +30,7 @@ export interface DaemonCommandResult {
   ok: boolean;
   action: 'start' | 'stop' | 'restart' | 'status';
   running: boolean;
+  processStatus?: DaemonProcessStatus;
   pid?: number;
   address?: string;
   authEnabled?: boolean;
@@ -66,13 +72,18 @@ export function daemonRestartOptions(options: CliOptions, previousState?: Daemon
 }
 
 /** Mark the running daemon as ready and refresh its live metadata. */
-export function markDaemonReady(dir: string, patch: Partial<Pick<DaemonState, 'host' | 'port' | 'address' | 'database' | 'authEnabled'>> = {}): void {
+export function markDaemonReady(dir: string, patch: Partial<Pick<DaemonState, 'host' | 'port' | 'address' | 'database' | 'authEnabled'>> = {}, startedAt = childMeta().startedAt): void {
   const previous = readDaemonStatus(dir);
+  const processIdentity = currentProcessIdentity();
+  const ownPrevious = previous?.pid === process.pid && previous.startedAt === startedAt && sameIdentity(previous.processIdentity, processIdentity) ? previous : undefined;
+  if (previous && !ownPrevious) throw new Error('Daemon state was replaced before readiness; replacement record preserved.');
   writeState(dir, {
+    ...ownPrevious,
     pid: process.pid,
     ready: true,
-    startedAt: previous?.startedAt ?? new Date().toISOString(),
-    cwd: process.cwd(),
+    startedAt,
+    processIdentity,
+    cwd: ownPrevious?.cwd ?? process.cwd(),
     ...patch
   });
 }
@@ -91,9 +102,11 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
   if (isDaemonChild(env)) {
     // We are the detached child: own the server and publish self metadata.
     const meta = childMeta(env);
+    const processIdentity = currentProcessIdentity();
     writePidFile(dir, process.pid);
     writeState(dir, {
       pid: process.pid,
+      processIdentity,
       ready: false,
       startedAt: meta.startedAt,
       cwd,
@@ -101,20 +114,21 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
       ...addressFromCli(options, env)
     });
     writeLastDaemonDir(dir, env.HOME);
-    await handlers.serve({ ...options, database }, () => markDaemonReady(dir, { ...addressFromCli(options, env), database }));
+    await handlers.serve({ ...options, database }, () => markDaemonReady(dir, { ...addressFromCli(options, env), database }, meta.startedAt));
     const authEnabled = authEnabledFromCli(options, env);
     return { ok: true, action: 'start', running: true, pid: process.pid, authEnabled, authentication: authEnabled ? 'required' : 'disabled' };
   }
 
   // Foreground parent: refuse to double-start.
-  const runningDir = resolveDaemonDir(cwd);
-  const current = readDaemonStatus(runningDir);
-  if (current && current.pid > 0 && pidAlive(current.pid)) {
-    return { ok: false, action: 'start', running: true, pid: current.pid, state: 'already-running', error: `Dutydeck is already running (pid ${current.pid}). Use 'dutydeck status' or 'dutydeck restart'.` };
+  const current = readDaemonStatus(dir);
+  const inspection = inspectDaemon(dir);
+  if (inspection.status === 'unverifiable') return unverifiedResult('start', inspection);
+  if (inspection.status === 'verified') {
+    return { ok: false, action: 'start', running: true, pid: current?.pid, state: 'already-running', error: `Dutydeck is already running (pid ${current?.pid}). Use 'dutydeck status' or 'dutydeck restart'.` };
   }
 
   const startedAt = new Date().toISOString();
-  clearState(dir);
+  if (!clearGeneration(dir, current)) return changedResult('start');
   // 先记下日志长度，失败时只回放这次启动新写入的行（日志是 append 的）。
   const logOffset = daemonLogSize(dir);
   const child = daemonize({ cwd, startedAt, env });
@@ -128,14 +142,15 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
  * 端口被占用这类失败完全无人报告。现在同时盯住子进程的 exit：它带非零码退出就
  * 立即失败，并把守护日志末尾几行作为原因带回去——用户不必自己去翻日志。
  */
-async function waitUntilReady(dir: string, startedAt: string, child?: DaemonChildHandle, logOffset = 0): Promise<DaemonCommandResult> {
+async function waitUntilReady(dir: string, startedAt: string, child: DaemonChildHandle, logOffset = 0): Promise<DaemonCommandResult> {
   let childExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
-  void child?.exited.then(result => { childExit = result; });
+  void child.exited.then(result => { childExit = result; });
 
   const deadline = Date.now() + READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const state = readDaemonStatus(dir);
-    if (state && state.pid > 0 && pidAlive(state.pid) && state.ready) {
+    if (!childExit && child.processIdentity && state?.pid === child.pid && state.startedAt === startedAt &&
+      sameIdentity(state.processIdentity, child.processIdentity) && state.ready && inspectDaemonState(state).status === 'verified') {
       const authEnabled = state.authEnabled !== false;
       return { ok: true, action: 'start', running: true, pid: state.pid, address: state.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile: daemonPaths(dir).logFile, state: 'started' };
     }
@@ -155,48 +170,55 @@ async function waitUntilReady(dir: string, startedAt: string, child?: DaemonChil
     }
     await sleep(200);
   }
-  const state = readDaemonStatus(dir);
-  const pid = pidFromState(state);
-  if (pid > 0 && pidAlive(pid)) {
-    const authEnabled = state?.authEnabled !== false;
-    return { ok: true, action: 'start', running: true, pid, address: state?.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', logFile: daemonPaths(dir).logFile, state: 'started', error: 'Daemon started but did not report ready within the timeout.' };
-  }
-  return { ok: false, action: 'start', running: false, state: 'not-running', logFile: daemonPaths(dir).logFile, error: 'Daemon failed to start within the timeout. See the log file for details.' };
+  return { ok: false, action: 'start', running: false, logFile: daemonPaths(dir).logFile, error: 'Daemon did not report verified readiness within the timeout. Inspect its state and log before retrying.' };
 }
 
-/** `dutydeck stop`: SIGTERM the daemon and clear its state. */
+function unverifiedResult(action: DaemonCommandResult['action'], inspection: DaemonInspection): DaemonCommandResult {
+  return { ok: false, action, running: false, pid: inspection.pid, processStatus: 'unverifiable',
+    error: `Daemon identity cannot be verified: ${inspection.reason}. Inspect the recorded PID and daemon state manually before starting or stopping it.` };
+}
+
+function changedResult(action: DaemonCommandResult['action']): DaemonCommandResult {
+  return { ok: false, action, running: false, error: 'Daemon state changed during this operation; the replacement record was preserved. Inspect dutydeck status before retrying.' };
+}
+
+/** Recheck both the disk generation and process identity before every signal and poll. */
 export async function daemonStop(): Promise<DaemonCommandResult> {
   const dir = resolveDaemonDir();
   const state = readDaemonStatus(dir);
-  const pid = pidFromState(state);
-
-  if (!pid || !pidAlive(pid)) {
-    clearState(dir);
-    return { ok: true, action: 'stop', running: false, state: 'not-running' };
-  }
-
-  try {
-    process.kill(pid, 'SIGTERM');
-  } catch {
-    clearState(dir);
-    return { ok: false, action: 'stop', running: false, state: 'stopped', error: `Failed to signal pid ${pid}.` };
-  }
-
-  const deadline = Date.now() + READY_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    if (!pidAlive(pid)) {
-      clearState(dir);
-      return { ok: true, action: 'stop', running: false, pid, state: 'stopped' };
+  const inspect = (): DaemonInspection | undefined => {
+    const inspection = inspectDaemon(dir);
+    if (inspection.status === 'unverifiable') return inspection;
+    return sameGeneration(state, readDaemonStatus(dir)) ? inspection : undefined;
+  };
+  const finish = (stopped: boolean): DaemonCommandResult => clearGeneration(dir, state)
+    ? { ok: true, action: 'stop', running: false, pid: state?.pid, state: stopped ? 'stopped' : 'not-running' }
+    : changedResult('stop');
+  const check = (stopped: boolean): DaemonCommandResult | undefined => {
+    const inspection = inspect();
+    if (!inspection) return changedResult('stop');
+    if (inspection.status === 'unverifiable') return unverifiedResult('stop', inspection);
+    if (inspection.status === 'stale') return finish(stopped);
+    return undefined;
+  };
+  let result = check(false);
+  if (result) return result;
+  for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
+    result = check(signal === 'SIGKILL');
+    if (result) return result;
+    try {
+      process.kill(state!.pid, signal);
+    } catch {
+      return { ok: false, action: 'stop', running: inspectDaemon(dir).status === 'verified', pid: state?.pid, error: `Failed to send ${signal} to pid ${state?.pid}; daemon state preserved.` };
     }
-    await sleep(200);
+    const deadline = Date.now() + READY_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      result = check(true);
+      if (result) return result;
+      await sleep(200);
+    }
   }
-
-  try {
-    process.kill(pid, 'SIGKILL');
-  } catch { /* already gone */ }
-  await sleep(200);
-  clearState(dir);
-  return { ok: true, action: 'stop', running: false, pid, state: 'stopped', error: 'Graceful stop timed out; sent SIGKILL.' };
+  return { ok: false, action: 'stop', running: true, pid: state?.pid, error: 'Daemon did not exit after SIGKILL; daemon state preserved.' };
 }
 
 /** `dutydeck restart`: stop, then start again. */
@@ -216,18 +238,21 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
     ...(restartOptions.port ? { [RESTART_PORT_ENV]: restartOptions.port } : {}),
     ...(restartOptions.auth !== undefined ? { [RESTART_AUTH_ENV]: String(restartOptions.auth) } : {})
   };
+  const stopped = await daemonStop();
+  if (!stopped.ok) return { ...stopped, action: 'restart' };
   if (previousCwd && previousCwd !== process.cwd()) {
     process.chdir(previousCwd);
   }
-  await daemonStop();
   const started = await daemonStart(restartOptions, handlers, restartEnv);
-  return started.running
+  return started.ok && started.running
     ? { ...started, action: 'restart' as const, state: 'restarted' as const }
     : { ok: false, action: 'restart' as const, running: false, state: 'not-running' as const, error: started.error };
 }
 
 export interface DaemonStatusInfo {
   running: boolean;
+  processStatus: DaemonProcessStatus;
+  error?: string;
   pid?: number;
   address?: string;
   logFile?: string;
@@ -241,12 +266,14 @@ export interface DaemonStatusInfo {
 export function daemonStatus(): DaemonStatusInfo {
   const dir = resolveDaemonDir();
   const state = readDaemonStatus(dir);
-  const pid = pidFromState(state);
-  const alive = pid > 0 && pidAlive(pid);
+  const inspection = inspectDaemon(dir);
+  const alive = inspection.status === 'verified';
   const authEnabled = state?.authEnabled !== false;
   return {
     running: alive,
-    pid: alive ? pid : undefined,
+    processStatus: inspection.status,
+    error: inspection.status === 'unverifiable' ? unverifiedResult('status', inspection).error : undefined,
+    pid: inspection.status !== 'stale' ? inspection.pid : undefined,
     address: alive ? state?.address : undefined,
     logFile: alive ? daemonPaths(dir).logFile : undefined,
     startedAt: alive ? state?.startedAt : undefined,

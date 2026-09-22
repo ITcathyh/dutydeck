@@ -132,7 +132,10 @@ function renderDaemonResult(result: DaemonCommandResult | (DaemonStatusInfo & { 
     .filter(Boolean).join(' · ');
 
   if (result.action === 'status') {
-    if (running) {
+    if (result.processStatus === 'unverifiable') {
+      ui.status('warn', '守护进程身份无法验证', result.error);
+      ui.hint('请人工核对记录的 PID 和进程归属；身份确认前不会自动启停。');
+    } else if (running) {
       ui.status('ok', '守护进程正在运行', detail || undefined);
       if (result.logFile) ui.hint(`日志：${result.logFile}`);
       if (address) ui.hint(`在浏览器打开：${address}`);
