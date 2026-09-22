@@ -137,6 +137,17 @@ describe('read-only participation decision', () => {
     expect(h.starts.every(agent => agent.permissionMode === 'deny-all')).toBe(true);
   });
 
+  it('rejects reply evidence without the current trigger in both decision and response phases', async () => {
+    const input = snapshot();
+    input.observations.push({ ...input.observations[0]!, id: 'history_1', origin: 'history', messageId: 'om_old' });
+    const unrelated = { ...replyDecision, evidenceIds: ['history_1'] };
+    const h = await harness(JSON.stringify(unrelated));
+    await expect(h.decider.decide(config, input, 'obs_1')).rejects.toMatchObject({ code: 'COLLABORATION_INVALID_EVIDENCE' });
+    await expect(h.decider.respond(config, input, unrelated, 'obs_1')).rejects.toMatchObject({ code: 'COLLABORATION_INVALID_EVIDENCE' });
+    expect(h.starts).toHaveLength(1);
+    expect(parseParticipationResult(JSON.stringify({ ...replyDecision, evidenceIds: ['obs_1', 'history_1'] }), input, 'obs_1').action).toBe('reply');
+  });
+
   it('accepts only bounded, nonblank response JSON with no state fields', () => {
     expect(parseParticipationResponse('```json\n{"response":"  回答\\n"}\n```')).toBe('回答');
     expect(parseParticipationResponse(JSON.stringify({ response: 'x'.repeat(8000) }))).toHaveLength(8000);

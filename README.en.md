@@ -207,7 +207,7 @@ In project channels, configure the bot as an intelligent team member:
 - **Participation Modes**:
   - `off`: Only responds when explicitly `@mentioned`.
   - `observe`: Silently reads message history to maintain context; never chimes in proactively.
-  - `selective`: Proactively contributes only when it has high factual confidence and authorization.
+  - `selective`: Stays silent by default without a mention. Replies to clearly addressed requests, verifiable follow-ups, or an evidenced urgent risk requiring immediate warning. Peer conversations, undirected questions, progress updates, thanks, and uncertain intent receive no reply or acknowledgement reaction.
 - **Processing status and concurrency**: Accepted replies get an `OK` reaction on the source message while the answer is generated and sent, then the reaction is removed. Silent decisions stay invisible. Groups run independently; each group processes replies in order and coalesces pending messages before accepting a reply.
 - **Natural Language Delegation**:
   - `@bot Track a todo: submit the release ticket before 5:00 PM tomorrow.`
