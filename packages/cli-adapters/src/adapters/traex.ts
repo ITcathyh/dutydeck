@@ -1,5 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
+import { pollScreenReady } from './screen-ready-helper.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -99,6 +100,10 @@ export function createTraexAdapter(): CliAdapter {
         return ['resume', ...args, usable];
       }
       return args;
+    },
+
+    async prepareInput(backend: PtyLike): Promise<void> {
+      await pollScreenReady(backend, 'TraeX', TRAEX_ACTIVE_BUSY_PATTERN);
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {

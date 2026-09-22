@@ -1,0 +1,4 @@
+{
+  "description": "Codex 0.154.0 native resume: real ANSI startup prefix/tail and tmux capture-pane -e viewport; transcript omitted and model/path/title anonymized.",
+  "screen": "\u001b[1m›\u001b[0m\u001b[39m\u001b[49m \u001b[2mAsk Codex to do anything\u001b[0m\u001b[39m\u001b[49m\n\n  \u001b[38;2;246;226;183mcustom-model medium\u001b[2m\u001b[39m · \u001b[0m\u001b[38;2;171;223;167m\u001b[49m/tmp/project\u001b[2m\u001b[39m · [Session]"
+}
