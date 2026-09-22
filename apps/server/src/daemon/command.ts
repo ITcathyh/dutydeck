@@ -77,6 +77,7 @@ export function markDaemonReady(dir: string, patch: Partial<Pick<DaemonState, 'h
   const processIdentity = currentProcessIdentity();
   const ownPrevious = previous?.pid === process.pid && previous.startedAt === startedAt && sameIdentity(previous.processIdentity, processIdentity) ? previous : undefined;
   if (previous && !ownPrevious) throw new Error('Daemon state was replaced before readiness; replacement record preserved.');
+  if (inspectDaemon(dir).status === 'unverifiable') throw new Error('Daemon state cannot be verified before readiness; existing record preserved.');
   writeState(dir, {
     ...ownPrevious,
     pid: process.pid,
