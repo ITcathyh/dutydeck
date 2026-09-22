@@ -52,14 +52,16 @@ type DeliveryLog = { warn: (...args: any[]) => void };
 async function delivered<T>(store: ConfigRepository | undefined, key: string, send: () => Promise<T>, validate?: (result: T) => boolean): Promise<T> {
   const saved = await store?.get(key);
   if (saved) {
-    const parsed = JSON.parse(saved) as T;
-    if (!validate || validate(parsed)) return parsed;
-    throw new Error(`Invalid delivery receipt: ${key}`);
+    if (!validate) return JSON.parse(saved) as T;
+    try {
+      const parsed = JSON.parse(saved) as T;
+      if (validate(parsed)) return parsed;
+    } catch { /* Strict delivery retries malformed cache entries with the same provider UUID. */ }
   }
   const result = await send();
   if (validate && !validate(result)) throw new Error(`Provider returned an invalid delivery receipt: ${key}`);
   if (store?.compareAndSet) {
-    if (!await store.compareAndSet(key, undefined, JSON.stringify(result))) {
+    if (!await store.compareAndSet(key, validate ? saved : undefined, JSON.stringify(result))) {
       const winner = JSON.parse((await store.get(key))!) as T;
       if (validate && !validate(winner)) throw new Error(`Invalid delivery receipt: ${key}`);
       return winner;

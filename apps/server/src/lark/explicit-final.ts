@@ -94,18 +94,25 @@ async function deliver(store: ConfigRepository, service: LarkCardService, record
     return async (...args: unknown[]) => { try { return await value.apply(target, args); } catch (error) { providerFailed = true; throw error; } };
   } });
   let sent: Awaited<ReturnType<typeof sendLarkResult>>;
-  try { sent = await sendLarkResult(strictService, targetFor(record.scope), {
-    state: 'running', cardKind: 'result', statusLabel: '答复已送达，执行尚未结束', readOnly: true,
-    taskId: record.scope.origin_message_id, taskName: record.task_name, sessionId: record.scope.session_id, turn: record.scope.turn,
-    capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, canVerify: false },
-    elements: [{ tag: 'markdown', element_id: 'final_output', content: record.content }], idempotencyKey: record.provider_uuid
-  }, log, store); } catch (error) {
-    if (providerFailed) await store.set(keyFor(record.scope), JSON.stringify({ ...record, status: 'failed' }));
+  let attachmentMessageId: string | undefined;
+  try {
+    const prepared = await prepareLarkResult(strictService, targetFor(record.scope), {
+      state: 'running', cardKind: 'result', statusLabel: '答复已送达，执行尚未结束', readOnly: true,
+      taskId: record.scope.origin_message_id, taskName: record.task_name, sessionId: record.scope.session_id, turn: record.scope.turn,
+      capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, canVerify: false },
+      elements: [{ tag: 'markdown', element_id: 'final_output', content: record.content }], idempotencyKey: record.provider_uuid
+    }, log, store);
+    // A delivered (including cached) attachment makes this a partial delivery:
+    // keep its intent retryable if the summary fails, never start a second result.
+    attachmentMessageId = prepared.attachmentMessageId;
+    sent = await sendLarkResult(strictService, targetFor(record.scope), prepared.input, log, store);
+  } catch (error) {
+    if (providerFailed && !attachmentMessageId) await store.set(keyFor(record.scope), JSON.stringify({ ...record, status: 'failed' }));
     throw error;
   }
   if (!sent.messageId?.trim()) throw new Error('Explicit final provider returned no message ID');
   const receipt: FinalRecord = { ...record, status: 'delivered', message_id: sent.messageId, elements: sent.elements,
-    ...(sent.attachmentMessageId ? { attachment_message_id: sent.attachmentMessageId } : {}) };
+    ...(attachmentMessageId ? { attachment_message_id: attachmentMessageId } : {}) };
   await store.set(keyFor(record.scope), JSON.stringify(receipt));
   return receipt;
 }
