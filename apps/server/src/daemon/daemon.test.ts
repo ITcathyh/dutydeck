@@ -12,12 +12,13 @@ import {
   daemonLogSize,
   defaultDaemonDir,
   isDaemonRunning,
+  inspectDaemon,
   daemonPaths,
   tailDaemonLog,
   writeLastDaemonDir,
   lastDaemonDirPointerFile
 } from './daemon.js';
-import { daemonRestartOptions, daemonStart, daemonStop, daemonStatus } from './command.js';
+import { daemonRestartOptions, daemonStart, daemonStop, daemonStatus, markDaemonReady } from './command.js';
 
 describe('Dutydeck daemon session', () => {
   let tmp: string;
@@ -86,6 +87,23 @@ describe('Dutydeck daemon session', () => {
     expect(result).toMatchObject({ ok: false, action: 'start', running: false });
     expect(serve).not.toHaveBeenCalled();
     expect(files.map(file => readFileSync(file, 'utf8'))).toEqual(before);
+  });
+
+  it.each(['malformed', 'unreadable'] as const)('preserves %s state instead of treating failed ready reads as an empty record', kind => {
+    const dir = defaultDaemonDir();
+    const stateFile = daemonPaths(dir).stateFile;
+    mkdirSync(dir, { recursive: true });
+    let preservedFile = stateFile;
+    if (kind === 'unreadable') {
+      // A directory produces a real EISDIR read failure even when tests run as root.
+      mkdirSync(stateFile);
+      preservedFile = join(stateFile, 'preserved-marker');
+    }
+    writeFileSync(preservedFile, '{broken-replacement');
+    expect(inspectDaemon(dir).status).toBe('unverifiable');
+    expect(() => markDaemonReady(dir, {}, 'delayed-launch')).toThrow('existing record preserved');
+    expect(readFileSync(preservedFile, 'utf8')).toBe('{broken-replacement');
+    expect(inspectDaemon(dir).status).toBe('unverifiable');
   });
 
   it('allows a child to publish and become ready for its own existing generation', async () => {
