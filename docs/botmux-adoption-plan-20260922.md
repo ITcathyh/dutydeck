@@ -2,7 +2,7 @@
 
 基线为 `f8c0b71`（`ceb72bd` 加评估报告）。本轮落实报告建议的五项差异；按人 CLI 授权另立能力范围。既有优化分支不整体移植。原 checkout 的未提交卡片改动保留，交付在 `feat/botmux-adoption-20260922` 独立 worktree。
 
-Controller 负责设计、任务边界、调度、集成和验收；确定路径的实现交给 ccflash，writer 不提交。各 writer 使用独立 worktree。
+Controller 负责设计、任务边界、调度、集成和验收；确定路径的实现由 worker 完成，writer 不提交。各 writer 使用独立 worktree。ccflash 连接失败后，已获用户确认改用原生 worker 接手。
 
 | 执行单元 | 固定设计与边界 | 验收 |
 |---|---|---|
