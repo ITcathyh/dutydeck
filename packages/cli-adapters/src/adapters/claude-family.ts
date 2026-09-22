@@ -108,10 +108,19 @@ export function pushClaudeFamilyBypassArgs(args: string[], permissionMode: Adapt
 
 function isComposerScreen(screen: string): boolean {
   const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
+  const footer = lines.slice(-4);
+  // Resuming long history can scroll the version banner out of capture-pane.
+  // Accept only the complete current empty composer, never a lone historical prompt glyph.
+  const resumedComposer = footer.length === 4 && /^─{8,}$/.test(footer[0]!)
+    && footer[1] === '❯' && footer[2] === footer[0]
+    && /^(?:⏵⏵ bypass permissions on \(shift\+tab to cycle\)(?: · ← for agents)?|\? for shortcuts)$/.test(footer[3]!);
+  const choiceMenu = lines.some((line, index) => /^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to select)\b/i.test(line)
+    && lines.slice(index + 1, index + 4).some(choice => /^❯\s+\S/.test(choice)));
   return lines.filter(line => line === '❯').length === 1
-    && lines.some(line => /Claude Code v\d/.test(line))
+    && (lines.some(line => /Claude Code v\d/.test(line)) || resumedComposer)
     && !lines.some(line => /^(Accessing workspace:|Quick safety check:|Security guide|Enter to confirm)/.test(line))
-    && !lines.some(line => /^(?:❯\s*)?(?:No, exit|Yes, I trust this folder)$/.test(line));
+    && !lines.some(line => /^(?:❯\s*)?(?:No, exit|Yes, I trust this folder)$/.test(line))
+    && !choiceMenu;
 }
 
 function trustSelection(screen: string, cwd: string | undefined): 'No, exit' | 'Yes, I trust this folder' | undefined {
