@@ -204,7 +204,10 @@ export class LarkGroupParticipation {
     const result = await this.options.repository.observe({ scope, source: 'lark.message', eventId: event.messageId,
       occurredAt: observationTime(event.createTime, '1970-01-01T00:00:00.000Z'), receivedAt: now, senderId: event.senderOpenId,
       senderKind: bot ? 'bot' : event.senderOpenId ? 'human' : 'system', threadId: event.threadId, messageId: event.messageId,
-      text: text.slice(0, 16_000), refs: [event.messageId, ...(event.parentId ? [event.parentId] : []), ...(input.explicit ? ['dutydeck:explicit'] : [])], origin: 'live', missing });
+      text: text.slice(0, 16_000), refs: [event.messageId, ...(event.parentId ? [event.parentId] : []), ...(input.explicit ? ['dutydeck:explicit'] : []),
+        ...(input.botOpenId ? [`dutydeck:self:${input.botOpenId}`] : []),
+        ...(event.parentId ? [`dutydeck:parent:${event.parentId}`] : []),
+        ...new Set(event.mentions.map(mention => `dutydeck:mention:${!input.botOpenId || !mention.openId ? 'unknown' : mention.openId === input.botOpenId ? 'self' : 'other'}`))], origin: 'live', missing });
     // Bootstrap can run alongside explicit requests, but is awaited before ambient decisions.
     void this.bootstrapper.ensure(scope).catch(error => this.options.log?.warn({ error, scope }, '群上下文补读失败'));
     if ((result.created || result.changed) && !input.explicit && !bot && event.senderOpenId && event.senderOpenId !== input.botOpenId) {
@@ -373,7 +376,7 @@ export class LarkGroupParticipation {
     try {
       const config = await this.options.readConfig(scope.appId, scope.chatId);
       if (this.closed || slot.stopped || !config?.listening) return;
-      result = parseParticipationResult(JSON.stringify(await this.options.decider.decide(config, snapshot, trigger.id)), snapshot);
+      result = parseParticipationResult(JSON.stringify(await this.options.decider.decide(config, snapshot, trigger.id)), snapshot, trigger.id);
     } catch (error) {
       await repo.recordDecision({ id, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion, action: 'silent', reason: `Decision unavailable: ${error instanceof Error ? error.message.slice(0, 1500) : 'unknown'}`, evidenceIds: [trigger.id], status: 'failed', inputSnapshot, createdAt: this.now().toISOString() });
       return;
@@ -401,12 +404,26 @@ export class LarkGroupParticipation {
     if (budgetIncomplete || budget >= snapshot.settings.maxProactivePerHour) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     // Keep uncertain/in-flight delivery deduplicated. A completed answer must not
     // suppress a different human question that happens to cite the same source.
-    const notificationKey = digest([result.evidenceIds.slice().sort(), pending.event.threadId ?? scope.chatId]);
+    // The trigger proves who asked; adding it must not defeat deduplication of uncertain sends for the same material.
+    const materialIds = result.evidenceIds.filter(id => id !== trigger.id);
+    const notificationKey = digest([(materialIds.length ? materialIds : result.evidenceIds).slice().sort(), pending.event.threadId ?? scope.chatId]);
     const inputDigest = digest([notificationKey, id]);
-    if (actions.some(item => item.kind === 'participation.reply' && item.payload.notificationKey === notificationKey
-      && item.status !== 'suppressed' && item.status !== 'failed'
-      && (item.status !== 'succeeded' || item.payload.messageId === pending.event.messageId))) {
-      await repo.updateDecision(scope, id, { status: 'suppressed' }); return;
+    for (const item of actions) {
+      if (item.kind !== 'participation.reply' || item.status === 'suppressed' || item.status === 'failed'
+        || item.status === 'succeeded' && item.payload.messageId !== pending.event.messageId) continue;
+      let duplicate = item.payload.notificationKey === notificationKey;
+      // Older pending receipts included their trigger in the key. Normalize the
+      // persisted decision too so an upgrade cannot retry an uncertain send.
+      if (!duplicate && item.status !== 'succeeded' && typeof item.payload.decisionId === 'string') {
+        const previous = await repo.getDecision(scope, item.payload.decisionId);
+        const observations = previous?.inputSnapshot?.observations;
+        const previousTrigger = Array.isArray(observations) ? observations.find(observation => observation.messageId === item.payload.messageId) : undefined;
+        if (previous && previousTrigger) {
+          const previousMaterials = previous.evidenceIds.filter(id => id !== previousTrigger.id);
+          duplicate = digest([(previousMaterials.length ? previousMaterials : previous.evidenceIds).slice().sort(), previousTrigger.threadId ?? scope.chatId]) === notificationKey;
+        }
+      }
+      if (duplicate) { await repo.updateDecision(scope, id, { status: 'suppressed' }); return; }
     }
     const actionId = `reply_${digest([id, inputDigest])}`;
     const begun = await repo.beginAction({ id: actionId, scope, kind: 'participation.reply', requesterId: 'policy:group-participation', inputDigest,

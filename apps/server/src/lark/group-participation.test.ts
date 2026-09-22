@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
+import { createHash } from 'node:crypto';
 import { createCollaborationSchema } from '../../../../packages/storage/src/collaboration-migration.js';
 import { createCollaborationRepository } from '../../../../packages/storage/src/collaboration.js';
 import { RuntimeError, type CollaborationSnapshot, type CollaborationFollowup, type CollaborationTeamContext } from '@dutydeck/shared';
@@ -16,7 +17,7 @@ const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'test', listen
   allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off' };
 const message = (id = 'om_1', text = '资料已提交', patch: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({ messageId: id, chatId: scope.chatId, chatType: 'group', messageType: 'text', content: JSON.stringify({ text }), createTime: '1789707600000', senderOpenId: 'ou_a', senderType: 'user', mentions: [], ...patch });
 const silent = (): ParticipationResult => ({ action: 'silent', reason: '没有新增信息', evidenceIds: [], updates: [] });
-const reply = (snapshot: CollaborationSnapshot): ParticipationResult => ({ action: 'reply', reason: '补充来源明确的新进展', evidenceIds: [snapshot.observations.find(item => item.origin === 'live')!.id], updates: [] });
+const reply = (snapshot: CollaborationSnapshot): ParticipationResult => ({ action: 'reply', reason: '补充来源明确的新进展', evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id], updates: [] });
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
@@ -47,17 +48,44 @@ const teamContext = (): CollaborationTeamContext => {
 };
 
 describe('team context in group participation', () => {
+  it('rejects a reply justified only by team material before acknowledging or generating', async () => {
+    const h = await harness('selective', { readTeamContext: async () => teamContext(), authorizeTeamContext: async () => true });
+    h.decide.mockImplementation(async () => ({ action: 'reply', reason: '外群有相关资料', evidenceIds: ['team_work'], updates: [] }));
+    await h.coordinator.handle(message('om_other', '大家觉得容量够吗？'), config);
+    await h.participation.flush(scope);
+    expect(h.respond).not.toHaveBeenCalled();
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+    expect(h.service.replyText).not.toHaveBeenCalled();
+    expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ action: 'silent', status: 'failed', reason: expect.stringContaining('current human trigger') });
+  });
+
+  it('persists addressing evidence through recovery without turning a mention of others into an explicit request', async () => {
+    const h = await harness();
+    const event = message('om_other', '@_user_1 帮忙看看', { parentId: 'om_human', mentions: [{ key: '@_user_1', name: '小王', openId: 'ou_other' }] });
+    await h.participation.handle(event, config, { explicit: false, botOpenId: 'ou_bot' });
+    await h.participation.close();
+    const recovered = new LarkGroupParticipation(h.options);
+    cleanups.push(() => recovered.close());
+    await recovered.recover(scope.appId); await recovered.flush(scope);
+    expect(h.decide).toHaveBeenCalledOnce();
+    const trigger = h.decide.mock.calls[0]![1].observations.find(item => item.messageId === event.messageId)!;
+    expect(trigger.refs).toEqual(['om_other', 'om_human', 'dutydeck:self:ou_bot', 'dutydeck:parent:om_human', 'dutydeck:mention:other']);
+    expect(trigger.refs).not.toContain('dutydeck:explicit');
+    expect(h.service.addReaction).not.toHaveBeenCalled();
+    expect(h.service.replyText).not.toHaveBeenCalled();
+  });
+
   it('freezes cross-group evidence once for both phases and delivers only to the originating question', async () => {
     const read = vi.fn(async () => teamContext());
     const h = await harness('selective', { readTeamContext: read, authorizeTeamContext: async () => true });
-    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), evidenceIds: [snapshot.teamContext!.observations[0]!.id] }));
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), evidenceIds: [...reply(snapshot).evidenceIds, snapshot.teamContext!.observations[0]!.id] }));
     await h.coordinator.handle(message('om_question', '看看个人待办群'), config);
     await h.participation.flush(scope);
     expect(read).toHaveBeenCalledExactlyOnceWith(scope, '看看个人待办群');
     expect(h.respond.mock.calls[0]![1].teamContext).toEqual(h.decide.mock.calls[0]![1].teamContext);
     expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_question' }));
     const decision = (await h.repository.listDecisions(scope))[0]!;
-    expect(decision).toMatchObject({ status: 'sent', evidenceIds: ['team_work'] });
+    expect(decision).toMatchObject({ status: 'sent', evidenceIds: [h.decide.mock.calls[0]![1].observations.find(item => item.origin === 'live')!.id, 'team_work'] });
     expect(decision.inputSnapshot).toHaveProperty('teamContext.sources.0.name', '个人待办');
     expect((await h.repository.listObservations(scope)).some(item => item.id === 'team_work')).toBe(false);
   });
@@ -79,7 +107,7 @@ describe('team context in group participation', () => {
 
   it('answers a new question even when its team evidence was used by a completed reply', async () => {
     const h = await harness('selective', { readTeamContext: async () => teamContext(), authorizeTeamContext: async () => true });
-    h.decide.mockImplementation(async () => ({ action: 'reply', reason: '新的查询复用同一来源', evidenceIds: ['team_work'], updates: [] }));
+    h.decide.mockImplementation(async (_config, snapshot) => ({ action: 'reply', reason: '新的查询复用同一来源', evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id, 'team_work'], updates: [] }));
     await h.coordinator.handle(message('om_first', '看看个人待办群'), config); await h.participation.flush(scope);
     await h.coordinator.handle(message('om_next', '这里面哪些和容量有关？'), config); await h.participation.flush(scope);
     expect(h.service.replyText.mock.calls).toEqual([
@@ -258,13 +286,28 @@ describe('group observation and selective participation through the coordinator'
   });
 
   it('an unknown delivery is never resent, including rewritten wording for identical evidence', async () => {
-    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), evidenceIds: [...new Set([snapshot.observations.find(item => item.origin === 'live')!.id, ...reply(snapshot).evidenceIds])] }));
     h.service.replyText.mockRejectedValueOnce(new Error('response lost'));
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
     expect((await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')!.status).toBe('unknown');
     h.respond.mockResolvedValue('换一种表达，材料已有进展');
     await h.coordinator.handle(message('om_2'), config); await h.participation.flush(scope);
     expect(h.service.replyText).toHaveBeenCalledOnce();
+  });
+  it.each([false, true])('preserves legacy uncertain-send keys within their original thread (new thread: %s)', async newThread => {
+    const h = await harness('selective', { readTeamContext: async () => teamContext(), authorizeTeamContext: async () => true });
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), evidenceIds: [...reply(snapshot).evidenceIds, 'team_work'] }));
+    h.service.replyText.mockRejectedValueOnce(new Error('response lost'));
+    await h.coordinator.handle(message('om_1', '看看容量', { threadId: 'omt_original' }), config); await h.participation.flush(scope);
+    const action = (await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')!;
+    expect(action.status).toBe('unknown');
+    const first = (await h.repository.listDecisions(scope))[0]!;
+    const legacyKey = createHash('sha256').update(JSON.stringify([first.evidenceIds.slice().sort(), 'omt_original'])).digest('hex');
+    h.db.prepare('UPDATE collaboration_actions SET payload_json = ? WHERE id = ?').run(JSON.stringify({ ...action.payload, notificationKey: legacyKey }), action.id);
+    await h.coordinator.handle(message('om_2', '看看容量', { threadId: newThread ? 'omt_other' : 'omt_original' }), config); await h.participation.flush(scope);
+    expect(h.service.replyText).toHaveBeenCalledTimes(newThread ? 2 : 1);
+    expect(h.respond).toHaveBeenCalledTimes(newThread ? 2 : 1);
+    expect((await h.repository.listDecisions(scope))[0]!.status).toBe(newThread ? 'sent' : 'suppressed');
   });
   it('enforces a zero proactive budget while preserving decisions', async () => {
     const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
@@ -446,7 +489,7 @@ describe('group observation and selective participation through the coordinator'
     const h = await harness();
     await h.repository.createFollowup({ id: 'follow_1', scope, goal: '提交资料', status: 'open', progress: '', steps: [{ id: 'draft', label: '初稿', status: 'open' }, { id: 'review', label: '审核', status: 'open' }], sourceRefs: [], taskIds: [], externalRefs: [], fields: {}, createdBy: 'ou_a', updatedBy: 'ou_a', provenance: 'confirmed' });
     h.authorize.mockImplementation(async (_scope, actor, action) => action !== 'update' || allowed && actor === 'ou_a');
-    h.decide.mockImplementation(async (_config, snapshot) => ({ ...silent(), updates: [{ followupId: 'follow_1', expectedRevision: 1, progress: '初稿已提交，仍待审核', steps: [{ id: 'draft', label: '初稿', status: 'done' }, { id: 'review', label: '审核', status: 'open' }], evidenceIds: [snapshot.observations.find(item => item.origin === 'live')!.id] }] }));
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...silent(), updates: [{ followupId: 'follow_1', expectedRevision: 1, progress: '初稿已提交，仍待审核', steps: [{ id: 'draft', label: '初稿', status: 'done' }, { id: 'review', label: '审核', status: 'open' }], evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id] }] }));
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
     const followup = (await h.repository.getFollowup(scope, 'follow_1'))!;
     expect(followup.status).toBe('open'); expect(followup.steps[0]!.status).toBe(allowed ? 'done' : 'open');

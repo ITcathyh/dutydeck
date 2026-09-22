@@ -165,7 +165,7 @@ it('reads another joined group for Tag without activating its participation or c
   expect(snapshot.teamContext.sources).toEqual(expect.arrayContaining([expect.objectContaining({ scope: personal, name: '个人待办' })]));
   const evidence = snapshot.teamContext.observations.find((item: any) => item.messageId === 'om_capacity');
   expect(evidence.scope).toEqual(personal);
-  f.calls[0]!.finish(JSON.stringify({ action: 'reply', reason: '另一个可读群有相关材料', evidenceIds: [evidence.id], updates: [] }));
+  f.calls[0]!.finish(JSON.stringify({ action: 'reply', reason: '当前请求查询另一个可读群', evidenceIds: [snapshot.observations.find((item: any) => item.messageId === 'om_team_question').id, evidence.id], updates: [] }));
   await eventually(async () => f.calls.length === 2);
   expect(f.calls[1]!.prompt).toContain('推进容量扫描');
   f.calls[1]!.finish('{"response":"「个人待办」群：推进容量扫描，监控 RDS 和 Abase 水位。"}');
