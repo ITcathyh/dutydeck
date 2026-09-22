@@ -1,3 +1,4 @@
+import { sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
@@ -85,13 +86,23 @@ export class LarkAgentToolCapabilityRegistry {
     return `v1.${digest}`;
   }
 
+  finalTurnToken(sessionId: string, taskId: string, attemptId: string) {
+    return createHmac('sha256', this.signingSecret).update(`dutydeck-final-turn-v1\0${sessionId}\0${taskId}\0${attemptId}`).digest('base64url');
+  }
+
+  assertFinalTurn(sessionId: string, taskId: string, attemptId: string, presented?: string) {
+    const expected = Buffer.from(this.finalTurnToken(sessionId, taskId, attemptId));
+    const actual = Buffer.from(typeof presented === 'string' ? presented : '');
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '最终答复凭证不属于当前任务轮次，请使用本轮提供的命令。', 403);
+  }
+
   workbenchTurnToken(sessionId: string, taskId: string) {
     return createHmac('sha256', this.signingSecret).update(`dutydeck-work-turn-v1\0${sessionId}\0${taskId}`).digest('base64url');
   }
 
   assertWorkbenchTurn(sessionId: string, taskId: string, presented?: string) {
     const expected = Buffer.from(this.workbenchTurnToken(sessionId, taskId));
-    const actual = Buffer.from(presented ?? '');
+    const actual = Buffer.from(typeof presented === 'string' ? presented : '');
     if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new AgentGroupToolError('WORK_ITEM_TURN_EXPIRED', '编排凭证不属于当前指令，请使用本轮提供的 work 命令。', 403);
   }
 
@@ -156,12 +167,14 @@ export interface LarkGroupToolClient {
   sendImage?: (input: { chatId: string; imageKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
   replyFile?: (input: { messageId: string; replyInThread?: boolean; fileKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
   replyImage?: (input: { messageId: string; replyInThread?: boolean; imageKey: string; idempotencyKey: string }) => Promise<LarkMessageResult>;
+  send?: LarkCardService['send']; reply?: LarkCardService['reply']; update?: LarkCardService['update'];
   readDocument?(url: string): Promise<{ url: string; title?: string; text: string }>;
 }
 
 export interface LarkAgentToolsOptions {
   authorizeTool?: (sessionId: string, action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send' | 'memory') => Promise<{ actorId: string } | void>;
-  workbenchTask?: (sessionId: string) => { taskId: string } | undefined;
+  workbenchTask?: (sessionId: string) => { taskId: string; attemptId?: string } | undefined;
+  finalTaskContext?: (binding: LarkAgentSessionBinding, task: { taskId: string; attemptId: string }) => Promise<ExplicitFinalContext | undefined>;
   groupManager?: LarkGroupManager;
   env?: NodeJS.ProcessEnv;
   fetcher?: typeof globalThis.fetch;
@@ -355,6 +368,7 @@ export class LarkAgentToolsService {
   private async authorized<T>(context: ToolContext, operation: keyof typeof operationScopes, action: () => Promise<T>) {
     try { return await action(); }
     catch (error) {
+      if (error instanceof Error && 'code' in error && error.code === 'FINAL_CONTENT_CONFLICT') throw new AgentGroupToolError('FINAL_CONTENT_CONFLICT', error.message, 409);
       if (isPermissionError(error)) throw authorizationError(context, operation, error as LarkServiceError);
       if (error instanceof LarkServiceError) throw groupLarkError(operation, error);
       throw error;
@@ -493,6 +507,10 @@ export class LarkAgentToolsService {
     if (config.groupToolsEnabled) {
       blocks.push(larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand));
       const task = this.options.workbenchTask?.(session.id);
+      if (task?.attemptId && config.groupToolsAllowSend && this.options.finalTaskContext) {
+        const finalTurn = this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId);
+        blocks.push(`主动交付本轮最终答复：${this.options.groupToolsCommand ?? 'dutydeck'} group send '<完整答复>' --final --turn ${finalTurn}。发送目标由本轮任务绑定；不要指定 --to 或自定义幂等键。普通进展和交接不要加 --final。映射尚未就绪时稍后重试。`);
+      }
       if (task) {
         const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
         blocks.push(workbenchAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${turn}`, workPlanConfirmationRequired(session)));
@@ -630,11 +648,37 @@ export class LarkAgentToolsService {
     }
   }
 
-  async send(token: string | undefined, input: { content?: string; to?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string }) {
+  async send(token: string | undefined, input: { final?: boolean; turn?: string; content?: string; to?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string }) {
     const context = await this.context(token, 'group_tools.send');
     if (!context.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
     const content = input.content?.trim();
     if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
+    if (input.final !== undefined && typeof input.final !== 'boolean') throw new AgentGroupToolError('INVALID_FINAL_FLAG', 'final 必须是布尔值。');
+    if (input.turn && !input.final) throw new AgentGroupToolError('FINAL_FLAG_REQUIRED', '--turn 只能与 --final 一起使用。');
+    if (input.final) {
+      const active = this.options.workbenchTask?.(context.sessionId);
+      if (!active?.attemptId) throw new AgentGroupToolError('FINAL_NO_ACTIVE_TASK', '没有可交付最终答复的活跃任务。', 409);
+      return withExplicitFinalLock(this.configs, active.taskId, async () => {
+        const current = await this.context(token, 'group_tools.send');
+        if (!current.config.groupToolsAllowSend) throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '发送能力已关闭。', 403);
+        const task = this.options.workbenchTask?.(current.sessionId);
+        if (!task?.attemptId || task.taskId !== active.taskId) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
+        this.capabilities.assertFinalTurn(current.sessionId, task.taskId, task.attemptId, input.turn);
+        const target = await this.options.finalTaskContext?.(current, { taskId: task.taskId, attemptId: task.attemptId });
+        if (!target) throw new AgentGroupToolError('FINAL_MAPPING_UNAVAILABLE', '本轮消息映射尚未就绪或没有合法消息路由，请稍后重试。', 409);
+        const scope = target.scope;
+        if (scope.app_id !== current.appId || scope.session_id !== current.sessionId || scope.runtime_task_id !== task.taskId
+          || scope.attempt_id !== task.attemptId || scope.chat_id !== current.chatId || scope.chat_type !== current.chatType
+          || input.to !== undefined || input.idempotencyKey !== undefined
+          || (input.replyTo !== undefined && input.replyTo.trim() !== scope.reply_message_id)
+          || (input.inThread !== undefined && input.inThread !== scope.reply_in_thread)) throw new AgentGroupToolError('FINAL_TARGET_MISMATCH', '最终答复只能交付到当前任务绑定的原始消息位置。', 400);
+        const latest = this.options.workbenchTask?.(current.sessionId);
+        if (latest?.taskId !== task.taskId || latest.attemptId !== task.attemptId) throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
+        if (!current.client.send || !current.client.update || !current.client.uploadFile
+          || (scope.reply_message_id ? !current.client.reply || !current.client.replyFile : !current.client.sendFile)) throw new AgentGroupToolError('FINAL_CLIENT_UNSUPPORTED', '当前客户端不支持最终答复卡片。', 503);
+        return this.authorized(current, scope.reply_message_id ? 'reply' : 'send', () => sendExplicitFinal(this.configs, current.client as LarkCardService, target, content));
+      });
+    }
     if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
     const idempotencyKey = input.idempotencyKey?.trim() || deterministicSendUuid({
       sessionId: context.sessionId,

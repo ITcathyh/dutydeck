@@ -186,3 +186,9 @@ describe('Dutydeck CLI', () => {
     expect(databaseUpgradeExecution).not.toHaveBeenCalled();
   });
 });
+
+it('parses explicit final and its current-turn capability', async () => {
+  const groupSend = vi.fn();
+  await createCliProgram('0.0.6', { groupSend }).parseAsync(['node', 'dutydeck', 'group', 'send', 'answer', '--final', '--turn', 'signed-turn']);
+  expect(groupSend).toHaveBeenCalledWith('answer', expect.objectContaining({ final: true, turn: 'signed-turn' }));
+});

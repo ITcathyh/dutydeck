@@ -53,6 +53,8 @@ export interface LarkCreateCliOptions {
 }
 
 export interface AgentGroupCliOptions {
+  final?: boolean;
+  turn?: string;
   after?: string;
   limit?: string;
   timeoutMs?: string;
@@ -421,6 +423,8 @@ Examples:
     .action((messageId) => handlers.groupMessage?.(messageId));
   group.command('send')
     .description('Send a new group message or reply to an existing message/thread')
+    .option('--final', 'Deliver the final answer for the current task')
+    .option('--turn <token>', 'Current final-delivery task capability')
     .argument('<content>', 'Message content')
     .option('--to <target>', 'Mention a discovered Agent or human member by ID or name')
     .option('--reply-to <message-id>', 'Reply to a message in this group')

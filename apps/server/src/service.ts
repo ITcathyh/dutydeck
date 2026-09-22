@@ -1,3 +1,4 @@
+import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
@@ -188,6 +189,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     env,
     groupToolsCommand: options.groupToolsCommand,
     workbenchTask: sessionId => runtime.getActiveTaskContext(sessionId),
+    finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(`lark-card:${binding.appId}`), binding, task),
     authorizeTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action) ?? Promise.resolve(),
     executionPolicy: legacyExecutionPolicy,
     groupManager,

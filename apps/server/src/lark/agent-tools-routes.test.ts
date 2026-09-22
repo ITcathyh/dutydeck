@@ -118,3 +118,13 @@ describe('Agent group tool HTTP boundary', () => {
     });
   });
 });
+
+it('forwards explicit final and current-turn token unchanged', async () => {
+  const send = vi.fn(async () => ({ messageId: 'om_final' }));
+  const app = Fastify(); apps.push(app);
+  await registerLarkAgentToolRoutes(app, { send } as any);
+  const result = await app.inject({ method: 'POST', url: '/api/lark/agent-tools/send',
+    headers: { authorization: 'Bearer session-token' }, payload: { content: 'answer', final: true, turn: 'signed-turn' } });
+  expect(result.statusCode).toBe(200);
+  expect(send).toHaveBeenCalledWith('session-token', { content: 'answer', final: true, turn: 'signed-turn' });
+});

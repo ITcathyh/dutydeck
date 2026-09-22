@@ -44,17 +44,26 @@ export async function deliverLarkCompletionReaction(
   }
 }
 
-type DeliveryTarget = { chatId: string; replyMessageId?: string; replyInThread?: boolean };
+export type DeliveryTarget = { chatId: string; replyMessageId?: string; replyInThread?: boolean; allowReplyFallback?: boolean };
 type DeliveryLog = { warn: (...args: any[]) => void };
 
 // Save only successful provider responses. Each leg has its own UUID and durable
 // receipt, so a restart after the file send retries only the missing summary.
-async function delivered<T>(store: ConfigRepository | undefined, key: string, send: () => Promise<T>): Promise<T> {
+async function delivered<T>(store: ConfigRepository | undefined, key: string, send: () => Promise<T>, validate?: (result: T) => boolean): Promise<T> {
   const saved = await store?.get(key);
-  if (saved) return JSON.parse(saved) as T;
+  if (saved) {
+    const parsed = JSON.parse(saved) as T;
+    if (!validate || validate(parsed)) return parsed;
+    throw new Error(`Invalid delivery receipt: ${key}`);
+  }
   const result = await send();
+  if (validate && !validate(result)) throw new Error(`Provider returned an invalid delivery receipt: ${key}`);
   if (store?.compareAndSet) {
-    if (!await store.compareAndSet(key, undefined, JSON.stringify(result))) return JSON.parse((await store.get(key))!) as T;
+    if (!await store.compareAndSet(key, undefined, JSON.stringify(result))) {
+      const winner = JSON.parse((await store.get(key))!) as T;
+      if (validate && !validate(winner)) throw new Error(`Invalid delivery receipt: ${key}`);
+      return winner;
+    }
   } else if (store) await store.set(key, JSON.stringify(result));
   return result;
 }
@@ -75,19 +84,19 @@ export async function sendLarkFile(
           fileKey,
           idempotencyKey: input.idempotencyKey,
         });
-      } catch (error) { log.warn({ error, messageId: target.replyMessageId }, '回复文件失败，回退为会话内发送'); }
+      } catch (error) { if (target.allowReplyFallback === false) throw error; log.warn({ error, messageId: target.replyMessageId }, '回复文件失败，回退为会话内发送'); }
     }
     return service.sendFile({ chatId: target.chatId, fileKey, idempotencyKey: input.idempotencyKey });
-  });
+  }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()) : undefined);
 }
 
-export async function sendLarkResult(
+export async function prepareLarkResult(
   service: LarkCardService,
   target: DeliveryTarget,
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
   log: DeliveryLog,
   store?: ConfigRepository
-): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
+): Promise<{ input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string }; attachmentMessageId?: string }> {
   const resultInput = { ...input, cardKind: 'result' as const };
   const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
   const card = buildLarkCard(resultInput);
@@ -114,6 +123,15 @@ export async function sendLarkResult(
       ...input.elements.filter(element => ['evidence', 'verification_status', 'workflow_result_status', 'workflow_accept', 'workflow_changes'].includes(String(element.element_id)))
     ];
   }
+  return { input: resultInput, ...(attachmentMessageId ? { attachmentMessageId } : {}) };
+}
+
+export async function sendLarkResult(
+  service: LarkCardService, target: DeliveryTarget,
+  input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
+  log: DeliveryLog, store?: ConfigRepository
+): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
+  const { input: resultInput, attachmentMessageId } = await prepareLarkResult(service, target, input, log, store);
   const elements = resultInput.elements;
   const sent = await delivered(store, `lark.delivery.${input.idempotencyKey}.summary`, async () => {
     if (target.replyMessageId && typeof service.reply === 'function') {
@@ -124,10 +142,12 @@ export async function sendLarkResult(
           ...(target.replyInThread ? { replyInThread: true } : {}),
         });
         return { ...result, elements };
-      } catch (error) { log.warn({ error, messageId: target.replyMessageId, chatId: target.chatId }, '回复执行结果失败，回退为会话内发送'); }
+      } catch (error) { if (target.allowReplyFallback === false) throw error; log.warn({ error, messageId: target.replyMessageId, chatId: target.chatId }, '回复执行结果失败，回退为会话内发送'); }
     }
+    if (target.replyMessageId && target.allowReplyFallback === false) throw new Error('Explicit final requires reply support');
     return { ...await service.send({ ...resultInput, chatId: target.chatId }), elements };
-  });
+  }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim())
+    && JSON.stringify(result.elements) === JSON.stringify(elements) : undefined);
   return { ...sent, ...(attachmentMessageId ? { attachmentMessageId } : {}) };
 }
 

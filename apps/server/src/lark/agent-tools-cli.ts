@@ -108,6 +108,8 @@ export function runGroupSend(content: string, cliOptions: AgentGroupCliOptions, 
     method: 'POST',
     body: JSON.stringify({
       content,
+      ...(cliOptions.final ? { final: true } : {}),
+      ...(cliOptions.turn ? { turn: cliOptions.turn } : {}),
       ...(cliOptions.to ? { to: cliOptions.to } : {}),
       ...(cliOptions.replyTo ? { replyTo: cliOptions.replyTo } : {}),
       ...(cliOptions.inThread ? { inThread: true } : {}),

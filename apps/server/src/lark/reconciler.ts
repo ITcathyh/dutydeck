@@ -1,7 +1,8 @@
+import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { describeLarkTaskRecovery } from './task-recovery.js';
 import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRecord } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
-import { boundLarkCardElements, type LarkCardService } from './service.js';
+import { boundLarkCardElements, type LarkCardInput, type LarkCardService } from './service.js';
 import {
   loadLarkTaskEvents,
   hasUnresolvedToolCalls,
@@ -42,6 +43,7 @@ export async function performLarkCardReconcile(input: {
   channel: string;
   deliveryStore?: ConfigRepository;
   resultElements?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, cardId: string) => Promise<Array<Record<string, any>>>;
+  terminalDecoration?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, config: StoredLarkConfig) => Promise<{ elements: Array<Record<string, any>>; cardInput: LarkCardInput }>;
   /** 按记录所属会话解析生效配置（群级呈现覆盖）。缺省时全部按 Bot 级配置补发。 */
   resolveConfig?: (saved: PersistedLarkCardTask) => Promise<StoredLarkConfig>;
 }): Promise<number> {
@@ -236,72 +238,79 @@ export async function performLarkCardReconcile(input: {
         }
       }
       if (!updated && isLarkMessageUnupdatable(lastError)) updated = true;
-      let finalMessageId: string | undefined;
-      let finalAttachmentMessageId: string | undefined;
-      let finalElements: Array<Record<string, any>> | undefined;
-      let reactionDelivered = false;
-      let resultCallbackFailed = false;
-      try {
-        // 完成时只贴表情：重启补发同样不发结果卡，只补那一枚表情。
-        // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
-        if (completed && effective.completionReactionOnly === true) {
-          reactionDelivered = await deliverLarkCompletionReaction(
-            service, { appId: persisted.app_id, messageId: mapping.externalId }, log, input.deliveryStore);
-        } else {
-        // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
-        // 保证消息不重发，@ 也不会重复。默认关闭时本元素不存在，卡面逐字节不变。
-        // 发起人是机器人时同样不 @ 回去：刷屏事故里最容易触发的恰好是重启对账这条路。
-        const mention = senderGroupMention(config.groupCardMention, {
-          chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type });
-        const elements = [
-          ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : []),
-          ...renderLarkResultElements(events),
-          ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : [])];
-        const result = await sendLarkResult(service, {
-          chatId: persisted.chat_id,
-          replyMessageId: persisted.reply_message_id?.trim()
-            || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
-          replyInThread: persisted.reply_in_thread
-        }, {
-          ...cardContext, permissionMode: larkPermissionMode(config), state,
-          taskId: mapping.externalId, taskName: persisted.task_name,
-          elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true, recordExport: true,
-          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-          elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn))
-        }, log, input.deliveryStore);
-        finalAttachmentMessageId = result.attachmentMessageId;
-        finalMessageId = result.messageId;
-        finalElements = result.elements;
-        if (completed && input.resultElements) {
-          try {
-            await input.resultElements(mapping, { ...persisted, final_attachment_message_id: finalAttachmentMessageId }, finalMessageId);
-          } catch (callbackError) {
-            resultCallbackFailed = true;
-            log.warn({ error: callbackError, messageId: persisted.card_message_id, finalMessageId, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果回调写入失败，稍后重试');
+      await withExplicitFinalLock(input.deliveryStore, runtimeTask.id, async () => {
+        const finalContext = completed ? explicitFinalContext(mapping, persisted, runtimeTask.currentAttemptId) : undefined;
+        const explicit = await hasExplicitFinal(input.deliveryStore, finalContext);
+        let finalCardInput: LarkCardInput | undefined;
+        let finalMessageId: string | undefined;
+        let finalAttachmentMessageId: string | undefined;
+        let finalElements: Array<Record<string, any>> | undefined;
+        let reactionDelivered = false;
+        let resultCallbackFailed = false;
+        try {
+          // 完成时只贴表情：重启补发同样不发结果卡，只补那一枚表情。
+          // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
+          if (!explicit && completed && effective.completionReactionOnly === true) {
+            reactionDelivered = await deliverLarkCompletionReaction(
+              service, { appId: persisted.app_id, messageId: mapping.externalId }, log, input.deliveryStore);
+          } else {
+          // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
+          // 保证消息不重发，@ 也不会重复。默认关闭时本元素不存在，卡面逐字节不变。
+          // 发起人是机器人时同样不 @ 回去：刷屏事故里最容易触发的恰好是重启对账这条路。
+          const mention = senderGroupMention(config.groupCardMention, {
+            chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type });
+          const decoration = await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective);
+          const elements = [
+            ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : []),
+            ...(explicit ? [] : renderLarkResultElements(events)),
+            ...(decoration?.elements ?? []),
+            ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : [])];
+          finalCardInput = {
+            ...cardContext, permissionMode: larkPermissionMode(config), state, cardKind: 'result',
+            taskId: mapping.externalId, taskName: persisted.task_name,
+            elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true, recordExport: true,
+            ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...decoration?.cardInput
+          };
+          const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements) ?? await sendLarkResult(service, {
+            chatId: persisted.chat_id,
+            replyMessageId: persisted.reply_message_id?.trim()
+              || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
+            replyInThread: persisted.reply_in_thread
+          }, { ...finalCardInput, elements, idempotencyKey: larkResultKey(cardMessageId ?? larkSilentResultAnchor(mapping.externalId, persisted.turn)) }, log, input.deliveryStore);
+          finalAttachmentMessageId = result.attachmentMessageId;
+          finalMessageId = result.messageId;
+          finalElements = result.elements;
+          if (completed && input.resultElements) {
+            try {
+              await input.resultElements(mapping, { ...persisted, final_attachment_message_id: finalAttachmentMessageId }, finalMessageId);
+            } catch (callbackError) {
+              resultCallbackFailed = true;
+              log.warn({ error: callbackError, messageId: persisted.card_message_id, finalMessageId, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果回调写入失败，稍后重试');
+            }
           }
+          }
+        } catch (error) {
+          log.warn({ error, messageId: persisted.card_message_id, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果交付待下次对账重试');
         }
+        if (!updated || (!finalMessageId && !reactionDelivered) || resultCallbackFailed) unresolved++;
+        // 原子 CAS：只有 mapping.extra 仍是本轮读到的旧快照时才写回，避免在 PATCH/结果发送
+        // 在途期间新一轮 turn 已 save 后，旧快照把新 turn/新卡覆盖回旧值并误冻结。
+        const casSaved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
+          ...persisted, runtime_task_id: runtimeTask.id, state,
+          progress_frozen: updated,
+          ...(finalMessageId
+            ? { final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements, final_card_input: finalCardInput }
+            : reactionDelivered ? { final_delivery_state: 'reaction' } : {}),
+          last_successful_elements: deliveredElements
+        }));
+        if (casSaved) {
+          log.info({ messageId: persisted.card_message_id, finalMessageId, reactionDelivered, state, progressFrozen: updated }, '飞书过程与结果消息对账完成');
+        } else {
+          // CAS 失败说明映射已被更新的一轮/实时链路写过：不覆盖，多跑一轮继续跟踪。
+          unresolved++;
+          log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '飞书卡片映射在对账期间已被更新，放弃旧快照写回并继续跟踪');
         }
-      } catch (error) {
-        log.warn({ error, messageId: persisted.card_message_id, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果交付待下次对账重试');
-      }
-      if (!updated || (!finalMessageId && !reactionDelivered) || resultCallbackFailed) unresolved++;
-      // 原子 CAS：只有 mapping.extra 仍是本轮读到的旧快照时才写回，避免在 PATCH/结果发送
-      // 在途期间新一轮 turn 已 save 后，旧快照把新 turn/新卡覆盖回旧值并误冻结。
-      const casSaved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
-        ...persisted, runtime_task_id: runtimeTask.id, state,
-        progress_frozen: updated,
-        ...(finalMessageId
-          ? { final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements }
-          : reactionDelivered ? { final_delivery_state: 'reaction' } : {}),
-        last_successful_elements: deliveredElements
-      }));
-      if (casSaved) {
-        log.info({ messageId: persisted.card_message_id, finalMessageId, reactionDelivered, state, progressFrozen: updated }, '飞书过程与结果消息对账完成');
-      } else {
-        // CAS 失败说明映射已被更新的一轮/实时链路写过：不覆盖，多跑一轮继续跟踪。
-        unresolved++;
-        log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '飞书卡片映射在对账期间已被更新，放弃旧快照写回并继续跟踪');
-      }
+      });
     } catch (error) {
       unresolved++;
       log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '对账单条卡片映射处理异常，稍后重试');

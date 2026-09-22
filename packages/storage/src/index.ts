@@ -99,6 +99,7 @@ type TaskRowLike = typeof tasks.$inferSelect | {
   execution_context: string | null;
   interrupted_by_actor?: string | null;
   queue_position?: number | null;
+  current_attempt_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -108,6 +109,7 @@ function decodeTask(row: TaskRowLike): TaskRecord {
   const executionContextRaw = 'executionContext' in row ? row.executionContext : row.execution_context;
   const interruptedByActor = 'interruptedByActor' in row ? row.interruptedByActor : row.interrupted_by_actor;
   const queuePosition = 'queuePosition' in row ? row.queuePosition : row.queue_position;
+  const currentAttemptId = 'currentAttemptId' in row ? row.currentAttemptId : row.current_attempt_id;
   const createdAt = 'createdAt' in row ? row.createdAt : row.created_at;
   const updatedAt = 'updatedAt' in row ? row.updatedAt : row.updated_at;
 
@@ -118,6 +120,7 @@ function decodeTask(row: TaskRowLike): TaskRecord {
     status: row.status,
     executionContext: executionContextRaw ? JSON.parse(executionContextRaw) : undefined,
     ...(interruptedByActor ? { interruptedByActor } : {}),
+    ...(currentAttemptId ? { currentAttemptId } : {}),
     ...(queuePosition !== null && queuePosition !== undefined ? { queuePosition } : {}),
     createdAt,
     updatedAt

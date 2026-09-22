@@ -969,9 +969,17 @@ export class DutydeckRuntime {
     }
   }
 
-  getActiveTaskContext(sessionId: string): { taskId: string; actorId?: string } | undefined {
+  getActiveTaskContext(sessionId: string): { taskId: string; attemptId?: string; actorId?: string } | undefined {
     const task = this.activeTasks.get(sessionId);
-    return task ? { taskId: task.id, actorId: task.executionContext?.actorId } : undefined;
+    if (!task) return undefined;
+    // 当前 attempt 必须确实属于这个活跃 task；队列/旧 token 残留不能冒充当前轮。
+    const owner = this.attempts.get(sessionId);
+    const ref = owner ? this.attemptRefs.get(owner) : undefined;
+    return {
+      taskId: task.id,
+      ...(ref && ref.taskId === task.id ? { attemptId: ref.attemptId } : {}),
+      actorId: task.executionContext?.actorId
+    };
   }
 
   async start(input: StartSessionInput): Promise<Session> {

@@ -56,3 +56,12 @@ describe('Agent group tool CLI client', () => {
     } });
   });
 });
+
+it('transmits final and turn without changing ordinary send fields', async () => {
+  const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => response({ messageId: 'om_final' }));
+  await runGroupSend('answer', { final: true, turn: 'signed-turn' }, {
+    env: { dutydeck_group_tools_url: 'http://localhost/api/lark/agent-tools', dutydeck_group_tools_token: 'capability' },
+    fetcher: fetcher as typeof fetch
+  });
+  expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).toEqual({ content: 'answer', final: true, turn: 'signed-turn' });
+});
