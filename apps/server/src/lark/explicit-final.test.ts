@@ -453,13 +453,77 @@ it('provides only platform controls when the original card is permanently unupda
   expect(resultSends(h)).toHaveLength(2);
 });
 
-it('does not accept a damaged cached provider receipt as an explicit delivery', async () => {
-  const h = await harness(); await h.sendFinal();
+it.each([
+  ['missing-elements', 'completion'], ['bad-json', 'completion'],
+  ['missing-elements', 'restart'], ['bad-json', 'restart']
+])('recovers a %s summary cache through %s with the original provider UUID', async (damage, recovery) => {
+  const h = await harness(); const sent = await h.sendFinal();
   const [row] = await h.repos.config.list!('lark.explicit_final.');
   const record = JSON.parse(row!.value);
   delete record.message_id; delete record.elements; record.status = 'pending';
   await h.repos.config.set(row!.key, JSON.stringify(record));
-  await h.repos.config.set(`lark.delivery.${record.provider_uuid}.summary`, JSON.stringify({ messageId: 'om_fake' }));
-  await expect(h.sendFinal()).rejects.toThrow('Invalid delivery receipt');
-  expect(JSON.parse((await h.repos.config.get(row!.key))!)).not.toHaveProperty('message_id');
+  const summaryKey = `lark.delivery.${record.provider_uuid}.summary`;
+  const damaged = damage === 'bad-json' ? '{broken' : JSON.stringify({ messageId: 'om_fake' });
+  await h.repos.config.set(summaryKey, damaged);
+  const compareAndSet = vi.spyOn(h.repos.config, 'compareAndSet');
+  if (recovery === 'restart') h.coordinator.stop();
+  h.release();
+  await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+  if (recovery === 'completion') await h.resultCard();
+  h.coordinator.stop();
+  for (let restart = 0; restart < 2; restart++) {
+    const restarted = h.createCoordinator();
+    try {
+      await restarted.reconcile(h.config);
+      expect((await h.persisted()).final_message_id).toBe(sent.messageId);
+      expect(h.cards.get(sent.messageId).state).toBe('completed');
+    } finally { restarted.stop(); }
+  }
+  expect(compareAndSet).toHaveBeenCalledWith(summaryKey, damaged, expect.any(String));
+  expect(resultSends(h)).toHaveLength(2);
+  expect(resultSends(h).every(input => input.idempotencyKey === record.provider_uuid)).toBe(true);
+  expect([...h.cards.values()].filter(input => input.cardKind === 'result')).toHaveLength(1);
+  expect(JSON.parse((await h.repos.config.get(summaryKey))!)).toMatchObject({ messageId: sent.messageId,
+    elements: [{ tag: 'markdown', element_id: 'final_output', content: '完整最终答复' }] });
+  expect(JSON.parse((await h.repos.config.get(row!.key))!)).toMatchObject({ status: 'delivered', message_id: sent.messageId });
 });
+
+it.each([['completion', 1], ['restart', 1], ['restart', 2]] as const)(
+  'keeps one attachment after %s recovery from %s failed summary attempts', async (recovery, failures) => {
+    const h = await harness({ text: 'long answer '.repeat(6000) });
+    for (let attempt = 0; attempt < failures; attempt++) {
+      h.service.reply.mockRejectedValueOnce(new Error('temporary summary failure'));
+      await expect(h.sendFinal()).rejects.toThrow('temporary summary failure');
+      expect(h.service.replyFile).toHaveBeenCalledTimes(1);
+      const [pending] = await h.repos.config.list!('lark.explicit_final.');
+      expect(JSON.parse(pending!.value)).toMatchObject({ status: 'pending' });
+    }
+    const [row] = await h.repos.config.list!('lark.explicit_final.');
+    const record = JSON.parse(row!.value);
+    const fileInput = h.service.replyFile.mock.calls[0]![0];
+    const fileId = [...h.cards].find(([, input]) => input.fileKey)![0];
+    if (recovery === 'restart') h.coordinator.stop();
+    h.release();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+    if (recovery === 'completion') await h.resultCard();
+    h.coordinator.stop();
+    for (let restart = 0; restart < 2; restart++) {
+      const restarted = h.createCoordinator();
+      try { await restarted.reconcile(h.config); }
+      finally { restarted.stop(); }
+    }
+    const saved = await h.persisted();
+    expect(saved.final_message_id).toBeTruthy();
+    expect(saved.final_attachment_message_id).toBe(fileId);
+    expect(h.cards.get(saved.final_message_id!).state).toBe('completed');
+    expect(h.service.replyFile).toHaveBeenCalledTimes(1);
+    expect(h.service.replyFile).toHaveBeenCalledWith(fileInput);
+    expect(h.service.uploadFile).toHaveBeenCalledTimes(1);
+    expect(resultSends(h)).toHaveLength(failures + 1);
+    expect(resultSends(h).every(input => input.idempotencyKey === record.provider_uuid)).toBe(true);
+    expect([...h.cards.values()].filter(input => input.cardKind === 'result')).toHaveLength(1);
+    expect(JSON.parse((await h.repos.config.get(row!.key))!)).toMatchObject({
+      status: 'delivered', provider_uuid: record.provider_uuid, message_id: saved.final_message_id, attachment_message_id: fileId
+    });
+  }
+);
