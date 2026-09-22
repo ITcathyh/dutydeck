@@ -1,4 +1,4 @@
-import { childProcessIdentity } from '@dutydeck/storage';
+import { childProcessIdentity, currentProcessIdentity } from '@dutydeck/storage';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -13,7 +13,9 @@ import {
   defaultDaemonDir,
   isDaemonRunning,
   daemonPaths,
-  tailDaemonLog
+  tailDaemonLog,
+  writeLastDaemonDir,
+  lastDaemonDirPointerFile
 } from './daemon.js';
 import { daemonRestartOptions, daemonStart, daemonStop, daemonStatus } from './command.js';
 
@@ -62,6 +64,40 @@ describe('Dutydeck daemon session', () => {
     const state = readDaemonStatus(defaultDaemonDir());
     expect(state).toMatchObject({ pid: process.pid, ready: false, address: 'http://127.0.0.1:4310', authEnabled: false, database: join(tmp, '.dutydeck', 'dutydeck.db') });
     expect(serve).toHaveBeenCalledWith(expect.objectContaining({ database: join(tmp, '.dutydeck', 'dutydeck.db') }), expect.any(Function));
+  });
+
+  it.each(['replacement-generation', 'legacy-live', 'stale-generation', 'malformed'] as const)('refuses delayed child publication over %s without touching pid, state, pointer or serve', async kind => {
+    const dir = defaultDaemonDir();
+    const processIdentity = currentProcessIdentity();
+    writeState(dir, {
+      pid: process.pid, processIdentity: kind === 'legacy-live' ? undefined : {
+        ...processIdentity, ...(kind === 'stale-generation' ? { start: 'previous-birth' } : {})
+      }, ready: true, startedAt: 'replacement-generation', cwd: tmp
+    });
+    if (kind === 'malformed') writeFileSync(daemonPaths(dir).stateFile, '{broken-replacement');
+    writePidFile(dir, 12345678);
+    writeLastDaemonDir(join(tmp, 'replacement-root'), tmp);
+    const files = [daemonPaths(dir).stateFile, daemonPaths(dir).pidFile, lastDaemonDirPointerFile(tmp)];
+    const before = files.map(file => readFileSync(file, 'utf8'));
+    const serve = vi.fn();
+    const result = await daemonStart({}, { serve }, {
+      HOME: tmp, DUTYDECK_DAEMONIZED: '1', DUTYDECK_DAEMON_STARTED_AT: 'older-delayed-launch'
+    });
+    expect(result).toMatchObject({ ok: false, action: 'start', running: false });
+    expect(serve).not.toHaveBeenCalled();
+    expect(files.map(file => readFileSync(file, 'utf8'))).toEqual(before);
+  });
+
+  it('allows a child to publish and become ready for its own existing generation', async () => {
+    const dir = defaultDaemonDir();
+    const processIdentity = currentProcessIdentity();
+    writeState(dir, { pid: process.pid, processIdentity, ready: false, startedAt: 'same-launch', cwd: tmp });
+    const serve = vi.fn((_options, ready) => ready());
+    expect(await daemonStart({}, { serve }, {
+      HOME: tmp, DUTYDECK_DAEMONIZED: '1', DUTYDECK_DAEMON_STARTED_AT: 'same-launch'
+    })).toMatchObject({ ok: true, action: 'start', running: true });
+    expect(serve).toHaveBeenCalledOnce();
+    expect(readDaemonStatus(dir)).toMatchObject({ pid: process.pid, processIdentity, ready: true, startedAt: 'same-launch' });
   });
 
   it('records the effective remote open deployment when configured only through env', async () => {
