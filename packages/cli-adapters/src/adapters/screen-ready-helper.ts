@@ -10,10 +10,10 @@ const PENDING = /^(?:Resuming(?: session)?(?:…|\.{3})?|(?:[•⠋⠙⠹⠸⠼�
 const CODEX_BANNER = /^(?:Codex|│\s*>_ OpenAI Codex \(v[^\s()]+\)\s*│)$/i;
 const TRAEX_BANNER = /^(?:TraeX|TraeCode CLI)$/i;
 const CODEX_COMPOSER = /^[›❯]\s*(?:Ask Codex(?: to do anything)?)?$/i;
-const TRAEX_COMPOSER = /^[›❯]\s*(?:Ask (?:Trae|TraeCode CLI)(?: to do anything)?)?$/i;
+const TRAEX_COMPOSER = /^[›❯]\s*(?:Ask (?:Trae|TraeCode CLI)(?: to do anything)?|Find and fix a bug in @filename)?$/i;
 
 // Only complete footer rows count as initialized evidence, never prose substrings.
-const CONTEXT_FOOTER = /^(?:(?:[^\s·]+(?: [^\s·]+)?) · )?Context \d+% (?:left|used)(?: · weekly \d+% left)?$|^\d+% (?:context )?left$/i;
+const CONTEXT_FOOTER = /^(?:[^\s·]+(?: [^\s·]+)? · (?:(?:\/|~)[^\s·]* · )?)?Context \d+% (?:left|used)(?: · weekly \d+% left)?(?: · (?:\/|~)[^\s·]*)?$|^(?:\? for shortcuts\s+)?\d+% (?:context )?left$/i;
 const PATH_FOOTER = /^[^\s·]+(?: [^\s·]+)? · (?:\/|~)[^\s·]*(?: · (?:Ready|\[Session\]))?$/;
 const DECORATION = /^[╰╯│╭╮─\-\s+=]+$|^\?\s+for\s+shortcuts$/i;
 
