@@ -238,6 +238,7 @@ export class TmuxBackend implements SessionBackend {
   private started = false;
   private exited = false;
   private pipePath: string | null = null;
+  private socketPath: string | undefined;
   private tail: ChildProcessByStdio<null, Readable, null> | null = null;
   /** Streaming UTF-8 decoder: tail emits raw chunks that can split a
    *  multi-byte character (CJK/emoji) — StringDecoder reassembles it. */
@@ -287,6 +288,7 @@ export class TmuxBackend implements SessionBackend {
     }
 
     try {
+      this.socketPath = runTmux(['display-message', '-p', '-t', `=${this.sessionName}`, '#{socket_path}']).trim();
       this.writeOwnershipMarker();
       // 2. Stage the child environment on this session only. injectEnv is
       // applied last so it wins on collisions, matching PtyBackend.
@@ -368,6 +370,17 @@ export class TmuxBackend implements SessionBackend {
     this.exitCbs.push(cb);
   }
 
+  /** Frozen while attached; later TMUX_TMPDIR changes cannot redirect a verified stop. */
+  getSocketPath(): string | undefined { return this.socketPath; }
+  getCapturePid(): number | undefined { return this.tail?.pid; }
+
+  /** Local teardown only. The identity-bound verifier owns the tmux command. */
+  disposeCapture(): void {
+    this.exited = true;
+    this.stopExitWatcher();
+    this.cleanup();
+  }
+
   /** Best-effort teardown. Never throws — a session that already died (CLI
    *  exited → last pane closed → session destroyed) is not an error. */
   kill(): void {
@@ -406,6 +419,7 @@ export class TmuxBackend implements SessionBackend {
   attach(opts: { cols: number; rows: number }): void {
     if (this.started) throw new TmuxError('tmux attach() called twice');
     this.assertOwnership();
+    this.socketPath = runTmux(['display-message', '-p', '-t', `=${this.sessionName}`, '#{socket_path}']).trim();
     this.started = true;
     this.cols = opts.cols;
     this.rows = opts.rows;

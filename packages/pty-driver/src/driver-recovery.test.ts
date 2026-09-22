@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeAll, afterEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
@@ -8,6 +8,8 @@ import type { AgentConfig, DriverTurnRecovery, NormalizedDriverEvent } from '@du
 import { DriverDetachedError, DriverRecoveryError } from '@dutydeck/shared';
 import type { CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { TmuxBackend, isTmuxAvailable, type SessionBackend } from '@dutydeck/session-backends';
+import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
+import { buildSessionMarker } from './session-id/index.js';
 import { PtyCliDriver } from './driver.js';
 
 const tmuxDescribe = isTmuxAvailable() ? describe : describe.skip;
@@ -35,6 +37,7 @@ function shellAdapter(prompts: string[]): CliAdapter {
     id: 'claude-code',
     capabilities: {},
     buildArgs: () => [],
+    buildResumeCommand: () => [],
     injectSessionContext: () => '',
     writeInput: (backend: PtyLike, prompt: string) => {
       prompts.push(prompt);
@@ -54,6 +57,13 @@ function config(cwd: string): AgentConfig {
 }
 
 tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
+  let tmuxDirectory: string;
+  const savedTmuxDirectory = process.env.TMUX_TMPDIR;
+  beforeAll(() => { tmuxDirectory = mkdtempSync(join(tmpdir(), 'dd-recovery-tmux-')); process.env.TMUX_TMPDIR = tmuxDirectory; });
+  afterAll(() => {
+    if (savedTmuxDirectory === undefined) delete process.env.TMUX_TMPDIR; else process.env.TMUX_TMPDIR = savedTmuxDirectory;
+    rmSync(tmuxDirectory, { recursive: true, force: true });
+  });
   const roots: string[] = [];
   const sessions: string[] = [];
 
@@ -70,9 +80,9 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     const project = join(cwd, 'projects', realpathSync(cwd).replace(/[^A-Za-z0-9-]/g, '-'));
     mkdirSync(project, { recursive: true });
     const transcript = join(project, 'recovery-fixture.jsonl');
-    // A pinned dutydeck id is enough for the real Claude resolver; no mocked
-    // tailer or hand-wired transcript source is involved in these tests.
-    writeFileSync(transcript, '');
+    // Real durable identity evidence, consumed by both resume and transcript recovery.
+    writeFileSync(transcript, JSON.stringify({ type: 'user', sessionId: 'recovery-fixture',
+      message: { role: 'user', content: buildSessionMarker(sessionId) } }) + '\n');
     const name = `dutydeck-turn-recovery-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     sessions.push(name);
     return { cwd, transcript, name, ownerId: `dutydeck:${sessionId}` };
@@ -185,12 +195,37 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     const backend = new TmuxBackend(f.name, { ownerId: f.ownerId });
     const unrelated = new TmuxBackend(other.name, { ownerId: 'dutydeck:unrelated' });
     unrelated.spawn('/bin/sh', ['-c', 'sleep 30'], { cwd: other.cwd, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '' } });
-    const driver = new PtyCliDriver({ agent: config(f.cwd), adapter: shellAdapter([]), backend, onEvent() {}, onExit() {}, sessionId });
+    const driver = new PtyCliDriver({ processProbe: { identify: childProcessIdentity, observe: observeProcess }, agent: config(f.cwd), adapter: shellAdapter([]), backend, onEvent() {}, onExit() {}, sessionId });
     try {
-      await driver.start(); await driver.stop();
+      await driver.start();
+      await driver.stop();
       expect(await driver.isStopped()).toBe(true);
       expect(TmuxBackend.probeSession(other.name)).toBe('exists');
     } finally { unrelated.kill(); }
+  }, 45_000);
+
+  it.each(['fresh', 'resumable', 'unresumable', 'empty-native'] as const)('retires runtime-authorized idle %s panes only when native context is recoverable', async kind => {
+    const f = fixture();
+    const seed = new TmuxBackend(f.name, { ownerId: f.ownerId });
+    seed.spawn('/bin/sh', [], { cwd: f.cwd, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '' } });
+    if (kind === 'fresh') rmSync(f.transcript);
+    if (kind === 'unresumable' || kind === 'empty-native') writeFileSync(f.transcript, '');
+    if (kind !== 'fresh' && kind !== 'empty-native') seed.setDutydeckMetadata('first_prompt_sent', 'true');
+    if (kind === 'resumable') writeFileSync(f.transcript, JSON.stringify({
+      type: 'user', sessionId: 'recovery-fixture', message: { role: 'user', content: buildSessionMarker(sessionId) },
+    }) + '\n');
+    seed.detach();
+    const adapter = shellAdapter([]);
+    adapter.buildResumeCommand = () => [];
+    const driver = new PtyCliDriver({
+      agent: config(f.cwd), adapter, backend: new TmuxBackend(f.name, { ownerId: f.ownerId }),
+      processProbe: { identify: childProcessIdentity, observe: observeProcess }, onEvent() {}, onExit() {}, sessionId,
+    });
+    await driver.start();
+    driver.prepareForDaemonShutdown(false);
+    await driver.stop();
+    expect(await driver.isStopped()).toBe(kind === 'fresh' || kind === 'resumable');
+    expect(TmuxBackend.probeSession(f.name)).toBe(kind === 'unresumable' || kind === 'empty-native' ? 'exists' : 'missing');
   }, 45_000);
 
   it('detaches a temporary attachment when transcript restore rejects a truncated cursor', async () => {

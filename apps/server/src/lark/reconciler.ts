@@ -1,5 +1,5 @@
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
-import { describeLarkTaskRecovery } from './task-recovery.js';
+import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRecord } from '@dutydeck/shared';
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, type LarkCardInput, type LarkCardService } from './service.js';
@@ -117,10 +117,6 @@ export async function performLarkCardReconcile(input: {
       if (!runtimeTask) { unresolved++; continue; }
       if (!terminalTaskStates.has(runtimeTask.status)) {
         unresolved++;
-        // 静默轮次没有过程卡可刷；任务仍在跑，继续跟踪到终态。
-        if (persisted.progress_frozen || !persisted.card_message_id) {
-          continue;
-        }
         const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
           ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status) : undefined;
         const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
@@ -129,6 +125,20 @@ export async function performLarkCardReconcile(input: {
         // Repaint whenever durable recovery facts change, including older cards
         // already marked read-only. Never retain an old thinking/queued trace.
         const statusKey = JSON.stringify([state, recovery?.markdown, canCancel]);
+        const notifyRecovery = () => recovery?.blocked ? notifyLarkTaskRecovery({
+          service, store: input.deliveryStore, log, appId: persisted.app_id,
+          sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn, recovery,
+          target: { chatId: persisted.chat_id,
+            replyMessageId: persisted.reply_message_id?.trim()
+              || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
+            replyInThread: persisted.reply_in_thread }
+        }) : Promise.resolve(undefined);
+        if (effective.silentProgress || persisted.progress_frozen || !persisted.card_message_id) {
+          await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state,
+            runtime_task_id: runtimeTask.id, recovery_read_only: true, recovery_status_key: statusKey }));
+          await notifyRecovery();
+          continue;
+        }
         if (persisted.recovery_status_key !== statusKey) try {
           await service.update({
             ...cardContext, cardKind: 'process', messageId: persisted.card_message_id,
@@ -149,7 +159,8 @@ export async function performLarkCardReconcile(input: {
               ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey, progress_frozen: true
             }));
             if (saved) {
-              log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '恢复中运行态过程卡已永久不可更新，就地冻结过程卡，继续保持任务轮询等待结果');
+              await notifyRecovery();
+              log.info({ externalId: mapping.externalId, messageId: persisted.card_message_id }, '恢复过程卡已冻结，异常通知按原目的地交付');
             }
           } else {
             log.warn({ error, sessionId: mapping.sessionId, externalId: mapping.externalId }, '恢复中的飞书卡片刷新失败');
@@ -168,7 +179,9 @@ export async function performLarkCardReconcile(input: {
         log.warn({ error, taskId: runtimeTask.id, sessionId: mapping.sessionId, externalId: mapping.externalId }, '读取执行结果失败，等待下次对账');
         continue;
       }
-      if (state === 'completed' && hasUnresolvedToolCalls(events)) state = 'failed';
+      const verifiedOutput = state === 'completed'
+        ? await verifiedLarkRecoveryOutput(runtime, mapping.sessionId, runtimeTask.id, events) : undefined;
+      if (state === 'completed' && !verifiedOutput && hasUnresolvedToolCalls(events)) state = 'failed';
       const completed = state === 'completed';
       const elapsedSeconds = Math.max(0, (Date.parse(runtimeTask.updatedAt) - persisted.started_at) / 1_000);
       const cardMessageId = persisted.card_message_id;
@@ -262,7 +275,7 @@ export async function performLarkCardReconcile(input: {
           const decoration = await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective);
           const elements = [
             ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : []),
-            ...(explicit ? [] : renderLarkResultElements(events)),
+            ...(explicit ? [] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events)),
             ...(decoration?.elements ?? []),
             ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : [])];
           finalCardInput = {

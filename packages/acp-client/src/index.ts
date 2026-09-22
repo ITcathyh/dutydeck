@@ -159,8 +159,9 @@ export interface AcpxAdapterOptions { context?: import('@dutydeck/shared').Drive
 type SessionAgentConfig = AgentConfig & { reasoningEffort?: string };
 
 export class AgentIdleTimeoutError extends Error {
+  readonly code = 'AGENT_IDLE_TIMEOUT';
   constructor(readonly timeoutMs: number) {
-    super(`Agent 连续 ${Math.ceil(timeoutMs / 1_000)} 秒无任何活动，已取消本轮任务`);
+    super(`Agent 连续 ${Math.ceil(timeoutMs / 1_000)} 秒无实质进展，已请求取消本轮任务`);
     this.name = 'AgentIdleTimeoutError';
   }
 }
@@ -199,7 +200,9 @@ export class AcpxAdapter implements AgentDriver {
   private readonly handles = new Set<AcpRuntimeHandle>();
   private readonly streams = new Set<Promise<void>>();
   private sending = false;
+  private turnCancelling = false;
   private timedOutStream?: Promise<void>;
+  private idleWatch?: { refresh(): void; clear(): void };
   private stopResourcesSettled = false;
   private readonly processes = new Map<ChildProcess, () => void>();
   private nativeIdentity?: NativeContextIdentity;
@@ -223,7 +226,7 @@ export class AcpxAdapter implements AgentDriver {
       permissionMode: acpxPermissionMode(agent.permissionMode),
       nonInteractivePermissions: 'fail', timeoutMs: agent.timeout * 1000,
       onPermissionRequest: async request => {
-        if (this.stopped) return { outcome: 'reject_once' };
+        if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
         const raw = request.raw as any; const id = raw.toolCall?.toolCallId ?? `permission-${Date.now()}`;
         const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
         const facts = permissionFacts(raw.toolCall, secrets);
@@ -233,17 +236,17 @@ export class AcpxAdapter implements AgentDriver {
           try { riskPolicy = await this.whileActive(() => this.options.resolveRiskPolicy!(riskPolicy)); }
           catch { return { outcome: 'reject_once' }; }
         }
-        if (this.stopped) return { outcome: 'reject_once' };
+        if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
         if (riskPolicy?.enabled && !riskPolicy.authorized) {
           try {
             const matches = await this.whileActive(() => testRegexWithTimeout(riskPolicy!.pattern, candidate));
-            if (this.stopped) return { outcome: 'reject_once' };
+            if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
             if (matches) {
               this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `高危操作已被 Dutydeck 拦截：${facts.title}`, options: [], status: 'rejected' } });
               return { outcome: 'reject_once' };
             }
           } catch (error) {
-            if (this.stopped) return { outcome: 'reject_once' };
+            if (this.stopped || this.turnCancelling) return { outcome: 'reject_once' };
             this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, title: `安全正则匹配异常，已拒绝操作：${error instanceof Error ? error.message : String(error)}`, options: [], status: 'rejected' } });
             return { outcome: 'reject_once' };
           }
@@ -253,10 +256,12 @@ export class AcpxAdapter implements AgentDriver {
         if (this.permissionMode === 'approve-reads' && /read|search|fetch/i.test(String(request.inferredKind ?? ''))) return { outcome: 'allow_once' };
         return new Promise<AcpPermissionDecision>(resolve => {
           this.pendingPermissions.set(id, resolve);
+          this.idleWatch?.refresh();
           try {
             this.options.onEvent({ type: 'permission_request', data: { id, toolCallId: raw.toolCall?.toolCallId, ...facts, options: (raw.options ?? []).map((option: any) => ({ id: option.optionId, label: permissionDisplayText(option.name, secrets, 100), kind: option.kind })), status: 'pending' } });
           } catch {
             this.pendingPermissions.delete(id);
+            this.idleWatch?.refresh();
             resolve({ outcome: 'reject_once' });
           }
         });
@@ -419,35 +424,52 @@ export class AcpxAdapter implements AgentDriver {
       if(submission)this.options.context!.assertSubmission(submission);
       const turn = this.runtime.startTurn({ handle, text: prompt, mode: 'prompt', requestId: submission?.submissionId??`req-${crypto.randomUUID()}`, timeoutMs: 0,...(submission?{resourceScope:this.scope(submission.operation),beforePrompt:()=>{this.assertActive();this.options.context!.assertSubmission(submission);}}:{}) });
       this.turn = turn;
+      this.turnCancelling = false;
       // result can reject before its event stream closes. Observe it immediately.
       const result = turn.result;
       void result.catch(() => undefined);
       const idleTimeoutMs = this.agent.timeout * 1_000;
       let timer: NodeJS.Timeout | undefined;
       let timedOut = false;
+      let finished = false;
+      let interrupting = false;
+      const toolProgress = new Map<string, string>();
+      let cancellationExpired = false;
+      let cancellationDeadline: NodeJS.Timeout | undefined;
       let rejectIdle!: (error: Error) => void;
       const idle = new Promise<never>((_resolve, reject) => { rejectIdle = reject; });
+      const clearIdle = () => { if (timer) clearTimeout(timer); timer = undefined; };
       const resetIdle = () => {
-        if (timer) clearTimeout(timer);
-        if (timedOut || this.stopped) return;
+        clearIdle();
+        if (timedOut || finished || interrupting || this.stopped || this.pendingPermissions.size) return;
         timer = setTimeout(() => {
           timedOut = true;
+          this.turnCancelling = true;
           this.timedOutStream = stream;
           const error = new AgentIdleTimeoutError(idleTimeoutMs);
           // Keep consuming the same stream: ACPX finalizes resources before it
           // closes the iterator, but after it resolves turn.result.
           void this.resourceOperation(() => turn.cancel({ reason: error.message })).catch(() => undefined);
-          rejectIdle(error);
+          // A cancel RPC only requests termination. Give the original stream a
+          // bounded chance to return an authoritative cancelled prompt result.
+          cancellationDeadline = setTimeout(() => { cancellationExpired = true; rejectIdle(error); }, 2_000);
         }, idleTimeoutMs);
       };
+      const idleWatch = { refresh: resetIdle, clear: () => { interrupting = true; clearIdle(); if (cancellationDeadline) clearTimeout(cancellationDeadline); } };
+      this.idleWatch = idleWatch;
       resetIdle();
       const stream = (async () => {
         let deliveryError: unknown;
         try {
           for await (const event of turn.events) {
-            resetIdle();
+            const normalized = normalizeAcpxEvent(event);
+            if (normalized?.type === 'tool_call' || normalized?.type === 'tool_result') {
+              const key = String(normalized.data.id ?? 'tool');
+              const progress = JSON.stringify(normalized.data);
+              if (toolProgress.get(key) !== progress) { toolProgress.set(key, progress); resetIdle(); }
+            } else if ((normalized?.type === 'text' || normalized?.type === 'thinking')
+              && typeof normalized.data?.text === 'string' && normalized.data.text.trim()) resetIdle();
             if (!this.stopped && !timedOut && !deliveryError) {
-              const normalized = normalizeAcpxEvent(event);
               if (normalized) {
                 try { this.options.onEvent(normalized); }
                 catch (error) { deliveryError ??= error; }
@@ -457,10 +479,26 @@ export class AcpxAdapter implements AgentDriver {
           const outcome = await result;
           if(outcome.status!=='failed'&&submission)submission.onAccepted({submissionId:submission.submissionId,kind:'provider_accepted',provider:'acp',receiptRef:`prompt-result:${submission.submissionId}`,digest:submission.inputDigest});
           if (deliveryError) throw deliveryError;
-          if (outcome.status === 'failed') throw new Error(outcome.error.message);
-          if (!this.stopped && !timedOut) this.options.onEvent({ type: 'completed', data: { stopReason: outcome.stopReason ?? outcome.status } });
+          if (outcome.status === 'failed') {
+            // This code is reserved by our ACPX patch for typed metadata on the
+            // current prompt response, not a transport error or assistant text.
+            if (!this.stopped && !cancellationExpired && outcome.error.code === 'ACP_PROVIDER_TERMINAL_ERROR') {
+              const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
+              this.options.onEvent({ type: 'error', data: { message: permissionDisplayText(outcome.error.message, secrets), code: outcome.error.code, detailCode: outcome.error.detailCode } });
+              this.options.onEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
+              return;
+            }
+            throw new Error(outcome.error.message);
+          }
+          if (timedOut && outcome.status !== 'cancelled' && outcome.stopReason !== 'cancelled') throw new AgentIdleTimeoutError(idleTimeoutMs);
+          if (!this.stopped && !cancellationExpired) this.options.onEvent({ type: 'completed', data: { stopReason: outcome.stopReason ?? outcome.status } });
         } finally {
-          if (timer) clearTimeout(timer);
+          finished = true;
+          for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
+          this.pendingPermissions.clear();
+          clearIdle();
+          if (cancellationDeadline) clearTimeout(cancellationDeadline);
+          if (this.idleWatch === idleWatch) this.idleWatch = undefined;
           if (this.turn === turn) this.turn = undefined;
         }
       })();
@@ -490,6 +528,10 @@ export class AcpxAdapter implements AgentDriver {
     } finally { this.sending = false; }
   }
   async interrupt() {
+    this.turnCancelling = true;
+    this.idleWatch?.clear();
+    for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
+    this.pendingPermissions.clear();
     await this.resourceOperation(async () => {
       const turn = this.turn;
       if (turn) await turn.cancel({ reason: 'Dutydeck interrupt' });
@@ -500,6 +542,7 @@ export class AcpxAdapter implements AgentDriver {
   stop(options: { discardSession?: boolean } = {}): Promise<void> {
     if (this.stopping) return this.stopping;
     this.stopped = true;
+    this.idleWatch?.clear();
     this.revocation.abort();
     for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
     this.pendingPermissions.clear();
@@ -549,7 +592,7 @@ export class AcpxAdapter implements AgentDriver {
     })().finally(() => { this.stopResourcesSettled = true; }).then(resolveStop, rejectStop);
     return this.stopping;
   }
-  async resolvePermission(id: string, approved: boolean) { const resolve = this.pendingPermissions.get(id); if (this.stopped || !resolve) return false; this.pendingPermissions.delete(id); resolve({ outcome: approved ? 'allow_once' : 'reject_once' }); return true; }
+  async resolvePermission(id: string, approved: boolean) { const resolve = this.pendingPermissions.get(id); if (this.stopped || !resolve) return false; this.pendingPermissions.delete(id); this.idleWatch?.refresh(); resolve({ outcome: approved ? 'allow_once' : 'reject_once' }); return true; }
   async setModel(model: string) {
     if(this.options.context?.protocol==='controlled-v1')throw new Error('NATIVE_CONFIGURATION_INTENT_REQUIRED');
     await this.resourceOperation(async () => {

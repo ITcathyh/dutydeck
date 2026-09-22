@@ -540,7 +540,7 @@ describe('runtime lifecycle acceptance', () => {
     h.driver.send = vi.fn(async () => { await gate.promise; });
     await h.runtime.initialize([agent]); const s = await h.runtime.start({ agentId: 'mock' });
     const sending = h.runtime.send(s.id, 'busy').catch(() => {});
-    await vi.waitFor(() => expect(h.runtime.getActiveTaskContext(s.id)).toBeTruthy());
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledOnce());
     const taskId = h.runtime.getActiveTaskContext(s.id)!.taskId;
     await expect(h.runtime.interrupt(s.id, taskId, 'installation_owner')).resolves.toMatchObject({ interrupted: true });
     expect(h.driver.interrupt).toHaveBeenCalledOnce();

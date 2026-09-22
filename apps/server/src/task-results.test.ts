@@ -54,6 +54,32 @@ function settleDriver(repos: ReturnType<typeof storage.createRepositories>, x: B
 const thrown = (fn: () => unknown) => { try { fn(); } catch (error) { return error; } throw new Error('Expected the function to throw'); };
 
 describe('readAttemptResult against the real execution ledger', () => {
+  it('atomically preserves old events and returns only verified manual output, with audited idempotency', async () => {
+    const { repos, x, path } = open();
+    const a = claimed(repos, x);
+    textEvents(x, a, ['partial old answer']);
+    x.appendEvent(af(a), { id: 'hanging-tool', type: 'tool_call', data: { id: 'tool', name: 'restart' } });
+    const decision = { decisionId: 'manual', actor: ownerActor, action: 'confirm_result' as const, evidenceRefs: ['transcript:sha256:reviewed'], resourceChecks: [] };
+    const evidence = { kind: 'manual' as const, outcome: 'completed' as const, decision };
+    const sql = new Database(path);
+    sql.exec("CREATE TRIGGER reject_recovery BEFORE INSERT ON events WHEN NEW.type='completed' BEGIN SELECT RAISE(ABORT,'injected'); END;");
+    expect(() => x.confirmAttemptRecovery(af(a), 'recovery:manual', evidence, 'verified complete answer')).toThrow('injected');
+    expect(repos.execution.getAttemptEvents(a.attemptId).filter(e => (e.data as any).recovery)).toHaveLength(0);
+    expect(current(repos, a.taskId).state).toBe('preparing');
+    sql.exec('DROP TRIGGER reject_recovery');
+    const settled = x.confirmAttemptRecovery(af(a), 'recovery:manual', evidence, 'verified complete answer');
+    expect(x.confirmAttemptRecovery(af(a), 'recovery:manual', evidence, 'verified complete answer').replayed).toBe(true);
+    expect(() => x.confirmAttemptRecovery(af(a), 'recovery:manual', evidence, 'changed')).toThrow(/EXECUTION_OPERATION_CONFLICT/);
+    const events = repos.execution.getAttemptEvents(a.attemptId);
+    expect(events.filter(e => e.type === 'tool_call')).toHaveLength(1);
+    expect(events.filter(e => (e.data as any).recovery)).toHaveLength(1);
+    expect(settled.attempt?.settlement).toMatchObject({ kind: 'manual', verifiedOutput: { digest: utf8Digest('verified complete answer') } });
+    expect(readAttemptResult({ execution: repos.execution }, 'session', a.taskId, a.attemptId)).toMatchObject({ status: 'settled', result: { output: { text: 'verified complete answer', digest: utf8Digest('verified complete answer') } } });
+    sql.prepare("UPDATE events SET data=? WHERE id=?").run(JSON.stringify({ role: 'assistant', text: 'tampered' }), events.find(e => (e.data as any).recovery)!.id);
+    expect(() => readAttemptResult({ execution: repos.execution }, 'session', a.taskId, a.attemptId)).toThrow(/Verified recovery output/);
+    sql.close();
+  });
+
   it('reports pending for preparing and active attempts', () => {
     const { repos, x } = open();
     const preparing = claimed(repos, x);

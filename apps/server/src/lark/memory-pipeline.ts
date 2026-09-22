@@ -7,7 +7,7 @@
  * 记忆会话优先用 `permissionMode: 'deny-all'`：整理 Agent 只需要输出 JSON，任何工具调用都
  * 被自动拒绝，不会停在等待批准上把这一轮挂死。PTY CLI 类 Agent 不支持 `deny-all`，会降级成
  * `ask` 重试一次——这类 Agent 的审批只能在终端完成，管线无法自动拒绝，所以它若违规调用工具
- * 会一直等到 `timeoutMs` 才被 `interrupt`，并按失败退避。两种模式都起不来则本轮记
+ * 超时后必须确认取消或停止；状态未知则记为待恢复并禁止继续积压。两种模式都起不来则本轮记
  * `MEMORY_AGENT_UNSUPPORTED`。
  *
  * Agent 的输出不直接落库：`gateExtractionFacts` / `gateConsolidationActions` 是确定性
@@ -64,6 +64,7 @@ export const larkMemoryPipelineRules = {
 const dedupeKey = (content: string) => content.replace(/\s+/g, '').toLowerCase();
 
 const terminalTaskStatuses = ['completed', 'failed', 'interrupted', 'cancelled'];
+const recoveryTaskStatuses = ['reconcile_required', 'legacy_unresolved'];
 
 /** 记忆会话的权限模式尝试顺序：deny-all 能自动拒绝工具调用，PTY CLI 起不来时才退到 ask。 */
 const memorySessionModes = ['deny-all', 'ask'] as const satisfies readonly PermissionMode[];
@@ -76,7 +77,9 @@ export interface LarkMemoryPipelineRuntime {
   listSessions(): Promise<Session[]>;
   dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt', agentPrompt: string): Promise<{ id: string; status: string }>;
   getTasks(id: string): Promise<TaskRecord[]>;
-  interrupt(id: string, expectedTaskId?: string): Promise<unknown>;
+  getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string }>; resolvedUnknown?: boolean }>;
+  cancelQueued?(id: string, taskId: string, actorId?: string, expectedRevision?: number): Promise<unknown>;
+  interrupt(id: string, expectedTaskId?: string, actorId?: string): Promise<unknown>;
   subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
 }
 
@@ -89,6 +92,8 @@ export interface LarkMemoryPipelineLog {
 export interface LarkMemoryPipelineOptions {
   runtime: LarkMemoryPipelineRuntime;
   repos: AttemptResultRepositories;
+  /** 服务装配提供已授权的后台控制身份，管线不推断用户或安装者。 */
+  controlActorId?: string;
   store: LarkMemoryStore;
   projection: LarkMemoryProjection;
   readConfig: (appId: string) => Promise<StoredLarkConfig | undefined>;
@@ -675,7 +680,7 @@ export class LarkMemoryPipeline {
       && session.agentId === agentId && (session.model ?? undefined) === (effectiveModel ?? undefined));
     for (const permissionMode of memorySessionModes) {
       const existing = reusable.find(session => session.permissionMode === permissionMode);
-      if (existing) return existing;
+      if (existing) { await this.assertMemorySessionReady(existing); return existing; }
     }
 
     // cwd 是该聊天的视图目录；写一次派生视图顺带把目录建出来。
@@ -708,8 +713,56 @@ export class LarkMemoryPipeline {
     return agent;
   }
 
-  /** 跑一轮记忆会话并返回最终文本；超时则中断该任务并失败。 */
+  private recoveryRequired(sessionId: string, taskId?: string, detail = '记忆会话需要恢复检查，未继续提交任务。') {
+    this.options.log.warn({ sessionId, taskId }, detail);
+    return new LarkMemoryError('MEMORY_RECOVERY_REQUIRED', detail, 409);
+  }
+
+  private async assertMemorySessionReady(session: Session) {
+    const runtime = this.options.runtime;
+    if (!runtime.getTaskRecovery) throw this.recoveryRequired(session.id, undefined, '运行时缺少记忆会话恢复检查能力。');
+    const tasks = await runtime.getTasks(session.id);
+    for (const task of tasks) {
+      const recovery = await runtime.getTaskRecovery(session.id, task.id);
+      if ((!terminalTaskStatuses.includes(recovery.status) && !recovery.resolvedUnknown) || recovery.blockers.length) {
+        throw this.recoveryRequired(session.id, task.id);
+      }
+    }
+  }
+
+  private async expireRun(session: Session, taskId: string): Promise<string> {
+    const runtime = this.options.runtime;
+    const current = () => runtime.getTasks(session.id).then(tasks => tasks.find(task => task.id === taskId));
+    let task = await current();
+    if (!task) throw this.recoveryRequired(session.id, taskId);
+    if (terminalTaskStatuses.includes(task.status)) return task.status;
+    if (recoveryTaskStatuses.includes(task.status)) throw this.recoveryRequired(session.id, taskId);
+    const actor = this.options.controlActorId;
+    if (!actor) throw this.recoveryRequired(session.id, taskId, '记忆任务超时，但没有已授权的后台控制身份。');
+    if (task.status === 'queued') {
+      if (!runtime.cancelQueued) throw this.recoveryRequired(session.id, taskId, '记忆任务超时，运行时不支持安全撤回排队请求。');
+      try { await runtime.cancelQueued(session.id, taskId, actor, task.revision); }
+      catch (error) {
+        this.options.log.warn({ error, sessionId: session.id, taskId }, '记忆排队任务撤回未确认');
+        throw this.recoveryRequired(session.id, taskId);
+      }
+      task = await current();
+      if (task?.status !== 'cancelled') throw this.recoveryRequired(session.id, taskId);
+    } else {
+      let response: unknown;
+      try { response = await runtime.interrupt(session.id, taskId, actor); }
+      catch (error) { this.options.log.warn({ error, sessionId: session.id, taskId }, '记忆任务中断未确认'); }
+      task = await current();
+      const acknowledged = Boolean(response && typeof response === 'object' && 'interrupted' in response && response.interrupted === true);
+      this.options.log.warn({ sessionId: session.id, taskId, interrupted: acknowledged, status: task?.status }, '记忆任务超时后的停止核对');
+      if (!task || !terminalTaskStatuses.includes(task.status)) throw this.recoveryRequired(session.id, taskId);
+    }
+    throw new LarkMemoryError('MEMORY_RUN_TIMEOUT', '记忆会话超时，任务已确认结束。', 504);
+  }
+
+  /** 超时只撤回未提交请求；已提交执行必须确认终态，否则保留恢复状态。 */
   private async runTurn(session: Session, prompt: string): Promise<string> {
+    await this.assertMemorySessionReady(session);
     let taskId: string | undefined;
     let buffered: AgentEvent[] = [];
     let resolveStatus!: (status: string) => void;
@@ -719,7 +772,7 @@ export class LarkMemoryPipeline {
       if (event.type !== 'task') return;
       const record = (event.data as { task?: { id?: string; status?: string } } | undefined)?.task;
       if (!record || record.id !== taskId || !record.status) return;
-      if (terminalTaskStatuses.includes(record.status)) resolveStatus(record.status);
+      if (terminalTaskStatuses.includes(record.status) || recoveryTaskStatuses.includes(record.status)) resolveStatus(record.status);
     };
     // dispatch 返回前就可能有事件到达，taskId 未知时先缓冲，拿到后回放。
     const unsubscribe = this.options.runtime.subscribe(session.id, event => {
@@ -731,14 +784,13 @@ export class LarkMemoryPipeline {
     try {
       const dispatched = await this.options.runtime.dispatch(session.id, prompt, 'queue', prompt);
       taskId = dispatched.id;
+      if (terminalTaskStatuses.includes(dispatched.status) || recoveryTaskStatuses.includes(dispatched.status)) resolveStatus(dispatched.status);
       for (const event of buffered) receive(event);
       buffered = [];
 
-      const settled = await status;
-      if (settled === '__timeout__') {
-        await this.options.runtime.interrupt(session.id, taskId).catch(() => undefined);
-        throw new LarkMemoryError('MEMORY_RUN_TIMEOUT', '记忆会话超时未返回结果。', 504);
-      }
+      let settled = await status;
+      if (settled === '__timeout__') settled = await this.expireRun(session, taskId);
+      if (recoveryTaskStatuses.includes(settled)) throw this.recoveryRequired(session.id, taskId);
       if (settled !== 'completed') {
         throw new LarkMemoryError('MEMORY_RUN_FAILED', `记忆会话以 ${settled} 结束。`, 502);
       }
@@ -763,7 +815,7 @@ export class LarkMemoryPipeline {
         const attemptId = this.attemptIdFor(taskId);
         if (attemptId) {
           const read = readAttemptResult(this.options.repos, sessionId, taskId, attemptId);
-          if (read.status === 'settled') return read.result.output.text;
+          if (read.status === 'settled' && read.result.outcome === 'completed') return read.result.output.text;
         }
       } catch (error) { lastError = error; }
     }

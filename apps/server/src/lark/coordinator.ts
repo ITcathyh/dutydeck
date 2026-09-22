@@ -1,7 +1,7 @@
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { createHash } from 'node:crypto';
-import { describeLarkTaskRecovery } from './task-recovery.js';
+import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
@@ -3008,13 +3008,20 @@ export class LarkMessageCoordinator {
       // still report queued, but must never repaint an executing card backwards.
       if (state === 'queued' && task.state === 'running') return Promise.resolve({ delivered: false } as CardUpdateOutcome);
       const terminal = state === 'completed' || state === 'failed' || state === 'interrupted' || state === 'cancelled';
-      // 没有过程卡就没有可写对象；静默时进展帧一律丢弃，只放行终态帧去冻结已有的旧卡。
-      if (!task.cardMessageId || (silentProgress && !terminal)) return Promise.resolve({ delivered: false } as CardUpdateOutcome);
-      if (timer) { clearTimeout(timer); timer = undefined; }
-      if (!terminal && task.progressFrozen) return Promise.resolve({ delivered: false } as CardUpdateOutcome);
-      let elements: LarkCardElement[] = boundLarkCardElements(renderLarkProcessElements(task.events, config, terminal));
       const recovery = task.sessionId && task.runtimeTaskId && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(state)
         ? await describeLarkTaskRecovery(this.runtime, task.sessionId, task.runtimeTaskId, state) : undefined;
+      const notifyRecovery = () => recovery?.blocked && task.sessionId && task.runtimeTaskId ? notifyLarkTaskRecovery({
+        service: this.service, store: this.workflowOptions.store, log: this.log, appId: config.appId,
+        sessionId: task.sessionId, taskId: task.runtimeTaskId, turn: task.turn, recovery,
+        target: { chatId: event.chatId, ...(event.chatType === 'group'
+          ? { replyMessageId: event.messageId, replyInThread: Boolean(event.threadId?.trim()) } : {}) }
+      }) : Promise.resolve(undefined);
+      if (!task.cardMessageId || (!terminal && (silentProgress || task.progressFrozen))) {
+        await notifyRecovery();
+        return { delivered: false } as CardUpdateOutcome;
+      }
+      if (timer) { clearTimeout(timer); timer = undefined; }
+      let elements: LarkCardElement[] = boundLarkCardElements(renderLarkProcessElements(task.events, config, terminal));
       if (recovery) elements = [{ tag: 'markdown', element_id: 'task_recovery', content: recovery.markdown }];
       if (!terminal) {
         // 非终态帧固定追加三枚只 PATCH、不新消息的注记元素；终态帧一律不带。
@@ -3046,7 +3053,7 @@ export class LarkMessageCoordinator {
           ];
         }
       }
-      return enqueueUpdate({
+      const outcome = await enqueueUpdate({
         terminal,
         turn: task.turn,
         input: {
@@ -3070,8 +3077,11 @@ export class LarkMessageCoordinator {
           elements
         }
       });
+      if (task.progressFrozen) await notifyRecovery();
+      return outcome;
     };
     let terminalDelivery: Promise<void> | undefined;
+    let verifiedOutput: AgentEvent | undefined;
     // Freeze the process card, then send one immutable result. Neither operation
     // counts as success for the other; reconciliation retries only the missing part.
     const deliverTerminal = (state: 'completed' | 'failed' | 'interrupted' | 'cancelled', completed = false) => {
@@ -3115,7 +3125,7 @@ export class LarkMessageCoordinator {
         const verification = await this.verificationView(task, config, state);
         const elements = [
           ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : []),
-          ...(explicit ? [] : renderLarkResultElements(task.events)),
+          ...(explicit ? [] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events)),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
           ...(verification.element ? [verification.element] : [])];
         if (this.stopped || task.turn !== currentTurn) return;
@@ -3264,7 +3274,9 @@ export class LarkMessageCoordinator {
           }
           // 若轮次已变（用户点击了重试并启动了新一轮），本轮终态回调不得覆盖新状态。
           if (task.turn !== currentTurn) return;
-          const resolvedState = state === 'completed' && hasUnresolvedToolCalls(task.events) ? 'failed' : state;
+          verifiedOutput = state === 'completed' && runtimeTaskId
+            ? await verifiedLarkRecoveryOutput(this.runtime, session.id, runtimeTaskId, task.events) : undefined;
+          const resolvedState = state === 'completed' && !verifiedOutput && hasUnresolvedToolCalls(task.events) ? 'failed' : state;
           if (resolvedState !== state) this.log.warn({ taskId: task.id, runtimeTaskId }, '任务已结束但仍有工具未返回结果，按失败终态处理');
           settled = true;
           active = false;
@@ -3372,12 +3384,14 @@ export class LarkMessageCoordinator {
           // 此时 runtimeTaskId 已就位，取消排队才真正可执行，因此这一版卡片开始提供
           // 「取消」。首张「已接收」卡片刻意不提供（runtimeTaskId 尚未分配，点了必失败）。
           try {
-            if (task.cardMessageId) await this.service.update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: 'queued', statusLabel: recovery.label, taskId: task.id, taskName: prompt.slice(0, 80), markdown: queueMarkdown, sessionId: task.sessionId, turn: task.turn, capabilities: this.capabilitiesForTask(task), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+            if (!task.cardMessageId || silentProgress || task.progressFrozen) await update('queued');
+            else await this.service.update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: 'queued', statusLabel: recovery.label, taskId: task.id, taskName: prompt.slice(0, 80), markdown: queueMarkdown, sessionId: task.sessionId, turn: task.turn, capabilities: this.capabilitiesForTask(task), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
             await this.saveCardTask(task, 'queued');
           } catch (error) {
             // Runtime already owns this task. A receipt/mapping outage must not
             // discard buffered events or report the accepted execution failed.
             this.log.warn({ error, runtimeTaskId }, '任务已接收，排队卡片待后续更新');
+            this.scheduleReconcile();
           }
         }
         for (const agentEvent of buffered) receive(agentEvent);

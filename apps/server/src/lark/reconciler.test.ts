@@ -1060,3 +1060,79 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     expect(h.service.update).toHaveBeenCalled();
   });
 });
+
+describe('恢复异常通知与人工核验结果', () => {
+  it.each(['silent', 'frozen', 'missing', 'unupdatable', 'writable'])('%s process card delivers only the required recovery notice and never a business final', async mode => {
+    const repos = createRepositories(':memory:');
+    try {
+      const task = { id: 'recovery-task', sessionId: 'session', status: 'reconcile_required', prompt: 'prompt', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as TaskRecord;
+      const mapping = createMapping('recovery-map', 'om_request', 'session', { runtime_task_id: task.id, turn: 2,
+        reply_message_id: 'om_request', reply_in_thread: true, ...(mode === 'frozen' ? { progress_frozen: true } : {}),
+        ...(mode === 'missing' ? { card_message_id: undefined } : {}) });
+      const cardMappings = createMemoryChannelMappingRepo([mapping]);
+      const runtime = { getTasks: vi.fn(async () => [task]), getEvents: vi.fn(async () => []),
+        getTaskRecovery: vi.fn(async () => ({ status: task.status, blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] })) };
+      const service = { update: vi.fn(async () => ({ messageId: 'om_card' })),
+        reply: vi.fn(async () => ({ messageId: 'om_notice' })), send: vi.fn() };
+      if (mode === 'unupdatable') {
+        const { LarkServiceError } = await import('./service.js');
+        service.update.mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'expired', 502, { upstreamCode: 230031 }));
+      }
+      const input = { runtime: runtime as any, service: service as any, cardMappings: cardMappings as any,
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config, channel: 'lark-card:cli_test', deliveryStore: repos.config,
+        resolveConfig: async () => ({ ...config, silentProgress: mode === 'silent' }) };
+      await performLarkCardReconcile(input);
+      task.updatedAt = new Date(Date.now() + 1_000).toISOString();
+      await performLarkCardReconcile({ ...input, runtime: { ...runtime } as any });
+      expect(service.reply).toHaveBeenCalledTimes(mode === 'writable' ? 0 : 1);
+      expect(service.update).toHaveBeenCalledTimes(['writable', 'unupdatable'].includes(mode) ? 1 : 0);
+      expect(service.send).not.toHaveBeenCalled();
+      const persisted = JSON.parse(cardMappings.mappings[0]!.extra!);
+      expect(persisted.final_message_id).toBeUndefined();
+      expect(persisted.final_delivery_state).toBeUndefined();
+      if (mode !== 'writable') expect(service.reply.mock.calls[0]![0]).toMatchObject({ messageId: 'om_request', replyInThread: true, statusLabel: '需要核对' });
+    } finally { repos.close(); }
+  });
+
+  it('retries a failed notice on a frozen card without patching or changing its original destination', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const mapping = createMapping('retry-recovery', 'om_request', 'session', { runtime_task_id: 'task', progress_frozen: true, reply_message_id: 'om_request' });
+      const cardMappings = createMemoryChannelMappingRepo([mapping]);
+      const task = { id: 'task', status: 'reconcile_required' };
+      const service = { update: vi.fn(), reply: vi.fn(async () => ({ messageId: 'om_notice' })), send: vi.fn() };
+      service.reply.mockRejectedValueOnce(new Error('network'));
+      const input = { runtime: { getTasks: async () => [task], getEvents: async () => [] } as any,
+        service: service as any, cardMappings: cardMappings as any, log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config,
+        channel: 'lark-card:cli_test', deliveryStore: repos.config };
+      await performLarkCardReconcile(input);
+      await performLarkCardReconcile(input);
+      await performLarkCardReconcile(input);
+      expect(service.reply).toHaveBeenCalledTimes(2);
+      expect(service.reply.mock.calls[0]).toEqual(service.reply.mock.calls[1]);
+      expect(service.update).not.toHaveBeenCalled(); expect(service.send).not.toHaveBeenCalled();
+    } finally { repos.close(); }
+  });
+
+  it.each([true, false])('only an authoritative verified completion can override historical open tools: %s', async verified => {
+    const { createHash } = await import('node:crypto');
+    const repos = createRepositories(':memory:');
+    try {
+      const mapping = createMapping('verified-map', 'om_request', 'session', { runtime_task_id: 'task', progress_frozen: true, reply_message_id: 'om_request' });
+      const cardMappings = createMemoryChannelMappingRepo([mapping]);
+      const text = '经原始记录核验的最终答案';
+      const event = { id: 'verified', type: 'text', data: { text, recovery: { actor: 'installation_owner' } } };
+      const runtime = { getTasks: async () => [{ id: 'task', status: 'completed', updatedAt: new Date().toISOString() }],
+        getEvents: async () => [{ id: 'tool', type: 'tool_call', data: { id: 'open_tool', name: 'shell' } }, event],
+        getTaskRecovery: async () => ({ status: 'completed', blockers: [], ...(verified ? { verifiedOutput: { eventId: 'verified', digest: createHash('sha256').update(text).digest('hex') } } : {}) }) };
+      const service = { update: vi.fn(), reply: vi.fn(async (_input: any) => ({ messageId: 'om_result' })), send: vi.fn() };
+      await performLarkCardReconcile({ runtime: runtime as any, service: service as any, cardMappings: cardMappings as any,
+        log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config, channel: 'lark-card:cli_test', deliveryStore: repos.config });
+      expect(service.reply.mock.calls[0]![0]).toMatchObject({ state: verified ? 'completed' : 'failed' });
+      if (verified) {
+        expect(JSON.stringify(service.reply.mock.calls[0])).toContain(text);
+        expect(JSON.stringify(service.reply.mock.calls[0])).not.toContain('open_tool');
+      }
+    } finally { repos.close(); }
+  });
+});

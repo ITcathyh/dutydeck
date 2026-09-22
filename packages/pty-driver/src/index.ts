@@ -20,3 +20,7 @@ export {
   type SessionIdLookup,
   type SessionIdLookupContext,
 } from './session-id/index.js';
+export {
+  captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit,
+  type OwnedTmuxScope, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type ProcessProbe,
+} from '@dutydeck/session-backends';

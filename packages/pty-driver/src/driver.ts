@@ -9,11 +9,12 @@ import {
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
 import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
-import { PtyBackend, TmuxBackend, type SessionBackend } from '@dutydeck/session-backends';
+import { captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, PtyBackend, TmuxBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type PhysicalProcessIdentity } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
 import { createTranscriptTailer, type TranscriptEventSource } from './transcript/index.js';
-import { buildSessionMarker, resolveCliSessionId } from './session-id/index.js';
+import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession, claudeSessionIdLookup } from './session-id/index.js';
+import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { ClaudeSettings } from './claude-settings.js';
 
@@ -22,6 +23,8 @@ export interface PtyCliDriverOptions {
   adapter: CliAdapter;
   /** 默认 new PtyBackend()；tmux 持久会话由调用方注入 TmuxBackend。 */
   backend?: SessionBackend;
+  /** Trusted host/boot/namespace/process-start probes supplied by the composition root. */
+  processProbe?: ProcessProbe;
   onEvent: (e: NormalizedDriverEvent) => void;
   onExit: (code: number | null) => void;
   /** Driver-owned stop completed (explicit kill or daemon detach). */
@@ -65,9 +68,12 @@ export class PtyCliDriver implements AgentDriver {
   private started = false;
   private stopped = false;
   private stoppedPid: number | undefined;
-  /** Normal daemon shutdown preserves a persistent backend; explicit
-   * session stop/restart still destroys it. Set only by the service
-   * composition root immediately before runtime.shutdown(). */
+  private readonly processProbe: ProcessProbe | undefined;
+  private tmuxIdentity: OwnedTmuxIdentity | undefined;
+  private tmuxExitProof: OwnedTmuxExitProof | undefined;
+  private captureIdentity: PhysicalProcessIdentity | undefined;
+  /** Runtime shutdown preserves active/unknown sessions; proven idle sessions
+   * may be stopped when their native context can be restored. */
   private detachOnStop = false;
   private exitReported = false;
   /** 一轮任务进行中：send() 置 true，completed 发出后置 false。 */
@@ -128,6 +134,7 @@ export class PtyCliDriver implements AgentDriver {
   private cliSessionId: string | undefined;
 
   constructor(opts: PtyCliDriverOptions) {
+    this.processProbe = opts.processProbe;
     this.agent = opts.agent;
     this.adapter = opts.adapter;
     this.sessionId = opts.sessionId;
@@ -165,6 +172,24 @@ export class PtyCliDriver implements AgentDriver {
       if (probe === 'unknown') {
         throw new Error(`Cannot determine whether persistent tmux session ${tmuxName} is alive; refusing to spawn a duplicate CLI`);
       }
+    }
+
+    // A retired tmux pane can still have durable native history. Only an
+    // actual resolver match authorizes automatic resume; never guess an id.
+    const nativeSessionId = tmuxName !== undefined ? this.resumableNativeSession() : undefined;
+    if (tmuxName !== undefined && !nativeSessionId && this.hasPinnedNativeSession()) {
+      throw new DriverRecoveryError('Pinned Claude session exists without a verified session marker; refusing to reuse its id for a fresh launch');
+    }
+    const resumeFragment = nativeSessionId && this.adapter.buildResumeCommand?.(nativeSessionId);
+    if (nativeSessionId && resumeFragment) {
+      this.cliSessionId = nativeSessionId;
+      this.lastArgs = this.claudeSettings.args(this.agent.args, this.buildResumeArgs(nativeSessionId, resumeFragment), this.cwd, this.agent.env);
+      this.backend.spawn(this.agent.command, this.lastArgs, {
+        cwd: this.cwd, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, env: this.spawnEnv(),
+      });
+      this.wire(this.backend);
+      this.markResumed();
+      return;
     }
 
     this.lastArgs = this.claudeSettings.args(this.agent.args, this.adapter.buildArgs({
@@ -490,6 +515,7 @@ export class PtyCliDriver implements AgentDriver {
   private markResumed(): void {
     this.started = true;
     this.firstPromptSent = true;
+    if (this.backend instanceof TmuxBackend) this.backend.setDutydeckMetadata('first_prompt_sent', 'true');
     this.inputPrepared = false;
   }
 
@@ -541,12 +567,27 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   /**
-   * Mark the next normal stop as a daemon-lifecycle detach. The service calls
-   * this immediately before runtime.shutdown(); user stop/restart paths never
-   * call it and therefore continue to kill the tmux session.
+   * Runtime shutdown chooses preserve for active/unknown work and permits
+   * retirement for verified idle work. Explicit user stop does not set this.
    */
-  prepareForDaemonShutdown(): void {
-    this.detachOnStop = true;
+  prepareForDaemonShutdown(preserveSession = true): void {
+    // Runtime alone may authorize idle retirement. If native history cannot
+    // be resumed with actual on-disk evidence, keep the persistent pane.
+    this.detachOnStop = preserveSession || ((this.firstPromptSent || this.hasPinnedNativeSession()) && !this.resumableNativeSession());
+  }
+
+  private hasPinnedNativeSession(): boolean {
+    return hasPinnedClaudeSession(this.adapter.id, {
+      sessionId: this.sessionId, cwd: this.cwd, env: this.spawnEnv(),
+    });
+  }
+
+  private resumableNativeSession(): string | undefined {
+    if (!this.adapter.buildResumeCommand || !claudeSessionIdLookup.adapterIds.includes(this.adapter.id)) return undefined;
+    const found = resolveCliSessionId(this.adapter.id, {
+      sessionId: this.sessionId, cwd: this.cwd, env: this.spawnEnv(), requireMarker: true,
+    });
+    return found && this.adapter.buildResumeCommand(found) !== null ? found : undefined;
   }
 
   async stop(options: { discardSession?: boolean } = {}): Promise<void> {
@@ -580,7 +621,16 @@ export class PtyCliDriver implements AgentDriver {
         // Nothing was attached: this is a foreign/mismatched live pane which
         // recovery deliberately left untouched.
       } else if (preservePersistentSession) tmuxBackend.detach();
-      else this.backend.kill();
+      else if (tmuxBackend && this.processProbe) {
+        // Clean up only our local capture; never redirect a tmux command via
+        // mutable process.env or mark a failed/unknown stop as gone.
+        tmuxBackend.disposeCapture();
+        if (this.tmuxIdentity) this.tmuxExitProof = await stopOwnedTmux(this.tmuxIdentity, this.processProbe);
+        const deadline = Date.now() + 5_000;
+        while (this.captureIdentity && this.processProbe.observe(this.captureIdentity) === 'alive' && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      } else this.backend.kill();
     } catch {
       // best effort：后端可能已退出
     } finally {
@@ -592,11 +642,11 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   async isStopped(): Promise<boolean> {
-    if (!this.stopped || this.recoveryRejected || this.detachOnStop) return false;
+    if (!this.stopped || this.recoveryRejected || (this.detachOnStop && !this.tmuxExitProof)) return false;
     if (this.backend instanceof TmuxBackend) {
-      // A failed kill or owner mismatch can leave the pane alive even though
-      // the backend's local exited flag is already set. Probe the server.
-      return TmuxBackend.probeSession(this.backend.sessionName) === 'missing';
+      return !!this.processProbe && !!this.tmuxExitProof
+        && verifyOwnedTmuxExit(this.tmuxExitProof, this.processProbe)
+        && !!this.captureIdentity && this.processProbe.observe(this.captureIdentity) === 'dead';
     }
     if (!(this.backend instanceof PtyBackend) || this.stoppedPid === undefined) return false;
     try { process.kill(this.stoppedPid, 0); return false; }
@@ -663,6 +713,19 @@ export class PtyCliDriver implements AgentDriver {
 
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
   private wire(backend: SessionBackend, restoreTranscript?: DriverTurnRecovery['transcript']): void {
+    this.tmuxIdentity = undefined;
+    this.tmuxExitProof = undefined;
+    this.captureIdentity = undefined;
+    if (backend instanceof TmuxBackend && this.processProbe && backend.ownerId && backend.getSocketPath()) {
+      try {
+        this.tmuxIdentity = captureOwnedTmuxIdentity({
+          socketPath: backend.getSocketPath()!, sessionName: backend.sessionName,
+          ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!(),
+        }, this.processProbe);
+        const capturePid = backend.getCapturePid();
+        if (capturePid) this.captureIdentity = this.processProbe.identify(capturePid);
+      } catch { /* Unknown physical identity must keep isStopped false. */ }
+    }
     const initial = backend instanceof TmuxBackend ? backend.initialScreen : undefined;
     this.snapshot = new TerminalSnapshot(initial?.cols ?? DEFAULT_COLS, initial?.rows ?? DEFAULT_ROWS);
     this.idleDetector = new IdleDetector({

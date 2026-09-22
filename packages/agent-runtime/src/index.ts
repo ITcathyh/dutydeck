@@ -1,12 +1,12 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, executionActorSchema, taskRequestV1Schema, makeId, now, RuntimeError, workspaceModes } from '@dutydeck/shared';
+import { canonicalExecutionJson, ptyRetirementRecoverySchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, makeId, now, RuntimeError, workspaceModes } from '@dutydeck/shared';
 import { AcpxAdapter, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
-import type { AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskRequestV1 } from '@dutydeck/shared';
+import type { PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { PersistentEventPublisher, type SubscribeOptions, type EventListener } from './persistent-event-publisher.js';
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
@@ -62,7 +62,14 @@ interface AttemptTools {
 // 本包不再自定义 AgentDriver / DriverFactory / NormalizedDriverEvent。
 export type { AgentDriver, DriverFactory, NormalizedDriverEvent };
 
+export interface PtyRetirementControl {
+  capture(session: Session): unknown;
+  stop(session: Session, snapshot: unknown, beforeKill: (snapshot: unknown) => Promise<void>): Promise<unknown>;
+  verify(session: Session, snapshot: unknown): boolean;
+}
 export interface RuntimeOptions {
+  ptyRetirement?: PtyRetirementControl;
+
   authorizeExecution?: (sessionId: string, actorId?: string) => Promise<void | (() => Promise<void>)>;
   /** Stopping an owned resource remains permitted after its execution authority is revoked. */
   authorizeControl?: (sessionId: string, actor: ExecutionActor, action: 'stop') => Promise<void>;
@@ -115,6 +122,7 @@ export class DutydeckRuntime {
   private shutdownRun?: Promise<void>;
   private readonly transitions = new Map<string, Owner>();
   private readonly stopIntents = new Map<string, { cancelQueue: boolean; actor?: ExecutionActor }>();
+  private readonly ptyRetirements = new Set<string>();
   private readonly stopRuns = new Map<string, Promise<void>>();
   private readonly stopBlocks = new Map<string, { sessionId: string; runId: string; reason: string }>();
   private readonly stopBlockVersions = new Map<string, number>();
@@ -207,7 +215,7 @@ export class DutydeckRuntime {
   }
   private resourceBlockers(id: string, reuseOwned = false) {
     const reusable = reuseOwned ? this.localResources.reusableIds(id) : new Set<string>();
-    return this.repos.execution.getSessionResourceBlockers(id).filter(block => !(block.code === 'DRIVER_RESOURCE_UNSAFE' && block.resourceId && reusable.has(block.resourceId)));
+    return [...(this.ptyRetirements.has(id) ? [{ sessionId: id, code: 'PTY_RETIREMENT_ACTIVE' }] : []), ...this.repos.execution.getSessionResourceBlockers(id)].filter(block => !(block.code === 'DRIVER_RESOURCE_UNSAFE' && block.resourceId && reusable.has(block.resourceId)));
   }
   private assertResources(id: string, reuseOwned = false) {
     const blockers = this.resourceBlockers(id, reuseOwned);
@@ -457,6 +465,7 @@ export class DutydeckRuntime {
           }
         }
         await this.observeAbandonedResources(session);
+        await this.clearVerifiedStopBlock(session);
         try { await this.mutations.wait(() => this.configurations.assertClear(session.id)); }
         catch (error) {
           if (error instanceof RuntimeError && ['DRIVER_CONFIGURATION_BUSY', 'DRIVER_CONFIGURATION_UNKNOWN'].includes(error.code)) return;
@@ -769,13 +778,180 @@ export class DutydeckRuntime {
     const reusable = this.localResources.reusableIds(id);
     const blockers = projection.blockers.filter(block => !(block.code === 'DRIVER_RESOURCE_UNSAFE' && block.resourceId && reusable.has(block.resourceId)));
     const tasks = await this.getTasks(id);
-    const active = tasks.find(task => task.id !== taskId && ['running', 'reconcile_required', 'legacy_unresolved'].includes(task.status));
+    const unresolved = (taskId: string) => this.repos.execution.getTaskExecution(taskId)?.attempts.some(attempt => ['preparing', 'active', 'reconcile_required', 'legacy_unresolved'].includes(attempt.state));
+    const active = tasks.find(task => task.id !== taskId && unresolved(task.id));
     if (active && active.status !== 'running') blockers.push({ code: 'PREVIOUS_RESULT_UNKNOWN', sessionId: id });
     if (projection.task.status === 'queued' && this.queueBlocked.has(id)) {
       blockers.push({ code: 'QUEUE_START_CHECK_FAILED', sessionId: id });
     }
-    return { status: projection.task.status, blockers: [...new Set(blockers.map(block => block.code))].map(code => ({ code })),
+    return { status: projection.task.status, resolvedUnknown: projection.currentAttempt?.state === 'settled' && projection.currentAttempt.outcome === 'unknown', blockers: [...new Set(blockers.map(block => block.code))].map(code => ({ code })),
+      ...(projection.currentAttempt?.state === 'settled' && projection.currentAttempt.outcome === 'completed' && projection.currentAttempt.settlement?.kind === 'manual' && projection.currentAttempt.settlement.verifiedOutput ? { verifiedOutput: projection.currentAttempt.settlement.verifiedOutput } : {}),
       ...(active ? { activeTaskId: active.id } : {}) };
+  }
+
+
+  private requireRecoveryOwner(actor: ExecutionActor) {
+    if (executionActorSchema.parse(actor).kind !== 'installation_owner') throw new RuntimeError('RECOVERY_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
+  }
+  async inspectExecutionRecovery(id: string, actor: ExecutionActor) {
+    this.assertReady(); this.requireRecoveryOwner(actor);
+    const session = await this.repos.sessions.get(id);
+    if (!session) throw new RuntimeError('SESSION_NOT_FOUND', 'Session not found', 404);
+    const tasks = (await this.repos.tasks.listBySession(id)).map(task => this.repos.execution.getTaskExecution(task.id)!).filter(Boolean);
+    const resources = this.repos.execution.getResources(id);
+    return { sessionId: id, runId: session.runId, state: session.state,
+      tasks: tasks.map(({ task, currentAttempt }) => ({ taskId: task.id, status: task.status, revision: task.revision,
+        attempt: currentAttempt, resolvedUnknown: currentAttempt?.state === 'settled' && currentAttempt.outcome === 'unknown' })),
+      resources, blockers: this.repos.execution.getSessionResourceBlockers(id),
+      stopBlock: await this.repos.config.get(STOP_BLOCK_PREFIX + id) ?? null,
+      resourceChecks: resources.filter(resource => resource.kind !== 'operation' && resource.purpose !== 'acp_native_context' && resource.stage !== 'not_created')
+        .flatMap(resource => resource.observations.at(-1) ? [{ resourceId: resource.resourceId, expectedRevision: resource.revision, observationId: resource.observations.at(-1)!.observationId }] : []),
+      unverifiedResourceIds: resources.filter(resource => ['local_only', 'legacy'].includes(resource.kind) && resource.observations.at(-1)?.state !== 'gone').map(resource => resource.resourceId)
+    };
+  }
+  private recoveryInFlight(id: string, includeQueueDrain = true) {
+    return this.ptyRetirements.has(id) || (includeQueueDrain && this.drains.has(id)) || this.attempts.has(id) || this.activeTurns.has(id) || this.stopRuns.has(id) || this.factoryCleanups.has(id)
+      || [...this.drivers.entries(), ...[...this.blockedDrivers].map(([key, value]) => [key, value.driver] as const)]
+        .some(([key, driver]) => key === id && this.driverOperations.get(driver)?.size);
+  }
+  private async clearVerifiedStopBlock(session: Session) {
+    if (this.recoveryInFlight(session.id)) return false;
+    const raw = await this.mutations.wait(() => this.repos.config.get(STOP_BLOCK_PREFIX + session.id));
+    if (!raw) return false;
+    try {
+      const cleared = await this.mutations.write(session.id, async () => this.bound().clearVerifiedStopBlock(this.fence(session), raw));
+      if (cleared) {
+        this.stopBlockVersions.set(session.id, (this.stopBlockVersions.get(session.id) ?? 0) + 1);
+        this.stopBlocks.delete(session.id);
+        this.drivers.delete(session.id); this.blockedDrivers.delete(session.id);
+      }
+      return cleared;
+    } catch (error) {
+      if (error instanceof RuntimeError && ['SESSION_RESOURCE_BLOCKED', 'DRIVER_STOP_BLOCK_INVALID', 'SESSION_RUN_CONFLICT'].includes(error.code)) return false;
+      throw error;
+    }
+  }
+  async probeExecutionRecovery(id: string, runId: string, actor: ExecutionActor) {
+    this.assertReady(); this.requireRecoveryOwner(actor);
+    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+      const { session } = await this.active(id);
+      if (session.runId !== runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
+      if (this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
+      await this.observeAbandonedResources(session);
+      await this.clearVerifiedStopBlock(session);
+      if (!this.resourceBlockers(id).length) {
+        if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
+        this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+      }
+      return this.inspectExecutionRecovery(id, actor);
+    });
+  }
+  async retirePtyExecution(id: string, raw: PtyRetirementRecovery, actor: ExecutionActor) {
+    this.assertReady(); this.requireRecoveryOwner(actor);
+    const input = ptyRetirementRecoverySchema.parse(raw), control = this.options.ptyRetirement;
+    if (!control) throw new RuntimeError('PTY_RETIREMENT_UNAVAILABLE', 'Trusted PTY recovery is not configured', 503);
+    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+      const { session } = await this.active(id);
+      if (session.runId !== input.runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
+      const key = `runtime_pty_retirement:${id}:${input.decisionId}`;
+      const observationId = `pty_retirement_${digest({ sessionId: id, ...input })}`;
+      type Receipt = { input: PtyRetirementRecovery; actor: ExecutionActor; identity: unknown; snapshot: unknown };
+      let receipt: Receipt | undefined;
+      let replayed = false, reserved = false;
+      const checkScope = async () => {
+        const current = await this.repos.sessions.get(id); this.mutations.check();
+        if (current?.runId !== input.runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
+      };
+      const checkResource = () => {
+        this.mutations.check();
+        const resource = this.repos.execution.getResources(id).find(item => item.resourceId === input.resourceId);
+        if (!resource || resource.runId !== input.runId || resource.kind !== 'local_only' || !resource.identity || resource.identity.locator === null) throw new RuntimeError('RESOURCE_SCOPE_CONFLICT', 'The exact local PTY resource is required', 409);
+        if (receipt && canonicalExecutionJson(resource.identity) !== canonicalExecutionJson(receipt.identity)) throw new RuntimeError('RESOURCE_IDENTITY_CONFLICT', 'Original resource identity changed', 409);
+        const observed = resource.observations.find(item => item.observationId === observationId);
+        if (receipt && observed && observed.state === 'gone' && resource.revision === input.expectedRevision + 1 && observed.evidenceRef === `pty-retirement:${digest(receipt)}`) return { resource, recorded: true };
+        if (resource.revision !== input.expectedRevision) throw new RuntimeError('RESOURCE_REVISION_CONFLICT', 'Resource revision changed', 409);
+        return { resource, recorded: false };
+      };
+      await this.mutations.write(id, async () => {
+        const persisted = await this.repos.config.get(key);
+        if (persisted) {
+          receipt = JSON.parse(persisted) as Receipt;
+          if (canonicalExecutionJson(receipt.input) !== canonicalExecutionJson(input) || canonicalExecutionJson(receipt.actor) !== canonicalExecutionJson(actor)) throw new RuntimeError('EXECUTION_OPERATION_CONFLICT', 'Retirement decision was reused with different input', 409);
+        }
+        await checkScope();
+        const checked = checkResource(); replayed = checked.recorded;
+        if (replayed) return;
+        if (this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution or queue drain still has an in-flight owner', 409);
+        if (checked.resource.stage !== 'created' || checked.resource.observations.at(-1)?.state === 'gone') throw new RuntimeError('PTY_RETIREMENT_RESOURCE_UNSAFE', 'Only the original live or unverified created PTY resource can be retired', 409);
+        const resources = this.repos.execution.getResources(id);
+        if (resources.some(resource => resource.kind === 'local_only' && resource.resourceId !== input.resourceId && resource.stage !== 'not_created' && resource.observations.at(-1)?.state !== 'gone')
+          || resources.some(resource => resource.kind === 'operation' && ['pending', 'unknown'].includes(resource.stage) && !resource.creationClosure)) throw new RuntimeError('PTY_RETIREMENT_RESOURCE_AMBIGUOUS', 'Another PTY resource or unfinished creation prevents unambiguous retirement', 409);
+        this.ptyRetirements.add(id); reserved = true;
+        if (!await this.repos.config.get(STOP_BLOCK_PREFIX + id)) await this.retainStopBlock(id, 'Explicit PTY retirement requires verified physical exit');
+      }).catch(error => { if (reserved) this.ptyRetirements.delete(id); throw error; });
+      if (replayed) return { replayed: true, recovery: await this.inspectExecutionRecovery(id, actor) };
+      try {
+        if (!replayed) {
+          if (!receipt) {
+            const snapshot = control.capture(session);
+            canonicalExecutionJson(snapshot);
+            await this.mutations.write(id, async () => {
+              await checkScope(); const { resource } = checkResource();
+              receipt = { input, actor, identity: resource.identity!, snapshot };
+              await this.repos.config.set(key, canonicalExecutionJson(receipt));
+            });
+          }
+          if (!control.verify(session, receipt!.snapshot)) {
+            const proof = await this.mutations.wait(() => control.stop(session, receipt!.snapshot, async snapshot => {
+              canonicalExecutionJson(snapshot);
+              await this.mutations.write(id, async () => {
+                await checkScope(); checkResource(); receipt = { ...receipt!, snapshot };
+                await this.repos.config.set(key, canonicalExecutionJson(receipt));
+              });
+            }));
+            canonicalExecutionJson(proof);
+            await this.mutations.write(id, async () => {
+              await checkScope(); checkResource(); receipt = { ...receipt!, snapshot: proof };
+              await this.repos.config.set(key, canonicalExecutionJson(receipt));
+            });
+          }
+          await this.mutations.write(id, async () => {
+            await checkScope(); const { resource } = checkResource();
+            if (!control.verify(session, receipt!.snapshot)) throw new RuntimeError('PTY_EXIT_UNVERIFIED', 'Original PTY processes have not all been proven gone', 409);
+            this.bound().observed(this.fence(session), resource.resourceId, input.expectedRevision, { observationId, state: 'gone', identityId: resource.identity!.identityId, observedAt: now(), evidenceRef: `pty-retirement:${digest(receipt)}` });
+          });
+        }
+      } finally { this.ptyRetirements.delete(id); }
+      await this.clearVerifiedStopBlock(session);
+      if (!this.resourceBlockers(id).length) {
+        if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
+        this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+      }
+      return { replayed, recovery: await this.inspectExecutionRecovery(id, actor) };
+    });
+  }
+
+  async confirmExecutionRecovery(id: string, raw: ExecutionRecoveryDecision, actor: ExecutionActor) {
+    this.assertReady(); this.requireRecoveryOwner(actor);
+    const input = executionRecoveryDecisionSchema.parse(raw);
+    return this.mutations.run(owner(id, this.transitions.get(id) ?? this.transition(id)), async () => {
+      const { session } = await this.active(id);
+      if (session.runId !== input.runId) throw new RuntimeError('SESSION_RUN_CONFLICT', 'Session run changed', 409);
+      const original = this.repos.execution.getTaskExecution(input.taskId)?.attempts.find(attempt => attempt.attemptId === input.attemptId);
+      const replay = original?.settlement?.kind === 'manual' && original.settlement.decision.decisionId === input.decisionId;
+      if (!replay && this.recoveryInFlight(id)) throw new RuntimeError('RECOVERY_EXECUTION_ACTIVE', 'Original execution still has an in-flight owner', 409);
+      const f = { sessionId: id, runId: input.runId, taskId: input.taskId, attemptId: input.attemptId, expectedRevision: input.expectedRevision };
+      const decision = { decisionId: input.decisionId, actor, action: input.action, evidenceRefs: input.evidenceRefs, resourceChecks: input.resourceChecks,
+        ...(input.action === 'retry' ? { allowDuplicateEffects: true } : {}) };
+      const result = await this.mutations.write(id, async () => this.wake(input.action === 'retry'
+        ? this.bound().retryAttempt(f, decision, input.resourceChecks)
+        : this.bound().confirmAttemptRecovery(f, `recovery:${input.decisionId}`, { kind: 'manual', outcome: input.outcome, decision }, input.verifiedOutputText)));
+      if (!result.replayed) {
+        if (this.lifecycle(id).revoked) this.lifecycles.set(id, owner(id, this.transitions.get(id) ?? this.transition(id)));
+        this.queueBlocked.delete(id); await this.projectQueue(id); this.scheduleQueue(id);
+      }
+      return { replayed: result.replayed, task: this.publicTask(result.task!), recovery: await this.inspectExecutionRecovery(id, actor) };
+    });
   }
 
 
@@ -1190,15 +1366,18 @@ export class DutydeckRuntime {
     if(this.lifecycle(id).revoked){this.mutations.run(undefined,()=>this.assertReplaceable(id));this.lifecycles.set(id,owner(id,this.transition(id)));}
     return this.scoped(id,async()=>{const {session}=await this.active(id);this.bound().authorizeNativeContextControl(this.fence(session),actor);await this.authorize(id,actor.kind==='unspecified'?undefined:actor.id);await this.observeAbandonedResources(session);return this.repos.execution.getSessionResourceBlockers(id);});
   }
-  async replaceNativeContext(id:string,actor:ExecutionActor,resourceId:string,expectedRevision:number,decisionId:string) {
-    return this.prepareNativeContext(id,actor,{resourceId,expectedRevision,decisionId});
+  async replaceNativeContext(id:string,actor:ExecutionActor,resourceId:string,expectedRevision:number,decisionId:string,expectedRunId?:string) {
+    if(expectedRunId!==undefined)this.requireRecoveryOwner(actor);
+    return this.prepareNativeContext(id,actor,{resourceId,expectedRevision,decisionId},expectedRunId);
   }
   async restoreNativeConfiguration(id:string,actor:ExecutionActor) { return this.prepareNativeContext(id,actor); }
-  private async prepareNativeContext(id:string,actor:ExecutionActor,replacement?:{resourceId:string;expectedRevision:number;decisionId:string}) {
+  private async prepareNativeContext(id:string,actor:ExecutionActor,replacement?:{resourceId:string;expectedRevision:number;decisionId:string},expectedRunId?:string) {
     this.assertReady();
     const original=await this.repos.sessions.get(id);if(!original)throw new RuntimeError('SESSION_NOT_FOUND','Unknown Session',404);
+    if(expectedRunId!==undefined&&original.runId!==expectedRunId)throw new RuntimeError('SESSION_RUN_CONFLICT','Session run changed',409);
     this.bound().authorizeNativeContextControl(this.fence(original),actor);await this.authorize(id,actor.kind==='unspecified'?undefined:actor.id);
     if(!replacement&&!await this.repos.config.get(`runtime_driver_configuration:${id}`))throw new RuntimeError('DRIVER_CONFIGURATION_REPAIR_NOT_REQUIRED','No configuration blocker exists',409);
+    if(expectedRunId!==undefined&&(await this.repos.sessions.get(id))?.runId!==expectedRunId)throw new RuntimeError('SESSION_RUN_CONFLICT','Session run changed',409);
     // Retain queued requests and unknown submitted Attempts. This operation never prompts.
     try{await this.revokeSession(id,false,'stopped');}catch(error){
       const blockers=this.repos.execution.getSessionResourceBlockers(id);
@@ -1206,7 +1385,9 @@ export class DutydeckRuntime {
     }
     const transition=this.transition(id),lifecycle=owner(id,transition);this.lifecycles.set(id,lifecycle);
     return this.mutations.run(lifecycle,async()=>{
-      const {session}=await this.active(id);this.bound().authorizeNativeContextControl(this.fence(session),actor);this.assertReplaceable(id);
+      const {session}=await this.active(id);
+      if(expectedRunId!==undefined&&session.runId!==expectedRunId)throw new RuntimeError('SESSION_RUN_CONFLICT','Session run changed',409);
+      this.bound().authorizeNativeContextControl(this.fence(session),actor);this.assertReplaceable(id);
       if(replacement)await this.mutations.write(id,async()=>this.bound().replaceNativeContext(this.fence(session),{...replacement,actor}));
       this.assertResources(id);
       const expected=await this.mutations.wait(()=>this.repos.config.get(`runtime_driver_configuration:${id}`));
@@ -1454,7 +1635,7 @@ export class DutydeckRuntime {
           const attempt = this.repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.attemptId === ref.attemptId);
           if (!attempt || attempt.state === 'settled') return;
           if (attempt.submissionState === 'not_submitted') this.wake(this.bound().settleAttempt(this.attemptFence(ref), `preparation:${ref.attemptId}`, { kind: 'not_submitted', outcome: isTaskFenceRevocation(error) ? 'cancelled' : 'failed', reason: error instanceof Error ? error.message : String(error) }));
-          else this.wake(this.bound().markReconcileRequired(this.attemptFence(ref), { reasonId: `unknown:${ref.attemptId}`, code: error instanceof RuntimeError ? error.code : 'DRIVER_RESULT_UNKNOWN', evidenceRefs: [] }));
+          else this.wake(this.bound().markReconcileRequired(this.attemptFence(ref), { reasonId: `unknown:${ref.attemptId}`, code: error instanceof RuntimeError || error instanceof Error && 'code' in error && typeof error.code === 'string' && /^[A-Z0-9_]+$/.test(error.code) ? String(error.code) : 'DRIVER_RESULT_UNKNOWN', evidenceRefs: [] }));
         });
       }
     } finally {
@@ -1568,7 +1749,7 @@ export class DutydeckRuntime {
     if (queue.length) this.queues.set(id, queue); else this.queues.delete(id);
   }
   private scheduleQueue(id: string) {
-    if (this.shuttingDown || this.initializationFailed || this.queueBlocked.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id)
+    if (this.ptyRetirements.has(id) || this.shuttingDown || this.initializationFailed || this.queueBlocked.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id)
       || this.blockedVerificationSessions.has(id) || !(this.queues.get(id)?.length)) return;
     const token = owner(id, this.lifecycle(id)); this.drains.set(id, token);
     const run = this.mutations.run(token, () => this.drainQueue(id)); this.queueRuns.set(id, run);
@@ -1978,6 +2159,19 @@ export class DutydeckRuntime {
     for (const transition of this.transitions.values()) transition.revoke();
     const ids = new Set([...this.lifecycles.keys(), ...this.drivers.keys()]);
     try {
+      for (const [id, driver] of this.drivers) {
+        if (!driver.prepareForDaemonShutdown) continue;
+        const tasks = await this.repos.tasks.listBySession(id);
+        const unresolved = tasks.some(task => this.repos.execution.getTaskExecution(task.id)?.attempts.some(attempt => ['preparing', 'active', 'reconcile_required', 'legacy_unresolved'].includes(attempt.state)));
+        const pendingCreation = this.repos.execution.getResources(id).some(resource => resource.kind === 'operation' && ['pending', 'unknown'].includes(resource.stage) && !resource.creationClosure);
+        // Admission is closed and transitions revoked; an unclaimed queue drain cannot start a new turn.
+        const preserve = this.drivers.get(id) !== driver || this.recoveryInFlight(id, false) || this.verifyingSessions.has(id) || unresolved || pendingCreation;
+        try { await driver.prepareForDaemonShutdown(Boolean(preserve)); }
+        catch {
+          try { await driver.prepareForDaemonShutdown(true); } catch { /* Stop still must prove physical exit. */ }
+          await this.retainStopBlock(id, 'Shutdown preparation failed; physical resource verification is required');
+        }
+      }
       await Promise.allSettled([...ids].map(id => this.revokeSession(id, false, 'stopped', true)));
       if (this.binding) await this.verifications.stop();
       await this.cleanupRun;

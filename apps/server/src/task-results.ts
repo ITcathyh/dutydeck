@@ -75,6 +75,8 @@ function findSettlementBoundary(execution: AttemptResultRepositories['execution'
 }
 
 function collectOutput(execution: AttemptResultRepositories['execution'], attempt: TaskAttempt, throughSequence: number): { text: string; digest: string } {
+  const verified = attempt.settlement?.kind === 'manual' && attempt.settlement.outcome === 'completed' ? attempt.settlement.verifiedOutput : undefined;
+  let verifiedFound = false;
   const chunks: string[] = [];
   let bytes = 0;
   let afterSequence = 0;
@@ -85,7 +87,11 @@ function collectOutput(execution: AttemptResultRepositories['execution'], attemp
     for (const event of page) {
       owned(event, attempt, cursor);
       if (event.sequence > throughSequence) fail('TASK_RESULT_EVENT_ORDER', 'Event page crossed the settlement boundary');
-      if (event.type === 'text') {
+      if (verified && event.id === verified.eventId) {
+        if (event.type !== 'text' || event.settlementId !== attempt.settlementId || (event.data as { role?: unknown }).role !== 'assistant' || typeof (event.data as { text?: unknown }).text !== 'string') fail('TASK_RESULT_DIGEST_CONFLICT', 'Verified recovery output ownership does not match its settlement');
+        verifiedFound = true;
+      }
+      if (event.type === 'text' && (!verified || event.id === verified.eventId)) {
         const data = event.data as { role?: unknown; text?: unknown };
         if (data.role !== 'user' && typeof data.text === 'string') {
           chunks.push(data.text);
@@ -118,5 +124,7 @@ function collectOutput(execution: AttemptResultRepositories['execution'], attemp
   if (finalBytes > TASK_RESULT_OUTPUT_BYTES) {
     fail('TASK_RESULT_OUTPUT_TOO_LARGE', `Generated result exceeds ${TASK_RESULT_OUTPUT_BYTES} bytes`);
   }
-  return { text, digest: createHash('sha256').update(text, 'utf8').digest('hex') };
+  const digest = createHash('sha256').update(text, 'utf8').digest('hex');
+  if (verified && (!verifiedFound || digest !== verified.digest)) fail('TASK_RESULT_DIGEST_CONFLICT', 'Verified recovery output is missing or its digest changed');
+  return { text, digest };
 }

@@ -7,6 +7,7 @@ import { join, resolve } from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { canonicalExecutionJson, type AcceptedTaskInput, type RepositoryBundle, type RuntimeControlClaim, type TaskRequestV1, type TaskAttempt, type SessionFence, type ResourceCheckRef } from '@dutydeck/shared';
+import { childProcessIdentity } from './process-identity.js';
 import { createRepositories } from './index.js';
 import { normalizeAcpxEvent } from '../../acp-client/src/index.js';
 
@@ -28,6 +29,34 @@ const intent=(submissionId='send')=>({submissionId,inputDigest:hash('final'),res
 const complete=(submissionId='send')=>({kind:'driver_result' as const,submissionId,outcome:'completed' as const,outputDigest:hash('done'),stopReason:'end_turn',complete:true as const});
 
 describe('task execution ledger',()=>{
+  it('clears only the exact stop block after probing the original real process gone', async () => {
+    const { x, repos } = ready();
+    const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });
+    const exit = once(child, 'exit');
+    try {
+      const identity = childProcessIdentity(child.pid!);
+      let r = x.beforeCreate(f, { resourceId: 'original-process', kind: 'process' });
+      r = x.spawned(f, r.resourceId, r.revision, { identityId: 'exact-child', kind: 'process', locator: identity });
+      r = x.creationFinished(f, r.resourceId, r.revision, 'created');
+      const raw = JSON.stringify({ ...f, reason: 'unverified' });
+      await repos.config.set('runtime_driver_stop_block:s', raw);
+      r = x.probePhysicalResource(f, r.resourceId, r.revision);
+      expect(r.observations.at(-1)?.state).toBe('live');
+      expect(() => x.clearVerifiedStopBlock(f, raw)).toThrow(expect.objectContaining({ code: 'SESSION_RESOURCE_BLOCKED' }));
+      child.kill('SIGTERM'); await exit;
+      expect(() => x.probePhysicalResource(f, r.resourceId, r.revision - 1)).toThrow(/RESOURCE_REVISION_CONFLICT/);
+      r = x.probePhysicalResource(f, r.resourceId, r.revision);
+      expect(r.observations.at(-1)?.state).toBe('gone');
+      expect(() => x.clearVerifiedStopBlock(f, raw + ' ')).toThrow(/DRIVER_STOP_BLOCK_CONFLICT/);
+      expect(() => x.clearVerifiedStopBlock({ ...f, runId: 'stale-run' }, raw)).toThrow(/SESSION_RUN_CONFLICT/);
+      expect(x.clearVerifiedStopBlock(f, raw)).toBe(true);
+      expect(await repos.config.get('runtime_driver_stop_block:s')).toBe('');
+      expect(x.clearVerifiedStopBlock(f, raw)).toBe(false);
+      await repos.config.set('runtime_driver_stop_block:s', raw);
+      expect(x.clearVerifiedStopBlock(f, raw)).toBe(true);
+      expect(await repos.config.get('runtime_driver_stop_block:s')).toBe('');
+    } finally { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); await exit; }
+  });
   it('defaults to schema-only and requires explicit conversion, including in memory',async()=>{
     const e=open(':memory:',false);expect(e.repos.execution.authority()).toBe('legacy');
     await e.repos.sessions.save(session());await e.repos.tasks.save({id:'old',sessionId:'s',prompt:'old',status:'running',createdAt:session().createdAt,updatedAt:session().updatedAt});
