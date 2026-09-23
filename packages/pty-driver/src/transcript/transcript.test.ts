@@ -12,6 +12,7 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { ClaudeTranscriptTailer, mapClaudeEntry, resolveClaudeTranscriptPath } from './claude.js';
 import { CodexTranscriptTailer, resolveCodexRolloutPath } from './codex.js';
 import { createTranscriptTailer } from './index.js';
@@ -557,6 +558,16 @@ describe('ClaudeTranscriptTailer (同 cwd 多会话隔离)', () => {
     // 不传 session id 时才退回「取最新」——这条固定住那个退化路径的语义，
     // 免得有人以为无 id 也安全。
     expect(resolveClaudeTranscriptPath(cwd)).toBe(siblingFile);
+  });
+
+  it('目标步骤的非 UUID 会话 id 也直接定位到钉住的 jsonl', () => {
+    const { cwd } = setupTwoSessions();
+    const work = `ses_work_${'c'.repeat(64)}`;
+    const projectDir = join(process.env.CLAUDE_CONFIG_DIR!, 'projects', cwd.replace(/[^A-Za-z0-9-]/g, '-'));
+    // 文件里没有 marker：只有按钉住的 UUID 直接找才能命中。
+    const file = join(projectDir, `${pinnedSessionUuid(work)}.jsonl`);
+    writeFileSync(file, assistantEntry('验收结论：通过'));
+    expect(resolveClaudeTranscriptPath(cwd, process.env, work)).toBe(file);
   });
 
   it('CLI 拒绝了钉住的 id 时，靠首轮 marker 找回自己的 transcript', () => {

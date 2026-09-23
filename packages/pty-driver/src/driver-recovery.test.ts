@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
 import type { AgentConfig, DriverTurnRecovery, NormalizedDriverEvent } from '@dutydeck/shared';
 import { DriverDetachedError, DriverRecoveryError } from '@dutydeck/shared';
-import type { CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
+import { pinnedSessionUuid, type CliAdapter, type PtyLike } from '@dutydeck/cli-adapters';
 import { TmuxBackend, isTmuxAvailable, type SessionBackend } from '@dutydeck/session-backends';
 import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { buildSessionMarker } from './session-id/index.js';
@@ -14,6 +14,7 @@ import { PtyCliDriver } from './driver.js';
 
 const tmuxDescribe = isTmuxAvailable() ? describe : describe.skip;
 const sessionId = 'ses_recovery-fixture';
+const nativeId = pinnedSessionUuid(sessionId);
 
 async function waitFor(check: () => void, timeoutMs = 20_000): Promise<void> {
   const started = Date.now();
@@ -79,9 +80,9 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     roots.push(cwd);
     const project = join(cwd, 'projects', realpathSync(cwd).replace(/[^A-Za-z0-9-]/g, '-'));
     mkdirSync(project, { recursive: true });
-    const transcript = join(project, 'recovery-fixture.jsonl');
+    const transcript = join(project, `${nativeId}.jsonl`);
     // Real durable identity evidence, consumed by both resume and transcript recovery.
-    writeFileSync(transcript, JSON.stringify({ type: 'user', sessionId: 'recovery-fixture',
+    writeFileSync(transcript, JSON.stringify({ type: 'user', sessionId: nativeId,
       message: { role: 'user', content: buildSessionMarker(sessionId) } }) + '\n');
     const name = `dutydeck-turn-recovery-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
     sessions.push(name);
@@ -231,7 +232,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     if (kind === 'unresumable' || kind === 'empty-native') writeFileSync(f.transcript, '');
     if (kind !== 'fresh' && kind !== 'empty-native') seed.setDutydeckMetadata('first_prompt_sent', 'true');
     if (kind === 'resumable') writeFileSync(f.transcript, JSON.stringify({
-      type: 'user', sessionId: 'recovery-fixture', message: { role: 'user', content: buildSessionMarker(sessionId) },
+      type: 'user', sessionId: nativeId, message: { role: 'user', content: buildSessionMarker(sessionId) },
     }) + '\n');
     seed.detach();
     const adapter = shellAdapter([]);

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 /**
  * Resume-id judgement helper.
  *
@@ -72,4 +74,21 @@ export function isDutydeckSessionId(sessionId: string): boolean {
 export function usableResumeId(resumeSessionId: string | undefined): string | undefined {
   if (!resumeSessionId) return undefined;
   return isDutydeckSessionId(resumeSessionId) ? undefined : resumeSessionId;
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The bare UUID dutydeck pins for CLIs that only accept `--session-id <uuid>`
+ * (claude family). `ses_<uuid>` strips to its UUID; other dutydeck ids (a
+ * work-item step is `ses_work_<sha256>`) map to a deterministic v4-shaped UUID,
+ * so spawn, resume and transcript lookup agree on one file. Ids without the
+ * `ses_` prefix are the CLI's own and pass through unchanged.
+ */
+export function pinnedSessionUuid(sessionId: string): string {
+  if (!sessionId.startsWith('ses_')) return sessionId;
+  const bare = sessionId.slice('ses_'.length);
+  if (UUID_RE.test(bare)) return bare;
+  const hex = createHash('sha256').update(sessionId).digest('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${(8 | parseInt(hex[16]!, 16) & 3).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }

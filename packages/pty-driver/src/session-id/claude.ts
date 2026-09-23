@@ -19,6 +19,7 @@
  */
 import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
+import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from './fs-scan.js';
 import { buildSessionMarker, isUsableMarker } from './marker.js';
@@ -31,9 +32,9 @@ const HEAD_BYTES = 256 * 1024;
 /** Newest-first cap on candidates scanned in one project dir. */
 const MAX_CANDIDATES = 40;
 
-/** Strip the `ses_` prefix dutydeck uses; Claude's own ids are bare UUIDs. */
+/** The UUID dutydeck pinned via --session-id; Claude's own ids are bare UUIDs. */
 function bareId(sessionId: string): string {
-  return sessionId.replace(/^ses_/, '');
+  return pinnedSessionUuid(sessionId);
 }
 
 /** Does an entry's text content mention the marker? Handles both the string

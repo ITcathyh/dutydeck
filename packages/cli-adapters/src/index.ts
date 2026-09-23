@@ -7,7 +7,7 @@ export type {
 export type { CliId } from './factory.js';
 export { ALL_CLI_IDS, createCliAdapter, getCliAdapter } from './factory.js';
 export { DUTYDECK_SHELL_HINTS, buildDutydeckRoutingBlock, prependRoutingBlock } from './shared-hints.js';
-export { isDutydeckSessionId, usableResumeId } from './resume-id.js';
+export { isDutydeckSessionId, pinnedSessionUuid, usableResumeId } from './resume-id.js';
 export {
   RUNNER_INPUT_CHUNK_BYTES,
   RUNNER_INPUT_THROTTLE_MS,
