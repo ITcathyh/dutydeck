@@ -1183,11 +1183,12 @@ describe('multi-driver routing', () => {
     let emit!: (event: any) => void;
     const driver: AgentDriver = { start: vi.fn(async () => {}), send: vi.fn(async () => { emit({ type: 'text', data: { text: 'answer' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); }), interrupt: vi.fn(async () => {}), resume: vi.fn(async () => {}), isStopped: async () => true, stop: vi.fn(async () => {}) };
     let routedProtocol: string | undefined;
+    let routedAgent: AgentConfig | undefined;
     const runtime = new DutydeckRuntime(repos, {
       probe: ptyProbe,
-      ptyDriverFactory: ptyDriverFactory ?? ((_agent, protocol, onEvent) => { routedProtocol = protocol; emit = onEvent; return driver; })
+      ptyDriverFactory: ptyDriverFactory ?? ((agent, protocol, onEvent) => { routedAgent = agent; routedProtocol = protocol; emit = onEvent; return driver; })
     });
-    return { repos, runtime, driver, routedProtocol: () => routedProtocol };
+    return { repos, runtime, driver, routedProtocol: () => routedProtocol, routedAgent: () => routedAgent };
   }
 
   it('routes pty-cli agents to the injected ptyDriverFactory and streams a turn', async () => {
@@ -1196,6 +1197,8 @@ describe('multi-driver routing', () => {
     await h.runtime.initialize([ptyAgent]);
     const session = await h.runtime.start({ agentId: 'mock-pty' });
     expect(h.routedProtocol()).toBe('pty-cli');
+    // 高风险拦截钩子按这个变量找会话策略。
+    expect(h.routedAgent()?.env.dutydeck_session_id).toBe(session.id);
     expect((await h.runtime.getSession(session.id))?.state).toBe('idle');
     await h.runtime.send(session.id, 'work');
     expect(h.driver.send).toHaveBeenCalledWith('work');
