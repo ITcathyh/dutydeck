@@ -189,7 +189,8 @@ export class DutydeckRuntime {
       if (protocol === 'acp') return new AcpxAdapter({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, { sessionKey: sessionId, context, onEvent, ...(this.options.resolveRiskPolicy ? { resolveRiskPolicy: (fallback?: ToolRiskPolicy) => this.options.resolveRiskPolicy!(sessionId, fallback) } : {}) });
       if (protocol === 'pty-cli') {
         if (!ptyDriverFactory) throw new RuntimeError('DRIVER_UNAVAILABLE', 'protocol 为 pty-cli 的 agent 需要注入 ptyDriverFactory（@dutydeck/pty-driver）', 503);
-        return ptyDriverFactory(agent, protocol, onEvent, onExit, sessionId, context);
+        // 高风险拦截钩子按 dutydeck_session_id 找会话策略，和 ACP 一样由宿主注入。
+        return ptyDriverFactory({ ...agent, env: { ...agent.env, dutydeck_session_id: sessionId } }, protocol, onEvent, onExit, sessionId, context);
       }
       if (protocol === 'pty') return new PtyTransport(agent, { onEvent, onExit });
       if (protocol === 'pipe') return new PipeTransport(agent, { onEvent, onExit, context });
