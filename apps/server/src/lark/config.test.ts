@@ -569,3 +569,55 @@ describe('Bot default group participation', () => {
     expect(await repository.get(larkBotsConfigKey)).toBe(before);
   });
 });
+
+describe('分层协作执行方式', () => {
+  const terminal: Record<string, object> = { 'cli-leader': { protocol: 'pty-cli', permissionMode: 'ask' }, 'trusted-cli': { protocol: 'pty-cli', permissionMode: 'full-trust' }, 'legacy-pty': { protocol: 'pty', permissionMode: 'full-trust' } };
+  const agents = { get: vi.fn(async (id: string) => ['pmo', 'leader', 'worker'].includes(id) ? { id, protocol: 'acp' } : terminal[id] ? { id, ...terminal[id] } : undefined) } as any;
+  const base = { appId: 'cli_layered', appSecret: 'secret', groupToolsEnabled: true };
+
+  it('defaults to single and keeps the Leader and Worker selections when switching back', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, agents, base);
+    expect(publicLarkConfig((await readLarkConfigs(repository))[0]!)).toMatchObject({ executionMode: 'single', workerAgentIds: [] });
+    await saveLarkConfig(repository, agents, { ...base, originalAppId: 'cli_layered', executionMode: 'layered', leaderAgentId: ' leader ', workerAgentIds: ['worker', ' worker ', ''] });
+    const [layered] = await readLarkConfigs(repository);
+    expect(layered).toMatchObject({ executionMode: 'layered', leaderAgentId: 'leader', workerAgentIds: ['worker'] });
+    await saveLarkConfig(repository, agents, { ...base, originalAppId: 'cli_layered', executionMode: 'single' });
+    const [single] = await readLarkConfigs(repository);
+    expect(single.executionMode).toBeUndefined();
+    expect(publicLarkConfig(single)).toMatchObject({ executionMode: 'single', leaderAgentId: 'leader', workerAgentIds: ['worker'] });
+  });
+
+  it.each([
+    ['group tools off', { groupToolsEnabled: false, leaderAgentId: 'leader', workerAgentIds: ['worker'] }, '群工具'],
+    ['missing Leader', { leaderAgentId: '', workerAgentIds: ['worker'] }, 'Leader'],
+    ['no Worker', { leaderAgentId: 'leader', workerAgentIds: [] }, 'Worker'],
+    ['too many Workers', { leaderAgentId: 'leader', workerAgentIds: Array.from({ length: 9 }, (_, index) => `worker${index}`) }, 'Worker'],
+    ['unknown Agent', { leaderAgentId: 'leader', workerAgentIds: ['ghost'] }, 'ghost'],
+    ['a terminal Leader that is not full trust', { leaderAgentId: 'cli-leader', workerAgentIds: ['worker'] }, '完全信任'],
+    ['a full-trust terminal Leader on an ask Bot', { permissionMode: 'ask', leaderAgentId: 'trusted-cli', workerAgentIds: ['worker'] }, '完全信任'],
+    ['a legacy PTY Leader', { leaderAgentId: 'legacy-pty', workerAgentIds: ['worker'] }, '旧版 PTY'],
+    ['unknown mode', { executionMode: 'swarm', leaderAgentId: 'leader', workerAgentIds: ['worker'] }, '执行方式']
+  ])('rejects layered mode with %s', async (_name, input, message) => {
+    await expect(saveLarkConfig(createRepository(), agents, { ...base, executionMode: 'layered', ...input } as any))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400, message: expect.stringContaining(message) });
+  });
+
+  it('accepts a terminal Leader when the Bot and the Agent are both full trust', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, agents, { ...base, executionMode: 'layered', leaderAgentId: 'trusted-cli', workerAgentIds: ['worker'] });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ executionMode: 'layered', leaderAgentId: 'trusted-cli' });
+  });
+
+  it('checks the roster only when it is submitted, so a deleted Worker does not block other saves', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, agents, { ...base, executionMode: 'layered', leaderAgentId: 'leader', workerAgentIds: ['worker', 'pmo'] });
+    const afterDelete = { get: vi.fn(async (id: string) => id === 'pmo' ? undefined : agents.get(id)) } as any;
+    await saveLarkConfig(repository, afterDelete, { originalAppId: 'cli_layered', stage: 'lark', pushIntervalMs: 2000 });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ pushIntervalMs: 2000, workerAgentIds: ['worker', 'pmo'] });
+    await expect(saveLarkConfig(repository, afterDelete, { originalAppId: 'cli_layered', executionMode: 'layered', leaderAgentId: 'leader', workerAgentIds: ['worker', 'pmo'] }))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', message: expect.stringContaining('pmo') });
+    await saveLarkConfig(repository, afterDelete, { originalAppId: 'cli_layered', executionMode: 'layered', leaderAgentId: 'leader', workerAgentIds: ['worker'] });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ workerAgentIds: ['worker'] });
+  });
+});

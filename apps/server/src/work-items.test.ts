@@ -214,6 +214,26 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect(f.calls[3]!.prompt).toContain('Kept result'); expect(f.calls[3]!.prompt).toContain('New result');
   });
 
+  it('stops each child once its result is saved and retries in a fresh child', async () => {
+    const f = await fixture(); const item = await f.create(); await f.tick(); await eventually(async () => f.calls.length === 2);
+    const [kept, failed] = f.calls.map(call => call.sessionId);
+    await f.finish(f.calls[0]!, 'Kept result'); await f.finish(f.calls[1]!, '', true); await f.tick();
+    const { revision } = await f.get(item.id);
+    // 停止在 tick 之外进行且不写记录：卡片刚拿到的版本号仍然有效，可以立刻重试。
+    await eventually(async () => [kept, failed].every(id => f.stopped.includes(id)));
+    expect(f.stopped).not.toContain(f.parent.id);
+    expect((await f.get(item.id)).revision).toBe(revision);
+    await f.service.retryStep(f.parent.id, item.id, 'b', revision, 'ou_owner'); await f.tick();
+    await eventually(async () => f.calls.length === 3);
+    // 重试起的是新子会话，运行中不能被回收。
+    await f.tick(); await new Promise(resolve => setTimeout(resolve, 20));
+    expect(f.stopped).not.toContain(f.calls[2]!.sessionId);
+    await f.finish(f.calls[2]!, 'New result'); await f.tick(); await eventually(async () => f.calls.length === 4);
+    await f.finish(f.calls[3]!, 'Complete comparison'); await f.tick();
+    expect((await f.get(item.id)).status).toBe('completed');
+    await eventually(async () => [f.calls[2]!.sessionId, f.calls[3]!.sessionId].every(id => f.stopped.includes(id)));
+  });
+
   it('blocks configuration drift and never falls back to a global owner', async () => {
     const f = await fixture(); const item = await f.create();
     await f.repos.agents.save({ ...f.agents[0]!, model: 'changed' }); await f.tick();

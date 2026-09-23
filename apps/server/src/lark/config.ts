@@ -71,6 +71,12 @@ export interface StoredLarkConfig {
   memoryAgentId?: string;
   /** 跑提取与整理的模型；缺省沿用 defaultModel。 */
   memoryModel?: string;
+  /** 执行方式，缺省 single；layered 时默认 Agent 当 PMO，把执行类任务交给 Leader 拆解、Worker 执行。 */
+  executionMode?: 'single' | 'layered';
+  /** layered 下负责拆解与验收的 Agent。 */
+  leaderAgentId?: string;
+  /** layered 下 Leader 可以指派的 Worker Agent。 */
+  workerAgentIds?: string[];
   /** 结构化问答卡片总开关，默认开启；显式 false 使用文字选项与引用回复。 */
   structuredAskCards: boolean;
   /** P0-4 群内卡片 @ 发起人总开关，默认关闭；开启后群内结果卡卡尾 @ 发起人，审批/提问卡卡首 @。 */
@@ -167,6 +173,10 @@ export interface SaveLarkConfigInput {
   memoryAutoExtract?: boolean;
   memoryAgentId?: string;
   memoryModel?: string;
+  executionMode?: StoredLarkConfig['executionMode'];
+  /** 空白串清除。 */
+  leaderAgentId?: string;
+  workerAgentIds?: string[];
   /** P0-2 结构化问答卡片总开关；缺省继承当前配置，仍缺省按关闭处理。 */
   structuredAskCards?: boolean;
   /** P0-4 群内卡片 @ 发起人总开关；缺省继承当前配置，仍缺省按关闭处理。 */
@@ -240,6 +250,9 @@ export interface PublicLarkConfig {
   memoryAutoExtract: boolean;
   memoryAgentId?: string;
   memoryModel?: string;
+  executionMode: NonNullable<StoredLarkConfig['executionMode']>;
+  leaderAgentId?: string;
+  workerAgentIds: string[];
   structuredAskCards: boolean;
   groupCardMention: boolean;
   /** 平台验证命令；未配置时飞书结果卡不提验证，也不给「运行验证」按钮。 */
@@ -464,6 +477,10 @@ const needsRiskControlMigration = (value: unknown): boolean => {
     || ['gateEnabled', 'softGateEnabled', 'hardGateEnabled', 'hookTrustConfirmed'].some(key => key in record);
 };
 
+const normalizeAgentIds = (value: unknown): string[] => Array.isArray(value)
+  ? [...new Set(value.filter((id): id is string => typeof id === 'string').map(id => id.trim()).filter(Boolean))]
+  : [];
+
 function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskControlShape): StoredLarkConfig | undefined {
   if (!parsed.appId || !parsed.appSecret) return undefined;
   const pushIntervalMs = Number(parsed.pushIntervalMs ?? defaultLarkPushIntervalMs);
@@ -504,6 +521,9 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     memoryAutoExtract: parsed.memoryAutoExtract !== false,
     ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
     ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
+    ...(parsed.executionMode === 'layered' ? { executionMode: 'layered' as const } : {}),
+    ...(parsed.leaderAgentId?.trim() ? { leaderAgentId: parsed.leaderAgentId.trim() } : {}),
+    ...(normalizeAgentIds(parsed.workerAgentIds).length ? { workerAgentIds: normalizeAgentIds(parsed.workerAgentIds) } : {}),
     structuredAskCards: parsed.structuredAskCards === undefined || parsed.structuredAskCards === true,
     groupCardMention: parsed.groupCardMention === true,
     ...(parsed.verificationCommand?.trim() ? { verificationCommand: parsed.verificationCommand.trim() } : {}),
@@ -599,6 +619,9 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   memoryAutoExtract: config.memoryAutoExtract !== false,
   ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
   ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
+  executionMode: config.executionMode === 'layered' ? 'layered' : 'single',
+  ...(config.leaderAgentId ? { leaderAgentId: config.leaderAgentId } : {}),
+  workerAgentIds: config.workerAgentIds ?? [],
   structuredAskCards: config.structuredAskCards !== false,
   groupCardMention: config.groupCardMention === true,
   pushIntervalMs: config.pushIntervalMs,
@@ -648,6 +671,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   if (input.defaultGroupParticipation !== undefined && !['off', 'observe', 'selective'].includes(input.defaultGroupParticipation)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '默认群参与模式无效。', 400);
   }
+  if (input.executionMode !== undefined && !['single', 'layered'].includes(input.executionMode)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '执行方式无效。', 400);
+  }
   const appId = input.appId?.trim() || current?.appId;
   const appSecret = input.appSecret?.trim() || current?.appSecret;
   const name = input.name === undefined ? current?.name : input.name.trim() || undefined;
@@ -662,6 +688,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
   const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
   const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;
+  const executionMode = input.executionMode ?? current?.executionMode ?? 'single';
+  const leaderAgentId = input.leaderAgentId === undefined ? current?.leaderAgentId : input.leaderAgentId.trim() || undefined;
+  const workerAgentIds = input.workerAgentIds === undefined ? current?.workerAgentIds ?? [] : normalizeAgentIds(input.workerAgentIds);
   const structuredAskCards = input.structuredAskCards ?? current?.structuredAskCards ?? true;
   const groupCardMention = input.groupCardMention ?? current?.groupCardMention ?? false;
   const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
@@ -709,6 +738,21 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const patternValidation = validateHighRiskPattern(highRiskPattern);
   if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
   if (agents && defaultAgentId && !(await agents.get(defaultAgentId))) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown default Agent: ${defaultAgentId}`, 400);
+  if (executionMode === 'layered') {
+    // PMO 通过群工具里的 work delegate 把任务交给 Leader，没有群工具就没有交接入口。
+    if (!groupToolsEnabled) throw new LarkServiceError('INVALID_LARK_CONFIG', '分层协作需要开启群工具。', 400);
+    if (!leaderAgentId) throw new LarkServiceError('INVALID_LARK_CONFIG', '分层协作需要选择 Leader Agent。', 400);
+    if (!workerAgentIds.length || workerAgentIds.length > 8) throw new LarkServiceError('INVALID_LARK_CONFIG', '分层协作需要选择 1 到 8 个 Worker Agent。', 400);
+    // 只在提交分层设置时校验名单：已选的 Agent 后来被删，不拦只改其他字段的保存；运行时跳过缺失的 Worker，缺 Leader 则拒绝委派。
+    const rosterSubmitted = input.executionMode !== undefined || input.leaderAgentId !== undefined || input.workerAgentIds !== undefined;
+    for (const id of agents && rosterSubmitted ? [leaderAgentId, ...workerAgentIds] : []) {
+      const agent = await agents!.get(id);
+      if (!agent) throw new LarkServiceError('INVALID_LARK_CONFIG', `Unknown Agent: ${id}`, 400);
+      // Leader 规划：ACP 以 deny-all 运行；终端模式没有 deny-all，只能以完全信任运行，验收步骤也按机器人与该 Agent 中较低的权限运行。
+      if (id === leaderAgentId && agent.protocol === 'pty') throw new LarkServiceError('INVALID_LARK_CONFIG', 'Leader 不支持旧版 PTY Agent。', 400);
+      if (id === leaderAgentId && agent.protocol === 'pty-cli' && (permissionMode !== 'full-trust' || agent.permissionMode !== 'full-trust')) throw new LarkServiceError('INVALID_LARK_CONFIG', '终端模式 Agent 当 Leader 时以完全信任规划和验收，「不改文件」只靠提示词约束，需要机器人和该 Agent 都是完全信任。', 400);
+    }
+  }
   const duplicate = configs.find((config, configIndex) => config.appId === appId && configIndex !== index);
   if (duplicate) throw new LarkServiceError('LARK_BOT_ALREADY_CONFIGURED', `Lark bot ${appId} already has a configuration panel`, 409);
   if ((input.stage === 'agent' || input.defaultAgentId !== undefined || input.listening === true) && permissionMode === 'full-trust' && !fullTrustConfirmed) {
@@ -743,6 +787,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     memoryAutoExtract,
     ...(memoryAgentId ? { memoryAgentId } : {}),
     ...(memoryModel ? { memoryModel } : {}),
+    ...(executionMode === 'layered' ? { executionMode } : {}),
+    ...(leaderAgentId ? { leaderAgentId } : {}),
+    ...(workerAgentIds.length ? { workerAgentIds } : {}),
     structuredAskCards,
     groupCardMention,
     ...(verificationCommand ? { verificationCommand } : {}),

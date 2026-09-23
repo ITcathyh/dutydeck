@@ -9,8 +9,8 @@ export async function runWorkCommand(operation: string, args: string[], options:
   if (operation === 'list' || operation === 'templates') return request(path);
   if (operation === 'agents' || operation === 'skills') return request(`${path}/${operation}`);
   if (operation === 'show') return request(`${path}/${encodeURIComponent(args[0] ?? '')}`);
-  if (operation === 'create') {
-    if (!options.file) throw new Error('work create 需要 --file JSON文件');
+  if (operation === 'create' || operation === 'delegate') {
+    if (!options.file) throw new Error(`work ${operation} 需要 --file JSON文件`);
     const handle = await open(options.file, 'r');
     let body: string;
     try {
@@ -20,7 +20,7 @@ export async function runWorkCommand(operation: string, args: string[], options:
       if (Buffer.byteLength(body) > 512_000) throw new Error('工作计划超出 512 KB');
       JSON.parse(body);
     } finally { await handle.close(); }
-    return request(path, { method: 'POST', body });
+    return request(operation === 'create' ? path : `${path}/delegations`, { method: 'POST', body });
   }
   if (operation === 'save') return request(`${path}/${encodeURIComponent(args[0] ?? '')}/template`, { method: 'POST', body: JSON.stringify({ name: args.slice(1).join(' ') }) });
   if (operation === 'run') {

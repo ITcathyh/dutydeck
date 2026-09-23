@@ -1,6 +1,6 @@
 import { sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
-import { workbenchAgentPrompt } from '../work-item-tools.js';
+import { layeredWorkbenchPrompt, workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -513,8 +513,11 @@ export class LarkAgentToolsService {
       }
       if (task) {
         const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
-        blocks.push(workbenchAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${turn}`, workPlanConfirmationRequired(session)));
-        if (binding.chatType === 'group' && session.sourceId?.split(':')[3] !== 'collaboration') blocks.push(collaborationAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} collaborate --turn ${turn}`));
+        const collaborationSession = session.sourceId?.split(':')[3] === 'collaboration';
+        // 分层协作只在群聊生效：单聊里目标无法固定交付位置（work create 同样被拒），保持单 Agent 提示。
+        const workbench = config.executionMode === 'layered' && binding.chatType === 'group' && !collaborationSession ? layeredWorkbenchPrompt : workbenchAgentPrompt;
+        blocks.push(workbench(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${turn}`, workPlanConfirmationRequired(session)));
+        if (binding.chatType === 'group' && !collaborationSession) blocks.push(collaborationAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} collaborate --turn ${turn}`));
       }
     }
     return blocks.length ? `${blocks.join('\n\n')}\n\n${prompt}` : prompt;

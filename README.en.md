@@ -209,6 +209,7 @@ In project channels, configure the bot as an intelligent team member:
   - `observe`: Silently reads message history to maintain context; never chimes in proactively.
   - `selective`: Stays silent by default without a mention. Replies to clearly addressed requests, verifiable follow-ups, or an evidenced urgent risk requiring immediate warning. Peer conversations, undirected questions, progress updates, thanks, and uncertain intent receive no reply or acknowledgement reaction.
 - **Processing status and concurrency**: Accepted replies get an `OK` reaction on the source message while the answer is generated and sent, then the reaction is removed. Silent decisions stay invisible. Groups run independently; each group processes replies in order and coalesces pending messages before accepting a reply.
+- **Layered execution**: Set the bot's "执行方式" (execution mode) to layered and pick a Leader and Workers. The mentioned default Agent then acts as PMO: it answers directly or hands code and test work to the Leader as a brief. The Leader plans read-only, assigns Workers, reviews the results last, and the result returns to the original thread. It applies to group chats only, and plans wait for "开始执行" (start). See [Tag layered execution](docs/tag-layered-execution.md) (Chinese).
 - **Natural Language Delegation**:
   - `@bot Track a todo: submit the release ticket before 5:00 PM tomorrow.`
   - `@bot Summarize today's engineering progress in this group every weekday at 18:00 until cancelled.`
@@ -439,6 +440,7 @@ dutydeck autostart disable  # Unregister service
 
 - [End-to-End Acceptance Test Matrix](tests/e2e/README.md)
 - [Generic Group Collaboration Implementation](docs/generic-collaboration-implementation.md)
+- [Tag Layered Execution: PMO + Leader + Worker](docs/tag-layered-execution.md)
 - [Collaboration Extensions Technical Specification](docs/collaboration-extensions.md)
 - [Lark Session Memory Architecture](docs/lark-memory-design.md)
 - [Legacy Data Import CLI Manual](docs/legacy-import-cli.md)

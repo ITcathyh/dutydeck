@@ -1,5 +1,6 @@
 import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
+import { LeaderDelegationService } from './leader-delegation.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
@@ -18,7 +19,7 @@ import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
 import { createLarkCardService } from './lark/service.js';
 import { createWorkbenchFetch } from './workbench-fetch.js';
-import { authorizeWorkItemInteraction, workItemRiskPolicy } from './work-item-policy.js';
+import { authorizeWorkItemAgent, authorizeWorkItemInteraction, workItemRiskPolicy } from './work-item-policy.js';
 import { SessionAutomationService } from './session-automation.js';
 import { createAutomationIntegration } from './automation-integration.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
@@ -226,7 +227,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     resolveRiskPolicy: async (sessionId, fallback) => {
       const background = await collaboration?.riskPolicy(sessionId, fallback);
       if (background) return background.policy;
-      const binding = await workItems.parentForSession(sessionId);
+      const binding = await workItems.parentForSession(sessionId) ?? await delegations.parentForSession(sessionId);
       return binding ? workItemRiskPolicy(repos, groupManager, binding.parentSessionId, binding.actorId, fallback, env, workbenchHttp.fetch) : groupManager.riskPolicy(sessionId, fallback);
     },
     acpxCommand: config.acpxCommand,
@@ -242,22 +243,17 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration,
     githubToken: env.DUTYDECK_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN });
   setupCleanup.push(() => automation.close());
-  const authorizeWorkAgent = async (sessionId: string, actorId: string, agentId: string) => {
-    const parent = await runtime.getSession(sessionId);
-    if (!parent || !await automationIntegration.authorize(sessionId, actorId)) return false;
-    if (parent.agentId === agentId || parent.source !== 'lark') return true;
-    const [appId, chatId, chatType] = parent.sourceId?.split(':') ?? [];
-    if (chatType !== 'group' || !appId || !chatId) return true;
-    const owner = actorId === installationOwnerTaskActor;
-    const decision = await groupManager.authorize(appId, chatId, owner ? undefined : actorId, 'run.change_agent', sessionId, { installationOwner: owner });
-    return decision?.allowed ?? true;
-  };
+  const authorizeWorkAgent = (sessionId: string, actorId: string, agentId: string) => authorizeWorkItemAgent(repos, groupManager, automationIntegration.authorize, sessionId, actorId, agentId);
   const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => app?.log.warn(...args as [unknown, string]) } });
   setupCleanup.push(() => workbench.close());
   const workItems: WorkItemService = new WorkItemService({ repositories: repos, runtime, authorize: automationIntegration.authorize, authorizeAgent: authorizeWorkAgent,
     requireConfirmation: workPlanConfirmationRequired,
     prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), deliver: item => workbench.deliver(item), notify: (item, actorId) => workbench.notify(item, actorId) });
   setupCleanup.push(() => workItems.close());
+  const delegations = new LeaderDelegationService({ repositories: repos, runtime, work: workItems, authorizeAgent: authorizeWorkAgent,
+    prepareDelivery: (sessionId, id, key) => workbench.prepareDelivery(sessionId, id, key), notice: (workId, text, key) => workbench.notice(workId, text, key),
+    log: { warn: (details, message) => app?.log.warn(details, message) } });
+  setupCleanup.push(() => delegations.close());
   const authorizeSessionRequest = async (request: import('fastify').FastifyRequest | import('node:http').IncomingMessage, sessionId: string, boundary: 'session' | 'high_risk' | 'terminal', action: PolicyAction): Promise<PolicyDecision> => {
     const session = await runtime.getSession(sessionId);
     if (session?.source === 'work_item') {
@@ -312,7 +308,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };
-      await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => automation.close()]);
+      await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => delegations.close(), () => automation.close()]);
       // Wake blocked asks before waiting for HTTP shutdown.
       await settle([() => relayBroker.close()]);
       await settle([() => collaboration?.close(), () => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
@@ -403,7 +399,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef, isLiveManagedBot: id => groupManager.isLiveManagedBot(id) },
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
       schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true, collaborationExecutorWired: true },
-      workItemTools: { runtime, work: workItems, tools: agentTools },
+      workItemTools: { runtime, work: workItems, tools: agentTools, delegations },
       // 与 coordinator 的记忆存储同一个 configs 仓库（listener 的 workflowStore 就是 repos.config）。
       memoryTools: { tools: agentTools, store: memoryStore, runtime },
       workItems: { service: workItems, interactions: workInteractions, authorize: async (request, sessionId, action) => {
@@ -423,6 +419,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     });
     await app.listen(listenOptions(config));
     workItems.start();
+    void delegations.start().catch(error => app?.log.warn({ error }, '分层协作规划恢复失败'));
     const tick = () => { void automation.tick().catch(error => app?.log.warn({ error }, '自动任务轮询失败')); };
     automationTimer = setInterval(tick, 60_000);
     automationTimer.unref();

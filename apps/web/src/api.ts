@@ -39,6 +39,12 @@ export type LarkBotConfig = {
   memoryAgentId?: string;
   /** 跑提取与整理的模型；空表示沿用默认模型。 */
   memoryModel?: string;
+  /** 执行方式；旧服务端缺省按 single 处理。 */
+  executionMode?: 'single' | 'layered';
+  /** 分层协作的 Leader Agent。 */
+  leaderAgentId?: string;
+  /** 分层协作里 Leader 可以指派的 Worker Agent。 */
+  workerAgentIds?: string[];
   /** P0-2 结构化问答卡片总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
   structuredAskCards?: boolean;
   /** P0-4 群内卡片 @ 发起人总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
@@ -291,6 +297,9 @@ export const api = {
     memoryAutoExtract?: boolean;
     memoryAgentId?: string;
     memoryModel?: string;
+    executionMode?: 'single' | 'layered';
+    leaderAgentId?: string;
+    workerAgentIds?: string[];
     structuredAskCards?: boolean;
     groupCardMention?: boolean;
     completionReactionOnly?: boolean;

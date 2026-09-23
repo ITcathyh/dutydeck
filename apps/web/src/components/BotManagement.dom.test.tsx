@@ -450,3 +450,82 @@ describe('Bot 默认群参与模式', () => {
     expect(screen.queryByText(/有未保存的修改/)).toBeNull();
   });
 });
+
+describe('Bot 执行方式', () => {
+  const agents: Agent[] = [
+    { id: 'codex', name: 'Codex', protocol: 'acp', permissionMode: 'ask' },
+    { id: 'claude', name: 'Claude', protocol: 'acp', permissionMode: 'ask' },
+    { id: 'claude-cli', name: 'Claude CLI', protocol: 'pty-cli', permissionMode: 'ask' },
+    { id: 'claude-trusted', name: 'Claude 完全信任', protocol: 'pty-cli', permissionMode: 'full-trust' }
+  ];
+
+  it('旧配置按单 Agent 展示，切到分层协作后带上 Leader 与 Worker 保存', async () => {
+    const user = userEvent.setup();
+    let bot: LarkBotConfig = { ...mockBot, groupToolsEnabled: true };
+    vi.spyOn(api, 'larkConfig').mockImplementation(async () => ({ configured: true, bots: [bot], listeningDisabled: false }));
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async () => {
+      bot = { ...bot, revision: 4, executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'] };
+      return { configured: true, bots: [bot], listeningDisabled: false };
+    });
+    renderWithClient(<BotManagement selectedAppId={bot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
+    const mode = await screen.findByRole('combobox', { name: '执行方式' });
+    expect((mode as HTMLSelectElement).value).toBe('single');
+    expect(screen.queryByRole('combobox', { name: 'Leader Agent' })).toBeNull();
+    await user.selectOptions(mode, 'layered');
+    expect(screen.getByText(/分层协作需要选择 Leader 和至少一个 Worker/)).toBeTruthy();
+    // 终端模式 Agent 只有设为完全信任（且机器人是完全信任）才能当 Leader；其余仍可当 Worker。
+    expect([...(screen.getByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement).options].map(option => option.textContent)).toEqual(['选择 Leader Agent', 'Codex', 'Claude', 'Claude 完全信任']);
+    expect(screen.getByRole('checkbox', { name: 'Claude CLI' })).toBeTruthy();
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Leader Agent' }), 'claude');
+    await user.click(screen.getByRole('checkbox', { name: 'Codex' }));
+    expect(screen.queryByText(/分层协作需要选择 Leader 和至少一个 Worker/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
+      executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'], expectedRevision: 3
+    })));
+    await waitFor(() => expect(screen.queryByText(/有未保存的修改/)).toBeNull());
+  });
+
+  it('未开启群工具时提示分层协作的前提', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, executionMode: 'layered', leaderAgentId: 'claude', workerAgentIds: ['codex'] }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
+    expect(((await screen.findByRole('combobox', { name: '执行方式' })) as HTMLSelectElement).value).toBe('layered');
+    expect((screen.getByRole('checkbox', { name: 'Codex' }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByText(/分层协作需要选择 Leader 和至少一个 Worker/)).toBeTruthy();
+    await user.selectOptions(screen.getByRole('combobox', { name: '执行方式' }), 'single');
+    expect(screen.queryByRole('combobox', { name: 'Leader Agent' })).toBeNull();
+  });
+
+  it('已删除的 Leader 与 Worker 仍然列出，可以改选和取消', async () => {
+    const user = userEvent.setup();
+    const bot: LarkBotConfig = { ...mockBot, groupToolsEnabled: true, executionMode: 'layered', leaderAgentId: 'gone-leader', workerAgentIds: ['codex', 'gone-worker'] };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
+    const leader = await screen.findByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
+    expect(leader.selectedOptions[0]?.textContent).toBe('gone-leader（不可用，请重选）');
+    await user.selectOptions(leader, 'claude');
+    expect([...leader.options].map(option => option.value)).toEqual(['', 'codex', 'claude', 'claude-trusted']);
+    await user.click(screen.getByRole('checkbox', { name: 'gone-worker（已不存在）' }));
+    expect(screen.queryByRole('checkbox', { name: 'gone-worker（已不存在）' })).toBeNull();
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ leaderAgentId: 'claude', workerAgentIds: ['codex'] })));
+  });
+
+  it('机器人不是完全信任时，终端模式 Agent 不能当 Leader', async () => {
+    const bot: LarkBotConfig = { ...mockBot, permissionMode: 'ask', groupToolsEnabled: true, executionMode: 'layered', leaderAgentId: 'claude-trusted', workerAgentIds: ['codex'] };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={agents}/>);
+    const leader = await screen.findByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
+    expect([...leader.options].map(option => option.textContent)).toEqual(['选择 Leader Agent', 'Codex', 'Claude', 'claude-trusted（不可用，请重选）']);
+  });
+});

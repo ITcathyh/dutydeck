@@ -409,6 +409,7 @@ Examples:
   for (const operation of ['list', 'templates', 'agents', 'skills']) work.command(operation).action(() => handlers.work?.(operation, [], workOptions()));
   work.command('show <id>').action(id => handlers.work?.('show', [id], workOptions()));
   work.command('create').requiredOption('--file <path>', 'JSON plan with goal and a stable idempotencyKey').action(options => handlers.work?.('create', [], workOptions(options)));
+  work.command('delegate').requiredOption('--file <path>', 'JSON brief with goal, context and a stable idempotencyKey').action(options => handlers.work?.('delegate', [], workOptions(options)));
   work.command('save <id> <name>').action((id, name) => handlers.work?.('save', [id, name], workOptions()));
   work.command('run <template> <version> <goal>').requiredOption('--key <key>', 'Stable request key for this run').action((id, version, goal, options) => handlers.work?.('run', [id, version, goal], workOptions(options)));
 

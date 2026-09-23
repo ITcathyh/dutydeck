@@ -4,13 +4,14 @@ import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createWorkItemSchema, RuntimeError, toPublicAgent } from '@dutydeck/shared';
 import type { LarkAgentToolsService } from './lark/agent-tools.js';
 import { agentGroupToolBearerToken } from './lark/agent-tools.js';
+import { delegationBriefSchema, type LeaderDelegationService } from './leader-delegation.js';
 import { discoverSkills } from './skill-catalog.js';
 import type { WorkItemService } from './work-items.js';
 import { runTemplateInput, templateNameInput, workInput } from './work-item-routes.js';
 
 const requestKey = (taskId: string, key: string) => createHash('sha256').update(JSON.stringify([taskId, key])).digest('hex');
 
-export interface WorkItemToolsOptions { runtime: DutydeckRuntime; work: WorkItemService; tools: LarkAgentToolsService }
+export interface WorkItemToolsOptions { runtime: DutydeckRuntime; work: WorkItemService; tools: LarkAgentToolsService; delegations?: LeaderDelegationService }
 
 export async function registerWorkItemTools(app: FastifyInstance, options: WorkItemToolsOptions) {
   const context = async (authorization?: string, turn?: string | string[]) => {
@@ -41,6 +42,12 @@ export async function registerWorkItemTools(app: FastifyInstance, options: WorkI
     const input = workInput(createWorkItemSchema, request.body);
     return options.work.create(scope.sessionId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) }, scope.actorId);
   });
+  app.post(`${base}/delegations`, async request => {
+    const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
+    if (!options.delegations) throw new RuntimeError('LEADER_DELEGATION_DISABLED', '当前实例未启用分层协作', 409);
+    const input = workInput(delegationBriefSchema, request.body);
+    return options.delegations.delegate(scope.sessionId, scope.actorId, scope.taskId, { ...input, idempotencyKey: requestKey(scope.taskId, input.idempotencyKey) });
+  });
   app.get<{ Params: { id: string } }>(`${base}/:id`, async request => {
     const scope = await context(request.headers.authorization, request.headers['x-dutydeck-work-turn']);
     return options.work.get(scope.sessionId, request.params.id, scope.actorId);
@@ -70,3 +77,13 @@ export const workbenchAgentPrompt = (command = 'dutydeck work', confirmation = f
 ${confirmation
   ? '收到目标编号说明计划已持久接收，但状态是 awaiting_confirmation：一个步骤都还没派发。Dutydeck 会在本话题发出待确认卡片，用户点「开始执行」后才入队，点「取消计划」即作废。向用户简述分工和编号、说明需要其在卡片上确认后结束本轮，不要轮询确认结果。'
   : '收到目标编号说明计划已持久接收，不表示执行成功。向用户简述分工和编号后结束本轮。'}Dutydeck 会回传等待和最终成果，不要轮询占住父任务或另行重复发送最终报告。失败或结果未知时不要自动创建替代目标，先报告并由用户决定重试。工具不提供代替用户回答等待、批准权限或确认计划的入口。`;
+
+/** 分层协作下替换上面的编排提示：默认 Agent 当 PMO，执行类任务交给 Leader 拆解、Worker 执行、Leader 验收。 */
+export const layeredWorkbenchPrompt = (command = 'dutydeck work', confirmation = false) => `[Dutydeck 分层协作]
+你是本话题的 PMO：接待用户，理清诉求，记下已确认的事实和约束，再决定自己答复还是交给 Leader。
+- 自己答复：问答、解释、查询、总结、闲聊，以及不改代码、不跑测试的一次性小事。
+- 交给 Leader：需要改代码、跑测试、多步推进或多人分工的任务。写一份简报后执行 ${command} delegate --file <JSON文件>，JSON 为 {"goal":"一句话目标","context":"完成任务需要的事实、约束、路径、链接和用户原话要点","idempotencyKey":"本轮稳定且唯一的请求键"}。Leader 和 Worker 看不到本话题历史，只看到简报；不要放无关群历史、账户信息或秘密。
+- 交接后 Leader 在后台拆解并指派 Worker，最后由 Leader 验收。${confirmation ? '计划就绪后本话题会出现待确认卡片，用户点「开始执行」才派发。' : '计划就绪后直接开始执行。'}向用户说明已交给 Leader、结果会回到本话题，然后结束本轮；不要轮询，也不要自己动手做同一件事。
+- Leader 在本话题提问时，等用户补充后把新信息并入 context，用新的 idempotencyKey 重新 delegate。
+- ${command} list / show <目标编号>：查看本话题已有目标的进度，回答用户的进度询问。
+工具不提供代替用户确认计划、回答等待或批准权限的入口。`;
