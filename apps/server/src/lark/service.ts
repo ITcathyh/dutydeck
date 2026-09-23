@@ -145,6 +145,7 @@ export interface LarkChat {
   chatMode?: string;
   chatStatus?: string;
 }
+export type LarkChatSortType = 'ByActiveTimeDesc' | 'ByCreateTimeAsc';
 export interface LarkChatsResult {
   items: LarkChat[];
   hasMore: boolean;
@@ -1150,8 +1151,8 @@ export class LarkCardService {
     return { messageId: payload.data?.message_id || messageId, chatId: payload.data?.chat_id };
   }
 
-  async listChats(pageToken?: string): Promise<LarkChatsResult> {
-    const query = new URLSearchParams({ user_id_type: 'open_id', page_size: '100', sort_type: 'ByActiveTimeDesc' });
+  async listChats(pageToken?: string, sortType: LarkChatSortType = 'ByActiveTimeDesc'): Promise<LarkChatsResult> {
+    const query = new URLSearchParams({ user_id_type: 'open_id', page_size: '100', sort_type: sortType });
     if (pageToken) query.set('page_token', pageToken);
     const payload = await this.request(`/open-apis/im/v1/chats?${query}`, { method: 'GET' });
     const items = (Array.isArray(payload.data?.items) ? payload.data.items : []).flatMap((item: any): LarkChat[] => {
@@ -1161,6 +1162,8 @@ export class LarkCardService {
       const ownerId = String(item.owner_id ?? '').trim() || undefined;
       const chatMode = String(item.chat_mode ?? '').trim() || undefined;
       const chatStatus = String(item.chat_status ?? '').trim() || undefined;
+      // 缺少 chat_status 字段时保留以防部分租户不返回该字段导致群全被过滤，但显式存在且非 normal（如已解散保留的 dissolved_save）时跳过。
+      if (chatStatus && chatStatus !== 'normal') return [];
       return [{
         chatId,
         name: String(item.name ?? '').trim() || chatId,
