@@ -65,11 +65,14 @@ export interface WorkItemElementOptions {
   agentNames?: Record<string, string>;
 }
 
-/** 分层协作的验收结论写在产物首行；执行完成但验收未通过或无法识别时，卡头不能写「已完成」。 */
+/**
+ * 分层协作的验收结论写在最终答复首行；终端模式 Leader 调工具前说的话也会进产物，所以取最后一个以「验收结论：」开头的行。
+ * 执行完成但验收未通过或无法识别时，卡头不能写「已完成」。
+ */
 export function reviewStatusLabel(item: WorkItem): string | undefined {
   const output = item.plan.steps.find(step => step.id === item.plan.outputStepId);
   if (item.status !== 'completed' || output?.id !== leaderReviewStepId || output.title !== leaderReviewTitle) return undefined;
-  const verdict = /^验收结论：\s*(通过|需返修|缺少信息)/.exec(item.output?.text.trim() ?? '')?.[1];
+  const verdict = [...(item.output?.text ?? '').matchAll(/^[ \t]*验收结论：\s*(通过|需返修|缺少信息)/gm)].at(-1)?.[1];
   return verdict === '通过' ? undefined : `验收${verdict ?? '待核对'}`;
 }
 

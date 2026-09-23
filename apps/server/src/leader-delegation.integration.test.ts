@@ -148,6 +148,9 @@ describe('Leader 计划解析', () => {
     expect(reviewStatusLabel(item('验收结论：需返修\n步骤 impl 缺测试'))).toBe('验收需返修');
     expect(reviewStatusLabel(item('验收结论：缺少信息'))).toBe('验收缺少信息');
     expect(reviewStatusLabel(item('看起来没问题'))).toBe('验收待核对');
+    // 终端模式 Leader 调工具前说的话会排在结论前面；行中间提到「验收结论」不算。
+    expect(reviewStatusLabel(item('先实跑核对一下，避免在验收结论里写错：\n验收结论：通过\n全部核对'))).toBeUndefined();
+    expect(reviewStatusLabel(item('验收结论：通过\n复核后发现问题：\n验收结论：需返修\n步骤 impl 缺测试'))).toBe('验收需返修');
     expect(reviewStatusLabel(item('看起来没问题', 'report'))).toBeUndefined();
     // 普通目标恰好用了同名步骤 id，也不当成 Leader 验收。
     expect(reviewStatusLabel(item('普通产出', 'leader_review', '汇总'))).toBeUndefined();
