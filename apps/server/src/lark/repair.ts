@@ -95,6 +95,8 @@ export interface RunOpenPlatformRepairInput {
 /**  configurator 错误码 → 可操作建议。错误本身的 message 已是中文原因，这里只补下一步动作。 */
 function repairFailureHint(code: string): string {
   switch (code) {
+    case 'session_expired':
+      return '开放平台登录态已失效，请重新完成扫码登录后再执行 /repair。';
     case 'scope_catalog_read_failed':
     case 'scope_catalog_incomplete':
       return '开放平台登录态可能已过期或该应用不属于当前登录企业，请重新完成扫码登录后再执行 /repair。';

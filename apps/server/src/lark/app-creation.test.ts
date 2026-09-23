@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { LarkAppCreationJobManager } from './app-creation.js';
 import { LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
-import { OpenPlatformRequestError, OpenPlatformSessionError, type ConnectedOpenPlatformSession, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
+import { OpenPlatformRequestError, OpenPlatformSessionError, OpenPlatformSessionExpiredError, type ConnectedOpenPlatformSession, type ConnectOpenPlatformSessionOptions } from './open-platform-session.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 
 const id = 'dfe543ed-a565-46af-8f04-552fd038df58';
@@ -117,6 +117,30 @@ it.each([
   expect(await h.manager.get(id)).toMatchObject({ status: 'failed', retryable });
   expect(JSON.stringify(await h.manager.get(id))).not.toContain('private-upstream-value');
   if (!retryable) await expect(h.manager.retry(id)).rejects.toMatchObject({ statusCode: 409 });
+});
+
+it('reports a half-expired console session as retryable with the re-scan message', async () => {
+  // 建应用后配置阶段，管理接口返回 passport 登出信号：configurator 透传 session_expired。
+  const h = harness();
+  h.configure.mockRejectedValueOnce(new LarkOpenPlatformConfigurationError('session_expired', '飞书开放平台登录已失效，请重新扫码。'));
+  await h.manager.start(id, 'Bot'); await h.manager.wait(id);
+  expect(await h.manager.get(id)).toMatchObject({
+    status: 'failed', botSaved: true, retryable: true,
+    error: expect.stringContaining('飞书开放平台登录已失效，请重新扫码。（session_expired）'),
+  });
+
+  // 直接打 client（读 secret）撞上会话层抛出的 OpenPlatformSessionExpiredError 时同样可重试。
+  const direct = harness();
+  direct.postJson.mockImplementation(async (path: string) => {
+    if (path.includes('upsert_by_template')) return { data: { ClientID: 'cli_created' } };
+    if (path.includes('/secret/')) throw new OpenPlatformSessionExpiredError();
+    throw new Error('unexpected endpoint');
+  });
+  await direct.manager.start(id, 'Bot'); await direct.manager.wait(id);
+  expect(await direct.manager.get(id)).toMatchObject({
+    status: 'failed', appId: 'cli_created', retryable: true,
+    error: expect.stringContaining('飞书开放平台登录已失效，请重新扫码。'),
+  });
 });
 
 it('does not recreate after a successful response without an app ID', async () => {

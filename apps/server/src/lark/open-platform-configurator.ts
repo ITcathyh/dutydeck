@@ -1,4 +1,5 @@
 import { larkCommandRegistry } from './commands.js';
+import { isOpenPlatformSessionExpired } from './open-platform-session.js';
 import type { LarkSlashCommandDefinition } from './service.js';
 
 /**
@@ -113,9 +114,17 @@ export interface LarkOpenPlatformConfigurationResult {
 }
 
 export class LarkOpenPlatformConfigurationError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(readonly code: string, message: string, options?: ErrorOptions) {
     super(message);
     this.name = 'LarkOpenPlatformConfigurationError';
+    if (options && 'cause' in options) {
+      Object.defineProperty(this, 'cause', {
+        value: options.cause,
+        writable: true,
+        configurable: true,
+        enumerable: false,
+      });
+    }
   }
 }
 
@@ -385,7 +394,16 @@ async function post(
     const record = asRecord(payload);
     if (typeof record.code === 'number' && record.code !== 0) throw new Error('request rejected');
     return payload;
-  } catch {
+  } catch (error) {
+    // 半失效登录态（首页有 csrf、管理接口才返回登出信号）：透传 session_expired，
+    // 不再换成该步骤的固定「读取失败」文案。传输层细节留在 cause 里，不进 message。
+    if (isOpenPlatformSessionExpired(error)) {
+      throw new LarkOpenPlatformConfigurationError(
+        'session_expired',
+        '飞书开放平台登录已失效，请重新扫码。',
+        { cause: error },
+      );
+    }
     // The injected transport may include cookies or app secrets in its error.
     // Keep the public error deterministic and credential-free.
     throw new LarkOpenPlatformConfigurationError(code, message);

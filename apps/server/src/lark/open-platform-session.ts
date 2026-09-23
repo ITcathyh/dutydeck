@@ -52,8 +52,24 @@ export interface OpenPlatformSessionClient {
 
 /** A rejected request is distinct from a lost response to an external write. */
 export class OpenPlatformRequestError extends Error {
+  readonly code?: string;
+
   constructor(message: string, readonly statusCode: number, readonly apiCode?: number) {
     super(message);
+    this.name = 'OpenPlatformRequestError';
+  }
+}
+
+export class OpenPlatformSessionExpiredError extends OpenPlatformRequestError {
+  override readonly code = 'session_expired';
+
+  constructor(
+    message = '飞书开放平台登录已失效，请重新扫码。',
+    statusCode = 401,
+    apiCode?: number,
+  ) {
+    super(message, statusCode, apiCode);
+    this.name = 'OpenPlatformSessionExpiredError';
   }
 }
 
@@ -146,6 +162,66 @@ export function writeOpenPlatformSessionCookies(
   }
 }
 
+export function clearOpenPlatformSessionCookies(filePath: string): void {
+  if (existsSync(filePath)) {
+    try {
+      unlinkSync(filePath);
+    } catch {
+      // best-effort cleanup
+    }
+  }
+}
+
+/**
+ * 判定飞书开放平台控制台会话是否已失效。
+ *
+ * 开放平台控制台存在「/app 首页能正常返回 CSRF 与账号，但具体管理接口返回 Passport 登出信号」的半失效状态。
+ * 已知登出信号包括：
+ * - HTTP 401 Unauthorized
+ * - payload 或 detail 中 Code/code === 4101
+ * - payload.code === 99991641 且 detail.LogoutReason === 40
+ * - 错误信息包含「请重新登录」或「please log in again」文案
+ *
+ * 注意：顶层通用 code=99991641 单独出现时，不应误判为登录失效（避免一般控制台故障误触发重新扫码）。
+ */
+export function isOpenPlatformSessionExpired(
+  target: unknown,
+  maybePayload?: unknown,
+): boolean {
+  if (typeof target === 'number') {
+    return isSessionExpiredPayload(target, maybePayload);
+  }
+  let current: unknown = target;
+  for (let depth = 0; depth < 4 && current !== undefined && current !== null; depth += 1) {
+    if (current instanceof OpenPlatformRequestError) {
+      if (current.code === 'session_expired') return true;
+      if (current.statusCode === 401) return true;
+      if (/please\s+log\s+in\s+again|请重新登录/i.test(current.message)) return true;
+    } else if (current instanceof Error) {
+      if ((current as { code?: unknown }).code === 'session_expired') return true;
+      if (/please\s+log\s+in\s+again|请重新登录/i.test(current.message)) return true;
+    }
+    current = current instanceof Error ? current.cause : undefined;
+  }
+  return false;
+}
+
+function isSessionExpiredPayload(status: number, payload: unknown): boolean {
+  if (status === 401) return true;
+  const record = asRecord(payload);
+  const detail = asRecord(record.error);
+  const codes = [record.code, detail.Code, detail.code];
+  if (codes.some(code => Number(code) === 4101)) return true;
+  if (Number(record.code) === 99991641 && Number(detail.LogoutReason ?? detail.logoutReason) === 40) {
+    return true;
+  }
+  const messages = [record.msg, record.message, detail.msg, detail.message, detail.Message]
+    .filter((value): value is string => typeof value === 'string')
+    .join(' ');
+  if (/please\s+log\s+in\s+again|请重新登录/i.test(messages)) return true;
+  return false;
+}
+
 /**
  * Reuses a private cache first, then falls back to Feishu Web QR login. A
  * readable owner identity is mandatory: silently configuring under an unknown
@@ -172,7 +248,7 @@ export async function connectLarkOpenPlatformSession(
     if (cached && cached.length > 0) {
       const jar = new CookieJar(cached, requestTimeoutMs);
       try {
-        const connected = await createClient(jar, fetcher);
+        const connected = await createClient(jar, fetcher, sessionFile);
         if (connected.owner) {
           // Refresh expiry/domain changes received while opening the console.
           writeOpenPlatformSessionCookies(sessionFile, jar.toJSON());
@@ -191,7 +267,7 @@ export async function connectLarkOpenPlatformSession(
   catch (error) { throw error instanceof OpenPlatformSessionError ? error : new OpenPlatformSessionError('qr_login', error); }
   let connected: Awaited<ReturnType<typeof createClient>>;
   try {
-    connected = await createClient(jar, fetcher);
+    connected = await createClient(jar, fetcher, sessionFile);
   } catch (error) {
     throw new OpenPlatformSessionError('console', error);
   }
@@ -206,6 +282,7 @@ export async function connectLarkOpenPlatformSession(
 async function createClient(
   jar: CookieJar,
   fetcher: typeof fetch,
+  sessionFilePath?: string,
 ): Promise<{ client: OpenPlatformSessionClient; owner: OpenPlatformOwnerIdentity | null }> {
   const page = await jar.fetch(fetcher, `${FEISHU_CONSOLE_ORIGIN}/app`, { method: 'GET' }, {
     allowedOrigins: FEISHU_LOGIN_ORIGINS,
@@ -240,17 +317,28 @@ async function createClient(
       allowCrossOriginRedirects: false,
       allowedOrigins: new Set([apiOrigin]),
     });
+    const status = response.response.status;
     const payload = await readJson(response.response);
+    const code = numericCode(payload);
+
+    if (isOpenPlatformSessionExpired(status, payload)) {
+      if (sessionFilePath) clearOpenPlatformSessionCookies(sessionFilePath);
+      throw new OpenPlatformSessionExpiredError(
+        '飞书开放平台登录已失效，请重新扫码。',
+        status,
+        code,
+      );
+    }
+
     if (!response.response.ok) {
       throw new OpenPlatformRequestError(safeOpenPlatformError(
-        `开放平台请求失败（HTTP ${response.response.status}，${path}）：${payloadMessage(payload)}`,
-      ), response.response.status);
+        `开放平台请求失败（HTTP ${status}，${path}）：${payloadMessage(payload)}`,
+      ), status);
     }
-    const code = numericCode(payload);
     if (code !== undefined && code !== 0) {
       throw new OpenPlatformRequestError(safeOpenPlatformError(
         `开放平台请求失败（code=${code}，${path}）：${payloadMessage(payload)}`,
-      ), response.response.status, code);
+      ), status, code);
     }
     return payload;
   };
