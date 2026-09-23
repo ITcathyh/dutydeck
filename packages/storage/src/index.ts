@@ -371,3 +371,4 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
 }
 
 export { childProcessIdentity, observeProcess, currentProcessIdentity, type ProcessIdentity } from './process-identity.js';
+export { checkSqliteDriver, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from './sqlite-preflight.js';

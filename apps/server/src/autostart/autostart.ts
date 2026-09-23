@@ -1,7 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
+import { checkSqliteDriver, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import { SUPERVISOR_ENV, SYSTEMD_UNIT_ENV, daemonPaths, defaultDaemonDir, resolveDaemonDir } from '../daemon/daemon.js';
 
 /**
  * Dutydeck 开机自启（boot hook）注册。
@@ -9,7 +11,8 @@ import { dirname, join, resolve, sep } from 'node:path';
  * macOS  —— 写入 `~/Library/LaunchAgents/com.dutydeck.server.plist`，由 launchd 在
  *           下次登录时加载并执行 `dutydeck start`。
  * Linux  —— 写入 `~/.config/systemd/user/dutydeck.service` 并 `systemctl --user
- *           enable`（不带 `--now`），由 user systemd 在下次开机/登录时拉起。
+ *           enable`（不带 `--now`），由 user systemd 在下次开机/登录时拉起。unit 前台
+ *           运行 `dutydeck start --foreground`，崩溃或被误杀后由 systemd 重拉。
  *
  * 三条硬约束（都来自真实事故，改动前务必读完）：
  *
@@ -19,8 +22,11 @@ import { dirname, join, resolve, sep } from 'node:path';
  *    想登记自启却被顺手启动了服务）；Linux 上 `systemctl --user enable` 绝不带
  *    `--now`。守护进程的生命周期只由 `dutydeck start` / `dutydeck stop` 掌管，
  *    `autostartDisable()` 同理不会停掉正在跑的守护进程（systemd 不带 `--now`
- *    就不会执行 ExecStop；launchd 的 job 进程在 `dutydeck start` 派生出脱离的
- *    daemon 后就已经退出，bootout 没有活进程可杀）。
+ *    就不会停止 unit；launchd 的 job 进程在 `dutydeck start` 派生出脱离的
+ *    daemon 后就已经退出，bootout 没有活进程可杀）。Linux 新模板 unit 还在运行时
+ *    disable 直接拒绝、什么都不动，由用户先 `dutydeck stop`：删掉 unit 文件后 systemd
+ *    会把运行中的 unit 退回 KillMode=control-group，daemon 一退出就连带清掉 cgroup
+ *    里的 tmux 和所有 Agent。
  *
  * 2. **幂等 + 漂移重写。** nvm 换版本、npm 升级都会让 `execPath` / `cliPath` 变化，
  *    避免磁盘上的 unit 路径静默失效导致重启后无法拉起且无报错。
@@ -101,9 +107,11 @@ export interface AutostartOptions {
   username?: string;
   /** launchd 域 `gui/<uid>` 用的 uid，默认 `process.getuid()`。 */
   uid?: number;
+  /** Linux enable 写 unit 前的 SQLite 驱动预检，默认 `@dutydeck/storage` 的 checkSqliteDriver。测试注入。 */
+  checkSqlite?: (options: SqliteDriverCheckOptions) => SqliteDriverCheck;
 }
 
-export type AutostartErrorCode = 'unsupported-platform' | 'systemd-unavailable' | 'command-failed';
+export type AutostartErrorCode = 'unsupported-platform' | 'systemd-unavailable' | 'command-failed' | 'sqlite-unavailable' | 'unit-customized' | 'unit-active';
 
 /** enable/disable 的硬失败。`status` 永不抛错。 */
 export class AutostartError extends Error {
@@ -151,9 +159,12 @@ interface ResolvedAutostart {
   username: string;
   uid: number;
   run: AutostartRunCommand;
+  /** Linux：unit 托管的 daemon 目录，WorkingDirectory 与日志路径都由它派生。 */
+  daemonDir?: string;
+  checkSqlite: (options: SqliteDriverCheckOptions) => SqliteDriverCheck;
 }
 
-const defaultRunCommand: AutostartRunCommand = async (command, args) => {
+export const defaultRunCommand: AutostartRunCommand = async (command, args) => {
   const result = spawnSync(command, [...args], { encoding: 'utf8' });
   return {
     // spawnSync 在命令不存在时 status 为 null —— 保留 null，让调用方能区分
@@ -208,6 +219,7 @@ function resolveOptions(options: AutostartOptions = {}): ResolvedAutostart {
     : platform === 'linux'
       ? join(homeDir, '.config', 'systemd', 'user', AUTOSTART_LINUX_UNIT)
       : undefined;
+  const workingDir = options.workingDir ?? homeDir;
   return {
     platform,
     rawPlatform,
@@ -215,12 +227,15 @@ function resolveOptions(options: AutostartOptions = {}): ResolvedAutostart {
     unitPath,
     execPath: options.execPath ?? process.execPath,
     cliPath: options.cliPath ?? (entry ? resolve(entry) : 'dutydeck'),
-    workingDir: options.workingDir ?? homeDir,
+    workingDir,
     logDir: options.logDir ?? join(homeDir, '.dutydeck', 'logs'),
     pathEnv: options.pathEnv ?? process.env.PATH ?? (platform === 'darwin' ? DARWIN_FALLBACK_PATH : LINUX_FALLBACK_PATH),
     username: options.username ?? currentUsername(),
     uid: options.uid ?? currentUid(),
-    run: options.runCommand ?? defaultRunCommand
+    run: options.runCommand ?? defaultRunCommand,
+    // 与 `dutydeck start` 同一套定位规则（优先 last-daemon-dir 指针），unit 因此钉在同一个根目录。
+    ...(platform === 'linux' ? { daemonDir: resolveDaemonDir(workingDir, homeDir) } : {}),
+    checkSqlite: options.checkSqlite ?? checkSqliteDriver
   };
 }
 
@@ -280,27 +295,108 @@ function renderPlist(config: ResolvedAutostart): string {
 `;
 }
 
+/**
+ * Linux unit 托管的 daemon 根目录，即 WorkingDirectory。取真实路径：daemon 按 process.cwd()
+ * 记录自己的目录，拿到的总是解析过符号链接的路径（本机 /home/<user> 就是指向 /data00 的链接）。
+ * unit 里若写链接路径，`dutydeck start` 比对 WorkingDirectory 时对不上，会退回 detached。
+ */
+function unitRoot(config: ResolvedAutostart): string {
+  const root = resolve(config.daemonDir!, '..', '..');
+  try {
+    return realpathSync(root);
+  } catch {
+    return root;
+  }
+}
+
+/** Linux unit 托管的 daemon 日志：前台进程的 stdout / stderr 追加到这里，与 detached 子进程同一个文件。 */
+function unitLogFile(config: ResolvedAutostart): string {
+  return daemonPaths(defaultDaemonDir(unitRoot(config))).logFile;
+}
+
 function renderUnit(config: ResolvedAutostart): string {
-  // Type=oneshot + RemainAfterExit=yes：`dutydeck start` 会把服务交给脱离的
-  // daemon 子进程后立即返回，若不 RemainAfterExit，systemd 会在 ExecStart 退出的
-  // 瞬间把 unit 判为 inactive(dead) 并回收整个 cgroup，刚起来的 daemon 会被一起杀掉。
+  // Type=simple：ExecStart 本身就是服务进程（`start --foreground`），崩溃、被 SIGKILL 或
+  // 被外部 SIGTERM 后 systemd 才能按 Restart=always 重拉。旧模板是 oneshot + RemainAfterExit：
+  // `start` 派生脱离的子进程就退出，子进程死了 unit 仍是 active (exited)，没有人重拉。
+  //
+  // WorkingDirectory 钉在 daemon 根目录：前台入口据此写状态文件，cli.ts 启动时按 cwd 读入
+  // 根目录的 .env，与 detached 子进程在同一目录下运行的效果一致。
+  //
+  // 不设 ExecStop：`dutydeck stop` 对受 systemd 托管的 daemon 会反过来调用 systemctl，
+  // 留着 ExecStop 就会 stop → systemctl → ExecStop → stop 绕回来。
+  //
+  // KillMode=process：只信号主进程。tmux server 若由 daemon 首次拉起，会落在本 unit 的
+  // cgroup 里；默认的 control-group 会在 restart 和崩溃重拉时把它连同其中所有 Agent 一起杀掉。
+  // `dutydeck stop` / `restart` 过去也只信号 daemon 本身，tmux 会话跨重启保留。
+  //
+  // StartLimit*：连续起不来就熔断，不无限重拉刷日志；熔断后用 systemctl --user reset-failed 解除。
   const start = `${systemdQuote(config.execPath)} ${systemdQuote(config.cliPath)}`;
+  const logFile = unitLogFile(config);
   return `[Unit]
 Description=Dutydeck 本地会话服务器
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=${config.workingDir}
+Type=simple
+WorkingDirectory=${unitRoot(config)}
 Environment=PATH=${config.pathEnv}
-ExecStart=${start} start
-ExecStop=${start} stop
+Environment=${SUPERVISOR_ENV}=systemd
+Environment=${SYSTEMD_UNIT_ENV}=${config.label}
+ExecStart=${start} start --foreground
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+KillMode=process
+StandardOutput=append:${logFile}
+StandardError=append:${logFile}
 
 [Install]
 WantedBy=default.target
 `;
+}
+
+/**
+ * 两代 Linux 模板（旧 oneshot 与现在的 simple）实际写过的指令，Environment 只写过这几个变量。
+ * enable 重写已有 unit 时，磁盘上出现这之外的指令（比如手工加的 EnvironmentFile）就拒绝，
+ * 免得重新生成时把它们静默丢掉。
+ */
+const TEMPLATE_UNIT_KEYS = new Set([
+  'Description', 'After', 'Wants', 'StartLimitIntervalSec', 'StartLimitBurst',
+  'Type', 'RemainAfterExit', 'WorkingDirectory', 'Environment', 'ExecStart', 'ExecStop',
+  'Restart', 'RestartSec', 'TimeoutStopSec', 'KillMode', 'StandardOutput', 'StandardError',
+  'WantedBy'
+]);
+const TEMPLATE_ENVIRONMENT = new Set(['PATH', SUPERVISOR_ENV, SYSTEMD_UNIT_ENV]);
+
+/** 磁盘上的 unit 里模板不会写的指令。只报键名和变量名，不带值（值里可能有密钥）。 */
+function customUnitDirectives(content: string): string[] {
+  const found: string[] = [];
+  for (const raw of content.split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#') || line.startsWith(';') || line.startsWith('[')) continue;
+    const at = line.indexOf('=');
+    const key = (at < 0 ? line : line.slice(0, at)).trim();
+    if (!TEMPLATE_UNIT_KEYS.has(key)) {
+      found.push(key);
+    } else if (key === 'Environment') {
+      const names = [...line.slice(at + 1).matchAll(/(?:^|\s)"?([^\s"=]+)=/g)].map(match => match[1]!);
+      const extra = names.filter(name => !TEMPLATE_ENVIRONMENT.has(name));
+      if (extra.length > 0) found.push(`Environment（${extra.join('、')}）`);
+    }
+  }
+  return [...new Set(found)];
+}
+
+function unitCustomized(config: ResolvedAutostart, directives: string[]): AutostartError {
+  const unitPath = config.unitPath!;
+  return new AutostartError(
+    'unit-customized',
+    `${unitPath} 里有 dutydeck 模板不会写的配置：${directives.join('、')}。重新生成 unit 会把它们丢掉，已拒绝，没有做任何改动。`,
+    [`把这些行原样移到 drop-in（例如 ${join(dirname(unitPath), `${config.label}.d`, 'local.conf')}，行前写上它原来所在的节，如 [Service]），从 ${unitPath} 里删掉后重跑 dutydeck autostart enable。drop-in 不会被 enable 改写，systemctl --user cat ${config.label} 能看到合并后的结果。`]
+  );
 }
 
 function renderDesired(config: ResolvedAutostart): string {
@@ -533,12 +629,31 @@ function systemdUnavailable(config: ResolvedAutostart): AutostartError {
   );
 }
 
+function sqliteUnavailable(config: ResolvedAutostart, check: SqliteDriverCheck): AutostartError {
+  return new AutostartError(
+    'sqlite-unavailable',
+    `开机自启会用 ${config.execPath} 运行 Dutydeck，但预检失败，未写入 unit。${describeSqliteDriverFailure(check)}`,
+    [`换一个能加载该驱动的 node，用绝对路径重跑：<node 绝对路径> ${config.cliPath} autostart enable`]
+  );
+}
+
 async function enableLinux(config: ResolvedAutostart): Promise<AutostartResult> {
   const unitPath = config.unitPath!;
   if (!await userSystemdAvailable(config)) throw systemdUnavailable(config);
 
   const enabledBefore = (await config.run('systemctl', ['--user', 'is-enabled', config.label])).status === 0;
-  const written = writeIfChanged(unitPath, renderUnit(config));
+  // unit 会把 execPath 钉进 ExecStart：写之前用它真的加载一次 SQLite 驱动，别把起不来的解释器固化成配置。
+  const sqlite = config.checkSqlite({ execPath: config.execPath, resolveFrom: config.cliPath });
+  if (!sqlite.ok) throw sqliteUnavailable(config, sqlite);
+  const desired = renderUnit(config);
+  const onDisk = readTextFile(unitPath);
+  if (onDisk !== undefined && onDisk !== desired) {
+    const directives = customUnitDirectives(onDisk);
+    if (directives.length > 0) throw unitCustomized(config, directives);
+  }
+  // StandardOutput=append: 不会替我们建目录，目录不在 unit 会直接起不来。
+  mkdirSync(dirname(unitLogFile(config)), { recursive: true });
+  const written = writeIfChanged(unitPath, desired);
   const notices = [written ? `已写入 systemd unit: ${unitPath}` : `systemd unit 已是最新，无需改动: ${unitPath}`];
 
   if (written) {
@@ -604,6 +719,8 @@ export async function autostartEnable(options: AutostartOptions = {}): Promise<A
 // ─── disable ─────────────────────────────────────────────────────────────────
 
 const DAEMON_UNTOUCHED_NOTICE = '当前正在运行的守护进程不受影响；要停止它请运行 dutydeck stop。';
+// Linux 新模板 unit 只有停下之后才允许 disable，删掉后没有它拉起的守护进程在跑。
+const SUPERVISED_UNIT_REMOVED_NOTICE = 'unit 已停止，之后不会再被 systemd 拉起；需要服务时运行 dutydeck start（不再受 systemd 托管）。';
 
 function removeIfPresent(path: string): boolean {
   if (readTextFile(path) === undefined) return false;
@@ -650,30 +767,60 @@ async function disableDarwin(config: ResolvedAutostart): Promise<AutostartResult
   };
 }
 
+/**
+ * 已加载的 unit 是否新模板（带托管声明），以及它的 ActiveState。连不上 user systemd 时只能看磁盘上的
+ * unit 文件，ActiveState 未知。
+ */
+async function loadedUnit(config: ResolvedAutostart, available: boolean): Promise<{ supervised: boolean; activeState?: string }> {
+  const shown = available ? await config.run('systemctl', ['--user', 'show', config.label, '--property=ActiveState,Environment']) : undefined;
+  if (!shown || shown.status !== 0) {
+    return { supervised: readTextFile(config.unitPath!)?.includes(`\nEnvironment=${SUPERVISOR_ENV}=systemd\n`) === true };
+  }
+  const props = new Map(shown.stdout.split('\n').map(line => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)] as const));
+  return {
+    supervised: (props.get('Environment') ?? '').split(/\s+/).includes(`${SUPERVISOR_ENV}=systemd`),
+    activeState: props.get('ActiveState') || undefined
+  };
+}
+
+function unitStillRunning(config: ResolvedAutostart, activeState: string | undefined): AutostartError {
+  const consequence = '删除 unit 文件后，systemd 会把运行中的 unit 退回默认的 KillMode=control-group：之后守护进程一退出（stop、restart 或崩溃），unit 里的 tmux 和所有 Agent 会被一起杀掉。已拒绝，没有做任何改动。';
+  return activeState === undefined
+    ? new AutostartError('unit-active', `当前会话连不上 user systemd，无法确认由 systemd 托管的 ${config.label} 是否还在运行。${consequence}`,
+      ['在能连上 user systemd 的会话里（通常需要 XDG_RUNTIME_DIR=/run/user/$(id -u)）先运行 dutydeck stop，再运行 dutydeck autostart disable。'])
+    : new AutostartError('unit-active', `${config.label} 还在运行（ActiveState=${activeState}）。${consequence}`,
+      ['先运行 dutydeck stop（这时 systemd 只停守护进程，tmux 保留），再运行 dutydeck autostart disable。']);
+}
+
 async function disableLinux(config: ResolvedAutostart): Promise<AutostartResult> {
   const unitPath = config.unitPath!;
   const notices: string[] = [];
   const available = await userSystemdAvailable(config);
   let enabledBefore = false;
+  // 只拦新模板：旧 oneshot unit 拉起的 detached daemon 不是 unit 的主进程，删掉 unit 后它退出也不会触发清理。
+  const loaded = await loadedUnit(config, available);
+  if (loaded.supervised && loaded.activeState !== 'inactive' && loaded.activeState !== 'failed') {
+    throw unitStillRunning(config, loaded.activeState);
+  }
 
   if (available) {
     // `changed` 必须来自 disable 之前的 is-enabled 状态：`systemctl --user disable`
     // 对本来就没启用的 unit 也返回 0，拿它的退出码判断会把空操作误报成"已改动"。
     enabledBefore = (await config.run('systemctl', ['--user', 'is-enabled', config.label])).status === 0;
-    // 约束 1：不带 --now，systemd 就不会执行 ExecStop，跑着的守护进程原样保留。
+    // 约束 1：不带 --now，systemd 就不会停止 unit，跑着的守护进程原样保留。
     const disabled = await config.run('systemctl', ['--user', 'disable', config.label]);
     if (disabled.status !== 0 && enabledBefore) {
       notices.push(`systemctl --user disable ${config.label} 失败（${firstLine(disabled.stderr) || '未知原因'}），继续删除 unit 文件。`);
     }
   } else {
-    // disable 是清理动作：连不上 user systemd 也要保证 unit 文件被删掉，因此不抛错。
+    // disable 是清理动作：连不上 user systemd 也要保证 unit 文件被删掉，因此不抛错（新模板 unit 已在上面拦下）。
     notices.push('当前会话连不上 user systemd（缺少 DBus / 容器环境），只删除 unit 文件；如仍有残留请在桌面会话里手动 systemctl --user disable。');
   }
 
   const removed = removeIfPresent(unitPath);
   notices.unshift(removed ? `已删除 systemd unit: ${unitPath}` : `开机自启未注册，无需删除: ${unitPath}`);
   if (removed && available) await config.run('systemctl', ['--user', 'daemon-reload']);
-  notices.push(DAEMON_UNTOUCHED_NOTICE);
+  notices.push(loaded.supervised ? SUPERVISED_UNIT_REMOVED_NOTICE : DAEMON_UNTOUCHED_NOTICE);
 
   let running: boolean | undefined;
   if (available) {

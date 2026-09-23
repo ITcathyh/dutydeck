@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { SqliteDriverCheck, SqliteDriverCheckOptions } from '@dutydeck/storage';
 import {
   AUTOSTART_LINUX_UNIT,
   AUTOSTART_MACOS_LABEL,
@@ -57,12 +58,19 @@ interface LinuxWorld {
   isEnabled?: boolean;
   isActive?: boolean;
   linger?: boolean;
+  /** `systemctl show` 报告的已加载定义：新模板（带托管声明）及其 ActiveState。不给就是旧 oneshot / 未加载。 */
+  supervisedUnit?: { activeState: string };
 }
 
 function linuxResponder(world: LinuxWorld = {}): Responder {
-  const { systemdAvailable = true, isEnabled = false, isActive = false, linger = true } = world;
+  const { systemdAvailable = true, isEnabled = false, isActive = false, linger = true, supervisedUnit } = world;
   return (command, args) => {
     if (command === 'systemctl' && args[1] === 'show-environment') return systemdAvailable ? { status: 0 } : { status: 1, stderr: 'Failed to connect to bus' };
+    if (command === 'systemctl' && args[1] === 'show') {
+      return supervisedUnit
+        ? { status: 0, stdout: `ActiveState=${supervisedUnit.activeState}\nEnvironment=PATH=/usr/bin DUTYDECK_SUPERVISOR=systemd DUTYDECK_SYSTEMD_UNIT=${AUTOSTART_LINUX_UNIT}\n` }
+        : { status: 0, stdout: `ActiveState=${isActive ? 'active' : 'inactive'}\nEnvironment=PATH=/usr/bin\n` };
+    }
     if (command === 'systemctl' && args[1] === 'is-enabled') return isEnabled ? { status: 0, stdout: 'enabled\n' } : { status: 1, stdout: 'disabled\n' };
     if (command === 'systemctl' && args[1] === 'is-active') return isActive ? { status: 0, stdout: 'active\n' } : { status: 3, stdout: 'inactive\n' };
     if (command === 'loginctl') return { status: 0, stdout: `Linger=${linger ? 'yes' : 'no'}\n` };
@@ -86,6 +94,8 @@ describe('Dutydeck 开机自启', () => {
       username: 'tester',
       uid: 501,
       pathEnv: '/usr/local/bin:/usr/bin:/bin',
+      // 默认让 SQLite 预检通过：不真的去执行这些假解释器路径。
+      checkSqlite: ({ execPath = '' }) => ({ ok: true, execPath }),
       ...overrides
     };
   }
@@ -93,8 +103,18 @@ describe('Dutydeck 开机自启', () => {
   const macPlist = () => join(tmp, HOME, 'Library', 'LaunchAgents', `${AUTOSTART_MACOS_LABEL}.plist`);
   const linuxUnit = () => join(tmp, HOME, '.config', 'systemd', 'user', AUTOSTART_LINUX_UNIT);
 
+  /** 改动前的 oneshot 模板（基线 5bce4ff 的 renderUnit），按 options() 的参数渲染。 */
+  function writeOneshotUnit(extra = ''): string {
+    const start = '/usr/local/node/v22.12.0/bin/node /usr/local/lib/node_modules/dutydeck/dist/cli.js';
+    const content = `[Unit]\nDescription=Dutydeck 本地会话服务器\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=oneshot\nRemainAfterExit=yes\nWorkingDirectory=${join(tmp, HOME)}\nEnvironment=PATH=/usr/local/bin:/usr/bin:/bin\n${extra}ExecStart=${start} start\nExecStop=${start} stop\n\n[Install]\nWantedBy=default.target\n`;
+    mkdirSync(dirname(linuxUnit()), { recursive: true });
+    writeFileSync(linuxUnit(), content, 'utf8');
+    return content;
+  }
+
   beforeEach(() => {
-    tmp = mkdtempSync(join(tmpdir(), 'dutydeck-autostart-'));
+    // 取真实路径：unit 的 WorkingDirectory 写的是解析过符号链接的路径（macOS 的 /var 是链接）。
+    tmp = realpathSync(mkdtempSync(join(tmpdir(), 'dutydeck-autostart-')));
   });
 
   afterEach(() => {
@@ -244,12 +264,84 @@ describe('Dutydeck 开机自启', () => {
     expect(result.state.unitPath).toBe(linuxUnit());
 
     const unit = readFileSync(linuxUnit(), 'utf8');
-    expect(unit).toContain('Type=oneshot');
-    expect(unit).toContain('RemainAfterExit=yes');
-    expect(unit).toContain('ExecStart=/usr/local/node/v22.12.0/bin/node /usr/local/lib/node_modules/dutydeck/dist/cli.js start');
-    expect(unit).toContain('ExecStop=/usr/local/node/v22.12.0/bin/node /usr/local/lib/node_modules/dutydeck/dist/cli.js stop');
+    // 前台运行、崩溃或被误杀后由 systemd 重拉；连续起不来时熔断
+    expect(unit).toContain('Type=simple');
+    expect(unit).not.toContain('Type=oneshot');
+    expect(unit).not.toContain('RemainAfterExit');
+    expect(unit).toContain('ExecStart=/usr/local/node/v22.12.0/bin/node /usr/local/lib/node_modules/dutydeck/dist/cli.js start --foreground\n');
+    expect(unit).toContain('Restart=always');
+    expect(unit).toMatch(/^RestartSec=\d+$/m);
+    expect(unit).toMatch(/\[Unit\][^[]*StartLimitIntervalSec=\d+[^[]*StartLimitBurst=\d+/);
+    // 没有 ExecStop：stop 由 dutydeck stop 调 systemctl，不能再经 ExecStop 绕回 CLI
+    expect(unit).not.toContain('ExecStop');
+    // 只信号主进程，daemon 拉起的 tmux server 不随 restart / 崩溃重拉一起被杀
+    expect(unit).toContain('KillMode=process');
+    // 托管声明：前台入口据此把 unit 记进 daemon 状态
+    expect(unit).toContain('Environment=DUTYDECK_SUPERVISOR=systemd');
+    expect(unit).toContain(`Environment=DUTYDECK_SYSTEMD_UNIT=${AUTOSTART_LINUX_UNIT}`);
+    // 首次运行（没有 last-daemon-dir 指针）时 daemon 根目录就是 home；日志追加到 daemon 日志
+    const daemonLog = join(tmp, HOME, '.dutydeck', 'daemon', 'dutydeck.log');
+    expect(unit).toContain(`WorkingDirectory=${join(tmp, HOME)}\n`);
+    expect(unit).toContain(`StandardOutput=append:${daemonLog}\n`);
+    expect(unit).toContain(`StandardError=append:${daemonLog}\n`);
+    expect(existsSync(dirname(daemonLog))).toBe(true);
     expect(unit).toContain('WantedBy=default.target');
     expect(unit).toContain('Environment=PATH=/usr/local/bin:/usr/bin:/bin');
+  });
+
+  it('Linux: HOME 是符号链接时 WorkingDirectory 写真实路径，与 daemon 记录的 process.cwd() 一致', async () => {
+    const realHome = join(tmp, 'data00', 'home', 'tester');
+    const linkHome = join(tmp, 'home-link');
+    mkdirSync(realHome, { recursive: true });
+    symlinkSync(realHome, linkHome);
+
+    await autostartEnable(options('linux', commandLog(linuxResponder()), { root: '/', homeDir: linkHome }));
+    const unit = readFileSync(join(linkHome, '.config', 'systemd', 'user', AUTOSTART_LINUX_UNIT), 'utf8');
+    expect(unit).toContain(`WorkingDirectory=${realHome}\n`);
+    expect(unit).toContain(`StandardOutput=append:${join(realHome, '.dutydeck', 'daemon', 'dutydeck.log')}\n`);
+    const status = await autostartStatus(options('linux', commandLog(linuxResponder({ isEnabled: true })), { root: '/', homeDir: linkHome }));
+    expect(status.state.stale).toBe(false);
+  });
+
+  it('Linux: unit 钉在 last-daemon-dir 指针所指的 daemon 根目录，指针变了 status 报 stale', async () => {
+    const projectRoot = join(tmp, 'projects', 'dutydeck');
+    const daemonDir = join(projectRoot, '.dutydeck', 'daemon');
+    mkdirSync(daemonDir, { recursive: true });
+    const pointer = join(tmp, HOME, '.dutydeck', 'last-daemon-dir');
+    mkdirSync(dirname(pointer), { recursive: true });
+    writeFileSync(pointer, `${daemonDir}\n`);
+
+    await autostartEnable(options('linux', commandLog(linuxResponder())));
+    const unit = readFileSync(linuxUnit(), 'utf8');
+    expect(unit).toContain(`WorkingDirectory=${projectRoot}\n`);
+    expect(unit).toContain(`StandardOutput=append:${join(daemonDir, 'dutydeck.log')}\n`);
+
+    const other = join(tmp, 'projects', 'other', '.dutydeck', 'daemon');
+    mkdirSync(other, { recursive: true });
+    writeFileSync(pointer, `${other}\n`);
+    const status = await autostartStatus(options('linux', commandLog(linuxResponder({ isEnabled: true }))));
+    expect(status.state.stale).toBe(true);
+  });
+
+  it('Linux: SQLite 预检用的是要写进 ExecStart 的解释器和入口脚本', async () => {
+    const seen: SqliteDriverCheckOptions[] = [];
+    await autostartEnable(options('linux', commandLog(linuxResponder()), {
+      checkSqlite: checked => { seen.push(checked); return { ok: true, execPath: checked.execPath ?? '' }; }
+    }));
+    expect(seen).toEqual([{ execPath: '/usr/local/node/v22.12.0/bin/node', resolveFrom: '/usr/local/lib/node_modules/dutydeck/dist/cli.js' }]);
+  });
+
+  it('Linux: SQLite 预检失败时拒绝 enable，不写 unit、不 daemon-reload、不 enable', async () => {
+    const failed: SqliteDriverCheck = { ok: false, execPath: '/usr/local/node-v26.5.0/bin/node', nodeVersion: 'v26.5.0', modules: '147', error: 'NODE_MODULE_VERSION 127 mismatch' };
+    const log = commandLog(linuxResponder());
+    const error = await rejection(autostartEnable(options('linux', log, { execPath: '/usr/local/node-v26.5.0/bin/node', checkSqlite: () => failed })));
+    expect(error.code).toBe('sqlite-unavailable');
+    expect(error.message).toContain('/usr/local/node-v26.5.0/bin/node');
+    expect(error.message).toContain('v26.5.0');
+    expect(error.message).toContain('process.versions.modules=147');
+    expect(error.message).toContain('NODE_MODULE_VERSION 127 mismatch');
+    expect(existsSync(linuxUnit())).toBe(false);
+    expect(log.calls.some(call => /daemon-reload|--user enable/.test(call))).toBe(false);
   });
 
   it('Linux: enable 只注册不启动 —— 没有 --now、没有 systemctl start', async () => {
@@ -367,8 +459,8 @@ describe('Dutydeck 开机自启', () => {
     expect(existsSync(linuxUnit())).toBe(true);
   });
 
-  it('Linux: disable 取消注册且不带 --now，运行中的守护进程不受影响', async () => {
-    await autostartEnable(options('linux', commandLog(linuxResponder())));
+  it('Linux: 旧 oneshot unit 运行中时 disable 取消注册且不带 --now，运行中的守护进程不受影响', async () => {
+    writeOneshotUnit();
     const log = commandLog(linuxResponder({ isEnabled: true, isActive: true }));
     const result = await autostartDisable(options('linux', log));
 
@@ -381,6 +473,81 @@ describe('Dutydeck 开机自启', () => {
     expect(result.notices.some(notice => notice.includes('不受影响'))).toBe(true);
     expect(result.notices.some(notice => notice.includes('dutydeck stop'))).toBe(true);
     expect(result.notices.some(notice => notice.includes('仍是 active'))).toBe(true);
+  });
+
+  it.each(['active', 'activating', 'deactivating'])('Linux: 新模板 unit 处于 %s 时拒绝 disable：不取消注册、不删文件、不 daemon-reload', async activeState => {
+    await autostartEnable(options('linux', commandLog(linuxResponder())));
+    const before = readFileSync(linuxUnit(), 'utf8');
+    const log = commandLog(linuxResponder({ isEnabled: true, isActive: activeState === 'active', supervisedUnit: { activeState } }));
+
+    const error = await rejection(autostartDisable(options('linux', log)));
+
+    expect(error.code).toBe('unit-active');
+    expect(error.message).toContain(`ActiveState=${activeState}`);
+    expect(error.message).toContain('tmux');
+    expect(error.notices.join('\n')).toContain('先运行 dutydeck stop');
+    expect(readFileSync(linuxUnit(), 'utf8')).toBe(before);
+    expect(log.calls.some(call => / (disable|daemon-reload|stop) /.test(`${call} `))).toBe(false);
+  });
+
+  it.each(['inactive', 'failed'])('Linux: 新模板 unit 已是 %s 时照常 disable 并删除 unit 文件', async activeState => {
+    await autostartEnable(options('linux', commandLog(linuxResponder())));
+    const log = commandLog(linuxResponder({ isEnabled: true, supervisedUnit: { activeState } }));
+
+    const result = await autostartDisable(options('linux', log));
+
+    expect(result).toMatchObject({ action: 'disable', changed: true });
+    expect(existsSync(linuxUnit())).toBe(false);
+    expect(log.calls).toContain(`systemctl --user disable ${AUTOSTART_LINUX_UNIT}`);
+    expect(log.calls).toContain('systemctl --user daemon-reload');
+    expect(result.notices.some(notice => notice.includes('dutydeck start'))).toBe(true);
+    expect(result.notices.some(notice => notice.includes('dutydeck stop'))).toBe(false);
+  });
+
+  it('Linux: 连不上 user systemd 时，磁盘上是新模板 unit 就拒绝 disable；旧 oneshot unit 照旧删除', async () => {
+    await autostartEnable(options('linux', commandLog(linuxResponder())));
+    const noBus = commandLog(linuxResponder({ systemdAvailable: false }));
+    const error = await rejection(autostartDisable(options('linux', noBus)));
+    expect(error.code).toBe('unit-active');
+    expect(error.notices.join('\n')).toContain('XDG_RUNTIME_DIR');
+    expect(existsSync(linuxUnit())).toBe(true);
+
+    writeOneshotUnit();
+    const result = await autostartDisable(options('linux', commandLog(linuxResponder({ systemdAvailable: false }))));
+    expect(result.changed).toBe(true);
+    expect(existsSync(linuxUnit())).toBe(false);
+  });
+
+  it('Linux: 已有 unit 里有模板不会写的指令时拒绝 enable 重写，只报键名不报值，提示移到 drop-in', async () => {
+    const before = writeOneshotUnit('EnvironmentFile=/srv/dutydeck/.dutydeck/codex-agent.env\nEnvironment=DUTYDECK_AGENTS_JSON=secret-json-value\nNice=5\n');
+    const log = commandLog(linuxResponder({ isEnabled: true, isActive: true }));
+
+    const error = await rejection(autostartEnable(options('linux', log)));
+
+    expect(error.code).toBe('unit-customized');
+    expect(error.message).toContain('EnvironmentFile');
+    expect(error.message).toContain('Environment（DUTYDECK_AGENTS_JSON）');
+    expect(error.message).toContain('Nice');
+    expect(error.message).not.toContain('secret-json-value');
+    expect(error.message).not.toContain('codex-agent.env');
+    expect(error.notices.join('\n')).toContain(`${AUTOSTART_LINUX_UNIT}.d`);
+    expect(readFileSync(linuxUnit(), 'utf8')).toBe(before);
+    expect(log.calls.some(call => / (daemon-reload|enable) /.test(`${call} `))).toBe(false);
+  });
+
+  it('Linux: 旧 oneshot unit 只含模板指令（配置已移到 drop-in）时照常改写成新模板，drop-in 不动', async () => {
+    writeOneshotUnit();
+    const dropIn = join(dirname(linuxUnit()), `${AUTOSTART_LINUX_UNIT}.d`, 'local.conf');
+    mkdirSync(dirname(dropIn), { recursive: true });
+    writeFileSync(dropIn, '[Service]\nEnvironmentFile=/srv/dutydeck/.dutydeck/codex-agent.env\n', 'utf8');
+    const log = commandLog(linuxResponder({ isEnabled: true, isActive: true }));
+
+    const result = await autostartEnable(options('linux', log));
+
+    expect(result.changed).toBe(true);
+    expect(readFileSync(linuxUnit(), 'utf8')).toBe(autostartUnitContent(options('linux', commandLog())));
+    expect(readFileSync(dropIn, 'utf8')).toBe('[Service]\nEnvironmentFile=/srv/dutydeck/.dutydeck/codex-agent.env\n');
+    expect(log.calls).toContain('systemctl --user daemon-reload');
   });
 
   it('Linux: 未注册时 disable 报告 changed=false', async () => {
