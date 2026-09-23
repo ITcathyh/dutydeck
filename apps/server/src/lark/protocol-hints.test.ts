@@ -37,7 +37,8 @@ describe('protocolModeNote', () => {
     expect(protocolModeNote(undefined)).toBeUndefined();
   });
 
-  it('permissionMode=full-trust 仍展示：终端通道缺失是 pty 内禀属性，不因运行时不问而消失', () => {
-    expect(protocolModeNote('pty', 'full-trust')).toBe(TERMINAL_PROTOCOL_NOTE);
+  it('permissionMode=full-trust 不展示：CLI 跳过权限确认启动，没有需要在电脑前响应的工具确认', () => {
+    expect(protocolModeNote('pty', 'full-trust')).toBeUndefined();
+    expect(protocolModeNote('pty-cli', 'full-trust')).toBeUndefined();
   });
 });

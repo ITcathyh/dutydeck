@@ -2750,7 +2750,7 @@ export class LarkMessageCoordinator {
       ? '这是升级后创建的新上下文；旧会话历史仍可查看，但原上下文未自动恢复。'
       : undefined;
     if (legacyUpgradeNote) task.group.legacyUpgradeSessionId = undefined;
-    // P0-7：pty/pty-cli 任务的工具确认只能在电脑前响应，首卡、排队卡与每帧心跳都如实标注。
+    // P0-7：ask 模式下 pty/pty-cli 任务的工具确认只能在电脑前响应，首卡、排队卡与每帧心跳都如实标注。
     const protocolNote = protocolModeNote(session.protocol, larkPermissionMode(config));
     // S3：未知命令近似提示只追加到卡面，绝不进入 prompt（materialPrompt 保持原文）。
     // S8：replayed 置位后排队 PATCH 也带恢复注记；心跳帧的同名元素在 update() 内另拼。
