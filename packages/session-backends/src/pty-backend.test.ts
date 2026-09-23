@@ -429,6 +429,64 @@ tmuxDescribe('TmuxBackend', () => {
     }
   }, 60000);
 
+  it('does not leak stale tmux server global environment variables into the spawned pane', async () => {
+    const namespaceRoot = mkdtempSync(join(tmpdir(), 'dutydeck-tmux-stale-env-'));
+    chmodSync(namespaceRoot, 0o700);
+    const previousTmuxTmpdir = process.env.TMUX_TMPDIR;
+    process.env.TMUX_TMPDIR = namespaceRoot;
+    const name = newSessionName();
+    const isolatedClientEnv = { ...process.env };
+    delete isolatedClientEnv.TMUX;
+
+    let targetBackend: TmuxBackend | null = null;
+    try {
+      execFileSync('tmux', ['new-session', '-d', '-s', 'seed-session', 'sleep 30'], {
+        env: isolatedClientEnv,
+        stdio: 'ignore',
+      });
+      execFileSync('tmux', ['set-environment', '-g', 'STALE_ROUTE', 'stale_route_value'], {
+        env: isolatedClientEnv,
+        stdio: 'ignore',
+      });
+      execFileSync('tmux', ['set-environment', '-g', 'ANTHROPIC_BASE_URL', 'https://stale.api.anthropic.com'], {
+        env: isolatedClientEnv,
+        stdio: 'ignore',
+      });
+
+      targetBackend = new TmuxBackend(name);
+      const received: string[] = [];
+      targetBackend.onData(d => received.push(d));
+      targetBackend.spawn('/bin/sh', [
+        '-c',
+        'echo "FRESH=${FRESH_VAR}"; env | grep -E "^(STALE_ROUTE|ANTHROPIC_BASE_URL)=" || true; echo DONE; sleep 30',
+      ], {
+        cwd: tmpdir(),
+        cols: 100,
+        rows: 30,
+        env: {
+          PATH: process.env.PATH ?? '',
+          HOME: process.env.HOME ?? '',
+          FRESH_VAR: 'fresh_123',
+        },
+      });
+
+      await waitFor(() => received.join('').includes('DONE'), 30000);
+      const output = received.join('');
+      expect(output).toContain('FRESH=fresh_123');
+      expect(output).not.toContain('STALE_ROUTE=');
+      expect(output).not.toContain('ANTHROPIC_BASE_URL=');
+    } finally {
+      targetBackend?.kill();
+      spawnSync('tmux', ['kill-server'], {
+        env: isolatedClientEnv,
+        stdio: 'ignore',
+      });
+      if (previousTmuxTmpdir === undefined) delete process.env.TMUX_TMPDIR;
+      else process.env.TMUX_TMPDIR = previousTmuxTmpdir;
+      rmSync(namespaceRoot, { recursive: true, force: true });
+    }
+  }, 60000);
+
   it('replaces a stale pipe-pane capture left behind by an ungraceful daemon exit', async () => {
     const name = newSessionName();
     sessions.push(name);
