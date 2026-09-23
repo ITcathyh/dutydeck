@@ -10,6 +10,10 @@ import { createKimiAdapter } from './adapters/kimi.js';
 import { createTraexAdapter } from './adapters/traex.js';
 import { encodeRunnerInput, chunkAscii, writeRunnerInput, RUNNER_INPUT_CHUNK_BYTES } from './runner-input.js';
 import { pinnedSessionUuid } from './resume-id.js';
+import { buildCwdTrustArgs } from './adapters/cwd-trust.js';
+import { mkdtempSync, symlinkSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { PtyLike } from './types.js';
 
 const SID = '11111111-2222-3333-4444-555555555555';
@@ -119,14 +123,47 @@ describe('claude-code', () => {
   });
 });
 
+describe('buildCwdTrustArgs', () => {
+  it('无 cwd 时返回空数组', () => {
+    expect(buildCwdTrustArgs(undefined)).toEqual([]);
+  });
+
+  it('普通目录只注入一次内联表信任', () => {
+    const args = buildCwdTrustArgs('/tmp/ws');
+    expect(args).toEqual(['-c', 'projects={"/tmp/ws"={trust_level="trusted"}}']);
+  });
+
+  it('路径中的引号和反斜杠按 TOML basic string 转义', () => {
+    const args = buildCwdTrustArgs('/weird"dir\\x');
+    expect(args).toEqual(['-c', 'projects={"/weird\\"dir\\\\x"={trust_level="trusted"}}']);
+  });
+
+  it('realpath 与传入 cwd 不同时在单条 -c 内联表中合并注入两个路径', () => {
+    // 构造一个真实目录再经软链接访问，确认词法路径和 realpath 都合并在同一张内联表中预置信任。
+    const real = mkdtempSync(join(tmpdir(), 'trust-real-'));
+    const link = `${real}-link`;
+    symlinkSync(real, link);
+    try {
+      const args = buildCwdTrustArgs(link);
+      expect(args).toEqual([
+        '-c', `projects={${JSON.stringify(link)}={trust_level="trusted"},${JSON.stringify(real)}={trust_level="trusted"}}`,
+      ]);
+    } finally {
+      rmSync(link, { force: true });
+      rmSync(real, { force: true, recursive: true });
+    }
+  });
+});
+
 describe('codex', () => {
   const adapter = createCodexAdapter();
 
-  it('安全模式保留通用参数，full-trust 才添加 bypass 双 flag', () => {
-    const safeArgs = adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' });
+  it('安全模式保留通用参数，full-trust 才添加 bypass 双 flag 并预置 cwd 信任', () => {
+    const safeArgs = adapter.buildArgs({ sessionId: SID, permissionMode: 'ask', cwd: '/tmp/ws' });
     expect(safeArgs).not.toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(safeArgs).not.toContain('--dangerously-bypass-hook-trust');
-    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST });
+    expect(safeArgs.some(a => a.startsWith('projects='))).toBe(false);
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST, cwd: '/tmp/ws' });
     expect(args).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(args).toContain('--dangerously-bypass-hook-trust');
     expect(args).toContain('--no-alt-screen');
@@ -135,6 +172,7 @@ describe('codex', () => {
     expect(nudgeIndex).toBeGreaterThan(0);
     expect(safeArgs[nudgeIndex - 1]).toBe('-c');
     expect(args).toContain('notice.hide_rate_limit_model_nudge=true');
+    expect(args).toContain('projects={"/tmp/ws"={trust_level="trusted"}}');
   });
 
   it('resume=true：resume 子命令 + id 收尾', () => {
@@ -155,6 +193,29 @@ describe('codex', () => {
     expect(args).toContain('model_reasoning_effort="high"');
     expect(args).toContain('-C');
     expect(args).toContain('/tmp/ws');
+  });
+
+  it('full-trust 的 cwd 信任预置按 TOML basic string 转义路径中的引号', () => {
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST, cwd: '/weird"dir' });
+    expect(args).toContain('projects={"/weird\\"dir"={trust_level="trusted"}}');
+  });
+
+  it('full-trust 无 cwd 时不注入 projects 信任预置', () => {
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST });
+    expect(args.some(a => a.startsWith('projects='))).toBe(false);
+  });
+
+  it('真正 resume（带 resumeSessionId）时同样注入 projects 预置：信任只来自进程级 -c、不写盘', () => {
+    const args = adapter.buildArgs({
+      sessionId: SID,
+      resume: true,
+      resumeSessionId: 'codex-sid',
+      ...FULL_TRUST,
+      cwd: '/tmp/ws',
+    });
+    expect(args[0]).toBe('resume');
+    expect(args).toContain('projects={"/tmp/ws"={trust_level="trusted"}}');
+    expect(args.indexOf('projects={"/tmp/ws"={trust_level="trusted"}}')).toBeLessThan(args.indexOf('codex-sid'));
   });
 
   it('pattern 族齐全', () => {
@@ -371,14 +432,17 @@ describe('kimi', () => {
 describe('traex', () => {
   const adapter = createTraexAdapter();
 
-  it('安全模式不 bypass，full-trust 才添加双 flag', () => {
-    const safeArgs = adapter.buildArgs({ sessionId: SID, permissionMode: 'ask' });
+  it('安全模式不 bypass，full-trust 才添加双 flag 并预置 cwd 信任', () => {
+    const safeArgs = adapter.buildArgs({ sessionId: SID, permissionMode: 'ask', cwd: '/tmp/ws' });
     expect(safeArgs).not.toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(safeArgs).not.toContain('--dangerously-bypass-hook-trust');
-    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST });
+    expect(safeArgs.some(a => a.startsWith('projects='))).toBe(false);
+    const args = adapter.buildArgs({ sessionId: SID, ...FULL_TRUST, cwd: '/tmp/ws' });
     expect(args).toContain('--dangerously-bypass-approvals-and-sandbox');
     expect(args).toContain('--dangerously-bypass-hook-trust');
     expect(args).toContain('--no-alt-screen');
+    expect(args).toContain('notice.hide_rate_limit_model_nudge=true');
+    expect(args).toContain('projects={"/tmp/ws"={trust_level="trusted"}}');
   });
 
   it('resume=true：resume 子命令 + id 收尾；无 id 新起', () => {
@@ -386,6 +450,19 @@ describe('traex', () => {
     expect(args[0]).toBe('resume');
     expect(args[args.length - 1]).toBe('trae-sid');
     expect(adapter.buildArgs({ sessionId: SID, resume: true })[0]).not.toBe('resume');
+  });
+
+  it('真正 resume（带 resumeSessionId）时同样注入 projects 预置：信任只来自进程级 -c、不写盘', () => {
+    const args = adapter.buildArgs({
+      sessionId: SID,
+      resume: true,
+      resumeSessionId: 'trae-sid',
+      ...FULL_TRUST,
+      cwd: '/tmp/ws',
+    });
+    expect(args[0]).toBe('resume');
+    expect(args).toContain('projects={"/tmp/ws"={trust_level="trusted"}}');
+    expect(args.indexOf('projects={"/tmp/ws"={trust_level="trusted"}}')).toBeLessThan(args.indexOf('trae-sid'));
   });
 
   it('model / reasoningEffort 传入', () => {

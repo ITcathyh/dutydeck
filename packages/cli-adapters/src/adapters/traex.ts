@@ -1,6 +1,7 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { pollScreenReady } from './screen-ready-helper.js';
+import { buildCwdTrustArgs } from './cwd-trust.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -80,9 +81,23 @@ export function createTraexAdapter(): CliAdapter {
     capabilities: { resume: true },
 
     buildArgs({ resume, resumeSessionId, cwd, model, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
-      const args: string[] = ['--no-alt-screen'];
+      const usable = usableResumeId(resumeSessionId);
+      const isRealResume = Boolean(resume && usable);
+
+      const args: string[] = [
+        '--no-alt-screen',
+        // 隐藏低额度模型提示；仅作用于本进程，不修改用户全局 config。
+        '-c',
+        'notice.hide_rate_limit_model_nudge=true',
+      ];
       if (permissionMode === 'full-trust') {
         args.unshift('--dangerously-bypass-approvals-and-sandbox', '--dangerously-bypass-hook-trust');
+        // fresh 与真正 resume 都预置 cwd 信任。我们的信任只来自进程级 -c、从不写盘，
+        // 因此 resume 一个「首次启动仅靠 -c 预置信任」的会话时，若本次不带 -c，
+        // 该目录仍是未受信任状态、照样弹文件夹信任页（真机 traex 0.207.1 已验证）。
+        if (cwd) {
+          args.push(...buildCwdTrustArgs(cwd));
+        }
       }
       if (model && model.trim()) {
         args.push('--model', model.trim());
@@ -95,15 +110,18 @@ export function createTraexAdapter(): CliAdapter {
       }
       // 只做精确 id 续接；无 resumeSessionId 时新起会话（不支持 history
       // 反查机制）。
-      const usable = usableResumeId(resumeSessionId);
-      if (resume && usable) {
-        return ['resume', ...args, usable];
+      if (isRealResume) {
+        return ['resume', ...args, usable!];
       }
       return args;
     },
 
-    async prepareInput(backend: PtyLike): Promise<void> {
-      await pollScreenReady(backend, 'TraeX', TRAEX_ACTIVE_BUSY_PATTERN);
+    async prepareInput(backend: PtyLike, ctx?: AdapterSessionContext): Promise<void> {
+      await pollScreenReady(backend, 'TraeX', {
+        busyPattern: TRAEX_ACTIVE_BUSY_PATTERN,
+        cwd: ctx?.cwd,
+        permissionMode: ctx?.permissionMode,
+      });
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
