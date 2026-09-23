@@ -9,6 +9,7 @@ import { createCursorAdapter } from './adapters/cursor.js';
 import { createKimiAdapter } from './adapters/kimi.js';
 import { createTraexAdapter } from './adapters/traex.js';
 import { encodeRunnerInput, chunkAscii, writeRunnerInput, RUNNER_INPUT_CHUNK_BYTES } from './runner-input.js';
+import { pinnedSessionUuid } from './resume-id.js';
 import type { PtyLike } from './types.js';
 
 const SID = '11111111-2222-3333-4444-555555555555';
@@ -87,6 +88,19 @@ describe('claude-code', () => {
     expect(args.slice(0, 2)).toEqual(['--resume', SID]);
     const args2 = adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'cli-sid' });
     expect(args2.slice(0, 2)).toEqual(['--resume', 'cli-sid']);
+  });
+
+  it('目标步骤这类非 UUID 的 dutydeck 会话 id 钉成固定的合法 UUID，启动与续接一致', () => {
+    const work = `ses_work_${'a'.repeat(64)}`;
+    const pinned = pinnedSessionUuid(work);
+    expect(pinned).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(pinnedSessionUuid(`ses_work_${'b'.repeat(64)}`)).not.toBe(pinned);
+    expect(pinnedSessionUuid(`ses_${SID}`)).toBe(SID);
+    expect(pinnedSessionUuid('cli-sid')).toBe('cli-sid');
+    expect(adapter.buildArgs({ sessionId: work }).slice(0, 2)).toEqual(['--session-id', pinned]);
+    expect(adapter.buildArgs({ sessionId: work, resume: true }).slice(0, 2)).toEqual(['--resume', pinned]);
+    expect(adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: work }).slice(0, 2)).toEqual(['--resume', pinned]);
+    expect(adapter.buildResumeCommand!(work)).toEqual(['--resume', pinned]);
   });
 
   it('model 传入：--model', () => {

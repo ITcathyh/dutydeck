@@ -1,5 +1,6 @@
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
+import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled } from '@dutydeck/relay';
 
 /**
@@ -207,16 +208,16 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     capabilities: { resume: true },
 
     buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode, env }: AdapterSessionContext): string[] {
-      // dutydeck sessionId 形如 "ses_<uuid>"，--session-id/--resume 只接受裸 UUID。
-      const uuid = sessionId.replace(/^ses_/, '');
+      // --session-id/--resume 只接受裸 UUID：dutydeck 的 "ses_<uuid>" 剥前缀，
+      // 目标步骤的 "ses_work_<hash>" 这类非 UUID id 确定性地映射成 UUID。
       const args: string[] = [];
       if (resume) {
         // resumeSessionId 可能是 CLI 自己铸的裸 UUID，也可能是 driver 反查失败后
-        // 退回来的 dutydeck `ses_<uuid>`——后者必须同样剥前缀，否则 argv 变成
-        // `--resume ses_<uuid>`，claude 认不出这个 id。缺省回退到本会话 uuid。
-        args.push('--resume', (resumeSessionId ?? uuid).replace(/^ses_/, ''));
+        // 退回来的 dutydeck id——后者必须同样换成 pinned UUID，否则 argv 变成
+        // `--resume ses_<uuid>`，claude 认不出这个 id。缺省回退到本会话的 pinned UUID。
+        args.push('--resume', pinnedSessionUuid(resumeSessionId ?? sessionId));
       } else {
-        args.push('--session-id', uuid);
+        args.push('--session-id', pinnedSessionUuid(sessionId));
       }
       if (model && model.trim()) {
         args.push('--model', model.trim());
@@ -247,7 +248,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     prepareInput: id === 'claude-code' ? prepareClaudeFamilyInput : undefined,
 
     buildResumeCommand(sessionId: string): string[] {
-      return ['--resume', sessionId.replace(/^ses_/, '')];
+      return ['--resume', pinnedSessionUuid(sessionId)];
     },
 
     completionPattern: CLAUDE_FAMILY_COMPLETION_RE,

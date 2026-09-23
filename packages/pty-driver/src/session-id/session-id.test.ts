@@ -20,6 +20,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import {
   adapterIdsWithSessionIdLookup,
   buildSessionMarker,
@@ -127,6 +128,17 @@ describe('claude-code session id lookup', () => {
     writeJsonl(join(projectDir, `${OUR_UUID}.jsonl`), claudeTranscript(OUR_UUID, 'hi'));
 
     expect(resolveCliSessionId('claude-code', { sessionId: OUR_SESSION, cwd })).toBe(OUR_UUID);
+  });
+
+  it('uses the pinned file for a work-item step whose session id is not a UUID', () => {
+    const configDir = makeTempDir('claude-cfg');
+    const cwd = makeTempDir('claude-cwd');
+    setEnv('CLAUDE_CONFIG_DIR', configDir);
+    const work = `ses_work_${'d'.repeat(64)}`;
+    const pinned = pinnedSessionUuid(work);
+    writeJsonl(join(claudeProject(configDir, cwd), `${pinned}.jsonl`), claudeTranscript(pinned, 'hi'));
+
+    expect(resolveCliSessionId('claude-code', { sessionId: work, cwd })).toBe(pinned);
   });
 
   it('finds our session by marker when the CLI minted its own id, ignoring a decoy', () => {

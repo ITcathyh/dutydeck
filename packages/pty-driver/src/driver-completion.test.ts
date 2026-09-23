@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createCliAdapter } from '@dutydeck/cli-adapters';
+import { createCliAdapter, pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import type { SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
@@ -28,7 +28,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     directory = mkdtempSync(join(tmpdir(), 'dutydeck-completion-'));
     const project = join(directory, 'projects', realpathSync(directory).replace(/[^A-Za-z0-9-]/g, '-'));
     mkdirSync(project, { recursive: true });
-    transcript = join(project, 'completion-fixture.jsonl');
+    transcript = join(project, `${pinnedSessionUuid('ses_completion-fixture')}.jsonl`);
     writeFileSync(transcript, '');
     events = [];
     submitted = false;

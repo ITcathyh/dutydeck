@@ -21,6 +21,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { isUsableMarker } from '../session-id/marker.js';
@@ -110,8 +111,8 @@ export function resolveClaudeTranscriptPath(
 function resolveClaudeSessionTranscript(projectDir: string, sessionId: string): string | undefined {
   // Fast path: dutydeck pinned the id via `--session-id <uuid>` (see
   // cli-adapters/adapters/claude-family.ts buildArgs) and Claude accepted it,
-  // so the filename is the bare uuid.
-  const pinned = sessionId.replace(/^ses_/, '');
+  // so the filename is the pinned uuid.
+  const pinned = pinnedSessionUuid(sessionId);
   if (pinned) {
     const direct = join(projectDir, `${pinned}.jsonl`);
     if (existsSync(direct)) return direct;
