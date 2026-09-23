@@ -293,6 +293,7 @@ export class TmuxBackend implements SessionBackend {
       // 2. Stage the child environment on this session only. injectEnv is
       // applied last so it wins on collisions, matching PtyBackend.
       const childEnvironment = { ...opts.env, ...opts.injectEnv };
+      this.scrubStaleGlobalEnvironment(childEnvironment);
       this.stageSessionEnvironment(childEnvironment);
 
       // 3. Pipe every byte the pane writes into a per-session tmp file;
@@ -617,6 +618,20 @@ export class TmuxBackend implements SessionBackend {
   private writeOwnershipMarker(): void {
     if (this.ownerId === undefined) return;
     runTmux(['set-option', '-t', this.sessionName, OWNER_OPTION, this.ownerId], { timeout: 2000 });
+  }
+
+  private scrubStaleGlobalEnvironment(childEnvironment: Record<string, string>): void {
+    const raw = runTmux(['show-environment', '-g'], { timeout: 2000 });
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('-')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq <= 0) continue;
+      const key = trimmed.slice(0, eq);
+      if (!(key in childEnvironment) || childEnvironment[key] === undefined) {
+        runTmux(['set-environment', '-t', this.sessionName, '-r', '--', key], { timeout: 2000 });
+      }
+    }
   }
 
   private stageSessionEnvironment(environment: Record<string, string>): void {
