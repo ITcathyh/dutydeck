@@ -392,4 +392,115 @@ describe('live group configuration', () => {
       expect((await readLarkConfig(repos.config, 'cli_one'))!.name).toBe('updated');
     } finally { other.close(); }
   });
+
+  it('marks absent groups as not_member when full pagination succeeds and restores them to member when they reappear', async () => {
+    const owner = (await manager.owner('cli_one'))!;
+    const beforeTwo = await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_two');
+    expect(beforeTwo?.membershipState).toBe('member');
+
+    // 本次同步完整拉取，但 oc_two 缺席（只有 oc_one）
+    listChats.mockResolvedValueOnce({ items: [{ chatId: 'oc_one', name: '项目群', external: false }], hasMore: false });
+    await manager.sync('cli_one');
+
+    const markedAbsent = await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_two');
+    expect(markedAbsent?.membershipState).toBe('not_member');
+    expect(markedAbsent?.revision).toBeGreaterThan(beforeTwo!.revision);
+    const retainedOne = await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_one');
+    expect(retainedOne?.membershipState).toBe('member');
+
+    const { groups } = await manager.groups();
+    const groupTwo = groups.find(g => g.chatId === 'oc_two')!;
+    const botEntryTwo = groupTwo.bots.find(b => b.appId === 'cli_one')!;
+    expect(botEntryTwo.membership).toBe('not_member');
+    expect(botEntryTwo.applied).toBe(false);
+
+    // oc_two 重新出现后，恢复为 member
+    listChats.mockResolvedValueOnce({
+      items: [
+        { chatId: 'oc_one', name: '项目群', external: false },
+        { chatId: 'oc_two', name: '值班群', external: false }
+      ],
+      hasMore: false
+    });
+    await manager.sync('cli_one');
+
+    const restoredTwo = await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_two');
+    expect(restoredTwo?.membershipState).toBe('member');
+    expect(restoredTwo?.revision).toBeGreaterThan(markedAbsent!.revision);
+  });
+
+  it('does not alter membership states when pagination is incomplete or throws an error', async () => {
+    const owner = (await manager.owner('cli_one'))!;
+    const factOneBefore = await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_one');
+    const factTwoBefore = await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_two');
+    expect(factOneBefore?.membershipState).toBe('member');
+    expect(factTwoBefore?.membershipState).toBe('member');
+
+    // 1. 出错时：抛错，成员状态与 revision 保持不变
+    listChats.mockRejectedValueOnce(new Error('Lark API timeout'));
+    await expect(manager.sync('cli_one')).rejects.toThrow('Lark API timeout');
+
+    expect(await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_one')).toEqual(factOneBefore);
+    expect(await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_two')).toEqual(factTwoBefore);
+
+    // 2. 分页不完整时：即使缺席 oc_two，也不改变任何成员状态
+    listChats.mockResolvedValueOnce({ items: [{ chatId: 'oc_one', name: '项目群', external: false }], hasMore: true });
+    await expect(manager.sync('cli_one')).rejects.toMatchObject({ code: 'LARK_PAGINATION_INCOMPLETE' });
+
+    expect(await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_one')).toEqual(factOneBefore);
+    expect(await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_two')).toEqual(factTwoBefore);
+
+    // 3. 触发上限时：超过最大页数上限，也不改变任何成员状态
+    let pageCount = 0;
+    listChats.mockImplementation(async () => ({
+      items: [{ chatId: 'oc_one', name: '项目群', external: false }],
+      hasMore: true,
+      pageToken: 'token_' + (++pageCount)
+    }));
+    await expect(manager.sync('cli_one')).rejects.toMatchObject({ code: 'LARK_PAGINATION_LIMIT' });
+
+    expect(await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_one')).toEqual(factOneBefore);
+    expect(await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_two')).toEqual(factTwoBefore);
+  });
+
+  it('uses ByCreateTimeAsc during sync so an active chat promoted between pages is not misidentified as not_member', async () => {
+    const owner = (await manager.owner('cli_one'))!;
+    const initialChats = Array.from({ length: 150 }, (_, i) => ({
+      chatId: `oc_g${String(i + 1).padStart(3, '0')}`,
+      name: `群 ${i + 1}`,
+      external: false
+    }));
+    listChats.mockResolvedValueOnce({ items: initialChats, hasMore: false });
+    await manager.sync('cli_one');
+
+    const before = await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_g101');
+    expect(before?.membershipState).toBe('member');
+
+    let order = initialChats.map(c => c.chatId);
+    let requestedSortType: string | undefined;
+
+    listChats.mockImplementation(async (pageToken?: string, sortType?: string) => {
+      requestedSortType = sortType;
+      const start = pageToken ? Number(pageToken) : 0;
+      if (sortType === 'ByCreateTimeAsc') {
+        const items = initialChats.slice(start, start + 100);
+        const next = start + 100;
+        return { items, hasMore: next < 150, ...(next < 150 ? { pageToken: String(next) } : {}) };
+      }
+
+      // 默认/旧的 ByActiveTimeDesc 排序：第 1 页拉取后，oc_g101 活跃时间前移到第 1 位
+      const page = order.slice(start, start + 100).map(id => ({ chatId: id, name: id, external: false }));
+      if (!pageToken) {
+        order = ['oc_g101', ...order.filter(id => id !== 'oc_g101')];
+      }
+      const next = start + 100;
+      return { items: page, hasMore: next < 150, ...(next < 150 ? { pageToken: String(next) } : {}) };
+    });
+
+    await manager.sync('cli_one');
+
+    expect(requestedSortType).toBe('ByCreateTimeAsc');
+    const after = await repos.remoteChatFacts.getByNaturalKey(owner.channelBotId, 'oc_g101');
+    expect(after?.membershipState).toBe('member');
+  });
 });

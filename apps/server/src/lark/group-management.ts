@@ -203,7 +203,8 @@ export class LarkGroupManager {
     let pageToken: string | undefined;
     const seen = new Set<string>();
     do {
-      const page = await client.listChats(pageToken);
+      if (seen.size >= 100) throw new RuntimeError('LARK_PAGINATION_LIMIT', '群列表分页过多，无法安全完成群同步。', 502);
+      const page = await client.listChats(pageToken, 'ByCreateTimeAsc');
       chats.push(...page.items);
       if (!page.hasMore) break;
       if (!page.pageToken || seen.has(page.pageToken)) throw new RuntimeError('LARK_PAGINATION_INCOMPLETE', '群列表分页不完整，请重新同步。', 502);
@@ -215,6 +216,7 @@ export class LarkGroupManager {
     if (owner.fingerprint !== fingerprint(config)) secret = await this.repos.secretRefs.update(secret.id, { expectedRevision: secret.revision, status: 'configured' });
     const at = this.now().toISOString();
     const expiresAt = new Date(this.now().getTime() + 60 * 60_000).toISOString();
+    const previousFacts = await this.repos.remoteChatFacts.listByChannelBot(owner.channelBotId, 500);
     await this.repos.groupPolicy.transact(tx => {
       const liveConfig = parse<StoredLarkConfig[]>(tx.config.get('lark.bots'))?.find(bot => bot.appId === appId);
       if (!liveConfig || fingerprint(liveConfig) !== fingerprint(config)) throw new RuntimeError('LARK_CREDENTIAL_CHANGED', '同步期间凭据已变更，请重试。', 409);
@@ -225,12 +227,35 @@ export class LarkGroupManager {
       const identity = tx.remoteIdentityFacts.upsert({ id: before?.id ?? `live_identity_${hash(appId)}`, expectedRevision: before?.revision ?? 0, channelBotId: owner.channelBotId,
         credentialRefId: secret.id, credentialRevision: secret.revision, credentialFingerprint: fingerprint(config), appFingerprint: hash(appId),
         botIdentityRef: `remote_bot_${hash(botInfo.openId)}`, ...(application.tenantKey ? { tenantRef: `remote_tenant_${hash(application.tenantKey)}` } : {}), appIdMatch: true, checkedAt: at, expiresAt });
+      const currentChatIds = new Set(chats.map(chat => chat.chatId));
       for (const chat of chats) {
         const beforeChat = tx.remoteChatFacts.getByNaturalKey(owner.channelBotId, chat.chatId);
         const fact = tx.remoteChatFacts.upsert({ id: beforeChat?.id ?? `live_chat_${hash(`${appId}\0${chat.chatId}`)}`, expectedRevision: beforeChat?.revision ?? 0, channelBotId: owner.channelBotId, externalChatId: chat.chatId,
           membershipState: 'member', chatType: chat.chatMode === 'topic' ? 'topic_group' : 'group', observedAt: at, lastSuccessAt: at,
           credentialRefId: secret.id, credentialRevision: secret.revision, credentialFingerprint: fingerprint(config), identityFactId: identity.id, identityRevision: identity.revision, expiresAt });
         tx.remoteChatFacts.update(fact.id, { expectedRevision: fact.revision, displayName: chat.name });
+      }
+      for (const previous of previousFacts) {
+        if (previous.membershipState !== 'member' || currentChatIds.has(previous.externalChatId)) continue;
+        const beforeChat = tx.remoteChatFacts.getByNaturalKey(owner.channelBotId, previous.externalChatId);
+        if (!beforeChat || beforeChat.membershipState !== 'member') continue;
+        tx.remoteChatFacts.upsert({
+          id: beforeChat.id,
+          expectedRevision: beforeChat.revision,
+          channelBotId: owner.channelBotId,
+          externalChatId: beforeChat.externalChatId,
+          membershipState: 'not_member',
+          chatType: beforeChat.chatType,
+          ...(beforeChat.displayName ? { displayName: beforeChat.displayName } : {}),
+          observedAt: at,
+          ...(beforeChat.lastSuccessAt ? { lastSuccessAt: beforeChat.lastSuccessAt } : {}),
+          credentialRefId: secret.id,
+          credentialRevision: secret.revision,
+          credentialFingerprint: fingerprint(config),
+          identityFactId: identity.id,
+          identityRevision: identity.revision,
+          expiresAt
+        });
       }
     });
     return this.groups();

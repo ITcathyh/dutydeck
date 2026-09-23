@@ -603,6 +603,78 @@ describe('Lark card service', () => {
     expect(fetcher.mock.calls[1]?.[0]).toContain('/open-apis/im/v1/chats?user_id_type=open_id&page_size=100&sort_type=ByActiveTimeDesc');
   });
 
+  it('passes sort_type to the chats API when specified, defaulting to ByActiveTimeDesc', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [], has_more: false } }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [], has_more: false } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await service.listChats(undefined, 'ByCreateTimeAsc');
+    expect(fetcher.mock.calls[1]?.[0]).toContain('sort_type=ByCreateTimeAsc');
+    await service.listChats();
+    expect(fetcher.mock.calls[2]?.[0]).toContain('sort_type=ByActiveTimeDesc');
+  });
+
+  it('filters out dissolved chats while retaining normal and status-missing chats', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({
+        code: 0,
+        data: {
+          items: [
+            { chat_id: 'oc_dissolved_save', name: '解散保留群', chat_mode: 'group', chat_status: 'dissolved_save' },
+            { chat_id: 'oc_dissolved', name: '已解散群', chat_mode: 'group', chat_status: 'dissolved' },
+            { chat_id: 'oc_normal', name: '正常群', chat_mode: 'group', chat_status: 'normal' },
+            { chat_id: 'oc_missing', name: '无状态群', chat_mode: 'group' }
+          ],
+          has_more: false
+        }
+      }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const result = await service.listChats();
+    expect(result.items).toEqual([
+      { chatId: 'oc_normal', name: '正常群', chatMode: 'group', chatStatus: 'normal', external: false },
+      { chatId: 'oc_missing', name: '无状态群', chatMode: 'group', external: false }
+    ]);
+  });
+
+  it('resolves member names without throwing when dissolved chats are present', async () => {
+    const fetcher = vi.fn(async (url: string) => {
+      const href = String(url);
+      if (href.includes('tenant_access_token')) {
+        return response({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      }
+      if (href.includes('/open-apis/im/v1/chats?')) {
+        return response({
+          code: 0,
+          data: {
+            items: [
+              { chat_id: 'oc_ghost', name: '幽灵群', chat_mode: 'group', chat_status: 'dissolved_save' },
+              { chat_id: 'oc_live', name: '活跃群', chat_mode: 'group', chat_status: 'normal' }
+            ],
+            has_more: false
+          }
+        });
+      }
+      if (href.includes('/open-apis/im/v1/chats/oc_ghost/members')) {
+        return response({ code: 232009, msg: 'Your request specifies a chat which has already been dissolved.' }, 400);
+      }
+      if (href.includes('/open-apis/im/v1/chats/oc_live/members')) {
+        return response({
+          code: 0,
+          data: {
+            items: [{ member_id: 'ou_zhang', member_id_type: 'open_id', name: '张三' }],
+            has_more: false
+          }
+        });
+      }
+      return response({ code: 99999, msg: 'unexpected URL ' + href }, 500);
+    });
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    const resolved = await service.resolveChatUsersByNames(['张三']);
+    expect(resolved).toEqual([{ openId: 'ou_zhang', name: '张三' }]);
+  });
+
   it('rejects an ambiguous typed member name instead of authorizing the wrong open_id', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
