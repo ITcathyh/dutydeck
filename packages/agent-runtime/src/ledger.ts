@@ -68,6 +68,13 @@ export class LocalDriverLedger {
     this.records.set(driver, record); // Retain the original handle before any persistence can throw.
     if (!record.controlled) this.identify(record);
   }
+  /** The recovery handshake has verified this original turn before transferring its holder. */
+  adopt(fence: SessionFence, options: ExecutionOptions, resource: DriverResource, driver: AgentDriver) {
+    const record: OwnedDriver = { fence, options: { ...options }, resourceId: resource.resourceId,
+      operationId: resource.parentResourceId!, identityId: resource.identity!.identityId,
+      driver, creationSettled: true, context: localOnlyDriverContext(fence, resource.resourceId) };
+    this.records.set(driver, record);
+  }
   get(driver: AgentDriver) { return this.records.get(driver); }
   private row(record: OwnedDriver, id: string): DriverResource {
     const row = this.repository.getResources(record.fence.sessionId).find(resource => resource.resourceId === id);

@@ -75,6 +75,7 @@ export class PtyCliDriver implements AgentDriver {
   /** Runtime shutdown preserves active/unknown sessions; proven idle sessions
    * may be stopped when their native context can be restored. */
   private detachOnStop = false;
+  private detachedForShutdown = false;
   private exitReported = false;
   /** 一轮任务进行中：send() 置 true，completed 发出后置 false。 */
   private turnActive = false;
@@ -318,7 +319,7 @@ export class PtyCliDriver implements AgentDriver {
     return { kind: 'pty-jsonl-v1', turnId, transcript: this.transcript.checkpoint() };
   }
 
-  async recover(state: DriverTurnRecovery): Promise<void> {
+  async recover(state: DriverTurnRecovery, onAttached?: () => Promise<void>): Promise<void> {
     if (this.started || this.stopped) {
       throw this.rejectRecovery('PTY turn recovery requires a fresh driver');
     }
@@ -355,6 +356,7 @@ export class PtyCliDriver implements AgentDriver {
     try {
       this.reattachTmux(sessionName, false, state.transcript);
       this.markTmuxReattached();
+      await onAttached?.();
     } catch (err) {
       this.turnActive = false;
       this.awaitingRecoveryTranscript = false;
@@ -380,6 +382,9 @@ export class PtyCliDriver implements AgentDriver {
     // waiting for turn completion. Fence that submission before signalling the
     // backend so a late poll or delayed Enter cannot submit after interrupt.
     const interruptError = new Error('Driver interrupted');
+    if (this.backend instanceof TmuxBackend) {
+      try { this.backend.setDutydeckMetadata('turn_id', 'interrupted'); } catch { /* Runtime's durable interrupt intent also prevents adoption. */ }
+    }
     this.cancelActiveSubmission(interruptError);
     this.turnWriteReject?.(interruptError);
     this.interruptPending = this.turnActive;
@@ -598,6 +603,9 @@ export class PtyCliDriver implements AgentDriver {
     const preservePersistentSession = this.detachOnStop
       && !options.discardSession
       && tmuxBackend !== undefined;
+    if (!preservePersistentSession && !this.recoveryRejected && tmuxBackend) {
+      try { tmuxBackend.setDutydeckMetadata('turn_id', 'stopped'); } catch { /* Exit proof still required below. */ }
+    }
     const stopReason = preservePersistentSession ? new DriverDetachedError() : new Error('Driver stopped');
     if (this.turnActive) {
       this.turnActive = false;
@@ -620,7 +628,10 @@ export class PtyCliDriver implements AgentDriver {
       if (this.recoveryRejected) {
         // Nothing was attached: this is a foreign/mismatched live pane which
         // recovery deliberately left untouched.
-      } else if (preservePersistentSession) tmuxBackend.detach();
+      } else if (preservePersistentSession) {
+        tmuxBackend.detach();
+        this.detachedForShutdown = true;
+      }
       else if (tmuxBackend && this.processProbe) {
         // Clean up only our local capture; never redirect a tmux command via
         // mutable process.env or mark a failed/unknown stop as gone.
@@ -640,6 +651,8 @@ export class PtyCliDriver implements AgentDriver {
     // onExit 由 backend 的 exit 事件驱动（kill 会触发）；若后端已自行退出，
     // handleExit 早已回调过，exitReported 保证恰好一次。
   }
+
+  isDetachedForShutdown(): boolean { return this.detachedForShutdown; }
 
   async isStopped(): Promise<boolean> {
     if (!this.stopped || this.recoveryRejected || (this.detachOnStop && !this.tmuxExitProof)) return false;
