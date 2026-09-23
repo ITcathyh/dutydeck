@@ -3,6 +3,7 @@ import { createWorkbenchFetch } from '../workbench-fetch.js';
 import { RuntimeError, type AcceptedTask, type RepositoryBundle, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import type { WorkItemService } from '../work-items.js';
+import { leaderReviewStepId, leaderReviewTitle } from '../leader-delegation.js';
 import type { WorkItemInteractions, WorkItemRequest } from '../work-item-interactions.js';
 import { readLarkConfig, type StoredLarkConfig } from './config.js';
 import { createLarkCardService, type LarkCardService } from './service.js';
@@ -64,6 +65,14 @@ export interface WorkItemElementOptions {
   agentNames?: Record<string, string>;
 }
 
+/** 分层协作的验收结论写在产物首行；执行完成但验收未通过或无法识别时，卡头不能写「已完成」。 */
+export function reviewStatusLabel(item: WorkItem): string | undefined {
+  const output = item.plan.steps.find(step => step.id === item.plan.outputStepId);
+  if (item.status !== 'completed' || output?.id !== leaderReviewStepId || output.title !== leaderReviewTitle) return undefined;
+  const verdict = /^验收结论：\s*(通过|需返修|缺少信息)/.exec(item.output?.text.trim() ?? '')?.[1];
+  return verdict === '通过' ? undefined : `验收${verdict ?? '待核对'}`;
+}
+
 export function researchWorkPlan(agents: string[]): WorkPlan {
   if (!agents.length) throw new RuntimeError('WORK_ITEM_NO_AGENT', '请先配置一个 Agent', 409);
   return {
@@ -120,7 +129,7 @@ export function workItemElements(item: WorkItem, requests: WorkItemRequest[] = [
     ]
   });
   const elements: Array<Record<string, any>> = [
-    { tag: 'markdown', content: `**${labels[item.status] ?? item.status} · ${item.title}**\n\n${item.goal.slice(0, 2000)}` }
+    { tag: 'markdown', content: `**${reviewStatusLabel(item) ?? labels[item.status] ?? item.status} · ${item.title}**\n\n${item.goal.slice(0, 2000)}` }
   ];
   // 闸门：确认前只展示计划本身（分工、依赖、工作区），不展示执行期的重试/回答入口。
   if (item.status === 'awaiting_confirmation') {
@@ -259,6 +268,7 @@ export class LarkWorkbench {
       state: this.cardState(item),
       // 待确认不是「执行中」：换标题、去掉转圈图标、转成停下来等人的色带，卡头别和卡身说反话。
       ...(item.status === 'awaiting_confirmation' ? { statusLabel: '待确认', awaitingHuman: true } : {}),
+      ...(reviewStatusLabel(item) ? { statusLabel: reviewStatusLabel(item) } : {}),
       readOnly: true, retryable: false, taskId: item.id, taskName: item.title, sessionId: item.parentSessionId,
       // S7：有配置就透传 Web 出口，未配置时 buildLarkCard 不渲染，不做公网兜底。
       webBaseUrl: config.webBaseUrl, elements: workItemElements(item, requests, { agentNames: await this.agentNames() })
@@ -311,6 +321,16 @@ export class LarkWorkbench {
     const config = await readLarkConfig(this.repos.config, target.appId);
     if (!config) throw new RuntimeError('WORK_ITEM_BOT_MISSING', '原机器人配置已不可用', 409);
     await this.send(item, target, config, `work_${digest(`${item.id}\0${item.output?.digest}`).slice(0, 40)}`);
+  }
+
+  /** 分层协作的文字进展，回复到该目标固定的原话题；目标未固定交付位置时不发。 */
+  async notice(workId: string, text: string, key: string) {
+    const encoded = await this.repos.config.get(`workbench.target.${workId}`);
+    if (!encoded) return;
+    const target = JSON.parse(encoded) as Target;
+    const config = await readLarkConfig(this.repos.config, target.appId);
+    if (!config) return;
+    await this.client(config).replyText({ messageId: target.replyMessageId, replyInThread: target.replyInThread, text, idempotencyKey: `dlg_${digest(key).slice(0, 40)}` });
   }
 
   /**

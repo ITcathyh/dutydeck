@@ -23,6 +23,8 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 const last = (step: WorkStep) => step.attempts.at(-1);
 const settled = (step: WorkStep) => ['completed', 'skipped'].includes(step.status);
 const fingerprint = (value: unknown) => hash(JSON.stringify(value));
+/** Stable WorkItem id, so callers can pin delivery before the plan exists. */
+export const workItemId = (parentSessionId: string, actorId: string | undefined, idempotencyKey: string) => 'work_' + hash(JSON.stringify([parentSessionId, actorId, idempotencyKey]));
 interface FrozenAgent { fingerprint: string; permissionMode: PermissionMode }
 interface StoredWork {
   item: WorkItem;
@@ -194,14 +196,17 @@ export class WorkItemService {
     if (admission && admission.taskId !== task.id) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Unexpected task for work attempt', 403);
     if (attempt?.taskId !== task.id) throw new RuntimeError('WORK_ITEM_TASK_REVOKED', 'Unexpected task for work attempt', 403);
   }
-  /** confirmation 显式为 true/false 时覆盖默认闸门判定；工具与 HTTP 入口一律不传，只走默认判定。 */
-  async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string, confirmation?: boolean): Promise<WorkItem> {
+  /**
+   * confirmation 显式为 true/false 时覆盖默认闸门判定；工具与 HTTP 入口一律不传，只走默认判定。
+   * parentTaskId 供父任务结束后才创建的计划沿用原任务的风险策略；缺省取当前活动任务。
+   */
+  async create(parentSessionId: string, input: CreateWorkItemInput, actorId?: string, confirmation?: boolean, parentTaskId?: string): Promise<WorkItem> {
     input = createWorkItemSchema.parse(input);
     const parent = await this.access(parentSessionId, actorId);
     if (parent.archivedAt || ['stopped', 'failed'].includes(parent.state)) throw new RuntimeError('WORK_ITEM_PARENT_INACTIVE', 'Parent session is not runnable', 409);
     const gated = confirmation ?? Boolean(await this.options.requireConfirmation?.(parent));
     const actor = this.executionActor(parent, actorId!);
-    const id = 'work_' + hash(JSON.stringify([parentSessionId, actorId, input.idempotencyKey]));
+    const id = workItemId(parentSessionId, actorId, input.idempotencyKey);
     return this.serial(id, async () => {
       const existing = await this.repos.config.get(PREFIX + id);
       const inputHash = fingerprint(input);
@@ -219,8 +224,8 @@ export class WorkItemService {
         const permissionMode = rank[Math.min(rank.indexOf(parent.permissionMode ?? 'ask'), rank.indexOf(agent.permissionMode))]!;
         agents[agent.id] = { fingerprint: fingerprint(agent), permissionMode };
       }
-      const currentTask = this.options.runtime.getActiveTaskContext(parentSessionId);
-      const parentTask = currentTask ? (await this.repos.tasks.listBySession(parentSessionId)).find(task => task.id === currentTask.taskId) : undefined;
+      const taskId = parentTaskId ?? this.options.runtime.getActiveTaskContext(parentSessionId)?.taskId;
+      const parentTask = taskId ? (await this.repos.tasks.listBySession(parentSessionId)).find(task => task.id === taskId) : undefined;
       const timestamp = time();
       const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: gated ? 'awaiting_confirmation' : 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 } };
       const record: StoredWork = { item, actorId: actorId!, actor, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy };
@@ -235,6 +240,8 @@ export class WorkItemService {
     return (await this.records()).filter(record => record.item.parentSessionId === parentSessionId && (record.actorId === actorId || actorId === installationOwnerTaskActor)).map(record => this.view(record));
   }
   async get(parentSessionId: string, id: string, actorId?: string): Promise<WorkItem> { return this.view((await this.owned(parentSessionId, id, actorId)).value); }
+  /** Existence only, without authorization: recovery bookkeeping for a caller that derived the id itself. */
+  async exists(id: string): Promise<boolean> { return Boolean(await this.repos.config.get(PREFIX + id)); }
 
   /** 人工确认后计划才入队；确认者走与其它目标操作相同的授权判定。 */
   async confirm(parentSessionId: string, id: string, expectedRevision: number, actorId?: string): Promise<WorkItem> {
@@ -507,6 +514,7 @@ export class WorkItemService {
       }
       if (attempt.status === 'preparing') await this.launch(state, step);
       if (step.status === 'running') await this.observeAttempt(state, step);
+      this.reclaim(record, step);
     }
     if (record.item.steps.some(step => step.status === 'blocked' || step.status === 'cancelled')) {
       record.item.status = 'blocked'; record.item.error = record.item.error ?? record.item.steps.find(step => step.status === 'blocked' || step.status === 'cancelled')?.attempts.at(-1)?.error ?? 'An execution requires reconciliation';
@@ -700,6 +708,16 @@ export class WorkItemService {
       state.value.item.status = 'failed'; await this.write(state); return;
     }
     await this.blockAttempt(state, step, 'reconcile_required', `Execution ${result.outcome}; previous resources and external effects require reconciliation`);
+  }
+  /**
+   * A settled child never takes another task (a retry starts a new attempt), so stop it once its result is saved.
+   * The stop runs off the tick and is not recorded (cancel and halt skip settled steps), so a slow child neither
+   * holds other work nor changes the revision a card was just rendered with. Runtime idle cleanup remains the fallback.
+   */
+  private reclaim(record: StoredWork, step: WorkStep) {
+    const attempt = last(step); const actor = record.actor;
+    if (!['completed', 'failed'].includes(step.status) || !attempt?.sessionId || !actor || record.stoppedAttempts.includes(attempt.id)) return;
+    this.effect('reclaim:' + attempt.id, async () => { await bounded(this.options.runtime.stopWorkItemSession(attempt.sessionId!, actor), 10_000); });
   }
   private async haltBlocked(state: RecordState) {
     for (const step of state.value.item.steps) {

@@ -47,6 +47,9 @@ export type BotDraft = {
   memoryAutoExtract: boolean;
   memoryAgentId: string;
   memoryModel: string;
+  executionMode: 'single' | 'layered';
+  leaderAgentId: string;
+  workerAgentIds: string[];
   riskControlMode: 'off' | 'guidance' | 'enforced';
   highRiskPattern: string;
 };

@@ -25,6 +25,23 @@ export async function workItemRiskPolicy(repos: RepositoryBundle, groups: LarkGr
   return { enabled: true, authorized, pattern: config.highRiskPattern || defaultHighRiskPattern, reason: '目标发起人没有此高风险操作权限' };
 }
 
+/**
+ * 群里用与话题会话不同的 Agent 需要 run.change_agent（管理员）权限。
+ * 分层协作的 Leader 与 Worker 是管理员在 Bot 配置里选定的，能发起任务的成员直接可用。
+ */
+export async function authorizeWorkItemAgent(repos: RepositoryBundle, groups: LarkGroupManager, authorize: (sessionId: string, actorId: string) => Promise<boolean>, sessionId: string, actorId: string, agentId: string): Promise<boolean> {
+  const parent = await repos.sessions.get(sessionId);
+  if (!parent || !await authorize(sessionId, actorId)) return false;
+  if (parent.agentId === agentId || parent.source !== 'lark') return true;
+  const [appId, chatId, chatType] = parent.sourceId?.split(':') ?? [];
+  if (chatType !== 'group' || !appId || !chatId) return true;
+  const config = await readLarkConfig(repos.config, appId);
+  if (config?.executionMode === 'layered' && [config.leaderAgentId, ...config.workerAgentIds ?? []].includes(agentId)) return true;
+  const owner = actorId === installationOwnerTaskActor;
+  const decision = await groups.authorize(appId, chatId, owner ? undefined : actorId, 'run.change_agent', sessionId, { installationOwner: owner });
+  return decision?.allowed ?? true;
+}
+
 /** Recheck the approving human, even if the original native request is still pending. */
 export async function authorizeWorkItemInteraction(repos: RepositoryBundle, groups: LarkGroupManager, parentSessionId: string, actorId: string, action: 'high_risk.execute' | 'terminal.write' | 'terminal.read', env: NodeJS.ProcessEnv = process.env, fetcher: typeof globalThis.fetch = globalThis.fetch): Promise<boolean> {
   const parent = await repos.sessions.get(parentSessionId);

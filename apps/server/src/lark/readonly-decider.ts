@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
-import { RuntimeError, type AgentEvent, type CollaborationSnapshot } from '@dutydeck/shared';
+import { RuntimeError, type AgentEvent, type CollaborationSnapshot, type PermissionMode } from '@dutydeck/shared';
 import { boundCollaborationSnapshot } from '../collaboration-context.js';
 import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
 import type { StoredLarkConfig } from './config.js';
@@ -129,45 +129,50 @@ export class ReadonlyParticipationDecider implements ParticipationDecider {
     return parseParticipationResponse(text);
   }
   private async runPrompt(config: StoredLarkConfig, snapshot: CollaborationSnapshot, prompt: string, phase: 'decision' | 'response'): Promise<string> {
-    const runtime = this.options.runtime;
     const agentId = config.memoryAgentId ?? config.defaultAgentId;
     if (!agentId) throw new RuntimeError('COLLABORATION_DECIDER_UNAVAILABLE', 'No decision Agent configured', 409);
     const key = createHash('sha256').update(JSON.stringify(snapshot.scope)).digest('hex');
     const cwd = join(this.options.workspaceRoot, key);
     await mkdir(cwd, { recursive: true });
     // Each phase gets a fresh session so prior model context cannot bypass the frozen snapshot.
-    const session = await runtime.start({ agentId, cwd, model: config.memoryModel ?? config.defaultModel, permissionMode: 'deny-all', source: `lark-${phase}`, sourceId: key });
-    let taskId: string | undefined;
-    const buffered: AgentEvent[] = [];
-    let settle!: (status: string) => void;
-    const terminal = new Promise<string>(resolve => { settle = resolve; });
-    const receive = (event: AgentEvent) => {
-      if (event.type !== 'task') return;
-      const task = (event.data as { task?: { id?: string; status?: string } })?.task;
-      if (task && task.id === taskId && ['completed', 'failed', 'cancelled', 'interrupted'].includes(task.status ?? '')) settle(task.status!);
-    };
-    const unsubscribe = runtime.subscribe(session.id, event => { if (taskId) receive(event); else buffered.push(event); });
-    const timer = setTimeout(() => settle('timeout'), this.options.timeoutMs ?? 60_000);
-    try {
-      taskId = (await runtime.dispatch(session.id, prompt, 'queue', prompt)).id;
-      buffered.forEach(receive);
-      const status = await terminal;
-      if (status !== 'completed') {
-        await runtime.interrupt(session.id, taskId).catch(() => undefined);
-        throw new RuntimeError('COLLABORATION_DECISION_FAILED', `Decision ended with ${status}`, 409);
-      }
-      for (let index = 0; index < 3; index++) {
-        if (index) await new Promise(resolve => setTimeout(resolve, 100));
-        const attempt = this.options.repos.execution.getTaskExecution(taskId)?.attempts.find(item => item.number === 1);
-        if (!attempt) continue;
-        const result = readAttemptResult(this.options.repos, session.id, taskId, attempt.attemptId);
-        if (result.status === 'settled' && result.result.outcome === 'completed') return result.result.output.text;
-      }
-      throw new RuntimeError('COLLABORATION_RESULT_UNAVAILABLE', 'Decision has no settled Attempt result', 409);
-    } finally {
-      clearTimeout(timer); unsubscribe();
-      // Stop the dedicated session when supported; never leave a permission wait behind.
-      await (runtime as LarkMemoryPipelineRuntime & { stop?(id: string): Promise<unknown> }).stop?.(session.id).catch(() => undefined);
+    return runReadonlyPrompt(this.options.runtime, this.options.repos, { agentId, cwd, model: config.memoryModel ?? config.defaultModel, source: `lark-${phase}`, sourceId: key, prompt, timeoutMs: this.options.timeoutMs ?? 60_000 });
+  }
+}
+
+/** Runs one prompt in a fresh session (deny-all unless the caller passes a mode) and returns its settled Attempt text; the session is always stopped. */
+export async function runReadonlyPrompt(runtime: LarkMemoryPipelineRuntime, repos: AttemptResultRepositories, input: { agentId: string; cwd: string; model?: string; permissionMode?: PermissionMode; source: string; sourceId: string; prompt: string; timeoutMs: number }): Promise<string> {
+  const { prompt } = input;
+  const session = await runtime.start({ agentId: input.agentId, cwd: input.cwd, model: input.model, permissionMode: input.permissionMode ?? 'deny-all', source: input.source, sourceId: input.sourceId });
+  let taskId: string | undefined;
+  const buffered: AgentEvent[] = [];
+  let settle!: (status: string) => void;
+  const terminal = new Promise<string>(resolve => { settle = resolve; });
+  const receive = (event: AgentEvent) => {
+    if (event.type !== 'task') return;
+    const task = (event.data as { task?: { id?: string; status?: string } })?.task;
+    if (task && task.id === taskId && ['completed', 'failed', 'cancelled', 'interrupted'].includes(task.status ?? '')) settle(task.status!);
+  };
+  const unsubscribe = runtime.subscribe(session.id, event => { if (taskId) receive(event); else buffered.push(event); });
+  const timer = setTimeout(() => settle('timeout'), input.timeoutMs);
+  try {
+    taskId = (await runtime.dispatch(session.id, prompt, 'queue', prompt)).id;
+    buffered.forEach(receive);
+    const status = await terminal;
+    if (status !== 'completed') {
+      await runtime.interrupt(session.id, taskId).catch(() => undefined);
+      throw new RuntimeError('COLLABORATION_DECISION_FAILED', `Decision ended with ${status}`, 409);
     }
+    for (let index = 0; index < 3; index++) {
+      if (index) await new Promise(resolve => setTimeout(resolve, 100));
+      const attempt = repos.execution.getTaskExecution(taskId)?.attempts.find(item => item.number === 1);
+      if (!attempt) continue;
+      const result = readAttemptResult(repos, session.id, taskId, attempt.attemptId);
+      if (result.status === 'settled' && result.result.outcome === 'completed') return result.result.output.text;
+    }
+    throw new RuntimeError('COLLABORATION_RESULT_UNAVAILABLE', 'Decision has no settled Attempt result', 409);
+  } finally {
+    clearTimeout(timer); unsubscribe();
+    // Stop the dedicated session when supported; never leave a permission wait behind.
+    await (runtime as LarkMemoryPipelineRuntime & { stop?(id: string): Promise<unknown> }).stop?.(session.id).catch(() => undefined);
   }
 }

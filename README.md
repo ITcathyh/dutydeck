@@ -208,6 +208,7 @@ Dutydeck 为每个聊天（私聊或群聊独立隔离）维护一份持久化�
   - `observe`：默默观察群聊上下文与讨论，积累背景知识，但绝不主动发言。
   - `selective`：按需参与。未 @ 时默认安静；仅在明确叫机器人帮忙、可靠续问，或有充分证据的紧迫风险需要立即提醒时回复。群友问答、泛问、进度和致谢不插话；不确定时不回复、不贴确认表情。
 - **处理状态与并发**：决定回复后在源消息加 `OK` 表情，生成并发送回复后移除；无需回复时保持静默。不同群独立处理，同群按顺序处理，尚未接下的连发消息会合并判断。
+- **分层协作执行方式**：在机器人设置的「执行方式」选择「分层协作」并指定 Leader 与 Worker 后，被 @ 的默认 Agent 当 PMO 负责接待和答复，改代码、跑测试这类任务写成简报交给 Leader；Leader 只读拆解并指派 Worker，最后由 Leader 验收，结果回到原话题。只在群聊生效，计划要点「开始执行」才派发。详见 [Tag 分层协作](docs/tag-layered-execution.md)。
 - **自然语言定时与持续委托**：
   - `@机器人 记录一个待办：明天下午 17:00 前提交发布单。`
   - `@机器人 每天工作日 18:00 总结本群今天的研发进展发到群里，直到我取消。`
@@ -439,6 +440,7 @@ dutydeck autostart disable  # 移除开机自启
 
 - [端到端测试与验收矩阵规范](tests/e2e/README.md)
 - [通用群协作设计与实现](docs/generic-collaboration-implementation.md)
+- [Tag 分层协作：PMO + Leader + Worker](docs/tag-layered-execution.md)
 - [群协作扩展技术规范](docs/collaboration-extensions.md)
 - [飞书会话长期记忆架构设计](docs/lark-memory-design.md)
 - [旧版数据迁移 CLI 使用指南](docs/legacy-import-cli.md)

@@ -60,6 +60,9 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     memoryAutoExtract: bot.memoryAutoExtract ?? true,
     memoryAgentId: bot.memoryAgentId ?? '',
     memoryModel: bot.memoryModel ?? '',
+    executionMode: bot.executionMode ?? 'single',
+    leaderAgentId: bot.leaderAgentId ?? '',
+    workerAgentIds: bot.workerAgentIds ?? [],
     riskControlMode: bot.riskControlMode ?? 'off',
     highRiskPattern: bot.highRiskPattern ?? ''
   };
@@ -83,6 +86,9 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   if ((original.memoryAutoExtract ?? true) !== draft.memoryAutoExtract) return true;
   if ((original.memoryAgentId ?? '') !== draft.memoryAgentId) return true;
   if ((original.memoryModel ?? '') !== draft.memoryModel) return true;
+  if ((original.executionMode ?? 'single') !== draft.executionMode) return true;
+  if ((original.leaderAgentId ?? '') !== draft.leaderAgentId) return true;
+  if ([...(original.workerAgentIds ?? [])].sort().join('\n') !== [...draft.workerAgentIds].sort().join('\n')) return true;
   if ((original.riskControlMode ?? 'off') !== draft.riskControlMode) return true;
   if ((original.highRiskPattern ?? '') !== draft.highRiskPattern) return true;
   return false;
@@ -92,6 +98,12 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
 function sameDraftContent(left: BotDraft, right: BotDraft): boolean {
   const strip = ({ baseRevision: _ignored, ...rest }: BotDraft) => rest;
   return JSON.stringify(strip(left)) === JSON.stringify(strip(right));
+}
+
+/** 能当 Leader 的 Agent：旧版 PTY 不行；终端模式没有 deny-all，要机器人和该 Agent 都是完全信任。与服务端保存校验一致。 */
+function leaderUsable(agent: Agent, bot: LarkBotConfig): boolean {
+  if (agent.protocol === 'pty') return false;
+  return agent.protocol !== 'pty-cli' || (agent.permissionMode === 'full-trust' && bot.permissionMode !== 'ask');
 }
 
 /** 一次保存提交所固定下来的东西。见 saveMutation 的注释。 */
@@ -231,6 +243,9 @@ export function BotManagement({
       memoryAutoExtract: draft.memoryAutoExtract,
       memoryAgentId: draft.memoryAgentId,
       memoryModel: draft.memoryModel,
+      executionMode: draft.executionMode,
+      leaderAgentId: draft.leaderAgentId,
+      workerAgentIds: draft.workerAgentIds,
       riskControlMode: draft.riskControlMode,
       highRiskPattern: draft.highRiskPattern,
       fullTrustConfirmed,
@@ -618,6 +633,73 @@ export function BotManagement({
                     <p className="mt-1.5 text-caption text-warning">
                       此模式需要在高级设置开启「允许它读取群聊内容」；Tag 回复还需要「允许它主动往群里发消息」。当前权限尚未满足。
                     </p>
+                  )}
+                </div>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-execution-mode">
+                      执行方式
+                    </label>
+                    <Select
+                      id="bot-execution-mode"
+                      value={currentDraft.executionMode}
+                      onChange={e => updateCurrentDraft({ executionMode: e.target.value as BotDraft['executionMode'] })}
+                    >
+                      <option value="single">单 Agent：默认 Agent 直接完成</option>
+                      <option value="layered">分层协作：PMO + Leader + Worker</option>
+                    </Select>
+                    <p className="mt-1.5 text-caption text-subtle">
+                      分层协作只在群聊生效，单聊仍由默认 Agent 直接处理。群聊里默认 Agent 当 PMO 负责接待和答复；改代码、跑测试这类任务写成简报交给 Leader，Leader 只读拆解并指派 Worker，最后由 Leader 验收。计划要点「开始执行」才派发，每个 Worker 完成后自动停止它的会话。
+                    </p>
+                  </div>
+                  {currentDraft.executionMode === 'layered' && (
+                    <>
+                      <div>
+                        <label className="mb-1.5 block text-caption font-medium text-secondary" htmlFor="bot-leader-agent">
+                          Leader Agent
+                        </label>
+                        <Select
+                          id="bot-leader-agent"
+                          value={currentDraft.leaderAgentId}
+                          onChange={e => updateCurrentDraft({ leaderAgentId: e.target.value })}
+                        >
+                          <option value="">选择 Leader Agent</option>
+                          {agents.filter(agent => leaderUsable(agent, activeBot)).map(agent => (
+                            <option key={agent.id} value={agent.id}>{agent.name}</option>
+                          ))}
+                          {/* 已选的 Leader 被删或不能用时照样列出，否则下拉框显示空选项、保存却被拒。 */}
+                          {currentDraft.leaderAgentId && !agents.some(agent => agent.id === currentDraft.leaderAgentId && leaderUsable(agent, activeBot)) && (
+                            <option value={currentDraft.leaderAgentId}>{currentDraft.leaderAgentId}（不可用，请重选）</option>
+                          )}
+                        </Select>
+                        <p className="mt-1.5 text-caption text-subtle">
+                          ACP Agent 以 deny-all 规划。终端模式 Agent 以完全信任规划和验收，「不改文件」只靠提示词约束；机器人为完全信任、且该 Agent 在 DUTYDECK_AGENTS_JSON 里设为 full-trust 时才可选。
+                        </p>
+                      </div>
+                      <fieldset>
+                        <legend className="mb-1.5 block text-caption font-medium text-secondary">Worker Agent（最多 8 个）</legend>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {/* 已删除的 Worker 也列出来，否则取消不掉，保存一直被拒。 */}
+                          {[...agents, ...currentDraft.workerAgentIds.filter(id => !agents.some(agent => agent.id === id)).map(id => ({ id, name: `${id}（已不存在）` }))].map(agent => (
+                            <label key={agent.id} className="flex items-center gap-2 text-caption">
+                              <input
+                                type="checkbox"
+                                checked={currentDraft.workerAgentIds.includes(agent.id)}
+                                onChange={e => updateCurrentDraft({ workerAgentIds: e.target.checked ? [...currentDraft.workerAgentIds, agent.id] : currentDraft.workerAgentIds.filter(id => id !== agent.id) })}
+                                className="rounded border-default text-action focus:ring-action"
+                              />
+                              <span>{agent.name}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                      {(!currentDraft.groupToolsEnabled || !currentDraft.leaderAgentId || !currentDraft.workerAgentIds.length) && (
+                        <p className="text-caption text-warning">
+                          分层协作需要选择 Leader 和至少一个 Worker，并在高级设置开启「允许它读取群聊内容」。
+                        </p>
+                      )}
+                    </>
                   )}
                 </div>
 
