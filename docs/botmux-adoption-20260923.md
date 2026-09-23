@@ -1,7 +1,6 @@
 # Botmux 改进吸收交付记录（2026-09-23）
 
-[评估报告](botmux-review-20260923.md) 提出的 6 项改进，加上 2 项低优先级改进，都已经在独立 worktree `../dutydeck-bm0923-integration`（分支 `feat/bm0923-integration`，基线 master `5bce4ff`）实现完毕，并通过了独立审查和复核。目前改动都在工作区里，没有提交，没有合入 master，也没有部署。线上 unit 需要按下文的迁移步骤手工切换。
-
+[评估报告](botmux-review-20260923.md) 提出的 6 项改进和 2 项低优先级改进已经全部实现，通过了独立审查和复核，以 `9392247..f9cc817` 这 6 个提交快进合入 master。22:12 部署到主服务（4310），并按下文步骤切换到了新的 systemd unit。Tag（4311）只改了 unit 的重启策略并执行了 daemon-reload，没有重启，也没有同步代码，仍在运行 `5bce4ff` 的构建。
 ## 改动
 
 | 改动 | 用户能感知到的变化 |
@@ -48,9 +47,9 @@
   - **tmux**：带着陈旧全局变量启动的 server，新建的 pane 里不再有这些变量；PATH、HOME 和本次传入的变量都正常。
 - 独立审查：第一轮提出 2 条 high、3 条 medium、7 条 low，采纳了其中 7 条并已修复。复核确认这 7 条都已解决，新发现 2 条 low，其中 N1 已修复，N2 不修（原因见上表）。审查报告在 `/data00/home/huangyuhang.edu/dispatch-bm0923/review-report.md`。
 
-## 主服务迁移步骤（未执行）
+## 主服务迁移步骤（2026-09-23 22:12 已执行）
 
-这些步骤要在分支合入并构建之后执行，需要选一个能接受约 10 秒中断的时间。下文中 `NODE22` 指 `/data00/home/huangyuhang.edu/.local/share/botmux/node-v22.23.1-linux-x64/bin/node`，`CLI` 指 `apps/server/dist/cli.js`。
+本次执行前，主服务没有正在运行的任务；切换时服务中断约 7 秒。旧 unit 备份在 `~/dutydeck.service.oneshot.bak-20260923`，旧构建备份在 `.dutydeck/daemon/backup-20260923-2215/`。下文中 `NODE22` 指 `/data00/home/huangyuhang.edu/.local/share/botmux/node-v22.23.1-linux-x64/bin/node`，`CLI` 指 `apps/server/dist/cli.js`。
 
 1. 把旧 unit 备份到 unit 目录之外：`cp ~/.config/systemd/user/dutydeck.service ~/dutydeck.service.oneshot.bak`。
 2. 把 `EnvironmentFile` 移到 drop-in，并从主文件里删掉。线上的 agent 配置来自这个文件；如果不先移走，enable 会拒绝执行。
@@ -78,9 +77,9 @@
 3. 回滚代码，执行 `pnpm build`。
 4. 执行 `systemctl --user start dutydeck.service`。
 
-## Tag（4311）unit 建议（未执行）
+## Tag（4311）unit（已修改，未重启）
 
-当前配置有两个问题：`Restart=on-failure` 在进程被外部 SIGTERM 停掉后不会重拉；ExecStart 里的 node 是 `~/.local/bin/node` 软链，botmux 的安装脚本会改写这个软链。建议改成下面这样（与现有内容相比，只改 `Restart`、node 路径，并加上熔断设置）：
+原配置有两个问题：`Restart=on-failure` 在进程被外部 SIGTERM 停掉后不会重拉；ExecStart 里的 node 是 `~/.local/bin/node` 这个软链，botmux 的安装脚本会改写它。22:17 按下面的内容修改并执行了 daemon-reload，原文件备份在 `~/dutydeck-tag-ccflash.service.bak-20260923`。`Restart=always` 已经生效；新的 node 路径要等下次重启才会用上，当前软链指向的就是同一个二进制。
 
 ```
 [Unit]
@@ -92,6 +91,12 @@ ExecStart=/data00/home/huangyuhang.edu/.local/share/botmux/node-v22.23.1-linux-x
 Restart=always
 RestartSec=3
 ```
+
+## 上线验证
+
+- 切换后 7 秒内 `/health` 恢复为 200。unit 状态为 active (running)，状态文件里记录为 `supervisor: systemd`，MainPID 与状态文件里的 pid 一致。drop-in 中的 `codex-agent.env` 已经加载，飞书监听正常。
+- 线上实测：对主进程发送外部 SIGTERM，9 秒后 systemd 拉起了新进程（`NRestarts=1`），4 个 tmux 会话都还在。
+- 切换前后 tmux 会话从 5 个变成 4 个。原因是 runtime 关闭时会保留还有未完成任务的会话、释放空闲会话（`packages/agent-runtime/src/index.ts` 的 `shutdownOnce`），以前每次重启都是这样，和新 unit 无关：tmux server 位于 `session-8.scope`，不在 unit 的 cgroup 里。
 
 ## 证据位置
 
