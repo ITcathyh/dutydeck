@@ -4,7 +4,7 @@ import QRCode from 'qrcode';
 import { LARK_APP_ICON_BASE64 } from './app-icon.js';
 import { readLarkConfig, saveLarkConfig } from './config.js';
 import { configureLarkOpenPlatformApp, isValidLarkAppId, larkSlashCommandDefinitions, LarkOpenPlatformConfigurationError } from './open-platform-configurator.js';
-import { connectLarkOpenPlatformSession, OpenPlatformRequestError, OpenPlatformSessionError } from './open-platform-session.js';
+import { connectLarkOpenPlatformSession, OpenPlatformRequestError, OpenPlatformSessionError, OpenPlatformSessionExpiredError } from './open-platform-session.js';
 import { createLarkCardService } from './service.js';
 
 /** 与 repair.ts 同一个判据：这条权限被跳过时命令菜单不可用，同步注定 403，不必发请求。 */
@@ -269,10 +269,16 @@ export class LarkAppCreationJobManager {
     } catch (error) {
       // Never copy upstream errors: they may contain cookies, secrets or private IDs.
       if (error instanceof OpenPlatformSessionError) message = error.message;
+      // 半失效登录态：缓存已被会话层删除，重试自然走扫码。
+      if (error instanceof OpenPlatformSessionExpiredError) {
+        message = error.message;
+        retryable = true;
+      }
       if (error instanceof LarkOpenPlatformConfigurationError) {
         message = `应用草稿已保存：${error.message}（${error.code}）。请继续处理该应用`;
         // Preflight failures never submit a publication; retries reuse and verify the same draft.
         retryable = [
+          'session_expired',
           'scope_catalog_read_failed', 'scope_catalog_incomplete', 'scope_update_failed',
           'scope_verification_read_failed', 'scope_verification_failed', 'robot_enable_failed',
           'event_mode_failed', 'event_read_failed', 'event_update_failed', 'event_verification_failed',

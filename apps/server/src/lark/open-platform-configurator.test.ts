@@ -7,6 +7,9 @@ import newAppPrivileges from './fixtures/new-app-privileges.json';
 import automaticApproval from './fixtures/approval-collaborator-exemption.json';
 import { larkCommandRegistry } from './commands.js';
 import {
+  OpenPlatformSessionExpiredError,
+} from './open-platform-session.js';
+import {
   configureLarkOpenPlatformApp,
   formatCommandDescription,
   larkSlashCommandDefinitions,
@@ -635,5 +638,83 @@ describe('new application data ranges', () => {
     expect(error).toMatchObject({ code: options.code });
     expect(String(error)).not.toContain('COOKIE_CANARY');
     expect(calls.some(call => call.path.includes('/app_version/create/') || call.path.includes('/publish/commit/'))).toBe(false);
+  });
+});
+
+describe('session expiration propagation', () => {
+  it('transparently passes through session_expired code and message instead of masking with step error', async () => {
+    const expiredError = new OpenPlatformSessionExpiredError(
+      '飞书开放平台登录已失效，请重新扫码。',
+      400,
+      99991641,
+    );
+    const client: LarkOpenPlatformClient = {
+      postJson: vi.fn(async () => {
+        throw expiredError;
+      }),
+    };
+
+    let caught: unknown;
+    try {
+      await configureLarkOpenPlatformApp(client, 'cli_test');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toMatchObject({
+      code: 'session_expired',
+      message: '飞书开放平台登录已失效，请重新扫码。',
+    });
+  });
+
+  it('transparently passes through mid-chain session expiration wrapped in cause chain', async () => {
+    const inner = new OpenPlatformSessionExpiredError();
+    const wrapper = new Error('transport failure', { cause: inner });
+    const { client } = harness();
+    const orig = client.postJson;
+    client.postJson = async (path: string, body?: Record<string, unknown>) => {
+      if (path.includes('/robot/switch/')) throw wrapper;
+      return orig(path, body);
+    };
+
+    await expect(configureLarkOpenPlatformApp(client, 'cli_test')).rejects.toMatchObject({
+      code: 'session_expired',
+      message: '飞书开放平台登录已失效，请重新扫码。',
+    });
+  });
+
+  it('keeps cause non-enumerable so JSON.stringify only outputs code and never serializes cause or response payload', async () => {
+    const rawSecretCanary = 'raw-secret-canary-payload-12345';
+    const inner = new OpenPlatformSessionExpiredError();
+    // 模拟内部带有包含敏感字段的 cause
+    (inner as unknown as { rawPayload: Record<string, unknown> }).rawPayload = { secret: rawSecretCanary };
+    const client: LarkOpenPlatformClient = {
+      postJson: vi.fn(async () => {
+        throw inner;
+      }),
+    };
+
+    let caught: unknown;
+    try {
+      await configureLarkOpenPlatformApp(client, 'cli_test');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toMatchObject({
+      code: 'session_expired',
+      message: '飞书开放平台登录已失效，请重新扫码。',
+    });
+    // cause 属性可通过属性访问（供内部排障）
+    expect((caught as Error).cause).toBe(inner);
+    // 但 cause 必须是不可枚举属性，JSON.stringify 绝不输出
+    const serialized = JSON.stringify(caught);
+    expect(JSON.parse(serialized)).toEqual({
+      code: 'session_expired',
+      name: 'LarkOpenPlatformConfigurationError',
+    });
+    expect(serialized).not.toContain(rawSecretCanary);
+    expect(serialized).not.toContain('cause');
+    expect(Object.keys(caught as object)).toEqual(['code', 'name']);
   });
 });

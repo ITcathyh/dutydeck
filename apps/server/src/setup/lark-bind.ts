@@ -111,6 +111,8 @@ const SESSION_FAILURE_PATTERNS = [
   '轮询扫码登录失败',
   '不受信任',
   '重定向次数过多',
+  '登录已失效',
+  '登录态已失效',
 ];
 
 function isSessionFailure(message: string): boolean {

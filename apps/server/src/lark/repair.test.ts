@@ -166,6 +166,24 @@ describe('runOpenPlatformRepair', () => {
     expect(card.markdown).not.toContain('已发布并通过审核');
   });
 
+  it('登录态半失效：透传 session_expired 与重新扫码文案，不换成固定的读取失败', async () => {
+    const configure = vi.fn(async () => {
+      throw new LarkOpenPlatformConfigurationError('session_expired', '飞书开放平台登录已失效，请重新扫码。');
+    });
+    const result = await runOpenPlatformRepair(
+      { connectClient: async () => ({ client: mockClient }), configure },
+      { appId, confirmed: true }
+    );
+    expect(result).toMatchObject({
+      status: 'failed',
+      code: 'session_expired',
+      reason: '飞书开放平台登录已失效，请重新扫码。',
+    });
+    if (result.status !== 'failed') throw new Error('expected failed');
+    expect(result.hint).toContain('重新完成扫码登录');
+    expect(result.reason).not.toContain('权限目录');
+  });
+
   it('非白名单异常不回显内部诊断（凭据/票据不进结果文案）', async () => {
     const result = await runOpenPlatformRepair(
       { connectClient: async () => ({ client: mockClient }), configure: configureStub('secret_failure') },

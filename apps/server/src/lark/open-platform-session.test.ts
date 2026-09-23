@@ -4,8 +4,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   connectLarkOpenPlatformSession,
+  OpenPlatformRequestError,
   OpenPlatformSessionError,
+  OpenPlatformSessionExpiredError,
   defaultOpenPlatformSessionFilePath,
+  isOpenPlatformSessionExpired,
   readOpenPlatformSessionCookies,
   safeOpenPlatformError,
   writeOpenPlatformSessionCookies,
@@ -407,4 +410,244 @@ it('explicit re-login bypasses a valid cookie cache before requesting a QR', asy
   }) as typeof fetch;
   await expect(connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl, forceLogin: true })).rejects.toMatchObject({ phase: 'qr_login' });
   expect(fetchImpl).toHaveBeenCalledOnce();
+});
+
+describe('Open Platform semi-expired session handling', () => {
+  const realLogoutPayload = {
+    code: 99991641,
+    msg: 'failed',
+    error: {
+      Code: 4101,
+      LogoutReason: 40,
+      Message: 'please log in again',
+    },
+  };
+
+  it('detects real expired payload, deletes cache file, and subsequent connect falls back to QR login', async () => {
+    const file = join(temporaryDirectory(), 'session.json');
+    writeOpenPlatformSessionCookies(file, [cookie()]);
+    let qrInitCount = 0;
+
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url.includes('/accounts/qrlogin/init')) {
+        qrInitCount += 1;
+        return Response.json({ code: 0, data: { step_info: { token: 'qr-token' } } }, {
+          headers: { 'x-flow-key': 'flow-key' },
+        });
+      }
+      if (url.includes('/accounts/qrlogin/polling')) {
+        return Response.json({
+          code: 0,
+          data: {
+            next_step: 'enter_app',
+            step_info: { status: 3, cross_login_uri: 'https://passport.feishu.cn/cross' },
+          },
+        });
+      }
+      if (url === 'https://passport.feishu.cn/cross') {
+        return new Response('', {
+          status: 200,
+          headers: { 'set-cookie': 'session=new-scanned-cookie; Domain=.feishu.cn; Path=/; Secure; HttpOnly' },
+        });
+      }
+      if (url === 'https://ask.feishu.cn/') return new Response('signed in');
+      if (url === 'https://open.feishu.cn/app') return new Response(consoleHtml(), { status: 200 });
+      if (url.includes('/developers/v1/')) {
+        return Response.json(realLogoutPayload, { status: 400 });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+
+    // 1. 首次连接：从缓存建立成功
+    const session1 = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
+    expect(session1.source).toBe('cache');
+    expect(readOpenPlatformSessionCookies(file)).not.toBeNull();
+
+    // 2. 调用管理接口：遇到登出信号，抛出 OpenPlatformSessionExpiredError 且缓存被删除
+    let caughtError: unknown;
+    try {
+      await session1.client.postJson('/developers/v1/scope/all/cli_test', {});
+    } catch (err) {
+      caughtError = err;
+    }
+    expect(caughtError).toBeInstanceOf(OpenPlatformSessionExpiredError);
+    expect(caughtError).toBeInstanceOf(OpenPlatformRequestError);
+    expect((caughtError as OpenPlatformSessionExpiredError).code).toBe('session_expired');
+    expect((caughtError as OpenPlatformSessionExpiredError).message).toBe('飞书开放平台登录已失效，请重新扫码。');
+    expect((caughtError as OpenPlatformSessionExpiredError).statusCode).toBe(400);
+    expect((caughtError as OpenPlatformSessionExpiredError).apiCode).toBe(99991641);
+    expect(readOpenPlatformSessionCookies(file)).toBeNull();
+
+    // 3. 紧接着再次连接：缓存文件已被清除，自然走扫码路径，source 是 qr_login 而非 cache
+    const session2 = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl, pollIntervalMs: 0 });
+    expect(session2.source).toBe('qr_login');
+    expect(qrInitCount).toBe(1);
+    expect(readOpenPlatformSessionCookies(file)?.map(c => c.value)).toContain('new-scanned-cookie');
+  });
+
+  it.each([
+    ['HTTP 401 Unauthorized', 401, {}],
+    ['detail.Code=4101', 400, { code: 99991641, error: { Code: 4101 } }],
+    ['detail.code=4101', 200, { code: 99991641, error: { code: 4101 } }],
+    ['top-level code=4101', 200, { code: 4101, msg: 'auth error' }],
+    ['code=99991641 with LogoutReason=40', 400, { code: 99991641, error: { LogoutReason: 40 } }],
+    ['code=99991641 with logoutReason=40', 400, { code: 99991641, error: { logoutReason: 40 } }],
+    ['message containing "请重新登录"', 400, { code: 100, msg: '登录已过期，请重新登录后再试' }],
+    ['detail.Message containing "please log in again"', 400, { code: 99991641, error: { Message: 'please log in again' } }],
+  ])('identifies logout signal: %s and deletes cache file', async (_desc, status, payload) => {
+    const file = join(temporaryDirectory(), 'session.json');
+    writeOpenPlatformSessionCookies(file, [cookie()]);
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === 'https://open.feishu.cn/app') return new Response(consoleHtml(), { status: 200 });
+      if (url.includes('/developers/v1/')) return Response.json(payload, { status });
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+
+    const session = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
+    await expect(session.client.postJson('/developers/v1/test', {})).rejects.toSatisfy((err: unknown) => {
+      return err instanceof OpenPlatformSessionExpiredError
+        && err.code === 'session_expired'
+        && err.message === '飞书开放平台登录已失效，请重新扫码。';
+    });
+    expect(readOpenPlatformSessionCookies(file)).toBeNull();
+  });
+
+  it('does NOT over-match: generic code=99991641 without strong signals keeps cache intact', async () => {
+    const file = join(temporaryDirectory(), 'session.json');
+    writeOpenPlatformSessionCookies(file, [cookie()]);
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === 'https://open.feishu.cn/app') return new Response(consoleHtml(), { status: 200 });
+      if (url.includes('/developers/v1/')) {
+        return Response.json({ code: 99991641, msg: 'Something went wrong.' }, { status: 400 });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+
+    const session = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
+    let error: unknown;
+    try {
+      await session.client.postJson('/developers/v1/test', {});
+    } catch (err) {
+      error = err;
+    }
+    expect(error).toBeInstanceOf(OpenPlatformRequestError);
+    expect(error).not.toBeInstanceOf(OpenPlatformSessionExpiredError);
+    expect((error as OpenPlatformRequestError).code).toBeUndefined();
+    expect((error as OpenPlatformRequestError).statusCode).toBe(400);
+    expect((error as OpenPlatformRequestError).message).toContain('Something went wrong');
+    // 关键断言：缓存必须保留，不能误删！
+    expect(readOpenPlatformSessionCookies(file)).toEqual([cookie()]);
+  });
+
+  it('keeps cache intact for ordinary business errors', async () => {
+    const file = join(temporaryDirectory(), 'session.json');
+    writeOpenPlatformSessionCookies(file, [cookie()]);
+    const fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === 'https://open.feishu.cn/app') return new Response(consoleHtml(), { status: 200 });
+      if (url.includes('/developers/v1/')) {
+        return Response.json({ code: 1, msg: '服务器开小差' }, { status: 500 });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+
+    const session = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
+    await expect(session.client.postJson('/developers/v1/test', {})).rejects.toSatisfy((err: unknown) => {
+      return err instanceof OpenPlatformRequestError
+        && !(err instanceof OpenPlatformSessionExpiredError)
+        && err.statusCode === 500;
+    });
+    expect(readOpenPlatformSessionCookies(file)).toEqual([cookie()]);
+  });
+
+  it('handles cause chain in isOpenPlatformSessionExpired', () => {
+    const root = new OpenPlatformSessionExpiredError();
+    const wrapped1 = new Error('wrapper 1', { cause: root });
+    const wrapped2 = new Error('wrapper 2', { cause: wrapped1 });
+    expect(isOpenPlatformSessionExpired(wrapped2)).toBe(true);
+
+    const normalErr = new OpenPlatformRequestError('ordinary error', 400, 100);
+    const wrappedNormal = new Error('wrapper', { cause: normalErr });
+    expect(isOpenPlatformSessionExpired(wrappedNormal)).toBe(false);
+
+    // 超过 4 层深度不继续向下深追
+    let deep: Error = root;
+    for (let i = 0; i < 6; i++) {
+      deep = new Error(`deep ${i}`, { cause: deep });
+    }
+    expect(isOpenPlatformSessionExpired(deep)).toBe(false);
+  });
+
+  it('never leaks raw response payloads through JSON.stringify for normal or session-expired errors', async () => {
+    const file = join(temporaryDirectory(), 'session.json');
+    writeOpenPlatformSessionCookies(file, [cookie()]);
+    const secretInPayload = 'canary-secret-raw-response-token-12345';
+    const detailKeyInPayload = 'internal_passport_diagnostic_key';
+
+    // 1. 普通错误（OpenPlatformRequestError）：JSON.stringify 绝不携带 raw payload
+    let fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === 'https://open.feishu.cn/app') return new Response(consoleHtml(), { status: 200 });
+      if (url.includes('/developers/v1/')) {
+        return Response.json({
+          code: 99991641,
+          msg: 'Something went wrong.',
+          [detailKeyInPayload]: secretInPayload,
+        }, { status: 400 });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+
+    let session = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
+    let normalError: unknown;
+    try {
+      await session.client.postJson('/developers/v1/normal', {});
+    } catch (err) {
+      normalError = err;
+    }
+    expect(normalError).toBeInstanceOf(OpenPlatformRequestError);
+    const normalJson = JSON.stringify(normalError);
+    expect(normalJson).not.toContain(secretInPayload);
+    expect(normalJson).not.toContain(detailKeyInPayload);
+    expect(normalJson).not.toContain('Something went wrong');
+    expect((normalError as { payload?: unknown }).payload).toBeUndefined();
+
+    // 2. 登录失效错误（OpenPlatformSessionExpiredError）：JSON.stringify 绝不携带 raw payload
+    writeOpenPlatformSessionCookies(file, [cookie()]);
+    fetchImpl = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === 'https://open.feishu.cn/app') return new Response(consoleHtml(), { status: 200 });
+      if (url.includes('/developers/v1/')) {
+        return Response.json({
+          code: 99991641,
+          msg: 'failed',
+          error: {
+            Code: 4101,
+            LogoutReason: 40,
+            Message: 'please log in again',
+            [detailKeyInPayload]: secretInPayload,
+          },
+        }, { status: 400 });
+      }
+      throw new Error(`unexpected ${url}`);
+    }) as typeof fetch;
+
+    session = await connectLarkOpenPlatformSession({ sessionFilePath: file, fetchImpl });
+    let expiredError: unknown;
+    try {
+      await session.client.postJson('/developers/v1/expired', {});
+    } catch (err) {
+      expiredError = err;
+    }
+    expect(expiredError).toBeInstanceOf(OpenPlatformSessionExpiredError);
+    const expiredJson = JSON.stringify(expiredError);
+    expect(expiredJson).not.toContain(secretInPayload);
+    expect(expiredJson).not.toContain(detailKeyInPayload);
+    expect(expiredJson).not.toContain('LogoutReason');
+    expect(expiredJson).not.toContain('please log in again');
+    expect((expiredError as { payload?: unknown }).payload).toBeUndefined();
+  });
 });
