@@ -18,9 +18,9 @@ afterEach(async () => {
 
 // A mock driver fixture with an observable backend state machine separated from
 // local attachment. It tracks backend history, completion state, and seen cursor
-// to prove that the reopened Runtime never automatically recovers or resubmits
-// an unconfirmed turn even when the backend completed offline.
-function persistentTurn() {
+// to exercise both unverified turns and the verified recovery handshake,
+// including completion while no Runtime is attached.
+function persistentTurn(recoverable = false) {
   const backendHistory: NormalizedDriverEvent[] = [];
   let backendCompleted = false;
   let seenCursor = 0;
@@ -30,7 +30,14 @@ function persistentTurn() {
   let attachedResolve: (() => void) | undefined;
   const factory: DriverFactory = (_agent, _protocol, emit) => {
     attachedEmit = emit;
-    const entry = { start: vi.fn(async () => {}), recover: vi.fn(async () => {}) };
+    let detached = false;
+    let preserve = false;
+    const entry = { start: vi.fn(async () => {}), recover: vi.fn(async (_state, onAttached?: () => Promise<void>) => {
+      if (!recoverable) return;
+      await onAttached?.();
+      for (const event of backendHistory) emit(event);
+      if (!backendCompleted) await new Promise<void>(resolve => { attachedResolve = resolve; });
+    }) };
     drivers.push(entry);
     return {
       start: entry.start,
@@ -40,10 +47,16 @@ function persistentTurn() {
         await new Promise<void>(resolve => { attachedResolve = resolve; });
       }),
       recover: entry.recover,
-      isStopped: async () => true,
+      ...(recoverable ? {
+        checkpoint: () => ({ kind: 'pty-jsonl-v1' as const, turnId: 'verified-turn', transcript: { offset: 0 } }),
+        prepareForDaemonShutdown: (keep: boolean) => { preserve = keep; },
+        isDetachedForShutdown: () => detached,
+      } : {}),
+      isStopped: async () => !detached,
       stop: vi.fn(async () => {
         // stop explicitly detaches the emit callback and resolves the local send wait,
         // while preserving the observable backend state.
+        detached = recoverable && preserve;
         attachedEmit = undefined;
         attachedResolve?.();
         attachedResolve = undefined;
@@ -55,6 +68,10 @@ function persistentTurn() {
     backendHistory: () => [...backendHistory],
     isBackendCompleted: () => backendCompleted,
     seenCursor: () => seenCursor,
+    tool(type: 'tool_call' | 'tool_result') {
+      const event: NormalizedDriverEvent = { type, data: { id: 'tool', name: 'Read', status: type === 'tool_call' ? 'running' : 'completed' }, sourceId: 'record_' + backendHistory.length };
+      backendHistory.push(event); attachedEmit?.(event);
+    },
     publish(text: string) {
       const event: NormalizedDriverEvent = { type: 'text', data: { text }, sourceId: 'record_' + backendHistory.length };
       backendHistory.push(event);
@@ -100,7 +117,7 @@ async function close(handle: ReturnType<typeof open>) {
 }
 
 describe('persistent task recovery across a reopened database', () => {
-  it.each([false, true])('marks a submitted, unconfirmed Attempt reconcile_required without reattaching or resending (completed offline: %s)', async offline => {
+  it.each([false, true])('keeps a submitted Attempt without a checkpoint unresolved (completed offline: %s)', async offline => {
     const file = database(); const backend = persistentTurn();
     const first = open(file, backend.factory);
     await first.runtime.initialize([agent]);
@@ -149,7 +166,7 @@ describe('persistent task recovery across a reopened database', () => {
     expect(stored.currentAttempt?.submission?.submissionId).toBe(originalSubmissionId);
     expect(stored.currentAttempt).toMatchObject({ state: 'reconcile_required', submissionState: 'intent_recorded' });
 
-    // The frozen Runtime never transparently reattaches the old turn or resends, even if completed offline.
+    // Without a durable checkpoint, even an offline result cannot authorize adoption.
     expect(backend.recoveredAfter(1)).toBe(0);
     expect(backend.startedAfter(1)).toBe(0);
     expect(backend.prompts).toEqual(['original prompt']);
@@ -180,6 +197,90 @@ describe('persistent task recovery across a reopened database', () => {
     expect(backend.prompts).toEqual(['first']);
     expect(backend.recoveredAfter(1)).toBe(0);
     expect(backend.startedAfter(1)).toBe(0);
+  });
+
+  it.each([false, true])('recovers a verified original turn and resumes its queue (offline: %s)', async offline => {
+    const file = database(), backend = persistentTurn(true);
+    const first = open(file, backend.factory);
+    await first.runtime.initialize([agent]);
+    const session = await first.runtime.start({ agentId: agent.id });
+    const task = await first.runtime.dispatch(session.id, 'first');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['first']));
+    backend.tool('tool_call'); backend.tool('tool_result');
+    backend.publish('before restart');
+    await vi.waitFor(async () => expect((await first.runtime.getEvents(session.id)).some(event => (event.data as any).text === 'before restart')).toBe(true));
+    const original = first.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+    const queued = await first.runtime.dispatch(session.id, 'second');
+    await close(first);
+    if (offline) { backend.publish('offline answer'); backend.complete(); }
+    const second = open(file, backend.factory);
+    await second.runtime.initialize([agent]);
+    if (!offline) { backend.publish('live answer'); backend.complete(); }
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['first', 'second']));
+    const recovered = second.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
+    expect(recovered).toMatchObject({ attemptId: original.attemptId, submission: original.submission, submissionController: original.submissionController, state: 'settled', outcome: 'completed' });
+    expect(recovered.controller).not.toEqual(original.controller);
+    expect(backend.recoveredAfter(1)).toBe(1);
+    expect(backend.startedAfter(1)).toBe(0);
+    backend.publish('second answer'); backend.complete();
+    await vi.waitFor(() => expect(second.repos.execution.getTaskExecution(queued.id)?.task.status).toBe('completed'));
+    const events = await second.runtime.getEvents(session.id);
+    expect(events.filter(event => event.type === 'text' && (event.data as any).text === 'before restart')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'completed')).toHaveLength(2);
+    expect(events.filter(event => event.type === 'tool_call')).toHaveLength(1);
+    expect(events.filter(event => event.type === 'tool_result')).toHaveLength(1);
+  });
+
+  it.each([false, true])('requires the verified-attachment handshake (rejected: %s)', async rejected => {
+    const file = database(), backend = persistentTurn(true);
+    const first = open(file, backend.factory);
+    await first.runtime.initialize([agent]);
+    const session = await first.runtime.start({ agentId: agent.id });
+    const task = await first.runtime.dispatch(session.id, 'first');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['first']));
+    await close(first);
+    const recover = vi.fn(async () => { if (rejected) throw new Error('mismatched identity'); });
+    const factory: DriverFactory = (...args) => ({ ...backend.factory(...args), recover });
+    const second = open(file, factory);
+    await second.runtime.initialize([agent]);
+    expect(recover).toHaveBeenCalledOnce();
+    expect(second.repos.execution.getTaskExecution(task.id)?.currentAttempt?.state).toBe('reconcile_required');
+    expect(second.runtime.getDriver(session.id)).toBeUndefined();
+    expect(backend.prompts).toEqual(['first']);
+  });
+
+  it('keeps revoked task authorization local to recovery and still initializes other sessions', async () => {
+    const file = database(), backend = persistentTurn(true);
+    const first = open(file, backend.factory);
+    await first.runtime.initialize([agent]);
+    const session = await first.runtime.start({ agentId: agent.id });
+    const task = await first.runtime.dispatch(session.id, 'first');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['first']));
+    await close(first);
+    const second = open(file, backend.factory, { authorizeTask: async () => { throw new Error('revoked'); } });
+    await expect(second.runtime.initialize([agent])).resolves.toBeUndefined();
+    expect(second.repos.execution.getTaskExecution(task.id)?.currentAttempt?.state).toBe('reconcile_required');
+    expect(backend.recoveredAfter(1)).toBe(0);
+    expect((await second.runtime.getEvents(session.id)).some(event => (event.data as any).code === 'PTY_RECOVERY_DEFERRED')).toBe(true);
+    await expect(second.runtime.start({ agentId: agent.id })).resolves.toBeDefined();
+  });
+
+  it('preserves an explicit unknown stop reason across reopen and never adopts its surviving resource', async () => {
+    const file = database(), backend = persistentTurn(true);
+    const factory: DriverFactory = (...args) => ({ ...backend.factory(...args), isStopped: async () => false, isDetachedForShutdown: () => false });
+    const first = open(file, factory);
+    await first.runtime.initialize([agent]);
+    const session = await first.runtime.start({ agentId: agent.id });
+    const task = await first.runtime.dispatch(session.id, 'first');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['first']));
+    await expect(first.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' })).rejects.toMatchObject({ code: 'DRIVER_STOP_UNVERIFIED' });
+    expect(first.repos.execution.getTaskExecution(task.id)?.currentAttempt?.reconcileReason?.code).toBe('STOP_RESULT_UNKNOWN');
+    await close(first);
+    const second = open(file, factory);
+    await second.runtime.initialize([agent]);
+    expect(second.repos.execution.getTaskExecution(task.id)?.currentAttempt?.reconcileReason?.code).toBe('STOP_RESULT_UNKNOWN');
+    expect(backend.recoveredAfter(1)).toBe(0);
+    expect(backend.prompts).toEqual(['first']);
   });
 
   it('preserves an unsubmitted queued task when shutdown races with authorization', async () => {
@@ -224,8 +325,8 @@ describe('persistent task recovery across a reopened database', () => {
     expect(backend.startedAfter(1)).toBe(0);
   });
 
-  it('does not resubmit an interrupted submitted turn and leaves its result reconcile_required on reopen', async () => {
-    const file = database(); const backend = persistentTurn();
+  it.each([false, true])('does not recover an explicitly interrupted turn even with a checkpoint (%s)', async recoverable => {
+    const file = database(); const backend = persistentTurn(recoverable);
     const first = open(file, backend.factory);
     await first.runtime.initialize([agent]);
     const session = await first.runtime.start({ agentId: agent.id });

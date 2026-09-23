@@ -274,7 +274,7 @@ describe('Runtime uses the execution ledger', () => {
     expect(h.runtime.getDriver(child.id)).toBeUndefined(); expect(h.repos.execution.getSessionResourceBlockers(child.id)).toEqual([]);
     await expect(h.runtime.stopWorkItemSession(child.id, { kind: 'unspecified' })).rejects.toMatchObject({ code: 'ACTOR_REQUIRED' });
   });
-  it('reopening a submitted unknown Attempt records orphan evidence without adopting or resending', async () => {
+  it('reopening a submitted unknown Attempt preserves its failure evidence without adopting or resending', async () => {
     const h = await fixture({}, async () => { throw new Error('lost result'); });
     const task = await h.runtime.send(h.session.id, 'one');
     const original = h.repos.execution.getTaskExecution(task.id)!.currentAttempt!;
@@ -287,7 +287,8 @@ describe('Runtime uses the execution ledger', () => {
     const restored = repos.execution.getTaskExecution(task.id)!.currentAttempt!;
     expect(restored.attemptId).toBe(original.attemptId); expect(restored.controller).toEqual(original.controller);
     expect(restored.submission).toEqual(original.submission); expect(restored.recoveryControllers).toEqual([]);
-    expect(restored.state).toBe('reconcile_required'); expect(restored.reconcileReason?.code).toBe('PREVIOUS_RUNTIME_RESULT_UNKNOWN');
+    expect(restored.state).toBe('reconcile_required'); expect(restored.reconcileReason).toEqual(original.reconcileReason);
+    expect(restored.reconcileReason?.code).toBe('DRIVER_RESULT_UNKNOWN');
     expect(create).not.toHaveBeenCalled(); expect(h.sent).toEqual(['one']);
   });
   it('replays a queue promotion against its original target while the promoted task is now active', async () => {

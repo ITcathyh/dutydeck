@@ -328,7 +328,7 @@ describe('production PTY backend injection', () => {
     }
   }, 30_000);
 
-  tmuxIt.each([false, true])('preserves an in-flight task in reconcile_required across service restart without duplicate submission (completed offline: %s)', async offline => {
+  tmuxIt.each([false, true])('recovers the original task and drains its queue across service restarts without duplicate submission (completed offline: %s)', async offline => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-service-turn-recovery-'));
     temporaryDirectories.push(root);
     const database = join(root, 'dutydeck.db');
@@ -339,15 +339,15 @@ describe('production PTY backend injection', () => {
       `#!${process.execPath}`,
       "import { appendFileSync, existsSync } from 'node:fs';",
       "process.stdin.setRawMode(true); process.stdin.setEncoding('utf8');",
-      "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n'); let input = '';",
+      "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n'); let input = ''; let count = 0;",
       // The real adapter pastes a multiline routing block, then Enter commits it.
       "process.stdin.on('data', data => {",
       "  input += data; const end = input.indexOf('\\x1b[201~');",
       "  if (end < 0 || !input.slice(end + 6).includes('\\r')) return;",
-      "  input = ''; appendFileSync('submissions', 'submitted\\n');",
+      "  input = ''; count++; const turn = count; appendFileSync('submissions', 'submitted\\n');",
       "  process.stdout.write('\\x1b[2J\\x1b[HWorking (esc to interrupt)\\r\\n');",
       "  const timer = setInterval(() => {",
-      "    if (!existsSync('finish')) return; clearInterval(timer);",
+      "    if (!existsSync('finish-' + turn)) return; clearInterval(timer);",
       "    process.stdout.write('\\x1b[2J\\x1b[HClaude Code v2.1.267 (mock)\\r\\n✳ Worked for 1s\\r\\n❯ \\r\\n');",
       '  }, 50);',
       '});', ''
@@ -379,6 +379,15 @@ describe('production PTY backend injection', () => {
       await vi.waitFor(() => expect(existsSync(join(root, 'submissions'))).toBe(true), { timeout: 25_000 });
       record('before restart');
       await vi.waitFor(async () => expect((await first.runtime.getEvents(session.id)).some(event => (event.data as any)?.text === 'before restart')).toBe(true));
+      const queued = await first.runtime.dispatch(session.id, 'continue after recovery');
+      const before = createRepositories(database);
+      let originalAttemptId: string;
+      let originalSubmissionId: string;
+      try {
+        const attempt = before.execution.getTaskExecution(task.id)!.currentAttempt!;
+        originalAttemptId = attempt.attemptId;
+        originalSubmissionId = attempt.submission!.submissionId;
+      } finally { before.close(); }
       await first.close();
       const persisted = createRepositories(database);
       try {
@@ -390,37 +399,50 @@ describe('production PTY backend injection', () => {
         expect(taskExec.attempts[0]?.submission?.recovery?.turnId)
           .toBe(backend.getDutydeckMetadata('turn_id'));
       } finally { persisted.close(); }
-      const complete = () => { record('final answer'); writeFileSync(join(root, 'finish'), ''); };
+      const complete = () => { record('final answer'); writeFileSync(join(root, 'finish-1'), ''); };
       if (offline) {
         complete();
         await vi.waitFor(() => expect(backend.captureCurrentScreen()).toContain('Worked for 1s'));
       }
       restored = await startLocalServer({ webRoot: root, env: await serverEnv() });
-      const tasksAfter = await restored.runtime.getTasks(session.id);
-      expect(tasksAfter).toHaveLength(1);
-      expect(tasksAfter[0]?.id).toBe(task.id);
-      expect(tasksAfter[0]?.status).toBe('reconcile_required');
       expect(backend.getPid()).toBe(originalPid);
-      expect(readFileSync(join(root, 'submissions'), 'utf8')).toBe('submitted\n');
-      expect((await restored.runtime.getTasks(session.id)).map(item => item.id)).toEqual([task.id]);
-      const events = await restored.runtime.getEvents(session.id);
-      expect(events.filter(event => event.type === 'text').map(event => (event.data as any).text))
-        .toEqual(['recover this exact task', 'before restart']);
-      expect(events.filter(event => event.type === 'completed')).toHaveLength(0);
-      expect(events.filter(event => event.type === 'error')).toEqual([]);
-      // Restarted resources lack a stop proof even with an explicit owner.
-      await expect(restored.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' }))
-        .rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
-      expect(backend.getPid()).toBe(originalPid);
-      expect(spawnSync('tmux', ['has-session', '-t', backend.sessionName]).status).toBe(0);
+      if (!offline) {
+        await vi.waitFor(async () => expect((await restored!.runtime.getTasks(session.id))[0]?.status).toBe('running'));
+        expect((await restored.runtime.getTasks(session.id))[1]?.status).toBe('queued');
+        expect(readFileSync(join(root, 'submissions'), 'utf8')).toBe('submitted\n');
+        // Repeating a restart while the same turn is busy must retain its identity.
+        await restored.close();
+        restored = await startLocalServer({ webRoot: root, env: await serverEnv() });
+        expect(backend.getPid()).toBe(originalPid);
+        complete();
+      }
+      await vi.waitFor(async () => expect((await restored!.runtime.getTasks(session.id))[0]?.status).toBe('completed'), { timeout: 25_000 });
+      await vi.waitFor(() => expect(readFileSync(join(root, 'submissions'), 'utf8')).toBe('submitted\nsubmitted\n'), { timeout: 25_000 });
+      expect((await restored.runtime.getTasks(session.id))[1]?.id).toBe(queued.id);
+      record('queued answer'); writeFileSync(join(root, 'finish-2'), '');
+      await vi.waitFor(async () => expect((await restored!.runtime.getTasks(session.id))[1]?.status).toBe('completed'), { timeout: 25_000 });
+      const persistedAfter = createRepositories(database);
+      try {
+        const original = persistedAfter.execution.getTaskExecution(task.id)!;
+        expect(original.attempts).toHaveLength(1);
+        expect(original.currentAttempt?.attemptId).toBe(originalAttemptId!);
+        expect(original.currentAttempt?.submission?.submissionId).toBe(originalSubmissionId!);
+      } finally { persistedAfter.close(); }
       expect((await restored.runtime.getTasks(session.id)).map(item => ({ id: item.id, status: item.status })))
-        .toEqual([{ id: task.id, status: 'reconcile_required' }]);
-      expect(readFileSync(join(root, 'submissions'), 'utf8')).toBe('submitted\n');
+        .toEqual([{ id: task.id, status: 'completed' }, { id: queued.id, status: 'completed' }]);
+      const events = await restored.runtime.getEvents(session.id);
+      for (const text of ['before restart', 'final answer', 'queued answer']) {
+        expect(events.filter(event => event.type === 'text' && (event.data as any).text === text)).toHaveLength(1);
+      }
+      expect(events.filter(event => event.type === 'completed')).toHaveLength(2);
+      expect(readFileSync(join(root, 'submissions'), 'utf8')).toBe('submitted\nsubmitted\n');
+      await restored.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' });
+      expect(spawnSync('tmux', ['has-session', '-t', backend.sessionName]).status).not.toBe(0);
     } finally {
       await first.close();
       await restored?.close();
     }
-  }, 60_000);
+  }, 90_000);
 
   tmuxIt('preserves pane across service restart with durable queued task blocked from unverified execution', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-persistent-pty-'));
