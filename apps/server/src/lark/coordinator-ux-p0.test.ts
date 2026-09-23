@@ -594,19 +594,15 @@ describe('控制命令纠错不执行', () => {
 });
 
 describe('S6/S8/P0-7 帧注记纪律：只在非终态帧，终态帧与结果新消息一律不带', () => {
-  it('P0-7 pty-cli 首卡与心跳标注终端模式，acp 全程不标注；终态不带', async () => {
+  it('P0-7 飞书里的 pty-cli 任务只以 full-trust 运行（ask 会被拒绝启动），首卡与心跳都不标注终端提示；acp 同样不标注', async () => {
+    // full-trust 下 CLI 跳过权限确认启动，没有需要在电脑前响应的工具确认，写这句就是误报。
     const pty = await harness('normal', { protocol: 'pty-cli', configPatch: { permissionMode: 'full-trust' } });
     await pty.coordinator.handle(ptyEvent('om_pty', '跑一下'), pty.config);
     await pty.waitDelivered(1);
-    // 首张卡随后会被同 messageId 的 running 帧 PATCH 覆盖（帧只有 elements），
-    // 断言首卡 markdown 必须从 reply 调用入参取，不能读 cards Map 的最终值。
-    const firstCard = pty.service.reply.mock.calls[0]![0];
-    expect(String(firstCard.markdown)).toContain(TERMINAL_PROTOCOL_NOTE);
-    await vi.waitFor(() => expect(cardUpdates(pty, input => Array.isArray(input.elements)
-      && input.elements.some((element: any) => element.element_id === 'protocol_hint')).length).toBeGreaterThan(0));
-    const terminalUpdates = cardUpdates(pty, input => ['completed', 'failed', 'interrupted'].includes(input.state));
-    expect(terminalUpdates.some(input => JSON.stringify(input).includes('protocol_hint'))).toBe(false);
-    expect(JSON.stringify([...pty.cards.values()].filter(card => card.state === 'completed' && card.readOnly))).not.toContain(TERMINAL_PROTOCOL_NOTE);
+    expect(String(pty.service.reply.mock.calls[0]![0].markdown)).not.toContain(TERMINAL_PROTOCOL_NOTE);
+    expect(cardUpdates(pty, input => Array.isArray(input.elements)).length).toBeGreaterThan(0);
+    expect(cardUpdates(pty, input => JSON.stringify(input).includes('protocol_hint'))).toHaveLength(0);
+    expect(JSON.stringify([...pty.cards.values()])).not.toContain(TERMINAL_PROTOCOL_NOTE);
 
     const acp = await harness('normal', { protocol: 'acp' });
     await acp.coordinator.handle(acpEvent('om_acp', '跑一下'), acp.config);
