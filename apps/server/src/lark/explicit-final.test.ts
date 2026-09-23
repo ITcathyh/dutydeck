@@ -30,7 +30,7 @@ const verificationRecord = (patch: Partial<VerificationResponse> = {}): Verifica
   beforeFingerprint: 'abcdef1234567890', afterFingerprint: 'abcdef1234567890', stale: false, ...patch
 });
 
-async function harness(options: { verificationCommand?: string; verifications?: VerificationResponse[]; fail?: boolean; interrupted?: boolean; reaction?: boolean; text?: string; p2p?: boolean } = {}) {
+async function harness(options: { verificationCommand?: string; verifications?: VerificationResponse[]; fail?: boolean; interrupted?: boolean; reaction?: boolean; text?: string; p2p?: boolean; groupMention?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-resultcard-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release!: () => void;
@@ -62,7 +62,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
 
   const config: StoredLarkConfig = { appId: 'cli_resultcard', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock',
     permissionMode: 'ask', listening: true, fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false,
-    groupCardMention: false, groupToolsEnabled: true, groupToolsAllowSend: true, pushIntervalMs: 1_000, hideTraceOnComplete: false,
+    groupCardMention: options.groupMention ?? false, groupToolsEnabled: true, groupToolsAllowSend: true, pushIntervalMs: 1_000, hideTraceOnComplete: false,
     completionReactionOnly: options.reaction ?? false, silentProgress: false, urgentEnabled: false, pinLongTasks: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
@@ -152,6 +152,36 @@ const callbackValues = (node: unknown, out: Record<string, unknown>[] = []): Rec
 const resultSends = (h: Awaited<ReturnType<typeof harness>>) => [...h.service.send.mock.calls, ...h.service.reply.mock.calls].map(([input]) => input).filter(input => input.cardKind === 'result');
 
 describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
+  it.each(['completion', 'restart', 'unupdatable'] as const)('keeps the group mention once in the rendered result footer after %s', async mode => {
+    const h = await harness({ groupMention: true });
+    const sent = await h.sendFinal();
+    if (mode === 'unupdatable') {
+      const update = h.service.update.getMockImplementation()!;
+      h.service.update.mockImplementation(async input => {
+        if (input.messageId === sent.messageId) throw new LarkServiceError('LARK_API_ERROR', 'unupdatable', 400, { upstreamCode: 230031 });
+        return update(input);
+      });
+    }
+    if (mode === 'restart') h.coordinator.stop();
+    h.release();
+    if (mode === 'restart') {
+      await vi.waitFor(async () => expect((await h.runtime.getTasks(h.session.id))[0]?.status).toBe('completed'));
+      const restarted = h.createCoordinator();
+      try { await restarted.reconcile(h.config); }
+      finally { restarted.stop(); }
+    }
+    const saved = await h.resultCard();
+    const card: any = buildLarkCard(h.cards.get(saved.final_message_id!));
+    const mention = '<at id=ou_alice></at>';
+    expect(JSON.stringify(card).split(mention)).toHaveLength(2);
+    expect(card.body.elements.some((item: any) => item.element_id === 'group_mention')).toBe(false);
+    const footer = card.body.elements.at(-1);
+    expect(footer.tag).toBe('column_set');
+    expect(footer.columns[0].elements[0].content).toContain(mention);
+    expect(resultSends(h)).toHaveLength(mode === 'unupdatable' ? 2 : 1);
+    expect(saved.final_message_id === sent.messageId).toBe(mode !== 'unupdatable');
+  });
+
   it.each([false, true])('delivers one answer and updates the same card with export and verification (reaction=%s)', async reaction => {
     const h = await harness({ verificationCommand: 'pnpm test', reaction });
     const sent = await h.sendFinal();

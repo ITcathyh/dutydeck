@@ -73,7 +73,7 @@ export interface StoredLarkConfig {
   memoryModel?: string;
   /** 结构化问答卡片总开关，默认开启；显式 false 使用文字选项与引用回复。 */
   structuredAskCards: boolean;
-  /** P0-4 群内审批卡/结果卡 @ 发起人总开关，默认关闭；触达效果真机验证通过后才建议开启。 */
+  /** P0-4 群内卡片 @ 发起人总开关，默认关闭；开启后群内结果卡卡尾 @ 发起人，审批/提问卡卡首 @。 */
   groupCardMention: boolean;
   /**
    * 平台验证命令：在会话工作目录真实执行，记录退出码、有限输出与代码指纹。
@@ -96,6 +96,12 @@ export interface StoredLarkConfig {
   pushIntervalMs: number;
   traceLimit?: number;
   hideTraceOnComplete: boolean;
+  /**
+   * 精简过程卡，默认开启。normalizeStoredConfig 总是落成显式布尔；渲染层只在显式 true 时
+   * 精简，缺省（旧配置读入未归一化的路径、旧测试直接构造的 config）按完整记录处理。
+   * 精简模式下 hideTraceOnComplete 对过程卡不再生效（各阶段退化为一行标题 markdown）。
+   */
+  compactTrace?: boolean;
   /** 完成时只对触发消息贴表情，不再发结果卡，默认关闭。可被群级 presentationOverride 覆盖。 */
   completionReactionOnly: boolean;
   /** 中间进展完全静默，只保留最终结果，默认关闭。可被群级 presentationOverride 覆盖。 */
@@ -180,6 +186,8 @@ export interface SaveLarkConfigInput {
   pushIntervalMs?: number;
   traceLimit?: number | null;
   hideTraceOnComplete?: boolean;
+  /** 精简过程卡；缺省继承当前配置，仍缺省按开启处理。 */
+  compactTrace?: boolean;
   completionReactionOnly?: boolean;
   silentProgress?: boolean;
   allowedUsers?: LarkAllowedUser[];
@@ -244,6 +252,8 @@ export interface PublicLarkConfig {
   pushIntervalMs: number;
   traceLimit?: number;
   hideTraceOnComplete: boolean;
+  /** 精简过程卡，默认开启；旧服务端/未归一化配置缺省时按开启处理。 */
+  compactTrace: boolean;
   completionReactionOnly: boolean;
   silentProgress: boolean;
   allowedUsers: LarkAllowedUser[];
@@ -505,6 +515,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     pushIntervalMs: Number.isInteger(pushIntervalMs) && pushIntervalMs >= 500 && pushIntervalMs <= 20_000 ? pushIntervalMs : defaultLarkPushIntervalMs,
     traceLimit,
     hideTraceOnComplete: parsed.hideTraceOnComplete !== false,
+    compactTrace: parsed.compactTrace !== false,
     completionReactionOnly: parsed.completionReactionOnly === true,
     silentProgress: parsed.silentProgress === true,
     allowedUsers: normalizeAllowedUsers(parsed.allowedUsers),
@@ -593,6 +604,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   pushIntervalMs: config.pushIntervalMs,
   traceLimit: config.traceLimit ?? defaultLarkTraceLimit,
   hideTraceOnComplete: config.hideTraceOnComplete,
+  compactTrace: config.compactTrace !== false,
   completionReactionOnly: config.completionReactionOnly === true,
   silentProgress: config.silentProgress === true,
   allowedUsers: config.allowedUsers,
@@ -655,6 +667,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
   const traceLimit = input.traceLimit === undefined ? current?.traceLimit ?? defaultLarkTraceLimit : input.traceLimit ?? defaultLarkTraceLimit;
   const hideTraceOnComplete = input.hideTraceOnComplete ?? current?.hideTraceOnComplete ?? true;
+  const compactTrace = input.compactTrace ?? current?.compactTrace ?? true;
   const completionReactionOnly = input.completionReactionOnly ?? current?.completionReactionOnly ?? false;
   const silentProgress = input.silentProgress ?? current?.silentProgress ?? false;
   const defaultModel = input.defaultModel === undefined ? current?.defaultModel : input.defaultModel.trim() || undefined;
@@ -741,6 +754,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     pushIntervalMs,
     traceLimit,
     hideTraceOnComplete,
+    compactTrace,
     completionReactionOnly,
     silentProgress,
     allowedUsers,

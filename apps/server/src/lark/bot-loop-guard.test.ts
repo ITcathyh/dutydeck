@@ -316,7 +316,7 @@ describe('结果卡不 @ 回机器人发起人', () => {
   it('机器人发起时不产出 at 串，人类发起时照常', () => {
     expect(senderGroupMention(true, { chatType: 'group', senderOpenId: 'ou_peer_bot', senderType: 'app' })).toBeUndefined();
     expect(senderGroupMention(true, { chatType: 'group', senderOpenId: 'ou_peer_bot', senderType: 'bot' })).toBeUndefined();
-    expect(senderGroupMention(true, { chatType: 'group', senderOpenId: 'ou_alice', senderType: 'user' })).toBe('<at user_id="ou_alice">成员</at>');
+    expect(senderGroupMention(true, { chatType: 'group', senderOpenId: 'ou_alice', senderType: 'user' })).toBe('<at id=ou_alice></at>');
     expect(senderGroupMention(false, { chatType: 'group', senderOpenId: 'ou_alice', senderType: 'user' })).toBeUndefined();
     expect(senderGroupMention(true, { chatType: 'p2p', senderOpenId: 'ou_alice', senderType: 'user' })).toBeUndefined();
   });

@@ -405,6 +405,36 @@ describe('Lark 实验卡片开关归一化', () => {
   });
 });
 
+describe('compactTrace 精简过程卡开关', () => {
+  it('旧配置缺省时归一化为开启，并在公开视图暴露 true', async () => {
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret' }]));
+    expect(config.compactTrace).toBe(true);
+    expect(publicLarkConfig(config)).toMatchObject({ compactTrace: true });
+  });
+
+  it('saveLarkConfig 显式 false 后持久化与读回均为 false', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, {
+      appId: 'cli_compact', appSecret: 'secret', compactTrace: false
+    });
+    const [persisted] = JSON.parse((await repository.get(larkBotsConfigKey))!);
+    expect(persisted).toMatchObject({ compactTrace: false });
+    const [config] = await readLarkConfigs(repository);
+    expect(config.compactTrace).toBe(false);
+    expect(publicLarkConfig(config)).toMatchObject({ compactTrace: false });
+  });
+
+  it('再次保存未带开关时继承现值', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, {
+      appId: 'cli_compact', appSecret: 'secret', compactTrace: false
+    });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_compact', appId: 'cli_compact', appSecret: 'secret', preInjectPrompt: 'hi' });
+    const [config] = await readLarkConfigs(repository);
+    expect(config.compactTrace).toBe(false);
+  });
+});
+
 describe('工作目录别名表与执行身份', () => {
   it('只保留指向绝对路径的别名，空表归一化为不存在', async () => {
     const repository = seedBots([{

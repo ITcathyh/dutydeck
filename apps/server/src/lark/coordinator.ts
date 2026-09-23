@@ -3124,10 +3124,10 @@ export class LarkMessageCoordinator {
         // 但此前只存在于 Web；结果卡上必须把「验证过没有」和 Agent 的自述分开写清楚。
         const verification = await this.verificationView(task, config, state);
         const elements = [
-          ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : []),
           ...(explicit ? [] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events)),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
-          ...(verification.element ? [verification.element] : [])];
+          ...(verification.element ? [verification.element] : []),
+          ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : [])];
         if (this.stopped || task.turn !== currentTurn) return;
         const resultCardInput = {
           ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: prompt.slice(0, 80),

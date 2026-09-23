@@ -666,7 +666,7 @@ describe('structured ask cards (P0-2)', () => {
       const groupCtx = context({ event: larkMessage({ messageId: 'om_group_ask', senderOpenId: 'ou_alice' }) });
       await h.workflow.observe(groupCtx, oversized.event, { structuredAskCards: true, groupMention: true });
       const card = h.cardAt(0);
-      expect(card.elements[0]).toMatchObject({ tag: 'markdown', element_id: 'group_mention', content: '<at user_id="ou_alice">成员</at>' });
+      expect(card.elements[0]).toMatchObject({ tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_alice></at>' });
       // 回落只能替换 hint 自身：严禁按固定下标写 elements[1]，否则群 @ 开启时覆盖的是问题正文。
       expect(card.elements[1]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: '请选择发布范围' } });
       expect(card.elements.some((element: any) => element.tag === 'form')).toBe(false);
