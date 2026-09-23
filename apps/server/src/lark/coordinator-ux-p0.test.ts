@@ -464,7 +464,8 @@ describe('P0-4 群卡 @ 发起人：默认关字节不变，开启只在审批/�
       && card.elements.some((element: any) => element.element_id === 'final_output'))!;
     expect(resultCard).toBeTruthy();
     const mention = resultCard.elements.find((element: any) => element.element_id === 'group_mention');
-    expect(mention).toMatchObject({ tag: 'markdown', content: '<at user_id="ou_alice">成员</at>' });
+    expect(mention).toMatchObject({ tag: 'markdown', content: '<at id=ou_alice></at>' });
+    expect(resultCard.elements.at(-1)?.element_id).toBe('group_mention');
     // 过程卡的每一帧 PATCH（含排队/运行）都不得携带 @。
     for (const [input] of h.service.update.mock.calls) {
       expect(JSON.stringify(input)).not.toContain('group_mention');
@@ -477,7 +478,8 @@ describe('P0-4 群卡 @ 发起人：默认关字节不变，开启只在审批/�
     await vi.waitFor(async () => expect((await p.interactions()).some(item => item.kind === 'permission' && item.state === 'pending')).toBe(true));
     const approvalCard = [...p.cards.values()].find(card => card.awaitingHuman)!;
     const approvalMention = approvalCard.elements.find((element: any) => element.element_id === 'group_mention');
-    expect(approvalMention).toMatchObject({ tag: 'markdown', content: '<at user_id="ou_alice">成员</at>' });
+    expect(approvalMention).toMatchObject({ tag: 'markdown', content: '<at id=ou_alice></at>' });
+    expect(approvalCard.elements[0]?.element_id).toBe('group_mention');
 
     // 私聊即使开启也不 @。
     const dm = await harness('normal', { configPatch: { groupCardMention: true } });

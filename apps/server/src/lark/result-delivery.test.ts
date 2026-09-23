@@ -59,7 +59,7 @@ describe('separate process and complete result messages', () => {
     const service = { uploadFile: vi.fn(async (_input: any) => 'file_full'), replyFile: vi.fn(async (_input: any) => ({ messageId: 'om_file' })),
       reply: vi.fn(async (_input: any) => ({ messageId: 'om_summary' })), send: vi.fn(), sendFile: vi.fn() };
     const original = input(text);
-    original.elements.push({ tag: 'markdown', element_id: 'group_mention', content: '<at user_id="ou_owner">成员</at>' },
+    original.elements.push({ tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_owner></at>' },
       { tag: 'button', element_id: 'workflow_accept', text: { tag: 'plain_text', content: '验收通过' } });
     const result = await sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question', replyInThread: true },
       { ...original, taskName: '创建机器人', turn: 1, recordExport: true }, log);
@@ -76,7 +76,11 @@ describe('separate process and complete result messages', () => {
     expect(JSON.stringify(card)).toContain('尚待用户扫码，创建尚未完成。');
     expect(JSON.stringify(card)).toContain('正文开头节选（非完整结论）');
     expect(JSON.stringify(card)).toContain('workflow_accept');
-    expect(JSON.stringify(card)).toContain('<at user_id=');
+    expect(JSON.stringify(card)).toContain('<at id=');
+    const attachmentIndex = summary.elements.findIndex((e: any) => e.element_id === 'result_attachment');
+    const mentionIndex = summary.elements.findIndex((e: any) => e.element_id === 'group_mention');
+    expect(mentionIndex).toBeGreaterThan(attachmentIndex);
+    expect(summary.elements.at(-1)?.element_id).toBe('group_mention');
     expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThan(24 * 1024);
     expect(result).toMatchObject({ messageId: 'om_summary', attachmentMessageId: 'om_file', elements: summary.elements });
     expect(service.send).not.toHaveBeenCalled();

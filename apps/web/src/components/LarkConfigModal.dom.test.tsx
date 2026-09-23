@@ -617,16 +617,18 @@ describe('LarkConfigModal S7 Web 出口健康提示', () => {
 });
 
 describe('LarkConfigModal 实验卡片开关', () => {
-  it('问答默认开启，群提及保持默认关闭', async () => {
+  it('问答与精简过程卡默认开启，群提及保持默认关闭', async () => {
     renderModal(collection({ setupComplete: true }));
     await screen.findByPlaceholderText('已保存');
     await userEvent.setup().click(await screen.findByText('访问范围与高级设置（可选）'));
     const ask = screen.getByRole('switch', { name: '结构化问答卡片（默认开启）' });
-    const mention = screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' });
+    const mention = screen.getByRole('switch', { name: '群卡片 @ 发起人（默认关闭）' });
+    const compact = screen.getByRole('switch', { name: '精简过程卡（默认开启）' });
     expect(ask.getAttribute('aria-checked')).toBe('true');
     expect(mention.getAttribute('aria-checked')).toBe('false');
+    expect(compact.getAttribute('aria-checked')).toBe('true');
     expect(screen.getByText(/低版本飞书客户端可能不支持/)).toBeTruthy();
-    expect(screen.getByText(/触达效果尚待真机验证/)).toBeTruthy();
+    expect(screen.getByText(/群内结果卡末尾 @ 任务发起人/)).toBeTruthy();
   });
 
   it('回填服务端已开启的开关', async () => {
@@ -634,20 +636,21 @@ describe('LarkConfigModal 实验卡片开关', () => {
     await screen.findByPlaceholderText('已保存');
     await userEvent.setup().click(await screen.findByText('访问范围与高级设置（可选）'));
     expect(screen.getByRole('switch', { name: '结构化问答卡片（默认开启）' }).getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByRole('switch', { name: '群卡片 @ 发起人（默认关闭）' }).getAttribute('aria-checked')).toBe('true');
   });
 
-  it('切换后随第一步保存写入配置', async () => {
+  it('切换后随第一步保存写入配置，精简过程卡默认带上且可关闭', async () => {
     const user = userEvent.setup();
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
     renderModal(collection({ setupComplete: true }));
     await screen.findByPlaceholderText('已保存');
     await user.click(await screen.findByText('访问范围与高级设置（可选）'));
     await user.click(screen.getByRole('switch', { name: '结构化问答卡片（默认开启）' }));
-    await user.click(screen.getByRole('switch', { name: '群卡片 @ 发起人（实验能力，默认关闭）' }));
+    await user.click(screen.getByRole('switch', { name: '群卡片 @ 发起人（默认关闭）' }));
+    await user.click(screen.getByRole('switch', { name: '精简过程卡（默认开启）' }));
     await user.click(screen.getByRole('button', { name: '下一步' }));
     await waitFor(() => expect(save).toHaveBeenCalledOnce());
-    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', structuredAskCards: false, groupCardMention: true });
+    expect(save.mock.calls[0]![0]).toMatchObject({ stage: 'lark', structuredAskCards: false, groupCardMention: true, compactTrace: false });
   });
 });
 

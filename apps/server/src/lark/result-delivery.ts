@@ -117,12 +117,12 @@ export async function prepareLarkResult(
     // An exact excerpt is not a business-outcome summary. Keep it explicitly
     // labelled and plain text; never infer success from a finished agent turn.
     resultInput.elements = [
-      ...input.elements.filter(element => element.element_id === 'group_mention'),
       { tag: 'div', element_id: 'final_output', text: { tag: 'plain_text', content: `正文开头节选（非完整结论）：\n${Array.from(String(output)).slice(0, 1000).join('')}…` } },
       { tag: 'div', element_id: 'result_attachment', text: { tag: 'plain_text', content: `完整正文已发送为附件「${filename}」。未完成事项与下一步请以全文为准；可引用本卡或附件反馈。` } },
       // 验证状态行必须跟着摘要卡走：结果转成附件后，卡上只剩节选，
       // 「这份结论有没有被平台验证过」比节选本身更需要留在能看见的地方。
-      ...input.elements.filter(element => ['evidence', 'verification_status', 'workflow_result_status', 'workflow_accept', 'workflow_changes'].includes(String(element.element_id)))
+      ...input.elements.filter(element => ['evidence', 'verification_status', 'workflow_result_status', 'workflow_accept', 'workflow_changes'].includes(String(element.element_id))),
+      ...input.elements.filter(element => element.element_id === 'group_mention')
     ];
   }
   return { input: resultInput, ...(attachmentMessageId ? { attachmentMessageId } : {}) };

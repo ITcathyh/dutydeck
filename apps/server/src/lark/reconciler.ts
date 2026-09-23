@@ -274,10 +274,10 @@ export async function performLarkCardReconcile(input: {
             chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type });
           const decoration = await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective);
           const elements = [
-            ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : []),
             ...(explicit ? [] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events)),
             ...(decoration?.elements ?? []),
-            ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : [])];
+            ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : []),
+            ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : [])];
           finalCardInput = {
             ...cardContext, permissionMode: larkPermissionMode(config), state, cardKind: 'result',
             taskId: mapping.externalId, taskName: persisted.task_name,

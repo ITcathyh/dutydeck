@@ -5,6 +5,8 @@ import { boundLarkCardElements, LarkServiceError } from './service.js';
 // 卡片渲染与限流/拒绝判断辅助。
 // 飞书只展示可观察的阶段摘要、工具活动和最终结果；模型 thinking 属于内部推理，
 // 只能用于计数和阶段状态判断，不得把原文写入卡片或降级 Markdown。
+// compactTrace 开启时过程卡进入精简模式：历史阶段与当前阶段都只保留一行标题/旁白，
+// 不再展开工具与终端面板；完整细节仍由 renderLarkTrace / renderLarkRecordExport 保留。
 
 export type TraceEntry = { type: AgentEvent['type']; data: Record<string, any>; timestamp: string };
 export type TraceGroup = { narratives: TraceEntry[]; actions: TraceEntry[] };
@@ -58,7 +60,7 @@ export function patchRejectedCardDelta(previous: LarkCardElement[] = [], current
   ]);
 }
 
-function compactTrace(events: AgentEvent[]): TraceEntry[] {
+function compactTraceEntries(events: AgentEvent[]): TraceEntry[] {
   const result: TraceEntry[] = [];
   const tools = new Map<string, TraceEntry>();
   const permissions = new Map<string, TraceEntry>();
@@ -402,7 +404,7 @@ const toolPresentation = (entry: TraceEntry) => {
   };
 };
 
-export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTrace(events).some(entry =>
+export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTraceEntries(events).some(entry =>
   (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '执行中'
 );
 
@@ -584,7 +586,8 @@ const historyGroupPanel = (
   index: number,
   showElapsed = false,
   expanded = false,
-  keepScreenFallback = false
+  keepScreenFallback = false,
+  compact = false
 ): LarkCardElement => {
   const records = stageRecords(group.actions, keepScreenFallback);
   const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
@@ -626,6 +629,11 @@ const historyGroupPanel = (
   // 只是在重复「没有异常」这件事，同时把失败的那一个淹掉。
   const stateSuffix = status.label === '已完成' ? '' : `　<font color='${status.color}'>● ${status.label}</font>`;
   const headerTitle = `${preview}${elapsedSuffix}${stateSuffix}`;
+
+  // 精简模式：阶段只留一行标题，不渲染任何工具/终端面板。
+  if (compact) {
+    return { tag: 'markdown', element_id: `trace_group_${index}`, content: headerTitle, text_size: 'notation', margin: '0px' };
+  }
 
   let actionElements: LarkCardElement[] = [];
   // 单条记录（一个工具、或一段合并后的终端输出）直接摊平：阶段本身已经是一层折叠，
@@ -690,7 +698,7 @@ const historyGroupPanel = (
   };
 };
 
-const currentRunningStagePanel = (group: TraceGroup, index: number, showFallbackTitle = true): LarkCardElement => {
+const currentRunningStagePanel = (group: TraceGroup, index: number, showFallbackTitle = true, compact = false): LarkCardElement => {
   const records = stageRecords(group.actions);
   const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
   const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
@@ -699,10 +707,12 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
   const toolPresentations = tools.map(toolPresentation);
   const primaryTool = toolPresentations[0];
 
+  // 精简模式下旁白截断放宽到 200：工具行不再展示，旁白是这一阶段唯一的可读信息。
+  const narrativeLimit = compact ? 200 : 92;
   // 没有旁白时用工具自带的描述，再没有才落到分类名。detail 不参与：它就是紧挨着的那行
   // 工具摘要的内容，再拼一次等于同一条命令连着出现两行。
   const currentTitle = narrativeText
-    ? truncateInline(narrativeText, 92)
+    ? truncateInline(narrativeText, narrativeLimit)
     : (primaryTool?.description ? truncateInline(primaryTool.description, 92)
       : primaryTool ? primaryTool.action : '正在执行…');
 
@@ -721,6 +731,42 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
     : '';
 
   const elements: LarkCardElement[] = [];
+  if (compact) {
+    // 精简模式：始终输出 current_title（忽略 omitFallbackTitle），只补一行步骤计数。
+    elements.push({
+      tag: 'markdown',
+      element_id: 'current_title',
+      content: `${escapeCardInline(currentTitle)}${statusSuffix}`,
+      text_size: 'normal',
+      margin: '0px'
+    });
+    // 终端回显不算步骤：它只是屏幕流，不是结构化工具调用。
+    if (tools.length > 0) {
+      const stepsText = failedCount > 0
+        ? `已执行 ${tools.length} 个步骤，${failedCount} 个失败`
+        : `已执行 ${tools.length} 个步骤`;
+      elements.push({
+        tag: 'markdown',
+        element_id: 'current_steps',
+        content: `<font color='grey'>${stepsText}</font>`,
+        text_size: 'notation',
+        margin: '0px'
+      });
+    }
+    return {
+      tag: 'interactive_container',
+      element_id: `trace_group_${index}`,
+      behaviors: [],
+      background_style: 'current_bg',
+      has_border: false,
+      corner_radius: '8px',
+      padding: '8px 10px 8px 10px',
+      margin: '0px',
+      direction: 'vertical',
+      vertical_spacing: '4px',
+      elements
+    };
+  }
   const omitFallbackTitle = !showFallbackTitle && !narrativeText && !primaryTool && records.length > 0;
   if (!omitFallbackTitle) {
     elements.push({
@@ -829,14 +875,15 @@ const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
 
 export function renderLarkCardElements(
   events: AgentEvent[],
-  config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete'>,
+  config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete' | 'compactTrace'>,
   completed = false,
   compensation = false,
   /** 保留入参以免改动全部调用点；下一步提示移除后渲染不再按会话类型分叉。 */
   _chatType?: string,
   view: 'combined' | 'process' | 'result' = 'combined'
 ): LarkCardElement[] {
-  const entries = compactTrace(events);
+  const compact = config.compactTrace === true;
+  const entries = compactTraceEntries(events);
   const lastIndex = (predicate: (entry: TraceEntry) => boolean) => {
     for (let index = entries.length - 1; index >= 0; index--) if (predicate(entries[index]!)) return index;
     return -1;
@@ -885,8 +932,10 @@ export function renderLarkCardElements(
   if (groups.length) {
     if (completed) {
       if (omittedGroupCount) elements.push(traceOmissionElement(omittedGroupCount, '0px 0px 4px 0px'));
-      const expanded = config.hideTraceOnComplete === false;
-      elements.push(...groups.map((group, index) => historyGroupPanel(group, index, false, expanded, true)));
+      // 精简模式下历史阶段退化为无 expanded 属性的 markdown 行，arrange 按默认规则折叠总面板，
+      // hideTraceOnComplete 对过程卡不再生效。
+      const expanded = !compact && config.hideTraceOnComplete === false;
+      elements.push(...groups.map((group, index) => historyGroupPanel(group, index, false, expanded, true, compact)));
     } else {
       const historyGroups = groups.slice(0, -1);
       const currentGroup = groups.at(-1)!;
@@ -896,16 +945,16 @@ export function renderLarkCardElements(
         // 灰字讲一遍「此前阶段」——那一行只是把当前阶段继续往下推。位置表达不了的
         // 只有「还有多少个更早阶段没展示」，所以这里只在真的省略了阶段时才出一行。
         if (omittedGroupCount) elements.push(traceOmissionElement(omittedGroupCount, '4px 0px 2px 0px'));
-        elements.push(...historyGroups.map((group, index) => historyGroupPanel(group, index, true, false)));
+        elements.push(...historyGroups.map((group, index) => historyGroupPanel(group, index, true, false, false, compact)));
       }
-      elements.push(currentRunningStagePanel(currentGroup, groups.length - 1, view !== 'process'));
+      elements.push(currentRunningStagePanel(currentGroup, groups.length - 1, view !== 'process', compact));
     }
   }
   if (!elements.length) elements.push({ tag: 'markdown', content: completed ? '执行过程已结束，结果见单独的结果消息。' : '正在思考中…', text_size: 'normal', margin: '0px' });
   return elements;
 }
 
-export const renderLarkProcessElements = (events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete'>, terminal = false) =>
+export const renderLarkProcessElements = (events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete' | 'compactTrace'>, terminal = false) =>
   renderLarkCardElements(events, config, terminal, false, undefined, 'process');
 
 export const renderLarkResultElements = (events: AgentEvent[]) =>
@@ -936,7 +985,7 @@ export function renderLarkResultTextElements(text: string): LarkCardElement[] {
 }
 
 export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkConfig, 'traceLimit'>, _completed = false) {
-  let entries = compactTrace(events);
+  let entries = compactTraceEntries(events);
   if (config.traceLimit) entries = entries.slice(-config.traceLimit);
   if (!entries.length) return '正在思考中…';
   return entries.map(entry => {
@@ -954,7 +1003,7 @@ export function renderLarkTrace(events: AgentEvent[], config: Pick<StoredLarkCon
 /** Full public execution record: do not export internal analysis or opaque PTY
  * screens, which may contain a CLI's private reasoning. No visual trace limits. */
 export function renderLarkRecordExport(events: AgentEvent[]): string {
-  const sections = compactTrace(events).flatMap(entry => {
+  const sections = compactTraceEntries(events).flatMap(entry => {
     const data = entry.data;
     const time = entry.timestamp;
     if (entry.type === 'text') return [`## ${time} · Agent\n\n${redactTraceText(String(data.text ?? ''))}`];

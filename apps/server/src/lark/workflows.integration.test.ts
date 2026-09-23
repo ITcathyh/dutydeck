@@ -82,6 +82,8 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
   await runtime.initialize([agent]);
   const config: StoredLarkConfig = { appId: 'cli_workflows', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
     mentionPolicy: options.mentionPolicy, fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
+    // 集成夹具按完整过程卡语义断言工具记录；精简模式由 card-renderer.compact.test.ts 单独覆盖。
+    compactTrace: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   let groupManager: LarkGroupManager | undefined;

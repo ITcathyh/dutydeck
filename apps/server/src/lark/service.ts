@@ -437,6 +437,18 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const isProcessCard = input.cardKind === 'process';
   const isResultCard = input.cardKind === 'result';
 
+  let footerMention: string | undefined;
+  let mentionElementIndex = -1;
+  if (isResultCard && input.elements?.length) {
+    mentionElementIndex = input.elements.findIndex(element => element?.element_id === 'group_mention');
+    if (mentionElementIndex >= 0) {
+      const el = input.elements[mentionElementIndex];
+      if (typeof el?.content === 'string') {
+        footerMention = el.content;
+      }
+    }
+  }
+
   // 页脚承载两件不值得占正文的事：这轮跑了多久，以及去哪看全貌。执行者已经写在
   // header 副标题里，页脚再写一次就是同一个名字在一张卡上出现两遍；工作区路径、
   // 任务号、权限标签对聊天里的读者没有可操作性，同样不占这一行。
@@ -446,12 +458,22 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // 多久，值得留下，但不值得占正文最上面一行去把结果往下推。
   // 调用方显式给了 statusLabel 时状态行会保留，耗时也就还在正文里，页脚不能再写一遍。
   // process 布局的耗时已在 task_overview 中承载，页脚不重复渲染耗时。
-  if (!isProcessCard && state === 'completed' && elapsedSeconds > 0 && !explicitStatusLabel) {
+  const hasElapsed = !isProcessCard && state === 'completed' && elapsedSeconds > 0 && !explicitStatusLabel;
+  const elapsedText = hasElapsed ? `用时 ${elapsedLabel(elapsedSeconds)}` : undefined;
+  const parts: string[] = [];
+  if (footerMention) parts.push(footerMention);
+  if (elapsedText) parts.push(elapsedText);
+  if (parts.length) {
+    const columnContent = footerMention && elapsedText
+      ? `${footerMention}<font color='grey'> · ${elapsedText}</font>`
+      : elapsedText
+        ? `<font color='grey'>${elapsedText}</font>`
+        : footerMention!;
     footerColumns.push({
       tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
       elements: [{
-        tag: 'markdown', element_id: 'task_elapsed',
-        content: `<font color='grey'>用时 ${elapsedLabel(elapsedSeconds)}</font>`,
+        tag: 'markdown', element_id: elapsedText ? 'task_elapsed' : 'group_mention',
+        content: columnContent,
         text_size: 'x-small', margin: '0px'
       }]
     });
@@ -475,8 +497,11 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   }] : [];
   const recordHint = exportElements.length ? '可点击「导出执行记录」获取公开执行记录。'
     : footerDetailUrl ? '完整记录见「查看详情」。' : '';
+  const rawElements = (isResultCard && mentionElementIndex >= 0 && input.elements?.length)
+    ? input.elements.filter((_, index) => index !== mentionElementIndex)
+    : input.elements;
   const sourceMainElements: Array<Record<string, unknown>> = input.elements?.length
-    ? JSON.parse(JSON.stringify(input.elements))
+    ? JSON.parse(JSON.stringify(rawElements))
     : [{ tag: 'markdown', content, text_align: 'left', text_size: 'normal_v2', margin: '0px' }];
   // Old persisted snapshots can still contain a Web-only instruction. Present
   // only an access path that this exact card actually offers.

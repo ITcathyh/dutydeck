@@ -108,6 +108,66 @@ describe('Lark card service', () => {
     expect(JSON.stringify(noUrl)).not.toContain('查看详情');
   });
 
+  it('result 卡页脚合并 @ 发起人与用时及查看详情链接', () => {
+    const card: any = buildLarkCard({
+      cardKind: 'result',
+      state: 'completed',
+      elapsedSeconds: 75,
+      sessionId: 'ses_1',
+      webBaseUrl: 'https://web.example.com',
+      elements: [
+        { tag: 'markdown', element_id: 'final_output', content: '任务已完成' },
+        { tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_alice></at>' }
+      ]
+    });
+    expect(card.body.elements.some((el: any) => el.element_id === 'group_mention')).toBe(false);
+    const footer = card.body.elements.at(-1);
+    expect(footer.tag).toBe('column_set');
+    const firstColMarkdown = footer.columns[0].elements[0];
+    expect(firstColMarkdown.element_id).toBe('task_elapsed');
+    expect(firstColMarkdown.content.startsWith('<at id=ou_alice></at>')).toBe(true);
+    expect(firstColMarkdown.content).toContain(' · 用时');
+    const secondColMarkdown = footer.columns[1].elements[0];
+    expect(secondColMarkdown.content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
+  });
+
+  it('result 卡无耗时（如 failed）时，页脚第一列保留 group_mention 且内容为 mention 本身', () => {
+    const card: any = buildLarkCard({
+      cardKind: 'result',
+      state: 'failed',
+      elements: [
+        { tag: 'markdown', element_id: 'final_output', content: '任务失败' },
+        { tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_alice></at>' }
+      ]
+    });
+    expect(card.body.elements.some((el: any) => el.element_id === 'group_mention')).toBe(false);
+    const footer = card.body.elements.at(-1);
+    expect(footer.tag).toBe('column_set');
+    const firstColMarkdown = footer.columns[0].elements[0];
+    expect(firstColMarkdown.element_id).toBe('group_mention');
+    expect(firstColMarkdown.content).toBe('<at id=ou_alice></at>');
+  });
+
+  it('同 a 的输入但不带 mention 时，与改动前结果一致，确保无回归', () => {
+    const card: any = buildLarkCard({
+      cardKind: 'result',
+      state: 'completed',
+      elapsedSeconds: 75,
+      sessionId: 'ses_1',
+      webBaseUrl: 'https://web.example.com',
+      elements: [
+        { tag: 'markdown', element_id: 'final_output', content: '任务已完成' }
+      ]
+    });
+    const footer = card.body.elements.at(-1);
+    expect(footer.tag).toBe('column_set');
+    const firstColMarkdown = footer.columns[0].elements[0];
+    expect(firstColMarkdown.element_id).toBe('task_elapsed');
+    expect(firstColMarkdown.content).toBe("<font color='grey'>用时 1m 15s</font>");
+    const secondColMarkdown = footer.columns[1].elements[0];
+    expect(secondColMarkdown.content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
+  });
+
   it('keeps state-specific actions in the top prompt row', () => {
     const queued: any = buildLarkCard({ state: 'queued', taskId: 'queued' });
     const running: any = buildLarkCard({ state: 'running', taskId: 'running', elapsedSeconds: 31 });
