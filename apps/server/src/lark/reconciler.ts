@@ -86,6 +86,8 @@ export async function performLarkCardReconcile(input: {
             sessionId: mapping.sessionId,
             readOnly: true,
             turn: persisted.turn,
+            // 结果早已作为另一条消息送达（只贴表情时没有这一条）。
+            ...(persisted.final_delivery_state === 'delivered' ? { resultFollows: true } : {}),
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             ...(legacyElements ? { elements: legacyElements } : {})
           });
@@ -188,6 +190,8 @@ export async function performLarkCardReconcile(input: {
       let lastError: unknown;
       let contentRejected = false;
       const currentElements = boundLarkCardElements(renderLarkProcessElements(events, config, true));
+      // 回执上的「结果见下条」：只贴表情的模式下这次对账不会补发结果消息。
+      const resultFollows = completed && effective.completionReactionOnly !== true;
       let deliveredElements = persisted.last_successful_elements;
       for (let attempt = 1; !updated && cardMessageId && attempt <= 3; attempt++) {
         try {
@@ -203,6 +207,7 @@ export async function performLarkCardReconcile(input: {
             sessionId: mapping.sessionId,
             readOnly: true,
             turn: persisted.turn,
+            ...(resultFollows ? { resultFollows: true } : {}),
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             elements: currentElements
           });
@@ -235,6 +240,7 @@ export async function performLarkCardReconcile(input: {
             sessionId: mapping.sessionId,
             readOnly: true,
             turn: persisted.turn,
+            ...(resultFollows ? { resultFollows: true } : {}),
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             elements: patchedElements
           });

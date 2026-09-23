@@ -38,6 +38,27 @@ describe('separate process and complete result messages', () => {
     expect(JSON.stringify(result)).not.toContain('private reasoning');
   });
 
+  it('long multi-paragraph results fold on the card and still count as fully delivered, without an attachment', async () => {
+    const text = Array.from({ length: 10 }, (_, index) => `## 第 ${index + 1} 部分\n\n${'结论的展开说明。'.repeat(20)}`).join('\n\n');
+    let sent: any;
+    const fetch = vi.fn(async (_url: string, init: RequestInit) => {
+      if (_url.includes('tenant_access_token')) return Response.json({ code: 0, tenant_access_token: 'test-token', expire: 7200 });
+      sent = JSON.parse(JSON.parse(String(init.body)).content);
+      return Response.json({ code: 0, data: { message_id: 'om_result' } });
+    });
+    const service = new LarkCardService({ appId: 'cli_test', appSecret: 'test', defaultReceiveIdType: 'chat_id', defaultAgentName: 'test', baseUrl: 'https://open.feishu.cn' }, fetch as any);
+    const result = await sendLarkResult(service, { chatId: 'oc_group' }, input(text), log);
+    expect(result).toMatchObject({ messageId: 'om_result' });
+    expect(result.attachmentMessageId).toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    const all = (value: any): any[] => Array.isArray(value) ? value.flatMap(all)
+      : value && typeof value === 'object' ? [value, ...Object.values(value).flatMap(all)] : [];
+    const byId = (id: string) => all(sent.body.elements).find(item => item.element_id === id);
+    expect(byId('final_output_more')).toMatchObject({ tag: 'collapsible_panel', expanded: false });
+    expect(byId('final_output').content + byId('final_output_rest').content).toBe(text);
+    expect(JSON.stringify(sent)).not.toContain('result_attachment');
+  });
+
   it('sends more than 6000 characters intact through the real card service', async () => {
     const text = `BEGIN\n${'a'.repeat(7000)}\nEND`;
     const fetch = vi.fn(async (_url: string, init: RequestInit) => {
@@ -71,7 +92,7 @@ describe('separate process and complete result messages', () => {
     const summary = service.reply.mock.calls[0]![0];
     expect(summary.idempotencyKey).not.toBe(service.replyFile.mock.calls[0]![0].idempotencyKey);
     const card = buildLarkCard(summary);
-    expect(card.header.title.content).toBe('执行结果 · 创建机器人');
+    expect(card.header.title.content).toBe('创建机器人');
     expect(card.config.summary.content).toContain('本轮结束');
     expect(JSON.stringify(card)).toContain('尚待用户扫码，创建尚未完成。');
     expect(JSON.stringify(card)).toContain('正文开头节选（非完整结论）');

@@ -42,6 +42,12 @@ const multiStageEvents: AgentEvent[] = [
 
 const compactConfig = { traceLimit: 10, compactTrace: true } as const;
 
+const components = (value: any): any[] => {
+  if (Array.isArray(value)) return value.flatMap(components);
+  if (!value || typeof value !== 'object') return [];
+  return [...(typeof value.tag === 'string' ? [value] : []), ...Object.values(value).flatMap(components)];
+};
+
 describe('compactTrace 精简过程卡', () => {
   beforeEach(() => {
     vi.useFakeTimers({ now: new Date('2026-08-27T00:00:09.000Z') });
@@ -50,7 +56,7 @@ describe('compactTrace 精简过程卡', () => {
     vi.useRealTimers();
   });
 
-  it('运行态：无工具条目与折叠面板，历史阶段为 markdown 行，当前阶段含标题与步骤计数', () => {
+  it('运行态：无工具条目与折叠面板，历史阶段一行一段，当前阶段写旁白、此刻这一步和按类型的步骤计数', () => {
     const elements = renderLarkProcessElements(multiStageEvents, compactConfig, false);
     const serialized = JSON.stringify(elements);
     expect(serialized).not.toContain('trace_tool_');
@@ -58,36 +64,60 @@ describe('compactTrace 精简过程卡', () => {
 
     const groups = elements.filter(element => String(element.element_id ?? '').startsWith('trace_group_'));
     expect(groups).toHaveLength(3);
-    // 前两个是历史阶段，都退化为 markdown 标题行。
-    expect(groups[0]).toMatchObject({ tag: 'markdown', element_id: 'trace_group_0' });
-    expect(groups[1]).toMatchObject({ tag: 'markdown', element_id: 'trace_group_1' });
-    // 失败的历史阶段标题带失败后缀。
-    expect(String(groups[1]!.content)).toContain('失败');
+    // 前两个是历史阶段：一行，左边图标说明结束与否、是否整段失败；不足 3 秒的阶段不写耗时。
+    const [done, failed] = groups as any[];
+    expect(done).toMatchObject({ tag: 'column_set', element_id: 'trace_group_0' });
+    expect(done.columns).toHaveLength(1);
+    expect(done.columns[0].elements[0]).toMatchObject({ content: '先看配置文件。', icon: { token: 'done_outlined', color: 'grey' } });
+    expect(failed).toMatchObject({ tag: 'column_set', element_id: 'trace_group_1' });
+    expect(failed.columns[0].elements[0].icon).toMatchObject({ token: 'close_outlined', color: 'red' });
 
-    // 当前阶段保持 interactive_container 约定。
+    // 当前阶段保持 interactive_container 约定，不再套底色。
     const current = groups[2]!;
-    expect(current.tag).toBe('interactive_container');
-    expect(current.element_id).toBe('trace_group_2');
-    const inner = current.elements as Record<string, unknown>[];
-    expect(inner.some(element => element.element_id === 'current_title')).toBe(true);
-    const steps = inner.find(element => element.element_id === 'current_steps');
-    expect(steps).toBeDefined();
-    expect(String(steps!.content)).toContain('已执行 2 个步骤，1 个失败');
-    // 当前阶段旁白是标题主体。
-    expect(String((inner.find(element => element.element_id === 'current_title')!).content)).toContain('根据失败信息修复');
+    expect(current).toMatchObject({ tag: 'interactive_container', element_id: 'trace_group_2' });
+    expect(current.background_style).toBeUndefined();
+    const title = components(current).find(element => element.element_id === 'current_title');
+    expect(title.content).toBe('**根据失败信息修复。**');
+    expect(components(current).find(element => element.element_id === 'current_elapsed').content).toBe("<font color='grey'>3s</font>");
+    // 有旁白时另起一行写最新一步；它失败了就直接标红。
+    expect(components(current).find(element => element.element_id === 'current_now').content)
+      .toBe("<font color='red'>失败：pnpm vitest run</font>");
+    const steps = components(current).find(element => element.element_id === 'current_steps').content as string;
+    const counted = [...steps.matchAll(/<text_tag color='neutral'>[^<]+ (\d+)<\/text_tag>/g)].reduce((sum, match) => sum + Number(match[1]), 0);
+    expect(counted).toBe(2);
+    expect(steps).toContain("<text_tag color='red'>失败 1</text_tag>");
     // 终端回显不渲染为独立条目，也不计入步骤数。
     expect(serialized).not.toContain('终端输出');
   });
 
-  it('完成态：所有阶段均为 markdown 标题行，无工具条目', () => {
+  it('运行态没有旁白时：标题跟着最新一步走，不再另起「正在」一行', () => {
+    const events: AgentEvent[] = [
+      event(1, 'tool_result', t1, { id: 'a', name: 'Read', input: { path: '/repo/package.json' }, output: 'ok', status: 'completed', startedAt: t0, completedAt: t1 }),
+      event(2, 'tool_call', t2, { id: 'b', name: 'Bash', input: { command: 'pnpm build' }, status: 'running', startedAt: t2 })
+    ];
+    const elements = renderLarkProcessElements(events, compactConfig, false);
+    expect(components(elements).find(element => element.element_id === 'current_title').content).toBe('**pnpm build**');
+    expect(components(elements).some(element => element.element_id === 'current_now')).toBe(false);
+
+    const card: any = buildLarkCard({ cardKind: 'process', state: 'running', taskName: '构建', elapsedSeconds: 9, elements });
+    expect(card.config.summary.content).toBe('执行中 · pnpm build');
+  });
+
+  it('完成态：每个阶段一行并带耗时，无工具条目', () => {
     const elements = renderLarkProcessElements(multiStageEvents, compactConfig, true);
     const groups = elements.filter(element => String(element.element_id ?? '').startsWith('trace_group_'));
     expect(groups.length).toBeGreaterThan(0);
-    for (const group of groups) {
-      expect(group.tag).toBe('markdown');
-    }
+    for (const group of groups) expect(group.tag).toBe('column_set');
     expect(JSON.stringify(elements)).not.toContain('trace_tool_');
     expect(elements.some(element => element.tag === 'collapsible_panel')).toBe(false);
+
+    // 展开回执后要能看出每段花了多久：耗时单独一列靠右。
+    const slow = renderLarkProcessElements([
+      event(1, 'text', t0, { role: 'assistant', text: '跑一遍构建。' }),
+      event(2, 'tool_result', t5, { id: 'b', name: 'Bash', input: { command: 'pnpm build' }, output: 'ok', status: 'completed', startedAt: t0, completedAt: t5 })
+    ], compactConfig, true);
+    const stage = slow.find(element => element.element_id === 'trace_group_0') as any;
+    expect(stage.columns[1]).toMatchObject({ width: 'auto', elements: [{ content: "<font color='grey'>5s</font>" }] });
   });
 
   it('经 buildLarkCard 组装后的过程卡不含 trace_tool_ 且不超过飞书 24KB 限制', () => {

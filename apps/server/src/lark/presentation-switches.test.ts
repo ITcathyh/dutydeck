@@ -15,6 +15,7 @@ import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { COMPLETION_REACTION_EMOJI } from './reaction-records.js';
+import { buildLarkCard } from './service.js';
 import type { LarkMessageEvent } from './listener.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -127,6 +128,10 @@ describe('完成时只贴表情（completionReactionOnly）', () => {
     expect(h.cardsOfKind('process')).toHaveLength(1);
     expect(h.cardsOfKind('result')).toHaveLength(1);
     expect(h.completionReactions()).toHaveLength(0);
+    // 会另发结果卡，完成后的回执才写「结果见下条」。
+    const completedUpdate = h.service.update.mock.calls.map(([input]) => input as any).find(input => input.state === 'completed');
+    expect(completedUpdate).toMatchObject({ cardKind: 'process', resultFollows: true });
+    expect(JSON.stringify(buildLarkCard(completedUpdate))).toContain('结果见下条');
   });
 
   it('开启后成功终态只贴一个表情、不发结果卡，过程卡仍冻结成完成态', async () => {
@@ -140,8 +145,11 @@ describe('完成时只贴表情（completionReactionOnly）', () => {
     expect(saved.state).toBe('completed');
     expect(saved.final_delivery_state).toBe('reaction');
     expect(saved.final_message_id).toBeUndefined();
-    // 终态帧仍然写进过程卡，卡片不会停在「执行中」。
-    expect(h.service.update.mock.calls.some(([input]) => (input as any).state === 'completed')).toBe(true);
+    // 终态帧仍然写进过程卡，卡片不会停在「执行中」；没有下一条结果消息，回执不能写「结果见下条」。
+    const completedUpdate = h.service.update.mock.calls.map(([input]) => input as any).find(input => input.state === 'completed');
+    expect(completedUpdate).toBeDefined();
+    expect(completedUpdate.resultFollows).toBeUndefined();
+    expect(JSON.stringify(buildLarkCard(completedUpdate))).not.toContain('结果见下条');
   });
 
   it('失败终态照发结果卡，不允许用一个表情把失败藏起来', async () => {

@@ -14,7 +14,7 @@ import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { RelayAskBroker } from '@dutydeck/relay';
 import type { AgentConfig } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
-import { LarkMessageCoordinator } from './coordinator.js';
+import { LarkMessageCoordinator, larkTaskTitle } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -827,5 +827,19 @@ describe('飞书输入明确反馈与提问生命周期', () => {
     expect(h.service.reply.mock.calls.at(-1)![0].markdown).toContain('请求未执行');
     expect(h.service.reply.mock.calls.at(-1)![0].markdown).toContain('运行权限尚未确认');
     expect(h.send).not.toHaveBeenCalled();
+  });
+});
+
+describe('卡片标题', () => {
+  it('去掉开头对本机器人的 @，@ 别的机器人和正文里的 @ 保留', () => {
+    expect(larkTaskTitle('@bdev-flash 详细总结下群聊', 'bdev-flash')).toBe('详细总结下群聊');
+    expect(larkTaskTitle('@bdev-flash @bdev-flash  重跑一次', 'bdev-flash')).toBe('重跑一次');
+    expect(larkTaskTitle('@other-bot 帮我看下', 'bdev-flash')).toBe('@other-bot 帮我看下');
+    expect(larkTaskTitle('@bdev-flashy 帮我看下', 'bdev-flash')).toBe('@bdev-flashy 帮我看下');
+    expect(larkTaskTitle('请 @bdev-flash 看下', 'bdev-flash')).toBe('请 @bdev-flash 看下');
+    // 只有 @ 没有正文时保留原话，标题不能是空的；没有机器人名时不动。
+    expect(larkTaskTitle('@bdev-flash', 'bdev-flash')).toBe('@bdev-flash');
+    expect(larkTaskTitle('@bdev-flash 做事')).toBe('@bdev-flash 做事');
+    expect(larkTaskTitle(`@bdev-flash ${'长'.repeat(100)}`, 'bdev-flash')).toHaveLength(80);
   });
 });
