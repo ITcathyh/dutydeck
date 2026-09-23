@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>飞书任务卡片：现状 vs 方案（可交互）</title>
+<style>
+  :root { --text:#1F2329; --grey:#646A73; --dim:#8F959E; --line:#DEE0E3; --blue:#245BDB; --green:#2EA121; --red:#D83931; }
+  body { margin:0; background:#F2F3F5; font:14px/22px -apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:var(--text); }
+  .bar { position:sticky; top:0; z-index:20; background:#fff; border-bottom:1px solid var(--line); padding:10px 32px; display:flex; flex-wrap:wrap; gap:10px 18px; align-items:center; }
+  .bar .grp { display:flex; gap:8px; align-items:center; font-size:13px; color:var(--grey); }
+  .seg { display:inline-flex; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .seg button { border:0; border-right:1px solid var(--line); background:#fff; padding:4px 12px; font:inherit; font-size:13px; cursor:pointer; color:var(--grey); }
+  .seg button:last-child { border-right:0; }
+  .seg button.on { background:#E1EAFF; color:var(--blue); font-weight:500; }
+  .btn { border:1px solid var(--line); background:#fff; border-radius:6px; padding:4px 12px; font:inherit; font-size:13px; cursor:pointer; color:var(--text); }
+  .btn.pri { background:#3370FF; border-color:#3370FF; color:#fff; min-width:72px; }
+  select { font:inherit; font-size:13px; border:1px solid var(--line); border-radius:6px; padding:3px 6px; background:#fff; }
+  input[type=range] { width:300px; accent-color:#3370FF; }
+  #clock { font-variant-numeric:tabular-nums; color:var(--text); min-width:120px; }
+  .marks { display:flex; gap:6px; flex-wrap:wrap; }
+  .marks button { border:1px solid var(--line); background:#F7F8FA; border-radius:12px; padding:0 10px; font:inherit; font-size:12px; line-height:22px; color:var(--grey); cursor:pointer; }
+  .marks button:hover { color:var(--blue); border-color:#B5C8FF; }
+  .wrap { padding:18px 32px 40px; }
+  .tip { margin:0 0 16px; color:var(--grey); font-size:13px; }
+  .pair { display:flex; gap:36px; align-items:flex-start; }
+  .col > h3 { margin:0 0 10px; font-size:13px; color:var(--grey); font-weight:500; } .col > h3 b { color:var(--text); }
+  .metric { margin-top:10px; font-size:12px; color:var(--grey); } .metric b { color:var(--text); }
+  .legend { background:#fff; border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-bottom:18px; }
+  .legend ul { list-style:none; margin:0; padding:0; display:flex; flex-wrap:wrap; gap:6px; }
+  .legend li { display:inline-flex; gap:6px; align-items:center; padding:2px 10px 2px 4px; border:1px solid var(--line); border-radius:14px; cursor:pointer; font-size:13px; line-height:22px; }
+  .legend li:hover { background:#F5F6F7; } .legend li.on { background:#E8EFFF; border-color:#B5C8FF; }
+  .legend .detail { margin-top:8px; font-size:13px; color:var(--grey); min-height:20px; }
+  .legend .detail b { color:var(--text); font-weight:500; }
+  .num { flex:0 0 18px; height:18px; border-radius:50%; background:#3370FF; color:#fff; font-size:11px; font-weight:600; line-height:18px; text-align:center; }
+  .pz { font-size:11px; border-radius:3px; padding:0 4px; margin-right:4px; }
+  .pz.p0 { background:#D9F5D6; color:#237B19; } .pz.p1 { background:#E1EAFF; color:#245BDB; }
+  /* 聊天列表 */
+  .cl { width:var(--w); box-sizing:border-box; display:flex; gap:10px; align-items:center; background:#fff; border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin-bottom:12px; }
+  .gav { flex:0 0 32px; height:32px; border-radius:8px; background:#7B61FF; color:#fff; font-size:13px; line-height:32px; text-align:center; }
+  .clx { flex:1; min-width:0; } .cln { display:flex; justify-content:space-between; font-size:13px; } .cln span { color:var(--dim); font-size:12px; }
+  .clp { color:var(--grey); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cll { font-size:11px; color:var(--dim); margin:0 0 4px; }
+  /* 卡片（与静态样稿同一套样式） */
+  .stack { display:flex; flex-direction:column; gap:10px; }
+  .msg { display:flex; gap:10px; align-items:flex-start; }
+  .avatar { width:36px; height:36px; border-radius:50%; background:#1F2329; flex:0 0 36px; position:relative; }
+  .avatar::after { content:""; position:absolute; width:12px; height:12px; border-radius:50%; background:#8B7CF6; right:6px; top:8px; box-shadow:0 0 0 2px #1F2329; }
+  .sender { font-size:13px; color:var(--grey); margin-bottom:4px; } .sender b { color:var(--text); font-weight:500; margin-right:6px; }
+  .bot { font-size:11px; color:#7B61FF; background:#EFEBFF; border-radius:4px; padding:0 4px; margin-right:6px; }
+  .card { width:var(--w); background:#fff; border-radius:8px; border:1px solid var(--line); box-sizing:border-box; }
+  .hd { padding:10px 12px 8px; display:flex; gap:8px; align-items:flex-start; border-radius:7px 7px 0 0; }
+  .hd .tx { flex:1; min-width:0; }
+  .hd .t { font-size:16px; line-height:24px; font-weight:600; }
+  .hd .s { font-size:14px; line-height:22px; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .hd.blue { background:linear-gradient(90deg,#EAF1FF,#F0F5FE); } .hd.blue .t { color:#235DF0; } .hd.blue .s { color:#4E83FD; }
+  .hd.green { background:linear-gradient(90deg,#E4F7E1,#F0FAEE); } .hd.green .t { color:#237B19; } .hd.green .s { color:#3D9A33; }
+  .hd.red { background:linear-gradient(90deg,#FDE7E6,#FEF2F1); } .hd.red .t { color:#C02A22; } .hd.red .s { color:#DE5A52; }
+  .tag { display:inline-flex; align-items:center; font-size:12px; line-height:20px; padding:0 6px; border-radius:4px; white-space:nowrap; font-weight:500; margin-top:2px; }
+  .tag.blue { background:#E1EAFF; color:#245BDB; } .tag.green { background:#D9F5D6; color:#237B19; } .tag.red { background:#FDE2E2; color:#C02A22; }
+  .bd { padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+  .ph { display:flex; justify-content:space-between; color:var(--grey); }
+  .note { font-size:12px; line-height:20px; color:var(--grey); }
+  .cur { background:#F0F5FD; border-radius:8px; padding:8px 10px; display:flex; flex-direction:column; gap:4px; }
+  .hist { font-size:12px; line-height:20px; } .hist .d { color:var(--grey); }
+  .failtxt { color:#A34D00; }
+  .row { display:flex; gap:4px; align-items:center; } .row.right { justify-content:flex-end; } .row.between { justify-content:space-between; }
+  .tb { display:inline-flex; align-items:center; gap:4px; height:32px; padding:0 8px; font-size:14px; color:var(--text); white-space:nowrap; }
+  .tb.pri { color:var(--blue); }
+  .ic { width:14px; height:14px; flex:0 0 14px; color:var(--grey); } .tb.pri .ic { color:var(--blue); }
+  .link { color:var(--blue); font-size:12px; } .greylink { color:var(--grey); font-size:12px; }
+  .foot { display:flex; justify-content:space-between; font-size:12px; color:var(--grey); margin-top:2px; }
+  .tl { display:flex; flex-direction:column; gap:6px; }
+  .st { display:flex; gap:8px; align-items:flex-start; }
+  .st .dot { flex:0 0 16px; height:22px; display:flex; align-items:center; justify-content:center; }
+  .st .dot svg { width:14px; height:14px; }
+  .st .body { flex:1; min-width:0; }
+  .st .d { color:var(--dim); font-size:12px; white-space:nowrap; line-height:22px; }
+  .st.now .body .a { font-weight:600; }
+  .st.past .body { color:var(--grey); font-size:13px; }
+  .nowline { display:inline-block; color:var(--grey); font-size:13px; margin-top:2px; padding:0 2px; margin-left:-2px; border-radius:4px; }
+  .nowline .bad { color:#D83931; }
+  .chips { display:inline-flex; gap:6px; margin-top:4px; flex-wrap:wrap; }
+  .chip { display:inline-flex; font-size:12px; line-height:20px; color:var(--grey); background:#F2F3F5; border-radius:4px; padding:0 6px; }
+  .callout { border-radius:8px; padding:8px 10px; display:flex; gap:8px; align-items:flex-start; }
+  .callout.red { background:#FEF1F1; } .callout.red .ic { color:#D83931; margin-top:4px; }
+  .receipt { display:flex; justify-content:space-between; align-items:center; padding:9px 12px; }
+  .receipt .l { display:flex; align-items:center; gap:6px; color:var(--grey); font-size:13px; } .receipt .l b { color:var(--green); font-weight:500; }
+  .md h4 { margin:10px 0 4px; font-size:14px; } .md p { margin:0 0 8px; } .md > :last-child { margin-bottom:0; }
+  .fold { display:flex; justify-content:space-between; align-items:center; color:var(--grey); font-size:13px; border-top:1px solid #EFF0F1; padding-top:8px; }
+  .chev { color:var(--dim); font-size:12px; }
+  code { background:#1F23290D; border-radius:3px; padding:0 3px; font-family:ui-monospace,Menlo,monospace; font-size:.92em; }
+  .click { cursor:pointer; user-select:none; } .click:hover { opacity:.8; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .spinning { animation:spin .9s linear infinite; }
+  @keyframes flash { from { background:#D6E3FF; } to { background:transparent; } }
+  .flash { animation:flash 1.6s ease-out both; }
+  /* 标注 */
+  .annot .B [data-n] { position:relative; }
+  .annot .B [data-n]::after { content:attr(data-n); position:absolute; top:-8px; right:-8px; width:16px; height:16px; border-radius:50%; background:#3370FF; color:#fff; font:600 10px/16px -apple-system,sans-serif; text-align:center; z-index:3; pointer-events:none; box-shadow:0 0 0 2px #fff; }
+  /* 右侧有耗时等内容的整行元素：角标放左边，避免盖住 */
+  .annot .B .st[data-n]::after, .annot .B .fold[data-n]::after, .annot .B .cl[data-n]::after, .annot .B .callout[data-n]::after { left:-21px; right:auto; top:3px; }
+  /* 行内文字：角标跟在文字后面 */
+  .annot .B span[data-n]:not(.tag)::after { position:relative; display:inline-block; top:-6px; right:auto; margin-left:3px; }
+  .hl { outline:2px solid #3370FF !important; outline-offset:2px; border-radius:4px; }
+  .A .hl { outline-color:#F5A623 !important; }
+</style></head><body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="stop" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="5.6" y="5.6" width="4.8" height="4.8" rx="0.8" fill="currentColor"/></symbol>
+  <symbol id="refresh" viewBox="0 0 16 16"><path d="M13.2 8A5.2 5.2 0 1 1 11.6 4.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M11.9 1.9v2.8H9.1" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="done" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#2EA121"/><path d="M4.8 8.2l2.1 2.1 4.3-4.4" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="doneline" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.4" fill="none" stroke="#B7BBC2" stroke-width="1.2"/><path d="M5.2 8.2l1.9 1.9 3.8-3.9" fill="none" stroke="#8F959E" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="spin" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="#D6E3FF" stroke-width="2"/><path d="M8 1.8A6.2 6.2 0 0 1 14.2 8" fill="none" stroke="#3370FF" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="fail" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#D83931"/><path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="warn" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.6H1.4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.2v3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="11.4" r=".8" fill="currentColor"/></symbol>
+</svg>
+
+<div class="bar">
+  <div class="grp">场景 <div class="seg" id="sceneSeg"></div></div>
+  <div class="grp"><button class="btn pri" id="play">▶ 播放</button><button class="btn" id="reset">重来</button></div>
+  <div class="grp"><input type="range" id="scrub" min="0" step="1"><span id="clock"></span></div>
+  <div class="grp">速度 <select id="speed"><option value="1">1×</option><option value="5">5×</option><option value="20">20×</option><option value="60">60×</option></select></div>
+  <div class="grp">宽度 <div class="seg" id="widthSeg"><button data-w="580">电脑 580px</button><button data-w="320">手机 360px</button></div></div>
+  <div class="grp"><label><input type="checkbox" id="annot" checked> 标出改动</label></div>
+  <div class="grp">跳到 <div class="marks" id="marks"></div></div>
+</div>
+
+<div class="wrap">
+  <p class="tip">左右两张卡跑的是同一个任务。可以播放或拖动时间轴。下面的改动项：悬停时两边对应位置会高亮（左橙右蓝），点击会跳到能看到它的时刻，再点一次取消。卡片上的「执行记录」「执行过程」「展开全文」都能点。旁白和各阶段耗时取自真实任务，工具步骤是按真实节奏补的示意数据。</p>
+  <div class="legend"><ul id="legend"></ul><div class="detail" id="detail"></div></div>
+  <div>
+    <div class="pair">
+      <div class="col A"><h3><b>现状</b>（线上精简模式）</h3><div class="cll">会话列表里的预览</div><div id="clA"></div><div class="m" id="A"></div><div class="metric" id="hA"></div></div>
+      <div class="col B"><h3><b>方案</b></h3><div class="cll">会话列表里的预览</div><div id="clB"></div><div class="m" id="B"></div><div class="metric" id="hB"></div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const fmt = sec => { sec = Math.max(0, Math.floor(sec)); return sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, '0')}s`; };
+const ic = (id, cls = 'ic') => `<svg class="${cls}"><use href="#${id}"/></svg>`;
+const msg = (card, name, time) => `<div class="msg"><div class="avatar"></div><div><div class="sender"><b>${esc(name)}</b><span class="bot">智能体</span>${time}</div>${card}</div></div>`;
+const stop = `<span class="tb">${ic('stop')}中断</span>`, refresh = `<span class="tb">${ic('refresh')}刷新</span>`, retry = `<span class="tb pri">${ic('refresh')}重试</span>`;
+const attr = n => n ? ` data-n="${n}"` : '';
+
+// 工具：[开始秒, 类型, 描述, 时长, 失败信息]
+const SCENES = {
+  run: {
+    label: '执行中 → 完成', bot: 'bdev-flash', group: '地狱焚决 Agent 群', clock: '13:43', endClock: '13:50', speed: 20,
+    prompt: '@bdev-flash 详细总结下地狱焚决 Agent 群这周的聊天内容，排除情感生活类的闲聊',
+    title: '详细总结下地狱焚决 Agent 群这周的聊天内容…', agent: 'CCFlash (Claude Code / CPA)',
+    end: 432, final: 'completed',
+    marks: [[0, '开始'], [76, '一步失败后重试'], [192, '3m 12s（文档场景 1）'], [290, '第 4 阶段'], [432, '完成']],
+    stages: [
+      { at: 0, texts: [[1, '先拉取本周群消息。'], [44, '先拉取本周群消息，共 6432 条。']], tools: [
+        [2, '命令', '拉取群内 9月8日以来的全部消息', 18], [21, '命令', '统计消息条数', 7], [30, '写文件', '按 8 个时段拆分写入文件', 12]] },
+      { at: 49, texts: [[49, '8 个时段拆分完成，开始逐段精读。']], tools: [
+        [51, '读文件', '读取 9/8 凌晨时段消息', 8], [61, '命令', '提取 9/8 凌晨的讨论主题', 9],
+        [72, '命令', '拉取 9/8 上午时段的话题回复', 6, { cmd: 'lark-cli im threads list', err: '429 Too Many Requests' }],
+        [80, '命令', '重试拉取 9/8 上午时段的话题回复', 11], [94, '读文件', '读取 9/8 上午和下午时段消息', 9]] },
+      { at: 111, texts: [[111, '9/8 下午时段已读完，还剩 9/9 两个时段，稍后出完整总结。']], tools: [
+        [113, '命令', '提取 9/8 下午的讨论主题', 10], [125, '命令', '合并 9/8 各时段的要点', 9], [136, '读文件', '读取 9/8 要点汇总', 5],
+        [143, '命令', '补拉 9/8 被引用的话题回复', 14], [159, '读文件', '读取补拉的话题回复', 6], [168, '命令', '拉取 9/9 上午时段消息（09:00–12:00）', 30],
+        [199, '读文件', '读取 9/9 上午时段消息', 8], [210, '命令', '提取 9/9 上午的讨论主题', 14], [228, '命令', '拉取 9/9 下午时段消息（12:00–18:00）', 24],
+        [255, '读文件', '读取 9/9 下午时段消息', 9], [268, '命令', '提取 9/9 下午的讨论主题', 16]] },
+      { at: 290, texts: [[290, '8 个时段都读完了，开始合并成完整总结。']], tools: [
+        [293, '读文件', '读取 8 个时段的要点', 7], [305, '写文件', '写入总结初稿', 20]] }
+    ]
+  },
+  fail: {
+    label: '失败', bot: 'mux 应用', group: '开发测试群', clock: '10:21', speed: 5,
+    prompt: '构建并重启服务端', title: '构建并重启服务端', agent: 'Claude Code',
+    end: 43, final: 'failed',
+    marks: [[0, '开始'], [20, '构建中'], [41, '构建失败'], [43, '结束']],
+    stages: [
+      { at: 0, texts: [[0, '开始安装依赖并构建服务端。']], tools: [[1, '命令', '安装依赖', 11]] },
+      { at: 12, texts: [[12, '依赖就绪，执行构建。']], tools: [[12, '命令', '构建服务端', 28, { cmd: 'pnpm build', err: 'Error: ENOSPC: no space left on device, write' }]] }
+    ]
+  }
+};
+
+const ANSWER_HEAD = `<p>这两天群里的结论，一句话是：<b>Astra 是目前最强的模型，但额度撑不住当主执行者，得靠「Astra 出方案 + 便宜模型执行」来省。</b></p>
+<p>拆开五条：</p><h4>1. 模型选型</h4><p>Astra 快、准、指令遵循好，computer use 已能自己点内网系统。但单价约为上一代的 2.5 倍，20x 套餐一周只够跑两三个重任务……</p>`;
+const ANSWER_REST = `<h4>2. 额度焦虑贯穿全程</h4><p>重置风波、重置卡亏损、封号潮、报销收紧……</p><h4>3. 9/9 组织调整传闻</h4><p>……</p><p class="note">（样稿只放了节选，全文约 4,300 字）</p>`;
+
+const NOTES = [
+  [1, 'p0', '标题去掉 @机器人', '标题去掉开头的「@机器人自己的名字」（@ 别的机器人保留），截成一行；结果卡去掉「执行结果 · 」前缀', 'run', 192],
+  [2, 'p0', '彩色状态标签', '状态改成标题栏右侧的彩色标签，替换正文里的状态行，卡内状态只出现一次', 'run', 192],
+  [3, 'p0', '删状态行，耗时移到底部', '删掉正文里「执行记录 · 执行中 · 用时」这一行，耗时和总步数移到底部左侧；副标题保持原样', 'run', 192],
+  [4, 'p0', '会话列表显示进度', '会话列表预览改成「执行中 · 当前阶段旁白」，没有旁白时用最近一个工具的描述', 'run', 192],
+  [5, 'p0', '删掉免责声明', '结果卡删掉「执行中曾有 N 个步骤失败，历史记录不代表仍有未解决问题」（左侧橙框）', 'run', 432],
+  [6, 'p1', '「正在：…」实时刷新', '当前阶段加一行「正在：<最新一个工具的描述>」，每次调用工具都刷新；刚失败的一步显示为红字（点击跳到 1m 16s 看失败）', 'run', 76],
+  [7, 'p1', '工具类型计数', '本阶段的工具类型计数，合计等于本阶段步数，替代「已执行 N 个步骤」', 'run', 192],
+  [8, 'p1', '阶段图标，耗时右对齐', '阶段前加状态图标（进行中是加载动图），耗时右对齐；有失败的阶段保留现有的「● 有失败」', 'run', 192],
+  [9, 'p1', '完成后收成一行', '完成后过程卡收成一行回执，不带标题栏；点「执行过程」可以展开阶段记录', 'run', 432],
+  [10, 'p1', '长结果折叠', '结果超过约 800 字时，原样展示前约 500 字，其余折叠；点「展开全文」试试', 'run', 432],
+  [11, 'p1', '@ 发起人', '群聊结果卡 @ 发起人，等结果的人会收到提醒（现有开关，默认关闭）', 'run', 432],
+  [12, 'p1', '失败卡露出失败步骤', '失败卡加提示块：最后失败的步骤、命令、耗时、输出里的报错行。写「最后失败的步骤」而不是「失败原因」，因为现在拿不到任务级的失败原因', 'fail', 43]
+];
+
+let sceneKey = 'run', sc = SCENES.run, t = 192, playing = false, speed = 20, width = 580;
+let ui = {}, lastState = '', hl = null, pinned = null, nowKey = '', nowAt = 0, renderKey = '';
+
+function snapshot(t) {
+  const done = t >= sc.end;
+  const stages = sc.stages.filter(s => s.at <= t).map((s, i, arr) => {
+    const tools = s.tools.filter(x => x[0] <= t).map(([at, kind, desc, dur, fail]) => ({ at, kind, desc, dur, fail, status: t < at + dur ? 'run' : fail ? 'fail' : 'ok' }));
+    const text = [...s.texts].reverse().find(x => x[0] <= t)?.[1] ?? '';
+    const next = arr[i + 1];
+    const endAt = next ? next.at : done ? Math.max(s.at, ...tools.map(x => x.at + x.dur)) : t;
+    const fails = tools.filter(x => x.status === 'fail').length, oks = tools.filter(x => x.status === 'ok').length;
+    return { text, tools, elapsed: endAt - s.at, current: !next && !done, fails, oks };
+  });
+  return { t: Math.min(t, sc.end), done, state: done ? sc.final : 'running', stages, steps: stages.reduce((n, s) => n + s.tools.length, 0) };
+}
+const stageTitle = x => x.text || x.tools[0]?.desc || '执行过程';
+const failLabel = x => x.fails ? (x.oks ? '有失败' : '失败') : '';
+const kinds = tools => { const m = new Map(); for (const x of tools) m.set(x.kind, (m.get(x.kind) || 0) + 1); return [...m]; };
+const open = (key, def) => ui[key] ?? def;
+const toggle = (key, isOpen) => ` data-toggle="${key}" data-open="${isOpen}"`;
+
+function header(color, title, sub, tag) {
+  return `<div class="hd ${color}"><div class="tx"><div class="t"${attr(1)}>${esc(title)}</div><div class="s">${esc(sub)}</div></div>${tag ? `<span class="tag ${color}"${attr(2)}>${tag}</span>` : ''}</div>`;
+}
+
+// ---------- 现状 ----------
+function oldCards(s) {
+  const st = s.state, color = { running: 'blue', completed: 'green', failed: 'red' }[st], label = { running: '执行中', completed: '已完成', failed: '已失败' }[st];
+  const cur = s.stages.find(x => x.current), hist = s.stages.filter(x => !x.current).reverse();
+  const traceOpen = open('oldTrace', st !== 'completed');
+  let body = `<div class="ph click"${attr(3)}${toggle('oldTrace', traceOpen)}><span>执行记录 · ${label} · 用时 ${fmt(s.t)}</span><span class="chev">${traceOpen ? '⌃' : '⌄'}</span></div>`;
+  if (traceOpen) {
+    if (cur) body += `<div class="cur"><div>${esc(cur.text || cur.tools[0]?.desc || '正在执行…')}${cur.fails ? `　<span class="failtxt">● ${failLabel(cur)}</span>` : ''}</div>${cur.tools.length ? `<div class="note"${attr(7)}>已执行 ${cur.tools.length} 个步骤${cur.fails ? `，${cur.fails} 个失败` : ''}</div>` : ''}</div>`;
+    body += hist.map((x, i) => `<div class="hist"${attr(i === 0 ? 8 : 0)}>${esc(stageTitle(x))}　<span class="d">${fmt(x.elapsed)}</span>${x.fails ? `　<span class="failtxt">● ${failLabel(x)}</span>` : ''}</div>`).join('');
+  }
+  if (st === 'running') body += `<div class="row right">${stop + refresh}</div>`;
+  if (st === 'failed') body += `<div class="row right">${retry}</div>`;
+  if (st !== 'running') body += `<div class="row right"><span class="link">查看详情</span></div>`;
+  const process = `<div class="card"${attr(st === 'completed' ? 9 : 0)}>${header(color, sc.prompt, sc.agent)}<div class="bd">${body}</div></div>`;
+  if (st !== 'completed') return msg(process, sc.bot, sc.clock);
+  const failed = s.stages.reduce((n, x) => n + x.fails, 0);
+  const result = `<div class="card">${header('green', '执行结果 · ' + sc.prompt, sc.agent)}<div class="bd"><div class="md"${attr(10)}>${ANSWER_HEAD}${ANSWER_REST}</div>
+    ${failed ? `<div class="note"${attr(5)}>ⓘ 执行中曾有 ${failed} 个步骤失败，历史记录不代表仍有未解决问题。</div>` : ''}
+    <div class="foot"><span>用时 ${fmt(s.t)}</span><span class="link">查看详情</span></div></div></div>`;
+  return `<div class="stack">${msg(process, sc.bot, sc.clock)}${msg(result, sc.bot, sc.endClock)}</div>`;
+}
+
+// ---------- 方案 ----------
+function timeline(s, terminal) {
+  const cur = terminal ? null : s.stages.find(x => x.current);
+  const hist = s.stages.filter(x => x !== cur).reverse();
+  let html = '';
+  if (cur) {
+    const last = cur.tools.at(-1);
+    const title = cur.text || last?.desc || '正在执行…';
+    let now = '';
+    if (cur.text && last) {
+      const key = `${sceneKey}|${last.at}|${last.status === 'fail'}`;
+      if (key !== nowKey) { nowKey = key; nowAt = performance.now(); }
+      const text = last.status === 'fail' ? `<span class="bad">失败：${esc(last.desc)}</span>` : `正在：${esc(last.desc)}`;
+      now = `<div><span class="nowline flash"${attr(6)} style="animation-delay:-${((performance.now() - nowAt) / 1000).toFixed(2)}s">${text}</span></div>`;
+    }
+    const counts = kinds(cur.tools);
+    const spin = `<svg class="spinning" style="animation-delay:-${((performance.now() / 1000) % 0.9).toFixed(2)}s"><use href="#spin"/></svg>`;
+    html += `<div class="st now"><span class="dot">${spin}</span><div class="body"><div class="a">${esc(title)}</div>${now}
+      ${counts.length ? `<div><span class="chips"${attr(7)}>${counts.map(([k, n]) => `<span class="chip">${k} ${n}</span>`).join('')}</span></div>` : ''}</div><span class="d">${fmt(cur.elapsed)}</span></div>`;
+  }
+  html += hist.map((x, i) => `<div class="st past"${attr(i === 0 ? 8 : 0)}><span class="dot">${ic(x.fails && !x.oks ? 'fail' : 'doneline', '')}</span>
+    <div class="body">${esc(stageTitle(x))}${x.fails && x.oks ? `　<span class="failtxt">● 有失败</span>` : ''}</div><span class="d">${fmt(x.elapsed)}</span></div>`).join('');
+  return `<div class="tl">${html}</div>`;
+}
+
+function newCards(s) {
+  const st = s.state;
+  if (st === 'completed') {
+    const rOpen = open('receipt', false), fOpen = open('fold', false);
+    const receipt = `<div class="card"${attr(9)}><div class="receipt click"${toggle('receipt', rOpen)}><span class="l">${ic('done')}<b>已完成</b>· ${s.steps} 步 · 结果见下条</span><span class="greylink">执行过程 ${rOpen ? '⌃' : '⌄'}</span></div>
+      ${rOpen ? `<div class="bd" style="padding-top:0">${timeline(s, true)}</div>` : ''}</div>`;
+    const result = `<div class="card">${header('green', sc.title, sc.agent, '已完成')}<div class="bd"><div class="md">${ANSWER_HEAD}${fOpen ? ANSWER_REST : ''}</div>
+      <div class="fold click"${attr(10)}${toggle('fold', fOpen)}><span>${fOpen ? '收起全文' : '展开全文 · 还有约 3,600 字'}</span><span class="chev">${fOpen ? '⌃' : '⌄'}</span></div>
+      <div class="foot"><span><span style="color:var(--blue)"${attr(11)}>@黄宇航</span>　用时 ${fmt(s.t)}</span><span class="link">查看详情</span></div></div></div>`;
+    return `<div class="stack">${msg(receipt, sc.bot, sc.clock)}${msg(result, sc.bot, sc.endClock)}</div>`;
+  }
+  const failed = st === 'failed';
+  let body = '';
+  if (failed) {
+    const lastFail = s.stages.flatMap(x => x.tools).filter(x => x.status === 'fail').at(-1);
+    body += `<div class="callout red"${attr(12)}>${ic('warn')}<div>${lastFail
+      ? `<b>最后失败的步骤：${esc(lastFail.desc)}</b><div class="note" style="color:#8F3B35"><code>${esc(lastFail.fail.cmd)}</code> · ${fmt(lastFail.dur)} · 输出末行 <code>${esc(lastFail.fail.err)}</code></div>`
+      : '<b>任务失败，执行记录里没有失败的步骤</b>'}</div></div>`;
+  }
+  body += timeline(s, failed);
+  body += failed
+    ? `<div class="row between"><span class="note"${attr(3)}>用时 ${fmt(s.t)} · <span class="greylink">查看详情</span></span><span class="row">${retry}</span></div>`
+    : `<div class="row between"><span class="note"${attr(3)}>已运行 ${fmt(s.t)} · 共 ${s.steps} 步</span><span class="row">${stop + refresh}</span></div>`;
+  return msg(`<div class="card">${header(failed ? 'red' : 'blue', sc.title, sc.agent, failed ? '失败' : '执行中')}<div class="bd">${body}</div></div>`, sc.bot, sc.clock);
+}
+
+function chatItem(s, side) {
+  const st = s.state, cur = s.stages.find(x => x.current);
+  const label = { running: '执行中', completed: '已完成', failed: '已失败' }[st];
+  const text = side === 'A'
+    ? `${st === 'completed' ? '执行结果' : '执行过程'} · ${sc.prompt} · ${label}`
+    : st === 'running' ? `执行中 · ${cur?.text || cur?.tools.at(-1)?.desc || '正在执行…'}` : `${st === 'failed' ? '失败' : '已完成'} · ${sc.title}`;
+  const time = st === 'completed' ? sc.endClock : sc.clock;
+  return `<div class="cl"${attr(4)}><div class="gav">群</div><div class="clx"><div class="cln"><b>${esc(sc.group)}</b><span>${time}</span></div><div class="clp">${esc(sc.bot)}：${esc(text)}</div></div></div>`;
+}
+
+// ---------- 渲染与交互 ----------
+function applyHighlight() {
+  const n = pinned ?? hl;
+  document.querySelectorAll('.m [data-n], #clA [data-n], #clB [data-n]').forEach(el => el.classList.toggle('hl', String(el.dataset.n) === String(n)));
+  document.querySelectorAll('#legend li').forEach(li => li.classList.toggle('on', li.dataset.n === String(pinned)));
+  const note = NOTES.find(x => String(x[0]) === String(n));
+  $('#detail').innerHTML = note ? `<b>${note[0]}. ${esc(note[2])}</b>：${esc(note[3])}` : '悬停查看每项改动的说明；卡片上的蓝色数字对应这里的编号。';
+}
+function render(force = false) {
+  const s = snapshot(t);
+  if (s.state !== lastState) { delete ui.oldTrace; lastState = s.state; }
+  const running = s.state === 'running';
+  // 执行中每帧重绘才能让「正在：…」的高亮和转圈连续；其余时刻只在状态变化时重绘，避免点击落空。
+  const key = `${sceneKey}|${Math.floor(t)}|${JSON.stringify(ui)}|${width}`;
+  if (!force && key === renderKey && !running) return;
+  if (!force && key === renderKey && running && !playing) return;
+  renderKey = key;
+  document.querySelectorAll('.m, #clA, #clB').forEach(el => el.style.setProperty('--w', width + 'px'));
+  $('#A').innerHTML = oldCards(s); $('#B').innerHTML = newCards(s);
+  $('#clA').innerHTML = chatItem(s, 'A'); $('#clB').innerHTML = chatItem(s, 'B');
+  const hA = Math.round($('#A').getBoundingClientRect().height), hB = Math.round($('#B').getBoundingClientRect().height);
+  $('#hA').innerHTML = `屏幕占用高度 <b>${hA}px</b>`;
+  $('#hB').innerHTML = `屏幕占用高度 <b>${hB}px</b>（${hB <= hA ? '−' : '+'}${Math.abs(Math.round((1 - hB / hA) * 100))}%）`;
+  $('#scrub').value = Math.floor(t);
+  $('#clock').textContent = `${fmt(t)} / ${fmt(sc.end)}　${{ running: '执行中', completed: '已完成', failed: '已失败' }[s.state]}`;
+  $('#play').textContent = playing ? '❚❚ 暂停' : '▶ 播放';
+  applyHighlight();
+}
+function setScene(key, at) {
+  sceneKey = key; sc = SCENES[key]; ui = {}; lastState = '';
+  t = at ?? 0; playing = false; speed = sc.speed; $('#speed').value = String(speed);
+  $('#scrub').max = sc.end;
+  $('#sceneSeg').innerHTML = Object.entries(SCENES).map(([k, v]) => `<button data-k="${k}" class="${k === key ? 'on' : ''}">${v.label}</button>`).join('');
+  $('#marks').innerHTML = sc.marks.map(([at, name]) => `<button data-t="${at}">${name}</button>`).join('');
+  render(true);
+}
+
+$('#sceneSeg').addEventListener('click', e => { const k = e.target.dataset.k; if (k) { pinned = null; setScene(k); } });
+$('#marks').addEventListener('click', e => { if (e.target.dataset.t) { t = Number(e.target.dataset.t); playing = false; render(true); } });
+$('#scrub').addEventListener('input', e => { t = Number(e.target.value); playing = false; render(true); });
+$('#speed').addEventListener('change', e => { speed = Number(e.target.value); });
+$('#play').addEventListener('click', () => { if (t >= sc.end) { t = 0; ui = {}; } playing = !playing; render(true); });
+$('#reset').addEventListener('click', () => { t = 0; ui = {}; playing = true; render(true); });
+$('#widthSeg').addEventListener('click', e => { if (!e.target.dataset.w) return; width = Number(e.target.dataset.w); document.querySelectorAll('#widthSeg button').forEach(b => b.classList.toggle('on', b === e.target)); render(true); });
+$('#annot').addEventListener('change', e => document.body.classList.toggle('annot', e.target.checked));
+// 播放时卡片在不断重绘，用 pointerdown 而不是 click，按下即生效。
+document.addEventListener('pointerdown', e => {
+  const el = e.target.closest('[data-toggle]'); if (!el) return;
+  ui[el.dataset.toggle] = el.dataset.open !== 'true'; render(true);
+});
+$('#legend').innerHTML = NOTES.map(([n, p, short]) => `<li data-n="${n}"><span class="num">${n}</span><span class="pz ${p}">${p.toUpperCase()}</span>${esc(short)}</li>`).join('');
+$('#legend').addEventListener('mouseover', e => { const li = e.target.closest('li'); if (li) { hl = li.dataset.n; applyHighlight(); } });
+$('#legend').addEventListener('mouseout', e => { if (!e.relatedTarget?.closest?.('#legend li')) { hl = null; applyHighlight(); } });
+$('#legend').addEventListener('click', e => {
+  const li = e.target.closest('li'); if (!li) return;
+  const note = NOTES.find(x => String(x[0]) === li.dataset.n);
+  if (pinned === note[0]) { pinned = null; applyHighlight(); return; }
+  pinned = note[0];
+  if (note[4] !== sceneKey) setScene(note[4], note[5]); else { t = note[5]; playing = false; ui = {}; render(true); }
+});
+
+let lastTs = performance.now();
+setInterval(() => {
+  const ts = performance.now(), dt = (ts - lastTs) / 1000; lastTs = ts;
+  if (playing) { t = Math.min(sc.end, t + dt * speed); if (t >= sc.end) playing = false; render(); }
+}, 50);
+document.body.classList.add('annot');
+// 地址参数：#fail@43、#run@432,w320,fold,receipt，用于直接打开某个时刻。
+const [, hs, ht, rest = ''] = location.hash.match(/^#(run|fail)@(\d+)(.*)$/) ?? [];
+if (rest.includes('w320')) width = 320;
+document.querySelectorAll('#widthSeg button').forEach(b => b.classList.toggle('on', Number(b.dataset.w) === width));
+setScene(hs ?? 'run', ht ? Number(ht) : 192);
+for (const k of ['fold', 'receipt']) if (rest.includes(k)) ui[k] = true;
+render(true);
+</script>
+</body></html>

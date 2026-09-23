@@ -66,6 +66,11 @@ export interface LarkCardInput {
    * interrupting。需要按 interrupting 收敛按钮时用它，不改变卡片配色与标题。
    */
   actionState?: LarkCardState | 'interrupting';
+  /**
+   * 过程卡完成后收成一行回执时，是否写「结果见下条」。只有调用方确认会另发结果消息时才传 true：
+   * 只贴表情的模式下没有下一条。
+   */
+  resultFollows?: boolean;
 }
 export interface LarkSendInput extends LarkCardInput { receiveId?: string; receiveIdType?: LarkReceiveIdType; chatId?: string }
 export interface LarkReplyInput extends LarkCardInput { messageId: string; replyInThread?: boolean; replyRootId?: string }
@@ -224,14 +229,14 @@ export interface LarkConfigurationStatus {
 // 等人处理的卡在 buildLarkCard 里强制转 orange——橙色在这套配色里没有别的用途，
 // 一眼就能从一片蓝绿里跳出来。
 const statePresentation = {
-  queued: { title: '排队中', color: 'grey', template: 'grey' },
-  running: { title: '正在执行', color: 'wathet', template: 'blue' },
-  completed: { title: '已完成', color: 'green', template: 'green' },
-  failed: { title: '已失败', color: 'red', template: 'red' },
-  interrupted: { title: '已中断', color: 'grey', template: 'grey' },
-  cancelled: { title: '已取消', color: 'grey', template: 'grey' },
-  reconcile_required: { title: '需要核对', color: 'orange', template: 'orange' },
-  legacy_unresolved: { title: '需要核对', color: 'orange', template: 'orange' }
+  queued: { title: '排队中', color: 'grey', template: 'grey', tagColor: 'neutral' },
+  running: { title: '正在执行', color: 'wathet', template: 'blue', tagColor: 'blue' },
+  completed: { title: '已完成', color: 'green', template: 'green', tagColor: 'green' },
+  failed: { title: '已失败', color: 'red', template: 'red', tagColor: 'red' },
+  interrupted: { title: '已中断', color: 'grey', template: 'grey', tagColor: 'neutral' },
+  cancelled: { title: '已取消', color: 'grey', template: 'grey', tagColor: 'neutral' },
+  reconcile_required: { title: '需要核对', color: 'orange', template: 'orange', tagColor: 'orange' },
+  legacy_unresolved: { title: '需要核对', color: 'orange', template: 'orange', tagColor: 'orange' }
 } as const;
 const elapsedLabel = (seconds: number) => {
   const value = Math.max(0, Math.floor(seconds));
@@ -244,6 +249,90 @@ const clipCardField = (value: string, limit: number) => {
   const characters = Array.from(value);
   return characters.length <= limit ? value : `${characters.slice(0, Math.max(1, limit - 1)).join('')}…`;
 };
+// 标题按显示宽度截（汉字算 2），约 22 个汉字：电脑上一行，手机上最多两行。
+const clipTitleWidth = (text: string, limit = 44) => {
+  let width = 0;
+  let clipped = '';
+  for (const char of text) {
+    width += char.charCodeAt(0) <= 0xff ? 1 : 2;
+    if (width > limit) return `${clipped.replace(/[\s，。、；：！？,.;:!?]+$/u, '')}…`;
+    clipped += char;
+  }
+  return text;
+};
+
+// 卡片 Markdown 转成会话列表预览用的纯文本。
+const plainCardText = (content: unknown) => typeof content === 'string'
+  ? content.replace(/<[^>]*>/g, '').replace(/\*\*/g, '').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&')
+    .replace(/\s+/g, ' ').trim().slice(0, 100)
+  : '';
+
+const findCardElement = (elements: unknown, id: string): Record<string, unknown> | undefined => {
+  if (!Array.isArray(elements)) return undefined;
+  for (const element of elements as Array<Record<string, unknown>>) {
+    if (!element || typeof element !== 'object') continue;
+    if (element.element_id === id) return element;
+    const nested = findCardElement(element.elements, id) ?? findCardElement(element.columns, id);
+    if (nested) return nested;
+  }
+  return undefined;
+};
+
+// 结果卡的长文只露出开头约 500 字，其余收进折叠面板。只在段落边界（代码块外的空行）切，
+// 表格内部没有空行，因此不会被切开。切出的两段拼起来与原文逐字相等——结果交付靠
+// larkCardFinalOutputText 判断整份结论是否都在卡上，差一个字符就会改发附件。
+const foldThreshold = 800;
+const foldHeadTarget = 500;
+const foldHeadMax = 1_200;
+const foldMinRest = 200;
+export const splitLongResult = (text: string): [string, string] | undefined => {
+  if (text.length <= foldThreshold) return undefined;
+  const boundaries: number[] = [];
+  const lines = text.split('\n');
+  let offset = 0;
+  let inFence = false;
+  for (let index = 0; index < lines.length - 1; index++) {
+    const line = lines[index]!;
+    offset += line.length + 1;
+    if (/^\s*(?:```|~~~)/.test(line)) inFence = !inFence;
+    else if (!inFence && !line.trim() && lines[index + 1]!.trim()) boundaries.push(offset);
+  }
+  const cut = boundaries.find(position => position >= foldHeadTarget && position <= foldHeadMax)
+    ?? [...boundaries].reverse().find(position => position < foldHeadTarget && position >= 150);
+  if (cut === undefined || text.length - cut < foldMinRest) return undefined;
+  return [text.slice(0, cut), text.slice(cut)];
+};
+
+const foldLongResult = (element: Record<string, unknown>): Array<Record<string, unknown>> => {
+  if (element.element_id !== 'final_output' || typeof element.content !== 'string') return [element];
+  const parts = splitLongResult(element.content);
+  if (!parts) return [element];
+  const [head, rest] = parts;
+  const restChars = Array.from(rest.trim()).length;
+  const approx = (restChars >= 1_000 ? Math.round(restChars / 100) * 100 : Math.max(10, Math.round(restChars / 10) * 10)).toLocaleString('en-US');
+  return [
+    { ...element, content: head },
+    {
+      tag: 'collapsible_panel', element_id: 'final_output_more', expanded: false,
+      direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px',
+      header: {
+        title: { tag: 'markdown', content: `<font color='grey'>其余内容 · 约 ${approx} 字</font>`, text_size: 'notation' },
+        vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
+        icon_position: 'right', icon_expanded_angle: -180
+      },
+      elements: [{ ...element, element_id: 'final_output_rest', content: rest }]
+    }
+  ];
+};
+
+/** 卡上实际展示的完整结论：开头一段加上折叠里的其余部分。 */
+export const larkCardFinalOutputText = (elements: Array<Record<string, unknown>>) => {
+  const head = elements.find(element => element.element_id === 'final_output');
+  if (typeof head?.content !== 'string') return undefined;
+  const rest = findCardElement(elements, 'final_output_rest');
+  return head.content + (typeof rest?.content === 'string' ? rest.content : '');
+};
+
 const cardFieldLimits = {
   taskName: 160,
   agentName: 64,
@@ -312,9 +401,12 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
     if (withinLimits(candidate)) return candidate;
     const groupIndex = mainElements.findIndex(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
     if (groupIndex < 0) {
+      // 步骤总数和最后失败的步骤很小，照样带上；它们也不能被当成正文。
+      const meta = mainElements.filter(element => element.element_id === 'trace_steps' || element.element_id === 'failure_step');
       const fallbackText = String((mainElements.find(element => element.element_id === 'final_output') as any)?.content
-        ?? (mainElements.find(element => element.tag === 'markdown') as any)?.content ?? '内容过长');
+        ?? (mainElements.find(element => element.tag === 'markdown' && !meta.includes(element)) as any)?.content ?? '内容过长');
       return [
+        ...meta,
         { tag: 'markdown', element_id: 'final_output', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
         { tag: 'markdown', element_id: 'dutydeck_snapshot_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
       ];
@@ -327,7 +419,7 @@ export function boundLarkCardElements(elements: Array<Record<string, unknown>>):
     if (stripFirstToolSection(group)) continue;
     // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动，避免整组被丢弃后用户什么都看不到。
     if (remainingGroups === 1 && groupElements.length > 1) {
-      const hasTitle = (groupElements[0] as Record<string, unknown>)?.element_id === 'current_title';
+      const hasTitle = ['current_title', 'current_head'].includes(String((groupElements[0] as Record<string, unknown>)?.element_id));
       if (hasTitle && groupElements.length > 2) {
         group.elements = [groupElements[0], ...groupElements.slice(2)];
         continue;
@@ -457,7 +549,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // 已完成的卡不再渲染状态行（见下方 showStatusRow），耗时挪到页脚：它能说明这轮跑了
   // 多久，值得留下，但不值得占正文最上面一行去把结果往下推。
   // 调用方显式给了 statusLabel 时状态行会保留，耗时也就还在正文里，页脚不能再写一遍。
-  // process 布局的耗时已在 task_overview 中承载，页脚不重复渲染耗时。
+  // process 布局的耗时在底部那一行（task_meta）里，页脚不重复渲染耗时。
   const hasElapsed = !isProcessCard && state === 'completed' && elapsedSeconds > 0 && !explicitStatusLabel;
   const elapsedText = hasElapsed ? `用时 ${elapsedLabel(elapsedSeconds)}` : undefined;
   const parts: string[] = [];
@@ -510,9 +602,32 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const hasPendingApproval = (elements: Array<Record<string, unknown>>) => elements.some(element =>
     typeof element.element_id === 'string' && element.element_id.startsWith('risk_alert_pending_')
   ) || input.awaitingHuman === true;
-  const arrange = (mainElements: Array<Record<string, unknown>>) => {
-    const waitingForApproval = state === 'running' && hasPendingApproval(mainElements);
-    const finalIds = new Set(['final_output', 'result_missing', 'evidence']);
+  // 渲染器附带的元数据不按原位置渲染：步骤总数进底部那一行，最后失败的步骤只放在失败卡上。
+  // 旧快照里的「执行中曾有 N 个步骤失败」在这里一并拿掉——对账、验收会用存下来的元素重绘，
+  // 只在渲染器里不再生成是不够的。
+  const metaIds = new Set(['trace_steps', 'failure_step', 'evidence']);
+  const stepsTextOf = (elements: Array<Record<string, unknown>>) => {
+    const found = elements.find(element => element.element_id === 'trace_steps');
+    return typeof found?.content === 'string' ? found.content : '';
+  };
+  const statusTagLabel = (waiting: boolean) => waiting && !explicitStatusLabel ? '等待审批' : liveTitle;
+  const grey = (text: string) => `<font color='grey'>${text}</font>`;
+  const detailLink = footerDetailUrl ? grey(`[查看详情](${footerDetailUrl})`) : '';
+  // 过程卡的底部一行：左边是耗时、步数和详情入口，右边是操作按钮。
+  const actionRow = (parts: string[]) => {
+    const left = parts.filter(Boolean).join(grey(' · '));
+    return actionButtons.length || left ? [{
+      tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
+      columns: [
+        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: left ? [{ tag: 'markdown', element_id: 'task_meta', content: left, text_size: 'notation', margin: '0px' }] : [] },
+        ...actionButtonColumns
+      ]
+    }] : [];
+  };
+  const arrange = (sourceElements: Array<Record<string, unknown>>) => {
+    const waitingForApproval = state === 'running' && hasPendingApproval(sourceElements);
+    const mainElements = sourceElements.filter(element => !metaIds.has(String(element.element_id ?? '')));
+    const finalIds = new Set(['final_output', 'result_missing']);
     const finalElements = mainElements.filter(element => finalIds.has(String(element.element_id ?? '')));
     const traceElements = mainElements.filter(element => typeof element.element_id === 'string' && element.element_id.startsWith('trace_group_'));
     const omissionNotice = mainElements.find(element => element.element_id === 'trace_omission');
@@ -533,15 +648,13 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       // 说两遍，而且它是整卡最重的一块颜色，会压过下面真正要读的结论。终态改用一行灰字
       // （状态文字仍然保留，颜色不是唯一线索）；运行态保留彩色 tag——那时状态还会变，
       // 需要它把注意力拉过去。
+      // 结果卡的状态已经在标题栏右侧的标签里，这一行只剩耗时。
       const liveState = state === 'running' || state === 'queued';
-      const statusLabelText = waitingForApproval && !explicitStatusLabel ? '等待审批' : liveTitle;
+      const statusLabelText = statusTagLabel(waitingForApproval);
       // 「已完成」这一行在终态卡上没有读者：绿色色带已经说了一遍，结果就在它正下方，
       // 而它每出现一次就把结果往下推一行。撤掉之后结论坐在卡片第一行，耗时退到页脚。
-      // 注意这没有消除过程卡与结果卡之间的跨消息重复——两张卡的标题、页脚耗时和
-      // 「查看详情」仍然相同，只是不再各占一行正文。
       //
       // 其余终态仍然渲染：失败和取消要让读者据此决定是否重试，而那不是默认预期。
-      const showStatusRow = state !== 'completed' || explicitStatusLabel;
       // 「已用时 0s」不是信息：它要么是首帧、要么是这张卡根本不会再更新（审批卡、提问卡
       // 都由 workflow-interactions 一次性投递，没有心跳）。0 一律不写。
       const elapsedText = elapsedSeconds > 0 ? `已用时 ${elapsedLabel(elapsedSeconds)}` : '';
@@ -550,17 +663,20 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       // 排队中和等待审批没有这个图标，状态必须由文字承担，标签保留。
       // 耗时还没攒够 1 秒时也保留：图标不能独自撑起一行没有任何文字的状态行。
       const spinnerSpeaks = state === 'running' && !waitingForApproval && !explicitStatusLabel && elapsedText !== '';
-      const statusContent = liveState
-        ? [spinnerSpeaks ? '' : `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${statusLabelText}</text_tag>`, elapsedText && `<font color='grey'>${elapsedText}</font>`].filter(Boolean).join('　')
-        : `<font color='grey'>${[statusLabelText, elapsedText].filter(Boolean).join('　')}</font>`;
+      const statusContent = isResultCard
+        ? (elapsedText ? grey(elapsedText) : '')
+        : liveState
+          ? [spinnerSpeaks ? '' : `<text_tag color='${waitingForApproval ? 'orange' : presentation.color}'>${statusLabelText}</text_tag>`, elapsedText && grey(elapsedText)].filter(Boolean).join('　')
+          : grey([statusLabelText, elapsedText].filter(Boolean).join('　'));
+      const showStatusRow = Boolean(statusContent) && (state !== 'completed' || explicitStatusLabel);
       const loadingIcon = loadingImageKey
         ? { tag: 'custom_icon', img_key: loadingImageKey, size: '20px 20px' }
         : { tag: 'standard_icon', token: 'loading_outlined', color: 'grey', size: '14px 14px' };
-      const statusElement = {
+      const statusElement = statusContent ? {
         tag: 'div', element_id: 'task_status', width: 'auto', margin: '0px',
         text: { tag: 'lark_md', content: statusContent, text_size: 'small' },
         ...(state === 'running' && !waitingForApproval ? { icon: loadingIcon } : {})
-      };
+      } : undefined;
       let traceSection: Record<string, unknown>[] = [];
       if (state === 'running') {
         const currentGroup = traceElements.find(el => el.tag === 'interactive_container') ?? traceElements.at(-1);
@@ -616,24 +732,26 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       const buttonRow = [{
         tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
         columns: [
-          { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [statusElement] },
+          { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: statusElement ? [statusElement] : [] },
           ...actionButtonColumns
         ]
       }];
-      // 有按钮就必须有承载它们的那一行，状态一并显示在左侧；没有按钮时状态行可以整行
+      // 有按钮就必须有承载它们的那一行，耗时一并显示在左侧；没有按钮时这一行可以整行
       // 省掉——已完成的卡走的就是这条路。
-      const taskHeader = actionButtons.length ? buttonRow : showStatusRow ? [statusElement] : [];
+      const taskHeader = actionButtons.length ? buttonRow : showStatusRow && statusElement ? [statusElement] : [];
+      // 结果卡的长文只露出开头，其余收进折叠面板：群里一条消息不该占满好几屏。
+      const shownFinal = isResultCard ? finalElements.flatMap(foldLongResult) : finalElements;
       return [
         ...taskHeader,
         ...attentionElements,
-        ...finalElements,
+        ...shownFinal,
         ...traceSection,
         ...otherElements
       ];
     }
 
-    // Process 卡片布局
-    const evidenceElements = mainElements.filter(element => element.element_id === 'evidence');
+    // Process 卡片布局。状态在标题栏标签里，耗时、步数和详情入口在底部一行，
+    // 正文从第一行起就是阶段内容本身。阶段新的在上：当前阶段下面紧跟刚结束的那段。
     const omissionIds = new Set([
       'dutydeck_rejected_delta',
       'dockmux_rejected_delta',
@@ -647,134 +765,135 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const omissionElements = mainElements.filter(element => omissionIds.has(String(element.element_id ?? '')));
     const processExternalClaimed = new Set([
       ...attentionElements,
-      ...evidenceElements,
       ...omissionElements,
       ...traceElements
     ]);
     const otherElements = mainElements.filter(element => !processExternalClaimed.has(element));
+    const stepsText = stepsTextOf(sourceElements);
+    const newestFirst = (items: Array<Record<string, unknown>>) => [...items].reverse();
+    const elapsedText = elapsedSeconds > 0 ? elapsedLabel(elapsedSeconds) : '';
+    // 终态卡可能是用运行中那一帧重绘的（终态更新被拒、对账补画）：那一帧的当前阶段还带着
+    // 加载图标和「正在：…」，任务已经停了，这两样都得拿掉。
+    const settled = (items: Array<Record<string, unknown>>) => items.map(item => {
+      if (item.tag !== 'interactive_container') return item;
+      const title = findCardElement([item], 'current_title');
+      if (title) delete title.icon;
+      const stage: Record<string, unknown> = { ...item, padding: '0px', elements: (item.elements as Array<Record<string, unknown>>).filter(el => el.element_id !== 'current_now') };
+      delete stage.background_style;
+      delete stage.corner_radius;
+      return stage;
+    });
 
-    const statusLabelText = waitingForApproval && !explicitStatusLabel ? '等待审批' : liveTitle;
-    const defaultExpanded = state === 'running' || state === 'queued' || state === 'failed';
-    const hasExplicitlyExpandedTrace = traceElements.some(el => el.expanded === true);
-    const overviewExpanded = defaultExpanded || hasExplicitlyExpandedTrace;
-
-    const elapsedPart = elapsedSeconds > 0 ? ` · ${state === 'queued' ? '排队等待' : '用时'} ${elapsedLabel(elapsedSeconds)}` : '';
-    const overviewTitleText = `执行记录 · ${statusLabelText}${elapsedPart}`;
-
-    let panelInnerElements: Record<string, unknown>[] = [];
-    if (state === 'running') {
-      const currentGroup = traceElements.find(el => el.tag === 'interactive_container') ?? traceElements.at(-1);
-      const currentItems = currentGroup?.tag === 'interactive_container' && Array.isArray(currentGroup.elements)
-        ? currentGroup.elements as Record<string, unknown>[] : [];
-      const currentTools = currentItems.filter(el => String(el.element_id ?? '').startsWith('trace_tool_'));
-      const currentStage = currentTools.length > 1 ? {
-        ...currentGroup,
-        elements: [
-          ...currentItems.filter(el => !currentTools.includes(el)),
-          {
-            tag: 'collapsible_panel', element_id: 'current_records', expanded: false,
-            direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px',
-            header: {
-              title: { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' },
-              vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-              icon_position: 'right', icon_expanded_angle: -180
-            },
-            elements: currentTools
-          }
-        ]
-      } : currentGroup;
-      const historyGroups = traceElements.filter(el => el !== currentGroup);
-      const currentStageElements = currentStage
-        ? (currentStage.tag === 'interactive_container' && Array.isArray(currentStage.elements)
-          ? (currentStage.elements as Record<string, unknown>[])
-          : [currentStage])
-        : [];
-      panelInnerElements = [
-        ...currentStageElements,
-        ...historyGroups,
-        ...otherElements
+    if (state === 'completed') {
+      // 完成后过程卡让位给结果：收成一行不带标题栏的回执，阶段记录收进这一行的折叠里。
+      // 「结果见下条」只在调用方确认会另发结果时写——只贴表情的模式下没有下一条。
+      const receiptTitle = `<font color='green'>已完成</font>${[stepsText, input.resultFollows ? '结果见下条' : '']
+        .filter(Boolean).map(part => grey(` · ${part}`)).join('')}`;
+      const receiptIcon = { tag: 'standard_icon', token: 'done_outlined', color: 'green' };
+      // 只有一个阶段时摊平：阶段标题作为普通一行，接着是它的内容，展开回执后不用再点开一层。
+      const single = traceElements.length === 1 ? traceElements[0]! : undefined;
+      const singleHeader = single?.header as Record<string, unknown> | undefined;
+      const stages = single?.tag === 'collapsible_panel' && Array.isArray(single.elements) && single.elements.length
+        ? [...(singleHeader?.title ? [singleHeader.title as Record<string, unknown>] : []), ...single.elements as Array<Record<string, unknown>>]
+        : settled(newestFirst(traceElements));
+      const listed: Array<Record<string, unknown>> = [
+        ...stages,
+        ...omissionElements,
+        // 「结果见单独的结果消息」由回执标题按 resultFollows 表达，这里不再重复，也不在没有下一条时乱说。
+        ...otherElements.filter(element => element.element_id !== 'trace_empty'),
+        ...(detailLink ? [{ tag: 'markdown', content: detailLink, text_size: 'notation', text_align: 'right', margin: '0px' }] : [])
       ];
-    } else if (traceElements.length === 1) {
-      const single = traceElements[0]!;
-      // 终态只有一个阶段时摊平，避免总面板里再套一层阶段折叠。
-      // 阶段标题（panel.header.title）作为普通一行保留，再接其 elements；
-      // 退化成 markdown 的空阶段直接原样放入。
-      const flattened = (single.tag === 'collapsible_panel' && Array.isArray(single.elements) && single.elements.length)
-        ? [
-            ...(single.header && (single.header as Record<string, unknown>).title ? [(single.header as Record<string, unknown>).title as Record<string, unknown>] : []),
-            ...(single.elements as Record<string, unknown>[])
-          ]
-        : [single];
-      panelInnerElements = [
-        ...flattened,
-        ...otherElements
+      const receipt = traceElements.length ? {
+        tag: 'collapsible_panel', element_id: 'task_overview', expanded: traceElements.some(el => el.expanded === true),
+        direction: 'vertical', vertical_spacing: '4px', padding: '0px', margin: '0px',
+        header: {
+          title: { tag: 'markdown', content: receiptTitle, text_size: 'normal', icon: receiptIcon },
+          vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
+          icon_position: 'right', icon_expanded_angle: -180
+        },
+        elements: listed
+      } : { tag: 'markdown', element_id: 'task_overview', content: receiptTitle, text_size: 'normal', margin: '0px', icon: receiptIcon };
+      return [
+        receipt,
+        ...(traceElements.length ? [] : listed),
+        ...attentionElements,
+        ...actionRow([])
       ];
-    } else if (traceElements.length > 1) {
-      panelInnerElements = [
-        ...traceElements,
-        ...otherElements
-      ];
-    } else {
-      panelInnerElements = [...otherElements];
     }
 
-    const hasActualDetails = traceElements.length > 0;
+    if (state === 'failed' || state === 'interrupted' || state === 'cancelled') {
+      // 失败卡先放报错（它才是任务停下的原因），再放最后失败的步骤——那一步之后可能已经重试成功。
+      // 没有失败步骤时不补一句「没有失败的步骤」：用运行中那一帧重绘的卡本来就不带这一块，
+      // 那句话在那时是错的。
+      const failure = state === 'failed' ? sourceElements.filter(element => element.element_id === 'failure_step') : [];
+      return [
+        ...attentionElements,
+        ...failure,
+        ...settled(newestFirst(traceElements)),
+        ...omissionElements,
+        ...otherElements,
+        ...actionRow([elapsedText && grey(`用时 ${elapsedText}`), detailLink])
+      ];
+    }
 
-    const overviewElement: Record<string, unknown> = hasActualDetails ? {
-      tag: 'collapsible_panel',
-      element_id: 'task_overview',
-      expanded: overviewExpanded,
-      direction: 'vertical',
-      vertical_spacing: '4px',
-      padding: '4px 0px 0px 0px',
-      margin: '0px',
-      header: {
-        title: {
-          tag: 'plain_text',
-          content: overviewTitleText
-        },
-        vertical_align: 'center',
-        icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
-        icon_position: 'right',
-        icon_expanded_angle: -180
-      },
-      elements: panelInnerElements
-    } : {
-      tag: 'div',
-      element_id: 'task_overview',
-      margin: '0px',
-      text: {
-        tag: 'plain_text',
-        content: overviewTitleText
-      }
-    };
-
-    // 无边框按钮靠右收成一排，像正文末尾的工具栏：可点，但不和正文抢注意力。
-    const processActionRow = actionButtons.length ? [{
-      tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
-      columns: [
-        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [] },
-        ...actionButtonColumns
+    const currentGroup = traceElements.find(el => el.tag === 'interactive_container');
+    const currentItems = currentGroup && Array.isArray(currentGroup.elements) ? currentGroup.elements as Record<string, unknown>[] : [];
+    const currentTools = currentItems.filter(el => String(el.element_id ?? '').startsWith('trace_tool_'));
+    const stage = currentTools.length > 1 ? {
+      ...currentGroup,
+      elements: [
+        ...currentItems.filter(el => !currentTools.includes(el)),
+        {
+          tag: 'collapsible_panel', element_id: 'current_records', expanded: false,
+          direction: 'vertical', vertical_spacing: '4px', padding: '4px 0px 0px 0px', margin: '0px',
+          header: {
+            title: { tag: 'markdown', content: `执行记录（${currentTools.length} 条）`, text_size: 'notation' },
+            vertical_align: 'center', icon: { tag: 'standard_icon', token: 'down-small-ccm_outlined', color: 'grey', size: '14px 14px' },
+            icon_position: 'right', icon_expanded_angle: -180
+          },
+          elements: currentTools
+        }
       ]
-    }] : [];
-
+    } : currentGroup;
+    // 当前阶段就是正文第一段，不再套一块底色（精简模式本来就没有）。
+    const currentStage: Record<string, unknown> | undefined = stage && { ...stage, padding: '0px' };
+    if (currentStage) {
+      delete currentStage.background_style;
+      delete currentStage.corner_radius;
+    }
+    // 当前阶段标题前的图标跟着卡片状态走：执行中用加载动图（没有动图时用标准加载图标），
+    // 停下来等审批时换成橙色提示，不能让一个转圈图标说「还在跑」。
+    const currentTitle = currentGroup ? findCardElement([currentGroup], 'current_title') : undefined;
+    if (currentTitle) {
+      currentTitle.icon = waitingForApproval
+        ? { tag: 'standard_icon', token: 'warning_outlined', color: 'orange' }
+        : loadingImageKey
+          ? { tag: 'custom_icon', img_key: loadingImageKey, size: '16px 16px' }
+          : { tag: 'standard_icon', token: 'loading_outlined', color: 'blue' };
+    }
+    const historyGroups = traceElements.filter(el => el !== currentGroup);
+    // 待审批、报错这类要人处理的提示紧跟当前阶段，不排在历史阶段后面。
     return [
-      overviewElement,
-      ...(hasActualDetails ? [] : otherElements),
+      ...(currentStage ? [currentStage] : []),
       ...attentionElements,
-      ...evidenceElements,
+      ...newestFirst(historyGroups),
       ...omissionElements,
-      ...processActionRow
+      ...otherElements,
+      ...actionRow([elapsedText && grey(`${state === 'queued' ? '排队等待' : '已运行'} ${elapsedText}`), stepsText && grey(stepsText), detailLink])
     ];
   };
   const assemble = (mainElements: Array<Record<string, unknown>>) => {
     const waitingForApproval = state === 'running' && hasPendingApproval(mainElements);
-    const summaryTitle = isProcessCard
-      ? `执行过程 · ${taskName} · ${waitingForApproval && !explicitStatusLabel ? '等待审批' : liveTitle}`
-      : isResultCard
-        ? `执行结果 · ${taskName} · ${waitingForApproval && !explicitStatusLabel ? '等待审批' : liveTitle}`
-        : `${taskName} · ${waitingForApproval && !explicitStatusLabel ? '等待审批' : liveTitle}`;
-    const headerTitle = isResultCard ? `执行结果 · ${compactTaskName || 'Dutydeck'}` : (compactTaskName || 'Dutydeck');
+    const statusLabel = statusTagLabel(waitingForApproval);
+    // 会话列表里的预览：执行中显示当前在做什么（旁白，没有旁白时是最新一步），
+    // 不点进群就能看到进度；其余状态是「状态 · 任务名」。
+    const progress = isProcessCard && state === 'running' && !waitingForApproval
+      ? plainCardText(findCardElement(mainElements, 'current_title')?.content) : '';
+    const summaryTitle = isProcessCard || isResultCard
+      ? `${statusLabel} · ${progress || taskName}`
+      : `${taskName} · ${statusLabel}`;
+    // 标题只占一行：卡片回复在原消息下面，用户原话已经在引用里，标题只需要让人认出是哪件事。
+    const headerTitle = isProcessCard || isResultCard ? clipTitleWidth(compactTaskName || 'Dutydeck') : (compactTaskName || 'Dutydeck');
 
     const baseCard = {
       schema: '2.0' as const,
@@ -788,6 +907,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         // 成功色只当圆点用（成功不再渲染文字后缀），按图形元素的 3:1 要求取值。
         style: { color: {
           current_bg: { light_mode: 'rgba(240,245,253,1)', dark_mode: 'rgba(30,40,56,1)' },
+          failure_bg: { light_mode: 'rgba(254,241,241,1)', dark_mode: 'rgba(64,32,32,1)' },
           trace_success: { light_mode: 'rgba(46,161,33,1)', dark_mode: 'rgba(118,204,142,1)' },
           trace_failure: { light_mode: 'rgba(163,77,0,1)', dark_mode: 'rgba(255,178,102,1)' },
           trace_running: { light_mode: 'rgba(36,91,219,1)', dark_mode: 'rgba(124,202,242,1)' }
@@ -801,13 +921,16 @@ export function buildLarkCard(input: LarkCardInput = {}) {
             if (!recordHint || !/(?:omission|rejected_delta)$/.test(String(element.element_id ?? '')) || typeof element.content !== 'string' || element.content.includes(recordHint)) return element;
             return { ...element, content: `${element.content}\n${recordHint}` };
           })),
-          ...(footerColumns.length ? [{
+          // 过程卡的详情入口已经在底部那一行里。
+          ...(footerColumns.length && !isProcessCard ? [{
             tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
             columns: footerColumns
           }] : [])
         ]
       }
     };
+    // 完成后的过程卡是一行回执，不带标题栏：群里一个任务只留结果卡这一张「重」卡。
+    if (isProcessCard && state === 'completed') return baseCard;
     return {
       ...baseCard,
       header: {
@@ -816,6 +939,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         // 读者怎么理解结果、去哪排查，是这一行唯一有信息量的东西；
         // 「· Agent 任务」每张卡都一样，只会把它冲淡。页脚不再重复第二遍。
         subtitle: { tag: 'plain_text', content: agentName },
+        // 任务卡的状态放在标题栏右侧：扫一眼就知道「在跑 / 等人 / 结束了没有」，正文里不再另起一行说。
+        // 审批、提问这类通用卡片仍由正文状态行表达。
+        ...(isProcessCard || isResultCard ? { text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: statusLabel }, color: waitingForApproval ? 'orange' : presentation.tagColor }] } : {}),
         template: waitingForApproval ? 'orange' : presentation.template,
         padding: '10px 12px 8px 12px'
       }
@@ -854,7 +980,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     }
     // 只剩一个 trace 分组时，优先从分组内部移除最旧的子元素，保留最近的活动。
     if (remainingGroups === 1 && groupElements.length > 1) {
-      const hasTitle = (groupElements[0] as Record<string, unknown>)?.element_id === 'current_title';
+      const hasTitle = ['current_title', 'current_head'].includes(String((groupElements[0] as Record<string, unknown>)?.element_id));
       if (hasTitle && groupElements.length > 2) {
         group.elements = [groupElements[0], ...groupElements.slice(2)];
       } else {
@@ -869,9 +995,11 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   }
   if (withinLimits(card)) return card;
   const fallbackText = String((sourceMainElements.find(element => element.element_id === 'final_output') as Record<string, unknown> | undefined)?.content
-    ?? (sourceMainElements.find(element => element.tag === 'markdown') as Record<string, unknown> | undefined)?.content
+    ?? (sourceMainElements.find(element => element.tag === 'markdown' && !metaIds.has(String(element.element_id ?? ''))) as Record<string, unknown> | undefined)?.content
     ?? content ?? '内容过长');
+  // 步骤总数和最后失败的步骤都很小，兜底时照样带上：失败卡不能因为记录被收起就改口说「没有失败的步骤」。
   const fallbackCard = assemble([
+    ...sourceMainElements.filter(element => metaIds.has(String(element.element_id ?? ''))),
     { tag: 'markdown', content: fallbackText.length > 4_000 ? `${fallbackText.slice(0, 3_999)}…` : fallbackText, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
     { tag: 'markdown', element_id: 'dutydeck_fallback_omission', content: "<font color='grey'>卡片内容超过飞书限制，过程记录已收起。</font>", text_size: 'x-small', margin: '8px 0px 0px 0px' }
   ]);
@@ -879,51 +1007,43 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // All caller-controlled fields have already been bounded. This last constant-size shape is the
   // hard safety net for unexpected Card schema overhead or deeply nested third-party elements.
   const waitingForApproval = state === 'running' && hasPendingApproval(sourceMainElements);
-  const hardFallbackSummaryPrefix = isProcessCard ? '执行过程 · ' : isResultCard ? '执行结果 · ' : '';
-  const hardFallbackSummary = `${hardFallbackSummaryPrefix}${taskName} · ${liveTitle}`;
-  if (isProcessCard) {
-    const elapsedPart = elapsedSeconds > 0 ? ` · ${state === 'queued' ? '排队等待' : '用时'} ${elapsedLabel(elapsedSeconds)}` : '';
-    const overviewTitleText = `执行记录 · ${liveTitle}${elapsedPart}`;
+  const hardFallbackOmission = { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: `卡片内容超过飞书安全预算，详细内容已收起。${hardFallbackHint}`, text_size: 'normal' };
+  if (isProcessCard || isResultCard) {
+    // 与正常布局同形：状态在标题栏标签里，完成的过程卡只留一行回执、不带标题栏。
+    const statusLabel = statusTagLabel(waitingForApproval);
+    const receiptOnly = isProcessCard && state === 'completed';
+    const meta = !receiptOnly && elapsedSeconds > 0
+      ? [{ tag: 'markdown', element_id: 'task_meta', content: grey(`${state === 'queued' ? '排队等待' : '用时'} ${elapsedLabel(elapsedSeconds)}`), text_size: 'notation', margin: '0px' }]
+      : [];
     return {
       schema: '2.0',
-      header: {
-        title: { tag: 'plain_text', content: compactTaskName || 'Dutydeck' },
+      ...(receiptOnly ? {} : { header: {
+        title: { tag: 'plain_text', content: clipTitleWidth(compactTaskName || 'Dutydeck') },
         subtitle: { tag: 'plain_text', content: agentName },
+        text_tag_list: [{ tag: 'text_tag', text: { tag: 'plain_text', content: statusLabel }, color: waitingForApproval ? 'orange' : presentation.tagColor }],
         template: waitingForApproval ? 'orange' : presentation.template,
         padding: '10px 12px 8px 12px'
-      },
-      config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: hardFallbackSummary } },
+      } }),
+      config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: `${statusLabel} · ${taskName}` } },
       body: {
         direction: 'vertical', padding: '10px 12px',
         elements: [
-          {
-            tag: 'div',
-            element_id: 'task_overview',
-            margin: '0px',
-            text: { tag: 'plain_text', content: overviewTitleText }
-          },
-          {
-            tag: 'markdown',
-            element_id: 'dutydeck_hard_fallback_omission',
-            content: `卡片内容超过飞书安全预算，详细内容已收起。${hardFallbackHint}`,
-            text_size: 'normal'
-          }
+          ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: "<font color='green'>已完成</font>", text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: 'done_outlined', color: 'green' } }] : []),
+          hardFallbackOmission,
+          ...meta
         ]
       }
     };
   }
-  const hardFallbackHeaderTitle = isResultCard
-    ? `执行结果 · ${compactTaskName || 'Dutydeck'}`
-    : compactTaskName;
   return {
     schema: '2.0',
-    header: { title: { tag: 'plain_text', content: hardFallbackHeaderTitle }, subtitle: { tag: 'plain_text', content: agentName }, template: presentation.template },
-    config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: hardFallbackSummary } },
+    header: { title: { tag: 'plain_text', content: compactTaskName }, subtitle: { tag: 'plain_text', content: agentName }, template: presentation.template },
+    config: { update_multi: true, width_mode: 'default', streaming_mode: false, summary: { content: `${taskName} · ${liveTitle}` } },
     body: {
       direction: 'vertical', padding: '10px 12px',
       elements: [
         { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
-        { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: `卡片内容超过飞书安全预算，详细内容已收起。${hardFallbackHint}`, text_size: 'normal' }
+        hardFallbackOmission
       ]
     }
   };

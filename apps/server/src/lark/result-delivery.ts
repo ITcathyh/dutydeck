@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { COMPLETION_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
-import { buildLarkCard, type LarkCardInput, type LarkCardService } from './service.js';
+import { buildLarkCard, larkCardFinalOutputText, type LarkCardInput, type LarkCardService } from './service.js';
 
 // Live delivery and restart reconciliation share one provider UUID per process card.
 export const larkResultKey = (processMessageId: string) =>
@@ -102,7 +102,8 @@ export async function prepareLarkResult(
   const resultInput = { ...input, cardKind: 'result' as const };
   const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
   const card = buildLarkCard(resultInput);
-  const fits = !output || card.body.elements.some(element => element.element_id === 'final_output' && 'content' in element && element.content === output);
+  // 长结论在卡上拆成「开头 + 折叠」两段，按拼起来的全文判断整份结论是否都在卡上。
+  const fits = !output || larkCardFinalOutputText(card.body.elements as Array<Record<string, unknown>>) === output;
   let attachmentMessageId: string | undefined;
   if (!fits) {
     const filename = `${(input.taskName?.trim() || '执行结果').replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 60)}.md`;
@@ -121,7 +122,7 @@ export async function prepareLarkResult(
       { tag: 'div', element_id: 'result_attachment', text: { tag: 'plain_text', content: `完整正文已发送为附件「${filename}」。未完成事项与下一步请以全文为准；可引用本卡或附件反馈。` } },
       // 验证状态行必须跟着摘要卡走：结果转成附件后，卡上只剩节选，
       // 「这份结论有没有被平台验证过」比节选本身更需要留在能看见的地方。
-      ...input.elements.filter(element => ['evidence', 'verification_status', 'workflow_result_status', 'workflow_accept', 'workflow_changes'].includes(String(element.element_id))),
+      ...input.elements.filter(element => ['verification_status', 'workflow_result_status', 'workflow_accept', 'workflow_changes'].includes(String(element.element_id))),
       ...input.elements.filter(element => element.element_id === 'group_mention')
     ];
   }
@@ -168,7 +169,8 @@ export async function patchLarkCard(
 ): Promise<{ messageId: string } | null> {
   const output = input.elements.find(element => element.element_id === 'final_output')?.content;
   const card = buildLarkCard(input);
-  const fits = !output || card.body.elements.some(element => element.element_id === 'final_output' && 'content' in element && element.content === output);
+  // 长结论在卡上拆成「开头 + 折叠」两段，按拼起来的全文判断整份结论是否都在卡上。
+  const fits = !output || larkCardFinalOutputText(card.body.elements as Array<Record<string, unknown>>) === output;
   if (!fits) return null;
   try {
     return await service.update({ ...input, messageId: target.messageId });

@@ -404,6 +404,22 @@ const toolPresentation = (entry: TraceEntry) => {
   };
 };
 
+type ToolPresentation = ReturnType<typeof toolPresentation>;
+
+// 一句话说清这一步在做什么：工具自带的描述优先，其次是自解释的命令/路径，最后才是分类名。
+// 与 toolPanel 的标题同一套取舍，只是不转义——调用方各自按落点转义。
+const toolHeadline = (tool: ToolPresentation) => tool.description
+  || (tool.selfEvidentDetail ? tool.detail : '')
+  || tool.action;
+
+const toolKindLabel: Record<TraceToolKind, string> = {
+  command: '命令', read: '读文件', edit: '改文件', search: '搜索', web: '网页',
+  git: 'Git', test: '测试', data: '数据', agent: '协作', tool: '工具'
+};
+
+// 标题整行加粗；文本自带 * 时不包，免得和它自己的 Markdown 拼出一串字面星号。
+const strong = (markdown: string) => markdown.includes('*') ? markdown : `**${markdown}**`;
+
 export const hasUnresolvedToolCalls = (events: AgentEvent[]) => compactTraceEntries(events).some(entry =>
   (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '执行中'
 );
@@ -630,9 +646,26 @@ const historyGroupPanel = (
   const stateSuffix = status.label === '已完成' ? '' : `　<font color='${status.color}'>● ${status.label}</font>`;
   const headerTitle = `${preview}${elapsedSuffix}${stateSuffix}`;
 
-  // 精简模式：阶段只留一行标题，不渲染任何工具/终端面板。
+  // 精简模式：阶段只留一行，不渲染任何工具/终端面板。左边的图标说明这个阶段结束了没有、
+  // 是不是整段失败，耗时单独一列靠右，旁白长了折行也不会把耗时挤到下一行开头。
+  // 部分步骤失败（通常是失败后重试成功）仍按原样标「有失败」：图标只区分「整段失败」。
   if (compact) {
-    return { tag: 'markdown', element_id: `trace_group_${index}`, content: headerTitle, text_size: 'notation', margin: '0px' };
+    const allFailed = hasFailed && succeededCount === 0 && runningCount === 0;
+    const suffix = status.label === '有失败' || status.label === '执行中' ? stateSuffix : '';
+    return {
+      tag: 'column_set', element_id: `trace_group_${index}`, flex_mode: 'none', horizontal_spacing: '8px', margin: '0px',
+      columns: [
+        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'top', elements: [{
+          tag: 'markdown', content: `${preview}${suffix}`, text_size: 'notation', margin: '0px',
+          icon: allFailed
+            ? { tag: 'standard_icon', token: 'close_outlined', color: 'red' }
+            : { tag: 'standard_icon', token: 'done_outlined', color: 'grey' }
+        }] },
+        ...(elapsed ? [{ tag: 'column', width: 'auto', vertical_align: 'top', elements: [
+          { tag: 'markdown', content: `<font color='grey'>${elapsed}</font>`, text_size: 'notation', margin: '0px' }
+        ] }] : [])
+      ]
+    };
   }
 
   let actionElements: LarkCardElement[] = [];
@@ -732,35 +765,55 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
 
   const elements: LarkCardElement[] = [];
   if (compact) {
-    // 精简模式：始终输出 current_title（忽略 omitFallbackTitle），只补一行步骤计数。
+    // 精简模式不展开工具，当前阶段回答三件事：这一阶段在做什么（旁白）、此刻在做哪一步
+    // （最新一个工具的描述）、到目前为止做了哪些事（按类型计数）。真实任务里一个阶段常常
+    // 连跑几十次工具，只有旁白和总数时，这块在整个阶段里一动不动，看起来像卡住了。
+    // 没有旁白时标题直接用最新一步——取第一步同样会让标题定格。
+    const latest = toolPresentations.at(-1);
+    const latestHeadline = latest ? toolHeadline(latest) : '';
+    const title = narrativeText
+      ? truncateInline(narrativeText, narrativeLimit)
+      : latestHeadline ? truncateInline(latestHeadline, 92) : '正在执行…';
+    const first = group.narratives[0] ?? group.actions[0];
+    const elapsed = traceElapsed(first?.data.startedAt ?? first?.timestamp);
+    // 图标由 service 按卡片状态换成加载动图或等待标识；这里放的是没有动图时的兜底。
     elements.push({
-      tag: 'markdown',
-      element_id: 'current_title',
-      content: `${escapeCardInline(currentTitle)}${statusSuffix}`,
-      text_size: 'normal',
-      margin: '0px'
+      tag: 'column_set', element_id: 'current_head', flex_mode: 'none', horizontal_spacing: '8px', margin: '0px',
+      columns: [
+        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'top', elements: [{
+          tag: 'markdown', element_id: 'current_title', content: strong(escapeCardInline(title)), text_size: 'normal', margin: '0px',
+          icon: { tag: 'standard_icon', token: 'loading_outlined', color: 'blue' }
+        }] },
+        ...(elapsed ? [{ tag: 'column', width: 'auto', vertical_align: 'top', elements: [
+          { tag: 'markdown', element_id: 'current_elapsed', content: `<font color='grey'>${elapsed}</font>`, text_size: 'notation', margin: '0px' }
+        ] }] : [])
+      ]
     });
+    // 缩进与标题文字对齐（让出标题前的图标）。
+    const indent = '0px 0px 0px 20px';
+    if (narrativeText && latest) {
+      const step = escapeCardInline(truncateInline(latestHeadline, 72));
+      elements.push({
+        tag: 'markdown', element_id: 'current_now', text_size: 'notation', margin: indent,
+        content: latest.statusLabel === '失败'
+          ? `<font color='red'>失败：${step}</font>`
+          : `<font color='grey'>${latest.statusLabel === '执行中' ? '正在' : '最近一步'}：${step}</font>`
+      });
+    }
     // 终端回显不算步骤：它只是屏幕流，不是结构化工具调用。
     if (tools.length > 0) {
-      const stepsText = failedCount > 0
-        ? `已执行 ${tools.length} 个步骤，${failedCount} 个失败`
-        : `已执行 ${tools.length} 个步骤`;
-      elements.push({
-        tag: 'markdown',
-        element_id: 'current_steps',
-        content: `<font color='grey'>${stepsText}</font>`,
-        text_size: 'notation',
-        margin: '0px'
-      });
+      const counts = new Map<string, number>();
+      for (const tool of toolPresentations) counts.set(toolKindLabel[tool.kind], (counts.get(toolKindLabel[tool.kind]) ?? 0) + 1);
+      const chips = [...counts].map(([label, count]) => `<text_tag color='neutral'>${label} ${count}</text_tag>`);
+      if (failedCount > 0) chips.push(`<text_tag color='red'>失败 ${failedCount}</text_tag>`);
+      elements.push({ tag: 'markdown', element_id: 'current_steps', content: chips.join(' '), text_size: 'notation', margin: indent });
     }
     return {
       tag: 'interactive_container',
       element_id: `trace_group_${index}`,
       behaviors: [],
-      background_style: 'current_bg',
       has_border: false,
-      corner_radius: '8px',
-      padding: '8px 10px 8px 10px',
+      padding: '0px',
       margin: '0px',
       direction: 'vertical',
       vertical_spacing: '4px',
@@ -799,24 +852,34 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
   };
 };
 
-// 「N 个工具已结束」是纯计数：任务进入终态本身就意味着步骤都结束了，这一行不改变
-// 任何判断，却挂在最终答案正下方跟答案抢注意力——结果卡上尤其明显。
-// 有失败时只陈述历史事实，不据此推断业务目标仍未完成。
-const buildEvidenceElement = (allGroups: TraceGroup[]): LarkCardElement | undefined => {
-  const failedCount = allGroups.flatMap(group => group.actions)
-    .filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result')
-    .map(toolPresentation)
-    .filter(tool => tool.statusLabel === '失败').length;
-  if (!failedCount) return undefined;
+// 失败卡上最该讲清的是失败在哪一步。任务事件里没有任务级的失败原因，这里能给的只有
+// 执行记录里最后一个失败的步骤——它之后可能已经重试成功，所以标题写「最后失败的步骤」，
+// 不写「失败原因」。报错行按终端的报错规则挑，挑不到就用输出的最后一行。
+// service 只在失败卡上放这一块，其余终态丢弃。
+const failureStepElement = (entry: TraceEntry): LarkCardElement => {
+  const tool = toolPresentation(entry);
+  const output = entry.data.output === undefined ? '' : typeof entry.data.output === 'string' ? entry.data.output : JSON.stringify(entry.data.output);
+  const lines = redactTraceText(output).split('\n').map(line => line.trim()).filter(Boolean);
+  const alertLine = [...lines].reverse().find(line => terminalAlertPattern.test(line));
+  const errorLine = alertLine ?? lines.at(-1);
+  const code = (text: string) => `\`${escapeCardInline(text).replaceAll('`', "'")}\``;
+  const headline = toolHeadline(tool);
+  const facts = [
+    // 标题已经是这条命令/路径本身时不再重复一遍。
+    tool.selfEvidentDetail && tool.detail && tool.detail !== headline ? code(tool.detail) : '',
+    tool.elapsed,
+    errorLine ? `${alertLine ? '报错' : '输出末行'} ${code(truncateInline(errorLine, 120))}` : ''
+  ].filter(Boolean).join(' · ');
   return {
-    tag: 'markdown',
-    element_id: 'evidence',
-    // 不写「详情见执行记录」：失败数按全部阶段统计，而卡片只渲染最近五个阶段，
-    // 失败发生在更早的阶段时，那句指引会把读者送到一份没有失败记录的执行记录里。
-    content: `<font color='grey'>执行中曾有 ${failedCount} 个步骤失败，历史记录不代表仍有未解决问题。</font>`,
-    text_size: 'notation',
-    margin: '4px 0px 0px 0px',
-    icon: { tag: 'standard_icon', token: 'info_outlined', color: 'grey' }
+    tag: 'interactive_container', element_id: 'failure_step', behaviors: [], background_style: 'failure_bg',
+    has_border: false, corner_radius: '8px', padding: '8px 10px 8px 10px', margin: '0px', direction: 'vertical', vertical_spacing: '2px',
+    elements: [
+      {
+        tag: 'markdown', content: strong(`最后失败的步骤：${escapeCardInline(truncateInline(headline, 72))}`), text_size: 'normal', margin: '0px',
+        icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'red' }
+      },
+      ...(facts ? [{ tag: 'markdown', content: facts, text_size: 'notation', margin: '0px 0px 0px 20px' }] : [])
+    ]
   };
 };
 
@@ -922,20 +985,24 @@ export function renderLarkCardElements(
     elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }
 
-  if (completed) {
-    const evidence = buildEvidenceElement(allGroups);
-    if (evidence) elements.push(evidence);
-  }
-
   if (view === 'result') return elements;
+
+  // 全部阶段的步骤总数（含卡上省略掉的更早阶段），由 service 放进底部那一行。
+  const toolCount = traceEntries.filter(entry => entry.type === 'tool_call' || entry.type === 'tool_result').length;
+  if (toolCount) elements.push({ tag: 'markdown', element_id: 'trace_steps', content: `共 ${toolCount} 步`, text_size: 'notation', margin: '0px' });
+  if (completed) {
+    const lastFailed = [...traceEntries].reverse().find(entry =>
+      (entry.type === 'tool_call' || entry.type === 'tool_result') && toolPresentation(entry).statusLabel === '失败');
+    if (lastFailed) elements.push(failureStepElement(lastFailed));
+  }
 
   if (groups.length) {
     if (completed) {
       if (omittedGroupCount) elements.push(traceOmissionElement(omittedGroupCount, '0px 0px 4px 0px'));
-      // 精简模式下历史阶段退化为无 expanded 属性的 markdown 行，arrange 按默认规则折叠总面板，
-      // hideTraceOnComplete 对过程卡不再生效。
+      // 精简模式下历史阶段退化为无 expanded 属性的单行，arrange 按默认规则折叠总面板，
+      // hideTraceOnComplete 对过程卡不再生效。展开后要能看出每段花了多久，所以带耗时。
       const expanded = !compact && config.hideTraceOnComplete === false;
-      elements.push(...groups.map((group, index) => historyGroupPanel(group, index, false, expanded, true, compact)));
+      elements.push(...groups.map((group, index) => historyGroupPanel(group, index, compact, expanded, true, compact)));
     } else {
       const historyGroups = groups.slice(0, -1);
       const currentGroup = groups.at(-1)!;
@@ -950,7 +1017,10 @@ export function renderLarkCardElements(
       elements.push(currentRunningStagePanel(currentGroup, groups.length - 1, view !== 'process', compact));
     }
   }
-  if (!elements.length) elements.push({ tag: 'markdown', content: completed ? '执行过程已结束，结果见单独的结果消息。' : '正在思考中…', text_size: 'normal', margin: '0px' });
+  // 完成时的占位带 id：过程卡的回执自己会说结果在不在下一条，service 据此把它拿掉。
+  if (!elements.length) elements.push(completed
+    ? { tag: 'markdown', element_id: 'trace_empty', content: '执行过程已结束，结果见单独的结果消息。', text_size: 'normal', margin: '0px' }
+    : { tag: 'markdown', content: '正在思考中…', text_size: 'normal', margin: '0px' });
   return elements;
 }
 

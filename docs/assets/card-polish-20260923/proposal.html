@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<style>
+  :root { --text:#1F2329; --grey:#646A73; --dim:#8F959E; --line:#DEE0E3; --blue:#245BDB; --green:#2EA121; --red:#D83931; --orange:#C35A07; }
+  body { margin:0; padding:28px 32px; background:#F2F3F5; font:14px/22px -apple-system,"PingFang SC","Helvetica Neue",sans-serif; color:var(--text); }
+  .scene { margin-bottom:44px; }
+  .scene > h2 { font-size:16px; margin:0 0 4px; }
+  .scene > p { margin:0 0 14px; color:var(--grey); font-size:13px; }
+  .pair { display:flex; gap:40px; align-items:flex-start; }
+  .col > h3 { margin:0 0 10px; font-size:13px; color:var(--grey); font-weight:500; }
+  .col > h3 b { color:var(--text); }
+  .stack { display:flex; flex-direction:column; gap:10px; }
+  .msg { display:flex; gap:10px; align-items:flex-start; }
+  .avatar { width:36px; height:36px; border-radius:50%; background:#1F2329; flex:0 0 36px; position:relative; }
+  .avatar::after { content:""; position:absolute; width:12px; height:12px; border-radius:50%; background:#8B7CF6; right:6px; top:8px; box-shadow:0 0 0 2px #1F2329; }
+  .sender { font-size:13px; color:var(--grey); margin-bottom:4px; } .sender b { color:var(--text); font-weight:500; margin-right:6px; }
+  .bot { font-size:11px; color:#7B61FF; background:#EFEBFF; border-radius:4px; padding:0 4px; margin-right:6px; }
+  .card { width:var(--w,580px); background:#fff; border-radius:8px; overflow:hidden; border:1px solid var(--line); box-sizing:border-box; }
+  .hd { padding:10px 12px 8px; display:flex; gap:8px; align-items:flex-start; }
+  .hd .tx { flex:1; min-width:0; }
+  .hd .t { font-size:16px; line-height:24px; font-weight:600; }
+  .hd .s { font-size:14px; line-height:22px; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .hd.blue { background:linear-gradient(90deg,#EAF1FF,#F0F5FE); } .hd.blue .t { color:#235DF0; } .hd.blue .s { color:#4E83FD; }
+  .hd.green { background:linear-gradient(90deg,#E4F7E1,#F0FAEE); } .hd.green .t { color:#237B19; } .hd.green .s { color:#3D9A33; }
+  .hd.red { background:linear-gradient(90deg,#FDE7E6,#FEF2F1); } .hd.red .t { color:#C02A22; } .hd.red .s { color:#DE5A52; }
+  .hd.orange { background:linear-gradient(90deg,#FFEBD7,#FFF3E7); } .hd.orange .t { color:#C35A07; } .hd.orange .s { color:#DE7A2C; }
+  .hd.plain .s, .hd .s.meta { color:var(--grey); }
+  .tag { display:inline-flex; align-items:center; gap:3px; font-size:12px; line-height:20px; padding:0 6px; border-radius:4px; white-space:nowrap; font-weight:500; }
+  .tag.blue { background:#E1EAFF; color:#245BDB; } .tag.green { background:#D9F5D6; color:#237B19; } .tag.red { background:#FDE2E2; color:#C02A22; } .tag.orange { background:#FEE7CD; color:#B85A03; } .tag.grey { background:#EFF0F1; color:#646A73; }
+  .bd { padding:10px 12px; display:flex; flex-direction:column; gap:8px; }
+  .ph { display:flex; justify-content:space-between; color:var(--grey); }
+  .note { font-size:12px; line-height:20px; color:var(--grey); }
+  .cur { background:#F0F5FD; border-radius:8px; padding:8px 10px; display:flex; flex-direction:column; gap:4px; }
+  .hist { font-size:12px; line-height:20px; } .hist .d { color:var(--grey); }
+  .row { display:flex; gap:4px; align-items:center; } .row.right { justify-content:flex-end; } .row.between { justify-content:space-between; }
+  .tb { display:inline-flex; align-items:center; gap:4px; height:32px; padding:0 8px; font-size:14px; color:var(--text); white-space:nowrap; }
+  .tb.pri { color:var(--blue); }
+  .ic { width:14px; height:14px; flex:0 0 14px; color:var(--grey); }
+  .tb.pri .ic { color:var(--blue); }
+  .link { color:var(--blue); font-size:12px; } .greylink { color:var(--grey); font-size:12px; }
+  .foot { display:flex; justify-content:space-between; font-size:12px; color:var(--grey); margin-top:2px; }
+  /* 方案：时间线 */
+  .tl { display:flex; flex-direction:column; gap:6px; }
+  .st { display:flex; gap:8px; align-items:flex-start; }
+  .st .dot { flex:0 0 16px; height:22px; display:flex; align-items:center; justify-content:center; }
+  .st .dot svg { width:14px; height:14px; }
+  .st .body { flex:1; min-width:0; }
+  .st .d { color:var(--dim); font-size:12px; white-space:nowrap; line-height:22px; }
+  .st.now .body .a { font-weight:600; }
+  .st.past .body { color:var(--grey); font-size:13px; }
+  .chips { display:flex; gap:6px; margin-top:4px; flex-wrap:wrap; }
+  .chip { display:inline-flex; align-items:center; gap:3px; font-size:12px; line-height:20px; color:var(--grey); background:#F2F3F5; border-radius:4px; padding:0 6px; }
+  .nowline { color:var(--grey); font-size:13px; margin-top:2px; }
+  .callout { border-radius:8px; padding:8px 10px; display:flex; gap:8px; align-items:flex-start; }
+  .callout.red { background:#FEF1F1; } .callout.red .ic { color:#D83931; }
+  .callout.orange { background:#FFF5EB; } .callout.orange .ic { color:#DE7A2C; }
+  .callout .ic { margin-top:4px; }
+  .receipt { display:flex; justify-content:space-between; align-items:center; padding:9px 12px; }
+  .receipt .l { display:flex; align-items:center; gap:6px; color:var(--grey); font-size:13px; }
+  .receipt .l b { color:var(--green); font-weight:500; }
+  .md h4 { margin:10px 0 4px; font-size:14px; } .md p { margin:0 0 8px; } .md ol, .md ul { margin:0 0 8px; padding-left:20px; }
+  .md li { margin:2px 0; }
+  .lead { font-size:15px; line-height:24px; }
+  .fold { display:flex; justify-content:space-between; align-items:center; color:var(--grey); font-size:13px; border-top:1px solid #EFF0F1; padding-top:8px; }
+  .chev { color:var(--dim); font-size:12px; }
+  .metric { margin-top:8px; font-size:12px; color:var(--grey); }
+  .metric b { color:var(--text); }
+  code { background:#1F23290D; border-radius:3px; padding:0 3px; font-family:ui-monospace,Menlo,monospace; font-size:.92em; }
+</style></head><body>
+<svg width="0" height="0" style="position:absolute">
+  <symbol id="stop" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.3" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="5.6" y="5.6" width="4.8" height="4.8" rx="0.8" fill="currentColor"/></symbol>
+  <symbol id="refresh" viewBox="0 0 16 16"><path d="M13.2 8A5.2 5.2 0 1 1 11.6 4.3" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/><path d="M11.9 1.9v2.8H9.1" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="done" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#2EA121"/><path d="M4.8 8.2l2.1 2.1 4.3-4.4" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="doneline" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.4" fill="none" stroke="#B7BBC2" stroke-width="1.2"/><path d="M5.2 8.2l1.9 1.9 3.8-3.9" fill="none" stroke="#8F959E" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="spin" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.2" fill="none" stroke="#D6E3FF" stroke-width="2"/><path d="M8 1.8A6.2 6.2 0 0 1 14.2 8" fill="none" stroke="#3370FF" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="fail" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="#D83931"/><path d="M5.6 5.6l4.8 4.8M10.4 5.6l-4.8 4.8" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></symbol>
+  <symbol id="warn" viewBox="0 0 16 16"><path d="M8 1.8l6.6 11.6H1.4z" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/><path d="M8 6.2v3.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="11.4" r=".8" fill="currentColor"/></symbol>
+  <symbol id="file" viewBox="0 0 16 16"><path d="M4 1.8h5.2L12.4 5v9.2H4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/><path d="M9 1.8V5h3.4" fill="none" stroke="currentColor" stroke-width="1.2"/></symbol>
+  <symbol id="term" viewBox="0 0 16 16"><rect x="1.8" y="2.8" width="12.4" height="10.4" rx="1.6" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M4.6 6.2l2 1.8-2 1.8M8 10h3.2" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="search" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.4" fill="none" stroke="currentColor" stroke-width="1.2"/><path d="M10.3 10.3l3.4 3.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></symbol>
+  <symbol id="chat" viewBox="0 0 16 16"><path d="M2.4 3.2h11.2v7.6H7.2l-3 2.4v-2.4H2.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/></symbol>
+</svg>
+<div id="root"></div>
+<script>
+const ic = (id, cls = 'ic') => `<svg class="${cls}"><use href="#${id}"/></svg>`;
+const msg = (card, name = 'bdev-flash', time = '13:43') => `<div class="msg"><div class="avatar"></div><div><div class="sender"><b>${name}</b><span class="bot">智能体</span>${time}</div>${card}</div></div>`;
+const toolbar = btns => `<div class="row right">${btns}</div>`;
+const stop = `<span class="tb">${ic('stop')}中断</span>`, refresh = `<span class="tb">${ic('refresh')}刷新</span>`, retry = `<span class="tb pri">${ic('refresh')}重试</span>`;
+const PROMPT = '@bdev-flash 详细总结下地狱焚决 Agent 群这周的聊天内容，排除情感生活类的闲聊';
+const TITLE = '详细总结下地狱焚决 Agent 群这周的聊天内容…';
+
+// ---------- 场景 1：执行中 ----------
+const runNow = `<div class="card"><div class="hd blue"><div class="tx"><div class="t">${PROMPT}</div><div class="s">CCFlash (Claude Code / CPA)</div></div></div>
+<div class="bd"><div class="ph"><span>执行记录 · 执行中 · 用时 3m 12s</span><span class="chev">⌃</span></div>
+<div class="cur"><div>9/8 下午时段已读完，还剩 9/9 两个时段，稍后出完整总结。</div><div class="note">已执行 6 个步骤</div></div>
+<div class="hist">8 个时段拆分完成，开始逐段精读。　<span class="d">1m 02s</span>　<span style="color:#A34D00">● 有失败</span></div>
+<div class="hist">先拉取本周群消息，共 6432 条。　<span class="d">49s</span></div>
+${toolbar(stop + refresh)}</div></div>`;
+const runNew = `<div class="card"><div class="hd blue"><div class="tx"><div class="t">${TITLE}</div><div class="s">CCFlash (Claude Code / CPA)</div></div><span class="tag blue" style="margin-top:2px">执行中</span></div>
+<div class="bd"><div class="tl">
+  <div class="st now"><span class="dot">${ic('spin','')}</span><div class="body"><div class="a">9/8 下午时段已读完，还剩 9/9 两个时段，稍后出完整总结。</div>
+    <div class="nowline">正在：拉取 9/9 上午时段消息（09:00–12:00）</div>
+    <div class="chips"><span class="chip">命令 4</span><span class="chip">读文件 2</span></div></div><span class="d">1m 21s</span></div>
+  <div class="st past"><span class="dot">${ic('doneline','')}</span><div class="body">8 个时段拆分完成，开始逐段精读。　<span style="color:#A34D00">● 有失败</span></div><span class="d">1m 02s</span></div>
+  <div class="st past"><span class="dot">${ic('doneline','')}</span><div class="body">先拉取本周群消息，共 6432 条。</div><span class="d">49s</span></div>
+</div>
+<div class="row between" style="margin-top:-2px"><span class="note">已运行 3m 12s · 共 14 步</span><span class="row">${stop + refresh}</span></div></div></div>`;
+
+// ---------- 场景 2：完成（群里的两条消息） ----------
+const answerFull = `<div class="md"><p>这两天群里的结论，一句话是：<b>Astra 是目前最强的模型，但额度撑不住当主执行者，得靠「Astra 出方案 + 便宜模型执行」来省。</b></p>
+<p>拆开五条：</p><h4>1. 模型选型</h4><p>Astra 快、准、指令遵循好，computer use 已能自己点内网系统。但单价约为上一代的 2.5 倍，20x 套餐一周只够跑两三个重任务……</p>
+<h4>2. 额度焦虑贯穿全程</h4><p>重置风波、重置卡亏损、封号潮、报销收紧……</p><h4>3. 9/9 组织调整传闻</h4><p>……（全文约 4,300 字）</p></div>`;
+const doneNow = `<div class="stack">${msg(`<div class="card"><div class="hd green"><div class="tx"><div class="t">${PROMPT}</div><div class="s">CCFlash (Claude Code / CPA)</div></div></div>
+<div class="bd"><div class="ph"><span>执行记录 · 已完成 · 用时 7m 12s</span><span class="chev">⌄</span></div><div class="row right"><span class="link">查看详情</span></div></div></div>`, 'bdev-flash', '13:43')}
+${msg(`<div class="card"><div class="hd green"><div class="tx"><div class="t">执行结果 · ${PROMPT}</div><div class="s">CCFlash (Claude Code / CPA)</div></div></div>
+<div class="bd">${answerFull}<div class="note">ⓘ 执行中曾有 1 个步骤失败，历史记录不代表仍有未解决问题。</div>
+<div class="foot"><span>用时 7m 12s</span><span class="link">查看详情</span></div></div></div>`, 'bdev-flash', '13:50')}</div>`;
+const doneNew = `<div class="stack">${msg(`<div class="card"><div class="receipt"><span class="l">${ic('done','ic')}<b>已完成</b>· 21 步 · 结果见下条</span><span class="row" style="gap:10px"><span class="greylink">执行过程 ⌄</span></span></div></div>`, 'bdev-flash', '13:43')}
+${msg(`<div class="card"><div class="hd green"><div class="tx"><div class="t">${TITLE}</div><div class="s">CCFlash (Claude Code / CPA)</div></div><span class="tag green" style="margin-top:2px">已完成</span></div>
+<div class="bd"><div class="md"><p>这两天群里的结论，一句话是：<b>Astra 是目前最强的模型，但额度撑不住当主执行者，得靠「Astra 出方案 + 便宜模型执行」来省。</b></p>
+<p>拆开五条：</p><h4>1. 模型选型</h4><p style="margin-bottom:0">Astra 快、准、指令遵循好，computer use 已能自己点内网系统。但单价约为上一代的 2.5 倍，20x 套餐一周只够跑两三个重任务……</p></div>
+<div class="fold"><span>展开全文 · 还有约 3,600 字</span><span class="chev">⌄</span></div>
+<div class="foot"><span><span style="color:var(--blue)">@黄宇航</span>　用时 7m 12s</span><span class="link">查看详情</span></div></div></div>`, 'bdev-flash', '13:50')}</div>`;
+
+// ---------- 场景 3：失败 ----------
+const failNow = `<div class="card"><div class="hd red"><div class="tx"><div class="t">构建并重启服务端</div><div class="s">Claude Code</div></div></div>
+<div class="bd"><div class="ph"><span>执行记录 · 已失败 · 用时 43s</span><span class="chev">⌄</span></div>
+<div class="hist">依赖就绪，执行构建。　<span class="d">28s</span>　<span style="color:#A34D00">● 失败</span></div>
+<div class="hist">开始安装依赖并构建服务端。　<span class="d">12s</span></div>
+${toolbar(retry)}<div class="row right"><span class="link">查看详情</span></div></div></div>`;
+const failNew = `<div class="card"><div class="hd red"><div class="tx"><div class="t">构建并重启服务端</div><div class="s">Claude Code</div></div><span class="tag red" style="margin-top:2px">失败</span></div>
+<div class="bd"><div class="callout red">${ic('warn')}<div><b>最后失败的步骤：构建服务端</b><div class="note" style="color:#8F3B35"><code>pnpm build</code> · 28s · 输出末行 <code>Error: ENOSPC: no space left on device, write</code></div></div></div>
+<div class="tl"><div class="st past"><span class="dot">${ic('fail','')}</span><div class="body">依赖就绪，执行构建。</div><span class="d">28s</span></div>
+<div class="st past"><span class="dot">${ic('doneline','')}</span><div class="body">开始安装依赖并构建服务端。</div><span class="d">12s</span></div></div>
+<div class="row between" style="margin-top:-2px"><span class="note">用时 43s · <span class="greylink">查看详情</span></span><span class="row">${retry}</span></div></div></div>`;
+
+const scene = (title, desc, a, b, id) => `<div class="scene" id="${id}"><h2>${title}</h2><p>${desc}</p><div class="pair">
+<div class="col"><h3><b>现状</b>（线上精简模式）</h3><div class="m">${a}</div><div class="metric"></div></div>
+<div class="col"><h3><b>方案</b></h3><div class="m">${b}</div><div class="metric"></div></div></div></div>`;
+document.getElementById('root').innerHTML =
+  scene('场景 1 · 执行中', '群聊里最常见的任务：总结群消息。读者想知道：在干什么、做到哪、要不要管。', msg(runNow), msg(runNew), 's1') +
+  scene('场景 2 · 完成后，群里留下的两条消息', '过程卡原地收成一行回执；结果卡用首段结论开头，长文折叠。', doneNow, doneNew, 's2') +
+  scene('场景 3 · 失败', '失败卡要说清失败在哪一步、下一步做什么。现状按真实失败快照绘制：只有阶段记录，没有失败说明。', msg(failNow, 'mux 应用', '10:21'), msg(failNew, 'mux 应用', '10:21'), 's3') +
+  scene('场景 4 · 手机宽度（360px）', '同一张执行中的卡在手机上的样子：现状标题折三行，状态藏在灰字里；方案把状态放进标题栏标签、耗时放到底部一行。', `<div style="--w:320px">${runNow}</div>`, `<div style="--w:320px">${runNew}</div>`, 's4');
+if (location.hash) for (const s of document.querySelectorAll('.scene')) if ('#' + s.id !== location.hash) s.remove();
+for (const s of document.querySelectorAll('.scene')) {
+  const cols = s.querySelectorAll('.col');
+  const h = [...cols].map(c => Math.round(c.querySelector('.m').getBoundingClientRect().height));
+  cols[0].querySelector('.metric').innerHTML = `屏幕占用高度 <b>${h[0]}px</b>`;
+  cols[1].querySelector('.metric').innerHTML = `屏幕占用高度 <b>${h[1]}px</b>（${h[1] <= h[0] ? '−' : '+'}${Math.abs(Math.round((1 - h[1] / h[0]) * 100))}%）`;
+}
+</script>
+</body></html>
