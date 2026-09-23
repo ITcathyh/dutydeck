@@ -41,8 +41,6 @@ export interface LarkCardInput {
   loadingImageKey?: string;
   idempotencyKey?: string;
   readOnly?: boolean;
-  /** Read-only export callback, bound to a persisted task by the coordinator. */
-  recordExport?: boolean;
   permissionMode?: PermissionMode;
   /** Override the lifecycle label without changing the machine state. */
   statusLabel?: string;
@@ -434,6 +432,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
     capabilities: actionCapabilities
   });
+  // 每个按钮一列、宽度随内容：按钮带图标，固定窄列会把文案挤折行。
+  const actionButtonColumns = actionButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }));
   const isProcessCard = input.cardKind === 'process';
   const isResultCard = input.cardKind === 'result';
 
@@ -491,12 +491,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       }]
     });
   }
-  const exportElements = input.recordExport && input.taskId && Number.isSafeInteger(input.turn) && state !== 'queued' && state !== 'cancelled' ? [{
-    tag: 'button', element_id: 'export_trace', text: { tag: 'plain_text', content: '导出执行记录' }, type: 'default',
-    behaviors: [{ type: 'callback', value: { dutydeck_export_trace: 'download', task_id: taskId, turn: String(input.turn) } }]
-  }] : [];
-  const recordHint = exportElements.length ? '可点击「导出执行记录」获取公开执行记录。'
-    : footerDetailUrl ? '完整记录见「查看详情」。' : '';
+  const recordHint = footerDetailUrl ? '完整记录见「查看详情」。' : '';
+  // 硬兜底卡没有页脚，指向「查看详情」时必须自带链接。
+  const hardFallbackHint = footerDetailUrl ? `完整记录见[查看详情](${footerDetailUrl})。` : '';
   const rawElements = (isResultCard && mentionElementIndex >= 0 && input.elements?.length)
     ? input.elements.filter((_, index) => index !== mentionElementIndex)
     : input.elements;
@@ -616,19 +613,11 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           ]
         }];
       }
-      // 按钮列宽随按钮数量放宽：单按钮沿用 72px，多按钮时改为自适应，
-      // 否则第二个按钮会被 72px 挤压折行。
       const buttonRow = [{
-        tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '8px', vertical_align: 'center', margin: '0px',
+        tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
         columns: [
           { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [statusElement] },
-          {
-            tag: 'column', width: actionButtons.length > 1 ? 'auto' : '72px', vertical_align: 'center',
-            elements: actionButtons.length > 1 ? [{
-              tag: 'column_set', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
-              columns: actionButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
-            }] : actionButtons
-          }
+          ...actionButtonColumns
         ]
       }];
       // 有按钮就必须有承载它们的那一行，状态一并显示在左侧；没有按钮时状态行可以整行
@@ -760,17 +749,12 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       }
     };
 
+    // 无边框按钮靠右收成一排，像正文末尾的工具栏：可点，但不和正文抢注意力。
     const processActionRow = actionButtons.length ? [{
-      tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '8px', vertical_align: 'center', margin: '0px',
+      tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
       columns: [
         { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [] },
-        {
-          tag: 'column', width: actionButtons.length > 1 ? 'auto' : '72px', vertical_align: 'center',
-          elements: actionButtons.length > 1 ? [{
-            tag: 'column_set', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
-            columns: actionButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
-          }] : actionButtons
-        }
+        ...actionButtonColumns
       ]
     }] : [];
 
@@ -817,7 +801,6 @@ export function buildLarkCard(input: LarkCardInput = {}) {
             if (!recordHint || !/(?:omission|rejected_delta)$/.test(String(element.element_id ?? '')) || typeof element.content !== 'string' || element.content.includes(recordHint)) return element;
             return { ...element, content: `${element.content}\n${recordHint}` };
           })),
-          ...exportElements,
           ...(footerColumns.length ? [{
             tag: 'column_set', flex_mode: 'none', horizontal_spacing: '8px', margin: '6px 0px 0px 0px',
             columns: footerColumns
@@ -922,10 +905,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
           {
             tag: 'markdown',
             element_id: 'dutydeck_hard_fallback_omission',
-            content: `卡片内容超过飞书安全预算，详细内容已收起。${recordHint}`,
+            content: `卡片内容超过飞书安全预算，详细内容已收起。${hardFallbackHint}`,
             text_size: 'normal'
-          },
-          ...exportElements
+          }
         ]
       }
     };
@@ -941,8 +923,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       direction: 'vertical', padding: '10px 12px',
       elements: [
         { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
-        { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: `卡片内容超过飞书安全预算，详细内容已收起。${recordHint}`, text_size: 'normal' },
-        ...exportElements
+        { tag: 'markdown', element_id: 'dutydeck_hard_fallback_omission', content: `卡片内容超过飞书安全预算，详细内容已收起。${hardFallbackHint}`, text_size: 'normal' }
       ]
     }
   };

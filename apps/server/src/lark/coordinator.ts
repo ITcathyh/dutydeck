@@ -733,7 +733,7 @@ export class LarkMessageCoordinator {
       ...await this.workflows!.result(record, record.cardId, saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined)];
     await this.service.update({ cardKind: 'result', messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements,
       capabilities: { ...this.capabilitiesForTask(restored), canVerify: verification.canRun },
-      agentName: await this.resolveAgentName(config), turn: saved.turn, recordExport: Boolean(saved.runtime_task_id) });
+      agentName: await this.resolveAgentName(config), turn: saved.turn });
     const current = (await this.cardMappings!.list(larkCardChannel(config.appId))).find(item => item.id === mapping.id);
     if (current?.extra !== mapping.extra) return;
     await this.cardMappings!.save({ ...mapping, extra: JSON.stringify({ ...saved, result_feedback_state: record.state, final_elements: elements }) });
@@ -2133,7 +2133,7 @@ export class LarkMessageCoordinator {
             await sendTaskCard(this.service, { messageId: saved.card_message_id ?? task.id, chatId: saved.chat_id,
               chatType: saved.chat_type ?? 'group', threadId: saved.thread_id, messageType: 'text', content: '', mentions: [] }, {
               state: 'failed', readOnly: true, taskName: '记录未能导出',
-              markdown: '未能获取或发送本轮完整公开记录，请稍后在原任务卡点击「导出执行记录」重试。'
+              markdown: '未能获取或发送本轮完整公开记录，请稍后重试。'
             }, this.log).catch(() => undefined);
           }
         })();
@@ -3072,7 +3072,6 @@ export class LarkMessageCoordinator {
           turn: task.turn,
           ...(terminal && task.retryable !== undefined ? { retryable: task.retryable } : {}),
           capabilities: this.capabilitiesForTask(task),
-          recordExport: Boolean(task.runtimeTaskId && this.cardMappings),
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
           elements
         }
@@ -3131,7 +3130,7 @@ export class LarkMessageCoordinator {
         if (this.stopped || task.turn !== currentTurn) return;
         const resultCardInput = {
           ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: prompt.slice(0, 80),
-          sessionId: task.sessionId, turn: currentTurn, readOnly: true, recordExport: Boolean(task.runtimeTaskId && this.cardMappings),
+          sessionId: task.sessionId, turn: currentTurn, readOnly: true,
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
           capabilities: { ...this.capabilitiesForTask(task), canVerify: verification.canRun },
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
