@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { RecoveryCliError, runRecoveryCli } from './recovery-cli.js';
 import { runCollaboration } from './collaboration-cli.js';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { loadEnvFile } from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -18,7 +18,7 @@ import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
 import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
-import { daemonRestart, daemonStart, daemonStatus, daemonStop, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
+import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTarget, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
@@ -95,6 +95,12 @@ async function serve(options: CliOptions, onReady?: () => void) {
 
 async function restartWithInstalledCli(entrypoint: string) {
   if (!existsSync(entrypoint)) throw new Error(`Updated Dutydeck entrypoint was not found: ${entrypoint}. The service was not restarted.`);
+  // 受 systemd 托管时，restart 由 unit 的 ExecStart 拉起；它若指向别的入口，重启后跑的仍是旧代码。
+  const supervised = await systemdRestartTarget();
+  const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+  if (supervised?.script && canonical(supervised.script) !== canonical(entrypoint)) {
+    throw new Error(`Dutydeck is supervised by systemd unit ${supervised.unit}, whose ExecStart runs ${supervised.script} instead of the updated ${entrypoint}; restarting would keep the old code. Run ${process.execPath} ${entrypoint} autostart enable to repoint the unit, then run dutydeck restart. The service was not restarted.`);
+  }
   const previousPid = daemonStatus().pid;
   const child = spawn(process.execPath, [entrypoint, 'daemon', 'restart'], { stdio: 'inherit', env: process.env });
   await new Promise<void>((resolve, reject) => {
@@ -261,8 +267,9 @@ async function main() {
       const result = await daemonStart(options, { serve: daemonServe });
       renderDaemonResult(result, options.json === true);
       // 起不来必须是非零退出码：脚本里 `dutydeck start && curl ...` 才不会踩空。
-      // 「已经在运行」不算失败：目标状态已达成。
-      if (!result.ok && result.state !== 'already-running') process.exitCode = 1;
+      // 「已经在运行」不算失败：目标状态已达成。前台入口例外：它自己没能服务就是失败，
+      // systemd 据退出码重拉或熔断。
+      if (!result.ok && (result.state !== 'already-running' || options.foreground === true)) process.exitCode = 1;
     },
     daemonStop: async options => {
       const result = await daemonStop();

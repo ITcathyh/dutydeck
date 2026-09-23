@@ -20,11 +20,18 @@ import {
  *
  * Parent vs. daemon child split is signalled through the
  * `DUTYDECK_DAEMONIZED` environment variable set on the respawned child.
+ *
+ * Linux 开机自启的 systemd unit 走另一条路：`dutydeck start --foreground` 自己就是服务
+ * 进程，按同样的格式写状态文件，并记下托管它的 unit（`supervisor` / `systemdUnit`），
+ * 之后 stop / restart 改由 systemctl 执行，崩溃或被误杀由 systemd 重拉。
  */
 
 export const DAEMON_ENV_FLAG = 'DUTYDECK_DAEMONIZED';
 export const DAEMON_CWD_ENV = 'DUTYDECK_DAEMON_CWD';
 export const DAEMON_STARTED_AT_ENV = 'DUTYDECK_DAEMON_STARTED_AT';
+/** systemd unit 通过这两个环境变量声明「本进程由它托管」，只有前台入口会读取。 */
+export const SUPERVISOR_ENV = 'DUTYDECK_SUPERVISOR';
+export const SYSTEMD_UNIT_ENV = 'DUTYDECK_SYSTEMD_UNIT';
 
 export const PID_FILE = 'dutydeck.pid';
 export const STATE_FILE = 'dutydeck.state.json';
@@ -43,6 +50,10 @@ export interface DaemonState {
   authEnabled?: boolean;
   stoppedAt?: string;
   processIdentity?: ProcessIdentity;
+  /** 由 systemd 托管时为 'systemd'；只有前台入口在 unit 里运行时才会写。 */
+  supervisor?: 'systemd';
+  /** 托管它的 systemd unit 名，stop / restart 据此调用 systemctl。 */
+  systemdUnit?: string;
 }
 
 export interface DaemonPaths {

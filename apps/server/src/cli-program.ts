@@ -21,6 +21,8 @@ export interface CliOptions {
   larkListen?: boolean;
   /** `--json`：把结果打成单行 JSON，供脚本消费。 */
   json?: boolean;
+  /** `start --foreground`：本进程自己作为 daemon 服务（systemd unit 的 ExecStart 用）。 */
+  foreground?: boolean;
 }
 
 export interface LarkCliOptions {
@@ -607,6 +609,7 @@ Examples:
   const addProcessCommands = (parent: Command) => {
     parent.command('start')
       .description('Start the Dutydeck server in the background')
+      .option('--foreground', 'Serve in this process as the daemon and record its state (used by the systemd unit)')
       .option('--json', 'Print the result as a single line of JSON')
       .action((options, command) => handlers.daemonStart?.(serverOptionsFrom(options, command)));
     parent.command('stop')
