@@ -62,7 +62,7 @@ describe('separate process and complete result messages', () => {
     original.elements.push({ tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_owner></at>' },
       { tag: 'button', element_id: 'workflow_accept', text: { tag: 'plain_text', content: '验收通过' } });
     const result = await sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question', replyInThread: true },
-      { ...original, taskName: '创建机器人', turn: 1, recordExport: true }, log);
+      { ...original, taskName: '创建机器人', turn: 1 }, log);
     const uploaded = Buffer.from(service.uploadFile.mock.calls[0]![0].data).toString('utf8');
     expect(uploaded).toBe(`${text}\n\n---\n\n结果验收：回复本文件消息「验收通过」即可确认；需要修改时，回复本文件消息并说明修改要求。`);
     expect(service.uploadFile.mock.calls[0]![0].filename).toBe('创建机器人.md');

@@ -1097,6 +1097,38 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(JSON.stringify(overview)).not.toContain('task_action_row');
   });
 
+  it('P1b. process 操作行：无边框按钮靠右收成一排，每个按钮一列、宽度随内容', () => {
+    const elements = boundLarkCardElements(renderLarkProcessElements(runningEvents, config));
+    const card: any = buildLarkCard({
+      cardKind: 'process', state: 'running', taskId: 'om_p1b', elapsedSeconds: 16, elements,
+      capabilities: { canCancelQueued: false, canInterrupt: true, canRetry: false, canRefresh: true }
+    });
+    const row = byId(card, 'task_action_row');
+    expect(card.body.elements.at(-1)).toBe(row);
+    const shape = (actionRow: any) => actionRow.columns.map((column: any) => [column.width, column.elements.map((el: any) => [el.element_id, el.type])]);
+    expect(shape(row)).toEqual([['weighted', []], ['auto', [['interrupt', 'text']]], ['auto', [['refresh', 'text']]]]);
+
+    const failed: any = buildLarkCard({
+      cardKind: 'process', state: 'failed', taskId: 'om_p1b', elements,
+      capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: true, canRefresh: false }
+    });
+    expect(shape(byId(failed, 'task_action_row'))).toEqual([['weighted', []], ['auto', [['retry', 'primary_text']]]]);
+
+    const queued: any = buildLarkCard({
+      cardKind: 'process', state: 'queued', taskId: 'om_p1b', turn: 1,
+      capabilities: { canCancelQueued: true, canInterrupt: false, canRetry: false, canRefresh: false }
+    });
+    expect(shape(byId(queued, 'task_action_row'))).toEqual([['weighted', []], ['auto', [['cancel', 'text']]]]);
+
+    // 非过程卡：状态占左侧，按钮同样每个一列、宽度随内容。
+    const plain: any = buildLarkCard({
+      state: 'running', taskId: 'om_p1b', elapsedSeconds: 16,
+      capabilities: { canCancelQueued: false, canInterrupt: true, canRetry: false, canRefresh: true }
+    });
+    expect(byId(plain, 'task_action_row').columns.map((column: any) => [column.width, column.elements.map((el: any) => el.element_id)]))
+      .toEqual([['weighted', ['task_status']], ['auto', ['interrupt']], ['auto', ['refresh']]]);
+  });
+
   it('P2. process 完成态：恢复根 header、总面板收起，单 trace 组摊平（无 trace_overview 嵌套）', () => {
     const elements = boundLarkCardElements(renderLarkProcessElements(completedEvents, config, true));
     const card: any = buildLarkCard({
@@ -1351,51 +1383,28 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
 
 
 describe('公开执行记录的可执行入口', () => {
-  it('未配置 Web 时，裁剪与旧审核快照指向可用导出按钮，硬预算回退仍保留入口', () => {
+  it('卡片不渲染导出按钮；未配置 Web 时裁剪、旧审核快照与硬预算回退都不指向不存在的入口', () => {
     const sources = [
       [{ tag: 'markdown', element_id: 'trace_omission', content: '另有 6 个更早阶段未展示，完整记录见 Dutydeck Web' }],
       [{ tag: 'markdown', element_id: 'dutydeck_rejected_delta', content: '新增内容未通过飞书审核；完整增量请在 Dutydeck Web 查看。' }],
       [{ tag: 'markdown', element_id: 'final_output', content: '超长输出'.repeat(10000) }]
     ];
     for (const elements of sources) {
-      const card = buildLarkCard({ state: 'completed', cardKind: 'process', taskId: 'om_original', turn: 3, recordExport: true, readOnly: true, elements });
-      expect(byId(card, 'export_trace')).toMatchObject({ behaviors: [{ value: { dutydeck_export_trace: 'download', task_id: 'om_original', turn: '3' } }] });
-      expect(JSON.stringify(card)).toContain('可点击「导出执行记录」');
-      expect(JSON.stringify(card)).not.toContain('Dutydeck Web');
-      expect(JSON.stringify(card)).not.toContain('查看详情');
+      const card = buildLarkCard({ state: 'completed', cardKind: 'process', taskId: 'om_original', turn: 3, readOnly: true, elements });
+      expect(byId(card, 'export_trace')).toBeUndefined();
+      expect(JSON.stringify(card)).not.toMatch(/Dutydeck Web|导出执行记录|查看详情/);
       expect(Buffer.byteLength(JSON.stringify(card))).toBeLessThanOrEqual(larkCardSafeLimits.bytes);
       expect(components(card).length).toBeLessThanOrEqual(larkCardSafeLimits.components);
     }
-    const unavailable = buildLarkCard({ cardKind: 'process', elements: sources[0] });
-    expect(byId(unavailable, 'export_trace')).toBeUndefined();
-    expect(JSON.stringify(unavailable)).not.toMatch(/Dutydeck Web|可点击|查看详情/);
     const withWeb = buildLarkCard({ cardKind: 'process', elements: sources[0], sessionId: 'ses_1', webBaseUrl: 'https://dock.example' });
     expect(JSON.stringify(withWeb)).toContain('完整记录见「查看详情」');
     expect(JSON.stringify(withWeb)).toContain('https://dock.example/sessions/ses_1');
-  });
-
-  it('排队中与已取消任务即使开启 recordExport 也无导出按钮与引导，排队取消入口保留', () => {
-    const queuedCard = buildLarkCard({
-      state: 'queued',
-      cardKind: 'process',
-      taskId: 'om_queued',
-      turn: 1,
-      recordExport: true,
-      capabilities: { canCancelQueued: true, canInterrupt: false, canRetry: false, canRefresh: false }
+    // 硬兜底卡没有页脚，提示里必须自带链接，否则「查看详情」无处可点。
+    const hardFallback = buildLarkCard({
+      cardKind: 'result', state: 'completed', sessionId: 'ses_1', webBaseUrl: 'https://dock.example',
+      elements: [{ tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_x></at>'.repeat(3000) }]
     });
-    expect(byId(queuedCard, 'export_trace')).toBeUndefined();
-    expect(JSON.stringify(queuedCard)).not.toContain('可点击「导出执行记录」');
-    expect(byId(queuedCard, 'cancel')).toBeDefined();
-
-    const cancelledCard = buildLarkCard({
-      state: 'cancelled',
-      cardKind: 'process',
-      taskId: 'om_cancelled',
-      turn: 1,
-      recordExport: true
-    });
-    expect(byId(cancelledCard, 'export_trace')).toBeUndefined();
-    expect(JSON.stringify(cancelledCard)).not.toContain('可点击「导出执行记录」');
+    expect(byId(hardFallback, 'dutydeck_hard_fallback_omission').content).toContain('[查看详情](https://dock.example/sessions/ses_1)');
   });
 
   it('重试成功后的失败计数仅陈述历史，完整公开记录保留失败证据', () => {

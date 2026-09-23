@@ -342,8 +342,9 @@ function renderElement(element: any, theme: Theme): string {
     case 'button': {
       const kind = element.type === 'danger' ? 'danger'
         : element.type === 'primary' ? 'primary'
-          : element.type === 'text' ? 'text' : 'default';
-      return `<button class="btn ${kind}"${element.disabled ? ' disabled' : ''}>${esc(element.text?.content ?? '')}</button>`;
+          : element.type === 'text' ? 'text'
+            : element.type === 'primary_text' ? 'text primary-text' : 'default';
+      return `<button class="btn ${kind}"${element.disabled ? ' disabled' : ''}>${icon(element.icon, theme)}${esc(element.text?.content ?? '')}</button>`;
     }
     case 'column_set': {
       const vertical = element.vertical_align === 'center' ? 'align-items:center;' : '';
@@ -436,7 +437,8 @@ const html = `<!doctype html>
   .btn { border:1px solid #DEE0E3; background:#fff; border-radius:6px; padding:2px 10px; font-size:12px; line-height:20px; cursor:default; color:#1F2329; }
   .btn.primary { background:#3370FF; border-color:#3370FF; color:#fff; }
   .btn.danger { background:#fff; border-color:#F54A45; color:#F54A45; }
-  .btn.text { border-color:transparent; background:transparent; color:#245BDB; padding:2px 6px; }
+  .btn.text { border-color:transparent; background:transparent; color:#1F2329; padding:2px 6px; }
+  .btn.primary-text { color:#245BDB; }
   .btn:disabled { opacity:.55; }
   .card-header.plain { background:#fff; padding:12px 12px 2px; }
   .card-header.plain .card-title { color:#1F2329; }

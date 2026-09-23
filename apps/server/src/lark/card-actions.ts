@@ -67,10 +67,10 @@ export interface LarkCardActionValue {
 
 /**
  * 元素预算：飞书整卡上限约 24KB / 180 个组件。
- * 一个按钮记 2 个组件（button 自身 + text.plain_text），
- * 因此操作区最多 4 个按钮 = 8 个组件、数百字节，不可能压爆预算。
+ * 一个按钮记 3 个组件（button 自身 + text.plain_text + icon），
+ * 因此操作区最多 4 个按钮 = 12 个组件、数百字节，不可能压爆预算。
  */
-export const larkCardActionBudget = { maxButtons: 4, componentsPerButton: 2 } as const;
+export const larkCardActionBudget = { maxButtons: 4, componentsPerButton: 3 } as const;
 
 /** taskId 上限：om_* 消息 ID 约 50 字符；超长说明上游有 bug，拒绝渲染回调按钮以保护 value 体积。 */
 const maxTaskIdLength = 256;
@@ -84,7 +84,13 @@ type LarkCardActionDefinition = {
   label: string;
   /** 「动作 + 对象 + 预期结果」的完整说明，供卡片用 markdown 补充（schema 2.0 拒绝 note 标签，ErrCode 200861）。 */
   hint: string;
-  buttonType: 'default' | 'primary' | 'danger';
+  /**
+   * 操作按钮一律无边框：它们是正文之后的次要控件，带边框或红框会比正文还抢眼。
+   * 语义由文案和图标承担；只有失败后的「重试」是这张卡要读者做的下一步，用蓝字点出。
+   */
+  buttonType: 'text' | 'primary_text';
+  /** 飞书图标库 token（https://open.feishu.cn/document/feishu-cards/enumerations-for-icons）。 */
+  icon: string;
   /** 允许该操作的状态集合。 */
   states: readonly LarkCardActionState[];
   capable: (capabilities: LarkCardCapabilities) => boolean;
@@ -124,7 +130,8 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     elementId: 'cancel',
     label: '取消',
     hint: '取消排队任务，Agent 不会开始执行',
-    buttonType: 'default',
+    buttonType: 'text',
+    icon: 'close-small_outlined',
     states: ['queued'],
     capable: capabilities => capabilities.canCancelQueued,
     primary: true
@@ -134,7 +141,8 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     elementId: 'interrupt',
     label: '中断',
     hint: '中断当前执行，已完成的步骤会保留',
-    buttonType: 'danger',
+    buttonType: 'text',
+    icon: 'stop_outlined',
     states: ['running'],
     capable: capabilities => capabilities.canInterrupt,
     primary: true
@@ -144,7 +152,9 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     elementId: 'retry',
     label: '重试',
     hint: '查看失败详情，修正后重新运行',
-    buttonType: 'primary',
+    buttonType: 'primary_text',
+    // 与「刷新」同一个图标：两者的可用状态不相交，不会同时出现在一张卡上。
+    icon: 'refresh_outlined',
     states: ['failed', 'interrupted', 'cancelled'],
     capable: capabilities => capabilities.canRetry,
     // 明确标记为不可重试的任务（例如配置错误、权限不足）不提供重试入口。
@@ -156,7 +166,8 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     elementId: 'verify',
     label: '运行验证',
     hint: '在工作目录执行已配置的验证命令，记录退出码与代码指纹',
-    buttonType: 'default',
+    buttonType: 'text',
+    icon: 'safe-pass_outlined',
     // 排队/执行中不给：验证要求会话空闲，runtime 会直接回 SESSION_BUSY。
     // cancelled 也不给：任务没跑过，没有需要验证的改动。
     states: ['completed', 'failed', 'interrupted'],
@@ -169,7 +180,8 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     elementId: 'refresh',
     label: '刷新',
     hint: '立即拉取任务最新状态，卡片心跳受频率限制可能滞后',
-    buttonType: 'default',
+    buttonType: 'text',
+    icon: 'refresh_outlined',
     // 只在非终态提供：终态已经收敛，刷新不会带来新信息。
     states: ['queued', 'running', 'interrupting'],
     capable: capabilities => capabilities.canRefresh,
@@ -257,6 +269,7 @@ const callbackButton = (definition: LarkCardActionDefinition, taskId: string, tu
   tag: 'button',
   text: { tag: 'plain_text', content: definition.label },
   type: definition.buttonType,
+  icon: { tag: 'standard_icon', token: definition.icon, color: definition.buttonType === 'primary_text' ? 'blue' : 'grey' },
   behaviors: [{ type: 'callback', value: callbackValue(definition.action, taskId, turn) }],
   margin: '0px',
   element_id: definition.elementId
@@ -276,7 +289,7 @@ const callbackButton = (definition: LarkCardActionDefinition, taskId: string, tu
  * 就是同一去向的两个入口。
  *
  * 注意：这里返回的是扁平按钮列表，不含 column_set 包装，
- * 由调用方决定放进状态行的哪一列（多按钮时需要放宽既有的 72px 列宽）。
+ * 由调用方决定放进哪一行；按钮带图标，所在列必须是自适应宽度，固定窄列会把文案挤折行。
  */
 export function buildLarkCardActions(context: LarkCardActionContext): LarkCardElement[] {
   const taskId = normalizedTaskId(context.taskId);

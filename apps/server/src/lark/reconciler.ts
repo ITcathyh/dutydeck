@@ -85,7 +85,6 @@ export async function performLarkCardReconcile(input: {
             elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
             sessionId: mapping.sessionId,
             readOnly: true,
-            recordExport: Boolean(persisted.runtime_task_id),
             turn: persisted.turn,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             ...(legacyElements ? { elements: legacyElements } : {})
@@ -147,7 +146,6 @@ export async function performLarkCardReconcile(input: {
             taskId: mapping.externalId, taskName: persisted.task_name,
             elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
             sessionId: mapping.sessionId, readOnly: !canCancel, turn: persisted.turn ?? 0,
-            recordExport: Number.isInteger(persisted.turn),
             capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false },
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             markdown: recovery?.markdown ?? RECOVERY_TRACKING_NOTE
@@ -204,7 +202,6 @@ export async function performLarkCardReconcile(input: {
             elapsedSeconds,
             sessionId: mapping.sessionId,
             readOnly: true,
-            recordExport: Boolean(persisted.runtime_task_id),
             turn: persisted.turn,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             elements: currentElements
@@ -237,7 +234,6 @@ export async function performLarkCardReconcile(input: {
             elapsedSeconds,
             sessionId: mapping.sessionId,
             readOnly: true,
-            recordExport: Boolean(persisted.runtime_task_id),
             turn: persisted.turn,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             elements: patchedElements
@@ -281,7 +277,7 @@ export async function performLarkCardReconcile(input: {
           finalCardInput = {
             ...cardContext, permissionMode: larkPermissionMode(config), state, cardKind: 'result',
             taskId: mapping.externalId, taskName: persisted.task_name,
-            elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true, recordExport: true,
+            elapsedSeconds, sessionId: mapping.sessionId, turn: persisted.turn, readOnly: true,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...decoration?.cardInput
           };
           const result = await completeExplicitFinal(input.deliveryStore, service, finalContext, finalCardInput, elements) ?? await sendLarkResult(service, {

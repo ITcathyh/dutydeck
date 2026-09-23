@@ -62,8 +62,8 @@ describe('飞书卡片操作按钮：状态收敛', () => {
     expect(buttonIds(running)).not.toContain('cancel');
     expect(buttonIds(running)).not.toContain('retry');
     expect(labels(running)[0]).toBe('中断');
-    // 中断使用 danger 强调，但语义仍由文案承载，颜色只是辅助。
-    expect(running[0]!.type).toBe('danger');
+    // 中断不用红框：语义由文案和停止图标承载，按钮本身保持无边框。
+    expect(running[0]).toMatchObject({ type: 'text', icon: { tag: 'standard_icon', token: 'stop_outlined', color: 'grey' } });
 
     for (const state of ['failed', 'interrupted'] as const) {
       const elements = buildLarkCardActions(context(state));
@@ -375,6 +375,13 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
         expect(element.element_id).toBeTruthy();
         // 主操作按钮走默认尺寸：small 在手机上点击面积偏小，且与其他卡片按钮不一致。
         expect(element.size).toBeUndefined();
+        // 一律无边框 + 图标；只有「重试」用蓝字标出下一步。
+        expect(element.type).toBe(element.element_id === 'retry' ? 'primary_text' : 'text');
+        expect(element.icon).toMatchObject({ tag: 'standard_icon', color: element.element_id === 'retry' ? 'blue' : 'grey' });
+        expect(element.icon.token).toBe({
+          cancel: 'close-small_outlined', interrupt: 'stop_outlined', retry: 'refresh_outlined',
+          verify: 'safe-pass_outlined', refresh: 'refresh_outlined'
+        }[element.element_id as string]);
       }
     }
   });
@@ -398,7 +405,7 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
         capabilities: { ...allCapabilities, webUrl: 'https://dutydeck.example.com/sessions/ses_1' }
       }));
       expect(elements.length).toBeLessThanOrEqual(larkCardActionBudget.maxButtons);
-      // 每个按钮 = button 自身 + text.plain_text 两个组件。
+      // 每个按钮 = button 自身 + text.plain_text + icon 三个组件。
       const components = elements.length * larkCardActionBudget.componentsPerButton;
       expect(components).toBeLessThanOrEqual(larkCardActionBudget.maxButtons * larkCardActionBudget.componentsPerButton);
       expect(Buffer.byteLength(JSON.stringify(elements), 'utf8')).toBeLessThan(2_048);
@@ -413,7 +420,8 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
     expect(buildLarkCardActions(context('running', { taskId: 'task-running' }, { canRefresh: false }))[0]).toEqual({
       tag: 'button',
       text: { tag: 'plain_text', content: '中断' },
-      type: 'danger',
+      type: 'text',
+      icon: { tag: 'standard_icon', token: 'stop_outlined', color: 'grey' },
       behaviors: [{ type: 'callback', value: { action: 'interrupt', task_id: 'task-running', turn: '0' } }],
       margin: '0px',
       element_id: 'interrupt'

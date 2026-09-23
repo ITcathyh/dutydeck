@@ -182,7 +182,7 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
     expect(saved.final_message_id === sent.messageId).toBe(mode !== 'unupdatable');
   });
 
-  it.each([false, true])('delivers one answer and updates the same card with export and verification (reaction=%s)', async reaction => {
+  it.each([false, true])('delivers one answer and updates the same card with verification but no export button (reaction=%s)', async reaction => {
     const h = await harness({ verificationCommand: 'pnpm test', reaction });
     const sent = await h.sendFinal();
     expect(h.cards.get(sent.messageId)).toMatchObject({ state: 'running', statusLabel: '答复已送达，执行尚未结束' });
@@ -191,10 +191,10 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
     expect(saved.final_message_id).toBe(sent.messageId);
     expect(resultSends(h)).toHaveLength(1);
     const card = h.cards.get(sent.messageId);
-    expect(card).toMatchObject({ state: 'completed', recordExport: true, capabilities: { canVerify: true } });
+    expect(card).toMatchObject({ state: 'completed', capabilities: { canVerify: true } });
     expect(card.elements.filter((item: any) => item.element_id === 'final_output')).toEqual([{ tag: 'markdown', element_id: 'final_output', content: '完整最终答复' }]);
     expect(callbackValues(buildLarkCard(card)).some(value => value.action === 'verify')).toBe(true);
-    expect(callbackValues(buildLarkCard(card)).some(value => value.dutydeck_export_trace === 'download')).toBe(true);
+    expect(callbackValues(buildLarkCard(card)).some(value => value.dutydeck_export_trace === 'download')).toBe(false);
   });
 
   it('serializes an in-flight explicit send with completion', async () => {
@@ -295,7 +295,7 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
       await restarted.reconcile(h.config);
       const saved = await h.persisted();
       expect(saved.final_message_id).toBe(sent.messageId);
-      expect(saved.final_card_input).toMatchObject({ recordExport: true, capabilities: { canVerify: true } });
+      expect(saved.final_card_input).toMatchObject({ capabilities: { canVerify: true } });
       const verify = callbackValues(buildLarkCard(h.cards.get(sent.messageId))).find(value => value.action === 'verify')!;
       expect(verify).toBeTruthy();
       expect(await restarted.handleAction(verify, 'ou_alice', { messageId: sent.messageId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
@@ -479,7 +479,7 @@ it('provides only platform controls when the original card is permanently unupda
   const status = h.cards.get(saved.final_message_id!);
   expect(JSON.stringify(status.elements)).toContain('正文已交付');
   expect(JSON.stringify(status.elements)).not.toContain('完整最终答复');
-  expect(status).toMatchObject({ recordExport: true, capabilities: { canVerify: true } });
+  expect(status).toMatchObject({ capabilities: { canVerify: true } });
   expect(resultSends(h)).toHaveLength(2);
 });
 

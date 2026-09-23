@@ -14,7 +14,7 @@ import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
-import { buildLarkCard, LarkServiceError } from './service.js';
+import { LarkServiceError } from './service.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -250,8 +250,8 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.coordinator.handle(event('om_task', 'USER_ORIGINAL_SECRET_REQUEST'), h.config);
     await h.completed();
     const summary = h.cards.get('om_card_2');
-    const card = buildLarkCard(summary);
-    const value = (card.body.elements.find((item: any) => item.element_id === 'export_trace') as any).behaviors[0].value;
+    // 新卡片不再渲染导出按钮；这里用已发出的老卡片按钮携带的回调值，确认它们仍可用。
+    const value = { dutydeck_export_trace: 'download', task_id: summary.taskId, turn: String(summary.turn) };
     chunks.splice(0, 1, 'LATER_TASK_PRIVATE_OUTPUT');
     await h.coordinator.handle(event('om_later_task', '另一个目标'), h.config);
     await vi.waitFor(async () => expect((await h.repos.channelMappings.list('lark-card:cli_workflows')).some(item => item.externalId === 'om_later_task' && JSON.parse(item.extra ?? '{}').final_delivery_state === 'delivered')).toBe(true));
