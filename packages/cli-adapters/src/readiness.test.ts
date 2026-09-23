@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createCodexAdapter } from './adapters/codex.js';
 import { createTraexAdapter } from './adapters/traex.js';
+import { isInputReady, isTrustPrompt, TRAEX_PLACEHOLDERS } from './adapters/screen-ready-helper.js';
 import type { PtyLike } from './types.js';
 
 const SID = 'test-session-1111-2222';
@@ -512,5 +513,315 @@ describe('upstream native startup layout compatibility', () => {
       expect(backend.writes).toEqual([]);
       expect(backend.specialKeys).toEqual([]);
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('terminal screen readiness and trust dialog handling', () => {
+  const codexStartup = JSON.parse(
+    readFileSync(join(__dirname, 'fixtures/codex-startup/native.json'), 'utf8'),
+  ) as {
+    fulltrustPretrust: string;
+    untrustedAsk: string;
+    hooksReview: string;
+    loading: string;
+    worktreePretrust: string;
+    noWarning: string;
+  };
+
+  const traexVariants = JSON.parse(
+    readFileSync(join(__dirname, 'fixtures/traex-startup/variants.json'), 'utf8'),
+  ) as {
+    defaultDirNudge: string;
+    gitBranchWorktree: string;
+    untrustedPretrust: string;
+    untrustedAsk: string;
+    hooksReview: string;
+    dutydeckRepo: string;
+    strippedFooter: string;
+  };
+
+  describe('screens recognized as input ready', () => {
+    it('accepts Codex full-trust pre-trusted screen with warning in footer', async () => {
+      vi.useFakeTimers();
+      try {
+        const backend = createMockBackend(codexStartup.fulltrustPretrust);
+        await createCodexAdapter().prepareInput!(backend, { sessionId: SID, permissionMode: 'full-trust' });
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('accepts Codex worktree full-trust pre-trusted screen', async () => {
+      vi.useFakeTimers();
+      try {
+        const backend = createMockBackend(codexStartup.worktreePretrust);
+        await createCodexAdapter().prepareInput!(backend, { sessionId: SID, permissionMode: 'full-trust' });
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('accepts Codex full-trust screen whose footer has no warning suffix', async () => {
+      vi.useFakeTimers();
+      try {
+        const backend = createMockBackend(codexStartup.noWarning);
+        await createCodexAdapter().prepareInput!(backend, { sessionId: SID, permissionMode: 'full-trust' });
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('accepts TraeX default directory with Full Access footer', async () => {
+      vi.useFakeTimers();
+      try {
+        const backend = createMockBackend(traexVariants.defaultDirNudge);
+        await createTraexAdapter().prepareInput!(backend, { sessionId: SID, permissionMode: 'full-trust' });
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('accepts TraeX git repository with branch segment in footer', async () => {
+      vi.useFakeTimers();
+      try {
+        const backend = createMockBackend(traexVariants.gitBranchWorktree);
+        await createTraexAdapter().prepareInput!(backend, { sessionId: SID, permissionMode: 'full-trust' });
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('accepts TraeX full-trust pre-trusted screen with truncated path', async () => {
+      vi.useFakeTimers();
+      try {
+        const backend = createMockBackend(traexVariants.untrustedPretrust);
+        await createTraexAdapter().prepareInput!(backend, { sessionId: SID, permissionMode: 'full-trust' });
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('accepts TraeX with stripped Full Access footer', async () => {
+      vi.useFakeTimers();
+      try {
+        const backend = createMockBackend(traexVariants.strippedFooter);
+        await createTraexAdapter().prepareInput!(backend, { sessionId: SID, permissionMode: 'full-trust' });
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it.each(TRAEX_PLACEHOLDERS)('accepts TraeX placeholder: "%s"', async placeholder => {
+      vi.useFakeTimers();
+      try {
+        const screen = traexVariants.dutydeckRepo.replace(/❯\s*Implement \{feature\}/, `❯ ${placeholder}`);
+        const backend = createMockBackend(screen);
+        await createTraexAdapter().prepareInput!(backend, { sessionId: SID, permissionMode: 'full-trust' });
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+  });
+
+  describe('screens recognized as not ready', () => {
+    it('rejects folder trust prompt', () => {
+      expect(isInputReady(codexStartup.untrustedAsk, 'Codex')).toBe(false);
+      expect(isInputReady(traexVariants.untrustedAsk, 'TraeX')).toBe(false);
+    });
+
+    it('rejects hooks review prompt', () => {
+      expect(isInputReady(codexStartup.hooksReview, 'Codex')).toBe(false);
+      expect(isInputReady(traexVariants.hooksReview, 'TraeX')).toBe(false);
+    });
+
+    it('hooks review page in ask mode is left untouched and only fails with the generic timeout', async () => {
+      vi.useFakeTimers();
+      try {
+        const backend = createMockBackend(traexVariants.hooksReview);
+        const rejected = expect(
+          createTraexAdapter().prepareInput!(backend, {
+            sessionId: SID,
+            cwd: '/data00/tmp/untrusted',
+            permissionMode: 'ask',
+          }),
+        ).rejects.toThrow(/就绪/);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await rejected;
+        expect(backend.writes).toEqual([]);
+        expect(backend.specialKeys).toEqual([]);
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('rejects numbered menu', () => {
+      const menuScreen = '› 1. Option A\n  2. Option B\n  enter continue · esc quit';
+      expect(isInputReady(menuScreen, 'Codex')).toBe(false);
+      expect(isInputReady(menuScreen, 'TraeX')).toBe(false);
+    });
+
+    it('rejects banner still loading', () => {
+      expect(isInputReady(codexStartup.loading, 'Codex')).toBe(false);
+    });
+
+    it('rejects running or pending state', () => {
+      const pendingScreen = 'Working on task... esc to interrupt';
+      expect(isInputReady(pendingScreen, 'Codex')).toBe(false);
+      expect(isInputReady(pendingScreen, 'TraeX')).toBe(false);
+    });
+
+    it('rejects unknown user draft', () => {
+      const draftScreen = traexVariants.defaultDirNudge.replace(
+        /❯\s*Find and fix a bug in @filename/,
+        '❯ My custom draft query that is not a placeholder',
+      );
+      expect(isInputReady(draftScreen, 'TraeX')).toBe(false);
+    });
+
+    it('rejects screen when regular text appears after composer', () => {
+      const modified = traexVariants.defaultDirNudge.replace(
+        /❯\s*Find and fix a bug in @filename/,
+        '❯ Find and fix a bug in @filename\nSome extraneous prose line',
+      );
+      expect(isInputReady(modified, 'TraeX')).toBe(false);
+    });
+  });
+
+  describe('untrusted directory prompt error in non-full-trust mode', () => {
+    it('immediately throws descriptive trust error for Codex when encountering trust dialog in ask mode', async () => {
+      const backend = createMockBackend(codexStartup.untrustedAsk);
+      await expect(
+        createCodexAdapter().prepareInput!(backend, {
+          sessionId: SID,
+          cwd: '/data00/tmp/untrusted',
+          permissionMode: 'ask',
+        }),
+      ).rejects.toThrow('Codex 需要先信任工作目录 /data00/tmp/untrusted：请在终端中确认信任，或改用完全信任模式。');
+    });
+
+    it('immediately throws descriptive trust error for TraeX when encountering trust dialog in ask mode', async () => {
+      const backend = createMockBackend(traexVariants.untrustedAsk);
+      await expect(
+        createTraexAdapter().prepareInput!(backend, {
+          sessionId: SID,
+          cwd: '/data00/tmp/untrusted',
+          permissionMode: 'ask',
+        }),
+      ).rejects.toThrow('TraeX 需要先信任工作目录 /data00/tmp/untrusted：请在终端中确认信任，或改用完全信任模式。');
+    });
+
+    // 回归：信任页识别必须行锚定且在就绪判断之后。已就绪画面的对话正文里
+    // 提到信任弹窗文字（agent 在讨论它，或 daemon 重连回旧 tmux 会话）时，
+    // ask 模式不得报「需要先信任工作目录」。
+    const traexFullAccessFooter =
+      '  GPT-6-Astra xhigh · Context 100% left · ~                          ☢ Full Access (shift+tab to cycle) · ← for agents';
+    const bar = '────────────────────────────────────────';
+
+    const codexReadyWithTranscript = [
+      '│ >_ OpenAI Codex (v0.156.1)                         │',
+      '• 我查了一下：非完全信任模式下 Codex 会弹出 "Trust this folder?" 的确认页，需要手动确认。',
+      '',
+      '› Ask Codex to do anything',
+      '',
+      '  GPT-6-Astra xhigh · /data00/home/huangyuhang.edu/ai/dutydeck',
+    ].join('\n');
+
+    const traexReadyWithTranscript = [
+      'TraeCode CLI',
+      '• 提示：TraeX 首次进入目录会问 Do you trust the contents of this directory? 选 1 即可',
+      bar,
+      '❯ Implement {feature}',
+      bar,
+      traexFullAccessFooter,
+    ].join('\n');
+
+    it('a ready Codex screen whose transcript mentions "Trust this folder?" is not a trust prompt', () => {
+      expect(isInputReady(codexReadyWithTranscript, 'Codex')).toBe(true);
+      expect(isTrustPrompt(codexReadyWithTranscript, 'Codex')).toBe(false);
+    });
+
+    it('a ready TraeX screen whose transcript mentions the trust question is not a trust prompt', () => {
+      expect(isInputReady(traexReadyWithTranscript, 'TraeX')).toBe(true);
+      expect(isTrustPrompt(traexReadyWithTranscript, 'TraeX')).toBe(false);
+    });
+
+    it('ask mode resolves (does not throw) when the ready screen merely quotes trust-dialog text', async () => {
+      const codexBackend = createMockBackend(codexReadyWithTranscript);
+      await expect(
+        createCodexAdapter().prepareInput!(codexBackend, { sessionId: SID, cwd: '/data00/x', permissionMode: 'ask' }),
+      ).resolves.toBeUndefined();
+
+      const traexBackend = createMockBackend(traexReadyWithTranscript);
+      await expect(
+        createTraexAdapter().prepareInput!(traexBackend, { sessionId: SID, cwd: '/data00/x', permissionMode: 'ask' }),
+      ).resolves.toBeUndefined();
+    });
+
+    it('unready screen with only heading line and no menu option does not throw trust error and keeps waiting (Codex)', async () => {
+      vi.useFakeTimers();
+      try {
+        const codexResumingWithHeadingOnly = [
+          '│ >_ OpenAI Codex (v0.156.1)                         │',
+          '• 我查了一下 Codex 的目录信任：',
+          '  Trust this folder? 这一页在非完全信任模式下会出现，需要手动确认。',
+          '',
+          '  Resuming session…',
+          '› Ask Codex to do anything',
+        ].join('\n');
+
+        expect(isInputReady(codexResumingWithHeadingOnly, 'Codex')).toBe(false);
+        expect(isTrustPrompt(codexResumingWithHeadingOnly, 'Codex')).toBe(false);
+
+        const codexBackend = createMockBackend(codexResumingWithHeadingOnly);
+        let errorCaught: any = null;
+        const pending = createCodexAdapter().prepareInput!(codexBackend, {
+          sessionId: SID,
+          cwd: '/data00/tmp/untrusted',
+          permissionMode: 'ask',
+        }).catch(err => { errorCaught = err; });
+
+        // 推进 5 秒：绝不能过早抛出目录信任错误，而是维持等待
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(errorCaught).toBeNull();
+
+        // 画面就绪后正常 resolve
+        codexBackend.screenText = codexResumingWithHeadingOnly.replace('  Resuming session…\n', '') + '\n\n  custom-model medium · /data00/x';
+        await vi.advanceTimersByTimeAsync(200);
+        await pending;
+        expect(errorCaught).toBeNull();
+      } finally { vi.useRealTimers(); }
+    });
+
+    it('unready screen with only heading line and no menu option does not throw trust error and keeps waiting (TraeX)', async () => {
+      vi.useFakeTimers();
+      try {
+        const traexResumingWithHeadingOnly = [
+          'TraeCode CLI',
+          '• 提示：',
+          '  Do you trust the contents of this directory? 这一行被用户引用了。',
+          '  Resuming session…',
+          '❯ Find and fix a bug in @filename',
+        ].join('\n');
+
+        expect(isInputReady(traexResumingWithHeadingOnly, 'TraeX')).toBe(false);
+        expect(isTrustPrompt(traexResumingWithHeadingOnly, 'TraeX')).toBe(false);
+
+        const traexBackend = createMockBackend(traexResumingWithHeadingOnly);
+        let errorCaught: any = null;
+        const pending = createTraexAdapter().prepareInput!(traexBackend, {
+          sessionId: SID,
+          cwd: '/data00/tmp/untrusted',
+          permissionMode: 'ask',
+        }).catch(err => { errorCaught = err; });
+
+        // 推进 5 秒：未就绪但无菜单选项，绝不能抛目录信任错误，维持等待
+        await vi.advanceTimersByTimeAsync(5_000);
+        expect(errorCaught).toBeNull();
+
+        // 超时后只抛常规启动超时，不抛目录信任错误
+        await vi.advanceTimersByTimeAsync(30_000);
+        await pending;
+        expect(errorCaught?.message).toMatch(/就绪/);
+        expect(errorCaught?.message).not.toMatch(/信任/);
+      } finally { vi.useRealTimers(); }
+    });
   });
 });
