@@ -116,4 +116,15 @@ describe('SessionRow 身份信息的可达性', () => {
     const { identity } = renderRow(sessionWith({ state: 'idle' }));
     expect(identity.className.trim()).toBe('sr-only');
   });
+
+  it('优先展示自定义会话名称，未命名时回退到 summary prompt 与 fallback', () => {
+    const withCustomName = render(<SessionRow session={sessionWith({ name: '自定义重构' })} summary={{ sessionId: 'session-1', taskId: 't1', prompt: '原始指令', status: 'completed', queuedCount: 0, updatedAt: '' }} active={false} onClick={() => {}}/>);
+    expect(withCustomName.container.querySelector('button')!.textContent).toContain('自定义重构');
+
+    const withoutCustomName = render(<SessionRow session={sessionWith()} summary={{ sessionId: 'session-1', taskId: 't1', prompt: '原始指令', status: 'completed', queuedCount: 0, updatedAt: '' }} active={false} onClick={() => {}}/>);
+    expect(withoutCustomName.container.querySelector('button')!.textContent).toContain('原始指令');
+
+    const fallbackOnly = render(<SessionRow session={sessionWith()} active={false} onClick={() => {}}/>);
+    expect(fallbackOnly.container.querySelector('button')!.textContent).toContain('尚未获取任务目标');
+  });
 });

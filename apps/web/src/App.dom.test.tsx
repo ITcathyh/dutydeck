@@ -1031,4 +1031,28 @@ describe('App 完整历史记录', () => {
     expect(await screen.findByText('最早的历史内容')).toBeTruthy();
     expect(screen.queryByText('历史记录加载失败：连接中断')).toBeNull();
   });
+
+  it('在会话详情点击「重命名会话」打开弹窗并完成改名', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    const s1 = session('s1');
+    mockAppApi({ sessions: [s1], summaries: [summary('s1', '原始任务目标')] });
+    vi.spyOn(api, 'setSessionName').mockResolvedValue({ ...s1, name: '改名后的任务' });
+    const user = userEvent.setup();
+    renderApp();
+
+    expect(await screen.findByRole('heading', { name: '原始任务目标' })).toBeTruthy();
+    const renameButton = screen.getByRole('button', { name: '重命名会话' });
+    await user.click(renameButton);
+
+    expect(screen.getByRole('dialog', { name: '重命名会话' })).toBeTruthy();
+    const input = screen.getByRole('textbox', { name: '会话名称' });
+    await user.type(input, '改名后的任务');
+    await user.click(screen.getByRole('button', { name: '保存' }));
+
+    expect(api.setSessionName).toHaveBeenCalledWith('s1', '改名后的任务');
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog', { name: '重命名会话' })).toBeNull();
+    });
+    expect(await screen.findByRole('heading', { name: '改名后的任务' })).toBeTruthy();
+  });
 });

@@ -379,5 +379,17 @@ describe('WorkspaceOverview', () => {
       await user.click(screen.getByRole('button', { name: '创建任务' }));
       expect(onCreate).toHaveBeenCalledOnce();
     });
+
+    it('任务行优先展示自定义会话名称，且 checkbox 的 aria-label 包含该名称', async () => {
+      const user = userEvent.setup();
+      const testSession: Session = { ...session('s1', '/repo/project', 'idle'), name: '周报生成任务' };
+      render(<WorkspaceOverview {...baseProps} sessions={[testSession]} summaries={{ s1: { sessionId: 's1', taskId: 't1', prompt: '原始任务', status: 'completed', queuedCount: 0, updatedAt: '' } }} onBulkArchive={() => {}} />);
+
+      expect(screen.getByText('周报生成任务')).toBeTruthy();
+      expect(screen.getByTitle('周报生成任务')).toBeTruthy();
+
+      await user.click(screen.getByRole('button', { name: '批量清理' }));
+      expect(screen.getByRole('checkbox', { name: '选择任务：周报生成任务' })).toBeTruthy();
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { type Query, useQueries } from '@tanstack/react-query';
 import { api, ApiError, type RunSummary, type Session } from '../api';
+import { sessionDisplayName } from '../run-summary';
 import { Banner, Button, Card, EmptyState, Spinner } from './primitives';
 import { ScheduleFoundationPanel } from './ScheduleFoundationPanel';
 import { scheduleNextExecution, SessionAutomationPanel } from './SessionAutomationPanel';
@@ -29,7 +30,7 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession }
   return <div className="space-y-5">
     {selectedSession ? <section className="space-y-3">
       <div className="flex flex-wrap gap-2"><Button onClick={() => setSelected(undefined)}>返回任务计划</Button><Button onClick={() => onSelectSession(selectedSession.id)}>打开所属任务</Button></div>
-      <SessionAutomationPanel key={selectedSession.id} session={selectedSession} initialScheduleId={selected?.scheduleId} openCreateForm={!selected?.scheduleId} taskTitle={summaries[selectedSession.id]?.prompt.trim() || `${selectedSession.agentId} · ${selectedSession.cwd}`}/>
+      <SessionAutomationPanel key={selectedSession.id} session={selectedSession} initialScheduleId={selected?.scheduleId} openCreateForm={!selected?.scheduleId} taskTitle={sessionDisplayName(selectedSession, summaries[selectedSession.id]?.prompt, `${selectedSession.agentId} · ${selectedSession.cwd}`)}/>
     </section> : <section className="space-y-3" aria-label="任务计划">
       <h2 className="text-title font-semibold">任务计划</h2>
       <p className="text-body text-secondary">启用后按时执行，沿用所属任务的目录和上下文。在这里与任务详情中编辑的是同一份计划。</p>
@@ -39,7 +40,7 @@ export function AutomationOverview({ sessions, summaries = {}, onSelectSession }
         if (query.isPending) return <Spinner key={session.id} label="读取任务计划"/>;
         if (query.error instanceof ApiError && [401, 403, 404].includes(query.error.status)) return null;
         return <Card key={session.id} as="article" padding="md" className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-body font-semibold">{summaries[session.id]?.prompt.trim() || `${session.agentId} · ${session.cwd}`}</h3><Button onClick={() => onSelectSession(session.id)}>打开任务</Button></div>
+          <div className="flex flex-wrap items-center justify-between gap-2"><h3 className="text-body font-semibold">{sessionDisplayName(session, summaries[session.id]?.prompt, `${session.agentId} · ${session.cwd}`)}</h3><Button onClick={() => onSelectSession(session.id)}>打开任务</Button></div>
           <p className="break-all text-caption text-secondary">{session.agentId} · 目录：{session.cwd}</p>
           {query.isError ? <Banner tone="danger" action={{ label: '重试', onClick: () => void query.refetch() }}>计划读取失败，无法确认当前状态。</Banner> : query.data && <>
             {query.data.schedules.map(item => <div key={item.id} className="space-y-1 rounded-md bg-muted p-3">

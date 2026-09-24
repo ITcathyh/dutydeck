@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { X } from 'lucide-react';
 import { api, type Session, type Task, type WorkspaceCleanupPreview } from '../api';
+import { sessionDisplayName } from '../run-summary';
 import { Banner, Button, Dialog, Field, IconButton, Input, Spinner } from './primitives';
 import { SessionAutomationPanel } from './SessionAutomationPanel';
 
@@ -174,7 +175,7 @@ export function SessionDeliveryPanel({ session, tasks, onClose }: { session: Ses
             {record.outputTruncated && <p className="text-caption text-warning">输出超过记录上限，已截断。</p>}
           </details>)}
         </section>
-        <SessionAutomationPanel session={session} taskTitle={tasks.find(task => task.prompt.trim())?.prompt}/>
+        <SessionAutomationPanel session={session} taskTitle={sessionDisplayName(session, tasks.find(task => task.prompt.trim())?.prompt)}/>
         <section className="space-y-2">
           <h3 className="text-body font-semibold">Skill 投递记录</h3>
           {!skillTasks.length && <p className="text-caption text-subtle">尚无明确选中的 Skill。发送时可在输入框选择。</p>}

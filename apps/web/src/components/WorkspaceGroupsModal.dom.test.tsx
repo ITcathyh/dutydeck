@@ -153,6 +153,14 @@ describe('WorkspaceGroupsModal 批量任务整理', () => {
     await user.click(screen.getByRole('button', { name: /应用到所选任务/ }));
     await waitFor(() => expect(assign).toHaveBeenCalledWith({ groupId: null, sessionIds: ['sess-a', 'sess-b'] }));
   });
+
+  it('任务有自定义名称时优先展示自定义名称', () => {
+    renderModal({
+      sessions: [{ ...sessions[0], name: '自定义分组任务' }],
+      summaries: { 'sess-a': { sessionId: 'sess-a', taskId: 't1', prompt: '原始指令', status: 'completed', queuedCount: 0, updatedAt: '' } }
+    });
+    expect(screen.getByText('自定义分组任务')).toBeTruthy();
+  });
 });
 
 describe('WorkspaceGroupsModal 失败与加载态', () => {

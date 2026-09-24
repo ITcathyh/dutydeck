@@ -3,7 +3,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { SessionDeliveryPanel } from './SessionDeliveryPanel';
-import type { Session } from '../api';
+import type { Session, Task } from '../api';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 const session: Session = { id: 's1', agentId: 'a', cwd: '/project/worktree', state: 'completed', runId: 'r', createdAt: '2026-09-12T00:00:00Z', updatedAt: '2026-09-12T00:00:00Z' };
@@ -15,6 +15,8 @@ function mount(state = session.state, options: {
   workspace?: any;
   cleanupPreview?: any;
   cleanupHandler?: (init?: RequestInit) => any;
+  sessionOverrides?: Partial<Session>;
+  tasks?: Task[];
 } = {}) {
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
@@ -29,7 +31,7 @@ function mount(state = session.state, options: {
     return new Response(JSON.stringify(body), { status: options.evidenceFailure && strUrl.endsWith('/verifications') ? 503 : 200, headers: { 'content-type': 'application/json' } });
   });
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state, ...(options.archivedAt ? { archivedAt: options.archivedAt } : {}) }} tasks={[]} onClose={() => {}}/></QueryClientProvider>);
+  render(<QueryClientProvider client={qc}><SessionDeliveryPanel session={{ ...session, state, ...(options.archivedAt ? { archivedAt: options.archivedAt } : {}), ...options.sessionOverrides }} tasks={options.tasks ?? []} onClose={() => {}}/></QueryClientProvider>);
   return requests;
 }
 
@@ -146,5 +148,28 @@ describe('work item delivery panel', () => {
 
     await screen.findByText(/工作目录已清理，任务历史仍可读/);
     expect(screen.queryByRole('button', { name: '检查可否清理' })).toBeNull();
+  });
+
+  it('所属任务优先展示 session.name，无 name 时使用任务原始 prompt，且不改写任务对象自身', async () => {
+    const rawTask: Task = { id: 't1', sessionId: 's1', prompt: '原始交付指令', status: 'completed', createdAt: '', updatedAt: '' };
+    mount('completed', {
+      sessionOverrides: { name: '自定义交付任务' },
+      tasks: [rawTask]
+    });
+    expect(await screen.findByText(/所属任务：自定义交付任务/)).toBeTruthy();
+    // 确保真实任务 prompt 未被修改
+    expect(rawTask.prompt).toBe('原始交付指令');
+  });
+
+  it('未命名会话回退到任务 prompt，任务缺失时使用 agent 和 cwd fallback', async () => {
+    const rawTask: Task = { id: 't1', sessionId: 's1', prompt: '原始交付指令', status: 'completed', createdAt: '', updatedAt: '' };
+    mount('completed', {
+      tasks: [rawTask]
+    });
+    expect(await screen.findByText(/所属任务：原始交付指令/)).toBeTruthy();
+
+    cleanup();
+    mount('completed', { tasks: [] });
+    expect(await screen.findByText(/所属任务：a · \/project\/worktree/)).toBeTruthy();
   });
 });

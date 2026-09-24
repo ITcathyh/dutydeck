@@ -368,6 +368,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         service: workspaceOrganizationService,
         authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
       },
+      sessionNames: {
+        authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
+      },
       webRoot,
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
         authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,

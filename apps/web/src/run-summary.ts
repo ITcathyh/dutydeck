@@ -10,3 +10,15 @@ export function summaryFromTasks(sessionId: string, tasks: Task[] | undefined): 
 }
 
 export const fallbackRunTitle = (source?: string) => source === 'lark' ? '来自飞书的任务' : '尚未获取任务目标';
+
+export function sessionDisplayName(
+  session?: { name?: string } | null,
+  prompt?: string | null,
+  fallback = ''
+): string {
+  const customName = session?.name?.trim();
+  if (customName) return customName;
+  const taskPrompt = prompt?.trim();
+  if (taskPrompt) return taskPrompt;
+  return fallback;
+}

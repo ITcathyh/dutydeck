@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CreateSessionScheduleInput, PublicSessionSchedule as SessionSchedule } from '@dutydeck/shared';
 import { api, type Session } from '../api';
+import { sessionDisplayName } from '../run-summary';
 import { Banner, Button, Field, Input, Select, Spinner, Textarea } from './primitives';
 
 const ciLabels: Record<string, string> = { waiting: '等待构建', dispatching: '提交续作中', accepted: '已提交续作', completed: '续作已结束', cancelled: '已取消', expired: '已过期', stale_head: '提交已变化，等待停止', session_inactive: '会话已结束', revoked: '权限已撤销', error: '查询失败' };
@@ -72,7 +73,7 @@ export function SessionAutomationPanel({ session, initialScheduleId, openCreateF
   return <section className="space-y-3">
     <h3 className="text-body font-semibold">自动续作</h3>
     <p className="text-caption text-secondary">自动任务排入本任务，沿用当前目录和上下文。GitHub 仓库与提交从此目录读取；每分钟检查一次。</p>
-    <p className="break-all text-caption text-secondary">所属任务：{taskTitle || `${session.agentId} · ${session.cwd}`} · 目录：{session.cwd}</p>
+    <p className="break-all text-caption text-secondary">所属任务：{sessionDisplayName(session, taskTitle, `${session.agentId} · ${session.cwd}`)} · 目录：{session.cwd}</p>
     {records.isLoading && <Spinner label="读取自动任务"/>}
     {error && <Banner tone="danger">{error.message}{records.isError && <Button onClick={() => void records.refetch()}>重新读取</Button>}</Banner>}
     {notice && <p role="status" className="text-caption text-secondary">{notice}</p>}

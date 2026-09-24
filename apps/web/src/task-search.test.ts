@@ -47,6 +47,11 @@ describe('taskSearchHaystack', () => {
     expect(haystack.agent).toBe('claude code claude-code');
   });
 
+  it('goal 候选同时包含 session.name 与原 summary.prompt', () => {
+    const haystack = taskSearchHaystack(session('1', { name: '自定义发布任务' }), summary('1', '修复登录超时'));
+    expect(haystack.goal).toBe('自定义发布任务 修复登录超时');
+  });
+
   it('没有任务目标时用 fallback 标题占位，而不是空串', () => {
     expect(taskSearchHaystack(session('1', { source: 'lark' })).goal).toBe('来自飞书的任务');
     expect(taskSearchHaystack(session('2'), summary('2', '   ')).goal).toBe('尚未获取任务目标');
@@ -76,6 +81,13 @@ describe('searchTasks 匹配语义', () => {
     expect(ids(run('登录超时', sessions, summaries))).toEqual(['1']);
     expect(ids(run('回归', sessions, summaries))).toEqual(['1']);
     expect(ids(run('部署', sessions, summaries))).toEqual([]);
+  });
+
+  it('改名后能搜新名字，也仍能搜历史任务目标', () => {
+    const sessions = [session('1', { name: '周四线上发布保障' })];
+    const summaries = { '1': summary('1', '修复登录超时问题并补齐回归测试') };
+    expect(ids(run('线上发布', sessions, summaries))).toEqual(['1']);
+    expect(ids(run('登录超时', sessions, summaries))).toEqual(['1']);
   });
 
   it('多词查询是 AND，且各词可以落在不同字段', () => {

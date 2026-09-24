@@ -282,6 +282,11 @@ describe('CommandPalette 任务行信息与全量性', () => {
     expect(screen.getByRole('option', { name: /来自飞书的任务/ })).toBeTruthy();
   });
 
+  it('任务有自定义名称时优先展示自定义名称', () => {
+    render(<CommandPalette {...baseProps} sessions={[session('1', { name: '自定义重构会话' })]} summaries={{ '1': summary('1', '修复登录超时') }}/>);
+    expect(screen.getByRole('option', { name: /自定义重构会话/ })).toBeTruthy();
+  });
+
   it('关闭后再次打开会清空上一次的查询词', async () => {
     const user = userEvent.setup();
     const props = { ...baseProps, sessions: [session('1')], summaries: { '1': summary('1', '修复登录超时') } };
