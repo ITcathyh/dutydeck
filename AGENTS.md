@@ -7,3 +7,7 @@
 - Agent Dock 群聊工具的运行时变量使用 `dutydeck_group_tools_url` 和 `dutydeck_group_tools_token`。如果需要兼容旧的大写变量，只能在读取边界兼容，写入 ACPX session 的键仍必须是小写 `snake_case`。
 - 修改 ACPX session 配置或环境变量注入逻辑时，必须增加使用真实 `AcpxAdapter` 和持久化 session key 的回归测试；仅 mock ACP 客户端无法覆盖持久化键名校验。
 
+## 重启线上服务
+
+重启线上服务用 `dutydeck restart`，它会等正在执行的任务结束；不要直接用 `systemctl --user restart dutydeck.service`。只有 restart 等待超时、并且确认可以中断这些任务时，才用 `dutydeck restart --force`。
+

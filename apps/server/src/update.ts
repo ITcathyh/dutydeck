@@ -7,6 +7,8 @@ const DEFAULT_PACKAGE_NAME = 'dutydeck';
 
 export interface DutydeckUpdateOptions {
   distTag?: string;
+  force?: boolean;
+  drainTimeout?: string;
 }
 
 export interface DutydeckUpdateResult {
@@ -21,7 +23,7 @@ export interface DutydeckUpdateResult {
 
 export interface DutydeckUpdateDependencies {
   runNpm(args: string[]): Promise<string>;
-  restart(installedEntrypoint: string): Promise<void>;
+  restart(installedEntrypoint: string, options?: { force?: boolean; drainTimeout?: string }): Promise<void>;
   packageName?: string;
 }
 
@@ -75,7 +77,10 @@ export async function updateDutydeck(
   }
   const globalRoot = (await dependencies.runNpm(['root', '--global'])).trim();
   if (!globalRoot) throw new Error('npm did not report its global package directory. The service was not restarted.');
-  await dependencies.restart(resolve(globalRoot, packageName, 'dist/cli.js'));
+  await dependencies.restart(resolve(globalRoot, packageName, 'dist/cli.js'), {
+    force: options.force,
+    drainTimeout: options.drainTimeout
+  });
   return {
     action: 'update', packageName, distTag, previousVersion: currentVersion,
     version, updated: version !== currentVersion, restarted: true
