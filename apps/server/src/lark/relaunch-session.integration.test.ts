@@ -47,14 +47,15 @@ function cardService(prefix: string) {
     send: vi.fn(deliver),
     update: vi.fn(async (input: any) => ({ messageId: input.messageId })),
     getUserEmails: vi.fn(async () => ['alice@example.com']),
-    listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice', memberType: 'user', name: 'Alice' }], hasMore: false })),
+    listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice', memberType: 'user', name: 'Alice' }, { memberId: 'ou_bob', memberType: 'user', name: 'Bob' }], hasMore: false })),
     listChatMessages: vi.fn(async () => ({ items: [], hasMore: false }))
   };
 }
 
-const message = (messageId: string, text: string): LarkMessageEvent => ({
-  messageId, chatId: 'oc_group', chatType: 'group', rootId: 'om_root', threadId: 'omt_topic', messageType: 'text',
-  content: JSON.stringify({ text: `@_user_1 ${text}` }), senderOpenId: 'ou_alice', senderType: 'user',
+/** 默认发在同一个话题里（会话按话题共用）；thread: false 是普通群的顶层消息，会话按发送人隔离。 */
+const message = (messageId: string, text: string, { sender = 'ou_alice', thread = true } = {}): LarkMessageEvent => ({
+  messageId, chatId: 'oc_group', chatType: 'group', ...(thread ? { rootId: 'om_root', threadId: 'omt_topic' } : {}), messageType: 'text',
+  content: JSON.stringify({ text: `@_user_1 ${text}` }), senderOpenId: sender, senderType: 'user',
   mentions: [{ key: '@_user_1', name: 'Dutydeck', openId: 'ou_bot' }]
 });
 
@@ -71,7 +72,8 @@ const callbackValueOf = (card: any, elementId: string) => {
 };
 const callbackButtonCount = (card: any) => (JSON.stringify(buildLarkCard(card)).match(/"type":"callback"/g) ?? []).length;
 
-async function blockedTopic() {
+/** web: 配置 Web 地址并要求登录，页脚「查看详情」渲染成登录回调按钮。 */
+async function blockedTopic({ thread = true, web = false } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-relaunch-'));
   const path = join(cwd, 'state.db');
   const agent: AgentConfig = { id: 'relaunch-fixture', name: 'Fixture', command: 'unused', args: [], protocol: 'pty-cli', cwd, env: {},
@@ -79,17 +81,22 @@ async function blockedTopic() {
   const config: StoredLarkConfig = { appId: 'app', appSecret: 'fixture', workspace: cwd, defaultAgentId: agent.id,
     fullTrustConfirmed: true, listening: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false,
     groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 60_000, hideTraceOnComplete: false,
-    allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
-    highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off' };
+    allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }, { openId: 'ou_bob', name: 'Bob' }], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
+    highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off',
+    ...(web ? { webBaseUrl: 'https://dutydeck.example.com' } : {}) };
+  const loginLinks = { issue: vi.fn((sessionId: string) => `code_${sessionId}`) };
   const submissions: Array<{ sessionId: string; prompt: string }> = [];
   let oldSessionId = '';
   const factory = (reject: boolean) => (driverConfig: AgentConfig, _protocol: unknown, onEvent: any, onExit: any, sessionId: string) => {
     if (reject && sessionId === oldSessionId) throw new Error('unknown execution must not be replayed');
-    let feed!: (data: string) => void, exit!: (code: number) => void;
-    return new PtyCliDriver({ agent: driverConfig,
+    let feed!: (data: string) => void, exit!: (code: number) => void, killed = false;
+    // 假后端没有真实进程，PtyCliDriver 按 pid 确认不了退出。重启后新建的会话按「kill 之后进程就没了」处理，
+    // /new 能正常停掉它；重启前的旧会话保持停不掉，阻塞才留得下来。
+    const Driver = reject ? class extends PtyCliDriver { override async isStopped() { return killed; } } : PtyCliDriver;
+    return new Driver({ agent: driverConfig,
       adapter: { id: 'fixture', capabilities: {}, buildArgs: () => [], readyPattern: /READY/,
         writeInput: (_backend: unknown, prompt: string) => { submissions.push({ sessionId, prompt }); feed('\x1b[2J\x1b[HWORKING'); } },
-      backend: { kind: 'pty', spawn() {}, write() {}, resize() {}, kill() { exit(0); }, interrupt() {}, onData(cb: (data: string) => void) { feed = cb; }, onExit(cb: (code: number) => void) { exit = cb; } },
+      backend: { kind: 'pty', spawn() {}, write() {}, resize() {}, kill() { killed = true; exit(0); }, interrupt() {}, onData(cb: (data: string) => void) { feed = cb; }, onExit(cb: (code: number) => void) { exit = cb; } },
       sessionId, onEvent, onExit } as any);
   };
   const probe = () => ({ protocol: 'pty-cli' as const, available: true, pause: false, resume: true });
@@ -103,9 +110,9 @@ async function blockedTopic() {
     undefined, repos.channelMappings, undefined, undefined, undefined, { store: repos.config });
   await first.initializeWorkflows(config);
   const inboxState = async (id: string) => JSON.parse(await repos.config.get(`lark.inbox.app.${id}`) ?? '{}').state;
-  await first.handle(message('om_first', '详细排查下报警'), config);
+  await first.handle(message('om_first', '详细排查下报警', { thread }), config);
   await until(() => submissions.length === 1);
-  await first.handle(message('om_queued', '看不懂'), config);
+  await first.handle(message('om_queued', '看不懂', { thread }), config);
   await until(async () => await inboxState('om_first') === 'accepted' && await inboxState('om_queued') === 'accepted');
   oldSessionId = (await repos.sessions.list())[0]!.id;
   first.stop();
@@ -125,7 +132,7 @@ async function blockedTopic() {
   const start = async (prefix: string) => {
     const service = cardService(prefix);
     const coordinator = new LarkMessageCoordinator(liveRuntime as any, service as any, silentLog(), Math.random, 'ou_bot',
-      undefined, liveRepos.channelMappings, undefined, undefined, undefined, { store: liveRepos.config });
+      undefined, liveRepos.channelMappings, undefined, undefined, undefined, { store: liveRepos.config, ...(web ? { loginLinks } : {}) });
     coordinators.push(coordinator);
     await coordinator.initializeWorkflows(config);
     await coordinator.reconcile(config);
@@ -141,7 +148,14 @@ async function blockedTopic() {
   /** 发给某张卡的最后一次 PATCH。 */
   const lastUpdate = (service: ReturnType<typeof cardService>, messageId: string) =>
     service.update.mock.calls.map(([input]) => input as any).filter(input => input.messageId === messageId).at(-1);
-  return { config, oldSessionId, submissions, start, mapping, tasks, blockers, sessions, lastUpdate, repos: liveRepos };
+  /** 等某张卡重绘出转交按钮，返回按钮的回调值与点击上下文。 */
+  const relaunchButton = async (service: ReturnType<typeof cardService>, id: string, action: 'run_in_new_session' | 'rerun_in_new_session') => {
+    const cardId = (await mapping(id)).saved.card_message_id!;
+    await until(() => Boolean(lastUpdate(service, cardId)?.capabilities?.canRelaunch));
+    return { value: callbackValueOf(lastUpdate(service, cardId), action), context: { messageId: cardId, chatId: 'oc_group' }, cardId };
+  };
+  const claims = () => liveRepos.config.list('lark.relaunch.');
+  return { config, oldSessionId, submissions, start, mapping, tasks, blockers, sessions, lastUpdate, relaunchButton, claims, repos: liveRepos, runtime: liveRuntime };
 }
 
 describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite）', () => {
@@ -248,5 +262,114 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect((await h.tasks(fresh.id)).map(task => task.prompt)).toEqual(['详细排查下报警', '继续']);
     expect(await h.tasks(h.oldSessionId)).toHaveLength(2);
   });
-});
 
+  it('同一话题第二次转交：复用上一次转交建出的正常会话，排在它已有的任务后面，不再新建会话', async () => {
+    const h = await blockedTopic();
+    const first = await h.start('p2');
+    const rerun = await h.relaunchButton(first.service, 'om_first', 'rerun_in_new_session');
+    expect(await first.coordinator.handleAction(rerun.value, 'ou_alice', rerun.context)).toMatchObject({ type: 'success' });
+    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
+    // 重启：内存里的话题绑定与作废集合都没了，第二次转交只能按账本判断哪个会话卡住。
+    const restarted = await h.start('p3');
+    const run = await h.relaunchButton(restarted.service, 'om_queued', 'run_in_new_session');
+    expect(await restarted.coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
+    await until(async () => (await h.tasks(fresh.id)).length === 2);
+    expect(await h.sessions()).toHaveLength(2);
+    expect((await h.tasks(fresh.id)).map(task => [task.prompt, task.status])).toEqual([['详细排查下报警', 'running'], ['看不懂', 'queued']]);
+    expect(h.submissions.filter(item => item.sessionId === fresh.id)).toHaveLength(1);
+    expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'cancelled']);
+    await restarted.coordinator.handle(message('om_followup', '继续'), h.config);
+    await until(async () => (await h.tasks(fresh.id)).length === 3);
+    expect(await h.sessions()).toHaveLength(2);
+  });
+
+  it('按发送人隔离的会话：只有发起人本人能转到新会话，别人连点也只回提示', async () => {
+    const h = await blockedTopic({ thread: false });
+    expect((await h.mapping('om_queued')).saved.scope_id).toBe('user:ou_alice');
+    const { coordinator, service } = await h.start('p2');
+    const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
+    for (let click = 0; click < 2; click++) {
+      expect(await coordinator.handleAction(run.value, 'ou_bob', run.context)).toMatchObject({ type: 'warning', content: expect.stringContaining('发起人本人') });
+    }
+    expect(await h.claims()).toHaveLength(0);
+    expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
+    expect(await h.sessions()).toHaveLength(1);
+    expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
+    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+  });
+
+  it('共享话题里他人发起的任务：与取消、重试他人任务一样再点一次才执行，执行身份是点击人', async () => {
+    const h = await blockedTopic();
+    const { coordinator, service } = await h.start('p2');
+    const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
+    expect(await coordinator.handleAction(run.value, 'ou_bob', run.context)).toEqual({ type: 'warning', content: '该任务由他人发起，再次点击同一按钮以确认操作' });
+    expect(await h.claims()).toHaveLength(0);
+    expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
+    expect(await h.sessions()).toHaveLength(1);
+    expect(await coordinator.handleAction(run.value, 'ou_bob', run.context)).toMatchObject({ type: 'success' });
+    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    expect(JSON.parse((await h.repos.config.get('lark.inbox.app.om_queued'))!).event.senderOpenId).toBe('ou_bob');
+  });
+
+  it('入站记录没受理或与卡片映射对不上的任务：卡上不画转交按钮，回调也不受理', async () => {
+    const h = await blockedTopic();
+    const inbox = async (id: string) => JSON.parse((await h.repos.config.get(`lark.inbox.app.${id}`))!);
+    // 待对账：受理没落库；错位：记录指向别的会话。两种都转不了，按钮就不该出现。
+    await h.repos.config.set('lark.inbox.app.om_queued', JSON.stringify({ ...await inbox('om_queued'), state: 'failed' }));
+    await h.repos.config.set('lark.inbox.app.om_first', JSON.stringify({ ...await inbox('om_first'), sessionId: 'ses_elsewhere' }));
+    const { coordinator, service } = await h.start('p2');
+    for (const [id, label, action] of [['om_queued', '排队受阻', 'run_in_new_session'], ['om_first', '需要核对', 'rerun_in_new_session']] as const) {
+      const cardId = (await h.mapping(id)).saved.card_message_id!;
+      await until(() => h.lastUpdate(service, cardId)?.statusLabel === label);
+      const card = h.lastUpdate(service, cardId);
+      expect(card.capabilities, id).not.toHaveProperty('canRelaunch');
+      expect(JSON.stringify(buildLarkCard(card)), id).not.toContain('在新会话中');
+      expect(await coordinator.handleAction({ action, task_id: id, turn: '1' }, 'ou_alice', { messageId: cardId, chatId: 'oc_group' }), id)
+        .toMatchObject({ type: 'warning' });
+    }
+    expect(await h.claims()).toHaveLength(0);
+    expect(await h.sessions()).toHaveLength(1);
+  });
+
+  it('转交之后在话题里发 /new：保留给管理员的旧会话不去停，照常开新会话，不出现「请联系管理员」', async () => {
+    const h = await blockedTopic();
+    const blockersBefore = h.blockers();
+    const first = await h.start('p2');
+    const rerun = await h.relaunchButton(first.service, 'om_first', 'rerun_in_new_session');
+    expect(await first.coordinator.handleAction(rerun.value, 'ou_alice', rerun.context)).toMatchObject({ type: 'success' });
+    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
+    // 重启后内存里的作废记录没了，只能靠持久化的保留标记认出旧会话。
+    const restarted = await h.start('p3');
+    const stop = vi.spyOn(h.runtime, 'stop');
+    await restarted.coordinator.handle(message('om_new', '/new'), h.config);
+    await until(() => JSON.stringify(restarted.service.reply.mock.calls).includes('/new'));
+    const replies = JSON.stringify(restarted.service.reply.mock.calls);
+    expect(replies).toContain('/new 已受理');
+    expect(replies).not.toContain('请联系管理员');
+    // 只停了转交建出的会话；旧会话一次都没去停，阻塞与任务原样留给管理员。
+    expect(stop.mock.calls.map(([id]) => id)).toEqual([fresh.id]);
+    expect(h.blockers()).toEqual(blockersBefore);
+    expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
+    await restarted.coordinator.handle(message('om_after_new', '重新开始'), h.config);
+    await until(async () => (await h.sessions()).length === 3);
+    const third = (await h.sessions()).find(item => item.id !== h.oldSessionId && item.id !== fresh.id)!;
+    await until(async () => (await h.tasks(third.id)).length === 1);
+    expect((await h.tasks(third.id)).map(task => task.prompt)).toEqual(['重新开始']);
+  });
+
+  it('旧卡收尾后页脚「查看详情」仍是登录回调按钮，不退回直链', async () => {
+    const h = await blockedTopic({ web: true });
+    const { coordinator, service } = await h.start('p2');
+    const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
+    expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
+    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已在新会话中执行');
+    const retired = h.lastUpdate(service, run.cardId);
+    expect(callbackButtonCount(retired)).toBe(1);
+    const detail = callbackValueOf(retired, 'detail');
+    expect(detail).toEqual({ action: 'detail', task_id: 'om_queued', turn: '1' });
+    // 登录链接绑定原会话：留给管理员核对的原任务在那里。
+    expect(retired.capabilities).toMatchObject({ detailLogin: true, webUrl: `https://dutydeck.example.com/sessions/${h.oldSessionId}` });
+  });
+});
