@@ -33,7 +33,7 @@ function requestId(): string {
 }
 
 export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
-  onCreated(appId: string, configured: boolean, pendingReview?: boolean): Promise<void>;
+  onCreated(appId: string, configured: boolean, pendingReview?: boolean, slashCommands?: LarkAppCreationJob['slashCommands']): Promise<void>;
   onBusyChange(busy: boolean): void;
 }) {
   const qc = useQueryClient();
@@ -62,7 +62,7 @@ export function LarkAppCreationPanel({ onCreated, onBusyChange }: {
   const finish = useMutation({
     mutationFn: async (appId: string) => {
       if (job.data?.status === 'pending_review') await onCreated(appId, true, true);
-      else await onCreated(appId, job.data?.status === 'completed');
+      else await onCreated(appId, job.data?.status === 'completed', false, job.data?.slashCommands);
       remember();
     },
   });

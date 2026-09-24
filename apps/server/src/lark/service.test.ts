@@ -953,10 +953,10 @@ describe('Lark card service', () => {
     expect(fetcher.mock.calls[1]?.[0]).toBe('https://open.feishu.cn/open-apis/application/v7/app_slash_commands');
     expect(fetcher.mock.calls[1]?.[1]?.method).toBe('GET');
     expect((fetcher.mock.calls[1]?.[1]?.headers as any).authorization).toBe('Bearer token');
-    // 取值变化用 PUT /:command_id，新增用 POST；远端多出来的 manual_command 一个字都不碰。
+    // 说明变化用 PATCH /:command_id，新增用 POST；远端多出来的 manual_command 一个字都不碰。
     expect(fetcher.mock.calls[2]?.[0]).toBe('https://open.feishu.cn/open-apis/application/v7/app_slash_commands/cmd_help');
-    expect(fetcher.mock.calls[2]?.[1]?.method).toBe('PUT');
-    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({ command: 'help', description: { default_value: '新说明' } });
+    expect(fetcher.mock.calls[2]?.[1]?.method).toBe('PATCH');
+    expect(JSON.parse(String(fetcher.mock.calls[2]?.[1]?.body))).toEqual({ description: { default_value: '新说明' } });
     expect(fetcher.mock.calls[3]?.[0]).toBe('https://open.feishu.cn/open-apis/application/v7/app_slash_commands');
     expect(fetcher.mock.calls[3]?.[1]?.method).toBe('POST');
     expect(JSON.parse(String(fetcher.mock.calls[3]?.[1]?.body))).toEqual({ command: 'repair', description: { default_value: '一键修复' } });

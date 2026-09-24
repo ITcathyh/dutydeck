@@ -59,6 +59,7 @@ describe('LarkConfigModal risk control', () => {
     vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: false, bots: [], listeningDisabled: false });
     vi.spyOn(api, 'systemCapabilities').mockResolvedValue({ platform: 'linux', directoryPicker: false, filePicker: false });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source: 'acp' });
+    vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ appId: 'cli_auto', setupComplete: false }));
     const startedAt = '2026-08-30T00:00:00.000Z';
     const start = vi.spyOn(api, 'startLarkOpenPlatformSetup').mockResolvedValue({
       id: 'job-ui', appId: 'cli_auto', status: 'waiting_for_scan', createdAt: startedAt, updatedAt: startedAt,
@@ -67,7 +68,8 @@ describe('LarkConfigModal risk control', () => {
     vi.spyOn(api, 'larkOpenPlatformSetupJob').mockResolvedValue({
       id: 'job-ui', appId: 'cli_auto', status: 'completed', createdAt: startedAt, updatedAt: startedAt,
       accountName: '测试账号', tenantName: '测试企业',
-      result: { status: 'ready', scopeCount: 16, eventCount: 1, callbackCount: 1, versionId: 'version-ui' }
+      result: { status: 'ready', scopeCount: 16, eventCount: 1, callbackCount: 1, versionId: 'version-ui' },
+      slashCommands: 'skipped_credentials'
     });
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} onClose={() => {}}/></QueryClientProvider>);
@@ -82,7 +84,11 @@ describe('LarkConfigModal risk control', () => {
     expect(screen.getByText('1 个事件')).toBeTruthy();
     expect(screen.getByText('1 个回调')).toBeTruthy();
     expect(screen.getByText('版本 version-ui')).toBeTruthy();
+    expect(screen.getByText(/原生斜杠命令菜单未同步：上次同步时未找到该应用凭据/)).toBeTruthy();
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await screen.findByText('默认 Agent');
+    expect(screen.getAllByText(/原生斜杠命令菜单未同步：上次同步时未找到该应用凭据/)).toHaveLength(1);
   });
 
   it('retries a failed setup with the cached account unless account switching is explicit', async () => {
@@ -467,9 +473,9 @@ describe('LarkConfigModal explicit selection', () => {
     const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(saved);
     const start = vi.spyOn(api, 'createLarkApp').mockImplementation(async input => {
       vi.mocked(api.larkConfig).mockResolvedValue(saved);
-      return { id: input.requestId, name: input.name, appId: created.appId, botSaved: true, status: 'completed', retryable: false, createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z' };
+      return { id: input.requestId, name: input.name, appId: created.appId, botSaved: true, status: 'completed', retryable: false, slashCommands: 'failed', createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z' };
     });
-    vi.spyOn(api, 'larkAppCreationJob').mockImplementation(async id => ({ id, name: '新助手', appId: created.appId, botSaved: true, status: 'completed', retryable: false, createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z' }));
+    vi.spyOn(api, 'larkAppCreationJob').mockImplementation(async id => ({ id, name: '新助手', appId: created.appId, botSaved: true, status: 'completed', retryable: false, slashCommands: 'failed', createdAt: '2026-09-13T00:00:00Z', updatedAt: '2026-09-13T00:00:00Z' }));
     renderModal(existing, 'acp', { appId: bot.appId });
     await screen.findByRole('heading', { name: '更新飞书 Bot：测试机器人' });
     await user.click(screen.getByRole('button', { name: '新增机器人' }));
@@ -478,6 +484,7 @@ describe('LarkConfigModal explicit selection', () => {
     await user.keyboard('{Enter}');
     await screen.findByRole('heading', { name: '更新飞书 Bot：新助手' });
     await screen.findByText('默认 Agent');
+    expect(screen.getByText(/原生斜杠命令菜单同步失败/)).toBeTruthy();
     expect(start).toHaveBeenCalledOnce();
     expect(save).not.toHaveBeenCalled();
     expect(screen.getByRole('switch', { name: '监听飞书消息' }).getAttribute('aria-checked')).toBe('true');

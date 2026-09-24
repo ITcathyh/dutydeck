@@ -248,14 +248,15 @@ describe('runOpenPlatformRepair', () => {
     expect(JSON.stringify(result) + card.markdown).not.toContain('LEAK');
   });
 
-  it('权限目录缺少 application:app_slash_command:write 时整步跳过，不发写请求', async () => {
+  it.each(['application:app_slash_command:read', 'application:app_slash_command:write'])('权限目录缺少 %s 时整步跳过，不发写请求', async missing => {
     const syncSlashCommands = vi.fn();
+    const configure = vi.fn(async () => ({ status: 'ready' as const, scopeCount: 16, skippedScopes: [missing], eventCount: 1, callbackCount: 1, versionId: 'v1' }));
     const result = await runOpenPlatformRepair(
-      { connectClient: async () => ({ client: mockClient }), configure: configureStub('slash_scope_missing'), slashCommandClient: { syncSlashCommands } },
+      { connectClient: async () => ({ client: mockClient }), configure, slashCommandClient: { syncSlashCommands } },
       { appId, confirmed: true }
     );
     expect(syncSlashCommands).not.toHaveBeenCalled();
-    expect(renderRepairResultCard(result).markdown).toContain('本企业权限目录缺少 application:app_slash_command:write，已跳过');
+    expect(renderRepairResultCard(result).markdown).toContain('本企业权限目录缺少原生斜杠命令读取或管理权限，已跳过');
   });
 
   it('审核中不同步：权限尚未生效，绝不去写命令菜单', async () => {

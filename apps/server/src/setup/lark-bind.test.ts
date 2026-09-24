@@ -237,6 +237,8 @@ function run(overrides: Parameters<typeof bindLarkApp>[0] extends infer T
   const renderQr = overrides.renderQr ?? vi.fn(async () => 'QR-ART');
   const promise = bindLarkApp({
     appId: overrides.appId ?? APP_ID,
+    appSecret: SECRETS.appSecret,
+    syncSlashCommands: vi.fn(async () => ({})),
     ui,
     prompter,
     sessionFilePath,
@@ -252,6 +254,40 @@ const levelOf = (result: LarkBindResult, key: LarkBindStepKey) =>
   result.steps.find(step => step.key === key)?.level;
 
 describe('bindLarkApp', () => {
+  it('syncs native slash commands after configuration with the matching app credential', async () => {
+    const syncSlashCommands = vi.fn(async (_input: { appId: string; appSecret: string }) => ({}));
+    const { promise, configure } = run({ syncSlashCommands });
+    const result = await promise;
+    expect(levelOf(result, 'slash_commands')).toBe('done');
+    expect(syncSlashCommands).toHaveBeenCalledExactlyOnceWith({ appId: APP_ID, appSecret: SECRETS.appSecret });
+    expect(syncSlashCommands.mock.invocationCallOrder[0]).toBeGreaterThan(configure.mock.invocationCallOrder[0]!);
+    expect(JSON.stringify(result)).not.toContain(SECRETS.appSecret);
+  });
+
+  it('shows a warning and skips sync when no credential for this app was provided', async () => {
+    const syncSlashCommands = vi.fn();
+    const { promise } = run({ appSecret: undefined, syncSlashCommands });
+    const result = await promise;
+    expect(levelOf(result, 'slash_commands')).toBe('warn');
+    expect(result.steps.find(step => step.key === 'slash_commands')?.detail).toContain('本地尚未保存');
+    expect(syncSlashCommands).not.toHaveBeenCalled();
+  });
+
+  it.each(['application:app_slash_command:read', 'application:app_slash_command:write'])('skips sync when %s is unavailable', async missing => {
+    const syncSlashCommands = vi.fn();
+    const { promise } = run({ configure: fakeConfigure({ skippedScopes: [missing] }), syncSlashCommands });
+    const result = await promise;
+    expect(levelOf(result, 'slash_commands')).toBe('warn');
+    expect(syncSlashCommands).not.toHaveBeenCalled();
+  });
+
+  it('does not expose upstream sync errors in the CLI result', async () => {
+    const { promise } = run({ syncSlashCommands: vi.fn(async () => { throw new Error('private-token'); }) });
+    const result = await promise;
+    expect(result.outcome).toBe('ready_with_warnings');
+    expect(JSON.stringify(result)).not.toContain('private-token');
+  });
+
   it('把「本来就满足」的重跑报成 ready，且只留发布确认这一条提醒', async () => {
     const { promise, configure } = run();
     const result = await promise;
@@ -284,8 +320,8 @@ describe('bindLarkApp', () => {
     const result = await promise;
 
     expect(levelOf(result, 'scopes')).toBe('done');
-    // 20 项里已生效 12 项，实测缺口就是 8 项。
-    expect(result.steps.find(step => step.key === 'scopes')?.detail).toContain('本次补齐 8 项');
+    // 21 项里已生效 12 项，实测缺口就是 9 项。
+    expect(result.steps.find(step => step.key === 'scopes')?.detail).toContain('本次补齐 9 项');
     expect(levelOf(result, 'events')).toBe('done');
     // 回调本来就好，不能被顺带标成 done。
     expect(levelOf(result, 'callback')).toBe('ok');
@@ -574,10 +610,10 @@ describe('bindLarkApp', () => {
     });
     const result = await promise;
 
-    // 实测缺 10 项。直接转述 configurator 的 scopeCount（20）就是假绿灯。
+    // 实测缺 11 项。直接转述 configurator 的 scopeCount（21）就是假绿灯。
     const scopes = result.steps.find(step => step.key === 'scopes');
     expect(scopes?.level).toBe('done');
-    expect(scopes?.detail).toContain('本次补齐 10 项');
+    expect(scopes?.detail).toContain('本次补齐 11 项');
     expect(JSON.stringify(result)).not.toContain('scopeCount');
     expect(JSON.stringify(result)).not.toContain('eventCount');
   });
@@ -600,7 +636,7 @@ describe('bindLarkApp', () => {
     expect(result.versionId).toBe('version-2');
     const scopes = result.steps.find(step => step.key === 'scopes');
     expect(scopes?.level).toBe('ok');
-    expect(scopes?.detail).toContain('19 项权限本来就已生效');
+    expect(scopes?.detail).toContain('20 项权限本来就已生效');
     expect(scopes?.detail).toContain('task:task:write');
     expect(result.warnings.some(warning => warning.includes('task:task:write'))).toBe(true);
   });

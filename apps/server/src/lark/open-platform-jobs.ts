@@ -32,6 +32,7 @@ export interface OpenPlatformConfigurationJobState {
   accountName?: string;
   tenantName?: string;
   result?: OpenPlatformConfigurationResult;
+  slashCommands?: 'configured' | 'skipped_scope' | 'skipped_credentials' | 'failed';
   error?: string;
 }
 
@@ -49,6 +50,7 @@ type QrDataUrl = (payload: string) => Promise<string>;
 export interface OpenPlatformConfigurationJobManagerOptions {
   connect?: Connect;
   configure?: Configure;
+  syncSlashCommands?: (appId: string) => Promise<'skipped_credentials' | void>;
   qrDataUrl?: QrDataUrl;
   now?: () => Date;
   retainedJobLimit?: number;
@@ -65,6 +67,7 @@ export class OpenPlatformConfigurationJobManager {
   private readonly runs = new Map<string, Promise<void>>();
   private readonly connect: Connect;
   private readonly configure: Configure;
+  private readonly syncSlashCommands?: (appId: string) => Promise<'skipped_credentials' | void>;
   private readonly qrDataUrl: QrDataUrl;
   private readonly now: () => Date;
   private readonly retainedJobLimit: number;
@@ -72,6 +75,7 @@ export class OpenPlatformConfigurationJobManager {
   constructor(options: OpenPlatformConfigurationJobManagerOptions = {}) {
     this.connect = options.connect ?? connectLarkOpenPlatformSession;
     this.configure = options.configure ?? configureLarkOpenPlatformApp;
+    this.syncSlashCommands = options.syncSlashCommands;
     this.qrDataUrl = options.qrDataUrl ?? (payload => QRCode.toDataURL(payload, {
       errorCorrectionLevel: 'M',
       margin: 2,
@@ -164,12 +168,25 @@ export class OpenPlatformConfigurationJobManager {
         tenantName: connected.owner.tenantName,
       });
       const result = await this.configure(connected.client, state.appId);
+      let slashCommands: NonNullable<OpenPlatformConfigurationJobState['slashCommands']>;
+      if (['application:app_slash_command:read', 'application:app_slash_command:write']
+        .some(scope => result.skippedScopes.includes(scope))) slashCommands = 'skipped_scope';
+      else if (!this.syncSlashCommands) slashCommands = 'skipped_credentials';
+      else {
+        try {
+          slashCommands = await this.syncSlashCommands(state.appId) === 'skipped_credentials'
+            ? 'skipped_credentials' : 'configured';
+        } catch {
+          slashCommands = 'failed';
+        }
+      }
       const configuring = this.jobs.get(jobId);
       if (!configuring) return;
       this.replace(jobId, {
         ...withoutQr(configuring),
         status: 'completed',
         result,
+        slashCommands,
       });
     } catch (error) {
       const current = this.jobs.get(jobId);
@@ -195,8 +212,6 @@ export class OpenPlatformConfigurationJobManager {
     }
   }
 }
-
-export const openPlatformConfigurationJobs = new OpenPlatformConfigurationJobManager();
 
 function isActive(status: OpenPlatformConfigurationJobStatus): boolean {
   return status === 'preparing' || status === 'waiting_for_scan' || status === 'configuring';

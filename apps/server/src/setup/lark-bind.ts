@@ -30,9 +30,11 @@ import {
   LarkOpenPlatformConfigurationError,
   configureLarkOpenPlatformApp,
   isValidLarkAppId,
+  larkSlashCommandDefinitions,
   type LarkOpenPlatformClient,
   type LarkOpenPlatformConfigurationResult,
 } from '../lark/open-platform-configurator.js';
+import { createLarkCardService } from '../lark/service.js';
 import {
   connectLarkOpenPlatformSession,
   safeOpenPlatformError,
@@ -49,7 +51,8 @@ export type LarkBindStepKey =
   | 'events'
   | 'callback'
   | 'version'
-  | 'publish';
+  | 'publish'
+  | 'slash_commands';
 
 export interface LarkBindStepResult {
   key: LarkBindStepKey;
@@ -80,6 +83,9 @@ export interface LarkBindOptions {
   assumeYes?: boolean;
   json?: boolean;
   forceLogin?: boolean;
+  /** 仅当调用方已确认此 Secret 属于 appId 时提供。 */
+  appSecret?: string;
+  syncSlashCommands?: (input: { appId: string; appSecret: string }) => Promise<unknown>;
   connect?: (options: ConnectOpenPlatformSessionOptions) => Promise<ConnectedOpenPlatformSession>;
   configure?: (
     client: LarkOpenPlatformClient,
@@ -455,6 +461,21 @@ export async function bindLarkApp(options: LarkBindOptions): Promise<LarkBindRes
   }
   warnings.push(PUBLISH_CONFIRM_WARNING);
   if (!versionId) warnings.push('未获得新版本号，无法确认发布对象，请到管理台检查应用版本。');
+  if (['application:app_slash_command:read', 'application:app_slash_command:write']
+    .some(scope => skippedScopes.includes(scope))) {
+    steps.push({ key: 'slash_commands', label: '原生斜杠命令菜单', level: 'warn', detail: '企业权限目录缺少读取或管理权限，已跳过同步' });
+  } else if (!options.appSecret) {
+    steps.push({ key: 'slash_commands', label: '原生斜杠命令菜单', level: 'warn', detail: '本地尚未保存该应用凭据，未同步' });
+  } else {
+    try {
+      if (options.syncSlashCommands) await options.syncSlashCommands({ appId, appSecret: options.appSecret });
+      else await createLarkCardService({}, undefined, { appId, appSecret: options.appSecret })
+        .syncSlashCommands(larkSlashCommandDefinitions());
+      steps.push({ key: 'slash_commands', label: '原生斜杠命令菜单', level: 'done', detail: '已同步' });
+    } catch {
+      steps.push({ key: 'slash_commands', label: '原生斜杠命令菜单', level: 'warn', detail: '同步失败，请核对权限后重试' });
+    }
+  }
 
   const outcome = classify(steps, versionId);
   return {

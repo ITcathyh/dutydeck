@@ -165,6 +165,7 @@ export type LarkOpenPlatformSetupJob = {
   accountName?: string;
   tenantName?: string;
   result?: { status: 'ready'; scopeCount: number; eventCount: number; callbackCount: number; versionId: string; skippedScopes?: string[] };
+  slashCommands?: 'configured' | 'skipped_scope' | 'skipped_credentials' | 'failed';
   error?: string;
 };
 export type LarkAppCreationJob = {
@@ -178,6 +179,7 @@ export type LarkAppCreationJob = {
   accountName?: string;
   tenantName?: string;
   error?: string;
+  slashCommands?: 'configured' | 'skipped_scope' | 'skipped_credentials' | 'failed';
   createdAt: string;
   updatedAt: string;
   retryable: boolean;

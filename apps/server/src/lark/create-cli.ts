@@ -17,6 +17,7 @@ interface Context {
   ui?: CliUi;
   connect?: typeof connectLarkOpenPlatformSession;
   configure?: ConstructorParameters<typeof LarkAppCreationJobManager>[0]['configure'];
+  syncSlashCommands?: ConstructorParameters<typeof LarkAppCreationJobManager>[0]['syncSlashCommands'];
   renderQr?: typeof renderQrToTerminal;
   syncListener?: typeof syncLarkListener;
 }
@@ -46,6 +47,14 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
       if (result.job) ui.keyValues([['任务', result.job.id], ['状态', result.job.status], ...(result.job.appId ? [['应用', result.job.appId] as [string, string]] : [])]);
       if (result.error) ui.status('fail', result.error);
       if (result.job?.status === 'completed') ui.status('done', '应用已创建、配置并发布，已回读确认');
+      if (result.job?.status === 'completed') {
+        switch (result.job.slashCommands) {
+          case 'configured': ui.status('done', '原生斜杠命令菜单已同步'); break;
+          case 'skipped_scope': ui.status('warn', '原生斜杠命令菜单未同步', '企业权限目录缺少读取或管理权限'); break;
+          case 'skipped_credentials': ui.status('warn', '原生斜杠命令菜单未同步', '本地未保存该应用凭据'); break;
+          case 'failed': ui.status('warn', '原生斜杠命令菜单同步失败', '机器人仍可使用；请重新自动配置以重试'); break;
+        }
+      }
       if (result.job?.status === 'pending_review') ui.notice('应用已完成配置并提交发布，正在等待飞书管理员审核。');
       if (result.bot?.defaultAgentId) ui.status('ok', '执行 Agent', result.bot.defaultAgentId);
       if (result.listener?.activeListening) ui.status('ok', '机器人监听已接通');
@@ -78,6 +87,7 @@ export async function runLarkCreate(name: string | undefined, options: LarkCreat
       config: context.config,
       agents: context.agents,
       configure: context.configure,
+      syncSlashCommands: context.syncSlashCommands,
       connect: async connectOptions => {
         const connected = await (context.connect ?? connectLarkOpenPlatformSession)({
           ...connectOptions,
