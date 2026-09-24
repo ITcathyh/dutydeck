@@ -1655,7 +1655,7 @@ export class LarkCardService {
    * 命令会被当成「不存在」而重复创建，逐条撞唯一性失败。翻页轮数按单应用 100 条上限封顶，
    * 服务端若一直回同一个 token 也不会把同步卡死。
    * 只增不改别人：远端存在而注册表里没有的命令可能是人手工加的，绝不删除。
-   * 写操作需要权限 application:app_slash_command:write。
+   * 列表需要 application:app_slash_command:read；写操作需要 application:app_slash_command:write。
    */
   async syncSlashCommands(definitions: readonly LarkSlashCommandDefinition[]): Promise<LarkSlashCommandSyncResult> {
     const existing = new Map<string, { commandId: string; description: string }>();
@@ -1676,13 +1676,13 @@ export class LarkCardService {
     const created: string[] = [];
     const updated: string[] = [];
     for (const definition of definitions) {
-      const body = { command: definition.command, description: { default_value: definition.description } };
+      const description = { default_value: definition.description };
       const hit = existing.get(definition.command);
       if (!hit) {
-        await this.request('/open-apis/application/v7/app_slash_commands', { body });
+        await this.request('/open-apis/application/v7/app_slash_commands', { body: { command: definition.command, description } });
         created.push(definition.command);
       } else if (hit.description !== definition.description) {
-        await this.request(`/open-apis/application/v7/app_slash_commands/${encodeURIComponent(hit.commandId)}`, { method: 'PUT', body });
+        await this.request(`/open-apis/application/v7/app_slash_commands/${encodeURIComponent(hit.commandId)}`, { method: 'PATCH', body: { description } });
         updated.push(definition.command);
       }
     }

@@ -26,7 +26,7 @@ import type { LarkCardElement } from './commands.js';
 export type LarkSlashCommandSyncClient = Pick<LarkCardService, 'syncSlashCommands'>;
 
 /** 同步要用到的那项 feature 权限；目录里没有它时整步跳过，不去撞一个必然 403 的写请求。 */
-const SLASH_COMMAND_SCOPE = 'application:app_slash_command:write';
+const SLASH_COMMAND_SCOPES = ['application:app_slash_command:read', 'application:app_slash_command:write'] as const;
 
 export type RepairSlashCommandOutcome =
   | { status: 'configured' }
@@ -180,7 +180,7 @@ function formatSlashCommandOutcome(outcome: RepairSlashCommandOutcome): string {
       return `（**失败**：${outcome.reason}。输入框里的 \`/\` 命令菜单未更新，命令本身仍可直接输入使用）`;
     case 'skipped':
       return outcome.reason === 'scope_missing'
-        ? `（本企业权限目录缺少 ${SLASH_COMMAND_SCOPE}，已跳过，命令菜单不可用）`
+        ? `（本企业权限目录缺少原生斜杠命令读取或管理权限，已跳过，命令菜单不可用）`
         : '（**未同步**：本次没有拿到该应用的机器人凭据，命令菜单未更新）';
   }
 }
@@ -220,7 +220,7 @@ export async function runOpenPlatformRepair(
       ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
       onStep: recordStep
     });
-    // 只在这里同步：application:app_slash_command:write 是本次刚补进草稿的权限，
+    // 只在这里同步：原生斜杠命令读写权限是本次刚补进草稿的权限，
     // 要等版本确认发布（publish_verify 通过）之后才对 tenant_access_token 生效；
     // 发布之前写必然 403。审核中（pending_review）走下面的 catch，同样不会同步。
     steps.push({ step: 'slash_command_sync', detail: { slashCommands: await syncSlashCommandsAfterPublish(deps, appId, result.skippedScopes) } });
@@ -256,7 +256,7 @@ async function syncSlashCommandsAfterPublish(
   appId: string,
   skippedScopes: readonly string[],
 ): Promise<RepairSlashCommandOutcome> {
-  if (skippedScopes.includes(SLASH_COMMAND_SCOPE)) return { status: 'skipped', reason: 'scope_missing' };
+  if (SLASH_COMMAND_SCOPES.some(scope => skippedScopes.includes(scope))) return { status: 'skipped', reason: 'scope_missing' };
   let client: LarkSlashCommandSyncClient;
   try {
     client = deps.slashCommandClient ?? envSlashCommandClient(appId);

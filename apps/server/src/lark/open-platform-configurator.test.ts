@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-// 该 fixture 是 console 实抓，唯一例外是标了 `_synthetic` 的四行
-// （application:app_slash_command:write、im:message:urgent_app、im:pin、task:task:write
+// 该 fixture 是 console 实抓，唯一例外是标了 `_synthetic` 的五行
+// （application:app_slash_command:read/write、im:message:urgent_app、im:pin、task:task:write
 // 的真实 scope id 未知，手工补入以便权限映射与发布测试能跑，一律按已开通填）。
 import draftCatalog from './fixtures/scope-catalog-draft.json';
 import newAppPrivileges from './fixtures/new-app-privileges.json';
@@ -231,6 +231,7 @@ describe('configureLarkOpenPlatformApp', () => {
 
   it('uses the exact minimal common scope set and keeps an already-ready subscription idempotent', async () => {
     expect(LARK_COMMON_TENANT_SCOPES).toEqual([
+      'application:app_slash_command:read',
       'application:app_slash_command:write',
       'contact:contact.base:readonly',
       'contact:user.base:readonly',
@@ -259,7 +260,7 @@ describe('configureLarkOpenPlatformApp', () => {
 
     expect(result).toEqual({
       status: 'ready',
-      scopeCount: 20,
+      scopeCount: 21,
       skippedScopes: [],
       eventCount: 3,
       callbackCount: 1,
@@ -362,7 +363,7 @@ describe('configureLarkOpenPlatformApp', () => {
 
     const result = await configureLarkOpenPlatformApp(client, 'cli_test');
 
-    expect(result).toMatchObject({ status: 'ready', scopeCount: 19, skippedScopes: ['task:task:write'] });
+    expect(result).toMatchObject({ status: 'ready', scopeCount: 20, skippedScopes: ['task:task:write'] });
     // 申请清单里不得出现跳过项的 id，回读校验也不得因为它失败。
     expect(calls.find(call => call.path.includes('/scope/update/'))?.body?.appScopeIDs)
       .toEqual(present.map((_, index) => `tenant-${index + 1}`));
@@ -380,6 +381,7 @@ describe('configureLarkOpenPlatformApp', () => {
     });
 
     expect(featureScopes).toEqual([
+      'application:app_slash_command:read',
       'application:app_slash_command:write',
       'im:message:urgent_app',
       'im:pin',
@@ -558,10 +560,12 @@ it('preserves existing published visibility even when a creator is supplied', as
 
 describe('native slash commands', () => {
   it('includes application:app_slash_command:write in LARK_COMMON_TENANT_SCOPES with alphabetical sort', () => {
+    expect(LARK_COMMON_TENANT_SCOPES).toContain('application:app_slash_command:read');
     expect(LARK_COMMON_TENANT_SCOPES).toContain('application:app_slash_command:write');
     const sorted = [...LARK_COMMON_TENANT_SCOPES].sort();
     expect(LARK_COMMON_TENANT_SCOPES).toEqual(sorted);
     // 分级只认 LARK_TENANT_SCOPES 这张表，不靠名字前缀猜。
+    expect(LARK_TENANT_SCOPES.find(scope => scope.name === 'application:app_slash_command:read')?.tier).toBe('feature');
     expect(LARK_TENANT_SCOPES.find(scope => scope.name === 'application:app_slash_command:write')?.tier).toBe('feature');
     expect(LARK_TENANT_SCOPES.filter(scope => scope.tier === 'base')).toHaveLength(16);
   });

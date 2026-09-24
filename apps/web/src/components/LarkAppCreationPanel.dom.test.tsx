@@ -50,7 +50,7 @@ describe('one-click Lark app creation', () => {
     expect(screen.queryByRole('button', { name: '创建机器人' })).toBeNull();
     expect(JSON.parse(sessionStorage.getItem(pendingKey)!)).toEqual(request);
     await act(async () => { client.setQueryData(['lark-app-creation', request.requestId], { ...waiting(request.requestId), status: 'completed', appId: 'cli_created', botSaved: true }); });
-    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('cli_created', true));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('cli_created', true, false, undefined));
     await waitFor(() => expect(sessionStorage.getItem(pendingKey)).toBeNull());
     expect(onCreated).toHaveBeenCalledOnce();
     expect(document.body.textContent).not.toContain('appSecret');
@@ -90,7 +90,7 @@ describe('one-click Lark app creation', () => {
     vi.spyOn(api, 'larkAppCreationJob').mockResolvedValue({ ...waiting(), status: 'failed', appId: 'cli_existing', botSaved: true, retryable: false, error: '发布结果尚未确认' });
     const { onCreated } = renderPanel();
     await user.click(await screen.findByRole('button', { name: '继续配置已创建的机器人' }));
-    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('cli_existing', false));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledWith('cli_existing', false, false, undefined));
     expect(screen.queryByRole('button', { name: '重试本次创建' })).toBeNull();
     expect(start).not.toHaveBeenCalled();
     expect(retry).not.toHaveBeenCalled();

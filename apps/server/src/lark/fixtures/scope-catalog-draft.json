@@ -4,6 +4,18 @@
     "scopes": [
       {
         "_synthetic": "Dutydeck 手工补入，非 console 实抓：真实 scope id 未知，此处的 id 仅用于让权限映射与发布测试跑通。",
+        "id": "30002",
+        "name": "application:app_slash_command:read",
+        "scopeType": [
+          2
+        ],
+        "scopeType2ScopeStatus": {
+          "2": 5
+        },
+        "status": 5
+      },
+      {
+        "_synthetic": "Dutydeck 手工补入，非 console 实抓：真实 scope id 未知，此处的 id 仅用于让权限映射与发布测试跑通。",
         "id": "30001",
         "name": "application:app_slash_command:write",
         "scopeType": [

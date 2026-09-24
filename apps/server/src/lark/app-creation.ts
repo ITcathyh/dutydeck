@@ -8,7 +8,7 @@ import { connectLarkOpenPlatformSession, OpenPlatformRequestError, OpenPlatformS
 import { createLarkCardService } from './service.js';
 
 /** 与 repair.ts 同一个判据：这条权限被跳过时命令菜单不可用，同步注定 403，不必发请求。 */
-const SLASH_COMMAND_SCOPE = 'application:app_slash_command:write';
+const SLASH_COMMAND_SCOPES = ['application:app_slash_command:read', 'application:app_slash_command:write'] as const;
 
 export interface LarkAppCreationJob {
   id: string;
@@ -21,6 +21,7 @@ export interface LarkAppCreationJob {
   accountName?: string;
   tenantName?: string;
   error?: string;
+  slashCommands?: 'configured' | 'skipped_scope' | 'skipped_credentials' | 'failed';
   createdAt: string;
   updatedAt: string;
   retryable: boolean;
@@ -264,8 +265,8 @@ export class LarkAppCreationJobManager {
       message = '应用草稿已保存，但自动配置或发布未完成；请继续配置该机器人并核对开放平台状态';
       await this.update(id, { status: 'configuring' });
       const configured = await (this.options.configure ?? configureLarkOpenPlatformApp)(client, appId, { creatorUserId: owner.userId, newApp: true });
-      await this.syncSlashCommands(appId, configured?.skippedScopes ?? []);
-      await this.update(id, { status: 'completed', retryable: false });
+      const slashCommands = await this.syncSlashCommands(appId, configured?.skippedScopes ?? []);
+      await this.update(id, { status: 'completed', retryable: false, slashCommands });
     } catch (error) {
       // Never copy upstream errors: they may contain cookies, secrets or private IDs.
       if (error instanceof OpenPlatformSessionError) message = error.message;
@@ -298,23 +299,24 @@ export class LarkAppCreationJobManager {
   /**
    * 首配完成后同步一次原生斜杠命令（飞书输入框里的 `/` 菜单）。
    *
-   * 时机与 /repair 相同，依据也相同：application:app_slash_command:write 是刚补进草稿的
+   * 时机与 /repair 相同，依据也相同：原生斜杠命令读写权限是刚补进草稿的
    * 权限，要等版本确认发布之后才对 tenant_access_token 生效，发布前写必然 403。
    * configureLarkOpenPlatformApp 正常返回就意味着它内部的 publish_verify 已经通过；
    * 审核中（publish_pending_review）会抛错走上面的 catch，同样不会走到这里。
    *
    * 任何失败都只是没有命令菜单——那是输入便利，不改变「应用已建好并配置完成」的结论，
-   * 因此一律吞掉，不把建应用判成失败；用户随时可以再跑一次 /repair 补齐。
+   * 因此只记录安全的同步结果，不把建应用判成失败；用户可以再跑一次 /repair 补齐。
    */
-  private async syncSlashCommands(appId: string, skippedScopes: readonly string[]) {
-    if (skippedScopes.includes(SLASH_COMMAND_SCOPE)) return;
+  private async syncSlashCommands(appId: string, skippedScopes: readonly string[]): Promise<NonNullable<LarkAppCreationJob['slashCommands']>> {
+    if (SLASH_COMMAND_SCOPES.some(scope => skippedScopes.includes(scope))) return 'skipped_scope';
     try {
       const saved = await readLarkConfig(this.options.config, appId);
-      if (!saved?.appSecret) return;
+      if (!saved?.appSecret) return 'skipped_credentials';
       if (this.options.syncSlashCommands) await this.options.syncSlashCommands({ appId, appSecret: saved.appSecret });
       else await createLarkCardService(process.env, this.options.fetcher, { appId, appSecret: saved.appSecret })
         .syncSlashCommands(larkSlashCommandDefinitions());
-    } catch { /* 命令菜单缺失不改变建应用的结论；重跑 /repair 可补齐。 */ }
+      return 'configured';
+    } catch { return 'failed'; }
   }
 }
 

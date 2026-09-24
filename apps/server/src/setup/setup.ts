@@ -236,7 +236,9 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
       const validated = validateAppId(appId);
       lark = await bind({
         appId: validated, ui, prompter, assumeYes, json,
-        forceLogin: options.forceLogin === true
+        forceLogin: options.forceLogin === true,
+        ...(existing.get('LARK_APP_ID') === validated && existing.get('LARK_APP_SECRET')
+          ? { appSecret: existing.get('LARK_APP_SECRET') } : {})
       });
       // 逐项如实呈现权限/机器人/长连接/事件/回调/版本/发布的结果：
       // 已满足的报「已配置」，本次变更的报「已完成」，未验证的绝不报成功。

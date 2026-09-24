@@ -62,7 +62,8 @@ async function harness(tty = true, versionStatus = 2) {
     return { source: 'qr_login' as const, owner: { userId: 'private-user', tenantId: 'private-tenant', userName: 'Alice', tenantName: 'Acme' }, client: { apiOrigin: 'https://open.feishu.cn', postJson, postForm } };
   });
   const syncListener = vi.fn(async () => ({ activeListening: true, message: '机器人监听已接通，可以在飞书中发送消息。' }));
-  const context = { syncListener, config: repositories.config, agents: repositories.agents, database: "/tmp/Bot's state.db", ui, connect };
+  const syncSlashCommands = vi.fn(async () => ({ created: [], updated: [] }));
+  const context = { syncListener, syncSlashCommands, config: repositories.config, agents: repositories.agents, database: "/tmp/Bot's state.db", ui, connect };
   return { repositories, context, syncListener, connect, postJson, postForm, output: () => stdout + stderr, stdout: () => stdout };
 }
 
@@ -100,6 +101,15 @@ it('saves a draft without an Agent, then completes that same bot on resume', asy
   const resumed = await runLarkCreate(undefined, { resume: first.job!.id, agent: 'ccflash', fullTrust: true }, h.context);
   expect(resumed).toMatchObject({ ok: true, bot: { defaultAgentId: 'ccflash', listening: false } });
   expect(h.connect).toHaveBeenCalledOnce();
+});
+
+it('keeps creation successful but reports a native slash menu failure in normal CLI output', async () => {
+  const h = await harness();
+  h.context.syncSlashCommands.mockRejectedValueOnce(new Error('private-token'));
+  const result = await runLarkCreate('Bot', {}, h.context);
+  expect(result).toMatchObject({ ok: true, job: { status: 'completed', slashCommands: 'failed' } });
+  expect(h.output()).toContain('原生斜杠命令菜单同步失败');
+  expect(h.output() + JSON.stringify(result)).not.toContain('private-token');
 });
 
 it('keeps automatic publication timeout distinct from a human review and never reconnects or republishes', async () => {

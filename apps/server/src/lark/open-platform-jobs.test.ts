@@ -36,6 +36,43 @@ const deferred = <T>() => {
 };
 
 describe('OpenPlatformConfigurationJobManager', () => {
+  it('syncs slash commands only after confirmed configuration for the requested app', async () => {
+    const configure = vi.fn(async () => result);
+    const syncSlashCommands = vi.fn(async (_appId: string) => {});
+    const manager = new OpenPlatformConfigurationJobManager({
+      connect: vi.fn(async () => connected()), configure, syncSlashCommands,
+    });
+    const started = manager.start('cli_target');
+    expect(await manager.wait(started.id)).toMatchObject({ status: 'completed', slashCommands: 'configured' });
+    expect(syncSlashCommands).toHaveBeenCalledExactlyOnceWith('cli_target');
+    expect(syncSlashCommands.mock.invocationCallOrder[0]).toBeGreaterThan(configure.mock.invocationCallOrder[0]!);
+  });
+
+  it.each(['application:app_slash_command:read', 'application:app_slash_command:write'])(
+    'skips slash sync when %s is missing', async missing => {
+      const syncSlashCommands = vi.fn();
+      const manager = new OpenPlatformConfigurationJobManager({
+        connect: vi.fn(async () => connected()),
+        configure: vi.fn(async () => ({ ...result, skippedScopes: [missing] })),
+        syncSlashCommands,
+      });
+      const started = manager.start('cli_target');
+      expect(await manager.wait(started.id)).toMatchObject({ status: 'completed', slashCommands: 'skipped_scope' });
+      expect(syncSlashCommands).not.toHaveBeenCalled();
+    });
+
+  it('keeps published app complete and exposes sanitized slash sync failure', async () => {
+    const manager = new OpenPlatformConfigurationJobManager({
+      connect: vi.fn(async () => connected()),
+      configure: vi.fn(async () => result),
+      syncSlashCommands: vi.fn(async () => { throw new Error('private-token'); }),
+    });
+    const started = manager.start('cli_target');
+    const job = await manager.wait(started.id);
+    expect(job).toMatchObject({ status: 'completed', slashCommands: 'failed' });
+    expect(JSON.stringify(job)).not.toContain('private-token');
+  });
+
   it('moves through QR/configuration states and only exposes display names', async () => {
     const release = deferred<void>();
     const rawQrPayload = '{"qrlogin":{"token":"private-login-token"}}';

@@ -16,11 +16,8 @@ import type { LarkAgentToolsService } from './agent-tools.js';
 import type { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryProjection } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
-import {
-  openPlatformConfigurationJobs,
-  type OpenPlatformConfigurationJobManager,
-} from './open-platform-jobs.js';
-import { isValidLarkAppId } from './open-platform-configurator.js';
+import { OpenPlatformConfigurationJobManager } from './open-platform-jobs.js';
+import { isValidLarkAppId, larkSlashCommandDefinitions } from './open-platform-configurator.js';
 
 type LarkSendRequest = LarkSendInput & { bot?: LarkBotConfigInput; botAppId?: string };
 type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?: string };
@@ -60,7 +57,14 @@ export interface LarkRoutesOptions {
 export async function registerLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {}) {
   const env = options.env ?? process.env;
   const fetcher = options.fetcher ?? globalThis.fetch;
-  const openPlatformJobs = options.openPlatformJobs ?? openPlatformConfigurationJobs;
+  const openPlatformJobs = options.openPlatformJobs ?? new OpenPlatformConfigurationJobManager({
+    syncSlashCommands: async appId => {
+      const saved = await readLarkConfig(options.config, appId);
+      if (!saved?.appSecret) return 'skipped_credentials';
+      await createLarkCardService(env, fetcher, { appId, appSecret: saved.appSecret })
+        .syncSlashCommands(larkSlashCommandDefinitions());
+    }
+  });
   let service = options.service;
   const listeningDisabled = options.listeningDisabled === true;
   const listener = options.listener ?? new LarkLongConnectionListenerPool(app.log, {

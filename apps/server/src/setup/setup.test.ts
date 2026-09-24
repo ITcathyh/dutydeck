@@ -284,6 +284,19 @@ describe('runSetup', () => {
     expect(result.warnings).toContain('请到管理台确认版本状态');
   });
 
+  it('passes a saved Secret to slash sync only when it belongs to the selected App ID', async () => {
+    const dir = await makeTempDir();
+    const secret = 'private-matching-secret';
+    const ready = larkResult({ outcome: 'ready', appId: 'cli_ok' });
+    const matching = harness({ cwd: dir, existing: { LARK_APP_ID: 'cli_ok', LARK_APP_SECRET: secret }, bind: async () => ready });
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', yes: true }, matching.deps);
+    expect(matching.bind.mock.calls[0]![0].appSecret).toBe(secret);
+
+    const other = harness({ cwd: dir, existing: { LARK_APP_ID: 'cli_other', LARK_APP_SECRET: secret }, bind: async () => ready });
+    await runSetup({ cwd: dir, port: '4310', larkAppId: 'cli_ok', yes: true }, other.deps);
+    expect(other.bind.mock.calls[0]![0]).not.toHaveProperty('appSecret');
+  });
+
   it('never calls bind under --skip-lark and tells the user how to bind later', async () => {
     const dir = await makeTempDir();
     const { deps, bind, out, writeEnv } = harness({ cwd: dir });

@@ -28,6 +28,7 @@ export interface LarkTenantScope {
 }
 
 export const LARK_TENANT_SCOPES: readonly LarkTenantScope[] = [
+  { name: 'application:app_slash_command:read', tier: 'feature', feature: '原生斜杠命令列表读取' },
   { name: 'application:app_slash_command:write', tier: 'feature', feature: '原生斜杠命令注册' },
   { name: 'contact:contact.base:readonly', tier: 'base' },
   { name: 'contact:user.base:readonly', tier: 'base' },

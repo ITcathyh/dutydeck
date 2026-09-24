@@ -300,7 +300,7 @@ it('recognizes a live foreign process, then CAS-claims one safe retry after that
     gate.resolve();
     await Promise.all([h.manager.wait(id), other.wait(id)]);
     expect(h.postJson.mock.calls.filter(([path]) => path.includes('upsert_by_template'))).toHaveLength(1);
-    expect(await h.manager.get(id)).toMatchObject({ status: 'completed' });
+    expect(await h.manager.get(id)).toMatchObject({ status: 'completed', slashCommands: 'configured' });
     expect(await other.get(id)).toMatchObject({ status: 'completed' });
   } finally {
     child.kill();
@@ -338,12 +338,12 @@ describe('首配后的原生斜杠命令同步', () => {
     expect(h.syncSlashCommands.mock.invocationCallOrder[0]!).toBeGreaterThan(h.configure.mock.invocationCallOrder[0]!);
   });
 
-  it('企业权限目录缺少斜杠命令权限时不发这个注定 403 的请求', async () => {
+  it.each(['application:app_slash_command:read', 'application:app_slash_command:write'])('企业权限目录缺少 %s 时不发同步请求', async missing => {
     const h = harness();
-    h.configure.mockResolvedValueOnce({ status: 'ready', scopeCount: 15, skippedScopes: ['application:app_slash_command:write'], eventCount: 1, callbackCount: 1, versionId: 'v1' });
+    h.configure.mockResolvedValueOnce({ status: 'ready', scopeCount: 15, skippedScopes: [missing], eventCount: 1, callbackCount: 1, versionId: 'v1' });
     await h.manager.start(id, 'My Bot');
     await h.manager.wait(id);
-    expect(await h.manager.get(id)).toMatchObject({ status: 'completed' });
+    expect(await h.manager.get(id)).toMatchObject({ status: 'completed', slashCommands: 'skipped_scope' });
     expect(h.syncSlashCommands).not.toHaveBeenCalled();
   });
 
@@ -353,7 +353,7 @@ describe('首配后的原生斜杠命令同步', () => {
     await h.manager.start(id, 'My Bot');
     await h.manager.wait(id);
     const job = await h.manager.get(id);
-    expect(job).toMatchObject({ status: 'completed', retryable: false });
+    expect(job).toMatchObject({ status: 'completed', retryable: false, slashCommands: 'failed' });
     expect(job!.error).toBeUndefined();
     expect(JSON.stringify(job)).not.toContain('private upstream failure');
   });
