@@ -19,7 +19,7 @@ import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
-import { buildLarkCard, larkCardSafeLimits } from './service.js';
+import { buildLarkCard, larkCardSafeLimits, type LarkChatMessage } from './service.js';
 import { buildRepairConfirmCard } from './repair.js';
 import { TERMINAL_PROTOCOL_NOTE } from './protocol-hints.js';
 import { replayedRecoveryNote } from './recovery-notes.js';
@@ -827,6 +827,75 @@ describe('飞书输入明确反馈与提问生命周期', () => {
     expect(h.service.reply.mock.calls.at(-1)![0].markdown).toContain('请求未执行');
     expect(h.service.reply.mock.calls.at(-1)![0].markdown).toContain('运行权限尚未确认');
     expect(h.send).not.toHaveBeenCalled();
+  });
+});
+
+describe('话题内引用自己的请求后补 @', () => {
+  const request = '总结下这个文档要做的事情（包括子文档），按主题聚合：https://example.larkoffice.com/docx/test';
+  const original: LarkChatMessage = {
+    messageId: 'om_request', chatId: 'oc_group', messageType: 'text', createTime: '1790232625764',
+    sender: { id: 'ou_alice', idType: 'open_id', type: 'user' }, rawContent: JSON.stringify({ text: request }),
+    mentions: [], deleted: false, updated: false
+  };
+  const wake = (patch: Partial<LarkMessageEvent> = {}) => event('om_wake', '@_user_1', {
+    rootId: 'om_request', parentId: 'om_request', createTime: '1790233043511', ...patch
+  });
+
+  it.each(['parent', 'root'] as const)('uses the verified %s request without forcing another confirmation', async reference => {
+    const h = await harness();
+    h.service.getMessage.mockResolvedValue(original as any);
+    await h.coordinator.handle(wake(reference === 'root' ? { parentId: undefined } : {}), h.config);
+    await h.waitDelivered(1);
+    const prompt = h.send.mock.calls[0]?.[0] as string;
+    expect(h.service.getMessage).toHaveBeenCalledWith('om_request');
+    expect(prompt).toContain(request);
+    expect(prompt).toContain('用户通过本次 @ 请求你处理下面自己发出的原消息');
+    expect(prompt).toContain('原消息没有明确请求或指代仍不清楚时，才询问缺少的信息');
+    expect(prompt).not.toContain('必须先复述你对用户意图的理解并询问确认');
+    const sessions = await h.repos.sessions.list();
+    const tasks = await h.repos.tasks.listBySession(sessions[0]!.id);
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]).toMatchObject({ status: 'completed', prompt: expect.stringContaining(request) });
+  });
+
+  it.each([
+    ['another user', { sender: { id: 'ou_bob', idType: 'open_id', type: 'user' } }],
+    ['bot author', { sender: { id: 'ou_alice', idType: 'open_id', type: 'app' } }],
+    ['unknown author', { sender: {} }],
+    ['another chat', { chatId: 'oc_other' }],
+    ['unknown chat', { chatId: undefined }],
+    ['another message', { messageId: 'om_other' }],
+    ['deleted message', { deleted: true }],
+    ['empty text', { rawContent: '{"text":""}' }],
+    ['forwarded material', { messageType: 'merge_forward' }]
+  ] satisfies Array<[string, Partial<LarkChatMessage>]>)('keeps confirmation for %s', async (_name, patch) => {
+    const h = await harness();
+    h.service.getMessage.mockResolvedValue({ ...original, ...patch } as any);
+    await h.coordinator.handle(wake(), h.config);
+    await h.waitDelivered(1);
+    const prompt = h.send.mock.calls[0]?.[0] as string;
+    expect(prompt).toContain('必须先复述你对用户意图的理解并询问确认');
+    expect(prompt).not.toContain('用户通过本次 @ 请求你处理下面自己发出的原消息');
+  });
+
+  it('does not fall back to an old own root request when replying to someone else', async () => {
+    const h = await harness();
+    h.service.getMessage.mockImplementation(async id => id === 'om_request' ? original as any
+      : { ...original, messageId: id, sender: { id: 'ou_bob', type: 'user' } } as any);
+    h.service.listChatMessages.mockResolvedValue({ items: [original], hasMore: false });
+    await h.coordinator.handle(wake({ parentId: 'om_bob_reply' }), h.config);
+    await h.waitDelivered(1);
+    expect(h.send.mock.calls[0]?.[0]).toContain('必须先复述你对用户意图的理解并询问确认');
+  });
+
+  it('keeps confirmation when the referenced message cannot be fetched', async () => {
+    const h = await harness();
+    h.service.getMessage.mockRejectedValue(new Error('message unavailable'));
+    h.service.listChatMessages.mockResolvedValue({ items: [original], hasMore: false });
+    await h.coordinator.handle(wake(), h.config);
+    await h.waitDelivered(1);
+    expect(h.send.mock.calls[0]?.[0]).toContain(request);
+    expect(h.send.mock.calls[0]?.[0]).toContain('必须先复述你对用户意图的理解并询问确认');
   });
 });
 
