@@ -10,16 +10,16 @@
 // service.ts 会 import 本模块，而 card-renderer.ts 又 import service.ts，
 // 引用它们任何一个都会形成 import 环。
 //
-// 关于脱敏：本模块所有按钮文案都是静态常量，唯一的动态入参是 taskId（飞书 message_id）
-// 和 webUrl（来自 StoredLarkConfig.webBaseUrl），都不是 Agent / 工具输出，
-// 因此不需要 redactTraceText / redactTraceValue。反过来说这也是一条约束：
+// 关于脱敏：本模块所有按钮文案都是静态常量，唯一的动态入参是 taskId（飞书 message_id）、
+// webUrl（来自 StoredLarkConfig.webBaseUrl）和定时按钮的 HH:MM（由任务开始时间折算），
+// 都不是 Agent / 工具输出，因此不需要 redactTraceText / redactTraceValue。反过来说这也是一条约束：
 // 任何时候都不要把 Agent 输出、工具参数或错误原文塞进按钮 label 或 callback value。
 
 /** 与 card-renderer.ts 的 LarkCardElement 结构一致，这里本地定义以避免 import 环。 */
 export type LarkCardElement = Record<string, any>;
 
 /** 回调型操作。查看详情是 open_url 链接按钮，不是回调，故不在此列。 */
-export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify';
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily';
 
 /** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
 export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'reconcile_required' | 'legacy_unresolved';
@@ -44,6 +44,16 @@ export interface LarkCardCapabilities {
    * 绝不能看到这个按钮，那会暗示一个不存在的能力。
    */
   canVerify?: boolean;
+  /**
+   * 结果卡的一键续问（说人话 / 给我对外回复 / 再详细点）。coordinator 确认会话仍可续聊、
+   * 去重键能落库时才置位；缺省即不给按钮。
+   */
+  canFollowUp?: boolean;
+  /**
+   * 「每天 HH:MM 自动执行」。只有 coordinator 判定为重复请求时才提供；
+   * scheduled 为 true 表示计划已由这张卡建好，只渲染一个不可点的「已设为…」。缺省即不给按钮。
+   */
+  dailySchedule?: { time: string; scheduled: boolean };
   /** 已解析好的深链，仅在配置了 webBaseUrl 时提供。 */
   webUrl?: string;
 }
@@ -75,6 +85,8 @@ export const larkCardActionBudget = { maxButtons: 4, componentsPerButton: 3 } as
 /** taskId 上限：om_* 消息 ID 约 50 字符；超长说明上游有 bug，拒绝渲染回调按钮以保护 value 体积。 */
 const maxTaskIdLength = 256;
 const maxWebUrlLength = 512;
+/** 定时按钮的时刻只接受 HH:MM，防止任何别的字符串进到按钮文案里。 */
+const clockTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 type LarkCardActionDefinition = {
   action: LarkCardActionName;
@@ -98,10 +110,20 @@ type LarkCardActionDefinition = {
   guard?: (context: LarkCardActionContext) => boolean;
   /**
    * 允许出现在只读收据上。只有「不改写已交付结论」的操作才能置位：
-   * 验证只在工作目录里跑一条命令并新增一条独立证据，卡上的结论一个字都不动。
-   * 其余四个操作都会改变任务状态，必须继续被只读规则挡住。
+   * 验证只在工作目录里跑一条命令并新增一条独立证据，卡上的结论一个字都不动；
+   * 续问在同一会话开下一轮、定时新建一个计划，这张卡上的结论同样不变。
+   * 取消、中断、重试、刷新都会改变任务状态，必须继续被只读规则挡住。
    */
   readOnlyReceipt?: boolean;
+  /**
+   * 摆在结果卡正文之后的续问行，而不是顶部操作区：读者看完结论才会想接着问。
+   * 两处读同一张表、同一个 isLarkCardActionAvailable，只是位置不同。
+   */
+  followUpRow?: boolean;
+  /** 一键续问提交的固定文本：点击等同于在原话题里回复这段话。 */
+  prompt?: string;
+  /** 文案要带入能力里的数据时使用（目前只有定时按钮的 HH:MM）。 */
+  dynamicLabel?: (capabilities: LarkCardCapabilities) => string;
   /** 是否为该状态的唯一主操作；主操作排在最前，视觉上最突出。 */
   primary: boolean;
 };
@@ -113,7 +135,8 @@ type LarkCardActionDefinition = {
  *   queued        → 取消
  *   running       → 中断
  *   interrupting  → 无主操作（停止请求已在途，见下方说明）
- *   completed     → 无主操作（结果已作为 fresh final 送达，验收在 Web）
+ *   completed     → 无主操作（结果已作为 fresh final 送达，验收在 Web）；
+ *                   正文之后的续问行（说人话 / 给我对外回复 / 再详细点 / 每天自动执行）都不是主操作
  *   failed        → 重试
  *   interrupted   → 重试
  *
@@ -186,6 +209,62 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     states: ['queued', 'running', 'interrupting'],
     capable: capabilities => capabilities.canRefresh,
     primary: false
+  },
+  {
+    action: 'ask_plain',
+    elementId: 'ask_plain',
+    label: '说人话',
+    hint: '用大白话重述上面的结论，先说结论再说影响，不重新调查',
+    buttonType: 'text',
+    icon: 'chat_outlined',
+    states: ['completed'],
+    capable: capabilities => capabilities.canFollowUp === true,
+    primary: false,
+    readOnlyReceipt: true,
+    followUpRow: true,
+    prompt: '用不含术语的大白话重新说一遍上面的结论：先一句话说结论，再说影响和要不要处理。不要重新调查。'
+  },
+  {
+    action: 'ask_reply',
+    elementId: 'ask_reply',
+    label: '给我对外回复',
+    hint: '按上面的结论写一段能直接转发给同事或群里的回复，不重新调查',
+    buttonType: 'text',
+    icon: 'reply_outlined',
+    states: ['completed'],
+    capable: capabilities => capabilities.canFollowUp === true,
+    primary: false,
+    readOnlyReceipt: true,
+    followUpRow: true,
+    prompt: '根据上面的结论，写一段可以直接转发给同事或群里的回复：三到五句，先说结论和影响，再说需要对方做什么；不含代码路径和命令。不要重新调查。'
+  },
+  {
+    action: 'ask_detail',
+    elementId: 'ask_detail',
+    label: '再详细点',
+    hint: '在上面结论的基础上展开细节和证据，补充不够确定的地方',
+    buttonType: 'text',
+    icon: 'details_outlined',
+    states: ['completed'],
+    capable: capabilities => capabilities.canFollowUp === true,
+    primary: false,
+    readOnlyReceipt: true,
+    followUpRow: true,
+    prompt: '在上面结论的基础上展开细节和证据，补充你认为不够确定的地方。'
+  },
+  {
+    action: 'schedule_daily',
+    elementId: 'schedule_daily',
+    label: '每天自动执行',
+    hint: '在这个话题里每天同一时间自动执行这条请求，结果回报到这里',
+    buttonType: 'text',
+    icon: 'time_outlined',
+    states: ['completed'],
+    capable: capabilities => capabilities.dailySchedule?.scheduled === false && clockTime.test(capabilities.dailySchedule.time),
+    primary: false,
+    readOnlyReceipt: true,
+    followUpRow: true,
+    dynamicLabel: capabilities => `每天 ${capabilities.dailySchedule!.time} 自动执行`
   }
 ] as const;
 
@@ -252,6 +331,23 @@ export function larkCardActionHint(action: LarkCardActionName): string | undefin
   return definitionFor(action)?.hint;
 }
 
+/** 一键续问提交的固定文本；不是续问操作时返回 undefined。 */
+export function larkCardFollowUpPrompt(action: LarkCardActionName): string | undefined {
+  return definitionFor(action)?.prompt;
+}
+
+/** 这段请求是不是某个续问按钮代发的固定文本（重复请求判定要把它们排除在外）。 */
+export function isLarkCardFollowUpPrompt(text: string): boolean {
+  const resolved = text.trim();
+  return larkCardActionDefinitions.some(definition => definition.prompt === resolved);
+}
+
+/** 按钮文案：带时刻的定时按钮用动态文案，其余一律是静态常量。 */
+export function larkCardActionLabel(action: LarkCardActionName, capabilities: LarkCardCapabilities): string | undefined {
+  const definition = definitionFor(action);
+  return definition && (definition.dynamicLabel?.(capabilities) ?? definition.label);
+}
+
 /**
  * callback value 一律使用字符串字段。
  * 原因有两条：飞书只能稳定保留 value 对象里的字符串（数字/布尔可能被吞或被改写类型）；
@@ -265,9 +361,9 @@ const callbackValue = (action: LarkCardActionName, taskId: string, turn: number)
   turn: String(turn)
 });
 
-const callbackButton = (definition: LarkCardActionDefinition, taskId: string, turn: number): LarkCardElement => ({
+const callbackButton = (definition: LarkCardActionDefinition, taskId: string, turn: number, capabilities: LarkCardCapabilities): LarkCardElement => ({
   tag: 'button',
-  text: { tag: 'plain_text', content: definition.label },
+  text: { tag: 'plain_text', content: definition.dynamicLabel?.(capabilities) ?? definition.label },
   type: definition.buttonType,
   icon: { tag: 'standard_icon', token: definition.icon, color: definition.buttonType === 'primary_text' ? 'blue' : 'grey' },
   behaviors: [{ type: 'callback', value: callbackValue(definition.action, taskId, turn) }],
@@ -298,10 +394,39 @@ export function buildLarkCardActions(context: LarkCardActionContext): LarkCardEl
   if (taskId) {
     for (const action of availableLarkCardActions(context)) {
       const definition = definitionFor(action);
-      if (definition) elements.push(callbackButton(definition, taskId, turn));
+      if (definition && !definition.followUpRow) elements.push(callbackButton(definition, taskId, turn, context.capabilities));
     }
   }
   // 预算兜底：正常路径最多 2 个按钮，这里的截断是防御性上限。
+  return elements.slice(0, larkCardActionBudget.maxButtons);
+}
+
+/**
+ * 结果卡正文之后的续问行：一键续问与「每天 HH:MM 自动执行」。
+ * 与 buildLarkCardActions 一样只是 isLarkCardActionAvailable 的渲染投影，两行合起来
+ * 正好等于 availableLarkCardActions。已建好的定时只渲染一个不可点的状态按钮：
+ * 它不带回调，不是操作，所以不在能力表里。
+ */
+export function buildLarkCardFollowUpActions(context: LarkCardActionContext): LarkCardElement[] {
+  const taskId = normalizedTaskId(context.taskId);
+  if (!taskId) return [];
+  const turn = normalizedTurn(context.turn);
+  const elements = availableLarkCardActions(context)
+    .map(definitionFor)
+    .filter((definition): definition is LarkCardActionDefinition => Boolean(definition?.followUpRow))
+    .map(definition => callbackButton(definition, taskId, turn, context.capabilities));
+  const schedule = context.capabilities.dailySchedule;
+  if (schedule?.scheduled && clockTime.test(schedule.time) && context.state === 'completed') {
+    elements.push({
+      tag: 'button',
+      text: { tag: 'plain_text', content: `已设为每天 ${schedule.time} 自动执行` },
+      type: 'text',
+      disabled: true,
+      icon: { tag: 'standard_icon', token: 'calendar-done_outlined', color: 'grey' },
+      margin: '0px',
+      element_id: 'schedule_daily'
+    });
+  }
   return elements.slice(0, larkCardActionBudget.maxButtons);
 }
 
