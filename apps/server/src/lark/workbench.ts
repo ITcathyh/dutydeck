@@ -155,7 +155,7 @@ export function consultWorkPlan(agents: [string, string]): WorkPlan {
         title: '独立调查（A）',
         kind: 'agent',
         agentId: agents[0],
-        instruction: '围绕目标问题独立调查，输出结论和关键证据。明确未验证的事实，最终回答须包含完整调查结果。',
+        instruction: '围绕目标问题独立调查，输出结论和关键证据。只阅读和分析，不修改文件，明确未验证的事实；最终回答须包含完整调查结果。',
         dependsOn: [],
         workspaceMode: 'shared'
       },
@@ -164,7 +164,7 @@ export function consultWorkPlan(agents: [string, string]): WorkPlan {
         title: '独立调查（B）',
         kind: 'agent',
         agentId: agents[1],
-        instruction: '围绕同一个问题独立调查，与其它调查并行且互不依赖，不参考其它步骤的输出。输出结论和关键证据，明确未验证的事实，最终回答须包含完整调查结果。',
+        instruction: '围绕同一个问题独立调查，与其它调查并行且互不依赖，不参考其它步骤的输出。只阅读和分析，不修改文件，明确未验证的事实；最终回答须包含完整调查结果。',
         dependsOn: [],
         workspaceMode: 'shared'
       },
@@ -173,7 +173,7 @@ export function consultWorkPlan(agents: [string, string]): WorkPlan {
         title: '合并会诊结论',
         kind: 'agent',
         agentId: agents[0],
-        instruction: '综合两个独立步骤的成果，读取两份结果，输出一份合并结论。结构固定为：\n1. 一句话结论；\n2. 一致点；\n3. 分歧点（每条写出双方的说法和各自的证据，能判断谁更可信就说明理由）；\n4. 建议下一步。\n\n最终回答须严格按此结构输出完整合并报告。',
+        instruction: '综合两个独立步骤的成果，读取两份结果，输出一份合并结论。只阅读和分析，不修改文件。结构固定为：\n1. 一句话结论；\n2. 一致点；\n3. 分歧点（每条写出双方的说法和各自的证据，能判断谁更可信就说明理由）；\n4. 建议下一步。\n\n最终回答须严格按此结构输出完整合并报告。',
         dependsOn: ['a', 'b'],
         workspaceMode: 'shared'
       }
