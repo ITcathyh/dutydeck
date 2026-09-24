@@ -907,9 +907,11 @@ describe('过期审批跟随权威恢复状态', () => {
       await persistInteraction(repositories.config, record);
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       await workflow.initialize('app_one');
-      expect(JSON.stringify(vi.mocked(service.update).mock.calls)).toContain('请联系管理员');
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls)).toContain('原任务已保留，管理员可以用 `dutydeck recovery` 命令核对');
       expect(JSON.stringify(vi.mocked(service.update).mock.calls)).not.toContain('重新提问');
-      await expect(workflow.respond(responseInput(record, { action: 'approve' }))).rejects.toThrow('请联系管理员');
+      // 审批卡上没有转到新会话的按钮，正文也不提。
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls)).not.toContain('在新会话中');
+      await expect(workflow.respond(responseInput(record, { action: 'approve' }))).rejects.toThrow('原任务已保留');
       recovery.mockResolvedValue({ status: 'reconcile_required', blockers: [], resolvedUnknown: true });
       await workflow.reconcile('app_one');
       expect(JSON.stringify(vi.mocked(service.update).mock.calls.at(-1))).toContain('可以继续发送新请求');
