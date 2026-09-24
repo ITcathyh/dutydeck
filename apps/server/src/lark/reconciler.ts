@@ -46,6 +46,8 @@ export async function performLarkCardReconcile(input: {
   terminalDecoration?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, config: StoredLarkConfig) => Promise<{ elements: Array<Record<string, any>>; cardInput: LarkCardInput }>;
   /** 按记录所属会话解析生效配置（群级呈现覆盖）。缺省时全部按 Bot 级配置补发。 */
   resolveConfig?: (saved: PersistedLarkCardTask) => Promise<StoredLarkConfig>;
+  /** 卡住的任务能否在卡上给「在新会话中执行」按钮，与 coordinator 回调端同一个判断。缺省不给。 */
+  relaunchSupported?: (status: string) => boolean;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
@@ -59,6 +61,8 @@ export async function performLarkCardReconcile(input: {
     try {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
+      // 这一轮正在转到新会话：旧卡由转交流程收尾，对账既不补发它的终态也不重绘。
+      if (persisted.relaunch_pending) continue;
       // 呈现开关可以按群覆盖：补发方式必须按这条记录所属会话的生效配置决定。
       const effective = (await input.resolveConfig?.(persisted)) ?? config;
       const terminalPersisted = terminalTaskStates.has(persisted.state);
@@ -119,21 +123,31 @@ export async function performLarkCardReconcile(input: {
       if (!terminalTaskStates.has(runtimeTask.status)) {
         unresolved++;
         const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
-          ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status) : undefined;
+          ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined, {
+            relaunch: Boolean(persisted.scope_id && input.relaunchSupported?.(runtimeTask.status)),
+            ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
         const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
           ? runtimeTask.status : runtimeTask.status === 'queued' ? 'queued' : 'running';
         const canCancel = state === 'queued' && Boolean(runtime.cancelQueued && persisted.sender_open_id);
+        const canRelaunch = recovery?.relaunch === true;
+        const actionable = canCancel || canRelaunch;
         // Repaint whenever durable recovery facts change, including older cards
         // already marked read-only. Never retain an old thinking/queued trace.
         const statusKey = JSON.stringify([state, recovery?.markdown, canCancel]);
-        const notifyRecovery = () => recovery?.blocked ? notifyLarkTaskRecovery({
-          service, store: input.deliveryStore, log, appId: persisted.app_id,
-          sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn, recovery,
-          target: { chatId: persisted.chat_id,
-            replyMessageId: persisted.reply_message_id?.trim()
-              || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
-            replyInThread: persisted.reply_in_thread }
-        }) : Promise.resolve(undefined);
+        const notifyRecovery = async () => {
+          if (!recovery?.blocked) return undefined;
+          // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
+          const notice = canRelaunch || config.webBaseUrl
+            ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status) : recovery;
+          return notifyLarkTaskRecovery({
+            service, store: input.deliveryStore, log, appId: persisted.app_id,
+            sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn, recovery: notice,
+            target: { chatId: persisted.chat_id,
+              replyMessageId: persisted.reply_message_id?.trim()
+                || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
+              replyInThread: persisted.reply_in_thread }
+          });
+        };
         if (effective.silentProgress || persisted.progress_frozen || !persisted.card_message_id) {
           await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state,
             runtime_task_id: runtimeTask.id, recovery_read_only: true, recovery_status_key: statusKey }));
@@ -147,16 +161,16 @@ export async function performLarkCardReconcile(input: {
             ...(recovery ? { statusLabel: recovery.label } : {}),
             taskId: mapping.externalId, taskName: persisted.task_name,
             elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
-            sessionId: mapping.sessionId, readOnly: !canCancel, turn: persisted.turn ?? 0,
-            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false },
+            sessionId: mapping.sessionId, readOnly: !actionable, turn: persisted.turn ?? 0,
+            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false, ...(canRelaunch ? { canRelaunch: true } : {}) },
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             markdown: recovery?.markdown ?? RECOVERY_TRACKING_NOTE
           });
-          await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey }));
+          await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !actionable, recovery_status_key: statusKey }));
         } catch (error) {
           if (isLarkMessageUnupdatable(error)) {
             const saved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
-              ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey, progress_frozen: true
+              ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !actionable, recovery_status_key: statusKey, progress_frozen: true
             }));
             if (saved) {
               await notifyRecovery();

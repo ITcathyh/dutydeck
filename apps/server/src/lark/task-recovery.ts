@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import type { AgentEvent, ConfigRepository } from '@dutydeck/shared';
 import { withExplicitFinalLock } from './explicit-final.js';
 import { sendLarkResult, type DeliveryTarget } from './result-delivery.js';
+import { larkRelaunchLabels } from './card-actions.js';
 import type { LarkCardService } from './service.js';
 import type { LarkRuntime } from './listener.js';
 
@@ -17,8 +18,19 @@ const explanations: Record<string, string> = {
   QUEUE_START_CHECK_FAILED: '任务启动检查未通过'
 };
 
-/** Read-only projection: preserve the ledger state, expose no process/controller identifiers. */
-export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: string, taskId: string, status: string, queuedAhead?: number) {
+/** 恢复说明的收尾：原任务留在哪、谁去核对。卡上有 Web 详情入口时才指向 Web。 */
+export const larkRecoveryRetainedNote = (webBaseUrl?: string) =>
+  webBaseUrl ? '原任务已保留，可在 Web 详情里核对。' : '原任务已保留，管理员可以用 `dutydeck recovery` 命令核对。';
+
+/**
+ * Read-only projection: preserve the ledger state, expose no process/controller identifiers.
+ *
+ * options.relaunch 是调用方声明「这张卡能渲染转到新会话的按钮」。只有声明了且任务确实卡住，
+ * 正文才提按钮；返回的 relaunch 就是按钮该不该出现，渲染端据此设 canRelaunch。
+ * options.webBaseUrl 同理：只有卡上带详情链接时才传，否则正文不指向 Web。
+ */
+export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: string, taskId: string, status: string, queuedAhead?: number,
+  options: { relaunch?: boolean; webBaseUrl?: string } = {}) {
   const recovery = await runtime.getTaskRecovery?.(sessionId, taskId);
   status = recovery?.status ?? status;
   const resolvedUnknown = recovery?.resolvedUnknown === true;
@@ -27,21 +39,25 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
   const blocked = needsReview || blockers.length > 0;
   const reasons = [...new Set(blockers.map(block => explanations[block.code] ?? '执行环境需要恢复检查'))];
   const label = needsReview ? '需要核对' : blocked ? '排队受阻' : resolvedUnknown ? '已核对，结果未确认' : '排队中';
+  const relaunch = options.relaunch === true && blocked && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(status);
+  const relaunchHint = !relaunch ? '' : status === 'queued'
+    ? `可以点「${larkRelaunchLabels.run_in_new_session}」：取消这条排队请求，在本话题的新会话里执行原文，之后本话题的消息也进入新会话。`
+    : `可以点「${larkRelaunchLabels.rerun_in_new_session}」在新会话里重新执行原请求。原执行结果未确认，重新执行可能把已经做过的操作再做一次。`;
   const detail = blocked
-    ? `${reasons.join('；') || '本轮执行结果尚未确认'}。为避免重复执行，任务不会自动重放。请联系管理员核对原进程和执行结果，完成恢复检查。`
+    ? `${reasons.join('；') || '本轮执行结果尚未确认'}。为避免重复执行，任务不会自动重放。${relaunchHint}${larkRecoveryRetainedNote(options.webBaseUrl)}`
     : resolvedUnknown ? '本轮已完成恢复检查，但执行结果未确认；旧请求不会重放，可以继续发送新请求。'
     : queuedAhead && queuedAhead > 0 ? `正在排队，前面还有 ${queuedAhead} 个任务…`
     : recovery?.activeTaskId ? '正在等待前一轮执行结束。' : '已进入执行队列，等待 Agent 开始。';
   const action = resolvedUnknown && !blocked ? '发送 `/status` 查看最新状态。' : status === 'queued' ? '此请求尚未执行，可点击取消，或回原话题发送 `/cancel`；发送 `/status` 查看最新状态。'
-    : '当前不能确认任务已停止；请勿直接重试。发送 `/status` 查看最新状态。';
-  return { blocked, label, markdown: `**${label}**\n\n${detail}\n\n${action}` };
+    : '发送 `/status` 查看最新状态。';
+  return { blocked, label, relaunch, markdown: `**${label}**\n\n${detail}\n\n${action}` };
 }
 
 /** One durable exception notice per accepted task/turn, independent of business-final delivery. */
 export async function notifyLarkTaskRecovery(input: {
   service: LarkCardService; store?: ConfigRepository; log: { warn: (...args: any[]) => void };
   appId: string; sessionId: string; taskId: string; turn?: number; target: DeliveryTarget;
-  recovery: Awaited<ReturnType<typeof describeLarkTaskRecovery>>;
+  recovery: Pick<Awaited<ReturnType<typeof describeLarkTaskRecovery>>, 'blocked' | 'label' | 'markdown'>;
 }) {
   if (!input.recovery.blocked) return;
   if (!input.store?.compareAndSet) throw new Error('Recovery notification requires persistent CAS');

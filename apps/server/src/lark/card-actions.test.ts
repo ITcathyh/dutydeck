@@ -48,6 +48,31 @@ const callbackButtons = (elements: LarkCardElement[]) =>
 const callbackValue = (element: LarkCardElement) =>
   element.behaviors.find((behavior: any) => behavior.type === 'callback').value;
 
+describe('飞书卡片操作按钮：转到新会话', () => {
+  it('只在声明 canRelaunch 时出现：排队受阻给「在新会话中执行」，需要核对给「在新会话中重新执行」', () => {
+    expect(availableLarkCardActions(context('queued', {}, { canRelaunch: true }))).toEqual(['cancel', 'refresh', 'run_in_new_session']);
+    expect(availableLarkCardActions(context('reconcile_required', {}, { canRelaunch: true }))).toEqual(['rerun_in_new_session']);
+    expect(availableLarkCardActions(context('legacy_unresolved', {}, { canRelaunch: true }))).toEqual(['rerun_in_new_session']);
+    expect(labels(buildLarkCardActions(context('reconcile_required', {}, { canRelaunch: true })))).toEqual(['在新会话中重新执行']);
+    expect(larkCardActionHint('rerun_in_new_session')).toBe('原执行结果未确认，重新执行可能把已经做过的操作再做一次');
+    for (const state of [...allStates, 'cancelled', 'reconcile_required', 'legacy_unresolved'] as LarkCardActionState[]) {
+      const actions = availableLarkCardActions(context(state));
+      expect(actions, state).not.toContain('run_in_new_session');
+      expect(actions, state).not.toContain('rerun_in_new_session');
+      // 只读卡不给：转到新会话会取消排队任务、另起一轮执行。
+      expect(buildLarkCardActions(context(state, { readOnly: true }, { canRelaunch: true })), state).toEqual([]);
+    }
+  });
+
+  it('渲染出的按钮能 parse 回同一个操作与轮次', () => {
+    for (const [state, action] of [['queued', 'run_in_new_session'], ['reconcile_required', 'rerun_in_new_session']] as const) {
+      const button = buildLarkCardActions(context(state, { turn: 3 }, { canRelaunch: true })).find(item => item.element_id === action)!;
+      expect(button.type).toBe('primary_text');
+      expect(parseLarkCardActionValue(callbackValue(button))).toEqual({ action, taskId: 'om_task_1', turn: 3 });
+    }
+  });
+});
+
 describe('飞书卡片操作按钮：状态收敛', () => {
   it('每个状态只出该状态匹配的主操作', () => {
     // 一个状态一个主要下一步：排队可取消、运行可中断、失败/取消可重试。
