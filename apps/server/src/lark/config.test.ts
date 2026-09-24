@@ -345,11 +345,11 @@ describe('describeWebBaseUrlReachability S7 分类矩阵', () => {
 });
 
 describe('Lark 实验卡片开关归一化', () => {
-  it('旧配置缺省时结构化问答开启，群提及关闭，并在公开视图暴露布尔值', async () => {
+  it('旧配置缺省时结构化问答与群提及都开启，并在公开视图暴露布尔值', async () => {
     const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret' }]));
     expect(config.structuredAskCards).toBe(true);
-    expect(config.groupCardMention).toBe(false);
-    expect(publicLarkConfig(config)).toMatchObject({ structuredAskCards: true, groupCardMention: false });
+    expect(config.groupCardMention).toBe(true);
+    expect(publicLarkConfig(config)).toMatchObject({ structuredAskCards: true, groupCardMention: true });
   });
 
   it('存量配置显式 true 时归一化保留 true，非布尔脏值回落 false', async () => {
@@ -364,7 +364,7 @@ describe('Lark 实验卡片开关归一化', () => {
     expect(dirty!.groupCardMention).toBe(false);
   });
 
-  it('保存时显式 true 往返落库，缺省保存问答开启、群提及关闭', async () => {
+  it('保存时显式 true 往返落库，缺省保存问答与群提及都开启', async () => {
     const repository = createRepository();
     await saveLarkConfig(repository, undefined, {
       appId: 'cli_test', appSecret: 'secret', structuredAskCards: true, groupCardMention: true
@@ -377,9 +377,9 @@ describe('Lark 实验卡片开关归一化', () => {
 
     await saveLarkConfig(repository, undefined, { appId: 'cli_default', appSecret: 'secret' });
     const configs = await readLarkConfigs(repository);
-    expect(configs.find(item => item.appId === 'cli_default')).toMatchObject({ structuredAskCards: true, groupCardMention: false });
+    expect(configs.find(item => item.appId === 'cli_default')).toMatchObject({ structuredAskCards: true, groupCardMention: true });
     const [persistedDefault] = JSON.parse((await repository.get(larkBotsConfigKey))!).filter((bot: any) => bot.appId === 'cli_default');
-    expect(persistedDefault).toMatchObject({ structuredAskCards: true, groupCardMention: false });
+    expect(persistedDefault).toMatchObject({ structuredAskCards: true, groupCardMention: true });
   });
 
   it('再次保存未带开关时继承现值；显式 false 可以关闭已开启项', async () => {
@@ -401,7 +401,42 @@ describe('Lark 实验卡片开关归一化', () => {
   it('公开集合视图同样暴露两个开关', async () => {
     const repository = seedBots([{ appId: 'cli_test', appSecret: 'secret', structuredAskCards: true }]);
     const collection = publicLarkConfigs(await readLarkConfigs(repository));
-    expect(collection.bots[0]).toMatchObject({ structuredAskCards: true, groupCardMention: false });
+    expect(collection.bots[0]).toMatchObject({ structuredAskCards: true, groupCardMention: true });
+  });
+
+  it('显式 false 仍能关掉群提及，重新保存不会被默认值翻回来', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_off', appSecret: 'secret', groupCardMention: false });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_off', appId: 'cli_off', appSecret: 'secret', preInjectPrompt: 'hi' });
+    const [config] = await readLarkConfigs(repository);
+    expect(config.groupCardMention).toBe(false);
+  });
+});
+
+describe('新机器人的 Web 地址', () => {
+  // 扫码一键创建和 CLI 创建保存时都不带 webBaseUrl；没有它卡片上就没有「查看详情」。
+  it('新建时没给地址就沿用已有机器人的地址', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_first', appSecret: 'secret', webBaseUrl: 'https://dutydeck.example.com' });
+    await saveLarkConfig(repository, undefined, { stage: 'lark', appId: 'cli_created', appSecret: 'secret', name: '新助手', listening: false });
+    const configs = await readLarkConfigs(repository);
+    expect(configs.find(item => item.appId === 'cli_created')?.webBaseUrl).toBe('https://dutydeck.example.com');
+  });
+
+  it('显式传空串不配置；已有机器人再保存时不从别的机器人继承', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_first', appSecret: 'secret', webBaseUrl: 'https://dutydeck.example.com' });
+    await saveLarkConfig(repository, undefined, { appId: 'cli_blank', appSecret: 'secret', webBaseUrl: '' });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_blank', appId: 'cli_blank', appSecret: 'secret', preInjectPrompt: 'hi' });
+    const configs = await readLarkConfigs(repository);
+    expect(configs.find(item => item.appId === 'cli_blank')?.webBaseUrl).toBeUndefined();
+  });
+
+  it('第一台机器人没有可沿用的地址', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_only', appSecret: 'secret' });
+    const [config] = await readLarkConfigs(repository);
+    expect(config.webBaseUrl).toBeUndefined();
   });
 });
 

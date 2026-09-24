@@ -183,15 +183,15 @@ describe('live group configuration', () => {
   it('folds per-group presentation overrides into the resolved runtime config', async () => {
     const initial = await save();
     const inherited = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
-    // 未覆盖时逐字段沿用 Bot 默认，两档新静默形态默认关闭。
-    expect(inherited).toMatchObject({ groupCardMention: false, hideTraceOnComplete: true, traceLimit: 50, pushIntervalMs: 1000, completionReactionOnly: false, silentProgress: false });
+    // 未覆盖时逐字段沿用 Bot 默认：群提及默认开启，两档新静默形态默认关闭。
+    expect(inherited).toMatchObject({ groupCardMention: true, hideTraceOnComplete: true, traceLimit: 50, pushIntervalMs: 1000, completionReactionOnly: false, silentProgress: false });
 
     const overridden = await manager.save('cli_one', 'oc_one', {
       expectedRevision: initial.binding!.revision,
       patch: {
         presentationOverride: {
           structuredAskCards: { mode: 'inherit' },
-          groupCardMention: { mode: 'set', value: true },
+          groupCardMention: { mode: 'set', value: false },
           pushIntervalMs: { mode: 'set', value: 5000 },
           traceLimit: { mode: 'set', value: 3 },
           hideTraceOnComplete: { mode: 'set', value: false },
@@ -201,17 +201,17 @@ describe('live group configuration', () => {
       }
     });
     expect(overridden.effective!.presentation).toMatchObject({
-      groupCardMention: { value: true, source: 'group_override' },
+      groupCardMention: { value: false, source: 'group_override' },
       traceLimit: { value: 3, source: 'group_override' },
       completionReactionOnly: { value: true, source: 'group_override' },
       silentProgress: { value: true, source: 'group_override' }
     });
     const resolved = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
-    expect(resolved).toMatchObject({ groupCardMention: true, hideTraceOnComplete: false, traceLimit: 3, pushIntervalMs: 5000, completionReactionOnly: true, silentProgress: true });
+    expect(resolved).toMatchObject({ groupCardMention: false, hideTraceOnComplete: false, traceLimit: 3, pushIntervalMs: 5000, completionReactionOnly: true, silentProgress: true });
     // 只对被覆盖的群生效；同 Bot 的另一个群仍是 Bot 默认。
     await save('cli_one', 'oc_two');
     expect(await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_two'))
-      .toMatchObject({ groupCardMention: false, traceLimit: 50, completionReactionOnly: false, silentProgress: false });
+      .toMatchObject({ groupCardMention: true, traceLimit: 50, completionReactionOnly: false, silentProgress: false });
   });
 
   it('applies current tool ceilings and group disablement to an already recorded session', async () => {
