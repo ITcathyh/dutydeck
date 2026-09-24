@@ -164,6 +164,8 @@ export interface CliHandlers {
   groupMessages?(options: AgentGroupCliOptions): void | Promise<void>;
   groupMessage?(messageId: string): void | Promise<void>;
   groupSend?(content: string, options: AgentGroupCliOptions): void | Promise<void>;
+  groupHandoff?(target: string, content: string, options: { turn: string }): void | Promise<void>;
+  groupReplyAgent?(content: string, options: { turn: string }): void | Promise<void>;
   groupSendFile?(path: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
   memoryList?(options?: { topic?: string }): void | Promise<void>;
@@ -464,6 +466,17 @@ Routing guidance:
     .option('--idempotency-key <key>', 'Stable retry key')
     .option('--image', 'Send as an image message (10 MiB limit)')
     .action((path, options) => handlers.groupSendFile?.(path, options));
+  group.command('handoff')
+    .description('Handoff task to another bot in the current group and topic')
+    .argument('<target>', 'Target bot name, appId, or openId')
+    .argument('<content>', 'Handoff task brief and acceptance criteria')
+    .requiredOption('--turn <token>', 'Current task capability supplied by Dutydeck')
+    .action((target, content, options) => handlers.groupHandoff?.(target, content, options));
+  group.command('reply-agent')
+    .description('Reply task execution result to the initiating bot in the current group and topic')
+    .argument('<content>', 'Execution result to reply')
+    .requiredOption('--turn <token>', 'Current task capability supplied by Dutydeck')
+    .action((content, options) => handlers.groupReplyAgent?.(content, options));
   group.command('wait')
     .description('Wait briefly for new messages after a cursor')
     .requiredOption('--after <cursor>', 'Cursor returned by messages or wait')

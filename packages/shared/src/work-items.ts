@@ -11,6 +11,10 @@ export const workStepDefinitionSchema = z.object({
   dependsOn: z.array(stepId).max(12),
   workspaceMode: z.enum(['shared', 'worktree']).optional(),
   skills: z.array(z.string().trim().min(1).max(200)).max(20).optional(),
+  reviewPolicy: z.object({
+    maxReworkRounds: z.number().int().min(0).max(3),
+    allowedTargetStepIds: z.array(stepId).min(1).max(11)
+  }).strict().optional(),
   when: z.object({ stepId, equals: z.string().min(1).max(4_000) }).strict().optional()
 }).strict();
 export type WorkStepDefinition = z.infer<typeof workStepDefinitionSchema>;
@@ -41,6 +45,18 @@ export const workPlanSchema = z.object({
   }
   const output = ids.get(plan.outputStepId);
   if (output?.kind !== 'agent' || output.when) invalid('Output must be an unconditional agent step');
+  for (const step of plan.steps.filter(step => step.reviewPolicy)) {
+    if (step.id !== plan.outputStepId) invalid('Only the output step can review');
+    const targets = step.reviewPolicy!.allowedTargetStepIds;
+    if (new Set(targets).size !== targets.length) invalid('Review targets must be unique');
+    for (const id of targets) {
+      const target = ids.get(id);
+      if (!target || target.kind !== 'agent' || target.when || target.id === step.id || target.agentId === step.agentId || !step.dependsOn.includes(id)
+        || plan.steps.some(other => other.id !== step.id && other.dependsOn.includes(id))) {
+        invalid(`Review target ${id} must be an unconditional terminal worker assigned to a different Agent`);
+      }
+    }
+  }
   const reachable = ancestors(plan.outputStepId);
   if (plan.steps.some(step => !reachable.has(step.id))) invalid('Every step must contribute to the output');
 });
@@ -51,12 +67,23 @@ export const createWorkItemSchema = z.object({
   idempotencyKey: z.string().trim().min(1).max(200)
 }).strict();
 export type CreateWorkItemInput = z.infer<typeof createWorkItemSchema>;
+export const workReviewVerdictSchema = z.object({
+  decision: z.enum(['accept', 'rework', 'stop']),
+  reviewed: z.array(z.object({ stepId, attemptId: z.string().min(1), digest: z.string().regex(/^[a-f0-9]{64}$/) }).strict()).min(1).max(11),
+  targetStepId: stepId.optional(),
+  feedback: z.string().trim().min(1).max(16_000)
+}).strict().superRefine((verdict, ctx) => {
+  if ((verdict.decision === 'rework') !== Boolean(verdict.targetStepId)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Only rework requires targetStepId' });
+});
+export type WorkReviewVerdict = z.infer<typeof workReviewVerdictSchema>;
 export type WorkItemBlockReason = 'reconcile_required' | 'legacy_output_unresolved' | 'legacy_input_unresolved' | 'admission_conflict';
 export interface WorkAttempt {
   id: string; number: number; sessionId?: string; taskId?: string;
   status: 'preparing' | 'accepted' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'blocked';
   runtimeAttemptId?: string;
   result?: AttemptResultV1;
+  /** Structured review evidence; the original generated JSON remains in output/result. */
+  review?: WorkReviewVerdict;
   resultBoundary?: 'verified' | 'legacy_output_unresolved';
   blockReason?: WorkItemBlockReason;
   output?: { text: string; digest: string }; error?: string; createdAt: string; updatedAt: string;

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, RuntimeError, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
+import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, RuntimeError, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { readAttemptResult } from './task-results.js';
@@ -23,6 +23,14 @@ const errorText = (error: unknown) => error instanceof Error ? error.message : S
 const last = (step: WorkStep) => step.attempts.at(-1);
 const settled = (step: WorkStep) => ['completed', 'skipped'].includes(step.status);
 const fingerprint = (value: unknown) => hash(JSON.stringify(value));
+/** Tool commentary may precede a single, explicitly delimited final verdict. */
+function parseReview(text: string) {
+  const markers = text.match(/```dutydeck-review/g) ?? [];
+  if (!markers.length) return workReviewVerdictSchema.parse(JSON.parse(text));
+  const final = text.match(/(?:^|\n)```dutydeck-review[ \t]*\r?\n([\s\S]*?)\r?\n```[ \t]*\s*$/);
+  if (markers.length !== 1 || !final) throw new Error('Review requires one final dutydeck-review block');
+  return workReviewVerdictSchema.parse(JSON.parse(final[1]!));
+}
 /** Stable WorkItem id, so callers can pin delivery before the plan exists. */
 export const workItemId = (parentSessionId: string, actorId: string | undefined, idempotencyKey: string) => 'work_' + hash(JSON.stringify([parentSessionId, actorId, idempotencyKey]));
 interface FrozenAgent { fingerprint: string; permissionMode: PermissionMode }
@@ -41,6 +49,8 @@ interface StoredWork {
   stoppedAttempts: string[];
   /** attempt.id -> 固定 TaskAdmissionV1，私有，绝不进入 WorkItem 公开投影。 */
   admissions?: Record<string, TaskAdmissionV1>;
+  /** Rework stays in the original worker workspace, including uncommitted files. */
+  reworkWorkspaces?: Record<string, { cwd: string; ownerSessionId: string }>;
 }
 interface StoredTemplate { template: WorkTemplate; actorId: string }
 interface RecordState { raw: string; value: StoredWork }
@@ -164,7 +174,9 @@ export class WorkItemService {
         const agent = await this.repos.agents.get(definition.agentId!);
         if (session.agentId !== definition.agentId || session.source !== 'work_item' || session.sourceId !== last(step)!.id || session.permissionMode !== value.agents[definition.agentId!]!.permissionMode || (session.model ?? undefined) !== agent?.model || (session.reasoningEffort ?? undefined) !== agent?.reasoningEffort || (session.systemPrompt ?? undefined) !== agent?.systemPrompt) throw new Error('Child execution configuration changed');
         const workspace = await this.options.runtime.getWorkspace(sessionId);
-        if (workspace && (workspace.cwd !== session.cwd || workspace.sourceCwd !== value.cwd || workspace.mode !== (definition.workspaceMode ?? 'shared'))) throw new Error('Child workspace changed');
+        const reused = value.reworkWorkspaces?.[step.id];
+        if (reused) await this.reworkWorkspace(value, step.id);
+        if (workspace && (workspace.cwd !== session.cwd || workspace.sourceCwd !== (reused?.cwd ?? value.cwd) || workspace.mode !== (reused ? 'shared' : definition.workspaceMode ?? 'shared'))) throw new Error('Child workspace changed');
       }
     }
     catch (error) { throw new RuntimeError('WORK_ITEM_TASK_REVOKED', errorText(error), 403); }
@@ -381,12 +393,19 @@ export class WorkItemService {
       }
     }
   }
-  private prompt(record: StoredWork, definition: WorkPlan['steps'][number]): string {
-    const inputs = definition.dependsOn.map(id => {
+  private async prompt(record: StoredWork, definition: WorkPlan['steps'][number]): Promise<string> {
+    const inputs = await Promise.all(definition.dependsOn.map(async id => {
       const step = record.item.steps.find(step => step.id === id)!;
-      return { stepId: id, status: step.status, answer: step.answer, generatedResult: last(step)?.output };
-    });
-    return `Goal: ${record.item.goal}\n\nStep: ${definition.title}\n${definition.instruction}\n\nUpstream inputs (generated results, not independent business verification):\n${JSON.stringify(inputs)}\n\nReturn the complete generated result for this step. Do not create nested Dutydeck work items.`;
+      const attempt = last(step);
+      const workspace = definition.reviewPolicy && attempt?.sessionId ? await this.options.runtime.getWorkspace(attempt.sessionId) : undefined;
+      if (definition.reviewPolicy && step.status === 'completed' && attempt && workspace?.state !== 'ready') throw new Error(`Review workspace unavailable for ${id}`);
+      return { stepId: id, status: step.status, answer: step.answer, attemptId: attempt?.id, generatedResult: attempt?.output,
+        ...(workspace ? { workspace: { cwd: workspace.cwd, branch: workspace.branch, baselineCommit: workspace.baselineCommit } } : {}) };
+    }));
+    const previousReview = record.item.steps.find(step => step.id === record.item.plan.outputStepId)?.attempts.slice().reverse().find(attempt => attempt.review)?.review;
+    const feedback = previousReview?.decision === 'rework' && (previousReview.targetStepId === definition.id || definition.reviewPolicy) ? `\nRework feedback (previous reviewed version):\n${JSON.stringify(previousReview)}\n${definition.reviewPolicy ? 'Verify the previous findings against the new artifacts as well as the acceptance criteria.' : 'Continue in the same workspace; preserve the previous implementation and fix the review findings.'}` : '';
+    const review = definition.reviewPolicy ? `\nIndependent review: inspect the actual upstream workspace paths. Process completion is not acceptance. End with exactly one fenced block labelled dutydeck-review containing the verdict JSON (on its own lines), with no non-whitespace text after its closing fence. Tool commentary may precede it. A bare JSON object is also accepted: {"decision":"accept|rework|stop","reviewed":[{"stepId":"...","attemptId":"...","digest":"..."}],"targetStepId":"only for rework","feedback":"user-readable conclusion, evidence and remaining issues"}. Copy stepId, attemptId and generatedResult.digest for EVERY completed Agent input. These identify generated artifacts, not proof of code correctness. Use accept only after checking the acceptance criteria; rework requires one allowed target; stop for missing context or issues outside those targets. Policy: ${JSON.stringify(definition.reviewPolicy)}` : '';
+    return `Goal: ${record.item.goal}\n\nStep: ${definition.title}\n${definition.instruction}${feedback}\n\nUpstream inputs (generated results, not independent business verification):\n${JSON.stringify(inputs)}\n\nReturn the complete generated result for this step. Do not create nested Dutydeck work items.${review}`;
   }
   /** 构造固定 TaskRequestV1；显式选项与原 prompt/skills/actor 全部冻结，重投不重读默认值。 */
   private buildRequest(record: StoredWork, definition: WorkPlan['steps'][number], sessionId: string, attemptId: string, prompt: string): TaskRequestV1 {
@@ -421,7 +440,7 @@ export class WorkItemService {
     }
     if (attempt.status !== 'preparing') { await this.blockAttempt(state, step, 'admission_conflict', 'Work attempt claims acceptance without a durable task'); return undefined; }
     // 未接受旧记录：在原 revision CAS 内固定新 canonical ID。
-    const prompt = this.prompt(record, definition);
+    const prompt = await this.prompt(record, definition);
     const request = this.buildRequest(record, definition, attempt.sessionId!, attempt.id, prompt);
     const taskId = executionTaskId('work_item', attempt.sessionId!, attempt.id);
     if (taskId === attempt.taskId) { await this.blockAttempt(state, step, 'admission_conflict', 'Old task id collides with the canonical id'); return undefined; }
@@ -533,7 +552,7 @@ export class WorkItemService {
       const number = step.attempts.length + 1;
       const attemptId = `${id}:${step.id}:${number}`;
       const sessionId = 'ses_work_' + hash(attemptId);
-      const prompt = this.prompt(record, definition);
+      const prompt = await this.prompt(record, definition);
       const request = this.buildRequest(record, definition, sessionId, attemptId, prompt);
       const taskId = executionTaskId('work_item', sessionId, attemptId);
       step.attempts.push({ id: attemptId, number, sessionId, taskId, status: 'preparing', createdAt: time(), updatedAt: time() });
@@ -545,6 +564,8 @@ export class WorkItemService {
     }
     const output = record.item.steps.find(step => step.id === record.item.plan.outputStepId)!;
     if (output.status === 'completed') {
+      const definition = record.item.plan.steps.find(step => step.id === output.id)!;
+      if (definition.reviewPolicy) { await this.applyReview(state, output, definition); return; }
       record.item.output = { ...last(output)!.output!, stepId: output.id }; record.item.status = 'completed'; await this.write(state); this.scheduleDelivery(record.item.id);
     } else {
       const status = record.item.steps.some(step => step.status === 'running') ? 'running'
@@ -552,6 +573,53 @@ export class WorkItemService {
         : ['skipped', 'cancelled'].includes(output.status) ? 'blocked' : 'running';
       if (status !== record.item.status) { record.item.status = status; await this.write(state); }
     }
+  }
+  private async reworkWorkspace(record: StoredWork, stepId: string) {
+    const reused = record.reworkWorkspaces?.[stepId];
+    if (!reused) return undefined;
+    const step = record.item.steps.find(step => step.id === stepId)!;
+    if (!step.attempts.some(attempt => attempt.sessionId === reused.ownerSessionId && attempt.status === 'completed')) throw new Error('Rework workspace has no completed owner attempt');
+    const workspace = await this.options.runtime.getWorkspace(reused.ownerSessionId);
+    if (workspace?.state !== 'ready' || workspace.cwd !== reused.cwd) throw new Error('Rework workspace is unavailable or changed');
+    return reused;
+  }
+  private async applyReview(state: RecordState, output: WorkStep, definition: WorkPlan['steps'][number]) {
+    const record = state.value; const attempt = last(output)!;
+    let verdict;
+    try { verdict = parseReview(attempt.output!.text); }
+    catch { record.item.status = 'blocked'; record.item.error = 'Review did not return a valid structured verdict; inspect the review output'; await this.write(state); return; }
+    const expected = definition.dependsOn.map(id => record.item.steps.find(step => step.id === id)!)
+      .filter(step => step.status === 'completed' && record.item.plan.steps.find(def => def.id === step.id)!.kind === 'agent')
+      .map(step => ({ stepId: step.id, attemptId: last(step)!.id, digest: last(step)!.output!.digest }));
+    if (verdict.reviewed.length !== expected.length || new Set(verdict.reviewed.map(value => value.stepId)).size !== expected.length
+      || expected.some(value => !verdict.reviewed.some(reviewed => reviewed.stepId === value.stepId && reviewed.attemptId === value.attemptId && reviewed.digest === value.digest))) {
+      record.item.status = 'blocked'; record.item.error = 'Review references missing or stale artifact versions'; await this.write(state); return;
+    }
+    attempt.review = verdict;
+    if (verdict.decision === 'accept') {
+      const text = verdict.feedback;
+      record.item.output = { text, digest: hash(text), stepId: output.id }; record.item.status = 'completed';
+      await this.write(state); this.scheduleDelivery(record.item.id); return;
+    }
+    const policy = definition.reviewPolicy!;
+    const rounds = output.attempts.filter(attempt => attempt.review?.decision === 'rework').length;
+    if (verdict.decision === 'stop' || rounds > policy.maxReworkRounds || !policy.allowedTargetStepIds.includes(verdict.targetStepId!) || !expected.some(value => value.stepId === verdict.targetStepId)) {
+      record.item.status = 'blocked';
+      record.item.error = `${verdict.decision === 'stop' ? 'Review stopped' : rounds > policy.maxReworkRounds ? 'Review rework limit reached' : 'Review target is not allowed'}: ${verdict.feedback}`;
+      await this.write(state); return;
+    }
+    const target = record.item.steps.find(step => step.id === verdict.targetStepId)!;
+    const previous = last(target)!;
+    const workspace = await this.options.runtime.getWorkspace(previous.sessionId!);
+    if (workspace?.state !== 'ready') throw new Error('Cannot rework without the previous workspace');
+    if (!record.actor || !await bounded(this.options.runtime.stopWorkItemSession(previous.sessionId!, record.actor), 10_000)) throw new Error('Cannot prove the previous worker stopped before rework');
+    if (!record.stoppedAttempts.includes(previous.id)) record.stoppedAttempts.push(previous.id);
+    record.reworkWorkspaces ??= {};
+    record.reworkWorkspaces[target.id] ??= { cwd: workspace.cwd, ownerSessionId: previous.sessionId! };
+    await this.reworkWorkspace(record, target.id);
+    target.status = 'pending'; output.status = 'pending'; record.item.status = 'running';
+    delete record.item.output; delete record.item.error;
+    await this.write(state);
   }
   private async launch(state: RecordState, step: WorkStep) {
     const record = state.value; const attempt = last(step)!;
@@ -587,7 +655,8 @@ export class WorkItemService {
         throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Historical task has no durable acceptance', 409);
       }
       const accepted = await bounded((async () => {
-        const session = await this.options.runtime.startWorkItemSession({ agentId: definition.agentId!, cwd: record.cwd, permissionMode: record.agents[definition.agentId!]!.permissionMode, workspaceMode: definition.workspaceMode ?? 'shared', source: 'work_item', sourceId: attempt.id }, attempt.sessionId!, async () => { await this.authorizeExecution(attempt.sessionId!, record.actorId); });
+        const reused = await this.reworkWorkspace(record, step.id);
+        const session = await this.options.runtime.startWorkItemSession({ agentId: definition.agentId!, cwd: reused?.cwd ?? record.cwd, permissionMode: record.agents[definition.agentId!]!.permissionMode, workspaceMode: reused ? 'shared' : definition.workspaceMode ?? 'shared', source: 'work_item', sourceId: attempt.id }, attempt.sessionId!, async () => { await this.authorizeExecution(attempt.sessionId!, record.actorId); });
         await this.authorizeExecution(session.id, record.actorId);
         const request = admission.request;
         if (!request) throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Historical admission cannot be redispatched', 409);

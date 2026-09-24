@@ -128,3 +128,28 @@ it('forwards explicit final and current-turn token unchanged', async () => {
   expect(result.statusCode).toBe(200);
   expect(send).toHaveBeenCalledWith('session-token', { content: 'answer', final: true, turn: 'signed-turn' });
 });
+
+it('forwards handoff and reply-agent endpoints with bearer tokens and payload', async () => {
+  const handoff = vi.fn(async () => ({ messageId: 'om_handoff' }));
+  const replyAgent = vi.fn(async () => ({ messageId: 'om_reply_agent' }));
+  const app = Fastify(); apps.push(app);
+  await registerLarkAgentToolRoutes(app, { handoff, replyAgent } as any);
+
+  const handoffRes = await app.inject({
+    method: 'POST',
+    url: '/api/lark/agent-tools/handoff',
+    headers: { authorization: 'Bearer session-token' },
+    payload: { to: 'Bot B', content: 'brief', turn: 'turn-token' }
+  });
+  expect(handoffRes.statusCode).toBe(200);
+  expect(handoff).toHaveBeenCalledWith('session-token', { to: 'Bot B', content: 'brief', turn: 'turn-token' });
+
+  const replyRes = await app.inject({
+    method: 'POST',
+    url: '/api/lark/agent-tools/reply-agent',
+    headers: { authorization: 'Bearer session-token' },
+    payload: { content: 'result', turn: 'turn-token' }
+  });
+  expect(replyRes.statusCode).toBe(200);
+  expect(replyAgent).toHaveBeenCalledWith('session-token', { content: 'result', turn: 'turn-token' });
+});

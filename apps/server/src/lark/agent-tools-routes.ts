@@ -21,6 +21,15 @@ interface GroupSendBody {
   idempotencyKey?: string;
 }
 interface GroupSendFileBody { path?: string; replyTo?: string; inThread?: boolean; idempotencyKey?: string; image?: boolean }
+interface GroupHandoffBody {
+  to?: string;
+  content?: string;
+  turn?: string;
+}
+interface GroupReplyAgentBody {
+  content?: string;
+  turn?: string;
+}
 
 const tokenFrom = (authorization?: string) => agentGroupToolBearerToken(authorization);
 const numberFrom = (value?: string) => value === undefined ? undefined : Number(value);
@@ -86,6 +95,16 @@ export async function registerLarkAgentToolRoutes(app: FastifyInstance, service?
   });
   app.post<{ Body: GroupSendFileBody }>('/api/lark/agent-tools/send-file', async (request, reply) => {
     try { return await service.sendFile(tokenFrom(request.headers.authorization), request.body ?? {}); }
+    catch (error) { return handleToolError(error, reply); }
+  });
+
+  app.post<{ Body: GroupHandoffBody }>('/api/lark/agent-tools/handoff', async (request, reply) => {
+    try { return await service.handoff(tokenFrom(request.headers.authorization), request.body ?? {}); }
+    catch (error) { return handleToolError(error, reply); }
+  });
+
+  app.post<{ Body: GroupReplyAgentBody }>('/api/lark/agent-tools/reply-agent', async (request, reply) => {
+    try { return await service.replyAgent(tokenFrom(request.headers.authorization), request.body ?? {}); }
     catch (error) { return handleToolError(error, reply); }
   });
 }

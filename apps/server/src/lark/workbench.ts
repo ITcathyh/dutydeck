@@ -66,12 +66,19 @@ export interface WorkItemElementOptions {
 }
 
 /**
- * 分层协作的验收结论写在最终答复首行；终端模式 Leader 调工具前说的话也会进产物，所以取最后一个以「验收结论：」开头的行。
- * 执行完成但验收未通过或无法识别时，卡头不能写「已完成」。
+ * 验收状态标签：
+ * 1. 有 reviewPolicy 时以持久结构化 review 结果为准，已完成的目标仅在 accept 时使用默认完成标签，否则显示「验收待核对」；未完成的目标沿用当前状态。
+ * 2. 无 reviewPolicy 的历史分层协作目标按输出文本推断：匹配末尾「验收结论：通过/需返修/缺少信息」，未通过或无法识别时显示对应核对提示。
  */
 export function reviewStatusLabel(item: WorkItem): string | undefined {
+  if (item.status !== 'completed') return undefined;
   const output = item.plan.steps.find(step => step.id === item.plan.outputStepId);
-  if (item.status !== 'completed' || output?.id !== leaderReviewStepId || output.title !== leaderReviewTitle) return undefined;
+  if (output?.reviewPolicy) {
+    const step = item.steps.find(s => s.id === item.plan.outputStepId);
+    const lastAttempt = step?.attempts.at(-1);
+    return lastAttempt?.review?.decision === 'accept' ? undefined : '验收待核对';
+  }
+  if (output?.id !== leaderReviewStepId || output.title !== leaderReviewTitle) return undefined;
   const verdict = [...(item.output?.text ?? '').matchAll(/^[ \t]*验收结论：\s*(通过|需返修|缺少信息)/gm)].at(-1)?.[1];
   return verdict === '通过' ? undefined : `验收${verdict ?? '待核对'}`;
 }

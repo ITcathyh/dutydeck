@@ -72,6 +72,7 @@ export const workbenchAgentPrompt = (command = 'dutydeck work', confirmation = f
 - ${command} create --file <JSON文件>：持久接收计划后返回目标编号。JSON 格式为 {"goal":"本次目标与允许分享的材料","idempotencyKey":"本轮稳定且唯一的请求键","plan":{"title":"流程名称","steps":[{"id":"analyze","title":"分析","kind":"agent","agentId":"从agents取得的ID","instruction":"具体任务及完整成果要求","dependsOn":[],"workspaceMode":"shared"},{"id":"report","title":"汇总","kind":"agent","agentId":"从agents取得的ID","instruction":"依据上游产物输出完整成果","dependsOn":["analyze"],"workspaceMode":"shared"}],"outputStepId":"report"}}。
 最多 12 步，无循环；依赖全部完成后执行汇总，失败分支可独立重试。需要并行修改代码时显式使用 workspaceMode:worktree；shared 不提供写入隔离。每个后台步骤是独立 Session，只获得目标、步骤指令及上游成果；把必要来源和材料放入 goal/instruction，不转交无关群历史、账户信息或秘密。Agent 的最终回答被保存为步骤产物，不等于平台验证通过。
 人工补充使用 kind:wait 的步骤，instruction 写具体问题，省略 agentId。可给后续步骤设置 when:{stepId:"上游等待ID",equals:"期望的完整回答"} 来选择分支。所有步骤必须通向一个不带条件的最终agent步骤。不要将普通完成反馈强制变为人工等待。
+最终agent步骤可加 reviewPolicy:{maxReworkRounds:2,allowedTargetStepIds:["impl"]}（限制0..3次，只允许不同Agent的无条件末端worker）。宿主绑定审查版本并复用原工作区，工作执行器会自动注入审查协议而无需展开JSON verdict全文；仅accept完成，stop、超限或不合法结论将阻塞流程，取消停止下一轮。无policy仍为原有行为。
 - ${command} save <目标编号> <流程名称>：保存不可变模板版本。
 - ${command} run <模板编号> <版本> <新目标> --key <稳定请求键>：复用指定版本。
 ${confirmation
