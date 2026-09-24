@@ -46,8 +46,8 @@ export async function performLarkCardReconcile(input: {
   terminalDecoration?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, config: StoredLarkConfig) => Promise<{ elements: Array<Record<string, any>>; cardInput: LarkCardInput }>;
   /** 按记录所属会话解析生效配置（群级呈现覆盖）。缺省时全部按 Bot 级配置补发。 */
   resolveConfig?: (saved: PersistedLarkCardTask) => Promise<StoredLarkConfig>;
-  /** 卡住的任务能否在卡上给「在新会话中执行」按钮，与 coordinator 回调端同一个判断。缺省不给。 */
-  relaunchSupported?: (status: string) => boolean;
+  /** 卡住的任务能否在卡上给「在新会话中执行」按钮，与 coordinator 回调端同一个判定（按 message_id 读映射与入站记录）。缺省不给。 */
+  relaunchReady?: (taskId: string, status: string, turn: number) => Promise<boolean>;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
@@ -124,7 +124,7 @@ export async function performLarkCardReconcile(input: {
         unresolved++;
         const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
           ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined, {
-            relaunch: Boolean(persisted.scope_id && input.relaunchSupported?.(runtimeTask.status)),
+            relaunch: await input.relaunchReady?.(mapping.externalId, runtimeTask.status, persisted.turn ?? 0) === true,
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
         const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
           ? runtimeTask.status : runtimeTask.status === 'queued' ? 'queued' : 'running';
