@@ -7,6 +7,7 @@ import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionCon
 import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
 import { parseLarkNewSession, validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext } from './task-context.js';
+import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkMemoryId, LarkMemoryStore, renderLarkMemoryList } from './memory.js';
 import { LarkMemoryProjection, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
@@ -2674,15 +2675,28 @@ export class LarkMessageCoordinator {
       task.prompt = await materializeLarkResources(event.messageId, task.prompt, task.resources, this.service);
       task.resources = [];
     }
+    const cardContext = { agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
+    const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
+    const failContextRead = async (error: unknown, activeSession?: Session) => {
+      if (this.stopped || task.turn !== currentTurn || this.supersededTurn(task, activeSession)) return;
+      this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取飞书上下文失败');
+      task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
+      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, readOnly: true,
+        taskId: task.id, taskName: '上下文读取失败', markdown: '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。',
+        idempotencyKey: `context_failed_${task.id}`.slice(0, 50),
+        ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+      task.cardMessageId = card.messageId;
+      if (task.inbox) await this.inbox!.update(task.inbox, { state: 'failed', error: '上下文读取超时或失败' });
+      await clearAcknowledgement();
+    };
     // 用户仅 @ 机器人而未发送文字时，拉取最近聊天记录作为上下文，让 Agent 判断用户意图。
     if (!task.prompt.trim()) {
-      task.prompt = await this.buildEmptyMessageFallback(event);
+      try { task.prompt = await withLarkContextReadTimeout(this.buildEmptyMessageFallback(event), '空 @ 上下文读取'); }
+      catch (error) { await failContextRead(error); return; }
     }
     const prompt = task.prompt;
     const taskTitle = larkTaskTitle(prompt, config.name);
     if (task.inbox?.request && task.inbox.request.prompt !== prompt) await this.inbox!.update(task.inbox, { request: { ...task.inbox.request, prompt } });
-    const cardContext = { agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config), ...(config.workspace ? { workspace: config.workspace } : {}) };
-    const clearAcknowledgement = () => this.clearAcknowledgementReaction(task);
 
     let actorEmails: string[] = [];
     const allowedUsers = config.allowedUsers ?? [];
@@ -2803,7 +2817,11 @@ export class LarkMessageCoordinator {
         const previous = raw ? JSON.parse(raw) : {};
         if (task.retryMaterialPrompt) snapshot = { prompt: task.retryMaterialPrompt, ...previous, contextBefore: raw };
         else {
-          const context = await collectLarkTaskContext({ event, prompt, resources: task.resources, service: this.service, ...previous });
+          let context: Awaited<ReturnType<typeof collectLarkTaskContext>>;
+          try {
+            context = await withLarkContextReadTimeout(collectLarkTaskContext({ event, prompt, resources: task.resources, service: this.service, ...previous }), '话题上下文读取');
+          } catch (error) { await failContextRead(error, session); return; }
+          if (this.stopped || task.turn !== currentTurn || this.supersededTurn(task, session)) return;
           materialPrompt = context.agentPrompt;
           for (const sourceId of new Set(context.resources.map(resource => resource.sourceMessageId))) {
             materialPrompt = await materializeLarkResources(sourceId, materialPrompt, context.resources.filter(resource => resource.sourceMessageId === sourceId), this.service);
@@ -3198,6 +3216,15 @@ export class LarkMessageCoordinator {
       return terminalDelivery;
     };
 
+    const closeSupersededPreparedTurn = async () => {
+      if (task.epoch === (group.epoch ?? 0)) return false;
+      this.pushTaskError(task, '这条请求没有执行：期间收到了 /new。请在新会话中重新发送。');
+      task.state = 'interrupted'; task.retryable = false;
+      await deliverTerminal('interrupted', false);
+      if (task.inbox) await this.inbox!.update(task.inbox, { state: 'failed', error: '请求在执行前被 /new 作废' });
+      return true;
+    };
+
     const scheduleHeartbeat = () => {
       if (!heartbeatActive || timer) return;
       timer = setTimeout(() => {
@@ -3220,11 +3247,23 @@ export class LarkMessageCoordinator {
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
     injected.push('[飞书结果说明] 最终回复先用一两句话说明用户目标已完成什么、还有什么未完成及需要用户做什么；有交付物再给入口。等待扫码、外部批准或用户操作时明确写出，不把本轮结束写成目标已完成；无需展开执行日志。');
     if (event.chatType === 'group' && this.workflowOptions.participation) {
-      const observedContext = await this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, prompt);
-      if (observedContext) injected.push(observedContext);
-      const instructions = await this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId });
-      if (instructions.trim()) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${instructions.trim()}`);
+      try {
+        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, prompt), '群上下文读取');
+        if (observedContext) injected.push(observedContext);
+        const instructions = await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取');
+        if (instructions.trim()) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${instructions.trim()}`);
+      } catch (error) {
+        if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
+        this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '执行前读取群上下文失败');
+        this.pushTaskError(task, '上下文读取超时或失败，Agent 尚未执行。请稍后重新发送请求。');
+        task.state = 'failed'; task.retryable = false;
+        await deliverTerminal('failed', false);
+        if (task.inbox) await this.inbox!.update(task.inbox, { state: 'failed', error: '上下文读取超时或失败' });
+        await clearAcknowledgement();
+        return;
+      }
     }
+    if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     // 会话记忆随 agentPrompt 一起冻结进任务账本：事后能核对这一轮 Agent 看到的是哪几条记忆。
     // 读取失败只丢本轮注入并留日志，不阻断任务。
@@ -3232,10 +3271,10 @@ export class LarkMessageCoordinator {
       try {
         const { store, projection, command } = this.workflowOptions.memory;
         const scope = { appId: config.appId, chatId: event.chatId };
-        const [entries, state] = await Promise.all([
+        const [entries, state] = await withLarkContextReadTimeout(Promise.all([
           store.list(scope),
           store.getState(scope)
-        ]);
+        ]), '会话记忆读取');
         const index = renderMemoryIndex(entries, state);
         const memoryBlock = renderLarkMemoryInjection(index.text, {
           command: command ?? 'dutydeck',
@@ -3244,6 +3283,7 @@ export class LarkMessageCoordinator {
         if (memoryBlock) injected.push(memoryBlock);
       } catch (error) {
         this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: task.id }, '读取飞书会话记忆失败，本轮不注入记忆');
+        injected.push('[Dutydeck 会话记忆状态] 会话记忆读取超时或失败，本轮未注入记忆；不要把未读到的内容判断为不存在。');
       }
     }
     if (event.chatType === 'group' && config.groupToolsEnabled && config.groupToolsAllowSend) {
@@ -3256,6 +3296,8 @@ export class LarkMessageCoordinator {
     }
     if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dutydeck 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dutydeck 安全策略阻止。`);
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
+
+    if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
 
     const appendEvent = (agentEvent: AgentEvent) => {
       const previous = task.events.at(-1);

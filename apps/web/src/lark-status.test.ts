@@ -51,10 +51,12 @@ describe('projectLarkBotStatus', () => {
     expect(status.tone).toBe('warning');
   });
 
-  it('用户未开启 listening 时判定为用户暂停监听', () => {
+  it('本实例 listening 为 false 时只描述当前服务，不归因为用户', () => {
     const status = projectLarkBotStatus(createBot({ setupComplete: true, listening: false, activeListening: false }));
     expect(status.key).toBe('paused');
-    expect(status.label).toBe('用户暂停监听');
+    expect(status.label).toBe('本实例未开启监听');
+    expect(status.description).toBe('当前服务未开启此机器人的监听；若已在其他实例运行，请到对应实例查看');
+    expect(`${status.label} ${status.description}`).not.toContain('用户');
     expect(status.tone).toBe('neutral');
   });
 
@@ -126,7 +128,7 @@ describe('formatLarkNavSummary', () => {
 
     expect(formatLarkNavSummary({ bots: [activeBot1, activeBot2] })).toBe('2 个机器人 · 监听已启动');
     expect(formatLarkNavSummary({ bots: [incompleteBot] })).toBe('1 个机器人 · 配置未完成');
-    expect(formatLarkNavSummary({ bots: [pausedBot] })).toBe('1 个机器人 · 用户暂停监听');
+    expect(formatLarkNavSummary({ bots: [pausedBot] })).toBe('1 个机器人 · 本实例未开启监听');
     expect(formatLarkNavSummary({ bots: [activeBot1, incompleteBot] })).toBe('2 个机器人 · 1 个监听中');
   });
 

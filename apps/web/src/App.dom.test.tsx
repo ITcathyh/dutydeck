@@ -749,14 +749,14 @@ describe('App 飞书 Bot 状态读取失败', () => {
     await waitFor(() => expect(within(aside).getByRole('heading', { name: /无法读取飞书接入状态/ })).toBeTruthy());
     const callsBefore = spy.mock.calls.length;
 
-    // 这一次让它成功，且返回一个「配置完成但用户暂停监听」的 Bot。
+    // 这一次让它成功，且返回一个「配置完成但本实例未开启监听」的 Bot。
     spy.mockResolvedValue({ configured: true, listeningDisabled: false, bots: [{ appId: 'cli_retry', name: '重试机器人', setupComplete: true, listening: false, activeListening: false } as never] });
     await userEvent.click(within(aside).getByRole('button', { name: '重试' }));
 
     await waitFor(() => expect(spy.mock.calls.length).toBeGreaterThan(callsBefore));
     await waitFor(() => expect(screen.queryByRole('heading', { name: /无法读取飞书接入状态/ })).toBeNull());
     // 改口后必须是真实状态，而不是「已接入」。
-    expect(await screen.findByText('用户暂停监听')).toBeTruthy();
+    expect(await screen.findByText('本实例未开启监听')).toBeTruthy();
     expect(document.body.textContent).not.toContain('监听已启动');
   });
 
@@ -824,7 +824,7 @@ describe('App 飞书 Bot 状态读取失败', () => {
     await waitFor(() => expect(spy.mock.calls.length).toBeGreaterThan(callsBefore));
     // 改口后是真实状态，而不是「已可用」。
     await waitFor(() => expect(within(dialog).getByText('重试机器人')).toBeTruthy());
-    expect(within(dialog).getAllByText(/用户暂停监听/).length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByText(/本实例未开启监听/).length).toBeGreaterThan(0);
   });
 
   it('设置与接入在缓存 refetch 失败时把 Bot 状态降级为未确认', async () => {

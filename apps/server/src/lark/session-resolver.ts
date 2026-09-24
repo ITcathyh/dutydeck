@@ -7,6 +7,7 @@ import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage';
 import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
+import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkChatMode } from './chat-mode.js';
 import type { LarkGroup } from './coordinator.js';
@@ -160,7 +161,7 @@ export async function materializeLarkResources(messageId: string, prompt: string
   const notes: string[] = [];
   for (const resource of resources) {
     try {
-      const downloaded = await service.downloadMessageResource(messageId, resource.key, resource.type);
+      const downloaded = await withLarkContextReadTimeout(service.downloadMessageResource(messageId, resource.key, resource.type), '附件下载');
       await mkdir(directory, { recursive: true, mode: 0o700 });
       const path = join(directory, safeResourceName(resource, downloaded.contentType));
       await writeFile(path, downloaded.data, { mode: 0o600 });
