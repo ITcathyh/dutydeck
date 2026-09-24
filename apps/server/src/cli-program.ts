@@ -1,5 +1,6 @@
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
+import type { SessionNamesAction } from './session-names-cli.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
 
@@ -138,6 +139,12 @@ export interface WorkspaceGroupsCommandOptions {
   json?: boolean;
 }
 
+export interface SessionNamesCommandOptions {
+  url?: string;
+  database?: string;
+  json?: boolean;
+}
+
 export interface CliHandlers {
   recovery?(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions): void | Promise<void>;
   collaborate?(operation: string, id: string | undefined, options: { json?: string; file?: string; turn?: string }): void | Promise<void>;
@@ -195,6 +202,14 @@ export interface CliHandlers {
       sessionIds?: string[];
     },
     options: WorkspaceGroupsCommandOptions
+  ): void | Promise<void>;
+  sessionNames?(
+    action: SessionNamesAction,
+    params: {
+      sessionId?: string;
+      name?: string;
+    },
+    options: SessionNamesCommandOptions
   ): void | Promise<void>;
 }
 
@@ -288,6 +303,21 @@ const collectDirectories = (val: string, prev: string[] = []): string[] => [...p
 const workspaceGroupsOptionsFrom = (options: WorkspaceGroupsCommandOptions, command: Command): WorkspaceGroupsCommandOptions => {
   const merged = { ...command.optsWithGlobals(), ...options } as Record<string, unknown>;
   const result: WorkspaceGroupsCommandOptions = { ...options };
+  if (typeof merged.database === 'string' && merged.database) {
+    result.database = merged.database;
+  }
+  if (typeof merged.url === 'string' && merged.url) {
+    result.url = merged.url;
+  }
+  if (merged.json === true) {
+    result.json = true;
+  }
+  return result;
+};
+
+const sessionOptionsFrom = (options: SessionNamesCommandOptions, command: Command): SessionNamesCommandOptions => {
+  const merged = { ...command.optsWithGlobals(), ...options } as Record<string, unknown>;
+  const result: SessionNamesCommandOptions = { ...options };
   if (typeof merged.database === 'string' && merged.database) {
     result.database = merged.database;
   }
@@ -553,6 +583,27 @@ Routing guidance:
   // 与 `dutydeck group send` 分层并存——group 面向飞书群里的其他人/机器人，
   // session 面向「发起本会话的用户」，落点是会话事件流（Web 时间线 / 卡片）。
   const session = program.command('session').description('Relay messages to the user who owns the current Dutydeck session');
+  session.command('list')
+    .description('List sessions on the local runtime')
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((options, command) => handlers.sessionNames?.('list', {}, sessionOptionsFrom(options, command)));
+
+  session.command('rename <session-id> <name>')
+    .description('Rename a session on the local runtime')
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((sessionId, name, options, command) => handlers.sessionNames?.('rename', { sessionId, name }, sessionOptionsFrom(options, command)));
+
+  session.command('reset-name <session-id>')
+    .description('Reset custom name of a session on the local runtime')
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((sessionId, options, command) => handlers.sessionNames?.('reset-name', { sessionId }, sessionOptionsFrom(options, command)));
+
   session.command('native-ask')
     .description('Bridge a native Claude AskUserQuestion hook from stdin to the current session')
     .action(() => handlers.sessionNativeAsk?.());

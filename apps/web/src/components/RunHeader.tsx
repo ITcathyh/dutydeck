@@ -1,6 +1,7 @@
-import { Archive, BookOpen, ChevronRight, Folder, MessageSquare, PanelRightOpen, Square, Terminal } from 'lucide-react';
+import { Archive, BookOpen, ChevronRight, Folder, MessageSquare, PanelRightOpen, Pencil, Square, Terminal } from 'lucide-react';
 import type { Agent, Session, Task } from '../api';
 import type { StreamStatus } from '../sse';
+import { sessionDisplayName } from '../run-summary';
 import { nextActionForState, sessionErrorSummary, sessionWorkspaceName, shortRunId } from '../workspace-model';
 import { Badge, Banner, Button, IconButton, Tabs } from './primitives';
 import { effectiveStatus, permissionLabels, stateTone } from './ui';
@@ -25,7 +26,7 @@ export function RunDetailTabs({ value, onChange }: { value: RunDetailTab; onChan
   ]}/>;
 }
 
-export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw }: {
+export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename }: {
   session: Session;
   agent?: Agent;
   taskPrompt?: string;
@@ -39,10 +40,11 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   onOpenPrompt(): void;
   onArchive(): void;
   onToggleRaw(): void;
+  onRename?(): void;
 }) {
   const managed = session.source === 'work_item';
   const workspace = sessionWorkspaceName(session);
-  const taskGoal = taskPrompt?.trim() || '未命名任务';
+  const taskGoal = sessionDisplayName(session, taskPrompt, '未命名任务');
   // 状态文案、是否呼吸、能否重新启动全部来自同一个判断，见 ui.tsx:effectiveStatus。
   // 这里曾经四处直接读 session.state，归档任务因此显示「思考中」+ 呼吸动画，
   // 并且给出可点击的「重新启动」按钮——归档是只读，那是功能缺陷。
@@ -71,6 +73,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
           <span className="max-w-28 shrink-0 truncate text-body font-medium text-subtle sm:max-w-44" title={workspace}>{workspace}</span>
           <ChevronRight size={13} className="shrink-0 text-subtle"/>
           <h1 className="min-w-0 flex-1 truncate text-title font-semibold text-primary" title={taskGoal}>{taskGoal}</h1>
+          {!managed && <IconButton label="重命名会话" onClick={() => onRename?.()}><Pencil size={13}/></IconButton>}
         </div>
         <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-caption text-subtle">
           <span className="hidden min-w-0 items-center gap-1 sm:flex"><Folder size={11} className="shrink-0"/><span title={session.cwd} className="truncate">{session.cwd}</span><span className="shrink-0">·</span></span>

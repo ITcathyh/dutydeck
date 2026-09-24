@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { sessionWorkspaceDirectory, workspaceName, WORKSPACE_GROUP_NAME_MAX_LENGTH } from '@dutydeck/shared';
 import { api, type RunSummary, type Session, type WorkspaceOrganizationSnapshot } from '../api';
+import { sessionDisplayName } from '../run-summary';
 import { Banner, Button, Dialog, IconButton, Input, Select, Spinner } from './primitives';
 import { Trash2, X } from 'lucide-react';
 
@@ -227,7 +228,7 @@ export function WorkspaceGroupsModal({ open, onClose, snapshot, loading, error, 
             />
             <span className="flex min-w-0 flex-1 flex-col gap-0.5">
               <span className="flex flex-wrap items-center gap-1.5 text-caption text-primary">
-                <span className="min-w-0 break-all">{summaries[session.id]?.prompt || session.id}</span>
+                <span className="min-w-0 break-all">{sessionDisplayName(session, summaries[session.id]?.prompt, session.id)}</span>
                 {session.archivedAt && <span className="rounded bg-muted px-1 py-0.5 text-subtle">已归档</span>}
               </span>
               <span className="break-all text-caption text-subtle">{sessionWorkspaceDirectory(session)}</span>

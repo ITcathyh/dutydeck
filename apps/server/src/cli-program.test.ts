@@ -257,6 +257,51 @@ describe('Dutydeck CLI', () => {
       expect(workspaceGroups).not.toHaveBeenCalled();
     });
   });
+
+  describe('session name commands parsing', () => {
+    it('parses session list with options and root database', async () => {
+      const sessionNames = vi.fn();
+      await createCliProgram('0.0.6', { sessionNames }).parseAsync([
+        'node', 'dutydeck', '--database', '/root/dock.sqlite', 'session', 'list', '--url', 'http://127.0.0.1:4310', '--json'
+      ]);
+      expect(sessionNames).toHaveBeenCalledWith('list', {}, expect.objectContaining({
+        database: '/root/dock.sqlite',
+        url: 'http://127.0.0.1:4310',
+        json: true
+      }));
+    });
+
+    it('parses session rename with session-id, name, and options', async () => {
+      const sessionNames = vi.fn();
+      await createCliProgram('0.0.6', { sessionNames }).parseAsync([
+        'node', 'dutydeck', 'session', 'rename', 'ses_abc', 'My Session', '--json'
+      ]);
+      expect(sessionNames).toHaveBeenCalledWith('rename', {
+        sessionId: 'ses_abc',
+        name: 'My Session'
+      }, expect.objectContaining({
+        json: true
+      }));
+    });
+
+    it('parses session reset-name with session-id', async () => {
+      const sessionNames = vi.fn();
+      await createCliProgram('0.0.6', { sessionNames }).parseAsync([
+        'node', 'dutydeck', 'session', 'reset-name', 'ses_xyz'
+      ]);
+      expect(sessionNames).toHaveBeenCalledWith('reset-name', {
+        sessionId: 'ses_xyz'
+      }, expect.any(Object));
+    });
+
+    it('rejects rename without required arguments', async () => {
+      const sessionNames = vi.fn();
+      const program = createCliProgram('0.0.6', { sessionNames }).exitOverride().configureOutput({ writeErr: () => {} });
+      await expect(program.parseAsync(['node', 'dutydeck', 'session', 'rename'])).rejects.toThrow();
+      await expect(program.parseAsync(['node', 'dutydeck', 'session', 'rename', 'ses_abc'])).rejects.toThrow();
+      expect(sessionNames).not.toHaveBeenCalled();
+    });
+  });
 });
 
 it('parses explicit final and its current-turn capability', async () => {

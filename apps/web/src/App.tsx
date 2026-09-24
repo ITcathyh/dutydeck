@@ -14,6 +14,7 @@ import { Banner, Button, Card, Dialog, IconButton, Spinner } from './components/
 import { SessionList } from './components/SessionList';
 import { NewSessionModal } from './components/NewSessionModal';
 import { SystemPromptModal } from './components/SystemPromptModal';
+import { SessionNameModal } from './components/SessionNameModal';
 import { ConfirmDialog } from './components/ConfirmDialog';
 import { WorkspaceOverview } from './components/WorkspaceOverview';
 import { RunDetailTabs, RunHeader } from './components/RunHeader';
@@ -89,6 +90,7 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [workspaceGroupsOpen, setWorkspaceGroupsOpen] = useState(false);
+  const [renameSession, setRenameSession] = useState<Session | null>(null);
   const theme = useTheme();
   const navigationTrigger = useRef<HTMLElement | null>(null);
   const mobileNavigationOpen = mobile && sidebarOpen;
@@ -199,6 +201,7 @@ export default function App() {
   // 命令面板与帮助面板都要先记下触发者，关闭后焦点才能回到原处。
   const openPalette = () => { captureDialogOpener(); setPaletteOpen(true); };
   const openHelp = () => { captureDialogOpener(); setHelpOpen(true); };
+  const openRenameSession = (target: Session) => { captureDialogOpener(); setRenameSession(target); };
 
   useEffect(() => {
     if (typeof window.matchMedia !== 'function') return;
@@ -328,7 +331,7 @@ export default function App() {
   const act = async (action: string) => { try { setActionError(undefined); await api.action(activeSessionId!, action); } catch (error) { setActionError(error instanceof Error ? error.message : String(error)); } };
 
   // 有浮层占用键盘时整套快捷键停用，避免和弹窗内的按键语义打架。
-  const overlayOpen = Boolean(overlay) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || deliveryPanelOpen || (rawVisible && !rawSideBySide);
+  const overlayOpen = Boolean(overlay) || newOpen || archiveConfirm || bulkArchiveIds.length > 0 || systemPromptOpen || paletteOpen || helpOpen || deliveryPanelOpen || Boolean(renameSession) || (rawVisible && !rawSideBySide);
   const shortcutHandlers = useMemo(() => ({
     'command-palette': openPalette,
     'toggle-help': () => setHelpOpen(open => !open),
@@ -434,7 +437,7 @@ export default function App() {
       {primaryNav === 'bots' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开机器人管理…"/></div>}><BotManagement selectedAppId={selectedAppId} onSelectBot={selectBot} onOpenLarkSetup={openLarkSetup} onSelectGroup={selectGroup} agents={agents.data ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false}/></Suspense>
       : primaryNav === 'groups' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开群聊管理…"/></div>}><GroupManagement selectedChatId={selectedChatId} selectedAppId={selectedAppId} onSelectGroup={selectGroup} onNavigateToBot={selectBot} agents={agents.data ?? []}/></Suspense>
       : route.kind === 'not-found' ? renderNotFound('page') : blockingMainQueryFailures.length ? renderBlockingFailure() : route.kind === 'session' && sessions.isPending ? <div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载任务…"/></div> : missingActiveSession ? renderNotFound('session') : active ? <>
-        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel}/>
+        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)}/>
         <div className="flex shrink-0 items-stretch bg-surface px-3 sm:px-5">
           <div className="flex min-w-0 flex-1 flex-col justify-end">{isPtyCli ? <RunDetailTabs value={detailTab} onChange={setDetailTab}/> : <div className="flex-1 border-b border-default"/>}</div>
           <div className="flex shrink-0 items-center gap-0.5 border-b border-default pl-2">{active.source !== 'work_item' && <WorkItemsPanel session={active} agents={agents.data ?? []} onSelectSession={selectSession} control={{ open: workItemPanel?.sessionId === active.id, selectedId: workItemPanel?.sessionId === active.id ? workItemPanel.itemId : '', onOpenChange: open => setWorkItemPanel(open ? { sessionId: active.id, itemId: '' } : null), onSelectItem: itemId => setWorkItemPanel(current => current?.sessionId === active.id ? { sessionId: active.id, itemId } : current) }}/>}<ToolbarButton label="工作目录、验证与自动化" icon={<FolderCog size={14}/>} onClick={() => setDeliveryPanelOpen(true)}/></div>
@@ -463,6 +466,7 @@ export default function App() {
     <ConfirmDialog open={archiveConfirm} tone="danger" title="归档此任务？" description="归档后任务将变为只读且无法恢复，历史指令和执行记录会继续保留。" confirmLabel="确认归档" busy={archive.isPending} error={archive.error?.message} onCancel={() => { if (!archive.isPending) setArchiveConfirm(false); }} onConfirm={() => { if (active) archive.mutate(active.id); }}/>
     <ConfirmDialog open={bulkArchiveIds.length > 0} tone="danger" title={`清理所选的 ${bulkArchiveIds.length} 个任务？`} description="所选任务将归档为只读且无法恢复；正在执行的任务会停止，排队指令会取消。历史指令和执行记录会保留，可在「已归档」中查看。" confirmLabel={bulkArchive.data?.failures.length ? '重试失败项' : '确认清理'} busy={bulkArchive.isPending} error={bulkArchive.data?.failures.length ? `${bulkArchive.data.failures.length} 个任务未清理。首个错误：${bulkArchive.data.failures[0].message}` : undefined} onCancel={() => { if (!bulkArchive.isPending) setBulkArchiveIds([]); }} onConfirm={() => { if (bulkArchiveIds.length && !bulkArchive.isPending) bulkArchive.mutate(bulkArchiveIds); }}/>
     <SystemPromptModal open={systemPromptOpen} session={active} onClose={() => setSystemPromptOpen(false)}/>
+    <SessionNameModal open={Boolean(renameSession)} session={renameSession} onClose={() => setRenameSession(null)}/>
     <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} sessions={visibleSessions} summaries={runSummaries} agents={agents.data ?? []} actions={paletteActions} onSelectSession={selectSession}/>
     <ShortcutHelpSheet open={helpOpen} onClose={() => setHelpOpen(false)} available={shortcutsAvailable}/>
     <ToastViewport/>

@@ -135,6 +135,31 @@ describe('RunHeader 失败详情', () => {
     expect(screen.queryByRole('alert')).toBeNull();
     expect(screen.queryByText('失败详情')).toBeNull();
   });
+
+  it('普通会话渲染「重命名会话」按钮，点击调用 onRename；source 为 work_item 时不显示', async () => {
+    const user = userEvent.setup();
+    const onRename = vi.fn();
+    const { rerender } = render(<RunHeader session={session} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+
+    const renameBtn = screen.getByRole('button', { name: '重命名会话' });
+    expect(renameBtn).toBeTruthy();
+    await user.click(renameBtn);
+    expect(onRename).toHaveBeenCalledTimes(1);
+
+    rerender(<RunHeader session={{ ...session, source: 'work_item' }} agent={agent} onRename={onRename} streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    expect(screen.queryByRole('button', { name: '重命名会话' })).toBeNull();
+  });
+
+  it('标题优先展示 session.name，无 name 时回退到 taskPrompt 或未命名任务', () => {
+    const { rerender } = render(<RunHeader session={{ ...session, name: '自建看板会话' }} agent={agent} taskPrompt="原始指令提示" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    expect(screen.getByRole('heading', { name: '自建看板会话' })).toBeTruthy();
+
+    rerender(<RunHeader session={session} agent={agent} taskPrompt="原始指令提示" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    expect(screen.getByRole('heading', { name: '原始指令提示' })).toBeTruthy();
+
+    rerender(<RunHeader session={session} agent={agent} taskPrompt="" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
+    expect(screen.getByRole('heading', { name: '未命名任务' })).toBeTruthy();
+  });
 });
 
 // RunDetailTabs 已被 App.tsx 消费（commit 1a1100f），手写 tablist 与方向键处理均已删除。

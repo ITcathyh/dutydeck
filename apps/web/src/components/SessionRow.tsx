@@ -1,5 +1,5 @@
 import type { Agent, RunSummary, Session } from '../api';
-import { fallbackRunTitle } from '../run-summary';
+import { fallbackRunTitle, sessionDisplayName } from '../run-summary';
 import { sidebarStatusVisual } from './ui';
 
 export type SessionRowProps = { session: Session; summary?: RunSummary; agent?: Agent; botName?: string; active: boolean; onClick(): void };
@@ -36,7 +36,7 @@ export type SessionRowProps = { session: Session; summary?: RunSummary; agent?: 
 export function SessionRow({ session, summary, agent, botName, active, onClick }: SessionRowProps) {
   // 文案、文字色、圆点色、是否呼吸全部来自同一个判断，见 ui.tsx:sidebarStatusVisual。
   const status = sidebarStatusVisual(session);
-  const title = summary?.prompt ?? fallbackRunTitle(session.source);
+  const title = sessionDisplayName(session, summary?.prompt, fallbackRunTitle(session.source));
   /*
     身份不能只靠可见文字。视觉上这行只有标题，但读屏用户需要知道「这是哪条任务、
     它什么状态、属于哪个 Agent」——后两项现在不可见了，所以进下面的 sr-only span，

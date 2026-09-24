@@ -229,4 +229,10 @@ describe('automation overview', () => {
     await advancePolling(10_000);
     expect(read.mock.calls.length).toBe(callsBeforeOverviewPoll + 1);
   });
+
+  it('优先展示自定义会话名称作为任务标题', async () => {
+    vi.spyOn(api, 'automation').mockResolvedValue(empty);
+    mount([{ ...session, name: '自动化巡检任务' }], { s1: { sessionId: 's1', taskId: 't1', prompt: '原始指令', status: 'completed', queuedCount: 0, updatedAt: session.updatedAt } });
+    expect(await screen.findByRole('heading', { name: '自动化巡检任务' })).toBeTruthy();
+  });
 });

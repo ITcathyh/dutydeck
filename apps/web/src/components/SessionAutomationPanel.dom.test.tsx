@@ -91,4 +91,31 @@ describe('session automation schedules', () => {
     await userEvent.click(screen.getByRole('button', { name: '重新读取' }));
     await screen.findByText('为此任务创建计划');
   });
+
+  it('展示所属任务时优先展示 session.name，无 name 时使用 taskTitle，最后使用 fallback', () => {
+    vi.spyOn(api, 'automation').mockResolvedValue({ schedules: [], subscriptions: [], occurrences: [] });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    clients.push(client);
+
+    const { rerender } = render(
+      <QueryClientProvider client={client}>
+        <SessionAutomationPanel session={{ ...session, name: '自动化巡检总控' }} taskTitle="原始任务指令"/>
+      </QueryClientProvider>
+    );
+    expect(screen.getByText(/所属任务：自动化巡检总控/)).toBeTruthy();
+
+    rerender(
+      <QueryClientProvider client={client}>
+        <SessionAutomationPanel session={session} taskTitle="原始任务指令"/>
+      </QueryClientProvider>
+    );
+    expect(screen.getByText(/所属任务：原始任务指令/)).toBeTruthy();
+
+    rerender(
+      <QueryClientProvider client={client}>
+        <SessionAutomationPanel session={session}/>
+      </QueryClientProvider>
+    );
+    expect(screen.getByText(/所属任务：a · \/project\/worktree/)).toBeTruthy();
+  });
 });

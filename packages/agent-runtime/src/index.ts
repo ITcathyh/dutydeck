@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, ptyRetirementRecoverySchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, makeId, now, RuntimeError, workspaceModes } from '@dutydeck/shared';
+import { canonicalExecutionJson, ptyRetirementRecoverySchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
 import { AcpxAdapter, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -612,8 +612,22 @@ export class DutydeckRuntime {
     return attached;
   }
   listAgents() { return this.repos.agents.list(); }
-  async listSessions() { return this.readWorkspace('workspace_list', async () => Promise.all((await this.mutations.wait(() => this.repos.sessions.list())).map(session => this.withWorkspaceMode(session)))); }
-  async getSession(id: string) { return this.readWorkspace(id, async () => { const session = await this.mutations.wait(() => this.repos.sessions.get(id)); return session ? this.withWorkspaceMode(session) : undefined; }); }
+  async listSessions() { return this.readWorkspace('workspace_list', async () => Promise.all((await this.mutations.wait(() => this.repos.sessions.list())).map(session => this.withSessionMetadata(session)))); }
+  async getSession(id: string) { return this.readWorkspace(id, async () => { const session = await this.mutations.wait(() => this.repos.sessions.get(id)); return session ? this.withSessionMetadata(session) : undefined; }); }
+  async setSessionName(id: string, rawName: string | null): Promise<Session> {
+    this.assertReady();
+    const normalizedName = normalizeSessionName(rawName);
+    return this.mutations.write(id, async () => {
+      const session = await this.repos.sessions.get(id);
+      if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
+      if (session.source === 'work_item') {
+        throw new RuntimeError('INVALID_WORK_SESSION', 'Work-item managed sessions cannot be renamed', 400);
+      }
+      const key = sessionNameConfigKey(id);
+      await this.repos.config.set(key, normalizedName ?? '');
+      return this.withSessionMetadata(session);
+    });
+  }
   async getWorkspace(id: string): Promise<WorkspaceResponse | undefined> {
     return this.readWorkspace(id, async () => {
       const workspace = await this.mutations.wait(() => this.workspaces.get(id));
@@ -858,9 +872,15 @@ export class DutydeckRuntime {
     return this.verifications.list(id, session.cwd);
   }
 
-  private async withWorkspaceMode(session: Session): Promise<Session> {
+  private async withSessionMetadata(session: Session): Promise<Session> {
     const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
-    return workspace ? { ...session, workspaceMode: workspace.mode, workspaceSourceCwd: workspace.sourceCwd } : session;
+    const rawName = await this.mutations.wait(() => this.repos.config.get(sessionNameConfigKey(session.id)));
+    const name = rawName && rawName.trim() ? rawName.trim() : undefined;
+    return {
+      ...session,
+      ...(workspace ? { workspaceMode: workspace.mode, workspaceSourceCwd: workspace.sourceCwd } : {}),
+      ...(name ? { name } : {})
+    };
   }
   /** 只读访问当前内存中的 driver 实例（如终端 WS 代理取 createTerminalStream）；未连接/已释放时返回 undefined。 */
   getDriver(sessionId: string): AgentDriver | undefined {
@@ -1447,7 +1467,7 @@ export class DutydeckRuntime {
     try {
       await this.reconnect(session);
       await this.mutations.wait(() => owned?.beforeStart() ?? Promise.resolve());
-      await this.saveState(session, 'idle'); return session;
+      await this.saveState(session, 'idle'); return this.withSessionMetadata(session);
     } catch (error) {
       if (error instanceof RevokedOperation) throw error;
       const message = error instanceof Error ? error.message : String(error);
@@ -2038,7 +2058,7 @@ export class DutydeckRuntime {
     try { await this.changeDriverConfiguration(session, driver, current => ({ ...current, model: normalized }), { model: normalized }); }
     catch (error) { throw new RuntimeError('MODEL_SWITCH_FAILED', error instanceof Error ? error.message : String(error), 422); }
     await this.emit(id, 'status', { state: session.state, model: normalized });
-    return session;
+    return this.withSessionMetadata(session);
     });
   }
   async setReasoningEffort(id: string, reasoningEffort: string) {
@@ -2052,7 +2072,7 @@ export class DutydeckRuntime {
     try { await this.changeDriverConfiguration(session, driver, current => ({ ...current, reasoningEffort: normalized }), { reasoningEffort: normalized }); }
     catch (error) { throw new RuntimeError('REASONING_SWITCH_FAILED', error instanceof Error ? error.message : String(error), 422); }
     await this.emit(id, 'status', { state: session.state, reasoningEffort: normalized });
-    return session;
+    return this.withSessionMetadata(session);
     });
   }
   async pause(id: string) {
@@ -2089,7 +2109,7 @@ export class DutydeckRuntime {
       if(owned?.controlled&&target&&driver.nativeConfiguration){owned.options={permissionMode:target.permissionMode,...driver.nativeConfiguration()};await this.changeDriverConfiguration(session,driver,()=>target,undefined,true);}
       await this.saveState(session, 'idle');
       await this.projectQueue(id); this.queueBlocked.delete(id); this.scheduleQueue(id);
-      return session;
+      return this.withSessionMetadata(session);
     });
   }
   private revokeSession(id: string, cancelQueue: boolean, state: 'stopped' | 'interrupted', shutdown = false, discardSession = false, beforeResourceCleanup?: Promise<void>, actor?: ExecutionActor): Promise<void> {
@@ -2173,7 +2193,8 @@ export class DutydeckRuntime {
     this.assertReady();
     const token = this.transition(id);
     await this.stopTransition(id, token, actor);
-    return this.mutations.run(token, () => this.patchSession(id, { archivedAt: now() }));
+    const session = await this.mutations.run(token, () => this.patchSession(id, { archivedAt: now() }));
+    return this.withSessionMetadata(session);
   }
   async restart(id: string, actor?: ExecutionActor) {
     this.assertReady();
@@ -2195,7 +2216,7 @@ export class DutydeckRuntime {
       const resources = this.repos.execution.getResources(id).filter(resource => resource.kind !== 'operation' && resource.purpose !== 'acp_native_context' && resource.stage !== 'not_created');
       Object.assign(session, this.bound().replaceSessionRun(this.fence(session), makeId('run'), resources.map(resource => ({ resourceId: resource.resourceId, expectedRevision: resource.revision, observationId: resource.observations.at(-1)!.observationId }))));
       await this.reconnect(session);
-      await this.saveState(session, 'idle'); return session;
+      await this.saveState(session, 'idle'); return this.withSessionMetadata(session);
     });
   }
   async setPermissionMode(id: string, mode: PermissionMode) {
@@ -2207,7 +2228,7 @@ export class DutydeckRuntime {
     if (driver && !driver.setPermissionMode) throw new RuntimeError('PERMISSION_MODE_SWITCH_UNSUPPORTED', `Agent ${session.agentId} does not support runtime permission switching`, 422);
     if (driver) await this.changeDriverConfiguration(session, driver, current => ({ ...current, permissionMode: mode }), { permissionMode: mode });
     else await this.mutations.write(id, async () => { await this.configurations.assertClear(id); Object.assign(session, await this.patchSession(id, { permissionMode: mode })); });
-    return session;
+    return this.withSessionMetadata(session);
     });
   }
   getPendingPermissions(sessionId: string): PermissionRequestData[] {

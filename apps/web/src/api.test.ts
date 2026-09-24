@@ -63,4 +63,26 @@ describe('web api adapter', () => {
     await expect(api.systemDirectories('/home/project')).resolves.toEqual(data);
     expect(fetcher).toHaveBeenCalledWith('/api/system/directories?path=%2Fhome%2Fproject', { credentials: 'same-origin', cache: 'no-store' });
   });
+
+  it('setSessionName 使用 PATCH /api/sessions/:id/name 提交名称或 null', async () => {
+    const sessionWithName: Session = { id: 's/1', agentId: 'codex', state: 'idle', cwd: '/repo', runId: 'r1', name: '自定义任务名', createdAt: '', updatedAt: '' };
+    const fetcher = vi.fn(async () => ({ ok: true, json: async () => sessionWithName }));
+    vi.stubGlobal('fetch', fetcher);
+
+    await expect(api.setSessionName('s/1', '自定义任务名')).resolves.toEqual(sessionWithName);
+    expect(fetcher).toHaveBeenCalledWith('/api/sessions/s%2F1/name', {
+      credentials: 'same-origin',
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: '自定义任务名' })
+    });
+
+    await expect(api.setSessionName('s/1', null)).resolves.toEqual(sessionWithName);
+    expect(fetcher).toHaveBeenCalledWith('/api/sessions/s%2F1/name', {
+      credentials: 'same-origin',
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: null })
+    });
+  });
 });

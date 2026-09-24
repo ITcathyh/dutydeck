@@ -266,6 +266,7 @@ export interface Session {
   workspaceMode?: import('./workspace.js').WorkspaceMode;
   /** Canonical cwd requested before an optional managed worktree was allocated. */
   workspaceSourceCwd?: string;
+  name?: string;
 }
 
 export interface StartSessionInput { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; workspaceMode?: import('./workspace.js').WorkspaceMode }
@@ -464,3 +465,5 @@ export * from './driver-resources.js';
 export * from './collaboration.js';
 
 export * from './execution-recovery.js';
+
+export * from './session-name.js';

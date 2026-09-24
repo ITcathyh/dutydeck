@@ -14,7 +14,7 @@ import {
   workbenchViewOrder,
   sessionWorkspaceName
 } from '../workspace-model';
-import { fallbackRunTitle } from '../run-summary';
+import { fallbackRunTitle, sessionDisplayName } from '../run-summary';
 import { Badge, Button, Card, EmptyState, Skeleton, StatusBadge } from './primitives';
 import { createTaskAffordance } from './ui';
 import { formatLarkNavSummary, projectLarkBotStatus } from '../lark-status';
@@ -80,9 +80,11 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
   const updatedAt = session.updatedAt || session.createdAt;
   const relativeTime = formatRelativeTime(updatedAt);
   const queuedCommands = summary?.queuedCount ?? 0;
+  const title = sessionDisplayName(session, summary?.prompt, fallbackRunTitle(session.source));
+  const checkboxLabel = sessionDisplayName(session, summary?.prompt, sessionWorkspaceName(session));
   return <div className="flex border-t border-subtle first:border-t-0">
     {selection && <label className="flex min-h-10 min-w-10 shrink-0 cursor-pointer items-center justify-center pl-2" title={selection.disabled ? '此步骤由目标管理，请从原目标处理' : undefined}>
-      <input type="checkbox" aria-label={`选择任务：${summary?.prompt ?? sessionWorkspaceName(session)}`} checked={selection.checked} disabled={selection.disabled} onChange={selection.onChange} className="h-4 w-4 accent-action"/>
+      <input type="checkbox" aria-label={`选择任务：${checkboxLabel}`} checked={selection.checked} disabled={selection.disabled} onChange={selection.onChange} className="h-4 w-4 accent-action"/>
     </label>}
     <button
     type="button"
@@ -93,7 +95,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
     {/* 徽标文案与归档优先判据都来自 effectiveStatus，由 StatusBadge 单点消费；这里不再拼配色字符串。 */}
     <span className="mt-0.5 shrink-0 sm:mt-0"><StatusBadge session={session}/></span>
     <span className="min-w-0 flex-1">
-      <strong className="line-clamp-2 text-body font-medium text-primary sm:line-clamp-none sm:block sm:truncate" title={summary?.prompt}>{summary?.prompt ?? fallbackRunTitle(session.source)}</strong>
+      <strong className="line-clamp-2 text-body font-medium text-primary sm:line-clamp-none sm:block sm:truncate" title={title}>{title}</strong>
       <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-secondary">
         <span>{sessionWorkspaceName(session)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
         {section === 'attention' && <><span aria-hidden="true">·</span><span className="font-medium text-primary">{attentionReasonForSession(session)}</span></>}

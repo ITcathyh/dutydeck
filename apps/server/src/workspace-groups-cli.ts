@@ -1,8 +1,5 @@
-import Database from 'better-sqlite3';
-import { networkInterfaces } from 'node:os';
-import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
-import { readDaemonStatus, inspectDaemonState, resolveDaemonDir, type DaemonState } from './daemon/daemon.js';
+import { executeLocalRuntimeRequest, type LocalRuntimeRequestDependencies } from './local-runtime-request.js';
 
 export type WorkspaceGroupsAction = 'list' | 'create' | 'rename' | 'delete' | 'move' | 'reset';
 
@@ -19,12 +16,7 @@ export interface WorkspaceGroupsCliInput {
 
 export type WorkspaceGroupsSnapshot = Record<string, unknown>;
 
-export interface WorkspaceGroupsCliDependencies {
-  readState?: () => DaemonState | undefined;
-  fetcher?: typeof fetch;
-  readToken?: (path: string) => string | undefined;
-  localAddresses?: () => string[];
-}
+export type WorkspaceGroupsCliDependencies = LocalRuntimeRequestDependencies;
 
 export class WorkspaceGroupsCliError extends Error {
   constructor(public readonly code: string, message: string) {
@@ -124,61 +116,22 @@ export async function runWorkspaceGroupsCli(
     throw new WorkspaceGroupsCliError('WORKSPACE_GROUPS_UNKNOWN_ACTION', `Unknown workspace-groups action: ${String(action)}`);
   }
 
-  // 2. 本机 URL 与 Token 解析（严格遵守只读、无迁移、本地 loopback、凭证不泄露）
-  const state = dependencies.readState?.() ?? readDaemonStatus(resolveDaemonDir());
-  if (input.url && !input.database) {
-    throw new WorkspaceGroupsCliError('WORKSPACE_GROUPS_DATABASE_REQUIRED', '--url requires the exact --database for that runtime');
-  }
-  const address = input.url ?? (state?.ready && inspectDaemonState(state).status === 'verified' ? state.address : undefined);
-  if (!address) {
-    throw new WorkspaceGroupsCliError('WORKSPACE_GROUPS_DAEMON_UNAVAILABLE', 'The local runtime is not ready');
-  }
-  const url = new URL(address);
-  const hostname = url.hostname.replace(/^\[|\]$/g, '');
-  const addresses = dependencies.localAddresses?.() ?? Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []);
-  const local = ['127.0.0.1', 'localhost', '::1'].includes(hostname) || Boolean(isIP(hostname) && addresses.includes(hostname));
-  if (url.protocol !== 'http:' || !local || url.username || url.password) {
-    throw new WorkspaceGroupsCliError('WORKSPACE_GROUPS_LOCAL_RUNTIME_REQUIRED', 'Workspace groups only connects to a loopback or literal local-interface runtime');
-  }
-  const database = input.database ?? state?.database;
-  if (!database) {
-    throw new WorkspaceGroupsCliError('WORKSPACE_GROUPS_DATABASE_REQUIRED', 'The runtime database identity is required');
-  }
-
-  const token = (dependencies.readToken ?? (path => {
-    const db = new Database(path, { readonly: true, fileMustExist: true });
-    try {
-      return (db.prepare('SELECT value FROM configs WHERE key=?').get('auth.accessToken') as { value?: string } | undefined)?.value?.trim();
-    } finally {
-      db.close();
-    }
-  }))(database);
-
-  // 3. HTTP 请求发起与安全错误处理
-  const headers: Record<string, string> = {
-    ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
-    ...(token ? { authorization: `Bearer ${token}` } : {})
-  };
-  const signal = AbortSignal.timeout(15_000);
-  const response = await (dependencies.fetcher ?? fetch)(new URL(endpoint, url.origin), {
+  const result = await executeLocalRuntimeRequest({
+    url: input.url,
+    database: input.database,
     method,
-    headers,
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-    redirect: 'error',
-    signal
-  });
-
-  let result: any;
-  try {
-    result = await response.json();
-  } catch {
-    result = null;
-  }
-
-  if (!response.ok) {
-    const code = typeof result?.error?.code === 'string' ? result.error.code : 'WORKSPACE_GROUPS_REQUEST_FAILED';
-    throw new WorkspaceGroupsCliError(code, `Workspace groups request failed with HTTP ${response.status}`);
-  }
+    endpoint,
+    body,
+    errorSpec: {
+      databaseRequired: 'WORKSPACE_GROUPS_DATABASE_REQUIRED',
+      daemonUnavailable: 'WORKSPACE_GROUPS_DAEMON_UNAVAILABLE',
+      localRuntimeRequired: 'WORKSPACE_GROUPS_LOCAL_RUNTIME_REQUIRED',
+      requestFailed: 'WORKSPACE_GROUPS_REQUEST_FAILED',
+      localRuntimeRequiredMessage: 'Workspace groups only connects to a loopback or literal local-interface runtime',
+      requestFailedMessage: status => `Workspace groups request failed with HTTP ${status}`
+    },
+    createError: (code, message) => new WorkspaceGroupsCliError(code, message)
+  }, dependencies);
 
   if (!isValidSnapshot(result)) {
     throw new WorkspaceGroupsCliError('WORKSPACE_GROUPS_INVALID_SNAPSHOT', 'Workspace groups API returned an invalid snapshot');

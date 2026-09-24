@@ -77,7 +77,11 @@
     "src/driver-resources.ts",
     "dist/driver-resources.js",
     "dist/driver-resources.js.map",
-    "dist/driver-resources.d.ts"
+    "dist/driver-resources.d.ts",
+    "src/session-name.ts",
+    "dist/session-name.js",
+    "dist/session-name.js.map",
+    "dist/session-name.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

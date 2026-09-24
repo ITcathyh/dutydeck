@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { CornerDownLeft, Search } from 'lucide-react';
 import type { Agent, RunSummary, Session } from '../api';
-import { fallbackRunTitle } from '../run-summary';
+import { fallbackRunTitle, sessionDisplayName } from '../run-summary';
 import { searchTasks, taskSearchTerms, type TaskSearchField, type TaskSearchMatch } from '../task-search';
 import { useDialogFocus } from '../useDialogFocus';
 import { attentionReasonForSession, formatRelativeTime, sessionWorkspaceName, shortRunId, workbenchTaskSection } from '../workspace-model';
@@ -220,7 +220,7 @@ function TaskOption({ optionRef, match, summary, agent, optionId, active, onHove
 }) {
   const { session, fields } = match;
   const updatedAt = session.updatedAt || session.createdAt;
-  const goal = summary?.prompt?.trim() || fallbackRunTitle(session.source);
+  const goal = sessionDisplayName(session, summary?.prompt, fallbackRunTitle(session.source));
   const queuedCommands = summary?.queuedCount ?? 0;
   const attention = !session.archivedAt && workbenchTaskSection(session, summary) === 'attention';
   return <button ref={optionRef} type="button" role="option" id={optionId} tabIndex={-1} aria-selected={active} onMouseMove={onHover} onClick={onRun} className={`flex min-h-10 w-full items-start gap-2.5 rounded-md px-2.5 py-2 text-left ${active ? 'bg-action-soft' : 'hover:bg-hover'}`}>

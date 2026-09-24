@@ -35,7 +35,7 @@ export function taskSearchCandidates(session: Session, summary?: RunSummary, age
   const sourceCwd = session.workspaceSourceCwd?.trim() || cwd;
   const unique = (values: Array<string | undefined>) => [...new Set(values.map(value => normalizeSearchQuery(value ?? '')).filter(Boolean))];
   return {
-    goal: unique([summary?.prompt, summary?.prompt?.trim() ? undefined : fallbackRunTitle(session.source)]),
+    goal: unique([session.name, summary?.prompt, (session.name?.trim() || summary?.prompt?.trim()) ? undefined : fallbackRunTitle(session.source)]),
     workspace: unique([workspaceName(sourceCwd), sourceCwd, workspaceName(cwd), cwd]),
     agent: unique([agent?.name, session.agentId])
   };
