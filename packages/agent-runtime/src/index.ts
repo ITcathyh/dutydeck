@@ -764,9 +764,24 @@ export class DutydeckRuntime {
       const driver = await this.reconnect(session, false);
       this.mutations.check();
       if (this.attachedTerminals.has(driver)) return driver;
-      if (driver.attachTerminal?.()) { this.localResources.ready(driver); this.attachedTerminals.add(driver); return driver; }
-      await this.revokeSession(id, false, 'interrupted'); return undefined;
+      let attached: boolean;
+      try { attached = driver.attachTerminal?.() ?? false; }
+      catch (error) { await this.discardUnattachedTerminal(id, driver); throw error; }
+      if (attached) { this.localResources.ready(driver); this.attachedTerminals.add(driver); return driver; }
+      await this.discardUnattachedTerminal(id, driver); return undefined;
     }).catch(error => { if (error instanceof RevokedOperation) return undefined; throw error; });
+  }
+  /**
+   * A terminal view that attached nothing owns no process, so there is no exit to prove.
+   * Shutdown retires idle panes whose native history can resume; revoking the view's
+   * driver here demanded a stop proof it can never give, and the retained stop block
+   * then refused every later task in the session. The session state is left untouched.
+   */
+  private async discardUnattachedTerminal(id: string, driver: AgentDriver) {
+    this.nextSessionGeneration(id);
+    if (this.drivers.get(id) === driver) this.drivers.delete(id);
+    try { await driver.stop(); } catch { /* Nothing was attached. */ }
+    await this.mutations.write(id, async () => this.localResources.gone(driver, 'terminal-attach-found-no-pane'));
   }
   getEvents(id: string, after = 0) { return this.repos.events.list(id, after); }
   getRecentEvents(id: string, limit: number) { return this.repos.events.listRecent(id, limit); }
