@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import type { Agent, PermissionMode, Session } from '../api';
 
 // 展示层术语两级制：一条 Session 对用户叫「任务」，一条 TaskRecord 对用户叫「指令」。
@@ -94,6 +95,14 @@ export function createTaskAffordance({ agents, agentsLoading = false, onCreate, 
   if (agentsLoading) return { label: '正在检测 Agent…', disabled: true, onClick: () => {} };
   if (!agents.length) return { label: '准备 Agent', disabled: false, onClick: onPrepareAgents };
   return { label: '创建任务', disabled: false, onClick: onCreate };
+}
+
+/**
+ * 任务详情工具栏里打开浮层的按钮（目标与步骤、工作目录与验证）。
+ * 窄屏只留图标，完整文案在 aria-label / title 里，所以自带 min-w-10 守住触控宽度。
+ */
+export function ToolbarButton({ label, icon, onClick }: { label: string; icon: ReactNode; onClick(): void }) {
+  return <button type="button" aria-label={label} title={label} onClick={onClick} className="flex min-h-10 min-w-10 shrink-0 items-center justify-center gap-1.5 rounded-md px-2.5 text-caption font-medium text-secondary transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring">{icon}<span className="hidden sm:inline">{label}</span></button>;
 }
 
 export function DutydeckIcon({ className = '' }: { className?: string }) {

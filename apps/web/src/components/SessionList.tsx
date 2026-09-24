@@ -98,10 +98,13 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
        就是撞在这上面失败的：那不是测试过时，是默认折叠一条任务的组确实是纯负担。
        降噪的收益全部来自多任务的组（18 条压到 4 行），这条规则不削弱它。
 
-    用户手动折叠过（override === false）时仍然尊重用户，两条默认规则都让位。
+    3. 只剩一个工作区 —— 折叠后侧栏只有一行组头，看起来像没有任务，而折叠要解决的
+       「多个组挤在一起」此时并不存在。
+
+    用户手动折叠过（override === false）时仍然尊重用户，默认规则都让位。
   */
   const containsActive = (workspace: WorkspaceGroup) => workspace.sessions.some(session => session.id === activeSessionId);
-  const autoExpanded = (workspace: WorkspaceGroup) => workspace.sessions.length === 1 || containsActive(workspace);
+  const autoExpanded = (workspace: WorkspaceGroup) => workspaces.length === 1 || workspace.sessions.length === 1 || containsActive(workspace);
   const isExpandedById = (id: string) => {
     const workspace = workspaces.find(item => item.id === id);
     return overrides[id] ?? (workspace ? autoExpanded(workspace) : false);
@@ -266,7 +269,7 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
       : <div className="rounded-lg border border-dashed border-sidebar-border px-4 py-6 text-center text-caption text-sidebar-text-muted">当前视图没有任务。</div>}</div></div>
 
     <div className={`${primaryNav === 'tasks' ? '' : 'mt-auto'} shrink-0 border-t border-sidebar-border pt-1`}>{onPrimaryNavChange
-      ? <details className="px-2.5"><summary className="cursor-pointer rounded-md px-2 py-3 text-caption text-sidebar-text">设置与工具</summary><SidebarNav groups={navGroups}/></details>
+      ? <details className="group/tools px-2.5"><summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 rounded-md px-2 text-caption font-medium text-sidebar-text transition-colors duration-fast ease-out hover:bg-sidebar-hover hover:text-sidebar-text-strong [&::-webkit-details-marker]:hidden"><Settings2 aria-hidden="true" size={14} className="shrink-0 text-sidebar-text-muted"/>设置与工具<ChevronRight aria-hidden="true" size={13} className="ml-auto shrink-0 text-sidebar-text-muted transition-transform duration-fast group-open/tools:rotate-90"/></summary><SidebarNav groups={navGroups}/></details>
       : <SidebarNav groups={navGroups}/>}</div>
 
     {/* 运行环境状态。它是事实陈述不是入口，所以在导航区之外、不做成按钮。 */}
