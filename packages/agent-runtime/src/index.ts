@@ -130,6 +130,8 @@ export class DutydeckRuntime {
   private readonly driverOperations = new Map<AgentDriver, Set<Promise<unknown>>>();
   private readonly factoryCleanups = new Map<string, Promise<void>>();
   private readonly attachedTerminals = new WeakSet<AgentDriver>();
+  /** Sessions whose persistent pane is gone; cleared when a driver is next built for them. */
+  private readonly missingTerminals = new Set<string>();
   private execution?: BoundExecutionRepository;
   private readonly attemptRefs = new WeakMap<Owner, AttemptRef & SessionFence>();
   private readonly eventScope = new AsyncLocalStorage<AttemptRef & SessionFence | SessionFence>();
@@ -759,6 +761,8 @@ export class DutydeckRuntime {
       await this.mutations.wait(() => this.configurations.assertClear(id));
       this.assertResources(id, true);
       const existing = this.drivers.get(id); if (existing) return existing;
+      // The terminal tab retries while open; each rebuild would add two closed ledger rows.
+      if (this.missingTerminals.has(id)) return undefined;
       const session = await this.mutations.wait(() => this.repos.sessions.get(id));
       if (!session || session.archivedAt || session.protocol !== 'pty-cli' || !['idle', 'completed', 'interrupted'].includes(session.state)) return undefined;
       const driver = await this.reconnect(session, false);
@@ -768,7 +772,7 @@ export class DutydeckRuntime {
       try { attached = driver.attachTerminal?.() ?? false; }
       catch (error) { await this.discardUnattachedTerminal(id, driver); throw error; }
       if (attached) { this.localResources.ready(driver); this.attachedTerminals.add(driver); return driver; }
-      await this.discardUnattachedTerminal(id, driver); return undefined;
+      await this.discardUnattachedTerminal(id, driver); this.missingTerminals.add(id); return undefined;
     }).catch(error => { if (error instanceof RevokedOperation) return undefined; throw error; });
   }
   /**
@@ -1467,7 +1471,7 @@ export class DutydeckRuntime {
       }
       this.mutations.check();throw error;
     }
-    this.drivers.set(session.id, driver);
+    this.drivers.set(session.id, driver); this.missingTerminals.delete(session.id);
     let startBegan = false;
     try {
       this.localResources.returned(resource, driver);
