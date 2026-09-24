@@ -1,4 +1,7 @@
 import { checkSqliteDriver, currentProcessIdentity, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import Database from 'better-sqlite3';
+import { networkInterfaces } from 'node:os';
+import { isIP } from 'node:net';
 import {
   SUPERVISOR_ENV,
   SYSTEMD_UNIT_ENV,
@@ -46,6 +49,8 @@ export interface DaemonCommandResult {
 }
 
 const READY_TIMEOUT_MS = 15_000;
+const DRAIN_INTERVAL_MS = 5_000;
+const DEFAULT_DRAIN_TIMEOUT_SECONDS = 900;
 const RESTART_HOST_ENV = 'DUTYDECK_DAEMON_RESTART_HOST';
 const RESTART_PORT_ENV = 'DUTYDECK_DAEMON_RESTART_PORT';
 const RESTART_CWD_ENV = 'DUTYDECK_DAEMON_RESTART_CWD';
@@ -60,6 +65,166 @@ export interface DaemonCommandDeps {
   checkSqlite?: (options?: SqliteDriverCheckOptions) => SqliteDriverCheck;
   /** 默认 `process.platform`；只有 linux 会走 systemd。 */
   platform?: string;
+  /** 网络请求客户端，默认 globalThis.fetch。测试可注入。 */
+  fetch?: typeof fetch;
+  /** 等待函数，默认 sleep。测试可注入。 */
+  sleep?: (ms: number) => Promise<void>;
+  /** 获取当前时间戳（毫秒），默认 Date.now。测试可注入。 */
+  now?: () => number;
+  /** 从数据库读取 accessToken，测试可注入。 */
+  readToken?: (databasePath: string) => string | undefined;
+  /** 本机网卡地址列表，默认读 node:os networkInterfaces。测试可注入。 */
+  localAddresses?: () => string[];
+  /** 警告输出钩子，默认输出到 process.stderr。测试可注入。 */
+  warn?: (message: string) => void;
+  /** 进度说明输出钩子，默认输出到 process.stderr。测试可注入。 */
+  info?: (message: string) => void;
+}
+
+const defaultWarn = (message: string) => {
+  process.stderr.write(`警告：${message}\n`);
+};
+
+const defaultInfo = (message: string) => {
+  process.stderr.write(`${message}\n`);
+};
+
+function defaultReadToken(databasePath: string): string | undefined {
+  try {
+    const db = new Database(databasePath, { readonly: true, fileMustExist: true });
+    try {
+      return (db.prepare('SELECT value FROM configs WHERE key=?').get('auth.accessToken') as { value?: string } | undefined)?.value?.trim();
+    } finally {
+      db.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** 只允许连 loopback 或本机网卡地址，且必须是明文 http、不带用户名密码。与 recovery-cli 同一边界。 */
+function resolveLocalUrl(address: string | undefined, localAddresses: () => string[]): URL | undefined {
+  if (!address) return undefined;
+  let url: URL;
+  try {
+    url = new URL(address);
+  } catch {
+    return undefined;
+  }
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  const local = ['127.0.0.1', 'localhost', '::1'].includes(hostname)
+    || Boolean(isIP(hostname) && localAddresses().includes(hostname));
+  if (url.protocol !== 'http:' || !local || url.username || url.password) return undefined;
+  return url;
+}
+
+/**
+ * 重启前等待守护进程中正在执行的任务结束（drain）。
+ * - options.force: 跳过等待直接重启；
+ * - 守护进程未运行、身份无法验证、查询失败：输出警告并继续重启；
+ * - 有任务在执行（> 0）：输出说明，每 5 秒查一次，归零后返回 ok: true；
+ * - 等待超时仍有任务在执行：返回 ok: false 与错误说明，不停止旧进程。
+ */
+export async function waitForRunningTasksDrain(
+  dir: string,
+  state: DaemonState | undefined,
+  options: CliOptions,
+  deps: DaemonCommandDeps
+): Promise<{ ok: true } | { ok: false; error: string; runningTasks: number }> {
+  if (options.force) return { ok: true };
+
+  const warn = deps.warn ?? defaultWarn;
+  const info = deps.info ?? defaultInfo;
+
+  const inspection = inspectDaemon(dir);
+  if (inspection.status === 'stale') {
+    warn('守护进程未运行，跳过任务等待，继续执行重启。');
+    return { ok: true };
+  }
+  if (inspection.status === 'unverifiable') {
+    warn('守护进程身份无法验证，跳过任务等待，继续执行重启。');
+    return { ok: true };
+  }
+
+  const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
+  const parsedUrl = resolveLocalUrl(state?.address, localAddresses);
+  if (!parsedUrl) {
+    warn('守护进程监听地址不可用于本机查询，跳过任务等待，继续执行重启。');
+    return { ok: true };
+  }
+
+  let token: string | undefined;
+  if (state?.authEnabled !== false && state?.database) {
+    token = (deps.readToken ?? defaultReadToken)(state.database);
+  }
+
+  const fetcher = deps.fetch ?? fetch;
+  const queryRunningTasks = async (): Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }> => {
+    try {
+      const url = new URL('/api/system/activity', parsedUrl.origin);
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      };
+      const response = await fetcher(url.toString(), {
+        method: 'GET',
+        headers
+      });
+      if (!response.ok) {
+        return { ok: false, error: `HTTP ${response.status}` };
+      }
+      const data = await response.json() as any;
+      if (typeof data?.runningTasks !== 'number' || !Number.isSafeInteger(data.runningTasks) || data.runningTasks < 0) {
+        return { ok: false, error: '接口返回数据格式错误' };
+      }
+      return { ok: true, runningTasks: data.runningTasks };
+    } catch (error: any) {
+      return { ok: false, error: error?.message || String(error) };
+    }
+  };
+
+  const initial = await queryRunningTasks();
+  if (!initial.ok) {
+    warn(`查询正在执行的任务数失败（${initial.error}），跳过等待继续重启。`);
+    return { ok: true };
+  }
+
+  if (initial.runningTasks === 0) {
+    return { ok: true };
+  }
+
+  const timeoutSeconds = options.drainTimeout
+    ? Math.max(1, parseInt(String(options.drainTimeout), 10) || DEFAULT_DRAIN_TIMEOUT_SECONDS)
+    : DEFAULT_DRAIN_TIMEOUT_SECONDS;
+
+  info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）`);
+
+  const sleeper = deps.sleep ?? sleep;
+  const timer = deps.now ?? Date.now;
+  const deadline = timer() + timeoutSeconds * 1000;
+  let currentRunning = initial.runningTasks;
+
+  while (currentRunning > 0) {
+    await sleeper(DRAIN_INTERVAL_MS);
+    const current = await queryRunningTasks();
+    if (!current.ok) {
+      warn(`查询正在执行的任务数失败（${current.error}），跳过等待继续重启。`);
+      return { ok: true };
+    }
+    currentRunning = current.runningTasks;
+    if (currentRunning === 0) {
+      return { ok: true };
+    }
+    if (timer() >= deadline) {
+      return {
+        ok: false,
+        runningTasks: currentRunning,
+        error: `等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。`
+      };
+    }
+  }
+
+  return { ok: true };
 }
 
 export interface DaemonCommandHandlers extends DaemonCommandDeps {
@@ -325,6 +490,10 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
     return { ok: false, action: 'restart', running, pid: previousState?.pid,
       error: `SQLite 预检失败，已拒绝重启${running ? '，旧的守护进程仍在运行' : ''}。${describeSqliteDriverFailure(sqlite)}。换一个能加载该驱动的 node（写绝对路径）重跑 dutydeck restart。` };
   }
+  const drain = await waitForRunningTasksDrain(runningDir, previousState, options, handlers);
+  if (!drain.ok) {
+    return { ok: false, action: 'restart', running: true, pid: previousState?.pid, error: drain.error };
+  }
   const stopped = await daemonStop(handlers);
   if (!stopped.ok) return { ...stopped, action: 'restart' };
   if (previousCwd && previousCwd !== process.cwd()) {
@@ -443,7 +612,12 @@ function systemctlFailure(verb: string, unit: string, output: AutostartCommandOu
 /** 新进程按 unit 的 ExecStart 启动，命令行上的服务参数传不过去；显式给了就拒绝，不静默丢弃。 */
 function explicitServerFlags(options: CliOptions): string[] {
   return Object.entries(options)
-    .filter(([key, value]) => value !== undefined && key !== 'json' && key !== 'foreground' && !(key === 'larkListen' && value === true))
+    .filter(([key, value]) => value !== undefined
+      && key !== 'json'
+      && key !== 'foreground'
+      && key !== 'force'
+      && key !== 'drainTimeout'
+      && !(key === 'larkListen' && value === true))
     .map(([key, value]) => key === 'auth' && value === false ? '--no-auth'
       : key === 'larkListen' ? '--no-lark-listen'
         : `--${key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`);
@@ -539,6 +713,10 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
   if (!sqlite.ok) {
     return { ok: false, action: 'restart', running: true, pid: state.pid,
       error: `SQLite 预检失败，已拒绝重启，旧的守护进程仍在运行。${describeSqliteDriverFailure(sqlite)}。unit ${unit} 的 ExecStart 用的就是这个解释器：换成能加载该驱动的 node，用它重跑 dutydeck autostart enable 改写 unit 后再重启。` };
+  }
+  const drain = await waitForRunningTasksDrain(dir, state, options, deps);
+  if (!drain.ok) {
+    return { ok: false, action: 'restart', running: true, pid: state.pid, error: drain.error };
   }
   const logOffset = daemonLogSize(dir);
   const restarted = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'restart', unit]);

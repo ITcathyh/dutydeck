@@ -95,7 +95,7 @@ async function serve(options: CliOptions, onReady?: () => void) {
   });
 }
 
-async function restartWithInstalledCli(entrypoint: string) {
+async function restartWithInstalledCli(entrypoint: string, options: { force?: boolean; drainTimeout?: string } = {}) {
   if (!existsSync(entrypoint)) throw new Error(`Updated Dutydeck entrypoint was not found: ${entrypoint}. The service was not restarted.`);
   // 受 systemd 托管时，restart 由 unit 的 ExecStart 拉起；它若指向别的入口，重启后跑的仍是旧代码。
   const supervised = await systemdRestartTarget();
@@ -104,7 +104,10 @@ async function restartWithInstalledCli(entrypoint: string) {
     throw new Error(`Dutydeck is supervised by systemd unit ${supervised.unit}, whose ExecStart runs ${supervised.script} instead of the updated ${entrypoint}; restarting would keep the old code. Run ${process.execPath} ${entrypoint} autostart enable to repoint the unit, then run dutydeck restart. The service was not restarted.`);
   }
   const previousPid = daemonStatus().pid;
-  const child = spawn(process.execPath, [entrypoint, 'daemon', 'restart'], { stdio: 'inherit', env: process.env });
+  const args = [entrypoint, 'daemon', 'restart'];
+  if (options.force) args.push('--force');
+  if (options.drainTimeout) args.push('--drain-timeout', options.drainTimeout);
+  const child = spawn(process.execPath, args, { stdio: 'inherit', env: process.env });
   await new Promise<void>((resolve, reject) => {
     child.once('error', reject);
     child.once('exit', code => code === 0 ? resolve() : reject(new Error(`Dutydeck restart exited with code ${code ?? 'unknown'}.`)));
@@ -292,7 +295,7 @@ async function main() {
       output(await updateDutydeck(packageJson.version, options, {
         packageName: packageJson.name,
         runNpm: runNpmForDutydeckUpdate,
-        restart: restartWithInstalledCli
+        restart: (entrypoint, restartOptions) => restartWithInstalledCli(entrypoint, restartOptions)
       }));
     },
     authToken: async options => {

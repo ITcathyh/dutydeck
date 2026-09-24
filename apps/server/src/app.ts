@@ -141,6 +141,9 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.collaboration) await registerCollaborationRoutes(app, options.collaboration);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
+  app.get('/api/system/activity', async () => ({
+    runningTasks: runtime.getRunningTaskCount()
+  }));
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
   app.get<{ Params: { id: string }; Querystring: { model?: string; refresh?: string } }>('/api/agents/:id/models', async request => {
     const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);

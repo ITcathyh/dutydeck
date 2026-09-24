@@ -1312,6 +1312,14 @@ export class DutydeckRuntime {
     };
   }
 
+  getRunningTaskCount(): number {
+    let count = 0;
+    for (const task of this.activeTasks.values()) {
+      if (task.status === 'running') count++;
+    }
+    return count;
+  }
+
   async start(input: StartSessionInput): Promise<Session> {
     this.assertReady();
     if (input?.source === 'work_item') throw new RuntimeError('INVALID_WORK_SESSION', 'Work-item sessions require the internal admission API', 403);
