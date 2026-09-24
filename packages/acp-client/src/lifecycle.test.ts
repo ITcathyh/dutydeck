@@ -19,6 +19,7 @@ function deferred<T = void>() {
 const dirs: string[] = [];
 const adapters: AcpxAdapter[] = [];
 afterEach(async () => {
+  vi.useRealTimers();
   for (const release of releases.splice(0)) release();
   for (const directory of dirs) {
     await writeFile(join(directory, 'release'), 'release');
@@ -409,8 +410,15 @@ describe('ACP instance revocation', () => {
     const { adapter, cwd } = await setup({ env: { lifecycle_cancel_gate: '1' } });
     await writeFile(join(cwd, 'release'), 'release');
     await adapter.start(); adapter.agent.timeout = 0.05;
-    await expect(adapter.send('wait')).rejects.toMatchObject({ name: 'AgentIdleTimeoutError' });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const sending = adapter.send('wait').catch(error => error);
+    // Let the real subprocess receive the prompt before triggering idle cancellation.
+    await expect.poll(async () => (await readFile(join(cwd, 'calls.jsonl'), 'utf8')).includes('session/prompt')).toBe(true);
+    await vi.advanceTimersByTimeAsync(50);
     await expect.poll(() => existsSync(join(cwd, 'cancelling'))).toBe(true);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(await sending).toMatchObject({ name: 'AgentIdleTimeoutError' });
+    vi.useRealTimers();
     adapter.agent.timeout = 10;
     let finished = false; const next = adapter.send('next').then(() => { finished = true; });
     await new Promise(resolve => setImmediate(resolve));

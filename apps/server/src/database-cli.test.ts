@@ -126,10 +126,18 @@ describe('database-cli', () => {
         repos.close();
       }
 
+      const db = new Database(dbPath, { readonly: true });
+      let schemaVersion: number;
+      try {
+        schemaVersion = (db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version;
+      } finally {
+        db.close();
+      }
+
       const result = await runDatabaseExecutionStatus({ database: dbPath });
       expect(result.status).toBe('legacy');
       expect(result.authority).toBe('legacy');
-      expect(result.schemaVersion).toBe(23);
+      expect(result.schemaVersion).toBe(schemaVersion);
       expect(result.counts?.tasks).toBe(1);
     });
   });
