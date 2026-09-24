@@ -349,6 +349,14 @@ describe('/help 渲染', () => {
     expect((help.text.match(/[一-龥]/g) ?? []).length).toBeGreaterThan(40);
   });
 
+  it('/work 命令用法文案包含 consult', () => {
+    const caps = capabilities({ work: true });
+    const help = renderLarkCommandHelp(caps, { pageSize: 20 });
+    expect(help.text).toContain('/work consult');
+    const workDef = larkCommandRegistry.find(def => def.name === 'work');
+    expect(workDef?.usage).toContain('consult');
+  });
+
   it('分页有界：每页只渲染 pageSize 条，页码可越界夹取', () => {
     const first = renderLarkCommandHelp(fullCapabilities, { page: 1, pageSize: 2 });
     expect(first.totalPages).toBe(4);
