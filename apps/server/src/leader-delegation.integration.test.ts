@@ -56,7 +56,10 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
         if (prompt.includes('你是分层协作里的 Leader')) {
           if (!leader.open) await new Promise<void>(resolve => leader.waiting.push(resolve));
           text = leader.reply;
-        } else if (prompt.includes('Step: Leader 验收')) text = '验收结论：通过\n登录测试已核对。';
+        } else if (prompt.includes('Step: Leader 验收')) {
+          const inputs = JSON.parse(prompt.split('Upstream inputs (generated results, not independent business verification):\n')[1]!.split('\n\n')[0]!);
+          text = JSON.stringify({ decision: 'accept', reviewed: inputs.map((input: any) => ({ stepId: input.stepId, attemptId: input.attemptId, digest: input.generatedResult.digest })), feedback: '验收结论：通过\n登录测试已核对。' });
+        }
         else if (sessionId.startsWith('ses_work_')) text = '已修复：改动 src/login.ts，pnpm test 通过。';
         else { await new Promise<void>(resolve => releases.set(sessionId, resolve)); text = '已交给 Leader。'; }
         emit({ type: 'text', data: { text } });
@@ -133,6 +136,8 @@ describe('Leader 计划解析', () => {
     expect(result.decision).toBe('plan');
     const built = layeredPlan(result as Extract<typeof result, { decision: 'plan' }>, 'leader', ['worker']);
     expect(built.outputStepId).toBe('leader_review');
+    expect(built.steps.at(-1)!.reviewPolicy).toEqual({ maxReworkRounds: 2, allowedTargetStepIds: ['impl'] });
+    expect(() => layeredPlan(parseLeaderResult(plan('leader')) as any, 'leader', ['leader'])).toThrow(/与 Leader 不同/);
     expect(built.steps.map(step => [step.id, step.agentId, step.dependsOn])).toEqual([['impl', 'worker', []], ['leader_review', 'leader', ['impl']]]);
     expect(built.steps[1]!.instruction).toContain('1. 登录测试通过');
     expect(built.steps[0]!.workspaceMode).toBe('worktree');

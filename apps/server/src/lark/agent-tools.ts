@@ -1,4 +1,4 @@
-import { sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext } from './explicit-final.js';
+import { sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { layeredWorkbenchPrompt, workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
@@ -311,6 +311,48 @@ const deterministicSendUuid = (input: { sessionId: string; chatId: string; conte
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 };
 
+export const stripLeadingMentions = (text: string): string => {
+  let result = text.trim();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const atTagMatch = result.match(/^<at[^>]*>.*?<\/at>\s*/i);
+    if (atTagMatch) {
+      result = result.slice(atTagMatch[0].length).trim();
+      changed = true;
+      continue;
+    }
+    const atTextMatch = result.match(/^@[^\s]+\s*/);
+    if (atTextMatch) {
+      result = result.slice(atTextMatch[0].length).trim();
+      changed = true;
+      continue;
+    }
+  }
+  return result;
+};
+
+export const deterministicAgentActionKey = (input: {
+  sessionId: string;
+  taskId: string;
+  attemptId: string;
+  action: 'handoff' | 'reply-agent';
+  targetId: string;
+  content: string;
+}): string => {
+  const fingerprint = JSON.stringify({
+    session: input.sessionId,
+    task: input.taskId,
+    attempt: input.attemptId,
+    action: input.action,
+    target: input.targetId,
+    content: input.content.trim()
+  });
+  const hash = createHash('sha256').update(fingerprint).digest('hex');
+  const prefix = input.action === 'handoff' ? 'ah_' : 'ar_';
+  return `${prefix}${hash.slice(0, 42)}`;
+};
+
 export class LarkAgentToolsService {
   private readonly clients = new Map<string, { secret: string; client: LarkGroupToolClient }>();
   private readonly identities = new Map<string, { secret: string; info: Promise<LarkBotInfo> }>();
@@ -510,6 +552,15 @@ export class LarkAgentToolsService {
       if (task?.attemptId && config.groupToolsAllowSend && this.options.finalTaskContext) {
         const finalTurn = this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId);
         blocks.push(`主动交付本轮最终答复：${this.options.groupToolsCommand ?? 'dutydeck'} group send '<完整答复>' --final --turn ${finalTurn}。发送目标由本轮任务绑定；不要指定 --to 或自定义幂等键。普通进展和交接不要加 --final。映射尚未就绪时稍后重试。`);
+        if (binding.chatType === 'group') {
+          const cmd = this.options.groupToolsCommand ?? 'dutydeck';
+          blocks.push(`单次 Agent 任务交接与回传（仅限群聊，绑定当前任务轮次与原话题）：
+- 向同群其他机器人交接任务：${cmd} group handoff <目标bot名称/appId/openId> '<交接内容>' --turn ${finalTurn}
+  交接时请在内容中附带明确目标、代码版本、实际工作区、只读/可写边界和验收标准；系统会自动 @目标 机器人并添加 [Agent 交接] 标记。
+- 收到交接后向发起方回传结果：${cmd} group reply-agent '<交付结果>' --turn ${finalTurn}
+  回传会自动回复发起方机器人并在原话题内回传一次，添加 [Agent 结果] 标记。
+规则：只给任务/实质结果 @机器人；收到或谢谢等礼貌确认切勿 @机器人，避免唤醒死循环。多轮审查返修请走 work 命令，不放大普通机器人门禁。`);
+        }
       }
       if (task) {
         const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
@@ -745,6 +796,227 @@ export class LarkAgentToolsService {
       sendImage: value => value.replyTo ? this.authorized(context, 'reply', () => client.replyImage!({ messageId: value.replyTo!, replyInThread: value.inThread, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey })) : this.authorized(context, 'send', () => client.sendImage!({ chatId: value.chatId, imageKey: value.imageKey, idempotencyKey: value.idempotencyKey }))
     };
     return deliverArtifact({ configs: this.configs, sessionId: context.sessionId, cwd: session.cwd, client: artifactClient, path, target, image: input.image === true, idempotencyKey: input.idempotencyKey });
+  }
+
+  private async resolveHandoffScope(token: string | undefined, turn?: string): Promise<{
+    context: ToolContext;
+    task: { taskId: string; attemptId: string };
+    scope: ExplicitFinalScope;
+  }> {
+    const context = await this.context(token, 'group_tools.send');
+    if (context.chatType !== 'group') {
+      throw new AgentGroupToolError('GROUP_TOOL_CHAT_TYPE_INVALID', '交接工具仅支持群聊会话使用。', 400);
+    }
+    if (!context.config.groupToolsAllowSend) {
+      throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
+    }
+    if (!turn?.trim()) {
+      throw new AgentGroupToolError('FINAL_FLAG_REQUIRED', '--turn 凭证不能为空。', 400);
+    }
+    const active = this.options.workbenchTask?.(context.sessionId);
+    if (!active?.attemptId) {
+      throw new AgentGroupToolError('FINAL_NO_ACTIVE_TASK', '没有可交接的活跃任务。', 409);
+    }
+    this.capabilities.assertFinalTurn(context.sessionId, active.taskId, active.attemptId, turn);
+    const target = await this.options.finalTaskContext?.(context, { taskId: active.taskId, attemptId: active.attemptId });
+    if (!target) {
+      throw new AgentGroupToolError('FINAL_MAPPING_UNAVAILABLE', '本轮消息映射尚未就绪，请稍后重试。', 409);
+    }
+    const scope = target.scope;
+    if (
+      scope.app_id !== context.appId ||
+      scope.session_id !== context.sessionId ||
+      scope.runtime_task_id !== active.taskId ||
+      scope.attempt_id !== active.attemptId ||
+      scope.chat_id !== context.chatId ||
+      scope.chat_type !== context.chatType ||
+      scope.chat_type !== 'group' ||
+      !scope.origin_message_id?.startsWith('om_')
+    ) {
+      throw new AgentGroupToolError('FINAL_TARGET_MISMATCH', '当前任务作用域与会话不匹配。', 400);
+    }
+    return { context, task: { taskId: active.taskId, attemptId: active.attemptId }, scope };
+  }
+
+  private async commitAgentAction(
+    token: string | undefined,
+    context: ToolContext,
+    active: { taskId: string; attemptId: string },
+    expectedScope: ExplicitFinalScope,
+    targetPeer: AgentGroupPeer,
+    text: string,
+    idempotencyKey: string
+  ) {
+    // 1. 最终映射异步检查，在最后一次 context(send) 授权之前完成
+    const finalTarget = await this.options.finalTaskContext?.(context, { taskId: active.taskId, attemptId: active.attemptId });
+    if (!finalTarget || JSON.stringify(finalTarget.scope) !== JSON.stringify(expectedScope)) {
+      throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次或映射已失效。', 403);
+    }
+
+    // 2. 最后一次 context(send) 授权
+    const freshContext = await this.context(token, 'group_tools.send');
+    if (!freshContext.config.groupToolsAllowSend) {
+      throw new AgentGroupToolError('GROUP_TOOL_SEND_DISABLED', '当前飞书机器人的群协作发送能力已被管理员关闭。', 403);
+    }
+
+    // 3. 所有异步查询结束后立即同步重读 active task/attempt
+    const currentTask = this.options.workbenchTask?.(freshContext.sessionId);
+    if (!currentTask?.attemptId || currentTask.taskId !== active.taskId || currentTask.attemptId !== active.attemptId) {
+      throw new AgentGroupToolError('FINAL_TURN_EXPIRED', '任务轮次已结束。', 403);
+    }
+
+    // 4. 同步校验通过，立即发送（中间无任何 await）
+    const result = await this.authorized(freshContext, 'reply', () => freshContext.client.replyText({
+      messageId: expectedScope.origin_message_id,
+      text,
+      replyInThread: true,
+      idempotencyKey
+    }));
+
+    return {
+      messageId: result.messageId,
+      chatId: result.chatId ?? freshContext.chatId,
+      target: {
+        appId: targetPeer.appId,
+        name: targetPeer.name,
+        ...(targetPeer.openId ? { openId: targetPeer.openId } : {})
+      },
+      replyTo: expectedScope.origin_message_id
+    };
+  }
+
+  async handoff(token: string | undefined, input: { to?: string; content?: string; turn?: string }) {
+    const to = input.to?.trim();
+    if (!to) throw new AgentGroupToolError('HANDOFF_TARGET_REQUIRED', 'to 目标机器人不能为空。', 400);
+    const content = input.content?.trim();
+    if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
+    if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
+
+    const { context, task, scope } = await this.resolveHandoffScope(token, input.turn);
+
+    const original = await this.authorized(context, 'reply', () => context.client.getMessage(scope.origin_message_id));
+    await this.assertMessageScope(context, original, true);
+
+    const botInfo = await this.identityFor(context.config);
+    const selfIdentifiers = new Set<string>();
+    if (context.appId) selfIdentifiers.add(context.appId.toLowerCase());
+    if (botInfo.openId) selfIdentifiers.add(botInfo.openId.toLowerCase());
+    const isSelfIdentifier = (id?: string) => Boolean(id && selfIdentifiers.has(id.toLowerCase()));
+    const isSelfPeer = (p: AgentGroupPeer) => isSelfIdentifier(p.appId) || isSelfIdentifier(p.memberId) || isSelfIdentifier(p.openId);
+
+    const targetLower = to.toLowerCase();
+    if (isSelfIdentifier(targetLower)) {
+      throw new AgentGroupToolError('HANDOFF_TARGET_SELF_FORBIDDEN', '不允许向自己交接任务。', 400);
+    }
+
+    const { peers } = await this.peersFor(context);
+    const botCandidates = peers.map(peer => ({
+      peer,
+      name: peer.name,
+      identifiers: [peer.appId, peer.agentId, peer.memberId, peer.openId].filter(Boolean) as string[]
+    }));
+    const idMatches = botCandidates.filter(c => c.identifiers.some(id => id.toLowerCase() === targetLower));
+    const matches = idMatches.length ? idMatches : botCandidates.filter(c => c.name.toLowerCase() === targetLower);
+    if (!matches.length) {
+      const { members } = await this.membersFor(context);
+      const humanMatches = members.filter(m => [m.memberId, m.openId].some(id => id?.toLowerCase() === targetLower) || m.name.toLowerCase() === targetLower);
+      if (humanMatches.length > 0) {
+        throw new AgentGroupToolError('HANDOFF_TARGET_HUMAN_FORBIDDEN', `目标 ${to} 是群内人类成员；交接只能交接给机器人。`, 400);
+      }
+      throw new AgentGroupToolError('GROUP_TARGET_NOT_FOUND', `当前群内没有找到目标机器人：${to}。请先调用 peers 获取可用机器人。`, 404);
+    }
+    if (matches.length > 1) {
+      throw new AgentGroupToolError('GROUP_TARGET_AMBIGUOUS', `目标机器人 ${to} 对应多个机器人，请改用 appId 或 openId。`, 409);
+    }
+    const targetPeer = matches[0]!.peer;
+
+    if (isSelfPeer(targetPeer)) {
+      throw new AgentGroupToolError('HANDOFF_TARGET_SELF_FORBIDDEN', '不允许向自己交接任务。', 400);
+    }
+
+    const senderBotName = context.config.name ?? botInfo.appName ?? context.appId;
+    const mentionId = targetPeer.openId ?? targetPeer.memberId;
+    const text = `<at user_id="${mentionId}">${escapeAtName(targetPeer.name)}</at> [Agent 交接] 来自 ${escapeAtName(senderBotName)} (${context.appId})\n请在原话题内完成任务并使用 reply-agent 回传实质结果（一次回传，无须重复确认）：\n\n${content}`;
+
+    const targetId = targetPeer.openId ?? targetPeer.appId ?? targetPeer.memberId;
+    const idempotencyKey = deterministicAgentActionKey({
+      sessionId: context.sessionId,
+      taskId: task.taskId,
+      attemptId: task.attemptId,
+      action: 'handoff',
+      targetId,
+      content
+    });
+
+    return this.commitAgentAction(token, context, task, scope, targetPeer, text, idempotencyKey);
+  }
+
+  async replyAgent(token: string | undefined, input: { content?: string; turn?: string }) {
+    const content = input.content?.trim();
+    if (!content) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能为空。', 400);
+    if (content.length > 20_000) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE', 'content 不能超过 20000 个字符。', 400);
+
+    const { context, task, scope } = await this.resolveHandoffScope(token, input.turn);
+
+    const original = await this.authorized(context, 'reply', () => context.client.getMessage(scope.origin_message_id));
+    await this.assertMessageScope(context, original, true);
+
+    const sender = original.sender;
+    if (!sender || (sender.type !== 'app' && (sender as any).type !== 'bot')) {
+      throw new AgentGroupToolError('REPLY_AGENT_ORIGIN_NOT_BOT', '当前任务原始消息不是由机器人发起，无法使用 reply-agent 回传。', 400);
+    }
+    if (!sender.id) {
+      throw new AgentGroupToolError('REPLY_AGENT_SENDER_UNRESOLVABLE', '原始消息缺少有效的发送方标识。', 400);
+    }
+
+    const botInfo = await this.identityFor(context.config);
+    const selfIdentifiers = new Set<string>();
+    if (context.appId) selfIdentifiers.add(context.appId.toLowerCase());
+    if (botInfo.openId) selfIdentifiers.add(botInfo.openId.toLowerCase());
+    const isSelfIdentifier = (id?: string) => Boolean(id && selfIdentifiers.has(id.toLowerCase()));
+    const isSelfPeer = (p: AgentGroupPeer) => isSelfIdentifier(p.appId) || isSelfIdentifier(p.memberId) || isSelfIdentifier(p.openId);
+
+    const senderId = sender.id.toLowerCase();
+    if (isSelfIdentifier(senderId)) {
+      throw new AgentGroupToolError('REPLY_AGENT_TARGET_SELF_FORBIDDEN', '无法向自己回传结果。', 400);
+    }
+
+    const originalText = await renderMessageContent(original);
+    const strippedText = stripLeadingMentions(originalText);
+    if (strippedText.startsWith('[Agent 结果]')) {
+      throw new AgentGroupToolError('AGENT_REPLY_ALREADY_COMPLETED', '当前消息已是 [Agent 结果]，无需再次回传，避免循环确认。', 400);
+    }
+
+    const { peers } = await this.peersFor(context);
+    const matchedPeers = peers.filter(peer =>
+      [peer.openId, peer.memberId, peer.appId].some(id => id?.toLowerCase() === senderId)
+    );
+    if (!matchedPeers.length) {
+      throw new AgentGroupToolError('REPLY_AGENT_SENDER_NOT_IN_PEERS', '发起交接的机器人不在当前群内或无法解析为当前群机器人。', 400);
+    }
+    if (matchedPeers.length > 1) {
+      throw new AgentGroupToolError('GROUP_TARGET_AMBIGUOUS', '发起交接的机器人对应多个群机器人，存在歧义。', 409);
+    }
+    const targetPeer = matchedPeers[0]!;
+
+    if (isSelfPeer(targetPeer)) {
+      throw new AgentGroupToolError('REPLY_AGENT_TARGET_SELF_FORBIDDEN', '无法向自己回传结果。', 400);
+    }
+
+    const mentionId = targetPeer.openId ?? targetPeer.memberId;
+    const text = `<at user_id="${mentionId}">${escapeAtName(targetPeer.name)}</at> [Agent 结果]\n任务交付结果如下（这是最终结果，请勿为“收到/谢谢”等礼貌确认再次唤醒）：\n\n${content}`;
+
+    const targetId = targetPeer.openId ?? targetPeer.appId ?? targetPeer.memberId;
+    const idempotencyKey = deterministicAgentActionKey({
+      sessionId: context.sessionId,
+      taskId: task.taskId,
+      attemptId: task.attemptId,
+      action: 'reply-agent',
+      targetId,
+      content
+    });
+
+    return this.commitAgentAction(token, context, task, scope, targetPeer, text, idempotencyKey);
   }
 }
 

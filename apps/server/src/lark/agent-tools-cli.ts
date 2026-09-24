@@ -121,3 +121,24 @@ export function runGroupSend(content: string, cliOptions: AgentGroupCliOptions, 
 export function runGroupSendFile(path: string, cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
   return new AgentGroupToolHttpClient(options).request('/send-file', { method: 'POST', body: JSON.stringify({ path, ...(cliOptions.replyTo ? { replyTo: cliOptions.replyTo } : {}), ...(cliOptions.inThread ? { inThread: true } : {}), ...(cliOptions.idempotencyKey ? { idempotencyKey: cliOptions.idempotencyKey } : {}), ...(cliOptions.image ? { image: true } : {}) }) });
 }
+
+export function runGroupHandoff(target: string, content: string, cliOptions: { turn: string }, options: GroupToolClientOptions = {}) {
+  return new AgentGroupToolHttpClient(options).request('/handoff', {
+    method: 'POST',
+    body: JSON.stringify({
+      to: target,
+      content,
+      turn: cliOptions.turn
+    })
+  });
+}
+
+export function runGroupReplyAgent(content: string, cliOptions: { turn: string }, options: GroupToolClientOptions = {}) {
+  return new AgentGroupToolHttpClient(options).request('/reply-agent', {
+    method: 'POST',
+    body: JSON.stringify({
+      content,
+      turn: cliOptions.turn
+    })
+  });
+}

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AgentGroupToolCliError, runGroupMembers, runGroupMessages, runGroupSend, runGroupSendFile } from './agent-tools-cli.js';
+import { AgentGroupToolCliError, runGroupHandoff, runGroupMembers, runGroupMessages, runGroupReplyAgent, runGroupSend, runGroupSendFile } from './agent-tools-cli.js';
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
@@ -64,4 +64,21 @@ it('transmits final and turn without changing ordinary send fields', async () =>
     fetcher: fetcher as typeof fetch
   });
   expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).toEqual({ content: 'answer', final: true, turn: 'signed-turn' });
+});
+
+it('transmits handoff and reply-agent payloads through scoped capability', async () => {
+  const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => response({ messageId: 'om_action' }));
+  await runGroupHandoff('cli_peer', 'handoff task', { turn: 'signed-turn' }, {
+    env: { dutydeck_group_tools_url: 'http://localhost/api/lark/agent-tools', dutydeck_group_tools_token: 'capability' },
+    fetcher: fetcher as typeof fetch
+  });
+  expect(fetcher).toHaveBeenCalledWith('http://localhost/api/lark/agent-tools/handoff', expect.objectContaining({ method: 'POST' }));
+  expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).toEqual({ to: 'cli_peer', content: 'handoff task', turn: 'signed-turn' });
+
+  await runGroupReplyAgent('result answer', { turn: 'signed-turn' }, {
+    env: { dutydeck_group_tools_url: 'http://localhost/api/lark/agent-tools', dutydeck_group_tools_token: 'capability' },
+    fetcher: fetcher as typeof fetch
+  });
+  expect(fetcher).toHaveBeenCalledWith('http://localhost/api/lark/agent-tools/reply-agent', expect.objectContaining({ method: 'POST' }));
+  expect(JSON.parse(String(fetcher.mock.calls[1]![1]?.body))).toEqual({ content: 'result answer', turn: 'signed-turn' });
 });

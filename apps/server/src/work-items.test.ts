@@ -1,5 +1,7 @@
 import Database from 'better-sqlite3';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -22,9 +24,16 @@ const plan: WorkPlan = {
     { id: 'join', title: 'Synthesis', kind: 'agent', agentId: 'alpha', instruction: 'Compare both results', dependsOn: ['a', 'b'] }
   ], outputStepId: 'join'
 };
-interface Call { sessionId: string; prompt: string; finish: (text: string, failed?: boolean) => void }
-async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confirmed') {
+interface Call { sessionId: string; prompt: string; finish: (text: string | string[], failed?: boolean) => void }
+async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confirmed', git = false) {
   const directory = await mkdtemp(join(tmpdir(), 'dutydeck-work-items-'));
+  if (git) {
+    const run = promisify(execFile);
+    await run('git', ['init', directory]);
+    await writeFile(join(directory, 'seed.txt'), 'baseline');
+    await run('git', ['-C', directory, 'add', 'seed.txt']);
+    await run('git', ['-C', directory, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-m', 'fixture']);
+  }
   const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agents = ['alpha', 'beta'].map(id => agentConfigSchema.parse({ id, name: id, command: 'fake', protocol: 'acp', cwd: directory, permissionMode: 'ask' }));
   const calls: Call[] = []; const stopped: string[] = [];
@@ -54,7 +63,15 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
           current = () => { onEvent({ type: 'completed', data: { stopReason: 'cancelled' } }); resolve(); };
           calls.push({ sessionId, prompt, finish(text, failed) {
             if (failed) onEvent({ type: 'error', data: { message: 'Synthetic failure' } });
-            if (text) onEvent({ type: 'text', data: { text } });
+            if (Array.isArray(text)) {
+              for (const [index, chunk] of text.entries()) {
+                onEvent({ type: 'text', data: { text: chunk } });
+                if (index < text.length - 1) {
+                  onEvent({ type: 'tool_call', data: { id: `read-${index}`, name: 'read_file', status: 'running' } });
+                  onEvent({ type: 'tool_result', data: { id: `read-${index}`, status: 'completed', output: 'file contents inspected' } });
+                }
+              }
+            } else if (text) onEvent({ type: 'text', data: { text } });
             onEvent({ type: 'completed', data: { stopReason: 'end_turn' } }); current = undefined; resolve();
           } });
         })
@@ -77,7 +94,7 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
     create: (custom = plan, key = 'request-1') => service.create(parent.id, { goal: 'Compare evidence', plan: custom, idempotencyKey: key }, 'ou_owner'),
     get: (id: string) => service.get(parent.id, id, 'ou_owner'),
     async tick() { await service.tick(); await new Promise(resolve => setTimeout(resolve, 10)); },
-    async finish(call: Call, text: string, failed = false) {
+    async finish(call: Call, text: string | string[], failed = false) {
       call.finish(text, failed);
       await eventually(async () => (await repos.tasks.listBySession(call.sessionId)).every(task => !['queued', 'running'].includes(task.status)));
     }
@@ -440,4 +457,158 @@ describe('WorkItemService with real Runtime and SQLite', () => {
     expect(await f.get(item.id)).toMatchObject({ status: 'cancelled', revision: newer.item.revision, delivery: { status: 'not_requested' } });
   });
 
+});
+
+const reviewPlan = (maxReworkRounds = 2): WorkPlan => ({ ...plan, steps: plan.steps.map(step => step.id === 'join'
+  ? { ...step, reviewPolicy: { maxReworkRounds, allowedTargetStepIds: ['b'] } } : step) });
+const reviewedInputs = (call: Call) => JSON.parse(call.prompt.split('Upstream inputs (generated results, not independent business verification):\n')[1]!.split('\n\n')[0]!) as Array<{ stepId: string; attemptId: string; generatedResult: { digest: string }; workspace: { cwd: string } }>;
+const reviewVerdict = (call: Call, decision: 'accept' | 'rework' | 'stop', feedback = 'Verified acceptance criteria', patch: Record<string, unknown> = {}) => JSON.stringify({
+  decision, reviewed: reviewedInputs(call).map(input => ({ stepId: input.stepId, attemptId: input.attemptId, digest: input.generatedResult.digest })),
+  ...(decision === 'rework' ? { targetStepId: 'b' } : {}), feedback, ...patch
+});
+async function reachReview(f: Awaited<ReturnType<typeof fixture>>, custom = reviewPlan()) {
+  const item = await f.create(custom);
+  await f.tick(); await eventually(async () => f.calls.length === 2);
+  await f.finish(f.calls[0]!, 'Context evidence'); await f.finish(f.calls[1]!, 'Implementation version 1');
+  await f.tick(); await eventually(async () => f.calls.length === 3);
+  return item;
+}
+
+describe('Bounded independent review with real Runtime and SQLite', () => {
+  it('rejects reviews on intermediate steps, upstream targets, duplicate targets and self-review', () => {
+    expect(() => workPlanSchema.parse(reviewPlan())).not.toThrow();
+    const withSteps = (steps: WorkPlan['steps']) => ({ ...reviewPlan(), steps });
+    expect(() => workPlanSchema.parse(withSteps(reviewPlan().steps.map(step => step.id === 'a' ? { ...step, reviewPolicy: { maxReworkRounds: 1, allowedTargetStepIds: ['b'] } } : step)))).toThrow();
+    expect(() => workPlanSchema.parse(withSteps(reviewPlan().steps.map(step => step.id === 'a' ? { ...step, dependsOn: ['b'] } : step)))).toThrow();
+    expect(() => workPlanSchema.parse(withSteps(reviewPlan().steps.map(step => step.id === 'join' ? { ...step, reviewPolicy: { maxReworkRounds: 1, allowedTargetStepIds: ['b', 'b'] } } : step)))).toThrow();
+    expect(() => workPlanSchema.parse(withSteps(reviewPlan().steps.map(step => step.id === 'b' ? { ...step, agentId: 'alpha' } : step)))).toThrow();
+  });
+
+  it('reworks in the original git worktree across restart, preserving uncommitted files and unrelated steps', async () => {
+    const f = await fixture('confirmed', true);
+    const custom = reviewPlan(); custom.steps = custom.steps.map(step => step.id === 'b' ? { ...step, workspaceMode: 'worktree' } : step);
+    const item = await f.create(custom);
+    await f.tick(); await eventually(async () => f.calls.length === 2);
+    const firstWorkspace = (await f.runtime.getWorkspace(f.calls[1]!.sessionId))!;
+    expect(firstWorkspace.mode).toBe('worktree'); expect(firstWorkspace.cwd).not.toBe(f.parent.cwd);
+    await writeFile(join(firstWorkspace.cwd, 'feature.txt'), 'version one');
+    await f.finish(f.calls[0]!, 'Context evidence'); await f.finish(f.calls[1]!, 'Implementation version 1');
+    await f.tick(); await eventually(async () => f.calls.length === 3);
+    expect(reviewedInputs(f.calls[2]!).find(input => input.stepId === 'b')!.workspace.cwd).toBe(firstWorkspace.cwd);
+    expect(await readFile(join(firstWorkspace.cwd, 'feature.txt'), 'utf8')).toBe('version one');
+    await f.finish(f.calls[2]!, reviewVerdict(f.calls[2]!, 'rework', 'Add the missing edge case'));
+    await f.tick();
+    expect((await f.get(item.id)).steps.map(step => step.status)).toEqual(['completed', 'pending', 'pending']);
+    await f.reboot(); await f.tick(); await eventually(async () => f.calls.length === 4);
+    const reworkWorkspace = (await f.runtime.getWorkspace(f.calls[3]!.sessionId))!;
+    expect(reworkWorkspace).toMatchObject({ mode: 'shared', cwd: firstWorkspace.cwd });
+    expect(await readFile(join(reworkWorkspace.cwd, 'feature.txt'), 'utf8')).toBe('version one');
+    expect(f.calls[3]!.prompt).toContain('Add the missing edge case');
+    await writeFile(join(reworkWorkspace.cwd, 'feature.txt'), 'version two');
+    await f.finish(f.calls[3]!, 'Implementation version 2, edge case verified');
+    await f.tick(); await eventually(async () => f.calls.length === 5);
+    expect(await readFile(join(reviewedInputs(f.calls[4]!).find(input => input.stepId === 'b')!.workspace.cwd, 'feature.txt'), 'utf8')).toBe('version two');
+    expect(f.calls[4]!.prompt).toContain('Add the missing edge case');
+    const final = reviewVerdict(f.calls[4]!, 'accept', '验收结论：通过\nBoth file and edge case verified');
+    await f.finish(f.calls[4]!, final); await f.tick();
+    const done = await f.get(item.id);
+    expect(done.status).toBe('completed'); expect(done.output!.text).toBe('验收结论：通过\nBoth file and edge case verified');
+    expect(done.steps.map(step => step.attempts.length)).toEqual([1, 2, 2]);
+    expect(done.steps[2]!.attempts.map(attempt => attempt.review?.decision)).toEqual(['rework', 'accept']);
+    expect(done.steps[2]!.attempts[1]!.output!.text).toBe(final);
+    await f.tick(); expect(f.calls).toHaveLength(5); expect(f.deliveries).toHaveBeenCalledTimes(1);
+    await expect(readFile(join(f.parent.cwd, 'feature.txt'), 'utf8')).rejects.toThrow();
+  });
+
+  it.each(['stop', 'limit', 'stale', 'missing', 'duplicate', 'foreign', 'malformed'] as const)('blocks %s verdicts without reporting completion or launching another worker', async kind => {
+    const f = await fixture(); const item = await reachReview(f, reviewPlan(kind === 'limit' ? 0 : 2));
+    const call = f.calls[2]!; const refs = reviewedInputs(call).map(input => ({ stepId: input.stepId, attemptId: input.attemptId, digest: input.generatedResult.digest }));
+    const patch = kind === 'stale' ? { reviewed: refs.map(ref => ({ ...ref, attemptId: 'old-attempt' })) }
+      : kind === 'missing' ? { reviewed: refs.slice(0, 1) }
+      : kind === 'duplicate' ? { reviewed: [refs[0], refs[0]] }
+      : kind === 'foreign' ? { targetStepId: 'a' } : {};
+    const text = kind === 'malformed' ? '验收结论：需返修' : reviewVerdict(call, ['limit', 'foreign'].includes(kind) ? 'rework' : kind === 'stop' ? 'stop' : 'accept', 'Unresolved issue', patch);
+    await f.finish(call, text); await f.tick();
+    expect((await f.get(item.id)).status).toBe('blocked'); expect((await f.get(item.id)).output).toBeUndefined();
+    expect((await f.get(item.id)).steps[2]!.attempts[0]!.output!.text).toBe(text);
+    await f.recreateService(); await f.tick(); expect(f.calls).toHaveLength(3); expect(f.deliveries).not.toHaveBeenCalled();
+  });
+
+  it('accepts one final review block after multiple tool commentary chunks', async () => {
+    const f = await fixture(); const item = await reachReview(f); const call = f.calls[2]!;
+    const verdict = reviewVerdict(call, 'accept', 'Files and acceptance checks verified');
+    const chunks = ['I will inspect the implementation.\n', 'The implementation matches the checks.\n', '```dutydeck-review\n' + verdict + '\n```'];
+    await f.finish(call, chunks); await f.tick();
+    const done = await f.get(item.id);
+    expect(done.status).toBe('completed'); expect(done.output!.text).toBe('Files and acceptance checks verified');
+    expect(done.steps[2]!.attempts[0]!.output!.text).toBe(chunks.join(''));
+  });
+
+  it.each(['conflicting', 'trailing'] as const)('rejects %s content around review blocks', async kind => {
+    const f = await fixture(); const item = await reachReview(f); const call = f.calls[2]!;
+    const fenced = (decision: 'accept' | 'stop') => '```dutydeck-review\n' + reviewVerdict(call, decision) + '\n```';
+    await f.finish(call, kind === 'conflicting' ? [fenced('stop') + '\n', fenced('accept')] : [fenced('accept'), '\nActually, a test failed.']);
+    await f.tick(); expect((await f.get(item.id)).status).toBe('blocked'); expect(f.deliveries).not.toHaveBeenCalled();
+  });
+
+  it('preserves the latest findings when the next reviewer fails and is retried', async () => {
+    const f = await fixture(); const item = await reachReview(f);
+    const finding = 'Reject an empty token and add the regression check';
+    const originalVerdict = reviewVerdict(f.calls[2]!, 'rework', finding);
+    await f.finish(f.calls[2]!, originalVerdict); await f.tick(); await f.tick();
+    await eventually(async () => f.calls.length === 4);
+    expect(f.calls[3]!.prompt).toContain(finding);
+    await f.finish(f.calls[3]!, 'Implementation version 2: empty tokens rejected and tested'); await f.tick();
+    await eventually(async () => f.calls.length === 5);
+    expect(f.calls[4]!.prompt).toContain(finding);
+    expect(f.calls[4]!.prompt).toContain('Verify the previous findings against the new artifacts as well as the acceptance criteria.');
+    const currentInputs = reviewedInputs(f.calls[4]!);
+    const implementationRef = currentInputs.find(input => input.stepId === 'b')!;
+    expect(implementationRef.attemptId).toBe((await f.get(item.id)).steps[1]!.attempts[1]!.id);
+    await f.finish(f.calls[4]!, 'Reviewer process failed before a verdict', true); await f.tick();
+    const failed = await f.get(item.id);
+    expect(failed.status).toBe('failed');
+    await f.service.retryStep(f.parent.id, item.id, 'join', failed.revision, 'ou_owner');
+    await f.recreateService(); await f.tick(); await eventually(async () => f.calls.length === 6);
+    expect(f.calls[5]!.prompt).toContain(finding);
+    expect(f.calls[5]!.prompt).toContain('Verify the previous findings against the new artifacts as well as the acceptance criteria.');
+    expect(reviewedInputs(f.calls[5]!)).toEqual(currentInputs);
+    await f.finish(f.calls[5]!, reviewVerdict(f.calls[5]!, 'accept', 'Verified the finding and all acceptance checks')); await f.tick();
+    const done = await f.get(item.id);
+    expect(done.status).toBe('completed');
+    expect(done.steps.map(step => step.attempts.length)).toEqual([1, 2, 3]);
+    expect(done.steps[2]!.attempts[0]!.output!.text).toBe(originalVerdict);
+    expect(done.steps[2]!.attempts[0]!.review).toEqual(JSON.parse(originalVerdict));
+    expect(done.steps[2]!.attempts[2]!.review!.reviewed.find(ref => ref.stepId === 'b')).toEqual({ stepId: 'b', attemptId: implementationRef.attemptId, digest: implementationRef.generatedResult.digest });
+  });
+
+  it('enforces the positive rework limit across persisted rounds', async () => {
+    const f = await fixture(); const item = await reachReview(f, reviewPlan(1));
+    await f.finish(f.calls[2]!, reviewVerdict(f.calls[2]!, 'rework', 'Fix edge case')); await f.tick(); await f.tick();
+    await eventually(async () => f.calls.length === 4); await f.finish(f.calls[3]!, 'Version 2'); await f.tick();
+    await eventually(async () => f.calls.length === 5);
+    await f.finish(f.calls[4]!, reviewVerdict(f.calls[4]!, 'rework', 'Still failing')); await f.tick();
+    expect(await f.get(item.id)).toMatchObject({ status: 'blocked', error: 'Review rework limit reached: Still failing' });
+    await f.reboot(); await f.tick(); expect(f.calls).toHaveLength(5);
+  });
+
+  it.each(['cancel', 'revoke'] as const)('does not dispatch a rework after %s', async action => {
+    const f = await fixture(); const item = await reachReview(f);
+    await f.finish(f.calls[2]!, reviewVerdict(f.calls[2]!, 'rework', 'Fix edge case')); await f.tick();
+    if (action === 'cancel') {
+      const current = await f.get(item.id); await f.service.cancel(f.parent.id, item.id, current.revision, 'ou_owner');
+    } else f.denyAgent('beta');
+    await f.tick();
+    expect((await f.get(item.id)).status).toBe(action === 'cancel' ? 'cancelled' : 'blocked');
+    expect(f.calls).toHaveLength(3); expect(f.deliveries).not.toHaveBeenCalled();
+  });
+
+  it('does not reuse a worktree whose persisted ownership changed', async () => {
+    const f = await fixture(); const item = await reachReview(f);
+    await f.finish(f.calls[2]!, reviewVerdict(f.calls[2]!, 'rework', 'Fix edge case')); await f.tick();
+    const key = 'runtime_workspace:' + f.calls[1]!.sessionId;
+    const workspace = JSON.parse((await f.repos.config.get(key))!); workspace.cwd = join(f.directory, 'different');
+    await f.repos.config.set(key, JSON.stringify(workspace)); await f.tick();
+    expect((await f.get(item.id)).status).toBe('blocked'); expect(f.calls).toHaveLength(3);
+  });
 });

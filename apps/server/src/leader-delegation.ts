@@ -85,7 +85,7 @@ export function leaderPrompt(brief: { goal: string; context: string }, workers: 
     '- 要求 Worker 在最终答复里列出改动文件、所在分支或工作目录、执行过的验证命令和结果。',
     worktree ? '- 会并行改代码的步骤各自用 workspaceMode "worktree"，只读或串行的步骤用 "shared"。' : '- 当前工作目录不是 git 仓库，所有步骤只能用 workspaceMode "shared"；会改同一批文件的步骤用 dependsOn 串行。',
     '- 最多 11 步；dependsOn 只引用本计划内的步骤 id，不能成环。agentId 只能从 Worker 名单里选。',
-    '宿主会在最后追加一个由你执行的验收步骤，它拿到全部步骤产物后按 acceptance 逐条核对，所以 acceptance 要写成可核对的条目。',
+    '宿主会在最后追加独立验收，最多自动返修两轮；只能返修没有其他 Worker 依赖的末端步骤，上游问题会停止并交给用户。acceptance 要写成可核对的条目。',
     '信息不足以拆解时不要猜，输出 needs_context，提一个用户能直接回答的问题。',
     '只输出一个 JSON 对象，不要其他文字：',
     '{"decision":"plan","title":"流程名称","acceptance":"1. …\\n2. …","steps":[{"id":"impl","title":"步骤名","agentId":"Worker 的 id","instruction":"完整任务说明","dependsOn":[],"workspaceMode":"shared"}]}',
@@ -110,9 +110,12 @@ export function layeredPlan(result: Extract<LeaderResult, { decision: 'plan' }>,
   const foreign = result.steps.find(step => !workerAgentIds.includes(step.agentId));
   if (foreign) throw new RuntimeError('LEADER_PLAN_INVALID', `步骤 ${foreign.id} 指派了名单外的 Agent：${foreign.agentId}`, 422);
   const steps = result.steps.map(step => ({ id: step.id, title: step.title, kind: 'agent' as const, agentId: step.agentId, instruction: step.instruction, dependsOn: step.dependsOn, workspaceMode: worktree ? step.workspaceMode : 'shared' as const }));
+  const targets = steps.filter(step => !steps.some(other => other.dependsOn.includes(step.id)));
+  if (targets.some(step => step.agentId === leaderAgentId)) throw new RuntimeError('LEADER_PLAN_INVALID', '末端执行步骤必须交给与 Leader 不同的 Worker，才能进行独立验收和返修', 422);
   const parsed = workPlanSchema.safeParse({ title: result.title, outputStepId: leaderReviewStepId, steps: [...steps, {
     id: leaderReviewStepId, title: leaderReviewTitle, kind: 'agent', agentId: leaderAgentId, dependsOn: steps.map(step => step.id), workspaceMode: 'shared',
-    instruction: `你是本目标的 Leader，现在验收。对照下面的验收标准逐条核对上游各步骤的产物；需要时只读查看文件，不修改文件，不重做实现。\n验收标准：\n${result.acceptance}\n最终答复直接发给用户：第一行写「验收结论：通过」「验收结论：需返修」或「验收结论：缺少信息」之一；然后按步骤说明交付了什么、验证证据是什么、还有什么遗留。需返修时写清是哪一步、要改什么。`
+    reviewPolicy: { maxReworkRounds: 2, allowedTargetStepIds: targets.map(step => step.id) },
+    instruction: `你是本目标的 Leader，现在验收。对照下面的验收标准逐条核对上游各步骤的产物；需要时只读查看文件，不修改文件，不重做实现。\n验收标准：\n${result.acceptance}\n按宿主的结构化审查格式输出 accept/rework/stop，不能把 Worker 执行完成当作验收通过。feedback 会直接发给用户：第一行写「验收结论：通过」「验收结论：需返修」或「验收结论：缺少信息」之一；然后说明交付物、实际核对的验证证据和遗留问题。需返修时写清目标步骤和修改要求。`
   }] });
   if (!parsed.success) throw new RuntimeError('LEADER_PLAN_INVALID', `Leader 计划不合法：${parsed.error.issues.map(issue => issue.message).join('; ')}`, 422);
   return parsed.data;
