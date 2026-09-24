@@ -19,7 +19,7 @@
 export type LarkCardElement = Record<string, any>;
 
 /** 回调型操作。查看详情是 open_url 链接按钮，不是回调，故不在此列。 */
-export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify';
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'run_in_new_session' | 'rerun_in_new_session';
 
 /** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
 export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'reconcile_required' | 'legacy_unresolved';
@@ -44,6 +44,11 @@ export interface LarkCardCapabilities {
    * 绝不能看到这个按钮，那会暗示一个不存在的能力。
    */
   canVerify?: boolean;
+  /**
+   * 卡住的任务可以转到新会话：排队受阻或需要核对，且 coordinator 能取消排队、持久化认领并重放原请求。
+   * 缺省不声明即为 false，其余卡片绝不出现这两个按钮。
+   */
+  canRelaunch?: boolean;
   /** 已解析好的深链，仅在配置了 webBaseUrl 时提供。 */
   webUrl?: string;
 }
@@ -75,6 +80,9 @@ export const larkCardActionBudget = { maxButtons: 4, componentsPerButton: 3 } as
 /** taskId 上限：om_* 消息 ID 约 50 字符；超长说明上游有 bug，拒绝渲染回调按钮以保护 value 体积。 */
 const maxTaskIdLength = 256;
 const maxWebUrlLength = 512;
+
+/** 转到新会话的两个按钮文案。task-recovery.ts 的恢复说明引用同一份常量，正文里提到的按钮名与卡上一致。 */
+export const larkRelaunchLabels = { run_in_new_session: '在新会话中执行', rerun_in_new_session: '在新会话中重新执行' } as const;
 
 type LarkCardActionDefinition = {
   action: LarkCardActionName;
@@ -185,6 +193,29 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     // 只在非终态提供：终态已经收敛，刷新不会带来新信息。
     states: ['queued', 'running', 'interrupting'],
     capable: capabilities => capabilities.canRefresh,
+    primary: false
+  },
+  {
+    action: 'run_in_new_session',
+    elementId: 'run_in_new_session',
+    label: larkRelaunchLabels.run_in_new_session,
+    hint: '取消这条排队请求，在本话题的新会话中执行原文；原会话留给管理员核对',
+    buttonType: 'primary_text',
+    icon: 'add-chat_outlined',
+    // 只给排队受阻的请求：它从未开始执行，换到新会话不会重复任何操作。
+    states: ['queued'],
+    capable: capabilities => capabilities.canRelaunch === true,
+    primary: false
+  },
+  {
+    action: 'rerun_in_new_session',
+    elementId: 'rerun_in_new_session',
+    label: larkRelaunchLabels.rerun_in_new_session,
+    hint: '原执行结果未确认，重新执行可能把已经做过的操作再做一次',
+    buttonType: 'primary_text',
+    icon: 'repeat_outlined',
+    states: ['reconcile_required', 'legacy_unresolved'],
+    capable: capabilities => capabilities.canRelaunch === true,
     primary: false
   }
 ] as const;
@@ -301,7 +332,7 @@ export function buildLarkCardActions(context: LarkCardActionContext): LarkCardEl
       if (definition) elements.push(callbackButton(definition, taskId, turn));
     }
   }
-  // 预算兜底：正常路径最多 2 个按钮，这里的截断是防御性上限。
+  // 预算兜底：正常路径最多 3 个按钮（排队受阻：取消、刷新、在新会话中执行），这里的截断是防御性上限。
   return elements.slice(0, larkCardActionBudget.maxButtons);
 }
 
