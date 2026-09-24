@@ -270,9 +270,10 @@ export async function performLarkCardReconcile(input: {
               service, { appId: persisted.app_id, messageId: mapping.externalId }, log, input.deliveryStore);
           } else {
           // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
-          // 保证消息不重发，@ 也不会重复。默认关闭时本元素不存在，卡面逐字节不变。
+          // 保证消息不重发，@ 也不会重复。开关按群覆盖后的生效配置取值（与实时链路一致），
+          // 群里关掉 @ 时本元素不存在。
           // 发起人是机器人时同样不 @ 回去：刷屏事故里最容易触发的恰好是重启对账这条路。
-          const mention = senderGroupMention(config.groupCardMention, {
+          const mention = senderGroupMention(effective.groupCardMention, {
             chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type });
           const decoration = await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective);
           const elements = [

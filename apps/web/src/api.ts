@@ -47,7 +47,7 @@ export type LarkBotConfig = {
   workerAgentIds?: string[];
   /** P0-2 结构化问答卡片总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
   structuredAskCards?: boolean;
-  /** P0-4 群内卡片 @ 发起人总开关，服务端恒返回布尔；旧服务端缺省按关闭处理。 */
+  /** P0-4 群内卡片 @ 发起人总开关，服务端恒返回布尔；缺省按开启处理。 */
   groupCardMention?: boolean;
   /** `/new --cwd <别名>` 的别名表；没有别名时字段缺席。 */
   workspaceAliases?: Record<string, string>;

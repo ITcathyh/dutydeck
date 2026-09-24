@@ -1045,6 +1045,24 @@ describe('performLarkCardReconcile 遵守群级呈现开关', () => {
     expect(JSON.parse(h.cardMappings.mappings[0]!.extra!).final_delivery_state).toBe('reaction');
   });
 
+  it('补发结果卡的 @ 发起人按群覆盖后的开关决定', async () => {
+    const groupTask = (sessionId: string) => ({ runtime_task_id: `task-${sessionId}`, state: 'running' as const, turn: 1,
+      chat_type: 'group', sender_open_id: 'ou_alice', sender_type: 'user' });
+    const sentElements = (h: ReturnType<typeof reconcileHarness>) =>
+      JSON.stringify([...h.service.send.mock.calls, ...h.service.reply.mock.calls].map(call => (call as any[])[0]?.elements));
+    for (const [bot, group, expected] of [[true, false, false], [false, true, true]] as const) {
+      const sessionId = `ses-mention-${bot}-${group}`;
+      const mapping = createMapping(`map-${sessionId}`, `om_req_${sessionId}`, sessionId, groupTask(sessionId));
+      const h = reconcileHarness([mapping], { [sessionId]: [completedTask(sessionId)] });
+      await performLarkCardReconcile({
+        runtime: h.runtime as any, service: h.service as any, cardMappings: h.cardMappings as any, log: h.log as any,
+        config: { ...config, groupCardMention: bot }, channel: 'lark-card:cli_test',
+        resolveConfig: async () => ({ ...config, groupCardMention: group })
+      });
+      expect(sentElements(h).includes('<at id=ou_alice></at>'), `bot=${bot} group=${group}`).toBe(expected);
+    }
+  });
+
   it('不给 resolveConfig 时按 Bot 级配置补发，既有行为不变', async () => {
     const task = completedTask('ses-plain');
     const mapping = createMapping('map-plain', 'om_req_plain', 'ses-plain', { runtime_task_id: task.id, state: 'running', turn: 1 });
