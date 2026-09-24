@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   availableLarkCardActions,
   buildLarkCardActions,
+  buildLarkCardFollowUpActions,
   isLarkCardActionAvailable,
+  isLarkCardFollowUpPrompt,
   larkCardActionBudget,
   larkCardActionHint,
+  larkCardFollowUpPrompt,
   parseLarkCardActionValue,
   safeLarkWebUrl,
   type LarkCardActionContext,
@@ -451,5 +454,84 @@ describe('飞书卡片操作按钮：文案与元素预算', () => {
       margin: '0px',
       element_id: 'interrupt'
     });
+  });
+});
+
+describe('结果卡续问行：一键续问与每天自动执行', () => {
+  const followUp = { canFollowUp: true };
+  const readOnlyCompleted = (capabilities: Partial<LarkCardCapabilities> = {}) =>
+    context('completed', { readOnly: true, turn: 2, capabilities: { ...allCapabilities, ...capabilities } });
+
+  it('只在已完成且能续聊时出现，位置在续问行而不是顶部操作区', () => {
+    const ctx = readOnlyCompleted(followUp);
+    expect(labels(buildLarkCardFollowUpActions(ctx))).toEqual(['说人话', '给我对外回复', '再详细点']);
+    // 顶部操作区不变：续问是读完结论之后的下一步，不能压在结论上面。
+    expect(buildLarkCardActions(ctx)).toEqual([]);
+    for (const state of allStates.filter(item => item !== 'completed')) {
+      expect(buildLarkCardFollowUpActions(context(state, { readOnly: true }, followUp)), state).toEqual([]);
+    }
+    // 没声明 canFollowUp（会话已结束、没有持久化去重存储）时不给按钮。
+    expect(buildLarkCardFollowUpActions(readOnlyCompleted())).toEqual([]);
+    for (const action of ['ask_plain', 'ask_reply', 'ask_detail'] as LarkCardActionName[]) {
+      expect(isLarkCardActionAvailable(action, readOnlyCompleted())).toBe(false);
+      expect(isLarkCardActionAvailable(action, readOnlyCompleted(followUp))).toBe(true);
+    }
+  });
+
+  it('提交的固定文本与需求逐字一致', () => {
+    expect(larkCardFollowUpPrompt('ask_plain')).toBe('用不含术语的大白话重新说一遍上面的结论：先一句话说结论，再说影响和要不要处理。不要重新调查。');
+    expect(larkCardFollowUpPrompt('ask_reply')).toBe('根据上面的结论，写一段可以直接转发给同事或群里的回复：三到五句，先说结论和影响，再说需要对方做什么；不含代码路径和命令。不要重新调查。');
+    expect(larkCardFollowUpPrompt('ask_detail')).toBe('在上面结论的基础上展开细节和证据，补充你认为不够确定的地方。');
+    expect(larkCardFollowUpPrompt('retry')).toBeUndefined();
+    expect(isLarkCardFollowUpPrompt(` ${larkCardFollowUpPrompt('ask_detail')} `)).toBe(true);
+    expect(isLarkCardFollowUpPrompt('详细总结下今天的聊天内容')).toBe(false);
+  });
+
+  it('定时按钮带着 HH:MM；已建好时只剩一个不可点的状态按钮', () => {
+    const offer = buildLarkCardFollowUpActions(readOnlyCompleted({ ...followUp, dailySchedule: { time: '09:05', scheduled: false } }));
+    expect(labels(offer)).toEqual(['说人话', '给我对外回复', '再详细点', '每天 09:05 自动执行']);
+    expect(callbackValue(offer[3]!)).toEqual({ action: 'schedule_daily', task_id: 'om_task_1', turn: '2' });
+
+    const done = buildLarkCardFollowUpActions(readOnlyCompleted({ ...followUp, dailySchedule: { time: '09:05', scheduled: true } }));
+    expect(labels(done).at(-1)).toBe('已设为每天 09:05 自动执行');
+    expect(done.at(-1)).toMatchObject({ disabled: true, element_id: 'schedule_daily' });
+    expect(done.at(-1)!.behaviors).toBeUndefined();
+    expect(isLarkCardActionAvailable('schedule_daily', readOnlyCompleted({ dailySchedule: { time: '09:05', scheduled: true } }))).toBe(false);
+
+    // 时刻只接受 HH:MM：别的字符串进不了按钮文案。
+    for (const time of ['9:05', '24:00', '09:60', '<at>', '']) {
+      expect(buildLarkCardFollowUpActions(readOnlyCompleted({ dailySchedule: { time, scheduled: false } })), time).toEqual([]);
+      expect(buildLarkCardFollowUpActions(readOnlyCompleted({ dailySchedule: { time, scheduled: true } })), time).toEqual([]);
+    }
+  });
+
+  it('两行按钮合起来正好等于后端接受的操作集合', () => {
+    const contexts = [
+      readOnlyCompleted(followUp),
+      readOnlyCompleted({ ...followUp, canVerify: true, dailySchedule: { time: '23:59', scheduled: false } }),
+      readOnlyCompleted({ dailySchedule: { time: '00:00', scheduled: false } }),
+      readOnlyCompleted({ ...followUp, dailySchedule: { time: '07:30', scheduled: true } })
+    ];
+    for (const ctx of contexts) {
+      const rendered = callbackButtons([...buildLarkCardActions(ctx), ...buildLarkCardFollowUpActions(ctx)]);
+      for (const button of rendered) {
+        const parsed = parseLarkCardActionValue(callbackValue(button));
+        expect(parsed).toBeDefined();
+        expect(isLarkCardActionAvailable(parsed!.action, ctx)).toBe(true);
+        for (const field of Object.values(callbackValue(button))) expect(typeof field).toBe('string');
+      }
+      expect(rendered.map(button => parseLarkCardActionValue(callbackValue(button))!.action).sort())
+        .toEqual(availableLarkCardActions(ctx).slice().sort());
+    }
+  });
+
+  it('续问行同样守预算与按钮样式', () => {
+    const elements = buildLarkCardFollowUpActions(readOnlyCompleted({ ...followUp, dailySchedule: { time: '09:05', scheduled: false } }));
+    expect(elements.length).toBeLessThanOrEqual(larkCardActionBudget.maxButtons);
+    expect(Buffer.byteLength(JSON.stringify(elements), 'utf8')).toBeLessThan(2_048);
+    for (const element of elements) {
+      expect(element).toMatchObject({ tag: 'button', type: 'text', icon: { tag: 'standard_icon', color: 'grey' } });
+      expect(larkCardActionHint(element.element_id as LarkCardActionName)!.length).toBeGreaterThan(6);
+    }
   });
 });
