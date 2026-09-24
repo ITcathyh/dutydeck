@@ -79,7 +79,7 @@ export interface StoredLarkConfig {
   workerAgentIds?: string[];
   /** 结构化问答卡片总开关，默认开启；显式 false 使用文字选项与引用回复。 */
   structuredAskCards: boolean;
-  /** P0-4 群内卡片 @ 发起人总开关，默认关闭；开启后群内结果卡卡尾 @ 发起人，审批/提问卡卡首 @。 */
+  /** P0-4 群内卡片 @ 发起人总开关，默认开启；开启后群内结果卡卡尾 @ 发起人，审批/提问卡卡首 @。 */
   groupCardMention: boolean;
   /**
    * 平台验证命令：在会话工作目录真实执行，记录退出码、有限输出与代码指纹。
@@ -179,7 +179,7 @@ export interface SaveLarkConfigInput {
   workerAgentIds?: string[];
   /** P0-2 结构化问答卡片总开关；缺省继承当前配置，仍缺省按关闭处理。 */
   structuredAskCards?: boolean;
-  /** P0-4 群内卡片 @ 发起人总开关；缺省继承当前配置，仍缺省按关闭处理。 */
+  /** P0-4 群内卡片 @ 发起人总开关；缺省继承当前配置，仍缺省按开启处理。 */
   groupCardMention?: boolean;
   /** 平台验证命令；缺省继承当前配置，空白串视为未配置。 */
   verificationCommand?: string;
@@ -525,7 +525,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.leaderAgentId?.trim() ? { leaderAgentId: parsed.leaderAgentId.trim() } : {}),
     ...(normalizeAgentIds(parsed.workerAgentIds).length ? { workerAgentIds: normalizeAgentIds(parsed.workerAgentIds) } : {}),
     structuredAskCards: parsed.structuredAskCards === undefined || parsed.structuredAskCards === true,
-    groupCardMention: parsed.groupCardMention === true,
+    groupCardMention: parsed.groupCardMention === undefined || parsed.groupCardMention === true,
     ...(parsed.verificationCommand?.trim() ? { verificationCommand: parsed.verificationCommand.trim() } : {}),
     urgentEnabled: parsed.urgentEnabled === true,
     ...(normalizeDelayMs(parsed.urgentThresholdMs, minLarkUrgentThresholdMs) !== undefined ? { urgentThresholdMs: normalizeDelayMs(parsed.urgentThresholdMs, minLarkUrgentThresholdMs)! } : {}),
@@ -679,7 +679,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const name = input.name === undefined ? current?.name : input.name.trim() || undefined;
   const workspace = input.workspace === undefined ? current?.workspace : input.workspace.trim() || undefined;
   const workspaceAliases = input.workspaceAliases === undefined ? current?.workspaceAliases : normalizeWorkspaceAliases(input.workspaceAliases);
-  const webBaseUrl = input.webBaseUrl === undefined ? current?.webBaseUrl : normalizeWebBaseUrl(input.webBaseUrl);
+  // 同一套部署的机器人共用一个控制台。新建时没给地址（扫码一键创建、CLI 创建都不带）就沿用
+  // 已有机器人的地址，否则卡片上没有「查看详情」；显式传空串仍表示不配置。
+  const webBaseUrl = input.webBaseUrl !== undefined ? normalizeWebBaseUrl(input.webBaseUrl)
+    : current ? current.webBaseUrl : configs.find(config => config.webBaseUrl)?.webBaseUrl;
   const defaultAgentId = input.defaultAgentId?.trim() || current?.defaultAgentId;
   const listening = input.listening ?? current?.listening ?? false;
   const groupToolsEnabled = input.groupToolsEnabled ?? current?.groupToolsEnabled ?? false;
@@ -692,7 +695,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const leaderAgentId = input.leaderAgentId === undefined ? current?.leaderAgentId : input.leaderAgentId.trim() || undefined;
   const workerAgentIds = input.workerAgentIds === undefined ? current?.workerAgentIds ?? [] : normalizeAgentIds(input.workerAgentIds);
   const structuredAskCards = input.structuredAskCards ?? current?.structuredAskCards ?? true;
-  const groupCardMention = input.groupCardMention ?? current?.groupCardMention ?? false;
+  const groupCardMention = input.groupCardMention ?? current?.groupCardMention ?? true;
   const pushIntervalMs = input.pushIntervalMs ?? current?.pushIntervalMs ?? defaultLarkPushIntervalMs;
   const traceLimit = input.traceLimit === undefined ? current?.traceLimit ?? defaultLarkTraceLimit : input.traceLimit ?? defaultLarkTraceLimit;
   const hideTraceOnComplete = input.hideTraceOnComplete ?? current?.hideTraceOnComplete ?? true;
