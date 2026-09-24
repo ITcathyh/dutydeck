@@ -108,7 +108,7 @@ describe('Lark card service', () => {
     expect(JSON.stringify(noUrl)).not.toContain('查看详情');
   });
 
-  it('result 卡页脚合并 @ 发起人与用时及查看详情链接', () => {
+  it('result 卡页脚一行依次是用时、@ 发起人、查看详情链接', () => {
     const card: any = buildLarkCard({
       cardKind: 'result',
       state: 'completed',
@@ -125,8 +125,7 @@ describe('Lark card service', () => {
     expect(footer.tag).toBe('column_set');
     const firstColMarkdown = footer.columns[0].elements[0];
     expect(firstColMarkdown.element_id).toBe('task_elapsed');
-    expect(firstColMarkdown.content.startsWith('<at id=ou_alice></at>')).toBe(true);
-    expect(firstColMarkdown.content).toContain(' · 用时');
+    expect(firstColMarkdown.content).toBe("<font color='grey'>用时 1m 15s · </font><at id=ou_alice></at>");
     const secondColMarkdown = footer.columns[1].elements[0];
     expect(secondColMarkdown.content).toContain('[查看详情](https://web.example.com/sessions/ses_1)');
   });

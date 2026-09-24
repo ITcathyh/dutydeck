@@ -557,8 +557,10 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   if (footerMention) parts.push(footerMention);
   if (elapsedText) parts.push(elapsedText);
   if (parts.length) {
+    // 顺序固定为「用时 · @发起人 · 查看详情」：先说这轮跑了多久，再点名该来看的人，
+    // 最后是去哪看全貌。
     const columnContent = footerMention && elapsedText
-      ? `${footerMention}<font color='grey'> · ${elapsedText}</font>`
+      ? `<font color='grey'>${elapsedText} · </font>${footerMention}`
       : elapsedText
         ? `<font color='grey'>${elapsedText}</font>`
         : footerMention!;
