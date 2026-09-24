@@ -429,6 +429,11 @@ describe('one-time login links', () => {
     registerBrowserAuthRoutes(app, { mode: 'token', getToken: async () => TOKEN, localOnly: false, loginLinks: links });
     return app;
   }
+  // 确认页上的按钮是普通表单提交，码在请求体里。
+  const confirm = (app: ReturnType<typeof buildLinkApp>, code: string) => app.inject({ method: 'POST', url: '/api/auth/link',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' }, payload: `code=${encodeURIComponent(code)}`, ...remote });
+  const open = (app: ReturnType<typeof buildLinkApp>, code: string, method: 'GET' | 'HEAD' = 'GET') =>
+    app.inject({ method, url: `/api/auth/link?code=${encodeURIComponent(code)}`, ...remote });
 
   it('码有 256 位随机熵，服务端只按哈希保存', () => {
     const links = new LoginLinkStore();
@@ -440,12 +445,39 @@ describe('one-time login links', () => {
     expect(stored).toContain(createHash('sha256').update(code).digest('hex'));
   });
 
-  it('兑换后设置与 /api/auth/login 完全相同的 cookie，并跳转到绑定的会话页', async () => {
+  it('GET 与 HEAD 只回确认页：不消耗码、不发 cookie；之后 POST 仍能兑换，兑换过再 POST 失败', async () => {
+    const links = new LoginLinkStore();
+    const app = buildLinkApp(links);
+    const code = links.issue('ses_1');
+    const page = await open(app, code);
+    expect(page.statusCode).toBe(200);
+    expect(page.headers['cache-control']).toBe('no-store');
+    expect(page.headers['set-cookie']).toBeUndefined();
+    expect(page.headers['content-type']).toContain('text/html');
+    expect(page.body).toContain('<form method="post" action="/api/auth/link">');
+    expect(page.body).toContain(`<input type="hidden" name="code" value="${code}">`);
+    const head = await open(app, code, 'HEAD');
+    expect(head.statusCode).toBe(200);
+    expect(head.headers['cache-control']).toBe('no-store');
+    expect(head.headers['set-cookie']).toBeUndefined();
+    // 链接检测、代理或浏览器预取打开几次都不算数，人点了按钮才兑换。
+    expect((await open(app, code)).statusCode).toBe(200);
+    const redeemed = await confirm(app, code);
+    expect(redeemed.statusCode).toBe(303);
+    expect(redeemed.headers['set-cookie']).toBeDefined();
+    const again = await confirm(app, code);
+    expect(again.statusCode).toBe(400);
+    expect(again.headers['set-cookie']).toBeUndefined();
+    expect((await open(app, code)).statusCode).toBe(400);
+    await app.close();
+  });
+
+  it('POST 兑换：设置与 /api/auth/login 完全相同的 cookie，303 跳转到绑定的会话页', async () => {
     const links = new LoginLinkStore();
     const app = buildLinkApp(links);
     const code = links.issue('ses_bound/1');
-    const redeemed = await app.inject({ method: 'GET', url: `/api/auth/link?code=${code}`, ...remote });
-    expect(redeemed.statusCode).toBe(302);
+    const redeemed = await confirm(app, code);
+    expect(redeemed.statusCode).toBe(303);
     expect(redeemed.headers.location).toBe('/sessions/ses_bound%2F1');
     expect(redeemed.headers['cache-control']).toBe('no-store');
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { token: TOKEN }, ...remote });
@@ -455,27 +487,28 @@ describe('one-time login links', () => {
     await app.close();
   });
 
-  it('重复使用、过期、伪造和缺失的码都只返回同一个错误页，不发 cookie', async () => {
+  it('重复使用、过期、伪造和缺失的码都只返回同一个错误页，不发 cookie、不回显码', async () => {
     let now = 1_000_000;
     const links = new LoginLinkStore(() => now);
     const app = buildLinkApp(links);
     const used = links.issue('ses_1');
-    expect((await app.inject({ method: 'GET', url: `/api/auth/link?code=${used}`, ...remote })).statusCode).toBe(302);
+    expect((await confirm(app, used)).statusCode).toBe(303);
     const expired = links.issue('ses_1');
     now += LOGIN_LINK_TTL_MS;
+    const forged = ['x'.repeat(43), '"><script>alert(1)</script>'];
     const failures = await Promise.all([
-      `/api/auth/link?code=${used}`,
-      `/api/auth/link?code=${expired}`,
-      `/api/auth/link?code=${'x'.repeat(43)}`,
-      '/api/auth/link'
-    ].map(url => app.inject({ method: 'GET', url, ...remote })));
+      ...[used, expired, ...forged].flatMap(code => [confirm(app, code), open(app, code)]),
+      app.inject({ method: 'POST', url: '/api/auth/link', ...remote }),
+      app.inject({ method: 'GET', url: '/api/auth/link', ...remote })
+    ]);
     for (const failure of failures) {
       expect(failure.statusCode).toBe(400);
       expect(failure.headers['set-cookie']).toBeUndefined();
+      expect(failure.headers['cache-control']).toBe('no-store');
       expect(failure.headers['content-type']).toContain('text/html');
       expect(failure.body).toBe(failures[0]!.body);
       expect(failure.body).toContain('登录链接已失效');
-      expect(failure.body).not.toContain('ses_1');
+      for (const leaked of ['ses_1', used, expired, ...forged]) expect(failure.body).not.toContain(leaked);
     }
     await app.close();
   });
@@ -484,8 +517,8 @@ describe('one-time login links', () => {
     const links = new LoginLinkStore();
     const app = buildLinkApp(links);
     const code = links.issue('ses_1');
-    const responses = await Promise.all(Array.from({ length: 8 }, () => app.inject({ method: 'GET', url: `/api/auth/link?code=${code}`, ...remote })));
-    expect(responses.filter(response => response.statusCode === 302)).toHaveLength(1);
+    const responses = await Promise.all(Array.from({ length: 8 }, () => confirm(app, code)));
+    expect(responses.filter(response => response.statusCode === 303)).toHaveLength(1);
     expect(responses.filter(response => response.headers['set-cookie'])).toHaveLength(1);
     await app.close();
   });
@@ -495,20 +528,25 @@ describe('one-time login links', () => {
     for (const mode of ['local', 'open'] as const) {
       const app = Fastify();
       registerBrowserAuthRoutes(app, { mode, getToken: async () => TOKEN, localOnly: mode === 'local', loginLinks: links });
-      const response = await app.inject({ method: 'GET', url: `/api/auth/link?code=${links.issue('ses_1')}` });
-      expect(response.statusCode).toBe(400);
-      expect(response.headers['set-cookie']).toBeUndefined();
+      const code = links.issue('ses_1');
+      for (const response of [await open(app, code), await confirm(app, code)]) {
+        expect(response.statusCode).toBe(400);
+        expect(response.headers['set-cookie']).toBeUndefined();
+      }
       await app.close();
     }
   });
 
-  it('请求日志只记兑换路径，不记登录码', async () => {
+  it('请求日志只记路径，不记登录码', async () => {
     const lines: string[] = [];
     const links = new LoginLinkStore();
     const app = buildLinkApp(links, { stream: { write: line => { lines.push(line); } } });
     const code = links.issue('ses_1');
-    expect((await app.inject({ method: 'GET', url: `/api/auth/link?code=${code}`, ...remote })).statusCode).toBe(302);
-    await app.inject({ method: 'GET', url: `/api/auth/link?code=${code}`, ...remote });
+    expect((await open(app, code)).statusCode).toBe(200);
+    expect((await open(app, code, 'HEAD')).statusCode).toBe(200);
+    expect((await confirm(app, code)).statusCode).toBe(303);
+    await confirm(app, code);
+    await open(app, code);
     const log = lines.join('');
     expect(log).toContain('"url":"/api/auth/link"');
     expect(log).toContain('incoming request');
