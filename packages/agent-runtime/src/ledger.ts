@@ -90,7 +90,7 @@ export class LocalDriverLedger {
     if (parent.stage === 'pending') this.execution().creationFinished(record.fence, parent.resourceId, parent.revision, 'created');
     this.execution().observed(record.fence, child.resourceId, child.revision, { observationId: makeId('observation'), identityId: record.identityId, state: 'live', evidenceRef: 'original-driver-start-finished', observedAt: now() });
   }
-  gone(driver: AgentDriver) {
+  gone(driver: AgentDriver, evidenceRef = 'original-driver-isStopped-and-operation-tails') {
     const record = this.records.get(driver);
     if (!record || !record.creationSettled) throw new RuntimeError('DRIVER_CREATION_PENDING', 'Driver creation has not finished', 409);
     if (record.controlled) { record.controlled.ready(); record.controlled.stopped(); return; }
@@ -99,7 +99,7 @@ export class LocalDriverLedger {
     if (child.stage === 'pending') child = this.execution().creationFinished(record.fence, child.resourceId, child.revision, 'created');
     const parent = this.row(record, record.operationId);
     if (parent.stage === 'pending') this.execution().creationFinished(record.fence, parent.resourceId, parent.revision, 'created');
-    this.execution().observed(record.fence, child.resourceId, child.revision, { observationId: makeId('observation'), identityId: record.identityId, state: 'gone', evidenceRef: 'original-driver-isStopped-and-operation-tails', observedAt: now() });
+    this.execution().observed(record.fence, child.resourceId, child.revision, { observationId: makeId('observation'), identityId: record.identityId, state: 'gone', evidenceRef, observedAt: now() });
   }
   refs(driver: AgentDriver): ResourceRef[] {
     const record = this.records.get(driver);

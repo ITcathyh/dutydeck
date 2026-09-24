@@ -311,3 +311,46 @@ it('revokes a terminal reconnect paused before the driver factory', async () => 
   expect(second.runtime.getDriver(session.id)).toBeUndefined();
   expect((await second.runtime.getSession(session.id))?.state).toBe('stopped');
 });
+
+it.each(['missing', 'foreign'] as const)('leaves a session usable when terminal viewing attaches nothing (%s pane)', async pane => {
+  const file = database();
+  const backend = persistentTurn();
+  const first = open(file, backend.factory);
+  await first.runtime.initialize([agent]);
+  const session = await first.runtime.start({ agentId: agent.id });
+  const firstTask = first.runtime.send(session.id, 'initial prompt');
+  await vi.waitFor(() => expect(backend.prompts).toEqual(['initial prompt']));
+  backend.complete();
+  await firstTask;
+  await close(first);
+
+  // Mirrors the PTY driver after shutdown retired an idle pane (attach finds no
+  // tmux session) or when a surviving pane fails the ownership check (attach
+  // throws). Either way nothing is attached, so no physical exit can be proven.
+  const unattached: AgentDriver = {
+    start: vi.fn(async () => {}), resume: vi.fn(async () => {}), send: vi.fn(async () => {}),
+    interrupt: vi.fn(async () => {}), isStopped: async () => false, stop: vi.fn(async () => {}),
+    attachTerminal: vi.fn(() => { if (pane === 'foreign') throw new Error('tmux owner mismatch'); return false; })
+  };
+  // Both terminal views build the unattached driver; the next instruction builds a real one.
+  const factory = vi.fn<DriverFactory>((...args) => factory.mock.calls.length <= 2 ? unattached : backend.factory(...args));
+  const second = open(file, factory);
+  await second.runtime.initialize([agent]);
+  const beforeSession = await second.runtime.getSession(session.id);
+
+  const view = () => second.runtime.getTerminalDriver(session.id);
+  if (pane === 'missing') await expect(view()).resolves.toBeUndefined();
+  else await expect(view()).rejects.toThrow('tmux owner mismatch');
+  expect(second.runtime.getDriver(session.id)).toBeUndefined();
+  expect(second.runtime.getDriverStopBlock(session.id)).toBeUndefined();
+  expect(second.repos.execution.getSessionResourceBlockers(session.id)).toEqual([]);
+  expect(await second.runtime.getSession(session.id)).toEqual(beforeSession);
+  // Viewing again reports the same attach outcome instead of a resource block.
+  if (pane === 'missing') await expect(view()).resolves.toBeUndefined();
+  else await expect(view()).rejects.toThrow('tmux owner mismatch');
+
+  // The next instruction still starts a fresh driver for the idle session.
+  await second.runtime.dispatch(session.id, 'next prompt');
+  await vi.waitFor(() => expect(backend.prompts).toEqual(['initial prompt', 'next prompt']));
+  backend.complete();
+});
