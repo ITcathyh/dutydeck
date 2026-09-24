@@ -5,7 +5,7 @@ import type { LarkMessageResource } from './message-content.js';
 import { collectLarkTaskContext, type CollectLarkTaskContextInput } from './task-context.js';
 
 type FakeService = Pick<LarkCardService, 'getMessage' | 'getMessageItems' | 'listChatMessages'> & {
-  readDocument?: (url: string) => Promise<{ url: string; title?: string; text: string }>;
+  readDocument?: (url: string) => Promise<{ url: string; title?: string; text: string; links?: string[]; linkTitles?: Array<{ url: string; title: string }>; linkError?: string }>;
 };
 
 const textContent = (text: string) => JSON.stringify({ text });
@@ -373,6 +373,98 @@ describe('collectLarkTaskContext', () => {
     expect(readDocument.mock.calls.map(([url]) => url)).toEqual(urls);
     for (const url of urls) expect(result.agentPrompt).toContain(`正文 ${url}`);
     for (const url of rejected) expect(readDocument).not.toHaveBeenCalledWith(url);
+  });
+
+  it('reads linked child documents only for an explicit child-document request and reports gaps', async () => {
+    const root = 'https://tenant.larkoffice.com/docx/root';
+    const children = Array.from({ length: 6 }, (_, index) => `https://tenant.larkoffice.com/docx/child${index}`);
+    const readDocument = vi.fn(async (url: string) => url === root
+      ? { url, text: '根正文', links: [...children, 'https://evil.example/docx/secret'] }
+      : { url, text: `子正文 ${url}` });
+    const currentService = service({ readDocument });
+    const normal = await collect({ prompt: `总结 ${root}`, service: currentService });
+    expect(readDocument).toHaveBeenCalledTimes(1);
+    expect(normal.agentPrompt).toContain(children[0]);
+    expect(normal.agentPrompt).not.toContain('子正文');
+
+    readDocument.mockClear();
+    const expanded = await collect({ prompt: `总结文档，包括子文档：${root}`, service: currentService });
+    expect(readDocument.mock.calls.map(([url]) => url)).toEqual([root, ...children]);
+    for (const child of children) expect(expanded.agentPrompt).toContain(`子正文 ${child}`);
+    expect(expanded.agentPrompt).not.toContain('evil.example');
+    expect(expanded.sources.filter(source => children.includes(source.url ?? ''))).toHaveLength(6);
+  });
+
+  it('does not expand links for an ordinary read or an explicit exclusion', async () => {
+    const root = 'https://tenant.larkoffice.com/docx/root';
+    const child = 'https://tenant.larkoffice.com/docx/child';
+    const readDocument = vi.fn(async (url: string) => ({ url, text: '正文', links: [child] }));
+    for (const prompt of [`读取这个文档 ${root}`, `总结这个文档，不包括子文档 ${root}`, `总结这个文档，不要包括子文档 ${root}`, `Summarize without child documents ${root}`]) {
+      readDocument.mockClear();
+      const result = await collect({ prompt, service: service({ readDocument }) });
+      expect(readDocument).toHaveBeenCalledTimes(1);
+      expect(result.agentPrompt).toContain(`${child}（未读取：当前请求未要求展开子文档）`);
+    }
+  });
+
+  it('shows each linked child as unread when access is denied, without claiming the links were absent', async () => {
+    const root = 'https://tenant.larkoffice.com/docx/root';
+    const children = Array.from({ length: 6 }, (_, index) => `https://tenant.larkoffice.com/docx/child${index}`);
+    const readDocument = vi.fn(async (url: string) => {
+      if (url === root) return { url, text: '根正文', links: [...children, 'https://tenant.larkoffice.com/base/table'],
+        linkTitles: children.map((child, index) => ({ url: child, title: `子文档 ${index}` })), linkError: '后续引用可能缺失' };
+      throw new Error('permission denied');
+    });
+    const result = await collect({ prompt: `总结包括子文档：${root}`, service: service({ readDocument }) });
+
+    expect(readDocument.mock.calls.map(([url]) => url)).toEqual([root, ...children]);
+    for (const [index, child] of children.entries()) {
+      expect(result.sources).toContainEqual(expect.objectContaining({ url: child, label: `子文档 ${index}`, error: 'permission denied' }));
+      expect(result.agentPrompt).toContain(`子文档 ${index}｜${child}】\n读取失败，正文未注入：permission denied`);
+    }
+    expect(result.agentPrompt).toContain('https://tenant.larkoffice.com/base/table（未读取：不是 docx/wiki 文档）');
+    expect(result.agentPrompt).toContain('引用链接读取不完整：后续引用可能缺失');
+  });
+
+  it('marks document-count and nesting limits without reading beyond them', async () => {
+    const root = 'https://tenant.larkoffice.com/docx/root';
+    const children = Array.from({ length: 12 }, (_, index) => `https://tenant.larkoffice.com/docx/child${index}`);
+    const grandchild = 'https://tenant.larkoffice.com/docx/grandchild';
+    const tooDeep = 'https://tenant.larkoffice.com/docx/too-deep';
+    const readDocument = vi.fn(async (url: string) => ({
+      url, text: `正文 ${url}`,
+      links: url === root ? children : url === children[0] ? [grandchild] : url === grandchild ? [tooDeep] : []
+    }));
+    const result = await collect({ prompt: `包括子文档 ${root}`, service: service({ readDocument }) });
+    expect(readDocument).toHaveBeenCalledTimes(12);
+    expect(readDocument).not.toHaveBeenCalledWith(children[11]);
+    expect(result.agentPrompt).toContain(`${children[11]}（未读取：文档数量上限为 12）`);
+    expect(readDocument).not.toHaveBeenCalledWith(grandchild);
+
+    const nestedRead = vi.fn(async (url: string) => ({ url, text: '正文', links: url === root ? [children[0]] : url === children[0] ? [grandchild] : url === grandchild ? [tooDeep] : [] }));
+    const nested = await collect({ prompt: `包括子文档 ${root}`, service: service({ readDocument: nestedRead }) });
+    expect(nestedRead.mock.calls.map(([url]) => url)).toEqual([root, children[0], grandchild]);
+    expect(nested.agentPrompt).toContain(`${tooDeep}（未读取：嵌套深度上限为 2）`);
+  });
+
+  it('deduplicates the same linked document across query and fragment variants', async () => {
+    const root = 'https://tenant.larkoffice.com/docx/root';
+    const child = 'https://tenant.larkoffice.com/docx/child';
+    const readDocument = vi.fn(async (url: string) => ({ url, text: '正文', links: url === root ? [child + '?preview=1', child + '#heading', child] : [root + '#again'] }));
+    const result = await collect({ prompt: `包括子文档 ${root}`, service: service({ readDocument }) });
+    expect(readDocument.mock.calls.map(([url]) => url)).toEqual([root, child + '?preview=1']);
+    expect(result.sources).toHaveLength(2);
+  });
+
+  it('bounds long reference lists and document bodies in expanded material', async () => {
+    const root = 'https://tenant.larkoffice.com/docx/root';
+    const links = Array.from({ length: 100 }, (_, index) => `https://tenant.larkoffice.com/docx/${index}_${'x'.repeat(100)}`);
+    const readDocument = vi.fn(async (url: string) => ({ url, text: 'A'.repeat(8_000), links: url === root ? links : [] }));
+    const result = await collect({ prompt: `总结包括子文档 ${root}`, service: service({ readDocument }) });
+    expect(readDocument).toHaveBeenCalledTimes(12);
+    expect(result.agentPrompt).toContain('[引用链接已截断，部分链接未读取]');
+    expect(result.agentPrompt).toContain('[参考材料正文已截断]');
+    expect(result.agentPrompt.length).toBeLessThan(60_000);
   });
 
   it('deduplicates resources by type and key while retaining their first real source message', async () => {
