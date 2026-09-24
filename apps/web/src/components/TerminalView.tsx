@@ -40,6 +40,13 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
   useEffect(() => { selectModeRef.current = selectMode; }, [selectMode]);
   const scrollToBottomRef = useRef<(focus: boolean) => void>(() => {});
   const [scrolledUp, setScrolledUp] = useState(false);
+  /*
+    连续两次握手都没成功就显示说明。服务端拒绝挂接时在握手阶段回 404/503 并附原因，
+    但浏览器的 WebSocket 读不到失败握手的状态码与正文，只收到 close：
+    不给提示的话，界面就是一块永远空白、静默重连的终端。重连照常进行，连上即撤掉说明。
+    文案不猜原因：进程已退出与运行时拒绝挂接在这里无法区分。
+  */
+  const [unreachable, setUnreachable] = useState(false);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -60,6 +67,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
     term.open(host);
     const unbindTouchScroll = bindTerminalTouchScroll(term, () => selectModeRef.current);
     setScrolledUp(false);
+    setUnreachable(false);
     scrollToBottomRef.current = focus => { term.scrollToBottom(); if (focus) term.focus(); };
     // xterm 的原生 viewport 滚动会抑制 onScroll；渲染事件同时覆盖滚轮、触摸和新输出。
     const scrollDisposable = term.onRender(() => {
@@ -93,6 +101,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
       const connection = ws;
       ws.onopen = () => {
         attempt = 0;
+        setUnreachable(false);
         sendResize();
       };
       ws.onmessage = event => {
@@ -122,6 +131,7 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
         // 断线后指数退避重连，上限 30s
         reconnectTimer = setTimeout(connect, nextTerminalBackoffMs(attempt));
         attempt += 1;
+        if (attempt >= 2) setUnreachable(true);
       };
     }
 
@@ -173,6 +183,13 @@ export function TerminalView({ sessionId, className, showKeyBar, readOnly = fals
 
   return <div className={`relative ${className ?? ''}`}>
     <div ref={hostRef} data-touch-scroll={touchScroll ? 'on' : undefined} className={`h-full w-full ${touchScroll ? '[&_.xterm-screen]:select-none [&_.xterm-screen]:[-webkit-touch-callout:none] [&_.xterm-screen_*]:select-none [&_.xterm-viewport]:overscroll-none' : ''}`}/>
+    {unreachable && <div role="status" className="absolute inset-0 z-sticky grid place-items-center bg-terminal-bg p-6">
+      <div className="max-w-md text-center">
+        <p className="text-body font-medium text-primary">终端暂时连不上</p>
+        <p className="mt-1 text-caption text-secondary">服务端没有接受终端连接，浏览器拿不到具体原因。任务进度仍可在「执行记录」查看。</p>
+        <p className="mt-2 text-caption text-subtle">仍在自动重试，连上后这条提示会自动消失。</p>
+      </div>
+    </div>}
     {scrolledUp && <button type="button" onPointerDown={event => event.preventDefault()} onMouseDown={event => event.preventDefault()} onClick={event => scrollToBottomRef.current(document.activeElement === event.currentTarget)} className="absolute right-2 top-2 z-sticky min-h-11 rounded-md border border-default bg-surface px-3 text-caption text-secondary shadow-panel">回到底部</button>}
     {keyBarVisible && <TerminalKeyBar onKey={onKey} selectMode={selectMode} onSelectModeChange={setSelectMode}/>}
   </div>;
