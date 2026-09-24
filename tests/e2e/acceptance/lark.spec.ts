@@ -21,4 +21,10 @@ test.describe('synthetic lark extended suite', () => {
       },
     });
   });
+
+  test('e2e-lark-detail-login: admin one-time link opens the session page in a signed-out browser', async ({ runLarkScenario }) => {
+    await runLarkScenario({
+      scriptName: 'e2e-lark-detail-login.mts',
+    });
+  });
 });

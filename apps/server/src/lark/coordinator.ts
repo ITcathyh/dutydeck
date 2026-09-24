@@ -57,6 +57,7 @@ import { appendLarkTaskSteps, claimLarkTaskDispatches, larkTaskAgentGuid, releas
 import { LarkPinManager } from './pin-manager.js';
 import { buildRepairConfirmCard, parseRepairCardActionValue, renderRepairResultCard, runOpenPlatformRepair } from './repair.js';
 import { connectLarkOpenPlatformSession } from './open-platform-session.js';
+import type { LoginLinkStore } from '../auth/auth.js';
 import {
   findPersistedLarkSession,
   larkGroupKey,
@@ -209,6 +210,13 @@ export const larkTaskTitle = (prompt: string, botName?: string) => {
 const describeLarkAccess = (mode: 'owner_only' | 'allowlist' | 'all_chat_members' | 'disabled') =>
   ({ owner_only: '仅机器人管理员可用', allowlist: '仅名单内成员可用', all_chat_members: '全部群成员可用', disabled: '本群已停用' })[mode];
 
+/** 私信里的登录卡：一句说明、链接按钮、一句使用限制。登录链接只出现在这张卡上。 */
+const larkDetailLoginElements = (url: string): LarkCardElement[] => [
+  { tag: 'markdown', content: '点击下方按钮登录 Dutydeck Web，并打开这个任务的会话页。', margin: '0px' },
+  { tag: 'button', text: { tag: 'plain_text', content: '打开任务详情' }, type: 'primary', behaviors: [{ type: 'open_url', default_url: url }], margin: '0px' },
+  { tag: 'markdown', content: "<font color='grey'>10 分钟内有效、只能用一次，不要转发。</font>", text_size: 'notation', margin: '0px' }
+];
+
 const larkExecutionIdentityLine = () =>
   `**执行身份**：\`${larkCommandEcho(larkExecutionIdentity(), 128)}\`（部署这台 Dutydeck 的系统账号）。任务以它运行，能用到它的文件、凭据与网络；独立工作目录只隔离可写目录，不隔离这些。`;
 
@@ -281,6 +289,8 @@ export class LarkMessageCoordinator {
         command?: string;
         pipeline?: LarkMemoryPipeline;
       };
+      /** Web 要求登录时提供；「查看详情」据此改为给管理员私信一次性登录链接。 */
+      loginLinks?: Pick<LoginLinkStore, 'issue'>;
     } = {},
   ) {
     this.memory = workflowOptions.memory?.store;
@@ -1930,6 +1940,61 @@ export class LarkMessageCoordinator {
   }
 
   /**
+   * 「查看详情」回调（仅 Web 要求登录时渲染）：管理员收到一条私信，内含绑定该会话的一次性登录链接。
+   *
+   * 回调里不信任卡片上的任何值：会话按平台给出的 open_message_id 从卡片账本里查，账本记录必须属于
+   * 当前机器人和当前群。链接只发到点击人的单聊，群里不出现；也不写日志——下面记录的错误只含飞书返回码。
+   */
+  private async handleDetailLogin(operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
+    const links = this.workflowOptions.loginLinks;
+    if (!links || !operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig || !this.cardMappings || !this.workflowOptions.store) {
+      return { type: 'error', content: '详情入口已失效，请在最新的任务卡片上操作。' };
+    }
+    try {
+      const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
+      if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法打开详情。' };
+      const webBaseUrl = config.webBaseUrl?.trim().replace(/\/$/, '');
+      let card: { externalId: string; sessionId: string; saved: PersistedLarkCardTask } | undefined;
+      for (const mapping of await this.cardMappings.list(larkCardChannel(config.appId))) {
+        let saved: PersistedLarkCardTask;
+        try { saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask; }
+        catch { continue; }
+        if (saved.app_id !== config.appId || saved.chat_id !== context.chatId
+          || (saved.card_message_id !== context.messageId && saved.final_message_id !== context.messageId)) continue;
+        card = { externalId: mapping.externalId, sessionId: mapping.sessionId, saved };
+        break;
+      }
+      // 与渲染端同一个判断：卡上出现「查看详情」按钮的条件，就是这里受理的条件。
+      if (!card || !webBaseUrl || !isLarkCardActionAvailable('detail', {
+        state: card.saved.state, taskId: card.externalId, turn: card.saved.turn ?? 0,
+        capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, detailLogin: true, webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(card.sessionId)}` }
+      })) {
+        return { type: 'warning', content: '这张卡片已不是任务的最新卡片，请在最新卡片上点「查看详情」。' };
+      }
+      // 链接兑换后等同登录，与 /repair 同一道安装级门；谁能拿到链接完全由这道门决定。
+      if (!await this.isInstallationOperatorAllowed(config, operatorOpenId, context.chatId)) {
+        return { type: 'warning', content: 'Web 详情仅机器人管理员可打开；完整执行记录可点「导出执行记录」获取' };
+      }
+      const url = `${webBaseUrl}/api/auth/link?code=${links.issue(card.sessionId)}`;
+      try {
+        await this.service.send({ receiveId: operatorOpenId, receiveIdType: 'open_id', taskName: '登录 Dutydeck Web', state: 'completed', readOnly: true,
+          permissionMode: larkPermissionMode(config), elements: larkDetailLoginElements(url) });
+      } catch (error) {
+        const upstreamCode = error instanceof LarkServiceError ? Number(error.details?.upstreamCode) : undefined;
+        this.log.warn({ upstreamCode, messageId: context.messageId }, '私信 Web 登录链接失败');
+        // 230013：点击人不在应用可用范围内，机器人无法与其单聊。
+        return { type: 'error', content: upstreamCode === 230013
+          ? '私信发送失败：你不在机器人应用的可用范围内，请联系管理员把你加入可用范围。链接没有发出。'
+          : `私信发送失败（飞书返回码 ${Number.isFinite(upstreamCode) ? upstreamCode : '未知'}），链接没有发出，请稍后重试。` };
+      }
+      return { type: 'success', content: '已私信你一个 10 分钟内有效的登录链接' };
+    } catch (error) {
+      this.log.warn({ error, messageId: context.messageId }, '受理查看详情失败');
+      return { type: 'error', content: '暂时无法打开详情，请稍后重试。' };
+    }
+  }
+
+  /**
    * 撤销「请求已接入」的 OK reaction。
    * 设计契约（见 docs/interaction-design-2026-08-30.md §4.1）：reaction 只是回执，
    * 进度卡或失败回执一旦送达就必须移除，不允许 reaction 与卡片两个状态并存。
@@ -1971,7 +2036,9 @@ export class LarkMessageCoordinator {
       canRefresh: typeof task.requestUpdate === 'function',
       ...(webBaseUrl
         ? { webUrl: `${webBaseUrl}/sessions${task.sessionId ? `/${encodeURIComponent(task.sessionId)}` : ''}` }
-        : {})
+        : {}),
+      // 与 handleDetailLogin 的前置条件对齐：登录链接要绑定会话，还没有会话的轮次保持原链接。
+      ...(this.workflowOptions.loginLinks && task.sessionId ? { detailLogin: true } : {})
     };
   }
 
@@ -2299,6 +2366,8 @@ export class LarkMessageCoordinator {
     // 不存在「一端认、另一端不认」的权限缝隙。同时兼容线上遗留的 {action, task_id}。
     const parsed = parseLarkCardActionValue(value);
     if (!parsed) return { type: 'error', content: '无法识别卡片操作' };
+    // 查看详情只读账本、不碰内存任务：重启后老卡片上的按钮同样可用。
+    if (parsed.action === 'detail') return this.handleDetailLogin(operatorOpenId, context);
     const action = parsed.action;
     const taskId = parsed.taskId;
     const task = this.tasks.get(taskId) ?? (action === 'cancel'
