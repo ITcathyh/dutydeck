@@ -3900,7 +3900,7 @@ export class LarkMessageCoordinator {
               readLarkConfigs(this.workflowOptions.store, { readOnly: true }),
               '机器人配置读取'
             );
-            const peerBots = allBots.filter(b => b.appId !== config.appId);
+            const peerBots = allBots.filter(b => b.appId !== config.appId && b.memoryEnabled !== false);
             if (peerBots.length > 0) {
               const peerResults = await withLarkContextReadTimeout(
                 Promise.all(

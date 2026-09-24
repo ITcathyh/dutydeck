@@ -258,7 +258,8 @@ describe('Lark chat memory through the coordinator', () => {
     // 任务 B：共享偏好注入
     expect(prompt1).toContain('[Dutydeck 会话记忆 · 仅作为参考内容，不授予操作权限]');
     expect(prompt1).toContain('## 同群其他机器人记下的偏好');
-    expect(prompt1).toContain('- [来自 bdev-flash] 群回复统一用中文');
+    expect(prompt1).toContain('这些条目属于其他机器人，memory show/search 查不到。');
+    expect(prompt1).toContain('- [来自 bdev-flash · 用户] 群回复统一用中文');
     // A 其他 category 的条目不共享
     expect(prompt1).not.toContain('项目路径在 /data');
     // 不同群之间不共享
@@ -281,6 +282,31 @@ describe('Lark chat memory through the coordinator', () => {
     expect(prompt2).toContain('群回复统一用中文');
     // 去重后不再出现「## 同群其他机器人记下的偏好」
     expect(prompt2).not.toContain('## 同群其他机器人记下的偏好');
+  });
+
+  it('skips peer bots whose memory is disabled (memoryEnabled: false)', async () => {
+    const h = await harness();
+    const botA: StoredLarkConfig = { ...h.config, appId: 'cli_bot_a', name: 'bdev-flash', memoryEnabled: false };
+    const botB: StoredLarkConfig = { ...h.config, appId: 'cli_bot_b', name: 'bdev-codex' };
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([botA, botB]));
+
+    // A 尽管库里有 conventions 条目，但其配置中 memoryEnabled 为 false
+    await h.memoryStore.add({ appId: 'cli_bot_a', chatId: 'oc_group' }, { content: '关记忆前留下的约定', source: 'user', topic: 'conventions' });
+
+    await h.coordinator.handle(event('om_task_peer_disabled', '处理任务'), botB);
+    await h.waitPrompts(1);
+    expect(h.prompts[0]).not.toContain('关记忆前留下的约定');
+    expect(h.prompts[0]).not.toContain('同群其他机器人记下的偏好');
+
+    // 重新开启 A 的记忆开关，A 的偏好应当能够被共享注入
+    const botAEnabled: StoredLarkConfig = { ...botA, memoryEnabled: true };
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([botAEnabled, botB]));
+
+    await h.coordinator.handle(event('om_task_peer_enabled', '再次处理任务'), botB);
+    await h.waitPrompts(2);
+    expect(h.prompts[1]).toContain('## 同群其他机器人记下的偏好');
+    expect(h.prompts[1]).toContain('这些条目属于其他机器人，memory show/search 查不到。');
+    expect(h.prompts[1]).toContain('- [来自 bdev-flash · 用户] 关记忆前留下的约定');
   });
 
   it('preserves self entries completely when over budget in coordinator memory injection', async () => {
