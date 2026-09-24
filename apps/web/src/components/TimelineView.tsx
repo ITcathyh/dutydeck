@@ -9,9 +9,6 @@ import { TimelineItem } from './TimelineItem';
 export type TimelineViewProps = {
   activeSessionId?: string;
   eventsLoading: boolean;
-  loadingEarlier: boolean;
-  hasEarlier: boolean;
-  onLoadEarlier(): Promise<unknown>;
   onResolvePermission(permissionId: string, approved: boolean): void;
   resolvingPermissionId?: string;
   timeline: TimelineEvent[];
@@ -23,17 +20,6 @@ export type TimelineViewProps = {
   footer?: ReactNode;
   renderProgress?: (emptyState: ReactNode) => ReactNode;
 };
-
-/*
-  「加载更早记录」按钮的可访问名必须恒定：测试与读屏都靠这行文案定位它。
-  loading 期间由 Button 原语自己置 disabled + 渲染 Spinner，不要把文案换成「加载中…」，
-  否则 getByRole('button', { name: '加载更早记录' }) 会失效。
-*/
-function LoadEarlierButton({ loading, onLoad }: { loading: boolean; onLoad(): void }) {
-  return <div className="mb-6 flex justify-center">
-    <Button size="sm" variant="secondary" loading={loading} onClick={onLoad}>加载更早记录</Button>
-  </div>;
-}
 
 /** 时间线首屏骨架：两行标题占位 + 一块正文占位，对应真实内容的视觉重量。 */
 function TimelineSkeleton() {
@@ -87,7 +73,7 @@ function TimelineBody({ timelineSections, activeOutputLabel, onResolvePermission
   </>;
 }
 
-export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, hasEarlier, onLoadEarlier, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress }: TimelineViewProps) {
+export function TimelineView({ activeSessionId, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress }: TimelineViewProps) {
   const progressRef = useRef<HTMLDivElement>(null);
   const timelineScroll = useTimelineAutoScroll(activeSessionId, timeline, awaitingAnswer);
   useEffect(() => {
@@ -97,18 +83,9 @@ export function TimelineView({ activeSessionId, eventsLoading, loadingEarlier, h
     observer.observe(progress);
     return () => observer.disconnect();
   }, [activeSessionId, timelineScroll.isFollowing]);
-  const loadEarlier = async () => {
-    const container = timelineScroll.containerRef.current;
-    const previousHeight = container?.scrollHeight ?? 0;
-    try {
-      await onLoadEarlier();
-      requestAnimationFrame(() => { if (container) container.scrollTop += container.scrollHeight - previousHeight; });
-    } catch { /* mutation 已在全局错误条展示 */ }
-  };
   return <div className="relative min-h-0 flex-1 bg-canvas">
     <div ref={timelineScroll.containerRef} onScroll={timelineScroll.onScroll} className="absolute inset-0 overscroll-contain overflow-y-auto">
       <div className="mx-auto w-full max-w-[880px] px-5 py-8 sm:px-8 sm:py-10">
-        {hasEarlier && <LoadEarlierButton loading={loadingEarlier} onLoad={() => void loadEarlier()}/>}
         {eventsLoading
           ? <TimelineSkeleton/>
           : timeline.length

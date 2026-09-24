@@ -9,13 +9,11 @@ import { buildApp } from '../apps/server/src/app.js';
 
 const SESSION_ID = 'ses_browser_perf';
 const EVENT_COUNT = 50_000;
-const PAGE_SIZE = 200;
 const SAMPLE_COUNT = 20;
 const budgets = {
   firstVisibleP95Ms: 800,
-  // API pagination keeps the strict 100ms budget in benchmark-history; this
-  // end-to-end budget also includes React reconciliation, layout and two paints.
-  paginationVisibleP95Ms: 250,
+  // Scrolling to earlier history includes layout and two paints.
+  historyScrollP95Ms: 250,
   incrementalPaintP95Ms: 80,
   browserHeapGrowthBytes: 32 * 1024 * 1024,
   serverRssGrowthBytes: 64 * 1024 * 1024,
@@ -90,7 +88,7 @@ async function main() {
 
     browser = await chromium.launch({ headless: true, args: ['--enable-precise-memory-info'] });
     const firstVisibleSamples: number[] = [];
-    const paginationSamples: number[] = [];
+    const scrollSamples: number[] = [];
     // Twenty samples make p95 meaningful: one cold-start/outlier sample does
     // not become the percentile itself, while repeated regressions still fail.
     for (let index = 0; index < SAMPLE_COUNT; index++) {
@@ -106,10 +104,11 @@ async function main() {
       }
       firstVisibleSamples.push(performance.now() - started);
 
-      const paginationStarted = performance.now();
-      await page.getByRole('button', { name: '加载更早记录' }).click();
-      await waitForPaint(page, `event ${EVENT_COUNT - PAGE_SIZE}`);
-      paginationSamples.push(performance.now() - paginationStarted);
+      const scrollStarted = performance.now();
+      if (await page.getByRole('button', { name: '加载更早记录' }).count()) throw new Error('history still requires manual pagination');
+      await page.getByText('event 1', { exact: true }).scrollIntoViewIfNeeded();
+      await waitForPaint(page, 'event 1');
+      scrollSamples.push(performance.now() - scrollStarted);
       await page.close();
     }
     await waitFor(() => subscribers.size === 0);
@@ -153,10 +152,10 @@ async function main() {
     const serverExternalGrowthBytes = Math.max(0, serverAfter.external - serverBefore.external);
 
     const firstVisibleP95Ms = percentile95(firstVisibleSamples);
-    const paginationVisibleP95Ms = percentile95(paginationSamples);
+    const historyScrollP95Ms = percentile95(scrollSamples);
     const incrementalPaintP95Ms = percentile95(incrementalSamples);
     assertBudget('browser first-visible p95', firstVisibleP95Ms, budgets.firstVisibleP95Ms, 'ms');
-    assertBudget('browser pagination-visible p95', paginationVisibleP95Ms, budgets.paginationVisibleP95Ms, 'ms');
+    assertBudget('browser history-scroll p95', historyScrollP95Ms, budgets.historyScrollP95Ms, 'ms');
     assertBudget('browser incremental-paint p95', incrementalPaintP95Ms, budgets.incrementalPaintP95Ms, 'ms');
     assertBudget('browser JS heap growth', browserHeapGrowthBytes, budgets.browserHeapGrowthBytes, 'B');
     assertBudget('server RSS growth after SSE soak', serverRssGrowthBytes, budgets.serverRssGrowthBytes, 'B');
@@ -165,7 +164,7 @@ async function main() {
 
     process.stdout.write(`${JSON.stringify({
       database: 'temporary-disk-sqlite', eventCount: EVENT_COUNT, sampleCount: SAMPLE_COUNT,
-      firstVisibleP95Ms, paginationVisibleP95Ms, incrementalPaintP95Ms,
+      firstVisibleP95Ms, historyScrollP95Ms, incrementalPaintP95Ms,
       browserHeapGrowthBytes, serverRssGrowthBytes, serverExternalGrowthBytes,
       sseReconnects: 100, peakSubscribers, leakedSubscribers: subscribers.size, budgets
     }, null, 2)}\n`);

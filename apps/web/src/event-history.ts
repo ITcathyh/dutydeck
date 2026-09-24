@@ -1,11 +1,10 @@
-import type { DockEvent, EventWindowQuery } from './api';
+import { api, type DockEvent } from './api';
 
 export const EVENT_PAGE_SIZE = 200;
-export const EVENT_RENDER_LIMIT = 800;
+const HISTORY_PAGE_SIZE = 1_000;
 
 export type EventWindow = {
   events: DockEvent[];
-  hasEarlier: boolean;
   sequenceIndex: Map<number, number>;
 };
 
@@ -17,21 +16,26 @@ const sortedUnique = (events: DockEvent[]) => {
 
 const indexEvents = (events: DockEvent[]) => new Map(events.map((event, index) => [event.sequence, index]));
 
-export function createEventWindow(events: DockEvent[], hasEarlier = events.length >= EVENT_PAGE_SIZE): EventWindow {
-  const bounded = sortedUnique(events).slice(-EVENT_RENDER_LIMIT);
-  return { events: bounded, hasEarlier: hasEarlier && bounded.length < EVENT_RENDER_LIMIT, sequenceIndex: indexEvents(bounded) };
+export function createEventWindow(events: DockEvent[]): EventWindow {
+  const sorted = sortedUnique(events);
+  return { events: sorted, sequenceIndex: indexEvents(sorted) };
 }
 
-export function mergeOlderEvents(current: EventWindow | undefined, older: DockEvent[], pageHasEarlier: boolean): EventWindow {
-  if (!current) return createEventWindow(older, pageHasEarlier);
-  const merged = sortedUnique([...older, ...current.events]).slice(-EVENT_RENDER_LIMIT);
-  const atLocalLimit = merged.length >= EVENT_RENDER_LIMIT;
-  return { events: merged, hasEarlier: pageHasEarlier && !atLocalLimit, sequenceIndex: indexEvents(merged) };
+export async function loadEventHistory(sessionId: string, signal?: AbortSignal): Promise<EventWindow> {
+  const events: DockEvent[] = [];
+  let before: number | undefined;
+  while (true) {
+    signal?.throwIfAborted();
+    const page = await api.events(sessionId, { before, limit: HISTORY_PAGE_SIZE, direction: 'backward' }, signal);
+    events.push(...page);
+    if (page.length < HISTORY_PAGE_SIZE) return createEventWindow(events);
+    before = page[0]!.sequence;
+  }
 }
 
-// SSE 热路径按 sequence map O(1) 定位更新；仅插入和有界淘汰时复制数组。
+// SSE 热路径按 sequence map O(1) 定位更新，保留已加载的全部历史。
 export function mergeLiveEvent(current: EventWindow | undefined, event: DockEvent): EventWindow {
-  if (!current) return createEventWindow([event], false);
+  if (!current) return createEventWindow([event]);
   const existing = current.sequenceIndex.get(event.sequence);
   if (existing !== undefined) {
     const events = [...current.events];
@@ -39,7 +43,7 @@ export function mergeLiveEvent(current: EventWindow | undefined, event: DockEven
     return { ...current, events };
   }
   const latest = current.events.at(-1);
-  if ((!latest || event.sequence > latest.sequence) && current.events.length < EVENT_RENDER_LIMIT) {
+  if (!latest || event.sequence > latest.sequence) {
     current.sequenceIndex.set(event.sequence, current.events.length);
     return { ...current, events: [...current.events, event] };
   }
@@ -50,16 +54,13 @@ export function mergeLiveEvent(current: EventWindow | undefined, event: DockEven
     else high = middle;
   }
   const events = [...current.events.slice(0, low), event, ...current.events.slice(low)];
-  if (events.length > EVENT_RENDER_LIMIT) events.splice(0, events.length - EVENT_RENDER_LIMIT);
-  return { events, hasEarlier: current.hasEarlier, sequenceIndex: indexEvents(events) };
+  return { events, sequenceIndex: indexEvents(events) };
 }
 
 export function mergeReconciledEvents(current: EventWindow | undefined, events: DockEvent[]): EventWindow {
   let next = current;
   for (const event of events) next = mergeLiveEvent(next, event);
-  return next ?? createEventWindow([], false);
+  return next ?? createEventWindow([]);
 }
 
-export const oldestSequence = (window: EventWindow | undefined) => window?.events[0]?.sequence;
 export const newestSequence = (window: EventWindow | undefined) => window?.events.at(-1)?.sequence ?? 0;
-export const initialEventQuery = (): EventWindowQuery => ({ limit: EVENT_PAGE_SIZE, direction: 'backward' });
