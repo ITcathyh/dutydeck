@@ -65,6 +65,34 @@ describe('durable task recovery notices', () => {
     expect(blocked.markdown).not.toContain('可以继续发送新请求');
   });
 
+  it('offers the new-session buttons only when the card renders them and the task is stuck, without dead-end advice', async () => {
+    const runtime = { getTaskRecovery: vi.fn(async () => ({ status: 'queued', blockers: [{ code: 'DRIVER_STOP_BLOCKED' }] as Array<{ code: string }> })) } as any;
+    const offered = await describeLarkTaskRecovery(runtime, 'session', 'task', 'queued', undefined, { relaunch: true, webBaseUrl: 'https://dutydeck.example.com' });
+    expect(offered).toMatchObject({ blocked: true, label: '排队受阻', relaunch: true });
+    expect(offered.markdown).toContain('可以点「在新会话中执行」');
+    expect(offered.markdown).toContain('原任务已保留，可在 Web 详情里核对。');
+    expect(offered.markdown).toContain('/cancel');
+    // 卡上没有按钮、也没有详情链接时，正文两者都不提。
+    const plain = await describeLarkTaskRecovery(runtime, 'session', 'task', 'queued');
+    expect(plain.relaunch).toBe(false);
+    expect(plain.markdown).not.toContain('在新会话中');
+    expect(plain.markdown).not.toContain('Web');
+    expect(plain.markdown).toContain('原任务已保留，管理员可以用 `dutydeck recovery` 命令核对。');
+    runtime.getTaskRecovery.mockResolvedValue({ status: 'reconcile_required', blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] });
+    const review = await describeLarkTaskRecovery(runtime, 'session', 'task', 'reconcile_required', undefined, { relaunch: true });
+    expect(review).toMatchObject({ blocked: true, label: '需要核对', relaunch: true });
+    expect(review.markdown).toContain('可以点「在新会话中重新执行」');
+    expect(review.markdown).toContain('原执行结果未确认，重新执行可能把已经做过的操作再做一次。');
+    for (const recovery of [offered, plain, review]) {
+      for (const phrase of ['请联系管理员', '请勿直接重试', '当前不能确认任务已停止']) expect(recovery.markdown).not.toContain(phrase);
+    }
+    // 没有卡住的任务不给按钮，声明了也不给。
+    runtime.getTaskRecovery.mockResolvedValue({ status: 'queued', blockers: [] });
+    const waiting = await describeLarkTaskRecovery(runtime, 'session', 'task', 'queued', undefined, { relaunch: true });
+    expect(waiting).toMatchObject({ blocked: false, relaunch: false });
+    expect(waiting.markdown).not.toContain('在新会话中');
+  });
+
   it('trusts only the authoritative completed settlement event and verifies its digest', async () => {
     const event = { id: 'verified', type: 'text', data: { text: '已核验结果', recovery: { actor: 'installation_owner' } } } as any;
     const runtime = { getTaskRecovery: vi.fn(async () => ({})) } as any;
