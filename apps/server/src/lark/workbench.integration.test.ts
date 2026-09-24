@@ -52,7 +52,14 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
           if (mode === 'permission') emit({ type: 'permission_request', data: { id: `permit_${sessionId}`, title: '读取指定文件', status: 'pending' } });
           await wait;
         }
-        emit({ type: 'text', data: { text: prompt.includes('综合两个') ? '最终报告：两项证据一致。' : '独立结果及来源。' } });
+        const text = prompt.includes('综合两个')
+          ? '最终报告：两项证据一致。'
+          : prompt.includes('独立调查（A）')
+            ? 'Agent A 调查结果：方案 A 具备关键证据。'
+            : prompt.includes('独立调查（B）')
+              ? 'Agent B 调查结果：方案 B 存在替代方案。'
+              : '独立结果及来源。';
+        emit({ type: 'text', data: { text } });
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
       },
       createTerminalStream: () => ({ onData: (_data, snapshot) => snapshot?.({ data: '\x1b[31mAllow tool? [y/n]\x1b[0m', cols: 80, rows: 24 }), write: terminalWrites, resize: () => {}, dispose: () => {} }),
@@ -763,12 +770,14 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
           agentId: 'alpha',
           dependsOn: []
         });
+        expect(stepA!.instruction).toContain('只阅读和分析');
         expect(stepB).toMatchObject({
           id: 'b',
           kind: 'agent',
           agentId: 'beta',
           dependsOn: []
         });
+        expect(stepB!.instruction).toContain('只阅读和分析');
         expect(stepMerge).toMatchObject({
           id: 'merge',
           kind: 'agent',
@@ -867,8 +876,25 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
       const completedItem = await f.item();
       expect(completedItem.status).toBe('completed');
       expect(f.prompts).toHaveLength(3);
-      // merge 步骤包含独立步骤的结果
-      expect(f.prompts[2]!.prompt).toContain('独立结果及来源。');
+
+      const promptA = f.prompts.find(p => p.prompt.includes('独立调查（A）'))!;
+      const promptB = f.prompts.find(p => p.prompt.includes('独立调查（B）'))!;
+      const promptMerge = f.prompts.find(p => p.prompt.includes('合并会诊结论'))!;
+      expect(promptA).toBeDefined();
+      expect(promptB).toBeDefined();
+      expect(promptMerge).toBeDefined();
+
+      // a、b 两步的 prompt 含只读约束
+      expect(promptA.prompt).toContain('只阅读和分析');
+      expect(promptB.prompt).toContain('只阅读和分析');
+
+      // b 步的 prompt 不含 a 的输出
+      expect(promptB.prompt).not.toContain('Agent A 调查结果：方案 A 具备关键证据。');
+      expect(promptA.prompt).not.toContain('Agent B 调查结果：方案 B 存在替代方案。');
+
+      // merge 步的 prompt 同时包含两份输出
+      expect(promptMerge.prompt).toContain('Agent A 调查结果：方案 A 具备关键证据。');
+      expect(promptMerge.prompt).toContain('Agent B 调查结果：方案 B 存在替代方案。');
 
       // 验证交付到话题的卡片中，只有 merge 的最终输出（final_output）
       await vi.waitFor(() => expect(f.cards.some(card => card.input.elements?.some((el: any) => el.element_id === 'final_output'))).toBe(true));
@@ -879,8 +905,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
       // 确认 a 和 b 的独立输出只在步骤记录里，没有推送到话题的 final_output
       const stepA = completedItem.steps.find(s => s.id === 'a');
       const stepB = completedItem.steps.find(s => s.id === 'b');
-      expect(stepA?.attempts.at(-1)?.output?.text).toBe('独立结果及来源。');
-      expect(stepB?.attempts.at(-1)?.output?.text).toBe('独立结果及来源。');
+      expect(stepA?.attempts.at(-1)?.output?.text).toBe('Agent A 调查结果：方案 A 具备关键证据。');
+      expect(stepB?.attempts.at(-1)?.output?.text).toBe('Agent B 调查结果：方案 B 存在替代方案。');
     });
 
     it('显式指定 --agents 时，按用户指定的 Agent 分配执行', async () => {
