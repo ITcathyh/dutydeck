@@ -184,7 +184,7 @@ export interface LarkCommandDefinition {
  *             （memory.ts）；三条命令都只读写本聊天的记忆，注入由 runTurn 完成。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
-  { name: 'work', summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
+  { name: 'work', summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
   { name: 'schedule', summary: '查看、创建、启用或停用此话题的定时任务', usage: '/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', mutating: true, requires: c => c.schedule === true, unavailableReason: '当前服务未接入定时任务。' },
   { name: 'ci', summary: '等待当前提交的 GitHub Actions、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true, unavailableReason: '当前机器人未接入 GitHub Actions 自动续作。' },
   { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
