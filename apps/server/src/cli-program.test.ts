@@ -185,6 +185,78 @@ describe('Dutydeck CLI', () => {
     await expect(program2.parseAsync(['node', 'dutydeck', 'database', 'upgrade-execution'])).rejects.toThrow();
     expect(databaseUpgradeExecution).not.toHaveBeenCalled();
   });
+
+  describe('workspace-groups commands parsing', () => {
+    it('parses workspace-groups list with options and root database', async () => {
+      const workspaceGroups = vi.fn();
+      await createCliProgram('0.0.6', { workspaceGroups }).parseAsync([
+        'node', 'dutydeck', '--database', '/root/db.sqlite', 'workspace-groups', 'list', '--url', 'http://127.0.0.1:4310', '--json'
+      ]);
+      expect(workspaceGroups).toHaveBeenCalledWith('list', {}, expect.objectContaining({
+        database: '/root/db.sqlite',
+        url: 'http://127.0.0.1:4310',
+        json: true
+      }));
+    });
+
+    it('parses workspace-groups create with name argument', async () => {
+      const workspaceGroups = vi.fn();
+      await createCliProgram('0.0.6', { workspaceGroups }).parseAsync([
+        'node', 'dutydeck', 'workspace-groups', 'create', 'Group Alpha'
+      ]);
+      expect(workspaceGroups).toHaveBeenCalledWith('create', { name: 'Group Alpha' }, expect.any(Object));
+    });
+
+    it('parses workspace-groups rename with id and new name', async () => {
+      const workspaceGroups = vi.fn();
+      await createCliProgram('0.0.6', { workspaceGroups }).parseAsync([
+        'node', 'dutydeck', 'workspace-groups', 'rename', 'group-123', 'Renamed Group'
+      ]);
+      expect(workspaceGroups).toHaveBeenCalledWith('rename', { groupId: 'group-123', name: 'Renamed Group' }, expect.any(Object));
+    });
+
+    it('parses workspace-groups delete with id', async () => {
+      const workspaceGroups = vi.fn();
+      await createCliProgram('0.0.6', { workspaceGroups }).parseAsync([
+        'node', 'dutydeck', 'workspace-groups', 'delete', 'group-456'
+      ]);
+      expect(workspaceGroups).toHaveBeenCalledWith('delete', { groupId: 'group-456' }, expect.any(Object));
+    });
+
+    it('parses workspace-groups move with session-ids and repeatable directories', async () => {
+      const workspaceGroups = vi.fn();
+      await createCliProgram('0.0.6', { workspaceGroups }).parseAsync([
+        'node', 'dutydeck', 'workspace-groups', 'move', 'group-789', 'session-1', 'session-2',
+        '--directory', '/data00/repo1', '--directory', '/data00/repo2'
+      ]);
+      expect(workspaceGroups).toHaveBeenCalledWith('move', {
+        groupId: 'group-789',
+        sessionIds: ['session-1', 'session-2']
+      }, expect.objectContaining({
+        directory: ['/data00/repo1', '/data00/repo2']
+      }));
+    });
+
+    it('parses workspace-groups reset with session-ids and repeatable directories', async () => {
+      const workspaceGroups = vi.fn();
+      await createCliProgram('0.0.6', { workspaceGroups }).parseAsync([
+        'node', 'dutydeck', 'workspace-groups', 'reset', 'session-3',
+        '--directory', '/data00/repo3'
+      ]);
+      expect(workspaceGroups).toHaveBeenCalledWith('reset', {
+        sessionIds: ['session-3']
+      }, expect.objectContaining({
+        directory: ['/data00/repo3']
+      }));
+    });
+
+    it('rejects unknown workspace-groups subcommand and does not silently succeed', async () => {
+      const workspaceGroups = vi.fn();
+      const program = createCliProgram('0.0.6', { workspaceGroups }).exitOverride().configureOutput({ writeErr: () => {} });
+      await expect(program.parseAsync(['node', 'dutydeck', 'workspace-groups', 'nonexistent'])).rejects.toThrow();
+      expect(workspaceGroups).not.toHaveBeenCalled();
+    });
+  });
 });
 
 it('parses explicit final and its current-turn capability', async () => {

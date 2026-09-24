@@ -1,4 +1,5 @@
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
+import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import { Command } from 'commander';
 import { DatabaseCliError } from './database-cli.js';
 
@@ -130,6 +131,13 @@ export interface DatabaseRetireLegacyCliOptions extends DatabaseExecutionCliOpti
   acpxDirectory?: string;
 }
 
+export interface WorkspaceGroupsCommandOptions {
+  url?: string;
+  database?: string;
+  directory?: string[];
+  json?: boolean;
+}
+
 export interface CliHandlers {
   recovery?(operation: RecoveryOperation, sessionId: string, options: RecoveryCliOptions): void | Promise<void>;
   collaborate?(operation: string, id: string | undefined, options: { json?: string; file?: string; turn?: string }): void | Promise<void>;
@@ -179,6 +187,15 @@ export interface CliHandlers {
   databaseExecutionStatus?(options: DatabaseExecutionStatusCliOptions): void | Promise<void>;
   databaseUpgradeExecution?(options: DatabaseUpgradeExecutionCliOptions): void | Promise<void>;
   databaseRetireLegacy?(options: DatabaseRetireLegacyCliOptions): void | Promise<void>;
+  workspaceGroups?(
+    action: WorkspaceGroupsAction,
+    params: {
+      groupId?: string;
+      name?: string;
+      sessionIds?: string[];
+    },
+    options: WorkspaceGroupsCommandOptions
+  ): void | Promise<void>;
 }
 
 const addCardOptions = (command: Command) => command
@@ -264,6 +281,23 @@ const databaseRetirementOptionsFrom = (options: { database?: string; hostname?: 
     ...(merged.tmuxSocket ? { tmuxSocket: merged.tmuxSocket } : {}),
     ...(merged.acpxDirectory ? { acpxDirectory: merged.acpxDirectory } : {})
   };
+};
+
+const collectDirectories = (val: string, prev: string[] = []): string[] => [...prev, val];
+
+const workspaceGroupsOptionsFrom = (options: WorkspaceGroupsCommandOptions, command: Command): WorkspaceGroupsCommandOptions => {
+  const merged = { ...command.optsWithGlobals(), ...options } as Record<string, unknown>;
+  const result: WorkspaceGroupsCommandOptions = { ...options };
+  if (typeof merged.database === 'string' && merged.database) {
+    result.database = merged.database;
+  }
+  if (typeof merged.url === 'string' && merged.url) {
+    result.url = merged.url;
+  }
+  if (merged.json === true) {
+    result.json = true;
+  }
+  return result;
 };
 
 export function createCliProgram(version: string, handlers: CliHandlers = {}) {
@@ -619,6 +653,52 @@ Examples:
     .option('--acpx-directory <path>', 'Trusted migrated acpx directory for legacy ACP metadata')
     .action((options, command) => handlers.databaseRetireLegacy?.(databaseRetirementOptionsFrom(options, command)));
 
+  const groups = program.command('workspace-groups').description('Manage workspace display grouping and assignments');
+
+  groups.command('list')
+    .description('List workspace groups, directory rules, and session assignments')
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((options, command) => handlers.workspaceGroups?.('list', {}, workspaceGroupsOptionsFrom(options, command)));
+
+  groups.command('create <name>')
+    .description('Create a new workspace group')
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((name, options, command) => handlers.workspaceGroups?.('create', { name }, workspaceGroupsOptionsFrom(options, command)));
+
+  groups.command('rename <group-id> <name>')
+    .description('Rename an existing workspace group')
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((groupId, name, options, command) => handlers.workspaceGroups?.('rename', { groupId, name }, workspaceGroupsOptionsFrom(options, command)));
+
+  groups.command('delete <group-id>')
+    .description('Delete a workspace group, preserving sessions and falling back to directory rules')
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((groupId, options, command) => handlers.workspaceGroups?.('delete', { groupId }, workspaceGroupsOptionsFrom(options, command)));
+
+  groups.command('move <group-id> [session-ids...]')
+    .description('Assign sessions and/or directories to a workspace group')
+    .option('--directory <path>', 'Directory absolute path to assign; repeatable', collectDirectories, [])
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((groupId, sessionIds, options, command) => handlers.workspaceGroups?.('move', { groupId, sessionIds: Array.isArray(sessionIds) ? sessionIds : (sessionIds ? [sessionIds] : []) }, workspaceGroupsOptionsFrom(options, command)));
+
+  groups.command('reset [session-ids...]')
+    .description('Reset session manual overrides and/or directory assignments')
+    .option('--directory <path>', 'Directory absolute path to reset; repeatable', collectDirectories, [])
+    .option('--url <url>', 'Exact local runtime URL; requires --database')
+    .option('--database <path>', 'Exact runtime database, opened read-only for its auth token')
+    .option('--json', 'Print the result as JSON')
+    .action((sessionIds, options, command) => handlers.workspaceGroups?.('reset', { sessionIds: Array.isArray(sessionIds) ? sessionIds : (sessionIds ? [sessionIds] : []) }, workspaceGroupsOptionsFrom(options, command)));
+
   const addProcessCommands = (parent: Command) => {
     parent.command('start')
       .description('Start the Dutydeck server in the background')
@@ -678,6 +758,10 @@ Examples:
   $ dutydeck session ask "要继续发布吗？"
   $ dutydeck migrate discover --source-home /tmp/legacy-fixture --json
   $ dutydeck migrate plan --source-home /tmp/legacy-fixture --output /tmp/redacted-plan.json
+  $ dutydeck workspace-groups list
+  $ dutydeck workspace-groups create "项目 A"
+  $ dutydeck workspace-groups move <group-id> --directory /path/to/repo
+  $ dutydeck workspace-groups reset [session-id]
   $ dutydeck migrate archive --source-home /tmp/legacy-fixture --output /tmp/private-archive
   $ dutydeck secret list
   $ dutydeck secret set team-bot --value-fd 0

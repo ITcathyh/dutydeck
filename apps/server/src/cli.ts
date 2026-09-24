@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { RecoveryCliError, runRecoveryCli } from './recovery-cli.js';
+import { WorkspaceGroupsCliError, runWorkspaceGroupsCli } from './workspace-groups-cli.js';
 import { runCollaboration } from './collaboration-cli.js';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -371,7 +372,19 @@ async function main() {
     },
     databaseExecutionStatus: async options => { output(await runDatabaseExecutionStatus(options)); },
     databaseUpgradeExecution: async options => { output(await runDatabaseUpgradeExecution(options)); },
-    databaseRetireLegacy: async options => { output(await runDatabaseRetireLegacy(options)); }
+    databaseRetireLegacy: async options => { output(await runDatabaseRetireLegacy(options)); },
+    workspaceGroups: async (action, params, options) => {
+      output(await runWorkspaceGroupsCli({
+        action,
+        groupId: params.groupId,
+        name: params.name,
+        sessionIds: params.sessionIds,
+        directories: options.directory,
+        url: options.url,
+        database: options.database,
+        json: options.json
+      }));
+    }
   });
   await program.parseAsync();
 }
@@ -383,7 +396,7 @@ try {
   else if (error instanceof LegacyImportError || error instanceof LegacyImportCliError) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   }
-  else if (error instanceof RecoveryCliError || error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
+  else if (error instanceof RecoveryCliError || error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError || error instanceof WorkspaceGroupsCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   // setup 的三类错误自带中文说明和「该补哪个 flag」，直接原样呈现，不要压成 JSON 或堆栈。
   else if (error instanceof PromptUnavailableError || error instanceof PromptAbortedError || error instanceof InvalidWorkingDirectoryError) {
     process.stderr.write(`${error.message}\n`);

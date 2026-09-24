@@ -1,12 +1,13 @@
 import { useMemo, useState } from 'react';
-import { CalendarClock, ChevronRight, FolderKanban, ListTodo, MessagesSquare, Plus, Settings2, ShieldCheck, Users } from 'lucide-react';
+import { CalendarClock, ChevronRight, FolderKanban, ListTodo, MessagesSquare, Plus, Settings2, ShieldCheck, SlidersHorizontal, Users } from 'lucide-react';
+import type { WorkspaceOrganization } from '@dutydeck/shared';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
 import type { PrimaryNav } from '../app-route';
 import { useMediaQuery } from '../useMediaQuery';
 import { groupSessionsByWorkspace, type WorkbenchView, type WorkspaceGroup } from '../workspace-model';
 import { formatLarkNavSummary } from '../lark-status';
 import { createTaskAffordance, DutydeckIcon } from './ui';
-import { Skeleton } from './primitives';
+import { IconButton, Skeleton } from './primitives';
 import { SessionRow } from './SessionRow';
 import { SidebarNav, type SidebarNavGroup } from './SidebarNav';
 
@@ -43,6 +44,8 @@ export type SessionListProps = {
   /** 切换主区一级视图。不传时不渲染这一组导航（供仅列任务的用法复用）。 */
   onPrimaryNavChange?(nav: PrimaryNav): void;
   authRequired?: boolean;
+  organization?: WorkspaceOrganization;
+  onManageWorkspaces?(): void;
 };
 
 /**
@@ -75,8 +78,8 @@ export type SessionListProps = {
  * 里没有 sidebar accent 这一档 variant，改用原语会让这几处颜色绕过 sidebar 语义层，
  * 将来 Team-Palette 想把侧栏重新分离出去就会漏改。语义类留着，成本为零。
  */
-export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, primaryNav = 'tasks', onPrimaryNavChange, authRequired }: SessionListProps) {
-  const workspaces = useMemo(() => groupSessionsByWorkspace(sessions, view, summaries), [sessions, summaries, view]);
+export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, primaryNav = 'tasks', onPrimaryNavChange, authRequired, organization, onManageWorkspaces }: SessionListProps) {
+  const workspaces = useMemo(() => groupSessionsByWorkspace(sessions, view, summaries, organization), [sessions, summaries, view, organization]);
   const matchesDesktop = useMediaQuery('(min-width: 768px)');
   /**
    * 折叠状态只记「用户手动改过的那些」，其余交给下面的默认规则。
@@ -233,7 +236,7 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
 
     {/* 任务列表是唯一 flex-1 的区块：卡片高度固定（top/bottom 都钉死），多出来的
         任务在这里滚，导航区和状态行不参与滚动，始终可见。 */}
-    <div className={`mt-3 min-h-0 flex-1 flex-col ${primaryNav === 'tasks' ? 'flex' : 'hidden'}`}><div className="flex items-center px-4 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>工作区<span className="ml-auto font-mono text-meta">{workspaces.length}</span></div><div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">{sessionsLoading
+    <div className={`mt-3 min-h-0 flex-1 flex-col ${primaryNav === 'tasks' ? 'flex' : 'hidden'}`}><div className="flex items-center px-4 pb-2 text-caption font-semibold text-sidebar-text-muted"><FolderKanban size={13} className="mr-2"/>工作区<span className="ml-auto font-mono text-meta">{workspaces.length}</span>{onManageWorkspaces && <span className="ml-1 -mr-2"><IconButton label="整理分组" size="sm" onClick={onManageWorkspaces}><SlidersHorizontal size={13}/></IconButton></span>}</div><div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">{sessionsLoading
       /* Skeleton 的条子写死 bg-muted，与 sidebar-hover 现在同源但不同名；这里用
          arbitrary variant 覆盖条子底色，让它跟着 sidebar 语义层走而不是内容表面层。 */
       ? <Skeleton variant="block" lines={2} className="px-1 [&>div]:bg-sidebar-hover"/>

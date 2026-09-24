@@ -41,6 +41,7 @@ function mockAppApi({ agents = [agent()], sessions = [], summaries = [], events 
   vi.spyOn(api, 'workItems').mockResolvedValue({ items: [], templates: [] });
   vi.spyOn(api, 'workItemRequests').mockResolvedValue([]);
   vi.spyOn(api, 'automation').mockResolvedValue({ schedules: [], subscriptions: [], occurrences: [] });
+  vi.spyOn(api, 'workspaceGroups').mockResolvedValue({ organization: { groups: [], directoryGroups: {}, sessionGroups: {} }, workspaces: [] });
 }
 
 function renderApp() {
