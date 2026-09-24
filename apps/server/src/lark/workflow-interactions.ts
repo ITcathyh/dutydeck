@@ -284,7 +284,7 @@ export class LarkWorkflowInteractions {
    * 关闭时使用文本卡并展示可读选项；开启后：带选项的 ask 渲染单选按钮组/多选表单，
    * 无选项的 ask 渲染自由文本 input 表单。低版本客户端仍可引用本卡片直接回复。
    * options.webBaseUrl：仅在传入且为合法 http(s) 地址时透传给结构化 ask 卡，未配置不渲染、无公网兜底。
-   * options.groupMention：群 @ 发起人开关（P0-4，默认关闭）。开启且为群聊时在审批/问答卡
+   * options.groupMention：群 @ 发起人开关（P0-4，取自 Bot/群配置，配置默认开启；未传视为关闭）。开启且为群聊时在审批/问答卡
    * 最前方插入 @ 发起人元素；关闭时不添加 @ 元素。
    */
   async observe(
@@ -330,7 +330,7 @@ export class LarkWorkflowInteractions {
     const record = created.record;
     if (record.state !== 'pending' || record.cardId || this.delivering.has(record.id) || (this.retryAfter.get(record.id) ?? 0) > Date.now()) return;
     this.delivering.add(record.id);
-    // P0-4：仅在显式开启且为群聊时于卡首 @ 发起人；默认关闭时该展开为空，卡面零变化。
+    // P0-4：仅在开关开启且为群聊时于卡首 @ 发起人；关闭时该展开为空，卡面零变化。
     const groupMentionTag = options.groupMention === true && isGroupChat(context.event.chatType) && context.event.senderOpenId
       ? renderGroupMention(context.event.senderOpenId)
       : undefined;
