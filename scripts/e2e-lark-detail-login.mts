@@ -1,4 +1,4 @@
-// 卡片「查看详情」一次性登录链接的浏览器验收：管理员点按钮 → 私信里拿到链接 → 未登录的浏览器打开后直接看到会话页。
+// 卡片「查看详情」一次性登录链接的浏览器验收：管理员点按钮 → 私信里拿到链接 → 未登录的浏览器打开确认页、点按钮后看到会话页。
 // 边界：飞书 transport 与 Agent driver 为进程内合成；Chromium、Fastify HTTP、SQLite、Runtime 与 Web 构建产物都是真实的。
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -166,23 +166,35 @@ async function runTest() {
   await page.getByLabel('访问令牌').waitFor({ timeout: 15_000 });
   passed('未登录的浏览器直接打开会话页只看到登录门');
 
-  // 从另一个来源点链接（模拟从飞书跳出），检验 SameSite=Strict cookie 在跨站跳转后仍能让会话页取到数据。
+  // 飞书链接检测、企业代理或浏览器预取会先 GET/HEAD 这个地址：只拿到确认页，码不作废、不发 cookie。
+  for (const method of ['GET', 'HEAD']) {
+    const prefetch = await fetch(url!, { method, redirect: 'manual' });
+    assert.equal(prefetch.status, 200, `${method} must only show the confirmation page`);
+    assert.equal(prefetch.headers.get('set-cookie'), null, `${method} must not set the access cookie`);
+    assert.equal(prefetch.headers.get('cache-control'), 'no-store');
+  }
+  passed('预取 GET/HEAD 只拿到确认页，不消耗登录码、不发 cookie');
+
+  // 从另一个来源点链接（模拟从飞书跳出），打开的是确认页；点按钮 POST 兑换后跳到会话页并直接取到数据。
   await page.goto('about:blank');
   await page.setContent(`<a id="open" href="${url}">打开任务详情</a>`);
   await page.click('#open');
+  await page.waitForURL(url!, { timeout: 15_000 });
+  assert.equal((await context.cookies(base)).length, 0, 'opening the link must not log in by itself');
+  await page.getByRole('button', { name: '登录并打开任务详情' }).click();
   await page.waitForURL(`${base}/sessions/${encodeURIComponent(mapping.sessionId)}`, { timeout: 15_000 });
   await page.getByText(REPLY).first().waitFor({ timeout: 15_000 });
   assert.equal(await page.getByLabel('访问令牌').count(), 0, 'login gate must be gone after redeeming the link');
   const cookie = (await context.cookies(base)).find(item => item.name === 'dutydeck_access');
   assert(cookie?.httpOnly && cookie.sameSite === 'Strict' && cookie.value === TOKEN, 'redeemed cookie must match /api/auth/login');
-  passed('打开链接后跳到该会话页并直接显示内容，cookie 与 /api/auth/login 相同');
+  passed('确认页点按钮后跳到该会话页并直接显示内容，cookie 与 /api/auth/login 相同');
 
   const replay = await (await browser.newContext()).newPage();
   const response = await replay.goto(url!);
   assert.equal(response?.status(), 400);
   await replay.getByText('登录链接已失效').waitFor({ timeout: 5_000 });
   assert.equal((await replay.context().cookies(base)).length, 0);
-  passed('同一链接第二次打开只看到失效页，不再发 cookie');
+  passed('兑换过的链接再打开只看到失效页，不再发 cookie');
   assert.equal(failures.length, 0, `unexpected warnings: ${JSON.stringify(failures)}`);
 }
 

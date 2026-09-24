@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
-import type { AgentConfig } from '@dutydeck/shared';
+import type { AgentConfig, ChannelMapping, TaskRecord } from '@dutydeck/shared';
 import { LoginLinkStore } from '../auth/auth.js';
 import {
   buildLarkCardActions,
@@ -23,6 +23,7 @@ import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinato
 import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
+import { performLarkCardReconcile } from './reconciler.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
 
 const components = (value: any): any[] => {
@@ -92,6 +93,103 @@ describe('buildLarkCard：查看详情', () => {
       expect(JSON.stringify(card)).toContain('[查看详情](https://dock.example/sessions/ses_1)');
     }
   });
+
+  it('不注入整张能力表的重绘（首帧、对账）只声明 detailLogin，也是回调按钮，其余按钮不变', () => {
+    const buttonsOf = (card: unknown) => components(card).filter(element => element.tag === 'button' && element.element_id !== 'detail').map(element => element.element_id);
+    const inputs = [
+      { ...base, cardKind: 'process', state: 'queued', readOnly: true },
+      { ...base, cardKind: 'process', state: 'queued' },
+      { ...base, cardKind: 'process', state: 'running' },
+      { ...base, cardKind: 'process', state: 'reconcile_required', capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, canRelaunch: true } },
+      { ...base, cardKind: 'process', state: 'completed', readOnly: true }
+    ] as const;
+    for (const input of inputs) {
+      const withLogin = buildLarkCard({ ...input, detailLogin: true });
+      const without = buildLarkCard(input);
+      expect(callbackValue(detailButtons(withLogin)[0])).toEqual({ action: 'detail', task_id: 'om_task', turn: '2' });
+      expect(JSON.stringify(withLogin)).not.toContain('/sessions/ses_1');
+      expect(buttonsOf(withLogin)).toEqual(buttonsOf(without));
+      expect(JSON.stringify(without)).toContain('[查看详情](https://dock.example/sessions/ses_1)');
+    }
+    // 没有会话的卡（请求未执行、Agent 启动失败等）拿不到绑定会话的登录链接，保持直链。
+    const noSession = buildLarkCard({ taskId: 'om_task', webBaseUrl: 'https://dock.example', state: 'failed', readOnly: true, detailLogin: true });
+    expect(detailButtons(noSession)).toHaveLength(0);
+    expect(JSON.stringify(noSession)).toContain('[查看详情](https://dock.example/)');
+  });
+
+  it('超出飞书预算的硬兜底卡同样给回调按钮，不在提示里塞会话深链', () => {
+    // 结果卡页脚里超长的 @、过程卡超长的失败步骤都收不进预算，只能落到硬兜底。
+    const mention = [{ tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_x></at>'.repeat(3000) }];
+    const failureStep = [{ tag: 'markdown', element_id: 'failure_step', content: 'x'.repeat(40_000) }];
+    const inputs = [
+      { ...base, cardKind: 'result' as const, state: 'completed' as const, readOnly: true, elements: mention, capabilities: loginCapabilities },
+      { ...base, cardKind: 'process' as const, state: 'failed' as const, elements: failureStep, detailLogin: true }
+    ];
+    for (const input of inputs) {
+      const card = buildLarkCard(input);
+      expect(components(card).some(element => element.element_id === 'dutydeck_hard_fallback_omission')).toBe(true);
+      expect(callbackValue(detailButtons(card)[0])).toEqual({ action: 'detail', task_id: 'om_task', turn: '2' });
+      expect(JSON.stringify(card)).not.toContain('/sessions/ses_1');
+      const { detailLogin: _detailLogin, capabilities: _capabilities, ...withoutLogin } = input as typeof input & { detailLogin?: boolean; capabilities?: LarkCardCapabilities };
+      expect(JSON.stringify(buildLarkCard(withoutLogin))).toContain('[查看详情](https://dock.example/sessions/ses_1)');
+    }
+  });
+});
+
+describe('对账重绘：查看详情', () => {
+  const reconcileConfig = { appId: 'cli_detail', appSecret: 'fake-secret', workspace: '/workspace', defaultAgentId: 'mock', fullTrustConfirmed: true, listening: true,
+    webBaseUrl: 'https://dock.example', preInjectPrompt: '', groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1_000, hideTraceOnComplete: false,
+    allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off' } as StoredLarkConfig;
+  const reconcileOnce = async (detailLogin: boolean, saved: Partial<PersistedLarkCardTask>, status?: string, rejectFirst = false) => {
+    const now = new Date().toISOString();
+    const persisted: PersistedLarkCardTask = { app_id: 'cli_detail', chat_id: 'oc_group', card_message_id: 'om_card', runtime_task_id: 'task_1',
+      task_name: '检查构建', prompt: '检查构建', started_at: Date.now() - 5_000, turn: 1, state: 'running', ...saved };
+    const rows: ChannelMapping[] = [{ id: 'lark-card:cli_detail:om_task', channel: 'lark-card:cli_detail', externalId: 'om_task', sessionId: 'ses_1', createdAt: now, extra: JSON.stringify(persisted) }];
+    const cardMappings = {
+      list: async () => rows.map(row => ({ ...row })),
+      get: async (_channel: string, externalId: string) => rows.find(row => row.externalId === externalId),
+      save: async () => {},
+      compareAndSetExtra: async (id: string, expected: string | null | undefined, extra: string) => {
+        const row = rows.find(item => item.id === id);
+        if (!row || (row.extra ?? null) !== (expected ?? null)) return false;
+        row.extra = extra;
+        return true;
+      }
+    };
+    const task = status ? { id: 'task_1', sessionId: 'ses_1', prompt: '检查构建', status, createdAt: now, updatedAt: now } as unknown as TaskRecord : undefined;
+    const runtime = {
+      getTasks: async () => task ? [task] : [],
+      getEvents: async () => [{ id: 'evt_1', sessionId: 'ses_1', sequence: 1, type: 'text', timestamp: now, data: { text: '工作已完成', taskId: 'task_1' } }],
+      getTaskRecovery: async () => ({ status, blockers: [{ code: 'DRIVER_RESOURCE_UNSAFE' }] })
+    };
+    const service = {
+      update: vi.fn(async (input: any) => ({ messageId: input.messageId })),
+      reply: vi.fn(async () => ({ messageId: 'om_result' })), send: vi.fn(async () => ({ messageId: 'om_result' }))
+    };
+    if (rejectFirst) service.update.mockRejectedValueOnce(new LarkServiceError('LARK_OPENAPI_ERROR', 'rejected', 400, { upstreamCode: 230028 }));
+    await performLarkCardReconcile({ runtime: runtime as any, service: service as any, cardMappings: cardMappings as any,
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config: reconcileConfig, channel: 'lark-card:cli_detail', ...(detailLogin ? { detailLogin: true } : {}) });
+    const processUpdates = service.update.mock.calls.map(([input]) => input).filter(input => input.cardKind === 'process' && input.messageId === 'om_card');
+    expect(processUpdates).toHaveLength(rejectFirst ? 2 : 1);
+    return processUpdates.at(-1);
+  };
+  // 过程卡的四条重绘：结果已交付后冻结回执、排队受阻/需要核对、终态收敛、内容被拒后原地修补。
+  const scenarios: Array<[string, Partial<PersistedLarkCardTask>, string | undefined, boolean]> = [
+    ['结果已交付后冻结过程回执', { state: 'completed', final_delivery_state: 'delivered', final_message_id: 'om_final' }, undefined, false],
+    ['需要核对的卡', {}, 'reconcile_required', false],
+    ['排队受阻的卡', {}, 'queued', false],
+    ['终态收敛', {}, 'completed', false],
+    ['内容被拒后原地修补', { last_successful_elements: [{ tag: 'markdown', element_id: 'previous', content: '上次成功的内容' }] }, 'completed', true]
+  ];
+
+  it.each(scenarios)('%s：Web 要求登录时页脚是回调按钮，否则仍是直链', async (_name, saved, status, rejectFirst) => {
+    const card = buildLarkCard(await reconcileOnce(true, saved, status, rejectFirst));
+    expect(callbackValue(detailButtons(card)[0])).toEqual({ action: 'detail', task_id: 'om_task', turn: '1' });
+    expect(JSON.stringify(card)).not.toContain('/sessions/ses_1');
+    const without = buildLarkCard(await reconcileOnce(false, saved, status, rejectFirst));
+    expect(detailButtons(without)).toHaveLength(0);
+    expect(JSON.stringify(without)).toContain('[查看详情](https://dock.example/sessions/ses_1)');
+  });
 });
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -103,16 +201,19 @@ const event = (id: string, text: string): LarkMessageEvent => ({
 });
 const principalId = (appId: string, openId: string) => `principal_${createHash('sha256').update(`${appId}\0${openId}`).digest('hex')}`;
 
-async function harness(options: { loginLinks?: boolean; managedGroup?: boolean; allowedUsers?: StoredLarkConfig['allowedUsers'] } = {}) {
+async function harness(options: { loginLinks?: boolean; managedGroup?: boolean; allowedUsers?: StoredLarkConfig['allowedUsers']; failFirst?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-detail-login-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
+  let sends = 0;
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit) => {
       const driver: AgentDriver = {
         start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
         send: async () => {
-          emit({ type: 'text', data: { text: '工作已完成' } });
+          // 收尾活动不是文本时 Runtime 判为失败，失败卡上才有「重试」。
+          if (options.failFirst && sends++ === 0) emit({ type: 'tool_call', data: { id: 'tool_1', name: 'Bash', input: {}, status: 'running' } });
+          else emit({ type: 'text', data: { text: '工作已完成' } });
           emit({ type: 'completed', data: { stopReason: 'end_turn' } });
         }
       };
@@ -169,7 +270,7 @@ async function harness(options: { loginLinks?: boolean; managedGroup?: boolean; 
   const groupMessages = () => service.reply.mock.calls.length + service.update.mock.calls.length
     + service.send.mock.calls.filter(([input]: any[]) => input.chatId).length;
   const privateMessages = () => service.send.mock.calls.map(([input]: any[]) => input).filter(input => input.receiveId);
-  return { repos, config, service, log, links, cards, coordinator, createCoordinator, groupManager, runTask, groupMessages, privateMessages };
+  return { repos, config, service, log, links, cards, coordinator, createCoordinator, groupManager, saved, runTask, groupMessages, privateMessages };
 }
 
 describe('coordinator：查看详情私信一次性登录链接', () => {
@@ -214,6 +315,49 @@ describe('coordinator：查看详情私信一次性登录链接', () => {
       expect(h.privateMessages()).toHaveLength(3);
     } finally { restored.stop(); }
     expect(h.groupMessages()).toBe(groupBefore);
+  });
+
+  it('过程卡首帧就是回调按钮，不等第一次心跳重绘', async () => {
+    const h = await harness();
+    const { sessionId } = await h.runTask();
+    const firstFrame = h.service.reply.mock.calls.map(([input]: any[]) => input).find(input => input.cardKind === 'process');
+    const card = buildLarkCard(firstFrame);
+    expect(detailButtons(card)).toHaveLength(1);
+    expect(JSON.stringify(card)).not.toContain(`/sessions/${sessionId}`);
+  });
+
+  it('重试开了新一轮后，旧一轮的卡片照样拿到链接，指向任务当前所在的会话', async () => {
+    const h = await harness({ failFirst: true });
+    await h.coordinator.handle(event('om_task', '检查构建'), h.config);
+    await vi.waitFor(async () => expect((await h.saved()).extra).toMatchObject({ state: 'failed', final_delivery_state: 'delivered' }), { timeout: 10_000 });
+    const first = (await h.saved()).extra;
+    expect(await h.coordinator.handleAction({ action: 'retry', task_id: 'om_task', turn: String(first.turn) }, 'ou_alice',
+      { messageId: first.card_message_id, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+    await vi.waitFor(async () => expect((await h.saved()).extra).toMatchObject({ turn: first.turn! + 1, state: 'completed', final_delivery_state: 'delivered' }), { timeout: 10_000 });
+    const current = await h.saved();
+    expect([current.extra.card_message_id, current.extra.final_message_id]).not.toContain(first.card_message_id);
+
+    const clickOld = async (messageId: string, chatId = 'oc_group') => {
+      const [button] = detailButtons(buildLarkCard(h.cards.get(messageId)));
+      expect(button, `旧卡 ${messageId} 上应有回调式「查看详情」`).toBeDefined();
+      return h.coordinator.handleAction(callbackValue(button), 'ou_alice', { messageId, chatId });
+    };
+    const lastCode = () => /code=([A-Za-z0-9_-]{43})/.exec(JSON.stringify(h.privateMessages().at(-1)))![1]!;
+    for (const messageId of [first.card_message_id!, first.final_message_id!]) {
+      expect(await clickOld(messageId)).toEqual({ type: 'success', content: '已私信你一个 10 分钟内有效的登录链接' });
+      expect(h.links.redeem(lastCode())).toBe(current.sessionId);
+    }
+    // 群号仍要对得上；非管理员在旧卡上也拿不到。
+    expect(await clickOld(first.final_message_id!, 'oc_other')).toMatchObject({ type: 'warning' });
+    expect(await h.coordinator.handleAction({ action: 'detail', task_id: 'om_task', turn: String(first.turn) }, 'ou_bob',
+      { messageId: first.final_message_id, chatId: 'oc_group' })).toMatchObject({ type: 'warning', content: expect.stringContaining('仅机器人管理员') });
+    expect(h.privateMessages()).toHaveLength(2);
+
+    // 任务转到别的会话后（账本换了会话），旧卡的链接跟着任务走。
+    const [row] = await h.repos.channelMappings.list('lark-card:cli_detail');
+    await h.repos.channelMappings.save({ ...row!, sessionId: 'ses_moved' });
+    expect(await clickOld(first.card_message_id!)).toMatchObject({ type: 'success' });
+    expect(h.links.redeem(lastCode())).toBe('ses_moved');
   });
 
   it('非管理员点击不发私信，只提示去导出执行记录', async () => {
@@ -268,9 +412,11 @@ describe('coordinator：查看详情私信一次性登录链接', () => {
   it('未开启 Web 登录时卡片保持直接打开的链接，回调也不发链接', async () => {
     const h = await harness({ loginLinks: false });
     const { sessionId, extra } = await h.runTask();
-    const resultCard = buildLarkCard(h.cards.get(extra.final_message_id!));
-    expect(detailButtons(resultCard)).toHaveLength(0);
-    expect(JSON.stringify(resultCard)).toContain(`[查看详情](https://dock.example/sessions/${sessionId})`);
+    const firstFrame = h.service.reply.mock.calls.map(([input]: any[]) => input).find(input => input.cardKind === 'process');
+    for (const card of [buildLarkCard(h.cards.get(extra.final_message_id!)), buildLarkCard(firstFrame)]) {
+      expect(detailButtons(card)).toHaveLength(0);
+      expect(JSON.stringify(card)).toContain(`[查看详情](https://dock.example/sessions/${sessionId})`);
+    }
     expect(await h.coordinator.handleAction({ action: 'detail', task_id: 'om_task', turn: String(extra.turn) }, 'ou_alice', { messageId: extra.final_message_id, chatId: 'oc_group' }))
       .toMatchObject({ type: 'error' });
     expect(h.privateMessages()).toHaveLength(0);

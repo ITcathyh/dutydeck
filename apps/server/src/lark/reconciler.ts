@@ -48,6 +48,8 @@ export async function performLarkCardReconcile(input: {
   resolveConfig?: (saved: PersistedLarkCardTask) => Promise<StoredLarkConfig>;
   /** 卡住的任务能否在卡上给「在新会话中执行」按钮，与 coordinator 回调端同一个判定（按 message_id 读映射与入站记录）。缺省不给。 */
   relaunchReady?: (taskId: string, status: string, turn: number) => Promise<boolean>;
+  /** Web 要求登录：重绘的过程卡上「查看详情」是回调按钮。结果卡的这项能力由 terminalDecoration 带上。 */
+  detailLogin?: boolean;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
@@ -55,6 +57,8 @@ export async function performLarkCardReconcile(input: {
   try { agentName = (await runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? agentName; }
   catch (error) { log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 对账卡片'); }
   const cardContext = { agentName, ...(config.workspace ? { workspace: config.workspace } : {}) };
+  // 过程卡重绘不注入整张能力表，「查看详情」要不要走回调单独声明，否则页脚退回直链、点开落到登录页。
+  const processContext = { ...cardContext, ...(input.detailLogin ? { detailLogin: true } : {}) };
   const mappings = await cardMappings.list(channel);
   let unresolved = 0;
   for (const mapping of mappings) {
@@ -79,7 +83,7 @@ export async function performLarkCardReconcile(input: {
         const legacyElements = persisted.last_successful_elements?.length ? persisted.last_successful_elements : undefined;
         try {
           await service.update({
-            ...cardContext,
+            ...processContext,
             cardKind: 'process',
             messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config),
@@ -156,7 +160,7 @@ export async function performLarkCardReconcile(input: {
         }
         if (persisted.recovery_status_key !== statusKey) try {
           await service.update({
-            ...cardContext, cardKind: 'process', messageId: persisted.card_message_id,
+            ...processContext, cardKind: 'process', messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config), state,
             ...(recovery ? { statusLabel: recovery.label } : {}),
             taskId: mapping.externalId, taskName: persisted.task_name,
@@ -210,7 +214,7 @@ export async function performLarkCardReconcile(input: {
       for (let attempt = 1; !updated && cardMessageId && attempt <= 3; attempt++) {
         try {
           await service.update({
-            ...cardContext,
+            ...processContext,
             cardKind: 'process',
             messageId: cardMessageId,
             permissionMode: larkPermissionMode(config),
@@ -243,7 +247,7 @@ export async function performLarkCardReconcile(input: {
         const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
         try {
           await service.update({
-            ...cardContext,
+            ...processContext,
             cardKind: 'process',
             messageId: cardMessageId,
             permissionMode: larkPermissionMode(config),

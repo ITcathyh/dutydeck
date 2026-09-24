@@ -120,7 +120,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         !pathname.startsWith('/api/')
         || pathname === '/api/auth/status'
         || pathname === '/api/auth/login'
-        || pathname === '/api/auth/link'
+        // 登录链接：GET（及自动生成的 HEAD）只回确认页，POST 才兑换；其余方法照常鉴权。
+        || (pathname === '/api/auth/link' && (method === 'GET' || method === 'HEAD' || method === 'POST'))
         || pathname === '/api/auth/logout'
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
