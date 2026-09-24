@@ -188,6 +188,8 @@ export type PersistedLarkCardTask = {
 };
 
 const larkCardChannel = (appId: string) => `lark-card:${appId}`;
+/** 空 @ 沿用同一用户上一条请求的时间窗：超过它就不再假定两条消息是同一次求助。 */
+const ownRequestAdoptionWindowMs = 10 * 60 * 1000;
 /**
  * 卡片标题：去掉开头对本机器人的 @。卡片回复在原消息下面，标题第一眼读到机器人自己的名字
  * 是噪声；@ 别的机器人是原话的一部分，保留。
@@ -550,6 +552,30 @@ export class LarkMessageCoordinator {
         && await resolveLarkScopeId(record.event, config, this.chatModeResolver) === scopeId) candidates.push(record);
     }
     return candidates;
+  }
+
+  /**
+   * 群参与开启时，这轮对话的根消息由同一用户发出，这条回复针对根消息或本机器人的消息、没有 @ 任何人，
+   * 且对应会话仍在进行：它是在继续和机器人对话，不必再 @。回复其他人的消息保持原有路由。
+   */
+  private async continuesOwnRequest(event: LarkMessageEvent, config: StoredLarkConfig): Promise<boolean> {
+    const rootId = event.rootId?.trim();
+    const parentId = event.parentId?.trim();
+    if (event.chatType !== 'group' || event.senderType !== 'user' || !event.senderOpenId || !rootId || rootId === event.messageId
+      || event.mentions.length || !this.botOpenId || !this.groupManager) return false;
+    try {
+      if (await this.workflowOptions.participation!.mode({ appId: config.appId, chatId: event.chatId }) === 'off') return false;
+      if (!await this.groupManager.hasActiveSession(config, event, await resolveLarkScopeId(event, config, this.chatModeResolver))) return false;
+      const root = await this.service.getMessage(rootId);
+      if (root.messageId !== rootId || root.chatId !== event.chatId || root.deleted || root.sender.type !== 'user' || root.sender.id !== event.senderOpenId) return false;
+      // 话题会话本身证明机器人接过这个话题；普通群按人归属的会话证明不了，根消息必须是 @ 本机器人的请求。
+      // 消息读取接口把被 @ 的机器人报成 app_id，实时事件里才是 open_id，两种都认。
+      if (!event.threadId?.trim() && !root.mentions.some(mention => mention.id === this.botOpenId || mention.idType === 'app_id' && mention.id === config.appId)) return false;
+      if (!parentId || parentId === rootId) return true;
+      const parent = await this.service.getMessage(parentId);
+      return parent.messageId === parentId && parent.chatId === event.chatId && !parent.deleted
+        && ['app', 'bot'].includes(parent.sender.type ?? '') && (parent.sender.id === config.appId || parent.sender.id === this.botOpenId);
+    } catch { return false; }
   }
 
   private async continuesPendingAsk(event: LarkMessageEvent, config: StoredLarkConfig): Promise<boolean> {
@@ -987,7 +1013,12 @@ export class LarkMessageCoordinator {
     if (inbox) await this.inbox!.update(inbox, { state: 'failed', error: reason });
   }
 
-  async handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false) {
+  /** 群参与判定为 act 时，按发送者本人的显式请求走同一条授权、领取与执行路径。 */
+  adopt(event: LarkMessageEvent, config: StoredLarkConfig) {
+    return this.handle(event, config, false, true);
+  }
+
+  async handle(event: LarkMessageEvent, config: StoredLarkConfig, recovering = false, adopted = false) {
     if (this.workflowOptions.store) {
       const current = await readLarkConfig(this.workflowOptions.store, config.appId);
       if (!current?.listening) return;
@@ -997,7 +1028,7 @@ export class LarkMessageCoordinator {
     const mentionsBot = this.botOpenId ? event.mentions.some(mention => mention.openId === this.botOpenId) : event.mentions.some(mention => mention.mentionedType === 'bot');
     if (this.stopped) return;
     const botSender = event.senderType === 'app' || event.senderType === 'bot';
-    const explicit = !botSender && (event.chatType === 'p2p' || mentionsBot || Boolean(quotedWorkflow));
+    const explicit = !botSender && (event.chatType === 'p2p' || mentionsBot || Boolean(quotedWorkflow) || adopted);
     let helpOnly = false;
     let recognizedCommand = false;
     try {
@@ -1023,11 +1054,13 @@ export class LarkMessageCoordinator {
     const commandInteraction = !botSender && recognizedCommand && legacyWake;
     // Observation precedes wake filtering and every visible acknowledgement.
     const pendingAskContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && await this.continuesPendingAsk(event, config));
-    const participation = await this.workflowOptions.participation?.handle(event, config, { explicit: explicit || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId });
+    const requestContinuation = Boolean(this.workflowOptions.participation && !recovering && !explicit && !pendingAskContinuation && await this.continuesOwnRequest(event, config));
+    const addressed = explicit || requestContinuation;
+    const participation = await this.workflowOptions.participation?.handle(event, config, { explicit: addressed || pendingAskContinuation || commandInteraction, botOpenId: this.botOpenId });
     if (this.handledMessages.has(event.messageId)) return;
     // 定向机器人交接仍走下方循环门禁和访问授权，不作为人类显式指令或主动判定。
-    if (participation?.enabled && !explicit && !pendingAskContinuation && !commandInteraction && !(botSender && legacyWake)) return;
-    const shouldWake = legacyWake || Boolean(participation?.enabled && pendingAskContinuation);
+    if (participation?.enabled && !addressed && !pendingAskContinuation && !commandInteraction && !(botSender && legacyWake)) return;
+    const shouldWake = legacyWake || adopted || Boolean(participation?.enabled && (pendingAskContinuation || requestContinuation));
     // 机器人互相 @ 的硬门禁。legacyWake 的 mentionsBot / quotedWorkflow 两支都不受 !botSender
     // 约束，访问控制在没配成员名单时又对机器人一律放行，所以刷屏回路只能在这里封口。
     // 判定失败按挡下处理：门禁读不到状态时放行等于把回路重新打开。
@@ -1048,7 +1081,7 @@ export class LarkMessageCoordinator {
     if (shouldWake && event.chatType === 'group' && this.groupManager) {
       const decision = await this.groupManager.authorize(config.appId, event.chatId, event.senderOpenId, entryAction, undefined, { memberObserved: !recovering });
       if (decision && !decision.allowed) {
-        await this.rejectIncoming(event, config, decision.code === 'talk_required' ? '当前账号没有此群的任务访问权限。' : decision.reason, explicit);
+        await this.rejectIncoming(event, config, decision.code === 'talk_required' ? '当前账号没有此群的任务访问权限。' : decision.reason, addressed);
         return;
       }
     }
@@ -1056,7 +1089,7 @@ export class LarkMessageCoordinator {
     if (recovering && (!event.senderOpenId || !await this.currentAccess(config, event.chatId, event.chatType, event.senderOpenId, entryAction, undefined, event.senderOpenId))) return;
     try { if (!helpOnly) await this.requireExecution('listener', 'task.create'); }
     catch (error) {
-      await this.rejectIncoming(event, config, error instanceof Error ? error.message : '机器人尚未获得运行权限。', explicit);
+      await this.rejectIncoming(event, config, error instanceof Error ? error.message : '机器人尚未获得运行权限。', addressed);
       return;
     }
     const inbox = await this.inbox?.claim(config.appId, event);
@@ -1319,7 +1352,9 @@ export class LarkMessageCoordinator {
         return 'handled';
       }
       if (route.command === 'status') {
-        await replyCard('任务状态', await this.describeChatStatus(config, sessionId, latestTask));
+        const participation = event.chatType === 'group'
+          ? await this.workflowOptions.participation?.describe({ appId: config.appId, chatId: event.chatId }).catch(() => undefined) : undefined;
+        await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation].filter(Boolean).join('\n\n'));
         return 'handled';
       }
       if (route.command === 'agents') {
@@ -2569,9 +2604,9 @@ export class LarkMessageCoordinator {
   }
 
   /**
-   * 空 @ 若引用同一用户自己的消息，沿用其中的明确请求；否则拉取最近聊天记录辅助澄清。
+   * 空 @ 若引用同一用户自己的消息，或紧跟在其刚发、机器人尚未回应的请求之后，沿用该请求；否则拉取最近聊天记录辅助澄清。
    */
-  private async buildEmptyMessageFallback(event: LarkMessageEvent): Promise<string> {
+  private async buildEmptyMessageFallback(event: LarkMessageEvent, appId: string): Promise<string> {
     const referenceId = event.parentId?.trim() || (event.threadId?.trim() ? event.rootId?.trim() : undefined);
     if (event.chatType === 'group' && event.senderType === 'user' && event.senderOpenId && referenceId
       && this.botOpenId && event.mentions.some(mention => mention.openId === this.botOpenId)) {
@@ -2608,24 +2643,36 @@ export class LarkMessageCoordinator {
         .filter(item => item.messageId !== event.messageId && !item.deleted)
         .sort((a, b) => Number(a.createTime) - Number(b.createTime));
       if (!messages.length) return fallback;
-      const lines = await Promise.all(messages.map(async item => {
-        const sender = item.sender.name || item.sender.id || '未知用户';
-        // 合并转发消息不自动展开，只返回占位提示；Agent 可通过群协作工具按 message_id 拉取转发内容。
-        const parsed = await parsePrompt({
-          messageId: item.messageId,
-          chatId: item.chatId ?? event.chatId,
-          chatType: event.chatType,
-          messageType: item.messageType,
-          content: item.rawContent,
-          mentions: item.mentions.map(mention => ({
-            key: mention.key ?? '',
-            name: mention.name ?? '',
-            ...(mention.id && (mention.idType === 'open_id' || mention.id.startsWith('ou_')) ? { openId: mention.id } : {})
-          }))
-        }, this.botOpenId);
-        const text = parsed.prompt;
-        return `${sender}: ${text || '[图片/文件/卡片等非文字消息]'}`;
-      }));
+      // 合并转发消息不自动展开，只返回占位提示；Agent 可通过群协作工具按 message_id 拉取转发内容。
+      const texts = await Promise.all(messages.map(async item => (await parsePrompt({
+        messageId: item.messageId,
+        chatId: item.chatId ?? event.chatId,
+        chatType: event.chatType,
+        messageType: item.messageType,
+        content: item.rawContent,
+        mentions: item.mentions.map(mention => ({
+          key: mention.key ?? '',
+          name: mention.name ?? '',
+          ...(mention.id && (mention.idType === 'open_id' || mention.id.startsWith('ou_')) ? { openId: mention.id } : {})
+        }))
+      }, this.botOpenId)).prompt));
+      // 顶层空 @ 紧跟在同一用户自己刚发、本机器人还没回应的请求之后：直接沿用该请求，不再多问一轮确认。
+      let ownIndex = -1;
+      if (!referenceId && event.chatType === 'group' && event.senderType === 'user' && event.senderOpenId) {
+        messages.forEach((item, index) => {
+          if (item.sender.type === 'user' && item.sender.id === event.senderOpenId && Number(item.createTime) <= Number(event.createTime)) ownIndex = index;
+        });
+      }
+      const own = messages[ownIndex];
+      const ownText = texts[ownIndex]?.trim();
+      if (own && ownText && !parseSlashCommand(ownText) && ['text', 'post', 'rich_text'].includes(own.messageType) && !own.mentions.length
+        && Number(event.createTime) - Number(own.createTime) <= ownRequestAdoptionWindowMs
+        // 只看原请求与本次 @ 之间：排队期间机器人为其他任务发出的消息不算已回应。
+        && !messages.slice(ownIndex + 1).some(item => Number(item.createTime) <= Number(event.createTime)
+          && ['app', 'bot'].includes(item.sender.type ?? '') && (item.sender.id === appId || item.sender.id === this.botOpenId))) {
+        return `[Dutydeck 空 @ 沿用请求]\n用户刚发出下面这条消息（${own.messageId}），随后单独 @ 了你，请你处理它。原消息包含明确请求时，直接沿用该请求继续处理，不要仅因本次消息只有 @ 而要求重复确认；原消息没有明确请求或指代仍不清楚时，才询问缺少的信息。其他聊天记录仅作参考，仍遵守既有权限与高风险操作确认要求。\n\n[用户的原消息]\n${ownText}`;
+      }
+      const lines = messages.map((item, index) => `${item.sender.name || item.sender.id || '未知用户'}: ${texts[index] || '[图片/文件/卡片等非文字消息]'}`);
       return `[Dutydeck 空消息兜底]\n用户仅 @ 了机器人而未发送任何文字内容。以下是当前会话最近的聊天记录，仅用于识别指代。${confirmationRule}\n\n[最近聊天记录]\n${lines.join('\n')}`;
     } catch (error) {
       this.log.warn({ error, chatId: event.chatId, messageId: event.messageId }, '拉取飞书聊天记录为空消息兜底失败');
@@ -2691,7 +2738,7 @@ export class LarkMessageCoordinator {
     };
     // 用户仅 @ 机器人而未发送文字时，拉取最近聊天记录作为上下文，让 Agent 判断用户意图。
     if (!task.prompt.trim()) {
-      try { task.prompt = await withLarkContextReadTimeout(this.buildEmptyMessageFallback(event), '空 @ 上下文读取'); }
+      try { task.prompt = await withLarkContextReadTimeout(this.buildEmptyMessageFallback(event, config.appId), '空 @ 上下文读取'); }
       catch (error) { await failContextRead(error); return; }
     }
     const prompt = task.prompt;

@@ -583,6 +583,11 @@ export class LarkGroupManager {
 
   async ownsTopic(config: StoredLarkConfig, event: LarkMessageEvent, scopeId: string) {
     if (!event.threadId || !scopeId.startsWith('thread:')) return false;
+    return this.hasActiveSession(config, event, scopeId);
+  }
+
+  /** 该 scope 下是否有未归档、未停止的会话。 */
+  async hasActiveSession(config: StoredLarkConfig, event: LarkMessageEvent, scopeId: string) {
     const source = larkSourceId(config, event.chatId, event.chatType, scopeId);
     return (await this.repos.sessions.list()).some(session => session.source === 'lark' && session.sourceId === source && !session.archivedAt && !['stopped', 'failed'].includes(session.state));
   }
