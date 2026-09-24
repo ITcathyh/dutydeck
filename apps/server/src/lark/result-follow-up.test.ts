@@ -238,6 +238,54 @@ describe('结果卡一键续问', () => {
     expect(await h.click(callbackOf(h.card(saved.final_message_id!), 'ask_detail'), 'ou_alice', saved)).toMatchObject({ type: 'success' });
     await vi.waitFor(() => expect(h.prompts).toHaveLength(3), { timeout: 10_000 });
   });
+
+  it('上个进程在代发前退出：重启后再点由这次点击接手，只提交一轮', async () => {
+    const h = await harness();
+    const saved = await h.run(event('om_1', '查一下登录为什么慢'));
+    const value = callbackOf(h.card(saved.final_message_id!), 'ask_plain');
+    // 第一次点击卡在代发消息上，进程随即退出（dutydeck restart 只等运行中的任务，不等卡片回调）。
+    h.service.replyText.mockImplementationOnce(() => new Promise<never>(() => {}));
+    void h.click(value, 'ou_alice', saved);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledTimes(1));
+    await h.restart();
+
+    expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'success' });
+    expect(h.service.replyText).toHaveBeenCalledTimes(2);
+    // 重做沿用同一个幂等键：上个进程其实已经发出去的话，飞书不会再发第二条。
+    expect(h.service.replyText.mock.calls[1]![0].idempotencyKey).toBe(h.service.replyText.mock.calls[0]![0].idempotencyKey);
+    const echoId = (await h.service.replyText.mock.results[1]!.value).messageId as string;
+    expect((await h.result(echoId)).prompt).toBe(larkCardFollowUpPrompt('ask_plain'));
+    expect(h.prompts).toHaveLength(2);
+    expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
+    expect(h.prompts).toHaveLength(2);
+  });
+
+  it('上个进程代发之后退出：接手沿用那条消息；已登记进 inbox 的不再提交', async () => {
+    const h = await harness();
+    const saved = await h.run(event('om_1', '查一下登录为什么慢'));
+    const value = callbackOf(h.card(saved.final_message_id!), 'ask_detail');
+    h.service.replyText.mockImplementationOnce(() => new Promise<never>(() => {}));
+    void h.click(value, 'ou_alice', saved);
+    await vi.waitFor(() => expect(h.service.replyText).toHaveBeenCalledTimes(1));
+    await h.restart();
+    // 上个进程已代发出 om_echo_sent 并记进认领，还没来得及登记进 inbox 就退出了。
+    const [row] = await h.repos.config.list!('lark.result_follow_up.cli_followup.');
+    await h.repos.config.set(row!.key, JSON.stringify({ ...JSON.parse(row!.value), message_id: 'om_echo_sent' }));
+
+    expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'success' });
+    expect(h.service.replyText).toHaveBeenCalledTimes(1);
+    expect((await h.result('om_echo_sent')).prompt).toBe(larkCardFollowUpPrompt('ask_detail'));
+    await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_followup.om_echo_sent'))!).state).toBe('accepted'), { timeout: 10_000 });
+    expect(h.prompts).toHaveLength(2);
+
+    // 登记进 inbox 之后、标记完成之前退出：接手时认出这条消息已经登记，不提交第二次。
+    const [done] = await h.repos.config.list!('lark.result_follow_up.cli_followup.');
+    await h.repos.config.set(done!.key, JSON.stringify({ ...JSON.parse(done!.value), phase: 'claimed', boot: 'previous-boot' }));
+    await h.restart();
+    expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
+    expect(h.service.replyText).toHaveBeenCalledTimes(1);
+    expect(h.prompts).toHaveLength(2);
+  });
 });
 
 describe('重复请求时提议每天自动执行', () => {
@@ -302,12 +350,16 @@ describe('重复请求时提议每天自动执行', () => {
     expect(JSON.parse((await h.repos.config.get(`automation.delivery-target.${schedules[0]!.id}`))!))
       .toEqual({ appId: 'cli_followup', chatId: 'oc_group', replyMessageId: 'om_2', replyInThread: true });
 
-    // 原结果卡重绘：定时按钮变成不可点的「已设为…」，其余按钮原样保留。
-    const updated = buildLarkCard(h.cards.get(second.final_message_id!));
-    expect(followUpLabels(updated)).toEqual(['说人话', '给我对外回复', '再详细点', `已设为每天 ${time} 自动执行`]);
-    expect(callbackOf(updated, 'schedule_daily')).toBeUndefined();
-    // 回执：计划名、下次执行时间、停用方法。
-    const receipt = h.service.reply.mock.calls.map(([input]: any[]) => input).find((input: any) => input.taskName === '定时任务');
+    // 原结果卡在后台重绘：定时按钮变成不可点的「已设为…」，其余按钮原样保留。
+    await vi.waitFor(() => expect(followUpLabels(buildLarkCard(h.cards.get(second.final_message_id!))))
+      .toEqual(['说人话', '给我对外回复', '再详细点', `已设为每天 ${time} 自动执行`]));
+    expect(callbackOf(buildLarkCard(h.cards.get(second.final_message_id!)), 'schedule_daily')).toBeUndefined();
+    // 回执（同样在后台发）：计划名、下次执行时间、停用方法。
+    const receipt = await vi.waitFor(() => {
+      const found = h.service.reply.mock.calls.map(([input]: any[]) => input).find((input: any) => input.taskName === '定时任务');
+      expect(found).toBeDefined();
+      return found;
+    });
     expect(receipt).toMatchObject({ messageId: second.final_message_id, replyInThread: true });
     expect(receipt.markdown).toContain('详细总结下今天的聊天内容');
     expect(receipt.markdown).toContain('下一次：');
@@ -318,5 +370,43 @@ describe('重复请求时提议每天自动执行', () => {
     expect(await h.click(value, 'ou_alice', second)).toMatchObject({ type: 'success' });
     expect((await h.automation!.listBySession(second.sessionId, 'ou_alice')).schedules).toHaveLength(1);
     expect(h.prompts).toHaveLength(2);
+  });
+
+  it.each([
+    ['建计划之前', 'createSchedule'],
+    ['计划已建好、启用之前', 'updateSchedule']
+  ] as const)('上个进程在%s退出：换人再点接手补完，只有一个启用的计划', async (_label, stuck) => {
+    const h = await harness({ automation: true });
+    await h.run(event('om_1', '详细总结下今天的聊天内容'));
+    const second = await h.run(event('om_2', '详细总结下今天的聊天内容'));
+    const time = clock(second.started_at);
+    const value = callbackOf(h.card(second.final_message_id!), 'schedule_daily');
+    const spy = vi.spyOn(h.automation!, stuck).mockImplementationOnce(() => new Promise<never>(() => {}));
+    void h.click(value, 'ou_alice', second);
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    await h.restart();
+
+    // 计划编号按「会话 + 操作人 + 键」算：换一个人接手时，要按登记找回上个进程建的那条补完，而不是另建一条。
+    expect(await h.click(value, 'ou_bob', second)).toMatchObject({ type: 'success', content: `已设为每天 ${time} 自动执行。` });
+    const schedules = (await h.automation!.listBySession(second.sessionId, 'ou_alice')).schedules;
+    expect(schedules).toHaveLength(1);
+    expect(schedules[0]).toMatchObject({ enabled: true, prompt: '详细总结下今天的聊天内容' });
+    expect(JSON.parse((await h.repos.config.get(`automation.delivery-target.${schedules[0]!.id}`))!))
+      .toEqual({ appId: 'cli_followup', chatId: 'oc_group', replyMessageId: 'om_2', replyInThread: true });
+    await vi.waitFor(() => expect(followUpLabels(buildLarkCard(h.cards.get(second.final_message_id!))).at(-1)).toBe(`已设为每天 ${time} 自动执行`));
+    expect(await h.click(value, 'ou_alice', second)).toMatchObject({ type: 'success' });
+    expect((await h.automation!.listBySession(second.sessionId, 'ou_alice')).schedules).toHaveLength(1);
+  });
+
+  it('飞书重绘卡住时点击仍立即回 toast，回执不排在重绘后面', async () => {
+    const h = await harness({ automation: true });
+    await h.run(event('om_1', '详细总结下今天的聊天内容'));
+    const second = await h.run(event('om_2', '详细总结下今天的聊天内容'));
+    const value = callbackOf(h.card(second.final_message_id!), 'schedule_daily');
+    h.service.update.mockImplementation(() => new Promise<never>(() => {}));
+    const outcome = await Promise.race([h.click(value, 'ou_alice', second), new Promise(resolve => setTimeout(() => resolve('timeout'), 2_000))]);
+    expect(outcome).toMatchObject({ type: 'success' });
+    expect((await h.automation!.listBySession(second.sessionId, 'ou_alice')).schedules).toMatchObject([{ enabled: true }]);
+    await vi.waitFor(() => expect(h.service.reply.mock.calls.some(([input]: any[]) => input.taskName === '定时任务')).toBe(true));
   });
 });

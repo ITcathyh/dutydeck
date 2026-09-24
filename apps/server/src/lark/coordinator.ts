@@ -231,11 +231,19 @@ const shanghaiClock = (at: number) => new Intl.DateTimeFormat('en-GB', { timeZon
 const larkScopeContinuesFor = (scopeId: string, operatorOpenId: string) =>
   scopeId.startsWith('user:') ? scopeId === `user:${operatorOpenId}` : !scopeId.startsWith('message:');
 const resultActionDigest = (...parts: Array<string | number>) => createHash('sha256').update(parts.join('\0')).digest('hex').slice(0, 32);
-/** 续问按钮的去重键：同一张结果卡（任务 + 轮次）上的同一个按钮只提交一轮，落库后重启仍成立。 */
+/**
+ * 续问按钮的去重认领：同一张结果卡（任务 + 轮次）上的同一个按钮只提交一轮，落库后重启仍成立。阶段与转交认领同一套：
+ * claimed 是正在代发并登记（boot 不是本进程，说明上个进程半路退出，下一次点击接手）；submitted 是代发的消息已登记进
+ * inbox，之后的点击只回执；failed 可以再点。message_id 是代发出去的那条消息，登记前先记下：接手时沿用它，已登记的不再提交。
+ */
 const followUpClaimKey = (appId: string, digest: string) => `lark.result_follow_up.${appId}.${digest}`;
-/** 「每天自动执行」的登记：同一张结果卡只建一个计划，渲染端也靠它把按钮画成「已设为…」。 */
+type LarkFollowUpClaim = { boot: string; phase: 'claimed' | 'submitted' | 'failed'; operator_open_id: string; claimed_at: string; message_id?: string };
+/**
+ * 「每天自动执行」的登记：同一张结果卡只建一个计划，渲染端也靠它把按钮画成「已设为…」。阶段同上：claimed 是正在建，
+ * created 是计划已建好并启用，failed 可以再点。schedule_id 在计划落库之前就记下：接手时先按它找回计划补完启用，找不到再建。
+ */
 const dailyScheduleKey = (appId: string, digest: string) => `lark.result_schedule.${appId}.${digest}`;
-type LarkDailyScheduleRecord = { state: 'creating' | 'created'; operator_open_id: string; time: string; schedule_id?: string };
+type LarkDailyScheduleRecord = { boot: string; phase: 'claimed' | 'created' | 'failed'; operator_open_id: string; time: string; schedule_id?: string };
 /** 结果卡续问行回调的服务端目标：全部取自持久化映射，卡片上只信 task_id 与 turn 用来定位。 */
 type LarkResultActionTarget = {
   current: StoredLarkConfig; config: StoredLarkConfig; mapping: ChannelMapping; saved: PersistedLarkCardTask;
@@ -2161,6 +2169,7 @@ export class LarkMessageCoordinator {
    * 重复请求时提议「每天 HH:MM 自动执行」：同一发起人在同一个聊天里、14 天内已有别的任务发过
    * 规范化后相同的请求，且这个话题还没有同样内容的已启用计划。时刻取本次任务的开始时间（北京时间）。
    * 这张卡已经建过计划、计划仍启用时返回 scheduled，按钮画成「已设为…」。
+   * 是否重复请求只在投递结果卡时扫一次卡片映射，结论随 final_card_input 落库；之后的重绘与回调都读这个结论，不再扫描。
    */
   private async dailyScheduleView(task: LarkTask, config: StoredLarkConfig): Promise<LarkCardCapabilities['dailySchedule']> {
     const automation = this.workflowOptions.automation;
@@ -2172,23 +2181,26 @@ export class LarkMessageCoordinator {
     if (!request || isLarkCardFollowUpPrompt(task.prompt)) return undefined;
     const raw = await store.get(dailyScheduleKey(config.appId, resultActionDigest(task.id, task.turn)));
     const record = raw ? JSON.parse(raw) as LarkDailyScheduleRecord : undefined;
-    if (record?.state !== 'created') {
-      const repeated = (await this.cardMappings.list(larkCardChannel(config.appId))).some(mapping => {
-        if (mapping.externalId === task.id) return false;
-        try {
-          const other = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
-          return other.app_id === config.appId && other.chat_id === task.event.chatId && other.sender_open_id === requester
-            && other.started_at <= startedAt && startedAt - other.started_at <= repeatedRequestWindowMs
-            && larkRequestText(other.prompt ?? '', config.name) === request;
-        } catch { return false; }
-      });
+    if (record?.phase !== 'created') {
+      const repeated = task.finalCardInput
+        ? Boolean((task.finalCardInput.capabilities as LarkCardCapabilities | undefined)?.dailySchedule)
+        : (await this.cardMappings.list(larkCardChannel(config.appId))).some(mapping => {
+          if (mapping.externalId === task.id) return false;
+          try {
+            const other = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
+            return other.app_id === config.appId && other.chat_id === task.event.chatId && other.sender_open_id === requester
+              && other.started_at <= startedAt && startedAt - other.started_at <= repeatedRequestWindowMs
+              && larkRequestText(other.prompt ?? '', config.name) === request;
+          } catch { return false; }
+        });
       if (!repeated) return undefined;
     }
     const schedules = (await automation.listBySession(task.sessionId, requester)).schedules;
-    if (record?.state === 'created') {
+    if (record?.phase === 'created') {
       return schedules.some(item => item.id === record.schedule_id && item.enabled) ? { time: record.time, scheduled: true } : undefined;
     }
-    if (schedules.some(item => item.enabled && larkRequestText(item.prompt, config.name) === request)) return undefined;
+    // 上个进程为这张卡建到一半的计划不算「已有同样内容的计划」：再点一次会接手把它补完。
+    if (schedules.some(item => item.enabled && item.id !== record?.schedule_id && larkRequestText(item.prompt, config.name) === request)) return undefined;
     return { time: shanghaiClock(startedAt), scheduled: false };
   }
 
@@ -2265,28 +2277,47 @@ export class LarkMessageCoordinator {
       const digest = resultActionDigest(task.id, task.turn, parsed.action);
       const key = followUpClaimKey(config.appId, digest);
       const duplicate = { type: 'warning', content: `「${label}」已经提交过，请看下方的新一轮结果。` };
-      const claim = JSON.stringify({ state: 'claimed', operator_open_id: operator, claimed_at: new Date().toISOString() });
-      // 空串是放开后的去重键（配置存储没有删除接口），与「键不存在」一视同仁。
-      if (!await store.compareAndSet!(key, undefined, claim) && !await store.compareAndSet!(key, '', claim)) return duplicate;
+      const busy = { type: 'warning', content: `「${label}」正在提交，请勿重复点击。` };
+      const raw = await store.get(key);
+      const previous = raw ? JSON.parse(raw) as LarkFollowUpClaim : undefined;
+      // 重复点击、回调重投、重启后再点都落在这里：本进程正在做的只回执，上个进程留下的未完成认领由这次点击接手。
+      if (previous?.phase === 'submitted') return duplicate;
+      if (previous?.phase === 'claimed' && previous.boot === this.relaunchBoot) return busy;
+      // 代发的消息已经登记进 inbox：重启恢复会接着处理它，这里只补记阶段，不提交第二次。
+      if (previous?.message_id && await store.get(`lark.inbox.${config.appId}.${previous.message_id}`)) {
+        await store.compareAndSet!(key, raw, JSON.stringify({ ...previous, phase: 'submitted' }));
+        return duplicate;
+      }
+      let claim: LarkFollowUpClaim = { boot: this.relaunchBoot, phase: 'claimed', operator_open_id: operator, claimed_at: new Date().toISOString(),
+        ...(previous?.message_id ? { message_id: previous.message_id } : {}) };
+      if (!await store.compareAndSet!(key, raw, JSON.stringify(claim))) return busy;
       let event: LarkMessageEvent;
+      let seeded: boolean;
       try {
-        const echo = await this.service.replyText({ messageId: target.resultMessageId, ...(saved.thread_id ? { replyInThread: true } : {}),
-          text: `「${label}」${prompt}`, idempotencyKey: `followup_${digest}` });
+        // 上次已代发、没来得及登记的，沿用那条消息，不发第二条。
+        if (!claim.message_id) {
+          const echo = await this.service.replyText({ messageId: target.resultMessageId, ...(saved.thread_id ? { replyInThread: true } : {}),
+            text: `「${label}」${prompt}`, idempotencyKey: `followup_${digest}` });
+          const sent: LarkFollowUpClaim = { ...claim, message_id: echo.messageId };
+          if (!await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify(sent))) throw new Error('续问认领已被接手。');
+          claim = sent;
+        }
         event = {
-          messageId: echo.messageId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group',
+          messageId: claim.message_id!, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group',
           ...(saved.thread_id ? { threadId: saved.thread_id } : {}), createTime: String(Date.now()),
           messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${prompt}` }), senderOpenId: operator, senderType: 'user',
           // 按钮本身就是对机器人说话：带上 @机器人，唤醒走显式 @ 的原路，不必为 mentionPolicy 特判。
           mentions: [{ key: '@_user_1', name: config.name?.trim() || 'Dutydeck', ...(this.botOpenId ? { openId: this.botOpenId } : {}), mentionedType: 'bot' }]
         };
-        if (!await this.inbox.seed(config.appId, event, { prompt, scopeId: target.scopeId, resources: [] })) return duplicate;
+        seeded = await this.inbox.seed(config.appId, event, { prompt, scopeId: target.scopeId, resources: [] });
       } catch (error) {
-        // 没能登记成待处理消息：放开去重键让用户能再点一次。代发消息带同一个幂等键，重点不会重复发出。
-        await store.compareAndSet!(key, claim, '').catch(() => undefined);
+        // 没能登记成待处理消息：认领记为失败，用户能再点一次。已代发的消息号留在认领里，重点时沿用。
+        await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify({ ...claim, phase: 'failed' })).catch(() => undefined);
         throw error;
       }
-      await store.set(key, JSON.stringify({ ...JSON.parse(claim), state: 'submitted', message_id: event.messageId }))
+      await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify({ ...claim, phase: 'submitted' }))
         .catch(error => this.log.warn({ error, key }, '续问已登记，去重记录未更新'));
+      if (!seeded) return duplicate;
       void this.handle(event, current).catch(error => this.log.error({ error, messageId: event.messageId }, '处理结果卡续问失败'));
       return { type: 'success', content: `已提交「${label}」，新一轮结果稍后发在下方。` };
     } catch (error) {
@@ -2298,7 +2329,8 @@ export class LarkMessageCoordinator {
   /**
    * 「每天 HH:MM 自动执行」：在这张卡所属的会话里用 cron 建一个每天执行同一请求的计划并启用，
    * 回报位置是原话题（与 /schedule 一样写 automation.delivery-target.*）。同一张卡只建一次：
-   * 登记键先占位再建计划，建好后重绘结果卡，按钮改为「已设为…」。
+   * 登记键先认领再建计划，建好后重绘结果卡，按钮改为「已设为…」。
+   * 回调要在 3 秒内返回：同步只做本地的建计划、启用与登记，重绘结果卡和发回执要调飞书接口，放后台。
    */
   private async scheduleResultDaily(parsed: LarkCardActionValue, operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
     try {
@@ -2319,37 +2351,48 @@ export class LarkMessageCoordinator {
       const store = this.workflowOptions.store!;
       const digest = resultActionDigest(task.id, task.turn);
       const key = dailyScheduleKey(config.appId, digest);
-      const claim = JSON.stringify({ state: 'creating', operator_open_id: operator, time: view.time } satisfies LarkDailyScheduleRecord);
-      if (!await store.compareAndSet!(key, undefined, claim) && !await store.compareAndSet!(key, '', claim)) {
-        return { type: 'warning', content: '定时任务正在设置，请勿重复点击。' };
-      }
+      const busy = { type: 'warning', content: '定时任务正在设置，请勿重复点击。' };
+      const raw = await store.get(key);
+      const previous = raw ? JSON.parse(raw) as LarkDailyScheduleRecord : undefined;
+      // 本进程正在建的只回执；上个进程留下的未完成认领由这次点击接手（已建好的在上面按 scheduled 回执过了）。
+      if (previous?.phase === 'claimed' && previous.boot === this.relaunchBoot) return busy;
+      let claim: LarkDailyScheduleRecord = { boot: this.relaunchBoot, phase: 'claimed', operator_open_id: operator, time: view.time,
+        ...(previous?.schedule_id ? { schedule_id: previous.schedule_id } : {}) };
+      if (!await store.compareAndSet!(key, raw, JSON.stringify(claim))) return busy;
       let schedule: PublicSessionSchedule;
       try {
         const prompt = withoutLeadingBotMention(saved.prompt, config.name);
         const [hour, minute] = view.time.split(':').map(Number);
-        schedule = await automation.createSchedule(mapping.sessionId, {
+        // 上个进程为这张卡建到一半的计划按记下的编号找回来补完；计划编号随操作人变，换人接手时不能靠 createSchedule 的幂等键。
+        const started = claim.schedule_id
+          ? (await automation.listBySession(mapping.sessionId, operator)).schedules.find(item => item.id === claim.schedule_id) : undefined;
+        schedule = started ?? await automation.createSchedule(mapping.sessionId, {
           name: prompt.slice(0, 100), prompt, trigger: { kind: 'cron', expression: `${minute} ${hour} * * *` },
           timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' }
         }, operator, {
           key: `${config.appId}:${task.id}:${task.turn}:daily`,
           prepareDelivery: async automationId => {
+            // 计划落库之前先记下编号：此后进程退出，下一次点击据此找回这条计划，而不是再建一条。
+            const recorded: LarkDailyScheduleRecord = { ...claim, schedule_id: automationId };
+            if (!await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify(recorded))) throw new Error('定时任务的登记已被接手。');
+            claim = recorded;
             await store.compareAndSet!(`automation.delivery-target.${automationId}`, undefined, JSON.stringify({ appId: config.appId, chatId: saved.chat_id, replyMessageId: task.id, replyInThread: saved.chat_type === 'group' }));
           }
         });
         if (!schedule.enabled) schedule = await automation.updateSchedule(mapping.sessionId, schedule.id, { expectedRevision: schedule.revision, enabled: true }, operator);
-        await store.set(key, JSON.stringify({ state: 'created', operator_open_id: operator, time: view.time, schedule_id: schedule.id } satisfies LarkDailyScheduleRecord));
+        await store.set(key, JSON.stringify({ ...claim, phase: 'created', schedule_id: schedule.id } satisfies LarkDailyScheduleRecord));
       } catch (error) {
-        await store.compareAndSet!(key, claim, '').catch(() => undefined);
+        await store.compareAndSet!(key, JSON.stringify(claim), JSON.stringify({ ...claim, phase: 'failed' } satisfies LarkDailyScheduleRecord)).catch(() => undefined);
         this.log.warn({ error, taskId: task.id }, '设置每天自动执行失败');
         return { type: 'error', content: `设置失败：${error instanceof Error ? error.message : String(error)}` };
       }
       // 原样重绘同一张结果卡：验证状态行按最新记录重算，续问行里的定时按钮改为「已设为…」。
       if (saved.final_elements?.length) {
-        await this.refreshResultVerification(task, config).catch(error => this.log.warn({ error, taskId: task.id }, '定时任务已建好，结果卡按钮未能更新'));
+        void this.refreshResultVerification(task, config).catch(error => this.log.warn({ error, taskId: task.id }, '定时任务已建好，结果卡按钮未能更新'));
       }
       const nextDue = schedule.nextDueAt
         ? `${new Date(schedule.nextDueAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）` : '未排定';
-      await sendTaskCard(this.service, { ...task.event, messageId: target.resultMessageId }, {
+      void sendTaskCard(this.service, { ...task.event, messageId: target.resultMessageId }, {
         state: 'completed', readOnly: true, retryable: false, taskId: task.id, taskName: '定时任务',
         markdown: `**已设为每天 ${view.time} 自动执行「${larkCommandEcho(schedule.name, 100)}」。**\n\n下一次：${nextDue}\n\n停用：\`/schedule disable ${schedule.id}\``,
         idempotencyKey: `daily_${digest}`
