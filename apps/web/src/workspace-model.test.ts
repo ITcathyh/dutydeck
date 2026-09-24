@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { WorkspaceOrganization } from '@dutydeck/shared';
 import type { RunSummary, Session } from './api';
 import type { WorkbenchView } from './workspace-model';
 import { attentionReasonForSession, formatRelativeTime, groupSessionsByWorkspace, needsAttention, normalizeWorkspacePath, orderSessionsForWorkbench, sessionErrorSummary, sessionMatchesView, sessionWorkspaceDirectory, sessionWorkspaceName, workbenchCounts, workbenchTaskSection, workbenchViewLabels, workbenchViewOrder, workspaceName } from './workspace-model';
@@ -268,5 +269,112 @@ describe('workspace model', () => {
     // 归档既不进任何分区，也不计入 all。
     expect(counts.archived).toBe(1);
     expect(needsAttention(sessions.at(-1)!, undefined)).toBe(false);
+  });
+
+  it('task 单任务覆盖优先于目录规则', () => {
+    const org: WorkspaceOrganization = {
+      groups: [
+        { id: 'wg_a', name: '项目组 A' },
+        { id: 'wg_b', name: '临时特权组' }
+      ],
+      directoryGroups: {
+        '/repo/proj': 'wg_a'
+      },
+      sessionGroups: {
+        s2: 'wg_b'
+      }
+    };
+    const sessions = [
+      session('s1', '/repo/proj', 'idle', '2026-09-01T00:00:00Z'),
+      session('s2', '/repo/proj', 'idle', '2026-09-01T01:00:00Z')
+    ];
+    const groups = groupSessionsByWorkspace(sessions, 'all', {}, org);
+    const groupA = groups.find(g => g.id === 'wg_a')!;
+    const groupB = groups.find(g => g.id === 'wg_b')!;
+    expect(groupA).toBeDefined();
+    expect(groupB).toBeDefined();
+    expect(groupA.sessions.map(s => s.id)).toEqual(['s1']);
+    expect(groupB.sessions.map(s => s.id)).toEqual(['s2']);
+  });
+
+  it('reset 通过清空 map 恢复按目录规则自动分组', () => {
+    const orgWithOverrides: WorkspaceOrganization = {
+      groups: [{ id: 'wg_custom', name: '自定义组' }],
+      directoryGroups: { '/repo/proj': 'wg_custom' },
+      sessionGroups: { s2: 'wg_custom' }
+    };
+    const sessions = [
+      session('s1', '/repo/proj', 'idle', '2026-09-01T00:00:00Z'),
+      session('s2', '/repo/other', 'idle', '2026-09-01T01:00:00Z')
+    ];
+    const customGroups = groupSessionsByWorkspace(sessions, 'all', {}, orgWithOverrides);
+    expect(customGroups.find(g => g.id === 'wg_custom')?.sessions.map(s => s.id).sort()).toEqual(['s1', 's2']);
+
+    const resetOrg: WorkspaceOrganization = {
+      groups: [{ id: 'wg_custom', name: '自定义组' }],
+      directoryGroups: {},
+      sessionGroups: {}
+    };
+    const restoredGroups = groupSessionsByWorkspace(sessions, 'all', {}, resetOrg);
+    const projGroup = restoredGroups.find(g => g.id === '/repo/proj')!;
+    const otherGroup = restoredGroups.find(g => g.id === '/repo/other')!;
+    expect(projGroup.sessions.map(s => s.id)).toEqual(['s1']);
+    expect(otherGroup.sessions.map(s => s.id)).toEqual(['s2']);
+  });
+
+  it('all 视图保留自定义空组，非 all 视图不显示空组', () => {
+    const org: WorkspaceOrganization = {
+      groups: [
+        { id: 'wg_active', name: '有任务组' },
+        { id: 'wg_empty', name: '空组' }
+      ],
+      directoryGroups: {},
+      sessionGroups: {
+        s1: 'wg_active'
+      }
+    };
+    const sessions = [
+      session('s1', '/repo/proj', 'thinking', '2026-09-01T00:00:00Z')
+    ];
+
+    const allGroups = groupSessionsByWorkspace(sessions, 'all', {}, org);
+    expect(allGroups.some(g => g.id === 'wg_empty')).toBe(true);
+    expect(allGroups.find(g => g.id === 'wg_empty')?.sessions).toEqual([]);
+
+    const activeGroups = groupSessionsByWorkspace(sessions, 'active', {}, org);
+    expect(activeGroups.some(g => g.id === 'wg_empty')).toBe(false);
+    expect(activeGroups.find(g => g.id === 'wg_active')?.sessions.map(s => s.id)).toEqual(['s1']);
+
+    const attentionGroups = groupSessionsByWorkspace(sessions, 'attention', {}, org);
+    expect(attentionGroups).toEqual([]);
+  });
+
+  it('archived 视图正确过滤并展示自定义组下的归档任务，无归档任务的自定义组不显示', () => {
+    const org: WorkspaceOrganization = {
+      groups: [
+        { id: 'wg_mixed', name: '混合组' },
+        { id: 'wg_unarchived_only', name: '仅未归档' }
+      ],
+      directoryGroups: {},
+      sessionGroups: {
+        s_active: 'wg_mixed',
+        s_archived: 'wg_mixed',
+        s_other_active: 'wg_unarchived_only'
+      }
+    };
+    const sessions: Session[] = [
+      session('s_active', '/repo/proj', 'thinking', '2026-09-01T00:00:00Z'),
+      { ...session('s_archived', '/repo/proj', 'completed', '2026-09-01T01:00:00Z'), archivedAt: '2026-09-01T02:00:00Z' },
+      session('s_other_active', '/repo/proj2', 'idle', '2026-09-01T00:00:00Z')
+    ];
+
+    const allGroups = groupSessionsByWorkspace(sessions, 'all', {}, org);
+    expect(allGroups.find(g => g.id === 'wg_mixed')?.sessions.map(s => s.id)).toEqual(['s_active']);
+    expect(allGroups.find(g => g.id === 'wg_unarchived_only')?.sessions.map(s => s.id)).toEqual(['s_other_active']);
+
+    const archivedGroups = groupSessionsByWorkspace(sessions, 'archived', {}, org);
+    expect(archivedGroups).toHaveLength(1);
+    expect(archivedGroups[0].id).toBe('wg_mixed');
+    expect(archivedGroups[0].sessions.map(s => s.id)).toEqual(['s_archived']);
   });
 });

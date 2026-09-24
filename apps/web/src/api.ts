@@ -1,8 +1,10 @@
 import type { CreateWorkItemInput, WorkItem, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription } from '@dutydeck/shared';
+import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
 import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dutydeck/shared';
 
 export type { WorkspaceCleanupPreview, WorkspaceCleanupResult };
+export type { WorkspaceOrganization, WorkspaceOrganizationSnapshot };
 export type { ScheduleTrigger };
 export type PermissionMode = 'ask' | 'approve-reads' | 'deny-all' | 'full-trust';
 export type { WorkspaceMode };
@@ -348,6 +350,11 @@ export const api = {
   selectDirectory: () => json<{ path: string }>('/api/system/select-directory', { method: 'POST' }),
   selectFile: () => json<{ path: string }>('/api/system/select-file', { method: 'POST' }),
   archive: (id: string) => json<Session>(`/api/sessions/${id}/archive`, { method: 'POST' }),
+  workspaceGroups: () => json<WorkspaceOrganizationSnapshot>('/api/workspace-groups'),
+  createWorkspaceGroup: (name: string) => json<WorkspaceOrganizationSnapshot>('/api/workspace-groups', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
+  renameWorkspaceGroup: (id: string, name: string) => json<WorkspaceOrganizationSnapshot>(`/api/workspace-groups/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
+  deleteWorkspaceGroup: (id: string) => json<WorkspaceOrganizationSnapshot>(`/api/workspace-groups/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  assignWorkspaceGroups: (input: { groupId: string | null; sessionIds?: string[]; directories?: string[] }) => json<WorkspaceOrganizationSnapshot>('/api/workspace-groups/assignments', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   restart: (id: string) => json<Session>(`/api/sessions/${id}/restart`, { method: 'POST' }),
   action: (id: string, action: string) => json(`/api/sessions/${id}/${action}`, { method: 'POST' }),
   permission: (id: string, permissionId: string, approved: boolean) => json(`/api/sessions/${id}/permissions/${permissionId}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ approved }) })

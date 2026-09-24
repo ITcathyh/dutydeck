@@ -444,6 +444,7 @@ export * from './driver.js';
 export * from './group-policy.js';
 export * from './schedule-foundation.js';
 export * from './workspace.js';
+export * from './workspace-organization.js';
 export * from './verification.js';
 
 export * from './session-automation.js';

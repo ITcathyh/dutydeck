@@ -1,6 +1,7 @@
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { WorkspaceOrganization } from '@dutydeck/shared';
 import type { RunSummary, Session } from '../api';
 import { workbenchViewLabels, workbenchViewOrder } from '../workspace-model';
 import { SessionList, type SessionListProps } from './SessionList';
@@ -319,5 +320,83 @@ describe('SessionList 功能导航区', () => {
     for (const nav of container.querySelectorAll('nav')) {
       for (const view of workbenchViewOrder) expect(nav.textContent).not.toContain(workbenchViewLabels[view]);
     }
+  });
+});
+
+describe('SessionList 工作区自定义分组与整理入口', () => {
+  const makeSession = (id: string, cwd: string, state = 'idle', archivedAt?: string): Session => ({
+    id,
+    agentId: 'codex',
+    state,
+    cwd,
+    runId: `run-${id}`,
+    createdAt: '2026-09-01T00:00:00Z',
+    updatedAt: '2026-09-01T01:00:00Z',
+    ...(archivedAt ? { archivedAt } : {})
+  });
+
+  it('点击「整理分组」按钮触发 onManageWorkspaces 回调，未传时不渲染按钮', async () => {
+    const user = userEvent.setup();
+    const onManageWorkspaces = vi.fn();
+    const { rerender } = render(<SessionList {...baseProps} open onManageWorkspaces={onManageWorkspaces}/>);
+    const manageButton = screen.getByRole('button', { name: '整理分组' });
+    expect(manageButton).toBeTruthy();
+    await user.click(manageButton);
+    expect(onManageWorkspaces).toHaveBeenCalledOnce();
+
+    rerender(<SessionList {...baseProps} open/>);
+    expect(screen.queryByRole('button', { name: '整理分组' })).toBeNull();
+  });
+
+  it('传入 organization 后，侧栏渲染自定义组名与组内任务', () => {
+    const organization: WorkspaceOrganization = {
+      groups: [
+        { id: 'wg_custom', name: '战略重点项目' }
+      ],
+      directoryGroups: {
+        '/repo/team-a': 'wg_custom'
+      },
+      sessionGroups: {
+        s_manual: 'wg_custom'
+      }
+    };
+    const sessions = [
+      makeSession('s_auto', '/repo/team-a'),
+      makeSession('s_manual', '/repo/other-dir'),
+      makeSession('s_default', '/repo/untouched')
+    ];
+    render(<SessionList {...baseProps} open organization={organization} sessions={sessions}/>);
+    expect(screen.getByRole('button', { name: /^战略重点项目/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^untouched/ })).toBeTruthy();
+    // 战略重点项目包含 s_auto 和 s_manual 共 2 条任务，默认折叠，组头数量为 2
+    expect(screen.getByRole('button', { name: /^战略重点项目/ }).textContent).toContain('2');
+  });
+
+  it('在 all 视图下展示自定义空组，在 archived 视图下只展示已归档任务并过滤空组', () => {
+    const organization: WorkspaceOrganization = {
+      groups: [
+        { id: 'wg_empty', name: '待开始规划组' },
+        { id: 'wg_done', name: '已完成归档组' }
+      ],
+      directoryGroups: {},
+      sessionGroups: {
+        s_active: 'wg_empty',
+        s_archived: 'wg_done'
+      }
+    };
+    const sessions = [
+      makeSession('s_active', '/repo/alpha', 'completed'),
+      makeSession('s_archived', '/repo/beta', 'completed', '2026-09-02T00:00:00Z')
+    ];
+
+    // all 视图：s_active 归入 wg_empty，wg_done 下无未归档任务（变成自定义空组），两者均显示
+    const { rerender } = render(<SessionList {...baseProps} open view="all" organization={organization} sessions={sessions}/>);
+    expect(screen.getByRole('button', { name: /^待开始规划组/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /^已完成归档组/ })).toBeTruthy();
+
+    // archived 视图：过滤空组，wg_empty 没有归档任务被过滤，只展示有归档任务的 wg_done
+    rerender(<SessionList {...baseProps} open view="archived" organization={organization} sessions={sessions}/>);
+    expect(screen.queryByRole('button', { name: /^待开始规划组/ })).toBeNull();
+    expect(screen.getByRole('button', { name: /^已完成归档组/ })).toBeTruthy();
   });
 });

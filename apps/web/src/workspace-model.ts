@@ -1,4 +1,13 @@
 import type { RunSummary, Session } from './api';
+import type { WorkspaceOrganization } from '@dutydeck/shared';
+import {
+  collectWorkspaceGroups,
+  normalizeWorkspacePath,
+  sessionWorkspaceDirectory,
+  workspaceName
+} from '@dutydeck/shared';
+
+export { normalizeWorkspacePath, sessionWorkspaceDirectory, workspaceName };
 
 export type WorkbenchView = 'all' | 'attention' | 'active' | 'completed' | 'archived';
 
@@ -41,27 +50,6 @@ const attentionStates = new Set(['waiting_for_permission', 'idle', 'interrupted'
 const failedStates = new Set(['failed', 'stopped']);
 const taskSectionRank: Record<WorkbenchTaskSection, number> = { attention: 0, active: 1, recent: 2 };
 const errorSummaryLimit = 140;
-
-export function normalizeWorkspacePath(path: string): string {
-  const trimmed = path.trim();
-  const stripped = trimmed.replace(/[\\/]+$/, '');
-  return stripped || trimmed;
-}
-
-export function workspaceName(cwd: string): string {
-  const normalized = normalizeWorkspacePath(cwd);
-  return normalized.split(/[\\/]/).filter(Boolean).at(-1) || cwd || '未命名工作区';
-}
-
-/**
- * 获取 Session 的项目源目录：
- * 优先取 workspaceSourceCwd（独立工作区所基于的源仓库目录），兜底取 cwd（共享工作区或旧 session），
- * 并进行统一的路径规范化（去除尾斜杠与空白）。
- */
-export function sessionWorkspaceDirectory(session: Pick<Session, 'cwd' | 'workspaceSourceCwd'>): string {
-  const raw = session.workspaceSourceCwd?.trim() || session.cwd;
-  return normalizeWorkspacePath(raw);
-}
 
 /**
  * 获取 Session 的项目展示标签名（基于规范化源目录）。
@@ -170,27 +158,48 @@ export function formatRelativeTime(value: string, now = Date.now()): string {
   return new Intl.DateTimeFormat('zh-CN', { month: 'numeric', day: 'numeric' }).format(timestamp);
 }
 
-export function groupSessionsByWorkspace(sessions: Session[], view: WorkbenchView = 'all', summaries: Record<string, RunSummary> = {}): WorkspaceGroup[] {
-  const groups = new Map<string, Session[]>();
-  for (const session of sessions) {
-    if (!sessionMatchesView(session, view, summaries[session.id])) continue;
-    const dir = sessionWorkspaceDirectory(session);
-    groups.set(dir, [...(groups.get(dir) ?? []), session]);
-  }
-  return [...groups.entries()].map(([dir, entries]) => {
-    const sorted = orderSessionsForWorkbench(entries, view, summaries);
-    const latest = [...entries].sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt))[0];
-    return {
-      id: dir,
-      cwd: dir,
-      name: workspaceName(dir),
+export function groupSessionsByWorkspace(
+  sessions: Session[],
+  view: WorkbenchView = 'all',
+  summaries: Record<string, RunSummary> = {},
+  organization?: WorkspaceOrganization
+): WorkspaceGroup[] {
+  const filtered = sessions.filter(session => sessionMatchesView(session, view, summaries[session.id]));
+  const groupSummaries = collectWorkspaceGroups(filtered, organization);
+  const sessionMap = new Map<string, Session>(filtered.map(session => [session.id, session]));
+
+  const groups: WorkspaceGroup[] = [];
+  for (const groupSummary of groupSummaries) {
+    const groupSessions = groupSummary.sessionIds
+      .map(id => sessionMap.get(id))
+      .filter((session): session is Session => Boolean(session));
+
+    if (view !== 'all' && groupSessions.length === 0) {
+      continue;
+    }
+    if (view === 'all' && !groupSummary.custom && groupSessions.length === 0) {
+      continue;
+    }
+
+    const sorted = orderSessionsForWorkbench(groupSessions, view, summaries);
+    const latest = [...groupSessions].sort((left, right) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt))[0];
+    groups.push({
+      id: groupSummary.id,
+      cwd: groupSummary.directories.join('\n'),
+      name: groupSummary.name,
       sessions: sorted,
       queuedCount: sorted.reduce((count, session) => count + (summaries[session.id]?.queuedCount ?? 0), 0),
       updatedAt: latest?.updatedAt || latest?.createdAt || ''
-    };
-  }).sort((left, right) => {
+    });
+  }
+
+  return groups.sort((left, right) => {
     if (view === 'all') {
-      const priority = taskSectionRank[workbenchTaskSection(left.sessions[0], summaries[left.sessions[0]?.id])] - taskSectionRank[workbenchTaskSection(right.sessions[0], summaries[right.sessions[0]?.id])];
+      const leftFirst = left.sessions[0];
+      const rightFirst = right.sessions[0];
+      const leftRank = leftFirst ? taskSectionRank[workbenchTaskSection(leftFirst, summaries[leftFirst.id])] : 3;
+      const rightRank = rightFirst ? taskSectionRank[workbenchTaskSection(rightFirst, summaries[rightFirst.id])] : 3;
+      const priority = leftRank - rightRank;
       if (priority) return priority;
     }
     return right.updatedAt.localeCompare(left.updatedAt);

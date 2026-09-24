@@ -45,6 +45,7 @@ import {
   createFoundationManagementAuthorizer,
   createInstallationPrincipalResolver,
 } from './foundation-policy.js';
+import { WorkspaceOrganizationService } from './workspace-organization.js';
 
 export interface StartLocalServerOptions {
   configureCollaborationExtensions?: (extensions: CollaborationExtensions) => void;
@@ -239,6 +240,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     sessionPrompt: (session, prompt) => agentTools.promptForSession(session, prompt)
   });
   setupCleanup.push(() => runtime.shutdown());
+  const workspaceOrganizationService = new WorkspaceOrganizationService({
+    config: repos.config,
+    listSessions: () => runtime.listSessions(),
+  });
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
   const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration,
     githubToken: env.DUTYDECK_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN });
@@ -359,6 +364,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     };
     app = await buildApp(runtime, {
       recovery: { authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
+      workspaceGroups: {
+        service: workspaceOrganizationService,
+        authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
+      },
       webRoot,
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
         authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,
