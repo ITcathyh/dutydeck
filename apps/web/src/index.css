@@ -41,6 +41,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .code-renderer-scroll { scrollbar-color: #52525b transparent; scrollbar-gutter: stable; tab-size: 2; }
 .reasoning summary { list-style: none; }
 .reasoning summary::-webkit-details-marker { display: none; }
+/* 折叠内容的末尾渐隐。遮罩只读 alpha，黑色不是显示色，不受 token 约束。 */
+.ui-fade-bottom { -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent); mask-image: linear-gradient(to bottom, #000 60%, transparent); }
 
 @keyframes ui-overlay-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes ui-dialog-in { from { opacity: 0; transform: translateY(10px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }

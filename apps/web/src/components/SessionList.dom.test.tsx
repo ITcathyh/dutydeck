@@ -85,8 +85,9 @@ describe('SessionList mobile accessibility', () => {
  * 起因：18 条任务全部平铺时，侧栏 248px 宽塞进 822 个字符，讲的全是主区已经讲过
  * 且更完整的事（桌面端两者同屏）。折叠让默认只剩「目录名 + 条数」。
  *
- * 但折叠本身也能变成负担，所以默认规则有两条边界，两条都在下面各有一条用例：
- * 单任务的组折叠起来一行也不省、只多一次点击；当前打开任务藏进折叠区等于没有选中态。
+ * 但折叠本身也能变成负担，所以默认规则有三条边界，各在下面有一条用例：
+ * 单任务的组折叠起来一行也不省、只多一次点击；当前打开任务藏进折叠区等于没有选中态；
+ * 只剩一个工作区时折叠后侧栏只有一行组头，像是没有任务。
  */
 describe('SessionList 工作区折叠', () => {
   const makeSession = (id: string, workspace: string): Session => ({ id, agentId: 'codex', state: 'idle', cwd: `/repo/${workspace}`, runId: `run-${id}`, createdAt: '', updatedAt: '' });
@@ -110,6 +111,12 @@ describe('SessionList 工作区折叠', () => {
     render(<SessionList {...baseProps} open sessions={twoInAlpha} summaries={summaries}/>);
     expect(screen.getByRole('button', { name: /^beta/ }).getAttribute('aria-expanded')).toBe('true');
     expect(screen.getByRole('button', { name: /任务 B1/ })).toBeTruthy();
+  });
+
+  it('只有一个工作区时默认展开，不让侧栏只剩一行组头', () => {
+    render(<SessionList {...baseProps} open sessions={twoInAlpha.slice(0, 2)} summaries={summaries}/>);
+    expect(screen.getByRole('button', { name: /^alpha/ }).getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('button', { name: /任务 A1/ })).toBeTruthy();
   });
 
   it('当前打开任务所在的组默认展开，否则选中态藏进折叠区等于没有选中态', () => {
@@ -168,7 +175,7 @@ describe('SessionList 同源 worktree 项目聚合', () => {
     updatedAt: ''
   });
 
-  it('同源两个 worktree 归一个 project 组，展开后两条任务都按真实 id 可选', async () => {
+  it('同源两个 worktree 归一个 project 组，两条任务都按真实 id 可选', async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     const sessions = [worktreeSession('ses_one', '/repo/project'), worktreeSession('ses_two', '/repo/project/')];
@@ -183,7 +190,8 @@ describe('SessionList 同源 worktree 项目聚合', () => {
     expect(header.textContent).toContain('2');
     expect(screen.queryByRole('button', { name: /^ses_one/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /^ses_two/ })).toBeNull();
-    await user.click(header);
+    // 只剩一个工作区时默认展开，不必先点组头。
+    expect(header.getAttribute('aria-expanded')).toBe('true');
     const first = screen.getByRole('button', { name: /任务一/ });
     const second = screen.getByRole('button', { name: /任务二/ });
     expect(first).toBeTruthy();

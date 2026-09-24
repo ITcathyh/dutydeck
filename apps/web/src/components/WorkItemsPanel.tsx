@@ -1,9 +1,10 @@
 import { useRef, useState, type RefObject } from 'react';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import type { CreateWorkItemInput, WorkItem, WorkPlan, WorkTemplate } from '@dutydeck/shared';
-import { X } from 'lucide-react';
+import { ListChecks, X } from 'lucide-react';
 import { api, type Agent, type Session, type WorkItemRequest } from '../api';
 import { Banner, Button, Dialog, Field, IconButton, Input, Select, Spinner, Textarea } from './primitives';
+import { ToolbarButton } from './ui';
 
 import { useWorkItems, useWorkItemRequests, workStatusLabels as statusLabels } from './workItemQueries';
 
@@ -70,7 +71,7 @@ function SessionWorkItems({ session, agents, onSelectSession, control }: Props) 
   const act = (action: Action) => { if (!disabled) { setNotice(''); mutation.mutate(action); } };
 
   return <>
-    <button type="button" className="text-caption text-accent hover:underline" onClick={() => setOpen(true)}>目标、步骤与成果</button>
+    <ToolbarButton label="目标、步骤与成果" icon={<ListChecks size={14}/>} onClick={() => setOpen(true)}/>
     {open && <Dialog open onClose={() => setOpen(false)} label="目标、步骤与成果" size="lg">
       <Dialog.Header><h2 className="text-title font-semibold">目标、步骤与成果</h2><span className="ml-auto"><IconButton label="关闭目标详情" onClick={() => setOpen(false)}><X size={16}/></IconButton></span></Dialog.Header>
       <Dialog.Body><div className="space-y-5">
@@ -174,7 +175,7 @@ function GoalDetails({ item, session, agents, disabled, onAction, onSelectSessio
             <p className="mt-2 text-caption text-subtle">{new Date(attempt.updatedAt).toLocaleString()}{attempt.taskId ? ` · 指令 ${attempt.taskId}` : ''}</p>
             {attempt.error && <p className="mt-1 whitespace-pre-wrap text-caption text-danger">{attempt.error}</p>}
             {attempt.output && <><pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-caption">{attempt.output.text}</pre><p className="break-all text-caption text-subtle">产物指纹 {attempt.output.digest}</p></>}
-            {attempt.sessionId && <a className="mt-2 inline-block text-caption text-accent hover:underline" href={`/sessions/${encodeURIComponent(attempt.sessionId)}`} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(attempt.sessionId!); } }}>查看此尝试的执行记录</a>}
+            {attempt.sessionId && <a className="mt-2 inline-block text-caption text-link hover:underline" href={`/sessions/${encodeURIComponent(attempt.sessionId)}`} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(attempt.sessionId!); } }}>查看此尝试的执行记录</a>}
           </details>)}
         </li>;
       })}

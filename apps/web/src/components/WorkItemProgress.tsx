@@ -37,7 +37,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
   const readOnly = Boolean(session.archivedAt) || ['stopped', 'failed'].includes(session.state);
   return <article aria-label={`目标：${item.title}`} className="min-w-0 border-b border-default py-3">
     <div className="flex min-w-0 flex-wrap items-center gap-2">
-      <button type="button" aria-expanded={expanded} aria-controls={stepsId} aria-label={`${expanded ? '收起' : '展开'}目标：${item.title}`} className="flex min-h-10 min-w-0 flex-1 basis-full items-center sm:basis-auto gap-2 rounded text-left text-body font-semibold hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring" onClick={() => setDisclosure({ status: item.status, expanded: !expanded })}>
+      <button type="button" aria-expanded={expanded} aria-controls={stepsId} aria-label={`${expanded ? '收起' : '展开'}目标：${item.title}`} className="flex min-h-10 min-w-0 flex-1 basis-full items-center sm:basis-auto gap-2 rounded text-left text-body font-semibold hover:text-link focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring" onClick={() => setDisclosure({ status: item.status, expanded: !expanded })}>
         {expanded ? <ChevronDown size={16} className="shrink-0"/> : <ChevronRight size={16} className="shrink-0"/>}<span className="min-w-0 break-words [overflow-wrap:anywhere]">{item.title}</span>
       </button>
       <Badge tone={item.status === 'completed' ? 'success' : item.status === 'failed' ? 'danger' : ['waiting', 'blocked'].includes(item.status) ? 'warning' : item.status === 'running' ? 'info' : 'neutral'}>{workStatusLabels[item.status]}</Badge>
@@ -76,7 +76,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
                   <p className="text-secondary">第 {record.number} 次尝试 · {workStatusLabels[record.status]}</p>
                   {record.error && <p className="whitespace-pre-wrap break-words text-danger [overflow-wrap:anywhere]">{record.error}</p>}
                   {record.output && <p className="text-secondary">已有步骤产物，可在目标详情查看。</p>}
-                  {record.sessionId && <a href={`/sessions/${encodeURIComponent(record.sessionId)}`} className="inline-block text-accent hover:underline" onClick={event => { if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(record.sessionId!); } }}>查看第 {record.number} 次尝试的执行记录</a>}
+                  {record.sessionId && <a href={`/sessions/${encodeURIComponent(record.sessionId)}`} className="inline-block text-link hover:underline" onClick={event => { if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(record.sessionId!); } }}>查看第 {record.number} 次尝试的执行记录</a>}
                 </div>)}
               </div>
             </details>

@@ -54,8 +54,8 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   // 脱敏管线在 workspace-model:sessionErrorSummary，这里只读不改。
   // 归档任务同样要能看到：历史失败原因是只读信息，不是可操作项。
   const errorSummary = sessionErrorSummary(session.error);
-  return <header className="shrink-0 border-b border-default bg-surface backdrop-blur">
-    <div className="flex min-h-14 items-center gap-2 px-3 sm:px-5">
+  return <header className="shrink-0 bg-surface">
+    <div className="flex min-h-14 items-center gap-2 px-3 pt-1 sm:px-5">
       {/*
         这里原先有一枚 md:hidden 的汉堡，无障碍名同样是「打开工作台导航」。
         全局顶栏落地后导航入口收归 TopBar，再留一枚就等于同一屏上有两个同名按钮：
@@ -68,9 +68,9 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
       */}
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-1.5">
-          <span className="max-w-28 shrink-0 truncate text-body font-semibold text-primary sm:max-w-44" title={workspace}>{workspace}</span>
+          <span className="max-w-28 shrink-0 truncate text-body font-medium text-subtle sm:max-w-44" title={workspace}>{workspace}</span>
           <ChevronRight size={13} className="shrink-0 text-subtle"/>
-          <h1 className="min-w-0 flex-1 truncate text-body font-semibold text-secondary" title={taskGoal}>{taskGoal}</h1>
+          <h1 className="min-w-0 flex-1 truncate text-title font-semibold text-primary" title={taskGoal}>{taskGoal}</h1>
         </div>
         <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-caption text-subtle">
           <span className="hidden min-w-0 items-center gap-1 sm:flex"><Folder size={11} className="shrink-0"/><span title={session.cwd} className="truncate">{session.cwd}</span><span className="shrink-0">·</span></span>
@@ -93,15 +93,16 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
       运行态圆点的配色来自 ui.tsx:stateTone，那是全站唯一的 state→色 映射，不在调用点
       另抄一份。归档与兜底这两支是 RunHeader 自己写的，与 stateTone 同用语义类。
     */}
-    <div className="flex min-h-10 items-center gap-2 border-t border-subtle bg-muted px-4 sm:px-5">
-      <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.busy ? 'ui-status-pulse' : ''} ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
-      <strong className="shrink-0 text-caption font-semibold text-secondary">{status.label}</strong>
-      <span className="hidden text-caption text-subtle sm:inline">/</span>
-      <span className="min-w-0 flex-1 truncate text-caption text-subtle">{nextAction}</span>
+    <div className="flex min-h-10 items-center gap-2.5 px-3 pb-1.5 sm:px-5">
+      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-sm bg-muted px-2 py-0.5">
+        <span aria-label={status.label} className={`h-2 w-2 shrink-0 rounded-full ${status.busy ? 'ui-status-pulse' : ''} ${status.archived ? 'bg-neutral-solid' : stateTone[session.state] ?? 'bg-neutral-solid'}`}/>
+        <strong className="text-caption font-semibold text-primary">{status.label}</strong>
+      </span>
+      <span className="min-w-0 flex-1 truncate text-caption text-secondary">{nextAction}</span>
       {status.recoverable && !managed && <Button variant="danger" size="sm" loading={restarting} onClick={onRestart}>重新启动</Button>}
       {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
       <ConnectionState status={streamStatus}/>
     </div>
-    {errorSummary && <div className="border-t border-subtle bg-muted px-4 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
+    {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
   </header>;
 }

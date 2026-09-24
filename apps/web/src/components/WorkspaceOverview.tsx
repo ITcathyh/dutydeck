@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertTriangle, Archive, ArrowRight, CheckCircle2, CircleDot, MessageSquare, Plus, Radio, Settings2 } from 'lucide-react';
+import { AlertTriangle, Archive, ArrowRight, CheckCircle2, ChevronRight, CircleDot, MessageSquare, Plus, Radio, Settings2 } from 'lucide-react';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
 import {
   attentionReasonForSession,
@@ -93,7 +93,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
     {/* 徽标文案与归档优先判据都来自 effectiveStatus，由 StatusBadge 单点消费；这里不再拼配色字符串。 */}
     <span className="mt-0.5 shrink-0 sm:mt-0"><StatusBadge session={session}/></span>
     <span className="min-w-0 flex-1">
-      <strong className="block text-body font-semibold text-primary sm:truncate" title={summary?.prompt}>{summary?.prompt ?? fallbackRunTitle(session.source)}</strong>
+      <strong className="line-clamp-2 text-body font-medium text-primary sm:line-clamp-none sm:block sm:truncate" title={summary?.prompt}>{summary?.prompt ?? fallbackRunTitle(session.source)}</strong>
       <span className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-1 text-caption text-secondary">
         <span>{sessionWorkspaceName(session)}</span><span aria-hidden="true">·</span><span>{agent?.name ?? session.agentId}</span>
         {section === 'attention' && <><span aria-hidden="true">·</span><span className="font-medium text-primary">{attentionReasonForSession(session)}</span></>}
@@ -215,7 +215,7 @@ function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisab
       <p className="mt-1 text-body text-secondary">绑定后在飞书私聊发送工程目标，或在群聊中 @机器人 下达任务；发送 <code className="rounded-sm bg-surface px-1.5 py-0.5 font-mono text-meta text-primary">/help</code> 查看可用操作。</p>
       <div className="mt-3 flex flex-wrap items-center gap-4 text-caption text-secondary"><span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>私聊发目标</span><span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>群聊 @机器人</span><span className="flex items-center gap-1.5 font-medium"><CheckCircle2 size={14} className="text-success"/>/help 查看操作</span></div>
     </div> : null}
-    {!loading && exceptions.length > 0 && <details className="mt-2"><summary className="min-h-11 cursor-pointer py-3 text-caption font-medium text-warning">{exceptions.length} 个机器人需要检查</summary><div className="space-y-2">{exceptions.map(({ bot, status }) => <div key={bot.appId} className="rounded-md bg-muted p-3"><div className="flex flex-wrap items-center gap-2"><strong className="text-body font-medium">{bot.name || bot.tabLabel || bot.appId}</strong><Badge tone={status.tone}>{status.label}</Badge></div><p className="mt-1 text-caption text-secondary">{status.description}</p></div>)}</div></details>}
+    {!loading && exceptions.length > 0 && <details className="group/bots mt-2"><summary className="flex min-h-10 cursor-pointer list-none items-center gap-1.5 text-caption font-medium text-warning [&::-webkit-details-marker]:hidden"><AlertTriangle aria-hidden="true" size={14} className="shrink-0"/>{exceptions.length} 个机器人需要检查<ChevronRight aria-hidden="true" size={13} className="shrink-0 transition-transform duration-fast group-open/bots:rotate-90"/></summary><div className="space-y-2">{exceptions.map(({ bot, status }) => <div key={bot.appId} className="rounded-md bg-muted p-3"><div className="flex flex-wrap items-center gap-2"><strong className="text-body font-medium">{bot.name || bot.tabLabel || bot.appId}</strong><Badge tone={status.tone}>{status.label}</Badge></div><p className="mt-1 text-caption text-secondary">{status.description}</p></div>)}</div></details>}
   </Card>;
 }
 
@@ -238,6 +238,7 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
     : [{ id: view === 'active' ? 'active' : view === 'attention' ? 'attention' : 'recent', sessions: ordered }];
   // 骨架必须盖住 agents 还在检测的那一段：先闪一次空状态会让用户以为「真的没有任务」。
   const pending = loading || agentsLoading;
+  const canBulkArchive = Boolean(onBulkArchive) && !pending && view !== 'archived' && (selectable.length > 0 || selecting);
   const hasTasks = sections.length > 0 && ordered.length > 0;
 
   return <div className="min-h-0 flex-1 overflow-y-auto bg-canvas">
@@ -269,33 +270,35 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
         <LarkBotsOverview bots={larkBots} agents={agents} loading={larkBotsLoading} agentsLoading={agentsLoading} listeningDisabled={larkListeningDisabled} failed={larkBotsFailed} retrying={larkBotsRetrying} onRetry={() => onRetryLarkBots?.()} onOpenLarkSetup={onOpenLarkSetup} onOpenAgentSetup={onOpenAgentSetup} onManageBots={onManageBots}/>
       </div>
 
-      <section aria-label="任务筛选" className="-mx-1 mt-6 overflow-x-auto px-1 pb-1">
-        <div className="flex min-w-max items-center gap-2">
-          {workbenchViewOrder.map(id => {
-            const Icon = filterIcons[id];
-            return <button
-              type="button"
-              aria-pressed={view === id}
-              onClick={() => onViewChange(id)}
-              key={id}
-              className={`flex min-h-10 items-center gap-2 rounded-md border px-3 text-body font-medium ${view === id ? 'border-action bg-action-soft text-action' : 'border-default bg-surface text-secondary hover:bg-hover hover:text-primary'}`}
-            ><Icon aria-hidden="true" size={15}/><span>{workbenchViewLabels[id]}</span><strong className="font-mono text-caption tabular-nums">{loading ? '—' : counts[id]}</strong></button>;
-          })}
-          {/* 待执行指令是「指令」口径，与芯片的「任务」口径不同，所以只作说明标签，不做可点击视图。 */}
-          {!loading && counts.queuedCommands > 0 && <span className="flex min-h-10 items-center rounded-md border border-dashed border-default px-3 text-caption text-subtle">另有待执行指令 {counts.queuedCommands} 条</span>}
-        </div>
-      </section>
+      {/* 筛选与「批量清理」同一行：批量清理作用于当前筛选视图，放在一起才看得出它清理的是哪一批。 */}
+      <div className="mt-6 flex items-center gap-2">
+        <section aria-label="任务筛选" className="-mx-1 min-w-0 flex-1 overflow-x-auto px-1 pb-1">
+          <div className="flex min-w-max items-center gap-2">
+            {workbenchViewOrder.map(id => {
+              const Icon = filterIcons[id];
+              return <button
+                type="button"
+                aria-pressed={view === id}
+                onClick={() => onViewChange(id)}
+                key={id}
+                className={`flex min-h-10 items-center gap-2 rounded-md border px-3 text-body font-medium ${view === id ? 'border-action bg-action-soft text-action' : 'border-default bg-surface text-secondary hover:bg-hover hover:text-primary'}`}
+              ><Icon aria-hidden="true" size={15}/><span>{workbenchViewLabels[id]}</span><strong className="font-mono text-caption tabular-nums">{loading ? '—' : counts[id]}</strong></button>;
+            })}
+            {/* 待执行指令是「指令」口径，与芯片的「任务」口径不同，所以只作说明标签，不做可点击视图。 */}
+            {!loading && counts.queuedCommands > 0 && <span className="flex min-h-10 items-center rounded-md border border-dashed border-default px-3 text-caption text-subtle">另有待执行指令 {counts.queuedCommands} 条</span>}
+          </div>
+        </section>
+        {canBulkArchive && !selecting && <div className="shrink-0 pb-1" aria-label="批量清理任务"><Button variant="secondary" aria-label="批量清理" title="批量清理" icon={<Archive size={15}/>} onClick={() => setSelecting(true)}><span className="hidden sm:inline">批量清理</span></Button></div>}
+      </div>
 
-      {onBulkArchive && !pending && view !== 'archived' && (selectable.length > 0 || selecting) && <div className="mt-4 flex flex-wrap items-center gap-2" aria-label="批量清理任务">
-        {selecting ? <>
-          <label className="flex min-h-10 cursor-pointer items-center gap-2 px-2 text-caption text-secondary">
-            <input type="checkbox" aria-label="全选当前视图" checked={allSelected} disabled={!selectable.length} ref={node => { if (node) node.indeterminate = selected.length > 0 && !allSelected; }} onChange={() => setSelectedIds(allSelected ? [] : selectable.map(session => session.id))} className="h-4 w-4 accent-action"/>
-            全选当前视图
-          </label>
-          <span role="status" className="text-caption text-secondary">已选 {selected.length} 个任务</span>
-          <Button variant="danger" disabled={!selected.length} icon={<Archive size={15}/>} onClick={() => onBulkArchive(selected)}>清理所选任务</Button>
-          <Button variant="ghost" onClick={() => { setSelecting(false); setSelectedIds([]); }}>退出多选</Button>
-        </> : <Button variant="secondary" icon={<Archive size={15}/>} onClick={() => setSelecting(true)}>批量清理</Button>}
+      {canBulkArchive && selecting && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-muted px-2 py-1" aria-label="批量清理任务">
+        <label className="flex min-h-10 cursor-pointer items-center gap-2 px-2 text-caption text-secondary">
+          <input type="checkbox" aria-label="全选当前视图" checked={allSelected} disabled={!selectable.length} ref={node => { if (node) node.indeterminate = selected.length > 0 && !allSelected; }} onChange={() => setSelectedIds(allSelected ? [] : selectable.map(session => session.id))} className="h-4 w-4 accent-action"/>
+          全选当前视图
+        </label>
+        <span role="status" className="text-caption text-secondary">已选 {selected.length} 个任务</span>
+        <Button variant="danger" disabled={!selected.length} icon={<Archive size={15}/>} onClick={() => onBulkArchive?.(selected)}>清理所选任务</Button>
+        <Button variant="ghost" onClick={() => { setSelecting(false); setSelectedIds([]); }}>退出多选</Button>
       </div>}
 
       {/* Bot 概览已占据首屏上段，任务列表在这里独占整个宽度，不再留右侧次列。 */}
