@@ -18,6 +18,7 @@ const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'test', listen
 const message = (id = 'om_1', text = '资料已提交', patch: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({ messageId: id, chatId: scope.chatId, chatType: 'group', messageType: 'text', content: JSON.stringify({ text }), createTime: '1789707600000', senderOpenId: 'ou_a', senderType: 'user', mentions: [], ...patch });
 const silent = (): ParticipationResult => ({ action: 'silent', reason: '没有新增信息', evidenceIds: [], updates: [] });
 const reply = (snapshot: CollaborationSnapshot): ParticipationResult => ({ action: 'reply', reason: '补充来源明确的新进展', evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id], updates: [] });
+const act = (snapshot: CollaborationSnapshot, evidence = true): ParticipationResult => ({ action: 'act', reason: '点名请机器人读取文档', evidenceIds: evidence ? [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id] : [], updates: [] });
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
@@ -418,6 +419,62 @@ describe('group observation and selective participation through the coordinator'
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
     expect(h.service.replyText).not.toHaveBeenCalled(); expect((await h.repository.listDecisions(scope))[0]!.status).toBe('suppressed');
     expect(h.respond).not.toHaveBeenCalled(); expect(h.service.addReaction).not.toHaveBeenCalled();
+  });
+  it('hands an act decision to the explicit execution path once', async () => {
+    const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => act(snapshot));
+    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    await h.coordinator.handle(message('om_1', 'Bot 帮我读下这份文档'), config); await h.participation.flush(scope);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    expect(h.runtime.send.mock.calls[0]).toEqual(expect.arrayContaining([expect.stringContaining('帮我读下这份文档')]));
+    expect((await h.repository.listDecisions(scope)).find(item => item.action === 'act')).toMatchObject({ status: 'sent' });
+    expect((await h.repository.listActions(scope)).filter(item => item.kind === 'participation.dispatch'))
+      .toEqual([expect.objectContaining({ status: 'succeeded', payload: expect.objectContaining({ messageId: 'om_1' }) })]);
+    await h.coordinator.handle(message('om_1', 'Bot 帮我读下这份文档'), config); await h.participation.flush(scope);
+    expect(h.runtime.send).toHaveBeenCalledOnce();
+  });
+  it('suppresses act without a dispatcher, without trigger evidence, or once the proactive budget is used', async () => {
+    const none = await harness(); none.decide.mockImplementation(async (_config, snapshot) => act(snapshot));
+    const unproven = await harness(); unproven.decide.mockImplementation(async (_config, snapshot) => act(snapshot, false));
+    const spent = await harness(); spent.decide.mockImplementation(async (_config, snapshot) => act(snapshot));
+    await spent.repository.updateSettings(scope, { expectedRevision: 1, maxProactivePerHour: 0 }, 'owner');
+    for (const h of [unproven, spent]) h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    for (const h of [none, unproven, spent]) {
+      await h.coordinator.handle(message(), config); await h.participation.flush(scope);
+      expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ action: 'act', status: 'suppressed' });
+      expect(h.runtime.send).not.toHaveBeenCalled(); expect(h.service.addReaction).not.toHaveBeenCalled();
+    }
+  });
+  it('keeps act as a candidate while only observing', async () => {
+    const h = await harness('observe'); h.decide.mockImplementation(async (_config, snapshot) => act(snapshot));
+    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    await h.coordinator.handle(message(), config); await h.participation.flush(scope);
+    expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ action: 'act', status: 'candidate' });
+    expect(h.runtime.send).not.toHaveBeenCalled();
+  });
+  it('counts dispatched act decisions against the proactive reply budget', async () => {
+    const h = await harness();
+    await h.repository.updateSettings(scope, { expectedRevision: 1, maxProactivePerHour: 1 }, 'owner');
+    h.participation.setDispatcher(scope.appId, (event, current) => h.coordinator.adopt(event, current));
+    h.decide.mockImplementationOnce(async (_config, snapshot) => act(snapshot)).mockImplementation(async (_config, snapshot) => reply(snapshot));
+    await h.coordinator.handle(message('om_1', 'Bot 帮我读下这份文档'), config); await h.participation.flush(scope);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    await h.coordinator.handle(message('om_2', 'Bot 现在进展如何'), config); await h.participation.flush(scope);
+    expect((await h.repository.listDecisions(scope)).find(item => item.action === 'reply')).toMatchObject({ status: 'suppressed' });
+    expect(h.service.replyText).not.toHaveBeenCalled();
+  });
+  it('tells the explicit Agent which participation mode the group uses', async () => {
+    for (const [mode, label] of [['selective', 'Tag 按需参与'], ['observe', '仅观察']] as const) {
+      const h = await harness(mode);
+      await h.coordinator.handle(message('om_explicit', '@_user_1 你现在是什么模式', { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] }), config);
+      await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+      expect(h.runtime.send.mock.calls[0]).toEqual(expect.arrayContaining([expect.stringContaining(`本群参与模式：${label}`)]));
+      expect(await h.participation.describe(scope)).toBe(`**群参与**：${label}`);
+    }
+  });
+  it('summarizes paused notifications for /status', async () => {
+    const h = await harness();
+    await h.repository.updateSettings(scope, { expectedRevision: 1, notificationsPaused: true }, 'owner');
+    expect(await h.participation.describe(scope)).toBe('**群参与**：Tag 按需参与 · 主动通知已暂停');
   });
   it('acknowledges only after deciding to reply, before generation, and clears the exact reaction after sending', async () => {
     const h = await harness(); h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));

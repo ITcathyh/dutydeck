@@ -1002,6 +1002,139 @@ describe('执行前上下文读取超时', () => {
   });
 });
 
+describe('顶层补 @ 沿用自己刚发的请求', () => {
+  const request = '总结下这个文档要做的事情（包括子文档），按主题聚合：https://example.larkoffice.com/docx/test';
+  const own: LarkChatMessage = {
+    messageId: 'om_request', chatId: 'oc_group', messageType: 'text', createTime: '1790232625764',
+    sender: { id: 'ou_alice', idType: 'open_id', type: 'user' }, rawContent: JSON.stringify({ text: request }),
+    mentions: [], deleted: false, updated: false
+  };
+  const run = async (items: LarkChatMessage[]) => {
+    const h = await harness();
+    h.service.listChatMessages.mockResolvedValue({ items, hasMore: false });
+    await h.coordinator.handle(event('om_wake', '@_user_1', { threadId: undefined, rootId: undefined, createTime: '1790233043511' }), h.config);
+    await h.waitDelivered(1);
+    return h.send.mock.calls[0]?.[0] as string;
+  };
+
+  it.each([
+    ['no later messages', [own]],
+    ['a bot message posted after the bare mention', [own, { ...own, messageId: 'om_bot_later', createTime: '1790233100000', sender: { id: 'cli_uxp0', idType: 'app_id', type: 'app' } }]]
+  ] satisfies Array<[string, LarkChatMessage[]]>)('runs the request without another confirmation round with %s', async (_name, items) => {
+    const prompt = await run(items);
+    expect(prompt).toContain('[Dutydeck 空 @ 沿用请求]');
+    expect(prompt).toContain(request);
+    expect(prompt).not.toContain('必须先复述你对用户意图的理解并询问确认');
+  });
+
+  it.each([
+    ['a request older than ten minutes', [{ ...own, createTime: String(1790233043511 - 11 * 60 * 1000) }]],
+    ['a request this bot already answered', [own, { ...own, messageId: 'om_bot', createTime: '1790232700000', sender: { id: 'cli_uxp0', idType: 'app_id', type: 'app' } }]],
+    ['a request addressed to someone else', [{ ...own, mentions: [{ key: '@_user_2', id: 'ou_bob', idType: 'open_id', name: 'Bob' }] }]],
+    ['another member request', [{ ...own, sender: { id: 'ou_bob', idType: 'open_id', type: 'user' } }]],
+    ['a slash command', [{ ...own, rawContent: JSON.stringify({ text: '/status' }) }]]
+  ] satisfies Array<[string, LarkChatMessage[]]>)('keeps confirmation for %s', async (_name, items) => {
+    const prompt = await run(items);
+    expect(prompt).toContain('必须先复述你对用户意图的理解并询问确认');
+    expect(prompt).not.toContain('[Dutydeck 空 @ 沿用请求]');
+  });
+});
+
+describe('群参与开启时的话题续问与转交执行', () => {
+  const root: LarkChatMessage = {
+    messageId: 'om_root', chatId: 'oc_group', messageType: 'text', createTime: '1790232625764',
+    sender: { id: 'ou_alice', idType: 'open_id', type: 'user' }, rawContent: JSON.stringify({ text: '@_user_1 先整理一版方案' }),
+    // 与真实消息读取接口一致：被 @ 的机器人以 app_id 返回。
+    mentions: [{ key: '@_user_1', id: 'cli_uxp0', idType: 'app_id', name: 'Dock' }], deleted: false, updated: false
+  };
+  const tag = (mode: 'off' | 'selective' = 'selective') => {
+    const handle = vi.fn(async (_event: LarkMessageEvent, _config: StoredLarkConfig, _input: { explicit: boolean }) => ({ enabled: mode !== 'off', instructions: '' }));
+    const participation = { handle, mode: async () => mode, guardBotTurn: async () => undefined, taskContext: async () => '', instructions: async () => '',
+      describe: async () => '**群参与**：Tag 按需参与' } as unknown as LarkGroupParticipation;
+    return { handle, participation };
+  };
+  const botCard = (id: string) => ({ ...root, messageId: id, sender: { id: 'cli_uxp0', idType: 'app_id', type: 'app' }, mentions: [] });
+  const start = async (mode?: 'off' | 'selective', rootPatch: Partial<LarkMessageEvent> = {}) => {
+    const { handle, participation } = tag(mode);
+    const h = await harness('normal', { managedGroup: true, participation });
+    // 根消息是 Alice @ 机器人的请求，om_card_* 是机器人自己发的卡片，其他消息都来自 Alice。
+    h.service.getMessage.mockImplementation(async (id: string) => (id === 'om_root' ? root : id.startsWith('om_card_') ? botCard(id) : { ...root, messageId: id, mentions: [] }) as any);
+    await h.coordinator.handle(event('om_root', '@_user_1 先整理一版方案', rootPatch), h.config);
+    await h.waitDelivered(1);
+    return { h, handle };
+  };
+  const followUp = (patch: Partial<LarkMessageEvent> = {}) => event('om_follow', '再补充一下兼容旧配置', { mentions: [], parentId: 'om_root', ...patch });
+  const inputFor = (handle: ReturnType<typeof tag>['handle'], messageId: string) => handle.mock.calls.find(([item]) => item.messageId === messageId)?.[2];
+
+  it('continues the requester own topic without another @', async () => {
+    const { h, handle } = await start();
+    await h.coordinator.handle(followUp(), h.config);
+    await h.waitDelivered(2);
+    expect(h.send).toHaveBeenCalledTimes(2);
+    expect(h.send.mock.calls[1]?.[0]).toContain('再补充一下兼容旧配置');
+    expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: true });
+  });
+
+  it('continues a plain reply to the bot card in an ordinary group', async () => {
+    const { h, handle } = await start('selective', { threadId: undefined, rootId: undefined });
+    await h.coordinator.handle(followUp({ threadId: undefined, parentId: 'om_card_1' }), h.config);
+    await h.waitDelivered(2);
+    expect(h.send.mock.calls[1]?.[0]).toContain('再补充一下兼容旧配置');
+    expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: true });
+  });
+
+  it.each([
+    ['another member', { senderOpenId: 'ou_bob' }],
+    ['a message addressed to someone else', { mentions: [{ key: '@_user_2', name: 'Bob', openId: 'ou_bob' }] }],
+    ['a reply to a member message in the topic', { parentId: 'om_other' }],
+    ['a top-level message without a reply target', { threadId: undefined, rootId: undefined, parentId: undefined }]
+  ] satisfies Array<[string, Partial<LarkMessageEvent>]>)('leaves %s to the participation decider', async (_name, patch) => {
+    const { h, handle } = await start();
+    await h.coordinator.handle(followUp(patch), h.config);
+    expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: false });
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.service.addReaction).not.toHaveBeenCalledWith('om_follow', expect.anything());
+  });
+
+  it('continues a topic the bot already works in even when its root had no @', async () => {
+    const { h, handle } = await start();
+    h.service.getMessage.mockImplementation(async (id: string) => ({ ...root, messageId: id, mentions: [] }) as any);
+    await h.coordinator.handle(followUp(), h.config);
+    await h.waitDelivered(2);
+    expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: true });
+  });
+
+  it('does not continue an ordinary-group reply whose root did not ask this bot', async () => {
+    const { h, handle } = await start('selective', { threadId: undefined, rootId: undefined });
+    h.service.getMessage.mockImplementation(async (id: string) => ({ ...root, messageId: id, mentions: [] }) as any);
+    await h.coordinator.handle(followUp({ threadId: undefined }), h.config);
+    expect(inputFor(handle, 'om_follow')).toMatchObject({ explicit: false });
+    expect(h.send).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the mention rule when group participation is off', async () => {
+    const { h } = await start('off');
+    await h.coordinator.handle(followUp(), h.config);
+    expect(h.send).toHaveBeenCalledOnce();
+    expect(h.service.addReaction).not.toHaveBeenCalledWith('om_follow', expect.anything());
+  });
+
+  it('runs an adopted act message through the ordinary explicit path', async () => {
+    const { participation } = tag();
+    const h = await harness('normal', { managedGroup: true, participation });
+    await h.coordinator.adopt(event('om_act', 'Dock 帮我读一下需求文档', { mentions: [], threadId: undefined, rootId: undefined }), h.config);
+    await h.waitDelivered(1);
+    expect(h.send.mock.calls[0]?.[0]).toContain('帮我读一下需求文档');
+    expect(h.service.addReaction).toHaveBeenCalledWith('om_act', 'OK');
+  });
+
+  it('shows the group participation mode in /status', async () => {
+    const { h } = await start();
+    await h.coordinator.handle(event('om_status', '@_user_1 /status'), h.config);
+    await vi.waitFor(() => expect(JSON.stringify(h.service.reply.mock.calls)).toContain('群参与'));
+  });
+});
+
 describe('卡片标题', () => {
   it('去掉开头对本机器人的 @，@ 别的机器人和正文里的 @ 保留', () => {
     expect(larkTaskTitle('@bdev-flash 详细总结下群聊', 'bdev-flash')).toBe('详细总结下群聊');
