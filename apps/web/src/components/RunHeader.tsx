@@ -63,7 +63,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
 
         缺陷 7：这一行原先塞了 workspace / 任务目标 / runId / cwd / Agent / 权限模式六类信息，
         移动端只剩一个截断标题。现在拆成两层：主行只回答「这是哪个仓库的什么任务」，
-        次要标识下沉到副行。副行的 cwd 与 runId 在窄屏用 CSS 隐藏（不是条件渲染），
+        工作目录等次要信息下沉到副行，runId 与右侧操作居中对齐。cwd 与 runId 在窄屏用 CSS 隐藏（不是条件渲染），
         Agent 名与权限姿态任何视口都留在可访问树里。
       */}
       <div className="min-w-0 flex-1">
@@ -76,11 +76,11 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
           <span className="hidden min-w-0 items-center gap-1 sm:flex"><Folder size={11} className="shrink-0"/><span title={session.cwd} className="truncate">{session.cwd}</span><span className="shrink-0">·</span></span>
           <span className="shrink-0 truncate">{agent?.name ?? session.agentId}</span>
           {session.permissionMode && <><span className="shrink-0">·</span><span title="本任务的权限姿态" className={`shrink-0 font-medium ${session.permissionMode === 'full-trust' ? 'text-danger' : 'text-subtle'}`}>{permissionLabels[session.permissionMode]}</span></>}
-          {/* runId 是低频元数据，text-meta 唯一合法的用途。 */}
-          <span className="ml-auto hidden shrink-0 pl-2 font-mono text-meta tracking-[.08em] sm:inline">{shortRunId(session)}</span>
         </div>
       </div>
       <div className="flex shrink-0 items-center gap-0.5">
+        {/* runId 是低频元数据，text-meta 唯一合法的用途。 */}
+        <span className="hidden shrink-0 pr-2 font-mono text-meta tracking-[.08em] text-subtle sm:inline">{shortRunId(session)}</span>
         {status.busy && !managed && <IconButton label="中断当前任务" onClick={onInterrupt}><Square size={14}/></IconButton>}
         {session.systemPrompt && <IconButton label="查看系统提示词" onClick={onOpenPrompt}><BookOpen size={14}/></IconButton>}
         {!status.archived && !managed && <IconButton label="归档任务" onClick={onArchive}><Archive size={15}/></IconButton>}
