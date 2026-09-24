@@ -134,7 +134,7 @@ export function ControlCenterModal({
       建议下一步只能按**真实状态**给，不能按 Bot 条数宣称「已可用」。
       判据复用 lark-status.ts 的投影（与首页、侧栏同一份），这里不再自己拼条件：
       原先的 `!setupComplete || !activeListening` 漏掉了两种同样收不到消息的情况——
-      用户主动暂停监听（listening=false）与本次启动整体禁用监听（listeningDisabled），
+      本实例未开启该 Bot 监听（listening=false）与本次启动整体禁用监听（listeningDisabled），
       两者都会让这里说出「N 个飞书 Bot 已可用」。
     */
     const unavailable = legacyBots

@@ -7,6 +7,7 @@ import {
   larkReplyContext,
   larkSessionConfigKey,
   larkSourceId,
+  materializeLarkResources,
   parsePrompt,
   resolveLarkSession,
   resolveLarkScopeId,
@@ -34,6 +35,23 @@ const groupEvent = (overrides: Partial<LarkMessageEvent> = {}): LarkMessageEvent
 });
 
 const staticResolver = (mode: 'topic' | 'group' | 'p2p'): LarkChatModeResolver => async () => mode;
+
+it('marks a stalled attachment download missing instead of holding the turn forever', async () => {
+  let release!: () => void;
+  const service = { downloadMessageResource: vi.fn(() => new Promise<{ data: Uint8Array; contentType: string }>(resolve => {
+    release = () => resolve({ data: new Uint8Array([65]), contentType: 'text/plain' });
+  })) };
+  vi.useFakeTimers();
+  const pending = materializeLarkResources('om_attachment', '请分析附件', [{ key: 'file_key', type: 'file', label: '附件' }], service);
+  let settled = false;
+  void pending.then(() => { settled = true; });
+  try {
+    await vi.advanceTimersByTimeAsync(15_001);
+    expect(settled).toBe(true);
+    expect(await pending).toContain('附件下载失败');
+    expect(await pending).toContain('你无法读取该附件');
+  } finally { release?.(); vi.useRealTimers(); }
+});
 
 describe('parsePrompt mention identity', () => {
   it('removes only the current bot mention and renders other mention keys as readable names', async () => {

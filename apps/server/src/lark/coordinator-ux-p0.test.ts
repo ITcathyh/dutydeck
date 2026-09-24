@@ -16,6 +16,7 @@ import type { AgentConfig } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator, larkTaskTitle } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
+import type { LarkGroupParticipation } from './group-participation.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
@@ -45,7 +46,7 @@ type HarnessMode = 'normal' | 'permission' | 'hang';
 
 async function harness(
   mode: HarnessMode = 'normal',
-  options: { protocol?: 'acp' | 'pty-cli'; configPatch?: Partial<StoredLarkConfig>; answerChunks?: string[]; managedGroup?: boolean; executionPolicy?: ConstructorParameters<typeof LarkMessageCoordinator>[8] } = {}
+  options: { protocol?: 'acp' | 'pty-cli'; configPatch?: Partial<StoredLarkConfig>; answerChunks?: string[]; managedGroup?: boolean; executionPolicy?: ConstructorParameters<typeof LarkMessageCoordinator>[8]; participation?: LarkGroupParticipation } = {}
 ) {
   const protocol = options.protocol ?? 'acp';
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-uxp0-'));
@@ -160,7 +161,7 @@ async function harness(
     await groupManager.sync(config.appId);
     await groupManager.save(config.appId, 'oc_group', { expectedRevision: 0, patch: {} });
   }
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker });
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker, participation: options.participation });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
@@ -896,6 +897,108 @@ describe('话题内引用自己的请求后补 @', () => {
     await h.waitDelivered(1);
     expect(h.send.mock.calls[0]?.[0]).toContain(request);
     expect(h.send.mock.calls[0]?.[0]).toContain('必须先复述你对用户意图的理解并询问确认');
+  });
+});
+
+describe('执行前上下文读取超时', () => {
+  it('reports a stalled thread read and lets the next request in that thread run', async () => {
+    const h = await harness();
+    h.service.listChatMessages.mockImplementationOnce(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    await h.coordinator.handle(event('om_stalled', '@_user_1 处理第一件事'), h.config);
+    for (let i = 0; i < 100 && !h.service.listChatMessages.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+    expect(h.service.listChatMessages).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(15_001);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'failed', markdown: expect.stringContaining('上下文读取超时')
+    })));
+    expect(h.send).not.toHaveBeenCalled();
+    await h.coordinator.handle(event('om_next', '@_user_1 处理第二件事'), h.config);
+    await h.waitDelivered(1);
+    expect(h.send.mock.calls[0]?.[0]).toContain('处理第二件事');
+  });
+
+  it('bounds an empty @ reference lookup and releases the thread', async () => {
+    const h = await harness();
+    h.service.getMessage.mockImplementationOnce(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    await h.coordinator.handle(event('om_empty_stalled', '@_user_1', { parentId: 'om_parent' }), h.config);
+    for (let i = 0; i < 100 && !h.service.getMessage.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+    expect(h.service.getMessage).toHaveBeenCalledWith('om_parent');
+    await vi.advanceTimersByTimeAsync(15_001);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({
+      state: 'failed', markdown: expect.stringContaining('上下文读取超时')
+    })));
+    expect(h.send).not.toHaveBeenCalled();
+    await h.coordinator.handle(event('om_after_empty', '@_user_1 下一条'), h.config);
+    await h.waitDelivered(1);
+    expect(h.send.mock.calls[0]?.[0]).toContain('下一条');
+  });
+
+  it('does not send a stale context failure after /new supersedes the waiting turn', async () => {
+    const h = await harness();
+    h.service.listChatMessages.mockImplementationOnce(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    await h.coordinator.handle(event('om_before_new', '@_user_1 旧请求'), h.config);
+    for (let i = 0; i < 100 && !h.service.listChatMessages.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+    expect(h.service.listChatMessages).toHaveBeenCalledOnce();
+    await h.coordinator.handle(event('om_new', '/new'), h.config);
+    await vi.advanceTimersByTimeAsync(15_001);
+    vi.useRealTimers();
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskName: '请求未执行' })));
+    expect(h.service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ taskName: '上下文读取失败' }));
+    expect(h.send).not.toHaveBeenCalled();
+  });
+
+  it('closes an existing process card when /new supersedes a stalled group context read', async () => {
+    let release!: () => void;
+    const taskContext = vi.fn().mockImplementationOnce(() => new Promise<string>(resolve => { release = () => resolve(''); }))
+      .mockResolvedValue('');
+    const participation = { handle: async () => ({ enabled: false }), guardBotTurn: async () => undefined,
+      taskContext, instructions: async () => '' } as unknown as LarkGroupParticipation;
+    const h = await harness('normal', { participation });
+    vi.spyOn(h.runtime, 'stop').mockImplementation(async () => undefined as any);
+    vi.useFakeTimers();
+    await h.coordinator.handle(event('om_prepared', '@_user_1 旧请求'), h.config);
+    try {
+      for (let i = 0; i < 100 && !taskContext.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+      expect(taskContext).toHaveBeenCalledOnce();
+      expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_prepared', cardKind: 'process' }));
+      await h.coordinator.handle(event('om_new_prepared', '/new'), h.config);
+      await vi.advanceTimersByTimeAsync(15_001);
+      vi.useRealTimers();
+      await vi.waitFor(() => expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_prepared', state: 'interrupted' })));
+      await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_prepared', cardKind: 'result', state: 'interrupted' })));
+      expect(JSON.stringify(h.service.reply.mock.calls)).toContain('这条请求没有执行：期间收到了 /new');
+      expect(JSON.parse((await h.repos.config.get('lark.inbox.cli_uxp0.om_prepared'))!)).toMatchObject({ state: 'failed' });
+      expect(h.send).not.toHaveBeenCalled();
+      release();
+      await Promise.resolve();
+      expect(h.send).not.toHaveBeenCalled();
+      await h.coordinator.handle(event('om_after_prepared', '@_user_1 新请求'), h.config);
+      await h.waitDelivered(2);
+      expect(h.send).toHaveBeenCalledOnce();
+      expect(h.send.mock.calls[0]?.[0]).toContain('新请求');
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not send a context failure after coordinator shutdown', async () => {
+    const h = await harness();
+    h.service.listChatMessages.mockImplementationOnce(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    await h.coordinator.handle(event('om_before_stop', '@_user_1 等待读取'), h.config);
+    for (let i = 0; i < 100 && !h.service.listChatMessages.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+    expect(h.service.listChatMessages).toHaveBeenCalledOnce();
+    h.coordinator.stop();
+    await vi.advanceTimersByTimeAsync(15_001);
+    vi.useRealTimers();
+    expect(h.service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ taskName: '上下文读取失败' }));
+    expect(h.send).not.toHaveBeenCalled();
   });
 });
 

@@ -364,6 +364,17 @@ describe('collectLarkTaskContext', () => {
     expect(firstBody.match(/A/g)?.length).toBe(8_000);
   });
 
+  it('reads larkoffice document links while rejecting lookalike hosts and credentials', async () => {
+    const urls = ['https://bytedance.larkoffice.com/docx/original', 'https://larkoffice.com/wiki/child'];
+    const rejected = ['https://evil-larkoffice.com/docx/x', 'https://larkoffice.com.evil.example/docx/x', 'https://user@larkoffice.com/docx/x'];
+    const readDocument = vi.fn(async (url: string) => ({ url, text: `正文 ${url}` }));
+    const result = await collect({ prompt: [...urls, ...rejected].join('\n'), service: service({ readDocument }) });
+
+    expect(readDocument.mock.calls.map(([url]) => url)).toEqual(urls);
+    for (const url of urls) expect(result.agentPrompt).toContain(`正文 ${url}`);
+    for (const url of rejected) expect(readDocument).not.toHaveBeenCalledWith(url);
+  });
+
   it('deduplicates resources by type and key while retaining their first real source message', async () => {
     const currentResource: LarkMessageResource = { type: 'image', key: 'same-key', label: '当前图片' };
     const history = message('om_image', '1000', '', {

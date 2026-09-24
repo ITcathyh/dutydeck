@@ -318,7 +318,7 @@ describe('LarkConfigModal 模态外壳契约', () => {
   /*
     activeListening 只是「listener.start() 没抛异常」这一个标记：它不等待 WebSocket
     握手，断连后也不会被置回。所以文案上限是「监听已启动」，不能说「长连接已连接」，
-    也不能在用户暂停监听或本次启动禁用监听时还显示成功态。
+    也不能在本实例未开启监听或本次启动禁用监听时还显示成功态。
   */
   describe('监听状态文案不宣称连接健康', () => {
     const ready = { defaultAgentId: 'codex', fullTrustConfirmed: true, setupComplete: true } as Partial<LarkBotConfig>;
@@ -338,7 +338,7 @@ describe('LarkConfigModal 模态外壳契约', () => {
       }
     });
 
-    it('用户暂停监听时不出现成功态文案，Bot 标签也不点亮监听圆点', async () => {
+    it('本实例未开启监听时不出现成功态文案，Bot 标签也不点亮监听圆点', async () => {
       renderModal(collection({ ...ready, listening: false, activeListening: false }));
       await openStepTwo();
       expect(screen.getByText('保持关闭，仅保存机器人配置')).toBeTruthy();

@@ -126,6 +126,8 @@ const documentUrl = (value: string) => {
     const hostname = url.hostname.toLowerCase();
     const allowedHost = hostname === 'feishu.cn'
       || hostname.endsWith('.feishu.cn')
+      || hostname === 'larkoffice.com'
+      || hostname.endsWith('.larkoffice.com')
       || hostname === 'larksuite.com'
       || hostname.endsWith('.larksuite.com');
     if (!allowedHost || !/^\/(?:docx|wiki)(?:\/|$)/iu.test(url.pathname)) return undefined;

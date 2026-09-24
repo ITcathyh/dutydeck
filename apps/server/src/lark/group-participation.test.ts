@@ -19,7 +19,7 @@ const message = (id = 'om_1', text = '资料已提交', patch: Partial<LarkMessa
 const silent = (): ParticipationResult => ({ action: 'silent', reason: '没有新增信息', evidenceIds: [], updates: [] });
 const reply = (snapshot: CollaborationSnapshot): ParticipationResult => ({ action: 'reply', reason: '补充来源明确的新进展', evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id], updates: [] });
 const cleanups: Array<() => void | Promise<void>> = [];
-afterEach(async () => { for (const clean of cleanups.splice(0).reverse()) await clean(); });
+afterEach(async () => { vi.useRealTimers(); for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
 async function harness(mode: 'off' | 'observe' | 'selective' = 'selective', extra: Pick<GroupParticipationOptions, 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext'> = {}) {
   const db = new Database(':memory:'); createCollaborationSchema(db);
@@ -121,6 +121,109 @@ describe('team context in group participation', () => {
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
     expect(h.decide.mock.calls[0]![1].bootstrap?.missing).toContain('team_context_unavailable');
     expect(h.service.replyText).toHaveBeenCalledOnce();
+  });
+
+  it('marks a stalled team read unavailable and releases the next task context read', async () => {
+    let release!: () => void;
+    const read = vi.fn().mockImplementationOnce(() => new Promise<CollaborationTeamContext>(resolve => { release = () => resolve(teamContext()); }))
+      .mockImplementation(async () => teamContext());
+    const h = await harness('selective', { readTeamContext: read, authorizeTeamContext: async () => true });
+    vi.useFakeTimers();
+    const first = h.participation.taskContext(scope, '第一条查询');
+    let settled = false;
+    void first.then(() => { settled = true; });
+    try {
+      for (let i = 0; i < 100 && !read.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+      expect(read).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(settled).toBe(true);
+      expect(await first).toContain('team_context_unavailable');
+      expect(await h.participation.taskContext(scope, '第二条查询')).toContain('team_work');
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops team material when its authorization stalls', async () => {
+    let release!: () => void;
+    const authorizeTeamContext = vi.fn(() => new Promise<boolean>(resolve => { release = () => resolve(true); }));
+    const h = await harness('selective', { readTeamContext: async () => teamContext(), authorizeTeamContext });
+    vi.useFakeTimers();
+    const pending = h.participation.taskContext(scope, '个人待办');
+    try {
+      for (let i = 0; i < 100 && !authorizeTeamContext.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+      expect(authorizeTeamContext).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(10_001);
+      const text = await pending;
+      expect(text).not.toContain('team_work');
+      expect(text).not.toContain('个人待办真实进展');
+      expect(text).toContain('team_context_authorization_unavailable');
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('finishes a stalled memory read without a late observation or shutdown wait', async () => {
+    let release!: () => void;
+    const readMemory = vi.fn(() => new Promise<string>(resolve => { release = () => resolve('迟到的私有记忆'); }));
+    const h = await harness('selective', { readMemory });
+    vi.useFakeTimers();
+    const pending = h.participation.taskContext(scope, '查询');
+    try {
+      for (let i = 0; i < 100 && !readMemory.mock.calls.length; i++) await vi.advanceTimersByTimeAsync(1);
+      expect(readMemory).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(await pending).toContain('memory_unavailable');
+      await h.participation.close();
+      const before = await h.repository.listObservations(scope);
+      release();
+      await Promise.resolve();
+      expect(await h.repository.listObservations(scope)).toEqual(before);
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed and drains shutdown when initial context authorization stalls', async () => {
+    const h = await harness('selective');
+    let release!: () => void;
+    h.authorize.mockImplementationOnce(() => new Promise<boolean>(resolve => { release = () => resolve(true); }));
+    vi.useFakeTimers();
+    const pending = h.participation.taskContext(scope, '查询');
+    try {
+      await vi.advanceTimersByTimeAsync(10_001);
+      await expect(pending).rejects.toThrow('群上下文授权超时');
+      await h.participation.close();
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails a stalled task context visibly before invoking the Agent and frees the next turn', async () => {
+    const h = await harness('observe');
+    let release!: () => void;
+    vi.spyOn(h.participation, 'taskContext').mockImplementationOnce(() => new Promise<string>(resolve => { release = () => resolve(''); }));
+    vi.useFakeTimers();
+    const mention = { mentions: [{ key: '@_user_1', name: 'Bot', openId: 'ou_bot' }] };
+    await h.coordinator.handle(message('om_stalled', '@_user_1 第一条', mention), config);
+    try {
+      for (let i = 0; i < 100 && !release; i++) await vi.advanceTimersByTimeAsync(1);
+      expect(release).toBeTypeOf('function');
+      await vi.advanceTimersByTimeAsync(15_001);
+      expect(h.runtime.send).not.toHaveBeenCalled();
+      expect(JSON.stringify(h.service.reply.mock.calls)).toContain('上下文读取超时或失败');
+      expect(h.service.deleteReaction).toHaveBeenCalledWith('om_stalled', 'reaction');
+      vi.useRealTimers();
+      await h.coordinator.handle(message('om_next', '@_user_1 第二条', mention), config);
+      await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+    } finally {
+      release?.();
+      vi.useRealTimers();
+    }
   });
 
   it('injects query-specific team context into the explicit Agent task', async () => {

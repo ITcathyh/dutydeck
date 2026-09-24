@@ -63,8 +63,8 @@ export function projectLarkBotStatus(
   if (!bot.listening) {
     return {
       key: 'paused',
-      label: '用户暂停监听',
-      description: '已在机器人设置中暂停监听',
+      label: '本实例未开启监听',
+      description: '当前服务未开启此机器人的监听；若已在其他实例运行，请到对应实例查看',
       tone: 'neutral'
     };
   }
@@ -130,7 +130,7 @@ export function formatLarkNavSummary({
     return `${count} 个机器人 · 配置未完成`;
   }
   if (statuses.every(s => s.key === 'paused')) {
-    return `${count} 个机器人 · 用户暂停监听`;
+    return `${count} 个机器人 · 本实例未开启监听`;
   }
   if (statuses.every(s => s.key === 'not_started')) {
     return `${count} 个机器人 · 监听未启动`;

@@ -159,17 +159,17 @@ describe('ControlCenterModal information architecture', () => {
   /*
     「建议下一步」曾按 Bot 条数宣称「N 个飞书 Bot 已可用」，判据只看
     setupComplete && activeListening，于是漏掉两种同样收不到消息的情况：
-    用户主动暂停监听、以及本次启动整体禁用监听。两者都有 bots.length > 0。
+    本实例未开启 Bot 监听、以及本次启动整体禁用监听。两者都有 bots.length > 0。
     现在判据复用 lark-status 的投影，与首页、侧栏同一份。
   */
   describe('建议下一步按真实状态给，不按 Bot 条数', () => {
-    it('用户暂停监听时不说「已可用」，而是指出暂停并指向 Bot 设置', async () => {
+    it('本实例未开启监听时不说「已可用」，并只陈述当前服务状态', async () => {
       mocks();
       const paused = { ...legacyBot, listening: false, activeListening: false } as LarkBotConfig;
       renderModal({ legacyBots: [paused] });
       await screen.findByRole('dialog', { name: 'Dutydeck 设置与接入' });
       expect(screen.getByText('继续设置 Legacy Bot')).toBeTruthy();
-      expect(screen.getByText(/用户暂停监听：已在机器人设置中暂停监听。/)).toBeTruthy();
+      expect(screen.getByText(/本实例未开启监听：当前服务未开启此机器人的监听；若已在其他实例运行，请到对应实例查看。/)).toBeTruthy();
       expect(document.body.textContent).not.toContain('已可用');
       expect(document.body.textContent).not.toContain('监听已启动');
     });
@@ -205,12 +205,12 @@ describe('ControlCenterModal information architecture', () => {
       expect(onCreateTask).not.toHaveBeenCalled();
     });
 
-    it('Bot 卡片的就绪判据同源：暂停监听不显示「已连接」', async () => {
+    it('Bot 卡片的就绪判据同源：本实例未开启监听不显示「已连接」', async () => {
       mocks();
       const paused = { ...legacyBot, listening: false, activeListening: false } as LarkBotConfig;
       renderModal({ initialSection: 'lark', legacyBots: [paused] });
       const card = await screen.findByRole('article');
-      expect(card.textContent).toContain('用户暂停监听');
+      expect(card.textContent).toContain('本实例未开启监听');
       expect(card.textContent).not.toContain('已连接');
       expect(card.textContent).toContain('继续设置');
     });

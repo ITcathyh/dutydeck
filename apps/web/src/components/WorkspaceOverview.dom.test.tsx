@@ -299,10 +299,10 @@ describe('WorkspaceOverview', () => {
       expect(screen.queryByText(/监听已启动/)).toBeNull();
     });
 
-    it('用户暂停监听（listening=false）：提示用户暂停监听', () => {
+    it('本实例 listening=false：只提示当前服务的监听状态', () => {
       render(<WorkspaceOverview {...baseProps} larkBots={[makeBot({ listening: false })]} />);
-      expect(screen.getByText('用户暂停监听')).toBeTruthy();
-      expect(screen.getByText('已在机器人设置中暂停监听')).toBeTruthy();
+      expect(screen.getByText('本实例未开启监听')).toBeTruthy();
+      expect(screen.getByText('当前服务未开启此机器人的监听；若已在其他实例运行，请到对应实例查看')).toBeTruthy();
     });
 
     it('本次启动禁用监听（larkListeningDisabled=true）：优先展示本次启动禁用监听', () => {
