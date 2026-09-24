@@ -36,7 +36,7 @@ import {
 } from './card-renderer.js';
 import { deliverLarkCompletionReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult, sendLarkFile } from './result-delivery.js';
 import { performLarkCardReconcile } from './reconciler.js';
-import { isLarkCardActionAvailable, isLarkCardFollowUpPrompt, larkCardActionLabel, larkCardFollowUpPrompt, parseLarkCardActionValue, type LarkCardActionState, type LarkCardActionValue, type LarkCardCapabilities } from './card-actions.js';
+import { isLarkCardActionAvailable, isLarkCardFollowUpPrompt, larkCardActionLabel, larkCardFollowUpPrompt, larkRelaunchLabels, parseLarkCardActionValue, type LarkCardActionState, type LarkCardActionValue, type LarkCardCapabilities } from './card-actions.js';
 import {
   larkCommandCapabilities,
   larkCommandEcho,
@@ -205,6 +205,11 @@ type LarkRelaunchClaim = {
   appId: string; taskId: string; turn: number; chatId: string; cardMessageId: string; taskName: string;
   sessionId: string; runtimeTaskId: string; operatorOpenId: string; newSessionId?: string;
 };
+/**
+ * 转交时作废、留给管理员核对的旧会话。它的执行进程未确认停止：/new 不去停它，之后的转交也不再选回它。
+ * 键按 App + 会话落库，重启后仍成立。
+ */
+const relaunchRetainedKey = (appId: string, sessionId: string) => `lark.relaunch_retained.${appId}.${sessionId}`;
 /** 去掉开头对本机器人的 @（可能连着好几个）。卡片标题与重复请求判定共用。 */
 const withoutLeadingBotMention = (prompt: string, botName?: string) => {
   const mention = botName?.trim() ? `@${botName.trim()}` : '';
@@ -880,7 +885,7 @@ export class LarkMessageCoordinator {
       config,
       channel: larkCardChannel(config.appId),
       deliveryStore: this.workflowOptions.store,
-      relaunchSupported: status => this.relaunchSupported(status),
+      relaunchReady: (taskId, status, turn) => this.relaunchReady(config.appId, taskId, status, turn),
       // 呈现开关可以按群覆盖，对账必须按记录所属会话解析后再决定怎么补发，
       // 否则重启后群里的静默/只贴表情配置全部失效。解析失败退回 Bot 级配置。
       resolveConfig: async saved => {
@@ -1855,6 +1860,9 @@ export class LarkMessageCoordinator {
       pendingSessionId,
       group.sessionId
     ].filter((id): id is string => Boolean(id)));
+    // 转交时保留给管理员核对的旧会话只登记作废、不去停：它的执行进程未确认停止，停也停不下来，资源要原样留着。
+    const retained = new Set<string>();
+    for (const id of targets) if (await this.workflowOptions.store?.get(relaunchRetainedKey(config.appId, id))) retained.add(id);
     const retired = (group.retiredSessionIds ??= new Set());
     for (const id of targets) retired.add(id);
     group.sessionId = undefined;
@@ -1862,7 +1870,7 @@ export class LarkMessageCoordinator {
     const stopped = new Set<string>();
     try {
       for (const id of targets) {
-        await this.runtime.stop(id, { kind: 'channel', id: event.senderOpenId, appId: config.appId });
+        if (!retained.has(id)) await this.runtime.stop(id, { kind: 'channel', id: event.senderOpenId, appId: config.appId });
         stopped.add(id);
       }
     } catch (error) {
@@ -2490,8 +2498,42 @@ export class LarkMessageCoordinator {
    * 只执行一次靠持久化认领与卡片映射 CAS，重放原请求靠入站记录；排队任务另需能取消。
    */
   private relaunchSupported(status: string) {
-    return Boolean(this.inbox && typeof this.cardMappings?.compareAndSetExtra === 'function'
+    return Boolean(this.inbox && this.workflowOptions.store?.compareAndSet && typeof this.cardMappings?.compareAndSetExtra === 'function'
       && this.runtime.getTasks && this.runtime.getTaskRecovery && (status !== 'queued' || this.runtime.cancelQueued));
+  }
+
+  /**
+   * 转交的原任务、会话与原文，渲染端与回调端共用：卡上画出按钮的条件就是回调受理的条件。
+   * 一律从卡片映射与入站记录读：映射要有原任务、原文和有人能续聊的 scope，入站记录要已受理、与映射同会话同群。
+   * 旧版遗留任务、入站记录待对账的任务都不满足，卡上就不给按钮。
+   */
+  private async relaunchSource(appId: string, taskId: string, turn: number) {
+    const mapping = await this.cardMappings?.get(larkCardChannel(appId), taskId);
+    const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+    if (!mapping || !saved || saved.app_id !== appId || !saved.card_message_id || !saved.runtime_task_id || !saved.prompt?.trim()
+      || !saved.scope_id || saved.scope_id.startsWith('message:') || (saved.turn ?? 0) !== turn) return undefined;
+    const raw = await this.workflowOptions.store?.get(`lark.inbox.${appId}.${taskId}`);
+    const inbox = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
+    if (!inbox || inbox.state !== 'accepted' || inbox.sessionId !== mapping.sessionId || inbox.event.chatId !== saved.chat_id) return undefined;
+    return { mapping, saved, inbox };
+  }
+
+  /** 渲染端：这张卡此刻能不能画转交按钮。读不到就不画，不因此打断心跳或对账。 */
+  private async relaunchReady(appId: string, taskId: string, status: string, turn: number) {
+    return this.relaunchSupported(status) && Boolean(await this.relaunchSource(appId, taskId, turn).catch(() => undefined));
+  }
+
+  /**
+   * 转交时要作废的会话：之前转交已保留给管理员的，或者有任务卡住的（执行资源未确认停止，或待核对且管理员还没核对）。
+   * 资源阻塞是会话级的，查任意一条任务即可；待核对按任务逐条看。
+   */
+  private async relaunchBlockedSession(appId: string, sessionId: string) {
+    if (await this.workflowOptions.store!.get(relaunchRetainedKey(appId, sessionId))) return true;
+    const tasks = await this.runtime.getTasks!(sessionId);
+    for (const task of [tasks[0], ...tasks.filter(item => ['reconcile_required', 'legacy_unresolved'].includes(item.status))]) {
+      if (task && (await describeLarkTaskRecovery(this.runtime, sessionId, task.id, task.status)).blocked) return true;
+    }
+    return false;
   }
 
   /**
@@ -2506,15 +2548,13 @@ export class LarkMessageCoordinator {
     context?: { messageId?: string; chatId?: string }) {
     const store = this.workflowOptions.store;
     const appId = this.reconcileConfig?.appId;
-    if (!operatorOpenId || !context?.messageId || !context.chatId || !appId || !store?.compareAndSet || !this.cardMappings || !this.inbox) {
+    if (!operatorOpenId || !context?.messageId || !context.chatId || !appId || !store?.compareAndSet || !this.cardMappings || !this.inbox || turn === undefined) {
       return { type: 'warning', content: '此卡当前不可操作，请回原话题发送 /status 查看任务' };
     }
     try {
       const config = await readLarkConfig(store, appId);
       if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法执行此操作' };
-      const mapping = await this.cardMappings.get(larkCardChannel(appId), taskId);
-      const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
-      const claimKey = `lark.relaunch.${appId}.${taskId}.${turn ?? saved?.turn ?? 0}`;
+      const claimKey = `lark.relaunch.${appId}.${taskId}.${turn}`;
       const raw = await store.get(claimKey);
       const claim = raw ? JSON.parse(raw) as LarkRelaunchClaim : undefined;
       // 重复点击、重复投递、重启后的重复回调都落在这里：只回执，不会第二次执行。
@@ -2525,10 +2565,12 @@ export class LarkMessageCoordinator {
         void this.markRelaunchedCard(config, claim).catch(error => this.log.warn({ error, taskId }, '旧任务卡未能更新为已转到新会话'));
         return { type: 'success', content: '已在新会话中执行，进度见话题里的新任务卡' };
       }
-      if (!mapping || !saved || saved.app_id !== appId || saved.chat_id !== context.chatId || saved.card_message_id !== context.messageId
-        || !saved.runtime_task_id || !saved.scope_id || !saved.prompt?.trim() || (turn !== undefined && turn !== (saved.turn ?? 0))) {
+      // 与渲染端同一个判定：卡上画不出按钮的任务，这里也不受理。
+      const source = await this.relaunchSource(appId, taskId, turn);
+      if (!source || source.saved.chat_id !== context.chatId || source.saved.card_message_id !== context.messageId) {
         return { type: 'warning', content: '此卡已失效，请在最新的任务卡上操作' };
       }
+      const { mapping, saved, inbox } = source;
       const oldTask = (await this.runtime.getTasks?.(mapping.sessionId))?.find(item => item.id === saved.runtime_task_id);
       if (!oldTask) return { type: 'warning', content: '原任务记录不存在，请重新发送这条请求' };
       // 上一次转交取消了排队任务之后才中断：认领还在，接着做完，而不是把用户挡在一个死按钮前。
@@ -2542,6 +2584,10 @@ export class LarkMessageCoordinator {
           return { type: 'warning', content: '这条任务现在不需要转到新会话，请发送 /status 查看最新状态' };
         }
       }
+      // 按发送人隔离的会话只接发起人本人的消息（与续聊同一条规则）：别人既不能替发起人转交，也不能换成自己的身份在这个会话里执行原文。
+      if (!larkScopeContinuesFor(saved.scope_id!, operatorOpenId)) {
+        return { type: 'warning', content: '这个会话按发起人隔离，只有发起人本人可以转到新会话，未执行' };
+      }
       const chatType = saved.chat_type ?? 'group';
       const effective = chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
       // 与「在这个话题里发一条新消息」同一套入口检查；托管群另需 /new 对当前会话的操作权，取消排队任务还要有取消权。
@@ -2553,13 +2599,22 @@ export class LarkMessageCoordinator {
       }
       await this.requireExecution('listener', 'task.create');
       await this.requireExecution('session', 'task.create');
-      const inboxRaw = await store.get(`lark.inbox.${appId}.${taskId}`);
-      const inbox = inboxRaw ? JSON.parse(inboxRaw) as LarkInboxRecord : undefined;
-      if (!inbox || inbox.state !== 'accepted' || inbox.sessionId !== mapping.sessionId || inbox.event.chatId !== saved.chat_id) {
-        return { type: 'warning', content: '原请求记录不完整，无法转到新会话，请重新发送这条请求' };
+      // 他人发起的任务与取消、重试他人任务同一口径：60 秒内再点一次同一按钮才执行；执行身份也照重试，换成点击人。
+      if (saved.sender_open_id && operatorOpenId !== saved.sender_open_id) {
+        const now = Date.now();
+        for (const [key, expiresAt] of this.foreignActionConfirmations) {
+          if (expiresAt <= now) this.foreignActionConfirmations.delete(key);
+        }
+        const confirmationKey = `${operatorOpenId}|${taskId}|${turn}|${action}`;
+        if ((this.foreignActionConfirmations.get(confirmationKey) ?? 0) > now) {
+          this.foreignActionConfirmations.delete(confirmationKey);
+        } else {
+          this.foreignActionConfirmations.set(confirmationKey, now + 60_000);
+          return { type: 'warning', content: '该任务由他人发起，再次点击同一按钮以确认操作' };
+        }
       }
       const next: LarkRelaunchClaim = { id: randomUUID(), boot: this.relaunchBoot, phase: 'claimed', action, appId, taskId,
-        turn: saved.turn ?? 0, chatId: saved.chat_id, cardMessageId: context.messageId, taskName: saved.task_name,
+        turn, chatId: saved.chat_id, cardMessageId: context.messageId, taskName: saved.task_name,
         sessionId: mapping.sessionId, runtimeTaskId: oldTask.id, operatorOpenId };
       if (!await store.compareAndSet(claimKey, raw, JSON.stringify(next))) return { type: 'warning', content: '正在转到新会话，请勿重复点击' };
       this.performRelaunch(config, effective, claimKey, next, saved, inbox.event, alreadyCancelled);
@@ -2586,7 +2641,9 @@ export class LarkMessageCoordinator {
       const retired = (group.retiredSessionIds ??= new Set());
       const previous = this.tasks.get(claim.taskId);
       let retiring: string[] = [];
+      const blocked = new Set([claim.sessionId]);
       let session: Session | undefined;
+      let created: Session | undefined;
       let inbox: LarkInboxRecord | undefined;
       let silenced = false;
       let cancelled = alreadyCancelled;
@@ -2595,15 +2652,18 @@ export class LarkMessageCoordinator {
         // 先打标记、再等在途的那一轮对账结束，之后开始的对账都会跳过这一轮。
         await this.setRelaunchPending(claim, true);
         await this.reconcileRun?.catch(() => undefined);
-        // 与 /new 相同，本话题现有会话都不再被选回来；不同的是不停止它们，被阻塞的旧会话本来也停不下来。
+        // 只作废卡住的会话，且不停止它们：被阻塞的旧会话本来也停不下来。本话题里正常的会话
+        // （例如上一次转交建出来的）照常复用，这条请求排在它已有的任务后面。
         const persisted = await listPersistedLarkSessions(this.runtime, effective, saved.chat_id, chatType, scopeId, this.cardMappings);
-        const pendingSessionId = (await group.pendingSession?.catch(() => undefined))?.id;
-        retiring = [...new Set([...persisted.filter(item => !['failed', 'stopped'].includes(item.state)).map(item => item.id), pendingSessionId, group.sessionId])]
-          .filter((id): id is string => Boolean(id) && !retired.has(id!));
+        for (const item of persisted) {
+          if (!['failed', 'stopped'].includes(item.state) && !retired.has(item.id) && await this.relaunchBlockedSession(claim.appId, item.id)) blocked.add(item.id);
+        }
+        retiring = [...blocked].filter(id => !retired.has(id));
         for (const id of retiring) retired.add(id);
-        group.sessionId = undefined;
-        group.sessionConfigKey = undefined;
+        if (group.sessionId && retired.has(group.sessionId)) { group.sessionId = undefined; group.sessionConfigKey = undefined; }
+        const bound = group.sessionId;
         session = await this.sessionFor(group, effective, saved.chat_id, chatType, scopeId);
+        if (session.id !== bound && !persisted.some(item => item.id === session!.id)) created = session;
         const raw = await store.get(`lark.inbox.${claim.appId}.${claim.taskId}`);
         inbox = raw ? await this.inbox!.adoptAccepted(JSON.parse(raw) as LarkInboxRecord) : undefined;
         if (!inbox) throw new Error('原请求记录已被其他流程接手。');
@@ -2620,8 +2680,8 @@ export class LarkMessageCoordinator {
       } catch (error) {
         this.log.warn({ error, taskId: claim.taskId }, '转到新会话失败，已回滚');
         if (!cancelled) {
-          // 旧任务没动：收走新会话，话题照旧回到原来的会话，旧轮次恢复接收事件。
-          const unused = session;
+          // 旧任务没动：收走这次新建的会话（复用的已有会话照常留着），话题照旧回到原来的会话，旧轮次恢复接收事件。
+          const unused = created;
           if (unused) {
             retired.add(unused.id);
             if (group.sessionId === unused.id) { group.sessionId = undefined; group.sessionConfigKey = undefined; }
@@ -2631,18 +2691,23 @@ export class LarkMessageCoordinator {
           for (const id of retiring) retired.delete(id);
           if (silenced) previous!.turn -= 1;
         }
-        await this.setRelaunchPending(claim, false).catch(() => undefined);
+        // 原排队请求已取消时留着转交标记：对账不会把旧卡改成「已取消」，旧卡上的按钮再点一次就接着做完。
+        if (!cancelled) await this.setRelaunchPending(claim, false).catch(() => undefined);
         await store.compareAndSet!(claimKey, JSON.stringify(claim), JSON.stringify({ ...claim, phase: 'failed' })).catch(() => undefined);
         const reason = error instanceof Error ? error.message : String(error);
         await sendTaskCard(this.service, event, {
           state: 'failed', readOnly: true, retryable: false, taskId: claim.taskId, taskName: '未能在新会话中执行',
-          markdown: cancelled
-            ? `**原排队请求已取消，但新会话没有开始执行。**\n\n${reason}\n\n请重新发送这条请求。`
-            : `**未能在新会话中执行，原任务没有改动。**\n\n${reason}\n\n可以稍后再点一次，或发送 \`/status\` 查看任务。`,
+          markdown: `${cancelled ? '**原排队请求已取消，但新会话没有开始执行。**' : '**未能在新会话中执行，原任务没有改动。**'}\n\n${reason}\n\n`
+            + `可以稍后在原任务卡上再点一次「${larkRelaunchLabels[claim.action]}」，或发送 \`/status\` 查看任务。`,
           idempotencyKey: `relaunch_failed_${claim.id}`.slice(0, 50),
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
         }, this.log).catch(sendError => this.log.warn({ error: sendError, taskId: claim.taskId }, '发送转到新会话失败回执失败'));
         return;
+      }
+      // 旧会话保留给管理员核对：之后 /new 不去停它，再次转交也不选回它。
+      for (const id of blocked) {
+        await store.set(relaunchRetainedKey(claim.appId, id), JSON.stringify({ task_id: claim.taskId, new_session_id: session.id }))
+          .catch(error => this.log.warn({ error, sessionId: id }, '旧会话的保留标记未能落库'));
       }
       const moved: LarkRelaunchClaim = { ...claim, phase: 'moved', newSessionId: session.id };
       if (!await store.compareAndSet!(claimKey, JSON.stringify(claim), JSON.stringify(moved))) {
@@ -2679,9 +2744,14 @@ export class LarkMessageCoordinator {
     const detail = rerun
       ? '原任务的执行结果仍未确认；原请求已在本话题的新会话中重新执行'
       : '这条请求没有在原会话执行：排队任务已取消，原文已在本话题的新会话中提交';
+    const webBaseUrl = config.webBaseUrl?.trim().replace(/\/$/, '');
     await this.service.update({
       cardKind: 'process', messageId: claim.cardMessageId, taskId: claim.taskId, taskName: claim.taskName, turn: claim.turn,
       sessionId: claim.sessionId, state: rerun ? 'reconcile_required' : 'cancelled', statusLabel: label, readOnly: true,
+      // 页脚「查看详情」与 capabilitiesForTask 一致：要求登录时是登录回调，否则是直链；两者都指向原会话。
+      capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false,
+        ...(webBaseUrl ? { webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(claim.sessionId)}` } : {}),
+        ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) },
       agentName: await this.resolveAgentName(config), permissionMode: larkPermissionMode(config),
       ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
       markdown: `**${label}**\n\n${detail}，进度见新的任务卡；之后本话题的消息也进入新会话。\n\n${larkRecoveryRetainedNote(config.webBaseUrl)}`
@@ -3670,7 +3740,7 @@ export class LarkMessageCoordinator {
       const terminal = state === 'completed' || state === 'failed' || state === 'interrupted' || state === 'cancelled';
       const recovery = task.sessionId && task.runtimeTaskId && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(state)
         ? await describeLarkTaskRecovery(this.runtime, task.sessionId, task.runtimeTaskId, state, undefined,
-          { relaunch: this.relaunchSupported(state), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
+          { relaunch: await this.relaunchReady(config.appId, task.id, state, task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
       const notifyRecovery = async () => {
         if (!recovery?.blocked || !task.sessionId || !task.runtimeTaskId) return undefined;
         // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
@@ -4118,7 +4188,7 @@ export class LarkMessageCoordinator {
         // 先提交 queued UI，再消费订阅期间缓存的 running 事件，杜绝 running→queued 闪回。
         if (runtimeTask.status === 'queued' && task.state === 'queued') {
           const recovery = await describeLarkTaskRecovery(this.runtime, session.id, runtimeTask.id, 'queued', runtimeTask.queuedAhead,
-            { relaunch: this.relaunchSupported('queued'), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+            { relaunch: await this.relaunchReady(config.appId, task.id, 'queued', task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
           const queueMarkdown = withCardNotes(recovery.markdown, recovery.blocked);
           // 此时 runtimeTaskId 已就位，取消排队才真正可执行，因此这一版卡片开始提供
           // 「取消」。首张「已接收」卡片刻意不提供（runtimeTaskId 尚未分配，点了必失败）。
