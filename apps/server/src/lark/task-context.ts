@@ -18,7 +18,7 @@ type LarkContextSource = {
 
 type SourcedResource = LarkMessageResource & { sourceMessageId: string };
 
-type ReadDocument = (url: string) => Promise<{ url: string; title?: string; text: string }>;
+type ReadDocument = (url: string) => Promise<{ url: string; title?: string; text: string; links?: string[]; linkTitles?: Array<{ url: string; title: string }>; linkError?: string }>;
 
 type TaskContextService = Pick<LarkCardService, 'getMessage' | 'getMessageItems' | 'listChatMessages'> & {
   readDocument?: ReadDocument;
@@ -43,8 +43,10 @@ export interface CollectLarkTaskContextResult {
 
 const MAX_THREAD_MESSAGES = 20;
 const MAX_DOCUMENTS = 3;
+const MAX_EXPANDED_DOCUMENTS = 12;
 const MAX_DOCUMENT_CHARS = 8_000;
 const MAX_MATERIAL_CHARS = 16_000;
+const MAX_EXPANDED_MATERIAL_CHARS = 56_000;
 const MAX_READ_MESSAGE_IDS = 200;
 
 const cursorPosition = (cursor: LarkContextCursor): LarkContextCursor => ({
@@ -62,11 +64,6 @@ const messageLabel = (messageId: string, senderName?: string) => {
   const name = senderName?.trim();
   return name ? `消息 ${messageId}（${name}）` : `消息 ${messageId}`;
 };
-
-const sourceError = (label: string, error: unknown): LarkContextSource => ({
-  label,
-  error: errorText(error) || '未知错误'
-});
 
 const parseCreateTime = (value: unknown) => {
   const parsed = Number(value);
@@ -118,7 +115,7 @@ const addReadId = (ids: string[], seen: Set<string>, messageId: string) => {
 
 const trimUrlPunctuation = (value: string) => value.replace(/[\])}>.,;!?，。；！？）】》」』]+$/u, '');
 
-const documentUrl = (value: string) => {
+const referenceUrl = (value: string) => {
   const candidate = trimUrlPunctuation(value.trim());
   try {
     const url = new URL(candidate);
@@ -130,11 +127,28 @@ const documentUrl = (value: string) => {
       || hostname.endsWith('.larkoffice.com')
       || hostname === 'larksuite.com'
       || hostname.endsWith('.larksuite.com');
-    if (!allowedHost || !/^\/(?:docx|wiki)(?:\/|$)/iu.test(url.pathname)) return undefined;
+    if (!allowedHost || !/^\/(?:docx|wiki|base)(?:\/|$)/iu.test(url.pathname)) return undefined;
     return url.toString();
   } catch {
     return undefined;
   }
+};
+
+const documentUrl = (value: string) => {
+  const url = referenceUrl(value);
+  return url && /^\/(?:docx|wiki)(?:\/|$)/iu.test(new URL(url).pathname) ? url : undefined;
+};
+
+const documentKey = (value: string) => {
+  const url = new URL(value);
+  url.search = '';
+  url.hash = '';
+  return url.toString();
+};
+
+const wantsChildDocuments = (prompt: string) => {
+  if (/(?:不(?:要|需|必)?(?:包括|包含|读取|展开)|无需(?:读取|展开)|别读|忽略|排除).{0,8}(?:子文档|子文件|关联文档|链接文档|引用文档)|(?:without|exclude|excluding|do not|don't).{0,20}(?:child|linked|sub[ -]?)\s*documents?/iu.test(prompt)) return false;
+  return /(?:包括|包含|读取|展开|总结|汇总).{0,8}(?:子文档|子文件|关联文档|链接文档|引用文档)|(?:include|including|read|expand|summari[sz]e).{0,20}(?:child|linked|sub[ -]?)\s*documents?/iu.test(prompt);
 };
 
 const findDocumentUrls = (text: string) => {
@@ -213,31 +227,49 @@ interface MaterialEntry {
   body?: string;
   truncated?: boolean;
   missing?: boolean;
+  references?: string[];
+  referencesTruncated?: boolean;
+  linkError?: string;
 }
 
 class MaterialCollector {
   private used = 0;
+  private limit = MAX_MATERIAL_CHARS;
   readonly entries: MaterialEntry[] = [];
 
   get hasCapacity() {
-    return this.used < MAX_MATERIAL_CHARS;
+    return this.used < this.limit;
+  }
+
+  expandForDocuments() {
+    this.limit = MAX_EXPANDED_MATERIAL_CHARS;
   }
 
   addMessage(source: LarkContextSource, body: string) {
     const text = body.trim();
-    const remaining = Math.max(0, MAX_MATERIAL_CHARS - this.used);
+    const remaining = Math.max(0, this.limit - this.used);
     const visible = text.slice(0, remaining);
     this.used += visible.length;
     this.entries.push({ source, body: visible, truncated: visible.length < text.length });
   }
 
-  addDocument(source: LarkContextSource, text: string) {
+  addDocument(source: LarkContextSource, text: string, references: string[] = [], linkError?: string) {
     const body = String(text ?? '');
-    const remaining = Math.max(0, MAX_MATERIAL_CHARS - this.used);
+    const visibleReferences: string[] = [];
+    let referenceChars = 0;
+    for (const reference of references) {
+      const next = referenceChars + reference.length + 2;
+      if (next > 4_000 || this.used + next > this.limit) break;
+      visibleReferences.push(reference);
+      referenceChars = next;
+    }
+    this.used += referenceChars;
+    const remaining = Math.max(0, this.limit - this.used);
     const take = Math.min(MAX_DOCUMENT_CHARS, remaining);
     const visible = body.slice(0, take);
     this.used += visible.length;
-    this.entries.push({ source, body: visible, truncated: visible.length < body.length });
+    this.entries.push({ source, body: visible, truncated: visible.length < body.length, references: visibleReferences,
+      referencesTruncated: visibleReferences.length < references.length, ...(linkError ? { linkError: linkError.slice(0, 500) } : {}) });
   }
 
   addMissing(source: LarkContextSource) {
@@ -257,7 +289,10 @@ const materialText = (entry: MaterialEntry) => {
   }
   const body = entry.body ?? '';
   const truncation = entry.truncated ? '\n[参考材料正文已截断]' : '';
-  return `${sourceHeader(entry.source)}${body ? `\n${body}` : '\n（无可读正文）'}${truncation}`;
+  const references = entry.references?.length ? `\n文档中的引用链接：\n${entry.references.map(reference => `- ${reference}`).join('\n')}` : '';
+  const referencesTruncated = entry.referencesTruncated ? '\n[引用链接已截断，部分链接未读取]' : '';
+  const linkError = entry.linkError ? `\n[引用链接读取不完整：${entry.linkError}]` : '';
+  return `${sourceHeader(entry.source)}${body ? `\n${body}` : '\n（无可读正文）'}${truncation}${references}${referencesTruncated}${linkError}`;
 };
 
 const appendSourceError = (sources: LarkContextSource[], label: string, error: unknown, messageId?: string) => {
@@ -288,6 +323,7 @@ async function collectReferencedParent(
   addRead: (messageId: string) => void,
   documentUrls: string[],
   documentUrlSet: Set<string>,
+  maxDocuments: number,
   alreadyRead: boolean
 ) {
   const label = `引用消息 ${parentId}`;
@@ -324,8 +360,9 @@ async function collectReferencedParent(
   for (const resource of parsed.resources) addResource(resource, resource.sourceMessageId);
   for (const messageId of parsed.messageIds) addRead(messageId);
   for (const url of findDocumentUrls(parsed.text)) {
-    if (!documentUrlSet.has(url) && documentUrls.length < MAX_DOCUMENTS) {
-      documentUrlSet.add(url);
+    const key = documentKey(url);
+    if (!documentUrlSet.has(key) && documentUrls.length < maxDocuments) {
+      documentUrlSet.add(key);
       documentUrls.push(url);
     }
   }
@@ -333,6 +370,8 @@ async function collectReferencedParent(
 
 export async function collectLarkTaskContext(input: CollectLarkTaskContextInput): Promise<CollectLarkTaskContextResult> {
   const { event, prompt, service } = input;
+  const expandDocuments = wantsChildDocuments(prompt);
+  const maxDocuments = expandDocuments ? MAX_EXPANDED_DOCUMENTS : MAX_DOCUMENTS;
   const readIds = normalizeReadIds(input.readMessageIds);
   const readSet = new Set(readIds);
   const currentMessageId = trimMessageId(event.messageId);
@@ -356,14 +395,16 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
   // so a later topic scan does not inject the same turn again.
   for (const resource of input.resources) addResource(resource, currentMessageId);
   for (const url of findDocumentUrls(prompt)) {
-    if (documentUrls.length >= MAX_DOCUMENTS) break;
-    documentUrlSet.add(url);
+    if (documentUrls.length >= maxDocuments) break;
+    const key = documentKey(url);
+    if (documentUrlSet.has(key)) continue;
+    documentUrlSet.add(key);
     documentUrls.push(url);
   }
 
   const parentId = trimMessageId(event.parentId);
   if (parentId) {
-    await collectReferencedParent(event, parentId, service, materials, sources, addResource, addRead, documentUrls, documentUrlSet, readSet.has(parentId));
+    await collectReferencedParent(event, parentId, service, materials, sources, addResource, addRead, documentUrls, documentUrlSet, maxDocuments, readSet.has(parentId));
   }
 
   let nextCursor: LarkContextCursor | undefined = input.cursor;
@@ -432,8 +473,9 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
         for (const resource of parsed.resources) addResource(resource, resource.sourceMessageId);
         for (const messageId of parsed.messageIds) addRead(messageId);
         for (const url of findDocumentUrls(parsed.text)) {
-          if (!documentUrlSet.has(url) && documentUrls.length < MAX_DOCUMENTS) {
-            documentUrlSet.add(url);
+          const key = documentKey(url);
+          if (!documentUrlSet.has(key) && documentUrls.length < maxDocuments) {
+            documentUrlSet.add(key);
             documentUrls.push(url);
           }
         }
@@ -463,25 +505,56 @@ export async function collectLarkTaskContext(input: CollectLarkTaskContextInput)
     }
   }
 
-  for (const url of documentUrls) {
-    const sourceLabel = `文档 ${url}`;
-    if (!service.readDocument) {
-      const source = sourceError(sourceLabel, '当前未接入飞书文档读取能力');
-      source.url = url;
-      sources.push(source);
-      materials.addMissing(source);
-      continue;
-    }
-    try {
-      const document = await service.readDocument(url);
+  if (expandDocuments) materials.expandForDocuments();
+  const pending: Array<{ url: string; depth: number; title?: string }> = documentUrls.map(url => ({ url, depth: 0 }));
+  for (let depth = 0; depth <= (expandDocuments ? 2 : 0); depth++) {
+    const batch = pending.filter(item => item.depth === depth);
+    const results = await Promise.all(batch.map(async item => {
+      try {
+        if (!service.readDocument) throw new Error('当前未接入飞书文档读取能力');
+        return { item, document: await service.readDocument(item.url) };
+      } catch (error) {
+        return { item, error };
+      }
+    }));
+    for (const result of results) {
+      const { url } = result.item;
+      const sourceLabel = result.item.title || `文档 ${url}`;
+      if ('error' in result) {
+        const source: LarkContextSource = { url, label: sourceLabel, error: errorText(result.error) || '未知错误' };
+        sources.push(source);
+        materials.addMissing(source);
+        continue;
+      }
+      const document = result.document;
+      const references: string[] = [];
+      const linkTitles = new Map(document.linkTitles?.map(link => [link.url, link.title]) ?? []);
+      for (const value of document.links ?? []) {
+        const reference = referenceUrl(value);
+        if (!reference) continue;
+        const linkedDocument = documentUrl(reference);
+        const title = linkTitles.get(value)?.replace(/\s+/gu, ' ').trim().slice(0, 120);
+        const referenceLabel = title ? `${title}｜${reference}` : reference;
+        if (!linkedDocument) {
+          references.push(`${referenceLabel}（未读取：不是 docx/wiki 文档）`);
+        } else if (!expandDocuments) {
+          references.push(`${referenceLabel}（未读取：当前请求未要求展开子文档）`);
+        } else if (documentUrlSet.has(documentKey(linkedDocument))) {
+          references.push(referenceLabel);
+        } else if (depth >= 2) {
+          references.push(`${referenceLabel}（未读取：嵌套深度上限为 2）`);
+        } else if (pending.length >= maxDocuments) {
+          references.push(`${referenceLabel}（未读取：文档数量上限为 ${maxDocuments}）`);
+        } else {
+          documentUrlSet.add(documentKey(linkedDocument));
+          pending.push({ url: linkedDocument, depth: depth + 1, ...(title ? { title } : {}) });
+          references.push(referenceLabel);
+        }
+      }
       const resolvedUrl = document.url?.trim() || url;
       const source: LarkContextSource = { url: resolvedUrl, label: document.title?.trim() || sourceLabel };
       sources.push(source);
-      materials.addDocument(source, document.text);
-    } catch (error) {
-      const source: LarkContextSource = { url, label: sourceLabel, error: errorText(error) || '未知错误' };
-      sources.push(source);
-      materials.addMissing(source);
+      materials.addDocument(source, document.text, references, document.linkError);
     }
   }
 

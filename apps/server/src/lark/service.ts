@@ -1553,7 +1553,7 @@ export class LarkCardService {
     return { data: new Uint8Array(await response.arrayBuffer()), ...(contentType ? { contentType } : {}) };
   }
 
-  async readDocument(urlInput: string): Promise<{ url: string; title?: string; text: string }> {
+  async readDocument(urlInput: string): Promise<{ url: string; title?: string; text: string; links: string[]; linkTitles: Array<{ url: string; title: string }>; linkError?: string }> {
     let url: URL;
     try { url = new URL(urlInput); } catch { throw new LarkServiceError('INVALID_DOCUMENT_URL', '文档链接必须是飞书或 Lark 的 https docx/wiki URL。', 400); }
     const host = url.hostname.toLowerCase();
@@ -1569,7 +1569,48 @@ export class LarkCardService {
     const raw = await this.request(`/open-apis/docx/v1/documents/${encodeURIComponent(token)}/raw_content`, { method: 'GET' });
     const text = raw.data?.content;
     if (typeof text !== 'string') throw new LarkServiceError('INVALID_LARK_RESPONSE', '文档读取响应未包含 raw_content。', 502);
-    return { url: url.toString(), ...(typeof raw.data?.title === 'string' ? { title: raw.data.title } : {}), text };
+    const links: string[] = [];
+    const seen = new Set<string>();
+    const linkTitles: Array<{ url: string; title: string }> = [];
+    const titled = new Set<string>();
+    let linkError: string | undefined;
+    let pageToken: string | undefined;
+    try {
+      for (let page = 0; page < 5; page++) {
+        const path = `/open-apis/docx/v1/documents/${encodeURIComponent(token)}/blocks?page_size=500${pageToken ? `&page_token=${encodeURIComponent(pageToken)}` : ''}`;
+        const payload = await this.request(path, { method: 'GET' });
+        if (!Array.isArray(payload.data?.items)) throw new Error('文档 blocks 响应未包含 items');
+        for (const block of payload.data.items) {
+          for (const value of Object.values(block as Record<string, any>)) {
+            if (!value || typeof value !== 'object' || !Array.isArray((value as any).elements)) continue;
+            for (const element of (value as any).elements) {
+              for (const candidate of [element?.mention_doc?.url, element?.text_run?.text_element_style?.link?.url]) {
+                if (typeof candidate === 'string' && candidate && !seen.has(candidate)) {
+                  seen.add(candidate);
+                  if (links.length < 100) links.push(candidate);
+                  else linkError = '文档引用超过 100 个，后续链接未收集';
+                }
+                const title = element?.mention_doc?.url === candidate ? element?.mention_doc?.title : undefined;
+                if (typeof title === 'string' && title.trim() && links.includes(candidate) && !titled.has(candidate)) {
+                  titled.add(candidate);
+                  linkTitles.push({ url: candidate, title: title.replace(/\s+/gu, ' ').trim().slice(0, 120) });
+                }
+              }
+            }
+          }
+        }
+        if (!payload.data.has_more) break;
+        const nextToken = String(payload.data.page_token ?? '').trim();
+        if (!nextToken || nextToken === pageToken || page === 4) {
+          linkError = '文档 blocks 未完整读取，后续引用链接可能缺失';
+          break;
+        }
+        pageToken = nextToken;
+      }
+    } catch (error) {
+      linkError = `文档引用链接读取失败：${error instanceof Error ? error.message : String(error)}`;
+    }
+    return { url: url.toString(), ...(typeof raw.data?.title === 'string' ? { title: raw.data.title } : {}), text, links, linkTitles, ...(linkError ? { linkError } : {}) };
   }
 
   async getBotOpenId(): Promise<string> {

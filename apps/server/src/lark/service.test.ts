@@ -817,6 +817,47 @@ describe('Lark card service', () => {
     expect(wikiFetcher).toHaveBeenCalledTimes(2);
   });
 
+  it('returns docx block links alongside raw text and reports an incomplete block read', async () => {
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { content: '根文档正文' } }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [
+        { block_type: 12, bullet: { elements: [{ mention_doc: { title: '子文档', url: 'https://tenant.larkoffice.com/docx/child' } }] } },
+        { block_type: 2, text: { elements: [{ text_run: { content: '入口', text_element_style: { link: { url: 'https://tenant.larkoffice.com/wiki/linked' } } } }] } }
+      ], has_more: false } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await expect(service.readDocument('https://tenant.larkoffice.com/docx/root')).resolves.toMatchObject({
+      text: '根文档正文',
+      links: ['https://tenant.larkoffice.com/docx/child', 'https://tenant.larkoffice.com/wiki/linked'],
+      linkTitles: [{ url: 'https://tenant.larkoffice.com/docx/child', title: '子文档' }]
+    });
+    expect(fetcher.mock.calls[2]![0]).toContain('/open-apis/docx/v1/documents/root/blocks?page_size=500');
+
+    const failed = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { content: '仍可读的正文' } }))
+      .mockResolvedValueOnce(response({ code: 99991663, msg: 'permission denied' }, 403));
+    const failedService = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, failed as typeof fetch);
+    await expect(failedService.readDocument('https://tenant.larkoffice.com/docx/root')).resolves.toMatchObject({
+      text: '仍可读的正文', linkError: expect.stringContaining('permission denied')
+    });
+  });
+
+  it('follows block pagination and flags a continuation that cannot be completed', async () => {
+    const first = 'https://tenant.larkoffice.com/docx/first';
+    const second = 'https://tenant.larkoffice.com/docx/second';
+    const fetcher = vi.fn()
+      .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { content: '正文' } }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [{ text: { elements: [{ mention_doc: { url: first } }] } }], has_more: true, page_token: 'next' } }))
+      .mockResolvedValueOnce(response({ code: 0, data: { items: [{ text: { elements: [{ mention_doc: { url: second } }] } }], has_more: true, page_token: 'next' } }));
+    const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' }, fetcher as typeof fetch);
+    await expect(service.readDocument('https://tenant.larkoffice.com/docx/root')).resolves.toMatchObject({
+      text: '正文', links: [first, second], linkError: expect.stringContaining('未完整读取')
+    });
+    expect(fetcher.mock.calls[3]![0]).toContain('page_token=next');
+  });
+
   it('sends in-app urgent request for a single message to target users', async () => {
     const fetcher = vi.fn()
       .mockResolvedValueOnce(response({ code: 0, tenant_access_token: 'token', expire: 7200 }))

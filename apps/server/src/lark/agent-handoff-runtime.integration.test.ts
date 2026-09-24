@@ -161,7 +161,7 @@ describe('Agent handoff A → B → A through Runtime, SQLite and both Lark coor
     expect(h.sends.filter(send => send.agentId === 'b')).toHaveLength(1);
     h.sends.find(send => send.agentId === 'b')!.release();
     const secondB = await h.ready(b!.appId, sentAB.id);
-    expect(h.sends.filter(send => send.agentId === 'b')).toHaveLength(2);
+    await vi.waitFor(() => expect(h.sends.filter(send => send.agentId === 'b')).toHaveLength(2));
     expect(h.sends.filter(send => send.agentId === 'b')[1]!.prompt).toContain('核对登录需求中的权限边界');
     expect(h.messages.get(sentAB.id)).toMatchObject({ rootId: topic.rootId, threadId: topic.threadId });
     await expect(h.tools.replyAgent(secondB.token, { content: '实质检查结果：权限边界符合需求', turn: firstB.turn }))
@@ -178,7 +178,7 @@ describe('Agent handoff A → B → A through Runtime, SQLite and both Lark coor
     expect(h.sends.filter(send => send.agentId === 'a')).toHaveLength(1);
     h.sends.find(send => send.agentId === 'a')!.release();
     const secondA = await h.ready(a!.appId, sentBA.id);
-    expect(h.sends.filter(send => send.agentId === 'a')).toHaveLength(2);
+    await vi.waitFor(() => expect(h.sends.filter(send => send.agentId === 'a')).toHaveLength(2));
     const before = h.emitted.length;
     await expect(h.tools.replyAgent(secondA.token, { content: '收到', turn: secondA.turn }))
       .rejects.toMatchObject({ code: 'AGENT_REPLY_ALREADY_COMPLETED' });
