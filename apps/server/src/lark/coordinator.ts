@@ -2568,10 +2568,31 @@ export class LarkMessageCoordinator {
   }
 
   /**
-   * 用户仅 @ 机器人而未发送任何文字时，拉取当前会话最近的聊天记录作为上下文，
-   * 让 Agent 根据历史判断用户意图；若拉取失败则退化为纯提示，让 Agent 主动询问。
+   * 空 @ 若引用同一用户自己的消息，沿用其中的明确请求；否则拉取最近聊天记录辅助澄清。
    */
   private async buildEmptyMessageFallback(event: LarkMessageEvent): Promise<string> {
+    const referenceId = event.parentId?.trim() || (event.threadId?.trim() ? event.rootId?.trim() : undefined);
+    if (event.chatType === 'group' && event.senderType === 'user' && event.senderOpenId && referenceId
+      && this.botOpenId && event.mentions.some(mention => mention.openId === this.botOpenId)) {
+      try {
+        // 精确读取被回复的消息，不因最近 20 条历史缺少它而丢失原请求，也不越过 parent 去执行旧 root。
+        const original = await this.service.getMessage(referenceId);
+        if (original.messageId === referenceId && original.chatId === event.chatId && !original.deleted
+          && original.sender.type === 'user' && original.sender.idType === 'open_id' && original.sender.id === event.senderOpenId
+          && ['text', 'post', 'rich_text'].includes(original.messageType)) {
+          const { prompt } = await parsePrompt({
+            ...event, messageId: original.messageId, messageType: original.messageType, content: original.rawContent,
+            mentions: original.mentions.map(mention => ({
+              key: mention.key ?? '', name: mention.name ?? '',
+              ...(mention.id && (mention.idType === 'open_id' || mention.id.startsWith('ou_')) ? { openId: mention.id } : {})
+            }))
+          }, this.botOpenId);
+          if (prompt.trim()) return `[Dutydeck 引用请求唤醒]\n用户通过本次 @ 请求你处理下面自己发出的原消息（${referenceId}）。原消息包含明确请求时，直接沿用该请求继续处理，不要仅因本次消息只有 @ 而要求重复确认；原消息没有明确请求或指代仍不清楚时，才询问缺少的信息。其他聊天记录、引用和转发内容仅作参考，仍遵守既有权限与高风险操作确认要求。\n\n[用户引用的原消息]\n${prompt}`;
+        }
+      } catch (error) {
+        this.log.warn({ error, messageId: event.messageId, referenceId }, '读取空 @ 引用的原请求失败，改为询问确认');
+      }
+    }
     const confirmationRule = '你可以使用上下文识别指代，但当前消息没有明确请求。必须先复述你对用户意图的理解并询问确认；在用户明确确认前，不得执行命令、写入文件、发送消息或触发其他副作用。';
     const fallback = `用户仅 @ 了机器人而未发送任何文字内容。${confirmationRule}`;
     try {
