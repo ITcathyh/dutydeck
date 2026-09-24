@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import type { AgentEvent } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { buildApp } from '../apps/server/src/app.js';
-import { createEventWindow, EVENT_RENDER_LIMIT, mergeLiveEvent } from '../apps/web/src/event-history.js';
+import { createEventWindow, mergeLiveEvent } from '../apps/web/src/event-history.js';
 
 const SESSION_ID = 'ses_benchmark_50k';
 const EVENT_COUNT = 50_000;
@@ -56,7 +56,7 @@ async function main() {
   const firstScreenP95Ms = await sample(40, async () => {
     const response = await app!.inject({ method: 'GET', url: `/api/sessions/${SESSION_ID}/events?limit=200&direction=backward` });
     if (response.statusCode !== 200) throw new Error(`initial history returned ${response.statusCode}`);
-    const window = createEventWindow(response.json(), true);
+    const window = createEventWindow(response.json());
     if (window.events.length !== 200) throw new Error(`initial history returned ${window.events.length} events`);
   });
   const paginationP95Ms = await sample(60, async index => {
@@ -65,10 +65,10 @@ async function main() {
     if (response.statusCode !== 200 || response.json().length !== 200) throw new Error('bounded pagination contract failed');
   });
 
-  let window = createEventWindow(Array.from({ length: EVENT_RENDER_LIMIT }, (_, offset) => event(EVENT_COUNT - EVENT_RENDER_LIMIT + offset + 1)), true);
+  let window = createEventWindow(Array.from({ length: EVENT_COUNT }, (_, offset) => event(offset + 1)));
   const incrementalP95Ms = await sample(2_000, index => {
     window = mergeLiveEvent(window, event(EVENT_COUNT + index + 1));
-    if (window.events.length > EVENT_RENDER_LIMIT) throw new Error('client event window grew past its bound');
+    if (window.events.length !== EVENT_COUNT + index + 1 || window.events[0]?.sequence !== 1) throw new Error('client discarded earlier history during live updates');
   });
 
   global.gc?.();

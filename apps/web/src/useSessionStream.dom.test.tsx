@@ -28,7 +28,7 @@ describe('useSessionStream reconciliation', () => {
     const taskLoader = vi.fn(async () => []); const sessionLoader = vi.fn(async () => [session]);
     const eventLoader = vi.spyOn(api, 'events').mockResolvedValueOnce([event(11)]).mockResolvedValueOnce([event(12), event(13)]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    client.setQueryData(['events', 's1'], createEventWindow([event(10)], true));
+    client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
     function Harness() {
       useQuery({ queryKey: ['tasks', 's1'], queryFn: taskLoader });
       useQuery({ queryKey: ['sessions'], queryFn: sessionLoader });
@@ -40,11 +40,43 @@ describe('useSessionStream reconciliation', () => {
     act(() => MockEventSource.instances[0]!.onopen?.(new Event('open')));
     await waitFor(() => expect(screen.getByText('open')).toBeTruthy());
     await waitFor(() => expect(taskLoader.mock.calls.length).toBeGreaterThanOrEqual(2));
-    await waitFor(() => expect(eventLoader).toHaveBeenCalledWith('s1', { after: 10, limit: 200, direction: 'forward' }));
+    await waitFor(() => expect(eventLoader).toHaveBeenCalledWith('s1', { after: 10, limit: 200, direction: 'forward' }, expect.any(AbortSignal)));
     await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.at(-1)?.sequence).toBe(11));
     act(() => MockEventSource.instances[0]!.emit('text', event(13)));
-    await waitFor(() => expect(eventLoader).toHaveBeenCalledWith('s1', { after: 11, limit: 200, direction: 'forward' }));
+    await waitFor(() => expect(eventLoader).toHaveBeenCalledWith('s1', { after: 11, limit: 200, direction: 'forward' }, expect.any(AbortSignal)));
     await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual([10, 11, 12, 13]));
+  });
+
+  it('reconnect loads every missed page without dropping the existing history', async () => {
+    const loader = vi.spyOn(api, 'events')
+      .mockResolvedValueOnce(Array.from({ length: 200 }, (_, index) => event(index + 1_001)))
+      .mockResolvedValueOnce(Array.from({ length: 200 }, (_, index) => event(index + 1_201)))
+      .mockResolvedValueOnce([event(1_401)]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['events', 's1'], createEventWindow(Array.from({ length: 1_000 }, (_, index) => event(index + 1))));
+    function Harness() { useSessionStream('s1', 'r1', true); return null; }
+    render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+    act(() => MockEventSource.instances[0]!.onopen?.(new Event('open')));
+    await waitFor(() => expect(loader).toHaveBeenCalledTimes(3));
+    expect(loader).toHaveBeenLastCalledWith('s1', { after: 1_400, limit: 200, direction: 'forward' }, expect.any(AbortSignal));
+    await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(item => item.sequence)).toEqual(Array.from({ length: 1_401 }, (_, index) => index + 1)));
+  });
+
+  it('leaving a session aborts reconciliation and prevents late cache writes', async () => {
+    let release!: (events: DockEvent[]) => void;
+    const loader = vi.spyOn(api, 'events').mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    client.setQueryData(['events', 's1'], createEventWindow([event(1)]));
+    function Harness() { useSessionStream('s1', 'r1', true); return null; }
+    const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+    act(() => MockEventSource.instances[0]!.onopen?.(new Event('open')));
+    await waitFor(() => expect(loader).toHaveBeenCalledTimes(1));
+    const signal = loader.mock.calls[0]?.[2];
+    view.unmount();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => release(Array.from({ length: 200 }, (_, index) => event(index + 2))));
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events).toEqual([event(1)]);
   });
 
   it('已有 Task 收到局部状态事件期间原 prompt/metadata 仍可渲染，回读后更新 status', async () => {

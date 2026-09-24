@@ -14,6 +14,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
   useEffect(() => {
     if (!sessionId || !enabled) return;
     setStatus('connecting');
+    const controller = new AbortController();
     let reconciling = false;
     let desiredTarget: number | undefined;
     const reconcileEvents = (after: number, target?: number) => {
@@ -23,10 +24,11 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
       void (async () => {
         let cursor = after;
         while (true) {
-          const missed = await api.events(sessionId, { after: cursor, limit: EVENT_PAGE_SIZE, direction: 'forward' });
+          const missed = await api.events(sessionId, { after: cursor, limit: EVENT_PAGE_SIZE, direction: 'forward' }, controller.signal);
+          if (controller.signal.aborted) return;
           qc.setQueryData<EventWindow>(['events', sessionId], current => mergeReconciledEvents(current, missed));
           const nextCursor = missed.at(-1)?.sequence ?? cursor;
-          if (!missed.length || nextCursor <= cursor || missed.length < EVENT_PAGE_SIZE || desiredTarget === undefined || nextCursor >= desiredTarget - 1) break;
+          if (!missed.length || nextCursor <= cursor || missed.length < EVENT_PAGE_SIZE || (desiredTarget !== undefined && nextCursor >= desiredTarget - 1)) break;
           cursor = nextCursor;
         }
       })().catch(() => { /* 下一次 open / gap 会再次校准 */ }).finally(() => { reconciling = false; desiredTarget = undefined; });
@@ -52,7 +54,7 @@ export function useSessionStream(sessionId: string | undefined, runId: string | 
     });
     streamRef.current = stream;
     stream.start();
-    return () => { stream.close(); streamRef.current = null; };
+    return () => { controller.abort(); stream.close(); streamRef.current = null; };
   }, [sessionId, runId, enabled, qc]);
 
   return sessionId && enabled ? status : 'connecting';

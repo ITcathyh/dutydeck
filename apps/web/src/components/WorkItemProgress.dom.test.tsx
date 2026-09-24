@@ -111,7 +111,7 @@ function mount(items: WorkItem[] = [goal()], initialSession = session, eventsLoa
   function View({ current }: { current: Session }) {
     const [panel, setPanel] = useState({ open: false, selectedId: '' });
     return <><WorkItemsPanel session={current} agents={agents} onSelectSession={select} control={{ ...panel, onOpenChange: open => setPanel(value => ({ ...value, open })), onSelectItem: selectedId => setPanel(value => ({ ...value, selectedId })) }}/>
-      <TimelineView activeSessionId={current.id} eventsLoading={eventsLoading} loadingEarlier={false} hasEarlier={false} onLoadEarlier={async () => {}} onResolvePermission={() => {}} timeline={[]} timelineSections={[]} awaitingAnswer={false} hasOngoingActivity={false} latestUserIndex={-1} activeOutputLabel="Agent" renderProgress={emptyState => <WorkItemProgress session={current} agents={agents} emptyState={emptyState} onOpenItem={selectedId => setPanel({ open: true, selectedId })} onSelectSession={select}/>}/></>;
+      <TimelineView activeSessionId={current.id} eventsLoading={eventsLoading} onResolvePermission={() => {}} timeline={[]} timelineSections={[]} awaitingAnswer={false} hasOngoingActivity={false} latestUserIndex={-1} activeOutputLabel="Agent" renderProgress={emptyState => <WorkItemProgress session={current} agents={agents} emptyState={emptyState} onOpenItem={selectedId => setPanel({ open: true, selectedId })} onSelectSession={select}/>}/></>;
   }
   const ui = (current: Session) => <QueryClientProvider client={qc}><View key={current.id} current={current}/></QueryClientProvider>;
   const view = render(ui(initialSession));

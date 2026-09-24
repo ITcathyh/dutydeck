@@ -7,6 +7,7 @@ import { api, foundationApi, scheduleApi, type Agent, type DockEvent, type RunSu
 import App from './App';
 import { useDockStore } from './store';
 import { resetDrafts } from './draft-store';
+import type { EventWindow } from './event-history';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
 
 vi.mock('./useSessionStream', () => ({ useSessionStream: () => 'open' }));
@@ -992,5 +993,41 @@ describe('编辑草稿跨视图存活', () => {
     await screen.findByRole('heading', { name: '群聊管理' });
     expect((await screen.findByRole('radio', { name: /使用 Agent 默认/ }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+  });
+});
+
+
+describe('App 完整历史记录', () => {
+  const history = Array.from({ length: 1_205 }, (_, index): DockEvent => ({
+    id: `history-${index + 1}`, sequence: index + 1, timestamp: '2026-08-30T00:00:00Z',
+    type: index === 0 || index === 1_204 ? 'text' : 'status',
+    data: index === 0 ? { role: 'user', text: '最早的历史内容' } : { role: 'assistant', text: '最新的历史内容' }
+  }));
+
+  it('进入会话自动跨页读取全部记录，重新读取后仍保留完整历史', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')] });
+    vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => query?.before === undefined || event.sequence < query.before).slice(-query!.limit!));
+    const { client } = renderApp();
+    expect(await screen.findByText('最早的历史内容')).toBeTruthy();
+    expect(screen.getByText('最新的历史内容')).toBeTruthy();
+    expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual(history);
+    expect(api.events).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('button', { name: '加载更早记录' })).toBeNull();
+    await act(() => client.invalidateQueries({ queryKey: ['events', 's1'] }));
+    expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual(history);
+    expect(screen.getByText('最早的历史内容')).toBeTruthy();
+  });
+
+  it('历史请求失败时显示错误，重试后自动补全记录', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')] });
+    vi.mocked(api.events).mockRejectedValueOnce(new Error('连接中断'));
+    renderApp();
+    expect(await screen.findByText('历史记录加载失败：连接中断')).toBeTruthy();
+    vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => query?.before === undefined || event.sequence < query.before).slice(-query!.limit!));
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试加载记录' }));
+    expect(await screen.findByText('最早的历史内容')).toBeTruthy();
+    expect(screen.queryByText('历史记录加载失败：连接中断')).toBeNull();
   });
 });
