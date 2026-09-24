@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import Fastify from 'fastify';
 import type { ConfigRepository } from '@dutydeck/shared';
 import {
@@ -10,6 +11,8 @@ import {
   getAuthToken,
   isSameOriginRequest,
   loadOrCreateAuthToken,
+  LOGIN_LINK_TTL_MS,
+  LoginLinkStore,
   registerBrowserAuthRoutes,
   registerAuthMiddleware,
   rotateAuthToken,
@@ -413,6 +416,104 @@ describe('browser auth routes', () => {
     expect((await app.inject({ method: 'GET', url: '/api/auth/status' })).json()).toEqual({ authenticated: true, required: false });
     expect((await app.inject({ method: 'POST', url: '/api/auth/login', payload: {} })).json()).toEqual({ authenticated: true, required: false });
     expect((await app.inject({ method: 'POST', url: '/api/auth/logout' })).json()).toEqual({ authenticated: true, required: false });
+    await app.close();
+  });
+});
+
+describe('one-time login links', () => {
+  const TOKEN = 'test-token-abcdefghijklmnopqrstuvwxyz123456';
+  const remote = { remoteAddress: '203.0.113.7' } as const;
+
+  function buildLinkApp(links: LoginLinkStore, options: { stream?: { write(line: string): void } } = {}) {
+    const app = options.stream ? Fastify({ logger: { level: 'info', stream: options.stream } }) : Fastify();
+    registerBrowserAuthRoutes(app, { mode: 'token', getToken: async () => TOKEN, localOnly: false, loginLinks: links });
+    return app;
+  }
+
+  it('码有 256 位随机熵，服务端只按哈希保存', () => {
+    const links = new LoginLinkStore();
+    const code = links.issue('ses_1');
+    expect(code).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(links.issue('ses_1')).not.toBe(code);
+    const stored = JSON.stringify([...(links as any).links.entries()]);
+    expect(stored).not.toContain(code);
+    expect(stored).toContain(createHash('sha256').update(code).digest('hex'));
+  });
+
+  it('兑换后设置与 /api/auth/login 完全相同的 cookie，并跳转到绑定的会话页', async () => {
+    const links = new LoginLinkStore();
+    const app = buildLinkApp(links);
+    const code = links.issue('ses_bound/1');
+    const redeemed = await app.inject({ method: 'GET', url: `/api/auth/link?code=${code}`, ...remote });
+    expect(redeemed.statusCode).toBe(302);
+    expect(redeemed.headers.location).toBe('/sessions/ses_bound%2F1');
+    expect(redeemed.headers['cache-control']).toBe('no-store');
+    const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { token: TOKEN }, ...remote });
+    expect(redeemed.headers['set-cookie']).toBe(login.headers['set-cookie']);
+    const status = await app.inject({ method: 'GET', url: '/api/auth/status', headers: { cookie: redeemed.headers['set-cookie'] as string }, ...remote });
+    expect(status.json()).toEqual({ authenticated: true, required: true });
+    await app.close();
+  });
+
+  it('重复使用、过期、伪造和缺失的码都只返回同一个错误页，不发 cookie', async () => {
+    let now = 1_000_000;
+    const links = new LoginLinkStore(() => now);
+    const app = buildLinkApp(links);
+    const used = links.issue('ses_1');
+    expect((await app.inject({ method: 'GET', url: `/api/auth/link?code=${used}`, ...remote })).statusCode).toBe(302);
+    const expired = links.issue('ses_1');
+    now += LOGIN_LINK_TTL_MS;
+    const failures = await Promise.all([
+      `/api/auth/link?code=${used}`,
+      `/api/auth/link?code=${expired}`,
+      `/api/auth/link?code=${'x'.repeat(43)}`,
+      '/api/auth/link'
+    ].map(url => app.inject({ method: 'GET', url, ...remote })));
+    for (const failure of failures) {
+      expect(failure.statusCode).toBe(400);
+      expect(failure.headers['set-cookie']).toBeUndefined();
+      expect(failure.headers['content-type']).toContain('text/html');
+      expect(failure.body).toBe(failures[0]!.body);
+      expect(failure.body).toContain('登录链接已失效');
+      expect(failure.body).not.toContain('ses_1');
+    }
+    await app.close();
+  });
+
+  it('同一个码并发兑换只成功一次', async () => {
+    const links = new LoginLinkStore();
+    const app = buildLinkApp(links);
+    const code = links.issue('ses_1');
+    const responses = await Promise.all(Array.from({ length: 8 }, () => app.inject({ method: 'GET', url: `/api/auth/link?code=${code}`, ...remote })));
+    expect(responses.filter(response => response.statusCode === 302)).toHaveLength(1);
+    expect(responses.filter(response => response.headers['set-cookie'])).toHaveLength(1);
+    await app.close();
+  });
+
+  it('本机免密或 --no-auth 时不兑换任何码', async () => {
+    const links = new LoginLinkStore();
+    for (const mode of ['local', 'open'] as const) {
+      const app = Fastify();
+      registerBrowserAuthRoutes(app, { mode, getToken: async () => TOKEN, localOnly: mode === 'local', loginLinks: links });
+      const response = await app.inject({ method: 'GET', url: `/api/auth/link?code=${links.issue('ses_1')}` });
+      expect(response.statusCode).toBe(400);
+      expect(response.headers['set-cookie']).toBeUndefined();
+      await app.close();
+    }
+  });
+
+  it('请求日志只记兑换路径，不记登录码', async () => {
+    const lines: string[] = [];
+    const links = new LoginLinkStore();
+    const app = buildLinkApp(links, { stream: { write: line => { lines.push(line); } } });
+    const code = links.issue('ses_1');
+    expect((await app.inject({ method: 'GET', url: `/api/auth/link?code=${code}`, ...remote })).statusCode).toBe(302);
+    await app.inject({ method: 'GET', url: `/api/auth/link?code=${code}`, ...remote });
+    const log = lines.join('');
+    expect(log).toContain('"url":"/api/auth/link"');
+    expect(log).toContain('incoming request');
+    expect(log).not.toContain(code);
+    expect(log).not.toContain('code=');
     await app.close();
   });
 });

@@ -18,8 +18,11 @@
 /** 与 card-renderer.ts 的 LarkCardElement 结构一致，这里本地定义以避免 import 环。 */
 export type LarkCardElement = Record<string, any>;
 
-/** 回调型操作。查看详情是 open_url 链接按钮，不是回调，故不在此列。 */
-export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'run_in_new_session' | 'rerun_in_new_session' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily';
+/**
+ * 回调型操作。查看详情平时是直接打开 webUrl 的链接，不是回调；
+ * 只有 Web 要求登录时才是回调 detail（服务端给管理员私信一次性登录链接）。
+ */
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'run_in_new_session' | 'rerun_in_new_session' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail';
 
 /** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
 export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'reconcile_required' | 'legacy_unresolved';
@@ -61,6 +64,11 @@ export interface LarkCardCapabilities {
   dailySchedule?: { time: string; scheduled: boolean };
   /** 已解析好的深链，仅在配置了 webBaseUrl 时提供。 */
   webUrl?: string;
+  /**
+   * Web 要求登录、且任务已有会话：「查看详情」改为回调，点击后由服务端给管理员私信一次性登录链接。
+   * 缺省即为 false，页脚仍是直接打开 webUrl 的链接。
+   */
+  detailLogin?: boolean;
 }
 
 export interface LarkCardActionContext {
@@ -134,6 +142,8 @@ type LarkCardActionDefinition = {
   dynamicLabel?: (capabilities: LarkCardCapabilities) => string;
   /** 是否为该状态的唯一主操作；主操作排在最前，视觉上最突出。 */
   primary: boolean;
+  /** 不进操作区，由卡片页脚渲染在原「查看详情」链接的位置（见 buildLarkCardDetailButton）。 */
+  footer?: boolean;
 };
 
 /**
@@ -296,6 +306,21 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     readOnlyReceipt: true,
     followUpRow: true,
     dynamicLabel: capabilities => `每天 ${capabilities.dailySchedule!.time} 自动执行`
+  },
+  {
+    action: 'detail',
+    elementId: 'detail',
+    label: '查看详情',
+    hint: '机器人管理员会收到一条私信，内含 10 分钟内有效的 Web 登录链接',
+    buttonType: 'text',
+    icon: 'file-link-text_outlined',
+    // 与原来的页脚链接一样，任何状态都能看详情。
+    states: ['queued', 'running', 'interrupting', 'completed', 'failed', 'interrupted', 'cancelled', 'reconcile_required', 'legacy_unresolved'],
+    capable: capabilities => capabilities.detailLogin === true && Boolean(safeLarkWebUrl(capabilities.webUrl)),
+    primary: false,
+    // 只读不写：打开详情不改卡上的结论。
+    readOnlyReceipt: true,
+    footer: true
   }
 ] as const;
 
@@ -425,7 +450,7 @@ export function buildLarkCardActions(context: LarkCardActionContext): LarkCardEl
   if (taskId) {
     for (const action of availableLarkCardActions(context)) {
       const definition = definitionFor(action);
-      if (definition && !definition.followUpRow) elements.push(callbackButton(definition, taskId, turn, context.capabilities));
+      if (definition && !definition.followUpRow && !definition.footer) elements.push(callbackButton(definition, taskId, turn, context.capabilities));
     }
   }
   // 预算兜底：正常路径最多 3 个按钮（排队受阻：取消、刷新、在新会话中执行），这里的截断是防御性上限。
@@ -459,6 +484,18 @@ export function buildLarkCardFollowUpActions(context: LarkCardActionContext): La
     });
   }
   return elements.slice(0, larkCardActionBudget.maxButtons);
+}
+
+/**
+ * 页脚「查看详情」的回调按钮；detail 不可用时返回 undefined，调用方照旧渲染直接打开 webUrl 的链接。
+ * 按钮本身不带 URL：服务端按平台给出的消息 ID 查账本、核对管理员后，才把登录链接私信给点击人。
+ */
+export function buildLarkCardDetailButton(context: LarkCardActionContext): LarkCardElement | undefined {
+  const taskId = normalizedTaskId(context.taskId);
+  const definition = definitionFor('detail');
+  if (!taskId || !definition || !isLarkCardActionAvailable('detail', context)) return undefined;
+  // 页脚是一行 x-small 灰字，按钮取小号，不把这一行撑高。
+  return { ...callbackButton(definition, taskId, normalizedTurn(context.turn), context.capabilities), size: 'small' };
 }
 
 /**

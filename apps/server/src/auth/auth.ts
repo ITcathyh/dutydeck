@@ -1,4 +1,4 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import type { ConfigRepository } from '@dutydeck/shared';
 
@@ -96,6 +96,39 @@ export function extractCookie(cookieHeader: string | undefined, name = AUTH_COOK
   return undefined;
 }
 
+/** 一次性登录链接的有效期 */
+export const LOGIN_LINK_TTL_MS = 10 * 60_000;
+
+const loginLinkKey = (code: string) => createHash('sha256').update(code).digest('hex');
+
+/**
+ * 飞书卡片「查看详情」换发的一次性登录链接。兑换结果等同 /api/auth/login，
+ * 所以只在进程内存里保存随机码的 SHA-256：库里、日志里都没有可用的码，进程重启后未用的链接一并作废。
+ * 兑换时先同步删掉记录再发 cookie，同一个码并发兑换只有第一个请求能拿到会话。
+ */
+export class LoginLinkStore {
+  private readonly links = new Map<string, { sessionId: string; expiresAt: number }>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** 生成绑定 sessionId 的一次性码（32 随机字节 base64url），只返回给调用方一次 */
+  issue(sessionId: string): string {
+    const now = this.now();
+    for (const [key, link] of this.links) if (link.expiresAt <= now) this.links.delete(key);
+    const code = randomBytes(32).toString('base64url');
+    this.links.set(loginLinkKey(code), { sessionId, expiresAt: now + LOGIN_LINK_TTL_MS });
+    return code;
+  }
+
+  /** 兑换并作废；码无效、已用或已过期时返回 undefined */
+  redeem(code: string): string | undefined {
+    const key = loginLinkKey(code);
+    const link = this.links.get(key);
+    this.links.delete(key);
+    return link && link.expiresAt > this.now() ? link.sessionId : undefined;
+  }
+}
+
 export interface AuthMiddlewareOptions {
   /** Explicit access mode. Omitted for compatibility with localOnly callers. */
   mode?: 'local' | 'token' | 'open';
@@ -105,6 +138,8 @@ export interface AuthMiddlewareOptions {
   localOnly: boolean;
   /** 额外豁免判定（如 /api/lark/agent-tools/* 自有 Bearer）。默认无豁免 */
   exempt?: (method: string, pathname: string) => boolean;
+  /** 飞书卡片换发的一次性登录链接；只在 token 模式下提供 */
+  loginLinks?: LoginLinkStore;
 }
 
 export type BrowserAuthState = { authenticated: boolean; required: boolean };
@@ -234,6 +269,22 @@ export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMid
     }
     reply.header('Set-Cookie', cookieAttributes(request).replace('__VALUE__', presented));
     return { authenticated: true, required: true } satisfies BrowserAuthState;
+  });
+
+  // 过期、已用、伪造的码一律回同一页，不区分原因。
+  const invalidLoginLinkPage = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录链接已失效</title></head><body><p>登录链接已失效：它可能已过期或已被使用。请回到飞书卡片重新点「查看详情」。</p></body></html>';
+  app.get<{ Querystring: { code?: unknown } }>('/api/auth/link', {
+    // 查询串里是一次性登录码，请求日志只记路径。
+    childLoggerFactory: (logger, bindings, opts) => logger.child(bindings, { ...opts, serializers: { ...opts.serializers,
+      req: (request: FastifyRequest) => ({ method: request.method, url: '/api/auth/link', host: request.host, remoteAddress: request.ip }) } })
+  }, async (request, reply) => {
+    reply.header('Cache-Control', 'no-store');
+    const code = typeof request.query?.code === 'string' ? request.query.code : '';
+    const sessionId = code ? options.loginLinks?.redeem(code) : undefined;
+    const token = sessionId && browserAuthRequired(request, options) ? await options.getToken() : null;
+    if (!sessionId || !token) return reply.code(400).type('text/html; charset=utf-8').send(invalidLoginLinkPage);
+    reply.header('Set-Cookie', cookieAttributes(request).replace('__VALUE__', token));
+    return reply.redirect(`/sessions/${encodeURIComponent(sessionId)}`, 302);
   });
 
   app.post('/api/auth/logout', async (request, reply) => {

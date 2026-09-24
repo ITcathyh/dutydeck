@@ -28,7 +28,7 @@ import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGro
 import { LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
-import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
+import { getAuthToken, loadOrCreateAuthToken, LoginLinkStore, tokensEqual } from './auth/auth.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
   createDutydeckPersistentBackend,
@@ -167,6 +167,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   } else {
     process.stderr.write('[dutydeck] WARNING: authentication is disabled. Everyone who can reach this address can view tasks, control Agents, and access terminals. Use only on a trusted network or behind upstream authentication.\n');
   }
+  // 只有 Web 要求登录时，飞书卡片的「查看详情」才换发一次性登录链接；本机免密和 --no-auth 仍直接打开。
+  const loginLinks = mode === 'token' ? new LoginLinkStore() : undefined;
   const resolveInstallationPrincipal = createInstallationPrincipalResolver({
     authEnabled: config.authEnabled,
     mode,
@@ -396,11 +398,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
           pipeline: memoryPipeline
         },
         listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
+        loginLinks,
       },
       auth: {
         mode,
         getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
-        localOnly: mode === 'local'
+        localOnly: mode === 'local',
+        loginLinks
       },
       terminal: {
         provider: terminalProvider,

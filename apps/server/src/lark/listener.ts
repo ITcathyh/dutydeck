@@ -17,6 +17,7 @@ import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
 import { describeWebBaseUrlReachability, larkExecutionConfirmed } from './config.js';
 import { buildEditedMessageEvent } from './edited-message.js';
+import type { LoginLinkStore } from '../auth/auth.js';
 
 // 飞书长连接监听：只负责 WebSocket 事件接入、事件组装与协调器装配。
 // 消息协调见 coordinator.ts，卡片渲染见 card-renderer.ts，会话路由见 session-resolver.ts，
@@ -104,6 +105,8 @@ export interface LarkLongConnectionListenerOptions {
     integrationMode: 'legacy_unmanaged';
     authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
   };
+  /** Web 要求登录时提供；卡片「查看详情」改为给管理员私信一次性登录链接。 */
+  loginLinks?: LoginLinkStore;
 }
 
 export class LarkLongConnectionListener implements LarkListener {
@@ -154,7 +157,7 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation },
+      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, loginLinks: this.options.loginLinks },
     ) : undefined;
     await coordinator?.initializeWorkflows(config);
     if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));
