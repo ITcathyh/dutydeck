@@ -54,12 +54,14 @@ export function renderMemoryIndex(
     if (!sharedEntries.length) {
       return { text: '', overBudget: false, omitted: 0 };
     }
+    const sharedIntro = '这些条目属于其他机器人，memory show/search 查不到。';
     const sharedLines: string[] = [];
     let overBudget = false;
     for (const item of sharedEntries) {
-      const line = `- [来自 ${item.botName}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
+      const src = sourceLabels[item.entry.source] ?? item.entry.source;
+      const line = `- [来自 ${item.botName} · ${src}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
       const candidateLines = [...sharedLines, line];
-      const candidateSection = `## 同群其他机器人记下的偏好\n${candidateLines.join('\n')}`;
+      const candidateSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${candidateLines.join('\n')}`;
       if (candidateSection.length <= budget) {
         sharedLines.push(line);
       } else {
@@ -70,7 +72,7 @@ export function renderMemoryIndex(
     if (!sharedLines.length) {
       return { text: '', overBudget: true, omitted: 0 };
     }
-    const text = `## 同群其他机器人记下的偏好\n${sharedLines.join('\n')}`;
+    const text = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${sharedLines.join('\n')}`;
     if (sharedLines.length < sharedEntries.length) {
       overBudget = true;
     }
@@ -173,11 +175,13 @@ export function renderMemoryIndex(
   }
 
   // 自己的条目未超预算，尝试在剩余预算内加入共享条目
+  const sharedIntro = '这些条目属于其他机器人，memory show/search 查不到。';
   const sharedLines: string[] = [];
   for (const item of sharedEntries) {
-    const line = `- [来自 ${item.botName}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
+    const src = sourceLabels[item.entry.source] ?? item.entry.source;
+    const line = `- [来自 ${item.botName} · ${src}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
     const candidateLines = [...sharedLines, line];
-    const candidateSection = `## 同群其他机器人记下的偏好\n${candidateLines.join('\n')}`;
+    const candidateSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${candidateLines.join('\n')}`;
     const candidateFullText = `${selfText}\n\n${candidateSection}`;
     if (candidateFullText.length <= budget) {
       sharedLines.push(line);
@@ -194,7 +198,7 @@ export function renderMemoryIndex(
   if (sharedLines.length < sharedEntries.length) {
     overBudget = true;
   }
-  const sharedSection = `## 同群其他机器人记下的偏好\n${sharedLines.join('\n')}`;
+  const sharedSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${sharedLines.join('\n')}`;
   return { text: `${selfText}\n\n${sharedSection}`, overBudget, omitted };
 }
 
