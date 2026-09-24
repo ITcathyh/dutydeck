@@ -92,6 +92,61 @@ describe('renderMemoryIndex', () => {
     expect(result.overBudget).toBe(true);
     expect(result.omitted).toBeGreaterThan(0);
   });
+
+  it('renders sharedEntries in a separate section with bot name source', () => {
+    const entries = [entry('mem_self', 'conventions', '自己偏好')];
+    const sharedEntries = [
+      { botName: 'bdev-flash', entry: entry('mem_shared1', 'conventions', '这个群的回复统一用中文') }
+    ];
+    const result = renderMemoryIndex(entries, dummyState, { sharedEntries });
+    expect(result.text).toContain('## 同群其他机器人记下的偏好');
+    expect(result.text).toContain('- [来自 bdev-flash] 这个群的回复统一用中文');
+    expect(result.text.indexOf('## conventions')).toBeLessThan(result.text.indexOf('## 同群其他机器人记下的偏好'));
+  });
+
+  it('renders sharedEntries when self entries is empty', () => {
+    const sharedEntries = [
+      { botName: 'bdev-flash', entry: entry('mem_shared1', 'conventions', '这个群的回复统一用中文') }
+    ];
+    const result = renderMemoryIndex([], dummyState, { sharedEntries });
+    expect(result.text).toBe('## 同群其他机器人记下的偏好\n- [来自 bdev-flash] 这个群的回复统一用中文');
+    expect(result.overBudget).toBe(false);
+  });
+
+  it('preserves self entries completely when over budget and drops shared entries', () => {
+    const entries = [
+      entry('mem_self1', 'topic-a', '自己第一条 ' + 'a'.repeat(80)),
+      entry('mem_self2', 'topic-b', '自己第二条 ' + 'b'.repeat(80))
+    ];
+    const selfNormalResult = renderMemoryIndex(entries, dummyState);
+    expect(selfNormalResult.omitted).toBe(0);
+
+    const sharedEntries = [
+      { botName: 'bdev-flash', entry: entry('mem_shared1', 'conventions', '长共享偏好 ' + 'c'.repeat(200)) }
+    ];
+
+    // 预算刚好只够放自己条目，不够放共享条目
+    const budget = selfNormalResult.text.length + 30;
+    const result = renderMemoryIndex(entries, dummyState, { budget, sharedEntries });
+    expect(result.text).toBe(selfNormalResult.text);
+    expect(result.overBudget).toBe(true);
+    expect(result.omitted).toBe(0); // 自己条目完整保留，没有省略
+    expect(result.text).not.toContain('同群其他机器人记下的偏好');
+  });
+
+  it('drops trailing shared entries when shared entries partially exceed budget', () => {
+    const entries = [entry('mem_self', 'topic-a', '自己条目')];
+    const sharedEntries = [
+      { botName: 'bot-1', entry: entry('mem_s1', 'conventions', '共享1') },
+      { botName: 'bot-2', entry: entry('mem_s2', 'conventions', '共享2超长 ' + 'x'.repeat(100)) }
+    ];
+    const selfText = renderMemoryIndex(entries, dummyState).text;
+    const budget = selfText.length + 65; // 只够放共享1，不够放共享2
+    const result = renderMemoryIndex(entries, dummyState, { budget, sharedEntries });
+    expect(result.overBudget).toBe(true);
+    expect(result.text).toContain('- [来自 bot-1] 共享1');
+    expect(result.text).not.toContain('共享2超长');
+  });
 });
 
 describe('renderTopicFile and renderLedgerJsonl', () => {

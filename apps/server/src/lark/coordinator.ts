@@ -9,14 +9,14 @@ import { parseLarkNewSession, validateLarkLaunchOptions, type LarkLaunchOptions 
 import { collectLarkTaskContext } from './task-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
-import { isLarkMemoryId, LarkMemoryStore, renderLarkMemoryList } from './memory.js';
+import { isLarkMemoryId, LarkMemoryStore, renderLarkMemoryList, type LarkMemoryEntry } from './memory.js';
 import { LarkMemoryProjection, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy, VerificationResponse } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { executeScheduleCommand } from './schedule-command.js';
-import { defaultHighRiskPattern, defaultLarkTraceLimit, larkExecutionIdentity, larkPermissionMode, readLarkConfig, type StoredLarkConfig } from './config.js';
+import { defaultHighRiskPattern, defaultLarkTraceLimit, larkExecutionIdentity, larkPermissionMode, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
 import {
@@ -3292,7 +3292,7 @@ export class LarkMessageCoordinator {
     injected.push(`[Dutydeck 机器人身份]
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
-    injected.push('[飞书结果说明] 最终回复先用一两句话说明用户目标已完成什么、还有什么未完成及需要用户做什么；有交付物再给入口。等待扫码、外部批准或用户操作时明确写出，不把本轮结束写成目标已完成；无需展开执行日志。');
+    injected.push('[飞书结果说明] 最终回复第一行用一句不含术语的话给出结论：做事类写完成了什么、还差什么；查问题或分析类写根因或判断。随后按需写影响与现状、用户是否需要处理及怎么做，有交付物再给入口。等待扫码、外部批准或用户操作时明确写出，不把本轮结束写成目标已完成。排查、告警分析、成本或流量归因这类请求，在结论之后附「可直接转发」一段：三到五句写给同事看的话，不含代码路径和命令。技术证据放在最后，无需展开执行日志。');
     if (event.chatType === 'group' && this.workflowOptions.participation) {
       try {
         const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, prompt), '群上下文读取');
@@ -3322,7 +3322,52 @@ export class LarkMessageCoordinator {
           store.list(scope),
           store.getState(scope)
         ]), '会话记忆读取');
-        const index = renderMemoryIndex(entries, state);
+
+        let sharedEntries: Array<{ botName: string; entry: LarkMemoryEntry }> | undefined;
+        if (event.chatType === 'group' && this.workflowOptions.store) {
+          try {
+            const allBots = await withLarkContextReadTimeout(
+              readLarkConfigs(this.workflowOptions.store, { readOnly: true }),
+              '机器人配置读取'
+            );
+            const peerBots = allBots.filter(b => b.appId !== config.appId);
+            if (peerBots.length > 0) {
+              const peerResults = await withLarkContextReadTimeout(
+                Promise.all(
+                  peerBots.map(async peerBot => {
+                    try {
+                      const peerList = await store.list({ appId: peerBot.appId, chatId: event.chatId });
+                      const botName = peerBot.name?.trim() || peerBot.displayName?.trim() || peerBot.appId;
+                      return { botName, peerList };
+                    } catch {
+                      return undefined;
+                    }
+                  })
+                ),
+                '同群其他机器人记忆读取'
+              );
+              const seen = new Set(entries.map(e => e.content.trim()));
+              const collected: Array<{ botName: string; entry: LarkMemoryEntry }> = [];
+              for (const res of peerResults) {
+                if (!res) continue;
+                for (const item of res.peerList) {
+                  if (item.topic !== 'conventions') continue;
+                  const text = item.content.trim();
+                  if (seen.has(text)) continue;
+                  seen.add(text);
+                  collected.push({ botName: res.botName, entry: item });
+                }
+              }
+              if (collected.length > 0) {
+                sharedEntries = collected;
+              }
+            }
+          } catch (peerError) {
+            this.log.warn({ error: peerError, chatId: event.chatId }, '读取同群其他机器人偏好失败，跳过共享记忆');
+          }
+        }
+
+        const index = renderMemoryIndex(entries, state, { sharedEntries });
         const memoryBlock = renderLarkMemoryInjection(index.text, {
           command: command ?? 'dutydeck',
           directory: projection.directoryFor(scope)
