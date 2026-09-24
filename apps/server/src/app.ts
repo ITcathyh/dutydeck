@@ -120,6 +120,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         !pathname.startsWith('/api/')
         || pathname === '/api/auth/status'
         || pathname === '/api/auth/login'
+        || pathname === '/api/auth/link'
         || pathname === '/api/auth/logout'
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)

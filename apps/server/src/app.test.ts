@@ -6,6 +6,7 @@ import { get as httpGet, type IncomingMessage } from 'node:http';
 import { buildApp } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from './lark/config.js';
+import { LoginLinkStore } from './auth/auth.js';
 
 const apps: any[] = [];
 const tempDirectories: string[] = [];
@@ -417,6 +418,20 @@ describe('HTTP API boundary', () => {
         `${url} 不在豁免名单里，无 token 的远程请求必须 401`,
       ).toBe(401);
     }
+  });
+
+  it('一次性登录链接免 token 兑换，换到的 cookie 能访问业务 API', async () => {
+    const loginLinks = new LoginLinkStore();
+    const app = await buildApp({ listSessions: async () => [] } as any, {
+      auth: { mode: 'token', getToken: async () => 'secret-token', localOnly: false, loginLinks },
+    }); apps.push(app);
+    const remote = { remoteAddress: '8.8.8.8' } as const;
+    expect((await app.inject({ method: 'GET', url: '/api/auth/link?code=forged', ...remote })).statusCode).toBe(400);
+    const redeemed = await app.inject({ method: 'GET', url: `/api/auth/link?code=${loginLinks.issue('ses_1')}`, ...remote });
+    expect(redeemed.statusCode).toBe(302);
+    expect(redeemed.headers.location).toBe('/sessions/ses_1');
+    expect(redeemed.headers['set-cookie']).toContain('dutydeck_access=secret-token');
+    expect((await app.inject({ method: 'GET', url: '/api/sessions', headers: { cookie: redeemed.headers['set-cookie'] as string }, ...remote })).statusCode).toBe(200);
   });
 
 });

@@ -18,6 +18,7 @@ import type { LarkMemoryProjection } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { OpenPlatformConfigurationJobManager } from './open-platform-jobs.js';
 import { isValidLarkAppId, larkSlashCommandDefinitions } from './open-platform-configurator.js';
+import type { LoginLinkStore } from '../auth/auth.js';
 
 type LarkSendRequest = LarkSendInput & { bot?: LarkBotConfigInput; botAppId?: string };
 type LarkUpdateRequest = LarkUpdateInput & { bot?: LarkBotConfigInput; botAppId?: string };
@@ -52,6 +53,8 @@ export interface LarkRoutesOptions {
     integrationMode: 'legacy_unmanaged';
     authorize(boundary: 'listener' | 'session' | 'high_risk', action: PolicyAction): Promise<PolicyDecision>;
   };
+  /** Web 要求登录时由服务端注入，卡片「查看详情」据此改为私信一次性登录链接。 */
+  loginLinks?: LoginLinkStore;
 }
 
 export async function registerLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {}) {
@@ -80,6 +83,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     executionPolicy: options.executionPolicy,
     groupManager: options.groupManager,
     memory: options.memory,
+    loginLinks: options.loginLinks,
     peerBotAuthorized: (appId, chatId, senderOpenId) => options.agentTools?.isConfiguredPeer(appId, chatId, senderOpenId) ?? Promise.resolve(false)
   });
   let listenerSyncTail: Promise<void> = Promise.resolve();
