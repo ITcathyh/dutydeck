@@ -3,7 +3,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { PermissionMode } from '@dutydeck/shared';
 import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, LarkCircuitOpenError } from './api-gate.js';
-import { buildLarkCardActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
+import { buildLarkCardActions, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 
 /**
  * 从响应头解析飞书要求的等待时长（ms）。Retry-After 与 x-ogw-ratelimit-reset 的
@@ -517,18 +517,26 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     // 裸 /sessions 会命中 not-found——那等于把「查看详情」指向一个死页面。
     ...(webBaseUrl ? { webUrl: sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/` } : {})
   };
-  const actionButtons = buildLarkCardActions({
+  const actionContext = {
     state: (input.actionState ?? state) as Parameters<typeof buildLarkCardActions>[0]['state'],
     taskId,
     turn: Number(input.turn ?? 0),
     ...(input.readOnly ? { readOnly: true } : {}),
     ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
     capabilities: actionCapabilities
-  });
+  };
+  const actionButtons = buildLarkCardActions(actionContext);
   // 每个按钮一列、宽度随内容：按钮带图标，固定窄列会把文案挤折行。
   const actionButtonColumns = actionButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }));
   const isProcessCard = input.cardKind === 'process';
   const isResultCard = input.cardKind === 'result';
+  // 结果卡的续问行（说人话 / 给我对外回复 / 再详细点 / 每天自动执行）放在正文之后：
+  // 读者看完结论才会接着问。流式排布，窄屏上按钮自动折行，不挤成一排。
+  const followUpButtons = isResultCard ? buildLarkCardFollowUpActions(actionContext) : [];
+  const followUpRow = followUpButtons.length ? [{
+    tag: 'column_set', element_id: 'result_follow_up_row', flex_mode: 'flow', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
+    columns: followUpButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
+  }] : [];
 
   let footerMention: string | undefined;
   let mentionElementIndex = -1;
@@ -749,7 +757,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ...attentionElements,
         ...shownFinal,
         ...traceSection,
-        ...otherElements
+        ...otherElements,
+        ...followUpRow
       ];
     }
 
