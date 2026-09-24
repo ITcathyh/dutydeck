@@ -189,6 +189,8 @@ export type PersistedLarkCardTask = {
   final_card_input?: Record<string, unknown>;
   progress_frozen?: boolean;
   turn?: number;
+  /** 本任务之前几轮的过程卡与结果卡消息 ID：重试、转到新会话之后，旧卡上的「查看详情」靠它认回这条任务。 */
+  earlier_message_ids?: string[];
 };
 
 const larkCardChannel = (appId: string) => `lark-card:${appId}`;
@@ -747,12 +749,16 @@ export class LarkMessageCoordinator {
    * （restoreVerifyCardAction）只带回一个子集，result_feedback_state 更是根本不在任务上。
    * 整体覆写会在「重启后点运行验证」这一步把附件绑定、验收状态与冻结标记一起抹掉，
    * ✅ 再也打不到那条文件消息上，对账也会开始反复重绘已终态的卡。
-   * 轮次推进时不合并：新一轮本来就要清掉上一轮的卡片归属与终态。
+   * 轮次推进时不合并：新一轮本来就要清掉上一轮的卡片归属与终态。只把上一轮的卡片消息 ID
+   * 记进 earlier_message_ids（最多留 20 个），旧卡上的「查看详情」仍能认回这条任务。
    */
   private mergeCardTaskExtra(previous: string | null | undefined, extra: PersistedLarkCardTask, turn: number): PersistedLarkCardTask {
     try {
       const parsed = previous ? JSON.parse(previous) as PersistedLarkCardTask : undefined;
       if (parsed && (parsed.turn ?? 0) === turn) return { ...parsed, ...extra };
+      const earlier = [...parsed?.earlier_message_ids ?? [], parsed?.card_message_id, parsed?.final_message_id]
+        .filter((id): id is string => Boolean(id)).slice(-20);
+      if (earlier.length) return { ...extra, earlier_message_ids: earlier };
     } catch { /* 记录损坏时按整体覆写处理 */ }
     return extra;
   }
@@ -881,6 +887,7 @@ export class LarkMessageCoordinator {
       channel: larkCardChannel(config.appId),
       deliveryStore: this.workflowOptions.store,
       relaunchSupported: status => this.relaunchSupported(status),
+      ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}),
       // 呈现开关可以按群覆盖，对账必须按记录所属会话解析后再决定怎么补发，
       // 否则重启后群里的静默/只贴表情配置全部失效。解析失败退回 Bot 级配置。
       resolveConfig: async saved => {
@@ -2020,7 +2027,8 @@ export class LarkMessageCoordinator {
    * 「查看详情」回调（仅 Web 要求登录时渲染）：管理员收到一条私信，内含绑定该会话的一次性登录链接。
    *
    * 回调里不信任卡片上的任何值：会话按平台给出的 open_message_id 从卡片账本里查，账本记录必须属于
-   * 当前机器人和当前群。链接只发到点击人的单聊，群里不出现；也不写日志——下面记录的错误只含飞书返回码。
+   * 当前机器人和当前群。重试或转到新会话之后的旧卡同样受理（查看详情只读），链接指向任务现在所在的会话。
+   * 链接只发到点击人的单聊，群里不出现；也不写日志——下面记录的错误只含飞书返回码。
    */
   private async handleDetailLogin(operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
     const links = this.workflowOptions.loginLinks;
@@ -2037,7 +2045,7 @@ export class LarkMessageCoordinator {
         try { saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask; }
         catch { continue; }
         if (saved.app_id !== config.appId || saved.chat_id !== context.chatId
-          || (saved.card_message_id !== context.messageId && saved.final_message_id !== context.messageId)) continue;
+          || ![saved.card_message_id, saved.final_message_id, ...saved.earlier_message_ids ?? []].includes(context.messageId)) continue;
         card = { externalId: mapping.externalId, sessionId: mapping.sessionId, saved };
         break;
       }
@@ -2046,7 +2054,7 @@ export class LarkMessageCoordinator {
         state: card.saved.state, taskId: card.externalId, turn: card.saved.turn ?? 0,
         capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, detailLogin: true, webUrl: `${webBaseUrl}/sessions/${encodeURIComponent(card.sessionId)}` }
       })) {
-        return { type: 'warning', content: '这张卡片已不是任务的最新卡片，请在最新卡片上点「查看详情」。' };
+        return { type: 'warning', content: '找不到这张卡片对应的任务记录，无法打开详情。' };
       }
       // 链接兑换后等同登录，与 /repair 同一道安装级门；谁能拿到链接完全由这道门决定。
       if (!await this.isInstallationOperatorAllowed(config, operatorOpenId, context.chatId)) {
@@ -3468,9 +3476,9 @@ export class LarkMessageCoordinator {
       if (silentProgress) {
         this.log.info({ taskId: task.id, chatId: event.chatId }, '中间进展静默：本轮不发执行过程卡');
       } else if (task.cardMessageId) {
-        await this.service.update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, taskId: task.id, taskName: taskTitle, markdown: initialMarkdown, sessionId: task.sessionId, turn: currentTurn, ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+        await this.service.update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, taskId: task.id, taskName: taskTitle, markdown: initialMarkdown, sessionId: task.sessionId, turn: currentTurn, ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) });
       } else {
-        const card = await sendTaskCard(this.service, event, { ...cardContext, cardKind: 'process', ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, readOnly: initialState === 'queued', taskId: task.id, taskName: taskTitle, markdown: initialMarkdown, sessionId: task.sessionId, turn: currentTurn, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+        const card = await sendTaskCard(this.service, event, { ...cardContext, cardKind: 'process', ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, readOnly: initialState === 'queued', taskId: task.id, taskName: taskTitle, markdown: initialMarkdown, sessionId: task.sessionId, turn: currentTurn, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) }, this.log);
         task.cardMessageId = card.messageId;
       }
       task.lastSuccessfulElements = initialElements;

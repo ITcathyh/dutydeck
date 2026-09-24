@@ -57,6 +57,11 @@ export interface LarkCardInput {
    */
   capabilities?: LarkCardCapabilities;
   /**
+   * Web 要求登录：「查看详情」渲染成回调按钮（同 capabilities.detailLogin）。给首帧、对账这类
+   * 不注入整张能力表的重绘用，其余按钮照旧；卡上没有 sessionId 时不生效，仍是直链。
+   */
+  detailLogin?: boolean;
+  /**
    * 轮次编号，写入 callback value 以便 daemon 重启后仍能解释这次点击。
    * 卡片状态机之外的信息一律放进 value，不依赖内存。
    */
@@ -508,7 +513,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // coordinator 注入真实能力来消除（见 capabilitiesForTask）。
   // canRefresh 例外：它依赖 coordinator 的 requestUpdate 心跳句柄，进程内不存在
   // 等价物，未显式声明时必须为 false，否则点了必然失败。
-  const actionCapabilities: LarkCardCapabilities = input.capabilities ?? {
+  const baseCapabilities: LarkCardCapabilities = input.capabilities ?? {
     canCancelQueued: true,
     canInterrupt: true,
     canRetry: input.retryable !== false,
@@ -517,6 +522,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     // 裸 /sessions 会命中 not-found——那等于把「查看详情」指向一个死页面。
     ...(webBaseUrl ? { webUrl: sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/` } : {})
   };
+  const actionCapabilities: LarkCardCapabilities = input.detailLogin && sessionId && webBaseUrl
+    ? { ...baseCapabilities, detailLogin: true, webUrl: baseCapabilities.webUrl ?? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` }
+    : baseCapabilities;
   const actionContext: Parameters<typeof buildLarkCardActions>[0] = {
     state: (input.actionState ?? state) as Parameters<typeof buildLarkCardActions>[0]['state'],
     taskId,
@@ -599,8 +607,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     });
   }
   const recordHint = footerDetailUrl ? '完整记录见「查看详情」。' : '';
-  // 硬兜底卡没有页脚，指向「查看详情」时必须自带链接。
-  const hardFallbackHint = footerDetailUrl ? `完整记录见[查看详情](${footerDetailUrl})。` : '';
+  // 硬兜底卡没有页脚，指向「查看详情」时必须自带入口：回调按钮跟在提示后面，否则提示里带链接。
+  const hardFallbackHint = detailButton ? recordHint : footerDetailUrl ? `完整记录见[查看详情](${footerDetailUrl})。` : '';
   const rawElements = (isResultCard && mentionElementIndex >= 0 && input.elements?.length)
     ? input.elements.filter((_, index) => index !== mentionElementIndex)
     : input.elements;
@@ -1047,6 +1055,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         elements: [
           ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: "<font color='green'>已完成</font>", text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: 'done_outlined', color: 'green' } }] : []),
           hardFallbackOmission,
+          ...(detailButton ? [detailButton] : []),
           ...meta
         ]
       }
@@ -1060,7 +1069,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       direction: 'vertical', padding: '10px 12px',
       elements: [
         { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
-        hardFallbackOmission
+        hardFallbackOmission,
+        ...(detailButton ? [detailButton] : [])
       ]
     }
   };

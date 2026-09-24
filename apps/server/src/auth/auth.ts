@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest, RouteShorthandOptions } from 'fastify';
 import type { ConfigRepository } from '@dutydeck/shared';
 
 /** token 在 configs 表中的 key */
@@ -118,6 +118,12 @@ export class LoginLinkStore {
     const code = randomBytes(32).toString('base64url');
     this.links.set(loginLinkKey(code), { sessionId, expiresAt: now + LOGIN_LINK_TTL_MS });
     return code;
+  }
+
+  /** 只查不用：打开链接时的确认页靠它判断要不要给按钮，码不作废 */
+  isValid(code: string): boolean {
+    const link = this.links.get(loginLinkKey(code));
+    return Boolean(link && link.expiresAt > this.now());
   }
 
   /** 兑换并作废；码无效、已用或已过期时返回 undefined */
@@ -271,20 +277,37 @@ export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMid
     return { authenticated: true, required: true } satisfies BrowserAuthState;
   });
 
-  // 过期、已用、伪造的码一律回同一页，不区分原因。
+  // 过期、已用、伪造的码一律回同一页，不区分原因，也不回显码。
   const invalidLoginLinkPage = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>登录链接已失效</title></head><body><p>登录链接已失效：它可能已过期或已被使用。请回到飞书卡片重新点「查看详情」。</p></body></html>';
-  app.get<{ Querystring: { code?: unknown } }>('/api/auth/link', {
-    // 查询串里是一次性登录码，请求日志只记路径。
+  // 打开链接只到这一页：飞书链接检测、企业代理、浏览器预取只会 GET/HEAD，码要等人点按钮 POST 时才兑换。
+  // 码已按 base64url 格式校验过，原样放进表单是安全的；no-referrer 让提交时的 Referer 不带查询串。
+  const confirmLoginLinkPage = (code: string) => `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><title>登录 Dutydeck Web</title></head><body><p>点击下方按钮登录 Dutydeck Web，并打开这个任务的会话页。</p><form method="post" action="/api/auth/link"><input type="hidden" name="code" value="${code}"><button type="submit">登录并打开任务详情</button></form><p>链接 10 分钟内有效、只能用一次。</p></body></html>`;
+  const loginLinkCode = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value) ? value : '';
+  const loginLinkRoute = {
+    // GET 的查询串里是一次性登录码，请求日志只记路径。
     childLoggerFactory: (logger, bindings, opts) => logger.child(bindings, { ...opts, serializers: { ...opts.serializers,
       req: (request: FastifyRequest) => ({ method: request.method, url: '/api/auth/link', host: request.host, remoteAddress: request.ip }) } })
-  }, async (request, reply) => {
-    reply.header('Cache-Control', 'no-store');
-    const code = typeof request.query?.code === 'string' ? request.query.code : '';
-    const sessionId = code ? options.loginLinks?.redeem(code) : undefined;
-    const token = sessionId && browserAuthRequired(request, options) ? await options.getToken() : null;
-    if (!sessionId || !token) return reply.code(400).type('text/html; charset=utf-8').send(invalidLoginLinkPage);
-    reply.header('Set-Cookie', cookieAttributes(request).replace('__VALUE__', token));
-    return reply.redirect(`/sessions/${encodeURIComponent(sessionId)}`, 302);
+  } satisfies RouteShorthandOptions;
+  // 确认页的按钮是普通表单提交。表单解析只注册在这个作用域里，其余接口仍不接受表单请求体。
+  app.register(async scope => {
+    scope.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string', bodyLimit: 1024 },
+      (_request, body, done) => done(null, Object.fromEntries(new URLSearchParams(body as string))));
+    // HEAD 由 Fastify 按 GET 自动生成，同样只回确认页。
+    scope.get<{ Querystring: { code?: unknown } }>('/api/auth/link', loginLinkRoute, async (request, reply) => {
+      reply.header('Cache-Control', 'no-store').type('text/html; charset=utf-8');
+      const code = loginLinkCode(request.query?.code);
+      if (!code || !browserAuthRequired(request, options) || !options.loginLinks?.isValid(code)) return reply.code(400).send(invalidLoginLinkPage);
+      return reply.send(confirmLoginLinkPage(code));
+    });
+    scope.post<{ Body: { code?: unknown } | undefined }>('/api/auth/link', loginLinkRoute, async (request, reply) => {
+      reply.header('Cache-Control', 'no-store');
+      const code = loginLinkCode(request.body?.code);
+      const sessionId = code && browserAuthRequired(request, options) ? options.loginLinks?.redeem(code) : undefined;
+      const token = sessionId ? await options.getToken() : null;
+      if (!sessionId || !token) return reply.code(400).type('text/html; charset=utf-8').send(invalidLoginLinkPage);
+      reply.header('Set-Cookie', cookieAttributes(request).replace('__VALUE__', token));
+      return reply.redirect(`/sessions/${encodeURIComponent(sessionId)}`, 303);
+    });
   });
 
   app.post('/api/auth/logout', async (request, reply) => {
