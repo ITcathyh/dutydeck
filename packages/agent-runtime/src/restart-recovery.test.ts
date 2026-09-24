@@ -332,8 +332,10 @@ it.each(['missing', 'foreign'] as const)('leaves a session usable when terminal 
     interrupt: vi.fn(async () => {}), isStopped: async () => false, stop: vi.fn(async () => {}),
     attachTerminal: vi.fn(() => { if (pane === 'foreign') throw new Error('tmux owner mismatch'); return false; })
   };
-  // Both terminal views build the unattached driver; the next instruction builds a real one.
-  const factory = vi.fn<DriverFactory>((...args) => factory.mock.calls.length <= 2 ? unattached : backend.factory(...args));
+  // A missing pane is remembered after the first view; a foreign pane is rechecked on
+  // every view. The next instruction builds a real driver either way.
+  const views = pane === 'missing' ? 1 : 2;
+  const factory = vi.fn<DriverFactory>((...args) => factory.mock.calls.length <= views ? unattached : backend.factory(...args));
   const second = open(file, factory);
   await second.runtime.initialize([agent]);
   const beforeSession = await second.runtime.getSession(session.id);
@@ -346,8 +348,11 @@ it.each(['missing', 'foreign'] as const)('leaves a session usable when terminal 
   expect(second.repos.execution.getSessionResourceBlockers(session.id)).toEqual([]);
   expect(await second.runtime.getSession(session.id)).toEqual(beforeSession);
   // Viewing again reports the same attach outcome instead of a resource block.
+  const rows = second.repos.execution.getResources(session.id).length;
   if (pane === 'missing') await expect(view()).resolves.toBeUndefined();
   else await expect(view()).rejects.toThrow('tmux owner mismatch');
+  expect(factory).toHaveBeenCalledTimes(views);
+  if (pane === 'missing') expect(second.repos.execution.getResources(session.id)).toHaveLength(rows);
 
   // The next instruction still starts a fresh driver for the idle session.
   await second.runtime.dispatch(session.id, 'next prompt');
