@@ -923,6 +923,11 @@ export class LarkAgentToolsService {
     try { allowed = await withLarkContextReadTimeout(search.reader.authorize(scope, found), '跨群资料授权复核'); } catch { /* 超时按未通过处理 */ }
     // 复核未通过时整份资料作废，连来源群名也不返回。
     if (!allowed) throw new AgentGroupToolError('GROUP_TEAM_SEARCH_DENIED', '跨群资料的读取权限复核未通过（来源群的成员关系或读取授权已变化），本次不返回其他群的内容。', 403);
+    // 读取期间发起群可能被停用或关闭群参与：交付前按同样条件重新校验调用方与发起群，不通过同样整份作废。
+    await this.context(token, 'group_tools.read');
+    if (!await search.available(scope)) {
+      throw new AgentGroupToolError('GROUP_TEAM_SEARCH_UNAVAILABLE', '跨群资料检索只在开启了群参与的群聊里可用；当前群在读取期间已关闭群参与或不再可用，本次不返回其他群的内容。', 403);
+    }
     const score = search.reader.scorer(query);
     const sources = found.sources.map(source => ({ name: source.name || source.scope.chatId, chatId: source.scope.chatId, status: source.status, missing: source.missing, entries: [] as string[] }));
     let matched = 0, returned = 0, length = 0, truncated = false;
