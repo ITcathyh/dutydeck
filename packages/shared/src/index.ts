@@ -411,6 +411,7 @@ export interface FoundationRepository {
 export interface RepositoryBundle {
   collaboration: import('./collaboration.js').CollaborationRepository;
   ciWebhook: import('./ci-webhook.js').CiWebhookRepository;
+  usage: import('./usage.js').UsageLedgerRepository;
   control: import('./database-control.js').DatabaseControl;
   execution: import('./task-execution.js').ExecutionRepository;
   agents: AgentRepository;
@@ -465,6 +466,7 @@ export * from './driver-resources.js';
 
 export * from './collaboration.js';
 export * from './ci-webhook.js';
+export * from './usage.js';
 
 export * from './execution-recovery.js';
 

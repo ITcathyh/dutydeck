@@ -43,6 +43,7 @@ describe('浮层的 URL 表示', () => {
     expect(parseAppLocation('/', '?panel=lark-setup').overlay).toEqual({ kind: 'lark-setup' });
     expect(parseAppLocation('/', '?panel=groups').overlay).toEqual({ kind: 'groups' });
     expect(parseAppLocation('/', '?panel=automation').overlay).toEqual({ kind: 'automation' });
+    expect(parseAppLocation('/', '?panel=usage').overlay).toEqual({ kind: 'usage' });
   });
 
   it('未知 panel 值当作没有浮层', () => {
@@ -101,7 +102,8 @@ describe('反向序列化', () => {
       { route: { kind: 'overview' }, overlay: { kind: 'settings', section: 'lark' } },
       { route: { kind: 'session', sessionId: 's1' }, overlay: { kind: 'lark-setup' } },
       { route: { kind: 'session', sessionId: 'a b' }, overlay: { kind: 'groups' } },
-      { route: { kind: 'overview' }, overlay: { kind: 'automation' } }
+      { route: { kind: 'overview' }, overlay: { kind: 'automation' } },
+      { route: { kind: 'overview' }, overlay: { kind: 'usage' } }
     ];
     for (const location of cases) {
       const path = appLocationPath(location);

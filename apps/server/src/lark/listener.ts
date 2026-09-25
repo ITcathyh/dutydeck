@@ -96,6 +96,7 @@ export interface LarkListener {
 
 export interface LarkLongConnectionListenerOptions {
   participation?: LarkGroupParticipation;
+  usage?: import('../usage-ledger.js').UsageLedger;
   automation?: SessionAutomationService;
   workbench?: import('./workbench.js').LarkWorkbench;
   workflowStore?: ConfigRepository;
@@ -177,7 +178,7 @@ export class LarkLongConnectionListener implements LarkListener {
       chatModeResolver,
       this.options.executionPolicy,
       this.options.groupManager,
-      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, loginLinks: this.options.loginLinks },
+      { store: this.options.workflowStore, broker: this.options.relayBroker, automation: this.options.automation, workbench: this.options.workbench, memory: this.options.memory, participation: this.options.participation, usage: this.options.usage, loginLinks: this.options.loginLinks },
     ) : undefined;
     await coordinator?.initializeWorkflows(config);
     if (coordinator) this.options.participation?.setDispatcher(config.appId, (event, current) => coordinator.adopt(event, current));

@@ -2,9 +2,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { agentConfigSchema, installationOwnerTaskActor, type AgentDriver } from '@dutydeck/shared';
+import { agentConfigSchema, installationOwnerTaskActor, RuntimeError, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
-import { DutydeckRuntime } from '@dutydeck/runtime';
+import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
 import { createCollaborationIntegration } from './collaboration-integration.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from './lark/config.js';
@@ -17,7 +17,7 @@ async function eventually(check: () => Promise<boolean>) {
   for (let count = 0; count < 100; count++) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 10)); }
   throw new Error('Condition did not converge');
 }
-async function fixture(options: { realAcp?: boolean } = {}) {
+async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions['admitTask'] } = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'collaboration-wiring-'));
   const repos = createRepositories(join(directory, 'test.db'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'agent', name: 'Agent', command: options.realAcp ? process.execPath : 'fake', ...(options.realAcp ? { args: [resolve('tests/fixtures/mock-acp-agent.mjs')], timeout: 2 } : {}), protocol: 'acp', cwd: directory, permissionMode: 'full-trust' });
@@ -50,6 +50,7 @@ async function fixture(options: { realAcp?: boolean } = {}) {
     authorizeTask: (session, task) => collaboration.background.authorizeTask(session, task),
     authorizeControl: async (id, actor) => { await collaboration.background.authorizeControl(id, actor); },
     resolveRiskPolicy: async (id, fallback) => (await collaboration.riskPolicy(id, fallback))?.policy,
+    admitTask: options.admitTask,
     driverFactory: options.realAcp ? undefined : (_agent, _protocol, onEvent, _exit, sessionId) => {
       let end: (() => void) | undefined;
       return {
@@ -324,6 +325,19 @@ it('uses real saved group bindings, runs one frozen background task and delivers
   expect(f.client.sendText).toHaveBeenCalledTimes(1);
   expect(f.client.sendText.mock.calls[0]?.[0]).toMatchObject({ chatId: scope.chatId, text: '仍缺最终核对。' });
   expect(f.calls).toHaveLength(1);
+});
+
+it('fails a mandate run refused by the monthly cost cap instead of leaving it for manual reconciliation', async () => {
+  const refusal = '本群本月成本已达上限 $1.00（已用 $1.50），新任务不再执行，正在执行的任务不受影响。';
+  const f = await fixture({ admitTask: async (_session, request) => { if (request.namespace === 'schedule') throw new RuntimeError('USAGE_CAP_EXCEEDED', refusal, 429); } });
+  await f.create(); f.advance(); await f.collaboration.scheduler.tick();
+  const execution = async () => (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution');
+  await eventually(async () => (await execution())?.status === 'failed');
+  expect(await execution()).toMatchObject({ status: 'failed', error: refusal });
+  await f.collaboration.scheduler.tick();
+  expect(await execution()).toMatchObject({ status: 'failed', error: refusal });
+  expect(f.calls).toHaveLength(0);
+  expect(f.client.sendText).not.toHaveBeenCalled();
 });
 
 it('physically stops the original task after cancellation and rejects forged or revoked identities', async () => {

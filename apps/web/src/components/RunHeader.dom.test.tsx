@@ -160,6 +160,18 @@ describe('RunHeader 失败详情', () => {
     rerender(<RunHeader session={session} agent={agent} taskPrompt="" streamStatus="open" queuedTasks={[]} rawVisible={false} rawAvailable={false} restarting={false} onInterrupt={() => {}} onRestart={() => {}} onOpenPrompt={() => {}} onArchive={() => {}} onToggleRaw={() => {}}/>);
     expect(screen.getByRole('heading', { name: '未命名任务' })).toBeTruthy();
   });
+
+  it('状态条显示本任务累计用量（含子步骤与估算），没有用量数据时如实说明', () => {
+    const totals = { entries: 1, costUsd: 0.5, estimatedCostUsd: 0, inputTokens: 1000, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0 };
+    const props = { agent, streamStatus: 'open' as const, queuedTasks: [], rawVisible: false, rawAvailable: false, restarting: false, onInterrupt() {}, onRestart() {}, onOpenPrompt() {}, onArchive() {}, onToggleRaw() {} };
+    const { rerender } = render(<RunHeader session={session} {...props} usage={{ own: totals, subSteps: { ...totals, costUsd: 0.25, estimatedCostUsd: 0.25 } }}/>);
+    expect(screen.getByText('本任务累计 $0.75（含子步骤 $0.25，含估算 $0.25）').getAttribute('title')).toBe('输入 2,000 · 输出 40 · 缓存读 0 · 缓存写 0 token');
+    const none = { ...totals, costUsd: 0, inputTokens: 0, outputTokens: 0 };
+    rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unavailable: 1 }, subSteps: { ...none, entries: 0 } }}/>);
+    expect(screen.getByText('本任务累计：无用量数据')).toBeTruthy();
+    rerender(<RunHeader session={session} {...props}/>);
+    expect(screen.queryByText(/本任务累计/)).toBeNull();
+  });
 });
 
 // RunDetailTabs 已被 App.tsx 消费（commit 1a1100f），手写 tablist 与方向键处理均已删除。
