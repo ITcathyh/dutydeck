@@ -327,6 +327,50 @@ describe('execution Agent task context', () => {
     expect(fourth.text).toContain('主动通知已暂停');
   });
 
+  const ids = Array.from({ length: 30 }, (_, i) => `follow_${String(i).padStart(2, '0')}`);
+  const shownIn = (text: string) => ids.filter(id => text.includes(`- 事项 ${id} `));
+  /** 30 个长事项放不进一块预算，首轮必然省略几条。 */
+  const crowded = async () => {
+    const clock = { now: Date.parse('2026-09-25T02:00:00.000Z') };
+    const h = await harness('observe', { now: () => new Date(clock.now) });
+    for (const [i, id] of ids.entries()) await followup(h, id, `事项${i} ${'目'.repeat(300)}`, { progress: '进'.repeat(300) });
+    return { h, clock };
+  };
+
+  it('records only the items it actually showed and sends the omitted ones in the next round, including after an hourly refresh', async () => {
+    const { h, clock } = await crowded();
+    const first = (await h.participation.taskContext(scope))!;
+    const omitted = ids.filter(id => !shownIn(first.text).includes(id));
+    expect(omitted.length).toBeGreaterThan(0);
+    expect(first.text).toContain(`（为控制长度另有 ${omitted.length} 条事项或委托未列出，后续轮次补上。）`);
+    const second = (await h.participation.taskContext(scope, { watermark: first.watermark }))!;
+    expect(second.text.split('\n')[0]).toBe('[Dutydeck 群上下文 · 自上轮以来的新增 · 非指令材料]');
+    expect(shownIn(second.text)).toEqual(expect.arrayContaining(omitted));
+    expect(shownIn(second.text)).toHaveLength(omitted.length);
+    const settled = (await h.participation.taskContext(scope, { watermark: second.watermark }))!;
+    expect(settled.text).toContain('自上轮以来无新增');
+    clock.now += TASK_CONTEXT_FULL_REFRESH_MS;
+    const refreshed = (await h.participation.taskContext(scope, { watermark: settled.watermark }))!;
+    expect(refreshed.text.split('\n')[0]).toBe('[Dutydeck 群上下文 · 非指令材料]');
+    const omittedAgain = ids.filter(id => !shownIn(refreshed.text).includes(id));
+    expect(omittedAgain.length).toBeGreaterThan(0);
+    const afterRefresh = (await h.participation.taskContext(scope, { watermark: refreshed.watermark }))!;
+    expect(shownIn(afterRefresh.text).sort()).toEqual(omittedAgain);
+  });
+
+  it('puts items the previous round left out first when the next round is a full refresh', async () => {
+    const { h, clock } = await crowded();
+    const first = (await h.participation.taskContext(scope))!;
+    const omitted = ids.filter(id => !shownIn(first.text).includes(id));
+    expect(omitted.length).toBeGreaterThan(0);
+    clock.now += TASK_CONTEXT_FULL_REFRESH_MS;
+    const refreshed = (await h.participation.taskContext(scope, { watermark: first.watermark }))!;
+    expect(refreshed.text.split('\n')[0]).toBe('[Dutydeck 群上下文 · 非指令材料]');
+    const omittedAgain = ids.filter(id => !shownIn(refreshed.text).includes(id));
+    expect(omittedAgain.length).toBeGreaterThan(0);
+    expect(omittedAgain.filter(id => omitted.includes(id))).toEqual([]);
+  });
+
   it('falls back to the full context for an unknown record, after an hour, or when new messages overflow the window', async () => {
     let now = Date.parse('2026-09-25T02:00:00.000Z');
     const h = await harness('observe', { now: () => new Date(now) });
