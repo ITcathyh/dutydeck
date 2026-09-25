@@ -310,6 +310,19 @@ it('parses explicit final and its current-turn capability', async () => {
   expect(groupSend).toHaveBeenCalledWith('answer', expect.objectContaining({ final: true, turn: 'signed-turn' }));
 });
 
+it('parses history list/show and group team-search', async () => {
+  const historyList = vi.fn(), historyShow = vi.fn(), groupTeamSearch = vi.fn();
+  const program = () => createCliProgram('0.0.6', { historyList, historyShow, groupTeamSearch });
+  await program().parseAsync(['node', 'dutydeck', 'history', 'list', '--since', '2026-09-20T00:00:00Z', '--until', '2026-09-25T00:00:00Z', '--query', '部署 方案', '--limit', '5']);
+  await program().parseAsync(['node', 'dutydeck', 'history', 'show', 'task_1']);
+  await program().parseAsync(['node', 'dutydeck', 'group', 'team-search', '部署 方案']);
+  expect(historyList).toHaveBeenCalledWith(expect.objectContaining({ since: '2026-09-20T00:00:00Z', until: '2026-09-25T00:00:00Z', query: '部署 方案', limit: '5' }));
+  expect(historyShow).toHaveBeenCalledWith('task_1');
+  expect(groupTeamSearch).toHaveBeenCalledWith('部署 方案');
+  await program().parseAsync(['node', 'dutydeck', 'history', 'list']);
+  expect(historyList).toHaveBeenLastCalledWith(expect.objectContaining({ limit: '20' }));
+});
+
 it('parses group messages with since, until, and query options', async () => {
   const groupMessages = vi.fn();
   await createCliProgram('0.0.6', { groupMessages }).parseAsync([
