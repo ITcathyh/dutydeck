@@ -10,7 +10,7 @@ import {
   larkMemoryPipelineRules,
   parseLastJsonBlock
 } from './memory-pipeline.js';
-import { LarkMemoryError, larkMemoryLimits, LarkMemoryStore, type LarkMemoryEntry } from './memory.js';
+import { LarkMemoryError, larkMemoryLimits, larkMemoryScope, LarkMemoryStore, type LarkMemoryEntry } from './memory.js';
 
 const scope = { appId: 'cli_bot', chatId: 'oc_group', pool: 'oc_group' };
 
@@ -358,6 +358,41 @@ describe('LarkMemoryStore.applyBatch', () => {
     ])).rejects.toThrow(LarkMemoryError);
 
     expect(await store.listAll(scope)).toEqual(before);
+    repos.close();
+  });
+
+  it('条数上限按批次终态判定：迁移后超限的群池可以被一次整理收缩到上限内', async () => {
+    const { repos, store } = build();
+    const groupA = larkMemoryScope('cli_bot', 'oc_group_a', 'group');
+    const groupB = larkMemoryScope('cli_bot', 'oc_group_b', 'group');
+    // 两个群各有 120 条旧记忆，都迁入群池后共 240 条，超过 200 条上限。
+    for (const [chatId, prefix] of [['oc_group_a', 'aa'], ['oc_group_b', 'bb']] as const) {
+      await repos.config.set(`lark.memory.cli_bot.${chatId}`, JSON.stringify({ v: 1, entries: Array.from({ length: 120 }, (_, index) => ({
+        id: `mem_${prefix}${index.toString(16).padStart(6, '0')}`, content: `${chatId} 的事实 ${index}`, source: 'extraction', topic: 'general',
+        createdAt: new Date(Date.UTC(2026, 8, 20, 0, 0, index)).toISOString()
+      })) }));
+    }
+    await store.list(groupA);
+    const live = await store.list(groupB);
+    expect(live).toHaveLength(240);
+
+    // 单条新增仍按即时上限拒绝；终态仍超限的批次（合并 12 条后剩 229 条）整批不写。
+    await expect(store.add(groupA, { content: '再记一条', source: 'user' })).rejects.toMatchObject({ code: 'MEMORY_LIMIT_REACHED' });
+    const before = await store.listAll(groupA);
+    await expect(store.applyBatch(groupA, [
+      { op: 'add', input: { content: '只合并一组', source: 'consolidation', supersedes: live.slice(0, 12).map(item => item.id) } }
+    ])).rejects.toMatchObject({ code: 'MEMORY_LIMIT_REACHED', statusCode: 409 });
+    expect(await store.listAll(groupA)).toEqual(before);
+
+    // 合并成 20 条的方案：门禁放行，批次第一步之后中间态仍有 228 条，但终态合法，整批写入。
+    const actions = Array.from({ length: 20 }, (_, index) => ({
+      op: 'merge', ids: live.slice(index * 12, index * 12 + 12).map(item => item.id), content: `合并后的事实 ${index}`
+    }));
+    const gate = gateConsolidationActions({ actions }, live);
+    if (!gate.ok) throw new Error(gate.violations.join('\n'));
+    const applied = await store.applyBatch(groupA, gate.plan);
+    expect(applied.added).toHaveLength(20);
+    expect((await store.list(groupB)).map(item => item.content)).toEqual(actions.map(action => action.content));
     repos.close();
   });
 });

@@ -63,7 +63,12 @@ export interface LarkMemoryEntry {
   deletedBy?: string;
 }
 
-interface StoredLarkMemory { v: 1; entries: LarkMemoryEntry[] }
+interface StoredLarkMemory {
+  v: 1;
+  entries: LarkMemoryEntry[];
+  /** 已并入本池的旧按群账本：chatId → 并入时间。和并入的条目同一次写入，重放迁移看到它就不再合并。 */
+  migratedChats?: Record<string, string>;
+}
 
 export interface LarkMemoryPendingTurn { sessionId: string; taskId: string; completedAt: string; chatId?: string; senderId?: string; senderKind?: 'human' | 'bot'; sourceMessageId?: string }
 
@@ -90,6 +95,8 @@ export interface LarkMemoryState {
     rejected: number;
     error?: string;
   };
+  /** 已并入本池的旧按群状态：chatId → 并入时间。和并入的状态同一次写入，重放迁移看到它就不再合并。 */
+  migratedChats?: Record<string, string>;
 }
 
 export const larkMemoryLimits = {
@@ -311,9 +318,9 @@ export class LarkMemoryStore {
       let retopiced = 0;
       for (const step of steps) {
         if (step.op === 'add') {
-          // 批内先 add 后 remove/retopic，中间态可能短暂多出一个主题；主题上限改到批次末尾统一判，
-          // 否则「退掉某主题最后一条 + 新开一个主题」这种终态合法的整理计划会被中间态误杀。
-          const outcome = this.addTo(current, step.input, { deferTopicLimit: true });
+          // 批内先 add 后 remove/retopic，中间态可能短暂多出一个主题或超过条数上限；两个上限都改到批次末尾统一判，
+          // 否则「退掉某主题最后一条 + 新开一个主题」、迁移后超限的池「逐步合并收缩」这类终态合法的整理计划会被中间态误杀。
+          const outcome = this.addTo(current, step.input, { deferLimits: true });
           current = outcome.entries;
           added.push(outcome.created);
         } else if (step.op === 'remove') {
@@ -329,7 +336,11 @@ export class LarkMemoryStore {
         }
       }
       if (added.length) {
-        const topics = new Set(current.filter(entry => !entry.deletedAt).map(entry => entry.topic));
+        const live = current.filter(entry => !entry.deletedAt);
+        if (live.length > larkMemoryLimits.liveEntries) {
+          throw new LarkMemoryError('MEMORY_LIMIT_REACHED', `记忆已达 ${larkMemoryLimits.liveEntries} 条上限，请先删除不再需要的记忆。`, 409);
+        }
+        const topics = new Set(live.map(entry => entry.topic));
         if (topics.size > larkMemoryLimits.topics) {
           throw new LarkMemoryError('MEMORY_TOPIC_LIMIT_REACHED', `记忆主题已达 ${larkMemoryLimits.topics} 个上限，请复用现有主题或先整理。`, 409);
         }
@@ -344,7 +355,7 @@ export class LarkMemoryStore {
   private addTo(
     entries: LarkMemoryEntry[],
     input: AddLarkMemoryInput,
-    options: { deferTopicLimit?: boolean } = {}
+    options: { deferLimits?: boolean } = {}
   ): { entries: LarkMemoryEntry[]; created: LarkMemoryEntry } {
     const content = normalizeLarkMemoryContent(input.content);
     if (looksLikeLarkMemoryCredential(content)) {
@@ -362,7 +373,7 @@ export class LarkMemoryStore {
       }
     }
 
-    if (!options.deferTopicLimit) {
+    if (!options.deferLimits) {
       const remainingLive = entries.filter(e => !e.deletedAt && !supersedes?.includes(e.id));
       const activeTopics = new Set(remainingLive.map(e => e.topic));
       if (!activeTopics.has(topic) && activeTopics.size >= larkMemoryLimits.topics) {
@@ -406,7 +417,7 @@ export class LarkMemoryStore {
     }
 
     const liveCount = next.filter(entry => !entry.deletedAt).length;
-    if (liveCount >= larkMemoryLimits.liveEntries) {
+    if (!options.deferLimits && liveCount >= larkMemoryLimits.liveEntries) {
       throw new LarkMemoryError('MEMORY_LIMIT_REACHED', `记忆已达 ${larkMemoryLimits.liveEntries} 条上限，请先删除不再需要的记忆。`, 409);
     }
 
@@ -551,15 +562,19 @@ export class LarkMemoryStore {
   /** 读-改-写；mutation 返回 undefined 表示无需写入。compareAndSet 冲突时重读重试。 */
   private async mutate(scope: LarkMemoryScope, mutation: (entries: LarkMemoryEntry[]) => LarkMemoryEntry[] | undefined) {
     await this.migrateLegacy(scope);
-    await this.mutateKey(larkMemoryKey(scope), mutation);
+    await this.mutateKey(larkMemoryKey(scope), stored => {
+      const entries = mutation(stored.entries);
+      return entries && { ...stored, entries };
+    });
   }
 
-  private async mutateKey(key: string, mutation: (entries: LarkMemoryEntry[]) => LarkMemoryEntry[] | undefined) {
+  /** 整份账本的读-改-写：条目之外的字段（migratedChats）原样带回。 */
+  private async mutateKey(key: string, mutation: (stored: StoredLarkMemory) => StoredLarkMemory | undefined) {
     for (let attempt = 0; attempt < maxWriteAttempts; attempt++) {
       const { raw, stored } = await this.readKey(key);
-      const next = mutation(stored.entries);
+      const next = mutation(stored);
       if (!next) return;
-      if (await this.write(key, raw, JSON.stringify({ v: 1, entries: next } satisfies StoredLarkMemory))) return;
+      if (await this.write(key, raw, JSON.stringify(next))) return;
     }
     throw new LarkMemoryError('MEMORY_WRITE_CONFLICT', '会话记忆正在被并发修改，请稍后重试。', 409);
   }
@@ -572,9 +587,11 @@ export class LarkMemoryStore {
   /**
    * 群池访问前，把该群旧版本按群保存的账本与状态并入群池；同一进程内每个群只做一次。
    *
-   * 顺序是「先并入、再给旧键写迁移占位」：中途崩溃时下次访问会重放并入，而并入按条目 id、
-   * 轮次 taskId 去重、计数取较大值，重放不会重复记账。配置仓库没有删除接口，旧键改写成
-   * 带 migratedTo 的占位，形状仍是 v1（空账本 / 零计数），回滚到旧版本读到的是空记录而不是损坏记录。
+   * 顺序是「先并入、再给旧键写迁移占位」。并入的结果和「该群已并入」的标记（池账本、池状态各自的
+   * migratedChats）在同一次 CAS 里写入：中途崩溃后重放时，看到标记就只补写旧键占位、不再合并。
+   * 不能靠按 id / taskId 去重来重放——崩溃后别的群可能已经消费了并入的轮次、删掉了并入的条目
+   * 并修剪了墓碑，再合并一次会把它们找回来。配置仓库没有删除接口，旧键改写成带 migratedTo 的占位，
+   * 形状仍是 v1（空账本 / 零计数），回滚到旧版本读到的是空记录而不是损坏记录。
    */
   private migrateLegacy(scope: LarkMemoryScope): Promise<void> {
     if (!isLarkGroupMemoryPool(scope) || scope.chatId === scope.pool) return Promise.resolve();
@@ -602,11 +619,18 @@ export class LarkMemoryStore {
       const at = this.now().toISOString();
       if (ledger) {
         const legacyEntries = parseLarkMemoryLedger(ledger, ledgerKey).entries;
-        await this.mutateKey(larkMemoryKey(scope), entries => mergeLegacyEntries(entries, legacyEntries, scope.chatId, at));
+        await this.mutateKey(larkMemoryKey(scope), stored => stored.migratedChats?.[scope.chatId] ? undefined : {
+          v: 1,
+          entries: mergeLegacyEntries(stored.entries, legacyEntries, scope.chatId, at) ?? stored.entries,
+          migratedChats: { ...stored.migratedChats, [scope.chatId]: at }
+        });
       }
       if (state) {
         const legacyState = parseLarkMemoryState(state);
-        await this.mutateStateKey(larkMemoryStateKey(scope), current => mergeLegacyState(current, legacyState, scope.chatId));
+        await this.mutateStateKey(larkMemoryStateKey(scope), current => current.migratedChats?.[scope.chatId] ? undefined : {
+          ...mergeLegacyState(current, legacyState, scope.chatId),
+          migratedChats: { ...current.migratedChats, [scope.chatId]: at }
+        });
       }
       const marker = { migratedTo: scope.pool, migratedAt: at };
       const ledgerMarked = !ledger || await this.write(ledgerKey, ledger, JSON.stringify({ v: 1, entries: [], ...marker }));
@@ -644,7 +668,7 @@ function parseLarkMemoryLedger(raw: string | undefined, key: string): StoredLark
     ...item,
     topic: item.topic ? normalizeLarkMemoryTopic(item.topic) : 'general'
   }));
-  return { v: 1, entries };
+  return { v: 1, entries, ...(stored.migratedChats ? { migratedChats: stored.migratedChats } : {}) };
 }
 
 function parseLarkMemoryState(raw: string | undefined): LarkMemoryState {
@@ -662,7 +686,8 @@ function parseLarkMemoryState(raw: string | undefined): LarkMemoryState {
         ...(parsed.indexOverBudget !== undefined ? { indexOverBudget: parsed.indexOverBudget } : {}),
         ...(parsed.lastFailureAt ? { lastFailureAt: parsed.lastFailureAt } : {}),
         ...(parsed.running ? { running: parsed.running } : {}),
-        ...(parsed.lastRun ? { lastRun: parsed.lastRun } : {})
+        ...(parsed.lastRun ? { lastRun: parsed.lastRun } : {}),
+        ...(parsed.migratedChats ? { migratedChats: parsed.migratedChats } : {})
       };
     }
   } catch {}
@@ -671,7 +696,7 @@ function parseLarkMemoryState(raw: string | undefined): LarkMemoryState {
 
 /**
  * 旧账本并入池：保留原 id 与墓碑，补上来源群；与池里有效条目归一化后完全相同的，
- * 以墓碑形式留下（supersededBy 指向池里那条）。已在池里的 id 视为迁移过，重放时跳过。
+ * 以墓碑形式留下（supersededBy 指向池里那条）。池里已有的 id 跳过，保证编号在池内唯一。
  * 不按上限截断：迁移不丢用户记下的东西，超限由后续整理收缩。
  */
 function mergeLegacyEntries(pool: LarkMemoryEntry[], legacy: LarkMemoryEntry[], chatId: string, at: string): LarkMemoryEntry[] | undefined {
@@ -694,7 +719,7 @@ function mergeLegacyEntries(pool: LarkMemoryEntry[], legacy: LarkMemoryEntry[], 
   return pruneTombstones([...pool, ...added].sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
 }
 
-/** 旧状态并入池状态：待提取轮次按 taskId 合并并标上来源群，计数取较大值，时间取较晚者；重放结果不变。 */
+/** 旧状态并入池状态：待提取轮次按 taskId 合并并标上来源群，计数取较大值，时间取较晚者。 */
 function mergeLegacyState(current: LarkMemoryState, legacy: LarkMemoryState, chatId: string): Partial<Omit<LarkMemoryState, 'v'>> {
   const known = new Set((current.pendingTurns ?? []).map(turn => turn.taskId));
   const pendingTurns = [
