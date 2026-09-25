@@ -105,8 +105,11 @@ export class ScheduleExecutor {
       try {
         let schedule = await this.repos.scheduleDefinitions.get(mandate.scheduleDefinitionId);
         if (!schedule || schedule.sourceNamespace !== 'collaboration') continue;
-        const lease = await this.lease(schedule); if (!lease) continue;
         const pending = await this.repos.scheduleOccurrences.listUnsettled(schedule.id);
+        // 已取消/暂停/完成的委托不再产生新执行：没有在途 occurrence 时直接跳过，
+        // 既不续租约也不写任何记录。在途工作仍需借租约完成一次性收尾（取消 Agent、suppress）。
+        if (mandate.status !== 'active' && !pending.length) { this.lastOccurrenceIds.delete(schedule.id); continue; }
+        const lease = await this.lease(schedule); if (!lease) continue;
         const pendingStart = pending.findIndex(occurrence => occurrence.id === this.lastOccurrenceIds.get(mandate.scheduleDefinitionId)) + 1;
         if (!pending.length) this.lastOccurrenceIds.delete(schedule.id);
         for (const occurrence of [...pending.slice(pendingStart), ...pending.slice(0, pendingStart)]) {
