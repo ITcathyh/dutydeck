@@ -1,4 +1,4 @@
-import type { CollaborationFollowup, CollaborationMandate, CollaborationObservation, CollaborationSnapshot } from '@dutydeck/shared';
+import type { CollaborationFollowup, CollaborationMandate, CollaborationObservation, CollaborationParticipationMode, CollaborationSnapshot } from '@dutydeck/shared';
 
 /** 机器人消息（含本机器人的卡片与结果）正文上限。 */
 export const TASK_CONTEXT_BOT_TEXT_LIMIT = 200;
@@ -20,6 +20,8 @@ const clockFormat = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai'
 interface Watermark {
   contextRevision: number;
   settingsRevision: number;
+  /** 输出时的有效参与模式。群继承机器人默认模式时，改默认值不推进 settingsRevision；旧水位没有这项，按变化处理。 */
+  participation?: CollaborationParticipationMode;
   /** 已注入过的进行中事项与委托：id → revision。 */
   items: Record<string, number>;
   fullAt: string;
@@ -52,6 +54,26 @@ function parseWatermark(raw: string | undefined): Watermark | undefined {
     return Number.isInteger(value.contextRevision) && Number.isInteger(value.settingsRevision) && value.items && typeof value.items === 'object'
       && Number.isFinite(Date.parse(value.fullAt ?? '')) ? value as Watermark : undefined;
   } catch { return undefined; }
+}
+
+/**
+ * 同一会话里排队的几轮都从同一个旧水位出发，后完成的一轮写回时与当前值合并。两边记录的内容都已交给这个会话，
+ * 所以已送达取并集：修订号取较大值（设置修订随 contextRevision 前进，同样取大），事项按 id 取较大 revision，
+ * fullAt 取较晚者；只合并双方记录过的 id，任何字段都不小于当前值。一侧读不懂时以另一侧为准。
+ * 有效参与模式跟随 contextRevision 较大的一侧；两侧修订相同而模式不同时分不清先后，不记，下一轮重发模式行。
+ */
+export function mergeGroupTaskWatermark(current: string | undefined, next: string): string {
+  const stored = parseWatermark(current);
+  const incoming = parseWatermark(next);
+  if (!stored) return next;
+  if (!incoming) return current!;
+  const items = { ...stored.items };
+  for (const [id, revision] of Object.entries(incoming.items)) items[id] = Math.max(items[id] ?? revision, revision);
+  const newer = incoming.contextRevision > stored.contextRevision ? incoming : stored;
+  const participation = stored.contextRevision === incoming.contextRevision && stored.participation !== incoming.participation ? undefined : newer.participation;
+  return JSON.stringify({ contextRevision: newer.contextRevision,
+    settingsRevision: Math.max(stored.settingsRevision, incoming.settingsRevision), ...(participation ? { participation } : {}), items,
+    fullAt: Date.parse(stored.fullAt) >= Date.parse(incoming.fullAt) ? stored.fullAt : incoming.fullAt } satisfies Watermark);
 }
 
 function clip(text: string, limit: number): string {
@@ -111,7 +133,7 @@ export function renderGroupTaskContext(input: GroupTaskContextInput): GroupTaskC
     .sort((a, b) => Number(delivered(a)) - Number(delivered(b)) || b.updatedAt.localeCompare(a.updatedAt));
   const description = since ? snapshot.observations.find(item => item.source === 'lark.description' && fresh(item)) : input.description;
   const messages = snapshot.observations.filter(item => !pinnedSources.has(item.source) && fresh(item));
-  const settingsChanged = !since || since.settingsRevision !== snapshot.settings.revision;
+  const settingsChanged = !since || since.settingsRevision !== snapshot.settings.revision || since.participation !== snapshot.settings.participation;
   const items: Array<{ line: string; id?: string }> = [
     ...(closed.length ? [{ line: `- 已不在进行中：${closed.join('、')}` }] : []),
     ...pending.map(item => ({ line: 'mode' in item ? mandateLine(item) : followupLine(item), id: item.id }))
@@ -126,7 +148,7 @@ export function renderGroupTaskContext(input: GroupTaskContextInput): GroupTaskC
     }
     // 「已不在进行中」那行被省略时，保留这些 id，下轮再报一次。
     if (!items.some(row => row.id === undefined)) for (const id of closed) versions[id] = since!.items[id]!;
-    return JSON.stringify({ contextRevision: snapshot.contextRevision, settingsRevision: snapshot.settings.revision, items: versions,
+    return JSON.stringify({ contextRevision: snapshot.contextRevision, settingsRevision: snapshot.settings.revision, participation: snapshot.settings.participation, items: versions,
       fullAt: since ? since.fullAt : now.toISOString() } satisfies Watermark);
   };
   if (since && !settingsChanged && !description && !items.length && !messages.length) {
