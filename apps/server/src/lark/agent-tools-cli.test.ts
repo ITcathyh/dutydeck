@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AgentGroupToolCliError, runGroupHandoff, runGroupMembers, runGroupMessages, runGroupReplyAgent, runGroupSend, runGroupSendFile } from './agent-tools-cli.js';
+import { AgentGroupToolCliError, runGroupHandoff, runGroupMembers, runGroupMessages, runGroupReplyAgent, runGroupSend, runGroupSendFile, runGroupTeamSearch, runHistoryList, runHistoryShow } from './agent-tools-cli.js';
 
 const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
@@ -75,6 +75,21 @@ describe('Agent group tool CLI client', () => {
     expect(calledUrl.searchParams.get('query')).toBe('bug fix');
     expect(calledUrl.searchParams.get('limit')).toBe('10');
   });
+});
+
+it('sends history and team-search requests through the scoped capability', async () => {
+  const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => response({ ok: true }));
+  const options = { env: { dutydeck_group_tools_url: 'http://localhost/api/lark/agent-tools', dutydeck_group_tools_token: 'capability' }, fetcher: fetcher as typeof fetch };
+  await runHistoryList({ since: '2026-09-20T00:00:00Z', until: '2026-09-25T00:00:00Z', query: '部署 方案', limit: '5' }, options);
+  await runHistoryShow('task/1', options);
+  await runGroupTeamSearch('部署 方案', options);
+  const [list, show, search] = fetcher.mock.calls.map(call => new URL(call[0]));
+  expect(list!.pathname).toBe('/api/lark/agent-tools/history');
+  expect(Object.fromEntries(list!.searchParams)).toEqual({ since: '2026-09-20T00:00:00Z', until: '2026-09-25T00:00:00Z', query: '部署 方案', limit: '5' });
+  expect(show!.pathname).toBe('/api/lark/agent-tools/history/task%2F1');
+  expect(search!.pathname).toBe('/api/lark/agent-tools/team-search');
+  expect(search!.searchParams.get('query')).toBe('部署 方案');
+  for (const call of fetcher.mock.calls) expect(new Headers(call[1]?.headers).get('authorization')).toBe('Bearer capability');
 });
 
 it('transmits final and turn without changing ordinary send fields', async () => {

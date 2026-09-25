@@ -85,6 +85,27 @@ export async function registerLarkAgentToolRoutes(app: FastifyInstance, service?
     } catch (error) { return handleToolError(error, reply); }
   });
 
+  app.get<{ Querystring: GroupToolQuery }>('/api/lark/agent-tools/history', async (request, reply) => {
+    try {
+      return await service.history(tokenFrom(request.headers.authorization), {
+        limit: numberFrom(request.query.limit),
+        since: request.query.since,
+        until: request.query.until,
+        query: request.query.query
+      });
+    } catch (error) { return handleToolError(error, reply); }
+  });
+
+  app.get<{ Params: { taskId: string } }>('/api/lark/agent-tools/history/:taskId', async (request, reply) => {
+    try { return await service.historyTask(tokenFrom(request.headers.authorization), { taskId: request.params.taskId }); }
+    catch (error) { return handleToolError(error, reply); }
+  });
+
+  app.get<{ Querystring: { query?: string } }>('/api/lark/agent-tools/team-search', async (request, reply) => {
+    try { return await service.teamSearch(tokenFrom(request.headers.authorization), { query: request.query.query }); }
+    catch (error) { return handleToolError(error, reply); }
+  });
+
   app.get<{ Querystring: GroupToolQuery }>('/api/lark/agent-tools/wait', async (request, reply) => {
     try {
       return await service.wait(tokenFrom(request.headers.authorization), {

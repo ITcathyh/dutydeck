@@ -10,7 +10,6 @@ interface ReaderOptions {
   readConfig(appId: string): Promise<StoredLarkConfig | undefined>;
   serviceFor(config: StoredLarkConfig): Pick<LarkCardService, 'listChats' | 'listChatMessages'>;
   canRead(scope: CollaborationScope): Promise<boolean>;
-  readMemory?(scope: CollaborationScope): Promise<string>;
   now?: () => Date;
 }
 const sameScope = (a: CollaborationScope, b: CollaborationScope) => a.appId === b.appId && a.chatId === b.chatId;
@@ -105,15 +104,6 @@ export class LarkTeamContextReader {
           const item = { ...await historicalObservation(candidate.scope, message, at), id: identity(candidate.scope, message.messageId), sequence: 1, revision: 1 };
           observations.set(key(item), item);
         }
-        if (config.memoryEnabled !== false && this.options.readMemory) {
-          try {
-            const memory = await this.options.readMemory(candidate.scope);
-            if (memory) {
-              const item = this.external(candidate.scope, 'lark.team.memory', candidate.scope.chatId, memory, at, []);
-              observations.set(item.id, item);
-            }
-          } catch { source.missing.push('memory_unavailable'); }
-        }
         context.observations.push(...observations.values());
         for (const item of observations.values()) source.missing.push(...item.missing);
         source.missing = [...new Set(source.missing)].slice(0, 100);
@@ -132,6 +122,11 @@ export class LarkTeamContextReader {
     }
     for (const source of context.sources) source.missing = [...new Set(source.missing)].slice(0, 100);
     return context;
+  }
+
+  /** read 排序所用的词面相关度打分；分数为 0 表示文本与查询没有词面重合。 */
+  scorer(query: string): (text: string) => number {
+    return relevance(query.slice(0, 2000));
   }
 
   async authorize(originScope: CollaborationScope, context: CollaborationTeamContext): Promise<boolean> {

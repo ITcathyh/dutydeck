@@ -54,6 +54,25 @@ describe('Agent group tool HTTP boundary', () => {
     });
   });
 
+  it('passes history and team-search parameters through to the domain service', async () => {
+    const service = {
+      history: vi.fn(async () => ({ chatId: 'oc_group', tasks: [] })),
+      historyTask: vi.fn(async () => { throw new AgentGroupToolError('HISTORY_TASK_NOT_FOUND', '本聊天没有编号为 task_x 的任务。', 404); }),
+      teamSearch: vi.fn(async () => ({ query: '部署 方案', matched: 0, sources: [], note: '' }))
+    };
+    const app = Fastify(); apps.push(app); await registerLarkAgentToolRoutes(app, service as any);
+    const headers = { authorization: 'Bearer scoped-token' };
+    const listed = await app.inject({ method: 'GET', url: `/api/lark/agent-tools/history?since=2026-09-20T00:00:00Z&until=1790000000&query=${encodeURIComponent('部署 方案')}&limit=5`, headers });
+    const shown = await app.inject({ method: 'GET', url: '/api/lark/agent-tools/history/task_x', headers });
+    const searched = await app.inject({ method: 'GET', url: `/api/lark/agent-tools/team-search?query=${encodeURIComponent('部署 方案')}`, headers });
+    expect(listed.statusCode).toBe(200); expect(searched.statusCode).toBe(200);
+    expect(service.history).toHaveBeenCalledWith('scoped-token', { limit: 5, since: '2026-09-20T00:00:00Z', until: '1790000000', query: '部署 方案' });
+    expect(service.historyTask).toHaveBeenCalledWith('scoped-token', { taskId: 'task_x' });
+    expect(shown.statusCode).toBe(404);
+    expect(shown.json()).toEqual({ error: { code: 'HISTORY_TASK_NOT_FOUND', message: '本聊天没有编号为 task_x 的任务。' } });
+    expect(service.teamSearch).toHaveBeenCalledWith('scoped-token', { query: '部署 方案' });
+  });
+
   it('rule 2 via HTTP: returns 400 with GROUP_MESSAGES_INVALID_RANGE on invalid range error', async () => {
     const service = {
       messages: vi.fn(async () => {
