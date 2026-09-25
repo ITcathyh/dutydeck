@@ -131,7 +131,7 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
     await first.handle(dm('om_initial', '先创建工作项'), config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
     const subscription = { id: 'ci_1', revision: 3, repository: { slug: 'owner/repo' }, headSha: 'a'.repeat(40), expiresAt: '2026-09-13T00:00:00.000Z', status: 'waiting' };
-    const automation = { subscribeCi: vi.fn(async () => subscription), listBySession: vi.fn(async () => ({ subscriptions: [subscription] })), cancelCi: vi.fn(async () => ({ ...subscription, status: 'cancelled' })) };
+    const automation = { githubConfigured: true, subscribeCi: vi.fn(async () => subscription), listBySession: vi.fn(async () => ({ subscriptions: [subscription] })), cancelCi: vi.fn(async () => ({ ...subscription, status: 'cancelled' })) };
     const service = cardService();
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
     try {
@@ -144,6 +144,48 @@ describe('飞书命令在 coordinator 重建后的会话定位', () => {
       expect(runtime.start).toHaveBeenCalledOnce();
       expect(runtime.send).toHaveBeenCalledOnce();
     } finally { first.stop(); coordinator.stop(); }
+  });
+
+  it('/ci 在没有 GitHub 令牌也没有 Codebase webhook 时回「未配置」和配置方法', async () => {
+    const { runtime } = persistentRuntime();
+    const automation = { githubConfigured: false, subscribeCi: vi.fn(), listBySession: vi.fn() };
+    const service = cardService();
+    const coordinator = new LarkMessageCoordinator(runtime as any, service as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { automation: automation as any });
+    try {
+      await coordinator.handle(dm('om_ci_unconfigured', '/ci wait'), config);
+      await vi.waitFor(() => expect(service.send).toHaveBeenCalledWith(expect.objectContaining({ taskName: '/ci 未执行' })));
+      const markdown = String(service.send.mock.calls.find(([input]: any[]) => input.taskName === '/ci 未执行')?.[0]?.markdown);
+      expect(markdown).toContain('CI 续作未配置');
+      expect(markdown).toContain('DUTYDECK_GITHUB_TOKEN');
+      expect(markdown).toContain('DUTYDECK_CODEBASE_WEBHOOK_SECRET');
+      expect(markdown).toContain('/api/hooks/codebase');
+      expect(automation.subscribeCi).not.toHaveBeenCalled();
+    } finally { coordinator.stop(); }
+  });
+
+  it('CI 失败卡「交给 Agent 修」走 /ci 同一道权限门，并且只认本会话的卡', async () => {
+    const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
+    const { runtime, sessions } = persistentRuntime();
+    sessions.push({ id: 'ses_ci', agentId: 'codex', state: 'idle', cwd: '/tmp', source: 'lark', sourceId: 'cli_test:oc_group:group', runId: 'run_ci', createdAt: '2026-09-25T00:00:00.000Z', updatedAt: '2026-09-25T00:00:00.000Z' });
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    const codebase = {
+      get: vi.fn(async (id: string) => id === 'cbci_1' ? { id: 'cbci_1', sessionId: 'ses_ci' } : undefined),
+      requestFix: vi.fn(async () => '已交给 Agent 修复（第 1/3 轮）。')
+    };
+    const coordinator = new LarkMessageCoordinator(runtime as any, cardService() as any, silentLog(), Math.random, 'ou_bot', undefined, undefined, undefined, undefined, undefined, { store: repos.config, automation: { codebase } as any });
+    try {
+      await coordinator.initializeWorkflows(config);
+      const value = { dutydeck_ci_fix: 'cbci_1', failure: 'failure_key' };
+      expect(await coordinator.handleAction(value, 'ou_alice', { messageId: 'om_failure_card', chatId: 'oc_group' }))
+        .toEqual({ type: 'success', content: '已交给 Agent 修复（第 1/3 轮）。' });
+      expect(codebase.requestFix).toHaveBeenCalledWith('cbci_1', { failureKey: 'failure_key', cardMessageId: 'om_failure_card' }, 'ou_alice');
+      // 别的群转发过来的卡、白名单之外的成员都不能触发修复。
+      expect(await coordinator.handleAction(value, 'ou_alice', { messageId: 'om_failure_card', chatId: 'oc_other' })).toMatchObject({ type: 'warning' });
+      await repos.config.set(larkBotsConfigKey, JSON.stringify([{ ...config, allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] }]));
+      expect(await coordinator.handleAction(value, 'ou_alice', { messageId: 'om_failure_card', chatId: 'oc_group' }))
+        .toEqual({ type: 'warning', content: '当前账号没有操作此任务的权限。' });
+      expect(codebase.requestFix).toHaveBeenCalledOnce();
+    } finally { coordinator.stop(); repos.close(); }
   });
 
   it('/status 报告持久化会话的 Agent、工作区与状态，而不是「尚未创建」', async () => {

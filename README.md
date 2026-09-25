@@ -177,7 +177,7 @@ pnpm dev
 | `/remember` | `/remember 测试命令必须使用 pnpm test` | 为当前聊天保存一条跨会话长期记忆 |
 | `/memory` | `/memory 1` | 分页查看本聊天的长期记忆条目 |
 | `/forget` | `/forget <记忆ID>` | 标记删除指定记忆条目 |
-| `/ci` | `/ci wait build.yml` | 监听 GitHub Actions 构建并在完成后自动续作 |
+| `/ci` | `/ci wait build.yml`、`/ci fix` | 等待 GitHub Actions 或 Codebase 流水线结果并自动续作；Codebase 失败可按规则交给 Agent 修复 |
 
 > **`/new` 选项语法规则**：使用参数时，必须在需求文本前加上 `--` 隔开，例如：  
 > `/new --cwd "/path/to/repo" --model "gemini-3.8-flash-high" --effort "high" --workspace worktree -- 需求内容`
@@ -266,6 +266,17 @@ Web 工作台为你提供全维度的任务视察、代码沙箱管理与自动�
 - Dutydeck 后台每分钟轮询 GitHub API（需配置 `DUTYDECK_GITHUB_TOKEN`）。
 - 一旦指定或所有 Workflow 构建结束，Dutydeck 会自动唤醒 Agent，在当前上下文中追加指令进行修复或下发结果通知。
 
+### 5. Codebase 流水线续作与修复
+配置 `DUTYDECK_CODEBASE_WEBHOOK_SECRET` 并重启后，Dutydeck 在 `POST /api/hooks/codebase` 接收 Codebase MR 与流水线事件。该路径不走 Web 登录，由路由自己校验：
+- 令牌：请求头 `X-Dutydeck-Token`、`Authorization: Bearer <密钥>`，或 URL 参数 `?token=<密钥>`（只能填 URL 的平台用；请求日志只记路径）。
+- 签名：`X-Dutydeck-Signature: sha256=<hex>`，为 HMAC-SHA256(密钥, `<X-Dutydeck-Timestamp>.<原始请求体>`)。
+- 时间戳：`X-Dutydeck-Timestamp`（Unix 秒）或载荷里的事件时间，与本机时间相差超过 5 分钟即拒绝。签名模式必须带 `X-Dutydeck-Timestamp`；令牌模式可以不带，此时只靠去重防重放。
+- 去重：`X-Dutydeck-Event-Id` 或载荷的 `id` / `event_id`，缺省时按请求体哈希；24 小时内的重复投递只确认、不处理，过期记录会被删除。
+
+在 origin 为 `code.byted.org` 的会话里执行 `/ci wait`：失败时发送失败卡，点「交给 Agent 修」开始修复；执行 `/ci fix`：失败时直接交给 Agent 修复。流水线通过时投递续作任务，MR 合入或关闭后停止等待。修复规则：最多 3 轮；同一错误指纹出现 2 次即停；每轮最多改 10 个文件、300 行；动手前和推送前各核对一次 head SHA；CI 日志作为不可信输入包在标记里交给 Agent；不合入、不 approve、不 force push。任务以部署者身份执行，事件里的操作人只做记录。
+
+载荷支持 DutyDeck 信封 `{ id, type: "codebase.pipeline" | "codebase.merge_request", timestamp, repository, branch, mr, sha, status 或 action, pipeline: { id, url }, operator, failures: [{ job, stage, reason, log }] }`，也按 GitLab 风格解析 `object_kind: pipeline | merge_request`。
+
 ---
 
 ## ⚙️ Agent 配置与扩展 <a id="agent-config"></a>
@@ -350,6 +361,7 @@ Dutydeck 既支持标准的 ACP (Agent Client Protocol) 协议，也支持通过
 | `DUTYDECK_DATABASE_URL` | `<cwd>/.dutydeck/dutydeck.db` | 本地 SQLite 存储路径 |
 | `DUTYDECK_AGENTS_JSON` | `[]` | 自定义 Agent 扩展配置列表 |
 | `DUTYDECK_GITHUB_TOKEN` | - | 用于 GitHub Actions 状态轮询的个人访问令牌 |
+| `DUTYDECK_CODEBASE_WEBHOOK_SECRET` | - | Codebase webhook（`/api/hooks/codebase`）的令牌与签名密钥；未设置时不开放该入口 |
 | `LARK_APP_ID` | - | 飞书应用 App ID |
 | `LARK_APP_SECRET` | - | 飞书应用 App Secret（持久化存储在服务端） |
 

@@ -265,6 +265,8 @@ Trigger `/ci wait [workflow]` from Lark or Web:
 - Dutydeck polls GitHub Workflow runs in the background (using `DUTYDECK_GITHUB_TOKEN`).
 - Once finished, Dutydeck automatically wakes the agent with the build outcome, queuing fixes if the build failed.
 
+For Codebase repositories, set `DUTYDECK_CODEBASE_WEBHOOK_SECRET` and point the Codebase or EventHub webhook at `POST /api/hooks/codebase` (token via `X-Dutydeck-Token`, `Authorization: Bearer` or `?token=`, or an HMAC-SHA256 `X-Dutydeck-Signature` over `<X-Dutydeck-Timestamp>.<raw body>`; 5-minute timestamp window, required for signatures and optional for tokens; 24-hour event-id dedupe). `/ci wait` sends a failure card with a "交给 Agent 修" button; `/ci fix` repairs automatically (at most 3 rounds, stop on a repeated error fingerprint, at most 10 files / 300 lines per round, head SHA checked before editing and before pushing, no merge, approve or force push).
+
 ---
 
 ## ⚙️ Agent Configuration <a id="agent-config"></a>
@@ -349,6 +351,7 @@ Sample `ccflash.settings.json`:
 | `DUTYDECK_DATABASE_URL` | `<cwd>/.dutydeck/dutydeck.db` | Local SQLite database location |
 | `DUTYDECK_AGENTS_JSON` | `[]` | JSON array defining custom agents |
 | `DUTYDECK_GITHUB_TOKEN` | - | GitHub Personal Access Token for Actions polling |
+| `DUTYDECK_CODEBASE_WEBHOOK_SECRET` | - | Token and signing secret for the Codebase webhook (`/api/hooks/codebase`); the endpoint is off when unset |
 | `LARK_APP_ID` | - | Lark App ID |
 | `LARK_APP_SECRET` | - | Lark App Secret (stored securely on the server) |
 

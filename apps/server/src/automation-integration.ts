@@ -17,6 +17,7 @@ import type { PersistedLarkCardTask } from './lark/coordinator.js';
 import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { sendLarkResult } from './lark/result-delivery.js';
 import { readAttemptResult } from './task-results.js';
+import type { CodebaseCiNotice } from './codebase-ci.js';
 
 export function createAutomationIntegration(repos: RepositoryBundle, runtime: DutydeckRuntime, groups: LarkGroupManager, options: {
   env?: NodeJS.ProcessEnv;
@@ -212,5 +213,33 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       idempotencyKey
     }, options.log);
   };
-  return { authorize, prepareDelivery, deliver };
+  /** CI webhook 通知：发到订阅时冻结的回报位置，非飞书会话不发；返回卡片消息 ID，按钮回调据此核对来源。 */
+  const notify = async (sessionId: string, sourceId: string, notice: CodebaseCiNotice) => {
+    const session = await runtime.getSession(sessionId);
+    if (!session || session.source !== 'lark') return undefined;
+    const [appId, chatId] = session.sourceId?.split(':') ?? [];
+    const target = JSON.parse(await repos.config.get(`automation.delivery-target.${sourceId}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
+    const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
+    if (!target || !config || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '自动任务缺少接收时保存的回报位置', 409);
+    const elements: Array<Record<string, unknown>> = [
+      { tag: 'markdown', element_id: 'ci_notice', content: notice.markdown },
+      ...(notice.output ? renderLarkResultTextElements(notice.output) : []),
+      ...(notice.action ? [{ tag: 'button', element_id: 'ci_fix', text: { tag: 'plain_text', content: notice.action.label }, type: 'primary',
+        behaviors: [{ type: 'callback', value: notice.action.value }], margin: '0px' }] : [])
+    ];
+    const sent = await sendLarkResult(client(config), target, {
+      state: notice.failed ? 'failed' : 'completed',
+      readOnly: true,
+      retryable: false,
+      taskName: notice.title,
+      taskId: sourceId,
+      sessionId,
+      workspace: session.cwd,
+      webBaseUrl: config.webBaseUrl,
+      elements,
+      idempotencyKey: `ci_${createHash('sha256').update(notice.key).digest('hex').slice(0, 40)}`
+    }, options.log, repos.config);
+    return sent.messageId;
+  };
+  return { authorize, prepareDelivery, deliver, notify };
 }
