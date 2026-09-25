@@ -1,0 +1,392 @@
+[
+  {
+    "say": "把登录修复推上去",
+    "message": "om_in_1"
+  },
+  {
+    "checkpoint": "重启后结果未知",
+    "requests": [
+      {
+        "message": "om_msg_1",
+        "request": "reply",
+        "anchor": "om_snapshot_root",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "task_om_in_1_1",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "已接收 · 把登录修复推上去"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "任务已接收，正在准备执行…",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "把登录修复推上去"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "已接收"
+                },
+                "color": "neutral"
+              }
+            ],
+            "template": "grey",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_1",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "结果未知 · 把登录修复推上去"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**结果未知**\n\n服务重启打断了这一轮，执行结果未知。这一轮执行过 git push，可能已产生外部副作用，没有自动重投。确认再做一次不会重复造成影响后点「重新执行」，不再需要就点「放弃」。原任务已保留，可在 Web 详情里核对。\n\n发送 `/status` 查看最新状态。",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>已运行 <耗时></font><font color='grey'> · </font><font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "重新执行"
+                        },
+                        "type": "primary_text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "repeat_outlined",
+                          "color": "blue"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "replay_turn",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "replay_turn"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "放弃"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "close-small_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "abandon_turn",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "abandon_turn"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "把登录修复推上去"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "结果未知"
+                },
+                "color": "orange"
+              }
+            ],
+            "template": "orange",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "click": "放弃",
+    "message": "om_msg_1",
+    "toast": {
+      "type": "success",
+      "content": "已放弃这一轮，不再执行"
+    }
+  },
+  {
+    "checkpoint": "放弃后",
+    "requests": [
+      {
+        "message": "om_msg_1",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "已放弃 · 把登录修复推上去"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**已放弃**\n\n这一轮不再执行，执行结果仍未知。\n\n原任务已保留，可在 Web 详情里核对。",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "把登录修复推上去"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "已放弃"
+                },
+                "color": "orange"
+              }
+            ],
+            "template": "orange",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      }
+    ]
+  }
+]
