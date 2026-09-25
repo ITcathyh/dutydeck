@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
+import { rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import {
@@ -51,6 +54,35 @@ it('marks a stalled attachment download missing instead of holding the turn fore
     expect(await pending).toContain('附件下载失败');
     expect(await pending).toContain('你无法读取该附件');
   } finally { release?.(); vi.useRealTimers(); }
+});
+
+describe('materializeLarkResources 图片按文件头识别格式', () => {
+  // 1x1 GIF。
+  const gif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+  const directory = join(tmpdir(), 'dutydeck', 'lark-resources', 'om_gif_format');
+
+  it('扩展名是 .jpg 的 GIF 按真实字节保存为 .gif，并在提示中给出多帧说明', async () => {
+    const service = { downloadMessageResource: vi.fn(async () => ({ data: gif, contentType: 'image/jpeg' })) };
+    const result = await materializeLarkResources('om_gif_format', '看图', [
+      { key: 'img_key', type: 'image', label: '图片「img_key.jpg」', fileName: 'img_key.jpg' }
+    ], service);
+    const path = result.match(/已下载到本地：(.+?)。/)?.[1] ?? '';
+    expect(path.startsWith(`${directory}/`)).toBe(true);
+    expect(path.endsWith('img_key.gif')).toBe(true);
+    expect(result).toContain('多帧');
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it('无法识别文件头的图片保留原始命名，不给出 GIF 提示', async () => {
+    const service = { downloadMessageResource: vi.fn(async () => ({ data: Buffer.from('unknown'), contentType: 'image/png' })) };
+    const result = await materializeLarkResources('om_unknown_format', '看图', [
+      { key: 'img_unknown', type: 'image', label: '图片「x.png」', fileName: 'x.png' }
+    ], service);
+    const path = result.match(/已下载到本地：(.+?)。/)?.[1] ?? '';
+    expect(path.endsWith('x.png')).toBe(true);
+    expect(result).not.toContain('多帧');
+    await rm(join(tmpdir(), 'dutydeck', 'lark-resources', 'om_unknown_format'), { recursive: true, force: true });
+  });
 });
 
 describe('parsePrompt mention identity', () => {

@@ -459,7 +459,7 @@ describe('structured ask cards (P0-2)', () => {
       await h.workflow.observe(plain.ctx, plain.event, { structuredAskCards: false });
       await h.workflow.observe(withChoices.ctx, withChoices.event, { structuredAskCards: false });
       const classic = [
-        { tag: 'div', text: { tag: 'plain_text', content: '怎么继续？' } },
+        { tag: 'markdown', content: '怎么继续？' },
         { tag: 'markdown', content: '请引用本卡片回复你的答案。' }
       ];
       expect(h.cardAt(0).elements.filter((element: any) => !element.content?.startsWith('回答截止时间'))).toEqual(classic);
@@ -659,7 +659,7 @@ describe('structured ask cards (P0-2)', () => {
   it('群 @ 开启且选项超预算回落时：@ 元素保留、问题正文不被提示语下标错位覆盖', async () => {
     const h = await setupHarness();
     try {
-      // 同预算体量（约 30KB）触发回落；同时开启群 @：元素序列变为 [group_mention, 问题div, hint]。
+      // 同预算体量（约 30KB）触发回落；同时开启群 @：元素序列变为 [group_mention, 问题正文, hint]。
       const choices: RelayAskChoice[] = Array.from({ length: 50 }, (_, index) =>
         ({ label: `选项${String(index).padStart(2, '0')}${'内'.repeat(195)}` }));
       const oversized = await h.ask(0, choices, false, '请选择发布范围');
@@ -668,7 +668,7 @@ describe('structured ask cards (P0-2)', () => {
       const card = h.cardAt(0);
       expect(card.elements[0]).toMatchObject({ tag: 'markdown', element_id: 'group_mention', content: '<at id=ou_alice></at>' });
       // 回落只能替换 hint 自身：严禁按固定下标写 elements[1]，否则群 @ 开启时覆盖的是问题正文。
-      expect(card.elements[1]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: '请选择发布范围' } });
+      expect(card.elements[1]).toEqual({ tag: 'markdown', content: '请选择发布范围' });
       expect(card.elements.some((element: any) => element.tag === 'form')).toBe(false);
       expect(card.elements).toContainEqual({ tag: 'markdown', content: '请引用本卡片回复你的答案。' });
       expect(JSON.stringify(card.elements)).not.toContain('点选下方选项');

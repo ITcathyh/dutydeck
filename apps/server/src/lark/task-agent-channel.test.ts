@@ -150,3 +150,33 @@ describe('飞书任务智能体通道接线', () => {
     await vi.waitFor(() => expect([...h.cards.values()].some(card => card.cardKind === 'result')).toBe(true), { timeout: 10_000 });
   });
 });
+
+describe('飞书任务指派人变更事件触发即时认领', () => {
+  it('收到含 task_assignees_update 的事件后立即走认领流程，不必等轮询', async () => {
+    const h = await harness({ tasks: [assignedTask('guid_event_1')] });
+    h.enable();
+    h.coordinator.handleTaskAssigneesUpdate(h.config);
+    await vi.waitFor(() => {
+      expect([...h.cards.values()].some(card => card.cardKind === 'result')).toBe(true);
+    }, { timeout: 10_000 });
+    // 认领查询确实被事件触发（此前没有任何轮询调用过出网）。
+    expect(h.openApiCalls.some(call => call.path.startsWith(larkTaskAgentPaths.listTasks))).toBe(true);
+  });
+
+  it('重复事件不重复认领：同一任务只交接一次', async () => {
+    const h = await harness({ tasks: [assignedTask('guid_event_repeat')] });
+    h.enable();
+    const handle = vi.spyOn(h.coordinator, 'handle');
+    for (let i = 0; i < 3; i += 1) h.coordinator.handleTaskAssigneesUpdate(h.config);
+    await vi.waitFor(() => expect(handle).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+    expect(handle).toHaveBeenNthCalledWith(1, expect.objectContaining({ messageId: larkTaskAgentMessageId('guid_event_repeat') }), h.config);
+  });
+
+  it('通道未激活时事件不发出网请求', async () => {
+    const h = await harness({ tasks: [assignedTask('guid_event_off')] });
+    h.coordinator.handleTaskAssigneesUpdate(h.config);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(h.service.callOpenApi).not.toHaveBeenCalled();
+  });
+});
+

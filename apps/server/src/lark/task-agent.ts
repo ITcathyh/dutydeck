@@ -98,6 +98,26 @@ export type LarkTaskAgentHighRiskResult =
   | { status: 'confirmation_required'; operation: string }
   | { status: 'applied'; operation: string; response: unknown };
 
+/**
+ * task.task.update_user_access_v2 事件载荷（节选）。事件里只给 task_guid 与变更类型，
+ * 不含任务标题/描述，因此事件本身不直接构造派发，而是触发一次与轮询相同的认领流程。
+ * 兼容两种入参：长连接回调给的内层事件 `{ task_guid, event_types }`，
+ * 以及 webhook 完整 body `{ header, event: { task_guid, event_types } }`。
+ */
+export interface LarkTaskUpdateUserAccessEvent {
+  task_guid?: unknown;
+  event_types?: unknown;
+  event?: { task_guid?: unknown; event_types?: unknown };
+  header?: { event_id?: unknown; event_type?: unknown };
+}
+
+/** 仅当事件明确包含 task_assignees_update（指派人变更）时才触发认领。 */
+export function isTaskAssigneesUpdateEvent(payload: unknown): boolean {
+  const body = (payload ?? {}) as LarkTaskUpdateUserAccessEvent;
+  const eventTypes = body.event_types ?? body.event?.event_types;
+  return Array.isArray(eventTypes) && eventTypes.includes('task_assignees_update');
+}
+
 const truthy = (raw: string | undefined) => raw !== undefined && ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 const trimmed = (raw: unknown) => typeof raw === 'string' && raw.trim() ? raw.trim() : undefined;
 

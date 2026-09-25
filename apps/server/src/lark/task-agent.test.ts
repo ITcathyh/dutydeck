@@ -11,6 +11,7 @@ import {
   buildLarkTaskDispatch,
   buildLarkTaskPrompt,
   claimLarkTaskDispatches,
+  isTaskAssigneesUpdateEvent,
   larkTaskAgentLedgerKey,
   larkTaskAgentMessageId,
   larkTaskAgentPaths,
@@ -365,5 +366,21 @@ describe('权限清单', () => {
   it('申请 task:task:write，并保持数组排序', () => {
     expect(LARK_COMMON_TENANT_SCOPES).toContain('task:task:write');
     expect([...LARK_COMMON_TENANT_SCOPES]).toEqual([...LARK_COMMON_TENANT_SCOPES].sort());
+  });
+});
+
+describe('isTaskAssigneesUpdateEvent', () => {
+  it('内层事件（长连接回调形态）含 task_assignees_update 才触发', () => {
+    expect(isTaskAssigneesUpdateEvent({ task_guid: 'g1', event_types: ['task_assignees_update'] })).toBe(true);
+    expect(isTaskAssigneesUpdateEvent({ event: { task_guid: 'g1', event_types: ['task_assignees_update'] } })).toBe(true);
+  });
+
+  it('其它变更类型与畸形载荷不触发', () => {
+    expect(isTaskAssigneesUpdateEvent({ task_guid: 'g1', event_types: ['task_completed_update'] })).toBe(false);
+    expect(isTaskAssigneesUpdateEvent({ task_guid: 'g1', event_types: ['task_summary_update', 'task_assignees_update'] })).toBe(true);
+    expect(isTaskAssigneesUpdateEvent({ task_guid: 'g1' })).toBe(false);
+    expect(isTaskAssigneesUpdateEvent({ event_types: 'task_assignees_update' })).toBe(false);
+    expect(isTaskAssigneesUpdateEvent(undefined)).toBe(false);
+    expect(isTaskAssigneesUpdateEvent(null)).toBe(false);
   });
 });

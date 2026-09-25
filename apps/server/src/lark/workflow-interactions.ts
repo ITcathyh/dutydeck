@@ -9,7 +9,19 @@ import type { LarkCardService } from './service.js';
 import { safeLarkWebUrl } from './card-actions.js';
 import { isGroupChat, renderGroupMention } from './card-mentions.js';
 import type { LarkCardElement } from './card-renderer.js';
+import { renderQuestionMarkdown } from './ask-markdown.js';
 import { LarkUrgentManager, type LarkUrgentCheckResult } from './workflow-urgent.js';
+
+/**
+ * 询问（ask）问题正文保留 Markdown 网页链接，改用 markdown 元素；
+ * 授权（permission）问题来自受控命令拼装，不需要任何 Markdown，继续用 plain_text。
+ */
+const questionElement = (kind: 'ask' | 'permission', question: string): LarkCardElement => {
+  const content = question.slice(0, 6000);
+  return kind === 'ask'
+    ? { tag: 'markdown', content: renderQuestionMarkdown(content) }
+    : { tag: 'div', text: { tag: 'plain_text', content } };
+};
 
 export interface LarkInteractionContext {
   appId: string;
@@ -231,7 +243,7 @@ export class LarkWorkflowInteractions {
     if (!record.cardId || record.kind === 'result' || this.closedCards.has(`${record.cardId}:${record.state}:${message}`)) return true;
     return this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.kind === 'ask' ? 'Agent 提问' : '本次操作确认',
       permissionMode: 'ask', state: record.state === 'expired' ? 'interrupted' : 'completed', statusLabel: record.state === 'expired' ? '已失效' : '已处理',
-      readOnly: true, elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: message }] }).then(() => { this.closedCards.add(`${record.cardId}:${record.state}:${message}`); return true; }).catch(() => false);
+      readOnly: true, elements: [questionElement(record.kind, record.question), { tag: 'markdown', content: message }] }).then(() => { this.closedCards.add(`${record.cardId}:${record.state}:${message}`); return true; }).catch(() => false);
   }
   private async renderPendingPermission(record: LarkInteraction) {
     if (!record.cardId) return;
@@ -343,7 +355,7 @@ export class LarkWorkflowInteractions {
       : '本次选择只处理这一条请求，不改变后续授权方式。' };
     const elements: LarkCardElement[] = [
       ...(groupMentionTag ? [{ tag: 'markdown', element_id: 'group_mention', content: groupMentionTag }] : []),
-      { tag: 'div', text: { tag: 'plain_text', content: question.slice(0, 6000) } },
+      questionElement(kind, question),
       // 正文只写读者做决定时需要知道的东西：授权范围（permission）、怎么答（ask）。
       // 原先还各带一份完整 slash 指令，`/approve wf_01H…` 里那串请求编号在 permission 卡上
       // 出现两次，正下方就是「批准一次 / 拒绝」两个按钮——对能点按钮的人是三行纯噪声。

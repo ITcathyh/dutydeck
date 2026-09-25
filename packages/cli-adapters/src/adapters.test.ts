@@ -175,14 +175,25 @@ describe('codex', () => {
     expect(args).toContain('projects={"/tmp/ws"={trust_level="trusted"}}');
   });
 
-  it('resume=true：resume 子命令 + id 收尾', () => {
+  it('resume=true：-c 配置参数前移到 resume 子命令前，子命令参数在 resume 后，id 收尾', () => {
     const args = adapter.buildArgs({ sessionId: SID, resume: true, resumeSessionId: 'codex-sid' });
-    expect(args[0]).toBe('resume');
+    const resumeIdx = args.indexOf('resume');
+    expect(resumeIdx).toBeGreaterThan(0);
     expect(args[args.length - 1]).toBe('codex-sid');
-    expect(args.indexOf('notice.hide_rate_limit_model_nudge=true')).toBeLessThan(args.indexOf('codex-sid'));
+    // -c 配置参数在前
+    const configIdx = args.indexOf('notice.hide_rate_limit_model_nudge=true');
+    expect(configIdx).toBeGreaterThan(0);
+    expect(args[configIdx - 1]).toBe('-c');
+    expect(configIdx).toBeLessThan(resumeIdx);
+    // 子命令参数在 resume 之后
+    expect(args.indexOf('--no-alt-screen')).toBeGreaterThan(resumeIdx);
+    // 所有 -c 必须位于 resume 之前
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-c') expect(i).toBeLessThan(resumeIdx);
+    }
     // 无 resumeSessionId 时新起会话，不猜 id
     const fresh = adapter.buildArgs({ sessionId: SID, resume: true });
-    expect(fresh[0]).not.toBe('resume');
+    expect(fresh.includes('resume')).toBe(false);
   });
 
   it('model / reasoningEffort / cwd 传入', () => {
@@ -205,7 +216,7 @@ describe('codex', () => {
     expect(args.some(a => a.startsWith('projects='))).toBe(false);
   });
 
-  it('真正 resume（带 resumeSessionId）时同样注入 projects 预置：信任只来自进程级 -c、不写盘', () => {
+  it('真正 resume（带 resumeSessionId）时同样注入 projects 预置：信任只来自进程级 -c、不写盘，且位于 resume 之前', () => {
     const args = adapter.buildArgs({
       sessionId: SID,
       resume: true,
@@ -213,9 +224,11 @@ describe('codex', () => {
       ...FULL_TRUST,
       cwd: '/tmp/ws',
     });
-    expect(args[0]).toBe('resume');
+    const resumeIdx = args.indexOf('resume');
+    expect(resumeIdx).toBeGreaterThan(0);
     expect(args).toContain('projects={"/tmp/ws"={trust_level="trusted"}}');
-    expect(args.indexOf('projects={"/tmp/ws"={trust_level="trusted"}}')).toBeLessThan(args.indexOf('codex-sid'));
+    expect(args.indexOf('projects={"/tmp/ws"={trust_level="trusted"}}')).toBeLessThan(resumeIdx);
+    expect(args.indexOf('--dangerously-bypass-approvals-and-sandbox')).toBeGreaterThan(resumeIdx);
   });
 
   it('pattern 族齐全', () => {

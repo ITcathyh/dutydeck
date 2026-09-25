@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, extname, join } from 'node:path';
 import type { ChannelMappingRepository, Session } from '@dutydeck/shared';
 import { LEGACY_RETIREMENT_NOTICE } from '@dutydeck/storage';
 import type { LarkLaunchOptions } from './new-session.js';
 import { larkExecutionConfirmed, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { parseLarkMessageContent, type LarkMessageResource } from './message-content.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
+import { detectImageFormat, gifSequenceHint } from './image-format.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkChatMode } from './chat-mode.js';
 import type { LarkGroup } from './coordinator.js';
@@ -146,6 +147,12 @@ const safeResourceName = (resource: LarkMessageResource, contentType?: string) =
   return supplied ? `${hash}-${supplied}` : `${resource.type}-${hash}${resourceExtensions[contentType ?? ''] ?? ''}`;
 };
 
+/** 按文件头识别出的真实扩展名替换文件名扩展名；原文件没有扩展名时直接追加。 */
+const withExtension = (fileName: string, extension: string) => {
+  const current = extname(fileName);
+  return (current ? fileName.slice(0, -current.length) : fileName) + extension;
+};
+
 const resourceFailureGuidance = (error: unknown) => {
   const upstreamCode = error instanceof LarkServiceError ? Number(error.details?.upstreamCode) : undefined;
   if (upstreamCode === 234002 || upstreamCode === 14005) {
@@ -162,10 +169,20 @@ export async function materializeLarkResources(messageId: string, prompt: string
   for (const resource of resources) {
     try {
       const downloaded = await withLarkContextReadTimeout(service.downloadMessageResource(messageId, resource.key, resource.type), '附件下载');
+      // 图片按文件头识别真实格式：下载接口的 contentType 与资源自带扩展名都可能与实际字节不符。
+      let fileName = safeResourceName(resource, downloaded.contentType);
+      let gifHint: string | undefined;
+      if (resource.type === 'image') {
+        const format = detectImageFormat(downloaded.data);
+        if (format) {
+          fileName = withExtension(fileName, format.extension);
+          gifHint = gifSequenceHint(format.mimeType);
+        }
+      }
       await mkdir(directory, { recursive: true, mode: 0o700 });
-      const path = join(directory, safeResourceName(resource, downloaded.contentType));
+      const path = join(directory, fileName);
       await writeFile(path, downloaded.data, { mode: 0o600 });
-      notes.push(`- ${resource.label}已下载到本地：${path}。请使用本地文件读取工具查看。`);
+      notes.push(`- ${resource.label}已下载到本地：${path}。请使用本地文件读取工具查看。${gifHint ? ` ${gifHint}` : ''}`);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       notes.push(`- ${resource.label}下载失败：${reason}。你无法读取该附件；请在回复中明确告知用户。${resourceFailureGuidance(error)}`);
