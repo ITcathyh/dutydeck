@@ -139,6 +139,15 @@ function activityLabel(events: TimelineEvent[]) {
   return thinking ? '思考过程' : '执行过程';
 }
 
+/** 时间线里最新一条仍待处理的权限请求 id；同一请求后来的决议已在 buildTimeline 里合并成最终状态。 */
+export function pendingPermissionId(timeline: TimelineEvent[]) {
+  for (let index = timeline.length - 1; index >= 0; index--) {
+    const event = timeline[index]!;
+    if (event.type === 'permission_request' && event.data.status === 'pending') return String(event.data.id ?? event.id);
+  }
+  return undefined;
+}
+
 export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] = []): TimelineSection[] {
   if (!timeline.length) return [];
   const turns: TimelineEvent[][] = [];

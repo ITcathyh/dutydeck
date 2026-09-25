@@ -920,3 +920,178 @@ describe('过期审批跟随权威恢复状态', () => {
     } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });
+
+describe('权限卡截止时间与自动拒绝', () => {
+  const minute = 60_000;
+  const livePermissions = (id: string) => {
+    const permissions: PermissionRequestData[] = [{ id, title: '写入配置', status: 'pending' }];
+    const resolvePermission = vi.fn(async (_sessionId: string, permissionId: string) => {
+      const index = permissions.findIndex(item => item.id === permissionId);
+      if (index >= 0) permissions.splice(index, 1);
+      return undefined;
+    });
+    return { permissions, ...makeRuntime([runningTask()], permissions, resolvePermission as any) };
+  };
+  const replies = (reply: ReturnType<typeof makeService>['reply']) => reply.mock.calls.map(call => (call as unknown as [Record<string, any>])[0]);
+
+  it('写入 30 分钟截止时间，截止前 10 分钟只提醒一次，到点经 runtime 拒绝并把卡改成已过期', async () => {
+    const { directory, repositories } = await openDatabase();
+    const at = Date.parse('2026-09-25T02:00:00.000Z');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
+    try {
+      const { permissions, runtime, resolvePermission } = livePermissions('perm_deadline');
+      const { service, reply } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      let [record] = await workflow.list('app_one');
+      expect(record!.expiresAt).toBe(new Date(at + 30 * minute).toISOString());
+      expect(JSON.stringify(replies(reply)[0])).toContain('审批截止时间：2026/9/25 10:30:00（北京时间）。到时仍未处理将自动拒绝。');
+
+      clock.mockReturnValue(at + 19 * minute);
+      await workflow.reconcile('app_one', 'task_one');
+      expect(reply).toHaveBeenCalledTimes(1);
+      clock.mockReturnValue(at + 20 * minute);
+      await workflow.reconcile('app_one', 'task_one');
+      await workflow.reconcile('app_one', 'task_one');
+      expect(reply).toHaveBeenCalledTimes(2);
+      expect(replies(reply)[1]).toMatchObject({ messageId: record!.cardId, idempotencyKey: `workflow_remind_${record!.id}` });
+      expect(JSON.stringify(replies(reply)[1])).toContain('这条审批即将超时');
+      expect((await workflow.list('app_one'))[0]!.remindedAt).toBe(new Date(at + 20 * minute).toISOString());
+      expect(resolvePermission).not.toHaveBeenCalled();
+
+      clock.mockReturnValue(at + 30 * minute);
+      await workflow.reconcile('app_one', 'task_one');
+      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_deadline', false);
+      [record] = await workflow.list('app_one');
+      expect(record).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), timeoutNoticeAt: expect.any(String) });
+      const closed = vi.mocked(service.update).mock.calls.at(-1)![0] as Record<string, any>;
+      expect(closed).toMatchObject({ messageId: record!.cardId, statusLabel: '已过期' });
+      expect(JSON.stringify(closed)).toContain('审批超时，已自动拒绝，不再接受批准。需要的话请重新发起。');
+      expect(JSON.stringify(closed)).not.toContain('允许本次');
+      expect(replies(reply)[2]).toMatchObject({ messageId: record!.cardId, idempotencyKey: `workflow_timeout_${record!.id}` });
+      expect(JSON.stringify(replies(reply)[2])).toContain('审批超时，已自动拒绝');
+
+      await workflow.reconcile('app_one', 'task_one');
+      expect(reply).toHaveBeenCalledTimes(3);
+      await expect(workflow.respond(responseInput(record!, { action: 'approve' }))).rejects.toThrow('审批超时，已自动拒绝');
+      expect(resolvePermission).toHaveBeenCalledOnce();
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('截止后对账前的迟到批准按超时收尾，不会把批准送达执行端', async () => {
+    const { directory, repositories } = await openDatabase();
+    const at = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
+    try {
+      const { permissions, runtime, resolvePermission } = livePermissions('perm_late');
+      const { service } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      const [record] = await workflow.list('app_one');
+      clock.mockReturnValue(at + 30 * minute + 1_000);
+      await expect(workflow.respond(responseInput(record!, { action: 'approve' }))).rejects.toThrow('审批超时，已自动拒绝');
+      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_late', false);
+      expect((await workflow.list('app_one'))[0]).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('执行端暂时没接住拒绝时保持待审批，下一次对账再拒', async () => {
+    const { directory, repositories } = await openDatabase();
+    const at = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
+    try {
+      const { permissions, runtime, resolvePermission } = livePermissions('perm_retry');
+      const { service } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      clock.mockReturnValue(at + 31 * minute);
+      resolvePermission.mockRejectedValueOnce(Object.assign(new Error('intent write failed'), { code: 'EVENT_WRITE_FAILED' }));
+      await workflow.reconcile('app_one', 'task_one');
+      expect((await workflow.list('app_one'))[0]).toMatchObject({ state: 'pending' });
+      expect((await workflow.list('app_one'))[0]!.timedOutAt).toBeUndefined();
+      await workflow.reconcile('app_one', 'task_one');
+      expect(resolvePermission).toHaveBeenCalledTimes(2);
+      expect((await workflow.list('app_one'))[0]).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('协调器重建后沿用持久化的截止时间与提醒记录，不重新计时', async () => {
+    const { directory, repositories } = await openDatabase();
+    const at = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
+    try {
+      const { permissions, runtime, resolvePermission } = livePermissions('perm_restart');
+      const first = makeService();
+      const before = new LarkWorkflowInteractions(repositories.config, runtime, first.service, undefined, async () => true);
+      await before.observe(context(), agentEvent('permission_request', permissions[0]));
+      clock.mockReturnValue(at + 21 * minute);
+      await before.reconcile('app_one', 'task_one');
+      const [original] = await before.list('app_one');
+      expect(original!.remindedAt).toBeDefined();
+
+      clock.mockReturnValue(at + 25 * minute);
+      const second = makeService();
+      const after = new LarkWorkflowInteractions(repositories.config, runtime, second.service, undefined, async () => true);
+      await after.initialize('app_one');
+      expect((await after.list('app_one'))[0]).toMatchObject({ state: 'expired' });
+      expect((await after.list('app_one'))[0]!.timedOutAt).toBeUndefined();
+      expect(resolvePermission).not.toHaveBeenCalled();
+      await after.observe(context(), agentEvent('permission_request', permissions[0]));
+      const renewed = (await after.list('app_one')).find(item => item.boot === after.boot)!;
+      expect(renewed).toMatchObject({ state: 'pending', expiresAt: original!.expiresAt, remindedAt: original!.remindedAt });
+      await after.reconcile('app_one', 'task_one');
+      expect(second.reply).toHaveBeenCalledOnce();
+
+      clock.mockReturnValue(at + 30 * minute);
+      await after.reconcile('app_one', 'task_one');
+      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_restart', false);
+      expect((await after.list('app_one')).find(item => item.boot === after.boot)).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('重启时按持久化的 expiresAt 处理停机期间到期的审批：执行端仍挂着就拒绝，已不在也照样收尾并说明', async () => {
+    const { directory, repositories } = await openDatabase();
+    const at = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
+    try {
+      const overdue = interaction({ id: 'perm_overdue', kind: 'permission', nativeId: 'perm_live', cardId: 'card_overdue', expiresAt: new Date(at - minute).toISOString() });
+      const gone = interaction({ id: 'perm_gone', kind: 'permission', nativeId: 'perm_gone_native', cardId: 'card_gone', expiresAt: new Date(at - minute).toISOString() });
+      const early = interaction({ id: 'perm_early', kind: 'permission', nativeId: 'perm_early_native', cardId: 'card_early', expiresAt: new Date(at + 10 * minute).toISOString() });
+      for (const record of [overdue, gone, early]) await persistInteraction(repositories.config, record);
+      const { permissions, runtime, resolvePermission } = livePermissions('perm_live');
+      const { service, reply } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      await workflow.initialize('app_one');
+      expect(permissions).toHaveLength(0);
+      expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_live', false);
+      const records = new Map((await workflow.list('app_one')).map(record => [record.id, record]));
+      expect(records.get('perm_overdue')).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), timeoutNoticeAt: expect.any(String) });
+      expect(records.get('perm_gone')).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), timeoutNoticeAt: expect.any(String) });
+      expect(records.get('perm_early')).toMatchObject({ state: 'expired' });
+      expect(records.get('perm_early')!.timedOutAt).toBeUndefined();
+      expect(replies(reply).map(item => item.idempotencyKey).sort()).toEqual(['workflow_timeout_perm_gone', 'workflow_timeout_perm_overdue']);
+      const labels = new Map(vi.mocked(service.update).mock.calls.map(call => [(call[0] as any).messageId, (call[0] as any).statusLabel]));
+      expect(Object.fromEntries(labels)).toEqual({ card_overdue: '已过期', card_gone: '已过期', card_early: '已失效' });
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('超时说明发送失败时计入待对账，重试成功后只发一次', async () => {
+    const { directory, repositories } = await openDatabase();
+    const at = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
+    try {
+      await persistInteraction(repositories.config, interaction({ id: 'perm_notice', kind: 'permission', state: 'expired', cardId: 'card_notice',
+        expiresAt: new Date(at - minute).toISOString(), timedOutAt: new Date(at).toISOString() }));
+      const { runtime } = makeRuntime([runningTask()], []);
+      const { service, reply } = makeService();
+      reply.mockRejectedValueOnce(new Error('rate limited'));
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
+      expect(await workflow.reconcile('app_one')).toBe(1);
+      expect((await workflow.list('app_one'))[0]!.timeoutNoticeAt).toBeUndefined();
+      expect(await workflow.reconcile('app_one')).toBe(0);
+      expect(await workflow.reconcile('app_one')).toBe(0);
+      expect(reply).toHaveBeenCalledTimes(2);
+      expect((await workflow.list('app_one'))[0]!.timeoutNoticeAt).toBeDefined();
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+});

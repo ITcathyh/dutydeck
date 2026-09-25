@@ -35,7 +35,7 @@ export interface StoredLarkConfig {
   defaultReasoningEffort?: string;
   /** Explicit consent for unattended Lark sessions to run in full-trust mode. */
   fullTrustConfirmed?: boolean;
-  permissionMode?: 'ask' | 'full-trust';
+  permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
   /**
    * 私聊路由模式：'chat' 整段 DM 共用一个会话；'thread' 每条顶层 DM 开一个新话题。
    * 缺省（旧配置无此字段）由 runtime 按 'chat' 处理。
@@ -132,8 +132,9 @@ export const larkExecutionIdentity = (): string => {
   catch { return '未知账号@未知主机'; }
 };
 
-export const larkPermissionMode = (config: Pick<StoredLarkConfig, 'permissionMode'>) => config.permissionMode === 'ask' ? 'ask' as const : 'full-trust' as const;
-export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissionMode' | 'fullTrustConfirmed'>) => larkPermissionMode(config) === 'ask' || config.fullTrustConfirmed === true;
+export const larkPermissionMode = (config: Pick<StoredLarkConfig, 'permissionMode'>) =>
+  config.permissionMode === 'ask' || config.permissionMode === 'approve-reads' ? config.permissionMode : 'full-trust' as const;
+export const larkExecutionConfirmed = (config: Pick<StoredLarkConfig, 'permissionMode' | 'fullTrustConfirmed'>) => larkPermissionMode(config) !== 'full-trust' || config.fullTrustConfirmed === true;
 
 export interface SaveLarkConfigInput {
   expectedRevision?: number;
@@ -152,7 +153,7 @@ export interface SaveLarkConfigInput {
   defaultModel?: string;
   defaultReasoningEffort?: string;
   fullTrustConfirmed?: boolean;
-  permissionMode?: 'ask' | 'full-trust';
+  permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
   /** 私聊路由模式：'chat' 整段 DM 一个会话；'thread' 每条顶层 DM 一个新话题。非法值归一化时丢弃。 */
   p2pMode?: 'chat' | 'thread';
   /** 普通群回复模式：'chat'/'shared' 全群一个会话；'new-topic' 每条顶层 @ 一个话题；'chat-topic' 顶层平铺、群内原生话题各自独立。非法值归一化时丢弃。 */
@@ -236,7 +237,7 @@ export interface PublicLarkConfig {
   defaultModel?: string;
   defaultReasoningEffort?: string;
   fullTrustConfirmed: boolean;
-  permissionMode?: 'ask' | 'full-trust';
+  permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
   p2pMode?: 'chat' | 'thread';
   groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   brand?: 'feishu' | 'lark';
@@ -506,7 +507,10 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.defaultModel ? { defaultModel: parsed.defaultModel } : {}),
     ...(parsed.defaultReasoningEffort ? { defaultReasoningEffort: parsed.defaultReasoningEffort } : {}),
     fullTrustConfirmed: parsed.fullTrustConfirmed === true,
-    ...(parsed.permissionMode === 'ask' ? { permissionMode: 'ask' as const } : {}),
+    // 没确认过完全信任时：显式写了 full-trust 的原样保留（照旧不能运行，迁移写回时也不丢），
+    // 没写权限模式的默认只读自动放行：执行端声明为读取或搜索的操作直接执行，其余照常逐项审批。
+    ...(parsed.permissionMode === 'ask' || parsed.permissionMode === 'approve-reads' ? { permissionMode: parsed.permissionMode }
+      : parsed.fullTrustConfirmed === true ? {} : { permissionMode: parsed.permissionMode === 'full-trust' ? 'full-trust' as const : 'approve-reads' as const }),
     ...(p2pMode ? { p2pMode } : {}),
     ...(groupReplyMode ? { groupReplyMode } : {}),
     ...(env ? { env } : {}),
@@ -706,7 +710,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const defaultReasoningEffort = input.defaultReasoningEffort === undefined ? current?.defaultReasoningEffort : input.defaultReasoningEffort.trim() || undefined;
   const fullTrustConfirmed = input.fullTrustConfirmed ?? current?.fullTrustConfirmed ?? false;
   const permissionMode = input.permissionMode ?? larkPermissionMode(current ?? {});
-  if (permissionMode !== 'ask' && permissionMode !== 'full-trust') throw new LarkServiceError('INVALID_LARK_CONFIG', 'Unsupported Lark permission mode', 400);
+  if (permissionMode !== 'ask' && permissionMode !== 'approve-reads' && permissionMode !== 'full-trust') throw new LarkServiceError('INVALID_LARK_CONFIG', 'Unsupported Lark permission mode', 400);
   const p2pMode = input.p2pMode === undefined ? current?.p2pMode : normalizeP2pMode(input.p2pMode);
   const groupReplyMode = input.groupReplyMode === undefined ? current?.groupReplyMode : normalizeGroupReplyMode(input.groupReplyMode);
   const env = input.env === undefined ? current?.env : normalizeEnv(input.env);

@@ -21,6 +21,13 @@ describe('renderQueueSummary', () => {
     expect(md).toBe('**排队 2 条**\n1. 修登录 bug\n2. 加导出按钮');
   });
 
+  it('当前一轮停在审批上时标题写明被审批阻塞，超长输入仍守住总长上限', () => {
+    expect(renderQueueSummary([task('t1', '修登录 bug')], { blockedByApproval: true })).toBe('**排队 1 条（被审批阻塞）**\n1. 修登录 bug');
+    const md = renderQueueSummary(Array.from({ length: 9 }, (_, index) => task(`t${index}`, '<>&'.repeat(40))), { blockedByApproval: true })!;
+    expect(md.startsWith('**排队 9 条（被审批阻塞）**')).toBe(true);
+    expect(md.length).toBeLessThanOrEqual(QUEUE_SUMMARY_MAX_CHARS);
+  });
+
   it('prompt 缺省/空白时给占位，不渲染出空行', () => {
     const md = renderQueueSummary([task('t1'), task('t2', '   ')]);
     expect(md).toBe('**排队 2 条**\n1. （无描述）\n2. （无描述）');

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { hostname, userInfo } from 'node:os';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, larkExecutionIdentity, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
+import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, larkExecutionConfirmed, larkExecutionIdentity, larkPermissionMode, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
 
 const createRepository = (initial: Record<string, string> = {}): ConfigRepository => {
   const store = new Map<string, string>(Object.entries(initial));
@@ -254,9 +254,36 @@ describe('publicLarkConfig new-field exposure', () => {
 });
 
 describe('Lark permission posture persistence', () => {
-  it('treats a legacy configuration without permissionMode as full-trust', async () => {
+  it('keeps a legacy configuration without permissionMode as full-trust when full trust was confirmed', async () => {
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret', defaultAgentId: 'codex', fullTrustConfirmed: true }]));
+    expect(publicLarkConfig(config)).toMatchObject({ permissionMode: 'full-trust', fullTrustConfirmed: true, setupComplete: true });
+  });
+
+  it('defaults a bot with neither a permission mode nor a full-trust confirmation to approve-reads', async () => {
     const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_legacy', appSecret: 'secret', defaultAgentId: 'codex' }]));
-    expect(publicLarkConfig(config)).toMatchObject({ permissionMode: 'full-trust', fullTrustConfirmed: false, setupComplete: false });
+    expect(larkPermissionMode(config)).toBe('approve-reads');
+    expect(larkExecutionConfirmed(config)).toBe(true);
+    expect(publicLarkConfig(config)).toMatchObject({ permissionMode: 'approve-reads', fullTrustConfirmed: false, setupComplete: true });
+  });
+
+  it('never changes an explicit permission mode, including after the stored list is written back', async () => {
+    const repository = seedBots([
+      { appId: 'cli_reads', appSecret: 'secret', defaultAgentId: 'codex', permissionMode: 'approve-reads', fullTrustConfirmed: true },
+      { appId: 'cli_ask', appSecret: 'secret', defaultAgentId: 'codex', permissionMode: 'ask', fullTrustConfirmed: true },
+      { appId: 'cli_trust', appSecret: 'secret', defaultAgentId: 'codex', permissionMode: 'full-trust', fullTrustConfirmed: true },
+      { appId: 'cli_unconfirmed', appSecret: 'secret', defaultAgentId: 'codex', permissionMode: 'full-trust' }
+    ]);
+    for (let read = 0; read < 2; read++) {
+      const bots = await readLarkConfigs(repository);
+      expect(bots.map(larkPermissionMode)).toEqual(['approve-reads', 'ask', 'full-trust', 'full-trust']);
+      // 显式 full-trust 但未确认：仍按 full-trust 处理，照旧不能无人值守运行。
+      expect(larkExecutionConfirmed(bots[3]!)).toBe(false);
+      expect(publicLarkConfig(bots[3]!)).toMatchObject({ permissionMode: 'full-trust', setupComplete: false });
+    }
+    // 默认值保存一次后成为显式配置，此后照原样读回。
+    const legacy = seedBots([{ appId: 'cli_legacy', appSecret: 'secret', defaultAgentId: 'codex' }]);
+    await saveLarkConfig(legacy, undefined, { originalAppId: 'cli_legacy', name: '改名' });
+    expect(JSON.parse((await legacy.get(larkBotsConfigKey))!)[0]).toMatchObject({ permissionMode: 'approve-reads' });
   });
 
   it('allows ask mode without full-trust confirmation and marks the setup complete', async () => {

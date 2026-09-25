@@ -40,8 +40,19 @@ export interface LarkInteraction extends LarkInteractionContext {
   cardCreatedAt?: string;
   /** 目标提问/审批人 openId（缺省为 context.event.senderOpenId） */
   targetUserId?: string;
+  /** permission 截止前提醒已发出的时间戳，每条审批最多提醒一次 */
+  remindedAt?: string;
+  /** permission 到截止时间仍无人处理、已自动拒绝的时间戳；expired 状态下据此区分「已过期」与「已失效」 */
+  timedOutAt?: string;
+  /** 超时说明已发到原话题的时间戳 */
+  timeoutNoticeAt?: string;
 }
-const deadlineText = (expiresAt: string) => `${new Date(expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）`;
+export const deadlineText = (expiresAt: string) => `${new Date(expiresAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })}（北京时间）`;
+/** 权限卡审批时限：到点仍无人处理就自动拒绝，一张没人点的卡不能无限期堵住同一会话后面的任务。 */
+export const larkPermissionTimeoutMs = 30 * 60_000;
+/** 截止前多久在原话题提醒一次。 */
+export const larkPermissionReminderLeadMs = 10 * 60_000;
+const pastDeadline = (record: LarkInteraction, now = Date.now()) => record.kind === 'permission' && Boolean(record.expiresAt) && Date.parse(record.expiresAt!) <= now;
 const prefix = (appId: string) => `lark.interaction.${appId}.`;
 const stale = () => new LarkServiceError('LARK_INTERACTION_EXPIRED', '此操作已处理或失效。请发送 `/status` 查看任务状态，不要重复操作旧卡。', 409);
 const button = (record: LarkInteraction, action: string, label: string): LarkCardElement => ({
@@ -179,7 +190,10 @@ export class LarkWorkflowInteractions {
   async initialize(appId: string) {
     for (const record of await this.list(appId)) {
       if (record.kind !== 'result' && record.state === 'expired') {
-        await this.renderClosed(record, await this.expiryMessage(record));
+        await this.closeExpired(record);
+      } else if (record.state === 'pending' && pastDeadline(record)) {
+        // 截止时间在停机或协调器重建期间已过：按持久化的 expiresAt 补做超时处理，执行端仍挂着这条请求时一并拒绝。
+        await this.timeoutPermission(record);
       } else if (record.kind !== 'result' && ['pending', 'resolving'].includes(record.state)) {
         // 快照与 move 之间记录可能已被旧协调器的 in-flight 终态处理移走（stop 不拦截
         // detached 续跑）；那种情况下重启收敛的目标已经达成，重读确认后不再重复处理，
@@ -199,6 +213,7 @@ export class LarkWorkflowInteractions {
     }
   }
   private async expiryMessage(record: LarkInteraction) {
+    if (record.timedOutAt && record.expiresAt) return `审批截止时间：${deadlineText(record.expiresAt)}。\n\n审批超时，已自动拒绝，不再接受批准。需要的话请重新发起。`;
     const task = (await this.runtime.getTasks?.(record.sessionId))?.find(item => item.id === record.taskId);
     const recovery = task ? await describeLarkTaskRecovery(this.runtime, record.sessionId, record.taskId, task.status) : undefined;
     if (recovery?.blocked || recovery?.label === '已核对，结果未确认') {
@@ -215,7 +230,8 @@ export class LarkWorkflowInteractions {
         if (record.kind === 'ask' && this.broker?.get(record.nativeId)?.status === 'answering') continue;
         try { record = await this.move(record, 'expired'); } catch { continue; }
       }
-      if (record.state === 'expired' && !await this.renderClosed(record, await this.expiryMessage(record))) unresolved++;
+      if (record.state === 'pending') record = await this.enforcePermissionDeadline(record);
+      if (record.state === 'expired' && !await this.closeExpired(record)) unresolved++;
     }
     if (this.urgentManager) {
       await this.checkAndUrgePending(appId).catch(() => undefined);
@@ -230,7 +246,7 @@ export class LarkWorkflowInteractions {
   private async renderClosed(record: LarkInteraction, message: string) {
     if (!record.cardId || record.kind === 'result' || this.closedCards.has(`${record.cardId}:${record.state}:${message}`)) return true;
     return this.service.update({ messageId: record.cardId, taskId: record.id, taskName: record.kind === 'ask' ? 'Agent 提问' : '本次操作确认',
-      permissionMode: 'ask', state: record.state === 'expired' ? 'interrupted' : 'completed', statusLabel: record.state === 'expired' ? '已失效' : '已处理',
+      permissionMode: 'ask', state: record.state === 'expired' ? 'interrupted' : 'completed', statusLabel: record.state === 'expired' ? record.timedOutAt ? '已过期' : '已失效' : '已处理',
       readOnly: true, elements: [{ tag: 'div', text: { tag: 'plain_text', content: record.question.slice(0, 6000) } }, { tag: 'markdown', content: message }] }).then(() => { this.closedCards.add(`${record.cardId}:${record.state}:${message}`); return true; }).catch(() => false);
   }
   private async renderPendingPermission(record: LarkInteraction) {
@@ -245,9 +261,75 @@ export class LarkWorkflowInteractions {
       catch { /* A concurrently accepted decision owns this request. */ }
     }
   }
+  /**
+   * 权限卡的截止时间只认持久化的 expiresAt：截止前 10 分钟在原话题提醒一次，到点自动拒绝。
+   * 心跳对账、重启初始化和迟到的点击都按它处理，进程重启不会顺延或漏掉截止时间。
+   */
+  private async enforcePermissionDeadline(record: LarkInteraction, now = Date.now()) {
+    if (record.kind !== 'permission' || record.state !== 'pending' || !record.expiresAt) return record;
+    if (pastDeadline(record, now)) return this.timeoutPermission(record);
+    if (record.remindedAt || !record.cardId || Date.parse(record.expiresAt) - now > larkPermissionReminderLeadMs) return record;
+    try {
+      await this.service.reply({ messageId: record.cardId, ...(record.event.threadId ? { replyInThread: true } : {}),
+        taskId: record.id, taskName: '审批提醒', permissionMode: 'ask', state: 'running', statusLabel: '等待审批', awaitingHuman: true, readOnly: true,
+        elements: [{ tag: 'markdown', content: `**这条审批即将超时**\n\n截止时间：${deadlineText(record.expiresAt)}。到时仍未处理，将自动拒绝这次操作。请在审批卡上点「允许本次」或「拒绝」。` }],
+        idempotencyKey: `workflow_remind_${record.id}` });
+    } catch { return record; }
+    return this.annotate(record, { remindedAt: new Date(now).toISOString() });
+  }
+  /** 到点仍无人处理：先抢占 resolving，再让执行端拒绝这条请求；已在处理中的人工决议优先。 */
+  private async timeoutPermission(record: LarkInteraction) {
+    let claimed: LarkInteraction;
+    try { claimed = await this.move(record, 'resolving'); }
+    catch { return this.current(record); }
+    try {
+      if ((await this.runtime.getPendingPermissions?.(record.sessionId))?.some(item => item.id === record.nativeId)) {
+        await this.runtime.resolvePermission!(record.sessionId, record.nativeId, false);
+      }
+    } catch (error) {
+      // 执行端暂时没接住拒绝（例如正在落盘决议意图）：退回 pending，下一次心跳再拒；请求已不存在或已被接受则照常收尾。
+      if (!['PERMISSION_NOT_FOUND', 'PERMISSION_EXPIRED', 'PERMISSION_ACCEPTED_AUDIT_FAILED'].includes((error as { code?: string }).code ?? '')) {
+        return this.move(claimed, 'pending').catch(() => this.current(record));
+      }
+    }
+    let expired: LarkInteraction;
+    try { expired = await this.move(claimed, 'expired', undefined, { timedOutAt: new Date().toISOString() }); }
+    catch { return this.current(record); }
+    await this.closeExpired(expired);
+    return this.current(expired);
+  }
+  /** 失效/过期的卡收成只读；超时拒绝的还要在原话题说明一次，发出后才记下，发送失败随对账重试。 */
+  private async closeExpired(record: LarkInteraction) {
+    const closed = await this.renderClosed(record, await this.expiryMessage(record));
+    if (!record.timedOutAt || record.timeoutNoticeAt || !record.expiresAt) return closed;
+    try {
+      await this.service.reply({ messageId: record.cardId ?? record.event.messageId, ...(record.event.threadId ? { replyInThread: true } : {}),
+        taskId: record.id, taskName: '审批超时', permissionMode: 'ask', state: 'interrupted', statusLabel: '已过期', readOnly: true,
+        elements: [{ tag: 'markdown', content: `**审批超时，已自动拒绝**\n\n截止时间：${deadlineText(record.expiresAt)}。这次操作没有执行，需要的话请重新发起。` }],
+        idempotencyKey: `workflow_timeout_${record.id}` });
+    } catch { return false; }
+    await this.annotate(record, { timeoutNoticeAt: new Date().toISOString() });
+    return closed;
+  }
+  private async current(record: LarkInteraction) {
+    const raw = await this.store.get(this.key(record));
+    return raw ? JSON.parse(raw) as LarkInteraction : record;
+  }
+  /** 只补写附加字段；记录已被别处改写时按最新值重试，状态流转仍由 move 的 CAS 负责。 */
+  private async annotate(record: LarkInteraction, patch: Partial<LarkInteraction>) {
+    let current = record;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const next = { ...current, ...patch };
+      if (await this.store.compareAndSet!(this.key(current), JSON.stringify(current), JSON.stringify(next))) return next;
+      const raw = await this.store.get(this.key(current));
+      if (!raw) return current;
+      current = JSON.parse(raw) as LarkInteraction;
+    }
+    return current;
+  }
   close() { this.closed = true; }
-  private async move(record: LarkInteraction, state: LarkInteraction['state'], actorId?: string) {
-    const next = { ...record, state, updatedAt: new Date().toISOString(), ...(actorId ? { actorId } : {}) };
+  private async move(record: LarkInteraction, state: LarkInteraction['state'], actorId?: string, patch: Partial<LarkInteraction> = {}) {
+    const next = { ...record, ...patch, state, updatedAt: new Date().toISOString(), ...(actorId ? { actorId } : {}) };
     if (!await this.store.compareAndSet!(this.key(record), JSON.stringify(record), JSON.stringify(next))) throw stale();
     return next;
   }
@@ -259,7 +341,7 @@ export class LarkWorkflowInteractions {
     kind: LarkInteraction['kind'],
     nativeId: string,
     question: string,
-    structured?: Pick<LarkInteraction, 'structured' | 'multiple' | 'expiresAt'>
+    structured?: Pick<LarkInteraction, 'structured' | 'multiple' | 'expiresAt' | 'remindedAt'>
   ) {
     const id = this.interactionId(context, kind, nativeId);
     const record: LarkInteraction = {
@@ -272,6 +354,16 @@ export class LarkWorkflowInteractions {
       return { record: JSON.parse(old) as LarkInteraction, created: false };
     }
     return { record, created: true };
+  }
+  /**
+   * 协调器重建后同一条执行端请求会换 boot 重新建卡；截止时间沿用最早那张卡持久化的 expiresAt，
+   * 已发过的提醒也不再重发，重启不会让审批时限重新计时。
+   */
+  private async permissionDeadline(context: LarkInteractionContext, nativeId: string) {
+    const earlier = (await this.list(context.appId)).filter(record => record.kind === 'permission' && record.sessionId === context.sessionId
+      && record.taskId === context.taskId && record.nativeId === nativeId && record.expiresAt)
+      .sort((left, right) => Date.parse(left.expiresAt!) - Date.parse(right.expiresAt!))[0];
+    return { expiresAt: earlier?.expiresAt ?? new Date(Date.now() + larkPermissionTimeoutMs).toISOString(), ...(earlier?.remindedAt ? { remindedAt: earlier.remindedAt } : {}) };
   }
   private async bindCard(record: LarkInteraction, cardId: string) {
     const now = new Date().toISOString();
@@ -300,6 +392,7 @@ export class LarkWorkflowInteractions {
     let askChoices: RelayAskChoice[] | undefined;
     let askMultiple = false;
     let expiresAt: string | undefined;
+    let remindedAt: string | undefined;
     if (event.type === 'text' && data.relay === 'ask' && this.broker) {
       const ask = this.broker.get(String(data.askId));
       if (!ask || ask.status !== 'pending' || ask.sessionId !== context.sessionId) return;
@@ -311,6 +404,7 @@ export class LarkWorkflowInteractions {
       const request = data as PermissionRequestData;
       if (!(await this.runtime.getPendingPermissions(context.sessionId)).some(item => item.id === request.id)) return;
       kind = 'permission'; nativeId = request.id;
+      ({ expiresAt, remindedAt } = await this.permissionDeadline(context, request.id));
       const operation = request.operation;
       question = [permissionDisplayText(request.title) || 'Agent 请求执行受控操作',
         ...(operation?.source === 'acp_tool_call' ? [
@@ -325,7 +419,7 @@ export class LarkWorkflowInteractions {
     const structuredChoices = structuredOn && askChoices && askChoices.length > 0 ? askChoices : undefined;
     const created = await this.create(
       context, kind, nativeId, question,
-      { ...(expiresAt ? { expiresAt } : {}), ...(structuredChoices ? { structured: true, ...(askMultiple ? { multiple: true } : {}) } : {}) }
+      { ...(expiresAt ? { expiresAt } : {}), ...(remindedAt ? { remindedAt } : {}), ...(structuredChoices ? { structured: true, ...(askMultiple ? { multiple: true } : {}) } : {}) }
     );
     const record = created.record;
     if (record.state !== 'pending' || record.cardId || this.delivering.has(record.id) || (this.retryAfter.get(record.id) ?? 0) > Date.now()) return;
@@ -353,7 +447,9 @@ export class LarkWorkflowInteractions {
       // 而不做那个回落，等于把这条备用路径一起删掉——命令会以「请填写请求编号」失败，
       // 而那个编号已经没有任何卡会显示。
       // 命令本身的可发现性由 `/help` 承担（commands.ts:173-175 已列出三条命令及其用法）。
-      ...(record.expiresAt ? [{ tag: 'markdown', content: `回答截止时间：${deadlineText(record.expiresAt)}。超时后请发送 /status 查看任务状态。` }] : []),
+      ...(record.expiresAt ? [{ tag: 'markdown', content: kind === 'permission'
+        ? `审批截止时间：${deadlineText(record.expiresAt)}。到时仍未处理将自动拒绝。`
+        : `回答截止时间：${deadlineText(record.expiresAt)}。超时后请发送 /status 查看任务状态。` }] : []),
       hintElement,
       ...(kind === 'permission' ? [button(record, 'approve', '允许本次'), button(record, 'reject', '拒绝')] : [])
     ];
@@ -479,6 +575,8 @@ export class LarkWorkflowInteractions {
     if (record.kind !== expectedKind) throw stale();
     const policy: PolicyAction = input.action === 'approve' ? 'high_risk.execute' : 'run.interrupt';
     if (!await this.authorize(record, input.actorId, policy)) throw new LarkServiceError('LARK_INTERACTION_DENIED', '当前账号无权操作此任务。', 403);
+    // 截止时间已过而对账还没轮到它：先按超时收尾，迟到的批准不再生效。
+    if (record.state === 'pending' && pastDeadline(record)) record = await this.timeoutPermission(record);
     if (record.state !== 'pending') {
       if (record.state === 'expired') {
         const message = await this.expiryMessage(record);

@@ -32,19 +32,22 @@ function useAutoResizeTextarea(value: string) {
   return ref;
 }
 
-function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, onCancel, onSteer }: { tasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string; onCancel(id: string): void; onSteer(id: string): void }) {
+function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, blockingPermissionId, rejectingPermission, onCancel, onSteer, onRejectPermission }: { tasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string; blockingPermissionId?: string; rejectingPermission?: boolean; onCancel(id: string): void; onSteer(id: string): void; onRejectPermission?(permissionId: string): void }) {
   if (!tasks.length) return null;
   const frozen = Boolean(cancellingTaskId) || Boolean(steeringTaskId);
+  // 当前一轮停在审批上时，排队的指令都要等它；这里给一个直接拒绝的入口，免得回到时间线里找那张审批卡。
+  const blocked = Boolean(blockingPermissionId);
   return <div className="mx-4 overflow-hidden rounded-t-xl border border-b-0 border-queued-border bg-queued-soft shadow-card backdrop-blur">
     <div className="flex items-center gap-2 border-b border-queued-border px-3.5 py-2 text-caption font-semibold text-queued">
       <ListEnd size={13}/>
       <span>待执行指令</span>
       <Badge tone="queued" variant="outline">{tasks.length}</Badge>
-      <span className="ml-auto text-caption font-normal text-queued">当前任务完成后依次执行</span>
+      <span className="ml-auto text-caption font-normal text-queued">{blocked ? '被审批阻塞，当前审批处理后依次执行' : '当前任务完成后依次执行'}</span>
+      {blocked && onRejectPermission && <Button size="md" variant="ghost" loading={rejectingPermission} onClick={() => onRejectPermission(blockingPermissionId!)}>拒绝这条审批</Button>}
     </div>
     <div className="max-h-32 overflow-y-auto">{tasks.map(task => <div key={task.id} className="group flex items-center gap-2 px-3.5 py-1.5 text-caption text-secondary hover:bg-hover">
       <span className="min-w-0 flex-1 truncate">{task.prompt}</span>
-      <span className="shrink-0 text-caption text-subtle">排队中</span>
+      <span className="shrink-0 text-caption text-subtle">{blocked ? '被审批阻塞' : '排队中'}</span>
       {/* 「打断当前任务并执行」会掐掉正在跑的那一步，属于契约 §9 的主要交互：40px，不走 sm 豁免。 */}
       <Button size="md" variant="ghost" disabled={frozen} onClick={() => onSteer(task.id)}>{steeringTaskId === task.id ? '正在打断' : '打断当前任务并执行'}</Button>
       <IconButton label={`取消排队：${task.prompt}`} disabled={frozen} onClick={() => onCancel(task.id)}><X size={14}/></IconButton>
@@ -186,8 +189,10 @@ function ContextMeter({ context }: { context: ContextStats }) {
   </div>;
 }
 
-export function Composer({ state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, context, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
+export function Composer({ state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, blockingPermissionId, rejectingPermission, onRejectPermission, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, context, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
   state: string; session?: Pick<Session, 'state' | 'archivedAt'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
+  /** 当前一轮停在这条审批上：排队指令标为被审批阻塞，并可直接拒绝它。 */
+  blockingPermissionId?: string; rejectingPermission?: boolean; onRejectPermission?(permissionId: string): void;
   skills: SkillReference[]; models: AgentModel[]; reasoningEfforts: AgentModel[]; currentModel?: string; currentReasoningEffort?: string; context: ContextStats; advertisedCommands: Array<{ name: string; description: string }>; filePicker: boolean; modelReadiness: ModelReadiness; switchingModel: boolean; switchingReasoningEffort: boolean; refreshingModels: boolean;
   onChange(value: string): void; onReferencesChange(value: ComposerReference[]): void; onModeChange(mode: SendMode): void; onSubmit(): void; onInterrupt(): void; onCancelQueued(taskId: string): void; onSteerQueued(taskId: string): void; onPickFile(): Promise<string | undefined>; onModelChange(model: string): void; onReasoningEffortChange(reasoningEffort: string): void; onRefreshModels(): void;
   // 命令注册表驱动的动作。未传时对应命令不出现在面板里（见 commands 的 filter）。
@@ -288,7 +293,7 @@ export function Composer({ state, session, value, references, sending, mode, que
   const confirmFile = () => addReference('file', filePath.split('/').at(-1) || filePath, filePath);
 
   return <div className="bg-gradient-to-t from-canvas via-canvas to-transparent px-4 pb-5 pt-7 sm:px-8"><div className="mx-auto max-w-[880px]">
-    <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} onCancel={onCancelQueued} onSteer={onSteerQueued}/>
+    <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} blockingPermissionId={blockingPermissionId} rejectingPermission={rejectingPermission} onCancel={onCancelQueued} onSteer={onSteerQueued} onRejectPermission={onRejectPermission}/>
 
     <div ref={shell} className={`relative rounded-xl border border-default bg-surface p-2 shadow-panel ring-1 ring-inset ring-subtle backdrop-blur-sm transition-[transform,border-color,box-shadow,background-color] duration-normal ease-out focus-within:-translate-y-0.5 focus-within:border-action focus-within:bg-raised ${queuedTasks.length ? 'rounded-t-md' : ''}`}>
       {/*

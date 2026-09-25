@@ -2438,6 +2438,24 @@ describe('Lark long connection listener 欢迎语', () => {
     } finally { releaseGroup(); listener.stop(); }
   });
 
+  it('同一次卡片点击被平台重复推送时只交给主控处理一次，重推拿到同一个结果', async () => {
+    const handleAction = vi.spyOn(LarkMessageCoordinator.prototype, 'handleAction').mockResolvedValue({ type: 'success', content: '执行端已接受本次批准。' });
+    const runtime = { getSession: vi.fn(async () => session), subscribe: vi.fn(() => vi.fn()), listSessions: vi.fn(async () => []) };
+    const { listener, handlers } = await startHarness({ runtime });
+    try {
+      const click = { event_id: 'ev_dup', token: 'c-dup', operator: { open_id: 'ou_user' },
+        action: { value: { dutydeck_workflow: 'approve', request_id: 'req_1', generation: 'boot_1' } },
+        context: { open_message_id: 'om_card', open_chat_id: 'oc_chat' } };
+      const first = await handlers['card.action.trigger']!(click);
+      const second = await handlers['card.action.trigger']!({ ...click });
+      expect(handleAction).toHaveBeenCalledOnce();
+      expect(first).toEqual({ toast: { type: 'success', content: '执行端已接受本次批准。' } });
+      expect(second).toEqual(first);
+      await handlers['card.action.trigger']!({ ...click, event_id: 'ev_next', token: 'c-next' });
+      expect(handleAction).toHaveBeenCalledTimes(2);
+    } finally { listener.stop(); handleAction.mockRestore(); }
+  });
+
   it('bot 入群事件触发欢迎卡分发冒烟', async () => {
     const { listener, handlers, posts } = await startHarness();
     handlers['im.chat.member.bot.added_v1']!({ event_id: "e1", chat_id: "oc_group" });
