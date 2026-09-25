@@ -656,6 +656,24 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             return result(f,t,t.currentAttemptId ? attempt(t.currentAttemptId) : undefined,[event]);
           });
         }); },
+        deliverQueuedBySteering(rawFence, taskId, expectedTaskRevision, rawInput) { return write(() => {
+          const f = readFence(rawFence);
+          const input = parse(taskExecutionSchemas.steeringDelivery,rawInput);
+          validateManagementActor(f,taskId,input.actor);
+          return command(`steering:${input.operationId}`,{ ...f,taskId,input },() => {
+            const { t, a } = queuedTask(f,taskId,expectedTaskRevision);
+            if (a) fail('STEERING_TASK_HAS_ATTEMPT');
+            // The steered content already reached this submission; its later settlement cannot undo that.
+            const target = attempt(input.target.attemptId);
+            if (!target || target.taskId !== input.target.taskId || target.sessionId !== f.sessionId || target.runId !== f.runId || target.submissionState === 'not_submitted') fail('STEERING_TARGET_CONFLICT');
+            t.status = 'completed'; t.revision++; t.updatedAt = timestamp(); saveTask(t);
+            const steering = { operationId: input.operationId, outcome: input.outcome, target: input.target };
+            // The prompt marker precedes the terminal Task event, so the Task's own output window stays empty.
+            const prompt = append(f,{ id: `steering:${input.operationId}:prompt`, type: 'text', data: { text: t.prompt, role: 'user', taskId: t.id, steering } });
+            const settled = append(f,{ id: `steering:${input.operationId}:task`, type: 'task', data: { task: { id: t.id, status: t.status, revision: t.revision }, steering } });
+            return result(f,t,undefined,[prompt,settled]);
+          });
+        }); },
         getPendingQueueActions(rawFence) { return write(() => {
           const f = readFence(rawFence);
           return db.prepare("SELECT json FROM task_queue_actions WHERE session_id=? AND state IN ('pending','blocked')").all(f.sessionId).map(r => rowJson<QueueAction>(r)!).filter(q=>q.runId===f.runId);

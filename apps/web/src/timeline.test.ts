@@ -135,6 +135,23 @@ describe('conversation timeline', () => {
     expect(sections.at(-1)).toMatchObject({ kind: 'event', final: true, event: { data: { text: '协作完成' } } });
   });
 
+  it('ties a steered message to the running turn it was injected into', () => {
+    const tasks = [
+      { id: 'task-1', sessionId: 's1', prompt: '检查', status: 'running', createdAt: '', updatedAt: '' },
+      { id: 'task-2', sessionId: 's1', prompt: '顺便看日志', status: 'completed', createdAt: '', updatedAt: '' }
+    ];
+    const timeline = buildTimeline([
+      event(1, 'text', { text: '检查', role: 'user', taskId: 'task-1' }),
+      event(2, 'tool_result', { id: 'ls', name: 'Bash', status: 'completed', output: 'ok' }),
+      event(3, 'text', { text: '顺便看日志', role: 'user', taskId: 'task-2', steering: { outcome: 'injected', target: { taskId: 'task-1', attemptId: 'a1' } } }),
+      event(4, 'tool_result', { id: 'log', name: 'Read', status: 'completed', output: 'ok' }),
+      event(5, 'text', { text: '日志正常', role: 'assistant' })
+    ]);
+    const sections = buildTimelineSections(timeline, tasks);
+    expect(sections.some(section => section.kind === 'event' && section.final)).toBe(false);
+    expect(sections.filter(section => section.kind === 'activity').at(-1)).toMatchObject({ taskStatus: 'running' });
+  });
+
   it('never promotes intermediate assistant text to final while the task is still running', () => {
     const tasks = [{ id: 'task-1', sessionId: 's1', prompt: '继续', status: 'running', createdAt: '', updatedAt: '' }];
     const timeline = buildTimeline([

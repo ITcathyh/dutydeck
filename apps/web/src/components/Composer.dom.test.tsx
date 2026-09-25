@@ -262,6 +262,16 @@ describe('Composer 排队任务', () => {
     expect((screen.getByRole('button', { name: '打断当前任务并执行' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it('Agent 可插话且正在执行时提供「立即插话」，空闲时不提供', async () => {
+    const user = userEvent.setup();
+    const onInjectQueued = vi.fn();
+    const { rerender } = render(<Composer {...baseProps} state="thinking" steerable queuedTasks={[task('t1', '第一条')]} onInjectQueued={onInjectQueued}/>);
+    await user.click(screen.getByRole('button', { name: '立即插话' }));
+    expect(onInjectQueued).toHaveBeenCalledWith('t1');
+    rerender(<Composer {...baseProps} steerable queuedTasks={[task('t1', '第一条')]} onInjectQueued={onInjectQueued}/>);
+    expect(screen.queryByRole('button', { name: '立即插话' })).toBeNull();
+  });
+
   it('无排队任务时不渲染排队区', () => {
     render(<Composer {...baseProps}/>);
     expect(screen.queryByText('等待发送')).toBeNull();
@@ -382,6 +392,20 @@ describe('Composer 浮层缺陷回归', () => {
     expect(screen.getByText('打断并立即发送')).toBeTruthy();
     rerender(<Composer {...baseProps} state="thinking" value=""/>);
     expect(screen.queryByText('打断并立即发送')).toBeNull();
+  });
+
+  it('Agent 可插话时发送模式菜单多一项「插话到当前这一轮」', async () => {
+    const user = userEvent.setup();
+    const onModeChange = vi.fn();
+    const { rerender } = render(<Composer {...baseProps} state="thinking" value="补充要求" steerable onModeChange={onModeChange}/>);
+    await user.click(screen.getByRole('button', { name: /排队/ }));
+    await user.click(screen.getByText('插话到当前这一轮'));
+    expect(onModeChange).toHaveBeenCalledWith('steer');
+    rerender(<Composer {...baseProps} state="thinking" value="补充要求" mode="steer" steerable/>);
+    expect(screen.getByRole('button', { name: /插话/ })).toBeTruthy();
+    rerender(<Composer {...baseProps} state="thinking" value="补充要求"/>);
+    await user.click(screen.getByRole('button', { name: /排队/ }));
+    expect(screen.queryByText('插话到当前这一轮')).toBeNull();
   });
 
   it('发送模式菜单响应 Escape（旧实现两个都不听）', async () => {
