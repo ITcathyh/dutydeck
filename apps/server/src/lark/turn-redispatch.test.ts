@@ -1,11 +1,34 @@
 import { describe, expect, it } from 'vitest';
+import { toAcpNotifications } from '@agentclientprotocol/claude-agent-acp';
+import { normalizeAcpxEvent } from '@dutydeck/acp-client';
 import type { AgentEvent } from '@dutydeck/shared';
 import { isRestartInterruption, larkHeldReason, larkLastActivityAt, larkRedispatchAgentNote, larkReplayUnsafeReason } from './turn-redispatch.js';
 
-const tool = (name: string, input?: unknown, type: 'tool_call' | 'tool_result' = 'tool_call'): AgentEvent => ({
-  id: `evt_${name}`, sessionId: 'ses', sequence: 1, type, timestamp: '2026-09-25T00:00:00.000Z',
-  data: { id: 'call', name, status: 'running', ...(input === undefined ? {} : { input }) }
+let calls = 0;
+const tool = (name: string, input?: unknown, type: 'tool_call' | 'tool_result' = 'tool_call', id = `call_${++calls}`): AgentEvent => ({
+  id: `evt_${id}_${type}`, sessionId: 'ses', sequence: 1, type, timestamp: '2026-09-25T00:00:00.000Z',
+  data: { id, name, status: 'running', ...(input === undefined ? {} : { input }) }
 });
+/**
+ * 内置 Claude ACP 适配器为一次工具调用发出的通知（claude-agent-acp 的 toAcpNotifications，会话目录 /repo）：流式时先发一条参数为空的
+ * tool_call，完整消息到了再补参数；streamed 为 false 时第一条就带完整参数（权限请求先发出、回放）。之后是工具结果。
+ * 再按 acpx 0.13 createToolCallEvent 的转法（缺省标题 tool call，转发 rawInput）交给 normalizeAcpxEvent，得到落库的事件。
+ */
+const claudeAcp = (name: string, input: Record<string, unknown>, streamed = true): AgentEvent[] => {
+  const id = `toolu_${++calls}`, cache = {}, emittedToolCalls = new Set<string>();
+  const notify = (content: unknown[], role: 'assistant' | 'user') =>
+    toAcpNotifications(content as any, role, 'ses', cache, {} as any, console, { registerHooks: false, cwd: '/repo', emittedToolCalls });
+  const updates = [
+    ...(streamed ? notify([{ type: 'tool_use', id, name, input: {} }], 'assistant') : []),
+    ...notify([{ type: 'tool_use', id, name, input }], 'assistant'),
+    ...notify([{ type: 'tool_result', tool_use_id: id, content: 'ok', is_error: false }], 'user')
+  ].map(notification => notification.update as Record<string, any>);
+  return updates.map((update, index) => ({
+    id: `${id}_${index}`, sessionId: 'ses', sequence: index + 1, timestamp: '2026-09-25T00:00:00.000Z',
+    ...normalizeAcpxEvent({ type: 'tool_call', tag: update.sessionUpdate, toolCallId: update.toolCallId, title: update.title || 'tool call',
+      ...(update.status ? { status: update.status } : {}), ...(update.kind ? { kind: update.kind } : {}), ...('rawInput' in update ? { rawInput: update.rawInput } : {}) })!
+  }) as AgentEvent);
+};
 const bash = (command: string) => tool('Bash', { command, description: '' });
 const codex = (command: string) => tool(command, { command: ['/usr/bin/zsh', '-lc', command], cwd: '/work' });
 
@@ -26,11 +49,38 @@ describe('被重启切断的一轮能不能安全重投', () => {
       bash("sed -n '1,200p' src/index.ts; wc -l src/*.ts"),
       bash('find . -name "*.ts" -type f | head -20'),
       bash('curl -s https://example.com/api/items'),
+      bash("curl -sSL -H 'Accept: application/json' https://example.com/api && curl -XGET https://example.com && curl --request HEAD https://example.com"),
+      bash('curl -I https://example.com && curl -m 10 --retry 2 -A dutydeck https://example.com'),
       bash('git -C /work diff --stat && git branch --show-current'),
       codex("rg -n 'foo' apps && cat README.md"),
       codex('ls -la')
     ];
     expect(larkReplayUnsafeReason(events)).toBeUndefined();
+  });
+
+  it('内置 Claude ACP 适配器产生的只读工具调用（标题形如 Read /work/alerts.md）不算外部副作用', () => {
+    const read = claudeAcp('Read', { file_path: '/work/alerts.md' });
+    expect(read.map(event => event.data)).toMatchObject([{ name: 'Read File' }, { name: 'Read /work/alerts.md', input: { file_path: '/work/alerts.md' } }, { name: 'tool call' }]);
+    const events = [
+      ...read, ...claudeAcp('Read', { file_path: '/repo/a.ts', offset: 10, limit: 20 }),
+      ...claudeAcp('Glob', { pattern: '**/*.ts', path: '/repo' }), ...claudeAcp('Grep', { pattern: 'alert', path: '/repo', output_mode: 'content', '-n': true }),
+      ...claudeAcp('WebFetch', { url: 'https://example.com', prompt: 'summary' }), ...claudeAcp('WebSearch', { query: 'dutydeck' }),
+      ...claudeAcp('Bash', { command: 'git status && git log --oneline -3', description: 'Show status' }),
+      // Codex 的结果事件也只有缺省名，与开始事件同 id。
+      tool("Read file '/work/a.ts'", undefined, 'tool_call', 'codex_read'), tool('tool call', undefined, 'tool_result', 'codex_read')
+    ];
+    expect(larkReplayUnsafeReason(events)).toBeUndefined();
+  });
+
+  it.each([
+    [claudeAcp('Bash', { command: 'git push origin HEAD', description: 'Push' }), '执行过 git push'],
+    [claudeAcp('Write', { file_path: '/repo/a.md', content: 'x' }), '调用过 Write'],
+    [claudeAcp('Edit', { file_path: '/repo/a.md', old_string: 'a', new_string: 'b' }), '调用过 Edit'],
+    [claudeAcp('mcp__lark__send_message', { text: 'hi' }), '调用过 mcp__lark__send_message'],
+    // 子 Agent 的标题是它的描述，碰巧以 Read 开头也不能认成读文件。
+    [claudeAcp('Agent', { description: 'Read the alerts and reply', prompt: 'do it', subagent_type: 'general-purpose' }, false), '调用过无法判断是否只读的工具']
+  ])('内置 Claude ACP 适配器产生的可能对外生效的工具调用按不安全处理：%#', (events, reason) => {
+    expect(larkReplayUnsafeReason(events)).toBe(reason);
   });
 
   it.each([
@@ -40,6 +90,10 @@ describe('被重启切断的一轮能不能安全重投', () => {
     [bash("curl -X POST https://example.com/api -d '{}'"), '执行过 curl'],
     [bash('curl -sXPOST https://example.com/api'), '执行过 curl'],
     [bash('curl --data-raw x https://example.com/api'), '执行过 curl'],
+    [bash('curl --request=POST https://example.com/api'), '执行过 curl'],
+    [bash("curl -d'{}' https://example.com/api"), '执行过 curl'],
+    [bash('curl -o/tmp/page.html https://example.com'), '执行过 curl'],
+    [bash('curl --unknown-flag https://example.com'), '执行过 curl'],
     [bash('rm -rf dist'), '执行过 rm'],
     [bash('echo hi > notes.txt'), '执行过无法判断是否只读的命令'],
     [bash('cat <<EOF > a.txt\nx\nEOF'), '执行过无法判断是否只读的命令'],

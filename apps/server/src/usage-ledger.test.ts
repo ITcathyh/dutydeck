@@ -37,13 +37,14 @@ describe('usage measurement', () => {
   });
 
   it('estimates codex turns from tokens with the price table and marks them as estimates', () => {
-    const tokens = { inputTokens: 1_000_000, outputTokens: 100_000, cacheReadTokens: 600_000 };
+    // 适配器报的 inputTokens 已扣掉缓存命中，缓存单列：这是 100 万输入（其中 60 万命中缓存）+ 10 万输出。
+    const tokens = { inputTokens: 400_000, outputTokens: 100_000, cacheReadTokens: 600_000 };
     // gpt-5 前缀：40 万非缓存 × 1.25 + 60 万缓存 × 0.125 + 10 万输出 × 10，单位百万 token。
     expect(estimateCostUsd(defaultUsagePricing, 'gpt-5-codex', tokens)).toBeCloseTo(0.5 + 0.075 + 1);
     expect(estimateCostUsd(defaultUsagePricing, 'gpt-5-mini', tokens)).toBeCloseTo(0.1 + 0.015 + 0.2);
     expect(estimateCostUsd(defaultUsagePricing, undefined, tokens)).toBeCloseTo(0.5 + 0.075 + 1);
-    const measured = measureUsage({ reading: { usageRef: 'req_2', breakdown: { inputTokens: 1_000_000, outputTokens: 100_000, cachedReadTokens: 600_000 } }, freshTokens: true, model: 'gpt-5-codex', pricing: defaultUsagePricing });
-    expect(measured).toMatchObject({ costEstimated: true, dataStatus: 'estimated', inputTokens: 1_000_000 });
+    const measured = measureUsage({ reading: { usageRef: 'req_2', breakdown: { inputTokens: 400_000, outputTokens: 100_000, cachedReadTokens: 600_000 } }, freshTokens: true, model: 'gpt-5-codex', pricing: defaultUsagePricing });
+    expect(measured).toMatchObject({ costEstimated: true, dataStatus: 'estimated', inputTokens: 400_000, cacheReadTokens: 600_000 });
     expect(measured.costUsd).toBeCloseTo(1.575);
     expect(measureUsage({ freshTokens: false, pricing: defaultUsagePricing })).toEqual({ costEstimated: false, dataStatus: 'unavailable' });
     const custom = parseUsagePricing(JSON.stringify({ default: { inputPerMTok: 1, cachedInputPerMTok: 1, outputPerMTok: 1 }, models: [] }));
