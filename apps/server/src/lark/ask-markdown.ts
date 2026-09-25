@@ -6,11 +6,15 @@
  * 仅放行 http/https 链接；图片、javascript:、file: 等一律按字面文本展示。
  */
 
-/** 飞书 @ 提及是结构化标记，转义掉其 ID 里的下划线会让整张卡非法，需整段保留。 */
-const ESCAPE_PATTERN = /<at\s+id=(?:"ou_[\w-]+"|'ou_[\w-]+'|ou_[\w-]+)\s*><\/at>|[*_~`[\]\\]/g;
+/** 飞书卡片要求 `<`、`>`、`&` 使用 HTML 实体转义，其余 Markdown 特殊字符按反斜杠转义。 */
+const ESCAPE_PATTERN = /[*_~`[\]\\]/g;
 
 function escapeMd(s: string): string {
-  return s.replace(ESCAPE_PATTERN, token => (token.startsWith('<at') ? token : `\\${token}`));
+  return s
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replace(ESCAPE_PATTERN, token => `\\${token}`);
 }
 
 /**

@@ -294,7 +294,7 @@ describe('coordinator 把验证状态带上结果卡', () => {
 
     const response = await h.coordinator.handleAction(verify, 'ou_alice', { messageId: 'om_card_2', chatId: 'oc_group' });
     expect(response).toMatchObject({ type: 'success' });
-    await vi.waitFor(() => expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'pnpm test' }));
+    await vi.waitFor(() => expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'pnpm test' }, 'ou_alice'));
     // 完成后原样重绘同一张结果卡，只换掉验证状态行。
     await vi.waitFor(() => {
       const patched = h.service.update.mock.calls.map(([input]) => input)
@@ -317,7 +317,7 @@ describe('coordinator 把验证状态带上结果卡', () => {
     await restarted.initializeWorkflows(h.config);
     const response = await restarted.handleAction(verify, 'ou_alice', { messageId: finalMessageId, chatId: 'oc_group' });
     expect(response).toMatchObject({ type: 'success' });
-    await vi.waitFor(() => expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'pnpm test' }));
+    await vi.waitFor(() => expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'pnpm test' }, 'ou_alice'));
     await vi.waitFor(() => {
       const patched = h.service.update.mock.calls.map(([input]) => input).filter(input => input.messageId === finalMessageId);
       expect(patched.at(-1)!.elements.find((element: any) => element.element_id === LARK_VERIFICATION_ELEMENT_ID).content).toContain('验证通过');

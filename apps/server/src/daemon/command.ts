@@ -50,7 +50,7 @@ export interface DaemonCommandResult {
 }
 
 const READY_TIMEOUT_MS = 15_000;
-const DRAIN_INTERVAL_MS = 5_000;
+export const DRAIN_INTERVAL_MS = 5_000;
 const ACTIVITY_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_SECONDS = 900;
 const RESTART_HOST_ENV = 'DUTYDECK_DAEMON_RESTART_HOST';
@@ -141,8 +141,11 @@ const DRAIN_LEASE_SECONDS = 60;
 /** 连运行时本机 API 用的三项：守护状态文件里的记录，或由 unit / deployment.json 推出来的同样信息。 */
 export type RuntimeEndpoint = Pick<DaemonState, 'address' | 'database' | 'authEnabled'>;
 
-/** 等待成功时 release 退出排空；调用方在随后的重启失败、旧进程还在跑时用它恢复执行。 */
-export type DrainResult = { ok: true; release?: () => Promise<void> } | { ok: false; error: string; runningTasks: number };
+/**
+ * 等待成功时 release 退出排空；调用方在随后的重启失败、旧进程还在跑时用它恢复执行。
+ * renew 把排空租约再续一个 DRAIN_LEASE_SECONDS：停旧进程前还有耗时步骤（如备份数据库）时定期调用。
+ */
+export type DrainResult = { ok: true; release?: () => Promise<void>; renew?: () => Promise<void> } | { ok: false; error: string; runningTasks: number };
 
 const invalidDrainTimeout = (options: Pick<CliOptions, 'drainTimeout'>): DrainResult => ({
   ok: false, runningTasks: 0,
@@ -265,6 +268,7 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
     warn(hold.status === 404 ? '当前服务版本不支持排空，等待期间仍可能开始新的任务。' : `进入排空失败（${hold.error}），等待期间仍可能开始新的任务。`);
   }
   const release = hold.ok ? async () => { await setDrain(false); } : undefined;
+  const renew = hold.ok ? async () => { await setDrain(true); } : undefined;
   const refuse = async (error: string, runningTasks: number): Promise<DrainResult> => {
     await release?.();
     return { ok: false, error, runningTasks };
@@ -272,7 +276,7 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
 
   const initial = await queryRunningTasks();
   if (!initial.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${initial.error}）`), 0);
-  if (initial.runningTasks === 0) return { ok: true, release };
+  if (initial.runningTasks === 0) return { ok: true, release, renew };
 
   info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）${hold.ok ? '。等待期间新消息照常排队，重启后由新进程执行' : ''}`);
 
@@ -300,7 +304,7 @@ async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
   }
-  return { ok: true, release };
+  return { ok: true, release, renew };
 }
 
 export interface DaemonCommandHandlers extends DaemonCommandDeps {
@@ -839,6 +843,8 @@ export interface ServiceControl {
   mainPid(): Promise<number | undefined>;
   /** 重启服务；失败时返回原因。 */
   restart(): Promise<string | undefined>;
+  /** 停服务；失败时返回原因。回滚要恢复数据库时用，停下后再用 restart 启动。 */
+  stop(): Promise<string | undefined>;
   /** 清掉失败计数（systemd 的 start-limit）；回滚前用，免得刚才的崩溃循环挡住回滚。 */
   resetFailed?(): Promise<void>;
 }
@@ -850,6 +856,10 @@ export function systemdServiceControl(unit: string, deps: DaemonCommandDeps): Se
     restart: async () => {
       const restarted = await run('systemctl', ['--user', 'restart', unit]);
       return restarted.status === 0 ? undefined : systemctlFailure('restart', unit, restarted);
+    },
+    stop: async () => {
+      const stopped = await run('systemctl', ['--user', 'stop', unit]);
+      return stopped.status === 0 ? undefined : systemctlFailure('stop', unit, stopped);
     },
     resetFailed: async () => { await run('systemctl', ['--user', 'reset-failed', unit]); }
   };

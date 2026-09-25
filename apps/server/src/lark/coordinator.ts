@@ -42,6 +42,7 @@ import { deliverLarkCompletionReaction, larkResultKey, larkSilentResultAnchor, s
 import { performLarkCardReconcile, type LarkInterruptedTurn } from './reconciler.js';
 import { isRestartInterruption, larkHeldWebNote, larkLastActivityAt, larkRedispatchAgentNote, larkRedispatchCardNote, larkRedispatchedCardMarkdown, larkRedispatchLimit,
   larkRedispatchMaxAgeMs, larkRedispatchWebNote, larkReplayUnsafeReason, type LarkHeldCause, type LarkRedispatchInfo } from './turn-redispatch.js';
+import { larkSessionDetailUrl } from './detail-link.js';
 import { isLarkCardActionAvailable, isLarkCardFollowUpPrompt, larkCardActionLabel, larkCardFollowUpPrompt, larkRelaunchLabels, parseLarkCardActionValue, type LarkCardActionState, type LarkCardActionValue, type LarkCardCapabilities } from './card-actions.js';
 import {
   larkCommandCapabilities,
@@ -295,6 +296,13 @@ const larkDetailLoginElements = (url: string): LarkCardElement[] => [
   { tag: 'markdown', content: '点击下方按钮登录 Dutydeck Web，并打开这个任务的会话页。', margin: '0px' },
   { tag: 'button', text: { tag: 'plain_text', content: '打开任务详情' }, type: 'primary', behaviors: [{ type: 'open_url', default_url: url }], margin: '0px' },
   { tag: 'markdown', content: "<font color='grey'>10 分钟内有效、只能用一次，不要转发。</font>", text_size: 'notation', margin: '0px' }
+];
+
+/** 私信里的只读详情卡：和新卡页脚「查看详情」是同一个分享链接 */
+const larkSessionShareElements = (url: string): LarkCardElement[] => [
+  { tag: 'markdown', content: '点击下方按钮打开这个任务的只读详情页，不用登录。', margin: '0px' },
+  { tag: 'button', text: { tag: 'plain_text', content: '打开任务详情' }, type: 'primary', behaviors: [{ type: 'open_url', default_url: url }], margin: '0px' },
+  { tag: 'markdown', content: "<font color='grey'>只能查看这一个任务；管理员轮换分享密钥后失效。</font>", text_size: 'notation', margin: '0px' }
 ];
 
 const larkExecutionIdentityLine = () =>
@@ -1502,9 +1510,12 @@ export class LarkMessageCoordinator {
         // 当前一轮停在审批上、后面还有指令排队时给一个拒绝入口：按钮与 /tasks 行内审批同形，
         // 登记成任务导航卡后由 respond 照常做鉴权和一次性决议。
         const approval = sessionId ? (await this.approvalBlock(config.appId, sessionId))?.record : undefined;
-        const card = await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation, usage].filter(Boolean).join('\n\n'),
-          approval ? { elements: [{ tag: 'button', element_id: 'status_reject_approval', type: 'danger', text: { tag: 'plain_text', content: '拒绝这条审批' },
-            behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: approval.id, generation: approval.boot } }] }] } : {});
+        const status = [await this.describeChatStatus(config, sessionId, latestTask), participation, usage].filter(Boolean).join('\n\n');
+        // 卡片带了 elements 就不再渲染 markdown 正文，正文要作为第一个元素放在按钮前面。
+        const card = await replyCard('任务状态', status,
+          approval ? { elements: [{ tag: 'markdown', element_id: 'status_body', content: status, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
+            { tag: 'button', element_id: 'status_reject_approval', type: 'danger', text: { tag: 'plain_text', content: '拒绝这条审批' },
+              behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: approval.id, generation: approval.boot } }] }] } : {});
         if (card && approval) {
           await this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
             messageId: event.messageId, chatId: event.chatId, chatType: event.chatType,
@@ -2200,6 +2211,8 @@ export class LarkMessageCoordinator {
 
   /**
    * 「查看详情」回调（仅 Web 要求登录时渲染）：管理员收到一条私信，内含绑定该会话的一次性登录链接。
+   * 一键登录停用（没有 loginLinks）后新卡不再渲染这个按钮，但已经发出的旧卡上还有：这时私信的是这个
+   * 会话的只读分享链接，和新卡页脚同一个链接。新卡页脚群里谁都能看到，所以这条路不走管理员门。
    *
    * 回调里不信任卡片上的任何值：会话按平台给出的 open_message_id 从卡片账本里查，账本记录必须属于
    * 当前机器人和当前群。旧卡同样受理（查看详情只读）：重试旧卡跳到任务现在所在的会话，转交旧卡跳原会话。
@@ -2208,7 +2221,7 @@ export class LarkMessageCoordinator {
    */
   private async handleDetailLogin(operatorOpenId?: string, context?: { messageId?: string; chatId?: string }, target?: { taskId: string; turn?: number }) {
     const links = this.workflowOptions.loginLinks;
-    if (!links || !operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig || !this.cardMappings || !this.workflowOptions.store) {
+    if (!operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig || !this.cardMappings || !this.workflowOptions.store) {
       return { type: 'error', content: '详情入口已失效，请在最新的任务卡片上操作。' };
     }
     try {
@@ -2242,14 +2255,16 @@ export class LarkMessageCoordinator {
       })) {
         return { type: 'warning', content: '找不到这张卡片对应的任务记录，无法打开详情。' };
       }
-      // 链接兑换后等同登录，与 /repair 同一道安装级门；谁能拿到链接完全由这道门决定。
-      if (!await this.isInstallationOperatorAllowed(config, operatorOpenId, context.chatId)) {
+      // 登录链接兑换后等同登录，与 /repair 同一道安装级门；谁能拿到链接完全由这道门决定。
+      if (links && !await this.isInstallationOperatorAllowed(config, operatorOpenId, context.chatId)) {
         return { type: 'warning', content: 'Web 详情仅机器人管理员可打开；完整执行记录可点「导出执行记录」获取' };
       }
-      const url = `${webBaseUrl}/api/auth/link?code=${links.issue(card.sessionId)}`;
+      const elements = links
+        ? larkDetailLoginElements(`${webBaseUrl}/api/auth/link?code=${links.issue(card.sessionId)}`)
+        : larkSessionShareElements(larkSessionDetailUrl(webBaseUrl, card.sessionId));
       try {
-        await this.service.send({ receiveId: operatorOpenId, receiveIdType: 'open_id', taskName: '登录 Dutydeck Web', state: 'completed', readOnly: true,
-          permissionMode: larkPermissionMode(config), elements: larkDetailLoginElements(url) });
+        await this.service.send({ receiveId: operatorOpenId, receiveIdType: 'open_id', taskName: links ? '登录 Dutydeck Web' : '任务详情', state: 'completed', readOnly: true,
+          permissionMode: larkPermissionMode(config), elements });
       } catch (error) {
         const upstreamCode = error instanceof LarkServiceError ? Number(error.details?.upstreamCode) : undefined;
         this.log.warn({ upstreamCode, messageId: context.messageId }, '私信 Web 登录链接失败');
@@ -2258,7 +2273,7 @@ export class LarkMessageCoordinator {
           ? '私信发送失败：你不在机器人应用的可用范围内，请联系管理员把你加入可用范围。链接没有发出。'
           : `私信发送失败（飞书返回码 ${Number.isFinite(upstreamCode) ? upstreamCode : '未知'}），链接没有发出，请稍后重试。` };
       }
-      return { type: 'success', content: '已私信你一个 10 分钟内有效的登录链接' };
+      return { type: 'success', content: links ? '已私信你一个 10 分钟内有效的登录链接' : '已私信你这个任务的只读详情链接' };
     } catch (error) {
       this.log.warn({ error, messageId: context.messageId }, '受理查看详情失败');
       return { type: 'error', content: '暂时无法打开详情，请稍后重试。' };
@@ -2786,7 +2801,8 @@ export class LarkMessageCoordinator {
       let failure: unknown;
       // 任务完成事件发出后运行时还要收尾一小段队列，这期间会话短暂忙；一直忙说明有别的任务在排队，这次跳过。
       for (let attempt = 1; ; attempt++) {
-        try { record = await this.runtime.runVerification!(task.sessionId!, { command: plan.command }); break; }
+        // 带上发起人：管理群的执行授权要求验证也有可核验的发起人。
+        try { record = await this.runtime.runVerification!(task.sessionId!, { command: plan.command }, task.event.senderOpenId); break; }
         catch (error) {
           failure = error;
           if (!(error instanceof RuntimeError && error.code === 'SESSION_BUSY') || attempt >= 20 || this.stopped || task.turn !== plan.turn) break;
@@ -3781,7 +3797,8 @@ export class LarkMessageCoordinator {
       this.verifyInFlight.add(task.id);
       const command = effectiveConfig.verificationCommand!.trim();
       void (async () => {
-        try { await this.runtime.runVerification!(task.sessionId!, { command }); }
+        // 带上点击人：管理群的执行授权要求验证有可核验的发起人。
+        try { await this.runtime.runVerification!(task.sessionId!, { command }, operatorOpenId); }
         catch (error) { this.log.warn({ error, taskId: task.id }, '运行验证失败，卡片按最新记录呈现'); }
         finally {
           // 先把卡刷成最新结论再放开重入：否则这段空档里的第二次点击会再起一个真实进程。

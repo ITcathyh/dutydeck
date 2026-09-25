@@ -6,7 +6,8 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readF
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions } from '../cli-program.js';
-import { drainRuntime, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
+import { pidAlive } from './daemon.js';
+import { DRAIN_INTERVAL_MS, drainRuntime, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
 
 /**
  * `dutydeck deploy`：把一个已构建好的检出目录做成不可变的发布目录，排空后切换 `current` 并重启，
@@ -233,6 +234,21 @@ async function backupSqlite(source: string, target: string): Promise<void> {
 
 const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
+/** 库里已经应用到的迁移版本（schema_migrations 的最大值），没有这张表时为 0；打不开返回 undefined。 */
+function schemaVersion(file: string): number | undefined {
+  try {
+    const db = new Database(file, { readonly: true, fileMustExist: true });
+    try {
+      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()) return 0;
+      return (db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get() as { version: number }).version;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 /** 部署成功后按版本名保留最新的几个发布目录和部署记录；current、上一版和仍被运行中进程引用的另外保留。 */
 export const RELEASES_TO_KEEP = 5;
 /** 写进 manifest.json 的来源标记：只有带它的部署记录才会被自动清理，手工部署留下的记录不动。 */
@@ -409,6 +425,58 @@ function updateDeploymentFile(target: DeployTarget, release: string, commit: str
 
 // ─── 部署 ────────────────────────────────────────────────────────────────────
 
+/**
+ * 排空成功后每 DRAIN_INTERVAL_MS 续一次租约，直到旧进程退出或调用返回的 stop：备份（Tag 库备份可能超过
+ * 60 秒的租约）、切换、重启期间旧进程都不会开始执行排队的任务。旧进程一退出就不再续，免得续到新进程上。
+ */
+function keepDraining(drain: DrainResult, pid: number | undefined): () => Promise<void> {
+  const renew = drain.ok ? drain.renew : undefined;
+  if (!renew || pid === undefined) return async () => {};
+  let renewal: Promise<void> | undefined;
+  const timer = setInterval(() => {
+    if (pidAlive(pid)) renewal = renew();
+    else clearInterval(timer);
+  }, DRAIN_INTERVAL_MS);
+  timer.unref();
+  return async () => {
+    clearInterval(timer);
+    await renewal;
+  };
+}
+
+/**
+ * 回滚前按需恢复数据库：新版本可能已经跑了迁移，旧版本见到更新的库会以 DATABASE_SCHEMA_TOO_NEW 拒绝启动。
+ * 迁移版本和部署前的备份不同（或读不出来）时停服务，把当前库另存为「回滚前」，再用部署前的备份覆盖；
+ * 版本没变就不动数据库。返回失败原因；另存失败时不覆盖当前库。
+ */
+async function restoreDatabaseForRollback(
+  service: ServiceControl, database: string, backup: string, record: string, manifest: Record<string, unknown>, deps: DeployDeps, info: (message: string) => void
+): Promise<string | undefined> {
+  const before = typeof manifest.schema_version_before === 'number' ? manifest.schema_version_before : undefined;
+  const current = schemaVersion(database);
+  manifest.schema_version_at_rollback = current ?? null;
+  if (before === undefined) return `读不出部署前备份 ${backup} 的迁移版本，没有恢复数据库。`;
+  if (current === before) return undefined;
+  info(`库的迁移版本从 ${before} 变成了 ${current ?? '（读不出）'}，停服务，另存当前库后用部署前的备份恢复。`);
+  const stopped = await service.stop();
+  if (stopped) return `停服务失败，没有恢复数据库：${stopped}`;
+  const copy = deps.backupDatabase ?? backupSqlite;
+  const beforeRollback = join(record, `${basename(database)}.before-rollback`);
+  try {
+    await copy(database, beforeRollback);
+  } catch (error) {
+    return `另存回滚前的数据库失败，没有恢复：${message(error)}`;
+  }
+  manifest.database_before_rollback = beforeRollback;
+  try {
+    await copy(backup, database);
+  } catch (error) {
+    return `用部署前的备份恢复数据库失败（回滚前的库已另存为 ${beforeRollback}）：${message(error)}`;
+  }
+  manifest.database_restored = true;
+  return undefined;
+}
+
 async function restartAndCheck(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DeployDeps) {
   const error = await service.restart();
   if (error) return { ok: false as const, error };
@@ -521,6 +589,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
     drain = await drainRuntime(target.endpoint, options, deps);
     if (!drain.ok) return finish('failed', { error: drain.error });
   }
+  const stopRenewing = keepDraining(drain, previousPid);
   const database = target.endpoint.database;
   if (database && existsSync(database)) {
     const backup = join(record, basename(database));
@@ -528,7 +597,9 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
     try {
       await (deps.backupDatabase ?? backupSqlite)(database, backup);
       manifest.database_backup = backup;
+      manifest.schema_version_before = schemaVersion(backup) ?? null;
     } catch (error) {
+      await stopRenewing();
       await drain.release?.();
       return finish('failed', { error: `备份数据库失败，没有切换版本：${message(error)}` });
     }
@@ -537,6 +608,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   info(`切换 current → ${id}，重启 ${target.unit}`);
   pointCurrent(target.releases, release);
   const started = await restartAndCheck(service, previousPid, target.endpoint.address, deps);
+  await stopRenewing();
   if (started.ok) {
     info(`健康检查通过（pid ${started.pid}）`);
     updateDeploymentFile(target, release, build.commit, manifestPath, now());
@@ -547,9 +619,15 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
 
   warn(`新版本没有通过健康检查，切回 ${basename(previousRelease)} 并重启。原因：${started.error}`);
   pointCurrent(target.releases, previousRelease);
+  manifest.database_restored = false;
+  const restoreError = database && typeof manifest.database_backup === 'string'
+    ? await restoreDatabaseForRollback(service, database, manifest.database_backup, record, manifest, deps, info)
+    : undefined;
+  if (restoreError) warn(restoreError);
   await service.resetFailed?.();
   const back = await restartAndCheck(service, await service.mainPid(), target.endpoint.address, deps);
+  const restoreNote = restoreError ? `数据库：${restoreError}` : manifest.database_restored ? '数据库已用部署前的备份恢复。' : '';
   return back.ok
-    ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}。原因：${started.error}` })
-    : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康。新版本：${started.error}上一版：${back.error}` });
+    ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}。原因：${started.error}${restoreNote}` })
+    : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康。新版本：${started.error}上一版：${back.error}${restoreNote}` });
 }
