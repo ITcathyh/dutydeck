@@ -250,6 +250,23 @@ export class LarkMemoryStore {
     return stored.entries;
   }
 
+  /**
+   * 只读的 list：不触发旧账本迁移，不写任何键。给别的机器人读本池用（同群其他机器人的偏好），
+   * 读取方不替池的主人改写它的账本。群池里该群的旧账本还没并入时，把它的有效条目一并读出并补上来源群。
+   */
+  async peek(scope: LarkMemoryScope): Promise<LarkMemoryEntry[]> {
+    let legacy: LarkMemoryEntry[] = [];
+    if (isLarkGroupMemoryPool(scope) && scope.chatId !== scope.pool) {
+      // 先读旧键再读池：迁移是先并入池、再给旧键写占位，按这个顺序读不会两边都错过。
+      const legacyKey = larkMemoryKey({ appId: scope.appId, pool: scope.chatId });
+      const raw = unmigrated(await this.configs.get(legacyKey));
+      if (raw) legacy = parseLarkMemoryLedger(raw, legacyKey).entries.map(entry => ({ ...entry, chatId: entry.chatId ?? scope.chatId }));
+    }
+    const { stored } = await this.readKey(larkMemoryKey(scope));
+    const entries = stored.migratedChats?.[scope.chatId] ? stored.entries : [...stored.entries, ...legacy];
+    return entries.filter(entry => !entry.deletedAt);
+  }
+
   /** 按主题组织有效记忆：主题按首次出现顺序，组内按创建时间升序。 */
   async byTopic(scope: LarkMemoryScope): Promise<Map<string, LarkMemoryEntry[]>> {
     const live = await this.list(scope);

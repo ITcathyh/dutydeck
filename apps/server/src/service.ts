@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
+import { localLoopbackUrl } from './local-api-url.js';
 import { WorkItemService } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
@@ -28,7 +29,7 @@ import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGro
 import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
-import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
+import { getAuthToken, loadOrCreateAuthToken, LoginLinkStore, tokensEqual } from './auth/auth.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
   createDutydeckPersistentBackend,
@@ -81,8 +82,7 @@ export function accessMode(config: Pick<AppConfig, 'host' | 'authEnabled'>): 'lo
 }
 
 function localApiBaseUrl(config: Pick<AppConfig, 'host' | 'port'>) {
-  const host = config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host;
-  return `http://${host.includes(':') ? `[${host}]` : host}:${config.port}`;
+  return localLoopbackUrl(config.host, config.port);
 }
 
 /** Production PTY-CLI policy: persistent tmux or a hard failure, never an
@@ -167,6 +167,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   } else {
     process.stderr.write('[dutydeck] WARNING: authentication is disabled. Everyone who can reach this address can view tasks, control Agents, and access terminals. Use only on a trusted network or behind upstream authentication.\n');
   }
+  // 只有 Web 要求登录时，飞书卡片的「查看详情」才换发一次性登录链接；本机免密和 --no-auth 仍直接打开。
+  const loginLinks = mode === 'token' ? new LoginLinkStore() : undefined;
   const resolveInstallationPrincipal = createInstallationPrincipalResolver({
     authEnabled: config.authEnabled,
     mode,
@@ -400,11 +402,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
           pipeline: memoryPipeline
         },
         listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
+        loginLinks,
       },
       auth: {
         mode,
         getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
-        localOnly: mode === 'local'
+        localOnly: mode === 'local',
+        loginLinks
       },
       terminal: {
         provider: terminalProvider,

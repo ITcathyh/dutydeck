@@ -118,6 +118,10 @@ describe('Feishu controls with real Runtime, SQLite and PTY driver', () => {
     expect(card).toMatchObject({ state: 'queued', statusLabel: '排队受阻', readOnly: false });
     expect(card.markdown).toContain('上次停止执行进程未成功');
     expect(card.markdown).toContain('/cancel');
+    // 没有入站记录与持久化认领时转不了新会话：不渲染按钮，正文也不提。
+    expect(card.capabilities).not.toHaveProperty('canRelaunch');
+    expect(card.markdown).not.toContain('在新会话中');
+    expect(card.markdown).toContain('管理员可以用 `dutydeck recovery` 命令核对');
     expect(JSON.stringify(buildLarkCard(card))).toContain('排队等待');
     const status = await (coordinator as any).describeChatStatus(config, h.session.id);
     expect(status).toContain('需要核对');

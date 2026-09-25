@@ -83,6 +83,140 @@ export function reviewStatusLabel(item: WorkItem): string | undefined {
   return verdict === '通过' ? undefined : `验收${verdict ?? '待核对'}`;
 }
 
+export const larkConsultUsage = '用法：/work consult [--agents A,B] -- <问题> 或 /work consult <问题>';
+
+export function parseLarkConsultCommand(input: string, allowedAgents?: string[]): { goal: string; agents?: [string, string] } {
+  const body = input.trim();
+  if (!body) throw new RuntimeError('WORK_ITEM_GOAL_REQUIRED', larkConsultUsage, 400);
+  if (!body.startsWith('--')) return { goal: body };
+
+  let remaining = body;
+  let agents: [string, string] | undefined;
+  const invalid = (msg?: string) => new RuntimeError('WORK_ITEM_CONSULT_USAGE', msg ?? larkConsultUsage, 400);
+  const token = () => {
+    const match = /^(?:"([^"]*)"|'([^']*)'|([^\s"']+))(?=\s|$)/u.exec(remaining);
+    if (!match) throw invalid();
+    remaining = remaining.slice(match[0].length).trimStart();
+    return match[1] ?? match[2] ?? match[3]!;
+  };
+
+  while (remaining) {
+    const flag = token();
+    if (flag === '--') {
+      const goal = remaining.trim();
+      if (!goal) throw new RuntimeError('WORK_ITEM_GOAL_REQUIRED', larkConsultUsage, 400);
+      return { goal, ...(agents ? { agents } : {}) };
+    }
+    if (flag === '--agents') {
+      if (agents !== undefined) throw invalid('重复指定了 --agents 选项');
+      if (!remaining) throw invalid();
+      const rawVal = token();
+      if (!rawVal.trim() || rawVal.startsWith('--')) throw invalid();
+      const parts = rawVal.split(',').map(s => s.trim()).filter(Boolean);
+      if (parts.length !== 2) {
+        throw new RuntimeError('WORK_ITEM_CONSULT_AGENTS_INVALID', '--agents 必须指定两个逗号分隔的 Agent 编号，如 --agents A,B', 400);
+      }
+      if (parts[0] === parts[1]) {
+        throw new RuntimeError('WORK_ITEM_CONSULT_AGENTS_DUPLICATE', '会诊需要指定两个不同的 Agent', 400);
+      }
+      const agentPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
+      if (!agentPattern.test(parts[0]!) || !agentPattern.test(parts[1]!)) {
+        throw new RuntimeError('WORK_ITEM_CONSULT_AGENTS_INVALID', 'Agent 编号格式不正确', 400);
+      }
+      if (allowedAgents) {
+        if (!allowedAgents.includes(parts[0]!)) {
+          throw new RuntimeError('WORK_ITEM_AGENT_NOT_FOUND', `Agent「${parts[0]}」不存在或不可用`, 404);
+        }
+        if (!allowedAgents.includes(parts[1]!)) {
+          throw new RuntimeError('WORK_ITEM_AGENT_NOT_FOUND', `Agent「${parts[1]}」不存在或不可用`, 404);
+        }
+      }
+      agents = [parts[0]!, parts[1]!];
+    } else {
+      throw invalid(`未知选项：${flag}。${larkConsultUsage}`);
+    }
+  }
+  throw invalid();
+}
+
+export function consultWorkPlan(agents: [string, string]): WorkPlan {
+  if (agents.length < 2 || !agents[0] || !agents[1]) {
+    throw new RuntimeError('WORK_ITEM_CONSULT_AGENTS_REQUIRED', '会诊需要提供两个 Agent', 400);
+  }
+  if (agents[0] === agents[1]) {
+    throw new RuntimeError('WORK_ITEM_CONSULT_AGENTS_DUPLICATE', '会诊需要指定两个不同的 Agent', 400);
+  }
+  return {
+    title: '多 Agent 会诊',
+    outputStepId: 'merge',
+    steps: [
+      {
+        id: 'a',
+        title: '独立调查（A）',
+        kind: 'agent',
+        agentId: agents[0],
+        instruction: '围绕目标问题独立调查，输出结论和关键证据。只阅读和分析，不修改文件，明确未验证的事实；最终回答须包含完整调查结果。',
+        dependsOn: [],
+        workspaceMode: 'shared'
+      },
+      {
+        id: 'b',
+        title: '独立调查（B）',
+        kind: 'agent',
+        agentId: agents[1],
+        instruction: '围绕同一个问题独立调查，与其它调查并行且互不依赖，不参考其它步骤的输出。只阅读和分析，不修改文件，明确未验证的事实；最终回答须包含完整调查结果。',
+        dependsOn: [],
+        workspaceMode: 'shared'
+      },
+      {
+        id: 'merge',
+        title: '合并会诊结论',
+        kind: 'agent',
+        agentId: agents[0],
+        instruction: '综合两个独立步骤的成果，读取两份结果，输出一份合并结论。只阅读和分析，不修改文件。结构固定为：\n1. 一句话结论；\n2. 一致点；\n3. 分歧点（每条写出双方的说法和各自的证据，能判断谁更可信就说明理由）；\n4. 建议下一步。\n\n最终回答须严格按此结构输出完整合并报告。',
+        dependsOn: ['a', 'b'],
+        workspaceMode: 'shared'
+      }
+    ]
+  };
+}
+
+export function resolveConsultAgents(
+  requestedAgents: [string, string] | undefined,
+  allowedAgents: string[],
+  defaultAgentId?: string
+): { chosen?: [string, string]; unavailableReason?: string } {
+  if (allowedAgents.length < 2) {
+    return { unavailableReason: '当前可用 Agent 不足两个，无法发起多 Agent 会诊。' };
+  }
+
+  if (requestedAgents) {
+    const [agentA, agentB] = requestedAgents;
+    if (agentA === agentB) {
+      throw new RuntimeError('WORK_ITEM_CONSULT_AGENTS_DUPLICATE', '会诊需要指定两个不同的 Agent', 400);
+    }
+    if (!allowedAgents.includes(agentA)) {
+      throw new RuntimeError('WORK_ITEM_AGENT_NOT_FOUND', `Agent「${agentA}」不存在或不可用`, 404);
+    }
+    if (!allowedAgents.includes(agentB)) {
+      throw new RuntimeError('WORK_ITEM_AGENT_NOT_FOUND', `Agent「${agentB}」不存在或不可用`, 404);
+    }
+    return { chosen: [agentA, agentB] };
+  }
+
+  const agentA = defaultAgentId && allowedAgents.includes(defaultAgentId) ? defaultAgentId : undefined;
+  if (!agentA) {
+    return { unavailableReason: '当前机器人未配置有效默认 Agent，无法发起多 Agent 会诊。' };
+  }
+
+  const agentB = allowedAgents.find(id => id !== agentA);
+  if (!agentB) {
+    return { unavailableReason: '当前可用 Agent 不足两个，无法发起多 Agent 会诊。' };
+  }
+
+  return { chosen: [agentA, agentB] };
+}
+
 export function researchWorkPlan(agents: string[]): WorkPlan {
   if (!agents.length) throw new RuntimeError('WORK_ITEM_NO_AGENT', '请先配置一个 Agent', 409);
   return {
@@ -427,7 +561,20 @@ export class LarkWorkbench {
     let item: WorkItem | undefined;
     let text: string | undefined;
     let previewKey: string | undefined;
-    if (action === 'research') {
+    if (action === 'consult') {
+      const consultArgs = argsText.replace(/^consult\s*/i, '');
+      const allowed = await this.allowedAgents(sessionId, actorId, config);
+      const parsed = parseLarkConsultCommand(consultArgs, allowed);
+      const resolved = resolveConsultAgents(parsed.agents, allowed, config.defaultAgentId);
+      if (resolved.unavailableReason || !resolved.chosen) {
+        const list = allowed.length ? allowed.map(id => `• ${id}`).join('\n') : '（暂无可用 Agent）';
+        text = `${resolved.unavailableReason ?? '当前可用 Agent 不足两个，无法发起多 Agent 会诊。'}\n\n当前可用 Agent 列表：\n${list}\n\n${larkConsultUsage}`;
+      } else {
+        await this.recordOrigin(sessionId, event.messageId, event, config);
+        const plan = consultWorkPlan(resolved.chosen);
+        item = await this.work().create(sessionId, { goal: parsed.goal, plan, idempotencyKey: event.messageId }, actorId, false);
+      }
+    } else if (action === 'research') {
       const goal = argsText.replace(/^research\s*/i, '').trim();
       if (!goal) throw new RuntimeError('WORK_ITEM_GOAL_REQUIRED', '用法：/work research 研究目标', 400);
       await this.recordOrigin(sessionId, event.messageId, event, config);
@@ -476,8 +623,8 @@ export class LarkWorkbench {
       }
     } else if (!action) {
       const items = await this.work().listBySession(sessionId, actorId);
-      text = '**Dutydeck 工作台**\n\n直接描述目标，让 Dutydeck 安排步骤、选择 Agent 并交付成果。\n\n' + (items.slice(0, 8).map(value => `**${labels[value.status]} · ${value.title}**\n\`/work show ${value.id}\``).join('\n\n') || '此话题暂无目标。') + '\n\n快速开始：`/work research 研究目标`\n自己编排：`/work plan 第一步；第二步`（先出待确认卡）\n常用流程：`/work templates`\n定时与 CI：`/schedule`、`/ci`';
-    } else throw new RuntimeError('WORK_ITEM_COMMAND_INVALID', '用法：/work；/work research 目标；/work plan 用分号分隔的多个步骤；/work show 编号；/work templates；/work run 流程编号 版本 目标；/work save 目标编号 名称；/work answer 目标编号 步骤编号 回答', 400);
+      text = '**Dutydeck 工作台**\n\n直接描述目标，让 Dutydeck 安排步骤、选择 Agent 并交付成果。\n\n' + (items.slice(0, 8).map(value => `**${labels[value.status]} · ${value.title}**\n\`/work show ${value.id}\``).join('\n\n') || '此话题暂无目标。') + '\n\n双 Agent 会诊：`/work consult [--agents A,B] -- <问题>`\n快速开始：`/work research 研究目标`\n自己编排：`/work plan 第一步；第二步`（先出待确认卡）\n常用流程：`/work templates`\n定时与 CI：`/schedule`、`/ci`';
+    } else throw new RuntimeError('WORK_ITEM_COMMAND_INVALID', '用法：/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work plan 用分号分隔的多个步骤；/work show 编号；/work templates；/work run 流程编号 版本 目标；/work save 目标编号 名称；/work answer 目标编号 步骤编号 回答', 400);
     if (text) {
       await sendLarkResult(this.client(config), target, { state: 'completed', readOnly: true, retryable: false, taskId: event.messageId, taskName: 'Dutydeck 工作台',
         elements: [{ tag: 'markdown', element_id: 'final_output', content: text }], idempotencyKey: `work_${digest(event.messageId).slice(0, 40)}` }, this.options.log);

@@ -1,4 +1,7 @@
 import { checkSqliteDriver, currentProcessIdentity, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import Database from 'better-sqlite3';
+import { networkInterfaces } from 'node:os';
+import { isIP } from 'node:net';
 import {
   SUPERVISOR_ENV,
   SYSTEMD_UNIT_ENV,
@@ -30,6 +33,7 @@ import { AUTOSTART_LINUX_UNIT, defaultRunCommand, type AutostartCommandOutput, t
 import { sleep } from './time.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { localLoopbackUrl } from '../local-api-url.js';
 
 export interface DaemonCommandResult {
   ok: boolean;
@@ -46,11 +50,16 @@ export interface DaemonCommandResult {
 }
 
 const READY_TIMEOUT_MS = 15_000;
+const DRAIN_INTERVAL_MS = 5_000;
+const ACTIVITY_REQUEST_TIMEOUT_MS = 5_000;
+const DEFAULT_DRAIN_TIMEOUT_SECONDS = 900;
 const RESTART_HOST_ENV = 'DUTYDECK_DAEMON_RESTART_HOST';
 const RESTART_PORT_ENV = 'DUTYDECK_DAEMON_RESTART_PORT';
 const RESTART_CWD_ENV = 'DUTYDECK_DAEMON_RESTART_CWD';
 const RESTART_DATABASE_ENV = 'DUTYDECK_DAEMON_RESTART_DATABASE';
 const RESTART_AUTH_ENV = 'DUTYDECK_DAEMON_RESTART_AUTH';
+/** detached restart：父进程已 drain 完，被拉起的 restart 子进程据此静默跳过，不再往守护日志写告警。 */
+export const RESTART_DRAINED_ENV = 'DUTYDECK_DAEMON_RESTART_DRAINED';
 
 /** start / stop / restart 与外部交互的钩子；默认走真实的 systemctl 与 SQLite 驱动，测试注入假实现。 */
 export interface DaemonCommandDeps {
@@ -60,6 +69,200 @@ export interface DaemonCommandDeps {
   checkSqlite?: (options?: SqliteDriverCheckOptions) => SqliteDriverCheck;
   /** 默认 `process.platform`；只有 linux 会走 systemd。 */
   platform?: string;
+  /** 网络请求客户端，默认 globalThis.fetch。测试可注入。 */
+  fetch?: typeof fetch;
+  /** 单次活动查询的超时（毫秒），默认 5000；测试可缩短。 */
+  requestTimeoutMs?: number;
+  /** 等待函数，默认 sleep。测试可注入。 */
+  sleep?: (ms: number) => Promise<void>;
+  /** 获取当前时间戳（毫秒），默认 Date.now。测试可注入。 */
+  now?: () => number;
+  /** 从数据库读取 accessToken，测试可注入。 */
+  readToken?: (databasePath: string) => string | undefined;
+  /** 本机网卡地址列表，默认读 node:os networkInterfaces。测试可注入。 */
+  localAddresses?: () => string[];
+  /** 要从计数里排除的会话 id；默认读 Agent 注入的 dutydeck_session_id。 */
+  excludeSessionId?: string;
+  /** 警告输出钩子，默认输出到 process.stderr。测试可注入。 */
+  warn?: (message: string) => void;
+  /** 进度说明输出钩子，默认输出到 process.stderr。测试可注入。 */
+  info?: (message: string) => void;
+}
+
+const defaultWarn = (message: string) => {
+  process.stderr.write(`警告：${message}\n`);
+};
+
+const defaultInfo = (message: string) => {
+  process.stderr.write(`${message}\n`);
+};
+
+function defaultReadToken(databasePath: string): string | undefined {
+  try {
+    const db = new Database(databasePath, { readonly: true, fileMustExist: true });
+    try {
+      return (db.prepare('SELECT value FROM configs WHERE key=?').get('auth.accessToken') as { value?: string } | undefined)?.value?.trim();
+    } finally {
+      db.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
+/** 只允许连 loopback 或本机网卡地址，且必须是明文 http、不带用户名密码。与 recovery-cli 同一边界。 */
+function resolveLocalUrl(address: string | undefined, localAddresses: () => string[]): URL | undefined {
+  if (!address) return undefined;
+  let url: URL;
+  try {
+    url = new URL(address);
+  } catch {
+    return undefined;
+  }
+  const hostname = url.hostname.replace(/^\[|\]$/g, '');
+  const local = ['127.0.0.1', 'localhost', '::1'].includes(hostname)
+    || Boolean(isIP(hostname) && localAddresses().includes(hostname));
+  if (url.protocol !== 'http:' || !local || url.username || url.password) return undefined;
+  return url;
+}
+
+/** 解析 --drain-timeout：只接受正整数秒数；undefined 用默认值；非法值返回 undefined。 */
+export function parseDrainTimeoutSeconds(value: string | undefined): number | undefined {
+  if (value === undefined) return DEFAULT_DRAIN_TIMEOUT_SECONDS;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const seconds = Number(trimmed);
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
+}
+
+/**
+ * 重启前等待守护进程中正在执行的任务结束（drain）。
+ * - options.force / 父进程已 drain（restart 子进程）：直接放行，不查询、不告警；
+ * - 守护进程未运行、身份无法验证、查询失败：输出警告并继续重启；
+ * - 有任务在执行（> 0）：输出说明，每 5 秒查一次，归零后返回 ok: true；
+ * - 等待超时仍有任务在执行：返回 ok: false 与错误说明，不停止旧进程。
+ */
+export async function waitForRunningTasksDrain(
+  dir: string,
+  state: DaemonState | undefined,
+  options: CliOptions,
+  deps: DaemonCommandDeps
+): Promise<{ ok: true } | { ok: false; error: string; runningTasks: number }> {
+  if (options.force) return { ok: true };
+  // detached restart 会再拉起一个执行 `daemon restart` 的后台子进程；父进程已等过，
+  // 子进程静默跳过，别再往守护日志写一行「守护进程未运行」。标记只消费一次，读完立即删除，
+  // 避免进程把标记带到后续执行或泄露给派生的 Agent。
+  if (process.env[RESTART_DRAINED_ENV] === '1') {
+    delete process.env[RESTART_DRAINED_ENV];
+    return { ok: true };
+  }
+
+  const warn = deps.warn ?? defaultWarn;
+  const info = deps.info ?? defaultInfo;
+
+  const timeoutSeconds = parseDrainTimeoutSeconds(options.drainTimeout);
+  if (timeoutSeconds === undefined) {
+    return {
+      ok: false, runningTasks: 0,
+      error: `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
+    };
+  }
+
+  const inspection = inspectDaemon(dir);
+  if (inspection.status === 'stale') {
+    warn('守护进程未运行，跳过任务等待，继续执行重启。');
+    return { ok: true };
+  }
+  if (inspection.status === 'unverifiable') {
+    warn('守护进程身份无法验证，跳过任务等待，继续执行重启。');
+    return { ok: true };
+  }
+
+  const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
+  const parsedUrl = resolveLocalUrl(state?.address, localAddresses);
+  if (!parsedUrl) {
+    warn('守护进程监听地址不可用于本机查询，跳过任务等待，继续执行重启。');
+    return { ok: true };
+  }
+
+  // 在 dutydeck 托管的 Agent 里执行 restart 时，Agent 自己那轮必然 running；
+  // 通过它注入的 dutydeck_session_id 把本会话从计数里排除，否则一定等满超时。
+  const excludeSessionId = deps.excludeSessionId ?? process.env.dutydeck_session_id;
+  if (excludeSessionId) {
+    info(`检测到当前运行在 Agent 会话 ${excludeSessionId} 中，查询任务数时已排除该会话。`);
+  }
+
+  let token: string | undefined;
+  if (state?.authEnabled !== false && state?.database) {
+    token = (deps.readToken ?? defaultReadToken)(state.database);
+  }
+
+  const fetcher = deps.fetch ?? fetch;
+  const requestTimeoutMs = deps.requestTimeoutMs ?? ACTIVITY_REQUEST_TIMEOUT_MS;
+  const queryRunningTasks = async (): Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }> => {
+    try {
+      const url = new URL('/api/system/activity', parsedUrl.origin);
+      if (excludeSessionId) url.searchParams.set('excludeSessionId', excludeSessionId);
+      const headers: Record<string, string> = {
+        Accept: 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      };
+      const response = await fetcher(url.toString(), {
+        method: 'GET',
+        headers,
+        signal: AbortSignal.timeout(requestTimeoutMs)
+      });
+      if (!response.ok) {
+        return { ok: false, error: `HTTP ${response.status}` };
+      }
+      const data = await response.json() as any;
+      if (typeof data?.runningTasks !== 'number' || !Number.isSafeInteger(data.runningTasks) || data.runningTasks < 0) {
+        return { ok: false, error: '接口返回数据格式错误' };
+      }
+      return { ok: true, runningTasks: data.runningTasks };
+    } catch (error: any) {
+      return { ok: false, error: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? `查询超时（${requestTimeoutMs} ms）` : (error?.message || String(error)) };
+    }
+  };
+
+  const initial = await queryRunningTasks();
+  if (!initial.ok) {
+    warn(`查询正在执行的任务数失败（${initial.error}），跳过等待继续重启。`);
+    return { ok: true };
+  }
+
+  if (initial.runningTasks === 0) {
+    return { ok: true };
+  }
+
+  info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）`);
+
+  const sleeper = deps.sleep ?? sleep;
+  const timer = deps.now ?? Date.now;
+  const deadline = timer() + timeoutSeconds * 1000;
+  let currentRunning = initial.runningTasks;
+
+  while (currentRunning > 0) {
+    await sleeper(DRAIN_INTERVAL_MS);
+    const current = await queryRunningTasks();
+    if (!current.ok) {
+      warn(`查询正在执行的任务数失败（${current.error}），跳过等待继续重启。`);
+      return { ok: true };
+    }
+    currentRunning = current.runningTasks;
+    if (currentRunning === 0) {
+      return { ok: true };
+    }
+    if (timer() >= deadline) {
+      return {
+        ok: false,
+        runningTasks: currentRunning,
+        error: `等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。`
+      };
+    }
+  }
+
+  return { ok: true };
 }
 
 export interface DaemonCommandHandlers extends DaemonCommandDeps {
@@ -144,6 +347,10 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
   }
 
   if (inBand) {
+    // 无论是 foreground 还是 detached 子进程，服务进程在派生任何 Agent 之前必须删除此标记，
+    // 避免 Agent 继承后执行 restart 被跳过等待。与 SUPERVISOR_ENV 的清理机制一致。
+    delete process.env[RESTART_DRAINED_ENV];
+    delete env[RESTART_DRAINED_ENV];
     // We are the daemon process (detached child or foreground entry): own the server and publish self metadata.
     const meta = foreground ? { startedAt: new Date().toISOString() } : childMeta(env);
     const processIdentity = currentProcessIdentity();
@@ -325,6 +532,13 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
     return { ok: false, action: 'restart', running, pid: previousState?.pid,
       error: `SQLite 预检失败，已拒绝重启${running ? '，旧的守护进程仍在运行' : ''}。${describeSqliteDriverFailure(sqlite)}。换一个能加载该驱动的 node（写绝对路径）重跑 dutydeck restart。` };
   }
+  const drain = await waitForRunningTasksDrain(runningDir, previousState, options, handlers);
+  if (!drain.ok) {
+    return { ok: false, action: 'restart', running: true, pid: previousState?.pid, error: drain.error };
+  }
+  // 父进程已完成 drain：daemonize 出的 restart 子进程继承此标记，静默跳过第二次等待检查，
+  // 否则旧进程已停、它会往守护日志再写一行「守护进程未运行」，挤掉启动失败时的关键日志。
+  (restartEnv as Record<string, string>)[RESTART_DRAINED_ENV] = '1';
   const stopped = await daemonStop(handlers);
   if (!stopped.ok) return { ...stopped, action: 'restart' };
   if (previousCwd && previousCwd !== process.cwd()) {
@@ -443,7 +657,12 @@ function systemctlFailure(verb: string, unit: string, output: AutostartCommandOu
 /** 新进程按 unit 的 ExecStart 启动，命令行上的服务参数传不过去；显式给了就拒绝，不静默丢弃。 */
 function explicitServerFlags(options: CliOptions): string[] {
   return Object.entries(options)
-    .filter(([key, value]) => value !== undefined && key !== 'json' && key !== 'foreground' && !(key === 'larkListen' && value === true))
+    .filter(([key, value]) => value !== undefined
+      && key !== 'json'
+      && key !== 'foreground'
+      && key !== 'force'
+      && key !== 'drainTimeout'
+      && !(key === 'larkListen' && value === true))
     .map(([key, value]) => key === 'auth' && value === false ? '--no-auth'
       : key === 'larkListen' ? '--no-lark-listen'
         : `--${key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`);
@@ -540,6 +759,10 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
     return { ok: false, action: 'restart', running: true, pid: state.pid,
       error: `SQLite 预检失败，已拒绝重启，旧的守护进程仍在运行。${describeSqliteDriverFailure(sqlite)}。unit ${unit} 的 ExecStart 用的就是这个解释器：换成能加载该驱动的 node，用它重跑 dutydeck autostart enable 改写 unit 后再重启。` };
   }
+  const drain = await waitForRunningTasksDrain(dir, state, options, deps);
+  if (!drain.ok) {
+    return { ok: false, action: 'restart', running: true, pid: state.pid, error: drain.error };
+  }
   const logOffset = daemonLogSize(dir);
   const restarted = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'restart', unit]);
   if (restarted.status !== 0) {
@@ -602,6 +825,6 @@ function addressFromCli(options: CliOptions, env: NodeJS.ProcessEnv = process.en
     ? '127.0.0.1'
     : options.host ?? env.DUTYDECK_HOST ?? '127.0.0.1';
   const port = Number(options.port ?? env.DUTYDECK_PORT ?? 4310);
-  const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
-  return { host, port, address: `http://${displayHost.includes(':') ? `[${displayHost}]` : displayHost}:${port}`, authEnabled: authEnabledFromCli(options, env) };
+  // 通配地址（0.0.0.0 / ::）在本机统一回环到 127.0.0.1，映射口径与 service.localApiBaseUrl 一致。
+  return { host, port, address: localLoopbackUrl(host, port), authEnabled: authEnabledFromCli(options, env) };
 }
