@@ -162,6 +162,8 @@ export class DutydeckRuntime {
   private readonly cleanupTimer?: NodeJS.Timeout;
   private cleanupRun?: Promise<void>;
   private shuttingDown = false;
+  /** Restart drain: accepted Tasks stay durable and queued; no new Attempt is claimed until released or the next process. */
+  private queueHeld = false;
   private readonly taskRuns = new Set<Promise<unknown>>();
   private readonly workspaces: WorkspaceManager;
   private readonly verifications: VerificationManager;
@@ -1313,6 +1315,14 @@ export class DutydeckRuntime {
     };
   }
 
+  /** Hold or release claiming of queued Tasks. Admission is unchanged; release reschedules every projected queue. */
+  setQueueHeld(held: boolean) {
+    if (this.queueHeld === held) return;
+    this.queueHeld = held;
+    if (!held) for (const id of [...this.queues.keys()]) this.mutations.run(undefined, () => this.scheduleQueue(id));
+  }
+  isQueueHeld() { return this.queueHeld; }
+
   getRunningTaskCount(excludeSessionId?: string): number {
     let count = 0;
     for (const [sessionId, task] of this.activeTasks) {
@@ -1917,7 +1927,7 @@ export class DutydeckRuntime {
     if (queue.length) this.queues.set(id, queue); else this.queues.delete(id);
   }
   private scheduleQueue(id: string) {
-    if (this.ptyRetirements.has(id) || this.shuttingDown || this.initializationFailed || this.queueBlocked.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id)
+    if (this.ptyRetirements.has(id) || this.shuttingDown || this.queueHeld || this.initializationFailed || this.queueBlocked.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id)
       || this.blockedVerificationSessions.has(id) || !(this.queues.get(id)?.length)) return;
     const token = owner(id, this.lifecycle(id)); this.drains.set(id, token);
     const run = this.mutations.run(token, () => this.drainQueue(id)); this.queueRuns.set(id, run);
@@ -1930,7 +1940,7 @@ export class DutydeckRuntime {
     void run.then(finish, finish);
   }
   private async drainQueue(id: string) {
-    while (this.mutations.valid() && !this.shuttingDown && !this.attempts.has(id) && !this.verifyingSessions.has(id)) {
+    while (this.mutations.valid() && !this.shuttingDown && !this.queueHeld && !this.attempts.has(id) && !this.verifyingSessions.has(id)) {
       const session = await this.mutations.wait(() => this.repos.sessions.get(id));
       if (!session) return;
       let next: TaskRecord | undefined;

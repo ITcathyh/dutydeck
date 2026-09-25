@@ -110,7 +110,8 @@ describe('daemon identity and generation protection', () => {
     const next = state({ startedAt: 'generation-two', cwd: root });
     daemon.writeState(dir, first);
     vi.mocked(sleep).mockImplementation(async ms => { now += ms; daemon.writeState(dir, next); alive = false; });
-    expect(await daemonRestart({}, { serve: vi.fn() })).toMatchObject({ ok: false, action: 'restart' });
+    // 这里测的是停止后的代际保护，不涉及等待任务：--force 跳过排空查询。
+    expect(await daemonRestart({ force: true }, { serve: vi.fn() })).toMatchObject({ ok: false, action: 'restart' });
     expect(daemon.readDaemonStatus(dir)).toEqual(next);
     expect(sent()).toEqual([[identity.pid, 'SIGTERM']]);
     expect(launch).not.toHaveBeenCalled();
@@ -158,7 +159,7 @@ describe('daemon identity and generation protection', () => {
       daemon.writeState(dir, state({ startedAt: options!.startedAt!, cwd: root }));
       return { pid: identity.pid, processIdentity: identity, exited: new Promise(() => {}) };
     });
-    expect(await daemonRestart({}, { serve: vi.fn() })).toMatchObject({ ok: true, state: 'restarted' });
+    expect(await daemonRestart({ force: true }, { serve: vi.fn() })).toMatchObject({ ok: true, state: 'restarted' });
   });
   it.each(['pid', 'startedAt', 'identity', 'not-ready', 'missing-capture'] as const)('rejects %s readiness instead of returning success on timeout', async mismatch => {
     launch.mockImplementation(options => {
