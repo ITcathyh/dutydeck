@@ -339,6 +339,7 @@ export class LarkMessageCoordinator {
     private readonly groupManager?: LarkGroupManager,
     private readonly workflowOptions: {
       participation?: LarkGroupParticipation;
+      usage?: Pick<import('../usage-ledger.js').UsageLedger, 'describe'>;
       store?: ConfigRepository;
       broker?: RelayAskBroker;
       automation?: import('../session-automation.js').SessionAutomationService;
@@ -1429,7 +1430,8 @@ export class LarkMessageCoordinator {
       if (route.command === 'status') {
         const participation = event.chatType === 'group'
           ? await this.workflowOptions.participation?.describe({ appId: config.appId, chatId: event.chatId }).catch(() => undefined) : undefined;
-        await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation].filter(Boolean).join('\n\n'));
+        const usage = await this.workflowOptions.usage?.describe(config.appId, event.chatType === 'group' ? event.chatId : undefined).catch(() => undefined);
+        await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation, usage].filter(Boolean).join('\n\n'));
         return 'handled';
       }
       if (route.command === 'agents') {

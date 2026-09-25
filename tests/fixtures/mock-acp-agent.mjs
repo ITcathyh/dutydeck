@@ -3,6 +3,7 @@ import readline from 'node:readline';
 const rl = readline.createInterface({ input: process.stdin });
 const send = message => process.stdout.write(`${JSON.stringify(message)}\n`);
 const sessions = new Set();
+let reportedCost = 0;
 const pending = new Map();
 const request = (method, params) => new Promise(resolve => { const id = `mock-request-${Date.now()}`; pending.set(id, resolve); send({ jsonrpc: '2.0', id, method, params }); });
 
@@ -32,6 +33,15 @@ rl.on('line', async line => {
       return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
     }
     if (prompt.includes('crash')) process.exit(17);
+    if (prompt.includes('report usage') || prompt.includes('report tokens')) {
+      // report usage 仿 claude-agent-acp：usage_update 带会话累计成本，PromptResponse.usage 是本轮 token；report tokens 仿 codex-acp，只有 token。
+      if (prompt.includes('report usage')) {
+        reportedCost += 0.25;
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'usage_update', used: 1200, size: 200000, cost: { amount: reportedCost, currency: 'USD' } } } });
+      }
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'usage reported' } } } });
+      return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 20, cachedReadTokens: 30, cachedWriteTokens: 5, totalTokens: 155 } } });
+    }
     if (prompt.includes('permission')) {
       const decision = await request('session/request_permission', { sessionId: params.sessionId, toolCall: { title: 'Edit a file', kind: 'edit', status: 'pending', toolCallId: 'permission-tool', content: [], locations: [], ...(prompt.includes('permission details') ? { title: 'Run', kind: 'execute', rawInput: { description: '运行项目测试', command: 'pnpm test --token=synthetic-cli-secret && echo synthetic-env-secret', cwd: '/work/project', path: '/work/project/config.ts', content: 'PRIVATE FILE CONTENT', nested: { arbitrary: 'DO NOT DISPLAY' } } } : {}) }, options: [{ kind: 'allow_once', name: 'Allow', optionId: 'allow' }, { kind: 'reject_once', name: 'Deny', optionId: 'deny' }] });
       send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Permission: ${decision.outcome.outcome} ${JSON.stringify(decision.outcome)}` } } } });

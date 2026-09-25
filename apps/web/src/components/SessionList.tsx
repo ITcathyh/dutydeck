@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { CalendarClock, ChevronRight, FolderKanban, ListTodo, MessagesSquare, Plus, Settings2, ShieldCheck, SlidersHorizontal, Users } from 'lucide-react';
+import { CalendarClock, ChevronRight, Coins, FolderKanban, ListTodo, MessagesSquare, Plus, Settings2, ShieldCheck, SlidersHorizontal, Users } from 'lucide-react';
 import type { WorkspaceOrganization } from '@dutydeck/shared';
 import type { Agent, LarkBotConfig, RunSummary, Session } from '../api';
 import type { PrimaryNav } from '../app-route';
@@ -36,6 +36,8 @@ export type SessionListProps = {
   onOpenGroups(): void;
   /** 任务执行计划与导入草稿（?panel=automation）。 */
   onOpenSchedules(): void;
+  /** 用量与成本汇总、月度上限（?panel=usage）。 */
+  onOpenUsage?(): void;
   /**
    * 主区一级视图。任务 / 机器人 / 群聊三选一，任何时刻只有一个为真；
    * 它决定 <main> 里渲染的是任务中心、Bot 管理还是群聊管理。
@@ -78,7 +80,7 @@ export type SessionListProps = {
  * 里没有 sidebar accent 这一档 variant，改用原语会让这几处颜色绕过 sidebar 语义层，
  * 将来 Team-Palette 想把侧栏重新分离出去就会漏改。语义类留着，成本为零。
  */
-export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, primaryNav = 'tasks', onPrimaryNavChange, authRequired, organization, onManageWorkspaces }: SessionListProps) {
+export function SessionList({ open, onClose, sessions, summaries, sessionsLoading, agents, agentsLoading = false, larkBots, larkBotsLoading = false, larkListeningDisabled = false, larkBotsFailed = false, activeSessionId, view, onSelect, onNewSession, onOpenControlCenter, onOpenLarkSetup, onOpenGroups, onOpenSchedules, onOpenUsage, primaryNav = 'tasks', onPrimaryNavChange, authRequired, organization, onManageWorkspaces }: SessionListProps) {
   const workspaces = useMemo(() => groupSessionsByWorkspace(sessions, view, summaries, organization), [sessions, summaries, view, organization]);
   const matchesDesktop = useMediaQuery('(min-width: 768px)');
   /**
@@ -184,7 +186,10 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
       */
       { id: 'groups', label: '群与权限', hint: '策略草稿 · 尚未接入运行时', Icon: Users, onClick: onOpenGroups },
       { id: 'schedules', label: '定时任务', hint: '任务执行计划与草稿', Icon: CalendarClock, onClick: onOpenSchedules }
-    ] }
+    ] },
+    ...(onOpenUsage ? [{ id: 'usage', title: '成本', items: [
+      { id: 'usage', label: '用量与成本', hint: '按 Bot、群、触发人、来源汇总 · 月度上限', Icon: Coins, onClick: onOpenUsage }
+    ] }] : [])
   ];
 
   return <aside

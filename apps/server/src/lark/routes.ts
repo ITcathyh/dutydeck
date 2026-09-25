@@ -26,6 +26,7 @@ type SaveLarkConfigRequest = SaveLarkConfigInput & { allowedUserNames?: string[]
 
 export interface LarkRoutesOptions {
   participation?: LarkGroupParticipation;
+  usage?: import('../usage-ledger.js').UsageLedger;
   workbench?: import('./workbench.js').LarkWorkbench;
   automation?: import('../session-automation.js').SessionAutomationService;
   relayBroker?: RelayAskBroker;
@@ -73,6 +74,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   const listener = options.listener ?? new LarkLongConnectionListenerPool(app.log, {
     runtime: options.runtime,
     participation: options.participation,
+    usage: options.usage,
     automation: options.automation,
     workbench: options.workbench,
     workflowStore: options.config,

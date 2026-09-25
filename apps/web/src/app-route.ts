@@ -37,7 +37,8 @@ export type OverlayRoute =
   | { kind: 'settings'; section: ControlCenterSection }
   | { kind: 'lark-setup'; target?: LarkSetupTarget }
   | { kind: 'groups' }
-  | { kind: 'automation' };
+  | { kind: 'automation' }
+  | { kind: 'usage' };
 
 export type AppLocation = {
   route: AppRoute;
@@ -77,6 +78,7 @@ const overlayFromSearch = (search: string): OverlayRoute | undefined => {
     case 'lark-setup': return { kind: 'lark-setup', ...(params.get('mode') === 'new' ? { target: 'new' as const } : params.get('targetAppId') ? { target: { appId: params.get('targetAppId')! } } : {}) };
     case 'groups': return { kind: 'groups' };
     case 'automation': return { kind: 'automation' };
+    case 'usage': return { kind: 'usage' };
     default: return undefined;
   }
 };

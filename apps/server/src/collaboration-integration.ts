@@ -24,6 +24,8 @@ export interface CollaborationIntegrationOptions {
   log?: { warn(details: unknown, message: string): void };
   listeningDisabled?: boolean;
   readMemory?(scope: CollaborationScope): Promise<string>;
+  /** 群参与判定前查月度成本上限，见 GroupParticipationOptions.usageRefusal。 */
+  usageRefusal?(scope: CollaborationScope): Promise<string | undefined>;
 }
 export function createCollaborationIntegration(options: CollaborationIntegrationOptions) {
   const { repositories: stored, runtime, groups } = options;
@@ -92,7 +94,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const deliveries = new CollaborationDelivery(repos.collaboration);
   const participation = new LarkGroupParticipation({
     withDelivery: (scope, actionId, send) => deliveries.run(scope, actionId, send),
-    repository: repos.collaboration, decider, readConfig, serviceFor: client, readMemory: options.readMemory, log: options.log,
+    repository: repos.collaboration, decider, readConfig, serviceFor: client, readMemory: options.readMemory, usageRefusal: options.usageRefusal, log: options.log,
     readTeamContext: (scope, query) => teamContext.read(scope, query),
     authorizeTeamContext: (scope, context) => teamContext.authorize(scope, context),
     authorize: async (scope, actorId, action, followup) => {

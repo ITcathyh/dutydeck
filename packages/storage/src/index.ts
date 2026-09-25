@@ -12,6 +12,7 @@ import { createFoundationRepositories } from './foundation.js';
 import { createWp1aRepositories } from './group-policy.js';
 import { createScheduleFoundationRepositories } from './schedule-foundation.js';
 import { createCollaborationRepository } from './collaboration.js';
+import { createUsageLedgerRepository } from './usage-ledger.js';
 import { canonicalDatabase, openDatabaseControl } from './database-control.js';
 export * from './schema.js';
 export * from './task-execution.js';
@@ -20,6 +21,7 @@ export * from './group-policy.js';
 export * from './schedule-foundation.js';
 export * from './collaboration.js';
 export * from './collaboration-migration.js';
+export * from './usage-ledger.js';
 export * from './execution-inspection.js';
 
 export const EVENT_WINDOW_DEFAULT_LIMIT = 200;
@@ -166,6 +168,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   const wp1aRepositories = createWp1aRepositories(sqlite);
   const scheduleRepositories = createScheduleFoundationRepositories(sqlite);
   const collaboration = createCollaborationRepository(sqlite);
+  const usage = createUsageLedgerRepository(sqlite);
   return {
     control,
     execution,
@@ -350,6 +353,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     ...wp1aRepositories,
     ...scheduleRepositories,
     collaboration,
+    usage,
     close() {
       control.assertClosable();
       if (filename !== ':memory:') restrictDatabaseFiles(filename);

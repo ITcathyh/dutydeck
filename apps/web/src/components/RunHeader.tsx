@@ -1,5 +1,5 @@
 import { Archive, BookOpen, ChevronRight, Folder, MessageSquare, PanelRightOpen, Pencil, Square, Terminal } from 'lucide-react';
-import type { Agent, Session, Task } from '../api';
+import type { Agent, Session, SessionUsage, Task } from '../api';
 import type { StreamStatus } from '../sse';
 import { sessionDisplayName } from '../run-summary';
 import { nextActionForState, sessionErrorSummary, sessionWorkspaceName, shortRunId } from '../workspace-model';
@@ -26,12 +26,27 @@ export function RunDetailTabs({ value, onChange }: { value: RunDetailTab; onChan
   ]}/>;
 }
 
-export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename }: {
+/** 本任务累计用量：自身执行加归到它名下的编排子步骤；还没有任何记录时不显示。 */
+function usageLabel(usage?: SessionUsage) {
+  if (!usage) return undefined;
+  const { own, subSteps } = usage;
+  const entries = own.entries + subSteps.entries;
+  if (!entries) return undefined;
+  if (own.unavailable + subSteps.unavailable === entries) return { text: '本任务累计：无用量数据', detail: '此 Agent 不上报 token 与成本' };
+  const usd = (value: number) => `$${value.toFixed(2)}`;
+  const estimated = own.estimatedCostUsd + subSteps.estimatedCostUsd;
+  const extra = [subSteps.entries ? `含子步骤 ${usd(subSteps.costUsd)}` : '', estimated > 0 ? `含估算 ${usd(estimated)}` : ''].filter(Boolean).join('，');
+  const tokens = (key: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens') => (own[key] + subSteps[key]).toLocaleString('zh-CN');
+  return { text: `本任务累计 ${usd(own.costUsd + subSteps.costUsd)}${extra ? `（${extra}）` : ''}`, detail: `输入 ${tokens('inputTokens')} · 输出 ${tokens('outputTokens')} · 缓存读 ${tokens('cacheReadTokens')} · 缓存写 ${tokens('cacheWriteTokens')} token` };
+}
+
+export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, usage, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename }: {
   session: Session;
   agent?: Agent;
   taskPrompt?: string;
   streamStatus: StreamStatus;
   queuedTasks: Task[];
+  usage?: SessionUsage;
   rawVisible: boolean;
   rawAvailable: boolean;
   restarting: boolean;
@@ -56,6 +71,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   // 脱敏管线在 workspace-model:sessionErrorSummary，这里只读不改。
   // 归档任务同样要能看到：历史失败原因是只读信息，不是可操作项。
   const errorSummary = sessionErrorSummary(session.error);
+  const usageLine = usageLabel(usage);
   return <header className="shrink-0 bg-surface">
     <div className="flex min-h-14 items-center gap-2 px-3 pt-1 sm:px-5">
       {/*
@@ -104,6 +120,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
       <span className="min-w-0 flex-1 truncate text-caption text-secondary">{nextAction}</span>
       {status.recoverable && !managed && <Button variant="danger" size="sm" loading={restarting} onClick={onRestart}>重新启动</Button>}
       {queuedTasks.length > 0 && <Badge tone="queued">待执行指令 {queuedTasks.length} 条</Badge>}
+      {usageLine && <span title={usageLine.detail} className="hidden shrink-0 text-caption text-subtle sm:inline">{usageLine.text}</span>}
       <ConnectionState status={streamStatus}/>
     </div>
     {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}

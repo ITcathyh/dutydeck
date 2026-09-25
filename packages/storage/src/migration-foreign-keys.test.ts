@@ -86,7 +86,7 @@ describe('foreign keys across migration table rebuilds', () => {
       expect(row).toEqual({ lease_key: null, lease_fence_token: null, holder_id: null, error: null });
     }
     expect(tables.map(table => db.pragma(`foreign_key_list(${table})`))).toEqual(beforeReferences)
-    expect(version(db)).toBe(24)
+    expect(version(db)).toBe(25)
     expect(db.pragma('foreign_keys', { simple: true })).toBe(foreignKeys)
     expect(db.pragma('foreign_key_check')).toEqual([])
     expect(db.pragma('integrity_check', { simple: true })).toBe('ok')
@@ -194,6 +194,6 @@ describe('foreign keys across migration table rebuilds', () => {
     inspect.close()
     const repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' })
     try { expect(repos.execution.authority()).toBe('legacy') } finally { repos.close() }
-    expect(version(open(path))).toBe(24)
+    expect(version(open(path))).toBe(25)
   })
 })

@@ -362,9 +362,11 @@ export const BOT_LOOP_GATE = 'bot_loop_gate';
 export const BOT_TURN_LIMIT_PER_HOUR = 6;
 /** 同一话题内连续「机器人往返」的轮数上限；中间出现人类触发的回合即归零。 */
 export const BOT_LOOP_DEPTH_LIMIT = 3;
+/** 标记「月度成本上限已用满，未判定」。没有调用模型，不计入判定预算。 */
+export const USAGE_CAP_GATE = 'usage_cap';
 
 /** 不代表一次模型判定的记录标记，统计判定用量时必须全部排除。 */
-const nonDecisionGates = new Set<string>([DECISION_BUDGET_GATE, BOT_TURN_RECORD, BOT_LOOP_GATE]);
+const nonDecisionGates = new Set<string>([DECISION_BUDGET_GATE, BOT_TURN_RECORD, BOT_LOOP_GATE, USAGE_CAP_GATE]);
 const gateOf = (item: Pick<CollaborationDecision, 'inputSnapshot'>) => String((item.inputSnapshot as { gate?: unknown }).gate ?? '');
 
 /**
