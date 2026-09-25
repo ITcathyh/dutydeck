@@ -20,6 +20,9 @@ import { RECOVERY_TRACKING_NOTE } from './recovery-notes.js';
 import { senderGroupMention } from './card-mentions.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
+import type { LarkHeldCause } from './turn-redispatch.js';
+
+export type LarkInterruptedTurn = { kind: 'handled' } | ({ kind: 'hold' } & LarkHeldCause);
 
 // 进程重启后分别对账执行过程卡的终态和独立结果消息。
 
@@ -48,6 +51,11 @@ export async function performLarkCardReconcile(input: {
   resolveConfig?: (saved: PersistedLarkCardTask) => Promise<StoredLarkConfig>;
   /** 卡住的任务能否在卡上给「在新会话中执行」按钮，与 coordinator 回调端同一个判定（按 message_id 读映射与入站记录）。缺省不给。 */
   relaunchReady?: (taskId: string, status: string, turn: number) => Promise<boolean>;
+  /**
+   * 「需要核对」的一轮先交给它：服务重启切断的轮次自动重投。handled 表示已交给重投流程或已放弃，这里不再重绘；
+   * hold 表示停下等人在卡上选「重新执行」「放弃」；undefined 照旧按需要核对处理。
+   */
+  interruptedTurn?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, runtimeTask: TaskRecord) => Promise<LarkInterruptedTurn | undefined>;
   /** Web 要求登录：重绘的过程卡上「查看详情」是回调按钮。结果卡的这项能力由 terminalDecoration 带上。 */
   detailLogin?: boolean;
 }): Promise<number> {
@@ -126,23 +134,31 @@ export async function performLarkCardReconcile(input: {
       if (!runtimeTask) { unresolved++; continue; }
       if (!terminalTaskStates.has(runtimeTask.status)) {
         unresolved++;
+        const interrupted = runtimeTask.status === 'reconcile_required' ? await input.interruptedTurn?.(mapping, persisted, runtimeTask) : undefined;
+        if (interrupted?.kind === 'handled') continue;
+        const hold = interrupted?.kind === 'hold' ? interrupted : undefined;
+        // 没有过程卡可画时按钮无处可放，说明里也不提。
+        const cardless = Boolean(effective.silentProgress || persisted.progress_frozen || !persisted.card_message_id);
         const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
           ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined, {
-            relaunch: await input.relaunchReady?.(mapping.externalId, runtimeTask.status, persisted.turn ?? 0) === true,
+            relaunch: !hold && await input.relaunchReady?.(mapping.externalId, runtimeTask.status, persisted.turn ?? 0) === true,
+            ...(hold ? { interrupted: { ...hold, buttons: !cardless } } : {}),
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
         const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
           ? runtimeTask.status : runtimeTask.status === 'queued' ? 'queued' : 'running';
         const canCancel = state === 'queued' && Boolean(runtime.cancelQueued && persisted.sender_open_id);
         const canRelaunch = recovery?.relaunch === true;
-        const actionable = canCancel || canRelaunch;
+        const canReplay = Boolean(hold) && recovery?.label === '结果未知' && !cardless;
+        const actionable = canCancel || canRelaunch || canReplay;
         // Repaint whenever durable recovery facts change, including older cards
         // already marked read-only. Never retain an old thinking/queued trace.
         const statusKey = JSON.stringify([state, recovery?.markdown, canCancel]);
         const notifyRecovery = async () => {
           if (!recovery?.blocked) return undefined;
           // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
-          const notice = canRelaunch || config.webBaseUrl
-            ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status) : recovery;
+          const notice = canRelaunch || canReplay || config.webBaseUrl
+            ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined,
+              hold ? { interrupted: hold } : {}) : recovery;
           return notifyLarkTaskRecovery({
             service, store: input.deliveryStore, log, appId: persisted.app_id,
             sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn, recovery: notice,
@@ -166,7 +182,7 @@ export async function performLarkCardReconcile(input: {
             taskId: mapping.externalId, taskName: persisted.task_name,
             elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
             sessionId: mapping.sessionId, readOnly: !actionable, turn: persisted.turn ?? 0,
-            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false, ...(canRelaunch ? { canRelaunch: true } : {}) },
+            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false, ...(canRelaunch ? { canRelaunch: true } : {}), ...(canReplay ? { canReplay: true } : {}) },
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             markdown: recovery?.markdown ?? RECOVERY_TRACKING_NOTE
           });
