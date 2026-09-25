@@ -455,6 +455,22 @@ describe('Runtime uses the execution ledger', () => {
     await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.objectContaining({ taskId: second.id, outcome: 'injected' }), expect.any(String)));
     expect(h.repos.execution.getTaskExecution(second.id)?.attempts).toHaveLength(1);
   });
+  it.each(['automation', 'schedule'] as const)('does not steer a %s Task whose consumer reads its own Attempt', async namespace => {
+    const entered = deferred(), gate = deferred();
+    const h = await fixture({}, async (emit, prompt) => {
+      if (prompt === 'first') { entered.resolve(); await gate.promise; }
+      emit({ type: 'text', data: { text: prompt } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    cleanup.push(async () => { gate.resolve(); });
+    await h.runtime.dispatch(h.session.id, 'first'); await entered.promise;
+    const envelope = { ...request(h.session.id, 'second'), namespace, actor: { kind: 'installation_owner', id: 'installation_owner' } } satisfies TaskRequestV1;
+    const second = await h.runtime.dispatch(h.session.id, envelope.prompt, 'queue', envelope.prompt, undefined, 'installation_owner', envelope.key, [], envelope);
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const); h.driver().steer = steer;
+    await expect(h.runtime.injectQueued(h.session.id, second.id, 'installation_owner')).resolves.toMatchObject({ outcome: 'unsupported', task: { status: 'queued' } });
+    expect(steer).not.toHaveBeenCalled();
+    gate.resolve(); await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(second.id)?.task.status).toBe('completed'));
+    expect(h.repos.execution.getTaskExecution(second.id)?.attempts).toHaveLength(1);
+  });
   it('does not inject a queued Task whose execution options differ from the running turn', async () => {
     const entered = deferred(), gate = deferred();
     const h = await fixture({}, async (emit, prompt) => {

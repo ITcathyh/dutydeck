@@ -145,6 +145,27 @@ describe('conversation timeline', () => {
     expect(sections.filter(section => section.kind === 'activity').at(-1)).toMatchObject({ taskStatus: 'running' });
   });
 
+  it('keeps a steered message from splitting the running tool call and its turn', () => {
+    const tasks = [
+      { id: 'task-1', sessionId: 's1', prompt: '检查', status: 'completed', createdAt: '', updatedAt: '' },
+      { id: 'task-2', sessionId: 's1', prompt: '顺便看日志', status: 'completed', createdAt: '', updatedAt: '' }
+    ];
+    const steering = { outcome: 'injected', target: { taskId: 'task-1', attemptId: 'a1' } };
+    const timeline = buildTimeline([
+      event(1, 'text', { text: '检查', role: 'user', taskId: 'task-1' }),
+      event(2, 'tool_call', { id: 't1', name: 'Bash', status: 'running' }),
+      event(3, 'text', { text: '顺便看日志', role: 'user', taskId: 'task-2', steering }),
+      event(4, 'tool_result', { id: 't1', name: 'Bash', status: 'completed', output: 'ok' }),
+      event(5, 'text', { text: '都检查完了', role: 'assistant' })
+    ]);
+    expect(timeline.filter(item => item.data.id === 't1')).toMatchObject([{ type: 'tool_result', data: { status: 'completed' } }]);
+    const sections = buildTimelineSections(timeline, tasks);
+    expect(sections.filter(section => section.kind === 'activity')).toMatchObject([{ hasAnswer: true, taskStatus: 'completed' }]);
+    expect(sections.at(-1)).toMatchObject({ kind: 'event', final: true, event: { data: { text: '都检查完了' } } });
+    // Steered right after the prompt, before any output: still its own bubble, not glued onto the prompt.
+    expect(buildTimeline([event(1, 'text', { text: '检查', role: 'user', taskId: 'task-1' }), event(2, 'text', { text: '顺便看日志', role: 'user', taskId: 'task-2', steering })]).map(item => item.data.text)).toEqual(['检查', '顺便看日志']);
+  });
+
   it('never promotes intermediate assistant text to final while the task is still running', () => {
     const tasks = [{ id: 'task-1', sessionId: 's1', prompt: '继续', status: 'running', createdAt: '', updatedAt: '' }];
     const timeline = buildTimeline([
