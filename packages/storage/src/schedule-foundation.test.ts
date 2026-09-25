@@ -1,3 +1,7 @@
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { CreateScheduleDefinitionInput } from '@dutydeck/shared';
 import { createRepositories, scheduleWriterLeaseKey } from './index.js';
@@ -93,5 +97,51 @@ describe('v13 Schedule foundation repositories', () => {
     expect(await repositories.archivedHammerIntegrations.listByChannelBot('bot-schedule')).toEqual([archived]);
     await expect(repositories.archivedHammerIntegrations.create({ id: 'hammer-second', channelBotId: 'bot-schedule', sourceEnabled: true, mode: 'lite', enforceGates: false, skillsInjection: 'none' })).rejects.toMatchObject({ code: 'SCHEDULE_NATURAL_KEY_CONFLICT' });
     repositories.close();
+  });
+
+  it('does not record lease renewals, but still records acquire and fence ownership changes', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'schedule-lease-versions-'));
+    const path = join(directory, 'state.db');
+    const repositories = createRepositories(path);
+    await repositories.secretRefs.create({ id: 'secret-lease-versions', kind: 'generic', provider: 'keychain', referenceKey: 'fixture/lease-versions', status: 'configured' });
+    await repositories.channelBots.create({ id: 'bot-lease-versions', channel: 'lark', externalAppId: 'cli_lease_versions', displayName: 'Lease Versions Fixture', brand: 'feishu', credentialRef: 'secret-lease-versions', state: 'staged' });
+    const key = scheduleWriterLeaseKey('bot-lease-versions');
+    await repositories.scheduleLeases.acquire({ id: 'lease-versions', leaseKey: key, expectedRevision: 0, expectedGeneration: 0, holderId: 'holder-a', holderIdentityRef: 'identity-a', secretRef: 'secret-lease-versions', scheduleSetHash, now: at(0), ttlMs: 120_000 });
+    for (let minute = 1; minute <= 5; minute++) {
+      await repositories.scheduleLeases.renew(key, { expectedRevision: minute, expectedGeneration: 1, expectedFenceToken: 1, holderId: 'holder-a', now: at(minute), ttlMs: 120_000 });
+    }
+    repositories.close();
+    const db = new Database(path, { readonly: true });
+    const countLease = () => (db.prepare('SELECT count(*) AS cnt FROM schedule_entity_versions WHERE entity_kind = ?').get('schedule_lease') as { cnt: number }).cnt;
+    expect(countLease()).toBe(1);
+    db.close();
+
+    const reopened = createRepositories(path);
+    await reopened.scheduleLeases.fence(key, { expectedRevision: 6, expectedGeneration: 1, expectedFenceToken: 1, now: at(10) });
+    reopened.close();
+    const verifying = new Database(path, { readonly: true });
+    expect((verifying.prepare('SELECT count(*) AS cnt FROM schedule_entity_versions WHERE entity_kind = ?').get('schedule_lease') as { cnt: number }).cnt).toBe(2);
+    verifying.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+
+  it('keeps recording real definition revisions but prunes each entity to the newest 50 versions', async () => {
+    const directory = mkdtempSync(join(tmpdir(), 'schedule-version-retention-'));
+    const path = join(directory, 'state.db');
+    const repositories = createRepositories(path);
+    await repositories.secretRefs.create({ id: 'secret-retention', kind: 'generic', provider: 'keychain', referenceKey: 'fixture/retention', status: 'configured' });
+    await repositories.channelBots.create({ id: 'bot-retention', channel: 'lark', externalAppId: 'cli_retention', displayName: 'Retention Fixture', brand: 'feishu', credentialRef: 'secret-retention', state: 'staged' });
+    const created = await repositories.scheduleDefinitions.create(definition('schedule-retention', { channelBotId: 'bot-retention' }));
+    for (let revision = 1; revision <= 55; revision++) {
+      await repositories.scheduleDefinitions.update(created.id, { expectedRevision: revision, name: `Revision ${revision}` });
+    }
+    const db = new Database(path, { readonly: true });
+    const rows = db.prepare('SELECT to_revision FROM schedule_entity_versions WHERE entity_kind = ? AND entity_id = ? ORDER BY to_revision DESC').all('schedule_definition', created.id) as Array<{ to_revision: number }>;
+    expect(rows).toHaveLength(50);
+    expect(rows[0]!.to_revision).toBe(56);
+    expect(rows[49]!.to_revision).toBe(7);
+    db.close();
+    repositories.close();
+    rmSync(directory, { recursive: true, force: true });
   });
 });
