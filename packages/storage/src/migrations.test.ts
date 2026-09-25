@@ -49,7 +49,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -541,6 +541,43 @@ describe('storage migrations', () => {
     expect(db.prepare('SELECT revision, group_tools_override_json FROM group_bindings WHERE id = ?').get('binding-v23-one')).toEqual({ revision: 1, group_tools_override_json: '{}' })
     expect(JSON.parse(db.prepare('SELECT presentation_json FROM channel_bot_policies WHERE id = ?').pluck().get('policy-v23') as string))
       .toEqual({ structuredAskCards: true, groupCardMention: true, pushIntervalMs: 1500, traceLimit: 12, hideTraceOnComplete: false, completionReactionOnly: false, silentProgress: false })
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+    db.close()
+  })
+
+  it('v25 把 schedule_entity_versions 按实体收敛到最近 50 条，清掉续租心跳历史', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+    withMigrationTransaction(db, () => {
+      for (const migration of migrations.slice(0, 24)) {
+        migration.up(db)
+        record.run(migration.version, '2026-09-20T00:00:00.000Z')
+      }
+    })
+    const insertVersion = db.prepare('INSERT INTO schedule_entity_versions (entity_kind, entity_id, from_revision, to_revision, before_json, after_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
+    const at = '2026-09-20T00:00:00.000Z'
+    for (let revision = 1; revision <= 120; revision++) {
+      insertVersion.run('schedule_lease', 'lease-bloated', revision - 1, revision, JSON.stringify({ revision: revision - 1, state: 'held' }), 'hash', at)
+    }
+    for (let revision = 1; revision <= 60; revision++) {
+      insertVersion.run('schedule_definition', 'definition-bloated', revision - 1, revision, revision === 1 ? null : JSON.stringify({ revision: revision - 1 }), 'hash', at)
+    }
+    for (let revision = 1; revision <= 10; revision++) {
+      insertVersion.run('schedule_definition', 'definition-small', revision - 1, revision, null, 'hash', at)
+    }
+
+    runMigrations(db)
+
+    const count = (kind: string, id: string) => (db.prepare('SELECT count(*) AS cnt FROM schedule_entity_versions WHERE entity_kind = ? AND entity_id = ?').get(kind, id) as { cnt: number }).cnt
+    expect(count('schedule_lease', 'lease-bloated')).toBe(50)
+    expect(count('schedule_definition', 'definition-bloated')).toBe(50)
+    expect(count('schedule_definition', 'definition-small')).toBe(10)
+    const revisions = db.prepare('SELECT to_revision FROM schedule_entity_versions WHERE entity_kind = ? AND entity_id = ? ORDER BY to_revision').all('schedule_lease', 'lease-bloated') as Array<{ to_revision: number }>
+    expect(revisions[0]!.to_revision).toBe(71)
+    expect(revisions[49]!.to_revision).toBe(120)
+    // 初始修订（before_json 为 NULL 的真实根版本）在窗口之外时也随收敛删除，rollback 只支持最近 50 条。
+    expect(db.prepare('SELECT before_json FROM schedule_entity_versions WHERE entity_kind = ? AND entity_id = ? AND to_revision = 1').get('schedule_definition', 'definition-bloated')).toBeUndefined()
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
     db.close()
   })
