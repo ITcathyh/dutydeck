@@ -6,6 +6,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { PtyCliDriver } from '@dutydeck/pty-driver';
 import type { AgentConfig } from '@dutydeck/shared';
+import { LoginLinkStore } from '../auth/auth.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -84,7 +85,7 @@ async function blockedTopic({ thread = true, web = false } = {}) {
     allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }, { openId: 'ou_bob', name: 'Bob' }], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off',
     ...(web ? { webBaseUrl: 'https://dutydeck.example.com' } : {}) };
-  const loginLinks = { issue: vi.fn((sessionId: string) => `code_${sessionId}`) };
+  const loginLinks = new LoginLinkStore();
   const submissions: Array<{ sessionId: string; prompt: string }> = [];
   /** 置 true 后，重启后新建的会话启动 Agent 时失败。 */
   const agentStart = { fails: false };
@@ -158,7 +159,7 @@ async function blockedTopic({ thread = true, web = false } = {}) {
     return { value: callbackValueOf(lastUpdate(service, cardId), action), context: { messageId: cardId, chatId: 'oc_group' }, cardId };
   };
   const claims = () => liveRepos.config.list('lark.relaunch.');
-  return { config, oldSessionId, submissions, start, mapping, tasks, blockers, sessions, lastUpdate, relaunchButton, claims, repos: liveRepos, runtime: liveRuntime, agentStart };
+  return { config, oldSessionId, submissions, start, mapping, tasks, blockers, sessions, lastUpdate, relaunchButton, claims, repos: liveRepos, runtime: liveRuntime, agentStart, loginLinks };
 }
 
 describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite）', () => {
@@ -374,6 +375,30 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect(detail).toEqual({ action: 'detail', task_id: 'om_queued', turn: '1' });
     // 登录链接绑定原会话：留给管理员核对的原任务在那里。
     expect(retired.capabilities).toMatchObject({ detailLogin: true, webUrl: `https://dutydeck.example.com/sessions/${h.oldSessionId}` });
+  });
+
+  it('真实转交后在旧卡上点「查看详情」：管理员私信里的登录链接兑换出原会话，非管理员被拒且不发私信', async () => {
+    const h = await blockedTopic({ web: true });
+    const { coordinator, service } = await h.start('p2');
+    const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
+    expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
+    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已在新会话中执行');
+    const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
+    // 回调值取旧卡页脚按钮上的，context 是旧卡本身。
+    const detail = callbackValueOf(h.lastUpdate(service, run.cardId), 'detail');
+    const privateMessages = () => service.send.mock.calls.map(([input]) => input as any).filter(input => input.receiveId);
+
+    expect(await coordinator.handleAction(detail, 'ou_mallory', run.context)).toMatchObject({ type: 'warning', content: expect.stringContaining('仅机器人管理员') });
+    expect(privateMessages()).toHaveLength(0);
+
+    expect(await coordinator.handleAction(detail, 'ou_alice', run.context)).toEqual({ type: 'success', content: '已私信你一个 10 分钟内有效的登录链接' });
+    const [dm, ...others] = privateMessages();
+    expect(others).toHaveLength(0);
+    expect(dm).toMatchObject({ receiveId: 'ou_alice', receiveIdType: 'open_id' });
+    const code = /code=([A-Za-z0-9_-]{43})/.exec(JSON.stringify(dm))![1]!;
+    // 链接绑定原会话（留给管理员核对的原任务在那里），不是转交建出的新会话。
+    expect(fresh.id).not.toBe(h.oldSessionId);
+    expect(h.loginLinks.redeem(code)).toBe(h.oldSessionId);
   });
 
   it('没转交过的卡住会话直接发 /new：不去停它、写保留标记，照常开新会话，回执说明原任务已保留', async () => {
