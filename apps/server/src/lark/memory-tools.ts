@@ -7,13 +7,13 @@
 import type { FastifyInstance } from 'fastify';
 import { RuntimeError } from '@dutydeck/shared';
 import { agentGroupToolBearerToken, type LarkAgentToolsService } from './agent-tools.js';
-import { larkMemoryScope, normalizeLarkMemoryTopic, type LarkMemoryStore } from './memory.js';
+import { LarkMemoryError, larkMemoryScope, normalizeLarkMemoryTopic, type LarkMemoryStore } from './memory.js';
 
 export interface LarkMemoryToolsOptions {
   tools: Pick<LarkAgentToolsService, 'memoryContext'>;
   store: LarkMemoryStore;
-  /** 有活动任务时把触发该轮的发送人记为 createdBy，便于追溯是谁的指令让 Agent 记住了它。 */
-  runtime?: { getActiveTaskContext(sessionId: string): { actorId?: string } | undefined };
+  /** 有活动任务时把触发该轮的发送人记为 createdBy、把该轮记为 taskId，便于追溯是谁的指令、哪一轮让 Agent 记住了它。 */
+  runtime?: { getActiveTaskContext(sessionId: string): { taskId?: string; actorId?: string } | undefined };
 }
 
 export const larkMemoryToolsPath = '/api/lark/agent-tools/memory';
@@ -21,10 +21,12 @@ export const larkMemoryToolsPath = '/api/lark/agent-tools/memory';
 export async function registerLarkMemoryTools(app: FastifyInstance, options: LarkMemoryToolsOptions) {
   const scopeFor = async (authorization?: string) => {
     const binding = await options.tools.memoryContext(agentGroupToolBearerToken(authorization));
+    const active = options.runtime?.getActiveTaskContext(binding.sessionId);
     return {
       scope: larkMemoryScope(binding.appId, binding.chatId, binding.chatType),
       sessionId: binding.sessionId,
-      actorId: options.runtime?.getActiveTaskContext(binding.sessionId)?.actorId
+      taskId: active?.taskId,
+      actorId: active?.actorId
     };
   };
 
@@ -63,19 +65,28 @@ export async function registerLarkMemoryTools(app: FastifyInstance, options: Lar
 
   // 4. add 新增（可选 topic）
   app.post<{ Body: { content?: unknown; topic?: unknown } }>(larkMemoryToolsPath, async request => {
-    const { scope, sessionId, actorId } = await scopeFor(request.headers.authorization);
+    const { scope, sessionId, taskId, actorId } = await scopeFor(request.headers.authorization);
     const content = request.body?.content;
     if (typeof content !== 'string') throw new RuntimeError('MEMORY_CONTENT_REQUIRED', '请求体需要字符串字段 content。', 400);
     const topic = typeof request.body?.topic === 'string' ? request.body.topic : undefined;
-    const entry = await options.store.add(scope, {
-      content,
-      source: 'agent',
-      sessionId,
-      chatId: scope.chatId,
-      ...(topic ? { topic } : {}),
-      ...(actorId ? { createdBy: actorId } : {})
-    });
-    return { chatId: scope.chatId, entry };
+    try {
+      const entry = await options.store.add(scope, {
+        content,
+        source: 'agent',
+        sessionId,
+        chatId: scope.chatId,
+        ...(taskId ? { taskId } : {}),
+        ...(topic ? { topic } : {}),
+        ...(actorId ? { createdBy: actorId } : {})
+      });
+      return { chatId: scope.chatId, entry };
+    } catch (error) {
+      // 被拒的内容本身往往就是凭据或注入指令，只记原因不记内容。
+      if (error instanceof LarkMemoryError && ['MEMORY_CREDENTIAL_REJECTED', 'MEMORY_INJECTION_REJECTED'].includes(error.code)) {
+        request.log.warn({ code: error.code, appId: scope.appId, pool: scope.pool, sessionId }, 'Agent 写入会话记忆被拒绝');
+      }
+      throw error;
+    }
   });
 
   // 5. delete 删除

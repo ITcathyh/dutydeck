@@ -10,8 +10,8 @@ import { parseLarkNewSession, validateLarkLaunchOptions, type LarkLaunchOptions 
 import { collectLarkTaskContext } from './task-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
-import { isLarkGroupMemoryPool, isLarkMemoryId, larkMemoryScope, LarkMemoryStore, renderLarkMemoryList, type LarkMemoryEntry } from './memory.js';
-import { LarkMemoryProjection, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
+import { isLarkGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, LarkMemoryStore, renderLarkMemoryList, type LarkMemoryEntry, type LarkMemoryScope } from './memory.js';
+import { isLarkTurnMemoryElement, LarkMemoryProjection, renderLarkMemoryInjection, renderLarkTurnMemoryElements, renderMemoryIndex } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMapping, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, PublicSessionSchedule, Session, TaskRecord, ToolRiskPolicy, VerificationResponse } from '@dutydeck/shared';
@@ -1301,8 +1301,7 @@ export class LarkMessageCoordinator {
   ): Promise<'handled' | string | LarkCommandPrompt | undefined> {
     if (!parseSlashCommand(prompt)) return undefined;
     const botSender = event.senderType === 'app' || event.senderType === 'bot';
-    const commandAccess = event.chatType === 'group' ? await this.groupManager?.authorize(config.appId, event.chatId, event.senderOpenId, 'task.view_result') : undefined;
-    const allowlisted = commandAccess?.allowed ?? await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, group.sessionId);
+    const allowlisted = await this.commandAllowlisted(config, event.chatType, event.chatId, event.senderOpenId, group.sessionId);
     const route = routeLarkCommand(prompt, {
       capabilities: this.larkRouteCapabilities(),
       operator: { kind: botSender ? 'bot' : 'user', allowlisted }
@@ -1349,6 +1348,15 @@ export class LarkMessageCoordinator {
       return 'handled';
     }
     return await this.executeChatCommandIntent(route, event, config, group, scopeId, replyCard, acknowledgementReactionId);
+  }
+
+  /**
+   * 命令层白名单门：群聊按群策略的 task.view_result，策略缺席时与私聊一样按机器人白名单。
+   * 聊天命令与结果卡上的删记忆按钮共用这一个判断，两处对同一个人不会给出不同答案。
+   */
+  private async commandAllowlisted(config: StoredLarkConfig, chatType: string, chatId: string, operatorOpenId: string | undefined, sessionId?: string) {
+    const access = chatType === 'group' ? await this.groupManager?.authorize(config.appId, chatId, operatorOpenId, 'task.view_result') : undefined;
+    return access?.allowed ?? await this.isOperatorAllowed(config, operatorOpenId, chatId, sessionId);
   }
 
   /**
@@ -1580,11 +1588,44 @@ export class LarkMessageCoordinator {
             else await replyCard('/memory consolidate 未执行', '本机器人已关闭会话记忆。', { failed: true });
             return 'handled';
           }
+          if (route.args[0] === 'ignore') {
+            // 「不许记」规则跟记忆池走：群聊里对本机器人所在各群都生效。增删改写的是约束，与 consolidate 一样挡住机器人发送者。
+            const [, action, id, ...extra] = route.args;
+            const where = shared ? '本机器人所在各群共享' : '本聊天';
+            if (!action || (action === 'list' && !id)) {
+              const rules = await memory.listIgnoreRules(scope);
+              await replyCard('不许记规则', rules.length
+                ? `**${where}的「不许记」规则（${rules.length} 条）**\n\n${rules.map(rule => `- \`${rule.id}\` · ${larkCommandEcho(rule.text, 200)}`).join('\n')}\n\n新增：\`/memory ignore <一句话描述>\`；删除：\`/memory ignore remove <编号>\``
+                : '**还没有「不许记」规则。**\n\n发送 `/memory ignore <一句话描述>` 添加，例如 `/memory ignore 不要记任何人的薪资`。后台提取会把规则当作约束，写入前再按规则过滤一次。');
+              return 'handled';
+            }
+            if (event.senderType === 'app' || event.senderType === 'bot') {
+              await replyCard('/memory ignore 未执行', '机器人发送者不能修改「不许记」规则。', { failed: true });
+              return 'handled';
+            }
+            if (action === 'remove') {
+              if (!isLarkMemoryIgnoreRuleId(id) || extra.length) {
+                await replyCard('/memory ignore 未执行', '**用法：`/memory ignore remove <规则编号>`**\n\n编号形如 `ign_1a2b3c4d`，发送 `/memory ignore list` 查看。', { failed: true });
+                return 'handled';
+              }
+              const removed = await memory.removeIgnoreRule(scope, id);
+              if (!removed) {
+                await replyCard('/memory ignore 未执行', `**${where}没有编号为 \`${id}\` 的「不许记」规则。**\n\n发送 \`/memory ignore list\` 查看。`, { failed: true });
+                return 'handled';
+              }
+              await replyCard('已删除不许记规则', `**已删除规则 \`${removed.id}\`。**\n\n${larkCommandEcho(removed.text, 200)}\n\n之后的后台提取不再受这条规则约束。`);
+              return 'handled';
+            }
+            const rule = await memory.addIgnoreRule(scope, { text: route.argsText.replace(/^ignore\s*/i, ''), chatId: event.chatId,
+              ...(event.senderOpenId ? { createdBy: event.senderOpenId } : {}) });
+            await replyCard('已添加不许记规则', `**已添加规则 \`${rule.id}\`${shared ? '（对本机器人所在各群都生效）' : ''}。**\n\n${larkCommandEcho(rule.text, 200)}\n\n之后的后台提取不会记下与它相关的内容；已有的记忆不受影响，可用 \`/forget <编号>\` 删除。查看：\`/memory ignore list\`；删除：\`/memory ignore remove ${rule.id}\`。`);
+            return 'handled';
+          }
           let page: number | undefined;
           if (route.args.length > 0) {
             page = Number(route.args[0]);
             if (!Number.isInteger(page) || page < 1) {
-              await replyCard('/memory 未执行', '**用法：`/memory [页码]` 或 `/memory consolidate`**', { failed: true });
+              await replyCard('/memory 未执行', '**用法：`/memory [页码]`、`/memory consolidate` 或 `/memory ignore <描述>`**', { failed: true });
               return 'handled';
             }
           }
@@ -2555,6 +2596,28 @@ export class LarkMessageCoordinator {
     await this.saveCardTask(task).catch(error => this.log.warn({ error, taskId: task.id }, '验证状态已更新到卡片，持久化待对账补齐'));
   }
 
+  /** 结果卡上的「本轮记忆」区；关闭记忆、没有记录或读取失败时不渲染，不影响结果交付。 */
+  private async turnMemoryElements(config: StoredLarkConfig, sessionId?: string, runtimeTaskId?: string) {
+    if (config.memoryEnabled === false || !this.memory || !sessionId || !runtimeTaskId) return [];
+    const view = await this.memory.turn(sessionId, runtimeTaskId).catch(error => {
+      this.log.warn({ error, runtimeTaskId }, '读取本轮会话记忆失败，结果卡不列本轮记忆');
+      return undefined;
+    });
+    return view ? renderLarkTurnMemoryElements(view) : [];
+  }
+
+  /** 删掉一条记忆后重绘结果卡上的「本轮记忆」区，其余内容原样保留；卡片不在内存里（例如重启之后）时不重绘。 */
+  private async refreshResultMemory(task: LarkTask, config: StoredLarkConfig) {
+    if (!task.finalCardInput || !task.finalMessageId || !task.finalElements) return;
+    const memory = await this.turnMemoryElements(config, task.sessionId, task.runtimeTaskId);
+    const kept = task.finalElements.filter(item => !isLarkTurnMemoryElement(item));
+    const mention = kept.findIndex(item => item.element_id === 'group_mention');
+    const elements = mention < 0 ? [...kept, ...memory] : [...kept.slice(0, mention), ...memory, ...kept.slice(mention)];
+    await this.service.update({ ...task.finalCardInput, messageId: task.finalMessageId, elements });
+    task.finalElements = elements;
+    await this.saveCardTask(task).catch(error => this.log.warn({ error, taskId: task.id }, '结果卡的本轮记忆已更新，持久化待对账补齐'));
+  }
+
   /** 正在后台执行 /repair 的「应用:确认卡消息」，防止同一张确认卡被重复点击触发多次发布。 */
   private repairInFlight = new Set<string>();
 
@@ -3189,6 +3252,40 @@ export class LarkMessageCoordinator {
       } catch (error) {
         this.log.warn({ error }, '受理 /repair 失败');
         return { type: 'error', content: '修复操作受理失败，请稍后重试；本次未完成发布。' };
+      }
+    }
+    // 结果卡「本轮记忆」的删除按钮：与 /forget 同一道命令层白名单门，只接受这一轮列出过的条目。
+    // 记忆池与会话取自派发时的记录，聊天以平台回调给的为准，不信 value 里的任何聊天标识。
+    if (workflow && typeof workflow === 'object' && 'dutydeck_memory_forget' in workflow) {
+      const memoryId = workflow.dutydeck_memory_forget;
+      const turnTaskId = typeof workflow.task_id === 'string' ? workflow.task_id : '';
+      const turnSessionId = typeof workflow.session_id === 'string' ? workflow.session_id : '';
+      if (!isLarkMemoryId(memoryId) || !turnTaskId || !turnSessionId) return { type: 'error', content: '无法识别要删除的记忆。' };
+      if (!context?.chatId || !operatorOpenId || !this.reconcileConfig || !this.memory || !this.workflowOptions.store) {
+        return { type: 'error', content: '删除入口已失效，请发送 /memory 查看，再用 /forget <编号> 删除。' };
+      }
+      try {
+        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
+        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法删除记忆。' };
+        if (config.memoryEnabled === false) return { type: 'warning', content: '本机器人已关闭会话记忆。' };
+        const turn = await this.memory.turn(turnSessionId, turnTaskId);
+        if (!turn) return { type: 'warning', content: `这张卡片的记忆记录已过期（每个会话只保留最近 ${larkMemoryLimits.turnsPerSession} 轮），请发送 /memory 查看，再用 /forget <编号> 删除。` };
+        if (turn.record.appId !== config.appId || turn.record.chatId !== context.chatId
+          || ![...turn.injected, ...turn.written].some(entry => entry.id === memoryId)) {
+          return { type: 'warning', content: '这条记忆不属于本卡片对应的任务，请发送 /memory 查看。' };
+        }
+        if (!await this.commandAllowlisted(config, turn.shared ? 'group' : 'p2p', context.chatId, operatorOpenId, turn.record.sessionId)) {
+          return { type: 'warning', content: '当前账号不在机器人白名单中，无法删除记忆。' };
+        }
+        const removed = await this.memory.remove(turn.scope, memoryId, operatorOpenId);
+        const task = [...this.tasks.values()].find(item => item.runtimeTaskId === turnTaskId);
+        if (task) await this.refreshResultMemory(task, config).catch(error => this.log.warn({ error, taskId: task.id }, '记忆已删除，结果卡刷新失败'));
+        return removed
+          ? { type: 'success', content: `已删除记忆 ${memoryId}，之后的任务不再带上这条记忆。` }
+          : { type: 'warning', content: `记忆 ${memoryId} 已经删除过了。` };
+      } catch (error) {
+        this.log.warn({ error }, '删除结果卡上的记忆失败');
+        return { type: 'error', content: '删除失败，请稍后重试，或发送 /forget <编号>。' };
       }
     }
     // S2：/help 只读翻页。帮助内容与用户身份无关，无需持久化原消息；门禁与 /help 命令同权。
@@ -4234,10 +4331,13 @@ export class LarkMessageCoordinator {
         // 但此前只存在于 Web；结果卡上必须把「验证过没有」和 Agent 的自述分开写清楚。
         const verification = await this.verificationView(task, config, state);
         const resultActions = await this.resultActionCapabilities(task, config, state);
+        // 取消的任务没有执行过，注入的记忆 Agent 并没有看到。
+        const memoryElements = state === 'cancelled' ? [] : await this.turnMemoryElements(config, task.sessionId, task.runtimeTaskId);
         const elements = [
           ...(explicit ? [] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events)),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
           ...(verification.element ? [verification.element] : []),
+          ...memoryElements,
           ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : [])];
         if (this.stopped || task.turn !== currentTurn) return;
         const resultCardInput = {
@@ -4353,12 +4453,15 @@ export class LarkMessageCoordinator {
     if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     // 会话记忆随 agentPrompt 一起冻结进任务账本：事后能核对这一轮 Agent 看到的是哪几条记忆。
-    // 读取失败只丢本轮注入并留日志，不阻断任务。
+    // 读取失败只丢本轮注入并留日志，不阻断任务。注入了哪几条另记一份，结果卡与 Web 任务详情据此列出。
+    let memoryTurn: { scope: LarkMemoryScope; ids: string[] } | undefined;
     if (config.memoryEnabled !== false && this.workflowOptions.memory) {
       try {
         const { store, projection, command } = this.workflowOptions.memory;
         const scope = larkMemoryScope(config.appId, event.chatId, event.chatType);
         const shared = isLarkGroupMemoryPool(scope);
+        // 没有注入任何条目也要记：本轮 Agent 保存的、后台从本轮提取的记忆都按这份记录找到记忆池。
+        memoryTurn = { scope, ids: [] };
         const [entries, state] = await withLarkContextReadTimeout(Promise.all([
           store.list(scope),
           store.getState(scope)
@@ -4415,7 +4518,10 @@ export class LarkMessageCoordinator {
           directory: projection.directoryFor(scope),
           shared
         });
-        if (memoryBlock) injected.push(memoryBlock);
+        if (memoryBlock) {
+          injected.push(memoryBlock);
+          memoryTurn.ids = index.ids;
+        }
       } catch (error) {
         this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: task.id }, '读取飞书会话记忆失败，本轮不注入记忆');
         injected.push('[Dutydeck 会话记忆状态] 会话记忆读取超时或失败，本轮未注入记忆；不要把未读到的内容判断为不存在。');
@@ -4558,6 +4664,11 @@ export class LarkMessageCoordinator {
         // 旧轮次不得把自己的 runtime task 写成新一轮的，否则 mapping 里的任务归属就错了。
         if (task.turn !== currentTurn) return;
         task.runtimeTaskId = runtimeTask.id;
+        // 重放的是早先那次派发，本轮新读的记忆没有交给 Agent，记录以那一次为准。
+        if (memoryTurn && !runtimeTask.replayed) {
+          await this.workflowOptions.memory!.store.recordTurn(memoryTurn.scope, { taskId: runtimeTask.id, sessionId: session.id, injected: memoryTurn.ids })
+            .catch(error => this.log.warn({ error, runtimeTaskId }, '记录本轮注入的会话记忆失败，结果卡不列本轮记忆'));
+        }
         // /steer 的降级：运行时没有「注入当前轮」的原语，只能把这条提到队首。
         // 注记按真实结果写：提升成功、提升失败、或本来就没有排队都各说各的，不预告成功。
         if (task.steer) {

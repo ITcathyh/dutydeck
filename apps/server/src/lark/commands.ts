@@ -195,7 +195,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   { name: 'reject', summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
   // 会话记忆跨话题、跨 /new、跨重启生效：同一机器人的所有群共享一份，每个私聊各自一份。
   { name: 'remember', summary: '把一条事实、偏好或约定保存为长期记忆（群聊里各群共享），之后每轮任务都会带给 Agent', usage: '/remember <内容>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/remember 已停用。' },
-  { name: 'memory', summary: '查看当前可见的记忆及其编号、后台提取与整理状态', usage: '/memory', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
+  { name: 'memory', summary: '查看当前可见的记忆及其编号、后台提取与整理状态', usage: '/memory；/memory consolidate；/memory ignore 描述；/memory ignore list；/memory ignore remove 编号', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
   { name: 'forget', summary: '删除当前可见记忆中指定编号的一条', usage: '/forget <记忆编号>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/forget 已停用。' },
   {
     name: 'help',

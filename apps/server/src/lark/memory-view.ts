@@ -13,7 +13,8 @@ import {
   type LarkMemoryScope,
   type LarkMemorySource,
   type LarkMemoryState,
-  type LarkMemoryStore
+  type LarkMemoryStore,
+  type LarkMemoryTurnView
 } from './memory.js';
 
 const sourceLabels: Record<LarkMemorySource, string> = {
@@ -43,18 +44,19 @@ export interface RenderMemoryIndexOptions {
  * 渲染 MEMORY.md 索引文本：
  * 标题、统计行、各主题下的摘要行；超预算时省略并附引导行。
  * 给了 currentChatId（群共享池注入时）则来源是别的群的条目标「其他群」；落盘的 MEMORY.md 不标。
+ * ids 是索引里列出的本池条目编号（不含同群其他机器人的条目），即这一轮注入了哪些记忆。
  */
 export function renderMemoryIndex(
   entries: LarkMemoryEntry[],
   state: LarkMemoryState,
   options?: RenderMemoryIndexOptions
-): { text: string; overBudget: boolean; omitted: number } {
+): { text: string; overBudget: boolean; omitted: number; ids: string[] } {
   const budget = options?.budget ?? larkMemoryLimits.indexChars;
   const sharedEntries = options?.sharedEntries ?? [];
 
   if (!entries.length) {
     if (!sharedEntries.length) {
-      return { text: '', overBudget: false, omitted: 0 };
+      return { text: '', overBudget: false, omitted: 0, ids: [] };
     }
     const sharedIntro = '这些条目属于其他机器人，memory show/search 查不到。';
     const sharedLines: string[] = [];
@@ -72,13 +74,13 @@ export function renderMemoryIndex(
       }
     }
     if (!sharedLines.length) {
-      return { text: '', overBudget: true, omitted: 0 };
+      return { text: '', overBudget: true, omitted: 0, ids: [] };
     }
     const text = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${sharedLines.join('\n')}`;
     if (sharedLines.length < sharedEntries.length) {
       overBudget = true;
     }
-    return { text, overBudget, omitted: 0 };
+    return { text, overBudget, omitted: 0, ids: [] };
   }
 
   const lastConsolidation = state.lastConsolidationAt
@@ -167,14 +169,15 @@ export function renderMemoryIndex(
   const omitted = entries.length - selectedIds.size;
   const selfText = formatIndexWith(selectedIds, omitted);
   let overBudget = omitted > 0 || selfText.length > budget;
+  const ids = [...selectedIds];
 
   if (!sharedEntries.length) {
-    return { text: selfText, overBudget, omitted };
+    return { text: selfText, overBudget, omitted, ids };
   }
 
   // 自己的条目优先：若自己已经超预算，先丢弃共享条目，保留自身全部已选条目
   if (overBudget) {
-    return { text: selfText, overBudget: true, omitted };
+    return { text: selfText, overBudget: true, omitted, ids };
   }
 
   // 自己的条目未超预算，尝试在剩余预算内加入共享条目
@@ -195,14 +198,54 @@ export function renderMemoryIndex(
   }
 
   if (!sharedLines.length) {
-    return { text: selfText, overBudget: true, omitted };
+    return { text: selfText, overBudget: true, omitted, ids };
   }
 
   if (sharedLines.length < sharedEntries.length) {
     overBudget = true;
   }
   const sharedSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${sharedLines.join('\n')}`;
-  return { text: `${selfText}\n\n${sharedSection}`, overBudget, omitted };
+  return { text: `${selfText}\n\n${sharedSection}`, overBudget, omitted, ids };
+}
+
+/** 结果卡「本轮记忆」区的 element_id 前缀；删掉一条后按它整段替换。 */
+export const larkTurnMemoryElementPrefix = 'memory_turn';
+/** 结果卡上最多列几条；超出只给总数，全部在 Web 任务详情与 /memory 里。 */
+export const larkTurnMemoryCardRows = 5;
+
+export const isLarkTurnMemoryElement = (element: { element_id?: unknown }) =>
+  typeof element.element_id === 'string' && element.element_id.startsWith(larkTurnMemoryElementPrefix);
+
+/**
+ * 结果卡上的「本轮记忆」：先列本轮新记下的，再列本轮用到的，每条一行、带删除按钮；已删除的不再列出。
+ * 条目内容放 plain_text，不当 markdown 渲染。按钮 value 只带本轮 taskId 与记忆编号：
+ * 回调端按记录核对它属于这一轮，再走 /forget 同一道权限门。没有可列的条目时返回空数组。
+ */
+export function renderLarkTurnMemoryElements(view: Pick<LarkMemoryTurnView, 'record' | 'shared' | 'injected' | 'written'>): Array<Record<string, unknown>> {
+  const written = view.written.filter(entry => !entry.deletedAt);
+  const injected = view.injected.filter(entry => !entry.deletedAt);
+  const rows = [...written.map(entry => ({ entry, kind: '新记下' })), ...injected.map(entry => ({ entry, kind: '用到' }))];
+  if (!rows.length) return [];
+  const counts = [injected.length ? `用到 ${injected.length} 条` : '', written.length ? `新记下 ${written.length} 条` : ''].filter(Boolean).join(' · ');
+  const hidden = rows.length - larkTurnMemoryCardRows;
+  return [
+    {
+      tag: 'markdown', element_id: larkTurnMemoryElementPrefix, margin: '8px 0px 0px 0px',
+      content: `**本轮记忆**：${counts}${hidden > 0 ? `，只列前 ${larkTurnMemoryCardRows} 条（全部见 Web 任务详情或 /memory）` : ''}\n删除后，之后的任务不再带上这条${view.shared ? '群共享' : ''}记忆；后台提取的新记忆稍后在 /memory 里可见。`
+    },
+    ...rows.slice(0, larkTurnMemoryCardRows).map(({ entry, kind }, index) => ({
+      tag: 'column_set', element_id: `${larkTurnMemoryElementPrefix}_${index}`, flex_mode: 'none', horizontal_spacing: '8px', vertical_align: 'center', margin: '4px 0px',
+      columns: [
+        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [{
+          tag: 'div', text: { tag: 'plain_text', content: `${kind} · ${entry.id} · ${clipLine(entry.content, 80)}`, lines: 2 }, margin: '0px'
+        }] },
+        { tag: 'column', width: 'auto', vertical_align: 'center', elements: [{
+          tag: 'button', type: 'text', text: { tag: 'plain_text', content: '删除' },
+          behaviors: [{ type: 'callback', value: { dutydeck_memory_forget: entry.id, task_id: view.record.taskId, session_id: view.record.sessionId } }]
+        }] }
+      ]
+    }))
+  ];
 }
 
 /**
