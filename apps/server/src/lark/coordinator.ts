@@ -2621,7 +2621,8 @@ export class LarkMessageCoordinator {
       let failure: unknown;
       // 任务完成事件发出后运行时还要收尾一小段队列，这期间会话短暂忙；一直忙说明有别的任务在排队，这次跳过。
       for (let attempt = 1; ; attempt++) {
-        try { record = await this.runtime.runVerification!(task.sessionId!, { command: plan.command }); break; }
+        // 带上发起人：管理群的执行授权要求验证也有可核验的发起人。
+        try { record = await this.runtime.runVerification!(task.sessionId!, { command: plan.command }, task.event.senderOpenId); break; }
         catch (error) {
           failure = error;
           if (!(error instanceof RuntimeError && error.code === 'SESSION_BUSY') || attempt >= 20 || this.stopped || task.turn !== plan.turn) break;

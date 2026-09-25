@@ -6,7 +6,8 @@
 // 4) 验证工具本身出错（命令不存在）记为未通过，但不发回返修；
 // 5) 没配验证命令时按基准推断候选命令，一键确认后保存到配置，同一工作区只提议一次；
 // 6) 自动验证执行中服务重启：重启后卡片改成「验证被中断」并给出「运行验证」；
-// 7) 待收尾记录每个机器人一行，任务的验证收尾后移除，不随任务数增长。
+// 7) 待收尾记录每个机器人一行，任务的验证收尾后移除，不随任务数增长；
+// 8) 管理群里自动验证带上发起人身份，过得了执行授权。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -17,6 +18,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig } from '@dutydeck/shared';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
+import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, readLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard } from './service.js';
@@ -36,8 +38,9 @@ const event = (id: string, text = '改一下登录逻辑'): LarkMessageEvent => 
 /**
  * edit 在 Agent 每一轮执行时调用，round 从 1 开始；不传就是这一轮不改代码。
  * unpushed：仓库有远端，本地还有一个没推送的提交——用户主目录的常见形态。
+ * managed：群绑定为管理群，执行授权走真实的 LarkGroupManager.prepareTurn（与 service.ts 的接线一致）。
  */
-async function harness(options: { verificationCommand?: string; files?: Record<string, string>; edit?: (repo: string, round: number, prompt: string) => void; unpushed?: boolean }) {
+async function harness(options: { verificationCommand?: string; files?: Record<string, string>; edit?: (repo: string, round: number, prompt: string) => void; unpushed?: boolean; managed?: boolean }) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-lark-autoverify-'));
   // 状态库放在仓库外面：它一直在写，放在仓库里会让验证期间的代码指纹对不上。
   const repo = join(root, 'repo');
@@ -93,7 +96,9 @@ async function harness(options: { verificationCommand?: string; files?: Record<s
   /** 在同一个状态库上起一套运行时与飞书协调器；重启时飞书那一侧（卡片、消息）不变。 */
   const boot = async (first: boolean) => {
     const repos = createRepositories(join(root, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
+    let groups: LarkGroupManager | undefined;
     const runtime = new DutydeckRuntime(repos, {
+      ...(options.managed ? { authorizeExecution: (sessionId: string, actorId?: string) => groups!.prepareTurn(sessionId, actorId) } : {}),
       probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
       driverFactory: (_config, _protocol, emit) => ({
         start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {}, isStopped: async () => true,
@@ -109,8 +114,22 @@ async function harness(options: { verificationCommand?: string; files?: Record<s
     await runtime.initialize([agent]);
     const runVerification = vi.spyOn(runtime, 'runVerification');
     if (first) await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    if (options.managed) {
+      const client = {
+        getBotInfo: async () => ({ appName: 'Dock', openId: 'ou_bot' }),
+        checkApplicationIdentity: async () => ({ verified: true, reportedAppId: config.appId, tenantKey: 'synthetic-tenant' }),
+        listChats: async () => ({ items: [{ chatId: 'oc_group', name: '项目群', external: false }], hasMore: false }),
+        listChatMembers: async () => ({ items: [{ memberId: 'ou_alice', openId: 'ou_alice', name: 'alice', memberType: 'user' }], hasMore: false, securityLimited: false }),
+        getUserEmails: async () => [] as string[]
+      };
+      groups = new LarkGroupManager(repos, { now: () => new Date(), client: () => client as any });
+      if (first) {
+        await groups.sync(config.appId);
+        await groups.save(config.appId, 'oc_group', { expectedRevision: 0, patch: { accessOverride: { mode: 'all_chat_members' } } });
+      }
+    }
     const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
-      undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
+      undefined, repos.channelMappings, async () => 'group', undefined, groups, { store: repos.config });
     await coordinator.initializeWorkflows(config);
     // 与服务关闭同一组动作：停飞书监听、停运行时（会打断执行中的验证）、关库。
     const close = async () => { coordinator.stop(); await runtime.shutdown(); repos.close(); };
@@ -166,7 +185,7 @@ describe('改了代码就自动验证', () => {
     const line = await h.settledLine('om_1', '验证通过');
     expect(line).toContain('`test -f work.txt` 退出码 0');
     expect(h.runVerification).toHaveBeenCalledTimes(1);
-    expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'test -f work.txt' });
+    expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'test -f work.txt' }, 'ou_alice');
     const built = buildLarkCard((await h.resultCard('om_1')).card);
     expect(built.header.text_tag_list[0].text.content).toBe('运行完成');
     // 已有记录能证明当前代码：不再给「运行验证」，也不发返修。
@@ -265,6 +284,16 @@ describe('改了代码就自动验证', () => {
     // 待收尾里已移除，卡上的说明随卡片记录保留，之后重绘仍照它写。
     await h.drained();
     expect((await h.persisted('om_1')).verification_auto).toMatchObject({ phase: 'infrastructure' });
+  }, 30_000);
+
+  it('管理群：自动验证带上发起人身份，过得了执行授权并验证通过', async () => {
+    const h = await harness({ verificationCommand: 'test -f work.txt', managed: true, edit: repo => writeFileSync(join(repo, 'work.txt'), 'done\n') });
+    await h.coordinator.handle(event('om_1'), h.config);
+    const line = await h.settledLine('om_1', '验证通过');
+    expect(line).not.toContain('没能执行');
+    expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'test -f work.txt' }, 'ou_alice');
+    expect((await h.runtime.getVerifications((await h.persisted('om_1')).sessionId)).map(item => item.status)).toEqual(['passed']);
+    await h.drained();
   }, 30_000);
 
   it('多个任务跑完后，待收尾这一行里不残留', async () => {
