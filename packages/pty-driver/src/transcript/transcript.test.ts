@@ -7,7 +7,7 @@
  * Run: pnpm vitest run packages/pty-driver/src/transcript/transcript.test.ts
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -520,6 +520,38 @@ describe('ClaudeTranscriptTailer (directory resolution + switching)', () => {
  *     dangerous shape — it lies successfully.
  */
 describe('ClaudeTranscriptTailer (同 cwd 多会话隔离)', () => {
+  it('reads answers and background work together when the real resolver first discovers a new transcript', () => {
+    const cwd = realpathSync(makeTempDir('claude-late-background'));
+    const env = { CLAUDE_CONFIG_DIR: cwd };
+    const sessionId = 'ses_late_background';
+    const records = readFileSync(new URL('../fixtures/claude-background-agent/transcript.jsonl', import.meta.url), 'utf8')
+      .trimEnd().split('\n');
+    const pendingAt = records.findIndex(line => JSON.parse(line).pendingBackgroundAgentCount === 1);
+    expect(pendingAt).toBeGreaterThan(0);
+    const tailer = new ClaudeTranscriptTailer({ cwd, env, sessionId, pollIntervalMs: 60_000 });
+    const events = collect(tailer);
+    const answers = () => events.filter(event => event.type === 'text').map(event => event.data.text);
+    try {
+      expect(resolveClaudeTranscriptPath(cwd, env, sessionId)).toBeUndefined();
+      tailer.start();
+      const projectDir = join(cwd, 'projects', cwd.replace(/[^A-Za-z0-9-]/g, '-'));
+      mkdirSync(projectDir, { recursive: true });
+      const file = join(projectDir, `${pinnedSessionUuid(sessionId)}.jsonl`);
+      writeFileSync(file, records.slice(0, pendingAt + 1).join('\n') + '\n');
+      tailer.flush();
+      expect(answers()).toEqual(['Plain answer.', 'Launched a background agent; waiting for it.']);
+      expect(tailer.pendingBackgroundWork()).toBe(1);
+
+      appendFileSync(file, records.slice(pendingAt + 1).join('\n') + '\n');
+      tailer.flush();
+      expect(answers()).toEqual(['Plain answer.', 'Launched a background agent; waiting for it.', 'FINAL: background result merged.']);
+      expect(tailer.pendingBackgroundWork()).toBe(0);
+      const consumed = [...events];
+      tailer.flush();
+      expect(events).toEqual(consumed);
+    } finally { tailer.stop(); }
+  });
+
   /** A first-prompt entry carrying the session marker, as the CLI records it. */
   const markerEntry = (sessionId: string) => JSON.stringify({
     type: 'user',
@@ -763,6 +795,30 @@ describe('CodexTranscriptTailer (explicit path)', () => {
 });
 
 describe('resolveCodexRolloutPath', () => {
+  it('reads the first answer when the session-scoped resolver initially has no file', () => {
+    const home = makeTempDir('codex-late-first-answer');
+    const sessionId = 'ses_first_answer';
+    const env = { CODEX_HOME: home };
+    const tailer = new CodexTranscriptTailer({ cwd: home, env, sessionId, pollIntervalMs: 10_000 });
+    const events = collect(tailer);
+    try {
+      tailer.start();
+      expect(tailer.checkpoint()).toEqual({ offset: 0 });
+      const nativeId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+      const day = join(home, 'sessions', '2026', '09', '25');
+      mkdirSync(day, { recursive: true });
+      const file = join(day, `rollout-2026-09-25T10-00-00-${nativeId}.jsonl`);
+      writeFileSync(join(home, 'history.jsonl'), JSON.stringify({ session_id: nativeId, text: `[dutydeck-session:${sessionId}]` }) + '\n');
+      const content = JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete', turn_id: 'first', last_agent_message: 'FIRST_COMPLETE_ANSWER' } }) + '\n';
+      writeFileSync(file, content);
+      tailer.flush();
+      expect(events.filter(event => event.type === 'text').map(event => event.data.text)).toEqual(['FIRST_COMPLETE_ANSWER']);
+      expect(tailer.checkpoint()).toEqual({ path: file, offset: Buffer.byteLength(content) });
+      tailer.flush();
+      expect(events.filter(event => event.type === 'text')).toHaveLength(1);
+    } finally { tailer.stop(); }
+  });
+
   it('picks the newest rollout under CODEX_HOME/sessions/YYYY/MM/DD', () => {
     const home = makeTempDir('codex-home');
     process.env.CODEX_HOME = home;

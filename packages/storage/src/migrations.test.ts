@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { AgentConfig } from '@dutydeck/shared'
 import { createRepositories, PRE_V10_BACKUP_SUFFIX } from './index.js'
 import { migrations, runMigrations, withMigrationTransaction } from './migrations.js'
+import { createCiWebhookRepository } from './ci-webhook.js'
+import { createUsageLedgerRepository } from './usage-ledger.js'
 
 const BUSINESS_TABLES = [
   'agent_configs',
@@ -49,7 +51,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -580,6 +582,59 @@ describe('storage migrations', () => {
     expect(db.prepare('SELECT before_json FROM schedule_entity_versions WHERE entity_kind = ? AND entity_id = ? AND to_revision = 1').get('schedule_definition', 'definition-bloated')).toBeUndefined()
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
     db.close()
+  })
+
+  it('upgrades a v27 database with execution indexes while preserving CI and usage records', async () => {
+    const db = new Database(':memory:')
+    try {
+      db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+      const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+      withMigrationTransaction(db, () => {
+        for (const migration of migrations.filter(migration => migration.version <= 27)) {
+          migration.up(db)
+          record.run(migration.version, '2026-09-25T00:00:00.000Z')
+        }
+      })
+      expect(appliedVersions(db)).toEqual(ALL_VERSIONS.filter(version => version <= 27))
+      const indexNames = () => (db.pragma('index_list(task_attempts)') as Array<{ name: string }>).map(index => index.name)
+      for (const name of ['task_attempts_session_state', 'task_attempts_session_order']) expect(indexNames()).not.toContain(name)
+
+      const ci = createCiWebhookRepository(db)
+      expect(ci.claimEvent('event-v27', 1_000, 11_000)).toBe(true)
+      ci.bindTask('task-v27', 'subscription-v27', 1_000)
+      const usage = createUsageLedgerRepository(db)
+      expect(await usage.append({
+        id: 'usage-v27', recordedAt: '2026-09-25T00:00:00.000Z', appId: 'app-v27', chatId: 'chat-v27',
+        sessionId: 'session-v27', taskId: 'task-v27', attemptId: 'attempt-v27', actorId: 'actor-v27',
+        category: 'explicit', origin: 'lark_group', agentId: 'claude', usageRef: 'request-v27',
+        inputTokens: 100, outputTokens: 10, costUsd: 0.5, cumulativeCostUsd: 1.5, costEstimated: false, dataStatus: 'reported'
+      })).toBe(true)
+      await usage.setCap({ scope: 'group', appId: 'app-v27', chatId: 'chat-v27', monthlyCostUsd: 2 })
+      expect(await usage.claimAlert('group', 'app-v27', 'chat-v27', '2026-09', 75)).toBe(true)
+      const preservedTables = ['ci_webhook_events', 'ci_webhook_tasks', 'usage_ledger', 'usage_caps', 'usage_cap_alerts']
+      const storedRecords = () => preservedTables.map(table => db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all())
+      const before = storedRecords()
+
+      runMigrations(db)
+      expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+      for (const [name, columns] of [
+        ['task_attempts_session_state', ['session_id', 'state', 'task_id']],
+        ['task_attempts_session_order', ['session_id', 'number', 'id']]
+      ] as const) {
+        expect(indexNames()).toContain(name)
+        expect((db.pragma(`index_info(${name})`) as Array<{ name: string }>).map(column => column.name)).toEqual(columns)
+      }
+      expect(storedRecords()).toEqual(before)
+      const applied = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
+      runMigrations(db)
+      expect(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()).toEqual(applied)
+      expect(storedRecords()).toEqual(before)
+      expect(ci.claimEvent('event-v27', 2_000, 12_000)).toBe(false)
+      expect(ci.taskSubscription('task-v27')).toBe('subscription-v27')
+      expect(await usage.totals({ appId: 'app-v27', chatId: 'chat-v27' })).toMatchObject({ entries: 1, costUsd: 0.5, inputTokens: 100, outputTokens: 10 })
+      expect(await usage.hasUsageRef('session-v27', 'request-v27')).toBe(true)
+      expect(await usage.claimAlert('group', 'app-v27', 'chat-v27', '2026-09', 75)).toBe(false)
+    } finally { db.close() }
   })
 
   it('creates a consistent one-time backup before the irreversible v10 table rebuild', async () => {

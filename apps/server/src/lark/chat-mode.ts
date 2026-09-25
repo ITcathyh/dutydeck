@@ -17,19 +17,20 @@ const CHAT_MODE_TTL_MS = 5 * 60 * 1000;
 const MAX_CACHE_ENTRIES = 1_000;
 const chatModeCache = new Map<string, CachedChatMode>();
 
-// 按 appId 复用 SDK Client；appSecret 轮换后自动重建。
+// 按域名和 appId 复用 SDK Client；appSecret 轮换后自动重建。
 const clients = new Map<string, { client: lark.Client; appSecret: string }>();
 
-function chatModeClient(appId: string, appSecret: string): lark.Client {
-  const existing = clients.get(appId);
+function chatModeClient(appId: string, appSecret: string, domain: string): lark.Client {
+  const key = `${domain}::${appId}`;
+  const existing = clients.get(key);
   if (existing && existing.appSecret === appSecret) return existing.client;
-  const client = new lark.Client({ appId, appSecret, loggerLevel: lark.LoggerLevel.warn });
-  clients.set(appId, { client, appSecret });
+  const client = new lark.Client({ appId, appSecret, domain, loggerLevel: lark.LoggerLevel.warn });
+  clients.set(key, { client, appSecret });
   return client;
 }
 
-function cacheChatMode(appId: string, chatId: string, mode: LarkChatMode): LarkChatMode {
-  const key = `${appId}::${chatId}`;
+function cacheChatMode(appId: string, chatId: string, mode: LarkChatMode, domain: string): LarkChatMode {
+  const key = `${domain}::${appId}::${chatId}`;
   chatModeCache.set(key, { mode, cachedAt: Date.now() });
   // 简单的容量上限：超限时淘汰最旧的一半，避免长生命周期进程里缓存无限增长。
   if (chatModeCache.size > MAX_CACHE_ENTRIES) {
@@ -44,8 +45,8 @@ function cacheChatMode(appId: string, chatId: string, mode: LarkChatMode): LarkC
 }
 
 /** 同步读取缓存的群形态；未缓存或已过期时返回 undefined。 */
-export function getCachedChatMode(appId: string, chatId: string): LarkChatMode | undefined {
-  const cached = chatModeCache.get(`${appId}::${chatId}`);
+export function getCachedChatMode(appId: string, chatId: string, domain = 'https://open.feishu.cn'): LarkChatMode | undefined {
+  const cached = chatModeCache.get(`${domain}::${appId}::${chatId}`);
   if (cached && Date.now() - cached.cachedAt < CHAT_MODE_TTL_MS) return cached.mode;
   return undefined;
 }
@@ -72,23 +73,24 @@ export async function getChatMode(
   appId: string,
   appSecret: string,
   chatId: string,
-  options: { forceRefresh?: boolean } = {}
+  options: { forceRefresh?: boolean; domain?: string } = {}
 ): Promise<LarkChatMode> {
+  const domain = options.domain?.replace(/\/$/, '') || 'https://open.feishu.cn';
   if (!options.forceRefresh) {
-    const cached = getCachedChatMode(appId, chatId);
+    const cached = getCachedChatMode(appId, chatId, domain);
     if (cached) return cached;
   }
   try {
-    const client = chatModeClient(appId, appSecret);
+    const client = chatModeClient(appId, appSecret, domain);
     const response = await client.im.chat.get({
       path: { chat_id: chatId },
       params: { user_id_type: 'open_id' }
     }) as { code?: number; msg?: string; data?: unknown };
-    if (response && response.code !== 0) return cacheChatMode(appId, chatId, 'group');
+    if (response && response.code !== 0) return cacheChatMode(appId, chatId, 'group', domain);
     const mode = parseChatMode(response?.data);
-    return cacheChatMode(appId, chatId, mode ?? 'group');
+    return cacheChatMode(appId, chatId, mode ?? 'group', domain);
   } catch {
-    return cacheChatMode(appId, chatId, 'group');
+    return cacheChatMode(appId, chatId, 'group', domain);
   }
 }
 

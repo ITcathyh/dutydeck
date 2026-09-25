@@ -38,6 +38,53 @@ async function fixture(options: RuntimeOptions = {}, isStopped = true) {
     reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { ...options, driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 describe('owner execution recovery', () => {
+  it('matches per-task recovery with one session snapshot and no repeated history projections', async () => {
+    const h = await fixture();
+    const expected = await Promise.all([h.first, h.second].map(async task => ({ taskId: task.id, ...await h.runtime.getTaskRecovery(h.session.id, task.id) })));
+    const projection = vi.spyOn(h.repos.execution, 'getTaskExecution');
+    const snapshot = vi.spyOn(h.repos.execution, 'getSessionExecutions');
+    const tasks = vi.spyOn(h.runtime, 'getTasks');
+    expect(await h.runtime.getSessionTaskRecovery(h.session.id)).toEqual(expected);
+    expect(snapshot).toHaveBeenCalledOnce();
+    expect(projection).not.toHaveBeenCalled();
+    expect(tasks).not.toHaveBeenCalled();
+  });
+
+  it('retains completed steered tasks without attempts and their session resource blockers in bulk recovery', async () => {
+    const h = await fixture();
+    const bound = (h.runtime as any).bound() as BoundExecutionRepository;
+    const fence = { sessionId: h.session.id, runId: h.session.runId };
+    const target = h.repos.execution.getTaskExecution(h.first.id)!.currentAttempt!;
+    const queued = h.repos.execution.getTaskExecution(h.second.id)!.task;
+    // A persisted resource without this runtime's reusable handle must remain blocked after task settlement.
+    let resource = bound.beforeCreate(fence, { resourceId: 'steering-history-resource', kind: 'local_only' });
+    resource = bound.spawned(fence, resource.resourceId, resource.revision, { identityId: 'steering-history-identity', kind: 'local_only', locator: { owner: 'previous-adapter' } });
+    resource = bound.creationFinished(fence, resource.resourceId, resource.revision, 'created');
+    bound.observed(fence, resource.resourceId, resource.revision, { observationId: 'steering-history-live', identityId: resource.identity!.identityId, state: 'live', evidenceRef: 'previous-adapter-started', observedAt: new Date().toISOString() });
+    bound.deliverQueuedBySteering(fence, queued.id, queued.revision, {
+      operationId: 'recovery-steering', actor: owner,
+      target: { taskId: target.taskId, attemptId: target.attemptId }, outcome: 'injected'
+    });
+    bound.settleAttempt({ ...fence, taskId: target.taskId, attemptId: target.attemptId, expectedRevision: target.revision }, 'recovery-steering-target', {
+      kind: 'driver_result', submissionId: target.submission!.submissionId,
+      outcome: 'completed', outputDigest: 'a'.repeat(64), stopReason: 'end_turn', complete: true
+    });
+    expect(h.repos.execution.getTaskExecution(queued.id)).toMatchObject({
+      task: { status: 'completed' }, currentAttempt: undefined, attempts: []
+    });
+    expect(h.repos.execution.getUnresolvedTasks(h.session.id)).toEqual([]);
+
+    const expected = await Promise.all([h.first, h.second].map(async task => ({ taskId: task.id, ...await h.runtime.getTaskRecovery(h.session.id, task.id) })));
+    const recovery = await h.runtime.getSessionTaskRecovery(h.session.id);
+    expect(recovery).toEqual(expected);
+    expect(recovery).toHaveLength(2);
+    for (const task of recovery) {
+      expect(task.status).toBe('completed');
+      expect(task.blockers).toContainEqual({ code: 'DRIVER_RESOURCE_UNSAFE' });
+    }
+    expect(recovery.find(task => task.taskId === queued.id)).toBeDefined();
+  });
+
   it('rejects unauthorized, stale and live-resource confirmation without changing the original attempt', async () => {
     const h = await fixture();
     const input = await h.decision();

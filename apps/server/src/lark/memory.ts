@@ -84,7 +84,7 @@ export interface LarkMemoryState {
   indexOverBudget?: boolean;
   /** 各类型最近一次失败的时间；退避只看自己这一类，成功后清除。lastRun 只代表最近一次运行。 */
   lastFailureAt?: { extraction?: string; consolidation?: string };
-  running?: { kind: 'extraction' | 'consolidation'; sessionId?: string; startedAt: string };
+  running?: { kind: 'extraction' | 'consolidation'; sessionId?: string; startedAt: string; token?: string; owner?: import('@dutydeck/storage').ProcessIdentity };
   lastRun?: {
     kind: 'extraction' | 'consolidation';
     at: string;
@@ -439,10 +439,11 @@ export class LarkMemoryStore {
    * 整理必须原子生效：先 add 后 remove/retopic 分成多次 add/remove 调用的话，
    * 中途失败会留下「新条目已写入、旧条目还在」的半成品账本。
    */
-  async applyBatch(scope: LarkMemoryScope, steps: LarkMemoryBatchStep[]): Promise<LarkMemoryBatchResult> {
+  async applyBatch(scope: LarkMemoryScope, steps: LarkMemoryBatchStep[], beforeCommit?: () => void): Promise<LarkMemoryBatchResult> {
     if (!steps.length) return { added: [], removed: 0, retopiced: 0 };
     let result!: LarkMemoryBatchResult;
     await this.mutate(scope, entries => {
+      beforeCommit?.();
       let current = entries;
       const added: LarkMemoryEntry[] = [];
       let removed = 0;

@@ -2,7 +2,7 @@ import { access, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
 import { delimiter, join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { launchAgent } from './launcher-process.mjs';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
 
@@ -48,13 +48,4 @@ const command = process.env.DUTYDECK_CLAUDE_ACP_COMMAND || process.execPath;
 const args = process.env.DUTYDECK_CLAUDE_ACP_ARGS_JSON
   ? JSON.parse(process.env.DUTYDECK_CLAUDE_ACP_ARGS_JSON)
   : [bundledClaudeAcp];
-const child = spawn(command, args, { cwd: process.cwd(), env, stdio: 'inherit' });
-
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => { if (!child.killed) child.kill(signal); });
-child.once('error', error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
-child.once('exit', (code, signal) => {
-  if (signal && process.platform !== 'win32') {
-    process.removeAllListeners(signal);
-    process.kill(process.pid, signal);
-  } else process.exit(code ?? 1);
-});
+launchAgent(command, args, env);

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -29,6 +29,46 @@ const intent=(submissionId='send')=>({submissionId,inputDigest:hash('final'),res
 const complete=(submissionId='send')=>({kind:'driver_result' as const,submissionId,outcome:'completed' as const,outputDigest:hash('done'),stopReason:'end_turn',complete:true as const});
 
 describe('task execution ledger',()=>{
+  it('bounds hot task and attempt reads as unrelated execution history grows', () => {
+    const filename = disk();
+    const { x, repos } = ready(filename);
+    const original = claimed(x);
+    const settled = x.settleAttempt(af(original), 'seed-final', { kind: 'not_submitted', outcome: 'cancelled', reason: 'fixture' }).attempt!;
+    const sql = new Database(filename);
+    try {
+      const insertTask = sql.prepare('INSERT INTO tasks(id,session_id,prompt,status,created_at,updated_at,current_attempt_id,revision) VALUES(?,?,?,?,?,?,?,?)');
+      const insertAttempt = sql.prepare('INSERT INTO task_attempts(id,task_id,session_id,run_id,number,revision,state,submission_state,json) VALUES(?,?,?,?,?,?,?,?,?)');
+      let count = 1;
+      for (const size of [1, 1000, 10000]) {
+        sql.transaction(() => {
+          for (; count < size; count++) {
+            const taskId = `history_task_${count}`, attemptId = `history_attempt_${count}`;
+            insertTask.run(taskId, 's', 'historic', 'cancelled', '2026-01-01', '2026-01-01', attemptId, 1);
+            insertAttempt.run(attemptId, taskId, 's', 'r', 1, settled.revision, 'settled', 'not_submitted', JSON.stringify({ ...settled, taskId, attemptId }));
+          }
+        })();
+        const parse = vi.spyOn(JSON, 'parse');
+        try {
+          expect(repos.execution.getTaskExecution(settled.taskId)?.attempts).toEqual([settled]);
+          expect(repos.execution.getAttempt(af(settled))).toEqual(settled);
+          expect(parse.mock.calls.length).toBeLessThan(12);
+        } finally { parse.mockRestore(); }
+      }
+      expect(repos.execution.getSessionExecutions('s')).toHaveLength(10000);
+      expect(repos.execution.getUnresolvedTasks('s')).toEqual([]);
+      for (const patch of [{ sessionId: 'foreign' }, { runId: 'foreign' }, { taskId: 'foreign' }]) {
+        expect(repos.execution.getAttempt({ ...af(settled), ...patch })).toBeUndefined();
+      }
+      const plan = sql.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM task_attempts WHERE session_id=? AND state='legacy_unresolved' LIMIT 1").all('s');
+      expect(JSON.stringify(plan)).toContain('task_attempts_session_state');
+      expect(JSON.stringify(plan)).not.toContain('SCAN task_attempts');
+      const legacy = { ...settled, attemptId: 'history_attempt_1', taskId: 'history_task_1', state: 'legacy_unresolved', submissionState: 'legacy_unknown' };
+      sql.prepare("UPDATE task_attempts SET state='legacy_unresolved',submission_state='legacy_unknown',json=? WHERE id=?").run(JSON.stringify(legacy), legacy.attemptId);
+      expect(repos.execution.getTaskExecution(settled.taskId)?.blockers).toContainEqual({ sessionId: 's', code: 'LEGACY_MULTIPLE_EXECUTIONS' });
+      expect(repos.execution.getUnresolvedTasks('s')).toEqual([{ id: 'history_task_1', status: 'cancelled' }]);
+    } finally { sql.close(); }
+  });
+
   it('clears only the exact stop block after probing the original real process gone', async () => {
     const { x, repos } = ready();
     const child = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { stdio: 'ignore' });

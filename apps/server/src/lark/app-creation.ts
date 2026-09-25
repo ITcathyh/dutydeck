@@ -313,7 +313,7 @@ export class LarkAppCreationJobManager {
       const saved = await readLarkConfig(this.options.config, appId);
       if (!saved?.appSecret) return 'skipped_credentials';
       if (this.options.syncSlashCommands) await this.options.syncSlashCommands({ appId, appSecret: saved.appSecret });
-      else await createLarkCardService(process.env, this.options.fetcher, { appId, appSecret: saved.appSecret })
+      else await createLarkCardService(process.env, this.options.fetcher, saved)
         .syncSlashCommands(larkSlashCommandDefinitions());
       return 'configured';
     } catch { return 'failed'; }

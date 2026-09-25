@@ -65,11 +65,12 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     syncSlashCommands: async appId => {
       const saved = await readLarkConfig(options.config, appId);
       if (!saved?.appSecret) return 'skipped_credentials';
-      await createLarkCardService(env, fetcher, { appId, appSecret: saved.appSecret })
+      await createLarkCardService(env, fetcher, saved)
         .syncSlashCommands(larkSlashCommandDefinitions());
     }
   });
   let service = options.service;
+  let serviceKey: string | undefined;
   const listeningDisabled = options.listeningDisabled === true;
   const listener = options.listener ?? new LarkLongConnectionListenerPool(app.log, {
     runtime: options.runtime,
@@ -105,7 +106,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   };
   const storedBot = async (appId?: string) => {
     const stored = await readLarkConfig(options.config, appId);
-    return stored ? { appId: stored.appId, appSecret: stored.appSecret } : undefined;
+    return stored ? { appId: stored.appId, appSecret: stored.appSecret, brand: stored.brand } : undefined;
   };
   const resolveService = async (bot?: LarkBotConfigInput, appId?: string) => {
     if (bot) return createLarkCardService(env, fetcher, bot);
@@ -114,8 +115,13 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       if (!stored) throw new LarkServiceError('LARK_BOT_NOT_FOUND', `Unknown Lark bot: ${appId}`, 404);
       return createLarkCardService(env, fetcher, stored);
     }
-    if (service) return service;
-    service = createLarkCardService(env, fetcher, await storedBot(appId));
+    if (options.service) return options.service;
+    const stored = await storedBot();
+    const key = JSON.stringify([stored?.appId ?? env.LARK_APP_ID, stored?.appSecret ?? env.LARK_APP_SECRET, larkConfigurationStatus(env, stored).baseUrl]);
+    if (!service || serviceKey !== key) {
+      service = createLarkCardService(env, fetcher, stored);
+      serviceKey = key;
+    }
     return service;
   };
 
@@ -165,9 +171,9 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     const job = openPlatformJobs.get(request.params.jobId);
     return job ?? reply.code(404).send({ error: { code: 'LARK_OPEN_PLATFORM_JOB_NOT_FOUND', message: '飞书自动配置任务不存在或已过期' } });
   });
-  app.post<{ Body: { appId?: string; appSecret?: string } }>('/api/lark/bot/inspect', async (request, reply) => {
+  app.post<{ Body: { appId?: string; appSecret?: string; brand?: 'feishu' | 'lark' } }>('/api/lark/bot/inspect', async (request, reply) => {
     try {
-      const bot = createLarkCardService(env, fetcher, { appId: request.body?.appId, appSecret: request.body?.appSecret });
+      const bot = createLarkCardService(env, fetcher, { appId: request.body?.appId, appSecret: request.body?.appSecret, brand: request.body?.brand ?? (await readLarkConfig(options.config, request.body?.appId))?.brand });
       return await bot.getBotInfo();
     } catch (error) {
       if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
@@ -232,23 +238,27 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
     if (!config) return reply.code(404).send({ error: { code: 'LARK_BOT_NOT_FOUND', message: 'Unknown Lark bot' } });
     return larkHookStatus(request.query.agentId?.trim() || config.defaultAgentId, config.workspace);
   });
-  app.post<{ Body: { appId?: string; highRiskPattern?: string } }>('/api/lark/hooks/install', async (request, reply) => {
+  app.post<{ Body: { appId?: string; highRiskPattern?: string; expectedRevision?: number } }>('/api/lark/hooks/install', async (request, reply) => {
     try {
       const config = await readLarkConfig(options.config, request.body?.appId);
       if (!config) throw new LarkServiceError('LARK_BOT_NOT_FOUND', 'Unknown Lark bot', 404);
+      if (request.body?.expectedRevision !== undefined && request.body.expectedRevision !== (config.revision ?? 1)) {
+        throw new LarkServiceError('LARK_CONFIG_REVISION_CONFLICT', '此 Bot 已被修改，请比较最新配置后再保存。', 409);
+      }
       const pattern = request.body?.highRiskPattern === undefined ? config.highRiskPattern : request.body.highRiskPattern.trim() || defaultHighRiskPattern;
       const patternValidation = validateHighRiskPattern(pattern);
       if (!patternValidation.valid) throw new LarkServiceError('INVALID_HIGH_RISK_PATTERN', patternValidation.error, 400);
       const hook = await installLarkHook(config.defaultAgentId, config.workspace);
-      await saveLarkConfig(options.config, options.agents, {
+      const saved = await saveLarkConfig(options.config, options.agents, {
         stage: 'agent',
         originalAppId: config.appId,
+        expectedRevision: config.revision ?? 1,
         ...(request.body?.highRiskPattern !== undefined ? { highRiskPattern: request.body.highRiskPattern } : {}),
         riskControlMode: 'guidance'
       });
       if (!listeningDisabled) await syncListeners();
       if (options.runtime) await options.groupManager?.refreshPolicies(options.runtime);
-      return hook;
+      return { ...hook, configRevision: saved.find(bot => bot.appId === config.appId)!.revision };
     } catch (error) {
       if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
       throw error;
@@ -261,7 +271,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
         const appId = input.appId?.trim() || existing?.appId;
         const appSecret = input.appSecret?.trim() || existing?.appSecret;
-        const bot = createLarkCardService(env, fetcher, { appId, appSecret });
+        const bot = createLarkCardService(env, fetcher, { appId, appSecret, brand: input.brand ?? existing?.brand });
         const info = await bot.getBotInfo();
         const resolvedAllowedUsers = input.allowedUserNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedUserNames);
         const resolvedAllowedBots = input.allowedBotNames === undefined ? undefined : await bot.resolveChatUsersByNames(input.allowedBotNames, ['bot']);
@@ -320,12 +330,12 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
       }
       if (input.stage === 'agent') {
         const existing = input.originalAppId ? await readLarkConfig(options.config, input.originalAppId) : undefined;
-        const resolvedHighRiskAllowedUsers = input.highRiskAllowedUserNames === undefined || !existing ? undefined : await createLarkCardService(env, fetcher, { appId: existing.appId, appSecret: existing.appSecret }).resolveChatUsersByNames(input.highRiskAllowedUserNames);
+        const resolvedHighRiskAllowedUsers = input.highRiskAllowedUserNames === undefined || !existing ? undefined : await createLarkCardService(env, fetcher, existing).resolveChatUsersByNames(input.highRiskAllowedUserNames);
         const highRiskAllowedUsers = resolvedHighRiskAllowedUsers ?? input.highRiskAllowedUsers ?? existing?.highRiskAllowedUsers ?? [];
         const highRiskAllowedEmails = input.highRiskAllowedEmails ?? existing?.highRiskAllowedEmails ?? [];
         const riskControlMode = resolveRiskControlModeInput(input, existing?.riskControlMode ?? 'off');
         if (riskControlMode !== 'off' && !highRiskAllowedUsers.length && highRiskAllowedEmails.length && existing) {
-          await createLarkCardService(env, fetcher, { appId: existing.appId, appSecret: existing.appSecret }).checkIdentityResolution();
+          await createLarkCardService(env, fetcher, existing).checkIdentityResolution();
         }
         if (resolvedHighRiskAllowedUsers !== undefined) input = { ...input, highRiskAllowedUsers: resolvedHighRiskAllowedUsers, highRiskAllowedEmails: [] };
       }

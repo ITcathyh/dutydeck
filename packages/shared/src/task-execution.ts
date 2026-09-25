@@ -273,6 +273,9 @@ export interface ExecutionRepository {
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   getAcceptedTask(taskId: string): AcceptedTask | undefined;
   getTaskExecution(taskId: string): TaskExecutionProjection | undefined;
+  getAttempt(ref: AttemptRef & SessionFence): TaskAttempt | undefined;
+  getSessionExecutions(sessionId: string): TaskExecutionProjection[];
+  getUnresolvedTasks(sessionId: string): Array<{ id: string; status: ExecutionTask['status'] }>;
   getAttemptEvents(attemptId: string, window?: EventWindowOptions): AgentEvent[];
   getSessionResourceBlockers(sessionId: string): ExecutionBlocker[];
   getResources(sessionId: string): DriverResource[];

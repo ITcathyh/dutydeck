@@ -21,12 +21,6 @@ export const leaderReviewTitle = 'Leader 验收';
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
 const time = () => new Date().toISOString();
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-/** 启动、派发、收尾停止都算进规划时限：卡在任何一步都按超时失败、让出排队名额，迟到的结果丢弃。 */
-const withinDeadline = <T>(operation: Promise<T>, milliseconds: number): Promise<T> => {
-  let timer: NodeJS.Timeout | undefined;
-  const expired = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new RuntimeError('LEADER_PLAN_TIMEOUT', 'Leader 规划超时', 504)), milliseconds); });
-  return Promise.race([operation, expired]).finally(() => clearTimeout(timer));
-};
 /** worktree 步骤需要 git 仓库，否则子会话起不来。 */
 const gitRepository = (cwd: string) => promisify(execFile)('git', ['-C', cwd, 'rev-parse', '--show-toplevel'], { timeout: 10_000 }).then(() => true, () => false);
 
@@ -127,6 +121,8 @@ const view = (record: Delegation) => ({ id: record.id, status: record.status, wo
 export class LeaderDelegationService {
   private readonly running = new Map<string, Promise<void>>();
   private readonly queue: string[] = [];
+  private readonly cleaning = new Map<string, Promise<void>>();
+  private readonly shutdown = new AbortController();
   private closed = false;
   private timer?: NodeJS.Timeout;
   constructor(private readonly options: LeaderDelegationOptions) {
@@ -170,6 +166,7 @@ export class LeaderDelegationService {
 
   async close() {
     this.closed = true;
+    this.shutdown.abort();
     clearInterval(this.timer);
     // Runtime 关闭会打断 Leader 会话；未完成的记录保持 planning，下次启动继续。
     await Promise.race([Promise.allSettled(this.running.values()), new Promise(resolve => setTimeout(resolve, 1000).unref())]);
@@ -218,7 +215,7 @@ export class LeaderDelegationService {
   }
 
   private pump() {
-    while (!this.closed && this.running.size < MAX_PLANNING && this.queue.length) {
+    while (!this.closed && new Set([...this.running.keys(), ...this.cleaning.keys()]).size < MAX_PLANNING && this.queue.length) {
       const id = this.queue.shift()!;
       const run = this.plan(id).catch(error => this.options.log?.warn({ error, delegationId: id }, 'Leader 规划记录更新失败')).finally(() => { this.running.delete(id); this.pump(); });
       this.running.set(id, run);
@@ -264,11 +261,17 @@ export class LeaderDelegationService {
         const { session, leader, workers } = await this.team(record.parentSessionId, record.actorId);
         const worktree = await gitRepository(session.cwd);
         const timeoutMs = this.options.timeoutMs ?? PLANNING_TIMEOUT_MS;
-        const text = await withinDeadline(runReadonlyPrompt(this.options.runtime, { execution: this.options.repositories.execution }, {
+        const text = await runReadonlyPrompt(this.options.runtime, { execution: this.options.repositories.execution }, {
           // 终端模式 Leader 以完全信任规划（team() 已核对），「不改文件」只靠提示词约束。
           agentId: leader.id, cwd: session.cwd, permissionMode: leader.protocol === 'pty-cli' ? 'full-trust' : 'deny-all', source: 'lark-leader', sourceId: record.id,
-          prompt: leaderPrompt(record, workers, worktree), timeoutMs
-        }), timeoutMs);
+          prompt: leaderPrompt(record, workers, worktree), timeoutMs, signal: this.shutdown.signal,
+          onCleanup: cleanup => {
+            this.cleaning.set(id, cleanup);
+            void cleanup.then(() => { this.cleaning.delete(id); this.pump(); }, error => {
+              this.options.log?.warn({ error, delegationId: id }, 'Leader 规划会话未确认清退，保留并发名额');
+            });
+          }
+        });
         if (this.closed) return;
         const result = parseLeaderResult(text);
         if (result.decision === 'needs_context') {
@@ -286,7 +289,7 @@ export class LeaderDelegationService {
       }
     } catch (error) {
       if (this.closed) return;
-      await this.fail(record, errorText(error).slice(0, 500));
+      await this.fail(record, error instanceof RuntimeError && error.code === 'COLLABORATION_DECISION_TIMEOUT' ? 'Leader 规划超时' : errorText(error).slice(0, 500));
       return;
     }
     // 目标已经建好（群聊里等人点「开始执行」），这里写失败只记日志、记录留在 planning，下次启动补记，不报成规划失败。
