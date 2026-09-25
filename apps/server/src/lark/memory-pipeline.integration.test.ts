@@ -11,14 +11,14 @@ import { RuntimeError, type AgentConfig, type PermissionMode } from '@dutydeck/s
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
-import { LarkMemoryStore } from './memory.js';
+import { larkMemoryScope, LarkMemoryStore } from './memory.js';
 import { LarkMemoryProjection } from './memory-view.js';
 import { LarkMemoryPipeline } from './memory-pipeline.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-const scope = { appId: 'cli_memory', chatId: 'oc_group' };
+const scope = larkMemoryScope('cli_memory', 'oc_group', 'group');
 
 const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({
   messageId: id, chatId: 'oc_group', chatType: 'group', threadId: 'omt_topic', rootId: 'om_root',
@@ -113,6 +113,7 @@ async function harness(options: { timeoutMs?: number; agentModel?: string; userA
       getTasks: id => runtime.getTasks(id),
       getTaskRecovery: (id, taskId) => runtime.getTaskRecovery(id, taskId),
       cancelQueued: (id, taskId, actor, revision) => runtime.cancelQueued(id, taskId, actor, revision),
+      archive: (id, actor) => runtime.archive(id, actor),
       interrupt: memoryInterrupt,
       subscribe: (id, listener) => runtime.subscribe(id, listener)
     },
@@ -196,7 +197,7 @@ describe('Lark memory pipeline through the coordinator', () => {
 
     // 记忆会话与用户会话相互独立，且以 deny-all 运行。
     const memorySession = (await h.runtime.listSessions()).find(session => session.source === 'lark-memory');
-    expect(memorySession).toMatchObject({ sourceId: `${scope.appId}:${scope.chatId}:memory`, permissionMode: 'deny-all' });
+    expect(memorySession).toMatchObject({ sourceId: 'cli_memory:groups:memory', permissionMode: 'deny-all' });
 
     // 下一轮用户 prompt 带上新条目。
     await h.runTurns(1);
@@ -680,5 +681,178 @@ describe('Lark memory pipeline through the coordinator', () => {
     expect(state.running).toBeUndefined();
     expect(state.lastRun).toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
     expect(await h.store.list(scope)).toHaveLength(1);
+  });
+});
+
+describe('shared group pool through the pipeline', () => {
+  const groupB = (id: string, text: string) => event(id, text, { chatId: 'oc_group_b', threadId: undefined, rootId: undefined });
+  const cardWith = (cards: Array<Record<string, unknown>>, text: string) => vi.waitFor(() => {
+    const card = cards.map(item => JSON.stringify(item)).find(item => item.includes(text));
+    expect(card).toBeDefined();
+    return card!;
+  }, { timeout: 15_000 });
+
+  it('一次提取混有多个群的轮次：逐轮标出来源群，事实记下证据轮次的群', async () => {
+    const h = await harness();
+    h.setResponder(prompt => {
+      if (!prompt.includes('后台提取')) return { text: jsonBlock({ actions: [{ op: 'noop' }] }) };
+      const fromB = prompt.match(/### 轮次 (\S+)\n来源群：oc_group_b\n/)?.[1] ?? 'unknown';
+      return { text: jsonBlock({ facts: [{ content: 'B 群的值班表在 wiki 首页', topic: 'contacts', kind: 'environment', evidence: fromB }] }) };
+    });
+
+    await h.runTurns(2);
+    const before = h.prompts.length;
+    await h.coordinator.handle(groupB('om_b_turn', 'B 群的任务'), h.config);
+    await vi.waitFor(() => expect(h.prompts.length).toBe(before + 1), { timeout: 15_000 });
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1 });
+    }, { timeout: 10_000 });
+    await h.waitIdle();
+
+    const extraction = h.memoryPrompts.find(prompt => prompt.includes('后台提取'))!;
+    expect(extraction.match(/来源群：oc_group\n/g)).toHaveLength(2);
+    expect(extraction.match(/来源群：oc_group_b\n/g)).toHaveLength(1);
+    const [saved] = await h.store.list(scope);
+    expect(saved).toMatchObject({ source: 'extraction', content: 'B 群的值班表在 wiki 首页', chatId: 'oc_group_b' });
+    // 两个群共用一个记忆会话与一份状态。
+    expect((await h.runtime.listSessions()).filter(session => session.source === 'lark-memory').map(session => session.sourceId)).toEqual(['cli_memory:groups:memory']);
+    expect(await h.store.getState(larkMemoryScope('cli_memory', 'oc_group_b', 'group'))).toEqual(await h.store.getState(scope));
+
+    // A 群的下一轮带上 B 群提取的事实，标「其他群」。
+    await h.runTurns(1);
+    expect(h.prompts.at(-1)).toMatch(/\[mem_[0-9a-f]{8} · 提取 · \d{4}-\d{2}-\d{2} · 其他群\] B 群的值班表在 wiki 首页/);
+  });
+
+  it('/memory 回执显示上次运行失败的原因与待提取轮次；私聊只看自己的池', async () => {
+    const h = await harness();
+    h.setResponder(() => ({ text: '整理故意不给 JSON 代码块' }));
+    await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
+    await cardWith(h.cards, '已保存为群共享记忆');
+    const quiet = await h.setConfig({ memoryAutoExtract: false });
+    await h.runTurns(2, quiet);
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).pendingTurns).toHaveLength(2));
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: false, error: 'MEMORY_AGENT_OUTPUT_INVALID' });
+
+    await h.coordinator.handle(groupB('om_status', '/memory'), quiet);
+    const receipt = await cardWith(h.cards, '后台提取与整理');
+    expect(receipt).toContain('本机器人所在各群共享，共 1 条记忆');
+    expect(receipt).toContain('其他群 · 这个群的回复统一用中文');
+    expect(receipt).toMatch(/上次运行：整理 · \d{4}-\d{2}-\d{2} \d{2}:\d{2} · 失败 `MEMORY_AGENT_OUTPUT_INVALID`（整理 Agent 的输出格式不对）/);
+    expect(receipt).toContain('待提取 2 轮 · 上次提取 尚未提取 · 上次整理 尚未整理');
+
+    await h.coordinator.handle(event('om_p2p_status', '/memory', { chatId: 'oc_p2p', chatType: 'p2p', threadId: undefined, rootId: undefined, mentions: [] }), quiet);
+    const p2p = await cardWith(h.cards, '本聊天还没有保存的记忆');
+    expect(p2p).toContain('上次运行：尚未运行');
+    expect(p2p).toContain('待提取 0 轮');
+  });
+});
+
+describe('stuck memory session after a daemon restart', () => {
+  it('归档 reconcile_required 的记忆会话、换新会话继续，旧会话的输出绝不被读取，之后复用新会话', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-restart-'));
+    cleanups.push(() => rm(cwd, { recursive: true, force: true }));
+    const file = join(cwd, 'state.db');
+    const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+    const config = { appId: scope.appId, appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true } as StoredLarkConfig;
+    const memoryPrompts: string[] = [];
+    let beforeRestart = true;
+    let poisonId = '';
+
+    const open = async (timeoutMs?: number) => {
+      const repos = createRepositories(file, { newDatabaseAuthority: 'ledger_v1' });
+      const runtime = new DutydeckRuntime(repos, {
+        probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+        driverFactory: (_config, _protocol, emit) => {
+          let release: (() => void) | undefined;
+          const driver: AgentDriver = {
+            start: async () => {}, resume: async () => {}, interrupt: async () => {},
+            stop: async () => { release?.(); },
+            send: async prompt => {
+              memoryPrompts.push(prompt);
+              if (beforeRestart) {
+                // 重启前吐出一段形式合法、会淘汰用户条目的整理结果，但这一轮没有终态：绝不能被读取。
+                emit({ type: 'text', data: { text: jsonBlock({ actions: [{ op: 'retire', id: poisonId, reason: '旧会话的输出' }] }) } });
+                await new Promise<void>(resolve => { release = resolve; });
+                return;
+              }
+              emit({ type: 'text', data: { text: jsonBlock({ actions: [{ op: 'noop' }] }) } });
+              emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+            }
+          };
+          return driver;
+        }
+      });
+      await runtime.initialize([agent]);
+      await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+      const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const store = new LarkMemoryStore(repos.config);
+      const projection = new LarkMemoryProjection(store, join(cwd, 'memory'), log);
+      const starts: StartInput[] = [];
+      const pipeline = new LarkMemoryPipeline({
+        runtime: {
+          start: input => { starts.push(input); return runtime.start(input); },
+          listAgents: () => runtime.listAgents(),
+          listSessions: () => runtime.listSessions(),
+          dispatch: (id, prompt, mode, agentPrompt) => runtime.dispatch(id, prompt, mode, agentPrompt),
+          getTasks: id => runtime.getTasks(id),
+          getTaskRecovery: (id, taskId) => runtime.getTaskRecovery(id, taskId),
+          cancelQueued: (id, taskId, actor, revision) => runtime.cancelQueued(id, taskId, actor, revision),
+          archive: (id, actor) => runtime.archive(id, actor),
+          interrupt: (id, taskId, actor) => runtime.interrupt(id, taskId, actor),
+          subscribe: (id, listener) => runtime.subscribe(id, listener)
+        },
+        controlActorId: 'installation_owner',
+        repos: { execution: repos.execution },
+        store, projection,
+        readConfig: async appId => (await readLarkConfigs(repos.config)).find(bot => bot.appId === appId),
+        log,
+        ...(timeoutMs ? { timeoutMs } : {})
+      });
+      const close = async () => { await runtime.shutdown(); repos.close(); };
+      return { repos, runtime, store, pipeline, log, starts, close };
+    };
+    const memorySessions = async (runtime: DutydeckRuntime) => (await runtime.listSessions())
+      .filter(session => session.source === 'lark-memory' && session.sourceId === 'cli_memory:groups:memory');
+
+    // 第一次 daemon：整理跑到一半 daemon 重启。
+    const first = await open(500);
+    poisonId = (await first.store.add(scope, { content: '这个群的回复统一用中文', source: 'user', chatId: scope.chatId })).id;
+    const stuckRun = first.pipeline.runConsolidation(scope);
+    await vi.waitFor(() => expect(memoryPrompts).toHaveLength(1), { timeout: 10_000 });
+    const [stuck] = await memorySessions(first.runtime);
+    await first.runtime.shutdown();
+    await stuckRun.catch(() => undefined);
+    first.repos.close();
+
+    // 第二次 daemon：旧会话里的任务成了 reconcile_required。
+    beforeRestart = false;
+    const second = await open();
+    cleanups.push(second.close);
+    await vi.waitFor(async () => expect((await second.runtime.getTasks(stuck!.id)).map(task => task.status)).toEqual(['reconcile_required']), { timeout: 10_000 });
+
+    expect(await second.pipeline.runConsolidation(scope)).toMatchObject({ kind: 'consolidation', ok: true });
+    const sessions = await memorySessions(second.runtime);
+    expect(sessions).toHaveLength(2);
+    const old = sessions.find(session => session.id === stuck!.id)!;
+    const replacement = sessions.find(session => session.id !== stuck!.id)!;
+    // 归档要先停掉原执行：重启后原进程资源未经确认时 runtime 会拒绝（SESSION_RESOURCE_BLOCKED），
+    // 旧会话于是留在账本里等人工恢复；不论归档成没成功，都不能再被选中。
+    const retired = second.log.warn.mock.calls.find(call => String(call[1]).startsWith('记忆会话有未决任务'));
+    expect(retired?.[0]).toMatchObject({ sessionId: old.id });
+    expect(retired?.[1]).toBe(old.archivedAt ? '记忆会话有未决任务，已归档并改用新会话' : '记忆会话有未决任务且归档未完成，改用新会话');
+    expect(replacement.archivedAt).toBeFalsy();
+    // 旧会话的任务账本保留、没有再派发；新会话收到这次整理并正常完成。
+    expect((await second.runtime.getTasks(old.id)).map(task => task.status)).toEqual(['reconcile_required']);
+    expect((await second.runtime.getTasks(replacement.id)).map(task => task.status)).toEqual(['completed']);
+    expect(memoryPrompts).toHaveLength(2);
+    // 旧会话里那段「淘汰用户条目」的输出没有被当成结果。
+    expect((await second.store.list(scope)).map(entry => entry.id)).toEqual([poisonId]);
+
+    // 下一次运行按 sourceId 选中新会话，不再新建，也不再碰旧会话。
+    expect(await second.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+    expect(second.starts).toHaveLength(1);
+    expect((await second.runtime.getTasks(replacement.id)).map(task => task.status)).toEqual(['completed', 'completed']);
+    expect((await second.runtime.getTasks(old.id)).map(task => task.status)).toEqual(['reconcile_required']);
+    expect(second.log.warn.mock.calls.filter(call => String(call[1]).startsWith('记忆会话有未决任务'))).toHaveLength(1);
   });
 });

@@ -216,7 +216,7 @@ describe('BotManagement 会话记忆', () => {
     expect(enabled.checked).toBe(true);
     expect((screen.getByRole('checkbox', { name: '自动提取与整理' }) as HTMLInputElement).checked).toBe(true);
     expect(screen.getByLabelText('整理 Agent')).toBeTruthy();
-    expect(screen.getByText('记忆按聊天隔离，仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
+    expect(screen.getByText('各群共享同一份记忆，私聊各自独立；仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
     // 只是默认值，没有改动过，不应该报「有未保存的修改」。
     expect(screen.queryByText(/有未保存的修改/)).toBeNull();
 

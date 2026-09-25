@@ -4,7 +4,7 @@ import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError, type Session } from '@dutydeck/shared';
 import { AgentGroupToolError, LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
 import { larkBotsConfigKey } from './config.js';
-import { LarkMemoryStore, larkMemoryKey } from './memory.js';
+import { larkGroupMemoryPool, LarkMemoryStore, larkMemoryKey, larkMemoryScope } from './memory.js';
 import { larkMemoryToolsPath, registerLarkMemoryTools } from './memory-tools.js';
 
 const apps: ReturnType<typeof Fastify>[] = [];
@@ -69,6 +69,7 @@ describe('Lark memory agent tools', () => {
       source: 'agent',
       topic: 'conventions',
       sessionId: 'ses_group',
+      chatId: 'oc_group',
       createdBy: 'ou_alice'
     });
     expect(entry.id).toMatch(/^mem_[0-9a-f]{8}$/);
@@ -78,7 +79,7 @@ describe('Lark memory agent tools', () => {
     expect(other.json()).toEqual({ chatId: 'oc_p2p', entries: [] });
     const foreignDelete = await app.inject({ method: 'DELETE', url: `${larkMemoryToolsPath}/${entry.id}`, headers: headers(p2pSession) });
     expect(foreignDelete.statusCode).toBe(404);
-    expect(await store.list({ appId: 'cli_bot', chatId: 'oc_group' })).toHaveLength(1);
+    expect(await store.list(larkMemoryScope('cli_bot', 'oc_group', 'group'))).toHaveLength(1);
 
     const listed = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: headers(groupSession) });
     expect(listed.json().entries).toEqual([entry]);
@@ -113,6 +114,34 @@ describe('Lark memory agent tools', () => {
     expect(again.json().error.code).toBe('MEMORY_NOT_FOUND');
   });
 
+  it('resolves group sessions to the shared group pool and p2p sessions to their own pool', async () => {
+    const { app, repos, store, groupSession, p2pSession, headers } = await setup();
+    const otherGroup = session('ses_group_2', 'cli_bot:oc_group_2:group:thread:omt_topic');
+    await repos.sessions.save(otherGroup);
+
+    const added = await app.inject({ method: 'POST', url: larkMemoryToolsPath, headers: headers(groupSession), payload: { content: '发布窗口是每周四下午' } });
+    const entry = added.json().entry;
+    expect(entry).toMatchObject({ chatId: 'oc_group', source: 'agent' });
+
+    // 另一个群的会话看得到、搜得到（多关键词）；私聊看不到。
+    const fromOther = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: headers(otherGroup) });
+    expect(fromOther.json()).toEqual({ chatId: 'oc_group_2', entries: [entry] });
+    const searched = await app.inject({ method: 'GET', url: `${larkMemoryToolsPath}/search?q=${encodeURIComponent('发布 周四')}`, headers: headers(otherGroup) });
+    expect(searched.json().entries).toEqual([entry]);
+    const fromP2p = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: headers(p2pSession) });
+    expect(fromP2p.json().entries).toEqual([]);
+
+    // 私聊写入只进自己的池。
+    await app.inject({ method: 'POST', url: larkMemoryToolsPath, headers: headers(p2pSession), payload: { content: '私聊偏好：先给结论' } });
+    expect((await store.list(larkMemoryScope('cli_bot', 'oc_group', 'group'))).map(item => item.content)).toEqual(['发布窗口是每周四下午']);
+    expect((await store.list(larkMemoryScope('cli_bot', 'oc_p2p', 'p2p'))).map(item => item.content)).toEqual(['私聊偏好：先给结论']);
+
+    // 共享池里的条目在任一群都可以删除。
+    const removed = await app.inject({ method: 'DELETE', url: `${larkMemoryToolsPath}/${entry.id}`, headers: headers(otherGroup) });
+    expect(removed.statusCode).toBe(200);
+    expect(await store.list(larkMemoryScope('cli_bot', 'oc_group', 'group'))).toEqual([]);
+  });
+
   it('rejects malformed content and invalid or expired capabilities', async () => {
     const { app, repos, groupSession, headers } = await setup();
     const missing = await app.inject({ method: 'POST', url: larkMemoryToolsPath, headers: headers(groupSession), payload: { content: 42 } });
@@ -139,7 +168,7 @@ describe('Lark memory agent tools', () => {
     const orphan = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: headers(groupSession) });
     expect(orphan.statusCode).toBe(404);
     expect(orphan.json().error.code).toBe('GROUP_TOOL_BOT_NOT_FOUND');
-    expect(await repos.config.get(larkMemoryKey({ appId: 'cli_bot', chatId: 'oc_group' }))).toBeUndefined();
+    expect(await repos.config.get(larkMemoryKey({ appId: 'cli_bot', pool: larkGroupMemoryPool }))).toBeUndefined();
   });
 
   it('rejects memory access with 403 MEMORY_DISABLED when memoryEnabled is false', async () => {
