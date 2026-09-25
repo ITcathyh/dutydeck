@@ -216,7 +216,8 @@ export function BotManagement({
     queryKey: ['lark-memory-status', activeAppId],
     queryFn: () => api.larkMemoryStatus(activeAppId!),
     enabled: Boolean(activeAppId && currentDraft?.memoryEnabled),
-    staleTime: 30_000
+    staleTime: 30_000,
+    refetchInterval: query => query.state.data?.groups?.running ? 10_000 : false
   });
 
   /*
