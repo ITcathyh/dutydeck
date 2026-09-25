@@ -3293,10 +3293,24 @@ export class LarkMessageCoordinator {
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
     injected.push('[飞书结果说明] 最终回复先用一两句话说明用户目标已完成什么、还有什么未完成及需要用户做什么；有交付物再给入口。等待扫码、外部批准或用户操作时明确写出，不把本轮结束写成目标已完成；无需展开执行日志。');
+    // 群上下文按运行时会话增量注入。水位只在本轮真正交给 Agent 之后推进（dispatch 的 running、send 返回）；
+    // 派发前失败、取消或重放旧任务都不推进，下一轮按旧水位重读，内容只会更多不会漏。
+    let groupContextCommit: (() => Promise<unknown>) | undefined;
+    const commitGroupContext = async () => {
+      const commit = groupContextCommit;
+      groupContextCommit = undefined;
+      await commit?.().catch(error => this.log.warn({ error, taskId: task.id, sessionId: session.id }, '群上下文水位推进失败，下一轮按旧水位注入'));
+    };
     if (event.chatType === 'group' && this.workflowOptions.participation) {
       try {
-        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, prompt), '群上下文读取');
-        if (observedContext) injected.push(observedContext);
+        const store = this.workflowOptions.store;
+        const watermarkKey = `lark.group-context.${config.appId}.${session.id}`;
+        const watermark = await store?.get(watermarkKey);
+        const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: event.messageId, watermark, groupTools: config.groupToolsEnabled }), '群上下文读取');
+        if (observedContext) {
+          injected.push(observedContext.text);
+          if (store?.compareAndSet) groupContextCommit = () => store.compareAndSet!(watermarkKey, watermark, observedContext.watermark);
+        }
         const instructions = await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取');
         if (instructions.trim()) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${instructions.trim()}`);
       } catch (error) {
@@ -3427,6 +3441,7 @@ export class LarkMessageCoordinator {
             // runtime 每次修订运行中的任务都会再发一次 running，最后一次紧挨着完成；只在出队时起算用时。
             if (!resumeTask && task.state === 'queued') task.startedAt = Date.now();
             task.state = 'running';
+            void commitGroupContext();
             void update('running').finally(scheduleHeartbeat);
           } else if (record.status === 'reconcile_required' || record.status === 'legacy_unresolved') {
             active = false;
@@ -3460,6 +3475,8 @@ export class LarkMessageCoordinator {
           ? await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy)
           : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt);
         runtimeTaskId = runtimeTask.id;
+        // 重连或按幂等键重放的是早先派发的那条 prompt，本轮新读的群上下文没有交给 Agent。
+        if (runtimeTask.replayed) groupContextCommit = undefined;
         // S8：恢复接上的任务只置位一次；之后排队 PATCH 与每一帧非终态心跳都带重启注记。
         if (runtimeTask.replayed) task.replayedNote = true;
         // dispatch 期间用户可能已经重试（group.tail 在 dispatch 建立订阅后就 resolve 了）。
@@ -3548,6 +3565,7 @@ export class LarkMessageCoordinator {
       else if (riskPolicy) await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy);
       else if (agentPrompt === prompt) await this.runtime.send(session.id, prompt);
       else await this.runtime.send(session.id, prompt, agentPrompt);
+      await commitGroupContext();
       // 若轮次已变（用户在 send 期间点击了重试），本轮不得覆盖新状态。
       if (task.turn !== currentTurn) return;
       if (task.interruptRequested) {
