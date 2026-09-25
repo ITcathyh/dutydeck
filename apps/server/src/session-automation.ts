@@ -39,6 +39,7 @@ import {
 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { GithubActionsClient, resolveGithubHead, type GithubWorkflowRun } from './github-actions.js';
+import type { CodebaseCiService } from './codebase-ci.js';
 import { readAttemptResult } from './task-results.js';
 import { z } from 'zod';
 
@@ -83,6 +84,8 @@ export interface SessionAutomationServiceOptions {
   deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void>;
   githubToken?: string;
   githubFetch?: typeof fetch;
+  /** Codebase 流水线 webhook 续作；未配置 webhook 密钥时不注入。 */
+  codebase?: CodebaseCiService;
   clock?: () => Date;
   pollIntervalMs?: number;
   requestTimeoutMs?: number;
@@ -234,6 +237,10 @@ export class SessionAutomationService {
     this.pollIntervalMs = Math.max(60_000, Math.min(60 * 60_000, options.pollIntervalMs ?? DEFAULT_POLL_MS));
     this.github = new GithubActionsClient({ token: options.githubToken, fetch: options.githubFetch, requestTimeoutMs: options.requestTimeoutMs });
   }
+
+  /** GitHub 路径本身不强制令牌；这里只回答部署者有没有配置 GitHub 提供方，供 /ci 判断「未配置」。 */
+  get githubConfigured() { return Boolean(this.options.githubToken); }
+  get codebase() { return this.options.codebase; }
 
   private requireStore() {
     if (!this.options.repositories.config.compareAndSet || !this.options.repositories.config.list) {

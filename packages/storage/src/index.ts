@@ -12,6 +12,7 @@ import { createFoundationRepositories } from './foundation.js';
 import { createWp1aRepositories } from './group-policy.js';
 import { createScheduleFoundationRepositories } from './schedule-foundation.js';
 import { createCollaborationRepository } from './collaboration.js';
+import { createCiWebhookRepository } from './ci-webhook.js';
 import { canonicalDatabase, openDatabaseControl } from './database-control.js';
 export * from './schema.js';
 export * from './task-execution.js';
@@ -166,6 +167,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   const wp1aRepositories = createWp1aRepositories(sqlite);
   const scheduleRepositories = createScheduleFoundationRepositories(sqlite);
   const collaboration = createCollaborationRepository(sqlite);
+  const ciWebhook = createCiWebhookRepository(sqlite);
   return {
     control,
     execution,
@@ -350,6 +352,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     ...wp1aRepositories,
     ...scheduleRepositories,
     collaboration,
+    ciWebhook,
     close() {
       control.assertClosable();
       if (filename !== ':memory:') restrictDatabaseFiles(filename);

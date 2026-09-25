@@ -410,6 +410,7 @@ export interface FoundationRepository {
 
 export interface RepositoryBundle {
   collaboration: import('./collaboration.js').CollaborationRepository;
+  ciWebhook: import('./ci-webhook.js').CiWebhookRepository;
   control: import('./database-control.js').DatabaseControl;
   execution: import('./task-execution.js').ExecutionRepository;
   agents: AgentRepository;
@@ -463,6 +464,7 @@ export * from './bot-configuration-scope.js';
 export * from './driver-resources.js';
 
 export * from './collaboration.js';
+export * from './ci-webhook.js';
 
 export * from './execution-recovery.js';
 
