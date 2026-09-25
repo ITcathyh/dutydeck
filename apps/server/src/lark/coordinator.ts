@@ -3298,12 +3298,15 @@ export class LarkMessageCoordinator {
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
     injected.push('[飞书结果说明] 最终回复先用一两句话说明用户目标已完成什么、还有什么未完成及需要用户做什么；有交付物再给入口。等待扫码、外部批准或用户操作时明确写出，不把本轮结束写成目标已完成；无需展开执行日志。');
-    // 群上下文按运行时会话增量注入。水位只在本轮真正交给 Agent 之后推进（dispatch 的 running、send 返回）；
-    // 派发前失败、取消或重放旧任务都不推进，下一轮按旧水位重读，内容只会更多不会漏。
+    // 群上下文按运行时会话增量注入，水位只在确认 prompt 已提交给 Agent 后推进。运行时对外只暴露任务状态：
+    // running 在领取时就发，此时可能还在准备、尚未提交；completed / interrupted 只能来自已提交轮次的驱动结果
+    // 或人工确认，failed 分不清是否提交过。所以只认这两种终态；其余终态、准备失败或重放旧任务都保留旧水位，
+    // 下一轮按旧水位重读，内容只会更多不会漏。
     let groupContextCommit: (() => Promise<unknown>) | undefined;
-    const commitGroupContext = async () => {
+    const commitGroupContext = async (status: unknown) => {
       const commit = groupContextCommit;
       groupContextCommit = undefined;
+      if (status !== 'completed' && status !== 'interrupted') return;
       await commit?.().catch(error => this.log.warn({ error, taskId: task.id, sessionId: session.id }, '群上下文水位推进失败，下一轮按旧水位注入'));
     };
     if (event.chatType === 'group' && this.workflowOptions.participation) {
@@ -3403,6 +3406,7 @@ export class LarkMessageCoordinator {
       const finish = (state: 'completed' | 'failed' | 'interrupted' | 'cancelled') => {
         if (settling || settled) return;
         settling = true;
+        void commitGroupContext(state);
         heartbeatActive = false;
         void (async () => {
           if (runtimeTaskId && this.runtime.getRecentEvents) {
@@ -3448,7 +3452,6 @@ export class LarkMessageCoordinator {
             // runtime 每次修订运行中的任务都会再发一次 running，最后一次紧挨着完成；只在出队时起算用时。
             if (!resumeTask && task.state === 'queued') task.startedAt = Date.now();
             task.state = 'running';
-            void commitGroupContext();
             void update('running').finally(scheduleHeartbeat);
           } else if (record.status === 'reconcile_required' || record.status === 'legacy_unresolved') {
             active = false;
@@ -3568,11 +3571,13 @@ export class LarkMessageCoordinator {
     try {
       heartbeatActive = true;
       scheduleHeartbeat();
-      if (config.managedGroup) await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy, event.senderOpenId);
-      else if (riskPolicy) await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy);
-      else if (agentPrompt === prompt) await this.runtime.send(session.id, prompt);
-      else await this.runtime.send(session.id, prompt, agentPrompt);
-      await commitGroupContext();
+      let sent: unknown;
+      if (config.managedGroup) sent = await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy, event.senderOpenId);
+      else if (riskPolicy) sent = await this.runtime.send(session.id, prompt, agentPrompt, riskPolicy);
+      else if (agentPrompt === prompt) sent = await this.runtime.send(session.id, prompt);
+      else sent = await this.runtime.send(session.id, prompt, agentPrompt);
+      // send 在未提交就结束时也会正常返回（status: failed），同样只认结果里的终态。
+      await commitGroupContext((sent as { status?: unknown } | undefined)?.status);
       // 若轮次已变（用户在 send 期间点击了重试），本轮不得覆盖新状态。
       if (task.turn !== currentTurn) return;
       if (task.interruptRequested) {
