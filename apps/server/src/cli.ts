@@ -24,6 +24,7 @@ import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTar
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
+import { runDeploy, type DeployResult } from './daemon/deploy.js';
 import { loadConfig } from '@dutydeck/config';
 import { createRepositories } from '@dutydeck/storage';
 import { runAuthTokenCommand } from './auth/auth.js';
@@ -123,8 +124,8 @@ async function restartWithInstalledCli(entrypoint: string, options: { force?: bo
 
 /**
  * `dutydeck update` 在 npm install -g 落盘之前先等正在执行的任务结束。
- * 超时返回失败时必须中止 update（抛错），否则磁盘已是新版、服务却还是旧的。
- * 守护进程没在跑 / 查询失败等情形 drain 内部会放行（返回 ok:true），与 restart 一致。
+ * 超时或查询失败返回失败时必须中止 update（抛错），否则磁盘已是新版、服务却还是旧的。
+ * 守护进程没在跑时 drain 内部会放行（返回 ok:true），与 restart 一致。
  */
 async function drainBeforeUpdate(options: { drainTimeout?: string }): Promise<void> {
   const dir = resolveDaemonDir();
@@ -207,6 +208,38 @@ function renderDaemonResult(result: DaemonCommandResult | (DaemonStatusInfo & { 
   if (result.logFile) ui.hint(`日志：${result.logFile}`);
   if (result.error) ui.status('warn', result.error);
   ui.hint('验证：dutydeck status');
+}
+
+const DEPLOY_TITLES: Record<DeployResult['status'], string> = {
+  deployed: '已部署',
+  staged: '已准备发布目录并切换 current（未重启）',
+  rolled_back: '部署失败，已切回上一版',
+  rollback_failed: '部署失败，切回上一版后服务仍不健康',
+  failed: '部署失败',
+  refused: '未部署',
+  unit: '已生成 unit'
+};
+
+function renderDeployResult(result: DeployResult, json: boolean): void {
+  if (json) {
+    createCliUi().json(result);
+    return;
+  }
+  // --print-unit 的正文单独走 stdout，便于重定向成文件；说明走 stderr。
+  if (result.status === 'unit' && result.unitFile !== undefined) {
+    process.stdout.write(result.unitFile.endsWith('\n') ? result.unitFile : `${result.unitFile}\n`);
+    process.stderr.write(`以上是改跑 releases/current 的 unit。确认后写入 ${result.unitPath}，再执行 systemctl --user daemon-reload。\n`);
+    return;
+  }
+  const ui = createCliUi();
+  ui.status(result.ok ? 'done' : 'fail', DEPLOY_TITLES[result.status], result.error);
+  if (result.release) ui.hint(`发布目录：${result.release}`);
+  if (result.previousRelease) ui.hint(`上一版：${result.previousRelease}`);
+  if (result.manifest) ui.hint(`部署记录：${result.manifest}`);
+  if (result.pid !== undefined) ui.hint(`服务进程：pid ${result.pid}`);
+  if (result.pruned?.removed.length) ui.hint(`清理旧发布目录：删除 ${result.pruned.removed.length} 个，腾出 ${Math.round(result.pruned.freedBytes / 1024 / 1024)} MB`);
+  if (result.pruned?.inUse.length) ui.hint(`仍被运行中的进程引用，保留：${result.pruned.inUse.join('、')}`);
+  if (result.prunedRecords?.removed.length) ui.hint(`清理旧部署记录（含数据库备份）：删除 ${result.prunedRecords.removed.length} 个，腾出 ${Math.round(result.prunedRecords.freedBytes / 1024 / 1024)} MB`);
 }
 
 async function main() {
@@ -310,6 +343,11 @@ async function main() {
         drain: drainBeforeUpdate,
         restart: (entrypoint, restartOptions) => restartWithInstalledCli(entrypoint, restartOptions)
       }));
+    },
+    deploy: async options => {
+      const result = await runDeploy(options);
+      renderDeployResult(result, options.json === true);
+      if (!result.ok) process.exitCode = 1;
     },
     authToken: async options => {
       // 优先用运行中/上次 daemon 记录的数据库路径，保证查看/轮换的是同一个 token；

@@ -385,8 +385,15 @@ dutydeck start [--cwd /path] [--port 4310] [--host 0.0.0.0]
 # 查看状态（包含 PID、监听地址、日志路径）
 dutydeck status
 
-# 重启守护进程
+# 重启守护进程：先排空（新消息照常排队、暂不开始执行），等正在执行的任务结束再重启
 dutydeck restart
+# 重启某个 systemd unit 托管的运行时（如 bot 运行时）
+dutydeck restart --unit dutydeck-tag-ccflash.service
+
+# 把已构建的检出目录发布为不可变版本：排空 → 切换 releases/current → 重启 → 健康检查，不通过自动切回上一版。
+# unit 须运行 releases/current/dist/cli.js，可用 --print-unit 生成；设置 DUTYDECK_DEPLOY_WINDOW（如 10:00-11:00,16:00-17:00）可限制部署时段
+# 成功后只留最新 5 个发布目录和 deploy 自己写的部署记录（含数据库备份），current、上一版和仍被运行中进程引用的不删
+dutydeck deploy --source /path/to/checkout
 
 # 停止守护进程
 dutydeck stop
