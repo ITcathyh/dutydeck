@@ -500,7 +500,7 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
     await h.snapshot('restart-result-unknown');
   }, 60_000);
 
-  it('等待审批时后续消息排队，/status 给出拒绝入口，从状态卡拒绝审批', async () => {
+  it('等待审批时后续消息排队，/status 显示被审批阻塞与本月用量，从状态卡拒绝审批', async () => {
     const h = await harness({ turns: [
       async ({ emit, permission }) => {
         emit(text('要改一下 config/app.yaml 里的超时配置。'));
@@ -518,8 +518,6 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
     await h.refresh(first);
     h.checkpoint('等待审批且有排队');
     h.say('/status');
-    // 现状：状态卡带「拒绝这条审批」按钮时，buildLarkCard 用 elements 取代 markdown，
-    // 状态正文（含被审批阻塞、本月用量）不会出现在发往飞书的卡片里。快照按现状记录。
     await h.until(() => h.findMessage('拒绝这条审批'));
     await h.settle();
     h.checkpoint('/status');

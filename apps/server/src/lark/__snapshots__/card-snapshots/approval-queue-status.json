@@ -781,6 +781,14 @@
             "padding": "10px 12px 10px 12px",
             "elements": [
               {
+                "tag": "markdown",
+                "element_id": "status_body",
+                "content": "**Agent**：mock\n\n**工作区**：<tmp>/workspace\n\n**会话**：`ses_<id:1>`\n\n**执行身份**：`<执行身份>`（部署这台 Dutydeck 的系统账号）。任务以它运行，能用到它的文件、凭据与网络；独立工作目录只隔离可写目录，不隔离这些。\n\n**运行状态**：waiting_for_permission\n\n**执行中的运行**：1 个　**待执行指令**：1 条（被审批阻塞）　**需要核对**：0 条\n\n**被审批阻塞**：当前一轮在等审批，<北京时间>截止，到时仍未处理将自动拒绝。后面 1 条指令要等它处理完才会执行。不需要这一步时，可以点下方「拒绝这条审批」放行队列。\n\n顺便补一条单元测试\n\n**被审批阻塞**\n\n前一轮在等审批，处理完后才会执行。\n\n**最近一轮**：queued\n\n**本月用量**：本群 $0.35（未设上限） · 本机器人 $0.35（未设上限）",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
                 "tag": "button",
                 "element_id": "status_reject_approval",
                 "type": "danger",
