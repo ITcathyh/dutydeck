@@ -384,6 +384,21 @@ describe('LarkConfigModal ask permission posture', () => {
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'ask', fullTrustConfirmed: false })));
   });
 
+  it('saves approve-reads without a full-trust confirmation for an ACP Agent', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', permissionMode: 'approve-reads', setupComplete: true }));
+    renderModal();
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+    await user.click(screen.getByRole('button', { name: /完全信任：自动执行操作/ }));
+    await user.click(await screen.findByRole('option', { name: /只读自动放行/ }));
+    expect(screen.queryByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ })).toBeNull();
+    const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(submit.disabled).toBe(false));
+    await user.click(submit);
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'approve-reads', fullTrustConfirmed: false })));
+  });
+
   it('does not allow ask to save when the selected Agent is not ACP', async () => {
     const user = userEvent.setup();
     renderModal(collection(), 'cli');

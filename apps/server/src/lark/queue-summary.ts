@@ -24,6 +24,11 @@ export interface QueueSummaryTask {
   prompt?: string;
 }
 
+export interface QueueSummaryOptions {
+  /** 当前一轮停在执行端审批上：排队条目都要等这条审批处理完。 */
+  blockedByApproval?: boolean;
+}
+
 export interface QueueSummaryElement {
   tag: 'markdown';
   element_id: string;
@@ -61,11 +66,11 @@ const overflowSuffix = (remaining: number) =>
  * 渲染排队摘要 markdown；无排队条目返回 undefined（主控不追加元素）。
  * 条目顺序按调用方给入顺序（runtime 队列序），主控负责过滤 status === 'queued'。
  */
-export function renderQueueSummary(tasks: readonly QueueSummaryTask[]): string | undefined {
+export function renderQueueSummary(tasks: readonly QueueSummaryTask[], options: QueueSummaryOptions = {}): string | undefined {
   const queued = tasks.filter(task => task.id?.trim());
   if (!queued.length) return undefined;
 
-  const title = `**排队 ${queued.length} 条**`;
+  const title = `**排队 ${queued.length} 条${options.blockedByApproval ? '（被审批阻塞）' : ''}**`;
   const lines: string[] = [];
   let shown = 0;
   for (const task of queued) {
@@ -89,8 +94,8 @@ export function renderQueueSummary(tasks: readonly QueueSummaryTask[]): string |
 }
 
 /** 渲染为可直接拼进运行卡 elements 的 markdown 元素；无摘要时返回 undefined。 */
-export function renderQueueSummaryElement(tasks: readonly QueueSummaryTask[]): QueueSummaryElement | undefined {
-  const content = renderQueueSummary(tasks);
+export function renderQueueSummaryElement(tasks: readonly QueueSummaryTask[], options: QueueSummaryOptions = {}): QueueSummaryElement | undefined {
+  const content = renderQueueSummary(tasks, options);
   return content
     ? { tag: 'markdown', element_id: QUEUE_SUMMARY_ELEMENT_ID, content, text_size: 'notation', margin: '0px' }
     : undefined;

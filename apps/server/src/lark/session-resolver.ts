@@ -310,7 +310,7 @@ export async function resolveLarkSession(
     await runtime.stop(session.id);
   };
   const compatible = (session: Session) => session.permissionMode === larkPermissionMode(config)
-    && (larkPermissionMode(config) !== 'ask' || session.protocol === 'acp');
+    && (larkPermissionMode(config) === 'full-trust' || session.protocol === 'acp');
   const configKey = larkSessionConfigKey(config);
   const sourceId = larkSourceId(config, chatId, chatType, scopeId);
   const binding = await mappings?.get(`lark-launch:${config.appId}`, sourceId);
@@ -385,7 +385,7 @@ export async function resolveLarkSession(
     source: 'lark',
     sourceId
   });
-  if (larkPermissionMode(config) === 'ask' && session.protocol !== 'acp') {
+  if (larkPermissionMode(config) !== 'full-trust' && session.protocol !== 'acp') {
     await runtime.stop?.(session.id);
     throw new LarkServiceError('LARK_APPROVAL_UNSUPPORTED', '飞书逐项确认仅支持 ACP Agent；此 Agent 的原生确认需在终端完成。', 422);
   }

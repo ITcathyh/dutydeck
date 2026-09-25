@@ -242,6 +242,20 @@ describe('Composer 排队任务', () => {
     expect(onSteerQueued).toHaveBeenCalledWith('t1');
   });
 
+  it('当前一轮停在审批上时，排队指令标为被审批阻塞，并能直接拒绝这条审批', async () => {
+    const user = userEvent.setup();
+    const onRejectPermission = vi.fn();
+    const { rerender } = render(<Composer {...baseProps} state="waiting_for_permission" queuedTasks={[task('t1', '第一条')]} blockingPermissionId="perm_1" onRejectPermission={onRejectPermission}/>);
+    expect(screen.getByText('被审批阻塞')).toBeTruthy();
+    expect(screen.getByText('被审批阻塞，当前审批处理后依次执行')).toBeTruthy();
+    expect(screen.queryByText('排队中')).toBeNull();
+    await user.click(screen.getByRole('button', { name: '拒绝这条审批' }));
+    expect(onRejectPermission).toHaveBeenCalledExactlyOnceWith('perm_1');
+    rerender(<Composer {...baseProps} queuedTasks={[task('t1', '第一条')]} onRejectPermission={onRejectPermission}/>);
+    expect(screen.getByText('排队中')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '拒绝这条审批' })).toBeNull();
+  });
+
   it('正在取消某条时，队列上的按钮整体 disabled，防并发操作', () => {
     render(<Composer {...baseProps} queuedTasks={[task('t1', '第一条')]} cancellingTaskId="t1"/>);
     expect((screen.getByRole('button', { name: '取消排队：第一条' }) as HTMLButtonElement).disabled).toBe(true);

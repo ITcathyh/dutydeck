@@ -699,6 +699,37 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.completed();
   });
 
+  it('shows queued work as blocked by the pending approval in /status, /queue and the queue summary, and rejects it from /status with existing authority', async () => {
+    const h = await harness('permission');
+    await h.coordinator.handle(event('om_task', '修改实现'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    const request = (await h.interactions()).find(item => item.kind === 'permission')!;
+    await h.coordinator.handle(event('om_task_queued', '再补一份说明'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(request.sessionId)).some(task => task.status === 'queued')).toBe(true));
+    await vi.waitFor(() => expect([...h.cards.values()].some(card => JSON.stringify(card).includes('排队 1 条（被审批阻塞）'))).toBe(true), { timeout: 5_000 });
+
+    await h.coordinator.handle(event('om_queue', '/queue'), h.config);
+    await vi.waitFor(() => expect([...h.cards.values()].find(card => card.taskName === '待执行指令')?.markdown).toContain('排队 1 条（被审批阻塞）'));
+    await h.coordinator.handle(event('om_status', '/status'), h.config);
+    await vi.waitFor(() => expect([...h.cards.values()].some(card => card.taskName === '任务状态')).toBe(true));
+    const [statusCardId, status] = [...h.cards.entries()].find(([, card]) => card.taskName === '任务状态')!;
+    expect(status.markdown).toContain('**待执行指令**：1 条（被审批阻塞）');
+    expect(status.markdown).toContain('**被审批阻塞**：当前一轮在等审批');
+    expect(status.markdown).toContain('到时仍未处理将自动拒绝');
+    expect(status.markdown).toContain('前一轮在等审批，处理完后才会执行。');
+    const button = status.elements.find((element: any) => element.element_id === 'status_reject_approval');
+    expect(button.text.content).toBe('拒绝这条审批');
+    const value = button.behaviors[0].value;
+    expect(value).toEqual({ dutydeck_workflow: 'reject', request_id: request.id, generation: request.boot });
+
+    expect(await h.coordinator.handleAction(value, 'ou_bob', { messageId: statusCardId, chatId: 'oc_group' })).toMatchObject({ type: 'error', content: '当前账号无权操作此任务。' });
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: 'om_unregistered', chatId: 'oc_group' })).toMatchObject({ type: 'error' });
+    expect(h.resolvePermission).not.toHaveBeenCalled();
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: statusCardId, chatId: 'oc_group' })).toMatchObject({ type: 'success', content: '执行端已接受拒绝。' });
+    expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', false);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(request.sessionId)).find(task => task.id === request.taskId)?.status).toBe('completed'));
+  });
+
   it('rejects revoked members and old cards after coordinator recreation', async () => {
     const h = await harness('permission');
     await h.coordinator.handle(event('om_task', '等待批准'), h.config);

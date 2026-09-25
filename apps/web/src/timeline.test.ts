@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import { buildTimeline, buildTimelineSections, toolDisplayName } from './timeline';
+import { buildTimeline, buildTimelineSections, pendingPermissionId, toolDisplayName } from './timeline';
 
 const event = (sequence: number, type: string, data: any) => ({ id: `e${sequence}`, sequence, type, timestamp: '', data });
 
 describe('conversation timeline', () => {
+  it('finds the latest permission request that is still pending after decisions merge', () => {
+    const decided = buildTimeline([event(1, 'permission_request', { id: 'perm_a', status: 'pending' }), event(2, 'permission_request', { id: 'perm_a', status: 'approved' })]);
+    expect(pendingPermissionId(decided)).toBeUndefined();
+    const waiting = buildTimeline([event(1, 'permission_request', { id: 'perm_a', status: 'rejected' }), event(2, 'text', { text: '继续' }), event(3, 'permission_request', { id: 'perm_b', status: 'pending' })]);
+    expect(pendingPermissionId(waiting)).toBe('perm_b');
+  });
+
   it('joins streamed token deltas into one Markdown message', () => {
     const timeline = buildTimeline([event(1, 'thinking', { text: 'Con' }), event(2, 'status', { state: 'thinking' }), event(3, 'thinking', { text: 'sidering' }), event(4, 'text', { text: '你' }), event(5, 'text', { text: '好' })]);
     expect(timeline).toHaveLength(2);
