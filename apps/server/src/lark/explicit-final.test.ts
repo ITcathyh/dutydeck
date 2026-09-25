@@ -300,7 +300,7 @@ describe('explicit final: real tools, runtime, coordinator and SQLite', () => {
       expect(verify).toBeTruthy();
       expect(await restarted.handleAction(verify, 'ou_alice', { messageId: sent.messageId, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
       await vi.waitFor(() => expect(h.runVerification).toHaveBeenCalledWith(h.session.id, { command: 'pnpm test' }));
-      await vi.waitFor(() => expect(JSON.stringify(h.cards.get(sent.messageId))).toContain('已验证'));
+      await vi.waitFor(() => expect(JSON.stringify(h.cards.get(sent.messageId))).toContain('验证通过'));
       await restarted.reconcile(h.config);
       expect(resultSends(h)).toHaveLength(1);
     } finally { restarted.stop(); }

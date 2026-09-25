@@ -93,7 +93,7 @@ describe('separate process and complete result messages', () => {
     expect(summary.idempotencyKey).not.toBe(service.replyFile.mock.calls[0]![0].idempotencyKey);
     const card = buildLarkCard(summary);
     expect(card.header.title.content).toBe('创建机器人');
-    expect(card.config.summary.content).toContain('本轮结束');
+    expect(card.config.summary.content).toContain('运行完成');
     expect(JSON.stringify(card)).toContain('尚待用户扫码，创建尚未完成。');
     expect(JSON.stringify(card)).toContain('正文开头节选（非完整结论）');
     expect(JSON.stringify(card)).toContain('workflow_accept');
