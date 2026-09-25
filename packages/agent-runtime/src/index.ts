@@ -12,7 +12,7 @@ import { PersistentEventPublisher, type SubscribeOptions, type EventListener } f
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
 import { localOnlyDriverContext } from './driver-context.js';
 import { WorkspaceManager } from './workspace.js';
-import { VerificationManager } from './verification.js';
+import { repositoryFingerprint, VerificationManager } from './verification.js';
 import { owner, RevokedOperation, SessionMutations, type Owner } from './ownership.js';
 
 function isSameOrIntersectingPath(a: string, b: string): boolean {
@@ -871,6 +871,12 @@ export class DutydeckRuntime {
     const session = await this.repos.sessions.get(id);
     if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
     return this.verifications.list(id, session.cwd);
+  }
+  /** Current code fingerprint of the Session directory, computed exactly like verification records. */
+  async getCodeFingerprint(id: string): Promise<string> {
+    const session = await this.repos.sessions.get(id);
+    if (!session) throw new RuntimeError('SESSION_NOT_FOUND', `Unknown session: ${id}`, 404);
+    return repositoryFingerprint(session.cwd);
   }
 
   private async withSessionMetadata(session: Session): Promise<Session> {

@@ -165,7 +165,7 @@ describe('saveCardTask 的合并语义', () => {
       await vi.waitFor(() => expect(h.runVerification).toHaveBeenCalled(), { timeout: 10_000 });
       await vi.waitFor(async () => {
         const after = await h.persisted();
-        expect(JSON.stringify(after.final_elements)).toContain('已验证');
+        expect(JSON.stringify(after.final_elements)).toContain('验证通过');
       }, { timeout: 10_000 });
     } finally { restarted.stop(); }
 
@@ -238,7 +238,7 @@ describe('验收刷新后文案与按钮同源', () => {
     const refreshed = h.cards.get(finalId);
     expect(callbackValues(buildLarkCard(refreshed)).some(value => value.action === 'verify')).toBe(false);
     const verificationLine = (refreshed.elements as any[]).find(item => item.element_id === LARK_VERIFICATION_ELEMENT_ID);
-    expect(String(verificationLine?.content ?? '')).toContain('已验证');
+    expect(String(verificationLine?.content ?? '')).toContain('验证通过');
     expect(String(verificationLine?.content ?? '')).not.toContain('运行验证');
   });
 });

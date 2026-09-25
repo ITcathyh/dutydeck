@@ -3,7 +3,7 @@ import type { ExecutionActor, ExecutionRecoveryDecision } from '@dutydeck/shared
 import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import * as lark from '@larksuiteoapi/node-sdk';
-import type { AgentConfig, AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy, VerificationCommandInput, VerificationResponse } from '@dutydeck/shared';
+import type { AgentConfig, AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceResponse } from '@dutydeck/shared';
 import type { LarkGroupManager } from './group-management.js';
 import type { StoredLarkConfig } from './config.js';
 import { createLarkCardService, LarkServiceError } from './service.js';
@@ -53,6 +53,10 @@ export interface LarkRuntime {
   /** 平台验证记录，最新在前，含代码指纹与 stale 判定。 */
   getVerifications?(id: string): Promise<VerificationResponse[]>;
   runVerification?(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse>;
+  /** 会话工作区记录；worktree 的基准 commit 用来判断本轮有没有改代码、推断验证命令。 */
+  getWorkspace?(id: string): Promise<WorkspaceResponse | undefined>;
+  /** 会话目录当前的代码指纹，与验证记录同一套算法；共享目录在轮次前后各取一次，判断这一轮有没有改代码。 */
+  getCodeFingerprint?(id: string): Promise<string>;
   subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
   /**
    * 安装者身份的执行恢复读写，与 `dutydeck recovery` 同一组原语。服务重启切断的一轮自动重投时用：

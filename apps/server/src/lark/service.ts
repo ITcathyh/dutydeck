@@ -503,7 +503,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const explicitStatusLabel = Boolean(input.statusLabel?.trim());
   const liveTitle = explicitStatusLabel
     ? clipCardField(input.statusLabel!.trim(), 32)
-    : state === 'running' ? '执行中' : state === 'completed' && input.cardKind === 'result' ? '本轮结束' : presentation.title;
+    : state === 'running' ? '执行中' : state === 'completed' && input.cardKind === 'result' ? '运行完成' : presentation.title;
   const compactTaskName = taskName;
   // 操作按钮统一由 card-actions.ts 这一唯一事实源决定：渲染端与 coordinator 回调端
   // 共用同一张能力表，因此不可能出现「界面上有按钮但回调拒绝执行」的死按钮。

@@ -1257,7 +1257,7 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(buildLarkCard({ state: 'running', taskName: long }).header.title.content).toBe(long);
   });
 
-  it('P7. result 卡：标题就是原任务名，状态标签「本轮结束」，短结论不折叠', () => {
+  it('P7. result 卡：标题就是原任务名，状态标签「运行完成」，短结论不折叠', () => {
     const elements = renderLarkResultElements([
       ...completedEvents,
       makeEvent(5, 'text', { role: 'assistant', text: '**最终答复**\n\n结论如下' }, t(17))
@@ -1267,8 +1267,8 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
       taskId: 'om_r', elapsedSeconds: 9, elements
     });
     expect(card.header.title).toMatchObject({ tag: 'plain_text', content: '原任务名' });
-    expect(card.header.text_tag_list).toEqual([{ tag: 'text_tag', text: { tag: 'plain_text', content: '本轮结束' }, color: 'green' }]);
-    expect(card.config.summary.content).toBe('本轮结束 · 原任务名');
+    expect(card.header.text_tag_list).toEqual([{ tag: 'text_tag', text: { tag: 'plain_text', content: '运行完成' }, color: 'green' }]);
+    expect(card.config.summary.content).toBe('运行完成 · 原任务名');
     const final = card.body.elements.find((el: any) => el.element_id === 'final_output');
     expect(final.content).toContain('**最终答复**');
     expect(byId(card, 'final_output_more')).toBeUndefined();
@@ -1545,7 +1545,7 @@ describe('公开执行记录的可执行入口', () => {
     expect(byId(card, 'evidence')).toBeUndefined();
     expect(byId(card, 'failure_step')).toBeUndefined();
     expect(JSON.stringify(card)).not.toContain('temporary failure');
-    expect(JSON.stringify(card)).toContain('本轮结束');
+    expect(JSON.stringify(card)).toContain('运行完成');
     expect(JSON.stringify(card)).toContain('待用户扫码');
     expect(renderLarkRecordExport(events)).toContain('temporary failure');
   });

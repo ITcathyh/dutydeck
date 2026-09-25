@@ -17,7 +17,8 @@ import type { LarkGroupManager } from './group-management.js';
 import type { AgentEvent, ChannelMapping, ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision, PublicSessionSchedule, Session, TaskRecord, ToolRiskPolicy, VerificationResponse } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { executeScheduleCommand } from './schedule-command.js';
-import { defaultHighRiskPattern, defaultLarkTraceLimit, larkExecutionIdentity, larkPermissionMode, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { defaultHighRiskPattern, defaultLarkTraceLimit, larkExecutionIdentity, larkPermissionMode, readLarkConfig, readLarkConfigs, saveLarkConfig, type StoredLarkConfig } from './config.js';
+import { inferLarkVerificationCommand, larkInsideGitRepository, larkPendingVerificationKey, larkVerificationBase, larkVerificationOutcome, larkVerificationRepairNotice, larkVerificationRepairPrompt, larkWorkspaceChanged, maxLarkPendingVerifications, mutateLarkPendingVerifications, parseLarkPendingVerifications, shouldAutoVerifyLarkTurn, type LarkAutoVerificationProgress, type LarkPendingVerification } from './auto-verification.js';
 import type { LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
 import {
@@ -157,6 +158,8 @@ export type LarkTask = {
   steer?: boolean;
   /** /steer 的降级结果说明，派发后按真实发生的事写进卡面，绝不预告未发生的成功。 */
   steerNote?: string;
+  /** 结果卡上自动验证的进展；验证状态行按它写说明。 */
+  autoVerification?: LarkAutoVerificationProgress;
 };
 export type PersistedLarkCardTask = {
   result_feedback_state?: string;
@@ -197,6 +200,8 @@ export type PersistedLarkCardTask = {
   turn?: number;
   /** 同一会话里之前几轮（重试前）的过程卡与结果卡消息 ID，旧卡上的「查看详情」靠它认回这条任务。转到新会话前那一轮的卡不记在这里。 */
   earlier_message_ids?: string[];
+  /** 结果卡上自动验证的进展，重绘时验证状态行照它写。 */
+  verification_auto?: LarkAutoVerificationProgress;
 };
 
 const larkCardChannel = (appId: string) => `lark-card:${appId}`;
@@ -265,6 +270,8 @@ type LarkFollowUpClaim = { boot: string; phase: 'claimed' | 'submitted' | 'faile
  */
 const dailyScheduleKey = (appId: string, digest: string) => `lark.result_schedule.${appId}.${digest}`;
 type LarkDailyScheduleRecord = { boot: string; phase: 'claimed' | 'created' | 'failed'; operator_open_id: string; time: string; schedule_id?: string };
+/** 候选验证命令每个工作区只提议一次：键按 App + 工作区，值是提议它的那张结果卡（任务 + 轮次）。 */
+const verificationSuggestionKey = (appId: string, workspace: string) => `lark.verification_suggestion.${appId}.${resultActionDigest(workspace)}`;
 /** 结果卡续问行回调的服务端目标：全部取自持久化映射，卡片上只信 task_id 与 turn 用来定位。 */
 type LarkResultActionTarget = {
   current: StoredLarkConfig; config: StoredLarkConfig; mapping: ChannelMapping; saved: PersistedLarkCardTask;
@@ -395,6 +402,7 @@ export class LarkMessageCoordinator {
     this.reconcileConfig = config;
     this.applyReminderSettings(config);
     await this.workflows?.initialize(config.appId);
+    await this.recoverAutoVerifications(config).catch(error => this.log.warn({ error, appId: config.appId }, '重启后收尾自动验证失败'));
     for (const record of await this.inbox?.orphanedCommands(config.appId) ?? []) {
       await this.inbox!.update(record, { state: 'failed', error: '重启后无法确认命令是否完成；如未生效，请重新发送。' });
       const actor = record.event.senderOpenId;
@@ -744,6 +752,8 @@ export class LarkMessageCoordinator {
       ...(task.finalCardInput ? { final_card_input: task.finalCardInput } : {}),
       ...(task.progressFrozen ? { progress_frozen: true } : {}),
       ...(task.lastSuccessfulElements?.length ? { last_successful_elements: task.lastSuccessfulElements } : {}),
+      // 没有进展也写这个键（序列化时省略）：同一轮合并写时要能清掉旧的进展。
+      verification_auto: task.autoVerification,
       ...(task.event.chatType === 'group' ? {
         reply_message_id: task.event.messageId,
         ...(task.event.threadId?.trim() ? { reply_in_thread: true } : {})
@@ -819,6 +829,7 @@ export class LarkMessageCoordinator {
       ...(saved.final_card_input ? { finalCardInput: saved.final_card_input } : {}),
       ...(saved.progress_frozen ? { progressFrozen: true } : {}),
       ...(saved.last_successful_elements ? { lastSuccessfulElements: saved.last_successful_elements } : {}),
+      ...(saved.verification_auto ? { autoVerification: saved.verification_auto } : {}),
       finalElements: saved.final_elements ?? [],
       event: { messageId: mapping.externalId, chatId: saved.chat_id, chatType: saved.chat_type ?? 'group', messageType: 'text',
         content: '', mentions: [], senderOpenId: saved.sender_open_id,
@@ -855,7 +866,7 @@ export class LarkMessageCoordinator {
       ...(verification.element ? [verification.element] : []),
       ...await this.workflows!.result(record, record.cardId, saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined)];
     await this.service.update({ cardKind: 'result', messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements,
-      capabilities: { ...this.capabilitiesForTask(restored), canVerify: verification.canRun, ...await this.resultActionCapabilities(restored, config, saved.state) },
+      capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, config, saved.state) },
       agentName: await this.resolveAgentName(config), turn: saved.turn });
     const current = (await this.cardMappings!.list(larkCardChannel(config.appId))).find(item => item.id === mapping.id);
     if (current?.extra !== mapping.extra) return;
@@ -932,7 +943,7 @@ export class LarkMessageCoordinator {
         const restored = this.restoredCardTask(effective, mapping, saved);
         const verification = await this.verificationView(restored, effective, saved.state as LarkCardActionState);
         return { elements: verification.element ? [verification.element] : [],
-          cardInput: { capabilities: { ...this.capabilitiesForTask(restored), canVerify: verification.canRun, ...await this.resultActionCapabilities(restored, effective, saved.state) } } };
+          cardInput: { capabilities: { ...this.capabilitiesForTask(restored), ...verification.capabilities, ...await this.resultActionCapabilities(restored, effective, saved.state) } } };
       }
     });
     unresolved += await this.workflows?.reconcile(config.appId) ?? 0;
@@ -2567,21 +2578,44 @@ export class LarkMessageCoordinator {
   /** 同一个任务的验证正在跑；重复点击只回提示，不再起第二个进程。 */
   private readonly verifyInFlight = new Set<string>();
 
+  /** 改写这个机器人待收尾的自动验证（见 mutateLarkPendingVerifications）；超出上限丢掉的最旧条目记日志。 */
+  private async mutatePendingVerifications(appId: string, mutation: (entries: LarkPendingVerification[]) => LarkPendingVerification[] | undefined) {
+    if (!this.workflowOptions.store) return;
+    const dropped = await mutateLarkPendingVerifications(this.workflowOptions.store, appId, mutation);
+    if (dropped.length) this.log.warn({ appId, dropped: dropped.map(item => item.task_id) }, `待收尾的自动验证超过 ${maxLarkPendingVerifications} 条，丢掉最旧的`);
+  }
+
+  /** 这个任务的自动验证已收尾：移出待收尾，登记的返修轮次随之作废。 */
+  private settlePendingVerification(appId: string, taskId: string) {
+    return this.mutatePendingVerifications(appId, entries => entries.some(item => item.task_id === taskId) ? entries.filter(item => item.task_id !== taskId) : undefined);
+  }
+
   /**
-   * 结果卡的验证状态：没配验证命令时整行不渲染、按钮也不给——不能暗示一个不存在的能力。
+   * 结果卡的验证状态：没配验证命令时整行不渲染、按钮也不给——不能暗示一个不存在的能力；
+   * 唯一例外是工作区第一次跑完任务时带上推断出的候选命令，只提议保存，不给「运行验证」。
    * canRun 与 canVerify 是同一个判断，渲染端与回调端因此不可能给出不同答案。
    */
-  private async verificationView(task: LarkTask, config: StoredLarkConfig, state: LarkCardActionState): Promise<{ element?: LarkCardElement; canRun: boolean }> {
+  private async verificationView(task: LarkTask, config: StoredLarkConfig, state: LarkCardActionState): Promise<{ element?: LarkCardElement; canRun: boolean; capabilities: Pick<LarkCardCapabilities, 'canVerify' | 'verificationSuggestion'> }> {
     const command = config.verificationCommand?.trim();
-    if (!command) return { canRun: false };
+    if (!command) {
+      const suggestion = state === 'completed' ? await this.verificationSuggestion(task, config).catch(error => {
+        this.log.warn({ error, taskId: task.id }, '推断候选验证命令失败，结果卡不提议');
+        return undefined;
+      }) : undefined;
+      const element = renderLarkVerificationElement({ suggestion });
+      return { ...(element ? { element } : {}), canRun: false, capabilities: suggestion ? { verificationSuggestion: suggestion } : {} };
+    }
     let latest: VerificationResponse | undefined;
     if (task.sessionId && this.runtime.getVerifications) {
       try { latest = (await this.runtime.getVerifications(task.sessionId))[0]; }
       catch (error) { this.log.warn({ error, taskId: task.id }, '读取验证记录失败，结果卡按未验证呈现'); }
     }
+    const note = task.autoVerification;
+    const auto = note && note.turn === task.turn && (note.phase === 'running' || note.record_id === latest?.id) ? note : undefined;
     // 只有「现有记录不能证明当前代码」时才给按钮：已验证且未失效的卡再跑一次没有意义，
-    // 正在跑的也不能再起一个（runtime 会直接回 VERIFICATION_IN_PROGRESS）。
-    const capable = Boolean(this.runtime.runVerification && task.sessionId
+    // 正在跑的也不能再起一个（runtime 会直接回 VERIFICATION_IN_PROGRESS；自动验证还没落记录时看 auto），
+    // 已发回返修的也不给：返修那一轮正占着会话，修完会自己重新验证。
+    const capable = Boolean(this.runtime.runVerification && task.sessionId && auto?.phase !== 'running' && auto?.phase !== 'repairing'
       && latest?.status !== 'running' && (!latest || latest.stale || latest.status !== 'passed'));
     // 最终仍由 card-actions 的能力表拍板（例如 cancelled 的卡不给验证入口）。
     // 文案里的「可点运行验证」必须与按钮同生同灭，否则就是在指一条不存在的路。
@@ -2590,7 +2624,7 @@ export class LarkMessageCoordinator {
       ...(task.retryable !== undefined ? { retryable: task.retryable } : {}),
       capabilities: { ...this.capabilitiesForTask(task), canVerify: capable }
     });
-    return { element: renderLarkVerificationElement({ command, latest, canRun }), canRun };
+    return { element: renderLarkVerificationElement({ command, latest, canRun, ...(auto ? { auto } : {}) }), canRun, capabilities: { canVerify: canRun } };
   }
 
   /** 验证跑完后原样重绘同一张结果卡，只整行替换验证状态，不改写已交付的结论。 */
@@ -2603,7 +2637,7 @@ export class LarkMessageCoordinator {
     ];
     await this.service.update({
       ...task.finalCardInput, messageId: task.finalMessageId, elements,
-      capabilities: { ...this.capabilitiesForTask(task), canVerify: verification.canRun,
+      capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities,
         ...await this.resultActionCapabilities(task, config, String(task.finalCardInput.state)) }
     });
     task.finalElements = elements;
@@ -2631,6 +2665,209 @@ export class LarkMessageCoordinator {
     await this.service.update({ ...task.finalCardInput, messageId: task.finalMessageId, elements });
     task.finalElements = elements;
     await this.saveCardTask(task).catch(error => this.log.warn({ error, taskId: task.id }, '结果卡的本轮记忆已更新，持久化待对账补齐'));
+  }
+
+  /**
+   * 没配验证命令的机器人，在工作区第一次有任务跑完时提议一个候选命令（只读基准上的项目文件推断）。
+   * 每个工作区只推断一次：登记键先认领再推断，之后的结果卡只读一次登记键，不再起 git 进程。
+   * 结论随 final_card_input 落库，之后的重绘与回调都读这个结论。
+   */
+  private async verificationSuggestion(task: LarkTask, config: StoredLarkConfig): Promise<string | undefined> {
+    if (task.finalCardInput) return (task.finalCardInput.capabilities as LarkCardCapabilities | undefined)?.verificationSuggestion;
+    const store = this.workflowOptions.store;
+    if (!store?.compareAndSet || !task.sessionId || !this.runtime.runVerification) return undefined;
+    const session = await this.runtime.getSession(task.sessionId);
+    if (!session?.cwd || !larkInsideGitRepository(session.cwd)) return undefined;
+    const workspace = await this.runtime.getWorkspace?.(task.sessionId);
+    const key = verificationSuggestionKey(config.appId, workspace?.sourceCwd ?? session.cwd);
+    const owner = `${task.id}:${task.turn}`;
+    if (!await store.compareAndSet(key, undefined, owner) && await store.get(key) !== owner) return undefined;
+    const base = await larkVerificationBase(session.cwd, workspace);
+    return base ? await inferLarkVerificationCommand(session.cwd, base) : undefined;
+  }
+
+  /**
+   * 共享目录在本轮开始时的代码指纹，与验证记录同一套算法。只有配了验证命令的机器人才读：读指纹要把整个仓库读一遍；
+   * worktree 按派生它的 commit 判断，不需要。读不出来返回 undefined，本轮结束后就不自动验证。
+   */
+  private async sharedWorkspaceFingerprint(task: LarkTask, session: Session): Promise<string | undefined> {
+    if (!task.config.verificationCommand?.trim() || !this.runtime.runVerification || !this.runtime.getCodeFingerprint
+      || !session.cwd || !larkInsideGitRepository(session.cwd)) return undefined;
+    try {
+      if ((await this.runtime.getWorkspace?.(session.id))?.mode === 'worktree') return undefined;
+      return await this.runtime.getCodeFingerprint(session.id);
+    } catch (error) {
+      this.log.warn({ error, taskId: task.id }, '读取本轮开始时的代码指纹失败，本轮结束后不自动验证');
+      return undefined;
+    }
+  }
+
+  /**
+   * 本轮结束后要不要自动验证（判定见 shouldAutoVerifyLarkTurn）。「本轮改了代码」：worktree 看相对派生它的 commit
+   * 有没有改动；共享目录只比较本轮前后的代码指纹——用户主目录里常有没推送的提交，相对默认分支比较会让只提问的一轮
+   * 也跑一遍验证命令。要跑时先占住验证入口、登记为待收尾，结果卡按「验证执行中」交付。
+   */
+  private async planAutoVerification(task: LarkTask, codeBefore: string | undefined): Promise<{ command: string; turn: number; recordId?: string } | undefined> {
+    const command = task.config.verificationCommand?.trim();
+    if (!command || !task.sessionId || !this.workflowOptions.store || !this.runtime.runVerification || !this.runtime.getVerifications || this.verifyInFlight.has(task.id)) return undefined;
+    try {
+      const session = await this.runtime.getSession(task.sessionId);
+      if (!session?.cwd) return undefined;
+      const workspace = await this.runtime.getWorkspace?.(task.sessionId);
+      let changed: boolean;
+      if (workspace?.mode === 'worktree') {
+        const base = await larkVerificationBase(session.cwd, workspace);
+        changed = Boolean(base && await larkWorkspaceChanged(session.cwd, base));
+      } else changed = Boolean(codeBefore && this.runtime.getCodeFingerprint && codeBefore !== await this.runtime.getCodeFingerprint(task.sessionId));
+      // 没改代码就不必读记录：读记录要给整个仓库算一次指纹。
+      const latest = changed ? (await this.runtime.getVerifications(task.sessionId))[0] : undefined;
+      if (!shouldAutoVerifyLarkTurn({ state: task.state, command, changed, latest })) return undefined;
+      this.verifyInFlight.add(task.id);
+      const progress = { turn: task.turn, ...(latest ? { record_id: latest.id } : {}) };
+      task.autoVerification = { ...progress, phase: 'running' };
+      await this.mutatePendingVerifications(task.config.appId, entries => {
+        const previous = entries.find(item => item.task_id === task.id);
+        return [...entries.filter(item => item.task_id !== task.id), { ...previous, task_id: task.id, running: { ...progress, boot: this.relaunchBoot } }];
+      }).catch(error => this.log.warn({ error, taskId: task.id }, '自动验证登记待收尾失败，重启后这张卡不会自动收尾'));
+      return { command, turn: task.turn, ...(latest ? { recordId: latest.id } : {}) };
+    } catch (error) {
+      this.log.warn({ error, taskId: task.id }, '判定本轮有没有改代码失败，不自动验证');
+      return undefined;
+    }
+  }
+
+  /**
+   * 自动验证：真实执行验证命令，完成后原样重绘结果卡。代码的失败把截断后的输出作为一轮返修发回 Agent，
+   * 同一条请求最多返修两轮；验证工具本身出错记为未通过，不发回返修。调用方 fire-and-forget，这里不抛出。
+   */
+  private async runAutoVerification(task: LarkTask, plan: { command: string; turn: number; recordId?: string }) {
+    let note: LarkAutoVerificationProgress | undefined;
+    let refreshed = false;
+    const refresh = async () => {
+      // 进程已停：待收尾原样留给重启后的收尾（执行中会被改成被中断），卡片也不在这里重绘。
+      if (this.stopped) return;
+      // 已开新一轮的，旧一轮的卡片不再重绘，只移出待收尾。
+      if (task.turn === plan.turn) {
+        task.autoVerification = note;
+        await this.refreshResultVerification(task, task.config).catch(error => this.log.warn({ error, taskId: task.id }, '自动验证结果未能更新到结果卡'));
+        // 被打断的仍留在待收尾里：停服务时这次重绘可能送不到，下次启动再重绘一次。
+        if (note?.phase === 'interrupted') return;
+      }
+      await this.settlePendingVerification(task.config.appId, task.id)
+        .catch(error => this.log.warn({ error, taskId: task.id }, '自动验证已收尾，移出待收尾失败'));
+    };
+    try {
+      let record: VerificationResponse | undefined;
+      let failure: unknown;
+      // 任务完成事件发出后运行时还要收尾一小段队列，这期间会话短暂忙；一直忙说明有别的任务在排队，这次跳过。
+      for (let attempt = 1; ; attempt++) {
+        try { record = await this.runtime.runVerification!(task.sessionId!, { command: plan.command }); break; }
+        catch (error) {
+          failure = error;
+          if (!(error instanceof RuntimeError && error.code === 'SESSION_BUSY') || attempt >= 20 || this.stopped || task.turn !== plan.turn) break;
+          await new Promise(resolve => setTimeout(resolve, 250));
+        }
+      }
+      if (this.stopped || task.turn !== plan.turn) return;
+      const recordId = record?.id ?? plan.recordId;
+      const tracked = { turn: plan.turn, ...(recordId ? { record_id: recordId } : {}) };
+      if (!record && failure instanceof RuntimeError && (failure.code === 'SESSION_BUSY' || failure.code === 'VERIFICATION_IN_PROGRESS')) {
+        note = { ...tracked, phase: 'skipped' };
+        return;
+      }
+      // 被服务重启或会话停止打断：没有结论，不算代码的失败，也不返修。
+      if (record?.status === 'interrupted') {
+        note = { ...tracked, phase: 'interrupted' };
+        return;
+      }
+      if (!record) this.log.warn({ error: failure, taskId: task.id }, '自动验证没能执行，结果卡记为验证未通过');
+      const outcome = larkVerificationOutcome(record, await this.verificationRepairRounds(task));
+      if (outcome.kind === 'infrastructure') {
+        note = { ...tracked, phase: 'infrastructure', ...(record ? {} : { error: failure instanceof Error ? failure.message : String(failure) }) };
+      } else if (outcome.kind === 'exhausted') note = { ...tracked, phase: 'exhausted' };
+      else if (outcome.kind === 'repair') {
+        // 先把卡刷成「已发回返修」再派发：返修那一轮一开跑就会改代码，之后再刷，这条失败记录只能显示成已过期。
+        note = { ...tracked, phase: 'repairing', round: outcome.round };
+        await refresh();
+        refreshed = true;
+        const sent = await this.submitVerificationRepair(task, record!, outcome.round).catch(error => {
+          this.log.warn({ error, taskId: task.id }, '验证未通过，发回 Agent 返修失败');
+          return false;
+        });
+        if (!sent) { note = undefined; refreshed = false; }
+      }
+    } catch (error) {
+      this.log.warn({ error, taskId: task.id }, '自动验证失败，结果卡按最新记录呈现');
+    } finally {
+      // 先把卡刷成最新结论再放开入口，与手动运行验证同一个顺序。
+      if (!refreshed) await refresh();
+      this.verifyInFlight.delete(task.id);
+    }
+  }
+
+  /** 这一轮是第几轮返修：代发返修消息时登记过就是那一轮，否则是用户的原始请求，还没返修过。 */
+  private async verificationRepairRounds(task: LarkTask) {
+    const raw = await this.workflowOptions.store?.get(larkPendingVerificationKey(task.config.appId));
+    return Number(parseLarkPendingVerifications(raw).find(item => item.task_id === task.id)?.repair_round) || 0;
+  }
+
+  /**
+   * 上一个进程退出时还在「验证执行中」（或刚被打断、没来得及重绘）的结果卡：运行时已把那条验证记录记为中断
+   * （或还没来得及落记录），不会再有进程回来重绘这些卡。这里把进展改成「验证被中断」并重绘，卡上随之给出「运行验证」。
+   * 旧进程其实已经验证完、只是没来得及重绘的，去掉进展，卡片按那条记录呈现。重绘过的移出待收尾。
+   */
+  private async recoverAutoVerifications(config: StoredLarkConfig) {
+    const store = this.workflowOptions.store;
+    if (!store || !this.cardMappings) return;
+    const settled = new Set<string>();
+    for (const entry of parseLarkPendingVerifications(await store.get(larkPendingVerificationKey(config.appId)))) {
+      const running = entry.running;
+      if (!running || running.boot === this.relaunchBoot) continue;
+      try {
+        const mapping = await this.cardMappings.get(larkCardChannel(config.appId), entry.task_id);
+        const latest = mapping ? (await this.runtime.getVerifications?.(mapping.sessionId))?.[0] : undefined;
+        // 运行时启动时已把上个进程遗留的执行中记录改成中断；还在执行中，说明是本进程换了监听，验证其实还在跑。
+        if (latest?.status === 'running') continue;
+        const saved = mapping?.extra ? JSON.parse(mapping.extra) as PersistedLarkCardTask : undefined;
+        if (mapping && saved?.final_card_input && (saved.turn ?? 0) === running.turn) {
+          const effective = saved.chat_type === 'group' && this.groupManager
+            ? await this.groupManager.resolved(config, saved.chat_id).catch(() => config) : config;
+          const task = this.restoredCardTask(effective, mapping, saved);
+          const finished = latest && latest.id !== running.record_id && latest.status !== 'interrupted';
+          task.autoVerification = finished ? undefined : { turn: running.turn, phase: 'interrupted', ...(latest ? { record_id: latest.id } : {}) };
+          await this.refreshResultVerification(task, effective);
+        }
+        settled.add(entry.task_id);
+      } catch (error) {
+        this.log.warn({ error, taskId: entry.task_id }, '重启后收尾自动验证失败，结果卡等下次重绘');
+      }
+    }
+    if (settled.size) await this.mutatePendingVerifications(config.appId, entries => entries.filter(item => !settled.has(item.task_id)));
+  }
+
+  /**
+   * 验证未通过时的一轮返修，等同于发起人在原位置回复「按失败输出修复」：机器人先在结果卡下代发一句说明，
+   * 再把它当作发起人的消息交给 handle，唤醒、授权、排队与会话复用全部走原路。失败输出只进 Agent 的请求，
+   * 不贴进群里。缺持久化存储、回复接口或能续聊的发起人时不返修，返回 false。
+   */
+  private async submitVerificationRepair(task: LarkTask, record: VerificationResponse, round: number): Promise<boolean> {
+    const store = this.workflowOptions.store;
+    const requester = task.event.senderOpenId;
+    if (!this.inbox || !store || typeof this.service.replyText !== 'function' || !requester || !larkScopeContinuesFor(task.scopeId, requester)) return false;
+    const notice = larkVerificationRepairNotice(round);
+    const echo = await this.service.replyText({ messageId: task.finalMessageId ?? task.event.messageId, ...(task.event.threadId ? { replyInThread: true } : {}),
+      text: notice, idempotencyKey: `verify_fix_${resultActionDigest(task.id, task.turn, record.id)}` });
+    // 先登记轮次再交给 handle：那一轮跑完再验证时必须读得到自己是第几轮。
+    await this.mutatePendingVerifications(task.config.appId, entries => [...entries.filter(item => item.task_id !== echo.messageId), { task_id: echo.messageId, repair_round: round }]);
+    const event: LarkMessageEvent = {
+      messageId: echo.messageId, chatId: task.event.chatId, chatType: task.event.chatType,
+      ...(task.event.threadId ? { threadId: task.event.threadId } : {}), createTime: String(Date.now()),
+      messageType: 'text', content: JSON.stringify({ text: `@_user_1 ${notice}` }), senderOpenId: requester, senderType: task.event.senderType ?? 'user',
+      mentions: [{ key: '@_user_1', name: task.config.name?.trim() || 'Dutydeck', ...(this.botOpenId ? { openId: this.botOpenId } : {}), mentionedType: 'bot' }]
+    };
+    if (!await this.inbox.seed(task.config.appId, event, { prompt: larkVerificationRepairPrompt(record, round), scopeId: task.scopeId, resources: [] })) return false;
+    void this.handle(event, task.config).catch(error => this.log.error({ error, messageId: event.messageId }, '处理验证返修失败'));
+    return true;
   }
 
   /** 正在后台执行 /repair 的「应用:确认卡消息」，防止同一张确认卡被重复点击触发多次发布。 */
@@ -3438,7 +3675,7 @@ export class LarkMessageCoordinator {
     if (action === 'replay_turn' || action === 'abandon_turn') return this.interruptedTurnAction(action, taskId, parsed.turn, operatorOpenId, context);
     const task = this.tasks.get(taskId) ?? (action === 'cancel'
       ? await this.restoreQueuedCardAction(taskId, parsed.turn, context)
-      : action === 'verify' ? await this.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
+      : action === 'verify' || action === 'use_verification_command' ? await this.restoreVerifyCardAction(taskId, parsed.turn, context) : undefined);
     if (!task) return { type: 'warning', content: '此卡当前不可操作，请回原话题发送 /status 或 /cancel 查看和处理任务' };
 
     /**
@@ -3483,6 +3720,25 @@ export class LarkMessageCoordinator {
         this.log.warn({ error, taskId }, '刷新飞书卡片失败');
         return { type: 'error', content: '刷新失败，请稍后重试或前往 Dutydeck Web 查看' };
       }
+    }
+
+    // 使用推断出的验证命令：只把命令存进机器人配置并重绘这张卡，卡上已交付的结论不变。
+    // 命令取自落库的卡片入参，不信回调里的值；改机器人配置按 channel_bot.update 再判一次权限。
+    if (action === 'use_verification_command') {
+      const command = (await this.verificationView(task, effectiveConfig, task.state)).capabilities.verificationSuggestion;
+      if (!command) return { type: 'warning', content: '这个机器人已经配置了验证命令，或这张卡没有可用的候选命令。' };
+      if (!await this.isOperatorAllowed(effectiveConfig, operatorOpenId, task.event.chatId, task.sessionId, task.event.senderOpenId, 'channel_bot.update')) {
+        return { type: 'warning', content: '当前账号没有修改机器人配置的权限。' };
+      }
+      try {
+        await saveLarkConfig(this.workflowOptions.store, undefined, { originalAppId: currentConfig.appId, expectedRevision: currentConfig.revision ?? 1, verificationCommand: command });
+      } catch (error) {
+        this.log.warn({ error, taskId }, '保存验证命令失败');
+        return { type: 'error', content: '保存失败：机器人配置可能刚被修改过，请稍后重试或在 Web 端配置。' };
+      }
+      void this.refreshResultVerification(task, { ...effectiveConfig, verificationCommand: command })
+        .catch(error => this.log.warn({ error, taskId }, '验证命令已保存，结果卡未能更新'));
+      return { type: 'success', content: '已保存验证命令，之后改了代码会自动验证。' };
     }
 
     // 运行验证：只读收据上唯一允许的操作。它在工作目录执行管理员配置的验证命令，
@@ -4359,7 +4615,7 @@ export class LarkMessageCoordinator {
           ...cardContext, cardKind: 'result' as const, state, taskId: task.id, taskName: taskTitle,
           sessionId: task.sessionId, turn: currentTurn, readOnly: true,
           elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
-          capabilities: { ...this.capabilitiesForTask(task), canVerify: verification.canRun, ...resultActions },
+          capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...resultActions },
           ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
         };
         const result = await completeExplicitFinal(this.workflowOptions.store, this.service, finalContext, resultCardInput, elements) ?? await sendLarkResult(this.service, {
@@ -4573,6 +4829,8 @@ export class LarkMessageCoordinator {
     if (this.runtime.dispatch) {
       task.state = 'queued';
       let runtimeTaskId: string | undefined;
+      /** 共享目录在本轮派发前的代码指纹；本轮结束时与当前指纹比较，判断这一轮有没有改代码。 */
+      let codeBefore: string | undefined;
       let active = false;
       let settling = false;
       let settled = false;
@@ -4616,7 +4874,14 @@ export class LarkMessageCoordinator {
           active = false;
           task.state = resolvedState;
           if (runtimeTaskId) await this.workflows?.expireTask(config.appId, runtimeTaskId);
+          // 本轮改了代码就自动验证：结果卡按「验证执行中」交付，交付之后在后台真实执行验证命令。
+          const autoVerification = resolvedState === 'completed' ? await this.planAutoVerification(task, codeBefore) : undefined;
           await deliverTerminal(resolvedState, resolvedState === 'completed').finally(cleanup);
+          if (autoVerification) void this.runAutoVerification(task, autoVerification);
+          // 本轮不自动验证：这个任务若是返修轮次，返修到此为止，登记的轮次移出待收尾。
+          else if (config.verificationCommand?.trim() && !this.verifyInFlight.has(task.id)) {
+            void this.settlePendingVerification(config.appId, task.id).catch(error => this.log.warn({ error, taskId: task.id }, '移出待收尾的自动验证失败'));
+          }
           // 记忆提取排在终态交付之后，且只记真实 dispatch 过的完成轮次；失败只留日志。
           const memoryPipeline = this.workflowOptions.memory?.pipeline;
           if (memoryPipeline && resolvedState === 'completed' && runtimeTaskId) {
@@ -4661,6 +4926,8 @@ export class LarkMessageCoordinator {
         else receive(agentEvent);
       });
       try {
+        // 重启后接上的任务没有开始时的指纹，共享目录里就不自动验证。
+        if (!resumeTask) codeBefore = await this.sharedWorkspaceFingerprint(task, session);
         const runtimeTask = resumeTask
           ? { ...((await this.runtime.getTasks!(session.id)).find(item => item.id === resumeTask!.id) ?? resumeTask), replayed: true, queuedAhead: 0 }
           : task.inbox
