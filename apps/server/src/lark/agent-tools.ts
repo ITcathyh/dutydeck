@@ -1,11 +1,11 @@
-import { sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope } from './explicit-final.js';
+import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { layeredWorkbenchPrompt, workbenchAgentPrompt } from '../work-item-tools.js';
 import type { LarkGroupManager } from './group-management.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
-import { workPlanConfirmationRequired, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
+import { workPlanConfirmationRequired, type ChannelMapping, type ChannelMappingRepository, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
 import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
@@ -187,8 +187,8 @@ export interface LarkAgentToolsOptions {
   clientFactory?: (config: StoredLarkConfig) => LarkGroupToolClient;
   pollIntervalMs?: number;
   groupToolsCommand?: string;
-  /** history list/show：只读会话、任务与执行账本。 */
-  history?: AttemptResultRepositories & { sessions: Pick<SessionRepository, 'list'>; tasks: Pick<TaskRepository, 'listBySession'> };
+  /** history list/show：只读会话、任务、执行账本和结果卡映射（显式最终答复的路由）。 */
+  history?: AttemptResultRepositories & { sessions: Pick<SessionRepository, 'list'>; tasks: Pick<TaskRepository, 'listBySession'>; channelMappings: Pick<ChannelMappingRepository, 'list'> };
   /** group team-search；群协作集成尚未就绪时返回 undefined。 */
   teamSearch?: () => { reader: Pick<LarkTeamContextReader, 'read' | 'authorize' | 'scorer'>; available(scope: CollaborationScope): Promise<boolean> } | undefined;
   /** Stored Lark sessions are explicitly legacy_unmanaged during WP1b. */
@@ -346,11 +346,19 @@ function inChat(session: Pick<Session, 'source' | 'sourceId'>, binding: LarkAgen
   return appId === binding.appId && chatId === binding.chatId && chatType === binding.chatType && kind !== 'collaboration';
 }
 
-/** 取法同记忆提取管线：number=1 Attempt 正常完成时的助手文本；未完成或读不到时没有回答。 */
-function taskAnswer(repos: AttemptResultRepositories, task: TaskRecord): string | undefined {
+/**
+ * 任务的最终答复。这一轮用 group send --final 交付过答复时取那条记录（此时助手文本往往只剩一句确认）；
+ * 否则取法同记忆提取管线：number=1 Attempt 正常完成时的助手文本。都读不到时没有回答。
+ */
+async function taskAnswer(repos: AttemptResultRepositories, store: ConfigRepository, session: Session, task: TaskRecord, cards: ChannelMapping[] | undefined): Promise<string | undefined> {
   try {
     const attemptId = repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.number === 1)?.attemptId;
     if (!attemptId) return undefined;
+    // 与交付时同一套路由：用任务所在会话的绑定从卡片映射还原 scope，只认通过校验的记录。
+    const binding = larkAgentSessionBinding(session);
+    const final = cards && binding ? await resolveExplicitFinalContext(cards, binding, { taskId: task.id, attemptId }) : undefined;
+    const explicit = final ? (await readExplicitFinal(store, final))?.trim() : undefined;
+    if (explicit) return explicit;
     const read = readAttemptResult(repos, task.sessionId, task.id, attemptId);
     return read.status === 'settled' && read.result.outcome === 'completed' ? read.result.output.text.trim() || undefined : undefined;
   } catch { return undefined; }
@@ -842,11 +850,25 @@ export class LarkAgentToolsService {
   private async chatTasks(context: ToolContext) {
     const repos = this.options.history;
     if (!repos) throw new AgentGroupToolError('HISTORY_UNAVAILABLE', '当前服务未接入会话历史。', 503);
+    const sessions = new Map<string, Session>();
     const tasks: TaskRecord[] = [];
     for (const session of await repos.sessions.list()) {
-      if (inChat(session, context)) tasks.push(...await repos.tasks.listBySession(session.id));
+      if (!inChat(session, context)) continue;
+      sessions.set(session.id, session);
+      tasks.push(...await repos.tasks.listBySession(session.id));
     }
-    return { repos, tasks: tasks.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)) };
+    // 结果卡映射按会话 + 任务分组，每行只解析一次。
+    const cards = new Map<string, ChannelMapping[]>();
+    for (const row of await repos.channelMappings.list(`lark-card:${context.appId}`)) {
+      if (!sessions.has(row.sessionId)) continue;
+      let taskId: unknown;
+      try { taskId = (JSON.parse(row.extra ?? '{}') as { runtime_task_id?: unknown }).runtime_task_id; } catch { continue; }
+      if (typeof taskId === 'string') cards.set(`${row.sessionId}\0${taskId}`, [...cards.get(`${row.sessionId}\0${taskId}`) ?? [], row]);
+    }
+    return {
+      tasks: tasks.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)),
+      answer: (task: TaskRecord) => taskAnswer(repos, this.configs, sessions.get(task.sessionId)!, task, cards.get(`${task.sessionId}\0${task.id}`))
+    };
   }
 
   async history(token: string | undefined, input: { limit?: number; since?: string; until?: string; query?: string } = {}) {
@@ -860,7 +882,7 @@ export class LarkAgentToolsService {
     const since = bound(input.since, 'since'), until = bound(input.until, 'until');
     if (since !== undefined && until !== undefined && since > until) throw new AgentGroupToolError('HISTORY_INVALID_RANGE', 'since 不能晚于 until。', 400);
     const terms = input.query?.trim().toLowerCase().split(/\s+/).filter(Boolean) ?? [];
-    const { repos, tasks } = await this.chatTasks(context);
+    const { tasks, answer: answerOf } = await this.chatTasks(context);
     // 正在执行本命令的这一轮总会命中自己的关键词，不列出。
     const current = this.options.workbenchTask?.(context.sessionId)?.taskId;
     const items = [];
@@ -871,7 +893,7 @@ export class LarkAgentToolsService {
       if (task.id === current || (since !== undefined && at < since) || (until !== undefined && at > until)) continue;
       if (terms.length && scanned >= historyScanLimit) { truncated = true; break; }
       scanned++;
-      const answer = taskAnswer(repos, task);
+      const answer = await answerOf(task);
       if (terms.length) {
         const text = `${task.prompt}\n${answer ?? ''}`.toLowerCase();
         if (!terms.every(term => text.includes(term))) continue;
@@ -890,11 +912,11 @@ export class LarkAgentToolsService {
     const context = await this.context(token, 'group_tools.read');
     const taskId = input.taskId?.trim();
     if (!taskId) throw new AgentGroupToolError('HISTORY_TASK_ID_REQUIRED', 'taskId 不能为空。', 400);
-    const { repos, tasks } = await this.chatTasks(context);
+    const { tasks, answer: answerOf } = await this.chatTasks(context);
     const task = tasks.find(item => item.id === taskId);
     // 其他聊天的任务与不存在的任务同样返回 404，不泄露存在性。
     if (!task) throw new AgentGroupToolError('HISTORY_TASK_NOT_FOUND', `本聊天没有编号为 ${taskId} 的任务。`, 404);
-    const answer = taskAnswer(repos, task);
+    const answer = await answerOf(task);
     // 回答是整轮助手文本的拼接，结论在末尾：超长时保留末尾。
     const answerClipped = answer !== undefined && answer.length > 8_000;
     return {

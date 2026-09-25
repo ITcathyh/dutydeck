@@ -10,7 +10,10 @@ import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig, Session } from '@dutydeck/shared';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
-import { larkBotsConfigKey } from './config.js';
+import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
+import { LarkMessageCoordinator } from './coordinator.js';
+import { resolveExplicitFinalContext } from './explicit-final.js';
+import { readAttemptResult } from '../task-results.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -84,5 +87,102 @@ describe('history tools over runtime + SQLite', () => {
     const fromP2p = await get(p2p.session, `/history/${deploy.taskId}`);
     expect(fromP2p.statusCode).toBe(404);
     expect((await get(p2p.session, '/history')).json().tasks.map((item: { taskId: string }) => item.taskId)).toEqual([p2p.taskId]);
+  });
+});
+
+const finalAnswer = '最终结论：登录改为短信验证码，旧密码入口保留一个月。';
+
+/** 真实 coordinator 建卡与映射，Agent 用 group send --final 交付答复，transcript 里只回一句确认。 */
+async function explicitFinalHarness() {
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-history-final-'));
+  const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const runtime = new DutydeckRuntime(repos, {
+    probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+    driverFactory: (_config, _protocol, emit, _exit, sessionId) => ({
+      start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
+      send: async prompt => {
+        if ((await repos.sessions.get(sessionId))?.sourceId?.includes(':thread:')) {
+          await gate;
+          emit({ type: 'text', data: { text: '已发送答复。' } });
+        } else emit({ type: 'text', data: { text: `回答：${prompt.split('\n').at(-1)}` } });
+        emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+      }
+    } satisfies AgentDriver)
+  });
+  const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
+  await runtime.initialize([agent]);
+  const config: StoredLarkConfig = { appId: 'cli_final', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock',
+    permissionMode: 'ask', listening: true, fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false,
+    groupCardMention: false, groupToolsEnabled: true, groupToolsAllowSend: true, pushIntervalMs: 1_000, hideTraceOnComplete: false,
+    completionReactionOnly: false, silentProgress: false, urgentEnabled: false, pinLongTasks: false,
+    allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
+    highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
+  await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+  let nextCard = 0;
+  const createCard = async () => ({ messageId: `om_card_${++nextCard}` });
+  const service = {
+    send: vi.fn(createCard), reply: vi.fn(createCard), sendText: vi.fn(createCard), replyText: vi.fn(createCard),
+    getBotInfo: vi.fn(async () => ({ appName: 'test', openId: 'ou_bot' })),
+    getMessage: vi.fn(async (id: string) => ({ messageId: id, chatId: 'oc_group', threadId: 'omt_topic' })),
+    uploadFile: vi.fn(async () => 'file_1'), replyFile: vi.fn(createCard), sendFile: vi.fn(createCard),
+    update: vi.fn(async (input: { messageId: string }) => ({ messageId: input.messageId })),
+    addReaction: vi.fn(async (messageId: string, emojiType = 'OK') => ({ messageId, reactionId: `r_${messageId}_${emojiType}` })),
+    deleteReaction: vi.fn(async () => {}), getUserEmails: vi.fn(async () => [] as string[]),
+    listChatMembers: vi.fn(async () => ({ items: [{ memberId: 'ou_alice' }], hasMore: false })),
+    listChatMessages: vi.fn(async () => ({ items: [] as unknown[], hasMore: false })),
+    getMessageItems: vi.fn(async () => [] as unknown[]),
+    pin: vi.fn(async (messageId: string) => ({ messageId })), unpin: vi.fn(async () => {}),
+    urgentApp: vi.fn(async () => ({ invalidUserIdList: [] as string[] })), callOpenApi: vi.fn(async () => ({ code: 0, data: {} }))
+  };
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
+    undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
+  await coordinator.initializeWorkflows(config);
+  cleanups.push(async () => { coordinator.stop(); release(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
+
+  const channel = `lark-card:${config.appId}`;
+  await coordinator.handle({ messageId: 'om_origin', chatId: 'oc_group', chatType: 'group', threadId: 'omt_topic', rootId: 'om_root',
+    senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text: '登录流程该怎么改？' }),
+    mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }] }, config);
+  const mapping = await vi.waitFor(async () => {
+    const [row] = await repos.channelMappings.list(channel);
+    expect(row && JSON.parse(row.extra!).runtime_task_id).toBeTruthy();
+    return row!;
+  });
+  const session = (await repos.sessions.get(mapping.sessionId))!;
+  const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://localhost', 'fixed-test-secret');
+  const token = capabilities.environmentFor(session).dutydeck_group_tools_token!;
+  const tools = new LarkAgentToolsService(capabilities, repos.config, {
+    authorizeTool: async () => {}, clientFactory: () => service as any, history: repos,
+    workbenchTask: id => runtime.getActiveTaskContext(id),
+    finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(channel), binding, task)
+  });
+  const active = runtime.getActiveTaskContext(session.id)!;
+  await tools.send(token, { content: finalAnswer, final: true, turn: capabilities.finalTurnToken(session.id, active.taskId, active.attemptId!) });
+  release();
+  await vi.waitFor(async () => expect((await runtime.getTasks(session.id))[0]?.status).toBe('completed'));
+  // 同一聊天里另一个没有显式答复的任务。
+  const plain = await runtime.start({ agentId: 'mock', cwd, source: 'lark', sourceId: 'cli_final:oc_group:group:user:ou_bob' });
+  const { id: plainTaskId } = await runtime.dispatch(plain.id, '普通问题', 'queue', '普通问题', undefined, 'ou_bob');
+  await vi.waitFor(async () => expect((await runtime.getTasks(plain.id))[0]?.status).toBe('completed'));
+  return { repos, tools, token, finalTaskId: active.taskId, finalSessionId: session.id, finalAttemptId: active.attemptId!, plainTaskId };
+}
+
+describe('history answers delivered with group send --final', () => {
+  it('returns the explicit final answer instead of the transcript confirmation, and falls back to the transcript otherwise', async () => {
+    const h = await explicitFinalHarness();
+    // 前提：这一轮的 transcript 里只有确认语。
+    const transcript = readAttemptResult(h.repos, h.finalSessionId, h.finalTaskId, h.finalAttemptId);
+    expect(transcript.status === 'settled' && transcript.result.output.text).toBe('已发送答复。');
+
+    expect(await h.tools.historyTask(h.token, { taskId: h.finalTaskId })).toMatchObject({ taskId: h.finalTaskId, answer: finalAnswer });
+    expect((await h.tools.history(h.token, { query: '短信验证码' })).tasks.map(item => item.taskId)).toEqual([h.finalTaskId]);
+    expect((await h.tools.history(h.token, { query: '已发送答复' })).tasks).toEqual([]);
+
+    expect(await h.tools.historyTask(h.token, { taskId: h.plainTaskId })).toMatchObject({ answer: '回答：普通问题' });
+    const listed = (await h.tools.history(h.token)).tasks;
+    expect(listed.map(item => [item.taskId, item.answer])).toEqual([[h.plainTaskId, '回答：普通问题'], [h.finalTaskId, finalAnswer]]);
   });
 });
