@@ -2,13 +2,9 @@
 
 基线：Dutydeck master `ae295ac`。线上数据取自 09-25 14:15 CST 的只读快照。本文只写 09-17 至 09-23 前期对标之后的新增内容；已有结论见[团队 Tag 能力差距](team-tag-capability-gap-20260918.md)、[飞书入口调度](feishu-dispatch-optimization-20260918.md)、[完整产品追平方案](full-product-parity-plan.md)、[Botmux 评估](botmux-review-20260923.md)和[记忆对标](lark-memory-research-20260917.md)。
 
-调研分两批：
-- **第一批**：复查 Claude Tag、Botmux、Mew 和前期覆盖过的外部产品。
-- **第二批**：找此前没覆盖的产品，范围包括国内 IM 与办公平台、海外团队协作 agent、字节内部 agent 平台、外部 coding agent 与编排工具，以及 ACP 协议本身。
-
 ## 结论
 
-Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留证、可审计的群参与判定、长期记忆、worktree 安全清理、doctor。两批对标又找到几项缺口，但眼下最影响结果的问题都不在功能上，共四件：
+Dutydeck 的功能已经和同类产品持平，验证留证、可审计的群参与判定、长期记忆、worktree 安全清理、doctor 这几项更完整。眼下最影响结果的问题都不在功能上，共四件：
 
 1. **部署暴露。** 主服务监听内网 IP `10.37.33.49:4310`，且关闭了鉴权。从另一台内网机器无需凭据就能读到全部 79 个会话，而这个实例上挂着 full-trust 的机器人。
 2. **发布节奏在丢任务。** 14 天内主服务重启 45 次、Tag 重启 38 次。主服务 15 个没完成的任务中有 12 个和重启有关。
@@ -22,7 +18,7 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
    - 9 月以来 fix 与 feat 的提交数之比为 93:68。
    - `coordinator.ts` 共 4387 行，9 月被 fix 了 25 次。
 
-第二批调研改变了两处判断：
+另有两点发现影响后面的做法：
 - **有两项缺口比预想的便宜。**
   - Dutydeck 在用的 claude-agent-acp 0.66.0 和 codex-acp 已经支持运行中插话（扩展方法 `_session/steering`），只差 acpx 这一层透传。
   - token 和成本数据已经送到 `packages/acp-client/src/index.ts:124`，只是服务端没有存。
@@ -32,11 +28,10 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
   - CI 修复的熔断：内部 CI 自动修复方案。
   - 事件投递：EventHub。
 
-建议接下来两周暂停扩展追平清单，按四步推进：
-1. 先止血：安全、数据膨胀、审批堵队列。
-2. 再把发布做成用户无感。
-3. 然后让已有能力闭环，内部 CI 接入放在这一步。
-4. 最后只补四项缺口：成本记账、按触发人身份执行、表情和仅本人可见的回执、运行中插话。
+建议按三级处理，明细见第 5 节：
+- **P0，本周**：止血。处理鉴权暴露、数据库膨胀、记忆停摆、审批堵队列、重启丢任务，并冻结外围范围。
+- **P1，一个月内**：把发布做成用户无感；让验证、CI、群参与这些已有能力真正用起来；开始记成本。
+- **P2，之后**：按触发人身份执行、表情控制、运行中插话、记忆可见，以及代码和文档整理。
 
 ## 1. 调研范围与证据
 
@@ -44,12 +39,10 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 |---|---|---|
 | Claude Tag | 官方文档，其中 commands、how-it-works、spend-limit 三页逐字核对 | 官方文档 |
 | Botmux | v3.30.0（`79e75b14`），逐个读了上次评估基线 `2716996` 之后的 43 个提交，另有 GitHub issue 158 个 | 源码、issue |
-| Mew 及内部同类 | Mew 主文档、权限隔离、身份凭证、Automation、MR 联动、Worktree、FAQ 等 16 篇；amux、HAS、MyShadow、Team Bot、AgentDock、Togo 等 | 飞书文档原文，3 篇无权限 |
-| 外部产品（第一批） | cc-connect、OpenClaw、OpenTag、claude-threads、lark-channel-bridge、Devin、Copilot、Cursor、Codex、Linear、Factory、Warp、Conductor、Ramp Inspect、Stripe Minions 等 | 官方文档为主，用户抱怨部分来自 issue/HN 和博客转述 |
+| Mew 及字节内部 agent 平台 | Mew 主文档、权限隔离、身份凭证、Automation、MR 联动、Worktree、FAQ 等 16 篇；amux、HAS、MyShadow、Team Bot、AgentDock、Togo；方舟 MA、Coze MA、TMates、Codebase MA、Ode、TAE、Tika、Uceclaw、Bits Flux、Agent Foundry、Agent Fabric、AgentBox、Cloud Agent Box、Orchestra、Neeko、Astra；另有 AAT、EventHub、CI 自动修复、卡片续跑、AxonTag、Agent Worker 等 20 多篇专题文档 | 飞书文档原文。9 篇无权限，包括 Neeko、Astra、TMates 手册、Ode 接入文档 |
 | 国内 IM 与办公平台 | 飞书 aily、飞书任务智能体接口、钉钉 AI 助理与悟空、企业微信智能机器人、CodeBuddy/WorkBuddy、Qoder、Trae、Comate/DuMate、Kimi、扣子 3.0、MiniMax、Manus | 官方文档为主。钉钉「群消息感知触发」和 aily 功能手册抓不到正文 |
-| 海外团队协作 agent | Dust、Glean、Asana、Notion、Rovo、Zapier、Lindy、Adapt、Moveworks、Slack | 官方文档。Asana 帮助中心和 Moveworks 审批页只拿到搜索摘要 |
-| 字节内部 agent 平台 | 16 个目标：方舟 MA、Coze MA、TMates、Codebase MA、Ode、TAE、Tika、Uceclaw、Bits Flux、Agent Foundry、Agent Fabric、AgentBox、Cloud Agent Box、Orchestra、Neeko、Astra。另读了 AAT、EventHub、CI 自动修复、卡片续跑、AxonTag、Agent Worker 等 20 多篇专题文档 | 飞书原文。Neeko、Astra、TMates 手册、Ode 接入文档等 6 篇无权限 |
-| 外部 coding agent 与编排 | Augment Cosmos、Roomote、Kilo、Amp、Coder、Replit、Zed、Sourcegraph、AgentConnect、Multica、Compozy、Pomerium AgentOps、Gas Town、Claude Code agent teams、OpenAI Symphony、CodeRabbit、Greptile、PR-Agent、codex-plugin-cc 等 | 源码和官方文档。多数文档页没有日期，按抓取日 09-25 记 |
+| 海外团队协作 agent | Devin、Linear、Factory、Charlie、Dust、Glean、Asana、Notion、Rovo、Zapier、Lindy、Adapt、Moveworks、Slack | 官方文档。Asana 帮助中心和 Moveworks 审批页只拿到搜索摘要 |
+| coding agent 与编排工具 | cc-connect、OpenClaw、OpenTag、claude-threads、lark-channel-bridge、Copilot、Cursor、Codex、Warp、Conductor、Ramp Inspect、Stripe Minions、Augment Cosmos、Roomote、Kilo、Amp、Coder、Replit、Zed、Sourcegraph、AgentConnect、Multica、Compozy、Pomerium AgentOps、Gas Town、Claude Code agent teams、OpenAI Symphony、CodeRabbit、Greptile、PR-Agent、codex-plugin-cc | 源码和官方文档为主。用户抱怨来自 issue、HN 和博客转述。多数文档页没有日期，按抓取日 09-25 记 |
 | ACP 协议 | 规范 v1.9.1（09-18）、v2 草案及相关 RFD 和 PR；claude-agent-acp、codex-acp、acpx 0.19.3 源码 | 源码。claude-agent-acp 0.66.0 支持插话这一点，已在开发机的依赖目录里核实 |
 | Dutydeck 线上 | 两个 SQLite 库只读副本、14 天服务日志、源码接线抽查、9 月 git log | 实测 |
 
@@ -73,7 +66,11 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 - 13 个结果未确认的任务里，12 个的原因码是 `PREVIOUS_RUNTIME_RESULT_UNKNOWN`。它们的结算时间都落在 09-22T16:22Z 和 09-25T03:04Z 两个重启点上。
 - 重启次数：主服务 45 次，其中 09-23、09-24 各 10 次；Tag 38 次。
 - 9 月以来，「跨重启恢复」相关的修复分别在 09-09、09-23、09-25 提交过。
-- **未查清**：这些重启有没有走 `dutydeck restart` 的等待逻辑。按仓库约定，这条命令会等正在执行的任务结束。
+- `dutydeck restart` 已有等待逻辑，但有两个缺口：
+  - 它会等正在执行的任务结束，默认最长 900 秒（`daemon/command.ts:55`、`:139-144`）。
+  - 等待期间没找到停止接收新任务的代码。
+  - 查询运行状态失败时，它输出警告后照常重启（`:141`）。
+- **未查清**：这 45 次重启是不是都走了这条命令。
 
 ### 2.3 挂起的审批会把会话堵几个小时
 
@@ -154,7 +151,7 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 - 原因：`schedule-executor.ts:98-108` 先给每个委托续租约，之后才检查委托状态；每次续租都在 `schedule-foundation.ts:269` 写一行版本记录，而这张表没有任何清理代码。
 - 主服务库里这张表是 0 行。主库 300MB 的构成没有查。
 
-## 3. 同类产品的新变化
+## 3. 同类产品的做法
 
 ### 3.1 Claude Tag：前期对标之后值得注意的设计
 
@@ -194,7 +191,7 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
   - Botmux 没有 `doctor`。
   - Botmux 自动创建的 worktree 从不回收（issue #698，仍 open）。
 
-### 3.3 Mew 及内部同类
+### 3.3 Mew
 
 | 设计 | 具体做法 | 来源 |
 |---|---|---|
@@ -209,9 +206,9 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 
 规模参考：Botmux 内部主群 4996 人、20 个 bot；Mew 数字团队从 9 月中上线 9 个 Agent、接入 6 个群。Mew 没有公开的周活数据。
 
-### 3.4 外部产品（第一批）
+### 3.4 行业共识与用户抱怨
 
-**行业已基本一致的做法**：
+**已基本一致的做法**：
 - 线程里 @ 发起，一个线程一个会话。
 - 先用 👀 或链接确认收到。
 - 自动选仓库，拿不准就问。
@@ -222,21 +219,6 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 - 有成本上限。
 - 手机只在需要操作时推送。
 
-**与 Dutydeck 直接相关的具体做法**：
-
-| 做法 | 产品 |
-|---|---|
-| 👀 在模型处理之前就加上；「安静」由程序直接处理，不交给模型；监听频道时维护一份待办清单，把新消息分成新问题、已跟踪问题的症状、无关三类，避免同一件事开十几个会话 | [Devin Slack 礼仪](https://devin.ai/blog/devins-slack-etiquette) |
-| 审批按钮在点击时核对 run、尝试锁和提案 hash，过期或重复点击被拒；外部调用结果不明时记为 `outcome_unknown` | [OpenTag](https://github.com/amplifthq/opentag) |
-| 排队中的消息保留原发送人的权限上限，不借用最新发送人的权限 | [OpenClaw 队列](https://docs.openclaw.ai/concepts/queue.md) |
-| 谁发起的 PR 谁不能批准；只有写权限用户的评论会传给 agent；记忆带代码引用，使用前对照当前分支验证，28 天没用到就删 | [Copilot](https://docs.github.com/en/copilot/concepts/agents/coding-agent/risks-and-mitigations) |
-| 收到事件后 10 秒内要发第一条 activity，30 分钟没有 activity 标为 stale | [Linear Agent Interaction](https://linear.app/developers/agent-interaction) |
-| 文档明说「运行显示绿色不等于任务成功」；事件 payload 包在标签里，标成不可信数据 | [Claude Routines](https://code.claude.com/docs/en/routines) |
-| CI 最多跑两轮 | [Stripe Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents) |
-| 核心指标是「会话最终产出合并的 PR」 | [Ramp Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent) |
-| 命令和工具按风险分级，只有超出当前级别才弹审批 | [Factory](https://docs.factory.ai/) |
-| 团队共享使用少见，多数仍是一个人驱动一个 agent；该产品已宣布 10-05 关闭 | [Charlie 复盘](https://charlielabs.ai/blog/charlie-2025-a-recap-and-whats-next/) |
-
 **用户的主要抱怨**：
 - 假完成：一篇文章核对了 101 条「tests pass」声明，35% 不实。
 - 噪音：Devin 早期一个线程堆了 47 条回复。
@@ -245,25 +227,24 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 - 通过评论注入指令，泄露凭证。
 - 成本不透明。
 
-来源见附录。
+### 3.5 按主题的具体做法
 
-### 3.5 此前未覆盖的产品
-
-只列和 Dutydeck 现有缺口直接相关的做法，按主题分组。链接见附录。
+只列和 Dutydeck 现有缺口直接相关的做法。标「内部」的是字节内部产品。链接见附录。
 
 #### 3.5.1 群参与与降噪
 
 | 产品 | 做法 |
 |---|---|
+| Devin | 👀 在模型处理之前就加上；「安静」由程序直接处理，不交给模型；监听频道时维护一份待办清单，把新消息分成新问题、已跟踪问题的症状、无关三类，避免同一件事开十几个会话 |
 | Glean | 判断「该回」但把握不大时，先只让提问人看到草稿，提问人点「发到线程」才公开。从不在别人的线程里主动插话。有外部成员的频道一律不主动回答。提问人既没分享也没删除时，补发一条提示，让别人可以自己请求答案 |
-| Glean | bot 用固定表情标状态：⏳ 处理中、👀 有建议、✅ 已公开、⚠️ 被标为没用 |
-| Glean | 频道 owner 只能关掉功能，不能打开管理员关掉的功能 |
+| Glean | bot 用固定表情标状态：⏳ 处理中、👀 有建议、✅ 已公开、⚠️ 被标为没用。频道 owner 只能关掉功能，不能打开管理员关掉的功能 |
 | Adapt | 在频道里 @ 它，用一句话设定参与规则，例如「顶层消息只在被 @ 时回」。它在线程里回显生效的规则。线程规则覆盖频道规则 |
 | Dust | bot 只读被 @ 的那一个线程。Dust 和其他 bot 的消息不进数据同步，避免 AI 输出被当成原始资料 |
 | AxonTag（内部） | 建话题时拍一次快照，之后每轮只加一行「其他地方的新消息」摘要，上下文预算 1.5 万 token。10 分钟内不重复插话。判定失败时不发言并记日志。发送前 5 秒内有新消息，本次回复作废 |
 | Agent Worker（内部） | 群上下文从每次拼最近 150 条原文，改为约 1–3KB 的结构化摘要，其余由 agent 按需用 CLI 查。改之前老群经常触发 128KiB 降级 |
 | solo-agent 熵文档（内部） | 单个 agent 10 秒内发送超过 20 次返回 429；同一频道 10 秒内有 20 次由 agent 消息触发的请求，暂停 agent 触发 60 秒，人类消息不受限 |
 | Manus | 一个线程同时只处理一个任务，任务归最先 @ 它的人；后加入的人要任务所有者批准 |
+| Charlie | 复盘称团队共享使用少见，多数仍是一个人驱动一个 agent；该产品已宣布 10-05 关闭 |
 
 #### 3.5.2 审批
 
@@ -272,8 +253,10 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 | 卡片续跑方案（内部） | 回调值带 `_agent_callback{version, session_id, expires_at}`，14 天有效；按 event_id 幂等；4xx 不重试，5xx 最多重试 3 次；同一会话内串行 |
 | Agent Fabric（内部） | 按钮回调带 session_id 和 wait_id，恢复到对应的等待点 |
 | AgentBox（内部） | Web 和飞书是对等的确认通道，卡片过期后可以去 Web 完成 |
+| OpenTag | 点击时核对 run、尝试锁和提案 hash，过期或重复点击被拒；外部调用结果不明时记为 `outcome_unknown` |
 | Zapier | 审批超时后可选「跳过继续」或「结束运行」，超时时长和提醒都可配 |
 | Moveworks | 执行前展示已收集的全部参数，用户可以先修改再确认 |
+| Factory | 命令和工具按风险分级，只有超出当前级别才弹审批 |
 | Dust | 工具分 never_ask / low / medium / high 四档。high 每次都要批，不能存成「总是允许」；「本会话全部允许」只存在内存里（09-15 新增）；未设档的远程 MCP 工具默认 high |
 | AgentConnect | 审批卡私聊发给触发人，找不到时依次找会话 owner、共享名单、创建者；点击时重新校验权限，状态用 CAS 从 pending 改写 |
 | Asana | 提权（改权限、加成员）和删除两类动作永远要人批准 |
@@ -289,14 +272,17 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 | Glean | 默认按触发人的权限执行。agent identity 按「凭证 × 工具」生效，动作由 agent 账号署名，触发人单独记进审计 |
 | Asana | 实际权限取 Teammate 权限和发起人权限的交集 |
 | Roomote | 每个 run 记 `actingUserId`，别人追问时先切换执行人再投递 |
+| OpenClaw | 排队中的消息保留原发送人的权限上限，不借用最新发送人的权限 |
+| Copilot | 谁发起的 PR 谁不能批准；只有写权限用户的评论会传给 agent |
 | Moveworks | 触发人还没授权某个连接器时，先请他授权再执行 |
 | 扣子 3.0 | 本地 Agent 走 ACP 接入。官方提醒「多人共享个人账号、高频自动化、长期无人值守」会增加风控风险 |
 | 私有群模式（内部） | 原则是「群就是边界」，内容在进入上下文之前拦截。文档承认 cron 的结果可能泄漏到公开群 |
 
-#### 3.5.4 发布、恢复与插话
+#### 3.5.4 响应、发布、恢复与插话
 
 | 产品 | 做法 |
 |---|---|
+| Linear | 收到事件后 10 秒内要发第一条 activity，30 分钟没有 activity 标为 stale |
 | AgentConnect | durable inbox 在重启后重放消息，并给 prompt 附一段说明：「上次尝试可能中途停了，先检查再重复任何外部副作用」。`turnStallTimeoutMs` 看门狗。收到 SIGTERM 先排空，受 `shutdownDrainMs` 约束 |
 | Multica | 重启后回收没干净结束的 run，标 `runtime_recovery`，最多重试 2 次；二进制更新时如果在忙，推迟到任务结束 |
 | Amp | runner 只在没有线程处于轮次中时重启。消息默认插话，在当前一步结束后送入；⌘Enter 改为排到整轮之后 |
@@ -313,6 +299,7 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 
 | 产品 | 做法 |
 |---|---|
+| Claude Routines | 文档明说「运行显示绿色不等于任务成功」；事件 payload 包在标签里，标成不可信数据 |
 | Gas Town | `gt done` 要求工作区干净且至少有 1 个 commit。源码注释写明报错信息故意不提绕过参数，因为 LLM 会读报错后自行绕过 |
 | Claude Code agent teams | `TaskCompleted` hook 返回 exit 2 就拒绝完成，并把 stderr 回灌给模型 |
 | codex-plugin-cc | 反例（issue #248）：验证基础设施出错时也返回 block，结果无限重唤醒 |
@@ -320,6 +307,8 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 | CodeRabbit | `review_skipped` 不能当成代码干净；读 Jenkins 结果时只认与 PR head commit 匹配的构建 |
 | PR-Agent / Qodo | 跨轮次记录每条问题的关闭和重开；每条问题必须以 Fixed、Skipped（附理由）或 Reported 结束 |
 | Greptile | Model Inversion（实验）：识别作者用的模型，换另一家的模型来审 |
+| Stripe Minions | CI 最多跑两轮 |
+| Ramp Inspect | 核心指标是「会话最终产出合并的 PR」 |
 | AgentBox Review CI（内部） | 钉住 MR 版本；结果是 Stale 或 Pending 都算失败；agent 不 approve、不绕过、不合入 |
 | CI 自动修复方案（内部，开发中） | 动手前和 push 前各校验一次 expected_head_sha；最多 3 轮；同一个错误指纹出现 2 次就停；每轮最多改 10 个文件、300 行；CI 日志当作不可信输入；不合入、不 approve、不 force push |
 | LBP CR（内部） | 把服务账号加进 review 规则，用 Approvals required 设为 1 或 2 决定 AI 的结论能否单独放行 |
@@ -342,13 +331,10 @@ Dutydeck 的功能已经和同类产品持平，有几项更完整：验证留�
 | Kilo、Augment、Coder | 按人设每日上限；相对基线的突增告警；每次请求前检查已花费 |
 | 内部平台现状 | 多数只做到按人按天统计，或还停留在规划 |
 | Asana | 每条记忆挂在某个项目、任务或文档上，检索时只返回发起人能看到来源的记忆。执行视图列出本次用到和新建的记忆，用户可以删除 |
+| Copilot | 记忆带代码引用，使用前对照当前分支验证，28 天没用到就删 |
 | 飞书 aily | 记忆按每个用户、每个群各存一份；群里的对话不调用私聊内容；每次发布留变更记录，可回滚 |
 | Lindy | 可编辑的 memory.md 里可以写「不要记住什么」；后台按频道和文档的可见性，把内容分流到团队记忆或个人记忆 |
 | AgentBox ContentGuard（内部） | 写入记忆前扫描注入、外泄和凭证 |
-
-#### 3.5.7 已关停或改名
-
-Roo Code Cloud 于 05-15 关停，由 Roomote 接替；Continue 被 Cursor 收购后停更；Coder Tasks 从 v2.36 起移除；AgentAPI 于 09-13 标为 deprecated；Augment Remote Agents 改名 Cosmos；Sweep 转成 JetBrains 插件；Charlie 宣布 10-05 关闭。
 
 ### 3.6 ACP 协议层现状
 
@@ -361,6 +347,10 @@ Roo Code Cloud 于 05-15 关停，由 Roomote 接替；Continue 被 Cursor 收�
 | 用量 | `usage_update` 于 06-05 稳定：`used`/`size` 必填，`cost` 可选。每轮 token 明细 `PromptResponse.usage` 仍是草案 | claude-agent-acp 报 `cost`（美元）和每轮 usage；codex-acp 不报成本，usage 是本轮增量 | 已转成 `status/usage`（`packages/acp-client/src/index.ts:124`），服务端没有消费 |
 
 插话的实际效果因 agent 而异（第三方，PR #2043 评论）：Codex 几乎立即生效；Claude Code 要等到下一个安全边界才并入。
+
+### 3.7 已关停或改名
+
+Roo Code Cloud 于 05-15 关停，由 Roomote 接替；Continue 被 Cursor 收购后停更；Coder Tasks 从 v2.36 起移除；AgentAPI 于 09-13 标为 deprecated；Augment Remote Agents 改名 Cosmos；Sweep 转成 JetBrains 插件；Charlie 宣布 10-05 关闭。
 
 ## 4. Dutydeck 的位置
 
@@ -380,220 +370,70 @@ Roo Code Cloud 于 05-15 关停，由 Roomote 接替；Continue 被 Cursor 收�
 
 ## 5. 优化建议
 
-每条写明做什么、影响范围、收益、依据和验收方式。工作量是估计。
+分级口径：
+- **P0**：本周处理。正在造成安全风险、数据损坏或用户可见损失的问题。
+- **P1**：一个月内。发布无感，以及已有能力没用起来的问题。
+- **P2**：P1 之后。功能缺口和代码、文档整理。
 
-### P0：本周止血
+「参考」后面是依据的产品，细节见第 3 节。
 
-**P0-1 收掉内网无鉴权暴露**
-- **做什么**：
-  - 线上立即二选一：打开鉴权，或把监听改回 `127.0.0.1`。
-  - 产品侧：host 不是回环地址且鉴权关闭时拒绝启动，除非显式传一个带 `unsafe` 字样的参数；`doctor` 把这种组合标红。
-  - 启动日志不再打印 token。
-- **影响**：线上配置，以及 `daemon/command.ts` 和启动日志。
-- **收益**：内网其他人不能再读取会话，也不能驱动 full-trust 的 agent。
-- **验收**：从另一台机器请求 `/api/sessions` 返回 401；日志里 grep 不到 token。
-- **工作量**：S。
+### P0：本周
 
-**P0-2 修 Tag 数据库膨胀**
-- **做什么**：
-  - 执行器先检查委托状态，已取消或已停用的委托不再续租。
-  - 续租不写实体版本记录，因为租约不属于配置修订。
-  - 给 `schedule_entity_versions` 加保留策略。
-  - 上线后按 `dutydeck restart` 流程停服，执行一次 `VACUUM`。
-- **影响**：`schedule-executor.ts`、`schedule-foundation.ts`。
-- **收益**：按当前速度每天约 100MB 的增长停止（估算）。
-- **验收**：一小时内该表新增行数接近 0；库文件变小。
-- **工作量**：S。
+| 问题 | 预期方案 | 影响范围 | 收益 |
+|---|---|---|---|
+| **P0-1 主服务内网无鉴权**：4310 监听 `10.37.33.49` 且鉴权关闭，从另一台机器无凭据读到 79 个会话 | 1. 线上打开鉴权，或把监听改回 `127.0.0.1`（见第 7 节）<br>2. host 不是回环地址且鉴权关闭时拒绝启动，除非显式传带 `unsafe` 字样的参数；doctor 把这种组合标红<br>3. 启动日志不再打印 token | 线上 `.env`；`daemon/command.ts`；启动日志 | 内网其他人不能再读会话、驱动 full-trust agent；以后同样的误配置在启动时就被拦下 |
+| **P0-2 Tag 数据库膨胀**：`schedule_entity_versions` 5 天写了 40 万行，库文件 672MB | 1. 执行器先查委托状态，已取消或停用的委托不再续租<br>2. 续租不写实体版本记录<br>3. 给这张表加保留策略；上线后按 `dutydeck restart` 停服，执行一次 `VACUUM` | `schedule-executor.ts`、`schedule-foundation.ts`；Tag 线上库 | 每天约 100MB（估算）的增长停止，库文件变小 |
+| **P0-3 主服务记忆提取停了 5 天没人发现**：09-20 后 23 个群任务没有新记忆，日志反复出现 `MEMORY_RECOVERY_REQUIRED` | 1. 核对 `ae295ac` 部署后这个错误是否消失，没消失就修<br>2. `/memory` 和 doctor 显示最后一次成功提取的时间，连续多轮没有提取时标黄 | 记忆提取流水线、`/memory`、doctor | 记忆恢复写入；以后停摆能被看到 |
+| **P0-4 没人处理的审批一直堵住队列**：3 个审批让后面的任务排了 3.0–4.3 小时，直到服务重启；权限卡没有截止时间（`lark/workflow-interactions.ts:310-313`） | 1. 权限卡和问题卡一样带截止时间：到时先提醒，再超时按策略拒绝，卡片改为「已过期」并在话题里说明（参考 Mew、HAS、Zapier）<br>2. 按钮回调按 event_id 去重（参考卡片续跑方案、Agent Fabric）<br>3. 挂起期间，后面排队的任务显示「被审批阻塞」和取消按钮<br>4. 群机器人默认 `approve-reads`，只读操作不再弹审批（参考 Factory、Dust） | `lark/workflow-interactions.ts`、任务队列、卡片 | 不再出现一个任务排几个小时的情况；约 2/3 的审批（按标题推断为只读）不再打扰人 |
+| **P0-5 重启时任务丢失**：14 天主服务重启 45 次，15 个未完成任务中 12 个和重启有关；`dutydeck restart` 等待期间仍接新任务，查询失败时照常重启（`daemon/command.ts:139-144`） | 1. 查清 45 次重启的来源：`dutydeck restart`、`--force`、直接 `systemctl`，还是崩溃后自动拉起<br>2. 等待期间停止接新轮次，新消息留在 inbox，重启后再处理（参考 AgentConnect、Amp）<br>3. 查询运行状态失败时不重启，要求显式 `--force`<br>4. Tag 运行时的重启同样走这条路径 | `daemon/command.ts`、inbox、Tag 的 systemd unit | 直接减少「结果未确认」和「排队受阻」；改动小 |
+| **P0-6 范围增长快于使用量**：TS 文件一个月从 158 个到 737 个，同期主服务 121 个任务；9 月 fix 93 次、feat 68 次 | 冻结追平方案的外围范围：ASR/TTS、会议消费者、桌面托盘、远端设备、跨部署联邦、插件市场，以及 28 个执行器逐个验收，都改为「有需求证据再做」。执行器只保留 Claude Code、Codex、CCFlash/TraeX 三个的完整能力矩阵（见第 7 节） | 追平方案、开发排期 | 开发时间集中到本表列出的、用户已经碰到的问题上 |
 
-**P0-3 恢复主服务的记忆提取，并让停摆可见**
-- **做什么**：
-  - 先核对 `ae295ac` 部署后 `MEMORY_RECOVERY_REQUIRED` 是否消失。
-  - `/memory` 和 `doctor` 显示「最后一次成功提取时间」，连续 N 轮没有提取时标黄。
-- **收益**：记忆停了能被发现。这次停了 5 天，没有任何可见信号。
-- **验收**：新群任务结束后 3 轮内出现新记忆，或出现明确的跳过原因。
-- **工作量**：S–M。
+### P1：一个月内
 
-**P0-4 审批不能无限期堵住队列**
-- **做什么**：
-  - 权限卡和问题卡一样带截止时间，落库存 `expires_at`。到时先提醒，再超时就按策略拒绝或采纳推荐项，卡片改成「已过期」，并在原话题说明。依据：Mew、HAS、Zapier、卡片续跑方案。
-  - 飞书按钮回调按 event_id 去重，重复推送不产生第二次处理。依据：卡片续跑方案、Agent Fabric。
-  - 卡片过期或手机上不方便操作时，可以在 Web 完成同一个审批（AgentBox）。这一条依赖 P0-1 的鉴权。
-  - 挂起期间，同一会话后面排队的任务显示「被审批阻塞」，并给出取消审批的按钮。
-  - 群机器人默认使用 `approve-reads`，按风险分级减少只读操作的审批（Factory、Dust）。
-- **影响**：`lark/workflow-interactions.ts` 的权限卡分支、队列、卡片。
-- **收益**：消除 09-22 那种一个任务排 3 到 4 小时的情况。
-- **验收**：构造一个挂起的审批，确认到时后卡片变为已过期、后续任务继续执行；同一回调重复推送只处理一次；统计只读操作的审批数量下降。
-- **工作量**：M。
+| 问题 | 预期方案 | 影响范围 | 收益 |
+|---|---|---|---|
+| **P1-1 合入 master 就等于上线**：线上服务直接运行主检出的 `dist`；多 bot 运行时靠手工拷贝，部署指针已过期 | 1. 线上改为运行不可变的发布目录。把 Tag 现有的 `bot-runtimes` 拷贝方式产品化成 `dutydeck deploy`：build → 拷贝到带版本号的目录 → 用目标 node 试加载 → 排空 → 切换 → 健康检查 → 失败回滚（参考 Botmux、lark-agent-bridge）<br>2. 每天 1–2 个部署窗口，先部署 Tag，观察几小时后再部署主服务 | 部署流程、多 bot 运行时、并行 agent 的协作约定 | 别的 agent 合入不再触发线上重启；多 bot 运行时不再手工维护；坏版本自动回滚 |
+| **P1-2 被中断的任务只留下「结果未确认」**：12 个任务的原因码是 `PREVIOUS_RUNTIME_RESULT_UNKNOWN`，要用户自己判断 | 1. 被切断的轮次从 inbox 重投，prompt 附一段说明：会话恢复成功写「从停下处继续」，恢复失败写「之前的动作可能已经生效，先检查再重复任何外部副作用」（参考 AgentConnect）<br>2. 结果不确定的标「未知」，不标失败；自动重投最多 2 次（参考 Multica）<br>3. 可能已产生外部副作用的轮次标 `replay_unsafe`，交给人决定（参考 Mew） | inbox、投递账本、`lark/task-recovery.ts` | 用户不用自己判断任务做完没有，也不用手动重发 |
+| **P1-3 手机打不开卡片详情**：`webBaseUrl` 为空或是内网 IP，14 天相关告警 175 条 | 审批、问答、失败原因和结果摘要都在卡片里完成；Web 链接只在鉴权开启时显示；`setup` 问清手机能否访问 Web，不能就不显示「查看详情」 | 卡片渲染、`setup` | 手机上能完成全部操作，也不必为手机访问放开鉴权 |
+| **P1-4 验证留证一次没用过**：所有 bot 都没配 `verificationCommand`；README 第 259 行说会自动触发，代码只有按钮和 API 入口（`lark/coordinator.ts:3109`） | 1. 工作区第一次任务时，从 `package.json`、`Makefile`、`go.mod` 推断验证命令，用户一键确认<br>2. 本轮改了代码就自动验证；失败回灌成一轮返修，最多 2 轮<br>3. 验证工具本身出错记为失败、不回灌，避免无限重试（codex-plugin-cc #248 的反例）；「跳过」不算通过（参考 CodeRabbit）<br>4. 验证命令以 base 分支上的配置为准，被测改动改不了（参考 Kilo）<br>5. 结果卡分开显示「运行完成」和「验证通过」，改代码后没重新验证的标「验证已过期」；修正 README 的描述 | 验证模块、结果卡、README | 同类产品都没有的证据链真正用起来，直接回应「假完成」这类抱怨 |
+| **P1-5 CI 续作对内部仓库没用**：只支持 GitHub Actions（`session-automation.ts:41`），线上没有 GitHub token，CI 订阅 0 个 | 1. 没配置时 `/ci` 显示「未配置」和配置方法，不再显示为可用<br>2. 新增校验签名或 token、按 event-id 去重的 webhook 入口；事件转成普通任务回投到原会话，执行人取事件里的操作人。事件源优先接 EventHub 的 Codebase MR 和流水线事件（参考 EventHub、Agent Fabric、Augment）<br>3. 修复规则照内部 CI 自动修复方案：动手前和 push 前各核对一次 head SHA；最多 3 轮；同一错误出现 2 次即停；每轮最多 10 个文件、300 行；CI 日志当不可信输入；不合入、不 approve、不 force push<br>4. 失败卡上加「交给 Agent 修」（参考 Mew） | `session-automation.ts`、新增 webhook 入口、inbox、卡片 | 内部用户能用上 CI 闭环；不会对着过期代码修改，也不会在同一个错误上无限重试。EventHub 和 Codebase webhook 的接入细节 `unverified` |
+| **P1-6 花了多少钱看不到**：只有次数预算；用量事件已在 `packages/acp-client/src/index.ts:124` 产生，服务端没存 | 1. 先存下来并展示，按 bot、群、触发人和来源汇总。来源分四类：显式请求、主动介入、定时、后台判定与提取<br>2. 口径：token 取累计值，与上次求差防重复（参考 Symphony）；codex-acp 不报成本、usage 是本轮增量，按单价估算并标为估算；PTY 类 CLI 标为「无数据」<br>3. 再加每个 bot、每个群的月上限，到 75% 和 95% 提醒；超限只拒绝新任务，不打断在跑的（参考 Claude Tag、Rovo） | `acp-client` 之后的服务端存储、Web 控制台、派发前检查 | 多人共用一份订阅时能看清谁花了多少；第一步不需要新数据源 |
+| **P1-7 Tag 群里多是机器人在说话**：212 条观察消息 88% 来自 bot；37 次判定中 25 次在拦 bot 循环；6 天真正服务人 5 次 | 1. 先加规则：不在别人的话题里主动插话；有外部成员的群不主动发言；发送前 5 秒内有新消息就作废本次回复；10 分钟内不重复插话（参考 Glean、AxonTag）<br>2. 群主可以用一句话写参与规则，作为判定器输入，bot 回显生效的规则（参考 Adapt）<br>3. 选 1–2 个真实团队群试点：先 observe 一周，再 selective 一周。按[通用群协作方案](team-tag-foundation-plan.md)的验收场景统计误介入、漏记录和 👍/👎 比例；同时打开分层执行，和单 Agent 对比耗时、token 和验收结果 | `lark/readonly-decider.ts`、`group-participation.ts`、试点群 | 少打扰人；拿到真人数据后再决定 Tag 投入多少 |
+| **P1-8 取舍没有数据依据** | Web 首页放周指标：真人发起的任务数、无人工干预完成率、结果未确认率、审批等待中位数、首次回应时延、主动发言的 👍/👎 比例、有验证证据的完成比例（参考 Ramp 以「最终合并 PR」为核心指标） | Web 控制台、统计查询 | 本表各项改完有没有效果可以量出来 |
 
-### P1：两周内把发布做成用户无感
+### P2：P1 之后
 
-**P1-1 先排空再重启，然后改成部署窗口加不可变运行目录**
-- **做什么**：
-  - 第一步，改动最小：部署或重启前停止接新轮次，等在跑的轮次结束或超时；有任务在跑就推迟，doctor 显示推迟原因。依据：Multica、Amp runner、AgentConnect `shutdownDrainMs`。
-  - 第二步：线上服务改为运行不可变的发布目录，合入 master 不再等于上线。复用 Tag 已在用的 `bot-runtimes` 拷贝方式，把它产品化成 `dutydeck deploy`，依次执行：build → 拷贝到带版本号的目录 → 用目标 node 试加载 → 排空 → 切换 → 健康检查 → 失败回滚。依据：Botmux 候选版本试运行、lark-agent-bridge 构建成功才重启。
-  - 每天固定 1 到 2 个部署窗口。先部署 Tag（4311），观察几小时后再部署主服务。
-- **影响**：部署流程、多 bot 运行时，以及并行 agent 的协作约定。
-- **收益**：14 天 45 次重启造成的「结果未确认」和「排队受阻」大部分可以避免；多 bot 运行时不再依赖手工拷贝。
-- **验收**：重启次数和 `reconcile_required` 数量按周下降；有任务在跑时部署会推迟；部署失败能自动回到上一版本。
-- **工作量**：第一步 S，第二步 M。
+| 问题 | 预期方案 | 影响范围 | 收益 |
+|---|---|---|---|
+| **P2-1 所有人都借用部署者的身份**：状态里显式声明（`coordinator.ts:265`）；Mew 和 Botmux 群里身份类问题排第一（09-18 统计为 71 条和 22 条） | 1. 入队时冻结触发人，每轮在 prompt 顶部注入当前 actor；记录谁触发、谁批准、以谁的身份执行（参考 Orchestra、Glean）<br>2. git 用 credential helper 按触发人现换短期 Codebase token，不写盘；`lark-cli`、`bytedcli` 按人隔离凭据目录，wrapper 清理敏感环境变量，冻结 PATH（参考 Orchestra、Mew）<br>3. 身份确认不了就拒绝并在卡片里说明，不回退为部署者身份；触发人没授权时先发授权卡（参考 Agent Fabric、AAT、Moveworks）<br>4. 群共享记忆按触发人能看到的范围过滤（参考 Asana） | 入队、执行环境、git 凭据、审批、记忆检索。需要先写设计文档，并用真实 `AcpxAdapter` 做回归测试 | 群里别人 @ bot 时不再以部署者的权限做事；每个操作都能追到具体的人 |
+| **P2-2 表情不能控制 bot，群里查状态会刷屏**：入站表情登记为 no-op（`listener.ts:269-273`） | 1. 👎 静音该话题，并放弃还没发出的回复；👀 在模型处理之前就加上（参考 Claude Tag、Devin）<br>2. bot 的状态表情固定一套：处理中、有建议、已公开、被标为没用（参考 Glean）<br>3. `/status`、`/tasks` 和把握不大的回复草稿，改用飞书「仅特定人可见」卡片（`/open-apis/ephemeral/v1/send`），触发人点「发到群里」才公开（参考 Claude Tag、Glean）。该接口能否用于话题内：`unverified` | `listener.ts`、`reaction-records.ts`、卡片发送 | 一个表情就能让 bot 停下；查状态不打扰群里其他人 |
+| **P2-3 不能在任务运行中插话**：`/steer` 只把排队中的消息提前（`lark/commands.ts:127`） | 1. 在 `patches/acpx@0.13.0.patch` 里加扩展请求透传，对声明了 `_meta.steering.supported` 的 agent 调用 `_session/steering`<br>2. 投递账本记下返回的 `injected`、`startedNewTurn` 或 `promptRequired`<br>3. 发消息时可选插话、排队或打断；排队的消息可改为立即插话，或删除（参考 Amp、Replit、Roomote）<br>4. 不支持插话的 agent 保持排队；PTY 类 CLI 只在屏幕稳定 2 秒后写入（参考 Coder AgentAPI） | acpx patch、`packages/acp-client`、`/steer`、投递账本。用真实 `AcpxAdapter` 做回归测试 | 长任务跑偏时不用打断重来。Claude Code 在下一个安全边界并入，Codex 几乎立即生效；有待处理的权限卡时 Claude 会把插话排到后面 |
+| **P2-4 用错的记忆发现不了**：在 `memory-view.ts` 和 `card-renderer.ts` 里没搜到按任务展示已用记忆的字段（`unverified`） | 结果卡或 Web 任务页列出本次用到和新写入的记忆，每条可一键删除（参考 Asana）；群里可配置「不许记」规则（参考 Lindy）；bot 自己的输出不作记忆来源，写入共享池前扫描注入指令和凭证（参考 Dust、AgentBox） | 记忆流水线、`lark/memory-view.ts`、结果卡 | 群共享池里的错误记忆能被发现和删掉 |
+| **P2-5 若干已知小问题** | 1. Botmux 的 8 项修复（见 3.2），优先做「后台子 agent 未回报时不算完成」。Dutydeck 现在画面空闲就判完成（`pty-driver/src/driver.ts:777`）<br>2. 飞书任务认领从轮询改为订阅 `task.task.update_user_access_v2`；先验证指派给 bot 时会不会触发，不触发就保留轮询 | PTY 驱动、飞书入口、`lark/task-agent.ts` | 减少误判完成；去掉定时轮询 |
+| **P2-6 `coordinator.ts` 反复返工**：4387 行，9 月被 fix 25 次；卡片与结果投递被 fix 29 次 | 按入站唤醒、任务派发、卡片生命周期、恢复对账拆成四块；卡片渲染用真实飞书 payload 做快照测试 | `lark/coordinator.ts`、卡片测试 | 改一处不再牵动整个文件，卡片类回归能在测试里发现 |
+| **P2-7 文档状态不清**：`docs/` 下已有 45 份 Markdown 文档，部分已被后续实现覆盖，例如团队 Tag 差距一文的第 1 节 | 新建 `docs/README.md`，给每份标注状态：现行、已落地或历史 | `docs/` | 人和 agent 不再照着过时方案做 |
 
-**P1-2 查清重启时的结果未知，被切断的轮次如实重投**
-- **做什么**：
-  - 调查：核对 09-22T16:22Z 和 09-25T03:04Z 两次重启，是否走了等待逻辑、是否用了 `--force`、是否被直接 `systemctl restart`。
-  - 重投：被切断的轮次从 inbox 重投，prompt 附一段说明。会话恢复成功时写「从停下处继续」；恢复失败时写「之前的动作可能已经生效，先检查再重复任何外部副作用」。依据：AgentConnect。
-  - 状态：结果不确定的标「未知」，不标失败；自动重投最多 2 次（Multica）。可能已产生外部副作用的轮次标 `replay_unsafe`，交给人决定（Mew）。
-- **影响**：inbox、投递账本、`lark/task-recovery.ts`。
-- **收益**：用户不用自己判断「这个任务到底做完没有」，也不用手动重发。
-- **验收**：模拟一次强制重启，被切断的任务要么自动重投并带上说明，要么在卡片里明确提示需要人确认。
-- **工作量**：调查 S，重投 M。
-
-**P1-3 卡片内闭环优先，少依赖 Web 链接**
-- **做什么**：
-  - 审批、问答、失败原因和结果摘要都在卡片里完成。
-  - Web 链接只作补充，并且只在鉴权开启时显示。
-  - `setup` 明确询问手机能否访问 Web；答否就不显示「查看详情」。
-- **收益**：这 175 条告警对应的用户问题从根上消失，也不需要为了手机访问而打开鉴权缺口。
-- **工作量**：M。
-
-### P2：一个月内让已有优势闭环
-
-**P2-1 验证留证自动化**
-- **做什么**：
-  - 工作区第一次任务时，从 `package.json`、`Makefile`、`go.mod` 推断候选验证命令，让用户一键确认保存。
-  - 本轮改了代码（diff 非空）时，结束后自动运行验证。
-  - 验证失败回灌成一轮返修，计入 2 轮上限。验证工具本身出错时记为失败、不回灌，避免无限重试（codex-plugin-cc #248 的反例）。「跳过」不算通过（CodeRabbit）。
-  - 验证命令以 base 分支上的配置为准，被测改动改不了它（Kilo）。
-  - 结果卡把「运行完成」和「验证通过」分开显示；最后一次改代码之后没有重新验证的，标「验证已过期」。
-  - 同步修正 README 第 259 行，使描述和实际行为一致。
-- **收益**：用上同类产品都没有的证据链，直接回应「假完成」这类抱怨。
-- **验收**：配置了验证命令的工作区中，自动验证覆盖率高于 90%（目标值）；构造一次验证工具报错，确认不会循环重试。
-- **工作量**：M。
-
-**P2-2 CI 续作接入 Codebase / BITS**
-- **做什么**：
-  - 没配置时，`/ci` 标为「未配置」并给出配置方法，不再显示为可用。
-  - 入口：新增一个校验签名或 token、按 event-id 去重的 webhook。事件转成普通任务，回投到订阅它的会话，执行人取事件里的操作人。事件源优先接 EventHub 的 Codebase MR / 流水线事件，因为它已经在给 Botmux 开发机 agent 投递。依据：EventHub、Agent Fabric DMA、Augment `subscribe-event`、Orchestra。
-  - 修复规则照内部 CI 自动修复方案：
-    - 动手前和 push 前各校验一次 head SHA。
-    - 最多 3 轮（Stripe 用 2 轮）；同一个错误指纹出现 2 次就停。
-    - 每轮最多 10 个文件、300 行。
-    - CI 日志当不可信输入。
-    - 不合入、不 approve、不 force push。
-  - 参照 Mew 的 Checks→Fix，在失败卡上给一个「交给 Agent 修」。
-- **收益**：内部用户能真正用上 CI 闭环。现在的 GitHub 实现对内部仓库没有用。
-- **验收**：在一个测试仓库上制造一次 CI 失败，事件进入原会话，修复不超过轮次上限，head 变化时停止并说明。
-- **工作量**：M–L。EventHub 和 Codebase webhook 的接入细节 `unverified`。
-
-**P2-3 Tag 先降噪，再用真人群试点**
-- **做什么**：
-  - 试点前先加规则：
-    - 不在别人的话题里主动插话。
-    - 有外部成员的群不主动发言。
-    - 发送前 5 秒内有新消息就作废本次回复，10 分钟内不重复插话。
-    - 依据：Glean、AxonTag。
-  - 判定为「该回」但把握不大时，先用仅本人可见卡片把草稿给触发人，触发人点「发到群里」才公开（Glean）。依赖 P3-3 的仅本人可见卡片。
-  - 允许群主用一句话写参与规则，作为判定器的输入，bot 回显生效的规则（Adapt）。对应 `lark/readonly-decider.ts` 的判定输入和 `group-participation.ts` 的三档配置。
-  - 试点：选 1 到 2 个真实团队群，先 observe 一周，再开 selective 一周。按[通用群协作方案](team-tag-foundation-plan.md)里的通用验收场景，统计误介入、漏记录、主动发言被 👍 或 👎 的比例。
-  - 分层执行在试点群里打开，和单 Agent 用同一批任务对比耗时、token 和验收结果（该方案已写明对比口径）。
-- **收益**：拿到真人数据后再决定 Tag 的投入。Charlie 的复盘说明团队共享使用少见，需要先验证需求。
-- **工作量**：规则 S–M，运营 S，统计面板 M。
-
-**P2-4 定义周指标并放到 Web 首页**
-- **做什么**：展示以下指标：
-  - 真人发起的任务数。
-  - 无人工干预完成率。
-  - 结果未确认率。
-  - 审批等待中位数。
-  - 首次回应时延。
-  - 主动发言的 👍 / 👎 比例。
-  - 有验证证据的完成比例。
-- **收益**：取舍有依据。Ramp 用「会话最终产出合并 PR」作为核心指标。
-- **工作量**：M。
-
-**P2-5 记忆用了哪些，用户能看到、能删**
-- **做什么**：
-  - 结果卡或 Web 任务页列出本次注入和新写入的记忆，每条可以一键删除（Asana）。
-  - 群里可以配置「不许记」的规则（Lindy）。
-  - bot 自己的输出不作为记忆来源（Dust）；写入共享池前扫描注入指令和凭证（AgentBox ContentGuard）。
-- **现状**：在 `lark/memory-view.ts` 和 `lark/card-renderer.ts` 里没搜到按任务展示已用记忆的字段，`unverified`。
-- **收益**：群共享池里的错误记忆能被发现和纠正。与 P0-3 配套，一个解决「停了没人知道」，一个解决「错了没人知道」。
-- **工作量**：M。
-
-### P3：只补四项缺口
-
-**P3-1 成本和 token 记账**
-- **做什么**：
-  - 第一步只做存储和汇总：`status/usage` 事件已经在 `packages/acp-client/src/index.ts:124` 产生。
-  - 口径：
-    - 上下文和成本取最新值；token 取累计值，与上次求差，防止重复计数（Symphony）。
-    - codex-acp 报的是本轮增量且不报成本，单独处理，按单价估算并标为估算。
-    - PTY 类 CLI 另行解析，或标为「无数据」。
-  - 按 bot、群、触发人、来源聚合，来源分四类：显式请求、主动介入、定时、后台判定与提取。同时汇总到 DAG 和 PMO/Leader/Worker 这棵树上。
-  - 每个 bot、每个群可设月上限，到 75% 和 95% 提醒（Claude Tag；Rovo 用 80% 和 100%）。超限只拒绝新任务，不中断正在跑的，并在话题里说明是哪种限制。派发前检查预算（Compozy）。
-  - 支持按事件导出 CSV（Rovo）。
-- **依据**：Claude Tag 的四类拆分，Botmux 的 `budget-tracker`。09-18 的文档把这项列为「再做」第一项，至今未开工。
-- **工作量**：存储和展示 S–M，上限 M。
-
-**P3-2 按触发人身份执行**
-- **做什么**：
-  - 第一步：任务入队时把触发人 union_id 冻结在任务上，每轮在 prompt 顶部注入当前 actor；每次运行记三件事：谁触发、谁批准、以谁的身份执行（Orchestra、Glean）。
-  - 第二步：git 用 credential helper 按触发人现换短期 Codebase token，不写盘；token 用 PreToolUse / SessionStart hook 续期（Orchestra）。`lark-cli`、`bytedcli` 按人隔离凭据目录：每人一套 HOME/XDG 和 profile，wrapper 清理敏感环境变量，冻结 PATH（Mew M2）。
-  - 第三步：身份解析、映射、授权任一步失败就拒绝，并在卡片里说明原因，不回退为部署者身份（Orchestra、Agent Fabric、AAT、Team Bot）。触发人还没授权时，先发授权卡，授权后接着原请求执行（Moveworks）。
-  - 群共享记忆和团队上下文检索，按触发人能看到的范围过滤（Asana）。
-- **依据**：Mew 和 Botmux 群里身份类问题排第一，09-18 的调研统计为 71 条和 22 条。Mew 踩过的坑包括缓存「拒绝」、systemd PATH 绕过 wrapper、长上下文里沿用上一个用户的身份。
-- **工作量**：L。先写设计文档，并按仓库约定用真实 `AcpxAdapter` 做回归测试。
-
-**P3-3 表情和仅本人可见的回执**
-- **做什么**：
-  - 👎 静音该话题，并放弃还没发出的回复。
-  - 👀 在模型处理之前就加上。
-  - bot 写的状态表情固定一套：处理中、有建议、已公开、被标为没用（Glean）。
-  - `/status`、`/tasks` 和 P2-3 的草稿，在群里改用飞书的[仅特定人可见消息卡片](https://open.feishu.cn/document/server-docs/im-v1/message-card/send-message-cards-that-are-only-visible-to-certain-people?lang=zh-CN)（`/open-apis/ephemeral/v1/send`）。所需权限以及该接口能否用于话题内：`unverified`。
-- **影响**：`listener.ts:269-273` 目前把表情事件登记为 no-op；`lark/reaction-records.ts`。
-- **工作量**：S–M。
-
-**P3-4 运行中插话**
-- **做什么**：
-  - 在 `patches/acpx@0.13.0.patch` 里加一个扩展请求透传。对声明了 `_meta.steering.supported` 的 agent，`/steer` 直接调用 `_session/steering`，把消息送进正在执行的轮次。
-  - 投递账本记下返回值 `injected`、`startedNewTurn` 或 `promptRequired`。
-  - 用户发消息时可选插话、排队或打断；排队中的消息可以改为立即插话，或删除。依据：Amp、Replit、Roomote。
-  - 不支持插话的 agent 保留现在的排队行为。PTY 类 CLI 只在屏幕稳定时写入（AgentAPI 用 2 秒）。
-- **影响**：acpx patch、`packages/acp-client`、`/steer` 命令、inbox 投递账本。按仓库约定用真实 `AcpxAdapter` 做回归测试。
-- **收益**：长任务跑偏时不用打断重来，这是追平方案里一直标为「协议不支持」的一项。
-- **注意**：
-  - Claude Code 要等到下一个安全边界才并入插话，Codex 几乎立即生效。
-  - 有待处理的权限卡时，claude-agent-acp 会把插话排到后面。
-- **工作量**：M。
-
-**P3-5 打包处理小修**
-- Botmux 的 8 项，见 3.2，优先做后台子 agent 的完成判定。
-- 飞书任务认领从轮询改为订阅 `task.task.update_user_access_v2` 事件。先验证指派给 bot 的任务会不会触发它，不触发就保留轮询。
-- **工作量**：S–M。
-
-### P4：做减法
-
-- **冻结追平方案的外围范围。** ASR/TTS、会议消费者、桌面托盘、远端设备、跨部署联邦、插件市场，以及 28 个执行器逐个验收，都标为「有需求证据再做」。执行器只保留 Claude Code、Codex、CCFlash/TraeX 三个的完整能力矩阵。
-- **拆分 `coordinator.ts`。** 按入站唤醒、任务派发、卡片生命周期、恢复对账拆成四块。卡片渲染与投递 9 月被 fix 29 次，用真实飞书 payload 做快照测试来收口。
-- **给文档建索引。** 本文之前 `docs/` 下已有 45 份 Markdown 文档，其中一部分已被后续实现覆盖，例如团队 Tag 差距一文的第 1 节。新建 `docs/README.md`，给每份标注状态：现行、已落地或历史。
-- **有前提再做**：
-  - Leader 验收的问题跨轮次保存，每条以 Fixed、Skipped 或 Reported 收口（PR-Agent）；可选换一家模型来审（Greptile）。前提是 P2-3 试点证明分层执行有人用。
-  - AI 审查结论能否放行，交给仓库的审批规则决定（LBP CR）。前提是 P2-2 的 CI 接入跑通。
-
-## 6. 明确不建议做
+## 6. 暂不做或不建议做
 
 - **不做托管云沙箱。** 本地优先是定位，外部头部产品也在做「执行在客户机器」。
-- **暂不把 ACP 连接移到服务进程外。** acpx 0.17 的 shared runtime 能在重启后接回正在执行的轮次，但这种模式拒绝插话和逐轮权限回调，和 P0-4、P3-4 冲突，升级 acpx 也要重新验证现有 patch。先做 P1-1 的排空和 P1-2 的重投；等 acpx 在 shared runtime 里支持扩展请求透传后再评估。
+- **暂不把 ACP 连接移到服务进程外。**
+  - acpx 0.17 的 shared runtime 能在重启后接回正在执行的轮次，但这种模式拒绝插话和逐轮权限回调，和 P0-4、P2-3 冲突。
+  - 升级 acpx 还要重新验证现有 patch。
+  - 先做 P0-5 和 P1-2；等 acpx 在 shared runtime 里支持扩展请求透传后再评估。
 - **不在 Tag 群里放多个 bot 自由对话。** Botmux 09-15 的 P0 事故和 Mew 的双 bot 循环都说明这条路风险高；Dutydeck 线上 25 次判定都花在拦截 bot 循环上。
 - **不追 Botmux 全部 32 个执行器**，也不照搬它的 22 个 Dashboard 页面。
 - **不在平台里造排班或升级引擎**，沿用 09-18 的结论。
+- **有前提再做**：
+  - Leader 验收的问题跨轮次保存，每条以 Fixed、Skipped 或 Reported 收口（参考 PR-Agent），可选换一家模型来审（参考 Greptile）。前提是 P1-7 试点证明分层执行有人用。
+  - AI 审查结论能否放行，交给仓库的审批规则决定（参考 LBP CR）。前提是 P1-5 的 CI 接入跑通。
 
 ## 7. 需要你决定的事
 
 | 问题 | 选项和后果 | 不答时的默认 |
 |---|---|---|
-| 主服务怎么收口 | A：打开鉴权。浏览器和 API 需要 token，飞书入口不受影响；之后 P0-4 的 Web 审批也能用。B：只监听本机。别的机器只能通过 ssh 隧道访问 Web | A。改的是线上配置，需要你确认后再执行 |
-| 是否改为部署窗口，并先部署 Tag | 是：合入后不立即上线，每天最多 1 到 2 次重启。否：保持现状 | 是 |
-| 是否冻结追平方案的外围范围 | 是：ASR/TTS、会议、桌面、远端设备、联邦、插件市场等暂停。否：继续按 P0–P10 推进 | 是 |
+| 主服务怎么收口（P0-1） | A：打开鉴权。浏览器和 API 需要 token，飞书入口不受影响。B：只监听本机。别的机器只能通过 ssh 隧道访问 Web | A。改的是线上配置，需要你确认后再执行 |
+| 是否冻结追平方案的外围范围（P0-6） | 是：ASR/TTS、会议、桌面、远端设备、联邦、插件市场等暂停。否：继续按追平方案的 P0–P10 推进 | 是 |
+| 是否改为部署窗口，并先部署 Tag（P1-1） | 是：合入后不立即上线，每天最多 1 到 2 次重启。否：保持现状 | 是 |
 
 ## 附录：来源
 
@@ -622,14 +462,12 @@ Roo Code Cloud 于 05-15 关停，由 Roomote 接替；Continue 被 Cursor 收�
 - [Worktree](https://bytedance.larkoffice.com/wiki/Momuwv2G7iVPuGkKqOZcS3eun8d)
 - [FAQ](https://bytedance.larkoffice.com/wiki/FxEVwPnAoi40HUkK5HVcWs30njd)
 
-**其他内部产品（第一批）**
+**字节内部其他产品**
 - [amux](https://bytedance.larkoffice.com/wiki/JCNtw1oWuiCdtckYdUIcmX2onDc)
 - [HAS](https://bytedance.larkoffice.com/wiki/J3BDw1t5riJy8ek3P2ecv8zHn1e)
 - [Team Bot 开发机指南](https://bytedance.larkoffice.com/docx/H2TwdRg22oUYiLxpgZHcxHMGnDg)
 - [字节的 Managed Agents 平台们](https://bytedance.larkoffice.com/docx/Hnl3dG6xEoWR2DxpkLNcz3GQnub)
 - [Wailmer](https://bytedance.larkoffice.com/wiki/IbB8wdSyTiuFo0kPjuicYzOunne)
-
-**字节内部（第二批）**
 - Orchestra：[主文档](https://bytedance.larkoffice.com/wiki/HBfQwkjtyiX4cYkZErQcP9xvnne)、[Orchestra 在飞书](https://bytedance.larkoffice.com/wiki/MiOVwLCSIiQ4Lck17wMcRu0AnRc)
 - Agent Fabric：[主文档](https://bytedance.larkoffice.com/docx/IjPRdFCsloLAnTxkPAamsHrQyzg)、[开发者指南](https://bytedance.larkoffice.com/docx/PzjSdS8JNopEC0xyn6Dmdigiyye)、[DMA](https://bytedance.larkoffice.com/docx/RFwRdtRzGop8y6xpBhVm6fFyyXf)
 - AgentBox：[用户文档](https://bytedance.larkoffice.com/wiki/RJccw8lXiiVjJSk23o6cEsEynod)、[Review CI](https://bytedance.larkoffice.com/wiki/XsLawOlVeinBRHkCcDSct8Ignxf)、[智能工作流](https://bytedance.larkoffice.com/wiki/HzS2weZ2yipY9Lk8cvGcGS3cnT6)
@@ -660,6 +498,10 @@ Roo Code Cloud 于 05-15 关停，由 Roomote 接替；Continue 被 Cursor 收�
 - [Manus Slack](https://help.manus.im/en/articles/14431752-chatting-with-manus-agent-on-slack-channels-dms-and-file-delivery)
 
 **海外团队协作 agent**
+- [Devin Slack 礼仪](https://devin.ai/blog/devins-slack-etiquette)
+- [Linear Agent Interaction](https://linear.app/developers/agent-interaction)
+- [Factory](https://docs.factory.ai/)
+- [Charlie 复盘](https://charlielabs.ai/blog/charlie-2025-a-recap-and-whats-next/)
 - Glean：[Agent identity](https://docs.glean.com/administration/agent-identity/overview)、[Publishing to Slack](https://docs.glean.com/agents/concepts/publish-slack)、[Configure bot responses](https://docs.glean.com/administration/platform/embedded-integrations/slackbot/admin-guide/configure-bot-responses)
 - Dust：[Slack 排障](https://docs.dust.tt/docs/slack-troubleshooting)、[PR #32154](https://github.com/dust-tt/dust/pull/32154)、[Webhooks](https://docs.dust.tt/docs/webhooks)
 - [Adapt Proactive agent mode](https://adapt.com/changelog/proactive-agent-slack)
@@ -671,7 +513,16 @@ Roo Code Cloud 于 05-15 关停，由 Roomote 接替；Continue 被 Cursor 收�
 - [Moveworks Activities](https://docs.moveworks.com/agent-studio/conversation-process/activities)
 - [Slack Developing agents](https://docs.slack.dev/ai/developing-agents/)
 
-**外部 coding agent 与编排**
+**coding agent 与编排工具**
+- [OpenTag](https://github.com/amplifthq/opentag)
+- [OpenClaw 队列](https://docs.openclaw.ai/concepts/queue.md)
+- [claude-threads](https://github.com/anneschuth/claude-threads)
+- [cc-connect](https://github.com/chenhg5/cc-connect)
+- [Copilot 风险与缓解](https://docs.github.com/en/copilot/concepts/agents/coding-agent/risks-and-mitigations)
+- [Cursor Slack](https://cursor.com/docs/integrations/slack)
+- [Claude Routines](https://code.claude.com/docs/en/routines)
+- [Ramp Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent)
+- [Stripe Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)
 - [AgentConnect](https://github.com/agentconnect-md/agentconnect)
 - [Multica](https://github.com/multica-ai/multica)
 - [Compozy](https://github.com/compozy/compozy)
@@ -694,21 +545,6 @@ Roo Code Cloud 于 05-15 关停，由 Roomote 接替；Continue 被 Cursor 收�
 - [claude-agent-acp](https://github.com/agentclientprotocol/claude-agent-acp/blob/main/src/acp-agent.ts)
 - [codex-acp](https://github.com/agentclientprotocol/codex-acp/blob/main/src/CodexAcpServer.ts)
 - [acpx shared sessions](https://github.com/openclaw/acpx/blob/main/docs/shared-sessions.md)
-
-**第一批外部产品**
-- [Devin Slack 礼仪](https://devin.ai/blog/devins-slack-etiquette)
-- [OpenTag](https://github.com/amplifthq/opentag)
-- [OpenClaw 队列](https://docs.openclaw.ai/concepts/queue.md)
-- [claude-threads](https://github.com/anneschuth/claude-threads)
-- [cc-connect](https://github.com/chenhg5/cc-connect)
-- [Copilot 风险与缓解](https://docs.github.com/en/copilot/concepts/agents/coding-agent/risks-and-mitigations)
-- [Cursor Slack](https://cursor.com/docs/integrations/slack)
-- [Linear Agent Interaction](https://linear.app/developers/agent-interaction)
-- [Claude Routines](https://code.claude.com/docs/en/routines)
-- [Factory](https://docs.factory.ai/)
-- [Ramp Inspect](https://builders.ramp.com/post/why-we-built-our-background-agent)
-- [Stripe Minions](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)
-- [Charlie 复盘](https://charlielabs.ai/blog/charlie-2025-a-recap-and-whats-next/)
 
 **用户抱怨**
 - [.NET 团队 Copilot 十个月复盘](https://devblogs.microsoft.com/dotnet/ten-months-with-cca-in-dotnet-runtime/)
