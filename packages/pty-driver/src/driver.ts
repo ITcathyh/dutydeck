@@ -1041,7 +1041,9 @@ export class PtyCliDriver implements AgentDriver {
       if (this.activeSubmission !== submission) {
         throw new Error('PtyCliDriver: submission is no longer active');
       }
-      return write();
+      const result = write();
+      if (result === false) throw new Error('PtyCliDriver: backend rejected input; submission was not confirmed');
+      return result;
     };
     const proxy: PtyLike = {
       write: data => guarded(() => target.write(data)),

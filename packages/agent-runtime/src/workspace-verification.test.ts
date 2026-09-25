@@ -233,6 +233,43 @@ describe('managed Session workspaces', () => {
 });
 
 describe('user-command verification evidence', () => {
+  it('reaps redirected background commands before accepting verification evidence', async () => {
+    const source = repository(); const h = open(':memory:'); await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: agent.id, cwd: source });
+    const result = await h.runtime.runVerification(session.id, { command: '(sleep 1; echo escaped >> tracked.txt) >/dev/null 2>&1 &' });
+    expect(result).toMatchObject({ status: 'passed', stale: false });
+    await h.runtime.stop(session.id);
+    await new Promise(resolve => setTimeout(resolve, 1_100));
+    expect(readFileSync(join(source, 'tracked.txt'), 'utf8')).toBe('baseline\n');
+  });
+
+  it('retains a running record and blocks queued work when process-group cleanup fails', async () => {
+    const source = repository(); const sent: string[] = [];
+    const h = open(':memory:', {}, sent); await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: agent.id, cwd: source });
+    const kill = process.kill.bind(process);
+    const denied = vi.spyOn(process, 'kill').mockImplementation((pid, signal) => {
+      if (pid < 0 && signal === 'SIGKILL') throw Object.assign(new Error('fixture cleanup denied'), { code: 'EPERM' });
+      return kill(pid, signal);
+    });
+    try {
+      await expect(h.runtime.runVerification(session.id, { command: 'sleep 30 >/dev/null 2>&1 &' })).rejects.toMatchObject({ code: 'VERIFICATION_RECOVERY_BLOCKED' });
+      expect(await h.runtime.getVerifications(session.id)).toEqual([expect.objectContaining({ status: 'running', error: 'Verification process group did not exit; Session remains blocked' })]);
+      const task = await h.runtime.dispatch(session.id, 'must stay queued');
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(sent).toEqual([]);
+      expect((await h.runtime.getTasks(session.id)).find(item => item.id === task.id)?.status).toBe('queued');
+      await expect(h.runtime.runVerification(session.id, { command: 'true' })).rejects.toMatchObject({ code: 'VERIFICATION_RECOVERY_BLOCKED' });
+    } finally {
+      denied.mockRestore();
+      const rows = await h.repos.config.list!(`runtime_verification:${session.id}:`);
+      for (const row of rows) {
+        const group = JSON.parse(row.value).processIdentity?.processGroupId;
+        if (group) { try { kill(-group, 'SIGKILL'); } catch { /* Already stopped. */ } }
+      }
+    }
+  }, 10_000);
+
   it('records success, failure, timeout, truncation, task linkage, and later staleness', async () => {
     const source = repository();
     const h = open(':memory:');

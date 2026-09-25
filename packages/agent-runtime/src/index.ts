@@ -6,7 +6,7 @@ import { AcpxAdapter, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
-import type { PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskRequestV1 } from '@dutydeck/shared';
+import type { PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskExecutionProjection, TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { PersistentEventPublisher, type SubscribeOptions, type EventListener } from './persistent-event-publisher.js';
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
@@ -227,7 +227,7 @@ export class DutydeckRuntime {
   private wake<T extends CommitResult>(result: T): T { this.publisher.wake(result.session.id); return result; }
   private fence(session: Session): SessionFence { return { sessionId: session.id, runId: session.runId }; }
   private attemptFence(ref: AttemptRef & SessionFence): AttemptFence {
-    const attempt = this.repos.execution.getTaskExecution(ref.taskId)?.attempts.find(item => item.attemptId === ref.attemptId);
+    const attempt = this.repos.execution.getAttempt(ref);
     if (!attempt || attempt.runId !== ref.runId) throw new RuntimeError('ATTEMPT_NOT_FOUND', 'The captured execution attempt no longer exists', 409);
     return { sessionId: ref.sessionId, runId: ref.runId, taskId: ref.taskId, attemptId: ref.attemptId, expectedRevision: attempt.revision };
   }
@@ -961,19 +961,28 @@ export class DutydeckRuntime {
   async getTaskRecovery(id: string, taskId: string) {
     const projection = this.repos.execution.getTaskExecution(taskId);
     if (!projection || projection.task.sessionId !== id) throw new RuntimeError('TASK_NOT_FOUND', 'Task not found in this session', 404);
+    const active = this.repos.execution.getUnresolvedTasks(id).find(task => task.id !== taskId);
+    return this.taskRecovery(id, projection, active, this.localResources.reusableIds(id));
+  }
+
+  /** One consistent traversal for callers checking every task in a session. */
+  async getSessionTaskRecovery(id: string) {
+    const projections = this.repos.execution.getSessionExecutions(id);
     const reusable = this.localResources.reusableIds(id);
+    const unresolved = projections.filter(value => value.attempts.some(attempt => ['preparing', 'active', 'reconcile_required', 'legacy_unresolved'].includes(attempt.state))).map(value => value.task);
+    return projections.map(projection => ({ taskId: projection.task.id,
+      ...this.taskRecovery(id, projection, unresolved[0]?.id === projection.task.id ? unresolved[1] : unresolved[0], reusable) }));
+  }
+
+  private taskRecovery(id: string, projection: TaskExecutionProjection, active: { id: string; status: string } | undefined, reusable: Set<string>) {
     const blockers = projection.blockers.filter(block => !(block.code === 'DRIVER_RESOURCE_UNSAFE' && block.resourceId && reusable.has(block.resourceId)));
-    const tasks = await this.getTasks(id);
-    const unresolved = (taskId: string) => this.repos.execution.getTaskExecution(taskId)?.attempts.some(attempt => ['preparing', 'active', 'reconcile_required', 'legacy_unresolved'].includes(attempt.state));
-    const active = tasks.find(task => task.id !== taskId && unresolved(task.id));
     if (active && active.status !== 'running') blockers.push({ code: 'PREVIOUS_RESULT_UNKNOWN', sessionId: id });
-    if (projection.task.status === 'queued' && this.queueBlocked.has(id)) {
-      blockers.push({ code: 'QUEUE_START_CHECK_FAILED', sessionId: id });
-    }
+    if (projection.task.status === 'queued' && this.queueBlocked.has(id)) blockers.push({ code: 'QUEUE_START_CHECK_FAILED', sessionId: id });
     return { status: projection.task.status, resolvedUnknown: projection.currentAttempt?.state === 'settled' && projection.currentAttempt.outcome === 'unknown', blockers: [...new Set(blockers.map(block => block.code))].map(code => ({ code })),
       ...(projection.currentAttempt?.state === 'settled' && projection.currentAttempt.outcome === 'completed' && projection.currentAttempt.settlement?.kind === 'manual' && projection.currentAttempt.settlement.verifiedOutput ? { verifiedOutput: projection.currentAttempt.settlement.verifiedOutput } : {}),
       ...(active ? { activeTaskId: active.id } : {}) };
   }
+
 
 
   private requireRecoveryOwner(actor: ExecutionActor) {
@@ -1167,6 +1176,9 @@ export class DutydeckRuntime {
         id, session.cwd, input, actorId, eligibleTasks.at(-1)?.id,
         () => this.mutations.run(token, () => this.authorize(id, actorId))
       ));
+    } catch (error) {
+      if (error instanceof RuntimeError && error.code === 'VERIFICATION_RECOVERY_BLOCKED') this.blockedVerificationSessions.set(id, error.message);
+      throw error;
     } finally {
       if (this.verificationDeferredTasks.get(id) === deferredTasks) {
         this.verifyingSessions.delete(id); this.verificationDeferredTasks.delete(id);
@@ -2240,7 +2252,7 @@ export class DutydeckRuntime {
       await this.verifications.stopSession(id);
       await this.mutations.write(id, async () => {
         if (ref) {
-          const attempt = this.repos.execution.getTaskExecution(ref.taskId)?.attempts.find(item => item.attemptId === ref.attemptId);
+          const attempt = this.repos.execution.getAttempt(ref);
           if (attempt && !['settled', 'suspended'].includes(attempt.state)) {
             if (attempt.submissionState === 'not_submitted') {
               if (shutdown) this.wake(this.bound().suspendUnsubmitted(this.attemptFence(ref)));

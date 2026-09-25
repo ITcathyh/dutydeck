@@ -570,7 +570,10 @@ export const migrations: Migration[] = [
   },
   // CI webhook 的 event-id 去重和任务绑定是短期记录：单独建表，过期或任务结束即删，不写进只增不删的 configs。
   { version: 26, name: 'ci_webhook_short_lived_records', up: createCiWebhookSchema },
-  { version: 27, name: 'usage_ledger', up: createUsageLedgerSchema }
+  { version: 27, name: 'usage_ledger', up: createUsageLedgerSchema },
+  { version: 28, name: 'execution_history_indexes', up(db) {
+    db.exec('CREATE INDEX task_attempts_session_state ON task_attempts(session_id,state,task_id); CREATE INDEX task_attempts_session_order ON task_attempts(session_id,number,id)');
+  } }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

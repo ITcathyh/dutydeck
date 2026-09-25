@@ -288,7 +288,7 @@ async function createClient(
     allowedOrigins: FEISHU_LOGIN_ORIGINS,
   });
   if (!page.response.ok) throw new Error(`开放平台页面 HTTP ${page.response.status}`);
-  const html = await page.response.text();
+  const html = page.body;
   const csrf = extractOpenPlatformCsrf(html);
   if (!csrf) throw new Error('开放平台页面未返回有效登录凭据，会话可能已经过期');
 
@@ -318,7 +318,7 @@ async function createClient(
       allowedOrigins: new Set([apiOrigin]),
     });
     const status = response.response.status;
-    const payload = await readJson(response.response);
+    const payload = readJson(response.body);
     const code = numericCode(payload);
 
     if (isOpenPlatformSessionExpired(status, payload)) {
@@ -366,7 +366,7 @@ async function loginWithQr(
     },
     body: JSON.stringify({ biz_type: null, redirect_uri: FEISHU_LOGIN_REDIRECT }),
   });
-  const initPayload = await readJson(initialized.response);
+  const initPayload = readJson(initialized.body);
   assertLoginPayload(initPayload, '初始化扫码登录失败');
   const token = pickString(asRecord(asRecord(asRecord(initPayload).data).step_info), ['token']);
   const flowKey = initialized.response.headers.get('x-flow-key');
@@ -396,7 +396,7 @@ async function loginWithQr(
     }, {
       requestTimeoutMs: Math.min(requestTimeoutMs, remainingMs),
     });
-    const pollPayload = await readJson(polled.response);
+    const pollPayload = readJson(polled.body);
     assertLoginPayload(pollPayload, '轮询扫码登录失败');
     const data = asRecord(asRecord(pollPayload).data);
     const step = asRecord(data.step_info);
@@ -449,9 +449,10 @@ class CookieJar {
     url: string,
     initial: RequestInit,
     options: CookieFetchOptions = {},
-  ): Promise<{ response: Response; finalUrl: string }> {
+  ): Promise<{ response: Response; body: string; finalUrl: string }> {
     const maxRedirects = options.maxRedirects ?? 10;
     const requestTimeoutMs = positiveTimeout(options.requestTimeoutMs, this.requestTimeoutMs);
+    const deadline = Date.now() + requestTimeoutMs;
     let currentUrl = url;
     let init = initial;
     let redirectReferer: string | undefined;
@@ -464,11 +465,13 @@ class CookieJar {
       if (cookie) headers.set('cookie', cookie);
       if (!headers.has('user-agent')) headers.set('user-agent', DEFAULT_BROWSER_USER_AGENT);
       if (redirectReferer && !headers.has('referer')) headers.set('referer', redirectReferer);
-      const response = await fetchWithTimeout(fetcher, currentUrl, { ...init, headers, redirect: 'manual' }, requestTimeoutMs);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) throw new Error('开放平台请求超时');
+      const { response, body } = await fetchWithTimeout(fetcher, currentUrl, { ...init, headers, redirect: 'manual' }, remainingMs);
       this.load(currentUrl, response.headers);
-      if (response.status < 300 || response.status >= 400) return { response, finalUrl: currentUrl };
+      if (response.status < 300 || response.status >= 400) return { response, body, finalUrl: currentUrl };
       const location = response.headers.get('location');
-      if (!location) return { response, finalUrl: currentUrl };
+      if (!location) return { response, body, finalUrl: currentUrl };
       const previous = currentUrl;
       const nextUrl = new URL(location, currentUrl).toString();
       const crossOrigin = new URL(previous).origin !== new URL(nextUrl).origin;
@@ -683,9 +686,9 @@ function payloadMessage(payload: unknown): string {
   return safeOpenPlatformError(pickString(record, ['msg', 'message', 'error_msg', 'error']) ?? '未返回错误说明');
 }
 
-async function readJson(response: Response): Promise<unknown> {
+function readJson(body: string): unknown {
   try {
-    return await response.json();
+    return JSON.parse(body);
   } catch {
     return {};
   }
@@ -719,7 +722,7 @@ async function fetchWithTimeout(
   input: string,
   init: RequestInit,
   timeoutMs: number,
-): Promise<Response> {
+): Promise<{ response: Response; body: string }> {
   const controller = new AbortController();
   const upstream = init.signal;
   const relayAbort = () => controller.abort(upstream?.reason);
@@ -728,7 +731,10 @@ async function fetchWithTimeout(
   const timer = setTimeout(() => controller.abort(new Error('开放平台请求超时')), timeoutMs);
   timer.unref?.();
   try {
-    return await fetcher(input, { ...init, signal: controller.signal });
+    const response = await fetcher(input, { ...init, signal: controller.signal });
+    // fetch resolves at headers; the same deadline also bounds a slow body.
+    const body = await response.text();
+    return { response, body };
   } catch (error) {
     if (controller.signal.aborted && !upstream?.aborted) throw new Error('开放平台请求超时');
     throw error;

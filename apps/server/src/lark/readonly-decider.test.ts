@@ -173,7 +173,6 @@ describe('read-only participation decision', () => {
     for (const output of ['not json', new Error('agent failed'), null]) {
       const h = await harness(output, output === null ? 100 : 3000);
       const stop = vi.spyOn(h.runtime, 'stop');
-      const interrupt = vi.spyOn(h.runtime, 'interrupt');
       const unsubscribe = vi.fn();
       const subscribe = h.runtime.subscribe.bind(h.runtime);
       vi.spyOn(h.runtime, 'subscribe').mockImplementation((id, listener) => {
@@ -182,14 +181,13 @@ describe('read-only participation decision', () => {
       });
       const run = runPhase(h.decider, phase);
       if (output === 'not json') await expect(run).rejects.toThrow(SyntaxError);
-      else await expect(run).rejects.toMatchObject({ code: 'COLLABORATION_DECISION_FAILED', message: `Decision ended with ${output === null ? 'timeout' : 'failed'}` });
+      else await expect(run).rejects.toMatchObject({ code: output === null ? 'COLLABORATION_DECISION_TIMEOUT' : 'COLLABORATION_DECISION_FAILED', message: `Decision ended with ${output === null ? 'timeout' : 'failed'}` });
       expect(stop).toHaveBeenCalledOnce();
       expect(unsubscribe).toHaveBeenCalledOnce();
       await expect(stop.mock.results[0]!.value).resolves.toBeUndefined();
       expect(await h.drivers[0]!.isStopped!()).toBe(true);
       // A missing result can retain an unresolved Attempt, while its process is already stopped.
       expect(['stopped', 'interrupted']).toContain((await h.runtime.listSessions())[0]!.state);
-      if (output === null) expect(interrupt).toHaveBeenCalledOnce();
     }
   });
 

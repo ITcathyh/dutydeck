@@ -8,6 +8,7 @@ import { withMigrationTransaction } from '../../../packages/storage/src/migratio
 import { createScheduleExecutionSchema } from '../../../packages/storage/src/schedule-execution-migration.js';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate } from './collaboration-service.js';
 import { ScheduleExecutor, type ScheduleExecutorOptions } from './schedule-executor.js';
+import { LarkServiceError } from './lark/service.js';
 
 const cleanup: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); for (const close of cleanup.splice(0)) await close(); });
@@ -170,6 +171,20 @@ it('keeps a pre-commit cancellation crash disabled until the same request is ret
   await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, status: 'cancelled' });
   f.advance(); await f.executor().tick(); expect(f.deliver).not.toHaveBeenCalled();
   expect(await f.repos.collaboration.getMandate(scope, mandate.id)).toMatchObject({ status: 'cancelled' });
+});
+
+it('settles a never-sent circuit rejection and permits the next authorized occurrence', async () => {
+  const f = await fixture(); const { mandate } = await f.create();
+  f.deliver.mockRejectedValueOnce(new LarkServiceError('LARK_CIRCUIT_OPEN', 'Request not sent', 503));
+  const run = f.executor(); f.advance(); await run.tick();
+  const [failed] = await f.repos.scheduleOccurrences.listByDefinition(mandate.scheduleDefinitionId);
+  expect(failed).toMatchObject({ state: 'failed' });
+  expect((await f.repos.collaboration.listActions(scope)).find(action => action.kind === 'schedule_delivery')).toMatchObject({ status: 'failed' });
+  await run.tick(); expect(f.deliver).toHaveBeenCalledOnce();
+  f.advance(); await run.tick();
+  expect(f.deliver).toHaveBeenCalledTimes(2);
+  expect(await f.repos.scheduleOccurrences.listUnsettled(mandate.scheduleDefinitionId)).toEqual([]);
+  expect(await f.repos.scheduleOccurrences.get(failed!.id)).toMatchObject({ state: 'failed' });
 });
 
 it('does not resend an unknown delivery after restart; a receipt query settles it', async () => {

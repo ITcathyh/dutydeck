@@ -120,7 +120,7 @@ export function resolveLarkGateConfig(env: NodeJS.ProcessEnv = process.env): Lar
   const qps = positiveFinite(env.LARK_API_QPS, 15);
   return {
     qps,
-    burst: positiveFinite(env.LARK_API_BURST, qps),
+    burst: Math.max(1, positiveFinite(env.LARK_API_BURST, qps)),
     retryMaxAttempts: nonNegativeInt(env.LARK_API_RETRY_MAX_ATTEMPTS, 3),
     retryBaseMs: positiveInt(env.LARK_API_RETRY_BASE_MS, 500),
     retryMaxMs: positiveInt(env.LARK_API_RETRY_MAX_MS, 8_000),
@@ -494,11 +494,15 @@ export async function executeWithLarkGate<T>(
   const log = options?.log ?? moduleLog;
   const signal = options?.signal;
   let attempt = 0;
+  let previousError: unknown;
   for (;;) {
     if (signal?.aborted) throw gateAbortError(signal);
     const circuit = getCircuit(appId, Date.now());
     if (circuit.status === 'open') {
       if (Date.now() - circuit.openedAtMs < config.circuitProbeIntervalMs) {
+        // A concurrent call can open the circuit during our retry backoff.
+        // Preserve the earlier send outcome; it is no longer a never-sent call.
+        if (attempt > 0) throw previousError;
         throw new LarkCircuitOpenError(appId, circuit.openedAtMs);
       }
       circuit.status = 'half-open';
@@ -522,6 +526,7 @@ export async function executeWithLarkGate<T>(
     } catch (error) {
       const retryable = isRetryableLarkError(error);
       if (retryable && attempt < config.retryMaxAttempts) {
+        previousError = error;
         const backoffMs = computeBackoffMs(config, attempt, error);
         attempt += 1;
         log.warn({ appId, op, attempt, maxAttempts: config.retryMaxAttempts, backoffMs }, '飞书 OpenAPI 调用失败，退避重试');

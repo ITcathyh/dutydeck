@@ -434,6 +434,7 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     h.agentStart.fails = true;
     await first.coordinator.handle(message('om_after_new', '重新开始'), h.config);
     await until(async () => (await h.sessions()).some(item => item.id !== h.oldSessionId && item.state === 'failed'));
+    await until(async () => JSON.parse((await h.repos.config.get('lark.inbox.app.om_after_new'))!).state === 'failed');
     h.agentStart.fails = false;
     const failed = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
     // 重启后内存里的作废集合没了：按「最新的可用会话」只剩那个卡住的旧会话。
@@ -441,9 +442,9 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     await restarted.coordinator.handle(message('om_followup', '继续'), h.config);
     await until(async () => (await h.sessions()).length === 3);
     const third = (await h.sessions()).find(item => item.id !== h.oldSessionId && item.id !== failed.id)!;
-    // 启动失败的那条请求没被受理，重启后按入站记录重放：它和续聊都进了新会话，旧会话一条都没收到。
-    await until(async () => (await h.tasks(third.id)).length === 2);
-    expect((await h.tasks(third.id)).map(task => task.prompt)).toEqual(['重新开始', '继续']);
+    // 明确失败的请求保持终结；重启只执行新的续聊，旧会话和已拒绝请求均不重放。
+    await until(async () => (await h.tasks(third.id)).length === 1);
+    expect((await h.tasks(third.id)).map(task => task.prompt)).toEqual(['继续']);
     expect(await h.tasks(h.oldSessionId)).toHaveLength(2);
   });
 
