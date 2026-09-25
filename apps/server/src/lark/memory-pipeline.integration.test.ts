@@ -221,6 +221,48 @@ describe('Lark memory pipeline through the coordinator', () => {
     await h.waitIdle();
   });
 
+  it('机器人自己发的消息同样不作为记忆来源', async () => {
+    const h = await harness();
+    const manual = await h.setConfig({ memoryAutoExtract: false });
+    await h.runTurns(1, manual);
+    await h.coordinator.handle(event('om_self', '机器人自己的播报，不代表用户决定', { senderType: 'app', senderOpenId: 'ou_bot' }), manual);
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).pendingTurns).toHaveLength(2));
+    expect((await h.store.getState(scope)).pendingTurns!.find(turn => turn.sourceMessageId === 'om_self')).toMatchObject({ senderKind: 'bot', senderId: 'ou_bot' });
+    await h.pipeline.runExtraction(scope);
+    expect(h.memoryPrompts.at(-1)).toContain('发送者：human ou_alice');
+    expect(h.memoryPrompts.at(-1)).not.toContain('机器人自己的播报');
+    expect(h.memoryPrompts.at(-1)).not.toContain('om_self');
+    await h.waitIdle();
+  });
+
+  it('提取遵守「不许记」规则：规则进 prompt，命中的事实不写入；写入的事实挂在证据轮次上', async () => {
+    const h = await harness();
+    const rule = await h.store.addIgnoreRule(scope, { text: '不要记任何人的薪资' });
+    h.setResponder(prompt => {
+      if (!prompt.includes('后台提取')) return { text: jsonBlock({ actions: [{ op: 'noop' }] }) };
+      const taskId = prompt.match(/### 轮次 (\S+)/)?.[1] ?? 'unknown';
+      return { text: jsonBlock({ facts: [
+        { content: '张三的薪资是 30k', topic: 'contacts', kind: 'other', evidence: taskId },
+        { content: '部署脚本在 scripts/deploy.sh', topic: 'environment', kind: 'environment', evidence: taskId }
+      ] }) };
+    });
+    await h.runTurns(3);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'extraction', ok: true, added: 1, rejected: 1 });
+    }, { timeout: 10_000 });
+    await h.waitIdle();
+    expect(h.memoryPrompts.find(prompt => prompt.includes('后台提取'))).toContain(`- ${rule.id}：不要记任何人的薪资`);
+    const saved = await h.store.list(scope);
+    expect(saved.map(entry => entry.content)).toEqual(['部署脚本在 scripts/deploy.sh']);
+    expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ rejected: [expect.objectContaining({ reason: `命中「不许记」规则 ${rule.id}` })] }), '会话记忆提取有条目未通过门禁');
+    // 拒绝原因进日志，被拒的内容本身不进。
+    expect(JSON.stringify(h.log.warn.mock.calls)).not.toContain('薪资是 30k');
+    // 记下的事实挂在证据轮次上：该轮的结果卡与 Web 任务详情据此列出「新记下」。
+    const [chatSession] = (await h.runtime.listSessions()).filter(session => session.source === 'lark');
+    const view = await h.store.turn(chatSession!.id, saved[0]!.taskId!);
+    expect(view?.written.map(entry => entry.id)).toEqual([saved[0]!.id]);
+  });
+
   it('memoryAutoExtract=false 时不自动触发，但仍然记账', async () => {
     const h = await harness();
     const disabled = await h.setConfig({ memoryAutoExtract: false });
@@ -738,7 +780,7 @@ describe('shared group pool through the pipeline', () => {
     expect(receipt).toContain('本机器人所在各群共享，共 1 条记忆');
     expect(receipt).toContain('其他群 · 这个群的回复统一用中文');
     expect(receipt).toMatch(/上次运行：整理 · \d{4}-\d{2}-\d{2} \d{2}:\d{2} · 失败 `MEMORY_AGENT_OUTPUT_INVALID`（整理 Agent 的输出格式不对）/);
-    expect(receipt).toContain('待提取 2 轮 · 上次提取 尚未提取 · 上次整理 尚未整理');
+    expect(receipt).toContain('待提取 2 轮 · 上次成功提取 尚未提取 · 上次整理 尚未整理');
 
     await h.coordinator.handle(event('om_p2p_status', '/memory', { chatId: 'oc_p2p', chatType: 'p2p', threadId: undefined, rootId: undefined, mentions: [] }), quiet);
     const p2p = await cardWith(h.cards, '本聊天还没有保存的记忆');

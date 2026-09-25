@@ -16,6 +16,7 @@
 import { randomBytes } from 'node:crypto';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
 import { relevance } from './text-relevance.js';
+import { redactTraceText } from './secret-redaction.js';
 
 /**
  * 一次记忆访问：`pool` 决定读写哪份账本，`chatId` 是发起访问的聊天（群池据此做懒迁移）。
@@ -50,7 +51,7 @@ export interface LarkMemoryEntry {
   messageId?: string;
   /** 保存动作发生在哪个会话。 */
   sessionId?: string;
-  /** extraction/consolidation 的证据任务。 */
+  /** extraction 的证据任务，或 Agent 保存动作所在的任务；结果卡与 Web 任务详情据此列出「本轮新记下」。 */
   taskId?: string;
   /** 来源聊天；群池里据此区分本群与其他群的条目。旧条目迁移时补上原群，跨群合并的整理条目没有。 */
   chatId?: string;
@@ -115,11 +116,55 @@ export const larkMemoryLimits = {
   /** 每个主题记忆条数上限。 */
   entriesPerTopic: 30,
   /** 索引单行字符上限。 */
-  indexLineChars: 160
+  indexLineChars: 160,
+  /** 每个记忆池的「不许记」规则上限。 */
+  ignoreRules: 20,
+  /** 单条「不许记」规则的字符上限。 */
+  ignoreRuleChars: 200,
+  /** 每个会话保留最近几轮的记忆记录；更早的结果卡上的删除按钮失效，改用 /forget。 */
+  turnsPerSession: 20
 } as const;
 
 export const larkMemoryKey = (scope: Pick<LarkMemoryScope, 'appId' | 'pool'>) => `lark.memory.${scope.appId}.${scope.pool}`;
 export const larkMemoryStateKey = (scope: Pick<LarkMemoryScope, 'appId' | 'pool'>) => `lark.memory.state.${scope.appId}.${scope.pool}`;
+export const larkMemoryIgnoreKey = (scope: Pick<LarkMemoryScope, 'appId' | 'pool'>) => `lark.memory.ignore.${scope.appId}.${scope.pool}`;
+export const larkMemoryTurnsKey = (sessionId: string) => `lark.memory.turns.${sessionId}`;
+
+/** 「不许记」规则：群成员用 /memory ignore 按记忆池设置；后台提取把它们写进约束，写入前再按规则过滤一次。 */
+export interface LarkMemoryIgnoreRule {
+  /** `ign_` + 8 位十六进制，/memory ignore remove 引用它。 */
+  id: string;
+  /** 一句话描述什么不许记，已归一化。 */
+  text: string;
+  createdAt: string;
+  createdBy?: string;
+  /** 设置规则的聊天；群共享池里的规则对本机器人所在的各群都生效。 */
+  chatId?: string;
+}
+
+/**
+ * 一轮任务注入了哪些记忆：派发时写一次。本轮新记下的记忆不在这里记，按条目的 taskId 反查。
+ * 同一会话的记录存在一行里，只留最近 turnsPerSession 轮：configs 表只增不删，每轮一行会随任务数一直涨。
+ */
+export interface LarkMemoryTurnRecord {
+  v: 1;
+  taskId: string;
+  sessionId: string;
+  appId: string;
+  chatId: string;
+  pool: string;
+  injected: string[];
+  at: string;
+}
+
+/** 结果卡与 Web 任务详情读的一轮记忆：注入与新记下的条目都含已删除的，修剪掉的墓碑不再列出。 */
+export interface LarkMemoryTurnView {
+  record: LarkMemoryTurnRecord;
+  scope: LarkMemoryScope;
+  shared: boolean;
+  injected: LarkMemoryEntry[];
+  written: LarkMemoryEntry[];
+}
 
 /** 只读状态摘要，供 /memory 回执与后台页面使用。 */
 export interface LarkMemoryStatus {
@@ -150,8 +195,31 @@ const maxWriteAttempts = 5;
 const credentialAssignmentPattern = /(api[_-]?key|token|secret|password|passwd|bearer)\s*[:=]/i;
 const longOpaqueSecretPattern = /[A-Za-z0-9+/=]{40,}/;
 
+/** 另外复用执行记录的脱敏规则（私钥、URL 里的账号密码、Bearer、带凭据的命令行参数等）：它会改写的内容都算疑似凭据。 */
 export function looksLikeLarkMemoryCredential(text: string): boolean {
-  return credentialAssignmentPattern.test(text) || longOpaqueSecretPattern.test(text);
+  return credentialAssignmentPattern.test(text) || longOpaqueSecretPattern.test(text) || redactTraceText(text) !== text;
+}
+
+/**
+ * 疑似注入指令：要求忽略既有指令、改写 Agent 的身份，或伪造 Dutydeck 的系统上下文标记。
+ * 群共享池的条目会带进本机器人所在的每个群，这样一条「记忆」等于在所有群里给 Agent 下指令。
+ */
+const injectionPatterns = [
+  /(忽略|无视|忘掉|忘记|不要理会|跳过)(掉)?(你)?(之前|此前|先前|以上|上面|前面|上述|所有|全部|一切|原有|原来)的?(所有|全部)?(指令|指示|提示词?|要求|规则|设定|约束)/,
+  /(你|您)(现在|从现在起|从现在开始|从今往后|今后)就?(是|扮演|充当|变成|作为)/,
+  /(从现在起|从现在开始|从今往后)[，,]?(你|您)/,
+  /(新的|最新的?)(系统)?(指令|提示词|设定)[:：]/,
+  /系统提示词|system\s*prompt/i,
+  /\bignore\s+(all\s+|any\s+|the\s+)?(previous|prior|above|earlier|preceding)\s+(instructions|prompts|rules|messages)/i,
+  /\bdisregard\s+(all\s+|any\s+|the\s+)?(previous|prior|above|earlier)\b/i,
+  /\byou\s+are\s+now\b/i,
+  /\bfrom\s+now\s+on,?\s+you\b/i,
+  /\bjailbreak\b|\bdeveloper\s+mode\b/i,
+  /\[Dutydeck[^\]\n]*\]/
+];
+
+export function looksLikeLarkMemoryInjection(text: string): boolean {
+  return injectionPatterns.some(pattern => pattern.test(text));
 }
 
 /** 归一化后用于查重：忽略空白与大小写差异。 */
@@ -195,6 +263,52 @@ export function normalizeLarkMemoryTopic(value: unknown): string {
 
 const memoryIdPattern = /^mem_[0-9a-f]{8}$/;
 export const isLarkMemoryId = (value: unknown): value is string => typeof value === 'string' && memoryIdPattern.test(value);
+
+const ignoreRuleIdPattern = /^ign_[0-9a-f]{8}$/;
+export const isLarkMemoryIgnoreRuleId = (value: unknown): value is string => typeof value === 'string' && ignoreRuleIdPattern.test(value);
+
+export function normalizeLarkMemoryIgnoreRule(value: unknown): string {
+  const text = (typeof value === 'string' ? value : '').replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!text) throw new LarkMemoryError('MEMORY_IGNORE_RULE_REQUIRED', '「不许记」规则不能为空。');
+  if (text.length > larkMemoryLimits.ignoreRuleChars) {
+    throw new LarkMemoryError('MEMORY_IGNORE_RULE_TOO_LONG', `单条「不许记」规则最多 ${larkMemoryLimits.ignoreRuleChars} 个字符。`);
+  }
+  if (looksLikeLarkMemoryCredential(text)) {
+    throw new LarkMemoryError('MEMORY_CREDENTIAL_REJECTED', '规则内容疑似包含凭据（密钥、令牌或密码），不保存。', 400);
+  }
+  return text;
+}
+
+/**
+ * 规则描述里只表达「不要记」这层意思的词，切词前换成空格，不参与匹配。
+ * 按长度从长到短排：「不要记录」不能先被「不要」切掉，剩下一个「记录」。
+ */
+const ignoreRuleFillers = ['不要记录', '不要记住', '不要保存', '不许记录', '不许记住', '不准记录', '别记录', '别记住', '不要记', '不许记', '不准记', '请勿记', '不要', '不许', '不准', '禁止', '请勿', '记录', '记住', '保存', '相关的', '相关', '有关的', '有关', '关于', '之类的', '之类', '任何', '所有', '一切', '内容', '信息', '事情', '东西', '话题', '讨论', '的'];
+const ignoreRuleStopwords = new Set(['a', 'an', 'the', 'of', 'and', 'or', 'to', 'for', 'with', 'in', 'on', 'about', 'any', 'anything', 'all', 'do', 'don', 'dont', 'not', 'never', 'no', 'remember', 'record', 'save', 'store', 'keep', 'related', 'info', 'information', 'stuff', 'thing', 'things', 'memory', 'memories']);
+
+function ignoreRuleTerms(rule: string): string[] {
+  let text = rule.toLowerCase();
+  for (const filler of ignoreRuleFillers) text = text.split(filler).join(' ');
+  const terms = new Set<string>();
+  for (const word of text.match(/[a-z0-9_]+|[\p{Script=Han}]+/gu) ?? []) {
+    if (/\p{Script=Han}/u.test(word)) {
+      // 单个汉字太泛，命中不说明任何事。
+      for (let index = 0; index + 1 < word.length; index++) terms.add(word.slice(index, index + 2));
+    } else if (word.length >= 2 && !ignoreRuleStopwords.has(word)) terms.add(word);
+  }
+  return [...terms];
+}
+
+/**
+ * 写入前的确定性复核：规则里过半的关键词（中文按二字切分）出现在内容里就算命中。
+ * 语义判断交给提取 Agent，这里只兜住它漏掉的明显情形；宁可少记一条，也不写入群里说过不许记的内容。
+ */
+export function matchesLarkMemoryIgnoreRule(rule: string, content: string): boolean {
+  const terms = ignoreRuleTerms(rule);
+  if (!terms.length) return false;
+  const text = content.toLowerCase();
+  return terms.filter(term => text.includes(term)).length * 2 > terms.length;
+}
 
 export interface AddLarkMemoryInput {
   content: string;
@@ -288,7 +402,7 @@ export class LarkMemoryStore {
   async add(scope: LarkMemoryScope, input: AddLarkMemoryInput): Promise<LarkMemoryEntry> {
     let created!: LarkMemoryEntry;
     await this.mutate(scope, entries => {
-      const outcome = this.addTo(entries, input);
+      const outcome = this.addTo(entries, input, { shared: isLarkGroupMemoryPool(scope) });
       created = outcome.created;
       return outcome.entries;
     });
@@ -337,7 +451,7 @@ export class LarkMemoryStore {
         if (step.op === 'add') {
           // 批内先 add 后 remove/retopic，中间态可能短暂多出一个主题或超过条数上限；两个上限都改到批次末尾统一判，
           // 否则「退掉某主题最后一条 + 新开一个主题」、迁移后超限的池「逐步合并收缩」这类终态合法的整理计划会被中间态误杀。
-          const outcome = this.addTo(current, step.input, { deferLimits: true });
+          const outcome = this.addTo(current, step.input, { deferLimits: true, shared: isLarkGroupMemoryPool(scope) });
           current = outcome.entries;
           added.push(outcome.created);
         } else if (step.op === 'remove') {
@@ -372,11 +486,14 @@ export class LarkMemoryStore {
   private addTo(
     entries: LarkMemoryEntry[],
     input: AddLarkMemoryInput,
-    options: { deferLimits?: boolean } = {}
+    options: { deferLimits?: boolean; shared?: boolean } = {}
   ): { entries: LarkMemoryEntry[]; created: LarkMemoryEntry } {
     const content = normalizeLarkMemoryContent(input.content);
     if (looksLikeLarkMemoryCredential(content)) {
       throw new LarkMemoryError('MEMORY_CREDENTIAL_REJECTED', '记忆内容疑似包含凭据（密钥、令牌或密码），不保存。', 400);
+    }
+    if (options.shared && looksLikeLarkMemoryInjection(content)) {
+      throw new LarkMemoryError('MEMORY_INJECTION_REJECTED', '记忆内容疑似包含注入指令（例如要求忽略之前的指令、改变 Agent 身份），不写入群共享记忆。', 400);
     }
     const topic = normalizeLarkMemoryTopic(input.topic);
     const supersedes = input.supersedes?.length ? [...new Set(input.supersedes)] : undefined;
@@ -484,6 +601,95 @@ export class LarkMemoryStore {
       .sort((a, b) => b.score - a.score || b.entry.createdAt.localeCompare(a.entry.createdAt))
       .slice(0, limit)
       .map(item => item.entry);
+  }
+
+  /** 本池的「不许记」规则，按添加先后排列。 */
+  async listIgnoreRules(scope: LarkMemoryScope): Promise<LarkMemoryIgnoreRule[]> {
+    return parseLarkMemoryIgnoreRules(await this.configs.get(larkMemoryIgnoreKey(scope)));
+  }
+
+  /** 加一条「不许记」规则；与已有规则归一化后相同时返回已有的那条，不重复添加。 */
+  async addIgnoreRule(scope: LarkMemoryScope, input: { text: string; createdBy?: string; chatId?: string }): Promise<LarkMemoryIgnoreRule> {
+    const text = normalizeLarkMemoryIgnoreRule(input.text);
+    let rule!: LarkMemoryIgnoreRule;
+    await this.mutateIgnoreRules(scope, rules => {
+      const existing = rules.find(item => larkMemoryDedupeKey(item.text) === larkMemoryDedupeKey(text));
+      if (existing) { rule = existing; return undefined; }
+      if (rules.length >= larkMemoryLimits.ignoreRules) {
+        throw new LarkMemoryError('MEMORY_IGNORE_LIMIT_REACHED', `「不许记」规则最多 ${larkMemoryLimits.ignoreRules} 条，请先删除不再需要的规则。`, 409);
+      }
+      const ids = new Set(rules.map(item => item.id));
+      let id = `ign_${randomBytes(4).toString('hex')}`;
+      while (ids.has(id)) id = `ign_${randomBytes(4).toString('hex')}`;
+      rule = { id, text, createdAt: this.now().toISOString(), ...(input.createdBy ? { createdBy: input.createdBy } : {}), ...(input.chatId ? { chatId: input.chatId } : {}) };
+      return [...rules, rule];
+    });
+    return rule;
+  }
+
+  /** 删除一条「不许记」规则；不存在时返回 undefined。 */
+  async removeIgnoreRule(scope: LarkMemoryScope, id: string): Promise<LarkMemoryIgnoreRule | undefined> {
+    let removed: LarkMemoryIgnoreRule | undefined;
+    await this.mutateIgnoreRules(scope, rules => {
+      removed = rules.find(item => item.id === id);
+      return removed ? rules.filter(item => item.id !== id) : undefined;
+    });
+    return removed;
+  }
+
+  private async mutateIgnoreRules(scope: LarkMemoryScope, mutation: (rules: LarkMemoryIgnoreRule[]) => LarkMemoryIgnoreRule[] | undefined) {
+    const key = larkMemoryIgnoreKey(scope);
+    for (let attempt = 0; attempt < maxWriteAttempts; attempt++) {
+      const raw = await this.configs.get(key);
+      const rules = mutation(parseLarkMemoryIgnoreRules(raw));
+      if (!rules) return;
+      if (await this.write(key, raw, JSON.stringify({ v: 1, rules }))) return;
+    }
+    throw new LarkMemoryError('MEMORY_WRITE_CONFLICT', '「不许记」规则正在被并发修改，请稍后重试。', 409);
+  }
+
+  /** 记下一轮任务注入了哪些记忆，写入时顺带丢掉本会话更早的轮次；同一轮重记时替换。 */
+  async recordTurn(scope: LarkMemoryScope, input: { taskId: string; sessionId: string; injected: string[] }): Promise<void> {
+    const record: LarkMemoryTurnRecord = {
+      v: 1, taskId: input.taskId, sessionId: input.sessionId,
+      appId: scope.appId, chatId: scope.chatId, pool: scope.pool,
+      injected: [...new Set(input.injected)], at: this.now().toISOString()
+    };
+    const key = larkMemoryTurnsKey(input.sessionId);
+    for (let attempt = 0; attempt < maxWriteAttempts; attempt++) {
+      const raw = await this.configs.get(key);
+      const turns = [...parseLarkMemoryTurnRecords(raw).filter(item => item.taskId !== input.taskId), record].slice(-larkMemoryLimits.turnsPerSession);
+      if (await this.write(key, raw, JSON.stringify({ v: 1, turns }))) return;
+    }
+    throw new LarkMemoryError('MEMORY_WRITE_CONFLICT', '本轮记忆记录正在被并发修改，请稍后重试。', 409);
+  }
+
+  /** 一轮任务用到与新记下的记忆；新记下的是证据或保存动作指向本轮的条目。没有记录或已被修剪时返回 undefined。 */
+  async turn(sessionId: string, taskId: string): Promise<LarkMemoryTurnView | undefined> {
+    return (await this.turns(sessionId, taskId))[0];
+  }
+
+  /** 会话最近几轮的记忆，新的在前；给了 taskId 只取那一轮。 */
+  async turns(sessionId: string, taskId?: string): Promise<LarkMemoryTurnView[]> {
+    const records = parseLarkMemoryTurnRecords(await this.configs.get(larkMemoryTurnsKey(sessionId)))
+      .filter(record => record.sessionId === sessionId && (!taskId || record.taskId === taskId)).reverse();
+    // 同一会话的各轮落在同一个池，账本只读一次。
+    const ledgers = new Map<string, LarkMemoryEntry[]>();
+    const views: LarkMemoryTurnView[] = [];
+    for (const record of records) {
+      const scope: LarkMemoryScope = { appId: record.appId, chatId: record.chatId, pool: record.pool };
+      const cacheKey = JSON.stringify(scope);
+      const entries = ledgers.get(cacheKey) ?? await this.listAll(scope);
+      ledgers.set(cacheKey, entries);
+      const byId = new Map(entries.map(entry => [entry.id, entry]));
+      const injected = new Set(record.injected);
+      views.push({
+        record, scope, shared: isLarkGroupMemoryPool(scope),
+        injected: record.injected.flatMap(id => byId.get(id) ?? []),
+        written: entries.filter(entry => entry.taskId === record.taskId && !injected.has(entry.id))
+      });
+    }
+    return views;
   }
 
   /** 读取该池的提取与整理状态；缺失时返回默认状态。 */
@@ -688,6 +894,31 @@ function parseLarkMemoryLedger(raw: string | undefined, key: string): StoredLark
   return { v: 1, entries, ...(stored.migratedChats ? { migratedChats: stored.migratedChats } : {}) };
 }
 
+function parseLarkMemoryIgnoreRules(raw: string | undefined): LarkMemoryIgnoreRule[] {
+  if (!raw) return [];
+  let parsed: { v?: unknown; rules?: unknown } | undefined;
+  try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
+  if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.rules)) {
+    // 与账本同理：规则是用户明确说过的「不许记」，记录损坏时不能静默当成没有规则。
+    throw new LarkMemoryError('MEMORY_STORE_CORRUPT', '「不许记」规则记录无法解析，请在 Dutydeck 数据库中检查该键。', 500);
+  }
+  return parsed.rules as LarkMemoryIgnoreRule[];
+}
+
+/** 记忆记录只供结果卡与 Web 展示和删除入口使用：整行损坏时当作没有记录，下一轮写入时覆盖。 */
+function parseLarkMemoryTurnRecords(raw: string | undefined): LarkMemoryTurnRecord[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as { v?: unknown; turns?: unknown } | null;
+    if (parsed?.v === 1 && Array.isArray(parsed.turns)) {
+      return (parsed.turns as Array<Partial<LarkMemoryTurnRecord> | null>).filter((item): item is LarkMemoryTurnRecord => Boolean(item && item.v === 1
+        && typeof item.taskId === 'string' && typeof item.sessionId === 'string' && typeof item.appId === 'string'
+        && typeof item.chatId === 'string' && typeof item.pool === 'string' && Array.isArray(item.injected)));
+    }
+  } catch {}
+  return [];
+}
+
 function parseLarkMemoryState(raw: string | undefined): LarkMemoryState {
   if (!raw) return { v: 1, turnsSinceExtraction: 0, turnsSinceConsolidation: 0 };
   try {
@@ -860,7 +1091,7 @@ export function renderLarkMemoryStatus(status: LarkMemoryStatus): string {
     '**后台提取与整理**',
     `- 上次运行：${outcome}`,
     ...(status.running ? [`- 正在运行：${runKindLabels[status.running.kind]}（开始于 ${formatTime(status.running.startedAt)}）`] : []),
-    `- 待提取 ${status.pendingTurns} 轮 · 上次提取 ${status.lastExtractionAt ? formatTime(status.lastExtractionAt) : '尚未提取'} · 上次整理 ${status.lastConsolidationAt ? formatTime(status.lastConsolidationAt) : '尚未整理'}`
+    `- 待提取 ${status.pendingTurns} 轮 · 上次成功提取 ${status.lastExtractionAt ? formatTime(status.lastExtractionAt) : '尚未提取'} · 上次整理 ${status.lastConsolidationAt ? formatTime(status.lastConsolidationAt) : '尚未整理'}`
   ].join('\n');
 }
 

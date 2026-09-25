@@ -20,6 +20,7 @@ import { registerFoundationManagementRoutes, type FoundationManagementOptions } 
 import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from './schedule-routes.js';
 import { registerWorkItemTools, type WorkItemToolsOptions } from './work-item-tools.js';
 import { registerLarkMemoryTools, type LarkMemoryToolsOptions } from './lark/memory-tools.js';
+import { registerLarkMemoryTurnRoutes } from './lark/memory-turn-routes.js';
 import { registerWorkItemRoutes, type WorkItemRouteOptions } from './work-item-routes.js';
 import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } from './session-automation-routes.js';
 import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
@@ -149,6 +150,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);
+  if (options.memoryTools) await registerLarkMemoryTurnRoutes(app, { store: options.memoryTools.store,
+    authorize: (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result') });
   if (options.collaboration) await registerCollaborationRoutes(app, options.collaboration);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });

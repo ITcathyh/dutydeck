@@ -11,6 +11,8 @@
  */
 import { larkBotsConfigKey, larkExecutionConfirmed, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
+import { larkMemoryErrorLabel } from '../lark/memory.js';
+import { larkMemoryPipelineRules } from '../lark/memory-pipeline.js';
 import type {
   CheckLevel,
   DatabaseProbeResult,
@@ -29,6 +31,12 @@ export { larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY };
 
 /** 体检需要从 configs 表读的键。都是「读」，绝不写。 */
 export const DOCTOR_CONFIG_KEYS = [larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY] as const;
+
+/** 会话记忆状态的键前缀，与 lark/memory.ts 的 larkMemoryStateKey 一致：`lark.memory.state.<appId>.<pool>`。 */
+const larkMemoryStatePrefix = 'lark.memory.state.';
+
+/** 体检按前缀读的键：会话记忆状态按「机器人 + 记忆池」分键，事先不知道有哪些池。 */
+export const DOCTOR_CONFIG_PREFIXES = [larkMemoryStatePrefix] as const;
 
 // ─── 1. node.version ─────────────────────────────────────────────────────────
 
@@ -474,6 +482,91 @@ export function checkLarkListener(botCount: number, daemonRunning: boolean, list
     };
   }
   return { id: 'lark.listener', label: '飞书监听', level: 'ok', detail: `守护进程在运行，${botCount} 个机器人的监听由它持有` };
+}
+
+// ─── 7b. lark.memory ─────────────────────────────────────────────────────────
+
+export interface LarkMemoryObservation {
+  /** configs 表里 lark.bots 的原始值；undefined 表示未配置。 */
+  raw?: string;
+  /** 探针读到的键值，含 `lark.memory.state.*` 前缀键。 */
+  values?: Readonly<Record<string, string | undefined>>;
+  /** 数据库不可读时为 true。 */
+  unavailable?: boolean;
+}
+
+/** 体检只关心的状态字段；其余字段（发送人、消息编号等）一律不读，自然也不会进报告。 */
+interface MemoryPoolState {
+  pendingTurns?: Array<{ senderKind?: unknown } | null>;
+  lastExtractionAt?: unknown;
+  running?: { startedAt?: unknown } | null;
+  lastRun?: { ok?: unknown; error?: unknown } | null;
+  migratedTo?: unknown;
+}
+
+const memoryTime = (value: unknown) => typeof value === 'string' && value ? value.slice(0, 16).replace('T', ' ') : '尚未提取';
+
+/**
+ * 会话记忆后台提取是否停摆：已完成、应该提取的轮次攒够一次提取的量，却既没有提取成功、
+ * 也没有明确的跳过原因时标黄。
+ *
+ * 明确的跳过原因不算停摆：机器人发起的轮次本来就不作为记忆来源；关闭了自动提取的机器人
+ * 只在 /memory consolidate 时提取；提取正在进行（未超过陈旧阈值）说明管线还活着。
+ *
+ * 只 parse 原始 JSON，不经 LarkMemoryStore：它的读路径会顺手把旧的按群账本迁移进群池（写库）。
+ */
+export function checkLarkMemory(observation: LarkMemoryObservation, now: Date): DoctorCheck {
+  const base = { id: 'lark.memory', label: '飞书会话记忆提取' } as const;
+  if (observation.unavailable) return { ...base, level: 'skip', detail: '数据库不可读，无法读取会话记忆状态' };
+  if (!observation.raw) return { ...base, level: 'skip', detail: '未配置飞书' };
+  let parsed: unknown;
+  try { parsed = JSON.parse(observation.raw); } catch { parsed = undefined; }
+  // lark.bots 坏掉由 lark.config 报 fail，这里不重复报。
+  const bots = (Array.isArray(parsed) ? parsed : []) as Array<Partial<StoredLarkConfig> | null>;
+  const enabled = bots.filter((bot): bot is Partial<StoredLarkConfig> & { appId: string } =>
+    Boolean(bot && typeof bot.appId === 'string' && bot.appId && bot.memoryEnabled !== false));
+  if (!enabled.length) return { ...base, level: 'skip', detail: '没有开启会话记忆的飞书机器人' };
+
+  const stalled: string[] = [];
+  const observed: string[] = [];
+  const keys = Object.keys(observation.values ?? {}).sort();
+  for (const bot of enabled) {
+    const prefix = `${larkMemoryStatePrefix}${bot.appId}.`;
+    const name = `${bot.name?.trim() || bot.displayName?.trim() || '机器人'}（${bot.appId}）`;
+    for (const key of keys) {
+      const raw = observation.values?.[key];
+      if (!key.startsWith(prefix) || !raw) continue;
+      let state: MemoryPoolState;
+      try { state = JSON.parse(raw) as MemoryPoolState; } catch { continue; }
+      // 已并入群池的旧按群状态只剩迁移占位，不再代表任何池。
+      if (!state || typeof state !== 'object' || Array.isArray(state) || typeof state.migratedTo === 'string') continue;
+      const pool = key.slice(prefix.length);
+      const where = `${name}${pool === 'groups' ? '群共享池' : `聊天 ${pool}`}`;
+      const human = (Array.isArray(state.pendingTurns) ? state.pendingTurns : []).filter(turn => turn?.senderKind !== 'bot').length;
+      const startedAt = typeof state.running?.startedAt === 'string' ? Date.parse(state.running.startedAt) : Number.NaN;
+      const running = Number.isFinite(startedAt) && now.getTime() - startedAt < larkMemoryPipelineRules.staleRunningMs;
+      const manual = bot.memoryAutoExtract === false;
+      const lastSuccess = memoryTime(state.lastExtractionAt);
+      if (!manual && !running && human >= larkMemoryPipelineRules.extractionTurns) {
+        const failed = state.lastRun && state.lastRun.ok === false
+          ? `，上次运行失败 ${larkMemoryErrorLabel(typeof state.lastRun.error === 'string' ? state.lastRun.error : undefined)}` : '';
+        stalled.push(`${where}：连续 ${human} 轮已完成的任务没有提取成功，上次成功提取 ${lastSuccess}${failed}`);
+      }
+      observed.push(`${where} 上次成功提取 ${lastSuccess}${manual ? '（已关闭自动提取）' : running ? '（提取进行中）' : ''}`);
+    }
+  }
+
+  if (stalled.length) {
+    return {
+      ...base,
+      level: 'warn',
+      detail: stalled.join('；'),
+      remedy: '在对应群里发送 /memory 查看后台状态；/memory consolidate 会立即补一次提取再整理。持续失败时查看守护进程日志里的「会话记忆提取失败」。',
+      verify: 'dutydeck doctor --json'
+    };
+  }
+  if (!observed.length) return { ...base, level: 'skip', detail: '开启会话记忆的机器人还没有记下过任何轮次' };
+  return { ...base, level: 'ok', detail: observed.join('；') };
 }
 
 // ─── 8. access.posture / access.token ────────────────────────────────────────
