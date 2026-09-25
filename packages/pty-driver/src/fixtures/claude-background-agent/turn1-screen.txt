@@ -1,0 +1,30 @@
+
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Opus 5.5 (1M context) · API Usage Billing
+  ▝▝ ▝▝    /tmp/pty-20260925-exp/work
+
+
+❯ Say something plain.
+
+● Plain answer.
+
+✻ Cooked for 0s · done 4:33 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                  tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents

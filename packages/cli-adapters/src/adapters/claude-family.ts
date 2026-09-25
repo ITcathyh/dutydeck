@@ -2,6 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { buildDutydeckRoutingBlock } from '../shared-hints.js';
 import { pinnedSessionUuid } from '../resume-id.js';
 import { relayCommandFrom, relayEnabled } from '@dutydeck/relay';
+import { waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
 /**
  * Claude Code 家族共用实现（claude-code / seed / relay）。
@@ -21,6 +22,12 @@ const TRUST_KEY_RETRY_MS = 1_000;
 /** Claude 家族完成标记：`✳ Worked for 12s` 等耗时行。 */
 export const CLAUDE_FAMILY_COMPLETION_RE =
   /[✳✻]\s*(?:Worked|Crunched|Cogitated|Cooked|Churned|Saut[eé]ed|Baked|Brewed) for \d+[smh]/;
+
+/** Claude 家族主轮已结束、仍在等后台子 agent 的状态行：
+ *  `✻ Waiting for 1 background agent to finish`（2.1.280 实测），
+ *  子 agent 回报后 CLI 自己再开一轮续写结果。 */
+const CLAUDE_FAMILY_BACKGROUND_WAIT_RE =
+  /^\s*[✳✻]\s*Waiting for \d+ (?:background agents?|dynamic workflows?)(?: and \d+ dynamic workflows?)? to finish\b/;
 
 const BRACKETED_PASTE_START = '\x1b[200~';
 const BRACKETED_PASTE_END = '\x1b[201~';
@@ -51,18 +58,23 @@ export function chunkTextByUtf8Bytes(text: string, maxBytes: number = CLAUDE_INP
   return chunks;
 }
 
-/** 已接收过首次写入的后端。首次写入落在 Ink 启动渲染期，需要更长的 settle
- *  和节流；按 identity 跟踪，同一后端跨适配器实例共享 warmup 状态。 */
-const firstWriteSeen = new WeakSet<PtyLike>();
+/** 已接收过首次写入的 CLI 进程（按 processKey，没有就按后端对象）。首次写入落在
+ *  Ink 启动渲染期，需要更长的 settle 和节流；同一进程跨适配器实例、跨多次提交共享
+ *  warmup 状态。 */
+const firstWriteSeen = new WeakSet<object>();
 
 /** Claude 家族的输入时序：分块键入 + soft-newline，最后一个 Enter 才提交。 */
 export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): Promise<void> {
-  const isFirstWrite = !firstWriteSeen.has(backend);
+  const processKey = backend.processKey ?? backend;
+  const isFirstWrite = !firstWriteSeen.has(processKey);
   if (isFirstWrite) {
-    firstWriteSeen.add(backend);
+    firstWriteSeen.add(processKey);
     // 首次写入落在 Ink 启动渲染期，先等队列稳定。
     await delay(200);
   }
+  // CLI 还在输出时键入会和它的重绘交错：先等屏幕静止，回显稳定后再提交。
+  await waitForQuietScreen(backend);
+  const typedAt = Date.now();
   const throttleMs = isFirstWrite ? 80 : 30;
   const tick = () => delay(throttleMs);
 
@@ -90,6 +102,7 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
     backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END);
   }
   await delay(500);
+  await waitForInputEcho(backend, typedAt);
   if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
   else backend.write('\r');
 }
@@ -254,6 +267,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
     completionPattern: CLAUDE_FAMILY_COMPLETION_RE,
     screenBusyPattern: /\besc to interrupt\b/i,
     screenActivityPattern: /^\s*[*·✢✳✶✻✽]\s+\p{L}[\p{L} '-]*(?:…|\.{3})(?:[ \t].*)?$/u,
+    backgroundWaitPattern: CLAUDE_FAMILY_BACKGROUND_WAIT_RE,
     readyPattern: /❯/,
   };
 }
