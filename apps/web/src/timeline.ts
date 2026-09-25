@@ -75,9 +75,10 @@ export function buildTimeline(events: DockEvent[] = [], tasks: Task[] = []): Tim
     const previous = timeline.at(-1);
     const role = current.data.role ?? 'assistant';
 
-    if (current.type === 'text' && current.data.role === 'user') toolIndexes.clear();
+    // 插话并入正在执行的那一轮：不切断这一轮里的工具调用，也不和前后的消息拼成一条。
+    if (current.type === 'text' && current.data.role === 'user' && !current.data.steering) toolIndexes.clear();
 
-    if ((current.type === 'text' || current.type === 'thinking') && previous?.type === current.type && (previous.data.role ?? 'assistant') === role) {
+    if ((current.type === 'text' || current.type === 'thinking') && previous?.type === current.type && (previous.data.role ?? 'assistant') === role && !current.data.steering && !previous.data.steering) {
       previous.data.text = `${previous.data.text ?? ''}${current.data.text ?? ''}`;
       previous.sequence = current.sequence;
       previous.timestamp = current.timestamp;
@@ -143,7 +144,8 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
   if (!timeline.length) return [];
   const turns: TimelineEvent[][] = [];
   for (const event of timeline) {
-    const userMessage = event.type === 'text' && event.data.role === 'user';
+    // 插话不另起一轮，留在它并入的那一轮里。
+    const userMessage = event.type === 'text' && event.data.role === 'user' && !event.data.steering;
     if (userMessage || !turns.length) turns.push([]);
     turns.at(-1)!.push(event);
   }

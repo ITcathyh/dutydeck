@@ -1,7 +1,7 @@
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  executionActorSchema, acceptedTaskInputSchema, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, RuntimeError,
+  executionActorSchema, acceptedTaskInputSchema, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steerableTaskNamespace, RuntimeError,
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
   type ExecutionTask, type ExecutionUpgradeCounts, type ExecutionUpgradeSnapshot, type QueueAction, type RecoveryDecisionInput, type ResourceCheckRef, type Session,
@@ -663,6 +663,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           return command(`steering:${input.operationId}`,{ ...f,taskId,input },() => {
             const { t, a } = queuedTask(f,taskId,expectedTaskRevision);
             if (a) fail('STEERING_TASK_HAS_ATTEMPT');
+            if (getAcceptedTask(taskId)?.request?.namespace !== steerableTaskNamespace) fail('STEERING_TASK_OWNED');
             // The steered content already reached this submission; its later settlement cannot undo that.
             const target = attempt(input.target.attemptId);
             if (!target || target.taskId !== input.target.taskId || target.sessionId !== f.sessionId || target.runId !== f.runId || target.submissionState === 'not_submitted') fail('STEERING_TARGET_CONFLICT');

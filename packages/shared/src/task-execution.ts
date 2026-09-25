@@ -140,6 +140,8 @@ export interface CommitResult {
 export interface QueueOperationInput { operationId: string; actor: ExecutionActor; interrupt: boolean }
 /** A queued Task delivered through `_session/steering` into a submitted Attempt instead of its own turn. */
 export interface SteeringDeliveryInput { operationId: string; actor: ExecutionActor; target: AttemptRef; outcome: 'injected' | 'startedNewTurn' }
+/** Only interactive Tasks can be steered: work-item, automation and schedule consumers settle through the Task's own Attempt. */
+export const steerableTaskNamespace: TaskRequestV1['namespace'] = 'runtime';
 export interface QueueAction extends SessionFence {
   operationId: string; source: 'accept' | 'promote' | 'interrupt'; taskId: string; actor: ExecutionActor; interrupt: boolean; target?: AttemptRef & { runId: string };
   revision: number; state: 'pending' | 'applied' | 'blocked' | 'obsolete'; evidence?: QueueActionEvidence;
