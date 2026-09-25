@@ -2801,7 +2801,8 @@ export class LarkMessageCoordinator {
       let failure: unknown;
       // 任务完成事件发出后运行时还要收尾一小段队列，这期间会话短暂忙；一直忙说明有别的任务在排队，这次跳过。
       for (let attempt = 1; ; attempt++) {
-        try { record = await this.runtime.runVerification!(task.sessionId!, { command: plan.command }); break; }
+        // 带上发起人：管理群的执行授权要求验证也有可核验的发起人。
+        try { record = await this.runtime.runVerification!(task.sessionId!, { command: plan.command }, task.event.senderOpenId); break; }
         catch (error) {
           failure = error;
           if (!(error instanceof RuntimeError && error.code === 'SESSION_BUSY') || attempt >= 20 || this.stopped || task.turn !== plan.turn) break;
@@ -3796,7 +3797,8 @@ export class LarkMessageCoordinator {
       this.verifyInFlight.add(task.id);
       const command = effectiveConfig.verificationCommand!.trim();
       void (async () => {
-        try { await this.runtime.runVerification!(task.sessionId!, { command }); }
+        // 带上点击人：管理群的执行授权要求验证有可核验的发起人。
+        try { await this.runtime.runVerification!(task.sessionId!, { command }, operatorOpenId); }
         catch (error) { this.log.warn({ error, taskId: task.id }, '运行验证失败，卡片按最新记录呈现'); }
         finally {
           // 先把卡刷成最新结论再放开重入：否则这段空档里的第二次点击会再起一个真实进程。
