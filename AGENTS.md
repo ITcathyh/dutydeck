@@ -9,5 +9,5 @@
 
 ## 重启线上服务
 
-重启线上服务用 `dutydeck restart`，它会等正在执行的任务结束；不要直接用 `systemctl --user restart dutydeck.service`。只有 restart 等待超时、并且确认可以中断这些任务时，才用 `dutydeck restart --force`。
+重启线上服务用 `dutydeck restart`，它会等正在执行的任务结束；不要直接用 `systemctl --user restart dutydeck.service`。只有 restart 等待超时、并且确认可以中断这些任务时，才用 `dutydeck restart --force`。在 Agent 会话里执行 `dutydeck restart` 时会自动排除当前会话自己那一轮，不必为「命令本身占着一个 running 任务」而加 --force。
 

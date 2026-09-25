@@ -33,6 +33,7 @@ import { AUTOSTART_LINUX_UNIT, defaultRunCommand, type AutostartCommandOutput, t
 import { sleep } from './time.js';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { localLoopbackUrl } from '../local-api-url.js';
 
 export interface DaemonCommandResult {
   ok: boolean;
@@ -50,12 +51,15 @@ export interface DaemonCommandResult {
 
 const READY_TIMEOUT_MS = 15_000;
 const DRAIN_INTERVAL_MS = 5_000;
+const ACTIVITY_REQUEST_TIMEOUT_MS = 5_000;
 const DEFAULT_DRAIN_TIMEOUT_SECONDS = 900;
 const RESTART_HOST_ENV = 'DUTYDECK_DAEMON_RESTART_HOST';
 const RESTART_PORT_ENV = 'DUTYDECK_DAEMON_RESTART_PORT';
 const RESTART_CWD_ENV = 'DUTYDECK_DAEMON_RESTART_CWD';
 const RESTART_DATABASE_ENV = 'DUTYDECK_DAEMON_RESTART_DATABASE';
 const RESTART_AUTH_ENV = 'DUTYDECK_DAEMON_RESTART_AUTH';
+/** detached restart：父进程已 drain 完，被拉起的 restart 子进程据此静默跳过，不再往守护日志写告警。 */
+export const RESTART_DRAINED_ENV = 'DUTYDECK_DAEMON_RESTART_DRAINED';
 
 /** start / stop / restart 与外部交互的钩子；默认走真实的 systemctl 与 SQLite 驱动，测试注入假实现。 */
 export interface DaemonCommandDeps {
@@ -67,6 +71,8 @@ export interface DaemonCommandDeps {
   platform?: string;
   /** 网络请求客户端，默认 globalThis.fetch。测试可注入。 */
   fetch?: typeof fetch;
+  /** 单次活动查询的超时（毫秒），默认 5000；测试可缩短。 */
+  requestTimeoutMs?: number;
   /** 等待函数，默认 sleep。测试可注入。 */
   sleep?: (ms: number) => Promise<void>;
   /** 获取当前时间戳（毫秒），默认 Date.now。测试可注入。 */
@@ -75,6 +81,8 @@ export interface DaemonCommandDeps {
   readToken?: (databasePath: string) => string | undefined;
   /** 本机网卡地址列表，默认读 node:os networkInterfaces。测试可注入。 */
   localAddresses?: () => string[];
+  /** 要从计数里排除的会话 id；默认读 Agent 注入的 dutydeck_session_id。 */
+  excludeSessionId?: string;
   /** 警告输出钩子，默认输出到 process.stderr。测试可注入。 */
   warn?: (message: string) => void;
   /** 进度说明输出钩子，默认输出到 process.stderr。测试可注入。 */
@@ -118,9 +126,18 @@ function resolveLocalUrl(address: string | undefined, localAddresses: () => stri
   return url;
 }
 
+/** 解析 --drain-timeout：只接受正整数秒数；undefined 用默认值；非法值返回 undefined。 */
+export function parseDrainTimeoutSeconds(value: string | undefined): number | undefined {
+  if (value === undefined) return DEFAULT_DRAIN_TIMEOUT_SECONDS;
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+  const seconds = Number(trimmed);
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
+}
+
 /**
  * 重启前等待守护进程中正在执行的任务结束（drain）。
- * - options.force: 跳过等待直接重启；
+ * - options.force / 父进程已 drain（restart 子进程）：直接放行，不查询、不告警；
  * - 守护进程未运行、身份无法验证、查询失败：输出警告并继续重启；
  * - 有任务在执行（> 0）：输出说明，每 5 秒查一次，归零后返回 ok: true；
  * - 等待超时仍有任务在执行：返回 ok: false 与错误说明，不停止旧进程。
@@ -132,9 +149,24 @@ export async function waitForRunningTasksDrain(
   deps: DaemonCommandDeps
 ): Promise<{ ok: true } | { ok: false; error: string; runningTasks: number }> {
   if (options.force) return { ok: true };
+  // detached restart 会再拉起一个执行 `daemon restart` 的后台子进程；父进程已等过，
+  // 子进程静默跳过，别再往守护日志写一行「守护进程未运行」。标记只消费一次，读完立即删除，
+  // 避免进程把标记带到后续执行或泄露给派生的 Agent。
+  if (process.env[RESTART_DRAINED_ENV] === '1') {
+    delete process.env[RESTART_DRAINED_ENV];
+    return { ok: true };
+  }
 
   const warn = deps.warn ?? defaultWarn;
   const info = deps.info ?? defaultInfo;
+
+  const timeoutSeconds = parseDrainTimeoutSeconds(options.drainTimeout);
+  if (timeoutSeconds === undefined) {
+    return {
+      ok: false, runningTasks: 0,
+      error: `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
+    };
+  }
 
   const inspection = inspectDaemon(dir);
   if (inspection.status === 'stale') {
@@ -153,22 +185,32 @@ export async function waitForRunningTasksDrain(
     return { ok: true };
   }
 
+  // 在 dutydeck 托管的 Agent 里执行 restart 时，Agent 自己那轮必然 running；
+  // 通过它注入的 dutydeck_session_id 把本会话从计数里排除，否则一定等满超时。
+  const excludeSessionId = deps.excludeSessionId ?? process.env.dutydeck_session_id;
+  if (excludeSessionId) {
+    info(`检测到当前运行在 Agent 会话 ${excludeSessionId} 中，查询任务数时已排除该会话。`);
+  }
+
   let token: string | undefined;
   if (state?.authEnabled !== false && state?.database) {
     token = (deps.readToken ?? defaultReadToken)(state.database);
   }
 
   const fetcher = deps.fetch ?? fetch;
+  const requestTimeoutMs = deps.requestTimeoutMs ?? ACTIVITY_REQUEST_TIMEOUT_MS;
   const queryRunningTasks = async (): Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }> => {
     try {
       const url = new URL('/api/system/activity', parsedUrl.origin);
+      if (excludeSessionId) url.searchParams.set('excludeSessionId', excludeSessionId);
       const headers: Record<string, string> = {
         Accept: 'application/json',
         ...(token ? { Authorization: `Bearer ${token}` } : {})
       };
       const response = await fetcher(url.toString(), {
         method: 'GET',
-        headers
+        headers,
+        signal: AbortSignal.timeout(requestTimeoutMs)
       });
       if (!response.ok) {
         return { ok: false, error: `HTTP ${response.status}` };
@@ -179,7 +221,7 @@ export async function waitForRunningTasksDrain(
       }
       return { ok: true, runningTasks: data.runningTasks };
     } catch (error: any) {
-      return { ok: false, error: error?.message || String(error) };
+      return { ok: false, error: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? `查询超时（${requestTimeoutMs} ms）` : (error?.message || String(error)) };
     }
   };
 
@@ -192,10 +234,6 @@ export async function waitForRunningTasksDrain(
   if (initial.runningTasks === 0) {
     return { ok: true };
   }
-
-  const timeoutSeconds = options.drainTimeout
-    ? Math.max(1, parseInt(String(options.drainTimeout), 10) || DEFAULT_DRAIN_TIMEOUT_SECONDS)
-    : DEFAULT_DRAIN_TIMEOUT_SECONDS;
 
   info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）`);
 
@@ -309,6 +347,10 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
   }
 
   if (inBand) {
+    // 无论是 foreground 还是 detached 子进程，服务进程在派生任何 Agent 之前必须删除此标记，
+    // 避免 Agent 继承后执行 restart 被跳过等待。与 SUPERVISOR_ENV 的清理机制一致。
+    delete process.env[RESTART_DRAINED_ENV];
+    delete env[RESTART_DRAINED_ENV];
     // We are the daemon process (detached child or foreground entry): own the server and publish self metadata.
     const meta = foreground ? { startedAt: new Date().toISOString() } : childMeta(env);
     const processIdentity = currentProcessIdentity();
@@ -494,6 +536,9 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
   if (!drain.ok) {
     return { ok: false, action: 'restart', running: true, pid: previousState?.pid, error: drain.error };
   }
+  // 父进程已完成 drain：daemonize 出的 restart 子进程继承此标记，静默跳过第二次等待检查，
+  // 否则旧进程已停、它会往守护日志再写一行「守护进程未运行」，挤掉启动失败时的关键日志。
+  (restartEnv as Record<string, string>)[RESTART_DRAINED_ENV] = '1';
   const stopped = await daemonStop(handlers);
   if (!stopped.ok) return { ...stopped, action: 'restart' };
   if (previousCwd && previousCwd !== process.cwd()) {
@@ -780,6 +825,6 @@ function addressFromCli(options: CliOptions, env: NodeJS.ProcessEnv = process.en
     ? '127.0.0.1'
     : options.host ?? env.DUTYDECK_HOST ?? '127.0.0.1';
   const port = Number(options.port ?? env.DUTYDECK_PORT ?? 4310);
-  const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
-  return { host, port, address: `http://${displayHost.includes(':') ? `[${displayHost}]` : displayHost}:${port}`, authEnabled: authEnabledFromCli(options, env) };
+  // 通配地址（0.0.0.0 / ::）在本机统一回环到 127.0.0.1，映射口径与 service.localApiBaseUrl 一致。
+  return { host, port, address: localLoopbackUrl(host, port), authEnabled: authEnabledFromCli(options, env) };
 }

@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
+import { localLoopbackUrl } from './local-api-url.js';
 import { WorkItemService } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
 import { LarkWorkbench } from './lark/workbench.js';
@@ -81,8 +82,7 @@ export function accessMode(config: Pick<AppConfig, 'host' | 'authEnabled'>): 'lo
 }
 
 function localApiBaseUrl(config: Pick<AppConfig, 'host' | 'port'>) {
-  const host = config.host === '0.0.0.0' || config.host === '::' ? '127.0.0.1' : config.host;
-  return `http://${host.includes(':') ? `[${host}]` : host}:${config.port}`;
+  return localLoopbackUrl(config.host, config.port);
 }
 
 /** Production PTY-CLI policy: persistent tmux or a hard failure, never an
