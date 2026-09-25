@@ -298,6 +298,18 @@ describe('resolveLarkSession ask posture', () => {
     runId: 'run_existing', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', ...overrides
   });
 
+  it('starts an approve-reads bot as an ACP session without a full-trust confirmation and rejects non-ACP Agents', async () => {
+    const unconfigured = { ...baseConfig, permissionMode: 'approve-reads' as const, fullTrustConfirmed: false };
+    const session = { id: 'ses_reads', protocol: 'acp', permissionMode: 'approve-reads', state: 'idle' };
+    const runtime = { listSessions: vi.fn(async () => []), start: vi.fn(async () => session), stop: vi.fn() };
+    await expect(resolveLarkSession(runtime as any, log, group() as any, unconfigured, 'oc_group', 'group', 'user:ou_user')).resolves.toBe(session);
+    expect(runtime.start).toHaveBeenCalledWith(expect.objectContaining({ permissionMode: 'approve-reads' }));
+    const pty = { id: 'ses_pty_reads', protocol: 'pty-cli', permissionMode: 'approve-reads', state: 'idle' };
+    const ptyRuntime = { listSessions: vi.fn(async () => []), start: vi.fn(async () => pty), stop: vi.fn(async () => {}) };
+    await expect(resolveLarkSession(ptyRuntime as any, log, group() as any, unconfigured, 'oc_group', 'group', 'user:ou_user')).rejects.toMatchObject({ code: 'LARK_APPROVAL_UNSUPPORTED', statusCode: 422 });
+    expect(ptyRuntime.stop).toHaveBeenCalledWith(pty.id);
+  });
+
   it('starts an ACP ask session without a full-trust confirmation', async () => {
     const ask = { ...baseConfig, permissionMode: 'ask' as const, fullTrustConfirmed: false };
     const session = { id: 'ses_ask', protocol: 'acp', permissionMode: 'ask', state: 'idle' };

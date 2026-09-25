@@ -447,3 +447,31 @@ describe('ACP instance revocation', () => {
     await expect(adapter.start()).rejects.toThrow(/stopped/i);
   });
 });
+
+describe('approve-reads 只读判定', () => {
+  const request = (toolCallId: string, toolCall: Record<string, unknown>, inferredKind?: string) => ({ ...(inferredKind ? { inferredKind } : {}), raw: { toolCall: { toolCallId, ...toolCall } } });
+  const settledNow = (decision: Promise<unknown>) => Promise.race([decision, new Promise(resolve => setImmediate(() => resolve('pending')))]);
+
+  it('只放行执行端声明为 read / search 的请求，其余照常等待审批', async () => {
+    const { runtime, events } = await setup({ permissionMode: 'approve-reads' });
+    expect(await settledNow(runtime.options.onPermissionRequest(request('declared_read', { kind: 'read', title: 'Read src/index.ts' }, 'read')))).toEqual({ outcome: 'allow_once' });
+    expect(await settledNow(runtime.options.onPermissionRequest(request('declared_search', { kind: 'search', title: 'Grep TODO' }, 'search')))).toEqual({ outcome: 'allow_once' });
+    const held = [
+      // 缺 kind 时 acpx 按标题猜出 read，不算执行端声明。
+      request('guessed_read', { title: 'Read and delete: config.json' }, 'read'),
+      request('declared_fetch', { kind: 'fetch', title: 'Fetch https://example.com' }, 'fetch'),
+      request('declared_execute', { kind: 'execute', title: 'cat README.md' }, 'execute'),
+      request('declared_edit', { kind: 'edit', title: 'Write result.txt' }, 'edit'),
+      request('unknown', { title: 'Check status' })
+    ];
+    for (const item of held) expect(await settledNow(runtime.options.onPermissionRequest(item))).toBe('pending');
+    expect(events.filter(event => event.type === 'permission_request' && event.data.status === 'pending').map(event => event.data.id))
+      .toEqual(['guessed_read', 'declared_fetch', 'declared_execute', 'declared_edit', 'unknown']);
+  });
+
+  it('ask 模式下声明为 read 的请求也要审批', async () => {
+    const { runtime, events } = await setup({ permissionMode: 'ask' });
+    expect(await settledNow(runtime.options.onPermissionRequest(request('ask_read', { kind: 'read', title: 'Read file' }, 'read')))).toBe('pending');
+    expect(events).toEqual([expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'ask_read', status: 'pending' }) })]);
+  });
+});
