@@ -309,3 +309,20 @@ it('parses explicit final and its current-turn capability', async () => {
   await createCliProgram('0.0.6', { groupSend }).parseAsync(['node', 'dutydeck', 'group', 'send', 'answer', '--final', '--turn', 'signed-turn']);
   expect(groupSend).toHaveBeenCalledWith('answer', expect.objectContaining({ final: true, turn: 'signed-turn' }));
 });
+
+it('parses group messages with since, until, and query options', async () => {
+  const groupMessages = vi.fn();
+  await createCliProgram('0.0.6', { groupMessages }).parseAsync([
+    'node', 'dutydeck', 'group', 'messages',
+    '--limit', '10',
+    '--since', '2026-09-25T10:00:00Z',
+    '--until', '2026-09-25T12:00:00Z',
+    '--query', 'urgent bug'
+  ]);
+  expect(groupMessages).toHaveBeenCalledWith(expect.objectContaining({
+    limit: '10',
+    since: '2026-09-25T10:00:00Z',
+    until: '2026-09-25T12:00:00Z',
+    query: 'urgent bug'
+  }));
+});

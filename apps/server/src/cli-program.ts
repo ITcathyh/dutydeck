@@ -63,6 +63,9 @@ export interface AgentGroupCliOptions {
   after?: string;
   limit?: string;
   timeoutMs?: string;
+  since?: string;
+  until?: string;
+  query?: string;
   to?: string;
   replyTo?: string;
   inThread?: boolean;
@@ -498,6 +501,9 @@ Examples:
     .description('Read messages from this Lark group')
     .option('--after <cursor>', 'Read only messages after a cursor returned by messages or wait')
     .option('--limit <count>', 'Maximum messages to return (1-50)', '20')
+    .option('--since <time>', 'Filter messages created after this time (ISO 8601 or unix timestamp)')
+    .option('--until <time>', 'Filter messages created before this time (ISO 8601 or unix timestamp)')
+    .option('--query <query>', 'Filter messages containing all whitespace-separated keywords (case-insensitive)')
     .action(options => handlers.groupMessages?.(options));
   group.command('message')
     .description('Fetch a single message by ID, expanding merge_forward (合并转发) content')
