@@ -46,8 +46,20 @@ export function createCodexAdapter(): CliAdapter {
       }
       // 只做精确 id 续接；无 resumeSessionId 时新起会话（不支持通过
       // history.jsonl 模糊反查）。
+      // 仅前移 -c 配置覆盖参数到 resume 子命令之前，保证外层/启动器的 -c 生效，
+      // 子命令选项保留在 resume 之后。
       if (isRealResume) {
-        return ['resume', ...args, usable!];
+        const rootConfigArgs: string[] = [];
+        const subcommandArgs: string[] = [];
+        for (let i = 0; i < args.length; i++) {
+          const arg = args[i]!;
+          if (arg === '-c') {
+            rootConfigArgs.push(arg, args[++i]!);
+          } else {
+            subcommandArgs.push(arg);
+          }
+        }
+        return [...rootConfigArgs, 'resume', ...subcommandArgs, usable!];
       }
       return args;
     },
