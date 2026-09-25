@@ -1,4 +1,4 @@
-import { RuntimeError, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, countDecisionUsage } from '@dutydeck/shared';
+import { RuntimeError, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GATE, countDecisionUsage } from '@dutydeck/shared';
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD, countBotTurnUsage } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationParticipationMode } from '@dutydeck/shared';
@@ -24,6 +24,8 @@ export interface GroupParticipationOptions {
   readGroupDescription?(scope: CollaborationScope, config: StoredLarkConfig): Promise<string>;
   withDelivery?<T>(scope: CollaborationScope, actionId: string, send: () => Promise<T>): Promise<T>;
   listScopes?(appId: string): Promise<CollaborationScope[]>;
+  /** 本月成本上限已用满时返回说明；判定前调用，返回说明即不再判定、不建会话。 */
+  usageRefusal?(scope: CollaborationScope): Promise<string | undefined>;
   now?: () => Date;
   debounceMs?: number;
   log?: { warn(details: unknown, message: string): void };
@@ -396,6 +398,13 @@ export class LarkGroupParticipation {
     if (!trigger) return;
     const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
     if (await repo.getDecision(scope, id)) return;
+    // 成本上限用满后判定也不再跑；群里的说明由用量账本发一次。留痕与预算闸门一样按小时分桶。
+    const refusal = await this.options.usageRefusal?.(scope);
+    if (refusal) {
+      await repo.recordDecision({ id: `decision_usage_cap_${digest([scope, Math.floor(this.now().getTime() / 3_600_000)])}`, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion,
+        action: 'silent', reason: refusal, evidenceIds: [trigger.id], status: 'suppressed', inputSnapshot: { gate: USAGE_CAP_GATE }, createdAt: this.now().toISOString() });
+      return;
+    }
     // 判定本身要花一次模型调用，observe 影子模式同样花。闸门必须在调用之前，
     // 否则每条新消息都会先付费再被发言预算挡下。
     const gate = await this.decisionBudget(scope, snapshot.settings.maxDecisionsPerHour);
@@ -485,7 +494,8 @@ export class LarkGroupParticipation {
         response = parseParticipationResponse(JSON.stringify({ response: await this.options.decider.respond(config, snapshot, result, trigger.id) }));
       } catch (error) {
         generationError = error instanceof Error ? error.message.slice(0, 1000) : 'Reply generation failed';
-        response = '这次回复生成失败，请稍后重试。';
+        // 判定之后成本刚好用满：如实说明上限，「稍后重试」在调高上限或下月之前都不会成功。
+        response = error instanceof RuntimeError && error.code === 'USAGE_CAP_EXCEEDED' ? error.message : '这次回复生成失败，请稍后重试。';
       }
       await repo.updateDecision(scope, id, { status: generationError ? 'failed' : 'candidate', response });
       action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'sending' });

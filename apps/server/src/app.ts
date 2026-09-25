@@ -25,6 +25,7 @@ import { registerWorkItemRoutes, type WorkItemRouteOptions } from './work-item-r
 import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } from './session-automation-routes.js';
 import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
 import { registerCiHookRoutes, type CiHookRouteOptions } from './ci-hook-routes.js';
+import { registerUsageRoutes, type UsageRouteOptions } from './usage-routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -62,6 +63,7 @@ export interface BuildAppOptions {
   workspaceGroups?: WorkspaceGroupRouteOptions;
   sessionNames?: SessionNameRouteOptions;
   collaboration?: CollaborationRouteOptions;
+  usage?: UsageRouteOptions;
   workItems?: WorkItemRouteOptions;
   workItemTools?: WorkItemToolsOptions;
   memoryTools?: LarkMemoryToolsOptions;
@@ -153,6 +155,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.memoryTools) await registerLarkMemoryTurnRoutes(app, { store: options.memoryTools.store,
     authorize: (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result') });
   if (options.collaboration) await registerCollaborationRoutes(app, options.collaboration);
+  if (options.usage) registerUsageRoutes(app, options.usage, (request, sessionId) => requireSessionExecution(request, sessionId, 'session', 'task.view_result'));
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
   app.get<{ Querystring: { excludeSessionId?: string } }>('/api/system/activity', async request => {

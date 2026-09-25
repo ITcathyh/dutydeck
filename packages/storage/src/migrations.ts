@@ -5,6 +5,7 @@ import { createBotConfigurationSchema } from './bot-configuration-migration.js'
 import { createCollaborationSchema } from './collaboration-migration.js'
 import { pruneScheduleEntityVersions } from './schedule-foundation.js'
 import { createCiWebhookSchema } from './ci-webhook.js'
+import { createUsageLedgerSchema } from './usage-ledger.js'
 
 export interface Migration {
   version: number
@@ -568,7 +569,8 @@ export const migrations: Migration[] = [
     }
   },
   // CI webhook 的 event-id 去重和任务绑定是短期记录：单独建表，过期或任务结束即删，不写进只增不删的 configs。
-  { version: 26, name: 'ci_webhook_short_lived_records', up: createCiWebhookSchema }
+  { version: 26, name: 'ci_webhook_short_lived_records', up: createCiWebhookSchema },
+  { version: 27, name: 'usage_ledger', up: createUsageLedgerSchema }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

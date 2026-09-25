@@ -205,10 +205,10 @@ export class LeaderDelegationService {
   }
 
   /** 规划会话归属的原话题与发起人：风险策略按它们取，与目标子会话一致。 */
-  async parentForSession(sessionId: string): Promise<{ parentSessionId: string; actorId: string } | undefined> {
+  async parentForSession(sessionId: string): Promise<{ parentSessionId: string; actorId: string; parentTaskId: string } | undefined> {
     const session = await this.options.repositories.sessions.get(sessionId);
     const record = session?.source === 'lark-leader' && session.sourceId ? await this.read(session.sourceId) : undefined;
-    return record ? { parentSessionId: record.parentSessionId, actorId: record.actorId } : undefined;
+    return record ? { parentSessionId: record.parentSessionId, actorId: record.actorId, parentTaskId: record.parentTaskId } : undefined;
   }
 
   private schedule(id: string) {

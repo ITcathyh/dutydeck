@@ -135,7 +135,8 @@ export class ReadonlyParticipationDecider implements ParticipationDecider {
     const cwd = join(this.options.workspaceRoot, key);
     await mkdir(cwd, { recursive: true });
     // Each phase gets a fresh session so prior model context cannot bypass the frozen snapshot.
-    return runReadonlyPrompt(this.options.runtime, this.options.repos, { agentId, cwd, model: config.memoryModel ?? config.defaultModel, source: `lark-${phase}`, sourceId: key, prompt, timeoutMs: this.options.timeoutMs ?? 60_000 });
+    // sourceId 记下 appId:chatId，用量账本据此把判定和回复生成的成本记到这个群。
+    return runReadonlyPrompt(this.options.runtime, this.options.repos, { agentId, cwd, model: config.memoryModel ?? config.defaultModel, source: `lark-${phase}`, sourceId: `${snapshot.scope.appId}:${snapshot.scope.chatId}`, prompt, timeoutMs: this.options.timeoutMs ?? 60_000 });
   }
 }
 

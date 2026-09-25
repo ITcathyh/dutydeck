@@ -837,7 +837,7 @@ describe('v19 bot configuration migration & schema checks', () => {
       // Remove obstacle and retry: migration completes and reopening is idempotent
       db.exec('DROP TABLE configuration_operations');
       expect(() => runMigrations(db)).not.toThrow();
-      expect(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()).toEqual({ v: 26 });
+      expect(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get()).toEqual({ v: 27 });
       expect(() => runMigrations(db)).not.toThrow();
       expect(db.prepare('SELECT authority FROM configuration_authority WHERE id=1').get()).toEqual({ authority: 'legacy' });
     } finally {

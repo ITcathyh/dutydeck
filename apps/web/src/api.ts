@@ -1,6 +1,7 @@
 import type { CreateWorkItemInput, WorkItem, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription } from '@dutydeck/shared';
 import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
+import type { UsageCap, UsageGroup, UsageTotals } from '@dutydeck/shared';
 import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dutydeck/shared';
 
 export type { WorkspaceCleanupPreview, WorkspaceCleanupResult };
@@ -158,6 +159,12 @@ export type ManagedGroupBot = {
   applied: boolean;
   error?: string;
 };
+
+export type UsageSummaryWindow = { since: string; totals: UsageTotals; bots: UsageGroup[]; chats: UsageGroup[]; actors: UsageGroup[]; categories: UsageGroup[] };
+export type UsageSummary = { month: UsageSummaryWindow; week: UsageSummaryWindow; caps: UsageCap[] };
+/** own：本任务自己的执行；subSteps：归到本任务名下的编排子步骤与 Leader 规划。 */
+export type SessionUsage = { own: UsageTotals; subSteps: UsageTotals };
+export type UsageCapInput = { scope: 'bot'; appId: string; monthlyCostUsd: number } | { scope: 'group'; appId: string; chatId: string; monthlyCostUsd: number };
 
 export type ManagedGroup = {
   key: string;
@@ -322,6 +329,10 @@ export const api = {
   steerQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}/steer`, { method: 'POST' }),
   injectQueued: (id: string, taskId: string) => json<SteeringResult & { task: Task }>(`/api/sessions/${id}/queue/${taskId}/inject`, { method: 'POST' }),
   larkConfig: () => json<LarkConfig>('/api/lark/config'),
+  usageSummary: () => json<UsageSummary>('/api/usage/summary', { cache: 'no-store' }),
+  setUsageCap: (body: UsageCapInput) => json<UsageCap>('/api/usage/caps', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+  deleteUsageCap: ({ scope, appId, chatId }: Pick<UsageCap, 'scope' | 'appId' | 'chatId'>) => json<{ deleted: boolean }>(`/api/usage/caps?${new URLSearchParams({ scope, appId, ...(chatId ? { chatId } : {}) })}`, { method: 'DELETE' }),
+  sessionUsage: (id: string) => json<SessionUsage>(`/api/sessions/${encodeURIComponent(id)}/usage`),
   startLarkOpenPlatformSetup: (appId: string, forceLogin = false) => json<LarkOpenPlatformSetupJob>('/api/lark/open-platform/configure', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, forceLogin }) }),
   larkOpenPlatformSetupJob: (jobId: string) => json<LarkOpenPlatformSetupJob>(`/api/lark/open-platform/jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),
   createLarkApp: (input: { requestId: string; name: string; forceLogin?: boolean }) => json<LarkAppCreationJob>('/api/lark/apps/create', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),

@@ -361,6 +361,7 @@ export class LarkMessageCoordinator {
     private readonly groupManager?: LarkGroupManager,
     private readonly workflowOptions: {
       participation?: LarkGroupParticipation;
+      usage?: Pick<import('../usage-ledger.js').UsageLedger, 'describe'>;
       store?: ConfigRepository;
       broker?: RelayAskBroker;
       automation?: import('../session-automation.js').SessionAutomationService;
@@ -1497,10 +1498,11 @@ export class LarkMessageCoordinator {
       if (route.command === 'status') {
         const participation = event.chatType === 'group'
           ? await this.workflowOptions.participation?.describe({ appId: config.appId, chatId: event.chatId }).catch(() => undefined) : undefined;
+        const usage = await this.workflowOptions.usage?.describe(config.appId, event.chatType === 'group' ? event.chatId : undefined).catch(() => undefined);
         // 当前一轮停在审批上、后面还有指令排队时给一个拒绝入口：按钮与 /tasks 行内审批同形，
         // 登记成任务导航卡后由 respond 照常做鉴权和一次性决议。
         const approval = sessionId ? (await this.approvalBlock(config.appId, sessionId))?.record : undefined;
-        const card = await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation].filter(Boolean).join('\n\n'),
+        const card = await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation, usage].filter(Boolean).join('\n\n'),
           approval ? { elements: [{ tag: 'button', element_id: 'status_reject_approval', type: 'danger', text: { tag: 'plain_text', content: '拒绝这条审批' },
             behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: approval.id, generation: approval.boot } }] }] } : {});
         if (card && approval) {

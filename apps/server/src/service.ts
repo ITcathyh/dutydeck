@@ -49,6 +49,7 @@ import {
   createInstallationPrincipalResolver,
 } from './foundation-policy.js';
 import { WorkspaceOrganizationService } from './workspace-organization.js';
+import { parseUsagePricing, UsageLedger } from './usage-ledger.js';
 
 export interface StartLocalServerOptions {
   configureCollaborationExtensions?: (extensions: CollaborationExtensions) => void;
@@ -244,8 +245,27 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       sessionId,
     });
   };
+  // 用量账本：runtime 每轮交来读数、派发新任务前查月度上限。子步骤的根任务取自下方的工作项与 Leader 委托。
+  const usageLedger = new UsageLedger({
+    repositories: repos,
+    pricing: parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON),
+    parentOf: async session => {
+      const binding = session.source === 'work_item' ? await workItems.parentForSession(session.id) : await delegations.parentForSession(session.id);
+      return binding ? { parentSessionId: binding.parentSessionId, ...(binding.parentTaskId ? { parentTaskId: binding.parentTaskId } : {}) } : undefined;
+    },
+    isProactive: async (appId, chatId, messageId) => (await repos.collaboration.listActions({ appId, chatId }, 500))
+      .some(action => action.kind === 'participation.dispatch' && action.payload.messageId === messageId),
+    notify: async (target, text, idempotencyKey) => {
+      const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === target.appId);
+      if (!bot?.appSecret) throw new Error('机器人凭证缺失，无法发送用量提醒');
+      await createLarkCardService(env, workbenchHttp.fetch, bot).sendText({ chatId: target.chatId, text, idempotencyKey });
+    },
+    log: { warn: (details, message) => app?.log.warn(details, message) }
+  });
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }),
+    admitTask: (session, request) => usageLedger.admit(session, request),
+    recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
     authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await codebaseCi?.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
     authorizeControl: async (sessionId, actor, _action) => {
       if (await workItems.authorizeControl(sessionId, actor)) return;
@@ -368,6 +388,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       workspaceRoot: config.databaseUrl === ':memory:' ? join(tmpdir(), 'dutydeck-decisions') : join(dirname(resolve(config.databaseUrl)), 'decisions'),
       client: bot => createLarkCardService(env, workbenchHttp.fetch, bot), configureExtensions: options.configureCollaborationExtensions,
       readMemory: scope => readCollaborationMemory(scope),
+      usageRefusal: scope => usageLedger.refusal(scope.appId, scope.chatId),
       listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
       log: { warn: (details, message) => app?.log.warn(details, message) } });
     setupCleanup.push(() => collaboration?.close());
@@ -415,12 +436,14 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
       },
       webRoot,
+      usage: { ledger: usageLedger, authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
       collaboration: { service: collaboration.service, runtime, tools: agentTools, evaluation: collaboration.evaluation, extensions: collaboration.extensions,
         authorizeManagement: async request => await resolveInstallationPrincipal(request) ? installationOwnerTaskActor : undefined,
         bootstrap: scope => collaboration!.participation.bootstrap(scope), prepareSettings: (scope, patch) => collaboration!.prepareSettings(scope, patch), onChange: scope => collaboration!.onChange(scope) },
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
         participation: collaboration.participation,
+        usage: usageLedger,
         automation,
         workbench,
         relayBroker,

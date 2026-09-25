@@ -344,7 +344,7 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     // 按 deny-all 起会被运行时拒绝，规划会话按完全信任起；风险策略按原话题与发起人取。
     const planning = (await f.runtime.listSessions()).filter(session => session.source === 'lark-leader');
     expect(planning).toEqual([expect.objectContaining({ agentId: 'leader', permissionMode: 'full-trust', sourceId: delegated.id })]);
-    expect(await f.delegations.parentForSession(planning[0]!.id)).toEqual({ parentSessionId: turn.parent.id, actorId: 'ou_alice' });
+    expect(await f.delegations.parentForSession(planning[0]!.id)).toEqual({ parentSessionId: turn.parent.id, actorId: 'ou_alice', parentTaskId: expect.stringMatching(/^task_/) });
     expect(await f.delegations.parentForSession(turn.parent.id)).toBeUndefined();
     await f.work.tick();
     const confirm = () => f.cards.find(card => card.input.elements?.some((element: any) => element.behaviors?.[0]?.value?.dutydeck_work_item === 'confirm'));
