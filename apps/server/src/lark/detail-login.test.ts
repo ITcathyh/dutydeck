@@ -25,6 +25,7 @@ import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import { performLarkCardReconcile } from './reconciler.js';
 import { buildLarkCard, LarkServiceError } from './service.js';
+import { setLarkSessionShareSigner } from './detail-link.js';
 
 const components = (value: any): any[] => {
   if (Array.isArray(value)) return value.flatMap(components);
@@ -453,16 +454,33 @@ describe('coordinator：查看详情私信一次性登录链接', () => {
     expect(h.privateMessages()).toHaveLength(1);
   });
 
-  it('未开启 Web 登录时卡片保持直接打开的链接，回调也不发链接', async () => {
+  it('一键登录停用后卡片直接链到只读分享页；旧卡上的回调私信同一个分享链接，谁点都给', async () => {
+    const disposeSigner = setLarkSessionShareSigner(sessionId => `sig-${sessionId}`);
+    cleanups.push(async () => disposeSigner());
     const h = await harness({ loginLinks: false });
     const { sessionId, extra } = await h.runTask();
+    const shareUrl = `https://dock.example/share/${sessionId}#sig-${sessionId}`;
     const firstFrame = h.service.reply.mock.calls.map(([input]: any[]) => input).find(input => input.cardKind === 'process');
     for (const card of [buildLarkCard(h.cards.get(extra.final_message_id!)), buildLarkCard(firstFrame)]) {
       expect(detailButtons(card)).toHaveLength(0);
-      expect(JSON.stringify(card)).toContain(`[查看详情](https://dock.example/sessions/${sessionId})`);
+      expect(JSON.stringify(card)).toContain(`[查看详情](${shareUrl})`);
     }
-    expect(await h.coordinator.handleAction({ action: 'detail', task_id: 'om_task', turn: String(extra.turn) }, 'ou_alice', { messageId: extra.final_message_id, chatId: 'oc_group' }))
-      .toMatchObject({ type: 'error' });
-    expect(h.privateMessages()).toHaveLength(0);
+    // 上一版发出的卡片上还是回调按钮：非管理员点也拿到链接，因为新卡页脚对群里所有人可见。
+    const groupBefore = h.groupMessages();
+    const value = { action: 'detail', task_id: 'om_task', turn: String(extra.turn) };
+    expect(await h.coordinator.handleAction(value, 'ou_bob', { messageId: extra.final_message_id, chatId: 'oc_group' }))
+      .toEqual({ type: 'success', content: '已私信你这个任务的只读详情链接' });
+    const [dm, ...extraDms] = h.privateMessages();
+    expect(extraDms).toHaveLength(0);
+    expect(dm).toMatchObject({ receiveId: 'ou_bob', receiveIdType: 'open_id' });
+    expect(openUrls(buildLarkCard(dm))).toEqual([shareUrl]);
+    expect(JSON.stringify(dm)).not.toContain('/api/auth/link');
+    expect(h.groupMessages()).toBe(groupBefore);
+    expect(JSON.stringify([h.log.info.mock.calls, h.log.warn.mock.calls, h.log.error.mock.calls])).not.toContain(`sig-${sessionId}`);
+    // 账本校验照旧：伪造的卡片或别的群不给链接。
+    for (const context of [{ messageId: 'om_forged', chatId: 'oc_group' }, { messageId: extra.final_message_id, chatId: 'oc_other' }]) {
+      expect(await h.coordinator.handleAction(value, 'ou_bob', context)).toMatchObject({ type: 'warning' });
+    }
+    expect(h.privateMessages()).toHaveLength(1);
   });
 });
