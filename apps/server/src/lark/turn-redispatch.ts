@@ -39,6 +39,22 @@ const readOnlyTools = new Set(['read', 'grep', 'glob', 'ls', 'notebookread', 'to
   'webfetch', 'websearch', 'skill', 'listagents', 'bashoutput', 'toolsearch', 'exitplanmode']);
 /** Codex 等 ACP Agent 把动作写成标题。 */
 const readOnlyTitle = /^(?:read file|search for|list files in|view image)\b/i;
+/**
+ * 内置 Claude ACP 适配器（claude-agent-acp）也把工具写成标题：Read 是「Read <路径>」，Glob 是「Find …」，Grep 是「grep …」，
+ * WebFetch 是「Fetch <网址>」，WebSearch 是带引号的查询。子 Agent 的标题是它的描述、提问的标题是问题原文，可能碰巧以这些词开头，
+ * 所以参数名也要都属于对应的只读工具。
+ */
+const claudeAcpReadTools: Array<[RegExp, string[]]> = [
+  [/^Read\b/, ['file_path', 'offset', 'limit', 'pages']],
+  [/^Find\b/, ['pattern', 'path']],
+  [/^grep\b/, ['pattern', 'path', 'glob', 'type', 'output_mode', '-i', '-n', '-o', '-A', '-B', '-C', 'context', 'head_limit', 'offset', 'multiline']],
+  [/^Fetch\b/, ['url', 'prompt']],
+  [/^(?:"|Web search\b)/, ['query', 'allowed_domains', 'blocked_domains']]
+];
+const claudeAcpReadOnly = (title: string, input?: Record<string, unknown>) =>
+  Boolean(input) && claudeAcpReadTools.some(([pattern, keys]) => pattern.test(title) && Object.keys(input!).every(key => keys.includes(key)));
+/** ACP 的更新、结果事件常不带标题，acpx 与 normalizeAcpxEvent 补的缺省名。 */
+const genericToolName = (name: string) => !name || /^(?:tool|tool call)$/i.test(name);
 
 const readOnlyPrograms = new Set(['cat', 'head', 'tail', 'less', 'more', 'wc', 'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ls', 'tree', 'pwd', 'echo',
   'printf', 'which', 'whereis', 'type', 'file', 'stat', 'du', 'df', 'sort', 'uniq', 'cut', 'tr', 'nl', 'column', 'diff', 'cmp', 'comm', 'jq',
@@ -99,6 +115,37 @@ function shellSegments(command: string): string[][] | undefined {
 
 const displayName = (value: string) => /^[A-Za-z0-9._+-]{1,32}$/.test(value) ? value : '';
 
+/** curl 认得的只读选项：前一组不带值，后一组带一个值。 */
+const curlFlags = new Set(['-s', '-S', '-L', '-i', '-I', '-v', '-f', '-k', '-g', '-#', '--silent', '--show-error', '--location', '--include',
+  '--head', '--verbose', '--fail', '--fail-with-body', '--insecure', '--globoff', '--progress-bar', '--compressed', '--no-progress-meter']);
+const curlValueOptions = new Set(['-H', '-X', '-m', '-A', '-e', '-u', '-r', '-b', '-x', '--header', '--request', '--max-time', '--user-agent',
+  '--referer', '--user', '--range', '--cookie', '--proxy', '--connect-timeout', '--retry', '--url', '--resolve', '--noproxy', '--cacert']);
+
+/**
+ * curl 只放过表里的选项、且方法是 GET / HEAD。短选项可以连写，值可以贴在后面（-sSL、-XGET、-H'Accept: x'）。
+ * 表外的写法一律算写：-d / -F / -T / -o 这类带请求体或写文件的，以及 --request=POST 这种 curl 自己都不认的写法。
+ */
+function curlReadOnly(args: string[]): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (!arg.startsWith('-')) continue;
+    let option = arg, value: string | undefined;
+    if (!arg.startsWith('--')) {
+      let j = 1;
+      while (j < arg.length && curlFlags.has(`-${arg[j]}`)) j++;
+      if (j === arg.length) continue;
+      option = `-${arg[j]}`;
+      value = arg.slice(j + 1) || undefined;
+    } else if (curlFlags.has(arg)) {
+      continue;
+    }
+    if (!curlValueOptions.has(option)) return false;
+    value ??= args[++i];
+    if ((option === '-X' || option === '--request') && !/^(?:GET|HEAD)$/i.test(value ?? '')) return false;
+  }
+  return true;
+}
+
 /** 一段命令是否只读：只读返回 undefined，否则返回写进说明的命令名（名字不规整时是空串）。 */
 function segmentRisk(words: string[]): string | undefined {
   let index = 0;
@@ -119,17 +166,7 @@ function segmentRisk(words: string[]): string | undefined {
     const scripts = args.filter(arg => !arg.startsWith('-'));
     return args.includes('-n') && !args.some(arg => /^-i|^--in-place/.test(arg)) && /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/.test(scripts[0] ?? '') ? undefined : name;
   }
-  if (program === 'curl') {
-    // 默认是 GET；带请求体、改方法或写本地文件都算写。
-    for (let i = 0; i < args.length; i++) {
-      const arg = args[i]!;
-      if (arg === '-X' || arg === '--request') { if (!/^(?:GET|HEAD)$/i.test(args[++i] ?? '')) return name; continue; }
-      if (/^-X(?:GET|HEAD)$/i.test(arg)) continue;
-      if (/^--(?:data|json|form|upload-file|output|remote-name|config)/.test(arg)) return name;
-      if (/^-[A-Za-z]+$/.test(arg) && /[XdFToOK]/.test(arg)) return name;
-    }
-    return undefined;
-  }
+  if (program === 'curl') return curlReadOnly(args) ? undefined : name;
   if (program === 'git') {
     let i = 0;
     while (i < args.length && args[i]!.startsWith('-')) i += ['-C', '-c'].includes(args[i]!) ? 2 : 1;
@@ -168,19 +205,32 @@ const commandText = (input: unknown): string | undefined => {
 /**
  * 这一轮已记录的工具调用里有没有可能已经对外生效的：返回写进说明的原因（「执行过 git push」「调用过 SendMessage」），
  * 全是只读时返回 undefined。
+ * 同一次调用的开始、更新、结果按 id 合起来看：ACP 的开始事件参数常是空的，更新与结果常只有缺省名，单看哪一条都认不出。
  */
 export function larkReplayUnsafeReason(events: AgentEvent[]): string | undefined {
-  for (const event of events) {
-    if (event.type !== 'tool_call' && event.type !== 'tool_result') continue;
-    const data = (event.data ?? {}) as { name?: unknown; input?: unknown };
+  const calls = new Map<string, { names: Set<string>; commands: Set<string>; input?: Record<string, unknown> }>();
+  events.forEach((event, index) => {
+    if (event.type !== 'tool_call' && event.type !== 'tool_result') return;
+    const data = (event.data ?? {}) as { id?: unknown; name?: unknown; input?: unknown };
+    const key = data.id === undefined || data.id === null ? `#${index}` : String(data.id);
+    const call = calls.get(key) ?? { names: new Set<string>(), commands: new Set<string>() };
+    calls.set(key, call);
     const name = typeof data.name === 'string' ? data.name.trim() : '';
+    if (!genericToolName(name)) call.names.add(name);
     const command = commandText(data.input);
-    if (command !== undefined) {
-      const risk = shellRisk(command);
-      if (risk !== undefined) return risk ? `执行过 ${risk}` : '执行过无法判断是否只读的命令';
+    if (command !== undefined) call.commands.add(command);
+    if (data.input && typeof data.input === 'object' && !Array.isArray(data.input)) call.input = { ...call.input, ...data.input };
+  });
+  for (const call of calls.values()) {
+    if (call.commands.size) {
+      for (const command of call.commands) {
+        const risk = shellRisk(command);
+        if (risk !== undefined) return risk ? `执行过 ${risk}` : '执行过无法判断是否只读的命令';
+      }
       continue;
     }
-    if (readOnlyTools.has(name.toLowerCase()) || readOnlyTitle.test(name)) continue;
+    const name = call.names.size ? [...call.names].find(name => !readOnlyTools.has(name.toLowerCase()) && !readOnlyTitle.test(name) && !claudeAcpReadOnly(name, call.input)) : '';
+    if (name === undefined) continue;
     return /^[A-Za-z0-9_.:-]{1,48}$/.test(name) ? `调用过 ${name}` : '调用过无法判断是否只读的工具';
   }
   return undefined;
