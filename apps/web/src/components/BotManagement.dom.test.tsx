@@ -1,6 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useState } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError, type Agent, type LarkBotConfig, type LarkConfig, type ManagedGroup } from '../api';
@@ -9,7 +9,7 @@ import { BotManagement } from './BotManagement';
 
 // 草稿是模块级 store（切走视图也要留住），用例之间必须显式清空，否则互相串。
 beforeEach(() => resetDrafts());
-afterEach(() => { vi.restoreAllMocks(); resetDrafts(); });
+afterEach(() => { vi.restoreAllMocks(); resetDrafts(); vi.useRealTimers(); });
 
 const mockBot: LarkBotConfig = {
   configured: true,
@@ -357,6 +357,79 @@ describe('BotManagement 会话记忆', () => {
 
     expect(await screen.findByText('正在运行：整理')).toBeTruthy();
     expect(screen.getByText('上次提取 尚未提取 · 上次整理 尚未整理')).toBeTruthy();
+  });
+
+  it('正在运行时每 10 秒自动重新读取，完成后显示完成结果', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+
+    const runningStatus = {
+      appId: 'cli_test_1',
+      enabled: true,
+      groups: {
+        appId: 'cli_test_1',
+        pool: 'groups',
+        shared: true,
+        liveEntries: 10,
+        topics: 2,
+        pendingTurns: 1,
+        running: { kind: 'extraction' as const, startedAt: '2026-09-25T10:00:00.000Z' }
+      }
+    };
+
+    const completedStatus = {
+      appId: 'cli_test_1',
+      enabled: true,
+      groups: {
+        appId: 'cli_test_1',
+        pool: 'groups',
+        shared: true,
+        liveEntries: 12,
+        topics: 2,
+        pendingTurns: 0,
+        lastExtractionAt: '2026-09-25T10:00:10.000Z',
+        lastRun: {
+          kind: 'extraction' as const,
+          at: '2026-09-25T10:00:10.000Z',
+          ok: true,
+          added: 2,
+          superseded: 0,
+          retired: 0,
+          retopiced: 0,
+          rejected: 0
+        }
+      }
+    };
+
+    let callCount = 0;
+    vi.spyOn(api, 'larkMemoryStatus').mockImplementation(async () => {
+      callCount++;
+      return callCount === 1 ? runningStatus : completedStatus;
+    });
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+
+    // 初始异步加载完成
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+    });
+
+    // 第一次返回 running：显示「正在运行：提取」
+    expect(screen.getByText('正在运行：提取')).toBeTruthy();
+
+    // 推进定时器 10 秒后触发 refetch
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    // 第二次返回已完成：页面显示完成结果，不再显示正在运行
+    expect(screen.getByText('群共享记忆：12 条 · 2 个主题 · 待提取 0 轮')).toBeTruthy();
+    expect(screen.queryByText('正在运行：提取')).toBeNull();
+    expect(screen.getByText('成功')).toBeTruthy();
   });
 
   it('接口失败时显示记忆状态读取失败，不影响页面其他部分', async () => {
