@@ -760,7 +760,7 @@ export function BotManagement({
                       </div>
                     </>
                   )}
-                  <p className="text-caption text-subtle">记忆按聊天隔离，仅作为参考内容注入，不授予操作权限。</p>
+                  <p className="text-caption text-subtle">各群共享同一份记忆，私聊各自独立；仅作为参考内容注入，不授予操作权限。</p>
                 </div>
               </Card>
 

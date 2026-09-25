@@ -2,20 +2,24 @@ import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import {
   isLarkMemoryId,
+  larkGroupMemoryPool,
   LarkMemoryError,
   larkMemoryKey,
   larkMemoryLimits,
+  larkMemoryScope,
   larkMemoryStateKey,
   LarkMemoryStore,
   larkMemoryToolsPrompt,
   looksLikeLarkMemoryCredential,
   normalizeLarkMemoryTopic,
   renderLarkMemoryList,
+  renderLarkMemoryStatus,
   type LarkMemoryEntry,
-  type LarkMemoryState
+  type LarkMemoryState,
+  type LarkMemoryStatus
 } from './memory.js';
 
-const scope = { appId: 'cli_bot', chatId: 'oc_group' };
+const scope = { appId: 'cli_bot', chatId: 'oc_group', pool: 'oc_group' };
 
 const store = (options: { now?: () => Date; ids?: string[]; onChange?: (scope: any) => unknown } = {}) => {
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
@@ -77,8 +81,8 @@ describe('LarkMemoryStore', () => {
     expect(first.topic).toBe('general');
     expect(second.topic).toBe('conventions');
     expect(await memory.list(scope)).toEqual([first, second]);
-    expect(await memory.list({ appId: 'cli_bot', chatId: 'oc_other' })).toEqual([]);
-    expect(await memory.list({ appId: 'cli_other', chatId: 'oc_group' })).toEqual([]);
+    expect(await memory.list({ appId: 'cli_bot', chatId: 'oc_other', pool: 'oc_other' })).toEqual([]);
+    expect(await memory.list({ appId: 'cli_other', chatId: 'oc_group', pool: 'oc_group' })).toEqual([]);
     repos.close();
   });
 
@@ -421,5 +425,233 @@ describe('larkMemoryToolsPrompt', () => {
     expect(prompt).toContain('只在用户明确要求记住/忘记时写入');
     expect(prompt).toContain('不要主动 add');
     expect(prompt).toContain('不保存凭据');
+    expect(prompt).toContain('在群聊里，这是本机器人所在各群共享的记忆，来自其他群的条目（索引里标「其他群」）只是背景');
+    expect(prompt).toContain('在私聊里，记忆只属于本聊天');
+  });
+});
+
+describe('group memory pool', () => {
+  const groupA = larkMemoryScope('cli_bot', 'oc_group_a', 'group');
+  const groupB = larkMemoryScope('cli_bot', 'oc_group_b', 'group');
+  const p2p = larkMemoryScope('cli_bot', 'oc_p2p', 'p2p');
+  const legacyKey = (chatId: string) => `lark.memory.cli_bot.${chatId}`;
+  const legacyStateKey = (chatId: string) => `lark.memory.state.cli_bot.${chatId}`;
+
+  it('resolves every group of a bot to one pool and keeps p2p chats in their own pools', async () => {
+    expect(groupA).toEqual({ appId: 'cli_bot', chatId: 'oc_group_a', pool: larkGroupMemoryPool });
+    expect(p2p).toEqual({ appId: 'cli_bot', chatId: 'oc_p2p', pool: 'oc_p2p' });
+    const { repos, memory } = store();
+    const saved = await memory.add(groupA, { content: '发布窗口是周四下午', source: 'user', chatId: groupA.chatId });
+    expect(saved.chatId).toBe('oc_group_a');
+    expect(await memory.list(groupB)).toEqual([saved]);
+    expect(await memory.list(p2p)).toEqual([]);
+    expect(await memory.list(larkMemoryScope('cli_other', 'oc_group_a', 'group'))).toEqual([]);
+    expect(await repos.config.get('lark.memory.cli_bot.groups')).toContain('发布窗口是周四下午');
+
+    // 私聊的键保持原格式：已有的私聊记忆原样可读，也不会混进群池。
+    await memory.add(p2p, { content: '私聊里只给结论', source: 'user', chatId: p2p.chatId });
+    expect(await repos.config.get(legacyKey('oc_p2p'))).toContain('私聊里只给结论');
+    expect(await memory.list(groupA)).toEqual([saved]);
+    repos.close();
+  });
+
+  const seedLegacy = async (repos: ReturnType<typeof store>['repos']) => {
+    const ledger = JSON.stringify({ v: 1, entries: [
+      { id: 'mem_aaaa0001', content: '回复统一用中文', source: 'user', topic: 'general', createdAt: '2026-09-20T00:00:00.000Z', createdBy: 'ou_alice' },
+      // 与池里已有的一条只差空白与大小写：迁移后留作墓碑。旧记录没有 topic，读时补 general。
+      { id: 'mem_aaaa0002', content: 'deploy 用  scripts/deploy.sh', source: 'extraction', createdAt: '2026-09-20T01:00:00.000Z', taskId: 'task_old' },
+      { id: 'mem_aaaa0003', content: '已经删掉的旧条目', source: 'agent', topic: 'general', createdAt: '2026-09-19T00:00:00.000Z', deletedAt: '2026-09-21T00:00:00.000Z', deletedBy: 'ou_alice' }
+    ] });
+    const state = JSON.stringify({
+      v: 1, turnsSinceExtraction: 13, turnsSinceConsolidation: 3,
+      pendingTurns: [
+        { sessionId: 'ses_a', taskId: 'task_a1', completedAt: '2026-09-20T02:00:00.000Z' },
+        { sessionId: 'ses_b', taskId: 'task_b1', completedAt: '2026-09-24T10:00:00.000Z' }
+      ],
+      lastExtractionAt: '2026-09-20T00:39:06.341Z',
+      lastRun: { kind: 'consolidation', at: '2026-09-24T09:51:41.447Z', ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: 'MEMORY_RECOVERY_REQUIRED' },
+      lastFailureAt: { consolidation: '2026-09-24T09:51:41.447Z' },
+      running: { kind: 'extraction', startedAt: '2026-09-24T09:00:00.000Z' }
+    });
+    await repos.config.set(legacyKey('oc_group_a'), ledger);
+    await repos.config.set(legacyStateKey('oc_group_a'), state);
+    return { ledger, state };
+  };
+
+  it('lazily merges a legacy per-group ledger and state into the pool on first access from that group', async () => {
+    const { repos, memory } = store({ now: () => new Date('2026-09-25T00:00:00.000Z') });
+    const existing = await memory.add(groupB, { content: 'Deploy 用 scripts/deploy.sh', source: 'user', chatId: groupB.chatId });
+    await memory.updateState(groupB, { turnsSinceExtraction: 1, turnsSinceConsolidation: 5,
+      pendingTurns: [{ sessionId: 'ses_b', taskId: 'task_b1', completedAt: '2026-09-24T10:00:00.000Z', chatId: 'oc_group_b' }] });
+    await seedLegacy(repos);
+
+    // 别的群访问不会搬 A 群的旧账本：只有 A 群自己访问时才知道它是群。
+    expect(await memory.list(groupB)).toEqual([existing]);
+    expect(await repos.config.get(legacyKey('oc_group_a'))).toContain('回复统一用中文');
+
+    const live = await memory.list(groupA);
+    expect(live.map(entry => entry.id)).toEqual(['mem_aaaa0001', existing.id]);
+    expect(live[0]).toMatchObject({ content: '回复统一用中文', source: 'user', createdBy: 'ou_alice', chatId: 'oc_group_a' });
+    const all = await memory.listAll(groupA);
+    expect(all.find(entry => entry.id === 'mem_aaaa0002')).toMatchObject({
+      topic: 'general', chatId: 'oc_group_a', supersededBy: existing.id, deletedAt: '2026-09-25T00:00:00.000Z', deletedBy: 'migration'
+    });
+    expect(all.find(entry => entry.id === 'mem_aaaa0003')).toMatchObject({ deletedAt: '2026-09-21T00:00:00.000Z', deletedBy: 'ou_alice', chatId: 'oc_group_a' });
+
+    const state = await memory.getState(groupB);
+    expect(state.turnsSinceExtraction).toBe(13);
+    expect(state.turnsSinceConsolidation).toBe(5);
+    expect(state.pendingTurns).toEqual([
+      { sessionId: 'ses_a', taskId: 'task_a1', completedAt: '2026-09-20T02:00:00.000Z', chatId: 'oc_group_a' },
+      { sessionId: 'ses_b', taskId: 'task_b1', completedAt: '2026-09-24T10:00:00.000Z', chatId: 'oc_group_b' }
+    ]);
+    expect(state.lastRun).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(state.lastFailureAt).toEqual({ consolidation: '2026-09-24T09:51:41.447Z' });
+    expect(state.lastExtractionAt).toBe('2026-09-20T00:39:06.341Z');
+    // 旧池的单飞占位不属于群池，不能把群池锁住。
+    expect(state.running).toBeUndefined();
+
+    // 旧键改写成迁移占位：仍是 v1 形状，回滚到旧版本读到的是空记录。
+    expect(JSON.parse((await repos.config.get(legacyKey('oc_group_a')))!)).toEqual({ v: 1, entries: [], migratedTo: 'groups', migratedAt: '2026-09-25T00:00:00.000Z' });
+    expect(JSON.parse((await repos.config.get(legacyStateKey('oc_group_a')))!)).toMatchObject({ v: 1, turnsSinceExtraction: 0, turnsSinceConsolidation: 0, migratedTo: 'groups' });
+    repos.close();
+  });
+
+  it('is idempotent across processes and when a crash left the old keys unmarked', async () => {
+    const { repos, memory } = store({ now: () => new Date('2026-09-25T00:00:00.000Z') });
+    const { ledger, state } = await seedLegacy(repos);
+    await memory.list(groupA);
+    const pool = await repos.config.get(larkMemoryKey(groupA));
+    const poolState = await repos.config.get(larkMemoryStateKey(groupA));
+
+    // 另一个进程（没有进程内缓存）再访问：旧键已是占位，什么都不改。
+    await new LarkMemoryStore(repos.config).list(groupA);
+    expect(await repos.config.get(larkMemoryKey(groupA))).toBe(pool);
+    expect(await repos.config.get(larkMemoryStateKey(groupA))).toBe(poolState);
+
+    // 模拟「已并入、还没写占位」时崩溃：重放不产生重复条目、不重复计数。
+    await repos.config.set(legacyKey('oc_group_a'), ledger);
+    await repos.config.set(legacyStateKey('oc_group_a'), state);
+    const replay = new LarkMemoryStore(repos.config, { now: () => new Date('2026-09-26T00:00:00.000Z') });
+    expect((await replay.listAll(groupA)).map(entry => entry.id)).toEqual(JSON.parse(pool!).entries.map((entry: LarkMemoryEntry) => entry.id));
+    expect(await replay.getState(groupA)).toEqual(JSON.parse(poolState!));
+    expect(JSON.parse((await repos.config.get(legacyKey('oc_group_a')))!)).toMatchObject({ migratedTo: 'groups' });
+    repos.close();
+  });
+
+  it('merges exactly once under concurrent access from separate stores and concurrent pool writes', async () => {
+    const { repos } = store();
+    await repos.config.set(legacyKey('oc_group_a'), JSON.stringify({ v: 1, entries: Array.from({ length: 5 }, (_, index) => ({
+      id: `mem_0000aa0${index}`, content: `旧事实 ${index}`, source: 'user', topic: 'general', createdAt: `2026-09-2${index}T00:00:00.000Z`
+    })) }));
+    await repos.config.set(legacyStateKey('oc_group_a'), JSON.stringify({ v: 1, turnsSinceExtraction: 1, turnsSinceConsolidation: 1,
+      pendingTurns: [{ sessionId: 'ses_a', taskId: 'task_legacy', completedAt: '2026-09-20T00:00:00.000Z' }] }));
+    // 三个互不共享进程内缓存的 store，同时从 A 群访问；B 群同时写条目与状态。
+    const stores = [0, 1, 2].map(() => new LarkMemoryStore(repos.config));
+    await Promise.all([
+      ...stores.map(item => item.list(groupA)),
+      stores[0]!.add(groupB, { content: 'B 群并发写入', source: 'user', chatId: groupB.chatId }),
+      stores[1]!.mutateState(groupB, current => ({
+        turnsSinceExtraction: current.turnsSinceExtraction + 1,
+        pendingTurns: [...(current.pendingTurns ?? []), { sessionId: 'ses_b', taskId: 'task_b', completedAt: '2026-09-25T00:00:00.000Z', chatId: 'oc_group_b' }]
+      })),
+      stores[2]!.getState(groupA)
+    ]);
+    const reader = new LarkMemoryStore(repos.config);
+    const all = await reader.listAll(groupA);
+    expect(all.map(entry => entry.content).sort()).toEqual(['B 群并发写入', '旧事实 0', '旧事实 1', '旧事实 2', '旧事实 3', '旧事实 4']);
+    expect(new Set(all.map(entry => entry.id)).size).toBe(all.length);
+    expect((await reader.getState(groupA)).pendingTurns?.map(turn => turn.taskId).sort()).toEqual(['task_b', 'task_legacy']);
+    expect(JSON.parse((await repos.config.get(legacyKey('oc_group_a')))!)).toMatchObject({ migratedTo: 'groups' });
+    repos.close();
+  });
+
+  it('never migrates a p2p ledger: the p2p pool key is the chat key itself', async () => {
+    const { repos, memory } = store();
+    const raw = JSON.stringify({ v: 1, entries: [{ id: 'mem_bbbb0001', content: '私聊偏好', source: 'user', topic: 'general', createdAt: '2026-09-20T00:00:00.000Z' }] });
+    await repos.config.set(legacyKey('oc_p2p'), raw);
+    expect((await memory.list(p2p)).map(entry => entry.id)).toEqual(['mem_bbbb0001']);
+    expect(await memory.list(groupA)).toEqual([]);
+    expect(await repos.config.get(legacyKey('oc_p2p'))).toBe(raw);
+    repos.close();
+  });
+
+  it('reports a read-only status summary per pool', async () => {
+    const { repos, memory } = store();
+    await memory.add(groupA, { content: '条目一', source: 'user', topic: 'one', chatId: groupA.chatId });
+    await memory.add(groupA, { content: '条目二', source: 'user', topic: 'two', chatId: groupA.chatId });
+    const gone = await memory.add(groupB, { content: '条目三', source: 'user', topic: 'three', chatId: groupB.chatId });
+    await memory.remove(groupB, gone.id);
+    const lastRun = { kind: 'extraction' as const, at: '2026-09-24T09:51:41.428Z', ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: 'MEMORY_RECOVERY_REQUIRED' };
+    const running = { kind: 'consolidation' as const, startedAt: '2026-09-25T00:00:00.000Z' };
+    await memory.updateState(groupA, {
+      pendingTurns: [{ sessionId: 's', taskId: 't1', completedAt: '2026-09-24T00:00:00.000Z' }, { sessionId: 's', taskId: 't2', completedAt: '2026-09-24T00:01:00.000Z' }],
+      lastRun, running, lastExtractionAt: '2026-09-20T00:39:06.341Z', lastFailureAt: { extraction: lastRun.at }
+    });
+    expect(await memory.status(groupB)).toEqual({
+      appId: 'cli_bot', pool: 'groups', shared: true, liveEntries: 2, topics: 2, pendingTurns: 2,
+      running, lastRun, lastExtractionAt: '2026-09-20T00:39:06.341Z', lastFailureAt: { extraction: lastRun.at }
+    });
+    expect(await memory.status(p2p)).toEqual({ appId: 'cli_bot', pool: 'oc_p2p', shared: false, liveEntries: 0, topics: 0, pendingTurns: 0 });
+    repos.close();
+  });
+});
+
+describe('memory search relevance', () => {
+  it('scores multi-keyword queries, drops misses and orders by score then recency', async () => {
+    let time = 0;
+    const { repos, memory } = store({ now: () => new Date(Date.UTC(2026, 8, 17, 0, 0, time++)) });
+    const alarm = await memory.add(scope, { content: 'Redis 内存告警阈值是 80%', source: 'user', topic: 'ops' });
+    const cluster = await memory.add(scope, { content: 'redis 集群在 A 机房', source: 'user', topic: 'ops' });
+    const slowlog = await memory.add(scope, { content: 'Redis 慢查询看 Argos', source: 'user', topic: 'ops' });
+    await memory.add(scope, { content: '前端用 React', source: 'user', topic: 'frontend' });
+
+    // 整串子串匹配查不到的多词查询：按命中词长度打分，同分按时间倒序。
+    expect((await memory.search(scope, { query: 'redis 内存告警' })).map(entry => entry.id)).toEqual([alarm.id, slowlog.id, cluster.id]);
+    expect(await memory.search(scope, { query: '告警 内存' })).toEqual([alarm]);
+    expect(await memory.search(scope, { query: 'kafka 延迟' })).toEqual([]);
+    expect((await memory.search(scope, { query: 'redis', limit: 2 })).map(entry => entry.id)).toEqual([slowlog.id, cluster.id]);
+    expect(await memory.search(scope, { query: 'redis 内存', topic: 'frontend' })).toEqual([]);
+    repos.close();
+  });
+});
+
+describe('/memory receipt for shared pools and background status', () => {
+  const state: LarkMemoryState = { v: 1, turnsSinceExtraction: 0, turnsSinceConsolidation: 0 };
+  const entry = (id: string, content: string, chatId?: string): LarkMemoryEntry => ({
+    id, content, topic: 'general', source: 'user', createdAt: '2026-09-17T08:00:00.000Z', ...(chatId ? { chatId } : {})
+  });
+  const failed: LarkMemoryStatus = {
+    appId: 'cli_bot', pool: 'groups', shared: true, liveEntries: 3, topics: 1, pendingTurns: 13,
+    lastRun: { kind: 'consolidation', at: '2026-09-24T09:51:41.447Z', ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: 'MEMORY_RECOVERY_REQUIRED' },
+    lastExtractionAt: '2026-09-20T00:39:06.341Z'
+  };
+
+  it('marks other-group entries and appends the last run with a readable failure reason', () => {
+    const byTopic = new Map([['general', [entry('mem_00000001', '本群条目', 'oc_a'), entry('mem_00000002', '别的群条目', 'oc_b'), entry('mem_00000003', '跨群合并条目')]]]);
+    const { text } = renderLarkMemoryList(byTopic, state, { shared: true, currentChatId: 'oc_a', status: failed });
+    expect(text).toContain('**本机器人所在各群共享，共 3 条记忆 · 上次整理 尚未整理**');
+    expect(text).toContain('- `mem_00000001` · 用户 · 2026-09-17 · 本群条目');
+    expect(text).toContain('- `mem_00000002` · 用户 · 2026-09-17 · 其他群 · 别的群条目');
+    expect(text).toContain('- `mem_00000003` · 用户 · 2026-09-17 · 跨群合并条目');
+    expect(text).toContain('- 上次运行：整理 · 2026-09-24 09:51 · 失败 `MEMORY_RECOVERY_REQUIRED`（记忆会话需要恢复）');
+    expect(text).toContain('- 待提取 13 轮 · 上次提取 2026-09-20 00:39 · 上次整理 尚未整理');
+    expect(text.indexOf('**后台提取与整理**')).toBeLessThan(text.indexOf('第 1/1 页'));
+  });
+
+  it('shows status on empty p2p receipts and never pastes raw error text', () => {
+    const empty = renderLarkMemoryList(new Map(), state, { status: { appId: 'cli_bot', pool: 'oc_p2p', shared: false, liveEntries: 0, topics: 0, pendingTurns: 2 } });
+    expect(empty.text).toContain('**本聊天还没有保存的记忆。**');
+    expect(empty.text).toContain('- 上次运行：尚未运行');
+    expect(empty.text).toContain('- 待提取 2 轮 · 上次提取 尚未提取 · 上次整理 尚未整理');
+    expect(renderLarkMemoryList(new Map(), state, { shared: true }).text).toContain('本机器人所在各群还没有共享的记忆');
+
+    const raw = renderLarkMemoryStatus({ ...failed, lastRun: { ...failed.lastRun!, kind: 'extraction', error: 'ENOENT: no such file /data00/private/path' } });
+    expect(raw).toContain('失败，运行异常（详见服务日志）');
+    expect(raw).not.toContain('/data00');
+    const ok = renderLarkMemoryStatus({ ...failed, running: { kind: 'extraction', startedAt: '2026-09-25T01:02:03.000Z' },
+      lastRun: { kind: 'extraction', at: '2026-09-25T01:00:00.000Z', ok: true, added: 2, superseded: 0, retired: 0, retopiced: 0, rejected: 1 } });
+    expect(ok).toContain('- 上次运行：提取 · 2026-09-25 01:00 · 成功，新增 2 条，拒绝 1 条');
+    expect(ok).toContain('- 正在运行：提取（开始于 2026-09-25 01:02）');
   });
 });

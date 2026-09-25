@@ -12,7 +12,7 @@ import {
 } from './memory-pipeline.js';
 import { LarkMemoryError, larkMemoryLimits, LarkMemoryStore, type LarkMemoryEntry } from './memory.js';
 
-const scope = { appId: 'cli_bot', chatId: 'oc_group' };
+const scope = { appId: 'cli_bot', chatId: 'oc_group', pool: 'oc_group' };
 
 const entry = (patch: Partial<LarkMemoryEntry> & { id: string }): LarkMemoryEntry => ({
   content: `内容 ${patch.id}`,
@@ -218,6 +218,20 @@ describe('buildExtractionPrompt', () => {
     expect(prompt).toContain('回答（回答较长，仅保留末尾部分）：结论在这里');
     expect(prompt).toContain('回答：完整回答');
   });
+
+  it('群共享池的提取输入逐轮标出来源群，并要求群特有的约定写明适用范围', () => {
+    const turns = [
+      { taskId: 'task_a', prompt: 'A 群的问题', answer: 'A 群的回答', chatId: 'oc_group_a' },
+      { taskId: 'task_b', prompt: 'B 群的问题', answer: 'B 群的回答', chatId: 'oc_group_b' }
+    ];
+    const shared = buildExtractionPrompt('', turns, { shared: true });
+    expect(shared).toContain('### 轮次 task_a\n来源群：oc_group_a\n');
+    expect(shared).toContain('### 轮次 task_b\n来源群：oc_group_b\n');
+    expect(shared).toContain('只对某个群成立的约定，要在内容里写明适用范围');
+    const p2p = buildExtractionPrompt('', turns);
+    expect(p2p).not.toContain('来源群');
+    expect(p2p).not.toContain('适用范围');
+  });
 });
 
 describe('gateConsolidationActions', () => {
@@ -345,5 +359,28 @@ describe('LarkMemoryStore.applyBatch', () => {
 
     expect(await store.listAll(scope)).toEqual(before);
     repos.close();
+  });
+});
+
+describe('整理结果的来源群', () => {
+  it('合并同一个群的条目保留来源群，跨群合并与原条目没有来源群时不写', () => {
+    const existing = [
+      entry({ id: 'mem_a1', content: 'A 群约定一', chatId: 'oc_a' }),
+      entry({ id: 'mem_a2', content: 'A 群约定二', chatId: 'oc_a' }),
+      entry({ id: 'mem_b1', content: 'B 群约定', chatId: 'oc_b' }),
+      entry({ id: 'mem_c1', content: 'B 群另一条', chatId: 'oc_b' }),
+      entry({ id: 'mem_x1', content: '来源未记录' })
+    ];
+    const gate = gateConsolidationActions({ actions: [
+      { op: 'merge', ids: ['mem_a1', 'mem_a2'], content: 'A 群约定合并' },
+      { op: 'merge', ids: ['mem_b1', 'mem_x1'], content: '跨来源合并' },
+      { op: 'update', id: 'mem_c1', content: 'B 群另一条（更新）' }
+    ] }, existing);
+    expect(gate.ok).toBe(true);
+    if (!gate.ok) return;
+    const inputs = gate.plan.flatMap(step => step.op === 'add' ? [step.input] : []);
+    expect(inputs.find(input => input.content === 'A 群约定合并')?.chatId).toBe('oc_a');
+    expect(inputs.find(input => input.content === '跨来源合并')?.chatId).toBeUndefined();
+    expect(inputs.find(input => input.content === 'B 群另一条（更新）')?.chatId).toBe('oc_b');
   });
 });
