@@ -1,5 +1,6 @@
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import type { LarkGroupParticipation } from './group-participation.js';
+import { mergeGroupTaskWatermark } from './group-task-context.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { describeLarkTaskRecovery, larkRecoveryRetainedNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
@@ -4038,7 +4039,18 @@ export class LarkMessageCoordinator {
         const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: event.messageId, watermark, groupTools: config.groupToolsEnabled }), '群上下文读取');
         if (observedContext) {
           injected.push(observedContext.text);
-          if (store?.compareAndSet) groupContextCommit = () => store.compareAndSet!(watermarkKey, watermark, observedContext.watermark);
+          // 排队的几轮都基于同一个旧水位；后完成的一轮 CAS 失败时读出当前值合并再写，最多 3 次，仍冲突就留日志。
+          if (store?.compareAndSet) groupContextCommit = async () => {
+            let expected = watermark;
+            let next = observedContext.watermark;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              if (await store.compareAndSet!(watermarkKey, expected, next)) return;
+              expected = await store.get(watermarkKey);
+              next = mergeGroupTaskWatermark(expected, observedContext.watermark);
+              if (next === expected) return;
+            }
+            throw new Error('群上下文水位写回多次冲突');
+          };
         }
         const instructions = await withLarkContextReadTimeout(this.workflowOptions.participation.instructions({ appId: config.appId, chatId: event.chatId }), '群长期指令读取');
         if (instructions.trim()) injected.push(`[Dutydeck 群长期指令 · 管理者配置]\n${instructions.trim()}`);

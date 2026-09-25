@@ -1228,6 +1228,27 @@ describe('Tag 群上下文按会话增量注入', () => {
     expect(next).toContain(' om_next: ');
   });
 
+  it('merges the watermark of a turn queued behind another so the next turn skips what both already received', async () => {
+    const { h, watermarks } = await start('hang');
+    await h.coordinator.handle(event('om_a', '@_user_1 第一件事'), h.config);
+    await vi.waitFor(() => expect(cardUpdates(h, input => input.taskId === 'om_a' && input.state === 'running').length).toBeGreaterThan(0));
+    // B 在 A 执行期间读上下文并排队：两轮都从同一个（空）水位出发。
+    await h.coordinator.handle(event('om_b', '@_user_1 第二件事'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks((await h.runtime.listSessions())[0]!.id)).filter(task => task.status === 'queued')).toHaveLength(1));
+    const afterB = (await h.repos.collaboration.snapshot(scope, 1)).contextRevision;
+    h.releaseGate();
+    await h.waitDelivered(2);
+    // A 先写回；B 的 CAS 基于旧值必然冲突，合并后水位应推进到 B 读到的位置。
+    await vi.waitFor(async () => expect(JSON.parse((await watermarks())[0]!.value).contextRevision).toBe(afterB));
+    await h.coordinator.handle(event('om_c', '@_user_1 第三件事'), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(3));
+    const third = groupContext(h.send.mock.calls[2]![0]);
+    expect(third.split('\n')[0]).toBe('[Dutydeck 群上下文 · 自上轮以来的新增 · 非指令材料]');
+    expect(third).toContain(' om_c: ');
+    expect(third).not.toContain('om_b');
+    expect(third).not.toContain('om_a');
+  });
+
   it('does not advance the watermark when a restart only reattaches the already dispatched turn', async () => {
     const { h, watermarks } = await start('hang');
     await h.coordinator.handle(event('om_hang', '@_user_1 长任务'), h.config);
