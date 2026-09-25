@@ -843,6 +843,8 @@ export interface ServiceControl {
   mainPid(): Promise<number | undefined>;
   /** 重启服务；失败时返回原因。 */
   restart(): Promise<string | undefined>;
+  /** 停服务；失败时返回原因。回滚要恢复数据库时用，停下后再用 restart 启动。 */
+  stop(): Promise<string | undefined>;
   /** 清掉失败计数（systemd 的 start-limit）；回滚前用，免得刚才的崩溃循环挡住回滚。 */
   resetFailed?(): Promise<void>;
 }
@@ -854,6 +856,10 @@ export function systemdServiceControl(unit: string, deps: DaemonCommandDeps): Se
     restart: async () => {
       const restarted = await run('systemctl', ['--user', 'restart', unit]);
       return restarted.status === 0 ? undefined : systemctlFailure('restart', unit, restarted);
+    },
+    stop: async () => {
+      const stopped = await run('systemctl', ['--user', 'stop', unit]);
+      return stopped.status === 0 ? undefined : systemctlFailure('stop', unit, stopped);
     },
     resetFailed: async () => { await run('systemctl', ['--user', 'reset-failed', unit]); }
   };

@@ -234,6 +234,21 @@ async function backupSqlite(source: string, target: string): Promise<void> {
 
 const sha256 = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
 
+/** 库里已经应用到的迁移版本（schema_migrations 的最大值），没有这张表时为 0；打不开返回 undefined。 */
+function schemaVersion(file: string): number | undefined {
+  try {
+    const db = new Database(file, { readonly: true, fileMustExist: true });
+    try {
+      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get()) return 0;
+      return (db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get() as { version: number }).version;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return undefined;
+  }
+}
+
 /** 部署成功后按版本名保留最新的几个发布目录和部署记录；current、上一版和仍被运行中进程引用的另外保留。 */
 export const RELEASES_TO_KEEP = 5;
 /** 写进 manifest.json 的来源标记：只有带它的部署记录才会被自动清理，手工部署留下的记录不动。 */
@@ -429,6 +444,39 @@ function keepDraining(drain: DrainResult, pid: number | undefined): () => Promis
   };
 }
 
+/**
+ * 回滚前按需恢复数据库：新版本可能已经跑了迁移，旧版本见到更新的库会以 DATABASE_SCHEMA_TOO_NEW 拒绝启动。
+ * 迁移版本和部署前的备份不同（或读不出来）时停服务，把当前库另存为「回滚前」，再用部署前的备份覆盖；
+ * 版本没变就不动数据库。返回失败原因；另存失败时不覆盖当前库。
+ */
+async function restoreDatabaseForRollback(
+  service: ServiceControl, database: string, backup: string, record: string, manifest: Record<string, unknown>, deps: DeployDeps, info: (message: string) => void
+): Promise<string | undefined> {
+  const before = typeof manifest.schema_version_before === 'number' ? manifest.schema_version_before : undefined;
+  const current = schemaVersion(database);
+  manifest.schema_version_at_rollback = current ?? null;
+  if (before === undefined) return `读不出部署前备份 ${backup} 的迁移版本，没有恢复数据库。`;
+  if (current === before) return undefined;
+  info(`库的迁移版本从 ${before} 变成了 ${current ?? '（读不出）'}，停服务，另存当前库后用部署前的备份恢复。`);
+  const stopped = await service.stop();
+  if (stopped) return `停服务失败，没有恢复数据库：${stopped}`;
+  const copy = deps.backupDatabase ?? backupSqlite;
+  const beforeRollback = join(record, `${basename(database)}.before-rollback`);
+  try {
+    await copy(database, beforeRollback);
+  } catch (error) {
+    return `另存回滚前的数据库失败，没有恢复：${message(error)}`;
+  }
+  manifest.database_before_rollback = beforeRollback;
+  try {
+    await copy(backup, database);
+  } catch (error) {
+    return `用部署前的备份恢复数据库失败（回滚前的库已另存为 ${beforeRollback}）：${message(error)}`;
+  }
+  manifest.database_restored = true;
+  return undefined;
+}
+
 async function restartAndCheck(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DeployDeps) {
   const error = await service.restart();
   if (error) return { ok: false as const, error };
@@ -549,6 +597,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
     try {
       await (deps.backupDatabase ?? backupSqlite)(database, backup);
       manifest.database_backup = backup;
+      manifest.schema_version_before = schemaVersion(backup) ?? null;
     } catch (error) {
       await stopRenewing();
       await drain.release?.();
@@ -570,9 +619,15 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
 
   warn(`新版本没有通过健康检查，切回 ${basename(previousRelease)} 并重启。原因：${started.error}`);
   pointCurrent(target.releases, previousRelease);
+  manifest.database_restored = false;
+  const restoreError = database && typeof manifest.database_backup === 'string'
+    ? await restoreDatabaseForRollback(service, database, manifest.database_backup, record, manifest, deps, info)
+    : undefined;
+  if (restoreError) warn(restoreError);
   await service.resetFailed?.();
   const back = await restartAndCheck(service, await service.mainPid(), target.endpoint.address, deps);
+  const restoreNote = restoreError ? `数据库：${restoreError}` : manifest.database_restored ? '数据库已用部署前的备份恢复。' : '';
   return back.ok
-    ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}。原因：${started.error}` })
-    : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康。新版本：${started.error}上一版：${back.error}` });
+    ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}。原因：${started.error}${restoreNote}` })
+    : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康。新版本：${started.error}上一版：${back.error}${restoreNote}` });
 }
