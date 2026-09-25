@@ -3,6 +3,7 @@ import { RuntimeError, type CollaborationObservation, type CollaborationReposito
 import { historicalObservation } from './context-bootstrap.js';
 import { larkExecutionConfirmed, type StoredLarkConfig } from './config.js';
 import type { LarkCardService, LarkChat } from './service.js';
+import { relevance } from './text-relevance.js';
 
 interface ReaderOptions {
   repository: CollaborationRepository;
@@ -15,14 +16,6 @@ interface ReaderOptions {
 const sameScope = (a: CollaborationScope, b: CollaborationScope) => a.appId === b.appId && a.chatId === b.chatId;
 const identity = (scope: CollaborationScope, value: string) => `team_${createHash('sha256').update(JSON.stringify([scope, value])).digest('hex')}`;
 const enabled = (config: StoredLarkConfig | undefined): config is StoredLarkConfig => Boolean(config?.listening && config.groupToolsEnabled && larkExecutionConfirmed(config));
-
-function relevance(query: string) {
-  const words = query.toLowerCase().match(/[a-z0-9_]+|[\p{Script=Han}]+/gu) ?? [];
-  const terms = new Set(words.flatMap(word => /\p{Script=Han}/u.test(word)
-    ? [word, ...Array.from({ length: Math.max(0, word.length - 1) }, (_, i) => word.slice(i, i + 2))]
-    : [word]));
-  return (text: string) => [...terms].reduce((score, term) => score + (text.toLowerCase().includes(term) ? term.length : 0), 0);
-}
 
 /** Host-controlled reads only: no source group activation, persistent writes or agent tools. */
 export class LarkTeamContextReader {

@@ -181,7 +181,8 @@ export interface LarkCommandDefinition {
  *             stop 掉旧会话，否则是一条什么都没发生的假命令。带任务内容时，argsText
  *             由 coordinator 当作普通请求走完整建任务链路，命令层不自己派发。
  * - `/remember` `/memory` `/forget`  coordinator 持有 workflowStore 时才有会话记忆存储
- *             （memory.ts）；三条命令都只读写本聊天的记忆，注入由 runTurn 完成。
+ *             （memory.ts）；三条命令都只读写当前聊天可见的记忆（群聊为本机器人的群共享池，
+ *             私聊为自己的池），注入由 runTurn 完成。
  */
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   { name: 'work', summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
@@ -191,10 +192,10 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
   { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },
   { name: 'reject', summary: '拒绝卡片上的本次工具调用', usage: '/reject <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/reject 已停用。' },
-  // 会话记忆按聊天（chat_id）保存，跨话题、跨 /new、跨重启生效；私聊与每个群各自独立。
-  { name: 'remember', summary: '把一条事实、偏好或约定保存为本聊天的长期记忆，之后每轮任务都会带给 Agent', usage: '/remember <内容>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/remember 已停用。' },
-  { name: 'memory', summary: '查看本聊天已保存的记忆及其编号', usage: '/memory', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
-  { name: 'forget', summary: '删除本聊天中指定编号的记忆', usage: '/forget <记忆编号>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/forget 已停用。' },
+  // 会话记忆跨话题、跨 /new、跨重启生效：同一机器人的所有群共享一份，每个私聊各自一份。
+  { name: 'remember', summary: '把一条事实、偏好或约定保存为长期记忆（群聊里各群共享），之后每轮任务都会带给 Agent', usage: '/remember <内容>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/remember 已停用。' },
+  { name: 'memory', summary: '查看当前可见的记忆及其编号、后台提取与整理状态', usage: '/memory', mutating: false, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/memory 已停用。' },
+  { name: 'forget', summary: '删除当前可见记忆中指定编号的一条', usage: '/forget <记忆编号>', mutating: true, requires: c => c.memory === true, unavailableReason: '当前服务没有会话记忆存储，/forget 已停用。' },
   {
     name: 'help',
     summary: '列出当前可用的 Dutydeck 命令及其用法',

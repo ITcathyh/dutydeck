@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import {
   LarkMemoryError,
+  larkMemoryScope,
   LarkMemoryStore,
   type LarkMemoryEntry,
   type LarkMemoryScope,
@@ -18,7 +19,7 @@ import {
   renderTopicFile
 } from './memory-view.js';
 
-const scope: LarkMemoryScope = { appId: 'cli_bot', chatId: 'oc_chat' };
+const scope: LarkMemoryScope = { appId: 'cli_bot', chatId: 'oc_chat', pool: 'oc_chat' };
 
 const dummyState: LarkMemoryState = {
   v: 1,
@@ -196,9 +197,9 @@ describe('LarkMemoryProjection', () => {
     const store = new LarkMemoryStore(repos.config);
     const projection = new LarkMemoryProjection(store, '/tmp/memory');
 
-    expect(() => projection.directoryFor({ appId: '../evil', chatId: 'oc_chat' })).toThrow(LarkMemoryError);
-    expect(() => projection.directoryFor({ appId: 'cli_bot', chatId: 'chat/sub' })).toThrow(LarkMemoryError);
-    expect(() => projection.directoryFor({ appId: 'cli_bot', chatId: 'chat:bad' })).toThrow(LarkMemoryError);
+    expect(() => projection.directoryFor({ appId: '../evil', chatId: 'oc_chat', pool: 'oc_chat' })).toThrow(LarkMemoryError);
+    expect(() => projection.directoryFor({ appId: 'cli_bot', chatId: 'chat/sub', pool: 'chat/sub' })).toThrow(LarkMemoryError);
+    expect(() => projection.directoryFor({ appId: 'cli_bot', chatId: 'chat:bad', pool: 'chat:bad' })).toThrow(LarkMemoryError);
     repos.close();
   });
 
@@ -260,8 +261,8 @@ describe('LarkMemoryProjection', () => {
     const store = new LarkMemoryStore(repos.config);
     const projection = new LarkMemoryProjection(store, root);
 
-    const scopeA: LarkMemoryScope = { appId: 'cli_bot', chatId: 'oc_chat_a' };
-    const scopeB: LarkMemoryScope = { appId: 'cli_bot', chatId: 'oc_chat_b' };
+    const scopeA: LarkMemoryScope = { appId: 'cli_bot', chatId: 'oc_chat_a', pool: 'oc_chat_a' };
+    const scopeB: LarkMemoryScope = { appId: 'cli_bot', chatId: 'oc_chat_b', pool: 'oc_chat_b' };
 
     await store.add(scopeA, { content: 'A 内容', source: 'user', topic: 'general' });
     await store.add(scopeB, { content: 'B 内容', source: 'user', topic: 'general' });
@@ -311,5 +312,36 @@ describe('renderLarkMemoryInjection', () => {
     expect(block).toContain('dutydeck memory show <topic>');
     expect(block).toContain('dutydeck memory search <关键词>');
     expect(block).toContain('文件副本：/app/memory/cli_bot/oc_chat');
+  });
+});
+
+describe('shared group pool view', () => {
+  const shared = (id: string, content: string, chatId?: string): LarkMemoryEntry => ({
+    id, content, topic: 'general', source: 'user', createdAt: '2026-09-17T08:00:00.000Z', ...(chatId ? { chatId } : {})
+  });
+
+  it('puts every group of a bot under one pool directory', () => {
+    const repos = createRepositories(':memory:');
+    const projection = new LarkMemoryProjection(new LarkMemoryStore(repos.config), '/tmp/memory');
+    expect(projection.directoryFor(larkMemoryScope('cli_bot', 'oc_group_a', 'group'))).toBe(join('/tmp/memory', 'cli_bot', 'groups'));
+    expect(projection.directoryFor(larkMemoryScope('cli_bot', 'oc_group_b', 'group'))).toBe(join('/tmp/memory', 'cli_bot', 'groups'));
+    expect(projection.directoryFor(larkMemoryScope('cli_bot', 'oc_p2p', 'p2p'))).toBe(join('/tmp/memory', 'cli_bot', 'oc_p2p'));
+    repos.close();
+  });
+
+  it('labels entries from other groups only when rendering for a current chat', () => {
+    const entries = [shared('mem_00000001', '本群条目', 'oc_a'), shared('mem_00000002', '别的群条目', 'oc_b'), shared('mem_00000003', '来源未记录')];
+    const forChat = renderMemoryIndex(entries, dummyState, { currentChatId: 'oc_a' }).text;
+    expect(forChat).toContain('- [mem_00000001 · 用户 · 2026-09-17] 本群条目');
+    expect(forChat).toContain('- [mem_00000002 · 用户 · 2026-09-17 · 其他群] 别的群条目');
+    expect(forChat).toContain('- [mem_00000003 · 用户 · 2026-09-17] 来源未记录');
+    expect(renderMemoryIndex(entries, dummyState).text).not.toContain('其他群');
+    expect(renderTopicFile('general', entries)).toContain('- 来源聊天：oc_b');
+  });
+
+  it('explains the shared scope in the injection block only for group pools', () => {
+    const block = renderLarkMemoryInjection('# 会话记忆索引\n- 事实', { command: 'dutydeck', directory: '/app/memory/cli_bot/groups', shared: true });
+    expect(block).toContain('范围：这是本机器人所在各群共享的记忆；标「其他群」的条目来自其他群，只是背景，不代表本群的约定。');
+    expect(renderLarkMemoryInjection('# 会话记忆索引\n- 事实', { command: 'dutydeck', directory: '/app/memory/cli_bot/oc_p2p' })).not.toContain('各群共享');
   });
 });

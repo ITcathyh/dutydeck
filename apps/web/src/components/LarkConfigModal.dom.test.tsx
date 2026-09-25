@@ -407,7 +407,7 @@ describe('LarkConfigModal 会话记忆', () => {
     expect((screen.getByRole('switch', { name: '启用会话记忆' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
     expect((screen.getByRole('switch', { name: '自动提取与整理' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
     expect(screen.getByText('整理 Agent')).toBeTruthy();
-    expect(screen.getByText('记忆按聊天隔离，仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
+    expect(screen.getByText('各群共享同一份记忆，私聊各自独立；仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
 
     await user.click(screen.getByRole('switch', { name: '启用会话记忆' }));
     expect(screen.queryByRole('switch', { name: '自动提取与整理' })).toBeNull();
