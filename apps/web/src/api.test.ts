@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, eventsUrl, type Session } from './api';
+import { api, eventsUrl, setShareToken, withShareToken, type Session } from './api';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -7,6 +7,22 @@ describe('web api adapter', () => {
   it('构造 backward / forward 有界事件窗口 URL', () => {
     expect(eventsUrl('s1', { before: 200, limit: 50, direction: 'backward' })).toBe('/api/sessions/s1/events?before=200&limit=50&direction=backward');
     expect(eventsUrl('s1', { after: 200, limit: 50, direction: 'forward' })).toBe('/api/sessions/s1/events?after=200&limit=50&direction=forward');
+  });
+
+  it('分享页的请求都在查询串里带分享 token；没设置时 URL 不变', async () => {
+    expect(withShareToken('/api/sessions/s1')).toBe('/api/sessions/s1');
+    setShareToken('tok_1');
+    try {
+      expect(withShareToken('/api/sessions/s1/stream')).toBe('/api/sessions/s1/stream?share=tok_1');
+      expect(withShareToken('/api/sessions/s1/events?before=2')).toBe('/api/sessions/s1/events?before=2&share=tok_1');
+      const fetcher = vi.fn(async () => ({ ok: true, json: async () => ({ id: 'a/b' }) }));
+      vi.stubGlobal('fetch', fetcher);
+      await api.session('a/b');
+      expect(fetcher).toHaveBeenCalledWith('/api/sessions/a%2Fb?share=tok_1', { credentials: 'same-origin' });
+    } finally {
+      setShareToken(undefined);
+    }
+    expect(withShareToken('/api/sessions/s1')).toBe('/api/sessions/s1');
   });
 
   it('restart 调用现有 Session 恢复路由', async () => {

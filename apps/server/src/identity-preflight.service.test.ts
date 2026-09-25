@@ -100,6 +100,8 @@ async function start(root: string, database: string, port: number, baseUrl: stri
       DUTYDECK_DEFAULT_CWD: root,
       DUTYDECK_DATABASE_URL: database,
       DUTYDECK_AUTH: String(auth),
+      // auth=false 的这一轮就是在 0.0.0.0 上免认证运行：显式确认，否则启动保护会拒绝。
+      DUTYDECK_UNSAFE_NO_AUTH: 'true',
       DUTYDECK_DISABLE_LARK_LISTENER: 'true',
       DUTYDECK_AGENTS_JSON: '[]',
     },

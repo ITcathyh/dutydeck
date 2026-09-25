@@ -500,8 +500,8 @@ export function checkAccessPosture(observation: PostureObservation): DoctorCheck
       label: '访问姿态',
       level: 'fail',
       detail: `认证已关闭且监听在 ${host}:${port}（非仅本机）——同网络任何人都能打开终端并驱动 Agent`,
-      remedy: `这等于把本机 shell 和所有 Agent 的控制权敞开给整个网络。二选一：重新开启访问认证，或改回只监听本机（127.0.0.1）。`,
-      command: 'dutydeck setup --local-only',
+      remedy: `这等于把本机 shell 和所有 Agent 的控制权敞开给整个网络，没有 --unsafe-no-auth 时服务会拒绝启动。二选一：设置访问密码并重新开启访问认证（去掉 --no-auth 或 .env 里的 DUTYDECK_AUTH=false），或改回只监听本机（dutydeck setup --local-only）。`,
+      command: 'dutydeck auth password set',
       verify: 'dutydeck doctor --json'
     };
   }

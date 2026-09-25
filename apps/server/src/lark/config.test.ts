@@ -438,6 +438,34 @@ describe('新机器人的 Web 地址', () => {
     const [config] = await readLarkConfigs(repository);
     expect(config.webBaseUrl).toBeUndefined();
   });
+
+  it('答了手机打不开就不存地址并记住这个答案；改回能打开后才重新保存地址', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_first', appSecret: 'secret', webBaseUrl: 'https://dutydeck.example.com' });
+    await saveLarkConfig(repository, undefined, { appId: 'cli_desk', appSecret: 'secret', webBaseUrl: 'https://dutydeck.example.com', webMobileReachable: false });
+    let config = (await readLarkConfigs(repository)).find(item => item.appId === 'cli_desk')!;
+    expect(config.webBaseUrl).toBeUndefined();
+    expect(config.webMobileReachable).toBe(false);
+    expect(publicLarkConfig(config)).toMatchObject({ webMobileReachable: false });
+    expect(publicLarkConfig(config)).not.toHaveProperty('webBaseUrl');
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_desk', appId: 'cli_desk', appSecret: 'secret', webBaseUrl: 'https://dutydeck.example.com', preInjectPrompt: 'hi' });
+    config = (await readLarkConfigs(repository)).find(item => item.appId === 'cli_desk')!;
+    expect(config.webBaseUrl).toBeUndefined();
+    expect(config.webMobileReachable).toBe(false);
+
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_desk', appId: 'cli_desk', appSecret: 'secret', webBaseUrl: 'https://dutydeck.example.com', webMobileReachable: true });
+    config = (await readLarkConfigs(repository)).find(item => item.appId === 'cli_desk')!;
+    expect(config.webBaseUrl).toBe('https://dutydeck.example.com');
+    expect(config).not.toHaveProperty('webMobileReachable');
+    expect((await readLarkConfigs(repository)).find(item => item.appId === 'cli_first')?.webBaseUrl).toBe('https://dutydeck.example.com');
+  });
+
+  it('手工写进库里的地址在答了打不开时读出来也不生效', async () => {
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_desk', appSecret: 'secret', webBaseUrl: 'https://dutydeck.example.com', webMobileReachable: false }]));
+    expect(config.webBaseUrl).toBeUndefined();
+    expect(config.webMobileReachable).toBe(false);
+  });
 });
 
 describe('compactTrace 精简过程卡开关', () => {

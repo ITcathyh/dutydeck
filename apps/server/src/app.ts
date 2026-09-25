@@ -84,7 +84,10 @@ export interface BuildAppOptions {
 }
 
 export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOptions = {}) {
-  const app = Fastify({ logger: process.env.NODE_ENV !== 'test' });
+  // 分享页的实时流只能把分享 token 放进查询串（EventSource 带不了请求头），请求日志里抹掉它。
+  const app = Fastify({ logger: process.env.NODE_ENV !== 'test' && { serializers: { req: (request: FastifyRequest) => ({
+    method: request.method, url: request.url.replace(/([?&]share=)[^&#]*/g, '$1[redacted]'), host: request.host, remoteAddress: request.ip, remotePort: request.socket?.remotePort
+  }) } } });
   const streams = new Set<import('node:http').ServerResponse>();
   const requireSessionExecution = async (request: FastifyRequest, sessionId: string, boundary: 'session' | 'high_risk', action: PolicyAction) => {
     if (!options.executionPolicy) return;
@@ -112,6 +115,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     //  - 非 /api/ 路径（静态 web 壳）公开：HTML/JS/CSS 不含会话数据，API 仍全部要 token
     //  - /api/lark/agent-tools/* 有自己的 Bearer 机制（agentGroupToolBearerToken），不重复门禁
     //  - relay send/ask 精确使用会话 HMAC；同一个 Authorization 头无法再放 access token
+    //  - /api/hooks/* 是 CI 回调，路由自己校验签名
     //  - 飞书卡片回调（card.action.trigger）走长连接监听、不经 HTTP，天然不受影响
     const userExempt = options.auth.exempt;
     registerAuthMiddleware(app, {
@@ -125,6 +129,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || pathname === '/api/auth/logout'
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
+        || pathname.startsWith('/api/hooks/')
         || userExempt?.(method, pathname) === true
     });
   }
