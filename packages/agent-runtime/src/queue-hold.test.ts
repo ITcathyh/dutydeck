@@ -110,9 +110,9 @@ describe('restart drain queue hold with steering', () => {
       expire = () => handler(...args);
       return realSetTimeout(() => {}, 60_000);
     }) as unknown as typeof setTimeout);
-    h.runtime.setQueueHeld(true);
     const steering = h.runtime.injectQueued(session.id, second.id);
     await asked.promise; timers.mockRestore();
+    h.runtime.setQueueHeld(true);
 
     gate.resolve();
     await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, first.id)).toBe('completed'));
@@ -145,9 +145,9 @@ describe('restart drain queue hold with steering', () => {
     const third = await h.runtime.dispatch(session.id, 'third');
     let answer!: (outcome: 'promptRequired') => void;
     h.driver.steer = () => { asked.resolve(); return new Promise(done => { answer = done; }); };
-    h.runtime.setQueueHeld(true);
     const steering = h.runtime.injectQueued(session.id, second.id);
     await asked.promise;
+    h.runtime.setQueueHeld(true);
 
     gate.resolve();
     await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, first.id)).toBe('completed'));
@@ -161,6 +161,60 @@ describe('restart drain queue hold with steering', () => {
     await expect(steering).resolves.toMatchObject({ outcome: 'promptRequired', task: { status: 'queued' } });
     await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, third.id)).toBe('completed'));
     expect(sent(h.driver)).toEqual(['first', 'second', 'third']);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('does not send a steering request while the queue is held', async () => {
+    const h = harness();
+    const gate = deferred();
+    h.gates.set('first', gate.promise);
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const first = await h.runtime.dispatch(session.id, 'first');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledWith('first'));
+    const second = await h.runtime.dispatch(session.id, 'second');
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const); h.driver.steer = steer;
+    h.runtime.setQueueHeld(true);
+    await expect(h.runtime.injectQueued(session.id, second.id)).resolves.toMatchObject({ outcome: 'promptRequired', task: { status: 'queued' } });
+    expect(steer).not.toHaveBeenCalled();
+
+    gate.resolve();
+    await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, first.id)).toBe('completed'));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(await statusOf(h.runtime, session.id, second.id)).toBe('queued');
+    h.runtime.setQueueHeld(false);
+    await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, second.id)).toBe('completed'));
+    expect(sent(h.driver)).toEqual(['first', 'second']);
+    await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('counts a steering request still in flight as running until it ends', async () => {
+    const h = harness();
+    const gate = deferred(), asked = deferred();
+    h.gates.set('first', gate.promise);
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    const first = await h.runtime.dispatch(session.id, 'first');
+    await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledWith('first'));
+    const second = await h.runtime.dispatch(session.id, 'second');
+    let answer!: (outcome: 'promptRequired') => void;
+    h.driver.steer = () => { asked.resolve(); return new Promise(done => { answer = done; }); };
+    const steering = h.runtime.injectQueued(session.id, second.id);
+    await asked.promise;
+    h.runtime.setQueueHeld(true);
+    expect(h.runtime.getRunningTaskCount()).toBe(1);
+
+    gate.resolve();
+    await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, first.id)).toBe('completed'));
+    expect(h.runtime.getRunningTaskCount()).toBe(1);
+    expect(h.runtime.getRunningTaskCount(session.id)).toBe(0);
+
+    answer('promptRequired');
+    await expect(steering).resolves.toMatchObject({ outcome: 'promptRequired', task: { status: 'queued' } });
+    expect(h.runtime.getRunningTaskCount()).toBe(0);
+    h.runtime.setQueueHeld(false);
+    await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, second.id)).toBe('completed'));
+    expect(sent(h.driver)).toEqual(['first', 'second']);
     await h.runtime.shutdown(); h.repos.close();
   });
 });
