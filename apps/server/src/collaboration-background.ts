@@ -120,6 +120,11 @@ export class CollaborationBackground {
         await this.options.runtime.dispatch(session.id, request.prompt, request.mode, request.prompt, undefined, record.requesterId, request.key, request.skills, request);
       } catch (error) {
         if (!this.options.repositories.execution.getAcceptedTask(taskId)) {
+          // 月度成本上限在接收前就拒绝了，确定没有执行：按失败收尾，不留成待核对。
+          if (error instanceof RuntimeError && error.code === 'USAGE_CAP_EXCEEDED') {
+            await this.finish(record, 'failed', undefined, error.message);
+            return { status: 'failed', error: error.message };
+          }
           await this.finish(record, 'unknown', undefined, error instanceof Error ? error.message : String(error));
           return { status: 'unknown', error: '无法确认原任务是否被接收，需要核对。' };
         }

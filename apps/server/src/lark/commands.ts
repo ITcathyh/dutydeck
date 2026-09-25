@@ -210,7 +210,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   },
   {
     name: 'status',
-    summary: '查看本会话绑定的 Agent、工作区、运行状态与待执行指令数',
+    summary: '查看本会话绑定的 Agent、工作区、运行状态、待执行指令数与本月用量',
     usage: '/status',
     mutating: false,
     requires: capabilities => capabilities.getSession,

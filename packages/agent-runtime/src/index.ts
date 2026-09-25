@@ -77,6 +77,13 @@ export interface RuntimeOptions {
   authorizeControl?: (sessionId: string, actor: ExecutionActor, action: 'stop') => Promise<void>;
   /** Revalidate the accepted task's external authority immediately before execution. */
   authorizeTask?: (session: Session, task: TaskRecord, phase: 'prepare' | 'submit') => Promise<void>;
+  /** 新任务接收前的准入检查（如月度成本上限），抛错即拒绝；按幂等键重放已接收的任务不经过这里。 */
+  admitTask?: (session: Session, request: TaskRequestV1) => Promise<void>;
+  /**
+   * 一轮的用量读数：ACP 驱动的 status/turn_usage 事件带读数，completed 事件不带（没有读数的驱动据此记为无数据）。
+   * 在事件落库之后调用，失败不影响本轮；求差、估算、归类都由宿主负责。
+   */
+  recordUsage?: (session: Session, attempt: AttemptRef, reading?: Record<string, unknown>) => Promise<void>;
   resolveRiskPolicy?: (sessionId: string, fallback?: ToolRiskPolicy) => Promise<ToolRiskPolicy | undefined>;
   acpxCommand?: string;
   driverFactory?: DriverFactory;
@@ -352,11 +359,17 @@ export class DutydeckRuntime {
     const next = previous.then(() => this.mutations.run(token, async () => {
       if (this.sessionGenerations.get(session.id) !== generation || !this.mutations.valid(token)) return;
       await this.eventScope.run(ref, () => this.mutations.write(session.id, () => this.consume(session, event, eventId)));
+      if (isAttemptRef(ref)) await this.recordUsage(session, ref, event);
     })).catch(error => {
       if (this.mutations.valid(token) && this.sessionGenerations.get(session.id) === generation && !this.driverEventErrors.has(session.id)) this.driverEventErrors.set(session.id, error);
     });
     this.driverEventChains.set(session.id, next);
     void next.finally(() => { if (this.driverEventChains.get(session.id) === next) this.driverEventChains.delete(session.id); });
+  }
+  private async recordUsage(session: Session, ref: AttemptRef, event: NormalizedDriverEvent) {
+    const usage = event.type === 'status' && event.data?.state === 'turn_usage';
+    if (!this.options.recordUsage || !usage && event.type !== 'completed') return;
+    await this.options.recordUsage(session, { taskId: ref.taskId, attemptId: ref.attemptId }, usage ? event.data : undefined).catch(() => {});
   }
   private async flushDriverEvents(sessionId: string) {
     while (true) {
@@ -1878,6 +1891,7 @@ export class DutydeckRuntime {
     return this.scoped(id, async () => {
       const { session } = await this.active(id);
       await this.authorize(id, actorId);
+      await this.mutations.wait(() => this.options.admitTask?.(session, request) ?? Promise.resolve());
       const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId));
       if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Agent is missing', 404);
       const executionOptions: ExecutionOptions = { permissionMode: request.options.permissionMode ?? session.permissionMode ?? agent.permissionMode,

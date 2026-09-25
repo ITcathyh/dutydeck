@@ -51,6 +51,8 @@ interface StoredWork {
   admissions?: Record<string, TaskAdmissionV1>;
   /** Rework stays in the original worker workspace, including uncommitted files. */
   reworkWorkspaces?: Record<string, { cwd: string; ownerSessionId: string }>;
+  /** 创建这份计划的父任务；步骤的用量归到它名下。 */
+  parentTaskId?: string;
 }
 interface StoredTemplate { template: WorkTemplate; actorId: string }
 interface RecordState { raw: string; value: StoredWork }
@@ -151,11 +153,11 @@ export class WorkItemService {
       if (!agent || fingerprint(agent) !== frozen.fingerprint) throw new RuntimeError('WORK_ITEM_CONFIG_DRIFT', 'Agent configuration changed; this work item is blocked', 409);
     }
   }
-  async parentForSession(sessionId: string): Promise<{ parentSessionId: string; actorId: string; workId: string; stepId: string } | undefined> {
+  async parentForSession(sessionId: string): Promise<{ parentSessionId: string; actorId: string; workId: string; stepId: string; parentTaskId?: string } | undefined> {
     const record = (await this.records()).find(record => record.item.steps.some(step => step.attempts.some(attempt => attempt.sessionId === sessionId)));
     if (!record) return undefined;
     const step = record.item.steps.find(step => step.attempts.some(attempt => attempt.sessionId === sessionId))!;
-    return { parentSessionId: record.item.parentSessionId, actorId: record.actorId, workId: record.item.id, stepId: step.id };
+    return { parentSessionId: record.item.parentSessionId, actorId: record.actorId, workId: record.item.id, stepId: step.id, ...(record.parentTaskId ? { parentTaskId: record.parentTaskId } : {}) };
   }
   async authorizeExecution(sessionId: string, actorId?: string): Promise<boolean> {
     const binding = await this.parentForSession(sessionId);
@@ -240,7 +242,7 @@ export class WorkItemService {
       const parentTask = taskId ? (await this.repos.tasks.listBySession(parentSessionId)).find(task => task.id === taskId) : undefined;
       const timestamp = time();
       const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: gated ? 'awaiting_confirmation' : 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 } };
-      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy };
+      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy, ...(taskId ? { parentTaskId: taskId } : {}) };
       await this.options.prepareDelivery?.(parentSessionId, id, input.idempotencyKey);
       await this.access(parentSessionId, actorId);
       if (!await this.repos.config.compareAndSet!(PREFIX + id, undefined, JSON.stringify(record))) throw new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);

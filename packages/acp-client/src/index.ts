@@ -3,7 +3,7 @@ import type { ChildProcess } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
+import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson } from '@dutydeck/shared';
 import { testRegexWithTimeout } from './regex-timeout.js';
@@ -478,6 +478,13 @@ export class AcpxAdapter implements AgentDriver {
           }
           const outcome = await result;
           if(outcome.status!=='failed'&&submission)submission.onAccepted({submissionId:submission.submissionId,kind:'provider_accepted',provider:'acp',receiptRef:`prompt-result:${submission.submissionId}`,digest:submission.inputDigest});
+          if (!this.stopped && !cancellationExpired && !deliveryError) {
+            const usage = await this.turnUsage(handle);
+            if (usage && !this.stopped && !cancellationExpired) {
+              try { this.options.onEvent(usage); }
+              catch (error) { deliveryError ??= error; }
+            }
+          }
           if (deliveryError) throw deliveryError;
           if (outcome.status === 'failed') {
             // This code is reserved by our ACPX patch for typed metadata on the
@@ -511,6 +518,18 @@ export class AcpxAdapter implements AgentDriver {
       return { completion: Promise.race([stream, idle]) };
     });
     await completion;
+  }
+  /**
+   * PromptResponse.usage 只落在 ACPX 会话记录里（按用户消息 id 存），turn.result 不带，轮次结束后读一次。
+   * 取最新一条按请求用量和会话累计成本原样上报：本轮没有新用量时会重复上一轮的键，由宿主记账时去重、求差。
+   */
+  private async turnUsage(handle: AcpRuntimeHandle): Promise<NormalizedDriverEvent | undefined> {
+    let usage: AcpRuntimeStatus['usage'];
+    try { usage = (await this.runtime.getStatus?.({ handle }))?.usage; } catch { return; }
+    const latest = Object.entries(usage?.perRequest ?? {}).at(-1);
+    const cost = usage?.cost?.amount;
+    if (!latest && cost === undefined) return;
+    return { type: 'status', data: { state: 'turn_usage', ...(latest ? { usageRef: latest[0], breakdown: latest[1] } : {}), ...(cost !== undefined ? { cost: usage!.cost } : {}) } };
   }
   async send(input: string|DriverSubmission) {
     const submission=typeof input==='string'?undefined:input;

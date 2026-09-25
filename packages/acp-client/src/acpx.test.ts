@@ -23,6 +23,29 @@ describe('acpx ACP boundary', () => {
     await adapter.stop();
   });
 
+  it('reports the latest per-request tokens and cumulative cost from the ACPX record before each completion', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-usage-')); dirs.push(cwd);
+    const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');
+    const events: any[] = [];
+    const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock ACP', command: process.execPath, args: [fixture], protocol: 'acp', cwd, env: {}, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { onEvent: event => events.push(event) });
+    await adapter.start();
+    await adapter.send('report usage one');
+    await adapter.send('plain turn');
+    await adapter.send('report usage two');
+    await adapter.stop();
+    const turns: any[][] = [[]];
+    for (const event of events) { turns.at(-1)!.push(event); if (event.type === 'completed') turns.push([]); }
+    const usage = turns.slice(0, 3).map(turn => turn.filter(event => event.type === 'status' && event.data.state === 'turn_usage'));
+    expect(usage.map(items => items.length)).toEqual([1, 1, 1]);
+    for (const turn of turns.slice(0, 3)) expect(turn.findIndex(event => event.data?.state === 'turn_usage')).toBe(turn.length - 2);
+    const [first, repeated, second] = usage.map(items => items[0].data);
+    expect(first).toMatchObject({ breakdown: { inputTokens: 100, outputTokens: 20, cachedReadTokens: 30, cachedWriteTokens: 5 }, cost: { amount: 0.25, currency: 'USD' } });
+    // 没有新用量的一轮只会重复上一轮的键和累计成本，由账本去重、求差。
+    expect(repeated).toEqual(first);
+    expect(second.usageRef).not.toBe(first.usageRef);
+    expect(second.cost).toEqual({ amount: 0.5, currency: 'USD' });
+  });
+
   it('treats timeout as inactivity and lets an active turn exceed its configured duration', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-active-timeout-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs');

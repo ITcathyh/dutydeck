@@ -1577,7 +1577,8 @@ export class SessionAutomationService {
     if (!fixed || !fixed.value.admission) return;
     // 仍在派发阶段（pending，acceptance 在途或响应丢失、尚无接受事实）时不做结果对账，
     // 由 processOccurrence 重投/恢复，避免把在途来源误判为 blocked。
-    if (fixed.value.runStatus === 'pending' && !this.execution.getAcceptedTask(fixed.value.admission.taskId)) return;
+    // 派发时就被拒（error，例如月度成本上限）同样没有接受事实：保留原因，不对账成 blocked，否则会挡住之后每一次触发。
+    if (['pending', 'error'].includes(fixed.value.runStatus) && !this.execution.getAcceptedTask(fixed.value.admission.taskId)) return;
     let working = fixed;
     let value = working.value;
 
