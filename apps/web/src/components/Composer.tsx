@@ -1,12 +1,12 @@
 import { type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { BrainCircuit, Check, ChevronDown, File, FolderOpen, Gauge, ListEnd, Plus, RefreshCw, Send, Sparkles, Square, X, Zap } from 'lucide-react';
+import { BrainCircuit, Check, ChevronDown, File, FolderOpen, Gauge, ListEnd, MessageSquarePlus, Plus, RefreshCw, Send, Sparkles, Square, X, Zap } from 'lucide-react';
 import type { AgentModel, Session, SkillReference, Task } from '../api';
 import { formatTokens, replaceSlashQuery, slashQuery, type ComposerReference, type ContextStats, type ModelReadiness } from '../composer-utils';
 import { composerCapabilities, mergeComposerCommands, type ComposerCommandAction } from '../composer-commands';
 import { Badge, Banner, Button, IconButton, Input, Popover, Spinner, usePopoverTrigger } from './primitives';
 import { busyStates } from './ui';
 
-export type SendMode = 'queue' | 'interrupt';
+export type SendMode = 'queue' | 'interrupt' | 'steer';
 type ComposerPanel = 'commands' | 'file' | 'models' | 'reasoning' | undefined;
 /** 面板里一行命令。available=false 时仍然列出，但禁用并显示 unavailableReason。 */
 type VisibleCommand = { name: string; description: string; action: ComposerCommandAction; available: boolean; aliases: string[]; unavailableReason?: string };
@@ -32,9 +32,9 @@ function useAutoResizeTextarea(value: string) {
   return ref;
 }
 
-function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, onCancel, onSteer }: { tasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string; onCancel(id: string): void; onSteer(id: string): void }) {
+function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, injectingTaskId, onCancel, onSteer, onInject }: { tasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string; injectingTaskId?: string; onCancel(id: string): void; onSteer(id: string): void; onInject?(id: string): void }) {
   if (!tasks.length) return null;
-  const frozen = Boolean(cancellingTaskId) || Boolean(steeringTaskId);
+  const frozen = Boolean(cancellingTaskId) || Boolean(steeringTaskId) || Boolean(injectingTaskId);
   return <div className="mx-4 overflow-hidden rounded-t-xl border border-b-0 border-queued-border bg-queued-soft shadow-card backdrop-blur">
     <div className="flex items-center gap-2 border-b border-queued-border px-3.5 py-2 text-caption font-semibold text-queued">
       <ListEnd size={13}/>
@@ -45,6 +45,8 @@ function QueuedTasks({ tasks, cancellingTaskId, steeringTaskId, onCancel, onStee
     <div className="max-h-32 overflow-y-auto">{tasks.map(task => <div key={task.id} className="group flex items-center gap-2 px-3.5 py-1.5 text-caption text-secondary hover:bg-hover">
       <span className="min-w-0 flex-1 truncate">{task.prompt}</span>
       <span className="shrink-0 text-caption text-subtle">排队中</span>
+      {/* 「立即插话」把这条送进正在执行的那一轮，不打断它；Agent 不支持时这条仍在排队。 */}
+      {onInject && <Button size="md" variant="ghost" disabled={frozen} onClick={() => onInject(task.id)}>{injectingTaskId === task.id ? '正在插话' : '立即插话'}</Button>}
       {/* 「打断当前任务并执行」会掐掉正在跑的那一步，属于契约 §9 的主要交互：40px，不走 sm 豁免。 */}
       <Button size="md" variant="ghost" disabled={frozen} onClick={() => onSteer(task.id)}>{steeringTaskId === task.id ? '正在打断' : '打断当前任务并执行'}</Button>
       <IconButton label={`取消排队：${task.prompt}`} disabled={frozen} onClick={() => onCancel(task.id)}><X size={14}/></IconButton>
@@ -186,8 +188,10 @@ function ContextMeter({ context }: { context: ContextStats }) {
   </div>;
 }
 
-export function Composer({ state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, context, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
+export function Composer({ state, session, value, references, sending, mode, queuedTasks, cancellingTaskId, steeringTaskId, injectingTaskId, steerable, skills, models, reasoningEfforts, currentModel, currentReasoningEffort, context, advertisedCommands, filePicker, modelReadiness, switchingModel, switchingReasoningEffort, refreshingModels, onChange, onReferencesChange, onModeChange, onSubmit, onInterrupt, onCancelQueued, onSteerQueued, onInjectQueued, onPickFile, onModelChange, onReasoningEffortChange, onRefreshModels, onShowStatus, onRestart, onCreateTask, onOpenHelp }: {
   state: string; session?: Pick<Session, 'state' | 'archivedAt'>; value: string; references: ComposerReference[]; sending: boolean; mode: SendMode; queuedTasks: Task[]; cancellingTaskId?: string; steeringTaskId?: string;
+  /** 当前 Agent 可能支持插话（ACP）；为假时不提供「插话」。 */
+  injectingTaskId?: string; steerable?: boolean; onInjectQueued?(taskId: string): void;
   skills: SkillReference[]; models: AgentModel[]; reasoningEfforts: AgentModel[]; currentModel?: string; currentReasoningEffort?: string; context: ContextStats; advertisedCommands: Array<{ name: string; description: string }>; filePicker: boolean; modelReadiness: ModelReadiness; switchingModel: boolean; switchingReasoningEffort: boolean; refreshingModels: boolean;
   onChange(value: string): void; onReferencesChange(value: ComposerReference[]): void; onModeChange(mode: SendMode): void; onSubmit(): void; onInterrupt(): void; onCancelQueued(taskId: string): void; onSteerQueued(taskId: string): void; onPickFile(): Promise<string | undefined>; onModelChange(model: string): void; onReasoningEffortChange(reasoningEffort: string): void; onRefreshModels(): void;
   // 命令注册表驱动的动作。未传时对应命令不出现在面板里（见 commands 的 filter）。
@@ -288,7 +292,7 @@ export function Composer({ state, session, value, references, sending, mode, que
   const confirmFile = () => addReference('file', filePath.split('/').at(-1) || filePath, filePath);
 
   return <div className="bg-gradient-to-t from-canvas via-canvas to-transparent px-4 pb-5 pt-7 sm:px-8"><div className="mx-auto max-w-[880px]">
-    <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} onCancel={onCancelQueued} onSteer={onSteerQueued}/>
+    <QueuedTasks tasks={queuedTasks} cancellingTaskId={cancellingTaskId} steeringTaskId={steeringTaskId} injectingTaskId={injectingTaskId} onCancel={onCancelQueued} onSteer={onSteerQueued} onInject={steerable && busy ? onInjectQueued : undefined}/>
 
     <div ref={shell} className={`relative rounded-xl border border-default bg-surface p-2 shadow-panel ring-1 ring-inset ring-subtle backdrop-blur-sm transition-[transform,border-color,box-shadow,background-color] duration-normal ease-out focus-within:-translate-y-0.5 focus-within:border-action focus-within:bg-raised ${queuedTasks.length ? 'rounded-t-md' : ''}`}>
       {/*
@@ -385,9 +389,10 @@ export function Composer({ state, session, value, references, sending, mode, que
             aria-haspopup={modeTrigger['aria-haspopup']}
             onClick={() => setModeOpen(open => !open)}
             className={`flex h-10 items-center gap-1 rounded-md px-2 text-caption font-medium transition-colors duration-fast ease-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring ${mode === 'interrupt' ? 'bg-warning-soft text-warning' : 'text-secondary hover:bg-hover'}`}
-          >{mode === 'interrupt' ? <Zap size={13}/> : <ListEnd size={13}/>}<span>{mode === 'interrupt' ? '立即' : '排队'}</span><ChevronDown size={12}/></button>}
+          >{mode === 'interrupt' ? <Zap size={13}/> : mode === 'steer' ? <MessageSquarePlus size={13}/> : <ListEnd size={13}/>}<span>{mode === 'interrupt' ? '立即' : mode === 'steer' ? '插话' : '排队'}</span><ChevronDown size={12}/></button>}
 
           <Popover open={modeOpen && modeTriggerVisible} onClose={() => setModeOpen(false)} anchor={modeAnchor} placement="top-end" width={224}>
+            {steerable && <button type="button" onClick={() => { onModeChange('steer'); setModeOpen(false); }} className="flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 py-2 text-body text-secondary hover:bg-hover"><MessageSquarePlus size={14}/>插话到当前这一轮</button>}
             <button type="button" onClick={() => { onModeChange('queue'); setModeOpen(false); }} className="flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 py-2 text-body text-secondary hover:bg-hover"><ListEnd size={14}/>排队发送</button>
             <button type="button" onClick={() => { onModeChange('interrupt'); setModeOpen(false); }} className="flex min-h-10 w-full items-center gap-2 rounded-md px-2.5 py-2 text-body text-secondary hover:bg-warning-soft hover:text-warning"><Zap size={14}/>打断并立即发送</button>
           </Popover>

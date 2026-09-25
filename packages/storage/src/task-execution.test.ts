@@ -141,6 +141,20 @@ describe('task execution ledger',()=>{
     expect(applied.target!.attemptId).toBe(a.attemptId);expect(repos.execution.getTaskExecution(later.taskId)!.task.status).toBe('running');
     const third=accepted(x,'three').task!;const cancelled=x.cancelQueued(f,third.id,third.revision,decision('cancel-third','cancel'));expect(cancelled.task!.status).toBe('cancelled');expect(repos.execution.getTaskExecution(third.id)!.attempts).toEqual([]);
   });
+  it('records a steering delivery into a submitted Attempt and takes the Task off the queue',()=>{
+    const {x,repos}=ready();const a=claimed(x);const second=accepted(x,'two').task!;
+    const delivery={operationId:'steer-two',actor:{kind:'unspecified' as const},target:{taskId:a.taskId,attemptId:a.attemptId},outcome:'injected' as const};
+    // Unsubmitted content has not reached the provider yet; there is nothing to steer into.
+    expect(()=>x.deliverQueuedBySteering(f,second.id,second.revision,delivery)).toThrow(/STEERING_TARGET_CONFLICT/);
+    x.markSubmissionPending(af(a),intent());
+    const delivered=x.deliverQueuedBySteering(f,second.id,second.revision,delivery);
+    expect(delivered.task!.status).toBe('completed');expect(repos.execution.getTaskExecution(second.id)!.attempts).toEqual([]);
+    expect(delivered.events.map(event=>[event.type,(event.data as any).steering?.outcome,(event.data as any).role])).toEqual([['text','injected','user'],['task','injected',undefined]]);
+    expect(x.deliverQueuedBySteering(f,second.id,second.revision,delivery).replayed).toBe(true);
+    expect(()=>x.deliverQueuedBySteering(f,second.id,second.revision+1,{...delivery,operationId:'steer-again'})).toThrow(/TASK_NOT_QUEUED/);
+    x.settleAttempt(af(repos.execution.getTaskExecution(a.taskId)!.currentAttempt!),'settle-first',complete());
+    expect(x.claimNext(f)).toBeUndefined();
+  });
   it('captures no interrupt target once and never retargets later activity',()=>{
     const {x}=ready();const first=x.acceptTask(f,request('one',{mode:'interrupt'}),input(),'front');expect(x.getPendingQueueActions(f)).toEqual([]);
     x.claimNext(f);expect(x.acceptTask(f,request('one',{mode:'interrupt'}),input(),'front').task!.id).toBe(first.task!.id);expect(x.getPendingQueueActions(f)).toEqual([]);

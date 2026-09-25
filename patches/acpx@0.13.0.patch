@@ -1,5 +1,5 @@
 diff --git a/dist/runtime.js b/dist/runtime.js
-index 3fb25ae..983be86 100644
+index 3fb25ae..11b936c 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
 @@ -734,17 +734,32 @@ async function createOrLoadRuntimeSession(client, resumeSessionId, cwd) {
@@ -157,7 +157,21 @@ index 3fb25ae..983be86 100644
  		});
  	}
  	createRuntimeTurnCheckpoint(record, conversation, readAcpxState) {
-@@ -1271,6 +1346,22 @@ var AcpRuntimeManager = class {
+@@ -1056,6 +1131,13 @@ var AcpRuntimeManager = class {
+ 		return {
+ 			hasActivePrompt: () => turn.client.hasActivePrompt(),
+ 			requestCancelActivePrompt: async () => await this.requestRuntimeTurnCancel(task, turn),
++			// Extension requests (e.g. `_session/steering`) target the prompt in flight; the
++			// support check and the send share one synchronous section.
++			requestExtension: async (method, params, supported) => {
++				if (!turn.client.hasActivePrompt(turn.activeSessionId)) return { active: false };
++				if (!supported(turn.client.initializeResult)) return { active: true, supported: false };
++				return { active: true, supported: true, response: await turn.client.getConnection().extMethod(method, { ...params, sessionId: turn.activeSessionId }) };
++			},
+ 			setSessionMode: async (modeId) => {
+ 				await this.waitForRuntimeControlSession(task, turn);
+ 				await turn.client.setSessionMode(turn.activeSessionId, modeId);
+@@ -1271,6 +1353,22 @@ var AcpRuntimeManager = class {
  			}
  		};
  	}
@@ -180,7 +194,15 @@ index 3fb25ae..983be86 100644
  	async setMode(handle, mode, sessionMode = "persistent") {
  		const record = await this.requireRecord(handle.acpxRecordId ?? handle.sessionKey);
  		const controller = this.activeControllers.get(record.acpxRecordId);
-@@ -1303,7 +1394,9 @@ var AcpRuntimeManager = class {
+@@ -1299,11 +1397,17 @@ var AcpRuntimeManager = class {
+ 		});
+ 		await this.options.sessionStore.save(result.record);
+ 	}
++	async requestActiveTurnExtension(handle, method, params, supported) {
++		const controller = this.activeControllers.get(handle.acpxRecordId ?? handle.sessionKey);
++		return controller ? await controller.requestExtension(method, params, supported) : { active: false };
++	}
+ 	async cancel(handle) {
  		await this.activeControllers.get(handle.acpxRecordId ?? handle.sessionKey)?.requestCancelActivePrompt();
  	}
  	async close(handle, options = {}) {
@@ -191,7 +213,7 @@ index 3fb25ae..983be86 100644
  		if (this.activeControllers.has(record.acpxRecordId)) this.closingActiveRecords.add(record.acpxRecordId);
  		await this.cancel(handle);
  		if (options.discardPersistentState) {
-@@ -1344,6 +1437,8 @@ var AcpRuntimeManager = class {
+@@ -1344,6 +1448,8 @@ var AcpRuntimeManager = class {
  	async requireRecord(sessionId) {
  		const record = await this.options.sessionStore.load(sessionId);
  		if (!record) throw new Error(`ACP session not found: ${sessionId}`);
@@ -200,7 +222,7 @@ index 3fb25ae..983be86 100644
  		return record;
  	}
  };
-@@ -1571,6 +1666,8 @@ var AcpxRuntime = class {
+@@ -1571,6 +1677,8 @@ var AcpxRuntime = class {
  			details: normalizeRuntimeDetails(report.details)
  		};
  	}
@@ -209,7 +231,7 @@ index 3fb25ae..983be86 100644
  	async ensureSession(input) {
  		const sessionName = input.sessionKey.trim();
  		if (!sessionName) throw new AcpRuntimeError("ACP_SESSION_INIT_FAILED", "ACP session key is required.");
-@@ -1582,7 +1679,7 @@ var AcpxRuntime = class {
+@@ -1582,7 +1690,7 @@ var AcpxRuntime = class {
  			mode: input.mode,
  			cwd: input.cwd ?? this.options.cwd,
  			resumeSessionId: input.resumeSessionId,
@@ -218,7 +240,7 @@ index 3fb25ae..983be86 100644
  		});
  		const handle = {
  			sessionKey: input.sessionKey,
-@@ -1614,7 +1711,7 @@ var AcpxRuntime = class {
+@@ -1614,7 +1722,7 @@ var AcpxRuntime = class {
  			sessionMode: state.mode,
  			requestId: input.requestId,
  			timeoutMs: input.timeoutMs,
@@ -227,7 +249,7 @@ index 3fb25ae..983be86 100644
  		}));
  		return {
  			requestId: input.requestId,
-@@ -1660,6 +1757,10 @@ var AcpxRuntime = class {
+@@ -1660,6 +1768,13 @@ var AcpxRuntime = class {
  		const { handle } = this.resolveManagerHandle(input.handle);
  		return await (await this.getManager()).getStatus(handle);
  	}
@@ -235,10 +257,13 @@ index 3fb25ae..983be86 100644
 +        const manager = await this.getManager();
 +        return await manager.setStrictConfigOption(this.resolveManagerHandle(input.handle).handle,input.key,input.value);
 +    }
++	async requestActiveTurnExtension(input) {
++		return await (await this.getManager()).requestActiveTurnExtension(this.resolveManagerHandle(input.handle).handle, input.method, input.params, input.supported);
++	}
  	async setMode(input) {
  		const { handle, state } = this.resolveManagerHandle(input.handle);
  		await (await this.getManager()).setMode(handle, input.mode, state.mode);
-@@ -1725,6 +1826,6 @@ function createRuntimeStore(options) {
+@@ -1725,6 +1840,6 @@ function createRuntimeStore(options) {
  	return createFileSessionStore(options);
  }
  //#endregion
@@ -248,7 +273,7 @@ index 3fb25ae..983be86 100644
  //# sourceMappingURL=runtime.js.map
 \ No newline at end of file
 diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
-index 0a8e55a..c7427da 100644
+index 0a8e55a..792fe11 100644
 --- a/dist/runtime.d.ts
 +++ b/dist/runtime.d.ts
 @@ -1,4 +1,4 @@
@@ -257,7 +282,7 @@ index 0a8e55a..c7427da 100644
  import { a as RequestedModelUnsupportedErrorCode, i as RequestedModelUnsupportedError, n as REQUESTED_MODEL_UNSUPPORTED_ERROR_CODE, o as RequestedModelUnsupportedReason, r as REQUESTED_MODEL_UNSUPPORTED_REASONS, s as isRequestedModelUnsupportedError, t as AcpClient } from "./client-BeKvumq9.js";
  import fs from "node:fs";
  import { ToolCallContent, ToolCallLocation, ToolKind } from "@agentclientprotocol/sdk";
-@@ -19,7 +19,26 @@ type AcpRuntimeHandle = {
+@@ -19,7 +19,29 @@ type AcpRuntimeHandle = {
    backendSessionId?: string;
    agentSessionId?: string;
  };
@@ -279,12 +304,15 @@ index 0a8e55a..c7427da 100644
 +export type AcpStrictRestoreInput = AcpRuntimeEnsureInput & {expected: AcpNativeContextIdentity; onPrepared(identity: AcpNativeContextIdentity, configuration: {model?:string;reasoningEffort?:string}): Promise<void> | void};
 +export declare function assertNativeContextRecord(record: AcpSessionRecord, identity: AcpNativeContextIdentity): void;
 +export interface AcpConfigurationAck { configId: string; value: string; configOptions: unknown[] }
++/** Extension request to the prompt in flight; `supported` reads the agent initialize `_meta`. */
++export interface AcpActiveTurnExtensionInput { handle: AcpRuntimeHandle; method: string; params: Record<string, unknown>; supported(agent: { agentInfo?: { name?: string } | null; _meta?: Record<string, unknown> | null } | undefined): boolean }
++export interface AcpActiveTurnExtensionResult { active: boolean; supported?: boolean; response?: unknown }
  type AcpRuntimeEnsureInput = {
 +  resourceScope?: AcpRuntimeResourceScope;
    sessionKey: string;
    agent: string;
    mode: AcpRuntimeSessionMode;
-@@ -44,6 +63,8 @@ type AcpRuntimeTurnAttachment = {
+@@ -44,6 +66,8 @@ type AcpRuntimeTurnAttachment = {
    data: string;
  };
  type AcpRuntimeTurnInput = {
@@ -293,17 +321,18 @@ index 0a8e55a..c7427da 100644
    handle: AcpRuntimeHandle;
    text: string;
    attachments?: AcpRuntimeTurnAttachment[];
-@@ -217,6 +238,9 @@ interface AcpRuntimeTurn {
+@@ -217,6 +241,10 @@ interface AcpRuntimeTurn {
  }
  interface AcpRuntime {
    ensureSession(input: AcpRuntimeEnsureInput): Promise<AcpRuntimeHandle>;
 +  createStrictSession?(input: AcpStrictCreateInput): Promise<AcpRuntimeHandle>;
 +  restoreStrictSession?(input: AcpStrictRestoreInput): Promise<AcpRuntimeHandle>;
 +  setStrictConfigOption?(input: {handle: AcpRuntimeHandle; key: string; value: string}): Promise<AcpConfigurationAck>;
++  requestActiveTurnExtension?(input: AcpActiveTurnExtensionInput): Promise<AcpActiveTurnExtensionResult>;
    startTurn(input: AcpRuntimeTurnInput): AcpRuntimeTurn;
    /**
     * Compatibility adapter for consumers that expect terminal status in the
-@@ -261,6 +285,8 @@ interface AcpAgentRegistry {
+@@ -261,6 +289,8 @@ interface AcpAgentRegistry {
    list(): string[];
  }
  type AcpRuntimeOptions = {
@@ -312,17 +341,18 @@ index 0a8e55a..c7427da 100644
    cwd: string;
    sessionStore: AcpSessionStore;
    agentRegistry: AcpAgentRegistry;
-@@ -416,6 +442,9 @@ declare class AcpxRuntime implements AcpxRuntimeLike {
+@@ -416,6 +446,10 @@ declare class AcpxRuntime implements AcpxRuntimeLike {
    probeAvailability(): Promise<void>;
    doctor(): Promise<AcpRuntimeDoctorReport>;
    ensureSession(input: AcpRuntimeEnsureInput): Promise<AcpRuntimeHandle>;
 +  createStrictSession(input: AcpStrictCreateInput): Promise<AcpRuntimeHandle>;
 +  restoreStrictSession(input: AcpStrictRestoreInput): Promise<AcpRuntimeHandle>;
 +  setStrictConfigOption(input: {handle: AcpRuntimeHandle; key: string; value: string}): Promise<AcpConfigurationAck>;
++  requestActiveTurnExtension(input: AcpActiveTurnExtensionInput): Promise<AcpActiveTurnExtensionResult>;
    startTurn(input: AcpRuntimeTurnInput): {
      requestId: string;
      events: {
-@@ -465,5 +494,5 @@ declare function createRuntimeStore(options: {
+@@ -465,5 +499,5 @@ declare function createRuntimeStore(options: {
    stateDir: string;
  }): AcpSessionStore;
  //#endregion

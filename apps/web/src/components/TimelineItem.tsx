@@ -16,7 +16,7 @@ import { PermissionCard } from './PermissionCard';
   飞书转来的指令常有十几行，超过 max-h-40 时先折叠，末尾渐隐并给「展开全文」。
   jsdom 里 scrollHeight 恒为 0，所以测试环境永远不折叠，不影响按文本查找。
 */
-function UserMessage({ text }: { text: string }) {
+function UserMessage({ text, steered = false }: { text: string; steered?: boolean }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -26,6 +26,7 @@ function UserMessage({ text }: { text: string }) {
   }, [text]);
   const collapsed = overflowing && !expanded;
   return <div className="ui-timeline-item my-6 flex justify-end"><div className="max-w-[84%] rounded-lg rounded-br-sm border border-action-soft-hover bg-action-soft px-4 py-3 text-body text-primary sm:max-w-[78%]">
+    {steered && <div className="mb-1 text-caption text-subtle">插话到当前这一轮</div>}
     <div ref={bodyRef} className={expanded ? undefined : `max-h-40 overflow-hidden ${collapsed ? 'ui-fade-bottom' : ''}`}><MarkdownContent>{text}</MarkdownContent></div>
     {overflowing && <button type="button" aria-expanded={expanded} onClick={() => setExpanded(value => !value)} className="mt-1 min-h-8 text-caption font-medium text-link hover:underline">{expanded ? '收起' : '展开全文'}</button>}
   </div></div>;
@@ -49,7 +50,7 @@ export function TimelineItem({ event, final = false, assistantLabel = 'Agent', o
   // 思考内容归 ActivityPanel 折叠区，不在主时间线重复出现。
   if (event.type === 'thinking') return null;
   const user = event.data.role === 'user';
-  if (user) return <UserMessage text={event.data.text ?? ''}/>;
+  if (user) return <UserMessage text={event.data.text ?? ''} steered={Boolean(event.data.steering)}/>;
   if (final) return <article aria-label={`${assistantLabel} 最终输出`} className="assistant-output markdown ui-timeline-item my-4 max-w-[78ch] text-body text-primary"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></article>;
   return <article className="assistant-output markdown ui-timeline-item my-5 max-w-[78ch] text-body text-primary"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></article>;
 }

@@ -218,6 +218,9 @@ export type LarkAppCreationJob = {
 export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
 export type DockEvent = { id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
+/** 插话结果：injected / startedNewTurn 已送达；moved 表示插话前这条已开跑或被取消；其余结果下这条指令仍在排队。 */
+export type SteeringOutcome = 'injected' | 'startedNewTurn' | 'moved' | 'promptRequired' | 'unsupported' | 'incompatible' | 'failed';
+export type SteeringResult = { outcome: SteeringOutcome; error?: string };
 export type RunSummary = { sessionId: string; taskId: string; prompt: string; status: string; queuedCount: number; updatedAt: string };
 export type EventWindowQuery = { before?: number; after?: number; limit?: number; direction?: 'backward' | 'forward' };
 export type BrowserAuthState = { authenticated: boolean; required: boolean };
@@ -297,12 +300,13 @@ export const api = {
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),
   create: (body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => json<Session>('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
-  send: (id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', skillRequests?: string[]) => json<{ accepted: true; task: Task }>(`/api/sessions/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, mode, ...(skillRequests?.length ? { skillRequests } : {}) }) }),
+  send: (id: string, prompt: string, mode: 'queue' | 'interrupt' | 'steer' = 'queue', skillRequests?: string[]) => json<{ accepted: true; task: Task; steering?: SteeringResult }>(`/api/sessions/${id}/send`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt, mode, ...(skillRequests?.length ? { skillRequests } : {}) }) }),
   setSessionModel: (id: string, model: string) => json<Session>(`/api/sessions/${id}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model }) }),
   setSessionReasoningEffort: (id: string, reasoningEffort: string) => json<Session>(`/api/sessions/${id}/config`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reasoningEffort }) }),
   setSessionName: (id: string, name: string | null) => json<Session>(`/api/sessions/${encodeURIComponent(id)}/name`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }),
   cancelQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}`, { method: 'DELETE' }),
   steerQueued: (id: string, taskId: string) => json<Task>(`/api/sessions/${id}/queue/${taskId}/steer`, { method: 'POST' }),
+  injectQueued: (id: string, taskId: string) => json<SteeringResult & { task: Task }>(`/api/sessions/${id}/queue/${taskId}/inject`, { method: 'POST' }),
   larkConfig: () => json<LarkConfig>('/api/lark/config'),
   startLarkOpenPlatformSetup: (appId: string, forceLogin = false) => json<LarkOpenPlatformSetupJob>('/api/lark/open-platform/configure', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, forceLogin }) }),
   larkOpenPlatformSetupJob: (jobId: string) => json<LarkOpenPlatformSetupJob>(`/api/lark/open-platform/jobs/${encodeURIComponent(jobId)}`, { cache: 'no-store' }),

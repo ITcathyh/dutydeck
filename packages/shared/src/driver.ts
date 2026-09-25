@@ -59,6 +59,8 @@ export class DriverRecoveryError extends Error {
  * tool_call 与 tool_result 靠 id 关联（runtime 的 correlateToolCalls 按 id 合并）。
  */
 
+export type DriverSteeringOutcome = 'injected' | 'startedNewTurn' | 'promptRequired' | 'unsupported';
+
 /** Agent 驱动：一个实现 = 一种 Agent 接入形态 */
 export interface AgentDriver {
   /** Runtime chooses whether uncertain execution must remain attached to its persistent session. */
@@ -75,6 +77,12 @@ export interface AgentDriver {
   prepareTurn?(input: DriverSubmissionInput, operation: OperationPermit): Promise<void>;
   prepareSubmission?(input: DriverSubmissionInput): Omit<DriverSubmission, 'operation' | 'onAccepted'>;
   resourceCapabilities?: DriverResourceCapabilities;
+  /**
+   * 可选：把一条消息送进正在执行的轮次（ACP 扩展 `_session/steering`）。
+   * injected：已并入当前轮次；startedNewTurn：Agent 用它另起了一轮；
+   * promptRequired：没有可插入的轮次，内容未送出；unsupported：Agent 未声明支持插话。
+   */
+  steer?(prompt: string): Promise<DriverSteeringOutcome>;
   /** 中断当前轮次（保留会话，可再 send）。 */
   interrupt(): Promise<void>;
   /** 重连/恢复持久会话；受控驱动的新增资源使用本次显式许可。 */

@@ -126,6 +126,8 @@ export interface LarkCommandCapabilities {
   cancelQueued: boolean;
   /** runtime.steerQueued（把排队中的一轮提到队首）。可选方法，缺失时 /steer 与 /queue top 停用。 */
   steerQueued?: boolean;
+  /** runtime.injectQueued（把排队中的一轮送进正在执行的那一轮）。缺失时 /steer 只能提到队首，/queue steer 停用。 */
+  injectQueued?: boolean;
   stop: boolean;
   getTasks: boolean;
   listAgents: boolean;
@@ -133,7 +135,7 @@ export interface LarkCommandCapabilities {
 }
 
 const capabilityKeys = [
-  'getSession', 'send', 'dispatch', 'interrupt', 'cancelQueued', 'steerQueued',
+  'getSession', 'send', 'dispatch', 'interrupt', 'cancelQueued', 'steerQueued', 'injectQueued',
   'stop', 'getTasks', 'listAgents', 'listSessions'
 ] as const satisfies readonly (keyof LarkCommandCapabilities)[];
 
@@ -255,17 +257,17 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
     name: 'queue',
     // 列出队列本身只读，但取消与提到队首会改变待执行的内容：整条命令按改状态处理，
     // 与 /cancel 同一道白名单门，避免「只读入口带着写操作」两套口径。
-    summary: '查看本会话待执行的指令，并取消其中一条或把它提到队首',
-    usage: '/queue；/queue cancel <编号>；/queue top <编号>',
+    summary: '查看本会话待执行的指令，并取消其中一条、把它提到队首或立即插话',
+    usage: '/queue；/queue cancel <编号>；/queue top <编号>；/queue steer <编号>',
     mutating: true,
     requires: capabilities => capabilities.getTasks && (capabilities.cancelQueued || capabilities.steerQueued === true),
     unavailableReason: '当前 Dutydeck 运行时读不到队列或无法操作队列（缺少 getTasks，且 cancelQueued 与 steerQueued 都不可用），/queue 已停用。'
   },
   {
     name: 'steer',
-    // 诚实边界：Dutydeck 运行时没有「向正在执行的这一轮注入内容」的原语，
-    // 只有把排队中的一轮提到队首（steerQueued）。命令因此只承诺后者，回执里如实说明。
-    summary: '把一条内容尽快插进来执行；当前 Agent 不支持真正插话，会排到队首并中断这一轮',
+    // 诚实边界：只有支持插话的 ACP Agent 才能把内容送进正在执行的这一轮（injectQueued）；
+    // 其余情况只能把排队中的一轮提到队首（steerQueued）。命令只承诺后者，回执按实际结果写。
+    summary: '把一条内容插进正在执行的这一轮；Agent 不支持插话时排到队首并中断这一轮',
     usage: '/steer <内容>',
     mutating: true,
     requires: capabilities => capabilities.dispatch && capabilities.steerQueued === true,

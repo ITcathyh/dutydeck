@@ -7,6 +7,7 @@ import { buildApp } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from './lark/config.js';
 import { LoginLinkStore } from './auth/auth.js';
+import { RuntimeError } from '@dutydeck/shared';
 
 const apps: any[] = [];
 const tempDirectories: string[] = [];
@@ -210,6 +211,27 @@ describe('HTTP API boundary', () => {
     expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/archive' })).statusCode).toBe(200);
     expect((await app.inject({ method: 'PUT', url: '/api/sessions/s1/permission-mode', payload: { mode: 'ask' } })).statusCode).toBe(404);
     expect(runtime.start).toHaveBeenCalledWith({ agentId: 'mock', model: 'model-selected-in-web', reasoningEffort: 'high' }); expect(runtime.dispatch).toHaveBeenCalledWith('s1', 'hello', 'queue', 'hello', undefined, undefined, undefined, undefined); expect(runtime.setModel).toHaveBeenCalledWith('s1', 'model-b'); expect(runtime.setReasoningEffort).toHaveBeenCalledWith('s1', 'high'); expect(runtime.cancelQueued).toHaveBeenCalledWith('s1', 't1'); expect(runtime.steerQueued).toHaveBeenCalledWith('s1', 't1'); expect(runtime.stop).toHaveBeenCalledOnce();
+  });
+
+  it('accepts a steer-mode send as a queued Task, then tries to inject it and reports what happened', async () => {
+    const task = { id: 't2', sessionId: 's1', prompt: 'also check logs', status: 'queued', createdAt: '', updatedAt: '' };
+    const runtime: any = { dispatch: vi.fn(async () => task), injectQueued: vi.fn(async () => ({ task: { ...task, status: 'completed' }, outcome: 'injected' })) };
+    const app = await buildApp(runtime); apps.push(app);
+    const sent = await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'also check logs', mode: 'steer' } });
+    expect(sent.statusCode).toBe(202);
+    expect(sent.json()).toMatchObject({ accepted: true, task: { id: 't2', status: 'completed' }, steering: { outcome: 'injected' } });
+    expect(runtime.dispatch).toHaveBeenCalledWith('s1', 'also check logs', 'queue', 'also check logs', undefined, undefined, undefined, undefined);
+    expect(runtime.injectQueued).toHaveBeenCalledWith('s1', 't2', undefined);
+    runtime.injectQueued.mockResolvedValueOnce({ task, outcome: 'unsupported' });
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/queue/t2/inject' })).json()).toMatchObject({ task: { status: 'queued' }, outcome: 'unsupported' });
+    // 这一条直接开跑（前面没有正在执行的一轮）时不插话，按正常新一轮回报。
+    runtime.dispatch.mockResolvedValueOnce({ ...task, status: 'running' });
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'start', mode: 'steer' } })).json()).toMatchObject({ steering: { outcome: 'promptRequired' } });
+    expect(runtime.injectQueued).toHaveBeenCalledTimes(2);
+    // 派发时还在排队、插话前已经开跑：按它此刻的状态回报，而不是说「接不了插话」。
+    runtime.injectQueued.mockRejectedValueOnce(new RuntimeError('QUEUED_TASK_NOT_FOUND', 'Queued task is missing', 404));
+    runtime.getTasks = vi.fn(async () => [{ ...task, status: 'running' }]);
+    expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'also check logs', mode: 'steer' } })).json()).toMatchObject({ task: { id: 't2', status: 'running' }, steering: { outcome: 'moved' } });
   });
 
   it('passes exact selected Skill paths and enforces shell authority for verification', async () => {
