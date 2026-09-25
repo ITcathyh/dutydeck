@@ -51,7 +51,7 @@ export interface LarkMemoryEntry {
   deletedBy?: string;         // open_id、'consolidation'，或迁移去重的 'migration'
 }
 
-interface StoredLarkMemory { v: 1; entries: LarkMemoryEntry[] }   // 旧记录无 topic 时读取补 'general'
+interface StoredLarkMemory { v: 1; entries: LarkMemoryEntry[]; migratedChats?: Record<string, string> }   // 旧记录无 topic 时读取补 'general'；migratedChats 见 §2.1
 
 export interface LarkMemoryState {
   v: 1;
@@ -66,6 +66,8 @@ export interface LarkMemoryState {
   lastRun?: { kind: 'extraction' | 'consolidation'; at: string; ok: boolean; added: number; superseded: number; retired: number; retopiced: number; rejected: number; error?: string };
   /** 分操作类型的最近失败时间，退避只看自己那一格；成功时清除 */
   lastFailureAt?: { extraction?: string; consolidation?: string };
+  /** 已并入群池的旧按群状态：chatId → 并入时间（§2.1） */
+  migratedChats?: Record<string, string>;
 }
 
 /** 只读状态摘要：/memory 回执与后台页面用。 */
@@ -95,11 +97,12 @@ export interface LarkMemoryStatus {
 
 某个群第一次访问群池时（任何读写入口：注入、命令、Agent 工具、管线、派生视图），`LarkMemoryStore` 检查该群的旧键 `lark.memory.<appId>.<chatId>` / `lark.memory.state.<appId>.<chatId>`，把它们并入群池：
 
-1. 条目：保留原 id 与墓碑，补 `chatId = 原群`；与群池有效条目归一化后完全相同（忽略空白与大小写）的旧条目留作墓碑（`supersededBy` 指向池里那条、`deletedBy: 'migration'`）；池里已有的 id 视为迁移过、跳过；合并后按 createdAt 排序。迁移不按上限截断，超限由后续整理收缩。
-2. 状态：`pendingTurns` 按 taskId 合并并补来源群（保留最新 24 条），两个计数取较大值，`lastExtractionAt` / `lastConsolidationAt` / `lastFailureAt` 取较晚者，`lastRun` 取较新的一次；旧池的 `running` 不带入。
+1. 条目：保留原 id 与墓碑，补 `chatId = 原群`；与群池有效条目归一化后完全相同（忽略空白与大小写）的旧条目留作墓碑（`supersededBy` 指向池里那条、`deletedBy: 'migration'`）；池里已有的 id 跳过（保证编号在池内唯一）；合并后按 createdAt 排序。迁移不按上限截断，超限由后续整理收缩。
+   并入结果和「该群已并入」标记（池账本的 `migratedChats[chatId] = 并入时间`）在同一次 CAS 里写入。
+2. 状态：`pendingTurns` 按 taskId 合并并补来源群（保留最新 24 条），两个计数取较大值，`lastExtractionAt` / `lastConsolidationAt` / `lastFailureAt` 取较晚者，`lastRun` 取较新的一次；旧池的 `running` 不带入。同样和池状态的 `migratedChats[chatId]` 同一次 CAS 写入。
 3. 并入成功后，用 CAS 把旧键改写成迁移占位：`{"v":1,"entries":[],"migratedTo":"groups","migratedAt":…}`（状态键同理为零计数）。配置仓库没有删除接口，占位保持 v1 形状，回滚到旧版本读到的是空记录而不是损坏记录。
 
-先并入再写占位：中途崩溃时下次访问重放，按 id / taskId 去重、计数取最大值，重放结果不变。同一进程内每个群只检查一次；多个进程或入口并发时靠 CAS 重试收敛。其他群访问不会搬这个群的旧账本——只有该群自己访问时才能确认它是群；私聊的池键就是旧键，不迁移。旧账本损坏时照常报 `MEMORY_STORE_CORRUPT`，只影响该群的访问。
+先并入再写占位：中途崩溃时下次访问重放，池账本 / 池状态里已有该群的 `migratedChats` 标记就跳过合并，只补写旧键占位。不能靠按 id / taskId 去重来重放：崩溃后别的群可能已经消费了并入的轮次、删掉了并入的条目并修剪了墓碑（只留 100 条），再合并一次会把已消费的轮次重新入队、把已删除的记忆恢复。同一进程内每个群只检查一次；多个进程或入口并发时靠 CAS 重试收敛。其他群访问不会搬这个群的旧账本——只有该群自己访问时才能确认它是群；私聊的池键就是旧键，不迁移。旧账本损坏时照常报 `MEMORY_STORE_CORRUPT`，只影响该群的访问。
 
 ## 3. 派生视图与注入（`apps/server/src/lark/memory-view.ts`）
 
@@ -179,7 +182,7 @@ Agent CLI（复用 `dutydeck_group_tools_*` capability；作用域取自 capabil
 
 门禁：所有 id 有效且未重复出现；`merge` 至少 2 个 id；`merge` / `update` 不得涉及 `source=user` 条目（用户条目只允许 `retire` / `retopic`）；新内容 1–1000 字符、无凭据模式；应用后主题 ≤ 12、每主题 ≤ 30、总数 ≤ 200；应用后索引 ≤ 预算，否则本轮判失败。任一违规 → 把违规清单附回 prompt 重试一次；仍失败则整轮不写入，`lastRun.ok=false`。
 
-应用：`merge` / `update` = `add({ source: 'consolidation', supersedes: ids })`；`retire` = `remove(id, 'consolidation')`；`retopic` = `retopic()`。全部通过后一次性写账本（`applyBatch`，单个 CAS 写；主题 ≤ 12 按批次终态校验，允许「先加新主题、再退掉旧主题」的中间态），再重建视图；`turnsSinceConsolidation` 减去 claim 时的快照值而不是清零，整理期间完成的轮次不丢计数。
+应用：`merge` / `update` = `add({ source: 'consolidation', supersedes: ids })`；`retire` = `remove(id, 'consolidation')`；`retopic` = `retopic()`。全部通过后一次性写账本（`applyBatch`，单个 CAS 写；主题 ≤ 12 与有效条目 ≤ 200 都按批次终态校验，允许「先加新主题、再退掉旧主题」以及迁移后超限的池「先合并、条数逐步回落」的中间态；`/remember`、Agent add 的单条新增仍按即时上限拒绝，提取由门禁逐条拒绝超限的事实），再重建视图；`turnsSinceConsolidation` 减去 claim 时的快照值而不是清零，整理期间完成的轮次不丢计数。
 
 ### 5.5 配置（legacy `StoredLarkConfig`）
 
