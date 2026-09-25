@@ -71,6 +71,9 @@ const queryPath = (path: string, options: AgentGroupCliOptions) => {
   if (options.after) query.set('after', options.after);
   if (options.limit) query.set('limit', options.limit);
   if (options.timeoutMs) query.set('timeoutMs', options.timeoutMs);
+  if (options.since) query.set('since', options.since);
+  if (options.until) query.set('until', options.until);
+  if (options.query) query.set('query', options.query);
   return query.size ? `${path}?${query}` : path;
 };
 
