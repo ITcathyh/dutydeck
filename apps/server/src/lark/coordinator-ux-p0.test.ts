@@ -638,6 +638,23 @@ describe('S6/S8/P0-7 帧注记纪律：只在非终态帧，终态帧与结果�
     } finally { restored.stop(); }
   });
 
+  it('结果卡用时从开始运行算起，运行中的状态刷新不会把它清零', async () => {
+    const h = await harness('hang');
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    const now = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + skew);
+    try {
+      await h.coordinator.handle(event('om_elapsed', '长任务'), h.config);
+      await vi.waitFor(() => expect(cardUpdates(h, input => input.state === 'running').length).toBeGreaterThan(0));
+      skew = 90_000;
+      h.releaseGate();
+      await h.waitDelivered(1);
+      const resultCard = [...h.cards.values()].find(card => card.readOnly && card.state === 'completed'
+        && Array.isArray(card.elements) && card.elements.some((element: any) => element.element_id === 'final_output'))!;
+      expect(resultCard.elapsedSeconds).toBeGreaterThanOrEqual(90);
+    } finally { now.mockRestore(); }
+  });
+
   it('S6 运行卡心跳携带排队摘要（不 @、不新消息），终态帧与结果卡不带；6+ 长队守 24KB/180', async () => {
     const h = await harness('hang');
     await h.coordinator.handle(event('om_a', '第一个任务'), h.config);

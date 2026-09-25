@@ -4190,8 +4190,9 @@ export class LarkMessageCoordinator {
           if (record.status === 'running') {
             active = true;
             heartbeatActive = true;
+            // runtime 每次修订运行中的任务都会再发一次 running，最后一次紧挨着完成；只在出队时起算用时。
+            if (!resumeTask && task.state === 'queued') task.startedAt = Date.now();
             task.state = 'running';
-            if (!resumeTask) task.startedAt = Date.now();
             void update('running').finally(scheduleHeartbeat);
           } else if (record.status === 'reconcile_required' || record.status === 'legacy_unresolved') {
             active = false;
