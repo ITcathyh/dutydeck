@@ -18,6 +18,7 @@ import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js'
 import { describeWebBaseUrlReachability, larkExecutionConfirmed } from './config.js';
 import { buildEditedMessageEvent } from './edited-message.js';
 import { LarkCardCallbackDeduper, larkCardCallbackKeys } from './card-callback-dedup.js';
+import { isTaskAssigneesUpdateEvent } from './task-agent.js';
 import type { LoginLinkStore } from '../auth/auth.js';
 
 // 飞书长连接监听：只负责 WebSocket 事件接入、事件组装与协调器装配。
@@ -285,6 +286,14 @@ export class LarkLongConnectionListener implements LarkListener {
       // reaction 在本产品里只是「请求已接入」的单向回执，不是可交互的控制面。
       'im.message.reaction.created_v1': () => undefined,
       'im.message.reaction.deleted_v1': () => undefined,
+      // 飞书任务指派人变更：立即触发一次与定时轮询相同的认领，重复事件由认领账本 CAS 去重。
+      // 仅响应 task_assignees_update；任务标题/完成状态等其它变更与「是否该接单」无关。
+      // 该事件订阅本身需在飞书开发者后台开启（task.task.update_user_access_v2，scope task:task:read）。
+      'task.task.update_user_access_v2': (event: any) => {
+        if (!coordinator || !isTaskAssigneesUpdateEvent(event)) return;
+        this.log.info({ appId: config.appId, taskGuid: typeof event?.task_guid === 'string' ? event.task_guid : undefined }, '收到飞书任务指派人变更事件，触发即时认领');
+        coordinator.handleTaskAssigneesUpdate(this.config ?? config);
+      },
       // 消息「修改」事件：解决「原消息发出时没 @ 本 bot（从未触发任务），用户编辑补 @」。
       // 事件 payload 的正文/mentions 不可靠，一律只取 message_id 回读权威消息；原作者、
       // 正文、mentions、话题字段全部以详情为准，编辑操作者绝不进入事件。是否已触发由
