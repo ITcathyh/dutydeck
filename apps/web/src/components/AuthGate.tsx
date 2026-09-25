@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { KeyRound, LogOut, RefreshCw } from 'lucide-react';
-import { api, UNAUTHORIZED_EVENT, type BrowserAuthState } from '../api';
+import { api, ApiError, UNAUTHORIZED_EVENT, type BrowserAuthState } from '../api';
 import { Banner, Button, Card, Field, Input, Spinner } from './primitives';
 
 export function AuthGate({ children }: { children: ReactNode }) {
@@ -19,7 +19,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   useEffect(() => { void check(); }, [check]);
   useEffect(() => {
-    const unauthorized = () => { setAuth({ authenticated: false, required: true }); setToken(''); };
+    // 回到登录页时保留「用密码登录」这一点，不然会退回令牌输入框。
+    const unauthorized = () => { setAuth(current => ({ authenticated: false, required: true, ...(current?.password ? { password: true } : {}) })); setToken(''); };
     window.addEventListener(UNAUTHORIZED_EVENT, unauthorized);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, unauthorized);
   }, []);
@@ -28,8 +29,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
     event.preventDefault();
     if (!token.trim()) return;
     setSubmitting(true); setError(undefined);
-    try { setAuth(await api.login(token.trim())); setToken(''); }
-    catch { setError('访问令牌不正确或已轮换，请重新获取后再试。'); }
+    // 密码原样提交（可以含空格）；令牌去掉首尾空白。
+    try { setAuth(await (auth?.password ? api.passwordLogin(token) : api.login(token.trim()))); setToken(''); }
+    catch (cause) { setError(cause instanceof ApiError && cause.status === 429 ? cause.message : auth?.password ? '访问密码不正确。' : '访问令牌不正确或已轮换，请重新获取后再试。'); }
     finally { setSubmitting(false); }
   };
 
@@ -59,19 +61,21 @@ export function AuthGate({ children }: { children: ReactNode }) {
         {/* 40px 方块，圆角按契约 §3「半径 ≈ 高度 / 3.5」取档：40 / 3.5 ≈ 11 → rounded-md（10px）。 */}
         <div className="grid h-10 w-10 place-items-center rounded-md bg-action text-body font-semibold text-on-action">D</div>
         <h1 className="mt-5 text-heading font-semibold tracking-tight text-primary">连接到这台 Dutydeck</h1>
-        <p className="mt-2 text-body text-secondary">输入 <code className="rounded-sm bg-muted px-1 py-0.5 text-caption">dutydeck auth token</code> 显示的访问令牌。登录后凭据保存在 HttpOnly Cookie 中，不会出现在 URL。</p>
+        {auth?.password
+          ? <p className="mt-2 text-body text-secondary">输入这台 Dutydeck 的访问密码。忘记了可以在服务器上用 <code className="rounded-sm bg-muted px-1 py-0.5 text-caption">dutydeck auth password set</code> 重设。</p>
+          : <p className="mt-2 text-body text-secondary">输入 <code className="rounded-sm bg-muted px-1 py-0.5 text-caption">dutydeck auth token</code> 显示的访问令牌。登录后凭据保存在 HttpOnly Cookie 中，不会出现在 URL。</p>}
         {/*
           Field 把 label 与控件用 id 绑起来（点标签能聚焦输入框），比原先手写的
           <span> + aria-label 少一份要同步的文案副本。原来贴在框里的钥匙图标随之舍弃：
           Field 没有「图标嵌在输入框内」的槽位，而那个图标纯装饰，旁边就是「访问令牌」四个字。
         */}
         <div className="mt-5">
-          <Field label="访问令牌">
+          <Field label={auth?.password ? '访问密码' : '访问令牌'}>
             <Input required autoFocus type="password" autoComplete="current-password" value={token} onChange={event => setToken(event.target.value)}/>
           </Field>
         </div>
         {error && <div className="mt-3"><Banner tone="danger">{error}</Banner></div>}
-        <div className="mt-5"><Button type="submit" variant="primary" fullWidth loading={submitting} disabled={!token.trim()} icon={<KeyRound size={14}/>} className="min-h-10">连接工作台</Button></div>
+        <div className="mt-5"><Button type="submit" variant="primary" fullWidth loading={submitting} disabled={!(auth?.password ? token : token.trim())} icon={<KeyRound size={14}/>} className="min-h-10">连接工作台</Button></div>
         {!auth && <div className="mt-3"><Button variant="ghost" fullWidth onClick={() => void check()} icon={<RefreshCw size={12}/>} className="min-h-10">重新检查连接</Button></div>}
       </form>
     </Card>

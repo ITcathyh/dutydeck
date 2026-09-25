@@ -4,6 +4,7 @@ import type { PermissionMode } from '@dutydeck/shared';
 import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, LarkCircuitOpenError } from './api-gate.js';
 import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
+import { larkSessionDetailUrl } from './detail-link.js';
 
 /**
  * 从响应头解析飞书要求的等待时长（ms）。Retry-After 与 x-ogw-ratelimit-reset 的
@@ -591,7 +592,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   }
   // 详情链接是整卡唯一的 Web 出口（顶部不再重复渲染同一个链接按钮），
   // 因此这里必须自己校验协议，不能假设别处已经挡掉 javascript: 之类的目标。
-  const footerDetailUrl = safeLarkWebUrl(sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : webBaseUrl ? `${webBaseUrl}/` : undefined);
+  // 有会话时指向这个会话的只读分享页（detail-link.ts），没有会话时指向任务中心。
+  const footerDetailUrl = safeLarkWebUrl(webBaseUrl ? sessionId ? larkSessionDetailUrl(webBaseUrl, sessionId) : `${webBaseUrl}/` : undefined);
   // Web 要求登录时「查看详情」换成回调按钮：链接要带一次性登录码，只能点击后私信给管理员；
   // 其余情况仍是直接打开 footerDetailUrl 的链接。
   const detailButton = footerDetailUrl ? buildLarkCardDetailButton(actionContext) : undefined;

@@ -3,21 +3,34 @@ import { createHash } from 'node:crypto';
 import Fastify from 'fastify';
 import type { ConfigRepository } from '@dutydeck/shared';
 import {
+  AUTH_PASSWORD_CONFIG_KEY,
   AUTH_TOKEN_CONFIG_KEY,
   AUTH_COOKIE_NAME,
   extractCookie,
   extractBearerToken,
   generateAuthToken,
   getAuthToken,
+  getPasswordHash,
+  getShareLinkSecret,
+  hashPassword,
   isSameOriginRequest,
+  issueBrowserSession,
   loadOrCreateAuthToken,
+  loadOrCreateShareLinkSecret,
   LOGIN_LINK_TTL_MS,
   LoginLinkStore,
+  LoginThrottle,
   registerBrowserAuthRoutes,
   registerAuthMiddleware,
   rotateAuthToken,
+  runAuthPasswordSetCommand,
   runAuthTokenCommand,
+  runShareKeyRotateCommand,
+  SHARE_TOKEN_QUERY_KEY,
+  signSessionShareToken,
   tokensEqual,
+  verifyBrowserSession,
+  verifyPassword,
   type AuthMiddlewareOptions
 } from './auth.js';
 
@@ -553,5 +566,204 @@ describe('one-time login links', () => {
     expect(log).not.toContain(code);
     expect(log).not.toContain('code=');
     await app.close();
+  });
+});
+
+describe('访问密码', () => {
+  it('只存加盐的 scrypt 哈希：同一密码两次哈希不同，都能验证，错密码不过', async () => {
+    const first = await hashPassword('correct horse');
+    const second = await hashPassword('correct horse');
+    expect(first).toMatch(/^scrypt\$16384\$8\$1\$[A-Za-z0-9_-]+\$[A-Za-z0-9_-]+$/);
+    expect(first).not.toContain('correct horse');
+    expect(first).not.toBe(second);
+    expect(await verifyPassword('correct horse', first)).toBe(true);
+    expect(await verifyPassword('correct horse', second)).toBe(true);
+    expect(await verifyPassword('correct hors', first)).toBe(false);
+    expect(await verifyPassword('correct horse', 'plain-text')).toBe(false);
+    expect(await verifyPassword('', 'scrypt$16384$8$1$c2FsdA$')).toBe(false);
+  });
+
+  it('auth password set：写入哈希；--generate 生成的密码只在返回值里出现一次；过短不改', async () => {
+    const configs = memoryConfigs();
+    await expect(runAuthPasswordSetCommand(configs, { readPassword: async () => 'short' })).rejects.toThrow('至少 8 个字符');
+    expect(await getPasswordHash(configs)).toBeNull();
+
+    expect(await runAuthPasswordSetCommand(configs, { readPassword: async () => 'dashboard pass' })).toEqual({ passwordSet: true });
+    const stored = await configs.get(AUTH_PASSWORD_CONFIG_KEY);
+    expect(stored).not.toContain('dashboard pass');
+    expect(await verifyPassword('dashboard pass', stored!)).toBe(true);
+
+    const readPassword = vi.fn(async () => 'unused');
+    const generated = await runAuthPasswordSetCommand(configs, { generate: true, readPassword });
+    expect(readPassword).not.toHaveBeenCalled();
+    expect(generated.password).toMatch(/^[A-Za-z0-9_-]{24}$/);
+    expect(await verifyPassword(generated.password!, (await getPasswordHash(configs))!)).toBe(true);
+    expect(await verifyPassword('dashboard pass', (await getPasswordHash(configs))!)).toBe(false);
+  });
+
+  it('浏览器会话：绑定当前密码哈希，过期、篡改、重设密码后都失效', async () => {
+    const hash = await hashPassword('dashboard pass');
+    const now = Date.UTC(2026, 8, 25);
+    const session = issueBrowserSession(hash, now);
+    expect(session).toMatch(/^pw\.[0-9a-z]+\.[A-Za-z0-9_-]{43}$/);
+    expect(session).not.toContain(hash);
+    expect(verifyBrowserSession(session, hash, now + 29 * 86_400_000)).toBe(true);
+    expect(verifyBrowserSession(session, hash, now + 31 * 86_400_000)).toBe(false);
+    expect(verifyBrowserSession(session, null, now)).toBe(false);
+    expect(verifyBrowserSession(`${session}x`, hash, now)).toBe(false);
+    expect(verifyBrowserSession(session.replace(/^pw\.[0-9a-z]+/, `pw.${(now + 1).toString(36)}`), hash, now + 1)).toBe(false);
+    expect(verifyBrowserSession(session, await hashPassword('dashboard pass'), now)).toBe(false);
+  });
+});
+
+describe('密码登录', () => {
+  const TOKEN = 'test-token-abcdefghijklmnopqrstuvwxyz123456';
+  const remote = { remoteAddress: '203.0.113.7' } as const;
+
+  async function passwordApp(options: { now?: () => number } = {}) {
+    const configs = memoryConfigs();
+    await runAuthPasswordSetCommand(configs, { readPassword: async () => 'dashboard pass' });
+    const auth: AuthMiddlewareOptions = {
+      mode: 'token', localOnly: false, getToken: async () => TOKEN, getPasswordHash: () => getPasswordHash(configs),
+      loginThrottle: new LoginThrottle(options.now)
+    };
+    const app = Fastify();
+    registerBrowserAuthRoutes(app, auth);
+    registerAuthMiddleware(app, { ...auth, exempt: (_method, pathname) => pathname.startsWith('/api/auth/') });
+    app.get('/api/sessions', async () => [{ id: 'ses_1' }]);
+    return { app, configs };
+  }
+  const login = (app: Awaited<ReturnType<typeof passwordApp>>['app'], payload: Record<string, string>, source: { remoteAddress: string } = remote) =>
+    app.inject({ method: 'POST', url: '/api/auth/login', payload, ...source });
+
+  it('未登录从非回环地址读会话列表被拒；密码登录后 cookie 可读；Bearer token 照旧可用', async () => {
+    const { app } = await passwordApp();
+    expect((await app.inject({ method: 'GET', url: '/api/sessions', ...remote })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: '/api/auth/status', ...remote })).json()).toEqual({ authenticated: false, required: true, password: true });
+
+    const ok = await login(app, { password: 'dashboard pass' });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ authenticated: true, required: true, password: true });
+    const cookie = String(ok.headers['set-cookie']);
+    expect(cookie).toMatch(new RegExp(`^${AUTH_COOKIE_NAME}=pw\\.`));
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('SameSite=Strict');
+    expect(cookie).not.toContain('dashboard pass');
+    expect(cookie).not.toContain(TOKEN);
+    const session = cookie.split(';')[0]!;
+    expect((await app.inject({ method: 'GET', url: '/api/sessions', headers: { cookie: session }, ...remote })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/auth/status', headers: { cookie: session }, ...remote })).json()).toMatchObject({ authenticated: true });
+    expect((await app.inject({ method: 'GET', url: '/api/sessions', headers: { authorization: `Bearer ${TOKEN}` }, ...remote })).statusCode).toBe(200);
+    // 令牌登录照旧可用：CLI 用户在浏览器里贴令牌也能进。
+    expect((await login(app, { token: TOKEN })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('错误密码 401 且不发 cookie；重设密码后旧会话失效', async () => {
+    const { app, configs } = await passwordApp();
+    const rejected = await login(app, { password: 'wrong pass' });
+    expect(rejected.statusCode).toBe(401);
+    expect(rejected.headers['set-cookie']).toBeUndefined();
+    expect((await login(app, { token: 'wrong-token' })).statusCode).toBe(401);
+
+    const session = String((await login(app, { password: 'dashboard pass' })).headers['set-cookie']).split(';')[0]!;
+    await runAuthPasswordSetCommand(configs, { readPassword: async () => 'another pass' });
+    expect((await app.inject({ method: 'GET', url: '/api/sessions', headers: { cookie: session }, ...remote })).statusCode).toBe(401);
+    expect((await login(app, { password: 'dashboard pass' })).statusCode).toBe(401);
+    expect((await login(app, { password: 'another pass' })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('同一地址连续失败 5 次锁定 60 秒：锁定期内正确密码也被拒，其他地址不受影响；解锁后成功并清零', async () => {
+    let now = 1_000_000;
+    const { app } = await passwordApp({ now: () => now });
+    for (let attempt = 0; attempt < 5; attempt++) expect((await login(app, { password: `wrong ${attempt}` })).statusCode).toBe(401);
+    const locked = await login(app, { password: 'dashboard pass' });
+    expect(locked.statusCode).toBe(429);
+    expect(locked.headers['retry-after']).toBe('60');
+    expect(locked.json().error.code).toBe('LOGIN_RATE_LIMITED');
+    expect(locked.headers['set-cookie']).toBeUndefined();
+    expect((await login(app, { password: 'dashboard pass' }, { remoteAddress: '198.51.100.9' })).statusCode).toBe(200);
+
+    now += 30_000;
+    expect((await login(app, { password: 'dashboard pass' })).statusCode).toBe(429);
+    now += 30_001;
+    expect((await login(app, { password: 'dashboard pass' })).statusCode).toBe(200);
+    // 成功后重新计数：再错 4 次还不会锁。
+    for (let attempt = 0; attempt < 4; attempt++) expect((await login(app, { password: 'wrong' })).statusCode).toBe(401);
+    expect((await login(app, { password: 'dashboard pass' })).statusCode).toBe(200);
+    await app.close();
+  });
+});
+
+describe('分享 token', () => {
+  const TOKEN = 'test-token-abcdefghijklmnopqrstuvwxyz123456';
+  const remote = { remoteAddress: '203.0.113.7' } as const;
+
+  async function shareApp() {
+    const configs = memoryConfigs();
+    await loadOrCreateShareLinkSecret(configs);
+    const app = Fastify();
+    registerAuthMiddleware(app, { mode: 'token', localOnly: false, getToken: async () => TOKEN, getShareSecret: () => getShareLinkSecret(configs) });
+    app.get('/api/sessions', async () => [{ id: 'ses_1' }, { id: 'ses_2' }]);
+    app.get('/api/sessions/summaries', async () => []);
+    for (const suffix of ['', '/events', '/tasks', '/stream', '/workspace', '/verifications']) {
+      app.get<{ Params: { id: string } }>(`/api/sessions/:id${suffix}`, async request => ({ id: request.params.id }));
+    }
+    for (const action of ['send', 'archive', 'interrupt', 'permissions/p1']) app.post(`/api/sessions/:id/${action}`, async () => ({ ok: true }));
+    return { app, configs, share: async (sessionId: string) => signSessionShareToken((await getShareLinkSecret(configs))!, sessionId) };
+  }
+
+  it('只放行绑定会话的读接口（详情、事件、任务、实时流）', async () => {
+    const { app, share } = await shareApp();
+    const token = await share('ses_1');
+    for (const suffix of ['', '/events', '/tasks', '/stream']) {
+      const response = await app.inject({ method: 'GET', url: `/api/sessions/ses_1${suffix}?after=0&${SHARE_TOKEN_QUERY_KEY}=${token}`, ...remote });
+      expect(response.statusCode, suffix).toBe(200);
+      expect(response.json()).toEqual({ id: 'ses_1' });
+    }
+    expect((await app.inject({ method: 'HEAD', url: `/api/sessions/ses_1?share=${token}`, ...remote })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('改会话 ID、伪造、缺失、重复参数、别的接口和写接口一律 401', async () => {
+    const { app, share } = await shareApp();
+    const token = await share('ses_1');
+    const denied = [
+      { method: 'GET', url: `/api/sessions/ses_2?share=${token}` },
+      { method: 'GET', url: `/api/sessions/ses_2/events?share=${token}` },
+      { method: 'GET', url: `/api/sessions/ses_1?share=${signSessionShareToken('forged-secret', 'ses_1')}` },
+      { method: 'GET', url: `/api/sessions/ses_1?share=${token.slice(0, -1)}A` },
+      { method: 'GET', url: '/api/sessions/ses_1' },
+      { method: 'GET', url: `/api/sessions/ses_1?share=${token}&share=${token}` },
+      { method: 'GET', url: `/api/sessions?share=${token}` },
+      { method: 'GET', url: `/api/sessions/summaries?share=${await share('summaries')}` },
+      { method: 'GET', url: `/api/sessions/ses_1/workspace?share=${token}` },
+      { method: 'GET', url: `/api/sessions/ses_1/verifications?share=${token}` },
+      { method: 'POST', url: `/api/sessions/ses_1/send?share=${token}` },
+      { method: 'POST', url: `/api/sessions/ses_1/archive?share=${token}` },
+      { method: 'POST', url: `/api/sessions/ses_1/interrupt?share=${token}` },
+      { method: 'POST', url: `/api/sessions/ses_1/permissions/p1?share=${token}` },
+    ] as const;
+    for (const request of denied) {
+      expect((await app.inject({ ...request, ...remote })).statusCode, `${request.method} ${request.url}`).toBe(401);
+    }
+    await app.close();
+  });
+
+  it('轮换签名密钥后旧链接失效，新链接可用', async () => {
+    const { app, configs, share } = await shareApp();
+    const old = await share('ses_1');
+    expect((await app.inject({ method: 'GET', url: `/api/sessions/ses_1?share=${old}`, ...remote })).statusCode).toBe(200);
+    expect(await runShareKeyRotateCommand(configs)).toEqual({ rotated: true });
+    expect((await app.inject({ method: 'GET', url: `/api/sessions/ses_1?share=${old}`, ...remote })).statusCode).toBe(401);
+    expect((await app.inject({ method: 'GET', url: `/api/sessions/ses_1?share=${await share('ses_1')}`, ...remote })).statusCode).toBe(200);
+    await app.close();
+  });
+
+  it('签名确定且绑定会话：同一会话同一串，换会话就变', () => {
+    expect(signSessionShareToken('secret', 'ses_1')).toBe(signSessionShareToken('secret', 'ses_1'));
+    expect(signSessionShareToken('secret', 'ses_1')).not.toBe(signSessionShareToken('secret', 'ses_2'));
+    expect(signSessionShareToken('secret', 'ses_1')).toMatch(/^[A-Za-z0-9_-]{43}$/);
   });
 });

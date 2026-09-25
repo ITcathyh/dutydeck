@@ -9,7 +9,8 @@ import { TimelineItem } from './TimelineItem';
 export type TimelineViewProps = {
   activeSessionId?: string;
   eventsLoading: boolean;
-  onResolvePermission(permissionId: string, approved: boolean): void;
+  /** 不传时授权卡只显示状态、不给按钮（只读分享页） */
+  onResolvePermission?(permissionId: string, approved: boolean): void;
   resolvingPermissionId?: string;
   timeline: TimelineEvent[];
   timelineSections: TimelineSection[];

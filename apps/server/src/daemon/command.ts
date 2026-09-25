@@ -816,6 +816,7 @@ export function daemonStatus(): DaemonStatusInfo {
 }
 
 function authEnabledFromCli(options: CliOptions, env: NodeJS.ProcessEnv): boolean {
+  if (options.unsafeNoAuth === true) return false;
   if (options.auth !== undefined) return options.auth;
   return env.DUTYDECK_AUTH !== 'false';
 }

@@ -23,6 +23,8 @@ export type LarkBotConfig = {
   setupComplete: boolean;
   workspace?: string;
   webBaseUrl?: string;
+  /** 配置向导里答了手机打不开 Web 地址；此时没有 webBaseUrl，卡片不显示「查看详情」 */
+  webMobileReachable?: false;
   defaultAgentId?: string;
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -220,7 +222,7 @@ export type DockEvent = { id: string; sequence: number; type: string; timestamp:
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
 export type RunSummary = { sessionId: string; taskId: string; prompt: string; status: string; queuedCount: number; updatedAt: string };
 export type EventWindowQuery = { before?: number; after?: number; limit?: number; direction?: 'backward' | 'forward' };
-export type BrowserAuthState = { authenticated: boolean; required: boolean };
+export type BrowserAuthState = { authenticated: boolean; required: boolean; password?: boolean };
 export type FoundationCapability = { schemaVersion: 1; repositoriesWired: boolean; permissionEvaluatorWired: boolean; secretInspectorWired: boolean; runtimeWired: false; writesEnabled: boolean; readiness: 'repository_unwired' | 'permission_unwired' | 'secret_inspector_unwired' | 'offline_management_ready'; blockers: Array<{ code: string; message: string; action: string }> };
 export type PublicSecretRef = SecretRefMetadata & { availability: 'available' | 'missing' | 'unreadable' | 'unchecked' };
 export type GroupMatrixCell = {
@@ -246,10 +248,17 @@ export type PublicScheduleDefinition = {
 export type ScheduleDetail = { definition: PublicScheduleDefinition; readiness: { executionEligible: false; nextOccurrence?: SchedulePreview; blockers: ScheduleBlocker[] }; currentGeneration?: ScheduleGeneration; watermark?: ScheduleWatermark };
 export type ScheduleList = { capabilities: ScheduleCapability; schedules: ScheduleDetail[] };
 export const UNAUTHORIZED_EVENT = 'dutydeck:unauthorized';
+/**
+ * 分享页只读一个会话：页面加载时从 # 片段取出分享 token，之后每个请求都在查询串里带上它。
+ * 放查询串而不是请求头，是因为 EventSource 带不了自定义请求头。
+ */
+let shareToken: string | undefined;
+export const setShareToken = (token: string | undefined) => { shareToken = token; };
+export const withShareToken = (url: string) => shareToken ? `${url}${url.includes('?') ? '&' : '?'}share=${encodeURIComponent(shareToken)}` : url;
 export class ApiError extends Error {
   constructor(message: string, public readonly code: string, public readonly status: number, public readonly current?: unknown) { super(message); this.name = 'ApiError'; }
 }
-const json = async <T,>(url: string, init?: RequestInit): Promise<T> => { const response = await fetch(url, { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
+const json = async <T,>(url: string, init?: RequestInit): Promise<T> => { const response = await fetch(withShareToken(url), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
 const agentModelsUrl = (id: string, model?: string, refresh = false) => {
   const query = new URLSearchParams();
   if (model) query.set('model', model);
@@ -292,8 +301,9 @@ export const api = {
   verify: (id: string, input: VerificationCommandInput) => json<VerificationResponse>(`/api/sessions/${id}/verifications`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) }),
   authStatus: () => json<BrowserAuthState>('/api/auth/status', { cache: 'no-store' }),
   login: (token: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }),
+  passwordLogin: (password: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) }),
   logout: () => json<BrowserAuthState>('/api/auth/logout', { method: 'POST' }),
-  agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh)), sessions: () => json<Session[]>('/api/sessions'), events: (id: string, query?: EventWindowQuery, signal?: AbortSignal) => json<DockEvent[]>(eventsUrl(id, query), { signal }), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
+  agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh)), sessions: () => json<Session[]>('/api/sessions'), session: (id: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`), events: (id: string, query?: EventWindowQuery, signal?: AbortSignal) => json<DockEvent[]>(eventsUrl(id, query), { signal }), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),
   create: (body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: WorkspaceMode }) => json<Session>('/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
@@ -320,6 +330,7 @@ export const api = {
     workspaceAliases?: Record<string, string>;
     verificationCommand?: string;
     webBaseUrl?: string;
+    webMobileReachable?: boolean;
     defaultAgentId?: string;
     defaultModel?: string;
     defaultReasoningEffort?: string;
