@@ -35,6 +35,11 @@ export interface TranscriptEventSource {
   checkpoint(): TranscriptCursor;
   restore(cursor: TranscriptCursor): void;
   onEvent(cb: (e: NormalizedDriverEvent) => void): void;
+  /** Background sub-agents the CLI reported still running when its latest
+   *  turn ended. Only sources whose transcript records it (Claude) implement this. */
+  pendingBackgroundWork?(): number;
+  /** Forget that report at a new prompt; the new turn's own end record decides. */
+  resetBackgroundWork?(): void;
 }
 
 /** Loose shape of a parsed JSONL entry — mappers narrow per CLI schema. */

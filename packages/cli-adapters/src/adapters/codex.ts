@@ -2,6 +2,7 @@ import type { AdapterSessionContext, CliAdapter, PtyLike } from '../types.js';
 import { isDutydeckSessionId, usableResumeId } from '../resume-id.js';
 import { pollScreenReady } from './screen-ready-helper.js';
 import { buildCwdTrustArgs } from './cwd-trust.js';
+import { waitForInputEcho, waitForQuietScreen } from './input-settle.js';
 
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
@@ -57,6 +58,9 @@ export function createCodexAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
+      // CLI 还在输出时粘贴会和它的重绘交错：先等屏幕静止，回显稳定后再提交。
+      await waitForQuietScreen(backend);
+      const typedAt = Date.now();
       // Codex 把字面 \n 当 Enter，必须 bracketed paste 包住多行内容，
       // 否则一条多行消息会被拆成多个 turn。
       if (backend.pasteText) {
@@ -65,6 +69,7 @@ export function createCodexAdapter(): CliAdapter {
         backend.write('\x1b[200~' + prompt + '\x1b[201~');
       }
       await delay(200);
+      await waitForInputEcho(backend, typedAt);
       if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
       else backend.write('\r');
     },

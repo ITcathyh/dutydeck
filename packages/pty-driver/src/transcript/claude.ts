@@ -14,6 +14,8 @@
  *     tool_use block  → { type:'tool_call', data:{ id, name, input, status:'running' } }
  *   user message.content[]:
  *     tool_result     → { type:'tool_result', data:{ id, status, output } }
+ *   system turn_duration → no event; feeds pendingBackgroundWork()
+ *                          (see claudePendingBackgroundWork)
  *
  * Sidechain (Task tool internals) and API-error assistant lines are skipped —
  * they are not model output.
@@ -233,6 +235,20 @@ export function mapClaudeEntry(entry: any): NormalizedDriverEvent[] | undefined 
   return undefined;
 }
 
+/**
+ * Background work a main-thread turn ended with. Claude writes a
+ * `system/turn_duration` record at every turn end; while sub-agents (or
+ * dynamic workflows) it launched in the background are still running, the
+ * record carries their count and the screen shows `✻ Waiting for 1 background
+ * agent to finish`. Their completion re-wakes the session as a new turn whose
+ * own record reports what is left. Undefined for every other entry.
+ */
+export function claudePendingBackgroundWork(entry: any): number | undefined {
+  if (!entry || entry.isSidechain === true || entry.type !== 'system' || entry.subtype !== 'turn_duration') return undefined;
+  const count = (value: unknown) => (Number.isSafeInteger(value) && (value as number) > 0 ? value as number : 0);
+  return count(entry.pendingBackgroundAgentCount) + count(entry.pendingWorkflowCount);
+}
+
 export interface ClaudeTranscriptTailerOptions {
   cwd: string;
   /** Explicit transcript path. When given, directory scanning and file
@@ -256,6 +272,7 @@ export interface ClaudeTranscriptTailerOptions {
 
 export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
+  private backgroundWork = 0;
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
@@ -277,7 +294,11 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         : opts.sessionId
           ? resolveOnce
           : () => resolveClaudeTranscriptPath(opts.cwd, opts.env),
-      mapEntry: mapClaudeEntry,
+      mapEntry: entry => {
+        const pending = claudePendingBackgroundWork(entry);
+        if (pending !== undefined) this.backgroundWork = pending;
+        return mapClaudeEntry(entry);
+      },
       pollIntervalMs: opts.pollIntervalMs,
       /**
        * Re-resolving each tick is what lets the tailer attach late: the jsonl
@@ -305,4 +326,6 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
   stop(): void { this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
+  pendingBackgroundWork(): number { return this.backgroundWork; }
+  resetBackgroundWork(): void { this.backgroundWork = 0; }
 }
