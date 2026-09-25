@@ -3,7 +3,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { PermissionMode } from '@dutydeck/shared';
 import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
 import { executeWithLarkGate, LarkCircuitOpenError } from './api-gate.js';
-import { buildLarkCardActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
+import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 
 /**
  * 从响应头解析飞书要求的等待时长（ms）。Retry-After 与 x-ogw-ratelimit-reset 的
@@ -56,6 +56,11 @@ export interface LarkCardInput {
    * 保证既有调用点行为不变。任一能力为 false 时对应按钮不渲染，而不是渲染死按钮。
    */
   capabilities?: LarkCardCapabilities;
+  /**
+   * Web 要求登录：「查看详情」渲染成回调按钮（同 capabilities.detailLogin）。给首帧、对账这类
+   * 不注入整张能力表的重绘用，其余按钮照旧；卡上没有 sessionId 时不生效，仍是直链。
+   */
+  detailLogin?: boolean;
   /**
    * 轮次编号，写入 callback value 以便 daemon 重启后仍能解释这次点击。
    * 卡片状态机之外的信息一律放进 value，不依赖内存。
@@ -508,7 +513,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // coordinator 注入真实能力来消除（见 capabilitiesForTask）。
   // canRefresh 例外：它依赖 coordinator 的 requestUpdate 心跳句柄，进程内不存在
   // 等价物，未显式声明时必须为 false，否则点了必然失败。
-  const actionCapabilities: LarkCardCapabilities = input.capabilities ?? {
+  const baseCapabilities: LarkCardCapabilities = input.capabilities ?? {
     canCancelQueued: true,
     canInterrupt: true,
     canRetry: input.retryable !== false,
@@ -517,18 +522,29 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     // 裸 /sessions 会命中 not-found——那等于把「查看详情」指向一个死页面。
     ...(webBaseUrl ? { webUrl: sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : `${webBaseUrl}/` } : {})
   };
-  const actionButtons = buildLarkCardActions({
+  const actionCapabilities: LarkCardCapabilities = input.detailLogin && sessionId && webBaseUrl
+    ? { ...baseCapabilities, detailLogin: true, webUrl: baseCapabilities.webUrl ?? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` }
+    : baseCapabilities;
+  const actionContext: Parameters<typeof buildLarkCardActions>[0] = {
     state: (input.actionState ?? state) as Parameters<typeof buildLarkCardActions>[0]['state'],
     taskId,
     turn: Number(input.turn ?? 0),
     ...(input.readOnly ? { readOnly: true } : {}),
     ...(input.retryable !== undefined ? { retryable: input.retryable } : {}),
     capabilities: actionCapabilities
-  });
+  };
+  const actionButtons = buildLarkCardActions(actionContext);
   // 每个按钮一列、宽度随内容：按钮带图标，固定窄列会把文案挤折行。
   const actionButtonColumns = actionButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }));
   const isProcessCard = input.cardKind === 'process';
   const isResultCard = input.cardKind === 'result';
+  // 结果卡的续问行（说人话 / 给我对外回复 / 再详细点 / 每天自动执行）放在正文之后：
+  // 读者看完结论才会接着问。流式排布，窄屏上按钮自动折行，不挤成一排。
+  const followUpButtons = isResultCard ? buildLarkCardFollowUpActions(actionContext) : [];
+  const followUpRow = followUpButtons.length ? [{
+    tag: 'column_set', element_id: 'result_follow_up_row', flex_mode: 'flow', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
+    columns: followUpButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }))
+  }] : [];
 
   let footerMention: string | undefined;
   let mentionElementIndex = -1;
@@ -576,10 +592,14 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   // 详情链接是整卡唯一的 Web 出口（顶部不再重复渲染同一个链接按钮），
   // 因此这里必须自己校验协议，不能假设别处已经挡掉 javascript: 之类的目标。
   const footerDetailUrl = safeLarkWebUrl(sessionId ? `${webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` : webBaseUrl ? `${webBaseUrl}/` : undefined);
+  // Web 要求登录时「查看详情」换成回调按钮：链接要带一次性登录码，只能点击后私信给管理员；
+  // 其余情况仍是直接打开 footerDetailUrl 的链接。
+  const detailButton = footerDetailUrl ? buildLarkCardDetailButton(actionContext) : undefined;
   if (footerDetailUrl) {
     footerColumns.push({
       tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center',
-      elements: [{
+      ...(detailButton ? { horizontal_align: 'right' } : {}),
+      elements: [detailButton ?? {
         tag: 'markdown',
         content: `<font color='grey'>[查看详情](${footerDetailUrl})</font>`,
         text_size: 'x-small', text_align: 'right', margin: '0px'
@@ -587,8 +607,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     });
   }
   const recordHint = footerDetailUrl ? '完整记录见「查看详情」。' : '';
-  // 硬兜底卡没有页脚，指向「查看详情」时必须自带链接。
-  const hardFallbackHint = footerDetailUrl ? `完整记录见[查看详情](${footerDetailUrl})。` : '';
+  // 硬兜底卡没有页脚，指向「查看详情」时必须自带入口：回调按钮跟在提示后面，否则提示里带链接。
+  const hardFallbackHint = detailButton ? recordHint : footerDetailUrl ? `完整记录见[查看详情](${footerDetailUrl})。` : '';
   const rawElements = (isResultCard && mentionElementIndex >= 0 && input.elements?.length)
     ? input.elements.filter((_, index) => index !== mentionElementIndex)
     : input.elements;
@@ -615,15 +635,16 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   };
   const statusTagLabel = (waiting: boolean) => waiting && !explicitStatusLabel ? '等待审批' : liveTitle;
   const grey = (text: string) => `<font color='grey'>${text}</font>`;
-  const detailLink = footerDetailUrl ? grey(`[查看详情](${footerDetailUrl})`) : '';
-  // 过程卡的底部一行：左边是耗时、步数和详情入口，右边是操作按钮。
-  const actionRow = (parts: string[]) => {
+  const detailLink = footerDetailUrl && !detailButton ? grey(`[查看详情](${footerDetailUrl})`) : '';
+  // 过程卡的底部一行：左边是耗时、步数和详情入口，右边是操作按钮（详情是按钮时排在最后）。
+  const actionRow = (parts: string[], detail?: Record<string, unknown>) => {
     const left = parts.filter(Boolean).join(grey(' · '));
-    return actionButtons.length || left ? [{
+    const buttonColumns = detail ? [...actionButtonColumns, { tag: 'column', width: 'auto', vertical_align: 'center', elements: [detail] }] : actionButtonColumns;
+    return buttonColumns.length || left ? [{
       tag: 'column_set', element_id: 'task_action_row', flex_mode: 'none', horizontal_spacing: '4px', vertical_align: 'center', margin: '0px',
       columns: [
         { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: left ? [{ tag: 'markdown', element_id: 'task_meta', content: left, text_size: 'notation', margin: '0px' }] : [] },
-        ...actionButtonColumns
+        ...buttonColumns
       ]
     }] : [];
   };
@@ -749,7 +770,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ...attentionElements,
         ...shownFinal,
         ...traceSection,
-        ...otherElements
+        ...otherElements,
+        ...followUpRow
       ];
     }
 
@@ -804,7 +826,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ...omissionElements,
         // 「结果见单独的结果消息」由回执标题按 resultFollows 表达，这里不再重复，也不在没有下一条时乱说。
         ...otherElements.filter(element => element.element_id !== 'trace_empty'),
-        ...(detailLink ? [{ tag: 'markdown', content: detailLink, text_size: 'notation', text_align: 'right', margin: '0px' }] : [])
+        ...(detailButton ? [detailButton] : detailLink ? [{ tag: 'markdown', content: detailLink, text_size: 'notation', text_align: 'right', margin: '0px' }] : [])
       ];
       const receipt = traceElements.length ? {
         tag: 'collapsible_panel', element_id: 'task_overview', expanded: traceElements.some(el => el.expanded === true),
@@ -835,7 +857,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         ...settled(newestFirst(traceElements)),
         ...omissionElements,
         ...otherElements,
-        ...actionRow([elapsedText && grey(`用时 ${elapsedText}`), detailLink])
+        ...actionRow([elapsedText && grey(`用时 ${elapsedText}`), detailLink], detailButton)
       ];
     }
 
@@ -882,7 +904,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       ...newestFirst(historyGroups),
       ...omissionElements,
       ...otherElements,
-      ...actionRow([elapsedText && grey(`${state === 'queued' ? '排队等待' : '已运行'} ${elapsedText}`), stepsText && grey(stepsText), detailLink])
+      ...actionRow([elapsedText && grey(`${state === 'queued' ? '排队等待' : '已运行'} ${elapsedText}`), stepsText && grey(stepsText), detailLink], detailButton)
     ];
   };
   const assemble = (mainElements: Array<Record<string, unknown>>) => {
@@ -1033,6 +1055,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
         elements: [
           ...(receiptOnly ? [{ tag: 'markdown', element_id: 'task_overview', content: "<font color='green'>已完成</font>", text_size: 'normal', margin: '0px', icon: { tag: 'standard_icon', token: 'done_outlined', color: 'green' } }] : []),
           hardFallbackOmission,
+          ...(detailButton ? [detailButton] : []),
           ...meta
         ]
       }
@@ -1046,7 +1069,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       direction: 'vertical', padding: '10px 12px',
       elements: [
         { tag: 'markdown', content: `<text_tag color='${presentation.color}'>${liveTitle}</text_tag>${elapsedSeconds > 0 ? `　<font color='grey'>已用时 ${elapsedLabel(elapsedSeconds)}</font>` : ''}`, text_size: 'small' },
-        hardFallbackOmission
+        hardFallbackOmission,
+        ...(detailButton ? [detailButton] : [])
       ]
     }
   };

@@ -28,6 +28,17 @@ const clipLine = (text: string, limit: number) => {
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
 };
 
+export interface SharedLarkMemoryEntry {
+  botName: string;
+  entry: LarkMemoryEntry;
+}
+
+export interface RenderMemoryIndexOptions {
+  budget?: number;
+  currentChatId?: string;
+  sharedEntries?: SharedLarkMemoryEntry[];
+}
+
 /**
  * 渲染 MEMORY.md 索引文本：
  * 标题、统计行、各主题下的摘要行；超预算时省略并附引导行。
@@ -36,13 +47,40 @@ const clipLine = (text: string, limit: number) => {
 export function renderMemoryIndex(
   entries: LarkMemoryEntry[],
   state: LarkMemoryState,
-  options?: { budget?: number; currentChatId?: string }
+  options?: RenderMemoryIndexOptions
 ): { text: string; overBudget: boolean; omitted: number } {
+  const budget = options?.budget ?? larkMemoryLimits.indexChars;
+  const sharedEntries = options?.sharedEntries ?? [];
+
   if (!entries.length) {
-    return { text: '', overBudget: false, omitted: 0 };
+    if (!sharedEntries.length) {
+      return { text: '', overBudget: false, omitted: 0 };
+    }
+    const sharedIntro = '这些条目属于其他机器人，memory show/search 查不到。';
+    const sharedLines: string[] = [];
+    let overBudget = false;
+    for (const item of sharedEntries) {
+      const src = sourceLabels[item.entry.source] ?? item.entry.source;
+      const line = `- [来自 ${item.botName} · ${src}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
+      const candidateLines = [...sharedLines, line];
+      const candidateSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${candidateLines.join('\n')}`;
+      if (candidateSection.length <= budget) {
+        sharedLines.push(line);
+      } else {
+        overBudget = true;
+        break;
+      }
+    }
+    if (!sharedLines.length) {
+      return { text: '', overBudget: true, omitted: 0 };
+    }
+    const text = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${sharedLines.join('\n')}`;
+    if (sharedLines.length < sharedEntries.length) {
+      overBudget = true;
+    }
+    return { text, overBudget, omitted: 0 };
   }
 
-  const budget = options?.budget ?? larkMemoryLimits.indexChars;
   const lastConsolidation = state.lastConsolidationAt
     ? state.lastConsolidationAt.slice(0, 16).replace('T', ' ')
     : '尚未整理';
@@ -127,10 +165,44 @@ export function renderMemoryIndex(
   }
 
   const omitted = entries.length - selectedIds.size;
-  const text = formatIndexWith(selectedIds, omitted);
-  const overBudget = omitted > 0 || text.length > budget;
+  const selfText = formatIndexWith(selectedIds, omitted);
+  let overBudget = omitted > 0 || selfText.length > budget;
 
-  return { text, overBudget, omitted };
+  if (!sharedEntries.length) {
+    return { text: selfText, overBudget, omitted };
+  }
+
+  // 自己的条目优先：若自己已经超预算，先丢弃共享条目，保留自身全部已选条目
+  if (overBudget) {
+    return { text: selfText, overBudget: true, omitted };
+  }
+
+  // 自己的条目未超预算，尝试在剩余预算内加入共享条目
+  const sharedIntro = '这些条目属于其他机器人，memory show/search 查不到。';
+  const sharedLines: string[] = [];
+  for (const item of sharedEntries) {
+    const src = sourceLabels[item.entry.source] ?? item.entry.source;
+    const line = `- [来自 ${item.botName} · ${src}] ${clipLine(item.entry.content, larkMemoryLimits.indexLineChars)}`;
+    const candidateLines = [...sharedLines, line];
+    const candidateSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${candidateLines.join('\n')}`;
+    const candidateFullText = `${selfText}\n\n${candidateSection}`;
+    if (candidateFullText.length <= budget) {
+      sharedLines.push(line);
+    } else {
+      overBudget = true;
+      break;
+    }
+  }
+
+  if (!sharedLines.length) {
+    return { text: selfText, overBudget: true, omitted };
+  }
+
+  if (sharedLines.length < sharedEntries.length) {
+    overBudget = true;
+  }
+  const sharedSection = `## 同群其他机器人记下的偏好\n${sharedIntro}\n${sharedLines.join('\n')}`;
+  return { text: `${selfText}\n\n${sharedSection}`, overBudget, omitted };
 }
 
 /**

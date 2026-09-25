@@ -34,6 +34,15 @@ export class LarkTaskInbox {
     const next: LarkInboxRecord = { ...(old ?? { appId, event, state: 'received' as const }), boot: this.boot };
     return await this.store.compareAndSet!(key, raw, JSON.stringify(next)) ? next : undefined;
   }
+  /**
+   * 结果卡续问按钮代发的一条消息：请求内容和所属 scope 由服务端按原任务定好，交给 handle 之前先落库。
+   * boot 留空，handle 里的 claim 会像认领上个进程留下的记录一样认领它；进程在认领前退出时，
+   * 重启后 recoverable 也会把它捞回来重放。返回 false 说明这条消息已经登记过。
+   */
+  async seed(appId: string, event: LarkMessageEvent, request: NonNullable<LarkInboxRecord['request']>): Promise<boolean> {
+    const record: LarkInboxRecord = { appId, event, boot: '', state: 'received', request };
+    return this.store.compareAndSet!(prefix(appId) + event.messageId, undefined, JSON.stringify(record));
+  }
   async adoptAccepted(record: LarkInboxRecord) {
     if (record.state !== 'accepted') return undefined;
     const next = { ...record, boot: this.boot };

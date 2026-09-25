@@ -25,6 +25,10 @@ export interface CliOptions {
   json?: boolean;
   /** `start --foreground`：本进程自己作为 daemon 服务（systemd unit 的 ExecStart 用）。 */
   foreground?: boolean;
+  /** `--force`：跳过等待正在执行的任务，立即重启。 */
+  force?: boolean;
+  /** `--drain-timeout <seconds>`：等待正在执行的任务结束的最长秒数（默认 900）。 */
+  drainTimeout?: string;
 }
 
 export interface LarkCliOptions {
@@ -75,6 +79,8 @@ export interface AgentGroupCliOptions {
 
 export interface UpdateCliOptions {
   distTag?: string;
+  force?: boolean;
+  drainTimeout?: string;
 }
 
 export interface SessionRelayCliOptions {
@@ -704,6 +710,8 @@ Examples:
   program.command('update')
     .description('Update the global Dutydeck package and restart the background service')
     .option('--dist-tag <tag>', 'npm dist-tag to install (default: latest)', 'latest')
+    .option('--force', 'Skip waiting for running tasks and restart immediately')
+    .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting restart (default: 900)')
     .action(options => handlers.update?.(options));
 
   const auth = program.command('auth').description('Manage access authentication');
@@ -788,6 +796,8 @@ Examples:
       .action(options => handlers.daemonStop?.(options));
     parent.command('restart')
       .description('Restart the background Dutydeck server')
+      .option('--force', 'Skip waiting for running tasks and restart immediately')
+      .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting restart (default: 900)', '900')
       .option('--json', 'Print the result as a single line of JSON')
       .action((options, command) => handlers.daemonRestart?.(serverOptionsFrom(options, command)));
     parent.command('status')
@@ -817,6 +827,7 @@ Examples:
   $ dutydeck start --port 4310
   $ dutydeck status
   $ dutydeck restart --port 4410
+  $ dutydeck restart --force
   $ dutydeck update --dist-tag fix
   $ dutydeck auth token
   $ dutydeck auth token --rotate

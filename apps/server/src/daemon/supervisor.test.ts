@@ -91,6 +91,8 @@ describe('systemd 托管下的 stop / restart / start 路由', () => {
     dir = defaultDaemonDir(tmp);
     cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(tmp);
     vi.stubEnv('HOME', tmp);
+    // 这些用例不关心 drain：默认活动接口报告 0 个任务，且不发起真实网络请求。
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ runningTasks: 0 }) })));
   });
 
   afterEach(async () => {
@@ -98,6 +100,7 @@ describe('systemd 托管下的 stop / restart / start 路由', () => {
     cwdSpy.mockRestore();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     rmSync(tmp, { recursive: true, force: true });
   });
 

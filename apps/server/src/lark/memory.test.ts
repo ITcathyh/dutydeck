@@ -625,6 +625,22 @@ describe('group memory pool', () => {
     repos.close();
   });
 
+  it('peeks a group pool read-only, reading an unmerged legacy ledger once and never writing', async () => {
+    const { repos, memory } = store({ now: () => new Date('2026-09-25T00:00:00.000Z') });
+    const { ledger } = await seedLegacy(repos);
+    const reader = new LarkMemoryStore(repos.config);
+    const seen = async () => (await reader.peek(groupA)).map(entry => [entry.id, entry.chatId]);
+    // 未迁移：旧账本的有效条目补上来源群；旧键原样，群池不创建。
+    expect(await seen()).toEqual([['mem_aaaa0001', 'oc_group_a'], ['mem_aaaa0002', 'oc_group_a']]);
+    expect(await repos.config.get(legacyKey('oc_group_a'))).toBe(ledger);
+    expect(await repos.config.get('lark.memory.cli_bot.groups')).toBeUndefined();
+    // 崩溃在并入之后、写占位之前：以群池为准，不把旧键再读一遍。
+    await crashAfterMerge(repos, memory);
+    expect(await seen()).toEqual([['mem_aaaa0001', 'oc_group_a'], ['mem_aaaa0002', 'oc_group_a']]);
+    expect(await repos.config.get(legacyKey('oc_group_a'))).toBe(ledger);
+    repos.close();
+  });
+
   it('reports a read-only status summary per pool', async () => {
     const { repos, memory } = store();
     await memory.add(groupA, { content: '条目一', source: 'user', topic: 'one', chatId: groupA.chatId });

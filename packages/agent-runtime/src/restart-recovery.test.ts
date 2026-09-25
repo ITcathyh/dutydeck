@@ -231,6 +231,27 @@ describe('persistent task recovery across a reopened database', () => {
     expect(events.filter(event => event.type === 'tool_result')).toHaveLength(1);
   });
 
+  it('counts running tasks as 1 during initial run and keeps 1 after recovering persistent turn', async () => {
+    const file = database(), backend = persistentTurn(true);
+    const first = open(file, backend.factory);
+    await first.runtime.initialize([agent]);
+    const session = await first.runtime.start({ agentId: agent.id });
+    const task = await first.runtime.dispatch(session.id, 'first');
+    await vi.waitFor(() => expect(backend.prompts).toEqual(['first']));
+    expect(first.runtime.getRunningTaskCount()).toBe(1);
+
+    await close(first);
+
+    // Reopen without completing offline turn: recovery should adopt it and count as 1
+    const second = open(file, backend.factory);
+    await second.runtime.initialize([agent]);
+    expect(second.runtime.getRunningTaskCount()).toBe(1);
+
+    backend.publish('live answer');
+    backend.complete();
+    await vi.waitFor(() => expect(second.runtime.getRunningTaskCount()).toBe(0));
+  });
+
   it.each([false, true])('requires the verified-attachment handshake (rejected: %s)', async rejected => {
     const file = database(), backend = persistentTurn(true);
     const first = open(file, backend.factory);

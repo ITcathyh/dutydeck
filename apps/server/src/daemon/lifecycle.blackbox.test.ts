@@ -1,11 +1,11 @@
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { childProcessIdentity } from '@dutydeck/storage';
-import { defaultDaemonDir, inspectDaemon, pidAlive, readDaemonStatus, writeState } from './daemon.js';
+import { daemonPaths, defaultDaemonDir, inspectDaemon, pidAlive, readDaemonStatus, writeState } from './daemon.js';
 
 const workspace = resolve(dirname(fileURLToPath(import.meta.url)), '../../../..');
 const tsx = join(workspace, 'node_modules/.bin/tsx');
@@ -41,6 +41,18 @@ describe('daemon detached process and CLI black box', () => {
     expect(lifecycle('status')).toMatchObject({ running: false, processStatus: 'stale' });
     expect(pidAlive(restarted.pid)).toBe(false);
   }, 60_000);
+  it('detached restart 不会让被拉起的 restart 子进程在守护日志里再写一行「跳过任务等待」', () => {
+    lifecycle('start');
+    lifecycle('restart');
+    // daemonize 出的 restart 子进程 stderr 重定向进守护日志；父进程已 drain 完，
+    // 子进程必须静默跳过，否则新进程起不来时这行会占掉 tailDaemonLog 取的 3 行之一。
+    const logFile = daemonPaths(defaultDaemonDir(root)).logFile;
+    const log = readFileSync(logFile, 'utf8');
+    expect(log).not.toContain('跳过任务等待');
+    expect(log).not.toContain('守护进程未运行');
+    lifecycle('stop');
+  }, 60_000);
+
   it('shows unknown identity in human and JSON status without recommending start', () => {
     const legacy = { pid: process.pid, ready: true, cwd: '/legacy-fixture', startedAt: 'legacy' };
     writeState(defaultDaemonDir(root), legacy);

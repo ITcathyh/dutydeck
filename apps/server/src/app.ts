@@ -120,6 +120,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         !pathname.startsWith('/api/')
         || pathname === '/api/auth/status'
         || pathname === '/api/auth/login'
+        // 登录链接：GET（及自动生成的 HEAD）只回确认页，POST 才兑换；其余方法照常鉴权。
+        || (pathname === '/api/auth/link' && (method === 'GET' || method === 'HEAD' || method === 'POST'))
         || pathname === '/api/auth/logout'
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
@@ -141,6 +143,10 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   if (options.collaboration) await registerCollaborationRoutes(app, options.collaboration);
   await registerSystemRoutes(app, options.system);
   await registerLarkRoutes(app, { ...options.lark, runtime: options.lark?.runtime ?? runtime });
+  app.get<{ Querystring: { excludeSessionId?: string } }>('/api/system/activity', async request => {
+    const excludeSessionId = request.query.excludeSessionId?.trim() || undefined;
+    return { runningTasks: runtime.getRunningTaskCount(excludeSessionId) };
+  });
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
   app.get<{ Params: { id: string }; Querystring: { model?: string; refresh?: string } }>('/api/agents/:id/models', async request => {
     const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);

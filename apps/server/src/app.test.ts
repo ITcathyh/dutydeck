@@ -6,6 +6,7 @@ import { get as httpGet, type IncomingMessage } from 'node:http';
 import { buildApp } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from './lark/config.js';
+import { LoginLinkStore } from './auth/auth.js';
 
 const apps: any[] = [];
 const tempDirectories: string[] = [];
@@ -417,6 +418,30 @@ describe('HTTP API boundary', () => {
         `${url} 不在豁免名单里，无 token 的远程请求必须 401`,
       ).toBe(401);
     }
+  });
+
+  it('一次性登录链接免 token：GET/HEAD 只回确认页，POST 兑换出能访问业务 API 的 cookie；其他方法照常鉴权', async () => {
+    const loginLinks = new LoginLinkStore();
+    const app = await buildApp({ listSessions: async () => [] } as any, {
+      auth: { mode: 'token', getToken: async () => 'secret-token', localOnly: false, loginLinks },
+    }); apps.push(app);
+    const remote = { remoteAddress: '8.8.8.8' } as const;
+    expect((await app.inject({ method: 'GET', url: '/api/auth/link?code=forged', ...remote })).statusCode).toBe(400);
+    const code = loginLinks.issue('ses_1');
+    for (const method of ['GET', 'HEAD'] as const) {
+      const page = await app.inject({ method, url: `/api/auth/link?code=${code}`, ...remote });
+      expect(page.statusCode).toBe(200);
+      expect(page.headers['set-cookie']).toBeUndefined();
+    }
+    for (const method of ['PUT', 'PATCH', 'DELETE'] as const) {
+      expect((await app.inject({ method, url: `/api/auth/link?code=${code}`, ...remote })).statusCode).toBe(401);
+    }
+    const redeemed = await app.inject({ method: 'POST', url: '/api/auth/link', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      payload: `code=${code}`, ...remote });
+    expect(redeemed.statusCode).toBe(303);
+    expect(redeemed.headers.location).toBe('/sessions/ses_1');
+    expect(redeemed.headers['set-cookie']).toContain('dutydeck_access=secret-token');
+    expect((await app.inject({ method: 'GET', url: '/api/sessions', headers: { cookie: redeemed.headers['set-cookie'] as string }, ...remote })).statusCode).toBe(200);
   });
 
 });

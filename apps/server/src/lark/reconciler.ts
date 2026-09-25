@@ -46,6 +46,10 @@ export async function performLarkCardReconcile(input: {
   terminalDecoration?: (mapping: ChannelMapping, saved: PersistedLarkCardTask, config: StoredLarkConfig) => Promise<{ elements: Array<Record<string, any>>; cardInput: LarkCardInput }>;
   /** 按记录所属会话解析生效配置（群级呈现覆盖）。缺省时全部按 Bot 级配置补发。 */
   resolveConfig?: (saved: PersistedLarkCardTask) => Promise<StoredLarkConfig>;
+  /** 卡住的任务能否在卡上给「在新会话中执行」按钮，与 coordinator 回调端同一个判定（按 message_id 读映射与入站记录）。缺省不给。 */
+  relaunchReady?: (taskId: string, status: string, turn: number) => Promise<boolean>;
+  /** Web 要求登录：重绘的过程卡上「查看详情」是回调按钮。结果卡的这项能力由 terminalDecoration 带上。 */
+  detailLogin?: boolean;
 }): Promise<number> {
   const { runtime, service, cardMappings, log, config, channel } = input;
   if (!runtime.getTasks || !runtime.getEvents) return 0;
@@ -53,12 +57,16 @@ export async function performLarkCardReconcile(input: {
   try { agentName = (await runtime.listAgents?.())?.find(agent => agent.id === config.defaultAgentId)?.name ?? agentName; }
   catch (error) { log.warn({ error, agentId: config.defaultAgentId }, '读取 Agent 展示名失败，使用 Agent ID 对账卡片'); }
   const cardContext = { agentName, ...(config.workspace ? { workspace: config.workspace } : {}) };
+  // 过程卡重绘不注入整张能力表，「查看详情」要不要走回调单独声明，否则页脚退回直链、点开落到登录页。
+  const processContext = { ...cardContext, ...(input.detailLogin ? { detailLogin: true } : {}) };
   const mappings = await cardMappings.list(channel);
   let unresolved = 0;
   for (const mapping of mappings) {
     try {
       const persisted = persistedCardTask(mapping.extra);
       if (!persisted) continue;
+      // 这一轮正在转到新会话：旧卡由转交流程收尾，对账既不补发它的终态也不重绘。
+      if (persisted.relaunch_pending) continue;
       // 呈现开关可以按群覆盖：补发方式必须按这条记录所属会话的生效配置决定。
       const effective = (await input.resolveConfig?.(persisted)) ?? config;
       const terminalPersisted = terminalTaskStates.has(persisted.state);
@@ -75,7 +83,7 @@ export async function performLarkCardReconcile(input: {
         const legacyElements = persisted.last_successful_elements?.length ? persisted.last_successful_elements : undefined;
         try {
           await service.update({
-            ...cardContext,
+            ...processContext,
             cardKind: 'process',
             messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config),
@@ -119,21 +127,31 @@ export async function performLarkCardReconcile(input: {
       if (!terminalTaskStates.has(runtimeTask.status)) {
         unresolved++;
         const recovery = ['queued', 'reconcile_required', 'legacy_unresolved'].includes(runtimeTask.status)
-          ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status) : undefined;
+          ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status, undefined, {
+            relaunch: await input.relaunchReady?.(mapping.externalId, runtimeTask.status, persisted.turn ?? 0) === true,
+            ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }) : undefined;
         const state = runtimeTask.status === 'reconcile_required' || runtimeTask.status === 'legacy_unresolved'
           ? runtimeTask.status : runtimeTask.status === 'queued' ? 'queued' : 'running';
         const canCancel = state === 'queued' && Boolean(runtime.cancelQueued && persisted.sender_open_id);
+        const canRelaunch = recovery?.relaunch === true;
+        const actionable = canCancel || canRelaunch;
         // Repaint whenever durable recovery facts change, including older cards
         // already marked read-only. Never retain an old thinking/queued trace.
         const statusKey = JSON.stringify([state, recovery?.markdown, canCancel]);
-        const notifyRecovery = () => recovery?.blocked ? notifyLarkTaskRecovery({
-          service, store: input.deliveryStore, log, appId: persisted.app_id,
-          sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn, recovery,
-          target: { chatId: persisted.chat_id,
-            replyMessageId: persisted.reply_message_id?.trim()
-              || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
-            replyInThread: persisted.reply_in_thread }
-        }) : Promise.resolve(undefined);
+        const notifyRecovery = async () => {
+          if (!recovery?.blocked) return undefined;
+          // 提醒卡上没有按钮也没有详情链接，正文按不提这两者重新生成。
+          const notice = canRelaunch || config.webBaseUrl
+            ? await describeLarkTaskRecovery(runtime, mapping.sessionId, runtimeTask.id, runtimeTask.status) : recovery;
+          return notifyLarkTaskRecovery({
+            service, store: input.deliveryStore, log, appId: persisted.app_id,
+            sessionId: mapping.sessionId, taskId: runtimeTask.id, turn: persisted.turn, recovery: notice,
+            target: { chatId: persisted.chat_id,
+              replyMessageId: persisted.reply_message_id?.trim()
+                || (persisted.root_message_id?.trim().startsWith('om_') ? persisted.root_message_id.trim() : undefined),
+              replyInThread: persisted.reply_in_thread }
+          });
+        };
         if (effective.silentProgress || persisted.progress_frozen || !persisted.card_message_id) {
           await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state,
             runtime_task_id: runtimeTask.id, recovery_read_only: true, recovery_status_key: statusKey }));
@@ -142,21 +160,21 @@ export async function performLarkCardReconcile(input: {
         }
         if (persisted.recovery_status_key !== statusKey) try {
           await service.update({
-            ...cardContext, cardKind: 'process', messageId: persisted.card_message_id,
+            ...processContext, cardKind: 'process', messageId: persisted.card_message_id,
             permissionMode: larkPermissionMode(config), state,
             ...(recovery ? { statusLabel: recovery.label } : {}),
             taskId: mapping.externalId, taskName: persisted.task_name,
             elapsedSeconds: Math.max(0, (Date.now() - persisted.started_at) / 1_000),
-            sessionId: mapping.sessionId, readOnly: !canCancel, turn: persisted.turn ?? 0,
-            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false },
+            sessionId: mapping.sessionId, readOnly: !actionable, turn: persisted.turn ?? 0,
+            capabilities: { canCancelQueued: canCancel, canInterrupt: false, canRetry: false, canRefresh: false, ...(canRelaunch ? { canRelaunch: true } : {}) },
             ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
             markdown: recovery?.markdown ?? RECOVERY_TRACKING_NOTE
           });
-          await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey }));
+          await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({ ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !actionable, recovery_status_key: statusKey }));
         } catch (error) {
           if (isLarkMessageUnupdatable(error)) {
             const saved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
-              ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !canCancel, recovery_status_key: statusKey, progress_frozen: true
+              ...persisted, state, runtime_task_id: runtimeTask.id, recovery_read_only: !actionable, recovery_status_key: statusKey, progress_frozen: true
             }));
             if (saved) {
               await notifyRecovery();
@@ -196,7 +214,7 @@ export async function performLarkCardReconcile(input: {
       for (let attempt = 1; !updated && cardMessageId && attempt <= 3; attempt++) {
         try {
           await service.update({
-            ...cardContext,
+            ...processContext,
             cardKind: 'process',
             messageId: cardMessageId,
             permissionMode: larkPermissionMode(config),
@@ -229,7 +247,7 @@ export async function performLarkCardReconcile(input: {
         const patchedElements = patchRejectedCardDelta(persisted.last_successful_elements, currentElements);
         try {
           await service.update({
-            ...cardContext,
+            ...processContext,
             cardKind: 'process',
             messageId: cardMessageId,
             permissionMode: larkPermissionMode(config),

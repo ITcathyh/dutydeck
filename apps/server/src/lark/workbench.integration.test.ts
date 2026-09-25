@@ -2,14 +2,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { RuntimeError, agentConfigSchema, workPlanConfirmationRequired, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
+import { RuntimeError, agentConfigSchema, workPlanConfirmationRequired, workPlanSchema, type AgentDriver, type WorkItem, type WorkPlan } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
 import { WorkItemService } from '../work-items.js';
 import type { WorkItemRequest } from '../work-item-interactions.js';
 import { WorkItemInteractions } from '../work-item-interactions.js';
-import { LarkWorkbench, composeWorkPlan, researchWorkPlan, workItemElements, workNoticeFingerprint } from './workbench.js';
+import { LarkWorkbench, composeWorkPlan, consultWorkPlan, parseLarkConsultCommand, researchWorkPlan, resolveConsultAgents, workItemElements, workNoticeFingerprint } from './workbench.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -52,7 +52,14 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
           if (mode === 'permission') emit({ type: 'permission_request', data: { id: `permit_${sessionId}`, title: '读取指定文件', status: 'pending' } });
           await wait;
         }
-        emit({ type: 'text', data: { text: prompt.includes('综合两个') ? '最终报告：两项证据一致。' : '独立结果及来源。' } });
+        const text = prompt.includes('综合两个')
+          ? '最终报告：两项证据一致。'
+          : prompt.includes('独立调查（A）')
+            ? 'Agent A 调查结果：方案 A 具备关键证据。'
+            : prompt.includes('独立调查（B）')
+              ? 'Agent B 调查结果：方案 B 存在替代方案。'
+              : '独立结果及来源。';
+        emit({ type: 'text', data: { text } });
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
       },
       createTerminalStream: () => ({ onData: (_data, snapshot) => snapshot?.({ data: '\x1b[31mAllow tool? [y/n]\x1b[0m', cols: 80, rows: 24 }), write: terminalWrites, resize: () => {}, dispose: () => {} }),
@@ -691,5 +698,261 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await executeScheduleCommand(automation, f.repos.config, parent.id, `disable ${schedules[0]!.id}`, event, f.config);
     expect((await automation.listBySession(parent.id, 'ou_alice')).schedules[0]!.enabled).toBe(false);
     expect(f.prompts).toHaveLength(0);
+  });
+
+  describe('/work consult 多 Agent 会诊', () => {
+    describe('命令解析与参数校验', () => {
+      it('解析不带 --agents 的问题', () => {
+        expect(parseLarkConsultCommand('比较两个方案')).toEqual({ goal: '比较两个方案' });
+        expect(parseLarkConsultCommand('-- 比较两个方案')).toEqual({ goal: '比较两个方案' });
+        expect(parseLarkConsultCommand('  -- 比较两个方案  ')).toEqual({ goal: '比较两个方案' });
+      });
+
+      it('解析带 --agents 的问题', () => {
+        expect(parseLarkConsultCommand('--agents alpha,beta -- 比较两个方案')).toEqual({
+          goal: '比较两个方案',
+          agents: ['alpha', 'beta']
+        });
+        expect(parseLarkConsultCommand('--agents "alpha, beta" -- 比较两个方案')).toEqual({
+          goal: '比较两个方案',
+          agents: ['alpha', 'beta']
+        });
+        expect(parseLarkConsultCommand('--agents \'alpha,beta\' -- 比较两个方案')).toEqual({
+          goal: '比较两个方案',
+          agents: ['alpha', 'beta']
+        });
+      });
+
+      it('缺少问题时抛出 WORK_ITEM_GOAL_REQUIRED 错误', () => {
+        expect(() => parseLarkConsultCommand('')).toThrowError(expect.objectContaining({ code: 'WORK_ITEM_GOAL_REQUIRED' }));
+        expect(() => parseLarkConsultCommand('   ')).toThrowError(expect.objectContaining({ code: 'WORK_ITEM_GOAL_REQUIRED' }));
+        expect(() => parseLarkConsultCommand('--agents alpha,beta --')).toThrowError(expect.objectContaining({ code: 'WORK_ITEM_GOAL_REQUIRED' }));
+        expect(() => parseLarkConsultCommand('--agents alpha,beta --   ')).toThrowError(expect.objectContaining({ code: 'WORK_ITEM_GOAL_REQUIRED' }));
+        expect(() => parseLarkConsultCommand('--')).toThrowError(expect.objectContaining({ code: 'WORK_ITEM_GOAL_REQUIRED' }));
+      });
+
+      it('两个 Agent 相同抛出 WORK_ITEM_CONSULT_AGENTS_DUPLICATE 错误', () => {
+        expect(() => parseLarkConsultCommand('--agents alpha,alpha -- 比较两个方案')).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_CONSULT_AGENTS_DUPLICATE' })
+        );
+      });
+
+      it('未知 Agent 时抛出 WORK_ITEM_AGENT_NOT_FOUND 错误', () => {
+        expect(() => parseLarkConsultCommand('--agents alpha,unknownAgent -- 比较两个方案', ['alpha', 'beta'])).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_AGENT_NOT_FOUND' })
+        );
+      });
+
+      it('选项格式非法或缺少分隔符时抛出错误', () => {
+        expect(() => parseLarkConsultCommand('--unknown foo -- 比较两个方案')).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_CONSULT_USAGE' })
+        );
+        expect(() => parseLarkConsultCommand('--agents alpha -- 比较两个方案')).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_CONSULT_AGENTS_INVALID' })
+        );
+        expect(() => parseLarkConsultCommand('--agents alpha,beta 缺少分隔符')).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_CONSULT_USAGE' })
+        );
+      });
+    });
+
+    describe('生成的计划结构', () => {
+      it('生成 a、b 并行且 merge 依赖两者的三步计划，且符合 workPlanSchema', () => {
+        const plan = consultWorkPlan(['alpha', 'beta']);
+        expect(plan.title).toBe('多 Agent 会诊');
+        expect(plan.outputStepId).toBe('merge');
+        expect(plan.steps).toHaveLength(3);
+
+        const [stepA, stepB, stepMerge] = plan.steps;
+        expect(stepA).toMatchObject({
+          id: 'a',
+          kind: 'agent',
+          agentId: 'alpha',
+          dependsOn: []
+        });
+        expect(stepA!.instruction).toContain('只阅读和分析');
+        expect(stepB).toMatchObject({
+          id: 'b',
+          kind: 'agent',
+          agentId: 'beta',
+          dependsOn: []
+        });
+        expect(stepB!.instruction).toContain('只阅读和分析');
+        expect(stepMerge).toMatchObject({
+          id: 'merge',
+          kind: 'agent',
+          agentId: 'alpha',
+          dependsOn: ['a', 'b']
+        });
+
+        // 验证 merge 指令的固定四部分结构
+        expect(stepMerge!.instruction).toContain('一句话结论');
+        expect(stepMerge!.instruction).toContain('一致点');
+        expect(stepMerge!.instruction).toContain('分歧点');
+        expect(stepMerge!.instruction).toContain('建议下一步');
+
+        // 验证 Zod schema
+        expect(() => workPlanSchema.parse(plan)).not.toThrow();
+      });
+
+      it('参数不合法时抛出错误', () => {
+        expect(() => consultWorkPlan(['alpha', 'alpha'])).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_CONSULT_AGENTS_DUPLICATE' })
+        );
+        expect(() => consultWorkPlan(['alpha', ''] as any)).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_CONSULT_AGENTS_REQUIRED' })
+        );
+      });
+    });
+
+    describe('默认 Agent 与 B 的选择', () => {
+      it('A 为默认 Agent，B 为列表中第一个与 A 不同的可用 Agent（按列表顺序确定）', () => {
+        const res1 = resolveConsultAgents(undefined, ['alpha', 'beta', 'gamma'], 'alpha');
+        expect(res1.chosen).toEqual(['alpha', 'beta']);
+
+        // 即使 runtime 列表中 alpha 不在第一个，A 依然是默认 Agent，B 是列表中第一个非 A 的可用 Agent
+        const res2 = resolveConsultAgents(undefined, ['gamma', 'alpha', 'beta'], 'alpha');
+        expect(res2.chosen).toEqual(['alpha', 'gamma']);
+
+        // runtime 列表中 beta 为默认 Agent 时，A 为 beta，B 为列表中第一个非 beta 的可用 Agent
+        const res3 = resolveConsultAgents(undefined, ['alpha', 'beta', 'gamma'], 'beta');
+        expect(res3.chosen).toEqual(['beta', 'alpha']);
+      });
+
+      it('显式指定 --agents 时校验两个 Agent 是否存在、可用且不相同', () => {
+        const res = resolveConsultAgents(['beta', 'gamma'], ['alpha', 'beta', 'gamma'], 'alpha');
+        expect(res.chosen).toEqual(['beta', 'gamma']);
+
+        expect(() => resolveConsultAgents(['beta', 'beta'], ['alpha', 'beta'], 'alpha')).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_CONSULT_AGENTS_DUPLICATE' })
+        );
+        expect(() => resolveConsultAgents(['beta', 'unknown'], ['alpha', 'beta'], 'alpha')).toThrowError(
+          expect.objectContaining({ code: 'WORK_ITEM_AGENT_NOT_FOUND' })
+        );
+      });
+
+      it('可用 Agent 不足两个时不建计划，返回不可用原因', () => {
+        const res1 = resolveConsultAgents(undefined, ['alpha'], 'alpha');
+        expect(res1.chosen).toBeUndefined();
+        expect(res1.unavailableReason).toContain('不足两个');
+
+        const res2 = resolveConsultAgents(['alpha', 'beta'], ['alpha'], 'alpha');
+        expect(res2.chosen).toBeUndefined();
+        expect(res2.unavailableReason).toContain('不足两个');
+
+        const res3 = resolveConsultAgents(undefined, [], undefined);
+        expect(res3.chosen).toBeUndefined();
+        expect(res3.unavailableReason).toContain('不足两个');
+      });
+    });
+
+    it('从飞书接收 /work consult，人手发起直接进入 running，两 Agent 并行独立调查，最终只交付 merge 输出', async () => {
+      const f = await fixture();
+      await f.coordinator.handle(message('om_consult', '/work consult 调查两个方案的分歧'), f.config);
+
+      const item = await f.item();
+      expect(item.plan.steps).toHaveLength(3);
+      expect(item.plan.outputStepId).toBe('merge');
+      expect(item.plan.steps.map(s => s.id)).toEqual(['a', 'b', 'merge']);
+      expect(item.plan.steps[0]!.agentId).toBe('alpha');
+      expect(item.plan.steps[1]!.agentId).toBe('beta');
+      expect(item.plan.steps[2]!.agentId).toBe('alpha');
+      expect(item.plan.steps[2]!.dependsOn).toEqual(['a', 'b']);
+
+      // 人手发起无需确认闸门，直接开跑
+      expect(item.status).toBe('running');
+
+      // 推进第一轮并行步骤 a 和 b
+      await f.work.tick();
+      await f.settle();
+      expect(f.prompts).toHaveLength(2);
+      expect(new Set(f.prompts.map(p => p.sessionId)).size).toBe(2);
+
+      // 推进 merge 步骤
+      await f.work.tick();
+      await f.settle();
+      await f.work.tick();
+
+      const completedItem = await f.item();
+      expect(completedItem.status).toBe('completed');
+      expect(f.prompts).toHaveLength(3);
+
+      const promptA = f.prompts.find(p => p.prompt.includes('独立调查（A）'))!;
+      const promptB = f.prompts.find(p => p.prompt.includes('独立调查（B）'))!;
+      const promptMerge = f.prompts.find(p => p.prompt.includes('合并会诊结论'))!;
+      expect(promptA).toBeDefined();
+      expect(promptB).toBeDefined();
+      expect(promptMerge).toBeDefined();
+
+      // a、b 两步的 prompt 含只读约束
+      expect(promptA.prompt).toContain('只阅读和分析');
+      expect(promptB.prompt).toContain('只阅读和分析');
+
+      // b 步的 prompt 不含 a 的输出
+      expect(promptB.prompt).not.toContain('Agent A 调查结果：方案 A 具备关键证据。');
+      expect(promptA.prompt).not.toContain('Agent B 调查结果：方案 B 存在替代方案。');
+
+      // merge 步的 prompt 同时包含两份输出
+      expect(promptMerge.prompt).toContain('Agent A 调查结果：方案 A 具备关键证据。');
+      expect(promptMerge.prompt).toContain('Agent B 调查结果：方案 B 存在替代方案。');
+
+      // 验证交付到话题的卡片中，只有 merge 的最终输出（final_output）
+      await vi.waitFor(() => expect(f.cards.some(card => card.input.elements?.some((el: any) => el.element_id === 'final_output'))).toBe(true));
+      const resultCard = f.cards.find(card => card.input.elements?.some((el: any) => el.element_id === 'final_output'))!;
+      expect(resultCard.input).toMatchObject({ messageId: 'om_consult', replyInThread: true, state: 'completed' });
+      expect(resultCard.input.elements.find((el: any) => el.element_id === 'final_output').content).toBe('最终报告：两项证据一致。');
+
+      // 确认 a 和 b 的独立输出只在步骤记录里，没有推送到话题的 final_output
+      const stepA = completedItem.steps.find(s => s.id === 'a');
+      const stepB = completedItem.steps.find(s => s.id === 'b');
+      expect(stepA?.attempts.at(-1)?.output?.text).toBe('Agent A 调查结果：方案 A 具备关键证据。');
+      expect(stepB?.attempts.at(-1)?.output?.text).toBe('Agent B 调查结果：方案 B 存在替代方案。');
+    });
+
+    it('显式指定 --agents 时，按用户指定的 Agent 分配执行', async () => {
+      const f = await fixture();
+      await f.coordinator.handle(message('om_consult_agents', '/work consult --agents beta,alpha -- 调查特定性能瓶颈'), f.config);
+
+      const item = await f.item();
+      expect(item.plan.steps[0]!.agentId).toBe('beta');
+      expect(item.plan.steps[1]!.agentId).toBe('alpha');
+      expect(item.plan.steps[2]!.agentId).toBe('beta');
+      expect(item.status).toBe('running');
+    });
+
+    it('可用 Agent 不足两个时，不建计划并回复可用 Agent 列表和用法', async () => {
+      const f = await fixture();
+      // 让 runtime 只剩下一个可用 agent
+      vi.spyOn(f.runtime, 'listAgents').mockResolvedValue([
+        agentConfigSchema.parse({ id: 'alpha', name: 'alpha', command: 'fixture', protocol: 'acp', permissionMode: 'ask', cwd: f.directory })
+      ]);
+
+      await f.coordinator.handle(message('om_consult_few', '/work consult 调查单 Agent 场景'), f.config);
+      expect(await f.work.listBySession((await f.parent()).id, 'ou_alice')).toHaveLength(0);
+
+      // 检查向话题回复了错误提示文案
+      const reply = f.cards.find(card => card.input.taskName === 'Dutydeck 工作台');
+      expect(reply).toBeDefined();
+      const content = reply!.input.elements.find((el: any) => el.element_id === 'final_output').content;
+      expect(content).toContain('不足两个');
+      expect(content).toContain('/work consult');
+    });
+
+    it('通过 workbench.command 执行时，非法输入会抛出对应 RuntimeError', async () => {
+      const f = await fixture();
+      const parent = (await f.runtime.start({ agentId: 'alpha', cwd: f.directory, source: 'lark', sourceId: `${f.config.appId}:oc_group:group:thread:omt_topic`, permissionMode: 'ask' })).id;
+
+      // 缺少问题
+      await expect(f.workbench.command(parent, 'consult', message('om_bad1', ''), f.config))
+        .rejects.toMatchObject({ code: 'WORK_ITEM_GOAL_REQUIRED' });
+
+      // 两个 Agent 相同
+      await expect(f.workbench.command(parent, 'consult --agents alpha,alpha -- 调查问题', message('om_bad2', ''), f.config))
+        .rejects.toMatchObject({ code: 'WORK_ITEM_CONSULT_AGENTS_DUPLICATE' });
+
+      // 未知 Agent
+      await expect(f.workbench.command(parent, 'consult --agents alpha,unknownAgent -- 调查问题', message('om_bad3', ''), f.config))
+        .rejects.toMatchObject({ code: 'WORK_ITEM_AGENT_NOT_FOUND' });
+    });
   });
 });

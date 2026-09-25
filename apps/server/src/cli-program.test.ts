@@ -82,6 +82,15 @@ describe('Dutydeck CLI', () => {
     expect(options.json).toBeUndefined();
   });
 
+  it('parses restart --force and --drain-timeout, defaulting the timeout to 900', async () => {
+    const daemonRestart = vi.fn();
+    await createCliProgram('0.0.6', { daemonRestart }).parseAsync(['node', 'dutydeck', 'restart']);
+    expect(daemonRestart).toHaveBeenCalledWith(expect.objectContaining({ drainTimeout: '900' }));
+    const forced = vi.fn();
+    await createCliProgram('0.0.6', { daemonRestart: forced }).parseAsync(['node', 'dutydeck', 'daemon', 'restart', '--force', '--drain-timeout', '30']);
+    expect(forced).toHaveBeenCalledWith(expect.objectContaining({ force: true, drainTimeout: '30' }));
+  });
+
   it('parses doctor with an optional machine-readable flag', async () => {
     const doctor = vi.fn();
     await createCliProgram('0.0.6', { doctor }).parseAsync(['node', 'dutydeck', 'doctor']);
