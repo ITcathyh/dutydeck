@@ -31,6 +31,10 @@ export interface PtyLike {
   sendText?(text: string): void | boolean;
   sendSpecialKeys?(...keys: string[]): void | boolean;
   pasteText?(text: string): void;
+  /** 后端最近一次输出屏幕数据的时间（Date.now() 毫秒）。写入用户消息前据此等屏幕静止、写入后确认回显。 */
+  lastOutputAt?(): number;
+  /** 同一 CLI 进程的各次写入共用的身份。driver 每次提交都新建 PtyLike 包装，适配器按进程记状态（如首写）时用它，不要用包装对象本身。 */
+  readonly processKey?: object;
 }
 
 export interface CliAdapterCapabilities {
@@ -77,6 +81,8 @@ export interface CliAdapter {
   screenBusyPattern?: RegExp;
   /** Animated status line in the rendered viewport; a later completion line supersedes it. */
   screenActivityPattern?: RegExp;
+  /** Status line of a turn that ended while its background sub-agents still run; a later completion line supersedes it. */
+  backgroundWaitPattern?: RegExp;
   idleToBusyPattern?: RegExp;
   readyPattern?: RegExp;
   staticBusyPattern?: RegExp;
