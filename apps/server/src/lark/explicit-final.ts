@@ -80,10 +80,10 @@ async function readRecord(store: ConfigRepository, scope: ExplicitFinalScope): P
     return record;
   } catch { return; }
 }
-/** 本轮已提交且未失败的显式最终答复正文（只读），供会话历史回看。 */
+/** 已确认送达的显式最终答复正文（只读），供会话历史回看；pending 与 failed 的正文群里未必收到过，不返回。 */
 export async function readExplicitFinal(store: ConfigRepository, context: ExplicitFinalContext): Promise<string | undefined> {
   const record = await readRecord(store, context.scope);
-  return record && record.status !== 'failed' ? record.content : undefined;
+  return record?.status === 'delivered' ? record.content : undefined;
 }
 export async function hasExplicitFinal(store: ConfigRepository | undefined, context: ExplicitFinalContext | undefined) {
   const record = store && context ? await readRecord(store, context.scope) : undefined;

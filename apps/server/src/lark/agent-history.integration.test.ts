@@ -93,11 +93,14 @@ describe('history tools over runtime + SQLite', () => {
 const finalAnswer = '最终结论：登录改为短信验证码，旧密码入口保留一个月。';
 
 /** 真实 coordinator 建卡与映射，Agent 用 group send --final 交付答复，transcript 里只回一句确认。 */
-async function explicitFinalHarness() {
+async function explicitFinalHarness(options: { holdFinal?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-history-final-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
+  // holdFinal 时显式答复卡的发送停在这里，记录保持 pending，直到 deliverFinal()。
+  let deliverFinal!: () => void;
+  const finalGate = new Promise<void>(resolve => { deliverFinal = resolve; });
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => ({
@@ -121,7 +124,15 @@ async function explicitFinalHarness() {
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
   let nextCard = 0;
-  const createCard = async () => ({ messageId: `om_card_${++nextCard}` });
+  const cardIds = new Map<string, string>();
+  const createCard = async (input: { idempotencyKey?: string }) => {
+    if (options.holdFinal && input.idempotencyKey?.startsWith('final_')) await finalGate;
+    const existing = input.idempotencyKey ? cardIds.get(input.idempotencyKey) : undefined;
+    if (existing) return { messageId: existing };
+    const id = `om_card_${++nextCard}`;
+    if (input.idempotencyKey) cardIds.set(input.idempotencyKey, id);
+    return { messageId: id };
+  };
   const service = {
     send: vi.fn(createCard), reply: vi.fn(createCard), sendText: vi.fn(createCard), replyText: vi.fn(createCard),
     getBotInfo: vi.fn(async () => ({ appName: 'test', openId: 'ou_bot' })),
@@ -140,7 +151,7 @@ async function explicitFinalHarness() {
   const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
     undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
   await coordinator.initializeWorkflows(config);
-  cleanups.push(async () => { coordinator.stop(); release(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
+  cleanups.push(async () => { coordinator.stop(); release(); deliverFinal(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
 
   const channel = `lark-card:${config.appId}`;
   await coordinator.handle({ messageId: 'om_origin', chatId: 'oc_group', chatType: 'group', threadId: 'omt_topic', rootId: 'om_root',
@@ -160,14 +171,17 @@ async function explicitFinalHarness() {
     finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(channel), binding, task)
   });
   const active = runtime.getActiveTaskContext(session.id)!;
-  await tools.send(token, { content: finalAnswer, final: true, turn: capabilities.finalTurnToken(session.id, active.taskId, active.attemptId!) });
+  const sending = tools.send(token, { content: finalAnswer, final: true, turn: capabilities.finalTurnToken(session.id, active.taskId, active.attemptId!) });
+  if (options.holdFinal) await vi.waitFor(() => expect(service.reply).toHaveBeenCalledWith(expect.objectContaining({ idempotencyKey: expect.stringMatching(/^final_/) })));
+  else await sending;
   release();
   await vi.waitFor(async () => expect((await runtime.getTasks(session.id))[0]?.status).toBe('completed'));
   // 同一聊天里另一个没有显式答复的任务。
   const plain = await runtime.start({ agentId: 'mock', cwd, source: 'lark', sourceId: 'cli_final:oc_group:group:user:ou_bob' });
   const { id: plainTaskId } = await runtime.dispatch(plain.id, '普通问题', 'queue', '普通问题', undefined, 'ou_bob');
   await vi.waitFor(async () => expect((await runtime.getTasks(plain.id))[0]?.status).toBe('completed'));
-  return { repos, tools, token, finalTaskId: active.taskId, finalSessionId: session.id, finalAttemptId: active.attemptId!, plainTaskId };
+  return { repos, tools, token, plainToken: capabilities.environmentFor(plain).dutydeck_group_tools_token!,
+    finalTaskId: active.taskId, finalSessionId: session.id, finalAttemptId: active.attemptId!, plainTaskId, sending, deliverFinal };
 }
 
 describe('history answers delivered with group send --final', () => {
@@ -184,5 +198,16 @@ describe('history answers delivered with group send --final', () => {
     expect(await h.tools.historyTask(h.token, { taskId: h.plainTaskId })).toMatchObject({ answer: '回答：普通问题' });
     const listed = (await h.tools.history(h.token)).tasks;
     expect(listed.map(item => [item.taskId, item.answer])).toEqual([[h.plainTaskId, '回答：普通问题'], [h.finalTaskId, finalAnswer]]);
+  });
+
+  it('keeps an explicit answer out of history until its delivery is confirmed', async () => {
+    const h = await explicitFinalHarness({ holdFinal: true });
+    // 这一轮已结束，答复卡还没送达：同群另一会话只看到 transcript。
+    expect(await h.tools.historyTask(h.plainToken, { taskId: h.finalTaskId })).toMatchObject({ status: 'completed', answer: '已发送答复。' });
+    expect((await h.tools.history(h.plainToken, { query: '短信验证码' })).tasks).toEqual([]);
+    h.deliverFinal();
+    await h.sending;
+    expect(await h.tools.historyTask(h.plainToken, { taskId: h.finalTaskId })).toMatchObject({ answer: finalAnswer });
+    expect((await h.tools.history(h.plainToken, { query: '短信验证码' })).tasks.map(item => item.taskId)).toEqual([h.finalTaskId]);
   });
 });
