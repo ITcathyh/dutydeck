@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import * as lark from '@larksuiteoapi/node-sdk';
 import type { PermissionMode } from '@dutydeck/shared';
 import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
-import { executeWithLarkGate, LarkCircuitOpenError } from './api-gate.js';
+import { executeWithLarkGate, isRetryableLarkError, LarkCircuitOpenError } from './api-gate.js';
 import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 import { larkSessionDetailUrl } from './detail-link.js';
 
@@ -1802,21 +1802,49 @@ export class LarkCardService {
   }
 
   /**
+   * contact SDK 调用不经过 api-gate（它复用自己的 token 缓存与 axios 栈），
+   * 因此在这里就地补一次瞬时错误重试：
+   *   - SDK throw 的 axios 错误：网络错误 / 429 / 5xx / 网关抖动码可重试，其余立即归一化抛出；
+   *   - SDK 不 throw 只回非零 code：瞬态业务码（频控/抖动）可重试，耗尽后原样返回，
+   *     由调用方按原有文案抛业务错误。
+   * 重试判定必须在 normalizeContactError 之前，归一化会剥掉纯网络错误的 axios 特征。
+   */
+  private static async callContactSdk<T extends { code?: number; data?: unknown }>(op: () => Promise<T>): Promise<T> {
+    const maxAttempts = 2;
+    const sleep = (attempt: number) => new Promise<void>(resolve => {
+      setTimeout(resolve, (process.env.NODE_ENV === 'test' ? 1 : 500) * attempt);
+    });
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        const res = await op();
+        const code = Number(res.code ?? 0);
+        if (code !== 0 && attempt < maxAttempts
+          && isRetryableLarkError(Object.assign(new Error(`(code: ${code})`), { code }))) {
+          await sleep(attempt);
+          continue;
+        }
+        return res;
+      } catch (err) {
+        if (attempt < maxAttempts && isRetryableLarkError(err)) {
+          await sleep(attempt);
+          continue;
+        }
+        LarkCardService.normalizeContactError(err);
+      }
+    }
+  }
+
+  /**
    * 按 open_id（ou_）或 union_id（on_）查询用户。返回 undefined 表示 code:0
    * 但响应里没有 user（明确不存在 = definitive miss）；业务码非零或网络错误
    * 一律 throw（definitive 码由 owner-identity 识别，其余按 inconclusive）。
    */
   async getContactUser(id: string, idType: ContactIdType): Promise<ContactUser | undefined> {
     const userId = required(id, 'id');
-    let res: { code?: number; data?: { user?: { open_id?: string; union_id?: string } } };
-    try {
-      res = await this.contactSdk().contact.v3.user.get({
-        path: { user_id: userId },
-        params: { user_id_type: idType }
-      });
-    } catch (err) {
-      LarkCardService.normalizeContactError(err);
-    }
+    const res = await LarkCardService.callContactSdk(() => this.contactSdk().contact.v3.user.get({
+      path: { user_id: userId },
+      params: { user_id_type: idType }
+    }));
     const code = Number(res?.code ?? 0);
     if (code !== 0) {
       throw Object.assign(new Error(`Lark contact user.get failed (code: ${code})`), { code, data: res?.data });
@@ -1840,15 +1868,10 @@ export class LarkCardService {
   }
 
   private async batchGetId(key: { emails?: string[]; mobiles?: string[] }): Promise<string | undefined> {
-    let res: { code?: number; data?: { user_list?: Array<{ user_id?: string }> } };
-    try {
-      res = await this.contactSdk().contact.v3.user.batchGetId({
-        params: { user_id_type: 'open_id' },
-        data: { ...key, include_resigned: false }
-      });
-    } catch (err) {
-      LarkCardService.normalizeContactError(err);
-    }
+    const res: { code?: number; data?: { user_list?: Array<{ user_id?: string }> } } = await LarkCardService.callContactSdk(() => this.contactSdk().contact.v3.user.batchGetId({
+      params: { user_id_type: 'open_id' },
+      data: { ...key, include_resigned: false }
+    }));
     const code = Number(res?.code ?? 0);
     if (code !== 0) {
       throw Object.assign(new Error(`Lark contact batchGetId failed (code: ${code})`), { code, data: res?.data });

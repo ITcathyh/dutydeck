@@ -1040,6 +1040,21 @@ export class LarkMessageCoordinator {
     return run;
   }
 
+  /**
+   * task.task.update_user_access_v2（含 task_assignees_update）事件入口：立即走一次与
+   * 定时轮询完全相同的认领流程，不必等下一轮轮询。幂等性由 claimLarkTaskDispatches 的
+   * ledger CAS 与 taskAgentRun 的在途合并共同保证——重复事件、事件与轮询并发都只会认领
+   * 一次。通道未激活时 pollLarkTaskDispatches 内部直接返回 0，无需在此重复判定。
+   * 不 await：事件回调不能被一次交接拖死，失败由保留的定时轮询兜底重试。
+   */
+  handleTaskAssigneesUpdate(config: StoredLarkConfig): void {
+    void this.pollLarkTaskDispatches(config)
+      .then(dispatched => {
+        if (dispatched > 0) this.log.info({ appId: config.appId, dispatched }, '飞书任务指派人变更事件触发即时认领');
+      })
+      .catch(error => this.log.warn({ error, appId: config.appId }, '飞书任务事件触发认领失败，等待轮询兜底'));
+  }
+
   /** 状态流转写回飞书任务记录的文案；没有对应说法的中间态不写。 */
   private static readonly taskStepContent: Partial<Record<LarkTaskState, string>> = {
     queued: 'Dutydeck 已接单，排队等待执行。',
