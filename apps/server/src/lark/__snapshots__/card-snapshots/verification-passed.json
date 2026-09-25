@@ -1,0 +1,584 @@
+[
+  {
+    "say": "加一个 work.txt",
+    "message": "om_in_1"
+  },
+  {
+    "checkpoint": "验证通过",
+    "requests": [
+      {
+        "message": "om_msg_1",
+        "request": "reply",
+        "anchor": "om_snapshot_root",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "task_om_in_1_1",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "已接收 · 加一个 work.txt"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "任务已接收，正在准备执行…",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "加一个 work.txt"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "已接收"
+                },
+                "color": "neutral"
+              }
+            ],
+            "template": "grey",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_1",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "已完成 · 加一个 work.txt"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "task_overview",
+                "content": "<font color='green'>已完成</font><font color='grey'> · 结果见下条</font>",
+                "text_size": "normal",
+                "margin": "0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "done_outlined",
+                  "color": "green"
+                }
+              },
+              {
+                "tag": "markdown",
+                "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                "text_size": "notation",
+                "text_align": "right",
+                "margin": "0px"
+              }
+            ]
+          }
+        }
+      },
+      {
+        "message": "om_msg_2",
+        "request": "reply",
+        "anchor": "om_in_1",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "result_<id:2>",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "运行完成 · 加一个 work.txt"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "final_output",
+                "content": "已新增 work.txt。",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "<text_tag color='blue'>验证执行中</text_tag>　本轮改了代码，正在执行 `test -f work.txt`，结论以完成后的记录为准。",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
+              },
+              {
+                "tag": "column_set",
+                "element_id": "result_follow_up_row",
+                "flex_mode": "flow",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "给我对外回复"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "reply_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "ask_reply",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "ask_reply"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "再详细点"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "details_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "ask_detail",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "ask_detail"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "margin": "6px 0px 0px 0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_elapsed",
+                        "content": "<font color='grey'>用时 <耗时> · </font><at id=ou_snapshot_alice></at>",
+                        "text_size": "x-small",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "x-small",
+                        "text_align": "right",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "加一个 work.txt"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "运行完成"
+                },
+                "color": "green"
+              }
+            ],
+            "template": "green",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_2",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "运行完成 · 加一个 work.txt"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "final_output",
+                "content": "已新增 work.txt。",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "verification_status",
+                "content": "<text_tag color='green'>验证通过</text_tag>　`test -f work.txt` 退出码 0　代码指纹 <指纹>　<UTC 时间>",
+                "text_size": "notation",
+                "margin": "4px 0px 0px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "info_outlined",
+                  "color": "grey"
+                }
+              },
+              {
+                "tag": "column_set",
+                "element_id": "result_follow_up_row",
+                "flex_mode": "flow",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "给我对外回复"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "reply_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "ask_reply",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "ask_reply"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "再详细点"
+                        },
+                        "type": "text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "details_outlined",
+                          "color": "grey"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "ask_detail",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "ask_detail"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "margin": "6px 0px 0px 0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_elapsed",
+                        "content": "<font color='grey'>用时 <耗时> · </font><at id=ou_snapshot_alice></at>",
+                        "text_size": "x-small",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "x-small",
+                        "text_align": "right",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "加一个 work.txt"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "运行完成"
+                },
+                "color": "green"
+              }
+            ],
+            "template": "green",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      }
+    ]
+  }
+]

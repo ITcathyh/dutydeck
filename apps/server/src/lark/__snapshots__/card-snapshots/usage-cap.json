@@ -1,0 +1,486 @@
+[
+  {
+    "say": "再跑一次登录回归",
+    "message": "om_in_1"
+  },
+  {
+    "checkpoint": "月度上限拒绝",
+    "requests": [
+      {
+        "message": "om_msg_1",
+        "request": "reply",
+        "anchor": "om_snapshot_root",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "task_om_in_1_1",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "已接收 · 再跑一次登录回归"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "任务已接收，正在准备执行…",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "再跑一次登录回归"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "已接收"
+                },
+                "color": "neutral"
+              }
+            ],
+            "template": "grey",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_1",
+        "request": "patch",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "已失败 · 再跑一次登录回归"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "element_id": "execution_alert_0",
+                "content": "本群本月成本已达上限 $1.00（已用 $1.50），新任务不再执行，正在执行的任务不受影响。安装管理员可在 Dutydeck Web 的「用量与成本」里调高上限，否则下月 1 日起重新计算。",
+                "text_size": "normal",
+                "margin": "6px 0px 8px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "warning_outlined",
+                  "color": "red"
+                }
+              },
+              {
+                "tag": "column_set",
+                "element_id": "task_action_row",
+                "flex_mode": "none",
+                "horizontal_spacing": "4px",
+                "vertical_align": "center",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "task_meta",
+                        "content": "<font color='grey'>用时 <耗时></font><font color='grey'> · </font><font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "notation",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "重试"
+                        },
+                        "type": "primary_text",
+                        "icon": {
+                          "tag": "standard_icon",
+                          "token": "refresh_outlined",
+                          "color": "blue"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "action": "retry",
+                              "task_id": "om_in_1",
+                              "turn": "1"
+                            }
+                          }
+                        ],
+                        "margin": "0px",
+                        "element_id": "retry"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "再跑一次登录回归"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "已失败"
+                },
+                "color": "red"
+              }
+            ],
+            "template": "red",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      },
+      {
+        "message": "om_msg_2",
+        "request": "reply",
+        "anchor": "om_in_1",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "result_<id:2>",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "已失败 · 再跑一次登录回归"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "div",
+                "element_id": "task_status",
+                "width": "auto",
+                "margin": "0px",
+                "text": {
+                  "tag": "lark_md",
+                  "content": "<font color='grey'>已用时 <耗时></font>",
+                  "text_size": "small"
+                }
+              },
+              {
+                "tag": "markdown",
+                "element_id": "execution_alert_0",
+                "content": "本群本月成本已达上限 $1.00（已用 $1.50），新任务不再执行，正在执行的任务不受影响。安装管理员可在 Dutydeck Web 的「用量与成本」里调高上限，否则下月 1 日起重新计算。",
+                "text_size": "normal",
+                "margin": "6px 0px 8px 0px",
+                "icon": {
+                  "tag": "standard_icon",
+                  "token": "warning_outlined",
+                  "color": "red"
+                }
+              },
+              {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "margin": "6px 0px 0px 0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "element_id": "group_mention",
+                        "content": "<at id=ou_snapshot_alice></at>",
+                        "text_size": "x-small",
+                        "margin": "0px"
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/sessions/ses_<id:1>)</font>",
+                        "text_size": "x-small",
+                        "text_align": "right",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "再跑一次登录回归"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Mock"
+            },
+            "text_tag_list": [
+              {
+                "tag": "text_tag",
+                "text": {
+                  "tag": "plain_text",
+                  "content": "已失败"
+                },
+                "color": "red"
+              }
+            ],
+            "template": "red",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      }
+    ]
+  },
+  {
+    "say": "/status",
+    "message": "om_in_2"
+  },
+  {
+    "checkpoint": "/status",
+    "requests": [
+      {
+        "message": "om_msg_3",
+        "request": "reply",
+        "anchor": "om_snapshot_root",
+        "reply_in_thread": true,
+        "msg_type": "interactive",
+        "uuid": "cmd_status_om_in_2",
+        "content": {
+          "schema": "2.0",
+          "config": {
+            "update_multi": true,
+            "width_mode": "default",
+            "streaming_mode": false,
+            "style": {
+              "color": {
+                "current_bg": {
+                  "light_mode": "rgba(240,245,253,1)",
+                  "dark_mode": "rgba(30,40,56,1)"
+                },
+                "failure_bg": {
+                  "light_mode": "rgba(254,241,241,1)",
+                  "dark_mode": "rgba(64,32,32,1)"
+                },
+                "trace_success": {
+                  "light_mode": "rgba(46,161,33,1)",
+                  "dark_mode": "rgba(118,204,142,1)"
+                },
+                "trace_failure": {
+                  "light_mode": "rgba(163,77,0,1)",
+                  "dark_mode": "rgba(255,178,102,1)"
+                },
+                "trace_running": {
+                  "light_mode": "rgba(36,91,219,1)",
+                  "dark_mode": "rgba(124,202,242,1)"
+                }
+              }
+            },
+            "summary": {
+              "content": "任务状态 · 已完成"
+            }
+          },
+          "body": {
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "padding": "10px 12px 10px 12px",
+            "elements": [
+              {
+                "tag": "markdown",
+                "content": "**Agent**：mock\n\n**工作区**：<tmp>/workspace\n\n**会话**：`ses_<id:1>`\n\n**执行身份**：`<执行身份>`（部署这台 Dutydeck 的系统账号）。任务以它运行，能用到它的文件、凭据与网络；独立工作目录只隔离可写目录，不隔离这些。\n\n**运行状态**：idle\n\n**执行中的运行**：0 个　**待执行指令**：0 条　**需要核对**：0 条\n\n**最近一轮**：failed\n\n**本月用量**：本群 $1.50（上限 $1.00，已用 150%） · 本机器人 $1.50（未设上限）",
+                "text_align": "left",
+                "text_size": "normal_v2",
+                "margin": "0px"
+              },
+              {
+                "tag": "column_set",
+                "flex_mode": "none",
+                "horizontal_spacing": "8px",
+                "margin": "6px 0px 0px 0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "weighted",
+                    "weight": 1,
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "markdown",
+                        "content": "<font color='grey'>[查看详情](https://dutydeck.example.com/)</font>",
+                        "text_size": "x-small",
+                        "text_align": "right",
+                        "margin": "0px"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "header": {
+            "title": {
+              "tag": "plain_text",
+              "content": "任务状态"
+            },
+            "subtitle": {
+              "tag": "plain_text",
+              "content": "Dutydeck"
+            },
+            "template": "green",
+            "padding": "10px 12px 8px 12px"
+          }
+        }
+      }
+    ]
+  }
+]
