@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { AgentEvent, ConfigRepository } from '@dutydeck/shared';
 import { withExplicitFinalLock } from './explicit-final.js';
 import { sendLarkResult, type DeliveryTarget } from './result-delivery.js';
-import { larkRelaunchLabels } from './card-actions.js';
+import { larkRelaunchLabels, larkReplayLabels } from './card-actions.js';
+import { larkHeldReason, type LarkHeldCause } from './turn-redispatch.js';
 import type { LarkCardService } from './service.js';
 import type { LarkRuntime } from './listener.js';
 
@@ -28,9 +29,11 @@ export const larkRecoveryRetainedNote = (webBaseUrl?: string) =>
  * options.relaunch 是调用方声明「这张卡能渲染转到新会话的按钮」。只有声明了且任务确实卡住，
  * 正文才提按钮；返回的 relaunch 就是按钮该不该出现，渲染端据此设 canRelaunch。
  * options.webBaseUrl 同理：只有卡上带详情链接时才传，否则正文不指向 Web。
+ * options.interrupted：服务重启切断、停下等人选的一轮（见 coordinator.redispatchInterruptedTurn），显示为「结果未知」；
+ * buttons 是卡上有没有「重新执行」「放弃」。
  */
 export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: string, taskId: string, status: string, queuedAhead?: number,
-  options: { relaunch?: boolean; webBaseUrl?: string } = {}) {
+  options: { relaunch?: boolean; webBaseUrl?: string; interrupted?: LarkHeldCause & { buttons?: boolean } } = {}) {
   const recovery = await runtime.getTaskRecovery?.(sessionId, taskId);
   status = recovery?.status ?? status;
   const resolvedUnknown = recovery?.resolvedUnknown === true;
@@ -38,6 +41,11 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
   const blockers = recovery?.blockers ?? [];
   const blocked = needsReview || blockers.length > 0;
   const reasons = [...new Set(blockers.map(block => explanations[block.code] ?? '执行环境需要恢复检查'))];
+  if (needsReview && options.interrupted) {
+    const choose = options.interrupted.buttons ? `确认再做一次不会重复造成影响后点「${larkReplayLabels.replay_turn}」，不再需要就点「${larkReplayLabels.abandon_turn}」。` : '';
+    return { blocked, label: '结果未知', relaunch: false,
+      markdown: `**结果未知**\n\n服务重启打断了这一轮，执行结果未知。${larkHeldReason(options.interrupted)}${choose}${larkRecoveryRetainedNote(options.webBaseUrl)}\n\n发送 \`/status\` 查看最新状态。` };
+  }
   const label = needsReview ? '需要核对' : blocked ? '排队受阻' : resolvedUnknown ? '已核对，结果未确认' : '排队中';
   const relaunch = options.relaunch === true && blocked && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(status);
   const relaunchHint = !relaunch ? '' : status === 'queued'
