@@ -8,7 +8,7 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { createCollaborationIntegration } from './collaboration-integration.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from './lark/config.js';
-import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './lark/agent-tools.js';
+import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, type AgentGroupToolError } from './lark/agent-tools.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0)) await close(); });
@@ -176,20 +176,31 @@ it('reads another joined group for Tag without activating its participation or c
   expect((await f.runtime.listSessions()).every(item => item.permissionMode === 'deny-all')).toBe(true);
 });
 
-it('serves group team-search from the real reader only while this group has participation on', async () => {
+async function teamSearchFixture() {
   const f = await fixture();
   const personal = { ...scope, chatId: 'oc_personal' };
+  // 设置后，下一次读取来源群消息（reader.read，不含 authorize 的单条探测）时先执行它，模拟读取期间的配置变化。
+  let duringRead: (() => Promise<unknown>) | undefined;
   f.client.listChats.mockResolvedValue({ items: [{ chatId: scope.chatId, name: '测试群', external: false }, { chatId: personal.chatId, name: '个人待办', external: false }], hasMore: false });
-  f.client.listChatMessages.mockImplementation(async (input?: any) => ({ items: input.chatId === personal.chatId ? [
-    { messageId: 'om_capacity', chatId: personal.chatId, messageType: 'text', rawContent: '{"text":"推进容量扫描，监控 RDS 和 Abase 水位"}',
-      createTime: String(Date.now() - 10000), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false },
-    { messageId: 'om_lunch', chatId: personal.chatId, messageType: 'text', rawContent: '{"text":"今天午饭吃什么"}',
-      createTime: String(Date.now() - 5000), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false }
-  ] : [], hasMore: false }));
+  f.client.listChatMessages.mockImplementation(async (input?: any) => {
+    if (input.chatId === personal.chatId && input.pageSize !== 1 && duringRead) { const change = duringRead; duringRead = undefined; await change(); }
+    return { items: input.chatId === personal.chatId ? [
+      { messageId: 'om_capacity', chatId: personal.chatId, messageType: 'text', rawContent: '{"text":"推进容量扫描，监控 RDS 和 Abase 水位"}',
+        createTime: String(Date.now() - 10000), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false },
+      { messageId: 'om_lunch', chatId: personal.chatId, messageType: 'text', rawContent: '{"text":"今天午饭吃什么"}',
+        createTime: String(Date.now() - 5000), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false }
+    ] : [], hasMore: false };
+  });
   const session = await f.runtime.start({ agentId: 'agent', source: 'lark', sourceId: `${scope.appId}:${scope.chatId}:group:user:ou_alice` });
   const capabilities = new LarkAgentToolCapabilityRegistry(f.repos.sessions, 'http://localhost', 'secret');
-  const tools = new LarkAgentToolsService(capabilities, f.repos.config, { teamSearch: () => f.collaboration.teamSearch });
+  // 模拟群成员 ou_alice 触发的这一轮：工具调用按其身份走真实的群访问策略。
+  const tools = new LarkAgentToolsService(capabilities, f.repos.config, { teamSearch: () => f.collaboration.teamSearch, groupManager: f.groups, authorizeTool: async () => ({ actorId: 'ou_alice' }) });
   const token = capabilities.environmentFor(session).dutydeck_group_tools_token;
+  return { f, personal, tools, token, onRead(change: () => Promise<unknown>) { duringRead = change; } };
+}
+
+it('serves group team-search from the real reader only while this group has participation on', async () => {
+  const { f, personal, tools, token } = await teamSearchFixture();
   await expect(tools.teamSearch(token, { query: '容量扫描' })).rejects.toMatchObject({ code: 'GROUP_TEAM_SEARCH_UNAVAILABLE', statusCode: 403 });
   expect(f.client.listChatMessages).not.toHaveBeenCalledWith(expect.objectContaining({ chatId: personal.chatId }));
   await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
@@ -197,6 +208,20 @@ it('serves group team-search from the real reader only while this group has part
   expect(result.sources).toEqual([expect.objectContaining({ name: '个人待办', chatId: personal.chatId, entries: [expect.stringContaining('ou_alice(human): 推进容量扫描，监控 RDS 和 Abase 水位')] })]);
   expect(JSON.stringify(result)).not.toContain('午饭');
   expect((await f.repos.collaboration.getSettings(personal)).participation).toBe('off');
+});
+
+it.each([
+  ['participation is turned off', 'GROUP_TEAM_SEARCH_UNAVAILABLE', (f: Awaited<ReturnType<typeof fixture>>) => saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'off' })],
+  ['the group is disabled', 'LARK_GROUP_POLICY_DENIED', (f: Awaited<ReturnType<typeof fixture>>) => f.groups.save(scope.appId, scope.chatId, { expectedRevision: f.group.binding!.revision, patch: { accessOverride: { mode: 'disabled', principalIds: [] } } })]
+] as const)('discards team-search material when %s while other groups are being read', async (_label, code, change) => {
+  const { f, tools, token, onRead } = await teamSearchFixture();
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  expect(JSON.stringify(await tools.teamSearch(token, { query: '容量扫描' }))).toContain('推进容量扫描');
+  onRead(() => change(f));
+  const error = await tools.teamSearch(token, { query: '容量扫描' }).then(() => undefined, (caught: AgentGroupToolError) => caught);
+  expect(error).toMatchObject({ code, statusCode: 403 });
+  const body = JSON.stringify(error!.response());
+  for (const leaked of ['推进容量扫描', '个人待办', 'oc_personal']) expect(body).not.toContain(leaked);
 });
 
 it.each(['ask', undefined] as const)('runs unattended %s delegations through real ACP without leaving permission requests pending', async permissionMode => {
