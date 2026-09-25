@@ -247,6 +247,197 @@ describe('BotManagement 会话记忆', () => {
       memoryEnabled: true, memoryAutoExtract: false, memoryAgentId: 'codex', memoryModel: 'gpt-4o-mini'
     })));
   });
+
+  it('会话记忆开启时展示群共享状态、上次提取/整理时间、成功运行及私聊小字', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'larkMemoryStatus').mockResolvedValue({
+      appId: 'cli_test_1',
+      enabled: true,
+      groups: {
+        appId: 'cli_test_1',
+        pool: 'groups',
+        shared: true,
+        liveEntries: 12,
+        topics: 3,
+        pendingTurns: 2,
+        lastExtractionAt: '2026-09-25T10:00:00.000Z',
+        lastConsolidationAt: '2026-09-25T12:00:00.000Z',
+        lastRun: {
+          kind: 'extraction',
+          at: '2026-09-25T10:00:00.000Z',
+          ok: true,
+          added: 2,
+          superseded: 0,
+          retired: 0,
+          retopiced: 0,
+          rejected: 0
+        }
+      }
+    });
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+
+    const expectedExtraction = new Date('2026-09-25T10:00:00.000Z').toLocaleString('zh-CN', { hour12: false });
+    const expectedConsolidation = new Date('2026-09-25T12:00:00.000Z').toLocaleString('zh-CN', { hour12: false });
+
+    expect(await screen.findByText('群共享记忆：12 条 · 3 个主题 · 待提取 2 轮')).toBeTruthy();
+    expect(screen.getByText(`上次提取 ${expectedExtraction} · 上次整理 ${expectedConsolidation}`)).toBeTruthy();
+    expect(screen.getByText(new RegExp(`上次运行：提取 · ${expectedExtraction.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))).toBeTruthy();
+    expect(screen.getByText('成功')).toBeTruthy();
+    expect(screen.getByText('私聊的记忆各自独立，在对应私聊里发 /memory 查看。')).toBeTruthy();
+  });
+
+  it('上次运行失败时展示失败信息与 lastRunLabel，并使用警示样式', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'larkMemoryStatus').mockResolvedValue({
+      appId: 'cli_test_1',
+      enabled: true,
+      groups: {
+        appId: 'cli_test_1',
+        pool: 'groups',
+        shared: true,
+        liveEntries: 5,
+        topics: 2,
+        pendingTurns: 4,
+        lastRun: {
+          kind: 'extraction',
+          at: '2026-09-25T11:00:00.000Z',
+          ok: false,
+          added: 0,
+          superseded: 0,
+          retired: 0,
+          retopiced: 0,
+          rejected: 0
+        },
+        lastRunLabel: 'MEMORY_RUN_TIMEOUT（记忆会话运行超时）'
+      }
+    });
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+
+    const expectedRunAt = new Date('2026-09-25T11:00:00.000Z').toLocaleString('zh-CN', { hour12: false });
+    const failSpan = await screen.findByText('失败 MEMORY_RUN_TIMEOUT（记忆会话运行超时）');
+    expect(failSpan).toBeTruthy();
+    expect(failSpan.className).toContain('text-warning');
+    expect(screen.getByText(new RegExp(`上次运行：提取 · ${expectedRunAt.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))).toBeTruthy();
+  });
+
+  it('正在运行时展示正在运行状态', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'larkMemoryStatus').mockResolvedValue({
+      appId: 'cli_test_1',
+      enabled: true,
+      groups: {
+        appId: 'cli_test_1',
+        pool: 'groups',
+        shared: true,
+        liveEntries: 0,
+        topics: 0,
+        pendingTurns: 1,
+        running: {
+          kind: 'consolidation',
+          startedAt: '2026-09-25T12:30:00.000Z'
+        }
+      }
+    });
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+
+    expect(await screen.findByText('正在运行：整理')).toBeTruthy();
+    expect(screen.getByText('上次提取 尚未提取 · 上次整理 尚未整理')).toBeTruthy();
+  });
+
+  it('接口失败时显示记忆状态读取失败，不影响页面其他部分', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'larkMemoryStatus').mockRejectedValue(new Error('Failed to fetch'));
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+
+    expect(await screen.findByText('记忆状态读取失败')).toBeTruthy();
+    // 页面其他部分正常存在
+    expect(screen.getByRole('checkbox', { name: '启用会话记忆' })).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: '自动提取与整理' })).toBeTruthy();
+  });
+
+  it('加载中显示读取中…', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    vi.spyOn(api, 'larkMemoryStatus').mockReturnValue(new Promise(() => {})); // 保持 pending
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+
+    expect(await screen.findByText('读取中…')).toBeTruthy();
+  });
+
+  it('关闭会话记忆时不请求接口，也不显示记忆状态', async () => {
+    const memoryDisabledBot: LarkBotConfig = { ...mockBot, memoryEnabled: false };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryDisabledBot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const memoryStatusSpy = vi.spyOn(api, 'larkMemoryStatus');
+
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+    expect(memoryStatusSpy).not.toHaveBeenCalled();
+    expect(screen.queryByText(/群共享记忆：/)).toBeNull();
+    expect(screen.queryByText('读取中…')).toBeNull();
+    expect(screen.queryByText('记忆状态读取失败')).toBeNull();
+  });
+
+  it('切换机器人时重新读取对应机器人的记忆状态', async () => {
+    const user = userEvent.setup();
+    const botB: LarkBotConfig = { ...mockBot, appId: 'cli_test_2', name: '第二助手', workspace: '/data/projects/bot2', revision: 7 };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot, botB], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    const memoryStatusSpy = vi.spyOn(api, 'larkMemoryStatus').mockImplementation(async appId => ({
+      appId,
+      enabled: true,
+      groups: {
+        appId,
+        pool: 'groups',
+        shared: true,
+        liveEntries: appId === 'cli_test_1' ? 10 : 25,
+        topics: 2,
+        pendingTurns: 0
+      }
+    }));
+
+    function BotSwitcher() {
+      const [appId, setAppId] = useState('cli_test_1');
+      return <BotManagement selectedAppId={appId} onSelectBot={setAppId} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>;
+    }
+
+    renderWithClient(<BotSwitcher/>);
+    expect(await screen.findByText('群共享记忆：10 条 · 2 个主题 · 待提取 0 轮')).toBeTruthy();
+    expect(memoryStatusSpy).toHaveBeenCalledWith('cli_test_1');
+
+    await user.click(screen.getByRole('button', { name: /第二助手/ }));
+    expect(await screen.findByText('群共享记忆：25 条 · 2 个主题 · 待提取 0 轮')).toBeTruthy();
+    expect(memoryStatusSpy).toHaveBeenCalledWith('cli_test_2');
+  });
 });
 
 describe('BotManagement 布局与状态诚实', () => {

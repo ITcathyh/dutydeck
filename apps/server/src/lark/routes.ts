@@ -13,7 +13,7 @@ import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listene
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
 import type { LarkAgentToolsService } from './agent-tools.js';
-import type { LarkMemoryStore } from './memory.js';
+import { larkMemoryErrorLabel, type LarkMemoryStore } from './memory.js';
 import type { LarkMemoryProjection } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { OpenPlatformConfigurationJobManager } from './open-platform-jobs.js';
@@ -171,6 +171,38 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   app.get<{ Params: { appId: string }; Querystring: { pageToken?: string } }>('/api/lark/bots/:appId/chats', async (request, reply) => {
     try {
       return await (await resolveService(undefined, request.params.appId)).listChats(request.query.pageToken);
+    } catch (error) {
+      if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
+      throw error;
+    }
+  });
+  app.get<{ Params: { appId: string } }>('/api/lark/bots/:appId/memory/status', async (request, reply) => {
+    try {
+      await resolveService(undefined, request.params.appId);
+      if (!options.memory?.pipeline) {
+        throw new LarkServiceError('MEMORY_STATUS_UNAVAILABLE', 'Memory status unavailable', 503);
+      }
+      const bot = await readLarkConfig(options.config, request.params.appId);
+      const enabled = bot?.memoryEnabled !== false;
+      const groups = await options.memory.pipeline.status({
+        appId: request.params.appId,
+        chatId: 'groups',
+        pool: 'groups'
+      });
+      const lastRunLabel = groups.lastRun && !groups.lastRun.ok ? larkMemoryErrorLabel(groups.lastRun.error) : undefined;
+      const lastRun = groups.lastRun ? {
+        ...groups.lastRun,
+        ...(groups.lastRun.error && !/^[A-Z][A-Z0-9_]*$/.test(groups.lastRun.error) ? { error: undefined } : {})
+      } : undefined;
+      return {
+        appId: request.params.appId,
+        enabled,
+        groups: {
+          ...groups,
+          ...(lastRun ? { lastRun } : {}),
+          ...(lastRunLabel !== undefined ? { lastRunLabel } : {})
+        }
+      };
     } catch (error) {
       if (error instanceof LarkServiceError) return reply.code(error.statusCode).send({ error: { code: error.code, message: error.message } });
       throw error;
