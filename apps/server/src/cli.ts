@@ -20,7 +20,7 @@ import { askOutput, runSessionAsk, runSessionSend } from './relay-cli.js';
 import { readNativeAskPayload, runNativeAskHook } from './native-ask-hook.js';
 import { RelayCliError } from '@dutydeck/relay';
 import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
-import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTarget, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
+import { daemonRestart, daemonStart, daemonStatus, daemonStop, systemdRestartTarget, waitForRunningTasksDrain, type DaemonCommandResult, type DaemonStatusInfo } from './daemon/command.js';
 import { readDaemonStatus, resolveDaemonDir } from './daemon/daemon.js';
 import { sleep } from './daemon/time.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
@@ -119,6 +119,18 @@ async function restartWithInstalledCli(entrypoint: string, options: { force?: bo
     await sleep(200);
   }
   throw new Error('Dutydeck was updated, but the restarted service did not become ready within 15 seconds. Run dutydeck status and inspect the daemon log.');
+}
+
+/**
+ * `dutydeck update` 在 npm install -g 落盘之前先等正在执行的任务结束。
+ * 超时返回失败时必须中止 update（抛错），否则磁盘已是新版、服务却还是旧的。
+ * 守护进程没在跑 / 查询失败等情形 drain 内部会放行（返回 ok:true），与 restart 一致。
+ */
+async function drainBeforeUpdate(options: { drainTimeout?: string }): Promise<void> {
+  const dir = resolveDaemonDir();
+  const state = readDaemonStatus(dir);
+  const result = await waitForRunningTasksDrain(dir, state, { drainTimeout: options.drainTimeout }, {});
+  if (!result.ok) throw new Error(result.error);
 }
 
 /**
@@ -295,6 +307,7 @@ async function main() {
       output(await updateDutydeck(packageJson.version, options, {
         packageName: packageJson.name,
         runNpm: runNpmForDutydeckUpdate,
+        drain: drainBeforeUpdate,
         restart: (entrypoint, restartOptions) => restartWithInstalledCli(entrypoint, restartOptions)
       }));
     },
