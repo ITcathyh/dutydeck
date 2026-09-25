@@ -20,14 +20,14 @@ function setup(chats = [chat(origin.chatId), chat(source.chatId, '个人待办')
   const config = { appId: origin.appId, appSecret: 'synthetic', listening: true, groupToolsEnabled: true, fullTrustConfirmed: true, memoryEnabled: false } as StoredLarkConfig;
   const listChats = vi.fn(async (_token?: string): Promise<LarkChatsResult> => ({ items: chats, hasMore: false }));
   const listChatMessages = vi.fn(async (_input: unknown) => ({ items: [] as LarkChatMessage[], hasMore: false }));
-  const canRead = vi.fn(async (_scope: CollaborationScope) => true), readMemory = vi.fn(async () => '个人待办记忆');
+  const canRead = vi.fn(async (_scope: CollaborationScope) => true);
   const readConfig = vi.fn(async () => config);
   const reader = new LarkTeamContextReader({ repository: repos.collaboration, readConfig,
-    serviceFor: () => ({ listChats, listChatMessages }), canRead, readMemory, now: () => new Date(at) });
+    serviceFor: () => ({ listChats, listChatMessages }), canRead, now: () => new Date(at) });
   const observe = (scope = source, eventId = 'om_old', text = '个人待办部署完成') => repos.collaboration.observe({ scope,
     source: 'lark.message', eventId, messageId: eventId, occurredAt: at, receivedAt: at, senderKind: 'human', senderId: 'ou_person',
     text, origin: 'live', refs: [eventId], missing: [] });
-  return { repos, config, reader, listChats, listChatMessages, canRead, readMemory, readConfig, observe };
+  return { repos, config, reader, listChats, listChatMessages, canRead, readConfig, observe };
 }
 
 describe('host team context reader', () => {
@@ -45,10 +45,9 @@ describe('host team context reader', () => {
     expect(result.observations).toHaveLength(80);
     expect(observe).not.toHaveBeenCalled(); expect(settings).not.toHaveBeenCalled();
     expect(await f.repos.groupBindings.listByChannelBot('cli_one')).toEqual([]);
-    expect(f.readMemory).not.toHaveBeenCalled();
   });
 
-  it('deduplicates live API messages over cache and exposes followups and enabled memory as external evidence', async () => {
+  it('deduplicates live API messages over cache and exposes followups but not other groups\' memory', async () => {
     const f = setup(); f.config.memoryEnabled = true;
     await f.observe();
     const followup = await f.repos.collaboration.createFollowup({ scope: source, goal: '个人待办发布', createdBy: 'ou_person' });
@@ -61,7 +60,7 @@ describe('host team context reader', () => {
       createdBy: 'ou_person', updatedBy: 'ou_person', createdAt: followup.createdAt, updatedAt: followup.updatedAt
     });
     expect(followup.ownerId).toBeUndefined();
-    expect(result.observations.find(item => item.source === 'lark.team.memory')).toMatchObject({ scope: source, origin: 'external' });
+    expect(result.observations.some(item => item.source === 'lark.team.memory')).toBe(false);
     expect(result.sources[0]).toMatchObject({ status: 'partial', missing: ['recent_history_partial'] });
   });
 
@@ -138,14 +137,21 @@ describe('host team context reader', () => {
     expect(f.listChats).toHaveBeenCalledTimes(1);
   });
 
-  it('honors default-on memory and checks empty-context metadata without refetching group membership', async () => {
+  it('does not read other groups\' memory by default and checks empty-context metadata without refetching group membership', async () => {
     const f = setup(); delete f.config.memoryEnabled;
     const result = await f.reader.read(origin, '个人待办');
-    expect(result.observations.find(item => item.source === 'lark.team.memory')?.origin).toBe('external');
+    expect(result.observations.some(item => item.source === 'lark.team.memory')).toBe(false);
     const empty = { ...result, observations: [] };
     expect(await f.reader.authorize(origin, empty)).toBe(true);
     expect(f.listChats).toHaveBeenCalledTimes(1);
     expect(await f.reader.authorize(origin, { ...empty, sources: [{ ...result.sources[0]!, scope: origin }] })).toBe(false);
     expect(await f.reader.authorize(origin, { ...empty, sources: [{ ...result.sources[0]!, scope: { appId: 'cli_other', chatId: source.chatId } }] })).toBe(false);
+  });
+
+  it('scores lexical overlap with the same relevance used for ordering', () => {
+    const { reader } = setup();
+    expect(reader.scorer('部署方案')('蓝绿方案已定')).toBeGreaterThan(0);
+    expect(reader.scorer('Deploy plan')('deploy 已完成')).toBeGreaterThan(0);
+    expect(reader.scorer('部署方案')('今天午饭吃什么')).toBe(0);
   });
 });

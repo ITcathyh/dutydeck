@@ -87,8 +87,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
   const decider = new ReadonlyParticipationDecider({ runtime, repos: { execution: repos.execution }, workspaceRoot: options.workspaceRoot });
   const teamContext = new LarkTeamContextReader({
     repository: repos.collaboration, readConfig: appId => readLarkConfig(repos.config, appId), serviceFor: client,
-    canRead: scope => options.listeningDisabled ? Promise.resolve(false) : groups.contextReadAllowed(scope.appId, scope.chatId),
-    readMemory: options.readMemory
+    canRead: scope => options.listeningDisabled ? Promise.resolve(false) : groups.contextReadAllowed(scope.appId, scope.chatId)
   });
   const deliveries = new CollaborationDelivery(repos.collaboration);
   const participation = new LarkGroupParticipation({
@@ -201,6 +200,8 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     }
   });
   return { service, scheduler, background, participation, extensions, evaluation, authorize, prepareSettings, riskPolicy,
+    // 执行 Agent 按需检索跨群资料，门槛与原先预注入 teamContext 相同：来源群开启群参与且可观察。
+    teamSearch: { reader: teamContext, available: (scope: CollaborationScope) => scopeGrant(scope, 'observe') },
     onChange: async (scope: CollaborationScope) => {
       void participation.bootstrap(scope).catch(error => options.log?.warn({ error }, '群上下文初始化未完成'));
       await scheduler.tick();

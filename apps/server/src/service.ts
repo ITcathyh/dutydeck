@@ -195,6 +195,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     authorizeTool: (sessionId, action) => collaboration?.background.authorizeTool(sessionId, action) ?? Promise.resolve(),
     executionPolicy: legacyExecutionPolicy,
     groupManager,
+    history: repos,
+    teamSearch: () => collaboration?.teamSearch,
   });
   // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
   // 自定义命令可通过 adapterId 复用已有 CLI 家族，同时保留独立 agent id。
