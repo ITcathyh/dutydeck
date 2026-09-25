@@ -6,7 +6,8 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readF
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions } from '../cli-program.js';
-import { drainRuntime, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
+import { pidAlive } from './daemon.js';
+import { DRAIN_INTERVAL_MS, drainRuntime, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
 
 /**
  * `dutydeck deploy`：把一个已构建好的检出目录做成不可变的发布目录，排空后切换 `current` 并重启，
@@ -409,6 +410,25 @@ function updateDeploymentFile(target: DeployTarget, release: string, commit: str
 
 // ─── 部署 ────────────────────────────────────────────────────────────────────
 
+/**
+ * 排空成功后每 DRAIN_INTERVAL_MS 续一次租约，直到旧进程退出或调用返回的 stop：备份（Tag 库备份可能超过
+ * 60 秒的租约）、切换、重启期间旧进程都不会开始执行排队的任务。旧进程一退出就不再续，免得续到新进程上。
+ */
+function keepDraining(drain: DrainResult, pid: number | undefined): () => Promise<void> {
+  const renew = drain.ok ? drain.renew : undefined;
+  if (!renew || pid === undefined) return async () => {};
+  let renewal: Promise<void> | undefined;
+  const timer = setInterval(() => {
+    if (pidAlive(pid)) renewal = renew();
+    else clearInterval(timer);
+  }, DRAIN_INTERVAL_MS);
+  timer.unref();
+  return async () => {
+    clearInterval(timer);
+    await renewal;
+  };
+}
+
 async function restartAndCheck(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DeployDeps) {
   const error = await service.restart();
   if (error) return { ok: false as const, error };
@@ -521,6 +541,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
     drain = await drainRuntime(target.endpoint, options, deps);
     if (!drain.ok) return finish('failed', { error: drain.error });
   }
+  const stopRenewing = keepDraining(drain, previousPid);
   const database = target.endpoint.database;
   if (database && existsSync(database)) {
     const backup = join(record, basename(database));
@@ -529,6 +550,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
       await (deps.backupDatabase ?? backupSqlite)(database, backup);
       manifest.database_backup = backup;
     } catch (error) {
+      await stopRenewing();
       await drain.release?.();
       return finish('failed', { error: `备份数据库失败，没有切换版本：${message(error)}` });
     }
@@ -537,6 +559,7 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   info(`切换 current → ${id}，重启 ${target.unit}`);
   pointCurrent(target.releases, release);
   const started = await restartAndCheck(service, previousPid, target.endpoint.address, deps);
+  await stopRenewing();
   if (started.ok) {
     info(`健康检查通过（pid ${started.pid}）`);
     updateDeploymentFile(target, release, build.commit, manifestPath, now());
