@@ -102,6 +102,13 @@ describe('注册表与能力门（诚实表达能力）', () => {
     expect(renderLarkCommandHelp(caps).text).toContain('/ci wait');
     expect(routeLarkCommand('/ci cancel ci_1', context({ capabilities: caps, operator: { kind: 'user', allowlisted: false } })).kind).toBe('denied');
   });
+  it('没有任何 CI 提供方时 /ci 回「未配置」和两种配置方法，/help 也不列出它', () => {
+    expect(routeLarkCommand('/ci', context())).toMatchObject({ kind: 'unavailable', reason: expect.stringContaining('CI 续作未配置') });
+    const route = routeLarkCommand('/ci fix', context());
+    expect(route.kind === 'unavailable' && route.reason).toEqual(expect.stringContaining('DUTYDECK_CODEBASE_WEBHOOK_SECRET'));
+    expect(route.kind === 'unavailable' && route.reason).toEqual(expect.stringContaining('DUTYDECK_GITHUB_TOKEN'));
+    expect(renderLarkCommandHelp(capabilities()).text).not.toContain('/ci wait');
+  });
   it('注册表里的命令名与别名本身都满足命令形状规则', () => {
     for (const definition of larkCommandRegistry) {
       for (const key of [definition.name, ...(definition.aliases ?? [])]) {

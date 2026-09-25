@@ -23,6 +23,7 @@ import { registerLarkMemoryTools, type LarkMemoryToolsOptions } from './lark/mem
 import { registerWorkItemRoutes, type WorkItemRouteOptions } from './work-item-routes.js';
 import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } from './session-automation-routes.js';
 import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
+import { registerCiHookRoutes, type CiHookRouteOptions } from './ci-hook-routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -64,6 +65,8 @@ export interface BuildAppOptions {
   workItemTools?: WorkItemToolsOptions;
   memoryTools?: LarkMemoryToolsOptions;
   automation?: SessionAutomationRouteOptions;
+  /** CI webhook 入口（/api/hooks/*）；未配置 webhook 密钥时不注册。 */
+  ciHooks?: CiHookRouteOptions;
   webRoot?: string;
   lark?: LarkRoutesOptions;
   system?: SystemRoutesOptions;
@@ -125,6 +128,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
         || pathname === '/api/auth/logout'
         || pathname.startsWith('/api/lark/agent-tools/')
         || isRelayCapabilityRequest(method, pathname)
+        // CI webhook 由路由自己校验令牌或签名、时间戳和 event-id。
+        || pathname.startsWith('/api/hooks/')
         || userExempt?.(method, pathname) === true
     });
   }
@@ -137,6 +142,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   await registerIdentityPreflightRoutes(app, options.identityPreflight);
   await registerScheduleManagementRoutes(app, options.schedule);
   if (options.automation) await registerSessionAutomationRoutes(app, options.automation);
+  if (options.ciHooks) await registerCiHookRoutes(app, options.ciHooks);
   if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);

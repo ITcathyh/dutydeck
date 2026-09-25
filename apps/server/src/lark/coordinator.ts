@@ -1266,7 +1266,8 @@ export class LarkMessageCoordinator {
   private larkRouteCapabilities() {
     return {
       ...larkCommandCapabilities(this.runtime),
-      ci: Boolean(this.workflowOptions.automation),
+      // 只有 automation 不算可用：GitHub 令牌或 Codebase webhook 至少配一个，否则 /ci 回「未配置」。
+      ci: Boolean(this.workflowOptions.automation && (this.workflowOptions.automation.githubConfigured || this.workflowOptions.automation.codebase)),
       schedule: Boolean(this.workflowOptions.automation),
       work: Boolean(this.workflowOptions.workbench),
       tasks: Boolean(this.workflows && this.cardMappings && this.runtime.getTasks),
@@ -1410,20 +1411,36 @@ export class LarkMessageCoordinator {
         if (!automation || !sessionId) throw new Error('当前话题还没有可用的工作项，请先发送任务。');
         if (!event.senderOpenId || !await this.isOperatorAllowed(config, event.senderOpenId, event.chatId, sessionId)) throw new Error('当前账号没有操作此任务的权限。');
         const [action, argument, ...extra] = route.args;
-        if (action === 'wait' && !extra.length) {
+        const codebase = automation.codebase;
+        // origin 是 Codebase 仓库时走 webhook 订阅；否则回落到原有的 GitHub Actions 轮询。
+        const codebaseItem = (action === 'wait' || action === 'fix') && !argument && codebase
+          ? await codebase.subscribe(sessionId, { autoFix: action === 'fix' }, event.senderOpenId) : undefined;
+        if (codebaseItem) {
+          await replyCard('等待 Codebase 流水线', `已等待 ${codebaseItem.repository} 的 ${codebaseItem.branch} 在提交 ${codebaseItem.headSha.slice(0, 12)} 上的流水线结果。\n\n`
+            + `${codebaseItem.autoFix ? '失败时自动交给 Agent 修复' : '失败时发送失败卡，可点「交给 Agent 修」'}：最多 3 轮；同一错误出现 2 次、每轮改动超过 10 个文件或 300 行、head SHA 变化时停下。\n\n`
+            + `截止：${codebaseItem.expiresAt}\n取消：/ci cancel ${codebaseItem.id}`);
+        } else if (action === 'fix') {
+          throw new Error(codebase ? '/ci fix 只支持 Codebase 仓库：当前工作区的 origin 不是 code.byted.org。' : '/ci fix 需要先配置 Codebase webhook（DUTYDECK_CODEBASE_WEBHOOK_SECRET）。');
+        } else if (action === 'wait' && !extra.length) {
           const item = await automation.subscribeCi(sessionId, argument ? { workflow: argument } : {}, event.senderOpenId);
           await replyCard('等待 GitHub Actions', `已等待 ${item.repository.slug} 的提交 ${item.headSha.slice(0, 12)}。\n\n截止：${item.expiresAt}\n取消：/ci cancel ${item.id}`);
         } else if (action === 'cancel' && argument && !extra.length) {
-          const items = await automation.listBySession(sessionId, event.senderOpenId);
-          const item = items.subscriptions.find(value => value.id === argument);
-          if (!item) throw new Error('此工作项中找不到该等待记录。');
-          await automation.cancelCi(sessionId, item.id, { expectedRevision: item.revision }, event.senderOpenId);
+          if (codebase && argument.startsWith('cbci_')) await codebase.cancel(sessionId, argument);
+          else {
+            const items = await automation.listBySession(sessionId, event.senderOpenId);
+            const item = items.subscriptions.find(value => value.id === argument);
+            if (!item) throw new Error('此工作项中找不到该等待记录。');
+            await automation.cancelCi(sessionId, item.id, { expectedRevision: item.revision }, event.senderOpenId);
+          }
           await replyCard('已取消 CI 等待', '尚未开始的自动续作不会再执行。已经运行的任务可通过 /cancel 中断。');
         } else if (!action) {
           const items = await automation.listBySession(sessionId, event.senderOpenId);
           const labels: Record<string, string> = { waiting: '等待中', dispatching: '提交中', accepted: '续作已接收', completed: '续作已结束', cancelled: '已取消', expired: '已过期', stale_head: '提交已变化', session_inactive: '会话已结束', revoked: '权限已撤销', error: '查询失败' };
-          await replyCard('CI 等待记录', items.subscriptions.slice(0, 10).map(item => `${labels[item.status] ?? item.status} · ${item.repository.slug} · ${item.headSha.slice(0, 12)}\n${item.error ?? ''}\n/ci cancel ${item.id}`).join('\n\n') || '尚无等待记录。发送 /ci wait [工作流文件名或 ID] 等待当前提交。');
-        } else throw new Error('用法：/ci、/ci wait [工作流文件名或 ID]、/ci cancel 等待编号');
+          const codebaseLabels: Record<string, string> = { waiting: '等待中', failed: '失败待修复', running: '处理中', passed: '已通过', stopped: '已停止', closed: 'MR 已结束', cancelled: '已取消', expired: '已过期' };
+          const codebaseLines = (await codebase?.listBySession(sessionId) ?? []).slice(-10)
+            .map(item => `${codebaseLabels[item.status] ?? item.status} · ${item.repository} · ${item.branch} · ${item.headSha.slice(0, 12)} · 已修复 ${item.rounds}/3 轮\n${item.reason ?? ''}\n/ci cancel ${item.id}`);
+          await replyCard('CI 等待记录', [...items.subscriptions.slice(0, 10).map(item => `${labels[item.status] ?? item.status} · ${item.repository.slug} · ${item.headSha.slice(0, 12)}\n${item.error ?? ''}\n/ci cancel ${item.id}`), ...codebaseLines].join('\n\n') || '尚无等待记录。发送 /ci wait [工作流文件名或 ID] 等待当前提交。');
+        } else throw new Error('用法：/ci、/ci wait [工作流文件名或 ID]、/ci fix、/ci cancel 等待编号');
         return 'handled';
       }
       if (route.command === 'status') {
@@ -2974,6 +2991,23 @@ export class LarkMessageCoordinator {
         this.log.warn({ error }, '刷新任务列表失败');
         return { type: 'error', content: '刷新失败，请稍后重试或重新发送 /tasks。' };
       }
+    }
+    // CI 失败卡「交给 Agent 修」：与 /ci 命令同一道权限门，卡片须是该订阅最新发出的失败卡。
+    if (workflow && typeof workflow.dutydeck_ci_fix === 'string') {
+      const codebase = this.workflowOptions.automation?.codebase;
+      if (!codebase || !this.reconcileConfig || !context?.messageId || !context.chatId || !operatorOpenId || typeof workflow.failure !== 'string') {
+        return { type: 'error', content: 'CI 失败卡已失效，请发送 /ci 查看最新状态。' };
+      }
+      try {
+        const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
+        if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法开始修复。' };
+        const subscription = await codebase.get(workflow.dutydeck_ci_fix);
+        const session = subscription ? await this.runtime.getSession(subscription.sessionId) : undefined;
+        const [appId, chatId] = session?.source === 'lark' ? session.sourceId?.split(':') ?? [] : [];
+        if (!subscription || appId !== config.appId || chatId !== context.chatId) return { type: 'warning', content: '这张 CI 失败卡不属于当前会话。' };
+        if (!await this.isOperatorAllowed(config, operatorOpenId, context.chatId, subscription.sessionId)) return { type: 'warning', content: '当前账号没有操作此任务的权限。' };
+        return { type: 'success', content: await codebase.requestFix(subscription.id, { failureKey: workflow.failure, cardMessageId: context.messageId }, operatorOpenId) };
+      } catch (error) { return { type: 'error', content: error instanceof Error ? error.message : String(error) }; }
     }
     if (workflow && typeof workflow.dutydeck_work_item === 'string') {
       if (!this.workflowOptions.workbench || !this.reconcileConfig || !context) return { type: 'error', content: '目标卡片已失效。' };

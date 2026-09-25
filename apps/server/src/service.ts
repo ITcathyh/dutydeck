@@ -23,6 +23,7 @@ import { createWorkbenchFetch } from './workbench-fetch.js';
 import { authorizeWorkItemAgent, authorizeWorkItemInteraction, workItemRiskPolicy } from './work-item-policy.js';
 import { SessionAutomationService } from './session-automation.js';
 import { createAutomationIntegration } from './automation-integration.js';
+import { CodebaseCiService } from './codebase-ci.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
@@ -216,7 +217,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   };
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
     ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }),
-    authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
+    authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await codebaseCi?.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
     authorizeControl: async (sessionId, actor, _action) => {
       if (await workItems.authorizeControl(sessionId, actor)) return;
       if (await collaboration?.background.authorizeControl(sessionId, actor)) return;
@@ -249,9 +250,13 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     listSessions: () => runtime.listSessions(),
   });
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
-  const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration,
+  const codebaseWebhookSecret = env.DUTYDECK_CODEBASE_WEBHOOK_SECRET?.trim();
+  const codebaseCi = codebaseWebhookSecret ? new CodebaseCiService({ repositories: repos, runtime, secret: codebaseWebhookSecret,
+    prepareDelivery: automationIntegration.prepareDelivery, notify: automationIntegration.notify, log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } }) : undefined;
+  const automation = new SessionAutomationService({ repositories: repos, runtime, ...automationIntegration, codebase: codebaseCi,
     githubToken: env.DUTYDECK_GITHUB_TOKEN ?? env.GH_TOKEN ?? env.GITHUB_TOKEN });
   setupCleanup.push(() => automation.close());
+  if (codebaseCi) setupCleanup.push(() => codebaseCi.close());
   const authorizeWorkAgent = (sessionId: string, actorId: string, agentId: string) => authorizeWorkItemAgent(repos, groupManager, automationIntegration.authorize, sessionId, actorId, agentId);
   const workbench = new LarkWorkbench(repos, runtime, () => workItems, () => workInteractions, automationIntegration.authorize, { env, authorizeAgent: authorizeWorkAgent, log: { warn: (...args: any[]) => app?.log.warn(...args as [unknown, string]) } });
   setupCleanup.push(() => workbench.close());
@@ -317,7 +322,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
       };
-      await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => delegations.close(), () => automation.close()]);
+      await settle([() => workbench.close(), () => workbenchHttp.close(), () => workItems.close(), () => delegations.close(), () => automation.close(), () => codebaseCi?.close()]);
       // Wake blocked asks before waiting for HTTP shutdown.
       await settle([() => relayBroker.close()]);
       await settle([() => collaboration?.close(), () => relayBroker.flush(), () => app?.close(), () => runtime.shutdown()]);
@@ -427,6 +432,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         const decision = await groupManager.authorizeSession(sessionId, action, true) ?? await foundationExecution.authorizeSessionId(sessionId, { boundary: 'session', action, request });
         return { ...decision, actorId: installationOwnerTaskActor };
       } },
+      ...(codebaseCi ? { ciHooks: { codebase: codebaseCi } } : {}),
       automation: { service: automation, authorize: async (request, sessionId, action) => {
         const principal = await resolveInstallationPrincipal(request);
         if (!principal) return false;
@@ -440,7 +446,10 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     await app.listen(listenOptions(config));
     workItems.start();
     void delegations.start().catch(error => app?.log.warn({ error }, '分层协作规划恢复失败'));
-    const tick = () => { void automation.tick().catch(error => app?.log.warn({ error }, '自动任务轮询失败')); };
+    const tick = () => {
+      void automation.tick().catch(error => app?.log.warn({ error }, '自动任务轮询失败'));
+      void codebaseCi?.tick().catch(error => app?.log.warn({ error }, 'Codebase CI 续作轮询失败'));
+    };
     automationTimer = setInterval(tick, 60_000);
     automationTimer.unref();
     tick();
