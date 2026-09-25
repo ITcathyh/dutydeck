@@ -560,6 +560,7 @@ export class DutydeckRuntime {
             }));
             this.localResources.adopt(this.fence(session), options, observed, driver);
             this.drivers.set(session.id, driver);
+            task.status = 'running';
             this.attemptRefs.set(token, ref); this.attempts.set(session.id, token); this.activeTasks.set(session.id, task);
             this.activeTurns.add(session.id);
             const tools: AttemptTools = { calls: new Map(), events: new Map(), replayData: new Map() };
@@ -1312,9 +1313,10 @@ export class DutydeckRuntime {
     };
   }
 
-  getRunningTaskCount(): number {
+  getRunningTaskCount(excludeSessionId?: string): number {
     let count = 0;
-    for (const task of this.activeTasks.values()) {
+    for (const [sessionId, task] of this.activeTasks) {
+      if (sessionId === excludeSessionId) continue;
       if (task.status === 'running') count++;
     }
     return count;
