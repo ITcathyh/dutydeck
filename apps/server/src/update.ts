@@ -23,6 +23,11 @@ export interface DutydeckUpdateResult {
 
 export interface DutydeckUpdateDependencies {
   runNpm(args: string[]): Promise<string>;
+  /**
+   * 安装前先等待正在执行的任务结束；超时/失败时应 reject，由调用方放弃本次 update。
+   * 只在未传 --force 时调用。返回 Promise 即代表可以安全停服。
+   */
+  drain?(options: { drainTimeout?: string }): Promise<void>;
   restart(installedEntrypoint: string, options?: { force?: boolean; drainTimeout?: string }): Promise<void>;
   packageName?: string;
 }
@@ -70,6 +75,12 @@ export async function updateDutydeck(
   const packageName = dependencies.packageName ?? DEFAULT_PACKAGE_NAME;
   const distTag = normalizeDistTag(options.distTag);
   const targetVersion = publishedVersion(await dependencies.runNpm(['view', `${packageName}@${distTag}`, 'version', '--json']));
+  // 安装前先等正在执行的任务结束：一旦 npm install -g 落盘，磁盘上就是新版文件，
+  // 此时再因超时放弃会留下「包是新的、服务还是旧的」。drain 失败/超时直接抛出，不安装、不重启。
+  // --force 两处等待（这里与 restart 内部）都跳过。
+  if (!options.force) {
+    await dependencies.drain?.({ drainTimeout: options.drainTimeout });
+  }
   await dependencies.runNpm(['install', '--global', `${packageName}@${distTag}`]);
   const version = installedVersion(await dependencies.runNpm(['list', '--global', packageName, '--depth=0', '--json']), packageName);
   if (version !== targetVersion) {
