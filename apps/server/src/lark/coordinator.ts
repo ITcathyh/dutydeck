@@ -9,7 +9,7 @@ import { parseLarkNewSession, validateLarkLaunchOptions, type LarkLaunchOptions 
 import { collectLarkTaskContext } from './task-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
-import { isLarkMemoryId, LarkMemoryStore, renderLarkMemoryList } from './memory.js';
+import { isLarkGroupMemoryPool, isLarkMemoryId, larkMemoryScope, LarkMemoryStore, renderLarkMemoryList } from './memory.js';
 import { LarkMemoryProjection, renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import type { LarkGroupManager } from './group-management.js';
@@ -1434,15 +1434,16 @@ export class LarkMessageCoordinator {
       if (route.command === 'grant' || route.command === 'revoke') {
         return await this.executeGrantCommand(route.command, event, config, route.argsText, replyCard);
       }
-      // 记忆命令的授权就是命令层的白名单门（发言人能在本聊天用命令，就能维护本聊天的记忆），
-      // 作用域固定为当前聊天，不接受参数指定别的群。
+      // 记忆命令的授权就是命令层的白名单门（发言人能在本聊天用命令，就能维护本聊天可见的记忆），
+      // 作用域由当前聊天决定：群聊是本机器人的群共享池，私聊是自己的池；不接受参数指定别的聊天。
       if (route.command === 'remember' || route.command === 'memory' || route.command === 'forget') {
         if (config.memoryEnabled === false) {
           await replyCard(`/${route.command} 未执行`, '本机器人已关闭会话记忆。', { failed: true });
           return 'handled';
         }
         const memory = this.memory!;
-        const scope = { appId: config.appId, chatId: event.chatId };
+        const scope = larkMemoryScope(config.appId, event.chatId, event.chatType);
+        const shared = isLarkGroupMemoryPool(scope);
         if (route.command === 'memory') {
           if (route.args[0] === 'consolidate') {
             // /memory 整体是只读命令，但 consolidate 会改写账本：这里单独挡住机器人发送者，
@@ -1470,11 +1471,13 @@ export class LarkMessageCoordinator {
               return 'handled';
             }
           }
-          const [byTopic, state] = await Promise.all([
+          const pipeline = this.workflowOptions.memory?.pipeline;
+          const [byTopic, state, status] = await Promise.all([
             memory.byTopic(scope),
-            memory.getState(scope)
+            memory.getState(scope),
+            pipeline ? pipeline.status(scope) : memory.status(scope)
           ]);
-          const result = renderLarkMemoryList(byTopic, state, { page });
+          const result = renderLarkMemoryList(byTopic, state, { page, shared, currentChatId: event.chatId, status });
           if (page !== undefined && page > result.totalPages) {
             await replyCard('/memory 未执行', `**页码超出范围，共 ${result.totalPages} 页。**\n\n发送 \`/memory 1\` 查看第一页。`, { failed: true });
             return 'handled';
@@ -1487,9 +1490,11 @@ export class LarkMessageCoordinator {
             await replyCard('/remember 未执行', '**用法：`/remember <要记住的内容>`**\n\n例如：`/remember 这个群的回复统一用中文`。', { failed: true });
             return 'handled';
           }
-          const entry = await memory.add(scope, { content: route.argsText, source: 'user', topic: 'general',
+          const entry = await memory.add(scope, { content: route.argsText, source: 'user', topic: 'general', chatId: event.chatId,
             ...(event.senderOpenId ? { createdBy: event.senderOpenId } : {}), messageId: event.messageId });
-          await replyCard('已记住', `**已保存为本聊天记忆 \`${entry.id}\`。**\n\n${larkCommandEcho(entry.content, 200)}\n\n之后本聊天的每轮任务都会带给 Agent。查看：\`/memory\`；删除：\`/forget ${entry.id}\`。`);
+          await replyCard('已记住', shared
+            ? `**已保存为群共享记忆 \`${entry.id}\`。**\n\n${larkCommandEcho(entry.content, 200)}\n\n之后本机器人所在各群的每轮任务都会带给 Agent（在其他群里作为背景）。查看：\`/memory\`；删除：\`/forget ${entry.id}\`。`
+            : `**已保存为本聊天记忆 \`${entry.id}\`。**\n\n${larkCommandEcho(entry.content, 200)}\n\n之后本聊天的每轮任务都会带给 Agent。查看：\`/memory\`；删除：\`/forget ${entry.id}\`。`);
           return 'handled';
         }
         const [id, ...extra] = route.args;
@@ -1499,7 +1504,7 @@ export class LarkMessageCoordinator {
         }
         const removed = await memory.remove(scope, id, event.senderOpenId);
         if (!removed) {
-          await replyCard('/forget 未执行', `**本聊天没有编号为 \`${id}\` 的记忆。**\n\n发送 \`/memory\` 查看当前记忆。`, { failed: true });
+          await replyCard('/forget 未执行', `**${shared ? '群共享记忆' : '本聊天'}没有编号为 \`${id}\` 的记忆。**\n\n发送 \`/memory\` 查看当前记忆。`, { failed: true });
           return 'handled';
         }
         await replyCard('已忘记', `**已删除记忆 \`${removed.id}\`。**\n\n${larkCommandEcho(removed.content, 200)}\n\n之后的任务不再带上这条记忆。`);
@@ -3331,15 +3336,17 @@ export class LarkMessageCoordinator {
     if (config.memoryEnabled !== false && this.workflowOptions.memory) {
       try {
         const { store, projection, command } = this.workflowOptions.memory;
-        const scope = { appId: config.appId, chatId: event.chatId };
+        const scope = larkMemoryScope(config.appId, event.chatId, event.chatType);
+        const shared = isLarkGroupMemoryPool(scope);
         const [entries, state] = await withLarkContextReadTimeout(Promise.all([
           store.list(scope),
           store.getState(scope)
         ]), '会话记忆读取');
-        const index = renderMemoryIndex(entries, state);
+        const index = renderMemoryIndex(entries, state, shared ? { currentChatId: event.chatId } : undefined);
         const memoryBlock = renderLarkMemoryInjection(index.text, {
           command: command ?? 'dutydeck',
-          directory: projection.directoryFor(scope)
+          directory: projection.directoryFor(scope),
+          shared
         });
         if (memoryBlock) injected.push(memoryBlock);
       } catch (error) {
@@ -3423,7 +3430,7 @@ export class LarkMessageCoordinator {
           // 记忆提取排在终态交付之后，且只记真实 dispatch 过的完成轮次；失败只留日志。
           const memoryPipeline = this.workflowOptions.memory?.pipeline;
           if (memoryPipeline && resolvedState === 'completed' && runtimeTaskId) {
-            void memoryPipeline.onTurnCompleted({ appId: config.appId, chatId: event.chatId }, { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: event.messageId })
+            void memoryPipeline.onTurnCompleted(larkMemoryScope(config.appId, event.chatId, event.chatType), { sessionId: session.id, taskId: runtimeTaskId, senderId: event.senderOpenId, senderKind: botSender ? 'bot' : 'human', sourceMessageId: event.messageId })
               .catch(error => this.log.warn({ error, appId: config.appId, chatId: event.chatId, taskId: runtimeTaskId }, '飞书会话记忆后台提取触发失败'));
           }
         })().catch(error => this.log.error({ error, taskId: task.id, runtimeTaskId }, '生成飞书任务终态失败'));

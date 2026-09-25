@@ -25,7 +25,7 @@ import { createAutomationIntegration } from './automation-integration.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
-import { LarkMemoryStore } from './lark/memory.js';
+import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
 import { getAuthToken, loadOrCreateAuthToken, tokensEqual } from './auth/auth.js';
@@ -358,9 +358,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         error: (obj, msg) => app?.log.error(obj, msg)
       }
     });
+    // 协作作用域都是群：读本机器人的群共享池，来源是别的群的条目标「其他群」。
     readCollaborationMemory = async scope => {
       const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === scope.appId);
-      return bot?.memoryEnabled === false ? '' : renderMemoryIndex(await memoryStore.list(scope), await memoryStore.getState(scope)).text;
+      const memoryScope = larkMemoryScope(scope.appId, scope.chatId, 'group');
+      return bot?.memoryEnabled === false ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
     };
     app = await buildApp(runtime, {
       recovery: { authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },

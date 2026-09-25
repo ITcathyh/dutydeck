@@ -11,10 +11,11 @@ import type { AgentConfig } from '@dutydeck/shared';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
-import { LarkMemoryStore } from './memory.js';
+import { larkMemoryScope, LarkMemoryStore } from './memory.js';
 import { LarkMemoryProjection } from './memory-view.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
+const groupPool = larkMemoryScope('cli_memory', 'oc_group', 'group');
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
 const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({
@@ -109,18 +110,19 @@ describe('Lark chat memory through the coordinator', () => {
     await h.coordinator.handle(event('om_empty', '/remember'), h.config);
     await h.waitCards(1);
     expect(h.lastCardText()).toContain('用法');
-    expect(await h.memoryStore.list({ appId: 'cli_memory', chatId: 'oc_group' })).toEqual([]);
+    expect(await h.memoryStore.list(groupPool)).toEqual([]);
 
     await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
     await h.waitCards(2);
     expect(h.lastCardText()).toContain('已记住');
     const id = h.lastCardText().match(/mem_[0-9a-f]{8}/)?.[0];
     expect(id).toBeDefined();
-    const stored = await h.memoryStore.list({ appId: 'cli_memory', chatId: 'oc_group' });
-    expect(stored).toEqual([expect.objectContaining({ id, content: '这个群的回复统一用中文', source: 'user', createdBy: 'ou_alice', messageId: 'om_remember', topic: 'general' })]);
+    const stored = await h.memoryStore.list(groupPool);
+    expect(stored).toEqual([expect.objectContaining({ id, content: '这个群的回复统一用中文', source: 'user', createdBy: 'ou_alice', messageId: 'om_remember', topic: 'general', chatId: 'oc_group' })]);
+    expect(h.lastCardText()).toContain('已保存为群共享记忆');
 
-    // 视图目录里出现 MEMORY.md
-    const memoryFilePath = join(h.cwd, 'memory', 'cli_memory', 'oc_group', 'MEMORY.md');
+    // 视图目录是本机器人的群共享池目录
+    const memoryFilePath = join(h.cwd, 'memory', 'cli_memory', 'groups', 'MEMORY.md');
     await vi.waitFor(async () => {
       const content = await readFile(memoryFilePath, 'utf8');
       expect(content).toContain('# 会话记忆索引');
@@ -129,9 +131,12 @@ describe('Lark chat memory through the coordinator', () => {
 
     await h.coordinator.handle(event('om_list', '/memory'), h.config);
     await h.waitCards(3);
-    expect(h.lastCardText()).toContain('共 1 条记忆 · 上次整理');
+    expect(h.lastCardText()).toContain('本机器人所在各群共享，共 1 条记忆 · 上次整理');
     expect(h.lastCardText()).toContain('**general（1 条）**');
     expect(h.lastCardText()).toContain(id!);
+    // 没有接入管线时状态取自存储：尚未运行、没有待提取轮次。
+    expect(h.lastCardText()).toContain('上次运行：尚未运行');
+    expect(h.lastCardText()).toContain('待提取 0 轮');
 
     // /memory 2 页码越界回执
     await h.coordinator.handle(event('om_page_overflow', '/memory 2'), h.config);
@@ -175,13 +180,80 @@ describe('Lark chat memory through the coordinator', () => {
     await vi.waitFor(() => expect(h.lastCardText()).toContain('没有编号为'));
     await h.coordinator.handle(event('om_forget', `/forget ${id}`), h.config);
     await vi.waitFor(() => expect(h.lastCardText()).toContain('已忘记'));
-    expect(await h.memoryStore.list({ appId: 'cli_memory', chatId: 'oc_group' })).toEqual([]);
+    expect(await h.memoryStore.list(groupPool)).toEqual([]);
 
     await h.coordinator.handle(event('om_task_2', '再看一下'), h.config);
     await h.waitPrompts(3);
     expect(h.prompts[2]).not.toContain('[Dutydeck 会话记忆');
     expect(h.prompts[2]).toContain('[用户请求]\n再看一下');
     expect(h.log.warn).not.toHaveBeenCalledWith(expect.anything(), '读取飞书会话记忆失败，本轮不注入记忆');
+  });
+
+  it('shares memory across the bot groups, marks other-group entries and keeps p2p chats separate', async () => {
+    const h = await harness();
+    const groupB = { chatId: 'oc_group_b', threadId: undefined, rootId: undefined };
+    const p2p = { chatId: 'oc_p2p', chatType: 'p2p', threadId: undefined, rootId: undefined, mentions: [] };
+    const cardWith = (text: string) => vi.waitFor(() => expect(h.cards.map(card => JSON.stringify(card)).find(card => card.includes(text))).toBeDefined());
+
+    await h.coordinator.handle(event('om_remember_a', '/remember 发布窗口是每周四下午'), h.config);
+    await cardWith('已保存为群共享记忆');
+
+    // 另一个群的任务带上 A 群记下的条目，并标出它来自其他群。
+    await h.coordinator.handle(event('om_task_b', '安排一下发布', groupB), h.config);
+    await h.waitPrompts(1);
+    expect(h.prompts[0]).toMatch(/\[mem_[0-9a-f]{8} · 用户 · \d{4}-\d{2}-\d{2} · 其他群\] 发布窗口是每周四下午/);
+    expect(h.prompts[0]).toContain('范围：这是本机器人所在各群共享的记忆');
+
+    await h.coordinator.handle(event('om_remember_b', '/remember 值班表在 wiki 首页', groupB), h.config);
+    await cardWith('值班表在 wiki 首页');
+    await h.coordinator.handle(event('om_list_b', '/memory', groupB), h.config);
+    await cardWith('本机器人所在各群共享，共 2 条记忆');
+    const listing = h.cards.map(card => JSON.stringify(card)).find(card => card.includes('本机器人所在各群共享，共 2 条记忆'))!;
+    expect(listing).toMatch(/ · 其他群 · 发布窗口是每周四下午/);
+    expect(listing).not.toMatch(/其他群 · 值班表在 wiki 首页/);
+
+    // 私聊既看不到群池，也不会把自己的记忆写进群池。
+    await h.coordinator.handle(event('om_p2p_task', '私聊任务', p2p), h.config);
+    await h.waitPrompts(2);
+    expect(h.prompts[1]).not.toContain('[Dutydeck 会话记忆');
+    await h.coordinator.handle(event('om_p2p_remember', '/remember 私聊里只给结论', p2p), h.config);
+    await cardWith('已保存为本聊天记忆');
+    expect((await h.memoryStore.list(groupPool)).map(entry => entry.content)).toEqual(['发布窗口是每周四下午', '值班表在 wiki 首页']);
+    expect((await h.memoryStore.list(larkMemoryScope('cli_memory', 'oc_p2p', 'p2p'))).map(entry => entry.content)).toEqual(['私聊里只给结论']);
+
+    await h.coordinator.handle(event('om_task_a', '再看一下'), h.config);
+    await h.waitPrompts(3);
+    expect(h.prompts[2]).toContain('值班表在 wiki 首页');
+    expect(h.prompts[2]).not.toContain('私聊里只给结论');
+    // A 群自己记下的条目不标「其他群」。
+    expect(h.prompts[2]).toMatch(/\[mem_[0-9a-f]{8} · 用户 · \d{4}-\d{2}-\d{2}\] 发布窗口是每周四下午/);
+  });
+
+  it('merges a legacy per-group ledger into the shared pool the first time that group is served', async () => {
+    const h = await harness();
+    // 旧版本按群保存的账本与状态，形状取自线上主服务。
+    await h.repos.config.set('lark.memory.cli_memory.oc_group', JSON.stringify({ v: 1, entries: [
+      { id: 'mem_2ac1ccb3', content: '排查或汇报问题时偏好先给一句话结论。', source: 'extraction', topic: 'conventions', createdAt: '2026-09-20T00:39:06.332Z', sessionId: 'ses_old', taskId: 'task_old' }
+    ] }));
+    await h.repos.config.set('lark.memory.state.cli_memory.oc_group', JSON.stringify({ v: 1, turnsSinceExtraction: 13, turnsSinceConsolidation: 16,
+      pendingTurns: [{ sessionId: 'ses_old', taskId: 'task_pending', completedAt: '2026-09-20T02:43:07.669Z', senderKind: 'human' }],
+      lastRun: { kind: 'consolidation', ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: 'MEMORY_RECOVERY_REQUIRED', at: '2026-09-24T09:51:41.447Z' } }));
+
+    // B 群先来：它不知道 A 群的旧账本，群池还是空的。
+    await h.coordinator.handle(event('om_task_b', 'B 群的任务', { chatId: 'oc_group_b', threadId: undefined, rootId: undefined }), h.config);
+    await h.waitPrompts(1);
+    expect(h.prompts[0]).not.toContain('[Dutydeck 会话记忆');
+
+    await h.coordinator.handle(event('om_task_a', 'A 群的任务'), h.config);
+    await h.waitPrompts(2);
+    expect(h.prompts[1]).toContain('[mem_2ac1ccb3 · 提取 · 2026-09-20] 排查或汇报问题时偏好先给一句话结论。');
+    expect(JSON.parse((await h.repos.config.get('lark.memory.cli_memory.oc_group'))!)).toMatchObject({ entries: [], migratedTo: 'groups' });
+    expect((await h.memoryStore.getState(groupPool)).pendingTurns?.map(turn => ({ taskId: turn.taskId, chatId: turn.chatId }))).toEqual([{ taskId: 'task_pending', chatId: 'oc_group' }]);
+    await vi.waitFor(async () => expect(await readFile(join(h.cwd, 'memory', 'cli_memory', 'groups', 'MEMORY.md'), 'utf8')).toContain('排查或汇报问题时偏好先给一句话结论。'));
+
+    await h.coordinator.handle(event('om_task_b2', 'B 群的第二个任务', { chatId: 'oc_group_b', threadId: undefined, rootId: undefined }), h.config);
+    await h.waitPrompts(3);
+    expect(h.prompts[2]).toContain('[mem_2ac1ccb3 · 提取 · 2026-09-20 · 其他群] 排查或汇报问题时偏好先给一句话结论。');
   });
 
   it('rejects memory commands and suppresses injection when memoryEnabled is false', async () => {
@@ -212,7 +284,7 @@ describe('Lark chat memory through the coordinator', () => {
     // 机器人发送者不能改写记忆：mutating 命令对 bot 操作者一律拒绝。
     await h.coordinator.handle(event('om_bot', '/remember 我是机器人', { senderType: 'app', senderOpenId: 'ou_peer' }), h.config);
     await vi.waitFor(() => expect(h.lastCardText()).toContain('未执行'));
-    expect(await h.memoryStore.list({ appId: 'cli_memory', chatId: 'oc_group' })).toEqual([]);
+    expect(await h.memoryStore.list(groupPool)).toEqual([]);
   });
 
   it('rejects credentials in /remember with failed receipt and does not persist to memory store', async () => {
@@ -221,7 +293,7 @@ describe('Lark chat memory through the coordinator', () => {
     await h.waitCards(1);
     expect(h.lastCardText()).toContain('"state":"failed"');
     expect(h.lastCardText()).toContain('记忆内容疑似包含凭据');
-    const stored = await h.memoryStore.list({ appId: 'cli_memory', chatId: 'oc_group' });
+    const stored = await h.memoryStore.list(groupPool);
     expect(stored).toEqual([]);
   });
 });

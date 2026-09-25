@@ -1,11 +1,13 @@
 /**
  * 会话记忆的 Agent 工具面：复用群协作工具的 capability token（Bearer）与路径前缀，
  * 因此走 app.ts 里同一条鉴权豁免规则；作用域由 token 绑定的会话决定，请求体不能指定别的聊天。
+ * 会话类型取自 capability 解析时按会话 sourceId（`<appId>:<chatId>:group|p2p:…`）重算的绑定：
+ * 群会话读写本机器人的群共享池，私聊会话只读写自己的池。
  */
 import type { FastifyInstance } from 'fastify';
 import { RuntimeError } from '@dutydeck/shared';
 import { agentGroupToolBearerToken, type LarkAgentToolsService } from './agent-tools.js';
-import { normalizeLarkMemoryTopic, type LarkMemoryStore } from './memory.js';
+import { larkMemoryScope, normalizeLarkMemoryTopic, type LarkMemoryStore } from './memory.js';
 
 export interface LarkMemoryToolsOptions {
   tools: Pick<LarkAgentToolsService, 'memoryContext'>;
@@ -20,7 +22,7 @@ export async function registerLarkMemoryTools(app: FastifyInstance, options: Lar
   const scopeFor = async (authorization?: string) => {
     const binding = await options.tools.memoryContext(agentGroupToolBearerToken(authorization));
     return {
-      scope: { appId: binding.appId, chatId: binding.chatId },
+      scope: larkMemoryScope(binding.appId, binding.chatId, binding.chatType),
       sessionId: binding.sessionId,
       actorId: options.runtime?.getActiveTaskContext(binding.sessionId)?.actorId
     };
@@ -69,6 +71,7 @@ export async function registerLarkMemoryTools(app: FastifyInstance, options: Lar
       content,
       source: 'agent',
       sessionId,
+      chatId: scope.chatId,
       ...(topic ? { topic } : {}),
       ...(actorId ? { createdBy: actorId } : {})
     });
@@ -79,7 +82,7 @@ export async function registerLarkMemoryTools(app: FastifyInstance, options: Lar
   app.delete<{ Params: { id: string } }>(`${larkMemoryToolsPath}/:id`, async request => {
     const { scope, actorId } = await scopeFor(request.headers.authorization);
     const removed = await options.store.remove(scope, request.params.id, actorId);
-    if (!removed) throw new RuntimeError('MEMORY_NOT_FOUND', `本聊天没有编号为 ${request.params.id} 的记忆。`, 404);
+    if (!removed) throw new RuntimeError('MEMORY_NOT_FOUND', `当前可见的记忆里没有编号为 ${request.params.id} 的条目。`, 404);
     return { chatId: scope.chatId, removed };
   });
 }
