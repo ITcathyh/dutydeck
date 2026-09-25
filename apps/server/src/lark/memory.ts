@@ -786,12 +786,25 @@ const memoryErrorLabels: Record<string, string> = {
 
 const formatTime = (iso: string) => iso.slice(0, 16).replace('T', ' ');
 
+function memoryErrorText(code: string): string | undefined {
+  return memoryErrorLabels[code];
+}
+
+/** 管线写进 lastRun.error 的错误码 → 状态与回执里的一句话说明。 */
+export function larkMemoryErrorLabel(error?: string): string {
+  if (!error) return '未知错误';
+  // 非 RuntimeError 时 lastRun.error 是原始报错文本，可能带路径等细节，不向外暴露。
+  if (!/^[A-Z][A-Z0-9_]*$/.test(error)) return '运行异常（详见服务日志）';
+  const text = memoryErrorText(error);
+  return text ? `${error}（${text}）` : '未知错误';
+}
+
 /** 接在「失败」后面的原因。 */
 function describeMemoryError(error?: string) {
   if (!error) return '，原因未记录';
   // 非 RuntimeError 时 lastRun.error 是原始报错文本，可能带路径等细节，不往聊天里贴。
   if (!/^[A-Z][A-Z0-9_]*$/.test(error)) return '，运行异常（详见服务日志）';
-  return ` \`${error}\`（${memoryErrorLabels[error] ?? '未知错误'}）`;
+  return ` \`${error}\`（${memoryErrorText(error) ?? '未知错误'}）`;
 }
 
 /** /memory 回执末尾的后台运行状态：上次运行及其结果、待提取轮次、上次提取与整理时间。 */
