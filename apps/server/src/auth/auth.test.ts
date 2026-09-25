@@ -733,7 +733,7 @@ describe('分享 token', () => {
       { method: 'GET', url: `/api/sessions/ses_2?share=${token}` },
       { method: 'GET', url: `/api/sessions/ses_2/events?share=${token}` },
       { method: 'GET', url: `/api/sessions/ses_1?share=${signSessionShareToken('forged-secret', 'ses_1')}` },
-      { method: 'GET', url: `/api/sessions/ses_1?share=${token.slice(0, -1)}A` },
+      { method: 'GET', url: `/api/sessions/ses_1?share=${token.slice(0, -1)}${token.endsWith('A') ? 'B' : 'A'}` },
       { method: 'GET', url: '/api/sessions/ses_1' },
       { method: 'GET', url: `/api/sessions/ses_1?share=${token}&share=${token}` },
       { method: 'GET', url: `/api/sessions?share=${token}` },
