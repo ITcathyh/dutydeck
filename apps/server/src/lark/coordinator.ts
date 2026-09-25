@@ -4,7 +4,7 @@ import { mergeGroupTaskWatermark } from './group-task-context.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { describeLarkTaskRecovery, larkRecoveryRetainedNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
-import { LarkWorkflowInteractions, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
+import { LarkWorkflowInteractions, deadlineText, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import { LarkTaskInbox, type LarkInboxRecord } from './task-inbox.js';
 import { parseLarkNewSession, validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext } from './task-context.js';
@@ -1306,18 +1306,19 @@ export class LarkMessageCoordinator {
       markdown: string,
       options: { elements?: LarkCardElement[]; failed?: boolean } = {}
     ) => {
-      await sendTaskCard(this.service, event, {
+      const card = await sendTaskCard(this.service, event, {
         state: options.failed ? 'failed' : 'completed', readOnly: true, retryable: false,
         taskId: event.messageId, taskName,
         markdown,
         ...(options.elements?.length ? { elements: options.elements } : {}),
         idempotencyKey: `cmd_${route.command}_${event.messageId}`.slice(0, 50),
         ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {})
-      }, this.log).catch(error => this.log.error({ error, messageId: event.messageId, command: route.command }, '发送飞书命令回执失败'));
+      }, this.log).catch(error => { this.log.error({ error, messageId: event.messageId, command: route.command }, '发送飞书命令回执失败'); return undefined; });
       // reaction 是「请求已接入」的回执，命令回执落地后必须撤销，避免两个状态并存。
       if (acknowledgementReactionId) {
         await this.service.deleteReaction(event.messageId, acknowledgementReactionId).catch(() => undefined);
       }
+      return card;
     };
 
     if (route.kind === 'correction') {
@@ -1351,7 +1352,7 @@ export class LarkMessageCoordinator {
     config: StoredLarkConfig,
     group: LarkGroup,
     scopeId: string,
-    replyCard: (taskName: string, markdown: string, options?: { elements?: LarkCardElement[]; failed?: boolean }) => Promise<void>,
+    replyCard: (taskName: string, markdown: string, options?: { elements?: LarkCardElement[]; failed?: boolean }) => Promise<{ messageId: string } | undefined>,
     acknowledgementReactionId?: string
   ): Promise<'handled' | string | LarkCommandPrompt> {
     // 最近一轮任务：/cancel 与 /retry 需要它，按插入顺序取该 group 的最后一个任务。
@@ -1429,7 +1430,18 @@ export class LarkMessageCoordinator {
       if (route.command === 'status') {
         const participation = event.chatType === 'group'
           ? await this.workflowOptions.participation?.describe({ appId: config.appId, chatId: event.chatId }).catch(() => undefined) : undefined;
-        await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation].filter(Boolean).join('\n\n'));
+        // 当前一轮停在审批上、后面还有指令排队时给一个拒绝入口：按钮与 /tasks 行内审批同形，
+        // 登记成任务导航卡后由 respond 照常做鉴权和一次性决议。
+        const approval = sessionId ? (await this.approvalBlock(config.appId, sessionId))?.record : undefined;
+        const card = await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation].filter(Boolean).join('\n\n'),
+          approval ? { elements: [{ tag: 'button', element_id: 'status_reject_approval', type: 'danger', text: { tag: 'plain_text', content: '拒绝这条审批' },
+            behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: approval.id, generation: approval.boot } }] }] } : {});
+        if (card && approval) {
+          await this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
+            messageId: event.messageId, chatId: event.chatId, chatType: event.chatType,
+            senderOpenId: event.senderOpenId, messageType: 'text', content: '', mentions: []
+          } satisfies LarkMessageEvent));
+        }
         return 'handled';
       }
       if (route.command === 'agents') {
@@ -1453,7 +1465,7 @@ export class LarkMessageCoordinator {
         const queued = (await this.runtime.getTasks!(sessionId)).filter(task => task.status === 'queued');
         const [action, argument, ...extra] = route.args;
         if (!action) {
-          const summary = renderQueueSummary(queued);
+          const summary = renderQueueSummary(queued, { blockedByApproval: queued.length > 0 && (await this.runtime.getPendingPermissions?.(sessionId) ?? []).length > 0 });
           // 摘要为卡片预算只列前几条，编号却一直有效：不写这句，第 6 条以后就成了看不见也够不着的死区。
           const hidden = queued.length > QUEUE_SUMMARY_MAX_ITEMS ? `上面只列出前 ${QUEUE_SUMMARY_MAX_ITEMS} 条，编号 ${QUEUE_SUMMARY_MAX_ITEMS + 1}-${queued.length} 同样可用。` : '';
           await replyCard('待执行指令', summary
@@ -1702,7 +1714,7 @@ export class LarkMessageCoordinator {
     event: LarkMessageEvent,
     config: StoredLarkConfig,
     argsText: string,
-    replyCard: (taskName: string, markdown: string, options?: { elements?: LarkCardElement[]; failed?: boolean }) => Promise<void>
+    replyCard: (taskName: string, markdown: string, options?: { elements?: LarkCardElement[]; failed?: boolean }) => Promise<unknown>
   ): Promise<'handled'> {
     const manager = this.groupManager;
     if (!manager || event.chatType !== 'group') throw new Error('只有群聊里才有可修改的对话授权。');
@@ -1959,10 +1971,17 @@ export class LarkMessageCoordinator {
         const running = tasks.filter(task => task.status === 'running').length;
         // 排队运行数与待执行指令数是两个口径，必须分开表达，不混用。
         const unresolved = tasks.filter(task => ['reconcile_required', 'legacy_unresolved'].includes(task.status));
-        lines.push(`**执行中的运行**：${running} 个　**待执行指令**：${queued} 条　**需要核对**：${unresolved.length} 条`);
+        const approval = queued ? await this.approvalBlock(config.appId, sessionId) : undefined;
+        lines.push(`**执行中的运行**：${running} 个　**待执行指令**：${queued} 条${approval ? '（被审批阻塞）' : ''}　**需要核对**：${unresolved.length} 条`);
+        if (approval) {
+          const deadline = approval.record?.expiresAt ? `，${deadlineText(approval.record.expiresAt)}截止，到时仍未处理将自动拒绝` : '';
+          lines.push(`**被审批阻塞**：当前一轮在等审批${deadline}。后面 ${queued} 条指令要等它处理完才会执行。${approval.record
+            ? '不需要这一步时，可以点下方「拒绝这条审批」放行队列。' : '请在审批卡或 Dutydeck Web 上处理这条审批。'}`);
+        }
         for (const task of [...unresolved, ...tasks.filter(task => task.status === 'queued')].slice(0, 3)) {
           const recovery = await describeLarkTaskRecovery(this.runtime, sessionId, task.id, task.status);
-          lines.push(`${larkCommandEcho(task.prompt, 80)}\n\n${recovery.markdown}`);
+          lines.push(`${larkCommandEcho(task.prompt, 80)}\n\n${approval && task.status === 'queued' && !recovery.blocked
+            ? '**被审批阻塞**\n\n前一轮在等审批，处理完后才会执行。' : recovery.markdown}`);
         }
       } catch (error) {
         this.log.warn({ error, sessionId }, '读取任务队列失败');
@@ -1970,6 +1989,19 @@ export class LarkMessageCoordinator {
     }
     if (latestTask) lines.push(`**最近一轮**：${larkCommandEcho(latestTask.state, 32)}`);
     return lines.join('\n\n');
+  }
+
+  /**
+   * 当前一轮停在执行端审批上、同一会话后面还有指令排队时，这些指令都被这条审批挡住。
+   * record 是本进程发出的审批卡记录（卡片尚未送达或审批只在 Web 上时没有），供「拒绝这条审批」入口使用。
+   */
+  private async approvalBlock(appId: string, sessionId: string) {
+    if (!(await this.runtime.getTasks?.(sessionId))?.some(task => task.status === 'queued')) return undefined;
+    const permissions = await this.runtime.getPendingPermissions?.(sessionId) ?? [];
+    if (!permissions.length) return undefined;
+    const record = (await this.workflows?.list(appId))?.find(item => item.kind === 'permission' && item.state === 'pending' && item.sessionId === sessionId
+      && item.boot === this.workflows?.boot && permissions.some(permission => permission.id === item.nativeId));
+    return { record };
   }
 
   /**
@@ -3861,7 +3893,9 @@ export class LarkMessageCoordinator {
             // 不过滤会把自己计入「排队 N 条」，与排队 PATCH 使用的 queuedAhead 口径不一致。
             const queuedTasks = (await this.runtime.getTasks(task.sessionId))
               .filter(item => item.status === 'queued' && item.id !== task.runtimeTaskId);
-            const queueSummary = renderQueueSummaryElement(queuedTasks);
+            // 当前一轮停在审批上时，排队的都要等它处理完，摘要标题写明被审批阻塞。
+            const blockedByApproval = queuedTasks.length > 0 && (await this.runtime.getPendingPermissions?.(task.sessionId) ?? []).length > 0;
+            const queueSummary = renderQueueSummaryElement(queuedTasks, { blockedByApproval });
             if (queueSummary) frameNotes.push(queueSummary);
           } catch (error) {
             this.log.warn({ error, taskId: task.id }, '读取排队摘要失败，本帧跳过排队摘要');

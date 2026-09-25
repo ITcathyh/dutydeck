@@ -103,7 +103,7 @@ function sameDraftContent(left: BotDraft, right: BotDraft): boolean {
 /** 能当 Leader 的 Agent：旧版 PTY 不行；终端模式没有 deny-all，要机器人和该 Agent 都是完全信任。与服务端保存校验一致。 */
 function leaderUsable(agent: Agent, bot: LarkBotConfig): boolean {
   if (agent.protocol === 'pty') return false;
-  return agent.protocol !== 'pty-cli' || (agent.permissionMode === 'full-trust' && bot.permissionMode !== 'ask');
+  return agent.protocol !== 'pty-cli' || (agent.permissionMode === 'full-trust' && bot.permissionMode !== 'ask' && bot.permissionMode !== 'approve-reads');
 }
 
 function formatMemoryTime(iso?: string): string {

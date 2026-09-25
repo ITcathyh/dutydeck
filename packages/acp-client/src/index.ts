@@ -253,7 +253,9 @@ export class AcpxAdapter implements AgentDriver {
         }
         if (this.permissionMode === 'full-trust') return { outcome: 'allow_once' };
         if (this.permissionMode === 'deny-all') return { outcome: 'reject_once' };
-        if (this.permissionMode === 'approve-reads' && /read|search|fetch/i.test(String(request.inferredKind ?? ''))) return { outcome: 'allow_once' };
+        // 只读判定从严，只认执行端自己声明的 read / search：acpx 在缺 kind 时按标题首词猜（「Read and delete」也会猜成 read），
+        // fetch 会把内容带到外部地址，都不算只读，照常审批。
+        if (this.permissionMode === 'approve-reads' && ['read', 'search'].includes(String(raw.toolCall?.kind ?? ''))) return { outcome: 'allow_once' };
         return new Promise<AcpPermissionDecision>(resolve => {
           this.pendingPermissions.set(id, resolve);
           this.idleWatch?.refresh();

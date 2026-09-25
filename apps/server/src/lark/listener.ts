@@ -17,6 +17,7 @@ import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
 import { describeWebBaseUrlReachability, larkExecutionConfirmed } from './config.js';
 import { buildEditedMessageEvent } from './edited-message.js';
+import { LarkCardCallbackDeduper, larkCardCallbackKeys } from './card-callback-dedup.js';
 import type { LoginLinkStore } from '../auth/auth.js';
 
 // 飞书长连接监听：只负责 WebSocket 事件接入、事件组装与协调器装配。
@@ -115,6 +116,7 @@ export class LarkLongConnectionListener implements LarkListener {
   private welcome?: LarkWelcomeService;
   private credentials?: string;
   private config?: StoredLarkConfig;
+  private readonly cardCallbacks = new LarkCardCallbackDeduper();
   listening = false;
 
   constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}) {}
@@ -237,7 +239,8 @@ export class LarkLongConnectionListener implements LarkListener {
           this.log.error({ error, messageId: message.message_id, chatId: message.chat_id }, '处理飞书消息事件失败');
         });
       },
-      'card.action.trigger': async (event: any) => {
+      // 平台重复推送的同一次点击只处理一次，重推直接返回第一次的结果。
+      'card.action.trigger': (event: any) => this.cardCallbacks.run(larkCardCallbackKeys(event), async () => {
         const operatorOpenId = event.operator?.open_id;
         // JSON 2.0 表单（结构化问答的多选/自由文本、workbench 步骤答题）提交值在 form_value，
         // 按钮回调值在 action.value；合并后下游统一读 value，表单值挂在 value.form_value。
@@ -254,7 +257,7 @@ export class LarkLongConnectionListener implements LarkListener {
         });
         if (!result) return;
         return { toast: result };
-      },
+      }),
       // bot 被拉入群：发一次入群欢迎卡（welcome 内部 kv 去重，重复事件/重启不重发）。
       // 存量应用需先经 /repair 增量订阅该事件并发布通过审核后才能收到。
       'im.chat.member.bot.added_v1': (event: any) => {

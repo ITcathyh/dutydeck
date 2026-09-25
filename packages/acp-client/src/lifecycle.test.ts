@@ -447,3 +447,48 @@ describe('ACP instance revocation', () => {
     await expect(adapter.start()).rejects.toThrow(/stopped/i);
   });
 });
+
+describe('approve-reads 只读判定', () => {
+  const request = (toolCallId: string, toolCall: Record<string, unknown>, inferredKind?: string) => ({ ...(inferredKind ? { inferredKind } : {}), raw: { toolCall: { toolCallId, ...toolCall } } });
+  const settledNow = (decision: Promise<unknown>) => Promise.race([decision, new Promise(resolve => setImmediate(() => resolve('pending')))]);
+
+  it('只放行执行端声明为 read / search 的请求，其余照常等待审批', async () => {
+    const { runtime, events } = await setup({ permissionMode: 'approve-reads' });
+    expect(await settledNow(runtime.options.onPermissionRequest(request('declared_read', { kind: 'read', title: 'Read src/index.ts' }, 'read')))).toEqual({ outcome: 'allow_once' });
+    expect(await settledNow(runtime.options.onPermissionRequest(request('declared_search', { kind: 'search', title: 'Grep TODO' }, 'search')))).toEqual({ outcome: 'allow_once' });
+    const held = [
+      // 缺 kind 时 acpx 按标题猜出 read，不算执行端声明。
+      request('guessed_read', { title: 'Read and delete: config.json' }, 'read'),
+      request('declared_fetch', { kind: 'fetch', title: 'Fetch https://example.com' }, 'fetch'),
+      request('declared_execute', { kind: 'execute', title: 'cat README.md' }, 'execute'),
+      request('declared_edit', { kind: 'edit', title: 'Write result.txt' }, 'edit'),
+      request('unknown', { title: 'Check status' })
+    ];
+    for (const item of held) expect(await settledNow(runtime.options.onPermissionRequest(item))).toBe('pending');
+    expect(events.filter(event => event.type === 'permission_request' && event.data.status === 'pending').map(event => event.data.id))
+      .toEqual(['guessed_read', 'declared_fetch', 'declared_execute', 'declared_edit', 'unknown']);
+  });
+
+  it('其余声明类型和大小写变体都不放行；声明为 read / search 时不再看标题', async () => {
+    const { runtime, events } = await setup({ permissionMode: 'approve-reads' });
+    const held = ['delete', 'move', 'think', 'switch_mode', 'other', 'Read', 'READ', ' read', 'read_file', 'search,execute']
+      .map(kind => request(`kind_${kind}`, { kind, title: 'Read config.json' }, kind));
+    for (const item of held) expect(await settledNow(runtime.options.onPermissionRequest(item))).toBe('pending');
+    expect(events.filter(event => event.data.status === 'pending')).toHaveLength(held.length);
+    // 只认执行端声明的 kind：声明为 read 的即使标题像写操作也放行，标题只进高危正则检查。
+    expect(await settledNow(runtime.options.onPermissionRequest(request('declared_read_titled_write', { kind: 'read', title: 'Write result.txt' }, 'read')))).toEqual({ outcome: 'allow_once' });
+  });
+
+  it('高危正则先于只读放行：命中的只读请求直接拒绝', async () => {
+    const { adapter, runtime, events } = await setup({ permissionMode: 'approve-reads' });
+    adapter.setRiskPolicy({ enabled: true, authorized: false, pattern: 'id_rsa' });
+    expect(await runtime.options.onPermissionRequest(request('risky_read', { kind: 'read', title: 'Read ~/.ssh/id_rsa' }, 'read'))).toEqual({ outcome: 'reject_once' });
+    expect(events).toEqual([expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'risky_read', status: 'rejected' }) })]);
+  });
+
+  it('ask 模式下声明为 read 的请求也要审批', async () => {
+    const { runtime, events } = await setup({ permissionMode: 'ask' });
+    expect(await settledNow(runtime.options.onPermissionRequest(request('ask_read', { kind: 'read', title: 'Read file' }, 'read')))).toBe('pending');
+    expect(events).toEqual([expect.objectContaining({ type: 'permission_request', data: expect.objectContaining({ id: 'ask_read', status: 'pending' }) })]);
+  });
+});
