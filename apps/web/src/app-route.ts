@@ -105,6 +105,21 @@ const routePath = (route: AppRoute): string =>
 
 export const sessionPath = (id?: string) => id ? `/sessions/${encodeURIComponent(id)}` : '/';
 
+/**
+ * 飞书卡片「查看详情」打开的只读分享页：`/share/<会话 ID>#<分享 token>`。
+ * 它不是工作台里的一个路由，而是另一个入口：没有侧栏、任务列表和设置，也链不回工作台。
+ * token 在 # 片段里，不随页面请求发给服务端。
+ */
+export const sharedSessionFromLocation = (pathname: string, hash: string): { sessionId: string; token: string } | undefined => {
+  const match = pathname.match(/^\/share\/([^/]+)$/);
+  if (!match?.[1]) return undefined;
+  // 片段缺失或被截断时 token 为空串：仍然是分享页，只是读不到内容，不会落到工作台的登录页。
+  const token = hash.replace(/^#/, '');
+  let sessionId = match[1];
+  try { sessionId = decodeURIComponent(sessionId); } catch { /* 保留原样，服务端会按不存在处理 */ }
+  return { sessionId, token: /^[A-Za-z0-9_-]+$/.test(token) ? token : '' };
+};
+
 /** 反向序列化。route 为 not-found 时无法还原原始路径，调用方不应对它做导航。 */
 export const appLocationPath = ({ route, nav, appId, chatId, overlay }: AppLocation): string => {
   const base = routePath(route);

@@ -8,6 +8,8 @@ export interface CliOptions {
   host?: string;
   localOnly?: boolean;
   auth?: boolean;
+  /** `--unsafe-no-auth`：在非回环地址上关掉认证，并确认接受这个风险。 */
+  unsafeNoAuth?: boolean;
   port?: string;
   cwd?: string;
   database?: string;
@@ -96,6 +98,10 @@ export interface AuthTokenCliOptions {
   rotate?: boolean;
 }
 
+export interface AuthPasswordSetCliOptions {
+  generate?: boolean;
+}
+
 export interface LegacySourceCliOptions {
   sourceHome?: string;
   botsConfig?: string;
@@ -169,6 +175,8 @@ export interface CliHandlers {
   daemonStatus?(options: DoctorCliOptions): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
   authToken?(options: AuthTokenCliOptions): void | Promise<void>;
+  authPasswordSet?(options: AuthPasswordSetCliOptions): void | Promise<void>;
+  authShareKeyRotate?(): void | Promise<void>;
   legacyDiscover?(options: LegacySourceCliOptions): void | Promise<void>;
   legacyPlan?(options: LegacySourceCliOptions): void | Promise<void>;
   legacyArchive?(options: LegacyArchiveCliOptions): void | Promise<void>;
@@ -241,6 +249,7 @@ const addServerOptions = (command: Command) => command
   .option('--local-only', 'Only accept connections from this computer (127.0.0.1)')
   .option('--auth', 'Require access-token authentication on non-local listeners (default)')
   .option('--no-auth', 'Explicitly disable Dutydeck access-token authentication (trusted networks only)')
+  .option('--unsafe-no-auth', 'Disable authentication even on a non-loopback address; without it such a listener refuses to start')
   .option('--port <port>', 'Bind port (default: 4310)')
   .option('--cwd <directory>', 'Default Agent working directory')
   .option('--database <file>', 'SQLite database path')
@@ -719,6 +728,15 @@ Examples:
     .description('Print the access token for remote API access (generates one on first use)')
     .option('--rotate', 'Generate a new token, invalidating the previous one')
     .action(options => handlers.authToken?.(options));
+  auth.command('password').description('Manage the dashboard password used by browsers')
+    .command('set')
+    .description('Set or reset the dashboard password (reads stdin, or prompts twice on a terminal); only a scrypt hash is stored')
+    .option('--generate', 'Generate a random password and print it once')
+    .action(options => handlers.authPasswordSet?.(options));
+  auth.command('share-key').description('Manage the key that signs Feishu card share links')
+    .command('rotate')
+    .description('Rotate the share-link signing key; every previously sent share link stops working')
+    .action(() => handlers.authShareKeyRotate?.());
 
   const database = program.command('database').description('Inspect and upgrade Dutydeck execution database ledger');
   database.command('execution-status')
@@ -831,6 +849,9 @@ Examples:
   $ dutydeck update --dist-tag fix
   $ dutydeck auth token
   $ dutydeck auth token --rotate
+  $ dutydeck auth password set
+  $ dutydeck auth password set --generate
+  $ dutydeck auth share-key rotate
   $ dutydeck stop
   $ dutydeck daemon start --port 4310
   $ dutydeck daemon status
@@ -865,6 +886,10 @@ export function environmentFromCli(options: CliOptions, base: NodeJS.ProcessEnv 
   if (options.host !== undefined) env.DUTYDECK_HOST = options.host;
   if (options.localOnly === true) env.DUTYDECK_LOCAL_ONLY = 'true';
   if (options.auth !== undefined) env.DUTYDECK_AUTH = String(options.auth);
+  if (options.unsafeNoAuth === true) {
+    env.DUTYDECK_AUTH = 'false';
+    env.DUTYDECK_UNSAFE_NO_AUTH = 'true';
+  }
   if (options.port !== undefined) env.DUTYDECK_PORT = options.port;
   if (options.cwd !== undefined) env.DUTYDECK_DEFAULT_CWD = options.cwd;
   if (options.database !== undefined) env.DUTYDECK_DATABASE_URL = options.database;

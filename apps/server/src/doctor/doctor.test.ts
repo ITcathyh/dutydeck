@@ -618,7 +618,8 @@ describe('access.posture / access.token', () => {
     expect(check.level).toBe('fail');
     expect(check.detail).toContain('0.0.0.0');
     expect(check.remedy).toMatch(/认证|本机/);
-    expect(check.command).toBeTruthy();
+    expect(check.remedy).toContain('拒绝启动');
+    expect(check.command).toBe('dutydeck auth password set');
   });
 
   it('任意非回环 host 同样按 open 处理', async () => {

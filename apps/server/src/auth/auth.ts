@@ -1,10 +1,16 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import type { FastifyInstance, FastifyReply, FastifyRequest, RouteShorthandOptions } from 'fastify';
 import type { ConfigRepository } from '@dutydeck/shared';
 
 /** token 在 configs 表中的 key */
 export const AUTH_TOKEN_CONFIG_KEY = 'auth.accessToken';
 export const AUTH_COOKIE_NAME = 'dutydeck_access';
+/** 访问密码的 scrypt 哈希在 configs 表中的 key；明文不落盘 */
+export const AUTH_PASSWORD_CONFIG_KEY = 'auth.passwordHash';
+/** 飞书卡片分享链接的签名密钥在 configs 表中的 key */
+export const SHARE_LINK_SECRET_CONFIG_KEY = 'auth.shareLinkSecret';
+/** 分享 token 放在查询串的这个参数里：EventSource 带不了自定义请求头 */
+export const SHARE_TOKEN_QUERY_KEY = 'share';
 
 /** 32 随机字节 base64url（43 字符，无填充） */
 export function generateAuthToken(): string {
@@ -74,6 +80,127 @@ export function tokensEqual(a: string, b: string): boolean {
   const bufB = Buffer.from(b);
   if (bufA.length !== bufB.length) return false;
   return timingSafeEqual(bufA, bufB);
+}
+
+const PASSWORD_SCRYPT = { N: 16384, r: 8, p: 1 } as const;
+const scryptKey = (password: string, salt: Buffer, length: number, options: ScryptOptions) =>
+  new Promise<Buffer>((resolve, reject) => scrypt(password, salt, length, options, (error, key) => error ? reject(error) : resolve(key)));
+
+/** 访问密码最短长度 */
+export const MIN_PASSWORD_LENGTH = 8;
+
+/** scrypt 哈希，存成 `scrypt$N$r$p$<salt>$<key>`（base64url）；参数随哈希保存，日后调参不影响旧哈希 */
+export async function hashPassword(password: string): Promise<string> {
+  const salt = randomBytes(16);
+  const key = await scryptKey(password, salt, 32, PASSWORD_SCRYPT);
+  return ['scrypt', PASSWORD_SCRYPT.N, PASSWORD_SCRYPT.r, PASSWORD_SCRYPT.p, salt.toString('base64url'), key.toString('base64url')].join('$');
+}
+
+/** 按哈希里记录的参数重算后 timing-safe 比对；格式不认识一律 false */
+export async function verifyPassword(password: string, stored: string): Promise<boolean> {
+  const [scheme, N, r, p, salt, key] = stored.split('$');
+  if (scheme !== 'scrypt' || !salt || !key) return false;
+  const expected = Buffer.from(key, 'base64url');
+  if (expected.length < 16) return false;
+  try {
+    return timingSafeEqual(await scryptKey(password, Buffer.from(salt, 'base64url'), expected.length, { N: Number(N), r: Number(r), p: Number(p) }), expected);
+  } catch {
+    return false;
+  }
+}
+
+/** 读取访问密码哈希；未设置返回 null */
+export async function getPasswordHash(configs: ConfigRepository): Promise<string | null> {
+  const stored = (await configs.get(AUTH_PASSWORD_CONFIG_KEY))?.trim();
+  return stored ? stored : null;
+}
+
+/** 随机访问密码：18 随机字节 base64url（24 字符） */
+export function generatePassword(): string {
+  return randomBytes(18).toString('base64url');
+}
+
+export interface AuthPasswordCommandResult {
+  passwordSet: true;
+  /** 只在 --generate 时出现，且只出现这一次 */
+  password?: string;
+}
+
+/**
+ * `dutydeck auth password set` 的处理器：只存 scrypt 哈希。
+ * 重设密码会换盐，之前用密码登录的浏览器会话随即失效。
+ */
+export async function runAuthPasswordSetCommand(
+  configs: ConfigRepository,
+  options: { generate?: boolean; readPassword(): Promise<string> },
+): Promise<AuthPasswordCommandResult> {
+  const password = options.generate ? generatePassword() : await options.readPassword();
+  if (password.length < MIN_PASSWORD_LENGTH) throw new Error(`访问密码至少 ${MIN_PASSWORD_LENGTH} 个字符，未修改。`);
+  await configs.set(AUTH_PASSWORD_CONFIG_KEY, await hashPassword(password));
+  return options.generate ? { passwordSet: true, password } : { passwordSet: true };
+}
+
+/** 密码登录发出的浏览器会话有效期，与 cookie 的 Max-Age 一致 */
+const BROWSER_SESSION_MAX_AGE_MS = 2592000 * 1000;
+
+const browserSessionMac = (passwordHash: string, issuedAt: string) =>
+  createHmac('sha256', passwordHash).update(`dutydeck-browser-session-v1\0${issuedAt}`).digest('base64url');
+
+/**
+ * 密码登录后写进 cookie 的会话值 `pw.<签发时刻>.<HMAC>`，以当前密码哈希为钥。
+ * cookie 里既没有密码也没有哈希；重设密码后之前签发的会话全部失效。
+ */
+export function issueBrowserSession(passwordHash: string, now = Date.now()): string {
+  const issuedAt = now.toString(36);
+  return `pw.${issuedAt}.${browserSessionMac(passwordHash, issuedAt)}`;
+}
+
+export function verifyBrowserSession(value: string, passwordHash: string | null, now = Date.now()): boolean {
+  const [kind, issuedAt, mac, ...rest] = value.split('.');
+  if (!passwordHash || kind !== 'pw' || !issuedAt || !mac || rest.length) return false;
+  const issued = Number.parseInt(issuedAt, 36);
+  if (!Number.isSafeInteger(issued) || issued > now + 60_000 || now - issued > BROWSER_SESSION_MAX_AGE_MS) return false;
+  return tokensEqual(mac, browserSessionMac(passwordHash, issuedAt));
+}
+
+/** 访问凭据是否有效：access token（Bearer 或 cookie），或密码登录签发的会话 cookie */
+export async function isValidAccessCredential(
+  presented: string | undefined,
+  getToken: () => Promise<string | null>,
+  getPasswordHash?: () => Promise<string | null>,
+): Promise<boolean> {
+  if (!presented) return false;
+  const token = await getToken();
+  if (token && tokensEqual(presented, token)) return true;
+  return presented.startsWith('pw.') && verifyBrowserSession(presented, await getPasswordHash?.() ?? null);
+}
+
+/** 读取分享链接签名密钥；不存在返回 null，不自动创建 */
+export async function getShareLinkSecret(configs: ConfigRepository): Promise<string | null> {
+  const stored = (await configs.get(SHARE_LINK_SECRET_CONFIG_KEY))?.trim();
+  return stored ? stored : null;
+}
+
+export async function loadOrCreateShareLinkSecret(configs: ConfigRepository): Promise<string> {
+  const existing = await getShareLinkSecret(configs);
+  if (existing) return existing;
+  const created = randomBytes(32).toString('base64url');
+  await configs.set(SHARE_LINK_SECRET_CONFIG_KEY, created);
+  return created;
+}
+
+/** `dutydeck auth share-key rotate`：换签名密钥，之前发出的分享链接全部失效 */
+export async function runShareKeyRotateCommand(configs: ConfigRepository): Promise<{ rotated: true }> {
+  await configs.set(SHARE_LINK_SECRET_CONFIG_KEY, randomBytes(32).toString('base64url'));
+  return { rotated: true };
+}
+
+/**
+ * 分享 token = HMAC(密钥, 会话 ID)。同一会话同一密钥总是同一串，所以链接不过期；
+ * 换一个会话 ID 算出来的就不是这一串，持有者只能读绑定的那一个会话。
+ */
+export function signSessionShareToken(secret: string, sessionId: string): string {
+  return createHmac('sha256', secret).update(`dutydeck-session-share-v1\0${sessionId}`).digest('base64url');
 }
 
 /** 从 Authorization 头提取 Bearer token；缺失或格式不对返回 undefined */
@@ -146,9 +273,56 @@ export interface AuthMiddlewareOptions {
   exempt?: (method: string, pathname: string) => boolean;
   /** 飞书卡片换发的一次性登录链接；只在 token 模式下提供 */
   loginLinks?: LoginLinkStore;
+  /** 访问密码哈希（null = 未设置）。设置后浏览器用密码登录 */
+  getPasswordHash?(): Promise<string | null>;
+  /** 分享链接签名密钥；提供时单个会话的读接口凭分享 token 放行 */
+  getShareSecret?(): Promise<string | null>;
+  /** 登录失败限流；不传则每个 app 自建一个 */
+  loginThrottle?: LoginThrottle;
 }
 
-export type BrowserAuthState = { authenticated: boolean; required: boolean };
+export type BrowserAuthState = { authenticated: boolean; required: boolean; password?: boolean };
+
+/**
+ * 登录失败限流：同一来源地址连续失败 maxFailures 次后锁定 lockMs；距上次失败超过 lockMs 重新计数，
+ * 成功即清零。只记在内存里，进程重启清空。
+ */
+export class LoginThrottle {
+  private readonly failures = new Map<string, { count: number; until: number }>();
+
+  constructor(private readonly now: () => number = Date.now, private readonly maxFailures = 5, private readonly lockMs = 60_000) {}
+
+  /** 还在锁定期内返回剩余毫秒，否则 0 */
+  retryAfter(key: string): number {
+    const entry = this.failures.get(key);
+    return entry && entry.count >= this.maxFailures ? Math.max(0, entry.until - this.now()) : 0;
+  }
+
+  fail(key: string): void {
+    const now = this.now();
+    for (const [other, entry] of this.failures) if (entry.until <= now) this.failures.delete(other);
+    const count = (this.failures.get(key)?.count ?? 0) + 1;
+    this.failures.set(key, { count, until: now + this.lockMs });
+  }
+
+  succeed(key: string): void {
+    this.failures.delete(key);
+  }
+}
+
+/** 分享页能读的接口：单个会话的详情、事件、任务和实时流，只读 */
+const SHARED_SESSION_READ_ROUTES = new Set(['/api/sessions/:id', '/api/sessions/:id/events', '/api/sessions/:id/tasks', '/api/sessions/:id/stream']);
+
+/** GET 上述路由且查询串带着为路由里这个会话 ID 签发的分享 token */
+async function isSharedSessionRead(request: FastifyRequest, options: AuthMiddlewareOptions): Promise<boolean> {
+  if (!options.getShareSecret || (request.method !== 'GET' && request.method !== 'HEAD')) return false;
+  if (!SHARED_SESSION_READ_ROUTES.has(request.routeOptions.url ?? '')) return false;
+  const token = (request.query as Record<string, unknown> | undefined)?.[SHARE_TOKEN_QUERY_KEY];
+  const sessionId = (request.params as { id?: unknown } | undefined)?.id;
+  if (typeof token !== 'string' || !token || typeof sessionId !== 'string' || !sessionId) return false;
+  const secret = await options.getShareSecret();
+  return Boolean(secret) && tokensEqual(token, signSessionShareToken(secret!, sessionId));
+}
 
 const accessMode = (options: AuthMiddlewareOptions): 'local' | 'token' | 'open' =>
   options.mode ?? (options.localOnly ? 'local' : 'token');
@@ -192,8 +366,9 @@ export function isLoopbackHost(host: string | undefined): boolean {
  * 注册访问认证中间件（Fastify onRequest hook）。判定顺序：
  * 1. localOnly → 仅 loopback Host 且（若有）Origin 精确同源时放行
  * 2. exempt(method, pathname) 为 true → 放行
- * 3. 否则取 presented token（Authorization: Bearer 头或 HttpOnly cookie），
- *    与 getToken() 的当前 token 做 timing-safe 比对；未配置/缺失/不匹配 → 401
+ * 3. 单个会话的读接口带着绑定该会话的分享 token → 放行
+ * 4. 否则取 presented token（Authorization: Bearer 头或 HttpOnly cookie），
+ *    与 getToken() 的当前 token 做 timing-safe 比对，cookie 也可以是密码登录签发的会话；未配置/缺失/不匹配 → 401
  */
 export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddlewareOptions): void {
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -217,14 +392,13 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
     }
     const pathname = new URL(request.url, 'http://dutydeck.local').pathname;
     if (options.exempt?.(request.method, pathname)) return;
+    if (await isSharedSessionRead(request, options)) return;
     const bearer = extractBearerToken(request.headers.authorization);
     const cookie = extractCookie(request.headers.cookie);
     if (!bearer && cookie && !isSameOriginRequest(request.headers, request.protocol)) {
       return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dutydeck' } });
     }
-    const presented = bearer ?? cookie;
-    const token = await options.getToken();
-    if (!token || !presented || !tokensEqual(presented, token)) {
+    if (!await isValidAccessCredential(bearer ?? cookie, options.getToken, options.getPasswordHash)) {
       return reply.code(401).send(UNAUTHORIZED_PAYLOAD);
     }
   });
@@ -256,25 +430,45 @@ const cookieAttributes = (request: FastifyRequest, clear = false) => {
  * WebSocket upgrades authenticate without exposing it in URLs or JavaScript.
  */
 export function registerBrowserAuthRoutes(app: FastifyInstance, options: AuthMiddlewareOptions): void {
+  const throttle = options.loginThrottle ?? new LoginThrottle();
+  // 设了访问密码，登录页就要密码；password 只在设了时出现，不透露别的。
+  const passwordFlag = (passwordHash: string | null) => passwordHash ? { password: true } : {};
+
   app.get('/api/auth/status', async (request, reply): Promise<BrowserAuthState> => {
     reply.header('Cache-Control', 'no-store');
     const required = browserAuthRequired(request, options);
     if (!required) return { authenticated: true, required: false };
-    const expected = await options.getToken();
-    const presented = requestToken(request);
-    return { authenticated: Boolean(expected && presented && tokensEqual(presented, expected)), required: true };
+    const passwordHash = await options.getPasswordHash?.() ?? null;
+    const authenticated = await isValidAccessCredential(requestToken(request), options.getToken, async () => passwordHash);
+    return { authenticated, required: true, ...passwordFlag(passwordHash) };
   });
 
-  app.post<{ Body: { token?: unknown } }>('/api/auth/login', async (request, reply) => {
+  // 密码或 access token 都能登录。同一来源连续失败会被锁定一段时间，锁定期内不再校验。
+  app.post<{ Body: { token?: unknown; password?: unknown } }>('/api/auth/login', async (request, reply) => {
     reply.header('Cache-Control', 'no-store');
     if (!browserAuthRequired(request, options)) return { authenticated: true, required: false } satisfies BrowserAuthState;
-    const expected = await options.getToken();
+    const retryAfter = throttle.retryAfter(request.ip);
+    if (retryAfter > 0) {
+      const seconds = Math.ceil(retryAfter / 1000);
+      return reply.code(429).header('Retry-After', String(seconds))
+        .send({ error: { code: 'LOGIN_RATE_LIMITED', message: `登录失败次数过多，请 ${seconds} 秒后再试` } });
+    }
+    const passwordHash = await options.getPasswordHash?.() ?? null;
+    const password = typeof request.body?.password === 'string' ? request.body.password : '';
     const presented = typeof request.body?.token === 'string' ? request.body.token.trim() : '';
-    if (!expected || !presented || !tokensEqual(presented, expected)) {
+    let session: string | undefined;
+    if (password && passwordHash && await verifyPassword(password, passwordHash)) session = issueBrowserSession(passwordHash);
+    else if (presented) {
+      const expected = await options.getToken();
+      if (expected && tokensEqual(presented, expected)) session = presented;
+    }
+    if (!session) {
+      throttle.fail(request.ip);
       return reply.code(401).send(UNAUTHORIZED_PAYLOAD);
     }
-    reply.header('Set-Cookie', cookieAttributes(request).replace('__VALUE__', presented));
-    return { authenticated: true, required: true } satisfies BrowserAuthState;
+    throttle.succeed(request.ip);
+    reply.header('Set-Cookie', cookieAttributes(request).replace('__VALUE__', session));
+    return { authenticated: true, required: true, ...passwordFlag(passwordHash) } satisfies BrowserAuthState;
   });
 
   // 过期、已用、伪造的码一律回同一页，不区分原因，也不回显码。

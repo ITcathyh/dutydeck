@@ -50,6 +50,26 @@ describe('Dutydeck CLI', () => {
     expect(environmentFromCli(enabled.opts(), { DUTYDECK_AUTH: 'false' })).toEqual({ DUTYDECK_AUTH: 'true' });
   });
 
+  it('maps --unsafe-no-auth to disabled auth plus the explicit unsafe acknowledgement', () => {
+    const unsafe = createCliProgram('0.0.5');
+    unsafe.parse(['node', 'dutydeck', '--host', '10.0.0.8', '--unsafe-no-auth']);
+    expect(environmentFromCli(unsafe.opts(), {})).toEqual({ DUTYDECK_HOST: '10.0.0.8', DUTYDECK_AUTH: 'false', DUTYDECK_UNSAFE_NO_AUTH: 'true' });
+
+    const plain = createCliProgram('0.0.5');
+    plain.parse(['node', 'dutydeck', '--host', '10.0.0.8', '--no-auth']);
+    expect(environmentFromCli(plain.opts(), {})).not.toHaveProperty('DUTYDECK_UNSAFE_NO_AUTH');
+  });
+
+  it('routes auth password and share-key commands to their handlers', async () => {
+    const authPasswordSet = vi.fn();
+    const authShareKeyRotate = vi.fn();
+    await createCliProgram('0.0.5', { authPasswordSet, authShareKeyRotate }).parseAsync(['node', 'dutydeck', 'auth', 'password', 'set']);
+    await createCliProgram('0.0.5', { authPasswordSet, authShareKeyRotate }).parseAsync(['node', 'dutydeck', 'auth', 'password', 'set', '--generate']);
+    await createCliProgram('0.0.5', { authPasswordSet, authShareKeyRotate }).parseAsync(['node', 'dutydeck', 'auth', 'share-key', 'rotate']);
+    expect(authPasswordSet.mock.calls.map(([options]) => options)).toEqual([{}, { generate: true }]);
+    expect(authShareKeyRotate).toHaveBeenCalledTimes(1);
+  });
+
   it('prints the installed version', () => {
     let output = '';
     const program = createCliProgram('0.0.5').exitOverride().configureOutput({ writeOut: value => { output += value; } });

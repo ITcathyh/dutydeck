@@ -29,7 +29,8 @@ import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGro
 import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
 import { LarkMemoryProjection } from './lark/memory-view.js';
 import { LarkMemoryPipeline } from './lark/memory-pipeline.js';
-import { getAuthToken, loadOrCreateAuthToken, LoginLinkStore, tokensEqual } from './auth/auth.js';
+import { getAuthToken, getPasswordHash, getShareLinkSecret, loadOrCreateAuthToken, loadOrCreateShareLinkSecret, signSessionShareToken, tokensEqual, verifyBrowserSession } from './auth/auth.js';
+import { setLarkSessionShareSigner } from './lark/detail-link.js';
 import type { TerminalStreamProvider } from './terminal/terminal-ws.js';
 import {
   createDutydeckPersistentBackend,
@@ -81,6 +82,22 @@ export function accessMode(config: Pick<AppConfig, 'host' | 'authEnabled'>): 'lo
   return config.authEnabled ? 'token' : 'open';
 }
 
+/** 显式确认在非回环地址上免认证运行：--unsafe-no-auth 或这个环境变量 */
+export const UNSAFE_NO_AUTH_ENV = 'DUTYDECK_UNSAFE_NO_AUTH';
+
+/**
+ * 监听地址不是回环、认证又关着（open 模式）时返回拒绝启动的说明，显式确认 unsafe 时放行。
+ * 第一行带 refused 且不含 password/token 字样：`dutydeck start` 只从守护日志回放这样的行。
+ */
+export function unauthenticatedListenRefusal(config: Pick<AppConfig, 'host' | 'authEnabled'>, env: NodeJS.ProcessEnv): string | undefined {
+  if (accessMode(config) !== 'open' || env[UNSAFE_NO_AUTH_ENV] === 'true') return undefined;
+  return [
+    `Dutydeck refused to start: 监听地址 ${config.host} 不是本机回环地址，访问认证却已关闭，同网络任何人都能查看任务、驱动 Agent、打开终端。`,
+    '先设置访问密码：dutydeck auth password set，再去掉 --no-auth（或 .env 里的 DUTYDECK_AUTH=false）重新启动；浏览器用这个密码登录，CLI 和本机调用照旧用 access token。',
+    `确需在这个地址免认证运行，改用 --unsafe-no-auth 或设置 ${UNSAFE_NO_AUTH_ENV}=true。`
+  ].join('\n');
+}
+
 function localApiBaseUrl(config: Pick<AppConfig, 'host' | 'port'>) {
   return localLoopbackUrl(config.host, config.port);
 }
@@ -98,6 +115,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   // pty-cli agent 发现：PTY_AGENT_CONTRIBUTIONS 经 loadConfig 合并进 config.agents
   // （builtinAgents 内部按 commandExists 过滤，只暴露本机已安装的 CLI；id 冲突时 ACPX 优先）。
   const config = loadConfig(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS);
+  const refusal = unauthenticatedListenRefusal(config, options.env ?? process.env);
+  if (refusal) throw new Error(refusal);
   const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
   const setupCleanup: Array<() => unknown> = [];
   let closeResources = async () => {
@@ -144,35 +163,45 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     relaySigningSecret,
     options.groupToolsCommand
   );
-  // 访问认证：默认启动时确保 token 存在（首次生成并打印到日志一次）。
+  // 访问认证：默认启动时确保 token 存在。首次生成时只提示查看命令，token 本身不进日志。
   // 走 stderr 而非 stdout——daemon 子进程的 stdout 承载 daemon 协议的 JSON 输出，不能污染；
   // daemon 模式下 stderr 与 stdout 一起重定向到 dutydeck.log，前台模式下直接可见。
   const mode = accessMode(config);
   let activeToken = '';
+  let activePasswordHash: string | null = null;
   let tokenRefresh: ReturnType<typeof setInterval> | undefined;
   if (config.authEnabled) {
     const { token: accessToken, created: tokenCreated } = await loadOrCreateAuthToken(repos.config);
     activeToken = accessToken;
+    activePasswordHash = await getPasswordHash(repos.config);
     if (tokenCreated) {
-      process.stderr.write(`[dutydeck] Generated access token for remote access: ${accessToken}\n`);
-      process.stderr.write(`[dutydeck] Run 'dutydeck auth token' to view it again, or 'dutydeck auth token --rotate' to rotate it.\n`);
+      process.stderr.write(`[dutydeck] Generated an access token for remote access. Run 'dutydeck auth token' to view it, or 'dutydeck auth token --rotate' to rotate it.\n`);
     }
-    // WS 升级认证是同步钩子，token 又可能被 `dutydeck auth token --rotate` 在另一个进程轮换，
+    // WS 升级认证是同步钩子，token 和访问密码又可能在另一个进程里被轮换、重设，
     // 所以维护一份短周期刷新的缓存（HTTP 中间件每次请求直读 DB，不受此缓存影响）。
     tokenRefresh = setInterval(() => {
       getAuthToken(repos.config).then(current => { if (current) activeToken = current; }).catch(() => {});
+      getPasswordHash(repos.config).then(current => { activePasswordHash = current; }).catch(() => {});
     }, 5_000);
     tokenRefresh.unref();
     setupCleanup.push(() => { if (tokenRefresh) clearInterval(tokenRefresh); });
   } else {
     process.stderr.write('[dutydeck] WARNING: authentication is disabled. Everyone who can reach this address can view tasks, control Agents, and access terminals. Use only on a trusted network or behind upstream authentication.\n');
   }
-  // 只有 Web 要求登录时，飞书卡片的「查看详情」才换发一次性登录链接；本机免密和 --no-auth 仍直接打开。
-  const loginLinks = mode === 'token' ? new LoginLinkStore() : undefined;
+  // 飞书卡片的「查看详情」指向只读分享页，链接带绑定会话的签名（lark/detail-link.ts）。
+  // 签名密钥可能被 `dutydeck auth share-key rotate` 在另一个进程轮换，卡片签名用短周期刷新的缓存，校验每次直读 DB。
+  let activeShareSecret = await loadOrCreateShareLinkSecret(repos.config);
+  const shareSecretRefresh = setInterval(() => {
+    getShareLinkSecret(repos.config).then(current => { if (current) activeShareSecret = current; }).catch(() => {});
+  }, 5_000);
+  shareSecretRefresh.unref();
+  const disposeShareSigner = setLarkSessionShareSigner(sessionId => signSessionShareToken(activeShareSecret, sessionId));
+  setupCleanup.push(() => { clearInterval(shareSecretRefresh); disposeShareSigner(); });
   const resolveInstallationPrincipal = createInstallationPrincipalResolver({
     authEnabled: config.authEnabled,
     mode,
     getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
+    getPasswordHash: () => getPasswordHash(repos.config),
   });
   const foundationManagementAuthorizer = createFoundationManagementAuthorizer(resolveInstallationPrincipal);
   const foundationExecution = createFoundationExecutionAuthorizer(repos, resolveInstallationPrincipal);
@@ -310,6 +339,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   closeResources = () => {
     if (!closeRun) closeRun = (async () => {
       if (tokenRefresh) clearInterval(tokenRefresh);
+      clearInterval(shareSecretRefresh);
+      disposeShareSigner();
       if (automationTimer) clearInterval(automationTimer);
       if (collaborationTimer) clearInterval(collaborationTimer);
       const errors: unknown[] = [];
@@ -402,17 +433,17 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
           pipeline: memoryPipeline
         },
         listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
-        loginLinks,
       },
       auth: {
         mode,
         getToken: () => config.authEnabled ? getAuthToken(repos.config) : Promise.resolve(null),
-        localOnly: mode === 'local',
-        loginLinks
+        getPasswordHash: () => getPasswordHash(repos.config),
+        getShareSecret: () => getShareLinkSecret(repos.config),
+        localOnly: mode === 'local'
       },
       terminal: {
         provider: terminalProvider,
-        auth: { mode, allowUnauthenticated: mode === 'local', check: presented => !!presented && tokensEqual(presented, activeToken) },
+        auth: { mode, allowUnauthenticated: mode === 'local', check: presented => !!presented && (tokensEqual(presented, activeToken) || verifyBrowserSession(presented, activePasswordHash)) },
         authorize: (request, sessionId, action) => authorizeSessionRequest(request, sessionId, 'terminal', action),
       },
       relay: { runtime, capabilities: relayCapabilities, broker: relayBroker },
