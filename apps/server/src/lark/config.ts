@@ -30,6 +30,11 @@ export interface StoredLarkConfig {
    */
   workspaceAliases?: Record<string, string>;
   webBaseUrl?: string;
+  /**
+   * 配置向导里答了「手机打不开 Web 地址」。此时不保存 webBaseUrl，卡片上就没有「查看详情」和其他 Web 出口；
+   * 只在为 false 时出现。
+   */
+  webMobileReachable?: false;
   defaultAgentId?: string;
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -149,6 +154,8 @@ export interface SaveLarkConfigInput {
   /** `/new --cwd <别名>` 的别名表；未提供时保留既有别名，传空表示清空。 */
   workspaceAliases?: Record<string, string>;
   webBaseUrl?: string;
+  /** 手机能否打开 webBaseUrl；false 时不保存地址，卡片不显示「查看详情」。未提供时沿用既有答案 */
+  webMobileReachable?: boolean;
   defaultAgentId?: string;
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -233,6 +240,7 @@ export interface PublicLarkConfig {
   /** `/new --cwd <别名>` 的别名表；没有别名时整个字段缺席。 */
   workspaceAliases?: Record<string, string>;
   webBaseUrl?: string;
+  webMobileReachable?: false;
   defaultAgentId?: string;
   defaultModel?: string;
   defaultReasoningEffort?: string;
@@ -502,7 +510,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.name?.trim() ? { name: parsed.name.trim() } : {}),
     ...(parsed.workspace?.trim() ? { workspace: parsed.workspace.trim() } : {}),
     ...(normalizeWorkspaceAliases(parsed.workspaceAliases) ? { workspaceAliases: normalizeWorkspaceAliases(parsed.workspaceAliases)! } : {}),
-    ...(normalizeWebBaseUrl(parsed.webBaseUrl) ? { webBaseUrl: normalizeWebBaseUrl(parsed.webBaseUrl) } : {}),
+    ...(parsed.webMobileReachable !== false && normalizeWebBaseUrl(parsed.webBaseUrl) ? { webBaseUrl: normalizeWebBaseUrl(parsed.webBaseUrl) } : {}),
+    ...(parsed.webMobileReachable === false ? { webMobileReachable: false as const } : {}),
     ...(parsed.defaultAgentId ? { defaultAgentId: parsed.defaultAgentId } : {}),
     ...(parsed.defaultModel ? { defaultModel: parsed.defaultModel } : {}),
     ...(parsed.defaultReasoningEffort ? { defaultReasoningEffort: parsed.defaultReasoningEffort } : {}),
@@ -599,6 +608,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   ...(config.workspace ? { workspace: config.workspace } : {}),
   ...(config.workspaceAliases ? { workspaceAliases: config.workspaceAliases } : {}),
   ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+  ...(config.webMobileReachable === false ? { webMobileReachable: false as const } : {}),
   ...(config.defaultAgentId ? { defaultAgentId: config.defaultAgentId } : {}),
   ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
   ...(config.defaultReasoningEffort ? { defaultReasoningEffort: config.defaultReasoningEffort } : {}),
@@ -685,7 +695,9 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const workspaceAliases = input.workspaceAliases === undefined ? current?.workspaceAliases : normalizeWorkspaceAliases(input.workspaceAliases);
   // 同一套部署的机器人共用一个控制台。新建时没给地址（扫码一键创建、CLI 创建都不带）就沿用
   // 已有机器人的地址，否则卡片上没有「查看详情」；显式传空串仍表示不配置。
-  const webBaseUrl = input.webBaseUrl !== undefined ? normalizeWebBaseUrl(input.webBaseUrl)
+  // 答了手机打不开这个地址就不存地址：卡片的「查看详情」和其他 Web 出口都从它来。
+  const webMobileReachable = typeof input.webMobileReachable === 'boolean' ? input.webMobileReachable : current?.webMobileReachable !== false;
+  const webBaseUrl = !webMobileReachable ? undefined : input.webBaseUrl !== undefined ? normalizeWebBaseUrl(input.webBaseUrl)
     : current ? current.webBaseUrl : configs.find(config => config.webBaseUrl)?.webBaseUrl;
   const defaultAgentId = input.defaultAgentId?.trim() || current?.defaultAgentId;
   const listening = input.listening ?? current?.listening ?? false;
@@ -775,6 +787,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(workspace ? { workspace } : {}),
     ...(workspaceAliases ? { workspaceAliases } : {}),
     ...(webBaseUrl ? { webBaseUrl } : {}),
+    ...(webMobileReachable ? {} : { webMobileReachable: false as const }),
     ...(defaultAgentId ? { defaultAgentId } : {}),
     ...(defaultModel ? { defaultModel } : {}),
     ...(defaultReasoningEffort ? { defaultReasoningEffort } : {}),

@@ -547,6 +547,27 @@ describe('LarkConfigModal explicit selection', () => {
     expect(save.mock.calls[0]?.[0]).toMatchObject({ appId: 'cli_new', webBaseUrl: 'https://dutydeck.example.com' });
   });
 
+  it('答手机打不开 Web 地址时随配置保存这个答案，并收起内网地址提示', async () => {
+    const user = userEvent.setup();
+    const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true, webMobileReachable: false }));
+    renderModal(collection({ appId: 'cli_test', setupComplete: true, webBaseUrl: 'http://10.0.0.8:4310' }));
+    await screen.findByDisplayValue('http://10.0.0.8:4310');
+    const reachable = screen.getByRole('switch', { name: '手机能打开这个地址' });
+    expect(reachable.getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText(/Web 地址只在本机或内网可达/)).toBeTruthy();
+    await user.click(reachable);
+    expect(reachable.getAttribute('aria-checked')).toBe('false');
+    expect(screen.queryByText(/Web 地址只在本机或内网可达/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]?.[0]).toMatchObject({ webMobileReachable: false });
+  });
+
+  it('已答过手机打不开的机器人重新打开时开关保持关闭', async () => {
+    renderModal(collection({ appId: 'cli_test', setupComplete: true, webMobileReachable: false }));
+    await waitFor(() => expect(screen.getByRole('switch', { name: '手机能打开这个地址' }).getAttribute('aria-checked')).toBe('false'));
+  });
+
   it('focuses the App ID when add is clicked again without discarding the new draft', async () => {
     const user = userEvent.setup();
     renderModal(collection({ setupComplete: true }), 'acp', 'new');

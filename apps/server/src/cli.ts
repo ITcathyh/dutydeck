@@ -26,7 +26,8 @@ import { sleep } from './daemon/time.js';
 import { runNpmForDutydeckUpdate, updateDutydeck } from './update.js';
 import { loadConfig } from '@dutydeck/config';
 import { createRepositories } from '@dutydeck/storage';
-import { runAuthTokenCommand } from './auth/auth.js';
+import { runAuthPasswordSetCommand, runAuthTokenCommand, runShareKeyRotateCommand } from './auth/auth.js';
+import { readPasswordInput } from './auth/password-input.js';
 import { LegacyImportError } from '@dutydeck/legacy-importer';
 import { LegacyImportCliError, runLegacyArchive, runLegacyDiscover, runLegacyPlan } from './legacy-import-cli.js';
 import { LocalFileSecretProvider, SecretProviderError, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
@@ -318,6 +319,23 @@ async function main() {
       const repos = createRepositories(databaseUrl);
       try {
         output(await runAuthTokenCommand(repos.config, { rotate: options.rotate === true }));
+      } finally {
+        repos.close();
+      }
+    },
+    authPasswordSet: async options => {
+      // 与 auth token 同一个库：运行中/上次 daemon 记录的数据库优先。服务每次请求直读，改完即生效。
+      const repos = createRepositories(readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl);
+      try {
+        output(await runAuthPasswordSetCommand(repos.config, { generate: options.generate === true, readPassword: () => readPasswordInput() }));
+      } finally {
+        repos.close();
+      }
+    },
+    authShareKeyRotate: async () => {
+      const repos = createRepositories(readDaemonStatus(resolveDaemonDir())?.database ?? loadConfig(process.env).databaseUrl);
+      try {
+        output(await runShareKeyRotateCommand(repos.config));
       } finally {
         repos.close();
       }

@@ -6,7 +6,7 @@ import { get as httpGet, type IncomingMessage } from 'node:http';
 import { buildApp } from './app.js';
 import { createRepositories } from '@dutydeck/storage';
 import { larkBotsConfigKey } from './lark/config.js';
-import { LoginLinkStore } from './auth/auth.js';
+import { LoginLinkStore, signSessionShareToken } from './auth/auth.js';
 
 const apps: any[] = [];
 const tempDirectories: string[] = [];
@@ -404,6 +404,8 @@ describe('HTTP API boundary', () => {
     // 豁免：lark agent-tools 自带 Bearer 机制
     expect((await app.inject({ method: 'GET', url: '/api/lark/agent-tools/self', ...remote })).statusCode).not.toBe(401);
     expect((await app.inject({ method: 'POST', url: '/api/relay/sessions/self/send', ...remote })).statusCode).not.toBe(401);
+    // 豁免：CI 回调前缀，路由自己校验签名
+    expect((await app.inject({ method: 'POST', url: '/api/hooks/ci', ...remote })).statusCode).not.toBe(401);
     // 浏览器认证入口公开，但只返回认证状态；登录后 cookie 才能访问业务 API。
     expect((await app.inject({ method: 'GET', url: '/api/auth/status', ...remote })).json()).toEqual({ authenticated: false, required: true });
     const login = await app.inject({ method: 'POST', url: '/api/auth/login', payload: { token: 'secret-token' }, ...remote });
@@ -418,6 +420,33 @@ describe('HTTP API boundary', () => {
         `${url} 不在豁免名单里，无 token 的远程请求必须 401`,
       ).toBe(401);
     }
+  });
+
+  it('分享 token 只能读绑定会话的详情、事件和任务，其他会话和写接口仍要登录', async () => {
+    const runtime: any = {
+      getSession: vi.fn(async (id: string) => ({ id })), getEventWindow: vi.fn(async () => []), getTasks: vi.fn(async () => []),
+      send: vi.fn(), archive: vi.fn(), listSessions: vi.fn(async () => [])
+    };
+    const app = await buildApp(runtime, {
+      auth: { mode: 'token', getToken: async () => 'secret-token', localOnly: false, getShareSecret: async () => 'share-secret' },
+    }); apps.push(app);
+    const remote = { remoteAddress: '8.8.8.8' } as const;
+    const share = signSessionShareToken('share-secret', 'ses_1');
+    for (const url of ['/api/sessions/ses_1', '/api/sessions/ses_1/events', '/api/sessions/ses_1/tasks']) {
+      expect((await app.inject({ method: 'GET', url: `${url}?share=${share}`, ...remote })).statusCode, url).toBe(200);
+    }
+    for (const request of [
+      { method: 'GET', url: `/api/sessions/ses_2?share=${share}` },
+      { method: 'GET', url: `/api/sessions?share=${share}` },
+      { method: 'GET', url: `/api/sessions/ses_1/workspace?share=${share}` },
+      { method: 'POST', url: `/api/sessions/ses_1/send?share=${share}`, payload: { prompt: 'hi' } },
+      { method: 'POST', url: `/api/sessions/ses_1/archive?share=${share}` },
+    ] as const) {
+      expect((await app.inject({ ...request, ...remote })).statusCode, `${request.method} ${request.url}`).toBe(401);
+    }
+    expect(runtime.getSession).toHaveBeenCalledTimes(1);
+    expect(runtime.send).not.toHaveBeenCalled();
+    expect(runtime.archive).not.toHaveBeenCalled();
   });
 
   it('一次性登录链接免 token：GET/HEAD 只回确认页，POST 兑换出能访问业务 API 的 cookie；其他方法照常鉴权', async () => {

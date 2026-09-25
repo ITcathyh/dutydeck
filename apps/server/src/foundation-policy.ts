@@ -10,7 +10,7 @@ import {
   type RepositoryBundle,
   type Session,
 } from '@dutydeck/shared';
-import { extractBearerToken, extractCookie, isLoopbackHost, tokensEqual } from './auth/auth.js';
+import { extractBearerToken, extractCookie, isLoopbackHost, tokensEqual, verifyBrowserSession } from './auth/auth.js';
 
 export const installationOwnerPrincipalId = 'principal_installation_owner';
 export const foundationGroupBindingSessionSource = 'foundation_group_binding';
@@ -18,7 +18,8 @@ export const foundationGroupBindingSessionSource = 'foundation_group_binding';
 export type InstallationPrincipalAuthentication =
   | 'trusted_devhost_no_auth'
   | 'trusted_loopback'
-  | 'verified_access_token';
+  | 'verified_access_token'
+  | 'verified_password_session';
 
 export interface InstallationOwnerPrincipal {
   id: typeof installationOwnerPrincipalId;
@@ -35,6 +36,8 @@ export interface InstallationPrincipalResolverOptions {
   authEnabled: boolean;
   mode: 'local' | 'token' | 'open';
   getToken: () => Promise<string | null>;
+  /** 访问密码哈希；密码登录签发的浏览器会话同样认作安装者本人 */
+  getPasswordHash?: () => Promise<string | null>;
 }
 
 const installationOwner = (authentication: InstallationPrincipalAuthentication): InstallationOwnerPrincipal => ({
@@ -65,7 +68,9 @@ export function createInstallationPrincipalResolver(options: InstallationPrincip
     const presented = extractBearerToken(request.headers.authorization) ?? extractCookie(request.headers.cookie);
     if (!presented) return undefined;
     const expected = await options.getToken();
-    return expected && tokensEqual(presented, expected) ? installationOwner('verified_access_token') : undefined;
+    if (expected && tokensEqual(presented, expected)) return installationOwner('verified_access_token');
+    return presented.startsWith('pw.') && verifyBrowserSession(presented, await options.getPasswordHash?.() ?? null)
+      ? installationOwner('verified_password_session') : undefined;
   };
 }
 

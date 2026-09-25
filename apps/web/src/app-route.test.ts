@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { appLocationPath, parseAppLocation, routeFromPath, sessionPath } from './app-route';
+import { appLocationPath, parseAppLocation, routeFromPath, sessionPath, sharedSessionFromLocation } from './app-route';
 
 describe('路径解析', () => {
   it('根路径是任务中心，会话路径带出 sessionId', () => {
@@ -118,4 +118,21 @@ it('round-trips explicit Bot editing and new modes without changing the underlyi
     const url = new URL(appLocationPath(location), 'http://localhost');
     expect(parseAppLocation(url.pathname, url.search)).toEqual(location);
   }
+});
+
+describe('只读分享页入口', () => {
+  it('/share/<会话> 带出会话 ID 和 # 片段里的分享 token', () => {
+    expect(sharedSessionFromLocation('/share/ses_1', '#abc-DEF_123')).toEqual({ sessionId: 'ses_1', token: 'abc-DEF_123' });
+    expect(sharedSessionFromLocation('/share/a%2Fb', '#t')).toEqual({ sessionId: 'a/b', token: 't' });
+    expect(sharedSessionFromLocation('/share/%E0%A4%A', '#t')).toEqual({ sessionId: '%E0%A4%A', token: 't' });
+  });
+
+  it('片段缺失或含非法字符时 token 为空串，仍然停在分享页', () => {
+    expect(sharedSessionFromLocation('/share/ses_1', '')).toEqual({ sessionId: 'ses_1', token: '' });
+    expect(sharedSessionFromLocation('/share/ses_1', '#a&b=c')).toEqual({ sessionId: 'ses_1', token: '' });
+  });
+
+  it.each(['/', '/sessions/ses_1', '/share', '/share/', '/share/ses_1/extra'])('%s 不是分享页', pathname => {
+    expect(sharedSessionFromLocation(pathname, '#t')).toBeUndefined();
+  });
 });

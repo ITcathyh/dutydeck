@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { getAuthToken } from './auth/auth.js';
-import { accessMode, createProductionPtyBackend, listenOptions, startLocalServer } from './service.js';
+import { accessMode, createProductionPtyBackend, listenOptions, startLocalServer, unauthenticatedListenRefusal } from './service.js';
 
 const temporaryDirectories: string[] = [];
 const tmuxSessions: string[] = [];
@@ -57,6 +57,43 @@ describe('server access mode', () => {
     expect(accessMode({ host: '127.0.0.1', authEnabled: false })).toBe('local');
   });
 
+  it('refuses an unauthenticated non-loopback listener unless the operator explicitly accepts it', () => {
+    const refusal = unauthenticatedListenRefusal({ host: '10.0.0.8', authEnabled: false }, {});
+    expect(refusal?.split('\n')[0]).toContain('Dutydeck refused to start');
+    expect(refusal?.split('\n')[0]).not.toMatch(/token|password/i);
+    expect(refusal).toContain('dutydeck auth password set');
+    expect(refusal).toContain('--unsafe-no-auth');
+    expect(refusal).toContain('DUTYDECK_UNSAFE_NO_AUTH=true');
+    expect(unauthenticatedListenRefusal({ host: '10.0.0.8', authEnabled: false }, { DUTYDECK_UNSAFE_NO_AUTH: 'true' })).toBeUndefined();
+    expect(unauthenticatedListenRefusal({ host: '10.0.0.8', authEnabled: false }, { DUTYDECK_UNSAFE_NO_AUTH: '1' })).toBeDefined();
+    expect(unauthenticatedListenRefusal({ host: '10.0.0.8', authEnabled: true }, {})).toBeUndefined();
+    expect(unauthenticatedListenRefusal({ host: '127.0.0.1', authEnabled: false }, {})).toBeUndefined();
+  });
+
+  it('fails startup before opening the database or port for an unauthenticated remote listener', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-refuse-'));
+    temporaryDirectories.push(root);
+    const database = join(root, 'dutydeck.db');
+    const port = await freePort();
+    await expect(startLocalServer({
+      webRoot: root,
+      env: {
+        ...process.env,
+        NODE_ENV: 'test',
+        DUTYDECK_HOST: '0.0.0.0',
+        DUTYDECK_PORT: String(port),
+        DUTYDECK_DEFAULT_CWD: root,
+        DUTYDECK_DATABASE_URL: database,
+        DUTYDECK_AUTH: 'false',
+        DUTYDECK_UNSAFE_NO_AUTH: undefined,
+        DUTYDECK_DISABLE_LARK_LISTENER: 'true',
+        DUTYDECK_AGENTS_JSON: '[]'
+      }
+    })).rejects.toThrow('Dutydeck refused to start');
+    expect(existsSync(database)).toBe(false);
+    await expect(fetch(`http://127.0.0.1:${port}/api/health`)).rejects.toThrow();
+  });
+
   it('does not create or refresh an access token when auth is explicitly disabled', async () => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-open-'));
     temporaryDirectories.push(root);
@@ -103,6 +140,7 @@ describe('server access mode', () => {
         DUTYDECK_DEFAULT_CWD: root,
         DUTYDECK_DATABASE_URL: database,
         DUTYDECK_AUTH: 'false',
+        DUTYDECK_UNSAFE_NO_AUTH: 'true',
         DUTYDECK_DISABLE_LARK_LISTENER: 'true',
         DUTYDECK_AGENTS_JSON: '[]'
       }
@@ -191,6 +229,7 @@ describe('server access mode', () => {
     const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
     seed.close();
     const port = await freePort();
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const service = await startLocalServer({
       webRoot: root,
       env: {
@@ -212,6 +251,9 @@ describe('server access mode', () => {
       const token = await getAuthToken(tokenRepository.config);
       tokenRepository.close();
       expect(token).toBeTruthy();
+      // 首次生成 token 只提示查看命令，token 本身不进日志。
+      expect(stderr).toHaveBeenCalledWith(expect.stringContaining("Run 'dutydeck auth token' to view it"));
+      expect(stderr.mock.calls.some(([chunk]) => String(chunk).includes(token!))).toBe(false);
       const created = await fetch(`${base}/api/foundation/channel-bots`, {
         method: 'POST',
         headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },

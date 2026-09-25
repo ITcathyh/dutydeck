@@ -208,7 +208,7 @@ export async function runSetup(options: SetupCliOptions = {}, dependencies: Setu
     if (!json) {
       ui.status(port === currentPort ? 'ok' : 'done', '监听端口', port);
       if (options.localOnly === true) ui.status('done', '仅本机可访问', '127.0.0.1');
-      else ui.hint('远程浏览器访问需要 access token：dutydeck auth token');
+      else ui.hint('远程浏览器访问先设访问密码：dutydeck auth password set（CLI 和脚本用 dutydeck auth token）');
     }
 
     // ---- 步骤 4：飞书绑定（可选，会产生对外副作用）----
