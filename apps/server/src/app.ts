@@ -1,7 +1,7 @@
 import { registerRecoveryRoutes, type RecoveryRouteOptions } from './recovery-routes.js';
 import { registerWorkspaceGroupRoutes, type WorkspaceGroupRouteOptions } from './workspace-group-routes.js';
 import { registerSessionNameRoutes, type SessionNameRouteOptions } from './session-name-routes.js';
-import { ZodError } from 'zod';
+import { z, ZodError } from 'zod';
 import { registerCollaborationRoutes, type CollaborationRouteOptions } from './collaboration-routes.js';
 import { AgentGroupToolError } from './lark/agent-tools.js';
 import { LarkServiceError } from './lark/service.js';
@@ -161,6 +161,31 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   app.get<{ Querystring: { excludeSessionId?: string } }>('/api/system/activity', async request => {
     const excludeSessionId = request.query.excludeSessionId?.trim() || undefined;
     return { runningTasks: runtime.getRunningTaskCount(excludeSessionId) };
+  });
+  // restart / deploy 等待任务结束期间进入排空：新消息照常入队，但不开始新的轮次，重启后由新进程执行。
+  // 排空带租约，调用方每轮查询时续租；它中途退出（Ctrl-C、被杀）时租约到期自动恢复，队列不会一直停着。
+  let drainLease: NodeJS.Timeout | undefined;
+  const endDrain = (reason: string) => {
+    if (drainLease) clearTimeout(drainLease);
+    drainLease = undefined;
+    if (!runtime.isQueueHeld()) return;
+    runtime.setQueueHeld(false);
+    app.log.info({ reason }, '退出排空，恢复执行排队任务');
+  };
+  app.addHook('onClose', async () => { if (drainLease) clearTimeout(drainLease); drainLease = undefined; });
+  const drainBody = z.object({ draining: z.boolean(), leaseSeconds: z.number().int().min(1).max(3600).default(60) });
+  app.post('/api/system/drain', async request => {
+    const { draining, leaseSeconds } = drainBody.parse(request.body ?? {});
+    if (!draining) {
+      endDrain('released');
+      return { draining: false };
+    }
+    if (drainLease) clearTimeout(drainLease);
+    else app.log.info({ leaseSeconds }, '进入排空：新任务照常入队，暂不开始执行');
+    runtime.setQueueHeld(true);
+    drainLease = setTimeout(() => endDrain('lease_expired'), leaseSeconds * 1000);
+    drainLease.unref();
+    return { draining: true, leaseSeconds };
   });
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
   app.get<{ Params: { id: string }; Querystring: { model?: string; refresh?: string } }>('/api/agents/:id/models', async request => {

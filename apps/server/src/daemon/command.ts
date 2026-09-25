@@ -135,19 +135,35 @@ export function parseDrainTimeoutSeconds(value: string | undefined): number | un
   return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : undefined;
 }
 
+/** 排空租约（秒）：等待期间每轮查询都会续租；调用方中途退出时，服务在租约到期后自己恢复。 */
+const DRAIN_LEASE_SECONDS = 60;
+
+/** 连运行时本机 API 用的三项：守护状态文件里的记录，或由 unit / deployment.json 推出来的同样信息。 */
+export type RuntimeEndpoint = Pick<DaemonState, 'address' | 'database' | 'authEnabled'>;
+
+/** 等待成功时 release 退出排空；调用方在随后的重启失败、旧进程还在跑时用它恢复执行。 */
+export type DrainResult = { ok: true; release?: () => Promise<void> } | { ok: false; error: string; runningTasks: number };
+
+const invalidDrainTimeout = (options: Pick<CliOptions, 'drainTimeout'>): DrainResult => ({
+  ok: false, runningTasks: 0,
+  error: `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
+});
+
+const refuseWithoutStatus = (reason: string) =>
+  `${reason}，无法确认是否有任务正在执行，已拒绝重启，旧服务仍在运行。若确认可以中断正在执行的任务，加 --force 跳过等待。`;
+
 /**
  * 重启前等待守护进程中正在执行的任务结束（drain）。
  * - options.force / 父进程已 drain（restart 子进程）：直接放行，不查询、不告警；
- * - 守护进程未运行、身份无法验证、查询失败：输出警告并继续重启；
- * - 有任务在执行（> 0）：输出说明，每 5 秒查一次，归零后返回 ok: true；
- * - 等待超时仍有任务在执行：返回 ok: false 与错误说明，不停止旧进程。
+ * - 守护进程未运行、身份无法验证：输出警告并继续（后者会被随后的停止步骤拒绝）；
+ * - 其余情形先让服务进入排空，再等任务结束，见 holdAndWait。
  */
 export async function waitForRunningTasksDrain(
   dir: string,
   state: DaemonState | undefined,
   options: CliOptions,
   deps: DaemonCommandDeps
-): Promise<{ ok: true } | { ok: false; error: string; runningTasks: number }> {
+): Promise<DrainResult> {
   if (options.force) return { ok: true };
   // detached restart 会再拉起一个执行 `daemon restart` 的后台子进程；父进程已等过，
   // 子进程静默跳过，别再往守护日志写一行「守护进程未运行」。标记只消费一次，读完立即删除，
@@ -158,15 +174,8 @@ export async function waitForRunningTasksDrain(
   }
 
   const warn = deps.warn ?? defaultWarn;
-  const info = deps.info ?? defaultInfo;
-
   const timeoutSeconds = parseDrainTimeoutSeconds(options.drainTimeout);
-  if (timeoutSeconds === undefined) {
-    return {
-      ok: false, runningTasks: 0,
-      error: `--drain-timeout 只接受正整数秒数（收到 ${JSON.stringify(options.drainTimeout)}）。要跳过等待立即重启，请用 dutydeck restart --force。旧服务仍在运行，没有停止任何进程。`
-    };
-  }
+  if (timeoutSeconds === undefined) return invalidDrainTimeout(options);
 
   const inspection = inspectDaemon(dir);
   if (inspection.status === 'stale') {
@@ -177,12 +186,32 @@ export async function waitForRunningTasksDrain(
     warn('守护进程身份无法验证，跳过任务等待，继续执行重启。');
     return { ok: true };
   }
+  return await holdAndWait(state, timeoutSeconds, deps);
+}
+
+/** deploy 与 `restart --unit` 用：目标不是某个守护状态目录，地址和数据库由调用方给出。 */
+export async function drainRuntime(endpoint: RuntimeEndpoint, options: Pick<CliOptions, 'force' | 'drainTimeout'>, deps: DaemonCommandDeps): Promise<DrainResult> {
+  if (options.force) return { ok: true };
+  const timeoutSeconds = parseDrainTimeoutSeconds(options.drainTimeout);
+  if (timeoutSeconds === undefined) return invalidDrainTimeout(options);
+  return await holdAndWait(endpoint, timeoutSeconds, deps);
+}
+
+/**
+ * 先让服务进入排空（新消息照常入队，但不开始新的轮次），再每 5 秒查一次正在执行的任务数：
+ * - 归零：返回 ok 与 release，排空保持到旧进程退出；
+ * - 查询失败：退出排空并拒绝重启——不知道有没有任务在跑，就不能停旧进程；
+ * - 超时仍有任务、或等待中被 Ctrl-C：退出排空，旧进程照常服务。
+ * 服务不支持排空（旧版本返回 404）时只告警，照旧等待。
+ */
+async function holdAndWait(endpoint: RuntimeEndpoint | undefined, timeoutSeconds: number, deps: DaemonCommandDeps): Promise<DrainResult> {
+  const warn = deps.warn ?? defaultWarn;
+  const info = deps.info ?? defaultInfo;
 
   const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
-  const parsedUrl = resolveLocalUrl(state?.address, localAddresses);
+  const parsedUrl = resolveLocalUrl(endpoint?.address, localAddresses);
   if (!parsedUrl) {
-    warn('守护进程监听地址不可用于本机查询，跳过任务等待，继续执行重启。');
-    return { ok: true };
+    return { ok: false, runningTasks: 0, error: refuseWithoutStatus(`守护进程监听地址（${endpoint?.address ?? '未记录'}）不可用于本机查询`) };
   }
 
   // 在 dutydeck 托管的 Agent 里执行 restart 时，Agent 自己那轮必然 running；
@@ -193,76 +222,85 @@ export async function waitForRunningTasksDrain(
   }
 
   let token: string | undefined;
-  if (state?.authEnabled !== false && state?.database) {
-    token = (deps.readToken ?? defaultReadToken)(state.database);
+  if (endpoint?.authEnabled !== false && endpoint?.database) {
+    token = (deps.readToken ?? defaultReadToken)(endpoint.database);
   }
 
   const fetcher = deps.fetch ?? fetch;
   const requestTimeoutMs = deps.requestTimeoutMs ?? ACTIVITY_REQUEST_TIMEOUT_MS;
-  const queryRunningTasks = async (): Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }> => {
+  const request = async (url: URL, body?: unknown): Promise<{ ok: true; data: any } | { ok: false; status?: number; error: string }> => {
     try {
-      const url = new URL('/api/system/activity', parsedUrl.origin);
-      if (excludeSessionId) url.searchParams.set('excludeSessionId', excludeSessionId);
       const headers: Record<string, string> = {
         Accept: 'application/json',
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
         ...(token ? { Authorization: `Bearer ${token}` } : {})
       };
       const response = await fetcher(url.toString(), {
-        method: 'GET',
+        method: body === undefined ? 'GET' : 'POST',
         headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(requestTimeoutMs)
       });
-      if (!response.ok) {
-        return { ok: false, error: `HTTP ${response.status}` };
-      }
-      const data = await response.json() as any;
-      if (typeof data?.runningTasks !== 'number' || !Number.isSafeInteger(data.runningTasks) || data.runningTasks < 0) {
-        return { ok: false, error: '接口返回数据格式错误' };
-      }
-      return { ok: true, runningTasks: data.runningTasks };
+      if (!response.ok) return { ok: false, status: response.status, error: `HTTP ${response.status}` };
+      return { ok: true, data: await response.json() };
     } catch (error: any) {
       return { ok: false, error: error?.name === 'TimeoutError' || error?.name === 'AbortError' ? `查询超时（${requestTimeoutMs} ms）` : (error?.message || String(error)) };
     }
   };
+  const queryRunningTasks = async (): Promise<{ ok: true; runningTasks: number } | { ok: false; error: string }> => {
+    const url = new URL('/api/system/activity', parsedUrl.origin);
+    if (excludeSessionId) url.searchParams.set('excludeSessionId', excludeSessionId);
+    const result = await request(url);
+    if (!result.ok) return result;
+    const data = result.data;
+    if (typeof data?.runningTasks !== 'number' || !Number.isSafeInteger(data.runningTasks) || data.runningTasks < 0) {
+      return { ok: false, error: '接口返回数据格式错误' };
+    }
+    return { ok: true, runningTasks: data.runningTasks };
+  };
+  const setDrain = (draining: boolean) => request(new URL('/api/system/drain', parsedUrl.origin), draining ? { draining, leaseSeconds: DRAIN_LEASE_SECONDS } : { draining });
+
+  const hold = await setDrain(true);
+  if (!hold.ok) {
+    warn(hold.status === 404 ? '当前服务版本不支持排空，等待期间仍可能开始新的任务。' : `进入排空失败（${hold.error}），等待期间仍可能开始新的任务。`);
+  }
+  const release = hold.ok ? async () => { await setDrain(false); } : undefined;
+  const refuse = async (error: string, runningTasks: number): Promise<DrainResult> => {
+    await release?.();
+    return { ok: false, error, runningTasks };
+  };
 
   const initial = await queryRunningTasks();
-  if (!initial.ok) {
-    warn(`查询正在执行的任务数失败（${initial.error}），跳过等待继续重启。`);
-    return { ok: true };
-  }
+  if (!initial.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${initial.error}）`), 0);
+  if (initial.runningTasks === 0) return { ok: true, release };
 
-  if (initial.runningTasks === 0) {
-    return { ok: true };
-  }
-
-  info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）`);
+  info(`有 ${initial.runningTasks} 个任务正在执行，等它们结束后再重启（最长 ${timeoutSeconds} 秒；加 --force 立即重启）${hold.ok ? '。等待期间新消息照常排队，重启后由新进程执行' : ''}`);
 
   const sleeper = deps.sleep ?? sleep;
   const timer = deps.now ?? Date.now;
   const deadline = timer() + timeoutSeconds * 1000;
   let currentRunning = initial.runningTasks;
-
-  while (currentRunning > 0) {
-    await sleeper(DRAIN_INTERVAL_MS);
-    const current = await queryRunningTasks();
-    if (!current.ok) {
-      warn(`查询正在执行的任务数失败（${current.error}），跳过等待继续重启。`);
-      return { ok: true };
+  // 等待中被 Ctrl-C / kill：先退出排空再退出，别让队列停到租约到期。
+  const onSignal = () => { void (release?.() ?? Promise.resolve()).finally(() => process.exit(130)); };
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+  try {
+    while (currentRunning > 0) {
+      await sleeper(DRAIN_INTERVAL_MS);
+      if (hold.ok) await setDrain(true);
+      const current = await queryRunningTasks();
+      if (!current.ok) return await refuse(refuseWithoutStatus(`查询正在执行的任务数失败（${current.error}）`), currentRunning);
+      currentRunning = current.runningTasks;
+      if (currentRunning === 0) break;
+      if (timer() >= deadline) {
+        return await refuse(`等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。`, currentRunning);
+      }
     }
-    currentRunning = current.runningTasks;
-    if (currentRunning === 0) {
-      return { ok: true };
-    }
-    if (timer() >= deadline) {
-      return {
-        ok: false,
-        runningTasks: currentRunning,
-        error: `等待正在执行的任务结束超时（${timeoutSeconds} 秒），旧服务仍在运行（当前仍有 ${currentRunning} 个任务正在执行）。若确认可以中断这些任务，请使用 dutydeck restart --force 强制重启。`
-      };
-    }
+  } finally {
+    process.off('SIGINT', onSignal);
+    process.off('SIGTERM', onSignal);
   }
-
-  return { ok: true };
+  return { ok: true, release };
 }
 
 export interface DaemonCommandHandlers extends DaemonCommandDeps {
@@ -495,6 +533,7 @@ export async function daemonStop(deps: DaemonCommandDeps = {}): Promise<DaemonCo
 
 /** `dutydeck restart`: stop, then start again. */
 export async function daemonRestart(options: CliOptions, handlers: DaemonCommandHandlers, env: NodeJS.ProcessEnv = process.env): Promise<DaemonCommandResult> {
+  if (options.unit) return await unitRestart(options.unit, options, handlers);
   // Resolve the currently running daemon's directory so we can restart it in
   // the same working directory (important when the user runs `restart` from a
   // different directory than where the daemon was started).
@@ -540,7 +579,10 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
   // 否则旧进程已停、它会往守护日志再写一行「守护进程未运行」，挤掉启动失败时的关键日志。
   (restartEnv as Record<string, string>)[RESTART_DRAINED_ENV] = '1';
   const stopped = await daemonStop(handlers);
-  if (!stopped.ok) return { ...stopped, action: 'restart' };
+  if (!stopped.ok) {
+    await drain.release?.();
+    return { ...stopped, action: 'restart' };
+  }
   if (previousCwd && previousCwd !== process.cwd()) {
     process.chdir(previousCwd);
   }
@@ -563,6 +605,10 @@ interface SystemdUnitInfo {
   /** ExecStart 的解释器与入口脚本：新 daemon 实际由它们运行。 */
   execPath?: string;
   script?: string;
+  /** ExecStart 里入口脚本之后的参数，例如 `start --foreground` 或 `--port 4311`。 */
+  args: string[];
+  /** unit 文件路径（FragmentPath）。 */
+  fragmentPath?: string;
 }
 
 function firstLine(value: string): string {
@@ -571,7 +617,7 @@ function firstLine(value: string): string {
 
 /** unit 不存在时 LoadState=not-found；systemctl 不可用或连不上 user systemd 时返回 undefined。 */
 async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<SystemdUnitInfo | undefined> {
-  const shown = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'show', unit, '--property=LoadState,SubState,MainPID,Environment,WorkingDirectory,ExecStart']);
+  const shown = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'show', unit, '--property=LoadState,SubState,MainPID,Environment,WorkingDirectory,ExecStart,FragmentPath']);
   if (shown.status !== 0) return undefined;
   const props = new Map<string, string>();
   for (const line of shown.stdout.split('\n')) {
@@ -588,7 +634,9 @@ async function showSystemdUnit(unit: string, deps: DaemonCommandDeps): Promise<S
     environment: (props.get('Environment') ?? '').split(/\s+/).filter(Boolean),
     workingDirectory: props.get('WorkingDirectory') || undefined,
     execPath: exec?.[1],
-    script: exec?.[2]?.split(' ')[1]
+    script: exec?.[2]?.split(' ')[1],
+    args: exec?.[2]?.split(' ').slice(2) ?? [],
+    fragmentPath: props.get('FragmentPath') || undefined
   };
 }
 
@@ -662,6 +710,7 @@ function explicitServerFlags(options: CliOptions): string[] {
       && key !== 'foreground'
       && key !== 'force'
       && key !== 'drainTimeout'
+      && key !== 'unit'
       && !(key === 'larkListen' && value === true))
     .map(([key, value]) => key === 'auth' && value === false ? '--no-auth'
       : key === 'larkListen' ? '--no-lark-listen'
@@ -766,6 +815,7 @@ async function systemdRestart(dir: string, state: DaemonState, unit: string, inf
   const logOffset = daemonLogSize(dir);
   const restarted = await (deps.runCommand ?? defaultRunCommand)('systemctl', ['--user', 'restart', unit]);
   if (restarted.status !== 0) {
+    await drain.release?.();
     return { ok: false, action: 'restart', running: inspectDaemon(dir).status === 'verified', pid: state.pid, error: systemctlFailure('restart', unit, restarted) };
   }
   return await waitForSystemdGeneration('restart', unit, dir, state, logOffset);
@@ -779,6 +829,145 @@ export async function systemdRestartTarget(deps: DaemonCommandDeps = {}): Promis
   const dir = resolveDaemonDir();
   const supervised = await systemdSupervisor(dir, readDaemonStatus(dir), deps);
   return supervised && !('error' in supervised) ? { unit: supervised.unit, execPath: supervised.info.execPath, script: supervised.info.script } : undefined;
+}
+
+// ─── 按 unit 重启（bot 运行时）与部署共用 ───────────────────────────────────
+
+/** deploy 与 `restart --unit` 控制目标服务的方式：默认走 systemd user unit，测试和演练可以换成直接起进程。 */
+export interface ServiceControl {
+  /** 服务当前的主进程；没在运行时为 undefined。 */
+  mainPid(): Promise<number | undefined>;
+  /** 重启服务；失败时返回原因。 */
+  restart(): Promise<string | undefined>;
+  /** 清掉失败计数（systemd 的 start-limit）；回滚前用，免得刚才的崩溃循环挡住回滚。 */
+  resetFailed?(): Promise<void>;
+}
+
+export function systemdServiceControl(unit: string, deps: DaemonCommandDeps): ServiceControl {
+  const run = deps.runCommand ?? defaultRunCommand;
+  return {
+    mainPid: async () => (await showSystemdUnit(unit, deps))?.mainPid,
+    restart: async () => {
+      const restarted = await run('systemctl', ['--user', 'restart', unit]);
+      return restarted.status === 0 ? undefined : systemctlFailure('restart', unit, restarted);
+    },
+    resetFailed: async () => { await run('systemctl', ['--user', 'reset-failed', unit]); }
+  };
+}
+
+const HEALTH_TIMEOUT_MS = 90_000;
+const HEALTH_INTERVAL_MS = 1_000;
+
+/** 重启后等到换上新的主进程，并且它的 /health 返回 ok。服务在 runtime 初始化完成后才开始监听。 */
+export async function waitForServiceHealth(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DaemonCommandDeps, timeoutMs = HEALTH_TIMEOUT_MS): Promise<{ ok: true; pid: number } | { ok: false; error: string }> {
+  const localAddresses = deps.localAddresses ?? (() => Object.values(networkInterfaces()).flatMap(entries => entries?.map(entry => entry.address) ?? []));
+  const url = resolveLocalUrl(address, localAddresses);
+  if (!url) return { ok: false, error: `监听地址（${address ?? '未记录'}）不可用于本机健康检查。` };
+  const fetcher = deps.fetch ?? fetch;
+  const sleeper = deps.sleep ?? sleep;
+  const timer = deps.now ?? Date.now;
+  const requestTimeoutMs = deps.requestTimeoutMs ?? ACTIVITY_REQUEST_TIMEOUT_MS;
+  const deadline = timer() + timeoutMs;
+  let last = '没有换上新的主进程';
+  for (;;) {
+    const pid = await service.mainPid();
+    if (pid !== undefined && pid !== previousPid) {
+      try {
+        const response = await fetcher(new URL('/health', url.origin).toString(), { signal: AbortSignal.timeout(requestTimeoutMs) });
+        if (response.ok && (await response.json() as any)?.ok === true) return { ok: true, pid };
+        last = `新进程（pid ${pid}）的 /health 返回 HTTP ${response.status}`;
+      } catch (error: any) {
+        last = `新进程（pid ${pid}）的 /health 请求失败：${error?.message || String(error)}`;
+      }
+    }
+    if (timer() >= deadline) return { ok: false, error: `${Math.round(timeoutMs / 1000)} 秒内没有通过健康检查（${last}）。` };
+    await sleeper(HEALTH_INTERVAL_MS);
+  }
+}
+
+/** unit 托管的运行时：根目录（WorkingDirectory）、ExecStart，以及连它本机 API 用的地址和数据库。 */
+export interface UnitRuntime {
+  unit: string;
+  root: string;
+  /** ExecStart 是 `start --foreground`：守护状态写在根目录的 .dutydeck/daemon 下。 */
+  foreground: boolean;
+  execPath?: string;
+  script?: string;
+  mainPid?: number;
+  fragmentPath?: string;
+  endpoint: RuntimeEndpoint;
+}
+
+function flagValue(args: string[], name: string): string | undefined {
+  const at = args.indexOf(name);
+  if (at >= 0) return args[at + 1];
+  return args.find(arg => arg.startsWith(`${name}=`))?.slice(name.length + 1);
+}
+
+/**
+ * 按 unit 找到它托管的运行时。`start --foreground` 的 unit 从守护状态读地址和数据库；直接 serve 的
+ * unit（如 Tag 运行时）没有守护状态，按 ExecStart 的 --host / --port / --local-only / --database 推出来。
+ */
+export async function unitRuntime(unit: string, deps: DaemonCommandDeps): Promise<UnitRuntime | { error: string }> {
+  if ((deps.platform ?? process.platform) !== 'linux') return { error: `--unit 只支持 Linux 上的 systemd user unit。` };
+  const info = await showSystemdUnit(unit, deps);
+  if (!info) return { error: `systemctl --user show ${unit} 失败，连不上 user systemd。请在能连上 user systemd 的会话里重试（通常需要 XDG_RUNTIME_DIR=/run/user/$(id -u)）。` };
+  if (!info.loaded) return { error: `找不到 systemd user unit ${unit}。` };
+  if (!info.workingDirectory) return { error: `unit ${unit} 没有设置 WorkingDirectory，无法确定运行时的根目录。` };
+  const root = info.workingDirectory;
+  const foreground = info.args[0] === 'start' && info.args.includes('--foreground');
+  const base = { unit, root, foreground, execPath: info.execPath, script: info.script, mainPid: info.mainPid, fragmentPath: info.fragmentPath };
+  if (foreground) {
+    const state = readDaemonStatus(defaultDaemonDir(root));
+    return { ...base, endpoint: { address: state?.address, database: state?.database, authEnabled: state?.authEnabled } };
+  }
+  const env = Object.fromEntries(info.environment.map(item => [item.slice(0, item.indexOf('=')), item.slice(item.indexOf('=') + 1)]));
+  const { address, authEnabled } = addressFromCli({
+    host: flagValue(info.args, '--host'),
+    port: flagValue(info.args, '--port'),
+    ...(info.args.includes('--local-only') ? { localOnly: true } : {}),
+    ...(info.args.includes('--no-auth') ? { auth: false } : {})
+  }, env);
+  return { ...base, endpoint: { address, authEnabled, database: resolve(root, flagValue(info.args, '--database') ?? '.dutydeck/dutydeck.db') } };
+}
+
+/**
+ * `dutydeck restart --unit <unit>`：重启指定 unit 托管的运行时，例如 Tag 这类 bot 运行时。
+ * `start --foreground` 的 unit 按根目录下的守护状态走上面的 systemd 重启；直接 serve 的 unit 同样先
+ * SQLite 预检、排空并等任务结束，再 systemctl restart，最后等新进程通过 /health。
+ */
+async function unitRestart(unit: string, options: CliOptions, deps: DaemonCommandDeps): Promise<DaemonCommandResult> {
+  const target = await unitRuntime(unit, deps);
+  if ('error' in target) return { ok: false, action: 'restart', running: false, error: target.error };
+  const dir = defaultDaemonDir(target.root);
+  if (target.foreground) {
+    const state = readDaemonStatus(dir);
+    const supervised = await systemdSupervisor(dir, state, deps);
+    if (supervised && 'error' in supervised) return { ok: false, action: 'restart', running: true, pid: state?.pid, error: supervised.error };
+    if (supervised?.unit === unit) return await systemdRestart(dir, state!, unit, supervised.info, options, deps);
+  }
+  const refused = refuseExplicitFlags('restart', unit, options, dir, target.mainPid);
+  if (refused) return refused;
+  if (!target.execPath) {
+    return { ok: false, action: 'restart', running: target.mainPid !== undefined, pid: target.mainPid, error: `读不到 ${unit} 的 ExecStart，无法确认新进程能否加载 SQLite；已拒绝重启。` };
+  }
+  const sqlite = (deps.checkSqlite ?? checkSqliteDriver)({ execPath: target.execPath, ...(target.script ? { resolveFrom: target.script } : {}) });
+  if (!sqlite.ok) {
+    return { ok: false, action: 'restart', running: target.mainPid !== undefined, pid: target.mainPid,
+      error: `SQLite 预检失败，已拒绝重启。${describeSqliteDriverFailure(sqlite)}。unit ${unit} 的 ExecStart 用的就是这个解释器。` };
+  }
+  const drain: DrainResult = target.mainPid === undefined ? { ok: true } : await drainRuntime(target.endpoint, options, deps);
+  if (!drain.ok) return { ok: false, action: 'restart', running: true, pid: target.mainPid, error: drain.error };
+  const service = systemdServiceControl(unit, deps);
+  const restartError = await service.restart();
+  if (restartError) {
+    await drain.release?.();
+    return { ok: false, action: 'restart', running: (await service.mainPid()) !== undefined, pid: target.mainPid, error: restartError };
+  }
+  const healthy = await waitForServiceHealth(service, target.mainPid, target.endpoint.address, deps);
+  if (!healthy.ok) return { ok: false, action: 'restart', running: false, state: 'not-running', error: `systemctl --user restart ${unit} 已返回，但${healthy.error}查看：systemctl --user status ${unit}` };
+  const authEnabled = target.endpoint.authEnabled !== false;
+  return { ok: true, action: 'restart', running: true, pid: healthy.pid, address: target.endpoint.address, authEnabled, authentication: authEnabled ? 'required' : 'disabled', state: 'restarted' };
 }
 
 export interface DaemonStatusInfo {
