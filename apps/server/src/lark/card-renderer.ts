@@ -138,17 +138,38 @@ export async function loadLarkTaskEvents(
   runtime: { getEvents?(id: string): Promise<AgentEvent[]>; getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]> },
   sessionId: string, taskId: string, limit: number
 ) {
-  if (!runtime.getRecentEvents) return eventsForRuntimeTask(await runtime.getEvents!(sessionId), taskId);
+  return eventsForRuntimeTask(await loadLarkTaskWindow(runtime, sessionId, taskId, limit), taskId);
+}
+
+/** 含这一轮起止边界事件的窗口：插话结果就记在边界事件上。 */
+export async function loadLarkTaskWindow(
+  runtime: { getEvents?(id: string): Promise<AgentEvent[]>; getRecentEvents?(id: string, limit: number): Promise<AgentEvent[]> },
+  sessionId: string, taskId: string, limit: number
+) {
+  if (!runtime.getRecentEvents) return runtime.getEvents!(sessionId);
   // A long streamed answer can span more events than the trace window. Expand
   // until the task boundary is present so the result cannot lose its beginning.
   for (;;) {
     const events = await runtime.getRecentEvents(sessionId, limit);
-    if (events.length < limit || events.some(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId)) {
-      return eventsForRuntimeTask(events, taskId);
-    }
+    if (events.length < limit || events.some(event => event.type === 'text' && (event.data as any)?.role === 'user' && (event.data as any)?.taskId === taskId)) return events;
     limit *= 2;
   }
 }
+
+/** 插话送达的 Task 没有自己的轮次，账本在它的终态事件上记着插话结果；没插过话时返回 undefined。 */
+export function larkTaskSteering(events: AgentEvent[], taskId: string): string | undefined {
+  const settled = events.find(event => event.type === 'task' && (event.data as any)?.task?.id === taskId && (event.data as any)?.steering?.outcome);
+  return settled ? String((settled.data as any).steering.outcome) : undefined;
+}
+
+/** 插话结果的人话说明：卡面与回执只写实际发生了什么。 */
+export const steeringOutcomeText = (outcome: string) => ({
+  injected: '已把这条内容送进正在执行的这一轮，Agent 会在这一轮里接着处理，回复出现在那一轮的结果里。',
+  startedNewTurn: 'Agent 已用这条内容另起了一轮；那一轮不在 Dutydeck 的执行记录里，结果不会回到这张卡片。',
+  promptRequired: '正在执行的那一轮此刻接不了插话（还没交给 Agent，或已经结束）。',
+  unsupported: '当前 Agent 不支持插话。',
+  incompatible: '这条内容的执行设置（权限模式、模型或高危操作策略）与正在执行的那一轮不同，不能插话。'
+} as Record<string, string>)[outcome] ?? 'Agent 没有接受插话。';
 
 const fenced = (value: unknown) => {
   if (value === undefined) return '';

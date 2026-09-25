@@ -32,7 +32,7 @@ const mentioning = (id: string, text: string, member: { openId?: string; name: s
     { key: '@_user_2', name: member.name, ...(member.openId ? { openId: member.openId } : {}), mentionedType: 'user' }
   ] });
 
-async function harness(options: { managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig> } = {}) {
+async function harness(options: { managedGroup?: boolean; configPatch?: Partial<StoredLarkConfig>; steer?: AgentDriver['steer']; hold?: (prompt: string) => Promise<void> | undefined } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-commands-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let release: (() => void) | undefined;
@@ -51,9 +51,11 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
           cancelled = false;
           // 第一轮一直挂着，后续消息才会真的排队；释放闸门后所有轮次立刻收口。
           await gate;
+          await options.hold?.(prompt);
           if (cancelled) return;
           emit({ type: 'completed', data: { stopReason: 'end_turn' } });
-        }
+        },
+        ...(options.steer ? { steer: options.steer } : {})
       };
       return driver;
     }
@@ -108,7 +110,8 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
     await groupManager.sync(config.appId);
     await groupManager.save(config.appId, 'oc_group', { expectedRevision: 0, patch: {} });
   }
-  const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config });
+  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', undefined, groupManager, { store: repos.config });
+  const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   cleanups.push(async () => { coordinator.stop(); release?.(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
 
@@ -130,7 +133,7 @@ async function harness(options: { managedGroup?: boolean; configPatch?: Partial<
   /** 等某条指令真的开跑：只等它出现在队列里的用例，会在「谁在执行」上偶发竞态。 */
   const waitRunning = async (text: string) => vi.waitFor(async () =>
     expect((await runtime.getTasks(await sessionId())).some(task => task.prompt.includes(text) && task.status === 'running')).toBe(true));
-  return { repos, runtime, config, coordinator, service, cards, log, groupManager, steerQueued, prompts,
+  return { repos, runtime, config, coordinator, createCoordinator, service, cards, log, groupManager, steerQueued, prompts,
     receipts, lastReceipt, receiptNamed, markdownOf, dispatch, sessionId, waitRunning, cwd, release: () => release?.() };
 }
 
@@ -255,6 +258,91 @@ describe('/steer 插话降级为队首', () => {
     expect(h.lastReceipt()).toMatchObject({ state: 'failed' });
     expect(h.markdownOf(h.lastReceipt())).toContain('/steer <内容>');
     expect(await h.runtime.listSessions()).toHaveLength(0);
+  });
+});
+
+describe('Agent 支持插话时送进正在执行的这一轮', () => {
+  it('/steer 送达后不提到队首，也不另起一轮', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    // 插话要等第一轮真的交给 Agent；只看任务状态 running 时它可能还在准备。
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.coordinator.handle(event('om_steer', '/steer 改成另一个方向'), h.config);
+    await vi.waitFor(() => expect(steer).toHaveBeenCalledTimes(1));
+    expect(steer.mock.calls[0]![0]).toContain('改成另一个方向');
+    const session = await h.sessionId();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(session)).find(task => task.prompt.includes('改成另一个方向'))?.status).toBe('completed'));
+    await vi.waitFor(() => expect(h.cards.map(card => h.markdownOf(card)).join('\n')).toContain('已把这条内容送进正在执行的这一轮'));
+    expect(h.steerQueued).not.toHaveBeenCalled();
+    expect(h.prompts).toHaveLength(1);
+  });
+
+  it('/queue steer 按编号把排队指令送进这一轮', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第二件事');
+    await h.coordinator.handle(event('om_q', '/queue steer 1'), h.config);
+    expect(h.receiptNamed('已插话')).toBeDefined();
+    expect(steer.mock.calls[0]![0]).toContain('第二件事');
+    expect((await h.runtime.getTasks(await h.sessionId())).find(task => task.prompt.includes('第二件事'))?.status).toBe('completed');
+    expect(h.steerQueued).not.toHaveBeenCalled();
+  });
+
+  it('重启后补发的终态卡按账本写插话结果，而不是「结果不完整」', async () => {
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第二件事');
+    const session = await h.sessionId();
+    const second = (await h.runtime.getTasks(session)).find(task => task.prompt.includes('第二件事'))!;
+    // 插话在飞书这一侧停机期间送达（例如 Web 上插话后服务重启），内存里没有任何插话标记。
+    h.coordinator.stop();
+    await h.runtime.injectQueued(session, second.id, 'ou_alice');
+    const restored = h.createCoordinator();
+    try {
+      await restored.initializeWorkflows(h.config);
+      await restored.reconcile(h.config);
+      const result = h.cards.filter(card => card.cardKind === 'result' && card.taskId === 'om_2').at(-1);
+      expect(h.markdownOf(result)).toContain('已把这条内容送进正在执行的这一轮');
+      expect(h.markdownOf(result)).not.toContain('结果不完整');
+    } finally { restored.stop(); }
+  });
+
+  it('/steer 派发后、插话前这条已经开跑时，回执写它已经开始执行', async () => {
+    let releaseSteered!: () => void;
+    const steered = new Promise<void>(done => { releaseSteered = done; });
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const);
+    const h = await harness({ steer, hold: prompt => prompt.includes('改成另一个方向') ? steered : undefined });
+    cleanups.push(() => releaseSteered());
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    const realInject = h.runtime.injectQueued.bind(h.runtime);
+    h.runtime.injectQueued = (async (id: string, taskId: string, actorId?: string) => {
+      // 派发与插话之间第一轮结束，这条自己开跑了。
+      h.release();
+      await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).find(task => task.id === taskId)?.status).toBe('running'));
+      return realInject(id, taskId, actorId);
+    }) as typeof h.runtime.injectQueued;
+    await h.coordinator.handle(event('om_steer', '/steer 改成另一个方向'), h.config);
+    await vi.waitFor(() => expect(h.cards.map(card => h.markdownOf(card)).join('\n')).toContain('已经开始执行'), { timeout: 5_000 });
+    expect(h.cards.map(card => h.markdownOf(card)).join('\n')).not.toContain('提升队首也失败了');
+    expect(steer).not.toHaveBeenCalled();
+    expect(h.steerQueued).not.toHaveBeenCalled();
+  });
+
+  it('/queue steer 在 Agent 不支持插话时如实说明，这条仍在排队', async () => {
+    const h = await harness();
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第二件事');
+    await h.coordinator.handle(event('om_q', '/queue steer 1'), h.config);
+    expect(h.receiptNamed('/queue 未插话')).toMatchObject({ state: 'failed' });
+    expect(h.markdownOf(h.receiptNamed('/queue 未插话'))).toContain('不支持插话');
+    expect((await h.runtime.getTasks(await h.sessionId())).find(task => task.prompt.includes('第二件事'))?.status).toBe('queued');
   });
 });
 

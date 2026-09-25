@@ -22,6 +22,7 @@ import type { LarkMessageResource } from './message-content.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
 import {
   loadLarkTaskEvents,
+  steeringOutcomeText,
   hasUnresolvedToolCalls,
   isLarkCardContentRejected,
   isLarkMessageRateLimit,
@@ -152,6 +153,8 @@ export type LarkTask = {
   steer?: boolean;
   /** /steer 的降级结果说明，派发后按真实发生的事写进卡面，绝不预告未发生的成功。 */
   steerNote?: string;
+  /** 这一轮已经插话送达，没有自己的轮次：结果卡只写插话结果，不渲染输出。 */
+  steered?: string;
 };
 export type PersistedLarkCardTask = {
   result_feedback_state?: string;
@@ -1457,12 +1460,12 @@ export class LarkMessageCoordinator {
           // 摘要为卡片预算只列前几条，编号却一直有效：不写这句，第 6 条以后就成了看不见也够不着的死区。
           const hidden = queued.length > QUEUE_SUMMARY_MAX_ITEMS ? `上面只列出前 ${QUEUE_SUMMARY_MAX_ITEMS} 条，编号 ${QUEUE_SUMMARY_MAX_ITEMS + 1}-${queued.length} 同样可用。` : '';
           await replyCard('待执行指令', summary
-            ? `${summary}\n\n编号按收到顺序，共 ${queued.length} 条。${hidden}取消：\`/queue cancel <编号>\`；提到队首：\`/queue top <编号>\`。`
+            ? `${summary}\n\n编号按收到顺序，共 ${queued.length} 条。${hidden}取消：\`/queue cancel <编号>\`；提到队首：\`/queue top <编号>\`${this.runtime.injectQueued ? '；立即插话：`/queue steer <编号>`' : ''}。`
             : '**当前没有待执行的指令。**');
           return 'handled';
         }
-        if (action !== 'cancel' && action !== 'top' || !argument || extra.length) {
-          throw new Error('用法：`/queue`、`/queue cancel <编号>`、`/queue top <编号>`');
+        if (action !== 'cancel' && action !== 'top' && action !== 'steer' || !argument || extra.length) {
+          throw new Error('用法：`/queue`、`/queue cancel <编号>`、`/queue top <编号>`、`/queue steer <编号>`');
         }
         const index = Number(argument);
         if (!Number.isInteger(index) || index < 1 || index > queued.length) {
@@ -1479,6 +1482,17 @@ export class LarkMessageCoordinator {
           if (!this.runtime.cancelQueued) throw new Error('当前 Dutydeck 运行时无法取消排队任务，请前往 Dutydeck Web 处理。');
           await this.runtime.cancelQueued(sessionId, target.id, event.senderOpenId);
           await replyCard('已取消排队指令', `**第 ${index} 条待执行指令不会再执行。**\n\n${escapeLarkPromptEcho(larkCommandEcho(target.prompt, 120))}`);
+        } else if (action === 'steer') {
+          if (!this.runtime.injectQueued) throw new Error('当前 Dutydeck 运行时不支持插话，可用 `/queue top <编号>` 提到队首。');
+          // 插话会改变正在执行的那一轮，与提到队首同一道 run.interrupt 门。
+          if (!await this.canInterruptCurrentTurn(config, event, sessionId)) {
+            await replyCard('/queue 未执行', '**插话会改变当前正在执行的那一轮，而那一轮不是你的任务。**\n\n你没有中断它的权限，这条指令仍在排队。', { failed: true });
+            return 'handled';
+          }
+          const steering = await this.runtime.injectQueued(sessionId, target.id, event.senderOpenId);
+          const echo = escapeLarkPromptEcho(larkCommandEcho(target.prompt, 120));
+          if (steering.outcome === 'injected' || steering.outcome === 'startedNewTurn') await replyCard('已插话', `**${steeringOutcomeText(steering.outcome)}**\n\n${echo}`);
+          else await replyCard('/queue 未插话', `**${steeringOutcomeText(steering.outcome)}第 ${index} 条指令仍在排队，顺序没有改动。**\n\n要尽快执行可用 \`/queue top ${index}\` 提到队首。\n\n${echo}`, { failed: true });
         } else {
           if (!this.runtime.steerQueued) throw new Error('当前 Dutydeck 运行时无法调整队列顺序，请前往 Dutydeck Web 处理。');
           if (!await this.canInterruptCurrentTurn(config, event, sessionId)) {
@@ -1501,9 +1515,8 @@ export class LarkMessageCoordinator {
           await replyCard('/steer 未执行', '**当前正在执行的是他人的任务，你没有中断它的权限。**\n\n直接把这条内容作为普通消息发出来，它会排到队尾执行。', { failed: true });
           return 'handled';
         }
-        // 运行时没有「向正在执行的这一轮注入内容」的原语，只有把排队中的一轮提到队首。
         // 内容仍走完整建任务链路（授权、风险检查、附件、卡片一个都不能少）；
-        // 队首提升在派发拿到 runtime task id 之后做，结果如实写在这张卡上。
+        // 派发拿到 runtime task id 之后先试插话，不支持再降级为队首提升，结果如实写在这张卡上。
         return { prompt: route.argsText, steer: true };
       }
       if (route.command === 'grant' || route.command === 'revoke') {
@@ -3941,7 +3954,8 @@ export class LarkMessageCoordinator {
           await this.saveCardTask(task, state);
           return;
         }
-        const context = completed ? this.interactionContext(task) : undefined;
+        // 插话送达的这一轮没有自己的输出，也就没有可验收的结果。
+        const context = completed && !task.steered ? this.interactionContext(task) : undefined;
         // P0-4：完成/失败/被中断的独立新消息在群聊开启时 @ 发起人；超长结果转文件消息时
         // 长文的 @ 保留在摘要卡，附件不 @；reaction 不承担通知。
         const terminalMention = senderGroupMention(config.groupCardMention, event);
@@ -3950,7 +3964,7 @@ export class LarkMessageCoordinator {
         const verification = await this.verificationView(task, config, state);
         const resultActions = await this.resultActionCapabilities(task, config, state);
         const elements = [
-          ...(explicit ? [] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events)),
+          ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events)),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
           ...(verification.element ? [verification.element] : []),
           ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : [])];
@@ -4240,7 +4254,11 @@ export class LarkMessageCoordinator {
               .then(() => this.saveCardTask(task, record.status))
               .catch(error => this.log.warn({ error, taskId: task.id, status: record.status }, '更新需要核对状态卡片失败'))
               .finally(() => this.scheduleReconcile());
-          } else if (record.status === 'completed' || record.status === 'failed' || record.status === 'interrupted' || record.status === 'cancelled') finish(record.status);
+          } else if (record.status === 'completed' || record.status === 'failed' || record.status === 'interrupted' || record.status === 'cancelled') {
+            const steering = (agentEvent.data as any)?.steering;
+            if (record.status === 'completed' && steering?.outcome) { task.steered = String(steering.outcome); task.steerNote = steeringOutcomeText(task.steered); }
+            finish(record.status);
+          }
           return;
         }
         if (!active || settled) return;
@@ -4272,8 +4290,8 @@ export class LarkMessageCoordinator {
         // 旧轮次不得把自己的 runtime task 写成新一轮的，否则 mapping 里的任务归属就错了。
         if (task.turn !== currentTurn) return;
         task.runtimeTaskId = runtimeTask.id;
-        // /steer 的降级：运行时没有「注入当前轮」的原语，只能把这条提到队首。
-        // 注记按真实结果写：提升成功、提升失败、或本来就没有排队都各说各的，不预告成功。
+        // /steer：先把这条送进正在执行的那一轮（Agent 支持插话时）；送不进去再降级为提到队首。
+        // 注记按真实结果写：插话送达、提升成功、提升失败、或本来就没有排队都各说各的，不预告成功。
         if (task.steer) {
           // 前面真的有东西才谈得上插队：只有自己一条时 steerQueued 无事可做，
           // 调了它再把异常写成「提升失败」，会把一个本来正常的情形说成出了问题。
@@ -4281,22 +4299,44 @@ export class LarkMessageCoordinator {
             ? (await this.runtime.getTasks(session.id).catch(() => []))
               .filter(item => item.id !== runtimeTask.id && (item.status === 'queued' || item.status === 'running'))
             : [];
-          task.steerNote = runtimeTask.status !== 'queued' || !ahead.length
-            ? '当前 Agent 不支持插话。此刻没有别的任务排在前面，这条内容会直接按顺序执行。'
+          // 派发要花上几秒（附件、建会话），期间正在执行的可能已经换成别人的任务：
+          // 插话与提升都会改变那一轮，真正动手前重新过一次中断门，命令层那次检查不能替这一刻背书。
+          // 这道门要查通讯录（isMember 会真打飞书接口），抛异常不能连累这条任务：
+          // runtime 已经接收它、还会照跑，把它打成 failed 就是发一张与事实相反的终态卡。
+          // 插话与提升本身 fail closed：判不了就都不做。
+          const allowed = runtimeTask.status === 'queued' && ahead.length > 0 && await this.canInterruptCurrentTurn(config, event, session.id).catch(() => false);
+          const running = ahead.some(item => item.status === 'running');
+          // 派发到插话之间这几秒，这条可能已经自己开跑或被取消：按它此刻的状态写，不说成插话或提升失败。
+          const movedNote = async () => {
+            const status = (await this.runtime.getTasks?.(session.id).catch(() => undefined))?.find(item => item.id === runtimeTask.id)?.status;
+            return !status || status === 'queued' ? undefined
+              : status === 'cancelled' ? '这条内容在插话之前已被取消。' : '这条内容在插话之前已经开始执行，按普通的一轮处理，没有插话。';
+          };
+          const steering = allowed && running && this.runtime.injectQueued
+            ? await this.runtime.injectQueued(session.id, runtimeTask.id, event.senderOpenId).catch(error => {
+              if (error instanceof RuntimeError && error.code === 'QUEUED_TASK_NOT_FOUND') return { outcome: 'moved' };
+              this.log.warn({ error, runtimeTaskId }, '插话失败，降级为提升队首');
+              return { outcome: 'failed' };
+            })
+            : undefined;
+          // 没过中断门时没有尝试插话，原因由下面的门分支写。
+          const reason = steering ? steeringOutcomeText(steering.outcome)
+            : !this.runtime.injectQueued ? '当前 Agent 不支持插话。' : !running ? '当前没有正在执行的一轮可以插话。' : '';
+          if (steering?.outcome === 'injected' || steering?.outcome === 'startedNewTurn') {
+            task.steered = steering.outcome;
+            task.steerNote = reason;
+          } else if (steering?.outcome === 'moved') task.steerNote = await movedNote() ?? `${reason}这条内容按正常顺序排队。`;
+          else task.steerNote = runtimeTask.status !== 'queued' || !ahead.length
+            ? `${reason}此刻没有别的任务排在前面，这条内容会直接按顺序执行。`
             : !this.runtime.steerQueued
-              ? '当前 Agent 不支持插话，运行时也无法调整队列顺序：这条内容按正常顺序排队。'
-              // 派发要花上几秒（附件、建会话），期间正在执行的可能已经换成别人的任务：
-              // 真正动手前重新过一次中断门，命令层那次检查不能替这一刻背书。
-              // 这道门要查通讯录（isMember 会真打飞书接口），抛异常不能连累这条任务：
-              // runtime 已经接收它、还会照跑，把它打成 failed 就是发一张与事实相反的终态卡。
-              // 提升本身 fail closed：判不了就不提升。
-              : !await this.canInterruptCurrentTurn(config, event, session.id).catch(() => false)
-                ? '当前 Agent 不支持插话，且无法确认你有权中断正在执行的那一轮：这条内容按正常顺序排队。'
+              ? `${reason}运行时也无法调整队列顺序：这条内容按正常顺序排队。`
+              : !allowed
+                ? `${reason}无法确认你有权中断正在执行的那一轮：这条内容按正常顺序排队。`
                 : await this.runtime.steerQueued(session.id, runtimeTask.id, event.senderOpenId)
-                .then(() => '当前 Agent 不支持插话。已把这条内容提到队首，当前正在执行的那一轮会被中断。')
-                .catch(error => {
+                .then(() => `${reason}已把这条内容提到队首，当前正在执行的那一轮会被中断。`)
+                .catch(async error => {
                   this.log.warn({ error, runtimeTaskId }, '插话降级：提升队首失败，任务按原顺序排队');
-                  return '当前 Agent 不支持插话，且提升队首失败：这条内容按正常顺序排队。';
+                  return await movedNote() ?? `${reason}提升队首也失败了：这条内容按正常顺序排队。`;
                 });
         }
         const mappingCommitted = await this.saveCardTask(task, task.state).then(() => true, error => {
@@ -4308,7 +4348,7 @@ export class LarkMessageCoordinator {
         if (task.inbox && contextCommitted && mappingCommitted) await this.inbox!.update(task.inbox, { state: 'accepted', taskId: runtimeTask.id }).catch(error => this.log.error({ error, runtimeTaskId }, '任务已接收，入站记录待重启对账'));
         if (task.turn !== currentTurn) return;
         // 先提交 queued UI，再消费订阅期间缓存的 running 事件，杜绝 running→queued 闪回。
-        if (runtimeTask.status === 'queued' && task.state === 'queued') {
+        if (runtimeTask.status === 'queued' && task.state === 'queued' && !task.steered) {
           const recovery = await describeLarkTaskRecovery(this.runtime, session.id, runtimeTask.id, 'queued', runtimeTask.queuedAhead,
             { relaunch: await this.relaunchReady(config.appId, task.id, 'queued', task.turn), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
           const queueMarkdown = withCardNotes(recovery.markdown, recovery.blocked);

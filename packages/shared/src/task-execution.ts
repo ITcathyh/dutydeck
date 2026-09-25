@@ -138,6 +138,8 @@ export interface CommitResult {
   accepted?: AcceptedTask;
 }
 export interface QueueOperationInput { operationId: string; actor: ExecutionActor; interrupt: boolean }
+/** A queued Task delivered through `_session/steering` into a submitted Attempt instead of its own turn. */
+export interface SteeringDeliveryInput { operationId: string; actor: ExecutionActor; target: AttemptRef; outcome: 'injected' | 'startedNewTurn' }
 export interface QueueAction extends SessionFence {
   operationId: string; source: 'accept' | 'promote' | 'interrupt'; taskId: string; actor: ExecutionActor; interrupt: boolean; target?: AttemptRef & { runId: string };
   revision: number; state: 'pending' | 'applied' | 'blocked' | 'obsolete'; evidence?: QueueActionEvidence;
@@ -177,6 +179,7 @@ export interface BoundExecutionRepository {
   acceptTask(f: SessionFence, request: TaskRequestV1, input: AcceptedTaskInputV2, position: 'front' | 'back'): CommitResult;
   claimNext(f: SessionFence): CommitResult | undefined;
   promoteQueued(f: SessionFence, taskId: string, expectedTaskRevision: number, operation: QueueOperationInput): CommitResult;
+  deliverQueuedBySteering(f: SessionFence, taskId: string, expectedTaskRevision: number, input: SteeringDeliveryInput): CommitResult;
   getPendingQueueActions(f: SessionFence): QueueAction[];
   settleQueueAction(f: SessionFence, operationId: string, expectedRevision: number, evidence: QueueActionEvidence): QueueAction;
   markSubmissionPending(f: AttemptFence, input: SubmissionIntent): CommitResult;
@@ -329,6 +332,7 @@ export const taskExecutionSchemas = {
   manual: z.object({ kind:z.literal('manual'), outcome:z.enum(['completed','failed','interrupted','cancelled','unknown']), decision:decisionSchema, verifiedOutput:z.object({eventId:id,digest:executionDigestSchema}).strict().optional() }).strict(),
   position: z.enum(['front','back']),
   queueOperation: z.object({ operationId:id, actor:executionActorSchema, interrupt:z.boolean() }).strict(),
+  steeringDelivery: z.object({ operationId:id, actor:executionActorSchema, target:z.object({ taskId:id, attemptId:id }).strict(), outcome:z.enum(['injected','startedNewTurn']) }).strict(),
   queueEvidence: z.object({ evidenceId:id, state:z.enum(['applied','blocked','obsolete']), reason:id, resourceChecks:resourceChecksSchema }).strict(),
   receipt: z.object({ submissionId:id, kind:z.literal('provider_accepted'), provider:id, receiptRef:id, digest:executionDigestSchema }).strict(),
   reconcile: z.object({ reasonId:id, code:id, evidenceRefs:z.array(id) }).strict(),

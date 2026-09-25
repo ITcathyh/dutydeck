@@ -6,7 +6,7 @@ import { AcpxAdapter, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
-import type { PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskRequestV1 } from '@dutydeck/shared';
+import type { PtyRetirementRecovery, ExecutionRecoveryDecision, AcceptedTask, AcceptedTaskInputV2, AttemptFence, AttemptRef, BoundExecutionRepository, CommitResult, DriverSteeringOutcome, ExecutionActor, ResourceCheckRef, SessionFence, TaskAttempt, TaskRequestV1 } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
 import { PersistentEventPublisher, type SubscribeOptions, type EventListener } from './persistent-event-publisher.js';
 import { digest, eventJson, DriverConfigurationLedger, LocalDriverLedger, type ExecutionOptions } from './ledger.js';
@@ -96,7 +96,15 @@ export interface RuntimeOptions {
     agentPrompt: string;
     skillDeliveries?: SkillDeliveryMetadata[];
   }>;
+  /** Diagnostics only, e.g. a steering reply that arrives after its timeout. */
+  log?: { warn(data: Record<string, unknown>, message: string): void };
 }
+
+/** 插话结果。injected / startedNewTurn 已记入投递账本并移出队列；其余结果下这一轮仍在队列里，按正常新一轮执行。 */
+export type SteeringOutcome = DriverSteeringOutcome | 'incompatible' | 'failed';
+/** An unanswered steering request neither ends with the turn nor blocks the queue past this; the Task then runs as its own turn. */
+const STEERING_TIMEOUT_MS = 30_000;
+export interface SteeringResult { task: PublicTaskRecord; outcome: SteeringOutcome; error?: string }
 
 export class DutydeckRuntime {
   private readonly mutations = new SessionMutations(() => this.assertBinding());
@@ -166,6 +174,8 @@ export class DutydeckRuntime {
   private readonly workspaces: WorkspaceManager;
   private readonly verifications: VerificationManager;
   private readonly verifyingSessions = new Set<string>();
+  /** A steering request is in flight (session -> Task): the queue must not claim, and cancel must not retract, the Task being injected. */
+  private readonly steeringSessions = new Map<string, string>();
   private readonly startingWorkSessions = new Set<string>();
   private readonly verificationDeferredTasks = new Map<string, Set<string>>();
   private readonly blockedVerificationSessions = new Map<string, string>();
@@ -1917,7 +1927,7 @@ export class DutydeckRuntime {
     if (queue.length) this.queues.set(id, queue); else this.queues.delete(id);
   }
   private scheduleQueue(id: string) {
-    if (this.ptyRetirements.has(id) || this.shuttingDown || this.initializationFailed || this.queueBlocked.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id)
+    if (this.ptyRetirements.has(id) || this.shuttingDown || this.initializationFailed || this.queueBlocked.has(id) || this.stopRuns.has(id) || this.stopBlocks.has(id) || this.blockedDrivers.has(id) || !this.mutations.valid(this.lifecycle(id)) || this.drains.has(id) || this.attempts.has(id) || this.verifyingSessions.has(id) || this.steeringSessions.has(id)
       || this.blockedVerificationSessions.has(id) || !(this.queues.get(id)?.length)) return;
     const token = owner(id, this.lifecycle(id)); this.drains.set(id, token);
     const run = this.mutations.run(token, () => this.drainQueue(id)); this.queueRuns.set(id, run);
@@ -1930,7 +1940,7 @@ export class DutydeckRuntime {
     void run.then(finish, finish);
   }
   private async drainQueue(id: string) {
-    while (this.mutations.valid() && !this.shuttingDown && !this.attempts.has(id) && !this.verifyingSessions.has(id)) {
+    while (this.mutations.valid() && !this.shuttingDown && !this.attempts.has(id) && !this.verifyingSessions.has(id) && !this.steeringSessions.has(id)) {
       const session = await this.mutations.wait(() => this.repos.sessions.get(id));
       if (!session) return;
       let next: TaskRecord | undefined;
@@ -2002,6 +2012,8 @@ export class DutydeckRuntime {
       const committed = await this.mutations.write(id, async () => {
         const task = this.repos.execution.getTaskExecution(taskId)?.task;
         if (!task) throw new RuntimeError('QUEUED_TASK_NOT_FOUND', 'Queued task is missing', 404);
+        // The agent may already hold this content; cancelling now would contradict what it does with it.
+        if (this.steeringSessions.get(id) === taskId) throw new RuntimeError('STEERING_IN_PROGRESS', 'The queued task is being steered into the running turn', 409);
         return this.wake(this.bound().cancelQueued(this.fence(session), taskId, expectedRevision ?? task.revision, { decisionId, actor: this.actor(session, actorId), action: 'cancel', evidenceRefs: ['runtime:queue-cancel'], resourceChecks: [] }));
       });
       const queue = this.queues.get(id);
@@ -2026,6 +2038,59 @@ export class DutydeckRuntime {
       const committed = await this.mutations.write(id, async () => this.wake(this.bound().promoteQueued(this.fence(session), taskId, expectedRevision ?? task.revision, { operationId, actor: this.actor(session, actorId), interrupt: true })));
       await this.projectQueue(id); await this.applyQueueActions(session); this.queueBlocked.delete(id); this.scheduleQueue(id);
       return this.publicTask(committed.task!);
+    });
+  }
+  /** 插话：把排队中的一轮送进正在执行的那一轮，而不是等它自己的轮次。 */
+  async injectQueued(id: string, taskId: string, actorId?: string, operationId = makeId('steering')): Promise<SteeringResult> {
+    return this.scoped(id, async () => {
+      const { session, driver } = await this.active(id);
+      await this.authorize(id, actorId);
+      const queued = () => {
+        const task = this.repos.execution.getTaskExecution(taskId)?.task;
+        if (!task || task.sessionId !== id || task.status !== 'queued') throw new RuntimeError('QUEUED_TASK_NOT_FOUND', 'Queued task is missing', 404);
+        return task;
+      };
+      const running = () => {
+        const ref = this.attempts.has(id) ? this.attemptRefs.get(this.attempts.get(id)!) : undefined;
+        const execution = ref && this.repos.execution.getTaskExecution(ref.taskId);
+        const attempt = execution?.attempts.find(item => item.attemptId === ref!.attemptId);
+        return ref && execution && attempt?.state === 'active' && attempt.submissionState !== 'not_submitted' ? { ref, task: execution.task } : undefined;
+      };
+      const task = queued();
+      const skipped = (outcome: SteeringOutcome, error?: string): SteeringResult => ({ task: this.publicTask(task), outcome, ...(error ? { error } : {}) });
+      if (!driver?.steer) return skipped('unsupported');
+      const target = running();
+      if (!target) return skipped('promptRequired');
+      const input = this.acceptedInput(task);
+      // Injected content runs under the current turn's permission mode, model and risk policy.
+      if (task.currentAttemptId || digest(input.executionOptions) !== digest(this.acceptedInput(target.task).executionOptions)
+        || digest(task.executionContext?.riskPolicy ?? null) !== digest(target.task.executionContext?.riskPolicy ?? null)) return skipped('incompatible');
+      await this.authorize(id, task.executionContext?.actorId);
+      await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'submit') ?? Promise.resolve());
+      this.steeringSessions.set(id, taskId);
+      try {
+        queued();
+        const current = running();
+        if (current?.ref.attemptId !== target.ref.attemptId) return skipped('promptRequired');
+        let outcome: DriverSteeringOutcome;
+        let timer: NodeJS.Timeout | undefined, expired = false;
+        const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { expired = true; reject(new Error(`Steering request got no answer within ${STEERING_TIMEOUT_MS / 1000}s`)); }, STEERING_TIMEOUT_MS); });
+        try {
+          outcome = await this.driverOperation(driver, () => {
+            const reply = driver.steer!(input.executionContext.agentPrompt);
+            // A late answer cannot be undone: after the timeout the Task stays queued, so an injected reply means it may run twice.
+            void reply.then(late => { if (expired) this.options.log?.warn({ sessionId: id, taskId, outcome: late }, 'Steering reply arrived after its timeout'); }, () => {});
+            return Promise.race([reply, timeout]);
+          });
+        }
+        catch (error) { return skipped('failed', error instanceof Error ? error.message : String(error)); }
+        finally { clearTimeout(timer); }
+        if (outcome !== 'injected' && outcome !== 'startedNewTurn') return skipped(outcome);
+        const committed = await this.mutations.write(id, async () => this.wake(this.bound().deliverQueuedBySteering(this.fence(session), taskId, queued().revision,
+          { operationId, actor: this.actor(session, actorId), target: { taskId: target.ref.taskId, attemptId: target.ref.attemptId }, outcome })));
+        await this.projectQueue(id);
+        return { task: this.publicTask(committed.task!), outcome };
+      } finally { this.steeringSessions.delete(id); this.scheduleQueue(id); }
     });
   }
   private async cancelSessionQueue(id: string, suppliedActor?: ExecutionActor): Promise<boolean> {

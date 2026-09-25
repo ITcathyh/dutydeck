@@ -222,18 +222,31 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'terminal.write');
     return runtime.runVerification(request.params.id, request.body, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
   });
-  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt'; skillRequests?: string[] } }>('/api/sessions/:id/send', async (request, reply) => {
+  app.post<{ Params: { id: string }; Body: { prompt: string; mode?: 'queue' | 'interrupt' | 'steer'; skillRequests?: string[] } }>('/api/sessions/:id/send', async (request, reply) => {
     const prompt = request.body?.prompt?.trim();
-    const mode = request.body?.mode ?? 'queue';
+    const requested = request.body?.mode ?? 'queue';
     if (!prompt) throw new RuntimeError('INVALID_PROMPT', 'Prompt must not be empty', 400);
-    if (mode !== 'queue' && mode !== 'interrupt') throw new RuntimeError('INVALID_SEND_MODE', `Unknown send mode: ${String(mode)}`, 400);
+    if (requested !== 'queue' && requested !== 'interrupt' && requested !== 'steer') throw new RuntimeError('INVALID_SEND_MODE', `Unknown send mode: ${String(requested)}`, 400);
+    // 插话先按排队接收（完整的任务链路），再尝试送进正在执行的那一轮；送不进去就照常排队。
+    const mode = requested === 'steer' ? 'queue' : requested;
     const skillRequests = request.body.skillRequests;
     if (skillRequests !== undefined && (!Array.isArray(skillRequests) || skillRequests.length > 16 || skillRequests.some(path => typeof path !== 'string' || !path.trim() || path.length > 4096))) throw new RuntimeError('INVALID_SKILL_REQUESTS', '请选择目录中的 Skill，最多 16 项', 400);
     const decision = await requireSessionExecution(request, request.params.id, 'session', 'turn.append');
     const task = decision?.source === 'owner'
       ? await runtime.dispatch(request.params.id, prompt, mode, prompt, undefined, installationOwnerTaskActor, undefined, skillRequests)
       : await runtime.dispatch(request.params.id, prompt, mode, prompt, undefined, undefined, undefined, skillRequests);
-    return reply.code(202).send({ accepted: true, task });
+    if (requested !== 'steer') return reply.code(202).send({ accepted: true, task });
+    // 这一条已经开跑（没有排队）也算按正常新一轮处理。
+    let steering: { task: unknown; outcome: string; error?: string } = { task, outcome: 'promptRequired' };
+    if (task.status === 'queued') {
+      try { steering = await runtime.injectQueued(request.params.id, task.id, decision?.source === 'owner' ? installationOwnerTaskActor : undefined); }
+      catch (error) {
+        if (!(error instanceof RuntimeError && error.code === 'QUEUED_TASK_NOT_FOUND')) steering = { task, outcome: 'failed', error: error instanceof Error ? error.message : String(error) };
+        // 派发到插话之间这一条已经开跑或被取消：按它此刻的状态回报。
+        else steering = { task: (await runtime.getTasks(request.params.id)).find(item => item.id === task.id) ?? task, outcome: 'moved' };
+      }
+    }
+    return reply.code(202).send({ accepted: true, task: steering.task, steering: { outcome: steering.outcome, ...(steering.error ? { error: steering.error } : {}) } });
   });
   app.patch<{ Params: { id: string }; Body: { model?: string; reasoningEffort?: string } }>('/api/sessions/:id/config', async request => {
     const model = request.body?.model?.trim();
@@ -255,6 +268,10 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId/steer', async request => {
     await requireSessionExecution(request, request.params.id, 'session', 'queue.promote');
     return runtime.steerQueued(request.params.id, request.params.taskId);
+  });
+  app.post<{ Params: { id: string; taskId: string } }>('/api/sessions/:id/queue/:taskId/inject', async request => {
+    const decision = await requireSessionExecution(request, request.params.id, 'session', 'queue.promote');
+    return runtime.injectQueued(request.params.id, request.params.taskId, decision?.source === 'owner' ? installationOwnerTaskActor : undefined);
   });
   const sessionActionPolicy: Record<'interrupt' | 'pause' | 'resume' | 'stop' | 'restart', PolicyAction> = {
     interrupt: 'run.interrupt', pause: 'run.pause', resume: 'run.resume', stop: 'run.interrupt', restart: 'run.restart'
