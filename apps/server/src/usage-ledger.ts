@@ -9,7 +9,10 @@ export type UsagePricing = z.infer<typeof pricingSchema>;
 /**
  * 估算单价（美元 / 百万 token），只在 Agent 不报成本时使用（codex-acp），结果一律标为估算。
  * 默认值按 OpenAI API 公开标价（https://openai.com/api/pricing ，2025 年末版本）录入，未与实际账单核对；
- * 按模型名最长前缀匹配，匹配不到用 default。input 按 OpenAI 口径含缓存命中部分，命中部分按 cachedInput 计。
+ * 按模型名最长前缀匹配，匹配不到用 default。token 按 ACP 适配器的口径：inputTokens 不含缓存命中，缓存命中单列在 cachedReadTokens，
+ * 两者分别按 input、cachedInput 计。已安装的 codex-acp 1.12.1-preview.4 在 dist/index.js 的 toTokenCount 里把
+ * inputTokens 换算成 inputTokens - cachedInputTokens，toPromptUsage 再把 cachedInputTokens 报成 cachedReadTokens；
+ * claude-agent-acp 沿用 Anthropic 的 input_tokens，本来就不含缓存。
  * 部署时可用 DUTYDECK_USAGE_PRICING_JSON 整表覆盖。
  */
 export const defaultUsagePricing: UsagePricing = {
@@ -30,9 +33,7 @@ interface Tokens { inputTokens?: number; outputTokens?: number; cacheReadTokens?
 export function estimateCostUsd(pricing: UsagePricing, model: string | undefined, tokens: Tokens): number {
   const name = model?.toLowerCase() ?? '';
   const rate = pricing.models.filter(entry => name.startsWith(entry.match.toLowerCase())).sort((a, b) => b.match.length - a.match.length)[0] ?? pricing.default;
-  const input = tokens.inputTokens ?? 0;
-  const cached = Math.min(tokens.cacheReadTokens ?? 0, input);
-  return ((input - cached) * rate.inputPerMTok + cached * rate.cachedInputPerMTok + (tokens.outputTokens ?? 0) * rate.outputPerMTok) / 1_000_000;
+  return ((tokens.inputTokens ?? 0) * rate.inputPerMTok + (tokens.cacheReadTokens ?? 0) * rate.cachedInputPerMTok + (tokens.outputTokens ?? 0) * rate.outputPerMTok) / 1_000_000;
 }
 
 /** 会话累计读数与上一次求差；读数变小说明 Agent 进程重启、累计从零开始，本次读数整体就是增量。 */
