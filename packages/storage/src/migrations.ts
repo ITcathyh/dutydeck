@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3'
 import { createTaskExecutionSchema } from './task-execution-migration.js'
 import { createBotConfigurationSchema } from './bot-configuration-migration.js'
 import { createCollaborationSchema } from './collaboration-migration.js'
+import { pruneScheduleEntityVersions } from './schedule-foundation.js'
 
 export interface Migration {
   version: number
@@ -13,6 +14,10 @@ export interface Migration {
 function ensureColumn(db: Database.Database, table: string, column: string, definition: string): void {
   const columns = db.pragma(`table_info(${table})`) as Array<{ name: string }>
   if (!columns.some(entry => entry.name === column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${definition}`)
+}
+
+function tableExistsForMigration(db: Database.Database, table: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table))
 }
 
 export const migrations: Migration[] = [
@@ -551,7 +556,16 @@ export const migrations: Migration[] = [
   // Bot 级 presentation 增加两档静默形态。两列都是既有的 JSON 列，只改内容不改表结构，
   // 但已经建好的旧库里存的还是旧形态，读出来会被 schema 拒掉，所以在这里就地改写。
   { version: 23, name: 'group_presentation_override_fields', up: migratePresentationOverrides },
-  { version: 24, name: 'collaboration_participation_inheritance', up(db) { ensureColumn(db, 'collaboration_settings', 'participation_inherited', 'participation_inherited INTEGER NOT NULL DEFAULT 0 CHECK (participation_inherited IN (0, 1))') } }
+  { version: 24, name: 'collaboration_participation_inheritance', up(db) { ensureColumn(db, 'collaboration_settings', 'participation_inherited', 'participation_inherited INTEGER NOT NULL DEFAULT 0 CHECK (participation_inherited IN (0, 1))') } },
+  {
+    // 旧版本每个 tick 的租约续租都写一行 schedule_entity_versions（线上 5 天 40 万行）。
+    // 续租不再写版本；这里把历史版本按实体收敛到保留窗口，租约实体只留下真正的持有者变更。
+    version: 25,
+    name: 'schedule_entity_versions_retention',
+    up(db) {
+      if (tableExistsForMigration(db, 'schedule_entity_versions')) pruneScheduleEntityVersions(db)
+    }
+  }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

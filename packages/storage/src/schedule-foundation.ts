@@ -38,6 +38,22 @@ import {
 } from '@dutydeck/shared';
 
 type ScheduleVersionKind = 'schedule_definition' | 'schedule_lease' | 'archived_integration';
+
+/** 配置修订审计只保留每个实体最近的若干条；租约续租不写版本，正常量级很小。 */
+export const SCHEDULE_VERSION_RETENTION = 50;
+
+/** v25 迁移复用同一套收敛逻辑：把历史上续租心跳写出的版本行清到保留窗口内。 */
+export function pruneScheduleEntityVersions(sqlite: Database.Database, retention = SCHEDULE_VERSION_RETENTION): void {
+  sqlite.prepare(`
+    DELETE FROM schedule_entity_versions
+    WHERE id NOT IN (
+      SELECT id FROM (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY entity_kind, entity_id ORDER BY to_revision DESC, id DESC) AS rn
+        FROM schedule_entity_versions
+      ) WHERE rn <= ?
+    )
+  `).run(retention);
+}
 type Versioned = ScheduleDefinition | ScheduleLease | ArchivedHammerIntegration;
 
 interface DefinitionRow {
@@ -141,6 +157,16 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
   const recordVersion = (kind: ScheduleVersionKind, entity: Versioned, before?: Versioned) => {
     sqlite.prepare('INSERT INTO schedule_entity_versions (entity_kind, entity_id, from_revision, to_revision, before_json, after_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
       .run(kind, entity.id, before?.revision ?? null, entity.revision, before ? JSON.stringify(before) : null, hash(entity), new Date().toISOString());
+    sqlite.prepare(`
+      DELETE FROM schedule_entity_versions
+      WHERE entity_kind = ? AND entity_id = ?
+        AND id NOT IN (
+          SELECT id FROM schedule_entity_versions
+          WHERE entity_kind = ? AND entity_id = ?
+          ORDER BY to_revision DESC, id DESC
+          LIMIT ?
+        )
+    `).run(kind, entity.id, kind, entity.id, SCHEDULE_VERSION_RETENTION);
   };
   const insertGeneration = (definition: ScheduleDefinition) => {
     const entity = scheduleGenerationSchema.parse({ schemaVersion: 1, id: generationId(definition.id, definition.currentGeneration), scheduleDefinitionId: definition.id, generation: definition.currentGeneration, definitionRevision: definition.revision, definitionHash: hash(definitionSemantic(definition)), timezone: definition.timezone, identityRef: definition.identityRef, secretRef: definition.secretRef, state: definition.state === 'enabled' ? 'enabled' : 'staged_disabled', createdAt: definition.updatedAt });
@@ -266,7 +292,7 @@ export function createScheduleFoundationRepositories(sqlite: Database.Database):
     const next = scheduleLeaseSchema.parse({ ...current, revision: current.revision + 1, renewedAt: input.now, expiresAt: new Date(new Date(input.now).getTime() + input.ttlMs).toISOString(), updatedAt: input.now });
     const result = sqlite.prepare('UPDATE schedule_leases SET revision = ?, renewed_at = ?, expires_at = ?, updated_at = ? WHERE lease_key = ? AND revision = ? AND generation = ? AND fence_token = ? AND holder_id = ? AND state = ?')
       .run(next.revision, next.renewedAt, next.expiresAt, next.updatedAt, leaseKey, input.expectedRevision, input.expectedGeneration, input.expectedFenceToken, input.holderId, 'held');
-    if (result.changes !== 1) throw leaseConflict('Lease changed concurrently'); recordVersion('schedule_lease', next, current); return next;
+    if (result.changes !== 1) throw leaseConflict('Lease changed concurrently'); return next;
   };
 
   const fenceLease = (leaseKey: string, raw: FenceScheduleLeaseInput): ScheduleLease => {

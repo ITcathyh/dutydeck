@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, expect, it, vi } from 'vitest';
-import { createRepositories } from '@dutydeck/storage';
+import { createRepositories, scheduleWriterLeaseKey } from '@dutydeck/storage';
 import { withMigrationTransaction } from '../../../packages/storage/src/migrations.js';
 import { createScheduleExecutionSchema } from '../../../packages/storage/src/schedule-execution-migration.js';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate } from './collaboration-service.js';
@@ -29,7 +29,7 @@ async function fixture(initialNow = new Date()) {
   };
   cleanup.push(async () => { await Promise.allSettled(instances.map(instance => instance.close())); repos.close(); rmSync(directory, { recursive: true, force: true }); });
   const input = { id: 'delegation', goal: 'Follow the document', mode: 'notify' as const, prompt: 'Please share the remaining material', trigger: { kind: 'interval' as const, everySeconds: 60, anchorAt: clock.toISOString() }, timezone: 'UTC' };
-  return { repos, service, executor, deliver, authorize, input, now, deny() { allowed = false; }, advance(ms = 60_000) { clock = new Date(clock.getTime() + ms); }, create: (extra = {}) => service.createMandate(scope, 'requester', { ...input, ...extra }) };
+  return { repos, service, executor, deliver, authorize, input, now, path, deny() { allowed = false; }, advance(ms = 60_000) { clock = new Date(clock.getTime() + ms); }, create: (extra = {}) => service.createMandate(scope, 'requester', { ...input, ...extra }) };
 }
 
 it('delivers a persisted delegation once per occurrence without creating a follow-up or requiring a live parent session', async () => {
@@ -233,6 +233,34 @@ it('cancels the old pending Agent after delegation cancellation and suppresses i
   await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, status: 'cancelled' });
   await run.tick(); expect(cancelAgent).toHaveBeenCalledTimes(1);
   expect(executeAgent).toHaveBeenCalledTimes(1); expect(f.deliver).not.toHaveBeenCalled();
+});
+
+it.each(['cancelled', 'paused'] as const)('never acquires or renews the writer lease for a %s mandate without in-flight occurrences', async status => {
+  const f = await fixture(); const { mandate } = await f.create();
+  await f.service.updateMandate(scope, 'requester', mandate.id, { expectedRevision: 1, status });
+  f.advance(61_000);
+  const run = f.executor();
+  await run.tick(); await run.tick(); await run.tick();
+  const db = new Database(f.path, { readonly: true });
+  expect((db.prepare('SELECT count(*) AS cnt FROM schedule_leases').get() as { cnt: number }).cnt).toBe(0);
+  expect((db.prepare("SELECT count(*) AS cnt FROM schedule_entity_versions WHERE entity_kind = 'schedule_lease'").get() as { cnt: number }).cnt).toBe(0);
+  db.close();
+  expect(f.deliver).not.toHaveBeenCalled();
+});
+
+it('renews the held lease across ticks without appending schedule_lease version rows', async () => {
+  const f = await fixture(); await f.create();
+  const run = f.executor(); f.advance(); await run.tick();
+  const leaseKey = scheduleWriterLeaseKey('bot');
+  const afterAcquire = await f.repos.scheduleLeases.getByKey(leaseKey);
+  expect(afterAcquire?.revision).toBe(1);
+  await run.tick(); await run.tick();
+  // 后续 tick 持续续租（revision 增长），但版本表只保留首次 acquire 一行。
+  const afterRenewals = await f.repos.scheduleLeases.getByKey(leaseKey);
+  expect(afterRenewals!.revision).toBeGreaterThan(1);
+  const db = new Database(f.path, { readonly: true });
+  expect((db.prepare("SELECT count(*) AS cnt FROM schedule_entity_versions WHERE entity_kind = 'schedule_lease'").get() as { cnt: number }).cnt).toBe(1);
+  db.close();
 });
 
 it('delivers the frozen scheduled summary when an unrelated follow-up is added during analysis', async () => {
