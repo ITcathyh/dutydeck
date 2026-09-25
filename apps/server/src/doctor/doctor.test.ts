@@ -14,7 +14,7 @@ import type {
   DoctorReport,
   PortProbeOutcome
 } from './types.js';
-import { larkBotsConfigKey } from './checks.js';
+import { checkLarkMemory, larkBotsConfigKey } from './checks.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 
 /**
@@ -610,6 +610,87 @@ describe('lark', () => {
   });
 });
 
+describe('lark.memory', () => {
+  const now = new Date('2026-09-25T08:00:00.000Z');
+  const bots = (overrides: Record<string, unknown> = {}) => JSON.stringify([{ appId: 'cli_mem', appSecret: FIXTURE_APP_SECRET, name: '记忆机器人', ...overrides }]);
+  const key = (pool = 'groups', appId = 'cli_mem') => `lark.memory.state.${appId}.${pool}`;
+  const turns = (...kinds: Array<'human' | 'bot'>) => kinds.map((senderKind, index) => ({
+    sessionId: 'ses_fixture', taskId: `task_${index}`, completedAt: `2026-09-24T09:0${index}:00.000Z`,
+    senderKind, senderId: `ou_sender_${index}`, sourceMessageId: `om_source_${index}`
+  }));
+  const state = (patch: Record<string, unknown> = {}) => JSON.stringify({ v: 1, turnsSinceExtraction: 3, turnsSinceConsolidation: 3, ...patch });
+  const observe = (values: Record<string, string>, raw = bots()) => checkLarkMemory({ raw, values }, now);
+  const stalledState = state({
+    pendingTurns: turns('human', 'human', 'human'),
+    lastExtractionAt: '2026-09-20T06:40:42.085Z',
+    lastRun: { kind: 'consolidation', at: '2026-09-24T09:51:41.447Z', ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: 'MEMORY_RECOVERY_REQUIRED' }
+  });
+
+  it('连续 3 轮应提取的任务都没提取成功为 warn：给出上次成功提取时间、失败原因与修法，不带发送人和消息编号', () => {
+    const check = observe({ [key()]: stalledState, [key('oc_private')]: state({ pendingTurns: [], lastExtractionAt: '2026-09-24T07:48:13.160Z' }) });
+    expect(check.level).toBe('warn');
+    expect(check.detail).toContain('记忆机器人（cli_mem）群共享池：连续 3 轮已完成的任务没有提取成功');
+    expect(check.detail).toContain('上次成功提取 2026-09-20 06:40');
+    expect(check.detail).toContain('MEMORY_RECOVERY_REQUIRED（记忆会话需要恢复）');
+    expect(check.detail).not.toContain('oc_private');
+    expect(check.remedy).toContain('/memory consolidate');
+    expect(JSON.stringify(check)).not.toMatch(/ou_sender_|om_source_|ses_fixture|task_0/);
+  });
+
+  it('未达一次提取的量、或只剩机器人发起的轮次时为 ok，并列出各池上次成功提取时间', () => {
+    const check = observe({
+      [key()]: state({ pendingTurns: turns('bot', 'bot', 'bot'), lastExtractionAt: '2026-09-24T07:48:13.160Z' }),
+      [key('oc_private')]: state({ pendingTurns: turns('human', 'human', 'bot') })
+    });
+    expect(check.level).toBe('ok');
+    expect(check.detail).toContain('记忆机器人（cli_mem）群共享池 上次成功提取 2026-09-24 07:48');
+    expect(check.detail).toContain('记忆机器人（cli_mem）聊天 oc_private 上次成功提取 尚未提取');
+  });
+
+  it('关闭自动提取是明确的跳过原因，不标黄', () => {
+    const check = observe({ [key()]: stalledState }, bots({ memoryAutoExtract: false }));
+    expect(check.level).toBe('ok');
+    expect(check.detail).toContain('已关闭自动提取');
+  });
+
+  it('提取正在进行（未超过陈旧阈值）不标黄；陈旧的 running 照样标黄', () => {
+    const running = (minutesAgo: number) => JSON.stringify({ ...JSON.parse(stalledState), running: { kind: 'extraction', startedAt: new Date(now.getTime() - minutesAgo * 60_000).toISOString() } });
+    const fresh = observe({ [key()]: running(1) });
+    expect(fresh.level).toBe('ok');
+    expect(fresh.detail).toContain('提取进行中');
+    expect(observe({ [key()]: running(20) }).level).toBe('warn');
+  });
+
+  it('旧的按群状态只剩迁移占位时忽略；关闭会话记忆的机器人不参与判断', () => {
+    const placeholder = state({ pendingTurns: turns('human', 'human', 'human'), migratedTo: 'groups', migratedAt: '2026-09-25T03:04:34.706Z' });
+    const check = observe({ [key('oc_legacy')]: placeholder, [key()]: state({ lastExtractionAt: '2026-09-24T07:48:13.160Z' }) });
+    expect(check.level).toBe('ok');
+    expect(check.detail).not.toContain('oc_legacy');
+    const disabled = observe({ [key()]: stalledState }, bots({ memoryEnabled: false }));
+    expect(disabled.level).toBe('skip');
+    expect(disabled.detail).toContain('没有开启会话记忆');
+  });
+
+  it('没有任何记忆状态或数据库不可读时 skip；坏 JSON 的状态被跳过', () => {
+    expect(observe({}).level).toBe('skip');
+    expect(observe({ [key()]: '{not json' }).level).toBe('skip');
+    expect(checkLarkMemory({ unavailable: true }, now).level).toBe('skip');
+  });
+
+  it('runDoctor 按前缀读记忆状态并给出 lark.memory，报告里不出现 appSecret', async () => {
+    const calls: Array<readonly string[] | undefined> = [];
+    const report = await runDoctor({ json: true }, deps({
+      databaseProbe: (_path, _keys, prefixes) => {
+        calls.push(prefixes);
+        return { exists: true, appliedVersion: 14, values: { [larkBotsConfigKey]: bots(), [key()]: stalledState } };
+      }
+    }));
+    expect(calls[0]).toContain('lark.memory.state.');
+    expect(level(report, 'lark.memory')).toBe('warn');
+    expect(JSON.stringify(report)).not.toContain(FIXTURE_APP_SECRET);
+  });
+});
+
 describe('access.posture / access.token', () => {
   it('认证关闭 + 非回环 = fail（终端与 Agent 控制权对整个网络敞开）', async () => {
     const check = find(await runDoctor({ json: true }, deps({
@@ -890,6 +971,33 @@ describe('默认探针（真实系统，仅限临时目录与本地端口）', (
       expect(result.appliedVersion).toBe(14);
       expect(result.values?.[larkBotsConfigKey]).toBe('[]');
       expect(result.values?.[AUTH_TOKEN_CONFIG_KEY]).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('数据库探针：按前缀读出全部匹配键，不串到别的键', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-doctor-db-'));
+    try {
+      const file = join(root, 'dutydeck.db');
+      const writer = new Database(file);
+      writer.exec('CREATE TABLE configs (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
+      writer.exec(`INSERT INTO configs VALUES ('lark.memory.state.cli_a.groups', '{"v":1}'), ('lark.memory.state.cli_a.oc_1', '{"v":1,"x":1}'), ('lark.memory.cli_a.groups', '{"v":1,"entries":[]}')`);
+      writer.close();
+
+      const result = defaultDatabaseProbe(file, [larkBotsConfigKey], ['lark.memory.state.']);
+      expect(result.error).toBeUndefined();
+      expect(result.values).toEqual({
+        [larkBotsConfigKey]: undefined,
+        'lark.memory.state.cli_a.groups': '{"v":1}',
+        'lark.memory.state.cli_a.oc_1': '{"v":1,"x":1}'
+      });
+      // 没有 configs 表的库照样可读，前缀键一律缺席。
+      const partial = join(root, 'partial.db');
+      const partialWriter = new Database(partial);
+      partialWriter.exec('CREATE TABLE unrelated (a TEXT)');
+      partialWriter.close();
+      expect(defaultDatabaseProbe(partial, [], ['lark.memory.state.'])).toEqual({ exists: true, values: {} });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

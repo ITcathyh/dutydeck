@@ -700,7 +700,7 @@ describe('/memory receipt for shared pools and background status', () => {
     expect(text).toContain('- `mem_00000002` · 用户 · 2026-09-17 · 其他群 · 别的群条目');
     expect(text).toContain('- `mem_00000003` · 用户 · 2026-09-17 · 跨群合并条目');
     expect(text).toContain('- 上次运行：整理 · 2026-09-24 09:51 · 失败 `MEMORY_RECOVERY_REQUIRED`（记忆会话需要恢复）');
-    expect(text).toContain('- 待提取 13 轮 · 上次提取 2026-09-20 00:39 · 上次整理 尚未整理');
+    expect(text).toContain('- 待提取 13 轮 · 上次成功提取 2026-09-20 00:39 · 上次整理 尚未整理');
     expect(text.indexOf('**后台提取与整理**')).toBeLessThan(text.indexOf('第 1/1 页'));
   });
 
@@ -708,7 +708,7 @@ describe('/memory receipt for shared pools and background status', () => {
     const empty = renderLarkMemoryList(new Map(), state, { status: { appId: 'cli_bot', pool: 'oc_p2p', shared: false, liveEntries: 0, topics: 0, pendingTurns: 2 } });
     expect(empty.text).toContain('**本聊天还没有保存的记忆。**');
     expect(empty.text).toContain('- 上次运行：尚未运行');
-    expect(empty.text).toContain('- 待提取 2 轮 · 上次提取 尚未提取 · 上次整理 尚未整理');
+    expect(empty.text).toContain('- 待提取 2 轮 · 上次成功提取 尚未提取 · 上次整理 尚未整理');
     expect(renderLarkMemoryList(new Map(), state, { shared: true }).text).toContain('本机器人所在各群还没有共享的记忆');
 
     const raw = renderLarkMemoryStatus({ ...failed, lastRun: { ...failed.lastRun!, kind: 'extraction', error: 'ENOENT: no such file /data00/private/path' } });

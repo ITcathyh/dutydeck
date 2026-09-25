@@ -1,6 +1,7 @@
 import type { AgentEvent, VerificationResponse, VerificationStatus } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, LarkServiceError } from './service.js';
+import { redactTraceText, sensitiveTraceKey } from './secret-redaction.js';
 
 // 卡片渲染与限流/拒绝判断辅助。
 // 飞书只展示可观察的阶段摘要、工具活动和最终结果；模型 thinking 属于内部推理，
@@ -161,21 +162,6 @@ const truncate = (value: unknown, limit: number) => {
   if (text.length <= limit) return text;
   return `${text.slice(0, limit).trimEnd()}\n…（内容过长，已截断）`;
 };
-const sensitiveTraceKey = /(?:authorization|api[_-]?key|access[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|password|passwd|pwd)$/i;
-const redactTraceText = (value: string) => value
-  // Treat a truncated PEM as sensitive through end-of-input; logs often cut
-  // output before the END marker arrives.
-  .replace(/-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*?(?:-----END(?: [A-Z0-9]+)* PRIVATE KEY-----|$)/g, '[REDACTED_PRIVATE_KEY]')
-  // URL userinfo can contain both a user name and password. Keep only the destination URL shape.
-  .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, '$1[REDACTED]@')
-  // Authorization is handled before generic assignments so "Bearer token" is removed as one value.
-  .replace(/(\bauthorization\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n"',;&}]+)/gi, '$1[REDACTED]')
-  .replace(/\bbearer\s+[^"'\s,;}&]+/gi, 'Bearer [REDACTED]')
-  .replace(/(--turn(?:\s+|=))(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s;&]+)/g, '$1[REDACTED]')
-  // Common CLI flags use a following argument instead of key=value.
-  .replace(/(^|[^A-Za-z0-9_-])((?:--?)(?:api[_-]?key|access[_-]?key(?:[_-]?id)?|secret[_-]?access[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)\s+)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gim, '$1$2[REDACTED]')
-  .replace(/((?:\b(?:api[_-]?key|access[_-]?key|private[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|token|secret|client[_-]?secret|password|passwd|pwd)|\b[A-Z][A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|ACCESS_KEY|API_KEY)[A-Z0-9_]*)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi, '$1[REDACTED]');
-
 const redactTraceValue = (value: unknown, seen = new WeakSet<object>(), depth = 0): unknown => {
   if (typeof value === 'string') return redactTraceText(value);
   if (!value || typeof value !== 'object') return value;
