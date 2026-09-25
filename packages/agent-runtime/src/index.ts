@@ -1358,6 +1358,8 @@ export class DutydeckRuntime {
       if (sessionId === excludeSessionId) continue;
       if (task.status === 'running') count++;
     }
+    // An unanswered steering request may already be inside the agent's turn, so the restart drain waits for it too.
+    for (const sessionId of this.steeringSessions.keys()) if (sessionId !== excludeSessionId && this.activeTasks.get(sessionId)?.status !== 'running') count++;
     return count;
   }
 
@@ -2101,7 +2103,8 @@ export class DutydeckRuntime {
       try {
         queued();
         const current = running();
-        if (current?.ref.attemptId !== target.ref.attemptId) return skipped('promptRequired');
+        // Restart drain: send nothing new into the turn; the Task stays queued and runs as its own turn after the restart.
+        if (this.queueHeld || current?.ref.attemptId !== target.ref.attemptId) return skipped('promptRequired');
         let outcome: DriverSteeringOutcome;
         let timer: NodeJS.Timeout | undefined, expired = false;
         const timeout = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { expired = true; reject(new Error(`Steering request got no answer within ${STEERING_TIMEOUT_MS / 1000}s`)); }, STEERING_TIMEOUT_MS); });
