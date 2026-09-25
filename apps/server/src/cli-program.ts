@@ -31,6 +31,25 @@ export interface CliOptions {
   force?: boolean;
   /** `--drain-timeout <seconds>`：等待正在执行的任务结束的最长秒数（默认 900）。 */
   drainTimeout?: string;
+  /** `restart --unit <unit>`：重启这个 systemd user unit 托管的运行时（如 Tag 运行时）。 */
+  unit?: string;
+}
+
+/** `dutydeck deploy` 的选项。 */
+export interface DeployCliOptions {
+  source?: string;
+  unit?: string;
+  runtime?: string;
+  releases?: string;
+  port?: string;
+  node?: string;
+  /** `--no-restart` 时为 false：只准备发布目录并切换 current，不排空、不重启。 */
+  restart?: boolean;
+  printUnit?: boolean;
+  now?: boolean;
+  force?: boolean;
+  drainTimeout?: string;
+  json?: boolean;
 }
 
 export interface LarkCliOptions {
@@ -174,6 +193,7 @@ export interface CliHandlers {
   daemonRestart?(options: CliOptions): void | Promise<void>;
   daemonStatus?(options: DoctorCliOptions): void | Promise<void>;
   update?(options: UpdateCliOptions): void | Promise<void>;
+  deploy?(options: DeployCliOptions): void | Promise<void>;
   authToken?(options: AuthTokenCliOptions): void | Promise<void>;
   authPasswordSet?(options: AuthPasswordSetCliOptions): void | Promise<void>;
   authShareKeyRotate?(): void | Promise<void>;
@@ -723,6 +743,26 @@ Examples:
     .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting restart (default: 900)')
     .action(options => handlers.update?.(options));
 
+  program.command('deploy')
+    .description('Deploy a built checkout as a versioned release: drain, switch releases/current, restart, health-check, and roll back on failure')
+    .option('--source <directory>', 'Built Dutydeck checkout to deploy (default: the repository containing the current directory)')
+    .option('--unit <unit>', 'systemd user unit that runs releases/current (default: dutydeck.service, or "unit" from --runtime deployment.json)')
+    .option('--runtime <directory>', 'Bot runtime directory whose deployment.json supplies the address, database and unit')
+    .option('--releases <directory>', 'Directory holding versioned releases and the current pointer (default: derived from the unit ExecStart)')
+    .option('--port <port>', 'Port used for draining and the health check (default: from deployment.json or the unit)')
+    .option('--node <path>', 'Node.js used to trial-load the release (default: the unit ExecStart interpreter)')
+    .option('--no-restart', 'Only prepare the release and switch current; do not drain or restart')
+    .option('--print-unit', 'Print the unit file rewritten to run releases/current, without changing anything')
+    .option('--now', 'Deploy even outside DUTYDECK_DEPLOY_WINDOW')
+    .option('--force', 'Skip waiting for running tasks and restart immediately')
+    .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting (default: 900)')
+    .option('--json', 'Print the result as a single line of JSON')
+    // --port 会被根命令同名的服务选项截获，从合并后的全局选项里取回来。
+    .action((options, command) => {
+      const port = command.optsWithGlobals().port;
+      return handlers.deploy?.({ ...options, ...(typeof port === 'string' ? { port } : {}) });
+    });
+
   const auth = program.command('auth').description('Manage access authentication');
   auth.command('token')
     .description('Print the access token for remote API access (generates one on first use)')
@@ -816,6 +856,7 @@ Examples:
       .description('Restart the background Dutydeck server')
       .option('--force', 'Skip waiting for running tasks and restart immediately')
       .option('--drain-timeout <seconds>', 'Maximum seconds to wait for running tasks before aborting restart (default: 900)', '900')
+      .option('--unit <unit>', 'Restart the runtime managed by this systemd user unit, e.g. a bot runtime')
       .option('--json', 'Print the result as a single line of JSON')
       .action((options, command) => handlers.daemonRestart?.(serverOptionsFrom(options, command)));
     parent.command('status')
@@ -846,6 +887,9 @@ Examples:
   $ dutydeck status
   $ dutydeck restart --port 4410
   $ dutydeck restart --force
+  $ dutydeck restart --unit dutydeck-tag-ccflash.service
+  $ dutydeck deploy --source /path/to/built-checkout
+  $ dutydeck deploy --print-unit
   $ dutydeck update --dist-tag fix
   $ dutydeck auth token
   $ dutydeck auth token --rotate

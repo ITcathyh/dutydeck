@@ -109,6 +109,19 @@ describe('Dutydeck CLI', () => {
     const forced = vi.fn();
     await createCliProgram('0.0.6', { daemonRestart: forced }).parseAsync(['node', 'dutydeck', 'daemon', 'restart', '--force', '--drain-timeout', '30']);
     expect(forced).toHaveBeenCalledWith(expect.objectContaining({ force: true, drainTimeout: '30' }));
+    const unit = vi.fn();
+    await createCliProgram('0.0.6', { daemonRestart: unit }).parseAsync(['node', 'dutydeck', 'restart', '--unit', 'dutydeck-tag.service']);
+    expect(unit).toHaveBeenCalledWith(expect.objectContaining({ unit: 'dutydeck-tag.service' }));
+  });
+
+  it('parses deploy options, including --port that the root server options would otherwise capture', async () => {
+    const deploy = vi.fn();
+    await createCliProgram('0.0.6', { deploy }).parseAsync(['node', 'dutydeck', 'deploy', '--source', '/src', '--runtime', '/bot', '--port', '4311', '--no-restart', '--now', '--drain-timeout', '30']);
+    expect(deploy).toHaveBeenCalledWith(expect.objectContaining({ source: '/src', runtime: '/bot', port: '4311', restart: false, now: true, drainTimeout: '30' }));
+    const plain = vi.fn();
+    await createCliProgram('0.0.6', { deploy: plain }).parseAsync(['node', 'dutydeck', 'deploy', '--print-unit']);
+    expect(plain).toHaveBeenCalledWith(expect.objectContaining({ restart: true, printUnit: true }));
+    expect(plain.mock.calls[0]![0].port).toBeUndefined();
   });
 
   it('parses doctor with an optional machine-readable flag', async () => {
