@@ -159,7 +159,8 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
 
   return turns.flatMap((turn, turnIndex) => {
     const userMessage = turn.find(event => event.type === 'text' && event.data.role === 'user');
-    const task = tasks.find(item => item.id === userMessage?.data.taskId);
+    // 插话并入了正在执行的那一轮，这一段的状态跟着那一轮走。
+    const task = tasks.find(item => item.id === (userMessage?.data.steering?.target?.taskId ?? userMessage?.data.taskId));
     const terminal = task ? terminalTaskStatuses.has(task.status) : turnIndex < turns.length - 1;
     const lastActivityIndex = turn.reduce((latest, event, index) => isActivity(event) ? index : latest, -1);
     const lastAssistantTextIndex = turn.reduce((latest, event, index) => event.type === 'text' && event.data.role !== 'user' ? index : latest, -1);

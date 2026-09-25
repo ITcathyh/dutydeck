@@ -4,7 +4,9 @@ import type { ChannelMapping, ChannelMappingRepository, ConfigRepository, TaskRe
 import { defaultLarkTraceLimit, larkPermissionMode, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, type LarkCardInput, type LarkCardService } from './service.js';
 import {
-  loadLarkTaskEvents,
+  eventsForRuntimeTask,
+  larkTaskSteering,
+  loadLarkTaskWindow,
   hasUnresolvedToolCalls,
   isLarkCardContentRejected,
   isLarkMessageRateLimit,
@@ -13,6 +15,7 @@ import {
   patchRejectedCardDelta,
   renderLarkProcessElements,
   renderLarkResultElements,
+  steeringOutcomeText,
   terminalTaskStates
 } from './card-renderer.js';
 import { deliverLarkCompletionReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
@@ -206,8 +209,13 @@ export async function performLarkCardReconcile(input: {
         ? 'completed'
         : runtimeTask.status === 'failed' ? 'failed' : runtimeTask.status === 'cancelled' ? 'cancelled' : 'interrupted';
       const recentLimit = Math.max((config.traceLimit ?? defaultLarkTraceLimit) * 30, 500);
-      let events;
-      try { events = await loadLarkTaskEvents(runtime, mapping.sessionId, runtimeTask.id, recentLimit); }
+      let events, steered: string | undefined;
+      try {
+        const window = await loadLarkTaskWindow(runtime, mapping.sessionId, runtimeTask.id, recentLimit);
+        events = eventsForRuntimeTask(window, runtimeTask.id);
+        // 插话送达的这一轮没有自己的输出：重启后按账本里的插话结果写卡，不另存标记。
+        steered = state === 'completed' ? larkTaskSteering(window, runtimeTask.id) : undefined;
+      }
       catch (error) {
         unresolved++;
         log.warn({ error, taskId: runtimeTask.id, sessionId: mapping.sessionId, externalId: mapping.externalId }, '读取执行结果失败，等待下次对账');
@@ -311,7 +319,7 @@ export async function performLarkCardReconcile(input: {
             chatType: persisted.chat_type, senderOpenId: persisted.sender_open_id, senderType: persisted.sender_type });
           const decoration = await input.terminalDecoration?.(mapping, { ...persisted, runtime_task_id: runtimeTask.id, state }, effective);
           const elements = [
-            ...(explicit ? [] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events)),
+            ...(explicit ? [] : steered ? [{ tag: 'markdown', element_id: 'steer_note', content: steeringOutcomeText(steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : events)),
             ...(decoration?.elements ?? []),
             ...(completed && input.resultElements ? await input.resultElements(mapping, persisted, '') : []),
             ...(mention ? [{ tag: 'markdown', element_id: 'group_mention', content: mention }] : [])];

@@ -383,5 +383,91 @@ describe('Runtime uses the execution ledger', () => {
     await vi.waitFor(() => expect(received.filter(sequence => expected.includes(sequence))).toEqual(expected), { timeout: 2500 });
     expect(h.repos.execution.getTaskExecution(task.id)?.currentAttempt?.outcome).toBe('completed'); unsubscribe();
   });
+  it('injects a queued Task into the running Attempt and takes it off the queue', async () => {
+    const entered = deferred(), gate = deferred();
+    const h = await fixture({}, async (emit, prompt) => {
+      if (prompt === 'first') { entered.resolve(); await gate.promise; }
+      emit({ type: 'text', data: { text: prompt } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    cleanup.push(async () => { gate.resolve(); });
+    const first = await h.runtime.dispatch(h.session.id, 'first'); await entered.promise;
+    const second = await h.runtime.dispatch(h.session.id, 'second');
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const); h.driver().steer = steer;
+    const result = await h.runtime.injectQueued(h.session.id, second.id, 'installation_owner', 'fixed-steering');
+    expect(result).toMatchObject({ outcome: 'injected', task: { id: second.id, status: 'completed' } });
+    expect(steer).toHaveBeenCalledWith('second');
+    expect(h.repos.execution.getTaskExecution(second.id)?.attempts).toEqual([]);
+    const marker = (await h.runtime.getEvents(h.session.id)).find(event => event.type === 'text' && (event.data as { steering?: unknown }).steering);
+    expect(marker?.data).toMatchObject({ role: 'user', text: 'second', taskId: second.id, steering: { outcome: 'injected', target: { taskId: first.id } } });
+    gate.resolve(); await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(first.id)?.task.status).toBe('completed'));
+    expect(h.sent).toEqual(['first']);
+  });
+  it.each([
+    ['unsupported', undefined],
+    ['promptRequired', async () => 'promptRequired' as const],
+    ['failed', async () => { throw new Error('agent rejected steering'); }]
+  ] as const)('keeps the Task queued as a normal next turn when steering is %s', async (outcome, steer) => {
+    const entered = deferred(), gate = deferred();
+    const h = await fixture({}, async (emit, prompt) => {
+      if (prompt === 'first') { entered.resolve(); await gate.promise; }
+      emit({ type: 'text', data: { text: prompt } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    cleanup.push(async () => { gate.resolve(); });
+    await h.runtime.dispatch(h.session.id, 'first'); await entered.promise;
+    const second = await h.runtime.dispatch(h.session.id, 'second');
+    if (steer) h.driver().steer = steer;
+    const result = await h.runtime.injectQueued(h.session.id, second.id, 'installation_owner');
+    expect(result).toMatchObject({ outcome, task: { id: second.id, status: 'queued' } });
+    expect(h.sent).toEqual(['first']);
+    gate.resolve(); await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(second.id)?.task.status).toBe('completed'));
+    expect(h.sent).toEqual(['first', 'second']);
+  });
+  it('gives up an unanswered steering request after 30 seconds and runs the Task as its own turn', async () => {
+    const entered = deferred(), gate = deferred(), asked = deferred(), warn = vi.fn();
+    const h = await fixture({ log: { warn } }, async (emit, prompt) => {
+      if (prompt === 'first') { entered.resolve(); await gate.promise; }
+      emit({ type: 'text', data: { text: prompt } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    cleanup.push(async () => { gate.resolve(); });
+    const first = await h.runtime.dispatch(h.session.id, 'first'); await entered.promise;
+    const second = await h.runtime.dispatch(h.session.id, 'second');
+    let answer!: (outcome: 'injected') => void;
+    h.driver().steer = () => { asked.resolve(); return new Promise(done => { answer = done; }); };
+    // Take over only the 30-second steering timer; the rest of the turn keeps real time.
+    const realSetTimeout = globalThis.setTimeout;
+    let expire: (() => void) | undefined;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((handler: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+      if (ms !== 30_000) return realSetTimeout(handler, ms, ...args);
+      expire = () => handler(...args);
+      return realSetTimeout(() => {}, 60_000);
+    }) as unknown as typeof setTimeout);
+    const steering = h.runtime.injectQueued(h.session.id, second.id, 'installation_owner');
+    await asked.promise;
+    // The turn ends while the request is unanswered; the queue waits for the steering result, not for the agent forever.
+    gate.resolve(); await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(first.id)?.task.status).toBe('completed'));
+    expect(h.sent).toEqual(['first']);
+    expire!();
+    await expect(steering).resolves.toMatchObject({ outcome: 'failed', task: { status: 'queued' } });
+    await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(second.id)?.task.status).toBe('completed'));
+    expect(h.sent).toEqual(['first', 'second']);
+    // The agent answers after the timeout: nothing changes, but the possible duplicate is logged.
+    answer('injected');
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(expect.objectContaining({ taskId: second.id, outcome: 'injected' }), expect.any(String)));
+    expect(h.repos.execution.getTaskExecution(second.id)?.attempts).toHaveLength(1);
+  });
+  it('does not inject a queued Task whose execution options differ from the running turn', async () => {
+    const entered = deferred(), gate = deferred();
+    const h = await fixture({}, async (emit, prompt) => {
+      if (prompt === 'first') { entered.resolve(); await gate.promise; }
+      emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+    });
+    cleanup.push(async () => { gate.resolve(); });
+    await h.runtime.dispatch(h.session.id, 'first'); await entered.promise;
+    const envelope = request(h.session.id, 'second', { model: 'special-model' });
+    const second = await h.runtime.dispatch(h.session.id, envelope.prompt, 'queue', envelope.prompt, undefined, undefined, envelope.key, [], envelope);
+    const steer = vi.fn(async (_prompt: string) => 'injected' as const); h.driver().steer = steer;
+    expect(await h.runtime.injectQueued(h.session.id, second.id, 'installation_owner')).toMatchObject({ outcome: 'incompatible', task: { status: 'queued' } });
+    expect(steer).not.toHaveBeenCalled();
+  });
 
 });

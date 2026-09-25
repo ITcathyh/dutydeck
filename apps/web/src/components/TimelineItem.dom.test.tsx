@@ -77,6 +77,11 @@ describe('TimelineItem 事件分发', () => {
     expect(container.querySelector('article')).toBeNull();
   });
 
+  it('插话送达的用户消息标明它并入了当前这一轮', () => {
+    render(<TimelineItem event={event('text', { role: 'user', text: '顺便看日志', steering: { outcome: 'injected' } })}/>);
+    expect(screen.getByText('插话到当前这一轮')).toBeTruthy();
+  });
+
   it('final=true 的 assistant 文本 → <article> 带 aria-label «<标签> 最终输出»', () => {
     render(<TimelineItem event={event('text', { role: 'assistant', text: '结论如下' })} final assistantLabel="Claude"/>);
     const article = screen.getByLabelText('Claude 最终输出');

@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
-import type { AgentConfig, AgentDriver, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, DriverSteeringOutcome, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson } from '@dutydeck/shared';
 import { testRegexWithTimeout } from './regex-timeout.js';
 
@@ -27,6 +27,13 @@ function envLauncherPath() {
 const persistedEnvKey = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const bridgedAgentEnvFileKey = 'dutydeck_agent_env_file';
 const bridgedAgentEnvDigestKey = 'dutydeck_agent_env_digest';
+/**
+ * Agents known to honour `_meta.steering.idleBehavior: 'promptRequired'`, by initialize `agentInfo.name`.
+ * Advertising `_meta.steering.supported` is not enough and the initialize response carries no field for this:
+ * codex-acp 1.12.1-preview.4 ignores idleBehavior and starts a turn of its own when none is running,
+ * and that turn's output never reaches Dutydeck's records. Other agents are treated as not supporting steering.
+ */
+const promptRequiredSteeringAgents = new Set(['@agentclientprotocol/claude-agent-acp']);
 
 function splitAgentEnvironment(env: Record<string, string>) {
   const persisted: Record<string, string> = {};
@@ -528,6 +535,29 @@ export class AcpxAdapter implements AgentDriver {
       if (previous) await this.whileActive(() => previous.catch(() => undefined));
       await this.sendTurn(prompt,submission);
     } finally { this.sending = false; }
+  }
+  /** Inject into the prompt in flight through `_session/steering`; only agents that advertise it and honour promptRequired get the request. */
+  async steer(prompt: string): Promise<DriverSteeringOutcome> {
+    // Only issuing the request joins the resource sequence: an agent that never answers must not hold up interrupt or the next turn.
+    const request = await this.resourceOperation(async () => {
+      const handle = this.handle;
+      if (!this.turn || !handle || this.turnCancelling) return 'promptRequired' as const;
+      if (!this.runtime.requestActiveTurnExtension) return 'unsupported' as const;
+      return { reply: this.runtime.requestActiveTurnExtension({
+        handle, method: '_session/steering',
+        // Opt into promptRequired: an idle agent must return the content instead of starting a turn Dutydeck does not own.
+        params: { prompt: [{ type: 'text', text: prompt }], _meta: { steering: { idleBehavior: 'promptRequired' } } },
+        supported: agent => (agent?._meta?.steering as { supported?: unknown } | undefined)?.supported === true && promptRequiredSteeringAgents.has(agent?.agentInfo?.name ?? '')
+      }) };
+    });
+    if (typeof request === 'string') return request;
+    const result = await request.reply;
+    if (!result.active) return 'promptRequired';
+    if (!result.supported) return 'unsupported';
+    const outcome = (result.response as { outcome?: unknown } | undefined)?.outcome;
+    if (outcome === 'injected') this.idleWatch?.refresh();
+    if (outcome === 'injected' || outcome === 'startedNewTurn' || outcome === 'promptRequired') return outcome;
+    throw new Error(`Agent ${this.agent.id} did not accept the steering message (${String(outcome)})`);
   }
   async interrupt() {
     this.turnCancelling = true;
