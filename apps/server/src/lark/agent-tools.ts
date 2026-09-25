@@ -202,7 +202,14 @@ export interface AgentGroupMessage {
   updated: boolean;
   threadId?: string;
 }
-export interface AgentGroupMessagesResult { chatId: string; messages: AgentGroupMessage[]; cursor?: string; timedOut?: boolean }
+export interface AgentGroupMessagesResult {
+  chatId: string;
+  messages: AgentGroupMessage[];
+  cursor?: string;
+  timedOut?: boolean;
+  scanned?: number;
+  truncated?: boolean;
+}
 
 class GroupMessageCursor {
   private constructor(readonly createTime: number, readonly messageId: string) {}
@@ -290,6 +297,24 @@ const normalizeLimit = (value?: number) => {
   if (!Number.isInteger(resolved) || resolved < 1 || resolved > maxMessageLimit) throw new AgentGroupToolError('INVALID_GROUP_MESSAGE_LIMIT', `limit 必须是 1-${maxMessageLimit} 的整数。`, 400);
   return resolved;
 };
+
+function parseTimestampMs(value: string | number): number {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value) || value < 0) throw new Error('Invalid timestamp');
+    return value <= 1e11 ? Math.floor(value * 1000) : Math.floor(value);
+  }
+  if (typeof value !== 'string') throw new Error('Invalid timestamp type');
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error('Empty timestamp');
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const num = Number(trimmed);
+    if (!Number.isFinite(num) || num < 0) throw new Error('Invalid timestamp');
+    return num <= 1e11 ? Math.floor(num * 1000) : Math.floor(num);
+  }
+  const ms = Date.parse(trimmed);
+  if (Number.isNaN(ms)) throw new Error('Invalid date format');
+  return ms;
+}
 
 const escapeAtName = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 
@@ -601,41 +626,134 @@ export class LarkAgentToolsService {
     return messages;
   }
 
-  private async messagesFor(context: ToolContext, input: { after?: string; limit?: number }): Promise<AgentGroupMessagesResult> {
+  private async messagesFor(
+    context: ToolContext,
+    input: { after?: string; limit?: number; since?: string; until?: string; query?: string }
+  ): Promise<AgentGroupMessagesResult> {
     const limit = normalizeLimit(input.limit);
-    const after = GroupMessageCursor.parse(input.after);
+    if (input.after && (input.since !== undefined || input.until !== undefined || input.query !== undefined)) {
+      throw new AgentGroupToolError('GROUP_MESSAGES_INVALID_RANGE', '--after 不能与 --since/--until/--query 同时使用。', 400);
+    }
+
+    let startTime: number | undefined;
+    let endTime: number | undefined;
+    let sinceMs: number | undefined;
+    let untilMs: number | undefined;
+
+    if (input.since !== undefined) {
+      try {
+        sinceMs = parseTimestampMs(input.since);
+        startTime = Math.max(0, Math.floor(sinceMs / 1000));
+      } catch {
+        throw new AgentGroupToolError('GROUP_MESSAGES_INVALID_RANGE', 'since 时间格式无法解析。', 400);
+      }
+    }
+
+    if (input.until !== undefined) {
+      try {
+        untilMs = parseTimestampMs(input.until);
+        endTime = Math.max(0, Math.floor(untilMs / 1000));
+      } catch {
+        throw new AgentGroupToolError('GROUP_MESSAGES_INVALID_RANGE', 'until 时间格式无法解析。', 400);
+      }
+    }
+
+    if (sinceMs !== undefined && untilMs !== undefined && sinceMs > untilMs) {
+      throw new AgentGroupToolError('GROUP_MESSAGES_INVALID_RANGE', 'since 不能晚于 until。', 400);
+    }
+
     // 话题内的消息拉取优先按 threadId 限定范围，避免拿到群里其他话题的消息；
     // 非话题群聊（按 user/message 隔离）则按 chatId 拉取整个群。
     const threadId = await this.resolveThreadId(context);
     const container = threadId ? { threadId } : { chatId: context.chatId };
-    if (!after) {
-      const requestStartedAt = Date.now();
-      const result = await this.authorized(context, 'messages', () => context.client.listChatMessages({ ...container, order: 'desc', pageSize: limit }));
-      const items = [...result.items].sort((left, right) => Number(left.createTime) - Number(right.createTime) || left.messageId.localeCompare(right.messageId));
+
+    const hasTimeWindow = startTime !== undefined || endTime !== undefined;
+    const hasQuery = input.query !== undefined;
+
+    if (!hasTimeWindow && !hasQuery) {
+      const after = GroupMessageCursor.parse(input.after);
+      if (!after) {
+        const requestStartedAt = Date.now();
+        const result = await this.authorized(context, 'messages', () => context.client.listChatMessages({ ...container, order: 'desc', pageSize: limit }));
+        const items = [...result.items].sort((left, right) => Number(left.createTime) - Number(right.createTime) || left.messageId.localeCompare(right.messageId));
+        const latest = items.at(-1);
+        return { chatId: context.chatId, messages: await this.normalizeMessages(items), cursor: (latest ? GroupMessageCursor.fromMessage(latest) : GroupMessageCursor.at(requestStartedAt)).encode() };
+      }
+
+      const items: LarkChatMessage[] = [];
+      let pageToken: string | undefined;
+      for (let page = 0; page < 10 && items.length < limit; page++) {
+        const result = await this.authorized(context, 'messages', () => context.client.listChatMessages({
+          ...container,
+          order: 'asc',
+          pageSize: maxMessageLimit,
+          startTime: Math.max(0, Math.floor(after.createTime / 1_000) - 1),
+          ...(pageToken ? { pageToken } : {})
+        }));
+        items.push(...result.items.filter(message => after.includes(message)).slice(0, limit - items.length));
+        if (!result.hasMore || !result.pageToken) break;
+        pageToken = result.pageToken;
+      }
+      items.sort((left, right) => Number(left.createTime) - Number(right.createTime) || left.messageId.localeCompare(right.messageId));
       const latest = items.at(-1);
-      return { chatId: context.chatId, messages: await this.normalizeMessages(items), cursor: (latest ? GroupMessageCursor.fromMessage(latest) : GroupMessageCursor.at(requestStartedAt)).encode() };
+      return { chatId: context.chatId, messages: await this.normalizeMessages(items), cursor: latest ? GroupMessageCursor.fromMessage(latest).encode() : input.after };
     }
 
+    const queryTerms = hasQuery
+      ? input.query!.trim().toLowerCase().split(/\s+/).filter(Boolean)
+      : [];
+
+    const requestStartedAt = Date.now();
     const items: LarkChatMessage[] = [];
+    let scannedCount = 0;
     let pageToken: string | undefined;
+    let pageCount = 0;
+    let lastHasMore = false;
+
     for (let page = 0; page < 10 && items.length < limit; page++) {
+      pageCount++;
       const result = await this.authorized(context, 'messages', () => context.client.listChatMessages({
         ...container,
-        order: 'asc',
+        order: 'desc',
         pageSize: maxMessageLimit,
-        startTime: Math.max(0, Math.floor(after.createTime / 1_000) - 1),
+        ...(startTime !== undefined ? { startTime } : {}),
+        ...(endTime !== undefined ? { endTime } : {}),
         ...(pageToken ? { pageToken } : {})
       }));
-      items.push(...result.items.filter(message => after.includes(message)).slice(0, limit - items.length));
+      lastHasMore = result.hasMore === true;
+
+      for (const message of result.items) {
+        scannedCount++;
+        if (hasQuery) {
+          const content = await renderMessageContent(message);
+          const lowerContent = content.toLowerCase();
+          if (!queryTerms.every(term => lowerContent.includes(term))) {
+            continue;
+          }
+        }
+        items.push(message);
+        if (items.length >= limit) break;
+      }
+
+      if (items.length >= limit) break;
       if (!result.hasMore || !result.pageToken) break;
       pageToken = result.pageToken;
     }
+
     items.sort((left, right) => Number(left.createTime) - Number(right.createTime) || left.messageId.localeCompare(right.messageId));
     const latest = items.at(-1);
-    return { chatId: context.chatId, messages: await this.normalizeMessages(items), cursor: latest ? GroupMessageCursor.fromMessage(latest).encode() : input.after };
+    const isTruncated = hasQuery && pageCount === 10 && lastHasMore && items.length < limit;
+
+    return {
+      chatId: context.chatId,
+      messages: await this.normalizeMessages(items),
+      cursor: (latest ? GroupMessageCursor.fromMessage(latest) : GroupMessageCursor.at(requestStartedAt)).encode(),
+      ...(hasQuery ? { scanned: scannedCount } : {}),
+      ...(isTruncated ? { truncated: true } : {})
+    };
   }
 
-  async messages(token: string | undefined, input: { after?: string; limit?: number } = {}) {
+  async messages(token: string | undefined, input: { after?: string; limit?: number; since?: string; until?: string; query?: string } = {}) {
     return this.messagesFor(await this.context(token, 'group_tools.read'), input);
   }
 
@@ -1031,7 +1149,7 @@ export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process
 export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dutydeck') => `[Dutydeck 飞书会话工具]
 ${allowSend ? '当前会话可读取和发送' : '当前会话可只读访问'}当前飞书会话的消息。必须使用以下当前服务绑定命令，不要改用 PATH 中的其他 dutydeck：
 - ${command} group self
-- ${command} group messages --limit 20 [--after <cursor>]
+- ${command} group messages --limit 20 [--after <cursor>] [--since <时间> --until <时间>] [--query '<关键词>']
 - ${command} group message <om_* message_id>
 ${allowSend ? `- ${command} group send-file <path> [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>] [--image]` : ''}
 - ${command} group wait --after <cursor> [--timeout-ms 15000]
@@ -1040,6 +1158,7 @@ ${allowSend ? `- ${command} group send <内容> [--to <Agent/成员名称、appI
 
 协作规则：
 - messages 返回的消息列表中，合并转发（merge_forward）消息只显示占位提示和 message_id，不会自动展开。如需查看转发的具体内容，请调用 ${command} group message <message_id> 按 message_id 拉取。
+- 要翻较早的讨论，用 --since/--until 限定时间，再用 --query 过滤；结果带 truncated=true 时表示只扫描了 500 条，没扫到的部分不能推断为不存在。
 - ${allowSend ? `需要其他 Agent 协助时先调用 peers 或 bots；返回的机器人中，带 agentId 字段的是本 Dutydeck 实例管理的可协作 Agent，不带 agentId 的是群内其他机器人。需要 @群内人类用户时先调用 members。再用 send --to 明确目标；名称重名时使用 appId 或 openId，不要臆测。
 - 发送前先判断消息归属：延续某条提问、回答某个话题或补充该话题结论时，使用 send --reply-to <该消息的 om_* messageId> --in-thread；独立公告、新任务或不应归入原讨论的内容，使用 send 且不要传 --reply-to/--in-thread。不要因为“能回复”就机械回复，也不要把 omt_* threadId 当作 reply-to。
 - 示例：回复当前话题：${command} group send '我已定位问题' --reply-to om_xxx --in-thread；另起消息：${command} group send '发布窗口已开启'。

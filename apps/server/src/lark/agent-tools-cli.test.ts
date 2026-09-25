@@ -55,6 +55,26 @@ describe('Agent group tool CLI client', () => {
       code: 'GROUP_TOOL_AUTHORIZATION_REQUIRED', instruction: '开通权限并发布版本', requiredScopes: ['im:message:readonly']
     } });
   });
+
+  it('encodes since, until, and query into the messages request URL', async () => {
+    const fetcher = vi.fn(async () => response({ chatId: 'oc_group', messages: [] }));
+    await runGroupMessages({
+      since: '2026-09-25T10:00:00Z',
+      until: '2026-09-25T12:00:00Z',
+      query: 'bug fix',
+      limit: '10'
+    }, {
+      env: { dutydeck_group_tools_url: 'http://127.0.0.1:4310/api/lark/agent-tools', dutydeck_group_tools_token: 'capability-token' },
+      fetcher: fetcher as typeof fetch
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const calledUrl = new URL(fetcher.mock.calls[0]![0] as string);
+    expect(calledUrl.pathname).toBe('/api/lark/agent-tools/messages');
+    expect(calledUrl.searchParams.get('since')).toBe('2026-09-25T10:00:00Z');
+    expect(calledUrl.searchParams.get('until')).toBe('2026-09-25T12:00:00Z');
+    expect(calledUrl.searchParams.get('query')).toBe('bug fix');
+    expect(calledUrl.searchParams.get('limit')).toBe('10');
+  });
 });
 
 it('transmits final and turn without changing ordinary send fields', async () => {

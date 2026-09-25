@@ -9,6 +9,9 @@ interface GroupToolQuery {
   after?: string;
   limit?: string;
   timeoutMs?: string;
+  since?: string;
+  until?: string;
+  query?: string;
 }
 
 interface GroupSendBody {
@@ -66,7 +69,10 @@ export async function registerLarkAgentToolRoutes(app: FastifyInstance, service?
     try {
       return await service.messages(tokenFrom(request.headers.authorization), {
         after: request.query.after,
-        limit: numberFrom(request.query.limit)
+        limit: numberFrom(request.query.limit),
+        since: request.query.since,
+        until: request.query.until,
+        query: request.query.query
       });
     } catch (error) { return handleToolError(error, reply); }
   });
