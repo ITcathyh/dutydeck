@@ -1433,9 +1433,12 @@ export class LarkMessageCoordinator {
         // 当前一轮停在审批上、后面还有指令排队时给一个拒绝入口：按钮与 /tasks 行内审批同形，
         // 登记成任务导航卡后由 respond 照常做鉴权和一次性决议。
         const approval = sessionId ? (await this.approvalBlock(config.appId, sessionId))?.record : undefined;
-        const card = await replyCard('任务状态', [await this.describeChatStatus(config, sessionId, latestTask), participation].filter(Boolean).join('\n\n'),
-          approval ? { elements: [{ tag: 'button', element_id: 'status_reject_approval', type: 'danger', text: { tag: 'plain_text', content: '拒绝这条审批' },
-            behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: approval.id, generation: approval.boot } }] }] } : {});
+        const status = [await this.describeChatStatus(config, sessionId, latestTask), participation].filter(Boolean).join('\n\n');
+        // 卡片带了 elements 就不再渲染 markdown 正文，正文要作为第一个元素放在按钮前面。
+        const card = await replyCard('任务状态', status,
+          approval ? { elements: [{ tag: 'markdown', element_id: 'status_body', content: status, text_align: 'left', text_size: 'normal_v2', margin: '0px' },
+            { tag: 'button', element_id: 'status_reject_approval', type: 'danger', text: { tag: 'plain_text', content: '拒绝这条审批' },
+              behaviors: [{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: approval.id, generation: approval.boot } }] }] } : {});
         if (card && approval) {
           await this.workflowOptions.store?.set(`lark.task_dashboard.${config.appId}.${card.messageId}`, JSON.stringify({
             messageId: event.messageId, chatId: event.chatId, chatType: event.chatType,
