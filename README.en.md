@@ -256,9 +256,11 @@ When creating tasks in the Web UI or specifying `--workspace worktree` via Lark:
   - Once verified, only the temporary folder is deleted, leaving the Git branch and all execution history intact.
 
 ### 3. Automated Verification Gate
-Associate custom verification commands (`pnpm test`, `cargo check`, `pytest`, etc.) with your workspace:
+Associate a verification command (`pnpm test`, `go test ./...`, etc.) with a Lark bot. When a turn finishes and that turn changed code (a worktree is compared with its source commit; a shared directory compares its code fingerprint at the start and end of the turn), the command runs automatically; the result card also offers a manual "Run verification" button:
 - Executes on the host in the specific task directory with strict timeout (default 5m) and output caps (128 KiB).
-- Captures real exit codes, runtimes, and commit fingerprints. If subsequent edits touch the directory, prior verification proof is automatically invalidated.
+- Captures real exit codes, runtimes, and code fingerprints. The result card header only says the run finished; verification status is a separate line (passed / failed / not verified). If later edits change the code, prior proof is marked expired. If the service restarts while an automatic verification is running, the card is marked as interrupted after restart and offers "Run verification" again.
+- On failure, the truncated output is sent back to the agent as a repair turn, at most 2 rounds per request; after that the card stays marked as failed. Tool problems (command not found, spawn failure, timeout) also count as failed but are not sent back for repair.
+- Bots without a command get a suggestion the first time a task finishes in a workspace, inferred from `package.json` (test / typecheck), `Makefile` (test target) or `go.mod` on the base branch (the worktree's source commit, or the default branch for a shared directory); one click on the result card saves it.
 
 ### 4. GitHub Actions CI Follow-Up
 Trigger `/ci wait [workflow]` from Lark or Web:

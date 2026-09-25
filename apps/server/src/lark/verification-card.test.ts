@@ -4,7 +4,7 @@
 // 命令在目标目录真实执行，留下退出码、有限输出、时间与代码指纹，Agent 自述测试通过
 // 不会产生任何验证记录。此前这件事在飞书侧一个字都没有。
 //
-// 最容易写错的一点是 stale：代码在验证之后变过的记录必须显示为失效，绝不能显示成已验证。
+// 最容易写错的一点是 stale：代码在验证之后变过的记录必须显示为已过期，绝不能显示成验证通过。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -40,31 +40,91 @@ describe('验证状态行渲染', () => {
     expect(element.content).toContain('运行验证');
   });
 
-  it('已验证给出退出码、代码指纹前若干位和验证时间', () => {
+  it('验证通过给出退出码、代码指纹前若干位和验证时间', () => {
     const element = renderLarkVerificationElement({ command: 'pnpm test', latest: record() })!;
-    expect(element.content).toContain('已验证');
+    expect(element.content).toContain('验证通过');
     expect(element.content).toContain('退出码 0');
     expect(element.content).toContain('代码指纹 abcdef123456');
     expect(element.content).toContain('2026-09-18 10:03 UTC');
   });
 
-  it('代码变化导致记录失效时必须显示为失效，绝不显示成已验证', () => {
+  it('最后一次代码改动之后没有重新验证的记录必须显示为已过期，绝不显示成验证通过', () => {
     for (const staleReason of ['code_changed', 'changed_during_run', 'current_fingerprint_unavailable', 'record_fingerprint_missing'] as const) {
-      const element = renderLarkVerificationElement({ command: 'pnpm test', latest: record({ stale: true, staleReason }) })!;
-      expect(element.content, staleReason).toContain('验证已失效');
-      expect(element.content, staleReason).not.toContain('已验证　');
-      expect(element.content.replace('验证已失效', ''), staleReason).not.toContain('已验证');
+      for (const status of ['passed', 'failed'] as const) {
+        const element = renderLarkVerificationElement({ command: 'pnpm test', latest: record({ status, stale: true, staleReason }) })!;
+        expect(element.content, staleReason).toContain('验证已过期');
+        expect(element.content, staleReason).not.toContain('验证通过');
+        expect(element.content, staleReason).not.toContain('验证未通过');
+      }
     }
   });
 
-  it('验证失败与验证中各自如实呈现，不冒充已验证', () => {
+  it('验证未通过与验证中各自如实呈现，不冒充验证通过', () => {
     const failed = renderLarkVerificationElement({ command: 'pnpm test', latest: record({ status: 'failed', exitCode: 1 }) })!;
-    expect(failed.content).toContain('验证失败');
+    expect(failed.content).toContain('验证未通过');
+    expect(failed.content).toContain('失败');
     expect(failed.content).toContain('退出码 1');
-    expect(failed.content).not.toContain('已验证');
+    expect(failed.content).not.toContain('验证通过');
+    for (const status of ['timed_out', 'interrupted', 'unverified'] as const) {
+      const other = renderLarkVerificationElement({ command: 'pnpm test', latest: record({ status, exitCode: undefined }) })!;
+      expect(other.content, status).toContain('验证未通过');
+      expect(other.content, status).not.toContain('验证通过');
+    }
     const running = renderLarkVerificationElement({ command: 'pnpm test', latest: record({ status: 'running', stale: true, staleReason: 'record_fingerprint_missing' }) })!;
     expect(running.content).toContain('验证执行中');
-    expect(running.content).not.toContain('已验证');
+    expect(running.content).not.toContain('验证通过');
+  });
+
+  it('自动验证的进展接在结论后面：执行中、被中断、已发回返修、返修用完、验证工具出错、跳过都不冒充通过', () => {
+    const failed = record({ status: 'failed', exitCode: 1 });
+    const running = renderLarkVerificationElement({ command: 'pnpm test', auto: { phase: 'running' }, canRun: true })!;
+    expect(running.content).toContain('验证执行中');
+    expect(running.content).toContain('本轮改了代码');
+    expect(running.content).not.toContain('运行验证');
+    const interrupted = renderLarkVerificationElement({ command: 'pnpm test', latest: record({ status: 'interrupted', exitCode: undefined }), auto: { phase: 'interrupted' }, canRun: true })!;
+    expect(interrupted.content).toContain('验证被中断');
+    expect(interrupted.content).toContain('服务重启');
+    expect(interrupted.content).toContain('运行验证');
+    expect(interrupted.content).not.toContain('验证执行中');
+    expect(interrupted.content).not.toContain('验证通过');
+    const repairing = renderLarkVerificationElement({ command: 'pnpm test', latest: failed, auto: { phase: 'repairing', round: 1 } })!;
+    expect(repairing.content).toContain('验证未通过');
+    expect(repairing.content).toContain('已把失败输出发回 Agent 返修（第 1/2 轮）');
+    const exhausted = renderLarkVerificationElement({ command: 'pnpm test', latest: failed, auto: { phase: 'exhausted' }, canRun: true })!;
+    expect(exhausted.content).toContain('验证未通过');
+    expect(exhausted.content).toContain('已自动返修 2 轮仍未通过');
+    expect(exhausted.content).toContain('运行验证');
+    const tool = renderLarkVerificationElement({ command: 'pnpm test', latest: record({ status: 'failed', exitCode: 127 }), auto: { phase: 'infrastructure' } })!;
+    expect(tool.content).toContain('验证未通过');
+    expect(tool.content).toContain('没有发回 Agent 返修');
+    const notStarted = renderLarkVerificationElement({ command: 'pnpm test', auto: { phase: 'infrastructure', error: 'Verification process recovery currently requires Linux' } })!;
+    expect(notStarted.content).toContain('验证未通过');
+    expect(notStarted.content).toContain('没能执行');
+    expect(notStarted.content).toContain('requires Linux');
+    const skipped = renderLarkVerificationElement({ command: 'pnpm test', auto: { phase: 'skipped' }, canRun: true })!;
+    expect(skipped.content).toContain('未验证');
+    expect(skipped.content).toContain('自动验证已跳过');
+    expect(skipped.content).not.toContain('验证通过');
+  });
+
+  it('没配验证命令时只在带了候选命令时渲染：写明未验证并指向「使用这个验证命令」', () => {
+    expect(renderLarkVerificationElement({})).toBeUndefined();
+    const element = renderLarkVerificationElement({ suggestion: 'pnpm run typecheck && pnpm test' })!;
+    expect(element.element_id).toBe(LARK_VERIFICATION_ELEMENT_ID);
+    expect(element.content).toContain('未验证');
+    expect(element.content).toContain('`pnpm run typecheck && pnpm test`');
+    expect(element.content).toContain('使用这个验证命令');
+    expect(element.content).not.toContain('运行验证');
+    const card = buildLarkCard({ cardKind: 'result', state: 'completed', taskId: 't1', turn: 1, readOnly: true,
+      capabilities: { canCancelQueued: true, canInterrupt: true, canRetry: true, canRefresh: true, verificationSuggestion: 'pnpm test' } });
+    expect(availableLarkCardActions({ state: 'completed', taskId: 't1', turn: 1, readOnly: true,
+      capabilities: { canCancelQueued: true, canInterrupt: true, canRetry: true, canRefresh: true, verificationSuggestion: 'pnpm test' } })).toEqual(['use_verification_command']);
+    expect(JSON.stringify(card)).toContain('使用这个验证命令');
+    for (const state of ['failed', 'interrupted', 'cancelled'] as const) {
+      expect(availableLarkCardActions({ state, taskId: 't1', turn: 1, readOnly: true,
+        capabilities: { canCancelQueued: true, canInterrupt: true, canRetry: true, canRefresh: true, verificationSuggestion: 'pnpm test' } }), state)
+        .not.toContain('use_verification_command');
+    }
   });
 });
 
@@ -239,7 +299,7 @@ describe('coordinator 把验证状态带上结果卡', () => {
     await vi.waitFor(() => {
       const patched = h.service.update.mock.calls.map(([input]) => input)
         .filter(input => input.cardKind === 'result' && verificationLine(input));
-      expect(patched.at(-1)!.elements.find((element: any) => element.element_id === LARK_VERIFICATION_ELEMENT_ID).content).toContain('已验证');
+      expect(patched.at(-1)!.elements.find((element: any) => element.element_id === LARK_VERIFICATION_ELEMENT_ID).content).toContain('验证通过');
       expect(patched.at(-1)!.elements.some((element: any) => element.element_id === 'final_output')).toBe(true);
     }, { timeout: 10_000 });
   });
@@ -260,26 +320,26 @@ describe('coordinator 把验证状态带上结果卡', () => {
     await vi.waitFor(() => expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'pnpm test' }));
     await vi.waitFor(() => {
       const patched = h.service.update.mock.calls.map(([input]) => input).filter(input => input.messageId === finalMessageId);
-      expect(patched.at(-1)!.elements.find((element: any) => element.element_id === LARK_VERIFICATION_ELEMENT_ID).content).toContain('已验证');
+      expect(patched.at(-1)!.elements.find((element: any) => element.element_id === LARK_VERIFICATION_ELEMENT_ID).content).toContain('验证通过');
     }, { timeout: 10_000 });
     restarted.stop();
   });
 
-  it('已有记录因代码变化失效时，结果卡显示失效而不是已验证，并仍给出重新验证入口', async () => {
+  it('已有记录因代码变化过期时，结果卡显示验证已过期而不是验证通过，并仍给出重新验证入口', async () => {
     const h = await harness({ verificationCommand: 'pnpm test', verifications: [record({ stale: true, staleReason: 'code_changed' })] });
     await h.coordinator.handle(event('om_1'), h.config);
     const card = await h.resultCard();
     const line = verificationLine(card);
-    expect(line.content).toContain('验证已失效');
-    expect(line.content.replace('验证已失效', '')).not.toContain('已验证');
+    expect(line.content).toContain('验证已过期');
+    expect(line.content).not.toContain('验证通过');
     expect(callbackValues(buildLarkCard(card)).map(value => value.action)).toContain('verify');
   });
 
-  it('记录能证明当前代码时不再给按钮，只留可核对的已验证结论', async () => {
+  it('记录能证明当前代码时不再给按钮，只留可核对的验证通过结论', async () => {
     const h = await harness({ verificationCommand: 'pnpm test', verifications: [record()] });
     await h.coordinator.handle(event('om_1'), h.config);
     const card = await h.resultCard();
-    expect(verificationLine(card).content).toContain('已验证');
+    expect(verificationLine(card).content).toContain('验证通过');
     expect(callbackValues(buildLarkCard(card)).map(value => value.action)).not.toContain('verify');
   });
 });

@@ -22,7 +22,7 @@ export type LarkCardElement = Record<string, any>;
  * 回调型操作。查看详情平时是直接打开 webUrl 的链接，不是回调；
  * 只有 Web 要求登录时才是回调 detail（服务端给管理员私信一次性登录链接）。
  */
-export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'run_in_new_session' | 'rerun_in_new_session' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail';
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'use_verification_command' | 'run_in_new_session' | 'rerun_in_new_session' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail';
 
 /** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
 export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'reconcile_required' | 'legacy_unresolved';
@@ -47,6 +47,11 @@ export interface LarkCardCapabilities {
    * 绝不能看到这个按钮，那会暗示一个不存在的能力。
    */
   canVerify?: boolean;
+  /**
+   * 机器人还没配验证命令时，按基准上的项目文件推断出的候选命令。只有工作区第一次跑完任务的
+   * 结果卡才带；缺省即不给「使用这个验证命令」按钮。
+   */
+  verificationSuggestion?: string;
   /**
    * 卡住的任务可以转到新会话：排队受阻或需要核对，且 coordinator 能取消排队、持久化认领并重放原请求。
    * 缺省不声明即为 false，其余卡片绝不出现这两个按钮。
@@ -215,6 +220,19 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     // cancelled 也不给：任务没跑过，没有需要验证的改动。
     states: ['completed', 'failed', 'interrupted'],
     capable: capabilities => capabilities.canVerify === true,
+    primary: false,
+    readOnlyReceipt: true
+  },
+  {
+    action: 'use_verification_command',
+    elementId: 'use_verification_command',
+    label: '使用这个验证命令',
+    hint: '把推断出的验证命令保存到机器人配置，之后改了代码会自动验证',
+    buttonType: 'text',
+    icon: 'safe-pass_outlined',
+    // 只保存配置，卡上已交付的结论不变，所以能出现在收据上。候选命令只在跑完的卡上推断。
+    states: ['completed'],
+    capable: capabilities => Boolean(capabilities.verificationSuggestion?.trim()),
     primary: false,
     readOnlyReceipt: true
   },
