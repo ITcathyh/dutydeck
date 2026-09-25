@@ -89,11 +89,21 @@ describe('GET /api/system/activity', () => {
       value: mockTasks,
       writable: true
     });
+    const steeringSessions = new Map<string, string>();
+    Object.defineProperty(fakeRuntime, 'steeringSessions', {
+      value: steeringSessions,
+      writable: true
+    });
 
     expect(fakeRuntime.getRunningTaskCount()).toBe(2);
     // 排除其中一个 running 会话后只剩 1（Agent 在自己会话里重启时排除本会话）
     expect(fakeRuntime.getRunningTaskCount('session-1')).toBe(1);
     // 排除一个本来就非 running 的会话不影响计数
     expect(fakeRuntime.getRunningTaskCount('session-2')).toBe(2);
+    // 插话请求在途的会话也算正在运行；本会话已有运行中的一轮时不重复计数
+    steeringSessions.set('session-1', 'task-7');
+    steeringSessions.set('session-4', 'task-8');
+    expect(fakeRuntime.getRunningTaskCount()).toBe(3);
+    expect(fakeRuntime.getRunningTaskCount('session-4')).toBe(2);
   });
 });
