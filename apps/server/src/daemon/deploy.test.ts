@@ -2,9 +2,11 @@ import type { SqliteDriverCheck, SqliteDriverCheckOptions } from '@dutydeck/stor
 import Database from 'better-sqlite3';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
 import { DRAIN_INTERVAL_MS } from './command.js';
@@ -28,14 +30,28 @@ function git(dir: string, ...args: string[]) {
   return result.stdout.trim();
 }
 
-interface CliBehaviour { health?: number; activity?: number; versionExit?: number }
+const betterSqliteUrl = pathToFileURL(createRequire(import.meta.url).resolve('better-sqlite3')).href;
+
+interface CliBehaviour {
+  health?: number;
+  activity?: number;
+  versionExit?: number;
+  /** 这个版本认识的最高迁移版本：启动时像真服务一样，库比它新就以 DATABASE_SCHEMA_TOO_NEW 退出，否则补上缺的迁移。 */
+  knownSchema?: number;
+}
 
 /** 假的 dist/cli.js：--version 前先加载 dep-a（它再加载 dep-b），否则起一个回答排空、任务数、健康检查的 HTTP 服务。 */
 function cliSource(behaviour: CliBehaviour) {
   return `import a from 'dep-a';
 import { createServer } from 'node:http';
 if (process.argv.includes('--version')) { console.log('0.0.3'); process.exit(${behaviour.versionExit ?? 0}); }
-const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
+${behaviour.knownSchema === undefined ? '' : `const { default: Database } = await import(${JSON.stringify(betterSqliteUrl)});
+const db = new Database(process.argv[process.argv.indexOf('--database') + 1]);
+db.exec('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+const applied = db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations').get().version;
+if (applied > ${behaviour.knownSchema}) { console.error('DATABASE_SCHEMA_TOO_NEW'); process.exit(1); }
+for (let version = applied + 1; version <= ${behaviour.knownSchema}; version++) db.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(version, 'test');
+`}const port = Number(process.argv[process.argv.indexOf('--port') + 1]);
 createServer((req, res) => {
   const path = new URL(req.url, 'http://x').pathname;
   const status = path === '/health' ? ${behaviour.health ?? 200} : path === '/api/system/activity' ? ${behaviour.activity ?? 200} : 200;
@@ -96,7 +112,7 @@ async function stop(child: ChildProcess) {
 }
 
 /** 可替换的进程管理：restart 停掉旧进程，再按 current 起一个新的。 */
-function processService(releases: string, port: number) {
+function processService(releases: string, port: number, database: string) {
   let child: ChildProcess | undefined;
   const ran: string[] = [];
   return {
@@ -105,10 +121,13 @@ function processService(releases: string, port: number) {
     restart: async () => {
       if (child) await stop(child);
       ran.push(realpathSync(join(releases, 'current')));
-      child = spawn(process.execPath, [join(releases, 'current', 'dist', 'cli.js'), '--port', String(port)], { stdio: 'ignore' });
+      child = spawn(process.execPath, [join(releases, 'current', 'dist', 'cli.js'), '--port', String(port), '--database', database], { stdio: 'ignore' });
       return undefined;
     },
-    stop: async () => { if (child) await stop(child); }
+    stop: async () => {
+      if (child) await stop(child);
+      return undefined;
+    }
   };
 }
 
@@ -155,7 +174,7 @@ describe('dutydeck deploy', () => {
     db.close();
     port = await freePort();
     writeFileSync(join(bot, 'deployment.json'), JSON.stringify({ address: `http://127.0.0.1:${port}`, databasePath: database, keep: 'me' }));
-    service = processService(releases, port);
+    service = processService(releases, port, database);
     info.mockClear();
     warn.mockClear();
   });
@@ -217,7 +236,8 @@ describe('dutydeck deploy', () => {
     expect(broken.error).toContain('HTTP 503');
     expect(realpathSync(join(releases, 'current'))).toBe(first.release);
     expect(service.ran).toEqual([first.release, broken.release, first.release]);
-    expect(JSON.parse(readFileSync(broken.manifest!, 'utf8'))).toMatchObject({ status: 'rolled_back', new_pid: await service.mainPid() });
+    // 库的迁移版本没变：只切回可执行文件，不动数据库
+    expect(JSON.parse(readFileSync(broken.manifest!, 'utf8'))).toMatchObject({ status: 'rolled_back', new_pid: await service.mainPid(), database_restored: false });
     // deployment.json 仍记着上一版
     expect(JSON.parse(readFileSync(join(bot, 'deployment.json'), 'utf8')).release).toBe(first.release);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('切回'));
@@ -297,6 +317,39 @@ describe('dutydeck deploy', () => {
     expect(requests.calls.filter(call => call.includes('/api/system/drain'))).toEqual([
       'drain /api/system/drain true', 'drain /api/system/drain true', 'drain /api/system/drain true', 'drain /api/system/drain false'
     ]);
+  }, 60_000);
+
+  it('新版本跑了迁移后没通过健康检查：停服务，另存回滚前的库，用部署前的备份恢复，旧版本才能启动', async () => {
+    nextCommit(source, { knownSchema: 24 });
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    expect(first, first.error).toMatchObject({ ok: true, status: 'deployed' });
+    nextCommit(source, { knownSchema: 27, health: 503 });
+    const schema = (file: string) => {
+      const db = new Database(file, { readonly: true, fileMustExist: true });
+      try { return (db.prepare('SELECT MAX(version) AS version FROM schema_migrations').get() as { version: number }).version; } finally { db.close(); }
+    };
+    // 记下每次停、启服务时库的迁移版本：停服务时库还没被恢复，旧版本启动时已经恢复
+    const order: string[] = [];
+    const tracked = {
+      ...service,
+      restart: async () => { order.push(`restart ${schema(database)}`); return await service.restart(); },
+      stop: async () => { order.push(`stop ${schema(database)}`); return await service.stop(); }
+    };
+
+    const broken = await runDeploy({ source, runtime: bot }, deps({ service: tracked, healthTimeoutMs: 2_500 }));
+
+    expect(broken, broken.error).toMatchObject({ ok: false, status: 'rolled_back', previousRelease: first.release });
+    expect(broken.error).toContain('数据库已用部署前的备份恢复');
+    expect(service.ran).toEqual([first.release, broken.release, first.release]);
+    expect(order).toEqual(['restart 24', 'stop 27', 'restart 24']);
+    expect(broken.pid).toBe(await service.mainPid());
+    expect(schema(database)).toBe(24);
+    const manifest = JSON.parse(readFileSync(broken.manifest!, 'utf8'));
+    expect(manifest).toMatchObject({
+      status: 'rolled_back', database_restored: true, schema_version_before: 24, schema_version_at_rollback: 27,
+      database_before_rollback: join(dirname(broken.manifest!), 'dutydeck.db.before-rollback')
+    });
+    expect(schema(manifest.database_before_rollback)).toBe(27);
   }, 60_000);
 
   it('试加载失败时不切换、不重启，删掉这个发布目录', async () => {
