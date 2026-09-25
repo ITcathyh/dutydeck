@@ -34,6 +34,47 @@ describe('Agent group tool HTTP boundary', () => {
     expect(service.sendFile).toHaveBeenCalledWith('scoped-token', { path: 'report.pdf', image: true, idempotencyKey: 'file-1' });
   });
 
+  it('rule 7: passes through since, until, and query query parameters to messages service', async () => {
+    const service = {
+      messages: vi.fn(async () => ({ chatId: 'oc_group', messages: [] }))
+    };
+    const app = Fastify(); apps.push(app); await registerLarkAgentToolRoutes(app, service as any);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/lark/agent-tools/messages?since=2026-09-25T10:00:00Z&until=2026-09-25T12:00:00Z&query=test%20query&limit=15',
+      headers: { authorization: 'Bearer scoped-token' }
+    });
+    expect(response.statusCode).toBe(200);
+    expect(service.messages).toHaveBeenCalledWith('scoped-token', {
+      after: undefined,
+      limit: 15,
+      since: '2026-09-25T10:00:00Z',
+      until: '2026-09-25T12:00:00Z',
+      query: 'test query'
+    });
+  });
+
+  it('rule 2 via HTTP: returns 400 with GROUP_MESSAGES_INVALID_RANGE on invalid range error', async () => {
+    const service = {
+      messages: vi.fn(async () => {
+        throw new AgentGroupToolError('GROUP_MESSAGES_INVALID_RANGE', '--after 不能与 --since/--until/--query 同时使用。', 400);
+      })
+    };
+    const app = Fastify(); apps.push(app); await registerLarkAgentToolRoutes(app, service as any);
+    const response = await app.inject({
+      method: 'GET',
+      url: '/api/lark/agent-tools/messages?after=cursor&since=2026-09-25T10:00:00Z',
+      headers: { authorization: 'Bearer scoped-token' }
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: {
+        code: 'GROUP_MESSAGES_INVALID_RANGE',
+        message: '--after 不能与 --since/--until/--query 同时使用。'
+      }
+    });
+  });
+
   it.each(['reply', 'topic seed', 'new topic', 'native thread'])('resolves %s routing through persisted sessions and the real Lark client', async scenario => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-thread-tools-'));
     const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
