@@ -6,7 +6,8 @@
 // 4) 验证工具本身出错（命令不存在）记为未通过，但不发回返修；
 // 5) 没配验证命令时按基准推断候选命令，一键确认后保存到配置，同一工作区只提议一次；
 // 6) 自动验证执行中服务重启：重启后卡片改成「验证被中断」并给出「运行验证」；
-// 7) 待收尾记录每个机器人一行，任务的验证收尾后移除，不随任务数增长。
+// 7) 待收尾记录每个机器人一行，任务的验证收尾后移除，不随任务数增长；
+// 8) 验证重绘过之后删掉结果卡上的一条本轮记忆：验证状态行与「运行验证」按钮按当前记录重绘，不退回交付时的样子。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -22,6 +23,8 @@ import type { LarkMessageEvent } from './listener.js';
 import { buildLarkCard } from './service.js';
 import { LARK_VERIFICATION_ELEMENT_ID } from './card-renderer.js';
 import { larkPendingVerificationKey, parseLarkPendingVerifications } from './auto-verification.js';
+import { larkMemoryScope, LarkMemoryStore } from './memory.js';
+import { LarkMemoryProjection } from './memory-view.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -36,8 +39,9 @@ const event = (id: string, text = '改一下登录逻辑'): LarkMessageEvent => 
 /**
  * edit 在 Agent 每一轮执行时调用，round 从 1 开始；不传就是这一轮不改代码。
  * unpushed：仓库有远端，本地还有一个没推送的提交——用户主目录的常见形态。
+ * memory：开启会话记忆，结果卡带「本轮记忆」区。
  */
-async function harness(options: { verificationCommand?: string; files?: Record<string, string>; edit?: (repo: string, round: number, prompt: string) => void; unpushed?: boolean }) {
+async function harness(options: { verificationCommand?: string; files?: Record<string, string>; edit?: (repo: string, round: number, prompt: string) => void; unpushed?: boolean; memory?: boolean }) {
   const root = await mkdtemp(join(tmpdir(), 'dutydeck-lark-autoverify-'));
   // 状态库放在仓库外面：它一直在写，放在仓库里会让验证期间的代码指纹对不上。
   const repo = join(root, 'repo');
@@ -109,12 +113,15 @@ async function harness(options: { verificationCommand?: string; files?: Record<s
     await runtime.initialize([agent]);
     const runVerification = vi.spyOn(runtime, 'runVerification');
     if (first) await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    // 记忆投影目录同样放在仓库外面。
+    const memoryStore = options.memory ? new LarkMemoryStore(repos.config) : undefined;
+    const memory = memoryStore ? { store: memoryStore, projection: new LarkMemoryProjection(memoryStore, join(root, 'memory'), log), command: 'dutydeck' } : undefined;
     const coordinator = new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot',
-      undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config });
+      undefined, repos.channelMappings, async () => 'group', undefined, undefined, { store: repos.config, ...(memory ? { memory } : {}) });
     await coordinator.initializeWorkflows(config);
     // 与服务关闭同一组动作：停飞书监听、停运行时（会打断执行中的验证）、关库。
     const close = async () => { coordinator.stop(); await runtime.shutdown(); repos.close(); };
-    return { repos, runtime, runVerification, coordinator, close };
+    return { repos, runtime, runVerification, coordinator, memoryStore, close };
   };
   let current = await boot(true);
   cleanups.push(async () => { await current.close(); await rm(root, { recursive: true, force: true }); });
@@ -144,7 +151,8 @@ async function harness(options: { verificationCommand?: string; files?: Record<s
   return {
     repo, config, service, cards, echoes, prompts, log, persisted, resultCard, verificationLine, settledLine, restart, pending, drained,
     get repos() { return current.repos; }, get runtime() { return current.runtime; },
-    get coordinator() { return current.coordinator; }, get runVerification() { return current.runVerification; }
+    get coordinator() { return current.coordinator; }, get runVerification() { return current.runVerification; },
+    get memoryStore() { return current.memoryStore; }
   };
 }
 
@@ -362,4 +370,40 @@ describe('自动验证进行中服务重启', () => {
       expect(h.service.update.mock.calls.length).toBe(updates);
     }, 45_000);
   }
+});
+
+describe('验证重绘过之后删本轮记忆', () => {
+  it('返修用完、验证行变成「可点运行验证」之后删一条本轮记忆：重绘后「运行验证」按钮仍在，文字与按钮一致', async () => {
+    const h = await harness({
+      memory: true,
+      verificationCommand: 'echo "still broken"; exit 1',
+      edit: (repo, round) => writeFileSync(join(repo, 'work.txt'), `round ${round}\n`)
+    });
+    const pool = larkMemoryScope(h.config.appId, 'oc_group', 'group');
+    const dropped = await h.memoryStore!.add(pool, { content: '回复统一用中文', source: 'user', chatId: 'oc_group' });
+    const kept = await h.memoryStore!.add(pool, { content: '先给一句话结论', source: 'user', chatId: 'oc_group' });
+    await h.coordinator.handle(event('om_1'), h.config);
+    await vi.waitFor(() => expect(h.echoes).toHaveLength(2), { timeout: 30_000 });
+    const last = h.echoes[1]!;
+    // 交付时自动验证正在跑，卡上没有「运行验证」；返修用完后重绘才给出按钮。
+    expect(await h.settledLine(last, '已自动返修 2 轮仍未通过')).toContain('可点「运行验证」执行。');
+    const before = (await h.resultCard(last)).card;
+    expect(callbackValues(buildLarkCard(before)).map(value => value.action)).toContain('verify');
+    const forget = callbackValues(before.elements).find(value => value.dutydeck_memory_forget === dropped.id);
+    expect(forget).toBeTruthy();
+
+    const saved = (await h.resultCard(last)).saved;
+    expect(await h.coordinator.handleAction(forget, 'ou_alice', { messageId: saved.final_message_id, chatId: saved.chat_id })).toMatchObject({ type: 'success' });
+    const redraw = (await h.resultCard(last)).card;
+    const elements = redraw.elements as Array<Record<string, any>>;
+    const memoryIds = callbackValues(elements).map(value => value.dutydeck_memory_forget).filter(Boolean);
+    expect(memoryIds).toEqual([kept.id]);
+    const line = String(elements.find(element => element.element_id === LARK_VERIFICATION_ELEMENT_ID)?.content ?? '');
+    expect(line).toContain('已自动返修 2 轮仍未通过');
+    expect(line).toContain('可点「运行验证」执行。');
+    expect(callbackValues(buildLarkCard(redraw)).map(value => value.action)).toContain('verify');
+    // 验证行原地替换：本轮记忆区以外的元素顺序不变。
+    const layout = (items: Array<Record<string, any>>) => items.map(element => String(element.element_id ?? '')).filter(id => !id.startsWith('memory_turn'));
+    expect(layout(elements)).toEqual(layout(before.elements));
+  }, 60_000);
 });

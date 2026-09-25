@@ -2655,14 +2655,24 @@ export class LarkMessageCoordinator {
     return view ? renderLarkTurnMemoryElements(view) : [];
   }
 
-  /** 删掉一条记忆后重绘结果卡上的「本轮记忆」区，其余内容原样保留；卡片不在内存里（例如重启之后）时不重绘。 */
+  /**
+   * 删掉一条记忆后重绘结果卡上的「本轮记忆」区，其余内容原样保留；卡片不在内存里（例如重启之后）时不重绘。
+   * 验证状态行与能力表按当前记录重算、验证行原地替换：交付之后验证重绘过的话，交付时的能力表已经和验证行对不上。
+   */
   private async refreshResultMemory(task: LarkTask, config: StoredLarkConfig) {
     if (!task.finalCardInput || !task.finalMessageId || !task.finalElements) return;
+    const state = String(task.finalCardInput.state);
     const memory = await this.turnMemoryElements(config, task.sessionId, task.runtimeTaskId);
+    const verification = await this.verificationView(task, config, state as LarkCardActionState);
     const kept = task.finalElements.filter(item => !isLarkTurnMemoryElement(item));
+    const row = kept.findIndex(item => item.element_id === LARK_VERIFICATION_ELEMENT_ID);
+    if (row >= 0) kept.splice(row, 1, ...(verification.element ? [verification.element] : []));
+    // 交付时没有验证行、现在有了（例如之后才配了验证命令）：按交付时的位置补在本轮记忆区前面。
+    const added = row < 0 && verification.element ? [verification.element] : [];
     const mention = kept.findIndex(item => item.element_id === 'group_mention');
-    const elements = mention < 0 ? [...kept, ...memory] : [...kept.slice(0, mention), ...memory, ...kept.slice(mention)];
-    await this.service.update({ ...task.finalCardInput, messageId: task.finalMessageId, elements });
+    const elements = mention < 0 ? [...kept, ...added, ...memory] : [...kept.slice(0, mention), ...added, ...memory, ...kept.slice(mention)];
+    await this.service.update({ ...task.finalCardInput, messageId: task.finalMessageId, elements,
+      capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...await this.resultActionCapabilities(task, config, state) } });
     task.finalElements = elements;
     await this.saveCardTask(task).catch(error => this.log.warn({ error, taskId: task.id }, '结果卡的本轮记忆已更新，持久化待对账补齐'));
   }
