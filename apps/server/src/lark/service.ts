@@ -538,7 +538,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   const actionButtonColumns = actionButtons.map(button => ({ tag: 'column', width: 'auto', vertical_align: 'center', elements: [button] }));
   const isProcessCard = input.cardKind === 'process';
   const isResultCard = input.cardKind === 'result';
-  // 结果卡的续问行（说人话 / 给我对外回复 / 再详细点 / 每天自动执行）放在正文之后：
+  // 结果卡的续问行（给我对外回复 / 再详细点 / 每天自动执行）放在正文之后：
   // 读者看完结论才会接着问。流式排布，窄屏上按钮自动折行，不挤成一排。
   const followUpButtons = isResultCard ? buildLarkCardFollowUpActions(actionContext) : [];
   const followUpRow = followUpButtons.length ? [{

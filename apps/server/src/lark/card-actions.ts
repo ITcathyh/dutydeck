@@ -53,7 +53,7 @@ export interface LarkCardCapabilities {
    */
   canRelaunch?: boolean;
   /**
-   * 结果卡的一键续问（说人话 / 给我对外回复 / 再详细点）。coordinator 确认会话仍可续聊、
+   * 结果卡的一键续问（给我对外回复 / 再详细点）。coordinator 确认会话仍可续聊、
    * 去重键能落库时才置位；缺省即不给按钮。
    */
   canFollowUp?: boolean;
@@ -136,6 +136,8 @@ type LarkCardActionDefinition = {
    * 两处读同一张表、同一个 isLarkCardActionAvailable，只是位置不同。
    */
   followUpRow?: boolean;
+  /** 已下线：新卡片不再渲染，只为已经发出的老卡片上的按钮继续接受点击。 */
+  retired?: boolean;
   /** 一键续问提交的固定文本：点击等同于在原话题里回复这段话。 */
   prompt?: string;
   /** 文案要带入能力里的数据时使用（目前只有定时按钮的 HH:MM）。 */
@@ -154,7 +156,7 @@ type LarkCardActionDefinition = {
  *   running       → 中断
  *   interrupting  → 无主操作（停止请求已在途，见下方说明）
  *   completed     → 无主操作（结果已作为 fresh final 送达，验收在 Web）；
- *                   正文之后的续问行（说人话 / 给我对外回复 / 再详细点 / 每天自动执行）都不是主操作
+ *                   正文之后的续问行（给我对外回复 / 再详细点 / 每天自动执行）都不是主操作
  *   failed        → 重试
  *   interrupted   → 重试
  *
@@ -263,6 +265,7 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     primary: false,
     readOnlyReceipt: true,
     followUpRow: true,
+    retired: true,
     prompt: '用不含术语的大白话重新说一遍上面的结论：先一句话说结论，再说影响和要不要处理。不要重新调查。'
   },
   {
@@ -358,7 +361,8 @@ export const safeLarkWebUrl = (value: string | undefined): string | undefined =>
 
 /**
  * 鉴权侧入口：回调到达时判断该操作在当前上下文是否合法。
- * 渲染侧共用同一函数，因此「界面上出现的按钮」与「后端接受的回调」严格等价。
+ * 渲染侧共用同一函数，因此「界面上出现的按钮」与「后端接受的回调」严格等价；
+ * 唯一例外是 retired 操作：只接老卡片上的点击，不再渲染。
  */
 export function isLarkCardActionAvailable(action: LarkCardActionName, context: LarkCardActionContext): boolean {
   const definition = definitionFor(action);
@@ -374,10 +378,10 @@ export function isLarkCardActionAvailable(action: LarkCardActionName, context: L
   return definition.guard ? definition.guard(context) : true;
 }
 
-/** 当前状态下可用的回调操作，按主操作优先排序。 */
+/** 当前状态下应渲染的回调操作，按主操作优先排序。 */
 export function availableLarkCardActions(context: LarkCardActionContext): LarkCardActionName[] {
   return larkCardActionDefinitions
-    .filter(definition => isLarkCardActionAvailable(definition.action, context))
+    .filter(definition => !definition.retired && isLarkCardActionAvailable(definition.action, context))
     .sort((left, right) => Number(right.primary) - Number(left.primary))
     .map(definition => definition.action);
 }
