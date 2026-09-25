@@ -3365,7 +3365,8 @@ export class LarkMessageCoordinator {
       this.verifyInFlight.add(task.id);
       const command = effectiveConfig.verificationCommand!.trim();
       void (async () => {
-        try { await this.runtime.runVerification!(task.sessionId!, { command }); }
+        // 带上点击人：管理群的执行授权要求验证有可核验的发起人。
+        try { await this.runtime.runVerification!(task.sessionId!, { command }, operatorOpenId); }
         catch (error) { this.log.warn({ error, taskId: task.id }, '运行验证失败，卡片按最新记录呈现'); }
         finally {
           // 先把卡刷成最新结论再放开重入：否则这段空档里的第二次点击会再起一个真实进程。

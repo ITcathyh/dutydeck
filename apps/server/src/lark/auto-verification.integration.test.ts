@@ -7,7 +7,7 @@
 // 5) 没配验证命令时按基准推断候选命令，一键确认后保存到配置，同一工作区只提议一次；
 // 6) 自动验证执行中服务重启：重启后卡片改成「验证被中断」并给出「运行验证」；
 // 7) 待收尾记录每个机器人一行，任务的验证收尾后移除，不随任务数增长；
-// 8) 管理群里自动验证带上发起人身份，过得了执行授权。
+// 8) 管理群里自动验证带上发起人身份、手动「运行验证」带上点击人身份，都过得了执行授权。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -294,6 +294,20 @@ describe('改了代码就自动验证', () => {
     expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'test -f work.txt' }, 'ou_alice');
     expect((await h.runtime.getVerifications((await h.persisted('om_1')).sessionId)).map(item => item.status)).toEqual(['passed']);
     await h.drained();
+  }, 30_000);
+
+  it('管理群：手动点「运行验证」带上点击人身份，过得了执行授权并执行', async () => {
+    const h = await harness({ verificationCommand: 'test -f README.md', managed: true });
+    await h.coordinator.handle(event('om_1', '登录逻辑是做什么的'), h.config);
+    expect(await h.verificationLine('om_1')).toContain('未验证');
+    const { saved, card } = await h.resultCard('om_1');
+    const verify = callbackValues(buildLarkCard(card)).find(value => value.action === 'verify');
+    expect(verify).toBeTruthy();
+    expect(await h.coordinator.handleAction(verify, 'ou_alice', { messageId: saved.final_message_id, chatId: saved.chat_id })).toMatchObject({ type: 'success' });
+    const line = await h.settledLine('om_1', '验证通过');
+    expect(line).toContain('`test -f README.md` 退出码 0');
+    expect(h.runVerification).toHaveBeenCalledWith(expect.any(String), { command: 'test -f README.md' }, 'ou_alice');
+    expect((await h.runtime.getVerifications(saved.sessionId)).map(item => item.status)).toEqual(['passed']);
   }, 30_000);
 
   it('多个任务跑完后，待收尾这一行里不残留', async () => {
