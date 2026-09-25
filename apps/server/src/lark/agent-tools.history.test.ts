@@ -162,6 +162,24 @@ describe('group team-search', () => {
     for (const leaked of ['部署方案已确认', '个人待办', '秘密群', 'oc_todo']) expect(body).not.toContain(leaked);
   });
 
+  it.each([
+    ['participation is turned off', 'GROUP_TEAM_SEARCH_UNAVAILABLE', 403, async (f: Awaited<ReturnType<typeof teamSetup>>) => { f.available.mockResolvedValue(false); }],
+    ['group tools are disabled', 'GROUP_TOOLS_DISABLED', 403, async (f: Awaited<ReturnType<typeof teamSetup>>) => {
+      await f.repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_current', appSecret: 'secret-current', defaultAgentId: 'codex', groupToolsEnabled: false }]));
+    }],
+    ['the session is stopped', 'GROUP_TOOL_SESSION_EXPIRED', 401, async (f: Awaited<ReturnType<typeof teamSetup>>) => {
+      await f.repos.sessions.save({ ...(await f.repos.sessions.get('ses_own'))!, state: 'stopped' });
+    }]
+  ] as const)('discards the material when %s during the read', async (_label, code, statusCode, change) => {
+    const f = await teamSetup(teamContext([observation('om_hit', '部署方案已确认')]));
+    f.reader.read.mockImplementationOnce(async () => { await change(f); return teamContext([observation('om_hit', '部署方案已确认')]); });
+    const error = await f.tools.teamSearch(f.token, { query: '部署方案' }).then(() => undefined, (caught: AgentGroupToolError) => caught);
+    expect(error).toMatchObject({ code, statusCode });
+    expect(f.reader.authorize).toHaveBeenCalled();
+    const body = JSON.stringify(error!.response());
+    for (const leaked of ['部署方案已确认', '个人待办', '秘密群', 'oc_todo']) expect(body).not.toContain(leaked);
+  });
+
   it('returns only entries with lexical overlap, grouped by source with status and missing', async () => {
     const followup = JSON.stringify({ goal: '部署上线', status: 'open', progress: '等待审批', steps: [] });
     const f = await teamSetup(teamContext([
