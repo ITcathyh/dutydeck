@@ -4899,7 +4899,8 @@ export class LarkMessageCoordinator {
           task.state = resolvedState;
           if (runtimeTaskId) await this.workflows?.expireTask(config.appId, runtimeTaskId);
           // 本轮改了代码就自动验证：结果卡按「验证执行中」交付，交付之后在后台真实执行验证命令。
-          const autoVerification = resolvedState === 'completed' ? await this.planAutoVerification(task, codeBefore) : undefined;
+          // 插话送达的这一条没有自己的一轮，代码是正在执行的那一轮改的，验证留给那一轮的结果卡。
+          const autoVerification = resolvedState === 'completed' && !task.steered ? await this.planAutoVerification(task, codeBefore) : undefined;
           await deliverTerminal(resolvedState, resolvedState === 'completed').finally(cleanup);
           if (autoVerification) void this.runAutoVerification(task, autoVerification);
           // 本轮不自动验证：这个任务若是返修轮次，返修到此为止，登记的轮次移出待收尾。

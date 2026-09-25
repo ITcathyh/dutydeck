@@ -5,6 +5,8 @@
 // 只把飞书网络层换成内存桩：这几条命令的价值全在「真的改了运行时/群绑定」，
 // 只 mock runtime 的测试证明不了任何事。
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
@@ -276,6 +278,32 @@ describe('Agent 支持插话时送进正在执行的这一轮', () => {
     await vi.waitFor(() => expect(h.cards.map(card => h.markdownOf(card)).join('\n')).toContain('已把这条内容送进正在执行的这一轮'));
     expect(h.steerQueued).not.toHaveBeenCalled();
     expect(h.prompts).toHaveLength(1);
+  });
+
+  it('插话送达的那条不自动验证：它没有自己的一轮，验证留给正在执行的那一轮', async () => {
+    let cwd = '';
+    // 插话期间正在执行的那一轮改了代码。
+    const steer = vi.fn(async (_prompt: string) => { writeFileSync(join(cwd, 'steered.txt'), 'changed\n'); return 'injected' as const; });
+    const h = await harness({ steer, configPatch: { verificationCommand: 'true' } });
+    cwd = h.cwd;
+    const git = (...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' });
+    git('init', '-q');
+    // 状态库一直在写，排除在代码指纹之外：本轮前后只有 steered.txt 这一处改动。
+    writeFileSync(join(cwd, '.gitignore'), 'state.db*\n');
+    writeFileSync(join(cwd, 'README.md'), 'baseline\n');
+    git('add', '.gitignore', 'README.md');
+    git('-c', 'user.email=test@example.com', '-c', 'user.name=Dutydeck Test', 'commit', '-qm', 'baseline');
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.coordinator.handle(event('om_steer', '/steer 改成另一个方向'), h.config);
+    await vi.waitFor(() => expect(steer).toHaveBeenCalledTimes(1));
+    const saved = await vi.waitFor(async () => {
+      const mapping = await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, 'om_steer');
+      const extra = JSON.parse(mapping?.extra ?? '{}');
+      expect(extra.final_message_id).toBeTruthy();
+      return extra;
+    });
+    expect(saved.verification_auto).toBeUndefined();
   });
 
   it('/queue steer 按编号把排队指令送进这一轮', async () => {
