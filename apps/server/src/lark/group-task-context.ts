@@ -101,20 +101,36 @@ export function renderGroupTaskContext(input: GroupTaskContextInput): GroupTaskC
   const since = previous && now.getTime() - Date.parse(previous.fullAt) < TASK_CONTEXT_FULL_REFRESH_MS
     && !(snapshot.observations.length >= TASK_CONTEXT_WINDOW && oldest!.sequence > previous.contextRevision) ? previous : undefined;
   const fresh = (item: { sequence: number }) => !since || item.sequence > since.contextRevision;
-  const changed = (item: { id: string; revision: number }) => !since || since.items[item.id] !== item.revision;
-  const watermark = JSON.stringify({ contextRevision: snapshot.contextRevision, settingsRevision: snapshot.settings.revision,
-    items: Object.fromEntries([...snapshot.followups, ...snapshot.mandates].map(item => [item.id, item.revision])),
-    fullAt: since ? since.fullAt : now.toISOString() } satisfies Watermark);
+  const delivered = (item: { id: string; revision: number }) => previous?.items[item.id] === item.revision;
 
-  const followups = snapshot.followups.filter(changed);
-  const mandates = snapshot.mandates.filter(changed);
-  const current = new Set([...snapshot.followups, ...snapshot.mandates].map(item => item.id));
-  const closed = since ? Object.keys(since.items).filter(id => !current.has(id)) : [];
+  const current = [...snapshot.followups, ...snapshot.mandates];
+  const currentIds = new Set(current.map(item => item.id));
+  const closed = since ? Object.keys(since.items).filter(id => !currentIds.has(id)) : [];
+  // 没按当前版本送达过的排前面，其次按更新时间从新到旧；预算不够时从末尾省略，没输出的下轮补发。
+  const pending = current.filter(item => !since || !delivered(item))
+    .sort((a, b) => Number(delivered(a)) - Number(delivered(b)) || b.updatedAt.localeCompare(a.updatedAt));
   const description = since ? snapshot.observations.find(item => item.source === 'lark.description' && fresh(item)) : input.description;
   const messages = snapshot.observations.filter(item => !pinnedSources.has(item.source) && fresh(item));
   const settingsChanged = !since || since.settingsRevision !== snapshot.settings.revision;
-  if (since && !settingsChanged && !description && !followups.length && !mandates.length && !closed.length && !messages.length) {
-    return { text: `[Dutydeck 群上下文 · 自上轮以来无新增] 本群没有新消息或事项变化（contextRevision ${snapshot.contextRevision}）。`, watermark };
+  const items: Array<{ line: string; id?: string }> = [
+    ...(closed.length ? [{ line: `- 已不在进行中：${closed.join('、')}` }] : []),
+    ...pending.map(item => ({ line: 'mode' in item ? mandateLine(item) : followupLine(item), id: item.id }))
+  ];
+  // 水位只记实际输出过的事项版本：输出了记当前版本；增量里没轮到的保留旧版本；全量里没输出的不记，下轮当作变化补发。
+  const watermark = () => {
+    const shown = new Set(items.map(row => row.id));
+    const versions: Record<string, number> = {};
+    for (const item of current) {
+      const seen = shown.has(item.id) ? item.revision : since?.items[item.id];
+      if (seen !== undefined) versions[item.id] = seen;
+    }
+    // 「已不在进行中」那行被省略时，保留这些 id，下轮再报一次。
+    if (!items.some(row => row.id === undefined)) for (const id of closed) versions[id] = since!.items[id]!;
+    return JSON.stringify({ contextRevision: snapshot.contextRevision, settingsRevision: snapshot.settings.revision, items: versions,
+      fullAt: since ? since.fullAt : now.toISOString() } satisfies Watermark);
+  };
+  if (since && !settingsChanged && !description && !items.length && !messages.length) {
+    return { text: `[Dutydeck 群上下文 · 自上轮以来无新增] 本群没有新消息或事项变化（contextRevision ${snapshot.contextRevision}）。`, watermark: watermark() };
   }
 
   const head = [
@@ -127,27 +143,26 @@ export function renderGroupTaskContext(input: GroupTaskContextInput): GroupTaskC
   if (!since && bootstrap && (bootstrap.status !== 'complete' || bootstrap.missing.length)) {
     head.push(clip(`历史补读：${bootstrap.status}${bootstrap.missing.length ? `；缺口：${bootstrap.missing.join('，')}` : ''}`, LINE_TEXT_LIMIT));
   }
-  const items = [...followups.map(followupLine), ...mandates.map(mandateLine), ...(closed.length ? [`- 已不在进行中：${closed.join('、')}`] : [])];
   const selfIds = new Set([snapshot.scope.appId, ...snapshot.observations.flatMap(item => item.refs
     .filter(ref => ref.startsWith('dutydeck:self:')).map(ref => ref.slice('dutydeck:self:'.length)))]);
   const rows = messages.map(item => ({ line: messageLine(item, selfIds), keep: Boolean(input.triggerMessageId && item.messageId === input.triggerMessageId) }));
 
   // 预算先从最旧的消息扣，消息扣完仍超出再从末尾扣事项；当前触发消息不扣。
   const size = (lines: string[]) => lines.reduce((sum, line) => sum + line.length + 1, 0);
-  let total = size(head) + size(items) + size(rows.map(row => row.line)) + 2 * OMISSION_NOTE_RESERVE;
+  let total = size(head) + size(items.map(row => row.line)) + size(rows.map(row => row.line)) + 2 * OMISSION_NOTE_RESERVE;
   let omittedMessages = 0; let omittedItems = 0;
   while (total > TASK_CONTEXT_BUDGET) {
     const index = rows.findIndex(row => !row.keep);
     if (index >= 0) { total -= rows[index]!.line.length + 1; rows.splice(index, 1); omittedMessages++; }
-    else if (items.length) { total -= items.pop()!.length + 1; omittedItems++; }
+    else if (items.length) { total -= items.pop()!.line.length + 1; omittedItems++; }
     else break;
   }
   return { text: [
     ...head,
-    ...(items.length || omittedItems ? [since ? '有变化的事项与委托：' : '进行中的事项与委托：', ...items] : []),
-    ...(omittedItems ? [`（为控制长度另有 ${omittedItems} 条事项或委托未列出。）`] : []),
+    ...(items.length || omittedItems ? [since ? '有变化的事项与委托：' : '进行中的事项与委托：', ...items.map(row => row.line)] : []),
+    ...(omittedItems ? [`（为控制长度另有 ${omittedItems} 条事项或委托未列出，后续轮次补上。）`] : []),
     ...(rows.length || omittedMessages ? [since ? '新消息（旧→新）：' : '最近消息（旧→新）：'] : []),
     ...(omittedMessages ? [`（为控制长度省略了更早的 ${omittedMessages} 条消息，${input.groupTools ? '可以用 group messages 查看' : '本轮未注入'}。）`] : []),
     ...rows.map(row => row.line)
-  ].join('\n'), watermark };
+  ].join('\n'), watermark: watermark() };
 }

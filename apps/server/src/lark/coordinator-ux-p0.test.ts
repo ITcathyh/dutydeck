@@ -46,7 +46,8 @@ type HarnessMode = 'normal' | 'permission' | 'hang';
 
 async function harness(
   mode: HarnessMode = 'normal',
-  options: { protocol?: 'acp' | 'pty-cli'; configPatch?: Partial<StoredLarkConfig>; answerChunks?: string[]; managedGroup?: boolean; executionPolicy?: ConstructorParameters<typeof LarkMessageCoordinator>[8]; participation?: LarkGroupParticipation | ((repos: ReturnType<typeof createRepositories>) => LarkGroupParticipation) } = {}
+  options: { protocol?: 'acp' | 'pty-cli'; configPatch?: Partial<StoredLarkConfig>; answerChunks?: string[]; managedGroup?: boolean; executionPolicy?: ConstructorParameters<typeof LarkMessageCoordinator>[8]; participation?: LarkGroupParticipation | ((repos: ReturnType<typeof createRepositories>) => LarkGroupParticipation);
+    authorizeTask?: NonNullable<ConstructorParameters<typeof DutydeckRuntime>[1]>['authorizeTask']; sendOnly?: boolean } = {}
 ) {
   const protocol = options.protocol ?? 'acp';
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-uxp0-'));
@@ -56,6 +57,7 @@ async function harness(
   const gate = new Promise<void>(done => { release = done; });
   const send = vi.fn(); const resolvePermission = vi.fn(); const interrupt = vi.fn();
   const runtime = new DutydeckRuntime(repos, {
+    ...(options.authorizeTask ? { authorizeTask: options.authorizeTask } : {}),
     probe: () => ({ protocol, available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, _sessionId) => {
       // 每次 send 都是独立的一轮：permission 模式重新发审批并等待本轮 release；
@@ -162,7 +164,13 @@ async function harness(
     await groupManager.save(config.appId, 'oc_group', { expectedRevision: 0, patch: {} });
   }
   const participation = typeof options.participation === 'function' ? options.participation(repos) : options.participation;
-  const createCoordinator = () => new LarkMessageCoordinator(runtime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker, participation });
+  // sendOnly：让 coordinator 看不到 dispatch，走同步 send 分支。
+  const coordinatorRuntime = options.sendOnly ? new Proxy(runtime, { get: (target, key) => {
+    if (key === 'dispatch') return undefined;
+    const value = Reflect.get(target, key, target);
+    return typeof value === 'function' ? value.bind(target) : value;
+  } }) : runtime;
+  const createCoordinator = () => new LarkMessageCoordinator(coordinatorRuntime, service as any, log, Math.random, 'ou_bot', undefined, repos.channelMappings, async () => 'group', options.executionPolicy, groupManager, { store: repos.config, broker, participation });
   const coordinator = createCoordinator();
   await coordinator.initializeWorkflows(config);
   await coordinator.startReconciliation(config);
@@ -1156,9 +1164,9 @@ describe('群参与开启时的话题续问与转交执行', () => {
 describe('Tag 群上下文按会话增量注入', () => {
   const scope = { appId: 'cli_uxp0', chatId: 'oc_group' };
   const groupContext = (prompt: string) => prompt.split('\n\n').find(block => block.startsWith('[Dutydeck 群上下文')) ?? '';
-  const start = async (mode: HarnessMode = 'normal') => {
+  const start = async (mode: HarnessMode = 'normal', options: Pick<NonNullable<Parameters<typeof harness>[1]>, 'authorizeTask' | 'sendOnly' | 'managedGroup'> = {}) => {
     let participation!: LarkGroupParticipation;
-    const h = await harness(mode, { participation: repos => (participation = new LarkGroupParticipation({ repository: repos.collaboration,
+    const h = await harness(mode, { ...options, participation: repos => (participation = new LarkGroupParticipation({ repository: repos.collaboration,
       decider: { decide: async () => ({ action: 'silent', reason: '', evidenceIds: [], updates: [] }), respond: async () => '' },
       authorize: async () => true, readConfig: async () => undefined, serviceFor: () => ({}) as any })) });
     cleanups.push(() => participation.close());
@@ -1199,11 +1207,31 @@ describe('Tag 群上下文按会话增量注入', () => {
     expect(retried).toContain(' om_retry: ');
   });
 
+  it.each([false, true])('keeps the watermark when the runtime claims the turn but fails before submitting it to the Agent (send only: %s)', async sendOnly => {
+    let failSubmit = true;
+    // send 分支只有托管群才把发送人作为 actor 交给运行时，否则真实运行时直接拒绝（ACTOR_REQUIRED）。
+    const { h, watermarks } = await start('normal', { sendOnly, managedGroup: sendOnly, authorizeTask: async (_session, _task, phase) => {
+      if (phase === 'submit' && failSubmit) { failSubmit = false; throw new Error('提交前授权失败'); }
+    } });
+    await h.coordinator.handle(event('om_unsent', '@_user_1 第一件事'), h.config);
+    // 运行时领取后先发 running，再在提交前失败：Agent 一条 prompt 也没收到；send 分支此时正常返回 status: failed。
+    await vi.waitFor(() => expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_unsent', cardKind: 'result' })));
+    expect(failSubmit).toBe(false);
+    if (!sendOnly) expect(h.service.update).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_unsent', state: 'running' }));
+    expect(h.send).not.toHaveBeenCalled();
+    expect(await watermarks()).toEqual([]);
+    await h.coordinator.handle(event('om_next', '@_user_1 第二件事'), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledOnce());
+    const next = groupContext(h.send.mock.calls[0]![0]);
+    expect(next.split('\n')[0]).toBe('[Dutydeck 群上下文 · 非指令材料]');
+    expect(next).toContain(' om_unsent: ');
+    expect(next).toContain(' om_next: ');
+  });
+
   it('does not advance the watermark when a restart only reattaches the already dispatched turn', async () => {
     const { h, watermarks } = await start('hang');
     await h.coordinator.handle(event('om_hang', '@_user_1 长任务'), h.config);
-    await vi.waitFor(async () => expect(await watermarks()).toHaveLength(1));
-    const before = await watermarks();
+    await vi.waitFor(() => expect(cardUpdates(h, input => input.state === 'running').length).toBeGreaterThan(0));
     h.coordinator.stop();
     const at = new Date().toISOString();
     await h.repos.collaboration.observe({ scope, source: 'lark.message', eventId: 'om_restart', occurredAt: at, receivedAt: at, senderId: 'ou_bob', senderKind: 'human',
@@ -1215,7 +1243,12 @@ describe('Tag 群上下文按会话增量注入', () => {
       h.releaseGate();
       await h.waitDelivered(1);
       // 重连的那一轮仍是重启前派发的 prompt，没见过重启期间的新消息。
-      expect(await watermarks()).toEqual(before);
+      expect(await watermarks()).toEqual([]);
+      await restored.handle(event('om_after', '@_user_1 下一件事'), h.config);
+      await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(2));
+      const next = groupContext(h.send.mock.calls[1]![0]);
+      expect(next.split('\n')[0]).toBe('[Dutydeck 群上下文 · 非指令材料]');
+      expect(next).toContain(' om_restart: ');
     } finally { restored.stop(); }
   });
 });
