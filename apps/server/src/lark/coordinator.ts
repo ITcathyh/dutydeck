@@ -189,7 +189,7 @@ export type PersistedLarkCardTask = {
   final_card_input?: Record<string, unknown>;
   progress_frozen?: boolean;
   turn?: number;
-  /** 本任务之前几轮的过程卡与结果卡消息 ID：重试、转到新会话之后，旧卡上的「查看详情」靠它认回这条任务。 */
+  /** 同一会话里之前几轮（重试前）的过程卡与结果卡消息 ID，旧卡上的「查看详情」靠它认回这条任务。转到新会话前那一轮的卡不记在这里。 */
   earlier_message_ids?: string[];
 };
 
@@ -745,7 +745,7 @@ export class LarkMessageCoordinator {
       let current: { sessionId: string; extra?: string | null } | undefined;
       try { current = await this.cardMappings.get(channel, task.id); }
       catch { /* 读不到就整体覆写：至少保证当前轮次可恢复 */ }
-      const merged = this.mergeCardTaskExtra(current?.extra, extra, task.turn);
+      const merged = this.mergeCardTaskExtra(current?.extra, extra, task.turn, current?.sessionId === task.sessionId);
       // 新建记录、换了会话（/new 之后 sessionId 变了）、或存储没有 CAS（测试替身）时
       // 只能整行落库——compareAndSetExtra 写不了 extra 以外的列。
       if (!current || current.sessionId !== task.sessionId || typeof this.cardMappings.compareAndSetExtra !== 'function' || attempt >= 5) {
@@ -762,14 +762,15 @@ export class LarkMessageCoordinator {
    * （restoreVerifyCardAction）只带回一个子集，result_feedback_state 更是根本不在任务上。
    * 整体覆写会在「重启后点运行验证」这一步把附件绑定、验收状态与冻结标记一起抹掉，
    * ✅ 再也打不到那条文件消息上，对账也会开始反复重绘已终态的卡。
-   * 轮次推进时不合并：新一轮本来就要清掉上一轮的卡片归属与终态。只把上一轮的卡片消息 ID
-   * 记进 earlier_message_ids（最多留 20 个），旧卡上的「查看详情」仍能认回这条任务。
+   * 轮次推进时不合并：新一轮本来就要清掉上一轮的卡片归属与终态。同一会话里的新一轮（重试）只把
+   * 上一轮的卡片消息 ID 记进 earlier_message_ids（最多留 20 个），旧卡上的「查看详情」仍能认回这条任务；
+   * 换了会话（转到新会话中执行）时上一轮的卡由转交认领认回原会话，这里不记。
    */
-  private mergeCardTaskExtra(previous: string | null | undefined, extra: PersistedLarkCardTask, turn: number): PersistedLarkCardTask {
+  private mergeCardTaskExtra(previous: string | null | undefined, extra: PersistedLarkCardTask, turn: number, sameSession: boolean): PersistedLarkCardTask {
     try {
       const parsed = previous ? JSON.parse(previous) as PersistedLarkCardTask : undefined;
       if (parsed && (parsed.turn ?? 0) === turn) return { ...parsed, ...extra };
-      const earlier = [...parsed?.earlier_message_ids ?? [], parsed?.card_message_id, parsed?.final_message_id]
+      const earlier = [...parsed?.earlier_message_ids ?? [], ...(sameSession ? [parsed?.card_message_id, parsed?.final_message_id] : [])]
         .filter((id): id is string => Boolean(id)).slice(-20);
       if (earlier.length) return { ...extra, earlier_message_ids: earlier };
     } catch { /* 记录损坏时按整体覆写处理 */ }
@@ -2043,10 +2044,11 @@ export class LarkMessageCoordinator {
    * 「查看详情」回调（仅 Web 要求登录时渲染）：管理员收到一条私信，内含绑定该会话的一次性登录链接。
    *
    * 回调里不信任卡片上的任何值：会话按平台给出的 open_message_id 从卡片账本里查，账本记录必须属于
-   * 当前机器人和当前群。重试或转到新会话之后的旧卡同样受理（查看详情只读），链接指向任务现在所在的会话。
+   * 当前机器人和当前群。旧卡同样受理（查看详情只读）：重试旧卡跳到任务现在所在的会话，转交旧卡跳原会话。
+   * target 只用来定位转交认领，会话一律取持久化记录。
    * 链接只发到点击人的单聊，群里不出现；也不写日志——下面记录的错误只含飞书返回码。
    */
-  private async handleDetailLogin(operatorOpenId?: string, context?: { messageId?: string; chatId?: string }) {
+  private async handleDetailLogin(operatorOpenId?: string, context?: { messageId?: string; chatId?: string }, target?: { taskId: string; turn?: number }) {
     const links = this.workflowOptions.loginLinks;
     if (!links || !operatorOpenId || !context?.messageId || !context.chatId || !this.reconcileConfig || !this.cardMappings || !this.workflowOptions.store) {
       return { type: 'error', content: '详情入口已失效，请在最新的任务卡片上操作。' };
@@ -2064,6 +2066,16 @@ export class LarkMessageCoordinator {
           || ![saved.card_message_id, saved.final_message_id, ...saved.earlier_message_ids ?? []].includes(context.messageId)) continue;
         card = { externalId: mapping.externalId, sessionId: mapping.sessionId, saved };
         break;
+      }
+      // 转交旧卡：映射已移到新一轮，按回调里的任务与轮次读转交认领。claim.sessionId 是原会话，
+      // 与 markRelaunchedCard 给这张旧卡的页脚会话一致。
+      if (!card && target?.turn !== undefined) {
+        const raw = await this.workflowOptions.store.get(`lark.relaunch.${config.appId}.${target.taskId}.${target.turn}`);
+        const claim = raw ? JSON.parse(raw) as LarkRelaunchClaim : undefined;
+        if (claim?.phase === 'moved' && claim.cardMessageId === context.messageId && claim.chatId === context.chatId) {
+          card = { externalId: claim.taskId, sessionId: claim.sessionId, saved: { app_id: claim.appId, chat_id: claim.chatId, turn: claim.turn,
+            state: claim.action === 'rerun_in_new_session' ? 'reconcile_required' : 'cancelled' } as PersistedLarkCardTask };
+        }
       }
       // 与渲染端同一个判断：卡上出现「查看详情」按钮的条件，就是这里受理的条件。
       if (!card || !webBaseUrl || !isLarkCardActionAvailable('detail', {
@@ -3014,7 +3026,7 @@ export class LarkMessageCoordinator {
     if (parsed.action === 'ask_plain' || parsed.action === 'ask_reply' || parsed.action === 'ask_detail') return this.submitResultFollowUp(parsed, operatorOpenId, context);
     if (parsed.action === 'schedule_daily') return this.scheduleResultDaily(parsed, operatorOpenId, context);
     // 查看详情只读账本、不碰内存任务：重启后老卡片上的按钮同样可用。
-    if (parsed.action === 'detail') return this.handleDetailLogin(operatorOpenId, context);
+    if (parsed.action === 'detail') return this.handleDetailLogin(operatorOpenId, context, parsed);
     const action = parsed.action;
     const taskId = parsed.taskId;
     if (action === 'run_in_new_session' || action === 'rerun_in_new_session') return this.relaunchCardAction(action, taskId, parsed.turn, operatorOpenId, context);
