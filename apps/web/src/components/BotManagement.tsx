@@ -106,6 +106,10 @@ function leaderUsable(agent: Agent, bot: LarkBotConfig): boolean {
   return agent.protocol !== 'pty-cli' || (agent.permissionMode === 'full-trust' && bot.permissionMode !== 'ask');
 }
 
+function formatMemoryTime(iso?: string): string {
+  return iso ? new Date(iso).toLocaleString('zh-CN', { hour12: false }) : '';
+}
+
 /** 一次保存提交所固定下来的东西。见 saveMutation 的注释。 */
 type BotSaveVariables = { appId: string; draft: BotDraft; fullTrustConfirmed: boolean };
 
@@ -205,6 +209,14 @@ export function BotManagement({
     enabled: Boolean(currentDraft?.defaultAgentId),
     initialData: () => currentDraft?.defaultAgentId ? readCachedAgentModels(currentDraft.defaultAgentId, currentDraft.defaultModel || undefined) : undefined,
     staleTime: 5 * 60_000
+  });
+
+  // 机器人的群共享会话记忆状态
+  const memoryStatusQuery = useQuery({
+    queryKey: ['lark-memory-status', activeAppId],
+    queryFn: () => api.larkMemoryStatus(activeAppId!),
+    enabled: Boolean(activeAppId && currentDraft?.memoryEnabled),
+    staleTime: 30_000
   });
 
   /*
@@ -759,6 +771,48 @@ export function BotManagement({
                         </Field>
                       </div>
                     </>
+                  )}
+                  {activeBot && currentDraft.memoryEnabled && (
+                    <div className="rounded-md border border-subtle bg-muted p-3 space-y-1.5 text-caption text-secondary">
+                      {memoryStatusQuery.isLoading ? (
+                        <p className="text-subtle">读取中…</p>
+                      ) : memoryStatusQuery.isError ? (
+                        <p className="text-warning">记忆状态读取失败</p>
+                      ) : memoryStatusQuery.data?.groups ? (
+                        <>
+                          <p>
+                            群共享记忆：{memoryStatusQuery.data.groups.liveEntries} 条 · {memoryStatusQuery.data.groups.topics} 个主题 · 待提取 {memoryStatusQuery.data.groups.pendingTurns} 轮
+                          </p>
+                          <p>
+                            上次提取 {memoryStatusQuery.data.groups.lastExtractionAt ? formatMemoryTime(memoryStatusQuery.data.groups.lastExtractionAt) : '尚未提取'} · 上次整理 {memoryStatusQuery.data.groups.lastConsolidationAt ? formatMemoryTime(memoryStatusQuery.data.groups.lastConsolidationAt) : '尚未整理'}
+                          </p>
+                          {memoryStatusQuery.data.groups.running && (
+                            <p>
+                              正在运行：{memoryStatusQuery.data.groups.running.kind === 'extraction' ? '提取' : '整理'}
+                            </p>
+                          )}
+                          <p>
+                            {memoryStatusQuery.data.groups.lastRun ? (
+                              <>
+                                <span>{`上次运行：${memoryStatusQuery.data.groups.lastRun.kind === 'extraction' ? '提取' : '整理'} · ${formatMemoryTime(memoryStatusQuery.data.groups.lastRun.at)} · `}</span>
+                                {memoryStatusQuery.data.groups.lastRun.ok ? (
+                                  <span>成功</span>
+                                ) : (
+                                  <span className="text-warning">
+                                    失败{memoryStatusQuery.data.groups.lastRunLabel ? ` ${memoryStatusQuery.data.groups.lastRunLabel}` : ''}
+                                  </span>
+                                )}
+                              </>
+                            ) : (
+                              '上次运行：尚未运行'
+                            )}
+                          </p>
+                          <p className="pt-1 text-meta text-subtle">
+                            私聊的记忆各自独立，在对应私聊里发 /memory 查看。
+                          </p>
+                        </>
+                      ) : null}
+                    </div>
                   )}
                   <p className="text-caption text-subtle">各群共享同一份记忆，私聊各自独立；仅作为参考内容注入，不授予操作权限。</p>
                 </div>

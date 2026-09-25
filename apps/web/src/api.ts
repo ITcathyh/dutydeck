@@ -90,6 +90,37 @@ export type LarkBotConfig = {
 };
 export type LarkConfig = { configured: boolean; bots: LarkBotConfig[]; listeningDisabled: boolean };
 
+export type LarkMemoryGroupStatus = {
+  appId: string;
+  pool: string;
+  shared: boolean;
+  liveEntries: number;
+  topics: number;
+  pendingTurns: number;
+  running?: { kind: 'extraction' | 'consolidation'; sessionId?: string; startedAt: string };
+  lastRun?: {
+    kind: 'extraction' | 'consolidation';
+    at: string;
+    ok: boolean;
+    added: number;
+    superseded: number;
+    retired: number;
+    retopiced: number;
+    rejected: number;
+    error?: string;
+  };
+  lastRunLabel?: string;
+  lastExtractionAt?: string;
+  lastConsolidationAt?: string;
+  lastFailureAt?: { extraction?: string; consolidation?: string };
+};
+
+export type LarkMemoryStatusResult = {
+  appId: string;
+  enabled: boolean;
+  groups: LarkMemoryGroupStatus;
+};
+
 export type RoleChange =
   | {
       kind: 'create';
@@ -347,6 +378,7 @@ export const api = {
     if (agentId) query.set('agentId', agentId);
     return json<LarkHookStatus>(`/api/lark/hooks/status?${query.toString()}`);
   },
+  larkMemoryStatus: (appId: string) => json<LarkMemoryStatusResult>(`/api/lark/bots/${encodeURIComponent(appId)}/memory/status`, { cache: 'no-store' }),
   installLarkHook: (appId: string, highRiskPattern: string) => json<LarkHookStatus>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern }) }),
   systemCapabilities: () => json<{ platform: string; directoryPicker: boolean; filePicker: boolean }>('/api/system/capabilities'),
   skills: (cwd?: string) => json<SkillReference[]>(`/api/system/skills${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`),
