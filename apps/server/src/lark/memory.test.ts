@@ -539,6 +539,55 @@ describe('group memory pool', () => {
     repos.close();
   });
 
+  // 崩溃在「已并入群池、旧键还没写占位」：池里是并入结果，旧键仍是原值。
+  const crashAfterMerge = async (repos: ReturnType<typeof store>['repos'], memory: LarkMemoryStore) => {
+    const { ledger, state } = await seedLegacy(repos);
+    await memory.list(groupA);
+    await repos.config.set(legacyKey('oc_group_a'), ledger);
+    await repos.config.set(legacyStateKey('oc_group_a'), state);
+  };
+
+  it('does not re-enqueue turns another group consumed before a crashed migration replays', async () => {
+    const { repos, memory } = store({ now: () => new Date('2026-09-25T00:00:00.000Z') });
+    await crashAfterMerge(repos, memory);
+    // 重启后 B 群先跑了一次提取，按 settleExtraction 的方式消费掉 A 群并入的轮次。
+    const restarted = new LarkMemoryStore(repos.config);
+    await restarted.mutateState(groupB, current => {
+      const pendingTurns = (current.pendingTurns ?? []).filter(turn => !['task_a1', 'task_b1'].includes(turn.taskId));
+      return { pendingTurns, turnsSinceExtraction: pendingTurns.length };
+    });
+
+    // A 群再访问触发重放：看到池里的迁移标记，只补写旧键占位，不再合并。
+    const replayed = await restarted.getState(groupA);
+    expect(replayed.pendingTurns).toEqual([]);
+    expect(replayed.turnsSinceExtraction).toBe(0);
+    expect(replayed.migratedChats).toEqual({ oc_group_a: '2026-09-25T00:00:00.000Z' });
+    expect(JSON.parse((await repos.config.get(legacyKey('oc_group_a')))!)).toMatchObject({ migratedTo: 'groups' });
+    expect(JSON.parse((await repos.config.get(legacyStateKey('oc_group_a')))!)).toMatchObject({ migratedTo: 'groups' });
+    repos.close();
+  });
+
+  it('does not revive a memory deleted before a crashed migration replays, even after its tombstone was pruned', async () => {
+    let tick = 0;
+    const now = () => new Date(Date.UTC(2026, 8, 25, 0, 0, 0, tick++));
+    const { repos, memory } = store({ now });
+    await crashAfterMerge(repos, memory);
+    // 重启后在 B 群删掉 A 群并入的那条，再删 100 条别的：它的墓碑被修剪掉，池里查不到这个编号。
+    const restarted = new LarkMemoryStore(repos.config, { now });
+    expect(await restarted.remove(groupB, 'mem_aaaa0001')).toBeTruthy();
+    for (let index = 0; index < larkMemoryLimits.tombstones; index++) {
+      const entry = await restarted.add(groupB, { content: `临时 ${index}`, source: 'agent', chatId: groupB.chatId });
+      await restarted.remove(groupB, entry.id);
+    }
+    expect((await restarted.listAll(groupB)).map(entry => entry.id)).not.toContain('mem_aaaa0001');
+
+    await restarted.list(groupA);
+    expect((await restarted.listAll(groupA)).map(entry => entry.id)).not.toContain('mem_aaaa0001');
+    expect((await restarted.list(groupA)).map(entry => entry.id)).toEqual(['mem_aaaa0002']);
+    expect(JSON.parse((await repos.config.get(legacyKey('oc_group_a')))!)).toMatchObject({ migratedTo: 'groups' });
+    repos.close();
+  });
+
   it('merges exactly once under concurrent access from separate stores and concurrent pool writes', async () => {
     const { repos } = store();
     await repos.config.set(legacyKey('oc_group_a'), JSON.stringify({ v: 1, entries: Array.from({ length: 5 }, (_, index) => ({
