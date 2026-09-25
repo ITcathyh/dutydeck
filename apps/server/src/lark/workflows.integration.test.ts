@@ -14,7 +14,7 @@ import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkInteraction } from './workflow-interactions.js';
-import { LarkServiceError } from './service.js';
+import { LarkServiceError, createLarkCardService } from './service.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -728,6 +728,36 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: statusCardId, chatId: 'oc_group' })).toMatchObject({ type: 'success', content: '执行端已接受拒绝。' });
     expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', false);
     await vi.waitFor(async () => expect((await h.runtime.getTasks(request.sessionId)).find(task => task.id === request.taskId)?.status).toBe('completed'));
+  });
+
+  it('sends the blocked /status card to Feishu with both its status text and the reject button', async () => {
+    const h = await harness('permission');
+    await h.coordinator.handle(event('om_task', '修改实现'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    const request = (await h.interactions()).find(item => item.kind === 'permission')!;
+    await h.coordinator.handle(event('om_task_queued', '再补一份说明'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(request.sessionId)).some(task => task.status === 'queued')).toBe(true));
+    // /status 回执走真实的 LarkCardService，只替换 fetcher：按发往飞书的请求体验收，而不是 service 入参。
+    const sent: any[] = [];
+    const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+      const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (url.includes('/tenant_access_token/')) return json({ code: 0, tenant_access_token: 'token', expire: 7200 });
+      sent.push({ url, body: JSON.parse(String(init?.body)) });
+      return json({ code: 0, data: { message_id: 'om_status_card', chat_id: 'oc_group' } });
+    });
+    const feishu = createLarkCardService({ LARK_APP_ID: 'cli_status', LARK_APP_SECRET: 'status_secret' }, fetcher as unknown as typeof fetch);
+    const deliver = h.service.reply.getMockImplementation()!;
+    h.service.reply.mockImplementation(async (input: any) => input.taskName === '任务状态' ? feishu.reply(input) : deliver(input));
+    await h.coordinator.handle(event('om_status', '/status'), h.config);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(sent[0].url).toMatch(/\/open-apis\/im\/v1\/messages\/[^/]+\/reply$/);
+    const elements = JSON.parse(sent[0].body.content).body.elements as any[];
+    const texts = JSON.stringify(elements.filter(element => element.tag === 'markdown').map(element => element.content));
+    expect(texts).toContain('**Agent**');
+    expect(texts).toContain('**会话**');
+    expect(texts).toContain('**待执行指令**：1 条（被审批阻塞）');
+    expect(texts).toContain('**被审批阻塞**：当前一轮在等审批');
+    expect(JSON.stringify(elements)).toContain('拒绝这条审批');
   });
 
   it('rejects revoked members and old cards after coordinator recreation', async () => {
