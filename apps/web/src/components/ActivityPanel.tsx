@@ -10,11 +10,13 @@ export function ActivityPanel({ groups, ongoing, hasAnswer = false, taskStatus =
   const elapsed = formatElapsed(elapsedMilliseconds(startedAt ?? groups[0]?.startedAt, ongoing ? undefined : completedAt ?? groups.at(-1)?.completedAt));
   const interrupted = taskStatus === 'interrupted' || taskStatus === 'cancelled';
   const failed = taskStatus === 'failed';
-  const incomplete = taskStatus === 'incomplete';
-  const statusLabel = ongoing ? '执行中' : interrupted ? '已取消' : failed ? '已失败' : incomplete ? '未完成' : '已完成';
+  // 执行结果没有确认（例如被服务重启切断）：既不是失败也不是完成，按未完成的样式标「结果未知」。
+  const unknown = taskStatus === 'reconcile_required';
+  const incomplete = taskStatus === 'incomplete' || unknown;
+  const statusLabel = ongoing ? '执行中' : interrupted ? '已取消' : failed ? '已失败' : unknown ? '结果未知' : incomplete ? '未完成' : '已完成';
   const statusTone = ongoing ? 'text-info' : interrupted ? 'text-subtle' : failed ? 'text-danger' : incomplete ? 'text-warning' : 'text-success';
   const missingFinal = !ongoing && !hasAnswer;
-  const missingFinalText = interrupted ? '任务已中断，未产生最终输出。' : failed ? '任务执行失败，未产生最终输出。' : 'Agent 未返回最终输出。';
+  const missingFinalText = interrupted ? '任务已中断，未产生最终输出。' : failed ? '任务执行失败，未产生最终输出。' : unknown ? '这一轮的执行结果未确认。' : 'Agent 未返回最终输出。';
   return <>
   <details open={open} onToggle={event => setOpen(event.currentTarget.open)} aria-live={ongoing ? 'polite' : undefined} aria-label={`${modelLabel} 执行过程`} className="reasoning ui-timeline-item group/turn my-3 border-b border-default text-body text-subtle">
     <summary className="flex min-h-11 cursor-pointer select-none items-center gap-2 py-2.5 text-caption font-medium text-subtle outline-none transition-colors hover:text-primary focus-visible:rounded-md focus-visible:ring-2 focus-visible:ring-focus-ring focus-visible:ring-inset">

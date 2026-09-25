@@ -1,5 +1,5 @@
 import type { LarkGroupParticipation } from './group-participation.js';
-import type { ExecutionActor } from '@dutydeck/shared';
+import type { ExecutionActor, ExecutionRecoveryDecision } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
 import type { RelayAskBroker } from '@dutydeck/relay';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -53,6 +53,17 @@ export interface LarkRuntime {
   getVerifications?(id: string): Promise<VerificationResponse[]>;
   runVerification?(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse>;
   subscribe(sessionId: string, listener: (event: AgentEvent) => void): () => void;
+  /**
+   * 安装者身份的执行恢复读写，与 `dutydeck recovery` 同一组原语。服务重启切断的一轮自动重投时用：
+   * 读原因码、阻塞与资源核对，把旧一轮记为结果未知。
+   */
+  inspectExecutionRecovery?(id: string, actor: ExecutionActor): Promise<{
+    runId: string; blockers: unknown[]; stopBlock: unknown; resourceChecks: ExecutionRecoveryDecision['resourceChecks'];
+    tasks: Array<{ taskId: string; attempt?: { attemptId: string; revision: number; state: string; reconcileReason?: { code: string }; createdAt?: string } }>;
+  }>;
+  confirmExecutionRecovery?(id: string, decision: ExecutionRecoveryDecision, actor: ExecutionActor): Promise<unknown>;
+  /** 往会话时间线写一条说明（Web 上能看到），不属于任何一轮的执行输出。 */
+  publishSessionEvent?(sessionId: string, type: 'text', data: unknown): Promise<unknown>;
 }
 
 export interface LarkMessageEvent {
