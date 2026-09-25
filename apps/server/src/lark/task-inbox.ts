@@ -4,6 +4,7 @@ import type { ConfigRepository } from '@dutydeck/shared';
 import type { LarkMessageResource } from './message-content.js';
 import type { LarkContextCursor } from './task-context.js';
 import type { LarkMessageEvent } from './listener.js';
+import type { LarkRedispatchInfo } from './turn-redispatch.js';
 
 export interface LarkInboxRecord {
   appId: string;
@@ -17,6 +18,8 @@ export interface LarkInboxRecord {
   workflowRequestId?: string;
   request?: { prompt: string; scopeId: string; resources: LarkMessageResource[]; materialPrompt?: string; launchOptions?: LarkLaunchOptions };
   materials?: { prompt: string; cursor?: LarkContextCursor; readMessageIds: string[]; contextBefore?: string };
+  /** 这一轮是服务重启切断之后的重投：Agent prompt 前附说明，count 也是下一次能不能自动重投的依据。 */
+  redispatch?: LarkRedispatchInfo;
   error?: string;
 }
 const prefix = (appId: string) => `lark.inbox.${appId}.`;
@@ -48,7 +51,7 @@ export class LarkTaskInbox {
     const next = { ...record, boot: this.boot };
     return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
   }
-  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'event' | 'workflowRequestId'>>) {
+  async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'event' | 'workflowRequestId' | 'redispatch'>>) {
     const next = { ...record, ...patch };
     if (!await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next))) {
       throw new Error('Lark inbox claim was lost');

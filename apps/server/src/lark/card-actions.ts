@@ -22,7 +22,7 @@ export type LarkCardElement = Record<string, any>;
  * 回调型操作。查看详情平时是直接打开 webUrl 的链接，不是回调；
  * 只有 Web 要求登录时才是回调 detail（服务端给管理员私信一次性登录链接）。
  */
-export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'run_in_new_session' | 'rerun_in_new_session' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail';
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'run_in_new_session' | 'rerun_in_new_session' | 'replay_turn' | 'abandon_turn' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail';
 
 /** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
 export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'reconcile_required' | 'legacy_unresolved';
@@ -52,6 +52,11 @@ export interface LarkCardCapabilities {
    * 缺省不声明即为 false，其余卡片绝不出现这两个按钮。
    */
   canRelaunch?: boolean;
+  /**
+   * 服务重启切断、停在结果未知的一轮（可能已有外部副作用或已自动重投满）：「重新执行」「放弃」。
+   * coordinator 持有这一轮的重投记录时才置位，缺省即不给按钮。
+   */
+  canReplay?: boolean;
   /**
    * 结果卡的一键续问（给我对外回复 / 再详细点）。coordinator 确认会话仍可续聊、
    * 去重键能落库时才置位；缺省即不给按钮。
@@ -103,6 +108,8 @@ const clockTime = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 
 /** 转到新会话的两个按钮文案。task-recovery.ts 的恢复说明引用同一份常量，正文里提到的按钮名与卡上一致。 */
 export const larkRelaunchLabels = { run_in_new_session: '在新会话中执行', rerun_in_new_session: '在新会话中重新执行' } as const;
+/** 重启切断那一轮的两个按钮文案，task-recovery.ts 的说明引用同一份。 */
+export const larkReplayLabels = { replay_turn: '重新执行', abandon_turn: '放弃' } as const;
 
 type LarkCardActionDefinition = {
   action: LarkCardActionName;
@@ -251,6 +258,28 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     icon: 'repeat_outlined',
     states: ['reconcile_required', 'legacy_unresolved'],
     capable: capabilities => capabilities.canRelaunch === true,
+    primary: false
+  },
+  {
+    action: 'replay_turn',
+    elementId: 'replay_turn',
+    label: larkReplayLabels.replay_turn,
+    hint: '服务重启打断的这一轮再执行一次，已经做过的操作可能重复',
+    buttonType: 'primary_text',
+    icon: 'repeat_outlined',
+    states: ['reconcile_required'],
+    capable: capabilities => capabilities.canReplay === true,
+    primary: false
+  },
+  {
+    action: 'abandon_turn',
+    elementId: 'abandon_turn',
+    label: larkReplayLabels.abandon_turn,
+    hint: '不再执行这一轮，执行结果保持未知',
+    buttonType: 'text',
+    icon: 'close-small_outlined',
+    states: ['reconcile_required'],
+    capable: capabilities => capabilities.canReplay === true,
     primary: false
   },
   {
