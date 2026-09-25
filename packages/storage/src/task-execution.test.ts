@@ -155,6 +155,11 @@ describe('task execution ledger',()=>{
     x.settleAttempt(af(repos.execution.getTaskExecution(a.taskId)!.currentAttempt!),'settle-first',complete());
     expect(x.claimNext(f)).toBeUndefined();
   });
+  it('refuses a steering delivery for a Task whose consumer reads its own Attempt',()=>{
+    const {x}=ready();const a=claimed(x);x.markSubmissionPending(af(a),intent());
+    const scheduled=x.acceptTask(f,request('two',{namespace:'schedule',actor:{kind:'installation_owner',id:'installation_owner'}}),input('hello','hello','installation_owner'),'back').task!;
+    expect(()=>x.deliverQueuedBySteering(f,scheduled.id,scheduled.revision,{operationId:'steer-schedule',actor:{kind:'unspecified'},target:{taskId:a.taskId,attemptId:a.attemptId},outcome:'injected'})).toThrow(/STEERING_TASK_OWNED/);
+  });
   it('captures no interrupt target once and never retargets later activity',()=>{
     const {x}=ready();const first=x.acceptTask(f,request('one',{mode:'interrupt'}),input(),'front');expect(x.getPendingQueueActions(f)).toEqual([]);
     x.claimNext(f);expect(x.acceptTask(f,request('one',{mode:'interrupt'}),input(),'front').task!.id).toBe(first.task!.id);expect(x.getPendingQueueActions(f)).toEqual([]);
