@@ -89,6 +89,22 @@ it('resolves Bot defaults on every read and keeps explicit group overrides until
   expect(await f.collaboration.service.repositories.collaboration.getSettings({ ...scope, appId: 'another_bot' })).toMatchObject({ participation: 'off' });
 });
 
+it('re-sends the participation mode line when an inheriting group follows a changed Bot default', async () => {
+  const f = await fixture();
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'observe' });
+  const before = await f.repos.collaboration.getSettings(scope);
+  const first = (await f.collaboration.participation.taskContext(scope))!;
+  expect(first.text).toContain('本群参与模式：仅观察');
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  // 改的是机器人默认值：群自己的设置修订不变，只有有效模式变了。
+  expect(await f.repos.collaboration.getSettings(scope)).toMatchObject({ revision: before.revision, inheritParticipation: true });
+  const next = (await f.collaboration.participation.taskContext(scope, { watermark: first.watermark }))!;
+  expect(next.text.split('\n')[0]).toBe('[Dutydeck 群上下文 · 自上轮以来的新增 · 非指令材料]');
+  expect(next.text).toContain('本群参与模式：Tag 按需参与');
+  const settled = (await f.collaboration.participation.taskContext(scope, { watermark: next.watermark }))!;
+  expect(settled.text).toContain('自上轮以来无新增');
+});
+
 it('discovers existing groups and handles a newly joined group without per-group setup or restarting the runtime', async () => {
   const f = await fixture();
   const second = { ...scope, chatId: 'oc_second' }, joined = { ...scope, chatId: 'oc_joined' };
