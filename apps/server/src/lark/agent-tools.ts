@@ -5,7 +5,10 @@ import type { LarkGroupManager } from './group-management.js';
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { resolve } from 'node:path';
 import { deliverArtifact, type ArtifactClient } from './artifact-delivery.js';
-import { workPlanConfirmationRequired, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository } from '@dutydeck/shared';
+import { workPlanConfirmationRequired, type CollaborationObservation, type CollaborationScope, type CollaborationTeamContext, type ConfigRepository, type PolicyAction, type PolicyDecision, type Session, type SessionRepository, type TaskRecord, type TaskRepository } from '@dutydeck/shared';
+import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
+import { withLarkContextReadTimeout } from './context-read-timeout.js';
+import type { LarkTeamContextReader } from './team-context.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { larkMemoryToolsPrompt } from './memory.js';
 import { readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
@@ -24,6 +27,9 @@ const groupToolPath = '/api/lark/agent-tools';
 export const groupToolsSigningSecretConfigKey = 'lark.group_tools.signing_secret';
 const maxMessageLimit = 50;
 const maxWaitTimeoutMs = 30_000;
+const historyScanLimit = 500;
+const teamSearchEntryLimit = 30;
+const teamSearchTextLimit = 8_000;
 
 export interface LarkAgentSessionBinding { sessionId: string; appId: string; chatId: string; chatType: 'group' | 'p2p'; threadId?: string; threadRootMessageId?: string }
 
@@ -181,6 +187,10 @@ export interface LarkAgentToolsOptions {
   clientFactory?: (config: StoredLarkConfig) => LarkGroupToolClient;
   pollIntervalMs?: number;
   groupToolsCommand?: string;
+  /** history list/show：只读会话、任务与执行账本。 */
+  history?: AttemptResultRepositories & { sessions: Pick<SessionRepository, 'list'>; tasks: Pick<TaskRepository, 'listBySession'> };
+  /** group team-search；群协作集成尚未就绪时返回 undefined。 */
+  teamSearch?: () => { reader: Pick<LarkTeamContextReader, 'read' | 'authorize' | 'scorer'>; available(scope: CollaborationScope): Promise<boolean> } | undefined;
   /** Stored Lark sessions are explicitly legacy_unmanaged during WP1b. */
   executionPolicy?: {
     integrationMode: 'legacy_unmanaged';
@@ -314,6 +324,46 @@ function parseTimestampMs(value: string | number): number {
   const ms = Date.parse(trimmed);
   if (Number.isNaN(ms)) throw new Error('Invalid date format');
   return ms;
+}
+
+/** 截断到 limit 个字符以内（含省略号），不切断代理对。 */
+const clip = (text: string, limit: number) => {
+  if (text.length <= limit) return text;
+  const end = /[\uD800-\uDBFF]/.test(text[limit - 2]!) ? limit - 2 : limit - 1;
+  return `${text.slice(0, end)}…`;
+};
+const flat = (text: string) => text.replace(/\s+/g, ' ').trim();
+const clockFormat = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const clock = (iso: string) => {
+  const parts = Object.fromEntries(clockFormat.formatToParts(new Date(iso)).map(part => [part.type, part.value]));
+  return `${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
+};
+
+/** 同一机器人、同一聊天的飞书任务会话；群参与的后台委托会话除外（记忆、判定、leader 会话的 source 不是 lark）。 */
+function inChat(session: Pick<Session, 'source' | 'sourceId'>, binding: LarkAgentSessionBinding) {
+  if (session.source !== 'lark' || !session.sourceId) return false;
+  const [appId, chatId, chatType, kind] = session.sourceId.split(':');
+  return appId === binding.appId && chatId === binding.chatId && chatType === binding.chatType && kind !== 'collaboration';
+}
+
+/** 取法同记忆提取管线：number=1 Attempt 正常完成时的助手文本；未完成或读不到时没有回答。 */
+function taskAnswer(repos: AttemptResultRepositories, task: TaskRecord): string | undefined {
+  try {
+    const attemptId = repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.number === 1)?.attemptId;
+    if (!attemptId) return undefined;
+    const read = readAttemptResult(repos, task.sessionId, task.id, attemptId);
+    return read.status === 'settled' && read.result.outcome === 'completed' ? read.result.output.text.trim() || undefined : undefined;
+  } catch { return undefined; }
+}
+
+function teamSearchLine(item: CollaborationObservation) {
+  if (item.source === 'lark.team.followup') {
+    try {
+      const followup = JSON.parse(item.text) as { goal?: string; status?: string; progress?: string; result?: string };
+      return { sender: '事项', body: flat([`[${followup.status}] ${followup.goal}`, followup.progress && `进展：${followup.progress}`, followup.result && `结果：${followup.result}`].filter(Boolean).join('；')) };
+    } catch { /* 按原文展示 */ }
+  }
+  return { sender: `${item.senderId ?? '未知'}(${item.senderKind})`, body: flat(item.text) };
 }
 
 const escapeAtName = (value: string) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
@@ -788,6 +838,113 @@ export class LarkAgentToolsService {
     };
   }
 
+  /** 本聊天全部任务，新到旧。 */
+  private async chatTasks(context: ToolContext) {
+    const repos = this.options.history;
+    if (!repos) throw new AgentGroupToolError('HISTORY_UNAVAILABLE', '当前服务未接入会话历史。', 503);
+    const tasks: TaskRecord[] = [];
+    for (const session of await repos.sessions.list()) {
+      if (inChat(session, context)) tasks.push(...await repos.tasks.listBySession(session.id));
+    }
+    return { repos, tasks: tasks.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)) };
+  }
+
+  async history(token: string | undefined, input: { limit?: number; since?: string; until?: string; query?: string } = {}) {
+    const context = await this.context(token, 'group_tools.read');
+    const limit = normalizeLimit(input.limit);
+    const bound = (value: string | undefined, name: string) => {
+      if (value === undefined) return undefined;
+      try { return parseTimestampMs(value); }
+      catch { throw new AgentGroupToolError('HISTORY_INVALID_RANGE', `${name} 时间格式无法解析。`, 400); }
+    };
+    const since = bound(input.since, 'since'), until = bound(input.until, 'until');
+    if (since !== undefined && until !== undefined && since > until) throw new AgentGroupToolError('HISTORY_INVALID_RANGE', 'since 不能晚于 until。', 400);
+    const terms = input.query?.trim().toLowerCase().split(/\s+/).filter(Boolean) ?? [];
+    const { repos, tasks } = await this.chatTasks(context);
+    // 正在执行本命令的这一轮总会命中自己的关键词，不列出。
+    const current = this.options.workbenchTask?.(context.sessionId)?.taskId;
+    const items = [];
+    let scanned = 0, truncated = false;
+    for (const task of tasks) {
+      if (items.length >= limit) break;
+      const at = Date.parse(task.createdAt);
+      if (task.id === current || (since !== undefined && at < since) || (until !== undefined && at > until)) continue;
+      if (terms.length && scanned >= historyScanLimit) { truncated = true; break; }
+      scanned++;
+      const answer = taskAnswer(repos, task);
+      if (terms.length) {
+        const text = `${task.prompt}\n${answer ?? ''}`.toLowerCase();
+        if (!terms.every(term => text.includes(term))) continue;
+      }
+      items.push({
+        taskId: task.id, createdAt: task.createdAt, status: task.status,
+        ...(task.executionContext?.actorId ? { actorId: task.executionContext.actorId } : {}),
+        request: clip(flat(task.prompt), 200),
+        ...(answer ? { answer: clip(flat(answer), 300) } : {})
+      });
+    }
+    return { chatId: context.chatId, tasks: items, ...(terms.length ? { scanned } : {}), ...(truncated ? { truncated: true } : {}) };
+  }
+
+  async historyTask(token: string | undefined, input: { taskId?: string }) {
+    const context = await this.context(token, 'group_tools.read');
+    const taskId = input.taskId?.trim();
+    if (!taskId) throw new AgentGroupToolError('HISTORY_TASK_ID_REQUIRED', 'taskId 不能为空。', 400);
+    const { repos, tasks } = await this.chatTasks(context);
+    const task = tasks.find(item => item.id === taskId);
+    // 其他聊天的任务与不存在的任务同样返回 404，不泄露存在性。
+    if (!task) throw new AgentGroupToolError('HISTORY_TASK_NOT_FOUND', `本聊天没有编号为 ${taskId} 的任务。`, 404);
+    const answer = taskAnswer(repos, task);
+    // 回答是整轮助手文本的拼接，结论在末尾：超长时保留末尾。
+    const answerClipped = answer !== undefined && answer.length > 8_000;
+    return {
+      chatId: context.chatId, taskId: task.id, createdAt: task.createdAt, status: task.status,
+      ...(task.executionContext?.actorId ? { actorId: task.executionContext.actorId } : {}),
+      request: clip(task.prompt, 4_000),
+      ...(answer ? { answer: answerClipped ? `…${answer.slice(-(8_000 - 1)).replace(/^[\uDC00-\uDFFF]/, '')}` : answer } : {}),
+      ...(answerClipped ? { answerClipped: true } : {})
+    };
+  }
+
+  async teamSearch(token: string | undefined, input: { query?: string }) {
+    const context = await this.context(token, 'group_tools.read');
+    const query = input.query?.trim();
+    if (!query) throw new AgentGroupToolError('GROUP_TEAM_SEARCH_QUERY_REQUIRED', 'team-search 需要关键词。', 400);
+    const scope = { appId: context.appId, chatId: context.chatId };
+    const search = this.options.teamSearch?.();
+    // 与原先预注入跨群资料的条件相同：只有开启了群参与的群聊可用。
+    if (context.chatType !== 'group' || !search || !await search.available(scope)) {
+      throw new AgentGroupToolError('GROUP_TEAM_SEARCH_UNAVAILABLE', '跨群资料检索只在开启了群参与的群聊里可用；当前聊天不是群聊或未开启群参与。', 403);
+    }
+    let found: CollaborationTeamContext;
+    try { found = await withLarkContextReadTimeout(search.reader.read(scope, query), '跨群资料读取'); }
+    catch (error) { throw new AgentGroupToolError('GROUP_TEAM_SEARCH_FAILED', `跨群资料读取失败：${error instanceof Error ? error.message : String(error)}`, 502); }
+    let allowed = false;
+    try { allowed = await withLarkContextReadTimeout(search.reader.authorize(scope, found), '跨群资料授权复核'); } catch { /* 超时按未通过处理 */ }
+    // 复核未通过时整份资料作废，连来源群名也不返回。
+    if (!allowed) throw new AgentGroupToolError('GROUP_TEAM_SEARCH_DENIED', '跨群资料的读取权限复核未通过（来源群的成员关系或读取授权已变化），本次不返回其他群的内容。', 403);
+    const score = search.reader.scorer(query);
+    const sources = found.sources.map(source => ({ name: source.name || source.scope.chatId, chatId: source.scope.chatId, status: source.status, missing: source.missing, entries: [] as string[] }));
+    let matched = 0, returned = 0, length = 0, truncated = false;
+    for (const item of found.observations) {
+      const { sender, body } = teamSearchLine(item);
+      const source = sources.find(entry => entry.chatId === item.scope.chatId);
+      if (!source || !body || score(body) <= 0) continue;
+      matched++;
+      const line = `[${item.missing.includes('event_time_unavailable') ? '时间未知' : clock(item.occurredAt)}] ${sender}: ${clip(body, 300)}`;
+      if (returned >= teamSearchEntryLimit || length + line.length > teamSearchTextLimit) { truncated = true; continue; }
+      source.entries.push(line); returned++; length += line.length;
+    }
+    const read = sources.filter(source => source.status !== 'unavailable').map(source => source.name);
+    const unread = sources.filter(source => source.status === 'unavailable').map(source => `${source.name}（${source.missing.join('、') || '原因未知'}）`);
+    const coverage = `已读来源：${read.join('、') || '无'}；未能读取的来源：${unread.join('、') || '无'}。每个来源只覆盖本地缓存与最近 50 条消息。`;
+    return {
+      query, matched, ...(truncated ? { truncated: true } : {}), sources,
+      note: !matched ? `没有找到与「${query}」有词面重合的条目。${coverage}未命中不代表其他群没有相关内容。`
+        : truncated ? `${coverage}结果超过 ${teamSearchEntryLimit} 条或 ${teamSearchTextLimit} 字，已截断，可换更具体的关键词。` : coverage
+    };
+  }
+
   private async resolveThreadId(context: ToolContext): Promise<string | undefined> {
     if (context.threadId || !context.threadRootMessageId) return context.threadId;
     const root = await this.authorized(context, 'message', () => context.client.getMessage(context.threadRootMessageId!));
@@ -1151,6 +1308,8 @@ ${allowSend ? '当前会话可读取和发送' : '当前会话可只读访问'}�
 - ${command} group self
 - ${command} group messages --limit 20 [--after <cursor>] [--since <时间> --until <时间>] [--query '<关键词>']
 - ${command} group message <om_* message_id>
+- ${command} history list [--since <时间>] [--until <时间>] [--query '<关键词>'] [--limit 20]、${command} history show <taskId>：本聊天以前的任务请求与最终回答
+- （仅群聊）${command} group team-search '<关键词>'：检索同一机器人所在其他群的相关消息
 ${allowSend ? `- ${command} group send-file <path> [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>] [--image]` : ''}
 - ${command} group wait --after <cursor> [--timeout-ms 15000]
 ${allowSend ? `- ${command} group send <内容> [--to <Agent/成员名称、appId 或 openId>] [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>]` : '- 当前机器人配置为只读：不要调用 group send。'}
@@ -1159,6 +1318,8 @@ ${allowSend ? `- ${command} group send <内容> [--to <Agent/成员名称、appI
 协作规则：
 - messages 返回的消息列表中，合并转发（merge_forward）消息只显示占位提示和 message_id，不会自动展开。如需查看转发的具体内容，请调用 ${command} group message <message_id> 按 message_id 拉取。
 - 要翻较早的讨论，用 --since/--until 限定时间，再用 --query 过滤；结果带 truncated=true 时表示只扫描了 500 条，没扫到的部分不能推断为不存在。
+- 用户问以前、上次、之前讨论过的结论时，先用 history list --query '<关键词>' 找到本聊天以前的任务，再用 history show <taskId> 读原文；没找到时说明查过的时间和关键词，不要断定没讨论过。
+- 用户问其他群、别的群的信息时，用 group team-search '<关键词>'；仅开启了群参与的群可用，只返回和关键词有字面重合的条目，未能读取的来源不能推断成不存在。
 - ${allowSend ? `需要其他 Agent 协助时先调用 peers 或 bots；返回的机器人中，带 agentId 字段的是本 Dutydeck 实例管理的可协作 Agent，不带 agentId 的是群内其他机器人。需要 @群内人类用户时先调用 members。再用 send --to 明确目标；名称重名时使用 appId 或 openId，不要臆测。
 - 发送前先判断消息归属：延续某条提问、回答某个话题或补充该话题结论时，使用 send --reply-to <该消息的 om_* messageId> --in-thread；独立公告、新任务或不应归入原讨论的内容，使用 send 且不要传 --reply-to/--in-thread。不要因为“能回复”就机械回复，也不要把 omt_* threadId 当作 reply-to。
 - 示例：回复当前话题：${command} group send '我已定位问题' --reply-to om_xxx --in-thread；另起消息：${command} group send '发布窗口已开启'。

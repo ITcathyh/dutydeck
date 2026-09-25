@@ -176,6 +176,29 @@ it('reads another joined group for Tag without activating its participation or c
   expect((await f.runtime.listSessions()).every(item => item.permissionMode === 'deny-all')).toBe(true);
 });
 
+it('serves group team-search from the real reader only while this group has participation on', async () => {
+  const f = await fixture();
+  const personal = { ...scope, chatId: 'oc_personal' };
+  f.client.listChats.mockResolvedValue({ items: [{ chatId: scope.chatId, name: '测试群', external: false }, { chatId: personal.chatId, name: '个人待办', external: false }], hasMore: false });
+  f.client.listChatMessages.mockImplementation(async (input?: any) => ({ items: input.chatId === personal.chatId ? [
+    { messageId: 'om_capacity', chatId: personal.chatId, messageType: 'text', rawContent: '{"text":"推进容量扫描，监控 RDS 和 Abase 水位"}',
+      createTime: String(Date.now() - 10000), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false },
+    { messageId: 'om_lunch', chatId: personal.chatId, messageType: 'text', rawContent: '{"text":"今天午饭吃什么"}',
+      createTime: String(Date.now() - 5000), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false }
+  ] : [], hasMore: false }));
+  const session = await f.runtime.start({ agentId: 'agent', source: 'lark', sourceId: `${scope.appId}:${scope.chatId}:group:user:ou_alice` });
+  const capabilities = new LarkAgentToolCapabilityRegistry(f.repos.sessions, 'http://localhost', 'secret');
+  const tools = new LarkAgentToolsService(capabilities, f.repos.config, { teamSearch: () => f.collaboration.teamSearch });
+  const token = capabilities.environmentFor(session).dutydeck_group_tools_token;
+  await expect(tools.teamSearch(token, { query: '容量扫描' })).rejects.toMatchObject({ code: 'GROUP_TEAM_SEARCH_UNAVAILABLE', statusCode: 403 });
+  expect(f.client.listChatMessages).not.toHaveBeenCalledWith(expect.objectContaining({ chatId: personal.chatId }));
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  const result = await tools.teamSearch(token, { query: '容量扫描' });
+  expect(result.sources).toEqual([expect.objectContaining({ name: '个人待办', chatId: personal.chatId, entries: [expect.stringContaining('ou_alice(human): 推进容量扫描，监控 RDS 和 Abase 水位')] })]);
+  expect(JSON.stringify(result)).not.toContain('午饭');
+  expect((await f.repos.collaboration.getSettings(personal)).participation).toBe('off');
+});
+
 it.each(['ask', undefined] as const)('runs unattended %s delegations through real ACP without leaving permission requests pending', async permissionMode => {
   const f = await fixture({ realAcp: true });
   const original = f.collaboration.background.options.resolveConfig;

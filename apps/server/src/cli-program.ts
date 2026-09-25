@@ -186,6 +186,9 @@ export interface CliHandlers {
   groupReplyAgent?(content: string, options: { turn: string }): void | Promise<void>;
   groupSendFile?(path: string, options: AgentGroupCliOptions): void | Promise<void>;
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
+  groupTeamSearch?(query: string): void | Promise<void>;
+  historyList?(options: AgentGroupCliOptions): void | Promise<void>;
+  historyShow?(taskId: string): void | Promise<void>;
   memoryList?(options?: { topic?: string }): void | Promise<void>;
   memoryShow?(topic: string): void | Promise<void>;
   memorySearch?(query: string, options?: { topic?: string; limit?: string }): void | Promise<void>;
@@ -553,6 +556,23 @@ Routing guidance:
     .option('--limit <count>', 'Maximum messages to return (1-50)', '20')
     .option('--timeout-ms <milliseconds>', 'Long-poll timeout (0-30000)', '15000')
     .action(options => handlers.groupWait?.(options));
+  group.command('team-search')
+    .description('Search messages in other Lark groups of this bot (requires group participation in this group)')
+    .argument('<query>', 'Keywords to search for')
+    .action(query => handlers.groupTeamSearch?.(query));
+
+  const history = program.command('history').description('Review earlier Agent tasks in the current Lark chat');
+  history.command('list')
+    .description('List earlier tasks of this chat, newest first')
+    .option('--since <time>', 'Only tasks created after this time (ISO 8601 or unix timestamp)')
+    .option('--until <time>', 'Only tasks created before this time (ISO 8601 or unix timestamp)')
+    .option('--query <query>', 'Only tasks whose request or answer contains all whitespace-separated keywords (case-insensitive)')
+    .option('--limit <count>', 'Maximum tasks to return (1-50)', '20')
+    .action(options => handlers.historyList?.(options));
+  history.command('show')
+    .description('Show the request and final answer of an earlier task in this chat')
+    .argument('<task-id>', 'Task id returned by history list')
+    .action(taskId => handlers.historyShow?.(taskId));
 
   // 会话记忆：与 group 同一套 capability，但对私聊和关闭群协作的机器人同样可用。
   program.command('collaborate <operation> [id]').description('Manage generic group follow-ups and ongoing mandates')

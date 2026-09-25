@@ -102,6 +102,18 @@ export function runGroupMessage(messageId: string, options: GroupToolClientOptio
   return new AgentGroupToolHttpClient(options).request(`/message?${query}`);
 }
 
+export function runGroupTeamSearch(query: string, options: GroupToolClientOptions = {}) {
+  return new AgentGroupToolHttpClient(options).request(`/team-search?${new URLSearchParams({ query })}`);
+}
+
+export function runHistoryList(cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
+  return new AgentGroupToolHttpClient(options).request(queryPath('/history', cliOptions));
+}
+
+export function runHistoryShow(taskId: string, options: GroupToolClientOptions = {}) {
+  return new AgentGroupToolHttpClient(options).request(`/history/${encodeURIComponent(taskId)}`);
+}
+
 export function runGroupWait(cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {
   return new AgentGroupToolHttpClient(options).request(queryPath('/wait', cliOptions));
 }
