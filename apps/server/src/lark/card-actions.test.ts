@@ -464,7 +464,7 @@ describe('结果卡续问行：一键续问与每天自动执行', () => {
 
   it('只在已完成且能续聊时出现，位置在续问行而不是顶部操作区', () => {
     const ctx = readOnlyCompleted(followUp);
-    expect(labels(buildLarkCardFollowUpActions(ctx))).toEqual(['说人话', '给我对外回复', '再详细点']);
+    expect(labels(buildLarkCardFollowUpActions(ctx))).toEqual(['给我对外回复', '再详细点']);
     // 顶部操作区不变：续问是读完结论之后的下一步，不能压在结论上面。
     expect(buildLarkCardActions(ctx)).toEqual([]);
     for (const state of allStates.filter(item => item !== 'completed')) {
@@ -476,6 +476,8 @@ describe('结果卡续问行：一键续问与每天自动执行', () => {
       expect(isLarkCardActionAvailable(action, readOnlyCompleted())).toBe(false);
       expect(isLarkCardActionAvailable(action, readOnlyCompleted(followUp))).toBe(true);
     }
+    // 「说人话」已下线：不再渲染，但老卡片上的按钮点了照常受理。
+    expect(availableLarkCardActions(readOnlyCompleted(followUp))).not.toContain('ask_plain');
   });
 
   it('提交的固定文本与需求逐字一致', () => {
@@ -489,8 +491,8 @@ describe('结果卡续问行：一键续问与每天自动执行', () => {
 
   it('定时按钮带着 HH:MM；已建好时只剩一个不可点的状态按钮', () => {
     const offer = buildLarkCardFollowUpActions(readOnlyCompleted({ ...followUp, dailySchedule: { time: '09:05', scheduled: false } }));
-    expect(labels(offer)).toEqual(['说人话', '给我对外回复', '再详细点', '每天 09:05 自动执行']);
-    expect(callbackValue(offer[3]!)).toEqual({ action: 'schedule_daily', task_id: 'om_task_1', turn: '2' });
+    expect(labels(offer)).toEqual(['给我对外回复', '再详细点', '每天 09:05 自动执行']);
+    expect(callbackValue(offer[2]!)).toEqual({ action: 'schedule_daily', task_id: 'om_task_1', turn: '2' });
 
     const done = buildLarkCardFollowUpActions(readOnlyCompleted({ ...followUp, dailySchedule: { time: '09:05', scheduled: true } }));
     expect(labels(done).at(-1)).toBe('已设为每天 09:05 自动执行');
@@ -505,7 +507,7 @@ describe('结果卡续问行：一键续问与每天自动执行', () => {
     }
   });
 
-  it('两行按钮合起来正好等于后端接受的操作集合', () => {
+  it('两行按钮合起来正好等于后端接受的操作集合（已下线的只接老卡片点击）', () => {
     const contexts = [
       readOnlyCompleted(followUp),
       readOnlyCompleted({ ...followUp, canVerify: true, dailySchedule: { time: '23:59', scheduled: false } }),

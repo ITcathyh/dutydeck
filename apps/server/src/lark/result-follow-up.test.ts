@@ -133,15 +133,16 @@ const callbackOf = (card: unknown, action: string) => buttonsOf(card)
 const clock = (at: number) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Shanghai', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(at);
 
 describe('结果卡一键续问', () => {
-  it('已完成的结果卡在正文之后带三个续问按钮；失败卡不带', async () => {
+  it('已完成的结果卡在正文之后带两个续问按钮；失败卡不带', async () => {
     const h = await harness();
     const saved = await h.run(event('om_1', '查一下登录为什么慢'));
     const card = h.card(saved.final_message_id!);
-    expect(followUpLabels(card)).toEqual(['说人话', '给我对外回复', '再详细点']);
+    expect(followUpLabels(card)).toEqual(['给我对外回复', '再详细点']);
     // 续问行在结论之后：结论仍坐在卡片第一行。
     const ids = card.body.elements.map((element: any) => element.element_id);
     expect(ids.indexOf('result_follow_up_row')).toBeGreaterThan(ids.indexOf('final_output'));
-    expect(callbackOf(card, 'ask_plain')).toEqual({ action: 'ask_plain', task_id: 'om_1', turn: String(saved.turn) });
+    expect(callbackOf(card, 'ask_reply')).toEqual({ action: 'ask_reply', task_id: 'om_1', turn: String(saved.turn) });
+    expect(callbackOf(card, 'ask_plain')).toBeUndefined();
 
     const failed = await harness({ fail: true });
     const failedSaved = await failed.run(event('om_1', '查一下登录为什么慢'));
@@ -157,14 +158,14 @@ describe('结果卡一键续问', () => {
     expect(prepared.attachmentMessageId).toBeTruthy();
     const summary = buildLarkCard(prepared.input);
     expect(findElement(summary, 'result_attachment')).toBeTruthy();
-    expect(followUpLabels(summary)).toEqual(['说人话', '给我对外回复', '再详细点']);
+    expect(followUpLabels(summary)).toEqual(['给我对外回复', '再详细点']);
   });
 
   it('点击等同于在原话题回复固定文本：进入同一个会话的下一轮', async () => {
     const h = await harness();
     const first = await h.run(event('om_1', '查一下登录为什么慢'));
     // 话题会话由在话题里发言的人共用：别的群成员点也等同于他在话题里回复。
-    const value = callbackOf(h.card(first.final_message_id!), 'ask_plain');
+    const value = callbackOf(h.card(first.final_message_id!), 'ask_reply');
     expect(await h.click(value, 'ou_bob', first)).toMatchObject({ type: 'success' });
 
     expect(h.service.replyText).toHaveBeenCalledTimes(1);
@@ -174,18 +175,27 @@ describe('结果卡一键续问', () => {
 
     const followUp = await h.result(echoId);
     expect(followUp.sessionId).toBe(first.sessionId);
-    expect(followUp.prompt).toBe(larkCardFollowUpPrompt('ask_plain'));
+    expect(followUp.prompt).toBe(larkCardFollowUpPrompt('ask_reply'));
     expect(followUp.sender_open_id).toBe('ou_bob');
     expect(followUp.scope_id).toBe(first.scope_id);
     expect(h.prompts).toHaveLength(2);
-    expect(h.prompts[1]).toContain(larkCardFollowUpPrompt('ask_plain'));
+    expect(h.prompts[1]).toContain(larkCardFollowUpPrompt('ask_reply'));
     // 新一轮的卡片回复在代发的那条消息下面，留在原话题里。
     expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ messageId: echoId, replyInThread: true }));
     // 点击不改原结果卡：原卡只在投递时写过一次。
     expect(h.service.update.mock.calls.some(([input]: any[]) => input.messageId === first.final_message_id)).toBe(false);
     // 续问的结果卡还能接着问，但不会被当成重复请求提议定时。
     const next = h.card(followUp.final_message_id!);
-    expect(followUpLabels(next)).toEqual(['说人话', '给我对外回复', '再详细点']);
+    expect(followUpLabels(next)).toEqual(['给我对外回复', '再详细点']);
+  });
+
+  it('已经发出的老卡片上的「说人话」点了照常提交', async () => {
+    const h = await harness();
+    const saved = await h.run(event('om_1', '查一下登录为什么慢'));
+    const value = { action: 'ask_plain', task_id: 'om_1', turn: String(saved.turn) };
+    expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'success' });
+    const echoId = (await h.service.replyText.mock.results[0]!.value).messageId as string;
+    expect((await h.result(echoId)).prompt).toBe(larkCardFollowUpPrompt('ask_plain'));
   });
 
   it('无权限时不提交：白名单外的成员、按发送人隔离的会话里的旁人', async () => {
@@ -221,7 +231,7 @@ describe('结果卡一键续问', () => {
   it('重复点击、回调重投与重启后再点，都只提交一轮', async () => {
     const h = await harness();
     const saved = await h.run(event('om_1', '查一下登录为什么慢'));
-    const value = callbackOf(h.card(saved.final_message_id!), 'ask_plain');
+    const value = callbackOf(h.card(saved.final_message_id!), 'ask_reply');
     const [left, right] = await Promise.all([h.click(value, 'ou_alice', saved), h.click(value, 'ou_alice', saved)]);
     expect([left, right].filter(item => item.type === 'success')).toHaveLength(1);
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
@@ -242,7 +252,7 @@ describe('结果卡一键续问', () => {
   it('上个进程在代发前退出：重启后再点由这次点击接手，只提交一轮', async () => {
     const h = await harness();
     const saved = await h.run(event('om_1', '查一下登录为什么慢'));
-    const value = callbackOf(h.card(saved.final_message_id!), 'ask_plain');
+    const value = callbackOf(h.card(saved.final_message_id!), 'ask_reply');
     // 第一次点击卡在代发消息上，进程随即退出（dutydeck restart 只等运行中的任务，不等卡片回调）。
     h.service.replyText.mockImplementationOnce(() => new Promise<never>(() => {}));
     void h.click(value, 'ou_alice', saved);
@@ -254,7 +264,7 @@ describe('结果卡一键续问', () => {
     // 重做沿用同一个幂等键：上个进程其实已经发出去的话，飞书不会再发第二条。
     expect(h.service.replyText.mock.calls[1]![0].idempotencyKey).toBe(h.service.replyText.mock.calls[0]![0].idempotencyKey);
     const echoId = (await h.service.replyText.mock.results[1]!.value).messageId as string;
-    expect((await h.result(echoId)).prompt).toBe(larkCardFollowUpPrompt('ask_plain'));
+    expect((await h.result(echoId)).prompt).toBe(larkCardFollowUpPrompt('ask_reply'));
     expect(h.prompts).toHaveLength(2);
     expect(await h.click(value, 'ou_alice', saved)).toMatchObject({ type: 'warning', content: expect.stringContaining('已经提交过') });
     expect(h.prompts).toHaveLength(2);
@@ -292,10 +302,10 @@ describe('重复请求时提议每天自动执行', () => {
   it('同一人同一群 14 天内发过同一句话：给出「每天 HH:MM 自动执行」', async () => {
     const h = await harness({ automation: true });
     const first = await h.run(event('om_1', '@Dock  详细总结下今天的聊天内容'));
-    expect(followUpLabels(h.card(first.final_message_id!))).toEqual(['说人话', '给我对外回复', '再详细点']);
+    expect(followUpLabels(h.card(first.final_message_id!))).toEqual(['给我对外回复', '再详细点']);
     const second = await h.run(event('om_2', '详细总结下今天的聊天内容'));
     expect(followUpLabels(h.card(second.final_message_id!)))
-      .toEqual(['说人话', '给我对外回复', '再详细点', `每天 ${clock(second.started_at)} 自动执行`]);
+      .toEqual(['给我对外回复', '再详细点', `每天 ${clock(second.started_at)} 自动执行`]);
   });
 
   it.each([
@@ -305,7 +315,7 @@ describe('重复请求时提议每天自动执行', () => {
     const h = await harness({ automation: true });
     await h.run(event('om_1', '详细总结下今天的聊天内容', patch));
     const second = await h.run(event('om_2', '详细总结下今天的聊天内容'));
-    expect(followUpLabels(h.card(second.final_message_id!))).toEqual(['说人话', '给我对外回复', '再详细点']);
+    expect(followUpLabels(h.card(second.final_message_id!))).toEqual(['给我对外回复', '再详细点']);
   });
 
   it('超过 14 天的旧请求不算重复', async () => {
@@ -315,7 +325,7 @@ describe('重复请求时提议每天自动执行', () => {
     const extra = JSON.parse(mapping.extra!) as PersistedLarkCardTask;
     await h.repos.channelMappings.save({ ...mapping, extra: JSON.stringify({ ...extra, started_at: Date.now() - 15 * 24 * 60 * 60 * 1000 }) });
     const second = await h.run(event('om_2', '详细总结下今天的聊天内容'));
-    expect(followUpLabels(h.card(second.final_message_id!))).toEqual(['说人话', '给我对外回复', '再详细点']);
+    expect(followUpLabels(h.card(second.final_message_id!))).toEqual(['给我对外回复', '再详细点']);
   });
 
   it('话题里已有同样内容的已启用计划时不再提议', async () => {
@@ -325,7 +335,7 @@ describe('重复请求时提议每天自动执行', () => {
       trigger: { kind: 'cron', expression: '0 18 * * *' }, timezone: 'Asia/Shanghai', dstPolicy: { gap: 'skip', overlap: 'first' }, condition: { kind: 'always' } }, 'ou_alice');
     await h.automation!.updateSchedule(first.sessionId, existing.id, { expectedRevision: existing.revision, enabled: true }, 'ou_alice');
     const second = await h.run(event('om_2', '详细总结下今天的聊天内容'));
-    expect(followUpLabels(h.card(second.final_message_id!))).toEqual(['说人话', '给我对外回复', '再详细点']);
+    expect(followUpLabels(h.card(second.final_message_id!))).toEqual(['给我对外回复', '再详细点']);
   });
 
   it('点击后建出每天的 cron 计划、回报到原话题，卡上改为「已设为…」，重复点击不重复建', async () => {
@@ -352,7 +362,7 @@ describe('重复请求时提议每天自动执行', () => {
 
     // 原结果卡在后台重绘：定时按钮变成不可点的「已设为…」，其余按钮原样保留。
     await vi.waitFor(() => expect(followUpLabels(buildLarkCard(h.cards.get(second.final_message_id!))))
-      .toEqual(['说人话', '给我对外回复', '再详细点', `已设为每天 ${time} 自动执行`]));
+      .toEqual(['给我对外回复', '再详细点', `已设为每天 ${time} 自动执行`]));
     expect(callbackOf(buildLarkCard(h.cards.get(second.final_message_id!)), 'schedule_daily')).toBeUndefined();
     // 回执（同样在后台发）：计划名、下次执行时间、停用方法。
     const receipt = await vi.waitFor(() => {
