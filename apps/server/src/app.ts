@@ -23,6 +23,7 @@ import { registerLarkMemoryTools, type LarkMemoryToolsOptions } from './lark/mem
 import { registerWorkItemRoutes, type WorkItemRouteOptions } from './work-item-routes.js';
 import { registerSessionAutomationRoutes, type SessionAutomationRouteOptions } from './session-automation-routes.js';
 import { registerIdentityPreflightRoutes, type IdentityPreflightRouteOptions } from './identity-preflight-routes.js';
+import { registerCiHookRoutes, type CiHookRouteOptions } from './ci-hook-routes.js';
 
 const contentTypes: Record<string, string> = {
   '.css': 'text/css; charset=utf-8',
@@ -64,6 +65,8 @@ export interface BuildAppOptions {
   workItemTools?: WorkItemToolsOptions;
   memoryTools?: LarkMemoryToolsOptions;
   automation?: SessionAutomationRouteOptions;
+  /** CI webhook 入口（/api/hooks/*）；未配置 webhook 密钥时不注册。 */
+  ciHooks?: CiHookRouteOptions;
   webRoot?: string;
   lark?: LarkRoutesOptions;
   system?: SystemRoutesOptions;
@@ -115,7 +118,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     //  - 非 /api/ 路径（静态 web 壳）公开：HTML/JS/CSS 不含会话数据，API 仍全部要 token
     //  - /api/lark/agent-tools/* 有自己的 Bearer 机制（agentGroupToolBearerToken），不重复门禁
     //  - relay send/ask 精确使用会话 HMAC；同一个 Authorization 头无法再放 access token
-    //  - /api/hooks/* 是 CI 回调，路由自己校验签名
+    //  - /api/hooks/* 是 CI 回调，路由自己校验令牌或签名、时间戳和 event-id
     //  - 飞书卡片回调（card.action.trigger）走长连接监听、不经 HTTP，天然不受影响
     const userExempt = options.auth.exempt;
     registerAuthMiddleware(app, {
@@ -142,6 +145,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   await registerIdentityPreflightRoutes(app, options.identityPreflight);
   await registerScheduleManagementRoutes(app, options.schedule);
   if (options.automation) await registerSessionAutomationRoutes(app, options.automation);
+  if (options.ciHooks) await registerCiHookRoutes(app, options.ciHooks);
   if (options.workItems) await registerWorkItemRoutes(app, options.workItems);
   if (options.workItemTools) await registerWorkItemTools(app, options.workItemTools);
   if (options.memoryTools) await registerLarkMemoryTools(app, options.memoryTools);

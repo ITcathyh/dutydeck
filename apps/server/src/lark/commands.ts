@@ -187,7 +187,8 @@ export interface LarkCommandDefinition {
 export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   { name: 'work', summary: '查看目标、分配 Agent、回答步骤问题并复用工作流', usage: '/work；/work consult [--agents A,B] -- <问题>；/work research 目标；/work templates', mutating: true, requires: c => c.work === true, unavailableReason: '当前服务未接入目标工作台。' },
   { name: 'schedule', summary: '查看、创建、启用或停用此话题的定时任务', usage: '/schedule；/schedule every 分钟 指令；/schedule enable 编号；/schedule disable 编号', mutating: true, requires: c => c.schedule === true, unavailableReason: '当前服务未接入定时任务。' },
-  { name: 'ci', summary: '等待当前提交的 GitHub Actions、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true, unavailableReason: '当前机器人未接入 GitHub Actions 自动续作。' },
+  { name: 'ci', summary: '等待当前提交的 CI（GitHub Actions 或 Codebase 流水线）、按规则交给 Agent 修复失败、查看等待或取消续作', usage: '/ci；/ci wait [工作流]；/ci fix；/ci cancel <等待编号>', mutating: true, requires: c => c.ci === true,
+    unavailableReason: 'CI 续作未配置：还没有可用的 CI 提供方。配置方法：GitHub Actions 设置环境变量 DUTYDECK_GITHUB_TOKEN（或 GH_TOKEN、GITHUB_TOKEN）；Codebase 流水线设置 DUTYDECK_CODEBASE_WEBHOOK_SECRET，并把 Codebase 或 EventHub 的 webhook 指向本服务的 /api/hooks/codebase。配置后执行 dutydeck restart 生效。' },
   { name: 'tasks', summary: '查看允许访问的待处理任务、运行进度和最近结果', usage: '/tasks [页码]', mutating: false, requires: c => c.tasks === true, unavailableReason: '当前机器人无法查询任务列表，/tasks 已停用。' },
   { name: 'answer', summary: '回答 Agent 的问题并继续原任务', usage: '/answer <问题编号> <回答>', mutating: true, requires: c => c.answer === true, unavailableReason: '当前机器人无法接收问题回答，/answer 已停用。' },
   { name: 'approve', summary: '批准卡片上的本次工具调用', usage: '/approve <请求编号>', mutating: true, requires: c => c.approval === true, unavailableReason: '当前机器人无法处理工具调用审批，/approve 已停用。' },
