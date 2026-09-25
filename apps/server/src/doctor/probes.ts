@@ -11,6 +11,7 @@ import { existsSync } from 'node:fs';
 
 /** configs 表的形状：{ key TEXT PRIMARY KEY, value TEXT NOT NULL }。 */
 interface ConfigRow { value: string }
+interface KeyedConfigRow { key: string; value: string }
 interface VersionRow { version: number | null }
 
 /**
@@ -25,7 +26,7 @@ interface VersionRow { version: number | null }
  * `immutable=1` 虽能免除但会在正常库上直接 SQLITE_CANTOPEN，代价更大。
  * 这两个边车文件不改变库内数据，是本模块唯一容许的写入。
  */
-export const defaultDatabaseProbe: DatabaseProbe = (path, keys) => {
+export const defaultDatabaseProbe: DatabaseProbe = (path, keys, prefixes = []) => {
   // fileMustExist 之外再显式判存：体检绝不因为「检查了一下」而把库建出来。
   if (!existsSync(path)) return { exists: false };
   const result: DatabaseProbeResult = { exists: true };
@@ -38,7 +39,7 @@ export const defaultDatabaseProbe: DatabaseProbe = (path, keys) => {
     } catch {
       // 表不存在（库尚未迁移过）不是错误，交由上层按 appliedVersion 缺失处理。
     }
-    if (keys.length > 0) {
+    if (keys.length > 0 || prefixes.length > 0) {
       const values: Record<string, string | undefined> = {};
       // prepare 本身会在 configs 表不存在时抛错（半初始化的库就是这样）。
       // 那不代表整个库读不了，所以单独兜住：键值一律 undefined，库仍算可读。
@@ -53,6 +54,20 @@ export const defaultDatabaseProbe: DatabaseProbe = (path, keys) => {
           values[key] = statement ? (statement.get(key) as ConfigRow | undefined)?.value : undefined;
         } catch {
           values[key] = undefined;
+        }
+      }
+      // 前缀查询同样单独兜住：configs 表缺失时这些键一律不出现，库仍算可读。
+      let prefixed: Database.Statement | undefined;
+      try {
+        prefixed = prefixes.length > 0 ? db.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ?') : undefined;
+      } catch {
+        prefixed = undefined;
+      }
+      for (const prefix of prefixes) {
+        try {
+          for (const row of (prefixed?.all(prefix, prefix) ?? []) as KeyedConfigRow[]) values[row.key] = row.value;
+        } catch {
+          // 读不出来就当没有这些键。
         }
       }
       result.values = values;

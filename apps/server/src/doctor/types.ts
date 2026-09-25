@@ -89,11 +89,15 @@ export interface DatabaseProbeResult {
   error?: string;
   /** schema_migrations 中已应用的最高版本；读不到时 undefined。 */
   appliedVersion?: number;
-  /** 请求的 configs 键值；键存在但无值时为 undefined。 */
+  /** 请求的 configs 键值；键存在但无值时为 undefined。按前缀读到的键也并在这里。 */
   values?: Readonly<Record<string, string | undefined>>;
 }
 
-export type DatabaseProbe = (path: string, keys: readonly string[]) => Promise<DatabaseProbeResult> | DatabaseProbeResult;
+/**
+ * keys 是精确键；prefixes 里的每个前缀会把 configs 表中以它开头的全部键一并读出，
+ * 用于事先不知道完整键名的记录（例如按机器人与记忆池分键的 `lark.memory.state.*`）。
+ */
+export type DatabaseProbe = (path: string, keys: readonly string[], prefixes?: readonly string[]) => Promise<DatabaseProbeResult> | DatabaseProbeResult;
 
 /**
  * 端口探测结果。

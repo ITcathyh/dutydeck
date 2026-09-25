@@ -45,7 +45,7 @@ const entry = (
 describe('renderMemoryIndex', () => {
   it('returns empty text and false overBudget for empty entries', () => {
     const result = renderMemoryIndex([], dummyState);
-    expect(result).toEqual({ text: '', overBudget: false, omitted: 0 });
+    expect(result).toEqual({ text: '', overBudget: false, omitted: 0, ids: [] });
   });
 
   it('renders index with headers and sorts entries within topic by createdAt ascending', () => {

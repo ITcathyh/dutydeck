@@ -37,6 +37,7 @@ import { defaultDatabaseProbe, defaultPortProbe } from './probes.js';
 import {
   AUTH_TOKEN_CONFIG_KEY,
   DOCTOR_CONFIG_KEYS,
+  DOCTOR_CONFIG_PREFIXES,
   checkAccessPosture,
   checkAccessToken,
   checkAgentAuth,
@@ -48,6 +49,7 @@ import {
   checkDutydeckDir,
   checkLark,
   checkLarkListener,
+  checkLarkMemory,
   checkNodeVersion,
   checkPlatformPickers,
   checkPort,
@@ -212,7 +214,7 @@ export async function runDoctor(
   // 库路径以守护进程记录为准，与 cli.ts 的取法一致（它才是真正在用的那个库）。
   const databaseUrl = record?.database ?? config.databaseUrl;
   progress(`只读探测数据库 ${databaseUrl}`);
-  const probe: DatabaseProbeResult = await databaseProbe(databaseUrl, DOCTOR_CONFIG_KEYS);
+  const probe: DatabaseProbeResult = await databaseProbe(databaseUrl, DOCTOR_CONFIG_KEYS, DOCTOR_CONFIG_PREFIXES);
   checks.push(checkDatabase(databaseUrl, probe));
   const expectedSchemaVersion = dependencies.expectedSchemaVersion ?? await resolveExpectedSchemaVersion();
   checks.push(checkSchema(probe, expectedSchemaVersion));
@@ -234,6 +236,10 @@ export async function runDoctor(
   );
   checks.push(...lark.checks);
   checks.push(checkLarkListener(lark.botCount, status.running, listenerDisabled));
+  checks.push(checkLarkMemory(
+    databaseUnreadable ? { unavailable: true } : { ...(probe.values?.[larkBotsConfigKey] ? { raw: probe.values[larkBotsConfigKey] } : {}), ...(probe.values ? { values: probe.values } : {}) },
+    new Date()
+  ));
 
   // ---- 8. 访问姿态 ----
   const mode = accessMode({ host: config.host, authEnabled: config.authEnabled });
