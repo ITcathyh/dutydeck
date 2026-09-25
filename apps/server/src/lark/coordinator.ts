@@ -206,10 +206,11 @@ type LarkRelaunchClaim = {
   sessionId: string; runtimeTaskId: string; operatorOpenId: string; newSessionId?: string;
 };
 /**
- * 转交时作废、留给管理员核对的旧会话。它的执行进程未确认停止：/new 不去停它，之后的转交也不再选回它。
- * 键按 App + 会话落库，重启后仍成立。
+ * 转交或 /new 时作废、留给管理员核对的旧会话。它的执行进程未确认停止：/new 不去停它，续聊与之后的转交都不再选回它。
+ * 键按 App + 会话落库，重启后仍成立；判断只看键在不在，值只是来源记录。
  */
-const relaunchRetainedKey = (appId: string, sessionId: string) => `lark.relaunch_retained.${appId}.${sessionId}`;
+const relaunchRetainedPrefix = (appId: string) => `lark.relaunch_retained.${appId}.`;
+const relaunchRetainedKey = (appId: string, sessionId: string) => relaunchRetainedPrefix(appId) + sessionId;
 /** 去掉开头对本机器人的 @（可能连着好几个）。卡片标题与重复请求判定共用。 */
 const withoutLeadingBotMention = (prompt: string, botName?: string) => {
   const mention = botName?.trim() ? `@${botName.trim()}` : '';
@@ -1641,7 +1642,7 @@ export class LarkMessageCoordinator {
         if (beforeValidation !== (group.epoch ?? 0)) throw new Error('已有更新的 /new 请求，请在新上下文中重新发送。');
         const retirement = this.retireScopeSession(group, config, event, scopeId);
         const epoch = group.epoch;
-        const retired = await retirement;
+        const { retired, retained } = await retirement;
         const goal = request.prompt;
         if (goal) {
           // reaction 仍挂在原消息上，交给随后的建任务链路按正常节奏撤销——
@@ -1650,7 +1651,9 @@ export class LarkMessageCoordinator {
         }
         await replyCard(
           '/new 已受理',
-          retired
+          retained
+            ? `**下一条消息将开启全新上下文。**\n\n原会话的执行进程尚未确认停止，没有结束它，之后的消息也不再进入它。${larkRecoveryRetainedNote(config.webBaseUrl)}`
+            : retired
             ? '**已结束当前会话，下一条消息将开启全新上下文。**\n\n历史记录仍可在 Dutydeck Web 查看。'
             : '**当前没有已绑定的会话，下一条消息会直接开启新会话。**'
         );
@@ -1860,9 +1863,13 @@ export class LarkMessageCoordinator {
       pendingSessionId,
       group.sessionId
     ].filter((id): id is string => Boolean(id)));
-    // 转交时保留给管理员核对的旧会话只登记作废、不去停：它的执行进程未确认停止，停也停不下来，资源要原样留着。
+    // 卡住的会话（转交保留过的，或执行进程未确认停止、有任务待核对的）按转交的口径处理：只登记作废、不去停，写保留标记。
+    // stop 停不下它，还会先取消它的排队任务；资源与待核对的任务要原样留给管理员。
+    const store = this.workflowOptions.store;
     const retained = new Set<string>();
-    for (const id of targets) if (await this.workflowOptions.store?.get(relaunchRetainedKey(config.appId, id))) retained.add(id);
+    if (store && this.runtime.getTasks && this.runtime.getTaskRecovery) {
+      for (const id of targets) if (await this.relaunchBlockedSession(config.appId, id)) retained.add(id);
+    }
     const retired = (group.retiredSessionIds ??= new Set());
     for (const id of targets) retired.add(id);
     group.sessionId = undefined;
@@ -1870,7 +1877,8 @@ export class LarkMessageCoordinator {
     const stopped = new Set<string>();
     try {
       for (const id of targets) {
-        if (!retained.has(id)) await this.runtime.stop(id, { kind: 'channel', id: event.senderOpenId, appId: config.appId });
+        if (retained.has(id)) await store!.set(relaunchRetainedKey(config.appId, id), JSON.stringify({ message_id: event.messageId }));
+        else await this.runtime.stop(id, { kind: 'channel', id: event.senderOpenId, appId: config.appId });
         stopped.add(id);
       }
     } catch (error) {
@@ -1879,7 +1887,7 @@ export class LarkMessageCoordinator {
       for (const id of targets) if (!stopped.has(id)) retired.delete(id);
       throw error;
     }
-    return targets.size > 0;
+    return { retired: targets.size > 0, retained: retained.size > 0 };
   }
 
   /**
@@ -3224,10 +3232,20 @@ export class LarkMessageCoordinator {
       ...(modelBaseline ? { model: modelBaseline } : {}), permissionMode: larkPermissionMode(config) }, config.workspaceAliases);
   }
 
+  /**
+   * 保留给管理员核对的旧会话不再被续聊选回。内存里的作废集合重启就没了，这里按持久化的保留标记补上；
+   * 本话题的会话都被跳过时，resolveLarkSession 照常新建会话。
+   */
+  private async skipRetainedSessions(group: LarkGroup, appId: string) {
+    const prefix = relaunchRetainedPrefix(appId);
+    for (const row of await this.workflowOptions.store?.list?.(prefix) ?? []) (group.retiredSessionIds ??= new Set()).add(row.key.slice(prefix.length));
+  }
+
   private async sessionFor(group: LarkGroup, config: StoredLarkConfig, chatId: string, chatType: LarkMessageEvent['chatType'], scopeId: string, launchOptions?: LarkLaunchOptions) {
     // 建会话期间把 promise 挂到 group 上：并发的 /new 需要等它落地，才能把这条
     // 刚建出来的会话一起停掉，而不是让它在 /new 之后变成一个没人管的新上下文。
-    const pending = resolveLarkSession(this.runtime, this.log, group, config, chatId, chatType, scopeId, this.cardMappings, launchOptions);
+    const pending = this.skipRetainedSessions(group, config.appId)
+      .then(() => resolveLarkSession(this.runtime, this.log, group, config, chatId, chatType, scopeId, this.cardMappings, launchOptions));
     const tracked = pending.catch(() => undefined);
     group.pendingSession = tracked;
     try { return await pending; }

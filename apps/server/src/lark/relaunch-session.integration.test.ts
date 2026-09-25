@@ -86,9 +86,12 @@ async function blockedTopic({ thread = true, web = false } = {}) {
     ...(web ? { webBaseUrl: 'https://dutydeck.example.com' } : {}) };
   const loginLinks = { issue: vi.fn((sessionId: string) => `code_${sessionId}`) };
   const submissions: Array<{ sessionId: string; prompt: string }> = [];
+  /** 置 true 后，重启后新建的会话启动 Agent 时失败。 */
+  const agentStart = { fails: false };
   let oldSessionId = '';
   const factory = (reject: boolean) => (driverConfig: AgentConfig, _protocol: unknown, onEvent: any, onExit: any, sessionId: string) => {
     if (reject && sessionId === oldSessionId) throw new Error('unknown execution must not be replayed');
+    if (reject && agentStart.fails) throw new Error('agent failed to start');
     let feed!: (data: string) => void, exit!: (code: number) => void, killed = false;
     // 假后端没有真实进程，PtyCliDriver 按 pid 确认不了退出。重启后新建的会话按「kill 之后进程就没了」处理，
     // /new 能正常停掉它；重启前的旧会话保持停不掉，阻塞才留得下来。
@@ -155,7 +158,7 @@ async function blockedTopic({ thread = true, web = false } = {}) {
     return { value: callbackValueOf(lastUpdate(service, cardId), action), context: { messageId: cardId, chatId: 'oc_group' }, cardId };
   };
   const claims = () => liveRepos.config.list('lark.relaunch.');
-  return { config, oldSessionId, submissions, start, mapping, tasks, blockers, sessions, lastUpdate, relaunchButton, claims, repos: liveRepos, runtime: liveRuntime };
+  return { config, oldSessionId, submissions, start, mapping, tasks, blockers, sessions, lastUpdate, relaunchButton, claims, repos: liveRepos, runtime: liveRuntime, agentStart };
 }
 
 describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite）', () => {
@@ -371,5 +374,85 @@ describe('卡住的任务在飞书里转到新会话（真实 Runtime + SQLite�
     expect(detail).toEqual({ action: 'detail', task_id: 'om_queued', turn: '1' });
     // 登录链接绑定原会话：留给管理员核对的原任务在那里。
     expect(retired.capabilities).toMatchObject({ detailLogin: true, webUrl: `https://dutydeck.example.com/sessions/${h.oldSessionId}` });
+  });
+
+  it('没转交过的卡住会话直接发 /new：不去停它、写保留标记，照常开新会话，回执说明原任务已保留', async () => {
+    const h = await blockedTopic();
+    const blockersBefore = h.blockers();
+    const { coordinator, service } = await h.start('p2');
+    const stop = vi.spyOn(h.runtime, 'stop');
+    await coordinator.handle(message('om_new', '/new'), h.config);
+    await until(() => JSON.stringify(service.reply.mock.calls).includes('/new'));
+    const replies = JSON.stringify(service.reply.mock.calls);
+    expect(replies).toContain('/new 已受理');
+    expect(replies).toContain('原任务已保留，管理员可以用 `dutydeck recovery` 命令核对');
+    expect(replies).not.toContain('请联系管理员');
+    // 旧会话没去停：阻塞、待核对的任务与它后面的排队请求都原样留给管理员。
+    expect(stop).not.toHaveBeenCalled();
+    expect(h.blockers()).toEqual(blockersBefore);
+    expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'queued']);
+    expect(await h.repos.config.get(`lark.relaunch_retained.app.${h.oldSessionId}`)).toBeTruthy();
+    await coordinator.handle(message('om_after_new', '重新开始'), h.config);
+    await until(async () => (await h.sessions()).length === 2);
+    const fresh = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
+    await until(async () => (await h.tasks(fresh.id)).length === 1);
+    expect((await h.tasks(fresh.id)).map(task => task.prompt)).toEqual(['重新开始']);
+    expect(await h.tasks(h.oldSessionId)).toHaveLength(2);
+  });
+
+  it('/new 之后建出的会话失败了：重启后的续聊跳过保留给管理员的旧会话，另开新会话', async () => {
+    const h = await blockedTopic();
+    const first = await h.start('p2');
+    await first.coordinator.handle(message('om_new', '/new'), h.config);
+    await until(() => JSON.stringify(first.service.reply.mock.calls).includes('/new 已受理'));
+    // 下一条消息建出的新会话启动 Agent 失败。
+    h.agentStart.fails = true;
+    await first.coordinator.handle(message('om_after_new', '重新开始'), h.config);
+    await until(async () => (await h.sessions()).some(item => item.id !== h.oldSessionId && item.state === 'failed'));
+    h.agentStart.fails = false;
+    const failed = (await h.sessions()).find(item => item.id !== h.oldSessionId)!;
+    // 重启后内存里的作废集合没了：按「最新的可用会话」只剩那个卡住的旧会话。
+    const restarted = await h.start('p3');
+    await restarted.coordinator.handle(message('om_followup', '继续'), h.config);
+    await until(async () => (await h.sessions()).length === 3);
+    const third = (await h.sessions()).find(item => item.id !== h.oldSessionId && item.id !== failed.id)!;
+    // 启动失败的那条请求没被受理，重启后按入站记录重放：它和续聊都进了新会话，旧会话一条都没收到。
+    await until(async () => (await h.tasks(third.id)).length === 2);
+    expect((await h.tasks(third.id)).map(task => task.prompt)).toEqual(['重新开始', '继续']);
+    expect(await h.tasks(h.oldSessionId)).toHaveLength(2);
+  });
+
+  it('原排队请求已取消、但交给新会话失败：失败卡说明可再点一次，旧卡按钮保留，再点一次接着做完且只执行一次', async () => {
+    const h = await blockedTopic();
+    const { coordinator, service } = await h.start('p2');
+    const run = await h.relaunchButton(service, 'om_queued', 'run_in_new_session');
+    // 取消之后、把原请求交给入站记录的那一次写入失败。
+    const write = h.repos.config.compareAndSet!.bind(h.repos.config);
+    let failed = false;
+    vi.spyOn(h.repos.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      if (!failed && key === 'lark.inbox.app.om_queued' && JSON.parse(value).state === 'received') { failed = true; return false; }
+      return write(key, expected, value);
+    });
+    expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
+    await until(() => JSON.stringify(service.reply.mock.calls).includes('未能在新会话中执行'));
+    const notice = service.reply.mock.calls.map(([input]) => input as any).find(input => input.taskName === '未能在新会话中执行');
+    expect(notice.markdown).toContain('原排队请求已取消，但新会话没有开始执行');
+    expect(notice.markdown).toContain('可以稍后在原任务卡上再点一次「在新会话中执行」');
+    expect((await h.tasks(h.oldSessionId)).map(task => task.status)).toEqual(['reconcile_required', 'cancelled']);
+    expect(JSON.parse((await h.claims()).find(row => row.key.endsWith('.om_queued.1'))!.value).phase).toBe('failed');
+    // 对账不把旧卡改成「已取消」：卡上的按钮还在。
+    await coordinator.reconcile(h.config);
+    expect(h.lastUpdate(service, run.cardId)).toMatchObject({ statusLabel: '排队受阻' });
+    expect(callbackValueOf(h.lastUpdate(service, run.cardId), 'run_in_new_session')).toEqual(run.value);
+    expect(service.reply).not.toHaveBeenCalledWith(expect.objectContaining({ cardKind: 'result', state: 'cancelled' }));
+
+    expect(await coordinator.handleAction(run.value, 'ou_alice', run.context)).toMatchObject({ type: 'success' });
+    await until(() => h.submissions.some(item => item.sessionId !== h.oldSessionId));
+    await until(() => h.lastUpdate(service, run.cardId)?.statusLabel === '已在新会话中执行');
+    const all = await h.sessions();
+    expect(all).toHaveLength(2);
+    const fresh = all.find(item => item.id !== h.oldSessionId)!;
+    expect(h.submissions.filter(item => item.sessionId === fresh.id).map(item => item.prompt)).toEqual([expect.stringContaining('看不懂')]);
+    expect((await h.tasks(fresh.id)).map(task => task.prompt)).toEqual(['看不懂']);
   });
 });
