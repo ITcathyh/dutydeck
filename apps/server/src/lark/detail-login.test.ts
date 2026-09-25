@@ -360,6 +360,50 @@ describe('coordinator：查看详情私信一次性登录链接', () => {
     expect(h.links.redeem(lastCode())).toBe('ses_moved');
   });
 
+  it('转交后的旧卡按转交认领跳原会话；认领的卡、群或阶段对不上都拒绝', async () => {
+    const h = await harness({ failFirst: true });
+    await h.coordinator.handle(event('om_task', '检查构建'), h.config);
+    await vi.waitFor(async () => expect((await h.saved()).extra).toMatchObject({ state: 'failed', final_delivery_state: 'delivered' }), { timeout: 10_000 });
+    const first = (await h.saved()).extra;
+    // 与转交落库的形状一致：账本里上一轮的会话和新一轮不同，新一轮整行覆写。
+    const [row] = await h.repos.channelMappings.list('lark-card:cli_detail');
+    await h.repos.channelMappings.save({ ...row!, sessionId: 'ses_original' });
+    expect(await h.coordinator.handleAction({ action: 'retry', task_id: 'om_task', turn: String(first.turn) }, 'ou_alice',
+      { messageId: first.card_message_id, chatId: 'oc_group' })).toMatchObject({ type: 'success' });
+    await vi.waitFor(async () => expect((await h.saved()).extra).toMatchObject({ turn: first.turn! + 1, state: 'completed', final_delivery_state: 'delivered' }), { timeout: 10_000 });
+    const current = await h.saved();
+    // 换了会话的那一轮不算重试旧卡，不记进账本，只能由转交认领认回。
+    expect(current.extra.earlier_message_ids ?? []).not.toContain(first.card_message_id);
+
+    const value = { action: 'detail', task_id: 'om_task', turn: String(first.turn) };
+    const oldCard = { messageId: first.card_message_id, chatId: 'oc_group' };
+    const click = (clickValue: Record<string, string> = value, context = oldCard) => h.coordinator.handleAction(clickValue, 'ou_alice', context);
+    expect(await click()).toMatchObject({ type: 'warning' });
+    const claimKey = `lark.relaunch.cli_detail.om_task.${first.turn}`;
+    const claim = { id: 'claim_1', boot: 'boot_1', phase: 'moved', action: 'run_in_new_session', appId: 'cli_detail', taskId: 'om_task', turn: first.turn,
+      chatId: 'oc_group', cardMessageId: first.card_message_id, taskName: '检查构建', sessionId: 'ses_original', runtimeTaskId: 'task_original',
+      operatorOpenId: 'ou_alice', newSessionId: current.sessionId };
+    const rejected: Array<[Record<string, unknown>, typeof oldCard]> = [
+      [{ phase: 'claimed' }, oldCard], [{ phase: 'failed' }, oldCard],
+      [{ cardMessageId: 'om_other_card' }, oldCard], [{ chatId: 'oc_other' }, oldCard], [{}, { ...oldCard, chatId: 'oc_other' }]
+    ];
+    for (const [change, context] of rejected) {
+      await h.repos.config.set(claimKey, JSON.stringify({ ...claim, ...change }));
+      expect(await click(value, context), JSON.stringify(change)).toMatchObject({ type: 'warning' });
+    }
+    await h.repos.config.set(claimKey, JSON.stringify(claim));
+    // 回调没带轮次时不猜认领。
+    expect(await click({ action: 'detail', task_id: 'om_task' })).toMatchObject({ type: 'warning' });
+    expect(h.privateMessages()).toHaveLength(0);
+
+    expect(await click()).toEqual({ type: 'success', content: '已私信你一个 10 分钟内有效的登录链接' });
+    const code = /code=([A-Za-z0-9_-]{43})/.exec(JSON.stringify(h.privateMessages().at(-1)))![1]!;
+    expect(h.links.redeem(code)).toBe('ses_original');
+    // 权限门不变：非管理员点转交旧卡也拿不到。
+    expect(await h.coordinator.handleAction(value, 'ou_bob', oldCard)).toMatchObject({ type: 'warning', content: expect.stringContaining('仅机器人管理员') });
+    expect(h.privateMessages()).toHaveLength(1);
+  });
+
   it('非管理员点击不发私信，只提示去导出执行记录', async () => {
     const h = await harness();
     const { extra } = await h.runTask();
