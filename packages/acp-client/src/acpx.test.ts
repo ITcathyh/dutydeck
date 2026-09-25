@@ -119,6 +119,25 @@ describe('acpx ACP boundary', () => {
     await adapter.stop();
   });
 
+  it('keeps title-guessed reads waiting for approval through real ACPX in approve-reads mode', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-approve-reads-')); dirs.push(cwd);
+    const events: any[] = [];
+    const adapter = new AcpxAdapter({ ...agentConfig(), cwd, command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], permissionMode: 'approve-reads' }, { onEvent: event => events.push(event) });
+    try {
+      await adapter.start();
+      await adapter.send('permission declared read');
+      expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"allow"'))).toBe(true);
+      expect(events.some(event => event.type === 'permission_request')).toBe(false);
+      // 执行端没声明 kind，acpx 会按标题猜成 read；不能因此自动放行，要等人审批。
+      events.length = 0;
+      const sending = adapter.send('permission guessed read');
+      await expect.poll(() => events.some(event => event.type === 'permission_request' && event.data.id === 'permission-tool' && event.data.status === 'pending')).toBe(true);
+      await adapter.resolvePermission('permission-tool', false);
+      await sending;
+      expect(events.some(event => event.type === 'text' && event.data.text.includes('"optionId":"deny"'))).toBe(true);
+    } finally { await adapter.stop(); }
+  });
+
   it('rejects a matching ACP permission before it reaches the Web approval UI', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-risk-gate-')); dirs.push(cwd);
     const fixture = resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs'); const events: any[] = [];
