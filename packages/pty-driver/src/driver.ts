@@ -92,6 +92,11 @@ export class PtyCliDriver implements AgentDriver {
    *  idle 检测会误判，宽限期内禁止 completed。 */
   private turnStartedAt = 0;
   private static readonly TURN_GRACE_MS = 15_000;
+  /** 后台子 agent 在飞时最多推迟 completed 这么久（见 holdForBackgroundWork）。
+   *  开发机 416 次真实后台 agent 从派发到回报：p90 约 49 分钟、p95 约 64 分钟。 */
+  private static readonly BACKGROUND_HOLD_MS = 60 * 60_000;
+  private backgroundHoldTimer: ReturnType<typeof setTimeout> | undefined;
+  private backgroundHoldExpired = false;
   /** send() 的等待者：send() 必须等本轮 completed（或 driver 退出）才 resolve，
    *  与 AcpxAdapter 的语义对齐（runtime 在 send resolve 后立即判定终态）。 */
   private turnResolve: (() => void) | null = null;
@@ -122,6 +127,8 @@ export class PtyCliDriver implements AgentDriver {
   private rawTerminalTimer: ReturnType<typeof setTimeout> | undefined;
   private renderedCompletionTimer: ReturnType<typeof setTimeout> | undefined;
   private lastRawTerminalText = '';
+  /** 最近一次 PTY 输出的时间，经 submissionBackend 交给适配器判断屏幕是否静止。 */
+  private lastOutputAt = 0;
   /** createTerminalStream 订阅者集合，driver 级持有，rewire 后继续生效。 */
   private readonly terminalSubscribers = new Set<(data: string) => void>();
 
@@ -258,6 +265,8 @@ export class PtyCliDriver implements AgentDriver {
       this.turnStartedAt = Date.now();
       this.awaitingRecoveryTranscript = false;
       this.clearRenderedCompletion();
+      this.clearBackgroundHold();
+      this.transcript?.resetBackgroundWork?.();
       this.idleDetector?.reset();
       completion = new Promise<void>((resolve, reject) => {
         this.turnResolve = resolve;
@@ -758,7 +767,7 @@ export class PtyCliDriver implements AgentDriver {
       // status line still shows activity below the previous turn's duration.
       const activity = this.adapter.screenActivityPattern;
       const statusLine = activity ? this.snapshot?.viewportText().split('\n').reverse()
-        .find(line => activity.test(line) || this.adapter.completionPattern?.test(line)) : undefined;
+        .find(line => activity.test(line) || this.adapter.backgroundWaitPattern?.test(line) || this.adapter.completionPattern?.test(line)) : undefined;
       if (this.activeSubmission || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))) {
         // Keep checking even if the next redraw only clears the footer.
         this.idleDetector?.reset();
@@ -773,6 +782,12 @@ export class PtyCliDriver implements AgentDriver {
       // Publish the final JSONL record before Runtime closes the turn, even
       // when it was written between the tailer's polling ticks.
       this.transcript?.flush();
+      if (this.holdForBackgroundWork(statusLine)) {
+        this.idleDetector?.reset();
+        this.idleDetector?.seedReadyEvidence();
+        return;
+      }
+      this.clearBackgroundHold();
       this.turnActive = false;
       this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending ? 'cancelled' : 'end_turn' } });
       this.interruptPending = false;
@@ -783,6 +798,7 @@ export class PtyCliDriver implements AgentDriver {
 
     backend.onData(data => {
       if (backend !== this.backend || this.stopped) return;
+      this.lastOutputAt = Date.now();
       this.idleDetector?.feed(data);
       this.snapshot?.write(data);
       for (const cb of this.terminalSubscribers) cb(data);
@@ -838,6 +854,7 @@ export class PtyCliDriver implements AgentDriver {
       this.rawTerminalTimer = undefined;
     }
     this.clearRenderedCompletion();
+    this.clearBackgroundHold();
   }
 
   private handleExit(code: number | null, source?: SessionBackend): void {
@@ -903,7 +920,7 @@ export class PtyCliDriver implements AgentDriver {
     const activity = this.adapter.screenActivityPattern;
     const lines = (this.snapshot?.viewportText() ?? '').split('\n').reverse();
     const statusLine = activity
-      ? lines.find(line => activity.test(line) || completion.test(line))
+      ? lines.find(line => activity.test(line) || this.adapter.backgroundWaitPattern?.test(line) || completion.test(line))
       : lines.find(line => completion.test(line));
     if (!statusLine || !completion.test(statusLine) || (activity && activity.test(statusLine))) return false;
     const footer = this.snapshot?.lastLine() ?? '';
@@ -930,6 +947,36 @@ export class PtyCliDriver implements AgentDriver {
   private checkRenderedCompletionFinal(): void {
     if (!this.hasRenderedCompletionEvidence()) return;
     this.idleDetector?.fireIdle();
+  }
+
+  /**
+   * Claude 在后台子 agent 回报前就结束主轮：屏幕最下面的状态行是
+   * `✻ Waiting for 1 background agent to finish`，transcript 的 turn_duration
+   * 记录带 pendingBackgroundAgentCount。回报到达后 CLI 自己再开一轮续写结果，
+   * 所以这期间的空闲不是本轮结束。两路任一仍在等就推迟 completed，直到续写
+   * 那一轮结束；中断不等，BACKGROUND_HOLD_MS 后也不再等。
+   */
+  private holdForBackgroundWork(statusLine: string | undefined): boolean {
+    if (this.interruptPending || this.backgroundHoldExpired) return false;
+    const screenWaiting = statusLine !== undefined && this.adapter.backgroundWaitPattern?.test(statusLine) === true;
+    if (!screenWaiting && !this.transcript?.pendingBackgroundWork?.()) return false;
+    if (!this.backgroundHoldTimer) {
+      const timer = setTimeout(() => {
+        this.backgroundHoldExpired = true;
+        this.idleDetector?.fireIdle();
+      }, PtyCliDriver.BACKGROUND_HOLD_MS);
+      timer.unref();
+      this.backgroundHoldTimer = timer;
+    }
+    return true;
+  }
+
+  private clearBackgroundHold(): void {
+    if (this.backgroundHoldTimer) {
+      clearTimeout(this.backgroundHoldTimer);
+      this.backgroundHoldTimer = undefined;
+    }
+    this.backgroundHoldExpired = false;
   }
 
   private sessionContext(): AdapterSessionContext {
@@ -998,6 +1045,8 @@ export class PtyCliDriver implements AgentDriver {
     };
     const proxy: PtyLike = {
       write: data => guarded(() => target.write(data)),
+      lastOutputAt: () => guarded(() => this.lastOutputAt),
+      processKey: target,
       // tmux can synchronously capture the pane. Prefer that authoritative
       // current render over its asynchronous pipe-pane/tail mirror while a
       // startup dialog is deciding whether it may accept any input.

@@ -1,0 +1,30 @@
+ ▐▛███▛█   Claude Code v2.1.280
+▝▜██████▀  Opus 5.5 (1M context) · API Usage Billing
+  ▝▝ ▝▝    /tmp/pty-20260925-exp/work
+
+
+❯ Say something plain.
+
+● Plain answer.
+
+✻ Cooked for 0s · done 4:33 PM
+
+❯ LAUNCH_BG please start the background check
+
+● Agent(Background check)
+  ⎿  Backgrounded agent (↓ to manage · ctrl+o to expand)
+
+● Launched a background agent; waiting for it.
+
+✻ Waiting for 1 background agent to finish
+
+● Agent "Background check" finished · 40s
+
+● FINAL: background result merged.
+
+✻ Churned for 40s · done 4:34 PM
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · /tasks to see subagents · ← for agents
