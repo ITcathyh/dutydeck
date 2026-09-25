@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AutostartCommandOutput } from '../autostart/autostart.js';
+import { DRAIN_INTERVAL_MS } from './command.js';
 import { parseDeployWindows, runDeploy, shanghaiMinuteOfDay, withinDeployWindow, type DeployDeps } from './deploy.js';
 
 const passingSqlite = (options?: SqliteDriverCheckOptions): SqliteDriverCheck => ({ ok: true, execPath: options?.execPath ?? process.execPath });
@@ -223,6 +224,79 @@ describe('dutydeck deploy', () => {
     // 回滚后不清理旧发布目录和部署记录
     expect(broken.pruned).toBeUndefined();
     expect(broken.prunedRecords).toBeUndefined();
+  }, 60_000);
+
+  /** 记下每个请求发生在哪个阶段；排空请求带上 draining 的值。 */
+  function recordRequests() {
+    const calls: string[] = [];
+    const recorder = { phase: 'drain', calls, fetch: (async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      const body = path === '/api/system/drain' ? ` ${JSON.parse(String(init?.body)).draining}` : '';
+      calls.push(`${recorder.phase} ${path}${body}`);
+      return await fetch(url, init);
+    }) as typeof fetch };
+    return recorder;
+  }
+
+  it('从排空起一直续租到旧进程退出：备份、切换、重启期间都续租，旧进程退出后不再续到新进程上', async () => {
+    await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source);
+    const requests = recordRequests();
+    const tick = async (intervals: number) => {
+      vi.advanceTimersByTime(intervals * DRAIN_INTERVAL_MS);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    };
+    const slowRestart = {
+      ...service,
+      restart: async () => {
+        requests.phase = 'restart';
+        await tick(1); // 停旧进程之前
+        const error = await service.restart();
+        requests.phase = 'after-restart';
+        await tick(3); // 旧进程已退出，新进程在跑
+        return error;
+      }
+    };
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const result = await runDeploy({ source, runtime: bot }, deps({
+        service: slowRestart,
+        fetch: requests.fetch,
+        backupDatabase: async () => { requests.phase = 'backup'; await tick(3); } // 相当于备份跑了 15 秒
+      }));
+      expect(result, result.error).toMatchObject({ ok: true, status: 'deployed' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(requests.calls.filter(call => call === 'backup /api/system/drain true')).toHaveLength(3);
+    expect(requests.calls.filter(call => call === 'restart /api/system/drain true')).toHaveLength(1);
+    expect(requests.calls.filter(call => call.startsWith('after-restart /api/system/drain'))).toEqual([]);
+  }, 60_000);
+
+  it('备份失败时先停止续租再退出排空，之后不再续租', async () => {
+    await runDeploy({ source, runtime: bot }, deps());
+    nextCommit(source);
+    const requests = recordRequests();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    try {
+      const result = await runDeploy({ source, runtime: bot }, deps({
+        fetch: requests.fetch,
+        backupDatabase: async () => {
+          vi.advanceTimersByTime(2 * DRAIN_INTERVAL_MS);
+          await new Promise(resolve => setTimeout(resolve, 100));
+          throw new Error('disk full');
+        }
+      }));
+      expect(result).toMatchObject({ ok: false, status: 'failed' });
+      requests.phase = 'after';
+      vi.advanceTimersByTime(3 * DRAIN_INTERVAL_MS);
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(requests.calls.filter(call => call.includes('/api/system/drain'))).toEqual([
+      'drain /api/system/drain true', 'drain /api/system/drain true', 'drain /api/system/drain true', 'drain /api/system/drain false'
+    ]);
   }, 60_000);
 
   it('试加载失败时不切换、不重启，删掉这个发布目录', async () => {
