@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
-import { canonicalExecutionJson, ptyRetirementRecoverySchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
+import { canonicalExecutionJson, ptyRetirementRecoverySchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
 import { AcpxAdapter, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
@@ -2091,6 +2091,8 @@ export class DutydeckRuntime {
       const task = queued();
       const skipped = (outcome: SteeringOutcome, error?: string): SteeringResult => ({ task: this.publicTask(task), outcome, ...(error ? { error } : {}) });
       if (!driver?.steer) return skipped('unsupported');
+      // Automation, schedule and work-item consumers wait for this Task's own Attempt; a steered Task never gets one.
+      if (this.repos.execution.getAcceptedTask(taskId)?.request?.namespace !== steerableTaskNamespace) return skipped('unsupported');
       const target = running();
       if (!target) return skipped('promptRequired');
       const input = this.acceptedInput(task);
