@@ -151,6 +151,20 @@ describe('WorkspaceOverview', () => {
     expect(screen.getByRole('button', { name: /等待授权.*需要你授权/ })).toBeTruthy();
   });
 
+  it('总览每个分区只预览前 5 条，「查看全部」切到对应视图；多选时展开全部，避免清理看不见的任务', async () => {
+    const user = userEvent.setup(); const onViewChange = vi.fn();
+    // updatedAt 取自 id 拼日期，个位数 id 才是合法时间。
+    const sessions = Array.from({ length: 7 }, (_, index) => session(String(index + 1), `/repo/${index + 1}`, 'failed'));
+    render(<WorkspaceOverview {...baseProps} sessions={sessions} view="all" onViewChange={onViewChange} onBulkArchive={() => {}}/>);
+    const list = screen.getByRole('region', { name: '任务列表' });
+    expect(list.querySelectorAll('[data-task-priority]')).toHaveLength(5);
+    await user.click(screen.getByRole('button', { name: /查看全部 7 个待你处理的任务/ }));
+    expect(onViewChange).toHaveBeenCalledWith('attention');
+    await user.click(screen.getByRole('button', { name: '批量清理' }));
+    expect(list.querySelectorAll('[data-task-priority]')).toHaveLength(7);
+    expect(screen.queryByRole('button', { name: /查看全部/ })).toBeNull();
+  });
+
   it('过滤视图展示全部匹配任务，不截断最近六条', () => {
     const sessions = Array.from({ length: 8 }, (_, index) => session(String(index + 1), `/repo/${index + 1}`, 'thinking'));
     render(<WorkspaceOverview sessions={sessions} summaries={Object.fromEntries(sessions.map(item => [item.id, { sessionId: item.id, taskId: `t${item.id}`, prompt: `任务 ${item.id}`, status: 'running', queuedCount: 0, updatedAt: item.updatedAt }]))} agents={agents} loading={false} larkBots={[]} view="active" onViewChange={() => {}} onSelect={() => {}} onCreate={() => {}} onOpenAgentSetup={() => {}} onOpenLarkSetup={() => {}}/>);

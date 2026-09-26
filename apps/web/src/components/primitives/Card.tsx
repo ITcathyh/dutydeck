@@ -12,9 +12,10 @@ const paddingClass = { none: '', sm: 'p-3', md: 'p-4', lg: 'p-6' } as const;
 /*
   契约 §4「默认无线」：default 与 muted 靠表面色差分层，不画边框。
   只有 dashed（空态框）例外——虚线是「这里本该有内容」的语义，不是分层手段。
+  default 的边缘由 shadow-elevated 里的发丝环给出（见 tokens.css），不是 border。
 */
 const toneClass = {
-  default: 'bg-surface shadow-card',
+  default: 'bg-surface shadow-elevated',
   muted: 'bg-muted',
   dashed: 'border border-dashed border-default bg-transparent'
 } as const;

@@ -142,6 +142,15 @@
   --status-neutral-soft: #f0f2f7;
   --overlay-scrim: rgba(15, 23, 42, .35);
   --shadow-card: 0 1px 2px rgba(15, 23, 42, .05);
+  /*
+    内容卡片与可点的统计卡。第一段是 1px 发丝环：白卡压在 canvas 上只有 1.08 的
+    亮度比，只靠 shadow-card 那 5% 的投影，边缘在普通屏上几乎看不见。环画在阴影里
+    而不是 border 上，卡片不占额外尺寸，也不和次按钮的 border + shadow-card 叠成双线。
+  */
+  --shadow-elevated: 0 0 0 1px rgba(15, 23, 42, .06), 0 1px 2px rgba(15, 23, 42, .04), 0 4px 12px -4px rgba(15, 23, 42, .06);
+  --shadow-elevated-hover: 0 0 0 1px rgba(15, 23, 42, .09), 0 2px 4px rgba(15, 23, 42, .05), 0 12px 24px -8px rgba(15, 23, 42, .12);
+  /* 任务中心页首的品牌色光晕，随内容滚走（index.css 的 .ui-hero-glow）。 */
+  --overview-glow: radial-gradient(1100px 340px at 50% -140px, rgba(79, 86, 232, .10), transparent 72%);
   --shadow-panel: 0 12px 34px rgba(15, 23, 42, .09);
   --shadow-dialog: 0 24px 80px rgba(15, 23, 42, .22);
   --shadow-overlay: 0 30px 100px rgba(15, 23, 42, .32);
@@ -235,6 +244,9 @@
     --status-neutral-soft: #1e2431;
     --overlay-scrim: rgba(3, 6, 12, .62);
     --shadow-card: 0 1px 2px rgba(0, 0, 0, .4);
+    --shadow-elevated: 0 0 0 1px rgba(255, 255, 255, .06), 0 1px 2px rgba(0, 0, 0, .45), 0 8px 20px -8px rgba(0, 0, 0, .5);
+    --shadow-elevated-hover: 0 0 0 1px rgba(255, 255, 255, .11), 0 2px 4px rgba(0, 0, 0, .5), 0 16px 32px -12px rgba(0, 0, 0, .6);
+    --overview-glow: radial-gradient(1100px 340px at 50% -140px, rgba(123, 130, 245, .13), transparent 72%);
     --shadow-panel: 0 12px 34px rgba(0, 0, 0, .45);
     --shadow-dialog: 0 24px 80px rgba(0, 0, 0, .6);
     --shadow-overlay: 0 30px 100px rgba(0, 0, 0, .68);
@@ -303,6 +315,9 @@
   --status-neutral-soft: #1e2431;
   --overlay-scrim: rgba(3, 6, 12, .62);
   --shadow-card: 0 1px 2px rgba(0, 0, 0, .4);
+  --shadow-elevated: 0 0 0 1px rgba(255, 255, 255, .06), 0 1px 2px rgba(0, 0, 0, .45), 0 8px 20px -8px rgba(0, 0, 0, .5);
+  --shadow-elevated-hover: 0 0 0 1px rgba(255, 255, 255, .11), 0 2px 4px rgba(0, 0, 0, .5), 0 16px 32px -12px rgba(0, 0, 0, .6);
+  --overview-glow: radial-gradient(1100px 340px at 50% -140px, rgba(123, 130, 245, .13), transparent 72%);
   --shadow-panel: 0 12px 34px rgba(0, 0, 0, .45);
   --shadow-dialog: 0 24px 80px rgba(0, 0, 0, .6);
   --shadow-overlay: 0 30px 100px rgba(0, 0, 0, .68);
