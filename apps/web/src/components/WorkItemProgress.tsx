@@ -2,6 +2,7 @@ import { useId, useState, type ReactNode } from 'react';
 import type { WorkItem } from '@dutydeck/shared';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import type { Agent, Session } from '../api';
+import { sessionPath } from '../app-route';
 import { Badge, Banner, Button, Spinner } from './primitives';
 import { useWorkItems, useWorkItemRequests, workStatusLabels } from './workItemQueries';
 
@@ -76,7 +77,7 @@ function GoalProgress({ item, session, agents, onOpen, onSelectSession }: { item
                   <p className="text-secondary">第 {record.number} 次尝试 · {workStatusLabels[record.status]}</p>
                   {record.error && <p className="whitespace-pre-wrap break-words text-danger [overflow-wrap:anywhere]">{record.error}</p>}
                   {record.output && <p className="text-secondary">已有步骤产物，可在目标详情查看。</p>}
-                  {record.sessionId && <a href={`/sessions/${encodeURIComponent(record.sessionId)}`} className="inline-block text-link hover:underline" onClick={event => { if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(record.sessionId!); } }}>查看第 {record.number} 次尝试的执行记录</a>}
+                  {record.sessionId && <a href={sessionPath(record.sessionId)} className="inline-block text-link hover:underline" onClick={event => { if (event.button === 0 && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(record.sessionId!); } }}>查看第 {record.number} 次尝试的执行记录</a>}
                 </div>)}
               </div>
             </details>

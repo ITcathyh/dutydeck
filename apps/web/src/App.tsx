@@ -28,6 +28,7 @@ import { nextActionForState, sessionWorkspaceName, type WorkbenchView } from './
 import { appLocationPath, OVERLAY_HISTORY_MARK, parseAppLocation, sessionPath, type AppLocation, type AppRoute, type OverlayRoute, type PrimaryNav, type LarkSetupTarget } from './app-route';
 import type { ControlCenterSection } from './components/ControlCenterModal';
 import { useMediaQuery } from './useMediaQuery';
+import { currentInstance, instanceHomePath } from './instance';
 import { captureDialogOpener } from './useDialogFocus';
 import { CommandPalette, type CommandAction } from './components/CommandPalette';
 import { ToastViewport } from './components/ToastViewport';
@@ -198,6 +199,7 @@ export default function App() {
   const larkConfig = useQuery({ queryKey: ['lark-config'], queryFn: api.larkConfig, staleTime: 30_000, refetchOnWindowFocus: true });
   const systemCapabilities = useQuery({ queryKey: ['system-capabilities'], queryFn: api.systemCapabilities, staleTime: Infinity });
   const authStatus = useQuery({ queryKey: ['auth-status'], queryFn: api.authStatus, staleTime: Infinity, retry: false });
+  const peerInstances = useQuery({ queryKey: ['instances'], queryFn: api.instances, staleTime: Infinity, retry: false });
 
   const openSettings = (section: ControlCenterSection = 'agents') => openOverlay({ kind: 'settings', section });
   const openLarkSetup = (target?: LarkSetupTarget) => openOverlay({ kind: 'lark-setup', target });
@@ -433,7 +435,7 @@ export default function App() {
   const overlayFallback = (label: string) => <div className="fixed inset-0 z-dialog grid place-items-center bg-scrim backdrop-blur-sm"><Spinner label={label}/></div>;
 
   return <div className="relative flex h-[100dvh] min-h-[100dvh] flex-col overflow-hidden bg-canvas font-sans text-primary">
-    <TopBar hidden={mobileNavigationOpen} onOpenNavigation={openMobileNavigation} onGoHome={() => selectSession(undefined)} onOpenSearch={openPalette} onOpenShortcuts={openHelp} themePreference={theme.preference} themeResolved={theme.resolved} onThemeChange={theme.setPreference}/>
+    <TopBar hidden={mobileNavigationOpen} onOpenNavigation={openMobileNavigation} onGoHome={() => selectSession(undefined)} onOpenSearch={openPalette} onOpenShortcuts={openHelp} themePreference={theme.preference} themeResolved={theme.resolved} onThemeChange={theme.setPreference} instances={peerInstances.data?.instances} instance={currentInstance()} onInstanceChange={id => { if (id !== currentInstance()) window.location.assign(instanceHomePath(id)); }}/>
     {/*
       顶栏之下的躯干。侧栏是 position:fixed 的浮动卡片而不是栅格列，所以这里是
       普通的 block/flex 容器，主区靠 md:ml-main-inset 让位——--main-inset 就是

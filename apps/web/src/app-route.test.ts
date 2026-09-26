@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { appLocationPath, parseAppLocation, routeFromPath, sessionPath, sharedSessionFromLocation } from './app-route';
+import { setInstance } from './instance';
 
 describe('路径解析', () => {
   it('根路径是任务中心，会话路径带出 sessionId', () => {
@@ -136,5 +137,17 @@ describe('只读分享页入口', () => {
 
   it.each(['/', '/sessions/ses_1', '/share', '/share/', '/share/ses_1/extra'])('%s 不是分享页', pathname => {
     expect(sharedSessionFromLocation(pathname, '#t')).toBeUndefined();
+  });
+});
+
+describe('其他实例下的路径', () => {
+  it('解析时去掉实例前缀，生成的路径带回同一个前缀', () => {
+    setInstance('tag');
+    try {
+      expect(routeFromPath('/instances/tag/')).toEqual({ kind: 'overview' });
+      expect(parseAppLocation('/instances/tag/sessions/s1', '?nav=bots').route).toEqual({ kind: 'session', sessionId: 's1' });
+      expect(sessionPath('s1')).toBe('/instances/tag/sessions/s1');
+      expect(appLocationPath({ route: { kind: 'overview' }, nav: 'bots' })).toBe('/instances/tag/?nav=bots');
+    } finally { setInstance(undefined); }
   });
 });
