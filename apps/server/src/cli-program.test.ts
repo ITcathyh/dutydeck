@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { createCliProgram, environmentFromCli } from './cli-program.js';
 
 describe('Dutydeck CLI', () => {
+  it('passes bot process identity to both server and daemon commands', async () => {
+    const daemonStart = vi.fn();
+    const program = createCliProgram('0.0.5', { daemonStart });
+    await program.parseAsync(['node', 'dutydeck', 'start', '--bot-app-id', 'cli_a']);
+    expect(daemonStart).toHaveBeenCalledWith(expect.objectContaining({ botAppId: 'cli_a' }));
+    expect(environmentFromCli({ botAppId: 'cli_a' }, {})).toEqual({ DUTYDECK_BOT_APP_ID: 'cli_a' });
+  });
+
   it('maps explicit Commander options to runtime environment variables', () => {
     const program = createCliProgram('0.0.5');
     program.parse(['node', 'dutydeck', '--host', '127.0.0.1', '--port', '4400', '--cwd', '/tmp/project', '--database', '/tmp/dock.db', '--idle-timeout-ms', '1000', '--cleanup-interval-ms', '500', '--lark-app-id', 'cli_test', '--lark-agent-name', 'My Agent']);

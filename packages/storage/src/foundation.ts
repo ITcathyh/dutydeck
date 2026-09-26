@@ -1,3 +1,4 @@
+import { assertBotProcessApp } from './bot-process.js';
 import type Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import {
@@ -257,6 +258,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
 
   const createChannelBot = (rawInput: CreateChannelBotInput): ChannelBotFoundation => {
     const input = createChannelBotInputSchema.parse(rawInput);
+    assertBotProcessApp(sqlite, input.externalAppId);
     if (getChannelBot(input.id)) throw naturalKeyConflict('channel_bot', input.id);
     if (findChannelBotByNaturalKey(input.channel, input.externalAppId)) throw naturalKeyConflict('channel_bot', `${input.channel}/${input.externalAppId}`);
     assertCredentialRef(input.credentialRef);
@@ -302,6 +304,7 @@ export function createFoundationRepositories(sqlite: Database.Database): Foundat
     const credentialRef = input.credentialRef === null ? undefined : input.credentialRef ?? current.credentialRef;
     assertCredentialRef(credentialRef);
     const externalAppId = input.externalAppId ?? current.externalAppId;
+    assertBotProcessApp(sqlite, externalAppId);
     const conflictingBot = findChannelBotByNaturalKey(current.channel, externalAppId);
     if (conflictingBot && conflictingBot.id !== id) throw naturalKeyConflict('channel_bot', `${current.channel}/${externalAppId}`);
     const next = channelBotFoundationSchema.parse({
