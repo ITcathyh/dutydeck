@@ -244,20 +244,30 @@ describe('Lark api gate retry', () => {
     expect(at[1]! - at[0]!).toBeGreaterThanOrEqual(3_000);
   });
 
-  it('caps an absurd Retry-After hint at retryMaxMs * 4', async () => {
+  it('does not retry before Retry-After, and cancellation bounds a long hint', async () => {
     vi.useFakeTimers();
-    const at: number[] = [];
-    let calls = 0;
-    const promise = executeWithLarkGate('cli_absurd', 'card.patch', async () => {
-      at.push(Date.now());
-      calls += 1;
-      if (calls === 1) throw openApiError(undefined, 429, { retryAfterMs: 3_600_000 });
-      return 'ok';
-    }, { env: gateEnv({ LARK_API_RETRY_MAX_MS: '8000' }) });
-
+    const abort = new AbortController();
+    const fn = vi.fn(async () => { throw openApiError(undefined, 429, { retryAfterMs: 3_600_000 }); });
+    const pending = executeWithLarkGate('cli_hint', 'card.patch', fn, { env: gateEnv(), signal: abort.signal });
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
     await vi.advanceTimersByTimeAsync(60_000);
-    await expect(promise).resolves.toBe('ok');
-    expect(at[1]! - at[0]!).toBe(32_000);
+    expect(fn).toHaveBeenCalledTimes(1);
+    abort.abort();
+    await rejected;
+  });
+
+  it('applies bounded jitter while treating Retry-After as a minimum', async () => {
+    vi.useFakeTimers();
+    for (const random of [0, 1]) {
+      const at: number[] = [];
+      const pending = executeWithLarkGate(`jitter_${random}`, 'get', async () => {
+        at.push(Date.now());
+        if (at.length === 1) throw networkError();
+      }, { env: gateEnv(), random: () => random });
+      await vi.advanceTimersByTimeAsync(1000);
+      await pending;
+      expect(at[1]! - at[0]!).toBe(random === 0 ? 250 : 500);
+    }
   });
 
   it('does not retry a non-retryable 4xx and rethrows the identical error object', async () => {
@@ -591,5 +601,88 @@ describe('setLarkGateLog', () => {
     expect(serialized).not.toContain('Bearer');
     // 日志只带 appId（非凭据）与运维指标。
     expect(serialized).toContain('cli_credential_check');
+  });
+});
+
+
+describe('half-open ownership', () => {
+  const env = gateEnv({ LARK_API_RETRY_MAX_ATTEMPTS: '0', LARK_API_CIRCUIT_FAILURE_THRESHOLD: '1', LARK_API_CIRCUIT_PROBE_INTERVAL_MS: '100' });
+  const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
+  const trip = () => executeWithLarkGate('probe', 'get', async () => { throw networkError(); }, { env }).catch(() => undefined);
+
+  it.each([8, 100])('allows only one probe among %i concurrent calls', async count => {
+    vi.useFakeTimers();
+    await trip();
+    await vi.advanceTimersByTimeAsync(101);
+    const release = deferred();
+    const fn = vi.fn(async () => { await release.promise; return 'ok'; });
+    const calls = Array.from({ length: count }, () => executeWithLarkGate('probe', 'get', fn, { env }));
+    const results = Promise.allSettled(calls);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fn).toHaveBeenCalledTimes(1);
+    release.resolve();
+    const settled = await results;
+    expect(settled.filter(item => item.status === 'fulfilled')).toHaveLength(1);
+    expect(settled.filter(item => item.status === 'rejected' && item.reason instanceof LarkCircuitOpenError)).toHaveLength(count - 1);
+  });
+
+  it('ignores a success from a closed generation after a newer probe failed', async () => {
+    vi.useFakeTimers();
+    const old = deferred();
+    const late = executeWithLarkGate('probe', 'get', () => old.promise, { env });
+    await vi.advanceTimersByTimeAsync(0);
+    await trip();
+    await vi.advanceTimersByTimeAsync(101);
+    await trip();
+    old.resolve();
+    await late;
+    await expect(executeWithLarkGate('probe', 'get', async () => 'wrong', { env })).rejects.toBeInstanceOf(LarkCircuitOpenError);
+  });
+
+  it('rechecks a circuit tripped while queued for a token', async () => {
+    vi.useFakeTimers();
+    const limited = { ...env, LARK_API_QPS: '1', LARK_API_BURST: '1' };
+    const release = deferred();
+    const failing = executeWithLarkGate('probe', 'get', async () => { await release.promise; throw networkError(); }, { env: limited });
+    const failed = expect(failing).rejects.toHaveProperty('code', 'LARK_NETWORK_ERROR');
+    const fn = vi.fn(async () => 'wrong');
+    const queued = executeWithLarkGate('probe', 'get', fn, { env: limited });
+    const rejected = expect(queued).rejects.toBeInstanceOf(LarkCircuitOpenError);
+    release.resolve();
+    await failed;
+    await vi.advanceTimersByTimeAsync(1000);
+    await rejected;
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('releases a probe cancelled during token waiting', async () => {
+    vi.useFakeTimers();
+    const limited = { ...env, LARK_API_QPS: '1', LARK_API_BURST: '1' };
+    await executeWithLarkGate('probe', 'get', async () => { throw networkError(); }, { env: limited }).catch(() => {});
+    await vi.advanceTimersByTimeAsync(101);
+    const abort = new AbortController();
+    const fn = vi.fn(async () => 'wrong');
+    const pending = executeWithLarkGate('probe', 'get', fn, { env: limited, signal: abort.signal });
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    abort.abort();
+    await rejected;
+    const next = executeWithLarkGate('probe', 'get', async () => 'ok', { env: limited });
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(next).resolves.toBe('ok');
+    expect(fn).not.toHaveBeenCalled();
+  });
+
+  it('retains the probe owner during backoff and releases it on cancellation', async () => {
+    vi.useFakeTimers();
+    await trip();
+    await vi.advanceTimersByTimeAsync(101);
+    const abort = new AbortController();
+    const pending = executeWithLarkGate('probe', 'get', async () => { throw networkError(); }, { env: { ...env, LARK_API_RETRY_MAX_ATTEMPTS: '3' }, signal: abort.signal });
+    const rejected = expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    await vi.advanceTimersByTimeAsync(0);
+    await expect(executeWithLarkGate('probe', 'get', async () => 'wrong', { env })).rejects.toBeInstanceOf(LarkCircuitOpenError);
+    abort.abort();
+    await rejected;
+    await expect(executeWithLarkGate('probe', 'get', async () => 'ok', { env })).resolves.toBe('ok');
   });
 });

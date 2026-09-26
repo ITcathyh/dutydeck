@@ -85,6 +85,13 @@ describe('owner execution recovery', () => {
     await h.runtime.confirmExecutionRecovery(h.session.id, input, owner);
     expect(h.prompts.filter(prompt => prompt === 'original')).toHaveLength(2);
     expect(h.repos.execution.getTaskExecution(h.first.id)?.attempts.map(attempt => attempt.outcome)).toEqual(['unknown', 'completed']);
+    // A send replay still returns its first Attempt, even after retry settled.
+    const dispatch = vi.spyOn(h.runtime, 'dispatch').mockResolvedValue({ ...h.first, replayed: true, queuedAhead: 0 });
+    try {
+      const result = await h.runtime.send(h.session.id, 'original');
+      expect(result.currentAttemptId).toBe(h.first.currentAttemptId);
+      expect(result.status).toBe('reconcile_required');
+    } finally { dispatch.mockRestore(); }
   });
   it('does not clear a local-only live stop block by probing or guessing that an idle session is safe', async () => {
     const h = await fixture();

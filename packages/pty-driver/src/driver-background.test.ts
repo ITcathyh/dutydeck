@@ -150,7 +150,9 @@ describe('PTY completion while Claude background agents are still running', () =
     append(dispatch);
     output(repaint(waitingScreen));
     await tick(5);
-    // No output arrives meanwhile, so the synchronous clock is enough and far faster.
+    // Let the asynchronous final drain establish the background hold first.
+    await vi.advanceTimersByTimeAsync(4_000);
+    // No output arrives meanwhile; the long clock jump needs no filesystem work.
     vi.advanceTimersByTime(HOLD_MS - 10_000);
     expect(completed()).toHaveLength(0);
     // The limit counts from the first vetoed idle, a few seconds after the repaint.

@@ -254,10 +254,14 @@ describe('BotManagement 会话记忆', () => {
     await user.click(screen.getByRole('checkbox', { name: '自动提取与整理' }));
     await user.selectOptions(screen.getByLabelText('整理 Agent'), 'codex');
     await user.type(screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
+    await user.selectOptions(screen.getByLabelText('群判定 Agent'), 'codex');
+    await user.selectOptions(screen.getByLabelText('群回复 Agent'), 'codex');
+    await user.type(screen.getByLabelText('群判定模型'), 'fast');
+    await user.type(screen.getByLabelText('群回复模型'), 'quality');
     await user.click(screen.getByRole('button', { name: '保存配置' }));
 
     await waitFor(() => expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({
-      memoryEnabled: true, memoryAutoExtract: false, memoryAgentId: 'codex', memoryModel: 'gpt-4o-mini'
+      memoryEnabled: true, memoryAutoExtract: false, memoryAgentId: 'codex', memoryModel: 'gpt-4o-mini', decisionAgentId: 'codex', decisionModel: 'fast', responseAgentId: 'codex', responseModel: 'quality'
     })));
   });
 
@@ -805,4 +809,24 @@ describe('Bot 执行方式', () => {
     const leader = await screen.findByRole('combobox', { name: 'Leader Agent' }) as HTMLSelectElement;
     expect([...leader.options].map(option => option.textContent)).toEqual(['选择 Leader Agent', 'Codex', 'Claude', 'claude-trusted（不可用，请重选）']);
   });
+});
+
+it('preserves independent model drafts across unmount and submits explicit clears', async () => {
+  const user = userEvent.setup();
+  vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, decisionModel: 'old-fast', responseModel: 'old-quality' }], listeningDisabled: false });
+  vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+  const component = <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>;
+  const first = renderWithClient(component);
+  await screen.findByLabelText('群判定模型');
+  await user.clear(screen.getByLabelText('群判定模型'));
+  await user.clear(screen.getByLabelText('群回复模型'));
+  await user.type(screen.getByLabelText('群回复模型'), 'draft-quality');
+  first.unmount();
+  renderWithClient(component);
+  expect((await screen.findByLabelText('群判定模型') as HTMLInputElement).value).toBe('');
+  expect((screen.getByLabelText('群回复模型') as HTMLInputElement).value).toBe('draft-quality');
+  await user.click(screen.getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ decisionModel: '', responseModel: 'draft-quality' })));
 });

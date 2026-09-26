@@ -1,11 +1,12 @@
 import { performance } from 'node:perf_hooks';
 import { gzipSync } from 'node:zlib';
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { AgentEvent } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
+import { createTimelineProjector } from '../apps/web/src/timeline.js';
 import { buildApp } from '../apps/server/src/app.js';
-import { createEventWindow, mergeLiveEvent } from '../apps/web/src/event-history.js';
+import { createEventWindow, mergeLiveEvent, mergeReconciledEvents } from '../apps/web/src/event-history.js';
 
 const SESSION_ID = 'ses_benchmark_50k';
 const EVENT_COUNT = 50_000;
@@ -16,9 +17,9 @@ function event(sequence: number): AgentEvent {
     id: `evt_${sequence}`,
     sessionId: SESSION_ID,
     sequence,
-    type: sequence % 7 === 0 ? 'tool_result' : 'text',
+    type: sequence % 20 === 1 ? 'text' : sequence % 7 === 0 ? 'tool_result' : 'text',
     timestamp: new Date(1_700_000_000_000 + sequence).toISOString(),
-    data: { text: `event ${sequence}`, status: 'completed', taskId: `task_${Math.floor(sequence / 20)}` }
+    data: { role: sequence % 20 === 1 ? 'user' : 'assistant', text: `event ${sequence}`, status: 'completed', taskId: `task_${Math.floor(sequence / 20)}` }
   };
 }
 
@@ -71,6 +72,19 @@ async function main() {
     if (window.events.length !== EVENT_COUNT + index + 1 || window.events[0]?.sequence !== 1) throw new Error('client discarded earlier history during live updates');
   });
 
+  const loaded = createEventWindow(Array.from({ length: EVENT_COUNT }, (_, offset) => event(offset + 1)));
+  const page = Array.from({ length: 200 }, (_, offset) => event(EVENT_COUNT + offset + 1));
+  const reconcileP95Ms = await sample(40, () => { mergeReconciledEvents(loaded, page); });
+  const projector = createTimelineProjector();
+  const tasks: [] = [];
+  projector(loaded.events, tasks);
+  let derivedWindow = loaded;
+  const deriveP95Ms = await sample(40, index => {
+    const incoming = Array.from({ length: 200 }, (_, offset) => event(EVENT_COUNT + index * 200 + offset + 1));
+    const next = mergeReconciledEvents(derivedWindow, incoming);
+    projector(next.events, tasks, false, next);
+    derivedWindow = next;
+  });
   global.gc?.();
   const heapBefore = process.memoryUsage().heapUsed;
   for (let index = 0; index < 500; index++) {
@@ -81,18 +95,21 @@ async function main() {
   global.gc?.();
   const retainedHeapBytes = Math.max(0, process.memoryUsage().heapUsed - heapBefore);
 
-  const assets = resolve('apps/web/dist/assets');
-  const entry = (await readdir(assets)).find(name => /^index-.*\.js$/.test(name));
+  const html = await readFile(resolve('apps/web/dist/index.html'), 'utf8');
+  const entry = html.match(/<script[^>]+src="([^"]+\.js)"/)?.[1];
   if (!entry) throw new Error('Web entry bundle not found; run the production build first');
-  const entryGzipBytes = gzipSync(await readFile(resolve(assets, entry))).byteLength;
+  const entryGzipBytes = gzipSync(await readFile(resolve('apps/web/dist', entry.replace(/^\//, '')))).byteLength;
 
+  process.stdout.write(`${JSON.stringify({ eventCount: EVENT_COUNT, seedMs, firstScreenP95Ms, paginationP95Ms, incrementalP95Ms, retainedHeapBytes, entryGzipBytes, reconcileP95Ms, deriveP95Ms, budgets }, null, 2)}\n`);
+  assertBudget('200-event reconciliation p95', reconcileP95Ms, 20, 'ms');
+  assertBudget('200-event merge and projection p95', deriveP95Ms, 20, 'ms');
   assertBudget('first visible history p95', firstScreenP95Ms, budgets.firstScreenP95Ms, 'ms');
   assertBudget('history pagination p95', paginationP95Ms, budgets.paginationP95Ms, 'ms');
   assertBudget('incremental client update p95', incrementalP95Ms, budgets.incrementalP95Ms, 'ms');
   assertBudget('history soak retained heap', retainedHeapBytes, budgets.retainedHeapBytes, 'B');
   assertBudget('Web entry gzip', entryGzipBytes, budgets.entryGzipBytes, 'B');
 
-  process.stdout.write(`${JSON.stringify({ eventCount: EVENT_COUNT, seedMs, firstScreenP95Ms, paginationP95Ms, incrementalP95Ms, retainedHeapBytes, entryGzipBytes, budgets }, null, 2)}\n`);
+
   } finally {
     await app?.close();
     repos.close();

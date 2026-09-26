@@ -72,15 +72,14 @@ export async function getChatMode(
   appId: string,
   appSecret: string,
   chatId: string,
-  options: { forceRefresh?: boolean } = {}
+  options: { forceRefresh?: boolean; read?: () => Promise<{ code?: number; data?: unknown }> } = {}
 ): Promise<LarkChatMode> {
   if (!options.forceRefresh) {
     const cached = getCachedChatMode(appId, chatId);
     if (cached) return cached;
   }
   try {
-    const client = chatModeClient(appId, appSecret);
-    const response = await client.im.chat.get({
+    const response = options.read ? await options.read() : await chatModeClient(appId, appSecret).im.chat.get({
       path: { chat_id: chatId },
       params: { user_id_type: 'open_id' }
     }) as { code?: number; msg?: string; data?: unknown };

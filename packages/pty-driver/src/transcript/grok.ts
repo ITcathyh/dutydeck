@@ -243,7 +243,7 @@ export class GrokTranscriptTailer implements TranscriptEventSource {
   }
 
   start(): void { this.tailer.start(); }
-  flush(): void { this.tailer.flush(); }
+  flush(): Promise<void> { return this.tailer.flush(); }
   checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
   restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
   stop(): void { this.tailer.stop(); }

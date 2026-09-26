@@ -1,67 +1,64 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { __testOnly_resetLarkGate } from './api-gate.js';
 import { createLarkCardService } from './service.js';
 
-// contact SDK 调用（user.get / batchGetId）独立于 api-gate，瞬时错误就地重试。
-// 这里直接替换懒构造的 contactSdk()，避免触达真实飞书接口。
-
-const fakeAxiosError = (status: number | undefined, code?: number) => {
-  const err = new Error(status === undefined ? 'Network Error' : `Request failed with status ${status}`) as Error & {
-    isAxiosError: boolean;
-    response?: { status: number; data: { code: number } };
-  };
-  err.isAxiosError = true;
-  if (status !== undefined) err.response = { status, data: { code: code ?? status } };
-  return err;
-};
-
+const response = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
 const harness = () => {
-  const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'secret_test' });
-  const get = vi.fn();
-  const batchGetId = vi.fn();
-  vi.spyOn(service as any, 'contactSdk').mockReturnValue({
-    contact: { v3: { user: { get, batchGetId } } }
-  } as any);
-  return { service, get, batchGetId };
+  const contact = vi.fn();
+  const fetcher = vi.fn(async (url: string | URL | Request) => String(url).includes('/auth/')
+    ? response({ code: 0, tenant_access_token: 'synthetic' }) : contact(url));
+  const service = createLarkCardService({ LARK_APP_ID: 'cli_test', LARK_APP_SECRET: 'synthetic',
+    LARK_API_QPS: '1000', LARK_API_RETRY_MAX_ATTEMPTS: '1', LARK_API_RETRY_BASE_MS: '1' }, fetcher);
+  return { service, contact, fetcher };
 };
+afterEach(() => { __testOnly_resetLarkGate(); vi.restoreAllMocks(); });
 
-afterEach(() => vi.restoreAllMocks());
-
-describe('contact SDK 瞬时错误就地重试', () => {
-  it('user.get 首次 5xx、二次成功：重试后返回用户', async () => {
-    const { service, get } = harness();
-    get.mockRejectedValueOnce(fakeAxiosError(500))
-      .mockResolvedValueOnce({ code: 0, data: { user: { open_id: 'ou_1', union_id: 'on_1' } } });
+describe('contact lookups use the shared HTTP retry budget', () => {
+  it('retries a 5xx and returns both user identifiers', async () => {
+    const { service, contact } = harness();
+    contact.mockResolvedValueOnce(response({ code: 500 }, 500))
+      .mockResolvedValueOnce(response({ code: 0, data: { user: { open_id: 'ou_1', union_id: 'on_1' } } }));
     await expect(service.getContactUser('ou_1', 'open_id')).resolves.toEqual({ openId: 'ou_1', unionId: 'on_1' });
-    expect(get).toHaveBeenCalledTimes(2);
+    expect(contact).toHaveBeenCalledTimes(2);
+    expect(String(contact.mock.calls[0]![0])).toContain('/contact/v3/users/ou_1?user_id_type=open_id');
   });
 
-  it('user.get 网络错误（无 HTTP 状态）也重试', async () => {
-    const { service, get } = harness();
-    get.mockRejectedValueOnce(fakeAxiosError(undefined))
-      .mockResolvedValueOnce({ code: 0, data: { user: { open_id: 'ou_1' } } });
+  it('retries a network failure', async () => {
+    const { service, contact } = harness();
+    contact.mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(response({ code: 0, data: { user: { open_id: 'ou_1' } } }));
     await expect(service.getContactUser('ou_1', 'open_id')).resolves.toEqual({ openId: 'ou_1' });
-    expect(get).toHaveBeenCalledTimes(2);
+    expect(contact).toHaveBeenCalledTimes(2);
   });
 
-  it('user.get 确定性 4xx 不重试，直接归一化抛出业务码', async () => {
-    const { service, get } = harness();
-    get.mockRejectedValue(fakeAxiosError(403, 99992361));
-    await expect(service.getContactUser('ou_foreign', 'open_id')).rejects.toMatchObject({ code: 99992361 });
-    expect(get).toHaveBeenCalledTimes(1);
+  it('preserves definitive numeric business codes without retrying', async () => {
+    const { service, contact } = harness();
+    contact.mockResolvedValue(response({ code: 99992361, data: { reason: 'foreign' } }, 403));
+    await expect(service.getContactUser('ou_foreign', 'open_id')).rejects.toMatchObject({ code: 99992361, data: { reason: 'foreign' } });
+    expect(contact).toHaveBeenCalledTimes(1);
   });
 
-  it('batchGetId 首次只回瞬态业务码（不 throw）、二次成功：仍然重试', async () => {
-    const { service, batchGetId } = harness();
-    batchGetId.mockResolvedValueOnce({ code: 99991400, msg: 'gateway busy' })
-      .mockResolvedValueOnce({ code: 0, data: { user_list: [{ user_id: 'ou_2' }] } });
+  it('retries a transient business code and preserves batch request semantics', async () => {
+    const { service, contact, fetcher } = harness();
+    contact.mockResolvedValueOnce(response({ code: 99991400 }))
+      .mockResolvedValueOnce(response({ code: 0, data: { user_list: [{ user_id: 'ou_2' }] } }));
     await expect(service.batchGetIdByEmail('a@example.com')).resolves.toBe('ou_2');
-    expect(batchGetId).toHaveBeenCalledTimes(2);
+    expect(contact).toHaveBeenCalledTimes(2);
+    expect(String(contact.mock.calls[0]![0])).toContain('/contact/v3/users/batch_get_id?user_id_type=open_id');
+    expect(fetcher).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ body: JSON.stringify({ emails: ['a@example.com'], include_resigned: false }), signal: expect.any(AbortSignal) }));
   });
 
-  it('batchGetId 持续 5xx：重试耗尽后归一化抛出', async () => {
-    const { service, batchGetId } = harness();
-    batchGetId.mockRejectedValue(fakeAxiosError(503));
-    await expect(service.batchGetIdByMobile('13800000000')).rejects.toThrow();
-    expect(batchGetId).toHaveBeenCalledTimes(2);
+  it('stops after the configured budget on persistent 5xx', async () => {
+    const { service, contact } = harness();
+    contact.mockImplementation(async () => response({ code: 503 }, 503));
+    await expect(service.batchGetIdByMobile('13800000000')).rejects.toMatchObject({ code: 503 });
+    expect(contact).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns undefined for a clean missing user or empty batch', async () => {
+    const { service, contact } = harness();
+    contact.mockImplementation(async () => response({ code: 0, data: {} }));
+    await expect(service.getContactUser('ou_missing', 'union_id')).resolves.toBeUndefined();
+    await expect(service.batchGetIdByEmail('missing@example.com')).resolves.toBeUndefined();
   });
 });

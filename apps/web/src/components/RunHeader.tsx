@@ -35,9 +35,11 @@ function usageLabel(usage?: SessionUsage) {
   if (own.unavailable + subSteps.unavailable === entries) return { text: '本任务累计：无用量数据', detail: '此 Agent 不上报 token 与成本' };
   const usd = (value: number) => `$${value.toFixed(2)}`;
   const estimated = own.estimatedCostUsd + subSteps.estimatedCostUsd;
-  const extra = [subSteps.entries ? `含子步骤 ${usd(subSteps.costUsd)}` : '', estimated > 0 ? `含估算 ${usd(estimated)}` : ''].filter(Boolean).join('，');
+  const unknown = (own.unknownCostEntries ?? (own.unpriced ?? 0) + own.unavailable)
+    + (subSteps.unknownCostEntries ?? (subSteps.unpriced ?? 0) + subSteps.unavailable);
+  const extra = [unknown ? `另有 ${unknown} 次费用未知` : '', subSteps.entries ? `含子步骤 ${usd(subSteps.costUsd)}` : '', estimated > 0 ? `含估算 ${usd(estimated)}` : ''].filter(Boolean).join('，');
   const tokens = (key: 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheWriteTokens') => (own[key] + subSteps[key]).toLocaleString('zh-CN');
-  return { text: `本任务累计 ${usd(own.costUsd + subSteps.costUsd)}${extra ? `（${extra}）` : ''}`, detail: `输入 ${tokens('inputTokens')} · 输出 ${tokens('outputTokens')} · 缓存读 ${tokens('cacheReadTokens')} · 缓存写 ${tokens('cacheWriteTokens')} token` };
+  return { text: `本任务${unknown ? '已知费用' : '累计'} ${usd(own.costUsd + subSteps.costUsd)}${extra ? `（${extra}）` : ''}`, detail: `输入 ${tokens('inputTokens')} · 输出 ${tokens('outputTokens')} · 缓存读 ${tokens('cacheReadTokens')} · 缓存写 ${tokens('cacheWriteTokens')} token` };
 }
 
 export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, usage, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename }: {

@@ -6,19 +6,19 @@ const event = (sequence: number, text = String(sequence)): DockEvent => ({ id: `
 
 afterEach(() => vi.restoreAllMocks());
 
-describe('complete event history', () => {
-  it.each([0, 37, 1_205, 2_000])('automatically loads all %i events in order', async count => {
+describe('progressive event history', () => {
+  it.each([0, 37, 1_205, 2_000])('loads the tail of %i events in one request', async count => {
     const history = Array.from({ length: count }, (_, index) => event(index + 1));
     const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => history.filter(item => query?.before === undefined || item.sequence < query.before).slice(-query!.limit!));
     const result = await loadEventHistory('s1');
-    expect(result.events).toEqual(history);
-    expect(loader).toHaveBeenCalledTimes(Math.floor(count / 1_000) + 1);
-    expect(loader).toHaveBeenNthCalledWith(1, 's1', { before: undefined, limit: 1_000, direction: 'backward' }, undefined);
-    if (count > 1_000) expect(loader).toHaveBeenNthCalledWith(2, 's1', { before: count - 999, limit: 1_000, direction: 'backward' }, undefined);
+    expect(result.events).toEqual(history.slice(-200));
+    expect(result.hasOlder).toBe(count >= 200);
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(loader).toHaveBeenNthCalledWith(1, 's1', { limit: 200, direction: 'backward' }, undefined);
   });
 
-  it('rejects failed older pages instead of returning incomplete history', async () => {
-    vi.spyOn(api, 'events').mockResolvedValueOnce(Array.from({ length: 1_000 }, (_, index) => event(index + 201))).mockRejectedValueOnce(new Error('offline'));
+  it('rejects a failed tail request', async () => {
+    vi.spyOn(api, 'events').mockRejectedValueOnce(new Error('offline'));
     await expect(loadEventHistory('s1')).rejects.toThrow('offline');
   });
 

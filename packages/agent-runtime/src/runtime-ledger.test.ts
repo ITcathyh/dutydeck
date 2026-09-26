@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { PersistentEventPublisher } from './persistent-event-publisher.js';
+import { JsonlTailer } from '../../pty-driver/src/transcript/tail.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
@@ -62,6 +65,67 @@ async function fixture(options: RuntimeOptions = {}, onSend?: (emit: (event: Nor
 }
 
 describe('Runtime uses the execution ledger', () => {
+  it.each([false, true])('finishes an already completed send without replaying history (sync subscribe callback: %s)', async synchronous => {
+    const h = await fixture();
+    const envelope = request(h.session.id, 'already-completed');
+    const first = await h.runtime.send(h.session.id, envelope.prompt, envelope.prompt, undefined, undefined, [], envelope);
+    const highWaterMark = h.repos.events.highWaterMark(h.session.id);
+    const pages = vi.spyOn(h.repos.events, 'listWindow');
+    const watermark = vi.spyOn(h.repos.events, 'highWaterMark');
+    let removed = false;
+    const subscribe = PersistentEventPublisher.prototype.subscribe;
+    vi.spyOn(PersistentEventPublisher.prototype, 'subscribe').mockImplementation(function (id, listener, options) {
+      const unsubscribe = subscribe.call(this, id, listener, options);
+      if (synchronous) void listener({} as never);
+      return () => { removed = true; unsubscribe(); };
+    });
+    const replay = await h.runtime.send(h.session.id, envelope.prompt, envelope.prompt, undefined, undefined, [], envelope);
+    expect(replay.currentAttemptId).toBe(first.currentAttemptId);
+    expect(replay.status).toBe('completed');
+    expect(watermark).toHaveBeenCalledWith(h.session.id);
+    expect(pages.mock.calls.every(([, options]) => (options?.afterSequence ?? 0) >= highWaterMark)).toBe(true);
+    expect(removed).toBe(true);
+  });
+
+  it('resolves a queued send cancelled before its first Attempt', async () => {
+    const gate = deferred();
+    const h = await fixture({}, async () => { await gate.promise; });
+    cleanup.push(async () => { gate.resolve(); });
+    await h.runtime.dispatch(h.session.id, 'blocking');
+    await vi.waitFor(() => expect(h.sent).toEqual(['blocking']));
+    const waiting = h.runtime.send(h.session.id, 'cancel-me');
+    let taskId = '';
+    await vi.waitFor(async () => { taskId = (await h.runtime.getTasks(h.session.id)).find(task => task.prompt === 'cancel-me')!.id; });
+    await h.runtime.cancelQueued(h.session.id, taskId, 'installation_owner');
+    expect(await waiting).toMatchObject({ id: taskId, status: 'cancelled' });
+    expect(h.repos.execution.getTaskExecution(taskId)?.attempts).toEqual([]);
+  });
+
+  it('attributes a final multi-chunk transcript record to the original Attempt before completion', async () => {
+    const text = 'sanitized answer'.repeat(100_000);
+    let h: Awaited<ReturnType<typeof fixture>>;
+    h = await fixture({}, async (emit, prompt) => {
+      const path = join(h.directory, 'transcript.jsonl');
+      writeFileSync(path, '');
+      const tailer = new JsonlTailer({ resolvePath: () => path, mapEntry: entry => [{ type: 'text', data: { text: entry.text } }] });
+      tailer.onEvent(emit); tailer.start();
+      try {
+        await tailer.flush();
+        appendFileSync(path, JSON.stringify({ text: prompt === 'first' ? text : 'next' }) + '\n');
+        await tailer.flush();
+        emit({ type: 'completed', data: { stopReason: 'end_turn' } });
+      } finally { tailer.stop(); }
+    });
+    const first = await h.runtime.send(h.session.id, 'first');
+    const second = await h.runtime.send(h.session.id, 'second');
+    const events = await h.runtime.getEvents(h.session.id);
+    const result = events.find(event => event.type === 'text' && event.data.text === text)!;
+    const completed = events.find(event => event.type === 'completed' && event.attemptId === first.currentAttemptId)!;
+    expect(result.attemptId).toBe(first.currentAttemptId);
+    expect(result.sequence).toBeLessThan(completed.sequence);
+    expect(second.currentAttemptId).not.toBe(result.attemptId);
+  });
+
   it('rejects legacy before saving Agent config or obtaining a Runtime claim', async () => {
     const repos = createRepositories(':memory:'); const save = vi.spyOn(repos.agents, 'save'), attach = vi.spyOn(repos.control, 'attachRuntime');
     const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0 });

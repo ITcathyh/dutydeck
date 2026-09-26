@@ -13,7 +13,7 @@
  * 本模块不碰 runtime、不发卡片：coordinator 负责把命令与注入接到消息链路，
  * memory-tools 负责暴露给 Agent 的 HTTP/CLI 面。
  */
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
 import { relevance } from './text-relevance.js';
 import { redactTraceText } from './secret-redaction.js';
@@ -81,6 +81,8 @@ export interface LarkMemoryState {
   pendingTurns?: LarkMemoryPendingTurn[];
   lastExtractionAt?: string;
   lastConsolidationAt?: string;
+  lastConsolidationInputHash?: string;
+  lastConsolidationHash?: string;
   indexOverBudget?: boolean;
   /** 各类型最近一次失败的时间；退避只看自己这一类，成功后清除。lastRun 只代表最近一次运行。 */
   lastFailureAt?: { extraction?: string; consolidation?: string };
@@ -328,7 +330,12 @@ export type LarkMemoryBatchStep =
   | { op: 'remove'; id: string; deletedBy?: string }
   | { op: 'retopic'; id: string; topic: string };
 
-export interface LarkMemoryBatchResult { added: LarkMemoryEntry[]; removed: number; retopiced: number }
+export interface LarkMemoryBatchResult { added: LarkMemoryEntry[]; removed: number; retopiced: number; fingerprint?: string }
+
+/** Stable across list order; tombstones are not part of the consolidation input. */
+export function larkMemoryFingerprint(entries: LarkMemoryEntry[]): string {
+  return createHash('sha256').update(JSON.stringify(entries.filter(entry => !entry.deletedAt).slice().sort((a, b) => a.id.localeCompare(b.id)))).digest('hex');
+}
 
 export interface LarkMemoryStoreOptions {
   now?: () => Date;
@@ -439,10 +446,13 @@ export class LarkMemoryStore {
    * 整理必须原子生效：先 add 后 remove/retopic 分成多次 add/remove 调用的话，
    * 中途失败会留下「新条目已写入、旧条目还在」的半成品账本。
    */
-  async applyBatch(scope: LarkMemoryScope, steps: LarkMemoryBatchStep[]): Promise<LarkMemoryBatchResult> {
+  async applyBatch(scope: LarkMemoryScope, steps: LarkMemoryBatchStep[], options?: { expectedFingerprint: string }): Promise<LarkMemoryBatchResult> {
     if (!steps.length) return { added: [], removed: 0, retopiced: 0 };
     let result!: LarkMemoryBatchResult;
     await this.mutate(scope, entries => {
+      if (options && larkMemoryFingerprint(entries) !== options.expectedFingerprint) {
+        throw new LarkMemoryError('MEMORY_CONCURRENT_CHANGE', '整理期间记忆已更新，保留新内容等待下一轮整理。', 409);
+      }
       let current = entries;
       const added: LarkMemoryEntry[] = [];
       let removed = 0;
@@ -476,7 +486,7 @@ export class LarkMemoryStore {
           throw new LarkMemoryError('MEMORY_TOPIC_LIMIT_REACHED', `记忆主题已达 ${larkMemoryLimits.topics} 个上限，请复用现有主题或先整理。`, 409);
         }
       }
-      result = { added, removed, retopiced };
+      result = { added, removed, retopiced, ...(options ? { fingerprint: larkMemoryFingerprint(current) } : {}) };
       return current;
     });
     this.notifyChange(scope);
@@ -930,6 +940,8 @@ function parseLarkMemoryState(raw: string | undefined): LarkMemoryState {
         turnsSinceConsolidation: parsed.turnsSinceConsolidation,
         ...(Array.isArray(parsed.pendingTurns) ? { pendingTurns: parsed.pendingTurns } : {}),
         ...(parsed.lastExtractionAt ? { lastExtractionAt: parsed.lastExtractionAt } : {}),
+        ...(typeof parsed.lastConsolidationInputHash === 'string' ? { lastConsolidationInputHash: parsed.lastConsolidationInputHash } : {}),
+        ...(typeof parsed.lastConsolidationHash === 'string' ? { lastConsolidationHash: parsed.lastConsolidationHash } : {}),
         ...(parsed.lastConsolidationAt ? { lastConsolidationAt: parsed.lastConsolidationAt } : {}),
         ...(parsed.indexOverBudget !== undefined ? { indexOverBudget: parsed.indexOverBudget } : {}),
         ...(parsed.lastFailureAt ? { lastFailureAt: parsed.lastFailureAt } : {}),

@@ -50,7 +50,7 @@ import {
   createInstallationPrincipalResolver,
 } from './foundation-policy.js';
 import { WorkspaceOrganizationService } from './workspace-organization.js';
-import { parseUsagePricing, UsageLedger } from './usage-ledger.js';
+import { parseUsageBackgroundLimits, parseUsagePricing, UsageLedger } from './usage-ledger.js';
 
 export interface StartLocalServerOptions {
   configureCollaborationExtensions?: (extensions: CollaborationExtensions) => void;
@@ -250,6 +250,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const usageLedger = new UsageLedger({
     repositories: repos,
     pricing: parseUsagePricing(env.DUTYDECK_USAGE_PRICING_JSON),
+    backgroundLimits: parseUsageBackgroundLimits(env.DUTYDECK_USAGE_BACKGROUND_LIMITS_JSON),
     parentOf: async session => {
       const binding = session.source === 'work_item' ? await workItems.parentForSession(session.id) : await delegations.parentForSession(session.id);
       return binding ? { parentSessionId: binding.parentSessionId, ...(binding.parentTaskId ? { parentTaskId: binding.parentTaskId } : {}) } : undefined;
@@ -389,7 +390,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       workspaceRoot: config.databaseUrl === ':memory:' ? join(tmpdir(), 'dutydeck-decisions') : join(dirname(resolve(config.databaseUrl)), 'decisions'),
       client: bot => createLarkCardService(env, workbenchHttp.fetch, bot), configureExtensions: options.configureCollaborationExtensions,
       readMemory: scope => readCollaborationMemory(scope),
-      usageRefusal: scope => usageLedger.refusal(scope.appId, scope.chatId),
+      usageRefusal: async scope => await usageLedger.refusal(scope.appId, scope.chatId)
+        ?? await usageLedger.automaticRefusal(scope.appId),
       listeningDisabled: env.DUTYDECK_DISABLE_LARK_LISTENER === 'true',
       log: { warn: (details, message) => app?.log.warn(details, message) } });
     setupCleanup.push(() => collaboration?.close());
@@ -443,6 +445,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         bootstrap: scope => collaboration!.participation.bootstrap(scope), prepareSettings: (scope, patch) => collaboration!.prepareSettings(scope, patch), onChange: scope => collaboration!.onChange(scope) },
       system: { directoryRoots: async () => [...config.agents.map(agent => agent.cwd).filter((cwd): cwd is string => Boolean(cwd)), ...(await readLarkConfigs(repos.config)).map(bot => bot.workspace).filter((cwd): cwd is string => Boolean(cwd))] },
       lark: {
+        fetcher: workbenchHttp.fetch,
         participation: collaboration.participation,
         usage: usageLedger,
         automation,

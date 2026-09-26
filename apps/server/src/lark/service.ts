@@ -1,8 +1,9 @@
 import { readFile } from 'node:fs/promises';
-import * as lark from '@larksuiteoapi/node-sdk';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import type { LifecycleFetch } from '../workbench-fetch.js';
 import type { PermissionMode } from '@dutydeck/shared';
-import { larkErrorCode, type ContactIdType, type ContactUser } from './owner-identity.js';
-import { executeWithLarkGate, isRetryableLarkError, LarkCircuitOpenError } from './api-gate.js';
+import type { ContactIdType, ContactUser } from './owner-identity.js';
+import { executeWithLarkGate, resolveLarkGateConfig, LarkCircuitOpenError } from './api-gate.js';
 import { buildLarkCardActions, buildLarkCardDetailButton, buildLarkCardFollowUpActions, safeLarkWebUrl, type LarkCardCapabilities } from './card-actions.js';
 import { larkSessionDetailUrl } from './detail-link.js';
 
@@ -1098,10 +1099,39 @@ type Fetch = typeof globalThis.fetch;
 export class LarkCardService {
   private token?: string;
   private tokenExpiresAt = 0;
+  private readonly lifecycle = new AbortController();
+  private readonly requests = new AsyncLocalStorage<{ signal: AbortSignal; remaining: number }>();
   private loadingImageKey?: string;
   private loadingImagePromise?: Promise<string | undefined>;
 
   constructor(private readonly config: LarkBotConfig, private readonly fetcher: Fetch = globalThis.fetch) {}
+
+  close(): void { this.lifecycle.abort(new DOMException('Lark service is closed', 'AbortError')); }
+
+  /** Authentication and business retries share one deadline and failed-attempt budget. */
+  withRequestBudget<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    const current = this.requests.getStore();
+    if (current) { current.signal.throwIfAborted(); return operation(current.signal); }
+    const configured = Number(this.config.env?.LARK_API_REQUEST_TIMEOUT_MS ?? process.env.LARK_API_REQUEST_TIMEOUT_MS);
+    const timeoutMs = Number.isFinite(configured) && configured > 0 ? configured : 15_000;
+    const signals = [this.lifecycle.signal, AbortSignal.timeout(timeoutMs)];
+    const inherited = (this.fetcher as LifecycleFetch).signal;
+    if (inherited) signals.push(inherited);
+    const signal = AbortSignal.any(signals);
+    signal.throwIfAborted();
+    return this.requests.run({ signal, remaining: resolveLarkGateConfig(this.config.env).retryMaxAttempts + 1 }, () => operation(signal));
+  }
+
+  private async fetch(input: string, init: RequestInit): Promise<Response> {
+    const context = this.requests.getStore()!;
+    context.signal.throwIfAborted();
+    if (context.remaining <= 0) throw new LarkServiceError('LARK_REQUEST_BUDGET_EXHAUSTED', '飞书请求的总尝试预算已用尽，等待持久化对账重投。', 503);
+    try { return await this.fetcher(input, { ...init, signal: context.signal }); }
+    catch (error) {
+      context.signal.throwIfAborted();
+      throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark OpenAPI request failed: ${error instanceof Error ? error.message : String(error)}`, 502);
+    }
+  }
 
   private async cardInput<T extends LarkCardInput>(input: T): Promise<T> {
     if ((input.state ?? 'running') !== 'running') return input;
@@ -1117,11 +1147,8 @@ export class LarkCardService {
         const form = new FormData();
         form.append('image_type', 'message');
         form.append('image', new Blob([await readFile(new URL('./assets/dutydeck-bouncing-ball.webp', import.meta.url))], { type: 'image/webp' }), 'dutydeck-bouncing-ball.webp');
-        const response = await this.fetcher(`${this.config.baseUrl}/open-apis/im/v1/images`, {
-          method: 'POST', headers: { authorization: `Bearer ${await this.tenantToken()}` }, body: form
-        });
-        const payload: any = await response.json();
-        if (!response.ok || Number(payload.code ?? 0) !== 0 || !payload.data?.image_key) return undefined;
+        const payload = await this.request('/open-apis/im/v1/images', { form, retry: false });
+        if (!payload.data?.image_key) return undefined;
         this.loadingImageKey = String(payload.data.image_key);
         return this.loadingImageKey;
       } catch { return undefined; }
@@ -1130,53 +1157,59 @@ export class LarkCardService {
   }
 
   async send(input: LarkSendInput): Promise<LarkMessageResult> {
-    if (input.chatId && input.receiveId) throw new LarkServiceError('CONFLICTING_RECIPIENTS', 'chatId and receiveId cannot be used together', 400);
-    const chatId = input.chatId?.trim();
-    if (chatId && !chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
-    const receiveId = required(chatId ?? input.receiveId ?? this.config.defaultReceiveId, 'chatId, receiveId, LARK_CHAT_ID, or LARK_RECEIVE_ID');
-    const resolvedReceiveIdType = receiveIdType(chatId ? 'chat_id' : input.receiveIdType ?? this.config.defaultReceiveIdType);
-    const cardInput = await this.cardInput(input);
-    const payload = await this.request(`/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(resolvedReceiveIdType)}`, {
-      body: {
-        receive_id: receiveId,
-        msg_type: 'interactive',
-        content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
-        ...(input.idempotencyKey?.trim() ? { uuid: input.idempotencyKey.trim() } : {})
-      }
+    return this.withRequestBudget(async () => {
+      if (input.chatId && input.receiveId) throw new LarkServiceError('CONFLICTING_RECIPIENTS', 'chatId and receiveId cannot be used together', 400);
+      const chatId = input.chatId?.trim();
+      if (chatId && !chatId.startsWith('oc_')) throw new LarkServiceError('INVALID_CHAT_ID', 'chatId must start with oc_', 400);
+      const receiveId = required(chatId ?? input.receiveId ?? this.config.defaultReceiveId, 'chatId, receiveId, LARK_CHAT_ID, or LARK_RECEIVE_ID');
+      const resolvedReceiveIdType = receiveIdType(chatId ? 'chat_id' : input.receiveIdType ?? this.config.defaultReceiveIdType);
+      const cardInput = await this.cardInput(input);
+      const payload = await this.request(`/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(resolvedReceiveIdType)}`, {
+        body: {
+          receive_id: receiveId,
+          msg_type: 'interactive',
+          content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
+          ...(input.idempotencyKey?.trim() ? { uuid: input.idempotencyKey.trim() } : {})
+        }
+      });
+      const messageId = payload.data?.message_id;
+      if (!messageId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
+      return { messageId, chatId: payload.data?.chat_id };
     });
-    const messageId = payload.data?.message_id;
-    if (!messageId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark send response did not include message_id', 502);
-    return { messageId, chatId: payload.data?.chat_id };
   }
 
   async reply(input: LarkReplyInput): Promise<LarkMessageResult> {
-    const messageId = required(input.messageId, 'messageId');
-    const cardInput = await this.cardInput(input);
-    // messageId 必须是 om_* 消息 ID；话题回复通过 reply_in_thread 显式声明，不能把 omt_* thread_id 当成 messageId。
-    // 话题根锚点：飞书 im.v1.message.reply 只接受 path 的 message_id + reply_in_thread 布尔，没有独立的
-    // root 锚点参数——话题锚定由 path 的 message_id 决定。replyInThread=true 且带 replyRootId（话题根
-    // 消息 om_*）时，用 replyRootId 作为 path 锚点，让卡片落在话题根下；否则回落到触发消息 messageId。
-    const threadAnchor = input.replyInThread && input.replyRootId?.trim() ? input.replyRootId.trim() : messageId;
-    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
-      body: {
-        msg_type: 'interactive',
-        content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
-        ...(input.replyInThread ? { reply_in_thread: true } : {}),
-        ...(input.idempotencyKey?.trim() ? { uuid: input.idempotencyKey.trim() } : {})
-      }
+    return this.withRequestBudget(async () => {
+      const messageId = required(input.messageId, 'messageId');
+      const cardInput = await this.cardInput(input);
+      // messageId 必须是 om_* 消息 ID；话题回复通过 reply_in_thread 显式声明，不能把 omt_* thread_id 当成 messageId。
+      // 话题根锚点：飞书 im.v1.message.reply 只接受 path 的 message_id + reply_in_thread 布尔，没有独立的
+      // root 锚点参数——话题锚定由 path 的 message_id 决定。replyInThread=true 且带 replyRootId（话题根
+      // 消息 om_*）时，用 replyRootId 作为 path 锚点，让卡片落在话题根下；否则回落到触发消息 messageId。
+      const threadAnchor = input.replyInThread && input.replyRootId?.trim() ? input.replyRootId.trim() : messageId;
+      const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(threadAnchor)}/reply`, {
+        body: {
+          msg_type: 'interactive',
+          content: JSON.stringify(buildLarkCard({ ...cardInput, agentName: input.agentName ?? this.config.defaultAgentName })),
+          ...(input.replyInThread ? { reply_in_thread: true } : {}),
+          ...(input.idempotencyKey?.trim() ? { uuid: input.idempotencyKey.trim() } : {})
+        }
+      });
+      const replyId = payload.data?.message_id;
+      if (!replyId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reply response did not include message_id', 502);
+      return { messageId: replyId, chatId: payload.data?.chat_id };
     });
-    const replyId = payload.data?.message_id;
-    if (!replyId) throw new LarkServiceError('INVALID_LARK_RESPONSE', 'Lark reply response did not include message_id', 502);
-    return { messageId: replyId, chatId: payload.data?.chat_id };
   }
 
   async update(input: LarkUpdateInput): Promise<LarkMessageResult> {
-    const messageId = required(input.messageId, 'messageId');
-    const cardInput = await this.cardInput(input);
-    const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
-      method: 'PATCH', body: { content: JSON.stringify(buildLarkCard({ ...cardInput, taskId: input.taskId ?? messageId, agentName: input.agentName ?? this.config.defaultAgentName })) }
+    return this.withRequestBudget(async () => {
+      const messageId = required(input.messageId, 'messageId');
+      const cardInput = await this.cardInput(input);
+      const payload = await this.request(`/open-apis/im/v1/messages/${encodeURIComponent(messageId)}`, {
+        method: 'PATCH', body: { content: JSON.stringify(buildLarkCard({ ...cardInput, taskId: input.taskId ?? messageId, agentName: input.agentName ?? this.config.defaultAgentName })) }
+      });
+      return { messageId: payload.data?.message_id || messageId, chatId: payload.data?.chat_id };
     });
-    return { messageId: payload.data?.message_id || messageId, chatId: payload.data?.chat_id };
   }
 
   async listChats(pageToken?: string, sortType: LarkChatSortType = 'ByActiveTimeDesc'): Promise<LarkChatsResult> {
@@ -1556,27 +1589,29 @@ export class LarkCardService {
   async downloadMessageResource(messageId: string, fileKey: string, type: 'image' | 'file'): Promise<LarkMessageResourceResult> {
     const resolvedMessageId = required(messageId, 'messageId');
     const resolvedFileKey = required(fileKey, 'fileKey');
-    let response: Response;
-    try {
-      response = await this.fetcher(`${this.config.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}/resources/${encodeURIComponent(resolvedFileKey)}?type=${type}`, {
-        method: 'GET', headers: { authorization: `Bearer ${await this.tenantToken()}` }
-      });
-    } catch (error) {
-      throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark message resource download failed: ${error instanceof Error ? error.message : String(error)}`, 502);
-    }
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({})) as any;
-      const message = payload.msg || payload.message || `${response.status} ${response.statusText}`;
-      const violation = Array.isArray(payload.error?.permission_violations) ? payload.error.permission_violations[0] : undefined;
-      const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
-      throw new LarkServiceError('LARK_RESOURCE_DOWNLOAD_FAILED', `Lark message resource download failed: ${message} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
-        upstreamCode: payload.code,
-        ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
-        ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
-      });
-    }
-    const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || undefined;
-    return { data: new Uint8Array(await response.arrayBuffer()), ...(contentType ? { contentType } : {}) };
+    return this.withRequestBudget(async signal => {
+      const token = await this.tenantToken();
+      return executeWithLarkGate(this.config.appId, 'GET message resource', async () => {
+        const response = await this.fetch(`${this.config.baseUrl}/open-apis/im/v1/messages/${encodeURIComponent(resolvedMessageId)}/resources/${encodeURIComponent(resolvedFileKey)}?type=${type}`, {
+          method: 'GET', headers: { authorization: `Bearer ${token}` }
+        });
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({})) as any;
+          signal.throwIfAborted();
+          const violation = Array.isArray(payload.error?.permission_violations) ? payload.error.permission_violations[0] : undefined;
+          const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
+          throw new LarkServiceError('LARK_RESOURCE_DOWNLOAD_FAILED', `Lark message resource download failed: ${payload.msg || response.statusText} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
+            upstreamCode: payload.code, upstreamHttpStatus: response.status,
+            ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
+            ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
+          });
+        }
+        const contentType = response.headers.get('content-type')?.split(';')[0]?.trim() || undefined;
+        const data = new Uint8Array(await response.arrayBuffer());
+        signal.throwIfAborted();
+        return { data, ...(contentType ? { contentType } : {}) };
+      }, { env: this.config.env, signal, canRetry: () => this.requests.getStore()!.remaining > 0, onFailure: () => { this.requests.getStore()!.remaining--; } });
+    });
   }
 
   async readDocument(urlInput: string): Promise<{ url: string; title?: string; text: string; links: string[]; linkTitles: Array<{ url: string; title: string }>; linkError?: string }> {
@@ -1766,71 +1801,15 @@ export class LarkCardService {
     return { verified: true, sampleOpenId, sampleEmails: [email] };
   }
 
-  /**
-   * 联系人查询（owner-identity 边界用）。与卡片/消息方法走同一套 raw-fetch + token
-   * 管理不同，这里用 SDK Client，因为它的错误形态（Axios throw / 业务 code 非零）
-   * 正是 owner-identity 的 definitive-miss 判定所依赖的。SDK Client 懒构造、复用
-   * token 缓存。domain 直接用 config.baseUrl（feishu/lark 品牌已由 baseUrl 区分）。
-   */
-  private contactClient?: lark.Client;
-  private contactSdk(): lark.Client {
-    if (!this.contactClient) {
-      this.contactClient = new lark.Client({
-        appId: this.config.appId,
-        appSecret: this.config.appSecret,
-        domain: this.config.baseUrl,
-        disableTokenCache: false
-      });
-    }
-    return this.contactClient;
-  }
-
-  /**
-   * 把 SDK 抛出的错误归一化成 { code, data } 形态，让 owner-identity 的
-   * larkErrorCode 能从 err.code / err.data.code / err.response.data.code 三处
-   * 挖到数字码。挖不到码（纯网络错误）时 code 为 undefined，调用方按
-   * inconclusive 处理。
-   */
-  private static normalizeContactError(err: unknown): never {
-    const code = larkErrorCode(err);
-    const data = (err as { response?: { data?: unknown }; data?: unknown } | null | undefined)?.response?.data
-      ?? (err as { data?: unknown } | null | undefined)?.data;
-    throw Object.assign(
-      new Error(`Lark contact API failed (code: ${code ?? 'unknown'})`),
-      { code, ...(data !== undefined ? { data } : {}) }
-    );
-  }
-
-  /**
-   * contact SDK 调用不经过 api-gate（它复用自己的 token 缓存与 axios 栈），
-   * 因此在这里就地补一次瞬时错误重试：
-   *   - SDK throw 的 axios 错误：网络错误 / 429 / 5xx / 网关抖动码可重试，其余立即归一化抛出；
-   *   - SDK 不 throw 只回非零 code：瞬态业务码（频控/抖动）可重试，耗尽后原样返回，
-   *     由调用方按原有文案抛业务错误。
-   * 重试判定必须在 normalizeContactError 之前，归一化会剥掉纯网络错误的 axios 特征。
-   */
-  private static async callContactSdk<T extends { code?: number; data?: unknown }>(op: () => Promise<T>): Promise<T> {
-    const maxAttempts = 2;
-    const sleep = (attempt: number) => new Promise<void>(resolve => {
-      setTimeout(resolve, (process.env.NODE_ENV === 'test' ? 1 : 500) * attempt);
-    });
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        const res = await op();
-        const code = Number(res.code ?? 0);
-        if (code !== 0 && attempt < maxAttempts
-          && isRetryableLarkError(Object.assign(new Error(`(code: ${code})`), { code }))) {
-          await sleep(attempt);
-          continue;
-        }
-        return res;
-      } catch (err) {
-        if (attempt < maxAttempts && isRetryableLarkError(err)) {
-          await sleep(attempt);
-          continue;
-        }
-        LarkCardService.normalizeContactError(err);
+  /** Preserve the contact lookup's numeric-code contract while using the common HTTP path. */
+  private async contactRequest(path: string, options: { method?: string; body?: unknown }) {
+    try { return await this.request(path, options); }
+    catch (error) {
+      if (error instanceof LarkServiceError && error.code === 'LARK_OPENAPI_ERROR') {
+        const code = Number(error.details?.upstreamCode);
+        throw Object.assign(new Error(error.message), { code: Number.isFinite(code) ? code : undefined, data: error.details?.upstreamData });
       }
+      throw error;
     }
   }
 
@@ -1841,10 +1820,7 @@ export class LarkCardService {
    */
   async getContactUser(id: string, idType: ContactIdType): Promise<ContactUser | undefined> {
     const userId = required(id, 'id');
-    const res = await LarkCardService.callContactSdk(() => this.contactSdk().contact.v3.user.get({
-      path: { user_id: userId },
-      params: { user_id_type: idType }
-    }));
+    const res = await this.contactRequest(`/open-apis/contact/v3/users/${encodeURIComponent(userId)}?user_id_type=${idType}`, { method: 'GET' });
     const code = Number(res?.code ?? 0);
     if (code !== 0) {
       throw Object.assign(new Error(`Lark contact user.get failed (code: ${code})`), { code, data: res?.data });
@@ -1868,10 +1844,7 @@ export class LarkCardService {
   }
 
   private async batchGetId(key: { emails?: string[]; mobiles?: string[] }): Promise<string | undefined> {
-    const res: { code?: number; data?: { user_list?: Array<{ user_id?: string }> } } = await LarkCardService.callContactSdk(() => this.contactSdk().contact.v3.user.batchGetId({
-      params: { user_id_type: 'open_id' },
-      data: { ...key, include_resigned: false }
-    }));
+    const res: { code?: number; data?: { user_list?: Array<{ user_id?: string }> } } = await this.contactRequest('/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id', { body: { ...key, include_resigned: false } });
     const code = Number(res?.code ?? 0);
     if (code !== 0) {
       throw Object.assign(new Error(`Lark contact batchGetId failed (code: ${code})`), { code, data: res?.data });
@@ -1892,55 +1865,45 @@ export class LarkCardService {
     return this.token;
   }
 
-  private async request(path: string, options: { method?: string; body?: unknown; token?: boolean }) {
-    const headers: Record<string, string> = { 'content-type': 'application/json; charset=utf-8' };
-    // token 必须在网关之外解析：tenantToken() 自身就走 request()，若放在 gate 内部
-    // 会形成嵌套调用——一次业务请求消耗两个令牌，且鉴权请求的重试会与业务请求的
-    // 重试相乘。鉴权自身是低频且带缓存的，不需要限流。
-    if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken()}`;
-    // 所有出网 JSON 调用（卡片创建/更新、消息发送、reaction、通讯录）都经由此处，
-    // 因此在这里收口 per-appId 限流：N 个并发会话的卡片心跳不再能合计打爆 app 配额。
-    // 熔断快速失败要转成 LarkServiceError：routes.ts 有 8 处按 instanceof LarkServiceError
-    // 决定 HTTP 状态码，不转换会让熔断退化成一个语义不明的 500。
-    try {
-      return await executeWithLarkGate(this.config.appId, `${options.method ?? 'POST'} ${path.split('?')[0]}`, async () => {
-      let response: Response;
+  private request(path: string, options: { method?: string; body?: unknown; token?: boolean; form?: FormData; retry?: boolean }) {
+    return this.withRequestBudget(async signal => {
+      const headers: Record<string, string> = options.form ? {} : { 'content-type': 'application/json; charset=utf-8' };
+      if (options.token !== false) headers.authorization = `Bearer ${await this.tenantToken()}`;
       try {
-        response = await this.fetcher(`${this.config.baseUrl}${path}`, {
-          method: options.method ?? 'POST', headers, ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) })        });
+        return await executeWithLarkGate(this.config.appId, `${options.method ?? 'POST'} ${path.split('?')[0]}`, async () => {
+          const response = await this.fetch(`${this.config.baseUrl}${path}`, {
+            method: options.method ?? 'POST', headers,
+            ...(options.form ? { body: options.form } : options.body === undefined ? {} : { body: JSON.stringify(options.body) })
+          });
+          if (!response) throw new LarkServiceError('LARK_NETWORK_ERROR', 'Lark OpenAPI request returned no response', 502);
+          const payload = await response.json().catch(error => { signal.throwIfAborted(); if (error instanceof SyntaxError) return {}; throw error; }) as any;
+          signal.throwIfAborted();
+          if (!response.ok || payload.code !== 0) {
+            const message = payload.msg || payload.message || `${response.status} ${response.statusText}`;
+            const violation = Array.isArray(payload.error?.permission_violations) ? payload.error.permission_violations[0] : undefined;
+            const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
+            const retryAfterMs = retryAfterMsFromHeaders(response.headers);
+            throw new LarkServiceError('LARK_OPENAPI_ERROR', `Lark OpenAPI request failed: ${message} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
+              upstreamCode: payload.code, upstreamHttpStatus: response.status, upstreamData: payload.data,
+              ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
+              ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
+              ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
+            });
+          }
+          return payload;
+        }, { env: options.retry === false ? { ...this.config.env, LARK_API_RETRY_MAX_ATTEMPTS: '0' } : this.config.env, signal,
+          canRetry: () => this.requests.getStore()!.remaining > 0,
+          onFailure: () => { if (options.retry !== false) this.requests.getStore()!.remaining--; } });
       } catch (error) {
-        throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark OpenAPI request failed: ${error instanceof Error ? error.message : String(error)}`, 502);
+        if (this.requests.getStore()!.remaining <= 0 && error instanceof Error) Object.assign(error, { larkRequestExhausted: true });
+        if (error instanceof LarkCircuitOpenError) {
+          throw new LarkServiceError('LARK_CIRCUIT_OPEN', '飞书 OpenAPI 连续失败已触发熔断，暂时停止外发请求。请稍后重试，或检查机器人凭据与网络连通性。', 503, {
+            appId: error.appId, openedAt: new Date(error.openedAt).toISOString()
+          });
+        }
+        throw error;
       }
-      if (!response) throw new LarkServiceError('LARK_NETWORK_ERROR', 'Lark OpenAPI request returned no response', 502);
-      const payload = await response.json().catch(() => ({})) as any;
-      if (!response.ok || payload.code !== 0) {
-        const message = payload.msg || payload.message || `${response.status} ${response.statusText}`;
-        const violation = Array.isArray(payload.error?.permission_violations) ? payload.error.permission_violations[0] : undefined;
-        const consoleUrl = payload.error?.console_url ?? payload.console_url ?? violation?.url;
-        // 网关按 retryAfterMs 决定退避时长：飞书用 Retry-After / x-ogw-ratelimit-reset
-        // （单位秒）告知需要等多久，丢掉它就只能盲目指数退避。
-        const retryAfterMs = retryAfterMsFromHeaders(response.headers);
-        throw new LarkServiceError('LARK_OPENAPI_ERROR', `Lark OpenAPI request failed: ${message} (code: ${payload.code ?? 'HTTP_ERROR'})`, 502, {
-          upstreamCode: payload.code,
-          upstreamHttpStatus: response.status,
-          ...(retryAfterMs !== undefined ? { retryAfterMs } : {}),
-          ...(consoleUrl ? { consoleUrl: String(consoleUrl) } : {}),
-          ...(payload.error?.permission_violations ? { permissionViolations: payload.error.permission_violations } : {})
-        });
-      }
-      return payload;
-      }, this.config.env ? { env: this.config.env } : undefined);
-    } catch (error) {
-      // 熔断跳闸期间请求未触达网络。转成 503（Service Unavailable）+ 可操作的中文说明，
-      // 让 routes.ts 现有的 instanceof 分支能给出正确状态码，也让上层日志看得懂原因。
-      if (error instanceof LarkCircuitOpenError) {
-        throw new LarkServiceError('LARK_CIRCUIT_OPEN', `飞书 OpenAPI 连续失败已触发熔断，暂时停止外发请求。请稍后重试，或检查机器人凭据与网络连通性。`, 503, {
-          appId: error.appId,
-          openedAt: new Date(error.openedAt).toISOString()
-        });
-      }
-      throw error;
-    }
+    });
   }
 
   /**
@@ -1951,14 +1914,8 @@ export class LarkCardService {
     return await this.request(path, options);
   }
 
-  private async requestForm(path: string, form: FormData) {
-    let response: Response;
-    try {
-      response = await this.fetcher(`${this.config.baseUrl}${path}`, { method: 'POST', headers: { authorization: `Bearer ${await this.tenantToken()}` }, body: form });
-    } catch (error) { throw new LarkServiceError('LARK_NETWORK_ERROR', `Lark OpenAPI request failed: ${error instanceof Error ? error.message : String(error)}`, 502); }
-    const payload = await response.json().catch(() => ({})) as any;
-    if (!response.ok || payload.code !== 0) throw new LarkServiceError('LARK_OPENAPI_ERROR', `Lark OpenAPI request failed: ${payload.msg || response.statusText}`, 502, { upstreamCode: payload.code, upstreamHttpStatus: response.status });
-    return payload;
+  private requestForm(path: string, form: FormData) {
+    return this.request(path, { form });
   }
 }
 

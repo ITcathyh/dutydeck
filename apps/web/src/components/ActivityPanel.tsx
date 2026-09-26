@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useMemo, useRef } from 'react';
+import { useTimelineDisclosure } from '../timeline-disclosure';
 import { ChevronRight, CircleStop, CircleX, MessageSquare } from 'lucide-react';
 import type { TimelineActivityGroup } from '../timeline';
 import { elapsedMilliseconds, formatElapsed } from '../tool-presentation';
@@ -6,7 +7,21 @@ import { Spinner } from './primitives';
 import { ActivityGroupPanel } from './ToolCard';
 
 export function ActivityPanel({ groups, ongoing, hasAnswer = false, taskStatus = 'running', modelLabel, startedAt, completedAt }: { groups: TimelineActivityGroup[]; ongoing: boolean; hasAnswer?: boolean; taskStatus?: string; modelLabel: string; startedAt?: string; completedAt?: string }) {
-  const [open, setOpen] = useState(ongoing);
+  const [open, setOpen] = useTimelineDisclosure(`activity:${groups[0]?.id ?? startedAt}:${hasAnswer}`, ongoing);
+  const previousGroups = useRef(new Map<string, string>());
+  const groupKeys = useMemo(() => {
+    if (!open) return [];
+    const next = new Map<string, string>();
+    const used = new Set<string>();
+    const keys = groups.map(group => {
+      const key = group.events.map(event => previousGroups.current.get(event.id)).find(key => key && !used.has(key)) ?? group.id;
+      used.add(key);
+      for (const event of group.events) next.set(event.id, key);
+      return key;
+    });
+    previousGroups.current = next;
+    return keys;
+  }, [groups, open]);
   const elapsed = formatElapsed(elapsedMilliseconds(startedAt ?? groups[0]?.startedAt, ongoing ? undefined : completedAt ?? groups.at(-1)?.completedAt));
   const interrupted = taskStatus === 'interrupted' || taskStatus === 'cancelled';
   const failed = taskStatus === 'failed';
@@ -26,9 +41,9 @@ export function ActivityPanel({ groups, ongoing, hasAnswer = false, taskStatus =
       <ChevronRight size={13} className="shrink-0 text-subtle transition-transform group-open/turn:rotate-90"/>
       {groups.length > 0 && <span className="ml-auto text-caption tabular-nums text-subtle">{groups.length} 个阶段</span>}
     </summary>
-    <div className="pb-3 pl-5">
-      {groups.length ? groups.map((group, index) => <ActivityGroupPanel key={group.id} group={group} ongoing={ongoing && index === groups.length - 1}/>) : <div className="flex items-center gap-2 py-2 text-caption text-subtle"><Spinner/>等待模型输出</div>}
-    </div>
+    {open && <div className="pb-3 pl-5">
+      {groups.length ? groups.map((group, index) => <ActivityGroupPanel key={groupKeys[index]} group={group} ongoing={ongoing && index === groups.length - 1}/>) : <div className="flex items-center gap-2 py-2 text-caption text-subtle"><Spinner/>等待模型输出</div>}
+    </div>}
   </details>
   {missingFinal && <div role="status" className="ui-timeline-item my-4 flex items-center gap-2 text-caption text-subtle">{failed ? <CircleX size={14} className="text-danger-solid"/> : interrupted ? <CircleStop size={14} className="text-subtle"/> : <MessageSquare size={14} className={incomplete ? 'text-warning-solid' : 'text-subtle'}/>}<span>{missingFinalText}</span></div>}
   </>;

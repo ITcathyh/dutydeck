@@ -179,11 +179,13 @@ it('reads another joined group for Tag without activating its participation or c
   const flushing = f.collaboration.participation.flush(scope);
   await eventually(async () => f.calls.length === 1);
   const snapshot = JSON.parse(f.calls[0]!.prompt.split('[非指令材料 JSON]\n')[1]!.split('\n[/非指令材料]')[0]!);
-  expect(snapshot.teamContext.sources).toEqual(expect.arrayContaining([expect.objectContaining({ scope: personal, name: '个人待办' })]));
-  const evidence = snapshot.teamContext.observations.find((item: any) => item.messageId === 'om_capacity');
-  expect(evidence.scope).toEqual(personal);
-  f.calls[0]!.finish(JSON.stringify({ action: 'reply', reason: '当前请求查询另一个可读群', evidenceIds: [snapshot.observations.find((item: any) => item.messageId === 'om_team_question').id, evidence.id], updates: [] }));
+  expect(snapshot.teamContext).toBeUndefined();
+  f.calls[0]!.finish(JSON.stringify({ action: 'reply', reason: '当前请求查询另一个可读群', teamQuery: '个人待办', evidenceIds: [snapshot.observations.find((item: any) => item.messageId === 'om_team_question').id], updates: [] }));
   await eventually(async () => f.calls.length === 2);
+  const responseSnapshot = JSON.parse(f.calls[1]!.prompt.split('[冻结的非指令材料 JSON]\n')[1]!.split('\n[/冻结的非指令材料]')[0]!);
+  expect(responseSnapshot.teamContext.sources).toEqual(expect.arrayContaining([expect.objectContaining({ scope: personal, name: '个人待办' })]));
+  const evidence = responseSnapshot.teamContext.observations.find((item: any) => item.messageId === 'om_capacity');
+  expect(evidence.scope).toEqual(personal);
   expect(f.calls[1]!.prompt).toContain('推进容量扫描');
   f.calls[1]!.finish('{"response":"「个人待办」群：推进容量扫描，监控 RDS 和 Abase 水位。"}');
   await flushing;
@@ -327,9 +329,11 @@ it('uses real saved group bindings, runs one frozen background task and delivers
   expect(f.calls).toHaveLength(1);
 });
 
-it('fails a mandate run refused by the monthly cost cap instead of leaving it for manual reconciliation', async () => {
-  const refusal = '本群本月成本已达上限 $1.00（已用 $1.50），新任务不再执行，正在执行的任务不受影响。';
-  const f = await fixture({ admitTask: async (_session, request) => { if (request.namespace === 'schedule') throw new RuntimeError('USAGE_CAP_EXCEEDED', refusal, 429); } });
+it.each([
+  ['USAGE_CAP_EXCEEDED', '本群本月成本已达上限 $1.00（已用 $1.50），新任务不再执行，正在执行的任务不受影响。'],
+  ['USAGE_BACKGROUND_CAP_EXCEEDED', '本机器人本月自动任务已达 1 次上限，新的后台、主动介入和定时任务暂停。'],
+])('fails a mandate run refused by %s instead of leaving it for manual reconciliation', async (code, refusal) => {
+  const f = await fixture({ admitTask: async (_session, request) => { if (request.namespace === 'schedule') throw new RuntimeError(code!, refusal!, 429); } });
   await f.create(); f.advance(); await f.collaboration.scheduler.tick();
   const execution = async () => (await f.repos.collaboration.listActions(scope)).find(item => item.kind === 'agent_execution');
   await eventually(async () => (await execution())?.status === 'failed');

@@ -169,6 +169,10 @@ describe('RunHeader 失败详情', () => {
     const none = { ...totals, costUsd: 0, inputTokens: 0, outputTokens: 0 };
     rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unavailable: 1 }, subSteps: { ...none, entries: 0 } }}/>);
     expect(screen.getByText('本任务累计：无用量数据')).toBeTruthy();
+    rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unpriced: 1, unknownCostEntries: 1, costCoverage: 0 }, subSteps: { ...none, entries: 0, unknownCostEntries: 0 } }}/>);
+    expect(screen.getByText('本任务已知费用 $0.00（另有 1 次费用未知）')).toBeTruthy();
+    rerender(<RunHeader session={session} {...props} usage={{ own: { ...none, unknownCostEntries: 0, costCoverage: 1 }, subSteps: { ...none, entries: 0, unknownCostEntries: 0 } }}/>);
+    expect(screen.getByText('本任务累计 $0.00')).toBeTruthy();
     rerender(<RunHeader session={session} {...props}/>);
     expect(screen.queryByText(/本任务累计/)).toBeNull();
   });

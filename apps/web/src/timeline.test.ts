@@ -1,3 +1,4 @@
+import type { DockEvent, Task } from './api';
 import { describe, expect, it } from 'vitest';
 import { buildTimeline, buildTimelineSections, pendingPermissionId, toolDisplayName } from './timeline';
 
@@ -280,4 +281,70 @@ describe('conversation timeline', () => {
     expect(activity?.groups[0]).toMatchObject({ label: 'Explore 子代理已启动，同时继续其他操作。' });
     expect(activity?.groups[0]?.events).toHaveLength(6);
   });
+});
+
+describe('incremental turn projection', () => {
+  it('keeps settled turn references while updating the active tool and permission', async () => {
+    const { createTimelineProjector } = await import('./timeline');
+    const project = createTimelineProjector();
+    const make = (sequence: number, data: Record<string, unknown>, type = 'text') => ({ id: `p${sequence}`, sequence, timestamp: String(sequence).padStart(3, '0'), type, data }) as DockEvent;
+    const source = [make(1, { role: 'user', text: 'first', taskId: 'a' }), make(2, { text: 'done' }), make(3, { role: 'user', text: 'second', taskId: 'b' }), make(4, { id: 'tool', name: 'read', status: 'running' }, 'tool_call')];
+    const first = project(source);
+    const updated = project([...source, make(5, { id: 'tool', status: 'completed', output: 'ok' }, 'tool_result'), make(6, { id: 'permission', status: 'pending' }, 'permission_request')]);
+    expect(updated.timeline[0]).toBe(first.timeline[0]);
+    expect(updated.timeline[1]).toBe(first.timeline[1]);
+    expect(updated.timelineSections[0]).toBe(first.timelineSections[0]);
+    expect(updated.timeline.find(event => event.data.id === 'tool')?.data).toMatchObject({ name: 'read', output: 'ok', status: 'completed' });
+    expect(pendingPermissionId(updated.timeline)).toBe('permission');
+  });
+  it('does not synthesize old task prompts outside the loaded window', async () => {
+    const { createTimelineProjector } = await import('./timeline');
+    const old = { id: 'old', prompt: 'old prompt', status: 'completed', createdAt: '001', updatedAt: '002' } as Task;
+    const tail = [{ id: 'tail', sequence: 50_000, timestamp: '999', type: 'text', data: { role: 'user', text: 'tail' } }] as DockEvent[];
+    expect(createTimelineProjector()(tail, [old], true).timeline.some(event => event.data.text === 'old prompt')).toBe(false);
+    expect(createTimelineProjector()(tail, [old], false).timeline.some(event => event.data.text === 'old prompt')).toBe(true);
+  });
+});
+
+it('uses the append delta without rereading historical turn timestamps', async () => {
+  const { createTimelineProjector } = await import('./timeline');
+  const { vi } = await import('vitest');
+  const timestamp = vi.fn(() => '001');
+  const first: DockEvent = { id: 'first', sequence: 1, type: 'text', get timestamp() { return timestamp(); }, data: { role: 'user', text: 'first' } };
+  const second: DockEvent = { id: 'second', sequence: 2, type: 'text', timestamp: '002', data: { role: 'user', text: 'second' } };
+  const next: DockEvent = { id: 'next', sequence: 3, type: 'text', timestamp: '003', data: { text: 'answer' } };
+  const tasks: Task[] = [], source = [first, second], project = createTimelineProjector();
+  const initial = project(source, tasks);
+  timestamp.mockClear();
+  const updated = project([...source, next], tasks, false, { previousEvents: source, changes: [next] });
+  expect(timestamp).not.toHaveBeenCalled();
+  expect(updated.timeline[0]).toBe(initial.timeline[0]);
+  expect(updated.timeline.at(-1)?.data.text).toBe('answer');
+});
+
+
+it('replaces a synthesized prompt when the real user event arrives in an append delta', async () => {
+  const { createTimelineProjector } = await import('./timeline');
+  const task = { id: 'task-1', sessionId: 's1', prompt: 'run it', status: 'running', createdAt: '001', updatedAt: '001' } as Task;
+  const tasks = [task], source: DockEvent[] = [], project = createTimelineProjector();
+  expect(project(source, tasks).timeline.map(event => event.id)).toEqual(['task-event-task-1']);
+  const real: DockEvent = { id: 'real', sequence: 1, type: 'text', timestamp: '002', data: { role: 'user', text: 'run it', taskId: task.id } };
+  const incremental = project([real], tasks, false, { previousEvents: source, changes: [real] });
+  expect(incremental).toEqual(createTimelineProjector()([real], tasks));
+  expect(incremental.timeline.map(event => event.id)).toEqual(['real']);
+});
+
+
+it('uses the target task for a tail page starting with an injected steering message', async () => {
+  const { createTimelineProjector } = await import('./timeline');
+  const target = { id: 'target', sessionId: 's1', prompt: 'original', status: 'interrupted', createdAt: '001', updatedAt: '005' } as Task;
+  const steeringTask = { ...target, id: 'steer', prompt: 'steer', status: 'completed', createdAt: '002' } as Task;
+  const tasks = [target, steeringTask];
+  const steering: DockEvent = { id: 'steering', sequence: 3, type: 'text', timestamp: '003', data: { role: 'user', text: 'steer', taskId: 'steer', steering: { target: { taskId: 'target' } } } };
+  const tool: DockEvent = { id: 'tool', sequence: 4, type: 'tool_result', timestamp: '004', data: { id: 'call', name: 'read', status: 'completed' } };
+  const project = createTimelineProjector(), source = [steering];
+  project(source, tasks, true);
+  const result = project([steering, tool], tasks, true, { previousEvents: source, changes: [tool] });
+  expect(result.timelineSections).toEqual(buildTimelineSections(buildTimeline([steering, tool]), tasks));
+  expect(result.timelineSections.find(section => section.kind === 'activity')?.taskStatus).toBe('interrupted');
 });

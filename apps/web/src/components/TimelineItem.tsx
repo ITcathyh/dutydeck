@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react';
+import { useTimelineDisclosure } from '../timeline-disclosure';
 import type { TimelineEvent } from '../timeline';
 import { MarkdownContent } from '../MarkdownContent';
 import { Banner } from './primitives';
@@ -16,10 +17,10 @@ import { PermissionCard } from './PermissionCard';
   飞书转来的指令常有十几行，超过 max-h-40 时先折叠，末尾渐隐并给「展开全文」。
   jsdom 里 scrollHeight 恒为 0，所以测试环境永远不折叠，不影响按文本查找。
 */
-function UserMessage({ text, steered = false }: { text: string; steered?: boolean }) {
+function UserMessage({ id, text, steered = false }: { id: string; text: string; steered?: boolean }) {
   const bodyRef = useRef<HTMLDivElement>(null);
   const [overflowing, setOverflowing] = useState(false);
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useTimelineDisclosure(`user:${id}`, false);
   useLayoutEffect(() => {
     const body = bodyRef.current;
     if (body) setOverflowing(body.scrollHeight > body.clientHeight + 1);
@@ -50,7 +51,7 @@ export function TimelineItem({ event, final = false, assistantLabel = 'Agent', o
   // 思考内容归 ActivityPanel 折叠区，不在主时间线重复出现。
   if (event.type === 'thinking') return null;
   const user = event.data.role === 'user';
-  if (user) return <UserMessage text={event.data.text ?? ''} steered={Boolean(event.data.steering)}/>;
+  if (user) return <UserMessage id={event.id} text={event.data.text ?? ''} steered={Boolean(event.data.steering)}/>;
   if (final) return <article aria-label={`${assistantLabel} 最终输出`} className="assistant-output markdown ui-timeline-item my-4 max-w-[78ch] text-body text-primary"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></article>;
   return <article className="assistant-output markdown ui-timeline-item my-5 max-w-[78ch] text-body text-primary"><MarkdownContent>{event.data.text ?? ''}</MarkdownContent></article>;
 }

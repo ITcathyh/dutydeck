@@ -60,6 +60,10 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     memoryAutoExtract: bot.memoryAutoExtract ?? true,
     memoryAgentId: bot.memoryAgentId ?? '',
     memoryModel: bot.memoryModel ?? '',
+    decisionAgentId: bot.decisionAgentId ?? '',
+    decisionModel: bot.decisionModel ?? '',
+    responseAgentId: bot.responseAgentId ?? '',
+    responseModel: bot.responseModel ?? '',
     executionMode: bot.executionMode ?? 'single',
     leaderAgentId: bot.leaderAgentId ?? '',
     workerAgentIds: bot.workerAgentIds ?? [],
@@ -86,6 +90,10 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   if ((original.memoryAutoExtract ?? true) !== draft.memoryAutoExtract) return true;
   if ((original.memoryAgentId ?? '') !== draft.memoryAgentId) return true;
   if ((original.memoryModel ?? '') !== draft.memoryModel) return true;
+  if ((original.decisionAgentId ?? '') !== draft.decisionAgentId) return true;
+  if ((original.decisionModel ?? '') !== draft.decisionModel) return true;
+  if ((original.responseAgentId ?? '') !== draft.responseAgentId) return true;
+  if ((original.responseModel ?? '') !== draft.responseModel) return true;
   if ((original.executionMode ?? 'single') !== draft.executionMode) return true;
   if ((original.leaderAgentId ?? '') !== draft.leaderAgentId) return true;
   if ([...(original.workerAgentIds ?? [])].sort().join('\n') !== [...draft.workerAgentIds].sort().join('\n')) return true;
@@ -256,6 +264,10 @@ export function BotManagement({
       memoryAutoExtract: draft.memoryAutoExtract,
       memoryAgentId: draft.memoryAgentId,
       memoryModel: draft.memoryModel,
+      decisionAgentId: draft.decisionAgentId,
+      decisionModel: draft.decisionModel,
+      responseAgentId: draft.responseAgentId,
+      responseModel: draft.responseModel,
       executionMode: draft.executionMode,
       leaderAgentId: draft.leaderAgentId,
       workerAgentIds: draft.workerAgentIds,
@@ -736,6 +748,28 @@ export function BotManagement({
                     />
                     <span>启用会话记忆</span>
                   </label>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="群判定 Agent" hint="留空沿用记忆 Agent，再回落默认 Agent。">
+                      <Select aria-label="群判定 Agent" value={currentDraft.decisionAgentId} onChange={e => updateCurrentDraft({ decisionAgentId: e.target.value })}>
+                        <option value="">沿用记忆或默认 Agent</option>
+                        {agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="群判定模型" hint="留空沿用记忆模型，再回落默认模型。">
+                      <Input aria-label="群判定模型" value={currentDraft.decisionModel} onChange={e => updateCurrentDraft({ decisionModel: e.target.value })} placeholder="沿用记忆或默认模型"/>
+                    </Field>
+                  </div>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    <Field label="群回复 Agent" hint="留空沿用记忆 Agent，再回落默认 Agent。">
+                      <Select aria-label="群回复 Agent" value={currentDraft.responseAgentId} onChange={e => updateCurrentDraft({ responseAgentId: e.target.value })}>
+                        <option value="">沿用记忆或默认 Agent</option>
+                        {agents.map(agent => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+                      </Select>
+                    </Field>
+                    <Field label="群回复模型" hint="留空沿用记忆模型，再回落默认模型。">
+                      <Input aria-label="群回复模型" value={currentDraft.responseModel} onChange={e => updateCurrentDraft({ responseModel: e.target.value })} placeholder="沿用记忆或默认模型"/>
+                    </Field>
+                  </div>
                   {currentDraft.memoryEnabled && (
                     <>
                       <label className="flex items-center gap-2 text-caption">

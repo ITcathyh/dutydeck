@@ -26,6 +26,7 @@ import {
   isLarkGroupMemoryPool,
   isLarkMemoryId,
   larkMemoryDedupeKey,
+  larkMemoryFingerprint,
   LarkMemoryError,
   larkMemoryLimits,
   looksLikeLarkMemoryCredential,
@@ -50,6 +51,7 @@ export const larkMemoryPipelineRules = {
   extractionTurns: 3,
   /** 累计完成多少轮触发一次整理。 */
   consolidationTurns: 8,
+  consolidationCheckMs: 24 * 60 * 60 * 1000,
   /** `pendingTurns` 队列长度，满了丢最旧。 */
   pendingTurns: larkMemoryLimits.pendingTurns,
   /** 单次提取最多消费多少轮。 */
@@ -458,7 +460,8 @@ export class LarkMemoryPipeline {
   }
 
   private dueForConsolidation(state: LarkMemoryState) {
-    return (state.turnsSinceConsolidation >= larkMemoryPipelineRules.consolidationTurns || state.indexOverBudget === true)
+    return (state.turnsSinceConsolidation >= larkMemoryPipelineRules.consolidationTurns || state.indexOverBudget === true
+      || Boolean(state.lastConsolidationAt && this.now().getTime() - Date.parse(state.lastConsolidationAt) >= larkMemoryPipelineRules.consolidationCheckMs))
       && !this.backingOff(state, 'consolidation');
   }
 
@@ -515,7 +518,7 @@ export class LarkMemoryPipeline {
       if (this.dueForConsolidation(await this.options.store.getState(scope))) {
         const claim = await this.claim(scope, 'consolidation');
         if (!claim) return;
-        try { await this.executeConsolidation(scope, config); ran = true; }
+        try { await this.executeConsolidation(scope, config, undefined, true); ran = true; }
         finally { await this.release(scope, claim); }
       }
       if (!ran) return;
@@ -630,18 +633,26 @@ export class LarkMemoryPipeline {
   // 整理
   // -------------------------------------------------------------------------
 
-  private async executeConsolidation(scope: LarkMemoryScope, config: StoredLarkConfig, actorId?: string): Promise<RunOutcome> {
+  private async executeConsolidation(scope: LarkMemoryScope, config: StoredLarkConfig, actorId?: string, automatic = false): Promise<RunOutcome> {
     try {
       const entries = await this.options.store.list(scope);
       const state = await this.options.store.getState(scope);
       // 整理期间用户轮次还在完成、计数还在涨；无条件清零会把这些增量抹掉，把下一次整理推迟。
       const countedBefore = state.turnsSinceConsolidation;
+      const inputHash = larkMemoryFingerprint(entries);
+      const recentlyChecked = state.lastConsolidationAt && this.now().getTime() - Date.parse(state.lastConsolidationAt) < larkMemoryPipelineRules.consolidationCheckMs;
+      if (automatic && !state.indexOverBudget && recentlyChecked && state.lastConsolidationHash === inputHash) {
+        await this.options.store.mutateState(scope, current => ({ turnsSinceConsolidation: Math.max(0, current.turnsSinceConsolidation - countedBefore) }));
+        return { kind: 'consolidation', at: this.now().toISOString(), ok: true, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0 };
+      }
       if (!entries.length) {
         return await this.settle(scope, {
           kind: 'consolidation', ok: true, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0
         }, current => ({
           turnsSinceConsolidation: Math.max(0, current.turnsSinceConsolidation - countedBefore),
           indexOverBudget: false,
+          lastConsolidationInputHash: inputHash,
+          lastConsolidationHash: inputHash,
           lastConsolidationAt: this.now().toISOString()
         }));
       }
@@ -653,7 +664,7 @@ export class LarkMemoryPipeline {
 
       // 门禁不通过时把违规清单附回 prompt 重试一次；仍失败整轮不写入。
       for (let attempt = 0; attempt < 2; attempt++) {
-        const text = await this.runTurn(session, buildConsolidationPrompt(entries, indexText, violations));
+        const text = await this.runTurn(session, buildConsolidationPrompt(entries, indexText, violations, this.now()));
         const parsed = parseLastJsonBlock(text) as { actions?: unknown };
         if (!Array.isArray(parsed.actions)) {
           throw new LarkMemoryError('MEMORY_AGENT_OUTPUT_INVALID', '记忆 Agent 输出缺少 actions 数组。', 422);
@@ -672,7 +683,7 @@ export class LarkMemoryPipeline {
         }, () => ({}));
       }
 
-      const applied = await this.options.store.applyBatch(scope, gate.plan);
+      const applied = await this.options.store.applyBatch(scope, gate.plan, { expectedFingerprint: inputHash });
       await this.options.projection.write(scope);
       const superseded = gate.plan.reduce((sum, step) => sum + (step.op === 'add' ? step.input.supersedes?.length ?? 0 : 0), 0);
       // indexOverBudget 只由派生视图写盘回写，而那次写盘失败只记日志：不在这里显式落地的话，
@@ -682,6 +693,8 @@ export class LarkMemoryPipeline {
       }, current => ({
         turnsSinceConsolidation: Math.max(0, current.turnsSinceConsolidation - countedBefore),
         indexOverBudget: false,
+        lastConsolidationInputHash: inputHash,
+        lastConsolidationHash: applied.fingerprint ?? inputHash,
         lastConsolidationAt: this.now().toISOString()
       }));
     } catch (error) {
@@ -946,12 +959,13 @@ export function buildExtractionPrompt(indexText: string, turns: LarkMemoryTurnMa
   ].join('\n');
 }
 
-export function buildConsolidationPrompt(entries: LarkMemoryEntry[], indexText: string, violations: string[]): string {
+export function buildConsolidationPrompt(entries: LarkMemoryEntry[], indexText: string, violations: string[], now = new Date()): string {
   const listing = entries
     .map(entry => `- ${entry.id} · ${entry.source} · ${entry.topic} · ${entry.createdAt.slice(0, 10)} · ${entry.content}`)
     .join('\n');
   return [
     '[Dutydeck 会话记忆 · 后台整理]',
+    `当前整理时间：${now.toISOString()}。仅根据条目中明确的期限或已被推翻的事实判断过时，不因条目较旧而删除。`,
     noToolsNotice,
     '',
     '把下面这份聊天记忆整理得更短、更不重复、主题更清楚：合并说同一件事的条目，淘汰已经过时或被推翻的条目，把放错主题的条目挪到合适的主题。',

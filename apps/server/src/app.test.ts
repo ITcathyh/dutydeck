@@ -247,6 +247,24 @@ describe('HTTP API boundary', () => {
     expect(runtime.runVerification).not.toHaveBeenCalled();
   });
 
+  it('uses bulk summaries and revalidates only the permission-filtered representation', async () => {
+    const visible = { sessionId: 's1', taskId: 't1', prompt: 'goal', status: 'completed', queuedCount: 0, updatedAt: '1' };
+    let rows = [visible, { ...visible, sessionId: 'hidden' }];
+    let allowed = true;
+    const runtime = { listRunSummaries: vi.fn(async () => rows), getTasks: vi.fn(), listSessions: vi.fn() };
+    const app = await buildApp(runtime as any, { executionPolicy: { authorize: async (_request: unknown, id: string) => ({ allowed: allowed && id === 's1' }) } as any }); apps.push(app);
+    const first = await app.inject({ method: 'GET', url: '/api/sessions/summaries' });
+    expect(first.json()).toEqual([visible]);
+    const headers = { 'if-none-match': String(first.headers.etag) };
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/summaries', headers })).statusCode).toBe(304);
+    allowed = false;
+    const revoked = await app.inject({ method: 'GET', url: '/api/sessions/summaries', headers });
+    expect(revoked.statusCode).toBe(200); expect(revoked.json()).toEqual([]);
+    allowed = true; rows = [];
+    expect((await app.inject({ method: 'GET', url: '/api/sessions/summaries', headers })).json()).toEqual([]);
+    expect(runtime.getTasks).not.toHaveBeenCalled(); expect(runtime.listSessions).not.toHaveBeenCalled();
+  });
+
   it('projects the first task goal and current queued count as a cross-session run summary', async () => {
     const sessions = [
       { id: 's1', updatedAt: '2026-01-01T00:00:00.000Z' },

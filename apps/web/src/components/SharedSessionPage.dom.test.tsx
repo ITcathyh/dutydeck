@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { api, ApiError, type DockEvent, type Session, type Task } from '../api';
 import { SharedSessionPage } from './SharedSessionPage';
@@ -28,6 +28,9 @@ describe('SharedSessionPage', () => {
     vi.spyOn(api, 'tasks').mockResolvedValue(tasks);
     const sessions = vi.spyOn(api, 'sessions');
     renderPage();
+    const details = await screen.findByLabelText('gpt-5 执行过程');
+    (details as HTMLDetailsElement).open = true;
+    fireEvent(details, new Event('toggle'));
     expect(await screen.findByText('已定位到登录表单')).toBeTruthy();
     expect(screen.getByRole('heading', { name: '修复登录页' })).toBeTruthy();
     expect(screen.getByText('gpt-5 · 只读查看')).toBeTruthy();

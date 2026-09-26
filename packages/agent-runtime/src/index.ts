@@ -638,6 +638,20 @@ export class DutydeckRuntime {
     return attached;
   }
   listAgents() { return this.repos.agents.list(); }
+  async listRunSummaries() {
+    return this.readWorkspace('workspace_list', () => this.mutations.wait(async () => {
+      if (this.repos.tasks.listRunSummaries) return this.repos.tasks.listRunSummaries();
+      const summaries: import('@dutydeck/shared').RunSummary[] = [];
+      for (const session of await this.repos.sessions.list()) {
+        const tasks = (await this.repos.tasks.listBySession(session.id)).filter(task => task.prompt?.trim() && task.status !== 'cancelled').sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        const first = tasks[0];
+        if (first) summaries.push({ sessionId: session.id, taskId: first.id, prompt: first.prompt.trim(), status: first.status,
+          queuedCount: tasks.filter(task => task.status === 'queued').length,
+          updatedAt: tasks.reduce((latest, task) => (task.updatedAt || task.createdAt) > latest ? task.updatedAt || task.createdAt : latest, first.updatedAt || first.createdAt) });
+      }
+      return summaries;
+    }));
+  }
   async listSessions() { return this.readWorkspace('workspace_list', async () => Promise.all((await this.mutations.wait(() => this.repos.sessions.list())).map(session => this.withSessionMetadata(session)))); }
   async getSession(id: string) { return this.readWorkspace(id, async () => { const session = await this.mutations.wait(() => this.repos.sessions.get(id)); return session ? this.withSessionMetadata(session) : undefined; }); }
   async setSessionName(id: string, rawName: string | null): Promise<Session> {
@@ -1820,7 +1834,8 @@ export class DutydeckRuntime {
       let prepared:ReturnType<NonNullable<AgentDriver['prepareSubmission']>>|undefined;
       await this.mutations.write(id, async () => {
         await this.configurations.assertClear(id); this.mutations.check();
-        const recovery = controlled ? undefined : driver.checkpoint?.();
+        const recovery = controlled ? undefined : await driver.checkpoint?.();
+        this.mutations.check();
         prepared = controlled ? driver.prepareSubmission?.(submissionInput) : undefined;
         if (controlled && !prepared) throw new RuntimeError('DRIVER_SUBMISSION_UNSUPPORTED','Controlled driver must freeze its submission',409);
         this.wake(this.bound().markSubmissionPending(this.attemptFence(ref), { submissionId, inputDigest: prepared?.inputDigest ?? digest({ prompt, executionOptions: input.executionOptions }), resourceRefs: prepared?.resourceRefs ?? this.localResources.refs(driver), authorizationRefs: [], ...(controlled?{driverInstanceId:controlled.driverInstanceId}:{}),...(prepared?.nativeContextRef ? {nativeContextRef:prepared.nativeContextRef,contextProofId:prepared.contextProofId}:{}), ...(prepared?.recovery || recovery ? { recovery:prepared?.recovery ?? recovery } : {}) }));
@@ -1890,8 +1905,11 @@ export class DutydeckRuntime {
         } catch (error) { finish(error); }
       };
       this.sendWaiters.add(inspect);
-      try { unsubscribe = this.publisher.subscribe(id, inspect, { afterSequence: 0 }); inspect(); }
-      catch (error) { finish(error); }
+      try {
+        unsubscribe = this.publisher.subscribe(id, inspect);
+        if (finished) unsubscribe();
+        else inspect();
+      } catch (error) { finish(error); }
     });
   }
 

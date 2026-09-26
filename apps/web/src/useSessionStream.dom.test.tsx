@@ -138,7 +138,7 @@ describe('useSessionStream reconciliation', () => {
 
       // 回读 gate 尚未释放期间，旧缓存依然保持完整，渲染 prompt.trim 绝不白屏崩溃
       expect(screen.getByTestId('task-task-1').textContent).toBe('fix startup bug:running');
-      expect(taskLoader.mock.calls.length).toBeGreaterThanOrEqual(2);
+      await waitFor(() => expect(taskLoader.mock.calls.length).toBeGreaterThanOrEqual(2));
 
       releaseGate();
       await waitFor(() => expect(screen.getByTestId('task-task-1').textContent).toBe('fix startup bug:completed'));
@@ -207,7 +207,7 @@ describe('useSessionStream reconciliation', () => {
 
       // 回读完成前，绝不向缓存插入缺失 prompt 的残缺对象，渲染 prompt.trim 绝不抛错
       expect(screen.queryByTestId('task-task-2')).toBeNull();
-      expect(taskLoader.mock.calls.length).toBeGreaterThanOrEqual(2);
+      await waitFor(() => expect(taskLoader.mock.calls.length).toBeGreaterThanOrEqual(2));
 
       releaseGate();
       await waitFor(() => expect(screen.getByTestId('task-task-2').textContent).toBe('fresh task prompt:running'));
@@ -215,4 +215,49 @@ describe('useSessionStream reconciliation', () => {
       releaseGate();
     }
   });
+});
+
+it('batches a burst into one frame and cancels the pending paint when leaving', async () => {
+  const frames = new Map<number, FrameRequestCallback>(); let frameId = 0;
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => { frames.set(++frameId, callback); return frameId; });
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(1)]));
+  function Harness() { useSessionStream('s1', 'r1', true); return null; }
+  const view = render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  const writes = vi.spyOn(client, 'setQueryData');
+  act(() => { for (let sequence = 2; sequence <= 201; sequence++) MockEventSource.instances[0]!.emit('text', event(sequence)); });
+  expect(writes).not.toHaveBeenCalled(); expect(frames.size).toBe(1);
+  act(() => { const callback = [...frames.values()][0]!; frames.clear(); callback(0); });
+  expect(writes).toHaveBeenCalledTimes(1);
+  expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events).toHaveLength(201);
+  act(() => MockEventSource.instances[0]!.emit('text', event(202)));
+  view.unmount(); expect(frames.size).toBe(0);
+  expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events).toHaveLength(201);
+});
+
+it('retries the lowest failed gap on open even after newer live events are cached', async () => {
+  const loader = vi.spyOn(api, 'events').mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce([event(11), event(12), event(13)]);
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['events', 's1'], createEventWindow([event(10)]));
+  function Harness() { useSessionStream('s1', 'r1', true); return null; }
+  render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  act(() => MockEventSource.instances[0]!.emit('text', event(13)));
+  await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.at(-1)?.sequence).toBe(13));
+  act(() => MockEventSource.instances[0]!.onopen?.(new Event('open')));
+  await waitFor(() => expect(loader).toHaveBeenCalledTimes(2));
+  expect(loader).toHaveBeenLastCalledWith('s1', { after: 10, direction: 'forward', limit: 200 }, expect.any(AbortSignal));
+  await waitFor(() => expect(client.getQueryData<ReturnType<typeof createEventWindow>>(['events', 's1'])?.events.map(event => event.sequence)).toEqual([10, 11, 12, 13]));
+});
+
+it('preserves metadata from earlier status events in the same frame', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(['sessions'], [session]);
+  function Harness() { useSessionStream('s1', 'r1', true); return null; }
+  render(<QueryClientProvider client={client}><Harness/></QueryClientProvider>);
+  act(() => {
+    MockEventSource.instances[0]!.emit('status', { ...event(1), type: 'status', data: { state: 'thinking', model: 'new-model' } });
+    MockEventSource.instances[0]!.emit('status', { ...event(2), type: 'status', data: { state: 'completed' } });
+  });
+  await waitFor(() => expect(client.getQueryData<Session[]>(['sessions'])?.[0]).toMatchObject({ model: 'new-model', state: 'completed' }));
 });

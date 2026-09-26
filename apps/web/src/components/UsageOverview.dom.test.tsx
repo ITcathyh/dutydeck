@@ -6,13 +6,13 @@ import type { UsageGroup, UsageTotals } from '@dutydeck/shared';
 import { api, ApiError, type LarkBotConfig, type UsageSummary } from '../api';
 import { UsageOverview } from './UsageOverview';
 
-const totals = (patch: Partial<UsageTotals> = {}): UsageTotals => ({ entries: 0, costUsd: 0, estimatedCostUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0, ...patch });
+const totals = (patch: Partial<UsageTotals> = {}): UsageTotals => ({ entries: 0, costUsd: 0, estimatedCostUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0, unpriced: 0, pricedEntries: 0, unknownCostEntries: 0, costCoverage: null, ...patch });
 const row = (patch: Partial<UsageGroup>): UsageGroup => ({ ...totals({ entries: 2, costUsd: 1.2, estimatedCostUsd: 0.2, inputTokens: 1000, outputTokens: 50 }), ...patch });
 const window = (costUsd: number, since: string) => ({
   since, totals: totals({ entries: 2, costUsd, estimatedCostUsd: 0.2, inputTokens: 1000, outputTokens: 50 }),
   bots: [row({ appId: 'cli_a', costUsd })], chats: [row({ appId: 'cli_a', chatId: 'oc_1', costUsd })], actors: [row({ actorId: 'ou_1', costUsd })], categories: [row({ category: 'proactive', costUsd })]
 });
-const summary: UsageSummary = { month: window(3, '2026-08-31T16:00:00.000Z'), week: window(1.2, '2026-09-18T00:00:00.000Z'), caps: [{ scope: 'group', appId: 'cli_a', chatId: 'oc_1', monthlyCostUsd: 4, updatedAt: '2026-09-25T00:00:00Z' }] };
+const summary: UsageSummary = { backgroundBudget: { month: '2026-09', usage: [] }, month: window(3, '2026-08-31T16:00:00.000Z'), week: window(1.2, '2026-09-18T00:00:00.000Z'), caps: [{ scope: 'group', appId: 'cli_a', chatId: 'oc_1', monthlyCostUsd: 4, updatedAt: '2026-09-25T00:00:00Z' }] };
 const bots = [{ configured: true, appId: 'cli_a', name: '值班 Bot', tabLabel: '值班 Bot', setupComplete: true }] as LarkBotConfig[];
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -55,6 +55,42 @@ describe('usage overview', () => {
     await user.click(within(caps).getByRole('button', { name: '删除' }));
     expect(remove.mock.calls[0]![0]).toMatchObject({ scope: 'group', appId: 'cli_a', chatId: 'oc_1' });
     await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(3));
+  });
+
+  it('shows unknown costs separately from known zero and explains missing automatic limits', async () => {
+    const unknown = totals({ entries: 3, costUsd: 0, unpriced: 1, unavailable: 1, pricedEntries: 1, unknownCostEntries: 2, costCoverage: 1 / 3 });
+    vi.spyOn(api, 'usageSummary').mockResolvedValue({ ...summary, month: { ...summary.month, totals: unknown } });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    mount();
+    const total = await screen.findByRole('region', { name: '合计' });
+    expect(within(total).getByText('已知费用 $0.00')).toBeTruthy();
+    expect(within(total).getByText(/计价覆盖率 33%.*1 次有 token、费用未知.*1 次无用量数据/)).toBeTruthy();
+    expect(screen.getByText(/默认未启用：美元上限无法覆盖未知费用/)).toBeTruthy();
+    expect(screen.getByText(/值班 Bot：本月已准入 0 次；未配置次数兜底/)).toBeTruthy();
+  });
+
+  it('shows the configured automatic task allowance and its explicit-task exemption', async () => {
+    vi.spyOn(api, 'usageSummary').mockResolvedValue({ ...summary, backgroundBudget: { month: '2026-09', defaultMonthlyTasks: 1000, bots: { cli_a: 200 }, usage: [{ appId: 'cli_a', tasks: 120 }] } });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    mount();
+    const budget = await screen.findByRole('region', { name: '自动任务次数兜底' });
+    expect(within(budget).getByText('值班 Bot：本月已准入 120 次；上限 200 次')).toBeTruthy();
+    expect(within(budget).getByText(/启用后覆盖后台、主动介入和定时根任务；显式请求/)).toBeTruthy();
+  });
+
+  it('renders an older instance response without inventing coverage or crashing on absent budget fields', async () => {
+    const legacy = JSON.parse(JSON.stringify(summary));
+    delete legacy.backgroundBudget;
+    delete legacy.month.totals.costCoverage;
+    delete legacy.month.totals.unpriced;
+    for (const group of legacy.month.bots) delete group.costCoverage;
+    vi.spyOn(api, 'usageSummary').mockResolvedValue(legacy);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    mount();
+    const total = await screen.findByRole('region', { name: '合计' });
+    expect(within(total).getByText(/计价覆盖率 未知/)).toBeTruthy();
+    expect(screen.getByText(/当前服务未返回自动任务次数配置，状态未知/)).toBeTruthy();
+    expect(screen.queryByText(/NaN/)).toBeNull();
   });
 
   it('explains when only the installation owner may read usage', async () => {

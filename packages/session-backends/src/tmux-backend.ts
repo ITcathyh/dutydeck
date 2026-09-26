@@ -24,7 +24,7 @@
  * hooks, destroySession fencing, captureInputState/capturePaneInputModes,
  * screen-settling heuristics.
  */
-import { execFileSync, spawnSync, spawn, type ChildProcessByStdio } from 'node:child_process';
+import { execFile, execFileSync, spawnSync, spawn, type ChildProcessByStdio } from 'node:child_process';
 import type { Readable } from 'node:stream';
 import { openSync, closeSync, statSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -534,6 +534,28 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
+  /** Async probe for the high-frequency watcher; unknown never proves exit. */
+  static probeSessionAsync(name: string): Promise<SessionProbe> {
+    return new Promise(resolve => {
+      execFile('tmux', ['has-session', '-t', name], { env: tmuxClientEnv(), timeout: 3000 }, (error, _stdout, stderr) => {
+        if (!error) return resolve('exists');
+        if (error.killed || error.signal || typeof error.code !== 'number') return resolve('unknown');
+        if (isSocketMissingErrorText(stderr)) return resolve('missing');
+        resolve(isServerLevelErrorText(stderr) ? 'unknown' : 'missing');
+      });
+    });
+  }
+
+  private getPidAsync(): Promise<number | null> {
+    return new Promise(resolve => {
+      execFile('tmux', ['display-message', '-p', '-t', this.sessionName, '#{pane_pid}'],
+        { env: tmuxClientEnv(), timeout: 2000 }, (error, stdout) => {
+          const pid = Number(stdout.trim());
+          resolve(!error && Number.isSafeInteger(pid) && pid > 0 ? pid : null);
+        });
+    });
+  }
+
   /** Kill a named tmux session (no-op if it doesn't exist). */
   static killSession(name: string): void {
     try {
@@ -704,31 +726,28 @@ export class TmuxBackend implements SessionBackend {
     // declaring the pane gone. Any successful check resets the counter.
     let consecutiveFailures = 0;
     const FAILURE_THRESHOLD = 3;
-    this.exitTimer = setInterval(() => {
-      if (this.exited) return;
-      let failed = false;
-      if (TmuxBackend.probeSession(this.sessionName) === 'missing') {
-        failed = true;
-      } else {
-        // Session exists: respawn-pane launches with `exec`, so the pane
-        // process IS the CLI; a dead pid is therefore authoritative even if
-        // tmux has not reaped the pane yet.
-        const pid = this.getPid();
-        if (pid !== null) {
-          try {
-            process.kill(pid, 0);
-          } catch (e) {
-            if ((e as NodeJS.ErrnoException).code === 'ESRCH') failed = true;
+    let checking = false;
+    const timer = setInterval(() => {
+      if (this.exited || checking) return;
+      checking = true;
+      void (async () => {
+        const probe = await TmuxBackend.probeSessionAsync(this.sessionName);
+        let failed = probe === 'missing';
+        // An unknown server answer must not be combined with a stale pane PID.
+        if (probe === 'exists') {
+          const pid = await this.getPidAsync();
+          if (pid !== null) {
+            try { process.kill(pid, 0); }
+            catch (e) { failed = (e as NodeJS.ErrnoException).code === 'ESRCH'; }
           }
         }
-      }
-      if (failed) {
-        consecutiveFailures++;
+        // A detached/replaced watcher must not act on an in-flight result.
+        if (this.exited || this.exitTimer !== timer) return;
+        consecutiveFailures = failed ? consecutiveFailures + 1 : 0;
         if (consecutiveFailures >= FAILURE_THRESHOLD) this.handlePaneExit();
-      } else {
-        consecutiveFailures = 0;
-      }
+      })().finally(() => { checking = false; });
     }, 1000);
+    this.exitTimer = timer;
   }
 
   private stopExitWatcher(): void {

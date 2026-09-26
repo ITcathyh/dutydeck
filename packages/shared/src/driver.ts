@@ -88,7 +88,7 @@ export interface AgentDriver {
   /** 重连/恢复持久会话；受控驱动的新增资源使用本次显式许可。 */
   resume(operation?: OperationPermit): Promise<void>;
   /** Capture the output boundary before submitting a new turn, if recoverable. */
-  checkpoint?(): DriverTurnRecovery | undefined;
+  checkpoint?(): DriverTurnRecovery | undefined | Promise<DriverTurnRecovery | undefined>;
   /** Attach to the original live backend and await this turn without resending its prompt. */
   recover?(state: DriverTurnRecovery, onAttached?: () => Promise<void>): Promise<void>;
   /** Local attachment closed for daemon shutdown; the persistent resource remains live. */

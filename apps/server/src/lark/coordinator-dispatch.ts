@@ -1,3 +1,4 @@
+import { setTimeout as retryDelay } from 'node:timers/promises';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { mergeGroupTaskWatermark } from './group-task-context.js';
 import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
@@ -622,61 +623,66 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           if (task.progressFrozen && pending.input.messageId === task.cardMessageId) {
             continue;
           }
-          // 终态卡片是交付契约的一部分，值得多试几次；运行态心跳丢一帧无所谓。
-          // 注意与 api-gate 的分层关系：gate 在 HTTP 层已做 429/5xx 退避重试
-          // （默认 3 次），这里是业务层重试。持续 429 时两层会相乘，单次终态更新
-          // 最坏可能拉长到分钟级。若线上观察到终态交付过慢，优先下调
-          // LARK_API_RETRY_MAX_ATTEMPTS，而不是削减这里的终态重试次数。
+          // Online delivery and HTTP retries share one deadline/attempt budget.
+          // Failed terminal delivery remains persisted and is retried by reconciliation.
           const attempts = pending.terminal ? 3 : 1;
-          for (let attempt = 1; attempt <= attempts; attempt++) {
-            try {
-              await this.service.update(pending.input);
-              lastError = undefined;
-              delivered = true;
-              // 更新本身打在旧卡上无害（那是它自己的卡），但快照属于新一轮，不能覆盖。
-              if (pending.input.elements && !stale()) {
-                // queue_summary 是该时刻的瞬态队列读数；若冻结进 last_successful_elements，
-                // 守护进程重启后 reconciler 会在恢复卡上重放崩溃瞬间的陈旧「排队 N 条」。
-                // protocol_hint / recovery_note 是持久事实，保留。
-                task.lastSuccessfulElements = (pending.input.elements as LarkCardElement[])
-                  .filter(element => element.element_id !== QUEUE_SUMMARY_ELEMENT_ID);
-              }
-              cardRateLimitFailures = 0;
-              cardRateLimitedUntil = 0;
-              break;
-            } catch (error) {
-              lastError = error;
-              if (isLarkCardContentRejected(error)) { contentRejected = true; break; }
-              if (isLarkMessageUnupdatable(error)) break;
-              if (isLarkMessageRateLimit(error)) {
-                cardRateLimitFailures += 1;
-                cardRateLimitedUntil = Date.now() + larkRateLimitBackoffMs(cardRateLimitFailures);
-              }
-              this.log.warn({ error, messageId: pending.input.messageId, attempt, attempts }, '更新飞书服务卡片失败');
-              // 轮次已翻页：不再为旧卡消耗重试预算，也不再制造新的在途请求。
-              if (stale()) break;
-              if (attempt < attempts) {
-                const retryDelay = isLarkMessageRateLimit(error)
-                  ? Math.max(0, cardRateLimitedUntil - Date.now())
-                  : attempt * 300;
-                await new Promise(resolve => setTimeout(resolve, retryDelay));
+          const deliver = async (signal?: AbortSignal) => {
+            for (let attempt = 1; attempt <= attempts; attempt++) {
+              try {
+                await this.service.update(pending.input);
+                lastError = undefined;
+                delivered = true;
+                // 更新本身打在旧卡上无害（那是它自己的卡），但快照属于新一轮，不能覆盖。
+                if (pending.input.elements && !stale()) {
+                  // queue_summary 是该时刻的瞬态队列读数；若冻结进 last_successful_elements，
+                  // 守护进程重启后 reconciler 会在恢复卡上重放崩溃瞬间的陈旧「排队 N 条」。
+                  // protocol_hint / recovery_note 是持久事实，保留。
+                  task.lastSuccessfulElements = (pending.input.elements as LarkCardElement[])
+                    .filter(element => element.element_id !== QUEUE_SUMMARY_ELEMENT_ID);
+                }
+                cardRateLimitFailures = 0;
+                cardRateLimitedUntil = 0;
+                break;
+              } catch (error) {
+                lastError = error;
+                if (isLarkCardContentRejected(error)) { contentRejected = true; break; }
+                if (isLarkMessageUnupdatable(error)) break;
+                if (isLarkMessageRateLimit(error)) {
+                  cardRateLimitFailures += 1;
+                  cardRateLimitedUntil = Date.now() + larkRateLimitBackoffMs(cardRateLimitFailures);
+                }
+                this.log.warn({ error, messageId: pending.input.messageId, attempt, attempts }, '更新飞书服务卡片失败');
+                // 轮次已翻页：不再为旧卡消耗重试预算，也不再制造新的在途请求。
+                if (stale() || signal?.aborted || (error as { larkRequestExhausted?: boolean })?.larkRequestExhausted
+                  || error instanceof LarkServiceError && ['LARK_REQUEST_BUDGET_EXHAUSTED', 'LARK_CIRCUIT_OPEN'].includes(error.code)
+                  || ['AbortError', 'TimeoutError'].includes((error as Error)?.name)) break;
+                if (attempt < attempts) {
+                  const delayMs = isLarkMessageRateLimit(error)
+                    ? Math.max(0, cardRateLimitedUntil - Date.now())
+                    : attempt * 300;
+                  try { await retryDelay(delayMs, undefined, { signal }); } catch (error) { lastError = error; break; }
+                }
               }
             }
-          }
-          if (stale()) continue;
-          // 过程卡内容被拒绝时保留上一次成功内容，结果消息独立交付。
-          if (lastError && contentRejected && Array.isArray(task.lastSuccessfulElements) && task.lastSuccessfulElements.length) {
-            const patchedElements = patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined);
-            try {
-              await this.service.update({ ...pending.input, elements: patchedElements, markdown: undefined });
-              delivered = true;
-              lastError = undefined;
-              if (!stale()) task.lastSuccessfulElements = patchedElements;
-              this.log.warn({ messageId: pending.input.messageId, state: pending.input.state }, '飞书卡片增量被拒绝，已保留上次成功内容并原地修补');
-            } catch (error) {
-              lastError = error;
+            if (stale()) return;
+            // 过程卡内容被拒绝时保留上一次成功内容，结果消息独立交付。
+            if (lastError && contentRejected && Array.isArray(task.lastSuccessfulElements) && task.lastSuccessfulElements.length) {
+              const patchedElements = patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined);
+              try {
+                await this.service.update({ ...pending.input, elements: patchedElements, markdown: undefined });
+                delivered = true;
+                lastError = undefined;
+                if (!stale()) task.lastSuccessfulElements = patchedElements;
+                this.log.warn({ messageId: pending.input.messageId, state: pending.input.state }, '飞书卡片增量被拒绝，已保留上次成功内容并原地修补');
+              } catch (error) {
+                lastError = error;
+              }
             }
-          }
+          };
+          try {
+            if (this.service.withRequestBudget) await this.service.withRequestBudget(deliver);
+            else await deliver();
+          } catch (error) { lastError = error; }
           if (stale()) continue;
           if (lastError) {
             if (isLarkMessageUnupdatable(lastError)) {
