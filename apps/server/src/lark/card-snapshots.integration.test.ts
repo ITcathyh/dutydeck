@@ -222,7 +222,7 @@ async function harness(options: { config?: Partial<StoredLarkConfig>; turns?: Tu
     appId, appSecret: 'snapshot-secret', name: bot.name, workspace, webBaseUrl: 'https://dutydeck.example.com', defaultAgentId: 'mock',
     permissionMode: 'ask', fullTrustConfirmed: true, listening: true, preInjectPrompt: '',
     structuredAskCards: true, groupCardMention: true, groupToolsEnabled: false, groupToolsAllowSend: false,
-    pushIntervalMs: 20_000, hideTraceOnComplete: false,
+    pushIntervalMs: 20_000, hideTraceOnComplete: false, memoryEnabled: options.memory === true,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
     ...options.config
@@ -617,20 +617,21 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
     await h.snapshot('verification-interrupted');
   }, 60_000);
 
-  it('结果卡的本轮记忆区：列出注入的记忆，点删除后重绘', async () => {
+  it('结果卡不展示本轮记忆，后台仍保留本轮记录', async () => {
     const h = await harness({ memory: true });
     const pool = larkMemoryScope(appId, chatId, 'group');
     await h.memoryStore!.add(pool, { content: '回复统一用中文', source: 'user', chatId });
     await h.memoryStore!.add(pool, { content: '先给一句话结论', source: 'user', chatId });
     const task = h.say('总结一下这周的发布情况');
     await h.delivered(task);
-    h.checkpoint('本轮记忆');
-    const resultCard = (await h.persisted(task))!.final_message_id!;
-    const before = h.textOf(resultCard);
-    await h.click(resultCard, value => typeof value.dutydeck_memory_forget === 'string');
-    await h.until(() => h.textOf(resultCard) !== before);
-    await h.settle();
-    h.checkpoint('删除一条记忆后');
+    const saved = (await h.persisted(task))!;
+    const resultCard = saved.final_message_id!;
+    expect(h.textOf(resultCard)).not.toContain('memory_turn');
+    expect(h.textOf(resultCard)).not.toContain('本轮记忆');
+    const mapping = await h.repos.channelMappings.get(`lark-card:${appId}`, task);
+    const turn = await h.memoryStore!.turn(mapping!.sessionId, saved.runtime_task_id!);
+    expect(turn?.injected).toHaveLength(2);
+    h.checkpoint('结果卡不展示记忆');
     await h.snapshot('turn-memory');
   }, 60_000);
 

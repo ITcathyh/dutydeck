@@ -11,7 +11,7 @@ import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import type { LarkTeamContextReader } from './team-context.js';
 import { parseLarkMessageContent } from './message-content.js';
 import { larkMemoryToolsPrompt } from './memory.js';
-import { readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { larkMemoryEnabled, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import {
   createLarkCardService,
   LarkServiceError,
@@ -518,7 +518,7 @@ export class LarkAgentToolsService {
     if (!config) {
       throw new AgentGroupToolError('GROUP_TOOL_BOT_NOT_FOUND', `当前会话关联的飞书机器人 ${binding.appId} 已被删除。`, 404);
     }
-    if (config.memoryEnabled === false) {
+    if (!larkMemoryEnabled(config)) {
       throw new AgentGroupToolError('MEMORY_DISABLED', '当前飞书机器人已关闭会话记忆。', 403);
     }
     return binding;
@@ -626,7 +626,7 @@ export class LarkAgentToolsService {
     const config = await readLarkConfig(this.configs, binding.appId);
     if (!config) return prompt;
     const blocks: string[] = [];
-    if (config.memoryEnabled !== false) {
+    if (larkMemoryEnabled(config)) {
       blocks.push(larkMemoryToolsPrompt(this.options.groupToolsCommand));
     }
     if (config.groupToolsEnabled) {

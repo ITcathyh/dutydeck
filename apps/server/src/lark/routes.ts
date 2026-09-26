@@ -8,7 +8,7 @@ import { validateHighRiskPattern, type AgentRepository, type ChannelMappingRepos
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { createLarkCardService, LarkServiceError, larkConfigurationStatus, type LarkBotConfigInput, type LarkCardService, type LarkSendInput, type LarkUpdateInput } from './service.js';
 import { detectUnusableOwnerEntries, normalizeOwnerEntries, type ContactLookup } from './owner-identity.js';
-import { defaultHighRiskPattern, deleteLarkConfig, larkExecutionConfirmed, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
+import { defaultHighRiskPattern, deleteLarkConfig, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, readLarkConfig, readLarkConfigs, resolveRiskControlModeInput, saveLarkConfig, type SaveLarkConfigInput } from './config.js';
 import { LarkLongConnectionListenerPool, type LarkListenerPool } from './listener.js';
 import { installLarkHook, larkHookStatus } from './security-hooks.js';
 import { registerLarkAgentToolRoutes } from './agent-tools-routes.js';
@@ -189,7 +189,7 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
         throw new LarkServiceError('MEMORY_STATUS_UNAVAILABLE', 'Memory status unavailable', 503);
       }
       const bot = await readLarkConfig(options.config, request.params.appId);
-      const enabled = bot?.memoryEnabled !== false;
+      const enabled = Boolean(bot && larkMemoryEnabled(bot));
       const groups = await options.memory.pipeline.status({
         appId: request.params.appId,
         chatId: 'groups',

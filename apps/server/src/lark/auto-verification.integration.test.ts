@@ -7,7 +7,7 @@
 // 5) 没配验证命令时按基准推断候选命令，一键确认后保存到配置，同一工作区只提议一次；
 // 6) 自动验证执行中服务重启：重启后卡片改成「验证被中断」并给出「运行验证」；
 // 7) 待收尾记录每个机器人一行，任务的验证收尾后移除，不随任务数增长；
-// 8) 验证重绘过之后删掉结果卡上的一条本轮记忆：验证状态行与「运行验证」按钮按当前记录重绘，不退回交付时的样子。
+// 8) 旧结果卡的记忆删除回调触发重绘后：验证状态行与「运行验证」按钮仍按当前记录显示。
 // 9) 管理群里自动验证带上发起人身份、手动「运行验证」带上点击人身份，都过得了执行授权。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -71,7 +71,7 @@ async function harness(options: { verificationCommand?: string; files?: Record<s
   const config: StoredLarkConfig = { appId: 'cli_autoverify', appSecret: 'fake-secret', name: 'Dock', workspace: repo, defaultAgentId: 'mock',
     permissionMode: 'ask', listening: true, fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false,
     groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1_000, hideTraceOnComplete: false,
-    completionReactionOnly: false, silentProgress: false, urgentEnabled: false, pinLongTasks: false,
+    completionReactionOnly: false, silentProgress: false, urgentEnabled: false, pinLongTasks: false, memoryEnabled: options.memory === true,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
     highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off',
     ...(options.verificationCommand ? { verificationCommand: options.verificationCommand } : {}) };
@@ -415,8 +415,8 @@ describe('自动验证进行中服务重启', () => {
   }
 });
 
-describe('验证重绘过之后删本轮记忆', () => {
-  it('返修用完、验证行变成「可点运行验证」之后删一条本轮记忆：重绘后「运行验证」按钮仍在，文字与按钮一致', async () => {
+describe('旧结果卡记忆删除回调', () => {
+  it('返修后旧卡删除回调重绘时，验证行与「运行验证」按钮仍一致', async () => {
     const h = await harness({
       memory: true,
       verificationCommand: 'echo "still broken"; exit 1',
@@ -424,7 +424,7 @@ describe('验证重绘过之后删本轮记忆', () => {
     });
     const pool = larkMemoryScope(h.config.appId, 'oc_group', 'group');
     const dropped = await h.memoryStore!.add(pool, { content: '回复统一用中文', source: 'user', chatId: 'oc_group' });
-    const kept = await h.memoryStore!.add(pool, { content: '先给一句话结论', source: 'user', chatId: 'oc_group' });
+    await h.memoryStore!.add(pool, { content: '先给一句话结论', source: 'user', chatId: 'oc_group' });
     await h.coordinator.handle(event('om_1'), h.config);
     await vi.waitFor(() => expect(h.echoes).toHaveLength(2), { timeout: 30_000 });
     const last = h.echoes[1]!;
@@ -432,21 +432,18 @@ describe('验证重绘过之后删本轮记忆', () => {
     expect(await h.settledLine(last, '已自动返修 2 轮仍未通过')).toContain('可点「运行验证」执行。');
     const before = (await h.resultCard(last)).card;
     expect(callbackValues(buildLarkCard(before)).map(value => value.action)).toContain('verify');
-    const forget = callbackValues(before.elements).find(value => value.dutydeck_memory_forget === dropped.id);
-    expect(forget).toBeTruthy();
-
     const saved = (await h.resultCard(last)).saved;
+    const forget = { dutydeck_memory_forget: dropped.id, task_id: saved.runtime_task_id, session_id: saved.sessionId };
     expect(await h.coordinator.handleAction(forget, 'ou_alice', { messageId: saved.final_message_id, chatId: saved.chat_id })).toMatchObject({ type: 'success' });
     const redraw = (await h.resultCard(last)).card;
     const elements = redraw.elements as Array<Record<string, any>>;
-    const memoryIds = callbackValues(elements).map(value => value.dutydeck_memory_forget).filter(Boolean);
-    expect(memoryIds).toEqual([kept.id]);
+    expect(JSON.stringify(elements)).not.toContain('memory_turn');
     const line = String(elements.find(element => element.element_id === LARK_VERIFICATION_ELEMENT_ID)?.content ?? '');
     expect(line).toContain('已自动返修 2 轮仍未通过');
     expect(line).toContain('可点「运行验证」执行。');
     expect(callbackValues(buildLarkCard(redraw)).map(value => value.action)).toContain('verify');
-    // 验证行原地替换：本轮记忆区以外的元素顺序不变。
-    const layout = (items: Array<Record<string, any>>) => items.map(element => String(element.element_id ?? '')).filter(id => !id.startsWith('memory_turn'));
+    // 验证行原地替换：其余元素顺序不变。
+    const layout = (items: Array<Record<string, any>>) => items.map(element => String(element.element_id ?? ''));
     expect(layout(elements)).toEqual(layout(before.elements));
   }, 60_000);
 });

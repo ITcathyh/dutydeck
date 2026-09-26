@@ -14,7 +14,7 @@ import { LarkContextBootstrap } from './context-bootstrap.js';
 
 const scope = { appId: 'cli_test', chatId: 'oc_test' };
 const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'test', listening: true, defaultAgentId: 'mock', workspace: '/tmp', fullTrustConfirmed: true,
-  permissionMode: 'ask', preInjectPrompt: '', groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
+  permissionMode: 'ask', preInjectPrompt: '', memoryEnabled: true, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1000, hideTraceOnComplete: false,
   allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off' };
 const message = (id = 'om_1', text = '资料已提交', patch: Partial<LarkMessageEvent> = {}): LarkMessageEvent => ({ messageId: id, chatId: scope.chatId, chatType: 'group', messageType: 'text', content: JSON.stringify({ text }), createTime: '1789707600000', senderOpenId: 'ou_a', senderType: 'user', mentions: [], ...patch });
 const silent = (): ParticipationResult => ({ action: 'silent', reason: '没有新增信息', evidenceIds: [], updates: [] });

@@ -612,7 +612,7 @@ describe('lark', () => {
 
 describe('lark.memory', () => {
   const now = new Date('2026-09-25T08:00:00.000Z');
-  const bots = (overrides: Record<string, unknown> = {}) => JSON.stringify([{ appId: 'cli_mem', appSecret: FIXTURE_APP_SECRET, name: '记忆机器人', ...overrides }]);
+  const bots = (overrides: Record<string, unknown> = {}) => JSON.stringify([{ appId: 'cli_mem', appSecret: FIXTURE_APP_SECRET, name: '记忆机器人', memoryEnabled: true, ...overrides }]);
   const key = (pool = 'groups', appId = 'cli_mem') => `lark.memory.state.${appId}.${pool}`;
   const turns = (...kinds: Array<'human' | 'bot'>) => kinds.map((senderKind, index) => ({
     sessionId: 'ses_fixture', taskId: `task_${index}`, completedAt: `2026-09-24T09:0${index}:00.000Z`,

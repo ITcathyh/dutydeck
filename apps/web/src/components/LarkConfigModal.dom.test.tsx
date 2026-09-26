@@ -413,20 +413,27 @@ describe('LarkConfigModal ask permission posture', () => {
 
 
 describe('LarkConfigModal 会话记忆', () => {
-  it('默认开启两个开关，关闭总开关后隐藏下属设置', async () => {
+  it('普通 Bot 默认关闭记忆，开启后显示下属设置', async () => {
     const user = userEvent.setup();
     renderModal();
     await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
     await screen.findByText('操作确认方式');
 
-    expect((screen.getByRole('switch', { name: '启用会话记忆' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
-    expect((screen.getByRole('switch', { name: '自动提取与整理' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
-    expect(screen.getByText('整理 Agent')).toBeTruthy();
+    expect((screen.getByRole('switch', { name: '启用会话记忆' }) as HTMLElement).getAttribute('aria-checked')).toBe('false');
+    expect(screen.queryByRole('switch', { name: '自动提取与整理' })).toBeNull();
     expect(screen.getByText('各群共享同一份记忆，私聊各自独立；仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
 
     await user.click(screen.getByRole('switch', { name: '启用会话记忆' }));
-    expect(screen.queryByRole('switch', { name: '自动提取与整理' })).toBeNull();
-    expect(screen.queryByText('整理 Agent')).toBeNull();
+    expect((screen.getByRole('switch', { name: '自动提取与整理' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText('整理 Agent')).toBeTruthy();
+  });
+
+  it('Tag Bot 旧配置缺字段时默认开启记忆', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ defaultGroupParticipation: 'selective' }));
+    await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+    await screen.findByText('操作确认方式');
+    expect((screen.getByRole('switch', { name: '启用会话记忆' }) as HTMLElement).getAttribute('aria-checked')).toBe('true');
   });
 
   it('保存时带上四个记忆字段', async () => {
@@ -436,6 +443,7 @@ describe('LarkConfigModal 会话记忆', () => {
     await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
     await screen.findByText('操作确认方式');
 
+    await user.click(screen.getByRole('switch', { name: '启用会话记忆' }));
     await user.click(screen.getByRole('switch', { name: '自动提取与整理' }));
     await user.click(screen.getByRole('button', { name: /沿用机器人默认 Agent/ }));
     await user.click(await screen.findByRole('option', { name: 'Claude' }));

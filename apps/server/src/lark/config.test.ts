@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { hostname, userInfo } from 'node:os';
 import type { ConfigRepository } from '@dutydeck/shared';
-import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, larkExecutionConfirmed, larkExecutionIdentity, larkPermissionMode, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
+import { describeWebBaseUrlReachability, larkBotsConfigKey, larkCredentialsConfigKey, larkExecutionConfirmed, larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, publicLarkConfig, publicLarkConfigs, readLarkConfigs, saveLarkConfig } from './config.js';
 
 const createRepository = (initial: Record<string, string> = {}): ConfigRepository => {
   const store = new Map<string, string>(Object.entries(initial));
@@ -12,6 +12,37 @@ const createRepository = (initial: Record<string, string> = {}): ConfigRepositor
 };
 
 const seedBots = (bots: unknown[]) => createRepository({ [larkBotsConfigKey]: JSON.stringify(bots) });
+
+describe('Lark memory defaults', () => {
+  it.each([
+    ['off', false], ['observe', false], ['selective', true]
+  ] as const)('defaults %s participation to memory %s across read, public config, and save', async (defaultGroupParticipation, enabled) => {
+    const repository = seedBots([{ appId: 'cli_legacy', appSecret: 'secret', defaultGroupParticipation, riskControlMode: 'off' }]);
+    const [config] = await readLarkConfigs(repository);
+    expect(larkMemoryEnabled({ defaultGroupParticipation })).toBe(enabled);
+    expect(config.memoryEnabled).toBe(enabled);
+    expect(publicLarkConfig(config).memoryEnabled).toBe(enabled);
+    await saveLarkConfig(repository, undefined, { originalAppId: config.appId, preInjectPrompt: 'updated' });
+    expect((await readLarkConfigs(repository))[0].memoryEnabled).toBe(enabled);
+  });
+
+  it.each([true, false])('preserves an explicit memory flag of %s', async memoryEnabled => {
+    const repository = seedBots([{ appId: 'cli_explicit', appSecret: 'secret', defaultGroupParticipation: 'selective', memoryEnabled, riskControlMode: 'off' }]);
+    expect((await readLarkConfigs(repository))[0].memoryEnabled).toBe(memoryEnabled);
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_explicit', defaultGroupParticipation: 'off' });
+    expect((await readLarkConfigs(repository))[0].memoryEnabled).toBe(memoryEnabled);
+    expect(larkMemoryEnabled({ defaultGroupParticipation: 'off', memoryEnabled })).toBe(memoryEnabled);
+  });
+
+  it('uses the participation default for new configs without a memory flag', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_regular', appSecret: 'secret' });
+    await saveLarkConfig(repository, undefined, { appId: 'cli_tag', appSecret: 'secret', defaultGroupParticipation: 'selective' });
+    expect((await readLarkConfigs(repository)).map(config => [config.appId, config.memoryEnabled])).toEqual([
+      ['cli_regular', false], ['cli_tag', true]
+    ]);
+  });
+});
 
 describe('Lark config new-field normalization', () => {
   it('keeps valid enum values and sanitizes env / startupCommands / displayName', async () => {

@@ -4,7 +4,7 @@ import { LeaderDelegationService } from './leader-delegation.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
 import type { CollaborationExtensions } from './collaboration-extensions.js';
 import { LarkGroupManager } from './lark/group-management.js';
-import { readLarkConfigs } from './lark/config.js';
+import { larkMemoryEnabled, readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfig, type AppConfig } from '@dutydeck/config';
 import { childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
@@ -425,7 +425,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     readCollaborationMemory = async scope => {
       const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === scope.appId);
       const memoryScope = larkMemoryScope(scope.appId, scope.chatId, 'group');
-      return bot?.memoryEnabled === false ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
+      return !bot || !larkMemoryEnabled(bot) ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
     };
     app = await buildApp(runtime, {
       recovery: { authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },

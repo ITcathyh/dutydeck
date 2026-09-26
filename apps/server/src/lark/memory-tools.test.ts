@@ -18,7 +18,7 @@ const session = (id: string, sourceId: string): Session => ({
   id, agentId: 'codex', state: 'idle', cwd: '/tmp', source: 'lark', sourceId, runId: 'run_1', createdAt: '', updatedAt: ''
 });
 
-async function setup(options: { actorId?: string; memoryEnabled?: boolean } = {}) {
+async function setup(options: { actorId?: string; memoryEnabled?: boolean | null } = {}) {
   const repos = createRepositories(':memory:'); repositories.push(repos);
   const groupSession = session('ses_group', 'cli_bot:oc_group:group');
   const p2pSession = session('ses_p2p', 'cli_bot:oc_p2p:p2p');
@@ -31,7 +31,7 @@ async function setup(options: { actorId?: string; memoryEnabled?: boolean } = {}
     name: 'Bot',
     defaultAgentId: 'codex',
     groupToolsEnabled: false,
-    memoryEnabled: options.memoryEnabled ?? true
+    ...(options.memoryEnabled === null ? {} : { memoryEnabled: options.memoryEnabled ?? true })
   }]));
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://127.0.0.1:4310');
   const tools = new LarkAgentToolsService(capabilities, repos.config, {});
@@ -188,6 +188,13 @@ describe('Lark memory agent tools', () => {
 
   it('rejects memory access with 403 MEMORY_DISABLED when memoryEnabled is false', async () => {
     const { app, groupSession, headers } = await setup({ memoryEnabled: false });
+    const res = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: headers(groupSession) });
+    expect(res.statusCode).toBe(403);
+    expect(res.json().error.code).toBe('MEMORY_DISABLED');
+  });
+
+  it('rejects memory access when an ordinary bot omits memoryEnabled', async () => {
+    const { app, groupSession, headers } = await setup({ memoryEnabled: null });
     const res = await app.inject({ method: 'GET', url: larkMemoryToolsPath, headers: headers(groupSession) });
     expect(res.statusCode).toBe(403);
     expect(res.json().error.code).toBe('MEMORY_DISABLED');

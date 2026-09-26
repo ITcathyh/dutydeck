@@ -40,7 +40,7 @@ export type LarkBotConfig = {
   activeListening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
-  /** 会话记忆开关，服务端恒返回布尔；旧服务端缺省按开启处理。 */
+  /** 会话记忆开关，服务端恒返回布尔；旧服务端缺省仅 Tag 模式开启。 */
   memoryEnabled?: boolean;
   /** 后台自动提取与整理开关，服务端恒返回布尔；旧服务端缺省按开启处理。 */
   memoryAutoExtract?: boolean;

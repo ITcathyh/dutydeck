@@ -201,7 +201,8 @@ describe('BotManagement component', () => {
 });
 
 describe('BotManagement 会话记忆', () => {
-  it('旧配置缺字段时默认开启，关闭总开关后隐藏下属设置', async () => {
+  const memoryBot: LarkBotConfig = { ...mockBot, memoryEnabled: true };
+  it('普通 Bot 旧配置缺字段时默认关闭，开启后显示下属设置', async () => {
     const user = userEvent.setup();
     vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
@@ -213,25 +214,37 @@ describe('BotManagement 会话记忆', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
 
     const enabled = screen.getByRole('checkbox', { name: '启用会话记忆' }) as HTMLInputElement;
-    expect(enabled.checked).toBe(true);
-    expect((screen.getByRole('checkbox', { name: '自动提取与整理' }) as HTMLInputElement).checked).toBe(true);
-    expect(screen.getByLabelText('整理 Agent')).toBeTruthy();
+    expect(enabled.checked).toBe(false);
+    expect(screen.queryByRole('checkbox', { name: '自动提取与整理' })).toBeNull();
+    expect(screen.queryByLabelText('整理 Agent')).toBeNull();
     expect(screen.getByText('各群共享同一份记忆，私聊各自独立；仅作为参考内容注入，不授予操作权限。')).toBeTruthy();
     // 只是默认值，没有改动过，不应该报「有未保存的修改」。
     expect(screen.queryByText(/有未保存的修改/)).toBeNull();
 
     await user.click(enabled);
-    expect(screen.queryByRole('checkbox', { name: '自动提取与整理' })).toBeNull();
-    expect(screen.queryByLabelText('整理 Agent')).toBeNull();
+    expect((screen.getByRole('checkbox', { name: '自动提取与整理' }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.getByLabelText('整理 Agent')).toBeTruthy();
     expect(screen.getByText(/有未保存的修改/)).toBeTruthy();
+  });
+
+  it('Tag Bot 旧配置缺字段时默认开启', async () => {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, defaultGroupParticipation: 'selective' }], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+    renderWithClient(
+      <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
+    );
+    await waitFor(() => expect(screen.getByRole('heading', { name: '测试助手' })).toBeTruthy());
+    expect((screen.getByRole('checkbox', { name: '启用会话记忆' }) as HTMLInputElement).checked).toBe(true);
+    expect(screen.queryByText(/有未保存的修改/)).toBeNull();
   });
 
   it('保存时带上四个记忆字段', async () => {
     const user = userEvent.setup();
-    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
-    const saveSpy = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...mockBot, revision: 4 }], listeningDisabled: false });
+    const saveSpy = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [{ ...memoryBot, revision: 4 }], listeningDisabled: false });
 
     renderWithClient(
       <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>
@@ -249,7 +262,7 @@ describe('BotManagement 会话记忆', () => {
   });
 
   it('会话记忆开启时展示群共享状态、上次提取/整理时间、成功运行及私聊小字', async () => {
-    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     vi.spyOn(api, 'larkMemoryStatus').mockResolvedValue({
@@ -292,7 +305,7 @@ describe('BotManagement 会话记忆', () => {
   });
 
   it('上次运行失败时展示失败信息与 lastRunLabel，并使用警示样式', async () => {
-    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     vi.spyOn(api, 'larkMemoryStatus').mockResolvedValue({
@@ -331,7 +344,7 @@ describe('BotManagement 会话记忆', () => {
   });
 
   it('正在运行时展示正在运行状态', async () => {
-    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     vi.spyOn(api, 'larkMemoryStatus').mockResolvedValue({
@@ -361,7 +374,7 @@ describe('BotManagement 会话记忆', () => {
 
   it('正在运行时每 10 秒自动重新读取，完成后显示完成结果', async () => {
     vi.useFakeTimers();
-    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
 
@@ -433,7 +446,7 @@ describe('BotManagement 会话记忆', () => {
   });
 
   it('接口失败时显示记忆状态读取失败，不影响页面其他部分', async () => {
-    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     vi.spyOn(api, 'larkMemoryStatus').mockRejectedValue(new Error('Failed to fetch'));
@@ -449,7 +462,7 @@ describe('BotManagement 会话记忆', () => {
   });
 
   it('加载中显示读取中…', async () => {
-    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     vi.spyOn(api, 'larkMemoryStatus').mockReturnValue(new Promise(() => {})); // 保持 pending
@@ -462,7 +475,7 @@ describe('BotManagement 会话记忆', () => {
   });
 
   it('关闭会话记忆时不请求接口，也不显示记忆状态', async () => {
-    const memoryDisabledBot: LarkBotConfig = { ...mockBot, memoryEnabled: false };
+    const memoryDisabledBot: LarkBotConfig = { ...memoryBot, memoryEnabled: false };
     vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryDisabledBot], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
@@ -481,8 +494,8 @@ describe('BotManagement 会话记忆', () => {
 
   it('切换机器人时重新读取对应机器人的记忆状态', async () => {
     const user = userEvent.setup();
-    const botB: LarkBotConfig = { ...mockBot, appId: 'cli_test_2', name: '第二助手', workspace: '/data/projects/bot2', revision: 7 };
-    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot, botB], listeningDisabled: false });
+    const botB: LarkBotConfig = { ...memoryBot, appId: 'cli_test_2', name: '第二助手', workspace: '/data/projects/bot2', revision: 7 };
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [memoryBot, botB], listeningDisabled: false });
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
     const memoryStatusSpy = vi.spyOn(api, 'larkMemoryStatus').mockImplementation(async appId => ({

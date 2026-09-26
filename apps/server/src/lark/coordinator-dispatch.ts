@@ -8,7 +8,7 @@ import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type Lark
 import { renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
-import { defaultHighRiskPattern, defaultLarkTraceLimit, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { defaultHighRiskPattern, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
 import {
   loadLarkTaskEvents,
@@ -896,13 +896,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         // 但此前只存在于 Web；结果卡上必须把「验证过没有」和 Agent 的自述分开写清楚。
         const verification = await this.verificationView(task, config, state);
         const resultActions = await this.resultActionCapabilities(task, config, state);
-        // 取消的任务没有执行过，注入的记忆 Agent 并没有看到。
-        const memoryElements = state === 'cancelled' ? [] : await this.turnMemoryElements(config, task.sessionId, task.runtimeTaskId);
         const elements = [
           ...(explicit ? [] : task.steered ? [{ tag: 'markdown', element_id: 'steer_note', content: task.steerNote ?? steeringOutcomeText(task.steered) }] : renderLarkResultElements(verifiedOutput ? [verifiedOutput] : task.events)),
           ...(context && this.workflows ? await this.workflows.result(context, '') : []),
           ...(verification.element ? [verification.element] : []),
-          ...memoryElements,
           ...(terminalMention ? [{ tag: 'markdown', element_id: 'group_mention', content: terminalMention }] : [])];
         if (this.stopped || task.turn !== currentTurn) return;
         const resultCardInput = {
@@ -1018,9 +1015,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
     if (config.preInjectPrompt?.trim()) injected.push(`[Dutydeck 预注入 Prompt]\n${config.preInjectPrompt.trim()}`);
     // 会话记忆随 agentPrompt 一起冻结进任务账本：事后能核对这一轮 Agent 看到的是哪几条记忆。
-    // 读取失败只丢本轮注入并留日志，不阻断任务。注入了哪几条另记一份，结果卡与 Web 任务详情据此列出。
+    // 读取失败只丢本轮注入并留日志，不阻断任务。注入了哪几条另记一份，供 Web 任务详情查看。
     let memoryTurn: { scope: LarkMemoryScope; ids: string[] } | undefined;
-    if (config.memoryEnabled !== false && this.workflowOptions.memory) {
+    if (larkMemoryEnabled(config) && this.workflowOptions.memory) {
       try {
         const { store, projection, command } = this.workflowOptions.memory;
         const scope = larkMemoryScope(config.appId, event.chatId, event.chatType);
@@ -1039,7 +1036,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
               readLarkConfigs(this.workflowOptions.store, { readOnly: true }),
               '机器人配置读取'
             );
-            const peerBots = allBots.filter(b => b.appId !== config.appId && b.memoryEnabled !== false);
+            const peerBots = allBots.filter(b => b.appId !== config.appId && larkMemoryEnabled(b));
             if (peerBots.length > 0) {
               const peerResults = await withLarkContextReadTimeout(
                 Promise.all(
