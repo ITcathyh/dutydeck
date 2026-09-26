@@ -1611,15 +1611,17 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     const actionStale = () => (task.turn ?? 0) !== actionTurn;
     if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
 
-    // 访问权限：操作人必须在机器人白名单中，与「谁可以使用 Agent」的配置一致。
-    // 白名单内的成员均可取消 / 中断 / 重试任意任务，不再限制为任务发起人本人，
-    // 避免 AI 协作链（上游 AI 触发下游 AI 任务）中人类无法干预的问题。
+    // 中断按钮单独校验发起人/管理员；其他操作沿用机器人访问权限。
     const currentConfig = this.workflowOptions.store ? await readLarkConfig(this.workflowOptions.store, task.config.appId) : task.config;
     if (!currentConfig || (this.workflowOptions.store && !currentConfig.listening)) return { type: 'warning', content: '机器人已停用，无法执行此操作' };
     const effectiveConfig = task.event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(currentConfig, task.event.chatId) : currentConfig;
-    const allowed = await this.isOperatorAllowed(effectiveConfig, operatorOpenId, task.event.chatId, task.sessionId, task.event.senderOpenId);
+    const allowed = action === 'interrupt'
+      ? await this.isInterruptOperatorAllowed(effectiveConfig, operatorOpenId, task.event.chatId, task.sessionId, task.event.senderOpenId)
+      : await this.isOperatorAllowed(effectiveConfig, operatorOpenId, task.event.chatId, task.sessionId, task.event.senderOpenId);
     if (!allowed) {
-      return { type: 'warning', content: '当前账号不在机器人白名单中，无法执行此操作' };
+      return { type: 'warning', content: action === 'interrupt'
+        ? '没有权限中断此任务，仅任务发起人和管理员可操作。'
+        : '当前账号不在机器人白名单中，无法执行此操作' };
     }
     // 鉴权本身是异步的，期间同样可能翻页。
     if (actionStale()) return { type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' };
@@ -1691,7 +1693,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     }
 
     // 旧版排队卡片会发 interrupt，仍按安全的单轮次取消处理，不中断当前运行任务。
-    // P0-1：取消/中断/重试他人发起的任务时要求二次点击确认；发起人本人与身份缺失场景不拦。
+    // P0-1：有权限取消/中断/重试他人发起的任务时，要求二次点击确认。
     // 键绑定 操作人+任务+轮次+动作，60 秒内同一按钮第二次点击才真正执行，过期需重新确认。
     if (operatorOpenId && task.event.senderOpenId && operatorOpenId !== task.event.senderOpenId
       && (action === 'cancel' || action === 'interrupt' || action === 'retry')) {

@@ -1054,7 +1054,7 @@ describe('Lark message coordinator', () => {
       update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
+    coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_operator', mentions: [] }, config);
     await vi.waitFor(() => expect(runtime.send).toHaveBeenCalledOnce());
 
     await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '正在取消任务' });
@@ -1113,7 +1113,7 @@ describe('Lark message coordinator', () => {
         .mockResolvedValueOnce({ messageId: 'om_result' }), update: vi.fn(async (input: any) => ({ messageId: input.messageId }))
     };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot');
-    coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
+    coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_operator', mentions: [] }, config);
     await vi.waitFor(() => expect(service.send).toHaveBeenCalledOnce());
 
     // 从真实渲染出来的首张卡里取真实的中断回调 value，不自己拼一个。
@@ -1125,8 +1125,8 @@ describe('Lark message coordinator', () => {
 
     // 心跳一次都还没发生，直接拿这个 value 点：必须被接受。
     expect(service.update).not.toHaveBeenCalled();
-    await expect(coordinator.handleAction(callbackValue)).resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', undefined, undefined);
+    await expect(coordinator.handleAction(callbackValue, 'ou_operator')).resolves.toEqual({ type: 'success', content: '正在取消任务' });
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', undefined, 'ou_operator');
     finishTurn();
     coordinator.stop();
   });
@@ -1141,19 +1141,19 @@ describe('Lark message coordinator', () => {
     // 任务已经在第 2 轮：第 1 轮那张卡上的按钮属于历史。
     (coordinator as any).tasks.set('om_turned', {
       id: 'om_turned', group: { tail: Promise.resolve() },
-      event: { messageId: 'om_turned', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{}', mentions: [] },
+      event: { messageId: 'om_turned', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{}', senderOpenId: 'ou_operator', mentions: [] },
       prompt: '执行任务', resources: [], config, state: 'running', events: [],
       sessionId: 'ses_1', runtimeTaskId: 'runtime-2', turn: 2
     });
 
-    await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_turned', turn: '1' }))
+    await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_turned', turn: '1' }, 'ou_operator'))
       .resolves.toEqual({ type: 'warning', content: '任务已开始新一轮，请在最新的卡片上操作' });
     expect(runtime.interrupt).not.toHaveBeenCalled();
 
     // 线上遗留卡片不带 turn，必须继续可用，不能因为这次加固把老卡片全废掉。
-    await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_turned' }))
+    await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_turned' }, 'ou_operator'))
       .resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2', undefined);
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2', 'ou_operator');
   });
 
   /**
@@ -1211,7 +1211,7 @@ describe('Lark message coordinator', () => {
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const coordinator = new LarkMessageCoordinator(runtime as any, service as any, log, Math.random, 'ou_bot', undefined, mappings as any);
     const emit = (event: AgentEvent) => { for (const listener of listeners) listener(event); };
-    const start = () => coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', mentions: [] }, config);
+    const start = () => coordinator.handle({ messageId: 'om_task', chatId: 'oc_p2p', chatType: 'p2p', messageType: 'text', content: '{"text":"执行任务"}', senderOpenId: 'ou_operator', mentions: [] }, config);
     const parsedMapping = () => JSON.parse(mapping.extra || '{}');
     return { runtime, service, mappings, mapping, log, coordinator, emit, start, parsedMapping, releaseReplacement, rejectReplacement, releaseInterrupt, rejectInterrupt };
   };
@@ -1247,8 +1247,8 @@ describe('Lark message coordinator', () => {
 
     // 新一轮仍然活着：刷新与取消都还能作用在它身上，没被旧轮的 cleanup 清掉。
     await expect(coordinator.handleAction({ action: 'refresh', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '已拉取最新状态' });
-    await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: '正在取消任务' });
-    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2', undefined);
+    await expect(coordinator.handleAction({ action: 'interrupt', task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: '正在取消任务' });
+    expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-2', 'ou_operator');
     expect(service.update.mock.calls.filter(([input]: any[]) => input.messageId === newCardId && input.state === 'interrupted')).toHaveLength(0);
     emit(agentEvent(22, 'task', { task: { id: 'runtime-2', status: 'interrupted' } }));
     // 新一轮的终态落在新卡上，旧卡 om_card_1 始终没被改写成第二轮的结论。
@@ -1328,9 +1328,9 @@ describe('Lark message coordinator', () => {
     const firstCardId = parsedMapping().card_message_id;
 
     // 取消/中断请求发出，但 runtime 那一侧挂住不返回。
-    await expect(coordinator.handleAction({ action, task_id: 'om_task' })).resolves.toEqual({ type: 'success', content: toast });
-    if (action === 'interrupt') expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-1', undefined);
-    else expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-1', undefined);
+    await expect(coordinator.handleAction({ action, task_id: 'om_task' }, 'ou_operator')).resolves.toEqual({ type: 'success', content: toast });
+    if (action === 'interrupt') expect(runtime.interrupt).toHaveBeenCalledWith('ses_1', 'runtime-1', 'ou_operator');
+    else expect(runtime.cancelQueued).toHaveBeenCalledWith('ses_1', 'runtime-1', 'ou_operator');
 
     // runtime 自己把第一轮判为 interrupted（事件流），于是任务可重试。
     emit(agentEvent(11, 'task', { task: { id: 'runtime-1', status: 'interrupted' } }));
