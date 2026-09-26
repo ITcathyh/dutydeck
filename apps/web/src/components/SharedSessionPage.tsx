@@ -1,9 +1,9 @@
 import { useMemo } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { Link2Off } from 'lucide-react';
 import { api, ApiError } from '../api';
-import { buildTimeline, buildTimelineSections } from '../timeline';
-import { createEventWindow, loadEventHistory, type EventWindow } from '../event-history';
+import { createTimelineProjector } from '../timeline';
+import { useEventHistory } from '../useEventHistory';
 import { sessionDisplayName } from '../run-summary';
 import { sessionErrorSummary } from '../workspace-model';
 import { useSessionStream } from '../useSessionStream';
@@ -21,15 +21,14 @@ import { TimelineView } from './TimelineView';
  */
 export function SharedSessionPage({ sessionId }: { sessionId: string }) {
   useTheme();
-  const qc = useQueryClient();
   const sessions = useQuery({ queryKey: ['sessions'], queryFn: async () => [await api.session(sessionId)], retry: false, refetchInterval: 15_000, refetchIntervalInBackground: false });
   const session = sessions.data?.[0];
-  const events = useQuery({ queryKey: ['events', sessionId], queryFn: async ({ signal }) => { const history = await loadEventHistory(sessionId, signal); const cached = qc.getQueryData<EventWindow>(['events', sessionId]); return createEventWindow([...history.events, ...(cached?.events ?? [])]); }, enabled: Boolean(session), staleTime: Infinity });
+  const events = useEventHistory(sessionId, Boolean(session));
   const tasks = useQuery({ queryKey: ['tasks', sessionId], queryFn: () => api.tasks(sessionId), enabled: Boolean(session) });
   const streamStatus = useSessionStream(session ? sessionId : undefined, session?.runId, events.isSuccess);
   const eventList = events.data?.events ?? [];
-  const timeline = useMemo(() => buildTimeline(eventList, tasks.data), [eventList, tasks.data]);
-  const timelineSections = useMemo(() => buildTimelineSections(timeline, tasks.data), [timeline, tasks.data]);
+  const projectTimeline = useMemo(() => createTimelineProjector(), [sessionId]);
+  const { timeline, timelineSections } = useMemo(() => projectTimeline(eventList, tasks.data, events.data?.hasOlder, events.data), [projectTimeline, eventList, tasks.data, events.data?.hasOlder]);
   const latestUserIndex = useMemo(() => {
     for (let index = timeline.length - 1; index >= 0; index--) if (timeline[index].type === 'text' && timeline[index].data.role === 'user') return index;
     return -1;
@@ -75,7 +74,7 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
       {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
     </header>
     {events.isError && <div className="shrink-0 px-4 py-2"><Banner tone="danger">执行记录加载失败：{events.error.message}</Banner></div>}
-    <TimelineView activeSessionId={sessionId} eventsLoading={events.isLoading} timeline={timeline} timelineSections={timelineSections}
+    <TimelineView key={sessionId} hasOlder={events.data?.hasOlder} loadOlder={events.loadOlder} loadingOlder={events.loadingOlder} olderError={events.olderError} activeSessionId={sessionId} eventsLoading={events.isLoading} timeline={timeline} timelineSections={timelineSections}
       awaitingAnswer={awaitingAnswer} hasOngoingActivity={hasOngoingActivity} latestUserIndex={latestUserIndex} activeOutputLabel={session.model ?? session.agentId}
       renderProgress={emptyState => emptyState ? <p className="py-10 text-center text-caption text-subtle">这个任务还没有执行记录。</p> : null}/>
   </div>;

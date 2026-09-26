@@ -248,3 +248,30 @@ describe('read-only participation decision', () => {
     expect(events.filter(event => event.type === 'task' && event.data.task?.status === 'completed')).toHaveLength(2);
   });
 });
+
+describe('participation model routing', () => {
+  it.each([
+    ['explicit', { decisionAgentId: 'decision', decisionModel: 'fast', responseAgentId: 'response', responseModel: 'quality', memoryAgentId: 'memory', memoryModel: 'memory-model' }, ['decision', 'response'], ['fast', 'quality']],
+    ['legacy memory', { memoryAgentId: 'memory', memoryModel: 'memory-model' }, ['memory', 'memory'], ['memory-model', 'memory-model']],
+    ['legacy default', {}, ['mock', 'mock'], ['default-model', 'default-model']]
+  ] as const)('uses %s configuration independently for decision and response', async (_name, patch, ids, models) => {
+    const h = await harness([JSON.stringify(replyDecision), '{"response":"ok"}']);
+    const base = (await h.runtime.listAgents())[0]!;
+    for (const id of ['decision', 'response', 'memory']) await h.repositories.agents.save({ ...base, id, name: id });
+    const selected = { ...config, defaultModel: 'default-model', ...patch };
+    const decision = await h.decider.decide(selected, snapshot(), 'obs_1');
+    await h.decider.respond(selected, snapshot(), decision, 'obs_1');
+    expect(h.starts.map(agent => agent.id)).toEqual(ids);
+    expect(h.starts.map(agent => agent.model)).toEqual(models);
+  });
+
+  it.each([
+    ['未向机器人求助', 'silent', []], ['明确唤醒', 'reply', ['obs_1']], ['可靠续问', 'reply', ['obs_1']], ['需工具执行', 'act', ['obs_1']]
+  ] as const)('replays %s output through the configured classifier without changing parsing', async (reason, action, evidenceIds) => {
+    const result = { action, reason, evidenceIds, updates: [] };
+    const h = await harness(JSON.stringify(result));
+    expect(await h.decider.decide({ ...config, decisionModel: 'classification-model', memoryModel: 'memory-model' }, snapshot(), 'obs_1')).toEqual(result);
+    expect(h.starts[0]?.model).toBe('classification-model');
+    expect(h.starts).toHaveLength(1);
+  });
+});

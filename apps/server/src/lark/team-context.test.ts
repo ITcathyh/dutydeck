@@ -15,7 +15,7 @@ const message = (messageId: string, chatId = source.chatId, text = '个人待办
   sender: { id: 'ou_person', type: 'user' }, mentions: [], deleted: false, updated: false
 });
 
-function setup(chats = [chat(origin.chatId), chat(source.chatId, '个人待办')]) {
+function setup(chats = [chat(origin.chatId), chat(source.chatId, '个人待办')], now = () => new Date(at)) {
   const repos = createRepositories(':memory:'); repositories.push(repos);
   const config = { appId: origin.appId, appSecret: 'synthetic', listening: true, groupToolsEnabled: true, fullTrustConfirmed: true, memoryEnabled: false } as StoredLarkConfig;
   const listChats = vi.fn(async (_token?: string): Promise<LarkChatsResult> => ({ items: chats, hasMore: false }));
@@ -23,7 +23,7 @@ function setup(chats = [chat(origin.chatId), chat(source.chatId, '个人待办')
   const canRead = vi.fn(async (_scope: CollaborationScope) => true);
   const readConfig = vi.fn(async () => config);
   const reader = new LarkTeamContextReader({ repository: repos.collaboration, readConfig,
-    serviceFor: () => ({ listChats, listChatMessages }), canRead, now: () => new Date(at) });
+    serviceFor: () => ({ listChats, listChatMessages }), canRead, now });
   const observe = (scope = source, eventId = 'om_old', text = '个人待办部署完成') => repos.collaboration.observe({ scope,
     source: 'lark.message', eventId, messageId: eventId, occurredAt: at, receivedAt: at, senderKind: 'human', senderId: 'ou_person',
     text, origin: 'live', refs: [eventId], missing: [] });
@@ -154,4 +154,74 @@ describe('host team context reader', () => {
     expect(reader.scorer('Deploy plan')('deploy 已完成')).toBeGreaterThan(0);
     expect(reader.scorer('部署方案')('今天午饭吃什么')).toBe(0);
   });
+});
+
+describe('team context cache and content recall', () => {
+  it('finds content in the 50th unnamed group and reuses unchanged local results', async () => {
+    const f = setup(Array.from({ length: 100 }, (_, i) => chat(`oc_${String(i).padStart(3, '0')}`, `工作组${i}`)));
+    const target = { ...origin, chatId: 'oc_050' };
+    await f.observe(target, 'om_target', '张三今天完成了容量评估');
+    const observations = vi.spyOn(f.repos.collaboration, 'listObservations');
+    const followups = vi.spyOn(f.repos.collaboration, 'listFollowups');
+    const first = await f.reader.read(origin, '张三今天进展');
+    expect(first.sources[0]?.scope).toEqual(target);
+    expect(first.observations.some(item => item.messageId === 'om_target')).toBe(true);
+    expect(observations).toHaveBeenCalledTimes(100); expect(followups).toHaveBeenCalledTimes(100);
+    await f.reader.read(origin, '张三今天进展');
+    expect(observations).toHaveBeenCalledTimes(100); expect(followups).toHaveBeenCalledTimes(100);
+    expect(f.listChats).toHaveBeenCalledOnce();
+    expect(f.listChatMessages).toHaveBeenCalledTimes(16);
+    await f.observe(target, 'om_new', '张三今天发布新版本');
+    const updated = await f.reader.read(origin, '张三今天进展');
+    expect(observations).toHaveBeenCalledTimes(101);
+    expect(updated.observations.some(item => item.messageId === 'om_new')).toBe(true);
+    f.config.appSecret = 'rotated';
+    await f.reader.read(origin, '张三今天进展');
+    expect(observations).toHaveBeenCalledTimes(201); expect(f.listChats).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not reuse local material after read permission is revoked', async () => {
+    const f = setup(); await f.observe();
+    await f.reader.read(origin, '个人待办');
+    const observations = vi.spyOn(f.repos.collaboration, 'listObservations');
+    f.canRead.mockResolvedValue(false);
+    expect((await f.reader.read(origin, '个人待办')).observations).toEqual([]);
+    expect(observations).not.toHaveBeenCalled();
+    expect(f.listChatMessages).toHaveBeenCalledOnce();
+  });
+});
+
+describe('bounded team material cache', () => {
+  it('skips oversized entries without truncating their search results and evicts by total bytes', async () => {
+    const f = setup(Array.from({ length: 12 }, (_, i) => chat(`oc_${i}`)));
+    for (let group = 0; group < 12; group++) {
+      for (let item = 0; item < (group === 11 ? 40 : 25); item++) {
+        await f.observe({ ...origin, chatId: `oc_${group}` }, `om_${group}_${item}`, `needle${group} ${'x'.repeat(16000 - 20)}`);
+      }
+    }
+    const observations = vi.spyOn(f.repos.collaboration, 'listObservations');
+    const result = await f.reader.read(origin, 'needle11');
+    expect(result.observations.some(item => item.messageId === 'om_11_39')).toBe(true);
+    expect(observations).toHaveBeenCalledTimes(12);
+    const cache = f.reader as unknown as { localBytes: number; local: Map<string, unknown> };
+    expect(cache.localBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+    expect(cache.local.size).toBeLessThan(11);
+    const oldest = { ...origin, chatId: 'oc_0' };
+    await f.reader.read(origin, 'needle11');
+    expect(observations.mock.calls.filter(([target]) => target.chatId === 'oc_11')).toHaveLength(2);
+    expect(observations.mock.calls.filter(([target]) => target.chatId === oldest.chatId)).toHaveLength(2);
+    expect(cache.localBytes).toBeLessThanOrEqual(4 * 1024 * 1024);
+  });
+});
+
+it('shares raw cached material across queries but expires both directory and local material after 30 seconds', async () => {
+  let clock = new Date(at);
+  const f = setup(undefined, () => clock); await f.observe();
+  const observations = vi.spyOn(f.repos.collaboration, 'listObservations');
+  await f.reader.read(origin, '个人待办');
+  await f.reader.read(origin, '部署');
+  expect(observations).toHaveBeenCalledOnce(); expect(f.listChats).toHaveBeenCalledOnce();
+  clock = new Date(clock.getTime() + 30_001);
+  await f.reader.read(origin, '部署');
+  expect(observations).toHaveBeenCalledTimes(2); expect(f.listChats).toHaveBeenCalledTimes(2);
 });

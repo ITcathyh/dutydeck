@@ -324,7 +324,16 @@ export interface TaskRecord {
   queuePosition?: number;
 }
 export type PublicTaskRecord = Omit<TaskRecord, 'executionContext' | 'queuePosition'> & { skillDeliveries?: SkillDeliveryMetadata[] };
+export interface RunSummary {
+  sessionId: string;
+  taskId: string;
+  prompt: string;
+  status: TaskRecord['status'];
+  queuedCount: number;
+  updatedAt: string;
+}
 export interface TaskRepository {
+  listRunSummaries?(): Promise<RunSummary[]>;
   save(task: TaskRecord): Promise<void>;
   listBySession(sessionId: string): Promise<TaskRecord[]>;
   get?(id: string): Promise<TaskRecord | undefined>;

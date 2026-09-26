@@ -30,10 +30,10 @@ describe('usage measurement', () => {
   it('counts per-turn tokens once and prefers the reported cost over an estimate', () => {
     const reading = { usageRef: 'req_1', breakdown: { inputTokens: 1000, outputTokens: 100, cachedReadTokens: 400, cachedWriteTokens: 50 }, cost: { amount: 0.75, currency: 'USD' } };
     expect(measureUsage({ reading, freshTokens: true, baselineCostUsd: 0.25, pricing: defaultUsagePricing })).toEqual({
-      inputTokens: 1000, outputTokens: 100, cacheReadTokens: 400, cacheWriteTokens: 50, usageRef: 'req_1', costUsd: 0.5, costEstimated: false, dataStatus: 'reported', cumulativeCostUsd: 0.75
+      inputTokens: 1000, outputTokens: 100, cacheReadTokens: 400, cacheWriteTokens: 50, usageRef: 'req_1', costUsd: 0.5, costEstimated: false, dataStatus: 'reported', cumulativeCostUsd: 0.75, pricingSource: 'reported'
     });
     // 同一个 usageRef 再次出现：token 不再计入，成本照常求差。
-    expect(measureUsage({ reading, freshTokens: false, baselineCostUsd: 0.75, pricing: defaultUsagePricing })).toEqual({ costUsd: 0, costEstimated: false, dataStatus: 'reported', cumulativeCostUsd: 0.75 });
+    expect(measureUsage({ reading, freshTokens: false, baselineCostUsd: 0.75, pricing: defaultUsagePricing })).toEqual({ costUsd: 0, costEstimated: false, dataStatus: 'reported', cumulativeCostUsd: 0.75, pricingSource: 'reported' });
   });
 
   it('estimates codex turns from tokens with the price table and marks them as estimates', () => {
@@ -42,11 +42,11 @@ describe('usage measurement', () => {
     // gpt-5 前缀：40 万非缓存 × 1.25 + 60 万缓存 × 0.125 + 10 万输出 × 10，单位百万 token。
     expect(estimateCostUsd(defaultUsagePricing, 'gpt-5-codex', tokens)).toBeCloseTo(0.5 + 0.075 + 1);
     expect(estimateCostUsd(defaultUsagePricing, 'gpt-5-mini', tokens)).toBeCloseTo(0.1 + 0.015 + 0.2);
-    expect(estimateCostUsd(defaultUsagePricing, undefined, tokens)).toBeCloseTo(0.5 + 0.075 + 1);
+    expect(estimateCostUsd(defaultUsagePricing, undefined, tokens)).toBeUndefined();
     const measured = measureUsage({ reading: { usageRef: 'req_2', breakdown: { inputTokens: 400_000, outputTokens: 100_000, cachedReadTokens: 600_000 } }, freshTokens: true, model: 'gpt-5-codex', pricing: defaultUsagePricing });
     expect(measured).toMatchObject({ costEstimated: true, dataStatus: 'estimated', inputTokens: 400_000, cacheReadTokens: 600_000 });
     expect(measured.costUsd).toBeCloseTo(1.575);
-    expect(measureUsage({ freshTokens: false, pricing: defaultUsagePricing })).toEqual({ costEstimated: false, dataStatus: 'unavailable' });
+    expect(measureUsage({ freshTokens: false, pricing: defaultUsagePricing })).toEqual({ costEstimated: false, dataStatus: 'unavailable', pricingSource: 'none' });
     const custom = parseUsagePricing(JSON.stringify({ default: { inputPerMTok: 1, cachedInputPerMTok: 1, outputPerMTok: 1 }, models: [] }));
     expect(estimateCostUsd(custom, 'gpt-5', { inputTokens: 1_000_000 })).toBe(1);
     expect(() => parseUsagePricing('{"default":{}}')).toThrow();
@@ -246,6 +246,57 @@ describe('usage ledger', () => {
     await h.ledger.record(group, { taskId: 't', attemptId: 'a1' }, { usageRef: 'a1', cost: { amount: 1 } });
     expect(await h.ledger.describe('cli_a', 'oc_1')).toBe('**本月用量**：本群 $1.00（上限 $4.00，已用 25%） · 本机器人 $1.00（未设上限）');
     expect(await h.ledger.describe('cli_a')).toBe('**本月用量**：本机器人 $1.00（未设上限）');
+    h.repos.close();
+  });
+});
+
+describe('complete pricing and provenance', () => {
+  const reading = (breakdown: Record<string, number>) => ({ usageRef: 'tokens', breakdown });
+  const legacyRates = { default: { inputPerMTok: 1, cachedInputPerMTok: 0.1, outputPerMTok: 2 }, models: [] };
+
+  it('prices cache-write-only usage when configured, and never calls an incomplete estimate zero', () => {
+    const legacy = parseUsagePricing(JSON.stringify(legacyRates));
+    const tokens = reading({ cachedWriteTokens: 1_000_000 });
+    const missing = measureUsage({ reading: tokens, freshTokens: true, model: 'anything', pricing: legacy });
+    expect(missing).toMatchObject({ cacheWriteTokens: 1_000_000, dataStatus: 'unpriced', unpricedReason: 'cache_write_rate_missing', pricingSource: 'custom_default', costEstimated: false });
+    expect(missing.costUsd).toBeUndefined();
+    const complete = parseUsagePricing(JSON.stringify({ ...legacyRates, default: { ...legacyRates.default, cacheWritePerMTok: 3 } }));
+    const result = measureUsage({ reading: tokens, freshTokens: true, model: 'anything', pricing: complete });
+    expect(result).toMatchObject({ costUsd: 3, dataStatus: 'estimated', pricingSource: 'custom_default' });
+    expect(result.pricingVersion).not.toBe(missing.pricingVersion);
+    expect(measureUsage({ reading: reading({ inputTokens: 1_000_000, cachedWriteTokens: 1 }), freshTokens: true, pricing: legacy }).costUsd).toBeUndefined();
+  });
+
+  it('keeps unknown model usage unpriced and real reported zero priced', () => {
+    for (const model of [undefined, 'new-provider-model', 'gpt-5.99']) {
+      const result = measureUsage({ reading: reading({ inputTokens: 10 }), freshTokens: true, model, pricing: defaultUsagePricing });
+      expect(result).toMatchObject({ dataStatus: 'unpriced', inputTokens: 10, unpricedReason: 'unknown_model', pricingSource: 'unmatched' });
+      expect(result.costUsd).toBeUndefined();
+    }
+    const result = measureUsage({ reading: { ...reading({ cachedWriteTokens: 1_000_000 }), cost: { amount: 0, currency: 'USD' } }, freshTokens: true, pricing: defaultUsagePricing });
+    expect(result).toMatchObject({ dataStatus: 'reported', costUsd: 0, pricingSource: 'reported', costEstimated: false });
+  });
+
+  it('matches provider-specific custom rates only with evidence and records the rate version', () => {
+    const pricing = parseUsagePricing(JSON.stringify({ version: 'contract-1', default: { ...legacyRates.default, provider: 'vendor-a' }, models: [{ ...legacyRates.default, provider: 'vendor-a', match: 'model-a', inputPerMTok: 4 }] }));
+    const input = { reading: reading({ inputTokens: 1_000_000 }), freshTokens: true, model: 'model-a', pricing };
+    expect(measureUsage(input)).toMatchObject({ dataStatus: 'unpriced', pricingSource: 'unmatched' });
+    expect(measureUsage({ ...input, provider: 'vendor-a' })).toMatchObject({ costUsd: 4, pricingSource: 'custom_model', pricingMatch: 'model-a', pricingVersion: expect.stringMatching(/^contract-1:/) });
+  });
+
+  it('uses the frozen task model and never infers a provider from an Agent name', async () => {
+    const h = harness();
+    const current = { ...group, model: 'gpt-5-mini', agentId: 'anthropic-agent-name' };
+    await h.repos.sessions.save(current);
+    const append = vi.spyOn(h.repos.usage, 'append');
+    const frozen = new UsageLedger({ repositories: { ...h.repos, execution: { getAcceptedTask: () => ({ input: { version: 2, executionOptions: { model: 'gpt-5-nano' } } }) } as any } });
+    await frozen.record(current, { taskId: 't', attemptId: 'frozen-model' }, { usageRef: 'frozen', breakdown: { inputTokens: 1_000_000 } });
+    expect(append.mock.calls[0]![0]).toMatchObject({ model: 'gpt-5-nano', modelSource: 'task', costUsd: 0.05 });
+    append.mockClear();
+    await h.ledger.record(current, { taskId: 't', attemptId: 'unknown-provider' }, { usageRef: 'one', breakdown: { inputTokens: 1_000_000 } });
+    expect(append.mock.calls[0]![0]).toMatchObject({ provider: 'unknown', modelSource: 'session', model: 'gpt-5-mini', pricingSource: 'builtin_model', pricingMatch: 'gpt-5-mini' });
+    await h.ledger.record(current, { taskId: 't', attemptId: 'reported-provider' }, { provider: 'actual-service', model: 'actual-model', usageRef: 'two', cost: { amount: 0.1, currency: 'USD' } });
+    expect(append.mock.calls[1]![0]).toMatchObject({ provider: 'actual-service', model: 'actual-model', modelSource: 'reading', pricingSource: 'reported' });
     h.repos.close();
   });
 });

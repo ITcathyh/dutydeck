@@ -91,15 +91,17 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     expect(finalIndex).toBeLessThan(events.findIndex(event => event.type === 'completed'));
   });
 
-  it('flushes a final record written between the last poll and the completion timer', async () => {
+  it.each([64, 1024 * 1024])('flushes a %i-byte final record written between the last poll and completion', async size => {
     const pending = driver.send('总结消息');
     await waitForSubmission();
     output(repaint(`✻ Cooked for 16m 55s\n❯\n${idleFooter}`));
     await vi.advanceTimersByTimeAsync(499);
-    answer(transcript);
+    const lastAnswer = 'x'.repeat(size);
+    answer(transcript, lastAnswer);
     expect(events.some(event => event.type === 'text')).toBe(false);
-    await vi.advanceTimersByTimeAsync(1);
+    await vi.advanceTimersByTimeAsync(10);
     await pending;
+    expect(events.find(event => event.type === 'text')?.data.text).toBe(lastAnswer);
     expect(events.filter(event => ['text', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['text', 'completed']);
     await vi.advanceTimersByTimeAsync(300);
     expect(events.filter(event => event.type === 'text')).toHaveLength(1);

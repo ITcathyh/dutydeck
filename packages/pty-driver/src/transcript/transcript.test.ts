@@ -85,7 +85,7 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
     })).toEqual([{ type: 'text', data: { text: 'real answer' } }]);
   });
 
-  it('flushes complete records once and retains a partial line for the next flush', () => {
+  it('flushes complete records once and retains a partial line for the next flush', async () => {
     const dir = makeTempDir('claude-flush');
     const file = join(dir, 'session.jsonl');
     writeFileSync(file, '');
@@ -96,11 +96,11 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
       const rawLine = JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: '完整总结🙂' } });
       const record = rawLine + '\n';
       appendFileSync(file, record.slice(0, -2));
-      tailer.flush();
+      await tailer.flush();
       expect(events).toEqual([]);
       appendFileSync(file, record.slice(-2));
-      tailer.flush();
-      tailer.flush();
+      await tailer.flush();
+      await tailer.flush();
       expect(events).toEqual([{
         type: 'text',
         data: { text: '完整总结🙂' },
@@ -294,7 +294,7 @@ describe('JsonlTailer checkpoint and restore', () => {
     ? [{ type: 'text' as const, data: { text: entry.text } }]
     : undefined;
 
-  it('keeps normal start-at-end behavior and only tails later records', () => {
+  it('keeps normal start-at-end behavior and only tails later records', async () => {
     const dir = makeTempDir('normal-tail');
     const file = join(dir, 'session.jsonl');
     writeFileSync(file, `${JSON.stringify(textEntry('history'))}\n`);
@@ -304,14 +304,14 @@ describe('JsonlTailer checkpoint and restore', () => {
     tailer.start();
     expect(events).toEqual([]);
     appendFileSync(file, `${JSON.stringify(textEntry('new'))}\n`);
-    tailer.flush();
+    await tailer.flush();
 
     expect(events).toHaveLength(1);
     expect(events[0]!.data).toEqual({ text: 'new' });
     tailer.stop();
   });
 
-  it('checkpoints an existing UTF-8 partial line at its preceding newline and restores it once', () => {
+  it('checkpoints an existing UTF-8 partial line at its preceding newline and restores it once', async () => {
     const dir = makeTempDir('existing-partial-recovery');
     const file = join(dir, 'session.jsonl');
     const history = `${JSON.stringify(textEntry('history'))}\n`;
@@ -323,6 +323,7 @@ describe('JsonlTailer checkpoint and restore', () => {
     const first = new JsonlTailer({ resolvePath: () => file, mapEntry: mapText });
     const firstEvents = collect(first);
     first.start();
+    await first.flush();
     const cursor = first.checkpoint();
     expect(firstEvents).toEqual([]);
     expect(cursor).toEqual({ path: file, offset: Buffer.byteLength(history) });
@@ -333,13 +334,14 @@ describe('JsonlTailer checkpoint and restore', () => {
     const recoveredEvents = collect(recovered);
     recovered.restore(cursor);
     recovered.start();
+    await recovered.flush();
 
     expect(recoveredEvents.map(event => event.data.text)).toEqual(['later 🙂']);
     expect(recovered.checkpoint()).toEqual({ path: file, offset: Buffer.byteLength(history) + partialRecord.length });
     recovered.stop();
   });
 
-  it('replays records appended while stopped from its complete-line checkpoint', () => {
+  it('replays records appended while stopped from its complete-line checkpoint', async () => {
     const dir = makeTempDir('offline-recovery');
     const file = join(dir, 'session.jsonl');
     writeFileSync(file, '');
@@ -347,7 +349,7 @@ describe('JsonlTailer checkpoint and restore', () => {
     const firstEvents = collect(first);
     first.start();
     appendFileSync(file, `${JSON.stringify(textEntry('before restart'))}\n`);
-    first.flush();
+    await first.flush();
     const cursor = first.checkpoint();
     first.stop();
 
@@ -357,35 +359,37 @@ describe('JsonlTailer checkpoint and restore', () => {
     const recoveredEvents = collect(recovered);
     recovered.restore(cursor);
     recovered.start();
+    await recovered.flush();
 
     expect(firstEvents.map(event => event.data.text)).toEqual(['before restart']);
     expect(recoveredEvents.map(event => event.data.text)).toEqual(['while offline one', 'while offline two']);
     recovered.stop();
   });
 
-  it('uses stable IDs for replay while distinguishing duplicate records by byte offset', () => {
+  it('uses stable IDs for replay while distinguishing duplicate records by byte offset', async () => {
     const dir = makeTempDir('replay-ids');
     const file = join(dir, 'session.jsonl');
     const rawLine = JSON.stringify(textEntry('same text'));
     writeFileSync(file, `${rawLine}\n${rawLine}\n`);
 
-    const replay = () => {
+    const replay = async () => {
       const tailer = new JsonlTailer({ resolvePath: () => file, mapEntry: mapText });
       const events = collect(tailer);
       tailer.restore({ path: file, offset: 0 });
       tailer.start();
+      await tailer.flush();
       tailer.stop();
       return events;
     };
-    const first = replay();
-    const second = replay();
+    const first = await replay();
+    const second = await replay();
 
     expect(first.map(event => event.sourceId)).toEqual(second.map(event => event.sourceId));
     expect(first[0]!.sourceId).toBe(sourceId(file, 0, rawLine, 0));
     expect(first[1]!.sourceId).not.toBe(first[0]!.sourceId);
   });
 
-  it('does not checkpoint a partial UTF-8 line and decodes it after the remaining bytes arrive', () => {
+  it('does not checkpoint a partial UTF-8 line and decodes it after the remaining bytes arrive', async () => {
     const dir = makeTempDir('utf8-checkpoint');
     const file = join(dir, 'session.jsonl');
     writeFileSync(file, '');
@@ -396,18 +400,18 @@ describe('JsonlTailer checkpoint and restore', () => {
 
     tailer.start();
     appendFileSync(file, bytes.subarray(0, emojiStart + 2));
-    tailer.flush();
+    await tailer.flush();
     expect(events).toEqual([]);
     expect(tailer.checkpoint()).toEqual({ path: file, offset: 0 });
 
     appendFileSync(file, bytes.subarray(emojiStart + 2));
-    tailer.flush();
+    await tailer.flush();
     expect(events[0]!.data).toEqual({ text: '中文🙂' });
     expect(tailer.checkpoint()).toEqual({ path: file, offset: bytes.length });
     tailer.stop();
   });
 
-  it('starts a path-less cursor at the beginning of a transcript created later', () => {
+  it('starts a path-less cursor at the beginning of a transcript created later', async () => {
     const dir = makeTempDir('pathless-recovery');
     const file = join(dir, 'session.jsonl');
     const tailer = new JsonlTailer({ resolvePath: () => file, mapEntry: mapText });
@@ -416,7 +420,7 @@ describe('JsonlTailer checkpoint and restore', () => {
     tailer.restore({ offset: 0 });
     tailer.start();
     writeFileSync(file, `${JSON.stringify(textEntry('first record'))}\n`);
-    tailer.flush();
+    await tailer.flush();
 
     expect(events.map(event => event.data.text)).toEqual(['first record']);
     tailer.stop();

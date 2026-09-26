@@ -80,7 +80,7 @@ export class LarkGroupParticipation {
     // Called after the coordinator's normal task authorization; off only disables ambient participation.
     return (await this.options.repository.getSettings(scope)).instructions;
   }
-  private async snapshot(scope: CollaborationScope, trigger?: CollaborationObservation, query = trigger?.text ?? ''): Promise<CollaborationSnapshot> {
+  private async snapshot(scope: CollaborationScope, trigger?: CollaborationObservation): Promise<CollaborationSnapshot> {
     const materials: CollaborationObservation[] = [];
     const description = this.bootstrapper.material(scope);
     if (description) materials.push(description);
@@ -95,23 +95,13 @@ export class LarkGroupParticipation {
         materials.push(result.observation);
       }
     }
-    let teamContext: CollaborationTeamContext | undefined;
-    let teamUnavailable = false;
-    if (this.options.readTeamContext && query.trim()) {
-      try { teamContext = await withLarkContextReadTimeout(this.options.readTeamContext(scope, query), '团队上下文读取', teamContextTimeoutMs); }
-      catch (error) {
-        teamUnavailable = true;
-        this.options.log?.warn({ error, scope }, '团队上下文检索暂不可用');
-      }
-    }
     const snapshot = await this.options.repository.snapshot(scope, 30);
-    if (teamUnavailable) snapshot.bootstrap = { ...snapshot.bootstrap, scope, status: 'partial', updatedAt: this.now().toISOString(), missing: [...new Set([...(snapshot.bootstrap?.missing ?? []), 'team_context_unavailable'])] };
     const ids = new Set(materials.map(item => item.id));
     const observations = [...materials, ...snapshot.observations.filter(item => !ids.has(item.id))];
     // A first live message is persisted before history arrives; keep it even if that
     // backfill pushes its sequence outside the recent observation window.
     const currentTrigger = trigger && (observations.find(item => item.id === trigger.id) ?? trigger);
-    return participationInput({ ...snapshot, ...(teamContext ? { teamContext } : {}), observations: currentTrigger
+    return participationInput({ ...snapshot, observations: currentTrigger
       ? [...observations.filter(item => item.id !== currentTrigger.id), currentTrigger] : observations });
   }
   /** watermark 是该会话上次收到的位置（由 coordinator 按会话存取），缺省时注入全量。 */
@@ -188,8 +178,9 @@ export class LarkGroupParticipation {
     }
     for (const scope of await this.options.listScopes?.(appId) ?? []) {
       if (this.closed) return;
-      await this.bootstrapper.ensure(scope, true);
-      if (this.closed) return;
+      const settings = await this.options.repository.getSettings(scope);
+      if (settings.participation === 'off' || await this.options.usageRefusal?.(scope)
+        || await this.decisionBudget(scope, settings.maxDecisionsPerHour)) continue;
       if (!await this.options.authorize(scope, undefined, 'observe')) continue;
       const snapshot = await this.options.repository.snapshot(scope, 30);
       if (snapshot.settings.participation === 'off') continue;
@@ -247,7 +238,7 @@ export class LarkGroupParticipation {
         ...(event.parentId ? [`dutydeck:parent:${event.parentId}`] : []),
         ...new Set(event.mentions.map(mention => `dutydeck:mention:${!input.botOpenId || !mention.openId ? 'unknown' : mention.openId === input.botOpenId ? 'self' : 'other'}`))], origin: 'live', missing });
     // Bootstrap can run alongside explicit requests, but is awaited before ambient decisions.
-    void this.bootstrapper.ensure(scope).catch(error => this.options.log?.warn({ error, scope }, '群上下文补读失败'));
+    if (input.explicit) void this.bootstrapper.ensure(scope).catch(error => this.options.log?.warn({ error, scope }, '群上下文补读失败'));
     if ((result.created || result.changed) && !input.explicit && !bot && event.senderOpenId && event.senderOpenId !== input.botOpenId) {
       this.enqueue(scope, { event, config, observation: result.observation });
     }
@@ -390,38 +381,56 @@ export class LarkGroupParticipation {
     }).catch(error => this.options.log?.warn({ error, scope, kind }, '机器人回合门禁留痕失败'));
   }
   private async decide(scope: CollaborationScope, pending: Pending, slot: Slot) {
-    await this.bootstrapper.ensure(scope);
     const repo = this.options.repository;
+    const settings = await repo.getSettings(scope);
+    if (this.closed || slot.stopped || settings.participation === 'off') return;
+    // 成本上限用满后判定也不再跑；群里的说明由用量账本发一次。留痕与预算闸门一样按小时分桶。
+    const refusal = await this.options.usageRefusal?.(scope);
+    if (refusal) {
+      await repo.recordDecision({ id: `decision_usage_cap_${digest([scope, Math.floor(this.now().getTime() / 3_600_000)])}`, scope, contextRevision: 0, policyVersion: settings.policyVersion,
+        action: 'silent', reason: refusal, evidenceIds: [pending.observation.id], status: 'suppressed', inputSnapshot: { gate: USAGE_CAP_GATE }, createdAt: this.now().toISOString() });
+      return;
+    }
+    // 判定本身要花一次模型调用，observe 影子模式同样花。闸门必须在调用之前，
+    // 否则每条新消息都会先付费再被发言预算挡下。
+    const gate = await this.decisionBudget(scope, settings.maxDecisionsPerHour);
+    if (gate) {
+      // 留痕让用量可见，但按小时分桶而不是按 contextRevision：recordDecision 遇到已存在的 id 直接返回，
+      // 所以每群每小时最多写一条。否则超限期间每条消息都写一条，闸门记录会把 500 条统计窗口占满。
+      const gateId = `decision_gate_${digest([scope, Math.floor(this.now().getTime() / 3_600_000)])}`;
+      await repo.recordDecision({ id: gateId, scope, contextRevision: 0, policyVersion: settings.policyVersion,
+        action: 'silent', reason: gate, evidenceIds: [pending.observation.id], status: 'suppressed', inputSnapshot: { gate: DECISION_BUDGET_GATE }, createdAt: this.now().toISOString() });
+      return;
+    }
+    await this.bootstrapper.ensure(scope);
     let snapshot = await this.snapshot(scope, pending.observation);
     if (snapshot.settings.participation === 'off' || !await this.current(scope, snapshot, pending.event.senderOpenId!, slot)) return;
     const trigger = snapshot.observations.find(item => item.messageId === pending.event.messageId && item.origin === 'live' && item.senderKind === 'human');
     if (!trigger) return;
     const id = `decision_${digest([scope, snapshot.contextRevision, snapshot.settings.policyVersion])}`;
     if (await repo.getDecision(scope, id)) return;
-    // 成本上限用满后判定也不再跑；群里的说明由用量账本发一次。留痕与预算闸门一样按小时分桶。
-    const refusal = await this.options.usageRefusal?.(scope);
-    if (refusal) {
-      await repo.recordDecision({ id: `decision_usage_cap_${digest([scope, Math.floor(this.now().getTime() / 3_600_000)])}`, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion,
-        action: 'silent', reason: refusal, evidenceIds: [trigger.id], status: 'suppressed', inputSnapshot: { gate: USAGE_CAP_GATE }, createdAt: this.now().toISOString() });
-      return;
-    }
-    // 判定本身要花一次模型调用，observe 影子模式同样花。闸门必须在调用之前，
-    // 否则每条新消息都会先付费再被发言预算挡下。
-    const gate = await this.decisionBudget(scope, snapshot.settings.maxDecisionsPerHour);
-    if (gate) {
-      // 留痕让用量可见，但按小时分桶而不是按 contextRevision：recordDecision 遇到已存在的 id 直接返回，
-      // 所以每群每小时最多写一条。否则超限期间每条消息都写一条，闸门记录会把 500 条统计窗口占满。
-      const gateId = `decision_gate_${digest([scope, Math.floor(this.now().getTime() / 3_600_000)])}`;
-      await repo.recordDecision({ id: gateId, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion,
-        action: 'silent', reason: gate, evidenceIds: [trigger.id], status: 'suppressed', inputSnapshot: { gate: DECISION_BUDGET_GATE }, createdAt: this.now().toISOString() });
-      return;
-    }
     let result: ParticipationResult;
-    const inputSnapshot = snapshot as unknown as Record<string, unknown>;
+    let inputSnapshot = snapshot as unknown as Record<string, unknown>;
     try {
       const config = await this.options.readConfig(scope.appId, scope.chatId);
       if (this.closed || slot.stopped || !config?.listening) return;
       result = parseParticipationResult(JSON.stringify(await this.options.decider.decide(config, snapshot, trigger.id)), snapshot, trigger.id);
+      if (result.action === 'reply' && result.teamQuery && this.options.readTeamContext) {
+        if (!await this.current(scope, snapshot, pending.event.senderOpenId!, slot)) return;
+        // A second budget check covers configuration changes while the classifier ran.
+        if (await this.options.usageRefusal?.(scope)) return;
+        try {
+          const teamContext = await withLarkContextReadTimeout(this.options.readTeamContext(scope, result.teamQuery), '团队上下文读取', teamContextTimeoutMs);
+          snapshot = participationInput({ ...snapshot, teamContext });
+          // Host-selected evidence is frozen with the accepted local trigger; this
+          // also keeps uncertain-send deduplication stable across team queries.
+          result = { ...result, evidenceIds: [...new Set([...result.evidenceIds, ...(snapshot.teamContext?.observations ?? []).map(item => item.id)])].slice(0, 30) };
+        } catch (error) {
+          snapshot = { ...snapshot, bootstrap: { ...snapshot.bootstrap, scope, status: 'partial', updatedAt: this.now().toISOString(), missing: [...new Set([...(snapshot.bootstrap?.missing ?? []), 'team_context_unavailable'])] } };
+          this.options.log?.warn({ error, scope }, '团队上下文检索暂不可用');
+        }
+        inputSnapshot = snapshot as unknown as Record<string, unknown>;
+      }
     } catch (error) {
       await repo.recordDecision({ id, scope, contextRevision: snapshot.contextRevision, policyVersion: snapshot.settings.policyVersion, action: 'silent', reason: `Decision unavailable: ${error instanceof Error ? error.message.slice(0, 1500) : 'unknown'}`, evidenceIds: [trigger.id], status: 'failed', inputSnapshot, createdAt: this.now().toISOString() });
       return;
@@ -495,7 +504,7 @@ export class LarkGroupParticipation {
       } catch (error) {
         generationError = error instanceof Error ? error.message.slice(0, 1000) : 'Reply generation failed';
         // 判定之后成本刚好用满：如实说明上限，「稍后重试」在调高上限或下月之前都不会成功。
-        response = error instanceof RuntimeError && error.code === 'USAGE_CAP_EXCEEDED' ? error.message : '这次回复生成失败，请稍后重试。';
+        response = error instanceof RuntimeError && ['USAGE_CAP_EXCEEDED', 'USAGE_BACKGROUND_CAP_EXCEEDED'].includes(error.code) ? error.message : '这次回复生成失败，请稍后重试。';
       }
       await repo.updateDecision(scope, id, { status: generationError ? 'failed' : 'candidate', response });
       action = await repo.updateAction(scope, actionId, { expectedRevision: action.revision, status: 'sending' });

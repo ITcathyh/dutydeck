@@ -89,6 +89,37 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     return { cwd, transcript, name, ownerId: `dutydeck:${sessionId}` };
   }
 
+  it('does not mark a stopped recovery attached after draining a real backlog', async () => {
+    const f = fixture();
+    const backend = new TmuxBackend(f.name, { ownerId: f.ownerId });
+    const first = new PtyCliDriver({
+      agent: config(f.cwd), adapter: shellAdapter([]), backend,
+      onEvent() {}, onExit() {}, sessionId,
+    });
+    await first.start();
+    const checkpoint = (await first.checkpoint())!;
+    const sent = first.send('sleep 30').catch(error => error);
+    await waitFor(() => expect(backend.getDutydeckMetadata('turn_id')).toBe(checkpoint.turnId));
+    first.prepareForDaemonShutdown();
+    await first.stop();
+    expect(await sent).toBeInstanceOf(DriverDetachedError);
+    appendFileSync(f.transcript, assistant('x'.repeat(1024)).repeat(4000));
+    const recovered = new PtyCliDriver({
+      agent: config(f.cwd), adapter: shellAdapter([]), backend: new TmuxBackend(f.name, { ownerId: f.ownerId }),
+      onEvent() {}, onExit() {}, sessionId,
+    });
+    const attached = vi.fn(async () => {});
+    const recovering = recovered.recover(checkpoint, attached).catch(error => error);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    recovered.prepareForDaemonShutdown();
+    await recovered.stop();
+    expect(await recovering).toEqual(new Error('PTY recovery cancelled by lifecycle change'));
+    expect(attached).not.toHaveBeenCalled();
+    expect(recovered.isDetachedForShutdown()).toBe(true);
+    await expect(recovered.send('must not revive')).rejects.toThrow('PtyCliDriver: send() called after stop()');
+    expect(TmuxBackend.probeSession(f.name)).toBe('exists');
+  });
+
   it('reattaches the original busy pane, replays only appended JSONL, and never submits the prompt twice', async () => {
     const f = fixture();
     const firstPrompts: string[] = [];
@@ -98,7 +129,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       onEvent() {}, onExit() {}, sessionId,
     });
     await first.start();
-    const checkpoint = first.checkpoint();
+    const checkpoint = await first.checkpoint();
     expect(checkpoint).toBeDefined();
     const originalPid = firstBackend.getPid();
     const sent = first.send('sleep 1; echo SHELL-DONE');
@@ -137,7 +168,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       onEvent() {}, onExit() {}, sessionId,
     });
     await first.start();
-    const checkpoint = first.checkpoint()!;
+    const checkpoint = (await first.checkpoint())!;
     const pending = first.send('sleep 0.2; echo SHELL-DONE');
     await waitFor(() => expect(firstBackend.getDutydeckMetadata('turn_id')).toBe(checkpoint.turnId));
     first.prepareForDaemonShutdown();
@@ -256,7 +287,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       onEvent() {}, onExit() {}, sessionId,
     });
     await first.start();
-    const checkpoint = first.checkpoint()!;
+    const checkpoint = (await first.checkpoint())!;
     const submitted = first.send('echo SHELL-DONE');
     await waitFor(() => expect(firstBackend.getDutydeckMetadata('turn_id')).toBe(checkpoint.turnId));
     first.prepareForDaemonShutdown();

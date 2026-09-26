@@ -47,6 +47,10 @@ export type BotDraft = {
   memoryAutoExtract: boolean;
   memoryAgentId: string;
   memoryModel: string;
+  decisionAgentId: string;
+  decisionModel: string;
+  responseAgentId: string;
+  responseModel: string;
   executionMode: 'single' | 'layered';
   leaderAgentId: string;
   workerAgentIds: string[];

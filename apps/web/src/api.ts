@@ -1,7 +1,7 @@
 import type { CreateWorkItemInput, WorkItem, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription } from '@dutydeck/shared';
 import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
-import type { UsageCap, UsageGroup, UsageTotals } from '@dutydeck/shared';
+import type { UsageBackgroundBudget, UsageCap, UsageGroup, UsageTotals } from '@dutydeck/shared';
 import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dutydeck/shared';
 
 import { instanceApiUrl } from './instance';
@@ -48,6 +48,10 @@ export type LarkBotConfig = {
   memoryAgentId?: string;
   /** 跑提取与整理的模型；空表示沿用默认模型。 */
   memoryModel?: string;
+  decisionAgentId?: string;
+  decisionModel?: string;
+  responseAgentId?: string;
+  responseModel?: string;
   /** 执行方式；旧服务端缺省按 single 处理。 */
   executionMode?: 'single' | 'layered';
   /** 分层协作的 Leader Agent。 */
@@ -164,10 +168,14 @@ export type ManagedGroupBot = {
   error?: string;
 };
 
-export type UsageSummaryWindow = { since: string; totals: UsageTotals; bots: UsageGroup[]; chats: UsageGroup[]; actors: UsageGroup[]; categories: UsageGroup[] };
-export type UsageSummary = { month: UsageSummaryWindow; week: UsageSummaryWindow; caps: UsageCap[] };
+type UsageCoverage = Pick<UsageTotals, 'unpriced' | 'pricedEntries' | 'unknownCostEntries' | 'costCoverage'>;
+/** Older instances omit coverage fields; absence means unknown, not zero. */
+export type UsageTotalsResponse = Omit<UsageTotals, keyof UsageCoverage> & Partial<UsageCoverage>;
+export type UsageGroupResponse = Omit<UsageGroup, keyof UsageCoverage> & Partial<UsageCoverage>;
+export type UsageSummaryWindow = { since: string; totals: UsageTotalsResponse; bots: UsageGroupResponse[]; chats: UsageGroupResponse[]; actors: UsageGroupResponse[]; categories: UsageGroupResponse[] };
+export type UsageSummary = { month: UsageSummaryWindow; week: UsageSummaryWindow; caps: UsageCap[]; backgroundBudget?: UsageBackgroundBudget };
 /** own：本任务自己的执行；subSteps：归到本任务名下的编排子步骤与 Leader 规划。 */
-export type SessionUsage = { own: UsageTotals; subSteps: UsageTotals };
+export type SessionUsage = { own: UsageTotalsResponse; subSteps: UsageTotalsResponse };
 export type UsageCapInput = { scope: 'bot'; appId: string; monthlyCostUsd: number } | { scope: 'group'; appId: string; chatId: string; monthlyCostUsd: number };
 
 export type ManagedGroup = {
@@ -233,7 +241,7 @@ export type LarkAppCreationJob = {
   retryable: boolean;
 };
 export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
-export type DockEvent = { id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
+export type DockEvent = { taskId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
 /** 插话结果：injected / startedNewTurn 已送达；moved 表示插话前这条已开跑或被取消；其余结果下这条指令仍在排队。 */
 export type SteeringOutcome = 'injected' | 'startedNewTurn' | 'moved' | 'promptRequired' | 'unsupported' | 'incompatible' | 'failed';
@@ -368,6 +376,10 @@ export const api = {
     memoryAutoExtract?: boolean;
     memoryAgentId?: string;
     memoryModel?: string;
+    decisionAgentId?: string;
+    decisionModel?: string;
+    responseAgentId?: string;
+    responseModel?: string;
     executionMode?: 'single' | 'layered';
     leaderAgentId?: string;
     workerAgentIds?: string[];

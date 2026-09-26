@@ -1,3 +1,4 @@
+import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import { LarkAppCreationJobManager } from './app-creation.js';
 import { registerLarkAppCreationRoutes } from './app-creation-routes.js';
@@ -60,7 +61,10 @@ export interface LarkRoutesOptions {
 
 export async function registerLarkRoutes(app: FastifyInstance, options: LarkRoutesOptions = {}) {
   const env = options.env ?? process.env;
-  const fetcher = options.fetcher ?? globalThis.fetch;
+  const http = createWorkbenchFetch(options.fetcher);
+  const fetcher = http.fetch;
+  // Abort before Fastify waits for active requests; onClose would be too late.
+  app.addHook('preClose', async () => { http.close(); options.service?.close?.(); });
   const openPlatformJobs = options.openPlatformJobs ?? new OpenPlatformConfigurationJobManager({
     syncSlashCommands: async appId => {
       const saved = await readLarkConfig(options.config, appId);

@@ -18,15 +18,44 @@ const enabled = (config: StoredLarkConfig | undefined): config is StoredLarkConf
 
 /** Host-controlled reads only: no source group activation, persistent writes or agent tools. */
 export class LarkTeamContextReader {
+  private readonly directories = new Map<string, { until: number; chats: LarkChat[] }>();
+  private localBytes = 0;
+  private readonly local = new Map<string, { bytes: number; until: number; observations: CollaborationObservation[]; missing: string[] }>();
   constructor(private readonly options: ReaderOptions) {}
 
-  private async joined(config: StoredLarkConfig): Promise<LarkChat[]> {
+  private now() { return (this.options.now?.() ?? new Date()).getTime(); }
+  private configKey(config: StoredLarkConfig) { return createHash('sha256').update(JSON.stringify(config)).digest('hex'); }
+  private remember<T>(cache: Map<string, T>, key: string, value: T, limit: number) {
+    cache.delete(key); cache.set(key, value);
+    while (cache.size > limit) cache.delete(cache.keys().next().value!);
+  }
+
+  private rememberLocal(key: string, value: { until: number; observations: CollaborationObservation[]; missing: string[] }) {
+    const bytes = Buffer.byteLength(JSON.stringify(value), 'utf8');
+    // Oversized groups are still searched in full, but never retained in memory.
+    if (bytes > 512 * 1024) return;
+    const previous = this.local.get(key);
+    if (previous) { this.localBytes -= previous.bytes; this.local.delete(key); }
+    this.local.set(key, { ...value, bytes }); this.localBytes += bytes;
+    while (this.local.size > 128 || this.localBytes > 4 * 1024 * 1024) {
+      const oldest = this.local.keys().next().value!;
+      this.localBytes -= this.local.get(oldest)!.bytes; this.local.delete(oldest);
+    }
+  }
+
+  private async joined(config: StoredLarkConfig, fresh = false): Promise<LarkChat[]> {
+    const key = this.configKey(config), cached = this.directories.get(key);
+    if (!fresh && cached && cached.until > this.now()) return cached.chats;
     const client = this.options.serviceFor(config), chats = new Map<string, LarkChat>(), tokens = new Set<string>();
     let pageToken: string | undefined;
     do {
       const page = await client.listChats(pageToken);
       for (const chat of page.items) if (chat.chatId.startsWith('oc_') && chat.chatMode !== 'p2p') chats.set(chat.chatId, chat);
-      if (!page.hasMore) return [...chats.values()];
+      if (!page.hasMore) {
+        const result = [...chats.values()];
+        if (Buffer.byteLength(JSON.stringify(result), 'utf8') <= 512 * 1024) this.remember(this.directories, key, { until: this.now() + 30_000, chats: result }, 16);
+        return result;
+      }
       if (!page.pageToken || tokens.has(page.pageToken)) throw new RuntimeError('TEAM_CONTEXT_PAGINATION_INCOMPLETE', '群列表分页不完整，无法确认团队上下文范围。', 502);
       pageToken = page.pageToken; tokens.add(pageToken);
     } while (true);
@@ -38,7 +67,11 @@ export class LarkTeamContextReader {
       missing: text.length > 16000 ? ['team_text_truncated'] : [] };
   }
 
-  private async stored(scope: CollaborationScope, at: string) {
+  private async stored(scope: CollaborationScope, at: string, config: StoredLarkConfig) {
+    const revision = (await this.options.repository.snapshot(scope, 1)).contextRevision;
+    const key = JSON.stringify([this.configKey(config), scope, revision]);
+    const cached = this.local.get(key);
+    if (cached && cached.until > this.now()) return { observations: cached.observations, missing: [...cached.missing] };
     const observations: CollaborationObservation[] = [], missing: string[] = [];
     let afterSequence = 0;
     for (let page = 0; page < 10; page++) {
@@ -60,6 +93,7 @@ export class LarkTeamContextReader {
         progress: item.progress, steps: item.steps, ownerId: item.ownerId, dueAt: item.dueAt, result: item.result,
         createdBy: item.createdBy, updatedBy: item.updatedBy, createdAt: item.createdAt, updatedAt: item.updatedAt }), item.updatedAt || at, [item.id, ...item.sourceRefs]));
     }
+    this.rememberLocal(key, { until: this.now() + 30_000, observations, missing: [...missing] });
     return { observations, missing };
   }
 
@@ -78,7 +112,7 @@ export class LarkTeamContextReader {
       let stored = { observations: [] as CollaborationObservation[], missing: [] as string[] };
       if (allowed) {
         try {
-          stored = await this.stored(scope, at);
+          stored = await this.stored(scope, at, config);
         } catch { stored.missing.push('stored_context_unavailable'); }
       }
       const named = Boolean(chat.name.trim() && context.query.toLowerCase().includes(chat.name.trim().toLowerCase()));
@@ -135,7 +169,7 @@ export class LarkTeamContextReader {
       if (!enabled(config) || config.appId !== originScope.appId) return false;
       if (context.sources.some(source => source.scope.appId !== originScope.appId || source.scope.chatId === originScope.chatId)) return false;
       if (!context.observations.length) return true;
-      const chats = new Set((await this.joined(config)).map(chat => chat.chatId));
+      const chats = new Set((await this.joined(config, true)).map(chat => chat.chatId));
       for (const item of context.observations) {
         const source = context.sources.find(source => sameScope(source.scope, item.scope));
         if (!source || source.status === 'unavailable' || item.scope.appId !== originScope.appId || item.scope.chatId === originScope.chatId) return false;

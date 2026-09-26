@@ -12,14 +12,14 @@
  *   1. Token bucket —— 默认 15 QPS / burst = qps，等待 >100ms 打 warn（带 appId +
  *      op），让限流排队可观测而不是静默堆积。
  *   2. 瞬时错误指数退避重试 —— 默认最多 3 次（500ms 起，上限 8s），尊重
- *      Retry-After / x-ogw-ratelimit-reset（两者单位都是秒，取 max 后有绝对上限）。
+ *      Retry-After / x-ogw-ratelimit-reset（秒，按服务端提示等待，总期限由调用方取消）。
  *   3. 熔断器 —— 30s 窗口内连续 5 次瞬时失败跳闸，跳闸期间快速失败
  *      （LarkCircuitOpenError）；30s 后放一次半开探测，成功即恢复（info 日志），
  *      失败则重新跳闸。
  *
  * 对调用方透明：内部重试后仍失败会抛出**原始错误对象**，所以现有 call site 的
  * isLarkMessageRateLimit / isLarkCardContentRejected / isLarkMessageUnupdatable
- * 判断完全不受影响，业务层重试（coordinator / reconciler）仍在 gate 之外照常工作。
+ * 判断完全不受影响，coordinator 与 gate 共享在线重试预算，reconciler 保留持久化重投。
  *
  * ⚠️ 不允许 import service.ts：service.ts 会 import 本模块，反向依赖会成环。因此
  * 这里不能用 `instanceof LarkServiceError`，所有错误分类必须是结构化 / 鸭子类型的。
@@ -63,6 +63,11 @@ export interface LarkGateOptions {
   log?: LarkGateLog;
   /** 配置来源，默认 process.env（每次调用现读，支持不重启调 QPS）。 */
   env?: NodeJS.ProcessEnv;
+  /** Testable jitter source; Retry-After is always a lower bound. */
+  random?: () => number;
+  /** Shared request budget can stop retries before another backoff. */
+  canRetry?: () => boolean;
+  onFailure?: () => void;
 }
 
 /**
@@ -218,7 +223,7 @@ function looksLikeLarkTransportError(err: unknown): boolean {
   const value = err as ErrorLike;
   if (!value || typeof value !== 'object') return false;
   if (value.code === LARK_NETWORK_ERROR_CODE || value.code === LARK_OPENAPI_ERROR_CODE) return true;
-  // axios / 飞书 SDK 形态（contact 系列接口走 SDK，抛的是 axios 错误）。
+  // 兼容旧 SDK / axios 调用方。
   if (value.isAxiosError === true || value.name === 'AxiosError') return true;
   if (value.config != null && (value.response != null || value.status != null)) return true;
   // 归一化过的 SDK 错误（normalizeContactError）：带数字业务码 + 上游状态。
@@ -236,6 +241,7 @@ function looksLikeLarkTransportError(err: unknown): boolean {
  *     230012/230030）→ 确定性错误，不重试
  */
 export function isRetryableLarkError(err: unknown): boolean {
+  if (['AbortError', 'TimeoutError'].includes((err as ErrorLike)?.name ?? '')) return false;
   const code = larkBusinessCode(err);
   if (code !== undefined && TRANSIENT_LARK_CODES.has(code)) return true;
   if (!looksLikeLarkTransportError(err)) return false;
@@ -287,13 +293,13 @@ function retryAfterHintMs(err: unknown): number | undefined {
 
 /**
  * 退避时长：指数退避与服务端头提示取 max（服务端说要等 30s 就不能只等 1s），
- * 但有绝对上限 retryMaxMs * 4，避免一个畸形的 Retry-After 头把请求挂死几小时。
+ * 服务端提示不截短；调用方的总 deadline 会取消超出预算的等待。
  */
-function computeBackoffMs(config: LarkGateConfig, attempt: number, err: unknown): number {
-  const backoff = Math.min(config.retryBaseMs * 2 ** attempt, config.retryMaxMs);
+function computeBackoffMs(config: LarkGateConfig, attempt: number, err: unknown, random: () => number): number {
+  const backoff = Math.min(config.retryBaseMs * 2 ** attempt, config.retryMaxMs) * (0.5 + random() * 0.5);
   const hint = retryAfterHintMs(err);
   if (hint === undefined) return backoff;
-  return Math.min(Math.max(backoff, hint), config.retryMaxMs * 4);
+  return Math.max(backoff, hint);
 }
 
 // ─── Token bucket ─────────────────────────────────────────────────────────────
@@ -339,6 +345,8 @@ interface CircuitState {
   consecutiveFailures: number;
   windowStartMs: number;
   openedAtMs: number;
+  generation: number;
+  probe?: symbol;
 }
 
 // ─── 模块级 per-app 状态 ──────────────────────────────────────────────────────
@@ -370,7 +378,7 @@ function getBucket(appId: string, now: number, config: LarkGateConfig): TokenBuc
 function getCircuit(appId: string, now: number): CircuitState {
   let circuit = circuits.get(appId);
   if (!circuit) {
-    circuit = { status: 'closed', consecutiveFailures: 0, windowStartMs: now, openedAtMs: 0 };
+    circuit = { status: 'closed', consecutiveFailures: 0, windowStartMs: now, openedAtMs: 0, generation: 0 };
     circuits.set(appId, circuit);
   }
   return circuit;
@@ -390,7 +398,7 @@ function gateAbortError(signal: AbortSignal): Error {
   // Node 的默认 abort reason 是 DOMException（instanceof Error 为 true），
   // 直接透出会变成 'This operation was aborted' 而丢掉网关语义；调用方显式
   // abort(customError) 传入的自定义原因仍原样透传。
-  if (reason instanceof Error && reason.constructor.name !== 'DOMException') return reason;
+  if (reason instanceof Error && (reason.constructor.name !== 'DOMException' || reason.name === 'TimeoutError')) return reason;
   const error = new Error('飞书 OpenAPI 网关操作已取消。');
   error.name = 'AbortError';
   return error;
@@ -452,6 +460,8 @@ function recordTransientFailure(
   if (circuit.status === 'half-open') {
     // 半开探测失败 → 立即重新跳闸，探测时钟从现在重新计时。
     circuit.status = 'open';
+    circuit.generation++;
+    circuit.probe = undefined;
     circuit.openedAtMs = now;
     circuit.consecutiveFailures += 1;
     log.warn({ appId, op, failures: circuit.consecutiveFailures }, '飞书 OpenAPI 熔断器半开探测失败，重新跳闸');
@@ -467,6 +477,8 @@ function recordTransientFailure(
   }
   if (circuit.consecutiveFailures >= config.circuitFailureThreshold) {
     circuit.status = 'open';
+    circuit.generation++;
+    circuit.probe = undefined;
     circuit.openedAtMs = now;
     log.warn({ appId, op, failures: circuit.consecutiveFailures, probeIntervalMs: config.circuitProbeIntervalMs }, '飞书 OpenAPI 熔断器跳闸');
   }
@@ -493,47 +505,64 @@ export async function executeWithLarkGate<T>(
   const config = resolveLarkGateConfig(options?.env);
   const log = options?.log ?? moduleLog;
   const signal = options?.signal;
-  let attempt = 0;
-  for (;;) {
-    if (signal?.aborted) throw gateAbortError(signal);
-    const circuit = getCircuit(appId, Date.now());
-    if (circuit.status === 'open') {
-      if (Date.now() - circuit.openedAtMs < config.circuitProbeIntervalMs) {
-        throw new LarkCircuitOpenError(appId, circuit.openedAtMs);
-      }
-      circuit.status = 'half-open';
-      log.info({ appId, op }, '飞书 OpenAPI 熔断器进入半开，放行一次探测');
+  const circuit = getCircuit(appId, Date.now());
+  const owner = Symbol(op);
+  if (signal?.aborted) throw gateAbortError(signal);
+  if (circuit.status === 'half-open'
+    || circuit.status === 'open' && Date.now() - circuit.openedAtMs < config.circuitProbeIntervalMs) {
+    throw new LarkCircuitOpenError(appId, circuit.openedAtMs);
+  }
+  if (circuit.status === 'open') {
+    circuit.status = 'half-open';
+    circuit.probe = owner;
+    log.info({ appId, op }, '飞书 OpenAPI 熔断器进入半开，放行一次探测');
+  }
+  const generation = circuit.generation;
+  const current = () => circuit.generation === generation
+    && (circuit.status === 'closed' || circuit.status === 'half-open' && circuit.probe === owner);
+  const succeeded = () => {
+    if (!current()) return;
+    circuit.consecutiveFailures = 0;
+    if (circuit.probe === owner) {
+      circuit.status = 'closed';
+      circuit.probe = undefined;
+      circuit.generation++;
+      log.info({ appId, op }, '飞书 OpenAPI 熔断器已恢复闭合');
     }
-
-    await acquireToken(appId, op, config, log, signal);
-    // acquireToken 里的 await 会让出事件循环，调用方的 abort() 可能正好在这期间
-    // 到达。这里必须复查：在**已经 aborted** 的 signal 上后注册的监听器永远不会
-    // 触发，不提前抛出的话 fn 内部的请求会永久挂起（无人取消、也无人超时）。
-    if (signal?.aborted) throw gateAbortError(signal);
-
-    try {
-      const result = await fn();
-      circuit.consecutiveFailures = 0;
-      if (circuit.status === 'half-open') {
-        circuit.status = 'closed';
-        log.info({ appId, op }, '飞书 OpenAPI 熔断器已恢复闭合');
+  };
+  try {
+    for (let attempt = 0; ; attempt++) {
+      if (signal?.aborted) throw gateAbortError(signal);
+      if (!current()) throw new LarkCircuitOpenError(appId, circuit.openedAtMs);
+      await acquireToken(appId, op, config, log, signal);
+      if (signal?.aborted) throw gateAbortError(signal);
+      // A concurrent request can trip the circuit while this call waits for a token.
+      if (!current()) throw new LarkCircuitOpenError(appId, circuit.openedAtMs);
+      try {
+        const result = await fn();
+        if (signal?.aborted) throw gateAbortError(signal);
+        succeeded();
+        return result;
+      } catch (error) {
+        if (signal?.aborted) throw gateAbortError(signal);
+        options?.onFailure?.();
+        const retryable = isRetryableLarkError(error);
+        if (retryable && current() && attempt < config.retryMaxAttempts && (options?.canRetry?.() ?? true)) {
+          const backoffMs = computeBackoffMs(config, attempt, error, options?.random ?? Math.random);
+          log.warn({ appId, op, attempt: attempt + 1, maxAttempts: config.retryMaxAttempts, backoffMs }, '飞书 OpenAPI 调用失败，退避重试');
+          await sleep(backoffMs, signal);
+          continue;
+        }
+        if (retryable && current()) recordTransientFailure(circuit, appId, op, config, log, Date.now());
+        throw error;
       }
-      return result;
-    } catch (error) {
-      const retryable = isRetryableLarkError(error);
-      if (retryable && attempt < config.retryMaxAttempts) {
-        const backoffMs = computeBackoffMs(config, attempt, error);
-        attempt += 1;
-        log.warn({ appId, op, attempt, maxAttempts: config.retryMaxAttempts, backoffMs }, '飞书 OpenAPI 调用失败，退避重试');
-        await sleep(backoffMs, signal);
-        continue;
-      }
-      // 熔断器只统计瞬时错误（429 / 5xx / 网络）。确定性错误（密钥错误、参数
-      // 错误、内容被审核拒绝、消息不可更新）重试无意义，更不该跳闸：否则一条
-      // 内容违规的卡片连发 5 次，就会把整个 app 的所有会话一起熔断——一个坏请求
-      // 毒死整个 app。
-      if (retryable) recordTransientFailure(circuit, appId, op, config, log, Date.now());
-      throw error;
+    }
+  } finally {
+    // Cancellation or a deterministic error releases the probe without claiming recovery.
+    if (circuit.generation === generation && circuit.probe === owner) {
+      circuit.probe = undefined;
+      circuit.status = 'open';
+      circuit.generation++;
     }
   }
 }

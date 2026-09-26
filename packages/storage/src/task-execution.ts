@@ -98,7 +98,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const blockers = (sessionId: string, owner?: ExecutionController): ExecutionBlocker[] => [
     ...resources(sessionId).filter(r => !resourceSafe(r, owner)).map(r => ({ sessionId, resourceId: r.resourceId, code: 'DRIVER_RESOURCE_UNSAFE' })),
     ...externalBlockers(sessionId),
-    ...(attempts(sessionId).some(a => a.state === 'legacy_unresolved') ? [{ sessionId, code: 'LEGACY_MULTIPLE_EXECUTIONS' }] : [])
+    ...(db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state='legacy_unresolved' LIMIT 1").get(sessionId) ? [{ sessionId, code: 'LEGACY_MULTIPLE_EXECUTIONS' }] : [])
   ];
   const readInput = (raw: string): AcceptedTaskInput => {
     const input = parse(acceptedTaskInputSchema, JSON.parse(raw));
@@ -508,7 +508,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     getTaskExecution(taskId) {
       const t = task(taskId); if (!t) return;
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
-      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: attempts(t.sessionId).filter(a => a.taskId === t.id), blockers: [...blockers(t.sessionId), ...inputBlockers(t)] };
+      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: db.prepare('SELECT json FROM task_attempts WHERE task_id=? ORDER BY number').all(t.id).map(row => rowJson<TaskAttempt>(row)!), blockers: [...blockers(t.sessionId), ...inputBlockers(t)] };
     },
     getAttemptEvents(attemptId, window = {}) {
       id.parse(attemptId);
@@ -625,7 +625,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const f = readFence(rawFence); const s = session(f.sessionId);
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
           assertResources(f, undefined, owner);
-          if (attempts(f.sessionId).some(a => ['preparing','active','reconcile_required'].includes(a.state))) fail('SESSION_EXECUTION_BUSY');
+          if (db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required') LIMIT 1").get(f.sessionId)) fail('SESSION_EXECUTION_BUSY');
           const row = db.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' ORDER BY COALESCE(queue_position,0),created_at,rowid LIMIT 1").get(f.sessionId) as { id: string } | undefined;
           if (!row) return;
           const t = task(row.id)!;

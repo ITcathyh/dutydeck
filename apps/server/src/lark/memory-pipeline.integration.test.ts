@@ -11,7 +11,7 @@ import { RuntimeError, type AgentConfig, type PermissionMode } from '@dutydeck/s
 import { LarkMessageCoordinator } from './coordinator.js';
 import { larkBotsConfigKey, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
-import { larkMemoryScope, LarkMemoryStore } from './memory.js';
+import { larkMemoryScope, larkMemoryFingerprint, LarkMemoryStore } from './memory.js';
 import { LarkMemoryProjection } from './memory-view.js';
 import { LarkMemoryPipeline } from './memory-pipeline.js';
 
@@ -34,7 +34,7 @@ type MemoryReply = { text: string; delayMs?: number };
 /** 记忆会话的 start 入参；用例用它断言权限模式与复用次数。 */
 type StartInput = { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode };
 
-async function harness(options: { timeoutMs?: number; agentModel?: string; userAnswer?: string; startGuard?: (input: StartInput) => void } = {}) {
+async function harness(options: { now?: () => Date; timeoutMs?: number; agentModel?: string; userAnswer?: string; startGuard?: (input: StartInput) => void } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-pipeline-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
@@ -117,6 +117,7 @@ async function harness(options: { timeoutMs?: number; agentModel?: string; userA
       interrupt: memoryInterrupt,
       subscribe: (id, listener) => runtime.subscribe(id, listener)
     },
+    now: options.now,
     controlActorId: 'installation_owner',
     repos: { execution: repos.execution },
     store,
@@ -911,4 +912,94 @@ describe('stuck memory session after a daemon restart', () => {
     expect((await second.runtime.getTasks(old.id)).map(task => task.status)).toEqual(['reconcile_required']);
     expect(second.log.warn.mock.calls.filter(call => String(call[1]).startsWith('记忆会话有未决任务'))).toHaveLength(1);
   });
+});
+
+describe('unchanged memory consolidation admission', () => {
+  it('extracts eight times in 24 completed turns without reconsolidating unchanged nonempty memory', async () => {
+    let now = new Date('2026-09-27T00:00:00Z');
+    const h = await harness({ now: () => now });
+    await h.store.add(scope, { content: '长期约定使用中文', topic: 'conventions', source: 'user' });
+    await h.pipeline.runConsolidation(scope);
+    const initial = await h.store.getState(scope);
+    expect(initial.lastConsolidationHash).toBe(larkMemoryFingerprint(await h.store.list(scope)));
+    h.memoryPrompts.length = 0;
+    for (let i = 0; i < 8; i++) { await h.runTurns(3); await h.waitIdle(); }
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台提取'))).toHaveLength(8);
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(0);
+    expect((await h.store.getState(scope)).lastConsolidationAt).toBe(initial.lastConsolidationAt);
+    // Manual runs remain forced even for an unchanged fingerprint.
+    await h.pipeline.runConsolidation(scope);
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(1);
+    await h.store.add(scope, { content: '新增约定写英文注释', topic: 'conventions', source: 'user' });
+    await h.runTurns(8); await h.waitIdle();
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(2);
+    await h.store.updateState(scope, { indexOverBudget: true, turnsSinceExtraction: 0, pendingTurns: [] });
+    await h.pipeline.onTurnCompleted(scope, { sessionId: 'budget-check', taskId: 'budget-check' }); await h.waitIdle();
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(3);
+    now = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+    await h.runTurns(1); await h.waitIdle();
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(4);
+  }, 30_000);
+
+  it('does not mark concurrent facts as consolidated and preserves concurrent writes on a mutating plan', async () => {
+    const h = await harness();
+    const original = await h.store.add(scope, { content: '已有约定使用中文', topic: 'conventions', source: 'user' });
+    const before = larkMemoryFingerprint(await h.store.list(scope));
+    h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }), delayMs: 200 }));
+    const running = h.pipeline.runConsolidation(scope);
+    await vi.waitFor(() => expect(h.memoryPrompts).toHaveLength(1));
+    await h.store.add(scope, { content: '运行期间新增事实', topic: 'conventions', source: 'user' });
+    expect(await running).toMatchObject({ ok: true });
+    const state = await h.store.getState(scope);
+    expect(state.lastConsolidationHash).toBe(before);
+    expect(state.lastConsolidationHash).not.toBe(larkMemoryFingerprint(await h.store.list(scope)));
+    h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'retopic', id: original.id, topic: 'workflow' }] }), delayMs: 200 }));
+    const second = h.pipeline.runConsolidation(scope);
+    await vi.waitFor(() => expect(h.memoryPrompts).toHaveLength(2));
+    await h.store.add(scope, { content: '第二次运行新写入的事实', topic: 'conventions', source: 'user' });
+    expect(await second).toMatchObject({ ok: false, error: 'MEMORY_CONCURRENT_CHANGE' });
+    expect((await h.store.list(scope))).toHaveLength(3);
+    expect((await h.store.list(scope)).find(item => item.id === original.id)?.topic).toBe('conventions');
+    expect((await h.store.getState(scope)).lastConsolidationHash).toBe(before);
+  });
+
+  it('runs legacy state without a fingerprint once and records the exact post-plan fingerprint', async () => {
+    const h = await harness();
+    const original = await h.store.add(scope, { content: '已有约定使用中文', topic: 'conventions', source: 'user' });
+    h.setResponder(prompt => ({ text: prompt.includes('后台提取') ? jsonBlock({ facts: [] }) : jsonBlock({ actions: [{ op: 'retopic', id: original.id, topic: 'workflow' }] }) }));
+    await h.store.updateState(scope, { turnsSinceConsolidation: 7, lastConsolidationAt: new Date().toISOString() });
+    const before = larkMemoryFingerprint(await h.store.list(scope));
+    await h.runTurns(1); await h.waitIdle();
+    expect(h.memoryPrompts.filter(prompt => prompt.includes('后台整理'))).toHaveLength(1);
+    const state = await h.store.getState(scope);
+    expect(state.lastConsolidationInputHash).toBe(before);
+    expect(state.lastConsolidationHash).toBe(larkMemoryFingerprint(await h.store.list(scope)));
+    expect(state.lastConsolidationHash).not.toBe(before);
+  });
+});
+
+it('keeps memory selection independent of decision and response configuration', async () => {
+  const h = await harness();
+  await h.setConfig({ memoryModel: 'memory-model', decisionAgentId: 'unregistered-classifier', decisionModel: 'fast', responseAgentId: 'unregistered-writer', responseModel: 'quality' });
+  await h.store.add(scope, { content: '默认使用中文', topic: 'conventions', source: 'user' });
+  expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
+  expect(h.startCalls).toHaveLength(1);
+  expect(h.startCalls[0]).toMatchObject({ agentId: 'mock', model: 'memory-model' });
+});
+
+it('rechecks unchanged dated facts after 24 hours and can retire expired entries', async () => {
+  let now = new Date('2026-09-27T00:00:00Z');
+  const h = await harness({ now: () => now });
+  const fact = await h.store.add(scope, { content: '发布窗口截止 2026-09-27T12:00:00Z', topic: 'workflow', source: 'user' });
+  await h.pipeline.runConsolidation(scope);
+  now = new Date('2026-09-28T00:00:00Z');
+  h.setResponder(prompt => {
+    expect(prompt).toContain(now.toISOString());
+    return { text: jsonBlock({ actions: [{ op: 'retire', id: fact.id, reason: '明确期限已过' }] }) };
+  });
+  await h.pipeline.onTurnCompleted(scope, { sessionId: 'expiry-check', taskId: 'expiry-check' });
+  await h.waitIdle();
+  expect(h.memoryPrompts).toHaveLength(2);
+  expect(await h.store.list(scope)).toEqual([]);
+  expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'consolidation', ok: true, retired: 1 });
 });

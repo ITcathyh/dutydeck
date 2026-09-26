@@ -27,23 +27,23 @@ describe('ClaudeTranscriptTailer background work', () => {
   let directory: string | undefined;
   afterEach(() => { if (directory) rmSync(directory, { recursive: true, force: true }); });
 
-  it('reports what the latest turn ended with until a new prompt resets it', () => {
+  it('reports what the latest turn ended with until a new prompt resets it', async () => {
     directory = mkdtempSync(join(tmpdir(), 'dutydeck-claude-background-'));
     const path = join(directory, 'session.jsonl');
     writeFileSync(path, '');
     const tailer = new ClaudeTranscriptTailer({ cwd: directory, transcriptPath: path });
-    const append = (lines: string[]) => { appendFileSync(path, lines.map(line => `${line}\n`).join('')); tailer.flush(); };
+    const append = async (lines: string[]) => { appendFileSync(path, lines.map(line => `${line}\n`).join('')); await tailer.flush(); };
     const pendingAt = records.findIndex(line => line.includes('"pendingBackgroundAgentCount"'));
     tailer.start();
     try {
-      append(records.slice(0, pendingAt));
+      await append(records.slice(0, pendingAt));
       expect(tailer.pendingBackgroundWork()).toBe(0);
-      append([records[pendingAt]!]);
+      await append([records[pendingAt]!]);
       expect(tailer.pendingBackgroundWork()).toBe(1);
       tailer.resetBackgroundWork();
       expect(tailer.pendingBackgroundWork()).toBe(0);
-      append([records[pendingAt]!]);
-      append(records.slice(pendingAt + 1));
+      await append([records[pendingAt]!]);
+      await append(records.slice(pendingAt + 1));
       expect(tailer.pendingBackgroundWork()).toBe(0);
     } finally {
       tailer.stop();

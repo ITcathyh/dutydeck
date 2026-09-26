@@ -23,7 +23,7 @@ const act = (snapshot: CollaborationSnapshot, evidence = true): ParticipationRes
 const cleanups: Array<() => void | Promise<void>> = [];
 afterEach(async () => { vi.useRealTimers(); for (const clean of cleanups.splice(0).reverse()) await clean(); });
 
-async function harness(mode: 'off' | 'observe' | 'selective' = 'selective', extra: Pick<GroupParticipationOptions, 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext' | 'now'> = {}) {
+async function harness(mode: 'off' | 'observe' | 'selective' = 'selective', extra: Pick<GroupParticipationOptions, 'withDelivery' | 'readMemory' | 'readGroupDescription' | 'readTeamContext' | 'authorizeTeamContext' | 'now' | 'usageRefusal'> = {}) {
   const db = new Database(':memory:'); createCollaborationSchema(db);
   const repository = createCollaborationRepository(db);
   if (mode !== 'off') await repository.updateSettings(scope, { expectedRevision: 0, participation: mode }, 'owner');
@@ -58,7 +58,7 @@ describe('team context in group participation', () => {
     expect(h.respond).not.toHaveBeenCalled();
     expect(h.service.addReaction).not.toHaveBeenCalled();
     expect(h.service.replyText).not.toHaveBeenCalled();
-    expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ action: 'silent', status: 'failed', reason: expect.stringContaining('current human trigger') });
+    expect((await h.repository.listDecisions(scope))[0]).toMatchObject({ action: 'silent', status: 'failed', reason: expect.stringContaining('outside its snapshot') });
   });
 
   it('persists addressing evidence through recovery without turning a mention of others into an explicit request', async () => {
@@ -77,14 +77,16 @@ describe('team context in group participation', () => {
     expect(h.service.replyText).not.toHaveBeenCalled();
   });
 
-  it('freezes cross-group evidence once for both phases and delivers only to the originating question', async () => {
+  it('requests and freezes cross-group evidence after the local decision and delivers only to the originating question', async () => {
     const read = vi.fn(async () => teamContext());
     const h = await harness('selective', { readTeamContext: read, authorizeTeamContext: async () => true });
-    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), evidenceIds: [...reply(snapshot).evidenceIds, snapshot.teamContext!.observations[0]!.id] }));
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), teamQuery: '看看个人待办群' }));
     await h.coordinator.handle(message('om_question', '看看个人待办群'), config);
     await h.participation.flush(scope);
     expect(read).toHaveBeenCalledExactlyOnceWith(scope, '看看个人待办群');
-    expect(h.respond.mock.calls[0]![1].teamContext).toEqual(h.decide.mock.calls[0]![1].teamContext);
+    expect(h.decide.mock.calls[0]![1].teamContext).toBeUndefined();
+    expect(h.decide).toHaveBeenCalledOnce();
+    expect(h.respond.mock.calls[0]![1].teamContext).toEqual(teamContext());
     expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ messageId: 'om_question' }));
     const decision = (await h.repository.listDecisions(scope))[0]!;
     expect(decision).toMatchObject({ status: 'sent', evidenceIds: [h.decide.mock.calls[0]![1].observations.find(item => item.origin === 'live')!.id, 'team_work'] });
@@ -95,7 +97,7 @@ describe('team context in group participation', () => {
   it('rechecks source access during generation and clears OK without sending revoked material', async () => {
     let allowed = true;
     const h = await harness('selective', { readTeamContext: async () => teamContext(), authorizeTeamContext: async () => allowed });
-    h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), teamQuery: '看看个人待办群' }));
     let finish!: () => void;
     h.respond.mockImplementation(async () => { await new Promise<void>(resolve => { finish = resolve; }); return '个人待办：推进容量扫描'; });
     await h.coordinator.handle(message(), config);
@@ -109,7 +111,7 @@ describe('team context in group participation', () => {
 
   it('answers a new question even when its team evidence was used by a completed reply', async () => {
     const h = await harness('selective', { readTeamContext: async () => teamContext(), authorizeTeamContext: async () => true });
-    h.decide.mockImplementation(async (_config, snapshot) => ({ action: 'reply', reason: '新的查询复用同一来源', evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id, 'team_work'], updates: [] }));
+    h.decide.mockImplementation(async (_config, snapshot) => ({ action: 'reply', reason: '新的查询复用同一来源', evidenceIds: [snapshot.observations.filter(item => item.origin === 'live').at(-1)!.id], updates: [], teamQuery: '看看个人待办群' }));
     await h.coordinator.handle(message('om_first', '看看个人待办群'), config); await h.participation.flush(scope);
     await h.coordinator.handle(message('om_next', '这里面哪些和容量有关？'), config); await h.participation.flush(scope);
     expect(h.service.replyText.mock.calls).toEqual([
@@ -119,9 +121,9 @@ describe('team context in group participation', () => {
 
   it('records unavailable team retrieval without silently dropping the local request', async () => {
     const h = await harness('selective', { readTeamContext: async () => { throw new Error('temporarily unavailable'); } });
-    h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), teamQuery: '看看个人待办群' }));
     await h.coordinator.handle(message(), config); await h.participation.flush(scope);
-    expect(h.decide.mock.calls[0]![1].bootstrap?.missing).toContain('team_context_unavailable');
+    expect(h.respond.mock.calls[0]![1].bootstrap?.missing).toContain('team_context_unavailable');
     expect(h.service.replyText).toHaveBeenCalledOnce();
   });
 
@@ -130,6 +132,7 @@ describe('team context in group participation', () => {
     const read = vi.fn().mockImplementationOnce(() => new Promise<CollaborationTeamContext>(resolve => { release = () => resolve(teamContext()); }))
       .mockImplementation(async () => teamContext());
     const h = await harness('selective', { readTeamContext: read, authorizeTeamContext: async () => true });
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), teamQuery: '个人待办' }));
     await h.coordinator.handle(message('om_first', '第一条查询'), config);
     vi.useFakeTimers();
     const first = h.participation.flush(scope);
@@ -138,11 +141,11 @@ describe('team context in group participation', () => {
       expect(read).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(10_001);
       await first;
-      expect(h.decide.mock.calls[0]![1].bootstrap?.missing).toContain('team_context_unavailable');
+      expect(h.respond.mock.calls[0]![1].bootstrap?.missing).toContain('team_context_unavailable');
       vi.useRealTimers();
       await h.coordinator.handle(message('om_second', '第二条查询'), config);
       await h.participation.flush(scope);
-      expect(h.decide.mock.calls[1]![1].teamContext?.observations.map(item => item.id)).toEqual(['team_work']);
+      expect(h.respond.mock.calls[1]![1].teamContext?.observations.map(item => item.id)).toEqual(['team_work']);
     } finally {
       release?.();
       vi.useRealTimers();
@@ -153,6 +156,7 @@ describe('team context in group participation', () => {
     let release!: () => void;
     const authorizeTeamContext = vi.fn(() => new Promise<boolean>(resolve => { release = () => resolve(true); }));
     const h = await harness('selective', { readTeamContext: async () => teamContext(), authorizeTeamContext });
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), teamQuery: '个人待办' }));
     await h.coordinator.handle(message('om_1', '个人待办'), config);
     vi.useFakeTimers();
     const pending = h.participation.flush(scope);
@@ -161,7 +165,8 @@ describe('team context in group participation', () => {
       expect(authorizeTeamContext).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(10_001);
       await pending;
-      expect(h.decide).not.toHaveBeenCalled();
+      expect(h.decide).toHaveBeenCalledOnce();
+      expect(h.respond).not.toHaveBeenCalled();
       expect(h.service.replyText).not.toHaveBeenCalled();
     } finally {
       release?.();
@@ -556,7 +561,7 @@ describe('group observation and selective participation through the coordinator'
   });
   it.each([false, true])('preserves legacy uncertain-send keys within their original thread (new thread: %s)', async newThread => {
     const h = await harness('selective', { readTeamContext: async () => teamContext(), authorizeTeamContext: async () => true });
-    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), evidenceIds: [...reply(snapshot).evidenceIds, 'team_work'] }));
+    h.decide.mockImplementation(async (_config, snapshot) => ({ ...reply(snapshot), teamQuery: '个人待办' }));
     h.service.replyText.mockRejectedValueOnce(new Error('response lost'));
     await h.coordinator.handle(message('om_1', '看看容量', { threadId: 'omt_original' }), config); await h.participation.flush(scope);
     const action = (await h.repository.listActions(scope)).find(item => item.kind === 'participation.reply')!;
@@ -912,4 +917,50 @@ describe('participation shutdown and source completeness', () => {
     }
     expect((await h.repository.getBootstrap(scope))!.missing).toEqual(expect.arrayContaining(['text_truncated', 'description_truncated']));
   });
+});
+
+describe('early participation admission and on-demand team reads', () => {
+  it.each(['usage', 'decisions'] as const)('rejects %s before bootstrap, memory, snapshots or team calls', async kind => {
+    const readMemory = vi.fn(async () => 'memory');
+    const readTeamContext = vi.fn(async () => teamContext());
+    const readGroupDescription = vi.fn(async () => 'description');
+    const h = await harness('selective', { readMemory, readTeamContext, readGroupDescription,
+      usageRefusal: async () => kind === 'usage' ? 'monthly automatic limit' : undefined });
+    if (kind === 'decisions') await h.repository.updateSettings(scope, { expectedRevision: 1, maxDecisionsPerHour: 0 }, 'owner');
+    const snapshots = vi.spyOn(h.repository, 'snapshot');
+    await h.participation.handle(message(), config, { explicit: false, botOpenId: 'ou_bot' });
+    await h.participation.flush(scope);
+    expect(readMemory).not.toHaveBeenCalled(); expect(readTeamContext).not.toHaveBeenCalled();
+    expect(readGroupDescription).not.toHaveBeenCalled(); expect(h.service.listChatMessages).not.toHaveBeenCalled();
+    expect(snapshots).not.toHaveBeenCalled(); expect(h.decide).not.toHaveBeenCalled();
+    expect((await h.repository.listDecisions(scope))[0]?.status).toBe('suppressed');
+  });
+
+  it('two ordinary messages never enter the 100-group reader', async () => {
+    const { LarkTeamContextReader } = await import('./team-context.js');
+    const h = await harness();
+    const listChats = vi.fn(async () => ({ items: Array.from({ length: 100 }, (_, i) => ({ chatId: `oc_${i}`, name: `群${i}`, external: false })), hasMore: false }));
+    const remote = vi.fn(async () => ({ items: [], hasMore: false }));
+    const reader = new LarkTeamContextReader({ repository: h.repository, readConfig: async () => ({ ...config, groupToolsEnabled: true }), serviceFor: () => ({ listChats, listChatMessages: remote }), canRead: async () => true });
+    h.options.readTeamContext = (target, query) => reader.read(target, query);
+    const observations = vi.spyOn(h.repository, 'listObservations'), followups = vi.spyOn(h.repository, 'listFollowups');
+    h.decide.mockResolvedValue({ ...silent(), teamQuery: 'even an ignored silent query' });
+    for (const [id, text] of [['om_thanks', '谢谢'], ['om_status', '发布工作还在进行']]) {
+      await h.participation.handle(message(id, text), config, { explicit: false, botOpenId: 'ou_bot' });
+      await h.participation.flush(scope);
+    }
+    expect(h.decide).toHaveBeenCalledTimes(2);
+    expect(listChats).not.toHaveBeenCalled(); expect(remote).not.toHaveBeenCalled();
+    expect(observations.mock.calls).toEqual([[scope, { limit: 1000 }]]);
+    expect(followups).not.toHaveBeenCalled();
+  });
+});
+
+it('explains an automatic task cap reached between classification and response admission', async () => {
+  const h = await harness();
+  h.decide.mockImplementation(async (_config, snapshot) => reply(snapshot));
+  h.respond.mockRejectedValue(new RuntimeError('USAGE_BACKGROUND_CAP_EXCEEDED', '自动任务月度次数已达上限', 429));
+  await h.participation.handle(message(), config, { explicit: false, botOpenId: 'ou_bot' });
+  await h.participation.flush(scope);
+  expect(h.service.replyText).toHaveBeenCalledWith(expect.objectContaining({ text: '自动任务月度次数已达上限' }));
 });

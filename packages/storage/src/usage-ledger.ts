@@ -19,13 +19,19 @@ export function createUsageLedgerSchema(db: Database.Database): void {
       origin TEXT NOT NULL CHECK (length(origin) <= 64),
       agent_id TEXT NOT NULL,
       model TEXT,
+      provider TEXT NOT NULL DEFAULT 'unknown',
+      model_source TEXT NOT NULL DEFAULT 'legacy_unknown',
+      pricing_source TEXT NOT NULL DEFAULT 'legacy_unknown',
+      pricing_version TEXT,
+      pricing_match TEXT,
+      unpriced_reason TEXT,
       input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
       output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
       cache_read_tokens INTEGER CHECK (cache_read_tokens IS NULL OR cache_read_tokens >= 0),
       cache_write_tokens INTEGER CHECK (cache_write_tokens IS NULL OR cache_write_tokens >= 0),
       cost_usd REAL CHECK (cost_usd IS NULL OR cost_usd >= 0),
       cost_estimated INTEGER NOT NULL CHECK (cost_estimated IN (0, 1)),
-      data_status TEXT NOT NULL CHECK (data_status IN ('reported', 'estimated', 'unavailable')),
+      data_status TEXT NOT NULL CHECK (data_status IN ('reported', 'estimated', 'unpriced', 'unavailable')),
       cumulative_cost_usd REAL CHECK (cumulative_cost_usd IS NULL OR cumulative_cost_usd >= 0),
       usage_ref TEXT,
       UNIQUE (session_id, usage_ref)
@@ -34,6 +40,15 @@ export function createUsageLedgerSchema(db: Database.Database): void {
     CREATE INDEX IF NOT EXISTS usage_ledger_app_recorded ON usage_ledger(app_id, chat_id, recorded_at);
     CREATE INDEX IF NOT EXISTS usage_ledger_session ON usage_ledger(session_id, recorded_at);
     CREATE INDEX IF NOT EXISTS usage_ledger_root_session ON usage_ledger(root_session_id);
+
+    CREATE TABLE IF NOT EXISTS usage_background_admissions (
+      app_id TEXT NOT NULL,
+      month TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      admitted_at TEXT NOT NULL,
+      PRIMARY KEY (app_id, task_id)
+    );
+    CREATE INDEX IF NOT EXISTS usage_background_month ON usage_background_admissions(month, app_id);
 
     CREATE TABLE IF NOT EXISTS usage_caps (
       scope TEXT NOT NULL CHECK (scope IN ('bot', 'group')),
@@ -57,12 +72,31 @@ export function createUsageLedgerSchema(db: Database.Database): void {
   `);
 }
 
-interface LedgerRow { app_id: string | null; chat_id: string | null; actor_id: string | null; category: string | null; entries: number; cost_usd: number | null; estimated_cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; unavailable: number | null }
+/** v29 preserves recorded bills and old estimate provenance without inventing
+ * a provider/rate version. Old cache-write estimates were incomplete. */
+export function migrateUsagePricing(db: Database.Database): void {
+  const columns = db.pragma('table_info(usage_ledger)') as Array<{ name: string }>;
+  if (!columns.some(column => column.name === 'pricing_source')) {
+    db.exec('ALTER TABLE usage_ledger RENAME TO usage_ledger_v27');
+    createUsageLedgerSchema(db);
+    const oldColumns = columns.map(column => `"${column.name}"`).join(', ');
+    db.exec(`INSERT INTO usage_ledger (${oldColumns}) SELECT ${oldColumns} FROM usage_ledger_v27`);
+    db.exec(`UPDATE usage_ledger SET cost_usd = NULL, cost_estimated = 0, data_status = 'unpriced', unpriced_reason = 'legacy_cache_write_rate_unknown'
+      WHERE data_status = 'estimated' AND cache_write_tokens > 0`);
+    db.exec('DROP TABLE usage_ledger_v27');
+  }
+  // Index names belonged to the renamed table until it was dropped.
+  createUsageLedgerSchema(db);
+}
+
+interface LedgerRow { app_id: string | null; chat_id: string | null; actor_id: string | null; category: string | null; entries: number; cost_usd: number | null; estimated_cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; unavailable: number | null; unpriced: number | null; priced_entries: number | null }
 interface CapRow { scope: UsageCapScope; app_id: string; chat_id: string; monthly_cost_usd: number; updated_at: string }
 
 const aggregates = `COUNT(*) AS entries, SUM(cost_usd) AS cost_usd, SUM(CASE WHEN cost_estimated = 1 THEN cost_usd END) AS estimated_cost_usd,
   SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens,
-  SUM(CASE WHEN data_status = 'unavailable' THEN 1 ELSE 0 END) AS unavailable`;
+  SUM(CASE WHEN data_status = 'unavailable' THEN 1 ELSE 0 END) AS unavailable,
+  SUM(CASE WHEN data_status = 'unpriced' THEN 1 ELSE 0 END) AS unpriced,
+  SUM(CASE WHEN cost_usd IS NOT NULL AND data_status IN ('reported', 'estimated') THEN 1 ELSE 0 END) AS priced_entries`;
 /** 群按 (Bot, 群) 分组：同一个群里的两个 Bot 各算各的。 */
 const groupings: Record<UsageDimension, Array<[keyof UsageGroup, string]>> = {
   appId: [['appId', 'app_id']], chatId: [['appId', 'app_id'], ['chatId', 'chat_id']], actorId: [['actorId', 'actor_id']], category: [['category', 'category']]
@@ -84,7 +118,8 @@ function totalsOf(row: LedgerRow): UsageTotals {
   return {
     entries: row.entries, costUsd: row.cost_usd ?? 0, estimatedCostUsd: row.estimated_cost_usd ?? 0,
     inputTokens: row.input_tokens ?? 0, outputTokens: row.output_tokens ?? 0, cacheReadTokens: row.cache_read_tokens ?? 0, cacheWriteTokens: row.cache_write_tokens ?? 0,
-    unavailable: row.unavailable ?? 0
+    unavailable: row.unavailable ?? 0, unpriced: row.unpriced ?? 0, pricedEntries: row.priced_entries ?? 0,
+    unknownCostEntries: row.entries - (row.priced_entries ?? 0), costCoverage: row.entries ? (row.priced_entries ?? 0) / row.entries : null
   };
 }
 
@@ -93,9 +128,9 @@ function capOf(row: CapRow): UsageCap {
 }
 
 export function createUsageLedgerRepository(sqlite: Database.Database): UsageLedgerRepository {
-  const insert = sqlite.prepare(`INSERT OR IGNORE INTO usage_ledger (id, recorded_at, app_id, chat_id, session_id, task_id, attempt_id, root_task_id, root_session_id, actor_id, category, origin, agent_id, model,
+  const insert = sqlite.prepare(`INSERT OR IGNORE INTO usage_ledger (id, recorded_at, app_id, chat_id, session_id, task_id, attempt_id, root_task_id, root_session_id, actor_id, category, origin, agent_id, model, provider, model_source, pricing_source, pricing_version, pricing_match, unpriced_reason,
     input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd, cost_estimated, data_status, cumulative_cost_usd, usage_ref)
-    VALUES (@id, @recordedAt, @appId, @chatId, @sessionId, @taskId, @attemptId, @rootTaskId, @rootSessionId, @actorId, @category, @origin, @agentId, @model,
+    VALUES (@id, @recordedAt, @appId, @chatId, @sessionId, @taskId, @attemptId, @rootTaskId, @rootSessionId, @actorId, @category, @origin, @agentId, @model, @provider, @modelSource, @pricingSource, @pricingVersion, @pricingMatch, @unpricedReason,
     @inputTokens, @outputTokens, @cacheReadTokens, @cacheWriteTokens, @costUsd, @costEstimated, @dataStatus, @cumulativeCostUsd, @usageRef)`);
   const chatKey = (scope: UsageCapScope, chatId?: string) => scope === 'bot' ? '' : chatId ?? '';
   return {
@@ -104,10 +139,24 @@ export function createUsageLedgerRepository(sqlite: Database.Database): UsageLed
       return insert.run({
         id: entry.id, recordedAt: entry.recordedAt, appId: nullable(entry.appId), chatId: nullable(entry.chatId), sessionId: entry.sessionId, taskId: entry.taskId, attemptId: entry.attemptId,
         rootTaskId: nullable(entry.rootTaskId), rootSessionId: nullable(entry.rootSessionId), actorId: nullable(entry.actorId), category: entry.category, origin: entry.origin,
-        agentId: entry.agentId, model: nullable(entry.model), inputTokens: nullable(entry.inputTokens), outputTokens: nullable(entry.outputTokens),
+        agentId: entry.agentId, model: nullable(entry.model), provider: entry.provider ?? 'unknown', modelSource: entry.modelSource ?? 'legacy_unknown',
+        pricingSource: entry.pricingSource ?? 'legacy_unknown', pricingVersion: nullable(entry.pricingVersion), pricingMatch: nullable(entry.pricingMatch), unpricedReason: nullable(entry.unpricedReason), inputTokens: nullable(entry.inputTokens), outputTokens: nullable(entry.outputTokens),
         cacheReadTokens: nullable(entry.cacheReadTokens), cacheWriteTokens: nullable(entry.cacheWriteTokens), costUsd: nullable(entry.costUsd),
         costEstimated: entry.costEstimated ? 1 : 0, dataStatus: entry.dataStatus, cumulativeCostUsd: nullable(entry.cumulativeCostUsd), usageRef: nullable(entry.usageRef)
       }).changes === 1;
+    },
+    async claimBackgroundTask(appId, month, taskId, limit): Promise<boolean> {
+      if (!Number.isSafeInteger(limit) || limit < 0) throw new Error('Invalid automatic task limit');
+      return sqlite.transaction(() => {
+        if (sqlite.prepare('SELECT 1 FROM usage_background_admissions WHERE app_id = ? AND task_id = ?').get(appId, taskId)) return true;
+        const { count } = sqlite.prepare('SELECT COUNT(*) AS count FROM usage_background_admissions WHERE app_id = ? AND month = ?').get(appId, month) as { count: number };
+        if (count >= limit) return false;
+        sqlite.prepare('INSERT INTO usage_background_admissions (app_id, month, task_id, admitted_at) VALUES (?, ?, ?, ?)').run(appId, month, taskId, new Date().toISOString());
+        return true;
+      }).immediate();
+    },
+    async backgroundTaskCounts(month) {
+      return (sqlite.prepare('SELECT app_id AS appId, COUNT(*) AS tasks FROM usage_background_admissions WHERE month = ? GROUP BY app_id ORDER BY app_id').all(month)) as Array<{ appId: string; tasks: number }>;
     },
     async hasAttempt(attemptId: string): Promise<boolean> {
       return Boolean(sqlite.prepare('SELECT 1 FROM usage_ledger WHERE attempt_id = ?').get(attemptId));

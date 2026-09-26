@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { api, foundationApi, scheduleApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
@@ -1005,22 +1005,29 @@ describe('App 完整历史记录', () => {
     data: index === 0 ? { role: 'user', text: '最早的历史内容' } : { role: 'assistant', text: '最新的历史内容' }
   }));
 
-  it('进入会话自动跨页读取全部记录，重新读取后仍保留完整历史', async () => {
+  it('首屏只读取尾页，滚动顶部自动补齐并在刷新后保留记录', async () => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')] });
     vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => query?.before === undefined || event.sequence < query.before).slice(-query!.limit!));
-    const { client } = renderApp();
+    const { client, container } = renderApp();
+    await waitFor(() => expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toHaveLength(200));
+    expect(api.events).toHaveBeenCalledTimes(1);
+    for (let page = 0; page < 6; page++) {
+      // These status-only pages add no visible height; JSDOM also has no
+      // layout. Continued upward wheel input can load another page at top=0,
+      // whereas assigning the same scrollTop does not cause a browser scroll.
+      fireEvent.wheel(container.querySelector('[data-timeline-scroll]')!, { deltaY: -100 });
+      await waitFor(() => expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toHaveLength(Math.min(1205, 400 + page * 200)));
+      expect(api.events).toHaveBeenCalledTimes(page + 2);
+    }
     expect(await screen.findByText('最早的历史内容')).toBeTruthy();
-    expect(screen.getByText('最新的历史内容')).toBeTruthy();
     expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual(history);
-    expect(api.events).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole('button', { name: '加载更早记录' })).toBeNull();
     await act(() => client.invalidateQueries({ queryKey: ['events', 's1'] }));
     expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual(history);
-    expect(screen.getByText('最早的历史内容')).toBeTruthy();
   });
 
-  it('历史请求失败时显示错误，重试后自动补全记录', async () => {
+  it('历史请求失败时显示错误，重试后加载尾页', async () => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')] });
     vi.mocked(api.events).mockRejectedValueOnce(new Error('连接中断'));
@@ -1028,7 +1035,7 @@ describe('App 完整历史记录', () => {
     expect(await screen.findByText('历史记录加载失败：连接中断')).toBeTruthy();
     vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => query?.before === undefined || event.sequence < query.before).slice(-query!.limit!));
     await userEvent.setup().click(screen.getByRole('button', { name: '重试加载记录' }));
-    expect(await screen.findByText('最早的历史内容')).toBeTruthy();
+    await waitFor(() => expect(vi.mocked(api.events)).toHaveBeenLastCalledWith('s1', { limit: 200, direction: 'backward' }, expect.any(AbortSignal)));
     expect(screen.queryByText('历史记录加载失败：连接中断')).toBeNull();
   });
 

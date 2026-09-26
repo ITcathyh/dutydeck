@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import type { UsageCap, UsageCategory, UsageGroup, UsageTotals } from '@dutydeck/shared';
-import { api, type LarkBotConfig, type UsageSummaryWindow } from '../api';
+import type { UsageBackgroundBudget, UsageCap, UsageCategory } from '@dutydeck/shared';
+import { api, type LarkBotConfig, type UsageSummaryWindow, type UsageTotalsResponse as UsageTotals, type UsageGroupResponse as UsageGroup } from '../api';
 import { Banner, Button, Card, EmptyState, Field, Input, Select, Spinner, Tabs } from './primitives';
 
 type UsageRange = 'month' | 'week';
@@ -12,8 +12,10 @@ const count = (value: number) => value.toLocaleString('zh-CN');
 
 /** 成本里估算的部分单独标出；PTY 等不上报用量的记录只计次数，不算进成本。 */
 function usageText(totals: UsageTotals) {
-  const parts = [`${usd(totals.costUsd)}${totals.estimatedCostUsd > 0 ? `（含估算 ${usd(totals.estimatedCostUsd)}）` : ''}`,
+  const parts = [`已知费用 ${usd(totals.costUsd)}${totals.estimatedCostUsd > 0 ? `（含估算 ${usd(totals.estimatedCostUsd)}）` : ''}`,
     `输入 ${count(totals.inputTokens)} · 输出 ${count(totals.outputTokens)} token`, `${count(totals.entries)} 次`];
+  parts.push(`计价覆盖率 ${totals.costCoverage === null ? '暂无记录' : typeof totals.costCoverage === 'number' && Number.isFinite(totals.costCoverage) ? `${Math.round(totals.costCoverage * 100)}%` : '未知'}`);
+  if (totals.unpriced) parts.push(`${count(totals.unpriced)} 次有 token、费用未知`);
   if (totals.unavailable) parts.push(`${count(totals.unavailable)} 次无用量数据`);
   return parts.join(' · ');
 }
@@ -46,9 +48,9 @@ export function UsageOverview({ bots }: { bots: LarkBotConfig[] }) {
     <Tabs<UsageRange> value={range} onChange={setRange} label="统计区间" items={[{ id: 'month', label: '本月' }, { id: 'week', label: '近 7 天' }]}/>
     <Card as="section" tone="muted" padding="md" className="space-y-1" aria-label="合计">
       <p className="text-caption text-secondary">{range === 'month' ? '本月' : '近 7 天'}合计（自 {new Date(window.since).toLocaleString('zh-CN', { hour12: false })}）</p>
-      <p className="text-title font-semibold text-primary">{usd(window.totals.costUsd)}</p>
+      <p className="text-title font-semibold text-primary">已知费用 {usd(window.totals.costUsd)}</p>
       <p className="text-caption text-secondary">{usageText(window.totals)}</p>
-      <p className="text-caption text-subtle">Claude 等上报成本的 Agent 按上报值记；Codex 只报 token，按单价表估算并标为估算；PTY 终端 Agent 不上报用量。编排子步骤计入发起它的任务所在的群。</p>
+      <p className="text-caption text-subtle">优先采用 Agent 上报费用；只有 token 且费率完整时估算。未知型号、缺缓存写入费率和 PTY 无用量均不能视为免费。覆盖率按有完整费用的记录数计算，未计价部分不受美元上限完整约束。编排子步骤归到发起任务所在的群。</p>
     </Card>
     {!window.totals.entries ? <EmptyState title="暂无用量记录" description="任务执行完一轮后会在这里出现。"/> : <>
       <UsageList title="按机器人" rows={window.bots} label={row => botName(row.appId)}/>
@@ -56,8 +58,25 @@ export function UsageOverview({ bots }: { bots: LarkBotConfig[] }) {
       <UsageList title="按触发人" rows={window.actors} label={row => row.actorId ?? '未记录触发人'}/>
       <UsageList title="按来源" rows={window.categories} label={row => row.category ? categoryLabels[row.category] : '未分类'}/>
     </>}
+    <AutomaticBudget budget={summary.data.backgroundBudget} bots={bots} botName={botName}/>
     <UsageCaps bots={bots} caps={summary.data.caps} month={summary.data.month} botName={botName} chatName={chatName} groups={groups.data?.groups ?? []}/>
   </div>;
+}
+
+function AutomaticBudget({ budget, bots, botName }: { budget?: UsageBackgroundBudget; bots: LarkBotConfig[]; botName(appId?: string): string }) {
+  if (!budget) return <Card as="section" padding="md" aria-label="自动任务次数兜底"><h3 className="text-body font-semibold">自动任务每月次数上限</h3><p className="text-caption text-secondary">当前服务未返回自动任务次数配置，状态未知；美元上限无法覆盖未知费用。</p></Card>;
+  const appIds = [...new Set([...bots.map(bot => bot.appId), ...Object.keys(budget.bots ?? {}), ...budget.usage.map(row => row.appId)])];
+  return <Card as="section" padding="md" className="space-y-2" aria-label="自动任务次数兜底">
+    <h3 className="text-body font-semibold">自动任务每月次数上限</h3>
+    <p className="text-caption text-secondary">费用事前未知，启用后覆盖后台、主动介入和定时根任务；显式请求与已接纳任务的子步骤不计次，也不打断在途任务。次数持久保存，下月重计；同一任务重放不重复计次。</p>
+    <p className="text-caption text-secondary">{budget.defaultMonthlyTasks === undefined ? '默认未启用：美元上限无法覆盖未知费用，未配置次数上限的机器人仍有预算覆盖缺口。' : `默认每机器人每月 ${count(budget.defaultMonthlyTasks)} 次；机器人单独配置优先。`}</p>
+    {appIds.length > 0 && <ul className="space-y-1 text-caption text-secondary">{appIds.map(appId => {
+      const limit = budget.bots?.[appId] ?? budget.defaultMonthlyTasks;
+      const used = budget.usage.find(row => row.appId === appId)?.tasks ?? 0;
+      return <li key={appId}>{botName(appId)}：本月已准入 {count(used)} 次；{limit === undefined ? '未配置次数兜底' : `上限 ${count(limit)} 次`}</li>;
+    })}</ul>}
+    <p className="text-caption text-subtle">安装管理员可通过服务配置设置默认或单机器人月度次数；本页展示当前配置。</p>
+  </Card>;
 }
 
 function UsageCaps({ bots, caps, month, botName, chatName, groups }: { bots: LarkBotConfig[]; caps: UsageCap[]; month: UsageSummaryWindow; botName(appId?: string): string; chatName(chatId?: string): string; groups: Array<{ chatId: string; name: string; bots: Array<{ appId: string }> }> }) {
@@ -81,7 +100,7 @@ function UsageCaps({ bots, caps, month, botName, chatName, groups }: { bots: Lar
 
   return <Card as="section" padding="md" className="space-y-3" aria-label="月度成本上限">
     <h3 className="text-body font-semibold">月度成本上限</h3>
-    <p className="text-caption text-secondary">默认不设上限。本月用到上限的 75% 和 95% 时各在群里提醒一次，用满后第一次拒绝新任务时再通知一次；之后新任务在派发前被拒绝并说明原因，正在执行的任务不受影响。下月 1 日起重新计算。</p>
+    <p className="text-caption text-secondary">默认不设上限。美元上限仅累计已知费用，未知费用不代表免费。本月用到上限的 75% 和 95% 时各在群里提醒一次，用满后第一次拒绝新任务时再通知一次；之后新任务在派发前被拒绝并说明原因，正在执行的任务不受影响。下月 1 日起重新计算。</p>
     {caps.length ? <ul className="divide-y divide-subtle rounded-md border border-subtle bg-surface">
       {caps.map(cap => <li key={`${cap.scope}:${cap.appId}:${cap.chatId ?? ''}`} className="flex flex-wrap items-center justify-between gap-2 p-3">
         <span className="min-w-0 break-all text-body text-primary">{cap.scope === 'bot' ? `机器人 ${botName(cap.appId)}` : `群 ${chatName(cap.chatId)} · ${botName(cap.appId)}`}</span>

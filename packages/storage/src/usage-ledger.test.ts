@@ -1,3 +1,7 @@
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { UsageLedgerEntry } from '@dutydeck/shared';
 import { createRepositories } from './index.js';
@@ -76,5 +80,79 @@ describe('usage ledger repository', () => {
       expect(await repos.usage.deleteCap('group', 'cli_a', 'oc_1')).toBe(false);
       expect(await repos.usage.listCaps()).toHaveLength(1);
     } finally { repos.close(); }
+  });
+});
+
+
+describe('usage pricing migration and durable automatic allowances', () => {
+  it('migrates real v27 rows, preserving reported costs and marking incomplete legacy cache-write estimates unknown', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'usage-migrate-'));
+    const path = join(dir, 'usage.sqlite');
+    let repos = createRepositories(path);
+    repos.close();
+    const db = new Database(path);
+    db.exec(`DROP TABLE usage_ledger;
+      DELETE FROM schema_migrations WHERE version = 29;
+      CREATE TABLE usage_ledger (
+        id TEXT PRIMARY KEY, recorded_at TEXT NOT NULL, app_id TEXT, chat_id TEXT,
+        session_id TEXT NOT NULL, task_id TEXT NOT NULL, attempt_id TEXT NOT NULL UNIQUE,
+        root_task_id TEXT, root_session_id TEXT, actor_id TEXT,
+        category TEXT NOT NULL, origin TEXT NOT NULL, agent_id TEXT NOT NULL, model TEXT,
+        input_tokens INTEGER, output_tokens INTEGER, cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+        cost_usd REAL, cost_estimated INTEGER NOT NULL,
+        data_status TEXT NOT NULL CHECK(data_status IN ('reported','estimated','unavailable')),
+        cumulative_cost_usd REAL, usage_ref TEXT, UNIQUE(session_id, usage_ref));`);
+    const insert = db.prepare(`INSERT INTO usage_ledger
+      (id, recorded_at, session_id, task_id, attempt_id, category, origin, agent_id, cache_write_tokens, cost_usd, cost_estimated, data_status)
+      VALUES (?, '2026-09-10T00:00:00Z', 'session', 'task', ?, 'background', 'memory', 'agent', ?, ?, ?, ?)`);
+    insert.run('reported', 'reported', 1000, 2, 0, 'reported');
+    insert.run('incomplete', 'incomplete', 1000, 0, 1, 'estimated');
+    insert.run('old-estimate', 'old-estimate', 0, 1, 1, 'estimated');
+    db.close();
+    try {
+      repos = createRepositories(path);
+      expect(await repos.usage.totals({})).toMatchObject({ entries: 3, costUsd: 3, unpriced: 1, unknownCostEntries: 1, pricedEntries: 2, costCoverage: 2 / 3 });
+      expect(await repos.usage.append(entry({ attemptId: 'fresh', provider: 'actual-vendor', model: 'model', modelSource: 'reading', pricingSource: 'custom_model', pricingVersion: 'config:hash', pricingMatch: 'model', costUsd: 0, dataStatus: 'estimated', costEstimated: true }))).toBe(true);
+      repos.close();
+      const inspect = new Database(path, { readonly: true });
+      try {
+        expect(inspect.prepare('SELECT provider, model_source, pricing_source, pricing_version, cost_usd, unpriced_reason FROM usage_ledger WHERE id = ?').get('incomplete')).toEqual({ provider: 'unknown', model_source: 'legacy_unknown', pricing_source: 'legacy_unknown', pricing_version: null, cost_usd: null, unpriced_reason: 'legacy_cache_write_rate_unknown' });
+        expect(inspect.prepare('SELECT provider, pricing_version, pricing_match, model, model_source FROM usage_ledger WHERE attempt_id = ?').get('fresh')).toEqual({ provider: 'actual-vendor', pricing_version: 'config:hash', pricing_match: 'model', model: 'model', model_source: 'reading' });
+        expect(inspect.prepare('SELECT cost_usd, data_status FROM usage_ledger WHERE id = ?').get('reported')).toEqual({ cost_usd: 2, data_status: 'reported' });
+        expect(inspect.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'usage_ledger_%'").all()).toHaveLength(4);
+      } finally { inspect.close(); }
+      repos = createRepositories(path);
+      expect(await repos.usage.append(entry({ attemptId: 'fresh', costUsd: 99 }))).toBe(false);
+    } finally { repos.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('distinguishes reported zero, token-only unpriced and no-usage entries in every aggregate', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      await repos.usage.append(entry({ attemptId: 'zero', costUsd: 0 }));
+      await repos.usage.append(entry({ attemptId: 'unpriced', inputTokens: 10, dataStatus: 'unpriced', unpricedReason: 'unknown_model' }));
+      await repos.usage.append(entry({ attemptId: 'unavailable', dataStatus: 'unavailable' }));
+      const expected = { costUsd: 0, entries: 3, unpriced: 1, unavailable: 1, pricedEntries: 1, unknownCostEntries: 2, costCoverage: 1 / 3 };
+      expect(await repos.usage.totals({})).toMatchObject(expected);
+      expect(await repos.usage.summarize('appId', {})).toMatchObject([expected]);
+      expect(await repos.usage.totals({ appId: 'absent' })).toMatchObject({ entries: 0, costCoverage: null });
+    } finally { repos.close(); }
+  });
+
+  it('atomically claims one allowance, keeps task replay free across months and survives reopening', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'usage-allowance-'));
+    const path = join(dir, 'usage.sqlite');
+    let repos = createRepositories(path);
+    try {
+      expect(await Promise.all(Array.from({ length: 10 }, (_, index) => repos.usage.claimBackgroundTask('app', '2026-09', `task-${index}`, 1)))).toEqual([true, ...Array(9).fill(false)]);
+      repos.close(); repos = createRepositories(path);
+      expect(await repos.usage.claimBackgroundTask('app', '2026-09', 'task-0', 0)).toBe(true);
+      expect(await repos.usage.claimBackgroundTask('app', '2026-09', 'task-next', 1)).toBe(false);
+      expect(await repos.usage.claimBackgroundTask('app', '2026-10', 'task-0', 1)).toBe(true);
+      expect(await repos.usage.backgroundTaskCounts('2026-10')).toEqual([]);
+      expect(await repos.usage.claimBackgroundTask('app', '2026-10', 'task-next', 1)).toBe(true);
+      expect(await repos.usage.claimBackgroundTask('other-app', '2026-09', 'task-next', 1)).toBe(true);
+      expect(await repos.usage.backgroundTaskCounts('2026-09')).toEqual([{ appId: 'app', tasks: 1 }, { appId: 'other-app', tasks: 1 }]);
+    } finally { repos.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 });

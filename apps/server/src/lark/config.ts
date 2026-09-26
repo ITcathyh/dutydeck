@@ -76,6 +76,12 @@ export interface StoredLarkConfig {
   memoryAgentId?: string;
   /** 跑提取与整理的模型；缺省沿用 defaultModel。 */
   memoryModel?: string;
+  /** 群判定独立选型；缺省沿用 memory，再回落 default。 */
+  decisionAgentId?: string;
+  decisionModel?: string;
+  /** 群回复独立选型；缺省沿用 memory，再回落 default。 */
+  responseAgentId?: string;
+  responseModel?: string;
   /** 执行方式，缺省 single；layered 时默认 Agent 当 PMO，把执行类任务交给 Leader 拆解、Worker 执行。 */
   executionMode?: 'single' | 'layered';
   /** layered 下负责拆解与验收的 Agent。 */
@@ -181,6 +187,10 @@ export interface SaveLarkConfigInput {
   memoryAutoExtract?: boolean;
   memoryAgentId?: string;
   memoryModel?: string;
+  decisionAgentId?: string;
+  decisionModel?: string;
+  responseAgentId?: string;
+  responseModel?: string;
   executionMode?: StoredLarkConfig['executionMode'];
   /** 空白串清除。 */
   leaderAgentId?: string;
@@ -259,6 +269,10 @@ export interface PublicLarkConfig {
   memoryAutoExtract: boolean;
   memoryAgentId?: string;
   memoryModel?: string;
+  decisionAgentId?: string;
+  decisionModel?: string;
+  responseAgentId?: string;
+  responseModel?: string;
   executionMode: NonNullable<StoredLarkConfig['executionMode']>;
   leaderAgentId?: string;
   workerAgentIds: string[];
@@ -537,6 +551,10 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     memoryAutoExtract: parsed.memoryAutoExtract !== false,
     ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
     ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
+    ...(parsed.decisionAgentId?.trim() ? { decisionAgentId: parsed.decisionAgentId.trim() } : {}),
+    ...(parsed.decisionModel?.trim() ? { decisionModel: parsed.decisionModel.trim() } : {}),
+    ...(parsed.responseAgentId?.trim() ? { responseAgentId: parsed.responseAgentId.trim() } : {}),
+    ...(parsed.responseModel?.trim() ? { responseModel: parsed.responseModel.trim() } : {}),
     ...(parsed.executionMode === 'layered' ? { executionMode: 'layered' as const } : {}),
     ...(parsed.leaderAgentId?.trim() ? { leaderAgentId: parsed.leaderAgentId.trim() } : {}),
     ...(normalizeAgentIds(parsed.workerAgentIds).length ? { workerAgentIds: normalizeAgentIds(parsed.workerAgentIds) } : {}),
@@ -636,6 +654,10 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   memoryAutoExtract: config.memoryAutoExtract !== false,
   ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
   ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
+  ...(config.decisionAgentId ? { decisionAgentId: config.decisionAgentId } : {}),
+  ...(config.decisionModel ? { decisionModel: config.decisionModel } : {}),
+  ...(config.responseAgentId ? { responseAgentId: config.responseAgentId } : {}),
+  ...(config.responseModel ? { responseModel: config.responseModel } : {}),
   executionMode: config.executionMode === 'layered' ? 'layered' : 'single',
   ...(config.leaderAgentId ? { leaderAgentId: config.leaderAgentId } : {}),
   workerAgentIds: config.workerAgentIds ?? [],
@@ -710,6 +732,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
   const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
   const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;
+  const decisionAgentId = input.decisionAgentId === undefined ? current?.decisionAgentId : input.decisionAgentId.trim() || undefined;
+  const decisionModel = input.decisionModel === undefined ? current?.decisionModel : input.decisionModel.trim() || undefined;
+  const responseAgentId = input.responseAgentId === undefined ? current?.responseAgentId : input.responseAgentId.trim() || undefined;
+  const responseModel = input.responseModel === undefined ? current?.responseModel : input.responseModel.trim() || undefined;
   const executionMode = input.executionMode ?? current?.executionMode ?? 'single';
   const leaderAgentId = input.leaderAgentId === undefined ? current?.leaderAgentId : input.leaderAgentId.trim() || undefined;
   const workerAgentIds = input.workerAgentIds === undefined ? current?.workerAgentIds ?? [] : normalizeAgentIds(input.workerAgentIds);
@@ -810,6 +836,10 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     memoryAutoExtract,
     ...(memoryAgentId ? { memoryAgentId } : {}),
     ...(memoryModel ? { memoryModel } : {}),
+    ...(decisionAgentId ? { decisionAgentId } : {}),
+    ...(decisionModel ? { decisionModel } : {}),
+    ...(responseAgentId ? { responseAgentId } : {}),
+    ...(responseModel ? { responseModel } : {}),
     ...(executionMode === 'layered' ? { executionMode } : {}),
     ...(leaderAgentId ? { leaderAgentId } : {}),
     ...(workerAgentIds.length ? { workerAgentIds } : {}),

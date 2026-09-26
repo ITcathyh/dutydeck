@@ -31,7 +31,7 @@ export interface TranscriptCursor {
 export interface TranscriptEventSource {
   start(): void;
   stop(): void;
-  flush(): void;
+  flush(): Promise<void>;
   checkpoint(): TranscriptCursor;
   restore(cursor: TranscriptCursor): void;
   onEvent(cb: (e: NormalizedDriverEvent) => void): void;
@@ -58,6 +58,12 @@ export interface JsonlTailerOptions {
 }
 
 const DEFAULT_POLL_MS = 300;
+const READ_CHUNK_BYTES = 64 * 1024;
+const TURN_BYTE_BUDGET = 256 * 1024;
+// Parsing one JSON record is indivisible. Fail visibly and retain the last
+// complete cursor rather than silently discard records or grow without bound.
+const MAX_RECORD_BYTES = 16 * 1024 * 1024;
+const yieldLoop = () => new Promise<void>(resolve => setImmediate(resolve));
 
 export class JsonlTailer implements TranscriptEventSource {
   private readonly resolvePath: () => string | undefined;
@@ -69,7 +75,12 @@ export class JsonlTailer implements TranscriptEventSource {
   private currentPath: string | undefined;
   private offset = 0;
   /** Bytes read after `pendingStartOffset` that do not yet end in a newline. */
-  private pending = Buffer.alloc(0);
+  private pending: Buffer[] = [];
+  private pendingBytes = 0;
+  private generation = 0;
+  private work: Promise<void> = Promise.resolve();
+  private polling = false;
+  private failure: Error | undefined;
   private pendingStartOffset = 0;
   /** End of the last complete line. This is the only safe resume point. */
   private completedOffset = 0;
@@ -94,11 +105,32 @@ export class JsonlTailer implements TranscriptEventSource {
 
   start(): void {
     if (this.timer) return;
-    this.tick();
-    this.timer = setInterval(() => this.tick(), this.pollIntervalMs);
+    this.poll();
+    this.timer = setInterval(() => this.poll(), this.pollIntervalMs);
   }
 
-  flush(): void { this.tick(); }
+  /** Snapshot the file waterline now; later appends belong to a later drain. */
+  async flush(): Promise<void> {
+    const generation = this.generation;
+    const path = this.currentPath && !this.watchForSwitch ? this.currentPath : this.resolvePath();
+    const size = path ? this.fileSize(path) : undefined;
+    const work = this.work.then(async () => {
+      if (generation !== this.generation) return;
+      if (this.failure) throw this.failure;
+      await this.tick(path, size, generation);
+    });
+    this.work = work.catch(() => {});
+    return work;
+  }
+
+  private poll(): void {
+    if (this.polling || this.failure) return;
+    this.polling = true;
+    const generation = this.generation;
+    void this.flush().catch(() => {}).finally(() => {
+      if (generation === this.generation) this.polling = false;
+    });
+  }
 
   checkpoint(): TranscriptCursor {
     return this.currentPath
@@ -128,7 +160,7 @@ export class JsonlTailer implements TranscriptEventSource {
     }
     this.currentPath = undefined;
     this.offset = 0;
-    this.pending = Buffer.alloc(0);
+    this.pending = []; this.pendingBytes = 0;
     this.pendingStartOffset = 0;
     this.completedOffset = 0;
     this.pendingBirth = false;
@@ -136,23 +168,26 @@ export class JsonlTailer implements TranscriptEventSource {
   }
 
   stop(): void {
+    this.generation++;
+    this.polling = false;
+    this.failure = undefined;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
     this.currentPath = undefined;
     this.offset = 0;
-    this.pending = Buffer.alloc(0);
+    this.pending = []; this.pendingBytes = 0;
     this.pendingStartOffset = 0;
     this.completedOffset = 0;
     this.pendingBirth = false;
     this.restoreCursor = undefined;
   }
 
-  private tick(): void {
+  private async tick(resolvedPath: string | undefined, waterline: number | undefined, generation: number): Promise<void> {
     try {
       if (!this.currentPath) {
-        const path = this.resolvePath();
+        const path = resolvedPath;
         if (!path) {
           if (this.restoreCursor?.path) {
             throw new TranscriptRestoreError(`Transcript restore rejected: resolver did not return ${this.restoreCursor.path}`);
@@ -162,7 +197,7 @@ export class JsonlTailer implements TranscriptEventSource {
         if (this.restoreCursor?.path && path !== this.restoreCursor.path) {
           throw new TranscriptRestoreError(`Transcript restore rejected: cursor path ${this.restoreCursor.path} differs from resolved path ${path}`);
         }
-        const size = this.fileSize(path);
+        const size = waterline;
         if (size === undefined) {
           if (this.restoreCursor?.path) {
             throw new TranscriptRestoreError(`Transcript restore rejected: cursor file is unavailable at ${path}`);
@@ -180,12 +215,12 @@ export class JsonlTailer implements TranscriptEventSource {
           this.offset = restoreOffset;
           this.completedOffset = restoreOffset;
           this.pendingStartOffset = restoreOffset;
-          this.pending = Buffer.alloc(0);
+          this.pending = []; this.pendingBytes = 0;
           this.pendingBirth = false;
           this.restoreCursor = undefined;
           // A recovered tailer must replay bytes appended while it was down
           // on its first tick, rather than wait for the next poll.
-          this.drain();
+          await this.drain(size, generation);
           return;
         }
         // Start at END for an existing transcript (never replay history);
@@ -194,86 +229,104 @@ export class JsonlTailer implements TranscriptEventSource {
         if (this.pendingBirth) {
           this.completedOffset = 0;
           this.pendingStartOffset = 0;
-          this.pending = Buffer.alloc(0);
+          this.pending = []; this.pendingBytes = 0;
         } else {
           // EOF is not necessarily a JSONL boundary: a CLI can be in the
           // middle of writing a multibyte character or its trailing newline.
           // Retain only that unfinished suffix. History before its last
           // newline remains intentionally unobserved, while a later restore
           // resumes at a real complete-line boundary.
-          const partial = this.trailingPartial(path, size);
+          const partial = await this.trailingPartial(path, size, generation);
+          if (generation !== this.generation) return;
           this.completedOffset = partial.offset;
           this.pendingStartOffset = partial.offset;
           this.pending = partial.bytes;
+          this.pendingBytes = size - partial.offset;
         }
         this.pendingBirth = false;
+        await this.drain(size, generation);
         return;
       }
       if (this.watchForSwitch) {
-        const path = this.resolvePath();
+        const path = resolvedPath;
         if (path && path !== this.currentPath) {
           this.currentPath = path;
-          this.offset = this.fileSize(path) ?? 0;
-          this.completedOffset = this.offset;
-          this.pendingStartOffset = this.offset;
-          this.pending = Buffer.alloc(0);
+          this.offset = waterline ?? 0;
+          const partial = waterline === undefined ? { offset: 0, bytes: [] } : await this.trailingPartial(path, waterline, generation);
+          if (generation !== this.generation) return;
+          this.completedOffset = this.pendingStartOffset = partial.offset;
+          this.pending = partial.bytes;
+          this.pendingBytes = this.offset - partial.offset;
           return;
         }
       }
-      this.drain();
+      await this.drain(waterline, generation);
     } catch (err) {
-      if (err instanceof TranscriptRestoreError) throw err;
-      // A transient fs error must never kill the poll loop.
+      if (err instanceof TranscriptRestoreError) this.failure = err;
+      // Poll catches transient failures; an explicit final drain must fail so
+      // the driver cannot report completion before its records are delivered.
+      throw err;
     }
   }
 
-  private drain(): void {
+  private async drain(size: number | undefined, generation: number): Promise<void> {
     const path = this.currentPath;
     if (!path) return;
-    let size: number;
-    try {
-      size = statSync(path).size;
-    } catch {
-      // File vanished (rotation/cleanup) — drop it and re-resolve next tick.
-      this.currentPath = undefined;
-      this.offset = 0;
-      this.pending = Buffer.alloc(0);
-      this.pendingStartOffset = 0;
-      this.completedOffset = 0;
-      return;
+    if (size === undefined) {
+      throw new Error('Transcript file became unavailable before its drain completed');
     }
     if (size < this.offset) {
-      // Truncated/rotated underneath us — re-read from the top.
-      this.offset = 0;
-      this.pending = Buffer.alloc(0);
-      this.pendingStartOffset = 0;
-      this.completedOffset = 0;
+      this.offset = this.completedOffset = this.pendingStartOffset = 0;
+      this.pending = []; this.pendingBytes = 0;
     }
     if (size === this.offset) return;
-
-    const len = size - this.offset;
-    const buf = Buffer.alloc(len);
     const fd = openSync(path, 'r');
-    let bytesRead = 0;
+    let budget = 0;
+    let started = performance.now();
     try {
-      bytesRead = readSync(fd, buf, 0, len, this.offset);
-    } finally {
-      closeSync(fd);
-    }
-    const readStart = this.offset;
-    this.offset += bytesRead;
-    if (this.pending.length === 0) this.pendingStartOffset = readStart;
-    this.pending = Buffer.concat([this.pending, buf.subarray(0, bytesRead)]);
+      while (this.offset < size && generation === this.generation) {
+        const buf = Buffer.allocUnsafe(Math.min(READ_CHUNK_BYTES, size - this.offset));
+        const bytesRead = readSync(fd, buf, 0, buf.length, this.offset);
+        if (!bytesRead) throw new Error('Transcript file was truncated during its drain');
+        let start = 0;
+        while (start < bytesRead) {
+          const newline = buf.indexOf(0x0a, start);
+          const end = newline >= 0 && newline < bytesRead ? newline : bytesRead;
+          this.appendSegment(buf.subarray(start, end));
+          this.offset += end - start;
+          if (end < bytesRead) {
+            const lineOffset = this.pendingStartOffset;
+            const raw = Buffer.concat(this.pending, this.pendingBytes).toString('utf8');
+            this.offset++;
+            this.pending = []; this.pendingBytes = 0;
+            this.completedOffset = this.pendingStartOffset = this.offset;
+            this.handleLine(raw, lineOffset);
+          }
+          start = end + 1;
+        }
+        budget += bytesRead;
+        if (budget >= TURN_BYTE_BUDGET || performance.now() - started >= 8) {
+          await yieldLoop();
+          budget = 0; started = performance.now();
+        }
+      }
+    } finally { closeSync(fd); }
+  }
 
-    let nl: number;
-    while ((nl = this.pending.indexOf(0x0a)) >= 0) {
-      const lineBytes = this.pending.subarray(0, nl);
-      const lineOffset = this.pendingStartOffset;
-      this.pending = this.pending.subarray(nl + 1);
-      this.pendingStartOffset += nl + 1;
-      this.completedOffset = this.pendingStartOffset;
-      this.handleLine(lineBytes.toString('utf8'), lineOffset);
+  private appendSegment(bytes: Buffer): void {
+    if (this.pendingBytes + bytes.length > MAX_RECORD_BYTES) {
+      this.failRecord();
     }
+    if (bytes.length) this.pending.push(bytes);
+    this.pendingBytes += bytes.length;
+  }
+
+  private failRecord(): never {
+    this.failure = new Error(`Transcript record exceeds ${MAX_RECORD_BYTES} bytes at offset ${this.pendingStartOffset}`);
+    for (const cb of this.callbacks) cb({ type: 'error', data: {
+      code: 'transcript_record_too_large', message: this.failure.message, retryable: false,
+    } });
+    throw this.failure;
   }
 
   private handleLine(rawLine: string, lineOffset: number): void {
@@ -317,30 +370,32 @@ export class JsonlTailer implements TranscriptEventSource {
   }
 
   /** Read bytes after the last newline without replaying complete history. */
-  private trailingPartial(path: string, size: number): { offset: number; bytes: Buffer } {
-    const blockSize = 64 * 1024;
+  private async trailingPartial(path: string, size: number, generation: number): Promise<{ offset: number; bytes: Buffer[] }> {
     const fd = openSync(path, 'r');
+    const chunks: Buffer[] = [];
+    let total = 0;
     try {
       let end = size;
-      while (end > 0) {
-        const start = Math.max(0, end - blockSize);
+      let budget = 0;
+      while (end > 0 && generation === this.generation) {
+        const start = Math.max(0, end - READ_CHUNK_BYTES);
         const block = Buffer.alloc(end - start);
         const bytesRead = readSync(fd, block, 0, block.length, start);
         const newline = block.subarray(0, bytesRead).lastIndexOf(0x0a);
-        if (newline >= 0) {
-          const offset = start + newline + 1;
-          const bytes = Buffer.alloc(size - offset);
-          readSync(fd, bytes, 0, bytes.length, offset);
-          return { offset, bytes };
+        const suffix = block.subarray(newline + 1, bytesRead);
+        total += suffix.length;
+        if (total > MAX_RECORD_BYTES) {
+          this.pendingStartOffset = Math.max(0, size - total);
+          this.failRecord();
         }
+        chunks.push(suffix);
+        if (newline >= 0) return { offset: start + newline + 1, bytes: chunks.reverse() };
         end = start;
+        budget += bytesRead;
+        if (budget >= TURN_BYTE_BUDGET) { await yieldLoop(); budget = 0; }
       }
-      const bytes = Buffer.alloc(size);
-      readSync(fd, bytes, 0, bytes.length, 0);
-      return { offset: 0, bytes };
-    } finally {
-      closeSync(fd);
-    }
+      return { offset: 0, bytes: chunks.reverse() };
+    } finally { closeSync(fd); }
   }
 }
 

@@ -449,11 +449,13 @@ describe('LarkConfigModal 会话记忆', () => {
     await user.click(await screen.findByRole('option', { name: 'Claude' }));
     await user.type(screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
 
+    await user.type(screen.getByLabelText('群判定模型'), 'fast');
+    await user.type(screen.getByLabelText('群回复模型'), 'quality');
     const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
     await waitFor(() => expect(submit.disabled).toBe(false));
     await user.click(submit);
     await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({
-      memoryEnabled: true, memoryAutoExtract: false, memoryAgentId: 'claude', memoryModel: 'gpt-4o-mini'
+      memoryEnabled: true, memoryAutoExtract: false, memoryAgentId: 'claude', memoryModel: 'gpt-4o-mini', decisionModel: 'fast', responseModel: 'quality'
     })));
   });
 });

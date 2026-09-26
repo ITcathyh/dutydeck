@@ -742,3 +742,24 @@ describe('分层协作执行方式', () => {
     expect((await readLarkConfigs(repository))[0]).toMatchObject({ workerAgentIds: ['worker'] });
   });
 });
+
+describe('independent participation models', () => {
+  it('persists, lists and round-trips each role while preserving partial updates and explicit clears', async () => {
+    const repository = seedBots([{ appId: 'cli_roles', appSecret: 'secret', memoryAgentId: 'legacy', memoryModel: 'legacy-model', riskControlMode: 'off' }]);
+    const roles = { decisionAgentId: 'classifier', decisionModel: 'fast', responseAgentId: 'writer', responseModel: 'quality' };
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_roles', ...Object.fromEntries(Object.entries(roles).map(([k, v]) => [k, ` ${v} `])) });
+    const [stored] = await readLarkConfigs(repository);
+    expect(stored).toMatchObject(roles);
+    expect(publicLarkConfig(stored)).toMatchObject(roles);
+    expect(publicLarkConfigs([stored]).bots[0]).toMatchObject(roles);
+    const exported = await repository.get(larkBotsConfigKey);
+    const imported = createRepository({ [larkBotsConfigKey]: exported! });
+    expect((await readLarkConfigs(imported))[0]).toMatchObject({ ...roles, memoryAgentId: 'legacy', memoryModel: 'legacy-model' });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_roles', decisionModel: 'new-fast' });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ ...roles, decisionModel: 'new-fast' });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_roles', decisionAgentId: '', decisionModel: ' ', responseAgentId: '', responseModel: '' });
+    const [cleared] = await readLarkConfigs(repository);
+    for (const key of Object.keys(roles)) expect(cleared).not.toHaveProperty(key);
+    expect(cleared).toMatchObject({ memoryAgentId: 'legacy', memoryModel: 'legacy-model' });
+  });
+});

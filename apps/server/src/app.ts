@@ -7,6 +7,7 @@ import { AgentGroupToolError } from './lark/agent-tools.js';
 import { LarkServiceError } from './lark/service.js';
 import Fastify, { type FastifyRequest } from 'fastify';
 import { readFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { extname, resolve, sep } from 'node:path';
 import { installationOwnerTaskActor, permissionModes, RuntimeError, toPublicAgent, type PermissionMode, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
@@ -203,7 +204,20 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const visible = await Promise.all(sessions.map(async session => await canViewSession(request, session.id) ? session : undefined));
     return visible.filter(Boolean);
   });
-  app.get('/api/sessions/summaries', async request => {
+  app.get('/api/sessions/summaries', async (request, reply) => {
+    const respond = (summaries: unknown[]) => {
+      const etag = `"${createHash('sha256').update(JSON.stringify(summaries)).digest('base64url')}"`;
+      // Browsers revalidate the private representation every poll. Permission
+      // filtering precedes hashing, so revoked/removed entries invalidate it too.
+      reply.header('Cache-Control', 'private, no-cache').header('Vary', 'Cookie, Authorization').header('ETag', etag);
+      if (request.headers['if-none-match'] === etag) return reply.code(304).send();
+      return summaries;
+    };
+    if (typeof runtime.listRunSummaries === 'function') {
+      const summaries = await runtime.listRunSummaries();
+      if (!options.executionPolicy) return respond(summaries);
+      return respond((await Promise.all(summaries.map(async summary => await canViewSession(request, summary.sessionId) ? summary : undefined))).filter(Boolean));
+    }
     const listed = await runtime.listSessions();
     const sessions = options.executionPolicy
       ? (await Promise.all(listed.map(async session => await canViewSession(request, session.id) ? session : undefined))).filter((session): session is typeof listed[number] => Boolean(session))
@@ -217,7 +231,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
       const latest = [...tasks].sort((left: any, right: any) => (right.updatedAt || right.createdAt).localeCompare(left.updatedAt || left.createdAt))[0] ?? first;
       return { sessionId: session.id, taskId: first.id, prompt: first.prompt.trim(), status: first.status, queuedCount: tasks.filter((task: any) => task.status === 'queued').length, updatedAt: latest.updatedAt || latest.createdAt };
     }));
-    return summaries.filter(Boolean);
+    return respond(summaries.filter(Boolean));
   });
   app.post<{ Body: { agentId: string; cwd?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; workspaceMode?: 'shared' | 'worktree' } }>('/api/sessions', async request => {
     if (request.body.permissionMode !== undefined && !permissionModes.includes(request.body.permissionMode)) throw new RuntimeError('INVALID_PERMISSION_MODE', `Unknown permission mode: ${String(request.body.permissionMode)}`, 400);

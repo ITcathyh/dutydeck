@@ -1,21 +1,27 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { makeId, RuntimeError, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals } from '@dutydeck/shared';
+import { executionTaskId } from '@dutydeck/storage';
+import { makeId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals } from '@dutydeck/shared';
 
-const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative() }).strict();
-const pricingSchema = z.object({ default: rateSchema, models: z.array(rateSchema.extend({ match: z.string().trim().min(1) }).strict()) }).strict();
-export type UsagePricing = z.infer<typeof pricingSchema>;
+const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
+const pricingSchema = z.object({ version: z.string().trim().min(1).optional(), default: rateSchema, models: z.array(rateSchema.extend({ match: z.string().trim().min(1) }).strict()) }).strict();
+export type UsagePricing = z.infer<typeof pricingSchema> & { source?: 'builtin' | 'custom' };
+const backgroundLimitsSchema = z.object({ defaultMonthlyTasks: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional(), bots: z.record(z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER)).optional() }).strict();
+export function parseUsageBackgroundLimits(json?: string): UsageBackgroundLimits {
+  return json?.trim() ? backgroundLimitsSchema.parse(JSON.parse(json)) : {};
+}
 
 /**
  * 估算单价（美元 / 百万 token），只在 Agent 不报成本时使用（codex-acp），结果一律标为估算。
  * 默认值按 OpenAI API 公开标价（https://openai.com/api/pricing ，2025 年末版本）录入，未与实际账单核对；
- * 按模型名最长前缀匹配，匹配不到用 default。token 按 ACP 适配器的口径：inputTokens 不含缓存命中，缓存命中单列在 cachedReadTokens，
+ * 按模型名最长前缀（型号边界）匹配，内置表不对未知型号使用 default。自定义 default 是明确的兜底估算。token 按 ACP 适配器的口径：inputTokens 不含缓存命中，缓存命中单列在 cachedReadTokens，
  * 两者分别按 input、cachedInput 计。已安装的 codex-acp 1.12.1-preview.4 在 dist/index.js 的 toTokenCount 里把
  * inputTokens 换算成 inputTokens - cachedInputTokens，toPromptUsage 再把 cachedInputTokens 报成 cachedReadTokens；
  * claude-agent-acp 沿用 Anthropic 的 input_tokens，本来就不含缓存。
  * 部署时可用 DUTYDECK_USAGE_PRICING_JSON 整表覆盖。
  */
 export const defaultUsagePricing: UsagePricing = {
+  source: 'builtin', version: 'openai-public-2025-end-v1',
   default: { inputPerMTok: 1.25, cachedInputPerMTok: 0.125, outputPerMTok: 10 },
   models: [
     { match: 'gpt-5.2', inputPerMTok: 1.75, cachedInputPerMTok: 0.175, outputPerMTok: 14 },
@@ -26,14 +32,31 @@ export const defaultUsagePricing: UsagePricing = {
   ]
 };
 export function parseUsagePricing(json?: string): UsagePricing {
-  return json?.trim() ? pricingSchema.parse(JSON.parse(json)) : defaultUsagePricing;
+  return json?.trim() ? { ...pricingSchema.parse(JSON.parse(json)), source: 'custom' } : defaultUsagePricing;
 }
 
 interface Tokens { inputTokens?: number; outputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number }
-export function estimateCostUsd(pricing: UsagePricing, model: string | undefined, tokens: Tokens): number {
+function priceSelection(pricing: UsagePricing, model: string | undefined, provider = 'unknown') {
   const name = model?.toLowerCase() ?? '';
-  const rate = pricing.models.filter(entry => name.startsWith(entry.match.toLowerCase())).sort((a, b) => b.match.length - a.match.length)[0] ?? pricing.default;
-  return ((tokens.inputTokens ?? 0) * rate.inputPerMTok + (tokens.cacheReadTokens ?? 0) * rate.cachedInputPerMTok + (tokens.outputTokens ?? 0) * rate.outputPerMTok) / 1_000_000;
+  const matchesProvider = (rate: z.infer<typeof rateSchema>) => !rate.provider || rate.provider.toLowerCase() === provider.toLowerCase();
+  const matched = pricing.models.filter(entry => {
+    const prefix = entry.match.toLowerCase();
+    return matchesProvider(entry) && (name === prefix || name.startsWith(`${prefix}-`));
+  }).sort((a, b) => b.match.length - a.match.length)[0];
+  const builtin = pricing.source === 'builtin';
+  const rate = matched ?? (!builtin && matchesProvider(pricing.default) ? pricing.default : undefined);
+  const pricingSource: UsageLedgerEntry['pricingSource'] = matched ? (builtin ? 'builtin_model' : 'custom_model') : rate ? 'custom_default' : 'unmatched';
+  // Include the actual table in the hash: editing prices without a version bump
+  // still leaves a distinct durable provenance key.
+  const pricingVersion = `${pricing.version ?? (builtin ? 'builtin' : 'custom')}:${createHash('sha256').update(JSON.stringify(pricing)).digest('hex').slice(0, 32)}`;
+  return { rate, pricingSource, pricingVersion, ...(matched ? { pricingMatch: matched.match } : {}) };
+}
+
+export function estimateCostUsd(pricing: UsagePricing, model: string | undefined, tokens: Tokens, provider?: string): number | undefined {
+  const { rate } = priceSelection(pricing, model, provider);
+  if (!rate || (tokens.cacheWriteTokens ?? 0) > 0 && rate.cacheWritePerMTok === undefined) return undefined;
+  return ((tokens.inputTokens ?? 0) * rate.inputPerMTok + (tokens.cacheReadTokens ?? 0) * rate.cachedInputPerMTok
+    + (tokens.outputTokens ?? 0) * rate.outputPerMTok + (tokens.cacheWriteTokens ?? 0) * (rate.cacheWritePerMTok ?? 0)) / 1_000_000;
 }
 
 /** 会话累计读数与上一次求差；读数变小说明 Agent 进程重启、累计从零开始，本次读数整体就是增量。 */
@@ -43,14 +66,14 @@ export function cumulativeDelta(previous: number | undefined, current: number): 
 
 const finite = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 /** ACP 驱动 turn_usage 事件的读数：usageRef/breakdown 是本轮 token（增量），cost 是会话累计成本。 */
-export interface UsageReading { usageRef?: unknown; breakdown?: Record<string, unknown>; cost?: { amount?: unknown; currency?: unknown } }
-type Measured = Pick<UsageLedgerEntry, keyof Tokens | 'costUsd' | 'costEstimated' | 'dataStatus' | 'cumulativeCostUsd' | 'usageRef'>;
+export interface UsageReading { provider?: unknown; model?: unknown; usageRef?: unknown; breakdown?: Record<string, unknown>; cost?: { amount?: unknown; currency?: unknown } }
+type Measured = Pick<UsageLedgerEntry, keyof Tokens | 'costUsd' | 'costEstimated' | 'dataStatus' | 'cumulativeCostUsd' | 'usageRef' | 'pricingSource' | 'pricingVersion' | 'pricingMatch' | 'unpricedReason'>;
 
 /**
  * 读数换算成一条记录的用量：token 只在这个 usageRef 第一次出现时计入（本轮增量直接累加）；
  * 成本优先用 Agent 报的会话累计值与基线求差，没有就按单价表估算，两样都没有记为无数据。
  */
-export function measureUsage(input: { reading?: UsageReading; freshTokens: boolean; baselineCostUsd?: number; model?: string; pricing: UsagePricing }): Measured {
+export function measureUsage(input: { reading?: UsageReading; freshTokens: boolean; baselineCostUsd?: number; model?: string; provider?: string; pricing: UsagePricing }): Measured {
   const { reading } = input;
   const usageRef = typeof reading?.usageRef === 'string' ? reading.usageRef : undefined;
   const breakdown = input.freshTokens && usageRef && reading?.breakdown && typeof reading.breakdown === 'object' ? reading.breakdown : undefined;
@@ -62,9 +85,15 @@ export function measureUsage(input: { reading?: UsageReading; freshTokens: boole
   const currency = typeof reading?.cost?.currency === 'string' ? reading.cost.currency.toUpperCase() : 'USD';
   const cumulative = currency === 'USD' ? finite(reading?.cost?.amount) : undefined;
   const counted = hasTokens ? { ...tokens, usageRef } : {};
-  if (cumulative !== undefined) return { ...counted, costUsd: cumulativeDelta(input.baselineCostUsd, cumulative), costEstimated: false, dataStatus: 'reported', cumulativeCostUsd: cumulative };
-  if (hasTokens) return { ...counted, costUsd: estimateCostUsd(input.pricing, input.model, tokens), costEstimated: true, dataStatus: 'estimated' };
-  return { costEstimated: false, dataStatus: 'unavailable' };
+  if (cumulative !== undefined) return { ...counted, costUsd: cumulativeDelta(input.baselineCostUsd, cumulative), costEstimated: false, dataStatus: 'reported', cumulativeCostUsd: cumulative, pricingSource: 'reported' };
+  if (hasTokens) {
+    const { rate, ...provenance } = priceSelection(input.pricing, input.model, input.provider);
+    const costUsd = estimateCostUsd(input.pricing, input.model, tokens, input.provider);
+    return costUsd === undefined
+      ? { ...counted, ...provenance, costEstimated: false, dataStatus: 'unpriced', unpricedReason: rate ? 'cache_write_rate_missing' : 'unknown_model' }
+      : { ...counted, ...provenance, costUsd, costEstimated: true, dataStatus: 'estimated' };
+  }
+  return { costEstimated: false, dataStatus: 'unavailable', pricingSource: 'none' };
 }
 
 /** 从会话来源解析 Bot 与群/会话；子步骤等不带这些信息的会话返回空，由根任务补齐。 */
@@ -118,6 +147,7 @@ export interface UsageParent { parentSessionId: string; parentTaskId?: string }
 export interface UsageLedgerOptions {
   repositories: Pick<RepositoryBundle, 'usage' | 'sessions' | 'execution' | 'agents'>;
   pricing?: UsagePricing;
+  backgroundLimits?: UsageBackgroundLimits;
   /** 编排子步骤、Leader 规划会话的发起方。 */
   parentOf?: (session: Session) => Promise<UsageParent | undefined>;
   /** 群参与判定为 act 后代为派发的消息。 */
@@ -165,14 +195,19 @@ export class UsageLedger {
       if (!reading && await usage.hasAttempt(attempt.attemptId)) return;
       const current = await this.repos.sessions.get(session.id) ?? session;
       const attribution = await this.attribute(current, attempt.taskId);
-      const model = current.model ?? (await this.repos.agents.get(current.agentId))?.model;
+      const accepted = this.repos.execution.getAcceptedTask(attempt.taskId);
+      const frozenModel = accepted?.input?.version === 2 ? accepted.input.executionOptions.model : undefined;
+      const reportedModel = typeof reading?.model === 'string' && reading.model.trim() ? reading.model.trim() : undefined;
+      const model = reportedModel ?? frozenModel ?? current.model ?? (await this.repos.agents.get(current.agentId))?.model;
+      const modelSource: UsageLedgerEntry['modelSource'] = reportedModel ? 'reading' : frozenModel ? 'task' : current.model ? 'session' : model ? 'agent' : 'unknown';
+      const provider = typeof reading?.provider === 'string' && reading.provider.trim() ? reading.provider.trim() : 'unknown';
       const usageRef = typeof reading?.usageRef === 'string' ? reading.usageRef : undefined;
       const freshTokens = usageRef ? !await usage.hasUsageRef(current.id, usageRef) : false;
       const baselineCostUsd = reading?.cost ? await usage.lastCumulativeCost(current.id, attempt.attemptId) : undefined;
       const entry: UsageLedgerEntry = {
         id: makeId('usage'), recordedAt: this.now().toISOString(), sessionId: current.id, taskId: attempt.taskId, attemptId: attempt.attemptId,
-        ...attribution, agentId: current.agentId, ...(model ? { model } : {}),
-        ...measureUsage({ reading, freshTokens, baselineCostUsd, model, pricing: this.pricing })
+        ...attribution, agentId: current.agentId, provider, modelSource, ...(model ? { model } : {}),
+        ...measureUsage({ reading, freshTokens, baselineCostUsd, model, provider, pricing: this.pricing })
       };
       if (await usage.append(entry)) void this.alert(entry).catch(error => this.options.log?.warn({ error, appId: entry.appId }, '用量上限提醒发送失败'));
     } catch (error) {
@@ -194,6 +229,30 @@ export class UsageLedger {
     const appId = scope.appId ?? (request.actor.kind === 'channel' ? request.actor.appId : undefined);
     const reason = appId ? await this.refusal(appId, scope.chatId, request) : undefined;
     if (reason) throw new RuntimeError('USAGE_CAP_EXCEEDED', reason, 429);
+    if (!appId) return;
+    const limit = this.options.backgroundLimits?.bots?.[appId] ?? this.options.backgroundLimits?.defaultMonthlyTasks;
+    if (limit === undefined) return;
+    let proactive = false;
+    if (session.source === 'lark' && scope.chatType === 'group' && request.key.startsWith('lark:')) {
+      proactive = await this.options.isProactive?.(appId, scope.chatId!, request.key.split(':').slice(2, -1).join(':')) ?? false;
+    }
+    if (classifyUsage(session, request, proactive).category === 'explicit') return;
+    const taskId = executionTaskId(request.namespace, request.sessionId, request.key);
+    if (!await this.repos.usage.claimBackgroundTask(appId, monthKey(this.now()), taskId, limit)) {
+      throw new RuntimeError('USAGE_BACKGROUND_CAP_EXCEEDED', this.automaticCapMessage(limit), 429);
+    }
+  }
+
+  /** Read-only early gate; admit still atomically claims the task allowance. */
+  async automaticRefusal(appId: string): Promise<string | undefined> {
+    const limit = this.options.backgroundLimits?.bots?.[appId] ?? this.options.backgroundLimits?.defaultMonthlyTasks;
+    if (limit === undefined) return undefined;
+    const used = (await this.repos.usage.backgroundTaskCounts(monthKey(this.now()))).find(row => row.appId === appId)?.tasks ?? 0;
+    return used >= limit ? this.automaticCapMessage(limit) : undefined;
+  }
+
+  private automaticCapMessage(limit: number) {
+    return `本机器人本月自动任务已达 ${limit} 次上限，新的后台、主动介入和定时任务暂停。显式请求与在途任务不受影响；安装管理员可调整自动任务月度次数配置。`;
   }
 
   /**
@@ -256,7 +315,7 @@ export class UsageLedger {
     }
   }
 
-  async summary(): Promise<{ month: UsageSummaryWindow; week: UsageSummaryWindow; caps: UsageCap[] }> {
+  async summary(): Promise<{ month: UsageSummaryWindow; week: UsageSummaryWindow; caps: UsageCap[]; backgroundBudget: UsageBackgroundBudget }> {
     const now = this.now();
     const window = async (since: Date): Promise<UsageSummaryWindow> => {
       const filter = { since: since.toISOString() };
@@ -264,7 +323,7 @@ export class UsageLedger {
         this.repos.usage.summarize('chatId', filter), this.repos.usage.summarize('actorId', filter), this.repos.usage.summarize('category', filter)]);
       return { since: filter.since, totals, bots, chats, actors, categories };
     };
-    return { month: await window(usageMonthStart(now)), week: await window(new Date(now.getTime() - 7 * 86_400_000)), caps: await this.repos.usage.listCaps() };
+    return { month: await window(usageMonthStart(now)), week: await window(new Date(now.getTime() - 7 * 86_400_000)), caps: await this.repos.usage.listCaps(), backgroundBudget: { ...this.options.backgroundLimits, month: monthKey(now), usage: await this.repos.usage.backgroundTaskCounts(monthKey(now)) } };
   }
 
   /** 任务详情：本会话自身的用量，加上归到它名下的编排子步骤。 */
@@ -282,7 +341,8 @@ export class UsageLedger {
       const cap = caps.find(item => item.scope === scope);
       const estimated = totals.estimatedCostUsd > 0 ? `，含估算 ${usd(totals.estimatedCostUsd)}` : '';
       const limit = cap ? `上限 ${usd(cap.monthlyCostUsd)}，已用 ${percent(totals.costUsd, cap.monthlyCostUsd)}%` : '未设上限';
-      return `${capLabel(scope)} ${usd(totals.costUsd)}（${limit}${estimated}）`;
+      const unknown = totals.unknownCostEntries ? `；另有 ${totals.unknownCostEntries} 次费用未知（${totals.unpriced} 次缺费率、${totals.unavailable} 次无用量），美元上限不覆盖这部分` : '';
+      return `${capLabel(scope)} ${usd(totals.costUsd)}（${limit}${estimated}）${unknown}`;
     };
     return `**本月用量**：${[...(chatId ? [await part('group')] : []), await part('bot')].join(' · ')}`;
   }

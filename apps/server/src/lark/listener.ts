@@ -1,3 +1,4 @@
+import { createWorkbenchFetch } from '../workbench-fetch.js';
 import type { LarkGroupParticipation } from './group-participation.js';
 import type { ExecutionActor, ExecutionRecoveryDecision } from '@dutydeck/shared';
 import type { SessionAutomationService } from '../session-automation.js';
@@ -131,6 +132,7 @@ export interface LarkLongConnectionListenerOptions {
 
 export class LarkLongConnectionListener implements LarkListener {
   private client?: lark.WSClient;
+  private http?: ReturnType<typeof createWorkbenchFetch>;
   private coordinator?: LarkMessageCoordinator;
   private welcome?: LarkWelcomeService;
   private credentials?: string;
@@ -161,12 +163,17 @@ export class LarkLongConnectionListener implements LarkListener {
     }
     this.stop();
 
-    const service = createLarkCardService(this.options.env ?? process.env, this.options.fetcher ?? globalThis.fetch, { appId: config.appId, appSecret: config.appSecret });
+    const http = createWorkbenchFetch(this.options.fetcher);
+    this.http = http;
+    const service = createLarkCardService(this.options.env ?? process.env, http.fetch, { appId: config.appId, appSecret: config.appSecret });
     let botOpenId: string;
     try { botOpenId = await service.getBotOpenId(); }
-    catch (error) { throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to resolve Lark bot identity: ${error instanceof Error ? error.message : String(error)}`, 502); }
+    catch (error) { http.close(); throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to resolve Lark bot identity: ${error instanceof Error ? error.message : String(error)}`, 502); }
+    http.fetch.signal!.throwIfAborted();
     // 话题群种子消息需要按群形态路由：默认用带缓存的 getChatMode，也允许注入（测试/自定义路由）。
-    const chatModeResolver = this.options.chatModeResolver ?? ((appId: string, chatId: string) => getChatMode(appId, config.appSecret, chatId));
+    const chatModeResolver = this.options.chatModeResolver ?? ((appId: string, chatId: string) => getChatMode(appId, config.appSecret, chatId, {
+      read: () => service.callOpenApi(`/open-apis/im/v1/chats/${encodeURIComponent(chatId)}?user_id_type=open_id`, { method: 'GET' })
+    }));
     const coordinator = this.options.runtime ? new LarkMessageCoordinator(
       this.options.runtime,
       service,
@@ -370,6 +377,7 @@ export class LarkLongConnectionListener implements LarkListener {
       this.config = config;
       this.listening = true;
     } catch (error) {
+      http.close();
       client.close();
       coordinator?.stop();
       throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to start Lark listener: ${error instanceof Error ? error.message : String(error)}`, 502);
@@ -377,6 +385,8 @@ export class LarkLongConnectionListener implements LarkListener {
   }
 
   stop() {
+    this.http?.close();
+    this.http = undefined;
     if (this.config) this.options.participation?.closeApp(this.config.appId);
     this.client?.close();
     this.coordinator?.stop();

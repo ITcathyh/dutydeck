@@ -67,6 +67,7 @@ export class PtyCliDriver implements AgentDriver {
 
   private started = false;
   private stopped = false;
+  private wiringGeneration = 0;
   private stoppedPid: number | undefined;
   private readonly processProbe: ProcessProbe | undefined;
   private tmuxIdentity: OwnedTmuxIdentity | undefined;
@@ -318,14 +319,18 @@ export class PtyCliDriver implements AgentDriver {
     return completion!;
   }
 
-  checkpoint(): DriverTurnRecovery | undefined {
+  async checkpoint(): Promise<DriverTurnRecovery | undefined> {
     // A cursor alone is insufficient: only an owned persistent tmux pane can
     // prove that it is still executing the exact prompt at this boundary.
     if (!(this.backend instanceof TmuxBackend) || !this.backend.ownerId || !this.transcript) return undefined;
-    this.transcript.flush();
+    const backend = this.backend;
+    const transcript = this.transcript;
+    const generation = this.wiringGeneration;
+    await transcript.flush();
+    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return undefined;
     const turnId = randomUUID();
     this.preparedTurnId = turnId;
-    return { kind: 'pty-jsonl-v1', turnId, transcript: this.transcript.checkpoint() };
+    return { kind: 'pty-jsonl-v1', turnId, transcript: transcript.checkpoint() };
   }
 
   async recover(state: DriverTurnRecovery, onAttached?: () => Promise<void>): Promise<void> {
@@ -362,11 +367,26 @@ export class PtyCliDriver implements AgentDriver {
     });
     void completion.catch(() => {});
     const originalBackend = this.backend;
+    let attachedBackend: SessionBackend | undefined;
+    let generation = this.wiringGeneration;
+    const rejectCompletion = this.turnReject;
     try {
       this.reattachTmux(sessionName, false, state.transcript);
+      attachedBackend = this.backend;
+      generation = this.wiringGeneration;
+      await this.transcript?.flush();
+      if (this.stopped || this.backend !== attachedBackend || this.wiringGeneration !== generation) {
+        throw new Error('PTY recovery cancelled by lifecycle change');
+      }
       this.markTmuxReattached();
       await onAttached?.();
     } catch (err) {
+      // A stopped/replaced attachment no longer owns the driver's waiters or
+      // wiring. In particular, never detach a newer backend from this catch.
+      if (attachedBackend && (this.stopped || this.backend !== attachedBackend || this.wiringGeneration !== generation)) {
+        rejectCompletion?.(err instanceof Error ? err : new Error(String(err)));
+        throw err;
+      }
       this.turnActive = false;
       this.awaitingRecoveryTranscript = false;
       this.turnReject?.(err instanceof Error ? err : new Error(String(err)));
@@ -405,11 +425,15 @@ export class PtyCliDriver implements AgentDriver {
 
   async resume(): Promise<void> {
     if (this.stopped) return;
+    const backend = this.backend;
+    const generation = this.wiringGeneration;
     this.assertPermissionModeSupported();
     // 路径 1：tmux 会话仍在 → reattach（后端内部重启 pipe-pane 捕获，driver 重建订阅）。
     const tmuxName = this.tmuxSessionName();
     const tmuxProbe = tmuxName === undefined ? 'missing' : TmuxBackend.probeSession(tmuxName);
     if (tmuxName !== undefined && tmuxProbe === 'exists') {
+      await this.transcript?.flush();
+      if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return;
       this.reattachTmux(tmuxName, this.started);
       // daemon 重启后的典型形态：新 driver 直接 resume()，从没调过 start()。
       // 必须置 started，否则接下来的 send() 会走 start() 再 spawn 一次，
@@ -425,6 +449,8 @@ export class PtyCliDriver implements AgentDriver {
     // 路径 2：适配器支持 CLI 级 resume → kill 旧后端，带 resume 参数重 spawn。
     if (!this.adapter.buildResumeCommand) return;   // 无 resume 能力 → no-op
     const plan = this.planResume();
+    await this.transcript?.flush();
+    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return;
     this.respawn(plan.args);
     if (plan.kind === 'resume') {
       this.markResumed();
@@ -627,10 +653,7 @@ export class PtyCliDriver implements AgentDriver {
     this.cancelActiveSubmission(stopReason);
     this.turnWriteReject?.(stopReason);
     this.turnWriteReject = null;
-    // The cursor consumed by a checkpoint must include every complete record
-    // observed before daemon teardown, including one written in the final poll
-    // interval. Keep the source alive through this flush.
-    this.transcript?.flush();
+    await this.transcript?.flush().catch(() => {});
     this.teardownWiring();
     this.terminalSubscribers.clear();
     try {
@@ -757,43 +780,62 @@ export class PtyCliDriver implements AgentDriver {
       staticBusyClearPattern: this.adapter.staticBusyClearPattern,
       readyPattern: this.adapter.readyPattern,
     });
+    let completing = false;
     this.idleDetector.onIdle(() => {
-      if (!this.turnActive) return;
-      if (this.awaitingRecoveryTranscript) return;
-      // Streaming can pause with an old prompt still on screen. Only the
-      // current footer counts; earlier busy text may remain in the answer.
-      const footer = this.snapshot?.lastLine() ?? '';
-      // Claude can hide its interrupt footer behind a paste hint. Its latest
-      // status line still shows activity below the previous turn's duration.
-      const activity = this.adapter.screenActivityPattern;
-      const statusLine = activity ? this.snapshot?.viewportText().split('\n').reverse()
-        .find(line => activity.test(line) || this.adapter.backgroundWaitPattern?.test(line) || this.adapter.completionPattern?.test(line)) : undefined;
-      if (this.activeSubmission || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))) {
-        // Keep checking even if the next redraw only clears the footer.
-        this.idleDetector?.reset();
-        this.idleDetector?.seedReadyEvidence();
-        return;
-      }
-      // 已有实质输出（CLI 在干活）→ 不受宽限期限制，idle 即完成。
-      // 尚无实质输出 → 可能还在启动期（splash 屏静止），宽限期内禁止 completed。
-      if (!this.turnHasOutput) {
-        if (Date.now() - this.turnStartedAt < PtyCliDriver.TURN_GRACE_MS) return;
-      }
-      // Publish the final JSONL record before Runtime closes the turn, even
-      // when it was written between the tailer's polling ticks.
-      this.transcript?.flush();
-      if (this.holdForBackgroundWork(statusLine)) {
-        this.idleDetector?.reset();
-        this.idleDetector?.seedReadyEvidence();
-        return;
-      }
-      this.clearBackgroundHold();
-      this.turnActive = false;
-      this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending ? 'cancelled' : 'end_turn' } });
-      this.interruptPending = false;
-      this.turnResolve?.();
-      this.turnResolve = null;
-      this.turnReject = null;
+      if (completing) return;
+      completing = true;
+      void (async () => {
+        if (!this.turnActive || this.stopped) return;
+        if (this.awaitingRecoveryTranscript) return;
+        // Streaming can pause with an old prompt still on screen. Only the
+        // current footer counts; earlier busy text may remain in the answer.
+        const footer = this.snapshot?.lastLine() ?? '';
+        // Claude can hide its interrupt footer behind a paste hint. Its latest
+        // status line still shows activity below the previous turn's duration.
+        const activity = this.adapter.screenActivityPattern;
+        const statusLine = activity ? this.snapshot?.viewportText().split('\n').reverse()
+          .find(line => activity.test(line) || this.adapter.backgroundWaitPattern?.test(line) || this.adapter.completionPattern?.test(line)) : undefined;
+        if (this.activeSubmission || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))) {
+          // Keep checking even if the next redraw only clears the footer.
+          this.idleDetector?.reset();
+          this.idleDetector?.seedReadyEvidence();
+          return;
+        }
+        // 已有实质输出（CLI 在干活）→ 不受宽限期限制，idle 即完成。
+        // 尚无实质输出 → 可能还在启动期（splash 屏静止），宽限期内禁止 completed。
+        if (!this.turnHasOutput) {
+          if (Date.now() - this.turnStartedAt < PtyCliDriver.TURN_GRACE_MS) return;
+        }
+        // Publish the final JSONL record before Runtime closes the turn, even
+        // when it was written between the tailer's polling ticks.
+        const resolve = this.turnResolve;
+        const outputAt = this.lastOutputAt;
+        await this.transcript?.flush();
+        if (backend !== this.backend || this.stopped || !this.turnActive || this.turnResolve !== resolve) return;
+        if (outputAt !== this.lastOutputAt) {
+          this.idleDetector?.reset();
+          this.idleDetector?.seedReadyEvidence();
+          return;
+        }
+        if (this.holdForBackgroundWork(statusLine)) {
+          this.idleDetector?.reset();
+          this.idleDetector?.seedReadyEvidence();
+          return;
+        }
+        this.clearBackgroundHold();
+        this.turnActive = false;
+        this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending ? 'cancelled' : 'end_turn' } });
+        this.interruptPending = false;
+        this.turnResolve?.();
+        this.turnResolve = null;
+        this.turnReject = null;
+      })().catch(error => {
+        if (backend !== this.backend || !this.turnActive) return;
+        this.turnActive = false;
+        this.turnReject?.(error instanceof Error ? error : new Error(String(error)));
+        this.turnResolve = null;
+        this.turnReject = null;
+      }).finally(() => { completing = false; });
     });
 
     backend.onData(data => {
@@ -806,7 +848,7 @@ export class PtyCliDriver implements AgentDriver {
       // 本轮进行中的 PTY 输出 = CLI 在干活（splash 屏静止不会触发 onData）。
       if (this.turnActive) this.turnHasOutput = true;
     });
-    backend.onExit(code => this.handleExit(code, backend));
+    backend.onExit(code => { void this.handleExit(code, backend); });
     if (initial) this.feedRecoveredScreen(initial.data);
 
     // The tailer must resolve the CLI's data dir from the environment the CLI
@@ -841,6 +883,7 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   private teardownWiring(): void {
+    this.wiringGeneration++;
     if (this.idleDetector) {
       this.idleDetector.dispose();
       this.idleDetector = undefined;
@@ -857,7 +900,7 @@ export class PtyCliDriver implements AgentDriver {
     this.clearBackgroundHold();
   }
 
-  private handleExit(code: number | null, source?: SessionBackend): void {
+  private async handleExit(code: number | null, source?: SessionBackend): Promise<void> {
     // 只认「当前后端」的退出。respawn 会 kill 旧后端再换新的，被 kill 的旧后端
     // 的 exit 是我们自己造成的退场，不是 agent 崩溃——上报它会让 runtime 把会话
     // 打成 failed（真实环境实测：resume 返回 200 后立刻 status=failed /
@@ -870,6 +913,9 @@ export class PtyCliDriver implements AgentDriver {
     if (this.exitReported) return;
     this.exitReported = true;
     this.stopped = true;
+    const exitingBackend = this.backend;
+    await this.transcript?.flush().catch(() => {});
+    if (this.backend !== exitingBackend) return;
     this.teardownWiring();
     if (!(this.backend instanceof TmuxBackend) || TmuxBackend.probeSession(this.backend.sessionName) === 'missing') {
       this.claudeSettings.cleanup();
@@ -1038,7 +1084,8 @@ export class PtyCliDriver implements AgentDriver {
     const target = this.backend as SessionBackend & Partial<PtyLike>;
     const guarded = <T>(write: () => T): T => {
       if (submission.cancelError) throw submission.cancelError;
-      if (this.activeSubmission !== submission) {
+      if (this.stopped) throw new Error('Driver stopped');
+      if (this.activeSubmission !== submission || this.backend !== target) {
         throw new Error('PtyCliDriver: submission is no longer active');
       }
       return write();

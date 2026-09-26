@@ -149,7 +149,7 @@ export function pendingPermissionId(timeline: TimelineEvent[]) {
   return undefined;
 }
 
-export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] = []): TimelineSection[] {
+export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] = [], latestTurn = true): TimelineSection[] {
   if (!timeline.length) return [];
   const turns: TimelineEvent[][] = [];
   for (const event of timeline) {
@@ -159,11 +159,12 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     turns.at(-1)!.push(event);
   }
 
+  const tasksById = new Map(tasks.map(task => [task.id, task]));
   return turns.flatMap((turn, turnIndex) => {
     const userMessage = turn.find(event => event.type === 'text' && event.data.role === 'user');
     // 插话并入了正在执行的那一轮，这一段的状态跟着那一轮走。
-    const task = tasks.find(item => item.id === (userMessage?.data.steering?.target?.taskId ?? userMessage?.data.taskId));
-    const terminal = task ? terminalTaskStatuses.has(task.status) : turnIndex < turns.length - 1;
+    const task = tasksById.get(userMessage?.data.steering?.target?.taskId ?? userMessage?.data.taskId ?? turn.find(event => event.taskId || event.data.taskId)?.taskId ?? turn.find(event => event.data.taskId)?.data.taskId);
+    const terminal = task ? terminalTaskStatuses.has(task.status) : turnIndex < turns.length - 1 || !latestTurn;
     const lastActivityIndex = turn.reduce((latest, event, index) => isActivity(event) ? index : latest, -1);
     const lastAssistantTextIndex = turn.reduce((latest, event, index) => event.type === 'text' && event.data.role !== 'user' ? index : latest, -1);
     const finalIndex = terminal && lastAssistantTextIndex > lastActivityIndex ? lastAssistantTextIndex : -1;
@@ -213,7 +214,7 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     const activity: TimelineSection = {
       kind: 'activity', id: `activity-${groups[0]!.id}`, groups, hasAnswer,
       taskStatus,
-      isLatestTurn: turnIndex === turns.length - 1,
+      isLatestTurn: latestTurn && turnIndex === turns.length - 1,
       startedAt: userMessage?.timestamp ?? groups[0]!.startedAt,
       ...(completedAt ? { completedAt } : {})
     };
@@ -224,4 +225,111 @@ export function buildTimelineSections(timeline: TimelineEvent[], tasks: Task[] =
     }
     return sections;
   });
+}
+
+/** Cache derived turns by their input references. Appending a token rebuilds
+ * only its turn; old Markdown, tool groups and permission cards keep identity. */
+export function createTimelineProjector() {
+  type Cached = { source: DockEvent[]; task?: Task; latest: boolean; timeline: TimelineEvent[]; sections: TimelineSection[] };
+  let cache = new Map<string, Cached>();
+  let lastEvents: DockEvent[] | undefined;
+  let lastTasks: Task[] | undefined;
+  let lastHasOlder = false;
+  let entries: Cached[] = [];
+  let byTask = new Map<string, Task>();
+  let hasSyntheticPrompts = false;
+  const result = () => {
+    let eventCount = 0, sectionCount = 0;
+    for (let index = 0; index < entries.length; index++) {
+      eventCount += entries[index]!.timeline.length; sectionCount += entries[index]!.sections.length;
+    }
+    const timeline = new Array<TimelineEvent>(eventCount), timelineSections = new Array<TimelineSection>(sectionCount);
+    let eventIndex = 0, sectionIndex = 0;
+    for (let index = 0; index < entries.length; index++) {
+      const entry = entries[index]!;
+      for (let offset = 0; offset < entry.timeline.length; offset++) timeline[eventIndex++] = entry.timeline[offset]!;
+      for (let offset = 0; offset < entry.sections.length; offset++) timelineSections[sectionIndex++] = entry.sections[offset]!;
+    }
+    return { timeline, timelineSections };
+  };
+  const taskFor = (source: DockEvent[]) => byTask.get(source.find(event => event.data.role === 'user')?.data.steering?.target?.taskId ?? source.find(event => event.data.role === 'user')?.data.taskId ?? source.find(event => event.taskId || event.data.taskId)?.taskId ?? source.find(event => event.data.taskId)?.data.taskId);
+  return (events: DockEvent[], tasks: Task[] = [], hasOlder = false, delta?: { previousEvents?: DockEvent[]; changes?: DockEvent[] }) => {
+    const changes = delta?.changes;
+    const previous = entries.at(-1);
+    // Appends carry their exact delta from the event cache. Avoid sorting,
+    // grouping and comparing every historical input again on each live frame.
+    if (previous && lastTasks === tasks && lastHasOlder === hasOlder && delta?.previousEvents === lastEvents && changes?.length
+      && changes.every((event, index) => (index === 0 || event.timestamp >= changes[index - 1]!.timestamp) && event.sequence > (lastEvents?.at(-1)?.sequence ?? 0) && event.timestamp >= previous.source.at(-1)!.timestamp
+        && event.type !== 'permission_request' && !warningText(event as TimelineEvent)
+        && !(hasSyntheticPrompts && event.data.role === 'user'))) {
+      const tail = [previous.source.slice()];
+      for (const event of changes) {
+        if (event.type === 'text' && event.data.role === 'user' && !event.data.steering) tail.push([]);
+        tail.at(-1)!.push(event);
+      }
+      cache.delete(previous.source[0]!.id);
+      entries.pop();
+      for (let index = 0; index < tail.length; index++) {
+        const source = tail[index]!, task = taskFor(source), latest = index === tail.length - 1;
+        const timeline = buildTimeline(source);
+        const entry = { source, task, latest, timeline, sections: buildTimelineSections(timeline, task ? [task] : [], latest) };
+        entries.push(entry); cache.set(source[0]!.id, entry);
+      }
+      lastEvents = events;
+      return result();
+    }
+    byTask = new Map(tasks.map(task => [task.id, task]));
+    const source = [...events];
+    // Missing legacy user messages are only synthesized inside the loaded range.
+    const oldest = hasOlder ? events[0]?.timestamp : undefined;
+    const taskIds = new Set(events.filter(event => event.data.role === 'user').map(event => event.data.taskId));
+    const legacy = new Map<string, number>();
+    for (const event of events) if (event.data.role === 'user' && !event.data.taskId) legacy.set(event.data.text, (legacy.get(event.data.text) ?? 0) + 1);
+    hasSyntheticPrompts = false;
+    for (const task of tasks) {
+      if (task.status === 'queued' || task.status === 'cancelled' || taskIds.has(task.id) || (oldest && task.createdAt < oldest)) continue;
+      const count = legacy.get(task.prompt) ?? 0;
+      if (count) { legacy.set(task.prompt, count - 1); continue; }
+      hasSyntheticPrompts = true;
+      const id = `task-event-${task.id}`;
+      const old = cache.get(id)?.source[0];
+      source.push(old?.data.text === task.prompt ? old : { id, sequence: -1, type: 'text', timestamp: task.createdAt, data: { text: task.prompt, role: 'user', taskId: task.id } });
+    }
+    source.sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.sequence - b.sequence);
+    const permissions = new Map<string, DockEvent>();
+    for (const event of source) if (event.type === 'permission_request') permissions.set(String(event.data.id), event);
+    const emittedPermissions = new Set<string>();
+    const turns: DockEvent[][] = [];
+    const warnings = new Set<string>();
+    for (let event of source) {
+      if (event.type === 'permission_request') {
+        const permissionId = String(event.data.id);
+        if (emittedPermissions.has(permissionId)) continue;
+        emittedPermissions.add(permissionId); event = permissions.get(permissionId)!;
+      }
+      const warning = warningText(event as TimelineEvent)?.toLocaleLowerCase();
+      if (warning && warnings.has(warning)) continue;
+      if (warning) warnings.add(warning);
+      if (!turns.length || (event.type === 'text' && event.data.role === 'user' && !event.data.steering)) turns.push([]);
+      turns.at(-1)!.push(event);
+    }
+    const next = new Map<string, Cached>();
+    const timeline: TimelineEvent[] = [];
+    const sections: TimelineSection[] = [];
+    for (let index = 0; index < turns.length; index++) {
+      const source = turns[index]!;
+      const key = source[0]!.id;
+      const task = taskFor(source);
+      const latest = index === turns.length - 1;
+      let entry = cache.get(key);
+      if (!entry || entry.task !== task || entry.latest !== latest || entry.source.length !== source.length || source.some((event, i) => entry!.source[i] !== event)) {
+        const derived = buildTimeline(source);
+        entry = { source, task, latest, timeline: derived, sections: buildTimelineSections(derived, task ? [task] : [], latest) };
+      }
+      next.set(key, entry);
+      for (const event of entry.timeline) timeline.push(event); for (const section of entry.sections) sections.push(section);
+    }
+    cache = next; entries = [...next.values()]; lastEvents = events; lastTasks = tasks; lastHasOlder = hasOlder;
+    return { timeline, timelineSections: sections };
+  };
 }
