@@ -1,4 +1,5 @@
 import type { ControlCenterSection } from './components/ControlCenterModal';
+import { instancePagePath, stripInstancePath } from './instance';
 
 /**
  * URL ↔ 界面状态的单一映射。
@@ -56,7 +57,8 @@ const controlCenterSections: readonly ControlCenterSection[] = ['agents', 'lark'
 const isControlCenterSection = (value: string | null): value is ControlCenterSection =>
   value !== null && (controlCenterSections as readonly string[]).includes(value);
 
-export const routeFromPath = (pathname: string): AppRoute => {
+export const routeFromPath = (fullPath: string): AppRoute => {
+  const pathname = stripInstancePath(fullPath);
   if (pathname === '/') return { kind: 'overview' };
   const match = pathname.match(/^\/sessions\/([^/]+)$/);
   if (!match?.[1]) return { kind: 'not-found' };
@@ -103,9 +105,9 @@ export const parseAppLocation = (pathname: string, search: string): AppLocation 
 };
 
 const routePath = (route: AppRoute): string =>
-  route.kind === 'session' ? `/sessions/${encodeURIComponent(route.sessionId)}` : '/';
+  instancePagePath(route.kind === 'session' ? `/sessions/${encodeURIComponent(route.sessionId)}` : '/');
 
-export const sessionPath = (id?: string) => id ? `/sessions/${encodeURIComponent(id)}` : '/';
+export const sessionPath = (id?: string) => instancePagePath(id ? `/sessions/${encodeURIComponent(id)}` : '/');
 
 /**
  * 飞书卡片「查看详情」打开的只读分享页：`/share/<会话 ID>#<分享 token>`。

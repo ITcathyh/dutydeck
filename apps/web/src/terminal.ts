@@ -1,5 +1,6 @@
 // PTY 终端 WebSocket 协议的纯函数层：URL 推导、帧解析、重连退避。
 // 帧格式见 apps/web/TERMINAL_API.md。
+import { instanceApiUrl } from './instance';
 
 export type TerminalServerFrame =
   | { type: 'snapshot'; data: string; cols: number; rows: number }
@@ -15,7 +16,7 @@ export type TerminalClientFrame =
 export function terminalWsUrl(sessionId: string, locationLike?: { protocol: string; host: string }): string {
   const location = locationLike ?? window.location;
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${scheme}://${location.host}/api/terminal/${encodeURIComponent(sessionId)}`;
+  return `${scheme}://${location.host}${instanceApiUrl(`/api/terminal/${encodeURIComponent(sessionId)}`)}`;
 }
 
 // 解析服务端→客户端 JSON 帧；非法 JSON / 未知 type / 缺字段时返回 undefined（不抛异常）

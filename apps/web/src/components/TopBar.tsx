@@ -2,7 +2,9 @@ import { Keyboard, Menu, Search } from 'lucide-react';
 import { IconButton, Kbd } from './primitives';
 import { DutydeckIcon } from './ui';
 import { ThemeToggle } from './ThemeToggle';
+import { CompactSelect } from './CompactSelect';
 import type { ResolvedTheme, ThemePreference } from '../theme';
+import type { PeerInstance } from '../api';
 
 export type TopBarProps = {
   /** 移动端抽屉触发器。桌面端侧栏常驻，这枚按钮 md:hidden。 */
@@ -15,6 +17,11 @@ export type TopBarProps = {
   onThemeChange(next: ThemePreference): void;
   /** 移动端抽屉打开时，顶栏和主区一起退出可交互树，否则 Tab 会走到遮罩背后。 */
   hidden?: boolean;
+  /** 同机其他 Dutydeck 实例；为空时不显示实例切换。 */
+  instances?: PeerInstance[];
+  /** 当前实例；undefined 表示主服务。 */
+  instance?: string;
+  onInstanceChange?(id: string | undefined): void;
 };
 
 /*
@@ -52,7 +59,7 @@ export type TopBarProps = {
   分隔线用 border-b border-default，采用标准语义边框而非硬编码 linear-gradient 渐变线，
   符合契约对颜色字面量的约束。
 */
-export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcuts, themePreference, themeResolved, onThemeChange, hidden }: TopBarProps) {
+export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcuts, themePreference, themeResolved, onThemeChange, hidden, instances, instance, onInstanceChange }: TopBarProps) {
   return <header
     aria-hidden={hidden || undefined}
     inert={hidden || undefined}
@@ -76,6 +83,18 @@ export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcu
       <DutydeckIcon className="h-7 w-7 shrink-0"/>
       <span className="hidden text-body font-semibold tracking-[-.025em] text-primary sm:inline">Dutydeck</span>
     </button>
+
+    {/*
+      实例切换只在主服务配了其他实例（DUTYDECK_INSTANCES_JSON）时出现。切换是整页跳转：
+      任务、机器人、群聊和用量全部换成该实例的数据，不保留上一个实例的缓存。
+      -mt-1.5 抵消 CompactSelect 自带的上边距，让它与顶栏其他控件同高对齐。
+
+      下拉列表向下展开会压到桌面端的侧栏卡片，两者都是 z-drawer，侧栏在 DOM 里靠后会盖住列表。
+      所以桌面端给这里单独一层 z-dialog；窄屏不加，否则会穿透从左侧滑出的抽屉。
+    */}
+    {instances?.length && onInstanceChange ? <div className="-mt-1.5 w-36 shrink-0 sm:w-48 md:relative md:z-dialog">
+      <CompactSelect options={[{ value: '', label: '主服务' }, ...instances.map(item => ({ value: item.id, label: item.name }))]} value={instance ?? ''} placeholder="切换 Dutydeck 实例" disabledText="" onChange={value => onInstanceChange(value || undefined)}/>
+    </div> : null}
 
     <div className="ml-auto flex min-w-0 items-center gap-1.5">
       {/*

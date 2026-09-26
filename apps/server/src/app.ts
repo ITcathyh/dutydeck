@@ -15,6 +15,7 @@ import { discoverAgentModels } from './agent-models.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
 import { registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
+import { registerInstanceProxy, type PeerInstance } from './instance-proxy.js';
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
 import { registerFoundationManagementRoutes, type FoundationManagementOptions } from './foundation-routes.js';
 import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from './schedule-routes.js';
@@ -77,6 +78,8 @@ export interface BuildAppOptions {
   auth?: AuthMiddlewareOptions;
   /** 终端 WS 代理；不传 = 不注册 /api/terminal/:sessionId */
   terminal?: TerminalRouteOptions;
+  /** 同机其他 Dutydeck 实例，dashboard 经 /api/instances/<id>/... 转发访问；不传 = 列表为空。 */
+  instances?: PeerInstance[];
   /** 通用会话回传通道；不传 = 不注册 /api/relay/* */
   relay?: RelayRoutesOptions;
   /** WP1a offline management only. Production service wiring is deferred to WP1b. */
@@ -143,6 +146,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   registerWorkspaceGroupRoutes(app, options.workspaceGroups);
   registerSessionNameRoutes(app, runtime, options.sessionNames);
   if (options.terminal) registerTerminalRoutes(app, options.terminal);
+  registerInstanceProxy(app, options.instances ?? [], options.terminal?.auth);
   registerRelayRoutes(app, { ...options.relay, runtime: options.relay?.runtime ?? runtime });
   await registerFoundationManagementRoutes(app, options.foundation);
   await registerIdentityPreflightRoutes(app, options.identityPreflight);

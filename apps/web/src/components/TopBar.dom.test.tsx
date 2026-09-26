@@ -132,3 +132,28 @@ describe('TopBar 全局入口', () => {
     expect(screen.queryByRole('button', { name: /设置/ })).toBeNull();
   });
 });
+
+describe('TopBar 实例切换', () => {
+  it('没有其他实例时不出现切换', () => {
+    renderTopBar();
+    expect(screen.queryByRole('button', { name: '主服务' })).toBeNull();
+  });
+
+  it('列出主服务和其他实例，选中后交给调用方跳转', async () => {
+    const onInstanceChange = vi.fn();
+    const user = userEvent.setup();
+    renderTopBar({ instances: [{ id: 'tag', name: 'Tag · CCFlash' }], onInstanceChange });
+    await user.click(screen.getByRole('button', { name: '主服务' }));
+    await user.click(within(screen.getByRole('listbox', { name: '切换 Dutydeck 实例' })).getByRole('option', { name: 'Tag · CCFlash' }));
+    expect(onInstanceChange).toHaveBeenCalledWith('tag');
+  });
+
+  it('在其他实例里选回主服务时传 undefined', async () => {
+    const onInstanceChange = vi.fn();
+    const user = userEvent.setup();
+    renderTopBar({ instances: [{ id: 'tag', name: 'Tag · CCFlash' }], instance: 'tag', onInstanceChange });
+    await user.click(screen.getByRole('button', { name: 'Tag · CCFlash' }));
+    await user.click(screen.getByRole('option', { name: '主服务' }));
+    expect(onInstanceChange).toHaveBeenCalledWith(undefined);
+  });
+});

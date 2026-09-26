@@ -5,6 +5,7 @@ import { ListChecks, X } from 'lucide-react';
 import { api, type Agent, type Session, type WorkItemRequest } from '../api';
 import { Banner, Button, Dialog, Field, IconButton, Input, Select, Spinner, Textarea } from './primitives';
 import { ToolbarButton } from './ui';
+import { sessionPath } from '../app-route';
 
 import { useWorkItems, useWorkItemRequests, workStatusLabels as statusLabels } from './workItemQueries';
 
@@ -175,7 +176,7 @@ function GoalDetails({ item, session, agents, disabled, onAction, onSelectSessio
             <p className="mt-2 text-caption text-subtle">{new Date(attempt.updatedAt).toLocaleString()}{attempt.taskId ? ` · 指令 ${attempt.taskId}` : ''}</p>
             {attempt.error && <p className="mt-1 whitespace-pre-wrap text-caption text-danger">{attempt.error}</p>}
             {attempt.output && <><pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-muted p-2 text-caption">{attempt.output.text}</pre><p className="break-all text-caption text-subtle">产物指纹 {attempt.output.digest}</p></>}
-            {attempt.sessionId && <a className="mt-2 inline-block text-caption text-link hover:underline" href={`/sessions/${encodeURIComponent(attempt.sessionId)}`} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(attempt.sessionId!); } }}>查看此尝试的执行记录</a>}
+            {attempt.sessionId && <a className="mt-2 inline-block text-caption text-link hover:underline" href={sessionPath(attempt.sessionId)} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) { event.preventDefault(); onSelectSession(attempt.sessionId!); } }}>查看此尝试的执行记录</a>}
           </details>)}
         </li>;
       })}

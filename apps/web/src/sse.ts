@@ -1,4 +1,5 @@
 import { withShareToken, type DockEvent, type Session } from './api';
+import { instanceApiUrl } from './instance';
 
 // 服务端 SSE 流支持的事件类型（与 App.tsx 现有监听列表保持一致）
 export const STREAM_EVENT_TYPES = ['text', 'thinking', 'tool_call', 'tool_result', 'permission_request', 'status', 'task', 'error', 'completed', 'raw_terminal'] as const;
@@ -129,7 +130,7 @@ export class SessionStream {
     if (this.closed) return;
     // 重连时重新取缓存最新 maxSequence（双保险；原生 EventSource 同时会自动带 Last-Event-ID header）
     const after = this.getAfter();
-    const source = this.eventSourceFactory(withShareToken(`/api/sessions/${this.sessionId}/stream?after=${after}`));
+    const source = this.eventSourceFactory(withShareToken(instanceApiUrl(`/api/sessions/${this.sessionId}/stream?after=${after}`)));
     this.source = source;
     source.onopen = () => {
       if (this.closed) return;

@@ -4,7 +4,11 @@ import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@duty
 import type { UsageCap, UsageGroup, UsageTotals } from '@dutydeck/shared';
 import type { ArchivedHammerIntegration, ChannelBotGroupPolicy, CreateGroupBindingInput, EffectiveGroupConfig, GroupBinding, PublicAgent, PublicChannelBotFoundation, RemoteChatFact, RoleAssignment, ScheduleBlocker, ScheduleGeneration, SchedulePreview, ScheduleTrigger, ScheduleWatermark, SecretRefMetadata, UpdateChannelBotInput, UpdateGroupBindingInput, UpdateScheduleDefinitionInput } from '@dutydeck/shared';
 
+import { instanceApiUrl } from './instance';
+
 export type { WorkspaceCleanupPreview, WorkspaceCleanupResult };
+/** 同机其他 Dutydeck 实例，经主服务转发访问。 */
+export type PeerInstance = { id: string; name: string };
 export type { WorkspaceOrganization, WorkspaceOrganizationSnapshot };
 export type { ScheduleTrigger };
 export type PermissionMode = 'ask' | 'approve-reads' | 'deny-all' | 'full-trust';
@@ -272,7 +276,7 @@ export const withShareToken = (url: string) => shareToken ? `${url}${url.include
 export class ApiError extends Error {
   constructor(message: string, public readonly code: string, public readonly status: number, public readonly current?: unknown) { super(message); this.name = 'ApiError'; }
 }
-const json = async <T,>(url: string, init?: RequestInit): Promise<T> => { const response = await fetch(withShareToken(url), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
+const json = async <T,>(url: string, init?: RequestInit): Promise<T> => { const response = await fetch(withShareToken(instanceApiUrl(url)), { credentials: 'same-origin', ...init }); const data = await response.json(); if (!response.ok) { if (response.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT)); throw new ApiError(data.error?.message ?? response.statusText, data.error?.code ?? 'REQUEST_FAILED', response.status, data.current); } return data; };
 const agentModelsUrl = (id: string, model?: string, refresh = false) => {
   const query = new URLSearchParams();
   if (model) query.set('model', model);
@@ -317,6 +321,7 @@ export const api = {
   login: (token: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token }) }),
   passwordLogin: (password: string) => json<BrowserAuthState>('/api/auth/login', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password }) }),
   logout: () => json<BrowserAuthState>('/api/auth/logout', { method: 'POST' }),
+  instances: () => json<{ instances: PeerInstance[] }>('/api/instances', { cache: 'no-store' }),
   agents: () => json<Agent[]>('/api/agents'), agentModels: (id: string, model?: string, refresh = false) => json<AgentModelsResult>(agentModelsUrl(id, model, refresh)), sessions: () => json<Session[]>('/api/sessions'), session: (id: string) => json<Session>(`/api/sessions/${encodeURIComponent(id)}`), events: (id: string, query?: EventWindowQuery, signal?: AbortSignal) => json<DockEvent[]>(eventsUrl(id, query), { signal }), tasks: (id: string) => json<Task[]>(`/api/sessions/${id}/tasks`),
   // 跨任务标题的最小只读契约；服务端接入前 UI 仅使用当前已加载 tasks 的真实 prompt，不伪造摘要。
   runSummaries: () => json<RunSummary[]>(RUN_SUMMARY_ENDPOINT),

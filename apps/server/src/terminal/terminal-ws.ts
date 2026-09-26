@@ -45,8 +45,32 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * WS 升级的访问认证，终端与转发到其他实例的升级共用。不传 auth = 不认证（loopback 场景）。
+ * 拒绝时返回 rejectUpgrade 的参数，放行时返回 undefined。
+ */
+export function upgradeRejection(request: IncomingMessage, auth: TerminalRouteAuth | undefined): [statusCode: number, statusText: string, message: string] | undefined {
+  if (!auth) return undefined;
+  const authMode = auth.mode ?? (auth.allowUnauthenticated ? 'local' : 'token');
+  const protocol = 'encrypted' in request.socket && request.socket.encrypted === true ? 'https' : 'http';
+  // Explicit open mode accepts remote hosts without a token, while browser
+  // upgrades still have to originate from the exact public Dutydeck origin.
+  if (authMode === 'open') {
+    return request.headers.origin && !isSameOriginRequest(request.headers, protocol) ? [403, 'Forbidden', 'origin not allowed'] : undefined;
+  }
+  // local-only may omit a token, but still validates Host/Origin to block
+  // browser DNS rebinding into the loopback terminal.
+  if (authMode === 'local') {
+    if (!isLoopbackHost(request.headers.host)) return [403, 'Forbidden', 'host not allowed'];
+    return request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, protocol) ? [403, 'Forbidden', 'origin not allowed'] : undefined;
+  }
+  if (request.headers.origin && !isSameOriginRequest(request.headers, protocol)) return [403, 'Forbidden', 'origin not allowed'];
+  if (!auth.check(extractBearerToken(request.headers.authorization) ?? extractCookie(request.headers.cookie))) return [401, 'Unauthorized', 'unauthorized'];
+  return undefined;
+}
+
 /** 升级前在 raw socket 上回 HTTP 错误并断开（不进入 WS 协议） */
-function rejectUpgrade(socket: Socket, statusCode: number, statusText: string, message: string): void {
+export function rejectUpgrade(socket: Socket, statusCode: number, statusText: string, message: string): void {
   const body = JSON.stringify({ type: 'error', message });
   socket.on('error', () => {}); // 对端可能已断开，写错误响应时静默吞掉 ECONNRESET
   socket.write(
@@ -204,39 +228,10 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
       }
       if (!url.pathname.startsWith(TERMINAL_PATH_PREFIX)) return; // 非本路由，放行
 
-      const authMode = options.auth?.mode ?? (options.auth?.allowUnauthenticated ? 'local' : 'token');
-      // Explicit open mode accepts remote hosts without a token, while browser
-      // upgrades still have to originate from the exact public Dutydeck origin.
-      if (options.auth && authMode === 'open') {
-        const encrypted = 'encrypted' in request.socket && request.socket.encrypted === true;
-        if (request.headers.origin && !isSameOriginRequest(request.headers, encrypted ? 'https' : 'http')) {
-          rejectUpgrade(socket, 403, 'Forbidden', 'origin not allowed');
-          return;
-        }
-      // local-only may omit a token, but still validates Host/Origin to block
-      // browser DNS rebinding into the loopback terminal.
-      } else if (options.auth && authMode === 'local') {
-        if (!isLoopbackHost(request.headers.host)) {
-          rejectUpgrade(socket, 403, 'Forbidden', 'host not allowed');
-          return;
-        }
-        const encrypted = 'encrypted' in request.socket && request.socket.encrypted === true;
-        if (request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, encrypted ? 'https' : 'http')) {
-          rejectUpgrade(socket, 403, 'Forbidden', 'origin not allowed');
-          return;
-        }
-      } else if (options.auth) {
-        const cookie = extractCookie(request.headers.cookie);
-        const bearer = extractBearerToken(request.headers.authorization);
-        const encrypted = 'encrypted' in request.socket && request.socket.encrypted === true;
-        if (request.headers.origin && !isSameOriginRequest(request.headers, encrypted ? 'https' : 'http')) {
-          rejectUpgrade(socket, 403, 'Forbidden', 'origin not allowed');
-          return;
-        }
-        if (!options.auth.check(bearer ?? cookie)) {
-          rejectUpgrade(socket, 401, 'Unauthorized', 'unauthorized');
-          return;
-        }
+      const rejection = upgradeRejection(request, options.auth);
+      if (rejection) {
+        rejectUpgrade(socket, ...rejection);
+        return;
       }
 
       // 解析 sessionId：只取第一段，decodeURIComponent

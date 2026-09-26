@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
+import { parsePeerInstances } from './instance-proxy.js';
 import { localLoopbackUrl } from './local-api-url.js';
 import { WorkItemService } from './work-items.js';
 import { WorkItemInteractions } from './work-item-interactions.js';
@@ -475,6 +476,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         auth: { mode, allowUnauthenticated: mode === 'local', check: presented => !!presented && (tokensEqual(presented, activeToken) || verifyBrowserSession(presented, activePasswordHash)) },
         authorize: (request, sessionId, action) => authorizeSessionRequest(request, sessionId, 'terminal', action),
       },
+      instances: parsePeerInstances(env.DUTYDECK_INSTANCES_JSON),
       relay: { runtime, capabilities: relayCapabilities, broker: relayBroker },
       foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef, isLiveManagedBot: id => groupManager.isLiveManagedBot(id) },
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
