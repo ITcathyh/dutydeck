@@ -236,8 +236,42 @@ const confirmValue = (appId = 'cli_uxp0') => buildRepairConfirmCard(appId).eleme
   .flatMap((element: any) => element.behaviors ?? []).find((behavior: any) => behavior.type === 'callback')!.value as Record<string, unknown>;
 
 describe('P0-1 他人操作二次确认 / overflow 门 / 行内审批反伪造', () => {
-  it('他人中断先警告不执行，60 秒内二点放行并落传 actor；本人首点即执行', async () => {
-    const h = await harness('permission');
+  it.each(['unrestricted', 'allowlisted', 'managed_member', 'managed_operator', 'managed_missing_requester', 'missing_identity'] as const)(
+    '中断权限拒绝 %s，重复点击也不确认或改变任务', async kind => {
+      const h = await harness('permission', { managedGroup: kind.startsWith('managed'),
+        ...(kind === 'allowlisted' ? { configPatch: { allowedUsers: [{ openId: 'ou_alice' }, { openId: 'ou_bob' }] } } : {}) });
+      if (kind === 'managed_operator') {
+        const bot = (await h.groupManager!.groups()).groups[0]!.bots[0]!;
+        const bob = (await h.groupManager!.members(h.config.appId, 'oc_group')).members.find(member => member.openId === 'ou_bob')!;
+        await h.groupManager!.save(h.config.appId, 'oc_group', { expectedRevision: bot.binding!.revision, patch: {}, roleChanges: [
+          { kind: 'create', principalId: bob.principalId, role: 'can_operate', operateScope: 'group_runs',
+            actionGates: { terminalWrite: false, highRisk: true, groupToolsSend: false } }
+        ] });
+      }
+      await h.coordinator.handle(event('om_task', '等待批准'), h.config);
+      await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'permission' && item.state === 'pending')).toBe(true));
+      const task = (h.coordinator as any).tasks.get('om_task');
+      if (kind === 'managed_missing_requester') task.event = { ...task.event, senderOpenId: undefined };
+      const update = vi.spyOn(task, 'requestUpdate');
+      const value = { action: 'interrupt', task_id: 'om_task', turn: '1' };
+      for (let click = 0; click < 2; click++) {
+        expect(await h.coordinator.handleAction(value, kind === 'missing_identity' ? undefined : 'ou_bob'))
+          .toEqual({ type: 'warning', content: '没有权限中断此任务，仅任务发起人和管理员可操作。' });
+      }
+      expect(h.interrupt).not.toHaveBeenCalled();
+      expect(task.state).toBe('running');
+      expect(task.interruptRequested).toBeFalsy();
+      expect(update).not.toHaveBeenCalled();
+      expect((h.coordinator as any).foreignActionConfirmations.size).toBe(0);
+    });
+
+  it('管理员中断他人任务先确认，60 秒内二点放行并落传 actor；本人首点即执行', async () => {
+    const h = await harness('permission', { managedGroup: true });
+    const bot = (await h.groupManager!.groups()).groups[0]!.bots[0]!;
+    const bob = (await h.groupManager!.members(h.config.appId, 'oc_group')).members.find(member => member.openId === 'ou_bob')!;
+    await h.repos.roleAssignments.create({ id: 'bob_admin', channelBotId: bot.binding!.channelBotId,
+      groupBindingId: bot.binding!.id, principalId: bob.principalId, role: 'admin', operateScope: 'none',
+      actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } });
     await h.coordinator.handle(event('om_task', '等待批准'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'permission' && item.state === 'pending')).toBe(true));
     const [session] = await h.runtime.listSessions();

@@ -299,6 +299,15 @@ export abstract class LarkCoordinatorCore {
     return this.isStaticOperatorAllowed(config, operatorOpenId, chatId);
   }
 
+  /** 中断按钮仅允许任务发起人或管理员；可使用机器人、can_operate 均不代表管理员。 */
+  protected async isInterruptOperatorAllowed(config: StoredLarkConfig, operatorOpenId: string | undefined, chatId: string, sessionId: string | undefined, taskRequesterOpenId: string | undefined): Promise<boolean> {
+    if (!operatorOpenId) return false;
+    const isRequester = operatorOpenId === taskRequesterOpenId;
+    const decision = await this.groupManager?.authorize(config.appId, chatId, operatorOpenId, 'run.interrupt', sessionId, { taskRequesterOpenId });
+    if (decision) return decision.allowed && (isRequester || decision.source === 'owner' || decision.source === 'admin');
+    return isRequester && await this.isStaticOperatorAllowed(config, operatorOpenId, chatId);
+  }
+
   /**
    * 部署级静态白名单口径（不经过托管群策略）：allowedUsers/allowedEmails/allowedBots。
    * 未配置任何白名单时维持「不限制」的既有默认；bot 身份（230001）按 peer bot 门处理。

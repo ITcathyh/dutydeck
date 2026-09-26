@@ -51,7 +51,8 @@ async function fixture(options: { physical?: boolean } = {}) {
       sessionId: session.id, runtimeTaskId: kind === 'cancel' ? queued.id : first.id,
       requestUpdate: async (state: string) => { updates.push(state); } };
     const context: any = { tasks: new Map([['om_task', task]]), workflowOptions: {}, runtime,
-      isOperatorAllowed: async () => true, foreignActionConfirmations: new Map(), log: { info() {}, warn() {} }, pushTaskError() {} };
+      isOperatorAllowed: async () => true, isInterruptOperatorAllowed: async () => true,
+      foreignActionConfirmations: new Map(), log: { info() {}, warn() {} }, pushTaskError() {} };
     const result = await LarkMessageCoordinator.prototype.handleAction.call(context, { action: kind, task_id: 'om_task', turn: '1' }, 'ou_alice');
     return { task, updates, result };
   };
