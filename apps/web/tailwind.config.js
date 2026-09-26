@@ -119,6 +119,9 @@ export default {
       },
       boxShadow: {
         card: 'var(--shadow-card)',
+        // 内容卡片与统计卡：发丝环 + 柔和投影，hover 档用于可点的卡片抬起一层。
+        elevated: 'var(--shadow-elevated)',
+        'elevated-hover': 'var(--shadow-elevated-hover)',
         panel: 'var(--shadow-panel)',
         dialog: 'var(--shadow-dialog)',
         overlay: 'var(--shadow-overlay)',

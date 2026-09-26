@@ -42,6 +42,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .reasoning summary { list-style: none; }
 .reasoning summary::-webkit-details-marker { display: none; }
 /* 折叠内容的末尾渐隐。遮罩只读 alpha，黑色不是显示色，不受 token 约束。 */
+/* 任务中心页首光晕。local：光晕贴着内容一起滚走，不钉在滚动容器顶部。 */
+.ui-hero-glow { background-image: var(--overview-glow); background-repeat: no-repeat; background-attachment: local; }
 .ui-fade-bottom { -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent); mask-image: linear-gradient(to bottom, #000 60%, transparent); }
 
 @keyframes ui-overlay-in { from { opacity: 0; } to { opacity: 1; } }

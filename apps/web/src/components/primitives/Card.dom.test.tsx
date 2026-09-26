@@ -23,7 +23,7 @@ describe('Card 语气', () => {
     const { container } = render(<Card>内容</Card>);
     const className = cardOf(container).className;
     expect(className).toContain('bg-surface');
-    expect(className).toContain('shadow-card');
+    expect(className).toContain('shadow-elevated');
     expect(className).not.toContain('border');
   });
 
