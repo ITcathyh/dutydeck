@@ -1,5 +1,6 @@
 import { Keyboard, Menu, Search } from 'lucide-react';
 import { IconButton, Kbd } from './primitives';
+import { detectPlatform, formatShortcutKeys } from '../useKeyboardShortcuts';
 import { DutydeckIcon } from './ui';
 import { ThemeToggle } from './ThemeToggle';
 import { CompactSelect } from './CompactSelect';
@@ -60,6 +61,9 @@ export type TopBarProps = {
   符合契约对颜色字面量的约束。
 */
 export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcuts, themePreference, themeResolved, onThemeChange, hidden, instances, instance, onInstanceChange }: TopBarProps) {
+  // 与命令面板的实际绑定（Mod+K）同源：mac 上是 ⌘K，其它平台是 Ctrl K。
+  const platform = detectPlatform();
+  const paletteKeys = formatShortcutKeys('Mod+K', platform).join(platform === 'mac' ? '' : ' ');
   return <header
     aria-hidden={hidden || undefined}
     inert={hidden || undefined}
@@ -105,11 +109,11 @@ export function TopBar({ onOpenNavigation, onGoHome, onOpenSearch, onOpenShortcu
         type="button"
         onClick={onOpenSearch}
         aria-label="搜索任务目标、工作区或 Agent"
-        className="flex min-h-10 min-w-10 items-center justify-center gap-2 rounded-md border-transparent px-2 text-body text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring sm:w-64 sm:justify-start sm:border sm:border-default sm:bg-surface sm:px-3"
+        className="flex min-h-10 min-w-10 items-center justify-center gap-2 rounded-md border-transparent px-2 text-body text-subtle transition-colors duration-fast ease-out hover:bg-hover hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring sm:w-64 sm:justify-start lg:w-80 sm:border sm:border-default sm:bg-canvas sm:px-3 sm:hover:border-strong sm:hover:bg-surface"
       >
         <Search aria-hidden="true" size={15} className="shrink-0"/>
         <span className="hidden min-w-0 flex-1 truncate text-left sm:inline">搜索任务目标、工作区或 Agent</span>
-        <span className="hidden shrink-0 sm:inline"><Kbd>Ctrl K</Kbd></span>
+        <span className="hidden shrink-0 sm:inline"><Kbd>{paletteKeys}</Kbd></span>
       </button>
 
       <ThemeToggle preference={themePreference} resolved={themeResolved} onChange={onThemeChange}/>
