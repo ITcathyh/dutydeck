@@ -95,11 +95,15 @@ export function SidebarNav({ groups }: SidebarNavProps) {
           2px 实心 focus 环，覆盖掉它就要在这里重新造一个等价物；nav 容器的
           px-2.5 已经给 outline-offset 留够了余量，不会被 aside 的 overflow-hidden 裁掉。
         */
-        className={`group flex min-h-12 w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-fast ease-out ${item.active ? 'bg-sidebar-hover' : 'hover:bg-sidebar-hover'}`}
+        /*
+          选中态用 sidebar-active（品牌色浅底）而不是 sidebar-hover：两者同色时，鼠标
+          划过别的项就和当前项长得一样，用户分不清自己在哪。
+        */
+        className={`group flex min-h-12 w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors duration-fast ease-out ${item.active ? 'bg-sidebar-active' : 'hover:bg-sidebar-hover'}`}
       >
         <item.Icon aria-hidden="true" size={16} className="shrink-0 text-sidebar-accent"/>
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-body font-medium text-sidebar-text transition-colors duration-fast ease-out group-hover:text-sidebar-text-strong">{item.label}</span>
+          <span className={`block truncate text-body font-medium transition-colors duration-fast ease-out group-hover:text-sidebar-text-strong ${item.active ? 'text-sidebar-text-strong' : 'text-sidebar-text'}`}>{item.label}</span>
           <span className="block truncate text-caption text-sidebar-text-muted">{item.hint}</span>
         </span>
       </button>)}

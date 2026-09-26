@@ -152,7 +152,8 @@ export function SessionList({ open, onClose, sessions, summaries, sessionsLoadin
     hint 的口径与下面「飞书接入」同源（formatLarkNavSummary），不另造措辞。
   */
   const primaryNavGroups: SidebarNavGroup[] = onPrimaryNavChange ? [{ id: 'workspace', title: '工作台', items: [
-    { id: 'nav-tasks', label: '任务', hint: `${sessions.length} 个任务 · 创建与跟进`, Icon: ListTodo, active: primaryNav === 'tasks', onClick: () => { onPrimaryNavChange('tasks'); onClose(); } },
+    // 计数不含已归档，与任务中心「总览」统计卡同口径；sessions 里带着归档任务。
+    { id: 'nav-tasks', label: '任务', hint: `${sessions.filter(session => !session.archivedAt).length} 个任务 · 创建与跟进`, Icon: ListTodo, active: primaryNav === 'tasks', onClick: () => { onPrimaryNavChange('tasks'); onClose(); } },
     { id: 'nav-bots', label: '机器人', hint: formatLarkNavSummary({ bots: larkBots, listeningDisabled: larkListeningDisabled, loading: larkBotsLoading, failed: larkBotsFailed }), Icon: MessagesSquare, active: primaryNav === 'bots', onClick: () => { onPrimaryNavChange('bots'); onClose(); } },
     { id: 'nav-groups', label: '群聊', hint: '群内每个 Bot 的目录与触发', Icon: Users, active: primaryNav === 'groups', onClick: () => { onPrimaryNavChange('groups'); onClose(); } }
   ] }] : [];

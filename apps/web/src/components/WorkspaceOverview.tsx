@@ -18,6 +18,7 @@ import { fallbackRunTitle, sessionDisplayName } from '../run-summary';
 import { Badge, Button, Card, EmptyState, Skeleton, StatusBadge } from './primitives';
 import { createTaskAffordance } from './ui';
 import { formatLarkNavSummary, projectLarkBotStatus } from '../lark-status';
+import { shortcutDefinitions, workbenchViewShortcutIds } from '../useKeyboardShortcuts';
 
 type OverviewProps = {
   sessions: Session[];
@@ -50,6 +51,30 @@ const filterIcons: Record<WorkbenchView, typeof Radio> = {
   completed: CheckCircle2,
   archived: Archive
 };
+
+// 统计卡图标底色，与各视图在全站的状态语义同色（待你处理=attention、进行中=info…）。
+const filterTone: Record<WorkbenchView, string> = {
+  all: 'bg-action-soft text-action',
+  attention: 'bg-attention-soft text-warning',
+  active: 'bg-info-soft text-info',
+  completed: 'bg-success-soft text-success',
+  archived: 'bg-neutral-soft text-subtle'
+};
+
+const sectionDot: Record<WorkbenchTaskSection, string> = {
+  attention: 'bg-attention-solid',
+  active: 'bg-info-solid',
+  recent: 'bg-success-solid'
+};
+
+/**
+ * 总览里每个分区最多预览几条。23 条「待你处理」平铺时，「进行中」要滚两屏才看得到；
+ * 超出的部分由分区底部的「查看全部」切到对应筛选视图，筛选视图本身不截断。
+ */
+const SECTION_PREVIEW = 5;
+// 统计卡悬停提示对应的数字快捷键，键位取自快捷键定义表，不另写一份。
+const viewShortcutKeys = (view: WorkbenchView) => shortcutDefinitions.find(definition => definition.id === workbenchViewShortcutIds[view])?.keys;
+const sectionView: Record<WorkbenchTaskSection, WorkbenchView> = { attention: 'attention', active: 'active', recent: 'completed' };
 
 // 分区标题与副标题的唯一副本。副标题必须与 workbenchTaskSection 的实际归类一致。
 //
@@ -90,7 +115,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
     type="button"
     data-task-priority={section}
     onClick={() => onSelect(session.id)}
-    className="group grid min-h-[72px] w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 px-4 py-3 text-left hover:bg-hover sm:flex sm:items-center sm:gap-3 sm:px-5"
+    className="group grid min-h-[72px] w-full min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-x-3 gap-y-1 px-4 py-3 text-left transition-colors duration-fast ease-out hover:bg-muted sm:flex sm:items-center sm:gap-3 sm:px-5"
   >
     {/* 徽标文案与归档优先判据都来自 effectiveStatus，由 StatusBadge 单点消费；这里不再拼配色字符串。 */}
     <span className="mt-0.5 shrink-0 sm:mt-0"><StatusBadge session={session}/></span>
@@ -108,7 +133,7 @@ function TaskRow({ session, summary, agent, section, onSelect, selection }: {
       {/* runId 是契约 §2 点名允许 text-meta 的低频元数据。 */}
       <span className="hidden font-mono text-meta sm:block">{shortRunId(session)}</span>
     </span>
-    <ArrowRight aria-hidden="true" size={16} className="hidden shrink-0 text-subtle group-hover:text-action sm:block"/>
+    <ArrowRight aria-hidden="true" size={16} className="hidden shrink-0 text-subtle transition-[color,transform] duration-fast ease-out group-hover:translate-x-0.5 group-hover:text-action sm:block"/>
   </button></div>;
 }
 
@@ -208,7 +233,7 @@ function LarkBotsOverview({ bots, agents, loading, agentsLoading, listeningDisab
 
   return <Card as="aside" aria-label="协作入口" padding="sm">
     <div className="flex flex-wrap items-center justify-between gap-2">
-      <div className="flex min-w-0 items-center gap-2"><MessageSquare size={18} className="shrink-0 text-info"/><div><h2 className="text-body font-semibold text-primary">飞书机器人</h2><p className="text-caption text-secondary">{summary}</p></div></div>
+      <div className="flex min-w-0 items-center gap-3"><span aria-hidden="true" className="grid h-9 w-9 shrink-0 place-items-center rounded-md bg-info-soft text-info"><MessageSquare size={17}/></span><div><h2 className="text-body font-semibold text-primary">飞书机器人</h2><p className="text-caption text-secondary">{summary}</p></div></div>
       <Button variant={firstUse ? 'primary' : 'secondary'} onClick={firstUse ? onOpenLarkSetup : onManageBots} icon={firstUse ? <Plus size={15}/> : <Settings2 size={15}/>}>{firstUse ? '绑定飞书 Bot' : '管理飞书 Bot'}</Button>
     </div>
     {noAgents && <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning-border bg-warning-soft p-3 text-caption text-warning"><span>尚未检测到本机可用 Agent，机器人收到消息后无法执行任务。</span><Button variant="secondary" onClick={onOpenAgentSetup}>准备 Agent</Button></div>}
@@ -243,11 +268,11 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
   const canBulkArchive = Boolean(onBulkArchive) && !pending && view !== 'archived' && (selectable.length > 0 || selecting);
   const hasTasks = sections.length > 0 && ordered.length > 0;
 
-  return <div className="min-h-0 flex-1 overflow-y-auto bg-canvas">
+  return <div className="ui-hero-glow min-h-0 flex-1 overflow-y-auto bg-canvas">
     <section aria-labelledby="workspace-overview-title" className="mx-auto w-full max-w-[1120px] px-4 pb-12 pt-6 sm:px-8 sm:pt-8 lg:px-10">
-      <header className="flex flex-col gap-4 border-b border-default pb-5 sm:flex-row sm:items-end sm:justify-between">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
-          <p className="text-body font-medium text-secondary">任务中心</p>
+          <p className="text-caption font-semibold tracking-[.08em] text-action">任务中心</p>
           <h1 id="workspace-overview-title" className="mt-1 text-display font-semibold tracking-[-.035em] text-primary">今天需要推进什么？</h1>
           {/* 这句话里的数字必须来自 counts，与下面的筛选芯片同源；分区标题也数同一个集合。 */}
           <p className="mt-2 text-body text-secondary">{headlineFor({ loading, agentsLoading, counts, hasAgents: agents.length > 0 })}</p>
@@ -272,26 +297,47 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
         <LarkBotsOverview bots={larkBots} agents={agents} loading={larkBotsLoading} agentsLoading={agentsLoading} listeningDisabled={larkListeningDisabled} failed={larkBotsFailed} retrying={larkBotsRetrying} onRetry={() => onRetryLarkBots?.()} onOpenLarkSetup={onOpenLarkSetup} onOpenAgentSetup={onOpenAgentSetup} onManageBots={onManageBots}/>
       </div>
 
-      {/* 筛选与「批量清理」同一行：批量清理作用于当前筛选视图，放在一起才看得出它清理的是哪一批。 */}
-      <div className="mt-6 flex items-center gap-2">
-        <section aria-label="任务筛选" className="-mx-1 min-w-0 flex-1 overflow-x-auto px-1 pb-1">
-          <div className="flex min-w-max items-center gap-2">
+      {/*
+        统计卡就是筛选器：一眼看数、一点即筛，不再是一排数字很小的芯片。
+        可及名仍是「标签 + 计数」（如「已归档 2」），DOM 顺序也保持标签在前、计数在后。
+        外层 -m-1 p-1 给选中描边、焦点环和 hover 抬起留出位置，否则会被 overflow 裁掉。
+
+        批量清理作用于当前筛选视图，所以和说明行一起放在统计卡正下方。
+      */}
+      <section aria-label="任务筛选" className="mt-6">
+        <div className="-m-1 overflow-x-auto p-1">
+          <div className="flex min-w-max gap-3 sm:grid sm:min-w-0 sm:grid-cols-5">
             {workbenchViewOrder.map(id => {
               const Icon = filterIcons[id];
+              const selected = view === id;
+              const keys = viewShortcutKeys(id);
               return <button
                 type="button"
-                aria-pressed={view === id}
+                aria-pressed={selected}
                 onClick={() => onViewChange(id)}
                 key={id}
-                className={`flex min-h-10 items-center gap-2 rounded-md border px-3 text-body font-medium ${view === id ? 'border-action bg-action-soft text-action' : 'border-default bg-surface text-secondary hover:bg-hover hover:text-primary'}`}
-              ><Icon aria-hidden="true" size={15}/><span>{workbenchViewLabels[id]}</span><strong className="font-mono text-caption tabular-nums">{loading ? '—' : counts[id]}</strong></button>;
+                title={keys ? `${workbenchViewLabels[id]}（快捷键 ${keys}）` : undefined}
+                /*
+                  选中态是品牌色浅底 + 1px 描边，不是单独一圈粗描边：键盘操作后获得焦点的
+                  那张卡会出现 2px 焦点环，两者同形时看起来像同时选中了两张。
+                */
+                className={`flex min-h-10 w-32 flex-col items-stretch rounded-lg p-3 text-left shadow-elevated transition-[background-color,box-shadow,transform] duration-fast ease-out sm:w-auto sm:p-4 ${selected ? 'bg-action-soft ring-1 ring-action' : 'bg-surface hover:-translate-y-px hover:shadow-elevated-hover'}`}
+              >
+                <span className="flex items-center justify-between gap-2">
+                  <span className={`truncate text-caption font-medium ${selected ? 'text-action' : 'text-secondary'}`}>{workbenchViewLabels[id]}</span>
+                  <span aria-hidden="true" className={`grid h-7 w-7 shrink-0 place-items-center rounded-sm ${selected ? 'bg-surface text-action' : filterTone[id]}`}><Icon size={15}/></span>
+                </span>
+                <strong className="mt-1 text-display font-semibold tabular-nums tracking-[-.02em] text-primary">{loading ? '—' : counts[id]}</strong>
+              </button>;
             })}
-            {/* 待执行指令是「指令」口径，与芯片的「任务」口径不同，所以只作说明标签，不做可点击视图。 */}
-            {!loading && counts.queuedCommands > 0 && <span className="flex min-h-10 items-center rounded-md border border-dashed border-default px-3 text-caption text-subtle">另有待执行指令 {counts.queuedCommands} 条</span>}
           </div>
-        </section>
-        {canBulkArchive && !selecting && <div className="shrink-0 pb-1" aria-label="批量清理任务"><Button variant="secondary" aria-label="批量清理" title="批量清理" icon={<Archive size={15}/>} onClick={() => setSelecting(true)}><span className="hidden sm:inline">批量清理</span></Button></div>}
-      </div>
+        </div>
+        {((!loading && counts.queuedCommands > 0) || (canBulkArchive && !selecting)) && <div className="mt-3 flex min-h-10 items-center gap-2">
+          {/* 待执行指令是「指令」口径，与统计卡的「任务」口径不同，所以只作说明，不做可点击视图。 */}
+          {!loading && counts.queuedCommands > 0 && <span className="text-caption text-subtle">另有待执行指令 {counts.queuedCommands} 条</span>}
+          {canBulkArchive && !selecting && <div className="ml-auto shrink-0" aria-label="批量清理任务"><Button variant="ghost" aria-label="批量清理" title="批量清理" icon={<Archive size={15}/>} onClick={() => setSelecting(true)}><span className="hidden sm:inline">批量清理</span></Button></div>}
+        </div>}
+      </section>
 
       {canBulkArchive && selecting && <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-muted px-2 py-1" aria-label="批量清理任务">
         <label className="flex min-h-10 cursor-pointer items-center gap-2 px-2 text-caption text-secondary">
@@ -309,7 +355,11 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
           {pending
             ? <Card><Skeleton variant="block" lines={2}/></Card>
             : hasTasks
-              ? <div className="space-y-6">{sections.map(section => <section key={section.id} aria-labelledby={`task-section-${section.id}`}>
+              ? <div className="space-y-6">{sections.map(section => {
+                // 多选时不截断：「全选当前视图」会选中整个视图，被折叠的任务看不见也会被清理。
+                const truncated = view === 'all' && !selecting && section.sessions.length > SECTION_PREVIEW;
+                const rows = truncated ? section.sessions.slice(0, SECTION_PREVIEW) : section.sessions;
+                return <section key={section.id} aria-labelledby={`task-section-${section.id}`}>
                 {/*
                   分区标题不再挂条数。同一个数字此前在同屏出现三遍：页首那句散文
                   （headlineFor：「N 个任务需要你先处理，N 个正在进行」）、筛选芯片
@@ -325,11 +375,17 @@ export function WorkspaceOverview({ sessions, summaries, agents, loading, agents
                   那句话对谁都成立，因此不携带任何信息。
                 */}
                 <div className="mb-2">
-                  <h2 id={`task-section-${section.id}`} className="text-title font-semibold text-primary">{view === 'all' ? sectionCopy[section.id].title : selectedLabel}</h2>
+                  <h2 id={`task-section-${section.id}`} className="flex items-center gap-2 text-title font-semibold text-primary">{view === 'all' && <span aria-hidden="true" className={`h-2 w-2 shrink-0 rounded-full ${sectionDot[section.id]}`}/>}{view === 'all' ? sectionCopy[section.id].title : selectedLabel}</h2>
                   {view === 'all' && <p className="mt-0.5 text-caption text-secondary">{sectionCopy[section.id].description}</p>}
                 </div>
-                <Card padding="none" className="overflow-hidden">{section.sessions.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={onSelect} selection={selecting ? { checked: selected.includes(session.id), disabled: session.source === 'work_item', onChange: () => setSelectedIds(current => current.includes(session.id) ? current.filter(id => id !== session.id) : [...current, session.id]) } : undefined}/>)}</Card>
-              </section>)}</div>
+                <Card padding="none" className="overflow-hidden">
+                  {rows.map(session => <TaskRow key={session.id} session={session} summary={summaries[session.id]} agent={agents.find(agent => agent.id === session.agentId)} section={section.id} onSelect={onSelect} selection={selecting ? { checked: selected.includes(session.id), disabled: session.source === 'work_item', onChange: () => setSelectedIds(current => current.includes(session.id) ? current.filter(id => id !== session.id) : [...current, session.id]) } : undefined}/>)}
+                  {truncated && <button type="button" onClick={() => onViewChange(sectionView[section.id])} className="group flex min-h-10 w-full items-center justify-center gap-1.5 border-t border-subtle px-4 py-2.5 text-caption font-medium text-action transition-colors duration-fast ease-out hover:bg-muted">
+                    查看全部 {section.sessions.length} 个{sectionCopy[section.id].title}的任务<ArrowRight aria-hidden="true" size={14} className="transition-transform duration-fast ease-out group-hover:translate-x-0.5"/>
+                  </button>}
+                </Card>
+              </section>;
+              })}</div>
               : <TaskListEmpty firstUse={view === 'all' && sessions.length === 0} hasAgents={agents.length > 0} createTask={createTask}/>}
         </section>
       </div>
