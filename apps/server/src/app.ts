@@ -15,7 +15,7 @@ import { discoverAgentModels } from './agent-models.js';
 import { registerSystemRoutes, type SystemRoutesOptions } from './system-routes.js';
 import { registerAuthMiddleware, registerBrowserAuthRoutes, type AuthMiddlewareOptions } from './auth/auth.js';
 import { registerTerminalRoutes, type TerminalRouteAuth, type TerminalStreamProvider } from './terminal/terminal-ws.js';
-import { registerInstanceProxy, type PeerInstance } from './instance-proxy.js';
+import { isSharedInstanceRead, registerInstanceProxy, rewriteSharedSessionProxyUrl, type PeerInstance } from './instance-proxy.js';
 import { isRelayCapabilityRequest, registerRelayRoutes, type RelayRoutesOptions } from './relay-routes.js';
 import { registerFoundationManagementRoutes, type FoundationManagementOptions } from './foundation-routes.js';
 import { registerScheduleManagementRoutes, type ScheduleManagementOptions } from './schedule-routes.js';
@@ -94,7 +94,7 @@ export interface BuildAppOptions {
 
 export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOptions = {}) {
   // 分享页的实时流只能把分享 token 放进查询串（EventSource 带不了请求头），请求日志里抹掉它。
-  const app = Fastify({ logger: process.env.NODE_ENV !== 'test' && { serializers: { req: (request: FastifyRequest) => ({
+  const app = Fastify({ rewriteUrl: rewriteSharedSessionProxyUrl, logger: process.env.NODE_ENV !== 'test' && { serializers: { req: (request: FastifyRequest) => ({
     method: request.method, url: request.url.replace(/([?&]share=)[^&#]*/g, '$1[redacted]'), host: request.host, remoteAddress: request.ip, remotePort: request.socket?.remotePort
   }) } } });
   const streams = new Set<import('node:http').ServerResponse>();
@@ -129,6 +129,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     const userExempt = options.auth.exempt;
     registerAuthMiddleware(app, {
       ...options.auth,
+      isSharedSessionProxy: request => isSharedInstanceRead(request, options.instances ?? []),
       exempt: (method, pathname) =>
         !pathname.startsWith('/api/')
         || pathname === '/api/auth/status'
@@ -146,7 +147,7 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   registerWorkspaceGroupRoutes(app, options.workspaceGroups);
   registerSessionNameRoutes(app, runtime, options.sessionNames);
   if (options.terminal) registerTerminalRoutes(app, options.terminal);
-  registerInstanceProxy(app, options.instances ?? [], options.terminal?.auth);
+  await registerInstanceProxy(app, options.instances ?? [], options.terminal?.auth, options.lark?.config);
   registerRelayRoutes(app, { ...options.relay, runtime: options.relay?.runtime ?? runtime });
   await registerFoundationManagementRoutes(app, options.foundation);
   await registerIdentityPreflightRoutes(app, options.identityPreflight);

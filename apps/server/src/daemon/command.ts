@@ -1,4 +1,4 @@
-import { checkSqliteDriver, currentProcessIdentity, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
+import { assertBotProcessStartup, checkSqliteDriver, currentProcessIdentity, describeSqliteDriverFailure, type SqliteDriverCheck, type SqliteDriverCheckOptions } from '@dutydeck/storage';
 import Database from 'better-sqlite3';
 import { networkInterfaces } from 'node:os';
 import { isIP } from 'node:net';
@@ -58,6 +58,7 @@ const RESTART_PORT_ENV = 'DUTYDECK_DAEMON_RESTART_PORT';
 const RESTART_CWD_ENV = 'DUTYDECK_DAEMON_RESTART_CWD';
 const RESTART_DATABASE_ENV = 'DUTYDECK_DAEMON_RESTART_DATABASE';
 const RESTART_AUTH_ENV = 'DUTYDECK_DAEMON_RESTART_AUTH';
+const RESTART_BOT_APP_ID_ENV = 'DUTYDECK_DAEMON_RESTART_BOT_APP_ID';
 /** detached restart：父进程已 drain 完，被拉起的 restart 子进程据此静默跳过，不再往守护日志写告警。 */
 export const RESTART_DRAINED_ENV = 'DUTYDECK_DAEMON_RESTART_DRAINED';
 
@@ -323,7 +324,8 @@ export function daemonRestartOptions(options: CliOptions, previousState?: Daemon
           : undefined;
   return {
     ...options,
-    ...(options.cwd === undefined && (previousState?.cwd ?? env[RESTART_CWD_ENV]) ? { cwd: previousState?.cwd ?? env[RESTART_CWD_ENV] } : {}),
+    ...(options.botAppId === undefined && (previousState?.botAppId ?? env[RESTART_BOT_APP_ID_ENV]) ? { botAppId: previousState?.botAppId ?? env[RESTART_BOT_APP_ID_ENV] } : {}),
+    ...(options.cwd === undefined && (previousState?.agentCwd ?? previousState?.cwd ?? env[RESTART_CWD_ENV]) ? { cwd: previousState?.agentCwd ?? previousState?.cwd ?? env[RESTART_CWD_ENV] } : {}),
     ...(options.database === undefined && (previousState?.database ?? env[RESTART_DATABASE_ENV]) ? { database: previousState?.database ?? env[RESTART_DATABASE_ENV] } : {}),
     ...(options.host === undefined && (previousState?.host ?? env[RESTART_HOST_ENV]) ? { host: previousState?.host ?? env[RESTART_HOST_ENV] } : {}),
     ...(options.port === undefined && (previousState?.port ?? env[RESTART_PORT_ENV]) ? { port: String(previousState?.port ?? env[RESTART_PORT_ENV]) } : {}),
@@ -363,9 +365,14 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
   const invocationCwd = process.cwd();
   const foreground = options.foreground === true && !isDaemonChild(env);
   const inBand = isDaemonChild(env) || foreground;
-  const dir = inBand ? defaultDaemonDir(invocationCwd) : resolveDaemonDir(invocationCwd, env.HOME);
+  const isolated = options.botAppId !== undefined || env.DUTYDECK_BOT_APP_ID !== undefined || env.DUTYDECK_DAEMON_DIR !== undefined;
+  const dir = env.DUTYDECK_DAEMON_DIR ? resolve(env.DUTYDECK_DAEMON_DIR) : inBand || isolated ? defaultDaemonDir(invocationCwd) : resolveDaemonDir(invocationCwd, env.HOME);
+  if (env.DUTYDECK_DAEMON_DIR && dir !== defaultDaemonDir(resolve(dir, '../..'))) throw new Error('DUTYDECK_DAEMON_DIR must end with /.dutydeck/daemon');
+  if (inBand && dir !== defaultDaemonDir(invocationCwd)) throw new Error('Daemon WorkingDirectory must match DUTYDECK_DAEMON_DIR');
   const cwd = inBand ? invocationCwd : resolve(dir, '../..');
-  const database = resolve(cwd, options.database ?? '.dutydeck/dutydeck.db');
+  const database = resolve(cwd, options.database ?? env.DUTYDECK_DATABASE_URL ?? '.dutydeck/dutydeck.db');
+  const scope = assertBotProcessStartup(database, options.botAppId ?? env.DUTYDECK_BOT_APP_ID);
+  const botAppId = scope?.appId ?? options.botAppId;
 
   // 托管声明只给前台入口自己用：读完就从 process.env 删掉。否则它派生的 Agent 会继承，Agent 在沙箱里
   // 跑 `start --foreground` 时，沙箱 daemon 会把自己登记成由生产 unit 托管。
@@ -403,6 +410,9 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
       startedAt: meta.startedAt,
       cwd,
       database,
+      ...(scope ? { botProcess: true } : {}),
+      ...(botAppId ? { botAppId } : {}),
+      ...(options.cwd || env.DUTYDECK_DEFAULT_CWD ? { agentCwd: options.cwd ?? env.DUTYDECK_DEFAULT_CWD } : {}),
       ...addressFromCli(options, env),
       // 托管声明只认前台入口：detached 子进程可能从 systemd 下的上一代继承到这些环境变量。
       ...supervision
@@ -413,7 +423,7 @@ export async function daemonStart(options: CliOptions, handlers: DaemonCommandHa
     if (previous && !sameGeneration(previous, initialState)) return changedResult('start');
     writePidFile(dir, process.pid);
     writeState(dir, initialState);
-    writeLastDaemonDir(dir, env.HOME);
+    if (!scope && !isolated) writeLastDaemonDir(dir, env.HOME);
     await handlers.serve({ ...options, database }, () => markDaemonReady(dir, { ...addressFromCli(options, env), database }, meta.startedAt));
     const authEnabled = authEnabledFromCli(options, env);
     return { ok: true, action: 'start', running: true, pid: process.pid, authEnabled, authentication: authEnabled ? 'required' : 'disabled' };
@@ -490,8 +500,7 @@ function changedResult(action: DaemonCommandResult['action']): DaemonCommandResu
 }
 
 /** Recheck both the disk generation and process identity before every signal and poll. */
-export async function daemonStop(deps: DaemonCommandDeps = {}): Promise<DaemonCommandResult> {
-  const dir = resolveDaemonDir();
+export async function daemonStop(deps: DaemonCommandDeps = {}, dir = resolveDaemonDir()): Promise<DaemonCommandResult> {
   const state = readDaemonStatus(dir);
   // 受 systemd 托管（Restart=always）的 daemon 直接发信号会被立刻重拉，交给 systemctl 停。
   const supervised = await systemdSupervisor(dir, state, deps);
@@ -541,8 +550,19 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
   // Resolve the currently running daemon's directory so we can restart it in
   // the same working directory (important when the user runs `restart` from a
   // different directory than where the daemon was started).
-  const runningDir = resolveDaemonDir();
+  const expectedAppId = options.botAppId ?? env.DUTYDECK_BOT_APP_ID;
+  const runningDir = env.DUTYDECK_DAEMON_DIR ? resolve(env.DUTYDECK_DAEMON_DIR) : expectedAppId !== undefined ? defaultDaemonDir() : resolveDaemonDir();
   const previousState = readDaemonStatus(runningDir);
+  if (expectedAppId !== undefined && previousState && previousState.botAppId !== expectedAppId) {
+    return { ok: false, action: 'restart', running: inspectDaemon(runningDir).status === 'verified', error: 'BOT_PROCESS_SCOPE: target daemon does not match --bot-app-id' };
+  }
+  if (expectedAppId !== undefined) {
+    const database = resolve(runningDir, '../..', options.database ?? env.DUTYDECK_DATABASE_URL ?? previousState?.database ?? env[RESTART_DATABASE_ENV] ?? '.dutydeck/dutydeck.db');
+    try { assertBotProcessStartup(database, expectedAppId); }
+    catch (error) {
+      return { ok: false, action: 'restart', running: inspectDaemon(runningDir).status === 'verified', error: String(error) };
+    }
+  }
   // 受 systemd 托管：交给 systemctl restart，由 unit 的 ExecStart 拉起新一代。
   const supervised = await systemdSupervisor(runningDir, previousState, handlers);
   if (supervised && 'error' in supervised) return { ok: false, action: 'restart', running: true, pid: previousState?.pid, error: supervised.error };
@@ -559,8 +579,11 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
   }
   const previousCwd = previousState?.cwd;
   const restartOptions = daemonRestartOptions(options, previousState, env);
+  if (restartOptions.database) assertBotProcessStartup(restartOptions.database, restartOptions.botAppId);
   const restartEnv = {
     ...env,
+    ...(previousState?.botProcess ? { DUTYDECK_DAEMON_DIR: runningDir } : {}),
+    ...(restartOptions.botAppId ? { [RESTART_BOT_APP_ID_ENV]: restartOptions.botAppId, DUTYDECK_BOT_APP_ID: restartOptions.botAppId } : {}),
     ...(restartOptions.cwd ? { [RESTART_CWD_ENV]: restartOptions.cwd } : {}),
     ...(restartOptions.database ? { [RESTART_DATABASE_ENV]: restartOptions.database } : {}),
     ...(restartOptions.host ? { [RESTART_HOST_ENV]: restartOptions.host } : {}),
@@ -582,7 +605,7 @@ export async function daemonRestart(options: CliOptions, handlers: DaemonCommand
   // 父进程已完成 drain：daemonize 出的 restart 子进程继承此标记，静默跳过第二次等待检查，
   // 否则旧进程已停、它会往守护日志再写一行「守护进程未运行」，挤掉启动失败时的关键日志。
   (restartEnv as Record<string, string>)[RESTART_DRAINED_ENV] = '1';
-  const stopped = await daemonStop(handlers);
+  const stopped = await daemonStop(handlers, runningDir);
   if (!stopped.ok) {
     await drain.release?.();
     return { ...stopped, action: 'restart' };

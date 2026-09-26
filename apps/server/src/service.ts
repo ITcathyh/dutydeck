@@ -7,7 +7,7 @@ import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfigs } from './lark/config.js';
 import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfig, type AppConfig } from '@dutydeck/config';
-import { childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
+import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
 import { installationOwnerTaskActor, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
@@ -120,6 +120,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const config = loadConfig(options.env ?? process.env, PTY_AGENT_CONTRIBUTIONS);
   const refusal = unauthenticatedListenRefusal(config, options.env ?? process.env);
   if (refusal) throw new Error(refusal);
+  assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
   const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
   const setupCleanup: Array<() => unknown> = [];
   let closeResources = async () => {
@@ -129,6 +130,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     if (errors.length) throw new AggregateError(errors, 'Dutydeck setup cleanup failed');
   };
   try {
+  // Recheck under the runtime claim in case an offline split completed between inspection and open.
+  assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
   let localSecretProvider: LocalFileSecretProvider | undefined;
   try {
     localSecretProvider = new LocalFileSecretProvider(secretDirectoryForDatabase(config.databaseUrl), { createDirectory: true });

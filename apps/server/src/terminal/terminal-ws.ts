@@ -3,7 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import type { IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { extractBearerToken, extractCookie, isLoopbackHost, isSameOriginRequest } from '../auth/auth.js';
+import { extractBearerToken, extractCookie, isLoopbackHost, isSameOriginRequest, SHARE_TOKEN_QUERY_KEY } from '../auth/auth.js';
 
 /** 终端流句柄：stream + 进程退出订阅（runtime 侧从 driver onExit 合成） */
 export interface TerminalStreamHandle {
@@ -50,6 +50,7 @@ function errorMessage(error: unknown): string {
  * 拒绝时返回 rejectUpgrade 的参数，放行时返回 undefined。
  */
 export function upgradeRejection(request: IncomingMessage, auth: TerminalRouteAuth | undefined): [statusCode: number, statusText: string, message: string] | undefined {
+  if (new URLSearchParams(request.url?.split('?').slice(1).join('?')).has(SHARE_TOKEN_QUERY_KEY)) return [401, 'Unauthorized', 'share links cannot access terminals'];
   if (!auth) return undefined;
   const authMode = auth.mode ?? (auth.allowUnauthenticated ? 'local' : 'token');
   const protocol = 'encrypted' in request.socket && request.socket.encrypted === true ? 'https' : 'http';

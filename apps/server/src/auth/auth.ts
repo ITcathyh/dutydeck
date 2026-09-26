@@ -277,6 +277,8 @@ export interface AuthMiddlewareOptions {
   getPasswordHash?(): Promise<string | null>;
   /** 分享链接签名密钥；提供时单个会话的读接口凭分享 token 放行 */
   getShareSecret?(): Promise<string | null>;
+  /** Exact read-only peer route; the destination must validate its own share secret. */
+  isSharedSessionProxy?(request: FastifyRequest): boolean;
   /** 登录失败限流；不传则每个 app 自建一个 */
   loginThrottle?: LoginThrottle;
 }
@@ -364,15 +366,21 @@ export function isLoopbackHost(host: string | undefined): boolean {
 
 /**
  * 注册访问认证中间件（Fastify onRequest hook）。判定顺序：
- * 1. localOnly → 仅 loopback Host 且（若有）Origin 精确同源时放行
- * 2. exempt(method, pathname) 为 true → 放行
- * 3. 单个会话的读接口带着绑定该会话的分享 token → 放行
- * 4. 否则取 presented token（Authorization: Bearer 头或 HttpOnly cookie），
+ * 1. local/open 模式保留 Host/Origin 保护；带 share 的请求必须验证分享能力
+ * 2. 无 share 时，local/open 或 exempt(method, pathname) 为 true → 放行
+ * 3. 否则取 presented token（Authorization: Bearer 头或 HttpOnly cookie），
  *    与 getToken() 的当前 token 做 timing-safe 比对，cookie 也可以是密码登录签发的会话；未配置/缺失/不匹配 → 401
  */
 export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddlewareOptions): void {
   app.addHook('onRequest', async (request: FastifyRequest, reply: FastifyReply) => {
     const mode = accessMode(options);
+    const hasShare = Object.prototype.hasOwnProperty.call(request.query ?? {}, SHARE_TOKEN_QUERY_KEY);
+    const checkShare = async () => {
+      if (!hasShare) return;
+      if (!options.isSharedSessionProxy?.(request) && !await isSharedSessionRead(request, options)) {
+        return reply.code(401).send(UNAUTHORIZED_PAYLOAD);
+      }
+    };
     if (mode === 'local') {
       if (!isLoopbackHost(request.headers.host)) {
         return reply.code(403).send({ error: { code: 'HOST_NOT_ALLOWED', message: 'Local-only requests require a loopback Host' } });
@@ -380,7 +388,7 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
       if (request.headers.origin && !isSameOriginRequest({ origin: request.headers.origin, host: request.headers.host }, request.protocol)) {
         return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dutydeck' } });
       }
-      return;
+      return checkShare();
     }
     if (mode === 'open') {
       // --no-auth removes the credential gate, not browser same-origin
@@ -388,11 +396,12 @@ export function registerAuthMiddleware(app: FastifyInstance, options: AuthMiddle
       if (request.headers.origin && !isSameOriginRequest(request.headers, request.protocol)) {
         return reply.code(403).send({ error: { code: 'ORIGIN_NOT_ALLOWED', message: 'Request origin does not match Dutydeck' } });
       }
-      return;
+      return checkShare();
     }
+    // A share-bearing request never inherits administrator or loopback authority.
+    if (hasShare) return checkShare();
     const pathname = new URL(request.url, 'http://dutydeck.local').pathname;
     if (options.exempt?.(request.method, pathname)) return;
-    if (await isSharedSessionRead(request, options)) return;
     const bearer = extractBearerToken(request.headers.authorization);
     const cookie = extractCookie(request.headers.cookie);
     if (!bearer && cookie && !isSameOriginRequest(request.headers, request.protocol)) {
