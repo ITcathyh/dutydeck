@@ -886,6 +886,7 @@ export class LarkMemoryPipeline {
     await this.assertClaim();
     let taskId: string | undefined;
     let buffered: AgentEvent[] = [];
+    let receiving = true;
     let resolveStatus!: (status: string) => void;
     const status = new Promise<string>(resolve => { resolveStatus = resolve; });
 
@@ -897,12 +898,19 @@ export class LarkMemoryPipeline {
     };
     // dispatch 返回前就可能有事件到达，taskId 未知时先缓冲，拿到后回放。
     const unsubscribe = this.options.runtime.subscribe(session.id, event => {
+      if (!receiving) return;
       if (!taskId) buffered.push(event);
       else receive(event);
     });
+    const cleanup = () => {
+      if (!receiving) return;
+      receiving = false;
+      buffered = [];
+      unsubscribe();
+    };
 
     const signal = this.runContext.getStore()?.signal;
-    const expired = () => resolveStatus('__timeout__');
+    const expired = () => { resolveStatus('__timeout__'); cleanup(); };
     signal?.addEventListener('abort', expired, { once: true });
     if (signal?.aborted) expired();
     try {
@@ -924,7 +932,7 @@ export class LarkMemoryPipeline {
       return output;
     } finally {
       signal?.removeEventListener('abort', expired);
-      unsubscribe();
+      cleanup();
     }
   }
 

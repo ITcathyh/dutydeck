@@ -517,6 +517,9 @@ describe('Lark memory pipeline through the coordinator', () => {
     // 先关自动触发，攒够 3 轮后手动跑一次提取，好在它执行期间再塞 3 轮进来。
     const manual = await h.setConfig({ memoryAutoExtract: false });
     await h.runTurns(3, manual);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).pendingTurns).toHaveLength(3);
+    });
     const extraction = h.pipeline.runExtraction(scope);
     await h.runTurns(3, manual);
     expect(await extraction).toMatchObject({ kind: 'extraction', ok: true });

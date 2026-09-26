@@ -53,6 +53,52 @@ async function harness(status = 'running', timeoutMs = 30, options: { archive?: 
 }
 
 describe('memory recovery and timeout boundaries', () => {
+  it.each(['dispatch', 'interrupt'] as const)('unsubscribes on timeout while %s is pending and still cleans up the late task', async phase => {
+    const h = await harness(phase === 'dispatch' ? 'queued' : 'running');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const unsubscribe = vi.fn();
+    h.runtime.subscribe.mockReturnValue(unsubscribe);
+    if (phase === 'dispatch') {
+      h.runtime.dispatch.mockImplementation(async () => {
+        await gate;
+        h.setTasks([h.task('queued')]);
+        return { id: 'task_memory', status: 'queued' };
+      });
+    } else {
+      h.runtime.interrupt.mockImplementation(async () => {
+        await gate;
+        h.setTasks([h.task('interrupted')]);
+        return { interrupted: true };
+      });
+    }
+    try {
+      expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_TIMEOUT' });
+      expect(unsubscribe).toHaveBeenCalledOnce();
+      expect((await h.store.getState(scope)).running?.token).toBeTruthy();
+      expect(await h.pipeline.requestConsolidation(scope)).toBe('running');
+      // An already queued callback can still arrive after unsubscribe; it must not be buffered or read.
+      const readEvent = vi.fn(() => 'task');
+      const late = { get type() { return readEvent(); } } as AgentEvent;
+      const receive = h.runtime.subscribe.mock.calls[0]![1];
+      for (let index = 0; index < 10; index++) receive(late);
+      release();
+      await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+      expect(readEvent).not.toHaveBeenCalled();
+      expect(unsubscribe).toHaveBeenCalledOnce();
+      if (phase === 'dispatch') {
+        expect(h.runtime.cancelQueued).toHaveBeenCalledWith(h.session.id, 'task_memory', installationOwnerTaskActor, 3);
+        expect(h.runtime.interrupt).not.toHaveBeenCalled();
+      } else {
+        expect(h.runtime.interrupt).toHaveBeenCalledExactlyOnceWith(h.session.id, 'task_memory', installationOwnerTaskActor);
+        expect(h.runtime.cancelQueued).not.toHaveBeenCalled();
+      }
+    } finally {
+      release();
+      await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+    }
+  });
+
   it.each(['startup', 'preparation'] as const)('bounds pending %s and keeps its live claim until late cleanup', async phase => {
     let now = Date.now();
     const h = await harness('failed', 30, { now: () => new Date(now), staleRunningMs: 50 });
