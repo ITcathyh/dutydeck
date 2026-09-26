@@ -21,7 +21,7 @@
  */
 import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
 import { installationOwnerTaskActor, RuntimeError, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
-import type { StoredLarkConfig } from './config.js';
+import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import {
   isLarkGroupMemoryPool,
   isLarkMemoryId,
@@ -379,7 +379,7 @@ export class LarkMemoryPipeline {
   /** 每个 completed 轮次记账一次，达到阈值时后台开跑；绝不阻塞调用方。 */
   async onTurnCompleted(scope: LarkMemoryScope, turn: { sessionId: string; taskId: string; senderId?: string; senderKind?: 'human' | 'bot'; sourceMessageId?: string }): Promise<void> {
     const config = await this.options.readConfig(scope.appId);
-    if (!config || config.memoryEnabled === false) return;
+    if (!config || !larkMemoryEnabled(config)) return;
 
     const completedAt = this.now().toISOString();
     const next = await this.options.store.mutateState(scope, current => {
@@ -404,7 +404,7 @@ export class LarkMemoryPipeline {
   /** `/memory consolidate`：先补一次提取（若有待提取轮次），再整理。 */
   async requestConsolidation(scope: LarkMemoryScope, options: { actorId?: string } = {}): Promise<'started' | 'running' | 'disabled'> {
     const config = await this.options.readConfig(scope.appId);
-    if (!config || config.memoryEnabled === false) return 'disabled';
+    if (!config || !larkMemoryEnabled(config)) return 'disabled';
     const claim = await this.claim(scope, 'consolidation');
     if (!claim) return 'running';
 
@@ -423,7 +423,7 @@ export class LarkMemoryPipeline {
 
   async runExtraction(scope: LarkMemoryScope): Promise<LarkMemoryState['lastRun']> {
     const config = await this.options.readConfig(scope.appId);
-    if (!config || config.memoryEnabled === false) return undefined;
+    if (!config || !larkMemoryEnabled(config)) return undefined;
     const claim = await this.claim(scope, 'extraction');
     if (!claim) return undefined;
     try { return await this.executeExtraction(scope, config); }
@@ -432,7 +432,7 @@ export class LarkMemoryPipeline {
 
   async runConsolidation(scope: LarkMemoryScope): Promise<LarkMemoryState['lastRun']> {
     const config = await this.options.readConfig(scope.appId);
-    if (!config || config.memoryEnabled === false) return undefined;
+    if (!config || !larkMemoryEnabled(config)) return undefined;
     const claim = await this.claim(scope, 'consolidation');
     if (!claim) return undefined;
     try { return await this.executeConsolidation(scope, config); }
@@ -503,7 +503,7 @@ export class LarkMemoryPipeline {
   private async drain(scope: LarkMemoryScope) {
     for (let pass = 0; pass < larkMemoryPipelineRules.drainPasses; pass++) {
       const config = await this.options.readConfig(scope.appId);
-      if (!config || config.memoryEnabled === false || config.memoryAutoExtract === false) return;
+      if (!config || !larkMemoryEnabled(config) || config.memoryAutoExtract === false) return;
       let ran = false;
 
       if (this.dueForExtraction(await this.options.store.getState(scope))) {

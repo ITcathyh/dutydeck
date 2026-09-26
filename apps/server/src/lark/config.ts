@@ -68,7 +68,7 @@ export interface StoredLarkConfig {
   listening: boolean;
   groupToolsEnabled: boolean;
   groupToolsAllowSend: boolean;
-  /** 会话记忆开关，默认开启；false 时不注入记忆，命令与工具不可用。 */
+  /** 会话记忆开关，Tag 模式缺省开启，其余缺省关闭；false 时不注入记忆，命令与工具不可用。 */
   memoryEnabled?: boolean;
   /** 后台自动提取与整理开关，默认开启；false 时只有 /memory consolidate 能手动触发。 */
   memoryAutoExtract?: boolean;
@@ -405,6 +405,9 @@ const normalizeGroupReplyMode = (value: unknown): StoredLarkConfig['groupReplyMo
 const normalizeDefaultGroupParticipation = (value: unknown): NonNullable<StoredLarkConfig['defaultGroupParticipation']> =>
   value === 'observe' || value === 'selective' ? value : 'off';
 
+export const larkMemoryEnabled = (config: Pick<StoredLarkConfig, 'memoryEnabled' | 'defaultGroupParticipation'>): boolean =>
+  config.memoryEnabled ?? normalizeDefaultGroupParticipation(config.defaultGroupParticipation) === 'selective';
+
 const normalizeBrand = (value: unknown): 'feishu' | 'lark' | undefined =>
   value === 'feishu' || value === 'lark' ? value : undefined;
 
@@ -530,7 +533,7 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     listening: parsed.listening === true,
     groupToolsEnabled: parsed.groupToolsEnabled === true,
     groupToolsAllowSend: parsed.groupToolsEnabled === true && parsed.groupToolsAllowSend === true,
-    memoryEnabled: parsed.memoryEnabled !== false,
+    memoryEnabled: larkMemoryEnabled(parsed),
     memoryAutoExtract: parsed.memoryAutoExtract !== false,
     ...(parsed.memoryAgentId?.trim() ? { memoryAgentId: parsed.memoryAgentId.trim() } : {}),
     ...(parsed.memoryModel?.trim() ? { memoryModel: parsed.memoryModel.trim() } : {}),
@@ -629,7 +632,7 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   activeListening: activeAppIds.has(config.appId),
   groupToolsEnabled: config.groupToolsEnabled,
   groupToolsAllowSend: config.groupToolsAllowSend,
-  memoryEnabled: config.memoryEnabled !== false,
+  memoryEnabled: larkMemoryEnabled(config),
   memoryAutoExtract: config.memoryAutoExtract !== false,
   ...(config.memoryAgentId ? { memoryAgentId: config.memoryAgentId } : {}),
   ...(config.memoryModel ? { memoryModel: config.memoryModel } : {}),
@@ -703,7 +706,7 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   const listening = input.listening ?? current?.listening ?? false;
   const groupToolsEnabled = input.groupToolsEnabled ?? current?.groupToolsEnabled ?? false;
   const groupToolsAllowSend = groupToolsEnabled && (input.groupToolsAllowSend ?? current?.groupToolsAllowSend ?? false);
-  const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? true;
+  const memoryEnabled = input.memoryEnabled ?? current?.memoryEnabled ?? (input.defaultGroupParticipation === 'selective');
   const memoryAutoExtract = input.memoryAutoExtract ?? current?.memoryAutoExtract ?? true;
   const memoryAgentId = input.memoryAgentId === undefined ? current?.memoryAgentId : input.memoryAgentId.trim() || undefined;
   const memoryModel = input.memoryModel === undefined ? current?.memoryModel : input.memoryModel.trim() || undefined;

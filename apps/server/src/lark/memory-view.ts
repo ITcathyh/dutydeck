@@ -14,7 +14,6 @@ import {
   type LarkMemorySource,
   type LarkMemoryState,
   type LarkMemoryStore,
-  type LarkMemoryTurnView
 } from './memory.js';
 
 const sourceLabels: Record<LarkMemorySource, string> = {
@@ -208,45 +207,11 @@ export function renderMemoryIndex(
   return { text: `${selfText}\n\n${sharedSection}`, overBudget, omitted, ids };
 }
 
-/** 结果卡「本轮记忆」区的 element_id 前缀；删掉一条后按它整段替换。 */
+/** 旧结果卡「本轮记忆」区的 element_id 前缀。 */
 export const larkTurnMemoryElementPrefix = 'memory_turn';
-/** 结果卡上最多列几条；超出只给总数，全部在 Web 任务详情与 /memory 里。 */
-export const larkTurnMemoryCardRows = 5;
-
+/** 识别已交付的旧结果卡中的记忆区，重绘时移除。 */
 export const isLarkTurnMemoryElement = (element: { element_id?: unknown }) =>
   typeof element.element_id === 'string' && element.element_id.startsWith(larkTurnMemoryElementPrefix);
-
-/**
- * 结果卡上的「本轮记忆」：先列本轮新记下的，再列本轮用到的，每条一行、带删除按钮；已删除的不再列出。
- * 条目内容放 plain_text，不当 markdown 渲染。按钮 value 只带本轮 taskId 与记忆编号：
- * 回调端按记录核对它属于这一轮，再走 /forget 同一道权限门。没有可列的条目时返回空数组。
- */
-export function renderLarkTurnMemoryElements(view: Pick<LarkMemoryTurnView, 'record' | 'shared' | 'injected' | 'written'>): Array<Record<string, unknown>> {
-  const written = view.written.filter(entry => !entry.deletedAt);
-  const injected = view.injected.filter(entry => !entry.deletedAt);
-  const rows = [...written.map(entry => ({ entry, kind: '新记下' })), ...injected.map(entry => ({ entry, kind: '用到' }))];
-  if (!rows.length) return [];
-  const counts = [injected.length ? `用到 ${injected.length} 条` : '', written.length ? `新记下 ${written.length} 条` : ''].filter(Boolean).join(' · ');
-  const hidden = rows.length - larkTurnMemoryCardRows;
-  return [
-    {
-      tag: 'markdown', element_id: larkTurnMemoryElementPrefix, margin: '8px 0px 0px 0px',
-      content: `**本轮记忆**：${counts}${hidden > 0 ? `，只列前 ${larkTurnMemoryCardRows} 条（全部见 Web 任务详情或 /memory）` : ''}\n删除后，之后的任务不再带上这条${view.shared ? '群共享' : ''}记忆；后台提取的新记忆稍后在 /memory 里可见。`
-    },
-    ...rows.slice(0, larkTurnMemoryCardRows).map(({ entry, kind }, index) => ({
-      tag: 'column_set', element_id: `${larkTurnMemoryElementPrefix}_${index}`, flex_mode: 'none', horizontal_spacing: '8px', vertical_align: 'center', margin: '4px 0px',
-      columns: [
-        { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', elements: [{
-          tag: 'div', text: { tag: 'plain_text', content: `${kind} · ${entry.id} · ${clipLine(entry.content, 80)}`, lines: 2 }, margin: '0px'
-        }] },
-        { tag: 'column', width: 'auto', vertical_align: 'center', elements: [{
-          tag: 'button', type: 'text', text: { tag: 'plain_text', content: '删除' },
-          behaviors: [{ type: 'callback', value: { dutydeck_memory_forget: entry.id, task_id: view.record.taskId, session_id: view.record.sessionId } }]
-        }] }
-      ]
-    }))
-  ];
-}
 
 /**
  * 渲染单个主题的完整详情文件 topics/<topic>.md。

@@ -1,8 +1,8 @@
-// 每轮任务的记忆记录：注入了哪些（派发时记下）、新记下了哪些（按条目 taskId 反查），以及结果卡上的「本轮记忆」区。
+// 每轮任务的记忆记录：注入了哪些（派发时记下）、新记下了哪些（按条目 taskId 反查）。
 import { describe, expect, it } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import { larkMemoryLimits, larkMemoryScope, LarkMemoryStore, type LarkMemoryEntry } from './memory.js';
-import { isLarkTurnMemoryElement, larkTurnMemoryCardRows, renderLarkTurnMemoryElements, renderMemoryIndex } from './memory-view.js';
+import { renderMemoryIndex } from './memory-view.js';
 
 const groups = larkMemoryScope('cli_bot', 'oc_group', 'group');
 const state = { v: 1 as const, turnsSinceExtraction: 0, turnsSinceConsolidation: 0 };
@@ -69,34 +69,5 @@ describe('turn records', () => {
     expect(await memory.turns('ses_1')).toEqual([]);
     await memory.recordTurn(groups, { taskId: 'task_1', sessionId: 'ses_1', injected: [] });
     expect((await memory.turns('ses_1')).map(view => view.record.taskId)).toEqual(['task_1']);
-  });
-});
-
-describe('result card memory section', () => {
-  const record = { v: 1 as const, taskId: 'task_1', sessionId: 'ses_1', appId: 'cli_bot', chatId: 'oc_group', pool: 'groups', injected: [], at: '2026-09-25T00:00:00.000Z' };
-
-  it('lists new memories first, then used ones, each with a delete button carrying only the turn and memory ids', () => {
-    const elements = renderLarkTurnMemoryElements({
-      record, shared: true,
-      injected: [entry('mem_0000000a', '回复统一用中文', { source: 'user' }), entry('mem_0000000b', '已删的', { deletedAt: '2026-09-25T01:00:00.000Z' })],
-      written: [entry('mem_0000000c', '部署脚本在 scripts/deploy.sh\n第二行')]
-    });
-    expect(elements.every(isLarkTurnMemoryElement)).toBe(true);
-    const text = JSON.stringify(elements);
-    expect(elements[0]).toMatchObject({ tag: 'markdown', element_id: 'memory_turn' });
-    expect(String(elements[0]!.content)).toContain('**本轮记忆**：用到 1 条 · 新记下 1 条');
-    expect(String(elements[0]!.content)).toContain('群共享记忆');
-    expect(elements).toHaveLength(3);
-    expect(text.indexOf('新记下 · mem_0000000c · 部署脚本在 scripts/deploy.sh 第二行')).toBeLessThan(text.indexOf('用到 · mem_0000000a'));
-    expect(text).not.toContain('mem_0000000b');
-    expect(text).toContain(JSON.stringify({ dutydeck_memory_forget: 'mem_0000000c', task_id: 'task_1', session_id: 'ses_1' }));
-  });
-
-  it('shows at most five rows and the totals when the turn used more', () => {
-    const injected = Array.from({ length: 7 }, (_, index) => entry(`mem_0000001${index}`, `第 ${index} 条`));
-    const elements = renderLarkTurnMemoryElements({ record, shared: false, injected, written: [] });
-    expect(elements).toHaveLength(1 + larkTurnMemoryCardRows);
-    expect(String(elements[0]!.content)).toContain(`用到 7 条，只列前 ${larkTurnMemoryCardRows} 条（全部见 Web 任务详情或 /memory）`);
-    expect(renderLarkTurnMemoryElements({ record, shared: false, injected: [], written: [] })).toEqual([]);
   });
 });

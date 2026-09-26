@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { isLarkTurnMemoryElement, renderLarkTurnMemoryElements } from './memory-view.js';
+import { isLarkTurnMemoryElement } from './memory-view.js';
 import type { ChannelMapping, PublicSessionSchedule, Session, VerificationResponse } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { readLarkConfig, type StoredLarkConfig } from './config.js';
@@ -16,7 +16,7 @@ import { larkCardChannel, withoutLeadingBotMention, larkTaskTitle, larkScopeCont
 import { LarkCoordinatorCore } from './coordinator-core.js';
 
 // 飞书消息协调器 · 卡片生命周期：卡片映射的持久化与还原、结果卡的重绘与卡上操作、置顶、
-// 自动验证与本轮记忆在结果卡上的呈现。
+// 自动验证与结果卡上的操作。
 
 /** 重复请求判定用的请求原文：去掉开头的 @机器人，合并空白。 */
 const larkRequestText = (prompt: string, botName?: string) => withoutLeadingBotMention(prompt, botName).replace(/\s+/g, ' ');
@@ -193,7 +193,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     const restored = this.restoredCardTask(config, mapping, saved);
     const verification = await this.verificationView(restored, config, saved.state as LarkCardActionState);
     const elements = [
-      ...resultElements.filter(item => !['workflow_accept', 'workflow_changes', 'workflow_result_status', LARK_VERIFICATION_ELEMENT_ID].includes(String(item.element_id))),
+      ...resultElements.filter(item => !isLarkTurnMemoryElement(item) && !['workflow_accept', 'workflow_changes', 'workflow_result_status', LARK_VERIFICATION_ELEMENT_ID].includes(String(item.element_id))),
       ...(verification.element ? [verification.element] : []),
       ...await this.workflows!.result(record, record.cardId, saved.final_attachment_message_id ? [saved.final_attachment_message_id] : undefined)];
     await this.service.update({ cardKind: 'result', messageId: record.cardId, taskId: mapping.externalId, taskName: saved.task_name, state: 'completed', readOnly: true, elements,
@@ -639,7 +639,7 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     if (!task.finalCardInput || !task.finalMessageId || !task.finalElements) return;
     const verification = await this.verificationView(task, config, String(task.finalCardInput.state) as LarkCardActionState);
     const elements = [
-      ...task.finalElements.filter(item => item.element_id !== LARK_VERIFICATION_ELEMENT_ID),
+      ...task.finalElements.filter(item => !isLarkTurnMemoryElement(item) && item.element_id !== LARK_VERIFICATION_ELEMENT_ID),
       ...(verification.element ? [verification.element] : [])
     ];
     await this.service.update({
@@ -652,36 +652,25 @@ export abstract class LarkCoordinatorCards extends LarkCoordinatorCore {
     await this.saveCardTask(task).catch(error => this.log.warn({ error, taskId: task.id }, '验证状态已更新到卡片，持久化待对账补齐'));
   }
 
-  /** 结果卡上的「本轮记忆」区；关闭记忆、没有记录或读取失败时不渲染，不影响结果交付。 */
-  protected async turnMemoryElements(config: StoredLarkConfig, sessionId?: string, runtimeTaskId?: string) {
-    if (config.memoryEnabled === false || !this.memory || !sessionId || !runtimeTaskId) return [];
-    const view = await this.memory.turn(sessionId, runtimeTaskId).catch(error => {
-      this.log.warn({ error, runtimeTaskId }, '读取本轮会话记忆失败，结果卡不列本轮记忆');
-      return undefined;
-    });
-    return view ? renderLarkTurnMemoryElements(view) : [];
-  }
-
   /**
-   * 删掉一条记忆后重绘结果卡上的「本轮记忆」区，其余内容原样保留；卡片不在内存里（例如重启之后）时不重绘。
+   * 旧结果卡的记忆按钮删除一条记忆后，重绘卡片并清掉旧记忆区；卡片不在内存里时不重绘。
    * 验证状态行与能力表按当前记录重算、验证行原地替换：交付之后验证重绘过的话，交付时的能力表已经和验证行对不上。
    */
   protected async refreshResultMemory(task: LarkTask, config: StoredLarkConfig) {
     if (!task.finalCardInput || !task.finalMessageId || !task.finalElements) return;
     const state = String(task.finalCardInput.state);
-    const memory = await this.turnMemoryElements(config, task.sessionId, task.runtimeTaskId);
     const verification = await this.verificationView(task, config, state as LarkCardActionState);
     const kept = task.finalElements.filter(item => !isLarkTurnMemoryElement(item));
     const row = kept.findIndex(item => item.element_id === LARK_VERIFICATION_ELEMENT_ID);
     if (row >= 0) kept.splice(row, 1, ...(verification.element ? [verification.element] : []));
-    // 交付时没有验证行、现在有了（例如之后才配了验证命令）：按交付时的位置补在本轮记忆区前面。
+    // 交付时没有验证行、现在有了（例如之后才配了验证命令）：按交付时的位置补上。
     const added = row < 0 && verification.element ? [verification.element] : [];
     const mention = kept.findIndex(item => item.element_id === 'group_mention');
-    const elements = mention < 0 ? [...kept, ...added, ...memory] : [...kept.slice(0, mention), ...added, ...memory, ...kept.slice(mention)];
+    const elements = mention < 0 ? [...kept, ...added] : [...kept.slice(0, mention), ...added, ...kept.slice(mention)];
     await this.service.update({ ...task.finalCardInput, messageId: task.finalMessageId, elements,
       capabilities: { ...this.capabilitiesForTask(task), ...verification.capabilities, ...await this.resultActionCapabilities(task, config, state) } });
     task.finalElements = elements;
-    await this.saveCardTask(task).catch(error => this.log.warn({ error, taskId: task.id }, '结果卡的本轮记忆已更新，持久化待对账补齐'));
+    await this.saveCardTask(task).catch(error => this.log.warn({ error, taskId: task.id }, '结果卡已更新，持久化待对账补齐'));
   }
 
   /**

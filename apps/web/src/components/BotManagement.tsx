@@ -56,7 +56,7 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     listening: bot.listening ?? true,
     groupToolsEnabled: bot.groupToolsEnabled ?? false,
     groupToolsAllowSend: bot.groupToolsAllowSend ?? false,
-    memoryEnabled: bot.memoryEnabled ?? true,
+    memoryEnabled: bot.memoryEnabled ?? (bot.defaultGroupParticipation === 'selective'),
     memoryAutoExtract: bot.memoryAutoExtract ?? true,
     memoryAgentId: bot.memoryAgentId ?? '',
     memoryModel: bot.memoryModel ?? '',
@@ -82,7 +82,7 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   if ((original.listening ?? true) !== draft.listening) return true;
   if ((original.groupToolsEnabled ?? false) !== draft.groupToolsEnabled) return true;
   if ((original.groupToolsAllowSend ?? false) !== draft.groupToolsAllowSend) return true;
-  if ((original.memoryEnabled ?? true) !== draft.memoryEnabled) return true;
+  if ((original.memoryEnabled ?? (original.defaultGroupParticipation === 'selective')) !== draft.memoryEnabled) return true;
   if ((original.memoryAutoExtract ?? true) !== draft.memoryAutoExtract) return true;
   if ((original.memoryAgentId ?? '') !== draft.memoryAgentId) return true;
   if ((original.memoryModel ?? '') !== draft.memoryModel) return true;

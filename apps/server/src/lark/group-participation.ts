@@ -2,7 +2,7 @@ import { RuntimeError, DECISION_BUDGET_GATE, DECISION_WINDOW_LIMIT, USAGE_CAP_GA
 import { BOT_LOOP_DEPTH_LIMIT, BOT_LOOP_GATE, BOT_TURN_LIMIT_PER_HOUR, BOT_TURN_RECORD, countBotTurnUsage } from '@dutydeck/shared';
 import { createHash } from 'node:crypto';
 import type { CollaborationRepository, CollaborationScope, CollaborationFollowup, CollaborationSnapshot, CollaborationObservation, CollaborationDecision, CollaborationAction, CollaborationTeamContext, CollaborationParticipationMode } from '@dutydeck/shared';
-import type { StoredLarkConfig } from './config.js';
+import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import type { LarkMessageEvent } from './listener.js';
 import type { LarkCardService } from './service.js';
 import { parseLarkMessageContent } from './message-content.js';
@@ -86,7 +86,7 @@ export class LarkGroupParticipation {
     if (description) materials.push(description);
     if (this.options.readMemory && await withLarkContextReadTimeout(this.options.authorize(scope, undefined, 'observe'), '群记忆读取授权', teamContextTimeoutMs)) {
       const config = await this.options.readConfig(scope.appId, scope.chatId);
-      if (config?.memoryEnabled !== false) {
+      if (config && larkMemoryEnabled(config)) {
         let text = ''; const missing: string[] = [];
         try { text = await withLarkContextReadTimeout(this.options.readMemory(scope), '群记忆读取', teamContextTimeoutMs); } catch { missing.push('memory_unavailable'); }
         if (text.length > 16000) missing.push('memory_truncated');

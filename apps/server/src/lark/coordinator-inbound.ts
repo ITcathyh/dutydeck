@@ -7,7 +7,7 @@ import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dash
 import { isLarkGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList } from './memory.js';
 import type { PolicyAction, Session } from '@dutydeck/shared';
 import { executeScheduleCommand } from './schedule-command.js';
-import { larkExecutionIdentity, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
+import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { LarkServiceError } from './service.js';
 import { steeringOutcomeText, renderLarkRecordExport, type LarkCardElement } from './card-renderer.js';
@@ -859,7 +859,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       // 记忆命令的授权就是命令层的白名单门（发言人能在本聊天用命令，就能维护本聊天可见的记忆），
       // 作用域由当前聊天决定：群聊是本机器人的群共享池，私聊是自己的池；不接受参数指定别的聊天。
       if (route.command === 'remember' || route.command === 'memory' || route.command === 'forget') {
-        if (config.memoryEnabled === false) {
+        if (!larkMemoryEnabled(config)) {
           await replyCard(`/${route.command} 未执行`, '本机器人已关闭会话记忆。', { failed: true });
           return 'handled';
         }
@@ -1440,7 +1440,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       try {
         const config = await readLarkConfig(this.workflowOptions.store, this.reconcileConfig.appId);
         if (!config?.listening) return { type: 'warning', content: '机器人已停用，无法删除记忆。' };
-        if (config.memoryEnabled === false) return { type: 'warning', content: '本机器人已关闭会话记忆。' };
+        if (!larkMemoryEnabled(config)) return { type: 'warning', content: '本机器人已关闭会话记忆。' };
         const turn = await this.memory.turn(turnSessionId, turnTaskId);
         if (!turn) return { type: 'warning', content: `这张卡片的记忆记录已过期（每个会话只保留最近 ${larkMemoryLimits.turnsPerSession} 轮），请发送 /memory 查看，再用 /forget <编号> 删除。` };
         if (turn.record.appId !== config.appId || turn.record.chatId !== context.chatId

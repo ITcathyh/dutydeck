@@ -21,7 +21,7 @@ describe('group participation with persistent repository and real runtime', () =
     const path = join(cwd, 'state.db');
     let repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
     const scope = { appId: 'cli_integration', chatId: 'oc_group' };
-    const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'fake', defaultAgentId: 'mock', workspace: cwd, listening: true, permissionMode: 'ask', fullTrustConfirmed: true,
+    const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'fake', defaultAgentId: 'mock', workspace: cwd, listening: true, permissionMode: 'ask', fullTrustConfirmed: true, memoryEnabled: true,
       preInjectPrompt: '', groupToolsEnabled: false, groupToolsAllowSend: false, allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off', hideTraceOnComplete: false, pushIntervalMs: 1000 };
     await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
     await repos.collaboration.updateSettings(scope, { expectedRevision: 0, participation: 'selective', instructions: '只补充明确有用的信息' }, 'owner');
@@ -90,7 +90,7 @@ describe('group participation with persistent repository and real runtime', () =
     const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
     const scopeA = { appId: 'cli_concurrent', chatId: 'oc_group_a' };
     const scopeB = { appId: scopeA.appId, chatId: 'oc_group_b' };
-    const config: StoredLarkConfig = { appId: scopeA.appId, appSecret: 'fake', defaultAgentId: 'mock', workspace: cwd, listening: true, permissionMode: 'ask', fullTrustConfirmed: true,
+    const config: StoredLarkConfig = { appId: scopeA.appId, appSecret: 'fake', defaultAgentId: 'mock', workspace: cwd, listening: true, permissionMode: 'ask', fullTrustConfirmed: true, memoryEnabled: true,
       preInjectPrompt: '', groupToolsEnabled: false, groupToolsAllowSend: false, allowedUsers: [], allowedEmails: [], highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'danger', riskControlMode: 'off', hideTraceOnComplete: false, pushIntervalMs: 1000 };
     await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
     for (const scope of [scopeA, scopeB]) await repos.collaboration.updateSettings(scope, { expectedRevision: 0, participation: 'selective' }, 'owner');

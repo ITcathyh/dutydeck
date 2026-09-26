@@ -1,5 +1,5 @@
 // 本轮记忆的协调器级回归：真实 DutydeckRuntime + SQLite + 真实 LarkMessageCoordinator，service 为内存 mock。
-// 锁定「派发时记下注入了哪些记忆 → 结果卡列出并带删除按钮 → 点删除走 /forget 同一道门 → 卡片重绘」，
+// 锁定「派发时记下注入了哪些记忆 → 结果卡不展示记忆 → 旧卡按钮仍走 /forget 同一道门」，
 // 以及 /memory ignore 的增删查。
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -44,7 +44,7 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
   });
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]);
-  const config: StoredLarkConfig = { appId: 'cli_memory', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
+  const config: StoredLarkConfig = { appId: 'cli_memory', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true, memoryEnabled: true,
     fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1_000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off', ...patch };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
@@ -100,11 +100,8 @@ async function harness(patch: Partial<StoredLarkConfig> = {}) {
   return { repos, runtime, coordinator, memoryStore, config, service, cards, prompts, lastCardText, waitCards, resultCard, remember, runTask };
 }
 
-const memoryRows = (elements: unknown) => (elements as Array<Record<string, any>>).filter(item => String(item.element_id ?? '').startsWith('memory_turn_'));
-const forgetValue = (row: Record<string, any>) => row.columns[1].elements[0].behaviors[0].value as { dutydeck_memory_forget: string; task_id: string; session_id: string };
-
-describe('memory of each turn on the result card', () => {
-  it('lists the injected memories, deletes one through the /forget gate and redraws the card', async () => {
+describe('memory of each turn', () => {
+  it('records injected memories without listing them on the result card, and accepts old-card forget callbacks', async () => {
     const h = await harness({ allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] });
     const first = await h.remember('om_r1', '回复统一用中文');
     const second = await h.remember('om_r2', '先给一句话结论');
@@ -115,11 +112,13 @@ describe('memory of each turn on the result card', () => {
     expect(view!.injected.map(entry => entry.id).sort()).toEqual([first, second].sort());
 
     const elements = result.card.elements as Array<Record<string, any>>;
-    expect(elements.find(item => item.element_id === 'memory_turn')?.content).toContain('**本轮记忆**：用到 2 条');
-    const rows = memoryRows(elements);
-    expect(rows).toHaveLength(2);
-    const value = forgetValue(rows.find(row => JSON.stringify(row).includes(first))!);
+    expect(JSON.stringify(elements)).not.toContain('memory_turn');
+    expect(JSON.stringify(elements)).not.toContain(first);
+    const value = { dutydeck_memory_forget: first, task_id: result.runtimeTaskId, session_id: result.sessionId };
     expect(value).toEqual({ dutydeck_memory_forget: first, task_id: result.runtimeTaskId, session_id: result.sessionId });
+    // Simulate an older delivered card still carrying a memory row. Its callback must clear that row.
+    const liveTask = [...(h.coordinator as any).tasks.values()].find((task: any) => task.runtimeTaskId === result.runtimeTaskId);
+    liveTask.finalElements.push({ tag: 'markdown', element_id: 'memory_turn', content: '**本轮记忆**' });
 
     const context = { messageId: result.messageId, chatId: 'oc_group' };
     // 与 /forget 同一道门：不在白名单里的人点了不生效。
@@ -136,23 +135,22 @@ describe('memory of each turn on the result card', () => {
     expect((await h.memoryStore.list(groupPool)).map(entry => entry.id)).toEqual([second]);
     expect((await h.memoryStore.listAll(groupPool)).find(entry => entry.id === first)).toMatchObject({ deletedBy: 'ou_alice' });
     const redraw = h.service.update.mock.calls.map(([input]) => input as Record<string, any>).filter(input => input.messageId === result.messageId).at(-1)!;
-    expect(redraw.elements.find((item: Record<string, any>) => item.element_id === 'memory_turn').content).toContain('用到 1 条');
-    expect(JSON.stringify(memoryRows(redraw.elements))).not.toContain(first);
+    expect(JSON.stringify(redraw.elements)).not.toContain('memory_turn');
     // 结论本身原样保留。
     expect(JSON.stringify(redraw.elements)).toContain('工作已完成');
 
     expect(await h.coordinator.handleAction(value, 'ou_alice', context)).toMatchObject({ type: 'warning', content: `记忆 ${first} 已经删除过了。` });
   });
 
-  it('lists at most five rows with the totals and leaves the card alone when nothing was used', async () => {
+  it('keeps the result card free of memory details even when many memories were used', async () => {
     const h = await harness();
     const empty = await h.runTask('om_empty', '第一个任务');
-    expect(memoryRows(empty.card.elements)).toEqual([]);
+    expect(JSON.stringify(empty.card.elements)).not.toContain('memory_turn');
     for (let index = 0; index < 7; index++) await h.remember(`om_r${index}`, `第 ${index} 条约定`);
     const result = await h.runTask('om_task', '第二个任务');
     const elements = result.card.elements as Array<Record<string, any>>;
-    expect(elements.find(item => item.element_id === 'memory_turn')?.content).toContain('用到 7 条，只列前 5 条');
-    expect(memoryRows(elements)).toHaveLength(5);
+    expect(JSON.stringify(elements)).not.toContain('memory_turn');
+    expect((await h.memoryStore.turn(result.sessionId, result.runtimeTaskId))?.injected).toHaveLength(7);
   });
 });
 

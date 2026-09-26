@@ -9,7 +9,7 @@
  *   · 每个 fail / warn 必须带 remedy，有可执行动作时必须带 command。
  *   · 任何字段都不得包含机密（app secret、access token）。
  */
-import { larkBotsConfigKey, larkExecutionConfirmed, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
+import { larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLarkConfigs, type StoredLarkConfig } from '../lark/config.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 import { larkMemoryErrorLabel } from '../lark/memory.js';
 import { larkMemoryPipelineRules } from '../lark/memory-pipeline.js';
@@ -524,7 +524,7 @@ export function checkLarkMemory(observation: LarkMemoryObservation, now: Date): 
   // lark.bots 坏掉由 lark.config 报 fail，这里不重复报。
   const bots = (Array.isArray(parsed) ? parsed : []) as Array<Partial<StoredLarkConfig> | null>;
   const enabled = bots.filter((bot): bot is Partial<StoredLarkConfig> & { appId: string } =>
-    Boolean(bot && typeof bot.appId === 'string' && bot.appId && bot.memoryEnabled !== false));
+    Boolean(bot && typeof bot.appId === 'string' && bot.appId && larkMemoryEnabled(bot)));
   if (!enabled.length) return { ...base, level: 'skip', detail: '没有开启会话记忆的飞书机器人' };
 
   const stalled: string[] = [];

@@ -44,7 +44,7 @@ async function harness() {
   });
   const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]);
-  const config: StoredLarkConfig = { appId: 'cli_memory', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
+  const config: StoredLarkConfig = { appId: 'cli_memory', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true, memoryEnabled: true,
     fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1_000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
@@ -278,6 +278,33 @@ describe('Lark chat memory through the coordinator', () => {
     await h.coordinator.handle(event('om_task_disabled', '执行任务'), disabledConfig);
     await h.waitPrompts(1);
     expect(h.prompts[0]).not.toContain('[Dutydeck 会话记忆');
+  });
+
+  it('keeps memory inactive for an ordinary bot with no memory flag', async () => {
+    const h = await harness();
+    const config = { ...h.config, memoryEnabled: undefined };
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    await h.memoryStore.add(groupPool, { content: '默认不注入的记忆', source: 'user', chatId: 'oc_group' });
+
+    await h.coordinator.handle(event('om_default_off', '/remember 新的偏好'), config);
+    await h.waitCards(1);
+    expect(h.lastCardText()).toContain('本机器人已关闭会话记忆');
+    await h.coordinator.handle(event('om_default_task', '执行任务'), config);
+    await h.waitPrompts(1);
+    expect(h.prompts[0]).not.toContain('[Dutydeck 会话记忆');
+    const [session] = (await h.runtime.listSessions()).filter(item => item.source === 'lark');
+    const [task] = await h.runtime.getTasks(session!.id);
+    expect(await h.memoryStore.turn(session!.id, task!.id)).toBeUndefined();
+  });
+
+  it('keeps memory active for a Tag bot with no memory flag', async () => {
+    const h = await harness();
+    const config = { ...h.config, defaultGroupParticipation: 'selective' as const, memoryEnabled: undefined };
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    await h.memoryStore.add(groupPool, { content: 'Tag 默认注入的记忆', source: 'user', chatId: 'oc_group' });
+    await h.coordinator.handle(event('om_tag_default', '执行任务'), config);
+    await h.waitPrompts(1);
+    expect(h.prompts[0]).toContain('Tag 默认注入的记忆');
   });
 
   it('lists memory commands in /help and keeps them off for bot senders', async () => {

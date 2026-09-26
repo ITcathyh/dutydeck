@@ -72,7 +72,7 @@ async function harness(options: { timeoutMs?: number; agentModel?: string; userA
     ...(options.agentModel ? { model: options.agentModel } : {}) };
   await runtime.initialize([agent]);
 
-  const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
+  const config: StoredLarkConfig = { appId: scope.appId, appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true, memoryEnabled: true,
     fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false, pushIntervalMs: 1_000, hideTraceOnComplete: false,
     allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false, highRiskAllowedUsers: [], highRiskAllowedEmails: [], highRiskPattern: 'dangerous', riskControlMode: 'off' };
   await repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
@@ -172,6 +172,20 @@ const listedEntries = (prompt: string) =>
   [...prompt.matchAll(/^- (mem_[0-9a-f]{8}) · (\w+) · /gm)].map(match => ({ id: match[1]!, source: match[2]! }));
 
 describe('Lark memory pipeline through the coordinator', () => {
+  it('does not queue or launch extraction for an ordinary bot with no memory flag', async () => {
+    const h = await harness();
+    await h.setConfig({ memoryEnabled: undefined });
+    for (let index = 0; index < 3; index++) {
+      await h.pipeline.onTurnCompleted(scope, { sessionId: 'ses_regular', taskId: `task_regular_${index}` });
+    }
+    const state = await h.store.getState(scope);
+    expect(state.turnsSinceExtraction).toBe(0);
+    expect(state.pendingTurns ?? []).toEqual([]);
+    expect(h.startCalls).toEqual([]);
+    expect(h.memoryPrompts).toEqual([]);
+    expect(await h.pipeline.requestConsolidation(scope)).toBe('disabled');
+  });
+
   it('3 轮完成后自动提取，账本出现 extraction 条目并进入下一轮索引', async () => {
     const h = await harness();
     h.setResponder(prompt => {
@@ -795,7 +809,7 @@ describe('stuck memory session after a daemon restart', () => {
     cleanups.push(() => rm(cwd, { recursive: true, force: true }));
     const file = join(cwd, 'state.db');
     const agent: AgentConfig = { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
-    const config = { appId: scope.appId, appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true } as StoredLarkConfig;
+    const config = { appId: scope.appId, appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true, memoryEnabled: true } as StoredLarkConfig;
     const memoryPrompts: string[] = [];
     let beforeRestart = true;
     let poisonId = '';
