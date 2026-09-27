@@ -13,6 +13,7 @@ export interface CliOptions {
   port?: string;
   cwd?: string;
   database?: string;
+  botAppId?: string;
   idleTimeoutMs?: string;
   cleanupIntervalMs?: string;
   larkAppId?: string;
@@ -273,6 +274,7 @@ const addServerOptions = (command: Command) => command
   .option('--port <port>', 'Bind port (default: 4310)')
   .option('--cwd <directory>', 'Default Agent working directory')
   .option('--database <file>', 'SQLite database path')
+  .option('--bot-app-id <appId>', 'Run the bot assigned to a partitioned database')
   .option('--idle-timeout-ms <ms>', 'Release idle Agent drivers (default: 21600000)')
   .option('--cleanup-interval-ms <ms>', 'Idle cleanup interval (default: 300000)')
   .option('--lark-app-id <id>', 'Lark app ID used by /api/lark; defaults to LARK_APP_ID')
@@ -937,6 +939,7 @@ export function environmentFromCli(options: CliOptions, base: NodeJS.ProcessEnv 
   if (options.port !== undefined) env.DUTYDECK_PORT = options.port;
   if (options.cwd !== undefined) env.DUTYDECK_DEFAULT_CWD = options.cwd;
   if (options.database !== undefined) env.DUTYDECK_DATABASE_URL = options.database;
+  if (options.botAppId !== undefined) env.DUTYDECK_BOT_APP_ID = options.botAppId;
   if (options.idleTimeoutMs !== undefined) env.DUTYDECK_DRIVER_IDLE_TIMEOUT_MS = options.idleTimeoutMs;
   if (options.cleanupIntervalMs !== undefined) env.DUTYDECK_CLEANUP_INTERVAL_MS = options.cleanupIntervalMs;
   if (options.larkAppId !== undefined) env.LARK_APP_ID = options.larkAppId;

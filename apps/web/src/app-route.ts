@@ -115,7 +115,7 @@ export const sessionPath = (id?: string) => instancePagePath(id ? `/sessions/${e
  * token 在 # 片段里，不随页面请求发给服务端。
  */
 export const sharedSessionFromLocation = (pathname: string, hash: string): { sessionId: string; token: string } | undefined => {
-  const match = pathname.match(/^\/share\/([^/]+)$/);
+  const match = stripInstancePath(pathname).match(/^\/share\/([^/]+)$/);
   if (!match?.[1]) return undefined;
   // 片段缺失或被截断时 token 为空串：仍然是分享页，只是读不到内容，不会落到工作台的登录页。
   const token = hash.replace(/^#/, '');

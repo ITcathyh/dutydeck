@@ -1,4 +1,4 @@
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
@@ -43,6 +43,9 @@ export interface DaemonState {
   startedAt: string;
   cwd: string;
   database?: string;
+  botAppId?: string;
+  botProcess?: boolean;
+  agentCwd?: string;
   host?: string;
   port?: number;
   address?: string;
@@ -183,7 +186,9 @@ export function clearGeneration(dir: string, expected?: DaemonState): boolean {
  * 3. The current working directory's daemon directory on the very first run.
  */
 export function resolveDaemonDir(cwd = process.cwd(), home = process.env.HOME ?? homedir()): string {
+  if (process.env.DUTYDECK_DAEMON_DIR) return resolve(process.env.DUTYDECK_DAEMON_DIR);
   const localDir = defaultDaemonDir(cwd);
+  if (readDaemonStatus(localDir)?.botProcess || readDaemonStatus(localDir)?.botAppId) return localDir;
   const localInspection = inspectDaemon(localDir);
   if (localInspection.status === 'verified' || localInspection.status === 'unverifiable') {
     return localDir;

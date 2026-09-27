@@ -125,6 +125,7 @@ it('round-trips explicit Bot editing and new modes without changing the underlyi
 
 describe('只读分享页入口', () => {
   it('/share/<会话> 带出会话 ID 和 # 片段里的分享 token', () => {
+    expect(sharedSessionFromLocation('/instances/bot-a/share/ses_1', '#abc-DEF_123')).toEqual({ sessionId: 'ses_1', token: 'abc-DEF_123' });
     expect(sharedSessionFromLocation('/share/ses_1', '#abc-DEF_123')).toEqual({ sessionId: 'ses_1', token: 'abc-DEF_123' });
     expect(sharedSessionFromLocation('/share/a%2Fb', '#t')).toEqual({ sessionId: 'a/b', token: 't' });
     expect(sharedSessionFromLocation('/share/%E0%A4%A', '#t')).toEqual({ sessionId: '%E0%A4%A', token: 't' });

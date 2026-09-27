@@ -13,6 +13,10 @@
     }
   },
   "files": [
+    "src/bot-process.ts",
+    "dist/bot-process.js",
+    "dist/bot-process.js.map",
+    "dist/bot-process.d.ts",
     "src/index.ts",
     "src/schema.ts",
     "src/foundation.ts",
