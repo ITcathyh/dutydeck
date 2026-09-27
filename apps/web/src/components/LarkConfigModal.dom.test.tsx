@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { api, type Agent, type LarkBotConfig, type LarkConfig } from '../api';
+import { api, ApiError, type Agent, type LarkBotConfig, type LarkConfig } from '../api';
 import { LarkConfigModal } from './LarkConfigModal';
 
 const agents: Agent[] = [
@@ -49,9 +49,81 @@ function renderModal(config: LarkConfig = collection(), source: 'acp' | 'cli' | 
   vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [], source });
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   render(<QueryClientProvider client={client}><LarkConfigModal agents={agents} target={target} onClose={() => {}}/></QueryClientProvider>);
+  return client;
 }
 
 afterEach(() => { cleanup(); sessionStorage.clear(); vi.restoreAllMocks(); });
+
+describe('LarkConfigModal revision conflicts', () => {
+  it.each(['lark', 'agent', 'hook'] as const)('keeps the %s draft tied to its original revision after a cache refresh', async stage => {
+    const user = userEvent.setup();
+    const initial = collection({ revision: 1, setupComplete: true, fullTrustConfirmed: true, defaultAgentId: 'codex' });
+    const client = renderModal(initial);
+    const save = vi.spyOn(api, 'saveLarkConfig').mockRejectedValue(new ApiError('此 Bot 已被修改', 'LARK_CONFIG_REVISION_CONFLICT', 409));
+    const install = vi.spyOn(api, 'installLarkHook');
+    vi.spyOn(api, 'larkHookStatus').mockResolvedValue({ agentId: 'codex', supported: true, installed: false, writable: true, trustRequired: false });
+    await screen.findByDisplayValue('/repo');
+    if (stage !== 'lark') await user.click(screen.getByRole('button', { name: /选择 Agent 并启用/ }));
+    const field = screen.getByRole('textbox', { name: stage === 'lark' ? '默认工作区' : /预注入 Prompt/ });
+    await user.clear(field); await user.type(field, '/my-draft');
+    if (stage === 'hook') await user.selectOptions(screen.getByRole('combobox', { name: '风险控制' }), 'enforced');
+    await act(async () => client.setQueryData(['lark-config'], collection({ ...initial.bots[0], revision: 2, workspace: '/new-server', preInjectPrompt: 'new server prompt' })));
+    await user.click(await screen.findByRole('button', { name: stage === 'hook' ? '配置拦截 Hook' : stage === 'lark' ? '下一步' : '完成配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    expect(save.mock.calls[0]![0]).toMatchObject({ expectedRevision: 1 });
+    expect((field as HTMLInputElement).value).toBe('/my-draft');
+    expect(install).not.toHaveBeenCalled();
+    expect(await screen.findByRole('button', { name: '加载最新配置并放弃草稿' })).toBeTruthy();
+  });
+
+  it('reloads explicitly after a conflict and saves against the reloaded revision', async () => {
+    const user = userEvent.setup();
+    renderModal(collection({ revision: 1, setupComplete: true }));
+    const save = vi.spyOn(api, 'saveLarkConfig')
+      .mockRejectedValueOnce(new ApiError('此 Bot 已被修改', 'LARK_CONFIG_REVISION_CONFLICT', 409))
+      .mockResolvedValueOnce(collection({ revision: 3, workspace: '/latest', setupComplete: true }));
+    const field = await screen.findByRole('textbox', { name: '默认工作区' });
+    await user.clear(field); await user.type(field, '/draft');
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    const reload = await screen.findByRole('button', { name: '加载最新配置并放弃草稿' });
+    vi.mocked(api.larkConfig).mockResolvedValue(collection({ revision: 2, workspace: '/latest', setupComplete: true }));
+    await user.click(reload);
+    await waitFor(() => expect((field as HTMLInputElement).value).toBe('/latest'));
+    await user.click(screen.getByRole('button', { name: '下一步' }));
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(2));
+    expect(save.mock.calls[1]![0]).toMatchObject({ expectedRevision: 2, workspace: '/latest' });
+  });
+
+  it('advances the draft revision through connection save, hook installation and final save', async () => {
+    const user = userEvent.setup();
+    let server = collection({ revision: 5, setupComplete: true, fullTrustConfirmed: true, defaultAgentId: 'codex' });
+    renderModal(server);
+    vi.mocked(api.larkConfig).mockImplementation(async () => server);
+    const status = { agentId: 'codex', supported: true, installed: false, writable: true, trustRequired: false };
+    vi.spyOn(api, 'larkHookStatus').mockImplementation(async () => ({ ...status }));
+    const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async input => {
+      expect(input.expectedRevision).toBe(server.bots[0]!.revision);
+      server = collection({ ...server.bots[0], revision: server.bots[0]!.revision! + 1 });
+      return server;
+    });
+    const install = vi.spyOn(api, 'installLarkHook').mockImplementation(async (_appId, _pattern, expectedRevision) => {
+      expect(expectedRevision).toBe(7);
+      server = collection({ ...server.bots[0], revision: 8 });
+      status.installed = true;
+      return { ...status, configRevision: 8 };
+    });
+    await screen.findByDisplayValue('/repo');
+    await user.click(await screen.findByRole('button', { name: '下一步' }));
+    await user.selectOptions(await screen.findByRole('combobox', { name: '风险控制' }), 'enforced');
+    await user.click(await screen.findByRole('button', { name: '配置拦截 Hook' }));
+    await waitFor(() => expect(install).toHaveBeenCalledOnce());
+    const complete = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
+    await waitFor(() => expect(complete.disabled).toBe(false));
+    await user.click(complete);
+    await waitFor(() => expect(save).toHaveBeenCalledTimes(3));
+    expect(save.mock.calls.map(([input]) => input.expectedRevision)).toEqual([5, 6, 8]);
+  });
+});
 
 describe('LarkConfigModal risk control', () => {
   it('configures the required Lark capabilities without making it another save gate', async () => {
@@ -175,7 +247,7 @@ describe('LarkConfigModal risk control', () => {
     expect(submit.disabled).toBe(true);
 
     await user.click(screen.getByRole('button', { name: '配置拦截 Hook' }));
-    await waitFor(() => expect(install).toHaveBeenCalledWith('cli_test', 'rm\\b'));
+    await waitFor(() => expect(install).toHaveBeenCalledWith('cli_test', 'rm\\b', 1));
     expect(save).toHaveBeenCalledWith(expect.objectContaining({ defaultAgentId: 'codex', fullTrustConfirmed: true, listening: true, riskControlMode: 'guidance' }));
     expect((selector as HTMLSelectElement).value).toBe('enforced');
     await waitFor(() => expect(submit.disabled).toBe(false));

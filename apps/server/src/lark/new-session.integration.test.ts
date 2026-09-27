@@ -3,9 +3,11 @@ import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
-import type { AgentConfig, ChannelMappingRepository, PolicyAction, Session, TaskRecord } from '@dutydeck/shared';
+import { RuntimeError } from '@dutydeck/shared';
+import type { AgentConfig, AgentEvent, ChannelMappingRepository, PolicyAction, Session, TaskRecord } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator } from './coordinator.js';
+import { LarkTaskInbox } from './task-inbox.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkSessionConfigKey, larkSourceId } from './session-resolver.js';
 
@@ -79,7 +81,7 @@ function persistentRuntime(options: {
     interrupt: vi.fn(async () => {}),
     cancelQueued: vi.fn(async () => {}),
     getTasks: vi.fn(async (id: string) => (tasks.get(id) ?? []).map(task => ({ ...task }))),
-    subscribe: vi.fn(() => vi.fn())
+    subscribe: vi.fn((_sessionId: string, _callback: (event: AgentEvent) => void) => vi.fn())
   };
   return { runtime, sessions };
 }
@@ -389,9 +391,124 @@ describe('Lark /new first-turn launch options', () => {
     // First list is the recovering turn's lookup. The new command lists once to
     // locate the bound session and once more after incrementing the group epoch.
     await vi.waitFor(() => expect(h.runtime.listSessions.mock.calls.length).toBeGreaterThanOrEqual(3));
+    const reopened = createRepositories(join(h.directory, 'state.db'));
+    try {
+      expect(await new LarkTaskInbox(reopened.config).recoverable(h.config.appId)).toEqual([]);
+    } finally { reopened.close(); }
     releaseStart();
     await reset;
     await vi.waitFor(() => expect(h.runtime.stop).toHaveBeenCalledWith('ses_1'));
     expect(h.runtime.send).not.toHaveBeenCalled();
+    await h.createCoordinator().handle(recoveredEvent, h.config, true);
+    expect(h.runtime.start).toHaveBeenCalledOnce();
+  });
+});
+
+
+describe('durable pre-dispatch rejection', () => {
+  it('keeps lifecycle shutdown pending for recovery', async () => {
+    const h = await harness();
+    h.runtime.start.mockRejectedValueOnce(new RuntimeError('RUNTIME_SHUTTING_DOWN', 'shutting down', 503));
+    const event = dm('om_shutdown_recovery', 'resume after shutdown');
+    await h.createCoordinator().handle(event, h.config);
+    await vi.waitFor(() => expect(h.runtime.start).toHaveBeenCalledOnce());
+    const recovered = h.createCoordinator();
+    await recovered.initializeWorkflows(h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledWith(expect.any(String), 'resume after shutdown', expect.any(String)));
+    expect(h.runtime.start).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not dispatch after /new during the auto-verification fingerprint read', async () => {
+    const state = persistentRuntime();
+    const runtime = Object.assign(state.runtime, { dispatch: vi.fn(async () => ({ id: 'task_a', status: 'queued' })) });
+    const h = await harness({ runtime });
+    const coordinator = h.createCoordinator();
+    let release!: () => void;
+    const gate = new Promise<undefined>(resolve => { release = () => resolve(undefined); });
+    const fingerprint = vi.spyOn(coordinator as any, 'sharedWorkspaceFingerprint').mockImplementation(() => gate);
+    try {
+      await coordinator.handle(dm('om_fingerprint', 'must not dispatch'), h.config);
+      await vi.waitFor(() => expect(fingerprint).toHaveBeenCalledOnce());
+      await coordinator.handle(dm('om_reset_fingerprint', '/new'), h.config);
+      expect(await new LarkTaskInbox(h.repos.config).recoverable(h.config.appId)).toEqual([]);
+      release();
+      await vi.waitFor(() => expect(h.service.send).toHaveBeenCalledWith(expect.objectContaining({ cardKind: 'result', state: 'interrupted' })));
+      expect(runtime.dispatch).not.toHaveBeenCalled();
+      await h.createCoordinator().initializeWorkflows(h.config);
+      expect(runtime.dispatch).not.toHaveBeenCalled();
+    } finally { release(); }
+  });
+
+  it.each(['allowlist', 'email', 'startup', 'policy'] as const)('does not replay a %s rejection after permissions recover', async reason => {
+    let denied = reason === 'policy';
+    const executionPolicy = { integrationMode: 'legacy_unmanaged', authorize: async (_boundary: string, action: PolicyAction) => ({
+      action, allowed: !denied || _boundary !== 'session', code: 'denied', reason: 'revoked', source: 'integration'
+    }) };
+    const h = await harness({ executionPolicy });
+    const config = { ...h.config,
+      ...(reason === 'allowlist' ? { allowedUsers: [{ openId: 'ou_other', name: 'Other' }] } : {}),
+      ...(reason === 'email' ? { allowedEmails: ['alice@example.com'] } : {})
+    };
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([config]));
+    if (reason === 'startup') h.runtime.start.mockRejectedValueOnce(new Error('startup rejected'));
+    const event = dm(`om_reject_${reason}`, 'must not replay');
+    await h.createCoordinator().handle(event, config);
+    await vi.waitFor(() => expect(h.service.send).toHaveBeenCalledWith(expect.objectContaining({ state: 'failed' })));
+    const reopened = createRepositories(join(h.directory, 'state.db'));
+    try {
+      expect(await new LarkTaskInbox(reopened.config).recoverable(config.appId)).toEqual([]);
+    } finally { reopened.close(); }
+    denied = false;
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify([h.config]));
+    await h.createCoordinator().handle(event, h.config, true);
+    expect(h.runtime.send).not.toHaveBeenCalled();
+  });
+
+
+});
+
+
+describe('dispatch terminal event isolation', () => {
+  it.each([false, true])('freezes the completed turn while recovery lookup is pending (stop: %s)', async stop => {
+    let receive!: (event: AgentEvent) => void;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const state = persistentRuntime();
+    const task = { id: 'task_a', sessionId: 'ses_1', prompt: 'A', status: 'running', queuedAhead: 0,
+      createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    const runtime = Object.assign(state.runtime, {
+      dispatch: vi.fn(async () => task),
+      getTaskRecovery: vi.fn(async () => { await gate; return undefined; })
+    });
+    runtime.subscribe.mockImplementation((_sessionId: string, callback: (event: AgentEvent) => void) => { receive = callback; return vi.fn(); });
+    const h = await harness({ runtime });
+    const coordinator = h.createCoordinator();
+    await coordinator.handle(dm('om_isolation', 'A'), h.config);
+    await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.om_isolation`))!).state).toBe('accepted'));
+    let sequence = 0;
+    const emit = (type: AgentEvent['type'], data: unknown, taskId?: string) => receive({ id: `ev_${++sequence}`, sequence,
+      timestamp: new Date().toISOString(), sessionId: 'ses_1', type, data, ...(taskId ? { taskId } : {}) });
+    emit('task', { task });
+    emit('text', { text: 'A answer' }, 'task_a');
+    emit('text', { text: 'foreign active answer' }, 'task_b');
+    emit('task', { task: { ...task, status: 'completed' } });
+    await vi.waitFor(() => expect(runtime.getTaskRecovery).toHaveBeenCalled());
+    // Runtime can start the next task while the previous terminal delivery awaits storage.
+    emit('text', { text: 'B answer after A finished' });
+    emit('task', { task });
+    if (stop) coordinator.stop();
+    release();
+    if (stop) {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(h.service.send.mock.calls.filter(([input]: any[]) => input.cardKind === 'result')).toEqual([]);
+    } else {
+      await vi.waitFor(() => expect(h.service.send).toHaveBeenCalledWith(expect.objectContaining({ cardKind: 'result' })));
+      const result = h.service.send.mock.calls.map(([input]: any[]) => input).find(input => input.cardKind === 'result');
+      expect(JSON.stringify(result)).toContain('A answer');
+      expect(JSON.stringify(result)).not.toContain('foreign active answer');
+      expect(JSON.stringify(result)).not.toContain('B answer');
+      coordinator.stop();
+    }
   });
 });

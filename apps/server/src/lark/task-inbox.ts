@@ -25,6 +25,7 @@ export interface LarkInboxRecord {
 const prefix = (appId: string) => `lark.inbox.${appId}.`;
 export class LarkTaskInbox {
   private readonly boot = randomUUID();
+  private readonly updates = new WeakMap<LarkInboxRecord, Promise<void>>();
   constructor(private readonly store: ConfigRepository) {
     if (!store.compareAndSet || !store.list) throw new Error('Lark inbox requires persistent CAS and prefix listing');
   }
@@ -52,12 +53,18 @@ export class LarkTaskInbox {
     return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
   }
   async update(record: LarkInboxRecord, patch: Partial<Pick<LarkInboxRecord, 'state' | 'sessionId' | 'cardId' | 'taskId' | 'error' | 'turn' | 'request' | 'materials' | 'event' | 'workflowRequestId' | 'redispatch'>>) {
-    const next = { ...record, ...patch };
-    if (!await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next))) {
-      throw new Error('Lark inbox claim was lost');
-    }
-    Object.assign(record, next);
+    // 同一认领的准备和 /new 可并发更新；串行合并字段，同时保留跨进程 CAS。
+    const operation = (this.updates.get(record) ?? Promise.resolve()).then(async () => {
+      const next = { ...record, ...patch };
+      if (!await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next))) {
+        throw new Error('Lark inbox claim was lost');
+      }
+      Object.assign(record, next);
+    });
+    this.updates.set(record, operation.catch(() => {}));
+    await operation;
   }
+
   async orphanedCommands(appId: string): Promise<LarkInboxRecord[]> {
     return (await this.store.list!(prefix(appId))).map(row => JSON.parse(row.value) as LarkInboxRecord)
       .filter(record => record.state === 'command' && record.boot !== this.boot);

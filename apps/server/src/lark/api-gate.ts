@@ -125,7 +125,7 @@ export function resolveLarkGateConfig(env: NodeJS.ProcessEnv = process.env): Lar
   const qps = positiveFinite(env.LARK_API_QPS, 15);
   return {
     qps,
-    burst: positiveFinite(env.LARK_API_BURST, qps),
+    burst: Math.max(1, positiveFinite(env.LARK_API_BURST, qps)),
     retryMaxAttempts: nonNegativeInt(env.LARK_API_RETRY_MAX_ATTEMPTS, 3),
     retryBaseMs: positiveInt(env.LARK_API_RETRY_BASE_MS, 500),
     retryMaxMs: positiveInt(env.LARK_API_RETRY_MAX_MS, 8_000),
@@ -530,14 +530,15 @@ export async function executeWithLarkGate<T>(
       log.info({ appId, op }, '飞书 OpenAPI 熔断器已恢复闭合');
     }
   };
+  let previousError: unknown;
   try {
     for (let attempt = 0; ; attempt++) {
       if (signal?.aborted) throw gateAbortError(signal);
-      if (!current()) throw new LarkCircuitOpenError(appId, circuit.openedAtMs);
+      if (!current()) throw attempt > 0 ? previousError : new LarkCircuitOpenError(appId, circuit.openedAtMs);
       await acquireToken(appId, op, config, log, signal);
       if (signal?.aborted) throw gateAbortError(signal);
       // A concurrent request can trip the circuit while this call waits for a token.
-      if (!current()) throw new LarkCircuitOpenError(appId, circuit.openedAtMs);
+      if (!current()) throw attempt > 0 ? previousError : new LarkCircuitOpenError(appId, circuit.openedAtMs);
       try {
         const result = await fn();
         if (signal?.aborted) throw gateAbortError(signal);
@@ -548,6 +549,7 @@ export async function executeWithLarkGate<T>(
         options?.onFailure?.();
         const retryable = isRetryableLarkError(error);
         if (retryable && current() && attempt < config.retryMaxAttempts && (options?.canRetry?.() ?? true)) {
+          previousError = error;
           const backoffMs = computeBackoffMs(config, attempt, error, options?.random ?? Math.random);
           log.warn({ appId, op, attempt: attempt + 1, maxAttempts: config.retryMaxAttempts, backoffMs }, '飞书 OpenAPI 调用失败，退避重试');
           await sleep(backoffMs, signal);

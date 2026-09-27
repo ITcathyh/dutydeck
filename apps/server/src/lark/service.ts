@@ -213,6 +213,7 @@ export interface LarkBotConfig {
   env?: NodeJS.ProcessEnv;
 }
 export interface LarkBotConfigInput {
+  brand?: 'feishu' | 'lark';
   appId?: string;
   appSecret?: string;
   receiveId?: string;
@@ -467,7 +468,7 @@ export function larkConfigurationStatus(env: NodeJS.ProcessEnv = process.env, in
     defaultReceiveIdConfigured: Boolean(defaultChatId || input.receiveId?.trim() || env.LARK_RECEIVE_ID?.trim()),
     defaultReceiveIdType: defaultChatId ? 'chat_id' : receiveIdType(input.receiveIdType ?? env.LARK_RECEIVE_ID_TYPE),
     defaultAgentName: input.agentName?.trim() || env.LARK_AGENT_NAME?.trim() || 'Dutydeck',
-    baseUrl: (input.baseUrl?.trim() || env.LARK_OPEN_API_BASE_URL?.trim() || 'https://open.feishu.cn').replace(/\/$/, '')
+    baseUrl: (input.baseUrl?.trim() || env.LARK_OPEN_API_BASE_URL?.trim() || (input.brand === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn')).replace(/\/$/, '')
   };
 }
 

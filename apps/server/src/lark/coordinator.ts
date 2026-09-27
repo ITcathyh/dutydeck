@@ -50,6 +50,8 @@ export type LarkTask = {
   retryMaterialPrompt?: string;
   launchOptions?: LarkLaunchOptions;
   restoring?: boolean;
+  /** dispatch/send 已开始后，交由运行时核对，不能按未执行请求作废。 */
+  submissionStarted?: boolean;
   config: StoredLarkConfig;
   state: LarkTaskState;
   events: AgentEvent[];

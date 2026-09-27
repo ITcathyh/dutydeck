@@ -212,6 +212,7 @@ export class AcpxAdapter implements AgentDriver {
   private idleWatch?: { refresh(): void; clear(): void };
   private stopResourcesSettled = false;
   private readonly processes = new Map<ChildProcess, () => void>();
+  private unconfirmedLauncherExit = false;
   private nativeIdentity?: NativeContextIdentity;
   private currentConfiguration?: {model?: string; reasoningEffort?: string};
   get resourceCapabilities() {const strict=this.options.context?.protocol==='controlled-v1';return {observe:true,originalObjectStop:true,identityBoundStop:false,nativeContextRestore:strict,activeTurnAttach:false,configurationAck:strict,creationDefaults:strict};}
@@ -291,20 +292,23 @@ export class AcpxAdapter implements AgentDriver {
       return;
     }
     const child = event.child;
-    if (this.processes.has(child) || child.exitCode != null || child.signalCode != null) return;
+    if (this.processes.has(child)) return;
+    const launcher = event.kind === 'agent' && child.spawnargs?.some(arg => arg === envLauncherPath() || arg === claudeLauncherPath());
     const exited = () => {
+      if (launcher && child.signalCode) this.unconfirmedLauncherExit = true;
       this.processes.delete(child);
       child.off('exit', exited); child.off('error', failed);
     };
     const failed = () => { if (child.pid == null) exited(); };
     this.processes.set(child, exited);
+    if (child.exitCode != null || child.signalCode != null) { exited(); return; }
     child.once('exit', exited); child.on('error', failed);
   }
   async isStopped(): Promise<boolean> {
     // Only SDK-direct agent/probe and host-terminal children are covered. This
     // does not establish containment of arbitrary detached agent descendants.
     for (const [child, exited] of this.processes) if (child.exitCode != null || child.signalCode != null) exited();
-    return this.stopped && this.stopResourcesSettled && this.resourceOperations.size === 0 && this.streams.size === 0 && this.sdkCreations.size === 0 && this.processes.size === 0;
+    return this.stopped && !this.unconfirmedLauncherExit && this.stopResourcesSettled && this.resourceOperations.size === 0 && this.streams.size === 0 && this.sdkCreations.size === 0 && this.processes.size === 0;
   }
   private assertActive() { if (this.stopped) throw new AcpxStoppedError(); }
   private async whileActive<T>(operation: () => Promise<T>): Promise<T> {

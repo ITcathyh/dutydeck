@@ -13,7 +13,7 @@ test.describe('synthetic lark extended suite', () => {
     });
   });
 
-  test('e2e-lark-app-creation: pending-review app creation flow', async ({ runLarkScenario }) => {
+  test('e2e-lark-app-creation: unconfirmed publication preserves the disabled bot', async ({ runLarkScenario }) => {
     await runLarkScenario({
       scriptName: 'e2e-lark-app-creation.mts',
       extraEnv: {

@@ -13,12 +13,12 @@ it('upgrades existing databases and uses indexes for session, task and active at
   const path = join(directory, 'test.db'); createRepositories(path).close();
   const db = new Database(path);
   try {
-    db.exec('DROP INDEX task_attempt_session_history; DELETE FROM schema_migrations WHERE version=28');
+    db.exec('DROP INDEX task_attempts_session_order; DELETE FROM schema_migrations WHERE version=30');
     runMigrations(db);
     for (const [sql, expected] of [
-      ['SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id', 'task_attempt_session_history'],
+      ['SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id', 'task_attempts_session_order'],
       ['SELECT json FROM task_attempts WHERE task_id=? ORDER BY number', 'sqlite_autoindex_task_attempts_4'],
-      ["SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required') LIMIT 1", 'task_attempt_active_slot']
+      ["SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required') LIMIT 1", 'task_attempts_session_state']
     ]) {
       const plan = JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN ${sql}`).all('s'));
       expect(plan).toContain('SEARCH'); expect(plan).not.toMatch(/SCAN|TEMP B-TREE/);

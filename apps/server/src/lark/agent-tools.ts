@@ -14,6 +14,7 @@ import { larkMemoryToolsPrompt } from './memory.js';
 import { larkMemoryEnabled, readLarkConfig, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import {
   createLarkCardService,
+  larkConfigurationStatus,
   LarkServiceError,
   type LarkBotInfo,
   type LarkCardService,
@@ -437,8 +438,8 @@ export const deterministicAgentActionKey = (input: {
 };
 
 export class LarkAgentToolsService {
-  private readonly clients = new Map<string, { secret: string; client: LarkGroupToolClient }>();
-  private readonly identities = new Map<string, { secret: string; info: Promise<LarkBotInfo> }>();
+  private readonly clients = new Map<string, { secret: string; domain: string; client: LarkGroupToolClient }>();
+  private readonly identities = new Map<string, { secret: string; domain: string; info: Promise<LarkBotInfo> }>();
   private readonly pollIntervalMs: number;
 
   constructor(
@@ -450,19 +451,21 @@ export class LarkAgentToolsService {
   }
 
   private clientFor(config: StoredLarkConfig) {
+    const domain = larkConfigurationStatus(this.options.env ?? process.env, config).baseUrl;
     const cached = this.clients.get(config.appId);
-    if (cached?.secret === config.appSecret) return cached.client;
-    const client = this.options.clientFactory?.(config) ?? createLarkCardService(this.options.env ?? process.env, this.options.fetcher ?? globalThis.fetch, { appId: config.appId, appSecret: config.appSecret }) as LarkCardService;
-    this.clients.set(config.appId, { secret: config.appSecret, client });
+    if (cached?.secret === config.appSecret && cached.domain === domain) return cached.client;
+    const client = this.options.clientFactory?.(config) ?? createLarkCardService(this.options.env ?? process.env, this.options.fetcher ?? globalThis.fetch, config) as LarkCardService;
+    this.clients.set(config.appId, { secret: config.appSecret, domain, client });
     this.identities.delete(config.appId);
     return client;
   }
 
   private identityFor(config: StoredLarkConfig) {
+    const domain = larkConfigurationStatus(this.options.env ?? process.env, config).baseUrl;
     const cached = this.identities.get(config.appId);
-    if (cached?.secret === config.appSecret) return cached.info;
+    if (cached?.secret === config.appSecret && cached.domain === domain) return cached.info;
     const info = this.clientFor(config).getBotInfo();
-    this.identities.set(config.appId, { secret: config.appSecret, info });
+    this.identities.set(config.appId, { secret: config.appSecret, domain, info });
     void info.catch(() => { if (this.identities.get(config.appId)?.info === info) this.identities.delete(config.appId); });
     return info;
   }

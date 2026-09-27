@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { canonicalExecutionJson, previewNextSchedule, RuntimeError, type CollaborationAction, type CollaborationMandate, type CollaborationScope, type CollaborationSnapshot, type ScheduleDefinition, type ScheduleExecutionFence, type ScheduleLease, type ScheduleOccurrence } from '@dutydeck/shared';
 import { scheduleWriterLeaseKey } from '@dutydeck/storage';
 import { CollaborationService, collaborationContextSignature, scheduleMatchesMandate, type CollaborationAuthorization, type CollaborationRepositories } from './collaboration-service.js';
+import { LarkServiceError } from './lark/service.js';
 
 export interface ScheduleExecutionInput {
   scope: CollaborationScope; actorId: string; mandate: CollaborationMandate; schedule: ScheduleDefinition;
@@ -233,7 +234,8 @@ export class ScheduleExecutor {
       await this.actionState(delivery, 'succeeded', result.receipt);
       await this.advance(occurrence, 'settled', lease);
     } catch (error) {
-      const state = error instanceof RuntimeError && ['COLLABORATION_DELIVERY_SUPPRESSED', 'COLLABORATION_EXECUTION_STALE', 'COLLABORATION_BUDGET_EXHAUSTED'].includes(error.code) ? 'suppressed' : 'unknown';
+      const state = error instanceof RuntimeError && ['COLLABORATION_DELIVERY_SUPPRESSED', 'COLLABORATION_EXECUTION_STALE', 'COLLABORATION_BUDGET_EXHAUSTED'].includes(error.code) ? 'suppressed'
+        : error instanceof LarkServiceError && error.code === 'LARK_CIRCUIT_OPEN' ? 'failed' : 'unknown';
       const current = await this.repos.collaboration.getAction(mandate.scope, delivery.id);
       if (current?.status === 'sending') await this.actionState(current, state, undefined, message(error));
       const currentOccurrence = await this.repos.scheduleOccurrences.get(occurrence.id);

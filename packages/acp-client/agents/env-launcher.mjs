@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { launchAgent } from './launcher-process.mjs';
 import { readFileSync } from 'node:fs';
 
 const carrierKey = 'dutydeck_agent_env_file';
@@ -24,20 +24,4 @@ try {
 const env = { ...process.env, ...bridged };
 delete env[carrierKey];
 delete env[digestKey];
-const child = spawn(command, args, { stdio: 'inherit', env });
-for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-  process.on(signal, () => {
-    if (!child.killed) child.kill(signal);
-  });
-}
-child.once('error', error => {
-  process.stderr.write(`${error.message}\n`);
-  process.exitCode = 1;
-});
-child.once('exit', (code, signal) => {
-  if (signal) {
-    process.kill(process.pid, signal);
-    return;
-  }
-  process.exitCode = code ?? 1;
-});
+launchAgent(command, args, env);

@@ -112,6 +112,7 @@ async function harness(options: { now?: () => Date; timeoutMs?: number; agentMod
       dispatch: (id, prompt, mode, agentPrompt) => runtime.dispatch(id, prompt, mode, agentPrompt),
       getTasks: id => runtime.getTasks(id),
       getTaskRecovery: (id, taskId) => runtime.getTaskRecovery(id, taskId),
+      getSessionTaskRecovery: id => runtime.getSessionTaskRecovery(id),
       cancelQueued: (id, taskId, actor, revision) => runtime.cancelQueued(id, taskId, actor, revision),
       archive: (id, actor) => runtime.archive(id, actor),
       interrupt: memoryInterrupt,
@@ -517,6 +518,9 @@ describe('Lark memory pipeline through the coordinator', () => {
     // 先关自动触发，攒够 3 轮后手动跑一次提取，好在它执行期间再塞 3 轮进来。
     const manual = await h.setConfig({ memoryAutoExtract: false });
     await h.runTurns(3, manual);
+    await vi.waitFor(async () => {
+      expect((await h.store.getState(scope)).pendingTurns).toHaveLength(3);
+    });
     const extraction = h.pipeline.runExtraction(scope);
     await h.runTurns(3, manual);
     expect(await extraction).toMatchObject({ kind: 'extraction', ok: true });
@@ -724,7 +728,7 @@ describe('Lark memory pipeline through the coordinator', () => {
   });
 
   it('记忆会话超时但中断未确认：保留原任务、报告恢复所需并清掉管线 running', async () => {
-    const h = await harness({ timeoutMs: 30 });
+    const h = await harness({ timeoutMs: 300 });
     h.setResponder(() => ({ text: jsonBlock({ actions: [{ op: 'noop' }] }), delayMs: 1_500 }));
 
     await h.coordinator.handle(event('om_remember', '/remember 这个群的回复统一用中文'), h.config);
@@ -853,6 +857,7 @@ describe('stuck memory session after a daemon restart', () => {
           dispatch: (id, prompt, mode, agentPrompt) => runtime.dispatch(id, prompt, mode, agentPrompt),
           getTasks: id => runtime.getTasks(id),
           getTaskRecovery: (id, taskId) => runtime.getTaskRecovery(id, taskId),
+          getSessionTaskRecovery: id => runtime.getSessionTaskRecovery(id),
           cancelQueued: (id, taskId, actor, revision) => runtime.cancelQueued(id, taskId, actor, revision),
           archive: (id, actor) => runtime.archive(id, actor),
           interrupt: (id, taskId, actor) => runtime.interrupt(id, taskId, actor),

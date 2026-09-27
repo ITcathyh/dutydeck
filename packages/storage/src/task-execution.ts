@@ -44,13 +44,16 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     return Object.fromEntries(Object.entries(row).filter(([, v]) => v !== null).map(([k, v]) => [names[k] ?? k, v])) as unknown as Session;
   };
   const task = (taskId: string): ExecutionTask | undefined => {
-    const r = db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId) as Record<string, any> | undefined;
+    return decodeTask(db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId) as Record<string, any> | undefined);
+  };
+  const decodeTask = (r: Record<string, any> | undefined): ExecutionTask | undefined => {
     if (!r) return;
     return { id: r.id, sessionId: r.session_id, prompt: r.prompt, status: r.status, revision: r.revision, digestVersion: r.digest_version,
       ...(r.execution_context ? { executionContext: JSON.parse(r.execution_context) } : {}), ...(r.current_attempt_id ? { currentAttemptId: r.current_attempt_id } : {}),
       ...(r.queue_position !== null ? { queuePosition: r.queue_position } : {}), ...(r.interrupted_by_actor ? { interruptedByActor: r.interrupted_by_actor } : {}), createdAt: r.created_at, updatedAt: r.updated_at };
   };
   const attempt = (attemptId: string) => rowJson<TaskAttempt>(db.prepare('SELECT json FROM task_attempts WHERE id=?').get(attemptId));
+  const taskAttempts = (taskId: string) => db.prepare('SELECT json FROM task_attempts WHERE task_id=? ORDER BY number,id').all(taskId).map(row => rowJson<TaskAttempt>(row)!);
   const attempts = (sessionId: string) => db.prepare('SELECT json FROM task_attempts WHERE session_id=? ORDER BY number,id').all(sessionId).map(row => rowJson<TaskAttempt>(row)!);
   const readResource = (row: unknown): DriverResource | undefined => {
     if (!row) return;
@@ -84,7 +87,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const externalBlockers = (sessionId: string): ExecutionBlocker[] => {
     const result: ExecutionBlocker[] = [];
-    for (const row of db.prepare("SELECT key,value FROM configs WHERE key=? OR key=? OR substr(key,1,length(?))=?").all(`runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId}:`) as Array<{ key: string; value: string }>) {
+    for (const row of db.prepare("SELECT key,value FROM configs WHERE key IN (?,?) OR (key>=? AND key<?)").all(`runtime_driver_stop_block:${sessionId}`, `runtime_workspace:${sessionId}`, `runtime_verification:${sessionId}:`, `runtime_verification:${sessionId};`) as Array<{ key: string; value: string }>) {
       if (row.key === `runtime_driver_stop_block:${sessionId}` && row.value === '') continue;
       try {
         const v = JSON.parse(row.value);
@@ -508,7 +511,30 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     getTaskExecution(taskId) {
       const t = task(taskId); if (!t) return;
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
-      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: db.prepare('SELECT json FROM task_attempts WHERE task_id=? ORDER BY number').all(t.id).map(row => rowJson<TaskAttempt>(row)!), blockers: [...blockers(t.sessionId), ...inputBlockers(t)] };
+      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), blockers: [...blockers(t.sessionId), ...inputBlockers(t)] };
+    },
+    getAttempt(ref) {
+      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+      const value = attempt(ref.attemptId);
+      if (value?.taskId === ref.taskId && value.sessionId === ref.sessionId && value.runId === ref.runId) return value;
+    },
+    getSessionExecutions(sessionId) {
+      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+      const byTask = new Map<string, TaskAttempt[]>();
+      for (const value of attempts(sessionId)) {
+        const list = byTask.get(value.taskId) ?? []; list.push(value); byTask.set(value.taskId, list);
+      }
+      const sharedBlockers = blockers(sessionId);
+      return (db.prepare('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,id').all(sessionId) as Record<string, any>[]).map(row => {
+        const t = decodeTask(row)!;
+        const values = byTask.get(t.id) ?? [];
+        return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, blockers: [...sharedBlockers, ...inputBlockers(t)] };
+      });
+    },
+    getUnresolvedTasks(sessionId) {
+      if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
+      return db.prepare("SELECT DISTINCT t.id,t.status FROM task_attempts a JOIN tasks t ON t.id=a.task_id WHERE a.session_id=? AND a.state IN ('preparing','active','reconcile_required','legacy_unresolved') ORDER BY t.created_at,t.id")
+        .all(sessionId) as Array<{ id: string; status: ExecutionTask['status'] }>;
     },
     getAttemptEvents(attemptId, window = {}) {
       id.parse(attemptId);

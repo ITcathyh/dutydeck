@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 import type { AgentConfig } from '@dutydeck/shared'
 import { createRepositories, PRE_V10_BACKUP_SUFFIX } from './index.js'
 import { migrations, runMigrations, withMigrationTransaction } from './migrations.js'
+import { createCiWebhookRepository } from './ci-webhook.js'
+import { createUsageLedgerRepository } from './usage-ledger.js'
 
 const BUSINESS_TABLES = [
   'agent_configs',
@@ -49,7 +51,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -580,6 +582,70 @@ describe('storage migrations', () => {
     expect(db.prepare('SELECT before_json FROM schedule_entity_versions WHERE entity_kind = ? AND entity_id = ? AND to_revision = 1').get('schedule_definition', 'definition-bloated')).toBeUndefined()
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
     db.close()
+  })
+
+  it.each(['v27', 'master-v28', 'p1-v28', 'p1-v29'])('upgrades %s with execution indexes while preserving CI and usage records', async lineage => {
+    const db = new Database(':memory:')
+    try {
+      db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+      const record = db.prepare('INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)')
+      withMigrationTransaction(db, () => {
+        for (const migration of migrations.filter(migration => migration.version <= 27)) {
+          if (migration.version === 27) db.exec(readFileSync(new URL('./fixtures/usage-ledger-v27.sql', import.meta.url), 'utf8'))
+          else migration.up(db)
+          record.run(migration.version, '2026-09-25T00:00:00.000Z')
+        }
+      })
+      expect(appliedVersions(db)).toEqual(ALL_VERSIONS.filter(version => version <= 27))
+      const indexNames = () => (db.pragma('index_list(task_attempts)') as Array<{ name: string }>).map(index => index.name)
+      for (const name of ['task_attempts_session_state', 'task_attempts_session_order']) expect(indexNames()).not.toContain(name)
+
+      const ci = createCiWebhookRepository(db)
+      expect(ci.claimEvent('event-v27', 1_000, 11_000)).toBe(true)
+      ci.bindTask('task-v27', 'subscription-v27', 1_000)
+      db.prepare(`INSERT INTO usage_ledger (id, recorded_at, app_id, chat_id, session_id, task_id, attempt_id, actor_id,
+        category, origin, agent_id, usage_ref, input_tokens, output_tokens, cost_usd, cumulative_cost_usd, cost_estimated, data_status)
+        VALUES ('usage-v27', '2026-09-25T00:00:00.000Z', 'app-v27', 'chat-v27', 'session-v27', 'task-v27', 'attempt-v27', 'actor-v27',
+        'explicit', 'lark_group', 'claude', 'request-v27', 100, 10, 0.5, 1.5, 0, 'reported')`).run()
+      db.exec("INSERT INTO usage_caps VALUES ('group', 'app-v27', 'chat-v27', 2, '2026-09-25T00:00:00.000Z'); INSERT INTO usage_cap_alerts VALUES ('group', 'app-v27', 'chat-v27', '2026-09', 75, '2026-09-25T00:00:00.000Z')")
+      if (lineage !== 'v27') {
+        if (lineage === 'master-v28') migrations.find(migration => migration.version === 28)!.up(db)
+        else db.exec('CREATE INDEX task_attempt_session_history ON task_attempts(session_id,number,id)')
+        record.run(28, '2026-09-26T00:00:00.000Z')
+      }
+      if (lineage === 'p1-v29') {
+        migrations.find(migration => migration.version === 29)!.up(db)
+        record.run(29, '2026-09-27T00:00:00.000Z')
+      }
+      const preservedTables = ['ci_webhook_events', 'ci_webhook_tasks', 'usage_ledger', 'usage_caps', 'usage_cap_alerts']
+      const columns = preservedTables.map(table => (db.pragma(`table_info(${table})`) as Array<{ name: string }>).map(column => column.name).join(','))
+      const storedRecords = () => preservedTables.map((table, index) => db.prepare(`SELECT ${columns[index]} FROM ${table} ORDER BY rowid`).all())
+      const before = storedRecords()
+
+      runMigrations(db)
+      expect(appliedVersions(db)).toEqual(ALL_VERSIONS)
+      for (const [name, columns] of [
+        ['task_attempts_session_state', ['session_id', 'state', 'task_id']],
+        ['task_attempts_session_order', ['session_id', 'number', 'id']]
+      ] as const) {
+        expect(indexNames()).toContain(name)
+        expect((db.pragma(`index_info(${name})`) as Array<{ name: string }>).map(column => column.name)).toEqual(columns)
+      }
+      expect(indexNames()).not.toContain('task_attempt_session_history')
+      expect(storedRecords()).toEqual(before)
+      expect(db.pragma('integrity_check', { simple: true })).toBe('ok')
+      expect(db.pragma('foreign_key_check')).toEqual([])
+      const applied = db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()
+      runMigrations(db)
+      expect(db.prepare('SELECT * FROM schema_migrations ORDER BY version').all()).toEqual(applied)
+      expect(storedRecords()).toEqual(before)
+      expect(ci.claimEvent('event-v27', 2_000, 12_000)).toBe(false)
+      expect(ci.taskSubscription('task-v27')).toBe('subscription-v27')
+      const usage = createUsageLedgerRepository(db)
+      expect(await usage.totals({ appId: 'app-v27', chatId: 'chat-v27' })).toMatchObject({ entries: 1, costUsd: 0.5, inputTokens: 100, outputTokens: 10 })
+      expect(await usage.hasUsageRef('session-v27', 'request-v27')).toBe(true)
+      expect(await usage.claimAlert('group', 'app-v27', 'chat-v27', '2026-09', 75)).toBe(false)
+    } finally { db.close() }
   })
 
   it('creates a consistent one-time backup before the irreversible v10 table rebuild', async () => {

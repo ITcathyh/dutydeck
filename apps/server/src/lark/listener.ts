@@ -7,7 +7,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import type { AgentConfig, AgentEvent, ChannelMappingRepository, ConfigRepository, PermissionRequestData, PermissionMode, PolicyAction, PolicyDecision, Session, TaskRecord, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceResponse } from '@dutydeck/shared';
 import type { LarkGroupManager } from './group-management.js';
 import type { StoredLarkConfig } from './config.js';
-import { createLarkCardService, LarkServiceError } from './service.js';
+import { createLarkCardService, larkConfigurationStatus, LarkServiceError } from './service.js';
 import { setLarkGateLog } from './api-gate.js';
 import { getChatMode } from './chat-mode.js';
 import { larkCommandCapabilities } from './commands.js';
@@ -152,7 +152,8 @@ export class LarkLongConnectionListener implements LarkListener {
     if (webReachability.kind !== 'public' && webReachability.message) {
       this.log.warn({ appId: config.appId, kind: webReachability.kind }, webReachability.message);
     }
-    const credentials = `${config.appId}\u0000${config.appSecret}`;
+    const domain = larkConfigurationStatus(this.options.env ?? process.env, config).baseUrl;
+    const credentials = `${config.appId}\u0000${config.appSecret}\u0000${domain}`;
     if (this.listening && this.credentials === credentials) {
       const participationChanged = this.config?.defaultGroupParticipation !== config.defaultGroupParticipation;
       this.config = config;
@@ -165,13 +166,14 @@ export class LarkLongConnectionListener implements LarkListener {
 
     const http = createWorkbenchFetch(this.options.fetcher);
     this.http = http;
-    const service = createLarkCardService(this.options.env ?? process.env, http.fetch, { appId: config.appId, appSecret: config.appSecret });
+    const service = createLarkCardService(this.options.env ?? process.env, http.fetch, config);
     let botOpenId: string;
     try { botOpenId = await service.getBotOpenId(); }
     catch (error) { http.close(); throw new LarkServiceError('LARK_LISTENER_START_FAILED', `Failed to resolve Lark bot identity: ${error instanceof Error ? error.message : String(error)}`, 502); }
     http.fetch.signal!.throwIfAborted();
     // 话题群种子消息需要按群形态路由：默认用带缓存的 getChatMode，也允许注入（测试/自定义路由）。
     const chatModeResolver = this.options.chatModeResolver ?? ((appId: string, chatId: string) => getChatMode(appId, config.appSecret, chatId, {
+      domain,
       read: () => service.callOpenApi(`/open-apis/im/v1/chats/${encodeURIComponent(chatId)}?user_id_type=open_id`, { method: 'GET' })
     }));
     const coordinator = this.options.runtime ? new LarkMessageCoordinator(
@@ -355,6 +357,7 @@ export class LarkLongConnectionListener implements LarkListener {
     const client = new lark.WSClient({
       appId: config.appId,
       appSecret: config.appSecret,
+      domain,
       loggerLevel: lark.LoggerLevel.warn,
       autoReconnect: true,
       // 握手超时：避免 TCP 已建立但 WebSocket 升级无响应时，重连循环的 connect() 永远挂起。
