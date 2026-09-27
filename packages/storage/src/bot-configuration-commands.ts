@@ -1,3 +1,4 @@
+import { assertBotProcessApp } from './bot-process.js';
 import type Database from 'better-sqlite3';
 import { z } from 'zod';
 import {
@@ -81,6 +82,7 @@ function createCommand(db: Database.Database): ConfigurationCommand<CreateBotV2,
     },
     access: input => ({ kind: 'owner', botIds: [input.botId] }),
     execute(input, context) {
+      assertBotProcessApp(db, input.externalAppId);
       if (context.before.get(input.botId) !== undefined) {
         fail('CONFIGURATION_CONFLICT', `Bot ID "${input.botId}" already exists`);
       }
@@ -223,6 +225,7 @@ function updateCommand(db: Database.Database): ConfigurationCommand<UpdateInput,
       const nextDisplayName = input.patch.displayName !== undefined ? input.patch.displayName : original.bot.displayName;
       const nextPlatformDisplayName = input.patch.platformDisplayName !== undefined ? input.patch.platformDisplayName : original.bot.platformDisplayName;
       const nextAppId = input.patch.externalAppId !== undefined ? input.patch.externalAppId : original.bot.externalAppId;
+      assertBotProcessApp(db, nextAppId);
       const nextBrand = input.patch.brand !== undefined ? input.patch.brand : original.bot.brand;
 
       if (nextAppId !== original.bot.externalAppId) {

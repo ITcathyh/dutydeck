@@ -1,3 +1,5 @@
+import { assertBotProcessConfigWrite } from './bot-process.js';
+export { assertBotProcessStartup, botProcessKey, botProcessMigrationKey, type BotProcessBinding } from './bot-process.js';
 import Database from 'better-sqlite3';
 import { and, asc, desc, eq, gt, lt } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
@@ -342,11 +344,12 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     },
     config: {
       async get(key) { return db.select().from(configs).where(eq(configs.key, key)).get()?.value; },
-      async set(key, value) { if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
+      async set(key, value) { assertBotProcessConfigWrite(sqlite, key, value); if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409); db.insert(configs).values({ key, value }).onConflictDoUpdate({ target: configs.key, set: { value } }).run(); },
       async list(prefix) {
         return sqlite.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ? ORDER BY key').all(prefix, prefix) as Array<{ key: string; value: string }>;
       },
       async compareAndSet(key, expected, value) {
+        assertBotProcessConfigWrite(sqlite, key, value);
         if (key.startsWith('runtime_native_context:')) throw new RuntimeError('EXECUTION_WRITE_REQUIRES_LEDGER', 'Native context selection requires a bound ledger command', 409);
         return expected === undefined
           ? sqlite.prepare('INSERT INTO configs (key, value) VALUES (?, ?) ON CONFLICT(key) DO NOTHING').run(key, value).changes === 1

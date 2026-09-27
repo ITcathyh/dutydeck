@@ -416,6 +416,9 @@ dutydeck stop
 dutydeck update
 ```
 
+单 bot 进程使用分库后的数据库启动：`dutydeck start --foreground --database /path/to/bot.db --bot-app-id cli_xxx`。数据库中的 `dutydeck.bot_process` 绑定必须与参数一致；已迁出的源库会拒绝启动。每个进程使用独立的数据库、端口、systemd unit 和 `WorkingDirectory`，并设置 `DUTYDECK_DAEMON_DIR=<WorkingDirectory>/.dutydeck/daemon`，使状态、日志和重启命令定位到当前 bot。`--cwd` 只指定 Agent 工作目录。普通未分库部署的启动方式不变。
+
+
 ### 2. 健康检查与环境排障 (`doctor`)
 
 遇到服务异常、无法连接或配置疑惑时，第一步运行：

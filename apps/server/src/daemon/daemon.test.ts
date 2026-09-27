@@ -1,4 +1,4 @@
-import { childProcessIdentity, currentProcessIdentity } from '@dutydeck/storage';
+import { createRepositories, childProcessIdentity, currentProcessIdentity } from '@dutydeck/storage';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   pidAlive,
   readDaemonStatus,
+  resolveDaemonDir,
   writeState,
   writePidFile,
   clearState,
@@ -18,7 +19,7 @@ import {
   writeLastDaemonDir,
   lastDaemonDirPointerFile
 } from './daemon.js';
-import { daemonRestartOptions, daemonStart, daemonStop, daemonStatus, markDaemonReady } from './command.js';
+import { daemonRestart, daemonRestartOptions, daemonStart, daemonStop, daemonStatus, markDaemonReady } from './command.js';
 
 describe('Dutydeck daemon session', () => {
   let tmp: string;
@@ -34,6 +35,56 @@ describe('Dutydeck daemon session', () => {
     cwdSpy.mockRestore();
     vi.unstubAllEnvs();
     rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it.each(['cli_a', null])('keeps bot/Web process %s state local without changing the global pointer', async appId => {
+    const database = join(tmp, 'bot.db');
+    const repos = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
+    await repos.config.set('lark.bots', JSON.stringify(appId ? [{ appId }] : []));
+    await repos.config.set('dutydeck.bot_process', JSON.stringify({ version: 1, appId })); repos.close();
+    const pointed = join(tmp, 'main', '.dutydeck', 'daemon'); mkdirSync(pointed, { recursive: true });
+    writeLastDaemonDir(pointed, tmp);
+    await daemonStart({ foreground: true, database, cwd: '/agent/workspace' }, { serve: vi.fn() }, { HOME: tmp });
+    const state = readDaemonStatus(defaultDaemonDir())!;
+    expect(state).toMatchObject({ botProcess: true, agentCwd: '/agent/workspace' });
+    expect(readFileSync(lastDaemonDirPointerFile(tmp), 'utf8').trim()).toBe(pointed);
+    expect(daemonRestartOptions({}, state)).toMatchObject({ cwd: '/agent/workspace', ...(appId ? { botAppId: appId } : {}) });
+    writeState(defaultDaemonDir(), { ...state, pid: 0 });
+    expect(resolveDaemonDir()).toBe(defaultDaemonDir());
+  });
+
+  it('prefers explicit daemon directory and refuses restarting a differently bound process', async () => {
+    const dir = join(tmp, 'bot-b', '.dutydeck', 'daemon');
+    vi.stubEnv('DUTYDECK_DAEMON_DIR', dir);
+    writeState(dir, { pid: 0, ready: false, startedAt: 'old', cwd: join(tmp, 'bot-b'), botAppId: 'cli_b', botProcess: true });
+    expect(resolveDaemonDir()).toBe(dir);
+    const runCommand = vi.fn();
+    const result = await daemonRestart({ botAppId: 'cli_a' }, { serve: vi.fn(), runCommand });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('BOT_PROCESS_SCOPE') });
+    expect(runCommand).not.toHaveBeenCalled();
+  });
+
+  it.each(['option', 'environment'])('refuses an unresolved bot restart from %s without touching the main daemon or pointer', async source => {
+    const mainDir = join(tmp, 'main', '.dutydeck', 'daemon');
+    const main = { pid: process.pid, processIdentity: currentProcessIdentity(), ready: true, startedAt: 'main', cwd: join(tmp, 'main'), supervisor: 'systemd' as const, systemdUnit: 'dutydeck.service' };
+    writeState(mainDir, main); writeLastDaemonDir(mainDir, tmp);
+    const pointer = readFileSync(lastDaemonDirPointerFile(tmp), 'utf8');
+    const runCommand = vi.fn(), fetch = vi.fn(), serve = vi.fn();
+    const result = await daemonRestart(source === 'option' ? { botAppId: 'cli_a' } : {}, { serve, runCommand, fetch }, { HOME: tmp, ...(source === 'environment' ? { DUTYDECK_BOT_APP_ID: 'cli_a' } : {}) });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('BOT_PROCESS_SCOPE') });
+    expect(runCommand).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled(); expect(serve).not.toHaveBeenCalled();
+    expect(readDaemonStatus(mainDir)).toEqual(main);
+    expect(readFileSync(lastDaemonDirPointerFile(tmp), 'utf8')).toBe(pointer);
+  });
+
+  it('keeps an explicitly selected stop directory instead of resolving the main pointer again', async () => {
+    const mainDir = join(tmp, 'main', '.dutydeck', 'daemon');
+    const main = { pid: process.pid, processIdentity: currentProcessIdentity(), ready: true, startedAt: 'main', cwd: join(tmp, 'main'), supervisor: 'systemd' as const, systemdUnit: 'dutydeck.service' };
+    writeState(mainDir, main); writeLastDaemonDir(mainDir, tmp);
+    const runCommand = vi.fn();
+    expect(await daemonStop({ runCommand }, defaultDaemonDir(tmp))).toMatchObject({ ok: true, running: false, state: 'not-running' });
+    expect(runCommand).not.toHaveBeenCalled(); expect(readDaemonStatus(mainDir)).toEqual(main);
+    expect(readFileSync(lastDaemonDirPointerFile(tmp), 'utf8').trim()).toBe(mainDir);
   });
 
   it('reports false for a non-running or absent daemon', () => {

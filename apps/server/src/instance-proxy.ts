@@ -1,9 +1,9 @@
 import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import type { Readable } from 'node:stream';
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
 import { rejectUpgrade, upgradeRejection, type TerminalRouteAuth } from './terminal/terminal-ws.js';
 
 /**
@@ -26,6 +26,36 @@ export function parsePeerInstances(raw: string | undefined): PeerInstance[] {
 }
 
 const PROXY_PATH = /^\/api\/instances\/([a-z0-9-]+)(\/[^#]*)$/;
+export const BOT_SESSION_ROUTES_KEY = 'dutydeck.bot_session_routes';
+const sessionRoutesSchema = z.object({ version: z.literal(1), routes: z.record(z.string().min(1), z.string().regex(/^[a-z0-9-]+$/)) }).strict();
+
+/** A dedicated destination path makes anonymous sharing fail closed on older peers. */
+export function rewriteSharedSessionProxyUrl(request: { url?: string; method?: string }): string {
+  const url = request.url ?? '/';
+  const queryAt = url.indexOf('?');
+  const tokens = new URLSearchParams(queryAt < 0 ? '' : url.slice(queryAt + 1)).getAll('share');
+  if (!['GET', 'HEAD'].includes(request.method ?? '') || tokens.length !== 1 || !tokens[0]) return url;
+  return url.replace(/^\/api\/shared-sessions\/([A-Za-z0-9_-]+(?:\/(?:events|tasks|stream))?)(?=\?|$)/, '/api/sessions/$1');
+}
+
+function proxyTarget(raw: string | undefined, peers: PeerInstance[]) {
+  const match = PROXY_PATH.exec(raw ?? '');
+  const peer = match && peers.find(item => item.id === match[1]);
+  if (!peer || !match) return undefined;
+  const path = `/api${match[2]}`;
+  const url = new URL(path, peer.url);
+  // Do not authorize one path and forward a normalized traversal to another.
+  if (url.pathname !== path.split('?')[0] || url.hash || url.origin !== new URL(peer.url).origin) return undefined;
+  return { peer, url };
+}
+
+export function isSharedInstanceRead(request: Pick<FastifyRequest, 'method' | 'url'>, peers: PeerInstance[]): boolean {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return false;
+  const target = proxyTarget(request.url, peers);
+  if (!target || !/^\/api\/sessions\/[A-Za-z0-9_-]+(?:\/(?:events|tasks|stream))?$/.test(target.url.pathname)) return false;
+  const tokens = target.url.searchParams.getAll('share');
+  return tokens.length === 1 && tokens[0]!.length > 0;
+}
 // 逐跳头不转发；Host 由目标地址重新生成；登录凭据和 Origin 属于主服务，对方是本机实例，不需要。
 const HOP_BY_HOP = ['connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
 const PRIVATE_REQUEST_HEADERS = ['host', 'cookie', 'authorization', 'origin', 'referer'];
@@ -37,15 +67,24 @@ const DROPPED_RESPONSE_HEADERS = new Set([...HOP_BY_HOP, 'set-cookie']);
 const withoutHeaders = (headers: IncomingHttpHeaders, dropped: Set<string>) =>
   Object.fromEntries(Object.entries(headers).filter(([name, value]) => value !== undefined && !dropped.has(name)));
 
-export function registerInstanceProxy(app: FastifyInstance, peers: PeerInstance[], auth: TerminalRouteAuth | undefined): void {
+export async function registerInstanceProxy(app: FastifyInstance, peers: PeerInstance[], auth: TerminalRouteAuth | undefined, config?: ConfigRepository): Promise<void> {
+  const rawRoutes = await config?.get(BOT_SESSION_ROUTES_KEY);
+  const routes = rawRoutes == null ? {} : sessionRoutesSchema.parse(JSON.parse(rawRoutes)).routes;
+  for (const id of Object.values(routes)) {
+    if (!peers.some(peer => peer.id === id)) throw new Error(`Session route references unknown instance: ${id}`);
+  }
+  app.addHook('onRequest', async (request, reply) => {
+    if (request.method !== 'GET' && request.method !== 'HEAD') return;
+    const match = /^\/(share|sessions)\/([^/?]+)(?:\?.*)?$/.exec(request.url);
+    if (!match) return;
+    let sessionId: string;
+    try { sessionId = decodeURIComponent(match[2]!); } catch { return; }
+    const instanceId = Object.prototype.hasOwnProperty.call(routes, sessionId) ? routes[sessionId] : undefined;
+    if (instanceId) return reply.header('Cache-Control', 'no-store').redirect(`/instances/${instanceId}/${match[1]}/${encodeURIComponent(sessionId)}`, 302);
+  });
   app.get('/api/instances', async () => ({ instances: peers.map(({ id, name }) => ({ id, name })) }));
   if (!peers.length) return;
-  const byId = new Map(peers.map(peer => [peer.id, peer]));
-  const target = (url: string | undefined) => {
-    const match = PROXY_PATH.exec(url ?? '');
-    const peer = match && byId.get(match[1]!);
-    return peer ? { peer, url: new URL(`/api${match[2]}`, peer.url) } : undefined;
-  };
+  const target = (url: string | undefined) => proxyTarget(url, peers);
 
   void app.register(async scope => {
     // 请求体原样转发，不在主服务解析。
@@ -55,11 +94,13 @@ export function registerInstanceProxy(app: FastifyInstance, peers: PeerInstance[
       const upstreamTarget = target(request.raw.url);
       if (!upstreamTarget) throw new RuntimeError('INSTANCE_NOT_FOUND', `Unknown instance: ${(request.params as { id: string }).id}`, 404);
       const { peer, url } = upstreamTarget;
+      const sharedRead = isSharedInstanceRead(request, peers);
+      if (sharedRead) url.pathname = url.pathname.replace('/api/sessions/', '/api/shared-sessions/');
       reply.hijack();
       const upstream = httpRequest(url, { method: request.method, headers: withoutHeaders(request.headers, DROPPED_REQUEST_HEADERS) });
       upstream.on('response', response => {
         // 对方要登录说明它不是 --local-only 启动的；原样回 401 会让浏览器以为主服务掉了登录。
-        reply.raw.writeHead(response.statusCode === 401 ? 502 : response.statusCode ?? 502, withoutHeaders(response.headers, DROPPED_RESPONSE_HEADERS));
+        reply.raw.writeHead(response.statusCode === 401 && !sharedRead ? 502 : response.statusCode ?? 502, withoutHeaders(response.headers, DROPPED_RESPONSE_HEADERS));
         response.pipe(reply.raw);
       });
       upstream.on('error', error => {
