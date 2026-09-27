@@ -343,8 +343,8 @@ describe('App browser navigation and shell states', () => {
     vi.mocked(api.sessions).mockRejectedValueOnce(new Error('temporary sessions failure'));
     await act(async () => { await client.refetchQueries({ queryKey: ['sessions'], exact: true }); });
 
-    const staleStatus = await screen.findByRole('status');
-    expect(staleStatus.textContent).toContain('部分数据可能不是最新：任务列表');
+    const staleStatus = await screen.findByText(/部分数据可能不是最新：任务列表/);
+    expect(staleStatus.closest('[role="status"]')).toBeTruthy();
     expect(screen.getByRole('button', { name: '归档任务' })).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
 
@@ -1005,23 +1005,23 @@ describe('App 完整历史记录', () => {
     data: index === 0 ? { role: 'user', text: '最早的历史内容' } : { role: 'assistant', text: '最新的历史内容' }
   }));
 
-  it('首屏只读取尾页，滚动顶部自动补齐并在刷新后保留记录', async () => {
+  it('首屏显示尾页后无需操作自动读完历史，刷新保留已读内容', async () => {
     window.history.replaceState(null, '', '/sessions/s1');
     mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')] });
-    vi.mocked(api.events).mockImplementation(async (_id, query) => history.filter(event => query?.before === undefined || event.sequence < query.before).slice(-query!.limit!));
-    const { client, container } = renderApp();
-    await waitFor(() => expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toHaveLength(200));
-    expect(api.events).toHaveBeenCalledTimes(1);
-    for (let page = 0; page < 6; page++) {
-      // These status-only pages add no visible height; JSDOM also has no
-      // layout. Continued upward wheel input can load another page at top=0,
-      // whereas assigning the same scrollTop does not cause a browser scroll.
-      fireEvent.wheel(container.querySelector('[data-timeline-scroll]')!, { deltaY: -100 });
-      await waitFor(() => expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toHaveLength(Math.min(1205, 400 + page * 200)));
-      expect(api.events).toHaveBeenCalledTimes(page + 2);
-    }
-    expect(await screen.findByText('最早的历史内容')).toBeTruthy();
+    let release!: () => void;
+    const olderReady = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(api.events).mockImplementation(async (_id, query) => {
+      if (query?.before !== undefined) await olderReady;
+      return history.filter(event => query?.before === undefined || event.sequence < query.before).slice(-query!.limit!);
+    });
+    const { client } = renderApp();
+    expect(await screen.findByText('已加载 200 条，正在加载全部历史…')).toBeTruthy();
+    expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toHaveLength(200);
+    expect(api.events).toHaveBeenNthCalledWith(1, 's1', { limit: 200, direction: 'backward' }, expect.any(AbortSignal));
+    await act(async () => release());
+    expect(await screen.findByText('已加载全部 1205 条记录')).toBeTruthy();
     expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual(history);
+    expect(api.events).toHaveBeenCalledTimes(7);
     expect(screen.queryByRole('button', { name: '加载更早记录' })).toBeNull();
     await act(() => client.invalidateQueries({ queryKey: ['events', 's1'] }));
     expect(client.getQueryData<EventWindow>(['events', 's1'])?.events).toEqual(history);

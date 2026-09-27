@@ -31,5 +31,15 @@ export function useEventHistory(sessionId: string | undefined, enabled: boolean)
       if (request.current === controller) { request.current = undefined; setLoadingOlder(false); }
     }
   }, [sessionId, qc]);
+  useEffect(() => {
+    if (!enabled || !query.data?.hasOlder || loadingOlder || olderError) return;
+    // Let the tail paint before starting the next serial background page.
+    // Only paging progress reschedules this work; live frames cannot starve it.
+    let secondFrame: number | undefined;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => { void loadOlder(); });
+    });
+    return () => { cancelAnimationFrame(firstFrame); if (secondFrame !== undefined) cancelAnimationFrame(secondFrame); };
+  }, [enabled, query.data?.hasOlder, query.data?.events[0]?.sequence, loadingOlder, olderError, loadOlder]);
   return { ...query, loadOlder, loadingOlder, olderError };
 }

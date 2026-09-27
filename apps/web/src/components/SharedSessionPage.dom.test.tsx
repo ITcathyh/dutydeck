@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { api, ApiError, type DockEvent, type Session, type Task } from '../api';
 import { SharedSessionPage } from './SharedSessionPage';
@@ -53,4 +53,36 @@ describe('SharedSessionPage', () => {
     expect(screen.queryByRole('button')).toBeNull();
     expect(eventsRead).not.toHaveBeenCalled();
   });
+});
+
+
+it('automatically loads the full shared history with progressive status and read-only controls', async () => {
+  vi.spyOn(api, 'session').mockResolvedValue(session);
+  vi.spyOn(api, 'tasks').mockResolvedValue([]);
+  const history = Array.from({ length: 1205 }, (_, index): DockEvent => ({ id: `share-${index}`, sequence: index + 1, timestamp: '', type: 'status', data: {} }));
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const loader = vi.spyOn(api, 'events').mockImplementation(async (_id, query) => {
+    if (query?.before) await gate;
+    return history.filter(event => !query?.before || event.sequence < query.before).slice(-query!.limit!);
+  });
+  renderPage();
+  await screen.findByText('已加载 200 条，正在加载全部历史…');
+  await act(async () => release());
+  await screen.findByText('已加载全部 1205 条记录');
+  expect(loader).toHaveBeenCalledTimes(7);
+  expect(screen.queryByRole('textbox')).toBeNull();
+  expect(screen.queryByRole('button', { name: /允许本次|拒绝/ })).toBeNull();
+});
+
+
+it('retries a failed initial shared history read', async () => {
+  vi.spyOn(api, 'session').mockResolvedValue(session);
+  vi.spyOn(api, 'tasks').mockResolvedValue([]);
+  const loader = vi.spyOn(api, 'events').mockRejectedValueOnce(new Error('offline')).mockResolvedValue(events);
+  renderPage();
+  await screen.findByText(/执行记录加载失败：offline/);
+  fireEvent.click(screen.getByRole('button', { name: '重试加载记录' }));
+  await screen.findByText('已加载全部 2 条记录');
+  expect(loader).toHaveBeenCalledTimes(2);
 });

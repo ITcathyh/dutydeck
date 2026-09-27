@@ -73,8 +73,8 @@ export function SharedSessionPage({ sessionId }: { sessionId: string }) {
       </div>
       {errorSummary && <div className="px-3 pb-3 sm:px-5"><Banner tone="danger" title="失败详情">{errorSummary}</Banner></div>}
     </header>
-    {events.isError && <div className="shrink-0 px-4 py-2"><Banner tone="danger">执行记录加载失败：{events.error.message}</Banner></div>}
-    <TimelineView key={sessionId} hasOlder={events.data?.hasOlder} loadOlder={events.loadOlder} loadingOlder={events.loadingOlder} olderError={events.olderError} activeSessionId={sessionId} eventsLoading={events.isLoading} timeline={timeline} timelineSections={timelineSections}
+    {events.isError && <div className="shrink-0 px-4 py-2"><Banner tone="danger">执行记录加载失败：{events.error.message}<button className="ml-2 underline" onClick={() => void events.refetch()}>重试加载记录</button></Banner></div>}
+    <TimelineView key={sessionId} hasOlder={events.data?.hasOlder} loadedEventCount={events.data?.events.length} loadOlder={events.loadOlder} olderError={events.olderError} activeSessionId={sessionId} eventsLoading={events.isLoading} timeline={timeline} timelineSections={timelineSections}
       awaitingAnswer={awaitingAnswer} hasOngoingActivity={hasOngoingActivity} latestUserIndex={latestUserIndex} activeOutputLabel={session.model ?? session.agentId}
       renderProgress={emptyState => emptyState ? <p className="py-10 text-center text-caption text-subtle">这个任务还没有执行记录。</p> : null}/>
   </div>;

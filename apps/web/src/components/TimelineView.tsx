@@ -10,7 +10,7 @@ import { TimelineItem } from './TimelineItem';
 export type TimelineViewProps = {
   activeSessionId?: string;
   hasOlder?: boolean;
-  loadingOlder?: boolean;
+  loadedEventCount?: number;
   olderError?: string;
   loadOlder?(): Promise<void>;
   eventsLoading: boolean;
@@ -85,7 +85,7 @@ const TimelineBody = memo(function TimelineBody({ timelineSections, activeOutput
 type TimelineTurn = { id: string; sections: TimelineSection[] };
 type TimelineRow = TimelineTurn & { top: number; height: number };
 
-export function TimelineView({ activeSessionId, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadingOlder, olderError, loadOlder }: TimelineViewProps) {
+export function TimelineView({ activeSessionId, eventsLoading, onResolvePermission, resolvingPermissionId, timeline, timelineSections, awaitingAnswer, hasOngoingActivity, latestUserIndex, activeOutputLabel, footer, renderProgress, hasOlder, loadedEventCount, olderError, loadOlder }: TimelineViewProps) {
   const disclosures = useMemo(() => new Map<string, boolean>(), [activeSessionId]);
   const progressRef = useRef<HTMLDivElement>(null);
   const timelineScroll = useTimelineAutoScroll(activeSessionId, timeline, awaitingAnswer);
@@ -182,18 +182,11 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
     // the same event/pixel target until the user scrolls again.
     syncViewport(!anchor.current?.eventId);
   }, [layout, activeSessionId, first, last]);
-  const touchY = useRef<number | undefined>(undefined);
-  const requestOlder = () => {
-    if ((timelineScroll.containerRef.current?.scrollTop ?? Infinity) < 120 && hasOlder && !loadingOlder) {
-      timelineScroll.stopFollowing(); syncViewport(); void loadOlder?.();
-    }
-  };
   const onScroll = () => {
     const scrollTop = timelineScroll.containerRef.current?.scrollTop;
     if (scrollTop === programmedScrollTop.current) { syncViewport(false); return; }
     programmedScrollTop.current = undefined;
     timelineScroll.onScroll(); syncViewport();
-    requestOlder();
   };
   useEffect(() => {
     const progress = progressRef.current;
@@ -204,13 +197,8 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
   }, [activeSessionId, timelineScroll.isFollowing]);
   return <TimelineDisclosureContext.Provider value={disclosures}><div className="relative min-h-0 flex-1 bg-canvas">
     <div ref={timelineScroll.containerRef} onScroll={onScroll}
-      onWheel={event => { if (event.deltaY < 0) requestOlder(); }}
-      onTouchStart={event => { touchY.current = event.touches[0]?.clientY; }}
-      onTouchMove={event => { if (touchY.current !== undefined && (event.touches[0]?.clientY ?? touchY.current) > touchY.current) requestOlder(); }}
-      style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={timeline[0]?.sequence} className="absolute inset-0 overscroll-contain overflow-y-auto">
+      style={{ overflowAnchor: 'none' }} data-timeline-scroll="true" data-history-start={timeline[0]?.sequence} data-history-loaded={loadedEventCount} data-history-complete={hasOlder === false} className="absolute inset-0 overscroll-contain overflow-y-auto">
       <div className="mx-auto w-full max-w-[880px] px-5 py-8 sm:px-8 sm:py-10">
-        {olderError && <button onClick={() => void loadOlder?.()} className="text-caption text-danger">历史加载失败，点击重试：{olderError}</button>}
-        {!eventsLoading && !timeline.length && hasOlder && <p className="text-caption text-subtle">向上滚动查看更早记录</p>}
         {eventsLoading
           ? <TimelineSkeleton/>
           : timeline.length
@@ -232,6 +220,10 @@ export function TimelineView({ activeSessionId, eventsLoading, onResolvePermissi
         {!eventsLoading && timeline.length > 0 && footer}
       </div>
     </div>
+    {!eventsLoading && loadedEventCount !== undefined && <div className="absolute left-5 top-1 z-sticky rounded bg-canvas px-2 py-1 text-meta text-subtle">
+      <span role="status">{olderError ? `已加载 ${loadedEventCount} 条，历史加载中断` : hasOlder ? `已加载 ${loadedEventCount} 条，正在加载全部历史…` : `已加载全部 ${loadedEventCount} 条记录`}</span>
+      {olderError && <button onClick={() => void loadOlder?.()} className="ml-2 text-caption text-danger" title={olderError}>重试加载历史</button>}
+    </div>}
     {!timelineScroll.isFollowing && <ScrollToBottomButton onClick={timelineScroll.scrollToBottom}/>}
   </div></TimelineDisclosureContext.Provider>;
 }

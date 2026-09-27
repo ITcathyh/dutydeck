@@ -90,16 +90,14 @@ it('keeps an expanded single-turn tool mounted when an older fragment is prepend
   expect(screen.getByText(/output 201/)).toBeTruthy();
 });
 
-it('loads older history on upward wheel or touch when the tail has no renderable events', () => {
+it('shows progress and retries failed background history only on explicit retry', () => {
   const loadOlder = vi.fn(async () => {});
-  const view = render(<TimelineView activeSessionId="empty-tail" eventsLoading={false} timeline={[]} timelineSections={[]} awaitingAnswer={false} hasOngoingActivity={false} latestUserIndex={-1} activeOutputLabel="Codex" hasOlder loadOlder={loadOlder}/>);
-  const container = view.container.querySelector('[data-timeline-scroll]')!;
-  expect(screen.getByText('向上滚动查看更早记录')).toBeTruthy();
-  fireEvent.wheel(container, { deltaY: -100 });
+  const view = render(<TimelineView activeSessionId="empty-tail" eventsLoading={false} timeline={[]} timelineSections={[]} awaitingAnswer={false} hasOngoingActivity={false} latestUserIndex={-1} activeOutputLabel="Codex" hasOlder loadedEventCount={200} olderError="offline" loadOlder={loadOlder}/>);
+  expect(screen.getByText('已加载 200 条，历史加载中断')).toBeTruthy();
+  fireEvent.wheel(view.container.querySelector('[data-timeline-scroll]')!, { deltaY: -100 });
+  expect(loadOlder).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: '重试加载历史' }));
   expect(loadOlder).toHaveBeenCalledTimes(1);
-  fireEvent.touchStart(container, { touches: [{ clientY: 100 }] });
-  fireEvent.touchMove(container, { touches: [{ clientY: 200 }] });
-  expect(loadOlder).toHaveBeenCalledTimes(2);
 });
 
 

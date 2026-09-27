@@ -1,3 +1,4 @@
+import { OptionalModelOverrides } from './OptionalModelOverrides';
 import type { LarkSetupTarget } from '../app-route';
 import { useState, useMemo } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -748,6 +749,7 @@ export function BotManagement({
                     />
                     <span>启用会话记忆</span>
                   </label>
+                  <OptionalModelOverrides key={activeAppId} initiallyExpanded={Boolean(currentDraft.decisionAgentId || currentDraft.decisionModel || currentDraft.responseAgentId || currentDraft.responseModel || activeBot.decisionAgentId || activeBot.decisionModel || activeBot.responseAgentId || activeBot.responseModel)}>
                   <div className="grid gap-4 sm:grid-cols-2">
                     <Field label="群判定 Agent" hint="留空沿用记忆 Agent，再回落默认 Agent。">
                       <Select aria-label="群判定 Agent" value={currentDraft.decisionAgentId} onChange={e => updateCurrentDraft({ decisionAgentId: e.target.value })}>
@@ -770,6 +772,7 @@ export function BotManagement({
                       <Input aria-label="群回复模型" value={currentDraft.responseModel} onChange={e => updateCurrentDraft({ responseModel: e.target.value })} placeholder="沿用记忆或默认模型"/>
                     </Field>
                   </div>
+                  </OptionalModelOverrides>
                   {currentDraft.memoryEnabled && (
                     <>
                       <label className="flex items-center gap-2 text-caption">
