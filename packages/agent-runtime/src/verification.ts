@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { lstat, readFile, readlink, realpath } from 'node:fs/promises';
+import { lstat, readFile, readdir, readlink, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { ConfigRepository, VerificationCommandInput, VerificationRecord, VerificationResponse } from '@dutydeck/shared';
 import { makeId, now, RuntimeError } from '@dutydeck/shared';
@@ -27,6 +27,16 @@ interface VerificationProcessIdentity {
 interface StoredVerificationRecord extends VerificationRecord {
   processStage?: 'awaiting_process' | 'command_started';
   processIdentity?: VerificationProcessIdentity;
+}
+
+interface CommandResult {
+  exitCode?: number;
+  output: string;
+  outputTruncated: boolean;
+  timedOut: boolean;
+  interrupted: boolean;
+  error?: string;
+  cleanupError?: string;
 }
 
 async function git(cwd: string, args: string[]): Promise<string> {
@@ -209,7 +219,7 @@ export class VerificationManager {
     };
     await this.replace(active);
 
-    let result: { exitCode?: number; output: string; outputTruncated: boolean; timedOut: boolean; interrupted: boolean; error?: string };
+    let result: CommandResult;
     try {
       result = await runCommand(command, cwd, timeoutSeconds * 1_000, signal, secrets, async identity => {
         const identified: StoredVerificationRecord = { ...active, revision: active.revision + 1, processStage: 'command_started', processIdentity: identity };
@@ -218,6 +228,11 @@ export class VerificationManager {
       });
     }
     catch (error) { result = { output: '', outputTruncated: false, timedOut: false, interrupted: signal.aborted, error: error instanceof Error ? error.message : String(error) }; }
+    if (result.cleanupError) {
+      const error = redact(Buffer.from(result.cleanupError), secrets).toString('utf8');
+      await this.replace({ ...active, revision: active.revision + 1, output: result.output, outputTruncated: result.outputTruncated, error }, active);
+      throw new RuntimeError('VERIFICATION_RECOVERY_BLOCKED', error, 409);
+    }
     let afterFingerprint: string | undefined;
     let fingerprintError: string | undefined;
     try { afterFingerprint = await repositoryFingerprint(cwd); }
@@ -286,19 +301,32 @@ async function readLinuxProcessIdentity(pid: number, marker: string): Promise<Ve
     if (!Number.isSafeInteger(processGroupId) || !startTimeTicks || !cmdline.includes(Buffer.from(marker))) return undefined;
     return { platform: 'linux', pid, processGroupId, startTimeTicks, marker };
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return undefined;
     throw error;
   }
 }
 
-function processGroupExists(processGroupId: number): boolean {
-  try { process.kill(-processGroupId, 0); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ESRCH'; }
+async function processGroupExists(processGroupId: number): Promise<boolean> {
+  try { process.kill(-processGroupId, 0); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; }
+  // Orphaned zombies may await PID 1 indefinitely, but can no longer execute.
+  const entries = (await readdir('/proc')).filter(entry => /^\d+$/.test(entry));
+  const live = await Promise.all(entries.map(async pid => {
+    try {
+      const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      return Number(fields[2]) === processGroupId && fields[0] !== 'Z' && fields[0] !== 'X';
+    } catch (error) {
+      if (['ENOENT', 'ESRCH'].includes((error as NodeJS.ErrnoException).code ?? '')) return false;
+      throw error;
+    }
+  }));
+  return live.some(Boolean);
 }
 
 async function waitForProcessGroupExit(processGroupId: number, timeoutMs = 3_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  while (processGroupExists(processGroupId)) {
+  while (await processGroupExists(processGroupId)) {
     if (Date.now() >= deadline) return false;
     await new Promise(resolve => setTimeout(resolve, 25));
   }
@@ -310,7 +338,7 @@ async function stopPersistedProcess(record: StoredVerificationRecord): Promise<s
   const identity = record.processIdentity;
   if (!identity || identity.platform !== 'linux') return 'Verification process identity is missing; automatic recovery is unsafe';
   if (process.platform !== 'linux') return 'Verification process recovery currently requires Linux';
-  if (!processGroupExists(identity.processGroupId)) return undefined;
+  if (!await processGroupExists(identity.processGroupId)) return undefined;
   const actual = await readLinuxProcessIdentity(identity.pid, identity.marker);
   if (!actual || actual.processGroupId !== identity.processGroupId || actual.startTimeTicks !== identity.startTimeTicks) {
     return 'Verification process identity changed while its process group is still alive; refusing to kill an unverified process';
@@ -323,7 +351,7 @@ async function stopPersistedProcess(record: StoredVerificationRecord): Promise<s
   return undefined;
 }
 
-function runCommand(command: string, cwd: string, timeoutMs: number, signal: AbortSignal, secrets: Buffer[], onIdentity: (identity: VerificationProcessIdentity) => Promise<void>): Promise<{ exitCode?: number; output: string; outputTruncated: boolean; timedOut: boolean; interrupted: boolean; error?: string }> {
+function runCommand(command: string, cwd: string, timeoutMs: number, signal: AbortSignal, secrets: Buffer[], onIdentity: (identity: VerificationProcessIdentity) => Promise<void>): Promise<CommandResult> {
   return new Promise(resolve => {
     const safetyMargin = Math.max(0, ...secrets.map(secret => secret.length - 1));
     const captureLimit = MAX_OUTPUT_BYTES + safetyMargin;
@@ -336,6 +364,9 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
     let interrupted = false;
     let terminated = false;
     let closed = false;
+    let finishing = false;
+    let cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+    let exitCode: number | undefined;
     let identityRun: Promise<void> | undefined;
     let spawnError: string | undefined;
     const capture = (chunk: Buffer | string) => {
@@ -357,6 +388,8 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
         if (process.platform !== 'win32' && child.pid) process.kill(-child.pid, 'SIGKILL');
         else child.kill('SIGKILL');
       } catch { /* Process already exited. */ }
+      // Failed signalling must still return a durable resource blocker.
+      if (!closed && !cleanupTimer) cleanupTimer = setTimeout(() => { void finish(); }, 3_000);
     };
     const onAbort = () => { interrupted = true; terminate(); };
     signal.addEventListener('abort', onAbort, { once: true });
@@ -380,19 +413,32 @@ function runCommand(command: string, cwd: string, timeoutMs: number, signal: Abo
       });
     });
     child.once('close', code => {
+      exitCode = code ?? undefined;
+      // Redirected background children can outlive the shell and its pipes.
+      terminate();
       closed = true;
-      terminated = true;
+      void finish();
+    });
+    async function finish() {
+      if (finishing) return;
+      finishing = true;
       clearTimeout(timer);
+      clearTimeout(cleanupTimer);
       signal.removeEventListener('abort', onAbort);
       // Process exit can precede the identity read/commit. Keep that continuation
       // inside the tracked run so stop/shutdown cannot close storage ahead of it.
-      void (identityRun ?? Promise.resolve()).then(() => {
-        const raw = Buffer.concat(chunks);
-        const redacted = redact(raw, secrets);
-        if (raw.length > MAX_OUTPUT_BYTES || redacted.length > MAX_OUTPUT_BYTES) outputTruncated = true;
-        const output = redacted.subarray(0, MAX_OUTPUT_BYTES).toString('utf8');
-        resolve({ ...(code !== null ? { exitCode: code } : {}), output, outputTruncated, timedOut, interrupted, ...(spawnError ? { error: spawnError } : {}) });
-      });
-    });
+      await identityRun;
+      let cleanupError: string | undefined;
+      try {
+        if (child.pid && !await waitForProcessGroupExit(child.pid)) cleanupError = 'Verification process group did not exit; Session remains blocked';
+      } catch (error) {
+        cleanupError = `Unable to verify process group exit: ${error instanceof Error ? error.message : String(error)}`;
+      }
+      const raw = Buffer.concat(chunks);
+      const redacted = redact(raw, secrets);
+      if (raw.length > MAX_OUTPUT_BYTES || redacted.length > MAX_OUTPUT_BYTES) outputTruncated = true;
+      const output = redacted.subarray(0, MAX_OUTPUT_BYTES).toString('utf8');
+      resolve({ ...(exitCode !== undefined ? { exitCode } : {}), output, outputTruncated, timedOut, interrupted, ...(spawnError ? { error: spawnError } : {}), ...(cleanupError ? { cleanupError } : {}) });
+    }
   });
 }

@@ -297,7 +297,7 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     expect(f.leaderPrompts()).toHaveLength(4);
   });
 
-  it('frees the planning slots when Leader sessions hang before they can answer', async () => {
+  it('times out hung starts without dispatching late or reusing their cleanup slots', async () => {
     const f = await fixture('layered', { planningTimeoutMs: 300 });
     const turn = await f.pmoTurn('om_hang', '修复登录');
     f.leader.hangStart = true;
@@ -307,8 +307,17 @@ describe('分层协作：PMO 交接、Leader 规划、Worker 执行、Leader 验
     f.leader.hangStart = false;
     f.openLeader();
     const next = await turn.run('delegate', { goal: '修复注册', idempotencyKey: 'next' }) as { workId: string };
+    await vi.waitFor(async () => {
+      for (const { id } of hung) expect(await f.record(id)).toMatchObject({ status: 'failed', error: 'Leader 规划超时' });
+    });
+    expect(await f.work.listBySession(turn.parent.id, 'ou_alice')).toEqual([]);
+    expect(f.leaderPrompts()).toHaveLength(0);
+    f.leader.starts.splice(0).forEach(release => release());
     await vi.waitFor(async () => expect((await f.work.listBySession(turn.parent.id, 'ou_alice')).map(item => item.id)).toEqual([next.workId]));
-    for (const { id } of hung) expect(await f.record(id)).toMatchObject({ status: 'failed', error: 'Leader 规划超时' });
+    expect(f.leaderPrompts()).toHaveLength(1);
+    const retired = (await f.runtime.listSessions()).filter(session => hung.some(item => item.id === session.sourceId));
+    expect(retired).toHaveLength(3);
+    expect(retired.every(session => session.state === 'stopped')).toBe(true);
   });
 
   it('checks the roster again before creating the goal and only offers usable Workers', async () => {

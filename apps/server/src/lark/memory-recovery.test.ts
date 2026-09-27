@@ -9,7 +9,7 @@ afterEach(() => { vi.useRealTimers(); cleanups.splice(0).forEach(close => close(
 const scope = { appId: 'app_memory', chatId: 'chat_memory', pool: 'chat_memory' };
 const owner = { kind: 'installation_owner', id: 'installation_owner' };
 
-async function harness(status = 'running', timeoutMs = 30, options: { archive?: boolean } = {}) {
+async function harness(status = 'running', timeoutMs = 30, options: { archive?: boolean; now?: () => Date; staleRunningMs?: number } = {}) {
   const repos = createRepositories(':memory:');
   cleanups.push(() => repos.close());
   const store = new LarkMemoryStore(repos.config);
@@ -40,18 +40,126 @@ async function harness(status = 'running', timeoutMs = 30, options: { archive?: 
     ...(options.archive === false ? {} : { archive: vi.fn(async (id: string) => { sessions.find(item => item.id === id)!.archivedAt = '2026-09-25T00:00:01.000Z'; }) })
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-  const pipeline = new LarkMemoryPipeline({ runtime: runtime as unknown as LarkMemoryPipelineRuntime,
+  const pipelineOptions = { runtime: runtime as unknown as LarkMemoryPipelineRuntime,
     controlActorId: installationOwnerTaskActor, repos, store,
     projection: { write: vi.fn(), directoryFor: () => '/memory' } as any,
-    readConfig: async () => ({ appId: scope.appId, defaultAgentId: 'agent', memoryEnabled: true }) as any, log, timeoutMs });
+    readConfig: async () => ({ appId: scope.appId, defaultAgentId: 'agent', memoryEnabled: true }) as any, log, timeoutMs, now: options.now, staleRunningMs: options.staleRunningMs };
+  const pipeline = new LarkMemoryPipeline(pipelineOptions);
   return {
-    pipeline, runtime, session, fresh, task, store, log,
+    pipeline, pipelineOptions, runtime, session, fresh, task, store, log,
     setTasks: (next: TaskRecord[], sessionId = session.id) => { tasksBySession.set(sessionId, next); },
     tasks: (sessionId = session.id) => tasksOf(sessionId)
   };
 }
 
 describe('memory recovery and timeout boundaries', () => {
+  it.each(['dispatch', 'interrupt'] as const)('unsubscribes on timeout while %s is pending and still cleans up the late task', async phase => {
+    const h = await harness(phase === 'dispatch' ? 'queued' : 'running');
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const unsubscribe = vi.fn();
+    h.runtime.subscribe.mockReturnValue(unsubscribe);
+    if (phase === 'dispatch') {
+      h.runtime.dispatch.mockImplementation(async () => {
+        await gate;
+        h.setTasks([h.task('queued')]);
+        return { id: 'task_memory', status: 'queued' };
+      });
+    } else {
+      h.runtime.interrupt.mockImplementation(async () => {
+        await gate;
+        h.setTasks([h.task('interrupted')]);
+        return { interrupted: true };
+      });
+    }
+    try {
+      expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_TIMEOUT' });
+      expect(unsubscribe).toHaveBeenCalledOnce();
+      expect((await h.store.getState(scope)).running?.token).toBeTruthy();
+      expect(await h.pipeline.requestConsolidation(scope)).toBe('running');
+      // An already queued callback can still arrive after unsubscribe; it must not be buffered or read.
+      const readEvent = vi.fn(() => 'task');
+      const late = { get type() { return readEvent(); } } as AgentEvent;
+      const receive = h.runtime.subscribe.mock.calls[0]![1];
+      for (let index = 0; index < 10; index++) receive(late);
+      release();
+      await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+      expect(readEvent).not.toHaveBeenCalled();
+      expect(unsubscribe).toHaveBeenCalledOnce();
+      if (phase === 'dispatch') {
+        expect(h.runtime.cancelQueued).toHaveBeenCalledWith(h.session.id, 'task_memory', installationOwnerTaskActor, 3);
+        expect(h.runtime.interrupt).not.toHaveBeenCalled();
+      } else {
+        expect(h.runtime.interrupt).toHaveBeenCalledExactlyOnceWith(h.session.id, 'task_memory', installationOwnerTaskActor);
+        expect(h.runtime.cancelQueued).not.toHaveBeenCalled();
+      }
+    } finally {
+      release();
+      await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+    }
+  });
+
+  it.each(['startup', 'preparation'] as const)('bounds pending %s and keeps its live claim until late cleanup', async phase => {
+    let now = Date.now();
+    const h = await harness('failed', 30, { now: () => new Date(now), staleRunningMs: 50 });
+    h.session.state = 'stopped';
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    if (phase === 'startup') h.runtime.start.mockImplementation(async () => { await gate; return h.fresh; });
+    else h.pipelineOptions.projection.write.mockImplementation(async () => { await gate; });
+    const started = Date.now();
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_TIMEOUT' });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect((await h.store.getState(scope)).running?.token).toBeTruthy();
+    now += 60_000;
+    const second = new LarkMemoryPipeline(h.pipelineOptions);
+    expect(await second.requestConsolidation(scope)).toBe('running');
+    if (phase === 'startup') h.runtime.archive!.mockImplementation(async () => {});
+    release();
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+    expect(h.runtime.dispatch).not.toHaveBeenCalled();
+    if (phase === 'startup') expect(h.runtime.archive).toHaveBeenCalledWith(h.fresh.id, owner);
+    else expect(h.runtime.start).not.toHaveBeenCalled();
+    expect(await h.store.list(scope)).toHaveLength(1);
+  });
+
+  it('bounds pending dispatch, retains ownership, and cancels only the late accepted task', async () => {
+    const h = await harness('queued');
+    let release!: () => void;
+    h.runtime.dispatch.mockImplementation(async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      h.setTasks([h.task('queued')]);
+      return { id: 'task_memory', status: 'queued' };
+    });
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_TIMEOUT' });
+    expect((await h.store.getState(scope)).running?.token).toBeTruthy();
+    expect(await h.pipeline.requestConsolidation(scope)).toBe('running');
+    release();
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
+    expect(h.runtime.cancelQueued).toHaveBeenCalledWith(h.session.id, 'task_memory', installationOwnerTaskActor, 3);
+    expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+    expect(h.runtime.interrupt).not.toHaveBeenCalled();
+    expect(await h.store.list(scope)).toHaveLength(1);
+  });
+
+  it('does not release or overwrite another claim when an old operation finishes', async () => {
+    const h = await harness('failed', 1000);
+    let release!: () => void;
+    h.runtime.dispatch.mockImplementation(async () => {
+      await new Promise<void>(resolve => { release = resolve; });
+      return { id: 'task_memory', status: 'failed' };
+    });
+    const run = h.pipeline.runConsolidation(scope);
+    await vi.waitFor(() => expect(h.runtime.dispatch).toHaveBeenCalledOnce());
+    const before = await h.store.getState(scope);
+    await h.store.updateState(scope, { running: { ...before.running!, token: 'new-claim' } });
+    release();
+    await expect(run).rejects.toMatchObject({ code: 'MEMORY_CLAIM_LOST' });
+    expect((await h.store.getState(scope)).running?.token).toBe('new-claim');
+    expect((await h.store.getState(scope)).lastRun).toBe(before.lastRun);
+    expect(await h.store.list(scope)).toHaveLength(1);
+  });
+
   it.each(['reconcile_required', 'legacy_unresolved'])('ends immediately on %s without cancelling or interrupting the unknown turn', async status => {
     const h = await harness(status, 600_000);
     await expect(h.pipeline.runConsolidation(scope)).resolves.toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });

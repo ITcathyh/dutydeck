@@ -6,9 +6,9 @@ import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import { AcpxAdapter } from '@dutydeck/acp-client';
 import { createRuntimeStore } from 'acpx/runtime';
-import { RuntimeError, type AgentConfig, type CollaborationSnapshot } from '@dutydeck/shared';
+import { RuntimeError, type AgentConfig, type AgentEvent, type CollaborationSnapshot } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
-import { parseParticipationResponse, parseParticipationResult, participationInput, ReadonlyParticipationDecider, type ParticipationResult } from './readonly-decider.js';
+import { parseParticipationResponse, parseParticipationResult, participationInput, ReadonlyParticipationDecider, runReadonlyPrompt, type ParticipationResult } from './readonly-decider.js';
 
 const scope = { appId: 'cli_test', chatId: 'oc_test' };
 const stamp = '2026-09-18T01:00:00.000Z';
@@ -173,7 +173,6 @@ describe('read-only participation decision', () => {
     for (const output of ['not json', new Error('agent failed'), null]) {
       const h = await harness(output, output === null ? 100 : 3000);
       const stop = vi.spyOn(h.runtime, 'stop');
-      const interrupt = vi.spyOn(h.runtime, 'interrupt');
       const unsubscribe = vi.fn();
       const subscribe = h.runtime.subscribe.bind(h.runtime);
       vi.spyOn(h.runtime, 'subscribe').mockImplementation((id, listener) => {
@@ -182,14 +181,13 @@ describe('read-only participation decision', () => {
       });
       const run = runPhase(h.decider, phase);
       if (output === 'not json') await expect(run).rejects.toThrow(SyntaxError);
-      else await expect(run).rejects.toMatchObject({ code: 'COLLABORATION_DECISION_FAILED', message: `Decision ended with ${output === null ? 'timeout' : 'failed'}` });
+      else await expect(run).rejects.toMatchObject({ code: output === null ? 'COLLABORATION_DECISION_TIMEOUT' : 'COLLABORATION_DECISION_FAILED', message: `Decision ended with ${output === null ? 'timeout' : 'failed'}` });
       expect(stop).toHaveBeenCalledOnce();
       expect(unsubscribe).toHaveBeenCalledOnce();
       await expect(stop.mock.results[0]!.value).resolves.toBeUndefined();
       expect(await h.drivers[0]!.isStopped!()).toBe(true);
       // A missing result can retain an unresolved Attempt, while its process is already stopped.
       expect(['stopped', 'interrupted']).toContain((await h.runtime.listSessions())[0]!.state);
-      if (output === null) expect(interrupt).toHaveBeenCalledOnce();
     }
   });
 
@@ -274,4 +272,40 @@ describe('participation model routing', () => {
     expect(h.starts[0]?.model).toBe('classification-model');
     expect(h.starts).toHaveLength(1);
   });
+});
+
+
+it.each(['dispatch', 'stop'] as const)('unsubscribes immediately at timeout while %s remains pending', async pending => {
+  let receive!: (event: AgentEvent) => void;
+  let finishDispatch!: (task: { id: string }) => void;
+  let finishStop!: () => void;
+  let released = false;
+  let cleanup!: Promise<void>;
+  const unsubscribe = vi.fn();
+  const stopped = new Promise<void>(resolve => { finishStop = resolve; });
+  const dispatched = new Promise<{ id: string }>(resolve => { finishDispatch = resolve; });
+  const runtime = {
+    start: async () => ({ id: 'pending-decision' }),
+    subscribe: (_id: string, listener: (event: AgentEvent) => void) => { receive = listener; return unsubscribe; },
+    dispatch: vi.fn(() => pending === 'dispatch' ? dispatched : Promise.resolve({ id: 'decision-task' })),
+    stop: vi.fn(() => pending === 'stop' ? stopped : Promise.resolve())
+  };
+  try {
+    const result = runReadonlyPrompt(runtime as unknown as Parameters<typeof runReadonlyPrompt>[0], {} as Parameters<typeof runReadonlyPrompt>[1], {
+      agentId: 'mock', cwd: '/tmp', source: 'test', sourceId: 'test', prompt: 'decide', timeoutMs: 20,
+      onCleanup: promise => { cleanup = promise; void promise.then(() => { released = true; }); }
+    });
+    await expect(result).rejects.toMatchObject({ code: 'COLLABORATION_DECISION_TIMEOUT' });
+    expect(runtime.dispatch).toHaveBeenCalledOnce();
+    expect(runtime.stop).toHaveBeenCalledOnce();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(released).toBe(false);
+    // Even a callback already queued by the publisher must not inspect or retain late events.
+    expect(() => receive({ get type() { throw new Error('late event was inspected'); } } as AgentEvent)).not.toThrow();
+    finishDispatch({ id: 'decision-task' }); finishStop();
+    await cleanup;
+    expect(released).toBe(true);
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(runtime.stop).toHaveBeenCalledOnce();
+  } finally { finishDispatch({ id: 'decision-task' }); finishStop(); await cleanup; }
 });

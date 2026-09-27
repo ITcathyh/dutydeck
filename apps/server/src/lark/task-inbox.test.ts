@@ -45,6 +45,22 @@ describe('persistent Lark task inbox', () => {
     }
   });
 
+  it('serializes preparation and cancellation patches without losing the terminal state', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const inbox = new LarkTaskInbox(repositories.config);
+      const record = (await inbox.claim('app_one', message()))!;
+      await Promise.all([
+        inbox.update(record, { sessionId: 'ses_pending' }),
+        inbox.update(record, { state: 'failed', error: 'superseded' }),
+        inbox.update(record, { cardId: 'om_receipt' })
+      ]);
+      expect(JSON.parse((await repositories.config.get('lark.inbox.app_one.om_original'))!))
+        .toMatchObject({ state: 'failed', sessionId: 'ses_pending', cardId: 'om_receipt', error: 'superseded' });
+      expect(await new LarkTaskInbox(repositories.config).recoverable('app_one')).toEqual([]);
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
   it('reopens a received message under a new boot without replacing the persisted event', async () => {
     const { directory, filename, repositories } = await openDatabase();
     let reopened = false;

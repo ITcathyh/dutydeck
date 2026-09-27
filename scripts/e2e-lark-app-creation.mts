@@ -9,6 +9,8 @@ import { agentConfigSchema } from '@dutydeck/shared';
 import { buildApp } from '../apps/server/src/app.js';
 import { LarkAppCreationJobManager } from '../apps/server/src/lark/app-creation.js';
 import { LARK_COMMON_TENANT_SCOPES } from '../apps/server/src/lark/open-platform-configurator.js';
+import newAppPrivileges from '../apps/server/src/lark/fixtures/new-app-privileges.json';
+import automaticApproval from '../apps/server/src/lark/fixtures/approval-collaborator-exemption.json';
 import { readLarkConfig, saveLarkConfig } from '../apps/server/src/lark/config.js';
 import {
   resolveArtifactDir,
@@ -21,7 +23,7 @@ import {
 
 const startTime = Date.now();
 const pendingReview = process.env.DUTYDECK_E2E_PENDING_REVIEW === '1';
-const scenarioName = pendingReview ? 'e2e-lark-app-creation-pending-review' : 'e2e-lark-app-creation';
+const scenarioName = pendingReview ? 'e2e-lark-app-creation-publication-unconfirmed' : 'e2e-lark-app-creation';
 
 const artifactDir = await resolveArtifactDir(scenarioName);
 const logger = new ArtifactLogger(artifactDir);
@@ -148,12 +150,14 @@ async function runTest() {
   let callbackEnabled = false;
   let callbackMode = 0;
   let published = false;
+  let privileges = structuredClone(newAppPrivileges.data.privileges);
+  let versionBody: Record<string, unknown> | undefined;
 
   const jobs = new LarkAppCreationJobManager({
     config: repositories.config,
     agents: repositories.agents,
     connect: async options => {
-      assert.equal(options?.forceLogin, true);
+      assert.equal(options?.forceLogin, false);
       const scanned = new Promise<void>(resolve => { releaseScan = resolve; });
       await options?.onQrUpdate?.({ qrPayload: 'synthetic-feishu-qr', status: 'waiting_for_scan' });
       await scanned;
@@ -172,6 +176,11 @@ async function runTest() {
             calls.push({ path, body });
             if (path.endsWith('/manifest/upsert_by_template')) return { code: 0, data: { ClientID: 'cli_created' } };
             if (path === '/developers/v1/secret/cli_created') return { code: 0, data: { secret } };
+            if (path.includes('/privilege/all/')) return { code: 0, data: { privileges } };
+            if (path.includes('/privilege/update/')) {
+              privileges = structuredClone((body as { privileges: typeof privileges }).privileges);
+              return { code: 0 };
+            }
             if (path.includes('/scope/all/')) return { code: 0, data: { appScopeList: LARK_COMMON_TENANT_SCOPES.map((scopeName, i) => ({ scopeId: `scope-${i}`, scopeName, status: published ? 5 : scopesEnabled ? 1 : 0 })) } };
             if (path.includes('/scope/update/')) { scopesEnabled = true; return { code: 0 }; }
             if (path.includes('/robot/switch/') || path.includes('/event/switch/')) return { code: 0 };
@@ -192,8 +201,15 @@ async function runTest() {
             if (path.includes('/app_version/list/')) return { code: 0, data: { versions: published ? [{ versionId: 'first-version', appVersion: '0.0.1', versionStatus: pendingReview ? 1 : 2 }] : [] } };
             if (path.includes('/app_version/create/')) {
               assert.deepEqual((body as any).visibleSuggest.members, ['creator-user']);
+              versionBody = body;
               return { code: 0, data: { versionId: 'first-version' } };
             }
+            if (path.includes('/app_version/detail/')) return { code: 0, data: {
+              versionId: 'first-version', versionStatus: 0,
+              visibleRange: { whiteList: versionBody?.visibleSuggest, blackList: versionBody?.blackVisibleSuggest },
+              changeAppShareConfig: { b2cShareSplitConfigSuggest: { b2cGroupChatShareEnable: false, b2cP2PChatShareEnable: false, b2cP2PChatNeedAudit: false } },
+            } };
+            if (path.includes('/approval_nodes/get/')) return structuredClone(automaticApproval);
             if (path.includes('/publish/commit/')) { published = true; return { code: 0 }; }
             throw new Error(`Unexpected synthetic endpoint: ${path}`);
           },
@@ -231,18 +247,19 @@ async function runTest() {
 
   await page.goto(`${base}/?panel=lark-setup&mode=new`);
   const dialog = page.getByRole('dialog');
-  await expect(dialog.getByRole('button', { name: '扫码创建机器人' })).toBeVisible();
+  await expect(dialog.getByRole('button', { name: '创建机器人', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('checkbox', { name: '使用其他账号，重新扫码登录' })).not.toBeChecked();
   const desktopScreenshot = resolve(artifactDir, 'one-click-bot.png');
   await page.screenshot({ path: desktopScreenshot, animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
-  await expect(dialog.getByRole('button', { name: '扫码创建机器人' })).toBeInViewport();
+  await expect(dialog.getByRole('button', { name: '创建机器人', exact: true })).toBeInViewport();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
   const mobileScreenshot = resolve(artifactDir, 'one-click-bot-mobile.png');
   await page.screenshot({ path: mobileScreenshot, animations: 'disabled' });
   await page.setViewportSize({ width: 1440, height: 1000 });
   await dialog.getByLabel('新机器人名称').fill('扫码创建的助手');
   const started = page.waitForResponse(response => response.url().endsWith('/api/lark/apps/create') && response.request().method() === 'POST');
-  await dialog.getByRole('button', { name: '扫码创建机器人' }).click();
+  await dialog.getByRole('button', { name: '创建机器人', exact: true }).click();
   const job = await (await started).json();
   await expect(dialog.getByAltText('创建机器人：飞书登录二维码')).toBeVisible();
   await page.reload();
@@ -250,30 +267,40 @@ async function runTest() {
   assert.equal(calls.filter(call => call.path.includes('/manifest/')).length, 0);
   releaseScan();
   if (pendingReview) {
-    await expect(dialog.getByText(/正在等待飞书管理员审核/)).toBeVisible({ timeout: 15_000 });
-    await expect(dialog.getByRole('link', { name: '查看审核进度' })).toBeVisible();
+    await expect(dialog.getByText(/publish_verification_pending/)).toBeVisible({ timeout: 15_000 });
+    await expect(dialog.getByRole('link', { name: '到飞书后台核对应用' })).toBeVisible();
     await expect(dialog.getByRole('button', { name: '重试本次创建' })).toHaveCount(0);
     await dialog.getByRole('button', { name: '继续配置已创建的机器人' }).click();
   }
   await expect(dialog.getByRole('heading', { name: '更新飞书 Bot：扫码创建的助手' })).toBeVisible({ timeout: 15_000 });
-  await expect(dialog.getByText('默认 Agent', { exact: true })).toBeVisible();
-  await expect(dialog.getByRole('button', { name: 'CCFlash (Claude Code / CPA)', exact: true })).toBeVisible();
   const draft = await readLarkConfig(repositories.config, 'cli_created');
   assert.equal(draft?.appSecret, secret);
   assert.equal(draft?.listening, false);
   assert.equal(draft?.fullTrustConfirmed, false);
-  await dialog.getByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ }).check();
-  await dialog.getByRole('button', { name: '完成配置' }).click();
-  await expect(dialog).toHaveCount(0);
+  if (pendingReview) {
+    await expect(dialog.getByText(/应用已创建，自动配置尚未完成/)).toBeVisible();
+    await expect(dialog.getByRole('button', { name: '完成配置' })).toHaveCount(0);
+  } else {
+    await expect(dialog.getByText('默认 Agent', { exact: true })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'CCFlash (Claude Code / CPA)', exact: true })).toBeVisible();
+    await dialog.getByRole('checkbox', { name: /确认飞书任务以 full-trust 运行/ }).check();
+    await dialog.getByRole('button', { name: '完成配置' }).click();
+    await expect(dialog).toHaveCount(0);
+  }
   const saved = await readLarkConfig(repositories.config, 'cli_created');
-  assert.equal(saved?.defaultAgentId, 'ccflash');
-  assert.equal(saved?.listening, true);
-  assert.equal(saved?.fullTrustConfirmed, true);
+  if (!pendingReview) assert.equal(saved?.defaultAgentId, 'ccflash');
+  assert.equal(saved?.listening, !pendingReview);
+  assert.equal(saved?.fullTrustConfirmed, !pendingReview);
   assert.deepEqual(await readLarkConfig(repositories.config, 'cli_previous'), previous);
   const duplicate = await fetch(`${base}/api/lark/apps/create`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ requestId: job.id, name: '扫码创建的助手' }) });
   assert.equal((await duplicate.json()).appId, 'cli_created');
   assert.equal(calls.filter(call => call.path.includes('/manifest/')).length, 1);
   assert.equal(calls.filter(call => call.path.includes('/publish/commit/')).length, 1);
+  assert.equal(calls.filter(call => call.path.includes('/privilege/all/')).length, 2);
+  assert.equal(JSON.parse(privileges[0]!.content).mode, 'part');
+  const predictionIndex = calls.findIndex(call => call.path.includes('/approval_nodes/get/'));
+  assert.ok(predictionIndex > calls.findIndex(call => call.path.includes('/app_version/detail/')));
+  assert.ok(calls.findIndex(call => call.path.includes('/publish/commit/')) > predictionIndex);
   assert.ok(!(await Promise.all(publicBodies)).join('\n').includes(secret));
   assert.deepEqual(errors, []);
 
@@ -283,6 +310,7 @@ async function runTest() {
     restoredAfterRefresh: true,
     secretHidden: true,
     previousBotPreserved: true,
+    unconfirmedPublicationKeptDisabled: pendingReview,
     selectedAgent: saved?.defaultAgentId,
     screenshots: [desktopScreenshot, mobileScreenshot],
   };

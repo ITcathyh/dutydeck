@@ -51,6 +51,7 @@ const agentsDir = resolve(serverRoot, 'dist/agents');
 mkdirSync(agentsDir, { recursive: true });
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-acp.mjs'), resolve(agentsDir, 'claude-acp.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/env-launcher.mjs'), resolve(agentsDir, 'env-launcher.mjs'));
+cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/launcher-process.mjs'), resolve(agentsDir, 'launcher-process.mjs'));
 const assetsDir = resolve(serverRoot, 'dist/assets');
 mkdirSync(assetsDir, { recursive: true });
 cpSync(resolve(serverRoot, 'src/lark/assets/dutydeck-bouncing-ball.webp'), resolve(assetsDir, 'dutydeck-bouncing-ball.webp'));

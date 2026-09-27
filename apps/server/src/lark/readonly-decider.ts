@@ -142,40 +142,81 @@ export class ReadonlyParticipationDecider implements ParticipationDecider {
   }
 }
 
-/** Runs one prompt in a fresh session (deny-all unless the caller passes a mode) and returns its settled Attempt text; the session is always stopped. */
-export async function runReadonlyPrompt(runtime: LarkMemoryPipelineRuntime, repos: AttemptResultRepositories, input: { agentId: string; cwd: string; model?: string; permissionMode?: PermissionMode; source: string; sourceId: string; prompt: string; timeoutMs: number }): Promise<string> {
-  const { prompt } = input;
-  const session = await runtime.start({ agentId: input.agentId, cwd: input.cwd, model: input.model, permissionMode: input.permissionMode ?? 'deny-all', source: input.source, sourceId: input.sourceId });
-  let taskId: string | undefined;
+/** The deadline includes startup, dispatch, result lookup and cleanup. Late startup never dispatches. */
+export async function runReadonlyPrompt(runtime: LarkMemoryPipelineRuntime, repos: AttemptResultRepositories, input: {
+  agentId: string; cwd: string; model?: string; permissionMode?: PermissionMode; source: string; sourceId: string; prompt: string; timeoutMs: number;
+  signal?: AbortSignal;
+  /** Schedulers keep the slot until pending startup/dispatch and resource cleanup really finish. */
+  onCleanup?: (cleanup: Promise<void>) => void;
+}): Promise<string> {
+  const controller = new AbortController();
+  const { signal } = controller;
+  const abort = () => controller.abort(input.signal?.reason ?? new RuntimeError('COLLABORATION_DECISION_CANCELLED', 'Decision cancelled', 409));
+  input.signal?.addEventListener('abort', abort, { once: true });
+  if (input.signal?.aborted) abort();
+  const timer = setTimeout(() => controller.abort(new RuntimeError('COLLABORATION_DECISION_TIMEOUT', 'Decision ended with timeout', 504)), input.timeoutMs);
+  let session: Awaited<ReturnType<LarkMemoryPipelineRuntime['start']>> | undefined;
+  let stopping: Promise<void> | undefined;
+  let unsubscribe: (() => void) | undefined;
+  let receiving = true;
   const buffered: AgentEvent[] = [];
-  let settle!: (status: string) => void;
-  const terminal = new Promise<string>(resolve => { settle = resolve; });
-  const receive = (event: AgentEvent) => {
-    if (event.type !== 'task') return;
-    const task = (event.data as { task?: { id?: string; status?: string } })?.task;
-    if (task && task.id === taskId && ['completed', 'failed', 'cancelled', 'interrupted'].includes(task.status ?? '')) settle(task.status!);
+  const stopReceiving = () => {
+    receiving = false;
+    buffered.length = 0;
+    const remove = unsubscribe;
+    unsubscribe = undefined;
+    remove?.();
   };
-  const unsubscribe = runtime.subscribe(session.id, event => { if (taskId) receive(event); else buffered.push(event); });
-  const timer = setTimeout(() => settle('timeout'), input.timeoutMs);
-  try {
-    taskId = (await runtime.dispatch(session.id, prompt, 'queue', prompt)).id;
-    buffered.forEach(receive);
-    const status = await terminal;
-    if (status !== 'completed') {
-      await runtime.interrupt(session.id, taskId).catch(() => undefined);
-      throw new RuntimeError('COLLABORATION_DECISION_FAILED', `Decision ended with ${status}`, 409);
-    }
-    for (let index = 0; index < 3; index++) {
-      if (index) await new Promise(resolve => setTimeout(resolve, 100));
-      const attempt = repos.execution.getTaskExecution(taskId)?.attempts.find(item => item.number === 1);
-      if (!attempt) continue;
-      const result = readAttemptResult(repos, session.id, taskId, attempt.attemptId);
-      if (result.status === 'settled' && result.result.outcome === 'completed') return result.result.output.text;
-    }
-    throw new RuntimeError('COLLABORATION_RESULT_UNAVAILABLE', 'Decision has no settled Attempt result', 409);
-  } finally {
-    clearTimeout(timer); unsubscribe();
-    // Stop the dedicated session when supported; never leave a permission wait behind.
-    await (runtime as LarkMemoryPipelineRuntime & { stop?(id: string): Promise<unknown> }).stop?.(session.id).catch(() => undefined);
-  }
+  const stop = () => {
+    if (!session) return Promise.resolve();
+    return stopping ??= Promise.resolve().then(async () => {
+      await (runtime as LarkMemoryPipelineRuntime & { stop?(id: string): Promise<unknown> }).stop?.(session!.id);
+    });
+  };
+  const cancelled = new Promise<never>((_resolve, reject) => {
+    const rejectAbort = () => { stopReceiving(); void stop().catch(() => {}); reject(signal.reason); };
+    signal.addEventListener('abort', rejectAbort, { once: true });
+    if (signal.aborted) rejectAbort();
+  });
+  const operation = (async () => {
+    try {
+      signal.throwIfAborted();
+      session = await runtime.start({ agentId: input.agentId, cwd: input.cwd, model: input.model, permissionMode: input.permissionMode ?? 'deny-all', source: input.source, sourceId: input.sourceId });
+      signal.throwIfAborted();
+      let taskId: string | undefined;
+      let settle!: (status: string) => void;
+      const terminal = new Promise<string>(resolve => { settle = resolve; });
+      const receive = (event: AgentEvent) => {
+        if (!receiving || signal.aborted || event.type !== 'task') return;
+        const task = (event.data as { task?: { id?: string; status?: string } })?.task;
+        if (task && task.id === taskId && ['completed', 'failed', 'cancelled', 'interrupted'].includes(task.status ?? '')) settle(task.status!);
+      };
+      unsubscribe = runtime.subscribe(session.id, event => {
+        if (!receiving || signal.aborted) return;
+        if (taskId) receive(event); else buffered.push(event);
+      });
+      signal.throwIfAborted();
+      taskId = (await runtime.dispatch(session.id, input.prompt, 'queue', input.prompt)).id;
+      signal.throwIfAborted();
+      buffered.forEach(receive);
+      buffered.length = 0;
+      const status = await Promise.race([terminal, cancelled]);
+      if (status !== 'completed') throw new RuntimeError('COLLABORATION_DECISION_FAILED', `Decision ended with ${status}`, 409);
+      for (let index = 0; index < 3; index++) {
+        if (index) await new Promise(resolve => setTimeout(resolve, 100));
+        signal.throwIfAborted();
+        const attempt = repos.execution.getTaskExecution(taskId)?.attempts.find(item => item.number === 1);
+        if (!attempt) continue;
+        const result = readAttemptResult(repos, session.id, taskId, attempt.attemptId);
+        if (result.status === 'settled' && result.result.outcome === 'completed') return result.result.output.text;
+      }
+      throw new RuntimeError('COLLABORATION_RESULT_UNAVAILABLE', 'Decision has no settled Attempt result', 409);
+    } finally { stopReceiving(); await stop(); }
+  })();
+  // A task failure still cleans up successfully; only a failed stop retains the resource slot.
+  const cleanup = operation.then(() => {}, async () => { await stopping; });
+  void cleanup.catch(() => {});
+  input.onCleanup?.(cleanup);
+  try { return await Promise.race([operation, cancelled]); }
+  finally { clearTimeout(timer); input.signal?.removeEventListener('abort', abort); }
 }

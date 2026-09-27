@@ -428,7 +428,7 @@ export const api = {
   larkMemoryStatus: (appId: string) => json<LarkMemoryStatusResult>(`/api/lark/bots/${encodeURIComponent(appId)}/memory/status`, { cache: 'no-store' }),
   sessionMemory: (sessionId: string) => json<{ turns: LarkTurnMemory[] }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory`, { cache: 'no-store' }),
   forgetSessionMemory: (sessionId: string, taskId: string, memoryId: string) => json<{ removed: { id: string } }>(`/api/sessions/${encodeURIComponent(sessionId)}/memory/${encodeURIComponent(taskId)}/entries/${encodeURIComponent(memoryId)}`, { method: 'DELETE' }),
-  installLarkHook: (appId: string, highRiskPattern: string) => json<LarkHookStatus>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern }) }),
+  installLarkHook: (appId: string, highRiskPattern: string, expectedRevision?: number) => json<LarkHookStatus & { configRevision?: number }>('/api/lark/hooks/install', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appId, highRiskPattern, expectedRevision }) }),
   systemCapabilities: () => json<{ platform: string; directoryPicker: boolean; filePicker: boolean }>('/api/system/capabilities'),
   skills: (cwd?: string) => json<SkillReference[]>(`/api/system/skills${cwd ? `?cwd=${encodeURIComponent(cwd)}` : ''}`),
   selectDirectory: () => json<{ path: string }>('/api/system/select-directory', { method: 'POST' }),

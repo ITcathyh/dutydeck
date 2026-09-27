@@ -571,8 +571,19 @@ export const migrations: Migration[] = [
   // CI webhook 的 event-id 去重和任务绑定是短期记录：单独建表，过期或任务结束即删，不写进只增不删的 configs。
   { version: 26, name: 'ci_webhook_short_lived_records', up: createCiWebhookSchema },
   { version: 27, name: 'usage_ledger', up: createUsageLedgerSchema },
-  { version: 28, name: 'attempt_session_history', up(db) { db.exec('CREATE INDEX IF NOT EXISTS task_attempt_session_history ON task_attempts(session_id, number, id)') } },
-  { version: 29, name: 'usage_pricing_and_background_budget', up: migrateUsagePricing }
+  { version: 28, name: 'execution_history_indexes', up(db) {
+    db.exec('CREATE INDEX task_attempts_session_state ON task_attempts(session_id,state,task_id); CREATE INDEX task_attempts_session_order ON task_attempts(session_id,number,id)');
+  } },
+  { version: 29, name: 'usage_pricing_and_background_budget', up: migrateUsagePricing },
+  { version: 30, name: 'reconcile_execution_history_indexes', up(db) {
+    // v28 also existed on the P1 branch with only the history index. Repair both lineages.
+    db.exec('CREATE INDEX IF NOT EXISTS task_attempts_session_state ON task_attempts(session_id,state,task_id); CREATE INDEX IF NOT EXISTS task_attempts_session_order ON task_attempts(session_id,number,id)');
+    const legacy = (db.pragma('index_list(task_attempts)') as Array<{ name: string; unique: number; partial: number }>).find(index => index.name === 'task_attempt_session_history');
+    if (legacy && !legacy.unique && !legacy.partial) {
+      const columns = (db.pragma('index_info(task_attempt_session_history)') as Array<{ name: string }>).map(column => column.name);
+      if (columns.join(',') === 'session_id,number,id') db.exec('DROP INDEX task_attempt_session_history');
+    }
+  } }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

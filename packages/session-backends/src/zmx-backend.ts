@@ -327,6 +327,8 @@ export class ZmxBackend implements SessionBackend {
   private launchDir: string | null = null;
   private tailProcess: ChildProcess | null = null;
   private historyTimer: NodeJS.Timeout | null = null;
+  private historyDueAt = 0;
+  private captureRequested = false;
   private historyGeneration = 0;
   private capturing = false;
   /** Last authoritative transcript; the diff base for delta emission. */
@@ -532,7 +534,11 @@ export class ZmxBackend implements SessionBackend {
   /** Schedule a capture in `delay` ms, unless one is already due sooner. */
   private requestHistoryCapture(delay: number): void {
     if (this.exited) return;
+    if (this.capturing) { this.captureRequested = true; return; }
+    const dueAt = Date.now() + delay;
+    if (this.historyTimer && this.historyDueAt <= dueAt) return;
     if (this.historyTimer) clearTimeout(this.historyTimer);
+    this.historyDueAt = dueAt;
     this.historyTimer = setTimeout(() => {
       this.historyTimer = null;
       void this.captureAndPublish();
@@ -561,7 +567,9 @@ export class ZmxBackend implements SessionBackend {
       this.capturing = false;
       if (!this.exited) {
         const cold = this.stablePolls >= HISTORY_STABLE_POLLS_BEFORE_COLD;
-        this.requestHistoryCapture(cold ? HISTORY_COLD_POLL_MS : HISTORY_HOT_POLL_MS);
+        const delay = this.captureRequested ? HISTORY_TAIL_DEBOUNCE_MS : cold ? HISTORY_COLD_POLL_MS : HISTORY_HOT_POLL_MS;
+        this.captureRequested = false;
+        this.requestHistoryCapture(delay);
       }
     }
   }
@@ -684,6 +692,7 @@ export class ZmxBackend implements SessionBackend {
 
   private stopObservation(): void {
     this.historyGeneration += 1;
+    this.captureRequested = false;
     if (this.historyTimer) {
       clearTimeout(this.historyTimer);
       this.historyTimer = null;

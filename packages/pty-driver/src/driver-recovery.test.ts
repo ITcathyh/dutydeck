@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { realpathSync } from 'node:fs';
 import type { AgentConfig, DriverTurnRecovery, NormalizedDriverEvent } from '@dutydeck/shared';
 import { DriverDetachedError, DriverRecoveryError } from '@dutydeck/shared';
-import { pinnedSessionUuid, type CliAdapter, type PtyLike } from '@dutydeck/cli-adapters';
+import { createCliAdapter, pinnedSessionUuid, type CliAdapter, type PtyLike } from '@dutydeck/cli-adapters';
 import { TmuxBackend, isTmuxAvailable, type SessionBackend } from '@dutydeck/session-backends';
 import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { buildSessionMarker } from './session-id/index.js';
@@ -119,6 +119,31 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     await expect(recovered.send('must not revive')).rejects.toThrow('PtyCliDriver: send() called after stop()');
     expect(TmuxBackend.probeSession(f.name)).toBe('exists');
   });
+
+  it.each(['codex', 'claude-code', 'traex'].flatMap(adapterId => ['write', 'sendSpecialKeys'].map(method => ({ adapterId, method }))))(
+    'rejects $adapterId submission when backend $method returns false without persisting success', async ({ adapterId, method }) => {
+      const f = fixture();
+      const backend = new TmuxBackend(f.name, { ownerId: f.ownerId });
+      const adapter = { ...createCliAdapter(adapterId)!, buildArgs: () => [], prepareInput: undefined };
+      const driver = new PtyCliDriver({ agent: config(f.cwd), adapter, backend, onEvent() {}, onExit() {}, sessionId });
+      try {
+        await driver.start();
+        await driver.checkpoint();
+        const writes = vi.spyOn(backend, 'write');
+        const enters = vi.spyOn(backend, 'sendSpecialKeys');
+        (method === 'write' ? writes : enters).mockReturnValue(false);
+        const metadata = vi.spyOn(backend, 'setDutydeckMetadata');
+        const sent = driver.send('fixture prompt').then(() => undefined, error => error);
+        let timer: NodeJS.Timeout | undefined;
+        const deadline = new Promise<Error>(resolve => { timer = setTimeout(() => resolve(new Error('submission did not reject')), 2_000); });
+        try { expect(await Promise.race([sent, deadline])).toMatchObject({ message: expect.stringContaining('backend rejected input') }); }
+        finally { clearTimeout(timer); }
+        expect(metadata).not.toHaveBeenCalled();
+        if (method === 'write') { expect(writes).toHaveBeenCalledOnce(); expect(enters).not.toHaveBeenCalled(); }
+        else expect(enters).toHaveBeenCalledOnce();
+      } finally { await driver.stop(); vi.restoreAllMocks(); }
+    }
+  );
 
   it('reattaches the original busy pane, replays only appended JSONL, and never submits the prompt twice', async () => {
     const f = fixture();

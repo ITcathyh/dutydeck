@@ -7,8 +7,8 @@
  * mapper that emits NormalizedDriverEvents.
  *
  * Semantics:
- *  - Start at END: when a file is first picked up, reading begins at its
- *    current size — history is never replayed.
+ *  - Start at END for a file resolved at startup; if no transcript exists
+ *    yet, read the first resolved file from 0 so the first answer is retained.
  *  - Rotation: when `watchForSwitch` is on, the path is re-resolved every
  *    tick; a newer file (session switch) becomes the tail target, again
  *    starting at its end.
@@ -85,7 +85,7 @@ export class JsonlTailer implements TranscriptEventSource {
   /** End of the last complete line. This is the only safe resume point. */
   private completedOffset = 0;
   private restoreCursor: TranscriptCursor | undefined;
-  /** True while the resolved path does not exist yet. When the file is first
+  /** True while no path can be resolved or the resolved path does not exist yet. When the file is first
    *  created, reading starts at byte 0 — those bytes are the beginning of the
    *  session, not replayable history. Without this latch a file created
    *  between two ticks would be treated as "existing transcript" and its
@@ -192,6 +192,7 @@ export class JsonlTailer implements TranscriptEventSource {
           if (this.restoreCursor?.path) {
             throw new TranscriptRestoreError(`Transcript restore rejected: resolver did not return ${this.restoreCursor.path}`);
           }
+          this.pendingBirth = true;
           return;
         }
         if (this.restoreCursor?.path && path !== this.restoreCursor.path) {
@@ -243,8 +244,9 @@ export class JsonlTailer implements TranscriptEventSource {
           this.pending = partial.bytes;
           this.pendingBytes = size - partial.offset;
         }
+        const newlyCreated = this.pendingBirth;
         this.pendingBirth = false;
-        await this.drain(size, generation);
+        if (newlyCreated) await this.drain(size, generation);
         return;
       }
       if (this.watchForSwitch) {

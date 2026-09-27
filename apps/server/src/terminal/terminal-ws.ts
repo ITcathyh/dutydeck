@@ -135,6 +135,7 @@ function bindConnection(
   });
 
   const handleMessage = async (raw: RawData) => {
+    if (closed || ws.readyState !== WebSocket.OPEN) return;
     let message: any;
     try {
       message = JSON.parse(raw.toString());
@@ -146,6 +147,7 @@ function bindConnection(
       let decision: PolicyDecision | undefined;
       try { decision = await authorizeWrite?.(); }
       catch { decision = { allowed: false, action: 'terminal.write', code: 'permission_evaluator_failed', reason: 'Terminal permission evaluation failed', source: 'integration' }; }
+      if (closed || ws.readyState !== WebSocket.OPEN) return;
       if (decision && !decision.allowed) {
         sendFrame({ type: 'error', message: decision.reason, code: decision.code });
         try { ws.close(); } catch { /* 已关闭 */ }
@@ -206,6 +208,9 @@ function bindConnection(
 export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRouteOptions): void {
   const wss = new WebSocketServer({ noServer: true });
   const active = new Set<WebSocket>();
+  const pending = new Set<Socket>();
+  let closing = false;
+  let closeRun: Promise<void> | undefined;
 
   /*
    * 必须用被动的 onReady 钩子，不能调 app.ready(cb)：
@@ -227,6 +232,9 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
         return; // 非法 URL 不属本路由，交给其它 upgrade 处理者
       }
       if (!url.pathname.startsWith(TERMINAL_PATH_PREFIX)) return; // 非本路由，放行
+      if (closing) { socket.destroy(); return; }
+      pending.add(socket);
+      socket.once('close', () => pending.delete(socket));
 
       const rejection = upgradeRejection(request, options.auth);
       if (rejection) {
@@ -261,6 +269,7 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
         }
       }
 
+      if (closing || socket.destroyed) return;
       let lookup: TerminalStreamLookup;
       try { lookup = await options.provider.lookupTerminalStream(sessionId); }
       catch (error) {
@@ -275,9 +284,10 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
         rejectUpgrade(socket, 400, 'Bad Request', 'terminal stream not supported for this session');
         return;
       }
-      if (socket.destroyed) { lookup.handle.stream.dispose(); return; }
+      if (closing || socket.destroyed) { lookup.handle.stream.dispose(); socket.destroy(); return; }
 
       wss.handleUpgrade(request, socket, head, ws => {
+        pending.delete(socket);
         active.add(ws);
         bindConnection(
           ws,
@@ -289,12 +299,17 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
     });
   });
 
-  // 与 app.ts 的 streams Set 清理模式对齐：app 关闭时断开所有终端连接
-  app.addHook('onClose', async () => {
+  // HTTP server.close 等升级连接退出；必须在它之前关闭终端，不能等 onClose。
+  app.addHook('preClose', async () => {
+    if (closeRun) return closeRun;
+    closing = true;
+    for (const socket of pending) socket.destroy();
+    pending.clear();
     for (const ws of active) {
       try { ws.terminate(); } catch { /* 已关闭 */ }
     }
     active.clear();
-    wss.close();
+    closeRun = new Promise<void>((resolve, reject) => wss.close(error => error ? reject(error) : resolve()));
+    return closeRun;
   });
 }
