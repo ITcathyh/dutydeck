@@ -15,7 +15,7 @@ export function createEventWindow(events: DockEvent[], hasOlder = false): EventW
   return { events: sorted, hasOlder };
 }
 
-/** First paint only needs the tail. Earlier pages are fetched when scrolling up. */
+/** First paint only needs the tail. The history hook then loads earlier pages automatically. */
 export async function loadEventHistory(sessionId: string, signal?: AbortSignal): Promise<EventWindow> {
   signal?.throwIfAborted();
   const page = await api.events(sessionId, { limit: EVENT_PAGE_SIZE, direction: 'backward' }, signal);

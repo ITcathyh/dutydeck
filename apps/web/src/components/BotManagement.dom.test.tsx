@@ -254,10 +254,15 @@ describe('BotManagement 会话记忆', () => {
     await user.click(screen.getByRole('checkbox', { name: '自动提取与整理' }));
     await user.selectOptions(screen.getByLabelText('整理 Agent'), 'codex');
     await user.type(screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
+    const optional = screen.getByText('可选：分别设置群判定和回复模型').closest('details')!;
+    expect(optional.open).toBe(false);
+    await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
     await user.selectOptions(screen.getByLabelText('群判定 Agent'), 'codex');
     await user.selectOptions(screen.getByLabelText('群回复 Agent'), 'codex');
     await user.type(screen.getByLabelText('群判定模型'), 'fast');
     await user.type(screen.getByLabelText('群回复模型'), 'quality');
+    await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
+    expect(screen.getByText('可选：分别设置群判定和回复模型').closest('details')?.open).toBe(false);
     await user.click(screen.getByRole('button', { name: '保存配置' }));
 
     await waitFor(() => expect(saveSpy).toHaveBeenCalledWith(expect.objectContaining({
@@ -820,6 +825,7 @@ it('preserves independent model drafts across unmount and submits explicit clear
   const component = <BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>;
   const first = renderWithClient(component);
   await screen.findByLabelText('群判定模型');
+  expect(screen.getByText('可选：分别设置群判定和回复模型').closest('details')?.open).toBe(true);
   await user.clear(screen.getByLabelText('群判定模型'));
   await user.clear(screen.getByLabelText('群回复模型'));
   await user.type(screen.getByLabelText('群回复模型'), 'draft-quality');
@@ -829,4 +835,21 @@ it('preserves independent model drafts across unmount and submits explicit clear
   expect((screen.getByLabelText('群回复模型') as HTMLInputElement).value).toBe('draft-quality');
   await user.click(screen.getByRole('button', { name: '保存配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ decisionModel: '', responseModel: 'draft-quality' })));
+});
+
+
+it('keeps optional model overrides collapsed and empty when saving unrelated changes', async () => {
+  const user = userEvent.setup();
+  vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+  vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+  vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue({ configured: true, bots: [mockBot], listeningDisabled: false });
+  renderWithClient(<BotManagement selectedAppId={mockBot.appId} onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents}/>);
+  const optional = (await screen.findByText('可选：分别设置群判定和回复模型')).closest('details')!;
+  expect(optional.open).toBe(false);
+  expect((screen.getByLabelText('群判定模型') as HTMLInputElement).value).toBe('');
+  expect((screen.getByLabelText('群回复模型') as HTMLInputElement).value).toBe('');
+  await user.type(screen.getByDisplayValue(mockBot.workspace!), '-draft');
+  await user.click(screen.getByRole('button', { name: '保存配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '' })));
 });

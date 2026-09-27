@@ -449,8 +449,11 @@ describe('LarkConfigModal 会话记忆', () => {
     await user.click(await screen.findByRole('option', { name: 'Claude' }));
     await user.type(screen.getByPlaceholderText('可选，例如 gpt-4o-mini'), 'gpt-4o-mini');
 
+    await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
     await user.type(screen.getByLabelText('群判定模型'), 'fast');
     await user.type(screen.getByLabelText('群回复模型'), 'quality');
+    await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
+    expect(screen.getByText('可选：分别设置群判定和回复模型').closest('details')?.open).toBe(false);
     const submit = screen.getByRole('button', { name: '完成配置' }) as HTMLButtonElement;
     await waitFor(() => expect(submit.disabled).toBe(false));
     await user.click(submit);
@@ -907,4 +910,33 @@ describe('LarkConfigModal 加急与置顶开关', () => {
     expect(screen.queryByText(/置顶等待时间至少 1 秒/)).toBeNull();
     expect((screen.getByRole('button', { name: '下一步' }) as HTMLButtonElement).disabled).toBe(false);
   });
+});
+
+
+it('keeps optional models empty by default and does not select values when opened', async () => {
+  const user = userEvent.setup();
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ defaultAgentId: 'codex', setupComplete: true }));
+  renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex' }));
+  await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+  const optional = screen.getByText('可选：分别设置群判定和回复模型').closest('details')!;
+  expect(optional.open).toBe(false);
+  await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
+  expect((screen.getByLabelText('群判定模型') as HTMLInputElement).value).toBe('');
+  expect((screen.getByLabelText('群回复模型') as HTMLInputElement).value).toBe('');
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '' })));
+});
+
+it('expands stored model overrides and saves explicit clears without changing other models', async () => {
+  const user = userEvent.setup();
+  const save = vi.spyOn(api, 'saveLarkConfig').mockResolvedValue(collection({ setupComplete: true }));
+  renderModal(collection({ fullTrustConfirmed: true, defaultAgentId: 'codex', defaultModel: 'original', decisionModel: 'fast', responseModel: 'quality' }));
+  await user.click(await screen.findByRole('button', { name: /选择 Agent 并启用/ }));
+  expect(screen.getByText('可选：分别设置群判定和回复模型').closest('details')?.open).toBe(true);
+  await user.clear(screen.getByLabelText('群判定模型'));
+  await user.clear(screen.getByLabelText('群回复模型'));
+  expect(screen.getByText('可选：分别设置群判定和回复模型').closest('details')?.open).toBe(true);
+  await user.click(screen.getByText('可选：分别设置群判定和回复模型'));
+  await user.click(screen.getByRole('button', { name: '完成配置' }));
+  await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ decisionModel: '', responseModel: '', defaultModel: 'original' })));
 });

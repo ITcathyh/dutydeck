@@ -108,6 +108,9 @@ async function main() {
       auth: { getToken: async () => null, localOnly: true },
       lark: { config: repos.config, agents: repos.agents, cardMappings: repos.channelMappings, listeningDisabled: true }
     });
+    // This fixture has no work items. Register its empty read response so the
+    // footer does not change from a retrying 404 spinner to an error banner.
+    app.get('/api/sessions/:sessionId/work-items', async () => ({ items: [], templates: [] }));
     await app.listen({ host: '127.0.0.1', port: 0 });
     const address = app.server.address();
     if (!address || typeof address === 'string') throw new Error('Browser benchmark server did not expose a port');
@@ -150,13 +153,12 @@ async function main() {
 
       const scrollStarted = performance.now();
       if (await page.getByRole('button', { name: '加载更早记录' }).count()) throw new Error('history still requires manual pagination');
-      const olderPage = page.waitForResponse(response => response.url().includes('/events?') && response.url().includes('before='));
+      const previousCount = await page.locator('[data-timeline-scroll]').evaluate(element => Number((element as HTMLElement).dataset.historyLoaded));
+      await page.waitForFunction(count => Number(document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyLoaded) > count, previousCount);
+      const targetSequence = await page.locator('[data-timeline-scroll]').evaluate(element => Number((element as HTMLElement).dataset.historyStart) + 1);
+      // Background pagination starts without user input; navigation remains responsive.
       await page.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
-      await olderPage;
-      await page.waitForFunction(expected => Number(document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyStart) <= expected, EVENT_COUNT - 399);
-      // One-page upward navigation is the progressive-history scroll contract.
-      await page.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
-      await waitForPaint(page, `event ${EVENT_COUNT - 398}`);
+      await waitForPaint(page, `event ${targetSequence}`);
       if (await page.locator('[data-timeline-turn]').count() > 40) throw new Error('timeline DOM grew beyond the viewport');
       scrollSamples.push(performance.now() - scrollStarted);
       await page.close();
@@ -164,42 +166,62 @@ async function main() {
     await waitFor(() => subscribers.size === 0);
 
     const page = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    let automaticHistoryPages = 0;
+    page.on('request', request => { if (request.url().includes('/events?') && request.url().includes('direction=backward')) automaticHistoryPages++; });
+    const automaticLoadStarted = performance.now();
     await page.goto(`${baseUrl}/sessions/${SESSION_ID}`, { waitUntil: 'domcontentloaded' });
     await waitForPaint(page, `event ${EVENT_COUNT}`);
+    const automaticFirstVisibleMs = performance.now() - automaticLoadStarted;
     await waitFor(() => subscribers.size === 1);
-    // Exercise the retained-history path, not just the 200-event cold window.
-    // Every older page is requested by the same scroll handler a user invokes.
-    let olderGate: Promise<void> | undefined;
-    let releasePage!: () => void;
-    await page.route('**/events?before=*', async route => { await olderGate; await route.continue(); });
-    let maxRenderedTurns = 0;
-    let maxAnchorDriftPx = 0;
-    for (let before = EVENT_COUNT - 199; before > 1; before -= 200) {
-      olderGate = new Promise<void>(resolve => { releasePage = resolve; });
-      const loaded = page.waitForResponse(response => response.url().includes(`/events?before=${before}&`));
-      await page.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
-      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-      const anchor = await page.locator('[data-timeline-event]').first().evaluate(element => ({ id: element.getAttribute('data-timeline-event'), top: element.getBoundingClientRect().top }));
-      releasePage(); await loaded;
-      const expected = Math.max(1, before - 200);
-      await page.waitForFunction(expected => Number(document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyStart) <= expected, expected);
-      await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-      const same = page.locator(`[data-timeline-event="${anchor.id}"]`);
-      if (await same.count() !== 1) throw new Error(`history prepend lost anchor ${anchor.id}`);
-      const drift = Math.abs(await same.evaluate(element => element.getBoundingClientRect().top) - anchor.top);
-      maxAnchorDriftPx = Math.max(maxAnchorDriftPx, drift);
-      if (drift > 2) {
-        progress.anchorFailure = { before, anchor, drift, after: await page.locator('[data-timeline-scroll]').evaluate(element => ({ scrollTop: element.scrollTop, events: [...element.querySelectorAll<HTMLElement>('[data-timeline-event]')].map(event => ({ id: event.dataset.timelineEvent, top: event.getBoundingClientRect().top })), turns: [...element.querySelectorAll<HTMLElement>('[data-timeline-turn]')].map(turn => ({ id: turn.dataset.timelineTurn, top: turn.getBoundingClientRect().top, height: turn.getBoundingClientRect().height })) })) };
-        throw new Error(`history prepend at ${before} moved ${anchor.id} by ${drift}px`);
-      }
-      maxRenderedTurns = Math.max(maxRenderedTurns, await page.locator('[data-timeline-turn]').count());
-    }
+    // Publish while older pages are loading: the automatic merge must retain
+    // this unique live event, and no navigation gesture starts any page.
+    const automaticLiveInjectedAtLoaded = await page.locator('[data-timeline-scroll]').evaluate(element => Number((element as HTMLElement).dataset.historyLoaded));
+    if (automaticLiveInjectedAtLoaded >= EVENT_COUNT) throw new Error('live injection missed the automatic history loading phase');
+    const liveBase = EVENT_COUNT + 1;
+    for (const subscriber of subscribers) subscriber(event(liveBase));
+    await waitForPaint(page, `event ${liveBase}`);
+    await page.evaluate(sequence => {
+      const container = document.querySelector<HTMLElement>('[data-timeline-scroll]')!;
+      const anchorId = `evt_browser_${sequence}`;
+      const top = document.querySelector<HTMLElement>(`[data-timeline-event="${anchorId}"]`)!.getBoundingClientRect().top;
+      const state = { maxAnchorDriftPx: 0, maxRenderedTurns: 0, observedPrependPaints: 0, failure: '', initialGoal: { text: document.querySelector('[aria-label="目标进度"]')?.textContent, height: document.querySelector('[aria-label="目标进度"]')?.getBoundingClientRect().height }, driftDetails: [] as unknown[], startCount: Number(container.dataset.historyLoaded) };
+      (window as any).__automaticHistory = state;
+      const observer = new MutationObserver(records => {
+        if (!records.some(record => record.attributeName === 'data-history-loaded')) return;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const anchors = document.querySelectorAll<HTMLElement>(`[data-timeline-event="${anchorId}"]`);
+          state.observedPrependPaints++;
+          if (anchors.length !== 1) { state.failure = `automatic prepend lost anchor ${anchorId}`; return; }
+          const drift = Math.abs(anchors[0]!.getBoundingClientRect().top - top);
+          if (drift > state.maxAnchorDriftPx && drift > 2) state.driftDetails.push({ count: container.dataset.historyLoaded, targetTop: top, top: anchors[0]!.getBoundingClientRect().top, scrollTop: container.scrollTop, scrollHeight: container.scrollHeight, clientHeight: container.clientHeight, goal: { text: document.querySelector('[aria-label="目标进度"]')?.textContent, height: document.querySelector('[aria-label="目标进度"]')?.getBoundingClientRect().height } });
+          state.maxAnchorDriftPx = Math.max(state.maxAnchorDriftPx, drift);
+          state.maxRenderedTurns = Math.max(state.maxRenderedTurns, document.querySelectorAll('[data-timeline-turn]').length);
+        }));
+      });
+      observer.observe(container, { attributes: true, attributeFilter: ['data-history-loaded'] });
+      (window as any).__automaticHistoryObserver = observer;
+    }, liveBase);
+    await page.waitForFunction(count => {
+      const container = document.querySelector<HTMLElement>('[data-timeline-scroll]');
+      return container?.dataset.historyComplete === 'true' && Number(container.dataset.historyLoaded) === count;
+    }, EVENT_COUNT + 1, { timeout: 120_000 });
+    const automaticFullLoadMs = performance.now() - automaticLoadStarted;
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    const automaticHistory = await page.evaluate(() => {
+      (window as any).__automaticHistoryObserver.disconnect();
+      return (window as any).__automaticHistory as { maxAnchorDriftPx: number; maxRenderedTurns: number; observedPrependPaints: number; failure: string; startCount: number };
+    });
+    const { maxRenderedTurns, maxAnchorDriftPx } = automaticHistory;
+    Object.assign(progress, { automaticFirstVisibleMs, automaticFullLoadMs, automaticHistoryPages, automaticLiveInjectedAtLoaded, automaticHistory });
+    if (automaticHistory.failure) throw new Error(automaticHistory.failure);
+    if (automaticHistory.observedPrependPaints < Math.max(1, Math.floor((EVENT_COUNT - automaticHistory.startCount) / 200) - 1)) throw new Error('automatic-history anchor observation missed pages');
+    if (automaticHistoryPages !== Math.floor(EVENT_COUNT / 200) + 1) throw new Error(`automatic history fetched ${automaticHistoryPages} pages`);
+    if (maxAnchorDriftPx > 2) throw new Error(`automatic prepend moved its anchor by ${maxAnchorDriftPx}px`);
+    if (maxRenderedTurns > 40) throw new Error(`retained history mounted ${maxRenderedTurns} turns`);
     await page.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
     await waitForPaint(page, 'event 2');
-    if (maxAnchorDriftPx > 2) throw new Error(`history prepend moved its anchor by ${maxAnchorDriftPx}px`);
-    if (maxRenderedTurns > 40) throw new Error(`retained history mounted ${maxRenderedTurns} turns`);
     await page.getByRole('button', { name: '回到最新消息' }).click();
-    await waitForPaint(page, `event ${EVENT_COUNT}`);
+    await waitForPaint(page, `event ${liveBase}`);
     const cdp = await page.context().newCDPSession(page);
     // Keep latency and raw heap diagnostics under natural GC. The former raw
     // endpoint-growth <=32MiB gate was GC-phase dependent; it is not a hard
@@ -209,10 +231,10 @@ async function main() {
     const incrementalSamples: number[] = [];
     Object.assign(progress, { incrementalSamples, browserRawHeapSamples });
     for (let index = 1; index <= 50; index++) {
-      const next = event(EVENT_COUNT + index);
+      const next = event(liveBase + index);
       const started = performance.now();
       for (const subscriber of subscribers) subscriber(next);
-      await waitForPaint(page, `event ${EVENT_COUNT + index}`);
+      await waitForPaint(page, `event ${liveBase + index}`);
       incrementalSamples.push(performance.now() - started);
       // Sampling happens after the latency timer stops, with no forced GC.
       browserRawHeapSamples.push(await page.evaluate(() => (performance as any).memory.usedJSHeapSize as number));
@@ -234,9 +256,9 @@ async function main() {
     await cdp.send('HeapProfiler.collectGarbage');
     const browserRetainedHeapBeforeBytes = (await cdp.send('Runtime.getHeapUsage')).usedSize;
     for (let index = 51; index <= 100; index++) {
-      const next = event(EVENT_COUNT + index);
+      const next = event(liveBase + index);
       for (const subscriber of subscribers) subscriber(next);
-      await waitForPaint(page, `event ${EVENT_COUNT + index}`);
+      await waitForPaint(page, `event ${liveBase + index}`);
     }
     await cdp.send('HeapProfiler.collectGarbage');
     const browserRetainedHeapAfterBytes = (await cdp.send('Runtime.getHeapUsage')).usedSize;
@@ -288,13 +310,15 @@ async function main() {
       } })();
     } finally { longSeed.close(); }
     const longPage = await browser.newPage({ viewport: { width: 1440, height: 960 } });
+    let releaseOlder!: () => void, releaseLast!: () => void;
+    const longOlderGate = new Promise<void>(resolve => { releaseOlder = resolve; });
+    const longLastGate = new Promise<void>(resolve => { releaseLast = resolve; });
+    await longPage.route(`**/api/sessions/${longId}/events?before=401&**`, async route => { await longOlderGate; await route.continue(); });
+    await longPage.route(`**/api/sessions/${longId}/events?before=201&**`, async route => { await longLastGate; await route.continue(); });
     await longPage.goto(`${baseUrl}/sessions/${longId}`, { waitUntil: 'domcontentloaded' });
     await longPage.locator('[data-timeline-scroll] details > summary').click();
     await longPage.getByText('step 401', { exact: true }).first().click();
     await longPage.locator('[data-timeline-event="long_450"] button').click();
-    let releaseOlder!: () => void;
-    const longOlderGate = new Promise<void>(resolve => { releaseOlder = resolve; });
-    await longPage.route(`**/api/sessions/${longId}/events?before=401&**`, async route => { await longOlderGate; await route.continue(); });
     const older = longPage.waitForResponse(response => response.url().includes(`${longId}/events?before=401&`));
     await longPage.locator('[data-timeline-scroll]').evaluate(element => { element.scrollTop = 0; element.dispatchEvent(new Event('scroll')); });
     await longPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
@@ -302,9 +326,15 @@ async function main() {
     releaseOlder(); await older;
     await longPage.waitForFunction(() => document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyStart === '201');
     await longPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
-    const longTurnAnchorDriftPx = Math.abs(await longPage.locator('[data-timeline-event="long_401"]').evaluate(element => element.getBoundingClientRect().top) - anchorTop);
+    let longTurnAnchorDriftPx = Math.abs(await longPage.locator('[data-timeline-event="long_401"]').evaluate(element => element.getBoundingClientRect().top) - anchorTop);
     if (longTurnAnchorDriftPx > 2) throw new Error(`long-turn prepend moved its anchor by ${longTurnAnchorDriftPx}px`);
     if (!await longPage.getByText(/long output 450/).count()) throw new Error('prepend collapsed the expanded tool');
+    releaseLast();
+    await longPage.waitForFunction(() => document.querySelector<HTMLElement>('[data-timeline-scroll]')?.dataset.historyComplete === 'true');
+    await longPage.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    longTurnAnchorDriftPx = Math.max(longTurnAnchorDriftPx, Math.abs(await longPage.locator('[data-timeline-event="long_401"]').evaluate(element => element.getBoundingClientRect().top) - anchorTop));
+    if (longTurnAnchorDriftPx > 2) throw new Error(`long-turn completion moved its anchor by ${longTurnAnchorDriftPx}px`);
+    if (!await longPage.getByText(/long output 450/).count()) throw new Error('automatic completion collapsed the expanded tool');
     await longPage.close(); await waitFor(() => subscribers.size === 0);
 
     global.gc?.();
@@ -332,6 +362,7 @@ async function main() {
     const incrementalPaintP95Ms = percentile95(incrementalSamples);
     process.stdout.write(`${JSON.stringify({
       database: 'temporary-disk-sqlite', eventCount: EVENT_COUNT, sampleCount: SAMPLE_COUNT, hostLoadAtStart, paintControlDelayMs,
+      automaticFirstVisibleMs, automaticFullLoadMs, automaticHistoryPages, automaticLiveInjectedAtLoaded, automaticHistory,
       firstVisibleP95Ms, historyScrollP95Ms, incrementalPaintP95Ms, incrementalPaintMaxMs: Math.max(...incrementalSamples), firstVisibleSamples,
       ...browserMemory, ...retainedMemory, heapControlHeldGrowthBytes, heapControlReleasedGrowthBytes, heapControlRejected,
       serverRssGrowthBytes, serverExternalGrowthBytes, maxRenderedTurns, maxAnchorDriftPx, longTurnAnchorDriftPx,
