@@ -246,6 +246,37 @@ describe('Agent group collaboration domain service', () => {
     expect(memoryOff).toContain('[Dutydeck 飞书会话工具]');
   });
 
+  it('injects capability limits and management hints according to group tools and chat type (F1-1)', async () => {
+    const { tools } = await setup({ cli_current: fakeClient() });
+
+    // 1. 群工具关闭时，prompt 包含定时说明和管理说明
+    const promptDisabledGroup = await tools.promptForSession(session({ sourceId: 'cli_disabled:oc_group:group' }), '用户指令');
+    expect(promptDisabledGroup).toContain('[Dutydeck 能力限制与操作指引]');
+    expect(promptDisabledGroup).toContain('定时任务：当前会话无法直接设置，请让用户使用 /schedule 命令设置');
+    expect(promptDisabledGroup).toContain('不要用 crontab、后台 sleep 或循环脚本代替');
+    expect(promptDisabledGroup).toContain('切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话');
+    expect(promptDisabledGroup).toContain('/tasks');
+    expect(promptDisabledGroup).toContain('停止当前任务：让用户点进度卡上的“中断”');
+    expect(promptDisabledGroup).toContain('重新开始：让用户使用 /new');
+    expect(promptDisabledGroup).toContain('不要说“已完成”或“已设置”');
+
+    // 2. 群工具开启且是群聊时，不含定时说明，但仍含管理说明
+    const promptEnabledGroup = await tools.promptForSession(session({ sourceId: 'cli_current:oc_group:group' }), '用户指令');
+    expect(promptEnabledGroup).toContain('[Dutydeck 能力限制与操作指引]');
+    expect(promptEnabledGroup).not.toContain('定时任务');
+    expect(promptEnabledGroup).not.toContain('/schedule');
+    expect(promptEnabledGroup).toContain('切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话');
+    expect(promptEnabledGroup).toContain('/tasks');
+    expect(promptEnabledGroup).toContain('停止当前任务：让用户点进度卡上的“中断”');
+    expect(promptEnabledGroup).toContain('重新开始：让用户使用 /new');
+
+    // 3. 私聊时，含定时说明
+    const promptP2P = await tools.promptForSession(session({ sourceId: 'cli_current:oc_p2p:p2p' }), '用户指令');
+    expect(promptP2P).toContain('[Dutydeck 能力限制与操作指引]');
+    expect(promptP2P).toContain('定时任务：当前会话无法直接设置，请让用户使用 /schedule 命令设置');
+    expect(promptP2P).toContain('切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话');
+  });
+
   it('uses opaque cursors for incremental reads and mentions a discovered target when sending', async () => {
     const first = message('om_1', '1000', 'one'); const second = message('om_2', '2000', 'two'); const third = message('om_3', '3000', 'three');
     const current = fakeClient({

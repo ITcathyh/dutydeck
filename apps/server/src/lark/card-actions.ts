@@ -22,7 +22,9 @@ export type LarkCardElement = Record<string, any>;
  * 回调型操作。查看详情平时是直接打开 webUrl 的链接，不是回调；
  * 只有 Web 要求登录时才是回调 detail（服务端给管理员私信一次性登录链接）。
  */
-export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'use_verification_command' | 'run_in_new_session' | 'rerun_in_new_session' | 'replay_turn' | 'abandon_turn' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail';
+export type LarkCardActionName = 'cancel' | 'interrupt' | 'retry' | 'refresh' | 'verify' | 'use_verification_command' | 'run_in_new_session' | 'rerun_in_new_session' | 'replay_turn' | 'abandon_turn' | 'ask_plain' | 'ask_reply' | 'ask_detail' | 'schedule_daily' | 'detail'
+  | 'steer_promote'
+  | 'steer_inject';
 
 /** 与 coordinator.ts 的 LarkTaskState 对齐；本地声明避免为了类型而引入模块依赖。 */
 export type LarkCardActionState = 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'interrupted' | 'cancelled' | 'reconcile_required' | 'legacy_unresolved';
@@ -79,6 +81,15 @@ export interface LarkCardCapabilities {
    * 缺省即为 false，页脚仍是直接打开 webUrl 的链接。
    */
   detailLogin?: boolean;
+  /**
+   * 排队卡紧排在正在执行的那一轮后面（前面没有别的排队项）：「中断当前这一轮，先做这条」。
+   * coordinator 按队列现状置位，缺省即不给按钮；谁能点由回调端按中断口径判断。
+   */
+  canSteerPromote?: boolean;
+  /** 同上，且 runtime 支持插话：「插进当前这一轮」。 */
+  canSteerInject?: boolean;
+  /** 排队的这句话是在叫停（「先停一下」之类）：「中断当前这一轮，先做这条」排到最前。只调顺序，不自动中断。 */
+  steerFirst?: boolean;
 }
 
 export interface LarkCardActionContext {
@@ -156,6 +167,8 @@ type LarkCardActionDefinition = {
   dynamicLabel?: (capabilities: LarkCardCapabilities) => string;
   /** 是否为该状态的唯一主操作；主操作排在最前，视觉上最突出。 */
   primary: boolean;
+  /** 为真时排到主操作之前（目前只有叫停类排队消息的「中断当前这一轮，先做这条」）。 */
+  lead?: (capabilities: LarkCardCapabilities) => boolean;
   /** 不进操作区，由卡片页脚渲染在原「查看详情」链接的位置（见 buildLarkCardDetailButton）。 */
   footer?: boolean;
 };
@@ -242,6 +255,29 @@ const larkCardActionDefinitions: readonly LarkCardActionDefinition[] = [
     capable: capabilities => Boolean(capabilities.verificationSuggestion?.trim()),
     primary: false,
     readOnlyReceipt: true
+  },
+  {
+    action: 'steer_promote',
+    elementId: 'steer_promote',
+    label: '中断当前这一轮，先做这条',
+    hint: '把这条提到队首，并中断正在执行的那一轮',
+    buttonType: 'text',
+    icon: 'stop_outlined',
+    states: ['queued'],
+    capable: capabilities => capabilities.canSteerPromote === true,
+    lead: capabilities => capabilities.steerFirst === true,
+    primary: false
+  },
+  {
+    action: 'steer_inject',
+    elementId: 'steer_inject',
+    label: '插进当前这一轮',
+    hint: '把这条送进正在执行的那一轮，不另起一轮',
+    buttonType: 'text',
+    icon: 'reply_outlined',
+    states: ['queued'],
+    capable: capabilities => capabilities.canSteerInject === true,
+    primary: false
   },
   {
     action: 'refresh',
@@ -427,9 +463,10 @@ export function isLarkCardActionAvailable(action: LarkCardActionName, context: L
 
 /** 当前状态下应渲染的回调操作，按主操作优先排序。 */
 export function availableLarkCardActions(context: LarkCardActionContext): LarkCardActionName[] {
+  const rank = (definition: LarkCardActionDefinition) => definition.lead?.(context.capabilities) ? 2 : Number(definition.primary);
   return larkCardActionDefinitions
     .filter(definition => !definition.retired && isLarkCardActionAvailable(definition.action, context))
-    .sort((left, right) => Number(right.primary) - Number(left.primary))
+    .sort((left, right) => rank(right) - rank(left))
     .map(definition => definition.action);
 }
 
@@ -504,7 +541,7 @@ export function buildLarkCardActions(context: LarkCardActionContext): LarkCardEl
       if (definition && !definition.followUpRow && !definition.footer) elements.push(callbackButton(definition, taskId, turn, context.capabilities));
     }
   }
-  // 预算兜底：正常路径最多 3 个按钮（排队受阻：取消、刷新、在新会话中执行），这里的截断是防御性上限。
+  // 预算兜底：正常路径最多 4 个按钮（紧排在执行中那一轮后面的排队卡：取消、两个插队按钮、刷新），这里的截断是防御性上限。
   return elements.slice(0, larkCardActionBudget.maxButtons);
 }
 

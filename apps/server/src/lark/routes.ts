@@ -95,15 +95,10 @@ export async function registerLarkRoutes(app: FastifyInstance, options: LarkRout
   });
   let listenerSyncTail: Promise<void> = Promise.resolve();
   const syncListeners = () => {
-    // Keep the retry in the same operation, so an old failed start cannot be
-    // retried after a newer stop. Read current settings when each attempt runs.
+    // 每次同步时再读当前配置。连不上的机器人由连接池按退避自动重连，直到被下一次同步取代。
     const synced = listenerSyncTail.then(async () => {
       try { await listener.sync(await readLarkConfigs(options.config)); }
-      catch (firstError) {
-        app.log.warn({ error: firstError }, '飞书消息监听首次连接失败，正在自动重试');
-        try { await listener.sync(await readLarkConfigs(options.config)); }
-        catch (error) { app.log.error({ error }, '飞书消息监听连接失败，已保留监听配置'); }
-      }
+      catch (error) { app.log.error({ error }, '飞书消息监听连接失败，已保留监听配置，稍后自动重连'); }
     });
     listenerSyncTail = synced.catch(() => {});
     return synced;

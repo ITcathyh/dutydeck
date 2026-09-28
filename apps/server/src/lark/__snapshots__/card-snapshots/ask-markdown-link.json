@@ -144,7 +144,7 @@
               }
             },
             "summary": {
-              "content": "执行中 · 发布前需要跟你确认一件事。部署前请先看 [发布手册](https://docs.example.com/release#window) 第 3 节。今晚 22:00 的发布窗口可以用吗？"
+              "content": "等待回答 · 今晚把登录修复发布上线"
             }
           },
           "body": {
@@ -182,14 +182,21 @@
                             "text_size": "normal",
                             "margin": "0px",
                             "icon": {
-                              "tag": "custom_icon",
-                              "img_key": "img_snapshot_loading",
-                              "size": "16px 16px"
+                              "tag": "standard_icon",
+                              "token": "warning_outlined",
+                              "color": "orange"
                             }
                           }
                         ]
                       }
                     ]
+                  },
+                  {
+                    "tag": "markdown",
+                    "element_id": "current_activity",
+                    "text_size": "notation",
+                    "margin": "0px 0px 0px 20px",
+                    "content": "<font color='grey'>最近活动 <北京时刻></font>"
                   }
                 ]
               },
@@ -298,12 +305,12 @@
                 "tag": "text_tag",
                 "text": {
                   "tag": "plain_text",
-                  "content": "执行中"
+                  "content": "等待回答"
                 },
-                "color": "blue"
+                "color": "orange"
               }
             ],
-            "template": "blue",
+            "template": "orange",
             "padding": "10px 12px 8px 12px"
           }
         }
@@ -577,7 +584,7 @@
               }
             },
             "summary": {
-              "content": "Agent 提问 · 已处理"
+              "content": "Agent 提问 · 已回答"
             }
           },
           "body": {
@@ -592,7 +599,7 @@
                 "margin": "0px",
                 "text": {
                   "tag": "lark_md",
-                  "content": "<font color='grey'>已处理</font>",
+                  "content": "<font color='grey'>已回答</font>",
                   "text_size": "small"
                 }
               },
@@ -602,7 +609,7 @@
               },
               {
                 "tag": "markdown",
-                "content": "回答已送达原任务。"
+                "content": "已回答 · <at id=ou_snapshot_alice></at> · <北京时刻>"
               }
             ]
           },

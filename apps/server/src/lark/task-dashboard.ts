@@ -1,10 +1,18 @@
 import { safeLarkWebUrl } from './card-actions.js';
+import { permissionDisplayText } from '@dutydeck/shared';
+import { larkCommandEcho } from './commands.js';
 
 export interface LarkTaskDashboardPendingApproval {
   /** workflow-interactions 里的交互 id；审批 value 必须带它走 respond 的一次性 CAS。 */
   requestId: string;
   /** LarkWorkflowInteractions.boot，回调时做世代校验。 */
   generation: string;
+  /** 命令摘要，展示时经 permissionDisplayText 脱敏 */
+  commandSummary?: string;
+  /** 审批记录所属会话的 chatId */
+  chatId?: string;
+  /** 原审批卡链接 */
+  cardUrl?: string;
 }
 
 export interface LarkTaskDashboardEntry {
@@ -166,7 +174,14 @@ const validApproval = (value: LarkTaskDashboardEntry['pendingApproval']) => {
   if (!value) return undefined;
   const requestId = typeof value.requestId === 'string' ? value.requestId.trim() : '';
   const generation = typeof value.generation === 'string' ? value.generation.trim() : '';
-  return requestId && generation ? { requestId, generation } : undefined;
+  if (!requestId || !generation) return undefined;
+  return {
+    requestId,
+    generation,
+    ...(typeof value.commandSummary === 'string' && value.commandSummary.trim() ? { commandSummary: value.commandSummary.trim() } : {}),
+    ...(typeof value.chatId === 'string' && value.chatId.trim() ? { chatId: value.chatId.trim() } : {}),
+    ...(typeof value.cardUrl === 'string' && value.cardUrl.trim() ? { cardUrl: value.cardUrl.trim() } : {})
+  };
 };
 
 /**
@@ -202,7 +217,7 @@ const primaryRowAction = (
   entry: LarkTaskDashboardEntry,
   approval: LarkTaskDashboardPendingApproval | undefined
 ): RowPrimaryAction | undefined => {
-  if (approval) return { label: '审批', buttonType: 'primary', value: workflowActionValue('approve', approval) };
+  if (approval) return { label: '批准本次', buttonType: 'primary', value: workflowActionValue('approve', approval) };
   const taskId = validActionTaskId(entry.actionTaskId);
   if (!taskId) return undefined;
   const turn = validTurn(entry.turn);
@@ -242,7 +257,15 @@ const rowOverflow = (
   return element;
 };
 
-const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorkspace?: string, sharedAgent?: string) => {
+const extractCommandSummary = (text: string): string => {
+  const match = text.match(/命令（已脱敏）：\s*([^\n]+)/);
+  const raw = match && match[1]?.trim()
+    ? match[1].trim()
+    : text.split('\n').map(line => line.trim()).filter(Boolean)[0] || text;
+  return larkCommandEcho(permissionDisplayText(raw), 80);
+};
+
+const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorkspace?: string, sharedAgent?: string, currentChatId?: string) => {
   const entry = item.entry;
   const title = compactText(entry.title, MAX_TITLE_CHARS, '未命名任务');
   const workspace = workspaceName(entry.workspace);
@@ -253,18 +276,25 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
   // 这时提到表头写一次，行内只留真正逐行不同的东西。Agent 同一口径。
   const location = sharedWorkspace ? '' : ` · ${workspace}`;
   const executor = agent && !sharedAgent ? ` · ${agent}` : '';
-  const summary = `${title}\n${entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${entry.detail ? `\n${entry.detail}` : ''}`;
+
   const url = validAppLink(entry.url);
   const approval = validApproval(entry.pendingApproval);
-  const primary = primaryRowAction(entry, approval);
-  const overflow = rowOverflow(rowIndex, url, approval);
+  const isDifferentChat = Boolean(currentChatId && approval?.chatId && currentChatId !== approval.chatId);
+
+  const cmdSummary = approval?.commandSummary ? extractCommandSummary(approval.commandSummary) : undefined;
+  const cmdLine = cmdSummary ? `\n命令：${cmdSummary}` : '';
+
+  const summary = `${title}\n${entry.blocked && entry.status === 'queued' ? '排队受阻' : statusLabel(entry.status)}${feedback} · ${relativeTime(entry.updatedAt, now)}${location}${executor}${entry.detail ? `\n${entry.detail}` : ''}${cmdLine}`;
+
+  const primary = isDifferentChat ? undefined : primaryRowAction(entry, approval);
+  const overflow = isDifferentChat ? rowOverflow(rowIndex, url, undefined) : rowOverflow(rowIndex, url, approval);
   const summaryElement = {
     tag: 'div',
-    text: { tag: 'plain_text', content: summary, lines: 3 },
+    text: { tag: 'plain_text', content: summary, lines: 4 },
     width: 'auto',
     margin: '0px'
   };
-  const hasTrailing = Boolean(primary || overflow);
+  const hasTrailing = Boolean(primary || overflow || (isDifferentChat && approval));
   const columns: Array<Record<string, any>> = [{
     tag: 'column', width: hasTrailing ? 'weighted' : 'auto', ...(hasTrailing ? { weight: 1 } : {}),
     vertical_align: 'center', elements: [summaryElement]
@@ -277,6 +307,16 @@ const taskRow = (item: IndexedEntry, rowIndex: number, now: number, sharedWorksp
         type: primary.buttonType,
         text: { tag: 'plain_text', content: primary.label },
         behaviors: [{ type: 'callback', value: primary.value }]
+      }]
+    });
+  } else if (isDifferentChat && approval) {
+    const hintUrl = approval.cardUrl ?? url;
+    columns.push({
+      tag: 'column', width: 'auto', vertical_align: 'center', elements: [{
+        tag: 'markdown',
+        element_id: `row_hint_${rowIndex}`,
+        content: hintUrl ? `[请到原群处理](${hintUrl})` : '请到原群处理',
+        text_size: 'notation'
       }]
     });
   }
@@ -313,7 +353,8 @@ const navigation = (page: number, totalPages: number) => ({
 export function buildLarkTaskDashboard(
   entries: LarkTaskDashboardEntry[],
   page = 1,
-  now = Date.now()
+  now = Date.now(),
+  currentChatId?: string
 ): LarkTaskDashboardResult {
   const indexed = entries.map((entry, index): IndexedEntry => ({ entry, index, group: entry.blocked || entry.feedback === 'pending' || entry.feedback === 'needs_changes' ? 0 : groupForStatus(entry.status) }));
   const ordered = ([0, 1, 2] as DashboardGroup[]).flatMap(group => indexed
@@ -353,7 +394,7 @@ export function buildLarkTaskDashboard(
       const groupCount = ordered.filter(candidate => candidate.group === item.group).length;
       elements.push(markdown(`task_dashboard_group_${item.group}`, `**${groupLabels[item.group]}**（${groupCount}）`));
     }
-    elements.push(taskRow(item, (currentPage - 1) * PAGE_SIZE + index, now, sharedWorkspace, sharedAgent));
+    elements.push(taskRow(item, (currentPage - 1) * PAGE_SIZE + index, now, sharedWorkspace, sharedAgent, currentChatId));
   });
 
   const nextPage = currentPage < totalPages ? currentPage + 1 : 1;

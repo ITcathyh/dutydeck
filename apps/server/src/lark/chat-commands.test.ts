@@ -172,7 +172,8 @@ describe('/queue 查看与操作待执行指令', () => {
     const h = await harness();
     await h.dispatch('om_1', '第一件事');
     await h.dispatch('om_2', '第二件事');
-    await h.dispatch('om_3', '第三件事');
+    // 换一个发起人：同一人紧接着连发的两条会并成一条排队，这里要的是两条独立的排队项。
+    await h.dispatch('om_3', '第三件事', 'ou_bob');
     const session = await h.sessionId();
     await vi.waitFor(async () => expect((await h.runtime.getTasks(session)).filter(task => task.status === 'queued')).toHaveLength(2));
 

@@ -154,7 +154,7 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { 
   return runtime;
 }
 
-async function fixture(options: { database?: string; clock?: Date; fetch?: typeof fetch; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void> } = {}) {
+async function fixture(options: { database?: string; clock?: Date; fetch?: typeof fetch; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void> } = {}) {
   const directory = options.database ? undefined : await mkdtemp(join(tmpdir(), 'dutydeck-automation-db-'));
   if (directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const database = options.database ?? join(directory!, 'dutydeck.db');
@@ -176,7 +176,8 @@ async function fixture(options: { database?: string; clock?: Date; fetch?: typeo
     authorize: async () => allowed.value,
     githubFetch: options.fetch ?? (vi.fn(async () => githubResponse((await run('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim())) as typeof fetch),
     clock: () => new Date(now.value),
-    deliver: options.deliver
+    deliver: options.deliver,
+    onScheduleDisabled: options.onScheduleDisabled
   });
   cleanups.push(() => service.close());
   return { database, repositories, cwd, session, now, allowed, service, ...mocked };
@@ -411,6 +412,26 @@ describe('SessionAutomationService schedules', () => {
       expectedRevision: enabled.revision,
       enabled: false
     }, 'ou_owner')).rejects.toMatchObject({ code: 'SESSION_AUTOMATION_REVISION_CONFLICT' });
+  });
+
+  it('calls onScheduleDisabled exactly once when an active schedule is disabled due to stopped session', async () => {
+    const onScheduleDisabled = vi.fn(async () => {});
+    const h = await fixture({ onScheduleDisabled });
+    const created = await h.service.createSchedule(h.session.id, scheduleInput, 'ou_owner');
+    const enabled = await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    const boundX = bound(h.repositories);
+    boundX.patchSession({ sessionId: h.session.id, runId: 'run_1' }, { state: 'stopped' });
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await h.service.tick();
+    expect(onScheduleDisabled).toHaveBeenCalledTimes(1);
+    expect(onScheduleDisabled).toHaveBeenCalledWith(
+      expect.objectContaining({ id: enabled.id, name: 'Every minute' }),
+      'Session is no longer active'
+    );
+    // 第二次到点时不应重复调用
+    h.now.value = new Date('2026-09-12T01:01:01.000Z');
+    await h.service.tick();
+    expect(onScheduleDisabled).toHaveBeenCalledTimes(1);
   });
 
   it('advances revision and generation when revoked authorization disables a due schedule', async () => {

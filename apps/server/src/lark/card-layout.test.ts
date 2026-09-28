@@ -1125,6 +1125,23 @@ describe('Lark process/result 双卡布局（cardKind）', () => {
     expect(card.config.summary.content).toBe('执行中 · 阶段 2：执行测试');
   });
 
+  it('ask 挂起（awaitingAnswer 为 true）时：进度卡的状态标签是「等待回答」', () => {
+    const elements = boundLarkCardElements(renderLarkProcessElements(runningEvents, config));
+    const card: any = buildLarkCard({
+      cardKind: 'process',
+      state: 'running',
+      taskName: '自动化流水线',
+      agentName: 'Claude Code',
+      taskId: 'om_ask_p1',
+      elapsedSeconds: 16,
+      awaitingAnswer: true,
+      elements
+    });
+    expect(card.header.text_tag_list).toEqual([{ tag: 'text_tag', text: { tag: 'plain_text', content: '等待回答' }, color: 'orange' }]);
+    expect(card.header.template).toBe('orange');
+    expect(card.config.summary.content).toContain('等待回答');
+  });
+
   it('P1b. process 操作行：左边耗时/步数，无边框按钮靠右收成一排，每个按钮一列、宽度随内容', () => {
     const elements = boundLarkCardElements(renderLarkProcessElements(runningEvents, config));
     const card: any = buildLarkCard({

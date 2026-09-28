@@ -739,7 +739,18 @@ const historyGroupPanel = (
   };
 };
 
-const currentRunningStagePanel = (group: TraceGroup, index: number, showFallbackTitle = true, compact = false): LarkCardElement => {
+const shanghaiClock = (at: string | number | Date): string | undefined => {
+  const date = new Date(at);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).format(date);
+};
+
+const currentRunningStagePanel = (group: TraceGroup, index: number, showFallbackTitle = true, compact = false, lastActivityAt?: string): LarkCardElement => {
   const records = stageRecords(group.actions);
   const tools = records.flatMap(record => record.kind === 'tool' ? [record.entry] : []);
   const assistantNarrative = [...group.narratives].reverse().find(entry => entry.type === 'text');
@@ -815,6 +826,16 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
       const chips = [...counts].map(([label, count]) => `<text_tag color='neutral'>${label} ${count}</text_tag>`);
       if (failedCount > 0) chips.push(`<text_tag color='red'>失败 ${failedCount}</text_tag>`);
       elements.push({ tag: 'markdown', element_id: 'current_steps', content: chips.join(' '), text_size: 'notation', margin: indent });
+    }
+    const activityClock = lastActivityAt ? shanghaiClock(lastActivityAt) : undefined;
+    if (activityClock) {
+      elements.push({
+        tag: 'markdown',
+        element_id: 'current_activity',
+        text_size: 'notation',
+        margin: indent,
+        content: `<font color='grey'>最近活动 ${activityClock}</font>`
+      });
     }
     return {
       tag: 'interactive_container',
@@ -916,6 +937,8 @@ const permissionAlert = (entry: TraceEntry, index: number): LarkCardElement => {
   // 已拦截 / 已授权则必须自己说——那时任务状态行显示的是「执行中」，不是审批结果。
   const resolvedTag = pending ? '' : rejected
     ? "<text_tag color='red'>已拦截</text_tag>　"
+    // 按「本会话允许」自动批准的不发审批卡，进度卡上这一行就是它唯一的记录。
+    : entry.data.sessionAllowed === true ? "<text_tag color='green'>本会话已允许</text_tag>　"
     : "<text_tag color='green'>已授权</text_tag>　";
   // 已拦截是唯一需要指引的分支：它是终局，而且下一步与部署形态无关。
   const guidance = rejected && !pending ? '可调整指令后重试，或由有权限的成员重新发起。' : '';
@@ -953,6 +976,7 @@ export function renderLarkCardElements(
   _chatType?: string,
   view: 'combined' | 'process' | 'result' = 'combined'
 ): LarkCardElement[] {
+  const effectiveLastActivityAt = events.at(-1)?.timestamp;
   const compact = config.compactTrace === true;
   const entries = compactTraceEntries(events);
   const lastIndex = (predicate: (entry: TraceEntry) => boolean) => {
@@ -1022,7 +1046,7 @@ export function renderLarkCardElements(
         if (omittedGroupCount) elements.push(traceOmissionElement(omittedGroupCount, '4px 0px 2px 0px'));
         elements.push(...historyGroups.map((group, index) => historyGroupPanel(group, index, true, false, false, compact)));
       }
-      elements.push(currentRunningStagePanel(currentGroup, groups.length - 1, view !== 'process', compact));
+      elements.push(currentRunningStagePanel(currentGroup, groups.length - 1, view !== 'process', compact, effectiveLastActivityAt));
     }
   }
   // 完成时的占位带 id：过程卡的回执自己会说结果在不在下一条，service 据此把它拿掉。

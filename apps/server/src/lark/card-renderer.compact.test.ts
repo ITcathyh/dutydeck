@@ -145,4 +145,34 @@ describe('compactTrace 精简过程卡', () => {
     expect(markdown).toContain('still failing');
     expect(markdown).toContain('/repo/src/broken.ts');
   });
+
+  it('从 events 最后一条事件的时间戳推导，卡片里有「最近活动 HH:MM」', () => {
+    // 2026-08-27T07:30:00.000Z 在 Asia/Shanghai 是 15:30
+    const activityIso = '2026-08-27T07:30:00.000Z';
+    const eventsWithActivity = [
+      ...multiStageEvents,
+      event(11, 'text', activityIso, { role: 'assistant', text: '继续排查。' })
+    ];
+    const elements = renderLarkProcessElements(eventsWithActivity, compactConfig, false);
+    const serialized = JSON.stringify(elements);
+    expect(serialized).toContain('最近活动 15:30');
+
+    const activityEl = components(elements).find(el => el.element_id === 'current_activity');
+    expect(activityEl).toBeDefined();
+    expect(activityEl.content).toBe("<font color='grey'>最近活动 15:30</font>");
+  });
+
+  it('awaitingAnswer 为 true 时，状态显示「等待回答」', () => {
+    const elements = renderLarkProcessElements(multiStageEvents, compactConfig, false);
+    const card: any = buildLarkCard({
+      cardKind: 'process',
+      state: 'running',
+      taskName: '等待回答任务',
+      awaitingAnswer: true,
+      elements
+    });
+    expect(card.header.template).toBe('orange');
+    expect(card.header.text_tag_list[0].text.content).toBe('等待回答');
+    expect(card.config.summary.content).toContain('等待回答');
+  });
 });
