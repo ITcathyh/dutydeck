@@ -1,5 +1,7 @@
 // Web 改版验收：一条命令跑完「不许弄坏」的三道闸 + 视觉 e2e 进度条。
 //
+// 运行前设置 DUTYDECK_E2E_BASE_URL，指向用于视觉验收的测试实例。
+//
 // 用法：
 //   node scripts/verify-redesign.mjs            全跑
 //   node scripts/verify-redesign.mjs --quick    跳过 pnpm test 与 pnpm build（只跑 tsc + 视觉 e2e）
@@ -20,6 +22,8 @@ import { spawn } from 'node:child_process';
 import { readFile, rm } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+if (!process.env.DUTYDECK_E2E_BASE_URL?.trim()) throw new Error('请设置 DUTYDECK_E2E_BASE_URL，指向用于视觉验收的测试实例。');
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const args = new Set(process.argv.slice(2));

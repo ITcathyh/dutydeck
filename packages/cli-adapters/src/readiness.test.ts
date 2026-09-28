@@ -721,7 +721,7 @@ describe('terminal screen readiness and trust dialog handling', () => {
       '',
       '› Ask Codex to do anything',
       '',
-      '  GPT-6-Astra xhigh · /data00/home/huangyuhang.edu/ai/dutydeck',
+      '  GPT-6-Astra xhigh · /home/example-user01/ai/dutydeck',
     ].join('\n');
 
     const traexReadyWithTranscript = [
