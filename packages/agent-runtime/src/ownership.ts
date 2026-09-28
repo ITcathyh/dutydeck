@@ -8,14 +8,24 @@ export interface Owner {
   readonly sessionId: string;
   readonly parent?: Owner;
   revoked: boolean;
-  readonly cancelled: Promise<never>;
+  onCancel(listener: () => void): () => void;
   revoke(): void;
 }
 export function owner(sessionId: string, parent?: Owner): Owner {
-  let reject!: (error: Error) => void;
-  const cancelled = new Promise<never>((_resolve, no) => { reject = no; });
-  void cancelled.catch(() => {});
-  const token: Owner = { sessionId, parent, revoked: false, cancelled, revoke() { token.revoked = true; reject(new RevokedOperation()); } };
+  const listeners = new Set<() => void>();
+  const token: Owner = {
+    sessionId, parent, revoked: false,
+    onCancel(listener) {
+      if (token.revoked) listener(); else listeners.add(listener);
+      return () => { listeners.delete(listener); };
+    },
+    revoke() {
+      if (token.revoked) return;
+      token.revoked = true;
+      for (const listener of listeners) listener();
+      listeners.clear();
+    }
+  };
   return token;
 }
 
@@ -35,11 +45,20 @@ export class SessionMutations {
     // Already-started operations must remain observed even when their owner was revoked.
     void pending.catch(() => {});
     this.check();
-    const cancellations: Promise<never>[] = [];
-    for (let token = this.current(); token; token = token.parent) cancellations.push(token.cancelled);
-    const result = await Promise.race([pending, ...cancellations]);
-    this.check();
-    return result;
+    const unsubscribe: Array<() => void> = [];
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      for (let token = this.current(); token; token = token.parent) {
+        unsubscribe.push(token.onCancel(() => reject(new RevokedOperation())));
+      }
+    });
+    try {
+      const result = await Promise.race([pending, cancelled]);
+      this.check();
+      return result;
+    } finally {
+      // A long-lived parent must not retain completed waits or their async context.
+      for (const remove of unsubscribe) remove();
+    }
   }
   write<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     const inherited = this.lease.getStore();
