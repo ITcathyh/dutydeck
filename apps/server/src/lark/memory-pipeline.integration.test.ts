@@ -575,6 +575,7 @@ describe('Lark memory pipeline through the coordinator', () => {
     h.setResponder(() => ({ text: '提取也故意不给 JSON 代码块' }));
     // 必须是真跑过的轮次：没有可读结果的轮次会走「无素材」成功早退，记不上失败。
     await h.runTurns(1);
+    await vi.waitFor(async () => expect((await h.store.getState(scope)).pendingTurns).toHaveLength(1));
     await h.pipeline.runExtraction(scope);
     const failed = await h.store.getState(scope);
     expect(failed.lastFailureAt?.extraction).toBeTruthy();

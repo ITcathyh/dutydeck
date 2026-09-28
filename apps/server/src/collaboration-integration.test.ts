@@ -381,6 +381,7 @@ it('physically stops the original task after cancellation and rejects forged or 
 
 it('stores immutable instruction versions and fails closed when the current group is revoked', async () => {
   const f = await fixture();
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, memoryEnabled: true });
   const patch = await f.collaboration.prepareSettings(scope, { expectedRevision: 0, participation: 'observe', instructions: '只补充遗漏' });
   await f.collaboration.service.updateSettings(scope, installationOwnerTaskActor, patch);
   expect(patch.policyVersion).toBe('revision-1');
