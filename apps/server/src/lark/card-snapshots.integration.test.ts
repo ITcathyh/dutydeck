@@ -509,13 +509,14 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
   }, 60_000);
 
   it('等待审批时后续消息排队，/status 显示被审批阻塞与本月用量，从状态卡拒绝审批', async () => {
+    const secondTurn = deferred();
     const h = await harness({ turns: [
       async ({ emit, permission }) => {
         emit(text('要改一下 config/app.yaml 里的超时配置。'));
         const approved = await permission('perm_config', '修改 config/app.yaml');
         emit(text(approved ? '已把请求超时改成 30 秒。' : '审批被拒绝，没有修改 config/app.yaml。'));
       },
-      async ({ emit }) => { emit(text('补了一条超时配置的单元测试。')); }
+      async ({ emit }) => { await secondTurn.wait; emit(text('补了一条超时配置的单元测试。')); }
     ] });
     await h.repos.usage.append(earlierUsage(0.35));
     const first = h.say('把请求超时改成 30 秒');
@@ -531,6 +532,7 @@ describe('飞书卡片快照（入站事件驱动真实链路）', () => {
     h.checkpoint('/status');
     await h.click(h.findMessage('拒绝这条审批')!, '拒绝这条审批');
     await h.delivered(first);
+    secondTurn.release();
     await h.delivered(second);
     h.checkpoint('拒绝审批后');
     await h.snapshot('approval-queue-status');

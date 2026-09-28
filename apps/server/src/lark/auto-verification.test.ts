@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, parse } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { ConfigRepository, VerificationResponse } from '@dutydeck/shared';
 import {
@@ -105,8 +105,7 @@ describe('基准与「本轮改了代码」', () => {
     expect(await larkVerificationBase(clone)).toBe(originHead);
     expect(await larkVerificationBase(clone, { mode: 'worktree', baselineCommit: git(clone, 'rev-parse', 'HEAD') })).toBe(git(clone, 'rev-parse', 'HEAD'));
     expect(await larkVerificationBase(origin, { mode: 'shared' })).toBe(originHead);
-    const plain = mkdtempSync(join(tmpdir(), 'dutydeck-auto-verify-plain-'));
-    directories.push(plain);
+    const plain = parse(tmpdir()).root;
     expect(await larkVerificationBase(plain)).toBeUndefined();
     expect(larkInsideGitRepository(plain)).toBe(false);
     expect(larkInsideGitRepository(join(clone, 'missing', 'nested'))).toBe(true);
