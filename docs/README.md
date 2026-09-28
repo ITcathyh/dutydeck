@@ -1,6 +1,6 @@
 # 文档索引
 
-本目录收录 Dutydeck 的架构设计、功能手册、调研对标与交付记录（共 46 篇）。
+本目录收录 Dutydeck 的架构设计、功能手册、调研对标与交付记录。
 
 状态说明：
 - **现行**：仍在指导当前工作的规范、使用手册与调研结论。
@@ -65,7 +65,8 @@
 
 | 文档 | 日期 | 说明 | 状态 |
 |---|---|---|---|
-| [competitive-review-20260925.md](competitive-review-20260925.md) | 2026-09-25 | 同类产品对标、线上运行诊断（内网无鉴权暴露、Tag 库膨胀、审批堵队列、重启丢任务）与 P0–P2 优化计划。 | 现行 |
+| [competitive-research-20260926.md](competitive-research-20260926.md) | 2026-09-26 | 当前能力与实例启用状态已核验；八项修补、配置及新能力建议，附隔离实测、失败记录与竞品来源。 | 现行（能力判断与投入建议，非已批准开发） |
+| [competitive-review-20260925.md](competitive-review-20260925.md) | 2026-09-25 | 当日产品对标、运行诊断与优化计划；多项问题已修复，当前核验见 09-26 调研。 | 历史快照（§7 用户决策继续适用） |
 | [botmux-adoption-20260923.md](botmux-adoption-20260923.md) | 2026-09-23 | Botmux 改进吸收交付与上线迁移记录（systemd 前台自愈、restart ABI 检查、CLI 就绪与目录信任、tmux 环境清理、解散群过滤、登录态清理）。 | 已落地 |
 | [botmux-review-20260923.md](botmux-review-20260923.md) | 2026-09-23 | Botmux 近 14 天（09-09 至 09-23）140 个提交的评估快照。 | 历史（评估项已由 [botmux-adoption-20260923.md](botmux-adoption-20260923.md) 落实取代，后续增量见 [competitive-review-20260925.md](competitive-review-20260925.md)） |
 | [botmux-adoption-20260922.md](botmux-adoption-20260922.md) | 2026-09-22 | Botmux 五项改进（daemon 进程身份、Codex/TraeX 输入就绪、编辑补 @、显式 `--final` 答复、复制降级反馈）交付与验证记录。 | 已落地 |
