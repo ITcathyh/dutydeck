@@ -78,7 +78,7 @@ describe('workspace-groups CLI', () => {
   it('rejects remote URLs, credential URLs, non-loopback addresses, and non-http protocols', async () => {
     const fetcher = vi.fn();
     const readToken = vi.fn();
-    const deps = { fetcher, readToken, localAddresses: () => ['10.37.33.49'] };
+    const deps = { fetcher, readToken, localAddresses: () => ['192.0.2.10'] };
 
     // 拒绝 remote 域名
     await expect(
@@ -114,13 +114,13 @@ describe('workspace-groups CLI', () => {
     const fetcher = vi.fn().mockImplementation(() =>
       Promise.resolve(new Response(JSON.stringify(mockSnapshot), { status: 200, headers: { 'content-type': 'application/json' } }))
     );
-    const deps = { fetcher, readToken: () => 'token', localAddresses: () => ['10.37.33.49'] };
+    const deps = { fetcher, readToken: () => 'token', localAddresses: () => ['192.0.2.10'] };
 
     for (const validUrl of [
       'http://127.0.0.1:4310',
       'http://localhost:4310',
       'http://[::1]:4310',
-      'http://10.37.33.49:4310'
+      'http://192.0.2.10:4310'
     ]) {
       const res = await runWorkspaceGroupsCli({ action: 'list', url: validUrl, database: '/dummy.db' }, deps);
       expect(res).toEqual(mockSnapshot);

@@ -36,13 +36,13 @@ it('authenticates a same-database local sync and confirms the exact app without 
 
 it('allows a bound local network interface without sending credentials to arbitrary remote hosts', async () => {
   const h = harness();
-  h.state.address = 'http://10.37.33.49:4317';
-  const interfaces = () => ({ eth0: [{ address: '10.37.33.49', family: 'IPv4' as const, netmask: '255.255.0.0', mac: '00:00:00:00:00:00', internal: false, cidr: '10.37.33.49/16' }] });
+  h.state.address = 'http://192.0.2.10:4317';
+  const interfaces = () => ({ eth0: [{ address: '192.0.2.10', family: 'IPv4' as const, netmask: '255.255.0.0', mac: '00:00:00:00:00:00', internal: false, cidr: '192.0.2.10/16' }] });
   expect(await syncLarkListener('cli_bot', h.context, { ...h.dependencies, interfaces })).toMatchObject({ activeListening: true });
-  expect(h.fetcher).toHaveBeenCalledWith(expect.stringContaining('http://10.37.33.49:4317/'), expect.anything());
+  expect(h.fetcher).toHaveBeenCalledWith(expect.stringContaining('http://192.0.2.10:4317/'), expect.anything());
 });
 
-it.each(['http://remote.example:4317', 'http://10.37.33.50:4317', 'http://127.0.0.1.evil.test', 'http://user:pass@127.0.0.1:4317', 'file:///tmp/server', 'http://0.0.0.0:4317'])('rejects unsafe daemon address %s before reading credentials', async address => {
+it.each(['http://remote.example:4317', 'http://192.0.2.11:4317', 'http://127.0.0.1.evil.test', 'http://user:pass@127.0.0.1:4317', 'file:///tmp/server', 'http://0.0.0.0:4317'])('rejects unsafe daemon address %s before reading credentials', async address => {
   const h = harness(); h.state.address = address;
   expect(await syncLarkListener('cli_bot', h.context, { ...h.dependencies, interfaces: () => ({}) })).toMatchObject({ activeListening: false });
   expect(h.config.get).not.toHaveBeenCalled(); expect(h.fetcher).not.toHaveBeenCalled();

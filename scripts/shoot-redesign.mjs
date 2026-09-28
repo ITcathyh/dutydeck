@@ -1,6 +1,6 @@
 // 改版前后的截图存档。
 //
-// 服务绑外部主机名而非 loopback，127.0.0.1 会 ERR_CONNECTION_REFUSED。
+// 运行前设置 DUTYDECK_E2E_BASE_URL，指向用于截图的测试实例。
 // 详情页开着 SSE，networkidle 永不触发（实测 30s 超时），所以统一用
 // domcontentloaded + 等 DOM 锚点。
 //
@@ -18,7 +18,8 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const BASE = process.env.DUTYDECK_E2E_BASE_URL ?? 'http://10.37.33.49:4310';
+const BASE = process.env.DUTYDECK_E2E_BASE_URL;
+if (!BASE?.trim()) throw new Error('请设置 DUTYDECK_E2E_BASE_URL，指向用于截图的测试实例。');
 const REFERENCE_URL = process.env.REFERENCE_DASHBOARD_URL ?? process.env.BOTMUX_DASHBOARD_URL ?? 'http://127.0.0.1:7891';
 
 const tag = process.argv[2] ?? 'before';

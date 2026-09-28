@@ -4,7 +4,8 @@ apps/web/dist/
 apps/server/dist/
 packages/*/dist/
 .env
-.env.local
+.env.*
+!.env.example
 *.log
 .DS_Store
 .dutydeck/
@@ -13,15 +14,14 @@ packages/*/dist/
 apps/server/public
 *.tsbuildinfo
 
-# setup 写入的 .env 备份（含本机路径，权限 600）
-.env.bak.*
-
 # 端到端验收产物
 artifacts/
 
-# 改版对比截图：4.9M 二进制，一轮改版就作废一批，进 git 会永久留在历史里。
-# 需要时用 scripts/shoot-redesign.mjs 重跑即可（脚本本身是提交的）。
-docs/assets/redesign-*/
+# 本地文档、调研数据与登录二维码
+/docs/
+/.scratch_cost/
+/.bdev-codex-qr.png
 
-# 卡片改版对比预览：改一轮就作废一批，需要时用 scripts/preview-lark-card.mts 重跑。
-docs/assets/card-preview*/
+# Agent 本地工作目录与个人配置
+/.claude/worktrees/
+/.claude/settings.local.json

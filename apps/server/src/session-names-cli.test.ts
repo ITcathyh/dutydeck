@@ -121,7 +121,7 @@ describe('session-names CLI', () => {
     });
 
     it('rejects remote, non-http, credential, and missing database options', async () => {
-      const deps = { fetcher: vi.fn(), readToken: vi.fn(), localAddresses: () => ['10.37.33.49'] };
+      const deps = { fetcher: vi.fn(), readToken: vi.fn(), localAddresses: () => ['192.0.2.10'] };
 
       await expect(
         runSessionNamesCli({ action: 'list', url: 'http://example.com:4310', database: '/dummy.db' }, deps)

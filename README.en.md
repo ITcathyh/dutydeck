@@ -210,7 +210,7 @@ In project channels, configure the bot as an intelligent team member:
   - `selective`: Stays silent by default without a mention. Replies to clearly addressed requests, verifiable follow-ups, or an evidenced urgent risk requiring immediate warning; an addressed request that needs a link read, a tool call, or a delegation change is handed to the executing Agent as if it were a mention. Peer conversations, undirected questions, progress updates, thanks, and uncertain intent receive no reply or acknowledgement reaction.
 - **One mention is enough**: With `observe` or `selective`, replying to your own request that mentioned the bot or to the bot's reply, or continuing in a thread you started that the bot already works in, needs no further mention; messages from others, replies that mention someone else, or replies to other people's messages follow the rules above. If you forget the mention on a request, sending a bare mention within 10 minutes makes the bot act on that request without asking for confirmation. `/status` shows the group's participation mode.
 - **Processing status and concurrency**: Accepted replies get an `OK` reaction on the source message while the answer is generated and sent, then the reaction is removed. Silent decisions stay invisible. Groups run independently; each group processes replies in order and coalesces pending messages before accepting a reply.
-- **Layered execution**: Set the bot's "执行方式" (execution mode) to layered and pick a Leader and Workers. The mentioned default Agent then acts as PMO: it answers directly or hands code and test work to the Leader as a brief. The Leader plans read-only, assigns Workers, reviews the results last, and the result returns to the original thread. It applies to group chats only, and plans wait for "开始执行" (start). See [Tag layered execution](docs/tag-layered-execution.md) (Chinese).
+- **Layered execution**: Set the bot's "执行方式" (execution mode) to layered and pick a Leader and Workers. The mentioned default Agent then acts as PMO: it answers directly or hands code and test work to the Leader as a brief. The Leader plans read-only, assigns Workers, reviews the results last, and the result returns to the original thread. It applies to group chats only, and plans wait for "开始执行" (start).
 - **Natural Language Delegation**:
   - `@bot Track a todo: submit the release ticket before 5:00 PM tomorrow.`
   - `@bot Summarize today's engineering progress in this group every weekday at 18:00 until cancelled.`
@@ -445,12 +445,6 @@ dutydeck autostart disable  # Unregister service
 ## 📚 Technical Docs & Architecture
 
 - [End-to-End Acceptance Test Matrix](tests/e2e/README.md)
-- [Generic Group Collaboration Implementation](docs/generic-collaboration-implementation.md)
-- [Tag Layered Execution: PMO + Leader + Worker](docs/tag-layered-execution.md)
-- [Collaboration Extensions Technical Specification](docs/collaboration-extensions.md)
-- [Lark Session Memory Architecture](docs/lark-memory-design.md)
-- [Legacy Data Import CLI Manual](docs/legacy-import-cli.md)
-- [Full Product Parity Plan](docs/full-product-parity-plan.md)
 
 ---
 

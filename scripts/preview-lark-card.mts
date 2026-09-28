@@ -96,7 +96,7 @@ const terminalHeavy: AgentEvent[] = [
 
 type Scenario = { id: string; label: string; note: string; card: any };
 
-const web = 'http://10.37.33.49:4310';
+const web = 'http://127.0.0.1:4310';
 const liveCapabilities = { canCancelQueued: false, canInterrupt: true, canRetry: false, canRefresh: true, webUrl: `${web}/sessions/ses_preview` };
 const doneCapabilities = { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false, webUrl: `${web}/sessions/ses_preview` };
 
@@ -135,7 +135,7 @@ const commandReceiptCard = (taskName: string, elements: Array<Record<string, any
 // dashboardNow 传给渲染器——否则每次跑图这些值都在动，并排复核时全是假差异。
 const dashboardNow = base;
 const ago = (minutes: number) => new Date(dashboardNow - minutes * 60_000).toISOString();
-const workspace = '/data00/home/huangyuhang.edu/ai/dutydeck';
+const workspace = '/workspace/example-project';
 const appLink = 'https://applink.feishu.cn/client/chat/open?openChatId=oc_preview';
 const dashboardEntries = [
   { taskId: 't1', title: '看看发送的消息卡片能不能做大规模重构优化', workspace, status: 'waiting_for_permission', updatedAt: ago(12), url: appLink },

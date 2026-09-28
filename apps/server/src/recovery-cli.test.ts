@@ -29,10 +29,10 @@ describe('owner recovery CLI', () => {
   });
   it('supports an exact local-interface listener while rejecting foreign IPs and credential URLs', async () => {
     const fetcher = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
-    const deps = { fetcher, readToken: vi.fn().mockReturnValue('owner'), localAddresses: () => ['10.37.33.49'] };
-    await runRecoveryCli('inspect', 'session', { url: 'http://10.37.33.49:4310', database: '/db' }, deps);
+    const deps = { fetcher, readToken: vi.fn().mockReturnValue('owner'), localAddresses: () => ['192.0.2.10'] };
+    await runRecoveryCli('inspect', 'session', { url: 'http://192.0.2.10:4310', database: '/db' }, deps);
     expect(fetcher).toHaveBeenCalledTimes(1);
-    for (const url of ['http://10.37.33.50:4310', 'http://owner@10.37.33.49:4310', 'http://main.local:4310']) {
+    for (const url of ['http://192.0.2.11:4310', 'http://owner@192.0.2.10:4310', 'http://main.local:4310']) {
       await expect(runRecoveryCli('inspect', 'session', { url, database: '/db' }, deps)).rejects.toMatchObject({ code: 'RECOVERY_LOCAL_RUNTIME_REQUIRED' });
     }
     expect(fetcher).toHaveBeenCalledTimes(1);

@@ -17,7 +17,9 @@ import { test as base, type Page, type Locator } from '@playwright/test';
  * 用户走的路径，也是最容易在重构中被漏掉一层的地方。
  */
 
-export const BASE_URL = process.env.DUTYDECK_E2E_BASE_URL ?? 'http://10.37.33.49:4310';
+const baseURL = process.env.DUTYDECK_E2E_BASE_URL;
+if (!baseURL?.trim()) throw new Error('请设置 DUTYDECK_E2E_BASE_URL，指向用于视觉验收的测试实例。');
+export const BASE_URL = baseURL;
 
 export type ThemeMode = 'light' | 'dark';
 /** attr = 显式 data-theme；media = 不写属性，靠 prefers-color-scheme。 */

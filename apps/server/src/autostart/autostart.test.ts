@@ -357,11 +357,11 @@ describe('Dutydeck 开机自启', () => {
   });
 
   it('Linux: linger 未开启时给出带真实用户名的警告', async () => {
-    const result = await autostartEnable(options('linux', commandLog(linuxResponder({ linger: false })), { username: 'huangyuhang' }));
+    const result = await autostartEnable(options('linux', commandLog(linuxResponder({ linger: false })), { username: 'example-user' }));
     const warning = result.notices.find(notice => notice.includes('linger'));
     expect(result.state.lingerEnabled).toBe(false);
     expect(warning).toBeDefined();
-    expect(warning).toContain('loginctl enable-linger huangyuhang');
+    expect(warning).toContain('loginctl enable-linger example-user');
     expect(warning).toContain('注销');
   });
 

@@ -1,8 +1,9 @@
 // 验收截图：桌面 1440x900 + 移动 390x844。
-// 服务绑外部主机名而非 loopback，127.0.0.1 会 ERR_CONNECTION_REFUSED。
+// 运行前设置 DUTYDECK_E2E_BASE_URL，指向用于截图的测试实例。
 import { chromium } from '@playwright/test';
 
-const URL = 'http://n37-033-049.byted.org:4310/';
+const URL = process.env.DUTYDECK_E2E_BASE_URL;
+if (!URL?.trim()) throw new Error('请设置 DUTYDECK_E2E_BASE_URL，指向用于截图的测试实例。');
 const tag = process.argv[2] ?? 'after';
 
 const browser = await chromium.launch();
