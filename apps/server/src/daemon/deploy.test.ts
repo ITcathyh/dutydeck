@@ -352,6 +352,66 @@ describe('dutydeck deploy', () => {
     expect(schema(manifest.database_before_rollback)).toBe(27);
   }, 60_000);
 
+  it('回滚用备份恢复数据库时，备份之后收到的飞书消息会从库里消失：按会话各回一条提醒核对后重发', async () => {
+    nextCommit(source, { knownSchema: 24 });
+    const first = await runDeploy({ source, runtime: bot }, deps());
+    expect(first, first.error).toMatchObject({ ok: true, status: 'deployed' });
+    nextCommit(source, { knownSchema: 27, health: 503 });
+    const inbox = (messageId: string, chatId: string, state: string, createTime: string, threadId?: string) => [`lark.inbox.cli_deploy.${messageId}`, JSON.stringify({
+      appId: 'cli_deploy', boot: 'boot', state, event: { messageId, chatId, chatType: 'group', messageType: 'text', content: '{"text":"请求"}', createTime, mentions: [], ...(threadId ? { threadId } : {}) }
+    })] as const;
+    const put = (file: string, rows: ReadonlyArray<readonly [string, string]>) => {
+      const db = new Database(file);
+      try { for (const row of rows) db.prepare('INSERT OR REPLACE INTO configs VALUES (?, ?)').run(...row); } finally { db.close(); }
+    };
+    const inboxKeys = (file: string) => {
+      const db = new Database(file, { readonly: true });
+      try { return (db.prepare("SELECT key FROM configs WHERE key LIKE 'lark.inbox.%' ORDER BY key").all() as Array<{ key: string }>).map(row => row.key); } finally { db.close(); }
+    };
+    put(database, [['lark.bots', JSON.stringify([{ appId: 'cli_deploy', appSecret: 'deploy-secret', listening: true }])], inbox('om_before', 'oc_a', 'accepted', '10')]);
+    const replies: Array<{ path: string; body: Record<string, unknown> }> = [];
+    const feishu: typeof fetch = async (url, init) => {
+      const target = new URL(String(url));
+      if (target.hostname !== 'open.feishu.cn') return await fetch(url, init);
+      if (target.pathname.startsWith('/open-apis/auth/')) return Response.json({ code: 0, tenant_access_token: 'tenant-token', expire: 7200 });
+      replies.push({ path: target.pathname, body: JSON.parse(String(init?.body)) });
+      return Response.json({ code: 0, data: { message_id: `om_notice_${replies.length}` } });
+    };
+    let backups = 0;
+    const broken = await runDeploy({ source, runtime: bot }, deps({
+      healthTimeoutMs: 2_500,
+      fetch: feishu,
+      backupDatabase: async (from, to) => {
+        const db = new Database(from, { readonly: true });
+        try { await db.backup(to); } finally { db.close(); }
+        // 部署前的备份做完之后，旧进程在重启前照常收下的消息
+        if (++backups === 1) {
+          put(database, [
+            inbox('om_a1', 'oc_a', 'received', '100'), inbox('om_a2', 'oc_a', 'accepted', '200'),
+            inbox('om_t1', 'oc_a', 'command', '150', 'omt_topic'), inbox('om_denied', 'oc_c', 'failed', '120')
+          ]);
+        }
+      }
+    }));
+
+    expect(broken, broken.error).toMatchObject({ ok: false, status: 'rolled_back' });
+    const manifest = JSON.parse(readFileSync(broken.manifest!, 'utf8'));
+    expect(manifest.database_restored).toBe(true);
+    // 复现：恢复后的库里只剩备份时就有的那条，备份之后收到的只留在另存的回滚前的库里
+    expect(inboxKeys(database)).toEqual(['lark.inbox.cli_deploy.om_before']);
+    expect(inboxKeys(manifest.database_before_rollback)).toEqual(['om_a1', 'om_a2', 'om_before', 'om_denied', 'om_t1'].map(id => `lark.inbox.cli_deploy.${id}`));
+    // 每个受影响的会话只回一条，回在其中最后收到的那条消息下；已回过拒绝回执的不算
+    expect(replies.map(reply => reply.path).sort()).toEqual(['/open-apis/im/v1/messages/om_a2/reply', '/open-apis/im/v1/messages/om_t1/reply']);
+    const topic = replies.find(reply => reply.path.includes('om_t1'))!;
+    expect(topic.body).toMatchObject({ msg_type: 'text', reply_in_thread: true });
+    for (const reply of replies) expect(JSON.parse(String(reply.body.content)).text).toContain('执行状态不确定，请核对后重发');
+    expect(manifest.uncertain_conversations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ app_id: 'cli_deploy', chat_id: 'oc_a', message_id: 'om_a2', messages: 2, notified: true }),
+      expect.objectContaining({ app_id: 'cli_deploy', chat_id: 'oc_a', thread_id: 'omt_topic', message_id: 'om_t1', messages: 1, notified: true })
+    ]));
+    expect(JSON.stringify(manifest)).not.toContain('deploy-secret');
+  }, 60_000);
+
   it('试加载失败时不切换、不重启，删掉这个发布目录', async () => {
     const first = await runDeploy({ source, runtime: bot }, deps());
     nextCommit(source, { versionExit: 1 });

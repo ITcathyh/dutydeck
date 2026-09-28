@@ -76,6 +76,35 @@ describe('飞书卡片操作按钮：转到新会话', () => {
   });
 });
 
+describe('飞书卡片操作按钮：排队卡插队', () => {
+  it('只在声明能力时出现，且只在排队卡上；缺省不给', () => {
+    expect(availableLarkCardActions(context('queued'))).toEqual(['cancel', 'refresh']);
+    expect(availableLarkCardActions(context('queued', {}, { canSteerPromote: true }))).toEqual(['cancel', 'steer_promote', 'refresh']);
+    expect(labels(buildLarkCardActions(context('queued', {}, { canSteerPromote: true, canSteerInject: true }))))
+      .toEqual(['取消', '中断当前这一轮，先做这条', '插进当前这一轮', '刷新']);
+    for (const state of allStates.filter(state => state !== 'queued')) {
+      const actions = availableLarkCardActions(context(state, {}, { canSteerPromote: true, canSteerInject: true, steerFirst: true }));
+      expect(actions, state).not.toContain('steer_promote');
+      expect(actions, state).not.toContain('steer_inject');
+    }
+    expect(buildLarkCardActions(context('queued', { readOnly: true }, { canSteerPromote: true, canSteerInject: true }))).toEqual([]);
+  });
+
+  it('叫停类消息把中断按钮排到最前，其余顺序不变，总数不超预算', () => {
+    const ctx = context('queued', { turn: 2 }, { canSteerPromote: true, canSteerInject: true, steerFirst: true });
+    const buttons = buildLarkCardActions(ctx);
+    expect(buttonIds(buttons)).toEqual(['steer_promote', 'cancel', 'steer_inject', 'refresh']);
+    expect(buttons.length).toBeLessThanOrEqual(larkCardActionBudget.maxButtons);
+    for (const button of buttons) {
+      const parsed = parseLarkCardActionValue(callbackValue(button))!;
+      expect(parsed.turn).toBe(2);
+      expect(isLarkCardActionAvailable(parsed.action, ctx)).toBe(true);
+    }
+    // 只调顺序：没有叫停时，中断按钮回到取消之后。
+    expect(availableLarkCardActions(context('queued', {}, { canSteerPromote: true, steerFirst: false }))).toEqual(['cancel', 'steer_promote', 'refresh']);
+  });
+});
+
 describe('飞书卡片操作按钮：状态收敛', () => {
   it('每个状态只出该状态匹配的主操作', () => {
     // 一个状态一个主要下一步：排队可取消、运行可中断、失败/取消可重试。

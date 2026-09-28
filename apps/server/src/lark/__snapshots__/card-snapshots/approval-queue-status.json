@@ -194,6 +194,13 @@
                         ]
                       }
                     ]
+                  },
+                  {
+                    "tag": "markdown",
+                    "element_id": "current_activity",
+                    "text_size": "notation",
+                    "margin": "0px 0px 0px 20px",
+                    "content": "<font color='grey'>最近活动 <北京时刻></font>"
                   }
                 ]
               },
@@ -605,10 +612,73 @@
             "elements": [
               {
                 "tag": "markdown",
-                "content": "**排队中**\n\n正在等待前一轮执行结束。\n\n此请求尚未执行，可点击取消，或回原话题发送 `/cancel`；发送 `/status` 查看最新状态。",
-                "text_align": "left",
-                "text_size": "normal_v2",
-                "margin": "0px"
+                "element_id": "queued_approval",
+                "content": "**排队中**\n\n上面的操作还在等你确认：修改 config/app.yaml。文字回复不算批准。"
+              },
+              {
+                "tag": "column_set",
+                "element_id": "queued_approval_actions",
+                "flex_mode": "flow",
+                "horizontal_spacing": "4px",
+                "margin": "0px",
+                "columns": [
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "element_id": "queued_approve",
+                        "type": "primary",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "允许本次"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "dutydeck_workflow": "approve",
+                              "request_id": "<id:3>",
+                              "generation": "<id:2>",
+                              "dutydeck_queued_task": "om_in_2",
+                              "queued_turn": "1"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "tag": "column",
+                    "width": "auto",
+                    "vertical_align": "center",
+                    "elements": [
+                      {
+                        "tag": "button",
+                        "element_id": "queued_reject",
+                        "type": "default",
+                        "text": {
+                          "tag": "plain_text",
+                          "content": "拒绝"
+                        },
+                        "behaviors": [
+                          {
+                            "type": "callback",
+                            "value": {
+                              "dutydeck_workflow": "reject",
+                              "request_id": "<id:3>",
+                              "generation": "<id:2>",
+                              "dutydeck_queued_task": "om_in_2",
+                              "queued_turn": "1"
+                            }
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
               },
               {
                 "tag": "column_set",
@@ -1013,7 +1083,7 @@
               }
             },
             "summary": {
-              "content": "本次操作确认 · 已处理"
+              "content": "本次操作确认 · 已拒绝"
             }
           },
           "body": {
@@ -1028,7 +1098,7 @@
                 "margin": "0px",
                 "text": {
                   "tag": "lark_md",
-                  "content": "<font color='grey'>已处理</font>",
+                  "content": "<font color='grey'>已拒绝</font>",
                   "text_size": "small"
                 }
               },
@@ -1041,7 +1111,7 @@
               },
               {
                 "tag": "markdown",
-                "content": "执行端已接受本次决策。"
+                "content": "已拒绝 · <at id=ou_snapshot_alice></at> · <北京时刻>"
               }
             ]
           },

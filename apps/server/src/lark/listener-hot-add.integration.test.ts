@@ -141,19 +141,19 @@ it.each(['ready', 'error', 'timeout'] as const)('waits for actual WebSocket read
     expect(settled).toBe(false);
     expect((await app.inject({ method: 'GET', url: '/api/lark/status' })).json().activeAppIds).toEqual([]);
     if (outcome === 'ready') sockets[0]!.ready();
-    else {
-      if (outcome === 'error') sockets[0]!.fail(new Error('private transport details'));
-      else await vi.advanceTimersByTimeAsync(20_000);
-      await vi.waitFor(() => expect(sockets).toHaveLength(2));
-      expect(settled).toBe(false);
-      if (outcome === 'error') sockets[1]!.fail(new Error('private transport details'));
-      else await vi.advanceTimersByTimeAsync(20_000);
-    }
+    else if (outcome === 'error') sockets[0]!.fail(new Error('private transport details'));
+    else await vi.advanceTimersByTimeAsync(20_000);
     const response = await request;
     expect(response.statusCode).toBe(outcome === 'ready' ? 200 : 503);
     expect(response.body).not.toContain('private transport details');
     expect((await app.inject({ method: 'GET', url: '/api/lark/status' })).json().activeAppIds).toEqual(outcome === 'ready' ? ['cli_wait'] : []);
-    if (outcome !== 'ready') expect(sockets.every(socket => socket.close.mock.calls.length === 1)).toBe(true);
+    if (outcome !== 'ready') {
+      // 失败的连接已关闭；不当场重试，由连接池 30 秒后重连。
+      expect(sockets).toHaveLength(1);
+      expect(sockets[0]!.close).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    }
   } finally {
     transport.autoReady = true;
     sockets.forEach(socket => socket.fail(new Error('test cleanup')));

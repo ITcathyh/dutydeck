@@ -242,6 +242,11 @@
                 }
               },
               {
+                "tag": "markdown",
+                "element_id": "git_status",
+                "content": "分支 <分支> · 未提交 <N> 个文件"
+              },
+              {
                 "tag": "column_set",
                 "element_id": "result_follow_up_row",
                 "flex_mode": "flow",
@@ -494,6 +499,11 @@
                 "text_align": "left",
                 "text_size": "normal_v2",
                 "margin": "0px"
+              },
+              {
+                "tag": "markdown",
+                "element_id": "git_status",
+                "content": "分支 <分支> · 未提交 <N> 个文件"
               },
               {
                 "tag": "markdown",

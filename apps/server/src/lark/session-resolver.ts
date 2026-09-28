@@ -11,7 +11,7 @@ import { withLarkContextReadTimeout } from './context-read-timeout.js';
 import { detectImageFormat, gifSequenceHint } from './image-format.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
 import type { LarkChatMode } from './chat-mode.js';
-import type { LarkGroup } from './coordinator.js';
+import type { LarkGroup, PersistedLarkCardTask } from './coordinator.js';
 import type { ListenerLog, LarkMessageEvent, LarkRuntime } from './listener.js';
 
 // 会话路由与资源物化辅助（从 listener.ts 拆分）。Third-party attribution: see THIRD_PARTY_NOTICES.md.
@@ -112,8 +112,8 @@ export async function parsePrompt(event: LarkMessageEvent, botOpenId?: string) {
   if (event.mentions.some(mention => typeof mention.key !== 'string' || typeof mention.name !== 'string')) {
     throw new Error('飞书消息包含无效的 mention 数据');
   }
-  // 合并转发（merge_forward）消息不自动展开，只返回带 message_id 的占位提示；
-  // Agent 如需查看转发内容，可通过群协作工具按 message_id 拉取。
+  // 合并转发（merge_forward）消息在 parsePrompt 中保持占位提示，
+  // 转发的具体聊天记录由 collectLarkTaskContext 展开为任务参考材料。
   const content = event.messageType === 'post' || event.messageType === 'rich_text'
     ? markSelfRichTextMentions(event.content, botOpenId)
     : event.content;
@@ -350,9 +350,12 @@ export async function resolveLarkSession(
     defaultAgentId: launchOptions.agentId ?? config.defaultAgentId,
     defaultModel: launchOptions.model ?? config.defaultModel, defaultReasoningEffort: launchOptions.reasoningEffort ?? config.defaultReasoningEffort } : config;
   const matchesRequest = (session: Session) => larkSessionMatchesScope(session, launchOptions ? { ...requestedConfig, managedGroup: undefined } : config, sourceId, launchOptions ? undefined : launch?.sessionId);
+  // 旧会话没能沿用的原因，新建会话时写进首卡。/new 结束的会话登记在 retiredSessionIds 里，不算意外。
+  let replacedReason: string | undefined;
   if (group.sessionId && !group.retiredSessionIds?.has(group.sessionId)) {
     const existing = await runtime.getSession(group.sessionId);
     const reusable = existing && !['failed', 'stopped'].includes(existing.state);
+    if (existing && !reusable) replacedReason = endedSessionReason(existing);
     if (reusable && (config.managedGroup || group.sessionConfigKey === configKey)) {
       if (compatible(existing) && launchCompatible(existing) && (!launchOptions || matchesRequest(existing))) {
         await saveLaunchBinding(existing);
@@ -360,10 +363,12 @@ export async function resolveLarkSession(
       }
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书权限姿态已变更，停止旧 Session 并创建新运行');
       await stopForConfiguration(existing);
+      replacedReason = configChangedReason;
     }
     if (reusable && !config.managedGroup && group.sessionConfigKey !== configKey) {
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '飞书 Agent 配置已变更，停止旧 Session 并应用新配置');
       await stopForConfiguration(existing);
+      replacedReason = configChangedReason;
     }
   }
   group.sessionId = undefined;
@@ -390,6 +395,12 @@ export async function resolveLarkSession(
       }
       log.info({ sessionId: existing.id, appId: config.appId, chatId }, '持久化飞书 Session 的权限姿态不匹配，停止旧 Session 并创建新运行');
       await stopForConfiguration(existing);
+      replacedReason = configChangedReason;
+    }
+    // 重启后没有内存绑定：看本 scope 最近一条会话为什么没被选中。还活着却没选中，只能是配置对不上了。
+    const previous = [...sessions].reverse().find(item => item.source === 'lark' && item.sourceId === sourceId && !item.archivedAt);
+    if (!replacedReason && previous && !group.retiredSessionIds?.has(previous.id)) {
+      replacedReason = ['failed', 'stopped'].includes(previous.state) ? endedSessionReason(previous) : configChangedReason;
     }
   }
   const session = await runtime.start({
@@ -410,5 +421,65 @@ export async function resolveLarkSession(
   group.sessionId = session.id;
   group.sessionConfigKey = configKey;
   if (retiredLegacy) group.legacyUpgradeSessionId = session.id;
+  // 带首轮参数说明是 /new 主动要求的新会话；升级退休另有注记。
+  if (replacedReason && !launchOptions && !retiredLegacy) newSessionNotes.set(session, `已开新会话（${replacedReason}）。`);
   return session;
+}
+
+const configChangedReason = '机器人配置已变更';
+const endedSessionReason = (session: Session) => session.state === 'failed' ? '原会话已异常结束' : '原会话已被停止';
+const newSessionNotes = new WeakMap<Session, string>();
+
+/**
+ * 取走 {@link resolveLarkSession} 这次意外新建会话的首卡注记。
+ * 按返回的 Session 对象记，只有拿到这次返回值的那一轮能取到，取走即清，后续轮次不再重复。
+ */
+export const takeLarkNewSessionNote = (session: Session) => {
+  const note = newSessionNotes.get(session);
+  newSessionNotes.delete(session);
+  return note;
+};
+
+/**
+ * 普通群的话题是否续接发起人自己的顶层任务；是则返回那条任务所在、仍可沿用的会话。
+ *
+ * 顶层消息按发送人、话题按话题各自建会话（见 {@link larkGroupScopeId}）。发起人改在自己顶层任务
+ * 消息的话题里回复时，不续接就会开一个空白会话，原来的上下文和等待中的提问都接不上。
+ * 对应关系只认任务卡映射：话题根就是那条任务消息，映射记着它跑在哪个会话里。任何一环查不到都
+ * 返回 undefined，调用方按原逻辑给话题新建会话。话题已有自己的会话时不续接。
+ * 续接后话题共享这个会话：别人的消息在进程内跟着 group 绑定走，重启后靠话题里已经跑在
+ * 这个会话上的任务卡认回来。托管群、话题群（顶层本来就是话题作用域）与私聊都不涉及。
+ */
+export async function findLarkThreadContinuation(
+  runtime: LarkRuntime,
+  config: StoredLarkConfig,
+  event: LarkMessageEvent,
+  scopeId: string,
+  mappings?: ChannelMappingRepository
+): Promise<Session | undefined> {
+  const rootId = trimmed(event.rootId);
+  if (event.chatType !== 'group' || config.managedGroup || !mappings || !runtime.listSessions
+    || !rootId || !trimmed(event.threadId) || scopeId !== `thread:${rootId}`) return undefined;
+  const channel = `lark-card:${config.appId}`;
+  const root = await mappings.get(channel, rootId);
+  if (root?.channel !== channel || root.externalId !== rootId || !root.extra) return undefined;
+  const task = JSON.parse(root.extra) as PersistedLarkCardTask;
+  const owner = task.sender_open_id;
+  if (task.app_id !== config.appId || task.chat_id !== event.chatId || task.chat_type !== 'group' || task.thread_id
+    || !owner || task.scope_id !== `user:${owner}`) return undefined;
+  const threadSourceId = larkSourceId(config, event.chatId, 'group', scopeId);
+  if ((await runtime.listSessions()).some(item => item.source === 'lark' && item.sourceId === threadSourceId && !item.archivedAt)) return undefined;
+  // 与顶层消息复用会话同一份判据：会话结束了、配置或权限姿态对不上了，话题也不续接。
+  const session = (await listPersistedLarkSessions(runtime, config, event.chatId, 'group', task.scope_id, mappings))
+    .find(item => item.id === root.sessionId);
+  const mode = larkPermissionMode(config);
+  if (!session || ['failed', 'stopped'].includes(session.state)
+    || session.permissionMode !== mode || (mode !== 'full-trust' && session.protocol !== 'acp')) return undefined;
+  if (event.senderOpenId === owner) return session;
+  const continued = (await mappings.list(channel)).some(row => {
+    if (row.sessionId !== session.id || !row.extra) return false;
+    const saved = JSON.parse(row.extra) as PersistedLarkCardTask;
+    return saved.app_id === config.appId && saved.chat_id === event.chatId && saved.scope_id === scopeId;
+  });
+  return continued ? session : undefined;
 }

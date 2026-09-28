@@ -97,6 +97,13 @@ export type LarkTask = {
   autoVerification?: LarkAutoVerificationProgress;
   /** 这一轮已经插话送达，没有自己的轮次：结果卡只写插话结果，不渲染输出。 */
   steered?: string;
+  /** 意外新建会话（旧会话已结束或配置已变更）时的首卡注记；/new 主动开的新会话没有。 */
+  newSessionNote?: string;
+  quoteFailureNote?: string;
+  /** 排队时已被提到队首（/queue top、/steer 或排队卡按钮）：不再和后一条合并。 */
+  promoted?: boolean;
+  /** 排队卡上正显示着的那条审批（记录 id）；审批有了结果，心跳据此把排队卡改回普通说明。 */
+  queuedApproval?: string;
 };
 export type PersistedLarkCardTask = {
   result_feedback_state?: string;

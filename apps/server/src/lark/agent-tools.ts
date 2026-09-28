@@ -657,6 +657,8 @@ export class LarkAgentToolsService {
         if (binding.chatType === 'group' && !collaborationSession) blocks.push(collaborationAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} collaborate --turn ${turn}`));
       }
     }
+    const cannotSchedule = !config.groupToolsEnabled || binding.chatType !== 'group';
+    blocks.push(larkCapabilityPrompt(cannotSchedule));
     return blocks.length ? `${blocks.join('\n\n')}\n\n${prompt}` : prompt;
   }
 
@@ -1331,6 +1333,19 @@ export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process
   const absoluteEntrypoint = resolve(entrypoint);
   const loader = absoluteEntrypoint.endsWith('.ts') ? tsxLoader ?? import.meta.resolve('tsx') : undefined;
   return `${shellQuote(execPath)}${loader ? ` --import ${shellQuote(loader)}` : ''} ${shellQuote(absoluteEntrypoint)}`;
+};
+
+export const larkCapabilityPrompt = (cannotSchedule: boolean) => {
+  const lines = ['[Dutydeck 能力限制与操作指引]'];
+  if (cannotSchedule) {
+    lines.push('- 定时任务：当前会话无法直接设置，请让用户使用 /schedule 命令设置（如 /schedule every 分钟 指令）；不要用 crontab、后台 sleep 或循环脚本代替。');
+  }
+  lines.push('- 切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话（/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容）。');
+  lines.push('- 查看任务：让用户使用 /tasks。');
+  lines.push('- 停止当前任务：让用户点进度卡上的“中断”。');
+  lines.push('- 重新开始：让用户使用 /new。');
+  lines.push('规则：遇到上述管理或不支持的请求时，在回复里给出上面的做法，不要说“已完成”或“已设置”。');
+  return lines.join('\n');
 };
 
 export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dutydeck') => `[Dutydeck 飞书会话工具]

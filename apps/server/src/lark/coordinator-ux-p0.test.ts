@@ -254,9 +254,11 @@ describe('P0-1 他人操作二次确认 / overflow 门 / 行内审批反伪造',
       if (kind === 'managed_missing_requester') task.event = { ...task.event, senderOpenId: undefined };
       const update = vi.spyOn(task, 'requestUpdate');
       const value = { action: 'interrupt', task_id: 'om_task', turn: '1' };
+      // 拒绝文案写真实原因，并附上配置名单里的发起人姓名；发起人缺失时只说「本轮发起人」。
+      const requester = kind === 'managed_missing_requester' ? '' : ' Alice ';
       for (let click = 0; click < 2; click++) {
         expect(await h.coordinator.handleAction(value, kind === 'missing_identity' ? undefined : 'ou_bob'))
-          .toEqual({ type: 'warning', content: '没有权限中断此任务，仅任务发起人和管理员可操作。' });
+          .toEqual({ type: 'warning', content: `只有本轮发起人${requester}和管理员能中断正在执行的这一轮。部署者可在 Web 停止。` });
       }
       expect(h.interrupt).not.toHaveBeenCalled();
       expect(task.state).toBe('running');
@@ -578,16 +580,20 @@ describe('P0-6 /repair 二次确认回调：串应用/监听/白名单/人类四
     expect(connectMock).not.toHaveBeenCalled();
     await h.saveConfig({ listening: true });
 
-    // service.getUserEmails 默认空：模拟 bot（230001 兜底后无邮箱），挡在发布前。
+    // 未配置白名单时，非托管群里的任何 /repair 均被拦截
+    expect(await h.coordinator.handleAction(confirmValue(), 'ou_alice', context)).toMatchObject({ type: 'warning', content: '未配置操作白名单时，飞书里不能执行 /repair，请在 Web 上操作。' });
+
+    // 配置白名单后：service.getUserEmails 默认空，模拟 bot（230001 兜底后无邮箱），挡在发布前。
+    await h.saveConfig({ allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }], allowedBots: [{ openId: 'ou_bot', name: 'Bot' }] });
     expect(await h.coordinator.handleAction(confirmValue(), 'ou_bot', context)).toMatchObject({ type: 'warning', content: '/repair 只能由人类成员执行。' });
     expect(connectMock).not.toHaveBeenCalled();
 
     await h.saveConfig({ allowedUsers: [{ openId: 'ou_carol', name: 'Carol' }] });
     expect(await h.coordinator.handleAction(confirmValue(), 'ou_alice', context)).toMatchObject({ type: 'warning', content: '当前账号无权执行 /repair：需要安装管理员权限。' });
     expect(connectMock).not.toHaveBeenCalled();
-    await h.saveConfig({ allowedUsers: [] });
 
-    // 人类 + 有权限 + 已监听：门禁同步通过后回调立即受理（3 秒 SLA），发布在后台跑完 PATCH 结果卡。
+    // 人类 + 在白名单中 + 已监听：门禁同步通过后回调立即受理（3 秒 SLA），发布在后台跑完 PATCH 结果卡。
+    await h.saveConfig({ allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] });
     h.service.getUserEmails.mockResolvedValue(['alice@example.com']);
     connectMock.mockResolvedValue(repairClient() as any);
     const accepted = await h.coordinator.handleAction(confirmValue(), 'ou_alice', context);
@@ -604,6 +610,7 @@ describe('P0-6 /repair 二次确认回调：串应用/监听/白名单/人类四
     const h = await harness();
     connectMock.mockClear();
     const context = { messageId: 'om_repair_card', chatId: 'oc_group' };
+    await h.saveConfig({ allowedUsers: [{ openId: 'ou_alice', name: 'Alice' }] });
     h.service.getUserEmails.mockResolvedValue(['alice@example.com']);
     let releaseConnect!: () => void;
     connectMock.mockImplementation(() => new Promise<any>(resolve => { releaseConnect = () => resolve(repairClient()); }));
@@ -702,8 +709,9 @@ describe('S6/S8/P0-7 帧注记纪律：只在非终态帧，终态帧与结果�
     const h = await harness('hang');
     await h.coordinator.handle(event('om_a', '第一个任务'), h.config);
     await vi.waitFor(() => expect(cardUpdates(h, input => input.state === 'running' && input.taskId === 'om_a').length).toBeGreaterThan(0));
+    // 两条排队来自不同的人：同一人连发的排队消息会并成一条，这里要的是两条独立的排队项。
     await h.coordinator.handle(event('om_b', '第二个任务'), h.config);
-    await h.coordinator.handle(event('om_c', '第三个任务'), h.config);
+    await h.coordinator.handle(event('om_c', '第三个任务', { senderOpenId: 'ou_bob' }), h.config);
     const summaryInput = await vi.waitFor(() => {
       const found = cardUpdates(h, input => Array.isArray(input.elements)
         && input.elements.some((element: any) => element.element_id === 'queue_summary' && String(element.content).includes('排队 2 条'))).at(-1);
@@ -729,7 +737,8 @@ describe('S6/S8/P0-7 帧注记纪律：只在非终态帧，终态帧与结果�
     const longPrompt = `超长任务 <数据 & 明细> ${'甲乙丙丁'.repeat(40)}`;
     await h.coordinator.handle(event('om_a', '主任务'), h.config);
     await vi.waitFor(() => expect(cardUpdates(h, input => input.state === 'running' && input.taskId === 'om_a').length).toBeGreaterThan(0));
-    for (let i = 0; i < 6; i++) await h.coordinator.handle(event(`om_q${i}`, longPrompt), h.config);
+    // 发起人交替：同一人连发的排队消息会并成一条，这里要六条独立的排队项。
+    for (let i = 0; i < 6; i++) await h.coordinator.handle(event(`om_q${i}`, longPrompt, { senderOpenId: i % 2 ? 'ou_bob' : 'ou_alice' }), h.config);
     const summaryInput = await vi.waitFor(() => {
       const found = cardUpdates(h, input => Array.isArray(input.elements)
         && input.elements.some((element: any) => element.element_id === 'queue_summary' && String(element.content).includes('排队 6 条'))).at(-1);

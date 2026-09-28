@@ -51,11 +51,15 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
   const relaunchHint = !relaunch ? '' : status === 'queued'
     ? `可以点「${larkRelaunchLabels.run_in_new_session}」：取消这条排队请求，在本话题的新会话里执行原文，之后本话题的消息也进入新会话。`
     : `可以点「${larkRelaunchLabels.rerun_in_new_session}」在新会话里重新执行原请求。原执行结果未确认，重新执行可能把已经做过的操作再做一次。`;
+  // 升级排空期间新消息照常入队、暂不开始：写明会自动执行，免得成员以为卡住了反复重发。
+  const held = status === 'queued' && runtime.isQueueHeld?.() === true;
   const detail = blocked
     ? `${reasons.join('；') || '本轮执行结果尚未确认'}。为避免重复执行，任务不会自动重放。${relaunchHint}${larkRecoveryRetainedNote(options.webBaseUrl)}`
     : resolvedUnknown ? '本轮已完成恢复检查，但执行结果未确认；旧请求不会重放，可以继续发送新请求。'
+    : held ? '服务正在升级，完成后会自动执行，无需重发。'
     : queuedAhead && queuedAhead > 0 ? `正在排队，前面还有 ${queuedAhead} 个任务…`
-    : recovery?.activeTaskId ? '正在等待前一轮执行结束。' : '已进入执行队列，等待 Agent 开始。';
+    // 紧排在执行中那一轮后面：这条不会传给那一轮，要插队得用卡上的按钮或 /steer。
+    : recovery?.activeTaskId ? '要等当前这一轮结束才会处理，不会传给它。' : '已进入执行队列，等待 Agent 开始。';
   const action = resolvedUnknown && !blocked ? '发送 `/status` 查看最新状态。' : status === 'queued' ? '此请求尚未执行，可点击取消，或回原话题发送 `/cancel`；发送 `/status` 查看最新状态。'
     : '发送 `/status` 查看最新状态。';
   return { blocked, label, relaunch, markdown: `**${label}**\n\n${detail}\n\n${action}` };

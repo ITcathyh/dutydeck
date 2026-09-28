@@ -49,11 +49,11 @@ describe('live group configuration', () => {
     expect(JSON.stringify(groups)).not.toContain('synthetic_cli');
   });
 
-  it('allows read context in an unbound participation-off group without activating or syncing it', async () => {
+  it('rejects read context in an unbound participation-off group without activating or syncing it', async () => {
     await saveLarkConfig(repos.config, repos.agents, { originalAppId: 'cli_one', listening: true, defaultGroupParticipation: 'off' });
     const before = await manager.owner('cli_one');
     listChats.mockClear();
-    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(true);
+    expect(await manager.contextReadAllowed('cli_one', 'oc_one')).toBe(false);
     expect(await manager.owner('cli_one')).toEqual(before);
     expect(await repos.groupBindings.getByNaturalKey(before!.channelBotId, 'oc_one')).toBeUndefined();
     expect(listChats).not.toHaveBeenCalled();

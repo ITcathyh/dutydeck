@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { parseLarkCardActionValue } from './card-actions.js';
+import { buildLarkCard } from './service.js';
 
 const entry = (overrides: Partial<LarkTaskDashboardEntry> = {}): LarkTaskDashboardEntry => ({
   taskId: 'task_internal',
@@ -203,7 +204,7 @@ describe('buildLarkTaskDashboard', () => {
     }
   });
 
-  it('待决审批行主操作固定为审批，拒绝收进 overflow，均走 workflow CAS value', () => {
+  it('待决审批行主操作固定为批准本次，拒绝收进 overflow，均走 workflow CAS value', () => {
     const result = buildLarkTaskDashboard([
       // 即便任务还在 running，审批也优先于中断。
       entry({ taskId: 'runtime-approve', title: '审批中', status: 'running', turn: 3, actionTaskId: 'om_task',
@@ -211,7 +212,7 @@ describe('buildLarkTaskDashboard', () => {
     ]);
     const row = rows(result.elements)[0]!;
     const button = rowPrimaryButton(row)!;
-    expect(button.text.content).toBe('审批');
+    expect(button.text.content).toBe('批准本次');
     expect(button.behaviors[0].value).toEqual({ dutydeck_workflow: 'approve', request_id: 'wf_24x', generation: 'boot-1' });
     // 不能退化成任务状态操作。
     expect(parseLarkCardActionValue(button.behaviors[0].value)).toBeUndefined();
@@ -219,6 +220,57 @@ describe('buildLarkTaskDashboard', () => {
     const overflow = rowOverflow(row)!;
     expect(overflow.options.map((option: any) => option.text.content)).toEqual(['拒绝']);
     expect(overflow.behaviors).toEqual([{ type: 'callback', value: { dutydeck_workflow: 'reject', request_id: 'wf_24x', generation: 'boot-1' } }]);
+  });
+
+  it('同一群内查看审批：行里有命令摘要，按钮是「批准本次」', () => {
+    const result = buildLarkTaskDashboard([
+      entry({
+        taskId: 'runtime-approve-cmd',
+        title: '构建任务',
+        status: 'running',
+        turn: 1,
+        actionTaskId: 'om_task_cmd',
+        pendingApproval: {
+          requestId: 'wf_cmd_1',
+          generation: 'boot-1',
+          commandSummary: 'pnpm test --run',
+          chatId: 'oc_group_1'
+        }
+      })
+    ], 1, Date.now(), 'oc_group_1');
+
+    const row = rows(result.elements)[0]!;
+    const button = rowPrimaryButton(row)!;
+    expect(button.text.content).toBe('批准本次');
+    const serialized = JSON.stringify(row);
+    expect(serialized).toContain('pnpm test --run');
+    expect(serialized).toContain('命令：pnpm test --run');
+  });
+
+  it('私聊查看群审批：没有批准按钮，有「请到原群处理」', () => {
+    const result = buildLarkTaskDashboard([
+      entry({
+        taskId: 'runtime-approve-diff-chat',
+        title: '群内审批任务',
+        status: 'running',
+        turn: 1,
+        actionTaskId: 'om_task_p2p',
+        url: 'https://applink.feishu.cn/client/chat/open?openChatId=oc_group_target',
+        pendingApproval: {
+          requestId: 'wf_diff_1',
+          generation: 'boot-1',
+          commandSummary: 'git push origin main',
+          chatId: 'oc_group_target'
+        }
+      })
+    ], 1, Date.now(), 'oc_p2p_user');
+
+    const row = rows(result.elements)[0]!;
+    // 私聊中不能批准属于原群的审批，无批准按钮
+    expect(rowPrimaryButton(row)).toBeUndefined();
+    const serialized = JSON.stringify(row);
+    expect(serialized).not.toContain('批准本次');
+    expect(serialized).toContain('请到原群处理');
   });
 
   it('审批信息缺 id 或缺 generation 时不渲染任何审批入口', () => {
@@ -302,6 +354,36 @@ describe('buildLarkTaskDashboard', () => {
     expect(rows(result.elements)).toHaveLength(10);
     expect(countComponents(result.elements)).toBeLessThanOrEqual(180);
     expect(Buffer.byteLength(serialized, 'utf8')).toBeLessThan(24 * 1024);
+  });
+
+  it('10 条长命令摘要待审批：截断后整卡守住预算，保留全部 10 行任务和批准按钮', () => {
+    // 每条约 1200 个中文字符
+    const longCommand = '部署命令参数非常长'.repeat(150);
+    const entries = Array.from({ length: 10 }, (_, index) => entry({
+      taskId: `task_long_${index}`,
+      title: `长命令任务 ${index}`,
+      workspace: '/workspace/project',
+      status: 'waiting_for_permission',
+      updatedAt: '2026-09-08T00:00:00.000Z',
+      pendingApproval: {
+        requestId: `wf_long_${index}`,
+        generation: `boot_${index}`,
+        commandSummary: longCommand
+      }
+    }));
+    const result = buildLarkTaskDashboard(entries);
+    const card = buildLarkCard({
+      state: 'running',
+      elements: result.elements
+    });
+    // 断言卡里仍然有 10 行任务和批准按钮，而不是降级为空卡
+    const rowList = rows(card.body.elements);
+    expect(rowList).toHaveLength(10);
+    for (const r of rowList) {
+      const btn = rowPrimaryButton(r);
+      expect(btn).toBeDefined();
+      expect(btn?.text.content).toBe('批准本次');
+    }
   });
 
   it('bounds dynamic fields and the serialized output for ten adversarial entries', () => {

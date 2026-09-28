@@ -7,6 +7,7 @@ import { RelayAskBroker, type RelayAskChoice } from '@dutydeck/relay';
 import { createRepositories } from '@dutydeck/storage';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { buildLarkCard, larkCardSafeLimits } from './service.js';
+import { defaultHighRiskPattern } from './config.js';
 import { LarkWorkflowInteractions, countCardComponents, type LarkInteraction, type LarkInteractionContext } from './workflow-interactions.js';
 import type { LarkCardService } from './service.js';
 import type { AgentEvent, PermissionRequestData, TaskRecord } from '@dutydeck/shared';
@@ -934,7 +935,7 @@ describe('权限卡截止时间与自动拒绝', () => {
   };
   const replies = (reply: ReturnType<typeof makeService>['reply']) => reply.mock.calls.map(call => (call as unknown as [Record<string, any>])[0]);
 
-  it('写入 30 分钟截止时间，截止前 10 分钟只提醒一次，到点经 runtime 拒绝并把卡改成已过期', async () => {
+  it('写入 30 分钟截止时间，截止前 10 分钟只提醒一次，到点经 runtime 拒绝并把原卡改成已过期，不另发消息', async () => {
     const { directory, repositories } = await openDatabase();
     const at = Date.parse('2026-09-25T02:00:00.000Z');
     const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
@@ -942,7 +943,8 @@ describe('权限卡截止时间与自动拒绝', () => {
       const { permissions, runtime, resolvePermission } = livePermissions('perm_deadline');
       const { service, reply } = makeService();
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
-      await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
+      // 提醒只发给能批准的人：夹具带上发起人，authorize 放行即发起人能批准。
+      await workflow.observe(context({ event: larkMessage({ senderOpenId: 'ou_requester' }) }), agentEvent('permission_request', permissions[0]));
       let [record] = await workflow.list('app_one');
       expect(record!.expiresAt).toBe(new Date(at + 30 * minute).toISOString());
       expect(JSON.stringify(replies(reply)[0])).toContain('审批截止时间：2026/9/25 10:30:00（北京时间）。到时仍未处理将自动拒绝。');
@@ -963,17 +965,18 @@ describe('权限卡截止时间与自动拒绝', () => {
       await workflow.reconcile('app_one', 'task_one');
       expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_deadline', false);
       [record] = await workflow.list('app_one');
-      expect(record).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), timeoutNoticeAt: expect.any(String) });
+      expect(record).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
       const closed = vi.mocked(service.update).mock.calls.at(-1)![0] as Record<string, any>;
       expect(closed).toMatchObject({ messageId: record!.cardId, statusLabel: '已过期' });
-      expect(JSON.stringify(closed)).toContain('审批超时，已自动拒绝，不再接受批准。需要的话请重新发起。');
+      expect(JSON.stringify(closed)).toContain('超时自动拒绝 · 10:30');
+      expect(JSON.stringify(closed)).toContain('截止前无人处理，这次操作没有执行，不再接受批准；需要的话请重新发起。');
       expect(JSON.stringify(closed)).not.toContain('允许本次');
-      expect(replies(reply)[2]).toMatchObject({ messageId: record!.cardId, idempotencyKey: `workflow_timeout_${record!.id}` });
-      expect(JSON.stringify(replies(reply)[2])).toContain('审批超时，已自动拒绝');
+      // 超时说明只原位改审批卡，不再另发一条消息。
+      expect(reply).toHaveBeenCalledTimes(2);
 
       await workflow.reconcile('app_one', 'task_one');
-      expect(reply).toHaveBeenCalledTimes(3);
-      await expect(workflow.respond(responseInput(record!, { action: 'approve' }))).rejects.toThrow('审批超时，已自动拒绝');
+      expect(reply).toHaveBeenCalledTimes(2);
+      await expect(workflow.respond(responseInput(record!, { action: 'approve' }))).rejects.toThrow('超时自动拒绝');
       expect(resolvePermission).toHaveBeenCalledOnce();
     } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
@@ -989,7 +992,7 @@ describe('权限卡截止时间与自动拒绝', () => {
       await workflow.observe(context(), agentEvent('permission_request', permissions[0]));
       const [record] = await workflow.list('app_one');
       clock.mockReturnValue(at + 30 * minute + 1_000);
-      await expect(workflow.respond(responseInput(record!, { action: 'approve' }))).rejects.toThrow('审批超时，已自动拒绝');
+      await expect(workflow.respond(responseInput(record!, { action: 'approve' }))).rejects.toThrow('超时自动拒绝');
       expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_late', false);
       expect((await workflow.list('app_one'))[0]).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
     } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
@@ -1065,17 +1068,21 @@ describe('权限卡截止时间与自动拒绝', () => {
       expect(permissions).toHaveLength(0);
       expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_live', false);
       const records = new Map((await workflow.list('app_one')).map(record => [record.id, record]));
-      expect(records.get('perm_overdue')).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), timeoutNoticeAt: expect.any(String) });
-      expect(records.get('perm_gone')).toMatchObject({ state: 'expired', timedOutAt: expect.any(String), timeoutNoticeAt: expect.any(String) });
+      expect(records.get('perm_overdue')).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
+      expect(records.get('perm_gone')).toMatchObject({ state: 'expired', timedOutAt: expect.any(String) });
       expect(records.get('perm_early')).toMatchObject({ state: 'expired' });
       expect(records.get('perm_early')!.timedOutAt).toBeUndefined();
-      expect(replies(reply).map(item => item.idempotencyKey).sort()).toEqual(['workflow_timeout_perm_gone', 'workflow_timeout_perm_overdue']);
+      // 超时说明原位写在各自的审批卡上，不另发消息。
+      expect(reply).not.toHaveBeenCalled();
+      const texts = new Map(vi.mocked(service.update).mock.calls.map(call => [(call[0] as any).messageId, JSON.stringify(call[0])]));
+      expect(texts.get('card_overdue')).toContain('超时自动拒绝');
+      expect(texts.get('card_gone')).toContain('超时自动拒绝');
       const labels = new Map(vi.mocked(service.update).mock.calls.map(call => [(call[0] as any).messageId, (call[0] as any).statusLabel]));
       expect(Object.fromEntries(labels)).toEqual({ card_overdue: '已过期', card_gone: '已过期', card_early: '已失效' });
     } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 
-  it('超时说明发送失败时计入待对账，重试成功后只发一次', async () => {
+  it('超时后原位更新审批卡失败时计入待对账，重试成功后只更新一次，全程不另发消息', async () => {
     const { directory, repositories } = await openDatabase();
     const at = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
@@ -1084,14 +1091,370 @@ describe('权限卡截止时间与自动拒绝', () => {
         expiresAt: new Date(at - minute).toISOString(), timedOutAt: new Date(at).toISOString() }));
       const { runtime } = makeRuntime([runningTask()], []);
       const { service, reply } = makeService();
-      reply.mockRejectedValueOnce(new Error('rate limited'));
+      vi.mocked(service.update).mockRejectedValueOnce(new Error('rate limited'));
       const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async () => true);
       expect(await workflow.reconcile('app_one')).toBe(1);
-      expect((await workflow.list('app_one'))[0]!.timeoutNoticeAt).toBeUndefined();
       expect(await workflow.reconcile('app_one')).toBe(0);
       expect(await workflow.reconcile('app_one')).toBe(0);
-      expect(reply).toHaveBeenCalledTimes(2);
-      expect((await workflow.list('app_one'))[0]!.timeoutNoticeAt).toBeDefined();
+      expect(service.update).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify(vi.mocked(service.update).mock.calls.at(-1))).toContain('超时自动拒绝');
+      expect(reply).not.toHaveBeenCalled();
     } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+});
+
+describe('审批卡的 @、处理结果与「本会话允许此命令」', () => {
+  const minute = 60_000;
+  const group = (overrides: Partial<LarkMessageEvent> = {}) => context({ event: larkMessage({ senderOpenId: 'ou_alice', senderType: 'user', ...overrides }) });
+  const command = (id: string, text: string, overrides: Partial<NonNullable<PermissionRequestData['operation']>> = {}): PermissionRequestData =>
+    ({ id, title: '运行命令', status: 'pending', operation: { source: 'acp_tool_call', cwd: '/work/project', command: text, ...overrides } });
+  /** 执行端挂着的审批；批准或拒绝后从列表移除，与真实执行端一致。 */
+  const liveRuntime = (permissions: PermissionRequestData[]) => {
+    const resolvePermission = vi.fn(async (_sessionId: string, permissionId: string) => {
+      const index = permissions.findIndex(item => item.id === permissionId);
+      if (index >= 0) permissions.splice(index, 1);
+      return undefined;
+    });
+    return makeRuntime([runningTask()], permissions, resolvePermission as any);
+  };
+  const cards = (reply: ReturnType<typeof makeService>['reply']) => reply.mock.calls.map(call => (call as unknown as [Record<string, any>])[0]);
+  const mentionOf = (card: Record<string, any>) => card.elements.find((element: any) => element.element_id === 'group_mention')?.content;
+  const buttonIds = (card: Record<string, any>) => card.elements.filter((element: any) => element.tag === 'button').map((element: any) => element.element_id);
+  const onlyAlice = async (_record: LarkInteraction, actor: string) => actor === 'ou_alice';
+
+  it('@ 能批准的发起人；同一任务 60 秒内的后续审批卡不 @ 任何人，过了 60 秒再 @', async () => {
+    const { directory, repositories } = await openDatabase();
+    const at = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
+    try {
+      const permissions = [command('perm_1', 'pnpm lint'), command('perm_2', 'pnpm test'), command('perm_3', 'pnpm build')];
+      const { runtime } = liveRuntime(permissions);
+      const { service, reply } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, onlyAlice);
+      await workflow.observe(group(), agentEvent('permission_request', permissions[0]), { groupMention: true });
+      clock.mockReturnValue(at + 30_000);
+      await workflow.observe(group(), agentEvent('permission_request', permissions[1]), { groupMention: true });
+      clock.mockReturnValue(at + 61_000);
+      await workflow.observe(group(), agentEvent('permission_request', permissions[2]), { groupMention: true });
+      const [first, second, third] = cards(reply);
+      expect(mentionOf(first!)).toBe('<at id=ou_alice></at>');
+      expect(mentionOf(second!)).toBeUndefined();
+      expect(JSON.stringify(second)).not.toContain('<at ');
+      expect(mentionOf(third!)).toBe('<at id=ou_alice></at>');
+      for (const card of [first, second, third]) expect(JSON.stringify(card)).not.toContain('需要在 Web 上处理');
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('同一轮并发来的两条审批只 @ 一次；卡没发出去时让出提醒窗口', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions = [command('perm_a', 'pnpm lint'), command('perm_b', 'pnpm test'), command('perm_c', 'pnpm build'), command('perm_d', 'pnpm check')];
+      const { runtime } = liveRuntime(permissions);
+      const { service, reply } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, onlyAlice);
+      // 两张卡都停在发送途中，保证两次决定 @ 时都还没有任何一张发出去。
+      const gate = deferred();
+      reply.mockImplementation(async () => { await gate.promise; return { messageId: `om_card_${reply.mock.calls.length}` }; });
+      const both = Promise.all([
+        workflow.observe(group(), agentEvent('permission_request', permissions[0]), { groupMention: true }),
+        workflow.observe(group(), agentEvent('permission_request', permissions[1]), { groupMention: true })
+      ]);
+      await vi.waitFor(() => expect(reply).toHaveBeenCalledTimes(2));
+      gate.resolve();
+      await both;
+      expect(cards(reply).map(mentionOf)).toEqual(expect.arrayContaining(['<at id=ou_alice></at>', undefined]));
+      expect(cards(reply).filter(card => JSON.stringify(card).includes('<at id=ou_alice></at>'))).toHaveLength(1);
+
+      // 新实例里，占了窗口的那张卡发送失败：窗口还回去，60 秒内的下一张卡照常 @。
+      const retry = makeService();
+      retry.reply.mockRejectedValueOnce(new Error('card send failed'));
+      const fresh = new LarkWorkflowInteractions(repositories.config, runtime, retry.service, undefined, onlyAlice);
+      await expect(fresh.observe(group({ messageId: 'om_fail' }), agentEvent('permission_request', permissions[2]), { groupMention: true })).rejects.toThrow('card send failed');
+      await fresh.observe(group({ messageId: 'om_next' }), agentEvent('permission_request', permissions[3]), { groupMention: true });
+      expect(cards(retry.reply).map(mentionOf)).toEqual(['<at id=ou_alice></at>', '<at id=ou_alice></at>']);
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('发起人不能批准时 @ 群里能批准的成员；飞书里没人能批准时写明在 Web 上处理，不 @ 任何人', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions = [command('perm_granted', 'pnpm test'), command('perm_nobody', 'pnpm test')];
+      const { runtime } = liveRuntime(permissions);
+      const granted = makeService();
+      const withBob = new LarkWorkflowInteractions(repositories.config, runtime, granted.service, undefined,
+        async (_record, actor) => actor === 'ou_bob', { approverCandidates: async () => ['ou_carol', 'ou_bob'] });
+      await withBob.observe(group(), agentEvent('permission_request', permissions[0]), { groupMention: true, highRiskPattern: 'dangerous' });
+      const bobCard = cards(granted.reply)[0]!;
+      expect(mentionOf(bobCard)).toBe('<at id=ou_bob></at>');
+      expect(JSON.stringify(bobCard)).not.toContain('ou_alice');
+      expect(JSON.stringify(bobCard)).not.toContain('需要在 Web 上处理');
+      // 「本会话允许」只给能批准的发起人。
+      expect(buttonIds(bobCard)).toEqual(['workflow_approve', 'workflow_reject']);
+
+      const nobody = makeService();
+      const noApprover = new LarkWorkflowInteractions(repositories.config, runtime, nobody.service, undefined,
+        async () => false, { approverCandidates: async () => ['ou_bob'] });
+      await noApprover.observe(group({ messageId: 'om_nobody' }), agentEvent('permission_request', permissions[1]), { groupMention: true, highRiskPattern: 'dangerous' });
+      const webCard = cards(nobody.reply)[0]!;
+      expect(mentionOf(webCard)).toBeUndefined();
+      expect(JSON.stringify(webCard)).not.toContain('<at ');
+      expect(JSON.stringify(webCard)).toContain('飞书里没有人能批准这条请求，需要在 Web 上处理。');
+      expect(buttonIds(webCard)).toEqual(['workflow_approve', 'workflow_reject']);
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('处理后的审批卡写结果、处理人和时间；私聊不写处理人', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const permissions = [command('perm_ok', 'pnpm test'), command('perm_no', 'pnpm build'), command('perm_dm', 'pnpm lint')];
+      const { runtime } = liveRuntime(permissions);
+      const { service } = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, onlyAlice);
+      await workflow.observe(group(), agentEvent('permission_request', permissions[0]));
+      await workflow.observe(group({ messageId: 'om_reject' }), agentEvent('permission_request', permissions[1]));
+      await workflow.observe(group({ messageId: 'om_dm', chatType: 'p2p', chatId: 'oc_dm' }), agentEvent('permission_request', permissions[2]));
+      const records = await workflow.list('app_one');
+      const find = (nativeId: string) => records.find(record => record.nativeId === nativeId)!;
+      await workflow.respond(responseInput(find('perm_ok'), { action: 'approve', actorId: 'ou_alice' }));
+      await workflow.respond(responseInput(find('perm_no'), { action: 'reject', actorId: 'ou_alice' }));
+      await workflow.respond(responseInput(find('perm_dm'), { action: 'approve', actorId: 'ou_alice', chatId: 'oc_dm' }));
+      const closed = (cardId: string) => vi.mocked(service.update).mock.calls.map(call => call[0] as Record<string, any>).filter(call => call.messageId === cardId).at(-1)!;
+      const approved = closed(find('perm_ok').cardId!);
+      expect(approved.statusLabel).toBe('已允许');
+      expect(JSON.stringify(approved)).toMatch(/已允许 · <at id=ou_alice><\/at> · \d{2}:\d{2}/);
+      expect(JSON.stringify(approved)).not.toContain('执行端已接受本次决策');
+      const rejected = closed(find('perm_no').cardId!);
+      expect(rejected.statusLabel).toBe('已拒绝');
+      expect(JSON.stringify(rejected)).toMatch(/已拒绝 · <at id=ou_alice><\/at> · \d{2}:\d{2}/);
+      const direct = JSON.stringify(closed(find('perm_dm').cardId!));
+      expect(direct).toMatch(/已允许 · \d{2}:\d{2}/);
+      expect(direct).not.toContain('<at ');
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('处理后的提问卡写「已回答 · 回答人 · 时间」，群里不在卡上公开回答内容', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const { runtime } = makeRuntime([runningTask()], []);
+      const { service } = makeService();
+      const broker = new RelayAskBroker({ publish: async () => undefined }, createRelayAskStore(repositories.config));
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, broker, onlyAlice);
+      const waiting = broker.register({ sessionId: 'ses_one', question: '部署到哪个环境？' });
+      await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+      const askId = broker.listPending()[0]!.id;
+      await workflow.observe(group(), agentEvent('text', { relay: 'ask', askId }));
+      const record = (await workflow.list('app_one'))[0]!;
+      await workflow.respond(responseInput(record, { actorId: 'ou_alice', answer: '只部署 staging-秘密环境' }));
+      await expect(waiting).resolves.toMatchObject({ status: 'answered' });
+      const closed = vi.mocked(service.update).mock.calls.at(-1)![0] as Record<string, any>;
+      expect(closed).toMatchObject({ messageId: record.cardId, statusLabel: '已回答' });
+      expect(JSON.stringify(closed)).toMatch(/已回答 · <at id=ou_alice><\/at> · \d{2}:\d{2}/);
+      expect(JSON.stringify(closed)).not.toContain('staging-秘密环境');
+      broker.close(); await broker.flush();
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it('截止前提醒只发一次、@ 能批准的人；飞书里没人能批准时不发提醒', async () => {
+    const { directory, repositories } = await openDatabase();
+    const at = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(at);
+    try {
+      const permissions = [command('perm_remind', 'pnpm test'), command('perm_silent', 'pnpm build')];
+      const { runtime } = liveRuntime(permissions);
+      const reminded = makeService();
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, reminded.service, undefined, onlyAlice);
+      await workflow.observe(group(), agentEvent('permission_request', permissions[0]), { groupMention: true });
+      clock.mockReturnValue(at + 20 * minute);
+      await workflow.reconcile('app_one', 'task_one');
+      await workflow.reconcile('app_one', 'task_one');
+      const sent = cards(reminded.reply);
+      expect(sent).toHaveLength(2);
+      expect(sent[1]!.elements[0].content).toMatch(/^<at id=ou_alice><\/at>\n\n\*\*这条审批即将超时\*\*/);
+
+      clock.mockReturnValue(at);
+      const silent = makeService();
+      const nobody = new LarkWorkflowInteractions(repositories.config, runtime, silent.service, undefined, async () => false);
+      await nobody.observe(group({ messageId: 'om_silent' }), agentEvent('permission_request', permissions[1]), { groupMention: true });
+      clock.mockReturnValue(at + 20 * minute);
+      await nobody.reconcile('app_one', 'task_one');
+      await nobody.reconcile('app_one', 'task_one');
+      expect(silent.reply).toHaveBeenCalledOnce();
+      expect((await nobody.list('app_one')).find(record => record.nativeId === 'perm_silent')!.remindedAt).toBeDefined();
+    } finally { clock.mockRestore(); repositories.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  describe('本会话允许此命令', () => {
+    const allowButton = (card: Record<string, any>) => card.elements.find((element: any) => element.element_id === 'workflow_allow_session');
+
+    it('只在可精确匹配的非高危命令上给按钮；只有发起人能点', async () => {
+      const { directory, repositories } = await openDatabase();
+      try {
+        const permissions = [
+          command('perm_plain', 'pnpm test'),
+          command('perm_risky', 'rm -rf build'),
+          command('perm_redacted', 'deploy --token=[REDACTED]'),
+          command('perm_truncated', `echo ${'x'.repeat(1200)}…`),
+          { id: 'perm_file', title: '写入文件', status: 'pending', operation: { source: 'acp_tool_call', resource: '/work/project/a.ts' } } as PermissionRequestData
+        ];
+        const { runtime, resolvePermission } = liveRuntime(permissions);
+        const { service, reply } = makeService();
+        const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async (_record, actor) => ['ou_alice', 'ou_bob'].includes(actor));
+        for (const [index, permission] of [...permissions].entries()) {
+          await workflow.observe(group({ messageId: `om_${index}` }), agentEvent('permission_request', permission), { highRiskPattern: defaultHighRiskPattern });
+        }
+        const sent = cards(reply);
+        expect(sent).toHaveLength(5);
+        expect(allowButton(sent[0]!)).toMatchObject({ text: { content: '本会话允许此命令' } });
+        expect(allowButton(sent[0]!).behaviors[0].value).toEqual({ dutydeck_workflow: 'allow_session', request_id: expect.any(String), generation: workflow.boot });
+        for (const card of sent.slice(1)) expect(allowButton(card)).toBeUndefined();
+
+        const records = await workflow.list('app_one');
+        const plain = records.find(record => record.nativeId === 'perm_plain')!;
+        await expect(workflow.respond(responseInput(plain, { action: 'allow_session', actorId: 'ou_bob' })))
+          .rejects.toMatchObject({ code: 'LARK_INTERACTION_DENIED', message: '只有发起人可以设置本会话允许此命令。' });
+        // 高危命令即使伪造回调也不能设为本会话允许。
+        const risky = records.find(record => record.nativeId === 'perm_risky')!;
+        await expect(workflow.respond(responseInput(risky, { action: 'allow_session', actorId: 'ou_alice' })))
+          .rejects.toMatchObject({ code: 'LARK_SESSION_ALLOW_UNAVAILABLE' });
+        expect(resolvePermission).not.toHaveBeenCalled();
+        expect((await workflow.list('app_one')).find(record => record.nativeId === 'perm_plain')!.state).toBe('pending');
+
+        await expect(workflow.respond(responseInput(plain, { action: 'allow_session', actorId: 'ou_alice' })))
+          .resolves.toBe('已允许，本会话内完全相同的命令之后会自动允许。');
+        expect(resolvePermission).toHaveBeenCalledExactlyOnceWith('ses_one', 'perm_plain', true);
+        const closed = vi.mocked(service.update).mock.calls.map(call => call[0] as Record<string, any>).filter(call => call.messageId === plain.cardId).at(-1)!;
+        expect(JSON.stringify(closed)).toMatch(/已允许 · <at id=ou_alice><\/at> · \d{2}:\d{2}/);
+        expect(JSON.stringify(closed)).toContain('本会话内完全相同的命令之后会自动允许。');
+      } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('同一会话里完全相同的命令自动批准、不发新卡；差一个字符、换会话或重启后都照常发卡', async () => {
+      const { directory, repositories } = await openDatabase();
+      try {
+        const permissions = [command('perm_first', 'pnpm test')];
+        const { runtime, resolvePermission } = liveRuntime(permissions);
+        const { service, reply } = makeService();
+        const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, onlyAlice);
+        const options = { highRiskPattern: defaultHighRiskPattern, onSessionAllowed: vi.fn() };
+        await workflow.observe(group(), agentEvent('permission_request', permissions[0]), options);
+        const first = (await workflow.list('app_one'))[0]!;
+        await workflow.respond(responseInput(first, { action: 'allow_session', actorId: 'ou_alice' }));
+        expect(reply).toHaveBeenCalledOnce();
+
+        permissions.push(command('perm_same', 'pnpm test'));
+        await workflow.observe(group({ messageId: 'om_same' }), agentEvent('permission_request', permissions[0]), options);
+        expect(resolvePermission).toHaveBeenLastCalledWith('ses_one', 'perm_same', true);
+        expect(options.onSessionAllowed).toHaveBeenCalledExactlyOnceWith('perm_same');
+        expect(reply).toHaveBeenCalledOnce();
+        expect((await workflow.list('app_one')).some(record => record.nativeId === 'perm_same')).toBe(false);
+
+        permissions.push(command('perm_differs', 'pnpm tests'));
+        await workflow.observe(group({ messageId: 'om_differs' }), agentEvent('permission_request', permissions[0]), options);
+        expect(reply).toHaveBeenCalledTimes(2);
+        expect(resolvePermission).not.toHaveBeenCalledWith('ses_one', 'perm_differs', true);
+
+        permissions.push(command('perm_other_dir', 'pnpm test', { cwd: '/work/other' }));
+        await workflow.observe(group({ messageId: 'om_other_dir' }), agentEvent('permission_request', permissions.at(-1)!), options);
+        expect(reply).toHaveBeenCalledTimes(3);
+
+        permissions.push(command('perm_other_session', 'pnpm test'));
+        await workflow.observe(context({ sessionId: 'ses_two', event: larkMessage({ messageId: 'om_other_session', senderOpenId: 'ou_alice' }) }),
+          agentEvent('permission_request', permissions.at(-1)!, { sessionId: 'ses_two' }), options);
+        expect(reply).toHaveBeenCalledTimes(4);
+
+        permissions.push(command('perm_restarted', 'pnpm test'));
+        const restarted = makeService();
+        const afterRestart = new LarkWorkflowInteractions(repositories.config, runtime, restarted.service, undefined, onlyAlice);
+        await afterRestart.observe(group({ messageId: 'om_restarted' }), agentEvent('permission_request', permissions.at(-1)!), options);
+        expect(restarted.reply).toHaveBeenCalledOnce();
+        expect(options.onSessionAllowed).toHaveBeenCalledOnce();
+        expect(resolvePermission.mock.calls.filter(call => call[2] === true).map(call => call[1])).toEqual(['perm_first', 'perm_same']);
+      } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('发起人已不能批准时不再自动批准，照常发卡', async () => {
+      const { directory, repositories } = await openDatabase();
+      try {
+        const permissions = [command('perm_first', 'pnpm test')];
+        const { runtime, resolvePermission } = liveRuntime(permissions);
+        const { service, reply } = makeService();
+        let allowed = true;
+        const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, async (_record, actor) => allowed && actor === 'ou_alice');
+        await workflow.observe(group(), agentEvent('permission_request', permissions[0]), { highRiskPattern: defaultHighRiskPattern });
+        await workflow.respond(responseInput((await workflow.list('app_one'))[0]!, { action: 'allow_session', actorId: 'ou_alice' }));
+        allowed = false;
+        permissions.push(command('perm_revoked', 'pnpm test'));
+        await workflow.observe(group({ messageId: 'om_revoked' }), agentEvent('permission_request', permissions[0]), { highRiskPattern: defaultHighRiskPattern });
+        expect(reply).toHaveBeenCalledTimes(2);
+        expect(resolvePermission).toHaveBeenCalledOnce();
+      } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+    });
+
+    it('高危正则灾难性回溯时不卡主线程：按可能高危处理，不给按钮，也不自动批准', async () => {
+      const { directory, repositories } = await openDatabase();
+      try {
+        const catastrophic = '(a|aa)+$';
+        const text = `${'a'.repeat(100)}!`;
+        const permissions = [command('perm_plain', text), command('perm_backtrack', text)];
+        const { runtime, resolvePermission } = liveRuntime(permissions);
+        const { service, reply } = makeService();
+        const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, undefined, onlyAlice);
+        // 先在普通正则下把这条命令设为本会话允许。
+        await workflow.observe(group(), agentEvent('permission_request', permissions[0]), { highRiskPattern: 'dangerous' });
+        await workflow.respond(responseInput((await workflow.list('app_one'))[0]!, { action: 'allow_session', actorId: 'ou_alice' }));
+        expect(resolvePermission).toHaveBeenCalledOnce();
+
+        // 正则换成会灾难性回溯的写法：匹配在隔离线程里超时，主线程照常跑定时器。
+        let ticks = 0;
+        const ticker = setInterval(() => { ticks++; }, 20);
+        const startedAt = Date.now();
+        try {
+          await workflow.observe(group({ messageId: 'om_backtrack' }), agentEvent('permission_request', permissions[0]), { highRiskPattern: catastrophic });
+        } finally { clearInterval(ticker); }
+        expect(Date.now() - startedAt).toBeLessThan(5_000);
+        expect(ticks).toBeGreaterThan(10);
+        // 相同命令也不自动批准，照常发卡；卡上没有「本会话允许此命令」。
+        expect(resolvePermission).toHaveBeenCalledOnce();
+        expect(reply).toHaveBeenCalledTimes(2);
+        expect(cards(reply)[1]!.elements.some((element: any) => element.element_id === 'workflow_allow_session')).toBe(false);
+        expect((await workflow.list('app_one')).find(record => record.nativeId === 'perm_backtrack')!.sessionAllowKey).toBeUndefined();
+      } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
+    }, 15_000);
+  });
+});
+
+describe('文字回复作答', () => {
+  it('对上选项文本或序号时按该选项提交；自由作答的回执回显脱敏后的原话', async () => {
+    const { directory, repositories } = await openDatabase();
+    try {
+      const { runtime } = makeRuntime([runningTask()], []);
+      const { service } = makeService();
+      const broker = new RelayAskBroker({ publish: async () => undefined }, createRelayAskStore(repositories.config));
+      const workflow = new LarkWorkflowInteractions(repositories.config, runtime, service, broker, async () => true);
+      const register = async (messageId: string, choices?: RelayAskChoice[]) => {
+        const before = new Set(broker.listPending().map(item => item.id));
+        const waiting = broker.register({ sessionId: 'ses_one', question: '怎么继续？', ...(choices ? { choices } : {}) });
+        await vi.waitFor(() => expect(broker.listPending().some(item => !before.has(item.id))).toBe(true));
+        const askId = broker.listPending().find(item => !before.has(item.id))!.id;
+        await workflow.observe(context({ event: larkMessage({ messageId, chatType: 'p2p', chatId: 'oc_dm', senderOpenId: 'ou_alice' }) }), agentEvent('text', { relay: 'ask', askId }));
+        return { waiting, record: (await workflow.list('app_one')).find(item => item.nativeId === askId)! };
+      };
+      const choice = await register('om_choice', [{ label: '跑测试', value: 'run_tests' }, { label: '直接合并', value: 'merge' }]);
+      expect(workflow.acceptsReply(choice.record, '先停一下')).toBe(false);
+      expect(workflow.acceptsReply(choice.record, '  直接合并 ')).toBe(true);
+      expect(workflow.acceptsReply(choice.record, 'RUN_TESTS')).toBe(true);
+      expect(workflow.acceptsReply(choice.record, '2')).toBe(true);
+      expect(workflow.acceptsReply(choice.record, '3')).toBe(false);
+      await expect(workflow.respond(responseInput(choice.record, { chatId: 'oc_dm', answer: ' 2 ', callback: false }))).resolves.toBe('回答已送达原任务。');
+      await expect(choice.waiting).resolves.toMatchObject({ status: 'answered', answer: 'merge' });
+
+      const free = await register('om_free');
+      expect(workflow.acceptsReply(free.record, '先停一下')).toBe(true);
+      const receipt = await workflow.respond(responseInput(free.record, { chatId: 'oc_dm', answer: `用 token=abc123 继续 ${'很长'.repeat(200)}`, callback: false }));
+      expect(receipt).toMatch(/^回答已送达原任务：用 token=\[REDACTED\] 继续 [很长]+…$/);
+      expect(receipt.length).toBeLessThan(230);
+      await expect(free.waiting).resolves.toMatchObject({ status: 'answered' });
+      broker.close(); await broker.flush();
+    } finally { repositories.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });

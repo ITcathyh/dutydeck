@@ -82,6 +82,7 @@ export interface SessionAutomationServiceOptions {
   authorize?: (sessionId: string, actorId?: string) => AuthorizationResult | Promise<AuthorizationResult>;
   prepareDelivery?: (sessionId: string, automationId: string) => Promise<void>;
   deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void>;
+  onScheduleDisabled?: (schedule: SessionSchedule, reason: string) => Promise<void>;
   githubToken?: string;
   githubFetch?: typeof fetch;
   /** Codebase 流水线 webhook 续作；未配置 webhook 密钥时不注入。 */
@@ -489,6 +490,28 @@ export class SessionAutomationService {
       throw new RuntimeError('SESSION_AUTOMATION_CONFLICT', 'Schedule identifier already exists', 409);
     }
     return publicSchedule(schedule);
+  }
+
+  static async getSchedule(store: Pick<import('@dutydeck/shared').ConfigRepository, 'get'>, scheduleId: string): Promise<Pick<SessionSchedule, 'id' | 'name' | 'sessionId'> | undefined> {
+    const raw = await store.get(scheduleKey(scheduleId));
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw);
+      const strict = sessionScheduleSchema.safeParse(parsed);
+      if (strict.success) {
+        return { id: strict.data.id, name: strict.data.name, sessionId: strict.data.sessionId };
+      }
+      if (parsed && typeof parsed === 'object' && typeof parsed.id === 'string' && typeof parsed.name === 'string' && typeof parsed.sessionId === 'string') {
+        return { id: parsed.id, name: parsed.name, sessionId: parsed.sessionId };
+      }
+      return undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async getSchedule(scheduleId: string): Promise<Pick<SessionSchedule, 'id' | 'name' | 'sessionId'> | undefined> {
+    return SessionAutomationService.getSchedule(this.options.repositories.config, scheduleId);
   }
 
   async updateSchedule(sessionId: string, id: string, rawInput: UpdateSessionScheduleInput, actorId?: string): Promise<PublicSessionSchedule> {
@@ -905,7 +928,11 @@ export class SessionAutomationService {
     let schedule = scheduleStored.value;
     const sessionMaybe = await this.options.runtime.getSession(schedule.sessionId);
     if (!isSessionRunnable(sessionMaybe)) {
-      await this.disableSchedule(scheduleStored);
+      const disabled = await this.disableSchedule(scheduleStored);
+      if (disabled && this.options.onScheduleDisabled) {
+        try { await this.options.onScheduleDisabled(schedule, 'Session is no longer active'); }
+        catch (error) { console.warn?.(`Failed to notify disabled schedule ${schedule.id}:`, error); }
+      }
       await this.finishOccurrence({ raw: stored.raw, value: occurrence }, { conditionStatus: 'error', runStatus: 'error', error: 'Session is no longer active' });
       return;
     }
@@ -1162,8 +1189,8 @@ export class SessionAutomationService {
     await this.replace(scheduleKey(schedule.id), current.raw, updated);
   }
 
-  private async disableSchedule(stored: { raw: string; value: SessionSchedule }) {
-    if (!stored.value.enabled) return;
+  private async disableSchedule(stored: { raw: string; value: SessionSchedule }): Promise<boolean> {
+    if (!stored.value.enabled) return false;
     const disabled = sessionScheduleSchema.parse({
       ...stored.value,
       revision: stored.value.revision + 1,
@@ -1172,7 +1199,7 @@ export class SessionAutomationService {
       nextDueAt: undefined,
       updatedAt: iso(this.clock())
     });
-    await this.replace(scheduleKey(stored.value.id), stored.raw, disabled);
+    return await this.replace(scheduleKey(stored.value.id), stored.raw, disabled);
   }
 
   private async claimAndPollCi(stored: { raw: string; value: CiSubscription }) {

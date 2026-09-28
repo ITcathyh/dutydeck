@@ -77,16 +77,17 @@ export class LarkGroupManager {
   }
   async owner(appId: string) { return parse<LiveOwner>(await this.repos.config.get(ownerKey(appId))); }
 
+  // 未在 Web 配置（绑定）的群默认不可被读取上下文。
   /** Read-only context policy; live membership and message access are checked by the reader. */
   async contextReadAllowed(appId: string, chatId: string): Promise<boolean> {
     const config = await readLarkConfig(this.repos.config, appId);
     if (!config?.listening || !config.groupToolsEnabled || !larkExecutionConfirmed(config)) return false;
     const owner = await this.owner(appId);
-    if (!owner) return true;
+    if (!owner) return false;
     const bot = await this.repos.channelBots.get(owner.channelBotId);
     if (bot?.state === 'disabled') return false;
     const binding = await this.repos.groupBindings.getByNaturalKey(owner.channelBotId, chatId);
-    if (!binding) return true;
+    if (!binding) return false;
     if (binding.state !== 'staged' || !owner.activeGroups.includes(binding.id)) return false;
     const effective = resolveGroupEffectiveConfig(this.policy(config, owner.channelBotId), binding);
     return effective.access.mode !== 'disabled' && effective.groupTools.read.allowed;
@@ -384,6 +385,25 @@ export class LarkGroupManager {
     const id = principalId(appId, openId);
     await this.repos.config.set(`lark.principal.${id}`, JSON.stringify({ appId, openId, name: openId }));
     return id;
+  }
+
+  /**
+   * 本群被显式授予高风险审批门的成员 open_id，只供审批卡挑选 @ 对象；
+   * 某人此刻能不能批准，仍由调用方按审批时的同一道判断逐个确认。
+   */
+  async highRiskOpenIds(appId: string, chatId: string): Promise<string[]> {
+    const config = await readLarkConfig(this.repos.config, appId);
+    const owner = config ? await this.owner(appId) : undefined;
+    if (!config || !owner) return [];
+    const now = this.now().toISOString();
+    const principals = new Set((await this.detail(config, owner, chatId)).roles
+      .filter(role => role.state === 'active' && role.actionGates.highRisk && (!role.expiresAt || role.expiresAt > now)).map(role => role.principalId));
+    const openIds: string[] = [];
+    for (const id of principals) {
+      const openId = parse<{ openId?: string }>(await this.repos.config.get(`lark.principal.${id}`))?.openId;
+      if (openId) openIds.push(openId);
+    }
+    return openIds;
   }
 
   private async runtimeDetail(config: StoredLarkConfig, owner: LiveOwner, chatId: string) {

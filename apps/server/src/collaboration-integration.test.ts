@@ -171,6 +171,8 @@ it('reads another joined group for Tag without activating its participation or c
   await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
   await f.repos.collaboration.updateSettings(personal, { expectedRevision: 0, participation: 'off' }, 'owner');
   f.client.listChats.mockResolvedValue({ items: [{ chatId: scope.chatId, name: '测试群', external: false }, { chatId: personal.chatId, name: '个人待办', external: false }], hasMore: false });
+  await f.groups.sync(scope.appId);
+  await f.groups.save(scope.appId, personal.chatId, { expectedRevision: 0, patch: {} });
   f.client.listChatMessages.mockImplementation(async (input?: any) => ({ items: input.chatId === personal.chatId ? [{
     messageId: 'om_capacity', chatId: personal.chatId, messageType: 'text', rawContent: '{"text":"推进容量扫描，监控 RDS 和 Abase 水位"}',
     createTime: String(Date.now() - 10000), sender: { id: 'ou_alice', type: 'user' }, mentions: [], deleted: false, updated: false
@@ -191,16 +193,20 @@ it('reads another joined group for Tag without activating its participation or c
   await flushing;
   expect(f.client.replyText).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ messageId: 'om_team_question', text: expect.stringContaining('个人待办') }));
   expect((await f.repos.collaboration.getSettings(personal)).participation).toBe('off');
-  expect(await f.repos.groupBindings.getByNaturalKey((await f.groups.owner(scope.appId))!.channelBotId, personal.chatId)).toBeUndefined();
+  expect((await f.repos.collaboration.getSettings(personal)).participation).toBe('off');
   expect((await f.runtime.listSessions()).every(item => item.permissionMode === 'deny-all')).toBe(true);
 });
 
-async function teamSearchFixture() {
+async function teamSearchFixture(options: { configurePersonal?: boolean } = {}) {
   const f = await fixture();
   const personal = { ...scope, chatId: 'oc_personal' };
   // 设置后，下一次读取来源群消息（reader.read，不含 authorize 的单条探测）时先执行它，模拟读取期间的配置变化。
   let duringRead: (() => Promise<unknown>) | undefined;
   f.client.listChats.mockResolvedValue({ items: [{ chatId: scope.chatId, name: '测试群', external: false }, { chatId: personal.chatId, name: '个人待办', external: false }], hasMore: false });
+  if (options.configurePersonal !== false) {
+    await f.groups.sync(scope.appId);
+    await f.groups.save(scope.appId, personal.chatId, { expectedRevision: 0, patch: {} });
+  }
   f.client.listChatMessages.mockImplementation(async (input?: any) => {
     if (input.chatId === personal.chatId && input.pageSize !== 1 && duringRead) { const change = duringRead; duringRead = undefined; await change(); }
     return { items: input.chatId === personal.chatId ? [
@@ -241,6 +247,21 @@ it.each([
   expect(error).toMatchObject({ code, statusCode: 403 });
   const body = JSON.stringify(error!.response());
   for (const leaked of ['推进容量扫描', '个人待办', 'oc_personal']) expect(body).not.toContain(leaked);
+});
+
+it('rejects reading messages from an unconfigured group during team-search when the group has no binding', async () => {
+  const { f, personal, tools, token } = await teamSearchFixture({ configurePersonal: false });
+  await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, defaultGroupParticipation: 'selective' });
+  const result = await tools.teamSearch(token, { query: '个人待办 容量扫描' });
+  const personalSource = result.sources.find(s => s.chatId === personal.chatId);
+  if (personalSource) {
+    expect(personalSource.status).toBe('unavailable');
+    expect(personalSource.missing).toContain('context_read_denied');
+    expect(personalSource.entries).toHaveLength(0);
+  } else {
+    expect(personalSource).toBeUndefined();
+  }
+  expect(JSON.stringify(result)).not.toContain('推进容量扫描');
 });
 
 it.each(['ask', undefined] as const)('runs unattended %s delegations through real ACP without leaving permission requests pending', async permissionMode => {

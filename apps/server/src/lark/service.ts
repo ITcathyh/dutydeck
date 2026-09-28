@@ -53,6 +53,11 @@ export interface LarkCardInput {
    */
   awaitingHuman?: boolean;
   /**
+   * 当任务有待回答的提问时为 true。
+   * 状态标签显示为「等待回答」，样式与等待审批一致。
+   */
+  awaitingAnswer?: boolean;
+  /**
    * 操作按钮能力声明（card-actions.ts 的唯一事实源入参）。
    * 由 coordinator 按 runtime 实际能力 + 任务当前状态注入；未注入时按保守默认推导，
    * 保证既有调用点行为不变。任一能力为 false 时对应按钮不渲染，而不是渲染死按钮。
@@ -628,7 +633,7 @@ export function buildLarkCard(input: LarkCardInput = {}) {
   }
   const hasPendingApproval = (elements: Array<Record<string, unknown>>) => elements.some(element =>
     typeof element.element_id === 'string' && element.element_id.startsWith('risk_alert_pending_')
-  ) || input.awaitingHuman === true;
+  ) || input.awaitingHuman === true || input.awaitingAnswer === true;
   // 渲染器附带的元数据不按原位置渲染：步骤总数进底部那一行，最后失败的步骤只放在失败卡上。
   // 旧快照里的「执行中曾有 N 个步骤失败」在这里一并拿掉——对账、验收会用存下来的元素重绘，
   // 只在渲染器里不再生成是不够的。
@@ -637,7 +642,9 @@ export function buildLarkCard(input: LarkCardInput = {}) {
     const found = elements.find(element => element.element_id === 'trace_steps');
     return typeof found?.content === 'string' ? found.content : '';
   };
-  const statusTagLabel = (waiting: boolean) => waiting && !explicitStatusLabel ? '等待审批' : liveTitle;
+  const statusTagLabel = (waiting: boolean) => waiting && !explicitStatusLabel
+    ? (input.awaitingAnswer ? '等待回答' : '等待审批')
+    : liveTitle;
   const grey = (text: string) => `<font color='grey'>${text}</font>`;
   const detailLink = footerDetailUrl && !detailButton ? grey(`[查看详情](${footerDetailUrl})`) : '';
   // 过程卡的底部一行：左边是耗时、步数和详情入口，右边是操作按钮（详情是按钮时排在最后）。

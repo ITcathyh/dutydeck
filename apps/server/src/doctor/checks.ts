@@ -13,6 +13,7 @@ import { larkBotsConfigKey, larkExecutionConfirmed, larkMemoryEnabled, publicLar
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 import { larkMemoryErrorLabel } from '../lark/memory.js';
 import { larkMemoryPipelineRules } from '../lark/memory-pipeline.js';
+import { larkListenerStatusKey, type LarkListenerStatus } from '../lark/listener-status.js';
 import type {
   CheckLevel,
   DatabaseProbeResult,
@@ -27,10 +28,10 @@ import type {
 /** workspace 根 package.json 的 engines.node。 */
 export const REQUIRED_NODE_VERSION = '22.12.0';
 
-export { larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY };
+export { larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY, larkListenerStatusKey };
 
 /** 体检需要从 configs 表读的键。都是「读」，绝不写。 */
-export const DOCTOR_CONFIG_KEYS = [larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY] as const;
+export const DOCTOR_CONFIG_KEYS = [larkBotsConfigKey, AUTH_TOKEN_CONFIG_KEY, larkListenerStatusKey] as const;
 
 /** 会话记忆状态的键前缀，与 lark/memory.ts 的 larkMemoryStateKey 一致：`lark.memory.state.<appId>.<pool>`。 */
 const larkMemoryStatePrefix = 'lark.memory.state.';
@@ -455,7 +456,21 @@ export function checkLark(observation: LarkObservation, listenerDisabled: boolea
   return { checks, botCount: usable.length };
 }
 
-export function checkLarkListener(botCount: number, daemonRunning: boolean, listenerDisabled: boolean): DoctorCheck {
+export interface LarkListenerObservation {
+  /** configs 表里 lark.bots 的原始值。 */
+  raw?: string;
+  /** 守护进程写的 lark.listener.status 原始值。 */
+  status?: string;
+  /** 正在运行的守护进程 pid，用来认出上一个进程留下的旧状态。 */
+  pid?: number;
+  now: Date;
+}
+
+/**
+ * 对比「应该监听」和「实际连上」：配置里开了监听、执行模式已确认的机器人，
+ * 必须出现在守护进程上报的已连接列表里，否则报失败并写出最近一次错误和下次重连时间。
+ */
+export function checkLarkListener(botCount: number, daemonRunning: boolean, listenerDisabled: boolean, observation: LarkListenerObservation): DoctorCheck {
   if (listenerDisabled) {
     return {
       id: 'lark.listener',
@@ -481,7 +496,48 @@ export function checkLarkListener(botCount: number, daemonRunning: boolean, list
       verify: 'dutydeck status'
     };
   }
-  return { id: 'lark.listener', label: '飞书监听', level: 'ok', detail: `守护进程在运行，${botCount} 个机器人的监听由它持有` };
+  let parsed: unknown;
+  try { parsed = JSON.parse(observation.raw ?? '[]'); } catch { parsed = undefined; }
+  // lark.bots 坏掉由 lark.config 报 fail；缺凭据的条目不会被加载，也不算应该监听。
+  const expected = (Array.isArray(parsed) ? parsed as Array<Partial<StoredLarkConfig> | null> : [])
+    .filter((bot): bot is Partial<StoredLarkConfig> & { appId: string } => Boolean(bot && typeof bot.appId === 'string' && bot.appId
+      && String(bot.appSecret ?? '').trim() && bot.listening === true && larkExecutionConfirmed(bot)));
+  if (!expected.length) return { id: 'lark.listener', label: '飞书监听', level: 'skip', detail: '没有开启监听的机器人' };
+  let status: Partial<LarkListenerStatus> | undefined;
+  try { status = observation.status ? JSON.parse(observation.status) as Partial<LarkListenerStatus> : undefined; } catch { status = undefined; }
+  if (!status || status.pid !== observation.pid) {
+    return {
+      id: 'lark.listener',
+      label: '飞书监听',
+      level: 'warn',
+      detail: '守护进程在运行，但没有上报飞书监听的连接状态，确认不了机器人是否连上',
+      remedy: '旧版本的守护进程不上报连接状态，以 --no-lark-listen 启动的守护进程不建立监听。升级后重启一次守护进程，再重跑体检。',
+      command: 'dutydeck restart',
+      verify: 'dutydeck doctor --json'
+    };
+  }
+  const active = new Set(Array.isArray(status.active) ? status.active : []);
+  const retrying = new Map((Array.isArray(status.retrying) ? status.retrying : []).map(item => [item.appId, item]));
+  const reconnecting = new Map((Array.isArray(status.reconnecting) ? status.reconnecting : []).map(item => [item.appId, item.since]));
+  const missing = expected.filter(bot => !active.has(bot.appId));
+  if (!missing.length) return { id: 'lark.listener', label: '飞书监听', level: 'ok', detail: `守护进程在运行，${expected.length} 个机器人的监听已连上` };
+  const lines = missing.map(bot => {
+    const name = `${bot.name?.trim() || bot.displayName?.trim() || '机器人'}（${bot.appId}）`;
+    const since = reconnecting.get(bot.appId);
+    if (since) return `${name}连接已断开约 ${Math.max(0, Math.floor((observation.now.getTime() - Date.parse(since)) / 1000))} 秒，正在自动重连`;
+    const retry = retrying.get(bot.appId);
+    if (!retry) return `${name}没连上，守护进程还没有记录到连接结果`;
+    const seconds = Math.ceil((Date.parse(retry.nextRetryAt) - observation.now.getTime()) / 1000);
+    return `${name}最近一次错误：${retry.error}；${seconds > 0 ? `约 ${seconds} 秒后重连` : '正在重连'}`;
+  });
+  return {
+    id: 'lark.listener',
+    label: '飞书监听',
+    level: 'fail',
+    detail: `${missing.length} 个机器人应该监听但没连上，收不到飞书消息。${lines.join('；')}`,
+    remedy: '守护进程会自动重连：连上之后断线由飞书 SDK 自己重连；启动失败或 SDK 放弃重连后，第一次在 30 秒后，之后间隔翻倍，最长 5 分钟。按上面的错误检查 App Secret、网络和飞书开放平台的长连接订阅设置；修好后在 Web 面板重新保存一次这个机器人，会立即重连。',
+    verify: 'dutydeck doctor --json'
+  };
 }
 
 // ─── 7b. lark.memory ─────────────────────────────────────────────────────────

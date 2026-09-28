@@ -190,6 +190,13 @@
                         ]
                       }
                     ]
+                  },
+                  {
+                    "tag": "markdown",
+                    "element_id": "current_activity",
+                    "text_size": "notation",
+                    "margin": "0px 0px 0px 20px",
+                    "content": "<font color='grey'>最近活动 <北京时刻></font>"
                   }
                 ]
               },
@@ -633,7 +640,7 @@
               },
               {
                 "tag": "markdown",
-                "content": "审批截止时间：<北京时间>。\n\n审批超时，已自动拒绝，不再接受批准。需要的话请重新发起。"
+                "content": "超时自动拒绝 · <北京时刻>\n\n截止前无人处理，这次操作没有执行，不再接受批准；需要的话请重新发起。"
               }
             ]
           },
@@ -653,83 +660,6 @@
       },
       {
         "message": "om_msg_3",
-        "request": "reply",
-        "anchor": "om_msg_2",
-        "reply_in_thread": true,
-        "msg_type": "interactive",
-        "uuid": "workflow_timeout_<id:3>",
-        "content": {
-          "schema": "2.0",
-          "config": {
-            "update_multi": true,
-            "width_mode": "default",
-            "streaming_mode": false,
-            "style": {
-              "color": {
-                "current_bg": {
-                  "light_mode": "rgba(240,245,253,1)",
-                  "dark_mode": "rgba(30,40,56,1)"
-                },
-                "failure_bg": {
-                  "light_mode": "rgba(254,241,241,1)",
-                  "dark_mode": "rgba(64,32,32,1)"
-                },
-                "trace_success": {
-                  "light_mode": "rgba(46,161,33,1)",
-                  "dark_mode": "rgba(118,204,142,1)"
-                },
-                "trace_failure": {
-                  "light_mode": "rgba(163,77,0,1)",
-                  "dark_mode": "rgba(255,178,102,1)"
-                },
-                "trace_running": {
-                  "light_mode": "rgba(36,91,219,1)",
-                  "dark_mode": "rgba(124,202,242,1)"
-                }
-              }
-            },
-            "summary": {
-              "content": "审批超时 · 已过期"
-            }
-          },
-          "body": {
-            "direction": "vertical",
-            "vertical_spacing": "8px",
-            "padding": "10px 12px 10px 12px",
-            "elements": [
-              {
-                "tag": "div",
-                "element_id": "task_status",
-                "width": "auto",
-                "margin": "0px",
-                "text": {
-                  "tag": "lark_md",
-                  "content": "<font color='grey'>已过期</font>",
-                  "text_size": "small"
-                }
-              },
-              {
-                "tag": "markdown",
-                "content": "**审批超时，已自动拒绝**\n\n截止时间：<北京时间>。这次操作没有执行，需要的话请重新发起。"
-              }
-            ]
-          },
-          "header": {
-            "title": {
-              "tag": "plain_text",
-              "content": "审批超时"
-            },
-            "subtitle": {
-              "tag": "plain_text",
-              "content": "Dutydeck"
-            },
-            "template": "grey",
-            "padding": "10px 12px 8px 12px"
-          }
-        }
-      },
-      {
-        "message": "om_msg_4",
         "request": "reply",
         "anchor": "om_in_1",
         "reply_in_thread": true,

@@ -204,6 +204,13 @@
                     "content": "<text_tag color='neutral'>读文件 1</text_tag> <text_tag color='neutral'>改文件 1</text_tag>",
                     "text_size": "notation",
                     "margin": "0px 0px 0px 20px"
+                  },
+                  {
+                    "tag": "markdown",
+                    "element_id": "current_activity",
+                    "text_size": "notation",
+                    "margin": "0px 0px 0px 20px",
+                    "content": "<font color='grey'>最近活动 <北京时刻></font>"
                   }
                 ]
               },

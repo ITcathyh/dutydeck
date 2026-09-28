@@ -14,7 +14,7 @@ import type {
   DoctorReport,
   PortProbeOutcome
 } from './types.js';
-import { checkLarkMemory, larkBotsConfigKey } from './checks.js';
+import { checkLarkMemory, larkBotsConfigKey, larkListenerStatusKey } from './checks.js';
 import { AUTH_TOKEN_CONFIG_KEY } from '../auth/auth.js';
 
 /**
@@ -599,6 +599,58 @@ describe('lark', () => {
     expect(check.level).toBe('warn');
     expect(check.detail).toMatch(/不可能是活的|未运行/);
     expect(check.command).toBe('dutydeck start');
+  });
+
+  describe('应该监听与实际连上的对比', () => {
+    const listenerStatus = (patch: Record<string, unknown> = {}) => JSON.stringify({ pid: 4242, updatedAt: new Date().toISOString(), active: [], retrying: [], reconnecting: [], ...patch });
+    const observe = (bots: unknown[], status?: string) => runDoctor({ json: true }, deps({
+      databaseProbe: () => ({ exists: true, appliedVersion: 14, values: { [larkBotsConfigKey]: JSON.stringify(bots), ...(status ? { [larkListenerStatusKey]: status } : {}) } })
+    }));
+
+    it('应该监听的机器人没连上为 fail：写出最近一次错误和下次重连时间', async () => {
+      const nextRetryAt = new Date(Date.now() + 45_000).toISOString();
+      const report = await observe([bot(), bot({ appId: 'cli_two', name: '机器人乙' })], listenerStatus({
+        active: ['cli_two'],
+        retrying: [{ appId: 'cli_ok', error: 'Failed to start Lark listener: WebSocket connection readiness timed out', failedAt: new Date().toISOString(), nextRetryAt }]
+      }));
+      const check = find(report, 'lark.listener')!;
+      expect(check.level).toBe('fail');
+      expect(check.detail).toContain('1 个机器人应该监听但没连上');
+      expect(check.detail).toContain('机器人甲（cli_ok）最近一次错误：Failed to start Lark listener: WebSocket connection readiness timed out');
+      expect(check.detail).toMatch(/约 4[56] 秒后重连/);
+      expect(check.detail).not.toContain('cli_two');
+      expect(check.remedy).toContain('自动重连');
+      expect(report.ok).toBe(false);
+      expect(JSON.stringify(report)).not.toContain(FIXTURE_APP_SECRET);
+    });
+
+    it('SDK 正在重连的机器人不算已连上，为 fail 并写明断开多久、正在自动重连', async () => {
+      const check = find(await observe([bot()], listenerStatus({ reconnecting: [{ appId: 'cli_ok', since: new Date(Date.now() - 42_000).toISOString() }] })), 'lark.listener')!;
+      expect(check.level).toBe('fail');
+      expect(check.detail).toMatch(/机器人甲（cli_ok）连接已断开约 4[23] 秒，正在自动重连/);
+      expect(check.remedy).toContain('飞书 SDK 自己重连');
+    });
+
+    it('配置里开了监听、守护进程却没有这个机器人的连接记录也为 fail', async () => {
+      const check = find(await observe([bot()], listenerStatus()), 'lark.listener')!;
+      expect(check.level).toBe('fail');
+      expect(check.detail).toContain('机器人甲（cli_ok）没连上');
+    });
+
+    it('应该监听的都连上了为 ok；没开监听的机器人不算', async () => {
+      const check = find(await observe([bot(), bot({ appId: 'cli_off', listening: false })], listenerStatus({ active: ['cli_ok'] })), 'lark.listener')!;
+      expect(check.level).toBe('ok');
+      expect(check.detail).toContain('1 个机器人的监听已连上');
+    });
+
+    it('状态缺失或是上一个进程留下的为 warn，不冒充已连上', async () => {
+      for (const status of [undefined, listenerStatus({ pid: 1111, active: ['cli_ok'] })]) {
+        const check = find(await observe([bot()], status), 'lark.listener')!;
+        expect(check.level).toBe('warn');
+        expect(check.detail).toContain('没有上报飞书监听的连接状态');
+        expect(check.command).toBe('dutydeck restart');
+      }
+    });
   });
 
   it('数据库不可读时飞书检查 skip，不谎称「未配置」', async () => {

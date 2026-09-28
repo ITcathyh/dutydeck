@@ -173,4 +173,41 @@ describe('automation service integration', () => {
     await expect(f.deliver('s1', result, 'other-occ', 'other-source')).rejects.toMatchObject({ code: 'AUTOMATION_RESULT_NOT_READY' });
     expect(f.client.reply).not.toHaveBeenCalled();
   });
+
+  it('notifies delivery target when schedule is disabled due to inactive session, and silently ignores missing target', async () => {
+    const f = await fixture();
+    const schedule: any = { id: 'sch_1', sessionId: 's1', name: '每日数据巡检', generation: 2 };
+    // 1. 无 delivery-target 时静默跳过
+    await expect(f.onScheduleDisabled!(schedule, 'Session is no longer active')).resolves.toBeUndefined();
+    expect(f.client.reply).not.toHaveBeenCalled();
+
+    // 2. 有 delivery-target 时向原位置发送通知卡片
+    await f.repos.config.set('automation.delivery-target.sch_1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_target_thread', replyInThread: true }));
+    await f.onScheduleDisabled!(schedule, 'Session is no longer active');
+    expect(f.client.reply).toHaveBeenCalledTimes(1);
+    const sent = f.client.reply.mock.calls[0]![0] as any;
+    expect(sent.messageId).toBe('om_target_thread');
+    expect(sent.taskName).toBe('每日数据巡检');
+    expect(JSON.stringify(sent.elements)).toContain('定时计划『每日数据巡检』已停用：它绑定的会话已结束。如需继续，请在新会话里重新设置。');
+  });
+
+  it('sets result card taskName to schedule name and adds disable button for schedule deliveries', async () => {
+    const f = await fixture();
+    const result = f.settleTask('completed', '巡检通过');
+    await f.repos.config.set('session_automation/schedule/automation1', JSON.stringify({
+      id: 'automation1',
+      sessionId: 's1',
+      name: '自动化日常巡检',
+      prompt: 'run check'
+    }));
+    await f.repos.config.set('automation.delivery-target.automation1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_sched_thread', replyInThread: true }));
+    await f.deliver('s1', result, 'occ1', 'automation1');
+    expect(f.client.reply).toHaveBeenCalledTimes(1);
+    const sent = f.client.reply.mock.calls[0]![0] as any;
+    expect(sent.taskName).toBe('自动化日常巡检');
+    const button = sent.elements.find((el: any) => el.element_id === 'disable_schedule');
+    expect(button).toBeDefined();
+    expect(button.text?.content).toBe('停用此计划');
+    expect(button.behaviors?.[0]?.value).toEqual({ dutydeck_schedule_disable: 'automation1' });
+  });
 });

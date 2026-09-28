@@ -7,7 +7,8 @@ import {
   sessionScheduleOccurrenceV2Schema,
   type AttemptResultV1,
   type ExecutionActor,
-  type RepositoryBundle
+  type RepositoryBundle,
+  type SessionSchedule
 } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import { larkExecutionConfirmed, readLarkConfig, type StoredLarkConfig } from './lark/config.js';
@@ -18,6 +19,7 @@ import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { sendLarkResult } from './lark/result-delivery.js';
 import { readAttemptResult } from './task-results.js';
 import type { CodebaseCiNotice } from './codebase-ci.js';
+import { SessionAutomationService } from './session-automation.js';
 
 export function createAutomationIntegration(repos: RepositoryBundle, runtime: DutydeckRuntime, groups: LarkGroupManager, options: {
   env?: NodeJS.ProcessEnv;
@@ -198,13 +200,31 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     if (!target || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_MISSING', '自动任务缺少接收时保存的回报位置', 409);
 
     // 6. 渲染与发送
+    const isSchedule = Boolean(occRaw && occurrenceId !== sourceId);
+    let taskName = '自动续作结果';
+    if (isSchedule) {
+      const schedule = await SessionAutomationService.getSchedule(repos.config, sourceId);
+      if (schedule?.name?.trim()) {
+        taskName = schedule.name.trim();
+      }
+    }
     const elements = renderLarkResultTextElements(verifiedResult.output.text);
+    if (isSchedule) {
+      elements.push({
+        tag: 'button',
+        element_id: 'disable_schedule',
+        text: { tag: 'plain_text', content: '停用此计划' },
+        type: 'text',
+        behaviors: [{ type: 'callback', value: { dutydeck_schedule_disable: sourceId } }],
+        margin: '0px'
+      });
+    }
     const idempotencyKey = `auto_${createHash('sha256').update(occurrenceId).digest('hex').slice(0, 40)}`;
     await sendLarkResult(client(config), target, {
       state: verifiedResult.outcome === 'completed' ? 'completed' : ['interrupted', 'cancelled'].includes(verifiedResult.outcome) ? 'interrupted' : 'failed',
       readOnly: true,
       retryable: false,
-      taskName: '自动续作结果',
+      taskName,
       taskId: verifiedResult.taskId,
       sessionId,
       workspace: session.cwd,
@@ -212,6 +232,31 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       elements,
       idempotencyKey
     }, options.log);
+  };
+  /** 定时计划失效通知：因会话结束被停用时，向原回报位置发送通知。找不到投递位置时静默跳过。 */
+  const onScheduleDisabled = async (schedule: SessionSchedule, reason: string) => {
+    const session = await runtime.getSession(schedule.sessionId);
+    if (!session || session.source !== 'lark') return;
+    const [appId, chatId] = session.sourceId?.split(':') ?? [];
+    const target = JSON.parse(await repos.config.get(`automation.delivery-target.${schedule.id}`) ?? 'null') as { appId: string; chatId: string; replyMessageId: string; replyInThread: boolean } | null;
+    const config = appId ? await readLarkConfig(repos.config, appId) : undefined;
+    if (!target || !config || target.appId !== appId || target.chatId !== chatId) return;
+    const content = `定时计划『${schedule.name}』已停用：它绑定的会话已结束。如需继续，请在新会话里重新设置。`;
+    const elements: Array<Record<string, unknown>> = [
+      { tag: 'markdown', element_id: 'schedule_disabled_notice', content }
+    ];
+    await sendLarkResult(client(config), target, {
+      state: 'failed',
+      readOnly: true,
+      retryable: false,
+      taskName: schedule.name,
+      taskId: schedule.id,
+      sessionId: schedule.sessionId,
+      workspace: session.cwd,
+      webBaseUrl: config.webBaseUrl,
+      elements,
+      idempotencyKey: `schedule_disabled_${createHash('sha256').update(`${schedule.id}_${schedule.generation}`).digest('hex').slice(0, 40)}`
+    }, options.log, repos.config);
   };
   /** CI webhook 通知：发到订阅时冻结的回报位置，非飞书会话不发；返回卡片消息 ID，按钮回调据此核对来源。 */
   const notify = async (sessionId: string, sourceId: string, notice: CodebaseCiNotice) => {
@@ -241,5 +286,5 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }, options.log, repos.config);
     return sent.messageId;
   };
-  return { authorize, prepareDelivery, deliver, notify };
+  return { authorize, prepareDelivery, deliver, notify, onScheduleDisabled };
 }

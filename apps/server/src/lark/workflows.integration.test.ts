@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
-import { RelayAskBroker } from '@dutydeck/relay';
-import type { AgentConfig, AgentEvent } from '@dutydeck/shared';
+import { RelayAskBroker, type RelayAskChoice } from '@dutydeck/relay';
+import type { AgentConfig, AgentEvent, PermissionRequestData } from '@dutydeck/shared';
 import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
@@ -23,7 +23,7 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
-async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { participation?: LarkGroupParticipation; participationMode?: 'observe' | 'selective'; mentionPolicy?: StoredLarkConfig['mentionPolicy']; managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number } = {}) {
+async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { participation?: LarkGroupParticipation; participationMode?: 'observe' | 'selective' | 'off'; mentionPolicy?: StoredLarkConfig['mentionPolicy']; managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number; askChoices?: RelayAskChoice[]; permissionOperation?: PermissionRequestData['operation'] } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflows-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
@@ -47,13 +47,13 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
           try { send(prompt); } catch (error) { emit({ type: 'error', data: { message: String(error) } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
           currentCancelled = false;
           if (kind === 'ask') {
-            const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？', timeoutMs: options.askTimeoutMs });
+            const result = await broker.register({ sessionId: sessionId!, question: '选择哪一种实现？', timeoutMs: options.askTimeoutMs, ...(options.askChoices ? { choices: options.askChoices } : {}) });
             if (result.status === 'answered') {
               emit({ type: 'text', data: { text: `已收到：${result.answer}` } });
             }
             emit({ type: 'completed', data: { stopReason: 'end_turn' } });
           } else if (kind === 'permission') {
-            emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'pending', options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
+            emit({ type: 'permission_request', data: { id: 'native_permission', title: '修改文件', status: 'pending', ...(options.permissionOperation ? { operation: options.permissionOperation } : {}), options: [{ id: 'once', label: '一次', kind: 'allow_once' }] } });
             await new Promise<void>(done => { currentRelease = done; });
             if (currentCancelled) return;
             currentRelease = undefined;
@@ -656,7 +656,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     } finally { restored.stop(); }
   });
 
-  it('rejects an expired quoted ask without converting the reply into another task or a newer answer', async () => {
+  it('hands a requester reply to an expired quoted ask to the Agent as a new message carrying the question, without answering a newer ask', async () => {
     const h = await harness('ask', { askTimeoutMs: 1_000 });
     await h.coordinator.handle(event('om_task', '开始工作'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
@@ -666,10 +666,130 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
     await h.coordinator.handle(event('om_next', '下一个任务'), h.config);
     await vi.waitFor(async () => expect((await h.interactions()).some(item => item.kind === 'ask' && item.nativeId !== first.nativeId && item.cardId)).toBe(true));
     const next = (await h.interactions()).find(item => item.kind === 'ask' && item.nativeId !== first.nativeId)!;
+    // 别人引用这张过期卡仍按原规则拒绝，不转成新消息。
+    await h.coordinator.handle(event('om_bob_stale', '替他回答', { parentId: first.cardId, senderOpenId: 'ou_bob' }), h.config);
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_bob_stale', state: 'failed' }));
     await h.coordinator.handle(event('om_stale_answer', '过时的答案', { parentId: first.cardId }), h.config);
     expect(h.broker.get(next.nativeId)?.status).toBe('pending');
-    expect(await h.runtime.getTasks(first.sessionId)).toHaveLength(2);
+    const handover = '[你之前的提问] 选择哪一种实现？\n[用户的回复] 过时的答案';
+    await vi.waitFor(async () => expect(JSON.parse((await h.repos.config.get(`lark.inbox.${h.config.appId}.om_stale_answer`))!).request?.prompt).toBe(handover));
+    // 排在正在等回答的那一轮后面，同一会话，不另开会话。
+    await vi.waitFor(async () => expect(await h.runtime.getTasks(first.sessionId)).toHaveLength(3));
+    expect(await h.runtime.listSessions()).toHaveLength(1);
     expect(h.send).toHaveBeenCalledTimes(2);
+    await h.coordinator.handle(event('om_next_answer', '方案 B', { parentId: next.cardId, mentions: [] }), h.config);
+    await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(3));
+    expect(String(h.send.mock.calls[2]![0])).toContain(handover);
+    expect(await h.repos.config.get(`lark.inbox.${h.config.appId}.om_bob_stale`)).toBeTruthy();
+    expect((await h.runtime.getTasks(first.sessionId)).some(task => task.prompt.includes('替他回答'))).toBe(false);
+  });
+
+  it.each([['without a participation service', undefined], ['with group participation off', 'off']] as const)('answers a pending ask from a plain same-topic owner reply without @ %s, and ignores the same text from others', async (_name, participationMode) => {
+    const h = await harness('ask', participationMode ? { participationMode } : {});
+    await h.coordinator.handle(event('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(event('om_other_actor', '方案 B', { senderOpenId: 'ou_bob', mentions: [] }), h.config);
+    expect(h.broker.get(ask.nativeId)?.status).toBe('pending');
+    expect(await h.repos.config.get(`lark.inbox.${h.config.appId}.om_other_actor`)).toBeUndefined();
+    await h.coordinator.handle(event('om_plain_answer', '方案 A', { mentions: [] }), h.config);
+    expect(h.broker.get(ask.nativeId)).toMatchObject({ status: 'answered', answer: '方案 A' });
+    expect(h.service.reply).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'om_plain_answer', markdown: '回答已送达原任务：方案 A' }));
+    await h.completed();
+    expect(await h.runtime.getTasks(ask.sessionId)).toHaveLength(1);
+    expect(h.send).toHaveBeenCalledOnce();
+    // 提问答完后，话题里不 @ 的消息照旧不唤醒。
+    await h.coordinator.handle(event('om_after', '谢谢', { mentions: [] }), h.config);
+    expect(await h.repos.config.get(`lark.inbox.${h.config.appId}.om_after`)).toBeUndefined();
+  });
+
+  it('in a private chat only a reply matching an option answers a choice question; other text stays an ordinary message', async () => {
+    const h = await harness('ask', { askChoices: [{ label: '方案 A', value: 'plan_a' }, { label: '方案 B', value: 'plan_b' }] });
+    const dm = (id: string, text: string) => event(id, text, { chatType: 'p2p', chatId: 'oc_dm', threadId: undefined, rootId: undefined, mentions: [] });
+    await h.coordinator.handle(dm('om_task', '帮我选方案'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(dm('om_pause', '先停一下'), h.config);
+    expect(h.broker.get(ask.nativeId)?.status).toBe('pending');
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(ask.sessionId)).map(task => task.prompt)).toEqual(expect.arrayContaining([expect.stringContaining('先停一下')])));
+    await h.coordinator.handle(dm('om_pick', ' 2 '), h.config);
+    expect(h.broker.get(ask.nativeId)).toMatchObject({ status: 'answered', answer: 'plan_b' });
+    expect([...h.cards.values()].find(card => card.taskId === 'om_pick')?.markdown).toBe('回答已送达原任务。');
+  });
+
+  it('echoes a redacted free-text answer in the private-chat receipt', async () => {
+    const h = await harness('ask');
+    const dm = (id: string, text: string) => event(id, text, { chatType: 'p2p', chatId: 'oc_dm', threadId: undefined, rootId: undefined, mentions: [] });
+    await h.coordinator.handle(dm('om_task', '开始工作'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'ask')?.cardId).toBeTruthy());
+    const ask = (await h.interactions()).find(item => item.kind === 'ask')!;
+    await h.coordinator.handle(dm('om_free', '先停一下 token=abc123'), h.config);
+    expect(h.broker.get(ask.nativeId)).toMatchObject({ status: 'answered', answer: '先停一下 token=abc123' });
+    expect([...h.cards.values()].find(card => card.taskId === 'om_free')?.markdown).toBe('回答已送达原任务：先停一下 token=[REDACTED]');
+  });
+
+  it('mentions only members who can approve: Web when nobody in Feishu can, then the granted member', async () => {
+    const h = await harness('permission', { managedGroup: true });
+    const bots = JSON.parse((await h.repos.config.get(larkBotsConfigKey))!) as StoredLarkConfig[];
+    await h.repos.config.set(larkBotsConfigKey, JSON.stringify(bots.map(bot => ({ ...bot, groupCardMention: true }))));
+    await h.coordinator.handle(event('om_task', '修改实现'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    const first = (await h.interactions()).find(item => item.kind === 'permission')!;
+    const webCard = JSON.stringify(h.cards.get(first.cardId!));
+    expect(webCard).toContain('飞书里没有人能批准这条请求，需要在 Web 上处理。');
+    expect(webCard).not.toContain('<at ');
+    expect(await h.coordinator.handleAction({ dutydeck_workflow: 'approve', request_id: first.id, generation: first.boot }, 'ou_alice', { messageId: first.cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'error' });
+
+    const bob = await h.groupManager!.resolveGroupPrincipal(h.config.appId, 'oc_group', 'ou_bob');
+    await h.groupManager!.save(h.config.appId, 'oc_group', { expectedRevision: (await h.groupManager!.groupAccess(h.config.appId, 'oc_group'))!.revision, patch: {},
+      roleChanges: [{ kind: 'create', principalId: bob!, role: 'can_operate', operateScope: 'group_runs', actionGates: { terminalWrite: false, highRisk: true, groupToolsSend: false } }] });
+    await h.coordinator.handle(event('om_task_2', '再修改一次', { rootId: 'om_root_2', threadId: 'omt_topic_2' }), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission' && item.id !== first.id)?.cardId).toBeTruthy());
+    const second = (await h.interactions()).find(item => item.kind === 'permission' && item.id !== first.id)!;
+    const bobCard = h.cards.get(second.cardId!);
+    expect(bobCard.elements.find((element: any) => element.element_id === 'group_mention')?.content).toBe('<at id=ou_bob></at>');
+    expect(JSON.stringify(bobCard)).not.toContain('ou_alice');
+    expect(JSON.stringify(bobCard)).not.toContain('需要在 Web 上处理');
+    expect(await h.coordinator.handleAction({ dutydeck_workflow: 'approve', request_id: second.id, generation: second.boot }, 'ou_bob', { messageId: second.cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'success', content: '执行端已接受本次批准。' });
+    expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', true);
+    expect(JSON.stringify(h.cards.get(second.cardId!))).toMatch(/已允许 · <at id=ou_bob><\/at> · \d{2}:\d{2}/);
+  });
+
+  it('lets only the requester allow an exact command for the session, then auto-approves it without another card', async () => {
+    const h = await harness('permission', { permissionOperation: { source: 'acp_tool_call', cwd: '/work/project', command: 'pnpm test' } });
+    await h.coordinator.handle(event('om_task', '运行测试'), h.config);
+    await vi.waitFor(async () => expect((await h.interactions()).find(item => item.kind === 'permission')?.cardId).toBeTruthy());
+    const request = (await h.interactions()).find(item => item.kind === 'permission')!;
+    const button = h.cards.get(request.cardId!).elements.find((element: any) => element.element_id === 'workflow_allow_session');
+    expect(button.text.content).toBe('本会话允许此命令');
+    const value = button.behaviors[0].value;
+    expect(await h.coordinator.handleAction(value, 'ou_bob', { messageId: request.cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'error', content: '只有发起人可以设置本会话允许此命令。' });
+    expect(h.resolvePermission).not.toHaveBeenCalled();
+    expect(await h.coordinator.handleAction(value, 'ou_alice', { messageId: request.cardId, chatId: 'oc_group' }))
+      .toMatchObject({ type: 'success', content: '已允许，本会话内完全相同的命令之后会自动允许。' });
+    expect(h.resolvePermission).toHaveBeenCalledExactlyOnceWith('native_permission', true);
+    expect(h.cards.get(request.cardId!).statusLabel).toBe('已允许');
+    await h.completed();
+    const cardCount = h.cards.size;
+
+    await h.coordinator.handle(event('om_task_again', '再运行一次测试'), h.config);
+    await vi.waitFor(() => expect(h.resolvePermission).toHaveBeenCalledTimes(2));
+    expect(h.resolvePermission).toHaveBeenLastCalledWith('native_permission', true);
+    expect((await h.interactions()).filter(item => item.kind === 'permission')).toHaveLength(1);
+    await vi.waitFor(async () => expect((await h.repos.channelMappings.list(`lark-card:${h.config.appId}`)).some(mapping => {
+      const saved = JSON.parse(mapping.extra ?? '{}');
+      return mapping.externalId === 'om_task_again' && saved.state === 'completed' && saved.final_delivery_state === 'delivered';
+    })).toBe(true), { timeout: 5_000 });
+    // 自动批准不发审批卡，只在这一轮的进度卡上原位留一行。
+    const again = [...h.cards.values()].filter(card => card.taskId === 'om_task_again');
+    expect(again.find(card => card.cardKind === 'process')?.elements[0].content).toBe("<text_tag color='green'>本会话已允许</text_tag>　修改文件");
+    expect(h.service.reply.mock.calls.filter(([input]: any[]) => input.taskName === '确认本次操作')).toHaveLength(1);
+    // 这一轮只多了进度卡和结果卡。
+    expect(again).toHaveLength(2);
+    expect(h.cards.size - cardCount).toBe(2);
   });
 
   it('binds an ACP approval to the real card and current authority; simultaneous approvals resolve only once', async () => {
@@ -790,7 +910,7 @@ describe('Feishu workflows through coordinator, Runtime and persistent storage',
 
     const interrupt = vi.spyOn(h.runtime, 'interrupt');
     await h.coordinator.handle(event('om_alice_cancel_bob', '/cancel'), h.config);
-    await vi.waitFor(() => expect([...h.cards.values()].some(card => card.taskId === 'om_alice_cancel_bob' && String(card.markdown).includes('不在机器人白名单'))).toBe(true));
+    await vi.waitFor(() => expect([...h.cards.values()].some(card => card.taskId === 'om_alice_cancel_bob' && String(card.markdown).includes('只有本轮发起人') && String(card.markdown).includes('部署者可在 Web 停止'))).toBe(true));
     expect(interrupt).not.toHaveBeenCalled();
 
     await h.coordinator.handle(event('om_bob_cancel_self', '/cancel', { senderOpenId: 'ou_bob' }), h.config);

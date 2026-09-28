@@ -56,6 +56,7 @@ import {
   checkPostureDrift,
   checkSchema,
   larkBotsConfigKey,
+  larkListenerStatusKey,
   summarize,
   type DirectoryObservation
 } from './checks.js';
@@ -235,7 +236,12 @@ export async function runDoctor(
     listenerDisabled
   );
   checks.push(...lark.checks);
-  checks.push(checkLarkListener(lark.botCount, status.running, listenerDisabled));
+  checks.push(checkLarkListener(lark.botCount, status.running, listenerDisabled, {
+    ...(probe.values?.[larkBotsConfigKey] ? { raw: probe.values[larkBotsConfigKey] } : {}),
+    ...(probe.values?.[larkListenerStatusKey] ? { status: probe.values[larkListenerStatusKey] } : {}),
+    ...(status.pid ?? record?.pid ? { pid: status.pid ?? record?.pid } : {}),
+    now: new Date()
+  }));
   checks.push(checkLarkMemory(
     databaseUnreadable ? { unavailable: true } : { ...(probe.values?.[larkBotsConfigKey] ? { raw: probe.values[larkBotsConfigKey] } : {}), ...(probe.values ? { values: probe.values } : {}) },
     new Date()

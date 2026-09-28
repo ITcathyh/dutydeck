@@ -6,6 +6,8 @@ import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readF
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { AUTOSTART_LINUX_UNIT } from '../autostart/autostart.js';
 import type { DeployCliOptions } from '../cli-program.js';
+import { larkBotsConfigKey, readLarkConfigs } from '../lark/config.js';
+import { createLarkCardService } from '../lark/service.js';
 import { pidAlive } from './daemon.js';
 import { DRAIN_INTERVAL_MS, drainRuntime, systemdServiceControl, unitRuntime, waitForServiceHealth, type DaemonCommandDeps, type DrainResult, type RuntimeEndpoint, type ServiceControl, type UnitRuntime } from './command.js';
 
@@ -477,6 +479,77 @@ async function restoreDatabaseForRollback(
   return undefined;
 }
 
+// ─── 回滚后提醒 ──────────────────────────────────────────────────────────────
+
+/** 飞书入站消息记录的键前缀，与 lark/task-inbox.ts 一致：`lark.inbox.<appId>.<messageId>`。 */
+const LARK_INBOX_PREFIX = 'lark.inbox.';
+const UNCERTAIN_NOTICE = '服务刚回滚到上一个版本，最近发来的请求执行状态不确定，请核对后重发。';
+
+interface UncertainConversation { appId: string; chatId: string; threadId?: string; messageId: string; createTime: number; messages: number }
+
+function configRows(file: string, prefix: string): Array<{ key: string; value: string }> {
+  const db = new Database(file, { readonly: true, fileMustExist: true });
+  try {
+    return db.prepare('SELECT key, value FROM configs WHERE substr(key, 1, length(?)) = ?').all(prefix, prefix) as Array<{ key: string; value: string }>;
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * 用部署前的备份恢复数据库后，备份之后收到的飞书消息只留在另存的回滚前的库里：服务再也看不到它们，
+ * 既不执行也不回复。按会话（机器人 + 群 + 话题）归并，每个会话记最后收到的那条；已经回过失败回执的不算。
+ */
+function uncertainConversations(beforeRollback: string, restored: string): UncertainConversation[] {
+  const kept = new Set(configRows(restored, LARK_INBOX_PREFIX).map(row => row.key));
+  const conversations = new Map<string, UncertainConversation>();
+  for (const row of configRows(beforeRollback, LARK_INBOX_PREFIX)) {
+    if (kept.has(row.key)) continue;
+    let record: { appId?: unknown; state?: unknown; event?: { messageId?: unknown; chatId?: unknown; threadId?: unknown; createTime?: unknown } };
+    try { record = JSON.parse(row.value); } catch { continue; }
+    const { appId, state, event } = record;
+    if (typeof appId !== 'string' || state === 'failed' || typeof event?.messageId !== 'string' || typeof event.chatId !== 'string') continue;
+    const threadId = typeof event.threadId === 'string' && event.threadId ? event.threadId : undefined;
+    const key = JSON.stringify([appId, event.chatId, threadId ?? '']);
+    const createTime = Number(event.createTime) || 0;
+    const previous = conversations.get(key);
+    const latest = !previous || createTime >= previous.createTime;
+    conversations.set(key, {
+      appId, chatId: event.chatId, ...(threadId ? { threadId } : {}),
+      messageId: latest ? event.messageId : previous.messageId, createTime: latest ? createTime : previous.createTime,
+      messages: (previous?.messages ?? 0) + 1
+    });
+  }
+  return [...conversations.values()];
+}
+
+/** 每个受影响的会话回一条纯文本。机器人凭据取回滚前的库，它是最新的。 */
+async function notifyUncertainConversations(conversations: UncertainConversation[], beforeRollback: string, deps: DeployDeps, serviceHealthy: boolean) {
+  const raw = configRows(beforeRollback, larkBotsConfigKey).find(row => row.key === larkBotsConfigKey)?.value;
+  const bots = await readLarkConfigs({ get: async key => key === larkBotsConfigKey ? raw : undefined, set: async () => {} }, { readOnly: true });
+  const results: Array<Record<string, unknown> & { notified: boolean }> = [];
+  for (const conversation of conversations) {
+    const bot = bots.find(item => item.appId === conversation.appId);
+    // 上一版没起来时不提醒重发：发了也没人接，只记进 manifest 供人工核对。
+    let error = !serviceHealthy ? '上一版没有恢复健康，没有发提醒' : bot ? undefined : '找不到这个机器人的配置';
+    if (!error && bot) {
+      try {
+        await createLarkCardService(deps.env ?? process.env, deps.fetch ?? fetch, bot).replyText({
+          messageId: conversation.messageId, ...(conversation.threadId ? { replyInThread: true } : {}),
+          text: UNCERTAIN_NOTICE, idempotencyKey: `rollback_${conversation.messageId}`.slice(0, 50)
+        });
+      } catch (sendError) {
+        error = message(sendError);
+      }
+    }
+    results.push({
+      app_id: conversation.appId, chat_id: conversation.chatId, ...(conversation.threadId ? { thread_id: conversation.threadId } : {}),
+      message_id: conversation.messageId, messages: conversation.messages, notified: !error, ...(error ? { error } : {})
+    });
+  }
+  return results;
+}
+
 async function restartAndCheck(service: ServiceControl, previousPid: number | undefined, address: string | undefined, deps: DeployDeps) {
   const error = await service.restart();
   if (error) return { ok: false as const, error };
@@ -626,7 +699,21 @@ export async function runDeploy(options: DeployCliOptions, deps: DeployDeps = {}
   if (restoreError) warn(restoreError);
   await service.resetFailed?.();
   const back = await restartAndCheck(service, await service.mainPid(), target.endpoint.address, deps);
-  const restoreNote = restoreError ? `数据库：${restoreError}` : manifest.database_restored ? '数据库已用部署前的备份恢复。' : '';
+  let lostNote = '';
+  if (database && manifest.database_restored === true && typeof manifest.database_before_rollback === 'string') {
+    try {
+      const conversations = uncertainConversations(manifest.database_before_rollback, database);
+      if (conversations.length > 0) {
+        const results = await notifyUncertainConversations(conversations, manifest.database_before_rollback, deps, back.ok);
+        manifest.uncertain_conversations = results;
+        lostNote = `备份之后收到的飞书消息随恢复丢失，涉及 ${conversations.length} 个会话，已在其中 ${results.filter(item => item.notified).length} 个回复提醒核对后重发，明细见 manifest 的 uncertain_conversations。`;
+        info(lostNote);
+      }
+    } catch (error) {
+      warn(`核对备份之后收到的飞书消息失败：${message(error)}`);
+    }
+  }
+  const restoreNote = (restoreError ? `数据库：${restoreError}` : manifest.database_restored ? '数据库已用部署前的备份恢复。' : '') + lostNote;
   return back.ok
     ? finish('rolled_back', { new_pid: back.pid, error: `新版本 ${id} 没有通过健康检查，已切回 ${basename(previousRelease)}。原因：${started.error}${restoreNote}` })
     : finish('rollback_failed', { error: `新版本没有通过健康检查，切回 ${basename(previousRelease)} 后仍不健康。新版本：${started.error}上一版：${back.error}${restoreNote}` });

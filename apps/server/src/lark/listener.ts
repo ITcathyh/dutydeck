@@ -16,11 +16,13 @@ import type { LarkMemoryStore } from './memory.js';
 import type { LarkMemoryProjection } from './memory-view.js';
 import type { LarkMemoryPipeline } from './memory-pipeline.js';
 import { createLarkWelcomeService, type LarkWelcomeService } from './welcome.js';
-import { describeWebBaseUrlReachability, larkExecutionConfirmed } from './config.js';
+import { describeWebBaseUrlReachability, larkExecutionConfirmed, readLarkConfigs } from './config.js';
 import { buildEditedMessageEvent } from './edited-message.js';
 import { LarkCardCallbackDeduper, larkCardCallbackKeys } from './card-callback-dedup.js';
 import { isTaskAssigneesUpdateEvent } from './task-agent.js';
 import type { LoginLinkStore } from '../auth/auth.js';
+import { redactTraceText } from './secret-redaction.js';
+import { larkListenerStatusKey, type LarkListenerStatus } from './listener-status.js';
 
 // 飞书长连接监听：只负责 WebSocket 事件接入、事件组装与协调器装配。
 // 消息协调见 coordinator.ts，卡片渲染见 card-renderer.ts，会话路由见 session-resolver.ts，
@@ -72,6 +74,8 @@ export interface LarkRuntime {
   confirmExecutionRecovery?(id: string, decision: ExecutionRecoveryDecision, actor: ExecutionActor): Promise<unknown>;
   /** 往会话时间线写一条说明（Web 上能看到），不属于任何一轮的执行输出。 */
   publishSessionEvent?(sessionId: string, type: 'text', data: unknown): Promise<unknown>;
+  /** 服务升级排空中：新任务照常入队，但暂不开始执行。 */
+  isQueueHeld?(): boolean;
 }
 
 export interface LarkMessageEvent {
@@ -139,8 +143,10 @@ export class LarkLongConnectionListener implements LarkListener {
   private config?: StoredLarkConfig;
   private readonly cardCallbacks = new LarkCardCallbackDeduper();
   listening = false;
+  /** 连上之后断线、SDK 正在自己重连的起始时间；重连成功或停止后清空。 */
+  reconnectingSince?: string;
 
-  constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}) {}
+  constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}, private readonly connectionLost?: (error: unknown) => void, private readonly connectionChanged?: () => void) {}
 
   async start(config: StoredLarkConfig) {
     // api-gate 是模块级单例（per-appId 限流状态必须跨会话共享），没有构造注入点。
@@ -366,9 +372,24 @@ export class LarkLongConnectionListener implements LarkListener {
       // 防止连接半开（TCP 看起来正常但实际已不通）时监听静默失效。
       wsConfig: { pingTimeout: 120 },
       onReady: () => { connected(); this.log.info({ appId: config.appId }, '飞书消息监听已连接'); },
-      onReconnecting: () => this.log.warn({ appId: config.appId }, '飞书消息监听正在重连'),
-      onReconnected: () => this.log.info({ appId: config.appId }, '飞书消息监听已恢复'),
-      onError: error => { connectionFailed(error); this.log.error({ error, appId: config.appId }, '飞书消息监听异常'); }
+      onReconnecting: () => {
+        this.log.warn({ appId: config.appId }, '飞书消息监听正在重连');
+        if (this.client !== client) return;
+        this.reconnectingSince ??= new Date().toISOString();
+        this.connectionChanged?.();
+      },
+      onReconnected: () => {
+        this.log.info({ appId: config.appId }, '飞书消息监听已恢复');
+        if (this.client !== client) return;
+        this.reconnectingSince = undefined;
+        this.connectionChanged?.();
+      },
+      onError: error => {
+        connectionFailed(error);
+        this.log.error({ error, appId: config.appId }, '飞书消息监听异常');
+        // 连上之后断线由 SDK 自己重连，它只在放弃重连（次数用尽或不可重试的错误）时才报 onError，交回连接池退避重连。
+        if (this.client === client) this.connectionLost?.(error);
+      }
     });
     const connectionTimeout = setTimeout(() => connectionFailed(new Error('WebSocket connection readiness timed out')), 20_000);
     try {
@@ -399,6 +420,7 @@ export class LarkLongConnectionListener implements LarkListener {
     this.credentials = undefined;
     this.config = undefined;
     this.listening = false;
+    this.reconnectingSince = undefined;
   }
 }
 
@@ -409,9 +431,17 @@ export interface LarkListenerPool {
   stop(): void;
 }
 
+/** 连接失败后的重连间隔：第一次 30 秒，之后每次翻倍，最长 5 分钟。 */
+export const larkListenerRetryDelayMs = (attempt: number) => Math.min(30_000 * 2 ** (attempt - 1), 300_000);
+
+interface LarkListenerRetry { attempt: number; error: string; failedAt: string; nextRetryAt: number; timer: NodeJS.Timeout }
+
 export class LarkLongConnectionListenerPool implements LarkListenerPool {
   private readonly listeners = new Map<string, LarkLongConnectionListener>();
+  /** 连接失败、等待重连的机器人。一直重连，直到连上、配置被删除或关闭监听。 */
+  private readonly retries = new Map<string, LarkListenerRetry>();
   private syncTail: Promise<void> = Promise.resolve();
+  private closed = false;
 
   constructor(private readonly log: ListenerLog, private readonly options: LarkLongConnectionListenerOptions = {}) {}
 
@@ -419,12 +449,20 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
   get activeAppIds() { return [...this.listeners.keys()]; }
 
   sync(configs: StoredLarkConfig[]): Promise<void> {
-    const synced = this.syncTail.then(() => this.syncConfiguredListeners(configs));
-    this.syncTail = synced.catch(() => {});
-    return synced;
+    return this.enqueue(() => this.syncConfiguredListeners(configs));
+  }
+
+  /** 同步、重连、断线接管都排在同一条队列上，同一个机器人不会同时有两条连接。 */
+  private enqueue(operation: () => Promise<void>) {
+    const run = this.syncTail.then(operation);
+    this.syncTail = run.catch(() => {});
+    return run;
   }
 
   private async syncConfiguredListeners(configs: StoredLarkConfig[]) {
+    // 手动同步或保存配置：已排定的重连作废，按这次的配置从头开始。
+    for (const retry of this.retries.values()) clearTimeout(retry.timer);
+    this.retries.clear();
     const enabled = new Map(configs.filter(config => config.listening && larkExecutionConfirmed(config)).map(config => [config.appId, config]));
     for (const [appId, listener] of this.listeners) {
       if (enabled.has(appId)) continue;
@@ -433,20 +471,91 @@ export class LarkLongConnectionListenerPool implements LarkListenerPool {
     }
     const failures: unknown[] = [];
     for (const [appId, config] of enabled) {
-      const listener = this.listeners.get(appId) ?? new LarkLongConnectionListener(this.log, this.options);
       try {
-        await listener.start(config);
-        this.listeners.set(appId, listener);
+        await this.startListener(appId, config);
       } catch (error) {
-        listener.stop();
-        this.listeners.delete(appId);
         failures.push(error);
+        this.scheduleRetry(appId, 1, error);
       }
     }
+    await this.publishStatus();
     if (failures.length) throw failures[0];
   }
 
+  private async startListener(appId: string, config: StoredLarkConfig) {
+    const listener = this.listeners.get(appId) ?? this.createListener(appId);
+    try {
+      await listener.start(config);
+      this.listeners.set(appId, listener);
+    } catch (error) {
+      listener.stop();
+      this.listeners.delete(appId);
+      throw error;
+    }
+  }
+
+  private createListener(appId: string): LarkLongConnectionListener {
+    const listener: LarkLongConnectionListener = new LarkLongConnectionListener(this.log, this.options, error => void this.enqueue(async () => {
+      if (this.listeners.get(appId) !== listener) return;
+      listener.stop();
+      this.listeners.delete(appId);
+      this.scheduleRetry(appId, 1, error);
+      await this.publishStatus();
+    }), () => void this.enqueue(() => this.publishStatus()));
+    return listener;
+  }
+
+  private scheduleRetry(appId: string, attempt: number, error: unknown) {
+    if (this.closed) return;
+    const delayMs = larkListenerRetryDelayMs(attempt);
+    const retry: LarkListenerRetry = {
+      attempt,
+      error: redactTraceText(error instanceof Error ? error.message : String(error)).slice(0, 300),
+      failedAt: new Date().toISOString(),
+      nextRetryAt: Date.now() + delayMs,
+      timer: setTimeout(() => void this.enqueue(() => this.retry(appId, retry)), delayMs)
+    };
+    retry.timer.unref?.();
+    this.retries.set(appId, retry);
+    this.log.warn({ error, appId, attempt, retryInMs: delayMs }, '飞书消息监听连接失败，稍后自动重连');
+  }
+
+  private async retry(appId: string, scheduled: LarkListenerRetry) {
+    // 已被新的同步或关闭作废。
+    if (this.closed || this.retries.get(appId) !== scheduled) return;
+    this.retries.delete(appId);
+    try {
+      // 每次重连前读最新配置：机器人被删除或关闭监听后不再重连。
+      const config = (await readLarkConfigs(this.options.workflowStore))
+        .find(item => item.appId === appId && item.listening && larkExecutionConfirmed(item));
+      if (config) {
+        await this.startListener(appId, config);
+        this.log.info({ appId, attempt: scheduled.attempt }, '飞书消息监听已重新连上');
+      }
+    } catch (error) {
+      this.scheduleRetry(appId, scheduled.attempt + 1, error);
+    }
+    await this.publishStatus();
+  }
+
+  /** 写给 `dutydeck doctor`：它在另一个进程里跑，只能从库里读实际连上了哪些机器人。 */
+  private async publishStatus() {
+    const status: LarkListenerStatus = {
+      pid: process.pid,
+      updatedAt: new Date().toISOString(),
+      // SDK 正在重连的连接实例还在，但收不到消息，不算已连上。
+      active: [...this.listeners].filter(([, listener]) => !listener.reconnectingSince).map(([appId]) => appId),
+      retrying: [...this.retries].map(([appId, retry]) => ({ appId, error: retry.error, failedAt: retry.failedAt, nextRetryAt: new Date(retry.nextRetryAt).toISOString() })),
+      reconnecting: [...this.listeners].flatMap(([appId, listener]) => listener.reconnectingSince ? [{ appId, since: listener.reconnectingSince }] : [])
+    };
+    try { await this.options.workflowStore?.set(larkListenerStatusKey, JSON.stringify(status)); }
+    catch (error) { this.log.warn({ error }, '记录飞书监听状态失败'); }
+  }
+
   stop() {
+    this.closed = true;
+    for (const retry of this.retries.values()) clearTimeout(retry.timer);
+    this.retries.clear();
     for (const listener of this.listeners.values()) listener.stop();
     this.listeners.clear();
   }
