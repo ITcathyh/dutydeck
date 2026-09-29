@@ -19,15 +19,17 @@ import { renderLarkResultTextElements } from './lark/card-renderer.js';
 import { sendLarkResult } from './lark/result-delivery.js';
 import { readAttemptResult } from './task-results.js';
 import type { CodebaseCiNotice } from './codebase-ci.js';
-import { SessionAutomationService } from './session-automation.js';
+import { SessionAutomationService, type AutomationDeliveryContext } from './session-automation.js';
 
 export function createAutomationIntegration(repos: RepositoryBundle, runtime: DutydeckRuntime, groups: LarkGroupManager, options: {
   env?: NodeJS.ProcessEnv;
+  /** Return a dedicated client per call; delivery cancellation closes its client. */
   client?: (config: StoredLarkConfig) => LarkCardService;
   log: { warn: (...args: any[]) => void };
 }) {
   const client = (config: StoredLarkConfig) => options.client?.(config) ?? createLarkCardService(options.env ?? process.env, globalThis.fetch, config);
-  const authorize = async (sessionId: string, actorId?: string) => {
+  const authorize = async (sessionId: string, actorId?: string, context?: AutomationDeliveryContext) => {
+    context?.signal.throwIfAborted();
     const session = await runtime.getSession(sessionId);
     if (!session || !actorId) return false;
     if (session.source !== 'lark') return session.source !== 'foundation_group_binding' && actorId === installationOwnerTaskActor;
@@ -46,8 +48,13 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     if (!(config.allowedUsers?.length || config.allowedEmails?.length)) return true;
     if (config.allowedUsers?.some(user => user.openId === actorId) || config.allowedBots?.some(bot => bot.openId === actorId)) return true;
     if (!config.allowedEmails?.length) return false;
-    try { return (await client(config).getUserEmails(actorId)).some(email => config.allowedEmails.includes(email)); }
+    context?.signal.throwIfAborted();
+    const directory = client(config);
+    const abort = () => directory.close?.();
+    context?.signal.addEventListener('abort', abort, { once: true });
+    try { return (await directory.getUserEmails(actorId)).some(email => config.allowedEmails.includes(email)); }
     catch { return false; }
+    finally { context?.signal.removeEventListener('abort', abort); }
   };
 
   const prepareDelivery = async (sessionId: string, automationId: string) => {
@@ -75,7 +82,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     if (!target || target.appId !== appId || target.chatId !== chatId) throw new RuntimeError('AUTOMATION_DESTINATION_CHANGED', '自动任务的回报位置已变化', 409);
   };
 
-  const deliver = async (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => {
+  const deliver = async (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => {
     const session = await runtime.getSession(sessionId);
     if (!session) throw new RuntimeError('AUTOMATION_SESSION_MISSING', '自动任务的会话不存在', 404);
     if (session.source !== 'lark') return;
@@ -188,7 +195,7 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       : actualActor.kind === 'channel'
         ? actualActor.id
         : undefined;
-    if (!await authorize(sessionId, actorId)) {
+    if (!await authorize(sessionId, actorId, context)) {
       throw new RuntimeError('AUTOMATION_DELIVERY_REVOKED', '自动任务的交付权限已撤销', 403);
     }
 
@@ -220,18 +227,31 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
       });
     }
     const idempotencyKey = `auto_${createHash('sha256').update(occurrenceId).digest('hex').slice(0, 40)}`;
-    await sendLarkResult(client(config), target, {
-      state: verifiedResult.outcome === 'completed' ? 'completed' : ['interrupted', 'cancelled'].includes(verifiedResult.outcome) ? 'interrupted' : 'failed',
-      readOnly: true,
-      retryable: false,
-      taskName,
-      taskId: verifiedResult.taskId,
-      sessionId,
-      workspace: session.cwd,
-      webBaseUrl: config.webBaseUrl,
-      elements,
-      idempotencyKey
-    }, options.log);
+    const sender = client(config);
+    const abort = () => sender.close?.();
+    context?.signal.addEventListener('abort', abort, { once: true });
+    const beforeSend = async () => {
+      context?.signal.throwIfAborted();
+      await context?.assertCurrent();
+      if (!await authorize(sessionId, actorId, context)) throw new RuntimeError('AUTOMATION_DELIVERY_REVOKED', '自动任务的交付权限已撤销', 403);
+      await context?.assertCurrent();
+      context?.signal.throwIfAborted();
+    };
+    try {
+      await beforeSend();
+      await sendLarkResult(sender, target, {
+        state: verifiedResult.outcome === 'completed' ? 'completed' : ['interrupted', 'cancelled'].includes(verifiedResult.outcome) ? 'interrupted' : 'failed',
+        readOnly: true,
+        retryable: false,
+        taskName,
+        taskId: verifiedResult.taskId,
+        sessionId,
+        workspace: session.cwd,
+        webBaseUrl: config.webBaseUrl,
+        elements,
+        idempotencyKey
+      }, options.log, repos.config, beforeSend);
+    } finally { context?.signal.removeEventListener('abort', abort); }
   };
   /** 定时计划失效通知：因会话结束被停用时，向原回报位置发送通知。找不到投递位置时静默跳过。 */
   const onScheduleDisabled = async (schedule: SessionSchedule, reason: string) => {

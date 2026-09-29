@@ -73,12 +73,13 @@ async function delivered<T>(store: ConfigRepository | undefined, key: string, se
 export async function sendLarkFile(
   service: LarkCardService, target: DeliveryTarget,
   input: { data: Uint8Array; filename: string; idempotencyKey: string },
-  log: DeliveryLog, store?: ConfigRepository
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: () => Promise<void>
 ) {
   const prefix = `lark.delivery.${input.idempotencyKey}`;
-  const fileKey = await delivered(store, `${prefix}.upload`, () => service.uploadFile(input));
+  const fileKey = await delivered(store, `${prefix}.upload`, async () => { await beforeSend?.(); return service.uploadFile(input); });
   return delivered(store, `${prefix}.message`, async () => {
     if (target.replyMessageId) {
+      await beforeSend?.();
       try {
         return await service.replyFile({
           messageId: target.replyMessageId,
@@ -88,6 +89,7 @@ export async function sendLarkFile(
         });
       } catch (error) { if (target.allowReplyFallback === false) throw error; log.warn({ error, messageId: target.replyMessageId }, '回复文件失败，回退为会话内发送'); }
     }
+    await beforeSend?.();
     return service.sendFile({ chatId: target.chatId, fileKey, idempotencyKey: input.idempotencyKey });
   }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()) : undefined);
 }
@@ -97,7 +99,8 @@ export async function prepareLarkResult(
   target: DeliveryTarget,
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
   log: DeliveryLog,
-  store?: ConfigRepository
+  store?: ConfigRepository,
+  beforeSend?: () => Promise<void>
 ): Promise<{ input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string }; attachmentMessageId?: string }> {
   const resultInput = { ...input, cardKind: 'result' as const };
   const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
@@ -113,7 +116,7 @@ export async function prepareLarkResult(
     const file = await sendLarkFile(service, target, {
       data: Buffer.from(`${output}${acceptance}`, 'utf8'), filename,
       idempotencyKey: `result_file_${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 36)}`
-    }, log, store);
+    }, log, store, beforeSend);
     attachmentMessageId = file.messageId;
     // An exact excerpt is not a business-outcome summary. Keep it explicitly
     // labelled and plain text; never infer success from a finished agent turn.
@@ -132,12 +135,13 @@ export async function prepareLarkResult(
 export async function sendLarkResult(
   service: LarkCardService, target: DeliveryTarget,
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
-  log: DeliveryLog, store?: ConfigRepository
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: () => Promise<void>
 ): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
-  const { input: resultInput, attachmentMessageId } = await prepareLarkResult(service, target, input, log, store);
+  const { input: resultInput, attachmentMessageId } = await prepareLarkResult(service, target, input, log, store, beforeSend);
   const elements = resultInput.elements;
   const sent = await delivered(store, `lark.delivery.${input.idempotencyKey}.summary`, async () => {
     if (target.replyMessageId && typeof service.reply === 'function') {
+      await beforeSend?.();
       try {
         const result = await service.reply({
           ...resultInput,
@@ -148,6 +152,7 @@ export async function sendLarkResult(
       } catch (error) { if (target.allowReplyFallback === false) throw error; log.warn({ error, messageId: target.replyMessageId, chatId: target.chatId }, '回复执行结果失败，回退为会话内发送'); }
     }
     if (target.replyMessageId && target.allowReplyFallback === false) throw new Error('Explicit final requires reply support');
+    await beforeSend?.();
     return { ...await service.send({ ...resultInput, chatId: target.chatId }), elements };
   }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim())
     && JSON.stringify(result.elements) === JSON.stringify(elements) : undefined);

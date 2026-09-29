@@ -79,6 +79,28 @@ async function fixture() {
 }
 
 describe('automation service integration', () => {
+  it('checks the lease again after a slow authorization before any provider send or fallback', async () => {
+    const f = await fixture(); const result = f.settleTask('completed');
+    await f.repos.config.set('automation.delivery-target.automation1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));
+    let expired = false, authorizations = 0;
+    f.groups.authorize.mockImplementation(async () => { if (++authorizations === 2) expired = true; return undefined; });
+    const controller = new AbortController();
+    const assertCurrent = vi.fn(async () => { if (expired) throw new Error('lease expired during authorization'); });
+    await expect(f.deliver('s1', result, 'occ1', 'automation1', { signal: controller.signal, assertCurrent })).rejects.toThrow('lease expired during authorization');
+    expect(assertCurrent).toHaveBeenCalledTimes(2);
+    expect(f.client.reply).not.toHaveBeenCalled(); expect(f.client.send).not.toHaveBeenCalled();
+  });
+
+  it('reuses the persisted provider receipt before the source delivered flag is saved', async () => {
+    const f = await fixture();
+    const result = f.settleTask('completed');
+    await f.repos.config.set('automation.delivery-target.automation1', JSON.stringify({ appId: 'cli_a', chatId: 'oc_chat', replyMessageId: 'om_original', replyInThread: true }));
+    await f.deliver('s1', result, 'occ1', 'automation1');
+    await f.deliver('s1', result, 'occ1', 'automation1');
+    expect(f.client.reply).toHaveBeenCalledOnce();
+    expect(await f.repos.config.list!('lark.delivery.')).toHaveLength(1);
+  });
+
   it('checks the captured actor without changing a running turn identity, and rechecks revocation', async () => {
     const f = await fixture();
     expect(await f.authorize('s1', 'ou_alice')).toBe(true);
@@ -112,15 +134,16 @@ describe('automation service integration', () => {
     await f.deliver('s1', result, 'occ1', 'automation1');
     await f.deliver('s1', result, 'occ1', 'automation1');
     const first = f.client.reply.mock.calls[0]![0] as any;
-    const second = f.client.reply.mock.calls[1]![0] as any;
-    expect(first.messageId).toBe('om_original'); expect(second.messageId).toBe('om_original');
-    expect(first.idempotencyKey).toBe(second.idempotencyKey);
+    expect(first.messageId).toBe('om_original');
+    expect(f.client.reply).toHaveBeenCalledOnce();
+    const receipt = await f.repos.config.get(`lark.delivery.${first.idempotencyKey}.summary`);
+    expect(JSON.parse(receipt!)).toMatchObject({ messageId: 'om_result' });
     expect(first.state).toBe(status);
     expect(JSON.stringify(first)).toContain('target result');
     expect(JSON.stringify(first)).not.toContain('secret-canary');
     await f.setBot({ listening: false });
     await expect(f.deliver('s1', result, 'occ1', 'automation1')).rejects.toThrow('权限');
-    expect(f.client.reply).toHaveBeenCalledTimes(2);
+    expect(f.client.reply).toHaveBeenCalledOnce();
   });
 
   it('rejects a forged body/throughSequence even with a real task, attempt and settlement; nothing is sent', async () => {

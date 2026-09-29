@@ -125,6 +125,41 @@ describe('skill-catalog', () => {
       expect(skills[1].description).toBe('User review');
     });
 
+    it('discovers Claude skills alongside existing roots and keeps same-name paths distinct', async () => {
+      const roots = [
+        { base: workspaceDir, provider: '.agents', source: 'workspace' },
+        { base: workspaceDir, provider: '.claude', source: 'workspace' },
+        { base: workspaceDir, provider: '.codex', source: 'workspace' },
+        { base: userHomeDir, provider: '.agents', source: 'user' },
+        { base: userHomeDir, provider: '.claude', source: 'user' },
+        { base: userHomeDir, provider: '.codex', source: 'user' }
+      ] as const;
+
+      for (const root of roots) {
+        const dir = join(root.base, root.provider, 'skills', 'shared');
+        await mkdir(dir, { recursive: true });
+        await writeFile(join(dir, 'SKILL.md'), `---\nname: shared\ndescription: ${root.source} ${root.provider}\n---\n${root.provider}`);
+      }
+
+      const skills = await discoverSkills(workspaceDir, { homeDirectory: userHomeDir });
+      expect(skills).toHaveLength(6);
+      expect(skills.map(skill => skill.path)).toEqual(roots.map(root => join(root.base, root.provider, 'skills', 'shared', 'SKILL.md')));
+      expect(skills.map(skill => skill.source)).toEqual(roots.map(root => root.source));
+      expect(skills.map(skill => skill.description)).toEqual(roots.map(root => `${root.source} ${root.provider}`));
+    });
+
+    it('deduplicates the same Claude skill reached through an existing root symlink', async () => {
+      const claudeDir = join(workspaceDir, '.claude', 'skills', 'shared');
+      await mkdir(claudeDir, { recursive: true });
+      await writeFile(join(claudeDir, 'SKILL.md'), '---\nname: shared\n---\nShared content');
+      await mkdir(join(workspaceDir, '.agents'), { recursive: true });
+      await symlink(join(workspaceDir, '.claude', 'skills'), join(workspaceDir, '.agents', 'skills'));
+
+      const skills = await discoverSkills(workspaceDir, { homeDirectory: userHomeDir });
+      expect(skills).toHaveLength(1);
+      expect(skills[0]?.path).toBe(join(claudeDir, 'SKILL.md'));
+    });
+
     it('does not crawl symlink directories pointing outside registered root', async () => {
       // Create outside directory with a secret SKILL.md
       const outsideDir = join(tempDir, 'outside-secret-dir');
@@ -158,6 +193,17 @@ describe('skill-catalog', () => {
       const skills = await discoverSkills(workspaceDir, { homeDirectory: userHomeDir });
       expect(skills.find(s => s.name === 'outside-file-skill')).toBeUndefined();
       expect(skills).toHaveLength(0);
+    });
+
+    it('rejects Claude skill symlinks pointing outside its root', async () => {
+      const outsideDir = join(tempDir, 'outside-claude');
+      await mkdir(outsideDir, { recursive: true });
+      await writeFile(join(outsideDir, 'SKILL.md'), '---\nname: secret\n---\nOutside');
+      const claudeRoot = join(userHomeDir, '.claude', 'skills');
+      await mkdir(claudeRoot, { recursive: true });
+      await symlink(outsideDir, join(claudeRoot, 'escaped'));
+
+      expect(await discoverSkills(workspaceDir, { homeDirectory: userHomeDir })).toEqual([]);
     });
 
     it('avoids circular symlink traversal loops inside registered root', async () => {

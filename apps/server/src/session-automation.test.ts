@@ -16,7 +16,7 @@ import {
 } from '@dutydeck/shared';
 import { createRepositories, executionTaskId } from '@dutydeck/storage';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { SessionAutomationService, type SessionAutomationRuntime } from './session-automation.js';
+import { SessionAutomationService, type SessionAutomationRuntime, type AutomationDeliveryContext } from './session-automation.js';
 
 const run = promisify(execFile);
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -154,7 +154,7 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { 
   return runtime;
 }
 
-async function fixture(options: { database?: string; clock?: Date; fetch?: typeof fetch; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void> } = {}) {
+async function fixture(options: { database?: string; clock?: Date; fetch?: typeof fetch; crashAfterAcceptance?: boolean; deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>; onScheduleDisabled?: (schedule: any, reason: string) => Promise<void> } = {}) {
   const directory = options.database ? undefined : await mkdtemp(join(tmpdir(), 'dutydeck-automation-db-'));
   if (directory) cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const database = options.database ?? join(directory!, 'dutydeck.db');
@@ -196,7 +196,37 @@ const scheduleInput = {
   condition: { kind: 'always' as const }
 };
 
+async function completedSchedules(h: Awaited<ReturnType<typeof fixture>>, count = 1) {
+  for (let index = 0; index < count; index++) {
+    const created = await h.service.createSchedule(h.session.id, { ...scheduleInput, trigger: { kind: 'at', localDateTime: '2026-09-12T08:01:00' } }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, created.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+  }
+  h.now.value = new Date('2026-09-12T00:01:01.000Z');
+  await h.service.tick();
+  for (const task of h.dispatches) h.settleTask(task.id);
+}
+
 describe('SessionAutomationService schedules', () => {
+  it('plans another due occurrence while an earlier result delivery remains pending', async () => {
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const sending = new Promise<void>(resolve => { entered = resolve; });
+    const h = await fixture({ deliver: async () => { entered(); await gate; } });
+    const first = await h.service.createSchedule(h.session.id, { ...scheduleInput, trigger: { kind: 'at', localDateTime: '2026-09-12T08:01:00' } }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, first.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:01:01.000Z');
+    await h.service.tick(); h.settleTask(h.dispatches[0]!.id);
+    const second = await h.service.createSchedule(h.session.id, { ...scheduleInput, trigger: { kind: 'at', localDateTime: '2026-09-12T08:02:00' } }, 'ou_owner');
+    await h.service.updateSchedule(h.session.id, second.id, { expectedRevision: 1, enabled: true }, 'ou_owner');
+    h.now.value = new Date('2026-09-12T00:02:01.000Z');
+    const ticking = h.service.tick();
+    try {
+      await sending;
+      await vi.waitFor(() => expect(h.dispatches).toHaveLength(2));
+      await ticking;
+    } finally { release(); await ticking; }
+  });
+
   it('stays disabled until explicit enable and two services sharing one runtime ledger claim one occurrence', async () => {
     const first = await fixture();
     // 多个自动化服务共享同一个 runtime 账本连接（执行账本只允许一个 runtime owner）；
@@ -512,6 +542,107 @@ describe('SessionAutomationService schedules', () => {
   });
 });
 
+describe('bounded automatic result delivery', () => {
+  it('waits for a claim crossing close and never starts its outbound send', async () => {
+    const deliver = vi.fn(async () => {});
+    const h = await fixture({ deliver }); await completedSchedules(h);
+    let entered!: () => void, release!: () => void;
+    const claimed = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const original = h.repositories.config.compareAndSet!.bind(h.repositories.config);
+    const cas = vi.spyOn(h.repositories.config, 'compareAndSet').mockImplementation(async (key, expected, value) => {
+      const changed = await original(key, expected, value);
+      if (changed && JSON.parse(value).leaseOwner?.startsWith('automation_delivery_')) { entered(); await gate; }
+      return changed;
+    });
+    const ticking = h.service.tick(); await claimed;
+    let closed = false;
+    const closing = h.service.close().then(() => { closed = true; });
+    try {
+      expect(closed).toBe(false); expect(deliver).not.toHaveBeenCalled();
+      release(); await Promise.all([ticking, closing, h.service.close()]);
+      expect(deliver).not.toHaveBeenCalled();
+      const occurrence = (await h.service.listBySession(h.session.id)).occurrences[0]!;
+      expect(occurrence.delivery).toMatchObject({ status: 'error', attempts: 1 });
+      expect(JSON.parse((await h.repositories.config.get(`session_automation/occurrence/${occurrence.id}`))!).leaseOwner).toBeUndefined();
+    } finally { release(); cas.mockRestore(); }
+  });
+
+  it('holds at most four sends across ticks and gives later sources a turn after failures', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const sent: string[] = [];
+    const h = await fixture({ deliver: async (_session, _result, id) => { sent.push(id); await gate; throw new Error('temporary'); } });
+    await completedSchedules(h, 6);
+    try {
+      await h.service.tick(); await vi.waitFor(() => expect(sent).toHaveLength(4));
+      await h.service.tick(); await h.service.tick();
+      expect(sent).toHaveLength(4); expect(new Set(sent).size).toBe(4);
+      release();
+      await vi.waitFor(async () => expect((await h.service.listBySession(h.session.id)).occurrences.filter(item => item.delivery.status === 'error')).toHaveLength(4));
+      await h.service.tick();
+      await vi.waitFor(() => expect(new Set(sent).size).toBe(6));
+      expect(h.dispatches).toHaveLength(6);
+    } finally { release(); }
+  });
+
+  it('renews a long send, prevents a second instance claim, and aborts a lost lease without stale settlement', async () => {
+    let context!: AutomationDeliveryContext;
+    const h = await fixture({ deliver: async (_session, _result, _id, _source, control) => {
+      context = control!;
+      await new Promise<void>((_resolve, reject) => control!.signal.addEventListener('abort', () => reject(control!.signal.reason), { once: true }));
+    } });
+    await completedSchedules(h);
+    let heartbeat!: () => void;
+    const originalInterval = globalThis.setInterval;
+    const timer = vi.spyOn(globalThis, 'setInterval').mockImplementation(((handler: () => void, ms: number) => {
+      if (ms === 10_000) heartbeat = handler;
+      return originalInterval(handler, 1_000_000);
+    }) as typeof setInterval);
+    cleanups.push(() => timer.mockRestore());
+    await h.service.tick(); await vi.waitFor(() => expect(context).toBeDefined());
+    const occurrence = (await h.service.listBySession(h.session.id)).occurrences[0]!;
+    const key = `session_automation/occurrence/${occurrence.id}`;
+    const first = JSON.parse((await h.repositories.config.get(key))!);
+    h.now.value = new Date(h.now.value.getTime() + 20_000); heartbeat();
+    await vi.waitFor(async () => expect(JSON.parse((await h.repositories.config.get(key))!).leaseExpiresAt).toBe(new Date(h.now.value.getTime() + 30_000).toISOString()));
+    h.now.value = new Date(h.now.value.getTime() + 15_000);
+    const send = vi.fn(async () => {});
+    const second = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value), deliver: send });
+    cleanups.push(() => second.close());
+    await second.tick(); expect(send).not.toHaveBeenCalled();
+    const raw = (await h.repositories.config.get(key))!;
+    await h.repositories.config.compareAndSet!(key, raw, JSON.stringify({ ...JSON.parse(raw), revision: first.revision + 10, leaseOwner: 'new-owner' }));
+    heartbeat(); await vi.waitFor(() => expect(context.signal.aborted).toBe(true));
+    await h.service.close();
+    const after = JSON.parse((await h.repositories.config.get(key))!);
+    expect(after.leaseOwner).toBe('new-owner'); expect(after.delivery).toMatchObject({ status: 'pending', attempts: 0 });
+  });
+
+  it('lets another instance reclaim an expired delivery and rejects the original late receipt', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const sending = vi.fn(async () => { await gate; });
+    const h = await fixture({ deliver: sending }); await completedSchedules(h);
+    await h.service.tick(); await vi.waitFor(() => expect(sending).toHaveBeenCalledOnce());
+    const occurrence = (await h.service.listBySession(h.session.id)).occurrences[0]!;
+    const key = `session_automation/occurrence/${occurrence.id}`;
+    const firstOwner = JSON.parse((await h.repositories.config.get(key))!).leaseOwner;
+    h.now.value = new Date(h.now.value.getTime() + 31_000);
+    const other = vi.fn(async () => {});
+    const second = new SessionAutomationService({ repositories: h.repositories, runtime: h, authorize: async () => true, clock: () => new Date(h.now.value), deliver: other });
+    cleanups.push(() => second.close());
+    try {
+      await second.tick();
+      await vi.waitFor(async () => expect(JSON.parse((await h.repositories.config.get(key))!).delivery).toMatchObject({ status: 'delivered', attempts: 1 }));
+      expect(other).toHaveBeenCalledOnce();
+      expect(JSON.parse((await h.repositories.config.get(key))!).leaseOwner).not.toBe(firstOwner);
+      release(); await h.service.close();
+      expect(JSON.parse((await h.repositories.config.get(key))!).delivery).toMatchObject({ status: 'delivered', attempts: 1 });
+    } finally { release(); }
+  });
+});
+
 describe('SessionAutomationService GitHub CI subscriptions', () => {
   it('prepares an immutable delivery destination before saving a new automation record', async () => {
     const h = await fixture();
@@ -698,11 +829,14 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     const [task] = await h.repositories.tasks.listBySession(h.session.id);
     h.settleTask(task!.id);
     await h.service.tick();
-    expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'error', attempts: 1 });
+    await vi.waitFor(async () => expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'error', attempts: 1 }));
     await h.service.tick();
-    expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'delivered', attempts: 2 });
+    await vi.waitFor(async () => {
+      await h.service.tick();
+      expect((await h.service.listBySession(h.session.id)).subscriptions[0]?.delivery).toMatchObject({ status: 'delivered', attempts: 2 });
+    });
     expect(deliver).toHaveBeenCalledTimes(2);
-    expect(deliver).toHaveBeenLastCalledWith(h.session.id, expect.objectContaining({ taskId: task?.id }), subscription.id, subscription.id);
+    expect(deliver).toHaveBeenLastCalledWith(h.session.id, expect.objectContaining({ taskId: task?.id }), subscription.id, subscription.id, expect.objectContaining({ signal: expect.any(AbortSignal), assertCurrent: expect.any(Function) }));
     expect(h.dispatches).toHaveLength(1);
   });
 

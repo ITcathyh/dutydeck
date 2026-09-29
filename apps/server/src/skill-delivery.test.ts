@@ -149,6 +149,27 @@ describe('skill-delivery', () => {
       expect(wsResult.agentPrompt).toContain('Workspace compile procedure');
     });
 
+    it('delivers selected Claude skill body while preserving workspace precedence for names', async () => {
+      const workspaceSkillPath = join(workspaceDir, '.claude', 'skills', 'review', 'SKILL.md');
+      const userSkillPath = join(userHomeDir, '.claude', 'skills', 'review', 'SKILL.md');
+      await mkdir(join(workspaceDir, '.claude', 'skills', 'review'), { recursive: true });
+      await mkdir(join(userHomeDir, '.claude', 'skills', 'review'), { recursive: true });
+      await writeFile(workspaceSkillPath, '---\nname: review\n---\nWorkspace Claude instructions');
+      const userBody = '---\nname: review\n---\nUser Claude instructions';
+      await writeFile(userSkillPath, userBody);
+
+      const explicit = await prepareSkillPrompt(workspaceDir, 'Review this', [userSkillPath], { homeDirectory: userHomeDir });
+      expect(explicit.skillDeliveries).toMatchObject([{ name: 'review', path: userSkillPath, source: 'user', mode: 'prompt' }]);
+      expect(explicit.skillDeliveries[0]?.digest).toBe(createHash('sha256').update(userBody).digest('hex'));
+      expect(explicit.agentPrompt).toContain(userBody);
+      expect(explicit.agentPrompt).not.toContain('Workspace Claude instructions');
+
+      const legacy = await prepareSkillPrompt(workspaceDir, '/skills review\nReview this', undefined, { homeDirectory: userHomeDir });
+      expect(legacy.skillDeliveries[0]?.path).toBe(workspaceSkillPath);
+      expect(legacy.agentPrompt).toContain('Workspace Claude instructions');
+      expect(legacy.agentPrompt).not.toContain('User Claude instructions');
+    });
+
     it('resolves legacy /skills directives with workspace precedence', async () => {
       // Both workspace and user have skill named "test"
       const wsSkillDir = join(workspaceDir, '.agents', 'skills', 'test');
@@ -220,6 +241,19 @@ describe('skill-delivery', () => {
       await expect(
         prepareSkillPrompt(workspaceDir, 'Exploit', [join(escapeLink, 'SKILL.md')], { homeDirectory: userHomeDir })
       ).rejects.toThrow();
+    });
+
+    it('rejects a Claude skill symlink escape during explicit selection', async () => {
+      const outsideDir = join(tempDir, 'secret-claude');
+      await mkdir(outsideDir, { recursive: true });
+      await writeFile(join(outsideDir, 'SKILL.md'), '---\nname: secret\n---\nSecret data');
+      const claudeRoot = join(workspaceDir, '.claude', 'skills');
+      await mkdir(claudeRoot, { recursive: true });
+      const escapedPath = join(claudeRoot, 'escaped');
+      await symlink(outsideDir, escapedPath);
+
+      await expect(prepareSkillPrompt(workspaceDir, 'Read secret', [join(escapedPath, 'SKILL.md')], { homeDirectory: userHomeDir }))
+        .rejects.toThrow(/does not match any discovered eligible skill in catalog/);
     });
 
     it('rejects unreadable or missing skill files', async () => {
