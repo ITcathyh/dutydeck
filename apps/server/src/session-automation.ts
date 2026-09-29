@@ -49,6 +49,7 @@ const CI_PREFIX = 'session_automation/ci/';
 const TASK_BINDING_PREFIX = 'session_automation/task/';
 const MAX_RECORDS = 1_000;
 const CLAIM_TTL_MS = 30_000;
+const MAX_DELIVERIES = 4;
 const DEFAULT_POLL_MS = 60_000;
 const terminalTaskStatuses = new Set(['completed', 'failed', 'interrupted', 'cancelled']);
 const failureConclusions = new Set(['failure', 'timed_out', 'action_required', 'startup_failure']);
@@ -76,12 +77,20 @@ export interface SessionAutomationRuntime {
   ): Promise<{ id: string; status: string }>;
 }
 
+export interface AutomationDeliveryContext {
+  signal: AbortSignal;
+  /** Recheck the exact source and lease before each outbound delivery step. */
+  assertCurrent(): Promise<void>;
+}
+
+type DeliveryRecord = SessionScheduleOccurrenceV2 | CiSubscriptionV2;
+
 export interface SessionAutomationServiceOptions {
   repositories: AutomationRepositories;
   runtime: SessionAutomationRuntime;
   authorize?: (sessionId: string, actorId?: string) => AuthorizationResult | Promise<AuthorizationResult>;
   prepareDelivery?: (sessionId: string, automationId: string) => Promise<void>;
-  deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string) => Promise<void>;
+  deliver?: (sessionId: string, result: AttemptResultV1, occurrenceId: string, sourceId: string, context?: AutomationDeliveryContext) => Promise<void>;
   onScheduleDisabled?: (schedule: SessionSchedule, reason: string) => Promise<void>;
   githubToken?: string;
   githubFetch?: typeof fetch;
@@ -232,6 +241,8 @@ export class SessionAutomationService {
   private readonly pollIntervalMs: number;
   private closed = false;
   private currentTick?: Promise<void>;
+  private readonly deliveries = new Map<string, { controller: AbortController; run: Promise<void> }>();
+  private lastDeliveryKey?: string;
 
   constructor(private readonly options: SessionAutomationServiceOptions) {
     this.clock = options.clock ?? (() => new Date());
@@ -611,7 +622,9 @@ export class SessionAutomationService {
 
   async close(): Promise<void> {
     this.closed = true;
-    if (this.currentTick) await this.currentTick;
+    for (const { controller } of this.deliveries.values()) controller.abort();
+    try { if (this.currentTick) await this.currentTick; }
+    finally { await Promise.allSettled([...this.deliveries.values()].map(item => item.run)); }
   }
 
   async authorizeTask(task: TaskRecord, phase: 'prepare' | 'submit' = 'prepare'): Promise<void> {
@@ -867,6 +880,7 @@ export class SessionAutomationService {
         if (task?.status === 'queued' && !value.taskStartedAt) await this.finishCi(item, 'expired', 'CI continuation expired before execution');
       }
     }
+    await this.startPendingDeliveries();
   }
 
   private async planSchedule(schedule: SessionSchedule, existing: SessionScheduleOccurrence[]) {
@@ -1675,7 +1689,6 @@ export class SessionAutomationService {
     }
     const result = outcome.result!;
     const settlingNow = working.value.runStatus === 'accepted' || working.value.runStatus === 'pending' || working.value.runStatus === 'blocked';
-    let terminal = working.value;
     if (settlingNow) {
       const runStatus = result.outcome === 'completed' ? 'completed' : result.outcome === 'cancelled' ? 'interrupted' : result.outcome === 'interrupted' ? 'interrupted' : 'failed';
       const settled = sessionScheduleOccurrenceV2Schema.parse({
@@ -1693,7 +1706,6 @@ export class SessionAutomationService {
         updatedAt: iso(this.clock())
       });
       if (!await this.replace(occurrenceKey(value.id), working.raw, settled)) return;
-      terminal = settled;
     } else if (!working.value.result) {
       // 旧 pending/error 终态缺可靠结果：blocked，不重造 pending。
       if (['pending', 'error'].includes(working.value.runStatus)) {
@@ -1701,7 +1713,6 @@ export class SessionAutomationService {
       }
       return;
     }
-    if (['pending', 'error'].includes(terminal.delivery.status) && terminal.result) await this.attemptOccurrenceDelivery(terminal);
   }
 
   private async refreshCi(item: { raw: string; value: CiSubscription }) {
@@ -1760,7 +1771,6 @@ export class SessionAutomationService {
     }
     const result = outcome.result!;
     const settlingNow = working.value.status === 'accepted' || working.value.status === 'dispatching' || working.value.status === 'blocked';
-    let terminal = working.value;
     if (settlingNow) {
       // 完成/失败/中断都收口为 completed 来源状态，具体 outcome 由冻结 result 表达并驱动卡片状态。
       const status: CiSubscriptionV2['status'] = result.outcome === 'cancelled' ? 'cancelled' : 'completed';
@@ -1778,83 +1788,102 @@ export class SessionAutomationService {
         updatedAt: iso(this.clock())
       });
       if (!await this.replace(ciKey(value.id), working.raw, completed)) return;
-      terminal = completed;
     } else if (!working.value.result) {
       if (['waiting', 'dispatching', 'error'].includes(working.value.status)) {
         await this.finishCi(working, 'blocked', 'Historical terminal CI continuation has no verifiable result');
       }
       return;
     }
-    if (['pending', 'error'].includes(terminal.delivery.status) && terminal.result) await this.attemptCiDelivery(terminal);
   }
 
-  private async attemptOccurrenceDelivery(value: SessionScheduleOccurrenceV2) {
-    if (!this.options.deliver || !['pending', 'error'].includes(value.delivery.status) || !value.result) return;
-    const before = await this.getRecord(occurrenceKey(value.id), input => sessionScheduleOccurrenceSchema.parse(input));
-    if (!before) return;
-    const beforeValue = migrateOccurrence(before.value);
-    if (beforeValue.delivery.status === 'delivered' || beforeValue.leaseExpiresAt && new Date(beforeValue.leaseExpiresAt) > this.clock()) return;
-    const frozen = beforeValue.result;
-    if (!frozen) return;
-    const claimed = sessionScheduleOccurrenceV2Schema.parse({ ...beforeValue, schemaVersion: 2, revision: beforeValue.revision + 1, leaseOwner: this.ownerId, leaseExpiresAt: plus(this.clock(), CLAIM_TTL_MS), updatedAt: iso(this.clock()) });
-    if (!await this.replace(occurrenceKey(value.id), before.raw, claimed)) return;
-    let deliveryError: string | undefined;
-    try { await this.options.deliver(value.sessionId, frozen, value.id, value.scheduleId); }
-    catch (cause) { deliveryError = errorMessage(cause); }
-    const current = await this.getRecord(occurrenceKey(value.id), input => sessionScheduleOccurrenceSchema.parse(input));
-    if (!current) return;
-    const currentValue = migrateOccurrence(current.value);
-    // CAS 前核对同一来源、lease owner、原 task/attempt/settlement/throughSequence/digest；迟到回执不覆盖新结果。
-    if (currentValue.leaseOwner !== this.ownerId) return;
-    if (currentValue.sessionId !== value.sessionId || currentValue.scheduleId !== value.scheduleId || currentValue.generation !== value.generation) return;
-    if (!['completed', 'failed', 'interrupted'].includes(currentValue.runStatus)) return;
-    if (currentValue.delivery.status === 'not_requested') return;
-    if (!sameResult(currentValue.result, frozen)) return;
-    if (currentValue.delivery.status === 'delivered') return;
-    const updated = sessionScheduleOccurrenceV2Schema.parse({
-      ...currentValue,
-      schemaVersion: 2,
-      revision: currentValue.revision + 1,
-      delivery: { status: deliveryError ? 'error' : 'delivered', attempts: currentValue.delivery.attempts + 1, ...(deliveryError ? { error: deliveryError } : { error: undefined }), updatedAt: iso(this.clock()) },
-      leaseOwner: undefined,
-      leaseExpiresAt: undefined,
-      updatedAt: iso(this.clock())
-    });
-    await this.replace(occurrenceKey(value.id), current.raw, updated);
+  private async readDelivery(key: string) {
+    return key.startsWith(OCCURRENCE_PREFIX)
+      ? this.getRecord(key, input => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(input)))
+      : this.getRecord(key, input => migrateCi(ciSubscriptionSchema.parse(input)));
   }
 
-  private async attemptCiDelivery(value: CiSubscriptionV2) {
-    if (!this.options.deliver || !['pending', 'error'].includes(value.delivery.status) || !value.result) return;
-    const before = await this.getRecord(ciKey(value.id), input => ciSubscriptionSchema.parse(input));
-    if (!before) return;
-    const beforeValue = migrateCi(before.value);
-    if (beforeValue.delivery.status === 'delivered' || beforeValue.leaseExpiresAt && new Date(beforeValue.leaseExpiresAt) > this.clock()) return;
-    const frozen = beforeValue.result;
-    if (!frozen) return;
-    const claimed = ciSubscriptionV2Schema.parse({ ...beforeValue, schemaVersion: 2, revision: beforeValue.revision + 1, leaseOwner: this.ownerId, leaseExpiresAt: plus(this.clock(), CLAIM_TTL_MS), updatedAt: iso(this.clock()) });
-    if (!await this.replace(ciKey(value.id), before.raw, claimed)) return;
-    let deliveryError: string | undefined;
-    try { await this.options.deliver(value.sessionId, frozen, value.id, value.id); }
-    catch (cause) { deliveryError = errorMessage(cause); }
-    const current = await this.getRecord(ciKey(value.id), input => ciSubscriptionSchema.parse(input));
-    if (!current) return;
-    const currentValue = migrateCi(current.value);
-    if (currentValue.leaseOwner !== this.ownerId) return;
-    if (currentValue.sessionId !== value.sessionId) return;
-    if (currentValue.status === 'cancelled') return;
-    if (!sameResult(currentValue.result, frozen)) return;
-    if (currentValue.delivery.status === 'delivered') return;
-    const updated = ciSubscriptionV2Schema.parse({
-      ...currentValue,
-      schemaVersion: 2,
-      revision: currentValue.revision + 1,
-      delivery: { status: deliveryError ? 'error' : 'delivered', attempts: currentValue.delivery.attempts + 1, ...(deliveryError ? { error: deliveryError } : { error: undefined }), updatedAt: iso(this.clock()) },
-      leaseOwner: undefined,
-      leaseExpiresAt: undefined,
-      updatedAt: iso(this.clock())
-    });
-    await this.replace(ciKey(value.id), current.raw, updated);
+  private deliverable(value: DeliveryRecord): boolean {
+    return ['pending', 'error'].includes(value.delivery.status) && Boolean(value.result && value.admission && value.runtimeAttemptId)
+      && ('runStatus' in value ? ['completed', 'failed', 'interrupted'].includes(value.runStatus) : value.status === 'completed');
   }
+
+  private ownsDelivery(current: DeliveryRecord, expected: DeliveryRecord): boolean {
+    return this.deliverable(current) && current.leaseOwner === expected.leaseOwner
+      && Boolean(current.leaseExpiresAt && new Date(current.leaseExpiresAt) > this.clock())
+      && current.sessionId === expected.sessionId && sameResult(current.result, expected.result)
+      && canonicalExecutionJson(current.admission ?? null) === canonicalExecutionJson(expected.admission ?? null)
+      && canonicalExecutionJson(current.actor ?? null) === canonicalExecutionJson(expected.actor ?? null)
+      && (!('scheduleId' in expected) || 'scheduleId' in current && current.scheduleId === expected.scheduleId && current.generation === expected.generation);
+  }
+
+  private async startPendingDeliveries() {
+    if (this.closed || !this.options.deliver || this.deliveries.size >= MAX_DELIVERIES) return;
+    const [occurrences, subscriptions] = await Promise.all([
+      this.listRecords(OCCURRENCE_PREFIX, input => migrateOccurrence(sessionScheduleOccurrenceSchema.parse(input))),
+      this.listRecords(CI_PREFIX, input => migrateCi(ciSubscriptionSchema.parse(input)))
+    ]);
+    const candidates = [
+      ...occurrences.map(item => ({ key: occurrenceKey(item.value.id), ...item })),
+      ...subscriptions.map(item => ({ key: ciKey(item.value.id), ...item }))
+    ].filter(item => this.deliverable(item.value)).sort((a, b) => a.key.localeCompare(b.key));
+    const start = candidates.findIndex(item => item.key > (this.lastDeliveryKey ?? ''));
+    for (const candidate of [...candidates.slice(start < 0 ? 0 : start), ...candidates.slice(0, start < 0 ? 0 : start)]) {
+      if (this.closed || this.deliveries.size >= MAX_DELIVERIES) break;
+      this.lastDeliveryKey = candidate.key;
+      if (this.deliveries.has(candidate.key)) continue;
+      const stored = await this.readDelivery(candidate.key);
+      if (!stored || !this.deliverable(stored.value) || stored.value.leaseExpiresAt && new Date(stored.value.leaseExpiresAt) > this.clock()) continue;
+      const claimed = { ...stored.value, revision: stored.value.revision + 1,
+        leaseOwner: `automation_delivery_${randomUUID()}`, leaseExpiresAt: plus(this.clock(), CLAIM_TTL_MS), updatedAt: iso(this.clock()) };
+      if (this.closed || !await this.replace(candidate.key, stored.raw, claimed)) continue;
+      const controller = new AbortController();
+      // Reserve before any outbound continuation; the same source cannot reenter on the next tick.
+      const run = Promise.resolve().then(() => this.runDelivery(candidate.key, claimed, controller))
+        .catch(() => { /* A storage failure leaves the durable lease to expire and retry. */ })
+        .finally(() => { this.deliveries.delete(candidate.key); });
+      this.deliveries.set(candidate.key, { controller, run });
+      if (this.closed) controller.abort();
+    }
+  }
+
+  private async runDelivery(key: string, claimed: DeliveryRecord, controller: AbortController) {
+    const stale = () => new RuntimeError('SESSION_AUTOMATION_DELIVERY_STALE', 'Automatic result delivery no longer owns its source lease', 409);
+    const context: AutomationDeliveryContext = {
+      signal: controller.signal,
+      assertCurrent: async () => {
+        controller.signal.throwIfAborted();
+        const current = await this.readDelivery(key);
+        if (!current || !this.ownsDelivery(current.value, claimed)) throw stale();
+        controller.signal.throwIfAborted();
+      }
+    };
+    let renewing: Promise<void> | undefined;
+    const heartbeat = setInterval(() => {
+      if (renewing || controller.signal.aborted) return;
+      renewing = (async () => {
+        const current = await this.readDelivery(key);
+        if (!current || !this.ownsDelivery(current.value, claimed)) throw stale();
+        const renewed = { ...current.value, revision: current.value.revision + 1, leaseExpiresAt: plus(this.clock(), CLAIM_TTL_MS), updatedAt: iso(this.clock()) };
+        if (!await this.replace(key, current.raw, renewed)) throw stale();
+      })().catch(error => { controller.abort(error); }).finally(() => { renewing = undefined; });
+    }, CLAIM_TTL_MS / 3);
+    heartbeat.unref();
+    let deliveryError: string | undefined;
+    try {
+      await context.assertCurrent();
+      await this.options.deliver!(claimed.sessionId, claimed.result!, claimed.id, 'scheduleId' in claimed ? claimed.scheduleId : claimed.id, context);
+      await context.assertCurrent();
+    } catch (cause) { deliveryError = errorMessage(cause); }
+    finally { clearInterval(heartbeat); await renewing; }
+    const current = await this.readDelivery(key);
+    if (!current || !this.ownsDelivery(current.value, claimed)) return;
+    const updated = { ...current.value, revision: current.value.revision + 1,
+      delivery: { status: deliveryError ? 'error' as const : 'delivered' as const, attempts: current.value.delivery.attempts + 1,
+        ...(deliveryError ? { error: deliveryError } : {}), updatedAt: iso(this.clock()) },
+      leaseOwner: undefined, leaseExpiresAt: undefined, updatedAt: iso(this.clock()) };
+    await this.replace(key, current.raw, updated);
+  }
+
 }
 
 function canonicalRequestDigest(request: TaskRequestV1): string {

@@ -1,9 +1,9 @@
 import { open, realpath, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { RuntimeError } from '@dutydeck/shared';
-import { discoverSkills, isPathInside, type DiscoverSkillsOptions, type SkillReference } from './skill-catalog.js';
+import { discoverSkills, isPathInside, skillRoots, type SkillReference } from './skill-catalog.js';
 
 export interface SkillDelivery {
   name: string;
@@ -101,15 +101,10 @@ export async function prepareSkillPrompt(
   const workspaceRoot = resolve(cwd?.trim() || process.cwd());
   const homeRoot = resolve(options?.homeDirectory?.trim() || homedir());
 
-  const roots = [
-    join(workspaceRoot, '.agents', 'skills'),
-    join(workspaceRoot, '.codex', 'skills'),
-    join(homeRoot, '.agents', 'skills'),
-    join(homeRoot, '.codex', 'skills'),
-  ];
+  const roots = skillRoots(workspaceRoot, homeRoot);
 
   const canonicalRoots = (
-    await Promise.all(roots.map(r => realpath(r).catch(() => null)))
+    await Promise.all(roots.map(root => realpath(root.path).catch(() => null)))
   ).filter((r): r is string => Boolean(r));
 
   const catalog = await discoverSkills(workspaceRoot, { homeDirectory: homeRoot });

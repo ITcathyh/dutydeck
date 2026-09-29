@@ -15,6 +15,17 @@ export interface DiscoverSkillsOptions {
 
 const ignoredDirectories = new Set(['.git', 'node_modules', 'dist', 'build']);
 
+export function skillRoots(workspaceRoot: string, homeRoot: string): Array<{ path: string; source: SkillReference['source'] }> {
+  return [
+    { path: join(workspaceRoot, '.agents', 'skills'), source: 'workspace' },
+    { path: join(workspaceRoot, '.codex', 'skills'), source: 'workspace' },
+    { path: join(workspaceRoot, '.claude', 'skills'), source: 'workspace' },
+    { path: join(homeRoot, '.agents', 'skills'), source: 'user' },
+    { path: join(homeRoot, '.codex', 'skills'), source: 'user' },
+    { path: join(homeRoot, '.claude', 'skills'), source: 'user' }
+  ];
+}
+
 export function isPathInside(child: string, parent: string): boolean {
   const rel = relative(parent, child);
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
@@ -78,12 +89,7 @@ export async function discoverSkills(
 ): Promise<SkillReference[]> {
   const workspaceRoot = resolve(workspace?.trim() || process.cwd());
   const homeRoot = resolve(options?.homeDirectory?.trim() || homedir());
-  const roots = [
-    { path: join(workspaceRoot, '.agents', 'skills'), source: 'workspace' as const },
-    { path: join(workspaceRoot, '.codex', 'skills'), source: 'workspace' as const },
-    { path: join(homeRoot, '.agents', 'skills'), source: 'user' as const },
-    { path: join(homeRoot, '.codex', 'skills'), source: 'user' as const }
-  ];
+  const roots = skillRoots(workspaceRoot, homeRoot);
 
   const references = await Promise.all(
     roots.map(async root => {
