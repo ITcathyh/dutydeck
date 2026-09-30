@@ -72,13 +72,23 @@ export interface LarkGateOptions {
 
 /**
  * 瞬时飞书业务码：即使 HTTP 状态是 4xx 也值得重试。
- *   230049   —— 发送频率过快（frequency limit）
  *   230020   —— 消息频控（card-renderer.isLarkMessageRateLimit 用的就是这个码）
  *   99991400 —— 网关频控 / 后端抖动
- * 这三个码飞书是按“客户端错误”返回的，但语义上是频控而非请求本身有问题，
+ * 这两个码飞书是按“客户端错误”返回的，但语义上是频控而非请求本身有问题，
  * 直接透出会让卡片更新白白丢一帧。
  */
-const TRANSIENT_LARK_CODES = new Set([230049, 230020, 99991400]);
+const TRANSIENT_LARK_CODES = new Set([230020, 99991400]);
+/**
+ * 230049：同一 UUID 的消息正在发送（官方含义，不是频控）。原请求可能马上成功，
+ * 只能原样重发同一个请求；它不说明上游不健康，不计入熔断。
+ */
+const LARK_MESSAGE_SENDING_CODE = 230049;
+/**
+ * 回复接口明确表示原消息不能再回复的业务码（open.feishu.cn im-v1/message/reply）：
+ * 230011 已撤回、230019 话题不存在、230050 对机器人不可见、230054 该消息类型不支持回复、
+ * 230071/230072 所在群或合并消息不支持话题回复、230111 消息即将自毁。
+ */
+const LARK_REPLY_TARGET_UNAVAILABLE_CODES = new Set([230011, 230019, 230050, 230054, 230071, 230072, 230111]);
 
 /**
  * Dutydeck 自己抛的 transport 层错误码（service.ts request()）。只有被明确识别为
@@ -233,7 +243,7 @@ function looksLikeLarkTransportError(err: unknown): boolean {
 /**
  * 判断错误是否值得重试：
  *   - 命中 TRANSIENT_LARK_CODES 的业务码 → 重试（即使 HTTP 4xx，因为这些码是频控
- *     或后端抖动，不是请求本身错了）
+ *     或后端抖动，不是请求本身错了）；230049 → 原样重发同一请求，但不计入熔断
  *   - 非 transport 错误 → 不重试
  *   - 无上游状态（LARK_NETWORK_ERROR / 连接失败）→ 重试
  *   - 上游 429 / 5xx → 重试
@@ -243,12 +253,46 @@ function looksLikeLarkTransportError(err: unknown): boolean {
 export function isRetryableLarkError(err: unknown): boolean {
   if (['AbortError', 'TimeoutError'].includes((err as ErrorLike)?.name ?? '')) return false;
   const code = larkBusinessCode(err);
-  if (code !== undefined && TRANSIENT_LARK_CODES.has(code)) return true;
+  if (code !== undefined && (TRANSIENT_LARK_CODES.has(code) || code === LARK_MESSAGE_SENDING_CODE)) return true;
   if (!looksLikeLarkTransportError(err)) return false;
   const status = upstreamHttpStatus(err);
   if (status === undefined) return true; // 网络错误：请求可能压根没发出去。
   if (status === 429) return true;
   return status >= 500 && status <= 599;
+}
+
+/**
+ * 一次出网失败对「消息有没有发出去」意味着什么。投递回退、结果对账和启动恢复共用：
+ *   not_sent —— 请求没有发出：熔断中，或 Dutydeck 自己的参数校验（LarkServiceError 的 4xx）；
+ *   rejected —— 平台明确拒绝并给出答复（上游 4xx 或 code≠0），这次请求没有产生消息；
+ *   unknown  —— 结果不确定：超时、没有上游状态的网络错误、5xx、230049、请求预算耗尽、
+ *               以及认不出来的错误。可能已经送达，只能用同一端点、同一 UUID 重发。
+ */
+export type LarkFailureKind = 'not_sent' | 'rejected' | 'unknown';
+
+export function larkFailureKind(err: unknown): LarkFailureKind {
+  const value = err as ErrorLike;
+  if (err instanceof LarkCircuitOpenError || value?.code === 'LARK_CIRCUIT_OPEN') return 'not_sent';
+  if (!looksLikeLarkTransportError(err)) {
+    const status = finiteNumber(value?.statusCode);
+    return value?.name === 'LarkServiceError' && status !== undefined && status >= 400 && status < 500 ? 'not_sent' : 'unknown';
+  }
+  const status = upstreamHttpStatus(err);
+  if (status === undefined || status >= 500 || larkBusinessCode(err) === LARK_MESSAGE_SENDING_CODE) return 'unknown';
+  return 'rejected';
+}
+
+/** 重试也不会成功的失败：平台明确拒绝且不是频控，或本地参数校验不通过。 */
+export function isLarkDeterministicFailure(err: unknown): boolean {
+  const kind = larkFailureKind(err);
+  if (kind === 'rejected') return !isRetryableLarkError(err);
+  return kind === 'not_sent' && !(err instanceof LarkCircuitOpenError || (err as ErrorLike)?.code === 'LARK_CIRCUIT_OPEN');
+}
+
+/** 平台明确拒绝回复且原因是原消息不能再回复：只有这时才允许改为在会话里新发。 */
+export function isLarkReplyTargetUnavailable(err: unknown): boolean {
+  const code = larkBusinessCode(err);
+  return larkFailureKind(err) === 'rejected' && code !== undefined && LARK_REPLY_TARGET_UNAVAILABLE_CODES.has(code);
 }
 
 // ─── Retry-After / x-ogw-ratelimit-reset ──────────────────────────────────────
@@ -555,7 +599,7 @@ export async function executeWithLarkGate<T>(
           await sleep(backoffMs, signal);
           continue;
         }
-        if (retryable && current()) recordTransientFailure(circuit, appId, op, config, log, Date.now());
+        if (retryable && current() && larkBusinessCode(error) !== LARK_MESSAGE_SENDING_CODE) recordTransientFailure(circuit, appId, op, config, log, Date.now());
         throw error;
       }
     }

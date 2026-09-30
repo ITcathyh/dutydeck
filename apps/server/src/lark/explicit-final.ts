@@ -116,6 +116,8 @@ async function deliver(store: ConfigRepository, service: LarkCardService, record
     throw error;
   }
   if (!sent.messageId?.trim()) throw new Error('Explicit final provider returned no message ID');
+  // 答复卡被拒收后由 sendLarkResult 改成了节选加附件：附件在这次发送里产生。
+  attachmentMessageId ??= sent.attachmentMessageId;
   const receipt: FinalRecord = { ...record, status: 'delivered', message_id: sent.messageId, elements: sent.elements,
     ...(attachmentMessageId ? { attachment_message_id: attachmentMessageId } : {}) };
   await store.set(keyFor(record.scope), JSON.stringify(receipt));

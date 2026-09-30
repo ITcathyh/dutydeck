@@ -31,6 +31,17 @@ describe('execution recovery owner routes', () => {
       expect((await app.inject({ method: 'POST', url: '/api/sessions/session/recovery/probe', headers, payload: { runId: 'run', gone: true } })).statusCode).toBe(400);
     } finally { await app.close(); }
   });
+  it('adds the Lark result deliveries of the session that failed or are waiting to retry', async () => {
+    const runtime = { inspectExecutionRecovery: vi.fn().mockResolvedValue({ runId: 'run' }) };
+    const deliveries = [{ sessionId: 'session', messageId: 'om_request', taskName: '任务', state: 'failed', error: '飞书拒收（230002）' }];
+    const larkResultDeliveries = vi.fn(async (sessionId: string) => sessionId === 'session' ? deliveries : []);
+    const app = Fastify();
+    registerRecoveryRoutes(app, runtime as unknown as DutydeckRuntime, { authorize: () => true, larkResultDeliveries });
+    try {
+      expect((await app.inject({ method: 'GET', url: '/api/sessions/session/recovery' })).json()).toEqual({ runId: 'run', larkResultDelivery: deliveries });
+      expect((await app.inject({ method: 'GET', url: '/api/sessions/quiet/recovery' })).json()).toEqual({ runId: 'run' });
+    } finally { await app.close(); }
+  });
   it('denies recovery when the owner resolver was not installed', async () => {
     const app = Fastify(); registerRecoveryRoutes(app, {} as DutydeckRuntime);
     try { expect((await app.inject({ method: 'GET', url: '/api/sessions/session/recovery' })).statusCode).toBe(403); }

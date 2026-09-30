@@ -20,6 +20,8 @@ import {
 } from './card-renderer.js';
 import { deliverLarkCompletionReaction, larkResultKey, larkSilentResultAnchor, sendLarkResult } from './result-delivery.js';
 import { RECOVERY_TRACKING_NOTE } from './recovery-notes.js';
+import { isLarkDeterministicFailure } from './api-gate.js';
+import { redactTraceText } from './secret-redaction.js';
 import { senderGroupMention } from './card-mentions.js';
 import type { ListenerLog, LarkRuntime } from './listener.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
@@ -39,6 +41,34 @@ const persistedCardTask = (value?: string | null): PersistedLarkCardTask | undef
     return parsed as PersistedLarkCardTask;
   } catch { return; }
 };
+
+/** 结果卡瞬时失败后按映射退避：5 秒起翻倍，最长 5 分钟。 */
+const larkResultRetryDelayMs = (attempts: number) => Math.min(5 * 60_000, 5_000 * 2 ** Math.max(0, attempts - 1));
+/**
+ * 瞬时失败最多自动重试的时长，从第一次失败算起。飞书同一 UUID 只在 1 小时内去重：
+ * 超过这段时间再重发，前一次若其实已经送达，群里就会出现两份结果。
+ */
+const larkResultRetryWindowMs = 60 * 60_000;
+const larkResultRetryExpiredReason = '自动重试超过 1 小时仍未确认送达，已停止自动重试；结果可能已送达，也可能没有';
+const deliveryFailureReason = (error: unknown) => redactTraceText(error instanceof Error ? error.message : String(error)).slice(0, 300);
+
+export type LarkResultDeliveryIssue = {
+  sessionId: string; messageId: string; chatId: string; taskName: string;
+  state: 'failed' | 'retrying'; error?: string; attempts?: number; retryAt?: string;
+};
+/** 结果没送达的轮次：已判定失败的，和正在退避重发的。/status 与 dutydeck recovery 共用。 */
+export function larkResultDeliveryIssues(mappings: ChannelMapping[]): LarkResultDeliveryIssue[] {
+  return mappings.flatMap((mapping): LarkResultDeliveryIssue[] => {
+    const saved = persistedCardTask(mapping.extra);
+    if (!saved || saved.final_delivery_state === 'delivered' || saved.final_delivery_state === 'reaction') return [];
+    const base = { sessionId: mapping.sessionId, messageId: mapping.externalId, chatId: saved.chat_id, taskName: saved.task_name,
+      ...(saved.final_delivery_error ? { error: saved.final_delivery_error } : {}) };
+    if (saved.final_delivery_state === 'failed') return [{ ...base, state: 'failed' }];
+    if (!saved.final_delivery_attempts) return [];
+    return [{ ...base, state: 'retrying', attempts: saved.final_delivery_attempts,
+      ...(saved.final_delivery_retry_at ? { retryAt: new Date(saved.final_delivery_retry_at).toISOString() } : {}) }];
+  });
+}
 
 export async function performLarkCardReconcile(input: {
   runtime: LarkRuntime;
@@ -78,6 +108,17 @@ export async function performLarkCardReconcile(input: {
       if (!persisted) continue;
       // 这一轮正在转到新会话：旧卡由转交流程收尾，对账既不补发它的终态也不重绘。
       if (persisted.relaunch_pending) continue;
+      // 结果卡已判定投递失败，或还在这条映射自己的退避期内：这一轮不再打平台。过程卡也已收敛时整条跳过；
+      // 退避中的仍算未解决，让对账循环继续跑到下一次重发。
+      // 瞬时失败已持续超过重试窗口：不再打平台，走下面的写回记为失败。
+      const retryExpired = persisted.final_delivery_state !== 'failed' && persisted.final_delivery_first_failed_at !== undefined
+        && Date.now() - persisted.final_delivery_first_failed_at > larkResultRetryWindowMs;
+      const resultDue = persisted.final_delivery_state !== 'failed' && !retryExpired && !((persisted.final_delivery_retry_at ?? 0) > Date.now());
+      if (!resultDue && !retryExpired && terminalTaskStates.has(persisted.state) && persisted.final_delivery_state !== 'delivered' && persisted.final_delivery_state !== 'reaction'
+        && (persisted.progress_frozen || !persisted.card_message_id)) {
+        if (persisted.final_delivery_state !== 'failed') unresolved++;
+        continue;
+      }
       // 呈现开关可以按群覆盖：补发方式必须按这条记录所属会话的生效配置决定。
       const effective = (await input.resolveConfig?.(persisted)) ?? config;
       const terminalPersisted = terminalTaskStates.has(persisted.state);
@@ -304,13 +345,14 @@ export async function performLarkCardReconcile(input: {
         let finalElements: Array<Record<string, any>> | undefined;
         let reactionDelivered = false;
         let resultCallbackFailed = false;
+        let deliveryError: unknown;
         try {
           // 完成时只贴表情：重启补发同样不发结果卡，只补那一枚表情。
           // 失败/中断/取消照旧补发结果卡——重启不是把失败藏起来的理由。
           if (!explicit && completed && effective.completionReactionOnly === true) {
             reactionDelivered = await deliverLarkCompletionReaction(
               service, { appId: persisted.app_id, messageId: mapping.externalId }, log, input.deliveryStore);
-          } else {
+          } else if (resultDue) {
           // P0-4：重启对账补发的结果/失败/中断卡与实时链路同口径 @ 发起人；idempotencyKey
           // 保证消息不重发，@ 也不会重复。开关按群覆盖后的生效配置取值（与实时链路一致），
           // 群里关掉 @ 时本元素不存在。
@@ -348,17 +390,30 @@ export async function performLarkCardReconcile(input: {
           }
           }
         } catch (error) {
-          log.warn({ error, messageId: persisted.card_message_id, sessionId: mapping.sessionId, externalId: mapping.externalId }, '执行结果交付待下次对账重试');
+          deliveryError = error;
+          log.warn({ error, messageId: persisted.card_message_id, sessionId: mapping.sessionId, externalId: mapping.externalId },
+            isLarkDeterministicFailure(error) ? '执行结果被飞书明确拒收，停止自动重发' : '执行结果交付待下次对账重试');
         }
-        if (!updated || (!finalMessageId && !reactionDelivered) || resultCallbackFailed) unresolved++;
+        // 投递失败只记在投递字段上，不改任务结果。确定性失败写失败终态、不再重试；瞬时失败按这条映射退避。
+        const deliveryFailed = !finalMessageId && !reactionDelivered && (retryExpired
+          || (deliveryError === undefined ? persisted.final_delivery_state === 'failed' : isLarkDeterministicFailure(deliveryError)));
+        const attempts = (persisted.final_delivery_attempts ?? 0) + 1;
+        const clearedRetry = { final_delivery_error: undefined, final_delivery_attempts: undefined, final_delivery_retry_at: undefined, final_delivery_first_failed_at: undefined };
+        const deliveryPatch = finalMessageId || reactionDelivered ? {}
+          : retryExpired ? { ...clearedRetry, final_delivery_state: 'failed', final_delivery_error: larkResultRetryExpiredReason }
+          : deliveryError === undefined ? {}
+          : deliveryFailed ? { ...clearedRetry, final_delivery_state: 'failed', final_delivery_error: deliveryFailureReason(deliveryError) }
+          : { final_delivery_error: deliveryFailureReason(deliveryError), final_delivery_attempts: attempts, final_delivery_retry_at: Date.now() + larkResultRetryDelayMs(attempts),
+            final_delivery_first_failed_at: persisted.final_delivery_first_failed_at ?? Date.now() };
+        if (!updated || (!finalMessageId && !reactionDelivered && !deliveryFailed) || resultCallbackFailed) unresolved++;
         // 原子 CAS：只有 mapping.extra 仍是本轮读到的旧快照时才写回，避免在 PATCH/结果发送
         // 在途期间新一轮 turn 已 save 后，旧快照把新 turn/新卡覆盖回旧值并误冻结。
         const casSaved = await cardMappings.compareAndSetExtra(mapping.id, mapping.extra, JSON.stringify({
           ...persisted, runtime_task_id: runtimeTask.id, state,
           progress_frozen: updated,
           ...(finalMessageId
-            ? { final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements, final_card_input: finalCardInput }
-            : reactionDelivered ? { final_delivery_state: 'reaction' } : {}),
+            ? { ...clearedRetry, final_message_id: finalMessageId, final_attachment_message_id: finalAttachmentMessageId, final_delivery_state: 'delivered', final_elements: finalElements, final_card_input: finalCardInput }
+            : reactionDelivered ? { final_delivery_state: 'reaction' } : deliveryPatch),
           last_successful_elements: deliveredElements
         }));
         if (casSaved) {

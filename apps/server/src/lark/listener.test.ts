@@ -52,6 +52,8 @@ const cardElements = (elements: any[]): any[] => elements.flatMap(element => {
   return [element, ...cardElements(children)];
 });
 const messageMissingError = () => new LarkServiceError('LARK_OPENAPI_ERROR', 'message not found', 502, { upstreamCode: 230030 });
+// 飞书明确回复“原消息已撤回”：只有这类拒绝才改为会话内新发。
+const replyTargetRecalledError = () => new LarkServiceError('LARK_OPENAPI_ERROR', 'The message was withdrawn. (code: 230011)', 502, { upstreamCode: 230011, upstreamHttpStatus: 400 });
 
 it('listens in ask mode without requiring full trust and stops when execution is no longer confirmed', async () => {
   const start = vi.spyOn(LarkLongConnectionListener.prototype, 'start').mockResolvedValue();
@@ -599,7 +601,7 @@ describe('Lark message coordinator', () => {
     const service = {
       addReaction: vi.fn(async () => ({ reactionId: 'reaction-1' })),
       send: vi.fn(async () => ({ messageId: 'om_top' })),
-      reply: vi.fn(async () => { throw new Error('reply forbidden'); }),
+      reply: vi.fn(async () => { throw replyTargetRecalledError(); }),
       deleteReaction: vi.fn(async () => {}),
       update: vi.fn(async () => ({ messageId: 'om_top' }))
     };
@@ -1876,10 +1878,19 @@ describe('Lark message coordinator', () => {
     await expect(coordinator.reconcile(config)).resolves.toBe(1);
     expect(service.update).not.toHaveBeenCalled();
     expect(service.send).toHaveBeenCalledOnce();
-    expect(JSON.parse(mapping.extra)).toMatchObject({ progress_frozen: true });
+    expect(JSON.parse(mapping.extra)).toMatchObject({ progress_frozen: true, final_delivery_attempts: 1 });
     expect(JSON.parse(mapping.extra).final_message_id).toBeUndefined();
 
-    await expect(coordinator.reconcile(config)).resolves.toBe(0);
+    // 退避期内不重发；过了 final_delivery_retry_at 才补发。
+    await expect(coordinator.reconcile(config)).resolves.toBe(1);
+    expect(service.send).toHaveBeenCalledOnce();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(JSON.parse(mapping.extra).final_delivery_retry_at + 1);
+      await expect(coordinator.reconcile(config)).resolves.toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
     expect(service.update).not.toHaveBeenCalled();
     expect(service.send).toHaveBeenCalledTimes(2);
     expect(service.send.mock.calls[1]?.[0].idempotencyKey).toBe(service.send.mock.calls[0]?.[0].idempotencyKey);
@@ -2156,7 +2167,7 @@ describe('Lark message coordinator', () => {
     const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [agentEvent(1, 'text', { text: '真实最终结果' })]) };
     const service = {
       update: vi.fn(async () => { throw messageMissingError(); }),
-      reply: vi.fn(async () => { throw new Error('message deleted'); }),
+      reply: vi.fn(async () => { throw replyTargetRecalledError(); }),
       send: vi.fn(async () => ({ messageId: 'om_fallback_result' }))
     };
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };

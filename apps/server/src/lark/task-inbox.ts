@@ -11,6 +11,8 @@ export interface LarkInboxRecord {
   event: LarkMessageEvent;
   boot: string;
   state: 'received' | 'accepted' | 'command' | 'failed';
+  /** 首次落库时间。任务通道的合成事件没有 createTime，启动恢复靠它判断记录是否过期。 */
+  receivedAt?: string;
   sessionId?: string;
   cardId?: string;
   taskId?: string;
@@ -51,7 +53,7 @@ export class LarkTaskInbox {
     const old = raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
     if (old && (old.state !== 'received' || old.boot === this.boot)) return undefined;
     // Always replay the originally persisted request, never replacement event content.
-    const next: LarkInboxRecord = { ...(old ?? { appId, event, state: 'received' as const }), boot: this.boot };
+    const next: LarkInboxRecord = { ...(old ?? { appId, event, state: 'received' as const, receivedAt: new Date().toISOString() }), boot: this.boot };
     return await this.store.compareAndSet!(key, raw, JSON.stringify(next)) ? next : undefined;
   }
   /**
@@ -60,7 +62,7 @@ export class LarkTaskInbox {
    * 重启后 recoverable 也会把它捞回来重放。返回 false 说明这条消息已经登记过。
    */
   async seed(appId: string, event: LarkMessageEvent, request: NonNullable<LarkInboxRecord['request']>): Promise<boolean> {
-    const record: LarkInboxRecord = { appId, event, boot: '', state: 'received', request };
+    const record: LarkInboxRecord = { appId, event, boot: '', state: 'received', receivedAt: new Date().toISOString(), request };
     return this.store.compareAndSet!(prefix(appId) + event.messageId, undefined, JSON.stringify(record));
   }
   /**
@@ -71,6 +73,11 @@ export class LarkTaskInbox {
     if (record.state !== 'received') return undefined;
     const next: LarkInboxRecord = { ...record, boot: '' };
     return await this.store.compareAndSet!(prefix(record.appId) + record.event.messageId, JSON.stringify(record), JSON.stringify(next)) ? next : undefined;
+  }
+  /** 这条记录现在落库的版本；已被删除时返回 undefined。 */
+  async reload(record: LarkInboxRecord): Promise<LarkInboxRecord | undefined> {
+    const raw = await this.store.get(prefix(record.appId) + record.event.messageId);
+    return raw ? JSON.parse(raw) as LarkInboxRecord : undefined;
   }
   /** 交还之后没被别的路径接手：记录原样还在。 */
   async unclaimed(record: LarkInboxRecord) {
