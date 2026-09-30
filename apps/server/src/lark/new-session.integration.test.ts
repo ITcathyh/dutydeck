@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, realpath, rm } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
@@ -195,6 +196,68 @@ describe('Lark /new first-turn launch options', () => {
       cwd: h.config.workspace, model: 'gpt-default', reasoningEffort: 'medium'
     }));
     expect(sentPrompt(h.runtime, 1)).toBe('use defaults');
+  });
+
+  it('opens a /new --handoff session whose first prompt carries the recorded handoff, without asking a model', async () => {
+    const h = await harness();
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: h.config.workspace, stdio: 'pipe' });
+    git('init', '-q', '-b', 'main');
+    await writeFile(join(h.config.workspace, 'app.ts'), 'v1');
+    git('add', '.');
+    git('-c', 'user.name=t', '-c', 'user.email=t@example.com', 'commit', '-qm', 'init');
+    await writeFile(join(h.config.workspace, 'app.ts'), 'v2');
+    const head = git('rev-parse', '--short', 'HEAD').toString().trim();
+    const coordinator = h.createCoordinator();
+    await coordinator.handle(dm('om_old', 'old task'), h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+
+    // The old session's ledger: four finished turns, of which the handoff quotes the last three.
+    const at = (index: number) => new Date(1_700_000_100_000 + index * 1_000).toISOString();
+    const tasks = [1, 2, 3, 4].map(index => ({ id: `task_${index}`, sessionId: 'ses_1', prompt: `第 ${index} 轮任务`, status: index === 3 ? 'failed' : 'completed', createdAt: at(index * 10), updatedAt: at(index * 10 + 5) }));
+    let sequence = 0;
+    const events: AgentEvent[] = tasks.flatMap(task => {
+      const index = Number(task.id.slice(-1));
+      const item = (type: AgentEvent['type'], data: unknown): AgentEvent => ({ id: `evt_${++sequence}`, sessionId: 'ses_1', sequence, type, data, timestamp: at(index * 10 + 1) });
+      return [
+        item('text', { role: 'user', taskId: task.id, text: task.prompt }),
+        index === 3 ? item('error', { message: '第 3 轮的失败原因' }) : item('text', { role: 'assistant', text: `第 ${index} 轮结论` }),
+        item('task', { task: { ...task } })
+      ];
+    });
+    h.runtime.getTasks.mockImplementation(async (id: string) => id === 'ses_1' ? tasks.map(task => ({ ...task })) : []);
+    Object.assign(h.runtime, { getRecentEvents: vi.fn(async () => events) });
+
+    await coordinator.handle(dm('om_handoff', '/new --handoff 先补 登录重试 的测试'), h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
+    expect(h.runtime.stop).toHaveBeenCalledWith('ses_1', { kind: 'channel', id: 'ou_alice', appId: 'cli_new_session' });
+    expect(h.runtime.send.mock.calls[1]?.[0]).toBe('ses_2');
+    expect(sentPrompt(h.runtime, 1)).toBe('交接到新会话');
+    const firstTurn = String(h.runtime.send.mock.calls[1]?.[2]);
+    expect(firstTurn).toContain('[Dutydeck 会话交接]');
+    expect(firstTurn).toContain('旧会话：ses_1');
+    expect(firstTurn).not.toContain('第 1 轮');
+    expect(firstTurn).toContain('1. 第 2 轮任务（已完成）\n   第 2 轮结论');
+    expect(firstTurn).toContain('2. 第 3 轮任务（失败）\n   第 3 轮的失败原因');
+    expect(firstTurn).toContain('3. 第 4 轮任务（已完成）\n   第 4 轮结论');
+    expect(firstTurn).toContain(`分支 main · HEAD ${head}\n   M app.ts`);
+    expect(firstTurn).toContain('用户备注：先补 登录重试 的测试');
+    expect(firstTurn).toContain('等待用户的下一条指令');
+    // The old session got no extra turn: the handoff is assembled from records only.
+    expect(h.runtime.send.mock.calls.filter(call => call[0] === 'ses_1')).toHaveLength(1);
+
+    // With a task, the task is the first request; outside a git repository the snapshot is just absent.
+    const other = await harness();
+    const second = other.createCoordinator();
+    await second.handle(dm('om_other_old', 'old task'), other.config);
+    await vi.waitFor(() => expect(other.runtime.send).toHaveBeenCalledOnce());
+    await second.handle(dm('om_other_handoff', '/new --handoff 备注 x -- 继续修复'), other.config);
+    await vi.waitFor(() => expect(other.runtime.send).toHaveBeenCalledTimes(2));
+    expect(sentPrompt(other.runtime, 1)).toBe('继续修复');
+    const withTask = String(other.runtime.send.mock.calls[1]?.[2]);
+    expect(withTask).toContain('[Dutydeck 会话交接]');
+    expect(withTask).toContain('不是 git 仓库或读取失败');
+    expect(withTask).toContain('用户备注：备注 x');
+    expect(withTask.endsWith('[交接结束]\n\n继续修复')).toBe(true);
   });
 
   it('rejects malformed and adapter-unsupported options before stopping the old session', async () => {

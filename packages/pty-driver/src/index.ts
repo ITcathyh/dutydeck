@@ -9,6 +9,7 @@ export {
 } from './persistent-backend.js';
 export {
   createTranscriptTailer,
+  claudeApiError,
   TRANSCRIPT_ADAPTER_IDS,
   type TranscriptEventSource,
   type CreateTranscriptTailerOptions,

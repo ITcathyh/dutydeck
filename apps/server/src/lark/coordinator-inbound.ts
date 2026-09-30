@@ -4,16 +4,18 @@ import { deadlineText, type LarkInteraction } from './workflow-interactions.js';
 import type { LarkInboxRecord } from './task-inbox.js';
 import { isLarkFirstCardUndelivered } from './task-inbox.js';
 import { parseLarkNewSession } from './new-session.js';
+import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle } from './handoff.js';
+import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList } from './memory.js';
-import type { PolicyAction, Session } from '@dutydeck/shared';
+import type { PolicyAction, Session, TaskRecord } from '@dutydeck/shared';
 import { executeScheduleCommand } from './schedule-command.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { LarkServiceError } from './service.js';
 import { isLarkDeterministicFailure } from './api-gate.js';
 import { larkRedispatchMaxAgeMs } from './turn-redispatch.js';
-import { steeringOutcomeText, renderLarkRecordExport, type LarkCardElement } from './card-renderer.js';
+import { eventsForRuntimeTask, loadLarkTaskWindow, renderLarkResultElements, steeringOutcomeText, renderLarkRecordExport, terminalTaskStates, type LarkCardElement } from './card-renderer.js';
 import { sendLarkFile } from './result-delivery.js';
 import { larkResultDeliveryIssues } from './reconciler.js';
 import { larkSessionDetailUrl } from './detail-link.js';
@@ -1318,11 +1320,18 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
         const queuedCount = before.filter(task => task.status === 'queued').length;
         const schedules = sessionId && this.workflowOptions.automation
           ? (await this.workflowOptions.automation.listBySession(sessionId, event.senderOpenId).catch(() => undefined))?.schedules.filter(item => item.enabled) ?? [] : [];
+        // 交接要在结束旧会话之前读：结束之后它的任务和工作目录就不再归这个聊天。
+        const handoff = request.handoff ? await this.newSessionHandoff(config, event, sessionId, before, request.handoff.note) : undefined;
         this.cancelUndeliveredRetries(group);
         const retirement = this.retireScopeSession(group, config, event, scopeId);
         const epoch = group.epoch;
         const { retired, retained } = await retirement;
         const goal = request.prompt;
+        if (handoff) {
+          // 交接前缀只进 Agent 的首轮 prompt，卡片标题仍是任务本身；没给任务时首轮只确认接手。
+          return { prompt: goal || larkHandoffTitle, materialPrompt: `${handoff}\n\n${goal || larkHandoffAck}`,
+            ...(request.launchOptions ? { launchOptions: request.launchOptions } : {}), epoch };
+        }
         if (goal) {
           // reaction 仍挂在原消息上，交给随后的建任务链路按正常节奏撤销——
           // 这里不发命令回执，因为用户马上会收到这条新任务的进度卡。
@@ -1349,6 +1358,32 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       await replyCard(`/${route.command} 执行失败`, `**命令未能完成。**\n\n${error instanceof Error ? error.message : String(error)}\n\n可稍后重试，或前往 Dutydeck Web 处理。`, { failed: true });
     }
     return 'handled';
+  }
+
+  /**
+   * `/new --handoff` 的交接前缀：最近 3 轮已结束任务的标题与结果摘录（与结果卡同一口径、已脱敏）、
+   * 旧会话链接、工作目录 git 快照和备注。只读执行记录，不调用模型；读不到的部分缺省，不让 /new 失败。
+   */
+  private async newSessionHandoff(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, tasks: TaskRecord[], note: string) {
+    const recent = tasks.filter(task => terminalTaskStates.has(task.status))
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-3);
+    const window = sessionId && recent.length && (this.runtime.getRecentEvents || this.runtime.getEvents)
+      ? await loadLarkTaskWindow(this.runtime, sessionId, recent[0]!.id, 500).catch(() => []) : [];
+    const turns = await Promise.all(recent.map(async task => {
+      const title = (await this.larkTaskOrigin(config, event.chatId, { id: task.id, sessionId: sessionId! }).catch(() => undefined))?.title
+        ?? larkTaskTitle(task.prompt, config.name);
+      // 窗口里没有这一轮的起点时 eventsForRuntimeTask 会退回整段窗口，那不是这一轮的结果。
+      const started = window.some(item => item.type === 'text' && (item.data as any)?.role === 'user' && (item.data as any)?.taskId === task.id);
+      const elements = started ? renderLarkResultElements(eventsForRuntimeTask(window, task.id)) : [];
+      const result = elements.find(element => element.element_id === 'final_output')?.content
+        ?? elements.find(element => String(element.element_id ?? '').startsWith('execution_alert_'))?.content;
+      return { title, status: task.status, ...(typeof result === 'string' ? { result } : {}) };
+    }));
+    const cwd = (sessionId ? (await this.runtime.getSession(sessionId).catch(() => undefined))?.cwd : undefined) ?? config.workspace;
+    return formatLarkHandoff({
+      ...(sessionId ? { sessionId, ...(config.webBaseUrl ? { sessionUrl: `${config.webBaseUrl}/sessions/${encodeURIComponent(sessionId)}` } : {}) } : {}),
+      turns, note, ...(cwd ? { cwd, git: await readGitSnapshot(cwd) } : {})
+    });
   }
 
   /**

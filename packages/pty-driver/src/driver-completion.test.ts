@@ -213,6 +213,44 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     expect(events.find(event => event.type === 'text')?.data.text).toBe(text);
   });
 
+  const apiError = (file: string, text = "You've hit your session limit · resets 9:40pm (Asia/Shanghai)") => appendFileSync(file,
+    JSON.stringify({ type: 'assistant', uuid: 'api-error-1', isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429,
+      message: { role: 'assistant', model: '<synthetic>', stop_reason: 'stop_sequence', content: [{ type: 'text', text }] } }) + '\n');
+
+  it('reports the recorded API error as the reason a turn ends without an answer', async () => {
+    const pending = driver.send('总结消息');
+    await waitForSubmission();
+    apiError(transcript);
+    output(repaint(`⎿ You've hit your session limit · resets 9:40pm (Asia/Shanghai)\n✻ Cooked for 3s\n❯\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(600);
+    await pending;
+    const types = events.filter(event => event.type !== 'raw_terminal').map(event => event.type);
+    expect(types).toEqual(['error', 'completed']);
+    expect(events.find(event => event.type === 'error')).toMatchObject({
+      sourceId: 'claude-api-error:api-error-1',
+      data: { code: 'claude_api_rate_limit', message: expect.stringContaining('额度约在 9:40pm (Asia/Shanghai) 重置') },
+    });
+    // Nothing carries over into the next turn.
+    const next = driver.send('再试一次');
+    await waitForSubmission();
+    answer(transcript, '这次成功了。');
+    output(repaint(`这次成功了。\n✻ Cooked for 2s\n❯\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(600);
+    await next;
+    expect(events.filter(event => event.type === 'error')).toHaveLength(1);
+  });
+
+  it('keeps a turn whose API error is followed by a normal answer free of errors', async () => {
+    const pending = driver.send('总结消息');
+    await waitForSubmission();
+    apiError(transcript, 'API Error: Connection lost mid-response. The response above may be incomplete.');
+    answer(transcript);
+    output(repaint(`${finalText}\n✻ Cooked for 3s\n❯\n${idleFooter}`));
+    await vi.advanceTimersByTimeAsync(600);
+    await pending;
+    expect(events.filter(event => event.type !== 'raw_terminal').map(event => event.type)).toEqual(['text', 'completed']);
+  });
+
   it('completes from rendered screen when incremental ANSI redraw splits or overwrites completion marker cells', async () => {
     let settled = false;
     const pending = driver.send('Ask the fixture question using AskUserQuestion.').then(() => { settled = true; });

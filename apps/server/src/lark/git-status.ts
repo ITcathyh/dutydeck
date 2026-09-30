@@ -3,6 +3,25 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+export interface LarkGitSnapshot { branch: string; head: string; status: string[]; statusTotal: number }
+
+/**
+ * `/new --handoff` 交接用的 git 快照：分支、HEAD 短 SHA、最多 10 行 `git status --short`。
+ * 不是 git 仓库、还没有提交、git 命令失败或超时时返回 undefined，不抛错。
+ */
+export async function readGitSnapshot(cwd: string): Promise<LarkGitSnapshot | undefined> {
+  if (!cwd || typeof cwd !== 'string') return undefined;
+  try {
+    const git = async (args: string[]) => (await execFileAsync('git', args, { cwd, timeout: 2000 })).stdout;
+    const branch = (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    const head = (await git(['rev-parse', '--short', 'HEAD'])).trim();
+    const lines = (await git(['status', '--short'])).split('\n').filter(line => line.trim().length > 0);
+    return { branch, head, status: lines.slice(0, 10), statusTotal: lines.length };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * 读取指定工作目录的 git 状态摘要行。
  * 形如："分支 main · 未提交 3 个文件 · 未推送 2 个提交"。

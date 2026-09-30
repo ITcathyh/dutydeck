@@ -240,8 +240,8 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   },
   {
     name: 'new',
-    summary: '结束当前会话上下文；带上任务内容可以同时开启新会话并立刻派发这个任务',
-    usage: '/new 或 /new <任务内容>；指定首轮配置：/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容',
+    summary: '结束当前会话上下文；带上任务内容可以同时开启新会话并立刻派发这个任务；加 --handoff 把最近结果、git 状态和备注交接给新会话',
+    usage: '/new 或 /new <任务内容>；指定首轮配置：/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；带交接开新会话：/new [首轮配置] --handoff [备注] [-- 任务内容]',
     mutating: true,
     requires: capabilities => capabilities.stop,
     unavailableReason: '当前 Dutydeck 运行时无法结束旧会话（缺少 stop），/new 不能保证下一条消息真的开启新会话，已停用。'
