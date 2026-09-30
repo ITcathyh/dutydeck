@@ -3,7 +3,7 @@ import { redactTraceText } from './secret-redaction.js';
 import { setTimeout as retryDelay } from 'node:timers/promises';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { mergeGroupTaskWatermark } from './group-task-context.js';
-import { describeLarkTaskRecovery, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
+import { describeLarkTaskRecovery, larkStallNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
 import { validateLarkLaunchOptions, type LarkLaunchOptions } from './new-session.js';
 import { collectLarkTaskContext } from './task-context.js';
 import { withLarkContextReadTimeout } from './context-read-timeout.js';
@@ -161,9 +161,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
    * 排队卡上跟「正在执行的那一轮」有关的部分，首张排队卡与之后的重绘共用。
    * - 那一轮停在审批上、且这条是那一轮的发起人发的：正文写明文字回复不算批准，卡上给「允许本次」「拒绝」。
    * - 否则紧排在那一轮后面（前面没有别的排队项）：给「中断当前这一轮，先做这条」，Agent 支持插话时再给「插进当前这一轮」。
-   * 排队受阻或服务升级排空时两样都不给：插队或批准都不会让它更早开始。
+   * 排队受阻或服务升级排空时两样都不给：插队或批准都不会让它更早开始。那一轮可能卡住时不给「插进当前这一轮」，按钮位让给「在新会话中执行」。
    */
-  private async queuedTurnOptions(task: LarkTask, recovery: { blocked: boolean; label: string }, tasks: TaskRecord[] | undefined, queuedAhead: number | undefined) {
+  private async queuedTurnOptions(task: LarkTask, recovery: { blocked: boolean; stalled?: boolean; label: string }, tasks: TaskRecord[] | undefined, queuedAhead: number | undefined) {
     // 派发与重绘之间这条可能已经自己开跑：它不再排队时没有「前一轮」可言。
     const queued = tasks?.find(item => item.id === task.runtimeTaskId)?.status === 'queued';
     const running = tasks?.find(item => item.status === 'running' && item.id !== task.runtimeTaskId);
@@ -174,7 +174,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (record?.taskId === running.id && record.event.senderOpenId && record.event.senderOpenId === task.event.senderOpenId) {
         approval = { record, markdown: `**${recovery.label}**\n\n上面的操作还在等你确认：${approvalSummary(record)}。文字回复不算批准。` };
       } else if (!queuedAhead && this.runtime.steerQueued) {
-        capabilities = { canSteerPromote: true, ...(this.runtime.injectQueued ? { canSteerInject: true } : {}),
+        capabilities = { canSteerPromote: true, ...(this.runtime.injectQueued && !recovery.stalled ? { canSteerInject: true } : {}),
           ...(isStopRequest(withoutLeadingBotMention(task.prompt, task.config.name)) ? { steerFirst: true } : {}) };
       }
     }
@@ -1203,6 +1203,15 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           this.log.warn({ error, taskId: task.id }, '读取等待回答状态失败');
         }
       }
+      // 这一轮可能卡住：只提示，不中断。同一会话的排队卡跟着这里的心跳（含这一轮的终态帧）标出和撤销同一提示。
+      const stall = state === 'running' && !awaitingAnswer && task.sessionId && task.runtimeTaskId
+        ? await this.runtime.getTurnStall?.(task.sessionId).catch(() => undefined) : undefined;
+      const stalled = stall !== undefined && stall.taskId === task.runtimeTaskId;
+      if (stalled) elements = [...elements, { tag: 'markdown', element_id: 'stall_note', content: larkStallNote(stall), text_size: 'notation', margin: '0px' }];
+      if (stalled !== Boolean(task.stallNoted)) {
+        task.stallNoted = stalled;
+        for (const item of this.tasks.values()) if (item !== task && item.sessionId === task.sessionId && item.state === 'queued') void item.requestUpdate?.('queued').catch(() => undefined);
+      }
       const outcome = await enqueueUpdate({
         terminal,
         turn: task.turn,
@@ -1212,7 +1221,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           messageId: task.cardMessageId!,
           permissionMode: larkPermissionMode(config),
           state,
-          ...(recovery ? { statusLabel: recovery.label } : task.state === 'interrupting' ? { statusLabel: '等待停止确认', actionState: 'interrupting' as const } : {}),
+          ...(recovery ? { statusLabel: recovery.label } : task.state === 'interrupting' ? { statusLabel: '等待停止确认', actionState: 'interrupting' as const } : stalled ? { statusLabel: '可能卡住' } : {}),
           ...(awaitingAnswer ? { awaitingAnswer: true } : {}),
           taskId: task.id,
           taskName: taskTitle,

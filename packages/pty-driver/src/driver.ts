@@ -132,6 +132,8 @@ export class PtyCliDriver implements AgentDriver {
   private lastOutputAt = 0;
   /** createTerminalStream 订阅者集合，driver 级持有，rewire 后继续生效。 */
   private readonly terminalSubscribers = new Set<(data: string) => void>();
+  /** 当前后端里 CLI 进程的进程号，按后端实例缓存：tmux 每问一次都要同步起一个 tmux 子进程。 */
+  private backendPid: { backend: SessionBackend; pid: number } | undefined;
 
   private lastArgs: string[] = [];
   /** spawn 用的环境。start() 时算好；但 daemon 重启形态下 driver 从没 start()
@@ -685,6 +687,16 @@ export class PtyCliDriver implements AgentDriver {
   }
 
   isDetachedForShutdown(): boolean { return this.detachedForShutdown; }
+
+  /** CLI 进程（tmux 下是 pane 进程）；它的后代构成受管进程树。 */
+  processIds(): number[] {
+    if (this.stopped) return [];
+    if (this.backendPid?.backend !== this.backend) {
+      const pid = this.backend.getPid?.();
+      this.backendPid = pid ? { backend: this.backend, pid } : undefined;
+    }
+    return this.backendPid ? [this.backendPid.pid] : [];
+  }
 
   async isStopped(): Promise<boolean> {
     if (!this.stopped || this.recoveryRejected || (this.detachOnStop && !this.tmuxExitProof)) return false;

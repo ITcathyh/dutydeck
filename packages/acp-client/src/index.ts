@@ -7,11 +7,13 @@ import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, creat
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson } from '@dutydeck/shared';
 import { testRegexWithTimeout } from './regex-timeout.js';
+import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
 
 // 归一化事件类型统一从 @dutydeck/shared re-export，保证 ACP driver 与 PTY driver 用同一类型。
 export type { NormalizedDriverEvent };
 // 服务端判定用户配置的高危正则时复用同一个带硬超时的隔离匹配，不在主线程上跑。
 export { testRegexWithTimeout };
+export { ProcessTreeCpu, type ProcessTreeActivity } from './process-cpu.js';
 export interface AcpxBuiltinAgent { id: string; argv: string[] }
 
 function claudeLauncherPath() {
@@ -175,6 +177,14 @@ export class AgentIdleTimeoutError extends Error {
   }
 }
 
+/**
+ * 到了无进展时限、受管进程树仍在占用 CPU 时（编译、跑测试这类不出新事件的长工具）先不取消，
+ * 每隔一个采样窗口复查一次，最多推迟到时限的这个倍数。完全静默且不占 CPU 时照旧到点取消。
+ * claude-agent-acp 的长工具心跳带 elapsedTimeSeconds，但 acpx 0.13.0 转发 tool_call_update 时丢掉了 _meta，这里看不到。
+ */
+const IDLE_DEFER_FACTOR = 3;
+const IDLE_CPU_WINDOW_MS = 60_000;
+
 class AcpxStoppedError extends Error {
   constructor() { super('ACP adapter is stopped'); this.name = 'AcpxStoppedError'; }
 }
@@ -212,6 +222,7 @@ export class AcpxAdapter implements AgentDriver {
   private turnCancelling = false;
   private timedOutStream?: Promise<void>;
   private idleWatch?: { refresh(): void; clear(): void };
+  private readonly cpu = new ProcessTreeCpu();
   private stopResourcesSettled = false;
   private readonly processes = new Map<ChildProcess, () => void>();
   private unconfirmedLauncherExit = false;
@@ -444,6 +455,10 @@ export class AcpxAdapter implements AgentDriver {
       const result = turn.result;
       void result.catch(() => undefined);
       const idleTimeoutMs = this.agent.timeout * 1_000;
+      // 时限不到两个最短采样窗口时不看 CPU，照旧到点取消。
+      const cpuWindowMs = Math.min(IDLE_CPU_WINDOW_MS, idleTimeoutMs / 2);
+      const deferLimitMs = idleTimeoutMs * IDLE_DEFER_FACTOR;
+      let silentMs = idleTimeoutMs;
       let timer: NodeJS.Timeout | undefined;
       let timedOut = false;
       let finished = false;
@@ -454,21 +469,32 @@ export class AcpxAdapter implements AgentDriver {
       let rejectIdle!: (error: Error) => void;
       const idle = new Promise<never>((_resolve, reject) => { rejectIdle = reject; });
       const clearIdle = () => { if (timer) clearTimeout(timer); timer = undefined; };
+      const expire = () => {
+        timedOut = true;
+        this.turnCancelling = true;
+        this.timedOutStream = stream;
+        const error = new AgentIdleTimeoutError(silentMs);
+        // Keep consuming the same stream: ACPX finalizes resources before it
+        // closes the iterator, but after it resolves turn.result.
+        void this.resourceOperation(() => turn.cancel({ reason: error.message })).catch(() => undefined);
+        // A cancel RPC only requests termination. Give the original stream a
+        // bounded chance to return an authoritative cancelled prompt result.
+        cancellationDeadline = setTimeout(() => { cancellationExpired = true; rejectIdle(error); }, 2_000);
+      };
+      const expireUnlessBusy = () => {
+        if (this.cpu.sample(this.processIds()) !== 'active' || silentMs >= deferLimitMs) { expire(); return; }
+        const next = Math.min(cpuWindowMs, deferLimitMs - silentMs);
+        silentMs += next;
+        timer = setTimeout(expireUnlessBusy, next);
+      };
       const resetIdle = () => {
         clearIdle();
         if (timedOut || finished || interrupting || this.stopped || this.pendingPermissions.size) return;
-        timer = setTimeout(() => {
-          timedOut = true;
-          this.turnCancelling = true;
-          this.timedOutStream = stream;
-          const error = new AgentIdleTimeoutError(idleTimeoutMs);
-          // Keep consuming the same stream: ACPX finalizes resources before it
-          // closes the iterator, but after it resolves turn.result.
-          void this.resourceOperation(() => turn.cancel({ reason: error.message })).catch(() => undefined);
-          // A cancel RPC only requests termination. Give the original stream a
-          // bounded chance to return an authoritative cancelled prompt result.
-          cancellationDeadline = setTimeout(() => { cancellationExpired = true; rejectIdle(error); }, 2_000);
-        }, idleTimeoutMs);
+        silentMs = idleTimeoutMs;
+        if (cpuWindowMs < PROCESS_CPU_MIN_WINDOW_MS) { timer = setTimeout(expire, idleTimeoutMs); return; }
+        // 提前一个窗口取对照样本，到点时才看得出这段时间有没有在用 CPU。
+        this.cpu.reset();
+        timer = setTimeout(() => { this.cpu.sample(this.processIds()); timer = setTimeout(expireUnlessBusy, cpuWindowMs); }, idleTimeoutMs - cpuWindowMs);
       };
       const idleWatch = { refresh: resetIdle, clear: () => { interrupting = true; clearIdle(); if (cancellationDeadline) clearTimeout(cancellationDeadline); } };
       this.idleWatch = idleWatch;
@@ -512,7 +538,7 @@ export class AcpxAdapter implements AgentDriver {
             }
             throw new Error(outcome.error.message);
           }
-          if (timedOut && outcome.status !== 'cancelled' && outcome.stopReason !== 'cancelled') throw new AgentIdleTimeoutError(idleTimeoutMs);
+          if (timedOut && outcome.status !== 'cancelled' && outcome.stopReason !== 'cancelled') throw new AgentIdleTimeoutError(silentMs);
           if (!this.stopped && !cancellationExpired) this.options.onEvent({ type: 'completed', data: { stopReason: outcome.stopReason ?? outcome.status } });
         } finally {
           finished = true;
@@ -685,5 +711,7 @@ export class AcpxAdapter implements AgentDriver {
     });
   }
   setRiskPolicy(policy?: ToolRiskPolicy) { this.riskPolicy = policy; }
+  /** 本实例直接拉起、仍在运行的进程（Agent 与宿主终端），它们的后代构成受管进程树。 */
+  processIds() { return [...this.processes.keys()].flatMap(child => child.pid ? [child.pid] : []); }
   killActive() { void this.interrupt().catch(() => undefined); }
 }

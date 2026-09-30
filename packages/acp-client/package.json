@@ -23,7 +23,11 @@
     "src/regex-timeout.ts",
     "dist/regex-timeout.js",
     "dist/regex-timeout.js.map",
-    "dist/regex-timeout.d.ts"
+    "dist/regex-timeout.d.ts",
+    "src/process-cpu.ts",
+    "dist/process-cpu.js",
+    "dist/process-cpu.js.map",
+    "dist/process-cpu.d.ts"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",

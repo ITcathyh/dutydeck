@@ -23,6 +23,11 @@ const explanations: Record<string, string> = {
 export const larkRecoveryRetainedNote = (webBaseUrl?: string) =>
   webBaseUrl ? '原任务已保留，可在 Web 详情里核对。' : '原任务已保留，管理员可以用 `dutydeck recovery` 命令核对。';
 
+/** 执行卡上的「可能卡住」注记，分钟数随心跳更新。 */
+export const larkStallNote = (stall: { silentMs: number; queued: number; cpu: 'inactive' | 'unknown' }) =>
+  `<font color='orange'>**可能卡住**</font>　已经 ${Math.floor(stall.silentMs / 60_000)} 分钟没有新的输出${stall.cpu === 'inactive' ? '，进程也没有在占用 CPU' : ''}，`
+  + `后面还有 ${stall.queued} 条请求在排队。Dutydeck 不会自动中断；确认卡住的话可以点「中断」，排队的请求也可以在各自的卡上点「${larkRelaunchLabels.run_in_new_session}」。`;
+
 /**
  * Read-only projection: preserve the ledger state, expose no process/controller identifiers.
  *
@@ -31,6 +36,7 @@ export const larkRecoveryRetainedNote = (webBaseUrl?: string) =>
  * options.webBaseUrl 同理：只有卡上带详情链接时才传，否则正文不指向 Web。
  * options.interrupted：服务重启切断、停下等人选的一轮（见 coordinator.redispatchInterruptedTurn），显示为「结果未知」；
  * buttons 是卡上有没有「重新执行」「放弃」。
+ * 排在一轮可能卡住的任务后面（stalled）只是提示：不算受阻、不发恢复提醒，但同样给转到新会话的按钮——它从未执行，换过去不会重复任何操作。
  */
 export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: string, taskId: string, status: string, queuedAhead?: number,
   options: { relaunch?: boolean; webBaseUrl?: string; interrupted?: LarkHeldCause & { buttons?: boolean } } = {}) {
@@ -46,8 +52,10 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
     return { blocked, label: '结果未知', relaunch: false,
       markdown: `**结果未知**\n\n服务重启打断了这一轮，执行结果未知。${larkHeldReason(options.interrupted)}${choose}${larkRecoveryRetainedNote(options.webBaseUrl)}\n\n发送 \`/status\` 查看最新状态。` };
   }
-  const label = needsReview ? '需要核对' : blocked ? '排队受阻' : resolvedUnknown ? '已核对，结果未确认' : '排队中';
-  const relaunch = options.relaunch === true && blocked && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(status);
+  const stall = status === 'queued' && !blocked && recovery?.activeTaskId ? await runtime.getTurnStall?.(sessionId).catch(() => undefined) : undefined;
+  const stalled = stall !== undefined && stall.taskId === recovery?.activeTaskId;
+  const label = needsReview ? '需要核对' : blocked ? '排队受阻' : stalled ? '可能卡住' : resolvedUnknown ? '已核对，结果未确认' : '排队中';
+  const relaunch = options.relaunch === true && (blocked || stalled) && ['queued', 'reconcile_required', 'legacy_unresolved'].includes(status);
   const relaunchHint = !relaunch ? '' : status === 'queued'
     ? `可以点「${larkRelaunchLabels.run_in_new_session}」：取消这条排队请求，在本话题的新会话里执行原文，之后本话题的消息也进入新会话。`
     : `可以点「${larkRelaunchLabels.rerun_in_new_session}」在新会话里重新执行原请求。原执行结果未确认，重新执行可能把已经做过的操作再做一次。`;
@@ -55,6 +63,7 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
   const held = status === 'queued' && runtime.isQueueHeld?.() === true;
   const detail = blocked
     ? `${reasons.join('；') || '本轮执行结果尚未确认'}。为避免重复执行，任务不会自动重放。${relaunchHint}${larkRecoveryRetainedNote(options.webBaseUrl)}`
+    : stalled ? `前面正在执行的那一轮长时间没有新的输出${stall.cpu === 'inactive' ? '，进程也没有在占用 CPU' : ''}，可能卡住了；Dutydeck 不会自动中断它。${relaunchHint}也可以在正在执行的那张卡上点「中断」。`
     : resolvedUnknown ? '本轮已完成恢复检查，但执行结果未确认；旧请求不会重放，可以继续发送新请求。'
     : held ? '服务正在升级，完成后会自动执行，无需重发。'
     : queuedAhead && queuedAhead > 0 ? `正在排队，前面还有 ${queuedAhead} 个任务…`
@@ -62,7 +71,7 @@ export async function describeLarkTaskRecovery(runtime: LarkRuntime, sessionId: 
     : recovery?.activeTaskId ? '要等当前这一轮结束才会处理，不会传给它。' : '已进入执行队列，等待 Agent 开始。';
   const action = resolvedUnknown && !blocked ? '发送 `/status` 查看最新状态。' : status === 'queued' ? '此请求尚未执行，可点击取消，或回原话题发送 `/cancel`；发送 `/status` 查看最新状态。'
     : '发送 `/status` 查看最新状态。';
-  return { blocked, label, relaunch, markdown: `**${label}**\n\n${detail}\n\n${action}` };
+  return { blocked, stalled, label, relaunch, markdown: `**${label}**\n\n${detail}\n\n${action}` };
 }
 
 /** One durable exception notice per accepted task/turn, independent of business-final delivery. */
