@@ -5,8 +5,9 @@ import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentEvent } from '@dutydeck/shared';
 import { loadLarkTaskEvents, renderLarkProcessElements, renderLarkResultElements } from './card-renderer.js';
-import { larkResultKey, patchLarkCard, sendLarkResult } from './result-delivery.js';
+import { larkResultKey, patchLarkCard, sendLarkFile, sendLarkResult } from './result-delivery.js';
 import { buildLarkCard, LarkCardService, LarkServiceError } from './service.js';
+import { sendTaskCard } from './coordinator-core.js';
 
 const event = (sequence: number, type: AgentEvent['type'], data: any): AgentEvent => ({
   id: `e${sequence}`, sessionId: 'ses_1', sequence, type, data, timestamp: '2026-09-08T00:00:00Z'
@@ -14,6 +15,19 @@ const event = (sequence: number, type: AgentEvent['type'], data: any): AgentEven
 const log = { warn: vi.fn() };
 const input = (text: string) => ({ state: 'completed' as const, taskId: 'task1', readOnly: true,
   elements: renderLarkResultElements([event(1, 'text', { text })]), idempotencyKey: larkResultKey('om_process') });
+// 与 service.ts request() 抛出的真实形态一致：业务码和上游 HTTP 状态都在 details 里。
+const openApiError = (code: number | undefined, status = 400) => new LarkServiceError('LARK_OPENAPI_ERROR',
+  `Lark OpenAPI request failed: rejected (code: ${code ?? 'HTTP_ERROR'})`, 502, { upstreamCode: code, upstreamHttpStatus: status });
+const recalled = () => openApiError(230011);
+const table = (n: number) => `| 项 | 值 |\n| --- | --- |\n| 第 ${n} 项 | ${n} |`;
+const tableCount = (value: unknown) => (JSON.stringify(value).match(/\| --- \| --- \|/g) ?? []).length;
+const unknownOutcomes = () => [
+  ['超时', new DOMException('The operation timed out.', 'TimeoutError')],
+  ['无状态网络错误', new LarkServiceError('LARK_NETWORK_ERROR', 'Lark OpenAPI request failed: socket hang up', 502)],
+  ['5xx', openApiError(undefined, 503)],
+  ['230049 消息正在发送', openApiError(230049)],
+  ['请求预算耗尽', new LarkServiceError('LARK_REQUEST_BUDGET_EXHAUSTED', '飞书请求的总尝试预算已用尽，等待持久化对账重投。', 503)]
+] as const;
 
 describe('separate process and complete result messages', () => {
   it('keeps completed process panels expandable even when the old hide setting is enabled', () => {
@@ -109,7 +123,7 @@ describe('separate process and complete result messages', () => {
   });
 
   it('uses the same result UUID for reply fallback and propagates a failed delivery', async () => {
-    const service = { reply: vi.fn(async () => { throw new Error('missing question'); }), send: vi.fn(async () => { throw new Error('unavailable'); }) };
+    const service = { reply: vi.fn(async () => { throw recalled(); }), send: vi.fn(async () => { throw new Error('unavailable'); }) };
     await expect(sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question' }, input('答案'), log)).rejects.toThrow('unavailable');
     expect(service.reply.mock.calls[0]?.[0]).toMatchObject({ idempotencyKey: larkResultKey('om_process') });
     expect(service.send.mock.calls[0]?.[0]).toMatchObject({ idempotencyKey: larkResultKey('om_process'), chatId: 'oc_group' });
@@ -135,6 +149,99 @@ describe('separate process and complete result messages', () => {
     expect(service.uploadFile).not.toHaveBeenCalled();
   });
 
+  it.each(unknownOutcomes())('does not turn a reply into a new group message when the outcome is unknown: %s', async (_label, error) => {
+    const service = { reply: vi.fn(async () => { throw error; }), send: vi.fn(async () => ({ messageId: 'om_duplicate' })) };
+    await expect(sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question' }, input('答案'), log)).rejects.toBe(error);
+    expect(service.reply).toHaveBeenCalledOnce();
+    expect(service.send).not.toHaveBeenCalled();
+  });
+
+  it('does not change endpoint when the platform rejects a reply for another reason', async () => {
+    const error = openApiError(230002);
+    const service = { reply: vi.fn(async () => { throw error; }), send: vi.fn(async () => ({ messageId: 'om_group' })) };
+    await expect(sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question' }, input('答案'), log)).rejects.toBe(error);
+    expect(service.send).not.toHaveBeenCalled();
+  });
+
+  it('moves a result with more tables than one card allows into the .md attachment', async () => {
+    const text = ['结论：六张对比表。', ...Array.from({ length: 6 }, (_, index) => table(index + 1))].join('\n\n');
+    const service = { uploadFile: vi.fn(async (_input: any) => 'file_tables'), sendFile: vi.fn(async (_input: any) => ({ messageId: 'om_file' })),
+      send: vi.fn(async (_input: any) => ({ messageId: 'om_summary' })) };
+    const result = await sendLarkResult(service as any, { chatId: 'oc_group' }, input(text), log);
+    expect(result).toMatchObject({ messageId: 'om_summary', attachmentMessageId: 'om_file' });
+    expect(Buffer.from(service.uploadFile.mock.calls[0]![0].data).toString('utf8')).toBe(text);
+    const card = buildLarkCard(service.send.mock.calls[0]![0]);
+    expect(JSON.stringify(card)).toContain('正文开头节选（非完整结论）');
+    expect(JSON.stringify(card)).toContain('result_attachment');
+  });
+
+  it('moves a result into the attachment when one Markdown component would hold more than four tables', async () => {
+    const text = ['五张表：', ...Array.from({ length: 5 }, (_, index) => table(index + 1))].join('\n\n');
+    expect(text.length).toBeLessThan(800);
+    const service = { uploadFile: vi.fn(async (_input: any) => 'file_tables'), sendFile: vi.fn(async (_input: any) => ({ messageId: 'om_file' })),
+      send: vi.fn(async (_input: any) => ({ messageId: 'om_summary' })) };
+    const result = await sendLarkResult(service as any, { chatId: 'oc_group' }, input(text), log);
+    expect(result.attachmentMessageId).toBe('om_file');
+    expect(service.uploadFile).toHaveBeenCalledOnce();
+  });
+
+  it('keeps five tables on the card when the opening and folded parts each hold at most four', async () => {
+    const text = [`开头说明${'。'.repeat(100)}`, table(1), table(2), table(3), `中段说明${'，'.repeat(300)}`,
+      table(4), table(5), `结尾说明${'；'.repeat(300)}`].join('\n\n');
+    const service = { uploadFile: vi.fn(), sendFile: vi.fn(), send: vi.fn(async (_input: any) => ({ messageId: 'om_result' })) };
+    const result = await sendLarkResult(service as any, { chatId: 'oc_group' }, input(text), log);
+    expect(result.attachmentMessageId).toBeUndefined();
+    expect(service.uploadFile).not.toHaveBeenCalled();
+    const all = (value: any): any[] => Array.isArray(value) ? value.flatMap(all)
+      : value && typeof value === 'object' ? [value, ...Object.values(value).flatMap(all)] : [];
+    const elements = all(buildLarkCard(service.send.mock.calls[0]![0]).body.elements);
+    const head = elements.find(item => item.element_id === 'final_output');
+    const rest = elements.find(item => item.element_id === 'final_output_rest');
+    expect([tableCount(head.content), tableCount(rest.content)]).toEqual([3, 2]);
+    expect(head.content + rest.content).toBe(text);
+  });
+
+  it('rewrites image syntax whose target is not an uploaded img_ key, keeping the stored result and code intact', async () => {
+    const text = ['截图如下：', '![截图](https://example.com/a.png)', '![本地图](./shots/a.png)', '![](img_v3_uploaded)',
+      '```md\n![代码里](https://example.com/b.png)\n```', '行内 `![行内](c.png)` 保留'].join('\n\n');
+    const service = { uploadFile: vi.fn(), sendFile: vi.fn(), send: vi.fn(async (_input: any) => ({ messageId: 'om_result' })) };
+    const result = await sendLarkResult(service as any, { chatId: 'oc_group' }, input(text), log);
+    expect(result.attachmentMessageId).toBeUndefined();
+    expect(service.uploadFile).not.toHaveBeenCalled();
+    const shown = buildLarkCard(service.send.mock.calls[0]![0]).body.elements.find((item: any) => item.element_id === 'final_output') as any;
+    expect(shown.content).toBe(['截图如下：', '[截图](https://example.com/a.png)', '本地图', '![](img_v3_uploaded)',
+      '```md\n![代码里](https://example.com/b.png)\n```', '行内 `![行内](c.png)` 保留'].join('\n\n'));
+    // 落库的结果元素（验收重绘、显式最终答复的收据校验都读它）仍是原文。
+    expect(result.elements.find(item => item.element_id === 'final_output')?.content).toBe(text);
+  });
+
+  it.each([230099, 230025])('falls back to the attachment exactly once when the platform rejects the result card with %s', async code => {
+    const cards: any[] = [];
+    let rejectCards = 1;
+    const fetch = vi.fn(async (url: string, init: RequestInit) => {
+      if (url.includes('tenant_access_token')) return Response.json({ code: 0, tenant_access_token: 'test-token', expire: 7200 });
+      if (url.includes('/im/v1/files')) return Response.json({ code: 0, data: { file_key: 'file_full' } });
+      const body = JSON.parse(String(init.body));
+      if (body.msg_type === 'file') return Response.json({ code: 0, data: { message_id: 'om_file' } });
+      cards.push(body);
+      if (rejectCards-- > 0) return Response.json({ code, msg: 'Failed to create card content, ext=ErrCode: 11310; ErrMsg: table number over limit' }, { status: 400 });
+      return Response.json({ code: 0, data: { message_id: 'om_summary' } });
+    });
+    const service = new LarkCardService({ appId: 'cli_degrade', appSecret: 'test', defaultReceiveIdType: 'chat_id', defaultAgentName: 'test', baseUrl: 'https://open.feishu.cn' }, fetch as any);
+    const result = await sendLarkResult(service, { chatId: 'oc_group' }, input('一段平台拒收的结论'), log);
+    expect(result).toMatchObject({ messageId: 'om_summary', attachmentMessageId: 'om_file' });
+    expect(cards).toHaveLength(2);
+    expect(cards[1].uuid).not.toBe(cards[0].uuid);
+    expect(cards[1].uuid.length).toBeLessThanOrEqual(50);
+    expect(cards[1].content).toContain('result_attachment');
+
+    // 降级后的节选卡也被拒收：不再降第二次，交给对账按错误类型处理。
+    cards.length = 0; rejectCards = 2;
+    await expect(sendLarkResult(service, { chatId: 'oc_group' }, { ...input('另一段结论'), idempotencyKey: larkResultKey('om_other') }, log))
+      .rejects.toMatchObject({ details: { upstreamCode: code } });
+    expect(cards).toHaveLength(2);
+  });
+
   it('loads the complete task when a streamed answer exceeds the recent event window', async () => {
     const events = [event(1, 'text', { role: 'user', taskId: 'task1', text: '问题' }),
       ...Array.from({ length: 1600 }, (_, index) => event(index + 2, 'text', { text: `${index}\n` })),
@@ -147,6 +254,36 @@ describe('separate process and complete result messages', () => {
     expect(result?.content).toBe(Array.from({ length: 1600 }, (_, index) => `${index}`).join('\n'));
     expect(runtime.getRecentEvents.mock.calls.map(call => call[1])).toEqual([500, 1000, 2000]);
     expect(JSON.stringify(result)).not.toContain('另一轮');
+  });
+});
+
+describe('回复失败后是否改为会话内新发', () => {
+  const groupEvent = { messageId: 'om_trigger', chatId: 'oc_group', chatType: 'group', messageType: 'text', content: '{}', mentions: [] };
+
+  it('task cards fall back to a group message only when the trigger message can no longer be replied to', async () => {
+    const service = { reply: vi.fn(async () => { throw recalled(); }), send: vi.fn(async (_input: any) => ({ messageId: 'om_group' })) };
+    await expect(sendTaskCard(service as any, groupEvent, { state: 'running', idempotencyKey: 'task_om_trigger_1' }, log)).resolves.toMatchObject({ messageId: 'om_group' });
+    expect(service.send.mock.calls[0]![0]).toMatchObject({ chatId: 'oc_group', idempotencyKey: 'task_om_trigger_1' });
+  });
+
+  it.each(unknownOutcomes())('task cards keep the reply endpoint when the outcome is unknown: %s', async (_label, error) => {
+    const service = { reply: vi.fn(async () => { throw error; }), send: vi.fn(async () => ({ messageId: 'om_duplicate' })) };
+    await expect(sendTaskCard(service as any, groupEvent, { state: 'running', idempotencyKey: 'task_om_trigger_1' }, log)).rejects.toBe(error);
+    expect(service.send).not.toHaveBeenCalled();
+  });
+
+  it('file replies fall back with the same UUID only for an unavailable trigger, never after a timeout', async () => {
+    const make = (error: Error) => ({ uploadFile: vi.fn(async () => 'file_key'), replyFile: vi.fn(async () => { throw error; }),
+      sendFile: vi.fn(async (_input: any) => ({ messageId: 'om_file' })) });
+    const gone = make(recalled());
+    await expect(sendLarkFile(gone as any, { chatId: 'oc_group', replyMessageId: 'om_trigger' }, { data: new Uint8Array([1]), filename: 'a.md', idempotencyKey: 'file_uuid' }, log))
+      .resolves.toMatchObject({ messageId: 'om_file' });
+    expect(gone.sendFile.mock.calls[0]![0]).toMatchObject({ chatId: 'oc_group', idempotencyKey: 'file_uuid' });
+    const timeout = new DOMException('The operation timed out.', 'TimeoutError');
+    const unknown = make(timeout);
+    await expect(sendLarkFile(unknown as any, { chatId: 'oc_group', replyMessageId: 'om_trigger' }, { data: new Uint8Array([1]), filename: 'a.md', idempotencyKey: 'file_uuid' }, log))
+      .rejects.toBe(timeout);
+    expect(unknown.sendFile).not.toHaveBeenCalled();
   });
 });
 

@@ -11,6 +11,7 @@ import type { LarkGroupManager } from './group-management.js';
 import type { ChannelMappingRepository, ConfigRepository, PolicyAction, PolicyDecision } from '@dutydeck/shared';
 import { defaultHighRiskPattern, readLarkConfig, type StoredLarkConfig } from './config.js';
 import { LarkServiceError, type LarkCardService } from './service.js';
+import { isLarkReplyTargetUnavailable } from './api-gate.js';
 import type { LarkHeldCause, LarkRedispatchInfo } from './turn-redispatch.js';
 import { isBotSenderType, isGroupChat } from './card-mentions.js';
 import { LarkPinManager } from './pin-manager.js';
@@ -79,7 +80,9 @@ export async function sendTaskCard(
     try {
       return await service.reply({ ...larkReplyContext(event), ...executionInput });
     } catch (error) {
-      // 回复触发消息失败（例如消息已被删除）时，回退为群内发送，保证卡片仍能送达。
+      // 只有平台明确说触发消息不能再回复（已撤回、不可见等）才回退为群内发送。超时、断连、5xx 时回复可能已经送达，
+      // 换接口会多出一张卡、首张过程卡永远停在「已接收」；原样抛出，由调用方用同一 UUID 重发同一个回复。
+      if (!isLarkReplyTargetUnavailable(error)) throw error;
       log?.warn({ error, messageId: event.messageId, chatId: event.chatId }, '回复卡片失败，回退为群内发送');
       return await service.send({ chatId: event.chatId, ...executionInput });
     }

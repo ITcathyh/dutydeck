@@ -65,9 +65,9 @@ export type LarkTask = {
   finalMessageId?: string;
   /**
    * 本轮终态是怎么交付的：'delivered' = 发了结果卡；'reaction' = 只贴了完成表情
-   * （completionReactionOnly，成功终态专用，此时没有 finalMessageId）。
+   * （completionReactionOnly，成功终态专用，此时没有 finalMessageId）；'failed' = 结果卡被平台明确拒收，对账不再补发。
    */
-  finalDeliveryState?: 'delivered' | 'reaction';
+  finalDeliveryState?: 'delivered' | 'reaction' | 'failed';
   finalAttachmentMessageId?: string;
   finalDeliveredTurn?: number;
   finalElements?: LarkCardElement[];
@@ -137,8 +137,17 @@ export type PersistedLarkCardTask = {
   chat_type?: LarkMessageEvent['chatType'];
   final_message_id?: string;
   final_attachment_message_id?: string;
-  /** 'reaction' = 只贴了完成表情、没有结果卡消息，对账据此判定「已交付」。 */
-  final_delivery_state?: 'delivered' | 'reaction';
+  /**
+   * 'reaction' = 只贴了完成表情、没有结果卡消息，对账据此判定「已交付」。
+   * 'failed' = 结果卡被平台明确拒收（不在群里、没有权限、内容被拒等），或瞬时失败自动重试超过 1 小时，对账不再补发。
+   */
+  final_delivery_state?: 'delivered' | 'reaction' | 'failed';
+  /** 结果没送达的原因：failed 时是停止重试的原因，重试中是最近一次失败的原因。送达后清掉。 */
+  final_delivery_error?: string;
+  /** 结果卡连续瞬时失败的次数、对账下一次重发的时间和第一次失败的时间（毫秒）。送达或判定失败后清掉。 */
+  final_delivery_attempts?: number;
+  final_delivery_retry_at?: number;
+  final_delivery_first_failed_at?: number;
   final_elements?: LarkCardElement[];
   /** 结果卡整卡入参，供重启后的「运行验证」原样重绘同一张收据。 */
   final_card_input?: Record<string, unknown>;

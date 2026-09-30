@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   executeWithLarkGate,
+  isLarkDeterministicFailure,
+  isLarkReplyTargetUnavailable,
   isRetryableLarkError,
   LarkCircuitOpenError,
+  larkFailureKind,
   resolveLarkGateConfig,
   setLarkGateLog,
   __testOnly_resetLarkGate,
@@ -127,6 +130,48 @@ describe('Lark api gate error classification', () => {
     const deterministic = openApiError(99992402, 400);
     expect(deterministic.statusCode).toBe(502);
     expect(isRetryableLarkError(deterministic)).toBe(false);
+  });
+
+  it('tells an explicit platform rejection from a request whose outcome is unknown', () => {
+    const localError = (code: string, statusCode: number) => Object.assign(new Error(code), { name: 'LarkServiceError', code, statusCode });
+    expect(larkFailureKind(openApiError(230002, 400))).toBe('rejected');
+    expect(larkFailureKind(openApiError(230020, 400))).toBe('rejected');
+    expect(larkFailureKind(openApiError(99991672, 403))).toBe('rejected');
+    expect(larkFailureKind({ isAxiosError: true, response: { status: 403, data: { code: 99991672 } } })).toBe('rejected');
+    // 230049 是「同一 UUID 的消息正在发送」：原请求可能即将成功，结果未知。
+    expect(larkFailureKind(openApiError(230049, 400))).toBe('unknown');
+    expect(larkFailureKind(openApiError(undefined, 503))).toBe('unknown');
+    expect(larkFailureKind(networkError())).toBe('unknown');
+    expect(larkFailureKind(new DOMException('The operation timed out.', 'TimeoutError'))).toBe('unknown');
+    expect(larkFailureKind(localError('LARK_REQUEST_BUDGET_EXHAUSTED', 503))).toBe('unknown');
+    expect(larkFailureKind(new Error('boom'))).toBe('unknown');
+    expect(larkFailureKind(new LarkCircuitOpenError('cli_kind', Date.now()))).toBe('not_sent');
+    expect(larkFailureKind(localError('LARK_CIRCUIT_OPEN', 503))).toBe('not_sent');
+    expect(larkFailureKind(localError('INVALID_CHAT_ID', 400))).toBe('not_sent');
+  });
+
+  it('treats only non-throttling rejections and local validation errors as deterministic', () => {
+    const localError = (code: string, statusCode: number) => Object.assign(new Error(code), { name: 'LarkServiceError', code, statusCode });
+    expect(isLarkDeterministicFailure(openApiError(230002, 400))).toBe(true);
+    expect(isLarkDeterministicFailure(openApiError(232009, 400))).toBe(true);
+    expect(isLarkDeterministicFailure(openApiError(99991672, 403))).toBe(true);
+    expect(isLarkDeterministicFailure(localError('INVALID_CHAT_ID', 400))).toBe(true);
+    for (const error of [openApiError(230020, 400), openApiError(99991400, 400), openApiError(undefined, 429), openApiError(230049, 400),
+      openApiError(undefined, 500), networkError(), new DOMException('The operation timed out.', 'TimeoutError'),
+      localError('LARK_REQUEST_BUDGET_EXHAUSTED', 503), localError('LARK_CIRCUIT_OPEN', 503), new Error('boom')]) {
+      expect(isLarkDeterministicFailure(error)).toBe(false);
+    }
+  });
+
+  it('allows a reply to become a new message only when the platform says the original cannot be replied to', () => {
+    for (const code of [230011, 230019, 230050, 230054, 230071, 230072, 230111]) {
+      expect(isLarkReplyTargetUnavailable(openApiError(code, 400))).toBe(true);
+    }
+    for (const error of [openApiError(230002, 400), openApiError(230049, 400), openApiError(230099, 400), openApiError(230028, 400),
+      openApiError(undefined, 502), networkError(), new DOMException('The operation timed out.', 'TimeoutError'), new Error('missing question'),
+      Object.assign(new Error('budget'), { name: 'LarkServiceError', code: 'LARK_REQUEST_BUDGET_EXHAUSTED', statusCode: 503 })]) {
+      expect(isLarkReplyTargetUnavailable(error)).toBe(false);
+    }
   });
 
   it('classifies axios-shaped SDK errors from contact lookups', () => {
@@ -338,6 +383,11 @@ describe('Lark api gate circuit breaker', () => {
     expect(error.appId).toBe('cli_meta');
     expect(error.openedAt).toBeGreaterThan(0);
     expect(error.message).toContain('cli_meta');
+  });
+
+  it('resends 230049 (message is being sent) without counting it as an upstream outage', async () => {
+    await failTimes('cli_sending', 5, () => openApiError(230049, 400));
+    await expect(executeWithLarkGate('cli_sending', 'message.reply', async () => 'ok', { env: trippingEnv })).resolves.toBe('ok');
   });
 
   it('keeps the circuit closed below the threshold', async () => {

@@ -585,8 +585,8 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     await expect(f.work.answer(parent.id, waiting.id, 'input', '秘密资料', waiting.revision, 'ou_bob')).rejects.toMatchObject({ code: 'WORK_ITEM_FORBIDDEN' });
     await f.coordinator.handle(message('om_answer', `/work answer ${waiting.id} input https://example.com/source`), f.config);
     await f.work.tick(); await f.settle();
+    // 结果不明的失败不再回退为会话内新发，一次投递只调一次 reply（reply 与 send 是同一个 mock）。
     f.client.reply.mockRejectedValueOnce(new Error('transport failure'));
-    f.client.send.mockRejectedValueOnce(new Error('transport failure'));
     await f.work.tick();
     await vi.waitFor(async () => expect((await f.work.get(parent.id, waiting.id, 'ou_alice')).delivery.status).toBe('error'));
     const count = f.prompts.length;

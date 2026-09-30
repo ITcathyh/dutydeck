@@ -748,7 +748,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       } catch (error) {
         task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
         await this.failPendingInbox(task, 'Agent 协作身份校验失败');
-        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: 'Agent 协作身份校验失败', markdown: withGroupMention(`**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: 'Agent 协作身份校验失败', markdown: withGroupMention(`**无法验证发起交接的 Agent。**\n\n${error instanceof Error ? error.message : String(error)}`), idempotencyKey: `fail_peer_${event.messageId}_${currentTurn}`.slice(0, 50), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
         task.cardMessageId = card.messageId;
         await clearAcknowledgement();
         return;
@@ -761,7 +761,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       } catch (error) {
         task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
         await this.failPendingInbox(task, '身份解析权限缺失');
-        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '身份解析权限缺失', markdown: withGroupMention(larkIdentityPermissionHelp(error, config.appId)), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '身份解析权限缺失', markdown: withGroupMention(larkIdentityPermissionHelp(error, config.appId)), idempotencyKey: `fail_id_${event.messageId}_${currentTurn}`.slice(0, 50), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
         task.cardMessageId = card.messageId;
         await clearAcknowledgement();
         return;
@@ -778,7 +778,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (!allowed) {
       task.state = 'failed'; task.retryable = false; task.startedAt = Date.now();
       await this.failPendingInbox(task, '访问被拒绝');
-      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '访问被拒绝', markdown: withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, taskId: task.id, taskName: '访问被拒绝', markdown: withGroupMention('**当前账号不在机器人白名单中。**\n\n如需使用，请联系机器人管理员添加你。'), idempotencyKey: `fail_acl_${event.messageId}_${currentTurn}`.slice(0, 50), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
       await clearAcknowledgement();
       return;
@@ -832,7 +832,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         task.retryable = false;
         await this.failPendingInbox(task, knownReason);
         const markdown = withGroupMention(`**${knownReason}**\n\n请联系部署者在 Web 上修改配置。`);
-        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, turn: currentTurn, taskId: task.id, taskName: taskTitle, markdown, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+        const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', retryable: false, turn: currentTurn, taskId: task.id, taskName: taskTitle, markdown, idempotencyKey: `fail_cfg_${event.messageId}_${currentTurn}`.slice(0, 50), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
         task.cardMessageId = card.messageId;
         await clearAcknowledgement();
         return;
@@ -841,7 +841,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await this.failPendingInbox(task, rawMessage);
       const detail = redactTraceText(rawMessage).slice(0, 500);
       const markdown = withGroupMention(`**Agent 启动失败**\n\n错误详情：\n${detail}`);
-      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', turn: currentTurn, taskId: task.id, taskName: taskTitle, markdown, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
+      const card = await sendTaskCard(this.service, event, { ...cardContext, state: 'failed', turn: currentTurn, taskId: task.id, taskName: taskTitle, markdown, idempotencyKey: `fail_start_${event.messageId}_${currentTurn}`.slice(0, 50), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) }, this.log);
       task.cardMessageId = card.messageId;
       await clearAcknowledgement();
       return;

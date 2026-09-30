@@ -3,7 +3,8 @@ import type { ChannelMapping, TaskRecord } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import type { StoredLarkConfig } from './config.js';
 import type { PersistedLarkCardTask } from './coordinator.js';
-import { performLarkCardReconcile } from './reconciler.js';
+import { larkResultDeliveryIssues, performLarkCardReconcile } from './reconciler.js';
+import { LarkServiceError } from './service.js';
 import { COMPLETION_REACTION_EMOJI } from './reaction-records.js';
 
 const config: StoredLarkConfig = {
@@ -1152,5 +1153,101 @@ describe('恢复异常通知与人工核验结果', () => {
         expect(JSON.stringify(service.reply.mock.calls[0])).not.toContain('open_tool');
       }
     } finally { repos.close(); }
+  });
+});
+
+describe('结果投递失败的对账', () => {
+  const setup = (send: () => Promise<{ messageId: string }>, task: Partial<PersistedLarkCardTask> = {}) => {
+    const runtimeTask = { id: 'task-r', sessionId: 'ses-r', prompt: 'Prompt msg-r', status: 'completed',
+      createdAt: new Date(Date.now() - 5_000).toISOString(), updatedAt: new Date().toISOString() };
+    const cardMappings = createMemoryChannelMappingRepo([createMapping('map-r', 'msg-r', 'ses-r', { runtime_task_id: 'task-r', progress_frozen: true, ...task })]);
+    const runtime = { getTasks: vi.fn(async () => [runtimeTask]), getEvents: vi.fn(async () => [{ id: 1, type: 'text', data: { text: '结论正文' } }]) };
+    const service = { update: vi.fn(), send: vi.fn(send) };
+    const input = { runtime: runtime as any, service: service as any, cardMappings: cardMappings as any,
+      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, config, channel: 'lark-card:cli_test' };
+    return { service, input, cardMappings, persisted: () => JSON.parse(cardMappings.mappings[0]!.extra!) as PersistedLarkCardTask & Record<string, any> };
+  };
+  const botRemoved = () => new LarkServiceError('LARK_OPENAPI_ERROR', 'Lark OpenAPI request failed: The bot can not be outside the group. (code: 230002)', 502,
+    { upstreamCode: 230002, upstreamHttpStatus: 400 });
+  const unavailable = () => new LarkServiceError('LARK_OPENAPI_ERROR', 'Lark OpenAPI request failed: 503 Service Unavailable (code: HTTP_ERROR)', 502,
+    { upstreamHttpStatus: 503 });
+
+  it('records a deterministic rejection as a failed delivery and stops calling the platform', async () => {
+    const h = setup(async () => { throw botRemoved(); });
+    expect(await performLarkCardReconcile(h.input)).toBe(0);
+    expect(h.persisted()).toMatchObject({ state: 'completed', progress_frozen: true, final_delivery_state: 'failed',
+      final_delivery_error: expect.stringContaining('230002') });
+    for (let round = 0; round < 3; round++) expect(await performLarkCardReconcile(h.input)).toBe(0);
+    expect(h.service.send).toHaveBeenCalledOnce();
+    // 投递失败只记在投递字段上，任务结果不变。
+    expect(h.persisted().state).toBe('completed');
+    expect(larkResultDeliveryIssues(h.cardMappings.mappings)).toEqual([expect.objectContaining({
+      sessionId: 'ses-r', taskName: 'Task msg-r', state: 'failed', error: expect.stringContaining('230002') })]);
+  });
+
+  it('backs a transient failure off per mapping, then clears the retry state once delivered', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      let failing = true;
+      const h = setup(async () => { if (failing) throw unavailable(); return { messageId: 'om_final' }; });
+      expect(await performLarkCardReconcile(h.input)).toBe(1);
+      const first = h.persisted();
+      expect(first).toMatchObject({ final_delivery_attempts: 1, final_delivery_error: expect.stringContaining('503'), final_delivery_first_failed_at: Date.now() });
+      expect(first.final_delivery_state).toBeUndefined();
+      const firstDelay = first.final_delivery_retry_at! - Date.now();
+      expect(firstDelay).toBeGreaterThan(0);
+      // 退避期内：仍算未解决（对账循环继续），但不再打平台。
+      expect(await performLarkCardReconcile(h.input)).toBe(1);
+      expect(h.service.send).toHaveBeenCalledOnce();
+      vi.setSystemTime(first.final_delivery_retry_at! + 1);
+      expect(await performLarkCardReconcile(h.input)).toBe(1);
+      expect(h.service.send).toHaveBeenCalledTimes(2);
+      const second = h.persisted();
+      expect(second.final_delivery_attempts).toBe(2);
+      expect(second.final_delivery_first_failed_at).toBe(first.final_delivery_first_failed_at);
+      expect(second.final_delivery_retry_at! - Date.now()).toBeGreaterThan(firstDelay);
+      expect(larkResultDeliveryIssues(h.cardMappings.mappings)).toEqual([expect.objectContaining({ state: 'retrying', attempts: 2 })]);
+      failing = false;
+      vi.setSystemTime(second.final_delivery_retry_at! + 1);
+      expect(await performLarkCardReconcile(h.input)).toBe(0);
+      const delivered = h.persisted();
+      expect(delivered).toMatchObject({ final_delivery_state: 'delivered', final_message_id: 'om_final' });
+      for (const key of ['final_delivery_attempts', 'final_delivery_retry_at', 'final_delivery_error', 'final_delivery_first_failed_at']) expect(delivered).not.toHaveProperty(key);
+      expect(larkResultDeliveryIssues(h.cardMappings.mappings)).toEqual([]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('stops retrying once transient failures outlast the one-hour UUID dedupe window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      const h = setup(async () => { throw unavailable(); });
+      const firstFailedAt = Date.now();
+      expect(await performLarkCardReconcile(h.input)).toBe(1);
+      // 59 分钟时仍在窗口内，照常按退避重试。
+      vi.setSystemTime(firstFailedAt + 59 * 60_000);
+      expect(await performLarkCardReconcile(h.input)).toBe(1);
+      expect(h.service.send).toHaveBeenCalledTimes(2);
+      expect(h.persisted()).toMatchObject({ final_delivery_attempts: 2, final_delivery_first_failed_at: firstFailedAt });
+      expect(h.persisted().final_delivery_state).toBeUndefined();
+      // 过了 1 小时：不再打平台，停在失败终态，任务结果不变。
+      vi.setSystemTime(firstFailedAt + 60 * 60_000 + 1);
+      expect(await performLarkCardReconcile(h.input)).toBe(0);
+      expect(h.service.send).toHaveBeenCalledTimes(2);
+      const failed = h.persisted();
+      expect(failed).toMatchObject({ state: 'completed', final_delivery_state: 'failed',
+        final_delivery_error: '自动重试超过 1 小时仍未确认送达，已停止自动重试；结果可能已送达，也可能没有' });
+      for (const key of ['final_delivery_attempts', 'final_delivery_retry_at', 'final_delivery_first_failed_at']) expect(failed).not.toHaveProperty(key);
+      expect(larkResultDeliveryIssues(h.cardMappings.mappings)).toEqual([expect.objectContaining({ state: 'failed', error: failed.final_delivery_error })]);
+      vi.setSystemTime(Date.now() + 10 * 60_000);
+      expect(await performLarkCardReconcile(h.input)).toBe(0);
+      expect(h.service.send).toHaveBeenCalledTimes(2);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('caps the per-mapping backoff', async () => {
+    const h = setup(async () => { throw unavailable(); }, { final_delivery_attempts: 30, final_delivery_retry_at: Date.now() - 1 } as any);
+    expect(await performLarkCardReconcile(h.input)).toBe(1);
+    expect(h.persisted().final_delivery_attempts).toBe(31);
+    expect(h.persisted().final_delivery_retry_at! - Date.now()).toBeLessThanOrEqual(5 * 60_000);
   });
 });

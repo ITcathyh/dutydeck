@@ -1,4 +1,5 @@
 import { resolveExplicitFinalContext } from './lark/explicit-final.js';
+import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
 import { LeaderDelegationService } from './leader-delegation.js';
 import { renderMemoryIndex } from './lark/memory-view.js';
@@ -433,7 +434,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return !bot || !larkMemoryEnabled(bot) ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
     };
     app = await buildApp(runtime, {
-      recovery: { authorize: async request => Boolean(await resolveInstallationPrincipal(request)) },
+      recovery: { authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
+        larkResultDeliveries: async sessionId => larkResultDeliveryIssues((await Promise.all((await readLarkConfigs(repos.config))
+          .map(bot => repos.channelMappings.list(`lark-card:${bot.appId}`)))).flat().filter(mapping => mapping.sessionId === sessionId)) },
       workspaceGroups: {
         service: workspaceOrganizationService,
         authorize: async request => Boolean(await resolveInstallationPrincipal(request)),

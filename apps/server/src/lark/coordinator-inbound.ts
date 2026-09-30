@@ -11,8 +11,11 @@ import { executeScheduleCommand } from './schedule-command.js';
 import { larkExecutionIdentity, larkMemoryEnabled, larkPermissionMode, readLarkConfig, saveLarkConfig, type StoredLarkConfig } from './config.js';
 import type { LarkMessageResource } from './message-content.js';
 import { LarkServiceError } from './service.js';
+import { isLarkDeterministicFailure } from './api-gate.js';
+import { larkRedispatchMaxAgeMs } from './turn-redispatch.js';
 import { steeringOutcomeText, renderLarkRecordExport, type LarkCardElement } from './card-renderer.js';
 import { sendLarkFile } from './result-delivery.js';
+import { larkResultDeliveryIssues } from './reconciler.js';
 import { larkSessionDetailUrl } from './detail-link.js';
 import { isLarkCardActionAvailable, parseLarkCardActionValue } from './card-actions.js';
 import {
@@ -65,6 +68,8 @@ const larkSessionShareElements = (url: string): LarkCardElement[] => [
 
 /** 首张进度卡没送达时，进程内重试整条入站处理的等待时间。 */
 const larkUndeliveredRetryDelaysMs = [30_000, 120_000];
+/** 启动恢复一条入站消息瞬时失败后的重试间隔：30 秒起翻倍，最长 5 分钟；记录过了恢复年龄上限就不再重试。 */
+const larkInboundRecoveryDelayMs = (attempt: number) => Math.min(30_000 * 2 ** (attempt - 1), 300_000);
 /** 过期提问的文字回复：附上原问题，作为一条新消息交给 Agent。不是这种情况返回 undefined。 */
 const expiredAskPrompt = (error: unknown, answer: string) =>
   error instanceof LarkServiceError && error.code === 'LARK_ASK_EXPIRED' && typeof error.details?.question === 'string'
@@ -79,44 +84,122 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
     this.applyReminderSettings(config);
     await this.workflows?.initialize(config.appId);
     await this.recoverAutoVerifications(config).catch(error => this.log.warn({ error, appId: config.appId }, '重启后收尾自动验证失败'));
+    // 入站恢复仍在监听建连之前、逐条完成：上次没处理完的旧请求先排进各自会话的队列，建连后新到的消息
+    // （包括 /new）排在它们后面，不会反过来插队。单条记录失败只影响这一条，不让初始化抛出、不阻止建连；
+    // 瞬时失败的记录交还后在后台重试，不占着建连。
     for (const record of await this.inbox?.orphanedCommands(config.appId) ?? []) {
-      await this.inbox!.update(record, { state: 'failed', error: '重启后无法确认命令是否完成；如未生效，请重新发送。' });
-      const actor = record.event.senderOpenId;
-      if (actor && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
-        await this.workflowReply(record.event, config, '重启后无法确认这条命令是否完成。如结果未生效，请重新发送该命令。', { failed: true }).catch(error => this.log.warn({ error }, '命令恢复回执发送失败'));
+      try {
+        await this.inbox!.update(record, { state: 'failed', error: '重启后无法确认命令是否完成；如未生效，请重新发送。' });
+        const actor = record.event.senderOpenId;
+        if (actor && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
+          await this.workflowReply(record.event, config, '重启后无法确认这条命令是否完成。如结果未生效，请重新发送该命令。', { failed: true }).catch(error => this.log.warn({ error }, '命令恢复回执发送失败'));
+        }
+      } catch (error) {
+        this.log.warn({ error, messageId: record.event.messageId }, '重启后收尾命令记录失败，跳过这一条');
       }
     }
-    for (const record of await this.inbox?.recoverable(config.appId) ?? []) {
-      // handle re-checks current configuration and membership; credentials are never replayed.
-      await this.handle(record.event, config, true);
-    }
+    for (const record of await this.inbox?.recoverable(config.appId) ?? []) await this.recoverInbound(record, config);
     // Queued Runtime tasks can start before the Feishu listener. Reattach their
     // original cards and query live waiters as well as subscribing to future events.
     if (!this.workflows || !this.runtime.getTasks) return;
     for (const mapping of await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []) {
       if (this.tasks.has(mapping.externalId)) continue;
-      const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
-      if (!saved.runtime_task_id || !saved.scope_id || !saved.sender_open_id) continue;
-      const runtimeTask = (await this.runtime.getTasks(mapping.sessionId)).find(task => task.id === saved.runtime_task_id);
-      if (!runtimeTask || !['running', 'queued'].includes(runtimeTask.status)) continue;
-      const raw = await this.workflowOptions.store!.get(`lark.inbox.${config.appId}.${mapping.externalId}`);
-      if (!raw) continue;
-      const stored = JSON.parse(raw) as LarkInboxRecord;
-      if (stored.state !== 'accepted' || stored.sessionId !== mapping.sessionId || stored.event.chatId !== saved.chat_id) continue;
-      const adopted = await this.inbox!.adoptAccepted(stored);
-      if (!adopted) continue;
-      const effective = stored.event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
-      const key = larkGroupKey(stored.event, saved.scope_id, config.appId);
-      const group = this.groups.get(key) ?? { tail: Promise.resolve() };
-      this.groups.set(key, group);
-      const task: LarkTask = { id: mapping.externalId, event: stored.event, config: effective, prompt: saved.prompt, resources: [],
-        group, inbox: adopted, state: 'queued', events: [], turn: (saved.turn ?? 1) - 1, scopeId: saved.scope_id, epoch: group.epoch ?? 0,
-        retryMaterialPrompt: saved.retry_material_prompt, sessionId: mapping.sessionId, cardMessageId: saved.card_message_id,
-        runtimeTaskId: runtimeTask.id, startedAt: saved.started_at, lastSuccessfulElements: saved.last_successful_elements,
-        progressFrozen: saved.progress_frozen, resumeTask: runtimeTask, restoring: true };
-      this.tasks.set(task.id, task);
-      this.handledMessages.add(task.id);
-      group.tail = group.tail.then(() => this.runTurn(task)).catch(error => this.log.error({ error, taskId: task.id }, '恢复飞书任务交互失败'));
+      try {
+        const saved = JSON.parse(mapping.extra ?? '{}') as PersistedLarkCardTask;
+        if (!saved.runtime_task_id || !saved.scope_id || !saved.sender_open_id) continue;
+        const runtimeTask = (await this.runtime.getTasks(mapping.sessionId)).find(task => task.id === saved.runtime_task_id);
+        if (!runtimeTask || !['running', 'queued'].includes(runtimeTask.status)) continue;
+        const raw = await this.workflowOptions.store!.get(`lark.inbox.${config.appId}.${mapping.externalId}`);
+        if (!raw) continue;
+        const stored = JSON.parse(raw) as LarkInboxRecord;
+        if (stored.state !== 'accepted' || stored.sessionId !== mapping.sessionId || stored.event.chatId !== saved.chat_id) continue;
+        const adopted = await this.inbox!.adoptAccepted(stored);
+        if (!adopted) continue;
+        const effective = stored.event.chatType === 'group' && this.groupManager ? await this.groupManager.resolved(config, saved.chat_id) : config;
+        const key = larkGroupKey(stored.event, saved.scope_id, config.appId);
+        const group = this.groups.get(key) ?? { tail: Promise.resolve() };
+        this.groups.set(key, group);
+        const task: LarkTask = { id: mapping.externalId, event: stored.event, config: effective, prompt: saved.prompt, resources: [],
+          group, inbox: adopted, state: 'queued', events: [], turn: (saved.turn ?? 1) - 1, scopeId: saved.scope_id, epoch: group.epoch ?? 0,
+          retryMaterialPrompt: saved.retry_material_prompt, sessionId: mapping.sessionId, cardMessageId: saved.card_message_id,
+          runtimeTaskId: runtimeTask.id, startedAt: saved.started_at, lastSuccessfulElements: saved.last_successful_elements,
+          progressFrozen: saved.progress_frozen, resumeTask: runtimeTask, restoring: true };
+        this.tasks.set(task.id, task);
+        this.handledMessages.add(task.id);
+        group.tail = group.tail.then(() => this.runTurn(task)).catch(error => this.log.error({ error, taskId: task.id }, '恢复飞书任务交互失败'));
+      } catch (error) {
+        this.log.warn({ error, messageId: mapping.externalId }, '重启后接回飞书任务卡失败，跳过这一条');
+      }
+    }
+  }
+
+  /** 启动恢复里瞬时失败、正在等待重试的入站消息，按消息记已重试次数。 */
+  private readonly inboundRecoveryRetries = new Map<string, number>();
+
+  /**
+   * 恢复一条上次没处理完的入站消息。handle 会重新检查当前配置和成员身份，凭据从不重放。
+   * - 超过恢复年龄上限（与重投同一个 larkRedispatchMaxAgeMs）：不再执行，标 failed，
+   *   像孤儿命令一样给仍有权限的发送人回一句，提示重新发送。
+   * - 平台明确拒绝（机器人不在群里、群已解散、没有权限）：标 failed 并写原因，重试也不会成功。
+   * - 网络、5xx、超时这类瞬时失败：交还记录，退避后在后台重试，不丢；过了年龄上限按上一条收口。
+   */
+  private async recoverInbound(record: LarkInboxRecord, config: StoredLarkConfig) {
+    if (this.stopped) return;
+    const messageId = record.event.messageId;
+    const receivedAt = Number(record.event.createTime) || Date.parse(record.receivedAt ?? '');
+    if (Date.now() - receivedAt > larkRedispatchMaxAgeMs) {
+      this.inboundRecoveryRetries.delete(messageId);
+      const hours = larkRedispatchMaxAgeMs / 3_600_000;
+      try {
+        await this.inbox!.update(record, { state: 'failed', error: `重启后超过 ${hours} 小时仍未执行，不再自动执行。` });
+        const actor = record.event.senderOpenId;
+        if (actor && await this.currentAccess(config, record.event.chatId, record.event.chatType, actor, 'task.view_result')) {
+          await this.workflowReply(record.event, config, `服务重启后，这条请求已超过 ${hours} 小时没有执行，不会再自动执行。如仍需要，请重新发送。`,
+            { failed: true, taskName: '请求未执行' });
+        }
+      } catch (error) {
+        this.log.warn({ error, messageId }, '过期的入站记录收尾失败');
+      }
+      return;
+    }
+    try {
+      await this.handle(record.event, config, true);
+      this.inboundRecoveryRetries.delete(messageId);
+      return;
+    } catch (error) {
+      try {
+        // 失败可能发生在认领前或认领后：按库里的当前版本收口。已不是 received，说明别的路径接手了或已记下结果。
+        const current = await this.inbox!.reload(record);
+        if (current?.state !== 'received') return;
+        const reason = error instanceof Error ? error.message : String(error);
+        if (isLarkDeterministicFailure(error)) {
+          this.inboundRecoveryRetries.delete(messageId);
+          await this.inbox!.update(current, { state: 'failed', error: reason });
+          this.log.warn({ error, messageId }, '重启恢复的入站消息被飞书明确拒绝，已标记失败');
+          return;
+        }
+        const released = await this.inbox!.release(current);
+        if (!released) return;
+        const attempt = (this.inboundRecoveryRetries.get(messageId) ?? 0) + 1;
+        this.inboundRecoveryRetries.set(messageId, attempt);
+        const delayMs = larkInboundRecoveryDelayMs(attempt);
+        const cancel = () => { clearTimeout(timer); this.turnCleanups.delete(cancel); };
+        const timer = setTimeout(() => {
+          cancel();
+          void (async () => {
+            const latest = await this.inbox!.reload(released);
+            // 等待期间被别的路径认领（例如同一条消息被再次推送）或已收口：不再重试。
+            if (this.stopped || latest?.state !== 'received' || latest.boot) return;
+            this.handledMessages.delete(messageId);
+            await this.recoverInbound(latest, config);
+          })().catch(retryError => this.log.error({ error: retryError, messageId }, '重试恢复入站消息失败'));
+        }, delayMs);
+        timer.unref?.();
+        this.turnCleanups.add(cancel);
+        this.log.warn({ error, messageId, attempt, retryInMs: delayMs }, '重启恢复入站消息暂时失败，稍后重试');
+      } catch (settleError) {
+        this.log.error({ error: settleError, cause: error, messageId }, '重启恢复入站消息失败后收口出错');
+      }
     }
   }
 
@@ -1404,6 +1487,18 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       } catch (error) {
         this.log.warn({ error, sessionId }, '读取任务队列失败');
       }
+    }
+    // 结果没送达的轮次：任务本身已经结束，只是结论没能发到飞书，读者在群里看不到它。
+    try {
+      const issues = larkResultDeliveryIssues((await this.cardMappings?.list(larkCardChannel(config.appId)) ?? []).filter(mapping => mapping.sessionId === sessionId));
+      for (const issue of issues.slice(0, 3)) {
+        const reason = larkCommandEcho(issue.error ?? '未记录', 200);
+        lines.push(issue.state === 'failed'
+          ? `**结果未送达**：「${larkCommandEcho(issue.taskName, 80)}」的结果没有确认送达飞书，不会再自动重发。原因：${reason}`
+          : `**结果投递重试中**：「${larkCommandEcho(issue.taskName, 80)}」的结果第 ${issue.attempts} 次发送失败，稍后自动重发。原因：${reason}`);
+      }
+    } catch (error) {
+      this.log.warn({ error, sessionId }, '读取结果投递状态失败');
     }
     if (latestTask) lines.push(`**最近一轮**：${larkCommandEcho(latestTask.state, 32)}`);
     return lines.join('\n\n');

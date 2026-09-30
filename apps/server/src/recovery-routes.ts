@@ -5,6 +5,8 @@ import { executionRecoveryDecisionSchema, ptyRetirementRecoverySchema, nativeRep
 
 export interface RecoveryRouteOptions {
   authorize(request: FastifyRequest): Promise<boolean> | boolean;
+  /** 这个会话里结果没送达飞书的轮次（已判定失败或正在退避重发），随 inspect 一起给出。 */
+  larkResultDeliveries?(sessionId: string): Promise<unknown[]>;
 }
 const owner = { kind: 'installation_owner', id: 'installation_owner' } as const;
 export function registerRecoveryRoutes(app: FastifyInstance, runtime: DutydeckRuntime, options?: RecoveryRouteOptions) {
@@ -13,7 +15,9 @@ export function registerRecoveryRoutes(app: FastifyInstance, runtime: DutydeckRu
   };
   app.get<{ Params: { id: string } }>('/api/sessions/:id/recovery', async request => {
     await authorize(request);
-    return runtime.inspectExecutionRecovery(request.params.id, owner);
+    const recovery = await runtime.inspectExecutionRecovery(request.params.id, owner);
+    const larkResultDelivery = await options?.larkResultDeliveries?.(request.params.id) ?? [];
+    return larkResultDelivery.length ? { ...recovery, larkResultDelivery } : recovery;
   });
   app.post<{ Params: { id: string } }>('/api/sessions/:id/recovery/probe', async request => {
     await authorize(request);

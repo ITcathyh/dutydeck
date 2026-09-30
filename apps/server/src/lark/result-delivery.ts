@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { ConfigRepository } from '@dutydeck/shared';
 import { COMPLETION_REACTION_EMOJI, reactionDedupeKey, type ReactionRecord } from './reaction-records.js';
-import { buildLarkCard, larkCardFinalOutputText, type LarkCardInput, type LarkCardService } from './service.js';
+import { isLarkReplyTargetUnavailable } from './api-gate.js';
+import { buildLarkCard, larkCardFinalOutputText, larkCardResultMarkdown, LarkServiceError, type LarkCardInput, type LarkCardService } from './service.js';
 
 // Live delivery and restart reconciliation share one provider UUID per process card.
 export const larkResultKey = (processMessageId: string) =>
@@ -87,27 +88,72 @@ export async function sendLarkFile(
           fileKey,
           idempotencyKey: input.idempotencyKey,
         });
-      } catch (error) { if (target.allowReplyFallback === false) throw error; log.warn({ error, messageId: target.replyMessageId }, '回复文件失败，回退为会话内发送'); }
+      } catch (error) {
+        // 只有平台明确说原消息不能再回复才改发；超时、断连这类结果未知的失败原样抛出，由调用方用同一 UUID 重发同一个回复。
+        if (target.allowReplyFallback === false || !isLarkReplyTargetUnavailable(error)) throw error;
+        log.warn({ error, messageId: target.replyMessageId }, '回复文件失败，回退为会话内发送');
+      }
     }
     await beforeSend?.();
     return service.sendFile({ chatId: target.chatId, fileKey, idempotencyKey: input.idempotencyKey });
   }, target.allowReplyFallback === false ? result => typeof result?.messageId === 'string' && Boolean(result.messageId.trim()) : undefined);
 }
 
+// 飞书卡片的表格上限：单个 Markdown 组件最多 4 个表格，整张卡最多 5 个表格组件。官方没写 Markdown 表格是否计入整卡上限，
+// 外部项目报告超过时同样被拒收（230099 / ErrCode 11310），这里按计入处理。
+const larkCardTableLimits = { markdown: 4, card: 5 } as const;
+const markdownTableDelimiter = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+/** 表头行后面紧跟分隔行（| --- |）算一个表格；代码块里的不算。 */
+const markdownTableCount = (text: string) => {
+  let inFence = false;
+  let previous = '';
+  let count = 0;
+  for (const line of text.split('\n')) {
+    if (/^\s*(?:```|~~~)/.test(line)) inFence = !inFence;
+    else if (!inFence && previous.includes('|') && line.includes('|') && markdownTableDelimiter.test(line)) count++;
+    previous = inFence ? '' : line;
+  }
+  return count;
+};
+/** 卡上每个 Markdown 组件、以及整张卡（开头段和折叠段一起算）的表格数都在上限内。 */
+const withinTableLimits = (elements: unknown) => {
+  let total = 0;
+  const visit = (value: unknown): boolean => {
+    if (Array.isArray(value)) return value.every(visit);
+    if (!value || typeof value !== 'object') return true;
+    const record = value as Record<string, unknown>;
+    if (record.tag === 'table') total++;
+    if (record.tag === 'markdown' && typeof record.content === 'string') {
+      const count = markdownTableCount(record.content);
+      if (count > larkCardTableLimits.markdown) return false;
+      total += count;
+    }
+    return Object.values(record).every(visit);
+  };
+  return visit(elements) && total <= larkCardTableLimits.card;
+};
+/** 结果卡被平台按卡片内容拒收：230099 卡片内容创建失败（表格超限、非法图片等），230025 超过消息体积上限。 */
+const isLarkResultCardRejected = (error: unknown) => error instanceof LarkServiceError && [230099, 230025].includes(Number(error.details?.upstreamCode));
+
+/** forceAttachment：整卡已被平台拒收，这次直接走「节选 + 附件」，节选卡换一个 UUID（内容不同）。 */
 export async function prepareLarkResult(
   service: LarkCardService,
   target: DeliveryTarget,
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
   log: DeliveryLog,
   store?: ConfigRepository,
-  beforeSend?: () => Promise<void>
+  beforeSend?: () => Promise<void>,
+  forceAttachment = false
 ): Promise<{ input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string }; attachmentMessageId?: string }> {
   const resultInput = { ...input, cardKind: 'result' as const };
   const output = resultInput.elements.find(element => element.element_id === 'final_output')?.content;
   const card = buildLarkCard(resultInput);
-  // 长结论在卡上拆成「开头 + 折叠」两段，按拼起来的全文判断整份结论是否都在卡上。
-  const fits = !output || larkCardFinalOutputText(card.body.elements as Array<Record<string, unknown>>) === output;
+  // 长结论在卡上拆成「开头 + 折叠」两段，按拼起来的全文判断整份结论是否都在卡上；卡面改写过图片语法，按改写后的原文比。
+  // 表格数超过飞书上限的卡一定会被拒收，同样按放不下处理。
+  const fits = !forceAttachment && (!output || typeof output === 'string'
+    && larkCardFinalOutputText(card.body.elements as Array<Record<string, unknown>>) === larkCardResultMarkdown(output) && withinTableLimits(card.body.elements));
   let attachmentMessageId: string | undefined;
+  if (forceAttachment) resultInput.idempotencyKey = `result_d_${createHash('sha256').update(input.idempotencyKey).digest('hex').slice(0, 40)}`;
   if (!fits) {
     const filename = `${(input.taskName?.trim() || '执行结果').replace(/[\\/:*?"<>|\r\n]/g, '_').slice(0, 60)}.md`;
     const acceptance = input.elements.some(element => element.element_id === 'workflow_accept')
@@ -137,9 +183,24 @@ export async function sendLarkResult(
   input: LarkCardInput & { elements: Array<Record<string, any>>; idempotencyKey: string },
   log: DeliveryLog, store?: ConfigRepository, beforeSend?: () => Promise<void>
 ): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
-  const { input: resultInput, attachmentMessageId } = await prepareLarkResult(service, target, input, log, store, beforeSend);
+  const prepared = await prepareLarkResult(service, target, input, log, store, beforeSend);
+  try { return await sendPreparedLarkResult(service, target, prepared, log, store, beforeSend); }
+  catch (error) {
+    // 整卡被拒收时改走「节选 + 附件」，只降这一次；已经是附件形态、没有正文可转、或内容审核（230028）拒收时原样抛出。
+    const output = input.elements.find(element => element.element_id === 'final_output')?.content;
+    if (prepared.attachmentMessageId || typeof output !== 'string' || !output || !isLarkResultCardRejected(error)) throw error;
+    log.warn({ error, idempotencyKey: input.idempotencyKey }, '结果卡被飞书拒收，改为正文节选加附件发送');
+    return sendPreparedLarkResult(service, target, await prepareLarkResult(service, target, input, log, store, beforeSend, true), log, store, beforeSend);
+  }
+}
+
+async function sendPreparedLarkResult(
+  service: LarkCardService, target: DeliveryTarget, prepared: Awaited<ReturnType<typeof prepareLarkResult>>,
+  log: DeliveryLog, store?: ConfigRepository, beforeSend?: () => Promise<void>
+): Promise<{ messageId: string; elements: Array<Record<string, any>>; attachmentMessageId?: string }> {
+  const { input: resultInput, attachmentMessageId } = prepared;
   const elements = resultInput.elements;
-  const sent = await delivered(store, `lark.delivery.${input.idempotencyKey}.summary`, async () => {
+  const sent = await delivered(store, `lark.delivery.${resultInput.idempotencyKey}.summary`, async () => {
     if (target.replyMessageId && typeof service.reply === 'function') {
       await beforeSend?.();
       try {
@@ -149,7 +210,10 @@ export async function sendLarkResult(
           ...(target.replyInThread ? { replyInThread: true } : {}),
         });
         return { ...result, elements };
-      } catch (error) { if (target.allowReplyFallback === false) throw error; log.warn({ error, messageId: target.replyMessageId, chatId: target.chatId }, '回复执行结果失败，回退为会话内发送'); }
+      } catch (error) {
+        if (target.allowReplyFallback === false || !isLarkReplyTargetUnavailable(error)) throw error;
+        log.warn({ error, messageId: target.replyMessageId, chatId: target.chatId }, '回复执行结果失败，回退为会话内发送');
+      }
     }
     if (target.replyMessageId && target.allowReplyFallback === false) throw new Error('Explicit final requires reply support');
     await beforeSend?.();

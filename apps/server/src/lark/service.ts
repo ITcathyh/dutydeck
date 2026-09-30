@@ -339,6 +339,21 @@ const foldLongResult = (element: Record<string, unknown>): Array<Record<string, 
   ];
 };
 
+/**
+ * 飞书卡片的 Markdown 图片只认上传后的 img_ key，目标是网址或本地路径时整张卡会被拒收（200570）。
+ * 结果卡上把这类图片语法改成普通链接（网址）或文字（其他），代码块和行内代码里的原样保留。
+ * 只改卡面：落库的结果元素和附件仍是原文。
+ */
+export const larkCardResultMarkdown = (text: string) => {
+  let inFence = false;
+  return text.split('\n').map(line => {
+    if (/^\s*(?:```|~~~)/.test(line)) { inFence = !inFence; return line; }
+    if (inFence) return line;
+    return line.split(/(`[^`]*`)/).map((part, index) => index % 2 ? part : part.replace(/!\[([^\]\n]*)\]\(\s*([^)\s]+)(?:\s+"[^"\n]*")?\s*\)/g,
+      (image, alt: string, target: string) => target.startsWith('img_') ? image : /^https?:\/\//i.test(target) ? `[${alt || target}](${target})` : alt || target)).join('');
+  }).join('\n');
+};
+
 /** 卡上实际展示的完整结论：开头一段加上折叠里的其余部分。 */
 export const larkCardFinalOutputText = (elements: Array<Record<string, unknown>>) => {
   const head = elements.find(element => element.element_id === 'final_output');
@@ -775,7 +790,8 @@ export function buildLarkCard(input: LarkCardInput = {}) {
       // 省掉——已完成的卡走的就是这条路。
       const taskHeader = actionButtons.length ? buttonRow : showStatusRow && statusElement ? [statusElement] : [];
       // 结果卡的长文只露出开头，其余收进折叠面板：群里一条消息不该占满好几屏。
-      const shownFinal = isResultCard ? finalElements.flatMap(foldLongResult) : finalElements;
+      const shownFinal = isResultCard ? finalElements.map(element => element.element_id === 'final_output' && typeof element.content === 'string'
+        ? { ...element, content: larkCardResultMarkdown(element.content) } : element).flatMap(foldLongResult) : finalElements;
       return [
         ...taskHeader,
         ...attentionElements,
