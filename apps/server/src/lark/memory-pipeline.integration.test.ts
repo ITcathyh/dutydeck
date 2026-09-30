@@ -312,9 +312,11 @@ describe('Lark memory pipeline through the coordinator', () => {
     await vi.waitFor(() => expect(h.lastCardText()).toContain('已记住'));
 
     await h.runTurns(8);
+    // 不能等 lastRun：整理后若还剩 3 轮以上没提取，紧接着的一次提取会把它覆盖成 extraction。等只有整理成功才写的时间戳，再等管线停下。
     await vi.waitFor(async () => {
-      expect((await h.store.getState(scope)).lastRun).toMatchObject({ kind: 'consolidation', ok: true });
+      expect((await h.store.getState(scope)).lastConsolidationAt).toBeTruthy();
     }, { timeout: 20_000 });
+    await h.waitIdle();
 
     const live = await h.store.list(scope);
     const consolidated = live.find(entry => entry.source === 'consolidation');
