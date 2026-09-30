@@ -105,6 +105,8 @@ export interface RuntimeOptions {
   }>;
   /** Diagnostics only, e.g. a steering reply that arrives after its timeout. */
   log?: { warn(data: Record<string, unknown>, message: string): void };
+  /** 会话里有 Agent 的提问在等人回答（relay ask）：与待审批一样是人工等待，这期间不判这一轮可能卡住。 */
+  awaitingAnswer?: (sessionId: string) => boolean;
 }
 
 /** 插话结果。injected / startedNewTurn 已记入投递账本并移出队列；其余结果下这一轮仍在队列里，按正常新一轮执行。 */
@@ -1393,13 +1395,13 @@ export class DutydeckRuntime {
   isQueueHeld() { return this.queueHeld; }
 
   /**
-   * 当前一轮是否可能卡住：后面有排队任务、驱动事件与终端输出都已静默超过阈值、受管进程树 CPU 不活跃，且没有在等审批。
+   * 当前一轮是否可能卡住：后面有排队任务、驱动事件与终端输出都已静默超过阈值、受管进程树 CPU 不活跃，且没有在等审批或等人回答。
    * 只是提示依据，运行时不据此中断、重跑或结束任何进程。
    */
   async getTurnStall(id: string): Promise<TurnStall | undefined> {
     const task = this.activeTasks.get(id);
     const silentMs = Date.now() - (this.turnProgressAt.get(id) ?? Date.now());
-    const queued = task && silentMs >= TURN_STALL_SILENCE_MS && !this.permissionsForSession(id).length
+    const queued = task && silentMs >= TURN_STALL_SILENCE_MS && !this.permissionsForSession(id).length && !this.options.awaitingAnswer?.(id)
       ? (await this.queuedTasks(id)).length : 0;
     if (!task || !queued || this.activeTasks.get(id) !== task) { this.turnCpu.delete(id); return undefined; }
     let sampler = this.turnCpu.get(id);
