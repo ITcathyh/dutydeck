@@ -111,6 +111,8 @@ export interface AgentDriver {
   setRiskPolicy?(policy?: ToolRiskPolicy): void;
   /** 切换权限模式。 */
   setPermissionMode?(mode: PermissionMode): void;
+  /** 可选：受管进程树的根进程号，运行时据此尽力判断这一轮是否还在占用 CPU。拿不到时返回空数组。 */
+  processIds?(): number[];
   /**
    * 可选：暴露原始终端流（PTY 形态的 driver 实现，ACP driver 不实现）。
    * 供 Web xterm 终端视图与 /api/terminal WS 代理使用。

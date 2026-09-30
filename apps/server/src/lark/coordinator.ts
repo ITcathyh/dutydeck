@@ -104,6 +104,8 @@ export type LarkTask = {
   promoted?: boolean;
   /** 排队卡上正显示着的那条审批（记录 id）；审批有了结果，心跳据此把排队卡改回普通说明。 */
   queuedApproval?: string;
+  /** 执行卡上正标着「可能卡住」；提示出现或撤销时，心跳据此重绘同一会话的排队卡。 */
+  stallNoted?: boolean;
 };
 export type PersistedLarkCardTask = {
   result_feedback_state?: string;

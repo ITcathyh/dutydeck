@@ -76,6 +76,8 @@ export interface LarkRuntime {
   publishSessionEvent?(sessionId: string, type: 'text', data: unknown): Promise<unknown>;
   /** 服务升级排空中：新任务照常入队，但暂不开始执行。 */
   isQueueHeld?(): boolean;
+  /** 当前一轮可能卡住的依据（后面有人排队、长时间没有输出、进程不占 CPU），只用来在卡上提示。 */
+  getTurnStall?(id: string): Promise<{ taskId: string; silentMs: number; queued: number; cpu: 'inactive' | 'unknown' } | undefined>;
 }
 
 export interface LarkMessageEvent {

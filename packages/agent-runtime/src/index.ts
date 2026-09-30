@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { canonicalExecutionJson, ptyRetirementRecoverySchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
-import { AcpxAdapter, readNativeCreationRecord } from '@dutydeck/acp-client';
+import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
@@ -112,6 +112,16 @@ export type SteeringOutcome = DriverSteeringOutcome | 'incompatible' | 'failed';
 /** An unanswered steering request neither ends with the turn nor blocks the queue past this; the Task then runs as its own turn. */
 const STEERING_TIMEOUT_MS = 30_000;
 export interface SteeringResult { task: PublicTaskRecord; outcome: SteeringOutcome; error?: string }
+/**
+ * 一轮后面有人排队、驱动事件与终端输出（PTY 的屏幕变化以 raw_terminal 事件到达）都静默这么久、受管进程树 CPU 也不活跃时，
+ * 提示这一轮可能卡住。Claude Code 干活时每秒都在刷新计时，长工具也有输出或心跳，3 分钟毫无动静且不占 CPU 已不正常；与 HappyClaw 的判定阈值相同。
+ */
+const TURN_STALL_SILENCE_MS = 3 * 60_000;
+/** 读不到 CPU（非 Linux、驱动给不出进程号）时只凭静默判断，放宽到 10 分钟，与 HappyClaw 的强制上限同值。 */
+const TURN_STALL_UNKNOWN_CPU_SILENCE_MS = 10 * 60_000;
+/** 心跳每秒都可能来问，CPU 至少隔这么久才重新读一次 /proc。 */
+const TURN_STALL_CPU_WINDOW_MS = 10_000;
+export interface TurnStall { taskId: string; silentMs: number; queued: number; cpu: 'inactive' | 'unknown' }
 
 export class DutydeckRuntime {
   private readonly mutations = new SessionMutations(() => this.assertBinding());
@@ -174,6 +184,9 @@ export class DutydeckRuntime {
   private readonly exitListeners = new Map<string, Set<(code: number | null) => void>>();
   private readonly factory: DriverFactory;
   private readonly lastActivity = new Map<string, number>();
+  /** 当前一轮的开始时间，之后每个驱动事件（含 raw_terminal）刷新一次。 */
+  private readonly turnProgressAt = new Map<string, number>();
+  private readonly turnCpu = new Map<string, ProcessTreeCpu>();
   private readonly cleanupTimer?: NodeJS.Timeout;
   private cleanupRun?: Promise<void>;
   private shuttingDown = false;
@@ -427,6 +440,7 @@ export class DutydeckRuntime {
     return (event: NormalizedDriverEvent) => {
       if (this.shuttingDown || !this.mutations.valid(lifecycle) || this.sessionGenerations.get(session.id) !== generation) return;
       const attempt = this.attempts.get(session.id);
+      if (attempt) this.turnProgressAt.set(session.id, Date.now());
       this.enqueueDriverEvent(session, event, generation, attempt ?? lifecycle);
     };
   }
@@ -587,7 +601,7 @@ export class DutydeckRuntime {
             this.drivers.set(session.id, driver);
             task.status = 'running';
             this.attemptRefs.set(token, ref); this.attempts.set(session.id, token); this.activeTasks.set(session.id, task);
-            this.activeTurns.add(session.id);
+            this.activeTurns.add(session.id); this.turnProgressAt.set(session.id, Date.now());
             const tools: AttemptTools = { calls: new Map(), events: new Map(), replayData: new Map() };
             let afterSequence = 0;
             for (;;) {
@@ -1378,6 +1392,23 @@ export class DutydeckRuntime {
   }
   isQueueHeld() { return this.queueHeld; }
 
+  /**
+   * 当前一轮是否可能卡住：后面有排队任务、驱动事件与终端输出都已静默超过阈值、受管进程树 CPU 不活跃，且没有在等审批。
+   * 只是提示依据，运行时不据此中断、重跑或结束任何进程。
+   */
+  async getTurnStall(id: string): Promise<TurnStall | undefined> {
+    const task = this.activeTasks.get(id);
+    const silentMs = Date.now() - (this.turnProgressAt.get(id) ?? Date.now());
+    const queued = task && silentMs >= TURN_STALL_SILENCE_MS && !this.permissionsForSession(id).length
+      ? (await this.queuedTasks(id)).length : 0;
+    if (!task || !queued || this.activeTasks.get(id) !== task) { this.turnCpu.delete(id); return undefined; }
+    let sampler = this.turnCpu.get(id);
+    if (!sampler) { sampler = new ProcessTreeCpu(TURN_STALL_CPU_WINDOW_MS); this.turnCpu.set(id, sampler); }
+    const cpu = sampler.sample(this.drivers.get(id)?.processIds?.() ?? []);
+    if (cpu === undefined || cpu === 'active' || cpu === 'unknown' && silentMs < TURN_STALL_UNKNOWN_CPU_SILENCE_MS) return undefined;
+    return { taskId: task.id, silentMs, queued, cpu };
+  }
+
   getRunningTaskCount(excludeSessionId?: string): number {
     let count = 0;
     for (const [sessionId, task] of this.activeTasks) {
@@ -1744,7 +1775,7 @@ export class DutydeckRuntime {
 
   private runTask(id: string, task: TaskRecord, attempt: TaskAttempt, token: Owner) {
     this.attemptRefs.set(token, { sessionId: id, runId: attempt.runId, taskId: task.id, attemptId: attempt.attemptId });
-    this.attempts.set(id, token); this.activeTasks.set(id, task);
+    this.attempts.set(id, token); this.activeTasks.set(id, task); this.turnProgressAt.set(id, Date.now());
     const run = this.mutations.run(token, () => this.executeTask(id, task));
     this.taskRuns.add(run);
     const cleanup = () => { this.taskRuns.delete(run); };
