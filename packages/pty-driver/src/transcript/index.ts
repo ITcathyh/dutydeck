@@ -34,6 +34,7 @@ export {
   ClaudeTranscriptTailer,
   resolveClaudeTranscriptPath,
   mapClaudeEntry,
+  claudeApiError,
   type ClaudeTranscriptTailerOptions,
 } from './claude.js';
 export {

@@ -270,6 +270,8 @@ export class PtyCliDriver implements AgentDriver {
       this.clearRenderedCompletion();
       this.clearBackgroundHold();
       this.transcript?.resetBackgroundWork?.();
+      // An earlier turn's unreported error must not fail this one.
+      this.transcript?.takeTurnError?.();
       this.idleDetector?.reset();
       completion = new Promise<void>((resolve, reject) => {
         this.turnResolve = resolve;
@@ -836,6 +838,10 @@ export class PtyCliDriver implements AgentDriver {
         }
         this.clearBackgroundHold();
         this.turnActive = false;
+        // The runtime fails a turn whose last step is not text but has no
+        // reason to show; the CLI's own error record is that reason.
+        const turnError = this.transcript?.takeTurnError?.();
+        if (turnError && !this.interruptPending) this.emitEvent(turnError);
         this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending ? 'cancelled' : 'end_turn' } });
         this.interruptPending = false;
         this.turnResolve?.();

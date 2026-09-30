@@ -36,6 +36,21 @@ describe('/new first-turn options', () => {
     expect(() => parseLarkNewSession(input)).toThrow();
   });
 
+  it('parses --handoff with an optional unquoted note and an optional task', () => {
+    expect(parseLarkNewSession('--handoff')).toEqual({ prompt: '', handoff: { note: '' } });
+    expect(parseLarkNewSession('--handoff 先补 登录重试 的测试')).toEqual({ prompt: '', handoff: { note: '先补 登录重试 的测试' } });
+    expect(parseLarkNewSession('--handoff -- 修复问题')).toEqual({ prompt: '修复问题', handoff: { note: '' } });
+    expect(parseLarkNewSession('--cwd "/tmp/a b" --model m --handoff 接着做 -- 修复问题\n  --cwd 是正文')).toEqual({
+      prompt: '修复问题\n  --cwd 是正文', handoff: { note: '接着做' }, launchOptions: { cwd: '/tmp/a b', model: 'm' }
+    });
+    // Without --handoff the option header still needs a task, as before.
+    expect(() => parseLarkNewSession('--cwd /tmp')).toThrow();
+  });
+
+  it.each(['--handoff --cwd /tmp -- 任务', '--handoff 备注 --', '--handoff --handoff'])('rejects a malformed handoff header: %s', input => {
+    expect(() => parseLarkNewSession(input)).toThrow('首轮参数格式不正确');
+  });
+
   it('parses --agent alongside the other first-turn options', () => {
     expect(parseLarkNewSession('--agent ccflash -- 修复问题')).toEqual({ prompt: '修复问题', launchOptions: { agentId: 'ccflash' } });
     expect(parseLarkNewSession('--agent claude-code --model opus -- 修复问题')).toEqual({

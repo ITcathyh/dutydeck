@@ -967,6 +967,29 @@ const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
   icon: { tag: 'standard_icon', token: 'warning_outlined', color: 'red' }
 });
 
+// 飞书看不到 Web 输入框上的上下文用量。本轮最后一次用量读数到了窗口的 80%，或本轮发生过
+// 压缩（含压缩失败）时，结果卡上提示一行怎么换新会话。只认驱动上报的 status 事件，
+// 没有这类信号的驱动不出提示；读数里没有窗口大小时不写百分比。
+const contextPressureElement = (events: AgentEvent[]): LarkCardElement | undefined => {
+  let percent: number | undefined;
+  let compaction: 'happened' | 'failed' | undefined;
+  for (const event of events) {
+    if (event.type !== 'status') continue;
+    const data = event.data as Record<string, any> | undefined;
+    if (data?.state === 'usage') {
+      const used = Number(data.used);
+      const size = Number(data.size);
+      percent = Number.isFinite(used) && Number.isFinite(size) && size > 0 ? Math.min(100, Math.floor(used / size * 100)) : undefined;
+    } else if (data?.state === 'compaction' && compaction !== 'failed') compaction = data.phase === 'failed' ? 'failed' : 'happened';
+  }
+  if (!compaction && (percent === undefined || percent < 80)) return undefined;
+  const parts = [
+    compaction === 'failed' ? '本轮上下文压缩失败' : compaction ? '本轮发生过上下文压缩' : '',
+    percent !== undefined ? `上下文已用 ${percent}%` : ''
+  ].filter(Boolean);
+  return { tag: 'markdown', element_id: 'context_hint', content: `${parts.join('，')}，可用 /new --handoff 带交接开新会话。`, text_size: 'notation', margin: '4px 0px 0px 0px' };
+};
+
 export function renderLarkCardElements(
   events: AgentEvent[],
   config: Pick<StoredLarkConfig, 'traceLimit' | 'hideTraceOnComplete' | 'compactTrace'>,
@@ -1016,6 +1039,8 @@ export function renderLarkCardElements(
   } else if (completed && view !== 'process' && errorEntries.length === 0) {
     elements.push({ tag: 'markdown', element_id: 'result_missing', content: "<text_tag color='orange'>结果不完整</text_tag>　Agent 未返回最终输出，可直接要求 Agent 总结本轮结论。", text_size: 'normal', margin: '4px 0px' });
   }
+  const contextHint = completed && view !== 'process' ? contextPressureElement(events) : undefined;
+  if (contextHint) elements.push(contextHint);
 
   if (view === 'result') return elements;
 

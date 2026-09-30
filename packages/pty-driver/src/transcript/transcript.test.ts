@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
-import { ClaudeTranscriptTailer, mapClaudeEntry, resolveClaudeTranscriptPath } from './claude.js';
+import { ClaudeTranscriptTailer, claudeApiError, mapClaudeEntry, resolveClaudeTranscriptPath } from './claude.js';
 import { CodexTranscriptTailer, resolveCodexRolloutPath } from './codex.js';
 import { createTranscriptTailer } from './index.js';
 import { JsonlTailer } from './tail.js';
@@ -285,6 +285,98 @@ describe('ClaudeTranscriptTailer (explicit path)', () => {
     }) + '\n');
     await sleep(150);
     expect(events).toHaveLength(0);
+  });
+});
+
+// The six API-error shapes observed in real Claude Code transcripts: the
+// `error` enum, the HTTP status when the CLI had one, and the CLI's own text.
+const apiErrorRecord = (error: string, text: string, apiErrorStatus?: number) => ({
+  type: 'assistant', uuid: `uuid-${error}`, isApiErrorMessage: true, error,
+  ...(apiErrorStatus ? { apiErrorStatus } : {}),
+  message: { role: 'assistant', model: '<synthetic>', stop_reason: 'stop_sequence', content: [{ type: 'text', text }] },
+});
+const apiErrorForms = [
+  { name: 'rate_limit', record: apiErrorRecord('rate_limit', "You've hit your session limit · resets 9:40pm (Asia/Shanghai)", 429),
+    hint: 'Claude 上游限流或额度已用尽，额度约在 9:40pm (Asia/Shanghai) 重置。请等额度恢复后再重发，或换用其他模型。', code: 'claude_api_rate_limit' },
+  { name: 'server_error', record: apiErrorRecord('server_error', 'API Error: 529 Overloaded. This is a server-side issue, usually temporary — try again in a moment. If it persists, check https://status.claude.com.', 529),
+    hint: 'Claude 上游暂时不可用（过载、服务端错误或网络中断），Claude Code 已在内部重试过。请稍后重发。', code: 'claude_api_server_error' },
+  { name: 'authentication_failed', record: apiErrorRecord('authentication_failed', 'Please run /login · API Error: 401 OAuth access token has expired. Re-authenticate to continue.', 401),
+    hint: 'Claude 登录或凭据已失效，重试无效。请到开发机上重新登录 Claude Code（/login），或检查网关凭据。', code: 'claude_api_authentication_failed' },
+  { name: 'model_not_found', record: apiErrorRecord('model_not_found', "There's an issue with the selected model (gemini-3.7-flash-high). It may not exist or you may not have access to it.", 404),
+    hint: 'Claude 拒绝了这次请求，模型或请求配置有误，重试无效。请检查 Agent 配置或 /new 的 --model 参数。', code: 'claude_api_model_not_found' },
+  { name: 'invalid_request (context too long)', record: apiErrorRecord('invalid_request', 'Prompt is too long'),
+    hint: '本会话上下文已超出模型上限，重试无效。请用 /new 开新会话（加 --handoff 可带上交接信息）。', code: 'claude_context_too_long' },
+  { name: 'unknown', record: apiErrorRecord('unknown', 'API Error: 400 Request contains an invalid argument.', 400),
+    hint: 'Claude 拒绝了这次请求，模型或请求配置有误，重试无效。请检查 Agent 配置或 /new 的 --model 参数。', code: 'claude_api_unknown' },
+];
+
+describe('Claude API-error records', () => {
+  it.each(apiErrorForms)('maps $name to an actionable hint plus the original first line', ({ record, hint, code }) => {
+    const raw = record.message.content[0]!.text;
+    expect(claudeApiError(record)).toEqual({
+      type: 'error',
+      data: { message: `${hint}\n原文：${raw}`, code, retryable: code === 'claude_api_server_error' },
+      sourceId: `claude-api-error:${record.uuid}`,
+    });
+    // Still not model output: the plain mapper never emits it.
+    expect(mapClaudeEntry(record)).toBeUndefined();
+  });
+
+  it('quotes only a redacted first line of at most 300 characters', () => {
+    const text = `Failed to authenticate. API Error: 401 Bearer sk-ant-api03-secretsecret token=abc123 ${'x'.repeat(400)}\n{"second":"line"}`;
+    const message = String(claudeApiError(apiErrorRecord('authentication_failed', text, 401))?.data.message);
+    const quoted = message.split('原文：')[1]!;
+    expect(quoted).not.toContain('sk-ant');
+    expect(quoted).not.toContain('abc123');
+    expect(quoted).not.toContain('second');
+    expect(quoted).toContain('Bearer [REDACTED]');
+    expect(Array.from(quoted)).toHaveLength(301);
+    expect(quoted.endsWith('…')).toBe(true);
+  });
+
+  it('ignores ordinary and sidechain entries', () => {
+    expect(claudeApiError({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'API Error: 500' }] } })).toBeUndefined();
+    expect(claudeApiError({ ...apiErrorForms[0]!.record, isSidechain: true })).toBeUndefined();
+  });
+
+  it('maps a compact boundary to the same compaction status the ACP driver reports', () => {
+    expect(mapClaudeEntry({ type: 'system', subtype: 'compact_boundary', content: 'Conversation compacted', compactMetadata: { trigger: 'auto', preTokens: 221_751 } }))
+      .toEqual([{ type: 'status', data: { state: 'compaction', phase: 'completed' } }]);
+  });
+
+  const tailFile = async (records: unknown[]) => {
+    const dir = makeTempDir('claude-api-error');
+    const file = join(dir, 'session.jsonl');
+    writeFileSync(file, '');
+    const tailer = new ClaudeTranscriptTailer({ cwd: dir, transcriptPath: file, pollIntervalMs: 60_000 });
+    const events = collect(tailer);
+    tailer.start();
+    appendFileSync(file, records.map(record => JSON.stringify(record) + '\n').join(''));
+    await tailer.flush();
+    tailer.stop();
+    return { tailer, events };
+  };
+  const toolUse = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] } };
+  const toolResult = { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] } };
+  const answer = (text: string) => ({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } });
+
+  it('holds the last error back as the turn failure when no model output follows', async () => {
+    const { tailer, events } = await tailFile([toolUse, toolResult, apiErrorForms[0]!.record]);
+    expect(events.map(event => event.type)).toEqual(['tool_call', 'tool_result']);
+    expect(tailer.takeTurnError()).toEqual(claudeApiError(apiErrorForms[0]!.record));
+    // Taking it clears it: the next turn starts clean.
+    expect(tailer.takeTurnError()).toBeUndefined();
+  });
+
+  it('drops an error superseded by later model output', async () => {
+    const { tailer, events } = await tailFile([apiErrorForms[1]!.record, answer('real answer')]);
+    expect(events.map(event => event.type)).toEqual(['text']);
+    expect(tailer.takeTurnError()).toBeUndefined();
+  });
+
+  it('drops an error that directly follows a text step, which the runtime already completes', async () => {
+    const { tailer } = await tailFile([answer('partial answer'), apiErrorForms[1]!.record]);
+    expect(tailer.takeTurnError()).toBeUndefined();
   });
 });
 

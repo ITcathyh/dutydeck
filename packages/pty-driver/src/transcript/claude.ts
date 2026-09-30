@@ -16,9 +16,11 @@
  *     tool_result     → { type:'tool_result', data:{ id, status, output } }
  *   system turn_duration → no event; feeds pendingBackgroundWork()
  *                          (see claudePendingBackgroundWork)
+ *   system compact_boundary → { type:'status', data:{ state:'compaction', phase:'completed' } }
  *
- * Sidechain (Task tool internals) and API-error assistant lines are skipped —
- * they are not model output.
+ * Sidechain (Task tool internals) lines are skipped. API-error assistant lines
+ * are not model output either: the tailer holds the latest one back as the
+ * turn's failure reason (see claudeApiError / takeTurnError).
  */
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
@@ -232,7 +234,88 @@ export function mapClaudeEntry(entry: any): NormalizedDriverEvent[] | undefined 
     return events.length > 0 ? events : undefined;
   }
 
+  // Context compaction (auto or /compact). Same status shape the ACP driver
+  // reports, so the Lark result card can suggest a fresh session.
+  if (entry.type === 'system' && entry.subtype === 'compact_boundary') {
+    return [{ type: 'status', data: { state: 'compaction', phase: 'completed' } }];
+  }
+
   return undefined;
+}
+
+const API_ERROR_RAW_LIMIT = 300;
+
+/** First non-empty line of an API error, with credentials masked and capped at
+ *  API_ERROR_RAW_LIMIT characters. Lark redacts again when it renders. */
+function apiErrorRawLine(text: string): string {
+  const line = (text.split('\n').map(item => item.trim()).find(Boolean) ?? '')
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, '$1[REDACTED]@')
+    .replace(/\bbearer\s+[^\s"',;}]+/gi, 'Bearer [REDACTED]')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, '[REDACTED]')
+    .replace(/((?:api[_-]?key|token|secret|password)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)/gi, '$1[REDACTED]');
+  const chars = Array.from(line);
+  return chars.length > API_ERROR_RAW_LIMIT ? `${chars.slice(0, API_ERROR_RAW_LIMIT).join('')}…` : line;
+}
+
+const CONFIG_HINT = 'Claude 拒绝了这次请求，模型或请求配置有误，重试无效。请检查 Agent 配置或 /new 的 --model 参数。';
+
+/** One actionable hint per failure the user can do something different about. */
+function apiErrorHint(kind: string, status: unknown, text: string): { hint: string; code: string; retryable: boolean } {
+  // The body is consulted only for this: context overflow arrives as a plain
+  // invalid_request whose remedy (a fresh session) differs from a bad config.
+  if (/prompt is too long/i.test(text)) {
+    return { code: 'claude_context_too_long', retryable: false,
+      hint: '本会话上下文已超出模型上限，重试无效。请用 /new 开新会话（加 --handoff 可带上交接信息）。' };
+  }
+  const code = `claude_api_${kind}`;
+  switch (kind) {
+    case 'rate_limit':
+    case 'billing_error': {
+      const reset = /\bresets?\s+(?:at\s+)?([^·\n]+)/i.exec(text)?.[1]?.trim().replace(/[.。]$/, '');
+      return { code, retryable: false,
+        hint: `Claude 上游限流或额度已用尽${reset ? `，额度约在 ${reset} 重置` : ''}。请等额度恢复后再重发，或换用其他模型。` };
+    }
+    case 'authentication_failed':
+    case 'oauth_org_not_allowed':
+    case 'account_on_hold':
+    case 'verification_required':
+    case 'cloud_credential_error':
+      return { code, retryable: false,
+        hint: 'Claude 登录或凭据已失效，重试无效。请到开发机上重新登录 Claude Code（/login），或检查网关凭据。' };
+    case 'model_not_found':
+    case 'invalid_request':
+      return { code, retryable: false, hint: CONFIG_HINT };
+    default:
+      // unknown / overloaded / server_error, and enum values newer than this
+      // list. An unattributed 4xx other than 429 is still the request's fault.
+      if (kind === 'unknown' && typeof status === 'number' && status >= 400 && status < 500 && status !== 429) {
+        return { code, retryable: false, hint: CONFIG_HINT };
+      }
+      return { code, retryable: true,
+        hint: 'Claude 上游暂时不可用（过载、服务端错误或网络中断），Claude Code 已在内部重试过。请稍后重发。' };
+  }
+}
+
+/**
+ * The failure an API-error line reports, as a displayable error event, or
+ * undefined for every other entry. Claude Code writes one after its own
+ * retries give up: `isApiErrorMessage: true`, the `error` enum, and the CLI's
+ * message as a text block. Whether it becomes the turn's failure is decided by
+ * the tailer (a later answer supersedes it), so mapClaudeEntry never emits it.
+ */
+export function claudeApiError(entry: any): NormalizedDriverEvent | undefined {
+  if (!entry || typeof entry !== 'object' || entry.isSidechain === true || entry.isApiErrorMessage !== true) return undefined;
+  const content = entry.message?.content;
+  const text = typeof content === 'string' ? content : Array.isArray(content)
+    ? content.filter((block: any) => block?.type === 'text' && typeof block.text === 'string').map((block: any) => block.text).join('\n')
+    : '';
+  const { hint, code, retryable } = apiErrorHint(typeof entry.error === 'string' ? entry.error : 'unknown', entry.apiErrorStatus, text);
+  const raw = apiErrorRawLine(text);
+  return {
+    type: 'error',
+    data: { message: raw ? `${hint}\n原文：${raw}` : hint, code, retryable },
+    ...(typeof entry.uuid === 'string' && entry.uuid ? { sourceId: `claude-api-error:${entry.uuid}` } : {}),
+  };
 }
 
 /**
@@ -273,6 +356,10 @@ export interface ClaudeTranscriptTailerOptions {
 export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
   private backgroundWork = 0;
+  /** Latest API error of this turn not yet superseded by model output. */
+  private turnError: NormalizedDriverEvent | undefined;
+  /** Type of this turn's latest model activity, ranked as the runtime ranks it. */
+  private lastActivity: NormalizedDriverEvent['type'] | undefined;
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
@@ -297,7 +384,23 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
       mapEntry: entry => {
         const pending = claudePendingBackgroundWork(entry);
         if (pending !== undefined) this.backgroundWork = pending;
-        return mapClaudeEntry(entry);
+        const apiError = claudeApiError(entry);
+        if (apiError) {
+          // Right after a text step the runtime already completes the turn (a
+          // stop-hook continuation, or an answer cut short mid-stream), and
+          // reporting the error would fail an answer the user has. Otherwise
+          // it is the reason the turn ends without final text.
+          this.turnError = this.lastActivity === 'text' ? undefined : apiError;
+          return undefined;
+        }
+        const events = mapClaudeEntry(entry);
+        const activity = events?.filter(event => ['text', 'thinking', 'tool_call', 'tool_result'].includes(event.type)).at(-1);
+        if (activity) {
+          // The model carried on, so that error no longer explains the turn's end.
+          this.turnError = undefined;
+          this.lastActivity = activity.type;
+        }
+        return events;
       },
       pollIntervalMs: opts.pollIntervalMs,
       /**
@@ -328,4 +431,10 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
   pendingBackgroundWork(): number { return this.backgroundWork; }
   resetBackgroundWork(): void { this.backgroundWork = 0; }
+  takeTurnError(): NormalizedDriverEvent | undefined {
+    const error = this.turnError;
+    this.turnError = undefined;
+    this.lastActivity = undefined;
+    return error;
+  }
 }

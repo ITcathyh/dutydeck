@@ -5,10 +5,12 @@ import type { AgentConfig } from '@dutydeck/shared';
 import { discoverAgentModels } from '../agent-models.js';
 
 export interface LarkLaunchOptions { agentId?: string; cwd?: string; model?: string; reasoningEffort?: string; workspaceMode?: 'shared' | 'worktree' }
-export const larkNewSessionUsage = '/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容';
+export const larkNewSessionUsage = '/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容；带交接：/new [以上选项] --handoff [备注] [-- 任务内容]';
 
-/** Only the option header is tokenized; the task body is never shell-parsed. */
-export function parseLarkNewSession(input: string): { prompt: string; launchOptions?: LarkLaunchOptions } {
+/** Only the option header is tokenized; the task body is never shell-parsed.
+ *  `--handoff` ends the header: the raw text after it up to a standalone `--`
+ *  is the note (spaces need no quotes), and the task after `--` is optional. */
+export function parseLarkNewSession(input: string): { prompt: string; launchOptions?: LarkLaunchOptions; handoff?: { note: string } } {
   const body = input.trim();
   if (!body.startsWith('--')) return { prompt: body };
   const launchOptions: LarkLaunchOptions = {};
@@ -26,6 +28,14 @@ export function parseLarkNewSession(input: string): { prompt: string; launchOpti
     if (flag === '--') {
       if (!remaining.trim()) throw invalid();
       return { prompt: remaining.trimEnd(), ...(Object.keys(launchOptions).length ? { launchOptions } : {}) };
+    }
+    if (flag === '--handoff') {
+      const separator = /(?:^|\s)--(?=\s|$)/u.exec(remaining);
+      const note = (separator ? remaining.slice(0, separator.index) : remaining).trim();
+      const prompt = separator ? remaining.slice(separator.index + separator[0].length).trim() : '';
+      // Options after --handoff would silently become the note; `-- ` with no task is the same typo as elsewhere.
+      if (note.startsWith('--') || (separator && !prompt)) throw invalid();
+      return { prompt, handoff: { note }, ...(Object.keys(launchOptions).length ? { launchOptions } : {}) };
     }
     const field = fields[flag as keyof typeof fields];
     if (!field || launchOptions[field] !== undefined) throw invalid();

@@ -40,6 +40,10 @@ export interface TranscriptEventSource {
   pendingBackgroundWork?(): number;
   /** Forget that report at a new prompt; the new turn's own end record decides. */
   resetBackgroundWork?(): void;
+  /** Why the turn ends without an answer, when the CLI recorded it (Claude's
+   *  API-error lines). Held back until the turn ends because later model output
+   *  supersedes it. Taking it starts a clean slate for the next turn. */
+  takeTurnError?(): NormalizedDriverEvent | undefined;
 }
 
 /** Loose shape of a parsed JSONL entry — mappers narrow per CLI schema. */

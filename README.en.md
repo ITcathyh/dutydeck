@@ -171,6 +171,7 @@ The Lark Bot is the primary driver for Dutydeck. Once bound, you can steer entir
 | `/help` | `/help` | Display list of available commands and actions |
 | `/new` | `/new -- Fix memory leak in auth handler` | Close previous context and start a fresh task |
 | `/new (Advanced)` | `/new --cwd "/data/app" --workspace worktree -- Refactor API` | Target a specific folder and spawn an isolated Git Worktree |
+| `/new --handoff` | `/new --handoff Add tests for login retry` | Close the previous context and open a new session whose first turn carries a handoff: old session link, last 3 results, git snapshot and your note (built by the server, no model summary); `-- prompt` is optional |
 | `/tasks` | `/tasks 1` | View active, pending, and recently finished tasks |
 | `/approve` | `/approve <card_id>` | Approve a pending sensitive action (same as clicking button) |
 | `/reject` | `/reject <card_id>` | Reject a pending sensitive action |
