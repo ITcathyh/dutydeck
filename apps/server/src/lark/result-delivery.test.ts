@@ -122,6 +122,21 @@ describe('separate process and complete result messages', () => {
     expect(service.sendFile).not.toHaveBeenCalled();
   });
 
+  it('keeps the context hint on the summary card when an oversized result moves into the attachment', async () => {
+    const service = { uploadFile: vi.fn(async (_input: any) => 'file_full'), replyFile: vi.fn(async (_input: any) => ({ messageId: 'om_file' })),
+      reply: vi.fn(async (_input: any) => ({ messageId: 'om_summary' })), send: vi.fn(), sendFile: vi.fn() };
+    const elements = renderLarkResultElements([
+      event(1, 'status', { state: 'usage', used: 180_000, size: 200_000 }),
+      event(2, 'text', { text: `结论开头\n${'完整结果'.repeat(8000)}` })
+    ]);
+    const result = await sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question' },
+      { state: 'completed', taskId: 'task1', readOnly: true, taskName: '长结果', elements, idempotencyKey: larkResultKey('om_process') }, log);
+    expect(result.attachmentMessageId).toBe('om_file');
+    const summary = service.reply.mock.calls[0]![0];
+    expect(summary.elements.map((element: any) => element.element_id)).toEqual(['final_output', 'result_attachment', 'context_hint']);
+    expect(JSON.stringify(buildLarkCard(summary))).toContain('上下文已用 90%，可用 /new --handoff 带交接开新会话。');
+  });
+
   it('uses the same result UUID for reply fallback and propagates a failed delivery', async () => {
     const service = { reply: vi.fn(async () => { throw recalled(); }), send: vi.fn(async () => { throw new Error('unavailable'); }) };
     await expect(sendLarkResult(service as any, { chatId: 'oc_group', replyMessageId: 'om_question' }, input('答案'), log)).rejects.toThrow('unavailable');

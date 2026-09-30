@@ -7,8 +7,10 @@ import { createRepositories } from '@dutydeck/storage';
 import { RuntimeError } from '@dutydeck/shared';
 import type { AgentConfig, AgentEvent, ChannelMappingRepository, PolicyAction, Session, TaskRecord } from '@dutydeck/shared';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
-import { LarkMessageCoordinator } from './coordinator.js';
+import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import { LarkTaskInbox } from './task-inbox.js';
+import { explicitFinalContext, sendExplicitFinal } from './explicit-final.js';
+import { larkCardChannel } from './coordinator-core.js';
 import type { LarkMessageEvent } from './listener.js';
 import { larkSessionConfigKey, larkSourceId } from './session-resolver.js';
 
@@ -258,6 +260,45 @@ describe('Lark /new first-turn launch options', () => {
     expect(withTask).toContain('不是 git 仓库或读取失败');
     expect(withTask).toContain('用户备注：备注 x');
     expect(withTask.endsWith('[交接结束]\n\n继续修复')).toBe(true);
+  });
+
+  it('quotes a delivered explicit final instead of the turn\'s bare acknowledgement text', async () => {
+    const h = await harness();
+    const coordinator = h.createCoordinator();
+    await coordinator.handle(dm('om_old', 'old task'), h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledOnce());
+
+    const at = (index: number) => new Date(1_700_000_100_000 + index * 1_000).toISOString();
+    const tasks = [
+      { id: 'task_final', sessionId: 'ses_1', prompt: '写周报', status: 'completed', currentAttemptId: 'att_final', createdAt: at(10), updatedAt: at(15) },
+      { id: 'task_plain', sessionId: 'ses_1', prompt: '查日志', status: 'completed', currentAttemptId: 'att_plain', createdAt: at(20), updatedAt: at(25) }
+    ];
+    let sequence = 0;
+    const item = (type: AgentEvent['type'], data: unknown): AgentEvent => ({ id: `evt_${++sequence}`, sessionId: 'ses_1', sequence, type, data, timestamp: at(sequence) });
+    const events: AgentEvent[] = [
+      item('text', { role: 'user', taskId: 'task_final', text: '写周报' }), item('text', { role: 'assistant', text: '已发送' }), item('task', { task: tasks[0] }),
+      item('text', { role: 'user', taskId: 'task_plain', text: '查日志' }), item('text', { role: 'assistant', text: '日志里没有报错' }), item('task', { task: tasks[1] })
+    ];
+    h.runtime.getTasks.mockImplementation(async (id: string) => id === 'ses_1' ? tasks.map(task => ({ ...task })) : []);
+    Object.assign(h.runtime, { getRecentEvents: vi.fn(async () => events) });
+    // Both turns have a card; only the first delivered its answer through group send --final.
+    for (const [task, messageId] of [[tasks[0]!, 'om_final_card'], [tasks[1]!, 'om_plain_card']] as const) {
+      const saved: PersistedLarkCardTask = { app_id: h.config.appId, chat_id: 'ou_alice', chat_type: 'p2p', runtime_task_id: task.id,
+        task_name: task.prompt, prompt: task.prompt, state: 'completed', started_at: Date.parse(task.createdAt), turn: 1,
+        card_message_id: messageId, final_message_id: `${messageId}_result`, final_delivery_state: 'delivered' };
+      await h.repos.channelMappings.save({ id: `card_${task.id}`, channel: larkCardChannel(h.config.appId), externalId: messageId, sessionId: 'ses_1', extra: JSON.stringify(saved), createdAt: task.createdAt });
+      if (task.id === 'task_final') {
+        const row = (await h.repos.channelMappings.list(larkCardChannel(h.config.appId))).find(mapping => mapping.externalId === messageId)!;
+        await sendExplicitFinal(h.repos.config, h.service as any, explicitFinalContext(row, saved, task.currentAttemptId)!, '周报结论：三项都已完成，下周跟进发布。');
+      }
+    }
+
+    await coordinator.handle(dm('om_handoff', '/new --handoff'), h.config);
+    await vi.waitFor(() => expect(h.runtime.send).toHaveBeenCalledTimes(2));
+    const firstTurn = String(h.runtime.send.mock.calls[1]?.[2]);
+    expect(firstTurn).toContain('1. 写周报（已完成）\n   周报结论：三项都已完成，下周跟进发布。');
+    expect(firstTurn).not.toContain('已发送');
+    expect(firstTurn).toContain('2. 查日志（已完成）\n   日志里没有报错');
   });
 
   it('rejects malformed and adapter-unsupported options before stopping the old session', async () => {

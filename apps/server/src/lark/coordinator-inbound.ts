@@ -5,6 +5,8 @@ import type { LarkInboxRecord } from './task-inbox.js';
 import { isLarkFirstCardUndelivered } from './task-inbox.js';
 import { parseLarkNewSession } from './new-session.js';
 import { formatLarkHandoff, larkHandoffAck, larkHandoffTitle } from './handoff.js';
+import { explicitFinalContext, readExplicitFinal } from './explicit-final.js';
+import { redactTraceText } from './secret-redaction.js';
 import { readGitSnapshot } from './git-status.js';
 import { buildLarkTaskDashboard, type LarkTaskDashboardEntry } from './task-dashboard.js';
 import { isLarkGroupMemoryPool, isLarkMemoryId, isLarkMemoryIgnoreRuleId, larkMemoryLimits, larkMemoryScope, renderLarkMemoryList } from './memory.js';
@@ -1361,7 +1363,7 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
   }
 
   /**
-   * `/new --handoff` 的交接前缀：最近 3 轮已结束任务的标题与结果摘录（与结果卡同一口径、已脱敏）、
+   * `/new --handoff` 的交接前缀：最近 3 轮已结束任务的标题与结果摘录（已交付的显式最终答复优先，否则与结果卡同一口径；已脱敏）、
    * 旧会话链接、工作目录 git 快照和备注。只读执行记录，不调用模型；读不到的部分缺省，不让 /new 失败。
    */
   private async newSessionHandoff(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string | undefined, tasks: TaskRecord[], note: string) {
@@ -1369,13 +1371,29 @@ export abstract class LarkCoordinatorInbound extends LarkCoordinatorDispatch {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt)).slice(-3);
     const window = sessionId && recent.length && (this.runtime.getRecentEvents || this.runtime.getEvents)
       ? await loadLarkTaskWindow(this.runtime, sessionId, recent[0]!.id, 500).catch(() => []) : [];
+    const store = this.workflowOptions.store;
+    const cards = store && sessionId && recent.length ? await this.cardMappings?.list(larkCardChannel(config.appId)).catch(() => undefined) : undefined;
+    // 用 group send --final 交付过答复的轮次，结论在那条记录里，助手文本往往只剩一句确认。
+    // 取法同 agent-tools 的 taskAnswer：本聊天里唯一对得上的卡片映射还原 scope，只认已交付的记录。
+    const explicitFinal = async (task: TaskRecord) => {
+      const matches = (cards ?? []).flatMap(row => {
+        try {
+          const saved = JSON.parse(row.extra ?? '{}') as PersistedLarkCardTask;
+          return row.sessionId === sessionId && saved.runtime_task_id === task.id && saved.chat_id === event.chatId ? [{ row, saved }] : [];
+        } catch { return []; }
+      });
+      const context = matches.length === 1 ? explicitFinalContext(matches[0]!.row, matches[0]!.saved, task.currentAttemptId) : undefined;
+      const content = store && context ? (await readExplicitFinal(store, context).catch(() => undefined))?.trim() : undefined;
+      return content ? redactTraceText(content) : undefined;
+    };
     const turns = await Promise.all(recent.map(async task => {
       const title = (await this.larkTaskOrigin(config, event.chatId, { id: task.id, sessionId: sessionId! }).catch(() => undefined))?.title
         ?? larkTaskTitle(task.prompt, config.name);
       // 窗口里没有这一轮的起点时 eventsForRuntimeTask 会退回整段窗口，那不是这一轮的结果。
       const started = window.some(item => item.type === 'text' && (item.data as any)?.role === 'user' && (item.data as any)?.taskId === task.id);
       const elements = started ? renderLarkResultElements(eventsForRuntimeTask(window, task.id)) : [];
-      const result = elements.find(element => element.element_id === 'final_output')?.content
+      const result = await explicitFinal(task)
+        ?? elements.find(element => element.element_id === 'final_output')?.content
         ?? elements.find(element => String(element.element_id ?? '').startsWith('execution_alert_'))?.content;
       return { title, status: task.status, ...(typeof result === 'string' ? { result } : {}) };
     }));
