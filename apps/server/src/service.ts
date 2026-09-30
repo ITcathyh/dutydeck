@@ -298,6 +298,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id) }),
     prepareTaskPrompt: (session, prompt, skills) => prepareSkillPrompt(session.cwd, prompt, skills),
     sessionPrompt: (session, prompt) => agentTools.promptForSession(session, prompt),
+    awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
     log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) }
   });
   setupCleanup.push(() => runtime.shutdown());

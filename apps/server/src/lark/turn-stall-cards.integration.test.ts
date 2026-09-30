@@ -6,9 +6,11 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { RelayAskBroker } from '@dutydeck/relay';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
+import { createRelayAskStore } from '../relay-ask-store.js';
 import { LarkMessageCoordinator, type PersistedLarkCardTask } from './coordinator.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { buildLarkCard } from './service.js';
@@ -33,6 +35,7 @@ async function harness() {
   let emit!: (event: NormalizedDriverEvent) => void;
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
+    awaitingAnswer: id => broker.listPending(id).length > 0,
     driverFactory: (_config, _protocol, onEvent) => {
       emit = onEvent;
       let finish: (() => void) | undefined;
@@ -54,6 +57,8 @@ async function harness() {
   });
   const agent: AgentConfig = { id: 'mock', name: 'Mock Agent', command: process.execPath, args: [], protocol: 'acp', cwd, env: {}, permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
   await runtime.initialize([agent]);
+  const broker = new RelayAskBroker({ publish: async (sessionId, input) => { await runtime.publishSessionEvent(sessionId, 'text', { text: input.text, relay: input.kind, askId: input.askId }); } }, createRelayAskStore(repos.config));
+  await broker.initialize();
   const config: StoredLarkConfig = { appId: 'cli_stall', appSecret: 'fake-secret', workspace: cwd, defaultAgentId: 'mock', permissionMode: 'ask', listening: true,
     fullTrustConfirmed: true, preInjectPrompt: '', structuredAskCards: false, groupCardMention: false, groupToolsEnabled: false, groupToolsAllowSend: false,
     pushIntervalMs: 500, hideTraceOnComplete: false, allowedUsers: [], allowedEmails: [], allowedBots: [], peerBotsAllowed: false,
@@ -73,9 +78,9 @@ async function harness() {
     getMessageItems: vi.fn(async () => [] as any[])
   };
   const coordinator = new LarkMessageCoordinator(runtime, service as any, { info: vi.fn(), warn: vi.fn(), error: vi.fn() }, Math.random, 'ou_bot', undefined, repos.channelMappings,
-    async () => 'group', undefined, undefined, { store: repos.config });
+    async () => 'group', undefined, undefined, { store: repos.config, broker });
   await coordinator.initializeWorkflows(config);
-  cleanups.push(async () => { coordinator.stop(); await runtime.shutdown(); repos.close(); idle.kill('SIGKILL'); await rm(cwd, { recursive: true, force: true }); });
+  cleanups.push(async () => { coordinator.stop(); broker.close(); await broker.flush(); await runtime.shutdown(); repos.close(); idle.kill('SIGKILL'); await rm(cwd, { recursive: true, force: true }); });
   // 墙钟整体前移，其余照常流逝：静默时长与 CPU 采样窗口都按它算。
   const realNow = Date.now.bind(Date);
   let offset = 0;
@@ -116,7 +121,7 @@ async function harness() {
     offset += 15_000;
   };
   const cardMessageId = async (id: string) => (JSON.parse((await repos.channelMappings.get(`lark-card:${config.appId}`, id))!.extra!) as PersistedLarkCardTask).card_message_id!;
-  return { coordinator, cards, prompts, interrupt, emit: (value: NormalizedDriverEvent) => emit(value), markdownOf, latestCard, buttonsOf, waitLatest, dispatch, runtimeTask, goSilent, cardMessageId };
+  return { runtime, broker, advance: (ms: number) => { offset += ms; }, coordinator, cards, prompts, interrupt, emit: (value: NormalizedDriverEvent) => emit(value), markdownOf, latestCard, buttonsOf, waitLatest, dispatch, runtimeTask, goSilent, cardMessageId };
 }
 
 describe.runIf(existsSync('/proc/self/stat'))('飞书卡上的「可能卡住」提示', () => {
@@ -159,6 +164,37 @@ describe.runIf(existsSync('/proc/self/stat'))('飞书卡上的「可能卡住」
     await vi.waitFor(() => expect(h.prompts.at(-1)).toContain('第二件事'));
     expect(h.interrupt).not.toHaveBeenCalled();
     expect((await h.runtimeTask('第一件事'))?.status).toBe('running');
+  }, 30_000);
+
+  it('这一轮在等人回答时两张卡都不标可能卡住，回答后仍然静默才提示', async () => {
+    const h = await harness();
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第二件事');
+    await h.waitLatest('om_2', card => expect(h.markdownOf(card)).toContain('不会传给它'));
+    const [session] = await h.runtime.listSessions();
+    const asked = h.broker.register({ sessionId: session!.id, question: '用哪种方案？', timeoutMs: 3_600_000 });
+    await vi.waitFor(() => expect(h.cards.some(card => h.markdownOf(card).includes('用哪种方案'))).toBe(true));
+    const since = h.cards.length;
+    await h.goSilent();
+    // 排队卡不跟心跳重绘：点两次「刷新」，相隔一个 CPU 采样窗口，按此刻重算。
+    const act = async (action: string) => h.coordinator.handleAction({ action, task_id: 'om_2', turn: '1' }, 'ou_alice', { messageId: await h.cardMessageId('om_2'), chatId: 'oc_group' });
+    expect(await act('refresh')).toMatchObject({ type: 'success' });
+    h.advance(15_000);
+    expect(await act('refresh')).toMatchObject({ type: 'success' });
+    await pause(1_200);
+    expect(h.cards.slice(since).filter(card => card.taskId === 'om_1' || card.taskId === 'om_2')
+      .some(card => card.statusLabel === '可能卡住' || h.markdownOf(card).includes('可能卡住'))).toBe(false);
+    expect(h.buttonsOf(h.latestCard('om_2'))).not.toContain('在新会话中执行');
+    expect(await act('run_in_new_session')).toMatchObject({ type: 'warning', content: expect.stringContaining('不需要转到新会话') });
+
+    // 回答之后这一轮仍然没有动静：按原来的口径提示。
+    await h.broker.answer(h.broker.listPending(session!.id)[0]!.id, '方案 A');
+    await expect(asked).resolves.toMatchObject({ status: 'answered' });
+    await h.goSilent();
+    await h.waitLatest('om_1', card => expect(card.statusLabel).toBe('可能卡住'));
+    await h.waitLatest('om_2', card => expect(h.buttonsOf(card)).toContain('在新会话中执行'));
+    expect(h.interrupt).not.toHaveBeenCalled();
   }, 30_000);
 
   it('后面没有排队时不提示', async () => {
