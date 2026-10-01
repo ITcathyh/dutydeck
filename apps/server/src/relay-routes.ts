@@ -1,3 +1,4 @@
+import type { HerdrSessions } from './herdr.js';
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import { RuntimeError } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
@@ -12,6 +13,7 @@ import {
 
 export interface RelayRoutesOptions {
   runtime?: DutydeckRuntime;
+  herdr?: HerdrSessions;
   capabilities?: RelayCapabilityRegistry;
   broker?: RelayAskBroker;
   service?: RelayService;
@@ -20,7 +22,7 @@ export interface RelayRoutesOptions {
 /** Only child-to-host relay calls use the session HMAC as their sole credential. */
 export const isRelayCapabilityRequest = (method: string, pathname: string) =>
   method.toUpperCase() === 'POST'
-  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask)$/.test(pathname);
+  && /^\/api\/relay\/sessions\/[^/]+\/(?:send|ask|herdr)$/.test(pathname);
 
 /** 会话进入这些状态时，把该会话所有阻塞中的 ask 唤醒 */
 const terminalStates = new Set(['stopped', 'failed']);
@@ -102,6 +104,17 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
     for (const sessionId of [...watched.keys()]) unwatch(sessionId);
     // daemon 关停也要唤醒并取消所有等待中的 ask 请求
     broker.close();
+  });
+
+  if (options.herdr && runtime) app.post<{ Params: { id: string }; Body: { action?: string } }>('/api/relay/sessions/:id/herdr', async (request, reply) => {
+    try {
+      const capability = await service.resolveSession(request.headers.authorization, request.params.id);
+      const session = await runtime.getSession(capability.sessionId);
+      if (!session) throw new RelayError('HERDR_SESSION_MISSING', 'Dutydeck 会话不存在。', 404);
+      if (request.body?.action === 'prepare') return await options.herdr!.prepare(session);
+      if (request.body?.action === 'stop') return await options.herdr!.stop(session.id);
+      throw new RelayError('HERDR_INVALID_ACTION', 'Herdr 入口仅支持 prepare 或 stop。', 400);
+    } catch (error) { return handleRelayError(error, reply); }
   });
 
   app.post<{ Params: { id: string }; Body: { text?: string } }>('/api/relay/sessions/:id/send', async (request, reply) => {

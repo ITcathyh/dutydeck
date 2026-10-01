@@ -1,3 +1,6 @@
+import { createRequire } from 'node:module';
+import { HerdrSessions } from './herdr.js';
+import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
 import { resolveExplicitFinalContext } from './lark/explicit-final.js';
 import { larkResultDeliveryIssues } from './lark/reconciler.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
@@ -170,6 +173,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     relaySigningSecret,
     options.groupToolsCommand
   );
+  const herdr = new HerdrSessions({ database: config.databaseUrl, signingSecret: relaySigningSecret, botAppId: env.DUTYDECK_BOT_APP_ID, env,
+    command: options.groupToolsCommand ?? dutydeckGroupToolsCommand(fileURLToPath(new URL(import.meta.url.endsWith('.ts') ? './cli.ts' : './cli.js', import.meta.url)), process.execPath, import.meta.url.endsWith('.ts') ? createRequire(import.meta.url).resolve('tsx') : undefined) });
   // 访问认证：默认启动时确保 token 存在。首次生成时只提示查看命令，token 本身不进日志。
   // 走 stderr 而非 stdout——daemon 子进程的 stdout 承载 daemon 协议的 JSON 输出，不能污染；
   // daemon 模式下 stderr 与 stdout 一起重定向到 dutydeck.log，前台模式下直接可见。
@@ -295,9 +300,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     ptyDriverFactory,
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     cleanupIntervalMs: config.cleanupIntervalMs,
-    sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id) }),
+    sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id) }),
     prepareTaskPrompt: (session, prompt, skills) => prepareSkillPrompt(session.cwd, prompt, skills),
-    sessionPrompt: (session, prompt) => agentTools.promptForSession(session, prompt),
+    sessionPrompt: async (session, prompt) => `${herdr.prompt()}\n\n${await agentTools.promptForSession(session, prompt)}`,
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
     log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) }
   });
@@ -487,7 +492,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         authorize: (request, sessionId, action) => authorizeSessionRequest(request, sessionId, 'terminal', action),
       },
       instances: parsePeerInstances(env.DUTYDECK_INSTANCES_JSON),
-      relay: { runtime, capabilities: relayCapabilities, broker: relayBroker },
+      relay: { runtime, capabilities: relayCapabilities, broker: relayBroker, herdr },
       foundation: { repositories: repos, authorize: foundationManagementAuthorizer, inspectSecretRef, isLiveManagedBot: id => groupManager.isLiveManagedBot(id) },
       identityPreflight: { repositories: repos, authorize: foundationManagementAuthorizer, probe: identityPreflightProbe, now: options.identityPreflight?.now },
       schedule: { repositories: repos, authorize: foundationManagementAuthorizer, uiEntryReady: true, collaborationExecutorWired: true },

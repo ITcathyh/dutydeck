@@ -442,6 +442,27 @@ dutydeck autostart disable  # 移除开机自启
 
 ---
 
+### 4. 会话专属 Herdr 子任务工作空间
+
+安装 Herdr 0.9.0 或兼容版本后，ACP/tmux 主 Agent 保持现有运行方式，可用 Herdr 派发侧边子任务。每个 Dutydeck 会话获得独立 named session，名称按安装数据库、机器人身份、持久签名密钥和会话 ID 派生；首次调用才创建，后续调用与 daemon 重启复用。
+
+Agent 每轮收到完整入口前缀；环境中的 `dutydeck_herdr_command` 是同一个入口。下面命令在 Dutydeck Agent 的工具 shell 内执行（先把返回的真实 ID 替换到后续命令）：
+
+```bash
+# eval 用于执行 Dutydeck 提供的已引用绝对路径前缀；不要改用 PATH 中的 dutydeck。
+eval "$dutydeck_herdr_command prepare"
+# 返回 session_name、socket_path、workspace_id、root_pane_id；首次创建通常是 w1、w1:p1。
+eval "$dutydeck_herdr_command pane split w1:p1 --direction right --no-focus"
+eval "$dutydeck_herdr_command pane run w1:p2 'echo dutydeck-herdr-ready'"
+eval "$dutydeck_herdr_command pane read w1:p2 --source recent-unwrapped --lines 40"
+# 确认任务可中断后停止本会话专属 server，保留保存状态。
+eval "$dutydeck_herdr_command stop"
+```
+
+入口使用现有会话凭证固定路由，使用宿主实际 socket 路径，因此 Agent 覆盖 HOME/XDG_CONFIG_HOME 也不会改路由；支持专属 session 内的 workspace/tab/pane/agent CLI 操作；禁止 `--session`、`--remote`、`--machine`、`--current` 和全局 session/server 管理命令。主 Agent 是外部调用方，不伪造 `HERDR_ENV` 或 `HERDR_PANE_ID`；未安装 Herdr 会在 prompt 中说明，不影响普通任务。
+
+关闭 daemon、停止/归档主会话或回收主 Agent 都不会自动终止侧边任务。入口需要运行中的 daemon 和有效会话凭证；失去凭证后，可在宿主终端按先前返回的名称清理：`herdr session stop dutydeck-<摘要>`；确认不再需要保存状态后再执行 `herdr session delete dutydeck-<摘要>`。只清理自己的专属名称，不使用 `default`。Herdr server 停止后保存布局；shell 进程会结束，Agent 恢复取决于 Herdr 的集成和配置，不保证任务自动续跑。
+
 ## ❓ 常见问题与排障 (FAQ) <a id="faq"></a>
 
 ### Q1: 飞书发消息后，机器人没有加 `👌` 表情，也没有任何反应？

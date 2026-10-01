@@ -1,3 +1,4 @@
+import { execFile } from 'node:child_process';
 import readline from 'node:readline';
 
 const rl = readline.createInterface({ input: process.stdin });
@@ -30,6 +31,19 @@ rl.on('line', async line => {
   }
   if (method === 'session/prompt') {
     const prompt = (params.prompt ?? []).map(p => p.text ?? '').join('');
+    const herdrCommand = prompt.match(/herdr command: (.*)/);
+    if (herdrCommand) {
+      const args = JSON.parse(herdrCommand[1]);
+      const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+      const output = await new Promise((resolve, reject) => execFile('/bin/sh', ['-c', `${process.env.dutydeck_herdr_command} ${args.map(quote).join(' ')}`], { timeout: 20000 }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: output || 'Herdr CLI completed with no stdout' } } } });
+      return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
+    }
+    if (prompt.includes('report herdr environment')) {
+      const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /^HERDR_/i.test(key) || key.startsWith('dutydeck_herdr_')));
+      send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: JSON.stringify(env) } } } });
+      return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });
+    }
     if (prompt.includes('report bridged environment')) {
       send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: `Bridged: ${process.env.MOCK_VENDOR_TOKEN ?? 'missing'}` } } } });
       return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn' } });

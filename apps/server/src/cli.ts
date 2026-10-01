@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runHerdrCli } from './herdr-cli.js';
 import { RecoveryCliError, runRecoveryCli } from './recovery-cli.js';
 import { WorkspaceGroupsCliError, runWorkspaceGroupsCli } from './workspace-groups-cli.js';
 import { SessionNamesCliError, runSessionNamesCli } from './session-names-cli.js';
@@ -432,6 +433,7 @@ async function main() {
     },
     memoryAdd: async (content, options) => { output(await runMemoryAdd(content, options)); },
     memoryRemove: async id => { output(await runMemoryRemove(id)); },
+    sessionHerdr: async args => { await runHerdrCli(args); },
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionNativeAsk: async () => {
       const result = await runNativeAskHook(await readNativeAskPayload(process.stdin));

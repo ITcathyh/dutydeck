@@ -43,6 +43,7 @@ function splitAgentEnvironment(env: Record<string, string>) {
   const persisted: Record<string, string> = {};
   const bridged: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
+    if (/^HERDR_/i.test(key)) continue;
     if (persistedEnvKey.test(key)) persisted[key] = value;
     else bridged[key] = value;
   }
@@ -64,8 +65,8 @@ export interface AcpxAgentLaunch {
 /** Prepare the ACPX boundary without persisting vendor env names or values. */
 export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDirectory: string; sessionKey: string }): AcpxAgentLaunch {
   const { persisted, bridged } = splitAgentEnvironment(agent.env);
-  const entries = Object.entries(bridged);
-  if (entries.length === 0) {
+  // Keep the direct ACP launch when no expansion or inherited pane cleanup is needed.
+  if (Object.keys(bridged).length === 0 && !Object.keys(process.env).some(key => /^HERDR_/i.test(key))) {
     return { command: [agent.command, ...agent.args], sessionOptions: buildAcpxSessionOptions(agent), cleanup() {} };
   }
 
@@ -354,6 +355,7 @@ export class AcpxAdapter implements AgentDriver {
     const scopedKeys = [
       'dutydeck_group_tools_url', 'dutydeck_group_tools_token',
       'dutydeck_relay_url', 'dutydeck_relay_token', 'dutydeck_relay_command',
+      'dutydeck_herdr_session', 'dutydeck_herdr_command',
       bridgedAgentEnvDigestKey
     ] as const;
     const record = await this.sessionStore.load(this.sessionKey);

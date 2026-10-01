@@ -22,6 +22,7 @@ try {
 }
 
 const env = { ...process.env, ...bridged };
+for (const key of Object.keys(env)) if (/^HERDR_/i.test(key)) delete env[key];
 delete env[carrierKey];
 delete env[digestKey];
 launchAgent(command, args, env);

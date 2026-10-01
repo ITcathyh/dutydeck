@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRuntimeStore } from 'acpx/runtime';
 import { AcpxAdapter, buildAcpxSessionOptions, normalizeAcpxEvent, renderAgentCommand } from './index.js';
 
@@ -261,6 +261,27 @@ describe('acpx ACP boundary', () => {
     }, { sessionKey: 'group-capability-session', onEvent() {} });
     await expect(adapter.start()).resolves.toBeUndefined();
     await adapter.stop();
+  });
+
+  it.each([false, true])('clears inherited Herdr identity in a real persistent ACP agent (vendor bridge: %s)', async bridged => {
+    const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-herdr-acp-')); dirs.push(cwd);
+    const fixture = resolve('tests/fixtures/mock-acp-agent.mjs');
+    const inherited = { HERDR_SOCKET_PATH: '/user/default.sock', HERDR_ENV: '1', HERDR_PANE_ID: 'user:p1', HERDR_WORKSPACE_ID: 'user', HERDR_TAB_ID: 'user:t1', HERDR_SESSION: 'default', HERDR_CONFIG_PATH: '/user/config', HERDR_CUSTOM: 'outer' };
+    for (const [key,value] of Object.entries(inherited)) vi.stubEnv(key,value);
+    const env = { dutydeck_herdr_session: 'dutydeck-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', dutydeck_herdr_command: "'/node' '/runtime/cli.js' session herdr --", ...(bridged ? { MOCK_VENDOR_TOKEN: 'fixture' } : {}), HERDR_PANE_ID: 'fake:p1' };
+    const sessionKey = 'herdr-persistent-session';
+    const events: any[] = [];
+    const adapter = new AcpxAdapter({ ...agentConfig(), cwd, command:process.execPath,args:[fixture],env },{sessionKey,onEvent:event=>events.push(event)});
+    try {
+      await adapter.start(); await adapter.send('report herdr environment');
+      const actual = JSON.parse(events.find(event=>event.type==='text').data.text);
+      expect(actual).toEqual({dutydeck_herdr_session:env.dutydeck_herdr_session,dutydeck_herdr_command:env.dutydeck_herdr_command});
+      await adapter.stop();
+      const record=await createRuntimeStore({stateDir:join(cwd,'.dutydeck','acpx')}).load(sessionKey);
+      expect(record?.acpx?.session_options?.env).toMatchObject(actual);
+      expect(Object.keys(record!.acpx!.session_options!.env!).every(key=>/^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(key))).toBe(true);
+      expect(process.env.HERDR_PANE_ID).toBe('user:p1');
+    } finally { await adapter.stop(); vi.unstubAllEnvs(); }
   });
 
   it('bridges uppercase Agent env without persisting an uppercase session key', async () => {
