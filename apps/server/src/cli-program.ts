@@ -229,6 +229,7 @@ export interface CliHandlers {
   memorySearch?(query: string, options?: { topic?: string; limit?: string }): void | Promise<void>;
   memoryAdd?(content: string, options?: { topic?: string }): void | Promise<void>;
   memoryRemove?(id: string): void | Promise<void>;
+  terminalBackend?(value: string | undefined, options: { url?: string; database?: string }): void | Promise<void>;
   sessionHerdr?(args: string[]): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
@@ -646,6 +647,13 @@ Routing guidance:
   // 通用回传通道：任何来源的会话内 CLI 都能使用，不限飞书。
   // 与 `dutydeck group send` 分层并存——group 面向飞书群里的其他人/机器人，
   // session 面向「发起本会话的用户」，落点是会话事件流（Web 时间线 / 卡片）。
+  const settings = program.command('settings').description('Settings for the targeted Dutydeck runtime');
+  settings.command('terminal-backend [tmux|herdr]')
+    .description('Get/set the primary terminal backend for NEW pty-cli sessions in this runtime; ACP stays ACP, existing sessions keep their backend')
+    .option('--url <url>', 'Target local runtime URL (requires its exact --database)')
+    .option('--database <path>', 'Exact database of the target runtime')
+    .action((value, _options, command) => { const options = command.optsWithGlobals(); return handlers.terminalBackend?.(value, { url: options.url, database: options.database }); });
+
   const session = program.command('session').enablePositionalOptions().description('Relay messages to the user who owns the current Dutydeck session');
   session.command('list')
     .description('List sessions on the local runtime')

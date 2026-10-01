@@ -583,7 +583,8 @@ export const migrations: Migration[] = [
       const columns = (db.pragma('index_info(task_attempt_session_history)') as Array<{ name: string }>).map(column => column.name);
       if (columns.join(',') === 'session_id,number,id') db.exec('DROP INDEX task_attempt_session_history');
     }
-  } }
+  } },
+  { version: 31, name: 'pin_primary_terminal_backend', up(db) { db.exec("ALTER TABLE sessions ADD COLUMN terminal_backend TEXT CHECK (terminal_backend IN ('tmux','herdr'))"); } }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

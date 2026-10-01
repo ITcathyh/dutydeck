@@ -777,3 +777,8 @@ export const collaborationApi = {
       { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}) }
     )
 };
+
+export const terminalSettingsApi = {
+  get: () => json<{ terminalBackend: 'tmux' | 'herdr'; scope: 'pty-cli' }>('/api/settings/terminal', { cache: 'no-store' }),
+  set: (terminalBackend: 'tmux' | 'herdr') => json<{ terminalBackend: 'tmux' | 'herdr'; scope: 'pty-cli' }>('/api/settings/terminal', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ terminalBackend }) }),
+};

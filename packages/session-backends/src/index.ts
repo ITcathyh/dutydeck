@@ -61,3 +61,5 @@ export {
   type OwnedTmuxScope, type OwnedTmuxIdentity, type OwnedTmuxExitProof,
   type PhysicalProcessIdentity, type ProcessProbe,
 } from './owned-tmux.js';
+
+export { HerdrBackend, herdrControlEnvironment, type HerdrBackendOptions } from './herdr-backend.js';

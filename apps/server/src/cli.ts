@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { runTerminalSettingsCli, TerminalSettingsCliError } from './terminal-settings-cli.js';
 import { runHerdrCli } from './herdr-cli.js';
 import { RecoveryCliError, runRecoveryCli } from './recovery-cli.js';
 import { WorkspaceGroupsCliError, runWorkspaceGroupsCli } from './workspace-groups-cli.js';
@@ -433,6 +434,7 @@ async function main() {
     },
     memoryAdd: async (content, options) => { output(await runMemoryAdd(content, options)); },
     memoryRemove: async id => { output(await runMemoryRemove(id)); },
+    terminalBackend: async (value, options) => { output(await runTerminalSettingsCli(value, options)); },
     sessionHerdr: async args => { await runHerdrCli(args); },
     sessionSend: async text => { output(await runSessionSend(text)); },
     sessionNativeAsk: async () => {
@@ -489,7 +491,7 @@ try {
   else if (error instanceof LegacyImportError || error instanceof LegacyImportCliError) {
     process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   }
-  else if (error instanceof RecoveryCliError || error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError || error instanceof WorkspaceGroupsCliError || error instanceof SessionNamesCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
+  else if (error instanceof TerminalSettingsCliError || error instanceof RecoveryCliError || error instanceof SecretCliError || error instanceof SecretProviderError || error instanceof IdentityPreflightCliError || error instanceof DatabaseCliError || error instanceof WorkspaceGroupsCliError || error instanceof SessionNamesCliError) process.stderr.write(`${JSON.stringify({ ok: false, error: { code: error.code, message: error.message } })}\n`);
   // setup 的三类错误自带中文说明和「该补哪个 flag」，直接原样呈现，不要压成 JSON 或堆栈。
   else if (error instanceof PromptUnavailableError || error instanceof PromptAbortedError || error instanceof InvalidWorkingDirectoryError) {
     process.stderr.write(`${error.message}\n`);

@@ -190,7 +190,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
           if (execution.authority() === 'ledger_v1') {
             const current = db.select().from(sessions).where(eq(sessions.id, s.id)).get();
             if (!current) throw new RuntimeError('EXECUTION_LEDGER_REQUIRED', 'Session creation requires a bound ledger command', 409);
-            for (const key of ['state', 'runId', 'archivedAt', 'error', 'agentId', 'cwd', 'source', 'sourceId', 'protocol', 'createdAt'] as const) {
+            for (const key of ['state', 'runId', 'archivedAt', 'error', 'agentId', 'cwd', 'source', 'sourceId', 'protocol', 'terminalBackend', 'createdAt'] as const) {
               if ((current[key] ?? null) !== (s[key] ?? null)) throw new RuntimeError('EXECUTION_LEDGER_REQUIRED', `Session ${key} requires a bound ledger command`, 409);
             }
             db.update(sessions).set({ model: s.model, reasoningEffort: s.reasoningEffort, systemPrompt: s.systemPrompt, permissionMode: s.permissionMode, updatedAt: s.updatedAt }).where(eq(sessions.id, s.id)).run();

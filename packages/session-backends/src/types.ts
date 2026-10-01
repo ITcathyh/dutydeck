@@ -15,7 +15,7 @@ export interface SpawnOptions {
 }
 
 export interface SessionBackend {
-  readonly kind: 'pty' | 'tmux' | 'zellij' | 'zmx';
+  readonly kind: 'pty' | 'tmux' | 'herdr' | 'zellij' | 'zmx';
   /**
    * The multiplexer session this backend is bound to (tmux/zellij/zmx session
    * name), or undefined for backends with no addressable session (pty).
@@ -29,7 +29,7 @@ export interface SessionBackend {
    */
   readonly sessionName?: string;
   /** Start the CLI process. Calling twice is undefined behavior (driver calls once). */
-  spawn(bin: string, args: string[], opts: SpawnOptions): void;
+  spawn(bin: string, args: string[], opts: SpawnOptions): void | Promise<void>;
   /** Write literal text. Returns false when the backend refused outright
    *  (tmux send-keys timeout, …); void/true means it was sent. */
   write(data: string): void | boolean;

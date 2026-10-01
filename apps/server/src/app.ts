@@ -1,3 +1,4 @@
+import type { TerminalSettings } from './terminal-settings.js';
 import { registerRecoveryRoutes, type RecoveryRouteOptions } from './recovery-routes.js';
 import { registerWorkspaceGroupRoutes, type WorkspaceGroupRouteOptions } from './workspace-group-routes.js';
 import { registerSessionNameRoutes, type SessionNameRouteOptions } from './session-name-routes.js';
@@ -61,6 +62,7 @@ export interface SessionExecutionPolicy {
 }
 
 export interface BuildAppOptions {
+  terminalSettings?: TerminalSettings;
   recovery?: RecoveryRouteOptions;
   workspaceGroups?: WorkspaceGroupRouteOptions;
   sessionNames?: SessionNameRouteOptions;
@@ -193,6 +195,13 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     drainLease.unref();
     return { draining: true, leaseSeconds };
   });
+  if (options.terminalSettings) {
+    app.get('/api/settings/terminal', () => options.terminalSettings!.get());
+    app.put<{ Body: unknown }>('/api/settings/terminal', async request => {
+      if (!options.sessionNames || !await options.sessionNames.authorize(request)) throw new RuntimeError('TERMINAL_SETTINGS_OWNER_REQUIRED', 'Installation owner authorization is required', 403);
+      return options.terminalSettings!.set(request.body);
+    });
+  }
   app.get('/api/agents', async () => (await runtime.listAgents()).map(toPublicAgent));
   app.get<{ Params: { id: string }; Querystring: { model?: string; refresh?: string } }>('/api/agents/:id/models', async request => {
     const agent = (await runtime.listAgents()).find(item => item.id === request.params.id);

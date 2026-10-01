@@ -442,9 +442,23 @@ dutydeck autostart disable  # 移除开机自启
 
 ---
 
-### 4. 会话专属 Herdr 子任务工作空间
+### 4. 主终端后端设置
 
-安装 Herdr 0.9.0 或兼容版本后，ACP/tmux 主 Agent 保持现有运行方式，可用 Herdr 派发侧边子任务。每个 Dutydeck 会话获得独立 named session，名称按安装数据库、机器人身份、持久签名密钥和会话 ID 派生；首次调用才创建，后续调用与 daemon 重启复用。
+Dashboard → Agent 设置 → 主终端后端可选择 tmux（默认）或 Herdr。设置只影响当前实例中新建的 `pty-cli` 会话；现有会话保留原后端，ACP 继续使用 ACP。Web 和各机器人运行时使用独立数据库，请切换到目标实例设置。
+
+```bash
+# 查询；指定正在运行的目标实例及其数据库
+dutydeck settings terminal-backend --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
+# 设置新会话后端
+dutydeck settings terminal-backend herdr --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
+dutydeck settings terminal-backend tmux --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
+```
+
+Herdr 主终端需要 Linux 和 Herdr >= 0.9。未安装、不可执行或身份验证失败会明确报错，不会自动回退到 tmux。主 Agent 在独立 named server 的真实 pane 中运行，使用 Herdr 注入的实际 `HERDR_*` 上下文；daemon 重启验证原进程身份后重新连接，已提交任务不会重复发送。
+
+### 5. 会话专属 Herdr 子任务工作空间
+
+安装 Herdr 0.9.0 或兼容版本后，主 Agent 可用 Herdr 派发侧边子任务。每个 Dutydeck 会话获得独立 named session，名称按安装数据库、机器人身份、持久签名密钥和会话 ID 派生；首次调用才创建，后续调用与 daemon 重启复用。
 
 Agent 每轮收到完整入口前缀；环境中的 `dutydeck_herdr_command` 是同一个入口。下面命令在 Dutydeck Agent 的工具 shell 内执行（先把返回的真实 ID 替换到后续命令）：
 
@@ -459,7 +473,7 @@ eval "$dutydeck_herdr_command pane read w1:p2 --source recent-unwrapped --lines 
 eval "$dutydeck_herdr_command stop"
 ```
 
-入口使用现有会话凭证固定路由，使用宿主实际 socket 路径，因此 Agent 覆盖 HOME/XDG_CONFIG_HOME 也不会改路由；支持专属 session 内的 workspace/tab/pane/agent CLI 操作；禁止 `--session`、`--remote`、`--machine`、`--current` 和全局 session/server 管理命令。主 Agent 是外部调用方，不伪造 `HERDR_ENV` 或 `HERDR_PANE_ID`；未安装 Herdr 会在 prompt 中说明，不影响普通任务。
+入口使用现有会话凭证固定路由，使用宿主实际 socket 路径，因此 Agent 覆盖 HOME/XDG_CONFIG_HOME 也不会改路由；支持专属 session 内的 workspace/tab/pane/agent CLI 操作；禁止 `--session`、`--remote`、`--machine`、`--current` 和全局 session/server 管理命令。ACP/tmux 主 Agent 是外部调用方，不伪造 `HERDR_ENV` 或 `HERDR_PANE_ID`；选择 Herdr 主终端时使用真实 pane 上下文。侧边工作空间与主终端分别隔离；未安装 Herdr 会在侧边入口 prompt 中说明，不影响 tmux/ACP 普通任务。
 
 关闭 daemon、停止/归档主会话或回收主 Agent 都不会自动终止侧边任务。入口需要运行中的 daemon 和有效会话凭证；失去凭证后，可在宿主终端按先前返回的名称清理：`herdr session stop dutydeck-<摘要>`；确认不再需要保存状态后再执行 `herdr session delete dutydeck-<摘要>`。只清理自己的专属名称，不使用 `default`。Herdr server 停止后保存布局；shell 进程会结束，Agent 恢复取决于 Herdr 的集成和配置，不保证任务自动续跑。
 
