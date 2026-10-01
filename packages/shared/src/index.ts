@@ -258,6 +258,7 @@ export interface Session {
   sourceId?: string;
   archivedAt?: string;
   protocol?: Exclude<Protocol, 'auto'>;
+  terminalBackend?: 'tmux' | 'herdr';
   runId: string;
   createdAt: string;
   updatedAt: string;

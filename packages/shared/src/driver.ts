@@ -120,7 +120,9 @@ export interface AgentDriver {
    */
   createTerminalStream?(): TerminalStream;
   /** Attach only to an existing owned terminal; never launch or submit a task. */
-  attachTerminal?(): boolean;
+  /** Trusted checkpoint of an idle persistent terminal, bound to its original resource at shutdown. */
+  persistentTerminalIdentity?(): unknown;
+  attachTerminal?(identity?: unknown): boolean | Promise<boolean>;
 }
 
 export interface TerminalScreen {

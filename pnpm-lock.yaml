@@ -111,6 +111,9 @@ importers:
       '@dutydeck/secret-provider':
         specifier: workspace:*
         version: link:../../packages/secret-provider
+      '@dutydeck/session-backends':
+        specifier: workspace:*
+        version: link:../../packages/session-backends
       '@types/better-sqlite3':
         specifier: 9.6.0
         version: 9.6.0

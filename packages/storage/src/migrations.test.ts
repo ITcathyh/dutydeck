@@ -51,7 +51,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -91,6 +91,32 @@ describe('storage migrations', () => {
       .run('ses_default_permission', 'agent', 'idle', '/tmp', 'run', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
     expect(db.prepare('SELECT permission_mode FROM sessions WHERE id = ?').get('ses_default_permission'))
       .toEqual({ permission_mode: 'ask' })
+    db.close()
+  })
+
+  it('v31 pins terminal backends while preserving null legacy rows and validating persisted values', () => {
+    const db = new Database(':memory:')
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)')
+    withMigrationTransaction(db, () => {
+      for (const migration of migrations.filter(item => item.version <= 30)) {
+        migration.up(db)
+        db.prepare('INSERT INTO schema_migrations VALUES (?, ?)').run(migration.version, '2026-01-01T00:00:00.000Z')
+      }
+    })
+    const insert = db.prepare("INSERT INTO sessions (id, agent_id, state, cwd, run_id, created_at, updated_at) VALUES (?, 'agent', 'idle', '/tmp', 'run', '2026-01-01', '2026-01-01')")
+    insert.run('legacy')
+    runMigrations(db)
+    const column = (db.pragma('table_info(sessions)') as Array<{ name: string; dflt_value: unknown }>).find(item => item.name === 'terminal_backend')!
+    expect(column.dflt_value).toBeNull()
+    expect(db.prepare('SELECT terminal_backend FROM sessions WHERE id = ?').get('legacy')).toEqual({ terminal_backend: null })
+    insert.run('new-default')
+    expect(db.prepare('SELECT terminal_backend FROM sessions WHERE id = ?').get('new-default')).toEqual({ terminal_backend: null })
+    for (const backend of ['tmux', 'herdr']) {
+      db.prepare('UPDATE sessions SET terminal_backend = ? WHERE id = ?').run(backend, 'new-default')
+      expect(db.prepare('SELECT terminal_backend FROM sessions WHERE id = ?').get('new-default')).toEqual({ terminal_backend: backend })
+    }
+    expect(() => db.prepare('UPDATE sessions SET terminal_backend = ? WHERE id = ?').run('pty', 'new-default')).toThrow(/CHECK constraint failed/)
+    expect(db.prepare('SELECT terminal_backend FROM sessions WHERE id = ?').get('new-default')).toEqual({ terminal_backend: 'herdr' })
     db.close()
   })
 

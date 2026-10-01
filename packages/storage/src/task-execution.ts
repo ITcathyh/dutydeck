@@ -40,7 +40,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   const session = (sessionId: string): Session => {
     const row = db.prepare('SELECT * FROM sessions WHERE id=?').get(sessionId) as Record<string, unknown> | undefined;
     if (!row) fail('SESSION_NOT_FOUND');
-    const names: Record<string, string> = { agent_id: 'agentId', run_id: 'runId', source_id: 'sourceId', permission_mode: 'permissionMode', system_prompt: 'systemPrompt', reasoning_effort: 'reasoningEffort', created_at: 'createdAt', updated_at: 'updatedAt', archived_at: 'archivedAt' };
+    const names: Record<string, string> = { terminal_backend: 'terminalBackend', agent_id: 'agentId', run_id: 'runId', source_id: 'sourceId', permission_mode: 'permissionMode', system_prompt: 'systemPrompt', reasoning_effort: 'reasoningEffort', created_at: 'createdAt', updated_at: 'updatedAt', archived_at: 'archivedAt' };
     return Object.fromEntries(Object.entries(row).filter(([, v]) => v !== null).map(([k, v]) => [names[k] ?? k, v])) as unknown as Session;
   };
   const task = (taskId: string): ExecutionTask | undefined => {
@@ -880,7 +880,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         createSession(rawSession) { return write(() => {
           const s=parse(sessionSchema,rawSession);
           if(db.prepare('SELECT 1 FROM sessions WHERE id=?').get(s.id)) fail('SESSION_ALREADY_EXISTS');
-          db.prepare('INSERT INTO sessions (id,agent_id,state,cwd,model,reasoning_effort,system_prompt,permission_mode,source,source_id,archived_at,protocol,run_id,error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(s.id,s.agentId,s.state,s.cwd,s.model??null,s.reasoningEffort??null,s.systemPrompt??null,s.permissionMode??'ask',s.source??null,s.sourceId??null,s.archivedAt??null,s.protocol??null,s.runId,s.error??null,s.createdAt,s.updatedAt);
+          db.prepare('INSERT INTO sessions (id,agent_id,state,cwd,model,reasoning_effort,system_prompt,permission_mode,source,source_id,archived_at,protocol,terminal_backend,run_id,error,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)').run(s.id,s.agentId,s.state,s.cwd,s.model??null,s.reasoningEffort??null,s.systemPrompt??null,s.permissionMode??'ask',s.source??null,s.sourceId??null,s.archivedAt??null,s.protocol??null,s.terminalBackend??null,s.runId,s.error??null,s.createdAt,s.updatedAt);
           return session(s.id);
         }); },
         finalizeSessionWorkspace(rawFence, rawProof) { return write(() => {

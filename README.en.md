@@ -422,9 +422,23 @@ dutydeck autostart disable  # Unregister service
 
 ---
 
-### 4. Dedicated Herdr Side Workspaces
+### 4. Primary Terminal Backend
 
-With Herdr 0.9.0 or a compatible version installed, the main ACP/tmux Agent keeps its current backend and can dispatch side tasks through Herdr. Each Dutydeck session gets a separate named Herdr session derived from the installation database, bot identity, persistent signing secret and session ID. Creation is lazy; later calls and daemon restarts reuse it.
+In Dashboard → Agent settings → Primary terminal backend, choose tmux (default) or Herdr. The setting applies only to new `pty-cli` sessions in the selected instance. Existing sessions keep their backend; ACP continues using ACP. Web and bot runtimes have separate databases, so select the intended instance first.
+
+```bash
+# Read the running target instance's setting using its database
+dutydeck settings terminal-backend --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
+# Select the backend for new sessions
+dutydeck settings terminal-backend herdr --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
+dutydeck settings terminal-backend tmux --url http://127.0.0.1:4401 --database /path/to/runtime/dutydeck.db
+```
+
+The Herdr primary backend requires Linux and Herdr >= 0.9. Missing executables or failed identity checks produce explicit errors without falling back to tmux. The Agent runs in a real pane of a dedicated named server with authoritative `HERDR_*` context. Daemon restart verifies and reattaches the original process; submitted turns are not sent again.
+
+### 5. Dedicated Herdr Side Workspaces
+
+With Herdr 0.9.0 or a compatible version installed, the main Agent can dispatch side tasks through Herdr. Each Dutydeck session gets a separate named Herdr session derived from the installation database, bot identity, persistent signing secret and session ID. Creation is lazy; later calls and daemon restarts reuse it.
 
 Every turn supplies an absolute command prefix, also available as `dutydeck_herdr_command`. Run these commands in the Dutydeck Agent's tool shell, replacing the example IDs with the actual returned IDs:
 
@@ -439,7 +453,7 @@ eval "$dutydeck_herdr_command pane read w1:p2 --source recent-unwrapped --lines 
 eval "$dutydeck_herdr_command stop"
 ```
 
-The entry uses existing session credentials and the host’s actual socket path to fix routing, even when the Agent overrides HOME/XDG_CONFIG_HOME. It supports workspace/tab/pane/agent CLI operations inside that session, rejecting `--session`, `--remote`, `--machine`, `--current` and global session/server management commands. The main Agent is an external caller and never claims `HERDR_ENV` or `HERDR_PANE_ID`. Missing Herdr is stated in the prompt and does not prevent ordinary tasks.
+The entry uses existing session credentials and the host’s actual socket path to fix routing, even when the Agent overrides HOME/XDG_CONFIG_HOME. It supports workspace/tab/pane/agent CLI operations inside that session, rejecting `--session`, `--remote`, `--machine`, `--current` and global session/server management commands. ACP/tmux Agents are external callers and never claim `HERDR_ENV` or `HERDR_PANE_ID`; Herdr primary Agents receive real pane context. Side workspaces and the primary terminal are isolated separately. Missing Herdr is stated in the side-workspace prompt and does not prevent ordinary tmux/ACP tasks.
 
 Daemon shutdown, stopping/archiving the main session and idle Agent cleanup do not terminate side tasks. The entry requires a running daemon and valid session credentials. After losing those credentials, use the previously returned name in a host terminal: `herdr session stop dutydeck-<digest>`. Only after confirming saved state is no longer needed, run `herdr session delete dutydeck-<digest>`. Target only your dedicated name, never `default`. Herdr saves layouts on server stop; shell processes end, and Agent restoration depends on Herdr integrations and configuration. Automatic task continuation is not guaranteed.
 

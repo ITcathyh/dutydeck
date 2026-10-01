@@ -93,6 +93,8 @@ export interface RuntimeOptions {
    * 未提供时创建 pty-cli 会话会抛 DRIVER_UNAVAILABLE。
    */
   ptyDriverFactory?: DriverFactory;
+  /** Selected once for a newly created PTY CLI session; existing sessions keep their backend. */
+  terminalBackend?: () => Promise<'tmux' | 'herdr'>;
   probe?: typeof probeAgent;
   driverIdleTimeoutMs?: number;
   cleanupIntervalMs?: number;
@@ -454,7 +456,7 @@ export class DutydeckRuntime {
       reasoningEffort: session.reasoningEffort ?? agent.reasoningEffort,
       systemPrompt: session.systemPrompt ?? agent.systemPrompt,
       permissionMode: session.permissionMode ?? agent.permissionMode,
-      env: { ...agent.env, ...this.options.sessionEnvironment?.(session) }
+      env: { ...agent.env, ...this.options.sessionEnvironment?.(session), ...(session.protocol === 'pty-cli' ? { dutydeck_terminal_backend: session.terminalBackend ?? 'tmux' } : {}) }
     };
   }
 
@@ -528,8 +530,9 @@ export class DutydeckRuntime {
             }
           }
         }
+        const restoredTerminal = !blockedVerifications.has(session.id) && await this.restoreIdleHerdrTerminal(session, tasks);
         // Unverified local_only and legacy resources remain blocked.
-        if (this.resourceBlockers(session.id).length || blockedVerifications.has(session.id)) return;
+        if (this.resourceBlockers(session.id, restoredTerminal).length || blockedVerifications.has(session.id)) return;
         for (const task of tasks) {
           const attempt = this.repos.execution.getTaskExecution(task.id)?.currentAttempt;
           if (attempt?.state === 'preparing' && attempt.submissionState === 'not_submitted') {
@@ -551,6 +554,64 @@ export class DutydeckRuntime {
       });
     }
   }
+  private async persistTerminalReceipt(session: Session, driver: AgentDriver): Promise<void> {
+    if (session.terminalBackend !== 'herdr') return;
+    const identity = driver.persistentTerminalIdentity?.(), record = this.localResources.get(driver);
+    const resource = record && this.repos.execution.getResources(session.id).find(row => row.resourceId === record.resourceId);
+    if (identity === undefined || !record?.creationSettled || record.controlled || resource?.stage !== 'created'
+      || resource.identity?.identityId !== record.identityId) return;
+    await this.repos.config.set(`runtime_idle_terminal:${session.id}`, canonicalExecutionJson({ runId: session.runId,
+      resourceId: resource.resourceId, identityId: record.identityId, options: record.options, identity }));
+  }
+  private async restoreIdleHerdrTerminal(session: Session, tasks: TaskRecord[]): Promise<boolean> {
+    if (session.terminalBackend !== 'herdr' || session.protocol !== 'pty-cli' || session.archivedAt
+      || !['idle', 'completed', 'interrupted'].includes(session.state) || this.stopBlocks.has(session.id) || this.drivers.has(session.id)
+      || tasks.some(task => this.repos.execution.getTaskExecution(task.id)?.attempts.some(attempt => ['preparing', 'active', 'reconcile_required', 'legacy_unresolved'].includes(attempt.state)))) return false;
+    const raw = await this.mutations.wait(() => this.repos.config.get(`runtime_idle_terminal:${session.id}`));
+    if (!raw) return false;
+    let receipt: { runId: string; resourceId: string; identityId: string; options: ExecutionOptions; identity: unknown };
+    try { receipt = JSON.parse(raw); if (!receipt || !receipt.options || !receipt.identity) return false; } catch { return false; }
+    const resource = this.repos.execution.getResources(session.id).find(row => row.resourceId === receipt.resourceId);
+    if (receipt.runId !== session.runId || !resource || resource.kind !== 'local_only' || resource.stage !== 'created'
+      || resource.runId !== session.runId || resource.identity?.identityId !== receipt.identityId || resource.observations.at(-1)?.state === 'gone'
+      || this.resourceBlockers(session.id).some(block => block.code !== 'DRIVER_RESOURCE_UNSAFE' || block.resourceId !== resource.resourceId)) return false;
+    const agent = await this.mutations.wait(() => this.repos.agents.get(session.agentId)); if (!agent) return false;
+    const configured = this.configureAgentForSession(agent, session);
+    const options: ExecutionOptions = { permissionMode: configured.permissionMode, ...(configured.model !== undefined ? { model: configured.model } : {}), ...(configured.reasoningEffort !== undefined ? { reasoningEffort: configured.reasoningEffort } : {}) };
+    if (canonicalExecutionJson(receipt.options) !== canonicalExecutionJson(options)) return false;
+    const workspace = await this.mutations.wait(() => this.workspaces.get(session.id));
+    if (workspace) await this.mutations.wait(() => this.workspaces.validate(workspace));
+    const generation = this.nextSessionGeneration(session.id), lifecycle = this.lifecycle(session.id);
+    let driver: AgentDriver | undefined;
+    let attached = false;
+    try {
+      driver = this.factory(configured, session.protocol, this.onDriverEvent(session, generation),
+        code => { if (this.mutations.valid(lifecycle) && this.sessionGenerations.get(session.id) === generation) this.notifyDriverExit(session.id, code); },
+        session.id, localOnlyDriverContext(this.fence(session), resource.resourceId));
+      attached = await this.driverOperation(driver, () => Promise.resolve(driver!.attachTerminal?.(receipt.identity) ?? false));
+      if (!attached) return false;
+      this.mutations.check();
+      await this.mutations.write(session.id, async () => {
+        const current = this.repos.execution.getResources(session.id).find(row => row.resourceId === resource.resourceId);
+        if (!current || current.revision !== resource.revision || current.identity?.identityId !== receipt.identityId) throw new RuntimeError('RESOURCE_IDENTITY_CONFLICT', 'Original idle terminal resource changed', 409);
+        const observed = this.bound().observed(this.fence(session), resource.resourceId, resource.revision, {
+          observationId: makeId('observation'), identityId: receipt.identityId, state: 'live', observedAt: now(), evidenceRef: `idle-terminal:${digest(receipt)}`,
+        });
+        this.localResources.adopt(this.fence(session), options, observed, driver!);
+        this.drivers.set(session.id, driver!); this.attachedTerminals.add(driver!);
+      });
+      return true;
+    } catch (error) {
+      await this.emit(session.id, 'status', { state: 'terminal_recovery_deferred', message: 'Original idle Herdr terminal identity could not be verified; resource remains blocked' });
+      return false;
+    } finally {
+      if (driver && this.drivers.get(session.id) !== driver) {
+        driver.prepareForDaemonShutdown?.(true);
+        await driver.stop();
+      }
+    }
+  }
+
   private async recoverPersistentTurn(session: Session, task: TaskRecord): Promise<boolean> {
     const attempt = this.repos.execution.getTaskExecution(task.id)?.currentAttempt;
     const submission = attempt?.submission, recovery = submission?.recovery;
@@ -966,9 +1027,9 @@ export class DutydeckRuntime {
       this.mutations.check();
       if (this.attachedTerminals.has(driver)) return driver;
       let attached: boolean;
-      try { attached = driver.attachTerminal?.() ?? false; }
+      try { attached = await driver.attachTerminal?.() ?? false; }
       catch (error) { await this.discardUnattachedTerminal(id, driver); throw error; }
-      if (attached) { this.localResources.ready(driver); this.attachedTerminals.add(driver); return driver; }
+      if (attached) { this.localResources.ready(driver); await this.persistTerminalReceipt(session, driver); this.attachedTerminals.add(driver); return driver; }
       await this.discardUnattachedTerminal(id, driver); this.missingTerminals.add(id); return undefined;
     }).catch(error => { if (error instanceof RevokedOperation) return undefined; throw error; });
   }
@@ -1553,7 +1614,8 @@ export class DutydeckRuntime {
     if (capability.protocol === 'pty-cli' && initialConfigured.permissionMode !== 'ask' && initialConfigured.permissionMode !== 'full-trust') {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'PTY Agent only supports ask (approve in the terminal) or explicit full-trust mode', 422);
     }
-    const session: Session = { id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
+    const terminalBackend = capability.protocol === 'pty-cli' ? await this.options.terminalBackend?.() ?? 'tmux' : undefined;
+    const session: Session = { terminalBackend, id: owned?.id ?? makeId('ses'), agentId: agent.id, state: 'created', cwd: sourceCwd, workspaceMode, model: initialConfigured.model, reasoningEffort: initialConfigured.reasoningEffort, permissionMode: initialConfigured.permissionMode, source: input.source, sourceId: input.sourceId, protocol: capability.protocol, runId: makeId('run'), createdAt: now(), updatedAt: now(), systemPrompt: agent.systemPrompt };
     return this.scoped(session.id, async () => {
     await this.mutations.write(session.id, async () => this.bound().createSession(eventJson(session) as unknown as Session));
 
@@ -1725,7 +1787,7 @@ export class DutydeckRuntime {
         const starting = Promise.resolve().then(() => driver.start());
         const settled = starting.then(async () => {
           this.localResources.settled(driver);
-          await this.mutations.run(undefined, () => this.mutations.write(session.id, async () => this.localResources.ready(driver)));
+          await this.mutations.run(undefined, () => this.mutations.write(session.id, async () => { this.localResources.ready(driver); await this.persistTerminalReceipt(session, driver); }));
         }, error => { this.localResources.settled(driver); throw error; });
         await this.driverOperation(driver, () => settled);
       } else this.localResources.settled(driver);
@@ -1829,6 +1891,7 @@ export class DutydeckRuntime {
           if (defaults) Object.assign(session, await this.patchSession(session.id, defaults));
           owned.options = { ...target };
           await this.configurations.finish(operation, true);
+          await this.persistTerminalReceipt(session, driver);
         });
       } catch (error) {
         await this.mutations.run(undefined, () => this.mutations.write(session.id, () => this.configurations.finish(operation, false)));
@@ -2278,6 +2341,7 @@ export class DutydeckRuntime {
         finally { if(operation)owned!.controlled!.endPreparation(operation); }
       });
       this.localResources.ready(driver);
+      await this.persistTerminalReceipt(session, driver);
       const target=owned?.options;
       if(owned?.controlled&&target&&driver.nativeConfiguration){owned.options={permissionMode:target.permissionMode,...driver.nativeConfiguration()};await this.changeDriverConfiguration(session,driver,()=>target,undefined,true);}
       await this.saveState(session, 'idle');
@@ -2498,7 +2562,13 @@ export class DutydeckRuntime {
         const pendingCreation = this.repos.execution.getResources(id).some(resource => resource.kind === 'operation' && ['pending', 'unknown'].includes(resource.stage) && !resource.creationClosure);
         // Admission is closed and transitions revoked; an unclaimed queue drain cannot start a new turn.
         const preserve = this.drivers.get(id) !== driver || this.recoveryInFlight(id, false) || this.verifyingSessions.has(id) || unresolved || pendingCreation;
-        try { await driver.prepareForDaemonShutdown(Boolean(preserve)); }
+        try {
+          if (!preserve) {
+            const session = await this.repos.sessions.get(id);
+            if (session) await this.persistTerminalReceipt(session, driver);
+          }
+          await driver.prepareForDaemonShutdown(Boolean(preserve));
+        }
         catch {
           try { await driver.prepareForDaemonShutdown(true); } catch { /* Stop still must prove physical exit. */ }
           await this.retainStopBlock(id, 'Shutdown preparation failed; physical resource verification is required');

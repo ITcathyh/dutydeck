@@ -1,3 +1,4 @@
+import { currentInstance } from '../instance';
 import type { LarkSetupTarget } from '../app-route';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -13,7 +14,7 @@ import {
   Users,
   X
 } from 'lucide-react';
-import { ApiError, foundationApi, scheduleApi, type Agent, type LarkBotConfig } from '../api';
+import { ApiError, foundationApi, scheduleApi, terminalSettingsApi, type Agent, type LarkBotConfig } from '../api';
 import { projectLarkBotStatus } from '../lark-status';
 import { Badge, Banner, Button, Card, Dialog, EmptyState, Field, IconButton, Input, Select, Spinner } from './primitives';
 import { permissionLabels } from './ui';
@@ -199,6 +200,7 @@ export function ControlCenterModal({
 function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { agents: Agent[]; legacyBots: LarkBotConfig[]; onCreateTask(agentId: string): void; onOpenLarkSetup(): void }) {
   return <section aria-labelledby="control-agents">
     <div className="flex flex-wrap items-end justify-between gap-3"><div><h3 id="control-agents" className="text-title font-semibold text-primary">Agent</h3><p className="mt-1 text-caption text-subtle">Agent 是在这台机器上执行任务的 CLI。Dutydeck 会自动发现已安装并登录的受支持 CLI。</p></div>{statePill(agents.length ? `${agents.length} 个可用` : '尚未找到', agents.length ? 'ready' : 'blocked')}</div>
+    <TerminalBackendSettings/>
     {agents.length > 0 && <div className="mt-4 grid gap-3 sm:grid-cols-2">{agents.map(agent => {
       const boundBots = legacyBots.filter(bot => bot.defaultAgentId === agent.id);
       return <Card key={agent.id} as="article" padding="md">
@@ -215,6 +217,25 @@ function AgentSection({ agents, legacyBots, onCreateTask, onOpenLarkSetup }: { a
       <details className="mt-3 text-caption text-secondary"><summary className="cursor-pointer font-semibold text-primary">自定义 Agent</summary><p className="mt-2">通过 <code>DUTYDECK_AGENTS_JSON</code> 配置自定义 ACP/CLI 后重启。启动命令、环境变量、密钥和 system prompt 不会发送到浏览器。</p></details>
     </div>
   </section>;
+}
+
+function TerminalBackendSettings() {
+  const client = useQueryClient();
+  const key = ['terminal-settings', currentInstance()];
+  const query = useQuery({ queryKey: key, queryFn: terminalSettingsApi.get, retry: false });
+  const [draft, setDraft] = useState<'tmux' | 'herdr' | undefined>();
+  const save = useMutation({ mutationFn: terminalSettingsApi.set, onSuccess: data => { client.setQueryData(key, data); setDraft(undefined); } });
+  const value = draft ?? query.data?.terminalBackend;
+  return <Card padding="md" className="mt-4">
+    <h4 className="text-body font-semibold text-primary">主终端后端 · 仅此实例</h4>
+    <p className="mt-1 text-caption text-secondary">仅影响此实例新建的终端 CLI（pty-cli）会话。ACP 保持 ACP，已有会话保留原后端。其它 Bot 实例请切换实例后单独设置。</p>
+    {query.isLoading ? <Spinner/> : query.isError ? <Banner tone="danger" action={{ label: '重试', onClick: () => void query.refetch() }}>读取主终端配置失败</Banner> : <div className="mt-3 flex items-end gap-3">
+      <Field label="主终端后端"><Select aria-label="主终端后端" value={value} disabled={save.isPending} onChange={event => { setDraft(event.target.value as 'tmux' | 'herdr'); save.reset(); }}><option value="tmux">tmux（默认）</option><option value="herdr">Herdr</option></Select></Field>
+      <Button disabled={save.isPending || !draft || draft === query.data?.terminalBackend} onClick={() => { if (draft) save.mutate(draft); }}>{save.isPending ? '保存中…' : '保存终端配置'}</Button>
+    </div>}
+    {save.error && <div className="mt-2"><Banner tone="danger">{save.error.message}</Banner></div>}
+    {save.isSuccess && <p role="status" className="mt-2 text-caption text-secondary">已保存；新建终端 CLI 会话时生效。</p>}
+  </Card>;
 }
 
 type QueryLike<T> = { data?: T; isError: boolean; isLoading: boolean; refetch(): unknown };

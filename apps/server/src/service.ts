@@ -1,3 +1,5 @@
+import { HerdrBackend } from '@dutydeck/session-backends';
+import { TerminalSettings, primaryHerdrBinary } from './terminal-settings.js';
 import { createRequire } from 'node:module';
 import { HerdrSessions } from './herdr.js';
 import { dutydeckGroupToolsCommand } from './lark/agent-tools.js';
@@ -241,6 +243,11 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     history: repos,
     teamSearch: () => collaboration?.teamSearch,
   });
+  const primaryHerdrBackend = (sessionId: string) => new HerdrBackend(herdr.nameFor(`primary:${sessionId}`), {
+    binary: primaryHerdrBinary(env), stateFile: join(dirname(config.databaseUrl), 'terminal-sessions', `${herdr.nameFor(`primary:${sessionId}`)}.json`),
+    ownerId: `dutydeck:${sessionId}`, processProbe: { identify: childProcessIdentity, observe: observeProcess }, env,
+  });
+  const terminalSettings = new TerminalSettings(repos.config, env);
   // pty-cli 协议驱动工厂：protocol='pty-cli' 的会话路由到 Dutydeck 的 PtyCliDriver。
   // 自定义命令可通过 adapterId 复用已有 CLI 家族，同时保留独立 agent id。
   const ptyDriverFactory: DriverFactory = (agent, _protocol, onEvent, onExit, sessionId) => {
@@ -248,7 +255,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     return createPtyCliDriver({
       agent,
       adapter,
-      backend: createProductionPtyBackend(sessionId),
+      backend: agent.env.dutydeck_terminal_backend === 'herdr' ? primaryHerdrBackend(sessionId) : createProductionPtyBackend(sessionId),
       processProbe: { identify: childProcessIdentity, observe: observeProcess },
       onEvent,
       onExit,
@@ -274,7 +281,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     log: { warn: (details, message) => app?.log.warn(details, message) }
   });
   const runtime: DutydeckRuntime = new DutydeckRuntime(repos, {
-    ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }),
+    ptyRetirement: createPtyRetirementControl({ identify: childProcessIdentity, observe: observeProcess }, session => primaryHerdrBackend(session.id)),
     admitTask: (session, request) => usageLedger.admit(session, request),
     recordUsage: (session, attempt, reading) => usageLedger.record(session, attempt, reading),
     authorizeTask: async (session, task, phase) => { await collaboration?.background.authorizeTask(session, task); await automation.authorizeTask(task, phase); await codebaseCi?.authorizeTask(task, phase); await workItems.authorizeTask(session, task, phase); },
@@ -298,11 +305,12 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     },
     acpxCommand: config.acpxCommand,
     ptyDriverFactory,
+    terminalBackend: () => terminalSettings.current(),
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     cleanupIntervalMs: config.cleanupIntervalMs,
     sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id) }),
     prepareTaskPrompt: (session, prompt, skills) => prepareSkillPrompt(session.cwd, prompt, skills),
-    sessionPrompt: async (session, prompt) => `${herdr.prompt()}\n\n${await agentTools.promptForSession(session, prompt)}`,
+    sessionPrompt: async (session, prompt) => `${session.terminalBackend === 'herdr' ? '你正在 Herdr 的真实主终端 pane 内运行；HERDR_* 由 Herdr 注入，使用 herdr pane current 核实自身上下文，可用 --current 管理本 pane。不要伪造身份或操作用户 default session。侧边任务可继续使用本会话的 dutydeck session herdr 专属入口。' : herdr.prompt()}\n\n${await agentTools.promptForSession(session, prompt)}`,
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
     log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) }
   });
@@ -440,6 +448,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       return !bot || !larkMemoryEnabled(bot) ? '' : renderMemoryIndex(await memoryStore.list(memoryScope), await memoryStore.getState(memoryScope), { currentChatId: scope.chatId }).text;
     };
     app = await buildApp(runtime, {
+    terminalSettings,
       recovery: { authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
         larkResultDeliveries: async sessionId => larkResultDeliveryIssues((await Promise.all((await readLarkConfigs(repos.config))
           .map(bot => repos.channelMappings.list(`lark-card:${bot.appId}`)))).flat().filter(mapping => mapping.sessionId === sessionId)) },
