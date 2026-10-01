@@ -1188,7 +1188,7 @@ function mergedEnv(agentEnv: Record<string, string>): Record<string, string> {
   );
   return Object.fromEntries(
     Object.entries({ ...stripped, ...agentEnv }).filter(
-      (entry): entry is [string, string] => typeof entry[1] === 'string'
+      (entry): entry is [string, string] => typeof entry[1] === 'string' && !/^HERDR_/i.test(entry[0])
     )
   );
 }

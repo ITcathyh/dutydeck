@@ -229,6 +229,7 @@ export interface CliHandlers {
   memorySearch?(query: string, options?: { topic?: string; limit?: string }): void | Promise<void>;
   memoryAdd?(content: string, options?: { topic?: string }): void | Promise<void>;
   memoryRemove?(id: string): void | Promise<void>;
+  sessionHerdr?(args: string[]): void | Promise<void>;
   sessionSend?(text: string): void | Promise<void>;
   sessionAsk?(question: string, options: SessionRelayCliOptions): void | Promise<void>;
   sessionNativeAsk?(): void | Promise<void>;
@@ -645,7 +646,7 @@ Routing guidance:
   // 通用回传通道：任何来源的会话内 CLI 都能使用，不限飞书。
   // 与 `dutydeck group send` 分层并存——group 面向飞书群里的其他人/机器人，
   // session 面向「发起本会话的用户」，落点是会话事件流（Web 时间线 / 卡片）。
-  const session = program.command('session').description('Relay messages to the user who owns the current Dutydeck session');
+  const session = program.command('session').enablePositionalOptions().description('Relay messages to the user who owns the current Dutydeck session');
   session.command('list')
     .description('List sessions on the local runtime')
     .option('--url <url>', 'Exact local runtime URL; requires --database')
@@ -667,6 +668,13 @@ Routing guidance:
     .option('--json', 'Print the result as JSON')
     .action((sessionId, options, command) => handlers.sessionNames?.('reset-name', { sessionId }, sessionOptionsFrom(options, command)));
 
+  session.command('herdr [args...]')
+    .description('Prepare or operate the current session’s dedicated Herdr side workspace')
+    .passThroughOptions()
+    .allowUnknownOption()
+    .allowExcessArguments()
+    .helpOption(false)
+    .action((_args, _options, command) => handlers.sessionHerdr?.(command.args));
   session.command('native-ask')
     .description('Bridge a native Claude AskUserQuestion hook from stdin to the current session')
     .action(() => handlers.sessionNativeAsk?.());
