@@ -221,6 +221,9 @@ export class AcpxAdapter implements AgentDriver {
   private readonly streams = new Set<Promise<void>>();
   private sending = false;
   private turnCancelling = false;
+  private interruptVersion = 0;
+  private compacting = false;
+  private maintenanceUsage?: NormalizedDriverEvent;
   private timedOutStream?: Promise<void>;
   private idleWatch?: { refresh(): void; clear(): void };
   private readonly cpu = new ProcessTreeCpu();
@@ -444,13 +447,18 @@ export class AcpxAdapter implements AgentDriver {
     return handle;
   }
   async start() { await this.resourceOperation(async () => { await this.ensureHandle(); }); }
-  private async sendTurn(prompt: string, submission?:DriverSubmission) {
+  private async sendTurn(prompt: string, submission?:DriverSubmission, maintenance = false) {
+    let compactFailed = false;
+    let compactCancelled = false;
+    const interruptVersion = this.interruptVersion;
+    const assertUninterrupted = () => { this.assertActive(); if (this.interruptVersion !== interruptVersion) throw new Error('ACP turn interrupted before submission'); };
     const { completion } = await this.resourceOperation(async () => {
       const handle = await this.ensureHandle();
       this.assertActive();
+      assertUninterrupted();
       if (this.turn) throw new Error('ACP turn already in progress');
       if(submission)this.options.context!.assertSubmission(submission);
-      const turn = this.runtime.startTurn({ handle, text: prompt, mode: 'prompt', requestId: submission?.submissionId??`req-${crypto.randomUUID()}`, timeoutMs: 0,...(submission?{resourceScope:this.scope(submission.operation),beforePrompt:()=>{this.assertActive();this.options.context!.assertSubmission(submission);}}:{}) });
+      const turn = this.runtime.startTurn({ handle, text: prompt, mode: 'prompt', requestId: maintenance ? `compact-${crypto.randomUUID()}` : submission?.submissionId??`req-${crypto.randomUUID()}`, timeoutMs: 0,...(submission?{resourceScope:this.scope(submission.operation),beforePrompt:()=>{assertUninterrupted();this.options.context!.assertSubmission(submission);}}:{}) });
       this.turn = turn;
       this.turnCancelling = false;
       // result can reject before its event stream closes. Observe it immediately.
@@ -506,6 +514,7 @@ export class AcpxAdapter implements AgentDriver {
         try {
           for await (const event of turn.events) {
             const normalized = normalizeAcpxEvent(event);
+            if (maintenance && (normalized?.type === 'error' || normalized?.data?.state === 'compaction' && normalized.data.phase === 'failed')) compactFailed = true;
             if (normalized?.type === 'tool_call' || normalized?.type === 'tool_result') {
               const key = String(normalized.data.id ?? 'tool');
               const progress = JSON.stringify(normalized.data);
@@ -513,15 +522,15 @@ export class AcpxAdapter implements AgentDriver {
             } else if ((normalized?.type === 'text' || normalized?.type === 'thinking')
               && typeof normalized.data?.text === 'string' && normalized.data.text.trim()) resetIdle();
             if (!this.stopped && !timedOut && !deliveryError) {
-              if (normalized) {
+              if (normalized && (!maintenance || normalized.type === 'status' || normalized.type === 'permission_request')) {
                 try { this.options.onEvent(normalized); }
                 catch (error) { deliveryError ??= error; }
               }
             }
           }
           const outcome = await result;
-          if(outcome.status!=='failed'&&submission)submission.onAccepted({submissionId:submission.submissionId,kind:'provider_accepted',provider:'acp',receiptRef:`prompt-result:${submission.submissionId}`,digest:submission.inputDigest});
-          if (!this.stopped && !cancellationExpired && !deliveryError) {
+          if(!maintenance&&outcome.status!=='failed'&&submission)submission.onAccepted({submissionId:submission.submissionId,kind:'provider_accepted',provider:'acp',receiptRef:`prompt-result:${submission.submissionId}`,digest:submission.inputDigest});
+          if (!maintenance && !this.stopped && !cancellationExpired && !deliveryError) {
             const usage = await this.turnUsage(handle);
             if (usage && !this.stopped && !cancellationExpired) {
               try { this.options.onEvent(usage); }
@@ -532,7 +541,7 @@ export class AcpxAdapter implements AgentDriver {
           if (outcome.status === 'failed') {
             // This code is reserved by our ACPX patch for typed metadata on the
             // current prompt response, not a transport error or assistant text.
-            if (!this.stopped && !cancellationExpired && outcome.error.code === 'ACP_PROVIDER_TERMINAL_ERROR') {
+            if (!maintenance && !this.stopped && !cancellationExpired && outcome.error.code === 'ACP_PROVIDER_TERMINAL_ERROR') {
               const secrets = Object.entries({ ...process.env, ...this.agent.env }).filter(([key]) => /token|secret|password|api[_-]?key|authorization|cookie/i.test(key)).map(([, value]) => value).filter((value): value is string => Boolean(value));
               this.options.onEvent({ type: 'error', data: { message: permissionDisplayText(outcome.error.message, secrets), code: outcome.error.code, detailCode: outcome.error.detailCode } });
               this.options.onEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
@@ -541,7 +550,12 @@ export class AcpxAdapter implements AgentDriver {
             throw new Error(outcome.error.message);
           }
           if (timedOut && outcome.status !== 'cancelled' && outcome.stopReason !== 'cancelled') throw new AgentIdleTimeoutError(silentMs);
-          if (!this.stopped && !cancellationExpired) this.options.onEvent({ type: 'completed', data: { stopReason: outcome.stopReason ?? outcome.status } });
+          if (maintenance) {
+            this.assertActive();
+            if (timedOut || cancellationExpired) throw new Error('Context compaction cancellation was not confirmed');
+            compactCancelled = outcome.status === 'cancelled' || outcome.stopReason === 'cancelled';
+            if (!compactCancelled && outcome.stopReason && outcome.stopReason !== 'end_turn') throw new Error(`Context compaction ended without success: ${outcome.stopReason}`);
+          } else if (!this.stopped && !cancellationExpired) this.options.onEvent({ type: 'completed', data: { stopReason: outcome.stopReason ?? outcome.status } });
         } finally {
           finished = true;
           for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });
@@ -561,18 +575,28 @@ export class AcpxAdapter implements AgentDriver {
       return { completion: Promise.race([stream, idle]) };
     });
     await completion;
+    return compactCancelled ? 'cancelled' as const : compactFailed ? 'failed' as const : 'completed' as const;
   }
   /**
    * PromptResponse.usage 只落在 ACPX 会话记录里（按用户消息 id 存），turn.result 不带，轮次结束后读一次。
-   * 取最新一条按请求用量和会话累计成本原样上报：本轮没有新用量时会重复上一轮的键，由宿主记账时去重、求差。
+   * 取最新一条按请求用量和会话累计成本上报；主动压缩的用量并入随后真实任务。重复的键由宿主去重、求差。
    */
-  private async turnUsage(handle: AcpRuntimeHandle): Promise<NormalizedDriverEvent | undefined> {
+  private async turnUsage(handle: AcpRuntimeHandle, includeMaintenance = true): Promise<NormalizedDriverEvent | undefined> {
     let usage: AcpRuntimeStatus['usage'];
     try { usage = (await this.runtime.getStatus?.({ handle }))?.usage; } catch { return; }
     const latest = Object.entries(usage?.perRequest ?? {}).at(-1);
     const cost = usage?.cost?.amount;
     if (!latest && cost === undefined) return;
-    return { type: 'status', data: { state: 'turn_usage', ...(latest ? { usageRef: latest[0], breakdown: latest[1] } : {}), ...(cost !== undefined ? { cost: usage!.cost } : {}) } };
+    const breakdown = latest ? { ...latest[1] } : undefined;
+    const maintenance = includeMaintenance ? this.maintenanceUsage?.data : undefined;
+    if (breakdown && maintenance?.breakdown && maintenance.usageRef !== latest?.[0]) {
+      for (const key of ['inputTokens', 'outputTokens', 'cachedReadTokens', 'cachedWriteTokens', 'thoughtTokens', 'totalTokens'] as const) {
+        const value = maintenance.breakdown[key];
+        if (typeof value === 'number') breakdown[key] = (breakdown[key] ?? 0) + value;
+      }
+    }
+    if (includeMaintenance) this.maintenanceUsage = undefined;
+    return { type: 'status', data: { state: 'turn_usage', ...(latest ? { usageRef: latest[0], breakdown } : {}), ...(cost !== undefined ? { cost: usage!.cost } : {}) } };
   }
   async send(input: string|DriverSubmission) {
     const submission=typeof input==='string'?undefined:input;
@@ -589,12 +613,51 @@ export class AcpxAdapter implements AgentDriver {
       await this.sendTurn(prompt,submission);
     } finally { this.sending = false; }
   }
+  async compact(submission?: DriverSubmission): Promise<'completed' | 'failed' | 'unsupported' | 'cancelled'> {
+    this.assertActive();
+    if (this.options.context?.protocol === 'controlled-v1' && !submission) throw new Error('DRIVER_SUBMISSION_REQUIRED');
+    if (this.sending) throw new Error('ACP turn already in progress');
+    this.sending = true;
+    this.compacting = true;
+    const interruptVersion = this.interruptVersion;
+    try {
+      const previous = this.timedOutStream;
+      if (previous) await this.whileActive(() => previous.catch(() => undefined));
+      const supported = await this.resourceOperation(async () => {
+        const handle = await this.ensureHandle();
+        const status = await this.runtime.getStatus?.({ handle });
+        this.assertActive();
+        return status?.availableCommands?.some(command => command.name.replace(/^\//, '') === 'compact') === true;
+      });
+      if (this.interruptVersion !== interruptVersion) throw new Error('Context compaction was interrupted');
+      if (!supported) {
+        this.options.onEvent({ type: 'status', data: { state: 'compaction', phase: 'unsupported', proactive: true } });
+        return 'unsupported';
+      }
+      const previousUsage = await this.turnUsage(this.handle!, false);
+      if (this.interruptVersion !== interruptVersion) throw new Error('Context compaction was interrupted');
+      this.options.onEvent({ type: 'status', data: { state: 'compaction', phase: 'start', proactive: true } });
+      try {
+        const phase = await this.sendTurn('/compact', submission, true);
+        const usage = await this.turnUsage(this.handle!, false);
+        if (usage?.data.usageRef && usage.data.usageRef !== previousUsage?.data.usageRef) {
+          if (phase === 'cancelled') this.options.onEvent(usage);
+          else this.maintenanceUsage = usage;
+        }
+        this.options.onEvent({ type: 'status', data: { state: 'compaction', phase, proactive: true } });
+        return phase;
+      } catch (error) {
+        if (!this.stopped) this.options.onEvent({ type: 'status', data: { state: 'compaction', phase: 'failed', proactive: true } });
+        throw error;
+      }
+    } finally { this.sending = false; this.compacting = false; }
+  }
   /** Inject into the prompt in flight through `_session/steering`; only agents that advertise it and honour promptRequired get the request. */
   async steer(prompt: string): Promise<DriverSteeringOutcome> {
     // Only issuing the request joins the resource sequence: an agent that never answers must not hold up interrupt or the next turn.
     const request = await this.resourceOperation(async () => {
       const handle = this.handle;
-      if (!this.turn || !handle || this.turnCancelling) return 'promptRequired' as const;
+      if (this.compacting || !this.turn || !handle || this.turnCancelling) return 'promptRequired' as const;
       if (!this.runtime.requestActiveTurnExtension) return 'unsupported' as const;
       return { reply: this.runtime.requestActiveTurnExtension({
         handle, method: '_session/steering',
@@ -613,6 +676,7 @@ export class AcpxAdapter implements AgentDriver {
     throw new Error(`Agent ${this.agent.id} did not accept the steering message (${String(outcome)})`);
   }
   async interrupt() {
+    this.interruptVersion++;
     this.turnCancelling = true;
     this.idleWatch?.clear();
     for (const resolve of this.pendingPermissions.values()) resolve({ outcome: 'reject_once' });

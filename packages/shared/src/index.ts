@@ -295,6 +295,8 @@ export interface TaskExecutionContext {
   actorId?: string;
   /** 实际发送给 Agent 的 prompt；可能包含来源通道补充的上下文。 */
   agentPrompt: string;
+  /** Channel policy captured at acceptance; absent means no proactive compaction. */
+  idleCompactHours?: number;
   /** Metadata for the immutable Skill content already included in agentPrompt. */
   skillDeliveries?: SkillDeliveryMetadata[];
   riskPolicy?: ToolRiskPolicy;

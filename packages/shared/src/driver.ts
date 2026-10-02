@@ -73,6 +73,8 @@ export interface AgentDriver {
    * 且必须先向运行时投递本轮全部事件再完成 Promise。轮次失败（提交失败/超时/异常退出）必须 reject。
    */
   send(prompt: string | DriverSubmission): Promise<void>;
+  /** Native advertised compaction; no user-turn completion event. Unknown execution must reject. */
+  compact?(submission?: DriverSubmission): Promise<'completed' | 'failed' | 'unsupported' | 'cancelled'>;
   /** Finish all asynchronous turn preparation before the durable submission intent. */
   prepareTurn?(input: DriverSubmissionInput, operation: OperationPermit): Promise<void>;
   prepareSubmission?(input: DriverSubmissionInput): Omit<DriverSubmission, 'operation' | 'onAccepted'>;

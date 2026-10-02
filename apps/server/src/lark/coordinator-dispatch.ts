@@ -11,7 +11,7 @@ import { isLarkGroupMemoryPool, larkMemoryScope, type LarkMemoryEntry, type Lark
 import { renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
-import { defaultHighRiskPattern, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
+import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
 import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
 import {
   loadLarkTaskEvents,
@@ -1212,6 +1212,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         task.stallNoted = stalled;
         for (const item of this.tasks.values()) if (item !== task && item.sessionId === task.sessionId && item.state === 'queued') void item.requestUpdate?.('queued').catch(() => undefined);
       }
+      const compaction = task.events.filter(item => item.type === 'status' && (item.data as any)?.state === 'compaction').at(-1)?.data as { phase?: string } | undefined;
+      const compacting = state === 'running' && compaction?.phase === 'start';
       const outcome = await enqueueUpdate({
         terminal,
         turn: task.turn,
@@ -1221,7 +1223,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           messageId: task.cardMessageId!,
           permissionMode: larkPermissionMode(config),
           state,
-          ...(recovery ? { statusLabel: recovery.label } : task.state === 'interrupting' ? { statusLabel: '等待停止确认', actionState: 'interrupting' as const } : stalled ? { statusLabel: '可能卡住' } : {}),
+          ...(recovery ? { statusLabel: recovery.label } : task.state === 'interrupting' ? { statusLabel: '等待停止确认', actionState: 'interrupting' as const } : compacting ? { statusLabel: '正在压缩历史上下文' } : stalled ? { statusLabel: '可能卡住' } : {}),
           ...(awaitingAnswer ? { awaitingAnswer: true } : {}),
           taskId: task.id,
           taskName: taskTitle,
@@ -1610,6 +1612,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         }
         if (!active || settled) return;
         appendEvent(agentEvent);
+        if (agentEvent.type === 'status' && (agentEvent.data as any)?.state === 'compaction' && !settling) void update('running').catch(error => this.log.warn({ error, taskId: task.id }, '更新上下文压缩进度失败'));
         const context = this.interactionContext(task);
         if (context) void this.workflows?.observe(context, agentEvent, this.workflowObserveOptions(task)).catch(error => this.log.error({ error, taskId: task.id }, '发送飞书工作请求失败'));
         if (!settling) scheduleHeartbeat();
@@ -1626,13 +1629,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         task.submissionStarted = true;
         const runtimeTask = resumeTask
           ? { ...((await this.runtime.getTasks!(session.id)).find(item => item.id === resumeTask!.id) ?? resumeTask), replayed: true, queuedAhead: 0 }
-          : task.inbox
-          ? await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy, event.senderOpenId, `lark:${config.appId}:${event.messageId}:${currentTurn}`)
-          : config.managedGroup
-          ? await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy, event.senderOpenId)
-          : riskPolicy
-          ? await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy)
-          : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt);
+          : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy,
+            task.inbox || config.managedGroup ? event.senderOpenId : undefined,
+            task.inbox ? `lark:${config.appId}:${event.messageId}:${currentTurn}` : undefined, undefined, undefined,
+            config.idleCompactEnabled !== false ? config.idleCompactHours ?? defaultLarkIdleCompactHours : undefined);
         runtimeTaskId = runtimeTask.id;
         // 重连或按幂等键重放的是早先派发的那条 prompt，本轮新读的群上下文没有交给 Agent。
         if (runtimeTask.replayed) groupContextCommit = undefined;
