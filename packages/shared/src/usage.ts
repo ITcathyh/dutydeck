@@ -47,6 +47,9 @@ export interface UsageLedgerEntry {
 
 export interface UsageTotals {
   entries: number;
+  /** Records reporting tokens; cost-only records are not token zeroes. */
+  tokenEntries?: number;
+  partialTokenEntries?: number;
   costUsd: number;
   estimatedCostUsd: number;
   inputTokens: number;

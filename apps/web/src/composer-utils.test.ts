@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildPrompt, commandsFromEvents, contextStatsFromEvents, getModelReadiness, replaceSlashQuery, slashQuery } from './composer-utils';
+import { buildPrompt, commandsFromEvents, contextStatsFromEvents, currentContextStats, getModelReadiness, replaceSlashQuery, slashQuery } from './composer-utils';
 
 describe('composer slash references', () => {
   it('can invoke a selected skill without additional text', () => {
@@ -38,4 +38,13 @@ describe('composer slash references', () => {
   it('blocks sending while switching models even when the previous catalog is loaded', () => {
     expect(getModelReadiness({ loaded: true, loading: false, switching: true, failed: false })).toMatchObject({ kind: 'loading', label: '模型切换中…' });
   });
+});
+
+it('does not use cumulative token breakdown for context and selects the newer session measurement', () => {
+  const events: any[] = [{ type: 'status', timestamp: '2026-10-02T00:00:00Z', data: { state: 'usage', breakdown: { totalTokens: 999999 } } }];
+  expect(contextStatsFromEvents(events).used).toBeUndefined();
+  const snapshot = { used: 100, size: 1000, observedAt: '2026-10-02T01:00:00Z' };
+  expect(currentContextStats(events, snapshot).used).toBe(100);
+  events.push({ type: 'status', timestamp: '2026-10-02T02:00:00Z', data: { state: 'usage', used: 0, size: 1000 } });
+  expect(currentContextStats(events, snapshot)).toMatchObject({ used: 0, percentage: 0 });
 });

@@ -2,6 +2,45 @@ diff --git a/dist/runtime.js b/dist/runtime.js
 index 3fb25ae4124cea292546e1dda95465b3ae15577e..23e148abc85904e7f751a1b4248b9874f8e7d353 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
+@@ -346,11 +346,26 @@
+ 		used,
+ 		size,
+ 		cost: normalizeUsageCost(payload.cost),
+-		breakdown: normalizeUsageBreakdown(meta?.usage)
++		breakdown: normalizeUsageBreakdown(meta?.usage),
++		rateLimit: normalizeClaudeRateLimit(meta?.["_claude/rateLimit"])
+ 	});
+ }
++function normalizeClaudeRateLimit(raw) {
++	if (!isRecord(raw)) return void 0;
++	const normalizeWindow = value => isRecord(value) && typeof value.utilization === "number" && Number.isFinite(value.utilization) && value.utilization >= 0 && value.utilization <= 1 && typeof value.resetsAt === "number" && Number.isFinite(value.resetsAt) && value.resetsAt > 0 ? { utilization: value.utilization, resetsAt: value.resetsAt } : void 0;
++	const result = {};
++	const window = normalizeWindow(raw);
++	if ((raw.rateLimitType === "five_hour" || raw.rateLimitType === "seven_day") && window) Object.assign(result, { rateLimitType: raw.rateLimitType, ...window });
++	const unifiedWindows = {};
++	for (const key of ["five_hour", "seven_day"]) {
++		const value = normalizeWindow(raw.unifiedWindows?.[key]);
++		if (value) unifiedWindows[key] = value;
++	}
++	if (Object.keys(unifiedWindows).length) result.unifiedWindows = unifiedWindows;
++	return Object.keys(result).length ? result : void 0;
++}
+ function buildUsageUpdateEvent(parts) {
+-	const { used, size, cost, breakdown } = parts;
++	const { used, size, cost, breakdown, rateLimit } = parts;
+ 	return {
+ 		type: "status",
+ 		text: used != null && size != null ? `usage updated: ${used}/${size}` : "usage updated",
+@@ -358,7 +373,8 @@
+ 		...used != null ? { used } : {},
+ 		...size != null ? { size } : {},
+ 		...cost ? { cost } : {},
+-		...breakdown ? { breakdown } : {}
++		...breakdown ? { breakdown } : {},
++		...rateLimit ? { rateLimit } : {}
+ 	};
+ }
+ function availableCommandsUpdateEvent(payload) {
 @@ -734,17 +734,33 @@ async function createOrLoadRuntimeSession(client, resumeSessionId, cwd) {
  		sessionResult: created
  	};

@@ -59,7 +59,7 @@ rl.on('line', async line => {
       // report usage 仿 claude-agent-acp：usage_update 带会话累计成本，PromptResponse.usage 是本轮 token；report tokens 仿 codex-acp，只有 token。
       if (prompt.includes('report usage')) {
         reportedCost += 0.25;
-        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'usage_update', used: 1200, size: 200000, cost: { amount: reportedCost, currency: 'USD' } } } });
+        send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'usage_update', used: 1200, size: 200000, cost: { amount: reportedCost, currency: 'USD' }, ...(prompt.includes('rate limits') ? { _meta: { '_claude/rateLimit': { rateLimitType: 'five_hour', utilization: 0.42, resetsAt: 1791000000, unifiedWindows: { five_hour: { utilization: 0.42, resetsAt: 1791000000 }, seven_day: { utilization: 0.75, resetsAt: 1791500000 }, ignored: { secret: 'private' } }, ignored: 'private' } } } : {}) } } });
       }
       send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId: params.sessionId, update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'usage reported' } } } });
       return send({ jsonrpc: '2.0', id, result: { stopReason: 'end_turn', usage: { inputTokens: 100, outputTokens: 20, cachedReadTokens: 30, cachedWriteTokens: 5, totalTokens: 155 } } });

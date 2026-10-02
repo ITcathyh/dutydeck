@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs
 import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
-import { permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson } from '@dutydeck/shared';
+import { claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson } from '@dutydeck/shared';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
 
@@ -133,7 +133,10 @@ export function normalizeAcpxEvent(input: unknown): NormalizedDriverEvent | unde
   if (kind === 'agent_thought_chunk' || kind === 'thinking') return { type: 'thinking', data: { text: update.content?.text ?? event.text ?? '' } };
   if (kind === 'tool_call' || kind === 'tool_call_update' || kind === 'tool_result') { const complete = statusMap[update.status] ?? (kind === 'tool_result' ? 'completed' : 'running'); return { type: complete === 'completed' || complete === 'failed' ? 'tool_result' : 'tool_call', data: { id: update.toolCallId ?? event.toolCallId ?? event.id, name: update.title ?? event.title ?? event.name ?? 'tool', input: update.rawInput ?? event.rawInput ?? event.input, output: update.rawOutput ?? event.rawOutput ?? event.output, status: complete } }; }
   if (kind === 'permission_request' || kind === 'permission_escalation') return { type: 'permission_request', data: { id: event.requestId ?? event.id ?? update.toolCallId, toolCallId: update.toolCallId, ...permissionFacts({ ...update, title: update.title ?? event.toolTitle }), options: update.options ?? [], status: 'pending' } };
-  if (kind === 'usage_update') return { type: 'status', data: { state: 'usage', used: event.used, size: event.size, breakdown: event.breakdown, cost: event.cost } };
+  if (kind === 'usage_update') {
+    const rateLimits = claudeRateLimits(event.rateLimit ?? update._meta?.['_claude/rateLimit'], new Date().toISOString());
+    return { type: 'status', data: { state: 'usage', used: update.used, size: update.size, breakdown: event.breakdown, cost: update.cost, ...(rateLimits ? { rateLimits } : {}) } };
+  }
   if (kind === 'available_commands_update') return { type: 'status', data: { state: 'commands', availableCommands: event.availableCommands ?? update.availableCommands ?? [] } };
   if (kind === 'error') return { type: 'error', data: { message: event.message ?? event.error?.message ?? 'Agent error', detail: event } };
   if (kind === 'done' || kind === 'completed' || kind === 'result' || event.result?.stopReason) return { type: 'completed', data: { stopReason: event.stopReason ?? event.result?.stopReason ?? 'end_turn' } };

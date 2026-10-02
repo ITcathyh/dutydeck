@@ -353,3 +353,17 @@ describe('acpx ACP boundary', () => {
 function agentConfig() {
   return { id: 'mock', name: 'Mock', command: process.execPath, args: [], protocol: 'acp' as const, env: {}, permissionMode: 'ask' as const, timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
 }
+
+it('preserves Claude quota metadata through real ACPX with a persistent session key', async () => {
+  const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-quota-')); dirs.push(cwd);
+  const events: any[] = [];
+  const sessionKey = 'usage_hud_regression';
+  const adapter = new AcpxAdapter({ id: 'mock', name: 'Mock', command: process.execPath, args: [resolve(process.cwd(), 'tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd, env: { dutydeck_session_id: sessionKey }, permissionMode: 'deny-all', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false }, { sessionKey, onEvent: e => events.push(e) });
+  try {
+    await adapter.start(); await adapter.send('report usage rate limits');
+    expect(events.find(e => e.data?.rateLimits)?.data).toMatchObject({ state: 'usage', used: 1200, size: 200000, rateLimits: { fiveHour: { usedPercent: 42, resetsAt: 1791000000 }, sevenDay: { usedPercent: 75, resetsAt: 1791500000 } } });
+    const record = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey);
+    expect(record?.acpx?.session_options?.env).toEqual({ dutydeck_session_id: sessionKey });
+    expect(JSON.stringify(events.find(e => e.data?.rateLimits))).not.toContain('private');
+  } finally { await adapter.stop(); }
+});
