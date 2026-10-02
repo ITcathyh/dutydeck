@@ -78,7 +78,8 @@ describe('compactTrace 精简过程卡', () => {
     expect(current.background_style).toBeUndefined();
     const title = components(current).find(element => element.element_id === 'current_title');
     expect(title.content).toBe('**根据失败信息修复。**');
-    expect(components(current).find(element => element.element_id === 'current_elapsed').content).toBe("<font color='grey'>3s</font>");
+    expect(components(current).find(element => element.element_id === 'current_head').columns).toHaveLength(1);
+    expect(components(current).find(element => element.element_id === 'current_elapsed')).toBeUndefined();
     // 有旁白时另起一行写最新一步；它失败了就直接标红。
     expect(components(current).find(element => element.element_id === 'current_now').content)
       .toBe("<font color='red'>失败：pnpm vitest run</font>");

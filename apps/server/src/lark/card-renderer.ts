@@ -793,8 +793,6 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
     const title = narrativeText
       ? truncateInline(narrativeText, narrativeLimit)
       : latestHeadline ? truncateInline(latestHeadline, 92) : '正在执行…';
-    const first = group.narratives[0] ?? group.actions[0];
-    const elapsed = traceElapsed(first?.data.startedAt ?? first?.timestamp);
     // 图标由 service 按卡片状态换成加载动图或等待标识；这里放的是没有动图时的兜底。
     elements.push({
       tag: 'column_set', element_id: 'current_head', flex_mode: 'none', horizontal_spacing: '8px', margin: '0px',
@@ -802,10 +800,7 @@ const currentRunningStagePanel = (group: TraceGroup, index: number, showFallback
         { tag: 'column', width: 'weighted', weight: 1, vertical_align: 'top', elements: [{
           tag: 'markdown', element_id: 'current_title', content: strong(escapeCardInline(title)), text_size: 'normal', margin: '0px',
           icon: { tag: 'standard_icon', token: 'loading_outlined', color: 'blue' }
-        }] },
-        ...(elapsed ? [{ tag: 'column', width: 'auto', vertical_align: 'top', elements: [
-          { tag: 'markdown', element_id: 'current_elapsed', content: `<font color='grey'>${elapsed}</font>`, text_size: 'notation', margin: '0px' }
-        ] }] : [])
+        }] }
       ]
     });
     // 缩进与标题文字对齐（让出标题前的图标）。
