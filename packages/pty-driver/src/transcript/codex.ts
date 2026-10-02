@@ -21,10 +21,10 @@
  *   event_msg task_complete.last_agent_message    → text (modern schema,
  *                                                   sole final-answer source)
  */
-import { existsSync, opendirSync, statSync } from 'node:fs';
-import type { Dirent } from 'node:fs';
+import { createReadStream, existsSync, opendirSync, statSync } from 'node:fs';
+import type { Dirent, Stats } from 'node:fs';
 import { join } from 'node:path';
-import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { codexRateLimits, contextUsage, type NormalizedDriverEvent, type SessionUsageSnapshot } from '@dutydeck/shared';
 import { codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { resolveCliSessionId } from '../session-id/index.js';
@@ -96,17 +96,19 @@ export function resolveNewestRollout(sessionsRoot: string): string | undefined {
 export function findRolloutBySessionId(
   sessionsRoot: string,
   cliSessionId: string,
+  maxCandidates = MAX_ROLLOUT_CANDIDATES,
 ): string | undefined {
   if (!existsSync(sessionsRoot)) return undefined;
   const candidates = walkFiles(sessionsRoot, {
     maxDepth: SESSION_SCAN_MAX_DEPTH,
     accept: name => name.startsWith('rollout-') && name.endsWith('.jsonl'),
-  }).sort(byMtimeDesc).slice(0, MAX_ROLLOUT_CANDIDATES);
+  }).sort(byMtimeDesc).slice(0, maxCandidates);
+  const named = candidates.find(candidate => candidate.path.endsWith(`-${cliSessionId}.jsonl`));
+  if (named) return named.path;
   for (const candidate of candidates) {
-    if (candidate.path.includes(cliSessionId)) return candidate.path;
     for (const entry of parseJsonlObjects(readHead(candidate.path, ROLLOUT_HEAD_BYTES))) {
       if (entry?.type !== 'session_meta') continue;
-      if (entry.payload?.session_id === cliSessionId) return candidate.path;
+      if ((entry.payload?.id ?? entry.payload?.session_id) === cliSessionId) return candidate.path;
       break; // session_meta is the head record; past it there is nothing to learn.
     }
   }
@@ -193,6 +195,13 @@ export function mapCodexEntry(entry: any): NormalizedDriverEvent[] | undefined {
   if (!entry || typeof entry !== 'object') return undefined;
   const p = entry.payload;
   if (!p || typeof p !== 'object') return undefined;
+
+  if (entry.type === 'event_msg' && p.type === 'token_count') {
+    const observedAt = typeof entry.timestamp === 'string' ? entry.timestamp : new Date().toISOString();
+    const context = contextUsage(p.info?.last_token_usage?.total_tokens, p.info?.model_context_window, observedAt);
+    const rateLimits = codexRateLimits(p.rate_limits, observedAt);
+    return context || rateLimits ? [{ type: 'status', data: { state: 'usage', ...(context ? { used: context.used, size: context.size } : {}), ...(rateLimits ? { rateLimits } : {}) } }] : undefined;
+  }
 
   if (entry.type === 'response_item') {
     // Reasoning summary → thinking. Prefer summary[] (what the TUI shows),
@@ -336,4 +345,61 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
   restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
   stop(): void { this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
+}
+
+interface UsageReadCursor { path: string; inode: number; mtime: number; offset: number; pending: Buffer; skippingLine: boolean; bound: boolean; snapshot: SessionUsageSnapshot }
+const usageReadCursors = new Map<string, UsageReadCursor>();
+/** Read only the named native session. Repeated polling reads appended bytes only. */
+export async function readCodexSessionUsage(nativeSessionId: string, env: CliPathEnv, cwd: string): Promise<SessionUsageSnapshot | undefined> {
+  const root = codexSessionsRoot(env);
+  const key = `${root}\0${nativeSessionId}\0${cwd}`;
+  let saved = usageReadCursors.get(key);
+  let path = saved?.path;
+  let stat: Stats | undefined;
+  if (path) {
+    try { stat = statSync(path); }
+    catch { usageReadCursors.delete(key); saved = undefined; path = undefined; }
+  }
+  path ??= findRolloutBySessionId(root, nativeSessionId, Infinity);
+  if (!path) return undefined;
+  stat ??= statSync(path);
+  let cursor = saved ? { ...saved, snapshot: { ...saved.snapshot, ...(saved.snapshot.rateLimits ? { rateLimits: { ...saved.snapshot.rateLimits } } : {}) } } : undefined;
+  if (!cursor || cursor.inode !== stat.ino || stat.size < cursor.offset || stat.size === cursor.offset && stat.mtimeMs !== cursor.mtime) {
+    cursor = { path, inode: stat.ino, mtime: stat.mtimeMs, offset: 0, pending: Buffer.alloc(0), skippingLine: false, bound: false, snapshot: {} };
+  }
+  const acceptLine = (line: Buffer) => {
+    let entry: any;
+    try { entry = JSON.parse(line.toString('utf8')); } catch { return; }
+    if (entry.type === 'session_meta') {
+      cursor!.bound = (entry.payload?.id ?? entry.payload?.session_id) === nativeSessionId && entry.payload?.cwd === cwd;
+      if (!cursor!.bound) cursor!.snapshot = {};
+    }
+    if (!cursor!.bound || entry.type !== 'event_msg' || entry.payload?.type !== 'token_count') return;
+    const context = contextUsage(entry.payload.info?.last_token_usage?.total_tokens, entry.payload.info?.model_context_window, entry.timestamp);
+    const rateLimits = codexRateLimits(entry.payload.rate_limits, entry.timestamp);
+    if (context) cursor!.snapshot.context = context;
+    if (rateLimits) cursor!.snapshot.rateLimits = { ...cursor!.snapshot.rateLimits, ...rateLimits };
+  };
+  if (stat.size > cursor.offset) {
+    const stream = createReadStream(path, { start: cursor.offset, end: stat.size - 1 });
+    try {
+      for await (const chunk of stream) {
+        const buffer = Buffer.concat([cursor.pending, chunk as Buffer]);
+        let start = 0; let end: number;
+        while ((end = buffer.indexOf(10, start)) >= 0) {
+          if (!cursor.skippingLine) acceptLine(buffer.subarray(start, end));
+          cursor.skippingLine = false; start = end + 1;
+        }
+        // Tool output can occupy huge JSONL lines; quota events are small.
+        cursor.pending = Buffer.from(buffer.subarray(start));
+        if (cursor.pending.length > 1024 * 1024) { cursor.pending = Buffer.alloc(0); cursor.skippingLine = true; }
+      }
+    } finally { stream.destroy(); }
+    cursor.offset = stat.size;
+    cursor.mtime = stat.mtimeMs;
+  }
+  usageReadCursors.delete(key);
+  if (cursor.bound) usageReadCursors.set(key, cursor);
+  if (usageReadCursors.size > 32) usageReadCursors.delete(usageReadCursors.keys().next().value!);
+  return cursor.bound ? { ...cursor.snapshot, ...(cursor.snapshot.rateLimits ? { rateLimits: { ...cursor.snapshot.rateLimits } } : {}) } : undefined;
 }

@@ -1,10 +1,12 @@
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { RuntimeError } from '@dutydeck/shared';
+import type { SessionUsageSnapshot } from '@dutydeck/shared';
 import type { UsageLedger } from './usage-ledger.js';
 
 export interface UsageRouteOptions {
   ledger: UsageLedger;
+  snapshot?(sessionId: string): Promise<SessionUsageSnapshot>;
   /** 安装管理员校验；汇总与上限跨所有 Bot，未授权一律 403。 */
   authorize(request: FastifyRequest): Promise<boolean> | boolean;
 }
@@ -40,6 +42,7 @@ export function registerUsageRoutes(app: FastifyInstance, options: UsageRouteOpt
 
   app.get<{ Params: { id: string } }>('/api/sessions/:id/usage', async request => {
     await requireSessionView(request, request.params.id);
-    return options.ledger.sessionUsage(request.params.id);
+    const [usage, snapshot] = await Promise.all([options.ledger.sessionUsage(request.params.id), options.snapshot?.(request.params.id)]);
+    return { ...usage, ...(snapshot ? { snapshot } : {}) };
   });
 }
