@@ -67,6 +67,34 @@ async function setup(
 }
 
 describe('Agent group collaboration domain service', () => {
+  it('refreshes final and work tokens and keeps independent capability gates on every prompt', async () => {
+    const f = await setup({ cli_current: fakeClient() });
+    const active = { taskId: 'task-one', attemptId: 'attempt-one', actorId: 'ou_actor' };
+    let work = true, collaboration = true, memory = true;
+    const live = vi.fn(async () => {});
+    const tools = new LarkAgentToolsService(f.capabilities, f.repos.config, {
+      workbenchTask: () => active, finalTaskContext: async () => undefined,
+      authorizeTool: live,
+      previewTool: async (_id, action) => { if (action === 'memory' && !memory) throw new Error('revoked'); },
+      previewWork: async () => work, previewCollaboration: async () => collaboration
+    });
+    const first = await tools.promptForSession(f.activeSession, 'one');
+    const final1 = f.capabilities.finalTurnToken(f.activeSession.id, active.taskId, active.attemptId);
+    const work1 = f.capabilities.workbenchTurnToken(f.activeSession.id, active.taskId);
+    expect(first).toContain(final1); expect(first).toContain(work1);
+    expect(first).toContain('[Dutydeck 目标编排]'); expect(first).toContain('[群内持续协作]');
+    active.taskId = 'task-two'; active.attemptId = 'attempt-two'; collaboration = false;
+    const second = await tools.promptForSession(f.activeSession, 'two');
+    expect(second).not.toContain(final1); expect(second).not.toContain(work1);
+    expect(second).toContain(f.capabilities.finalTurnToken(f.activeSession.id, active.taskId, active.attemptId));
+    expect(second).toContain('[Dutydeck 目标编排]'); expect(second).not.toContain('[群内持续协作]');
+    work = false; collaboration = true; memory = false;
+    const third = await tools.promptForSession(f.activeSession, 'three');
+    expect(third).not.toContain('[Dutydeck 目标编排]'); expect(third).toContain('[群内持续协作]');
+    expect(third).not.toContain('[Dutydeck 会话记忆工具]'); expect(third).toContain('发送独立消息/文件');
+    expect(live).not.toHaveBeenCalled();
+  });
+
   it('checks the unified group-tools execution edge before reading or sending', async () => {
     const current = fakeClient();
     const authorize = vi.fn(async (_boundary: 'group_tools', action: any) => ({
@@ -76,6 +104,10 @@ describe('Agent group collaboration domain service', () => {
       integrationMode: 'legacy_unmanaged',
       authorize,
     });
+    const prompt = await tools.promptForSession(session(), 'q');
+    expect(prompt).not.toContain('[Dutydeck 飞书会话工具]');
+    expect(prompt).toContain('[Dutydeck 会话记忆工具]');
+    authorize.mockClear();
     await expect(tools.messages(token)).rejects.toMatchObject({
       code: 'channel_bot_disabled', statusCode: 403, details: { boundary: 'group_tools', integrationMode: 'legacy_unmanaged' }
     });
@@ -216,9 +248,11 @@ describe('Agent group collaboration domain service', () => {
   it('injects group context for every dispatch path while leaving p2p sessions unchanged', async () => {
     const { tools } = await setup({ cli_current: fakeClient() }, "'/usr/bin/node' '/app/cli.js'");
     const prompt = await tools.promptForSession(session(), '继续处理');
-    expect(prompt).toContain("'/usr/bin/node' '/app/cli.js' group peers");
-    expect(prompt).toContain("group send '我已定位问题' --reply-to om_xxx --in-thread");
-    expect(prompt).toContain("group send '发布窗口已开启'");
+    expect(prompt).toContain("'/usr/bin/node' '/app/cli.js' group --help");
+    expect(prompt).toContain('group peers/bots/members');
+    expect(prompt).toContain('本轮最终答复直接输出');
+    expect(prompt).toContain('--reply-to 只用 om_*，勿用 omt_*');
+    expect(prompt).toContain('独立消息不加 --reply-to/--in-thread');
     await expect(tools.promptForSession(session({ sourceId: 'cli_current:oc_p2p:p2p' }), '继续处理')).resolves.toContain('group send-file');
   });
 
@@ -227,13 +261,12 @@ describe('Agent group collaboration domain service', () => {
     const enabled = await tools.promptForSession(session(), '继续处理');
     expect(enabled.indexOf('[Dutydeck 会话记忆工具]')).toBeGreaterThanOrEqual(0);
     expect(enabled.indexOf('[Dutydeck 会话记忆工具]')).toBeLessThan(enabled.indexOf('[Dutydeck 飞书会话工具]'));
-    expect(enabled).toContain("'/usr/bin/node' '/app/cli.js' memory add");
-    expect(enabled).toContain("'/usr/bin/node' '/app/cli.js' memory show");
-    expect(enabled).toContain("'/usr/bin/node' '/app/cli.js' memory search");
+    expect(enabled).toContain("'/usr/bin/node' '/app/cli.js' memory --help");
+    expect(enabled).toContain('list/show/search/add/remove');
     expect(enabled.endsWith('继续处理')).toBe(true);
     const disabled = await tools.promptForSession(session({ sourceId: 'cli_disabled:oc_p2p:p2p' }), '继续处理');
-    expect(disabled).toContain("'/usr/bin/node' '/app/cli.js' memory list");
-    expect(disabled).not.toContain('group send');
+    expect(disabled).toContain("'/usr/bin/node' '/app/cli.js' memory --help");
+    expect(disabled).not.toContain('[Dutydeck 飞书会话工具]');
     expect(disabled).not.toContain('[Dutydeck 目标编排]');
     await expect(tools.promptForSession(session({ source: 'web', sourceId: undefined }), '继续处理')).resolves.toBe('继续处理');
 
@@ -252,7 +285,7 @@ describe('Agent group collaboration domain service', () => {
     // 1. 群工具关闭时，prompt 包含定时说明和管理说明
     const promptDisabledGroup = await tools.promptForSession(session({ sourceId: 'cli_disabled:oc_group:group' }), '用户指令');
     expect(promptDisabledGroup).toContain('[Dutydeck 能力限制与操作指引]');
-    expect(promptDisabledGroup).toContain('定时任务：当前会话无法直接设置，请让用户使用 /schedule 命令设置');
+    expect(promptDisabledGroup).toContain('定时任务：本轮未确认可直接设置，请让用户使用 /schedule 命令设置');
     expect(promptDisabledGroup).toContain('不要用 crontab、后台 sleep 或循环脚本代替');
     expect(promptDisabledGroup).toContain('切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话');
     expect(promptDisabledGroup).toContain('/tasks');
@@ -260,11 +293,11 @@ describe('Agent group collaboration domain service', () => {
     expect(promptDisabledGroup).toContain('重新开始：让用户使用 /new');
     expect(promptDisabledGroup).toContain('不要说“已完成”或“已设置”');
 
-    // 2. 群工具开启且是群聊时，不含定时说明，但仍含管理说明
+    // 2. 仅群工具开启不足以提供定时委托：缺少当前 actor 与独立协作授权
     const promptEnabledGroup = await tools.promptForSession(session({ sourceId: 'cli_current:oc_group:group' }), '用户指令');
     expect(promptEnabledGroup).toContain('[Dutydeck 能力限制与操作指引]');
-    expect(promptEnabledGroup).not.toContain('定时任务');
-    expect(promptEnabledGroup).not.toContain('/schedule');
+    expect(promptEnabledGroup).toContain('定时任务');
+    expect(promptEnabledGroup).toContain('/schedule');
     expect(promptEnabledGroup).toContain('切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话');
     expect(promptEnabledGroup).toContain('/tasks');
     expect(promptEnabledGroup).toContain('停止当前任务：让用户点进度卡上的“中断”');
@@ -273,7 +306,7 @@ describe('Agent group collaboration domain service', () => {
     // 3. 私聊时，含定时说明
     const promptP2P = await tools.promptForSession(session({ sourceId: 'cli_current:oc_p2p:p2p' }), '用户指令');
     expect(promptP2P).toContain('[Dutydeck 能力限制与操作指引]');
-    expect(promptP2P).toContain('定时任务：当前会话无法直接设置，请让用户使用 /schedule 命令设置');
+    expect(promptP2P).toContain('定时任务：本轮未确认可直接设置，请让用户使用 /schedule 命令设置');
     expect(promptP2P).toContain('切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话');
   });
 

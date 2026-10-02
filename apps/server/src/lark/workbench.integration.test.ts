@@ -67,7 +67,7 @@ async function fixture(mode: 'normal' | 'permission' | 'held' | 'terminal' = 'no
     } satisfies AgentDriver)
   });
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://localhost', 'fixture-signing-key');
-  tools = new LarkAgentToolsService(capabilities, repos.config, { workbenchTask: (id: string) => runtime.getActiveTaskContext(id) });
+  tools = new LarkAgentToolsService(capabilities, repos.config, { workbenchTask: (id: string) => runtime.getActiveTaskContext(id), previewWork: (id, actor) => authorize(id, actor) });
   const broker = new RelayAskBroker({ publish: async (id: string, input: any) => { await runtime.publishSessionEvent(id, 'text', { text: input.text, relay: input.kind, askId: input.askId }); } });
   const createCard = vi.fn(async (input: any) => {
     const messageId = `om_card_${cards.length + 1}`;
@@ -198,7 +198,7 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     const env = f.capabilities.environmentFor(parent);
     const turn = f.capabilities.workbenchTurnToken(parent.id, active.taskId);
     expect(f.prompts[0]!.prompt).toContain('awaiting_confirmation');
-    expect(f.prompts[0]!.prompt).toContain('不提供代替用户回答等待、批准权限或确认计划的入口');
+    expect(f.prompts[0]!.prompt).toContain('不能代用户确认、回答等待或批准权限');
     const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
       const response = await f.app.inject({ method: init?.method as any ?? 'GET', url: new URL(String(url)).pathname, headers: Object.fromEntries(new Headers(init?.headers)), ...(init?.body ? { payload: String(init.body) } : {}) });
       return new Response(response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } });
@@ -500,7 +500,7 @@ describe('Feishu workbench with real Runtime, SQLite and HTTP routes', () => {
     }
     const env = f.capabilities.environmentFor(parent);
     const turn = f.capabilities.workbenchTurnToken(parent.id, active.taskId);
-    expect(f.prompts[0]!.prompt).toContain(`work --turn ${turn} create`);
+    expect(f.prompts[0]!.prompt).toContain(`work --turn ${turn}`);
     const fetcher = async (url: string | URL | Request, init?: RequestInit) => {
       const response = await f.app.inject({ method: init?.method as any ?? 'GET', url: new URL(String(url)).pathname, headers: Object.fromEntries(new Headers(init?.headers)), ...(init?.body ? { payload: String(init.body) } : {}) });
       return new Response(response.body, { status: response.statusCode, headers: { 'content-type': 'application/json' } });

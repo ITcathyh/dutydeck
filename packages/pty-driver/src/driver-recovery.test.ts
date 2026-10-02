@@ -126,7 +126,8 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
       const f = fixture();
       const backend = new TmuxBackend(f.name, { ownerId: f.ownerId });
       const adapter = { ...createCliAdapter(adapterId)!, buildArgs: () => [], prepareInput: undefined };
-      const driver = new PtyCliDriver({ agent: config(f.cwd), adapter, backend, onEvent() {}, onExit() {}, sessionId });
+      const events: NormalizedDriverEvent[] = [];
+      const driver = new PtyCliDriver({ agent: config(f.cwd), adapter, backend, onEvent(event) { events.push(event); }, onExit() {}, sessionId });
       try {
         await driver.start();
         await driver.checkpoint();
@@ -140,6 +141,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
         try { expect(await Promise.race([sent, deadline])).toMatchObject({ message: expect.stringContaining('backend rejected input') }); }
         finally { clearTimeout(timer); }
         expect(metadata).not.toHaveBeenCalled();
+        expect(events.filter(event => event.data?.state === 'prompt_assembly')).toEqual([]);
         if (method === 'write') { expect(writes).toHaveBeenCalledOnce(); expect(enters).not.toHaveBeenCalled(); }
         else expect(enters).toHaveBeenCalledOnce();
       } finally { await driver.stop(); vi.restoreAllMocks(); }
@@ -180,6 +182,7 @@ tmuxDescribe('PtyCliDriver in-flight tmux turn recovery', () => {
     expect(await new TmuxBackend(f.name, { ownerId: f.ownerId }).getPid()).toBe(originalPid);
     expect(firstPrompts).toHaveLength(1);
     expect(recoveredPrompts).toEqual([]);
+    expect(events.filter(event => event.data?.state === 'prompt_assembly')).toEqual([]);
     expect(attached).toHaveBeenCalledOnce();
     expect(events.filter(event => event.type === 'text').map(event => event.data.text))
       .toEqual(['final written while daemon was down']);

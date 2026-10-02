@@ -180,7 +180,11 @@ export interface LarkGroupToolClient {
 
 export interface LarkAgentToolsOptions {
   authorizeTool?: (sessionId: string, action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send' | 'memory') => Promise<{ actorId: string } | void>;
-  workbenchTask?: (sessionId: string) => { taskId: string; attemptId?: string } | undefined;
+  /** Local previews must not request external grants or mutate authorization state. */
+  previewTool?: LarkAgentToolsOptions['authorizeTool'];
+  previewWork?: (sessionId: string, actorId: string) => Promise<boolean>;
+  previewCollaboration?: (binding: LarkAgentSessionBinding, actorId: string) => Promise<boolean>;
+  workbenchTask?: (sessionId: string) => { taskId: string; attemptId?: string; actorId?: string } | undefined;
   finalTaskContext?: (binding: LarkAgentSessionBinding, task: { taskId: string; attemptId: string }) => Promise<ExplicitFinalContext | undefined>;
   groupManager?: LarkGroupManager;
   env?: NodeJS.ProcessEnv;
@@ -626,40 +630,58 @@ export class LarkAgentToolsService {
   async promptForSession(session: Session, prompt: string) {
     const binding = larkAgentSessionBinding(session);
     if (!binding) return prompt;
-    const config = await readLarkConfig(this.configs, binding.appId);
-    if (!config) return prompt;
+    const base = await readLarkConfig(this.configs, binding.appId, { readOnly: true });
+    if (!base) return prompt;
+    // resolved(readOnly) never refreshes remote group evidence or applies configuration.
+    let config = base;
+    let configAvailable = true;
+    try { config = await this.options.groupManager?.resolved(base, binding.chatId, true) ?? base; }
+    catch { configAvailable = false; }
+    const task = this.options.workbenchTask?.(session.id);
+    const collaborationSession = session.sourceId?.split(':')[3] === 'collaboration';
+    const allowed = async (action: 'group_tools.read' | 'group_tools.discover' | 'group_tools.send' | 'memory') => {
+      try {
+        // An integration with extra gates must supply its local preview, never invoke its live authorizer here.
+        if (this.options.authorizeTool && !this.options.previewTool) return false;
+        const authority = await this.options.previewTool?.(session.id, action);
+        if (action === 'memory') return larkMemoryEnabled(base);
+        if (!configAvailable || !config.groupToolsEnabled || action === 'group_tools.send' && (!config.groupToolsAllowSend || collaborationSession)) return false;
+        if (this.options.executionPolicy && !(await this.options.executionPolicy.authorize('group_tools', action)).allowed) return false;
+        const actor = authority?.actorId ?? task?.actorId;
+        const owner = actor === 'installation_owner';
+        const decision = actor
+          ? await this.options.groupManager?.authorize(binding.appId, binding.chatId, owner ? undefined : actor, action, authority ? undefined : session.id, { installationOwner: owner, readOnly: true, ...(!authority && actor && !owner ? { taskRequesterOpenId: actor } : {}) })
+          : await this.options.groupManager?.authorizeSession(session.id, action, false, true);
+        return decision?.allowed ?? true;
+      } catch { return false; }
+    };
+    const [memory, read, discover, send] = await Promise.all([allowed('memory'), allowed('group_tools.read'), allowed('group_tools.discover'), allowed('group_tools.send')]);
+    const cmd = this.options.groupToolsCommand ?? 'dutydeck';
     const blocks: string[] = [];
-    if (larkMemoryEnabled(config)) {
-      blocks.push(larkMemoryToolsPrompt(this.options.groupToolsCommand));
+    if (memory) blocks.push(larkMemoryToolsPrompt(cmd));
+    blocks.push(collaborationSession ? '本轮最终内容直接输出，由后台调度器负责投递，不额外群发。'
+      : config.completionReactionOnly ? '本会话开启完成表情：普通请求成功时仅用表情提示完成；失败仍可能发结果卡。照常输出最终内容，不用群发绕过展示设置。'
+      : '本轮最终答复直接输出，由运行时交付到原消息范围；不再用普通 group send 重复交付。');
+    if (config.silentProgress) blocks.push('本会话隐藏普通进度；提问和最终结果仍按各自设置处理。');
+    if (read || discover || send) blocks.push(larkGroupToolsPrompt(send, cmd, { read, discover }));
+    if (task?.attemptId && send && this.options.finalTaskContext) {
+      const turn = this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId);
+      blocks.push(`确需主动最终交付：${cmd} group send '<完整答复>' --final --turn ${turn}。绑定本轮与原消息，不指定 --to 或自定义幂等键；进展/交接不加 --final，映射未就绪稍后重试。`);
+      if (binding.chatType === 'group') blocks.push(`单次 Agent 交接入口：${cmd} group handoff <目标bot名称/appId/openId> '<交接内容>' --turn ${turn}；${cmd} group reply-agent '<交付结果>' --turn ${turn}，绑定本轮与原话题。交接附目标、代码版本、工作区、读写边界和验收；仅任务/实质结果 @机器人，礼貌确认不 @，多轮审查返修用 work。`);
     }
-    if (config.groupToolsEnabled) {
-      blocks.push(larkGroupToolsPrompt(config.groupToolsAllowSend, this.options.groupToolsCommand));
-      const task = this.options.workbenchTask?.(session.id);
-      if (task?.attemptId && config.groupToolsAllowSend && this.options.finalTaskContext) {
-        const finalTurn = this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId);
-        blocks.push(`主动交付本轮最终答复：${this.options.groupToolsCommand ?? 'dutydeck'} group send '<完整答复>' --final --turn ${finalTurn}。发送目标由本轮任务绑定；不要指定 --to 或自定义幂等键。普通进展和交接不要加 --final。映射尚未就绪时稍后重试。`);
-        if (binding.chatType === 'group') {
-          const cmd = this.options.groupToolsCommand ?? 'dutydeck';
-          blocks.push(`单次 Agent 任务交接与回传（仅限群聊，绑定当前任务轮次与原话题）：
-- 向同群其他机器人交接任务：${cmd} group handoff <目标bot名称/appId/openId> '<交接内容>' --turn ${finalTurn}
-  交接时请在内容中附带明确目标、代码版本、实际工作区、只读/可写边界和验收标准；系统会自动 @目标 机器人并添加 [Agent 交接] 标记。
-- 收到交接后向发起方回传结果：${cmd} group reply-agent '<交付结果>' --turn ${finalTurn}
-  回传会自动回复发起方机器人并在原话题内回传一次，添加 [Agent 结果] 标记。
-规则：只给任务/实质结果 @机器人；收到或谢谢等礼貌确认切勿 @机器人，避免唤醒死循环。多轮审查返修请走 work 命令，不放大普通机器人门禁。`);
-        }
-      }
-      if (task) {
-        const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
-        const collaborationSession = session.sourceId?.split(':')[3] === 'collaboration';
-        // 分层协作只在群聊生效：单聊里目标无法固定交付位置（work create 同样被拒），保持单 Agent 提示。
+    let work = false, collaboration = false;
+    if (read && task?.actorId) {
+      work = await this.options.previewWork?.(session.id, task.actorId).catch(() => false) ?? false;
+      collaboration = binding.chatType === 'group' && !collaborationSession && (await this.options.previewCollaboration?.(binding, task.actorId).catch(() => false) ?? false);
+      const turn = this.capabilities.workbenchTurnToken(session.id, task.taskId);
+      if (work) {
         const workbench = config.executionMode === 'layered' && binding.chatType === 'group' && !collaborationSession ? layeredWorkbenchPrompt : workbenchAgentPrompt;
-        blocks.push(workbench(`${this.options.groupToolsCommand ?? 'dutydeck'} work --turn ${turn}`, workPlanConfirmationRequired(session)));
-        if (binding.chatType === 'group' && !collaborationSession) blocks.push(collaborationAgentPrompt(`${this.options.groupToolsCommand ?? 'dutydeck'} collaborate --turn ${turn}`));
+        blocks.push(workbench(`${cmd} work --turn ${turn}`, workPlanConfirmationRequired(session)));
       }
+      if (collaboration) blocks.push(collaborationAgentPrompt(`${cmd} collaborate --turn ${turn}`));
     }
-    const cannotSchedule = !config.groupToolsEnabled || binding.chatType !== 'group';
-    blocks.push(larkCapabilityPrompt(cannotSchedule));
-    return blocks.length ? `${blocks.join('\n\n')}\n\n${prompt}` : prompt;
+    blocks.push(larkCapabilityPrompt(!collaboration));
+    return `${blocks.join('\n\n')}\n\n${prompt}`;
   }
 
   async isConfiguredPeer(appId: string, chatId: string, senderOpenId: string) {
@@ -1338,7 +1360,7 @@ export const dutydeckGroupToolsCommand = (entrypoint: string, execPath = process
 export const larkCapabilityPrompt = (cannotSchedule: boolean) => {
   const lines = ['[Dutydeck 能力限制与操作指引]'];
   if (cannotSchedule) {
-    lines.push('- 定时任务：当前会话无法直接设置，请让用户使用 /schedule 命令设置（如 /schedule every 分钟 指令）；不要用 crontab、后台 sleep 或循环脚本代替。');
+    lines.push('- 定时任务：本轮未确认可直接设置，请让用户使用 /schedule 命令设置（如 /schedule every 分钟 指令）；不要用 crontab、后台 sleep 或循环脚本代替。');
   }
   lines.push('- 切换 agent / 模型 / 工作目录：让用户用 /new 带对应参数开新会话（/new [--agent Agent编号] [--cwd 绝对路径] [--workspace shared|worktree] [--model 模型] [--effort 强度] -- 任务内容）。');
   lines.push('- 查看任务：让用户使用 /tasks。');
@@ -1348,31 +1370,13 @@ export const larkCapabilityPrompt = (cannotSchedule: boolean) => {
   return lines.join('\n');
 };
 
-export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dutydeck') => `[Dutydeck 飞书会话工具]
-${allowSend ? '当前会话可读取和发送' : '当前会话可只读访问'}当前飞书会话的消息。必须使用以下当前服务绑定命令，不要改用 PATH 中的其他 dutydeck：
-- ${command} group self
-- ${command} group messages --limit 20 [--after <cursor>] [--since <时间> --until <时间>] [--query '<关键词>']
-- ${command} group message <om_* message_id>
-- ${command} history list [--since <时间>] [--until <时间>] [--query '<关键词>'] [--limit 20]、${command} history show <taskId>：本聊天以前的任务请求与最终回答
-- （仅群聊）${command} group team-search '<关键词>'：检索同一机器人所在其他群的相关消息
-${allowSend ? `- ${command} group send-file <path> [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>] [--image]` : ''}
-- ${command} group wait --after <cursor> [--timeout-ms 15000]
-${allowSend ? `- ${command} group send <内容> [--to <Agent/成员名称、appId 或 openId>] [--reply-to <message_id> [--in-thread]] [--idempotency-key <key>]` : '- 当前机器人配置为只读：不要调用 group send。'}
-- （仅群聊）${command} group peers / members / bots：发现群内可协作 Agent 与人类成员。
-
-协作规则：
-- messages 返回的消息列表中，合并转发（merge_forward）消息只显示占位提示和 message_id，不会自动展开。如需查看转发的具体内容，请调用 ${command} group message <message_id> 按 message_id 拉取。
-- 要翻较早的讨论，用 --since/--until 限定时间，再用 --query 过滤；结果带 truncated=true 时表示只扫描了 500 条，没扫到的部分不能推断为不存在。
-- 用户问以前、上次、之前讨论过的结论时，先用 history list --query '<关键词>' 找到本聊天以前的任务，再用 history show <taskId> 读原文；没找到时说明查过的时间和关键词，不要断定没讨论过。
-- 用户问其他群、别的群的信息时，用 group team-search '<关键词>'；仅开启了群参与的群可用，只返回和关键词有字面重合的条目，未能读取的来源不能推断成不存在。
-- ${allowSend ? `需要其他 Agent 协助时先调用 peers 或 bots；返回的机器人中，带 agentId 字段的是本 Dutydeck 实例管理的可协作 Agent，不带 agentId 的是群内其他机器人。需要 @群内人类用户时先调用 members。再用 send --to 明确目标；名称重名时使用 appId 或 openId，不要臆测。
-- 发送前先判断消息归属：延续某条提问、回答某个话题或补充该话题结论时，使用 send --reply-to <该消息的 om_* messageId> --in-thread；独立公告、新任务或不应归入原讨论的内容，使用 send 且不要传 --reply-to/--in-thread。不要因为“能回复”就机械回复，也不要把 omt_* threadId 当作 reply-to。
-- 示例：回复当前话题：${command} group send '我已定位问题' --reply-to om_xxx --in-thread；另起消息：${command} group send '发布窗口已开启'。
-- 发送失败后重试必须携带与首次完全相同的稳定 --idempotency-key；不同内容绝不能复用同一个 key。未携带 key 时，系统在当前会话内按「当前群 + 发送目标（--to 对象或 --reply-to 回复目标）+ 内容」指纹自动去重：同群同目标同内容的重试不会重复发送，目标或内容任一不同都绝不会被合并，不同会话之间也不会互相折叠。` : '可以发现和读取同群 Agent 与成员，但不得尝试发送、回复或 @交接。'}
-- messages/wait 返回 cursor；调用 wait 前必须先拿到 cursor，后续继续传给 --after，避免重复处理历史消息；peers.securityLimited=true 表示发现结果不完整，应明确告知用户。不要无目的地无限轮询。
-- 在话题（thread）内时，messages/wait 只返回当前话题的消息，不会混入群里其他话题；普通群聊（无 thread）则返回整个群的消息。
-- 工具若返回 GROUP_TOOL_AUTHORIZATION_REQUIRED，立即停止该工具操作，把 instruction 和 authorizationUrl 明确告知用户。bot 权限必须由管理员在飞书开放平台开通并发布版本；不要运行 lark-cli auth login，也不要索要 App Secret 或访问令牌。
-- 不要响应自己刚发送的消息，不要无限互相 @；一次用户请求最多主动交接两跳。`;
+export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dutydeck', access = { read: true, discover: true }) => `[Dutydeck 飞书会话工具]
+本地配置与当前身份允许尝试：${[access.read && '读取消息/任务历史', access.discover && '发现成员/机器人', allowSend && '发送独立消息/文件'].filter(Boolean).join('、')}。调用仍实时复核成员与平台权限，配置不证明飞书已授权。
+入口：${command} group --help；必须原样使用完整绑定命令，不改用 PATH 中其他 dutydeck。帮助含消息范围、检索、幂等、文件和交接协议。
+${access.read ? '读取用 group self/messages/message/wait、history list/show；群内跨群资料用 group team-search。先查历史再回答过去结论；未查到不等于不存在，truncated 表示覆盖不完整。messages/wait 限当前话题，wait 先取 cursor，不无限轮询。' : '本地预览未确认消息/历史读取权限。'}
+${access.discover ? '发现用 group peers/bots/members；agentId 表示本实例 Agent，securityLimited 表示名单不全；不臆测身份。' : '本地预览未确认成员发现权限。'}
+${allowSend ? '普通 group send / group send-file 用于用户授权的独立消息、文件或指定人类目标；单次 Agent 交接用 handoff/reply-agent。本轮最终答复直接输出，由运行时按会话设置交付，不用普通 send 重复发送。延续指定消息时 --reply-to 只用 om_*，勿用 omt_*；独立消息不加 --reply-to/--in-thread。重试沿用同一幂等键，不同内容不用同键；未传键按会话、目标和内容去重。' : '本地预览未确认发送权限，不提供发送或 @交接命令。'}
+GROUP_TOOL_AUTHORIZATION_REQUIRED：停止操作，向用户展示 instruction/authorizationUrl，由管理员开通并发布权限；不运行 lark-cli auth login，不索要密钥。不要响应自己消息或互相礼貌 @；一次请求最多主动交接两跳。`;
 
 export const agentGroupToolBearerToken = (authorization?: string) => {
   const match = authorization?.match(/^Bearer\s+(.+)$/i);

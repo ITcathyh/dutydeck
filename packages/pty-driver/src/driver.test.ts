@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -62,11 +63,14 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     let exitCode: number | null | undefined;
     let stopped = false;
 
+    const prompts: string[] = [];
     const adapter: CliAdapter = {
       id: 'mock-cli',
       capabilities: {},
       buildArgs: () => [fixturePath],
+      injectSessionContext: () => 'routing synthetic-secret-token',
       writeInput: (backend, prompt) => {
+        prompts.push(prompt);
         backend.write(prompt + '\n');
       },
       completionPattern: /MOCK DONE/,
@@ -119,6 +123,17 @@ describe('PtyCliDriver（PtyBackend + 假 CLI 集成）', () => {
     await driver.send('world');
     await waitFor('second completed', () => completedCount() >= 2);
     expect(completedCount()).toBe(2);
+
+    const records = events.filter(event => event.data?.state === 'prompt_assembly');
+    expect(records.map(event => event.data.stage)).toEqual(['pty_routing', 'pty_input', 'pty_input']);
+    const prefix = prompts[0]!.slice(0, -'hello'.length);
+    for (const [index, text] of [prefix, prompts[0]!, prompts[1]!].entries()) {
+      expect(records[index]?.data).toMatchObject({ version: 1, mode: 'send', phase: 'written', chars: text.length, charUnit: 'utf16_code_units', sha256: createHash('sha256').update(text, 'utf8').digest('hex') });
+    }
+    expect(prompts[0]).toContain('routing synthetic-secret-token');
+    expect(prompts[1]).toBe('world');
+    expect(JSON.stringify(records)).not.toContain('synthetic-secret-token');
+    expect(JSON.stringify(records)).not.toContain('hello');
 
     // 4. stop 后 onExit 触发
     await driver.stop();

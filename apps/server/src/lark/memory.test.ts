@@ -1,3 +1,4 @@
+import { memoryToolsHelp } from '../agent-tool-help.js';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import {
@@ -416,7 +417,10 @@ describe('renderLarkMemoryList', () => {
 
 describe('larkMemoryToolsPrompt', () => {
   it('contains search, show, and write policy rules', () => {
-    const prompt = larkMemoryToolsPrompt('dutydeck');
+    expect(larkMemoryToolsPrompt('dutydeck')).toContain('dutydeck memory --help');
+    expect(larkMemoryToolsPrompt('dutydeck')).toContain('仅用户明确要求记住/忘记时写入');
+    expect(larkMemoryToolsPrompt('dutydeck')).toContain('可能过时');
+    const prompt = memoryToolsHelp('dutydeck');
     expect(prompt).toContain('dutydeck memory list [--topic <slug>]');
     expect(prompt).toContain('dutydeck memory show <topic>');
     expect(prompt).toContain("dutydeck memory search '<关键词>' [--topic <slug>]");

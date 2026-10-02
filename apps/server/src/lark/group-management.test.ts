@@ -42,6 +42,59 @@ describe('live group configuration', () => {
   });
   afterEach(async () => { repos?.close(); await rm(dir, { recursive: true, force: true }); });
 
+  it.each([
+    { read: 'inherit', discover: 'inherit', send: 'inherit' },
+    { read: 'inherit', discover: 'inherit', send: 'deny' },
+    { read: 'deny', discover: 'inherit', send: 'inherit' },
+    { read: 'inherit', discover: 'deny', send: 'inherit' },
+    { read: 'deny', discover: 'deny', send: 'deny' }
+  ] as const)('previews effective tools without external reads or writes: %j', async overrides => {
+    await save('cli_one', 'oc_one', { groupToolsOverride: overrides });
+    const session: Session = { id: 'prompt', agentId: 'agent_one', cwd: dir, source: 'lark', sourceId: 'cli_one:oc_one:group', state: 'idle', runId: 'run', createdAt: time.toISOString(), updatedAt: time.toISOString() };
+    await repos.sessions.save(session);
+    const config = await manager.resolved((await readLarkConfig(repos.config, 'cli_one'))!, 'oc_one');
+    await manager.recordRun(session, config, event, 'chat:oc_one');
+    await manager.beginTurn(session.id, 'ou_alice');
+    const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://unused');
+    const client = { getBotInfo: vi.fn(async () => ({ appName: 'Bot', openId: 'ou_bot' })), listChatMembers: vi.fn(async () => ({ items: [], hasMore: false })), sendText: vi.fn(async () => ({ messageId: 'om_sent' })) };
+    const tools = new LarkAgentToolsService(capabilities, repos.config, { groupManager: manager, clientFactory: () => client as any, workbenchTask: () => ({ taskId: 'task', attemptId: 'attempt', actorId: 'ou_alice' }) });
+    const remote = vi.spyOn(manager as any, 'client');
+    const write = vi.spyOn(repos.config, 'set');
+    const prompt = await tools.promptForSession(session, 'question');
+    expect(remote).not.toHaveBeenCalled();
+    expect(write).not.toHaveBeenCalled();
+    expect(client.getBotInfo).not.toHaveBeenCalled();
+    expect(prompt.includes('读取消息/任务历史')).toBe(overrides.read !== 'deny');
+    expect(prompt.includes('发现成员/机器人')).toBe(overrides.discover !== 'deny');
+    expect(prompt.includes('发送独立消息/文件')).toBe(overrides.send !== 'deny');
+    const token = capabilities.environmentFor(session).dutydeck_group_tools_token!;
+    for (const [gate, invoke] of [
+      ['read', () => tools.self(token)], ['discover', () => tools.peers(token)], ['send', () => tools.send(token, { content: 'independent' })]
+    ] as const) {
+      if (overrides[gate] === 'deny') await expect(invoke()).rejects.toMatchObject({ statusCode: 403 });
+      else await expect(invoke()).resolves.toBeDefined();
+    }
+    capabilities.close();
+  });
+
+  it('uses current actors and stale local evidence without refreshing or granting tool access', async () => {
+    await save('cli_one', 'oc_one', { accessOverride: { mode: 'owner_only', principalIds: [] } });
+    const session: Session = { id: 'prompt-actor', agentId: 'agent_one', cwd: dir, source: 'lark', sourceId: 'cli_one:oc_one:group', state: 'idle', runId: 'run', createdAt: time.toISOString(), updatedAt: time.toISOString() };
+    await repos.sessions.save(session);
+    const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://unused');
+    let actorId: string | undefined;
+    const tools = new LarkAgentToolsService(capabilities, repos.config, { groupManager: manager, workbenchTask: () => ({ taskId: 'task', actorId }) });
+    const remote = vi.spyOn(manager as any, 'client');
+    const write = vi.spyOn(repos.config, 'set');
+    for (actorId of [undefined, 'ou_alice']) expect(await tools.promptForSession(session, 'q')).not.toContain('[Dutydeck 飞书会话工具]');
+    actorId = 'installation_owner';
+    expect(await tools.promptForSession(session, 'q')).toContain('发送独立消息/文件');
+    time = new Date(time.getTime() + 3_600_001);
+    expect(await tools.promptForSession(session, 'q')).not.toContain('[Dutydeck 飞书会话工具]');
+    expect(remote).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled();
+    capabilities.close();
+  });
+
   it('discovers two Bots in two groups with valid evidence, without activating configuration', async () => {
     const { groups } = await manager.groups();
     expect(groups).toHaveLength(2);

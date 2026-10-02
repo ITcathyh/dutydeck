@@ -1,8 +1,9 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, utimesSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { AgentConfig } from '@dutydeck/shared';
+import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
 import { createClaudeCodeAdapter } from '@dutydeck/cli-adapters';
 import { TmuxBackend } from '@dutydeck/session-backends';
 import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
@@ -45,12 +46,13 @@ describe('start reconnects durable native history only with session evidence', (
     }
     const fresh = kind === 'new' || kind === 'grok-directory';
     const prompts: string[] = [];
+    const events: NormalizedDriverEvent[] = [];
     adapter.prepareInput = undefined;
     adapter.writeInput = (_backend, prompt) => { prompts.push(prompt); };
     const agent = { id: 'fixture', name: 'fixture', command: process.execPath, args: [fixture, '--wrapper', 'kept'], protocol: 'pty-cli',
       cwd, env, model: 'fixture-model', permissionMode: 'full-trust', timeout: 60,
       capabilities: { pause: false, resume: true }, builtin: false } as AgentConfig;
-    const driver = new PtyCliDriver({ agent, adapter, sessionId, backend: new TmuxBackend(`start-${kind}`, { ownerId: `dutydeck:${sessionId}` }), processProbe: { identify: childProcessIdentity, observe: observeProcess }, onEvent() {}, onExit() {} });
+    const driver = new PtyCliDriver({ agent, adapter, sessionId, backend: new TmuxBackend(`start-${kind}`, { ownerId: `dutydeck:${sessionId}` }), processProbe: { identify: childProcessIdentity, observe: observeProcess }, onEvent(event) { events.push(event); }, onExit() {} });
     try {
       if (kind === 'foreign' || kind === 'filename-only') {
         await expect(driver.start()).rejects.toThrow('refusing to reuse its id');
@@ -75,6 +77,10 @@ describe('start reconnects durable native history only with session evidence', (
       for (let tries = 0; !prompts.length && tries < 100; tries++) await new Promise(resolve => setTimeout(resolve, 10));
       expect(prompts).toHaveLength(1);
       expect(prompts[0]!.includes(buildSessionMarker(sessionId))).toBe(fresh);
+      await expect.poll(() => events.filter(event => event.data?.state === 'prompt_assembly').length).toBe(fresh ? 2 : 1);
+      const records = events.filter(event => event.data?.state === 'prompt_assembly');
+      expect(records.map(event => event.data.stage)).toEqual(fresh ? ['pty_routing', 'pty_input'] : ['pty_input']);
+      expect(records.at(-1)?.data).toMatchObject({ phase: 'written', chars: prompts[0]!.length, sha256: createHash('sha256').update(prompts[0]!, 'utf8').digest('hex') });
       await driver.stop(); await turn;
     } finally { await driver.stop(); }
   });

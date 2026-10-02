@@ -5,6 +5,7 @@ import {
   type AgentDriver,
   type DriverTurnRecovery,
   type NormalizedDriverEvent,
+  type PromptAssemblyData,
   type TerminalStream,
 } from '@dutydeck/shared';
 import type { AdapterSessionContext, CliAdapter, PtyLike } from '@dutydeck/cli-adapters';
@@ -256,6 +257,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopped) throw new Error('Driver stopped');
 
     let finalPrompt = prompt;
+    let routingPrefix: string | undefined;
     const isFirstPrompt = !this.firstPromptSent;
     if (isFirstPrompt) {
       // 首轮 prompt 前注入路由块：适配器自带 injectSessionContext 的用它
@@ -270,7 +272,8 @@ export class PtyCliDriver implements AgentDriver {
       // 必须在首轮就注入，resume 时才有东西可查。见 session-id/marker.ts。
       const marker = buildSessionMarker(this.sessionId);
       const prefix = block ? `${block.replace(/\n$/, '')}\n${marker}` : marker;
-      finalPrompt = `${prefix}\n${finalPrompt}`;
+      routingPrefix = `${prefix}\n`;
+      finalPrompt = `${routingPrefix}${finalPrompt}`;
     }
     const writeCancelled = new Promise<never>((_, reject) => {
       this.turnWriteReject = reject;
@@ -327,6 +330,8 @@ export class PtyCliDriver implements AgentDriver {
       if (this.activeSubmission === submission) this.activeSubmission = undefined;
     }
     this.firstPromptSent = true;
+    if (routingPrefix !== undefined) this.recordPrompt(routingPrefix, 'pty_routing');
+    this.recordPrompt(finalPrompt, 'pty_input');
     if (isFirstPrompt && this.persistentBackend()) {
       // tmux owns this tiny non-secret lifecycle marker across daemon
       // restarts, so reattach neither repeats nor accidentally skips the
@@ -348,6 +353,17 @@ export class PtyCliDriver implements AgentDriver {
     // 与 AcpxAdapter 语义对齐：send() 等本轮结束（completed）才 resolve，
     // runtime 在 send resolve 后立即判定终态。driver 退出则 reject。
     return completion!;
+  }
+
+  private recordPrompt(prompt: string, stage: 'pty_routing' | 'pty_input') {
+    const data: PromptAssemblyData = {
+      state: 'prompt_assembly', version: 1, stage,
+      source: stage === 'pty_routing' ? 'pty.session_context_and_marker' : 'pty.adapter_input',
+      mode: 'send', phase: 'written', chars: prompt.length, charUnit: 'utf16_code_units',
+      sha256: createHash('sha256').update(prompt, 'utf8').digest('hex')
+    };
+    // A diagnostic callback cannot turn a completed adapter write into failure.
+    try { this.emitEvent({ type: 'status', data }); } catch { /* best effort */ }
   }
 
   async checkpoint(): Promise<DriverTurnRecovery | undefined> {

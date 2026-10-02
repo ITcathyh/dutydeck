@@ -1,3 +1,4 @@
+import { workbenchHelp, layeredWorkbenchHelp, collaborationHelp, groupToolsHelp, memoryToolsHelp, herdrHelp } from './agent-tool-help.js';
 import type { RecoveryCliOptions, RecoveryOperation } from './recovery-cli.js';
 import type { WorkspaceGroupsAction } from './workspace-groups-cli.js';
 import type { SessionNamesAction } from './session-names-cli.js';
@@ -518,15 +519,16 @@ Examples:
     .action((channelBotId, options) => handlers.identityPreflight?.(channelBotId, options));
 
   const work = program.command('work').description('Arrange durable goals, Agent steps and reusable workflows in the current Feishu conversation').requiredOption('--turn <token>', 'Current task capability supplied by Dutydeck');
+  work.addHelpText('after', workbenchHelp() + '\n' + layeredWorkbenchHelp());
   const workOptions = (options: { file?: string; key?: string } = {}) => ({ ...options, turn: work.opts().turn as string });
   for (const operation of ['list', 'templates', 'agents', 'skills']) work.command(operation).action(() => handlers.work?.(operation, [], workOptions()));
   work.command('show <id>').action(id => handlers.work?.('show', [id], workOptions()));
-  work.command('create').requiredOption('--file <path>', 'JSON plan with goal and a stable idempotencyKey').action(options => handlers.work?.('create', [], workOptions(options)));
-  work.command('delegate').requiredOption('--file <path>', 'JSON brief with goal, context and a stable idempotencyKey').action(options => handlers.work?.('delegate', [], workOptions(options)));
+  work.command('create').addHelpText('after', workbenchHelp()).requiredOption('--file <path>', 'JSON plan with goal and a stable idempotencyKey').action(options => handlers.work?.('create', [], workOptions(options)));
+  work.command('delegate').addHelpText('after', layeredWorkbenchHelp()).requiredOption('--file <path>', 'JSON brief with goal, context and a stable idempotencyKey').action(options => handlers.work?.('delegate', [], workOptions(options)));
   work.command('save <id> <name>').action((id, name) => handlers.work?.('save', [id, name], workOptions()));
   work.command('run <template> <version> <goal>').requiredOption('--key <key>', 'Stable request key for this run').action((id, version, goal, options) => handlers.work?.('run', [id, version, goal], workOptions(options)));
 
-  const group = program.command('group').description('Collaborate with Agents in the current Lark group');
+  const group = program.command('group').description('Collaborate with Agents in the current Lark group').addHelpText('after', groupToolsHelp(true));
   group.command('self')
     .description('Show the current Lark Agent and scoped chat')
     .action(() => handlers.groupSelf?.());
@@ -614,12 +616,12 @@ Routing guidance:
     .action(taskId => handlers.historyShow?.(taskId));
 
   // 会话记忆：与 group 同一套 capability，但对私聊和关闭群协作的机器人同样可用。
-  program.command('collaborate <operation> [id]').description('Manage generic group follow-ups and ongoing mandates')
+  program.command('collaborate <operation> [id]').addHelpText('after', collaborationHelp('dutydeck collaborate')).description('Manage generic group follow-ups and ongoing mandates')
     .option('--json <json>', 'Structured operation parameters').option('--file <path>', 'Read operation parameters from JSON file')
     .requiredOption('--turn <token>', 'Current task authorization token')
     .action((operation, id, options) => handlers.collaborate?.(operation, id, options));
 
-  const memory = program.command('memory').description('Read and maintain the long-term memory of the current Lark chat');
+  const memory = program.command('memory').description('Read and maintain the long-term memory of the current Lark chat').addHelpText('after', memoryToolsHelp());
   memory.command('list')
     .description('List the memories saved for this chat, with their ids')
     .option('--topic <slug>', 'Filter memories by topic slug')
@@ -681,13 +683,13 @@ Routing guidance:
     .passThroughOptions()
     .allowUnknownOption()
     .allowExcessArguments()
-    .helpOption(false)
+    .addHelpText('after', herdrHelp)
     .action((_args, _options, command) => handlers.sessionHerdr?.(command.args));
   session.command('native-ask')
     .description('Bridge a native Claude AskUserQuestion hook from stdin to the current session')
     .action(() => handlers.sessionNativeAsk?.());
   session.command('send')
-    .description('Push a message to the user now, without waiting for the turn to end')
+    .description('Publish an in-turn progress event; presentation depends on session settings')
     .argument('<text>', 'Message content')
     .action(text => handlers.sessionSend?.(text));
   session.command('ask')

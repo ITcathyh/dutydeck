@@ -5,6 +5,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { agentConfigSchema, installationOwnerTaskActor, RuntimeError, type AgentDriver } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type RuntimeOptions } from '@dutydeck/runtime';
+import { createAutomationIntegration } from './automation-integration.js';
 import { createCollaborationIntegration } from './collaboration-integration.js';
 import { LarkGroupManager } from './lark/group-management.js';
 import { readLarkConfig, saveLarkConfig } from './lark/config.js';
@@ -74,6 +75,40 @@ async function fixture(options: { realAcp?: boolean; admitTask?: RuntimeOptions[
   return { repos, runtime, collaboration, groups, client, group, calls, stopped, create,
     advance() { clock = new Date(clock.getTime() + 60_000); }, revoke() { members = []; } };
 }
+
+it('previews work and collaboration independently with real group policy and no side effects', async () => {
+  const f = await fixture();
+  const session = await f.runtime.start({ agentId: 'agent', source: 'lark', sourceId: `${scope.appId}:${scope.chatId}:group` });
+  const capabilities = new LarkAgentToolCapabilityRegistry(f.repos.sessions, 'http://unused');
+  const automation = createAutomationIntegration(f.repos, f.runtime, f.groups, { client: () => f.client as any, log: { warn: vi.fn() } });
+  const task = { taskId: 'task', attemptId: 'attempt', actorId: 'ou_alice' };
+  const tools = new LarkAgentToolsService(capabilities, f.repos.config, {
+    groupManager: f.groups, workbenchTask: () => task,
+    previewWork: automation.previewAuthorize,
+    previewCollaboration: (binding, actor) => f.collaboration.previewAuthorize(binding, actor, 'write')
+  });
+  const remote = vi.spyOn(f.groups as any, 'client');
+  const write = vi.spyOn(f.repos.config, 'set');
+  const prompt = await tools.promptForSession(session, 'request');
+  expect(prompt).toContain('[Dutydeck 目标编排]'); expect(prompt).toContain('[群内持续协作]');
+  expect(remote).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled();
+  // Group read alone is insufficient: task.create/turn.append require an operating actor.
+  const alice = (await f.groups.members(scope.appId, scope.chatId)).members[0]!;
+  const changed = await f.groups.save(scope.appId, scope.chatId, { expectedRevision: f.group.binding!.revision,
+    patch: { accessOverride: { mode: 'owner_only', principalIds: [] } },
+    roleChanges: [{ kind: 'create', principalId: alice.principalId, role: 'can_operate', operateScope: 'group_runs', actionGates: { terminalWrite: false, highRisk: false, groupToolsSend: false } }]
+  });
+  expect(await automation.previewAuthorize(session.id, 'ou_alice')).toBe(await automation.authorize(session.id, 'ou_alice'));
+  expect(await f.collaboration.previewAuthorize(scope, 'ou_alice', 'write')).toBe(await f.collaboration.authorize(scope, 'ou_alice', 'write'));
+  await f.groups.save(scope.appId, scope.chatId, { expectedRevision: changed.binding!.revision, patch: {},
+    roleChanges: [{ kind: 'update', id: changed.roles[0]!.id, expectedRevision: changed.roles[0]!.revision, patch: { state: 'revoked' } }]
+  });
+  const revoked = await tools.promptForSession(session, 'request');
+  expect(revoked).not.toContain('[Dutydeck 目标编排]'); expect(revoked).not.toContain('[群内持续协作]');
+  expect(await automation.authorize(session.id, 'ou_alice')).toBe(false);
+  expect(await f.collaboration.authorize(scope, 'ou_alice', 'write')).toBe(false);
+  capabilities.close();
+});
 
 it('resolves Bot defaults on every read and keeps explicit group overrides until inheritance is restored', async () => {
   const f = await fixture();
@@ -336,9 +371,14 @@ it('uses real saved group bindings, runs one frozen background task and delivers
   await saveLarkConfig(f.repos.config, f.repos.agents, { originalAppId: scope.appId, riskControlMode: 'off' });
   expect(await f.collaboration.riskPolicy(call.sessionId, policy)).toEqual({ policy: undefined });
   const capabilities = new LarkAgentToolCapabilityRegistry(f.repos.sessions, 'http://localhost:1');
-  const tools = new LarkAgentToolsService(capabilities, f.repos.config, { groupManager: f.groups, clientFactory: () => f.client as any, authorizeTool: (id, action) => f.collaboration.background.authorizeTool(id, action) });
+  const tools = new LarkAgentToolsService(capabilities, f.repos.config, { groupManager: f.groups, clientFactory: () => f.client as any, previewTool: (id, action) => f.collaboration.background.authorizeTool(id, action, true), authorizeTool: (id, action) => f.collaboration.background.authorizeTool(id, action) });
   const session = (await f.runtime.getSession(call.sessionId))!;
   const token = capabilities.environmentFor(session).dutydeck_group_tools_token;
+  const prompt = await tools.promptForSession(session, 'request');
+  expect(prompt).toContain('读取消息/任务历史');
+  expect(prompt).toContain('后台调度器负责投递');
+  expect(prompt).not.toContain('发送独立消息/文件');
+  expect(prompt).not.toContain('[群内持续协作]');
   expect(await tools.workbenchContext(token)).toMatchObject({ sessionId: call.sessionId });
   await expect(tools.send(token, { content: 'duplicate' })).rejects.toMatchObject({ code: 'COLLABORATION_MANAGED_DELIVERY' });
   capabilities.close();

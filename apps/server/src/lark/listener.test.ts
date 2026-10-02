@@ -715,7 +715,9 @@ describe('Lark message coordinator', () => {
     expect(injectedPrompt).toContain('[Dutydeck 飞书当前消息 · 系统上下文]');
     expect(injectedPrompt).toContain('message_id：om_group_tools');
     expect(injectedPrompt).toContain('thread_id：omt_topic');
-    expect(injectedPrompt).toContain('group send --reply-to om_group_tools --in-thread');
+    expect(injectedPrompt).toContain('--reply-to 使用 om_group_tools');
+    expect(injectedPrompt).toContain('回答本轮提问直接输出最终内容');
+    expect(injectedPrompt).not.toContain('回答当前提问，使用 group send');
     expect(injectedPrompt).toContain('[用户请求]\n协作处理');
   });
 

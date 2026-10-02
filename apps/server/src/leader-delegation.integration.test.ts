@@ -68,7 +68,7 @@ async function fixture(executionMode: StoredLarkConfig['executionMode'] = 'layer
     } satisfies AgentDriver)
   });
   const capabilities = new LarkAgentToolCapabilityRegistry(repos.sessions, 'http://localhost', 'fixture-signing-key');
-  tools = new LarkAgentToolsService(capabilities, repos.config, { workbenchTask: (id: string) => runtime.getActiveTaskContext(id) });
+  tools = new LarkAgentToolsService(capabilities, repos.config, { workbenchTask: (id: string) => runtime.getActiveTaskContext(id), previewWork: (id, actor) => authorize(id, actor) });
   const broker = new RelayAskBroker({ publish: async (id: string, input: any) => { await runtime.publishSessionEvent(id, 'text', { text: input.text, relay: input.kind, askId: input.askId }); } });
   const createCard = vi.fn(async (input: any) => {
     const messageId = `om_card_${cards.length + 1}`;
