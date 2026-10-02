@@ -1,7 +1,7 @@
 import type { DockEvent } from './api';
 
 export type ComposerReference = { id: string; kind: 'file' | 'skill'; label: string; value: string };
-export type ContextStats = { used?: number; size?: number; compacted?: number; percentage?: number };
+export type ContextStats = { used?: number; size?: number; compacted?: number; percentage?: number; observedAt?: string };
 export type ModelReadiness =
   | { kind: 'ready' }
   | { kind: 'loading'; label: string; reason: string }
@@ -40,16 +40,17 @@ export function contextStatsFromEvents(events: DockEvent[] = []): ContextStats {
   let size: number | undefined;
   let compacted = 0;
   let hasUsage = false;
+  let observedAt: string | undefined;
   for (const event of events) {
     if (event.type !== 'status' || event.data?.state !== 'usage') continue;
     hasUsage = true;
-    const nextUsed = Number.isFinite(event.data.used) ? Number(event.data.used) : Number.isFinite(event.data.breakdown?.totalTokens) ? Number(event.data.breakdown.totalTokens) : undefined;
-    const nextSize = Number.isFinite(event.data.size) ? Number(event.data.size) : undefined;
+    const nextUsed = Number.isFinite(event.data.used) && event.data.used >= 0 ? Number(event.data.used) : undefined;
+    const nextSize = Number.isFinite(event.data.size) && event.data.size > 0 ? Number(event.data.size) : undefined;
     if (used !== undefined && nextUsed !== undefined && nextUsed < used) compacted += used - nextUsed;
-    if (nextUsed !== undefined) used = nextUsed;
+    if (nextUsed !== undefined) { used = nextUsed; observedAt = event.timestamp; }
     if (nextSize !== undefined) size = nextSize;
   }
-  return { used, size, ...(hasUsage ? { compacted } : {}), ...(used !== undefined && size ? { percentage: Math.min(100, used / size * 100) } : {}) };
+  return { used, size, ...(observedAt ? { observedAt } : {}), ...(hasUsage ? { compacted } : {}), ...(used !== undefined && size ? { percentage: Math.min(100, used / size * 100) } : {}) };
 }
 
 export function commandsFromEvents(events: DockEvent[] = []) {
@@ -67,4 +68,10 @@ export function formatTokens(value?: number) {
   if (value < 1_000) return String(value);
   if (value < 1_000_000) return `${(value / 1_000).toFixed(value >= 10_000 ? 0 : 1)}k`;
   return `${(value / 1_000_000).toFixed(1)}m`;
+}
+
+export function currentContextStats(events: DockEvent[], snapshot?: import('@dutydeck/shared').ContextUsage): ContextStats {
+  const live = contextStatsFromEvents(events);
+  if (!snapshot || live.used !== undefined && live.observedAt && Date.parse(live.observedAt) >= Date.parse(snapshot.observedAt)) return live;
+  return { ...snapshot, ...(snapshot.size ? { percentage: Math.min(100, snapshot.used / snapshot.size * 100) } : {}) };
 }

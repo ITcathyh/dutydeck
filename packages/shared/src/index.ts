@@ -356,6 +356,8 @@ export interface EventRepository {
   append(event: AgentEvent): Promise<void>;
   list(sessionId: string, afterSequence?: number): Promise<AgentEvent[]>;
   listRecent(sessionId: string, limit: number): Promise<AgentEvent[]>;
+  /** Latest context and each quota window, independent of the timeline window. */
+  listLatestUsage?(sessionId: string): Promise<AgentEvent[]>;
   /** 有硬上限的游标窗口；无论查询方向如何，结果均按 sequence 升序。 */
   listWindow(sessionId: string, options?: EventWindowOptions): Promise<AgentEvent[]>;
 }
@@ -483,3 +485,5 @@ export * from './usage.js';
 export * from './execution-recovery.js';
 
 export * from './session-name.js';
+
+export * from './session-usage.js';
