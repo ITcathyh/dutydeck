@@ -59,9 +59,9 @@ export class RelayService {
    * 走的是 app.ts 的常规访问认证（远程访问要 access token，loopback 豁免），
    * 与「CLI 子进程持会话凭证」是两套身份，不要混用。
    */
-  answer(sessionId: string, askId: string, input: RelayAnswerInput) {
+  answer(sessionId: string, askId: string, input: RelayAnswerInput, beforeClaim?: () => Promise<void>) {
     const answer = requireText(input.answer, 'RELAY_ANSWER_REQUIRED', '回答内容');
-    return this.broker.answer(askId, answer, { sessionId });
+    return this.broker.answer(askId, answer, { sessionId, beforeClaim });
   }
 
   listPending(sessionId: string) {

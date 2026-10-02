@@ -86,25 +86,25 @@ export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): 
       const line = lines[i];
       if (line && line.length > 0) {
         for (const chunk of chunkTextByUtf8Bytes(line)) {
-          backend.sendText(chunk);
+          (await backend.sendText(chunk));
           await tick();
         }
       }
       if (i < lines.length - 1) {
-        backend.sendText('\\');
+        (await backend.sendText('\\'));
         await tick();
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
         await tick();
       }
     }
   } else {
     // 裸 PTY：bracketed paste 标记自己包，多行内容不会被拆成多次提交。
-    backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END);
+    (await backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END));
   }
   await delay(500);
   await waitForInputEcho(backend, typedAt);
-  if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
-  else backend.write('\r');
+  if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
+  else (await backend.write('\r'));
 }
 
 /** full-trust 姿态：同时跳过工具权限确认与危险模式提示。 */
@@ -180,7 +180,7 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
   let lastDownAt = -Infinity;
   let lastEnterAt = -Infinity;
   while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
-    const screen = backend.readScreen();
+    const screen = (await backend.readScreen());
     const selection = trustSelection(screen, ctx.cwd);
     const trustScreen = selection !== undefined;
 
@@ -202,12 +202,12 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
     const now = Date.now();
     if (selection === 'No, exit' && now - lastDownAt >= TRUST_KEY_RETRY_MS) {
       lastDownAt = now;
-      if (backend.sendSpecialKeys) backend.sendSpecialKeys('Down');
-      else backend.write('\x1b[B');
+      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Down'));
+      else (await backend.write('\x1b[B'));
     } else if (selection === 'Yes, I trust this folder' && now - lastEnterAt >= TRUST_KEY_RETRY_MS) {
       lastEnterAt = now;
-      if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
-      else backend.write('\r');
+      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
+      else (await backend.write('\r'));
     }
     await delay(STARTUP_POLL_MS);
   }

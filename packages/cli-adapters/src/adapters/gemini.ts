@@ -24,13 +24,13 @@ export function createGeminiAdapter(): CliAdapter {
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       if (backend.sendText && backend.sendSpecialKeys) {
-        backend.sendText(prompt);
+        (await backend.sendText(prompt));
         await delay(200);
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
       } else {
-        backend.write(prompt);
+        (await backend.write(prompt));
         await delay(1000);
-        backend.write('\r');
+        (await backend.write('\r'));
       }
     },
   };

@@ -1,8 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
-  backendUnavailableMessage,
   defaultBackendProbes,
-  selectSessionBackend,
   TmuxBackend,
   type BackendProbes,
 } from '@dutydeck/session-backends';
@@ -22,12 +20,11 @@ export function dutydeckPtySessionName(sessionId: string): string {
  * implicit downgrade to the in-process PtyBackend. */
 export function createDutydeckPersistentBackend(
   sessionId: string,
-  probes: BackendProbes = defaultBackendProbes,
+  _probes: BackendProbes = defaultBackendProbes,
 ): TmuxBackend {
   const sessionName = dutydeckPtySessionName(sessionId);
-  const selected = selectSessionBackend({ preferred: 'tmux', sessionName, probes });
-  if (!selected.ok) throw new Error(backendUnavailableMessage(selected.requested, selected.reason));
-  if (selected.kind !== 'tmux') throw new Error(`Production PTY backend policy selected unexpected backend: ${selected.kind}`);
+  // Construction is synchronous; start() performs asynchronous tri-state and
+  // ownership probes before launch. There is never an implicit PTY fallback.
   return new TmuxBackend(sessionName, { ownerId: `dutydeck:${sessionId}` });
 }
 

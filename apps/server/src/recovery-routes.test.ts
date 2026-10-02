@@ -31,6 +31,25 @@ describe('execution recovery owner routes', () => {
       expect((await app.inject({ method: 'POST', url: '/api/sessions/session/recovery/probe', headers, payload: { runId: 'run', gone: true } })).statusCode).toBe(400);
     } finally { await app.close(); }
   });
+  it('validates steering recovery and supplies only the server-resolved owner to runtime', async () => {
+    const runtime = { confirmSteeringRecovery: vi.fn().mockResolvedValue({ replayed: false }) };
+    const app = Fastify();
+    app.setErrorHandler((error, _request, reply) => reply.code(error instanceof ZodError ? 400 : error instanceof RuntimeError ? error.statusCode : 500).send({ error: error.message }));
+    registerRecoveryRoutes(app, runtime as unknown as DutydeckRuntime, { authorize: request => request.headers.authorization === 'Bearer owner' });
+    const decision = { runId: 'run', taskId: 'task', operationId: 'operation', expectedRevision: 2, decisionId: 'decision', evidenceRefs: ['reviewed'], resourceChecks: [], action: 'delivered' };
+    const url = '/api/sessions/session/recovery/steering', headers = { authorization: 'Bearer owner' };
+    try {
+      expect((await app.inject({ method: 'POST', url, payload: decision })).statusCode).toBe(403);
+      for (const payload of [{ ...decision, actor: 'forged' }, { ...decision, expectedRevision: 0 }, { ...decision, evidenceRefs: [] }, { ...decision, action: 'not_delivered' }]) {
+        expect((await app.inject({ method: 'POST', url, headers, payload })).statusCode).toBe(400);
+      }
+      expect(runtime.confirmSteeringRecovery).not.toHaveBeenCalled();
+      for (const payload of [decision, { ...decision, action: 'abandon' }, { ...decision, action: 'not_delivered', allowDuplicateEffects: true }]) {
+        expect((await app.inject({ method: 'POST', url, headers, payload })).statusCode).toBe(200);
+        expect(runtime.confirmSteeringRecovery).toHaveBeenLastCalledWith('session', payload, { kind: 'installation_owner', id: 'installation_owner' });
+      }
+    } finally { await app.close(); }
+  });
   it('adds the Lark result deliveries of the session that failed or are waiting to retry', async () => {
     const runtime = { inspectExecutionRecovery: vi.fn().mockResolvedValue({ runId: 'run' }) };
     const deliveries = [{ sessionId: 'session', messageId: 'om_request', taskName: '任务', state: 'failed', error: '飞书拒收（230002）' }];

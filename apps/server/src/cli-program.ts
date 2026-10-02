@@ -387,12 +387,12 @@ export function createCliProgram(version: string, handlers: CliHandlers = {}) {
   program.action(options => handlers.serve?.(options));
 
   const recovery = program.command('recovery').description('Inspect and explicitly reconcile execution on the local runtime');
-  for (const operation of ['inspect', 'probe', 'confirm', 'retire-pty', 'replace-native'] as const) {
+  for (const operation of ['inspect', 'probe', 'confirm', 'steering', 'retire-pty', 'replace-native'] as const) {
     const command = recovery.command(`${operation} <session-id>`)
       .option('--url <url>', 'Exact local runtime URL; requires --database')
       .option('--database <path>', 'Exact runtime database, opened read-only for its auth token');
     if (operation === 'probe') command.requiredOption('--run-id <id>', 'Exact run ID from recovery inspect');
-    if (['confirm', 'retire-pty', 'replace-native'].includes(operation)) command.requiredOption('--file <path>', 'Reviewed decision JSON, including revisions and evidence');
+    if (['confirm', 'steering', 'retire-pty', 'replace-native'].includes(operation)) command.requiredOption('--file <path>', 'Reviewed decision JSON, including revisions and evidence');
     command.action((sessionId, options, cmd) => handlers.recovery?.(operation, sessionId, { ...options,
       ...(cmd.optsWithGlobals().database ? { database: cmd.optsWithGlobals().database } : {}) }));
   }

@@ -41,11 +41,11 @@ export function createGeniusAdapter(): CliAdapter {
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // 整段发送 + 单个 Enter 提交（不走 bracketed paste）。
       // 精简契约的 writeInput 无返回通道，不进行额外的提交落地重试校验。
-      if (backend.sendText) backend.sendText(prompt);
-      else backend.write(prompt);
+      if (backend.sendText) (await backend.sendText(prompt));
+      else (await backend.write(prompt));
       await delay(200);
-      if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
-      else backend.write('\r');
+      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
+      else (await backend.write('\r'));
     },
 
     buildResumeCommand(sessionId: string): string[] {

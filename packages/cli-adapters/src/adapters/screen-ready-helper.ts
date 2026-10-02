@@ -130,7 +130,7 @@ export async function pollScreenReady(
   const { busyPattern, cwd, permissionMode } = options;
   const startedAt = Date.now();
   while (Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
-    const screen = backend.readScreen();
+    const screen = (await backend.readScreen());
     // 先判就绪：已就绪（例如对话正文里恰好提到信任弹窗文字、或 daemon 重连回旧会话）
     // 直接返回，避免把正文里的 "Trust this folder?" 之类文字误当成当前信任页。
     if (isInputReady(screen, cli, busyPattern)) return;

@@ -36,19 +36,19 @@ export function createCursorAdapter(): CliAdapter {
       // 多行块折叠成 `[Pasted text +N lines]` 占位符，模型读不到内容。
       // 绝不用 bracketed-paste 标记（会触发折叠）。
       const useKeys = !!(backend.sendText && backend.sendSpecialKeys);
-      const emitText = (s: string) => (useKeys ? backend.sendText!(s) : backend.write(s));
-      const emitSoftNewline = () => {
+      const emitText = async (s: string) => (useKeys ? (await backend.sendText!(s)) : (await backend.write(s)));
+      const emitSoftNewline = async () => {
         if (useKeys) {
           // tmux：Ctrl+J 是 cursor 原生 soft-newline。
-          backend.sendSpecialKeys!('C-j');
+          (await backend.sendSpecialKeys!('C-j'));
         } else {
           // 裸 PTY：'\' + CR，cursor 把 CR 前的反斜杠当 soft-newline 吃掉，
           // 流里没有 LF 字节，免疫折叠（仅本地 TUI 渲染多个尾部反斜杠）。
-          backend.write('\\');
-          backend.write('\r');
+          (await backend.write('\\'));
+          (await backend.write('\r'));
         }
       };
-      const emitEnter = () => (useKeys ? backend.sendSpecialKeys!('Enter') : backend.write('\r'));
+      const emitEnter = async () => (useKeys ? (await backend.sendSpecialKeys!('Enter')) : (await backend.write('\r')));
 
       const isFirstWrite = !cursorFirstWriteSeen.has(backend);
       if (isFirstWrite) {
@@ -61,20 +61,20 @@ export function createCursorAdapter(): CliAdapter {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
         if (line && line.length > 0) {
-          emitText(line);
+          (await emitText(line));
           await delay(throttleMs);
         }
         if (i < lines.length - 1) {
-          emitSoftNewline();
+          (await emitSoftNewline());
           await delay(throttleMs);
         }
       }
       await delay(200);
-      emitEnter();
+      (await emitEnter());
       // turn 运行中时第一个 Enter 只把文本停在 follow-up 面板，第二个 Enter
       // 才把它推进活动 turn；空闲时空 composer 的额外 Enter 是 no-op。
       await delay(200);
-      emitEnter();
+      (await emitEnter());
     },
 
     /** Cursor 的 chat id 不透明、由 CLI 自己铸，dutydeck 的 sessionId 推导不出来。

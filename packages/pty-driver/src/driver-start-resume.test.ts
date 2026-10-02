@@ -55,7 +55,7 @@ describe('start reconnects durable native history only with session evidence', (
       if (kind === 'foreign' || kind === 'filename-only') {
         await expect(driver.start()).rejects.toThrow('refusing to reuse its id');
         expect(existsSync(output)).toBe(false);
-        expect(TmuxBackend.probeSession(`start-${kind}`)).toBe('missing');
+        expect((await TmuxBackend.probeSession(`start-${kind}`))).toBe('missing');
         return;
       }
       await driver.start();

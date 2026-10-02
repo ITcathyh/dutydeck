@@ -885,7 +885,10 @@ describe('Lark message coordinator', () => {
     coordinator.handle(message('om_second', '第二条'), { ...config, riskControlMode: 'guidance', highRiskAllowedUsers: [{ openId: 'ou_admin', name: '管理员' }] });
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
     expect(runtime.dispatch.mock.calls.map(call => call.slice(1, 3))).toEqual([['第一条', 'queue'], ['第二条', 'queue']]);
-    expect(runtime.dispatch.mock.calls.every(call => call.length === 4)).toBe(true);
+    expect(runtime.dispatch.mock.calls.map(call => call.slice(4))).toEqual([
+      [undefined, undefined, undefined, undefined, undefined, 24],
+      [undefined, undefined, undefined, undefined, undefined, 24]
+    ]);
     expect(runtime.dispatch.mock.calls[1]?.[3]).toContain('[Dutydeck 安全策略 · 自动注入]');
     expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('正在排队，前面还有 1 个任务…') }));
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('前面还有 0 个任务') }));

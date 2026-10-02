@@ -34,13 +34,13 @@ export function createKimiAdapter(): CliAdapter {
         await delay(KIMI_FIRST_WRITE_SETTLE_MS);
       }
       if (backend.pasteText && backend.sendSpecialKeys) {
-        backend.pasteText(prompt);
+        (await backend.pasteText(prompt));
         await delay(200);
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
       } else {
-        backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END);
+        (await backend.write(BRACKETED_PASTE_START + prompt + BRACKETED_PASTE_END));
         await delay(1000);
-        backend.write('\r');
+        (await backend.write('\r'));
       }
     },
 

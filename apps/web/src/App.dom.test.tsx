@@ -9,6 +9,7 @@ import { useDockStore } from './store';
 import { resetDrafts } from './draft-store';
 import type { EventWindow } from './event-history';
 import { shortcutDefinitions } from './useKeyboardShortcuts';
+import { toastStore } from './useToasts';
 
 vi.mock('./useSessionStream', () => ({ useSessionStream: () => 'open' }));
 vi.mock('./components/TerminalView', () => ({ TerminalView: ({ sessionId }: { sessionId: string }) => <div>Terminal {sessionId}</div> }));
@@ -56,6 +57,7 @@ afterEach(() => {
   useDockStore.setState({ activeSessionId: undefined, rawVisible: false });
   // 编辑草稿是模块级 store（跨视图存活），不清会让用例互相串草稿。
   resetDrafts();
+  toastStore.clear();
   window.history.replaceState(null, '', '/');
 });
 
@@ -1061,5 +1063,59 @@ describe('App 完整历史记录', () => {
       expect(screen.queryByRole('dialog', { name: '重命名会话' })).toBeNull();
     });
     expect(await screen.findByRole('heading', { name: '改名后的任务' })).toBeTruthy();
+  });
+});
+
+
+describe('App 插话结果反馈', () => {
+  it('发送器插话返回未知时提示核对，不承诺重新排队', async () => {
+    const user = userEvent.setup();
+    const active = session('s1', 'thinking');
+    const task = { id: 'new-steering', sessionId: active.id, prompt: '追加一条核对', status: 'reconcile_required', createdAt: active.createdAt, updatedAt: active.updatedAt };
+    mockAppApi({ sessions: [active], summaries: [summary('s1', '当前任务')] });
+    const send = vi.spyOn(api, 'send').mockResolvedValue({ accepted: true, task, steering: { outcome: 'failed' } });
+    renderApp();
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await user.click(await within(navigation).findByRole('button', { name: /当前任务/ }));
+    await user.type(await screen.findByRole('textbox', { name: '消息' }), task.prompt);
+    await user.click(screen.getByRole('button', { name: '排队' }));
+    await user.click(screen.getByRole('button', { name: '插话到当前这一轮' }));
+    await user.click(screen.getByRole('button', { name: '发送消息' }));
+    await waitFor(() => expect(send).toHaveBeenCalledWith(active.id, task.prompt, 'steer', []));
+    await waitFor(() => expect(toastStore.getSnapshot().find(toast => toast.key === 'steering')?.title).toBe('插话投递结果未知'));
+    expect(toastStore.getSnapshot().find(toast => toast.key === 'steering')?.description).toContain('不会自动重发');
+  });
+
+  it.each(['reconcile_required', 'queued', 'completed'] as const)('排队按钮按持久状态 %s 回报插话结果', async status => {
+    const user = userEvent.setup();
+    const active = session('s1', 'thinking');
+    const queued = { id: 'queued-1', sessionId: active.id, prompt: '核对第二条指令', status: 'queued', createdAt: active.createdAt, updatedAt: active.updatedAt };
+    mockAppApi({ sessions: [active], summaries: [summary('s1', '当前任务')] });
+    vi.mocked(api.tasks).mockResolvedValue([queued]);
+    const inject = vi.spyOn(api, 'injectQueued').mockImplementation(async () => {
+      vi.mocked(api.tasks).mockResolvedValue([{ ...queued, status }]);
+      return { task: { ...queued, status }, outcome: status === 'queued' ? 'unsupported' : 'failed' };
+    });
+    renderApp();
+    const navigation = screen.getByRole('complementary', { name: 'Dutydeck 工作台导航' });
+    await user.click(await within(navigation).findByRole('button', { name: /当前任务/ }));
+    await user.click(await screen.findByRole('button', { name: '立即插话' }));
+    await waitFor(() => expect(inject).toHaveBeenCalledWith(active.id, queued.id));
+    await waitFor(() => expect(toastStore.getSnapshot().find(toast => toast.key === 'steering')).toBeDefined());
+    const toast = toastStore.getSnapshot().find(item => item.key === 'steering')!;
+    if (status === 'reconcile_required') {
+      expect(toast.title).toBe('插话投递结果未知');
+      expect(toast.description).toContain('管理员核对');
+      expect(toast.description).toContain('不会自动重发');
+      expect(toast.description).not.toContain('当前任务完成后会执行它');
+    } else if (status === 'completed') {
+      expect(toast.title).toBe('插话请求未确认');
+      expect(toast.description).toContain('已不在队列中');
+      expect(toast.description).not.toContain('当前任务完成后会执行它');
+    } else {
+      expect(toast.title).toBe('没有插话，这条指令在排队');
+      expect(toast.description).toContain('不支持插话');
+      expect(toast.description).toContain('当前任务完成后会执行它');
+    }
   });
 });

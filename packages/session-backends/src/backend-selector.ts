@@ -39,10 +39,10 @@ export function isPersistentBackend(kind: BackendKind): boolean {
 /** Availability + existence probes, injectable so selection is unit-testable. */
 export interface BackendProbes {
   /** Is this backend usable on this host? */
-  isAvailable(kind: BackendKind): boolean;
+  isAvailable(kind: BackendKind): boolean | Promise<boolean>;
   /** Does this session already exist on this backend? Tri-state: a failed
    *  probe must answer 'unknown', never 'missing'. */
-  probeSession(kind: BackendKind, sessionName: string): SessionProbe;
+  probeSession(kind: BackendKind, sessionName: string): SessionProbe | Promise<SessionProbe>;
 }
 
 /** Real probes against the installed multiplexers. */
@@ -105,14 +105,14 @@ export type BackendSelection =
  *     automatic degradation, and it happens before any session exists, so
  *     nothing can be orphaned by it.
  */
-export function selectSessionBackend(opts: SelectBackendOptions = {}): BackendSelection {
+export async function selectSessionBackend(opts: SelectBackendOptions = {}): Promise<BackendSelection> {
   const probes = opts.probes ?? defaultBackendProbes;
 
   // 5. No explicit preference — the default path.
   if (opts.preferred === undefined) {
-    if (probes.isAvailable('tmux')) {
+    if (await probes.isAvailable('tmux')) {
       const reattach = opts.sessionName !== undefined
-        && probes.probeSession('tmux', opts.sessionName) === 'exists';
+        && await probes.probeSession('tmux', opts.sessionName) === 'exists';
       return {
         ok: true,
         kind: 'tmux',
@@ -132,13 +132,13 @@ export function selectSessionBackend(opts: SelectBackendOptions = {}): BackendSe
 
   // 2. A live session outranks the capability probe.
   if (opts.sessionName !== undefined) {
-    if (probes.probeSession(requested, opts.sessionName) === 'exists') {
+    if (await probes.probeSession(requested, opts.sessionName) === 'exists') {
       return { ok: true, kind: requested, reattach: true, reason: `${requested} session already live` };
     }
   }
 
   // 3/4. Availability decides — and an unavailable request fails loudly.
-  if (probes.isAvailable(requested)) {
+  if (await probes.isAvailable(requested)) {
     return { ok: true, kind: requested, reattach: false, reason: `${requested} requested and available` };
   }
   return {

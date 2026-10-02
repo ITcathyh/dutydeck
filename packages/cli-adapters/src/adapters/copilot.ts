@@ -43,13 +43,13 @@ export function createCopilotAdapter(): CliAdapter {
       // 该窗口内的写入可能被静默丢弃；输入框渲染完成后 sendText + Enter 可靠。
       // 没有 cursor 那种 bracketed-paste 折叠，所以走最简单的 write+Enter。
       if (backend.sendText && backend.sendSpecialKeys) {
-        backend.sendText(prompt);
+        (await backend.sendText(prompt));
         await delay(200);
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
       } else {
-        backend.write(prompt);
+        (await backend.write(prompt));
         await delay(1000);
-        backend.write('\r');
+        (await backend.write('\r'));
       }
     },
 

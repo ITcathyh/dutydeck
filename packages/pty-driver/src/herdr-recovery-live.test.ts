@@ -23,7 +23,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('real Herdr primary 
     writeFileSync(transcript, JSON.stringify({ type: 'user', sessionId: pinnedSessionUuid(sessionId), message: { role: 'user', content: buildSessionMarker(sessionId) } }) + '\n');
     const prompts: string[] = [], outputs: string[] = [];
     const adapter: CliAdapter = { id: 'claude-code', capabilities: { resume: true }, buildArgs: () => [], injectSessionContext: () => '', buildResumeCommand: () => [], completionPattern: /HERDR-SHELL-DONE/,
-      writeInput: (backend, prompt) => { prompts.push(prompt); backend.write(prompt + '\n'); } };
+      writeInput: async (backend, prompt) => { prompts.push(prompt); (await backend.write(prompt + '\n')); } };
     const agent: AgentConfig = { id: 'fixture', name: 'fixture', command: '/bin/sh', args: ['-c', 'exec /bin/sh'], protocol: 'pty-cli', cwd, env: { CLAUDE_CONFIG_DIR: cwd }, permissionMode: 'full-trust', timeout: 30, capabilities: { pause: false, resume: true }, builtin: false };
     const drivers: PtyCliDriver[] = [];
     const create = () => {
@@ -37,7 +37,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('real Herdr primary 
       const checkpoint = (await first.driver.checkpoint())!;
       expect(checkpoint).toBeDefined();
       const sent = first.driver.send('sleep 2; echo HERDR-SHELL-DONE').catch(error => error);
-      await expect.poll(() => first.backend.getDutydeckMetadata('turn_id')).toBe(checkpoint.turnId);
+      await expect.poll(async () => (await first.backend.getDutydeckMetadata('turn_id'))).toBe(checkpoint.turnId);
       first.driver.prepareForDaemonShutdown(); await first.driver.stop();
       expect(await sent).toBeInstanceOf(DriverDetachedError);
       expect(first.driver.isDetachedForShutdown()).toBe(true);
@@ -53,7 +53,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('real Herdr primary 
       await recovering;
       expect(prompts).toHaveLength(1);
       expect(outputs.filter(value => value === 'HERDR_RECOVERED_RESULT')).toHaveLength(1);
-      expect(recovered.backend.getDutydeckMetadata('first_prompt_sent')).toBe('true');
+      expect((await recovered.backend.getDutydeckMetadata('first_prompt_sent'))).toBe('true');
       await recovered.driver.resume();
       expect(recovered.backend.getPid()).toBe(pid);
       await recovered.driver.stop({ discardSession: true });

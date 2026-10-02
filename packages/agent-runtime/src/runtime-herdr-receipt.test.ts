@@ -15,14 +15,14 @@ it('defers a persisted idle Herdr constructor failure without blocking instance 
     return { start: async () => {}, send: async () => {}, resume: async () => {}, interrupt: async () => {},
       stop: async () => { stopped = true; }, isStopped: async () => stopped && !detached,
       prepareForDaemonShutdown: () => { detached = persistent; }, isDetachedForShutdown: () => detached,
-      persistentTerminalIdentity: () => persistent ? { original: 'immutable-physical-fixture' } : undefined };
+      persistentTerminalIdentity: async () => persistent ? { original: 'immutable-physical-fixture' } : undefined };
   };
   let repos = createRepositories(path, { newDatabaseAuthority: 'ledger_v1' });
   let runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, terminalBackend: async () => 'herdr', driverFactory: agent => mock(agent.id === terminal.id) });
   try {
     await runtime.initialize([terminal, other]);
     const session = await runtime.start({ agentId: terminal.id });
-    expect(await repos.config.get(`runtime_idle_terminal:${session.id}`)).toBeTruthy();
+    expect(JSON.parse((await repos.config.get(`runtime_idle_terminal:${session.id}`))!).identity).toEqual({original:'immutable-physical-fixture'});
     await runtime.shutdown(); repos.close();
     repos = createRepositories(path);
     runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, driverFactory: agent => {

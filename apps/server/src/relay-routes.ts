@@ -1,5 +1,5 @@
 import type { HerdrSessions } from './herdr.js';
-import type { FastifyInstance, FastifyReply } from 'fastify';
+import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { RuntimeError } from '@dutydeck/shared';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
 import {
@@ -17,6 +17,7 @@ export interface RelayRoutesOptions {
   capabilities?: RelayCapabilityRegistry;
   broker?: RelayAskBroker;
   service?: RelayService;
+  authorize?(request: FastifyRequest, sessionId: string, action: 'task.view_result' | 'turn.append'): Promise<void>;
 }
 
 /** Only child-to-host relay calls use the session HMAC as their sole credential. */
@@ -139,6 +140,7 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
   app.get<{ Params: { id: string } }>('/api/relay/sessions/:id/asks', async (request, reply) => {
     try {
       if ((await runtime?.getSession(request.params.id))?.source === 'work_item') throw new RuntimeError('WORK_ITEM_MANAGED_SESSION', '请从目标查看和回答步骤提问', 403);
+      await options.authorize?.(request, request.params.id, 'task.view_result');
       return service.listPending(request.params.id);
     }
     catch (error) { return handleRelayError(error, reply); }
@@ -147,7 +149,8 @@ export function registerRelayRoutes(app: FastifyInstance, options: RelayRoutesOp
   app.post<{ Params: { id: string; askId: string }; Body: { answer?: string } }>('/api/relay/sessions/:id/asks/:askId/answer', async (request, reply) => {
     try {
       if ((await runtime?.getSession(request.params.id))?.source === 'work_item') throw new RuntimeError('WORK_ITEM_MANAGED_SESSION', '请从目标查看和回答步骤提问', 403);
-      const ask = await service.answer(request.params.id, request.params.askId, request.body ?? {});
+      const ask = await service.answer(request.params.id, request.params.askId, request.body ?? {},
+        async () => { await options.authorize?.(request, request.params.id, 'turn.append'); });
       return { ok: true, ask };
     } catch (error) { return handleRelayError(error, reply); }
   });

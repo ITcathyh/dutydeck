@@ -22,52 +22,52 @@ afterEach(() => { try { tmux('kill-server'); } catch {} rmSync(root, { recursive
 describe('owned tmux physical exit proofs (real isolated server and process identity)', () => {
   it('stops only exact owned target, verifies proof again, and admits a later task', async () => {
     create(); create('other');
-    const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     const proof = await stopOwnedTmux(identity, probe);
     expect(proof.identities.length).toBeGreaterThan(0);
     expect(proof.identities.every(item => observeProcess(item) === 'dead')).toBe(true);
-    expect(verifyOwnedTmuxExit(proof, probe)).toBe(true);
+    expect((await verifyOwnedTmuxExit(proof, probe))).toBe(true);
     expect(tmux('has-session', '-t', '=other')).toBe('');
     create(); // replacement is not covered by the old proof
-    expect(verifyOwnedTmuxExit(proof, probe)).toBe(false);
-    await stopOwnedTmux(captureOwnedTmuxIdentity(scope(), probe)!, probe);
+    expect((await verifyOwnedTmuxExit(proof, probe))).toBe(false);
+    await stopOwnedTmux((await captureOwnedTmuxIdentity(scope(), probe))!, probe);
   });
   it('rejects a missing initial socket and permits a batch missing target after the last verified stop', async () => {
-    expect(() => captureOwnedTmuxIdentity(scope(), probe)).toThrow('PATH_UNAVAILABLE');
+    await expect(captureOwnedTmuxIdentity(scope(), probe)).rejects.toThrow('PATH_UNAVAILABLE');
     create();
-    const proof = await stopOwnedTmux(captureOwnedTmuxIdentity(scope(), probe)!, probe);
-    expect(captureOwnedTmuxIdentity(scope('next'), probe, proof)).toBeUndefined();
+    const proof = await stopOwnedTmux((await captureOwnedTmuxIdentity(scope(), probe))!, probe);
+    expect((await captureOwnedTmuxIdentity(scope('next'), probe, proof))).toBeUndefined();
   });
   it('accepts already-proven natural exit of the last session before stop', async () => {
-    create(); const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     tmux('send-keys', '-t', 'owned', 'exit', 'Enter');
     const proof = { ...identity, stoppedAt: new Date().toISOString() };
-    for (let tries = 0; !verifyOwnedTmuxExit(proof, probe) && tries < 100; tries++) await new Promise(resolve => setTimeout(resolve, 20));
-    expect(verifyOwnedTmuxExit(proof, probe)).toBe(true);
-    expect(verifyOwnedTmuxExit(await stopOwnedTmux(identity, probe), probe)).toBe(true);
+    for (let tries = 0; !(await verifyOwnedTmuxExit(proof, probe)) && tries < 100; tries++) await new Promise(resolve => setTimeout(resolve, 20));
+    expect((await verifyOwnedTmuxExit(proof, probe))).toBe(true);
+    expect((await verifyOwnedTmuxExit(await stopOwnedTmux(identity, probe), probe))).toBe(true);
   });
   it('rejects owner mutation between capture and stop without killing the target', async () => {
-    create(); const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     tmux('set-option', '-t', 'owned', '@dutydeck_owner_id', 'foreign');
     await expect(stopOwnedTmux(identity, probe)).rejects.toThrow('OWNER_MISMATCH');
     expect(tmux('has-session', '-t', '=owned')).toBe('');
   });
   it('refuses unknown process observations and foreign namespaces', async () => {
-    create(); const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     await expect(stopOwnedTmux(identity, { ...probe, observe: () => 'unknown' })).rejects.toThrow('PROCESS_STATE_CHANGED');
     identity.server.namespace = 'foreign';
     await expect(stopOwnedTmux(identity, probe)).rejects.toThrow('PROCESS_STATE_CHANGED');
     expect(tmux('has-session', '-t', '=owned')).toBe('');
   });
   it('is independent of later TMUX/TMUX_TMPDIR namespace changes', async () => {
-    create(); const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     const saved = process.env.TMUX_TMPDIR;
     process.env.TMUX_TMPDIR = join(root, 'different');
-    try { expect(verifyOwnedTmuxExit(await stopOwnedTmux(identity, probe), probe)).toBe(true); }
+    try { expect((await verifyOwnedTmuxExit(await stopOwnedTmux(identity, probe), probe))).toBe(true); }
     finally { if (saved === undefined) delete process.env.TMUX_TMPDIR; else process.env.TMUX_TMPDIR = saved; }
   });
   it('rechecks ownership after the durable pre-kill callback', async () => {
-    create(); const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     let saved = false;
     await expect(stopOwnedTmux(identity, probe, async captured => {
       expect(captured.identities.length).toBeGreaterThan(0);
@@ -78,7 +78,7 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
     expect(tmux('has-session', '-t', '=owned')).toBe('');
   });
   it('refuses children created during the durable pre-kill callback', async () => {
-    create(); const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     let child: ReturnType<typeof childProcessIdentity> | undefined;
     try {
       await expect(stopOwnedTmux(identity, probe, async () => {
@@ -95,17 +95,17 @@ describe('owned tmux physical exit proofs (real isolated server and process iden
   });
   it('does not treat an unlinked live server socket as proof of target absence', async () => {
     create(); create('other');
-    const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     const proof = await stopOwnedTmux(identity, probe);
     create(); // a replacement pane lives on the still-running server
     rmSync(socket);
     expect(observeProcess(identity.server)).toBe('alive');
-    expect(verifyOwnedTmuxExit(proof, probe)).toBe(false);
+    expect((await verifyOwnedTmuxExit(proof, probe))).toBe(false);
     process.kill(identity.server.pid, 'SIGUSR1');
     await new Promise(resolve => setTimeout(resolve, 100));
   });
   it('does not accept a socket path replaced by an ordinary file', async () => {
-    create(); const identity = captureOwnedTmuxIdentity(scope(), probe)!;
+    create(); const identity = (await captureOwnedTmuxIdentity(scope(), probe))!;
     rmSync(socket); writeFileSync(socket, 'replacement');
     await expect(stopOwnedTmux(identity, probe)).rejects.toThrow('PATH_TYPE_MISMATCH');
     // Recreate only this test server socket for cleanup.

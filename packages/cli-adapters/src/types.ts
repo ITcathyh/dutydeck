@@ -25,12 +25,12 @@ export interface AdapterSessionContext {
 
 /** 后端写接口的最小表面（PtyBackend/TmuxBackend 都满足） */
 export interface PtyLike {
-  write(data: string): void | boolean;
+  write(data: string): void | boolean | Promise<void | boolean>;
   /** 当前终端已渲染的完整屏幕。仅需要在启动交互前确认状态的适配器使用。 */
-  readScreen?(): string;
-  sendText?(text: string): void | boolean;
-  sendSpecialKeys?(...keys: string[]): void | boolean;
-  pasteText?(text: string): void;
+  readScreen?(): string | Promise<string>;
+  sendText?(text: string): void | boolean | Promise<void | boolean>;
+  sendSpecialKeys?(...keys: string[]): void | boolean | Promise<void | boolean>;
+  pasteText?(text: string): void | Promise<void>;
   /** 后端最近一次输出屏幕数据的时间（Date.now() 毫秒）。写入用户消息前据此等屏幕静止、写入后确认回显。 */
   lastOutputAt?(): number;
   /** 同一 CLI 进程的各次写入共用的身份。driver 每次提交都新建 PtyLike 包装，适配器按进程记状态（如首写）时用它，不要用包装对象本身。 */
@@ -50,7 +50,7 @@ export interface CliAdapter {
   /** 构造 spawn 参数（bin 由 driver 层的 AgentConfig.command 提供，适配器不解析 bin 路径） */
   buildArgs(ctx: AdapterSessionContext): string[];
   /** 把 prompt 写进后端（paste+Enter / 分块 stdin / runner 帧，因 CLI 而异） */
-  writeInput(backend: PtyLike, prompt: string): void;
+  writeInput(backend: PtyLike, prompt: string): void | Promise<void>;
   /** 首轮输入前处理 CLI 自己的、可安全识别的启动交互。 */
   prepareInput?(backend: PtyLike, ctx: AdapterSessionContext): void | Promise<void>;
   /**

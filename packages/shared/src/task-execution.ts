@@ -139,7 +139,13 @@ export interface CommitResult {
 }
 export interface QueueOperationInput { operationId: string; actor: ExecutionActor; interrupt: boolean }
 /** A queued Task delivered through `_session/steering` into a submitted Attempt instead of its own turn. */
-export interface SteeringDeliveryInput { operationId: string; actor: ExecutionActor; target: AttemptRef; outcome: 'injected' | 'startedNewTurn' }
+export interface SteeringOperation extends SessionFence {
+  operationId: string; taskId: string; target: AttemptRef; actor: ExecutionActor; controller: ExecutionController;
+  state: 'pending' | 'unknown' | 'delivered' | 'not_delivered' | 'abandoned'; revision: number;
+  outcome?: 'injected' | 'startedNewTurn' | 'promptRequired' | 'unsupported';
+  decisionId?: string; createdAt: string; updatedAt: string;
+}
+export interface SteeringOperationInput { operationId: string; actor: ExecutionActor; target: AttemptRef }
 /** Only interactive Tasks can be steered: work-item, automation and schedule consumers settle through the Task's own Attempt. */
 export const steerableTaskNamespace: TaskRequestV1['namespace'] = 'runtime';
 export interface QueueAction extends SessionFence {
@@ -175,13 +181,15 @@ export type SessionExecutionPatch = Partial<Pick<Session, 'state' | 'archivedAt'
 export interface SessionWorkspaceProof { expectedCwd: string; workspaceRevision: number; workspaceDigest: string }
 export type SessionStatePatch = Pick<Session, 'state'> & { error?: string | null };
 export interface ExecutionEventInput { id: string; type: AgentEvent['type']; data: JsonValue; sourceId?: string; timestamp?: string; raw?: string }
-export interface TaskExecutionProjection { task: ExecutionTask; currentAttempt?: TaskAttempt; attempts: TaskAttempt[]; blockers: ExecutionBlocker[] }
+export interface TaskExecutionProjection { task: ExecutionTask; currentAttempt?: TaskAttempt; attempts: TaskAttempt[]; blockers: ExecutionBlocker[]; steering?: SteeringOperation }
 export interface BoundExecutionRepository {
   lookupAccepted(request: TaskRequestV1): AcceptedTask | undefined;
   acceptTask(f: SessionFence, request: TaskRequestV1, input: AcceptedTaskInputV2, position: 'front' | 'back'): CommitResult;
   claimNext(f: SessionFence): CommitResult | undefined;
   promoteQueued(f: SessionFence, taskId: string, expectedTaskRevision: number, operation: QueueOperationInput): CommitResult;
-  deliverQueuedBySteering(f: SessionFence, taskId: string, expectedTaskRevision: number, input: SteeringDeliveryInput): CommitResult;
+  beginQueuedSteering(f: SessionFence, taskId: string, expectedTaskRevision: number, input: SteeringOperationInput): CommitResult;
+  resolveQueuedSteering(f: SessionFence, operationId: string, controller: ExecutionController, outcome: 'injected' | 'startedNewTurn' | 'promptRequired' | 'unsupported' | 'unknown'): CommitResult;
+  confirmSteeringRecovery(f: SessionFence, input: import('./execution-recovery.js').SteeringRecoveryDecision, actor: ExecutionActor): CommitResult;
   getPendingQueueActions(f: SessionFence): QueueAction[];
   settleQueueAction(f: SessionFence, operationId: string, expectedRevision: number, evidence: QueueActionEvidence): QueueAction;
   markSubmissionPending(f: AttemptFence, input: SubmissionIntent): CommitResult;
@@ -325,7 +333,7 @@ export const taskExecutionSchemas = {
   driverSubmission: z.object({taskId:id,attemptId:id,submissionId:id,driverInstanceId:id,inputDigest:executionDigestSchema}).strict(),
   creatorIdentitySchema, legacyRetirementReceiptSchema, nativeReserve: z.object({resourceId:id,parentResourceId:id,expected:nativeContextExpectedSchema}).strict(),
   nativeIdentitySchema, nativeSelectionSchema, nativeBindingSchema, nativeReplacementSchema, nativeContextExpectedSchema, nativeContextRefSchema,
-  id, revision: z.number().int().positive().safe(), fenceSchema,
+  controllerSchema, id, revision: z.number().int().positive().safe(), fenceSchema,
   attemptFenceSchema: fenceSchema.extend({ taskId: id, attemptId: id, expectedRevision: z.number().int().positive().safe() }),
   checksSchema: resourceChecksSchema, decisionSchema,
   identitySchema: z.object({ identityId: id, kind: z.enum(physicalKinds), locator: executionJsonSchema }).strict(),
@@ -337,7 +345,7 @@ export const taskExecutionSchemas = {
   manual: z.object({ kind:z.literal('manual'), outcome:z.enum(['completed','failed','interrupted','cancelled','unknown']), decision:decisionSchema, verifiedOutput:z.object({eventId:id,digest:executionDigestSchema}).strict().optional() }).strict(),
   position: z.enum(['front','back']),
   queueOperation: z.object({ operationId:id, actor:executionActorSchema, interrupt:z.boolean() }).strict(),
-  steeringDelivery: z.object({ operationId:id, actor:executionActorSchema, target:z.object({ taskId:id, attemptId:id }).strict(), outcome:z.enum(['injected','startedNewTurn']) }).strict(),
+  steeringOperation: z.object({ operationId:id, actor:executionActorSchema, target:z.object({ taskId:id, attemptId:id }).strict() }).strict(),
   queueEvidence: z.object({ evidenceId:id, state:z.enum(['applied','blocked','obsolete']), reason:id, resourceChecks:resourceChecksSchema }).strict(),
   receipt: z.object({ submissionId:id, kind:z.literal('provider_accepted'), provider:id, receiptRef:id, digest:executionDigestSchema }).strict(),
   reconcile: z.object({ reasonId:id, code:id, evidenceRefs:z.array(id) }).strict(),

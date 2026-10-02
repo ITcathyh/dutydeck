@@ -3,14 +3,14 @@
  *
  * Architecture (no PTY, no attach). Third-party attribution: see THIRD_PARTY_NOTICES.md.
  *   - `tmux new-session -d -s <name> -x <cols> -y <rows> -c <cwd>` starts a
- *     bare shell in a detached session (spawnSync, env-scrubbed client).
+ *     bare shell in a detached session through an asynchronous, env-scrubbed client.
  *   - Session-specific env is staged with `set-environment -t <session>`, the
  *     pane is atomically replaced with the CLI via `respawn-pane`, then the
  *     staged values are immediately removed from tmux. This avoids both the
  *     shared server-global environment and typing secrets/large launch lines
  *     into an interactive shell's visible history.
- *   - `tmux pipe-pane -o -t <name> 'cat >> <tmpfile>'` replicates every byte
- *     the pane writes; a `tail -F` child streams the file back to onData.
+ *   - `tmux pipe-pane` sends output through a bounded Unix socket writer.
+ *     Overflow reports a gap and the driver atomically restores the screen.
  *   - Writes go through `tmux send-keys -l` (long/multiline text via
  *     load-buffer + paste-buffer, which is also robust to the 4KB tty
  *     canonical-input limit).
@@ -24,13 +24,11 @@
  * hooks, destroySession fencing, captureInputState/capturePaneInputModes,
  * screen-settling heuristics.
  */
-import { execFile, execFileSync, spawnSync, spawn, type ChildProcessByStdio } from 'node:child_process';
-import type { Readable } from 'node:stream';
-import { openSync, closeSync, statSync, unlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { runCommand } from './command.js';
+import { OutputHandoff } from './output-handoff.js';
+import { TmuxCapture, cleanAbandonedTmuxCapture } from './tmux-capture.js';
+import { statSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { StringDecoder } from 'node:string_decoder';
 import type { SessionBackend, SessionProbe, SpawnOptions } from './types.js';
 
 // ─── Typed errors ──────────────────────────────────────────────────────────
@@ -150,7 +148,7 @@ function tmuxClientEnv(): NodeJS.ProcessEnv {
   return out;
 }
 
-/** Map a failed execFileSync to the right typed error. */
+/** Map a failed management command to the right typed error. */
 function classifyFailure(err: unknown, op: string): TmuxError {
   const e = err as (NodeJS.ErrnoException & {
     status?: number | null;
@@ -176,33 +174,18 @@ function classifyFailure(err: unknown, op: string): TmuxError {
 }
 
 /** Run a tmux command, capturing stdout. Throws a typed TmuxError on failure. */
-function runTmux(args: string[], opts: { input?: string; timeout?: number } = {}): string {
-  try {
-    return execFileSync('tmux', args, {
-      encoding: 'utf8',
-      stdio: opts.input !== undefined ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'],
-      input: opts.input,
-      timeout: opts.timeout ?? 5000,
-      env: tmuxClientEnv(),
-      maxBuffer: 16 * 1024 * 1024,
-    });
-  } catch (err) {
-    throw classifyFailure(err, `tmux ${args[0] ?? 'client'}`);
-  }
+async function runTmux(args: string[], opts: { input?: string; timeout?: number; cwd?: string } = {}): Promise<string> {
+  try { return await runCommand('tmux', args, { ...opts, env: tmuxClientEnv(), maxBuffer: 16 * 1024 * 1024 }); }
+  catch (err) { throw classifyFailure(err, `tmux ${args[0] ?? 'client'}`); }
 }
 
 let tmuxAvailableCache: boolean | undefined;
 
 /** Probe whether tmux is installed and runnable (cached). */
-export function isTmuxAvailable(): boolean {
+export async function isTmuxAvailable(): Promise<boolean> {
   if (tmuxAvailableCache !== undefined) return tmuxAvailableCache;
-  try {
-    const r = spawnSync('tmux', ['-V'], { stdio: 'ignore', timeout: 2000 });
-    tmuxAvailableCache = r.status === 0;
-  } catch {
-    tmuxAvailableCache = false;
-  }
-  return tmuxAvailableCache;
+  try { await runTmux(['-V'], { timeout: 2000 }); return tmuxAvailableCache = true; }
+  catch { return tmuxAvailableCache = false; }
 }
 
 // ─── Backend ───────────────────────────────────────────────────────────────
@@ -236,14 +219,13 @@ export class TmuxBackend implements SessionBackend {
   private cols = 80;
   private rows = 24;
   private started = false;
+  private lifecycle = 0;
+  private inputGeneration = 0;
+  private creation?: Promise<void>;
   private exited = false;
-  private pipePath: string | null = null;
+  private capture: TmuxCapture | undefined;
   private socketPath: string | undefined;
-  private tail: ChildProcessByStdio<null, Readable, null> | null = null;
-  /** Streaming UTF-8 decoder: tail emits raw chunks that can split a
-   *  multi-byte character (CJK/emoji) — StringDecoder reassembles it. */
-  private readonly decoder = new StringDecoder('utf8');
-  private readonly dataCbs: Array<(d: string) => void> = [];
+  private readonly output = new OutputHandoff();
   private readonly exitCbs: Array<(code: number | null, signal: string | null) => void> = [];
   private exitTimer: NodeJS.Timeout | null = null;
   initialScreen?: { data: string; cols: number; rows: number };
@@ -255,9 +237,22 @@ export class TmuxBackend implements SessionBackend {
 
   // ─── SessionBackend implementation ──────────────────────────────────────
 
-  spawn(bin: string, args: string[], opts: SpawnOptions): void {
+  spawn(bin: string, args: string[], opts: SpawnOptions): Promise<void> {
+    const creation = this.launch(bin, args, opts, this.lifecycle);
+    this.creation = creation;
+    return creation.finally(() => { if (this.creation === creation) this.creation = undefined; });
+  }
+
+  async cancelPending(): Promise<void> {
+    this.lifecycle++;
+    this.inputGeneration++;
+    await this.creation?.catch(() => {});
+  }
+
+  private async launch(bin: string, args: string[], opts: SpawnOptions, generation: number): Promise<void> {
+    const check = () => { if (generation !== this.lifecycle) throw new TmuxError('tmux launch cancelled'); };
     if (this.started) throw new TmuxError('tmux spawn() called twice');
-    // Node reports a missing spawn cwd as "spawnSync tmux ENOENT" too.
+    // Validate cwd before starting the management client.
     let validCwd = false;
     try { validCwd = statSync(opts.cwd).isDirectory(); } catch { /* Missing or inaccessible directory. */ }
     if (!validCwd) {
@@ -271,48 +266,47 @@ export class TmuxBackend implements SessionBackend {
     //    send-keys (step 4) so session-specific env never touches the tmux
     //    server's global environment.
     try {
-      execFileSync('tmux', [
+      (await runTmux([
         'new-session', '-d',
         '-s', this.sessionName,
         '-x', String(opts.cols),
         '-y', String(opts.rows),
         '-c', opts.cwd,
-      ], {
-        stdio: ['ignore', 'ignore', 'pipe'],
-        timeout: 5000,
-        env: tmuxClientEnv(),
-        cwd: opts.cwd,
-      });
+      ], { cwd: opts.cwd }));
     } catch (err) {
       throw classifyFailure(err, 'tmux new-session');
     }
 
     try {
-      this.socketPath = runTmux(['display-message', '-p', '-t', `=${this.sessionName}`, '#{socket_path}']).trim();
-      this.writeOwnershipMarker();
+      this.socketPath = (await runTmux(['display-message', '-p', '-t', `=${this.sessionName}`, '#{socket_path}'])).trim();
+      await this.writeOwnershipMarker();
+      check();
       // 2. Stage the child environment on this session only. injectEnv is
       // applied last so it wins on collisions, matching PtyBackend.
       const childEnvironment = { ...opts.env, ...opts.injectEnv };
-      this.scrubStaleGlobalEnvironment(childEnvironment);
-      this.stageSessionEnvironment(childEnvironment);
+      await this.scrubStaleGlobalEnvironment(childEnvironment);
+      check();
+      await this.stageSessionEnvironment(childEnvironment);
+      check();
 
-      // 3. Pipe every byte the pane writes into a per-session tmp file;
-      //    `tail -F` streams it back to onData. The file is removed on kill.
-      this.startCapture();
+      // 3. Stream output through a bounded private socket capture.
+      await this.startCapture();
+      check();
 
       // 4. Replace the bootstrap shell instead of typing a potentially huge
       // launch line into it. tmux forks the pane with a snapshot of the
       // session environment before respawn-pane returns; clear the staged
       // values immediately afterwards so secrets do not linger in tmux.
       const launchLine = ['exec', bin, ...args].map(shellescape).join(' ');
-      runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, launchLine]);
-      this.clearSessionEnvironment(Object.keys(childEnvironment));
+      (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, launchLine]));
+      await this.clearSessionEnvironment(Object.keys(childEnvironment));
+      check();
 
       this.startExitWatcher();
     } catch (err) {
       this.exited = true; // spawn failed — the instance is inert
       this.cleanup();
-      try { runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 }); } catch { /* best effort */ }
+      try { (await runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 })); } catch { /* best effort */ }
       throw err;
     }
   }
@@ -322,11 +316,12 @@ export class TmuxBackend implements SessionBackend {
    * false (the driver treats that as "not sent"). An authoritative
    * session-missing answer is converted to onExit (guarded send) — the CLI exited and the pane is gone.
    */
-  write(data: string): boolean {
+  async write(data: string): Promise<boolean> {
     if (this.exited || !this.started) return false;
+    const generation = this.inputGeneration;
     try {
-      this.sendLiteral(data);
-      return true;
+      await this.sendLiteral(data, generation);
+      return this.inputValid(generation);
     } catch (err) {
       if (err instanceof TmuxSessionMissingError) this.handlePaneExit();
       return false;
@@ -336,35 +331,37 @@ export class TmuxBackend implements SessionBackend {
   /** Send tmux key names (for example Down or Enter), never literal escape
    * bytes. Applications in cursor-key mode distinguish these from text sent
    * through write(), which is intentionally limited to literal paste input. */
-  sendSpecialKeys(...keys: string[]): boolean {
+  async sendSpecialKeys(...keys: string[]): Promise<boolean> {
     if (this.exited || !this.started || keys.length === 0) return false;
+    const generation = this.inputGeneration;
     try {
-      runTmux(['send-keys', '-t', this.sessionName, ...keys]);
-      return true;
+      (await runTmux(['send-keys', '-t', this.sessionName, ...keys]));
+      return this.inputValid(generation);
     } catch (err) {
       if (err instanceof TmuxSessionMissingError) this.handlePaneExit();
       return false;
     }
   }
 
-  interrupt(): void {
+  async interrupt(): Promise<void> {
+    this.inputGeneration++;
     if (this.exited) return;
-    try { runTmux(['send-keys', '-t', this.sessionName, 'C-c']); } catch { /* best effort */ }
+    try { (await runTmux(['send-keys', '-t', this.sessionName, 'C-c'])); } catch { /* best effort */ }
   }
 
-  resize(cols: number, rows: number): void {
+  async resize(cols: number, rows: number): Promise<void> {
     if (this.exited) return;
     this.cols = cols;
     this.rows = rows;
     try {
-      runTmux(['resize-window', '-t', this.sessionName, '-x', String(cols), '-y', String(rows)]);
+      (await runTmux(['resize-window', '-t', this.sessionName, '-x', String(cols), '-y', String(rows)]));
     } catch { /* best effort */ }
   }
 
   /** Safe to call before spawn() — callbacks are buffered and survive the
    *  spawn-time wiring (unlike the pty backend). */
   onData(cb: (data: string) => void): void {
-    this.dataCbs.push(cb);
+    this.output.onData(cb);
   }
 
   onExit(cb: (code: number | null, signal: string | null) => void): void {
@@ -373,10 +370,14 @@ export class TmuxBackend implements SessionBackend {
 
   /** Frozen while attached; later TMUX_TMPDIR changes cannot redirect a verified stop. */
   getSocketPath(): string | undefined { return this.socketPath; }
-  getCapturePid(): number | undefined { return this.tail?.pid; }
+  getCapturePid(): number | undefined { return undefined; }
+  captureDisposed(): boolean { return !this.capture; }
+  onOutputGap(cb: (dropped: number) => void): void { this.output.onGap(cb); }
 
   /** Local teardown only. The identity-bound verifier owns the tmux command. */
   disposeCapture(): void {
+    this.lifecycle++;
+    this.inputGeneration++;
     this.exited = true;
     this.stopExitWatcher();
     this.cleanup();
@@ -384,7 +385,8 @@ export class TmuxBackend implements SessionBackend {
 
   /** Best-effort teardown. Never throws — a session that already died (CLI
    *  exited → last pane closed → session destroyed) is not an error. */
-  kill(): void {
+  async kill(): Promise<void> {
+    await this.cancelPending();
     if (this.exited) return;
     this.exited = true;
     this.stopExitWatcher();
@@ -392,22 +394,23 @@ export class TmuxBackend implements SessionBackend {
     // An owner-bound backend may be a not-yet-attached restoration handle.
     // If its name now points at an unmarked/foreign pane, cleanup after a
     // failed attach must never destroy that pane (preserving external session history).
-    if (this.ownerId !== undefined && TmuxBackend.sessionOwner(this.sessionName) !== this.ownerId) return;
-    try { runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 }); } catch { /* already gone */ }
+    if (this.ownerId !== undefined && (await TmuxBackend.sessionOwner(this.sessionName)) !== this.ownerId) return;
+    try { await runTmux(['kill-session', '-t', this.sessionName], { timeout: 3000 }); } catch { /* already gone */ }
   }
 
   /**
    * Detach this backend from a LIVE session WITHOUT destroying it: stop the
-   * exit watcher, cancel the pipe-pane capture, kill the tail child. The tmux
+   * exit watcher, cancel the pipe-pane capture and close its private socket. The tmux
    * session and its CLI keep running — another TmuxBackend can attach() later
    * (driver resume() across daemon restarts). Contrast with kill(), which
    * kills the session itself.
    */
-  detach(): void {
+  async detach(): Promise<void> {
+    await this.cancelPending();
     if (this.exited) return;
     this.exited = true;
     this.stopExitWatcher();
-    try { runTmux(['pipe-pane', '-t', this.sessionName]); } catch { /* best effort */ }
+    try { (await runTmux(['pipe-pane', '-t', this.sessionName])); } catch { /* best effort */ }
     this.cleanup();
   }
 
@@ -415,45 +418,66 @@ export class TmuxBackend implements SessionBackend {
    * Attach to an EXISTING live session — the caller must have probed with
    * probeSession() === 'exists'. Unlike spawn(), this neither creates the
    * session nor launches a CLI: the CLI is already running in the pane.
-   * Re-arms output capture (pipe-pane + tail) and the exit watcher only.
+   * Re-arms output capture (pipe-pane + socket) and the exit watcher only.
    */
-  attach(opts: { cols: number; rows: number }): void {
+  async attach(opts: { cols: number; rows: number }): Promise<void> {
+    const generation = this.lifecycle;
+    const check = () => { if (generation !== this.lifecycle) throw new TmuxError('tmux attachment cancelled'); };
     if (this.started) throw new TmuxError('tmux attach() called twice');
-    this.assertOwnership();
-    this.socketPath = runTmux(['display-message', '-p', '-t', `=${this.sessionName}`, '#{socket_path}']).trim();
+    await this.assertOwnership();
+    check();
+    this.socketPath = (await runTmux(['display-message', '-p', '-t', `=${this.sessionName}`, '#{socket_path}'])).trim();
+    check();
     this.started = true;
     this.cols = opts.cols;
     this.rows = opts.rows;
     try {
       // A daemon crash leaves tmux's `pipe-pane` writer alive even though the
-      // local tail process is gone. Replace that stale capture before arming
+      // local socket reader is gone. Replace that stale capture before arming
       // ours; the higher-level lease/fencing layer is responsible for
       // preventing two live daemons from attaching concurrently.
-      runTmux(['pipe-pane', '-t', this.sessionName]);
-      this.startCapture(true);
+      const oldCapture = await runTmux(['show-options', '-v', '-t', this.sessionName, '@dutydeck_capture_directory']).catch(() => '');
+      check();
+      await runTmux(['pipe-pane', '-t', this.sessionName]);
+      check();
+      if (oldCapture.trim()) cleanAbandonedTmuxCapture(oldCapture.trim(), this.ownerId ?? this.sessionName);
+      await this.startCapture(true);
+      check();
       this.startExitWatcher();
     } catch (err) {
-      this.detach();
+      (await this.detach());
       throw err;
     }
   }
 
-  captureCurrentScreen(): string | null {
+  async resyncOutput(onBoundary?: () => void): Promise<string | null> {
+    if (this.exited) return null;
+    const generation = this.lifecycle;
+    const check = () => { if (this.exited || generation !== this.lifecycle) throw new TmuxError('tmux capture cancelled'); };
+    await this.assertOwnership(); check();
+    await runTmux(['pipe-pane', '-t', this.sessionName]); check();
+    this.cleanup();
+    onBoundary?.();
+    await this.startCapture(true); check();
+    return this.initialScreen?.data ?? null;
+  }
+
+  async captureCurrentScreen(): Promise<string | null> {
     if (this.exited) return null;
     try {
-      return runTmux(['capture-pane', '-p', '-t', this.sessionName]);
+      return (await runTmux(['capture-pane', '-p', '-t', this.sessionName]));
     } catch {
       return null;
     }
   }
 
-  getPaneSize(): { cols: number; rows: number } | null {
+  async getPaneSize(): Promise<{ cols: number; rows: number } | null> {
     if (this.exited) return null;
     try {
-      const out = runTmux(
+      const out = (await runTmux(
         ['display-message', '-p', '-t', this.sessionName, '#{pane_width} #{pane_height}'],
         { timeout: 2000 },
-      ).trim();
+      )).trim();
       const parts = out.split(/\s+/).map(s => parseInt(s, 10));
       const cols = parts[0];
       const rows = parts[1];
@@ -466,13 +490,13 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
-  getPid(): number | null {
+  async getPid(): Promise<number | null> {
     if (this.exited) return null;
     try {
-      const out = runTmux(
+      const out = (await runTmux(
         ['display-message', '-p', '-t', this.sessionName, '#{pane_pid}'],
         { timeout: 2000 },
-      ).trim();
+      )).trim();
       const pid = parseInt(out, 10);
       return pid > 0 ? pid : null;
     } catch {
@@ -481,12 +505,12 @@ export class TmuxBackend implements SessionBackend {
   }
 
   /** Read a small non-secret driver lifecycle marker persisted by tmux. */
-  getDutydeckMetadata(key: TmuxDutydeckMetadataKey): string | undefined {
+  async getDutydeckMetadata(key: TmuxDutydeckMetadataKey): Promise<string | undefined> {
     if (this.exited) return undefined;
     try {
-      const value = runTmux([
+      const value = (await runTmux([
         'show-options', '-v', '-t', this.sessionName, METADATA_OPTIONS[key],
-      ], { timeout: 2000 }).trim();
+      ], { timeout: 2000 })).trim();
       return value || undefined;
     } catch {
       return undefined;
@@ -494,9 +518,9 @@ export class TmuxBackend implements SessionBackend {
   }
 
   /** Persist a small non-secret driver lifecycle marker on the tmux session. */
-  setDutydeckMetadata(key: TmuxDutydeckMetadataKey, value: string): void {
+  async setDutydeckMetadata(key: TmuxDutydeckMetadataKey, value: string): Promise<void> {
     if (this.exited) throw new TmuxError('cannot write metadata on an exited tmux backend');
-    runTmux(['set-option', '-t', this.sessionName, METADATA_OPTIONS[key], value], { timeout: 2000 });
+    (await runTmux(['set-option', '-t', this.sessionName, METADATA_OPTIONS[key], value], { timeout: 2000 }));
   }
 
   // ─── Static helpers ─────────────────────────────────────────────────────
@@ -513,64 +537,39 @@ export class TmuxBackend implements SessionBackend {
    * carries a numeric exit status) — also means we never got an answer →
    * 'unknown'.
    */
-  static probeSession(name: string): SessionProbe {
+  static probeSession(name: string): Promise<SessionProbe> { return this.probeSessionAsync(name); }
+
+  /** Async probe for the high-frequency watcher; unknown never proves exit. */
+  static async probeSessionAsync(name: string): Promise<SessionProbe> {
     try {
-      execFileSync('tmux', ['has-session', '-t', name], {
-        stdio: ['ignore', 'ignore', 'pipe'],
-        env: tmuxClientEnv(),
-        timeout: 3000,
-      });
+      await runCommand('tmux', ['has-session', '-t', name], { env: tmuxClientEnv(), timeout: 3000 });
       return 'exists';
-    } catch (e) {
-      if (isTimeoutError(e)) return 'unknown';
-      const err = e as { status?: number; signal?: string; stderr?: Buffer };
-      if (err && typeof err.status === 'number' && !err.signal) {
-        const stderrText = (err.stderr?.toString?.() ?? '').trim();
-        if (isSocketMissingErrorText(stderrText)) return 'missing';
-        if (isServerLevelErrorText(stderrText)) return 'unknown';
-        return 'missing';
-      }
-      return 'unknown';
+    } catch (error) {
+      const failure = error as { signal?: string; status?: number; stderr?: string };
+      if (failure.signal || typeof failure.status !== 'number') return 'unknown';
+      const stderr = failure.stderr ?? '';
+      if (isSocketMissingErrorText(stderr)) return 'missing';
+      return isServerLevelErrorText(stderr) ? 'unknown' : 'missing';
     }
   }
 
-  /** Async probe for the high-frequency watcher; unknown never proves exit. */
-  static probeSessionAsync(name: string): Promise<SessionProbe> {
-    return new Promise(resolve => {
-      execFile('tmux', ['has-session', '-t', name], { env: tmuxClientEnv(), timeout: 3000 }, (error, _stdout, stderr) => {
-        if (!error) return resolve('exists');
-        if (error.killed || error.signal || typeof error.code !== 'number') return resolve('unknown');
-        if (isSocketMissingErrorText(stderr)) return resolve('missing');
-        resolve(isServerLevelErrorText(stderr) ? 'unknown' : 'missing');
-      });
-    });
-  }
-
-  private getPidAsync(): Promise<number | null> {
-    return new Promise(resolve => {
-      execFile('tmux', ['display-message', '-p', '-t', this.sessionName, '#{pane_pid}'],
-        { env: tmuxClientEnv(), timeout: 2000 }, (error, stdout) => {
-          const pid = Number(stdout.trim());
-          resolve(!error && Number.isSafeInteger(pid) && pid > 0 ? pid : null);
-        });
-    });
+  private async getPidAsync(): Promise<number | null> {
+    try {
+      const stdout = await runCommand('tmux', ['display-message', '-p', '-t', this.sessionName, '#{pane_pid}'], { env: tmuxClientEnv(), timeout: 2000 });
+      const pid = Number(stdout.trim());
+      return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+    } catch { return null; }
   }
 
   /** Kill a named tmux session (no-op if it doesn't exist). */
-  static killSession(name: string): void {
-    try {
-      execFileSync('tmux', ['kill-session', '-t', name], {
-        stdio: 'ignore',
-        timeout: 3000,
-        env: tmuxClientEnv(),
-      });
-    } catch { /* session doesn't exist */ }
+  static async killSession(name: string): Promise<void> {
+    try { await runTmux(['kill-session', '-t', name], { timeout: 3000 }); } catch { /* already gone */ }
   }
 
   /** Diagnostic/readiness helper.  Missing markers return undefined. */
-  static sessionOwner(name: string): string | undefined {
+  static async sessionOwner(name: string): Promise<string | undefined> {
     try {
-      const owner = runTmux(['show-options', '-v', '-t', name, OWNER_OPTION], { timeout: 2000 }).trim();
+      const owner = (await runTmux(['show-options', '-v', '-t', name, OWNER_OPTION], { timeout: 2000 })).trim();
       return owner || undefined;
     } catch {
       return undefined;
@@ -579,35 +578,25 @@ export class TmuxBackend implements SessionBackend {
 
   // ─── Internals ──────────────────────────────────────────────────────────
 
-  /** Arm output capture: per-session tmp file + `tail -F` child + pipe-pane
-   *  subscription. Shared by spawn() (new session) and attach() (existing
-   *  session); the file is removed by cleanup() on kill/detach. */
-  private startCapture(restoreScreen = false): void {
-    this.pipePath = join(tmpdir(), `dutydeck-tmux-${randomBytes(8).toString('hex')}.log`);
-    closeSync(openSync(this.pipePath, 'w')); // ensure it exists before tail -F
-    this.tail = spawn('tail', ['-n', '+1', '-F', this.pipePath], {
-      stdio: ['ignore', 'pipe', 'ignore'],
-    });
-    this.tail.stdout.on('data', (chunk: Buffer) => {
-      const data = this.decoder.write(chunk);
-      if (!data) return;
-      for (const cb of this.dataCbs) {
-        try { cb(data); } catch { /* listener crash is benign */ }
+  /** Arm bounded socket capture; restoreScreen atomically captures screen/history
+   *  before starting new increments. kill/detach remove local socket metadata. */
+  private async startCapture(restoreScreen = false): Promise<void> {
+    const generation = this.lifecycle;
+    const capture = new TmuxCapture(this.ownerId ?? this.sessionName, data => {
+      this.output.data(data);
+    }, dropped => this.output.gap(dropped));
+    this.capture = capture;
+    const check = () => {
+      if (this.exited || this.capture !== capture || this.lifecycle !== generation) {
+        capture.close();
+        if (this.capture === capture) this.capture = undefined;
+        throw new TmuxError('tmux capture cancelled');
       }
-    });
-    this.tail.stdout.on('end', () => {
-      const rest = this.decoder.end();
-      if (rest) {
-        for (const cb of this.dataCbs) {
-          try { cb(rest); } catch { /* listener crash is benign */ }
-        }
-      }
-    });
-    this.tail.on('error', () => { /* tail missing/killed — output goes quiet */ });
-
-    // -o opens only when no pipe is set yet; detach() cancels it.
-    const pipe = ['pipe-pane', '-o', '-t', this.sessionName, `cat >> ${shellescape(this.pipePath)}`];
-    if (!restoreScreen) { runTmux(pipe); return; }
+    };
+    await capture.listen(); check();
+    await runTmux(['set-option', '-t', this.sessionName, '@dutydeck_capture_directory', capture.directory]); check();
+    const pipe = ['pipe-pane', '-o', '-t', this.sessionName, capture.command()];
+    if (!restoreScreen) { await runTmux(pipe); check(); return; }
 
     // One tmux command queue captures the existing screen/history and then
     // starts the incremental pipe, without a gap between two client calls.
@@ -615,10 +604,11 @@ export class TmuxBackend implements SessionBackend {
       'cursor_flag', 'keypad_cursor_flag', 'mouse_standard_flag', 'mouse_button_flag',
       'mouse_all_flag', 'mouse_sgr_flag', 'mouse_utf8_flag', 'insert_flag', 'wrap_flag',
       'origin_flag', 'scroll_region_upper', 'scroll_region_lower'];
-    const captured = runTmux([
+    const captured = (await runTmux([
       'display-message', '-p', '-t', this.sessionName, fields.map(key => `#{${key}}`).join('|'), ';',
       'capture-pane', '-p', '-e', '-t', this.sessionName, '-S', '-5000', ';', ...pipe,
-    ]);
+    ]));
+    check();
     const boundary = captured.indexOf('\n');
     const values = captured.slice(0, boundary).trim().split('|').map(Number);
     const [cols, rows, x, y, alternate, cursor, cursorKeys, mouse, mouseButton, mouseAll, sgr, utf8, insert, wrap, origin, top, bottom] = values;
@@ -637,13 +627,14 @@ export class TmuxBackend implements SessionBackend {
     this.initialScreen = { data, cols, rows };
   }
 
-  private writeOwnershipMarker(): void {
+  private async writeOwnershipMarker(): Promise<void> {
     if (this.ownerId === undefined) return;
-    runTmux(['set-option', '-t', this.sessionName, OWNER_OPTION, this.ownerId], { timeout: 2000 });
+    (await runTmux(['set-option', '-t', this.sessionName, OWNER_OPTION, this.ownerId], { timeout: 2000 }));
   }
 
-  private scrubStaleGlobalEnvironment(childEnvironment: Record<string, string>): void {
-    const raw = runTmux(['show-environment', '-g'], { timeout: 2000 });
+  private async scrubStaleGlobalEnvironment(childEnvironment: Record<string, string>): Promise<void> {
+    const raw = (await runTmux(['show-environment', '-g'], { timeout: 2000 }));
+    const commands: string[] = [];
     for (const line of raw.split('\n')) {
       const trimmed = line.trim();
       if (!trimmed || trimmed.startsWith('-')) continue;
@@ -651,26 +642,37 @@ export class TmuxBackend implements SessionBackend {
       if (eq <= 0) continue;
       const key = trimmed.slice(0, eq);
       if (!(key in childEnvironment) || childEnvironment[key] === undefined) {
-        runTmux(['set-environment', '-t', this.sessionName, '-r', '--', key], { timeout: 2000 });
+        commands.push('set-environment', '-t', this.sessionName, '-r', '--', key, ';');
       }
     }
+    await this.runEnvironmentCommands(commands);
   }
 
-  private stageSessionEnvironment(environment: Record<string, string>): void {
-    for (const [key, value] of Object.entries(environment)) {
-      runTmux(['set-environment', '-t', this.sessionName, '--', key, value], { timeout: 2000 });
+  private async stageSessionEnvironment(environment: Record<string, string>): Promise<void> {
+    const commands = Object.entries(environment).flatMap(([key, value]) => ['set-environment', '-t', this.sessionName, '--', key, value, ';']);
+    await this.runEnvironmentCommands(commands);
+  }
+
+  private async clearSessionEnvironment(keys: string[]): Promise<void> {
+    const commands = keys.flatMap(key => ['set-environment', '-u', '-t', this.sessionName, '--', key, ';']);
+    await this.runEnvironmentCommands(commands);
+  }
+
+  /** tmux limits a client's command message; keep batches below that limit. */
+  private async runEnvironmentCommands(commands: string[]): Promise<void> {
+    let batch: string[] = [], command: string[] = [], bytes = 0;
+    for (const arg of commands) {
+      if (arg !== ';') { command.push(arg); continue; }
+      const size = command.reduce((sum, value) => sum + Buffer.byteLength(value) + 8, 0);
+      if (bytes + size > 8192 && batch.length) { await runTmux(batch.slice(0, -1)); batch = []; bytes = 0; }
+      batch.push(...command, ';'); bytes += size; command = [];
     }
+    if (batch.length) await runTmux(batch.slice(0, -1));
   }
 
-  private clearSessionEnvironment(keys: string[]): void {
-    for (const key of keys) {
-      runTmux(['set-environment', '-u', '-t', this.sessionName, '--', key], { timeout: 2000 });
-    }
-  }
-
-  private assertOwnership(): void {
+  private async assertOwnership(): Promise<void> {
     if (this.ownerId === undefined) return;
-    const actual = TmuxBackend.sessionOwner(this.sessionName);
+    const actual = (await TmuxBackend.sessionOwner(this.sessionName));
     if (actual !== this.ownerId) {
       throw new TmuxOwnershipError(
         `Refusing to attach tmux session ${this.sessionName}: Dutydeck ownership marker mismatch`,
@@ -681,27 +683,30 @@ export class TmuxBackend implements SessionBackend {
   /** Send text literally: send-keys -l for short single-line payloads,
    *  load-buffer + paste-buffer for long or multiline text (avoids the 4KB
    *  tty canonical-input limit and handles newlines via bracketed paste). */
-  private sendLiteral(text: string): void {
+  private inputValid(generation: number): boolean { return generation === this.inputGeneration && !this.exited && this.started; }
+
+  private async sendLiteral(text: string, generation: number): Promise<void> {
     if (text.length > LITERAL_SEND_LIMIT || text.includes('\n')) {
-      this.pasteLiteral(text);
+      (await this.pasteLiteral(text, generation));
       return;
     }
-    runTmux(['send-keys', '-t', this.sessionName, '-l', '--', text]);
+    (await runTmux(['send-keys', '-t', this.sessionName, '-l', '--', text]));
   }
 
-  private pasteLiteral(text: string): void {
+  private async pasteLiteral(text: string, generation: number): Promise<void> {
     const bufferName = `dutydeck-${randomBytes(8).toString('hex')}`;
     let loaded = false;
     try {
-      runTmux(['load-buffer', '-b', bufferName, '-'], { input: text });
+      (await runTmux(['load-buffer', '-b', bufferName, '-'], { input: text }));
       loaded = true;
+      if (!this.inputValid(generation)) throw new TmuxError('tmux input cancelled before paste');
       // -d deletes the buffer after pasting; -p wraps in bracketed-paste
       // markers when the application requested bracketed paste.
-      runTmux(['paste-buffer', '-b', bufferName, '-t', this.sessionName, '-d', '-p']);
+      (await runTmux(['paste-buffer', '-b', bufferName, '-t', this.sessionName, '-d', '-p']));
       loaded = false;
     } finally {
       if (loaded) {
-        try { runTmux(['delete-buffer', '-b', bufferName], { timeout: 1000 }); } catch { /* best effort */ }
+        try { (await runTmux(['delete-buffer', '-b', bufferName], { timeout: 1000 })); } catch { /* best effort */ }
       }
     }
   }
@@ -767,16 +772,8 @@ export class TmuxBackend implements SessionBackend {
     }
   }
 
-  /** Stop the tail child and remove the pipe tmp file. Does NOT touch the
-   *  tmux session itself. */
+  /** Close the local socket and metadata without touching the tmux session. */
   private cleanup(): void {
-    if (this.tail) {
-      try { this.tail.kill(); } catch { /* already dead */ }
-      this.tail = null;
-    }
-    if (this.pipePath) {
-      try { unlinkSync(this.pipePath); } catch { /* already gone */ }
-      this.pipePath = null;
-    }
+    this.capture?.close(); this.capture = undefined;
   }
 }

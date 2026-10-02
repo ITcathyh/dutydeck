@@ -28,10 +28,10 @@ export function createMojoAdapter(): CliAdapter {
       return [];
     },
 
-    writeInput(backend: PtyLike, prompt: string): void {
+    async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // 直通：不需要 paste-burst 规避，也不需要 bracketed paste，
       // 后端的 write() 才是真正发起 CLI 调用的地方。
-      backend.write(prompt);
+      (await backend.write(prompt));
     },
 
     // 刻意不实现 injectSessionContext：共用路由块推荐 --mention-back，对「发送者

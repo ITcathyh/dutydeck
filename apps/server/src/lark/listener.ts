@@ -53,8 +53,8 @@ export interface LarkRuntime {
   cancelQueued?(id: string, taskId: string, actorId?: string): Promise<unknown>;
   /** 把排队中的一轮提到队首（会中断当前正在执行的那一轮）。/queue top 与 /steer 的唯一原语。 */
   steerQueued?(id: string, taskId: string, actorId?: string): Promise<unknown>;
-  /** 把排队中的一轮送进正在执行的那一轮（ACP 插话）。只有 injected / startedNewTurn 会把它移出队列。 */
-  injectQueued?(id: string, taskId: string, actorId?: string): Promise<{ outcome: string; error?: string }>;
+  /** ACP 插话结果包含持久任务状态；reconcile_required 表示投递未知，不能自动重发。 */
+  injectQueued?(id: string, taskId: string, actorId?: string): Promise<{ task: TaskRecord; outcome: string; error?: string }>;
   /** 平台验证记录，最新在前，含代码指纹与 stale 判定。 */
   getVerifications?(id: string): Promise<VerificationResponse[]>;
   runVerification?(id: string, input: VerificationCommandInput, actorId?: string): Promise<VerificationResponse>;

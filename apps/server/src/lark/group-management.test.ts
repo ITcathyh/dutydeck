@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import Database from 'better-sqlite3';
 import { agentConfigSchema, type RepositoryBundle, type Session } from '@dutydeck/shared';
 import { createRepositories } from '@dutydeck/storage';
+import { RelayAskBroker, RelayCapabilityRegistry } from '@dutydeck/relay';
 import { buildApp } from '../app.js';
 import { LarkGroupManager } from './group-management.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService } from './agent-tools.js';
@@ -263,6 +264,36 @@ describe('live group configuration', () => {
       await tools.send(token, { content: 'Bob is now executing' });
       expect(sendText).toHaveBeenCalledTimes(1);
     } finally { capabilities.close(); }
+  });
+
+  it('rechecks disabled live group policy when an owner answers a relay question', async () => {
+    const initial = await save('cli_one', 'oc_one', { accessOverride: { mode: 'all_chat_members', principalIds: [] } });
+    const session: Session = { id: 'relay-group', agentId: 'agent_one', cwd: dir, source: 'lark', sourceId: 'cli_one:oc_one:group:thread:om_root', state: 'thinking', runId: 'run', createdAt: time.toISOString(), updatedAt: time.toISOString() };
+    await repos.sessions.save(session);
+    const publish = vi.fn(async () => {});
+    const runtime = { getSession: (id: string) => repos.sessions.get(id), subscribe: () => () => {}, publishSessionEvent: publish };
+    const broker = new RelayAskBroker({ publish });
+    const capabilities = new RelayCapabilityRegistry(repos.sessions, 'http://127.0.0.1', 'synthetic-secret');
+    const app = await buildApp(runtime as any, {
+      auth: { mode: 'token', localOnly: false, getToken: async () => 'owner' },
+      relay: { runtime: runtime as any, broker, capabilities },
+      executionPolicy: { authorize: async (_request, id, _boundary, action) => (await manager.authorizeSession(id, action, true))! },
+    });
+    const pending = broker.register({ sessionId: session.id, question: 'Proceed?' });
+    await vi.waitFor(() => expect(broker.listPending()).toHaveLength(1));
+    const id = broker.listPending()[0]!.id, headers = { authorization: 'Bearer owner' };
+    const answer = () => app.inject({ method: 'POST', url: `/api/relay/sessions/${session.id}/asks/${id}/answer`, headers, payload: { answer: 'continue' } });
+    try {
+      expect((await app.inject({ method: 'GET', url: `/api/relay/sessions/${session.id}/asks`, headers })).statusCode).toBe(200);
+      const disabled = await manager.save('cli_one', 'oc_one', { expectedRevision: initial.binding!.revision, patch: { accessOverride: { mode: 'disabled', principalIds: [] } } });
+      expect((await answer()).statusCode).toBe(403);
+      expect(broker.listPending()).toHaveLength(1);
+      expect(publish.mock.calls).toHaveLength(1); // Only the question was published.
+      await manager.save('cli_one', 'oc_one', { expectedRevision: disabled.binding!.revision, patch: { accessOverride: { mode: 'all_chat_members', principalIds: [] } } });
+      expect((await answer()).statusCode).toBe(200);
+      await expect(pending).resolves.toMatchObject({ status: 'answered', answer: 'continue' });
+      expect(publish.mock.calls).toHaveLength(2);
+    } finally { await app.close(); await pending; }
   });
 
   it('enforces new group restrictions on an existing legacy session and refreshes its policy', async () => {

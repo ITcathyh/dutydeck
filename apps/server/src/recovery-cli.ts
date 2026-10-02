@@ -2,10 +2,10 @@ import { readFile } from 'node:fs/promises';
 import Database from 'better-sqlite3';
 import { networkInterfaces } from 'node:os';
 import { isIP } from 'node:net';
-import { executionRecoveryDecisionSchema, ptyRetirementRecoverySchema, nativeReplacementRecoverySchema } from '@dutydeck/shared';
+import { executionRecoveryDecisionSchema, steeringRecoveryDecisionSchema, ptyRetirementRecoverySchema, nativeReplacementRecoverySchema } from '@dutydeck/shared';
 import { readDaemonStatus, inspectDaemonState, resolveDaemonDir, type DaemonState } from './daemon/daemon.js';
 
-export type RecoveryOperation = 'inspect' | 'probe' | 'confirm' | 'retire-pty' | 'replace-native';
+export type RecoveryOperation = 'inspect' | 'probe' | 'confirm' | 'steering' | 'retire-pty' | 'replace-native';
 export interface RecoveryCliOptions { file?: string; runId?: string; url?: string; database?: string }
 export class RecoveryCliError extends Error {
   constructor(public readonly code: string, message: string) { super(message); this.name = 'RecoveryCliError'; }
@@ -36,9 +36,9 @@ export async function runRecoveryCli(operation: RecoveryOperation, sessionId: st
   if (operation === 'probe') {
     if (!options.runId) throw new RecoveryCliError('RECOVERY_RUN_REQUIRED', 'Inspect first, then supply the exact --run-id');
     body = { runId: options.runId };
-  } else if (operation === 'confirm' || operation === 'retire-pty' || operation === 'replace-native') {
+  } else if (operation === 'confirm' || operation === 'steering' || operation === 'retire-pty' || operation === 'replace-native') {
     if (!options.file) throw new RecoveryCliError('RECOVERY_DECISION_REQUIRED', '--file must contain the reviewed recovery decision');
-    const schema = operation === 'retire-pty' ? ptyRetirementRecoverySchema : operation === 'replace-native' ? nativeReplacementRecoverySchema : executionRecoveryDecisionSchema;
+    const schema = operation === 'steering' ? steeringRecoveryDecisionSchema : operation === 'retire-pty' ? ptyRetirementRecoverySchema : operation === 'replace-native' ? nativeReplacementRecoverySchema : executionRecoveryDecisionSchema;
     body = schema.parse(JSON.parse(await readFile(options.file, 'utf8')));
   }
   const endpoint = `/api/sessions/${encodeURIComponent(sessionId)}/recovery${operation === 'inspect' ? '' : `/${operation}`}`;

@@ -76,14 +76,14 @@ export function createCodexAdapter(): CliAdapter {
       // Codex 把字面 \n 当 Enter，必须 bracketed paste 包住多行内容，
       // 否则一条多行消息会被拆成多个 turn。
       if (backend.pasteText) {
-        backend.pasteText(prompt);
+        (await backend.pasteText(prompt));
       } else {
-        backend.write('\x1b[200~' + prompt + '\x1b[201~');
+        (await backend.write('\x1b[200~' + prompt + '\x1b[201~'));
       }
       await delay(200);
       await waitForInputEcho(backend, typedAt);
-      if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
-      else backend.write('\r');
+      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
+      else (await backend.write('\r'));
     },
 
     /**

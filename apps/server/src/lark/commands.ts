@@ -267,7 +267,7 @@ export const larkCommandRegistry: readonly LarkCommandDefinition[] = [
   {
     name: 'steer',
     // 诚实边界：只有支持插话的 ACP Agent 才能把内容送进正在执行的这一轮（injectQueued）；
-    // 其余情况只能把排队中的一轮提到队首（steerQueued）。命令只承诺后者，回执按实际结果写。
+    // 明确未投递时可把排队中的一轮提到队首（steerQueued）；投递未知时保留恢复状态，回执按实际结果写。
     summary: '把一条内容插进正在执行的这一轮；Agent 不支持插话时排到队首并中断这一轮',
     usage: '/steer <内容>',
     mutating: true,

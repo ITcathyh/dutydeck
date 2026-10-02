@@ -51,6 +51,23 @@ describe('owner recovery CLI', () => {
     await expect(runRecoveryCli(operation, 'session', options, deps)).rejects.toThrow();
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
+  it('validates and submits the steering decision and exposes its Commander command', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'recovery-steering-')); dirs.push(dir);
+    const file = join(dir, 'decision.json');
+    const decision = { runId: 'run', taskId: 'task', operationId: 'operation', expectedRevision: 2, decisionId: 'decision', evidenceRefs: ['reviewed'], resourceChecks: [], action: 'not_delivered', allowDuplicateEffects: true };
+    writeFileSync(file, JSON.stringify(decision));
+    const fetcher = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    const options = { url: 'http://127.0.0.1:4311', database: '/db', file }, deps = { fetcher, readToken: () => 'owner' };
+    await runRecoveryCli('steering', 'session', options, deps);
+    expect(fetcher.mock.calls[0]![0].pathname).toBe('/api/sessions/session/recovery/steering');
+    expect(JSON.parse(fetcher.mock.calls[0]![1].body)).toEqual(decision);
+    writeFileSync(file, JSON.stringify({ ...decision, actor: 'forged' }));
+    await expect(runRecoveryCli('steering', 'session', options, deps)).rejects.toThrow();
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const recovery = vi.fn();
+    await createCliProgram('test', { recovery }).parseAsync(['node', 'dutydeck', '--database', '/db', 'recovery', 'steering', 'session', '--url', options.url, '--file', file]);
+    expect(recovery).toHaveBeenCalledWith('steering', 'session', expect.objectContaining(options));
+  });
   it('wires explicit probe scope and global database through Commander', async () => {
     const recovery = vi.fn();
     await createCliProgram('test', { recovery }).parseAsync(['node', 'dutydeck', '--database', '/child/db', 'recovery', 'probe', 'session', '--url', 'http://127.0.0.1:4311', '--run-id', 'run']);

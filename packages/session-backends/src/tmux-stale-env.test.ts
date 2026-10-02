@@ -1,36 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
-import { execFileSync, spawn } from 'node:child_process';
+import { runCommand } from './command.js';
 import { TmuxBackend } from './tmux-backend.js';
 
-vi.mock('node:child_process', async importOriginal => {
-  const original = await importOriginal<typeof import('node:child_process')>();
-  return {
-    ...original,
-    execFileSync: vi.fn(),
-    spawn: vi.fn((cmd: string, args: string[], opts: unknown) => {
-      if (cmd === 'tail') {
-        const fakeChild = new EventEmitter() as any;
-        fakeChild.stdout = new EventEmitter();
-        fakeChild.kill = vi.fn();
-        fakeChild.pid = 99999;
-        return fakeChild;
-      }
-      return original.spawn(cmd, args as any, opts as any);
-    }),
-  };
-});
-
+vi.mock('./command.js', () => ({ runCommand: vi.fn() }));
 describe('TmuxBackend stale global environment scrubbing (unit)', () => {
   let backend: TmuxBackend | null = null;
   const recordedCommands: string[][] = [];
 
   beforeEach(() => {
     recordedCommands.length = 0;
-    vi.mocked(execFileSync).mockImplementation(((file: string, args?: readonly string[], _options?: unknown) => {
+    vi.mocked(runCommand).mockImplementation(async (file: string, args: string[]) => {
       if (file === 'tmux' && args) {
-        recordedCommands.push([...args]);
+        let command: string[] = [];
+        for (const arg of args) {
+          if (arg === ';') { recordedCommands.push(command); command = []; } else command.push(arg);
+        }
+        recordedCommands.push(command);
         const cmd = args[0];
         if (cmd === 'display-message') {
           return '/tmp/tmux-mock-test/default\n';
@@ -50,7 +36,7 @@ describe('TmuxBackend stale global environment scrubbing (unit)', () => {
         return '';
       }
       return '';
-    }) as typeof execFileSync);
+    });
   });
 
   afterEach(() => {
@@ -59,11 +45,11 @@ describe('TmuxBackend stale global environment scrubbing (unit)', () => {
     vi.clearAllMocks();
   });
 
-  it('issues set-environment -r for variables present only in global env, and never for variables in child env', () => {
+  it('issues set-environment -r for variables present only in global env, and never for variables in child env', async () => {
     const sessionName = 'test-session-scrub';
     backend = new TmuxBackend(sessionName);
 
-    backend.spawn('/bin/sh', ['-c', 'echo test'], {
+    await backend.spawn('/bin/sh', ['-c', 'echo test'], {
       cwd: tmpdir(),
       cols: 80,
       rows: 24,
@@ -124,11 +110,11 @@ describe('TmuxBackend stale global environment scrubbing (unit)', () => {
     expect(unsetKeys).toEqual(expect.arrayContaining(['PATH', 'HOME', 'SHARED_GLOBAL_VAR', 'LOCAL_FRESH_VAR']));
   });
 
-  it('recognizes injectEnv as part of childEnvironment and does not emit -r for it', () => {
+  it('recognizes injectEnv as part of childEnvironment and does not emit -r for it', async () => {
     const sessionName = 'test-session-inject-env';
     backend = new TmuxBackend(sessionName);
 
-    backend.spawn('/bin/sh', ['-c', 'echo test'], {
+    await backend.spawn('/bin/sh', ['-c', 'echo test'], {
       cwd: tmpdir(),
       cols: 80,
       rows: 24,

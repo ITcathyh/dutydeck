@@ -16,6 +16,7 @@ const BUSINESS_TABLES = [
   'projects',
   'sessions',
   'tasks',
+  'task_steering_operations',
   'events',
   'tool_calls',
   'permission_requests',
@@ -51,7 +52,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -119,6 +120,19 @@ describe('storage migrations', () => {
     expect(db.prepare('SELECT terminal_backend FROM sessions WHERE id = ?').get('new-default')).toEqual({ terminal_backend: 'herdr' })
     db.close()
   })
+
+  it('v32 adds a steering ledger to v31 without changing existing queued tasks', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+    withMigrationTransaction(db, () => { for (const migration of migrations.filter(m => m.version <= 31)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version,'2026-10-01'); } });
+    db.prepare("INSERT INTO sessions(id,agent_id,state,cwd,run_id,created_at,updated_at) VALUES ('s','a','idle','/tmp','r','2026-10-01','2026-10-01')").run();
+    db.prepare("INSERT INTO tasks(id,session_id,prompt,status,created_at,updated_at) VALUES ('t','s','original','queued','2026-10-01','2026-10-01')").run();
+    const before = db.prepare('SELECT * FROM tasks').all(); runMigrations(db);
+    expect(db.prepare('SELECT * FROM tasks').all()).toEqual(before);
+    expect(db.prepare('SELECT * FROM task_steering_operations').all()).toEqual([]);
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS); runMigrations(db);
+    expect(db.pragma('foreign_key_check')).toEqual([]); db.close();
+  });
 
   it('is idempotent when run twice', () => {
     const db = new Database(':memory:')

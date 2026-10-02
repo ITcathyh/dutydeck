@@ -56,18 +56,22 @@ const WorkspaceGroupsModal = lazy(() => import('./components/WorkspaceGroupsModa
 type DetailTab = 'timeline' | 'terminal';
 type MainQueryFailure = { label: string; message: string; hasData: boolean; retrying: boolean; retry(): Promise<void> };
 
-// 插话只如实报告结果：没送进去的指令仍在排队，由当前任务完成后执行。
+// 只有明确未投递的指令继续排队；结果未知时等待管理员核对。
 const steeringSkipped: Record<string, string> = {
   promptRequired: '正在执行的那一轮此刻接不了插话（还没交给 Agent，或已经结束）。', unsupported: '当前 Agent 不支持插话。',
   incompatible: '这条指令的执行设置与正在执行的这一轮不同。'
 };
-const steeringToast = ({ outcome, error }: SteeringResult, task?: Task) => outcome === 'injected'
-  ? { kind: 'success' as const, key: 'steering', title: '已插话到当前这一轮', description: 'Agent 会在这一轮里接着处理这条指令。' }
-  : outcome === 'moved'
-    ? { kind: 'info' as const, key: 'steering', title: '没有插话', description: task?.status === 'cancelled' ? '这条指令在插话之前已被取消。' : '这条指令在插话之前已经开始执行，按普通的一轮处理。' }
-  : outcome === 'startedNewTurn'
-    ? { kind: 'warning' as const, key: 'steering', title: 'Agent 用这条指令另起了一轮', description: '那一轮不在执行记录里，结果不会显示在这里。' }
-    : { kind: 'info' as const, key: 'steering', title: '没有插话，这条指令在排队', description: `${steeringSkipped[outcome] ?? `插话失败${error ? `：${error}` : '。'}`}当前任务完成后会执行它。` };
+const steeringToast = ({ outcome, error }: SteeringResult, task: Task) => {
+  if (task.status === 'reconcile_required') return { kind: 'warning' as const, key: 'steering', title: '插话投递结果未知', description: '这条指令可能已送达，请联系 Dutydeck 管理员核对后处理。当前不会自动重发。' };
+  if (outcome === 'failed' && task.status !== 'queued') return { kind: 'info' as const, key: 'steering', title: '插话请求未确认', description: '这条指令已不在队列中，请查看最新执行记录核对。' };
+  return outcome === 'injected'
+    ? { kind: 'success' as const, key: 'steering', title: '已插话到当前这一轮', description: 'Agent 会在这一轮里接着处理这条指令。' }
+    : outcome === 'moved'
+      ? { kind: 'info' as const, key: 'steering', title: '没有插话', description: task.status === 'cancelled' ? '这条指令在插话之前已被取消。' : task.status === 'running' ? '这条指令在插话之前已经开始执行，按普通的一轮处理。' : '这条指令已不在队列中，请查看最新执行记录核对。' }
+    : outcome === 'startedNewTurn'
+      ? { kind: 'warning' as const, key: 'steering', title: 'Agent 用这条指令另起了一轮', description: '那一轮不在执行记录里，结果不会显示在这里。' }
+      : { kind: 'info' as const, key: 'steering', title: '没有插话，这条指令在排队', description: `${steeringSkipped[outcome] ?? `插话失败${error ? `：${error}` : '。'}`}当前任务完成后会执行它。` };
+};
 
 const currentLocation = (): AppLocation => typeof window === 'undefined'
   ? { route: { kind: 'overview' } }
@@ -301,7 +305,7 @@ export default function App() {
     toastStore.push({ kind: 'success', key: `cancel-queued-${variables.taskId}`, title: '已取消 1 条待执行指令', description: restorable ? '恢复会把这条指令重新排到队列末尾，不会回到原来的位置。' : undefined, action: restorable ? { label: '恢复这条指令', run: () => api.send(variables.sessionId, restorable, 'queue').then(() => { void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }) } : undefined });
   }, onError: error => { setActionError(error.message); toastStore.push({ kind: 'error', key: 'cancel-queued', title: '取消待执行指令失败', description: error.message }); } });
   const steerQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.steerQueued(sessionId, taskId), onSuccess: (_result, variables) => { setActionError(undefined); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
-  const injectQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.injectQueued(sessionId, taskId), onSuccess: (result, variables) => { setActionError(undefined); toastStore.push(steeringToast(result)); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
+  const injectQueued = useMutation({ mutationFn: ({ sessionId, taskId }: { sessionId: string; taskId: string }) => api.injectQueued(sessionId, taskId), onSuccess: (result, variables) => { setActionError(undefined); toastStore.push(steeringToast(result, result.task)); void qc.invalidateQueries({ queryKey: ['tasks', variables.sessionId] }); }, onError: error => setActionError(error.message) });
   const archive = useMutation({ mutationFn: (sessionId: string) => api.archive(sessionId), onSuccess: result => { qc.setQueryData<Session[]>(['sessions'], current => current?.map(session => session.id === result.id ? result : session)); setArchiveConfirm(false); selectSession(undefined); toastStore.push({ kind: 'success', key: 'archive', title: '任务已归档', description: '历史指令和执行记录仍可在「已归档」筛选中查看。' }); }, onError: error => setActionError(error.message) });
   const bulkArchive = useMutation({
     mutationFn: async (ids: string[]) => {

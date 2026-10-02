@@ -135,8 +135,11 @@ export class RelayAskBroker {
     return outcome;
   }
 
-  async answer(askId: string, answer: string, options: { sessionId?: string } = {}): Promise<RelayAskRecord> {
+  async answer(askId: string, answer: string, options: { sessionId?: string; beforeClaim?: () => Promise<void> } = {}): Promise<RelayAskRecord> {
     await this.ready;
+    // A live question is read and claimed without another await after this
+    // policy check. Readiness may have waited while permission was revoked.
+    if (options.beforeClaim) await options.beforeClaim();
     const ask = this.pending.get(askId);
     const known = ask?.record ?? this.history.get(askId) ?? await this.store?.get(askId);
     if (!known || options.sessionId && options.sessionId !== known.sessionId) throw new RelayError('RELAY_ASK_NOT_FOUND', '未知的提问：' + askId, 404);
