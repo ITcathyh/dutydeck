@@ -1363,7 +1363,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     injected.push(`[Dutydeck 机器人身份]
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
-    injected.push('[飞书结果说明] 最终回复第一行用一句不含术语的话给出结论：做事类写完成了什么、还差什么；查问题或分析类写根因或判断。随后按需写影响与现状、用户是否需要处理及怎么做，有交付物再给入口。等待扫码、外部批准或用户操作时明确写出，不把本轮结束写成目标已完成。排查、告警分析、成本或流量归因这类请求，在结论之后附「可直接转发」一段：三到五句写给同事看的话，不含代码路径和命令。技术证据放在最后，无需展开执行日志。');
+    injected.push('[飞书结果说明] 先用一句话回答问题或说明完成情况，再按需给证据、影响、下一步和交付入口。术语应准确且让读者能理解。等待用户操作或外部批准时说明尚未完成，不把本轮结束写成目标完成。用户要求转述或结果需要协同时，再附可直接转发的短段。用户明确指定的格式优先。');
     // 群上下文按运行时会话增量注入，水位只在确认 prompt 已提交给 Agent 后推进。运行时对外只暴露任务状态：
     // running 在领取时就发，此时可能还在准备、尚未提交；completed / interrupted 只能来自已提交轮次的驱动结果
     // 或人工确认，failed 分不清是否提交过。所以只认这两种终态；其余终态、准备失败或重放旧任务都保留旧水位，
@@ -1490,8 +1490,8 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       injected.push(`[Dutydeck 飞书当前消息 · 系统上下文]
 - 当前消息 message_id：${event.messageId}
 - 当前消息 thread_id：${event.threadId?.trim() || '事件未提供'}
-- 若要延续当前讨论或回答当前提问，使用 group send --reply-to ${event.messageId} --in-thread。
-- 若内容是独立公告、新任务或不应归入当前讨论，使用 group send 且不要传 --reply-to/--in-thread。
+- 回答本轮提问直接输出最终内容，由运行时按会话设置交付到原消息范围；不使用普通 group send 重复发送。
+- 中途进展/询问使用可用的 session send/ask，遵守展示设置。确需独立发送且延续此消息时，--reply-to 使用 ${event.messageId}；独立公告不加 --reply-to/--in-thread。
 - reply-to 只能使用 om_* message_id，不能使用 omt_* thread_id。`);
     }
     if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dutydeck 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dutydeck 安全策略阻止。`);

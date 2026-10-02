@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
-import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
 import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
@@ -445,7 +445,7 @@ export class DutydeckRuntime {
     return (event: NormalizedDriverEvent) => {
       if (this.shuttingDown || !this.mutations.valid(lifecycle) || this.sessionGenerations.get(session.id) !== generation) return;
       const attempt = this.attempts.get(session.id);
-      if (attempt) this.turnProgressAt.set(session.id, Date.now());
+      if (attempt && !(event.type === 'status' && event.data?.state === 'prompt_assembly')) this.turnProgressAt.set(session.id, Date.now());
       this.enqueueDriverEvent(session, event, generation, attempt ?? lifecycle);
     };
   }
@@ -1383,6 +1383,11 @@ export class DutydeckRuntime {
 
   private async consume(session: Session, event: NormalizedDriverEvent, eventId: string) {
     const scope = this.currentRef(session.id);
+    if (event.type === 'status' && event.data?.state === 'prompt_assembly') {
+      // Diagnostic persistence must neither refresh idleness nor fail the turn.
+      await this.emit(session.id, 'status', event.data, undefined, eventId, event.sourceId).catch(() => {});
+      return;
+    }
     this.touch(session.id);
     if (event.type === 'completed') {
       if (scope && isAttemptRef(scope)) {
@@ -1937,6 +1942,16 @@ export class DutydeckRuntime {
     return existing;
   }
   private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id); }
+  private async recordPrompt(sessionId: string, prompt: string, stage: 'accepted_input' | 'session_context', mode: 'send' | 'steer', inputTaskId: string, operationId?: string) {
+    const data: PromptAssemblyData = {
+      state: 'prompt_assembly', version: 1, stage,
+      source: stage === 'accepted_input' ? 'execution_context.agent_prompt' : 'runtime.session_prompt',
+      mode, phase: 'prepared', chars: prompt.length, charUnit: 'utf16_code_units',
+      sha256: createHash('sha256').update(prompt, 'utf8').digest('hex'), inputTaskId,
+      ...(operationId ? { operationId } : {})
+    };
+    await this.emit(sessionId, 'status', data).catch(() => {});
+  }
   private async executeTask(id: string, task: TaskRecord) {
     const token = this.mutations.current()!;
     const ref = this.attemptRefs.get(token)!;
@@ -1949,6 +1964,8 @@ export class DutydeckRuntime {
       const driver = await this.configureTaskDriver(session, input.executionOptions);
       await this.applyRiskPolicy(session, driver, task.executionContext?.riskPolicy);
       const prompt = await this.mutations.wait(() => Promise.resolve(this.options.sessionPrompt?.(session, input.executionContext.agentPrompt) ?? input.executionContext.agentPrompt));
+      await this.recordPrompt(id, input.executionContext.agentPrompt, 'accepted_input', 'send', task.id);
+      await this.recordPrompt(id, prompt, 'session_context', 'send', task.id);
       const compactHours = input.executionContext.idleCompactHours;
       const previousTasks = compactHours === undefined ? [] : await this.mutations.wait(() => this.repos.tasks.listBySession(id));
       const previousActivity = Math.max(...previousTasks.filter(item => item.id !== task.id && ['completed', 'interrupted', 'failed'].includes(item.status)).map(item => Date.parse(item.updatedAt)));
@@ -2288,6 +2305,7 @@ export class DutydeckRuntime {
         operation = this.repos.execution.getTaskExecution(taskId)!.steering!;
         if (reserved.replayed) return skipped(operation.outcome ?? 'failed');
         await this.projectQueue(id);
+        await this.recordPrompt(id, input.executionContext.agentPrompt, 'accepted_input', 'steer', task.id, operationId);
         // No await separates this final ownership check from initiating the remote operation.
         this.mutations.check();
         if (this.queueHeld || running()?.ref.attemptId !== target.ref.attemptId) { await record('promptRequired'); return skipped('promptRequired'); }

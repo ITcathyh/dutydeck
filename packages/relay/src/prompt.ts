@@ -51,9 +51,8 @@ export function relayHintLines(env: RelayPromptEnv = {}): string[] {
   }
   const command = relayCommandFrom(env);
   return [
-    `需要在轮次中途主动告知用户时，用 ${command} session send "内容"——立刻送达，不必等本轮结束。`,
-    `需要用户决策才能继续时，用 ${command} session ask "问题"：命令会阻塞，用户回答后答案从 stdout 返回（退出码 0）；超时退出 124，通道不可用退出 3。不要自己猜测用户的选择。`,
-    `问题有明确选项时，用 ${command} session ask "选哪个方案？" --choices '[{"label":"方案甲","value":"a"},{"label":"方案乙","value":"b"}]'；允许多选时再加 --multiple。label 是展示文案，按钮或表单提交返回 value（省略则返回 label），文字回复按原文返回；没有固定选项时不传 --choices。选项会传给卡片，飞书默认显示选择按钮或多选框；显式关闭 structuredAskCards 时展示文字选项并引用卡片回答。`,
-    `${command} 必须原样使用上面给出的完整路径，不要改用 PATH 中的其他 dutydeck——其它安装的凭证在本会话无效。`
+    `中途进展用 ${command} session send "内容"；成功只表示事件已发布，实际展示取决于会话设置，不证明 IM 已送达。最终答复直接输出，由运行时按设置交付。`,
+    `需要用户决定时用 ${command} session ask "问题"，仅退出 0 表示已回答，答案从 stdout 返回；2 表示参数或凭证缺失等用法错误，3 表示通道不可用或提问取消，124 表示超时。不要猜测用户选择；--choices/--multiple 等完整选项见同一命令加 --help（无需服务或凭证）。`,
+    '必须原样使用完整绑定命令，不要改用 PATH 中其他 dutydeck；超时或通道不可用不能视为用户已回答。'
   ];
 }

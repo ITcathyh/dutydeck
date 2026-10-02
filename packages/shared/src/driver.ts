@@ -29,6 +29,30 @@ export interface NormalizedDriverEvent {
   sourceId?: string;
 }
 
+/** Content-free prompt diagnostics carried by status/state=prompt_assembly.
+ * Each stage hashes its entire named text (SHA-256 over UTF-8). chars is JS
+ * string.length (UTF-16 code units), never tokens. session_context is the full
+ * runtime input after sessionPrompt; pty_routing includes the marker and trailing
+ * separator; pty_input is the full text passed to adapter.writeInput, excluding
+ * terminal paste/control bytes. prepared proves assembly only; written proves
+ * writeInput and its pending backend writes returned, not model acceptance.
+ * Version identifies this measurement contract, not arbitrary prompt templates;
+ * sha256 identifies the exact content revision, including dynamic context.
+ */
+export interface PromptAssemblyData {
+  state: 'prompt_assembly';
+  version: 1;
+  stage: 'accepted_input' | 'session_context' | 'pty_routing' | 'pty_input';
+  source: 'execution_context.agent_prompt' | 'runtime.session_prompt' | 'pty.session_context_and_marker' | 'pty.adapter_input';
+  mode: 'send' | 'steer';
+  phase: 'prepared' | 'written';
+  chars: number;
+  charUnit: 'utf16_code_units';
+  sha256: string;
+  operationId?: string;
+  inputTaskId?: string;
+}
+
 export interface TranscriptCursor { path?: string; offset: number }
 export interface DriverTurnRecovery { kind: 'pty-jsonl-v1'; turnId: string; transcript: TranscriptCursor }
 

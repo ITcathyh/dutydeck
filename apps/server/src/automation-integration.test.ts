@@ -103,6 +103,9 @@ describe('automation service integration', () => {
 
   it('checks the captured actor without changing a running turn identity, and rechecks revocation', async () => {
     const f = await fixture();
+    expect(await f.previewAuthorize('s1', 'ou_alice')).toBe(true);
+    expect(await f.previewAuthorize('s1', 'ou_bob')).toBe(false);
+    expect(f.client.getUserEmails).not.toHaveBeenCalled();
     expect(await f.authorize('s1', 'ou_alice')).toBe(true);
     expect(await f.authorize('s1', 'ou_bob')).toBe(false);
     expect(f.groups.beginTurn).not.toHaveBeenCalled();

@@ -414,10 +414,10 @@ export class LarkGroupManager {
     }
     return detail;
   }
-  async resolved(config: StoredLarkConfig, chatId: string) {
+  async resolved(config: StoredLarkConfig, chatId: string, readOnly = false) {
     const owner = await this.owner(config.appId);
     if (!owner) return config;
-    const detail = await this.runtimeDetail(config, owner, chatId);
+    const detail = readOnly ? await this.detail(config, owner, chatId) : await this.runtimeDetail(config, owner, chatId);
     if (!detail.binding) return config;
     if (!detail.applied) throw new RuntimeError('LARK_GROUP_NOT_APPLIED', detail.error ?? '群配置尚未生效。', 403);
     const effective = detail.effective!;
@@ -448,20 +448,21 @@ export class LarkGroupManager {
     } while (true);
   }
 
-  async authorize(appId: string, chatId: string, openId: string | undefined, action: PolicyAction, sessionId?: string, options: { memberObserved?: boolean; installationOwner?: boolean; taskRequesterOpenId?: string } = {}): Promise<PolicyDecision | undefined> {
-    const config = await readLarkConfig(this.repos.config, appId);
+  /** readOnly previews local policy for a known actor; membership/email and platform grants are rechecked on invocation. */
+  async authorize(appId: string, chatId: string, openId: string | undefined, action: PolicyAction, sessionId?: string, options: { memberObserved?: boolean; installationOwner?: boolean; taskRequesterOpenId?: string; readOnly?: boolean } = {}): Promise<PolicyDecision | undefined> {
+    const config = await readLarkConfig(this.repos.config, appId, { readOnly: options.readOnly });
     if (!config) return deny(action, '此 Bot 已删除。');
     const owner = await this.owner(appId);
     if (!owner) return undefined;
-    const detail = await this.runtimeDetail(config, owner, chatId);
+    const detail = options.readOnly ? await this.detail(config, owner, chatId) : await this.runtimeDetail(config, owner, chatId);
     if (!detail.binding) return undefined;
     if (options.installationOwner && action === 'task.view_result') return { allowed: true, action, code: 'allowed_owner', reason: '安装管理员可查看任务记录。', source: 'owner' };
     if (!detail.applied) return deny(action, detail.error ?? '群配置已停用。');
     if (!openId && !options.installationOwner) return deny(action, '缺少当前 App 的成员身份。');
     const id = options.installationOwner ? 'principal_installation_owner' : principalId(appId, openId!);
-    const isMember = options.installationOwner || options.memberObserved || await this.isMember(config, chatId, openId!);
+    const isMember = options.installationOwner || options.memberObserved || options.readOnly || await this.isMember(config, chatId, openId!);
     if (!isMember) return deny(action, '无法确认当前账号仍在此群中。');
-    if (openId) await this.repos.config.set(`lark.principal.${id}`, JSON.stringify({ appId, openId, name: openId }));
+    if (openId && !options.readOnly) await this.repos.config.set(`lark.principal.${id}`, JSON.stringify({ appId, openId, name: openId }));
     const effective = detail.effective!;
     if (effective.access.mode === 'disabled') return deny(action, '此群已禁止发起和操作任务。');
     const run = sessionId ? parse<RunContext>(await this.repos.config.get(runKey(sessionId))) : undefined;
@@ -469,7 +470,7 @@ export class LarkGroupManager {
     const now = this.now().toISOString();
     const assignments = [...detail.roles];
     // Default talk grants permit operating one's own tasks, never another member's tasks.
-    const emailAllowed = config.allowedEmails.length && openId ? (await this.client(config).getUserEmails(openId)).some(email => config.allowedEmails.includes(email)) : false;
+    const emailAllowed = !options.readOnly && config.allowedEmails.length && openId ? (await this.client(config).getUserEmails(openId)).some(email => config.allowedEmails.includes(email)) : false;
     const botDefaultAllowed = config.allowedUsers.some(user => user.openId === openId) || Boolean(emailAllowed);
     const canTalk = options.installationOwner || detail.binding.oncall || effective.access.mode === 'all_chat_members' || effective.access.mode === 'allowlist' && effective.access.principalIds.includes(id)
       || detail.binding.accessOverride.mode === 'inherit' && botDefaultAllowed || assignments.some(role => role.principalId === id && role.state === 'active' && (!role.expiresAt || role.expiresAt > now) && role.role === 'can_talk');
@@ -496,17 +497,17 @@ export class LarkGroupManager {
     else await this.repos.config.set(runKey(session.id), JSON.stringify(value));
   }
 
-  async authorizeSession(sessionId: string, action: PolicyAction, installationOwner = false) {
+  async authorizeSession(sessionId: string, action: PolicyAction, installationOwner = false, readOnly = false) {
     const run = parse<RunContext>(await this.repos.config.get(runKey(sessionId)));
     if (run) {
       const actor = run.activeOpenId;
       const owner = installationOwner || actor === installationOwnerTaskActor;
-      return this.authorize(run.appId, run.chatId, owner ? undefined : actor, action, sessionId, { installationOwner: owner, ...(actor && !owner ? { taskRequesterOpenId: actor } : {}) });
+      return this.authorize(run.appId, run.chatId, owner ? undefined : actor, action, sessionId, { installationOwner: owner, readOnly, ...(actor && !owner ? { taskRequesterOpenId: actor } : {}) });
     }
     const session = await this.repos.sessions.get(sessionId);
     const [appId, chatId, chatType] = session?.sourceId?.split(':') ?? [];
     if (session?.source !== 'lark' || !appId || !chatId || chatType !== 'group') return undefined;
-    return this.authorize(appId, chatId, undefined, action, sessionId, { installationOwner });
+    return this.authorize(appId, chatId, undefined, action, sessionId, { installationOwner, readOnly });
   }
 
   async prepareTurn(sessionId: string, actorId?: string): Promise<(() => Promise<void>) | undefined> {

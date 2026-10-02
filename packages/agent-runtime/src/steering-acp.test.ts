@@ -1,9 +1,10 @@
+import { createHash } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
-import { agentConfigSchema } from '@dutydeck/shared';
+import { agentConfigSchema, type Session } from '@dutydeck/shared';
 import { DutydeckRuntime } from './index.js';
 
 // 插话请求挂着不回时，会话不能被它卡住：真实 AcpxAdapter + Mock ACP 子进程，
@@ -11,11 +12,11 @@ import { DutydeckRuntime } from './index.js';
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
 
-async function fixture(env: Record<string, string> = { mock_acp_steering: '1', mock_acp_agent_name: '@agentclientprotocol/claude-agent-acp' }) {
+async function fixture(env: Record<string, string> = { mock_acp_steering: '1', mock_acp_agent_name: '@agentclientprotocol/claude-agent-acp' }, sessionPrompt?: (session: Session, prompt: string) => string) {
   const directory = await mkdtemp(join(tmpdir(), 'runtime-steering-acp-'));
   const repos = createRepositories(join(directory, 'state.sqlite'), { newDatabaseAuthority: 'ledger_v1' });
   const agent = agentConfigSchema.parse({ id: 'mock', name: 'Mock', command: process.execPath, args: [resolve('tests/fixtures/mock-acp-agent.mjs')], protocol: 'acp', cwd: directory, env, permissionMode: 'ask', timeout: 10 });
-  const runtime = new DutydeckRuntime(repos, { driverIdleTimeoutMs: 0, probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any });
+  const runtime = new DutydeckRuntime(repos, { sessionPrompt, driverIdleTimeoutMs: 0, probe: (() => ({ available: true, protocol: 'acp', acp: true })) as any });
   cleanup.push(async () => { await runtime.shutdown(); repos.close(); await rm(directory, { recursive: true, force: true }); });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id, cwd: directory });
@@ -30,6 +31,38 @@ async function fixture(env: Record<string, string> = { mock_acp_steering: '1', m
 }
 
 describe('unanswered ACP steering request', () => {
+  it('matches the full text received by ACP after session context is applied', async () => {
+    const secret = 'synthetic-turn-token';
+    const h = await fixture(undefined, (_session, prompt) => `${secret}\n${prompt}`);
+    const accepted = 'accepted request 😀';
+    const task = await h.runtime.send(h.session.id, 'public request', accepted);
+    expect(task.status).toBe('completed');
+    const received = `${secret}\n${accepted}`;
+    expect(await h.texts()).toContain(`Mock reply: ${received}`);
+    const records = (await h.runtime.getEvents(h.session.id)).filter(event => (event.data as any)?.state === 'prompt_assembly');
+    expect(records.map(event => (event.data as any).stage)).toEqual(['accepted_input', 'session_context']);
+    expect(records[1]?.data).toMatchObject({ phase: 'prepared', chars: received.length, sha256: createHash('sha256').update(received, 'utf8').digest('hex') });
+    expect(JSON.stringify(records)).not.toContain(secret);
+    expect(JSON.stringify(records)).not.toContain(accepted);
+  });
+
+  it('hashes the real ACP steering input without applying a new turn context', async () => {
+    let contexts = 0;
+    const h = await fixture(undefined, (_session, prompt) => `final-token-${++contexts}\n${prompt}`);
+    await h.running();
+    const accepted = 'accepted steering 😀';
+    const second = await h.runtime.dispatch(h.session.id, 'public steering', 'queue', accepted);
+    await expect(h.runtime.injectQueued(h.session.id, second.id, 'installation_owner', 'digest-steering')).resolves.toMatchObject({ outcome: 'injected' });
+    await expect.poll(h.texts, { timeout: 10_000 }).toContain(`Steered: ${accepted}`);
+    expect(contexts).toBe(1);
+    const records = (await h.runtime.getEvents(h.session.id)).filter(event => (event.data as any)?.state === 'prompt_assembly');
+    const steered = records.filter(event => (event.data as any)?.mode === 'steer');
+    expect(steered).toHaveLength(1);
+    expect(steered[0]?.data).toEqual({ state: 'prompt_assembly', version: 1, stage: 'accepted_input', source: 'execution_context.agent_prompt', mode: 'steer', phase: 'prepared', chars: accepted.length, charUnit: 'utf16_code_units', sha256: createHash('sha256').update(accepted, 'utf8').digest('hex'), inputTaskId: second.id, operationId: 'digest-steering' });
+    expect(JSON.stringify(records)).not.toContain('final-token');
+    expect(JSON.stringify(records)).not.toContain(accepted);
+  });
+
   it('leaves cancel, interrupt and stop usable, and ends only when the connection closes', async () => {
     const h = await fixture();
     const first = await h.running();

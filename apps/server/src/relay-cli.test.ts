@@ -1,3 +1,4 @@
+import { createCliProgram } from './cli-program.js';
 import { execFile } from 'node:child_process';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
@@ -51,10 +52,17 @@ async function harness() {
 describe('session ask CLI over HTTP', () => {
   const choices = [{ label: '方案甲', value: 'a' }, { label: '方案乙', value: 'b' }];
 
-  it('runs the injected choice example through the real CLI and prints only the answer', async () => {
+  it('runs the on-demand help choice example through the real CLI and prints only the answer', async () => {
     const h = await harness();
     const hints = relayHintLines({ dutydeck_relay_url: 'http://localhost/api/relay', dutydeck_relay_token: 'fixture-token' }).join('\n');
-    const example = hints.match(/--choices '([^']+)'/);
+    expect(hints).toContain('--help');
+    expect(hints).not.toContain('立刻送达');
+    let help = '';
+    const program = createCliProgram('test');
+    program.commands.find(command => command.name() === 'session')!.commands.find(command => command.name() === 'ask')!
+      .exitOverride().configureOutput({ writeOut: value => { help += value; } });
+    expect(() => program.parse(['node', 'dutydeck', 'session', 'ask', '--help'])).toThrowError(expect.objectContaining({ exitCode: 0 }));
+    const example = help.match(/--choices '([^']+)'/);
     expect(example).not.toBeNull();
     expect(await h.invoke(['--choices', example![1]!, '--timeout', '60'])).toEqual({ code: 0, stdout: 'a\n', stderr: '' });
     expect(h.requests).toEqual([{ url: '/api/relay/sessions/self/ask', authorization: 'Bearer fixture-token',

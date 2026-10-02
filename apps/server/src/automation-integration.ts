@@ -28,26 +28,26 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
   log: { warn: (...args: any[]) => void };
 }) {
   const client = (config: StoredLarkConfig) => options.client?.(config) ?? createLarkCardService(options.env ?? process.env, globalThis.fetch, config);
-  const authorize = async (sessionId: string, actorId?: string, context?: AutomationDeliveryContext) => {
+  const authorize = async (sessionId: string, actorId?: string, context?: AutomationDeliveryContext, readOnly = false) => {
     context?.signal.throwIfAborted();
     const session = await runtime.getSession(sessionId);
     if (!session || !actorId) return false;
     if (session.source !== 'lark') return session.source !== 'foundation_group_binding' && actorId === installationOwnerTaskActor;
     const [appId, chatId, chatType] = session.sourceId?.split(':') ?? [];
     if (!appId || !chatId) return false;
-    const config = await readLarkConfig(repos.config, appId);
+    const config = await readLarkConfig(repos.config, appId, { readOnly });
     if (!config || !config.listening || !larkExecutionConfirmed(config)) return false;
     const owner = actorId === installationOwnerTaskActor;
     // Unlike beginTurn, this checks the captured actor without switching the
     // identity used by a turn that may already be running in this session.
     if (chatType === 'group') {
-      const decision = await groups.authorize(appId, chatId, owner ? undefined : actorId, 'turn.append', sessionId, { installationOwner: owner });
+      const decision = await groups.authorize(appId, chatId, owner ? undefined : actorId, 'turn.append', sessionId, { installationOwner: owner, readOnly });
       if (decision) return decision.allowed;
     }
     if (owner) return true;
     if (!(config.allowedUsers?.length || config.allowedEmails?.length)) return true;
     if (config.allowedUsers?.some(user => user.openId === actorId) || config.allowedBots?.some(bot => bot.openId === actorId)) return true;
-    if (!config.allowedEmails?.length) return false;
+    if (!config.allowedEmails?.length || readOnly) return false;
     context?.signal.throwIfAborted();
     const directory = client(config);
     const abort = () => directory.close?.();
@@ -306,5 +306,5 @@ export function createAutomationIntegration(repos: RepositoryBundle, runtime: Du
     }, options.log, repos.config);
     return sent.messageId;
   };
-  return { authorize, prepareDelivery, deliver, notify, onScheduleDisabled };
+  return { authorize, previewAuthorize: (sessionId: string, actorId?: string) => authorize(sessionId, actorId, undefined, true), prepareDelivery, deliver, notify, onScheduleDisabled };
 }

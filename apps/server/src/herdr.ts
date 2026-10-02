@@ -47,9 +47,8 @@ export class HerdrSessions {
     return { [herdrSessionEnvKey]: this.nameFor(sessionId), [herdrCommandEnvKey]: `${this.options.command} session herdr --` };
   }
   prompt(): string {
-    const command = `${this.options.command} session herdr --`;
     if (!this.binary) return 'Herdr 未安装，本会话的侧边子任务工作空间不可用；继续使用现有 Agent 完成普通任务。';
-    return `Herdr 侧边子任务工作空间：先执行 ${command} prepare，按需创建或复用本会话专属 named session，返回真实 session_name/workspace_id/root_pane_id。\n后续使用 ${command} <workspace|tab|pane|agent> <子命令>，沿用 Herdr CLI 参数，并显式指定返回的目标 ID；例如 ${command} pane split <root_pane_id> --direction right --cwd <工作目录> --no-focus。\n你是外部 ACP/tmux 主 Agent，不是 Herdr pane：不要设置 HERDR_ENV/HERDR_PANE_ID，不用 --current，不绑定或操作用户的 default session。子任务使用上述专属入口和显式目标流程。\n此入口固定会话路由，禁止 --session/--remote/--machine；必须原样使用完整命令前缀，不能改用 PATH 中的其它 dutydeck。daemon 退出不会停止侧边任务。确认侧边任务可中断后，用 ${command} stop 停止本专属 server（保留状态）。`;
+    return `Herdr 侧边子任务入口：${this.options.command} session herdr --help；帮助无需服务或凭证。使用 prepare 获取专属 session/workspace/pane 的真实 ID，再按需分派。你是外部 ACP/tmux 主 Agent，不伪造 HERDR_*、不用 --current、不操作用户 default session。必须原样使用完整绑定前缀；停止侧边任务前确认可中断。`;
   }
   private serial<T>(name: string, work: () => Promise<T>): Promise<T> {
     const result = (this.tails.get(name) ?? Promise.resolve()).catch(() => {}).then(work);

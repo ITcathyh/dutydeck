@@ -44,34 +44,35 @@ export function createCollaborationIntegration(options: CollaborationIntegration
     }
   } };
   const client = options.client ?? ((config: StoredLarkConfig) => createLarkCardService(process.env, globalThis.fetch, config));
-  const known = async (scope: CollaborationScope) => {
-    await groups.ensureParticipationGroup(scope.appId, scope.chatId);
-    const config = await readLarkConfig(repos.config, scope.appId);
+  const known = async (scope: CollaborationScope, readOnly = false) => {
+    if (!readOnly) await groups.ensureParticipationGroup(scope.appId, scope.chatId);
+    const config = await readLarkConfig(repos.config, scope.appId, { readOnly });
     const owner = await groups.owner(scope.appId);
     const binding = owner && await repos.groupBindings.getByNaturalKey(owner.channelBotId, scope.chatId);
     if (!config || !owner || !binding) throw new RuntimeError('COLLABORATION_GROUP_REQUIRED', '请先同步并配置此群。', 403);
     return { config, owner, binding };
   };
-  const live = async (scope: CollaborationScope) => {
-    const result = await known(scope);
+  const live = async (scope: CollaborationScope, readOnly = false) => {
+    const result = await known(scope, readOnly);
     if (options.listeningDisabled || !result.config.listening || !larkExecutionConfirmed(result.config) || !result.owner.activeGroups.includes(result.binding.id) || result.binding.state !== 'staged') throw new RuntimeError('COLLABORATION_GROUP_INACTIVE', '此群的 Agent 接入当前不可用。', 403);
-    return { ...result, config: await groups.resolved(result.config, scope.chatId) };
+    return { ...result, config: await groups.resolved(result.config, scope.chatId, readOnly) };
   };
-  const policy = async (scope: CollaborationScope, actorId: string, action: PolicyAction) => {
+  const policy = async (scope: CollaborationScope, actorId: string, action: PolicyAction, readOnly = false) => {
     const owner = actorId === installationOwnerTaskActor;
-    const result = await groups.authorize(scope.appId, scope.chatId, owner ? undefined : actorId, action, undefined, { installationOwner: owner });
+    const result = await groups.authorize(scope.appId, scope.chatId, owner ? undefined : actorId, action, undefined, { installationOwner: owner, readOnly });
     return result?.allowed === true;
   };
-  const authorize: CollaborationAuthorization = async (scope, actorId, action) => {
+  const authorize = async (scope: CollaborationScope, actorId: string, action: Parameters<CollaborationAuthorization>[2], readOnly = false) => {
     try {
-      await known(scope);
+      await known(scope, readOnly);
       // Local management identity is resolved by the existing server auth boundary.
       if (actorId === installationOwnerTaskActor && ['read', 'write', 'manage'].includes(action)) return true;
       if (action === 'manage') return false;
-      await live(scope);
-      return policy(scope, actorId, action === 'read' ? 'group_tools.read' : action === 'deliver' ? 'group_tools.send' : 'task.create');
+      await live(scope, readOnly);
+      return policy(scope, actorId, action === 'read' ? 'group_tools.read' : action === 'deliver' ? 'group_tools.send' : 'task.create', readOnly);
     } catch { return false; }
   };
+  const previewAuthorize: CollaborationAuthorization = (scope, actorId, action) => authorize(scope, actorId, action, true);
   const scopeGrant = async (scope: CollaborationScope, action: 'observe' | 'deliver') => {
     try {
       const settings = await repos.collaboration.getSettings(scope);
@@ -134,7 +135,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
       catch { return false; }
     }
   });
-  const background = new CollaborationBackground({ repositories: repos, runtime, authorize, resolveConfig: async scope => (await live(scope)).config });
+  const background = new CollaborationBackground({ repositories: repos, runtime, authorize, previewAuthorize, resolveConfig: async scope => (await live(scope)).config });
   const riskPolicy = async (sessionId: string, _fallback?: ToolRiskPolicy): Promise<{ policy?: ToolRiskPolicy } | undefined> => {
     const session = await runtime.getSession(sessionId);
     const [appId, chatId, kind, origin] = session?.sourceId?.split(':') ?? [];
@@ -218,6 +219,7 @@ export function createCollaborationIntegration(options: CollaborationIntegration
         }
       }
     },
+    previewAuthorize,
     async close() {
       const settled = await Promise.allSettled([scheduler.close(), participation.close()]);
       const errors = settled.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);

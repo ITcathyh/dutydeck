@@ -18,6 +18,7 @@ export interface CollaborationBackgroundOptions {
   repositories: RepositoryBundle;
   runtime: DutydeckRuntime;
   authorize: CollaborationAuthorization;
+  previewAuthorize?: CollaborationAuthorization;
   resolveConfig(scope: CollaborationScope): Promise<StoredLarkConfig>;
 }
 
@@ -34,12 +35,13 @@ export class CollaborationBackground {
     if (!record || record.kind !== 'agent_execution' || record.payload.sessionId !== session.id) throw denied();
     return record;
   }
-  private async assertRecord(record: CollaborationAction) {
+  private async assertRecord(record: CollaborationAction, readOnly = false) {
     const mandate = record.mandateId && await this.repo.getMandate(record.scope, record.mandateId);
     if (!mandate || mandate.status !== 'active' || mandate.requesterId !== record.requesterId) throw denied();
     const schedule = await this.options.repositories.scheduleDefinitions.get(mandate.scheduleDefinitionId);
     if (!schedule || schedule.state !== 'enabled' || schedule.currentGeneration !== record.scheduleGeneration || !scheduleMatchesMandate(schedule, mandate)) throw denied();
-    if (!await this.options.authorize(record.scope, record.requesterId, 'execute')) throw denied();
+    const authorize = readOnly ? this.options.previewAuthorize : this.options.authorize;
+    if (!authorize || !await authorize(record.scope, record.requesterId, 'execute')) throw denied();
     if (mandate.followupId) {
       const followup = await this.repo.getFollowup(record.scope, mandate.followupId);
       if (!followup || (record.followupRevision !== undefined && record.followupRevision !== followup.revision) || (mandate.condition !== 'always' && followup.status !== 'open')) throw denied();
@@ -64,10 +66,10 @@ export class CollaborationBackground {
     if (!record || canonicalExecutionJson(actor) !== canonicalExecutionJson(this.actor(record.scope, record.requesterId))) throw denied();
     return true;
   }
-  async authorizeTool(sessionId: string, action: string): Promise<{ actorId: string } | undefined> {
+  async authorizeTool(sessionId: string, action: string, readOnly = false): Promise<{ actorId: string } | undefined> {
     const session = await this.options.runtime.getSession(sessionId); if (!session || !scopeOf(session)) return;
     const record = await this.record(session); if (!record) throw denied();
-    await this.assertRecord(record);
+    await this.assertRecord(record, readOnly);
     // Delivery has one owner: the scheduler's durable delivery action.
     if (action === 'group_tools.send') throw new RuntimeError('COLLABORATION_MANAGED_DELIVERY', '此后台任务由调度器统一投递结果，请直接返回最终内容。', 403);
     return { actorId: record.requesterId };

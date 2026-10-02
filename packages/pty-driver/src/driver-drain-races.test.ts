@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import type { NormalizedDriverEvent } from '@dutydeck/shared';
 import type { CliAdapter } from '@dutydeck/cli-adapters';
 import { TmuxBackend, type SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
@@ -22,6 +23,7 @@ async function fixture(tmux = false, writeInput: CliAdapter['writeInput'] = () =
   tail.start();
   await tail.flush();
   const writes: string[] = [];
+  const events: NormalizedDriverEvent[] = [];
   const backend: SessionBackend = tmux ? new TmuxBackend('unused-drain-race', { ownerId: 'test' }) : {
     kind: 'pty', spawn() {}, resize() {}, kill() {}, interrupt() {}, onData() {}, onExit() {},
     write(data) { writes.push(data); },
@@ -34,7 +36,7 @@ async function fixture(tmux = false, writeInput: CliAdapter['writeInput'] = () =
     agent: { id: 'fixture', name: 'fixture', protocol: 'pty-cli', command: 'unused', args: [],
       env: {}, permissionMode: 'full-trust', timeout: 60, capabilities: { resume: true, pause: false }, builtin: false },
     adapter: { id: 'fixture', capabilities: {}, buildArgs: () => [], buildResumeCommand: () => [], writeInput },
-    backend, sessionId: 'ses_drain-race', onEvent() {}, onExit() {},
+    backend, sessionId: 'ses_drain-race', onEvent(event) { events.push(event); }, onExit() {},
   });
   // Keep the real driver and real yielding tail; only the external CLI is inert.
   const internals = driver as unknown as { transcript: JsonlTailer; started: boolean; preparedTurnId?: string };
@@ -43,7 +45,7 @@ async function fixture(tmux = false, writeInput: CliAdapter['writeInput'] = () =
   cleanup.push(() => rmSync(directory, { recursive: true, force: true }));
   cleanup.push(async () => { await driver.stop(); tail.stop(); });
   const backlog = () => appendFileSync(path, (JSON.stringify({ text: 'x'.repeat(1024) }) + '\n').repeat(4000));
-  return { driver, tail, writes, backlog, internals };
+  return { driver, tail, writes, events, backlog, internals };
 }
 
 describe('driver cancellation across a real transcript drain', () => {
@@ -72,8 +74,16 @@ describe('driver cancellation across a real transcript drain', () => {
     expect(f.writes).toEqual(['pasted prompt']);
     expect(enterError).toEqual(new Error('Driver stopped'));
     expect(await sent).toBe('Driver stopped');
+    expect(f.events.filter(event => event.data?.state === 'prompt_assembly')).toEqual([]);
     expect(stopped).toBe(false);
     await stopping;
+  });
+
+  it('does not report written input when the adapter rejects', async () => {
+    const f = await fixture(false, async backend => { backend.write('partial paste'); throw new Error('write failed'); });
+    await expect(f.driver.send('request')).rejects.toThrow('write failed');
+    expect(f.writes).toEqual(['partial paste']);
+    expect(f.events.filter(event => event.data?.state === 'prompt_assembly')).toEqual([]);
   });
 
   it.each([false, true])('does not revive after stop while resume drains (tmux=%s)', async tmux => {

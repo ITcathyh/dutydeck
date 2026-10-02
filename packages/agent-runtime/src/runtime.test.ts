@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
 import type { AgentConfig, Session, ToolRiskPolicy } from '@dutydeck/shared';
@@ -246,6 +247,64 @@ describe('runtime lifecycle acceptance', () => {
     await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledWith('[group:cli_test:oc_chat:group]\nfrom web'));
     expect((await h.runtime.getTasks(session.id))[0]?.prompt).toBe('from web');
     await h.runtime.shutdown(); h.repos.close();
+  });
+
+  it('records exact accepted and session prompt digests without exposing dynamic context', async () => {
+    const secret = 'synthetic-final-token-do-not-persist';
+    const accepted = 'accepted context\nrequest 😀';
+    const h = harness({ sessionPrompt: (_session, prompt) => `${secret}\n${prompt}`, onSend: emit => emit({ type: 'text', data: { text: 'done' } }) });
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    try {
+      const task = await h.runtime.send(session.id, 'public request', accepted);
+      expect(task.status).toBe('completed');
+      const finalPrompt = `${secret}\n${accepted}`;
+      expect(h.driver.send).toHaveBeenCalledWith(finalPrompt);
+      const records = (await h.runtime.getEvents(session.id)).filter(event => (event.data as any)?.state === 'prompt_assembly');
+      expect(records.map(event => event.data)).toEqual([
+        expect.objectContaining({ version: 1, stage: 'accepted_input', source: 'execution_context.agent_prompt', mode: 'send', phase: 'prepared', chars: accepted.length, charUnit: 'utf16_code_units', sha256: createHash('sha256').update(accepted, 'utf8').digest('hex'), inputTaskId: task.id }),
+        expect.objectContaining({ version: 1, stage: 'session_context', source: 'runtime.session_prompt', mode: 'send', phase: 'prepared', chars: finalPrompt.length, sha256: createHash('sha256').update(finalPrompt, 'utf8').digest('hex'), inputTaskId: task.id })
+      ]);
+      for (const event of records) {
+        expect(event.taskId).toBe(task.id);
+        expect(event.attemptId).toBe(h.repos.execution.getTaskExecution(task.id)?.currentAttempt?.attemptId);
+        expect(event.raw).toBeNull();
+      }
+      expect(JSON.stringify(records)).not.toContain(secret);
+      expect(JSON.stringify(records)).not.toContain(accepted);
+      expect((await h.runtime.getSession(session.id))?.state).toBe('idle');
+    } finally { await h.runtime.shutdown(); h.repos.close(); }
+  });
+
+  it('does not treat prompt diagnostics as output or activity, even if persistence fails', async () => {
+    const h = harness();
+    const entered = deferred(), gate = deferred();
+    h.driver.send = async () => { entered.resolve(); await gate.promise; h.emit({ type: 'completed', data: { stopReason: 'end_turn' } }); };
+    await h.runtime.initialize([agent]);
+    const session = await h.runtime.start({ agentId: 'mock' });
+    try {
+      const sent = h.runtime.send(session.id, 'request');
+      await entered.promise;
+      const internals = h.runtime as unknown as { lastActivity: Map<string, number>; turnProgressAt: Map<string, number> };
+      internals.lastActivity.set(session.id, 100); internals.turnProgressAt.set(session.id, 200);
+      const before = await h.runtime.getSession(session.id);
+      const append = h.bound().appendEvent.bind(h.bound());
+      vi.spyOn(h.bound(), 'appendEvent').mockImplementation((fence, event) => {
+        if ((event.data as any)?.stage === 'pty_routing') throw new Error('diagnostic write unavailable');
+        return append(fence, event);
+      });
+      const data = { state: 'prompt_assembly', version: 1, stage: 'pty_input', source: 'pty.adapter_input', mode: 'send', phase: 'written', chars: 1, charUnit: 'utf16_code_units', sha256: createHash('sha256').update('x').digest('hex') };
+      h.emit({ type: 'status', data: { ...data, stage: 'pty_routing' } });
+      h.emit({ type: 'status', data });
+      await vi.waitFor(async () => expect((await h.runtime.getEvents(session.id)).some(event => (event.data as any)?.stage === 'pty_input')).toBe(true));
+      expect(internals.lastActivity.get(session.id)).toBe(100);
+      expect(internals.turnProgressAt.get(session.id)).toBe(200);
+      expect(await h.runtime.getSession(session.id)).toEqual(before);
+      gate.resolve();
+      // Metadata alone must not turn a response with no assistant text into success.
+      expect((await sent).status).toBe('failed');
+      expect((await h.runtime.getEvents(session.id)).some(event => event.type === 'error' && JSON.stringify(event.data).includes('diagnostic write unavailable'))).toBe(false);
+    } finally { gate.resolve(); await h.runtime.shutdown(); h.repos.close(); }
   });
 
   it('keeps the same agent session across consecutive turns', async () => {

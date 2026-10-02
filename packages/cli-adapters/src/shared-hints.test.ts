@@ -15,7 +15,11 @@ describe('routing block — relay command hints', () => {
     expect(block).toContain("'/usr/bin/node' '/opt/dutydeck/dist/cli.js' session send");
     expect(block).toContain("'/usr/bin/node' '/opt/dutydeck/dist/cli.js' session ask");
     // 退出码契约要写进文案，否则 CLI 不知道怎么判读
-    expect(block).toContain('124');
+    expect(block).toContain('仅退出 0 表示已回答');
+    expect(block).toContain('2 表示参数或凭证缺失等用法错误');
+    expect(block).toContain('3 表示通道不可用或提问取消');
+    expect(block).toContain('124 表示超时');
+    expect(block).toContain('超时或通道不可用不能视为用户已回答');
     // 与 larkGroupToolsPrompt 同样的告诫：不要改用 PATH 里的其他 dutydeck
     expect(block).toMatch(/不要改用 PATH/);
     // 不能再残留 M2 的占位文案

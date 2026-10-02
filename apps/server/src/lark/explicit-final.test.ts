@@ -126,7 +126,7 @@ async function harness(options: { verificationCommand?: string; verifications?: 
   const token = capabilities.environmentFor(session).dutydeck_group_tools_token!;
   const authorize = vi.fn(async () => {});
   const tools = new LarkAgentToolsService(capabilities, repos.config, {
-    authorizeTool: authorize, clientFactory: () => service as any,
+    authorizeTool: authorize, previewTool: authorize, clientFactory: () => service as any,
     workbenchTask: id => runtime.getActiveTaskContext(id),
     finalTaskContext: async (binding, task) => resolveExplicitFinalContext(await repos.channelMappings.list(channel), binding, task)
   });
