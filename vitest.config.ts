@@ -2,6 +2,7 @@ import { defineConfig } from 'vitest/config';
 import { fileURLToPath, URL } from 'node:url';
 
 const alias = {
+  '@dutydeck/shared/child-environment': fileURLToPath(new URL('./packages/shared/runtime/child-environment.mjs', import.meta.url)),
   '@dutydeck/acp-client': fileURLToPath(new URL('./packages/acp-client/src/index.ts', import.meta.url)),
   '@dutydeck/runtime': fileURLToPath(new URL('./packages/agent-runtime/src/index.ts', import.meta.url)),
   '@dutydeck/config': fileURLToPath(new URL('./packages/config/src/index.ts', import.meta.url)),

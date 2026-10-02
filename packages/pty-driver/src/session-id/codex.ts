@@ -38,6 +38,7 @@ import {
 import { byMtimeDesc, parseJsonlObjects, readHead, readTail, walkFiles } from './fs-scan.js';
 import { isUsableMarker } from './marker.js';
 import type { SessionIdLookup, SessionIdLookupContext } from './types.js';
+import { codexInputText } from '../transcript/input-receipt.js';
 
 /** history.jsonl grows without bound; recent sessions are at the end, so a
  *  bounded tail keeps the lookup O(window) rather than O(file). */
@@ -78,19 +79,6 @@ export function findSessionIdInHistory(historyPath: string, marker: string): str
   return undefined;
 }
 
-/** Text of a rollout `response_item` user message, joined across blocks. */
-function rolloutUserText(entry: any): string {
-  const p = entry?.payload;
-  if (!p || p.type !== 'message' || p.role !== 'user') return '';
-  if (typeof p.content === 'string') return p.content;
-  if (!Array.isArray(p.content)) return '';
-  const parts: string[] = [];
-  for (const block of p.content) {
-    if (block && typeof block === 'object' && typeof block.text === 'string') parts.push(block.text);
-  }
-  return parts.join('');
-}
-
 /**
  * Scan the rollout tree for the session whose head carries the marker.
  * `cwd` gates the match: session_meta records the working directory, and a
@@ -116,11 +104,12 @@ export function findSessionIdInRollouts(
     for (const entry of entries) {
       if (entry?.type === 'session_meta') {
         const p = entry.payload;
-        if (typeof p?.session_id === 'string' && p.session_id.length > 0) metaSessionId = p.session_id;
+        const id = p?.id ?? p?.session_id;
+        if (typeof id === 'string' && id.length > 0) metaSessionId = id;
         if (typeof p?.cwd === 'string' && p.cwd.length > 0) cwdOk = realCwd(p.cwd, env) === wanted;
         continue;
       }
-      if (entry?.type === 'response_item' && rolloutUserText(entry).includes(marker)) {
+      if (codexInputText(entry)?.includes(marker)) {
         marked = true;
         break;
       }

@@ -62,6 +62,7 @@ const submitPrompt = rawPrompt => {
   const prompt = rawPrompt.trim();
   if (!prompt) return;
   const currentTurn = ++turn;
+  write({ type: 'user', sessionId: sessionArg, timestamp: new Date().toISOString(), message: { role: 'user', content: rawPrompt } });
   process.stdout.write('\\r\\nworking\\r\\n');
   setTimeout(() => {
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });

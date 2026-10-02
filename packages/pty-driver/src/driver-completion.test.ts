@@ -42,7 +42,11 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
       agent: { id: 'claude-code', name: 'Claude', command: 'unused', args: [], protocol: 'pty-cli', cwd: directory,
         env: { CLAUDE_CONFIG_DIR: directory }, permissionMode: 'full-trust', timeout: 60,
         capabilities: { pause: false, resume: true }, builtin: false },
-      adapter: { ...createCliAdapter('claude-code'), writeInput() { submitted = true; return holdSubmission; } },
+      adapter: { ...createCliAdapter('claude-code'), writeInput(_backend, prompt) {
+        submitted = true;
+        appendFileSync(transcript, JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } }) + '\n');
+        return holdSubmission;
+      } },
       backend, sessionId: 'ses_completion-fixture', onEvent: event => events.push(event), onExit() {}
     });
     await driver.start();
@@ -64,7 +68,7 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }], stop_reason: 'end_turn' } }) + '\n');
 
   const waitForSubmission = async () => {
-    for (let attempt = 0; attempt < 10 && !submitted; attempt++) await Promise.resolve();
+    for (let attempt = 0; attempt < 30 && !submitted; attempt++) await Promise.resolve();
     expect(submitted).toBe(true);
   };
 
@@ -225,7 +229,9 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     await vi.advanceTimersByTimeAsync(600);
     await pending;
     const types = events.filter(event => event.type !== 'raw_terminal').map(event => event.type);
-    expect(types).toEqual(['error', 'completed']);
+    expect(types).toEqual(['status', 'status', 'status', 'status', 'error', 'completed']);
+    expect(events.filter(event => event.type === 'status').map(event => [event.data.state, event.data.phase]))
+      .toEqual([['prompt_assembly', 'written'], ['prompt_assembly', 'written'], ['input_receipt', 'pending'], ['input_receipt', 'confirmed']]);
     expect(events.find(event => event.type === 'error')).toMatchObject({
       sourceId: 'claude-api-error:api-error-1',
       data: { code: 'claude_api_rate_limit', message: expect.stringContaining('额度约在 9:40pm (Asia/Shanghai) 重置') },
@@ -248,7 +254,9 @@ describe('PTY result completion with a real terminal snapshot and transcript', (
     output(repaint(`${finalText}\n✻ Cooked for 3s\n❯\n${idleFooter}`));
     await vi.advanceTimersByTimeAsync(600);
     await pending;
-    expect(events.filter(event => event.type !== 'raw_terminal').map(event => event.type)).toEqual(['text', 'completed']);
+    expect(events.filter(event => event.type !== 'raw_terminal').map(event => event.type)).toEqual(['status', 'status', 'status', 'text', 'status', 'completed']);
+    expect(events.filter(event => event.type === 'status').map(event => [event.data.state, event.data.phase]))
+      .toEqual([['prompt_assembly', 'written'], ['prompt_assembly', 'written'], ['input_receipt', 'pending'], ['input_receipt', 'confirmed']]);
   });
 
   it('completes from rendered screen when incremental ANSI redraw splits or overwrites completion marker cells', async () => {

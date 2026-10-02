@@ -63,7 +63,9 @@ const PATH_FOOTER = new RegExp(
   '^[^\\s·]+(?: [^\\s·]+)? · ' +
   '(?:⎇ [^\\s·]+ · )?' +
   '(?:\\/|~|…)[^\\s·]*' +
-  '(?: · (?:Ready|\\[Session\\]))?' +
+  // Modern Codex replaces Ready/[Session] with its conversation title.
+  // Keep the model/path row anchored and exclude transient control states.
+  '(?: · (?!Working\\b|Resuming\\b|Queued\\b|Select permissions\\b|Review hooks\\b|Press enter\\b|Approval\\b)[^·\\r\\n⚠]+?)?' +
   TRAEX_ACCESS_FOOTER.source +
   CODEX_WARNING_FOOTER.source +
   '$',

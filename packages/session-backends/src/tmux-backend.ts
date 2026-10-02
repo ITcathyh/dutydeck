@@ -297,7 +297,10 @@ export class TmuxBackend implements SessionBackend {
       // launch line into it. tmux forks the pane with a snapshot of the
       // session environment before respawn-pane returns; clear the staged
       // values immediately afterwards so secrets do not linger in tmux.
-      const launchLine = ['exec', bin, ...args].map(shellescape).join(' ');
+      // tmux preserves the bootstrap pane's PATH across respawn (even with
+      // set-environment/-e). Override it after shell startup to prevent old
+      // session identity wrappers from returning to the CLI's search path.
+      const launchLine = `${childEnvironment.PATH === undefined ? '' : `PATH=${shellescape(childEnvironment.PATH)} `}${['exec', bin, ...args].map(shellescape).join(' ')}`;
       (await runTmux(['respawn-pane', '-k', '-t', this.sessionName, '-c', opts.cwd, launchLine]));
       await this.clearSessionEnvironment(Object.keys(childEnvironment));
       check();

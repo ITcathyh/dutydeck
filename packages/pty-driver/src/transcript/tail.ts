@@ -19,6 +19,7 @@
 import { closeSync, openSync, readSync, statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
+import { normalizeInputText } from './input-receipt.js';
 
 /** A durable position immediately after the last complete JSONL record.
  * Without a path there is no file identity, so the only valid offset is 0. */
@@ -35,6 +36,11 @@ export interface TranscriptEventSource {
   checkpoint(): TranscriptCursor;
   restore(cursor: TranscriptCursor): void;
   onEvent(cb: (e: NormalizedDriverEvent) => void): void;
+  /** New complete records, including held errors that publish no event. */
+  onProgress?(cb: () => void): void;
+  /** Arm after flush(), before writing. Only a new exact user record in this
+   * session can confirm input; abort/stop never converts unknown into accepted. */
+  waitForInput?(prompt: string, signal: AbortSignal): Promise<void>;
   /** Background sub-agents the CLI reported still running when its latest
    *  turn ended. Only sources whose transcript records it (Claude) implement this. */
   pendingBackgroundWork?(): number;
@@ -55,10 +61,15 @@ export interface JsonlTailerOptions {
   resolvePath: () => string | undefined;
   /** Map one parsed JSONL entry to zero or more normalized events. */
   mapEntry: (entry: TranscriptEntry) => NormalizedDriverEvent[] | undefined;
+  resetMapping?: () => void;
   /** Poll interval in ms. Default 300. */
   pollIntervalMs?: number;
   /** Re-resolve the path each tick and switch to a newer file. Default true. */
   watchForSwitch?: boolean;
+  inputText?: (entry: TranscriptEntry) => string | undefined;
+  inputTimestamp?: (entry: TranscriptEntry) => number;
+  /** Native tools can appear in both legacy and completed-item dialects. */
+  deduplicateTools?: boolean;
 }
 
 const DEFAULT_POLL_MS = 300;
@@ -72,8 +83,14 @@ const yieldLoop = () => new Promise<void>(resolve => setImmediate(resolve));
 export class JsonlTailer implements TranscriptEventSource {
   private readonly resolvePath: () => string | undefined;
   private readonly mapEntry: (entry: TranscriptEntry) => NormalizedDriverEvent[] | undefined;
+  private readonly resetMapping?: () => void;
   private readonly pollIntervalMs: number;
   private readonly watchForSwitch: boolean;
+  private readonly inputText?: JsonlTailerOptions['inputText'];
+  private readonly inputTimestamp?: JsonlTailerOptions['inputTimestamp'];
+  private readonly deduplicateTools: boolean;
+  private readonly toolEvents = new Set<string>();
+  private readonly receipts = new Set<{ prompt: string; path?: string; offset: number; since: number; finish(error?: Error): void }>();
   private readonly callbacks = new Set<(e: NormalizedDriverEvent) => void>();
   private timer: ReturnType<typeof setInterval> | null = null;
   private currentPath: string | undefined;
@@ -95,17 +112,39 @@ export class JsonlTailer implements TranscriptEventSource {
    *  between two ticks would be treated as "existing transcript" and its
    *  first (already-written) lines would be skipped. */
   private pendingBirth = false;
+  private progressCallback?: () => void;
 
   constructor(opts: JsonlTailerOptions) {
     this.resolvePath = opts.resolvePath;
     this.mapEntry = opts.mapEntry;
+    this.resetMapping = opts.resetMapping;
     this.pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_MS;
     this.watchForSwitch = opts.watchForSwitch ?? true;
+    this.inputText = opts.inputText;
+    this.inputTimestamp = opts.inputTimestamp;
+    this.deduplicateTools = opts.deduplicateTools ?? false;
+  }
+
+  waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const receipt = {
+        prompt: normalizeInputText(prompt), path: this.currentPath, offset: this.offset, since: Date.now(),
+        finish: (error?: Error) => {
+          this.receipts.delete(receipt); signal.removeEventListener('abort', abort);
+          if (error) reject(error); else resolve();
+        },
+      };
+      const abort = () => receipt.finish(signal.reason instanceof Error ? signal.reason : new Error('Native input receipt cancelled'));
+      if (signal.aborted) { abort(); return; }
+      this.receipts.add(receipt); signal.addEventListener('abort', abort, { once: true });
+    });
   }
 
   onEvent(cb: (e: NormalizedDriverEvent) => void): void {
     this.callbacks.add(cb);
   }
+
+  onProgress(cb: () => void): void { this.progressCallback = cb; }
 
   start(): void {
     if (this.timer) return;
@@ -121,7 +160,9 @@ export class JsonlTailer implements TranscriptEventSource {
     const work = this.work.then(async () => {
       if (generation !== this.generation) return;
       if (this.failure) throw this.failure;
+      const offset = this.completedOffset;
       await this.tick(path, size, generation);
+      if (generation === this.generation && this.completedOffset !== offset) this.progressCallback?.();
     });
     this.work = work.catch(() => {});
     return work;
@@ -172,6 +213,9 @@ export class JsonlTailer implements TranscriptEventSource {
   }
 
   stop(): void {
+    for (const receipt of this.receipts) receipt.finish(new Error('Transcript stopped before native input receipt'));
+    this.toolEvents.clear();
+    this.resetMapping?.();
     this.generation++;
     this.polling = false;
     this.failure = undefined;
@@ -217,6 +261,11 @@ export class JsonlTailer implements TranscriptEventSource {
           if (size < restoreOffset) {
             throw new TranscriptRestoreError(`Transcript restore rejected: ${path} is ${size} bytes, before cursor offset ${restoreOffset}`);
           }
+          // Rebuild only the native tool identity set, without publishing old
+          // events. A legacy call before the durable cursor can have its modern
+          // mirror after it. Chunked reads keep restore memory and I/O bounded.
+          if (this.deduplicateTools) await this.drain(restoreOffset, generation, true);
+          if (generation !== this.generation) return;
           this.offset = restoreOffset;
           this.completedOffset = restoreOffset;
           this.pendingStartOffset = restoreOffset;
@@ -226,6 +275,10 @@ export class JsonlTailer implements TranscriptEventSource {
           // A recovered tailer must replay bytes appended while it was down
           // on its first tick, rather than wait for the next poll.
           await this.drain(size, generation);
+          return;
+        }
+        if (this.deduplicateTools && !this.pendingBirth) {
+          await this.drain(size, generation, true);
           return;
         }
         // Start at END for an existing transcript (never replay history);
@@ -256,7 +309,15 @@ export class JsonlTailer implements TranscriptEventSource {
       if (this.watchForSwitch) {
         const path = resolvedPath;
         if (path && path !== this.currentPath) {
+          this.toolEvents.clear();
+          this.resetMapping?.();
           this.currentPath = path;
+          if (this.deduplicateTools) {
+            this.offset = this.completedOffset = this.pendingStartOffset = 0;
+            this.pending = []; this.pendingBytes = 0;
+            await this.drain(waterline ?? 0, generation, true);
+            return;
+          }
           this.offset = waterline ?? 0;
           const partial = waterline === undefined ? { offset: 0, bytes: [] } : await this.trailingPartial(path, waterline, generation);
           if (generation !== this.generation) return;
@@ -275,13 +336,15 @@ export class JsonlTailer implements TranscriptEventSource {
     }
   }
 
-  private async drain(size: number | undefined, generation: number): Promise<void> {
+  private async drain(size: number | undefined, generation: number, baseline = false): Promise<void> {
     const path = this.currentPath;
     if (!path) return;
     if (size === undefined) {
       throw new Error('Transcript file became unavailable before its drain completed');
     }
     if (size < this.offset) {
+      this.toolEvents.clear();
+      this.resetMapping?.();
       this.offset = this.completedOffset = this.pendingStartOffset = 0;
       this.pending = []; this.pendingBytes = 0;
     }
@@ -306,7 +369,7 @@ export class JsonlTailer implements TranscriptEventSource {
             this.offset++;
             this.pending = []; this.pendingBytes = 0;
             this.completedOffset = this.pendingStartOffset = this.offset;
-            this.handleLine(raw, lineOffset);
+            this.handleLine(raw, lineOffset, baseline);
           }
           start = end + 1;
         }
@@ -335,7 +398,7 @@ export class JsonlTailer implements TranscriptEventSource {
     throw this.failure;
   }
 
-  private handleLine(rawLine: string, lineOffset: number): void {
+  private handleLine(rawLine: string, lineOffset: number, baseline = false): void {
     const line = rawLine.trim();
     if (!line) return;
     let entry: unknown;
@@ -345,6 +408,21 @@ export class JsonlTailer implements TranscriptEventSource {
       return; // Malformed line — skip silently.
     }
     if (!entry || typeof entry !== 'object') return;
+    if (!baseline && this.inputText && this.receipts.size) {
+      const input = this.inputText(entry);
+      if (input !== undefined) {
+        const text = normalizeInputText(input);
+        const timestamp = this.inputTimestamp ? this.inputTimestamp(entry) : Date.parse((entry as any).timestamp);
+        for (const receipt of this.receipts) {
+          if ((!receipt.path || receipt.path === this.currentPath)
+            && (!receipt.path || lineOffset >= receipt.offset)
+            // Without an initial file waterline a late resolver might have
+            // found old history. Only a fresh timestamp can prove receipt.
+            && (Number.isFinite(timestamp) ? timestamp >= receipt.since - 1000 : receipt.path !== undefined)
+            && text === receipt.prompt) receipt.finish();
+        }
+      }
+    }
     let events: NormalizedDriverEvent[] | undefined;
     try {
       events = this.mapEntry(entry as TranscriptEntry);
@@ -354,6 +432,12 @@ export class JsonlTailer implements TranscriptEventSource {
     if (!events) return;
     for (let eventIndex = 0; eventIndex < events.length; eventIndex++) {
       const ev = events[eventIndex]!;
+      if (this.deduplicateTools && (ev.type === 'tool_call' || ev.type === 'tool_result') && typeof ev.data?.id === 'string') {
+        const key = `${ev.type}\0${ev.data.id}`;
+        if (this.toolEvents.has(key)) continue;
+        this.toolEvents.add(key);
+      }
+      if (baseline) continue;
       const sourceId = createHash('sha256')
         .update(this.currentPath ?? '')
         .update('\0')

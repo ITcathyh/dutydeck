@@ -9,7 +9,8 @@ Dutydeck 源码中包含或派生自以下第三方开源项目的代码与资�
 ## 1. Botmux
 
 - **项目来源**: https://github.com/deepcoldy/botmux
-- **固定参考版本**: commit `ba847cae5d190e6c87a3c57452074921be3d1c58`
+- **固定参考版本（原移植范围）**: commit `ba847cae5d190e6c87a3c57452074921be3d1c58`
+- **新增参考快照（2026-10-02）**: commit `fd8a3d953c644bf47c144ea26afd4f2f1c4af1eb`
 - **实际移植与派生代码范围**:
   目前已确认的移植或派生实现包括：
   - `packages/cli-adapters`: 部分 CLI 适配层接口与命令行参数构建逻辑；
@@ -18,6 +19,11 @@ Dutydeck 源码中包含或派生自以下第三方开源项目的代码与资�
   - `packages/terminal-renderer`: 虚拟终端与终端输出序列化渲染；
   - `packages/relay/src/cli-contract.ts`: 移植并对齐了源 CLI 交互退出码契约（`relayAskExitCodes`）；
   - `apps/server/src/lark/chat-mode.ts`: 移植了群形态（话题群与普通群模式切换）识别及带 TTL 缓存的 helper。
+
+  新增快照的参考与派生范围：
+  - `packages/shared/runtime/child-environment.mjs`: 参考会话身份环境键集合、`cli-identity/<session>.bin` 路径识别与关联 shell/git 环境清理规则，并用于 PTY、ACP 及 Herdr 子进程环境隔离；
+  - `packages/pty-driver/src/transcript`: 参考新版原生 CLI transcript 事件的识别与归一化机制；
+  - `packages/cli-adapters`、`packages/pty-driver`、`packages/session-backends`: 参考输入提交回执机制，将原生 CLI 输入写入结果传递到运行时。
 
 - **版权与许可证全文**:
 

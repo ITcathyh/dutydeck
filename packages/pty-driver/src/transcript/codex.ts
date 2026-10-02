@@ -25,10 +25,13 @@ import { createReadStream, existsSync, opendirSync, statSync } from 'node:fs';
 import type { Dirent, Stats } from 'node:fs';
 import { join } from 'node:path';
 import { codexRateLimits, contextUsage, type NormalizedDriverEvent, type SessionUsageSnapshot } from '@dutydeck/shared';
-import { codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
+import { codexHistoryPath, codexSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
+import { codexInputText } from './input-receipt.js';
+import { CodexToolProjection, mapCodexCompletedTool } from './codex-tools.js';
+import { CodexInputReceipt } from './codex-input-receipt.js';
 
 const SESSION_SCAN_MAX_DEPTH = 3;
 /** Head window per rollout candidate — session_meta rides the first record.
@@ -196,6 +199,8 @@ export function mapCodexEntry(entry: any): NormalizedDriverEvent[] | undefined {
   const p = entry.payload;
   if (!p || typeof p !== 'object') return undefined;
 
+  if (entry.type === 'event_msg' && p.type === 'item_completed') return mapCodexCompletedTool(p.item);
+
   if (entry.type === 'event_msg' && p.type === 'token_count') {
     const observedAt = typeof entry.timestamp === 'string' ? entry.timestamp : new Date().toISOString();
     const context = contextUsage(p.info?.last_token_usage?.total_tokens, p.info?.model_context_window, observedAt);
@@ -312,8 +317,11 @@ export interface CodexTranscriptTailerOptions {
 
 export class CodexTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
+  private readonly inputReceipt?: CodexInputReceipt;
 
   constructor(opts: CodexTranscriptTailerOptions) {
+    if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(codexHistoryPath(opts.env),
+      () => resolveCliSessionId('codex', { sessionId: opts.sessionId!, cwd: opts.cwd, env: opts.env }));
     const explicit = opts.transcriptPath;
     // Memoise the session-scoped resolution: JsonlTailer re-resolves every
     // ~300ms tick, and recovering the CLI's own session id means reading
@@ -322,13 +330,17 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
     // tailer for the full reasoning.
     let resolved: string | undefined;
     const resolveOnce = () => (resolved ??= resolveCodexRolloutPath(opts.cwd, opts.env, opts.sessionId));
+    const projection = new CodexToolProjection(mapCodexEntry);
     this.tailer = new JsonlTailer({
       resolvePath: explicit
         ? () => explicit
         : opts.sessionId
           ? resolveOnce
           : () => resolveCodexRolloutPath(opts.cwd, opts.env),
-      mapEntry: mapCodexEntry,
+      mapEntry: entry => projection.map(entry),
+      resetMapping: () => projection.reset(),
+      inputText: codexInputText,
+      deduplicateTools: true,
       pollIntervalMs: opts.pollIntervalMs,
       // Re-resolving each tick is what lets the tailer attach late: the
       // rollout appears a beat after spawn, and the CLI's id is only
@@ -339,12 +351,15 @@ export class CodexTranscriptTailer implements TranscriptEventSource {
     });
   }
 
-  start(): void { this.tailer.start(); }
-  flush(): Promise<void> { return this.tailer.flush(); }
+  start(): void { this.inputReceipt?.start(); this.tailer.start(); }
+  async flush(): Promise<void> { await Promise.all([this.tailer.flush(), this.inputReceipt?.flush()]); }
   checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
   restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
-  stop(): void { this.tailer.stop(); }
+  stop(): void { this.inputReceipt?.stop(); this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
+  waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    return this.inputReceipt ? this.inputReceipt.waitForInput(this.tailer, prompt, signal) : this.tailer.waitForInput(prompt, signal);
+  }
 }
 
 interface UsageReadCursor { path: string; inode: number; mtime: number; offset: number; pending: Buffer; skippingLine: boolean; bound: boolean; snapshot: SessionUsageSnapshot }

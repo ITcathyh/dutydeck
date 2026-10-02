@@ -12,7 +12,7 @@ const CODEX_ACTIVE_BUSY_PATTERN = /Working[^\r\n]{0,160}esc to interrupt/i;
 export function createCodexAdapter(): CliAdapter {
   return {
     id: 'codex',
-    capabilities: { resume: true },
+    capabilities: { resume: true, nativeInputReceipt: true },
 
     buildArgs({ resume, resumeSessionId, cwd, model, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
       const usable = usableResumeId(resumeSessionId);
@@ -70,6 +70,7 @@ export function createCodexAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
+      prompt = prompt.replace(/\r\n?/g, '\n');
       // CLI 还在输出时粘贴会和它的重绘交错：先等屏幕静止，回显稳定后再提交。
       await waitForQuietScreen(backend);
       const typedAt = Date.now();

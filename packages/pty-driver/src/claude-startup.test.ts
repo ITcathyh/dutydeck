@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { mkdirSync, realpathSync } from 'node:fs';
+import { pinnedSessionUuid } from '@dutydeck/cli-adapters';
 import { createClaudeCodeAdapter } from '../../cli-adapters/src/adapters/claude-code.js';
 import type { CliAdapter } from '../../cli-adapters/src/types.js';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
@@ -9,6 +11,7 @@ import { PtyBackend, type SessionBackend } from '@dutydeck/session-backends';
 import { PtyCliDriver } from './driver.js';
 
 const TRUST_CLI = String.raw`
+import { appendFileSync } from 'node:fs';
 let trusted = false;
 let input = '';
 let selected = 'no';
@@ -46,6 +49,8 @@ process.stdin.on('data', chunk => {
   if (end >= 0) {
     const prompt = input.slice(input.indexOf('\x1b[200~') + 6, end);
     input = input.slice(end + 6);
+    appendFileSync(process.env.MOCK_TRANSCRIPT_PATH, JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } }) + '\n');
+    appendFileSync(process.env.MOCK_TRANSCRIPT_PATH, JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'RECEIVED:' + prompt }], stop_reason: 'end_turn' } }) + '\n');
     process.stdout.write('RECEIVED:' + prompt + '\n✳ Worked for 1s\n❯ \n');
   }
 });
@@ -78,6 +83,7 @@ describe('PtyCliDriver Claude startup preparation', () => {
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'dutydeck-claude-trust-'));
     fixture = join(dir, 'trust-cli.mjs');
+    mkdirSync(join(dir, 'claude-config', 'projects', realpathSync(dir).replace(/[^A-Za-z0-9-]/g, '-')), { recursive: true });
     await writeFile(fixture, TRUST_CLI.replaceAll('/workspace/dutydeck', dir), 'utf8');
   });
 
@@ -106,6 +112,7 @@ describe('PtyCliDriver Claude startup preparation', () => {
       expect(String(screen)).toContain('TASK_AFTER_TRUST');
       expect(events.some(event => String(event.data?.text ?? '').includes('EARLY_PROMPT'))).toBe(false);
       expect(events.some(event => String(event.data?.text ?? '').includes('EARLY_CONFIRM'))).toBe(false);
+      expect(events.filter(event => ['text', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['text', 'completed']);
     } finally {
       await driver.stop();
     }
@@ -189,7 +196,8 @@ describe('PtyCliDriver Claude startup preparation', () => {
 function agentConfig(fixture: string, home: string): AgentConfig {
   return {
     id: 'claude-startup-fixture', name: 'Claude startup fixture', command: process.execPath, args: [], protocol: 'pty-cli',
-    env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-config') }, cwd: home,
+    env: { HOME: home, CLAUDE_CONFIG_DIR: join(home, 'claude-config'),
+      MOCK_TRANSCRIPT_PATH: join(home, 'claude-config', 'projects', realpathSync(home).replace(/[^A-Za-z0-9-]/g, '-'), `${pinnedSessionUuid('claude-startup-session')}.jsonl`) }, cwd: home,
     permissionMode: 'full-trust', timeout: 600, capabilities: { pause: false, resume: false }, builtin: false,
   };
 }

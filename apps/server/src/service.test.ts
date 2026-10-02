@@ -390,14 +390,19 @@ describe('production PTY backend injection', () => {
     const runner = join(root, 'runner.mjs');
     writeFileSync(runner, [
       `#!${process.execPath}`,
-      "import { appendFileSync, existsSync } from 'node:fs';",
+      "import { appendFileSync, existsSync, realpathSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      "const sessionId = process.argv[process.argv.indexOf('--session-id') + 1];",
+      "const transcript = join(process.env.CLAUDE_CONFIG_DIR, 'projects', realpathSync(process.cwd()).replace(/[^A-Za-z0-9-]/g, '-'), sessionId + '.jsonl');",
       "process.stdin.setRawMode(true); process.stdin.setEncoding('utf8');",
       "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n'); let input = ''; let count = 0;",
       // The real adapter pastes a multiline routing block, then Enter commits it.
       "process.stdin.on('data', data => {",
       "  input += data; const end = input.indexOf('\\x1b[201~');",
       "  if (end < 0 || !input.slice(end + 6).includes('\\r')) return;",
-      "  input = ''; count++; const turn = count; appendFileSync('submissions', 'submitted\\n');",
+      "  const prompt = input.slice(input.indexOf('\\x1b[200~') + 6, end); input = '';",
+      "  appendFileSync(transcript, JSON.stringify({ type: 'user', sessionId, timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } }) + '\\n');",
+      "  count++; const turn = count; appendFileSync('submissions', 'submitted\\n');",
       "  process.stdout.write('\\x1b[2J\\x1b[HWorking (esc to interrupt)\\r\\n');",
       "  const timer = setInterval(() => {",
       "    if (!existsSync('finish-' + turn)) return; clearInterval(timer);",
@@ -436,11 +441,14 @@ describe('production PTY backend injection', () => {
       const before = createRepositories(database);
       let originalAttemptId: string;
       let originalSubmissionId: string;
+      let originalTurnId: string;
       try {
         const attempt = before.execution.getTaskExecution(task.id)!.currentAttempt!;
         originalAttemptId = attempt.attemptId;
         originalSubmissionId = attempt.submission!.submissionId;
+        originalTurnId = attempt.submission!.recovery!.turnId;
       } finally { before.close(); }
+      await vi.waitFor(async () => expect(await backend.getDutydeckMetadata('turn_id')).toBe(originalTurnId));
       await first.close();
       const persisted = createRepositories(database);
       try {
@@ -503,18 +511,24 @@ describe('production PTY backend injection', () => {
     const database = join(root, 'dutydeck.db');
     const seed = createRepositories(database, { newDatabaseAuthority: 'ledger_v1' });
     seed.close();
-    const fakeRunner = join(root, 'fake-claude-runner.sh');
+    const fakeRunner = join(root, 'fake-claude-runner.mjs');
     writeFileSync(fakeRunner, [
-      '#!/bin/sh',
-      "printf 'Claude Code v2.1.267 (mock)\\n❯ \\n'",
-      'while IFS= read -r line; do',
-      "  printf '\\033[2J\\033[HClaude Code v2.1.267 (mock)\\nhandled:%s\\n✳ Worked for 1s\\n❯ \\n' \"$line\"",
-      '  for f in "$CLAUDE_CONFIG_DIR"/projects/*/*.jsonl; do',
-      '    if [ -f "$f" ]; then',
-      '      printf \'{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"handled:%s"}],"stop_reason":"end_turn"}}\\n\' "$line" >> "$f"',
-      '    fi',
-      '  done',
-      'done',
+      `#!${process.execPath}`,
+      "import { appendFileSync, realpathSync } from 'node:fs';",
+      "import { join } from 'node:path';",
+      "const sessionId = process.argv[process.argv.indexOf('--session-id') + 1];",
+      "const transcript = join(process.env.CLAUDE_CONFIG_DIR, 'projects', realpathSync(process.cwd()).replace(/[^A-Za-z0-9-]/g, '-'), sessionId + '.jsonl');",
+      "const write = record => appendFileSync(transcript, JSON.stringify(record) + '\\n');",
+      "process.stdin.setRawMode(true); process.stdin.setEncoding('utf8'); let input = '';",
+      "process.stdout.write('Claude Code v2.1.267 (mock)\\r\\n❯ \\r\\n');",
+      "process.stdin.on('data', data => {",
+      "  input += data; const end = input.indexOf('\\x1b[201~');",
+      "  if (end < 0 || !input.slice(end + 6).includes('\\r')) return;",
+      "  const prompt = input.slice(input.indexOf('\\x1b[200~') + 6, end); input = '';",
+      "  write({ type: 'user', sessionId, timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } });",
+      "  write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'handled:' + prompt }], stop_reason: 'end_turn' } });",
+      "  process.stdout.write('\\x1b[2J\\x1b[HClaude Code v2.1.267 (mock)\\r\\n✳ Worked for 1s\\r\\n❯ \\r\\n');",
+      '});',
       '',
     ].join('\n'));
     chmodSync(fakeRunner, 0o700);
@@ -565,6 +579,9 @@ describe('production PTY backend injection', () => {
       ).stdout.trim());
       expect(originalPid).toBeGreaterThan(0);
 
+      // The CLI accepted the turn, but its history is no longer available for
+      // native resume. Shutdown must preserve that unverified original pane.
+      rmSync(transcript);
       await first.close();
       expect(spawnSync('tmux', ['has-session', '-t', backend.sessionName]).status).toBe(0);
 

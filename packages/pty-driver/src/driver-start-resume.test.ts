@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, utimesSync, readFileSync, rmSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { AgentConfig, NormalizedDriverEvent } from '@dutydeck/shared';
-import { createClaudeCodeAdapter } from '@dutydeck/cli-adapters';
+import { createClaudeCodeAdapter, createCliAdapter } from '@dutydeck/cli-adapters';
 import { TmuxBackend } from '@dutydeck/session-backends';
 import { childProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { PtyCliDriver } from './driver.js';
@@ -42,7 +42,7 @@ describe('start reconnects durable native history only with session evidence', (
     if (kind === 'grok-directory') {
       mkdirSync(join(env.GROK_HOME, 'sessions', encodeURIComponent(cwd), sessionId), { recursive: true });
       expect(resolveCliSessionId('grok', { sessionId, cwd, env, requireMarker: true })).toBe(sessionId);
-      adapter = { ...adapter, id: 'grok' };
+      adapter = { ...adapter, id: 'grok', capabilities: createCliAdapter('grok').capabilities };
     }
     const fresh = kind === 'new' || kind === 'grok-directory';
     const prompts: string[] = [];

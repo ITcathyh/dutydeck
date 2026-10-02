@@ -60,10 +60,11 @@ describe('PTY completion while Claude background agents are still running', () =
         capabilities: { pause: false, resume: true }, builtin: false },
       adapter: {
         ...createCliAdapter('claude-code'),
-        writeInput(target) {
+        writeInput(target, prompt) {
           submitted = true;
           submittedOutputAt = target.lastOutputAt?.();
           submittedProcessKey = target.processKey;
+          appendFileSync(transcript, JSON.stringify({ type: 'user', timestamp: new Date().toISOString(), message: { role: 'user', content: prompt } }) + '\n');
         },
       },
       backend, sessionId: 'ses_background-fixture', onEvent: event => events.push(event), onExit() {},
@@ -84,7 +85,7 @@ describe('PTY completion while Claude background agents are still running', () =
   const send = async () => {
     let settled = false;
     const pending = driver.send('LAUNCH_BG please start the background check').then(() => { settled = true; });
-    for (let attempt = 0; attempt < 10 && !submitted; attempt++) await Promise.resolve();
+    for (let attempt = 0; attempt < 30 && !submitted; attempt++) await Promise.resolve();
     expect(submitted).toBe(true);
     return { pending, settled: () => settled };
   };
@@ -185,6 +186,7 @@ describe('PTY completion while Claude background agents are still running', () =
     const first = await send();
     const processKey = submittedProcessKey;
     expect(processKey).toBeDefined();
+    append([JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'Current turn answer.' }] } })]);
     output(repaint(turnOneScreen));
     await vi.advanceTimersByTimeAsync(600);
     await first.pending;

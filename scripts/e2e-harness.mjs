@@ -245,6 +245,7 @@ const submitPrompt = rawPrompt => {
   const prompt = rawPrompt.trim();
   if (!prompt) return;
   const currentTurn = ++turn;
+  write({ type: 'user', sessionId: sessionArg, timestamp: new Date().toISOString(), message: { role: 'user', content: rawPrompt } });
   process.stdout.write('\\r\\nworking\\r\\n');
   // 慢速轮次必须持续吐 spinner 字符，否则 PTY 静默 2s（IdleDetector 的
   // QUIESCENCE_MS）就会被判为「这一轮结束了」——真实 CLI 正是靠 spinner 表示还在忙。

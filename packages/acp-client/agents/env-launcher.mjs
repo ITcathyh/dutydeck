@@ -1,5 +1,10 @@
 import { launchAgent } from './launcher-process.mjs';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+
+// The bundled server ships this beside the launcher. Standalone ACP packages
+// resolve the same policy from their declared shared dependency.
+const policyUrl = new URL('./child-environment.mjs', import.meta.url);
+const { childEnvironment } = await import(existsSync(policyUrl) ? policyUrl.href : '@dutydeck/shared/child-environment');
 
 const carrierKey = 'dutydeck_agent_env_file';
 const digestKey = 'dutydeck_agent_env_digest';
@@ -21,8 +26,7 @@ try {
   process.exit(2);
 }
 
-const env = { ...process.env, ...bridged };
-for (const key of Object.keys(env)) if (/^HERDR_/i.test(key)) delete env[key];
+const env = childEnvironment(process.env, bridged);
 delete env[carrierKey];
 delete env[digestKey];
 launchAgent(command, args, env);
