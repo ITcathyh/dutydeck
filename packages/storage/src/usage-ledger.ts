@@ -89,11 +89,13 @@ export function migrateUsagePricing(db: Database.Database): void {
   createUsageLedgerSchema(db);
 }
 
-interface LedgerRow { app_id: string | null; chat_id: string | null; actor_id: string | null; category: string | null; entries: number; cost_usd: number | null; estimated_cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; unavailable: number | null; unpriced: number | null; priced_entries: number | null }
+interface LedgerRow { app_id: string | null; chat_id: string | null; actor_id: string | null; category: string | null; entries: number; token_entries: number | null; partial_token_entries: number | null; cost_usd: number | null; estimated_cost_usd: number | null; input_tokens: number | null; output_tokens: number | null; cache_read_tokens: number | null; cache_write_tokens: number | null; unavailable: number | null; unpriced: number | null; priced_entries: number | null }
 interface CapRow { scope: UsageCapScope; app_id: string; chat_id: string; monthly_cost_usd: number; updated_at: string }
 
 const aggregates = `COUNT(*) AS entries, SUM(cost_usd) AS cost_usd, SUM(CASE WHEN cost_estimated = 1 THEN cost_usd END) AS estimated_cost_usd,
   SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens, SUM(cache_read_tokens) AS cache_read_tokens, SUM(cache_write_tokens) AS cache_write_tokens,
+  SUM(CASE WHEN input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cache_read_tokens IS NOT NULL OR cache_write_tokens IS NOT NULL THEN 1 ELSE 0 END) AS token_entries,
+  SUM(CASE WHEN (input_tokens IS NULL OR output_tokens IS NULL) AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL OR cache_read_tokens IS NOT NULL OR cache_write_tokens IS NOT NULL) THEN 1 ELSE 0 END) AS partial_token_entries,
   SUM(CASE WHEN data_status = 'unavailable' THEN 1 ELSE 0 END) AS unavailable,
   SUM(CASE WHEN data_status = 'unpriced' THEN 1 ELSE 0 END) AS unpriced,
   SUM(CASE WHEN cost_usd IS NOT NULL AND data_status IN ('reported', 'estimated') THEN 1 ELSE 0 END) AS priced_entries`;
@@ -116,7 +118,7 @@ function where(filter: UsageFilter): { sql: string; values: string[] } {
 
 function totalsOf(row: LedgerRow): UsageTotals {
   return {
-    entries: row.entries, costUsd: row.cost_usd ?? 0, estimatedCostUsd: row.estimated_cost_usd ?? 0,
+    entries: row.entries, tokenEntries: row.token_entries ?? 0, partialTokenEntries: row.partial_token_entries ?? 0, costUsd: row.cost_usd ?? 0, estimatedCostUsd: row.estimated_cost_usd ?? 0,
     inputTokens: row.input_tokens ?? 0, outputTokens: row.output_tokens ?? 0, cacheReadTokens: row.cache_read_tokens ?? 0, cacheWriteTokens: row.cache_write_tokens ?? 0,
     unavailable: row.unavailable ?? 0, unpriced: row.unpriced ?? 0, pricedEntries: row.priced_entries ?? 0,
     unknownCostEntries: row.entries - (row.priced_entries ?? 0), costCoverage: row.entries ? (row.priced_entries ?? 0) / row.entries : null

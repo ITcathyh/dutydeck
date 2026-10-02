@@ -1,3 +1,4 @@
+import type { SessionUsageSnapshot } from '@dutydeck/shared';
 import type { CreateWorkItemInput, WorkItem, WorkTemplate } from '@dutydeck/shared';
 import type { WorkspaceMode, WorkspaceResponse, WorkspaceCleanupPreview, WorkspaceCleanupResult, VerificationResponse, VerificationCommandInput, SkillDeliveryMetadata, SessionAutomationList, CreateSessionScheduleInput, UpdateSessionScheduleInput, SubscribeCiInput, SessionSchedule, CiSubscription } from '@dutydeck/shared';
 import type { WorkspaceOrganization, WorkspaceOrganizationSnapshot } from '@dutydeck/shared';
@@ -177,7 +178,7 @@ export type UsageGroupResponse = Omit<UsageGroup, keyof UsageCoverage> & Partial
 export type UsageSummaryWindow = { since: string; totals: UsageTotalsResponse; bots: UsageGroupResponse[]; chats: UsageGroupResponse[]; actors: UsageGroupResponse[]; categories: UsageGroupResponse[] };
 export type UsageSummary = { month: UsageSummaryWindow; week: UsageSummaryWindow; caps: UsageCap[]; backgroundBudget?: UsageBackgroundBudget };
 /** own：本任务自己的执行；subSteps：归到本任务名下的编排子步骤与 Leader 规划。 */
-export type SessionUsage = { own: UsageTotalsResponse; subSteps: UsageTotalsResponse };
+export type SessionUsage = { own: UsageTotalsResponse; subSteps: UsageTotalsResponse; snapshot?: SessionUsageSnapshot };
 export type UsageCapInput = { scope: 'bot'; appId: string; monthlyCostUsd: number } | { scope: 'group'; appId: string; chatId: string; monthlyCostUsd: number };
 
 export type ManagedGroup = {

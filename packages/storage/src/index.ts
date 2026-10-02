@@ -1,7 +1,7 @@
 import { assertBotProcessConfigWrite } from './bot-process.js';
 export { assertBotProcessStartup, botProcessKey, botProcessMigrationKey, type BotProcessBinding } from './bot-process.js';
 import Database from 'better-sqlite3';
-import { and, asc, desc, eq, gt, lt } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, lt, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/better-sqlite3';
 import { chmodSync, closeSync, constants, existsSync, mkdirSync, openSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
@@ -329,6 +329,16 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
       async listRecent(sessionId, limit) {
         const rows = db.select().from(events).where(eq(events.sessionId, sessionId)).orderBy(desc(events.sequence)).limit(limit).all();
         return rows.reverse().map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[];
+      },
+      async listLatestUsage(sessionId) {
+        const rows = await Promise.all(['used', 'rateLimits.fiveHour.usedPercent', 'rateLimits.sevenDay.usedPercent'].map(async field => {
+          return db.select().from(events).where(and(eq(events.sessionId, sessionId), eq(events.type, 'status'),
+            sql`json_extract(${events.data}, '$.state') = 'usage'`,
+            sql`json_type(${events.data}, ${`$.${field}`}) IN ('integer', 'real')`,
+            sql`json_extract(${events.data}, ${`$.${field}`}) >= 0`))
+            .orderBy(desc(events.sequence)).limit(1).all();
+        }));
+        return rows.flat().map(r => ({ ...r, data: JSON.parse(r.data) })) as AgentEvent[];
       },
       async listWindow(sessionId, options = {}) {
         const requestedLimit = Number.isFinite(options.limit) ? Math.trunc(options.limit!) : EVENT_WINDOW_DEFAULT_LIMIT;

@@ -156,3 +156,13 @@ describe('usage pricing migration and durable automatic allowances', () => {
     } finally { repos.close(); rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+it('reports token coverage independently of costs, including zero and partial readings', async () => {
+  const repos = createRepositories(':memory:');
+  try {
+    await repos.usage.append(entry({ attemptId: 'cost-only', costUsd: 1 }));
+    await repos.usage.append(entry({ attemptId: 'zero', inputTokens: 0, outputTokens: 0, costUsd: 0 }));
+    await repos.usage.append(entry({ attemptId: 'partial', inputTokens: 25, dataStatus: 'unpriced' }));
+    expect(await repos.usage.totals({ sessionId: 'ses_1' })).toMatchObject({ entries: 3, tokenEntries: 2, partialTokenEntries: 1, inputTokens: 25, outputTokens: 0 });
+  } finally { repos.close(); }
+});
