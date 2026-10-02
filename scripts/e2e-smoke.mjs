@@ -31,6 +31,7 @@
  * 用法
  *   node scripts/e2e-smoke.mjs                 # mock 模式（默认）
  *   node scripts/e2e-smoke.mjs --real          # 真实 CLI
+ *   node scripts/e2e-smoke.mjs --real --real-claude-settings /path/profile.json --real-claude-model model
  *   node scripts/e2e-smoke.mjs --port 14500 --verbose
  *   node scripts/e2e-smoke.mjs --server-entry /tmp/install/node_modules/dutydeck/dist/cli.js
  */
@@ -55,6 +56,9 @@ const value = (name, fallback) => {
   return index >= 0 && argv[index + 1] ? argv[index + 1] : fallback;
 };
 const REAL = flag('real');
+const REAL_CLAUDE_SETTINGS = value('real-claude-settings', '');
+const REAL_CLAUDE_MODEL = value('real-claude-model', '').trim();
+if (REAL && REAL_CLAUDE_SETTINGS && !existsSync(resolve(REAL_CLAUDE_SETTINGS))) throw new Error('real-claude-settings 文件不存在');
 const VERBOSE = flag('verbose');
 const ARTIFACT_DIR = process.env.DUTYDECK_E2E_ARTIFACT_DIR || value('artifact-dir', '');
 if (ARTIFACT_DIR) mkdirSync(ARTIFACT_DIR, { recursive: true });
@@ -84,6 +88,7 @@ const POLLUTING_ENV = ['ANTHROPIC_BASE_URL', 'ANTHROPIC_MODEL', 'ANTHROPIC_AUTH_
 const BASE = `http://127.0.0.1:${PORT}`;
 let stepNumber = 0;
 const results = [];
+const diagnosticSessions = new Set();
 let activeContext;
 let activePage;
 const serverLogGlobal = [];
@@ -203,9 +208,10 @@ const bracketedPasteEnd = '\\u001b[201~';
 
 const submitPrompt = rawPrompt => {
   const prompt = rawPrompt.trim();
-  if (!prompt) return;
+  if (!prompt) { process.stdout.write('\\r\\n\\u276f '); return; }
   if (confirmTurn) { if (prompt === 'y') { const finish = confirmTurn; confirmTurn = undefined; finish(); } return; }
   const currentTurn = ++turn;
+  write({ type: 'user', sessionId: sessionArg, timestamp: new Date().toISOString(), message: { role: 'user', content: rawPrompt } });
   process.stdout.write('\\r\\nworking\\r\\n');
   const finish = () => {
     write({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'thinking', thinking: 'mock thinking block' }] } });
@@ -222,6 +228,8 @@ const submitPrompt = rawPrompt => {
   else setTimeout(finish, 300);
 };
 
+// Match the interactive CLI: canonical TTY input truncates lines above 4095 bytes.
+if (process.stdin.isTTY) process.stdin.setRawMode(true);
 process.stdin.setEncoding('utf8');
 process.stdin.on('data', chunk => {
   buffer += chunk;
@@ -434,12 +442,13 @@ async function main() {
     });
     serverEnv.DUTYDECK_AGENTS_JSON = JSON.stringify([{
       id: 'claude-code',
-      name: 'Claude Code',
+      name: 'Real Claude PTY',
       command: 'claude',
-      args: [],
+      args: REAL_CLAUDE_SETTINGS ? ['--settings', resolve(REAL_CLAUDE_SETTINGS)] : [],
       protocol: 'pty-cli',
       cwd: workspace,
       env: bridgedCliEnv,
+      ...(REAL_CLAUDE_MODEL ? { model: REAL_CLAUDE_MODEL } : {}),
       permissionMode: 'full-trust',
       timeout: 600,
       capabilities: { pause: false, resume: true },
@@ -613,7 +622,7 @@ async function main() {
 
   const agentSelect = createTaskForm.getByText('执行任务的 Agent', { exact: true }).locator('..').getByRole('button');
   await agentSelect.click();
-  const browserAgentName = REAL ? 'Claude Code' : 'Mock Claude';
+  const browserAgentName = REAL ? 'Real Claude PTY' : 'Mock Claude';
   // Option 的 accessible name 还会包含版本号，因此按 Agent 名称子串匹配。
   await page.getByRole('option', { name: browserAgentName }).click();
   assert((await agentSelect.textContent())?.includes(browserAgentName),
@@ -635,6 +644,7 @@ async function main() {
   assert(typeof browserSession?.id === 'string' && browserSession.id.startsWith('ses_'),
     `浏览器创建了真实任务运行：${browserSession?.id}`);
   browserSessionId = browserSession.id;
+  diagnosticSessions.add(browserSessionId);
   browserWorkspace = browserSession.cwd;
   assert(browserWorkspace !== workspace && existsSync(join(browserWorkspace, skillRelativePath)), 'Web 默认创建独立工作目录，保留已提交的项目 Skill');
 
@@ -757,6 +767,7 @@ async function main() {
   const created = await request('POST', '/api/sessions', { agentId: REAL ? 'claude-code' : 'ccflash', cwd: workspace });
   assert(created.status === 200, `POST /api/sessions 返回 200（实际 ${created.status}）`);
   const session = created.json;
+  if (typeof session?.id === 'string') diagnosticSessions.add(session.id);
   assert(typeof session?.id === 'string' && session.id.startsWith('ses_'), `任务运行已创建：${session?.id}`);
   assert(session.protocol === 'pty-cli' || claudeCode.protocol === 'pty-cli', '任务运行走 pty-cli 协议');
 
@@ -896,6 +907,46 @@ async function main() {
 
 // ── 入口与有界收尾 ──────────────────────────────────────────────────────────
 let exitCode = 0;
+async function captureFailureDiagnostics() {
+  const snapshots = await Promise.all([...diagnosticSessions].map(async sessionId => {
+    const result = { sessionId, capturedAt: new Date().toISOString() };
+    await Promise.all(['', '/tasks', '/events?limit=200&direction=backward'].map(async suffix => {
+      const key = suffix.startsWith('/events') ? 'events' : suffix === '/tasks' ? 'tasks' : 'session';
+      try {
+        const response = await fetch(`${BASE}/api/sessions/${encodeURIComponent(sessionId)}${suffix}`, { signal: AbortSignal.timeout(2_000) });
+        const data = await response.json();
+        result[key] = key === 'session' ? { id: data.id, state: data.state, agentId: data.agentId, cwd: data.cwd, error: data.error } : data;
+      } catch (error) { result[key] = { error: String(error) }; }
+    }));
+    // Subscribe only to this smoke's own terminal, without sending keys or
+    // resize. The server supplies an initial authoritative screen snapshot.
+    result.terminal = await new Promise(resolveFrames => {
+      const frames = [];
+      const socket = new (loadWebSocket())(`ws://127.0.0.1:${PORT}/api/terminal/${encodeURIComponent(sessionId)}`);
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true; clearTimeout(timer);
+        try { socket.close(); } catch {}
+        resolveFrames(frames);
+      };
+      const timer = setTimeout(finish, 3_000);
+      socket.on('message', raw => {
+        try {
+          const frame = JSON.parse(String(raw));
+          if (typeof frame.data === 'string') frame.data = frame.data.slice(-100_000);
+          if (frames.length < 10) frames.push(frame);
+          if (frame.type === 'snapshot') finish();
+        } catch {}
+      });
+      socket.on('error', error => { frames.push({ error: String(error) }); finish(); });
+      socket.on('close', finish);
+    });
+    return result;
+  }));
+  writeFileSync(join(ARTIFACT_DIR, 'smoke-runtime-diagnostics.json'), JSON.stringify(snapshots, null, 2), 'utf8');
+}
+
 let finalizePromise = null;
 
 function safeFinalize(reason, targetExitCode) {
@@ -905,6 +956,9 @@ function safeFinalize(reason, targetExitCode) {
   finalizePromise = (async () => {
     // 1. 在关闭任何资源前，先保留现场证据
     if (ARTIFACT_DIR) {
+      if (targetExitCode !== 0) {
+        try { await captureFailureDiagnostics(); } catch {}
+      }
       if (activeContext) {
         if (activePage && !activePage.isClosed() && targetExitCode !== 0) {
           try {

@@ -19,6 +19,7 @@ const aliases = new Map([
   ['@dutydeck/secret-provider', 'packages/secret-provider/src/index.ts'],
   ['@dutydeck/session-backends', 'packages/session-backends/src/index.ts'],
   ['@dutydeck/shared', 'packages/shared/src/index.ts'],
+  ['@dutydeck/shared/child-environment', 'packages/shared/runtime/child-environment.mjs'],
   ['@dutydeck/storage', 'packages/storage/src/index.ts'],
   ['@dutydeck/terminal-renderer', 'packages/terminal-renderer/src/index.ts'],
   ['@dutydeck/transports', 'packages/transports/src/index.ts']
@@ -51,6 +52,7 @@ const agentsDir = resolve(serverRoot, 'dist/agents');
 mkdirSync(agentsDir, { recursive: true });
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/claude-acp.mjs'), resolve(agentsDir, 'claude-acp.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/env-launcher.mjs'), resolve(agentsDir, 'env-launcher.mjs'));
+cpSync(resolve(workspaceRoot, 'packages/shared/runtime/child-environment.mjs'), resolve(agentsDir, 'child-environment.mjs'));
 cpSync(resolve(workspaceRoot, 'packages/acp-client/agents/launcher-process.mjs'), resolve(agentsDir, 'launcher-process.mjs'));
 const assetsDir = resolve(serverRoot, 'dist/assets');
 mkdirSync(assetsDir, { recursive: true });

@@ -1,0 +1,12 @@
+ ▐▛███▛█   Claude Code v2.1.287
+▝▜██████▀  Relay · auto_model/alwaysday1_max with xhigh effort · API Usage Billing
+ ▝▝   ▝▝   /workspace/trusted-project
+
+  Updated to latest. Got 6 features, 49 bugfixes, and 33 other changes.
+  code.claude.com/docs/en/changelog for details
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ Try "refactor <filepath>"
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents                              Not logged in · Run /login

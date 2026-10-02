@@ -5,6 +5,9 @@ import type { PtyLike } from '../types.js';
 
 // The observed pane's last four nonempty lines are verbatim; history above is anonymized.
 const resumedComposer = readFileSync(new URL('../fixtures/claude-resume-ready/screen.txt', import.meta.url), 'utf8');
+// Real 2.1.287 smoke startup screen; only the isolated workspace is anonymized.
+// Readiness means input can be written, independently of provider login.
+const placeholderComposer = readFileSync(new URL('../fixtures/claude-placeholder-ready/screen.txt', import.meta.url), 'utf8');
 const cwd = '/workspace/trusted-project';
 const trustScreen = (selected: 'No, exit' | 'Yes, I trust this folder', path = cwd) => [
   '─'.repeat(120), 'Accessing workspace:', '', path, '',
@@ -39,6 +42,11 @@ class TrustBackend implements PtyLike {
 }
 
 describe('Claude family startup trust confirmation', () => {
+  it('accepts a boxed native placeholder without sending startup keys', async () => {
+    const backend = new TrustBackend(placeholderComposer);
+    await prepareClaudeFamilyInput(backend, { sessionId: 'sid', cwd, permissionMode: 'full-trust' });
+    expect(backend.writes).toEqual([]);
+  });
   it('only enables screen-driven startup confirmation for Claude Code', () => {
     expect(createClaudeFamilyAdapter('claude-code').prepareInput).toBe(prepareClaudeFamilyInput);
     expect(createClaudeFamilyAdapter('seed').prepareInput).toBeUndefined();
@@ -148,6 +156,11 @@ describe('Claude family startup trust confirmation', () => {
     ['truncated resumed footer', resumedComposer.trimEnd().split('\n').slice(0, -1).join('\n')],
     ['unknown resumed footer', resumedComposer.replace(/⏵⏵[^\n]*/, 'Press Enter to continue')],
     ['unfinished composer', resumedComposer.replace('\n❯\n', '\n❯ unfinished input\n')],
+    ['unboxed placeholder', placeholderComposer.replace(/─{120}/, 'partial')],
+    ['incomplete placeholder', placeholderComposer.replace('Try "refactor <filepath>"', 'Try "refactor <filepath>')],
+    ['ordinary draft', placeholderComposer.replace('Try "refactor <filepath>"', 'refactor this file')],
+    ['permission menu above placeholder', `Permission required\n❯ 1. Yes\n  2. No\n${placeholderComposer}`],
+    ['trust dialog above placeholder', `${trustScreen('No, exit')}\n${placeholderComposer}`],
     ['historical empty prompt alongside composer', `❯\n${resumedComposer}`],
     ['quoted historical composer followed by output', `${resumedComposer}More response text`],
     ['permission choice above stale composer', `Permission required\n❯ 1. Yes\n  2. No\n${resumedComposer}`],

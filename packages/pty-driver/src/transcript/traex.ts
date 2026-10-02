@@ -22,10 +22,13 @@
  * final answer that TRAE recorded elsewhere.
  */
 import type { NormalizedDriverEvent } from '@dutydeck/shared';
-import { traeSessionsRoot, type CliPathEnv } from '../cli-paths.js';
+import { traeHistoryPath, traeSessionsRoot, type CliPathEnv } from '../cli-paths.js';
 import { resolveCliSessionId } from '../session-id/index.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
 import { findRolloutBySessionId, mapCodexEntry, resolveNewestRollout } from './codex.js';
+import { codexInputText } from './input-receipt.js';
+import { CodexInputReceipt } from './codex-input-receipt.js';
+import { CodexToolProjection } from './codex-tools.js';
 
 /**
  * Locate the TRAE rollout jsonl for a session.
@@ -112,8 +115,11 @@ export interface TraexTranscriptTailerOptions {
 
 export class TraexTranscriptTailer implements TranscriptEventSource {
   private readonly tailer: JsonlTailer;
+  private readonly inputReceipt?: CodexInputReceipt;
 
   constructor(opts: TraexTranscriptTailerOptions) {
+    if (opts.sessionId) this.inputReceipt = new CodexInputReceipt(traeHistoryPath(opts.env),
+      () => resolveCliSessionId('traex', { sessionId: opts.sessionId!, cwd: opts.cwd, env: opts.env }));
     const explicit = opts.transcriptPath;
     // Memoise the session-scoped resolution: JsonlTailer re-resolves every
     // ~300ms tick, and recovering the CLI's own session id means reading
@@ -122,23 +128,30 @@ export class TraexTranscriptTailer implements TranscriptEventSource {
     // tailer for the full reasoning.
     let resolved: string | undefined;
     const resolveOnce = () => (resolved ??= resolveTraexRolloutPath(opts.cwd, opts.env, opts.sessionId));
+    const projection = new CodexToolProjection(mapTraexEntry);
     this.tailer = new JsonlTailer({
       resolvePath: explicit
         ? () => explicit
         : opts.sessionId
           ? resolveOnce
           : () => resolveTraexRolloutPath(opts.cwd, opts.env),
-      mapEntry: mapTraexEntry,
+      mapEntry: entry => projection.map(entry),
+      resetMapping: () => projection.reset(),
+      inputText: codexInputText,
+      deduplicateTools: true,
       pollIntervalMs: opts.pollIntervalMs,
       // See the Codex tailer — same dialect, same reasoning.
       watchForSwitch: !explicit,
     });
   }
 
-  start(): void { this.tailer.start(); }
-  flush(): Promise<void> { return this.tailer.flush(); }
+  start(): void { this.inputReceipt?.start(); this.tailer.start(); }
+  async flush(): Promise<void> { await Promise.all([this.tailer.flush(), this.inputReceipt?.flush()]); }
   checkpoint(): TranscriptCursor { return this.tailer.checkpoint(); }
   restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
-  stop(): void { this.tailer.stop(); }
+  stop(): void { this.inputReceipt?.stop(); this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
+  waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    return this.inputReceipt ? this.inputReceipt.waitForInput(this.tailer, prompt, signal) : this.tailer.waitForInput(prompt, signal);
+  }
 }

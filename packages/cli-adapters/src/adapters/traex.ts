@@ -78,7 +78,7 @@ const TRAEX_STATIC_BUSY_PATTERN = new RegExp(
 export function createTraexAdapter(): CliAdapter {
   return {
     id: 'traex',
-    capabilities: { resume: true },
+    capabilities: { resume: true, nativeInputReceipt: true },
 
     buildArgs({ resume, resumeSessionId, cwd, model, reasoningEffort, permissionMode }: AdapterSessionContext): string[] {
       const usable = usableResumeId(resumeSessionId);
@@ -125,6 +125,7 @@ export function createTraexAdapter(): CliAdapter {
     },
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
+      prompt = prompt.replace(/\r\n?/g, '\n');
       // 与 Codex 相同的 bracketed-paste 策略：多行消息不能被内嵌 \n 拆成多个 turn。
       if (backend.pasteText) {
         (await backend.pasteText(prompt));

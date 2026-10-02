@@ -65,6 +65,7 @@ const firstWriteSeen = new WeakSet<object>();
 
 /** Claude 家族的输入时序：分块键入 + soft-newline，最后一个 Enter 才提交。 */
 export async function writeClaudeFamilyInput(backend: PtyLike, prompt: string): Promise<void> {
+  prompt = prompt.replace(/\r\n?/g, '\n');
   const processKey = backend.processKey ?? backend;
   const isFirstWrite = !firstWriteSeen.has(processKey);
   if (isFirstWrite) {
@@ -122,15 +123,20 @@ export function pushClaudeFamilyBypassArgs(args: string[], permissionMode: Adapt
 
 function isComposerScreen(screen: string): boolean {
   const lines = screen.replace(/\r/g, '').split('\n').map(line => line.trim()).filter(Boolean);
+  // 2.1.287 paints an empty composer's hint as `❯ Try "…"`. Require
+  // its complete matching box, so arbitrary drafts/history are not readiness.
+  const composerLine = (line: string, index: number) => line === '❯'
+    || (/^❯\s+Try "[^"\r\n]+"$/.test(line) && /^─{8,}$/.test(lines[index - 1] ?? '')
+      && lines[index + 1] === lines[index - 1]);
   const footer = lines.slice(-4);
   // Resuming long history can scroll the version banner out of capture-pane.
   // Accept only the complete current empty composer, never a lone historical prompt glyph.
   const resumedComposer = footer.length === 4 && /^─{8,}$/.test(footer[0]!)
-    && footer[1] === '❯' && footer[2] === footer[0]
+    && composerLine(footer[1]!, lines.length - 3) && footer[2] === footer[0]
     && /^(?:⏵⏵ bypass permissions on \(shift\+tab to cycle\)(?: · ← for agents)?|\? for shortcuts)$/.test(footer[3]!);
   const choiceMenu = lines.some((line, index) => /^(?:Permission required|Do you want to (?:proceed|allow)|Select an option|Enter to select)\b/i.test(line)
     && lines.slice(index + 1, index + 4).some(choice => /^❯\s+\S/.test(choice)));
-  return lines.filter(line => line === '❯').length === 1
+  return lines.filter(composerLine).length === 1
     && (lines.some(line => /Claude Code v\d/.test(line)) || resumedComposer)
     && !lines.some(line => /^(Accessing workspace:|Quick safety check:|Security guide|Enter to confirm)/.test(line))
     && !lines.some(line => /^(?:❯\s*)?(?:No, exit|Yes, I trust this folder)$/.test(line))
@@ -218,7 +224,7 @@ export async function prepareClaudeFamilyInput(backend: PtyLike, ctx: AdapterSes
 export function createClaudeFamilyAdapter(id: string): CliAdapter {
   return {
     id,
-    capabilities: { resume: true },
+    capabilities: { resume: true, nativeInputReceipt: true },
 
     buildArgs({ sessionId, resume, resumeSessionId, model, permissionMode, env }: AdapterSessionContext): string[] {
       // --session-id/--resume 只接受裸 UUID：dutydeck 的 "ses_<uuid>" 剥前缀，
@@ -266,6 +272,7 @@ export function createClaudeFamilyAdapter(id: string): CliAdapter {
 
     completionPattern: CLAUDE_FAMILY_COMPLETION_RE,
     screenBusyPattern: /\besc to interrupt\b/i,
+    screenCancelledPattern: /^\s*Interrupted · What should Claude do instead\?\s*$/m,
     screenActivityPattern: /^\s*[*·✢✳✶✻✽]\s+\p{L}[\p{L} '-]*(?:…|\.{3})(?:[ \t].*)?$/u,
     backgroundWaitPattern: CLAUDE_FAMILY_BACKGROUND_WAIT_RE,
     readyPattern: /❯/,

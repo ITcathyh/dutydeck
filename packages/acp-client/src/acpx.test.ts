@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -355,6 +356,7 @@ function agentConfig() {
 }
 
 it('preserves Claude quota metadata through real ACPX with a persistent session key', async () => {
+  vi.stubEnv('BOTMUX_SESSION_ID', 'sentinel-outer-session');
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-acp-quota-')); dirs.push(cwd);
   const events: any[] = [];
   const sessionKey = 'usage_hud_regression';
@@ -363,7 +365,13 @@ it('preserves Claude quota metadata through real ACPX with a persistent session 
     await adapter.start(); await adapter.send('report usage rate limits');
     expect(events.find(e => e.data?.rateLimits)?.data).toMatchObject({ state: 'usage', used: 1200, size: 200000, rateLimits: { fiveHour: { usedPercent: 42, resetsAt: 1791000000 }, sevenDay: { usedPercent: 75, resetsAt: 1791500000 } } });
     const record = await createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') }).load(sessionKey);
-    expect(record?.acpx?.session_options?.env).toEqual({ dutydeck_session_id: sessionKey });
+    // Launcher metadata is persisted with legal keys and consumed before the
+    // final Agent spawn; the real child-environment test checks that boundary.
+    expect(record?.acpx?.session_options?.env).toEqual({
+      dutydeck_session_id: sessionKey,
+      dutydeck_agent_env_file: join(cwd, '.dutydeck', 'runtime-env', `${createHash('sha256').update(sessionKey).digest('hex')}.json`),
+      dutydeck_agent_env_digest: createHash('sha256').update('{}').digest('hex')
+    });
     expect(JSON.stringify(events.find(e => e.data?.rateLimits))).not.toContain('private');
-  } finally { await adapter.stop(); }
+  } finally { await adapter.stop(); vi.unstubAllEnvs(); }
 });

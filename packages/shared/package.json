@@ -6,6 +6,10 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
+    "./child-environment": {
+      "types": "./runtime/child-environment.d.mts",
+      "import": "./runtime/child-environment.mjs"
+    },
     ".": {
       "types": "./dist/index.d.ts",
       "development": "./src/index.ts",
@@ -13,6 +17,7 @@
     }
   },
   "files": [
+    "runtime",
     "src/index.ts",
     "src/group-policy.ts",
     "dist/index.js",

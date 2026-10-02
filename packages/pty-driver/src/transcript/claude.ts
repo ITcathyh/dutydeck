@@ -30,6 +30,7 @@ import { claudeProjectDir, type CliPathEnv } from '../cli-paths.js';
 import { byMtimeDesc, parseJsonlObjects, readHead, walkFiles } from '../session-id/fs-scan.js';
 import { isUsableMarker } from '../session-id/marker.js';
 import { JsonlTailer, type TranscriptCursor, type TranscriptEventSource } from './tail.js';
+import { claudeInputText } from './input-receipt.js';
 
 /** Head window per candidate when scanning for the marker. It rides the FIRST
  *  user prompt, so a small window suffices and a long conversation is never
@@ -402,6 +403,7 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
         }
         return events;
       },
+      inputText: claudeInputText,
       pollIntervalMs: opts.pollIntervalMs,
       /**
        * Re-resolving each tick is what lets the tailer attach late: the jsonl
@@ -429,6 +431,8 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   restore(cursor: TranscriptCursor): void { this.tailer.restore(cursor); }
   stop(): void { this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
+  onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
+  waitForInput(prompt: string, signal: AbortSignal): Promise<void> { return this.tailer.waitForInput(prompt, signal); }
   pendingBackgroundWork(): number { return this.backgroundWork; }
   resetBackgroundWork(): void { this.backgroundWork = 0; }
   takeTurnError(): NormalizedDriverEvent | undefined {

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { assertNativeContextRecord, createAcpRuntime, createAgentRegistry, createRuntimeStore, type AcpPermissionDecision, type AcpRuntime, type AcpRuntimeResourceScope, type AcpRuntimeHandle, type AcpRuntimeProcessEvent, type AcpRuntimeStatus, type AcpRuntimeTurn, type AcpSessionStore } from 'acpx/runtime';
 import type { AgentConfig, AgentDriver, DriverSteeringOutcome, NormalizedDriverEvent, PermissionMode, ToolRiskPolicy, DriverSubmission, DriverSubmissionInput, NativeContextIdentity, NativeContextExpected, NativeConfigurationRequest, NativeConfigurationProof, OperationPermit, ChildPermit } from '@dutydeck/shared';
 import { claudeRateLimits, permissionDisplayText, taskExecutionSchemas, canonicalExecutionJson } from '@dutydeck/shared';
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { testRegexWithTimeout } from './regex-timeout.js';
 import { PROCESS_CPU_MIN_WINDOW_MS, ProcessTreeCpu } from './process-cpu.js';
 
@@ -31,6 +32,12 @@ function envLauncherPath() {
 const persistedEnvKey = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/;
 const bridgedAgentEnvFileKey = 'dutydeck_agent_env_file';
 const bridgedAgentEnvDigestKey = 'dutydeck_agent_env_digest';
+const environmentBoundaryError = () => new Error('ACP_ENVIRONMENT_BOUNDARY_CHANGED: 旧会话的启动环境含其他会话身份或服务密钥。请清理服务启动环境后再恢复；原会话记录已保留。');
+
+function inheritedEnvironmentNeedsCleanup() {
+  const clean = childEnvironment(process.env);
+  return Object.entries(process.env).some(([key, value]) => typeof value === 'string' && clean[key] !== value);
+}
 /**
  * Agents known to honour `_meta.steering.idleBehavior: 'promptRequired'`, by initialize `agentInfo.name`.
  * Advertising `_meta.steering.supported` is not enough and the initialize response carries no field for this:
@@ -63,17 +70,18 @@ export interface AcpxAgentLaunch {
 }
 
 /** Prepare the ACPX boundary without persisting vendor env names or values. */
-export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDirectory: string; sessionKey: string }): AcpxAgentLaunch {
+export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDirectory: string; sessionKey: string; forceLauncher?: boolean }): AcpxAgentLaunch {
   const { persisted, bridged } = splitAgentEnvironment(agent.env);
-  // Keep the direct ACP launch when no expansion or inherited pane cleanup is needed.
-  if (Object.keys(bridged).length === 0 && !Object.keys(process.env).some(key => /^HERDR_/i.test(key))) {
+  // Preserve the native argv of clean direct launches. Dirty environments and
+  // uppercase accounts need the launcher; never mutate the daemon snapshot.
+  if (!options.forceLauncher && !inheritedEnvironmentNeedsCleanup() && Object.keys(bridged).length === 0) {
     return { command: [agent.command, ...agent.args], sessionOptions: buildAcpxSessionOptions(agent), cleanup() {} };
   }
-
+  // Carry all explicit values so current scopes/accounts can survive ambient cleanup.
   mkdirSync(options.runtimeDirectory, { recursive: true, mode: 0o700 });
   chmodSync(options.runtimeDirectory, 0o700);
   const identity = createHash('sha256').update(options.sessionKey).digest('hex');
-  const payload = JSON.stringify(bridged);
+  const payload = JSON.stringify({ ...persisted, ...bridged });
   const environmentFile = join(options.runtimeDirectory, `${identity}.json`);
   writeFileSync(environmentFile, payload, { encoding: 'utf8', mode: 0o600 });
   chmodSync(environmentFile, 0o600);
@@ -84,7 +92,9 @@ export function prepareAcpxAgentLaunch(agent: AgentConfig, options: { runtimeDir
       env: {
         ...persisted,
         [bridgedAgentEnvFileKey]: environmentFile,
-        [bridgedAgentEnvDigestKey]: createHash('sha256').update(payload).digest('hex')
+        // Keep the existing vendor-account digest so adding the cleanup
+        // launcher does not discard a native session during an upgrade.
+        [bridgedAgentEnvDigestKey]: createHash('sha256').update(JSON.stringify(bridged)).digest('hex')
       }
     },
     cleanup() { rmSync(environmentFile, { force: true }); }
@@ -213,7 +223,7 @@ export class AcpxAdapter implements AgentDriver {
   private readonly sessionKey: string;
   private riskPolicy?: ToolRiskPolicy;
   private permissionMode: PermissionMode;
-  private readonly launch: AcpxAgentLaunch;
+  private launch: AcpxAgentLaunch;
   // An adapter owns one lifetime. interrupt/resume retain it; stop revokes it.
   private stopped = false;
   private readonly revocation = new AbortController();
@@ -243,11 +253,12 @@ export class AcpxAdapter implements AgentDriver {
     this.permissionMode = agent.permissionMode;
     this.sessionStore = createRuntimeStore({ stateDir: join(cwd, '.dutydeck', 'acpx') });
     this.launch = prepareAcpxAgentLaunch(agent, { runtimeDirectory: join(cwd, '.dutydeck', 'runtime-env'), sessionKey: this.sessionKey });
+    const registry = createAgentRegistry({ overrides: { [agent.id]: this.launch.command } });
     this.runtime = createAcpRuntime({
       cwd,
       onProcess: event => this.observeProcess(event),
       sessionStore: this.sessionStore,
-      agentRegistry: createAgentRegistry({ overrides: { [agent.id]: this.launch.command } }),
+      agentRegistry: { ...registry, resolve: name => name === agent.id ? this.launch.command : registry.resolve(name) },
       // `ask` must not silently auto-approve direct read capabilities. ACP
       // permission requests still flow through onPermissionRequest below;
       // capabilities the host cannot intercept fail closed.
@@ -367,6 +378,12 @@ export class AcpxAdapter implements AgentDriver {
     const record = await this.sessionStore.load(this.sessionKey);
     this.assertActive();
     if (!record) return;
+    if (this.launch.command[1] === envLauncherPath()
+      && JSON.stringify(record.agentArgv) === JSON.stringify([this.agent.command, ...this.agent.args])) {
+      // ACPX would otherwise silently create a new native session on argv
+      // mismatch. Keep the old context intact until the ambient environment is clean.
+      throw environmentBoundaryError();
+    }
     const stored = record.acpx?.session_options?.env ?? {};
     if (scopedKeys.every(key => stored[key] === desired[key])) return;
     record.acpx = { ...record.acpx, reset_on_next_ensure: true };
@@ -424,6 +441,30 @@ export class AcpxAdapter implements AgentDriver {
   }
   private async ensureHandle() {
     this.assertActive();
+    if (!this.handle) {
+      const record = await this.sessionStore.load(this.sessionKey);
+      this.assertActive();
+      const wrapped = [process.execPath, envLauncherPath(), this.agent.command, ...this.agent.args];
+      const digest = createHash('sha256').update(JSON.stringify(splitAgentEnvironment(this.agent.env).bridged)).digest('hex');
+      const savedEnv = record?.acpx?.session_options?.env;
+      if (typeof savedEnv?.[bridgedAgentEnvFileKey] === 'string' && typeof savedEnv?.[bridgedAgentEnvDigestKey] === 'string'
+        && /(?:^|[\\/])env-launcher\.mjs$/.test(record?.agentArgv?.[1] ?? '')
+        && JSON.stringify(record?.agentArgv) !== JSON.stringify(wrapped)) {
+        // Transport markers identify a prior Dutydeck bridge, but never grant
+        // authority to execute an unverified launcher from another release.
+        throw new Error('ACP_LAUNCHER_VERSION_CHANGED: 旧会话启动器版本变化，无法自动核验；原会话记录已保留。');
+      }
+      // A prior empty bridge remains a bridge after ambient cleanup. Only
+      // recognize this exact installed launcher/agent argv and account digest.
+      if (this.launch.command[1] !== envLauncherPath() && JSON.stringify(record?.agentArgv) === JSON.stringify(wrapped)
+        && record?.acpx?.session_options?.env?.[bridgedAgentEnvDigestKey] === digest) {
+        this.launch.cleanup();
+        this.launch = prepareAcpxAgentLaunch(this.agent, { runtimeDirectory: join(this.agent.cwd ?? process.cwd(), '.dutydeck', 'runtime-env'), sessionKey: this.sessionKey, forceLauncher: true });
+      }
+    }
+    // ACPX reads process.env at spawn time. Recheck direct launches before each
+    // operation as well, including a prompt that may reconnect a saved handle.
+    if (this.launch.command[1] !== envLauncherPath() && inheritedEnvironmentNeedsCleanup()) throw environmentBoundaryError();
     if (this.handle) return this.handle;
     const context=this.options.context;
     let handle:AcpRuntimeHandle;

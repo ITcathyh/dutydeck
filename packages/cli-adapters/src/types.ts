@@ -38,6 +38,8 @@ export interface PtyLike {
 }
 
 export interface CliAdapterCapabilities {
+  /** Native user records can prove that terminal input was accepted. */
+  nativeInputReceipt?: boolean;
   /** 支持 --resume 类会话恢复 */
   resume?: boolean;
   /** 首轮 prompt 走 CLI 参数而非 stdin */
@@ -79,6 +81,8 @@ export interface CliAdapter {
   busyPattern?: RegExp;
   /** Current rendered footer evidence that vetoes screen-derived completion. */
   screenBusyPattern?: RegExp;
+  /** Explicit local terminal cancellation can finish without an assistant record. */
+  screenCancelledPattern?: RegExp;
   /** Animated status line in the rendered viewport; a later completion line supersedes it. */
   screenActivityPattern?: RegExp;
   /** Status line of a turn that ended while its background sub-agents still run; a later completion line supersedes it. */

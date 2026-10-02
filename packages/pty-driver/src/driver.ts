@@ -1,3 +1,4 @@
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 import {
   DriverDetachedError,
   DriverRecoveryError,
@@ -94,6 +95,8 @@ export class PtyCliDriver implements AgentDriver {
    *  idle 检测在 CLI 启动期（splash 屏静止）会误判为空闲，必须等至少
    *  一条实质事件后才允许 completed。 */
   private turnHasOutput = false;
+  private turnHasTranscriptResult = false;
+  private awaitingTranscriptResult = false;
   /** 本轮开始时间——用于启动宽限期：CLI 初始化期间 PTY 静止，
    *  idle 检测会误判，宽限期内禁止 completed。 */
   private turnStartedAt = 0;
@@ -122,7 +125,10 @@ export class PtyCliDriver implements AgentDriver {
   /** The adapter can await between paste chunks and its final Enter. Every
    * write travels through this identity-bound guard so a detached driver
    * cannot leave a delayed submit key in a surviving tmux pane. */
-  private activeSubmission: { cancelError?: Error; pending?: Promise<unknown> } | undefined;
+  private activeSubmission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController } | undefined;
+  /** Cancellation invalidates the turn stamp after any in-flight metadata
+   * operation, so a late control reply cannot make that turn recoverable again. */
+  private submissionMetadata: Promise<void> = Promise.resolve();
   /** A checkpoint is prepared before writeInput. It becomes recoverable only
    * after the successful submission has been stamped on the owned tmux pane. */
   private preparedTurnId: string | undefined;
@@ -275,12 +281,25 @@ export class PtyCliDriver implements AgentDriver {
       routingPrefix = `${prefix}\n`;
       finalPrompt = `${routingPrefix}${finalPrompt}`;
     }
+    if (this.adapter.capabilities.nativeInputReceipt) {
+      finalPrompt = finalPrompt.replace(/\r\n?/g, '\n');
+      routingPrefix = routingPrefix?.replace(/\r\n?/g, '\n');
+    }
+    let rejectWrite!: (error: Error) => void;
     const writeCancelled = new Promise<never>((_, reject) => {
-      this.turnWriteReject = reject;
+      this.turnWriteReject = rejectWrite = reject;
     });
-    const submission: { cancelError?: Error; pending?: Promise<unknown> } = {};
+    const submission: { cancelError?: Error; pending?: Promise<unknown>; receiptAbort?: AbortController } = {};
     this.activeSubmission = submission;
+    const inputBackend = this.backend, generation = this.wiringGeneration;
+    const check = () => {
+      if (submission.cancelError) throw submission.cancelError;
+      if (this.stopped || this.activeSubmission !== submission || this.backend !== inputBackend || this.wiringGeneration !== generation) throw new Error('PTY submission cancelled by lifecycle change');
+    };
     let completion: Promise<void> | undefined;
+    let rejectTurn: ((error: Error) => void) | undefined;
+    let receiptPending = false;
+    let receiptTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       // Startup confirmation is outside a turn: a static confirmation menu
       // must never be mistaken for an idle, completed agent response.
@@ -288,11 +307,15 @@ export class PtyCliDriver implements AgentDriver {
         if (this.adapter.prepareInput) {
           await Promise.race([this.adapter.prepareInput(this.submissionBackend(submission), this.sessionContext()), writeCancelled]);
         }
+        check();
         this.inputPrepared = true;
       }
+      check();
       this.turnActive = true;
       this.interruptPending = false;
       this.turnHasOutput = false;
+      this.turnHasTranscriptResult = false;
+      this.awaitingTranscriptResult = false;
       this.turnStartedAt = Date.now();
       this.startTurnDeadline();
       this.awaitingRecoveryTranscript = false;
@@ -304,51 +327,83 @@ export class PtyCliDriver implements AgentDriver {
       this.idleDetector?.reset();
       completion = new Promise<void>((resolve, reject) => {
         this.turnResolve = resolve;
-        this.turnReject = reject;
+        this.turnReject = rejectTurn = reject;
       });
       // send() normally returns this promise after writeInput settles. If the
       // write itself rejects first, though, send() throws that write error and
       // no caller can yet hold `completion`; consume that parallel rejection so
       // it never becomes an unhandled process-level rejection.
       void completion.catch(() => {});
+      let receipt: Promise<void> | undefined;
+      if (this.adapter.capabilities.nativeInputReceipt) {
+        const transcript = this.transcript;
+        if (!transcript?.waitForInput) throw new DriverRecoveryError('Native input receipt is unavailable; original process preserved');
+        await Promise.race([transcript.flush(), writeCancelled]);
+        check();
+        submission.receiptAbort = new AbortController();
+        receipt = transcript.waitForInput(finalPrompt, submission.receiptAbort.signal);
+        void receipt.catch(() => {});
+      }
       // Register the completion waiter before writeInput: an in-memory/mock
       // backend may synchronously emit a completion marker from write().
       await Promise.race([this.adapter.writeInput(this.submissionBackend(submission), finalPrompt), writeCancelled]);
       await Promise.race([submission.pending, writeCancelled]);
+      check();
+      if (routingPrefix !== undefined) this.recordPrompt(routingPrefix, 'pty_routing');
+      this.recordPrompt(finalPrompt, 'pty_input');
+      if (receipt) {
+        receiptPending = true;
+        this.emitEvent({ type: 'status', data: { state: 'input_receipt', phase: 'pending' } });
+        receiptTimer = setTimeout(() => {
+          if (this.activeSubmission !== submission) return;
+          const error = new DriverRecoveryError('Native input receipt was not observed within 90 seconds; submission remains unknown and original process is preserved');
+          this.cancelSubmission(submission, error); this.turnWriteReject?.(error);
+        }, 90_000);
+        receiptTimer.unref();
+        await Promise.race([receipt, writeCancelled]);
+        check();
+        receiptPending = false;
+        this.emitEvent({ type: 'status', data: { state: 'input_receipt', phase: 'confirmed' } });
+      }
+      const persistent = this.persistentBackend();
+      if (isFirstPrompt && persistent) {
+        this.submissionMetadata = persistent.setDutydeckMetadata('first_prompt_sent', 'true').catch(() => {});
+        await Promise.race([this.submissionMetadata, writeCancelled]);
+        check();
+      }
+      if (this.preparedTurnId && persistent) {
+        const turnId = this.preparedTurnId;
+        this.submissionMetadata = persistent.setDutydeckMetadata('turn_id', turnId).catch(() => {
+          if (this.activeSubmission === submission) this.preparedTurnId = undefined;
+        });
+        await Promise.race([this.submissionMetadata, writeCancelled]);
+        check();
+      }
+      this.firstPromptSent = true;
     } catch (err) {
-      this.preparedTurnId = undefined;
+      if (receiptPending && this.wiringGeneration === generation && this.activeSubmission === submission) {
+        this.emitEvent({ type: 'status', data: { state: 'input_receipt', phase: 'unknown' } });
+      }
+      if (this.activeSubmission === submission || (rejectTurn && this.turnReject === rejectTurn)) this.preparedTurnId = undefined;
       this.cancelSubmission(submission, err instanceof Error ? err : new Error(String(err)));
-      if (this.turnActive) {
+      if (this.turnReject === rejectTurn && this.wiringGeneration === generation && this.turnActive) {
         this.turnActive = false;
+        this.clearTurnDeadline();
         this.turnReject?.(err instanceof Error ? err : new Error(String(err)));
         this.turnResolve = null;
         this.turnReject = null;
       }
       throw err;
     } finally {
-      this.turnWriteReject = null;
+      if (receiptTimer) clearTimeout(receiptTimer);
+      submission.receiptAbort?.abort(new Error('Native input receipt watcher retired'));
+      if (this.turnWriteReject === rejectWrite) this.turnWriteReject = null;
       if (this.activeSubmission === submission) this.activeSubmission = undefined;
     }
-    this.firstPromptSent = true;
-    if (routingPrefix !== undefined) this.recordPrompt(routingPrefix, 'pty_routing');
-    this.recordPrompt(finalPrompt, 'pty_input');
-    if (isFirstPrompt && this.persistentBackend()) {
-      // tmux owns this tiny non-secret lifecycle marker across daemon
-      // restarts, so reattach neither repeats nor accidentally skips the
-      // first-turn routing/session marker.
-      try { await this.persistentBackend()!.setDutydeckMetadata('first_prompt_sent', 'true'); }
-      catch { /* A missing lifecycle marker may repeat context after restart, but must not fail a prompt already sent. */ }
-    }
-    if (this.preparedTurnId && this.persistentBackend()) {
-      try {
-        // This is deliberately after writeInput. A persisted cursor without a
-        // matching pane stamp must be rejected, never used to resend a prompt
-        // whose delivery we cannot prove.
-        await this.persistentBackend()!.setDutydeckMetadata('turn_id', this.preparedTurnId);
-      } catch {
-        this.preparedTurnId = undefined;
-      }
-    }
+    // A CLI can paint its final screen before persisting the user receipt.
+    // Re-drive completion after releasing the submission hold, even if there
+    // are no more PTY bytes. All current-screen/busy guards still apply.
+    this.checkRenderedCompletion();
 
     // 与 AcpxAdapter 语义对齐：send() 等本轮结束（completed）才 resolve，
     // runtime 在 send resolve 后立即判定终态。driver 退出则 reject。
@@ -407,6 +462,8 @@ export class PtyCliDriver implements AgentDriver {
 
     this.turnActive = true;
     this.turnHasOutput = false;
+    this.turnHasTranscriptResult = false;
+    this.awaitingTranscriptResult = false;
     this.turnStartedAt = 0;
     this.startTurnDeadline();
     this.awaitingRecoveryTranscript = true;
@@ -458,17 +515,22 @@ export class PtyCliDriver implements AgentDriver {
 
   async interrupt(): Promise<void> {
     if (this.stopped) return;
+    const backend = this.backend, generation = this.wiringGeneration;
+    const turn = this.turnReject;
     // prepareInput and delayed writeInput steps run before send() begins
     // waiting for turn completion. Fence that submission before signalling the
     // backend so a late poll or delayed Enter cannot submit after interrupt.
     const interruptError = new Error('Driver interrupted');
+    this.cancelActiveSubmission(interruptError);
+    this.turnWriteReject?.(interruptError);
+    await this.submissionMetadata;
+    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation || (this.turnReject && this.turnReject !== turn)) return;
     if (this.persistentBackend()) {
       try { await this.persistentBackend()!.setDutydeckMetadata('turn_id', 'interrupted'); } catch { /* Runtime's durable interrupt intent also prevents adoption. */ }
     }
-    this.cancelActiveSubmission(interruptError);
-    this.turnWriteReject?.(interruptError);
     this.interruptPending = this.turnActive;
-    await this.backend.interrupt();
+    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation || (this.turnReject && this.turnReject !== turn)) return;
+    await backend.interrupt();
     // Ctrl-C only requests cancellation. Keep send() and Runtime's attempt open
     // until idle detection observes the prompt; a busy or silent pane is not proof.
     this.emitEvent({ type: 'status', data: { state: 'interrupting' } });
@@ -696,10 +758,13 @@ export class PtyCliDriver implements AgentDriver {
     const preservePersistentSession = this.detachOnStop
       && !options.discardSession
       && tmuxBackend !== undefined;
+    const stopReason = preservePersistentSession ? new DriverDetachedError() : new Error('Driver stopped');
+    this.cancelActiveSubmission(stopReason);
+    this.turnWriteReject?.(stopReason);
+    await this.submissionMetadata;
     if (!preservePersistentSession && !this.recoveryRejected && tmuxBackend) {
       try { await tmuxBackend.setDutydeckMetadata('turn_id', 'stopped'); } catch { /* Exit proof still required below. */ }
     }
-    const stopReason = preservePersistentSession ? new DriverDetachedError() : new Error('Driver stopped');
     if (this.turnActive) {
       this.turnActive = false;
       this.turnReject?.(stopReason);
@@ -897,7 +962,8 @@ export class PtyCliDriver implements AgentDriver {
         // status line still shows activity below the previous turn's duration.
         const activity = this.adapter.screenActivityPattern;
         const statusLine = activity ? this.snapshot?.viewportText().split('\n').reverse()
-          .find(line => activity.test(line) || this.adapter.backgroundWaitPattern?.test(line) || this.adapter.completionPattern?.test(line)) : undefined;
+          .find(line => activity.test(line) || this.adapter.backgroundWaitPattern?.test(line) || this.adapter.completionPattern?.test(line)
+            || this.adapter.screenCancelledPattern?.test(line)) : undefined;
         if (this.activeSubmission || this.adapter.screenBusyPattern?.test(footer) || (statusLine && activity?.test(statusLine))) {
           // Keep checking even if the next redraw only clears the footer.
           this.idleDetector?.reset();
@@ -926,11 +992,19 @@ export class PtyCliDriver implements AgentDriver {
           return;
         }
         this.clearBackgroundHold();
+        const turnError = this.transcript?.takeTurnError?.();
+        // A native user receipt proves submission, while a PTY redraw only
+        // proves screen activity. Keep the turn open if its assistant record
+        // has not reached the transcript yet, even after a completion marker.
+        if (this.adapter.capabilities.nativeInputReceipt && !this.turnHasTranscriptResult && !turnError && !this.interruptPending
+          && !this.adapter.screenCancelledPattern?.test(statusLine ?? '')) {
+          this.awaitingTranscriptResult = true;
+          return;
+        }
         this.turnActive = false;
         this.clearTurnDeadline();
         // The runtime fails a turn whose last step is not text but has no
         // reason to show; the CLI's own error record is that reason.
-        const turnError = this.transcript?.takeTurnError?.();
         if (turnError && !this.interruptPending) this.emitEvent(turnError);
         this.emitEvent({ type: 'completed', data: { stopReason: this.interruptPending ? 'cancelled' : 'end_turn' } });
         this.interruptPending = false;
@@ -1049,9 +1123,28 @@ export class PtyCliDriver implements AgentDriver {
         // 标记本轮已有实质输出或结构化失败，解除 idle 闸门。
         if (e.type === 'text' || e.type === 'thinking' || e.type === 'tool_call' || e.type === 'tool_result' || e.type === 'error') {
           this.turnHasOutput = true;
+          if (this.turnActive) this.turnHasTranscriptResult = e.type === 'text' || e.type === 'error';
           this.awaitingRecoveryTranscript = false;
         }
         this.emitEvent(e);
+        // The idle callback may have flushed an empty transcript before this
+        // poll. Publish the event first, then retry existing screen evidence;
+        // no additional PTY redraw is required and the original turn owns it.
+        if (this.turnActive && this.awaitingTranscriptResult && this.turnHasTranscriptResult) {
+          this.awaitingTranscriptResult = false;
+          this.idleDetector?.reset();
+          this.checkRenderedCompletion();
+          if (!this.adapter.completionPattern && this.adapter.readyPattern?.test(this.snapshot?.viewportText() ?? '')) {
+            this.idleDetector?.seedReadyEvidence();
+          }
+        }
+      });
+      this.transcript.onProgress?.(() => {
+        if (backend !== this.backend || this.stopped || !this.turnActive || !this.awaitingTranscriptResult) return;
+        // Claude's API errors are held until completion rather than emitted
+        // as model output. A newly read error must retry the same idle guard.
+        this.idleDetector?.reset();
+        this.checkRenderedCompletion();
       });
       if (restoreTranscript) this.transcript.restore(restoreTranscript);
       this.transcript.start();
@@ -1402,8 +1495,9 @@ export class PtyCliDriver implements AgentDriver {
     }
   }
 
-  private cancelSubmission(submission: { cancelError?: Error }, error: Error): void {
+  private cancelSubmission(submission: { cancelError?: Error; receiptAbort?: AbortController }, error: Error): void {
     submission.cancelError ??= error;
+    submission.receiptAbort?.abort(error);
   }
 
   private rejectRecovery(message: string): DriverRecoveryError {
@@ -1461,14 +1555,5 @@ function mergedEnv(agentEnv: Record<string, string>): Record<string, string> {
   // 剥离桥接进程自身的 ANTHROPIC_* / CLAUDE_* 环境变量——这些是 dutydeck
   // daemon 的运行身份，不是被桥接 CLI 的。CLI 应该用自己的配置（~/.claude/）
   // 或 agent.env 里显式声明的变量。
-  const stripped = Object.fromEntries(
-    Object.entries(process.env).filter(
-      ([key]) => !/^(ANTHROPIC_|CLAUDE_)/i.test(key)
-    )
-  );
-  return Object.fromEntries(
-    Object.entries({ ...stripped, ...agentEnv }).filter(
-      (entry): entry is [string, string] => typeof entry[1] === 'string' && !/^HERDR_/i.test(entry[0])
-    )
-  );
+  return childEnvironment(process.env, agentEnv, { stripClaude: true });
 }

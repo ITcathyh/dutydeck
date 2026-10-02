@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { runCommand } from './command.js';
 import { OutputHandoff } from './output-handoff.js';
 import { randomBytes } from 'node:crypto';
@@ -178,19 +179,35 @@ export class HerdrBackend implements SessionBackend {
     check();
     const existing = listing.find((item: { name: string }) => item.name === this.sessionName);
     if (existing && !previous) throw new Error('Unclaimed Herdr session exists; refusing adoption or replacement');
-    // A durable reservation makes an interrupted launch fail closed on retry.
-    mkdirSync(dirname(this.options.stateFile), { recursive: true, mode: 0o700 });
-    writeFileSync(this.options.stateFile, JSON.stringify({ owner: this.ownerId, name: this.sessionName, launch_id: launchId }), { mode: 0o600, flag: previous ? 'w' : 'wx' });
-    let path: string, serverIdentity: PhysicalProcessIdentity;
+    let path!: string, serverIdentity!: PhysicalProcessIdentity;
     if (existing?.running) {
       if (!previous || this.options.processProbe.observe(previous.server) !== 'alive') throw new Error('HERDR_SERVER_IDENTITY_CHANGED');
       path = realpathSync(existing.socket_path);
       const stat = this.socketStat(path);
       if (path !== previous.socket || stat.dev !== previous.dev || stat.ino !== previous.ino) throw new Error('HERDR_SERVER_IDENTITY_CHANGED');
       serverIdentity = previous.server;
-    } else {
+      // Pane env is an overlay on the server's ambient environment. A legacy
+      // contaminated server cannot be reused safely, and must stay untouched.
+      let inherited: Record<string, string>;
+      try {
+        inherited = Object.fromEntries(readFileSync(`/proc/${serverIdentity.pid}/environ`, 'utf8').split('\0').filter(Boolean).map(entry => {
+          const separator = entry.indexOf('=');
+          return [entry.slice(0, separator), entry.slice(separator + 1)];
+        }));
+      } catch { throw new Error('HERDR_SERVER_ENVIRONMENT_UNKNOWN: 无法核验原服务启动环境，原会话和其他 pane 已保留。'); }
+      if (this.options.processProbe.observe(serverIdentity) !== 'alive') throw new Error('HERDR_SERVER_IDENTITY_CHANGED');
+      const clean = childEnvironment(inherited, {}, { stripClaude: true });
+      if (Object.entries(inherited).some(([key, value]) => clean[key] !== value)) {
+        throw new Error('HERDR_SERVER_ENVIRONMENT_DIRTY: 原 Herdr 服务含其他会话身份或服务密钥，不能复用；原会话和其他 pane 已保留。');
+      }
+    }
+    // Reserve only after all checks on a reused server pass, so rejection
+    // preserves its durable ownership record and independently running panes.
+    mkdirSync(dirname(this.options.stateFile), { recursive: true, mode: 0o700 });
+    writeFileSync(this.options.stateFile, JSON.stringify({ owner: this.ownerId, name: this.sessionName, launch_id: launchId }), { mode: 0o600, flag: previous ? 'w' : 'wx' });
+    if (!existing?.running) {
       const server = spawn(this.options.binary, ['--session', this.sessionName, 'server'], {
-        cwd: opts.cwd, env: Object.fromEntries(Object.entries(this.environment).filter(([key]) => !/^(ANTHROPIC_|CLAUDE_|dutydeck_)/i.test(key))), detached: true, stdio: 'ignore',
+        cwd: opts.cwd, env: Object.fromEntries(Object.entries(childEnvironment(this.environment, {}, { stripClaude: true })).filter(([key]) => !/^dutydeck_/i.test(key))), detached: true, stdio: 'ignore',
       });
       let launchError: Error | undefined;
       server.on('error', error => { launchError = error; });
