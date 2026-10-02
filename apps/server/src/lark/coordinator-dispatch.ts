@@ -107,10 +107,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
   protected async steerQueuedTurn(config: StoredLarkConfig, event: LarkMessageEvent, sessionId: string, target: { id: string; status: string }, mode: 'steer' | 'inject' | 'promote'): Promise<{ steered?: string; note: string }> {
     // 前面真的有东西才谈得上插队：只有自己一条时 steerQueued 无事可做，
     // 调了它再把异常写成「提升失败」，会把一个本来正常的情形说成出了问题。
-    const ahead = this.runtime.getTasks
-      ? (await this.runtime.getTasks(sessionId).catch(() => []))
-        .filter(item => item.id !== target.id && (item.status === 'queued' || item.status === 'running'))
-      : [];
+    const tasks = this.runtime.getTasks ? await this.runtime.getTasks(sessionId).catch(() => []) : [];
+    const unknownNote = '插话投递结果未知，这条指令可能已送达。请联系 Dutydeck 管理员核对后处理，当前不会自动重发。';
+    if (target.status === 'reconcile_required' || tasks.find(item => item.id === target.id)?.status === 'reconcile_required') return { note: unknownNote };
+    const ahead = tasks.filter(item => item.id !== target.id && (item.status === 'queued' || item.status === 'running'));
     // 派发要花上几秒（附件、建会话），期间正在执行的可能已经换成别人的任务：
     // 插话与提升都会改变那一轮，真正动手前重新过一次中断门，命令层那次检查不能替这一刻背书。
     // 这道门要查通讯录（isMember 会真打飞书接口），抛异常不能连累这条任务：
@@ -122,20 +122,23 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     const movedNote = async () => {
       const status = (await this.runtime.getTasks?.(sessionId).catch(() => undefined))?.find(item => item.id === target.id)?.status;
       return !status || status === 'queued' ? undefined
-        : status === 'cancelled' ? '这条内容在插话之前已被取消。' : '这条内容在插话之前已经开始执行，按普通的一轮处理，没有插话。';
+        : status === 'reconcile_required' ? unknownNote : status === 'cancelled' ? '这条内容在插话之前已被取消。' : status === 'running' ? '这条内容在插话之前已经开始执行，按普通的一轮处理，没有插话。' : '这条内容已不在队列中，请通过 `/status` 核对最新执行记录。';
     };
     const steering = mode !== 'promote' && allowed && running && this.runtime.injectQueued
-      ? await this.runtime.injectQueued(sessionId, target.id, event.senderOpenId).catch(error => {
+      ? await this.runtime.injectQueued(sessionId, target.id, event.senderOpenId).catch(async error => {
         if (error instanceof RuntimeError && error.code === 'QUEUED_TASK_NOT_FOUND') return { outcome: 'moved' };
-        this.log.warn({ error, runtimeTaskId: target.id }, mode === 'steer' ? '插话失败，降级为提升队首' : '插话失败，这条按原顺序排队');
-        return { outcome: 'failed' };
+        this.log.warn({ error, runtimeTaskId: target.id }, '插话请求未返回成功结果，核对任务状态');
+        const task = (await this.runtime.getTasks?.(sessionId).catch(() => undefined))?.find(item => item.id === target.id);
+        return { outcome: 'failed', task };
       })
       : undefined;
+    if (steering && 'task' in steering && (steering.task?.status === 'reconcile_required' || steering.outcome === 'failed' && !steering.task)) return { note: unknownNote };
     // 没过中断门时没有尝试插话，原因由下面的门分支写。
     const reason = steering ? steeringOutcomeText(steering.outcome)
       : mode === 'promote' ? '' : !this.runtime.injectQueued ? '当前 Agent 不支持插话。' : !running ? '当前没有正在执行的一轮可以插话。' : '';
     if (steering?.outcome === 'injected' || steering?.outcome === 'startedNewTurn') return { steered: steering.outcome, note: reason };
-    if (steering?.outcome === 'moved') return { note: await movedNote() ?? `${reason}这条内容按正常顺序排队。` };
+    if (steering?.outcome === 'failed' && 'task' in steering && steering.task?.status !== 'queued') return { note: '插话请求未确认，这条内容已不在队列中，请通过 `/status` 核对最新执行记录。' };
+    if (steering?.outcome === 'moved') return { note: await movedNote() ?? '插话前任务状态已变化，请通过 `/status` 核对最新执行记录。' };
     const idle = target.status !== 'queued' || !ahead.length;
     if (mode === 'inject') {
       return { note: idle ? `${reason}此刻没有别的任务排在前面，这条内容会直接按顺序执行。`
@@ -1647,7 +1650,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           await this.workflowOptions.memory!.store.recordTurn(memoryTurn.scope, { taskId: runtimeTask.id, sessionId: session.id, injected: memoryTurn.ids })
             .catch(error => this.log.warn({ error, runtimeTaskId }, '记录本轮注入的会话记忆失败，结果卡不列本轮记忆'));
         }
-        // /steer：先把这条送进正在执行的那一轮（Agent 支持插话时）；送不进去再降级为提到队首。
+        // /steer：先尝试插话；明确未投递才可降级为提到队首，结果未知时等待核对。
         // 注记按真实结果写：插话送达、提升成功、提升失败、或本来就没有排队都各说各的，不预告成功。
         if (task.steer) {
           const steering = await this.steerQueuedTurn(config, event, session.id, runtimeTask, 'steer');

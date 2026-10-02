@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { DutydeckRuntime } from '@dutydeck/runtime';
-import { executionRecoveryDecisionSchema, ptyRetirementRecoverySchema, nativeReplacementRecoverySchema, RuntimeError } from '@dutydeck/shared';
+import { executionRecoveryDecisionSchema, steeringRecoveryDecisionSchema, ptyRetirementRecoverySchema, nativeReplacementRecoverySchema, RuntimeError } from '@dutydeck/shared';
 
 export interface RecoveryRouteOptions {
   authorize(request: FastifyRequest): Promise<boolean> | boolean;
@@ -27,6 +27,10 @@ export function registerRecoveryRoutes(app: FastifyInstance, runtime: DutydeckRu
   app.post<{ Params: { id: string } }>('/api/sessions/:id/recovery/confirm', { bodyLimit: 4 * 1024 * 1024 }, async request => {
     await authorize(request);
     return runtime.confirmExecutionRecovery(request.params.id, executionRecoveryDecisionSchema.parse(request.body), owner);
+  });
+  app.post<{ Params: { id: string } }>('/api/sessions/:id/recovery/steering', async request => {
+    await authorize(request);
+    return runtime.confirmSteeringRecovery(request.params.id, steeringRecoveryDecisionSchema.parse(request.body), owner);
   });
   app.post<{ Params: { id: string } }>('/api/sessions/:id/recovery/retire-pty', async request => {
     await authorize(request);

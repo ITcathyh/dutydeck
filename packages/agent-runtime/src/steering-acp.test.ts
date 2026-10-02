@@ -45,7 +45,7 @@ describe('unanswered ACP steering request', () => {
     await expect.poll(() => h.status(first.id), { timeout: 10_000 }).toBe('interrupted');
     // The turn ending does not end the request: without the runtime timeout the queue would wait on it.
     expect(await Promise.race([steering.then(() => 'settled'), new Promise(done => setTimeout(done, 500, 'pending'))])).toBe('pending');
-    expect(await h.status(second.id)).toBe('queued');
+    expect(await h.status(second.id)).toBe('reconcile_required');
     await h.runtime.stop(h.session.id, { kind: 'installation_owner', id: 'installation_owner' });
     await expect(steering).resolves.toMatchObject({ outcome: 'failed' });
   });
@@ -61,14 +61,14 @@ describe('unanswered ACP steering request', () => {
     expect(await h.texts()).toContain('Mock reply: second');
   });
 
-  it('ends a pending steering request when the agent connection drops, leaving the Task queued', async () => {
+  it('ends a pending steering request when the agent connection drops, retaining uncertain delivery', async () => {
     const h = await fixture();
     const first = await h.running();
     const second = await h.runtime.dispatch(h.session.id, 'drop connection');
-    await expect(h.runtime.injectQueued(h.session.id, second.id, 'installation_owner')).resolves.toMatchObject({ outcome: 'failed', task: { status: 'queued' } });
+    await expect(h.runtime.injectQueued(h.session.id, second.id, 'installation_owner')).resolves.toMatchObject({ outcome: 'failed', task: { status: 'reconcile_required' } });
     // The dropped turn follows crash recovery (reconcile_required pauses the queue by design); steering no longer holds the Task.
     await expect.poll(() => h.status(first.id), { timeout: 10_000 }).toBe('reconcile_required');
-    await h.runtime.cancelQueued(h.session.id, second.id, 'installation_owner');
-    expect(await h.status(second.id)).toBe('cancelled');
+    await expect(h.runtime.cancelQueued(h.session.id, second.id, 'installation_owner')).rejects.toMatchObject({code:'TASK_NOT_QUEUED'});
+    expect(h.repos.execution.getTaskExecution(second.id)?.steering?.state).toBe('unknown');
   });
 });

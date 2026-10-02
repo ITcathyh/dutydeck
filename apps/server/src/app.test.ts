@@ -234,6 +234,19 @@ describe('HTTP API boundary', () => {
     expect((await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: 'also check logs', mode: 'steer' } })).json()).toMatchObject({ task: { id: 't2', status: 'running' }, steering: { outcome: 'moved' } });
   });
 
+  it('reports the persisted unknown steering state after a send exception instead of the queued acceptance snapshot', async () => {
+    const task = { id: 't2', sessionId: 's1', prompt: 'also check logs', status: 'queued', createdAt: '', updatedAt: '' };
+    const runtime: any = { dispatch: vi.fn(async () => task), injectQueued: vi.fn(async () => { throw new Error('acknowledgement unavailable'); }), getTasks: vi.fn(async () => [{ ...task, status: 'reconcile_required' }]) };
+    const app = await buildApp(runtime); apps.push(app);
+    const sent = await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: task.prompt, mode: 'steer' } });
+    expect(sent.statusCode).toBe(202);
+    expect(sent.json()).toMatchObject({ accepted: true, task: { id: task.id, status: 'reconcile_required' }, steering: { outcome: 'failed', error: 'acknowledgement unavailable' } });
+    runtime.getTasks.mockRejectedValueOnce(new Error('persisted state unavailable'));
+    const unavailable = await app.inject({ method: 'POST', url: '/api/sessions/s1/send', payload: { prompt: task.prompt, mode: 'steer' } });
+    expect(unavailable.statusCode).toBe(500);
+    expect(unavailable.json().task).toBeUndefined();
+  });
+
   it('passes exact selected Skill paths and enforces shell authority for verification', async () => {
     const runtime = { dispatch: vi.fn(async () => ({ id: 't1' })), runVerification: vi.fn(async () => ({ status: 'passed' })) };
     const authorize = vi.fn(async (_request: unknown, _id: string, _boundary: string, action: string) => ({ allowed: action !== 'terminal.write', source: 'owner', code: 'denied_shell', reason: 'terminal access required' }));

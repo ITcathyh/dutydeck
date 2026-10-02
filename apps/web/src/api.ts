@@ -245,7 +245,7 @@ export type LarkAppCreationJob = {
 export type Session = { id: string; agentId: string; state: string; cwd: string; name?: string; model?: string; reasoningEffort?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string; archivedAt?: string; runId: string; createdAt: string; updatedAt: string; error?: string; systemPrompt?: string; workspaceMode?: WorkspaceMode; workspaceSourceCwd?: string };
 export type DockEvent = { taskId?: string; id: string; sequence: number; type: string; timestamp: string; data: any; raw?: string };
 export type Task = { skillDeliveries?: SkillDeliveryMetadata[]; id: string; sessionId: string; prompt: string; status: string; createdAt: string; updatedAt: string };
-/** 插话结果：injected / startedNewTurn 已送达；moved 表示插话前这条已开跑或被取消；其余结果下这条指令仍在排队。 */
+/** 插话结果：injected / startedNewTurn 已送达；moved 表示状态已变化；failed 是否需要核对以 task.status 为准，reconcile_required 不自动重发。 */
 export type SteeringOutcome = 'injected' | 'startedNewTurn' | 'moved' | 'promptRequired' | 'unsupported' | 'incompatible' | 'failed';
 export type SteeringResult = { outcome: SteeringOutcome; error?: string };
 export type RunSummary = { sessionId: string; taskId: string; prompt: string; status: string; queuedCount: number; updatedAt: string };

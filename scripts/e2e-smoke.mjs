@@ -842,11 +842,12 @@ async function main() {
     `第二轮有实质输出（${secondTurn.length} 条新事件，全部 sequence > ${beforeSecondTurn}）`);
 
   if (!REAL) {
-    const secondText = secondTurn.filter(item => item.type === 'text').map(item => item.event.data?.text ?? '').join('');
+    const assistantReplies = secondTurn.filter(item => item.type === 'text' && item.event.data?.role !== 'user').map(item => item.event.data?.text ?? '');
+    const secondText = assistantReplies.join('');
     const continuation = [
       { marker: 'MOCK_CONTINUED', path: 'persistent pane 中的存活进程续跑' },
       { marker: 'MOCK_RESUMED', path: '进程缺失后以 --resume respawn' }
-    ].find(candidate => secondText.includes(`${candidate.marker}: ${secondPrompt}`));
+    ].find(candidate => assistantReplies.some(text => text.includes(`${candidate.marker}:`) && text.includes(secondPrompt)));
     assert(Boolean(continuation),
       `第二轮包含新 prompt，并走 persistent continuation 或 --resume respawn（实际前 160 字：${secondText.slice(0, 160)}）`);
     ok(`resume 采用合法路径：${continuation.path}`);

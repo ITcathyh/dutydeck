@@ -21,3 +21,16 @@ export const nativeReplacementRecoverySchema = z.object({
 }).strict();
 export const ptyRetirementRecoverySchema = nativeReplacementRecoverySchema.extend({ evidenceRefs: z.array(z.string().min(1)).min(1) }).strict();
 export type PtyRetirementRecovery = z.infer<typeof ptyRetirementRecoverySchema>;
+
+const steeringScope = {
+  runId: z.string().min(1), taskId: z.string().min(1), operationId: z.string().min(1),
+  expectedRevision: z.number().int().positive().safe(), decisionId: z.string().min(1),
+  evidenceRefs: z.array(z.string().min(1)).min(1), resourceChecks: taskExecutionSchemas.checksSchema
+};
+/** not_delivered authorizes a new dispatch; it does not prove the previous dispatch had no effects. */
+export const steeringRecoveryDecisionSchema = z.discriminatedUnion('action', [
+  z.object({ ...steeringScope, action: z.literal('delivered') }).strict(),
+  z.object({ ...steeringScope, action: z.literal('not_delivered'), allowDuplicateEffects: z.literal(true) }).strict(),
+  z.object({ ...steeringScope, action: z.literal('abandon') }).strict()
+]);
+export type SteeringRecoveryDecision = z.infer<typeof steeringRecoveryDecisionSchema>;

@@ -12,10 +12,11 @@ import { buildDutydeckRoutingBlock } from '@dutydeck/cli-adapters';
 import { captureOwnedTmuxIdentity, stopOwnedTmux, verifyOwnedTmuxExit, PtyBackend, TmuxBackend, HerdrBackend, type SessionBackend, type ProcessProbe, type OwnedTmuxIdentity, type OwnedTmuxExitProof, type PhysicalProcessIdentity } from '@dutydeck/session-backends';
 import { TerminalSnapshot } from '@dutydeck/terminal-renderer';
 import { IdleDetector } from './idle-detector.js';
+import { TurnCpu } from './turn-cpu.js';
 import { createTranscriptTailer, type TranscriptEventSource } from './transcript/index.js';
 import { buildSessionMarker, resolveCliSessionId, hasPinnedClaudeSession, claudeSessionIdLookup } from './session-id/index.js';
 import { hostname } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ClaudeSettings } from './claude-settings.js';
 
 export interface PtyCliDriverOptions {
@@ -35,6 +36,8 @@ export interface PtyCliDriverOptions {
    * 不做磁盘反查——这是最可靠的来源。
    */
   cliSessionId?: string;
+  /** Composition root knows whether a relay answer is pending. */
+  awaitingAnswer?: () => boolean;
 }
 
 const DEFAULT_COLS = 120;
@@ -48,12 +51,13 @@ const RAW_TERMINAL_THROTTLE_MS = 200;
  *
  * 事件来源（三路合并，按发生顺序回调）：
  *  1. transcript tail（claude-code JSONL / codex rollout 等）→ 结构化事件，原样转发
- *  2. 屏幕流（backend.onData → TerminalSnapshot）→ raw_terminal 节流广播，兜底永不丢
+ *  2. 屏幕流（backend.onData → TerminalSnapshot）→ raw_terminal 节流广播，超限明确提示并恢复屏幕
  *  3. idle-detector 屏幕观察 → 一轮结束时发恰好一次 completed
  *
  * 不变量：一轮 send() 恰好发一次 completed（turnActive 闩锁保证，idle 重复触发被吞掉）。
  */
 export class PtyCliDriver implements AgentDriver {
+  private readonly awaitingAnswer: (() => boolean) | undefined;
   private readonly agent: AgentConfig;
   private readonly adapter: CliAdapter;
   private readonly sessionId: string;
@@ -92,6 +96,14 @@ export class PtyCliDriver implements AgentDriver {
   /** 本轮开始时间——用于启动宽限期：CLI 初始化期间 PTY 静止，
    *  idle 检测会误判，宽限期内禁止 completed。 */
   private turnStartedAt = 0;
+  private turnDeadlineTimer?: ReturnType<typeof setTimeout>;
+  private lastProgressAt = 0;
+  private readonly turnCpu = new TurnCpu();
+  private readonly activityRecords = new Set<string>();
+  private readonly humanWaits = new Set<string>();
+  private backgroundEvidenceUntil = 0;
+  private screenProgress = '';
+  private refreshingScreen = false;
   private static readonly TURN_GRACE_MS = 15_000;
   /** 后台子 agent 在飞时最多推迟 completed 这么久（见 holdForBackgroundWork）。
    *  开发机 416 次真实后台 agent 从派发到回报：p90 约 49 分钟、p95 约 64 分钟。 */
@@ -109,7 +121,7 @@ export class PtyCliDriver implements AgentDriver {
   /** The adapter can await between paste chunks and its final Enter. Every
    * write travels through this identity-bound guard so a detached driver
    * cannot leave a delayed submit key in a surviving tmux pane. */
-  private activeSubmission: { cancelError?: Error } | undefined;
+  private activeSubmission: { cancelError?: Error; pending?: Promise<unknown> } | undefined;
   /** A checkpoint is prepared before writeInput. It becomes recoverable only
    * after the successful submission has been stamped on the owned tmux pane. */
   private preparedTurnId: string | undefined;
@@ -145,6 +157,7 @@ export class PtyCliDriver implements AgentDriver {
   private cliSessionId: string | undefined;
 
   constructor(opts: PtyCliDriverOptions) {
+    this.awaitingAnswer = opts.awaitingAnswer;
     this.processProbe = opts.processProbe;
     this.agent = opts.agent;
     this.adapter = opts.adapter;
@@ -175,17 +188,17 @@ export class PtyCliDriver implements AgentDriver {
     // driver and calling start(), not resume(). A production-injected tmux
     // backend therefore has to attach here when its owned pane survived the
     // daemon, otherwise spawn() would collide with the live session.
-    if (this.backend instanceof HerdrBackend && this.backend.hasState() && !this.backend.isStopped()) {
+    if (this.backend instanceof HerdrBackend && this.backend.hasState() && !(await this.backend.isStopped())) {
       await this.reattachHerdr();
-      this.markTmuxReattached();
+      (await this.markTmuxReattached());
       return;
     }
     const tmuxName = this.tmuxSessionName();
     if (tmuxName !== undefined) {
-      const probe = TmuxBackend.probeSession(tmuxName);
+      const probe = (await TmuxBackend.probeSession(tmuxName));
       if (probe === 'exists') {
-        this.reattachTmux(tmuxName, false);
-        this.markTmuxReattached();
+        (await this.reattachTmux(tmuxName, false));
+        (await this.markTmuxReattached());
         return;
       }
       if (probe === 'unknown') {
@@ -208,8 +221,8 @@ export class PtyCliDriver implements AgentDriver {
         cwd: this.cwd, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, env: this.spawnEnv(),
       });
       check();
-      this.wire(this.backend);
-      this.markResumed();
+      (await this.wire(this.backend));
+      (await this.markResumed());
       return;
     }
 
@@ -229,7 +242,7 @@ export class PtyCliDriver implements AgentDriver {
       env: this.spawnEnv(),
     });
     check();
-    this.wire(this.backend);
+    (await this.wire(this.backend));
   }
 
   /** spawn 环境，首次调用时算好并缓存。resume-without-start 也走这里。 */
@@ -262,7 +275,7 @@ export class PtyCliDriver implements AgentDriver {
     const writeCancelled = new Promise<never>((_, reject) => {
       this.turnWriteReject = reject;
     });
-    const submission = { cancelError: undefined as Error | undefined };
+    const submission: { cancelError?: Error; pending?: Promise<unknown> } = {};
     this.activeSubmission = submission;
     let completion: Promise<void> | undefined;
     try {
@@ -278,6 +291,7 @@ export class PtyCliDriver implements AgentDriver {
       this.interruptPending = false;
       this.turnHasOutput = false;
       this.turnStartedAt = Date.now();
+      this.startTurnDeadline();
       this.awaitingRecoveryTranscript = false;
       this.clearRenderedCompletion();
       this.clearBackgroundHold();
@@ -297,6 +311,7 @@ export class PtyCliDriver implements AgentDriver {
       // Register the completion waiter before writeInput: an in-memory/mock
       // backend may synchronously emit a completion marker from write().
       await Promise.race([this.adapter.writeInput(this.submissionBackend(submission), finalPrompt), writeCancelled]);
+      await Promise.race([submission.pending, writeCancelled]);
     } catch (err) {
       this.preparedTurnId = undefined;
       this.cancelSubmission(submission, err instanceof Error ? err : new Error(String(err)));
@@ -316,7 +331,7 @@ export class PtyCliDriver implements AgentDriver {
       // tmux owns this tiny non-secret lifecycle marker across daemon
       // restarts, so reattach neither repeats nor accidentally skips the
       // first-turn routing/session marker.
-      try { this.persistentBackend()!.setDutydeckMetadata('first_prompt_sent', 'true'); }
+      try { await this.persistentBackend()!.setDutydeckMetadata('first_prompt_sent', 'true'); }
       catch { /* A missing lifecycle marker may repeat context after restart, but must not fail a prompt already sent. */ }
     }
     if (this.preparedTurnId && this.persistentBackend()) {
@@ -324,7 +339,7 @@ export class PtyCliDriver implements AgentDriver {
         // This is deliberately after writeInput. A persisted cursor without a
         // matching pane stamp must be rejected, never used to resend a prompt
         // whose delivery we cannot prove.
-        this.persistentBackend()!.setDutydeckMetadata('turn_id', this.preparedTurnId);
+        await this.persistentBackend()!.setDutydeckMetadata('turn_id', this.preparedTurnId);
       } catch {
         this.preparedTurnId = undefined;
       }
@@ -362,13 +377,13 @@ export class PtyCliDriver implements AgentDriver {
     }
     const sessionName = this.tmuxSessionName();
     if (this.backend instanceof TmuxBackend) {
-      if (!sessionName || TmuxBackend.probeSession(sessionName) !== 'exists') throw this.rejectRecovery('Original tmux session is not alive');
-      if (TmuxBackend.sessionOwner(sessionName) !== this.backend.ownerId) throw this.rejectRecovery('Original tmux session owner does not match');
+      if (!sessionName || (await TmuxBackend.probeSession(sessionName)) !== 'exists') throw this.rejectRecovery('Original tmux session is not alive');
+      if ((await TmuxBackend.sessionOwner(sessionName)) !== this.backend.ownerId) throw this.rejectRecovery('Original tmux session owner does not match');
     }
     // The metadata belongs to the original backend and is checked before any
     // attach side effect. Missing, stale, or foreign turns are all unsafe.
     let turnId: string | undefined;
-    try { turnId = this.persistentBackend()!.getDutydeckMetadata('turn_id'); }
+    try { turnId = await this.persistentBackend()!.getDutydeckMetadata('turn_id'); }
     catch (error) { throw this.rejectRecovery(String(error)); }
     if (turnId !== state.turnId) {
       throw this.rejectRecovery('Original tmux turn id does not match');
@@ -377,6 +392,7 @@ export class PtyCliDriver implements AgentDriver {
     this.turnActive = true;
     this.turnHasOutput = false;
     this.turnStartedAt = 0;
+    this.startTurnDeadline();
     this.awaitingRecoveryTranscript = true;
     const completion = new Promise<void>((resolve, reject) => {
       this.turnResolve = resolve;
@@ -389,15 +405,16 @@ export class PtyCliDriver implements AgentDriver {
     const rejectCompletion = this.turnReject;
     try {
       if (this.backend instanceof HerdrBackend) await this.reattachHerdr(state.transcript);
-      else this.reattachTmux(sessionName!, false, state.transcript);
+      else (await this.reattachTmux(sessionName!, false, state.transcript));
       attachedBackend = this.backend;
       generation = this.wiringGeneration;
       await this.transcript?.flush();
       if (this.stopped || this.backend !== attachedBackend || this.wiringGeneration !== generation) {
         throw new Error('PTY recovery cancelled by lifecycle change');
       }
-      this.markTmuxReattached();
+      (await this.markTmuxReattached());
       await onAttached?.();
+      this.startTurnDeadline();
     } catch (err) {
       // A stopped/replaced attachment no longer owns the driver's waiters or
       // wiring. In particular, never detach a newer backend from this catch.
@@ -411,12 +428,12 @@ export class PtyCliDriver implements AgentDriver {
       this.turnResolve = null;
       this.turnReject = null;
       // `reattachTmux` assigns the newly-created backend before attach/wire.
-      // A transcript restore can therefore fail after pipe-pane, tail and the
+      // A transcript restore can therefore fail after pipe-pane, socket capture and the
       // exit watcher are live. Tear down that temporary attachment only; the
       // original tmux pane continues and is never killed by a bad cursor.
       if (this.backend !== originalBackend || this.backend instanceof HerdrBackend) {
         this.teardownWiring();
-        try { this.backend.detach?.(); } catch { /* best effort */ }
+        try { await this.backend.detach?.(); } catch { /* best effort */ }
       }
       throw this.rejectRecovery(`Could not reattach original PTY turn: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -430,12 +447,12 @@ export class PtyCliDriver implements AgentDriver {
     // backend so a late poll or delayed Enter cannot submit after interrupt.
     const interruptError = new Error('Driver interrupted');
     if (this.persistentBackend()) {
-      try { this.persistentBackend()!.setDutydeckMetadata('turn_id', 'interrupted'); } catch { /* Runtime's durable interrupt intent also prevents adoption. */ }
+      try { await this.persistentBackend()!.setDutydeckMetadata('turn_id', 'interrupted'); } catch { /* Runtime's durable interrupt intent also prevents adoption. */ }
     }
     this.cancelActiveSubmission(interruptError);
     this.turnWriteReject?.(interruptError);
     this.interruptPending = this.turnActive;
-    this.backend.interrupt();
+    await this.backend.interrupt();
     // Ctrl-C only requests cancellation. Keep send() and Runtime's attempt open
     // until idle detection observes the prompt; a busy or silent pane is not proof.
     this.emitEvent({ type: 'status', data: { state: 'interrupting' } });
@@ -446,26 +463,26 @@ export class PtyCliDriver implements AgentDriver {
     const backend = this.backend;
     const generation = this.wiringGeneration;
     this.assertPermissionModeSupported();
-    if (this.backend instanceof HerdrBackend && this.backend.hasState() && !this.backend.isStopped()) {
+    if (this.backend instanceof HerdrBackend && this.backend.hasState() && !(await this.backend.isStopped())) {
       await this.transcript?.flush();
       if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return;
       await this.reattachHerdr();
-      this.markTmuxReattached();
+      (await this.markTmuxReattached());
       return;
     }
     // 路径 1：tmux 会话仍在 → reattach（后端内部重启 pipe-pane 捕获，driver 重建订阅）。
     const tmuxName = this.tmuxSessionName();
-    const tmuxProbe = tmuxName === undefined ? 'missing' : TmuxBackend.probeSession(tmuxName);
+    const tmuxProbe = tmuxName === undefined ? 'missing' : (await TmuxBackend.probeSession(tmuxName));
     if (tmuxName !== undefined && tmuxProbe === 'exists') {
       await this.transcript?.flush();
       if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return;
-      this.reattachTmux(tmuxName, this.started);
+      (await this.reattachTmux(tmuxName, this.started));
       // daemon 重启后的典型形态：新 driver 直接 resume()，从没调过 start()。
       // 必须置 started，否则接下来的 send() 会走 start() 再 spawn 一次，
       // 把刚 attach 上的后端二次 spawn（tmux 后端直接抛 "spawn() called twice"）。
       // 同理 firstPromptSent：CLI 进程还活着，上一条 prompt 里的路由块/指纹
       // 仍在它的上下文里，重发一遍只会污染会话。
-      this.markTmuxReattached();
+      (await this.markTmuxReattached());
       return;
     }
     if (tmuxName !== undefined && tmuxProbe === 'unknown') {
@@ -478,7 +495,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) return;
     await this.respawn(plan.args);
     if (plan.kind === 'resume') {
-      this.markResumed();
+      (await this.markResumed());
       return;
     }
     // 降级为全新会话：后端是活的（不该再 spawn），但 CLI 里什么上下文都没有。
@@ -577,20 +594,20 @@ export class PtyCliDriver implements AgentDriver {
 
   /** CLI-level resume 之后 driver 已有一个接好线的活后端：start() 不该再 spawn，
    *  首轮注入也不该重来（会话上下文已经带着它了）。 */
-  private markResumed(): void {
+  private async markResumed(): Promise<void> {
     this.started = true;
     this.firstPromptSent = true;
-    if (this.persistentBackend()) this.persistentBackend()!.setDutydeckMetadata('first_prompt_sent', 'true');
+    if (this.persistentBackend()) await this.persistentBackend()!.setDutydeckMetadata('first_prompt_sent', 'true');
     this.inputPrepared = false;
   }
 
   /** tmux reattach restores the exact first-prompt state saved on the owned
    * session. This also handles a daemon restart between session start and the
    * first user prompt without silently losing the routing/session marker. */
-  private markTmuxReattached(): void {
+  private async markTmuxReattached(): Promise<void> {
     this.started = true;
     this.firstPromptSent = !!this.persistentBackend()
-      && this.persistentBackend()!.getDutydeckMetadata('first_prompt_sent') === 'true';
+      && await this.persistentBackend()!.getDutydeckMetadata('first_prompt_sent') === 'true';
     this.inputPrepared = this.firstPromptSent;
   }
 
@@ -664,7 +681,7 @@ export class PtyCliDriver implements AgentDriver {
       && !options.discardSession
       && tmuxBackend !== undefined;
     if (!preservePersistentSession && !this.recoveryRejected && tmuxBackend) {
-      try { tmuxBackend.setDutydeckMetadata('turn_id', 'stopped'); } catch { /* Exit proof still required below. */ }
+      try { await tmuxBackend.setDutydeckMetadata('turn_id', 'stopped'); } catch { /* Exit proof still required below. */ }
     }
     const stopReason = preservePersistentSession ? new DriverDetachedError() : new Error('Driver stopped');
     if (this.turnActive) {
@@ -678,7 +695,7 @@ export class PtyCliDriver implements AgentDriver {
     this.cancelActiveSubmission(stopReason);
     this.turnWriteReject?.(stopReason);
     this.turnWriteReject = null;
-    if (this.backend instanceof HerdrBackend) await this.backend.cancelPending();
+    if (this.backend instanceof HerdrBackend || this.backend instanceof TmuxBackend) await this.backend.cancelPending();
     await this.transcript?.flush().catch(() => {});
     this.teardownWiring();
     this.terminalSubscribers.clear();
@@ -687,7 +704,7 @@ export class PtyCliDriver implements AgentDriver {
         // Nothing was attached: this is a foreign/mismatched live pane which
         // recovery deliberately left untouched.
       } else if (preservePersistentSession) {
-        tmuxBackend.detach();
+        (await tmuxBackend.detach());
         this.detachedForShutdown = true;
       }
       else if (tmuxBackend instanceof HerdrBackend) await tmuxBackend.stopOwnedIdentity();
@@ -700,7 +717,7 @@ export class PtyCliDriver implements AgentDriver {
         while (this.captureIdentity && this.processProbe.observe(this.captureIdentity) === 'alive' && Date.now() < deadline) {
           await new Promise(resolve => setTimeout(resolve, 25));
         }
-      } else this.backend.kill();
+      } else (await this.backend.kill());
     } catch {
       // best effort：后端可能已退出
     } finally {
@@ -716,21 +733,17 @@ export class PtyCliDriver implements AgentDriver {
   /** CLI 进程（tmux 下是 pane 进程）；它的后代构成受管进程树。 */
   processIds(): number[] {
     if (this.stopped) return [];
-    if (this.backendPid?.backend !== this.backend) {
-      const pid = this.backend.getPid?.();
-      this.backendPid = pid ? { backend: this.backend, pid } : undefined;
-    }
     return this.backendPid ? [this.backendPid.pid] : [];
   }
 
   async isStopped(): Promise<boolean> {
     if (!this.stopped || this.recoveryRejected || this.detachedForShutdown) return false;
-    if (this.backend instanceof HerdrBackend) return this.backend.isStopped();
+    if (this.backend instanceof HerdrBackend) return (await this.backend.isStopped());
     if (this.detachOnStop && !this.tmuxExitProof) return false;
     if (this.backend instanceof TmuxBackend) {
       return !!this.processProbe && !!this.tmuxExitProof
-        && verifyOwnedTmuxExit(this.tmuxExitProof, this.processProbe)
-        && !!this.captureIdentity && this.processProbe.observe(this.captureIdentity) === 'dead';
+        && (await verifyOwnedTmuxExit(this.tmuxExitProof, this.processProbe))
+        && this.backend.captureDisposed() && (!this.captureIdentity || this.processProbe.observe(this.captureIdentity) === 'dead');
     }
     if (!(this.backend instanceof PtyBackend) || this.stoppedPid === undefined) return false;
     try { process.kill(this.stoppedPid, 0); return false; }
@@ -743,7 +756,15 @@ export class PtyCliDriver implements AgentDriver {
       onData: (cb, onSnapshot) => {
         let ready = !onSnapshot || !this.snapshot;
         const pending: string[] = [];
-        const forward = (data: string) => { if (ready) cb(data); else pending.push(data); };
+        let pendingBytes = 0, retrySnapshot = false;
+        const forward = (data: string) => {
+          if (ready) cb(data);
+          else if (!retrySnapshot) {
+            pendingBytes += Buffer.byteLength(data);
+            if (pendingBytes > 256 * 1024) { pending.length = 0; pendingBytes = 0; retrySnapshot = true; }
+            else pending.push(data);
+          }
+        };
         local.add(forward);
         this.terminalSubscribers.add(forward);
         const capture = () => {
@@ -751,7 +772,7 @@ export class PtyCliDriver implements AgentDriver {
           if (!snapshot || !onSnapshot) return;
           snapshot.capture(screen => {
             if (!local.has(forward) || !this.terminalSubscribers.has(forward)) return;
-            if (snapshot !== this.snapshot) { pending.length = 0; capture(); return; }
+            if (snapshot !== this.snapshot || retrySnapshot) { pending.length = 0; pendingBytes = 0; retrySnapshot = false; capture(); return; }
             // These bytes were produced at the snapshot dimensions. Restore
             // them in the same write before the browser fits its viewport.
             const data = screen.data + pending.join('');
@@ -762,12 +783,18 @@ export class PtyCliDriver implements AgentDriver {
         };
         if (!ready) capture();
       },
-      write: data => {
-        this.backend.write(data);
+      write: async data => {
+        const backend = this.backend;
+        if (this.stopped) throw new DriverDetachedError();
+        const result = await backend.write(data);
+        if (this.stopped || this.backend !== backend) throw new DriverDetachedError();
+        if (result === false) throw new DriverRecoveryError('Terminal input was not confirmed');
       },
-      resize: (cols, rows) => {
-        this.backend.resize(cols, rows);
-        this.snapshot?.resize(cols, rows);
+      resize: async (cols, rows) => {
+        const backend = this.backend;
+        if (this.stopped) throw new DriverDetachedError();
+        await backend.resize(cols, rows);
+        if (!this.stopped && this.backend === backend) this.snapshot?.resize(cols, rows);
       },
       dispose: () => {
         for (const cb of local) this.terminalSubscribers.delete(cb);
@@ -776,19 +803,19 @@ export class PtyCliDriver implements AgentDriver {
     };
   }
 
-  persistentTerminalIdentity(): unknown {
-    return this.backend instanceof HerdrBackend ? this.backend.captureOwnedIdentity() : undefined;
+  async persistentTerminalIdentity(): Promise<unknown> {
+    return this.backend instanceof HerdrBackend ? await this.backend.captureOwnedIdentity() : undefined;
   }
 
-  attachTerminal(identity?: unknown): boolean | Promise<boolean> {
+  async attachTerminal(identity?: unknown): Promise<boolean> {
     if (this.started) return !this.stopped;
     if (this.backend instanceof HerdrBackend) {
       this.recoveryRejected = true;
       if (!this.backend.hasState()) return false;
-      if (identity !== undefined) this.backend.assertOwnedIdentity(identity);
-      return this.reattachHerdr().then(() => {
-        if (identity !== undefined) (this.backend as HerdrBackend).assertOwnedIdentity(identity);
-        this.markTmuxReattached();
+      if (identity !== undefined) (await this.backend.assertOwnedIdentity(identity));
+      return this.reattachHerdr().then(async () => {
+        if (identity !== undefined) await (this.backend as HerdrBackend).assertOwnedIdentity(identity);
+        (await this.markTmuxReattached());
         this.recoveryRejected = false;
         return true;
       });
@@ -796,35 +823,41 @@ export class PtyCliDriver implements AgentDriver {
     const name = this.tmuxSessionName();
     // Failed viewing must never destroy a surviving pane during cleanup.
     this.recoveryRejected = true;
-    if (!name || TmuxBackend.probeSession(name) !== 'exists') return false;
+    if (!name || (await TmuxBackend.probeSession(name)) !== 'exists') return false;
     try {
-      this.reattachTmux(name, false);
-      this.markTmuxReattached();
+      (await this.reattachTmux(name, false));
+      (await this.markTmuxReattached());
       this.recoveryRejected = false;
       return true;
     } catch (error) {
       this.teardownWiring();
       // Ownership failures happen before attach installs a pipe.
-      if (this.backend instanceof TmuxBackend && this.backend.initialScreen) this.backend.detach();
+      if (this.backend instanceof TmuxBackend && this.backend.initialScreen) (await this.backend.detach());
       throw error;
     }
   }
 
   /** 把一个后端接线进事件流（start / reattach / respawn 共用）。 */
-  private wire(backend: SessionBackend, restoreTranscript?: DriverTurnRecovery['transcript']): void {
+  private async wire(backend: SessionBackend, restoreTranscript?: DriverTurnRecovery['transcript']): Promise<void> {
+    const generation = this.wiringGeneration;
+    const check = () => { if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) throw new Error('PTY wiring cancelled by lifecycle change'); };
+    const pid = await backend.getPid?.();
+    check();
+    this.backendPid = pid ? { backend, pid } : undefined;
     this.tmuxIdentity = undefined;
     this.tmuxExitProof = undefined;
     this.captureIdentity = undefined;
     if (backend instanceof TmuxBackend && this.processProbe && backend.ownerId && backend.getSocketPath()) {
       try {
-        this.tmuxIdentity = captureOwnedTmuxIdentity({
+        this.tmuxIdentity = (await captureOwnedTmuxIdentity({
           socketPath: backend.getSocketPath()!, sessionName: backend.sessionName,
           ownerId: backend.ownerId, hostname: hostname(), uid: process.getuid!(),
-        }, this.processProbe);
+        }, this.processProbe));
         const capturePid = backend.getCapturePid();
         if (capturePid) this.captureIdentity = this.processProbe.identify(capturePid);
       } catch { /* Unknown physical identity must keep isStopped false. */ }
     }
+    check();
     const initial = backend instanceof TmuxBackend || backend instanceof HerdrBackend ? backend.initialScreen : undefined;
     this.snapshot = new TerminalSnapshot(initial?.cols ?? DEFAULT_COLS, initial?.rows ?? DEFAULT_ROWS);
     this.idleDetector = new IdleDetector({
@@ -878,6 +911,7 @@ export class PtyCliDriver implements AgentDriver {
         }
         this.clearBackgroundHold();
         this.turnActive = false;
+        this.clearTurnDeadline();
         // The runtime fails a turn whose last step is not text but has no
         // reason to show; the CLI's own error record is that reason.
         const turnError = this.transcript?.takeTurnError?.();
@@ -896,14 +930,68 @@ export class PtyCliDriver implements AgentDriver {
       }).finally(() => { completing = false; });
     });
 
+    // Backends retain bounded post-snapshot increments until this subscription.
+    if (initial) await this.feedRecoveredScreen(initial.data);
+    check();
+    let parsingBytes = 0, refreshPendingBytes = 0, retryRefresh = false;
+    const refreshPending: string[] = [];
+    const notice = '\r\n[DutyDeck: terminal output exceeded its buffer; restoring the current screen.]\r\n';
+    const refreshAfterGap = (droppedBytes: number) => {
+      if (backend !== this.backend || this.stopped) return;
+      this.emitEvent({ type: 'status', data: { state: 'terminal_output_gap', droppedBytes, message: 'At least this many terminal bytes were dropped; restoring the current screen.' } });
+      if (this.refreshingScreen) { retryRefresh = true; return; }
+      for (const cb of this.terminalSubscribers) cb(notice);
+      this.refreshingScreen = true;
+      const capture = async (): Promise<void> => {
+        do {
+          retryRefresh = false; refreshPending.length = 0; refreshPendingBytes = 0;
+          const screen = await (backend.resyncOutput ? backend.resyncOutput(() => { refreshPending.length = 0; refreshPendingBytes = 0; retryRefresh = false; }) : backend.captureCurrentScreen?.());
+          if (this.stopped || this.backend !== backend) return;
+          if (retryRefresh) continue;
+          if (screen === undefined || screen === null) return;
+          // Keep the refresh single-flight through xterm parsing. Only one
+          // bounded snapshot and one delta batch can be queued at a time.
+          await this.feedRecoveredScreen('\x1bc' + screen);
+          while (!retryRefresh && refreshPending.length && !this.stopped && this.backend === backend) {
+            const delta = refreshPending.join('');
+            refreshPending.length = 0; refreshPendingBytes = 0;
+            await this.feedRecoveredScreen(delta);
+          }
+          if (retryRefresh) continue;
+          return;
+        } while (this.backend === backend && !this.stopped);
+      };
+      void capture().catch(() => { /* The visible notice remains if recovery fails. */ }).finally(() => {
+        if (this.backend === backend) this.refreshingScreen = false;
+        refreshPending.length = 0; refreshPendingBytes = 0;
+      });
+    };
+    backend.onOutputGap?.(refreshAfterGap);
     backend.onData(data => {
       if (backend !== this.backend || this.stopped) return;
+      const bytes = Buffer.byteLength(data);
+      if (this.refreshingScreen) {
+        if (retryRefresh) return;
+        refreshPendingBytes += bytes;
+        if (refreshPendingBytes > 256 * 1024) {
+          refreshPending.length = 0; refreshPendingBytes = 0;
+          refreshAfterGap(bytes);
+        } else refreshPending.push(data);
+        return;
+      }
+      // xterm parses asynchronously: bound its in-flight write queue as well.
+      if (parsingBytes + bytes > 256 * 1024) { refreshAfterGap(bytes); return; }
       this.lastOutputAt = Date.now();
       this.idleDetector?.feed(data);
-      this.snapshot?.write(data);
+      const snapshot = this.snapshot;
+      if (snapshot) {
+        parsingBytes += bytes;
+        void snapshot.writeAndFlush(data).then(() => {
+          if (this.snapshot === snapshot && this.backend === backend) this.noteScreenProgress();
+        }).catch(() => { /* A disposed renderer belongs to an old attachment. */ }).finally(() => { parsingBytes -= bytes; });
+      }
       for (const cb of this.terminalSubscribers) cb(data);
       this.scheduleRawTerminal();
-      // 本轮进行中的 PTY 输出 = CLI 在干活（splash 屏静止不会触发 onData）。
       if (this.turnActive) this.turnHasOutput = true;
     });
     backend.onExit(code => { void this.handleExit(code, backend); });
@@ -920,7 +1008,7 @@ export class PtyCliDriver implements AgentDriver {
       this.teardownWiring();
       this.emitEvent({ type: 'status', data: { state: 'terminal_disconnected', message: error.message } });
     });
-    if (initial) this.feedRecoveredScreen(initial.data);
+    check();
 
     // The tailer must resolve the CLI's data dir from the environment the CLI
     // CHILD got, never the daemon's: mergedEnv strips CLAUDE_* from the child,
@@ -941,6 +1029,7 @@ export class PtyCliDriver implements AgentDriver {
     });
     if (this.transcript) {
       this.transcript.onEvent(e => {
+        this.noteTurnProgress(e);
         // 标记本轮已有实质输出或结构化失败，解除 idle 闸门。
         if (e.type === 'text' || e.type === 'thinking' || e.type === 'tool_call' || e.type === 'tool_result' || e.type === 'error') {
           this.turnHasOutput = true;
@@ -953,7 +1042,88 @@ export class PtyCliDriver implements AgentDriver {
     }
   }
 
+  private startTurnDeadline(): void {
+    this.clearTurnDeadline();
+    this.lastProgressAt = Date.now();
+    this.activityRecords.clear(); this.humanWaits.clear();
+    this.backgroundEvidenceUntil = this.lastProgressAt + PtyCliDriver.BACKGROUND_HOLD_MS;
+    this.screenProgress = '';
+    void this.turnCpu.active(this.processIds());
+    this.scheduleTurnDeadline();
+  }
+
+  private clearTurnDeadline(): void {
+    if (this.turnDeadlineTimer) clearTimeout(this.turnDeadlineTimer);
+    this.turnDeadlineTimer = undefined;
+  }
+
+  private scheduleTurnDeadline(): void {
+    const timeout = this.agent.timeout * 1000;
+    if (!Number.isFinite(timeout) || timeout <= 0) return;
+    this.clearTurnDeadline();
+    const waiting = this.awaitingAnswer?.() || this.humanWaits.size > 0 || this.screenWaitsForHuman();
+    const remaining = waiting ? timeout : Math.max(1, this.lastProgressAt + timeout - Date.now());
+    this.turnDeadlineTimer = setTimeout(() => {
+      this.turnDeadlineTimer = undefined;
+      if (!this.turnActive || this.stopped) return;
+      const waiter = this.turnReject;
+      void (async () => {
+        if (this.awaitingAnswer?.() || this.humanWaits.size || this.screenWaitsForHuman()
+          || (!this.backgroundHoldExpired && (this.backgroundHoldTimer !== undefined
+            || (Date.now() < this.backgroundEvidenceUntil && (this.transcript?.pendingBackgroundWork?.() ?? 0) > 0)))
+          || await this.turnCpu.active(this.processIds())) this.lastProgressAt = Date.now();
+        if (!this.turnActive || this.stopped || this.turnReject !== waiter) return;
+        if (Date.now() < this.lastProgressAt + timeout) { this.scheduleTurnDeadline(); return; }
+        const error = new DriverRecoveryError(`PTY turn has no verified activity for ${this.agent.timeout} seconds; original process preserved for recovery`);
+        this.turnActive = false;
+        this.cancelActiveSubmission(error); this.turnWriteReject?.(error);
+        this.turnReject?.(error); this.turnReject = null; this.turnResolve = null;
+        this.emitEvent({ type: 'status', data: { state: 'turn_timeout', timeoutSeconds: this.agent.timeout, message: error.message } });
+      })().catch(error => {
+        if (!this.turnActive || this.turnReject !== waiter) return;
+        this.turnActive = false;
+        this.turnReject?.(new DriverRecoveryError(String(error))); this.turnReject = null; this.turnResolve = null;
+      });
+    }, remaining);
+    this.turnDeadlineTimer.unref();
+  }
+
+  private screenWaitsForHuman(): boolean {
+    const footer = this.snapshot?.viewportText().split('\n').slice(-12).join('\n') ?? '';
+    return /(?:Permission required|Do you want to (?:proceed|allow)|Waiting for (?:your|user) (?:answer|response)|Answer the question|Enter to select)/i.test(footer)
+      && /[❯›]|(?:yes|allow|deny|answer|waiting)/i.test(footer);
+  }
+
+  private noteScreenProgress(): void {
+    if (!this.turnActive) return;
+    // Animation, spinner counters and footer time changes are not progress.
+    const lines = this.snapshot?.viewportText().split('\n').map(line => line.trim()) ?? [];
+    const text = lines.filter(line => line && !/[✻✽✶✳⏺⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|esc to interrupt|\b(?:thinking|working|running|loading|tokens?|seconds?)\b|[\d.]+s\b/i.test(line)).join('\n');
+    if (text && text !== this.screenProgress) { this.screenProgress = text; this.lastProgressAt = Date.now(); }
+  }
+
+  private noteTurnProgress(event: NormalizedDriverEvent): void {
+    if (!this.turnActive) return;
+    const data = event.data;
+    if (event.type === 'permission_request') {
+      if ((data.status ?? 'pending') === 'pending') this.humanWaits.add(String(data.id));
+      else if (this.humanWaits.delete(String(data.id))) this.lastProgressAt = Date.now();
+    }
+    if (event.type === 'tool_call' && (data.name === 'AskUserQuestion' || /dutydeck.*relay.*ask/.test(String(data.input?.command ?? '')))) this.humanWaits.add(String(data.id));
+    if (event.type === 'tool_result') this.humanWaits.delete(String(data.id));
+    if (event.type === 'text' || event.type === 'thinking') {
+      if (typeof data.text === 'string' && data.text.trim()) this.lastProgressAt = Date.now();
+      return;
+    }
+    if (event.type !== 'tool_call' && event.type !== 'tool_result') return;
+    const key = createHash('sha256').update(JSON.stringify([event.type, data.id, data.name, data.input, data.status, data.output])).digest('hex');
+    if (this.activityRecords.has(key)) return;
+    if (this.activityRecords.size >= 1000) this.activityRecords.delete(this.activityRecords.values().next().value!);
+    this.activityRecords.add(key); this.lastProgressAt = Date.now();
+  }
+
   private teardownWiring(): void {
+    this.clearTurnDeadline();
     this.wiringGeneration++;
     if (this.idleDetector) {
       this.idleDetector.dispose();
@@ -988,7 +1158,7 @@ export class PtyCliDriver implements AgentDriver {
     await this.transcript?.flush().catch(() => {});
     if (this.backend !== exitingBackend) return;
     this.teardownWiring();
-    if (this.backend instanceof HerdrBackend ? this.backend.isStopped() : !(this.backend instanceof TmuxBackend) || TmuxBackend.probeSession(this.backend.sessionName) === 'missing') {
+    if (this.backend instanceof HerdrBackend ? (await this.backend.isStopped()) : !(this.backend instanceof TmuxBackend) || (await TmuxBackend.probeSession(this.backend.sessionName)) === 'missing') {
       this.claudeSettings.cleanup();
     }
     // 若本轮仍在进行，driver 退出 = 本轮失败，reject send() 的等待者。
@@ -1130,7 +1300,7 @@ export class PtyCliDriver implements AgentDriver {
     if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) {
       throw new Error('PTY recovery cancelled by lifecycle change');
     }
-    this.wire(backend, restoreTranscript);
+    (await this.wire(backend, restoreTranscript));
   }
 
   private tmuxSessionName(): string | undefined {
@@ -1139,55 +1309,68 @@ export class PtyCliDriver implements AgentDriver {
     return name.length > 0 ? name : undefined;
   }
 
-  private reattachTmux(
+  private async reattachTmux(
     sessionName: string,
     detachCurrent: boolean,
     restoreTranscript?: DriverTurnRecovery['transcript'],
-  ): void {
+  ): Promise<void> {
     this.teardownWiring();
     // detach 只拆捕获，不杀 tmux 会话——CLI 进程继续存活。
     const ownerId = this.backend instanceof TmuxBackend ? this.backend.ownerId : undefined;
-    if (detachCurrent) this.backend.detach?.();
+    if (detachCurrent) await this.backend.detach?.();
     const backend = new TmuxBackend(sessionName, { ownerId });
     this.backend = backend;
     // attach 到既有会话：不重建 session、不重发 CLI 启动命令，只重建捕获。
-    backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
-    this.wire(backend, restoreTranscript);
+    const generation = this.wiringGeneration;
+    await backend.attach({ cols: DEFAULT_COLS, rows: DEFAULT_ROWS });
+    if (this.stopped || this.backend !== backend || this.wiringGeneration !== generation) throw new Error('PTY recovery cancelled by lifecycle change');
+    await this.wire(backend, restoreTranscript);
   }
 
   /** Feed a point-in-time tmux capture through the same snapshot and idle
    * machinery as pipe-pane bytes, without treating it as new PTY output. */
-  private feedRecoveredScreen(screen: string): void {
+  private async feedRecoveredScreen(screen: string): Promise<void> {
+    const snapshot = this.snapshot;
     this.idleDetector?.feed(screen);
-    this.snapshot?.write(screen);
     for (const cb of this.terminalSubscribers) cb(screen);
+    await snapshot?.writeAndFlush(screen);
+    if (this.snapshot !== snapshot || this.stopped) return;
+    this.noteScreenProgress();
     this.scheduleRawTerminal();
   }
 
   /** Wrap the intentionally-small adapter PTY surface per submission. The
    * real Claude adapter awaits between its bracketed paste and Enter, so
    * checking only before writeInput is insufficient after daemon detach. */
-  private submissionBackend(submission: { cancelError?: Error }): PtyLike {
+  private submissionBackend(submission: { cancelError?: Error; pending?: Promise<unknown> }): PtyLike {
     const target = this.backend as SessionBackend & Partial<PtyLike>;
-    const guarded = <T>(write: () => T): T => {
+    const check = () => {
       if (submission.cancelError) throw submission.cancelError;
       if (this.stopped) throw new Error('Driver stopped');
-      if (this.activeSubmission !== submission || this.backend !== target) {
-        throw new Error('PtyCliDriver: submission is no longer active');
-      }
-      const result = write();
-      if (result === false) throw new Error('PtyCliDriver: backend rejected input; submission was not confirmed');
-      return result;
+      if (this.activeSubmission !== submission || this.backend !== target) throw new Error('PtyCliDriver: submission is no longer active');
+    };
+    const guarded = <T>(write: () => T | Promise<T>): Promise<T> => {
+      check();
+      const operation = (submission.pending ?? Promise.resolve()).then(async () => {
+        check();
+        const result = await write();
+        check();
+        if (result === false) throw new DriverRecoveryError('PTY backend rejected input; original process preserved');
+        return result;
+      });
+      submission.pending = operation;
+      void operation.catch(() => {});
+      return operation;
     };
     const proxy: PtyLike = {
       write: data => guarded(() => target.write(data)),
-      lastOutputAt: () => guarded(() => this.lastOutputAt),
+      lastOutputAt: () => { check(); return this.lastOutputAt; },
       processKey: target,
-      // tmux can synchronously capture the pane. Prefer that authoritative
-      // current render over its asynchronous pipe-pane/tail mirror while a
+      // tmux can capture the pane through its management client. Prefer that authoritative
+      // current render over its asynchronous pipe-pane/socket mirror while a
       // startup dialog is deciding whether it may accept any input.
-      readScreen: () => guarded(() => target.captureCurrentScreen
-        ? target.captureCurrentScreen() ?? ''
+      readScreen: () => guarded(async () => target.captureCurrentScreen
+        ? await target.captureCurrentScreen() ?? ''
         : this.snapshot?.viewportText() ?? ''),
     };
     if (target.sendText) proxy.sendText = text => guarded(() => target.sendText!(text));
@@ -1227,7 +1410,7 @@ export class PtyCliDriver implements AgentDriver {
     if (previousBackend instanceof HerdrBackend) await previousBackend.stopOwnedIdentity();
     if (this.stopped || this.backend !== previousBackend || this.wiringGeneration !== generation) throw new Error('PTY respawn cancelled by lifecycle change');
     try {
-      previousBackend.kill();
+      await previousBackend.kill();
     } catch {
       // best effort
     }
@@ -1250,7 +1433,7 @@ export class PtyCliDriver implements AgentDriver {
       }
       throw error;
     }
-    this.wire(backend);
+    (await this.wire(backend));
   }
 }
 

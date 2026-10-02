@@ -8,15 +8,16 @@ import { DutydeckRuntime, type RuntimeOptions, type PtyRetirementControl } from 
 const owner = { kind: 'installation_owner', id: 'installation_owner' } as const;
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanups.splice(0).reverse()) await close(); });
-async function fixture(options: RuntimeOptions = {}, isStopped = true) {
+async function fixture(options: RuntimeOptions = {}, isStopped = true, deferFailure = false) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-recovery-'));
   const repos = createRepositories(':memory:', { newDatabaseAuthority: 'ledger_v1' });
   const prompts: string[] = [];
-  let fail = true;
+  let fail = true, releaseFailure!:()=>void;
+  const failureGate=new Promise<void>(done=>{releaseFailure=done;});
   const factory: DriverFactory = (_agent, _protocol, emit) => ({ start: async () => {}, resume: async () => {}, stop: async () => {}, isStopped: async () => isStopped,
     interrupt: async () => {}, send: async input => {
       const prompt = typeof input === 'string' ? input : input.prompt; prompts.push(prompt);
-      if (fail) throw Object.assign(new Error('original result unavailable'), { code: 'AGENT_IDLE_TIMEOUT' });
+      if (fail) { if(deferFailure) await failureGate; throw Object.assign(new Error('original result unavailable'), { code: 'AGENT_IDLE_TIMEOUT' }); }
       emit({ type: 'text', data: { text: 'done' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } });
     } });
   const agent: AgentConfig = { id: 'fixture', name: 'fixture', command: process.execPath, args: [], cwd, env: {}, protocol: 'acp', permissionMode: 'ask', timeout: 10, capabilities: { pause: false, resume: true }, builtin: false };
@@ -24,9 +25,9 @@ async function fixture(options: RuntimeOptions = {}, isStopped = true) {
   cleanups.push(async () => { await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
   await runtime.initialize([agent]);
   const session = await runtime.start({ agentId: agent.id });
-  const first = await runtime.send(session.id, 'original');
-  expect(first.status).toBe('reconcile_required');
-  await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)).toBeUndefined());
+  const first = deferFailure ? await runtime.dispatch(session.id,'original') : await runtime.send(session.id,'original');
+  if(deferFailure) await vi.waitFor(()=>expect(repos.execution.getTaskExecution(first.id)?.currentAttempt?.state).toBe('active'));
+  else { expect(first.status).toBe('reconcile_required'); await vi.waitFor(() => expect(runtime.getActiveTaskContext(session.id)).toBeUndefined()); }
   const second = await runtime.dispatch(session.id, 'queued');
   const decision = async (decisionId = 'confirmed'): Promise<ExecutionRecoveryDecision> => {
     const snapshot = await runtime.inspectExecutionRecovery(session.id, owner);
@@ -34,7 +35,7 @@ async function fixture(options: RuntimeOptions = {}, isStopped = true) {
     return { runId: snapshot.runId, taskId: first.id, attemptId: attempt.attemptId, expectedRevision: attempt.revision,
       decisionId, action: 'confirm_result', outcome: 'unknown', evidenceRefs: ['operator:original-result-unknown'], resourceChecks: snapshot.resourceChecks };
   };
-  return { repos, session, first, second, prompts, decision, get runtime() { return runtime; },
+  return { repos, session, first, second, prompts, decision, releaseFailure, get runtime() { return runtime; },
     reopen: async () => { await runtime.shutdown(); fail = false; runtime = new DutydeckRuntime(repos, { ...options, driverFactory: factory, cleanupIntervalMs: 0 }); await runtime.initialize([agent]); } };
 }
 describe('owner execution recovery', () => {
@@ -51,7 +52,7 @@ describe('owner execution recovery', () => {
   });
 
   it('retains completed steered tasks without attempts and their session resource blockers in bulk recovery', async () => {
-    const h = await fixture();
+    const h = await fixture({},true,true);
     const bound = (h.runtime as any).bound() as BoundExecutionRepository;
     const fence = { sessionId: h.session.id, runId: h.session.runId };
     const target = h.repos.execution.getTaskExecution(h.first.id)!.currentAttempt!;
@@ -61,11 +62,15 @@ describe('owner execution recovery', () => {
     resource = bound.spawned(fence, resource.resourceId, resource.revision, { identityId: 'steering-history-identity', kind: 'local_only', locator: { owner: 'previous-adapter' } });
     resource = bound.creationFinished(fence, resource.resourceId, resource.revision, 'created');
     bound.observed(fence, resource.resourceId, resource.revision, { observationId: 'steering-history-live', identityId: resource.identity!.identityId, state: 'live', evidenceRef: 'previous-adapter-started', observedAt: new Date().toISOString() });
-    bound.deliverQueuedBySteering(fence, queued.id, queued.revision, {
+    bound.beginQueuedSteering(fence, queued.id, queued.revision, {
       operationId: 'recovery-steering', actor: owner,
-      target: { taskId: target.taskId, attemptId: target.attemptId }, outcome: 'injected'
+      target: { taskId: target.taskId, attemptId: target.attemptId }
     });
-    bound.settleAttempt({ ...fence, taskId: target.taskId, attemptId: target.attemptId, expectedRevision: target.revision }, 'recovery-steering-target', {
+    h.releaseFailure(); await vi.waitFor(()=>expect(h.repos.execution.getTaskExecution(h.first.id)?.task.status).toBe('reconcile_required'));
+    const operation=h.repos.execution.getTaskExecution(queued.id)!.steering!;
+    bound.resolveQueuedSteering(fence,operation.operationId,operation.controller,'injected');
+    const reconciled=h.repos.execution.getTaskExecution(h.first.id)!.currentAttempt!;
+    bound.settleAttempt({ ...fence, taskId: target.taskId, attemptId: target.attemptId, expectedRevision: reconciled.revision }, 'recovery-steering-target', {
       kind: 'driver_result', submissionId: target.submission!.submissionId,
       outcome: 'completed', outputDigest: 'a'.repeat(64), stopReason: 'end_turn', complete: true
     });
@@ -207,6 +212,16 @@ describe('trusted explicit PTY retirement', () => {
     await expect(h.runtime.retirePtyExecution(h.session.id, { ...input, expectedRevision: gone.revision }, owner)).rejects.toMatchObject({ code: 'PTY_RETIREMENT_RESOURCE_UNSAFE' });
     expect(capture).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled();
     expect(h.repos.execution.getResources(h.session.id).find(r => r.resourceId === second.resourceId)?.observations.at(-1)?.state).toBe('live');
+  });
+  it('awaits asynchronous capture and rejects an asynchronous false exit proof',async()=>{
+    const snapshot={original:'async-owner'};
+    const capture=vi.fn(async()=>snapshot), stop=vi.fn<PtyRetirementControl['stop']>(async(_s,value)=>value);
+    const h=await fixture({ptyRetirement:{capture,stop,verify:async()=>false}},false);
+    const input=await inputFor(h);
+    await expect(h.runtime.retirePtyExecution(h.session.id,input,owner)).rejects.toMatchObject({code:'PTY_EXIT_UNVERIFIED'});
+    expect(stop).toHaveBeenCalledWith(expect.anything(),snapshot,expect.any(Function));
+    expect(JSON.parse((await h.repos.config.get(`runtime_pty_retirement:${h.session.id}:retire`))!).snapshot).toEqual(snapshot);
+    expect(h.repos.execution.getResources(h.session.id).find(r=>r.resourceId===input.resourceId)?.observations.some(o=>o.state==='gone')).toBe(false);
   });
   it('blocks concurrent queue start and requires a separate unknown confirmation before dispatch', async () => {
     let release!: () => void, entered!: () => void, gone = false;

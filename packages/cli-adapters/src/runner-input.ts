@@ -58,7 +58,7 @@ export async function writeRunnerInput(
   // 裸 PTY 回退：单次写入即可，没有 send-keys 超时问题。
   if (!backend.sendText || !backend.sendSpecialKeys) {
     try {
-      if (backend.write(line + '\r') === false) return { submitted: false };
+      if ((await backend.write(line + '\r')) === false) return { submitted: false };
     } catch {
       return { submitted: false };
     }
@@ -66,9 +66,9 @@ export async function writeRunnerInput(
   }
 
   const sendText = backend.sendText.bind(backend);
-  const sendEnterWithRetry = (attempts = 3): boolean => {
+  const sendEnterWithRetry = async (attempts = 3): Promise<boolean> => {
     for (let i = 0; i < attempts; i++) {
-      if (backend.sendSpecialKeys!('Enter') !== false) return true;
+      if ((await backend.sendSpecialKeys!('Enter')) !== false) return true;
     }
     return false;
   };
@@ -76,7 +76,7 @@ export async function writeRunnerInput(
   // 预冲 Enter 必须先落地：缓冲里若有旧半行，直接写新行会把两者拼成一条
   // runner 丢弃的坏行，而提交 Enter 仍报成功（静默丢消息）。
   try {
-    if (!sendEnterWithRetry()) return { submitted: false };
+    if (!(await sendEnterWithRetry())) return { submitted: false };
   } catch {
     return { submitted: false };
   }
@@ -86,13 +86,13 @@ export async function writeRunnerInput(
     const chunk = chunks[i]!;
     let chunkWritten: void | boolean;
     try {
-      chunkWritten = sendText(chunk);
+      chunkWritten = await sendText(chunk);
     } catch {
       return { submitted: false };
     }
     if (chunkWritten === false) {
       // 已写入的 chunk 是没有换行的半行，补发 Enter 冲掉它。
-      try { sendEnterWithRetry(); } catch { /* 尽力而为 */ }
+      try { (await sendEnterWithRetry()); } catch { /* 尽力而为 */ }
       return { submitted: false };
     }
     if (i < chunks.length - 1) await delay(RUNNER_INPUT_THROTTLE_MS);
@@ -100,7 +100,7 @@ export async function writeRunnerInput(
 
   // 提交 Enter（带重试：单次未确认可能让完整行停在缓冲里）。
   try {
-    if (!sendEnterWithRetry()) return { submitted: false };
+    if (!(await sendEnterWithRetry())) return { submitted: false };
   } catch {
     return { submitted: false };
   }

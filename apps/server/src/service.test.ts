@@ -283,11 +283,22 @@ describe('production PTY backend injection', () => {
     }).sessionName).toBe(backend.sessionName);
   });
 
-  it('fails loudly instead of downgrading production sessions to PtyBackend', () => {
-    expect(() => createProductionPtyBackend('ses-no-tmux', {
-      isAvailable: (kind: string) => false,
-      probeSession: () => 'missing',
-    })).toThrow(/tmux backend is unavailable/i);
+  it('fails loudly instead of downgrading production sessions to PtyBackend', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'dutydeck-no-tmux-'));
+    temporaryDirectories.push(root);
+    const { PtyBackend } = await import('@dutydeck/session-backends');
+    const fallback = vi.spyOn(PtyBackend.prototype, 'spawn');
+    const savedPath = process.env.PATH;
+    process.env.PATH = root; // An empty real PATH, rather than a mocked availability result.
+    try {
+      const backend = createProductionPtyBackend('ses-no-tmux');
+      expect(backend.kind).toBe('tmux');
+      await expect(backend.spawn('/bin/sh', [], { cwd: root, cols: 80, rows: 24, env: {} }))
+        .rejects.toThrow(/spawn tmux ENOENT/);
+      expect(fallback).not.toHaveBeenCalled();
+    } finally {
+      if (savedPath === undefined) delete process.env.PATH; else process.env.PATH = savedPath;
+    }
   });
 
   const tmuxAvailable = spawnSync('tmux', ['-V'], { stdio: 'ignore' }).status === 0;
@@ -409,7 +420,7 @@ describe('production PTY backend injection', () => {
       const session = await first.runtime.start({ agentId: 'claude-code' });
       const backend = createProductionPtyBackend(session.id);
       tmuxSessions.push(backend.sessionName);
-      const originalPid = backend.getPid();
+      const originalPid = await backend.getPid();
       const project = join(root, 'projects', realpathSync(root).replace(/[^A-Za-z0-9-]/g, '-'));
       mkdirSync(project, { recursive: true });
       const transcript = join(project, session.id.replace(/^ses_/, '') + '.jsonl');
@@ -439,15 +450,15 @@ describe('production PTY backend injection', () => {
         expect(taskExec.attempts).toHaveLength(1);
         expect(taskExec.attempts[0]?.state).toBe('reconcile_required');
         expect(taskExec.attempts[0]?.submission?.recovery?.turnId)
-          .toBe(backend.getDutydeckMetadata('turn_id'));
+          .toBe(await backend.getDutydeckMetadata('turn_id'));
       } finally { persisted.close(); }
       const complete = () => { record('final answer'); writeFileSync(join(root, 'finish-1'), ''); };
       if (offline) {
         complete();
-        await vi.waitFor(() => expect(backend.captureCurrentScreen()).toContain('Worked for 1s'));
+        await vi.waitFor(async () => expect(await backend.captureCurrentScreen()).toContain('Worked for 1s'));
       }
       restored = await startLocalServer({ webRoot: root, env: await serverEnv() });
-      expect(backend.getPid()).toBe(originalPid);
+      expect(await backend.getPid()).toBe(originalPid);
       if (!offline) {
         await vi.waitFor(async () => expect((await restored!.runtime.getTasks(session.id))[0]?.status).toBe('running'));
         expect((await restored.runtime.getTasks(session.id))[1]?.status).toBe('queued');
@@ -455,7 +466,7 @@ describe('production PTY backend injection', () => {
         // Repeating a restart while the same turn is busy must retain its identity.
         await restored.close();
         restored = await startLocalServer({ webRoot: root, env: await serverEnv() });
-        expect(backend.getPid()).toBe(originalPid);
+        expect(await backend.getPid()).toBe(originalPid);
         complete();
       }
       await vi.waitFor(async () => expect((await restored!.runtime.getTasks(session.id))[0]?.status).toBe('completed'), { timeout: 25_000 });
@@ -580,11 +591,11 @@ describe('production PTY backend injection', () => {
       // 而不是假装已干净停止。service 关闭时 pane 保持存活，由本测试的 afterEach 清理。
       await expect(restored.runtime.stop(session.id)).rejects.toMatchObject({ code: 'ACTOR_REQUIRED' });
       expect((await restored.runtime.getTasks(session.id))[1]?.status).toBe('queued');
-      expect(backend.getPid()).toBe(originalPid);
+      expect(await backend.getPid()).toBe(originalPid);
       await expect(restored.runtime.stop(session.id, { kind: 'installation_owner', id: 'installation_owner' }))
         .rejects.toMatchObject({ code: 'SESSION_RESOURCE_BLOCKED' });
       expect((await restored.runtime.getTasks(session.id))[1]?.status).toBe('cancelled');
-      expect(backend.getPid()).toBe(originalPid);
+      expect(await backend.getPid()).toBe(originalPid);
     } finally {
       await first.close();
       await restored?.close();

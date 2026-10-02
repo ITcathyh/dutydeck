@@ -32,24 +32,27 @@ export interface SessionBackend {
   spawn(bin: string, args: string[], opts: SpawnOptions): void | Promise<void>;
   /** Write literal text. Returns false when the backend refused outright
    *  (tmux send-keys timeout, …); void/true means it was sent. */
-  write(data: string): void | boolean;
+  write(data: string): void | boolean | Promise<void | boolean>;
   /** Interrupt the current turn: pty writes \x03; tmux sends C-c. */
-  interrupt(): void;
-  resize(cols: number, rows: number): void;
+  interrupt(): void | Promise<void>;
+  resize(cols: number, rows: number): void | Promise<void>;
   onData(cb: (data: string) => void): void;
   onExit(cb: (code: number | null, signal: string | null) => void): void;
-  kill(): void;
+  kill(): void | Promise<void>;
   /**
    * Detach from a LIVE backend without destroying the underlying session
    * (tmux only): tear down output capture so another backend instance can
    * attach later. The CLI process keeps running. PtyBackend does not
    * implement it — a pty child cannot survive its backend.
    */
-  detach?(): void;
+  detach?(): void | Promise<void>;
   /** tmux: capture-pane snapshot; pty: null */
-  captureCurrentScreen?(): string | null;
-  getPaneSize?(): { cols: number; rows: number } | null;
-  getPid?(): number | null;
+  captureCurrentScreen?(): string | null | Promise<string | null>;
+  /** Atomically restore a snapshot followed by new pipe increments. */
+  resyncOutput?(onBoundary?: () => void): Promise<string | null>;
+  onOutputGap?(cb: (droppedBytes: number) => void): void;
+  getPaneSize?(): { cols: number; rows: number } | null | Promise<{ cols: number; rows: number } | null>;
+  getPid?(): number | null | Promise<number | null>;
 }
 
 /** Tri-state tmux session probe (command failure ≠ session missing). */

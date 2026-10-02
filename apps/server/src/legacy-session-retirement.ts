@@ -74,7 +74,7 @@ async function verifyPty(candidate: LegacyRetirementCandidate, options: LegacyRe
   const expectedOwner = `dutydeck:${candidate.sessionId}`;
   const probe = { identify: childProcessIdentity, observe: observeProcess };
   try {
-    const identity = captureOwnedTmuxIdentity({ socketPath: options.tmuxSocket, sessionName: targetName,
+    const identity = await captureOwnedTmuxIdentity({ socketPath: options.tmuxSocket, sessionName: targetName,
       ownerId: expectedOwner, hostname: options.hostname, uid: options.uid }, probe, state.exitProof);
     if (!identity) return readyReceipt(candidate, options, {
       kind: 'pty_tmux_absent', socketPath: options.tmuxSocket, targetName, owner: expectedOwner,

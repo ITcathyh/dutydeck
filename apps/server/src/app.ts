@@ -151,7 +151,8 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
   registerSessionNameRoutes(app, runtime, options.sessionNames);
   if (options.terminal) registerTerminalRoutes(app, options.terminal);
   await registerInstanceProxy(app, options.instances ?? [], options.terminal?.auth, options.lark?.config);
-  registerRelayRoutes(app, { ...options.relay, runtime: options.relay?.runtime ?? runtime });
+  registerRelayRoutes(app, { ...options.relay, runtime: options.relay?.runtime ?? runtime,
+    authorize: async (request, sessionId, action) => { await requireSessionExecution(request, sessionId, 'session', action); } });
   await registerFoundationManagementRoutes(app, options.foundation);
   await registerIdentityPreflightRoutes(app, options.identityPreflight);
   await registerScheduleManagementRoutes(app, options.schedule);
@@ -309,9 +310,12 @@ export async function buildApp(runtime: DutydeckRuntime, options: BuildAppOption
     if (task.status === 'queued') {
       try { steering = await runtime.injectQueued(request.params.id, task.id, decision?.source === 'owner' ? installationOwnerTaskActor : undefined); }
       catch (error) {
-        if (!(error instanceof RuntimeError && error.code === 'QUEUED_TASK_NOT_FOUND')) steering = { task, outcome: 'failed', error: error instanceof Error ? error.message : String(error) };
-        // 派发到插话之间这一条已经开跑或被取消：按它此刻的状态回报。
-        else steering = { task: (await runtime.getTasks(request.params.id)).find(item => item.id === task.id) ?? task, outcome: 'moved' };
+        // 持久投递意图可能已写入；异常后不能再用派发时的 queued 快照。
+        const currentTask = (await runtime.getTasks(request.params.id)).find(item => item.id === task.id);
+        if (!currentTask) throw error;
+        steering = error instanceof RuntimeError && error.code === 'QUEUED_TASK_NOT_FOUND'
+          ? { task: currentTask, outcome: 'moved' }
+          : { task: currentTask, outcome: 'failed', error: error instanceof Error ? error.message : String(error) };
       }
     }
     return reply.code(202).send({ accepted: true, task: steering.task, steering: { outcome: steering.outcome, ...(steering.error ? { error: steering.error } : {}) } });

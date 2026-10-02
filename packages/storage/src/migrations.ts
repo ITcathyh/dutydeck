@@ -584,7 +584,16 @@ export const migrations: Migration[] = [
       if (columns.join(',') === 'session_id,number,id') db.exec('DROP INDEX task_attempt_session_history');
     }
   } },
-  { version: 31, name: 'pin_primary_terminal_backend', up(db) { db.exec("ALTER TABLE sessions ADD COLUMN terminal_backend TEXT CHECK (terminal_backend IN ('tmux','herdr'))"); } }
+  { version: 31, name: 'pin_primary_terminal_backend', up(db) { db.exec("ALTER TABLE sessions ADD COLUMN terminal_backend TEXT CHECK (terminal_backend IN ('tmux','herdr'))"); } },
+  { version: 32, name: 'persist_steering_delivery', up(db) { db.exec(`
+    CREATE TABLE task_steering_operations (
+      id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id), run_id TEXT NOT NULL,
+      task_id TEXT NOT NULL REFERENCES tasks(id), state TEXT NOT NULL CHECK(state IN ('pending','unknown','delivered','not_delivered','abandoned')),
+      revision INTEGER NOT NULL, json TEXT NOT NULL CHECK(json_valid(json))
+    );
+    CREATE INDEX task_steering_session_state ON task_steering_operations(session_id,state);
+    CREATE INDEX task_steering_task ON task_steering_operations(task_id);
+  `); } }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

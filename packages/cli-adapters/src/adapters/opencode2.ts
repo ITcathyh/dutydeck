@@ -39,16 +39,16 @@ export function createOpenCode2Adapter(): CliAdapter {
       if (backend.sendText && backend.sendSpecialKeys) {
         if (!isSlashCommand && backend.pasteText
           && (prompt.length > OPENCODE_PASTE_THRESHOLD || prompt.includes('\n'))) {
-          backend.pasteText(prompt);
+          (await backend.pasteText(prompt));
         } else {
-          backend.sendText(prompt);
+          (await backend.sendText(prompt));
         }
         await delay(200);
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
       } else {
-        backend.write(prompt);
+        (await backend.write(prompt));
         await delay(1000);
-        backend.write('\r');
+        (await backend.write('\r'));
       }
     },
 

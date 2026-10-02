@@ -37,13 +37,13 @@ export function createReasonixAdapter(): CliAdapter {
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       if (backend.sendText && backend.sendSpecialKeys) {
-        if (backend.sendText(prompt) === false) return;
+        if ((await backend.sendText(prompt)) === false) return;
         await delay(200);
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
       } else {
-        backend.write(prompt);
+        (await backend.write(prompt));
         await delay(1000);
-        backend.write('\r');
+        (await backend.write('\r'));
       }
     },
 

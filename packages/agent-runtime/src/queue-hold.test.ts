@@ -101,7 +101,8 @@ describe('restart drain queue hold with steering', () => {
     const first = await h.runtime.dispatch(session.id, 'first');
     await vi.waitFor(() => expect(h.driver.send).toHaveBeenCalledWith('first'));
     const second = await h.runtime.dispatch(session.id, 'second');
-    h.driver.steer = () => { asked.resolve(); return new Promise(() => {}); };
+    let answer!: (outcome:'injected')=>void;
+    h.driver.steer = () => { asked.resolve(); return new Promise(done => { answer=done; }); };
     // Take over only the 30-second steering timer.
     const realSetTimeout = globalThis.setTimeout;
     let expire: (() => void) | undefined;
@@ -117,18 +118,21 @@ describe('restart drain queue hold with steering', () => {
     gate.resolve();
     await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, first.id)).toBe('completed'));
     expire!();
-    await expect(steering).resolves.toMatchObject({ outcome: 'failed', task: { status: 'queued' } });
+    await expect(steering).resolves.toMatchObject({ outcome: 'failed', task: { status: 'reconcile_required' } });
     // Steering is over but the drain is not: admission still works, nothing is claimed.
     const third = await h.runtime.dispatch(session.id, 'third');
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(sent(h.driver)).toEqual(['first']);
-    expect(await statusOf(h.runtime, session.id, second.id)).toBe('queued');
+    expect(await statusOf(h.runtime, session.id, second.id)).toBe('reconcile_required');
     expect(await statusOf(h.runtime, session.id, third.id)).toBe('queued');
     expect(admitTask).toHaveBeenCalledTimes(3);
 
     h.runtime.setQueueHeld(false);
+    await new Promise(resolve => setTimeout(resolve,50));
+    expect(sent(h.driver)).toEqual(['first']);
+    answer('injected');
     await vi.waitFor(async () => expect(await statusOf(h.runtime, session.id, third.id)).toBe('completed'));
-    expect(sent(h.driver)).toEqual(['first', 'second', 'third']);
+    expect(sent(h.driver)).toEqual(['first', 'third']);
     expect(admitTask).toHaveBeenCalledTimes(3);
     await h.runtime.shutdown(); h.repos.close();
   });
@@ -154,7 +158,7 @@ describe('restart drain queue hold with steering', () => {
     h.runtime.setQueueHeld(false);
     await new Promise(resolve => setTimeout(resolve, 50));
     expect(sent(h.driver)).toEqual(['first']);
-    expect(await statusOf(h.runtime, session.id, second.id)).toBe('queued');
+    expect(await statusOf(h.runtime, session.id, second.id)).toBe('reconcile_required');
     expect(await statusOf(h.runtime, session.id, third.id)).toBe('queued');
 
     answer('promptRequired');

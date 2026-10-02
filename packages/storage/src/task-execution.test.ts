@@ -29,6 +29,46 @@ const intent=(submissionId='send')=>({submissionId,inputDigest:hash('final'),res
 const complete=(submissionId='send')=>({kind:'driver_result' as const,submissionId,outcome:'completed' as const,outputDigest:hash('done'),stopReason:'end_turn',complete:true as const});
 
 describe('task execution ledger',()=>{
+  it('persists a steering reservation before dispatch and blocks every replay entry after reopening',()=>{
+    const filename=disk();const initial=ready(filename);let a=claimed(initial.x);a=initial.x.markSubmissionPending(af(a),intent()).attempt!;
+    const second=accepted(initial.x,'steered').task!;
+    const begin={operationId:'persisted-op',actor:{kind:'installation_owner' as const,id:'installation_owner' as const},target:{taskId:a.taskId,attemptId:a.attemptId}};
+    initial.x.beginQueuedSteering(f,second.id,second.revision,begin);
+    initial.x.settleAttempt(af(a),'original-finished',complete());
+    const op=initial.repos.execution.getTaskExecution(second.id)!.steering!;
+    expect(op).toMatchObject({state:'pending',revision:1});expect(initial.repos.execution.getTaskExecution(second.id)?.attempts).toEqual([]);
+    initial.claim!.release();initial.repos.close();opened.splice(opened.findIndex(entry=>entry.repos===initial.repos),1);
+    const next=open(filename);next.claim=next.repos.control.attachRuntime('replacement');const x=next.repos.execution.bind(next.claim);
+    x.resolveQueuedSteering(f,op.operationId,op.controller,'unknown');
+    expect(next.repos.execution.getUnresolvedTasks('s')).toEqual([{id:second.id,status:'reconcile_required'}]);
+    expect(()=>x.claimNext(f)).toThrow(/STEERING_DELIVERY_UNKNOWN/);
+    expect(()=>x.promoteQueued(f,second.id,3,{operationId:'promote',actor:begin.actor,interrupt:false})).toThrow(/TASK_NOT_QUEUED/);
+    expect(()=>x.cancelQueued(f,second.id,3,decision('cancel','cancel'))).toThrow(/TASK_NOT_QUEUED/);
+    expect(()=>x.replaceSessionRun(f,'new-run',[])).toThrow(/STEERING_DELIVERY_UNKNOWN/);
+    expect(()=>x.patchSession(f,{archivedAt:'2026-10-02T00:00:00.000Z'})).toThrow(/STEERING_DELIVERY_UNKNOWN/);
+    expect(()=>x.resolveQueuedSteering(f,op.operationId,op.controller,'injected')).toThrow(/STEERING_CONTROLLER_CONFLICT/);
+    const current=next.repos.execution.getTaskExecution(second.id)!.steering!;
+    const input={runId:f.runId,taskId:second.id,operationId:op.operationId,expectedRevision:current.revision,decisionId:'abandon-old',evidenceRefs:['operator:reviewed'],resourceChecks:[],action:'abandon' as const};
+    expect(x.confirmSteeringRecovery(f,input,begin.actor).task?.status).toBe('cancelled');expect(x.confirmSteeringRecovery(f,input,begin.actor).replayed).toBe(true);
+    expect(()=>x.confirmSteeringRecovery(f,{...input,action:'delivered'},begin.actor)).toThrow(/EXECUTION_OPERATION_CONFLICT/);
+    expect(next.repos.execution.getUnresolvedTasks('s')).toEqual([]);expect(x.claimNext(f)).toBeUndefined();
+  });
+  it('requires physical stop evidence and preserves manual decisions against late replies',()=>{
+    const {x,repos}=ready();let a=claimed(x);a=x.markSubmissionPending(af(a),intent()).attempt!;
+    const second=accepted(x,'steered').task!;
+    const actor={kind:'installation_owner' as const,id:'installation_owner' as const};
+    x.beginQueuedSteering(f,second.id,second.revision,{operationId:'late-op',actor,target:{taskId:a.taskId,attemptId:a.attemptId}});
+    const op=repos.execution.getTaskExecution(second.id)!.steering!;
+    const r=x.beforeCreate(f,{resourceId:'original-process',kind:'local_only'});
+    const created=x.spawned(f,r.resourceId,r.revision,{identityId:'original-identity',kind:'local_only',locator:{driver:'fixture'}});
+    const input={runId:f.runId,taskId:second.id,operationId:op.operationId,expectedRevision:op.revision,decisionId:'manual-abandon',evidenceRefs:['operator:reviewed'],resourceChecks:[] as ResourceCheckRef[],action:'abandon' as const};
+    expect(()=>x.confirmSteeringRecovery(f,input,actor)).toThrow(/RESOURCE_OBSERVATION_REQUIRED/);
+    const gone=x.observed(f,created.resourceId,created.revision,{observationId:'physical-exit',state:'gone',identityId:'original-identity',observedAt:'2026-10-02T00:00:00.000Z',evidenceRef:'fixture:exit'});
+    input.resourceChecks.push({resourceId:gone.resourceId,expectedRevision:gone.revision,observationId:'physical-exit'});
+    x.confirmSteeringRecovery(f,input,actor);
+    const late=x.resolveQueuedSteering(f,op.operationId,op.controller,'injected');expect(late.replayed).toBe(true);expect(late.task?.status).toBe('cancelled');
+    expect(repos.execution.getTaskExecution(second.id)).toMatchObject({attempts:[],steering:{state:'abandoned',decisionId:'manual-abandon'}});
+  });
   it('bounds hot task and attempt reads as unrelated execution history grows', () => {
     const filename = disk();
     const { x, repos } = ready(filename);
@@ -62,6 +102,11 @@ describe('task execution ledger',()=>{
       const plan = sql.prepare("EXPLAIN QUERY PLAN SELECT 1 FROM task_attempts WHERE session_id=? AND state='legacy_unresolved' LIMIT 1").all('s');
       expect(JSON.stringify(plan)).toContain('task_attempts_session_state');
       expect(JSON.stringify(plan)).not.toContain('SCAN task_attempts');
+      const unresolvedPlan = sql.prepare("EXPLAIN QUERY PLAN SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id").all('s','s');
+      expect(JSON.stringify(unresolvedPlan)).toContain('task_attempts_session_state');
+      expect(JSON.stringify(unresolvedPlan)).toContain('task_steering_session_state');
+      expect(JSON.stringify(unresolvedPlan)).not.toMatch(/SCAN (?:t|task_attempts|task_steering_operations)"/);
+
       const legacy = { ...settled, attemptId: 'history_attempt_1', taskId: 'history_task_1', state: 'legacy_unresolved', submissionState: 'legacy_unknown' };
       sql.prepare("UPDATE task_attempts SET state='legacy_unresolved',submission_state='legacy_unknown',json=? WHERE id=?").run(JSON.stringify(legacy), legacy.attemptId);
       expect(repos.execution.getTaskExecution(settled.taskId)?.blockers).toContainEqual({ sessionId: 's', code: 'LEGACY_MULTIPLE_EXECUTIONS' });
@@ -183,22 +228,25 @@ describe('task execution ledger',()=>{
   });
   it('records a steering delivery into a submitted Attempt and takes the Task off the queue',()=>{
     const {x,repos}=ready();const a=claimed(x);const second=accepted(x,'two').task!;
-    const delivery={operationId:'steer-two',actor:{kind:'unspecified' as const},target:{taskId:a.taskId,attemptId:a.attemptId},outcome:'injected' as const};
+    const delivery={operationId:'steer-two',actor:{kind:'unspecified' as const},target:{taskId:a.taskId,attemptId:a.attemptId}};
     // Unsubmitted content has not reached the provider yet; there is nothing to steer into.
-    expect(()=>x.deliverQueuedBySteering(f,second.id,second.revision,delivery)).toThrow(/STEERING_TARGET_CONFLICT/);
+    expect(()=>x.beginQueuedSteering(f,second.id,second.revision,delivery)).toThrow(/STEERING_TARGET_CONFLICT/);
     x.markSubmissionPending(af(a),intent());
-    const delivered=x.deliverQueuedBySteering(f,second.id,second.revision,delivery);
+    x.beginQueuedSteering(f,second.id,second.revision,delivery);
+    const operation=repos.execution.getTaskExecution(second.id)!.steering!;
+    const delivered=x.resolveQueuedSteering(f,operation.operationId,operation.controller,'injected');
     expect(delivered.task!.status).toBe('completed');expect(repos.execution.getTaskExecution(second.id)!.attempts).toEqual([]);
     expect(delivered.events.map(event=>[event.type,(event.data as any).steering?.outcome,(event.data as any).role])).toEqual([['text','injected','user'],['task','injected',undefined]]);
-    expect(x.deliverQueuedBySteering(f,second.id,second.revision,delivery).replayed).toBe(true);
-    expect(()=>x.deliverQueuedBySteering(f,second.id,second.revision+1,{...delivery,operationId:'steer-again'})).toThrow(/TASK_NOT_QUEUED/);
+    expect(x.beginQueuedSteering(f,second.id,second.revision,delivery).replayed).toBe(true);
+    expect(x.resolveQueuedSteering(f,operation.operationId,operation.controller,'injected').replayed).toBe(true);
+    expect(()=>x.beginQueuedSteering(f,second.id,second.revision+1,{...delivery,operationId:'steer-again'})).toThrow(/TASK_NOT_QUEUED/);
     x.settleAttempt(af(repos.execution.getTaskExecution(a.taskId)!.currentAttempt!),'settle-first',complete());
     expect(x.claimNext(f)).toBeUndefined();
   });
   it('refuses a steering delivery for a Task whose consumer reads its own Attempt',()=>{
     const {x}=ready();const a=claimed(x);x.markSubmissionPending(af(a),intent());
     const scheduled=x.acceptTask(f,request('two',{namespace:'schedule',actor:{kind:'installation_owner',id:'installation_owner'}}),input('hello','hello','installation_owner'),'back').task!;
-    expect(()=>x.deliverQueuedBySteering(f,scheduled.id,scheduled.revision,{operationId:'steer-schedule',actor:{kind:'unspecified'},target:{taskId:a.taskId,attemptId:a.attemptId},outcome:'injected'})).toThrow(/STEERING_TASK_OWNED/);
+    expect(()=>x.beginQueuedSteering(f,scheduled.id,scheduled.revision,{operationId:'steer-schedule',actor:{kind:'unspecified'},target:{taskId:a.taskId,attemptId:a.attemptId}})).toThrow(/STEERING_TASK_OWNED/);
   });
   it('captures no interrupt target once and never retargets later activity',()=>{
     const {x}=ready();const first=x.acceptTask(f,request('one',{mode:'interrupt'}),input(),'front');expect(x.getPendingQueueActions(f)).toEqual([]);

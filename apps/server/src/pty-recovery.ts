@@ -24,13 +24,13 @@ export function createPtyRetirementControl(probe: ProcessProbe, herdrBackend?: (
   };
   const proof = (snapshot: OwnedTmuxIdentity): OwnedTmuxExitProof => ({ ...snapshot, stoppedAt: (snapshot as OwnedTmuxExitProof).stoppedAt ?? new Date().toISOString() });
   return {
-    capture(session) {
+    async capture(session) {
       if (session.terminalBackend === 'herdr') return herdr(session).captureOwnedIdentity();
-      const snapshot = captureOwnedTmuxIdentity(scope(session), probe);
+      const snapshot = await captureOwnedTmuxIdentity(scope(session), probe);
       if (!snapshot) throw new RuntimeError('PTY_RETIREMENT_IDENTITY_UNAVAILABLE', 'No original PTY identity can be captured; missing alone is not proof of exit', 409);
       return snapshot;
     },
     async stop(session, raw, beforeKill) { if (session.terminalBackend === 'herdr') return herdr(session).stopOwnedIdentity(raw, beforeKill); return stopOwnedTmux(checked(session, raw), probe, beforeKill); },
-    verify(session, raw) { if (session.terminalBackend === 'herdr') return herdr(session).verifyOwnedIdentity(raw); return verifyOwnedTmuxExit(proof(checked(session, raw)), probe); },
+    async verify(session, raw) { if (session.terminalBackend === 'herdr') return herdr(session).verifyOwnedIdentity(raw); return verifyOwnedTmuxExit(proof(checked(session, raw)), probe); },
   };
 }

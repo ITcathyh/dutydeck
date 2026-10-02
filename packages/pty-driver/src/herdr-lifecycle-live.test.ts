@@ -17,10 +17,10 @@ function fixture() {
   const options = { binary, stateFile: join(cwd, 'identity.json'), ownerId: 'dutydeck:lifecycle', processProbe: { identify: childProcessIdentity, observe: observeProcess } };
   const backend = new HerdrBackend(name, options), exit = vi.fn(), events = vi.fn();
   const agent: AgentConfig = { id: 'fixture', name: 'fixture', protocol: 'pty-cli', command: '/bin/sh', args: ['-c', 'exec /bin/sh'], cwd, env: {}, permissionMode: 'full-trust', timeout: 30, capabilities: { pause: false, resume: true }, builtin: false };
-  const adapter: CliAdapter = { id: 'fixture', capabilities: {}, buildResumeCommand: () => [], buildArgs: () => [], injectSessionContext: () => '', writeInput: (backend, prompt) => backend.write(prompt + '\n') };
+  const adapter: CliAdapter = { id: 'fixture', capabilities: {}, buildResumeCommand: () => [], buildArgs: () => [], injectSessionContext: () => '', writeInput: async (backend, prompt) => (await backend.write(prompt + '\n')) };
   const driver = new PtyCliDriver({ backend, sessionId: 'ses_lifecycle', agent, adapter, onExit: exit, onEvent: events });
   const cleanup = async () => {
-    backend.detach();
+    (await backend.detach());
     for (const action of ['stop', 'delete']) { try { execFileSync(binary, ['session', action, name, '--json'], { env: herdrControlEnvironment(process.env), stdio: 'pipe' }); } catch {} }
     rmSync(cwd, { recursive: true, force: true }); vi.restoreAllMocks();
   };
@@ -30,17 +30,17 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
   it('settles cancelled readiness and never detaches a newer controller from an old rejection', async () => {
     const f = fixture();
     try {
-      await f.driver.start(); const pid = f.backend.getPid(); f.backend.detach();
+      await f.driver.start(); const pid = f.backend.getPid(); (await f.backend.detach());
       const wrapper = join(f.cwd, 'slow-herdr.sh');
       writeFileSync(wrapper, `#!/bin/sh\nif [ "$3" = terminal ]; then sleep 0.6; fi\nexec '${f.options.binary}' "$@"\n`, { mode: 0o700 });
       const backend = new HerdrBackend(f.name, { ...f.options, binary: wrapper });
       const cancelled = backend.attach({ cols: 120, rows: 30 }).catch(error => error);
-      await delay(40); backend.detach();
+      await delay(40); (await backend.detach());
       const latest = backend.attach({ cols: 120, rows: 30 });
       await expect(cancelled).resolves.toMatchObject({ message: 'Herdr terminal attachment cancelled' });
       await latest;
-      expect(backend.getPid()).toBe(pid); expect(backend.write("printf 'NEW_%s\\n' CONTROLLER\n")).toBe(true);
-      await backend.stopOwnedIdentity(); expect(backend.isStopped()).toBe(true);
+      expect(backend.getPid()).toBe(pid); expect((await backend.write("printf 'NEW_%s\\n' CONTROLLER\n"))).toBe(true);
+      await backend.stopOwnedIdentity(); expect((await backend.isStopped())).toBe(true);
     } finally { await f.cleanup(); }
   });
   it.each(['workspace.create', 'layout.apply'])('stops async startup at %s without wiring or leaving physical execution alive', async boundary => {
@@ -74,13 +74,13 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
       await f.driver.stop(); release();
       expect(await resuming).toMatchObject({ message: 'PTY respawn cancelled by lifecycle change' });
       expect(await f.driver.isStopped()).toBe(true);
-      expect(f.backend.isStopped()).toBe(true);
+      expect((await f.backend.isStopped())).toBe(true);
     } finally { release(); await f.cleanup(); }
   });
   it('cancels terminal viewing during readiness and never reports success after stop', async () => {
     const f = fixture();
     try {
-      await f.driver.start(); const pid = f.backend.getPid(); f.backend.detach();
+      await f.driver.start(); const pid = f.backend.getPid(); (await f.backend.detach());
       const wrapper = join(f.cwd, 'slow-herdr.sh');
       writeFileSync(wrapper, `#!/bin/sh\nif [ "$3" = terminal ]; then sleep 0.6; fi\nexec '${f.options.binary}' "$@"\n`, { mode: 0o700 });
       const backend = new HerdrBackend(f.name, { ...f.options, binary: wrapper });
@@ -115,22 +115,22 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
     const f = fixture();
     try {
       await f.driver.start(); const pid = f.backend.getPid()!, root = childProcessIdentity(pid);
-      f.backend.write('exit\n');
+      (await f.backend.write('exit\n'));
       await expect.poll(() => observeProcess(root)).toBe('dead');
       await expect.poll(() => f.exit.mock.calls.length).toBe(1);
       expect(f.exit).toHaveBeenCalledWith(null);
       await f.driver.stop();
       await expect.poll(() => f.driver.isStopped()).toBe(true);
-      const capture = new HerdrBackend(f.name, f.options).captureOwnedIdentity();
+      const capture = await new HerdrBackend(f.name, f.options).captureOwnedIdentity();
       const retired = new HerdrBackend(f.name, f.options);
-      expect(retired.verifyOwnedIdentity(capture)).toBe(true);
+      expect((await retired.verifyOwnedIdentity(capture))).toBe(true);
       expect(await retired.stopOwnedIdentity(capture)).toBeTruthy();
       const unknown = new HerdrBackend(f.name, { ...f.options, processProbe: { identify: childProcessIdentity, observe: () => 'unknown' } });
-      expect(unknown.verifyOwnedIdentity(capture)).toBe(false);
+      expect((await unknown.verifyOwnedIdentity(capture))).toBe(false);
       const state = JSON.parse(readFileSync(f.options.stateFile, 'utf8'));
       state.identities.push(childProcessIdentity(process.pid));
       writeFileSync(f.options.stateFile, JSON.stringify(state));
-      expect(new HerdrBackend(f.name, f.options).verifyOwnedIdentity(state)).toBe(false);
+      expect(await new HerdrBackend(f.name, f.options).verifyOwnedIdentity(state)).toBe(false);
     } finally { await f.cleanup(); }
   });
   it('keeps natural exit pending across terminal closure until an unknown census becomes provable', async () => {
@@ -143,7 +143,7 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
         if (observeProcess(root) === 'dead' && !allowProof) throw new Error('HERDR_OWNERSHIP_CENSUS_UNKNOWN temporary fixture');
         return owned();
       });
-      f.backend.write('exit\n');
+      (await f.backend.write('exit\n'));
       await expect.poll(() => observeProcess(root)).toBe('dead');
       await expect.poll(() => internal.stream === undefined).toBe(true);
       expect(f.events.mock.calls.some(([event]) => event.type === 'status' && event.data.state === 'terminal_disconnected')).toBe(false);
@@ -165,36 +165,36 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
         if (observeProcess(root) === 'dead' && !allowProof) throw new Error('HERDR_OWNERSHIP_CENSUS_UNKNOWN temporary fixture');
         return owned();
       });
-      f.backend.write('exit\n'); await expect.poll(() => observeProcess(root)).toBe('dead');
+      (await f.backend.write('exit\n')); await expect.poll(() => observeProcess(root)).toBe('dead');
       await expect.poll(() => internal.stream === undefined).toBe(true);
-      expect(internal.executionTimer).toBeTruthy(); f.backend.detach();
+      expect(internal.executionTimer).toBeTruthy(); (await f.backend.detach());
       expect(internal.executionTimer).toBeUndefined(); allowProof = true;
       replacement = f.backend.fork();
       await replacement.spawn('/bin/sh', ['-c', 'exec /bin/sh'], { cwd: f.cwd, cols: 120, rows: 30, env: { PATH: process.env.PATH } });
       const next = childProcessIdentity(replacement.getPid()!), nextExit = vi.fn(); replacement.onExit(nextExit);
       await delay(700);
       expect(f.exit).not.toHaveBeenCalled(); expect(nextExit).not.toHaveBeenCalled(); expect(observeProcess(next)).toBe('alive');
-      await replacement.stopOwnedIdentity(); expect(replacement.isStopped()).toBe(true);
-    } finally { replacement?.detach(); await f.cleanup(); }
+      await replacement.stopOwnedIdentity(); expect((await replacement.isStopped())).toBe(true);
+    } finally { (await replacement?.detach()); await f.cleanup(); }
   });
   it('keeps a real reparented descendant unresolved after natural primary exit until that descendant dies', async () => {
     const f = fixture();
     let child: ReturnType<typeof childProcessIdentity> | undefined;
     try {
       await f.driver.start(); const root = childProcessIdentity(f.backend.getPid()!);
-      f.backend.write("setsid --wait /bin/sh -c 'echo $$ > child.pid; trap \"\" HUP TERM; exec sleep 4' &\n");
+      (await f.backend.write("setsid --wait /bin/sh -c 'echo $$ > child.pid; trap \"\" HUP TERM; exec sleep 4' &\n"));
       await expect.poll(() => { try { return Number(readFileSync(join(f.cwd, 'child.pid'), 'utf8').trim()); } catch { return 0; } }).toBeGreaterThan(0);
       child = childProcessIdentity(Number(readFileSync(join(f.cwd, 'child.pid'), 'utf8').trim()));
       await expect.poll(() => JSON.parse(readFileSync(f.options.stateFile, 'utf8')).identities.some((item: { pid: number }) => item.pid === child!.pid)).toBe(true);
-      f.backend.write('exit\n');
+      (await f.backend.write('exit\n'));
       await expect.poll(() => observeProcess(root)).toBe('dead');
       expect(observeProcess(child)).toBe('alive');
-      const original = new HerdrBackend(f.name, f.options), snapshot = original.captureOwnedIdentity();
-      expect(original.verifyOwnedIdentity(snapshot)).toBe(false);
+      const original = new HerdrBackend(f.name, f.options), snapshot = (await original.captureOwnedIdentity());
+      expect((await original.verifyOwnedIdentity(snapshot))).toBe(false);
       expect(f.exit).not.toHaveBeenCalled();
       await expect.poll(() => observeProcess(child!), { timeout: 6000 }).toBe('dead');
-      await original.stopOwnedIdentity(original.captureOwnedIdentity());
-      expect(original.isStopped()).toBe(true);
+      await original.stopOwnedIdentity((await original.captureOwnedIdentity()));
+      expect((await original.isStopped())).toBe(true);
     } finally {
       if (child && observeProcess(child) === 'alive') process.kill(child.pid, 'SIGKILL');
       await f.cleanup();
@@ -215,55 +215,55 @@ describe.skipIf(process.env.DUTYDECK_TEST_HERDR !== 'true')('Herdr lifecycle rac
       const info = JSON.parse(execFileSync(f.options.binary, ['--session', f.name, 'pane', 'process-info', '--pane', layout.layout.root.pane_id], { env: herdrControlEnvironment(process.env), encoding: 'utf8' })).result.process_info;
       const worker = childProcessIdentity(info.shell_pid);
       expect(readFileSync(`/proc/${worker.pid}/environ`, 'utf8')).not.toContain(`dutydeck_terminal_launch_id=${originalLaunch}`);
-      f.backend.write(`setsid /bin/sh -c 'trap "" HUP; echo $$ > child.pid; exec sleep 30' </dev/null >/dev/null 2>&1 &\n`);
+      (await f.backend.write(`setsid /bin/sh -c 'trap "" HUP; echo $$ > child.pid; exec sleep 30' </dev/null >/dev/null 2>&1 &\n`));
       await expect.poll(() => { try { return Number(readFileSync(join(f.cwd, 'child.pid'), 'utf8').trim()); } catch { return 0; } }).toBeGreaterThan(0);
       const escaped = childProcessIdentity(Number(readFileSync(join(f.cwd, 'child.pid'), 'utf8').trim()));
       expect(JSON.parse(readFileSync(f.options.stateFile, 'utf8')).identities.some((item: { pid: number }) => item.pid === escaped.pid)).toBe(false);
-      f.backend.write('exit\n'); await expect.poll(() => observeProcess(root)).toBe('dead');
-      const retired = new HerdrBackend(f.name, f.options), receipt = retired.captureOwnedIdentity();
+      (await f.backend.write('exit\n')); await expect.poll(() => observeProcess(root)).toBe('dead');
+      const retired = new HerdrBackend(f.name, f.options), receipt = (await retired.captureOwnedIdentity());
       expect((receipt as { identities: Array<{ pid: number }> }).identities.some(item => item.pid === escaped.pid)).toBe(true);
-      expect(observeProcess(escaped)).toBe('alive'); expect(retired.verifyOwnedIdentity(receipt)).toBe(false);
+      expect(observeProcess(escaped)).toBe('alive'); expect((await retired.verifyOwnedIdentity(receipt))).toBe(false);
       expect(f.exit).not.toHaveBeenCalled(); expect(await f.driver.isStopped()).toBe(false);
       await retired.stopOwnedIdentity(receipt);
-      expect(observeProcess(escaped)).toBe('dead'); expect(retired.isStopped()).toBe(true);
+      expect(observeProcess(escaped)).toBe('dead'); expect((await retired.isStopped())).toBe(true);
       expect(observeProcess(worker)).toBe('alive');
       const current = retired.fork(); await current.spawn('/bin/sh', ['-c', 'exec /bin/sh'], { cwd: f.cwd, cols: 120, rows: 30, env: { PATH: process.env.PATH } });
       const next = JSON.parse(readFileSync(f.options.stateFile, 'utf8'));
       expect(next.launch_id).not.toBe(originalLaunch);
-      expect(current.verifyOwnedIdentity(receipt)).toBe(false);
+      expect((await current.verifyOwnedIdentity(receipt))).toBe(false);
       oldGeneration = spawn('/bin/sh', ['-c', 'exec sleep 30'], { env: { ...process.env, dutydeck_terminal_launch_id: originalLaunch }, stdio: 'ignore' });
       const oldIdentity = childProcessIdentity(oldGeneration.pid!);
-      current.write('exit\n');
-      await expect.poll(() => current.isStopped()).toBe(true);
-      const nextProof = current.captureOwnedIdentity();
-      expect(current.verifyOwnedIdentity(nextProof)).toBe(true);
-      expect(current.verifyOwnedIdentity({ ...(nextProof as object), launch_id: originalLaunch })).toBe(false);
+      (await current.write('exit\n'));
+      await expect.poll(async () => (await current.isStopped())).toBe(true);
+      const nextProof = (await current.captureOwnedIdentity());
+      expect((await current.verifyOwnedIdentity(nextProof))).toBe(true);
+      expect((await current.verifyOwnedIdentity({ ...(nextProof as object), launch_id: originalLaunch }))).toBe(false);
       const census = vi.spyOn(current as any, 'ownedProcesses').mockImplementation(() => { throw new Error('HERDR_OWNERSHIP_CENSUS_UNKNOWN'); });
-      expect(current.verifyOwnedIdentity(nextProof)).toBe(false); census.mockRestore();
+      expect((await current.verifyOwnedIdentity(nextProof))).toBe(false); census.mockRestore();
       expect(observeProcess(oldIdentity)).toBe('alive'); expect(observeProcess(worker)).toBe('alive');
-      current.detach();
+      (await current.detach());
     } finally { oldGeneration?.kill('SIGKILL'); await f.cleanup(); }
   });
   it('verifies durable pre-close identity after a lost close acknowledgement and rejects unknown process observations', async () => {
     const f = fixture();
     try {
-      await f.driver.start(); const snapshot = f.backend.captureOwnedIdentity();
+      await f.driver.start(); const snapshot = (await f.backend.captureOwnedIdentity());
       const internal = f.backend as any, call = internal.cli.bind(internal);
-      vi.spyOn(internal, 'cli').mockImplementation((args: string[]) => {
-        const result = call(args);
+      vi.spyOn(internal, 'cli').mockImplementation(async (args: string[]) => {
+        const result = await call(args);
         if (args[0] === 'pane' && args[1] === 'close') throw new Error('simulated lost close response');
         return result;
       });
-      expect(() => f.backend.kill()).toThrow('simulated lost close response');
-      f.backend.detach();
+      await expect(f.backend.kill()).rejects.toThrow('simulated lost close response');
+      (await f.backend.detach());
       const stored = JSON.parse(readFileSync(f.options.stateFile, 'utf8'));
       expect(stored.close_intent).toBe(true); expect(stored.closed).not.toBe(true);
       const recovered = new HerdrBackend(f.name, f.options);
-      await expect.poll(() => recovered.verifyOwnedIdentity(snapshot)).toBe(true);
+      await expect.poll(async () => (await recovered.verifyOwnedIdentity(snapshot))).toBe(true);
       await recovered.stopOwnedIdentity(snapshot);
-      expect(recovered.isStopped()).toBe(true);
+      expect((await recovered.isStopped())).toBe(true);
       const unknown = new HerdrBackend(f.name, { ...f.options, processProbe: { identify: childProcessIdentity, observe: () => 'unknown' } });
-      expect(unknown.verifyOwnedIdentity(snapshot)).toBe(false);
+      expect((await unknown.verifyOwnedIdentity(snapshot))).toBe(false);
     } finally { await f.cleanup(); }
   });
 });

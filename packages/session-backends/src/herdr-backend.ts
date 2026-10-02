@@ -1,4 +1,6 @@
-import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { runCommand } from './command.js';
+import { OutputHandoff } from './output-handoff.js';
 import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { createConnection } from 'node:net';
@@ -30,7 +32,9 @@ export class HerdrBackend implements SessionBackend {
   initialScreen?: { data: string; cols: number; rows: number };
   private state?: State;
   private stream?: ChildProcessWithoutNullStreams;
-  private dataCallbacks: Array<(data: string) => void> = [];
+  private readonly output = new OutputHandoff();
+  private inputGeneration = 0;
+  private readonly pendingInput = new Set<() => void>();
   private exitCallbacks: Array<(code: number | null, signal: string | null) => void> = [];
   private readonly environment: NodeJS.ProcessEnv;
   private lifecycle = 0;
@@ -39,6 +43,7 @@ export class HerdrBackend implements SessionBackend {
   private disconnectCallbacks: Array<(error: Error) => void> = [];
   private captures: PhysicalProcessIdentity[] = [];
   private executionTimer?: NodeJS.Timeout;
+  private naturalExit?: Promise<boolean>;
   private size = { cols: 120, rows: 30 };
 
   constructor(readonly sessionName: string, private readonly options: HerdrBackendOptions) {
@@ -53,16 +58,15 @@ export class HerdrBackend implements SessionBackend {
   }
   hasState(): boolean { return !!this.state; }
   fork(): HerdrBackend { return new HerdrBackend(this.sessionName, this.options); }
-  private cli(args: string[]): string {
-    try {
-      return execFileSync(this.options.binary, ['--session', this.sessionName, ...args], {
-        env: this.environment, encoding: 'utf8', timeout: 5000, maxBuffer: 4 * 1024 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
-      });
-    } catch (error) {
-      throw new Error(`Herdr request failed; no backend fallback: ${String((error as { stderr?: Buffer }).stderr ?? (error as Error).message)}`);
-    }
+  private async cli(args: string[]): Promise<string> {
+    try { return await runCommand(this.options.binary, ['--session', this.sessionName, ...args], { env: this.environment }); }
+    catch (error) { throw new Error(`Herdr request failed; no backend fallback: ${String((error as { stderr?: Buffer }).stderr ?? (error as Error).message)}`); }
   }
   private persist(): void {
+    // A retired controller can resume an async observation after fork() has
+    // reserved a new launch in this same file. It must never overwrite it.
+    const persisted: State = JSON.parse(readFileSync(this.options.stateFile, 'utf8'));
+    if (persisted.launch_id !== this.state?.launch_id) throw new Error('HERDR_STATE_GENERATION_CHANGED');
     mkdirSync(dirname(this.options.stateFile), { recursive: true, mode: 0o700 });
     const temporary = `${this.options.stateFile}.${process.pid}.tmp`;
     writeFileSync(temporary, JSON.stringify(this.state), { mode: 0o600 });
@@ -74,8 +78,9 @@ export class HerdrBackend implements SessionBackend {
     if (!stat.isSocket() || Number(stat.uid) !== process.getuid?.()) throw new Error('HERDR_SOCKET_OWNER_MISMATCH');
     return { dev: String(stat.dev), ino: String(stat.ino) };
   }
-  private checked(requireLaunched = true): State {
-    const state = this.state;
+  private async checked(requireLaunched = true): Promise<State> {
+    const state = this.state, generation = this.lifecycle;
+    const check = () => { if (this.state !== state || this.lifecycle !== generation) throw new Error('HERDR_LIFECYCLE_CHANGED'); };
     if (!state?.root || !state.server) throw new Error('HERDR_LAUNCH_IDENTITY_INCOMPLETE; refusing duplicate launch');
     const stat = this.socketStat(state.socket);
     if (stat.dev !== state.dev || stat.ino !== state.ino || this.options.processProbe.observe(state.server) !== 'alive') {
@@ -86,35 +91,71 @@ export class HerdrBackend implements SessionBackend {
       return state;
     }
     if (!state.pane) throw new Error('HERDR_PANE_IDENTITY_UNAVAILABLE');
-    const panes: Pane[] = JSON.parse(this.cli(['pane', 'list'])).result.panes;
+    const panes: Pane[] = JSON.parse((await this.cli(['pane', 'list']))).result.panes;
+    check();
     if (!panes.some(pane => pane.pane_id === state.pane!.pane_id && pane.terminal_id === state.pane!.terminal_id)) throw new Error('HERDR_PANE_IDENTITY_CHANGED');
-    const info = JSON.parse(this.cli(['pane', 'process-info', '--pane', state.pane!.pane_id])).result.process_info;
+    const info = JSON.parse((await this.cli(['pane', 'process-info', '--pane', state.pane!.pane_id]))).result.process_info;
+    check();
     if (info.shell_pid !== state.root.pid || this.options.processProbe.observe(state.root) !== 'alive') throw new Error('HERDR_PROCESS_IDENTITY_CHANGED');
     return state;
   }
-  private request<T>(method: string, params: unknown, path = this.checked().socket): Promise<T> {
+  private async request<T>(method: string, params: unknown, path?: string, inputGeneration?: number): Promise<T> {
+    path ??= (await this.checked()).socket;
     return new Promise((resolve, reject) => {
       const socket = createConnection(path);
-      let buffer = '';
-      socket.setTimeout(5000, () => socket.destroy(new Error('Herdr API timeout')));
-      socket.on('error', reject);
-      socket.on('connect', () => socket.write(JSON.stringify({ id: 'dutydeck', method, params }) + '\n'));
-      socket.on('data', chunk => {
-        buffer += chunk;
-        if (!buffer.includes('\n')) return;
-        socket.end();
-        try {
-          const response = JSON.parse(buffer.split('\n')[0]!);
-          if (response.error) reject(new Error(`Herdr ${response.error.code}: ${response.error.message}`));
-          else resolve(response.result);
-        } catch (error) { reject(error); }
+      // Control replies are small JSON records. Bound both elapsed time and
+      // bytes, even when a peer keeps sending incomplete response fragments.
+      const maxResponseBytes = 1024 * 1024;
+      let buffer = Buffer.allocUnsafe(4096), received = 0, settled = false;
+      const finish = (error?: Error, result?: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.pendingInput.delete(cancel);
+        buffer = Buffer.alloc(0);
+        socket.destroy();
+        if (error) reject(error); else resolve(result!);
+      };
+      const cancel = () => finish(new Error('Herdr input cancelled before send'));
+      const timer = setTimeout(() => finish(new Error('Herdr API timeout')), 5000);
+      if (inputGeneration !== undefined) {
+        this.pendingInput.add(cancel);
+        if (inputGeneration !== this.inputGeneration) cancel();
+      }
+      socket.on('error', error => finish(error));
+      socket.on('end', () => finish(new Error('Herdr API closed without a response')));
+      socket.on('close', () => finish(new Error('Herdr API closed without a response')));
+      socket.on('connect', () => {
+        if (settled) return;
+        if (inputGeneration !== undefined && inputGeneration !== this.inputGeneration) { cancel(); return; }
+        // Once write is attempted delivery is unknown until the bounded reply.
+        this.pendingInput.delete(cancel);
+        try { socket.write(JSON.stringify({ id: 'dutydeck', method, params }) + '\n'); }
+        catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
       });
-      socket.on('end', () => { if (!buffer.includes('\n')) reject(new Error('Herdr API closed without a response')); });
+      socket.on('data', (chunk: Buffer) => {
+        if (settled) return;
+        const newline = chunk.indexOf(10);
+        const fragment = newline < 0 ? chunk : chunk.subarray(0, newline);
+        const size = received + fragment.length;
+        if (size > maxResponseBytes) { finish(new Error('Herdr API response exceeds 1048576 bytes')); return; }
+        if (size > buffer.length) {
+          const grown = Buffer.allocUnsafe(Math.min(maxResponseBytes, Math.max(size, buffer.length * 2)));
+          buffer.copy(grown, 0, 0, received); buffer = grown;
+        }
+        fragment.copy(buffer, received); received = size;
+        if (newline < 0) return;
+        try {
+          const response = JSON.parse(buffer.toString('utf8', 0, received));
+          if (response.error) finish(new Error(`Herdr ${response.error.code}: ${response.error.message}`));
+          else finish(undefined, response.result);
+        } catch (error) { finish(error instanceof Error ? error : new Error(String(error))); }
+      });
     });
   }
   async cancelPending(): Promise<void> {
     this.lifecycle++;
-    this.detach();
+    (await this.detach());
     await this.creation?.catch(() => {});
   }
   spawn(bin: string, args: string[], opts: SpawnOptions): Promise<void> {
@@ -128,16 +169,18 @@ export class HerdrBackend implements SessionBackend {
     check();
     const previous = this.state;
     const launchId = randomBytes(32).toString('hex');
-    if (previous && !this.isStopped()) throw new Error('Existing Herdr identity requires reattach; refusing duplicate launch');
+    if (previous && !(await this.isStopped())) throw new Error('Existing Herdr identity requires reattach; refusing duplicate launch');
     if (process.platform !== 'linux') throw new Error('Herdr primary backend currently requires Linux process identity probes');
-    const version = execFileSync(this.options.binary, ['--version'], { encoding: 'utf8', env: this.environment }).trim();
+    const version = (await runCommand(this.options.binary, ['--version'], { env: this.environment, timeout: 5000 })).trim();
+    check();
     if (!/^herdr 0\.(?:9|[1-9]\d)\./.test(version)) throw new Error('Herdr >= 0.9 is required for terminal session streams');
-    const listing = JSON.parse(this.cli(['session', 'list', '--json'])).sessions;
+    const listing = JSON.parse((await this.cli(['session', 'list', '--json']))).sessions;
+    check();
     const existing = listing.find((item: { name: string }) => item.name === this.sessionName);
     if (existing && !previous) throw new Error('Unclaimed Herdr session exists; refusing adoption or replacement');
     // A durable reservation makes an interrupted launch fail closed on retry.
     mkdirSync(dirname(this.options.stateFile), { recursive: true, mode: 0o700 });
-    writeFileSync(this.options.stateFile, JSON.stringify({ owner: this.ownerId, name: this.sessionName }), { mode: 0o600, flag: previous ? 'w' : 'wx' });
+    writeFileSync(this.options.stateFile, JSON.stringify({ owner: this.ownerId, name: this.sessionName, launch_id: launchId }), { mode: 0o600, flag: previous ? 'w' : 'wx' });
     let path: string, serverIdentity: PhysicalProcessIdentity;
     if (existing?.running) {
       if (!previous || this.options.processProbe.observe(previous.server) !== 'alive') throw new Error('HERDR_SERVER_IDENTITY_CHANGED');
@@ -156,13 +199,14 @@ export class HerdrBackend implements SessionBackend {
       let entry: { socket_path: string } | undefined;
       while (!entry) {
         if (launchError) throw launchError;
-        const sessions = JSON.parse(this.cli(['session', 'list', '--json'])).sessions;
+        const sessions = JSON.parse((await this.cli(['session', 'list', '--json']))).sessions;
         entry = sessions.find((item: { name: string; default: boolean; running: boolean }) => item.name === this.sessionName && !item.default && item.running);
         if (!entry) {
           if (Date.now() >= deadline || server.exitCode !== null) throw new Error('Herdr dedicated server did not become ready');
           await new Promise(resolve => setTimeout(resolve, 100));
         }
       }
+      // Preserve a reservation containing the dedicated server identity before cancellation.
       path = realpathSync(entry.socket_path);
       serverIdentity = this.options.processProbe.identify(server.pid!);
     }
@@ -177,10 +221,10 @@ export class HerdrBackend implements SessionBackend {
       tab_id: workspace.tab.tab_id, focus: false,
       root: { type: 'pane', cwd: opts.cwd, command: [bin, ...args], env: environment },
     }, path);
-    const panes: Pane[] = JSON.parse(this.cli(['pane', 'list'])).result.panes;
+    const panes: Pane[] = JSON.parse((await this.cli(['pane', 'list']))).result.panes;
     const pane = panes.find(item => item.pane_id === layout.layout.root.pane_id);
     if (!pane) throw new Error('Herdr did not return the launched primary pane');
-    const info = JSON.parse(this.cli(['pane', 'process-info', '--pane', pane.pane_id])).result.process_info;
+    const info = JSON.parse((await this.cli(['pane', 'process-info', '--pane', pane.pane_id]))).result.process_info;
     const root = this.options.processProbe.identify(info.shell_pid);
     this.state = { launch_id: launchId, owner: this.ownerId, name: this.sessionName, socket: path, ...stat, server: serverIdentity, pane, root, process_session: Number(readFileSync(`/proc/${root.pid}/stat`, 'utf8').split(') ').at(-1)!.split(' ')[3]), process_cgroup: readFileSync(`/proc/${root.pid}/cgroup`, 'utf8'), identities: [root] };
     this.persist();
@@ -188,9 +232,14 @@ export class HerdrBackend implements SessionBackend {
     await this.attach(opts);
     check();
   }
-  async attach(opts: { cols: number; rows: number }): Promise<void> {
-    const state = this.checked();
-    this.detach();
+  async attach(opts: { cols: number; rows: number }, onBoundary?: () => void): Promise<void> {
+    const generation = this.lifecycle;
+    const check = () => { if (generation !== this.lifecycle) throw new Error('Herdr attachment cancelled'); };
+    const state = await this.checked();
+    check();
+    await this.detach(false, Boolean(onBoundary));
+    check();
+    onBoundary?.();
 
     this.size = { cols: opts.cols, rows: opts.rows };
     this.initialScreen = undefined;
@@ -203,19 +252,19 @@ export class HerdrBackend implements SessionBackend {
     child.stderr.on('data', chunk => { stderr = (stderr + chunk).slice(-2000); });
     await new Promise<void>((resolve, reject) => {
       const fail = (error: Error) => { clearTimeout(timer); if (this.attachReject === fail) this.attachReject = undefined; reject(error); };
-      const timer = setTimeout(() => { fail(new Error('Herdr terminal stream did not become ready')); if (this.stream === child) this.detach(); }, 5000);
+      const timer = setTimeout(async () => { fail(new Error('Herdr terminal stream did not become ready')); if (this.stream === child) (await this.detach()); }, 5000);
       this.attachReject = fail;
       const lines = createInterface({ input: child.stdout });
       child.once('error', fail);
-      child.once('exit', code => {
+      child.once('exit', async code => {
         if (this.stream !== child) { fail(new Error('Herdr terminal attachment cancelled')); return; }
-        if (this.finishNaturalExit()) { fail(new Error('Primary process exited')); return; }
+        if ((await this.finishNaturalExit())) { fail(new Error('Primary process exited')); return; }
         const error = new Error(`Herdr terminal stream disconnected (${code}): ${stderr}; original pane preserved`);
         fail(error);
         // Transport failure is not process exit. Keep physical ownership and make the turn unresolved.
-        if (this.initialScreen) this.observeClosedStream(child, error);
+        if (this.initialScreen) void this.observeClosedStream(child, error);
       });
-      lines.on('line', line => {
+      lines.on('line', async line => {
         if (this.stream !== child) return;
         try {
           const frame = JSON.parse(line);
@@ -225,98 +274,106 @@ export class HerdrBackend implements SessionBackend {
             if (!this.initialScreen) {
               this.initialScreen = { data, ...this.size };
               clearTimeout(timer); this.attachReject = undefined;
-              this.executionTimer = setInterval(() => {
-                if (this.stream !== child) return;
-                if (this.finishNaturalExit()) return;
-                try { this.state!.identities = (this.captureOwnedIdentity() as State).identities; this.persist(); } catch { /* Unknown observations never prove exit. */ }
+              let polling = false;
+              this.executionTimer = setInterval(async () => {
+                if (this.stream !== child || polling) return;
+                polling = true;
+                try {
+                  if (await this.finishNaturalExit()) return;
+                  const snapshot = await this.captureOwnedIdentity() as State;
+                  if (this.stream !== child || this.state !== state || generation !== this.lifecycle) return;
+                  this.state.identities = snapshot.identities; this.persist();
+                } catch { /* Unknown observations never prove exit. */ }
+                finally { polling = false; }
               }, 500); this.executionTimer.unref();
               resolve();
-            } else for (const callback of this.dataCallbacks) callback(data);
+            } else this.output.data(data);
           } else if (frame.type === 'terminal.closed') {
-            if (this.finishNaturalExit()) { fail(new Error('Primary process exited')); return; }
+            if ((await this.finishNaturalExit())) { fail(new Error('Primary process exited')); return; }
             const error = new Error(`Herdr terminal stream closed: ${frame.reason ?? 'unknown'}; execution exit is unverified`);
             fail(error);
-            if (this.initialScreen) this.observeClosedStream(child, error);
-            else if (this.stream === child) this.detach();
+            if (this.initialScreen) void this.observeClosedStream(child, error);
+            else if (this.stream === child) (await this.detach());
           }
         } catch (error) { clearTimeout(timer); reject(error); }
       });
-    }).catch(error => { if (this.stream === child) this.detach(); throw error; });
+    }).catch(async error => { if (this.stream === child) (await this.detach()); throw error; });
   }
-  private observeClosedStream(child: ChildProcessWithoutNullStreams, error: Error): void {
+  private async observeClosedStream(child: ChildProcessWithoutNullStreams, error: Error): Promise<void> {
     if (this.stream !== child) return;
     const state = this.state, generation = this.lifecycle;
-    const disconnect = () => {
-      const callbacks = [...this.disconnectCallbacks]; this.detach();
+    const disconnect = async () => {
+      const callbacks = [...this.disconnectCallbacks]; (await this.detach());
       for (const callback of callbacks) callback(error);
     };
     this.stream = undefined; child.stdin.end(); child.kill();
-    this.dataCallbacks = [];
+    this.output.reset();
     if (this.executionTimer) clearInterval(this.executionTimer);
     this.executionTimer = undefined;
-    if (!state || this.options.processProbe.observe(state.root) === 'alive') { disconnect(); return; }
+    if (!state || this.options.processProbe.observe(state.root) === 'alive') { await disconnect(); return; }
     const deadline = Date.now() + 5000;
-    const timer = setInterval(() => {
-      if (this.executionTimer !== timer) return;
+    let polling = false;
+    const timer = setInterval(async () => {
+      if (this.executionTimer !== timer || polling) return;
+      polling = true;
+      try {
       if (this.state !== state || this.lifecycle !== generation) {
         clearInterval(timer); this.executionTimer = undefined; return;
       }
-      if (this.finishNaturalExit()) return;
-      if (this.options.processProbe.observe(state.root) === 'alive' || Date.now() >= deadline) disconnect();
+      if ((await this.finishNaturalExit())) return;
+      if (this.state !== state || generation !== this.lifecycle || this.executionTimer !== timer) return;
+      if (this.options.processProbe.observe(state.root) === 'alive' || Date.now() >= deadline) await disconnect();
+      } finally { polling = false; }
     }, 500);
     this.executionTimer = timer; timer.unref();
   }
-  private requestSync(method: string, params: unknown, path: string): void {
-    // stdin carries arbitrary input without CLI option parsing, argv limits, or shell interpolation.
-    execFileSync(process.execPath, ['--input-type=module', '-e', String.raw`
-      import { readFileSync } from 'node:fs';
-      import { createConnection } from 'node:net';
-      const { path, method, params } = JSON.parse(readFileSync(0, 'utf8'));
-      const socket = createConnection(path);
-      socket.setTimeout(4000, () => socket.destroy(new Error('Herdr API timeout')));
-      let buffer = '';
-      socket.on('connect', () => socket.write(JSON.stringify({ id: 'dutydeck-input', method, params }) + '\n'));
-      socket.on('data', chunk => {
-        buffer += chunk;
-        if (!buffer.includes('\n')) return;
-        const response = JSON.parse(buffer.split('\n')[0]);
-        socket.destroy();
-        if (response.error) { process.stderr.write(response.error.code + ': ' + response.error.message); process.exitCode = 1; }
-      });
-      socket.on('error', error => { process.stderr.write(error.message); process.exitCode = 1; });
-      socket.on('end', () => { if (!buffer.includes('\n')) process.exitCode = 1; });
-    `], { input: JSON.stringify({ path, method, params }), env: this.environment, timeout: 5000, stdio: ['pipe', 'pipe', 'pipe'] });
-  }
-  assertOwnedIdentity(raw: unknown): void { this.validateIdentity(raw); this.checked(); }
-  getDutydeckMetadata(key: 'first_prompt_sent' | 'turn_id'): string | undefined { this.checked(); return this.state![key]; }
-  setDutydeckMetadata(key: 'first_prompt_sent' | 'turn_id', value: string): void { this.checked(); this.state![key] = value; this.persist(); }
-  write(data: string): boolean {
-    const state = this.checked();
+  async assertOwnedIdentity(raw: unknown): Promise<void> { this.validateIdentity(raw); (await this.checked()); }
+  async getDutydeckMetadata(key: 'first_prompt_sent' | 'turn_id'): Promise<string | undefined> { (await this.checked()); return this.state![key]; }
+  async setDutydeckMetadata(key: 'first_prompt_sent' | 'turn_id', value: string): Promise<void> { (await this.checked()); this.state![key] = value; this.persist(); }
+  async write(data: string): Promise<boolean> {
+    const generation = this.inputGeneration;
+    const state = (await this.checked());
+    if (generation !== this.inputGeneration) return false;
     if (!this.stream?.stdin.writable) throw new Error('Herdr terminal controller is disconnected; original pane preserved');
-    // The synchronous API response confirms the input reached this exact pane.
-    this.requestSync('pane.send_text', { pane_id: state.pane!.pane_id, text: data }, state.socket);
-    return true;
+    // The API response confirms the input reached this exact pane.
+    await this.request('pane.send_text', { pane_id: state.pane!.pane_id, text: data }, state.socket, generation);
+    return generation === this.inputGeneration;
   }
-  interrupt(): void { const state = this.checked(); this.cli(['pane', 'send-keys', state.pane!.pane_id, 'ctrl+c']); }
-  resize(cols: number, rows: number): void {
-    this.checked();
+  private cancelInput(): void {
+    this.inputGeneration++;
+    for (const cancel of this.pendingInput) cancel();
+  }
+  async interrupt(): Promise<void> { this.cancelInput(); const state = (await this.checked()); (await this.cli(['pane', 'send-keys', state.pane!.pane_id, 'ctrl+c'])); }
+  async resize(cols: number, rows: number): Promise<void> {
+    (await this.checked());
     if (!this.stream?.stdin.writable) throw new Error('Herdr terminal controller is detached');
     this.stream.stdin.write(JSON.stringify({ type: 'terminal.resize', cols, rows }) + '\n');
   }
-  captureCurrentScreen(): string { const state = this.checked(); return this.cli(['pane', 'read', state.pane!.pane_id, '--source', 'visible', '--ansi']); }
+  async resyncOutput(onBoundary?: () => void): Promise<string | null> {
+    // A new controller's first frame is the snapshot boundary; later frames
+    // remain subscribed and are queued by the driver's refresh single-flight.
+    await this.attach(this.size, onBoundary ?? (() => {}));
+    return this.initialScreen?.data ?? null;
+  }
+  async captureCurrentScreen(): Promise<string> { const state = (await this.checked()); return (await this.cli(['pane', 'read', state.pane!.pane_id, '--source', 'visible', '--ansi'])); }
   getPaneSize(): { cols: number; rows: number } { return this.size; }
-  getPid(): number | null { return this.checked().root.pid; }
-  onData(cb: (data: string) => void): void { this.dataCallbacks.push(cb); }
+  getPid(): number | null { return this.state?.root?.pid ?? null; }
+  onData(cb: (data: string) => void): void { this.output.onData(cb); }
+  onOutputGap(cb: (dropped: number) => void): void { this.output.onGap(cb); }
   onDisconnect(cb: (error: Error) => void): void { this.disconnectCallbacks.push(cb); }
   onExit(cb: (code: number | null, signal: string | null) => void): void { this.exitCallbacks.push(cb); }
-  detach(): void {
+  async detach(invalidate = true, preserveSubscriptions = false): Promise<void> {
+    this.cancelInput();
+    if (invalidate) this.lifecycle++;
     if (this.executionTimer) clearInterval(this.executionTimer);
     this.executionTimer = undefined;
     this.attachReject?.(new Error('Herdr terminal attachment cancelled'));
     this.attachReject = undefined;
     if (this.state?.root && !this.state.close_intent) {
       try {
-        const snapshot = this.captureOwnedIdentity() as State;
+        const state = this.state;
+        const snapshot = (await this.captureOwnedIdentity()) as State;
+        if (this.state !== state) return;
         this.state.identities = snapshot.identities;
         this.persist();
       } catch { /* Never treat a failed capture as proof that execution is gone. */ }
@@ -324,7 +381,8 @@ export class HerdrBackend implements SessionBackend {
     const child = this.stream;
     this.stream = undefined;
     if (child) { child.stdin.end(); child.kill(); }
-    this.dataCallbacks = []; this.exitCallbacks = []; this.disconnectCallbacks = [];
+    this.output.reset(!preserveSubscriptions);
+    if (!preserveSubscriptions) { this.exitCallbacks = []; this.disconnectCallbacks = []; }
   }
   private ownedProcesses(): PhysicalProcessIdentity[] {
     const state = this.state;
@@ -405,8 +463,8 @@ export class HerdrBackend implements SessionBackend {
     }
     return identities;
   }
-  private descendants(): PhysicalProcessIdentity[] {
-    const state = this.checked(false);
+  private async descendants(): Promise<PhysicalProcessIdentity[]> {
+    const state = (await this.checked(false));
     const children = new Map<number, number[]>();
     for (const entry of readdirSync('/proc').filter(name => /^\d+$/.test(name))) {
       try {
@@ -452,21 +510,28 @@ export class HerdrBackend implements SessionBackend {
     }
     return captured;
   }
-  private finishNaturalExit(): boolean {
+  private finishNaturalExit(): Promise<boolean> {
+    if (this.naturalExit) return this.naturalExit;
+    const finishing = this.finishNaturalExitOnce();
+    this.naturalExit = finishing;
+    return finishing.finally(() => { if (this.naturalExit === finishing) this.naturalExit = undefined; });
+  }
+  private async finishNaturalExitOnce(): Promise<boolean> {
+    const state = this.state, generation = this.lifecycle;
     try {
       const snapshot = this.exitedSnapshot();
       this.state!.identities = snapshot.identities; this.persist();
-      if (!this.verifyOwnedIdentity(snapshot)) return false;
-      const callbacks = [...this.exitCallbacks]; this.detach();
+      if (!(await this.verifyOwnedIdentity(snapshot)) || this.state !== state || generation !== this.lifecycle) return false;
+      const callbacks = [...this.exitCallbacks]; (await this.detach());
       for (const callback of callbacks) callback(null, null);
       return true;
     } catch { return false; }
   }
-  captureOwnedIdentity(): unknown {
+  async captureOwnedIdentity(): Promise<unknown> {
     try {
-      this.checked(false);
+      (await this.checked(false));
       const state = structuredClone(this.state!);
-      state.identities = [...new Map([...state.identities, ...this.descendants(), ...this.ownedProcesses()].map(item => [JSON.stringify(item), item])).values()];
+      state.identities = [...new Map([...state.identities, ...(await this.descendants()), ...this.ownedProcesses()].map(item => [JSON.stringify(item), item])).values()];
       return state;
     } catch (error) {
       if (this.state && this.options.processProbe.observe(this.state.root) === 'dead') return this.exitedSnapshot();
@@ -482,7 +547,7 @@ export class HerdrBackend implements SessionBackend {
     if (!Array.isArray(snapshot.identities) || !snapshot.identities.length) throw new Error('HERDR_EXIT_UNPROVEN');
     return snapshot;
   }
-  verifyOwnedIdentity(raw: unknown): boolean {
+  async verifyOwnedIdentity(raw: unknown): Promise<boolean> {
     try {
       const snapshot = this.validateIdentity(raw), state = this.state!;
       // A pre-kill receipt cannot omit descendants captured durably before close.
@@ -496,7 +561,7 @@ export class HerdrBackend implements SessionBackend {
       try {
         const stat = this.socketStat(snapshot.socket);
         if (stat.dev !== snapshot.dev || stat.ino !== snapshot.ino) return false;
-        const panes: Pane[] = JSON.parse(this.cli(['pane', 'list'])).result.panes;
+        const panes: Pane[] = JSON.parse((await this.cli(['pane', 'list']))).result.panes;
         return snapshot.launching ? false : !panes.some(pane => pane.terminal_id === snapshot.pane!.terminal_id);
       } catch { return this.options.processProbe.observe(snapshot.server) === 'dead'; }
     } catch { return false; }
@@ -504,33 +569,33 @@ export class HerdrBackend implements SessionBackend {
   async stopOwnedIdentity(raw: unknown = this.state, beforeKill?: (snapshot: unknown) => Promise<void>): Promise<unknown> {
     this.validateIdentity(raw);
     const deadline = Date.now() + 5000;
-    const census = async <T>(read: () => T): Promise<T> => {
+    const census = async <T>(read: () => T | Promise<T>): Promise<T> => {
       for (;;) {
-        try { return read(); } catch (error) {
+        try { return await read(); } catch (error) {
           if (!(error instanceof Error) || !error.message.startsWith('HERDR_OWNERSHIP_CENSUS_UNKNOWN') || Date.now() >= deadline) throw error;
           await new Promise(resolve => setTimeout(resolve, 25));
         }
       }
     };
-    const snapshot = await census(() => this.captureOwnedIdentity() as State);
-    if (this.verifyOwnedIdentity(snapshot)) {
-      this.state!.identities = snapshot.identities; this.persist(); this.detach();
+    const snapshot = await census(async () => (await this.captureOwnedIdentity()) as State);
+    if ((await this.verifyOwnedIdentity(snapshot))) {
+      this.state!.identities = snapshot.identities; this.persist(); (await this.detach());
     } else {
       await beforeKill?.(snapshot);
-      await census(() => {
-        const current = this.captureOwnedIdentity() as State;
+      await census(async () => {
+        const current = (await this.captureOwnedIdentity()) as State;
         if (current.identities.some(item => !snapshot.identities.some(prior => isDeepStrictEqual(prior, item)))) throw new Error('HERDR_PROCESS_SET_CHANGED');
         this.state!.identities = snapshot.identities;
         this.state!.close_intent = true; this.persist();
-        if (this.options.processProbe.observe(this.state!.root) === 'alive') this.kill(snapshot.identities);
+        if (this.options.processProbe.observe(this.state!.root) === 'alive') (await this.kill(snapshot.identities));
         else {
           this.boundServer(this.state!);
           if (this.options.processProbe.observe(this.state!.root) !== 'dead') throw new Error('HERDR_EXIT_UNPROVEN');
           if (this.options.processProbe.observe(this.state!.server) === 'alive') {
-            const panes: Pane[] = JSON.parse(this.cli(['pane', 'list'])).result.panes;
-            if (panes.some(pane => pane.pane_id === this.state!.pane?.pane_id && pane.terminal_id === this.state!.pane?.terminal_id)) this.cli(['pane', 'close', this.state!.pane!.pane_id]);
+            const panes: Pane[] = JSON.parse((await this.cli(['pane', 'list']))).result.panes;
+            if (panes.some(pane => pane.pane_id === this.state!.pane?.pane_id && pane.terminal_id === this.state!.pane?.terminal_id)) (await this.cli(['pane', 'close', this.state!.pane!.pane_id]));
           }
-          this.detach();
+          (await this.detach());
         }
       });
       // Snapshot holders authorize exactly these immutable processes, including marked setsid children.
@@ -540,36 +605,36 @@ export class HerdrBackend implements SessionBackend {
         if (observation === 'alive') { try { process.kill(identity.pid, 'SIGTERM'); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error; } }
       }
     }
-    let stopped = this.isStopped();
+    let stopped = (await this.isStopped());
     while (!stopped && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 25)); stopped = this.isStopped();
+      await new Promise(resolve => setTimeout(resolve, 25)); stopped = (await this.isStopped());
     }
     if (!stopped) throw new Error('HERDR_EXIT_UNPROVEN');
     return structuredClone(this.state);
   }
-  kill(expected?: PhysicalProcessIdentity[]): void {
-    if (this.isStopped()) return;
-    const state = this.checked(false);
-    const identities = [...this.descendants(), ...this.ownedProcesses()];
-    const second = [...this.descendants(), ...this.ownedProcesses()];
+  async kill(expected?: PhysicalProcessIdentity[]): Promise<void> {
+    if ((await this.isStopped())) return;
+    const state = (await this.checked(false));
+    const identities = [...(await this.descendants()), ...this.ownedProcesses()];
+    const second = [...(await this.descendants()), ...this.ownedProcesses()];
     const key = (item: PhysicalProcessIdentity) => JSON.stringify(item);
     if (second.some(item => !identities.some(prior => key(item) === key(prior)))) throw new Error('HERDR_PROCESS_SET_CHANGED');
     if (expected && second.some(item => !expected.some(prior => isDeepStrictEqual(prior, item)))) throw new Error('HERDR_PROCESS_SET_CHANGED');
     state.identities = [...new Map([...state.identities, ...identities].map(item => [key(item), item])).values()];
     state.close_intent = true;
     this.persist();
-    this.checked(false);
-    if (state.launching) this.cli(['session', 'stop', this.sessionName, '--json']);
-    else this.cli(['pane', 'close', state.pane!.pane_id]);
+    (await this.checked(false));
+    if (state.launching) (await this.cli(['session', 'stop', this.sessionName, '--json']));
+    else (await this.cli(['pane', 'close', state.pane!.pane_id]));
     state.closed = true;
     this.persist();
-    this.detach();
+    (await this.detach());
     // Preserve any independently created worker panes in this dedicated server.
-    if (!state.launching && JSON.parse(this.cli(['pane', 'list'])).result.panes.length === 0
-      && this.options.processProbe.observe(state.server) === 'alive') this.cli(['session', 'stop', this.sessionName, '--json']);
+    if (!state.launching && JSON.parse((await this.cli(['pane', 'list']))).result.panes.length === 0
+      && this.options.processProbe.observe(state.server) === 'alive') (await this.cli(['session', 'stop', this.sessionName, '--json']));
   }
-  isStopped(): boolean {
-    return !!this.state && this.verifyOwnedIdentity(this.state)
+  async isStopped(): Promise<boolean> {
+    return !!this.state && (await this.verifyOwnedIdentity(this.state))
       && this.captures.every(identity => this.options.processProbe.observe(identity) === 'dead');
   }
 }

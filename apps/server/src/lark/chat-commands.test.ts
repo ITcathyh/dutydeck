@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createRepositories } from '@dutydeck/storage';
 import { DutydeckRuntime, type AgentDriver } from '@dutydeck/runtime';
-import type { AgentConfig } from '@dutydeck/shared';
+import { RuntimeError, type AgentConfig } from '@dutydeck/shared';
 import { LarkMessageCoordinator } from './coordinator.js';
 import { LarkGroupManager } from './group-management.js';
 import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
@@ -361,6 +361,63 @@ describe('Agent 支持插话时送进正在执行的这一轮', () => {
     expect(h.cards.map(card => h.markdownOf(card)).join('\n')).not.toContain('提升队首也失败了');
     expect(steer).not.toHaveBeenCalled();
     expect(h.steerQueued).not.toHaveBeenCalled();
+  });
+
+  it.each(['result', 'exception', 'moved'] as const)('/steer 投递结果未知时保留恢复状态，不降级为提升队首（%s）', async mode => {
+    const steer = vi.fn(async () => { throw new Error('acknowledgement lost after delivery'); });
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    if (mode !== 'result') {
+      const inject = h.runtime.injectQueued.bind(h.runtime);
+      vi.spyOn(h.runtime, 'injectQueued').mockImplementation(async (...args) => {
+        await inject(...args);
+        throw mode === 'moved' ? new RuntimeError('QUEUED_TASK_NOT_FOUND', 'Queued task is missing', 404) : new Error('response projection failed');
+      });
+    }
+    await h.coordinator.handle(event('om_unknown', '/steer 改成另一个方向'), h.config);
+    const id = await h.sessionId();
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).find(task => task.prompt.includes('改成另一个方向'))?.status).toBe('reconcile_required'));
+    expect(h.steerQueued).not.toHaveBeenCalled();
+    const note = await vi.waitFor(() => { const card = h.cards.filter(card => card.taskId === 'om_unknown').at(-1); expect(h.markdownOf(card)).toContain('投递结果未知'); return h.markdownOf(card); });
+    expect(note).toContain('管理员核对');
+    expect(note).not.toContain('已把这条内容提到队首');
+    expect(note).not.toContain('这条内容按正常顺序排队');
+    h.release();
+    // 夹具没有助手文本，原轮结束时标为 failed；未知插话仍不能随后自行执行。
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(id)).find(task => task.prompt.includes('第一件事'))?.status).toBe('failed'));
+    expect(steer).toHaveBeenCalledTimes(1); expect(h.prompts).toHaveLength(1);
+  });
+
+  it('/steer 回执丢失但持久任务已完成时不重新提升队列', async () => {
+    const h = await harness({ steer: async () => 'injected' });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    const inject = h.runtime.injectQueued.bind(h.runtime);
+    vi.spyOn(h.runtime, 'injectQueued').mockImplementation(async (...args) => { await inject(...args); throw new Error('response projection failed'); });
+    await h.coordinator.handle(event('om_committed', '/steer 已送达但回执丢失'), h.config);
+    await vi.waitFor(async () => expect((await h.runtime.getTasks(await h.sessionId())).find(task => task.prompt.includes('已送达但回执丢失'))?.status).toBe('completed'));
+    expect(h.steerQueued).not.toHaveBeenCalled();
+    const note = await vi.waitFor(() => { const card = h.cards.filter(card => card.taskId === 'om_committed').at(-1); expect(h.markdownOf(card)).toContain('已把这条内容送进正在执行的这一轮'); return h.markdownOf(card); });
+    expect(note).not.toContain('已把这条内容提到队首'); expect(note).not.toContain('这条内容按正常顺序排队');
+    expect(h.prompts).toHaveLength(1);
+  });
+
+  it('/queue steer 投递结果未知时要求核对，不提示继续排队或提升', async () => {
+    const steer = vi.fn(async () => { throw new Error('acknowledgement lost after delivery'); });
+    const h = await harness({ steer });
+    await h.dispatch('om_1', '第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第二件事');
+    await h.coordinator.handle(event('om_q_unknown', '/queue steer 1'), h.config);
+    const receipt = h.receiptNamed('/queue 插话结果未知');
+    expect(h.markdownOf(receipt)).toContain('可能已送达');
+    expect(h.markdownOf(receipt)).toContain('管理员核对');
+    expect(h.markdownOf(receipt)).not.toContain('仍在排队');
+    expect(h.markdownOf(receipt)).not.toContain('/queue top');
+    const second = (await h.runtime.getTasks(await h.sessionId())).find(task => task.prompt.includes('第二件事'))!;
+    expect(second.status).toBe('reconcile_required');
+    expect(h.steerQueued).not.toHaveBeenCalled(); expect(steer).toHaveBeenCalledTimes(1);
   });
 
   it('/queue steer 在 Agent 不支持插话时如实说明，这条仍在排队', async () => {

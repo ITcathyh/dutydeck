@@ -19,7 +19,7 @@ function fixture() {
     backend, sessionId: 'fixture', onEvent() {}, onExit() {}
   });
   drivers.push(driver);
-  return { driver, output: (data: string) => output(data) };
+  return { driver, backend, output: (data: string) => output(data) };
 }
 
 describe('terminal initial screen', () => {
@@ -73,4 +73,69 @@ describe('terminal initial screen', () => {
     await new Promise(resolve => setTimeout(resolve, 30));
     expect(callback).not.toHaveBeenCalled();
   });
+  it('bounds a slow initial snapshot and retries after overflow before forwarding increments', async () => {
+    const { driver, output } = fixture();
+    await driver.start();
+    const captures: Array<(screen: TerminalScreen) => void> = [];
+    const capture = vi.spyOn(TerminalSnapshot.prototype, 'capture').mockImplementation(callback => { captures.push(callback); });
+    try {
+      const frames: Array<TerminalScreen | string> = [];
+      driver.createTerminalStream().onData(data => frames.push(data), screen => frames.push(screen));
+      for (let at = 0; at < 32; at++) { output('x'.repeat(16384)); await new Promise(resolve => setTimeout(resolve, 0)); }
+      captures.shift()!({ data: 'STALE', cols: 120, rows: 30 });
+      expect(frames).toEqual([]);
+      expect(captures).toHaveLength(1);
+      captures.shift()!({ data: 'FRESH', cols: 120, rows: 30 });
+      expect(frames).toEqual([{ data: 'FRESH', cols: 120, rows: 30 }]);
+      output('TAIL'); expect(frames[1]).toBe('TAIL');
+    } finally { capture.mockRestore(); }
+  });
+
+  it('recovers the snapshot-to-response window with bounded increments and visibly reports loss', async () => {
+    const { driver, backend, output } = fixture();
+    let gap!: (dropped: number) => void, resolve!: (screen: string) => void, calls = 0;
+    backend.onOutputGap = callback => { gap = callback; };
+    backend.resyncOutput = boundary => { calls++; boundary?.(); return new Promise(done => { resolve = done; }); };
+    await driver.start();
+    const frames: string[] = [];
+    driver.createTerminalStream().onData(data => frames.push(data));
+    gap(100);
+    expect(frames[0]).toContain('terminal output exceeded its buffer');
+    // The authoritative capture has happened, but its Promise response is delayed.
+    output('AFTER_CAPTURE'); resolve('SCREEN');
+    await new Promise(done => setTimeout(done, 10));
+    expect(frames.join('')).toContain('SCREENAFTER_CAPTURE');
+    gap(100);
+    output('x'.repeat(300000)); resolve('OBSOLETE');
+    await Promise.resolve(); await Promise.resolve();
+    expect(calls).toBe(3);
+    output('LATEST_TAIL'); resolve('LATEST');
+    await new Promise(done => setTimeout(done, 10));
+    expect(frames.slice(-2).join('')).toContain('LATESTLATEST_TAIL');
+    expect(frames.at(-1)).not.toContain('OBSOLETE');
+  });
+
+  it('does not queue repeated snapshots while the renderer is stalled', async () => {
+    const { driver, backend, output } = fixture();
+    let gap!: (dropped: number) => void, calls = 0;
+    backend.onOutputGap = callback => { gap = callback; };
+    backend.resyncOutput = async boundary => { calls++; boundary?.(); return 'CURRENT'; };
+    await driver.start();
+    const writes: Array<() => void> = [];
+    const flush = vi.spyOn(TerminalSnapshot.prototype, 'writeAndFlush').mockImplementation(() => new Promise(resolve => { writes.push(resolve); }));
+    try {
+      output('x'.repeat(256 * 1024));
+      gap(100); await Promise.resolve(); await Promise.resolve();
+      expect(calls).toBe(1); expect(writes).toHaveLength(2);
+      for (let at = 0; at < 100; at++) output('x'.repeat(16384));
+      await Promise.resolve(); await Promise.resolve();
+      expect(calls).toBe(1); expect(writes).toHaveLength(2);
+      writes[0](); writes[1](); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+      expect(calls).toBe(2);
+      expect(writes).toHaveLength(3);
+      writes[2]();
+      await Promise.resolve(); await Promise.resolve();
+    } finally { flush.mockRestore(); }
+  });
+
 });

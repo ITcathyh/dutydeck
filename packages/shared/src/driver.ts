@@ -138,9 +138,9 @@ export interface TerminalStream {
   /** 可选恢复当前屏幕，然后按顺序订阅后续 PTY 输出。 */
   onData(callback: (data: string) => void, onSnapshot?: (screen: TerminalScreen) => void): void;
   /** 向终端注入输入（键盘字节） */
-  write(data: string): void;
+  write(data: string): void | Promise<void>;
   /** 调整终端尺寸 */
-  resize(cols: number, rows: number): void;
+  resize(cols: number, rows: number): void | Promise<void>;
   /** 结束订阅（不杀 PTY 进程） */
   dispose(): void;
 }

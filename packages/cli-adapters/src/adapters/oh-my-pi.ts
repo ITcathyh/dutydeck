@@ -50,23 +50,23 @@ function chunkOmpInput(text: string): string[] {
   return chunks;
 }
 
-function sendLiteral(backend: PtyLike, text: string): boolean {
+async function sendLiteral(backend: PtyLike, text: string): Promise<boolean> {
   try {
-    if (backend.sendText) return backend.sendText(text) !== false;
-    backend.write(text);
+    if (backend.sendText) return (await backend.sendText(text)) !== false;
+    (await backend.write(text));
     return true;
   } catch {
     return false;
   }
 }
 
-function submitEnter(backend: PtyLike, attempts = 3): boolean {
+async function submitEnter(backend: PtyLike, attempts = 3): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
     try {
       if (backend.sendSpecialKeys) {
-        if (backend.sendSpecialKeys('Enter') !== false) return true;
+        if ((await backend.sendSpecialKeys('Enter')) !== false) return true;
       } else {
-        backend.write('\r');
+        (await backend.write('\r'));
         return true;
       }
     } catch {
@@ -94,8 +94,8 @@ export function createOhMyPiAdapter(): CliAdapter {
     if (waitMs > 0) await delay(waitMs);
     lastClearAttemptAt = Date.now();
     try {
-      if (backend.sendSpecialKeys) return backend.sendSpecialKeys('C-c') !== false;
-      backend.write('\x03');
+      if (backend.sendSpecialKeys) return (await backend.sendSpecialKeys('C-c')) !== false;
+      (await backend.write('\x03'));
       return true;
     } catch {
       return false;
@@ -137,14 +137,14 @@ export function createOhMyPiAdapter(): CliAdapter {
       for (const chunk of chunkOmpInput(normalized)) {
         // 自己发 paste 标记而不依赖后端的 pasteText：tmux/zellij 实现的是
         // bracketed paste，别的后端只做字面写入。统一线格式让各后端等价。
-        if (!sendLiteral(backend, `${BRACKETED_PASTE_START}${chunk}${BRACKETED_PASTE_END}`)) {
+        if (!(await sendLiteral(backend, `${BRACKETED_PASTE_START}${chunk}${BRACKETED_PASTE_END}`))) {
           composerDirty = !(await clearComposer(backend));
           return;
         }
         await delay(OMP_INPUT_THROTTLE_MS);
       }
 
-      if (!submitEnter(backend)) {
+      if (!(await submitEnter(backend))) {
         composerDirty = !(await clearComposer(backend));
         return;
       }

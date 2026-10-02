@@ -127,13 +127,13 @@ export function createTraexAdapter(): CliAdapter {
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // 与 Codex 相同的 bracketed-paste 策略：多行消息不能被内嵌 \n 拆成多个 turn。
       if (backend.pasteText) {
-        backend.pasteText(prompt);
+        (await backend.pasteText(prompt));
       } else {
-        backend.write('\x1b[200~' + prompt + '\x1b[201~');
+        (await backend.write('\x1b[200~' + prompt + '\x1b[201~'));
       }
       await delay(200);
-      if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
-      else backend.write('\r');
+      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
+      else (await backend.write('\r'));
     },
 
     /** 与 codex 同源：自己铸 rollout id。收到 dutydeck 的 `ses_<uuid>` 说明反查

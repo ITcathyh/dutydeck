@@ -52,13 +52,13 @@ export function createPiAdapter(): CliAdapter {
 
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       if (backend.pasteText && backend.sendSpecialKeys) {
-        backend.pasteText(prompt);
+        (await backend.pasteText(prompt));
         await delay(200);
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
       } else {
-        backend.write('\x1b[200~' + prompt + '\x1b[201~');
+        (await backend.write('\x1b[200~' + prompt + '\x1b[201~'));
         await delay(1000);
-        backend.write('\r');
+        (await backend.write('\r'));
       }
     },
 

@@ -128,7 +128,7 @@ test.describe('Managed workspace browser acceptance', () => {
 
     // 核对主区执行记录：用户消息与最终输出 article
     const timelineA = main.getByLabel('执行记录', { exact: true });
-    await expect(timelineA.getByText(PROMPT_ALPHA, { exact: true })).toBeVisible();
+    await expect(timelineA.locator('.ui-timeline-item.justify-end').getByText(PROMPT_ALPHA, { exact: true })).toBeVisible();
 
     const outputArticleA = timelineA.getByRole('article', { name: /最终输出/ });
     await expect(outputArticleA).toBeVisible();
@@ -159,7 +159,7 @@ test.describe('Managed workspace browser acceptance', () => {
 
     // 核对主区执行记录：用户消息与最终输出 article
     const timelineB = main.getByLabel('执行记录', { exact: true });
-    await expect(timelineB.getByText(PROMPT_BETA, { exact: true })).toBeVisible();
+    await expect(timelineB.locator('.ui-timeline-item.justify-end').getByText(PROMPT_BETA, { exact: true })).toBeVisible();
 
     const outputArticleB = timelineB.getByRole('article', { name: /最终输出/ });
     await expect(outputArticleB).toBeVisible();
@@ -328,7 +328,7 @@ test.describe('Managed workspace browser acceptance', () => {
     const reloadedMain = page.getByRole('main');
     const reloadedTimeline = reloadedMain.getByLabel('执行记录', { exact: true });
 
-    await expect(reloadedTimeline.getByText(PROMPT_ALPHA, { exact: true })).toBeVisible({ timeout: 15_000 });
+    await expect(reloadedTimeline.locator('.ui-timeline-item.justify-end').getByText(PROMPT_ALPHA, { exact: true })).toBeVisible({ timeout: 15_000 });
     const reloadedOutputArticle = reloadedTimeline.getByRole('article', { name: /最终输出/ });
     await expect(reloadedOutputArticle).toBeVisible();
     await expect(reloadedOutputArticle).toContainText('MOCK_REPLY:');

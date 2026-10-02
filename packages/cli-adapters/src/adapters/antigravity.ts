@@ -38,22 +38,22 @@ export function createAntigravityAdapter(): CliAdapter {
       if (backend.sendText && backend.sendSpecialKeys) {
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
-          if (line && line.length > 0) backend.sendText(line);
-          if (i < lines.length - 1) backend.sendSpecialKeys('M-Enter');
+          if (line && line.length > 0) (await backend.sendText(line));
+          if (i < lines.length - 1) (await backend.sendSpecialKeys('M-Enter'));
         }
       } else {
         // 裸 PTY 回退：ESC + CR 就是 M-Enter 的字节形态。
         for (let i = 0; i < lines.length; i++) {
-          backend.write(lines[i] ?? '');
-          if (i < lines.length - 1) backend.write('\x1b\r');
+          (await backend.write(lines[i] ?? ''));
+          if (i < lines.length - 1) (await backend.write('\x1b\r'));
         }
       }
       await delay(300);
       // 单次 Enter，**绝不重试**：agy 的提交落盘可能远晚于任何短窗口（冷启动、
       // 大 prompt、网络态鉴权），重试的 Enter 会落在已提交的 composer 上，把同一
       // 条 prompt 重复提交多次。
-      if (backend.sendSpecialKeys) backend.sendSpecialKeys('Enter');
-      else backend.write('\r');
+      if (backend.sendSpecialKeys) (await backend.sendSpecialKeys('Enter'));
+      else (await backend.write('\r'));
     },
 
     /** agy 自己铸 conversation UUID 并忽略外部传值，`--conversation` 严格按既有

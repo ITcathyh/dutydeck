@@ -8,7 +8,7 @@ import { extractBearerToken, extractCookie, isLoopbackHost, isSameOriginRequest,
 /** 终端流句柄：stream + 进程退出订阅（runtime 侧从 driver onExit 合成） */
 export interface TerminalStreamHandle {
   stream: TerminalStream;
-  onExit(callback: (code: number | null) => void): void;
+  onExit(callback: (code: number | null) => void): (() => void) | void;
 }
 
 export type TerminalStreamLookup =
@@ -37,6 +37,16 @@ export interface TerminalRouteOptions {
   /** Unified GroupBinding execution gate; legacy sessions return legacy_unmanaged. */
   authorize?: (request: IncomingMessage, sessionId: string, action: 'terminal.read' | 'terminal.write') => Promise<PolicyDecision>;
 }
+
+export const terminalConnectionLimits = {
+  pendingSendBytes: 4 * 1024 * 1024,
+  instancePendingSendBytes: 32 * 1024 * 1024,
+  maxPayloadBytes: 64 * 1024,
+  pendingInputBytes: 256 * 1024,
+  pendingInputMessages: 128,
+} as const;
+
+type SendBudget = { bytes: number };
 
 const TERMINAL_PATH_PREFIX = '/api/terminal/';
 
@@ -90,50 +100,71 @@ function bindConnection(
   ws: WebSocket,
   handle: TerminalStreamHandle,
   onClosed: () => void,
+  sendBudget: SendBudget,
   authorizeWrite?: () => Promise<PolicyDecision>,
 ): void {
   const { stream } = handle;
-  let disposed = false;
   let closed = false;
+  let pendingSendBytes = 0;
+  let unsubscribeExit: (() => void) | void;
+  const inputQueue: Array<{ raw: RawData; bytes: number }> = [];
+  let pendingInputBytes = 0;
+  let processingInput = false;
 
-  const sendFrame = (frame: unknown): void => {
-    // 注意：OPEN 是 WebSocket 的静态属性，实例上没有，不能写 ws.OPEN
-    if (ws.readyState !== WebSocket.OPEN) return;
-    try {
-      ws.send(JSON.stringify(frame));
-    } catch {
-      // 发送失败（对端已半关）按连接关闭处理
-    }
-  };
-
-  /** 连接结束时只 dispose 一次（不杀 PTY 进程），幂等 */
   const cleanup = (): void => {
     if (closed) return;
     closed = true;
     onClosed();
-    if (disposed) return;
-    disposed = true;
-    try {
-      stream.dispose();
-    } catch {
-      // dispose 幂等，异常忽略
-    }
+    sendBudget.bytes -= pendingSendBytes;
+    pendingSendBytes = 0;
+    inputQueue.length = 0;
+    pendingInputBytes = 0;
+    unsubscribeExit?.();
+    try { stream.dispose(); } catch { /* dispose 幂等 */ }
   };
+  const disconnect = (): void => {
+    cleanup();
+    ws.terminate();
+  };
+  const sendPayload = (payload: string | Buffer, pong = false): void => {
+    if (closed || ws.readyState !== WebSocket.OPEN) return;
+    const bytes = Buffer.byteLength(payload) + 14; // Maximum WS frame header.
+    if (pendingSendBytes + bytes > terminalConnectionLimits.pendingSendBytes
+      || sendBudget.bytes + bytes > terminalConnectionLimits.instancePendingSendBytes) {
+      // A reconnect restores a snapshot; never pause the shared PTY producer.
+      disconnect();
+      return;
+    }
+    pendingSendBytes += bytes;
+    sendBudget.bytes += bytes;
+    try {
+      const sent = (error?: Error) => {
+        if (closed) return;
+        pendingSendBytes -= bytes;
+        sendBudget.bytes -= bytes;
+        if (error) disconnect();
+      };
+      if (pong) ws.pong(payload, false, sent);
+      else ws.send(payload, sent);
+    } catch { disconnect(); }
+  };
+  const sendFrame = (frame: unknown): void => sendPayload(JSON.stringify(frame));
+  ws.on('ping', data => sendPayload(data, true));
+  ws.on('close', cleanup);
+  ws.on('error', disconnect);
 
-  // PTY 输出 → data 帧
   stream.onData(
     data => sendFrame({ type: 'data', data }),
     screen => sendFrame({ type: 'snapshot', ...screen }),
   );
-  // 进程退出 → exit 帧后主动关闭
-  handle.onExit(code => {
-    sendFrame({ type: 'exit', code });
-    try {
-      ws.close();
-    } catch {
-      // 已关闭则忽略
-    }
-  });
+  if (!closed) {
+    const unsubscribe = handle.onExit(code => {
+      sendFrame({ type: 'exit', code });
+      try { ws.close(); } catch { disconnect(); }
+    });
+    if (closed) unsubscribe?.();
+    else unsubscribeExit = unsubscribe;
+  }
 
   const handleMessage = async (raw: RawData) => {
     if (closed || ws.readyState !== WebSocket.OPEN) return;
@@ -157,7 +188,7 @@ function bindConnection(
     }
     if (message?.type === 'input') {
       try {
-        stream.write(String(message.data ?? ''));
+        await stream.write(String(message.data ?? ''));
       } catch (error) {
         // 运行期 stream 异常 → error 帧后 close
         sendFrame({ type: 'error', message: errorMessage(error) });
@@ -173,7 +204,7 @@ function bindConnection(
         return;
       }
       try {
-        stream.resize(cols, rows);
+        await stream.resize(cols, rows);
       } catch (error) {
         sendFrame({ type: 'error', message: errorMessage(error) });
         try { ws.close(); } catch { /* 已关闭 */ }
@@ -183,18 +214,34 @@ function bindConnection(
     // 未知 type / 解析失败 → error 帧，不断开
     sendFrame({ type: 'error', message: `unknown message type: ${String(message?.type)}` });
   };
-  // Authorization may be asynchronous. Preserve PTY input ordering instead of
-  // allowing a slower permission lookup to reorder adjacent key frames.
-  let messageChain = Promise.resolve();
-  ws.on('message', raw => {
-    messageChain = messageChain.then(() => handleMessage(raw)).catch(error => {
+  // One active authorization retains at most one frame; waiting frames have
+  // both a byte and a count budget, and are discarded on disconnect.
+  const pumpInput = async () => {
+    if (processingInput) return;
+    processingInput = true;
+    try {
+      while (!closed && inputQueue.length) {
+        const item = inputQueue.shift()!;
+        try { await handleMessage(item.raw); }
+        finally { pendingInputBytes = Math.max(0, pendingInputBytes - item.bytes); }
+      }
+    } catch (error) {
       sendFrame({ type: 'error', message: errorMessage(error) });
-      try { ws.close(); } catch { /* 已关闭 */ }
-    });
+      disconnect();
+    } finally { processingInput = false; }
+  };
+  ws.on('message', raw => {
+    if (closed) return;
+    const bytes = Array.isArray(raw) ? raw.reduce((total, part) => total + part.length, 0) : raw.byteLength;
+    if (pendingInputBytes + bytes > terminalConnectionLimits.pendingInputBytes
+      || inputQueue.length + Number(processingInput) >= terminalConnectionLimits.pendingInputMessages) {
+      disconnect();
+      return;
+    }
+    inputQueue.push({ raw, bytes });
+    pendingInputBytes += bytes;
+    void pumpInput();
   });
-
-  ws.on('close', cleanup);
-  ws.on('error', cleanup);
 }
 
 /**
@@ -207,8 +254,9 @@ function bindConnection(
  * 只拦截 pathname 以 /api/terminal/ 开头的 upgrade，其它路径直接放行，不影响未来其它 WS。
  */
 export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRouteOptions): void {
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, autoPong: false, maxPayload: terminalConnectionLimits.maxPayloadBytes });
   const active = new Set<WebSocket>();
+  const sendBudget: SendBudget = { bytes: 0 };
   const pending = new Set<Socket>();
   let closing = false;
   let closeRun: Promise<void> | undefined;
@@ -294,6 +342,7 @@ export function registerTerminalRoutes(app: FastifyInstance, options: TerminalRo
           ws,
           lookup.handle,
           () => active.delete(ws),
+          sendBudget,
           options.authorize ? () => options.authorize!(request, sessionId, 'terminal.write') : undefined,
         );
       });

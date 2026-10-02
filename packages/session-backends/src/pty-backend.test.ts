@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it, afterEach } from 'vitest';
+import { describe, expect, it, afterEach, beforeAll, afterAll } from 'vitest';
 import { PtyBackend } from './pty-backend.js';
 import { TmuxBackend, TmuxOwnershipError, isTmuxAvailable } from './tmux-backend.js';
 import { ZellijBackend } from './zellij-backend.js';
@@ -16,9 +16,9 @@ import type { SessionBackend } from './types.js';
 function waitFor(predicate: () => boolean, timeoutMs = 30000, intervalMs = 100): Promise<void> {
   return new Promise((resolve, reject) => {
     const start = Date.now();
-    const tick = () => {
+    const tick = async () => {
       try {
-        if (predicate()) return resolve();
+        if (await predicate()) return resolve();
       } catch { /* keep polling */ }
       if (Date.now() - start > timeoutMs) return reject(new Error('waitFor timeout'));
       setTimeout(tick, intervalMs);
@@ -36,7 +36,7 @@ async function waitForAssert<T>(fn: () => T, timeoutMs = 30000, intervalMs = 100
   let lastError: unknown;
   for (;;) {
     try {
-      return fn();
+      return await fn();
     } catch (err) {
       lastError = err;
       if (Date.now() - start > timeoutMs) throw lastError;
@@ -58,28 +58,28 @@ describe('PtyBackend', () => {
     backend = new PtyBackend();
     const received: string[] = [];
     let exitArgs: { code: number | null; signal: string | null } | null = null;
-    backend.spawn(process.execPath, ['-e', `
+    (await backend.spawn(process.execPath, ['-e', `
       setInterval(() => process.stdout.write('PTY-READY\\n'), 200);
-    `], { cwd: process.cwd(), cols: 80, rows: 24, env: nodeEnv() });
+    `], { cwd: process.cwd(), cols: 80, rows: 24, env: nodeEnv() }));
     // Callbacks register AFTER spawn (node-pty wiring — pre-spawn callbacks are lost).
     backend.onData(d => received.push(d));
     backend.onExit((code, signal) => { exitArgs = { code, signal }; });
 
     await waitFor(() => received.join('').includes('PTY-READY'));
-    expect(backend.getPid()).toBeGreaterThan(0);
+    expect((await backend.getPid())).toBeGreaterThan(0);
 
     // tty line discipline echoes typed input back through the pty.
-    expect(backend.write('PING')).toBe(true);
+    expect((await backend.write('PING'))).toBe(true);
     await waitFor(() => received.join('').includes('PING'));
 
-    backend.kill();
+    (await backend.kill());
     await waitFor(() => exitArgs !== null);
   }, 30000);
 
   it('merges injectEnv into the child environment (inject wins)', async () => {
     backend = new PtyBackend();
     const received: string[] = [];
-    backend.spawn(process.execPath, ['-e', `
+    (await backend.spawn(process.execPath, ['-e', `
       const line = 'VAR=' + process.env.MY_TEST_VAR + ' INJECT=' + process.env.MY_INJECT_VAR
         + ' SHARED=' + process.env.SHARED + '\\n';
       setInterval(() => process.stdout.write(line), 200);
@@ -89,7 +89,7 @@ describe('PtyBackend', () => {
       rows: 24,
       env: nodeEnv({ MY_TEST_VAR: 'base', SHARED: 'from-base' }),
       injectEnv: { MY_INJECT_VAR: 'inj', SHARED: 'from-inject' },
-    });
+    }));
     backend.onData(d => received.push(d));
     await waitFor(() => received.join('').includes('VAR=base INJECT=inj'));
     await waitFor(() => received.join('').includes('SHARED=from-inject'));
@@ -97,9 +97,22 @@ describe('PtyBackend', () => {
 });
 
 // tmux tests run only where tmux exists (CI/dev boxes; skip elsewhere).
-const tmuxDescribe = isTmuxAvailable() ? describe : describe.skip;
+const tmuxDescribe = (await isTmuxAvailable()) ? describe : describe.skip;
 
 tmuxDescribe('TmuxBackend', () => {
+  let tmuxDirectory: string;
+  const savedTmuxDirectory = process.env.TMUX_TMPDIR, savedTmux = process.env.TMUX;
+  beforeAll(() => {
+    tmuxDirectory = mkdtempSync(join(tmpdir(), 'dd-backend-tmux-'));
+    process.env.TMUX_TMPDIR = tmuxDirectory; delete process.env.TMUX;
+  });
+  afterAll(() => {
+    try { execFileSync('tmux', ['-S', join(tmuxDirectory, `tmux-${process.getuid!()}`, 'default'), 'kill-server'], { stdio: 'ignore' }); } catch { /* gone */ }
+    if (savedTmuxDirectory === undefined) delete process.env.TMUX_TMPDIR; else process.env.TMUX_TMPDIR = savedTmuxDirectory;
+    if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux;
+    rmSync(tmuxDirectory, { recursive: true, force: true });
+  });
+
   const sessions: string[] = [];
   let backend: TmuxBackend | null = null;
 
@@ -115,7 +128,7 @@ tmuxDescribe('TmuxBackend', () => {
     sessions.length = 0;
   });
 
-  it.each(['missing', 'file'])('identifies an invalid working directory (%s) before creating a session', kind => {
+  it.each(['missing', 'file'])('identifies an invalid working directory (%s) before creating a session', async kind => {
     const root = mkdtempSync(join(tmpdir(), 'dutydeck-invalid-cwd-'));
     const cwd = join(root, 'workspace');
     const name = newSessionName();
@@ -123,10 +136,10 @@ tmuxDescribe('TmuxBackend', () => {
     backend = new TmuxBackend(name);
     try {
       if (kind === 'file') writeFileSync(cwd, 'not a directory');
-      expect(() => backend!.spawn('/bin/sh', ['-c', 'sleep 30'], {
+      await expect(backend!.spawn('/bin/sh', ['-c', 'sleep 30'], {
         cwd, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-      })).toThrow(`工作目录不可用：${cwd}`);
-      expect(TmuxBackend.probeSession(name)).toBe('missing');
+      })).rejects.toThrow(`工作目录不可用：${cwd}`);
+      expect((await TmuxBackend.probeSession(name))).toBe('missing');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -146,12 +159,12 @@ tmuxDescribe('TmuxBackend', () => {
     const args = ['-c', 'pwd; sleep 30'];
     const options = { cwd: previous, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' } };
     try {
-      expect(() => backend!.spawn('/bin/sh', args, options)).toThrow(`工作目录不可用：${previous}`);
-      backend.spawn('/bin/sh', args, { ...options, cwd: current });
+      await expect(backend!.spawn('/bin/sh', args, options)).rejects.toThrow(`工作目录不可用：${previous}`);
+      (await backend.spawn('/bin/sh', args, { ...options, cwd: current }));
       await waitFor(() => received.join('').includes(current));
-      expect(TmuxBackend.probeSession(name)).toBe('exists');
+      expect((await TmuxBackend.probeSession(name))).toBe('exists');
     } finally {
-      backend.kill();
+      (await backend.kill());
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -159,17 +172,17 @@ tmuxDescribe('TmuxBackend', () => {
   it('spawns, streams output, captures the screen, reports pid/size, and kills the session', async () => {
     const name = newSessionName();
     sessions.push(name);
-    expect(TmuxBackend.probeSession(name)).toBe('missing');
+    expect((await TmuxBackend.probeSession(name))).toBe('missing');
 
     backend = new TmuxBackend(name);
     const received: string[] = [];
     let exitArgs: { code: number | null; signal: string | null } | null = null;
-    backend.spawn('/bin/sh', ['-c', 'echo TMUX-READY; sleep 30'], {
+    (await backend.spawn('/bin/sh', ['-c', 'echo TMUX-READY; sleep 30'], {
       cwd: tmpdir(),
       cols: 100,
       rows: 30,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-    });
+    }));
     backend.onData(d => received.push(d));
     backend.onExit((code, signal) => { exitArgs = { code, signal }; });
 
@@ -179,15 +192,15 @@ tmuxDescribe('TmuxBackend', () => {
     // 全量并发套件下 pipe-pane → tail -F 链路可能较慢（首个 tmux 测试还要
     // 承担 tmux server 冷启动），给 30s。
     await waitFor(() => joined().includes('TMUX-READY'), 30000);
-    expect(TmuxBackend.probeSession(name)).toBe('exists');
+    expect((await TmuxBackend.probeSession(name))).toBe('exists');
 
     // display-message can transiently return null under load (its 2s internal
     // deadline) — poll the same assertions instead of one-shotting them.
-    await waitForAssert(() => {
-      expect(backend!.getPid()).toBeGreaterThan(0);
+    await waitForAssert(async () => {
+      expect((await backend!.getPid())).toBeGreaterThan(0);
     });
-    const size = await waitForAssert(() => {
-      const s = backend!.getPaneSize();
+    const size = await waitForAssert(async () => {
+      const s = (await backend!.getPaneSize());
       expect(s).not.toBeNull();
       expect(s!.cols).toBe(100);
       expect(s!.rows).toBe(30);
@@ -198,8 +211,8 @@ tmuxDescribe('TmuxBackend', () => {
 
     // capture-pane snapshot contains the echoed line (polled: the pane's first
     // render can race the capture under load).
-    await waitForAssert(() => {
-      const screen = backend!.captureCurrentScreen();
+    await waitForAssert(async () => {
+      const screen = (await backend!.captureCurrentScreen());
       expect(screen).not.toBeNull();
       expect(screen!).toContain('TMUX-READY');
     });
@@ -209,7 +222,7 @@ tmuxDescribe('TmuxBackend', () => {
     // pipe-pane → tail chain can lag enough that the echo doesn't arrive in
     // the capture window. The write itself succeeded (send-keys returned
     // true), so verify it best-effort without failing the test.
-    expect(backend.write('hello-tmux')).toBe(true);
+    expect((await backend.write('hello-tmux'))).toBe(true);
     await waitFor(() => received.join('').includes('hello-tmux'), 10000).catch(() => {
       console.warn('[tmux-test] hello-tmux echo not captured (load-induced lag, write succeeded)');
     });
@@ -217,7 +230,7 @@ tmuxDescribe('TmuxBackend', () => {
     // C-c kills the sleep → pane closes → session destroyed → onExit fires.
     backend.interrupt();
     await waitFor(() => exitArgs !== null, 30000);
-    await waitFor(() => TmuxBackend.probeSession(name) === 'missing', 30000);
+    await waitFor(async () => (await TmuxBackend.probeSession(name)) === 'missing', 30000);
   }, 120000);
 
   it('sends named special keys through tmux instead of literal escape text', async () => {
@@ -235,11 +248,11 @@ tmuxDescribe('TmuxBackend', () => {
     const received: string[] = [];
     backend.onData(data => received.push(data));
     try {
-      backend.spawn(process.execPath, [fixture], {
+      (await backend.spawn(process.execPath, [fixture], {
         cwd: root, cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-      });
+      }));
       await waitFor(() => received.join('').includes('KEYS_READY'));
-      expect(backend.sendSpecialKeys('Down', 'Enter')).toBe(true);
+      expect((await backend.sendSpecialKeys('Down', 'Enter'))).toBe(true);
       await waitFor(() => received.join('').includes('KEY:'));
       const keys = received.join('');
       // Application cursor mode makes tmux encode Down as ESC O B. A literal
@@ -247,7 +260,7 @@ tmuxDescribe('TmuxBackend', () => {
       expect(keys).toContain('KEY:"\\u001bOB\\r"');
       expect(keys).not.toContain('KEY:"\\u001b[B');
     } finally {
-      backend.kill();
+      (await backend.kill());
       rmSync(root, { recursive: true, force: true });
     }
   }, 60000);
@@ -257,13 +270,13 @@ tmuxDescribe('TmuxBackend', () => {
     sessions.push(name);
     backend = new TmuxBackend(name);
     const received: string[] = [];
-    backend.spawn('/bin/sh', ['-c', 'echo "VAR=${MY_TEST_VAR} INJECT=${MY_INJECT_VAR}"; sleep 30'], {
+    (await backend.spawn('/bin/sh', ['-c', 'echo "VAR=${MY_TEST_VAR} INJECT=${MY_INJECT_VAR}"; sleep 30'], {
       cwd: tmpdir(),
       cols: 80,
       rows: 24,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', MY_TEST_VAR: 'secret123' },
       injectEnv: { MY_INJECT_VAR: 'inject456' },
-    });
+    }));
     backend.onData(d => received.push(d));
     await waitFor(() => received.join('').includes('VAR=secret123 INJECT=inject456'));
 
@@ -282,7 +295,7 @@ tmuxDescribe('TmuxBackend', () => {
     backend = new TmuxBackend(name);
     const received: string[] = [];
     const secret = `not-in-pane-${Math.random().toString(36).slice(2)}`;
-    backend.spawn('/bin/sh', ['-c', 'echo LARGE-ENV-READY; sleep 30'], {
+    (await backend.spawn('/bin/sh', ['-c', 'echo LARGE-ENV-READY; sleep 30'], {
       cwd: tmpdir(),
       cols: 80,
       rows: 24,
@@ -293,11 +306,11 @@ tmuxDescribe('TmuxBackend', () => {
           (_, index) => [`DUTYDECK_TEST_PADDING_${index}`, 'x'.repeat(512)],
         )),
       }),
-    });
+    }));
     backend.onData(d => received.push(d));
     await waitFor(() => received.join('').includes('LARGE-ENV-READY'));
 
-    const screen = backend.captureCurrentScreen();
+    const screen = (await backend.captureCurrentScreen());
     expect(screen).toContain('LARGE-ENV-READY');
     expect(screen).not.toContain(secret);
     const sessionEnv = execFileSync('tmux', ['show-environment', '-t', name], {
@@ -308,20 +321,38 @@ tmuxDescribe('TmuxBackend', () => {
     expect(sessionEnv).not.toContain('DUTYDECK_TEST_PADDING_0=');
   }, 60000);
 
+  it('atomically restores screen capture before resuming increments, and detach preserves the pane', async () => {
+    const name = newSessionName(); sessions.push(name);
+    backend = new TmuxBackend(name, { ownerId: `dutydeck:${name}` });
+    await backend.spawn('/bin/sh', [], { cwd: tmpdir(), cols: 80, rows: 24, env: { PATH: process.env.PATH ?? '' } });
+    const pid = await backend.getPid();
+    await backend.write("printf 'BEFORE_%s\\n' SNAPSHOT\n");
+    await waitForAssert(async () => expect(await backend!.captureCurrentScreen()).toContain('BEFORE_SNAPSHOT'));
+    let boundary = false, output = '';
+    backend.onData(data => { output += data; });
+    const snapshot = await backend.resyncOutput(() => { boundary = true; output = ''; });
+    expect(boundary).toBe(true); expect(snapshot).toContain('BEFORE_SNAPSHOT');
+    await backend.write("printf 'AFTER_%s\\n' SNAPSHOT\n");
+    await waitFor(() => output.includes('AFTER_SNAPSHOT'));
+    await backend.detach();
+    expect(await new TmuxBackend(name).getPid()).toBe(pid);
+    expect(backend.captureDisposed()).toBe(true);
+  }, 30000);
+
   it('write() returns false after the session is gone', async () => {
     const name = newSessionName();
     sessions.push(name);
     backend = new TmuxBackend(name);
-    backend.spawn('/bin/sh', ['-c', 'sleep 30'], {
+    (await backend.spawn('/bin/sh', ['-c', 'sleep 30'], {
       cwd: tmpdir(),
       cols: 80,
       rows: 24,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-    });
-    expect(TmuxBackend.probeSession(name)).toBe('exists');
-    TmuxBackend.killSession(name);
+    }));
+    expect((await TmuxBackend.probeSession(name))).toBe('exists');
+    (await TmuxBackend.killSession(name));
     // The exit watcher marks the backend exited within ~1s (poll interval).
-    await waitFor(() => backend!.write('x') === false, 15000);
+    await waitFor(async () => (await backend!.write('x')) === false, 15000);
   }, 60000);
 
   it('detach() leaves the session alive and attach() re-captures a live session', async () => {
@@ -330,39 +361,39 @@ tmuxDescribe('TmuxBackend', () => {
     const first = new TmuxBackend(name);
     backend = first;
     const received: string[] = [];
-    first.spawn('/bin/sh', ['-c', 'echo TMUX-PERSIST; sleep 30'], {
+    (await first.spawn('/bin/sh', ['-c', 'echo TMUX-PERSIST; sleep 30'], {
       cwd: tmpdir(),
       cols: 80,
       rows: 24,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-    });
+    }));
     first.onData(d => received.push(d));
     await waitFor(() => received.join('').includes('TMUX-PERSIST'));
 
     // detach: capture torn down, but the tmux session AND its CLI survive.
-    first.detach();
-    expect(TmuxBackend.probeSession(name)).toBe('exists');
-    expect(first.captureCurrentScreen()).toBeNull();
+    (await first.detach());
+    expect((await TmuxBackend.probeSession(name))).toBe('exists');
+    expect((await first.captureCurrentScreen())).toBeNull();
 
     // A fresh backend attaches to the live session (no new-session, no CLI relaunch).
     const second = new TmuxBackend(name);
     const reReceived: string[] = [];
     second.onData(d => reReceived.push(d));
-    second.attach({ cols: 80, rows: 24 });
+    (await second.attach({ cols: 80, rows: 24 }));
     backend = second; // afterEach cleans this one up
 
     // Polled: display-message/capture-pane can race the attach under load.
-    await waitForAssert(() => {
-      expect(second.getPid()).toBeGreaterThan(0);
+    await waitForAssert(async () => {
+      expect((await second.getPid())).toBeGreaterThan(0);
     });
-    await waitForAssert(() => {
-      const screen = second.captureCurrentScreen();
+    await waitForAssert(async () => {
+      const screen = (await second.captureCurrentScreen());
       expect(screen).not.toBeNull();
       expect(screen!).toContain('TMUX-PERSIST');
     });
 
     // Output capture works after reattach: typed input echoes back through the new pipe.
-    expect(second.write('after-reattach')).toBe(true);
+    expect((await second.write('after-reattach'))).toBe(true);
     await waitFor(() => reReceived.join('').includes('after-reattach'));
   }, 60000);
 
@@ -383,13 +414,13 @@ tmuxDescribe('TmuxBackend', () => {
     try {
       // A fresh isolated socket root has no server yet. That is an
       // authoritative absence, not an ambiguous transport failure.
-      expect(TmuxBackend.probeSession(name)).toBe('missing');
-      first.spawn('/bin/sh', ['-c', 'sleep 30'], {
+      expect((await TmuxBackend.probeSession(name))).toBe('missing');
+      (await first.spawn('/bin/sh', ['-c', 'sleep 30'], {
         cwd: tmpdir(),
         cols: 80,
         rows: 24,
         env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-      });
+      }));
 
       // An ordinary tmux client in the same isolated environment must see
       // the exact live pane. A client in the default namespace must not.
@@ -404,17 +435,17 @@ tmuxDescribe('TmuxBackend', () => {
         stdio: 'ignore',
       }).status).not.toBe(0);
 
-      first.detach();
+      (await first.detach());
       restored = new TmuxBackend(name, { ownerId });
-      restored.attach({ cols: 80, rows: 24 });
-      expect(restored.getPid()).toBe(originalPid);
+      (await restored.attach({ cols: 80, rows: 24 }));
+      expect((await restored.getPid())).toBe(originalPid);
 
-      restored.kill();
+      (await restored.kill());
       expect(spawnSync('tmux', ['has-session', '-t', name], {
         env: isolatedClientEnv,
         stdio: 'ignore',
       }).status).not.toBe(0);
-      expect(TmuxBackend.probeSession(name)).toBe('missing');
+      expect((await TmuxBackend.probeSession(name))).toBe('missing');
     } finally {
       // Keep cleanup in the same namespace even if an assertion fails. This
       // also makes the test prove it cannot leave an isolated tmux residue.
@@ -494,28 +525,28 @@ tmuxDescribe('TmuxBackend', () => {
     const first = new TmuxBackend(name, { ownerId });
     backend = first;
     const firstReceived: string[] = [];
-    first.spawn('/bin/sh', ['-c', 'while :; do echo CRASH-RECOVERY; sleep 0.2; done'], {
+    (await first.spawn('/bin/sh', ['-c', 'while :; do echo CRASH-RECOVERY; sleep 0.2; done'], {
       cwd: tmpdir(),
       cols: 80,
       rows: 24,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-    });
+    }));
     first.onData(d => firstReceived.push(d));
     await waitFor(() => firstReceived.join('').includes('CRASH-RECOVERY'));
-    const originalPid = first.getPid();
+    const originalPid = (await first.getPid());
 
     // No detach(): model a dead daemon whose tmux-side `cat >> pipe-file`
     // survived. A fresh backend must replace that writer and receive output.
     const restored = new TmuxBackend(name, { ownerId });
     const restoredReceived: string[] = [];
     restored.onData(d => restoredReceived.push(d));
-    restored.attach({ cols: 80, rows: 24 });
+    (await restored.attach({ cols: 80, rows: 24 }));
     backend = restored;
     await waitFor(() => restoredReceived.join('').includes('CRASH-RECOVERY'));
-    expect(restored.getPid()).toBe(originalPid);
+    expect((await restored.getPid())).toBe(originalPid);
 
-    restored.kill();
-    first.detach();
+    (await restored.kill());
+    (await first.detach());
   }, 60000);
 
   it('persists Dutydeck ownership/metadata and refuses a foreign attach without killing the pane', async () => {
@@ -523,29 +554,29 @@ tmuxDescribe('TmuxBackend', () => {
     sessions.push(name);
     const first = new TmuxBackend(name, { ownerId: 'dutydeck:ses-owned' });
     backend = first;
-    first.spawn('/bin/sh', ['-c', 'sleep 30'], {
+    (await first.spawn('/bin/sh', ['-c', 'sleep 30'], {
       cwd: tmpdir(),
       cols: 80,
       rows: 24,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-    });
-    await waitFor(() => first.getPid() !== null);
-    const originalPid = first.getPid();
-    expect(TmuxBackend.sessionOwner(name)).toBe('dutydeck:ses-owned');
-    first.setDutydeckMetadata('first_prompt_sent', 'true');
-    expect(first.getDutydeckMetadata('first_prompt_sent')).toBe('true');
-    first.detach();
+    }));
+    await waitFor(async () => (await first.getPid()) !== null);
+    const originalPid = (await first.getPid());
+    expect((await TmuxBackend.sessionOwner(name))).toBe('dutydeck:ses-owned');
+    (await first.setDutydeckMetadata('first_prompt_sent', 'true'));
+    expect((await first.getDutydeckMetadata('first_prompt_sent'))).toBe('true');
+    (await first.detach());
 
     const foreign = new TmuxBackend(name, { ownerId: 'dutydeck:ses-other' });
-    expect(() => foreign.attach({ cols: 80, rows: 24 })).toThrow(TmuxOwnershipError);
-    foreign.kill();
-    expect(TmuxBackend.probeSession(name)).toBe('exists');
+    await expect(foreign.attach({ cols: 80, rows: 24 })).rejects.toThrow(TmuxOwnershipError);
+    (await foreign.kill());
+    expect((await TmuxBackend.probeSession(name))).toBe('exists');
 
     const restored = new TmuxBackend(name, { ownerId: 'dutydeck:ses-owned' });
-    restored.attach({ cols: 80, rows: 24 });
+    (await restored.attach({ cols: 80, rows: 24 }));
     backend = restored;
-    expect(restored.getPid()).toBe(originalPid);
-    expect(restored.getDutydeckMetadata('first_prompt_sent')).toBe('true');
+    expect((await restored.getPid())).toBe(originalPid);
+    expect((await restored.getDutydeckMetadata('first_prompt_sent'))).toBe('true');
   }, 60000);
 });
 

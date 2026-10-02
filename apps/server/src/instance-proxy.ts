@@ -1,4 +1,4 @@
-import { request as httpRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
+import { request as httpRequest, type ClientRequest, type IncomingHttpHeaders, type IncomingMessage } from 'node:http';
 import type { Socket } from 'node:net';
 import type { Readable } from 'node:stream';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
@@ -85,6 +85,12 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
   app.get('/api/instances', async () => ({ instances: peers.map(({ id, name }) => ({ id, name })) }));
   if (!peers.length) return;
   const target = (url: string | undefined) => proxyTarget(url, peers);
+  let closing = false;
+  const upgrades = new Set<() => void>();
+  app.addHook('preClose', async () => {
+    closing = true;
+    for (const close of upgrades) close();
+  });
 
   void app.register(async scope => {
     // 请求体原样转发，不在主服务解析。
@@ -123,19 +129,40 @@ export async function registerInstanceProxy(app: FastifyInstance, peers: PeerIns
       const upstreamTarget = target(request.url);
       const rejection: [number, string, string] | undefined = upstreamTarget ? upgradeRejection(request, auth) : [404, 'Not Found', 'instance not found'];
       if (rejection) { rejectUpgrade(socket, ...rejection); return; }
-      const upstream = httpRequest(upstreamTarget!.url, { method: 'GET', headers: withoutHeaders(request.headers, DROPPED_UPGRADE_HEADERS) });
-      upstream.on('upgrade', (response, peerSocket, peerHead) => {
+      if (closing) { socket.destroy(); return; }
+      let upstream: ClientRequest;
+      let peerSocket: Socket | undefined;
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        upgrades.delete(close);
+        upstream?.destroy();
+        socket.destroy();
+        peerSocket?.destroy();
+      };
+      upgrades.add(close);
+      socket.on('error', close).once('close', close);
+      upstream = httpRequest(upstreamTarget!.url, { method: 'GET', headers: withoutHeaders(request.headers, DROPPED_UPGRADE_HEADERS) });
+      upstream.on('upgrade', (response, upgradedSocket, peerHead) => {
+        peerSocket = upgradedSocket;
+        peerSocket.on('error', close).once('close', close);
+        if (closing || closed || socket.destroyed) { peerSocket.destroy(); close(); return; }
         const headerLines = response.rawHeaders.reduce((lines, value, index) => index % 2 ? `${lines}: ${value}\r\n` : `${lines}${value}`, '');
         socket.write(`HTTP/1.1 101 Switching Protocols\r\n${headerLines}\r\n`);
         if (peerHead.length) socket.write(peerHead);
         if (head.length) peerSocket.write(head);
-        const close = () => { socket.destroy(); peerSocket.destroy(); };
-        socket.on('error', close).on('close', close);
-        peerSocket.on('error', close).on('close', close);
         peerSocket.pipe(socket).pipe(peerSocket);
       });
-      upstream.on('response', response => { response.resume(); rejectUpgrade(socket, response.statusCode ?? 502, response.statusMessage ?? 'Bad Gateway', 'instance refused the upgrade'); });
-      upstream.on('error', () => rejectUpgrade(socket, 502, 'Bad Gateway', 'instance unavailable'));
+      upstream.on('response', response => {
+        response.resume();
+        if (!closed) rejectUpgrade(socket, response.statusCode ?? 502, response.statusMessage ?? 'Bad Gateway', 'instance refused the upgrade');
+        close();
+      });
+      upstream.on('error', () => {
+        if (!closed) rejectUpgrade(socket, 502, 'Bad Gateway', 'instance unavailable');
+        close();
+      });
       upstream.end();
     });
   });

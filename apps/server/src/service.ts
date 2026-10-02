@@ -260,6 +260,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
       onEvent,
       onExit,
       sessionId,
+      awaitingAnswer: () => relayBroker.listPending(sessionId).length > 0,
     });
   };
   // 用量账本：runtime 每轮交来读数、派发新任务前查月度上限。子步骤的根任务取自下方的工作项与 Leader 委托。
@@ -365,6 +366,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
               unsubscribe();
               callback(code);
             });
+            return unsubscribe;
           }
         }
       };

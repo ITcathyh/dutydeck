@@ -53,13 +53,13 @@ export function createGrokAdapter(): CliAdapter {
     async writeInput(backend: PtyLike, prompt: string): Promise<void> {
       // grok 把字面 \n 当 composer 内的软换行（不是提交），直接发整段即可。
       if (backend.sendText && backend.sendSpecialKeys) {
-        if (backend.sendText(prompt) === false) return;
+        if ((await backend.sendText(prompt)) === false) return;
         await delay(200);
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
       } else {
-        backend.write(prompt);
+        (await backend.write(prompt));
         await delay(1000);
-        backend.write('\r');
+        (await backend.write('\r'));
       }
     },
 

@@ -11,7 +11,7 @@
  *
  * Run: npx vitest run packages/pty-driver/src/driver-resume.test.ts
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -32,7 +32,7 @@ async function waitForAssert<T>(fn: () => T, timeoutMs = 30_000, intervalMs = 10
   let lastError: unknown;
   for (;;) {
     try {
-      return fn();
+      return await fn();
     } catch (err) {
       lastError = err;
       if (Date.now() - start > timeoutMs) throw lastError;
@@ -940,9 +940,22 @@ describe('PtyCliDriver resume degradation (buildResumeCommand → null)', () => 
 
 // ─── tmux reattach (driver level, across a "daemon restart") ───────────────
 
-const tmuxDescribe = isTmuxAvailable() ? describe : describe.skip;
+const tmuxDescribe = (await isTmuxAvailable()) ? describe : describe.skip;
 
 tmuxDescribe('PtyCliDriver tmux reattach', () => {
+  let tmuxDirectory: string;
+  const savedTmuxDirectory = process.env.TMUX_TMPDIR, savedTmux = process.env.TMUX;
+  beforeAll(() => {
+    tmuxDirectory = mkdtempSync(join(tmpdir(), 'dd-resume-tmux-'));
+    process.env.TMUX_TMPDIR = tmuxDirectory; delete process.env.TMUX;
+  });
+  afterAll(() => {
+    try { execFileSync('tmux', ['-S', join(tmuxDirectory, `tmux-${process.getuid!()}`, 'default'), 'kill-server'], { stdio: 'ignore' }); } catch { /* gone */ }
+    if (savedTmuxDirectory === undefined) delete process.env.TMUX_TMPDIR; else process.env.TMUX_TMPDIR = savedTmuxDirectory;
+    if (savedTmux === undefined) delete process.env.TMUX; else process.env.TMUX = savedTmux;
+    rmSync(tmuxDirectory, { recursive: true, force: true });
+  });
+
   const sessions: string[] = [];
 
   afterEach(() => {
@@ -1033,16 +1046,16 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
       expect(firstEvents.some(e => e.type === 'raw_terminal')).toBe(true);
     });
     await first.send('echo DRIVER-BEFORE-RESTART; echo DRIVER-DONE');
-    const originalPid = firstBackend.getPid();
+    const originalPid = (await firstBackend.getPid());
     expect(originalPid).toBeGreaterThan(0);
-    expect(TmuxBackend.sessionOwner(name)).toBe(ownerId);
-    expect(firstBackend.getDutydeckMetadata('first_prompt_sent')).toBe('true');
+    expect((await TmuxBackend.sessionOwner(name))).toBe(ownerId);
+    expect((await firstBackend.getDutydeckMetadata('first_prompt_sent'))).toBe('true');
 
     // The service marks every production driver before runtime.shutdown().
     // stop() must detach rather than kill only on that path.
     first.prepareForDaemonShutdown();
     await first.stop();
-    expect(TmuxBackend.probeSession(name)).toBe('exists');
+    expect((await TmuxBackend.probeSession(name))).toBe('exists');
 
     // ── daemon lifetime #2: a brand-new driver over the SAME tmux session ──
     const secondEvents: NormalizedDriverEvent[] = [];
@@ -1059,10 +1072,10 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
 
     // The live pane was reattached, not respawned.
     expect(resumeIds).toEqual([]);
-    expect(TmuxBackend.probeSession(name)).toBe('exists');
+    expect((await TmuxBackend.probeSession(name))).toBe('exists');
     const restoredBackend = new TmuxBackend(name, { ownerId });
-    expect(TmuxBackend.sessionOwner(name)).toBe(ownerId);
-    expect(restoredBackend.getPid()).toBe(originalPid);
+    expect((await TmuxBackend.sessionOwner(name))).toBe(ownerId);
+    expect((await restoredBackend.getPid())).toBe(originalPid);
 
     // Output flows again through the rebuilt capture.
     second.createTerminalStream();
@@ -1076,22 +1089,22 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     });
 
     await second.stop();
-    await waitFor(() => TmuxBackend.probeSession(name) === 'missing');
+    await waitFor(async () => (await TmuxBackend.probeSession(name)) === 'missing');
   }, 60_000);
 
   it('does not kill a foreign same-named pane when reattach ownership validation fails', async () => {
     const name = tmuxName();
     const cwd = makeTempDir('tmux-cwd');
     const foreign = new TmuxBackend(name, { ownerId: 'dutydeck:foreign-session' });
-    foreign.spawn('/bin/sh', ['-c', 'sleep 30'], {
+    (await foreign.spawn('/bin/sh', ['-c', 'sleep 30'], {
       cwd,
       cols: 80,
       rows: 24,
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
-    });
-    const foreignPid = foreign.getPid();
+    }));
+    const foreignPid = (await foreign.getPid());
     expect(foreignPid).toBeGreaterThan(0);
-    foreign.detach();
+    (await foreign.detach());
 
     const driver = new PtyCliDriver({
       agent: agentConfig({ command: '/bin/sh', cwd }),
@@ -1106,11 +1119,11 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     // Runtime performs this cleanup after a failed start. It must remain
     // scoped to the expected owner rather than deleting the foreign pane.
     await driver.stop({ discardSession: true });
-    expect(TmuxBackend.probeSession(name)).toBe('exists');
+    expect((await TmuxBackend.probeSession(name))).toBe('exists');
     const observer = new TmuxBackend(name, { ownerId: 'dutydeck:foreign-session' });
-    observer.attach({ cols: 80, rows: 24 });
-    expect(observer.getPid()).toBe(foreignPid);
-    observer.detach();
+    (await observer.attach({ cols: 80, rows: 24 }));
+    expect((await observer.getPid())).toBe(foreignPid);
+    (await observer.detach());
   }, 60_000);
 
   it('falls back to a CLI-level resume when the tmux session is gone', async () => {
@@ -1128,11 +1141,11 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
       sessionId: SESSION_ID,
     });
     await driver.start();
-    await waitFor(() => TmuxBackend.probeSession(name) === 'exists');
+    await waitFor(async () => (await TmuxBackend.probeSession(name)) === 'exists');
 
     // The session dies (machine reboot / tmux server killed).
-    backend.kill();
-    await waitFor(() => TmuxBackend.probeSession(name) === 'missing');
+    (await backend.kill());
+    await waitFor(async () => (await TmuxBackend.probeSession(name)) === 'missing');
 
     await driver.resume();
 
@@ -1140,7 +1153,7 @@ tmuxDescribe('PtyCliDriver tmux reattach', () => {
     // with no transcript evidence it degraded to the dutydeck session id.
     expect(resumeIds).toEqual([SESSION_ID]);
     // The respawn reused the SAME tmux session name (state stays addressable).
-    await waitFor(() => TmuxBackend.probeSession(name) === 'exists');
+    await waitFor(async () => (await TmuxBackend.probeSession(name)) === 'exists');
 
     await driver.stop();
   }, 60_000);

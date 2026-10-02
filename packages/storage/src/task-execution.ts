@@ -1,12 +1,12 @@
 import type Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  executionActorSchema, acceptedTaskInputSchema, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steerableTaskNamespace, RuntimeError,
+  executionActorSchema, acceptedTaskInputSchema, acceptedTaskInputV2Schema, canonicalExecutionJson, taskExecutionSchemas, taskRequestV1Schema, steeringRecoveryDecisionSchema, steerableTaskNamespace, RuntimeError,
   type AcceptedTask, type AcceptedTaskInput, type AgentEvent, type AttemptFence, type BoundExecutionRepository,
   type CommitResult, type DriverResource, type ExecutionBlocker, type ExecutionController, type ExecutionRepository,
   type ExecutionTask, type ExecutionUpgradeCounts, type ExecutionUpgradeSnapshot, type QueueAction, type RecoveryDecisionInput, type ResourceCheckRef, type Session,
   type SessionFence, type TaskAttempt, type TaskRequestV1, type NativeContextSelection, type NativeContextRef, type NativeContextBinding,
-  type LegacyRetirementCandidate, type LegacyRetirementReceipt, type LegacyRetirementResult
+  type SteeringOperation, type LegacyRetirementCandidate, type LegacyRetirementReceipt, type LegacyRetirementResult
 } from '@dutydeck/shared';
 import type { OpenControl } from './database-control.js';
 import { currentProcessIdentity, observeProcess } from './process-identity.js';
@@ -75,6 +75,10 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
   };
   const resource = (resourceId: string) => readResource(db.prepare('SELECT json FROM driver_resources WHERE id=?').get(resourceId));
   const resources = (sessionId: string) => db.prepare('SELECT json FROM driver_resources WHERE session_id=? ORDER BY rowid').all(sessionId).map(row => readResource(row)!);
+  const steeringOperation = (operationId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE id=?').get(operationId));
+  const taskSteering = (taskId: string) => rowJson<SteeringOperation>(db.prepare('SELECT json FROM task_steering_operations WHERE task_id=? ORDER BY rowid DESC LIMIT 1').get(taskId));
+  const steeringBlockers = (sessionId: string): ExecutionBlocker[] => (db.prepare("SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')").all(sessionId) as Array<{task_id:string}>).map(row => ({code:'STEERING_DELIVERY_UNKNOWN',sessionId,taskId:row.task_id}));
+  const saveSteering = (value: SteeringOperation) => db.prepare('UPDATE task_steering_operations SET state=?,revision=?,json=? WHERE id=?').run(value.state,value.revision,json(value),value.operationId);
   const sameController = (a: ExecutionController, b: ExecutionController) => a.accessId === b.accessId && a.instanceId === b.instanceId && a.generation === b.generation;
   const resourceSafe = (r: DriverResource, owner?: ExecutionController): boolean => {
     if (r.purpose === 'acp_native_context') return Boolean(r.nativeReplacement || r.stage === 'created' && r.identity);
@@ -252,11 +256,11 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       return { task: legacy, ...(stored?.accepted_json ? { input: readInput(stored.accepted_json) } : {}), replayValidation: 'legacy_partial' };
     }
   };
-  const result = (f: SessionFence, t?: ExecutionTask, a?: TaskAttempt, events: AgentEvent[] = [], replayed = false): CommitResult => ({ session: session(f.sessionId), ...(t ? { task: t } : {}), ...(a ? { attempt: a } : {}), events, replayed, blockers: [...blockers(f.sessionId), ...(t ? inputBlockers(t) : [])] });
+  const result = (f: SessionFence, t?: ExecutionTask, a?: TaskAttempt, events: AgentEvent[] = [], replayed = false): CommitResult => ({ session: session(f.sessionId), ...(t ? { task: t } : {}), ...(a ? { attempt: a } : {}), events, replayed, blockers: [...blockers(f.sessionId), ...steeringBlockers(f.sessionId), ...(t ? inputBlockers(t) : [])] });
   const sessionStatus = (sessionId: string) => {
     const all = attempts(sessionId);
     const state = all.some(a => a.state === 'preparing' || a.state === 'active') ? 'thinking'
-      : all.some(a => a.state === 'reconcile_required' || a.state === 'legacy_unresolved' || a.outcome === 'unknown' && task(a.taskId)?.currentAttemptId === a.attemptId) ? 'interrupted' : 'idle';
+      : all.some(a => a.state === 'reconcile_required' || a.state === 'legacy_unresolved' || a.outcome === 'unknown' && task(a.taskId)?.currentAttemptId === a.attemptId) || steeringBlockers(sessionId).length ? 'interrupted' : 'idle';
     db.prepare('UPDATE sessions SET state=?,updated_at=? WHERE id=?').run(state, timestamp(), sessionId);
   };
   const transitions = (f: SessionFence, t: ExecutionTask, a: TaskAttempt, settled = false) => {
@@ -511,7 +515,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
     getTaskExecution(taskId) {
       const t = task(taskId); if (!t) return;
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
-      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), blockers: [...blockers(t.sessionId), ...inputBlockers(t)] };
+      return { task: t, currentAttempt: t.currentAttemptId ? attempt(t.currentAttemptId) : undefined, attempts: taskAttempts(t.id), steering: taskSteering(t.id), blockers: [...blockers(t.sessionId), ...steeringBlockers(t.sessionId), ...inputBlockers(t)] };
     },
     getAttempt(ref) {
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
@@ -524,17 +528,19 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
       for (const value of attempts(sessionId)) {
         const list = byTask.get(value.taskId) ?? []; list.push(value); byTask.set(value.taskId, list);
       }
-      const sharedBlockers = blockers(sessionId);
+      const bySteeringTask = new Map<string,SteeringOperation>();
+      for (const row of db.prepare('SELECT json FROM task_steering_operations WHERE session_id=? ORDER BY rowid').all(sessionId)) { const value=rowJson<SteeringOperation>(row)!; bySteeringTask.set(value.taskId,value); }
+      const sharedBlockers = [...blockers(sessionId), ...steeringBlockers(sessionId)];
       return (db.prepare('SELECT * FROM tasks WHERE session_id=? ORDER BY created_at,id').all(sessionId) as Record<string, any>[]).map(row => {
         const t = decodeTask(row)!;
         const values = byTask.get(t.id) ?? [];
-        return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, blockers: [...sharedBlockers, ...inputBlockers(t)] };
+        return { task: t, currentAttempt: values.find(a => a.attemptId === t.currentAttemptId), attempts: values, steering: bySteeringTask.get(t.id), blockers: [...sharedBlockers, ...inputBlockers(t)] };
       });
     },
     getUnresolvedTasks(sessionId) {
       if (authority() !== 'ledger_v1') fail('EXECUTION_AUTHORITY_LEGACY');
-      return db.prepare("SELECT DISTINCT t.id,t.status FROM task_attempts a JOIN tasks t ON t.id=a.task_id WHERE a.session_id=? AND a.state IN ('preparing','active','reconcile_required','legacy_unresolved') ORDER BY t.created_at,t.id")
-        .all(sessionId) as Array<{ id: string; status: ExecutionTask['status'] }>;
+      return db.prepare("SELECT t.id,t.status FROM (SELECT task_id FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required','legacy_unresolved') UNION SELECT task_id FROM task_steering_operations WHERE session_id=? AND state IN ('pending','unknown')) unresolved JOIN tasks t ON t.id=unresolved.task_id ORDER BY t.created_at,t.id")
+        .all(sessionId,sessionId) as Array<{ id: string; status: ExecutionTask['status'] }>;
     },
     getAttemptEvents(attemptId, window = {}) {
       id.parse(attemptId);
@@ -651,6 +657,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
           const f = readFence(rawFence); const s = session(f.sessionId);
           if (s.archivedAt || s.state === 'stopped') fail('SESSION_NOT_ACCEPTING');
           assertResources(f, undefined, owner);
+          if (steeringBlockers(f.sessionId).length) fail('STEERING_DELIVERY_UNKNOWN');
           if (db.prepare("SELECT 1 FROM task_attempts WHERE session_id=? AND state IN ('preparing','active','reconcile_required') LIMIT 1").get(f.sessionId)) fail('SESSION_EXECUTION_BUSY');
           const row = db.prepare("SELECT id FROM tasks WHERE session_id=? AND status='queued' ORDER BY COALESCE(queue_position,0),created_at,rowid LIMIT 1").get(f.sessionId) as { id: string } | undefined;
           if (!row) return;
@@ -682,23 +689,62 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
             return result(f,t,t.currentAttemptId ? attempt(t.currentAttemptId) : undefined,[event]);
           });
         }); },
-        deliverQueuedBySteering(rawFence, taskId, expectedTaskRevision, rawInput) { return write(() => {
+        beginQueuedSteering(rawFence, taskId, expectedTaskRevision, rawInput) { return write(owner => {
           const f = readFence(rawFence);
-          const input = parse(taskExecutionSchemas.steeringDelivery,rawInput);
+          const input = parse(taskExecutionSchemas.steeringOperation,rawInput);
           validateManagementActor(f,taskId,input.actor);
-          return command(`steering:${input.operationId}`,{ ...f,taskId,input },() => {
-            const { t, a } = queuedTask(f,taskId,expectedTaskRevision);
-            if (a) fail('STEERING_TASK_HAS_ATTEMPT');
-            if (getAcceptedTask(taskId)?.request?.namespace !== steerableTaskNamespace) fail('STEERING_TASK_OWNED');
-            // The steered content already reached this submission; its later settlement cannot undo that.
-            const target = attempt(input.target.attemptId);
-            if (!target || target.taskId !== input.target.taskId || target.sessionId !== f.sessionId || target.runId !== f.runId || target.submissionState === 'not_submitted') fail('STEERING_TARGET_CONFLICT');
-            t.status = 'completed'; t.revision++; t.updatedAt = timestamp(); saveTask(t);
-            const steering = { operationId: input.operationId, outcome: input.outcome, target: input.target };
-            // The prompt marker precedes the terminal Task event, so the Task's own output window stays empty.
-            const prompt = append(f,{ id: `steering:${input.operationId}:prompt`, type: 'text', data: { text: t.prompt, role: 'user', taskId: t.id, steering } });
-            const settled = append(f,{ id: `steering:${input.operationId}:task`, type: 'task', data: { task: { id: t.id, status: t.status, revision: t.revision }, steering } });
-            return result(f,t,undefined,[prompt,settled]);
+          return command(`steering_begin:${input.operationId}`,{...f,taskId,input},() => {
+            if (steeringBlockers(f.sessionId).length) fail('STEERING_DELIVERY_UNKNOWN');
+            const {t,a} = queuedTask(f,taskId,expectedTaskRevision);
+            if(a) fail('STEERING_TASK_HAS_ATTEMPT');
+            if(getAcceptedTask(taskId)?.request?.namespace!==steerableTaskNamespace) fail('STEERING_TASK_OWNED');
+            const target=attempt(input.target.attemptId);
+            if(!target || target.taskId!==input.target.taskId || target.sessionId!==f.sessionId || target.runId!==f.runId || target.state!=='active' || target.submissionState==='not_submitted') fail('STEERING_TARGET_CONFLICT');
+            const value: SteeringOperation = {...f,...input,taskId,controller:owner,state:'pending',revision:1,createdAt:timestamp(),updatedAt:timestamp()};
+            db.prepare('INSERT INTO task_steering_operations VALUES (?,?,?,?,?,?,?)').run(value.operationId,f.sessionId,f.runId,taskId,value.state,value.revision,json(value));
+            t.status='reconcile_required'; t.revision++; t.updatedAt=timestamp(); saveTask(t); sessionStatus(f.sessionId);
+            return result(f,t,undefined,[append(f,{id:`steering:${value.operationId}:pending`,type:'task',data:{task:{id:t.id,status:t.status,revision:t.revision},steering:value}})]);
+          });
+        }); },
+        resolveQueuedSteering(rawFence, operationId, controller, outcome) { return write(owner => {
+          const f=readFence(rawFence); id.parse(operationId); parse(taskExecutionSchemas.controllerSchema,controller);
+          if(!['injected','startedNewTurn','promptRequired','unsupported','unknown'].includes(outcome)) fail('EXECUTION_INVALID_INPUT');
+          const value=steeringOperation(operationId);
+          if(!value || value.sessionId!==f.sessionId || value.runId!==f.runId || !sameController(value.controller,controller)) fail('STEERING_OPERATION_CONFLICT');
+          // New controllers may classify an orphan as unknown, but only the original controller may record a remote reply.
+          if(outcome!=='unknown' && !sameController(owner,controller)) fail('STEERING_CONTROLLER_CONFLICT');
+          const t=task(value.taskId)!;
+          if(!['pending','unknown'].includes(value.state) || value.state==='unknown' && outcome==='unknown') return result(f,t,undefined,[],true);
+          if(t.status!=='reconcile_required' || t.currentAttemptId) fail('STEERING_TASK_CONFLICT');
+          value.state=outcome==='unknown' ? 'unknown' : outcome==='injected' || outcome==='startedNewTurn' ? 'delivered' : 'not_delivered';
+          if(outcome!=='unknown') value.outcome=outcome;
+          value.revision++; value.updatedAt=timestamp(); saveSteering(value);
+          t.status=value.state==='delivered' ? 'completed' : value.state==='not_delivered' ? 'queued' : 'reconcile_required';
+          t.revision++; t.updatedAt=timestamp(); saveTask(t); sessionStatus(f.sessionId);
+          const events=[];
+          if(value.state==='delivered') events.push(append(f,{id:`steering:${operationId}:prompt`,type:'text',data:{text:t.prompt,role:'user',taskId:t.id,steering:value}}));
+          events.push(append(f,{id:`steering:${operationId}:result:${value.revision}`,type:'task',data:{task:{id:t.id,status:t.status,revision:t.revision},steering:value}}));
+          return result(f,t,undefined,events);
+        }); },
+        confirmSteeringRecovery(rawFence, rawInput, rawActor) { return write(() => {
+          const f=readFence(rawFence), input=parse(steeringRecoveryDecisionSchema,rawInput), actor=parse(executionActorSchema,rawActor);
+          if(actor.kind!=='installation_owner') fail('RECOVERY_OWNER_REQUIRED');
+          if(input.runId!==f.runId) fail('SESSION_RUN_CONFLICT');
+          return command(`steering_recovery:${input.decisionId}`,{...f,input,actor},() => {
+            const value=steeringOperation(input.operationId), t=task(input.taskId);
+            if(!value || !t || value.taskId!==input.taskId || value.sessionId!==f.sessionId || value.runId!==f.runId) fail('STEERING_OPERATION_CONFLICT');
+            if(value.revision!==input.expectedRevision) fail('STEERING_REVISION_CONFLICT');
+            if(!['pending','unknown'].includes(value.state) || t.status!=='reconcile_required' || t.currentAttemptId) fail('STEERING_ALREADY_SETTLED');
+            assertResources(f,input.resourceChecks);
+            recordDecision(f,undefined,{...input,actor},input.decisionId);
+            value.state=input.action==='abandon' ? 'abandoned' : input.action; value.decisionId=input.decisionId;
+            value.revision++; value.updatedAt=timestamp(); saveSteering(value);
+            t.status=input.action==='delivered' ? 'completed' : input.action==='not_delivered' ? 'queued' : 'cancelled';
+            t.revision++; t.updatedAt=timestamp(); saveTask(t); sessionStatus(f.sessionId);
+            const events=[];
+            if(input.action==='delivered') events.push(append(f,{id:`steering:${value.operationId}:prompt`,type:'text',data:{text:t.prompt,role:'user',taskId:t.id,steering:value}}));
+            events.push(append(f,{id:`steering:${value.operationId}:manual`,type:'task',data:{task:{id:t.id,status:t.status,revision:t.revision},steering:value}}));
+            return result(f,t,undefined,events);
           });
         }); },
         getPendingQueueActions(rawFence) { return write(() => {
@@ -944,6 +990,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         patchSession(rawFence,rawPatch) { return write(() => {
           const f=readFence(rawFence);const patch=parse(taskExecutionSchemas.sessionPatch,rawPatch);
           if(patch.archivedAt) {
+            if(steeringBlockers(f.sessionId).length) fail('STEERING_DELIVERY_UNKNOWN');
             if(attempts(f.sessionId).some(a=>['preparing','active','reconcile_required','legacy_unresolved','suspended'].includes(a.state))) fail('SESSION_PENDING_ATTEMPTS');
             assertResources(f);
           }
@@ -953,6 +1000,7 @@ export function createTaskExecutionRepository(db: Database.Database, control: Op
         replaceSessionRun(rawFence,newRunId,safeResources) { return write(() => {
           const f=readFence(rawFence);id.parse(newRunId);
           if(newRunId===f.runId) fail('SESSION_RUN_CONFLICT');
+          if(steeringBlockers(f.sessionId).length) fail('STEERING_DELIVERY_UNKNOWN');
           if(attempts(f.sessionId).some(a=>['preparing','active','reconcile_required','legacy_unresolved','suspended'].includes(a.state))) fail('SESSION_PENDING_ATTEMPTS');
           assertResources(f,safeResources);
           const selection = nativeSelection(f.sessionId);

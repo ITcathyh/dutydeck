@@ -13,11 +13,11 @@ async function requestSessionIdOnce(backend: PtyLike): Promise<void> {
   if (sessionIdRequestedBackends.has(backend)) return;
   sessionIdRequestedBackends.add(backend);
   if (backend.sendText && backend.sendSpecialKeys) {
-    backend.sendText('/session-id');
+    (await backend.sendText('/session-id'));
     await delay(200);
-    backend.sendSpecialKeys('Enter');
+    (await backend.sendSpecialKeys('Enter'));
   } else {
-    backend.write('/session-id\r');
+    (await backend.write('/session-id\r'));
   }
   await delay(200);
 }
@@ -54,18 +54,18 @@ export function createKiroCliAdapter(): CliAdapter {
         const lines = prompt.split('\n');
         for (let i = 0; i < lines.length; i++) {
           const line = lines[i];
-          if (line && line.length > 0) backend.sendText(line);
+          if (line && line.length > 0) (await backend.sendText(line));
           if (i < lines.length - 1) {
-            backend.sendSpecialKeys('C-j');
+            (await backend.sendSpecialKeys('C-j'));
             await delay(50);
           }
         }
         await delay(200);
-        backend.sendSpecialKeys('Enter');
+        (await backend.sendSpecialKeys('Enter'));
       } else {
-        backend.write(prompt.replace(/\n/g, '\x0a'));
+        (await backend.write(prompt.replace(/\n/g, '\x0a')));
         await delay(1000);
-        backend.write('\r');
+        (await backend.write('\r'));
       }
     },
 
