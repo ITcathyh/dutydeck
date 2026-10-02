@@ -763,3 +763,38 @@ describe('independent participation models', () => {
     expect(cleared).toMatchObject({ memoryAgentId: 'legacy', memoryModel: 'legacy-model' });
   });
 });
+
+
+describe('idle context compaction settings', () => {
+  it('defaults older stored configurations to enabled after 24 hours', async () => {
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_idle', appSecret: 'secret' }]));
+    expect(config).toMatchObject({ idleCompactEnabled: true, idleCompactHours: 24 });
+    expect(publicLarkConfig(config)).toMatchObject({ idleCompactEnabled: true, idleCompactHours: 24 });
+  });
+
+  it('persists disabled/custom settings and preserves them during unrelated edits', async () => {
+    const repository = createRepository();
+    await saveLarkConfig(repository, undefined, { appId: 'cli_idle', appSecret: 'secret', idleCompactEnabled: false, idleCompactHours: 48 });
+    expect(JSON.parse((await repository.get(larkBotsConfigKey))!)[0]).toMatchObject({ idleCompactEnabled: false, idleCompactHours: 48 });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_idle', preInjectPrompt: 'hello' });
+    const [config] = await readLarkConfigs(repository);
+    expect(publicLarkConfig(config)).toMatchObject({ idleCompactEnabled: false, idleCompactHours: 48 });
+    await saveLarkConfig(repository, undefined, { originalAppId: 'cli_idle', idleCompactEnabled: true, idleCompactHours: 1 });
+    expect((await readLarkConfigs(repository))[0]).toMatchObject({ idleCompactEnabled: true, idleCompactHours: 1 });
+  });
+
+  it.each([0, -1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])('rejects invalid idle hours %s before persistence', async idleCompactHours => {
+    const repository = createRepository();
+    await expect(saveLarkConfig(repository, undefined, { appId: 'cli_idle', appSecret: 'secret', idleCompactHours }))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400 });
+    expect(repository.set).not.toHaveBeenCalled();
+  });
+
+  it('rejects nonboolean switch values and normalizes invalid imported hours', async () => {
+    const repository = createRepository();
+    await expect(saveLarkConfig(repository, undefined, { appId: 'cli_idle', appSecret: 'secret', idleCompactEnabled: 'false' as any }))
+      .rejects.toMatchObject({ code: 'INVALID_LARK_CONFIG', statusCode: 400 });
+    const [config] = await readLarkConfigs(seedBots([{ appId: 'cli_idle', appSecret: 'secret', idleCompactEnabled: false, idleCompactHours: 0 }]));
+    expect(config).toMatchObject({ idleCompactEnabled: false, idleCompactHours: 24 });
+  });
+});

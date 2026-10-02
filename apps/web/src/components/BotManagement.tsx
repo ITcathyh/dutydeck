@@ -50,6 +50,8 @@ function initialDraft(bot: LarkBotConfig): BotDraft {
     defaultModel: bot.defaultModel ?? '',
     defaultReasoningEffort: bot.defaultReasoningEffort ?? '',
     p2pMode: bot.p2pMode ?? 'chat',
+    idleCompactEnabled: bot.idleCompactEnabled ?? true,
+    idleCompactHours: String(bot.idleCompactHours ?? 24),
     groupReplyMode: bot.groupReplyMode ?? '',
     mentionPolicy: bot.mentionPolicy ?? 'always',
     defaultGroupParticipation: bot.defaultGroupParticipation ?? 'off',
@@ -80,6 +82,8 @@ function hasDraftChanges(original: LarkBotConfig, draft: BotDraft): boolean {
   if ((original.defaultModel ?? '') !== draft.defaultModel) return true;
   if ((original.defaultReasoningEffort ?? '') !== draft.defaultReasoningEffort) return true;
   if ((original.p2pMode ?? 'chat') !== draft.p2pMode) return true;
+  if ((original.idleCompactEnabled ?? true) !== draft.idleCompactEnabled) return true;
+  if (String(original.idleCompactHours ?? 24) !== draft.idleCompactHours) return true;
   if ((original.groupReplyMode ?? '') !== draft.groupReplyMode) return true;
   if ((original.mentionPolicy ?? 'always') !== draft.mentionPolicy) return true;
   if ((original.defaultGroupParticipation ?? 'off') !== draft.defaultGroupParticipation) return true;
@@ -254,6 +258,8 @@ export function BotManagement({
       defaultReasoningEffort: draft.defaultReasoningEffort,
       workspace: draft.workspace,
       p2pMode: draft.p2pMode,
+      idleCompactEnabled: draft.idleCompactEnabled,
+      idleCompactHours: Number(draft.idleCompactHours),
       groupReplyMode: draft.groupReplyMode || undefined,
       mentionPolicy: draft.mentionPolicy,
       defaultGroupParticipation: draft.defaultGroupParticipation,
@@ -322,8 +328,9 @@ export function BotManagement({
   });
 
   /** 提交当前对象。variables 在这里定格，之后切走也不影响这次请求的归属。 */
+  const idleCompactHoursValid = Boolean(currentDraft && currentDraft.idleCompactHours.trim() && Number.isSafeInteger(Number(currentDraft.idleCompactHours)) && Number(currentDraft.idleCompactHours) >= 1);
   const submitSave = () => {
-    if (!activeBot || !currentDraft) return;
+    if (!activeBot || !currentDraft || !idleCompactHoursValid) return;
     saveMutation.mutate({ appId: activeBot.appId, draft: currentDraft, fullTrustConfirmed: activeBot.fullTrustConfirmed });
   };
 
@@ -637,6 +644,31 @@ export function BotManagement({
                       <option value="never">不用 @ 也会响应</option>
                     </Select>
                   </div>
+                </div>
+
+                <div className="space-y-3">
+                  <label className="flex items-center gap-2 text-caption">
+                    <input
+                      type="checkbox"
+                      checked={currentDraft.idleCompactEnabled}
+                      onChange={e => updateCurrentDraft({ idleCompactEnabled: e.target.checked })}
+                      className="rounded border-default text-action focus:ring-action"
+                    />
+                    <span>空闲后自动压缩上下文</span>
+                  </label>
+                  <p className="text-caption text-subtle">
+                    会话空闲达到设定时长后，下次收到消息时先压缩历史上下文；仅对支持原生压缩的 Agent 生效。
+                  </p>
+                  <Field label="空闲时长（小时）" error={!idleCompactHoursValid ? '请输入至少 1 小时的整数。' : undefined}>
+                    <Input
+                      aria-label="空闲时长（小时）"
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={currentDraft.idleCompactHours}
+                      onChange={e => updateCurrentDraft({ idleCompactHours: e.target.value })}
+                    />
+                  </Field>
                 </div>
 
                 <div>
@@ -990,7 +1022,7 @@ export function BotManagement({
                   </Button>
                   <Button
                     variant="primary"
-                    disabled={!isDirty}
+                    disabled={!isDirty || !idleCompactHoursValid}
                     loading={savingThisBot}
                     onClick={submitSave}
                   >

@@ -1317,9 +1317,10 @@ export class DutydeckRuntime {
     return { ...visible, ...(task.executionContext?.skillDeliveries?.length ? { skillDeliveries: task.executionContext.skillDeliveries } : {}) };
   }
 
-  private executionContext(agentPrompt: string, riskPolicy?: ToolRiskPolicy, actorId?: string, skillDeliveries?: SkillDeliveryMetadata[]): TaskExecutionContext {
+  private executionContext(agentPrompt: string, riskPolicy?: ToolRiskPolicy, actorId?: string, skillDeliveries?: SkillDeliveryMetadata[], idleCompactHours?: number): TaskExecutionContext {
     return {
       agentPrompt,
+      ...(idleCompactHours !== undefined ? { idleCompactHours } : {}),
       ...(actorId ? { actorId } : {}),
       ...(riskPolicy ? { riskPolicy } : {}),
       ...(skillDeliveries?.length ? { skillDeliveries } : {})
@@ -1924,6 +1925,24 @@ export class DutydeckRuntime {
       const driver = await this.configureTaskDriver(session, input.executionOptions);
       await this.applyRiskPolicy(session, driver, task.executionContext?.riskPolicy);
       const prompt = await this.mutations.wait(() => Promise.resolve(this.options.sessionPrompt?.(session, input.executionContext.agentPrompt) ?? input.executionContext.agentPrompt));
+      const compactHours = input.executionContext.idleCompactHours;
+      const previousTasks = compactHours === undefined ? [] : await this.mutations.wait(() => this.repos.tasks.listBySession(id));
+      const previousActivity = Math.max(...previousTasks.filter(item => item.id !== task.id && ['completed', 'interrupted', 'failed'].includes(item.status)).map(item => Date.parse(item.updatedAt)));
+      const compactDue = compactHours !== undefined && Number.isFinite(previousActivity) && Date.now() - previousActivity >= compactHours * 3_600_000;
+      const compact = async (submission?: import('@dutydeck/shared').DriverSubmission) => {
+        if (!compactDue) return true;
+        const outcome = driver.compact ? await driver.compact(submission) : 'unsupported';
+        if (!driver.compact) await this.emit(id, 'status', { state: 'compaction', phase: 'unsupported', proactive: true });
+        this.mutations.check();
+        const interrupted = this.bound().getPendingQueueActions(this.fence(session)).some(action => action.interrupt && action.target?.attemptId === ref.attemptId);
+        if (outcome === 'cancelled' || interrupted) {
+          // The maintenance stream is quiescent; finish the logical task without submitting its user prompt.
+          await this.emit(id, 'status', { state: 'compaction', phase: 'cancelled', proactive: true });
+          await this.consume(session, { type: 'completed', data: { stopReason: 'cancelled' } }, makeId('evt'));
+          return false;
+        }
+        return true;
+      };
       const submissionId = makeId('submission');
       const controlled=this.localResources.get(driver)?.controlled;
       const submissionInput=Object.freeze({taskId:ref.taskId,attemptId:ref.attemptId,submissionId,prompt,executionOptions:Object.freeze({...input.executionOptions})});
@@ -1951,10 +1970,13 @@ export class DutydeckRuntime {
       if (controlled && prepared) {
         const operation=controlled.beginSubmission(prepared), frozen=prepared;
         await this.driverOperation(driver,async()=>{
-          try {await driver.send(Object.freeze({...frozen,operation,onAccepted:(receipt:import('@dutydeck/shared').SubmissionReceipt)=>{this.wake(this.bound().markSubmitted(this.attemptFence(ref),receipt));}}));}
+          try {
+            const submission = Object.freeze({...frozen,operation,onAccepted:(receipt:import('@dutydeck/shared').SubmissionReceipt)=>{this.wake(this.bound().markSubmitted(this.attemptFence(ref),receipt));}});
+            if (await compact(submission)) await driver.send(submission);
+          }
           finally {controlled.endSubmission(operation);}
         });
-      } else await this.driverOperation(driver, () => driver.send(prompt));
+      } else await this.driverOperation(driver, async () => { if (await compact()) await driver.send(prompt); });
       await this.flushDriverEvents(id);
       if (!this.completedTurns.has(ref.attemptId)) throw new RuntimeError('DRIVER_RESULT_INCOMPLETE', 'Driver returned without a completed result', 409);
       const result = this.turnOutput(ref);
@@ -2021,12 +2043,12 @@ export class DutydeckRuntime {
     });
   }
 
-  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: TaskRequestV1) {
+  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: TaskRequestV1, idleCompactHours?: number) {
     this.assertReady();
       const stored = await this.repos.sessions.get(id);
       this.assertReady();
       if (!stored) throw new RuntimeError('SESSION_NOT_FOUND', 'Session is missing', 404);
-      const request: TaskRequestV1 = supplied ?? { version: 1, namespace: 'runtime', sessionId: id, key: idempotencyKey ?? makeId('request'), actor: this.actor(stored, actorId), prompt, mode, skills: skillRequests ?? [], options: {}, sources: [], sourcePayload: { agentPrompt, ...(riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(riskPolicy)) } : {}), skills: skillRequests ?? [] } };
+      const request: TaskRequestV1 = supplied ?? { version: 1, namespace: 'runtime', sessionId: id, key: idempotencyKey ?? makeId('request'), actor: this.actor(stored, actorId), prompt, mode, skills: skillRequests ?? [], options: {}, sources: [], sourcePayload: { agentPrompt, ...(riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(riskPolicy)) } : {}), skills: skillRequests ?? [], ...(idleCompactHours !== undefined ? { idleCompactHours } : {}) } };
       canonicalExecutionJson(request); taskRequestV1Schema.parse(request);
       const explicitActor = actorId ?? undefined;
       const requestActor = request.actor.kind === 'unspecified' ? undefined : request.actor.id;
@@ -2053,7 +2075,7 @@ export class DutydeckRuntime {
         ...((request.options.reasoningEffort ?? session.reasoningEffort ?? agent.reasoningEffort) !== undefined ? { reasoningEffort: request.options.reasoningEffort ?? session.reasoningEffort ?? agent.reasoningEffort } : {}) };
       if (request.actor.kind === 'unspecified' && executionOptions.permissionMode === 'full-trust' && session.permissionMode !== 'full-trust') throw new RuntimeError('ACTOR_REQUIRED', 'An unspecified actor cannot enable full trust', 403);
       const prepared = await this.mutations.wait(() => this.prepareTask(session, agentPrompt, skillRequests));
-      const content = { version: 2 as const, prompt, executionContext: this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries), contentSources: [], executionOptions };
+      const content = { version: 2 as const, prompt, executionContext: this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries, idleCompactHours), contentSources: [], executionOptions };
       const accepted = await this.mutations.write(id, async () => {
         const committed = this.wake(this.bound().acceptTask(this.fence(session), request, { ...content, digest: digest(content) }, mode === 'interrupt' ? 'front' : 'back'));
         if (committed.task) this.rememberQueued(committed.task);

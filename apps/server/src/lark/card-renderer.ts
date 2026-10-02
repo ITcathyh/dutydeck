@@ -972,19 +972,22 @@ const errorAlert = (entry: TraceEntry, index: number): LarkCardElement => ({
 // 没有这类信号的驱动不出提示；读数里没有窗口大小时不写百分比。
 const contextPressureElement = (events: AgentEvent[]): LarkCardElement | undefined => {
   let percent: number | undefined;
-  let compaction: 'happened' | 'failed' | undefined;
+  let compaction: 'happened' | 'failed' | 'cancelled' | undefined;
+  let unsupported = false;
   for (const event of events) {
     if (event.type !== 'status') continue;
     const data = event.data as Record<string, any> | undefined;
+    if (data?.state === 'compaction' && data.proactive && data.phase === 'unsupported') unsupported = true;
     if (data?.state === 'usage') {
       const used = Number(data.used);
       const size = Number(data.size);
       percent = Number.isFinite(used) && Number.isFinite(size) && size > 0 ? Math.min(100, Math.floor(used / size * 100)) : undefined;
-    } else if (data?.state === 'compaction' && compaction !== 'failed') compaction = data.phase === 'failed' ? 'failed' : 'happened';
+    } else if (data?.state === 'compaction' && compaction !== 'failed' && ['start', 'completed', 'failed', 'cancelled'].includes(data.phase)) compaction = data.phase === 'failed' ? 'failed' : data.phase === 'cancelled' ? 'cancelled' : 'happened';
   }
-  if (!compaction && (percent === undefined || percent < 80)) return undefined;
+  if (!compaction && (percent === undefined || percent < 80)) return unsupported
+    ? { tag: 'markdown', element_id: 'context_hint', content: '当前 Agent 不支持主动压缩，已继续处理本轮请求。', text_size: 'notation', margin: '4px 0px 0px 0px' } : undefined;
   const parts = [
-    compaction === 'failed' ? '本轮上下文压缩失败' : compaction ? '本轮发生过上下文压缩' : '',
+    compaction === 'failed' ? '本轮上下文压缩失败' : compaction === 'cancelled' ? '本轮上下文压缩已中断' : compaction ? '本轮发生过上下文压缩' : '',
     percent !== undefined ? `上下文已用 ${percent}%` : ''
   ].filter(Boolean);
   return { tag: 'markdown', element_id: 'context_hint', content: `${parts.join('，')}，可用 /new --handoff 带交接开新会话。`, text_size: 'notation', margin: '4px 0px 0px 0px' };

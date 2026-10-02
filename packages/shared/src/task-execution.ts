@@ -67,7 +67,7 @@ export interface AcceptedTaskInputV1 {
 const recoverySchema = z.object({ kind: z.literal('pty-jsonl-v1'), turnId: id, transcript: z.object({ path: id.optional(), offset: z.number().int().nonnegative() }).strict() }).strict();
 export const acceptedTaskInputV1Schema = z.object({
   version: z.literal(1), prompt: z.string(),
-  executionContext: z.object({ actorId: id.optional(), agentPrompt: z.string(),
+  executionContext: z.object({ actorId: id.optional(), agentPrompt: z.string(), idleCompactHours: z.number().positive().optional(),
     skillDeliveries: z.array(z.object({ name: id, path: id, source: z.enum(['workspace', 'user']), digest: id, mode: z.literal('prompt') }).strict()).optional(),
     riskPolicy: z.object({ enabled: z.boolean(), authorized: z.boolean(), pattern: z.string(), actorEmail: z.string().optional(), reason: z.string().optional() }).strict().optional(),
     recovery: recoverySchema.optional()

@@ -1,8 +1,8 @@
 diff --git a/dist/runtime.js b/dist/runtime.js
-index 3fb25ae..11b936c 100644
+index 3fb25ae4124cea292546e1dda95465b3ae15577e..23e148abc85904e7f751a1b4248b9874f8e7d353 100644
 --- a/dist/runtime.js
 +++ b/dist/runtime.js
-@@ -734,17 +734,32 @@ async function createOrLoadRuntimeSession(client, resumeSessionId, cwd) {
+@@ -734,17 +734,33 @@ async function createOrLoadRuntimeSession(client, resumeSessionId, cwd) {
  		sessionResult: created
  	};
  }
@@ -25,6 +25,7 @@ index 3fb25ae..11b936c 100644
  	activeControllers = /* @__PURE__ */ new Map();
  	pendingPersistentClients = /* @__PURE__ */ new Map();
 +	strictIdentities = new Map();
++	startupCommands = new WeakMap();
  	closingActiveRecords = /* @__PURE__ */ new Set();
  	constructor(options, deps = {}) {
  		this.options = options;
@@ -35,16 +36,32 @@ index 3fb25ae..11b936c 100644
  		return this.deps.clientFactory?.(options) ?? new AcpClient(options);
  	}
  	async readPendingPersistentClient(record, options) {
-@@ -822,6 +837,7 @@ var AcpRuntimeManager = class {
+@@ -821,7 +837,20 @@ var AcpRuntimeManager = class {
+ 			record: result.record
  		};
  	}
++	captureStartupCommands(client) {
++		client.setEventHandlers({onSessionUpdate: notification => {
++			if (notification.update.sessionUpdate !== "available_commands_update") return;
++			this.startupCommands.set(client, notification.update.availableCommands.map(command => ({name:command.name,
++				...(command.description ? {description:command.description} : {}),has_input:command.input != null})));
++		}});
++	}
++	applyStartupCommands(record, client, consume = false) {
++		const commands = client && this.startupCommands.get(client);
++		if (commands) record.acpx = {...record.acpx,available_commands:commands};
++		if (consume && client) this.startupCommands.delete(client);
++	}
  	async ensureSession(input) {
 +		if (input.strict) return await this.ensureStrictSession(input);
  		const cwd = path.resolve(input.cwd?.trim() || this.options.cwd);
  		const { agentCommand, agentArgv } = normalizeAgentCommandInput(this.options.agentRegistry.resolve(input.agent));
  		const existing = await this.options.sessionStore.load(input.sessionKey);
-@@ -849,7 +865,7 @@ var AcpRuntimeManager = class {
+@@ -847,9 +875,10 @@ var AcpRuntimeManager = class {
+ 			verbose: this.options.verbose,
+ 			sessionOptions: input.sessionOptions
  		});
++		this.captureStartupCommands(client);
  		let keepClientOpen = false;
  		try {
 -			await client.start();
@@ -52,7 +69,7 @@ index 3fb25ae..11b936c 100644
  			const session = await createOrLoadRuntimeSession(client, input.resumeSessionId, cwd);
  			const record = await this.createAndSaveRuntimeRecord({
  				input,
-@@ -865,6 +881,51 @@ var AcpRuntimeManager = class {
+@@ -865,6 +894,53 @@ var AcpRuntimeManager = class {
  			if (!keepClientOpen) await client.close();
  		}
  	}
@@ -73,6 +90,7 @@ index 3fb25ae..11b936c 100644
 +		}
 +		const client = this.createClient({agentCommand,agentArgv,cwd,mcpServers:[...this.options.mcpServers??[]],permissionMode:this.options.permissionMode,
 +			nonInteractivePermissions:this.options.nonInteractivePermissions,onPermissionRequest:this.options.onPermissionRequest,sessionOptions:input.sessionOptions,resourceScope:input.resourceScope});
++		this.captureStartupCommands(client);
 +		let kept = false;
 +		try {
 +			await withTimeout(client.start(), this.options.timeoutMs);
@@ -94,6 +112,7 @@ index 3fb25ae..11b936c 100644
 +			persistSessionOptions(record, original ? {...sessionOptionsFromRecord(original),env:input.sessionOptions?.env??{}} : input.sessionOptions);
 +			applyLifecycleSnapshotToRecord(record,client.getAgentLifecycleSnapshot());
 +			record.closed=false;delete record.closedAt;
++			this.applyStartupCommands(record, client);
 +			await this.options.sessionStore.save(record);
 +			await input.strict.onPrepared(identity, defaults);
 +			this.strictIdentities.set(record.acpxRecordId,identity);
@@ -104,7 +123,15 @@ index 3fb25ae..11b936c 100644
  	async createAndSaveRuntimeRecord(params) {
  		const { input, client, agentCommand, agentArgv, cwd, session } = params;
  		const record = createInitialRecord({
-@@ -986,11 +1047,25 @@ var AcpRuntimeManager = class {
+@@ -893,6 +969,7 @@ var AcpRuntimeManager = class {
+ 		if (modelApplication.applied) setCurrentModelId(record, currentModelIdFromSetModelResponse(modelApplication.response, input.sessionOptions?.model));
+ 		applyLifecycleSnapshotToRecord(record, client.getAgentLifecycleSnapshot());
+ 		persistSessionOptions(record, input.sessionOptions);
++		this.applyStartupCommands(record, client);
+ 		await this.options.sessionStore.save(record);
+ 		return record;
+ 	}
+@@ -986,11 +1063,25 @@ var AcpRuntimeManager = class {
  				client: turn.client,
  				sessionId,
  				prompt: task.promptInput,
@@ -130,16 +157,17 @@ index 3fb25ae..11b936c 100644
  			task.settleResult({
  				status: response.stopReason === "cancelled" ? "cancelled" : "completed",
  				...response.stopReason ? { stopReason: response.stopReason } : {}
-@@ -1014,7 +1089,7 @@ var AcpRuntimeManager = class {
+@@ -1014,7 +1105,8 @@ var AcpRuntimeManager = class {
  		applyConversation(record, conversation);
  		await this.options.sessionStore.save(record);
  		const pendingClient = await this.readPendingPersistentClient(record, { consume: true });
 -		const client = pendingClient ?? this.createTurnClient(record);
++		if (pendingClient) { this.applyStartupCommands(record, pendingClient, true); acpxState = cloneSessionAcpxState(record.acpx); }
 +		const client = pendingClient ?? this.createTurnClient(record, task.input.resourceScope);
  		const turn = {
  			record,
  			conversation,
-@@ -1030,7 +1105,7 @@ var AcpRuntimeManager = class {
+@@ -1030,7 +1122,7 @@ var AcpRuntimeManager = class {
  		this.installRuntimeTurnEventHandlers(task, turn);
  		return turn;
  	}
@@ -148,7 +176,7 @@ index 3fb25ae..11b936c 100644
  		return this.createClient({
  			agentCommand: record.agentCommand,
  			agentArgv: record.agentArgv,
-@@ -1040,7 +1115,7 @@ var AcpRuntimeManager = class {
+@@ -1040,7 +1132,7 @@ var AcpRuntimeManager = class {
  			nonInteractivePermissions: this.options.nonInteractivePermissions,
  			onPermissionRequest: this.options.onPermissionRequest,
  			verbose: this.options.verbose,
@@ -157,7 +185,7 @@ index 3fb25ae..11b936c 100644
  		});
  	}
  	createRuntimeTurnCheckpoint(record, conversation, readAcpxState) {
-@@ -1056,6 +1131,13 @@ var AcpRuntimeManager = class {
+@@ -1056,6 +1148,13 @@ var AcpRuntimeManager = class {
  		return {
  			hasActivePrompt: () => turn.client.hasActivePrompt(),
  			requestCancelActivePrompt: async () => await this.requestRuntimeTurnCancel(task, turn),
@@ -171,7 +199,15 @@ index 3fb25ae..11b936c 100644
  			setSessionMode: async (modeId) => {
  				await this.waitForRuntimeControlSession(task, turn);
  				await turn.client.setSessionMode(turn.activeSessionId, modeId);
-@@ -1271,6 +1353,22 @@ var AcpRuntimeManager = class {
+@@ -1255,6 +1354,7 @@ var AcpRuntimeManager = class {
+ 	}
+ 	async getStatus(handle) {
+ 		const record = await this.requireRecord(handle.acpxRecordId ?? handle.sessionKey);
++		this.applyStartupCommands(record, this.pendingPersistentClients.get(record.acpxRecordId));
+ 		return {
+ 			summary: statusSummary(record),
+ 			acpxRecordId: record.acpxRecordId,
+@@ -1271,6 +1371,22 @@ var AcpRuntimeManager = class {
  			}
  		};
  	}
@@ -194,7 +230,7 @@ index 3fb25ae..11b936c 100644
  	async setMode(handle, mode, sessionMode = "persistent") {
  		const record = await this.requireRecord(handle.acpxRecordId ?? handle.sessionKey);
  		const controller = this.activeControllers.get(record.acpxRecordId);
-@@ -1299,11 +1397,17 @@ var AcpRuntimeManager = class {
+@@ -1299,11 +1415,17 @@ var AcpRuntimeManager = class {
  		});
  		await this.options.sessionStore.save(result.record);
  	}
@@ -213,7 +249,7 @@ index 3fb25ae..11b936c 100644
  		if (this.activeControllers.has(record.acpxRecordId)) this.closingActiveRecords.add(record.acpxRecordId);
  		await this.cancel(handle);
  		if (options.discardPersistentState) {
-@@ -1344,6 +1448,8 @@ var AcpRuntimeManager = class {
+@@ -1344,6 +1466,8 @@ var AcpRuntimeManager = class {
  	async requireRecord(sessionId) {
  		const record = await this.options.sessionStore.load(sessionId);
  		if (!record) throw new Error(`ACP session not found: ${sessionId}`);
@@ -222,7 +258,7 @@ index 3fb25ae..11b936c 100644
  		return record;
  	}
  };
-@@ -1571,6 +1677,8 @@ var AcpxRuntime = class {
+@@ -1571,6 +1695,8 @@ var AcpxRuntime = class {
  			details: normalizeRuntimeDetails(report.details)
  		};
  	}
@@ -231,7 +267,7 @@ index 3fb25ae..11b936c 100644
  	async ensureSession(input) {
  		const sessionName = input.sessionKey.trim();
  		if (!sessionName) throw new AcpRuntimeError("ACP_SESSION_INIT_FAILED", "ACP session key is required.");
-@@ -1582,7 +1690,7 @@ var AcpxRuntime = class {
+@@ -1582,7 +1708,7 @@ var AcpxRuntime = class {
  			mode: input.mode,
  			cwd: input.cwd ?? this.options.cwd,
  			resumeSessionId: input.resumeSessionId,
@@ -240,7 +276,7 @@ index 3fb25ae..11b936c 100644
  		});
  		const handle = {
  			sessionKey: input.sessionKey,
-@@ -1614,7 +1722,7 @@ var AcpxRuntime = class {
+@@ -1614,7 +1740,7 @@ var AcpxRuntime = class {
  			sessionMode: state.mode,
  			requestId: input.requestId,
  			timeoutMs: input.timeoutMs,
@@ -249,7 +285,7 @@ index 3fb25ae..11b936c 100644
  		}));
  		return {
  			requestId: input.requestId,
-@@ -1660,6 +1768,13 @@ var AcpxRuntime = class {
+@@ -1660,6 +1786,13 @@ var AcpxRuntime = class {
  		const { handle } = this.resolveManagerHandle(input.handle);
  		return await (await this.getManager()).getStatus(handle);
  	}
@@ -263,7 +299,7 @@ index 3fb25ae..11b936c 100644
  	async setMode(input) {
  		const { handle, state } = this.resolveManagerHandle(input.handle);
  		await (await this.getManager()).setMode(handle, input.mode, state.mode);
-@@ -1725,6 +1840,6 @@ function createRuntimeStore(options) {
+@@ -1725,6 +1858,6 @@ function createRuntimeStore(options) {
  	return createFileSessionStore(options);
  }
  //#endregion
@@ -273,7 +309,7 @@ index 3fb25ae..11b936c 100644
  //# sourceMappingURL=runtime.js.map
 \ No newline at end of file
 diff --git a/dist/runtime.d.ts b/dist/runtime.d.ts
-index 0a8e55a..792fe11 100644
+index 0a8e55a11354137781078a1cf8ff043c0466b06f..f3d8b26d6175711379eed09d529775680e10ccc4 100644
 --- a/dist/runtime.d.ts
 +++ b/dist/runtime.d.ts
 @@ -1,4 +1,4 @@
@@ -361,7 +397,7 @@ index 0a8e55a..792fe11 100644
  //# sourceMappingURL=runtime.d.ts.map
 \ No newline at end of file
 diff --git a/dist/live-checkpoint-CBecfnSH.js b/dist/live-checkpoint-CBecfnSH.js
-index 32fd9b0..18e8998 100644
+index 32fd9b038f9427d9be1f8c045596a9852c256065..18e8998a1287ff1ce6153408d21c6f8625ed8464 100644
 --- a/dist/live-checkpoint-CBecfnSH.js
 +++ b/dist/live-checkpoint-CBecfnSH.js
 @@ -1356,6 +1356,8 @@ function parseAcpxState(raw) {
@@ -914,7 +950,7 @@ index 32fd9b0..18e8998 100644
  		};
  	} catch (error) {
 diff --git a/dist/session-options-CTdZvr68.d.ts b/dist/session-options-CTdZvr68.d.ts
-index 3ec271c..67062f8 100644
+index 3ec271cc95b43ad598f182652c391d17f28fc695..67062f8d94b12b5795504a8547098ebb0590a025 100644
 --- a/dist/session-options-CTdZvr68.d.ts
 +++ b/dist/session-options-CTdZvr68.d.ts
 @@ -1,3 +1,4 @@
@@ -948,4 +984,3 @@ index 3ec271c..67062f8 100644
 -export { AcpPermissionRequest as a, NonInteractivePermissionPolicy as c, PermissionStats as d, SessionRecord as f, AcpPermissionDecision as i, PermissionMode as l, SystemPromptOption as n, AuthPolicy as o, PromptInput as p, AcpClientOptions as r, McpServer$1 as s, SessionAgentOptions as t, PermissionPolicy as u };
 +export { AcpProcessEvent as x, AcpPermissionRequest as a, NonInteractivePermissionPolicy as c, PermissionStats as d, SessionRecord as f, AcpPermissionDecision as i, PermissionMode as l, SystemPromptOption as n, AuthPolicy as o, PromptInput as p, AcpClientOptions as r, McpServer$1 as s, SessionAgentOptions as t, PermissionPolicy as u };
  //# sourceMappingURL=session-options-CTdZvr68.d.ts.map
-\ No newline at end of file

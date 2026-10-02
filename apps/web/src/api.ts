@@ -95,6 +95,8 @@ export type LarkBotConfig = {
   riskControlMode: RiskControlMode;
   revision?: number;
   p2pMode?: 'chat' | 'thread';
+  idleCompactEnabled?: boolean;
+  idleCompactHours?: number;
   groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
   defaultGroupParticipation?: 'off' | 'observe' | 'selective';
@@ -410,6 +412,8 @@ export const api = {
     riskControlMode?: RiskControlMode;
     expectedRevision?: number;
     p2pMode?: 'chat' | 'thread';
+    idleCompactEnabled?: boolean;
+    idleCompactHours?: number;
     groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
     mentionPolicy?: 'always' | 'topic' | 'never' | 'ambient';
     defaultGroupParticipation?: 'off' | 'observe' | 'selective';

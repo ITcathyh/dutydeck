@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AgentEvent } from '@dutydeck/shared';
-import { renderLarkCardElements, renderLarkProcessElements, renderLarkRecordExport } from './card-renderer.js';
+import { renderLarkCardElements, renderLarkProcessElements, renderLarkRecordExport, renderLarkResultElements } from './card-renderer.js';
 import { buildLarkCard } from './service.js';
 
 // 精简过程卡（compactTrace）：历史阶段与当前阶段都退化为标题行，
@@ -174,5 +174,19 @@ describe('compactTrace 精简过程卡', () => {
     expect(card.header.template).toBe('orange');
     expect(card.header.text_tag_list[0].text.content).toBe('等待回答');
     expect(card.config.summary.content).toContain('等待回答');
+  });
+});
+
+
+describe('proactive compaction outcome hints', () => {
+  it.each([
+    ['unsupported', '当前 Agent 不支持主动压缩'],
+    ['failed', '本轮上下文压缩失败'],
+    ['cancelled', '本轮上下文压缩已中断']
+  ])('describes %s without claiming successful compaction', (phase, expected) => {
+    const events = [event(1, 'status', t0, { state: 'compaction', phase, proactive: true })];
+    const text = JSON.stringify(renderLarkResultElements(events));
+    expect(text).toContain(expected);
+    expect(text).not.toContain('本轮发生过上下文压缩');
   });
 });

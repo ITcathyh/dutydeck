@@ -23,12 +23,12 @@ const event = (id: string, text: string, patch: Partial<LarkMessageEvent> = {}):
   senderOpenId: 'ou_alice', senderType: 'user', messageType: 'text', content: JSON.stringify({ text }),
   mentions: [{ key: '@_user_1', name: 'Dock', openId: 'ou_bot' }], ...patch
 });
-async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { participation?: LarkGroupParticipation; participationMode?: 'observe' | 'selective' | 'off'; mentionPolicy?: StoredLarkConfig['mentionPolicy']; managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number; askChoices?: RelayAskChoice[]; permissionOperation?: PermissionRequestData['operation'] } = {}) {
+async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options: { participation?: LarkGroupParticipation; participationMode?: 'observe' | 'selective' | 'off'; mentionPolicy?: StoredLarkConfig['mentionPolicy']; managedGroup?: boolean; answerChunks?: string[]; traceEvents?: Array<Pick<AgentEvent, 'type' | 'data'>>; askTimeoutMs?: number; askChoices?: RelayAskChoice[]; permissionOperation?: PermissionRequestData['operation']; compactGate?: Promise<void> } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-workflows-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   let broker!: RelayAskBroker;
   let release: (() => void) | undefined;
-  const send = vi.fn(); const resolvePermission = vi.fn();
+  const send = vi.fn(); const resolvePermission = vi.fn(); const compact = vi.fn();
   const runtime = new DutydeckRuntime(repos, {
     probe: () => ({ protocol: 'acp', available: true, pause: false, resume: true }),
     driverFactory: (_config, _protocol, emit, _exit, sessionId) => {
@@ -43,6 +43,11 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
       };
       const driver: AgentDriver = {
         start: async () => {}, resume: async () => {}, stop: async () => cancelCurrent(), interrupt: async () => cancelCurrent(),
+        ...(options.compactGate ? { compact: async () => {
+          compact(); emit({ type: 'status', data: { state: 'compaction', phase: 'start', proactive: true } });
+          await options.compactGate; emit({ type: 'status', data: { state: 'compaction', phase: 'completed', proactive: true } });
+          return 'completed' as const;
+        } } : {}),
         send: async prompt => {
           try { send(prompt); } catch (error) { emit({ type: 'error', data: { message: String(error) } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
           currentCancelled = false;
@@ -147,7 +152,7 @@ async function harness(kind: 'normal' | 'ask' | 'permission' = 'normal', options
       return mapping.externalId === 'om_task' && saved.state === 'completed' && saved.final_delivery_state === 'delivered';
     })).toBe(true));
   };
-  return { repos, runtime, broker, config, coordinator, createCoordinator, groupManager, service, cards, files, log, send, resolvePermission, interactions, completed };
+  return { repos, runtime, broker, config, coordinator, createCoordinator, groupManager, service, cards, files, log, send, compact, resolvePermission, interactions, completed };
 }
 
 async function seedLegacyResult(h: Awaited<ReturnType<typeof harness>>) {
@@ -165,6 +170,26 @@ async function seedLegacyResult(h: Awaited<ReturnType<typeof harness>>) {
 }
 
 describe('Feishu workflows through coordinator, Runtime and persistent storage', () => {
+  it('updates the running card while compact is still held and clears the label before the real result', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-01T00:00:00Z'));
+    let release!: () => void;
+    const gate = new Promise<void>(done => { release = done; });
+    const h = await harness('normal', { compactGate: gate });
+    try {
+      await h.coordinator.handle(event('om_task', 'first request'), h.config);
+      await h.completed();
+      vi.setSystemTime(new Date('2026-10-02T01:00:00Z'));
+      await h.coordinator.handle(event('om_after_idle', 'second request'), { ...h.config, compactTrace: true });
+      await vi.waitFor(() => expect(h.compact).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(h.service.update.mock.calls.some(([input]) => input.state === 'running' && input.statusLabel === '正在压缩历史上下文')).toBe(true));
+      expect(h.send).toHaveBeenCalledTimes(1);
+      release();
+      await vi.waitFor(() => expect(h.send).toHaveBeenCalledTimes(2));
+      await vi.waitFor(() => expect([...h.cards.values()].some(card => card.taskName === 'second request' && card.state === 'completed' && card.statusLabel !== '正在压缩历史上下文')).toBe(true));
+      expect(await h.runtime.listSessions()).toHaveLength(1);
+    } finally { release(); vi.useRealTimers(); }
+  });
   it('delivers a complete oversized file and summary without imposing feedback, then continues in the same session', async () => {
     const answer = `开头\n${'完整结果🙂'.repeat(5000)}\n末尾`;
     const h = await harness('normal', { answerChunks: [answer] });

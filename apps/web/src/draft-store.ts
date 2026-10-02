@@ -36,6 +36,8 @@ export type BotDraft = {
   defaultModel: string;
   defaultReasoningEffort: string;
   p2pMode: 'chat' | 'thread';
+  idleCompactEnabled: boolean;
+  idleCompactHours: string;
   groupReplyMode: '' | 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   mentionPolicy: 'always' | 'topic' | 'never' | 'ambient';
   defaultGroupParticipation: 'off' | 'observe' | 'selective';

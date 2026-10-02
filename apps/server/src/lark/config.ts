@@ -46,6 +46,8 @@ export interface StoredLarkConfig {
    * 缺省（旧配置无此字段）由 runtime 按 'chat' 处理。
    */
   p2pMode?: 'chat' | 'thread';
+  idleCompactEnabled?: boolean;
+  idleCompactHours?: number;
   /**
    * 普通群回复模式：'chat'/'shared' 全群一个会话；'new-topic' 每条顶层 @ 一个话题；
    * 'chat-topic' 顶层平铺、群内原生话题各自独立。缺省由 runtime 决定，不在此落默认值。
@@ -169,6 +171,8 @@ export interface SaveLarkConfigInput {
   permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
   /** 私聊路由模式：'chat' 整段 DM 一个会话；'thread' 每条顶层 DM 一个新话题。非法值归一化时丢弃。 */
   p2pMode?: 'chat' | 'thread';
+  idleCompactEnabled?: boolean;
+  idleCompactHours?: number;
   /** 普通群回复模式：'chat'/'shared' 全群一个会话；'new-topic' 每条顶层 @ 一个话题；'chat-topic' 顶层平铺、群内原生话题各自独立。非法值归一化时丢弃。 */
   groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   /** Legacy stored environment accepted for import compatibility; never returned publicly. */
@@ -257,6 +261,8 @@ export interface PublicLarkConfig {
   fullTrustConfirmed: boolean;
   permissionMode?: 'ask' | 'approve-reads' | 'full-trust';
   p2pMode?: 'chat' | 'thread';
+  idleCompactEnabled?: boolean;
+  idleCompactHours?: number;
   groupReplyMode?: 'chat' | 'shared' | 'new-topic' | 'chat-topic';
   brand?: 'feishu' | 'lark';
   displayName?: string;
@@ -310,6 +316,7 @@ export interface PublicLarkConfigCollection {
 
 export const defaultLarkPushIntervalMs = 1_000;
 export const defaultLarkTraceLimit = 50;
+export const defaultLarkIdleCompactHours = 24;
 export const defaultHighRiskPattern = String.raw`(?:^|[\s;&|])(?:sudo|rm|shred|dd|mkfs|diskutil|launchctl|kill|pkill|lark-?cli|larkcli|bits-?cli|bitscli|bytedcli|ssh|scp|rsync|osascript)\b|\bgit\s+(?:push|reset|clean|checkout)\b|\b(?:npm|pnpm|yarn)\s+(?:publish|unpublish)\b|\bcurl\b[^\n]*(?:-X|--request)\s*(?:POST|PUT|PATCH|DELETE)\b`;
 
 const normalizeEmails = (value: unknown) => [...new Set((Array.isArray(value) ? value : [])
@@ -538,6 +545,8 @@ function normalizeStoredConfig(parsed: Partial<StoredLarkConfig> & LegacyRiskCon
     ...(parsed.permissionMode === 'ask' || parsed.permissionMode === 'approve-reads' ? { permissionMode: parsed.permissionMode }
       : parsed.fullTrustConfirmed === true ? {} : { permissionMode: parsed.permissionMode === 'full-trust' ? 'full-trust' as const : 'approve-reads' as const }),
     ...(p2pMode ? { p2pMode } : {}),
+    idleCompactEnabled: parsed.idleCompactEnabled !== false,
+    idleCompactHours: Number.isSafeInteger(parsed.idleCompactHours) && Number(parsed.idleCompactHours) >= 1 ? parsed.idleCompactHours : defaultLarkIdleCompactHours,
     ...(groupReplyMode ? { groupReplyMode } : {}),
     ...(env ? { env } : {}),
     ...(startupCommands ? { startupCommands } : {}),
@@ -636,6 +645,8 @@ export const publicLarkConfig = (config: StoredLarkConfig, activeAppIds: Readonl
   fullTrustConfirmed: config.fullTrustConfirmed === true,
   permissionMode: larkPermissionMode(config),
   ...(config.p2pMode ? { p2pMode: config.p2pMode } : {}),
+  idleCompactEnabled: config.idleCompactEnabled !== false,
+  idleCompactHours: config.idleCompactHours ?? defaultLarkIdleCompactHours,
   ...(config.groupReplyMode ? { groupReplyMode: config.groupReplyMode } : {}),
   ...(config.brand ? { brand: config.brand } : {}),
   ...(config.displayName ? { displayName: config.displayName } : {}),
@@ -712,6 +723,12 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
   }
   if (input.executionMode !== undefined && !['single', 'layered'].includes(input.executionMode)) {
     throw new LarkServiceError('INVALID_LARK_CONFIG', '执行方式无效。', 400);
+  }
+  if (input.idleCompactEnabled !== undefined && typeof input.idleCompactEnabled !== 'boolean') {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '空闲后自动压缩上下文开关必须为布尔值。', 400);
+  }
+  if (input.idleCompactHours !== undefined && (!Number.isSafeInteger(input.idleCompactHours) || input.idleCompactHours < 1)) {
+    throw new LarkServiceError('INVALID_LARK_CONFIG', '空闲时长必须是至少 1 小时的整数。', 400);
   }
   const appId = input.appId?.trim() || current?.appId;
   const appSecret = input.appSecret?.trim() || current?.appSecret;
@@ -828,6 +845,8 @@ async function saveLarkConfigUnlocked(repository: ConfigRepository | undefined, 
     ...(startupCommands ? { startupCommands } : {}),
     ...(brand ? { brand } : {}),
     ...(displayName ? { displayName } : {}),
+    idleCompactEnabled: input.idleCompactEnabled ?? current?.idleCompactEnabled ?? true,
+    idleCompactHours: input.idleCompactHours ?? current?.idleCompactHours ?? defaultLarkIdleCompactHours,
     preInjectPrompt,
     listening,
     groupToolsEnabled,

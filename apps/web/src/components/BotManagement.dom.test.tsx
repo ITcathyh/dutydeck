@@ -853,3 +853,88 @@ it('keeps optional model overrides collapsed and empty when saving unrelated cha
   await user.click(screen.getByRole('button', { name: '保存配置' }));
   await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ decisionAgentId: '', decisionModel: '', responseAgentId: '', responseModel: '' })));
 });
+
+describe('idle context compaction configuration', () => {
+  function renderBot() {
+    return renderWithClient(<BotManagement selectedAppId="cli_test_1" onSelectBot={() => {}} onOpenLarkSetup={() => {}} onSelectGroup={() => {}} agents={mockAgents} />);
+  }
+
+  function mockQueries(bot: LarkBotConfig = mockBot) {
+    vi.spyOn(api, 'larkConfig').mockResolvedValue({ configured: true, bots: [bot], listeningDisabled: false });
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(api, 'agentModels').mockResolvedValue({ models: [], reasoningEfforts: [] });
+  }
+
+  it('defaults on, saves disabled/custom hours, and restores saved settings after reopening', async () => {
+    const user = userEvent.setup();
+    let savedBot = { ...mockBot };
+    mockQueries();
+    vi.mocked(api.larkConfig).mockImplementation(async () => ({ configured: true, bots: [savedBot], listeningDisabled: false }));
+    const save = vi.spyOn(api, 'saveLarkConfig').mockImplementation(async input => {
+      savedBot = { ...savedBot, revision: savedBot.revision! + 1, idleCompactEnabled: input.idleCompactEnabled, idleCompactHours: input.idleCompactHours };
+      return { configured: true, bots: [savedBot], listeningDisabled: false };
+    });
+    let view = renderBot();
+    const toggle = await screen.findByRole('checkbox', { name: '空闲后自动压缩上下文' });
+    expect((toggle as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('spinbutton', { name: '空闲时长（小时）' }) as HTMLInputElement).value).toBe('24');
+    expect(screen.getByText(/下次收到消息时先压缩历史上下文/)).toBeTruthy();
+    await user.click(toggle);
+    await user.clear(screen.getByRole('spinbutton', { name: '空闲时长（小时）' }));
+    await user.type(screen.getByRole('spinbutton', { name: '空闲时长（小时）' }), '48');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenCalledWith(expect.objectContaining({ idleCompactEnabled: false, idleCompactHours: 48, expectedRevision: 3 })));
+    await waitFor(() => expect(screen.queryByText(/有未保存的修改/)).toBeNull());
+    view.unmount();
+    view = renderBot();
+    expect((await screen.findByRole('checkbox', { name: '空闲后自动压缩上下文' }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole('spinbutton', { name: '空闲时长（小时）' }) as HTMLInputElement).value).toBe('48');
+    await user.click(screen.getByRole('checkbox', { name: '空闲后自动压缩上下文' }));
+    await user.clear(screen.getByRole('spinbutton', { name: '空闲时长（小时）' }));
+    await user.type(screen.getByRole('spinbutton', { name: '空闲时长（小时）' }), '1');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(save).toHaveBeenLastCalledWith(expect.objectContaining({ idleCompactEnabled: true, idleCompactHours: 1, expectedRevision: 4 })));
+    await waitFor(() => expect(screen.queryByText(/有未保存的修改/)).toBeNull());
+    view.unmount();
+    renderBot();
+    expect((await screen.findByRole('checkbox', { name: '空闲后自动压缩上下文' }) as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole('spinbutton', { name: '空闲时长（小时）' }) as HTMLInputElement).value).toBe('1');
+  });
+
+  it('keeps invalid hours in the draft across reopening and blocks save until corrected', async () => {
+    const user = userEvent.setup();
+    mockQueries();
+    const save = vi.spyOn(api, 'saveLarkConfig');
+    const view = renderBot();
+    const hours = await screen.findByRole('spinbutton', { name: '空闲时长（小时）' });
+    for (const value of ['', '0', '1.5', '-1']) {
+      await user.clear(hours);
+      if (value) await user.type(hours, value);
+      expect(hours.getAttribute('aria-invalid')).toBe('true');
+      expect(screen.getByText('请输入至少 1 小时的整数。').getAttribute('role')).toBe('alert');
+      expect((screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement).disabled).toBe(true);
+    }
+    view.unmount();
+    renderBot();
+    expect((await screen.findByRole('spinbutton', { name: '空闲时长（小时）' }) as HTMLInputElement).value).toBe('-1');
+    expect((screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement).disabled).toBe(true);
+    expect(save).not.toHaveBeenCalled();
+    await user.clear(screen.getByRole('spinbutton', { name: '空闲时长（小时）' }));
+    await user.type(screen.getByRole('spinbutton', { name: '空闲时长（小时）' }), '12');
+    expect((screen.getByRole('button', { name: '保存配置' }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('retains compaction edits after a revision conflict', async () => {
+    const user = userEvent.setup();
+    mockQueries();
+    vi.spyOn(api, 'saveLarkConfig').mockRejectedValue(new ApiError('版本冲突', 'LARK_CONFIG_REVISION_CONFLICT', 409));
+    renderBot();
+    await user.click(await screen.findByRole('checkbox', { name: '空闲后自动压缩上下文' }));
+    await user.clear(screen.getByRole('spinbutton', { name: '空闲时长（小时）' }));
+    await user.type(screen.getByRole('spinbutton', { name: '空闲时长（小时）' }), '72');
+    await user.click(screen.getByRole('button', { name: '保存配置' }));
+    await waitFor(() => expect(screen.getByText(/版本冲突/)).toBeTruthy());
+    expect((screen.getByRole('checkbox', { name: '空闲后自动压缩上下文' }) as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole('spinbutton', { name: '空闲时长（小时）' }) as HTMLInputElement).value).toBe('72');
+  });
+});
