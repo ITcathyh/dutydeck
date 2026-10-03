@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "frozenConfig": {
+    "model": "local-fixture",
+    "protocol": "mock"
+  },
+  "repetitions": 1,
+  "runners": {
+    "legacy": [
+      "node",
+      "--import",
+      "./../../../node_modules/tsx/dist/loader.mjs",
+      "./local-runner.mts"
+    ],
+    "optimized": [
+      "node",
+      "--import",
+      "./../../../node_modules/tsx/dist/loader.mjs",
+      "./local-runner.mts"
+    ]
+  },
+  "cases": [
+    {
+      "id": "exact-retrieval",
+      "type": "retrieval",
+      "input": {
+        "messageId": "m1",
+        "requiredWord": "confirmed"
+      },
+      "toolData": {
+        "messages": [
+          {
+            "id": "m1",
+            "text": "ship on Friday"
+          },
+          {
+            "id": "m2",
+            "text": "other message"
+          }
+        ]
+      },
+      "checks": [
+        {
+          "kind": "exact",
+          "path": [
+            "fact"
+          ],
+          "value": "ship on Friday"
+        },
+        {
+          "kind": "exact",
+          "path": [
+            "requiredWord"
+          ],
+          "value": "confirmed"
+        }
+      ]
+    }
+  ]
+}

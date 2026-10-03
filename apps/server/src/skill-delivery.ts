@@ -2,7 +2,8 @@ import { open, realpath, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
-import { RuntimeError } from '@dutydeck/shared';
+import { RuntimeError, type PromptPart } from '@dutydeck/shared';
+import { assemblePrompt } from './prompt-context.js';
 import { discoverSkills, isPathInside, skillRoots, type SkillReference } from './skill-catalog.js';
 
 export interface SkillDelivery {
@@ -16,10 +17,14 @@ export interface SkillDelivery {
 export interface PrepareSkillPromptResult {
   agentPrompt: string;
   skillDeliveries: SkillDelivery[];
+  promptParts?: PromptPart[];
+  promptDiagnostics?: import('@dutydeck/shared').PromptSourceDiagnostics;
 }
 
 export interface PrepareSkillPromptOptions {
   homeDirectory?: string;
+  promptPolicyVersion?: 'legacy-v1' | 'optimized-v1';
+  promptParts?: PromptPart[];
 }
 
 export interface ParsedLeadingDirectives {
@@ -95,6 +100,7 @@ export async function prepareSkillPrompt(
     return {
       agentPrompt: rawPrompt,
       skillDeliveries: [],
+      ...(options?.promptParts ? { promptParts: options.promptParts, promptDiagnostics: assemblePrompt(options.promptParts, rawPrompt, options.promptPolicyVersion).diagnostics } : {}),
     };
   }
 
@@ -168,6 +174,7 @@ export async function prepareSkillPrompt(
     return {
       agentPrompt: rawPrompt,
       skillDeliveries: [],
+      ...(options?.promptParts ? { promptParts: options.promptParts, promptDiagnostics: assemblePrompt(options.promptParts, rawPrompt, options.promptPolicyVersion).diagnostics } : {}),
     };
   }
 
@@ -285,8 +292,16 @@ export async function prepareSkillPrompt(
     ? `${skillBlocks}\n\n---\n\n${promptBody}`
     : skillBlocks;
 
-  return {
-    agentPrompt,
-    skillDeliveries,
-  };
+  const promptParts: PromptPart[] = loadedSkills.map((skill, index) => ({
+    kind: 'skill', sourceId: skill.path, digest: skillDeliveries[index]!.digest, trustScope: 'explicit_skill', complete: true,
+    content: skill.content, prefix: `${index ? '\n\n' : ''}# Skill: ${skill.name}\nPath: ${skill.path}\n\n`
+  }));
+  if (promptBody) {
+    // Leading directives/trim can change the caller's source layout; retain unknown user text intact.
+    const original = options?.promptParts?.map(part => `${part.prefix ?? ''}${part.content}${part.suffix ?? ''}`).join('');
+    const userParts = original === promptBody ? options!.promptParts! : [{ kind: 'user_request' as const, content: promptBody, trustScope: 'user_request' }];
+    promptParts.push(...userParts.map((part, index) => ({ ...part, prefix: `${index === 0 ? '\n\n---\n\n' : ''}${part.prefix ?? ''}` })));
+  }
+  const assembled = assemblePrompt(promptParts, agentPrompt, options?.promptPolicyVersion);
+  return { agentPrompt, skillDeliveries, promptParts, promptDiagnostics: { ...assembled.diagnostics, afterChars: agentPrompt.length, deduplicatedParts: 0 } };
 }

@@ -86,6 +86,8 @@ export interface UsageLedgerRepository {
   hasUsageRef(sessionId: string, usageRef: string): Promise<boolean>;
   /** 上一次记下的会话累计成本；账本里没有时取事件表里其他轮次最后一次上报的累计成本。 */
   lastCumulativeCost(sessionId: string, excludeAttemptId?: string): Promise<number | undefined>;
+  /** Read-only entries for authorized offline analysis; does not change billing aggregation. */
+  listEntries(filter: UsageFilter, taskIds?: string[]): Promise<UsageLedgerEntry[]>;
   totals(filter: UsageFilter): Promise<UsageTotals>;
   summarize(dimension: UsageDimension, filter: UsageFilter): Promise<UsageGroup[]>;
   listCaps(): Promise<UsageCap[]>;

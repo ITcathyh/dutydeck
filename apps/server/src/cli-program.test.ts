@@ -389,3 +389,11 @@ it('parses group messages with since, until, and query options', async () => {
     query: 'urgent bug'
   }));
 });
+
+it('parses history verbatim ranges and continuation cursor', async () => {
+  const historyShow = vi.fn();
+  await createCliProgram('0.0.6', { historyShow }).parseAsync(['node', 'dutydeck', 'history', 'show', 'task_1', '--field', 'request', '--offset', '0', '--length', '5']);
+  expect(historyShow).toHaveBeenCalledWith('task_1', { field: 'request', offset: '0', length: '5' });
+  await createCliProgram('0.0.6', { historyShow }).parseAsync(['node', 'dutydeck', 'history', 'show', 'task_1', '--cursor', 'next']);
+  expect(historyShow).toHaveBeenLastCalledWith('task_1', { cursor: 'next' });
+});

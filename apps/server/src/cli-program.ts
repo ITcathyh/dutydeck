@@ -84,6 +84,8 @@ export interface LarkCreateCliOptions {
   forceLogin?: boolean;
 }
 
+export interface HistoryShowCliOptions { field?: string; offset?: string; length?: string; cursor?: string }
+
 export interface AgentGroupCliOptions {
   final?: boolean;
   turn?: string;
@@ -224,7 +226,7 @@ export interface CliHandlers {
   groupWait?(options: AgentGroupCliOptions): void | Promise<void>;
   groupTeamSearch?(query: string): void | Promise<void>;
   historyList?(options: AgentGroupCliOptions): void | Promise<void>;
-  historyShow?(taskId: string): void | Promise<void>;
+  historyShow?(taskId: string, options?: HistoryShowCliOptions): void | Promise<void>;
   memoryList?(options?: { topic?: string }): void | Promise<void>;
   memoryShow?(topic: string): void | Promise<void>;
   memorySearch?(query: string, options?: { topic?: string; limit?: string }): void | Promise<void>;
@@ -613,7 +615,11 @@ Routing guidance:
   history.command('show')
     .description('Show the request and final answer of an earlier task in this chat')
     .argument('<task-id>', 'Task id returned by history list')
-    .action(taskId => handlers.historyShow?.(taskId));
+    .option('--field <field>', 'Read saved request or answer verbatim (request|answer)')
+    .option('--offset <units>', 'UTF-16 offset; surrogate pairs are kept intact')
+    .option('--length <units>', 'Page length in UTF-16 units (1-8000, default 4000)')
+    .option('--cursor <cursor>', 'Continue a version-bound page; exclusive with field/offset/length')
+    .action((taskId, options) => Object.keys(options).length ? handlers.historyShow?.(taskId, options) : handlers.historyShow?.(taskId));
 
   // 会话记忆：与 group 同一套 capability，但对私聊和关闭群协作的机器人同样可用。
   program.command('collaborate <operation> [id]').addHelpText('after', collaborationHelp('dutydeck collaborate')).description('Manage generic group follow-ups and ongoing mandates')

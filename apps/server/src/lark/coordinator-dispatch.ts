@@ -1,3 +1,5 @@
+import type { PromptPart } from '@dutydeck/shared';
+import { promptDigest } from '../prompt-context.js';
 import { readGitStatusLine } from './git-status.js';
 import { redactTraceText } from './secret-redaction.js';
 import { setTimeout as retryDelay } from 'node:timers/promises';
@@ -870,6 +872,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     cardContext.workspace = session.cwd;
     await this.groupManager?.recordRun(session, config, event, task.scopeId);
     let materialPrompt = task.retryMaterialPrompt ?? prompt;
+    let materialParts: PromptPart[] | undefined;
     let contextCommit: (() => Promise<void>) | undefined;
     if (this.workflowOptions.store && !resumeTask) {
       const contextKey = `lark.context.${config.appId}.${session.id}`;
@@ -889,11 +892,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           for (const sourceId of new Set(context.resources.map(resource => resource.sourceMessageId))) {
             materialPrompt = await materializeLarkResources(sourceId, materialPrompt, context.resources.filter(resource => resource.sourceMessageId === sourceId), this.service);
           }
-          snapshot = { prompt: materialPrompt, cursor: context.cursor, readMessageIds: context.readMessageIds, contextBefore: raw };
+          snapshot = { prompt: materialPrompt, ...(materialPrompt === context.agentPrompt ? { promptParts: context.promptParts } : {}), cursor: context.cursor, readMessageIds: context.readMessageIds, contextBefore: raw };
         }
         if (task.inbox) await this.inbox!.update(task.inbox, { sessionId: session.id, materials: snapshot });
       }
       materialPrompt = snapshot!.prompt;
+      materialParts = snapshot!.promptParts;
       const acceptedSnapshot = snapshot!;
       contextCommit = async () => {
         const next = JSON.stringify({ cursor: acceptedSnapshot.cursor, readMessageIds: acceptedSnapshot.readMessageIds });
@@ -1360,6 +1364,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       await update(state);
     };
     const injected: string[] = [];
+    const knownParts = new Map<string, PromptPart[]>();
     injected.push(`[Dutydeck 机器人身份]
 - 机器人名称：${config.name ?? config.appId}
 - App ID：${config.appId}${session.cwd ? `\n- 工作区：${session.cwd}` : ''}`);
@@ -1383,6 +1388,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
         const observedContext = await withLarkContextReadTimeout(this.workflowOptions.participation.taskContext({ appId: config.appId, chatId: event.chatId }, { triggerMessageId: event.messageId, watermark, groupTools: config.groupToolsEnabled }), '群上下文读取');
         if (observedContext) {
           injected.push(observedContext.text);
+          if (observedContext.promptParts) knownParts.set(observedContext.text, observedContext.promptParts);
           // 排队的几轮都基于同一个旧水位；后完成的一轮 CAS 失败时读出当前值合并再写，最多 3 次，仍冲突就留日志。
           if (store?.compareAndSet) groupContextCommit = async () => {
             let expected = watermark;
@@ -1497,6 +1503,15 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     if (riskControlEnabled && !highRiskAuthorized) injected.push(`[Dutydeck 安全策略 · 自动注入]\n当前飞书发送人不在高危操作允许名单中。禁止执行匹配以下正则的操作，也不要通过脚本、子进程、MCP 或其他等价方式绕过：\n${highRiskPattern}\n如果用户要求此类操作，请明确说明已被 Dutydeck 安全策略阻止。`);
     if (task.redispatch) injected.push(larkRedispatchAgentNote(task.redispatch));
     const agentPrompt = injected.length ? `${injected.join('\n\n')}\n\n[用户请求]\n${materialPrompt}` : materialPrompt;
+    const promptParts: PromptPart[] = injected.flatMap((content, index) => {
+      const parts = knownParts.get(content) ?? [{ kind: content.startsWith('[Dutydeck 群长期指令') || content.startsWith('[Dutydeck 预注入 Prompt') || content.startsWith('[Dutydeck 安全策略') ? 'host_rules' as const
+        : content.startsWith('[Dutydeck 会话记忆') ? 'memory' as const : 'dynamic_context' as const,
+        sourceId: `lark:${config.appId}:${event.chatId}:injection:${index}`, digest: promptDigest(content), trustScope: 'host', content }];
+      return parts.map((part, partIndex) => ({ ...part, prefix: `${partIndex === 0 && index ? '\n\n' : ''}${part.prefix ?? ''}` }));
+    });
+    const preparedMaterials = materialParts ?? [{ kind: 'user_request' as const, content: materialPrompt, trustScope: 'user_request' }];
+    promptParts.push(...preparedMaterials.map((part, index) => ({ ...part, prefix: `${index === 0 && injected.length ? '\n\n[用户请求]\n' : ''}${part.prefix ?? ''}` })));
+
 
     if (this.stopped || task.turn !== currentTurn || await closeSupersededPreparedTurn()) return;
 
@@ -1635,7 +1650,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           : await this.runtime.dispatch(session.id, prompt, 'queue', agentPrompt, riskPolicy,
             task.inbox || config.managedGroup ? event.senderOpenId : undefined,
             task.inbox ? `lark:${config.appId}:${event.messageId}:${currentTurn}` : undefined, undefined, undefined,
-            config.idleCompactEnabled !== false ? config.idleCompactHours ?? defaultLarkIdleCompactHours : undefined);
+            config.idleCompactEnabled !== false ? config.idleCompactHours ?? defaultLarkIdleCompactHours : undefined, promptParts);
         runtimeTaskId = runtimeTask.id;
         // 重连或按幂等键重放的是早先派发的那条 prompt，本轮新读的群上下文没有交给 Agent。
         if (runtimeTask.replayed) groupContextCommit = undefined;

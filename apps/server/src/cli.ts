@@ -425,7 +425,7 @@ async function main() {
     groupWait: async options => { output(await runGroupWait(options)); },
     groupTeamSearch: async query => { output(await runGroupTeamSearch(query)); },
     historyList: async options => { output(await runHistoryList(options)); },
-    historyShow: async taskId => { output(await runHistoryShow(taskId)); },
+    historyShow: async (taskId, options) => { output(await runHistoryShow(taskId, {}, options)); },
     memoryList: async options => { output(await runMemoryList(options)); },
     memoryShow: async topic => { output(await runMemoryShow(topic)); },
     memorySearch: async (query, options) => {

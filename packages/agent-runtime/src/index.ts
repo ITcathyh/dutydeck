@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
-import type { AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
+import type { AgentCapabilities, AgentConfig, AgentDriver, AgentEvent, DriverFactory, EventType, EventWindowOptions, NormalizedDriverEvent, PermissionMode, PermissionRequestData, PromptAssemblyData, PromptPart, PromptSourceDiagnostics, PublicTaskRecord, RepositoryBundle, RuntimeControlClaim, Session, SkillDeliveryMetadata, StartSessionInput, TaskExecutionContext, TaskRecord, ToolCallData, ToolRiskPolicy, VerificationCommandInput, VerificationResponse, WorkspaceCleanupBlocker, WorkspaceCleanupPreview, WorkspaceCleanupResult, WorkspaceResponse } from '@dutydeck/shared';
 import { canonicalExecutionJson, ptyRetirementRecoverySchema, steeringRecoveryDecisionSchema, executionRecoveryDecisionSchema, executionActorSchema, taskRequestV1Schema, steerableTaskNamespace, makeId, now, RuntimeError, workspaceModes, sessionNameConfigKey, normalizeSessionName } from '@dutydeck/shared';
 import { AcpxAdapter, ProcessTreeCpu, readNativeCreationRecord } from '@dutydeck/acp-client';
 import { JsonlTransport, PipeTransport, probeAgent, PtyTransport, type ProbeMatrix } from '@dutydeck/transports';
@@ -99,11 +99,14 @@ export interface RuntimeOptions {
   driverIdleTimeoutMs?: number;
   cleanupIntervalMs?: number;
   sessionEnvironment?: (session: Session) => Record<string, string>;
-  sessionPrompt?: (session: Session, prompt: string) => string | Promise<string>;
+  selectPromptPolicy?: (session: Session, request: TaskRequestV1) => Promise<{ version: 'legacy-v1' | 'optimized-v1'; diagnosticReason?: string }>;
+  sessionPrompt?: (session: Session, prompt: string, context?: TaskExecutionContext) => string | { prompt: string; diagnostics?: PromptSourceDiagnostics } | Promise<string | { prompt: string; diagnostics?: PromptSourceDiagnostics }>;
   workspaceRoot?: string;
-  prepareTaskPrompt?: (session: Session, prompt: string, skillRequests?: string[]) => Promise<{
+  prepareTaskPrompt?: (session: Session, prompt: string, skillRequests?: string[], context?: Pick<TaskExecutionContext, 'promptPolicyVersion' | 'promptParts'>) => Promise<{
     agentPrompt: string;
     skillDeliveries?: SkillDeliveryMetadata[];
+    promptParts?: PromptPart[];
+    promptDiagnostics?: PromptSourceDiagnostics;
   }>;
   /** Diagnostics only, e.g. a steering reply that arrives after its timeout. */
   log?: { warn(data: Record<string, unknown>, message: string): void };
@@ -1350,11 +1353,11 @@ export class DutydeckRuntime {
     };
   }
 
-  private async prepareTask(session: Session, agentPrompt: string, skillRequests?: string[]): Promise<{ agentPrompt: string; skillDeliveries?: SkillDeliveryMetadata[] }> {
+  private async prepareTask(session: Session, agentPrompt: string, skillRequests?: string[], context?: Pick<TaskExecutionContext, 'promptPolicyVersion' | 'promptParts'>): Promise<{ agentPrompt: string; skillDeliveries?: SkillDeliveryMetadata[]; promptParts?: PromptPart[]; promptDiagnostics?: PromptSourceDiagnostics }> {
     if (skillRequests?.length && !this.options.prepareTaskPrompt) {
       throw new RuntimeError('SKILL_DELIVERY_UNAVAILABLE', 'This Runtime has no Skill delivery resolver', 503);
     }
-    return this.options.prepareTaskPrompt?.(session, agentPrompt, skillRequests) ?? { agentPrompt };
+    return this.options.prepareTaskPrompt?.(session, agentPrompt, skillRequests, context) ?? { agentPrompt, ...(context?.promptParts ? { promptParts: context.promptParts } : {}) };
   }
 
   subscribe(sessionId: string, listener: EventListener, options?: SubscribeOptions) {
@@ -1565,6 +1568,48 @@ export class DutydeckRuntime {
     try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
   }
 
+  private sessionCapability(agent: AgentConfig, input: StartSessionInput) {
+    const configured = { ...agent, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
+    return { configured, capability: (this.options.probe ?? probeAgent)(configured, this.options.acpxCommand) };
+  }
+
+  /** Resolve auto transport before the memory job freezes its permission posture. */
+  async resolveMemorySessionInput(input: StartSessionInput): Promise<StartSessionInput & { protocol: AgentCapabilities['protocol'] }> {
+    this.assertReady();
+    if (input.source !== 'lark-memory' || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '')) throw new RuntimeError('INVALID_MEMORY_SESSION', 'Invalid memory session scope', 400);
+    const agent = await this.repos.agents.get(input.agentId);
+    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Memory Agent not found', 404);
+    const { configured, capability } = this.sessionCapability(agent, input);
+    if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
+    if (capability.protocol === 'pty') throw new RuntimeError('MEMORY_AGENT_UNSUPPORTED', 'Legacy PTY cannot enforce memory permissions', 422);
+    return { ...input, protocol: capability.protocol, cwd: configured.cwd, model: configured.model, reasoningEffort: configured.reasoningEffort, permissionMode: capability.protocol === 'pty-cli' ? 'ask' : 'deny-all' };
+  }
+
+  async startMemorySession(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session> {
+    this.assertReady();
+    if (input.source !== 'lark-memory' || !/^[A-Za-z0-9_-]+:[A-Za-z0-9_-]+:memory$/.test(input.sourceId ?? '') || !/^ses_memory_[a-f0-9]{64}$/.test(stableSessionId) || input.workspaceMode === 'worktree') {
+      throw new RuntimeError('INVALID_MEMORY_SESSION', 'Memory sessions require a stable authorized Lark group scope and shared workspace', 400);
+    }
+    await beforeStart();
+    const pending = this.backgroundStarts.get(stableSessionId);
+    if (pending) { await pending; return this.startMemorySession(input, stableSessionId, beforeStart); }
+    const agent = await this.repos.agents.get(input.agentId);
+    if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', 'Memory Agent not found', 404);
+    const existing = await this.repos.sessions.get(stableSessionId);
+    if (existing) {
+      const { capability } = this.sessionCapability(agent, input);
+      const expected = { protocol: capability.protocol, workspaceMode: input.workspaceMode ?? 'shared', source: input.source, sourceId: input.sourceId, agentId: input.agentId, cwd: input.cwd ?? agent.cwd ?? process.cwd(), model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode, systemPrompt: agent.systemPrompt };
+      if (Object.entries(expected).some(([key, value]) => ((key === 'workspaceMode' ? existing.workspaceMode ?? 'shared' : existing[key as keyof Session]) ?? undefined) !== (value ?? undefined))) throw new RuntimeError('MEMORY_SESSION_CONFLICT', 'Memory session immutable configuration changed', 409);
+      return existing;
+    }
+    // Recheck after the asynchronous reads before reserving the stable identity.
+    const raced = this.backgroundStarts.get(stableSessionId);
+    if (raced) { await raced; return this.startMemorySession(input, stableSessionId, beforeStart); }
+    const start = this.startSession(input, { id: stableSessionId, beforeStart });
+    this.backgroundStarts.set(stableSessionId, start);
+    try { return await start; } finally { if (this.backgroundStarts.get(stableSessionId) === start) this.backgroundStarts.delete(stableSessionId); }
+  }
+
   /** A persisted stopped flag alone is not evidence that a previous process stopped. */
   async stopWorkItemSession(sessionId: string, actor: ExecutionActor): Promise<boolean> {
     this.assertReady();
@@ -1634,8 +1679,7 @@ export class DutydeckRuntime {
     if (!agent) throw new RuntimeError('AGENT_NOT_FOUND', `Unknown agent: ${input.agentId}`, 404);
     const sourceCwd = input.cwd ?? agent.cwd ?? process.cwd();
     const workspaceMode = input.workspaceMode ?? 'shared';
-    const initialConfigured = { ...agent, cwd: sourceCwd, model: input.model ?? agent.model, reasoningEffort: input.reasoningEffort ?? agent.reasoningEffort, permissionMode: input.permissionMode ?? agent.permissionMode };
-    const capability = (this.options.probe ?? probeAgent)(initialConfigured, this.options.acpxCommand);
+    const { configured: initialConfigured, capability } = this.sessionCapability(agent, input);
     if (!capability.available) throw new RuntimeError('AGENT_UNAVAILABLE', capability.detail ?? 'Agent unavailable', 503);
     if (capability.protocol === 'pty') {
       throw new RuntimeError('PERMISSION_MODE_UNSUPPORTED', 'Legacy PTY transport cannot enforce a permission posture or expose interactive approval; use an ACP or PTY CLI Agent', 422);
@@ -1942,13 +1986,13 @@ export class DutydeckRuntime {
     return existing;
   }
   private permissionsForSession(id: string) { return [...this.permissions.values()].filter(permission => permission.fence.sessionId === id); }
-  private async recordPrompt(sessionId: string, prompt: string, stage: 'accepted_input' | 'session_context', mode: 'send' | 'steer', inputTaskId: string, operationId?: string) {
+  private async recordPrompt(sessionId: string, prompt: string, stage: 'accepted_input' | 'session_context', mode: 'send' | 'steer', inputTaskId: string, operationId?: string, sources?: PromptSourceDiagnostics) {
     const data: PromptAssemblyData = {
       state: 'prompt_assembly', version: 1, stage,
       source: stage === 'accepted_input' ? 'execution_context.agent_prompt' : 'runtime.session_prompt',
       mode, phase: 'prepared', chars: prompt.length, charUnit: 'utf16_code_units',
       sha256: createHash('sha256').update(prompt, 'utf8').digest('hex'), inputTaskId,
-      ...(operationId ? { operationId } : {})
+      ...(operationId ? { operationId } : {}), ...(sources ? { sources } : {})
     };
     await this.emit(sessionId, 'status', data).catch(() => {});
   }
@@ -1963,9 +2007,10 @@ export class DutydeckRuntime {
       await this.mutations.wait(() => this.options.authorizeTask?.(session, task, 'prepare') ?? Promise.resolve());
       const driver = await this.configureTaskDriver(session, input.executionOptions);
       await this.applyRiskPolicy(session, driver, task.executionContext?.riskPolicy);
-      const prompt = await this.mutations.wait(() => Promise.resolve(this.options.sessionPrompt?.(session, input.executionContext.agentPrompt) ?? input.executionContext.agentPrompt));
-      await this.recordPrompt(id, input.executionContext.agentPrompt, 'accepted_input', 'send', task.id);
-      await this.recordPrompt(id, prompt, 'session_context', 'send', task.id);
+      const assembled = await this.mutations.wait(() => Promise.resolve(this.options.sessionPrompt?.(session, input.executionContext.agentPrompt, input.executionContext) ?? input.executionContext.agentPrompt));
+      const prompt = typeof assembled === 'string' ? assembled : assembled.prompt;
+      await this.recordPrompt(id, input.executionContext.agentPrompt, 'accepted_input', 'send', task.id, undefined, input.executionContext.promptDiagnostics);
+      await this.recordPrompt(id, prompt, 'session_context', 'send', task.id, undefined, typeof assembled === 'string' ? undefined : assembled.diagnostics);
       const compactHours = input.executionContext.idleCompactHours;
       const previousTasks = compactHours === undefined ? [] : await this.mutations.wait(() => this.repos.tasks.listBySession(id));
       const previousActivity = Math.max(...previousTasks.filter(item => item.id !== task.id && ['completed', 'interrupted', 'failed'].includes(item.status)).map(item => Date.parse(item.updatedAt)));
@@ -2084,12 +2129,12 @@ export class DutydeckRuntime {
     });
   }
 
-  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: TaskRequestV1, idleCompactHours?: number) {
+  async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: TaskRequestV1, idleCompactHours?: number, promptParts?: PromptPart[]) {
     this.assertReady();
       const stored = await this.repos.sessions.get(id);
       this.assertReady();
       if (!stored) throw new RuntimeError('SESSION_NOT_FOUND', 'Session is missing', 404);
-      const request: TaskRequestV1 = supplied ?? { version: 1, namespace: 'runtime', sessionId: id, key: idempotencyKey ?? makeId('request'), actor: this.actor(stored, actorId), prompt, mode, skills: skillRequests ?? [], options: {}, sources: [], sourcePayload: { agentPrompt, ...(riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(riskPolicy)) } : {}), skills: skillRequests ?? [], ...(idleCompactHours !== undefined ? { idleCompactHours } : {}) } };
+      const request: TaskRequestV1 = supplied ?? { version: 1, namespace: 'runtime', sessionId: id, key: idempotencyKey ?? makeId('request'), actor: this.actor(stored, actorId), prompt, mode, skills: skillRequests ?? [], options: {}, sources: [], sourcePayload: { agentPrompt, ...(riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(riskPolicy)) } : {}), skills: skillRequests ?? [], ...(idleCompactHours !== undefined ? { idleCompactHours } : {}), ...(promptParts ? { promptParts: JSON.parse(canonicalExecutionJson(promptParts)) } : {}) } };
       canonicalExecutionJson(request); taskRequestV1Schema.parse(request);
       const explicitActor = actorId ?? undefined;
       const requestActor = request.actor.kind === 'unspecified' ? undefined : request.actor.id;
@@ -2115,8 +2160,16 @@ export class DutydeckRuntime {
         ...((request.options.model ?? session.model ?? agent.model) !== undefined ? { model: request.options.model ?? session.model ?? agent.model } : {}),
         ...((request.options.reasoningEffort ?? session.reasoningEffort ?? agent.reasoningEffort) !== undefined ? { reasoningEffort: request.options.reasoningEffort ?? session.reasoningEffort ?? agent.reasoningEffort } : {}) };
       if (request.actor.kind === 'unspecified' && executionOptions.permissionMode === 'full-trust' && session.permissionMode !== 'full-trust') throw new RuntimeError('ACTOR_REQUIRED', 'An unspecified actor cannot enable full trust', 403);
-      const prepared = await this.mutations.wait(() => this.prepareTask(session, agentPrompt, skillRequests));
-      const content = { version: 2 as const, prompt, executionContext: this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries, idleCompactHours), contentSources: [], executionOptions };
+      const payload = request.sourcePayload as { promptPolicyVersion?: unknown; promptParts?: unknown };
+      const inherited = payload?.promptPolicyVersion;
+      if (inherited !== undefined && inherited !== 'legacy-v1' && inherited !== 'optimized-v1') throw new RuntimeError('PROMPT_POLICY_INVALID', 'Unsupported inherited prompt policy', 409);
+      const selected: { version: 'legacy-v1' | 'optimized-v1'; diagnosticReason?: string } = inherited ? { version: inherited } : await this.mutations.wait(() => this.options.selectPromptPolicy?.(session, request) ?? Promise.resolve({ version: 'legacy-v1' as const }));
+      const sources = promptParts ?? (Array.isArray(payload?.promptParts) ? payload.promptParts as PromptPart[] : undefined);
+      const prepared = await this.mutations.wait(() => this.prepareTask(session, agentPrompt, skillRequests, { promptPolicyVersion: selected.version, ...(sources ? { promptParts: sources } : {}) }));
+      const context: TaskExecutionContext = { ...this.executionContext(prepared.agentPrompt, riskPolicy, actorId, prepared.skillDeliveries, idleCompactHours), promptPolicyVersion: selected.version,
+        ...(prepared.promptParts ? { promptParts: prepared.promptParts } : {}), ...(prepared.promptDiagnostics ? { promptDiagnostics: { ...prepared.promptDiagnostics, ...(selected.diagnosticReason ? { fallbackReason: selected.diagnosticReason } : {}) } }
+          : selected.diagnosticReason ? { promptDiagnostics: { templateVersion: selected.version, beforeChars: prepared.agentPrompt.length, afterChars: prepared.agentPrompt.length, deduplicatedParts: 0, fallbackReason: selected.diagnosticReason, parts: [] } } : {}) };
+      const content = { version: 2 as const, prompt, executionContext: context, contentSources: [], executionOptions };
       const accepted = await this.mutations.write(id, async () => {
         const committed = this.wake(this.bound().acceptTask(this.fence(session), request, { ...content, digest: digest(content) }, mode === 'interrupt' ? 'front' : 'back'));
         if (committed.task) this.rememberQueued(committed.task);
@@ -2305,7 +2358,13 @@ export class DutydeckRuntime {
         operation = this.repos.execution.getTaskExecution(taskId)!.steering!;
         if (reserved.replayed) return skipped(operation.outcome ?? 'failed');
         await this.projectQueue(id);
-        await this.recordPrompt(id, input.executionContext.agentPrompt, 'accepted_input', 'steer', task.id, operationId);
+        const steerContext = { ...input.executionContext, promptPolicyVersion: target.task.executionContext?.promptPolicyVersion ?? 'legacy-v1' as const };
+        const assembled = steerContext.promptPolicyVersion === 'optimized-v1'
+          ? await this.mutations.wait(() => Promise.resolve(this.options.sessionPrompt?.(session, input.executionContext.agentPrompt, steerContext) ?? input.executionContext.agentPrompt))
+          : input.executionContext.agentPrompt;
+        const steeringPrompt = typeof assembled === 'string' ? assembled : assembled.prompt;
+        await this.recordPrompt(id, input.executionContext.agentPrompt, 'accepted_input', 'steer', task.id, operationId, input.executionContext.promptDiagnostics);
+        if (typeof assembled !== 'string') await this.recordPrompt(id, steeringPrompt, 'session_context', 'steer', task.id, operationId, assembled.diagnostics);
         // No await separates this final ownership check from initiating the remote operation.
         this.mutations.check();
         if (this.queueHeld || running()?.ref.attemptId !== target.ref.attemptId) { await record('promptRequired'); return skipped('promptRequired'); }
@@ -2314,7 +2373,7 @@ export class DutydeckRuntime {
           const outcome = await this.driverOperation(driver, () => {
             this.steeringReplies.set(operationId,{sessionId:id,driver});
             let reply: Promise<DriverSteeringOutcome>;
-            try { reply = driver.steer!(input.executionContext.agentPrompt); } catch (error) { reply = Promise.reject(error); }
+            try { reply = driver.steer!(steeringPrompt); } catch (error) { reply = Promise.reject(error); }
             const observed = reply.then(async outcome => {
               if (this.steeringReplies.has(operationId)) await record(outcome);
               return outcome;

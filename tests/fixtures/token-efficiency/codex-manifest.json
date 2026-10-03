@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "frozenConfig": {
+    "model": "gpt-6.1-sol",
+    "protocol": "codex-jsonl",
+    "reasoningEffort": "high"
+  },
+  "repetitions": 1,
+  "timeoutMs": 120000,
+  "providerEnv": [
+    "http_proxy",
+    "https_proxy",
+    "no_proxy"
+  ],
+  "runners": {
+    "legacy": [
+      "node",
+      "--import",
+      "./../../../node_modules/tsx/dist/loader.mjs",
+      "./../../../scripts/token-efficiency-codex-runner.mts"
+    ],
+    "optimized": [
+      "node",
+      "--import",
+      "./../../../node_modules/tsx/dist/loader.mjs",
+      "./../../../scripts/token-efficiency-codex-runner.mts"
+    ]
+  },
+  "cases": [
+    {
+      "id": "provider-fact",
+      "type": "no-tools-smoke",
+      "input": {
+        "promptSource": "explicit frozen fixture; replace with production builders for assembly validation",
+        "prompts": {
+          "legacy": "Frozen fact: release day is Friday. Preserve the fact Friday. Answer JSON {\"day\":\"Friday\"}.",
+          "optimized": "Frozen fact: release day is Friday. Answer JSON {\"day\":\"Friday\"}."
+        }
+      },
+      "toolData": {},
+      "checks": [
+        {
+          "kind": "exact",
+          "path": [
+            "day"
+          ],
+          "value": "Friday"
+        },
+        {
+          "kind": "schema",
+          "path": [],
+          "required": [
+            "day"
+          ]
+        }
+      ]
+    }
+  ],
+  "providerAuth": "codex_login"
+}

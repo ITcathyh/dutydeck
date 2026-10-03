@@ -20,7 +20,7 @@ afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) awai
 
 const longAnswer = `开头的中间过程${'过程'.repeat(5_000)}最终结论：采用蓝绿部署`;
 
-async function harness() {
+async function harness(options: { output?: string; gate?: Promise<void>; fail?: boolean } = {}) {
   const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-agent-history-'));
   const repos = createRepositories(join(cwd, 'state.db'), { newDatabaseAuthority: 'ledger_v1' });
   const runtime = new DutydeckRuntime(repos, {
@@ -28,7 +28,9 @@ async function harness() {
     driverFactory: (_config, _protocol, emit) => ({
       start: async () => {}, resume: async () => {}, stop: async () => {}, interrupt: async () => {},
       send: async prompt => {
-        emit({ type: 'text', data: { text: prompt.includes('长回答') ? longAnswer : `回答：${prompt.split('\n').at(-1)}` } });
+        await options.gate;
+        if (options.fail) { emit({ type: 'error', data: { message: 'fixture failure' } }); emit({ type: 'completed', data: { stopReason: 'end_turn' } }); return; }
+        emit({ type: 'text', data: { text: options.output ?? (prompt.includes('长回答') ? longAnswer : `回答：${prompt.split('\n').at(-1)}`) } });
         emit({ type: 'completed', data: { stopReason: 'end_turn' } });
       }
     } satisfies AgentDriver)
@@ -42,15 +44,19 @@ async function harness() {
   await registerLarkAgentToolRoutes(app, tools);
   cleanups.push(async () => { await app.close(); await runtime.shutdown(); repos.close(); await rm(cwd, { recursive: true, force: true }); });
 
-  const run = async (sourceId: string, prompt: string) => {
+  const enqueue = async (sourceId: string, prompt: string) => {
     const session = await runtime.start({ agentId: 'mock', cwd, source: 'lark', sourceId });
     const { id } = await runtime.dispatch(session.id, prompt, 'queue', `[Dutydeck 群上下文 INJECTED_CONTEXT]\n${prompt}`, undefined, 'ou_alice');
-    await vi.waitFor(async () => expect((await runtime.getTasks(session.id)).find(task => task.id === id)?.status).toBe('completed'));
     return { session, taskId: id };
+  };
+  const run = async (sourceId: string, prompt: string) => {
+    const result = await enqueue(sourceId, prompt);
+    await vi.waitFor(async () => expect((await runtime.getTasks(result.session.id)).find(task => task.id === result.taskId)?.status).toBe(options.fail ? 'failed' : 'completed'));
+    return result;
   };
   const get = (session: Session, url: string) => app.inject({ method: 'GET', url: `/api/lark/agent-tools${url}`,
     headers: { authorization: `Bearer ${capabilities.environmentFor(session).dutydeck_group_tools_token}` } });
-  return { run, get };
+  return { run, enqueue, get };
 }
 
 describe('history tools over runtime + SQLite', () => {
@@ -77,6 +83,15 @@ describe('history tools over runtime + SQLite', () => {
     expect(shown.json()).toMatchObject({ taskId: long.taskId, request: '请给长回答', answerClipped: true });
     expect(shown.json().answer.length).toBeLessThanOrEqual(8_000);
     expect(shown.json().answer.endsWith('最终结论：采用蓝绿部署')).toBe(true);
+    const first = await get(deploy.session, `/history/${long.taskId}?field=answer&length=8000`);
+    expect(first.json()).toMatchObject({ text: longAnswer.slice(0, 8000), readStatus: 'completed', source: 'attempt', totalChars: longAnswer.length, complete: false });
+    const second = await get(deploy.session, `/history/${long.taskId}?cursor=${first.json().nextCursor}`);
+    expect(first.json().text + second.json().text).toBe(longAnswer);
+    expect(second.json().complete).toBe(true);
+    for (const value of ['', '1.0', '1e2', '-1', 'Infinity', '9007199254740992']) {
+      const invalid = await get(deploy.session, `/history/${long.taskId}?field=answer&offset=${encodeURIComponent(value)}`);
+      expect(invalid.statusCode).toBe(400);
+    }
 
     for (const { taskId } of [other, background, p2p]) {
       const denied = await get(deploy.session, `/history/${taskId}`);
@@ -88,6 +103,32 @@ describe('history tools over runtime + SQLite', () => {
     expect(fromP2p.statusCode).toBe(404);
     expect((await get(p2p.session, '/history')).json().tasks.map((item: { taskId: string }) => item.taskId)).toEqual([p2p.taskId]);
   });
+});
+
+it('preserves saved answer whitespace and reports oversized saved answers as unreadable', async () => {
+  const exact = await harness({ output: '  🧪\n  ' });
+  const task = await exact.run('cli_hist:oc_group:group:user:ou_alice', 'unicode');
+  const read = await exact.get(task.session, `/history/${task.taskId}?field=answer`);
+  expect(read.json()).toMatchObject({ text: '  🧪\n  ', source: 'attempt', complete: true });
+  const huge = await harness({ output: 'x'.repeat(600_000) });
+  const largeTask = await huge.run('cli_hist:oc_group:group:user:ou_alice', 'oversized');
+  const unavailable = await huge.get(largeTask.session, `/history/${largeTask.taskId}?field=answer`);
+  expect(unavailable.json()).toMatchObject({ readStatus: 'read_error', source: 'attempt', error: 'TASK_RESULT_OUTPUT_TOO_LARGE', complete: false, totalChars: null });
+});
+
+it('uses actual ledger settlement to distinguish unsettled and failed answers', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const pending = await harness({ gate });
+  const task = await pending.enqueue('cli_hist:oc_group:group:user:ou_alice', 'pending');
+  try {
+    const read = await pending.get(task.session, `/history/${task.taskId}?field=answer`);
+    expect(read.json()).toMatchObject({ readStatus: 'unsettled', complete: false });
+  } finally { release(); }
+  const failed = await harness({ fail: true });
+  const failedTask = await failed.run('cli_hist:oc_group:group:user:ou_alice', 'failed');
+  const read = await failed.get(failedTask.session, `/history/${failedTask.taskId}?field=answer`);
+  expect(read.json()).toMatchObject({ readStatus: 'missing', source: 'attempt', complete: false });
 });
 
 const finalAnswer = '最终结论：登录改为短信验证码，旧密码入口保留一个月。';
@@ -192,12 +233,33 @@ describe('history answers delivered with group send --final', () => {
     expect(transcript.status === 'settled' && transcript.result.output.text).toBe('已发送答复。');
 
     expect(await h.tools.historyTask(h.token, { taskId: h.finalTaskId })).toMatchObject({ taskId: h.finalTaskId, answer: finalAnswer });
+    expect(await h.tools.historyTask(h.token, { taskId: h.finalTaskId, field: 'answer' })).toMatchObject({ text: finalAnswer, source: 'explicit_final', complete: true });
     expect((await h.tools.history(h.token, { query: '短信验证码' })).tasks.map(item => item.taskId)).toEqual([h.finalTaskId]);
     expect((await h.tools.history(h.token, { query: '已发送答复' })).tasks).toEqual([]);
 
     expect(await h.tools.historyTask(h.token, { taskId: h.plainTaskId })).toMatchObject({ answer: '回答：普通问题' });
     const listed = (await h.tools.history(h.token)).tasks;
     expect(listed.map(item => [item.taskId, item.answer])).toEqual([[h.plainTaskId, '回答：普通问题'], [h.finalTaskId, finalAnswer]]);
+  });
+
+  it('reports corrupt explicit final records as read_error and preserves legacy fallback', async () => {
+    const h = await explicitFinalHarness();
+    const config = await h.repos.config.list('lark.explicit_final.');
+    const key = config.find(item => item.key.startsWith('lark.explicit_final.'))!.key;
+    await h.repos.config.set(key, '{broken');
+    expect(await h.tools.historyTask(h.token, { taskId: h.finalTaskId, field: 'answer' })).toMatchObject({ readStatus: 'read_error', source: 'explicit_final', complete: false });
+    expect(await h.tools.historyTask(h.token, { taskId: h.finalTaskId })).toMatchObject({ answer: '已发送答复。' });
+  });
+
+  it('rechecks authorization after reading an explicit final source', async () => {
+    const h = await explicitFinalHarness();
+    const originalGet = h.repos.config.get.bind(h.repos.config);
+    vi.spyOn(h.repos.config, 'get').mockImplementation(async key => {
+      const value = await originalGet(key);
+      if (key.startsWith('lark.explicit_final.')) await h.repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_final', appSecret: 'fake', groupToolsEnabled: false }]));
+      return value;
+    });
+    await expect(h.tools.historyTask(h.token, { taskId: h.finalTaskId, field: 'answer' })).rejects.toMatchObject({ code: 'GROUP_TOOLS_DISABLED' });
   });
 
   it('keeps an explicit answer out of history until its delivery is confirmed', async () => {

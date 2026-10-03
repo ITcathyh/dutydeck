@@ -67,7 +67,7 @@ async function setup(
 }
 
 describe('Agent group collaboration domain service', () => {
-  it('refreshes final and work tokens and keeps independent capability gates on every prompt', async () => {
+  it.each(['legacy-v1', 'optimized-v1'])('refreshes final and work tokens and keeps independent capability gates on every %s prompt', async policyVersion => {
     const f = await setup({ cli_current: fakeClient() });
     const active = { taskId: 'task-one', attemptId: 'attempt-one', actorId: 'ou_actor' };
     let work = true, collaboration = true, memory = true;
@@ -78,18 +78,18 @@ describe('Agent group collaboration domain service', () => {
       previewTool: async (_id, action) => { if (action === 'memory' && !memory) throw new Error('revoked'); },
       previewWork: async () => work, previewCollaboration: async () => collaboration
     });
-    const first = await tools.promptForSession(f.activeSession, 'one');
+    const first = await tools.promptForSession(f.activeSession, 'one', policyVersion);
     const final1 = f.capabilities.finalTurnToken(f.activeSession.id, active.taskId, active.attemptId);
     const work1 = f.capabilities.workbenchTurnToken(f.activeSession.id, active.taskId);
     expect(first).toContain(final1); expect(first).toContain(work1);
     expect(first).toContain('[Dutydeck 目标编排]'); expect(first).toContain('[群内持续协作]');
     active.taskId = 'task-two'; active.attemptId = 'attempt-two'; collaboration = false;
-    const second = await tools.promptForSession(f.activeSession, 'two');
+    const second = await tools.promptForSession(f.activeSession, 'two', policyVersion);
     expect(second).not.toContain(final1); expect(second).not.toContain(work1);
     expect(second).toContain(f.capabilities.finalTurnToken(f.activeSession.id, active.taskId, active.attemptId));
     expect(second).toContain('[Dutydeck 目标编排]'); expect(second).not.toContain('[群内持续协作]');
     work = false; collaboration = true; memory = false;
-    const third = await tools.promptForSession(f.activeSession, 'three');
+    const third = await tools.promptForSession(f.activeSession, 'three', policyVersion);
     expect(third).not.toContain('[Dutydeck 目标编排]'); expect(third).toContain('[群内持续协作]');
     expect(third).not.toContain('[Dutydeck 会话记忆工具]'); expect(third).toContain('发送独立消息/文件');
     expect(live).not.toHaveBeenCalled();

@@ -65,12 +65,25 @@ export interface AcceptedTaskInputV1 {
   digest: string;
 }
 const recoverySchema = z.object({ kind: z.literal('pty-jsonl-v1'), turnId: id, transcript: z.object({ path: id.optional(), offset: z.number().int().nonnegative() }).strict() }).strict();
+export const promptPartSchema = z.object({
+  kind: z.enum(['host_rules', 'dynamic_context', 'skill', 'user_request', 'reference', 'memory', 'collaboration_artifact']),
+  sourceId: id.optional(), version: id.optional(), digest: executionDigestSchema.optional(), trustScope: id,
+  content: z.string(), complete: z.boolean().optional(), prefix: z.string().optional(), suffix: z.string().optional()
+}).strict();
+const promptDiagnosticsSchema = z.object({
+  templateVersion: id, beforeChars: z.number().int().nonnegative().safe(), afterChars: z.number().int().nonnegative().safe(),
+  deduplicatedParts: z.number().int().nonnegative().safe(), fallbackReason: id.optional(),
+  parts: z.array(z.object({ kind: promptPartSchema.shape.kind, chars: z.number().int().nonnegative().safe(), sha256: executionDigestSchema,
+    sourceIdDigest: executionDigestSchema.optional(), versionDigest: executionDigestSchema.optional(), complete: z.boolean() }).strict())
+}).strict();
 export const acceptedTaskInputV1Schema = z.object({
   version: z.literal(1), prompt: z.string(),
   executionContext: z.object({ actorId: id.optional(), agentPrompt: z.string(), idleCompactHours: z.number().positive().optional(),
     skillDeliveries: z.array(z.object({ name: id, path: id, source: z.enum(['workspace', 'user']), digest: id, mode: z.literal('prompt') }).strict()).optional(),
     riskPolicy: z.object({ enabled: z.boolean(), authorized: z.boolean(), pattern: z.string(), actorEmail: z.string().optional(), reason: z.string().optional() }).strict().optional(),
-    recovery: recoverySchema.optional()
+    recovery: recoverySchema.optional(),
+    promptPolicyVersion: z.enum(['legacy-v1', 'optimized-v1']).optional(),
+    promptParts: z.array(promptPartSchema).optional(), promptDiagnostics: promptDiagnosticsSchema.optional()
   }).strict(),
   contentSources: z.array(z.object({ kind: id, id, version: id.optional(), digest: executionDigestSchema }).strict()), digest: executionDigestSchema
 }).strict();

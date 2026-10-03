@@ -1,3 +1,4 @@
+import { createMemoryJobRepository } from './memory-jobs.js';
 import { assertBotProcessConfigWrite } from './bot-process.js';
 export { assertBotProcessStartup, botProcessKey, botProcessMigrationKey, type BotProcessBinding } from './bot-process.js';
 import Database from 'better-sqlite3';
@@ -383,6 +384,7 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
     ...foundationRepositories,
     ...wp1aRepositories,
     ...scheduleRepositories,
+    memoryJobs: createMemoryJobRepository(sqlite),
     collaboration,
     ciWebhook,
     usage,

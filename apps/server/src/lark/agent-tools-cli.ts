@@ -1,4 +1,4 @@
-import type { AgentGroupCliOptions } from '../cli-program.js';
+import type { AgentGroupCliOptions, HistoryShowCliOptions } from '../cli-program.js';
 
 interface GroupToolErrorBody {
   code: string;
@@ -110,8 +110,10 @@ export function runHistoryList(cliOptions: AgentGroupCliOptions, options: GroupT
   return new AgentGroupToolHttpClient(options).request(queryPath('/history', cliOptions));
 }
 
-export function runHistoryShow(taskId: string, options: GroupToolClientOptions = {}) {
-  return new AgentGroupToolHttpClient(options).request(`/history/${encodeURIComponent(taskId)}`);
+export function runHistoryShow(taskId: string, options: GroupToolClientOptions = {}, range: HistoryShowCliOptions = {}) {
+  const query = new URLSearchParams();
+  for (const key of ['field', 'offset', 'length', 'cursor'] as const) if (range[key] !== undefined) query.set(key, range[key]!);
+  return new AgentGroupToolHttpClient(options).request(`/history/${encodeURIComponent(taskId)}${query.size ? `?${query}` : ''}`);
 }
 
 export function runGroupWait(cliOptions: AgentGroupCliOptions, options: GroupToolClientOptions = {}) {

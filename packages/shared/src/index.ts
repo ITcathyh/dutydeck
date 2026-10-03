@@ -290,11 +290,35 @@ export interface SessionRepository {
   save(session: Session): Promise<void>;
 }
 export const installationOwnerTaskActor = 'installation_owner';
+export interface PromptPart {
+  kind: 'host_rules' | 'dynamic_context' | 'skill' | 'user_request' | 'reference' | 'memory' | 'collaboration_artifact';
+  sourceId?: string;
+  version?: string;
+  digest?: string;
+  trustScope: string;
+  content: string;
+  complete?: boolean;
+  /** Wrappers preserve each occurrence's attribution and coverage when the body is shared. */
+  prefix?: string;
+  suffix?: string;
+}
+export interface PromptSourceDiagnostics {
+  templateVersion: string;
+  beforeChars: number;
+  afterChars: number;
+  deduplicatedParts: number;
+  fallbackReason?: string;
+  parts: Array<{ kind: PromptPart['kind']; chars: number; sha256: string; sourceIdDigest?: string; versionDigest?: string; complete: boolean }>;
+}
 export interface TaskExecutionContext {
   /** Trusted channel actor captured at enqueue time; activated only when this task runs. */
   actorId?: string;
   /** 实际发送给 Agent 的 prompt；可能包含来源通道补充的上下文。 */
   agentPrompt: string;
+  /** Installation policy and immutable source snapshots selected at task acceptance. */
+  promptPolicyVersion?: 'legacy-v1' | 'optimized-v1';
+  promptParts?: PromptPart[];
+  promptDiagnostics?: PromptSourceDiagnostics;
   /** Channel policy captured at acceptance; absent means no proactive compaction. */
   idleCompactHours?: number;
   /** Metadata for the immutable Skill content already included in agentPrompt. */
@@ -423,6 +447,7 @@ export interface FoundationRepository {
 }
 
 export interface RepositoryBundle {
+  memoryJobs: import('./memory-jobs.js').MemoryJobRepository;
   collaboration: import('./collaboration.js').CollaborationRepository;
   ciWebhook: import('./ci-webhook.js').CiWebhookRepository;
   usage: import('./usage.js').UsageLedgerRepository;
@@ -487,3 +512,5 @@ export * from './execution-recovery.js';
 export * from './session-name.js';
 
 export * from './session-usage.js';
+
+export * from './memory-jobs.js';

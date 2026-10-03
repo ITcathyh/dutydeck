@@ -29,6 +29,33 @@ describe('usage ledger repository', () => {
     } finally { repos.close(); }
   });
 
+  it('reads authorized raw entries without inventing missing fields or changing aggregate costs', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      const row = entry({ attemptId: 'list-one', costUsd: 0, inputTokens: 0, outputTokens: 5, cacheReadTokens: undefined, costEstimated: true });
+      await repos.usage.append(row);
+      await repos.usage.append(entry({ attemptId: 'list-two', appId: 'other', inputTokens: 100 }));
+      const rows = await repos.usage.listEntries({ appId: 'cli_a', chatId: 'oc_1' });
+      expect(rows).toHaveLength(1);
+      const { cacheReadTokens: _absent, ...expected } = row;
+      expect(rows[0]).toMatchObject({ ...expected, costEstimated: true });
+      expect(rows[0]).not.toHaveProperty('cacheReadTokens');
+      expect(await repos.usage.totals({ appId: 'cli_a' })).toMatchObject({ entries: 1, costUsd: 0, inputTokens: 0, outputTokens: 5 });
+    } finally { repos.close(); }
+  });
+
+  it('restricts offline entry reads to exact tasks within the app/time boundary', async () => {
+    const repos = createRepositories(':memory:');
+    try {
+      await repos.usage.append(entry({ attemptId: 'exact', appId: 'cli_a', taskId: 'wanted', recordedAt: '2026-10-01T00:00:00.000Z' }));
+      await repos.usage.append(entry({ attemptId: 'other-task', appId: 'cli_a', taskId: 'other', recordedAt: '2026-10-01T00:00:00.000Z' }));
+      await repos.usage.append(entry({ attemptId: 'other-app', appId: 'cli_b', taskId: 'wanted', recordedAt: '2026-10-01T00:00:00.000Z' }));
+      await repos.usage.append(entry({ attemptId: 'earlier', appId: 'cli_a', taskId: 'wanted', recordedAt: '2026-09-30T00:00:00.000Z' }));
+      expect((await repos.usage.listEntries({ appId: 'cli_a', since: '2026-10-01T00:00:00.000Z' }, ['wanted', 'wanted'])).map(row => row.attemptId)).toEqual(['exact']);
+      expect(await repos.usage.listEntries({}, [])).toEqual([]);
+    } finally { repos.close(); }
+  });
+
   it('falls back to the last streamed cumulative cost of an earlier attempt when the ledger has no baseline', async () => {
     const repos = createRepositories(':memory:');
     try {

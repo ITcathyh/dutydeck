@@ -63,26 +63,28 @@ const keyFor = (scope: ExplicitFinalScope) => `lark.explicit_final.${digest(scop
 const uuidFor = (scope: ExplicitFinalScope) => `final_${digest(scope).slice(0, 40)}`;
 const targetFor = (scope: ExplicitFinalScope): DeliveryTarget => ({ chatId: scope.chat_id,
   ...(scope.reply_message_id ? { replyMessageId: scope.reply_message_id, replyInThread: scope.reply_in_thread } : {}), allowReplyFallback: false });
-async function readRecord(store: ConfigRepository, scope: ExplicitFinalScope): Promise<FinalRecord | undefined> {
+async function readRecord(store: ConfigRepository, scope: ExplicitFinalScope, strict = false): Promise<FinalRecord | undefined> {
   const saved = await store.get(keyFor(scope));
+  if (saved === undefined || saved === null) return;
+  const invalid = () => { if (strict) throw new Error('Invalid explicit final record'); return undefined; };
   try {
     const record = JSON.parse(saved ?? 'null') as FinalRecord | null;
     if (!record || record.version !== 1 || !['pending', 'failed', 'delivered'].includes(record.status) || JSON.stringify(record.scope) !== JSON.stringify(scope)
       || record.provider_uuid !== uuidFor(scope) || typeof record.content !== 'string' || !record.content.trim()
       || typeof record.task_name !== 'string' || (record.message_id !== undefined && (typeof record.message_id !== 'string' || !record.message_id.trim()
-        || !Array.isArray(record.elements) || !record.elements.every(item => item && typeof item === 'object')))) return;
-    if ((record.status === 'delivered') !== Boolean(record.message_id)) return;
+        || !Array.isArray(record.elements) || !record.elements.every(item => item && typeof item === 'object')))) return invalid();
+    if ((record.status === 'delivered') !== Boolean(record.message_id)) return invalid();
     if (record.message_id) {
       const output = record.elements?.find(item => item.element_id === 'final_output');
       if (!output || (output.content !== record.content && !(typeof record.attachment_message_id === 'string' && record.attachment_message_id.trim()
-        && record.elements?.some(item => item.element_id === 'result_attachment')))) return;
+        && record.elements?.some(item => item.element_id === 'result_attachment')))) return invalid();
     }
     return record;
-  } catch { return; }
+  } catch (error) { if (strict) throw error; return; }
 }
 /** 已确认送达的显式最终答复正文（只读），供会话历史回看；pending 与 failed 的正文群里未必收到过，不返回。 */
-export async function readExplicitFinal(store: ConfigRepository, context: ExplicitFinalContext): Promise<string | undefined> {
-  const record = await readRecord(store, context.scope);
+export async function readExplicitFinal(store: ConfigRepository, context: ExplicitFinalContext, strict = false): Promise<string | undefined> {
+  const record = await readRecord(store, context.scope, strict);
   return record?.status === 'delivered' ? record.content : undefined;
 }
 export async function hasExplicitFinal(store: ConfigRepository | undefined, context: ExplicitFinalContext | undefined) {

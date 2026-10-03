@@ -51,6 +51,7 @@ export interface PromptAssemblyData {
   sha256: string;
   operationId?: string;
   inputTaskId?: string;
+  sources?: import('./index.js').PromptSourceDiagnostics;
 }
 
 export interface TranscriptCursor { path?: string; offset: number }

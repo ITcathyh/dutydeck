@@ -1,3 +1,4 @@
+import { createMemoryJobSchema } from './memory-jobs.js';
 import { createScheduleExecutionSchema } from './schedule-execution-migration.js'
 import type Database from 'better-sqlite3'
 import { createTaskExecutionSchema } from './task-execution-migration.js'
@@ -593,7 +594,8 @@ export const migrations: Migration[] = [
     );
     CREATE INDEX task_steering_session_state ON task_steering_operations(session_id,state);
     CREATE INDEX task_steering_task ON task_steering_operations(task_id);
-  `); } }
+  `); } },
+  { version: 33, name: 'memory_jobs', up: createMemoryJobSchema }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

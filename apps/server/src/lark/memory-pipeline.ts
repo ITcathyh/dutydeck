@@ -13,17 +13,17 @@
  * Agent 的输出不直接落库：`gateExtractionFacts` / `gateConsolidationActions` 是确定性
  * 门禁，逐条核对长度、主题、证据、凭据与上限，群共享池还要挡住疑似注入指令；
  * 提取另按本池的「不许记」规则复核；整理还要求「用户原话只能 retire / retopic」。
- * 通过后一次 `applyBatch` 原子写入，中途失败不留半成品账本。
+ * 持久作业经 `applyJob` 在同一事务写入动作、消费轮次与结算回执；兼容测试入口使用 `applyBatch`。
  *
  * 状态、单飞与记忆会话都按记忆池：群共享池的一次提取可能混有多个群的轮次，每轮在 prompt 里标出来源群。
  * 复用的记忆会话里若有未决任务（例如 daemon 在运行中途重启留下的 reconcile_required），
- * 本次运行归档它并换一个新会话，绝不向它派发、也不读它的输出；每次运行最多换一次。
+ * 本次运行只在归档确认后换新会话，未知运行继续阻塞；不会读取旧输出。
  */
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { currentProcessIdentity, observeProcess } from '@dutydeck/storage';
 import { readAttemptResult, type AttemptResultRepositories } from '../task-results.js';
-import { installationOwnerTaskActor, RuntimeError, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
+import { installationOwnerTaskActor, RuntimeError, type AgentCapabilities, type AcceptedTask, type ConfigRepository, type MemoryJob, type MemoryJobRepository, type StartSessionInput, type TaskRequestV1, type AgentConfig, type AgentEvent, type ExecutionActor, type PermissionMode, type Session, type TaskRecord } from '@dutydeck/shared';
 import { larkMemoryEnabled, type StoredLarkConfig } from './config.js';
 import {
   isLarkGroupMemoryPool,
@@ -46,7 +46,8 @@ import {
   type LarkMemoryStatus,
   type LarkMemoryStore
 } from './memory.js';
-import { renderMemoryIndex, type LarkMemoryProjection } from './memory-view.js';
+import { readTokenEfficiencyPolicy } from '../token-efficiency.js';
+import { renderMemoryIndexMetadata, renderMemoryIndex, type LarkMemoryProjection } from './memory-view.js';
 
 /** 触发阈值与运行参数。门禁的数值上限统一取 `larkMemoryLimits`，这里只放管线自己的常量。 */
 export const larkMemoryPipelineRules = {
@@ -85,10 +86,13 @@ const memorySessionModes = ['deny-all', 'ask'] as const satisfies readonly Permi
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export interface LarkMemoryPipelineRuntime {
+  resolveMemorySessionInput?(input: StartSessionInput): Promise<StartSessionInput & { protocol: AgentCapabilities['protocol'] }>;
+  startMemorySession?(input: StartSessionInput, stableSessionId: string, beforeStart: () => Promise<void>): Promise<Session>;
+  lookupAcceptedTask?(request: TaskRequestV1): AcceptedTask | undefined;
   start(input: { agentId: string; cwd?: string; model?: string; permissionMode?: PermissionMode; source?: string; sourceId?: string }): Promise<Session>;
   listAgents(): Promise<AgentConfig[]>;
   listSessions(): Promise<Session[]>;
-  dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt', agentPrompt: string): Promise<{ id: string; status: string }>;
+  dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt', agentPrompt: string, riskPolicy?: undefined, actorId?: string, idempotencyKey?: string, skillRequests?: string[], request?: TaskRequestV1): Promise<{ id: string; status: string }>;
   getTasks(id: string): Promise<TaskRecord[]>;
   getSessionTaskRecovery?(id: string): Promise<Array<{ taskId: string; status: string; blockers: Array<{ code: string }>; resolvedUnknown?: boolean }>>;
   getTaskRecovery?(id: string, taskId: string): Promise<{ status: string; blockers: Array<{ code: string }>; resolvedUnknown?: boolean }>;
@@ -107,6 +111,8 @@ export interface LarkMemoryPipelineLog {
 
 export interface LarkMemoryPipelineOptions {
   runtime: LarkMemoryPipelineRuntime;
+  jobs?: MemoryJobRepository;
+  policyConfig?: ConfigRepository;
   repos: AttemptResultRepositories;
   /** 服务装配提供已授权的后台控制身份，管线不推断用户或安装者。 */
   controlActorId?: string;
@@ -383,25 +389,46 @@ export class LarkMemoryPipeline {
     this.staleRunningMs = options.staleRunningMs ?? larkMemoryPipelineRules.staleRunningMs;
   }
 
+  async recoverJobs(appId: string): Promise<void> {
+    if (!this.options.jobs) return;
+    for (const job of await this.options.jobs.listUnsettled(appId)) {
+      const scope = { ...job.scope, chatId: job.scope.pool };
+      const config = await this.options.readConfig(appId);
+      if (!config || !larkMemoryEnabled(config)) continue;
+      const state = await this.options.store.getState(scope);
+      if (!job.receipt && this.backingOff(state, job.kind)) continue;
+      const claim = await this.claim(scope, job.kind);
+      if (!claim) continue;
+      await this.withClaim(scope, claim, job.kind, () => this.executeJob(scope, config, job.kind));
+    }
+  }
+
   /** 每个 completed 轮次记账一次，达到阈值时后台开跑；绝不阻塞调用方。 */
   async onTurnCompleted(scope: LarkMemoryScope, turn: { sessionId: string; taskId: string; senderId?: string; senderKind?: 'human' | 'bot'; sourceMessageId?: string }): Promise<void> {
     const config = await this.options.readConfig(scope.appId);
     if (!config || !larkMemoryEnabled(config)) return;
 
+    if (await this.options.jobs?.isConsumed(scope, turn.taskId)) return;
+    const claimedJob = await this.options.jobs?.findUnsettled(scope);
+    const protectedIds = new Set((claimedJob?.input as unknown as { turns?: LarkMemoryPendingTurn[] })?.turns?.map(turn => turn.taskId) ?? []);
     const completedAt = this.now().toISOString();
     const next = await this.options.store.mutateState(scope, current => {
       // 恢复重放会带同一个 runtimeTaskId 回来，重复记账会让计数虚高。
       if (current.pendingTurns?.some(item => item.taskId === turn.taskId)) return undefined;
+      if (current.running && !claimedJob) for (const item of (current.pendingTurns ?? []).slice(0, larkMemoryPipelineRules.turnsPerExtraction)) protectedIds.add(item.taskId);
       return {
         turnsSinceExtraction: current.turnsSinceExtraction + 1,
         turnsSinceConsolidation: current.turnsSinceConsolidation + 1,
-        pendingTurns: [...(current.pendingTurns ?? []), { ...turn, chatId: scope.chatId, completedAt }]
-          .slice(-larkMemoryPipelineRules.pendingTurns)
+        pendingTurns: [...(current.pendingTurns ?? []).filter(item => protectedIds.has(item.taskId)), ...[...(current.pendingTurns ?? []).filter(item => !protectedIds.has(item.taskId)), { ...turn, chatId: scope.chatId, completedAt }].slice(-larkMemoryPipelineRules.pendingTurns)]
       };
-    });
+    }, this.options.jobs && { jobs: this.options.jobs, taskId: turn.taskId });
     if (!next) return;
 
     if (config.memoryAutoExtract === false) return;
+    if (claimedJob) {
+      if (!this.isRunning(next)) void this.recoverJobs(scope.appId).catch(error => this.options.log.error({ error, scope }, '恢复记忆作业失败'));
+      return;
+    }
     if (!this.dueForExtraction(next) && !this.dueForConsolidation(next)) return;
     if (this.isRunning(next)) return;
 
@@ -488,8 +515,13 @@ export class LarkMemoryPipeline {
     const startedAt = this.now().toISOString();
     const token = randomUUID();
     const owner = currentProcessIdentity();
-    const written = await this.options.store.mutateState(scope, current =>
-      this.isRunning(current) ? undefined : { running: { kind, startedAt, token, owner } });
+    const before = await this.options.store.getState(scope);
+    const knownJob = !before.running || !this.options.jobs || await this.options.jobs.hasClaim(scope, before.running.token);
+    const written = await this.options.store.mutateState(scope, current => {
+      if (this.isRunning(current) || current.running?.token !== before.running?.token) return undefined;
+      if (current.running && !knownJob) throw this.recoveryRequired(current.running.sessionId ?? `${scope.appId}:${scope.pool}`, undefined, '旧记忆运行缺少原子作业回执，保留认领和待处理轮次等待核对。');
+      return { running: { kind, startedAt, token, owner } };
+    });
     return written ? token : undefined;
   }
 
@@ -569,6 +601,7 @@ export class LarkMemoryPipeline {
   // -------------------------------------------------------------------------
 
   private async executeExtraction(scope: LarkMemoryScope, config: StoredLarkConfig, actorId?: string): Promise<RunOutcome> {
+    if (this.options.jobs && this.options.policyConfig) return this.executeJob(scope, config, 'extraction', actorId);
     let turns: LarkMemoryPendingTurn[] = [];
     try {
       const entries = await this.options.store.list(scope);
@@ -648,9 +681,9 @@ export class LarkMemoryPipeline {
       try {
         const attemptId = this.attemptIdFor(turn.taskId);
         const task = (await this.options.runtime.getTasks(turn.sessionId)).find(item => item.id === turn.taskId);
-        if (!attemptId || !task) continue;
+        if (!attemptId || !task) { if (this.options.jobs) throw new LarkMemoryError('MEMORY_RESULT_UNAVAILABLE', '待提取轮次没有可读账本。', 502); continue; }
         const read = readAttemptResult(this.options.repos, turn.sessionId, turn.taskId, attemptId);
-        if (read.status !== 'settled' || read.result.outcome !== 'completed') continue;
+        if (read.status !== 'settled' || read.result.outcome !== 'completed') { if (this.options.jobs) throw new LarkMemoryError('MEMORY_RESULT_UNAVAILABLE', '待提取轮次尚未确认完成。', 502); continue; }
         const answer = read.result.output.text.trim();
         if (!answer) continue;
         // output.text 是整轮 assistant 文本的拼接，结论在末尾：从头截会把结论丢掉，
@@ -665,7 +698,8 @@ export class LarkMemoryPipeline {
           clipped
         });
       } catch (error) {
-        this.options.log.warn({ error, turn }, '读取待提取轮次结果失败，跳过该轮');
+        this.options.log.warn({ error, turn }, '读取待提取轮次结果失败');
+        if (this.options.jobs) throw error;
       }
     }
     return materials;
@@ -676,6 +710,7 @@ export class LarkMemoryPipeline {
   // -------------------------------------------------------------------------
 
   private async executeConsolidation(scope: LarkMemoryScope, config: StoredLarkConfig, actorId?: string, automatic = false): Promise<RunOutcome> {
+    if (this.options.jobs && this.options.policyConfig) return this.executeJob(scope, config, 'consolidation', actorId, automatic);
     try {
       const entries = await this.options.store.list(scope);
       const state = await this.options.store.getState(scope);
@@ -754,6 +789,164 @@ export class LarkMemoryPipeline {
     }
   }
 
+  /** Frozen jobs survive restarts; only the accepted request identity may be replayed. */
+  private async executeJob(scope: LarkMemoryScope, config: StoredLarkConfig, kind: 'extraction' | 'consolidation', actorId?: string, automatic = false): Promise<RunOutcome> {
+    if (this.options.controlActorId !== installationOwnerTaskActor) throw new LarkMemoryError('MEMORY_ACTOR_REQUIRED', '缺少授权的后台安装者控制身份。', 403);
+    const jobs = this.options.jobs!;
+    let job = await jobs.findUnsettled(scope);
+    try {
+      await this.assertClaim();
+      const token = this.runContext.getStore()!.token;
+      if (job && job.claimToken !== token) job = await jobs.update({ ...job, claimToken: token }, job.revision);
+      if (job?.receipt) return await this.finishJob(scope, job);
+      if (!job) {
+        // Every old session must be demonstrably terminal before admitting a migrated job.
+        const sessions = (await this.options.runtime.listSessions()).filter(session => session.source === 'lark-memory' && [`${scope.appId}:${scope.pool}`, `${scope.appId}:${scope.pool}:memory`].includes(session.sourceId ?? ''));
+        for (const session of sessions) await this.assertMemorySessionReady(session);
+        const versions = await this.options.store.jobVersions(scope);
+        const entries = await this.options.store.list(scope);
+        const state = await this.options.store.getState(scope);
+        const ignoreRules = await this.options.store.listIgnoreRules(scope);
+        const turns = kind === 'extraction' ? (state.pendingTurns ?? []).slice(0, larkMemoryPipelineRules.turnsPerExtraction) : [];
+        const materials = await this.collectTurns(turns);
+        const now = this.now().toISOString();
+        const agentId = config.memoryAgentId ?? config.defaultAgentId;
+        if (!agentId) throw new LarkMemoryError('MEMORY_AGENT_NOT_FOUND', '机器人没有记忆 Agent。', 409);
+        const agent = await this.agent(agentId);
+        const model = config.memoryModel ?? config.defaultModel ?? agent.model;
+        if (!this.options.runtime.resolveMemorySessionInput) throw new LarkMemoryError('MEMORY_AGENT_UNSUPPORTED', '运行时缺少后台记忆能力预检。', 503);
+        const sessionInput = await this.options.runtime.resolveMemorySessionInput({ agentId, cwd: this.options.projection.directoryFor(scope), model, reasoningEffort: agent.reasoningEffort, source: 'lark-memory', sourceId: `${scope.appId}:${scope.pool}:memory` });
+        const permissionMode = sessionInput.permissionMode;
+
+        const shared = isLarkGroupMemoryPool(scope);
+        const index = renderMemoryIndex(entries, state);
+        const fullPrompt = kind === 'extraction'
+          ? buildExtractionPrompt(JSON.stringify(entries), materials, { shared, ignoreRules })
+          : buildConsolidationPrompt(entries, renderMemoryIndexMetadata(entries, state), [], new Date(now));
+        const policy = await readTokenEfficiencyPolicy(this.options.policyConfig!);
+        const profile = policy.memoryProfiles.find(item => item.agentId === agentId && item.model === sessionInput.model && item.protocol === sessionInput.protocol && item.reasoningEffort === sessionInput.reasoningEffort);
+        const resolvedConfiguration = Boolean(sessionInput.model?.trim() && sessionInput.reasoningEffort?.trim());
+        const isolated = policy.mode === 'optimized' && resolvedConfiguration && profile && fullPrompt.length <= profile.maxInputChars;
+        const mode = isolated ? 'isolated' : 'compatible';
+        const compatibilityReason = isolated ? undefined : policy.mode === 'legacy' ? 'legacy_policy' : !resolvedConfiguration ? 'unresolved_model_configuration' : !profile ? 'unverified_capacity' : 'input_outside_verified_range';
+        const recentlyChecked = state.lastConsolidationAt && this.now().getTime() - Date.parse(state.lastConsolidationAt) < larkMemoryPipelineRules.consolidationCheckMs;
+        const skip = kind === 'consolidation' && automatic && !state.indexOverBudget && recentlyChecked && state.lastConsolidationHash === larkMemoryFingerprint(entries);
+        const prompt = isolated ? fullPrompt : kind === 'extraction' ? buildExtractionPrompt(index.text, materials, { shared, ignoreRules }) : buildConsolidationPrompt(entries, index.text, [], new Date(now));
+        const confirmedVersions = await this.options.store.jobVersions(scope);
+        if (JSON.stringify(versions) !== JSON.stringify(confirmedVersions)) throw new LarkMemoryError('MEMORY_CONCURRENT_CHANGE', '冻结输入期间记忆或规则已改变。', 409);
+        const input = { entries, state, ignoreRules, turns, materials, now, prompt, promptPolicyVersion: policy.mode === 'optimized' ? 'optimized-v1' : 'legacy-v1', actorId, agentDigest: createHash('sha256').update(JSON.stringify(agent)).digest('hex'), verifiedMaxInputChars: isolated ? profile!.maxInputChars : undefined, skip: Boolean(skip) };
+        const inputDigest = createHash('sha256').update(JSON.stringify(input)).digest('hex');
+        const id = `memory_${createHash('sha256').update(`${scope.appId}:${scope.pool}:${kind}:${token}`).digest('hex')}`;
+        const previous = mode === 'compatible' ? sessions.filter(session => session.agentId === agentId && (session.model ?? undefined) === (model ?? undefined) && session.permissionMode === permissionMode && session.cwd === sessionInput.cwd && (session.reasoningEffort ?? undefined) === sessionInput.reasoningEffort && (session.systemPrompt ?? undefined) === (agent.systemPrompt ?? undefined) && session.protocol === sessionInput.protocol && !session.archivedAt && !['stopped','failed'].includes(session.state)).sort((a,b) => b.createdAt.localeCompare(a.createdAt))[0] : undefined;
+        job = { id, scope: { appId: scope.appId, pool: scope.pool }, kind, revision: 0, claimToken: token, mode, compatibilityReason, inputDigest, input: JSON.parse(JSON.stringify(input)), versions, sessionId: previous?.id ?? `ses_memory_${createHash('sha256').update(id).digest('hex')}`, sessionInput, requests: [], state: 'prepared', createdAt: now };
+        await jobs.create(job);
+        this.options.log.info({ jobId: id, mode, compatibilityReason, inputChars: prompt.length }, '记忆作业输入已冻结');
+      }
+      const input = job.input as unknown as { entries: LarkMemoryEntry[]; state: LarkMemoryState; ignoreRules: LarkMemoryIgnoreRule[]; turns: LarkMemoryPendingTurn[]; materials: LarkMemoryTurnMaterial[]; now: string; prompt: string; verifiedMaxInputChars?: number; promptPolicyVersion?: 'legacy-v1' | 'optimized-v1'; actorId?: string; agentDigest: string; skip: boolean };
+      kind = job.kind;
+      let plan: LarkMemoryBatchStep[] = [];
+      let rejected = 0;
+      const requiresModel = !input.skip && (kind === 'extraction' ? input.materials.length > 0 : input.entries.length > 0);
+      if (requiresModel) {
+        await this.options.projection.write(scope);
+        await this.assertClaim();
+        let session = (await this.options.runtime.listSessions()).find(item => item.id === job!.sessionId);
+        if (!session && !/^ses_memory_/.test(job.sessionId)) throw this.recoveryRequired(job.sessionId, undefined, '冻结的兼容会话不存在，禁止换会话补跑。');
+        if (!session || /^ses_memory_/.test(session.id)) {
+          if (!this.options.runtime.startMemorySession) throw this.recoveryRequired(job.sessionId, undefined, '运行时缺少稳定记忆会话入口。');
+          session = await this.options.runtime.startMemorySession(job.sessionInput, job.sessionId, async () => {
+            await this.assertClaim();
+            const currentAgent = await this.agent(job!.sessionInput.agentId);
+            if (createHash('sha256').update(JSON.stringify(currentAgent)).digest('hex') !== input.agentDigest) throw new LarkMemoryError('MEMORY_CONCURRENT_CHANGE', '记忆 Agent 配置已改变。', 409);
+            const current = await this.options.readConfig(scope.appId);
+            if (!current || !larkMemoryEnabled(current)) throw new LarkMemoryError('MEMORY_DISABLED', '记忆权限已关闭。', 403);
+          });
+        }
+        const currentAgent = await this.agent(job.sessionInput.agentId);
+        if (createHash('sha256').update(JSON.stringify(currentAgent)).digest('hex') !== input.agentDigest) throw new LarkMemoryError('MEMORY_CONCURRENT_CHANGE', '记忆 Agent 配置已改变。', 409);
+        const attempts = kind === 'extraction' ? 1 : 2;
+        let candidate: unknown[] = [];
+        let violations: string[] = [];
+        for (let attempt = 0; attempt < attempts; attempt++) {
+          let request = job.requests[attempt];
+          if (!request) {
+            const prompt = attempt === 0 ? input.prompt : `${input.prompt}\n上一版候选动作：${JSON.stringify(candidate, (_key, value) => typeof value === 'string' && looksLikeLarkMemoryCredential(value) ? '[疑似凭据已移除]' : value)}\n违规清单：${JSON.stringify(violations)}\n请修正后重新输出完整 actions。`;
+            if (input.verifiedMaxInputChars && prompt.length > input.verifiedMaxInputChars) throw new LarkMemoryError('MEMORY_INPUT_CAPACITY', '返修输入超过已验证容量范围，保留待处理轮次。', 422);
+            request = { version: 1, namespace: 'runtime', key: `${job.id}:${attempt}`, sessionId: job.sessionId, actor: { kind: 'installation_owner', id: 'installation_owner' }, prompt, mode: 'queue', skills: [], options: { ...(session.model ? { model: session.model } : {}), ...(session.reasoningEffort ? { reasoningEffort: session.reasoningEffort } : {}), permissionMode: session.permissionMode ?? 'deny-all' }, sources: input.turns.map(turn => ({ kind: 'memory_input_task', id: turn.taskId })), sourcePayload: { memoryJobId: job.id, inputDigest: job.inputDigest, attempt, promptPolicyVersion: input.promptPolicyVersion ?? 'legacy-v1' } };
+            job = await jobs.update({ ...job, state: 'running', requests: [...job.requests, request] }, job.revision);
+          }
+          const parsed = parseLastJsonBlock(await this.runTurn(session, request.prompt, request)) as { facts?: unknown[]; actions?: unknown[] };
+          if (kind === 'extraction') {
+            if (!Array.isArray(parsed.facts)) throw new LarkMemoryError('MEMORY_AGENT_OUTPUT_INVALID', '输出缺少 facts。', 422);
+            const gate = gateExtractionFacts({ facts: parsed.facts, evidenceTaskIds: input.materials.map(turn => turn.taskId), shared: isLarkGroupMemoryPool(scope), ignoreRules: input.ignoreRules }, input.entries);
+            rejected = gate.rejected.length;
+            plan = gate.accepted.map(fact => ({ op: 'add', input: { content: fact.content, topic: fact.topic, source: 'extraction', taskId: fact.evidence, sessionId: session.id, chatId: input.materials.find(turn => turn.taskId === fact.evidence)?.chatId, ...(input.actorId ? { createdBy: input.actorId } : {}) } }));
+            break;
+          }
+          if (!Array.isArray(parsed.actions)) throw new LarkMemoryError('MEMORY_AGENT_OUTPUT_INVALID', '输出缺少 actions。', 422);
+          candidate = parsed.actions;
+          const gate = gateConsolidationActions({ actions: candidate, sessionId: session.id, state: input.state, now: new Date(input.now), shared: isLarkGroupMemoryPool(scope) }, input.entries);
+          if (gate.ok) { plan = gate.plan; break; }
+          violations = gate.violations;
+          if (attempt === attempts - 1) throw new LarkMemoryError(violations.some(item => item.includes(indexOverBudgetViolation)) ? indexOverBudgetViolation : 'MEMORY_GATE_REJECTED', '两轮整理均未通过门禁。', 422);
+        }
+      }
+      await this.assertClaim();
+      const currentConfig = await this.options.readConfig(scope.appId);
+      if (!currentConfig || !larkMemoryEnabled(currentConfig)) throw new LarkMemoryError('MEMORY_DISABLED', '写入前记忆权限已关闭。', 403);
+      const consumed = kind === 'extraction' ? input.turns.filter(turn => turn.senderKind === 'bot' || input.materials.some(material => material.taskId === turn.taskId)).map(turn => turn.taskId) : [];
+      job = await this.options.store.applyJob(scope, jobs, job, plan, (state, result) => {
+        const at = this.now().toISOString();
+        const pendingTurns = (state.pendingTurns ?? []).filter(turn => !consumed.includes(turn.taskId));
+        const failures = { ...state.lastFailureAt }; delete failures[kind];
+        const lastRun: RunOutcome = { kind, at, ok: true, added: result.added.length, superseded: plan.reduce((sum, step) => sum + (step.op === 'add' ? step.input.supersedes?.length ?? 0 : 0), 0), retired: result.removed, retopiced: result.retopiced, rejected };
+        return { lastRun, lastFailureAt: failures, ...(kind === 'extraction' ? { pendingTurns, turnsSinceExtraction: pendingTurns.length, lastExtractionAt: at } : { turnsSinceConsolidation: Math.max(0, state.turnsSinceConsolidation - input.state.turnsSinceConsolidation), indexOverBudget: false, lastConsolidationAt: at, lastConsolidationInputHash: larkMemoryFingerprint(input.entries), lastConsolidationHash: result.fingerprint }) };
+      }, consumed);
+      return await this.finishJob(scope, job);
+    } catch (error) {
+      if (job && !job.receipt) {
+        const code = errorCode(error);
+        // Unknown startup/submission and unread results retain the same frozen job and requests.
+        const terminal = ['MEMORY_DISABLED','MEMORY_CONCURRENT_CHANGE','MEMORY_GATE_REJECTED',indexOverBudgetViolation,'MEMORY_INPUT_CAPACITY','MEMORY_AGENT_OUTPUT_INVALID','MEMORY_RUN_FAILED','MEMORY_RUN_TIMEOUT'].includes(code);
+        if (terminal && !this.runContext.getStore()?.signal.aborted) {
+          try {
+            if (job.mode === 'isolated') {
+              const session = (await this.options.runtime.listSessions()).find(item => item.id === job!.sessionId);
+              if (session && !session.archivedAt) {
+                await this.assertMemorySessionReady(session);
+                if (!this.options.runtime.archive) throw this.recoveryRequired(session.id);
+                await this.options.runtime.archive(session.id, { kind: 'installation_owner', id: 'installation_owner' });
+              }
+            }
+            job = await jobs.update({ ...job, state: 'failed', error: code }, job.revision);
+          } catch (cleanupError) {
+            this.options.log.warn({ error: cleanupError, jobId: job.id }, '失败记忆作业的归档未确认，保留原作业');
+            error = this.recoveryRequired(job.sessionId);
+          }
+        }
+      }
+      if (this.runContext.getStore()?.signal.aborted) throw error;
+      this.options.log.error({ error, scope, jobId: job?.id }, '记忆作业等待恢复或退避');
+      if (job?.receipt) return { kind, at: this.now().toISOString(), ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: errorCode(error) };
+      return this.settle(scope, { kind, ok: false, added: 0, superseded: 0, retired: 0, retopiced: 0, rejected: 0, error: errorCode(error) }, () => ({}));
+    }
+  }
+
+  private async finishJob(scope: LarkMemoryScope, job: MemoryJob): Promise<RunOutcome> {
+    const projected = await this.options.projection.writeVerified(scope);
+    if (!projected) throw new LarkMemoryError('MEMORY_PROJECTION_FAILED', '记忆已提交，派生视图待恢复。', 503);
+    if (job.mode === 'isolated' && job.requests.length) {
+      const session = (await this.options.runtime.listSessions()).find(item => item.id === job.sessionId);
+      if (session && !session.archivedAt) {
+        await this.assertMemorySessionReady(session);
+        if (!this.options.runtime.archive) throw this.recoveryRequired(job.sessionId);
+        await this.options.runtime.archive(job.sessionId, { kind: 'installation_owner', id: 'installation_owner' });
+      }
+    }
+    await this.options.jobs!.update({ ...job, state: 'settled' }, job.revision);
+    return (job.receipt!.result as unknown as { lastRun: RunOutcome }).lastRun;
+  }
+
   // -------------------------------------------------------------------------
   // 记忆会话
   // -------------------------------------------------------------------------
@@ -770,8 +963,7 @@ export class LarkMemoryPipeline {
     // 比较必须用「生效模型」：机器人不配模型时 runtime 会把 Agent 自己的 model 落到 session 上，
     // 拿空值去比永远不等，每一轮都会白建一个会话与 Agent 进程。
     // 只看这组条件下最新的一个记忆会话：可用就复用，卡住就替换，停止 / 失败 / 已归档就新建。
-    // 更早的会话一概不再选中——被替换的旧会话归档不一定成功（原进程资源未确认安全停止时 runtime 会拒绝），
-    // 它仍在账本里等人工恢复，但替换它的新会话更新，永远排在它前面。
+    // 归档未确认时阻塞本轮；不得绕过原执行创建替代会话。
     const [latest] = sessions.filter(session => session.source === 'lark-memory' && session.sourceId === sourceId
       && (memorySessionModes as readonly string[]).includes(session.permissionMode ?? '')
       && session.agentId === agentId && (session.model ?? undefined) === (effectiveModel ?? undefined))
@@ -830,8 +1022,7 @@ export class LarkMemoryPipeline {
 
   /**
    * 换掉有未决任务的记忆会话：归档它（停掉进程、撤回排队请求，任务账本原样保留），不读它的任何输出。
-   * 归档失败（例如原进程资源尚未确认安全停止）只记日志，旧会话留在账本里等人工恢复；
-   * 查找只认最新的会话，接下来新建的会话会取代它。
+   * 归档失败时保留原会话并阻塞补跑，等待人工确认原执行停止。
    */
   private async retireMemorySession(session: Session, scope: LarkMemoryScope) {
     const actor: ExecutionActor | undefined = this.options.controlActorId === installationOwnerTaskActor
@@ -840,7 +1031,8 @@ export class LarkMemoryPipeline {
       await this.options.runtime.archive!(session.id, actor);
       this.options.log.warn({ scope, sessionId: session.id }, '记忆会话有未决任务，已归档并改用新会话');
     } catch (error) {
-      this.options.log.warn({ error, scope, sessionId: session.id }, '记忆会话有未决任务且归档未完成，改用新会话');
+      this.options.log.warn({ error, scope, sessionId: session.id }, '记忆会话归档未完成，禁止新开补跑');
+      throw this.recoveryRequired(session.id);
     }
   }
 
@@ -898,8 +1090,10 @@ export class LarkMemoryPipeline {
   }
 
   /** 超时只撤回未提交请求；已提交执行必须确认终态，否则保留恢复状态。 */
-  private async runTurn(session: Session, prompt: string): Promise<string> {
-    await this.assertMemorySessionReady(session);
+  private async runTurn(session: Session, prompt: string, request?: TaskRequestV1): Promise<string> {
+    if (request && !this.options.runtime.lookupAcceptedTask) throw this.recoveryRequired(session.id);
+    const accepted = request ? this.options.runtime.lookupAcceptedTask!(request) : undefined;
+    if (!accepted) await this.assertMemorySessionReady(session);
     await this.assertClaim();
     let taskId: string | undefined;
     let buffered: AgentEvent[] = [];
@@ -932,9 +1126,11 @@ export class LarkMemoryPipeline {
     if (signal?.aborted) expired();
     try {
       this.checkRun();
-      const dispatched = await this.options.runtime.dispatch(session.id, prompt, 'queue', prompt);
+      const dispatched = accepted?.task ?? await this.options.runtime.dispatch(session.id, prompt, 'queue', prompt, undefined, request ? installationOwnerTaskActor : undefined, request?.key, [], request);
       taskId = dispatched.id;
       if (terminalTaskStatuses.includes(dispatched.status) || recoveryTaskStatuses.includes(dispatched.status)) resolveStatus(dispatched.status);
+      const current = (await this.options.runtime.getTasks(session.id)).find(item => item.id === taskId);
+      if (current && (terminalTaskStatuses.includes(current.status) || recoveryTaskStatuses.includes(current.status))) resolveStatus(current.status);
       for (const event of buffered) receive(event);
       buffered = [];
 
@@ -1055,7 +1251,7 @@ export function buildConsolidationPrompt(entries: LarkMemoryEntry[], indexText: 
     '把下面这份聊天记忆整理得更短、更不重复、主题更清楚：合并说同一件事的条目，淘汰已经过时或被推翻的条目，把放错主题的条目挪到合适的主题。',
     '',
     '全部有效条目：',
-    listing,
+    indexText.startsWith('{') ? JSON.stringify(entries) : listing,
     '',
     '当前索引：',
     indexText.trim() || '（暂无索引）',

@@ -1,3 +1,5 @@
+import { promptDigest } from '../prompt-context.js';
+import type { PromptPart } from '@dutydeck/shared';
 import type { CollaborationFollowup, CollaborationMandate, CollaborationObservation, CollaborationParticipationMode, CollaborationSnapshot } from '@dutydeck/shared';
 
 /** 机器人消息（含本机器人的卡片与结果）正文上限。 */
@@ -29,6 +31,7 @@ interface Watermark {
 
 export interface GroupTaskContext {
   text: string;
+  promptParts?: PromptPart[];
   /** 本轮真正交给 Agent 之后才由 coordinator 写回的新水位。 */
   watermark: string;
 }
@@ -179,12 +182,13 @@ export function renderGroupTaskContext(input: GroupTaskContextInput): GroupTaskC
     else if (items.length) { total -= items.pop()!.line.length + 1; omittedItems++; }
     else break;
   }
-  return { text: [
+  const text = [
     ...head,
     ...(items.length || omittedItems ? [since ? '有变化的事项与委托：' : '进行中的事项与委托：', ...items.map(row => row.line)] : []),
     ...(omittedItems ? [`（为控制长度另有 ${omittedItems} 条事项或委托未列出，后续轮次补上。）`] : []),
     ...(rows.length || omittedMessages ? [since ? '新消息（旧→新）：' : '最近消息（旧→新）：'] : []),
     ...(omittedMessages ? [`（为控制长度省略了更早的 ${omittedMessages} 条消息，${input.groupTools ? '可以用 group messages 查看' : '本轮未注入'}。）`] : []),
     ...rows.map(row => row.line)
-  ].join('\n'), watermark: watermark() };
+  ].join('\n');
+  return { text, watermark: watermark(), promptParts: [{ kind: 'reference', sourceId: `lark:group:${snapshot.scope.appId}:${snapshot.scope.chatId}`, version: String(snapshot.contextRevision), digest: promptDigest(text), trustScope: `reference:lark:${snapshot.scope.chatId}`, complete: false, content: text }] };
 }
