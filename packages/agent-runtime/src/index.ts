@@ -69,6 +69,13 @@ export interface PtyRetirementControl {
   stop(session: Session, snapshot: unknown, beforeKill: (snapshot: unknown) => Promise<void>): Promise<unknown>;
   verify(session: Session, snapshot: unknown): boolean | Promise<boolean>;
 }
+export interface TaskRequestMaterial {
+  agentPrompt?: string;
+  riskPolicy?: ToolRiskPolicy;
+  idleCompactHours?: number;
+  promptParts?: PromptPart[];
+}
+
 export interface RuntimeOptions {
   ptyRetirement?: PtyRetirementControl;
 
@@ -2131,25 +2138,37 @@ export class DutydeckRuntime {
 
   async dispatch(id: string, prompt: string, mode: 'queue' | 'interrupt' = 'queue', agentPrompt = prompt, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: TaskRequestV1, idleCompactHours?: number, promptParts?: PromptPart[]) {
     this.assertReady();
-      const stored = await this.repos.sessions.get(id);
-      this.assertReady();
-      if (!stored) throw new RuntimeError('SESSION_NOT_FOUND', 'Session is missing', 404);
-      const request: TaskRequestV1 = supplied ?? { version: 1, namespace: 'runtime', sessionId: id, key: idempotencyKey ?? makeId('request'), actor: this.actor(stored, actorId), prompt, mode, skills: skillRequests ?? [], options: {}, sources: [], sourcePayload: { agentPrompt, ...(riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(riskPolicy)) } : {}), skills: skillRequests ?? [], ...(idleCompactHours !== undefined ? { idleCompactHours } : {}), ...(promptParts ? { promptParts: JSON.parse(canonicalExecutionJson(promptParts)) } : {}) } };
-      canonicalExecutionJson(request); taskRequestV1Schema.parse(request);
-      const explicitActor = actorId ?? undefined;
-      const requestActor = request.actor.kind === 'unspecified' ? undefined : request.actor.id;
-      if (request.sessionId !== id || request.prompt !== prompt || request.mode !== mode || idempotencyKey !== undefined && request.key !== idempotencyKey || canonicalExecutionJson(request.skills) !== canonicalExecutionJson(skillRequests ?? []) || explicitActor !== requestActor) throw new RuntimeError('TASK_REQUEST_MISMATCH', 'Explicit dispatch arguments differ from the immutable request', 409);
-      const existing = this.lookupAcceptedTask(request);
-      if (existing) {
-        if (this.mutations.valid(this.lifecycle(id)) && !stored.archivedAt && stored.state !== 'stopped') {
-          await this.scoped(id, async () => {
-            this.rememberQueued(existing.task); this.queueBlocked.delete(id);
-            try { await this.projectQueue(id); await this.applyQueueActions(stored); }
-            finally { this.scheduleQueue(id); }
-          });
-        }
-        return { ...this.publicTask(existing.task), replayed: true, queuedAhead: 0 };
+    const stored = await this.repos.sessions.get(id);
+    this.assertReady();
+    if (!stored) throw new RuntimeError('SESSION_NOT_FOUND', 'Session is missing', 404);
+    const request: TaskRequestV1 = supplied ?? { version: 1, namespace: 'runtime', sessionId: id, key: idempotencyKey ?? makeId('request'), actor: this.actor(stored, actorId), prompt, mode, skills: skillRequests ?? [], options: {}, sources: [], sourcePayload: { agentPrompt, ...(riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(riskPolicy)) } : {}), skills: skillRequests ?? [], ...(idleCompactHours !== undefined ? { idleCompactHours } : {}), ...(promptParts ? { promptParts: JSON.parse(canonicalExecutionJson(promptParts)) } : {}) } };
+    canonicalExecutionJson(request); taskRequestV1Schema.parse(request);
+    const explicitActor = actorId ?? undefined;
+    const requestActor = request.actor.kind === 'unspecified' ? undefined : request.actor.id;
+    if (request.sessionId !== id || request.prompt !== prompt || request.mode !== mode || idempotencyKey !== undefined && request.key !== idempotencyKey || canonicalExecutionJson(request.skills) !== canonicalExecutionJson(skillRequests ?? []) || explicitActor !== requestActor) throw new RuntimeError('TASK_REQUEST_MISMATCH', 'Explicit dispatch arguments differ from the immutable request', 409);
+    return this.dispatchRequest(request, { agentPrompt, riskPolicy, idleCompactHours, promptParts });
+  }
+
+  async dispatchRequest(request: TaskRequestV1, material: TaskRequestMaterial = {}) {
+    this.assertReady();
+    canonicalExecutionJson(request); taskRequestV1Schema.parse(request);
+    const { sessionId: id, prompt, mode, skills: skillRequests } = request;
+    const actorId = request.actor.kind === 'unspecified' ? undefined : request.actor.id;
+    const { agentPrompt = prompt, riskPolicy, idleCompactHours, promptParts } = material;
+    const stored = await this.repos.sessions.get(id);
+    this.assertReady();
+    if (!stored) throw new RuntimeError('SESSION_NOT_FOUND', 'Session is missing', 404);
+    const existing = this.lookupAcceptedTask(request);
+    if (existing) {
+      if (this.mutations.valid(this.lifecycle(id)) && !stored.archivedAt && stored.state !== 'stopped') {
+        await this.scoped(id, async () => {
+          this.rememberQueued(existing.task); this.queueBlocked.delete(id);
+          try { await this.projectQueue(id); await this.applyQueueActions(stored); }
+          finally { this.scheduleQueue(id); }
+        });
       }
+      return { ...this.publicTask(existing.task), replayed: true, queuedAhead: 0 };
+    }
     return this.scoped(id, async () => {
       const { session } = await this.active(id);
       await this.authorize(id, actorId);

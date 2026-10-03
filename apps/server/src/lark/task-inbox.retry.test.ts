@@ -9,6 +9,7 @@ import { larkBotsConfigKey, type StoredLarkConfig } from './config.js';
 import { LarkMessageCoordinator } from './coordinator.js';
 import type { LarkMessageEvent } from './listener.js';
 import { LarkServiceError } from './service.js';
+import { LarkTaskInbox } from './task-inbox.js';
 
 // 真实 coordinator 与 SQLite 入站记录；飞书发送与 runtime 用替身，按脚本让首卡失败几次。
 const config: StoredLarkConfig = {
@@ -96,6 +97,26 @@ it('keeps the request pending after the first card fails and delivers exactly on
   expect(h.delivered.filter(input => input.cardKind === 'process')).toHaveLength(1);
   expect(h.runtime.dispatch).toHaveBeenCalledOnce();
   expect(await h.inbox()).toMatchObject({ state: 'accepted', taskId: 'task_runtime', cardId: 'om_card_1' });
+  expect(h.service.replyText).not.toHaveBeenCalled();
+});
+
+it('retries an undelivered first PATCH on a recovered existing card before accepting the request', async () => {
+  const h = await harness(0);
+  const previous = new LarkTaskInbox(h.store);
+  const record = (await previous.claim(config.appId, message()))!;
+  await previous.update(record, { cardId: 'om_existing', turn: 1 });
+  h.service.update.mockRejectedValueOnce(new Error('first PATCH unavailable'));
+  const coordinator = h.createCoordinator();
+  await coordinator.initializeWorkflows(config);
+  await settle();
+  expect(await h.inbox()).toMatchObject({ state: 'received', boot: '', cardId: 'om_existing' });
+  expect(h.runtime.dispatch).not.toHaveBeenCalled();
+  expect(h.service.send).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(30_000);
+  await settle();
+  expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+  expect(await h.inbox()).toMatchObject({ state: 'accepted', taskId: 'task_runtime', cardId: 'om_existing' });
+  expect(h.service.update.mock.calls.map(([input]) => input.messageId)).toEqual(['om_existing', 'om_existing', 'om_existing']);
   expect(h.service.replyText).not.toHaveBeenCalled();
 });
 

@@ -1,13 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRepositories } from '@dutydeck/storage';
-import { installationOwnerTaskActor, type AgentEvent, type Session, type TaskRecord } from '@dutydeck/shared';
+import { installationOwnerTaskActor, type StartSessionInput, type AgentEvent, type Session, type TaskRequestV1, type TaskRecord } from '@dutydeck/shared';
 import { LarkMemoryStore } from './memory.js';
 import { LarkMemoryPipeline, type LarkMemoryPipelineRuntime } from './memory-pipeline.js';
 
 const cleanups: Array<() => void> = [];
 afterEach(() => { vi.useRealTimers(); cleanups.splice(0).forEach(close => close()); });
 const scope = { appId: 'app_memory', chatId: 'chat_memory', pool: 'chat_memory' };
-const owner = { kind: 'installation_owner', id: 'installation_owner' };
 
 async function harness(status = 'running', timeoutMs = 30, options: { archive?: boolean; now?: () => Date; staleRunningMs?: number } = {}) {
   const repos = createRepositories(':memory:');
@@ -15,7 +14,7 @@ async function harness(status = 'running', timeoutMs = 30, options: { archive?: 
   const store = new LarkMemoryStore(repos.config);
   await store.add(scope, { content: '回复使用中文', topic: 'preferences', source: 'user' });
   const memorySession = (id: string, createdAt: string) => ({ id, agentId: 'agent', state: 'idle', permissionMode: 'deny-all',
-    source: 'lark-memory', sourceId: `${scope.appId}:${scope.pool}:memory`, createdAt }) as Session;
+    cwd: '/memory', protocol: 'acp', source: 'lark-memory', sourceId: `${scope.appId}:${scope.pool}:memory`, createdAt }) as Session;
   const session = memorySession('session_memory', '2026-09-20T00:00:00.000Z');
   const fresh = memorySession('session_fresh', '2026-09-25T00:00:00.000Z');
   const sessions: Session[] = [session];
@@ -25,11 +24,19 @@ async function harness(status = 'running', timeoutMs = 30, options: { archive?: 
   const task = (state: string, id = 'task_memory', sessionId = session.id) => ({ id, sessionId, status: state, revision: 3,
     prompt: 'memory consolidation', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as TaskRecord);
   const runtime = {
-    start: vi.fn(async () => { sessions.push(fresh); if (!tasksBySession.has(fresh.id)) tasksBySession.set(fresh.id, []); return fresh; }),
+    start: vi.fn(),
+    resolveMemorySessionInput: vi.fn(async (input: StartSessionInput) => ({ ...input, protocol: 'acp', permissionMode: 'deny-all' })),
+    startMemorySession: vi.fn(async (_input: StartSessionInput, id: string, beforeStart: () => Promise<void>) => {
+      await beforeStart();
+      fresh.id = id; sessions.push(fresh); tasksBySession.set(id, []); return fresh;
+    }),
+    lookupAcceptedTask: vi.fn(() => undefined),
     listAgents: vi.fn(async () => [{ id: 'agent' }]), listSessions: vi.fn(async () => sessions.map(item => ({ ...item }))),
     getTasks: vi.fn(async (id: string) => tasksOf(id)),
     getTaskRecovery: vi.fn(async (id: string, taskId: string) => ({ status: tasksOf(id).find(item => item.id === taskId)!.status, blockers: [] as Array<{ code: string }>, resolvedUnknown: false })),
-    dispatch: vi.fn(async (id: string) => {
+    dispatch: vi.fn(),
+    dispatchRequest: vi.fn(async (request: TaskRequestV1) => {
+      const id = request.sessionId;
       const current = task(status, 'task_memory', id); tasksBySession.set(id, [...tasksOf(id), current]);
       listener?.({ type: 'task', data: { task: current } } as AgentEvent);
       return { id: current.id, status: 'queued' };
@@ -41,8 +48,8 @@ async function harness(status = 'running', timeoutMs = 30, options: { archive?: 
   };
   const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const pipelineOptions = { runtime: runtime as unknown as LarkMemoryPipelineRuntime,
-    controlActorId: installationOwnerTaskActor, repos, store,
-    projection: { write: vi.fn(), directoryFor: () => '/memory' } as any,
+    controlActorId: installationOwnerTaskActor, repos, store, jobs: repos.memoryJobs, policyConfig: repos.config,
+    projection: { write: vi.fn(), writeVerified: vi.fn(async () => true), directoryFor: () => '/memory' } as any,
     readConfig: async () => ({ appId: scope.appId, defaultAgentId: 'agent', memoryEnabled: true }) as any, log, timeoutMs, now: options.now, staleRunningMs: options.staleRunningMs };
   const pipeline = new LarkMemoryPipeline(pipelineOptions);
   return {
@@ -60,7 +67,7 @@ describe('memory recovery and timeout boundaries', () => {
     const unsubscribe = vi.fn();
     h.runtime.subscribe.mockReturnValue(unsubscribe);
     if (phase === 'dispatch') {
-      h.runtime.dispatch.mockImplementation(async () => {
+      h.runtime.dispatchRequest.mockImplementation(async () => {
         await gate;
         h.setTasks([h.task('queued')]);
         return { id: 'task_memory', status: 'queued' };
@@ -105,7 +112,7 @@ describe('memory recovery and timeout boundaries', () => {
     h.session.state = 'stopped';
     let release!: () => void;
     const gate = new Promise<void>(resolve => { release = resolve; });
-    if (phase === 'startup') h.runtime.start.mockImplementation(async () => { await gate; return h.fresh; });
+    if (phase === 'startup') h.runtime.startMemorySession.mockImplementation(async (_input, id, beforeStart) => { await gate; await beforeStart(); h.fresh.id = id; return h.fresh; });
     else h.pipelineOptions.projection.write.mockImplementation(async () => { await gate; });
     const started = Date.now();
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_TIMEOUT' });
@@ -114,19 +121,18 @@ describe('memory recovery and timeout boundaries', () => {
     now += 60_000;
     const second = new LarkMemoryPipeline(h.pipelineOptions);
     expect(await second.requestConsolidation(scope)).toBe('running');
-    if (phase === 'startup') h.runtime.archive!.mockImplementation(async () => {});
     release();
     await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
-    expect(h.runtime.dispatch).not.toHaveBeenCalled();
-    if (phase === 'startup') expect(h.runtime.archive).toHaveBeenCalledWith(h.fresh.id, owner);
-    else expect(h.runtime.start).not.toHaveBeenCalled();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
+    expect(h.runtime.archive).not.toHaveBeenCalled();
+    if (phase === 'preparation') expect(h.runtime.startMemorySession).not.toHaveBeenCalled();
     expect(await h.store.list(scope)).toHaveLength(1);
   });
 
   it('bounds pending dispatch, retains ownership, and cancels only the late accepted task', async () => {
     const h = await harness('queued');
     let release!: () => void;
-    h.runtime.dispatch.mockImplementation(async () => {
+    h.runtime.dispatchRequest.mockImplementation(async () => {
       await new Promise<void>(resolve => { release = resolve; });
       h.setTasks([h.task('queued')]);
       return { id: 'task_memory', status: 'queued' };
@@ -137,7 +143,7 @@ describe('memory recovery and timeout boundaries', () => {
     release();
     await vi.waitFor(async () => expect((await h.store.getState(scope)).running).toBeUndefined());
     expect(h.runtime.cancelQueued).toHaveBeenCalledWith(h.session.id, 'task_memory', installationOwnerTaskActor, 3);
-    expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+    expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
     expect(h.runtime.interrupt).not.toHaveBeenCalled();
     expect(await h.store.list(scope)).toHaveLength(1);
   });
@@ -145,12 +151,12 @@ describe('memory recovery and timeout boundaries', () => {
   it('does not release or overwrite another claim when an old operation finishes', async () => {
     const h = await harness('failed', 1000);
     let release!: () => void;
-    h.runtime.dispatch.mockImplementation(async () => {
+    h.runtime.dispatchRequest.mockImplementation(async () => {
       await new Promise<void>(resolve => { release = resolve; });
       return { id: 'task_memory', status: 'failed' };
     });
     const run = h.pipeline.runConsolidation(scope);
-    await vi.waitFor(() => expect(h.runtime.dispatch).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce());
     const before = await h.store.getState(scope);
     await h.store.updateState(scope, { running: { ...before.running!, token: 'new-claim' } });
     release();
@@ -169,65 +175,43 @@ describe('memory recovery and timeout boundaries', () => {
     expect((await h.store.getState(scope)).running).toBeUndefined();
   });
 
-  it.each(['reconcile_required', 'queued', 'running'])('archives a memory session stuck on a %s task and continues on a new one', async status => {
-    // 新会话里的任务以 failed 结束：拿到的是新会话自己的终态，证明这次运行确实换到了新会话。
+  // The retired path archived unknown sessions and replaced them. Persistent jobs must
+  // instead reconcile every prior execution before freezing a new job.
+  it.each(['reconcile_required', 'legacy_unresolved', 'queued', 'running'])('blocks a new job while an old %s task is unresolved', async status => {
     const h = await harness('failed'); h.setTasks([h.task(status, 'task_stuck')]);
-    await expect(h.pipeline.runConsolidation(scope)).resolves.toMatchObject({ ok: false, error: 'MEMORY_RUN_FAILED' });
-    expect(h.runtime.archive).toHaveBeenCalledWith(h.session.id, owner);
-    expect(h.runtime.start).toHaveBeenCalledOnce();
-    expect(h.runtime.dispatch.mock.calls.map(call => call[0])).toEqual([h.fresh.id]);
-    // 旧会话的任务账本原样保留，也没有被撤回或中断。
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(h.runtime.archive).not.toHaveBeenCalled();
+    expect(h.runtime.startMemorySession).not.toHaveBeenCalled();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
+    expect(await h.pipelineOptions.jobs.listScope(scope)).toEqual([]);
     expect(h.tasks()).toEqual([expect.objectContaining({ id: 'task_stuck', status })]);
     expect(h.runtime.cancelQueued).not.toHaveBeenCalled();
     expect(h.runtime.interrupt).not.toHaveBeenCalled();
-
-    // 下一次运行按 sourceId 选中新会话，不再替换。
-    await h.pipeline.runConsolidation(scope);
-    expect(h.runtime.start).toHaveBeenCalledOnce();
-    expect(h.runtime.archive).toHaveBeenCalledOnce();
-    expect(h.runtime.dispatch.mock.calls.map(call => call[0])).toEqual([h.fresh.id, h.fresh.id]);
   });
 
-  it('replaces idle memory sessions with blocked resources instead of dispatching to them', async () => {
+  it('blocks a completed old task with unresolved resources without replacing its session', async () => {
     const h = await harness('failed'); h.setTasks([h.task('completed')]);
     h.runtime.getTaskRecovery.mockResolvedValue({ status: 'completed', blockers: [{ code: 'DRIVER_STOP_BLOCKED' }], resolvedUnknown: false });
-    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_FAILED' });
-    expect(h.runtime.archive).toHaveBeenCalledWith(h.session.id, owner);
-    expect(h.runtime.dispatch.mock.calls.map(call => call[0])).toEqual([h.fresh.id]);
-  });
-
-  it('blocks replacement when archiving the stuck session fails', async () => {
-    const h = await harness('failed'); h.setTasks([h.task('reconcile_required', 'task_stuck')]);
-    h.runtime.archive!.mockRejectedValue(new Error('SESSION_RESOURCE_BLOCKED'));
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
-    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
-    expect(h.runtime.start).not.toHaveBeenCalled();
-    expect(h.runtime.archive).toHaveBeenCalledTimes(2);
-    expect(h.runtime.dispatch).not.toHaveBeenCalled();
+    expect(h.runtime.archive).not.toHaveBeenCalled();
+    expect(h.runtime.startMemorySession).not.toHaveBeenCalled();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
+    expect(await h.pipelineOptions.jobs.listScope(scope)).toEqual([]);
   });
 
-  it('replaces at most once per run: a replacement that is not ready either fails the run', async () => {
-    const h = await harness('failed'); h.setTasks([h.task('reconcile_required', 'task_stuck')]);
-    h.setTasks([h.task('reconcile_required', 'task_other', h.fresh.id)], h.fresh.id);
-    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
-    expect(h.runtime.archive).toHaveBeenCalledOnce();
-    expect(h.runtime.start).toHaveBeenCalledOnce();
-    expect(h.runtime.dispatch).not.toHaveBeenCalled();
-    expect((await h.store.getState(scope)).lastFailureAt?.consolidation).toBeTruthy();
-  });
-
-  it('fails closed without starting another session when the runtime cannot archive', async () => {
+  it('does not use archive availability to bypass an unknown execution', async () => {
     const h = await harness('failed', 30, { archive: false }); h.setTasks([h.task('reconcile_required')]);
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
-    expect(h.runtime.dispatch).not.toHaveBeenCalled();
-    expect(h.runtime.start).not.toHaveBeenCalled();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
+    expect(h.runtime.startMemorySession).not.toHaveBeenCalled();
   });
 
   it('allows reuse after confirmed recovery with unknown old output, but never treats that output as memory completion', async () => {
     const h = await harness('reconcile_required'); h.setTasks([h.task('reconcile_required', 'old')]);
     h.runtime.getTaskRecovery.mockResolvedValue({ status: 'reconcile_required', blockers: [], resolvedUnknown: true });
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
-    expect(h.runtime.dispatch).toHaveBeenCalledOnce();
+    expect(h.runtime.dispatchRequest).toHaveBeenCalledOnce();
     expect(h.runtime.archive).not.toHaveBeenCalled();
     expect((await h.store.list(scope))).toHaveLength(1);
   });
@@ -264,7 +248,7 @@ describe('memory recovery and timeout boundaries', () => {
   it('fails closed before dispatch when recovery inspection is unavailable', async () => {
     const h = await harness(); (h.runtime as any).getTaskRecovery = undefined;
     expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
-    expect(h.runtime.dispatch).not.toHaveBeenCalled();
+    expect(h.runtime.dispatchRequest).not.toHaveBeenCalled();
     expect(h.runtime.start).not.toHaveBeenCalled();
     expect(h.runtime.archive).not.toHaveBeenCalled();
   });

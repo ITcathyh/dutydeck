@@ -166,12 +166,12 @@ describe('WorkItem ledger integration with real SQLite and local drivers', () =>
 
   it('completes the same admission after a lost dispatch response and SQLite close/reopen without re-reading material or re-sending', async () => {
     const f = await fixture('jsonl');
-    const dispatch = f.runtime.dispatch.bind(f.runtime);
+    const dispatch = f.runtime.dispatchRequest.bind(f.runtime);
     let dispatchAccepted = false;
     // 真实 cut point：Task 已在 SQLite 中持久接受。
     // 在来源收到回执并把 attempt.status 改为 accepted 之前，等待底层驱动事件正常入库以避免 shutdown 打断任务，
     // 然后关闭 service 并抛出异常，使 catch 因 this.closed === true 不再把 accepted 回写
-    vi.spyOn(f.runtime, 'dispatch').mockImplementationOnce(async (...args) => {
+    vi.spyOn(f.runtime, 'dispatchRequest').mockImplementationOnce(async (...args) => {
       const result = await dispatch(...(args as Parameters<typeof dispatch>));
       dispatchAccepted = true;
       while (f.repos.execution.getTaskExecution(result.id)?.currentAttempt?.state !== 'settled') {

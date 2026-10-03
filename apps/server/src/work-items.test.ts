@@ -185,8 +185,8 @@ describe('WorkItemService with real Runtime and SQLite', () => {
   });
 
   it('recovers a lost accepted response without sending a second prompt', async () => {
-    const f = await fixture(); const dispatch = f.runtime.dispatch.bind(f.runtime);
-    vi.spyOn(f.runtime, 'dispatch').mockImplementationOnce(async (...args) => { await dispatch(...args); throw new Error('response lost'); });
+    const f = await fixture(); const dispatch = f.runtime.dispatchRequest.bind(f.runtime);
+    vi.spyOn(f.runtime, 'dispatchRequest').mockImplementationOnce(async (...args) => { await dispatch(...args); throw new Error('response lost'); });
     const single = { ...plan, steps: [plan.steps[0]!], outputStepId: 'a' };
     const item = await f.create(single); await f.tick(); await eventually(async () => f.calls.length === 1);
     await f.recreateService(); await f.tick(); expect(f.calls).toHaveLength(1);
