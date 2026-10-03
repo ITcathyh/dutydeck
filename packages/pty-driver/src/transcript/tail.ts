@@ -50,6 +50,9 @@ export interface TranscriptEventSource {
    *  API-error lines). Held back until the turn ends because later model output
    *  supersedes it. Taking it starts a clean slate for the next turn. */
   takeTurnError?(): NormalizedDriverEvent | undefined;
+  /** A native terminal error whose ancestry is bound to the exact input
+   * receipt. It may finish the submitted turn without terminal screen evidence. */
+  takeInputError?(): NormalizedDriverEvent | undefined;
 }
 
 /** Loose shape of a parsed JSONL entry — mappers narrow per CLI schema. */
@@ -68,6 +71,8 @@ export interface JsonlTailerOptions {
   watchForSwitch?: boolean;
   inputText?: (entry: TranscriptEntry) => string | undefined;
   inputTimestamp?: (entry: TranscriptEntry) => number;
+  /** Called only for a fresh exact receipt, before mapping that same record. */
+  onInputReceipt?: (entry: TranscriptEntry) => void;
   /** Native tools can appear in both legacy and completed-item dialects. */
   deduplicateTools?: boolean;
 }
@@ -88,6 +93,7 @@ export class JsonlTailer implements TranscriptEventSource {
   private readonly watchForSwitch: boolean;
   private readonly inputText?: JsonlTailerOptions['inputText'];
   private readonly inputTimestamp?: JsonlTailerOptions['inputTimestamp'];
+  private readonly onInputReceipt?: JsonlTailerOptions['onInputReceipt'];
   private readonly deduplicateTools: boolean;
   private readonly toolEvents = new Set<string>();
   private readonly receipts = new Set<{ prompt: string; path?: string; offset: number; since: number; finish(error?: Error): void }>();
@@ -122,6 +128,7 @@ export class JsonlTailer implements TranscriptEventSource {
     this.watchForSwitch = opts.watchForSwitch ?? true;
     this.inputText = opts.inputText;
     this.inputTimestamp = opts.inputTimestamp;
+    this.onInputReceipt = opts.onInputReceipt;
     this.deduplicateTools = opts.deduplicateTools ?? false;
   }
 
@@ -419,7 +426,10 @@ export class JsonlTailer implements TranscriptEventSource {
             // Without an initial file waterline a late resolver might have
             // found old history. Only a fresh timestamp can prove receipt.
             && (Number.isFinite(timestamp) ? timestamp >= receipt.since - 1000 : receipt.path !== undefined)
-            && text === receipt.prompt) receipt.finish();
+            && text === receipt.prompt) {
+            this.onInputReceipt?.(entry);
+            receipt.finish();
+          }
         }
       }
     }

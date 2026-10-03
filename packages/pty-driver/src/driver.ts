@@ -96,6 +96,7 @@ export class PtyCliDriver implements AgentDriver {
    *  一条实质事件后才允许 completed。 */
   private turnHasOutput = false;
   private turnHasTranscriptResult = false;
+  private turnInputConfirmed = false;
   private awaitingTranscriptResult = false;
   /** 本轮开始时间——用于启动宽限期：CLI 初始化期间 PTY 静止，
    *  idle 检测会误判，宽限期内禁止 completed。 */
@@ -315,6 +316,7 @@ export class PtyCliDriver implements AgentDriver {
       this.interruptPending = false;
       this.turnHasOutput = false;
       this.turnHasTranscriptResult = false;
+      this.turnInputConfirmed = false;
       this.awaitingTranscriptResult = false;
       this.turnStartedAt = Date.now();
       this.startTurnDeadline();
@@ -364,20 +366,24 @@ export class PtyCliDriver implements AgentDriver {
         check();
         receiptPending = false;
         this.emitEvent({ type: 'status', data: { state: 'input_receipt', phase: 'confirmed' } });
+        this.turnInputConfirmed = true;
+        this.completeInputError();
       }
       const persistent = this.persistentBackend();
       if (isFirstPrompt && persistent) {
-        this.submissionMetadata = persistent.setDutydeckMetadata('first_prompt_sent', 'true').catch(() => {});
-        await Promise.race([this.submissionMetadata, writeCancelled]);
+        this.submissionMetadata = this.submissionMetadata.then(() => persistent.setDutydeckMetadata('first_prompt_sent', 'true')).catch(() => {});
+        await Promise.race([this.submissionMetadata, writeCancelled, completion]);
         check();
+        if (!this.turnActive) { this.firstPromptSent = true; return completion!; }
       }
       if (this.preparedTurnId && persistent) {
         const turnId = this.preparedTurnId;
-        this.submissionMetadata = persistent.setDutydeckMetadata('turn_id', turnId).catch(() => {
+        this.submissionMetadata = this.submissionMetadata.then(() => persistent.setDutydeckMetadata('turn_id', turnId)).catch(() => {
           if (this.activeSubmission === submission) this.preparedTurnId = undefined;
         });
-        await Promise.race([this.submissionMetadata, writeCancelled]);
+        await Promise.race([this.submissionMetadata, writeCancelled, completion]);
         check();
+        if (!this.turnActive) { this.firstPromptSent = true; return completion!; }
       }
       this.firstPromptSent = true;
     } catch (err) {
@@ -1140,7 +1146,8 @@ export class PtyCliDriver implements AgentDriver {
         }
       });
       this.transcript.onProgress?.(() => {
-        if (backend !== this.backend || this.stopped || !this.turnActive || !this.awaitingTranscriptResult) return;
+        if (backend !== this.backend || this.stopped || !this.turnActive) return;
+        if (this.completeInputError() || !this.awaitingTranscriptResult) return;
         // Claude's API errors are held until completion rather than emitted
         // as model output. A newly read error must retry the same idle guard.
         this.idleDetector?.reset();
@@ -1149,6 +1156,20 @@ export class PtyCliDriver implements AgentDriver {
       if (restoreTranscript) this.transcript.restore(restoreTranscript);
       this.transcript.start();
     }
+  }
+
+  private completeInputError(): boolean {
+    if (!this.turnActive || !this.turnInputConfirmed || this.interruptPending) return false;
+    const error = this.transcript?.takeInputError?.();
+    if (!error) return false;
+    this.turnActive = false;
+    this.preparedTurnId = undefined;
+    this.clearTurnDeadline(); this.clearRenderedCompletion(); this.clearBackgroundHold();
+    this.emitEvent(error);
+    this.emitEvent({ type: 'completed', data: { stopReason: 'end_turn' } });
+    this.turnResolve?.();
+    this.turnResolve = null; this.turnReject = null;
+    return true;
   }
 
   private startTurnDeadline(): void {

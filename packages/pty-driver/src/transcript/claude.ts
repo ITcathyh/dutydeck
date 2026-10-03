@@ -361,6 +361,9 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   private turnError: NormalizedDriverEvent | undefined;
   /** Type of this turn's latest model activity, ranked as the runtime ranks it. */
   private lastActivity: NormalizedDriverEvent['type'] | undefined;
+  private inputUuid: string | undefined;
+  private readonly inputEntries = new Set<string>();
+  private inputError: NormalizedDriverEvent | undefined;
 
   constructor(opts: ClaudeTranscriptTailerOptions) {
     const explicit = opts.transcriptPath;
@@ -383,6 +386,15 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           ? resolveOnce
           : () => resolveClaudeTranscriptPath(opts.cwd, opts.env),
       mapEntry: entry => {
+        if (this.inputUuid && entry.isSidechain !== true) {
+          // A different native user input starts another turn, even when it
+          // follows our history. Its errors cannot settle our submission.
+          if (claudeInputText(entry) !== undefined && entry.uuid !== this.inputUuid) {
+            this.inputEntries.clear(); this.turnError = undefined; this.inputError = undefined;
+          } else if (typeof entry.uuid === 'string' && this.inputEntries.has(entry.parentUuid)) {
+            this.inputEntries.add(entry.uuid);
+          }
+        }
         const pending = claudePendingBackgroundWork(entry);
         if (pending !== undefined) this.backgroundWork = pending;
         const apiError = claudeApiError(entry);
@@ -391,19 +403,28 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
           // stop-hook continuation, or an answer cut short mid-stream), and
           // reporting the error would fail an answer the user has. Otherwise
           // it is the reason the turn ends without final text.
-          this.turnError = this.lastActivity === 'text' ? undefined : apiError;
+          if (!this.inputUuid || this.inputEntries.has(entry.uuid)) {
+            this.turnError = this.lastActivity === 'text' ? undefined : apiError;
+            this.inputError = this.inputUuid ? this.turnError : undefined;
+          }
           return undefined;
         }
         const events = mapClaudeEntry(entry);
         const activity = events?.filter(event => ['text', 'thinking', 'tool_call', 'tool_result'].includes(event.type)).at(-1);
         if (activity) {
           // The model carried on, so that error no longer explains the turn's end.
-          this.turnError = undefined;
+          this.turnError = undefined; this.inputError = undefined;
           this.lastActivity = activity.type;
         }
         return events;
       },
       inputText: claudeInputText,
+      onInputReceipt: entry => {
+        this.inputUuid = typeof entry.uuid === 'string' ? entry.uuid : undefined;
+        this.inputEntries.clear();
+        this.lastActivity = undefined; this.turnError = undefined; this.inputError = undefined;
+        if (this.inputUuid) this.inputEntries.add(this.inputUuid);
+      },
       pollIntervalMs: opts.pollIntervalMs,
       /**
        * Re-resolving each tick is what lets the tailer attach late: the jsonl
@@ -432,13 +453,20 @@ export class ClaudeTranscriptTailer implements TranscriptEventSource {
   stop(): void { this.tailer.stop(); }
   onEvent(cb: (e: NormalizedDriverEvent) => void): void { this.tailer.onEvent(cb); }
   onProgress(cb: () => void): void { this.tailer.onProgress(cb); }
-  waitForInput(prompt: string, signal: AbortSignal): Promise<void> { return this.tailer.waitForInput(prompt, signal); }
+  waitForInput(prompt: string, signal: AbortSignal): Promise<void> {
+    this.inputUuid = undefined; this.inputEntries.clear(); this.inputError = undefined;
+    return this.tailer.waitForInput(prompt, signal);
+  }
   pendingBackgroundWork(): number { return this.backgroundWork; }
   resetBackgroundWork(): void { this.backgroundWork = 0; }
   takeTurnError(): NormalizedDriverEvent | undefined {
     const error = this.turnError;
-    this.turnError = undefined;
+    this.turnError = undefined; this.inputError = undefined;
     this.lastActivity = undefined;
+    if (error) { this.inputUuid = undefined; this.inputEntries.clear(); }
     return error;
+  }
+  takeInputError(): NormalizedDriverEvent | undefined {
+    return this.inputError ? this.takeTurnError() : undefined;
   }
 }

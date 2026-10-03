@@ -144,3 +144,120 @@ it('cancels send while a metadata reply is delayed and invalidates the stamp aft
   expect(writes).toEqual([['first_prompt_sent', 'true'], ['turn_id', 'interrupted']]);
   expect(access.preparedTurnId).toBeUndefined();
 });
+
+// Sanitized shape from both 2026-10-02 incidents: a pasted user record,
+// attachment ancestry, then Claude's native authentication_failed record.
+it.each(['3cff', 'edcb'])('immediately fails the bound native paste %s without a duration record or terminal footer', async id => {
+  const { pending } = await arm('sanitized incident input'); let done = false; void pending.then(() => { done = true; }, () => {});
+  appendFileSync(transcript, [
+    { type: 'user', uuid: 'incident-input', isSidechain: false, timestamp: new Date().toISOString(), message: { role: 'user', content: `\n\n<pasted_content id="${id}">\n${prompts[0]}\n</pasted_content id="${id}">\n` } },
+    { type: 'attachment', uuid: 'incident-attachment', parentUuid: 'incident-input', isSidechain: false },
+    { type: 'assistant', uuid: 'incident-error', parentUuid: 'incident-attachment', isSidechain: false, isApiErrorMessage: true, error: 'authentication_failed',
+      message: { role: 'assistant', model: '<synthetic>', stop_reason: 'stop_sequence', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } },
+  ].map(line).join(''));
+  await vi.advanceTimersByTimeAsync(500);
+  expect(done).toBe(true); await pending;
+  expect(phases()).toEqual(['pending', 'confirmed']);
+  expect(events.filter(event => ['error', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['error', 'completed']);
+  expect(events.find(event => event.type === 'error')?.data).toMatchObject({ code: 'claude_api_authentication_failed', message: expect.stringContaining('Not logged in · Please run /login') });
+  await vi.advanceTimersByTimeAsync(90_000);
+  expect(phases()).not.toContain('unknown'); expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+});
+
+it.each(['startup', 'old turn', 'different input', 'unrelated error', 'quoted text'])('does not fail the active turn from %s evidence', async kind => {
+  const error = { type: 'assistant', uuid: 'unrelated-error', parentUuid: 'other-input', isApiErrorMessage: true, error: 'authentication_failed',
+    message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } };
+  if (kind === 'old turn') { appendFileSync(transcript, line(error)); await vi.advanceTimersByTimeAsync(350); }
+  output(screen('Claude Code v2.1.287\n❯\nNot logged in · Run /login'));
+  await vi.advanceTimersByTimeAsync(250);
+  const { pending } = await arm(); let done = false; void pending.then(() => { done = true; }, () => {});
+  if (kind === 'different input') appendFileSync(transcript, line({ type: 'user', uuid: 'other-input', timestamp: new Date().toISOString(), message: { role: 'user', content: 'another input' } }) + line(error));
+  if (kind === 'unrelated error') appendFileSync(transcript, line({ type: 'user', uuid: 'current-input', timestamp: new Date().toISOString(), message: { role: 'user', content: prompts[0] } }) + line(error));
+  if (kind === 'quoted text') output(screen('❯ quote: ⎿ Not logged in · Please run /login\n✻ Cooked for 1s\n❯'));
+  await vi.advanceTimersByTimeAsync(2_000);
+  expect(done).toBe(false); expect(events.filter(event => ['error', 'completed'].includes(event.type))).toHaveLength(0);
+  if (kind !== 'unrelated error') {
+    await vi.advanceTimersByTimeAsync(90_000); await expect(pending).rejects.toBeInstanceOf(DriverRecoveryError);
+    expect(phases()).toEqual(['pending', 'unknown']);
+  } else { await driver.stop(); await expect(pending).rejects.toThrow('Driver stopped'); }
+});
+
+it('keeps the native input ancestry after an empty final-screen check, then fails without another redraw', async () => {
+  const { pending } = await arm(); let done = false; void pending.then(() => { done = true; }, () => {});
+  appendFileSync(transcript, line({ type: 'user', uuid: 'native-input', timestamp: new Date().toISOString(), message: { role: 'user', content: prompts[0] } }));
+  await vi.advanceTimersByTimeAsync(350);
+  output(screen(finalScreen)); await vi.advanceTimersByTimeAsync(1_000);
+  expect(done).toBe(false);
+  output(screen('❯')); await vi.advanceTimersByTimeAsync(250);
+  appendFileSync(transcript, line({ type: 'assistant', uuid: 'native-error', parentUuid: 'native-input', isApiErrorMessage: true, error: 'rate_limit',
+    message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: "You've hit your session limit" }] } }));
+  await vi.advanceTimersByTimeAsync(500);
+  expect(done).toBe(true); await pending;
+  expect(events.filter(event => ['error', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['error', 'completed']);
+});
+
+it('does not let delayed persistent metadata postpone a proven native failure', async () => {
+  let release!: () => void;
+  const delayed = new Promise<void>(resolve => { release = resolve; });
+  const persistent = { setDutydeckMetadata() { return delayed; } };
+  const access = driver as unknown as { persistentBackend(): unknown; firstPromptSent: boolean };
+  vi.spyOn(access, 'persistentBackend').mockReturnValue(persistent);
+  const { pending } = await arm(); let done = false; void pending.then(() => { done = true; }, () => {});
+  appendFileSync(transcript, line({ type: 'user', uuid: 'native-input', timestamp: new Date().toISOString(), message: { role: 'user', content: prompts[0] } }));
+  await vi.advanceTimersByTimeAsync(350);
+  appendFileSync(transcript, line({ type: 'assistant', uuid: 'native-error', parentUuid: 'native-input', isApiErrorMessage: true, error: 'authentication_failed',
+    message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } }));
+  await vi.advanceTimersByTimeAsync(500);
+  try {
+    expect(done).toBe(true); await pending;
+    expect(phases()).toEqual(['pending', 'confirmed']); expect(access.firstPromptSent).toBe(true);
+    expect(events.filter(event => ['error', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['error', 'completed']);
+  } finally { release(); }
+});
+
+it('keeps an unrelated error outside the input ancestry after an empty final-screen check', async () => {
+  const { pending } = await arm(); let done = false; void pending.then(() => { done = true; }, () => {});
+  appendFileSync(transcript, line({ type: 'user', uuid: 'native-input', timestamp: new Date().toISOString(), message: { role: 'user', content: prompts[0] } }));
+  await vi.advanceTimersByTimeAsync(350);
+  output(screen(finalScreen)); await vi.advanceTimersByTimeAsync(1_000);
+  appendFileSync(transcript, line({ type: 'assistant', uuid: 'unrelated-error', parentUuid: 'other-input', isApiErrorMessage: true, error: 'authentication_failed',
+    message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } }));
+  await vi.advanceTimersByTimeAsync(4_000);
+  expect(done).toBe(false); expect(events.filter(event => ['error', 'completed'].includes(event.type))).toHaveLength(0);
+  await driver.stop(); await expect(pending).rejects.toThrow('Driver stopped');
+});
+
+it('does not let late old-turn text suppress the current receipt-bound API failure in the same drain', async () => {
+  const { pending } = await arm(); let done = false; void pending.then(() => { done = true; }, () => {});
+  appendFileSync(transcript, [
+    { type: 'assistant', uuid: 'old-answer', parentUuid: 'old-input', message: { role: 'assistant', content: [{ type: 'text', text: 'old turn answer' }] } },
+    { type: 'user', uuid: 'native-input', timestamp: new Date().toISOString(), message: { role: 'user', content: prompts[0] } },
+    { type: 'assistant', uuid: 'native-error', parentUuid: 'native-input', isApiErrorMessage: true, error: 'authentication_failed',
+      message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } },
+  ].map(line).join(''));
+  await vi.advanceTimersByTimeAsync(500);
+  expect(done).toBe(true); await pending;
+  expect(events.filter(event => ['error', 'completed'].includes(event.type)).map(event => event.type)).toEqual(['error', 'completed']);
+});
+
+it('serializes a late old metadata stamp before the next turn stamp after native failure', async () => {
+  let release!: () => void;
+  const delayed = new Promise<void>(resolve => { release = resolve; });
+  const writes: string[] = [];
+  const persistent = { setDutydeckMetadata(_key: string, value: string) { writes.push(value); return value === 'old-stamp' ? delayed : Promise.resolve(); } };
+  const access = driver as unknown as { persistentBackend(): unknown; firstPromptSent: boolean; preparedTurnId: string };
+  vi.spyOn(access, 'persistentBackend').mockReturnValue(persistent);
+  access.firstPromptSent = true; access.preparedTurnId = 'old-stamp';
+  const first = await arm('old'); let done = false; void first.pending.then(() => { done = true; }, () => {});
+  appendFileSync(transcript, line({ type: 'user', uuid: 'old-input', timestamp: new Date().toISOString(), message: { role: 'user', content: prompts[0] } }));
+  await vi.advanceTimersByTimeAsync(350); expect(writes).toEqual(['old-stamp']);
+  appendFileSync(transcript, line({ type: 'assistant', uuid: 'old-error', parentUuid: 'old-input', isApiErrorMessage: true, error: 'authentication_failed',
+    message: { role: 'assistant', model: '<synthetic>', content: [{ type: 'text', text: 'Not logged in · Please run /login' }] } }));
+  await vi.advanceTimersByTimeAsync(500); expect(done).toBe(true); await first.pending;
+  prompts = []; events = []; access.preparedTurnId = 'new-stamp';
+  const next = await arm('next'); receipt(prompts[0]!); answer(); output(screen(finalScreen));
+  await vi.advanceTimersByTimeAsync(1_000);
+  try { expect(writes).toEqual(['old-stamp']); } finally { release(); }
+  await vi.advanceTimersByTimeAsync(1_000); await next.pending;
+  expect(writes).toEqual(['old-stamp', 'new-stamp']); expect(events.filter(event => event.type === 'completed')).toHaveLength(1);
+});
