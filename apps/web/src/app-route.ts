@@ -39,7 +39,8 @@ export type OverlayRoute =
   | { kind: 'lark-setup'; target?: LarkSetupTarget }
   | { kind: 'groups' }
   | { kind: 'automation' }
-  | { kind: 'usage' };
+  | { kind: 'usage'; view?: 'cost' | 'insight' }
+  | { kind: 'insight'; compare?: string };
 
 export type AppLocation = {
   route: AppRoute;
@@ -66,7 +67,7 @@ export const routeFromPath = (fullPath: string): AppRoute => {
   catch { return { kind: 'session', sessionId: match[1] }; }
 };
 
-const overlayFromSearch = (search: string): OverlayRoute | undefined => {
+const overlayFromSearch = (search: string, isSessionRoute: boolean): OverlayRoute | undefined => {
   const params = new URLSearchParams(search);
   const panel = params.get('panel');
   if (!panel) return undefined;
@@ -80,7 +81,9 @@ const overlayFromSearch = (search: string): OverlayRoute | undefined => {
     case 'lark-setup': return { kind: 'lark-setup', ...(params.get('mode') === 'new' ? { target: 'new' as const } : params.get('targetAppId') ? { target: { appId: params.get('targetAppId')! } } : {}) };
     case 'groups': return { kind: 'groups' };
     case 'automation': return { kind: 'automation' };
-    case 'usage': return { kind: 'usage' };
+    case 'usage': return { kind: 'usage', ...(params.get('view') === 'insight' ? { view: 'insight' as const } : {}) };
+    // insight 只在会话详情上有意义；非会话路由（如任务中心深链）不打开。
+    case 'insight': return isSessionRoute ? { kind: 'insight', ...(params.get('compare') ? { compare: params.get('compare')! } : {}) } : undefined;
     default: return undefined;
   }
 };
@@ -100,7 +103,7 @@ export const parseAppLocation = (pathname: string, search: string): AppLocation 
     ...(nav ? { nav } : {}),
     ...(appId ? { appId } : {}),
     ...(chatId ? { chatId } : {}),
-    overlay: overlayFromSearch(search)
+    overlay: overlayFromSearch(search, route.kind === 'session')
   };
 };
 
@@ -144,6 +147,8 @@ export const appLocationPath = ({ route, nav, appId, chatId, overlay }: AppLocat
       if (overlay.target === 'new') params.set('mode', 'new');
       else params.set('targetAppId', overlay.target.appId);
     }
+    if (overlay.kind === 'usage' && overlay.view === 'insight') params.set('view', 'insight');
+    if (overlay.kind === 'insight' && overlay.compare) params.set('compare', overlay.compare);
   }
   const query = params.toString();
   return query ? `${base}?${query}` : base;

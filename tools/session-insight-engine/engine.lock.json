@@ -1,0 +1,41 @@
+{
+  "$schema": "./engine.lock.schema.json",
+  "name": "session-insight-engine",
+  "upstreamCommit": "0bf5f1c95e89384f6379357aa515d385b2bf4e1e",
+  "engineCommit": "cf9a6c1e215eba0f9e3975c4f0c82cff2ebcc6fd",
+  "versions": {
+    "schemaVersion": 1,
+    "engineVersion": "cf9a6c1e215eba0f9e3975c4f0c82cff2ebcc6fd",
+    "parserVersion": "v3",
+    "metricVersion": "v1",
+    "redactionVersion": "redaction-v1"
+  },
+  "build": {
+    "goToolchain": "go1.26.1",
+    "cgoEnabled": 0,
+    "flags": [
+      "-trimpath",
+      "-buildvcs=false"
+    ],
+    "ldflagsSymbols": {
+      "main.EngineVersion": "engineCommit",
+      "main.ParserVersion": "versions.parserVersion",
+      "main.MetricVersion": "versions.metricVersion"
+    }
+  },
+  "platforms": {
+    "linux-amd64": {
+      "sha256": "37fc5daf40504319b10f16d2434f1391ac85ecafaabe37b80108a050d8056e7d"
+    },
+    "linux-arm64": {
+      "sha256": "21b5e03cf16a5d23e639bf9e264a9b2daa0b9e94ce74d6d231a80e6253ed9c38"
+    },
+    "darwin-amd64": {
+      "sha256": "c731adbc45a099f8da1e8d40880b8fce2d8a339a0794de3942b2b9e7b3d68244"
+    },
+    "darwin-arm64": {
+      "sha256": "8c2c0321f9ddaf12eb40ae132fdbf0078685c03ef71b5a5a0697101cd344642b"
+    }
+  },
+  "redistributionLicensed": false
+}

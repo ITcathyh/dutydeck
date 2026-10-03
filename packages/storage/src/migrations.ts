@@ -7,6 +7,7 @@ import { createCollaborationSchema } from './collaboration-migration.js'
 import { pruneScheduleEntityVersions } from './schedule-foundation.js'
 import { createCiWebhookSchema } from './ci-webhook.js'
 import { createUsageLedgerSchema, migrateUsagePricing } from './usage-ledger.js'
+import { createSessionInsightSchema } from './session-insight-migration.js'
 
 export interface Migration {
   version: number
@@ -595,7 +596,8 @@ export const migrations: Migration[] = [
     CREATE INDEX task_steering_session_state ON task_steering_operations(session_id,state);
     CREATE INDEX task_steering_task ON task_steering_operations(task_id);
   `); } },
-  { version: 33, name: 'memory_jobs', up: createMemoryJobSchema }
+  { version: 33, name: 'memory_jobs', up: createMemoryJobSchema },
+  { version: 34, name: 'session_insight_cache', up: createSessionInsightSchema }
 ]
 
 const INHERIT_PRESENTATION_OVERRIDE = {

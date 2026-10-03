@@ -3,7 +3,7 @@ import { cleanup, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { UsageGroup, UsageTotals } from '@dutydeck/shared';
-import { api, ApiError, type LarkBotConfig, type UsageSummary } from '../api';
+import { api, ApiError, insightApi, type LarkBotConfig, type UsageSummary } from '../api';
 import { UsageOverview } from './UsageOverview';
 
 const totals = (patch: Partial<UsageTotals> = {}): UsageTotals => ({ entries: 0, costUsd: 0, estimatedCostUsd: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, unavailable: 0, unpriced: 0, pricedEntries: 0, unknownCostEntries: 0, costCoverage: null, ...patch });
@@ -16,9 +16,15 @@ const summary: UsageSummary = { backgroundBudget: { month: '2026-09', usage: [] 
 const bots = [{ configured: true, appId: 'cli_a', name: '值班 Bot', tabLabel: '值班 Bot', setupComplete: true }] as LarkBotConfig[];
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
-function mount() {
+function mount(props: Parameters<typeof UsageOverview>[0] = { bots }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(<QueryClientProvider client={client}><UsageOverview bots={bots}/></QueryClientProvider>);
+  const onViewChange = vi.fn();
+  const onOpenSession = vi.fn();
+  const onCompare = vi.fn();
+  const utils = render(<QueryClientProvider client={client}>
+    <UsageOverview bots={props.bots} initialView={props.initialView} onViewChange={onViewChange} onOpenSession={onOpenSession} onCompare={onCompare}/>
+  </QueryClientProvider>);
+  return { ...utils, onViewChange, onOpenSession, onCompare };
 }
 
 describe('usage overview', () => {
@@ -98,5 +104,62 @@ describe('usage overview', () => {
     vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
     mount();
     expect(await screen.findByText(/安装管理员授权后才能查看用量汇总和设置上限/)).toBeTruthy();
+  });
+});
+
+describe('usage overview 会话分析 tab', () => {
+  const insightSummary = {
+    candidateSessions: 1, withSnapshot: 0, withoutSnapshot: 1, partialSnapshots: 0,
+    failedRefreshes: 0, staleSnapshots: 0, freshnessUnknown: 1, groups: [], sessions: [], nextCursor: null
+  };
+
+  it('默认停在费用 tab，不请求会话分析汇总', async () => {
+    vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    const insightSpy = vi.spyOn(insightApi, 'summary');
+    mount();
+    await screen.findByRole('region', { name: '合计' });
+    expect(insightSpy).not.toHaveBeenCalled();
+    expect(screen.queryByRole('region', { name: '候选会话覆盖' })).toBeNull();
+  });
+
+  it('切到会话分析 tab 时请求分析汇总并回调 view 变化；切回费用不改变费用查询口径', async () => {
+    vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    const insightSpy = vi.spyOn(insightApi, 'summary').mockResolvedValue(insightSummary as never);
+    const user = userEvent.setup();
+    const { onViewChange } = mount();
+    await user.click(screen.getByRole('tab', { name: '会话分析' }));
+    expect(onViewChange).toHaveBeenCalledWith('insight');
+    expect(await screen.findByRole('region', { name: '候选会话覆盖' })).toBeTruthy();
+    expect(insightSpy).toHaveBeenCalledWith(expect.objectContaining({ groupBy: 'workspace', limit: 100 }), expect.any(AbortSignal));
+    await user.click(screen.getByRole('tab', { name: '费用' }));
+    expect(onViewChange).toHaveBeenLastCalledWith('cost');
+    expect(await screen.findByRole('region', { name: '合计' })).toBeTruthy();
+  });
+
+  it('initialView=insight（panel=usage&view=insight 深链）直接恢复会话分析 tab，费用接口失败也不阻塞', async () => {
+    vi.spyOn(api, 'usageSummary').mockRejectedValue(new ApiError('费用暂不可用', 'X', 500));
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    vi.spyOn(insightApi, 'summary').mockResolvedValue(insightSummary as never);
+    mount({ bots, initialView: 'insight' });
+    expect(await screen.findByRole('region', { name: '候选会话覆盖' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: '合计' })).toBeNull();
+  });
+
+  it('会话行打开与双选对比回调透传给上层路由', async () => {
+    vi.spyOn(api, 'usageSummary').mockResolvedValue(summary);
+    vi.spyOn(api, 'managementGroups').mockResolvedValue({ groups: [] });
+    const sessionRow = {
+      sessionId: 's9', workspace: 'repo', agentId: 'codex', usage: 'explicit', createdAt: '2026-10-01T00:00:00.000Z',
+      refreshState: 'idle', errorCode: null, lastCheckedAt: null, hasSnapshot: false, snapshotId: null,
+      availability: 'none' as const, freshness: 'unknown' as const, models: [], metrics: null, metricAttributions: {}, isSharedSource: false
+    };
+    vi.spyOn(insightApi, 'summary').mockResolvedValue({ ...insightSummary, sessions: [sessionRow] } as never);
+    const user = userEvent.setup();
+    const { onOpenSession } = mount({ bots, initialView: 'insight' });
+    await screen.findByRole('region', { name: '会话列表' });
+    await user.click(screen.getByRole('button', { name: 's9' }));
+    expect(onOpenSession).toHaveBeenCalledWith('s9');
   });
 });
