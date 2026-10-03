@@ -17,6 +17,7 @@ import { createScheduleFoundationRepositories } from './schedule-foundation.js';
 import { createCollaborationRepository } from './collaboration.js';
 import { createCiWebhookRepository } from './ci-webhook.js';
 import { createUsageLedgerRepository } from './usage-ledger.js';
+import { createSessionInsightRepository } from './session-insight.js';
 import { canonicalDatabase, openDatabaseControl } from './database-control.js';
 export * from './schema.js';
 export * from './task-execution.js';
@@ -27,6 +28,8 @@ export * from './collaboration.js';
 export * from './collaboration-migration.js';
 export * from './usage-ledger.js';
 export * from './execution-inspection.js';
+export { createSessionInsightRepository } from './session-insight.js';
+export { createSessionInsightSchema } from './session-insight-migration.js';
 
 export const EVENT_WINDOW_DEFAULT_LIMIT = 200;
 export const EVENT_WINDOW_MAX_LIMIT = 1_000;
@@ -174,9 +177,11 @@ export function createRepositories(filename: string, options: RepositoryOpenOpti
   const collaboration = createCollaborationRepository(sqlite);
   const ciWebhook = createCiWebhookRepository(sqlite);
   const usage = createUsageLedgerRepository(sqlite);
+  const insight = createSessionInsightRepository(sqlite, control);
   return {
     control,
     execution,
+    insight,
     agents: {
       async list() { return db.select().from(agentConfigs).all().map(r => JSON.parse(r.json)); },
       async get(id) { const r = db.select().from(agentConfigs).where(eq(agentConfigs.id, id)).get(); return r ? JSON.parse(r.json) : undefined; },

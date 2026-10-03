@@ -1,0 +1,1 @@
+{"type": "assistant", "isSidechain": false, "message": {"type": "message", "role": "assistant", "content": [{"type": "text", "text": "sanitized answer"}], "stop_reason": "tool_use"}}

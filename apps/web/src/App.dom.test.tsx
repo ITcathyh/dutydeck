@@ -3,7 +3,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { api, foundationApi, scheduleApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
+import { api, foundationApi, insightApi, scheduleApi, type Agent, type DockEvent, type RunSummary, type Session } from './api';
+import type { SessionInsightDetailsResponse } from '@dutydeck/shared';
 import App from './App';
 import { useDockStore } from './store';
 import { resetDrafts } from './draft-store';
@@ -1117,5 +1118,94 @@ describe('App 插话结果反馈', () => {
       expect(toast.description).toContain('不支持插话');
       expect(toast.description).toContain('当前任务完成后会执行它');
     }
+  });
+});
+
+describe('App 会话分析深链与导航', () => {
+  const insightDetails = (sessionId: string, state: SessionInsightDetailsResponse['status']['refreshState'] = 'idle', snapshotId: string | null = null): SessionInsightDetailsResponse => ({
+    status: { sessionId, refreshState: state, availability: snapshotId ? 'complete' : 'none', freshness: snapshotId ? 'current' : 'unknown', currentSnapshotId: snapshotId, requestId: null, errorCode: null },
+    summary: null, manifest: null, hostEvidence: null
+  });
+
+  function mockInsight() {
+    vi.spyOn(insightApi, 'details').mockImplementation(async (id: string) => insightDetails(id));
+    vi.spyOn(insightApi, 'refresh').mockResolvedValue({ requestId: '33333333-3333-4333-8333-333333333333', state: 'queued', cacheHit: false });
+    vi.spyOn(insightApi, 'cancel').mockResolvedValue({ success: true, state: 'cancelled' });
+  }
+
+  it('RunHeader「分析」打开 Dialog lazy 面板并写入 ?panel=insight，后退关闭、前进重开', async () => {
+    window.history.replaceState(null, '', '/sessions/s1');
+    mockAppApi({ sessions: [session('s1')], summaries: [summary('s1', '任务一')] });
+    mockInsight();
+    const user = userEvent.setup();
+    const pushState = vi.spyOn(window.history, 'pushState');
+    renderApp();
+    await screen.findByRole('heading', { name: '任务一' });
+
+    await user.click(screen.getByRole('button', { name: '会话分析' }));
+    const dialog = await screen.findByRole('dialog', { name: '会话分析' });
+    expect(dialog).toBeTruthy();
+    expect(pushState).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 's1' }), '', '/sessions/s1?panel=insight');
+
+    // 后退：关闭面板。
+    act(() => window.history.back());
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '会话分析' })).toBeNull());
+
+    // 前进：沿同一历史记录重开。
+    act(() => window.history.forward());
+    expect(await screen.findByRole('dialog', { name: '会话分析' })).toBeTruthy();
+  });
+
+  it('深链 /sessions/:id?panel=insight 直接打开分析面板，?compare= 带入对比会话', async () => {
+    window.history.replaceState(null, '', '/sessions/s1?panel=insight&compare=s2');
+    mockAppApi({ sessions: [session('s1'), session('s2')], summaries: [summary('s1', '任务一')] });
+    const detailsSpy = vi.spyOn(insightApi, 'details').mockImplementation(async (id: string) => insightDetails(id));
+    renderApp();
+    await screen.findByRole('dialog', { name: '会话分析' });
+    await waitFor(() => expect(detailsSpy).toHaveBeenCalledWith('s2', null, expect.any(AbortSignal)));
+    // 对比会话没有快照时的提示（对比不隐式分析）。
+    expect(await screen.findByText(/对比会话 s2 还没有分析快照/)).toBeTruthy();
+  });
+
+  it('非会话路由上的 ?panel=insight 不打开面板', async () => {
+    window.history.replaceState(null, '', '/?panel=insight');
+    mockAppApi();
+    renderApp();
+    await screen.findByRole('heading', { name: '今天需要推进什么？' });
+    // 等待一个 tick 确认 lazy 面板没有挂载。
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(screen.queryByRole('dialog', { name: '会话分析' })).toBeNull();
+  });
+
+  it('panel=usage&view=insight 恢复「会话分析」tab，选会话跳转到该会话的分析面板', async () => {
+    window.history.replaceState(null, '', '/?panel=usage&view=insight');
+    mockAppApi({ sessions: [session('s1'), session('s2')] });
+    vi.spyOn(api, 'usageSummary').mockResolvedValue({} as never);
+    vi.spyOn(insightApi, 'summary').mockResolvedValue({
+      candidateSessions: 1, withSnapshot: 0, withoutSnapshot: 1, partialSnapshots: 0, failedRefreshes: 0, staleSnapshots: 0, freshnessUnknown: 1,
+      groups: [],
+      sessions: [{
+        sessionId: 's1', workspace: 'repo', agentId: 'codex', usage: 'explicit', createdAt: '2026-10-01T00:00:00.000Z',
+        refreshState: 'idle', errorCode: null, lastCheckedAt: null, hasSnapshot: false, snapshotId: null,
+        availability: 'none' as const, freshness: 'unknown' as const, models: [], metrics: null, metricAttributions: {}, isSharedSource: false
+      }],
+      nextCursor: null
+    });
+    vi.spyOn(insightApi, 'details').mockImplementation(async (id: string) => insightDetails(id));
+    const user = userEvent.setup();
+    renderApp();
+
+    const usageDialog = await screen.findByRole('dialog', { name: '用量与成本' });
+    // 会话分析 tab 被深链选中（lazy 面板 Suspense 加载完成后出现）。
+    const insightTab = await within(usageDialog).findByRole('tab', { name: '会话分析' });
+    expect(insightTab.getAttribute('aria-selected')).toBe('true');
+    await within(usageDialog).findByRole('region', { name: '候选会话覆盖' });
+
+    await user.click(within(usageDialog).getByRole('button', { name: 's1' }));
+    // 关闭用量浮层，进入会话详情 + 分析面板。
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: '用量与成本' })).toBeNull());
+    expect(await screen.findByRole('dialog', { name: '会话分析' })).toBeTruthy();
+    expect(window.location.pathname).toBe('/sessions/s1');
+    expect(window.location.search).toBe('?panel=insight');
   });
 });

@@ -47,6 +47,7 @@ const LarkConfigModal = lazy(() => import('./components/LarkConfigModal').then(m
 const GroupPolicyModal = lazy(() => import('./components/GroupPolicyModal').then(module => ({ default: module.GroupPolicyModal })));
 const AutomationOverview = lazy(() => import('./components/AutomationOverview').then(module => ({ default: module.AutomationOverview })));
 const UsageOverview = lazy(() => import('./components/UsageOverview').then(module => ({ default: module.UsageOverview })));
+const SessionInsightPanel = lazy(() => import('./components/SessionInsightPanel').then(module => ({ default: module.SessionInsightPanel })));
 const TimelineView = lazy(() => import('./components/TimelineView').then(module => ({ default: module.TimelineView })));
 // 机器人 / 群聊是一级视图但不是首屏：多数会话只用任务中心，两块管理界面各自带表单
 // 与目录浏览器，进首屏 chunk 只会拖慢每个人的第一次加载。
@@ -456,7 +457,7 @@ export default function App() {
       {primaryNav === 'bots' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开机器人管理…"/></div>}><BotManagement selectedAppId={selectedAppId} onSelectBot={selectBot} onOpenLarkSetup={openLarkSetup} onSelectGroup={selectGroup} agents={agents.data ?? []} larkListeningDisabled={larkConfig.data?.listeningDisabled ?? false}/></Suspense>
       : primaryNav === 'groups' ? <Suspense fallback={<div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在打开群聊管理…"/></div>}><GroupManagement selectedChatId={selectedChatId} selectedAppId={selectedAppId} onSelectGroup={selectGroup} onNavigateToBot={selectBot} agents={agents.data ?? []}/></Suspense>
       : route.kind === 'not-found' ? renderNotFound('page') : blockingMainQueryFailures.length ? renderBlockingFailure() : route.kind === 'session' && sessions.isPending ? <div className="grid min-h-0 flex-1 place-items-center"><Spinner label="正在加载任务…"/></div> : missingActiveSession ? renderNotFound('session') : active ? <>
-        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} usage={sessionUsage.data} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)}/>
+        <RunHeader session={active} agent={activeAgent} taskPrompt={runSummaries[active.id]?.prompt} streamStatus={streamStatus} queuedTasks={queuedTasks} usage={sessionUsage.data} rawVisible={rawVisible} rawAvailable={Boolean(raw)} restarting={restart.isPending} onInterrupt={() => void act('interrupt')} onRestart={() => restart.mutate(active.id)} onOpenPrompt={() => setSystemPromptOpen(true)} onArchive={() => { archive.reset(); setArchiveConfirm(true); }} onToggleRaw={toggleRawPanel} onRename={() => openRenameSession(active)} onOpenInsight={() => openOverlay({ kind: 'insight' })}/>
         <UsageHud usage={sessionUsage.data} context={taskContext} loading={sessionUsage.isLoading} error={sessionUsage.isError}/>
         <div className="flex shrink-0 items-stretch bg-surface px-3 sm:px-5">
           <div className="flex min-w-0 flex-1 flex-col justify-end">{isPtyCli ? <RunDetailTabs value={detailTab} onChange={setDetailTab}/> : <div className="flex-1 border-b border-default"/>}</div>
@@ -484,8 +485,34 @@ export default function App() {
     </Dialog>}
     {overlay?.kind === 'usage' && <Dialog open onClose={closeOverlay} label="用量与成本" size="lg">
       <Dialog.Header><h2 className="text-title font-semibold">用量与成本</h2><span className="ml-auto"><IconButton label="关闭用量与成本" onClick={closeOverlay}><X size={16}/></IconButton></span></Dialog.Header>
-      <Dialog.Body><Suspense fallback={<Spinner label="正在读取用量…"/>}><UsageOverview bots={larkConfig.data?.bots ?? []}/></Suspense></Dialog.Body>
+      <Dialog.Body><Suspense fallback={<Spinner label="正在读取用量…"/>}><UsageOverview
+        bots={larkConfig.data?.bots ?? []}
+        initialView={overlay.view === 'insight' ? 'insight' : 'cost'}
+        onViewChange={view => navigate({
+          route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId,
+          overlay: { kind: 'usage', ...(view === 'insight' ? { view: 'insight' as const } : {}) }
+        }, { replace: true })}
+        onOpenSession={id => {
+          applySessionSelection(id);
+          navigate({ route: { kind: 'session', sessionId: id }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId, overlay: { kind: 'insight' } });
+        }}
+        onCompare={(leftSessionId, rightSessionId) => {
+          applySessionSelection(leftSessionId);
+          navigate({ route: { kind: 'session', sessionId: leftSessionId }, nav: 'tasks', appId: selectedAppId, chatId: selectedChatId, overlay: { kind: 'insight', compare: rightSessionId } });
+        }}
+      /></Suspense></Dialog.Body>
     </Dialog>}
+    {overlay?.kind === 'insight' && route.kind === 'session' && <Suspense fallback={overlayFallback('正在打开会话分析…')}>
+      <SessionInsightPanel
+        sessionId={route.sessionId}
+        compareSessionId={overlay.compare ?? null}
+        onCompareSessionChange={compare => navigate({
+          route, nav: primaryNav, appId: selectedAppId, chatId: selectedChatId,
+          overlay: { kind: 'insight', ...(compare ? { compare } : {}) }
+        }, { replace: true })}
+        onClose={closeOverlay}
+      />
+    </Suspense>}
     {workspaceGroupsOpen && <Suspense fallback={overlayFallback('正在打开整理分组…')}><WorkspaceGroupsModal open onClose={() => setWorkspaceGroupsOpen(false)} snapshot={workspaceGroups.data} loading={workspaceGroups.isLoading} error={workspaceGroups.error ?? undefined} sessions={visibleSessions} summaries={runSummaries} onRetry={() => void workspaceGroups.refetch()}/></Suspense>}
     <ConfirmDialog open={archiveConfirm} tone="danger" title="归档此任务？" description="归档后任务将变为只读且无法恢复，历史指令和执行记录会继续保留。" confirmLabel="确认归档" busy={archive.isPending} error={archive.error?.message} onCancel={() => { if (!archive.isPending) setArchiveConfirm(false); }} onConfirm={() => { if (active) archive.mutate(active.id); }}/>
     <ConfirmDialog open={bulkArchiveIds.length > 0} tone="danger" title={`清理所选的 ${bulkArchiveIds.length} 个任务？`} description="所选任务将归档为只读且无法恢复；正在执行的任务会停止，排队指令会取消。历史指令和执行记录会保留，可在「已归档」中查看。" confirmLabel={bulkArchive.data?.failures.length ? '重试失败项' : '确认清理'} busy={bulkArchive.isPending} error={bulkArchive.data?.failures.length ? `${bulkArchive.data.failures.length} 个任务未清理。首个错误：${bulkArchive.data.failures[0].message}` : undefined} onCancel={() => { if (!bulkArchive.isPending) setBulkArchiveIds([]); }} onConfirm={() => { if (bulkArchiveIds.length && !bulkArchive.isPending) bulkArchive.mutate(bulkArchiveIds); }}/>

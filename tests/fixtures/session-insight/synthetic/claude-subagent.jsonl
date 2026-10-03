@@ -1,0 +1,2 @@
+{"type":"user","uuid":"u-sub-1","timestamp":"2026-10-03T10:05:02Z","sessionId":"claude-shared-session","agentId":"subagent-worker-1","cwd":"/workspace/synthetic","isSidechain":true,"message":{"id":"user-sub","role":"user","content":"subagent execution step"}}
+{"type":"assistant","uuid":"a-sub-1","timestamp":"2026-10-03T10:05:03Z","sessionId":"claude-shared-session","agentId":"subagent-worker-1","isSidechain":true,"message":{"id":"msg-sub-1","role":"assistant","usage":{"input_tokens":40,"output_tokens":15},"content":[{"type":"text","text":"subagent completed work"}]}}
