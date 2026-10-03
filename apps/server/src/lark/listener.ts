@@ -42,7 +42,7 @@ export interface LarkRuntime {
   getSession(id: string): Promise<Session | undefined>;
   stop?(id: string, actor?: ExecutionActor): Promise<unknown>;
   send(id: string, prompt: string, agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string): Promise<unknown>;
-  dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: import('@dutydeck/shared').TaskRequestV1, idleCompactHours?: number): Promise<{ id: string; status: string; queuedAhead?: number; replayed?: boolean }>;
+  dispatch?(id: string, prompt: string, mode?: 'queue' | 'interrupt', agentPrompt?: string, riskPolicy?: ToolRiskPolicy, actorId?: string, idempotencyKey?: string, skillRequests?: string[], supplied?: import('@dutydeck/shared').TaskRequestV1, idleCompactHours?: number, promptParts?: import('@dutydeck/shared').PromptPart[]): Promise<{ id: string; status: string; queuedAhead?: number; replayed?: boolean }>;
   getPendingPermissions?(id: string): PermissionRequestData[] | Promise<PermissionRequestData[]>;
   resolvePermission?(id: string, requestId: string, approved: boolean): Promise<unknown>;
   getTasks?(id: string): Promise<TaskRecord[]>;

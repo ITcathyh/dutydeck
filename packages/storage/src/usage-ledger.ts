@@ -176,6 +176,25 @@ export function createUsageLedgerRepository(sqlite: Database.Database): UsageLed
         ORDER BY sequence DESC LIMIT 1`).get(sessionId, excludeAttemptId ?? null) as { amount: number } | undefined;
       return typeof reported?.amount === 'number' ? reported.amount : undefined;
     },
+    async listEntries(filter: UsageFilter, taskIds?: string[]): Promise<UsageLedgerEntry[]> {
+      const query = where(filter);
+      if (taskIds !== undefined) {
+        query.sql += `${query.sql ? ' AND ' : 'WHERE '}task_id IN (SELECT value FROM json_each(?))`;
+        query.values.push(JSON.stringify([...new Set(taskIds)]));
+      }
+      const { sql, values } = query;
+      const columns = {
+        id: 'id', recordedAt: 'recorded_at', appId: 'app_id', chatId: 'chat_id', sessionId: 'session_id', taskId: 'task_id', attemptId: 'attempt_id',
+        rootTaskId: 'root_task_id', rootSessionId: 'root_session_id', actorId: 'actor_id', category: 'category', origin: 'origin', agentId: 'agent_id',
+        model: 'model', provider: 'provider', modelSource: 'model_source', pricingSource: 'pricing_source', pricingVersion: 'pricing_version',
+        pricingMatch: 'pricing_match', unpricedReason: 'unpriced_reason', inputTokens: 'input_tokens', outputTokens: 'output_tokens',
+        cacheReadTokens: 'cache_read_tokens', cacheWriteTokens: 'cache_write_tokens', costUsd: 'cost_usd', costEstimated: 'cost_estimated',
+        dataStatus: 'data_status', cumulativeCostUsd: 'cumulative_cost_usd', usageRef: 'usage_ref'
+      };
+      const projection = Object.entries(columns).map(([key, column]) => `${column} AS "${key}"`).join(', ');
+      const rows = sqlite.prepare(`SELECT ${projection} FROM usage_ledger ${sql} ORDER BY recorded_at, id`).all(...values) as Array<Record<string, unknown>>;
+      return rows.map(row => ({ ...Object.fromEntries(Object.entries(row).filter(([, value]) => value !== null)), costEstimated: row.costEstimated === 1 }) as unknown as UsageLedgerEntry);
+    },
     async totals(filter: UsageFilter): Promise<UsageTotals> {
       const { sql, values } = where(filter);
       return totalsOf(sqlite.prepare(`SELECT ${aggregates} FROM usage_ledger ${sql}`).get(...values) as LedgerRow);

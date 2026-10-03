@@ -14,7 +14,7 @@
  * memory-tools 负责暴露给 Agent 的 HTTP/CLI 面。
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { RuntimeError, type ConfigRepository } from '@dutydeck/shared';
+import { RuntimeError, type MemoryJob, type MemoryJobRepository, type MemoryJobVersion, type JsonValue, type ConfigRepository } from '@dutydeck/shared';
 import { relevance } from './text-relevance.js';
 import { redactTraceText } from './secret-redaction.js';
 
@@ -75,6 +75,7 @@ export interface LarkMemoryPendingTurn { sessionId: string; taskId: string; comp
 
 export interface LarkMemoryState {
   v: 1;
+  appliedJobId?: string;
   turnsSinceExtraction: number;
   turnsSinceConsolidation: number;
   /** 待提取的已完成轮次；coordinator 每个 completed 轮次追加一条，提取消费后移除。 */
@@ -454,6 +455,16 @@ export class LarkMemoryStore {
       if (options?.expectedFingerprint !== undefined && larkMemoryFingerprint(entries) !== options.expectedFingerprint) {
         throw new LarkMemoryError('MEMORY_CONCURRENT_CHANGE', '整理期间记忆已更新，保留新内容等待下一轮整理。', 409);
       }
+      const planned = this.planBatch(scope, entries, steps);
+      result = planned.result;
+      const current = planned.entries;
+      return current;
+    });
+    this.notifyChange(scope);
+    return result;
+  }
+
+  private planBatch(scope: LarkMemoryScope, entries: LarkMemoryEntry[], steps: LarkMemoryBatchStep[]): { entries: LarkMemoryEntry[]; result: LarkMemoryBatchResult } {
       let current = entries;
       const added: LarkMemoryEntry[] = [];
       let removed = 0;
@@ -487,11 +498,36 @@ export class LarkMemoryStore {
           throw new LarkMemoryError('MEMORY_TOPIC_LIMIT_REACHED', `记忆主题已达 ${larkMemoryLimits.topics} 个上限，请复用现有主题或先整理。`, 409);
         }
       }
-      result = { added, removed, retopiced, ...(options ? { fingerprint: larkMemoryFingerprint(current) } : {}) };
-      return current;
-    });
-    this.notifyChange(scope);
-    return result;
+      return { entries: current, result: { added, removed, retopiced, fingerprint: larkMemoryFingerprint(current) } };
+  }
+
+  async jobVersions(scope: LarkMemoryScope): Promise<MemoryJobVersion[]> {
+    await this.migrateLegacy(scope);
+    return Promise.all([larkMemoryKey(scope), larkMemoryIgnoreKey(scope), 'lark.bots', 'lark.credentials'].map(async key => ({ key, value: await this.configs.get(key) })));
+  }
+
+  async applyJob(scope: LarkMemoryScope, jobs: MemoryJobRepository, job: MemoryJob, steps: LarkMemoryBatchStep[], patch: (state: LarkMemoryState, result: LarkMemoryBatchResult) => Partial<LarkMemoryState>, consumedTaskIds: string[]): Promise<MemoryJob> {
+    if (scope.appId !== job.scope.appId || scope.pool !== job.scope.pool) throw new LarkMemoryError('MEMORY_SCOPE_INVALID', '记忆作业不属于该池。', 403);
+    if (job.receipt) return job;
+    const stateKey = larkMemoryStateKey(scope);
+    for (let attempt = 0; attempt < maxWriteAttempts; attempt++) {
+      const stateRaw = await this.configs.get(stateKey);
+      const state = parseLarkMemoryState(stateRaw);
+      const { raw, stored } = await this.read(scope);
+      const planned = this.planBatch(scope, stored.entries, steps);
+      const nextState = { ...state, ...patch(state, planned.result), appliedJobId: job.id };
+      try {
+        const applied = await jobs.apply({ job, claimToken: job.claimToken,
+          versions: [...job.versions, { key: larkMemoryKey(scope), value: raw }, { key: stateKey, value: stateRaw }],
+          writes: [{ key: larkMemoryKey(scope), value: JSON.stringify({ ...stored, entries: planned.entries }) }, { key: stateKey, value: JSON.stringify(nextState) }],
+          consumedTaskIds, result: JSON.parse(JSON.stringify({ ...planned.result, lastRun: nextState.lastRun })) as JsonValue, appliedAt: this.now().toISOString() });
+        this.notifyChange(scope);
+        return applied;
+      } catch (error) {
+        if (!(error instanceof RuntimeError) || error.code !== 'MEMORY_CONCURRENT_CHANGE' || await this.configs.get(stateKey) === stateRaw) throw error;
+      }
+    }
+    throw new LarkMemoryError('MEMORY_WRITE_CONFLICT', '记忆状态正在被并发修改。', 409);
   }
 
   private addTo(
@@ -740,15 +776,17 @@ export class LarkMemoryStore {
    */
   async mutateState(
     scope: LarkMemoryScope,
-    updater: (current: LarkMemoryState) => Partial<Omit<LarkMemoryState, 'v'>> | undefined
+    updater: (current: LarkMemoryState) => Partial<Omit<LarkMemoryState, 'v'>> | undefined,
+    pendingTurn?: { jobs: MemoryJobRepository; taskId: string }
   ): Promise<LarkMemoryState | undefined> {
     await this.migrateLegacy(scope);
-    return this.mutateStateKey(larkMemoryStateKey(scope), updater);
+    return this.mutateStateKey(larkMemoryStateKey(scope), updater, pendingTurn && { ...pendingTurn, scope });
   }
 
   private async mutateStateKey(
     key: string,
-    updater: (current: LarkMemoryState) => Partial<Omit<LarkMemoryState, 'v'>> | undefined
+    updater: (current: LarkMemoryState) => Partial<Omit<LarkMemoryState, 'v'>> | undefined,
+    pendingTurn?: { jobs: MemoryJobRepository; taskId: string; scope: LarkMemoryScope }
   ): Promise<LarkMemoryState | undefined> {
     for (let attempt = 0; attempt < maxWriteAttempts; attempt++) {
       const raw = await this.configs.get(key);
@@ -770,7 +808,11 @@ export class LarkMemoryStore {
         }
       }
       next.v = 1;
-      if (await this.write(key, raw, JSON.stringify(next))) return next;
+      if (pendingTurn) {
+        const status = await pendingTurn.jobs.enqueuePendingTurn({ scope: pendingTurn.scope, taskId: pendingTurn.taskId, expectedState: raw, state: JSON.stringify(next) });
+        if (status === 'consumed') return undefined;
+        if (status === 'enqueued') return next;
+      } else if (await this.write(key, raw, JSON.stringify(next))) return next;
     }
     throw new LarkMemoryError('MEMORY_WRITE_CONFLICT', '会话记忆状态正在被并发修改，请稍后重试。', 409);
   }

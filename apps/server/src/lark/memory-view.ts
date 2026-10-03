@@ -207,6 +207,12 @@ export function renderMemoryIndex(
   return { text: `${selfText}\n\n${sharedSection}`, overBudget, omitted, ids };
 }
 
+/** Complete index structure, referencing the entries supplied once in the job prompt. */
+export function renderMemoryIndexMetadata(entries: LarkMemoryEntry[], state: LarkMemoryState): string {
+  const index = renderMemoryIndex(entries, state);
+  return JSON.stringify({ ids: index.ids, topics: [...new Set(entries.map(entry => entry.topic))].map(topic => ({ topic, ids: entries.filter(entry => entry.topic === topic && index.ids.includes(entry.id)).sort((a,b) => a.createdAt.localeCompare(b.createdAt)).map(entry => entry.id), total: entries.filter(entry => entry.topic === topic).length })), omitted: index.omitted, overBudget: index.overBudget, budget: larkMemoryLimits.indexChars, lastConsolidationAt: state.lastConsolidationAt });
+}
+
 /** 旧结果卡「本轮记忆」区的 element_id 前缀。 */
 export const larkTurnMemoryElementPrefix = 'memory_turn';
 /** 识别已交付的旧结果卡中的记忆区，重绘时移除。 */
@@ -329,11 +335,25 @@ export class LarkMemoryProjection {
     });
   }
 
+  /** Durable jobs must retain their receipt until all derived files have been rebuilt. */
+  async writeVerified(scope: LarkMemoryScope): Promise<boolean> {
+    await this.write(scope);
+    const queue = this.queues.get(`${scope.appId}/${scope.pool}`)!;
+    let verified = false;
+    const write = queue.chain.catch(() => {}).then(async () => {
+      try { queue.latestResult = await this.performWrite(scope, true); verified = true; }
+      catch (error) { this.log?.warn({ error, scope }, '记忆作业派生视图待恢复'); }
+    });
+    queue.chain = write;
+    await write;
+    return verified;
+  }
+
   /**
    * 读账本全部条目与状态，写 MEMORY.md、topics/*.md 与 ledger.jsonl 到磁盘；
    * IO 失败只记日志不抛出。
    */
-  private async performWrite(scope: LarkMemoryScope): Promise<{ indexText: string; overBudget: boolean }> {
+  private async performWrite(scope: LarkMemoryScope, verify = false): Promise<{ indexText: string; overBudget: boolean }> {
     const dir = this.directoryFor(scope);
     let indexText = '';
     let overBudget = false;
@@ -388,6 +408,7 @@ export class LarkMemoryProjection {
         }
       } catch (cleanError) {
         this.log?.warn({ error: cleanError, scope }, '清理过期主题文件失败');
+        if (verify) throw cleanError;
       }
 
       // 5. 将 overBudget 回写 state.indexOverBudget（仅在变化时写）
@@ -398,6 +419,7 @@ export class LarkMemoryProjection {
       }
     } catch (error) {
       this.log?.warn({ error, scope }, '写入会话记忆派生视图失败');
+      if (verify) throw error;
     }
 
     return { indexText, overBudget };

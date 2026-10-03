@@ -33,6 +33,8 @@ import { SessionAutomationService } from './session-automation.js';
 import { createAutomationIntegration } from './automation-integration.js';
 import { CodebaseCiService } from './codebase-ci.js';
 import { prepareSkillPrompt } from './skill-delivery.js';
+import { readTokenEfficiencyPolicy } from './token-efficiency.js';
+import { assemblePrompt, promptDigest, promptTemplateVersion } from './prompt-context.js';
 import { createRelayAskStore } from './relay-ask-store.js';
 import { LarkAgentToolCapabilityRegistry, LarkAgentToolsService, loadOrCreateGroupToolsSigningSecret } from './lark/agent-tools.js';
 import { larkMemoryScope, LarkMemoryStore } from './lark/memory.js';
@@ -314,8 +316,31 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     driverIdleTimeoutMs: config.driverIdleTimeoutMs,
     cleanupIntervalMs: config.cleanupIntervalMs,
     sessionEnvironment: session => ({ ...capabilities.environmentFor(session), ...relayCapabilities.environmentFor(session.id), ...herdr.environmentFor(session.id) }),
-    prepareTaskPrompt: (session, prompt, skills) => prepareSkillPrompt(session.cwd, prompt, skills),
-    sessionPrompt: async (session, prompt) => `${session.terminalBackend === 'herdr' ? '你正在 Herdr 的真实主终端 pane 内运行；HERDR_* 由 Herdr 注入，使用 herdr pane current 核实自身上下文，可用 --current 管理本 pane。不要伪造身份或操作用户 default session。侧边任务可继续使用本会话的 dutydeck session herdr 专属入口。' : herdr.prompt()}\n\n${await agentTools.promptForSession(session, prompt)}`,
+    selectPromptPolicy: async session => {
+      const parent = await workItems.parentForSession(session.id) ?? await delegations.parentForSession(session.id);
+      if (parent?.parentTaskId) {
+        const task = repos.execution.getAcceptedTask(parent.parentTaskId)?.task;
+        return { version: task?.executionContext?.promptPolicyVersion ?? 'legacy-v1' };
+      }
+      const policy = await readTokenEfficiencyPolicy(repos.config);
+      return { version: promptTemplateVersion(policy.mode), ...(policy.diagnosticReason ? { diagnosticReason: policy.diagnosticReason } : {}) };
+    },
+    prepareTaskPrompt: (session, prompt, skills, context) => prepareSkillPrompt(session.cwd, prompt, skills, context),
+    sessionPrompt: async (session, prompt, context) => {
+      const version = context?.promptPolicyVersion ?? 'legacy-v1';
+      const herdrPrompt = session.terminalBackend === 'herdr' ? '你正在 Herdr 的真实主终端 pane 内运行；HERDR_* 由 Herdr 注入，使用 herdr pane current 核实自身上下文，可用 --current 管理本 pane。不要伪造身份或操作用户 default session。侧边任务可继续使用本会话的 dutydeck session herdr 专属入口。' : herdr.prompt();
+      const toolsPrompt = await agentTools.promptForSession(session, prompt, version);
+      const prefix = toolsPrompt.slice(0, toolsPrompt.length - prompt.length);
+      const legacyPrompt = `${herdrPrompt}\n\n${toolsPrompt}`;
+      const parts = [
+        { kind: 'host_rules' as const, sourceId: 'dutydeck:herdr', version, digest: promptDigest(herdrPrompt), trustScope: 'host', complete: true, content: herdrPrompt, suffix: '\n\n' },
+        ...(prefix ? [{ kind: 'dynamic_context' as const, trustScope: 'host:current_authority', content: prefix }] : []),
+        ...(context?.promptParts ?? [{ kind: 'user_request' as const, trustScope: 'user_request', content: prompt }])
+      ];
+      const result = assemblePrompt(parts, legacyPrompt, version);
+      if (context?.promptDiagnostics?.fallbackReason && !result.diagnostics.fallbackReason) result.diagnostics.fallbackReason = context.promptDiagnostics.fallbackReason;
+      return result;
+    },
     awaitingAnswer: sessionId => relayBroker.listPending(sessionId).length > 0,
     log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) }
   });
@@ -436,6 +461,8 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     );
     const memoryPipeline = new LarkMemoryPipeline({
       runtime,
+      jobs: repos.memoryJobs,
+      policyConfig: repos.config,
       controlActorId: installationOwnerTaskActor,
       repos: { execution: repos.execution },
       store: memoryStore,
@@ -447,6 +474,7 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
         error: (obj, msg) => app?.log.error(obj, msg)
       }
     });
+    for (const bot of await readLarkConfigs(repos.config)) void memoryPipeline.recoverJobs(bot.appId).catch(error => app?.log.error({ error, appId: bot.appId }, '恢复后台记忆作业失败'));
     // 协作作用域都是群：读本机器人的群共享池，来源是别的群的条目标「其他群」。
     readCollaborationMemory = async scope => {
       const bot = (await readLarkConfigs(repos.config)).find(entry => entry.appId === scope.appId);

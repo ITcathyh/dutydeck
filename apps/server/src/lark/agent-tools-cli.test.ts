@@ -117,3 +117,12 @@ it('transmits handoff and reply-agent payloads through scoped capability', async
   expect(fetcher).toHaveBeenCalledWith('http://localhost/api/lark/agent-tools/reply-agent', expect.objectContaining({ method: 'POST' }));
   expect(JSON.parse(String(fetcher.mock.calls[1]![1]?.body))).toEqual({ content: 'result answer', turn: 'signed-turn' });
 });
+
+it('preserves zero offset and cursor query parameters for history ranges', async () => {
+  const fetcher = vi.fn(async (_url: string, _init?: RequestInit) => response({ ok: true }));
+  const options = { env: { dutydeck_group_tools_url: 'http://localhost/api/lark/agent-tools', dutydeck_group_tools_token: 'capability' }, fetcher: fetcher as typeof fetch };
+  await runHistoryShow('task/1', options, { field: 'request', offset: '0', length: '5' });
+  await runHistoryShow('task/1', options, { cursor: 'abc+=' });
+  expect(Object.fromEntries(new URL(fetcher.mock.calls[0]![0] as string).searchParams)).toEqual({ field: 'request', offset: '0', length: '5' });
+  expect(new URL(fetcher.mock.calls[1]![0] as string).searchParams.get('cursor')).toBe('abc+=');
+});

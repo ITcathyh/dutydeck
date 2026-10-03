@@ -17,6 +17,7 @@ const BUSINESS_TABLES = [
   'sessions',
   'tasks',
   'task_steering_operations',
+  'memory_jobs',
   'events',
   'tool_calls',
   'permission_requests',
@@ -52,7 +53,7 @@ const BUSINESS_TABLES = [
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -94,6 +95,19 @@ describe('storage migrations', () => {
       .toEqual({ permission_mode: 'ask' })
     db.close()
   })
+
+  it('v33 preserves old memory claims and pending input without inventing job receipts', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+    withMigrationTransaction(db, () => { for (const migration of migrations.filter(item => item.version <= 32)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version, '2026-10-01'); } });
+    const old = JSON.stringify({ v: 1, running: { kind: 'extraction', sessionId: 'unknown', token: 'old' }, pendingTurns: [{ taskId: 'unreadable', sessionId: 'old' }] });
+    db.prepare('INSERT INTO configs(key,value) VALUES (?,?)').run('lark.memory.state.app.groups', old);
+    runMigrations(db);
+    expect(db.prepare('SELECT value FROM configs WHERE key=?').pluck().get('lark.memory.state.app.groups')).toBe(old);
+    expect(db.prepare('SELECT COUNT(*) FROM memory_jobs').pluck().get()).toBe(0);
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+    db.close();
+  });
 
   it('v31 pins terminal backends while preserving null legacy rows and validating persisted values', () => {
     const db = new Database(':memory:')

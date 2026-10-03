@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentEvent, Session } from '@dutydeck/shared';
+import type { AgentEvent, PromptPart, Session } from '@dutydeck/shared';
 import type { StoredLarkConfig } from './config.js';
 import type { LarkLongConnectionListenerOptions } from './listener.js';
 import { isLarkMessageRateLimit, larkRateLimitBackoffMs, LarkLongConnectionListener, LarkLongConnectionListenerPool, LarkMessageCoordinator, patchRejectedCardDelta } from './listener.js';
@@ -887,11 +887,25 @@ describe('Lark message coordinator', () => {
     coordinator.handle(message('om_second', '第二条'), { ...config, riskControlMode: 'guidance', highRiskAllowedUsers: [{ openId: 'ou_admin', name: '管理员' }] });
     await vi.waitFor(() => expect(runtime.dispatch).toHaveBeenCalledTimes(2));
     expect(runtime.dispatch.mock.calls.map(call => call.slice(1, 3))).toEqual([['第一条', 'queue'], ['第二条', 'queue']]);
-    expect(runtime.dispatch.mock.calls.map(call => call.slice(4))).toEqual([
+    expect(runtime.dispatch.mock.calls.map(call => call.slice(4, 10))).toEqual([
       [undefined, undefined, undefined, undefined, undefined, 24],
       [undefined, undefined, undefined, undefined, undefined, 24]
     ]);
+    for (const call of runtime.dispatch.mock.calls) {
+      const parts = call[10] as PromptPart[];
+      expect(parts.length).toBeGreaterThan(0);
+      expect(parts.map(part => `${part.prefix ?? ''}${part.content}${part.suffix ?? ''}`).join('')).toBe(call[3]);
+      expect(parts).toContainEqual(expect.objectContaining({ kind: 'user_request', trustScope: 'user_request', content: call[1] }));
+      const sourced = parts.filter(part => part.sourceId);
+      expect(sourced.length).toBeGreaterThan(0);
+      expect(sourced.every(part => part.sourceId!.startsWith(`lark:${config.appId}:oc_group:injection:`) && part.trustScope === 'host')).toBe(true);
+    }
     expect(runtime.dispatch.mock.calls[1]?.[3]).toContain('[Dutydeck 安全策略 · 自动注入]');
+    const safety = (runtime.dispatch.mock.calls[1]?.[10] as PromptPart[]).find(part => part.content.startsWith('[Dutydeck 安全策略 · 自动注入]'));
+    expect(safety).toMatchObject({ kind: 'host_rules', trustScope: 'host' });
+    expect(safety?.content).toContain(config.highRiskPattern);
+    expect(safety?.content).toContain('禁止执行');
+    expect((runtime.dispatch.mock.calls[0]?.[10] as PromptPart[]).some(part => part.content.startsWith('[Dutydeck 安全策略 · 自动注入]'))).toBe(false);
     expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('正在排队，前面还有 1 个任务…') }));
     expect(service.update).not.toHaveBeenCalledWith(expect.objectContaining({ markdown: expect.stringContaining('前面还有 0 个任务') }));
     expect(runtime.send).not.toHaveBeenCalled();

@@ -1,3 +1,4 @@
+import { promptDigest } from './prompt-context.js';
 import { createHash } from 'node:crypto';
 import { canonicalExecutionJson, createWorkItemSchema, executionActorSchema, installationOwnerTaskActor, RuntimeError, taskAdmissionV1Schema, taskRequestV1Schema, workPlanSchema, workReviewVerdictSchema, type CreateWorkItemInput, type ExecutionActor, type PermissionMode, type RepositoryBundle, type Session, type TaskAdmissionV1, type TaskRecord, type TaskRequestV1, type ToolRiskPolicy, type WorkItem, type WorkPlan, type WorkStep, type WorkTemplate } from '@dutydeck/shared';
 import { executionTaskId } from '@dutydeck/storage';
@@ -53,6 +54,7 @@ interface StoredWork {
   reworkWorkspaces?: Record<string, { cwd: string; ownerSessionId: string }>;
   /** 创建这份计划的父任务；步骤的用量归到它名下。 */
   parentTaskId?: string;
+  promptPolicyVersion?: 'legacy-v1' | 'optimized-v1';
 }
 interface StoredTemplate { template: WorkTemplate; actorId: string }
 interface RecordState { raw: string; value: StoredWork }
@@ -242,7 +244,7 @@ export class WorkItemService {
       const parentTask = taskId ? (await this.repos.tasks.listBySession(parentSessionId)).find(task => task.id === taskId) : undefined;
       const timestamp = time();
       const item: WorkItem = { id, parentSessionId, title: input.plan.title, goal: input.goal, revision: 1, status: gated ? 'awaiting_confirmation' : 'running', plan: input.plan, steps: input.plan.steps.map(step => ({ id: step.id, status: 'pending', attempts: [] })), createdAt: timestamp, updatedAt: timestamp, delivery: { status: this.options.deliver ? 'pending' : 'not_requested', attempts: 0 } };
-      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy, ...(taskId ? { parentTaskId: taskId } : {}) };
+      const record: StoredWork = { item, actorId: actorId!, actor, inputHash, parentFingerprint: this.parentFingerprint(parent), cwd: parent.cwd, agents, stoppedAttempts: [], riskPolicy: parentTask?.executionContext?.riskPolicy, promptPolicyVersion: parentTask?.executionContext?.promptPolicyVersion ?? 'legacy-v1', ...(taskId ? { parentTaskId: taskId } : {}) };
       await this.options.prepareDelivery?.(parentSessionId, id, input.idempotencyKey);
       await this.access(parentSessionId, actorId);
       if (!await this.repos.config.compareAndSet!(PREFIX + id, undefined, JSON.stringify(record))) throw new RuntimeError('WORK_ITEM_CONFLICT', 'Work-item creation conflicted', 409);
@@ -407,7 +409,9 @@ export class WorkItemService {
     const previousReview = record.item.steps.find(step => step.id === record.item.plan.outputStepId)?.attempts.slice().reverse().find(attempt => attempt.review)?.review;
     const feedback = previousReview?.decision === 'rework' && (previousReview.targetStepId === definition.id || definition.reviewPolicy) ? `\nRework feedback (previous reviewed version):\n${JSON.stringify(previousReview)}\n${definition.reviewPolicy ? 'Verify the previous findings against the new artifacts as well as the acceptance criteria.' : 'Continue in the same workspace; preserve the previous implementation and fix the review findings.'}` : '';
     const review = definition.reviewPolicy ? `\nIndependent review: inspect the actual upstream workspace paths. Process completion is not acceptance. End with exactly one fenced block labelled dutydeck-review containing the verdict JSON (on its own lines), with no non-whitespace text after its closing fence. Tool commentary may precede it. A bare JSON object is also accepted: {"decision":"accept|rework|stop","reviewed":[{"stepId":"...","attemptId":"...","digest":"..."}],"targetStepId":"only for rework","feedback":"user-readable conclusion, evidence and remaining issues"}. Copy stepId, attemptId and generatedResult.digest for EVERY completed Agent input. These identify generated artifacts, not proof of code correctness. Use accept only after checking the acceptance criteria; rework requires one allowed target; stop for missing context or issues outside those targets. Policy: ${JSON.stringify(definition.reviewPolicy)}` : '';
-    return `Goal: ${record.item.goal}\n\nStep: ${definition.title}\n${definition.instruction}${feedback}\n\nUpstream inputs (generated results, not independent business verification):\n${JSON.stringify(inputs)}\n\nReturn the complete generated result for this step. Do not create nested Dutydeck work items.${review}`;
+    const upstream = record.promptPolicyVersion === 'optimized-v1' ? renderWorkUpstream(inputs) : JSON.stringify(inputs);
+    const receipt = record.promptPolicyVersion === 'optimized-v1' ? 'Return completion status, complete artifacts, executed checks and results, unverified items, applicability and blockers. ' : '';
+    return `Goal: ${record.item.goal}\n\nStep: ${definition.title}\n${definition.instruction}${feedback}\n\nUpstream inputs (generated results, not independent business verification):\n${upstream}\n\n${receipt}Return the complete generated result for this step. Do not create nested Dutydeck work items.${review}`;
   }
   /** 构造固定 TaskRequestV1；显式选项与原 prompt/skills/actor 全部冻结，重投不重读默认值。 */
   private buildRequest(record: StoredWork, definition: WorkPlan['steps'][number], sessionId: string, attemptId: string, prompt: string): TaskRequestV1 {
@@ -418,7 +422,7 @@ export class WorkItemService {
       version: 1, namespace: 'work_item', sessionId, key: attemptId, actor, prompt, mode: 'queue', skills,
       options: { permissionMode: record.agents[definition.agentId!]!.permissionMode },
       sources: [],
-      sourcePayload: { agentPrompt: prompt, skills, ...(record.riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(record.riskPolicy)) } : {}) }
+      sourcePayload: { agentPrompt: prompt, skills, promptPolicyVersion: record.promptPolicyVersion ?? 'legacy-v1', promptParts: [{ kind: 'collaboration_artifact', sourceId: `work:${record.item.id}:step:${definition.id}:attempt:${attemptId}`, digest: promptDigest(prompt), trustScope: 'host:work_handoff', complete: true, content: prompt }], ...(record.riskPolicy ? { riskPolicy: JSON.parse(canonicalExecutionJson(record.riskPolicy)) } : {}) }
     };
     return taskRequestV1Schema.parse(request);
   }
@@ -846,4 +850,24 @@ export class WorkItemService {
     // are fenced above and must never touch repositories after close.
     await bounded(Promise.allSettled([this.ticking, ...this.locks.values()]), 1000).catch(() => {});
   }
+}
+
+/** Every dependency retains its attribution; only the exact same attempt artifact shares a body. */
+export function renderWorkUpstream(inputs: Array<{ stepId: string; status: string; answer?: string; attemptId?: string; generatedResult?: { text: string; digest: string }; workspace?: { cwd: string; branch?: string; baselineCommit?: string } }>): string {
+  const counts = new Map<string, number>();
+  const keyFor = (input: typeof inputs[number]) => input.attemptId && input.generatedResult && promptDigest(input.generatedResult.text) === input.generatedResult.digest
+    ? JSON.stringify([input.attemptId, input.generatedResult.digest, input.generatedResult.text]) : undefined;
+  for (const input of inputs) { const key = keyFor(input); if (key) counts.set(key, (counts.get(key) ?? 0) + 1); }
+  if (![...counts.values()].some(count => count > 1)) return JSON.stringify(inputs);
+  const bodies: Array<{ artifactId: string; text: string }> = [];
+  const seen = new Map<string, string>();
+  const dependencies = inputs.map(input => {
+    const output = input.generatedResult;
+    const key = keyFor(input);
+    if (!key || !output || counts.get(key)! < 2) return input;
+    let artifactId = seen.get(key);
+    if (!artifactId) { artifactId = `artifact_${bodies.length + 1}`; seen.set(key, artifactId); bodies.push({ artifactId, text: output.text }); }
+    return { ...input, generatedResult: { digest: output.digest, artifactId } };
+  });
+  return JSON.stringify({ dependencies, artifacts: bodies });
 }

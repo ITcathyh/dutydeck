@@ -1,6 +1,6 @@
 import type { LarkLaunchOptions } from './new-session.js';
 import { randomUUID } from 'node:crypto';
-import type { ConfigRepository } from '@dutydeck/shared';
+import type { ConfigRepository, PromptPart } from '@dutydeck/shared';
 import type { LarkMessageResource } from './message-content.js';
 import type { LarkContextCursor } from './task-context.js';
 import type { LarkMessageEvent } from './listener.js';
@@ -19,7 +19,7 @@ export interface LarkInboxRecord {
   turn?: number;
   workflowRequestId?: string;
   request?: { prompt: string; scopeId: string; resources: LarkMessageResource[]; materialPrompt?: string; launchOptions?: LarkLaunchOptions };
-  materials?: { prompt: string; cursor?: LarkContextCursor; readMessageIds: string[]; contextBefore?: string };
+  materials?: { prompt: string; promptParts?: PromptPart[]; cursor?: LarkContextCursor; readMessageIds: string[]; contextBefore?: string };
   /** 这一轮是服务重启切断之后的重投：Agent prompt 前附说明，count 也是下一次能不能自动重投的依据。 */
   redispatch?: LarkRedispatchInfo;
   error?: string;

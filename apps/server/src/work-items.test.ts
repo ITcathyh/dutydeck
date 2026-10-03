@@ -40,11 +40,13 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
   let beforeSubmit: (() => Promise<void>) | undefined;
   let beforeStart: (() => Promise<void>) | undefined;
   const deniedAgents = new Set<string>();
+  let promptPolicy: 'legacy-v1' | 'optimized-v1' = 'legacy-v1';
   let allowed = true; let gated = false; let service: WorkItemService; let runtime: DutydeckRuntime;
   const deliveries = vi.fn(async (_item: WorkItem) => {});
   const notifications = vi.fn(async (_item: WorkItem, _actorId: string) => {});
   const makeRuntime = () => new DutydeckRuntime(repos, {
     workspaceRoot: join(directory, 'workspaces'), cleanupIntervalMs: 0,
+    selectPromptPolicy: async () => ({ version: promptPolicy }),
     probe: (() => ({ available: true, protocol: 'acp', acp: true, jsonl: false, pipe: false, pty: false })) as any,
     authorizeExecution: async (id, actor) => { await service.authorizeExecution(id, actor); },
     authorizeControl: async (id, actor) => { await service.authorizeControl(id, actor); },
@@ -84,6 +86,7 @@ async function fixture(stopProof: 'confirmed' | 'missing' | 'unproven' = 'confir
   cleanup.push(async () => { await service.close(); await runtime.shutdown(); await repos.close(); await rm(directory, { recursive: true, force: true }); });
   return {
     directory,
+    setPolicy(version: typeof promptPolicy) { promptPolicy = version; },
     repos, agents, parent, calls, stopped, deliveries, notifications,
     holdStart(action: () => Promise<void>) { beforeStart = action; },
     get service() { return service; }, get runtime() { return runtime; },
@@ -111,6 +114,23 @@ describe('Work plan validation', () => {
 });
 
 describe('WorkItemService with real Runtime and SQLite', () => {
+  it('inherits the completed root task policy for child tasks after an installation policy change', async () => {
+    const f = await fixture();
+    f.setPolicy('optimized-v1');
+    const root = await f.runtime.dispatch(f.parent.id, 'parent request', 'queue', 'parent request', undefined, 'ou_owner');
+    await eventually(async () => f.calls.length === 1);
+    await f.finish(f.calls[0]!, 'parent result');
+    f.setPolicy('legacy-v1');
+    const single = { ...plan, steps: [plan.steps[0]!], outputStepId: 'a' };
+    const item = await f.service.create(f.parent.id, { goal: 'Compare evidence', plan: single, idempotencyKey: 'root-policy' }, 'ou_owner', undefined, root.id);
+    await f.tick(); await eventually(async () => f.calls.length === 2);
+    const child = f.calls[1]!;
+    expect(child.prompt).toContain('Return completion status, complete artifacts');
+    const task = (await f.repos.tasks.listBySession(child.sessionId))[0]!;
+    expect(f.repos.execution.getAcceptedTask(task.id)?.input?.executionContext.promptPolicyVersion).toBe('optimized-v1');
+    await f.finish(child, 'full artifact'); await f.tick();
+    expect((await f.get(item.id)).status).toBe('completed');
+  });
   it('runs independent branches concurrently and synthesizes full frozen results exactly once', async () => {
     const f = await fixture(); const item = await f.create();
     await f.tick(); await eventually(async () => f.calls.length === 2);

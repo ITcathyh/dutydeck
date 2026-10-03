@@ -812,7 +812,7 @@ describe('shared group pool through the pipeline', () => {
 });
 
 describe('stuck memory session after a daemon restart', () => {
-  it('归档 reconcile_required 的记忆会话、换新会话继续，旧会话的输出绝不被读取，之后复用新会话', async () => {
+  it('重启后原执行未知且归档失败时阻塞补跑，旧输出不被读取', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'dutydeck-lark-memory-restart-'));
     cleanups.push(() => rm(cwd, { recursive: true, force: true }));
     const file = join(cwd, 'state.db');
@@ -895,30 +895,15 @@ describe('stuck memory session after a daemon restart', () => {
     cleanups.push(second.close);
     await vi.waitFor(async () => expect((await second.runtime.getTasks(stuck!.id)).map(task => task.status)).toEqual(['reconcile_required']), { timeout: 10_000 });
 
-    expect(await second.pipeline.runConsolidation(scope)).toMatchObject({ kind: 'consolidation', ok: true });
-    const sessions = await memorySessions(second.runtime);
-    expect(sessions).toHaveLength(2);
-    const old = sessions.find(session => session.id === stuck!.id)!;
-    const replacement = sessions.find(session => session.id !== stuck!.id)!;
-    // 归档要先停掉原执行：重启后原进程资源未经确认时 runtime 会拒绝（SESSION_RESOURCE_BLOCKED），
-    // 旧会话于是留在账本里等人工恢复；不论归档成没成功，都不能再被选中。
-    const retired = second.log.warn.mock.calls.find(call => String(call[1]).startsWith('记忆会话有未决任务'));
-    expect(retired?.[0]).toMatchObject({ sessionId: old.id });
-    expect(retired?.[1]).toBe(old.archivedAt ? '记忆会话有未决任务，已归档并改用新会话' : '记忆会话有未决任务且归档未完成，改用新会话');
-    expect(replacement.archivedAt).toBeFalsy();
-    // 旧会话的任务账本保留、没有再派发；新会话收到这次整理并正常完成。
-    expect((await second.runtime.getTasks(old.id)).map(task => task.status)).toEqual(['reconcile_required']);
-    expect((await second.runtime.getTasks(replacement.id)).map(task => task.status)).toEqual(['completed']);
-    expect(memoryPrompts).toHaveLength(2);
-    // 旧会话里那段「淘汰用户条目」的输出没有被当成结果。
+    expect(await second.pipeline.runConsolidation(scope)).toMatchObject({ kind: 'consolidation', ok: false, error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(await memorySessions(second.runtime)).toHaveLength(1);
+    expect((await second.runtime.getTasks(stuck!.id)).map(task => task.status)).toEqual(['reconcile_required']);
+    expect(memoryPrompts).toHaveLength(1);
     expect((await second.store.list(scope)).map(entry => entry.id)).toEqual([poisonId]);
+    expect(await second.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(second.starts).toHaveLength(0);
+    expect(memoryPrompts).toHaveLength(1);
 
-    // 下一次运行按 sourceId 选中新会话，不再新建，也不再碰旧会话。
-    expect(await second.pipeline.runConsolidation(scope)).toMatchObject({ ok: true });
-    expect(second.starts).toHaveLength(1);
-    expect((await second.runtime.getTasks(replacement.id)).map(task => task.status)).toEqual(['completed', 'completed']);
-    expect((await second.runtime.getTasks(old.id)).map(task => task.status)).toEqual(['reconcile_required']);
-    expect(second.log.warn.mock.calls.filter(call => String(call[1]).startsWith('记忆会话有未决任务'))).toHaveLength(1);
   });
 });
 

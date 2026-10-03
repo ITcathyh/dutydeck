@@ -609,3 +609,22 @@ describe('collectLarkTaskContext', () => {
     expect(result.sources).toEqual([expect.objectContaining({ messageId: 'om_fail_merge', error: 'API限流' })]);
   });
 });
+
+describe('frozen material sources', () => {
+  it('renders exactly the established input and marks truncation independently from a complete source', async () => {
+    const result = await collect({ service: service({ readDocument: async url => ({ url, title: 'Specification', text: '正文'.repeat(6000) }) }), prompt: '阅读 https://example.feishu.cn/docx/abc123' });
+    expect(result.promptParts.map(part => `${part.prefix ?? ''}${part.content}${part.suffix ?? ''}`).join('')).toBe(result.agentPrompt);
+    const document = result.promptParts.find(part => part.sourceId?.includes('document:'))!;
+    expect(document.complete).toBe(false);
+    expect(document.suffix).toContain('已截断');
+    expect(document.trustScope).toBe('reference:lark:oc_group');
+  });
+  it('keeps reference failure evidence and all available complete message attribution', async () => {
+    const result = await collect({ event: event({ parentId: 'om_parent' }), service: service() });
+    expect(result.promptParts.map(part => `${part.prefix ?? ''}${part.content}${part.suffix ?? ''}`).join('')).toBe(result.agentPrompt);
+    const parent = result.promptParts.find(part => part.sourceId === 'lark:oc_group:message:om_parent')!;
+    expect(parent.complete).toBe(true);
+    expect(parent.content).toBe('引用 om_parent');
+    expect(parent.prefix).toContain('om_parent');
+  });
+});

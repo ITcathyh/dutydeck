@@ -96,8 +96,15 @@ export async function registerLarkAgentToolRoutes(app: FastifyInstance, service?
     } catch (error) { return handleToolError(error, reply); }
   });
 
-  app.get<{ Params: { taskId: string } }>('/api/lark/agent-tools/history/:taskId', async (request, reply) => {
-    try { return await service.historyTask(tokenFrom(request.headers.authorization), { taskId: request.params.taskId }); }
+  app.get<{ Params: { taskId: string }; Querystring: { field?: string; offset?: string; length?: string; cursor?: string } }>('/api/lark/agent-tools/history/:taskId', async (request, reply) => {
+    try {
+      const integer = (value: string) => typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value) ? Number(value) : NaN;
+      return await service.historyTask(tokenFrom(request.headers.authorization), { taskId: request.params.taskId,
+        ...(request.query.field !== undefined ? { field: request.query.field } : {}),
+        ...(request.query.offset !== undefined ? { offset: integer(request.query.offset) } : {}),
+        ...(request.query.length !== undefined ? { length: integer(request.query.length) } : {}),
+        ...(request.query.cursor !== undefined ? { cursor: request.query.cursor } : {}) });
+    }
     catch (error) { return handleToolError(error, reply); }
   });
 

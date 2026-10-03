@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { executionTaskId } from '@dutydeck/storage';
-import { makeId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals } from '@dutydeck/shared';
+import { makeId, RuntimeError, type UsageBackgroundLimits, type UsageBackgroundBudget, type AttemptRef, type RepositoryBundle, type Session, type TaskRequestV1, type UsageCap, type UsageCapScope, type UsageCategory, type UsageGroup, type UsageLedgerEntry, type UsageTotals, type UsageFilter, type JsonValue } from '@dutydeck/shared';
 
 const rateSchema = z.object({ inputPerMTok: z.number().nonnegative(), cachedInputPerMTok: z.number().nonnegative(), outputPerMTok: z.number().nonnegative(), cacheWritePerMTok: z.number().nonnegative().optional(), provider: z.string().trim().min(1).optional() }).strict();
 const pricingSchema = z.object({ version: z.string().trim().min(1).optional(), default: rateSchema, models: z.array(rateSchema.extend({ match: z.string().trim().min(1) }).strict()) }).strict();
@@ -350,4 +350,67 @@ export class UsageLedger {
   listCaps() { return this.repos.usage.listCaps(); }
   setCap(cap: Omit<UsageCap, 'updatedAt'>) { return this.repos.usage.setCap(cap); }
   deleteCap(scope: UsageCapScope, appId: string, chatId?: string) { return this.repos.usage.deleteCap(scope, appId, chatId); }
+}
+
+/** The caller supplies only already-authorized job records; this helper creates no public route. */
+export async function tokenEfficiencyUsageReport(
+  repos: Pick<RepositoryBundle, 'usage' | 'execution'>,
+  input: { rootTaskIds: string[]; taskIds?: string[]; filter: UsageFilter;
+    memoryJobs?: Array<{ id: string; scope: { appId: string; pool: string }; sessionId: string; input: JsonValue; requests: TaskRequestV1[] }> }
+) {
+  const executionAvailable = repos.execution.authority() === 'ledger_v1';
+  const roots = new Set(input.rootTaskIds);
+  const taskIds = new Set([...roots, ...(input.taskIds ?? [])]);
+  const entries = await repos.usage.listEntries(input.filter);
+  for (const entry of entries) if (entry.rootTaskId && roots.has(entry.rootTaskId)) taskIds.add(entry.taskId);
+  const jobs = new Map<string, NonNullable<typeof input.memoryJobs>[number]>();
+  for (const job of input.memoryJobs ?? []) {
+    if (input.filter.appId !== undefined && job.scope.appId !== input.filter.appId) continue;
+    const frozen = job.input as { turns?: Array<{ taskId?: unknown }> } | null;
+    if (Array.isArray(frozen?.turns) && frozen.turns.some(turn => turn && typeof turn.taskId === 'string' && taskIds.has(turn.taskId))) jobs.set(job.id, job);
+  }
+  // A compatible session can run unrelated jobs. Match stable dispatch task identities, never its entire session.
+  const jobTasks = new Set([...jobs.values()].flatMap(job => job.requests.map(request => executionTaskId(request.namespace, request.sessionId, request.key))));
+  // Shared-pool rows have no chat/root-session attribution. Authorized frozen jobs supply
+  // the exact identities to supplement; keep their app and the requested time window.
+  const tasksByApp = new Map<string, Set<string>>();
+  for (const job of jobs.values()) {
+    const ids = tasksByApp.get(job.scope.appId) ?? new Set<string>();
+    for (const request of job.requests) ids.add(executionTaskId(request.namespace, request.sessionId, request.key));
+    tasksByApp.set(job.scope.appId, ids);
+  }
+  const jobEntries = (await Promise.all([...tasksByApp].map(([appId, ids]) => repos.usage.listEntries(
+    { appId, ...(input.filter.since !== undefined ? { since: input.filter.since } : {}) }, [...ids]
+  )))).flat();
+  const selected = [...entries, ...jobEntries].filter(entry => taskIds.has(entry.taskId) || entry.rootTaskId && roots.has(entry.rootTaskId) || jobTasks.has(entry.taskId));
+  const seenAttempts = new Set<string>(), seenUsage = new Set<string>();
+  const unique = selected.filter(entry => {
+    const attempt = JSON.stringify([entry.sessionId, entry.attemptId]);
+    const usage = entry.usageRef ? JSON.stringify([entry.sessionId, entry.usageRef]) : undefined;
+    if (seenAttempts.has(attempt) || usage && seenUsage.has(usage)) return false;
+    seenAttempts.add(attempt); if (usage) seenUsage.add(usage); return true;
+  });
+  const policies: Record<string, number> = {};
+  const fields = ['inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens'] as const;
+  const tokens = Object.fromEntries(fields.map(field => {
+    const reported = unique.filter(entry => typeof entry[field] === 'number');
+    return [field, { value: reported.length ? reported.reduce((sum, entry) => sum + entry[field]!, 0) : null, reportedEntries: reported.length,
+      coverage: unique.length ? reported.length / unique.length : null }];
+  })) as Record<typeof fields[number], { value: number | null; reportedEntries: number; coverage: number | null }>;
+  for (const entry of unique) {
+    const policy = (executionAvailable ? repos.execution.getAcceptedTask(entry.taskId)?.input?.executionContext.promptPolicyVersion : undefined) ?? 'legacy_unversioned';
+    policies[policy] = (policies[policy] ?? 0) + 1;
+  }
+  const allTasks = new Set([...taskIds, ...jobTasks]);
+  const attempts = executionAvailable ? [...allTasks].flatMap(taskId => repos.execution.getTaskExecution(taskId)?.attempts ?? []) : [];
+  const covered = new Set(unique.map(entry => entry.attemptId));
+  return {
+    executionCoverage: executionAvailable ? 'ledger_v1' as const : 'legacy_unavailable' as const,
+    entries: unique.length, policies, tokens, memoryJobIds: [...jobs.keys()],
+    accounting: 'shared_memory_jobs_counted_once' as const,
+    unavailableEntries: unique.filter(entry => entry.dataStatus === 'unavailable').length,
+    missingUsageAttempts: attempts.filter(attempt => !covered.has(attempt.attemptId)).map(attempt => attempt.attemptId),
+    costUsd: unique.some(entry => entry.costUsd !== undefined) ? unique.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0) : null,
+    taskStates: [...allTasks].map(taskId => ({ taskId, status: (executionAvailable ? repos.execution.getTaskExecution(taskId)?.task.status : undefined) ?? 'unavailable' }))
+  };
 }

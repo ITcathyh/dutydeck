@@ -119,6 +119,54 @@ describe('history list/show', () => {
   });
 });
 
+describe('history verbatim ranges', () => {
+  it('reads huge saved requests without clipping and stitches Unicode pages exactly', async () => {
+    const { repos, tools, token } = await setup();
+    const original = `  A😀B\n${'汉😀'.repeat(50_000)}  `;
+    await repos.tasks.save(task('task_huge', 'ses_own', '2026-09-24T02:00:00.000Z', original));
+    let page = await tools.historyTask(token, { taskId: 'task_huge', field: 'request', length: 7_999 });
+    let combined = '';
+    while ('text' in page) {
+      expect(page).toMatchObject({ readStatus: 'completed', source: 'stored_request', unit: 'utf16_code_unit', totalChars: original.length });
+      expect(page.text).toBe(original.slice(page.start!, page.end!));
+      expect(page.text).not.toMatch(/^[\uDC00-\uDFFF]|[\uD800-\uDBFF]$/);
+      combined += page.text;
+      if (!page.nextCursor) { expect(page.complete).toBe(true); break; }
+      expect(page.complete).toBe(false);
+      page = await tools.historyTask(token, { taskId: 'task_huge', cursor: page.nextCursor });
+    }
+    expect(combined).toBe(original);
+    expect(await tools.historyTask(token, { taskId: 'task_huge', field: 'request', offset: 4, length: 1 })).toMatchObject({ text: '😀', start: 3, end: 5 });
+    expect(await tools.historyTask(token, { taskId: 'task_huge', field: 'request', offset: original.length })).toMatchObject({ text: '', complete: true });
+  });
+
+  it('rejects changed versions, task/scope mismatches, invalid ranges, and revoked authorization', async () => {
+    const { repos, tools, token } = await setup();
+    const page = await tools.historyTask(token, { taskId: 'task_deploy', field: 'request', length: 1 });
+    const cursor = 'nextCursor' in page ? page.nextCursor! : '';
+    await expect(tools.historyTask(token, { taskId: 'task_release', cursor })).rejects.toMatchObject({ code: 'HISTORY_INVALID_RANGE' });
+    for (const range of [{ field: 'wrong' }, { offset: 0 }, { field: 'request', offset: -1 }, { field: 'answer', length: 0 }, { field: 'request', length: 8_001 }, { field: 'request', offset: 1.5 }, { field: 'request', offset: Number.MAX_SAFE_INTEGER + 1 }, { cursor, length: 1 }, { cursor, field: 'request' }, { cursor: 'bad' }]) {
+      await expect(tools.historyTask(token, { taskId: 'task_deploy', ...range })).rejects.toMatchObject({ code: 'HISTORY_INVALID_RANGE' });
+    }
+    await repos.tasks.save(task('task_deploy', 'ses_own', '2026-09-20T02:00:00.000Z', 'changed'));
+    await expect(tools.historyTask(token, { taskId: 'task_deploy', cursor })).rejects.toMatchObject({ code: 'HISTORY_CONTENT_CHANGED', statusCode: 409 });
+    for (const taskId of ['task_other_chat', 'task_missing']) await expect(tools.historyTask(token, { taskId, cursor })).rejects.toMatchObject({ code: 'HISTORY_TASK_NOT_FOUND', statusCode: 404 });
+    await repos.config.set(larkBotsConfigKey, JSON.stringify([{ appId: 'cli_current', appSecret: 'secret', groupToolsEnabled: false }]));
+    await expect(tools.historyTask(token, { taskId: 'task_deploy', cursor })).rejects.toMatchObject({ code: 'GROUP_TOOLS_DISABLED' });
+  });
+
+  it('distinguishes missing, unsettled, and source read failure without declaring complete', async () => {
+    const f = await setup();
+    vi.spyOn(f.repos.execution, 'getTaskExecution').mockReturnValue(undefined);
+    expect(await f.tools.historyTask(f.token, { taskId: 'task_deploy', field: 'answer' })).toMatchObject({ readStatus: 'missing', text: null, totalChars: null, complete: false });
+    await f.repos.tasks.save({ ...task('task_pending', 'ses_own', '2026-09-24T02:00:00.000Z', 'pending'), status: 'running' });
+    expect(await f.tools.historyTask(f.token, { taskId: 'task_pending', field: 'answer' })).toMatchObject({ readStatus: 'unsettled', complete: false });
+    vi.spyOn(f.repos.execution, 'getTaskExecution').mockImplementation(() => { throw new Error('private storage details'); });
+    expect(await f.tools.historyTask(f.token, { taskId: 'task_deploy', field: 'answer' })).toMatchObject({ readStatus: 'read_error', error: 'HISTORY_SOURCE_READ_FAILED', complete: false });
+    expect(await f.tools.historyTask(f.token, { taskId: 'task_deploy' })).not.toHaveProperty('answer');
+  });
+});
+
 const origin = { appId: 'cli_current', chatId: 'oc_group' }, todo = { appId: 'cli_current', chatId: 'oc_todo' }, secret = { appId: 'cli_current', chatId: 'oc_secret' };
 const at = '2026-09-21T03:00:00.000Z';
 const observation = (id: string, text: string, overrides: Partial<CollaborationObservation> = {}): CollaborationObservation => ({

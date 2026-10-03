@@ -1,3 +1,4 @@
+import { deliveryPrompt } from '../prompt-context.js';
 import { readExplicitFinal, resolveExplicitFinalContext, sendExplicitFinal, withExplicitFinalLock, type ExplicitFinalContext, type ExplicitFinalScope } from './explicit-final.js';
 import { collaborationAgentPrompt } from '../collaboration-cli.js';
 import { layeredWorkbenchPrompt, workbenchAgentPrompt } from '../work-item-tools.js';
@@ -355,6 +356,29 @@ function inChat(session: Pick<Session, 'source' | 'sourceId'>, binding: LarkAgen
  * 任务的最终答复。这一轮用 group send --final 交付过答复时取那条记录（此时助手文本往往只剩一句确认）；
  * 否则取法同记忆提取管线：number=1 Attempt 正常完成时的助手文本。都读不到时没有回答。
  */
+type HistoryAnswerRead = { readStatus: 'missing' | 'unsettled' | 'read_error' | 'completed'; source?: 'explicit_final' | 'attempt'; text?: string; error?: string };
+export interface HistoryTaskInput { taskId?: string; field?: string; offset?: number; length?: number; cursor?: string }
+
+async function readHistoryAnswer(repos: AttemptResultRepositories, store: ConfigRepository, session: Session, task: TaskRecord, cards: ChannelMapping[] | undefined): Promise<HistoryAnswerRead> {
+  let source: HistoryAnswerRead['source'];
+  try {
+    const attemptId = repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.number === 1)?.attemptId;
+    if (!attemptId) return { readStatus: ['queued', 'running', 'reconcile_required'].includes(task.status) ? 'unsettled' : 'missing' };
+    const binding = larkAgentSessionBinding(session);
+    const final = cards && binding ? await resolveExplicitFinalContext(cards, binding, { taskId: task.id, attemptId }) : undefined;
+    if (final) source = 'explicit_final';
+    const explicit = final ? await readExplicitFinal(store, final, true) : undefined;
+    if (explicit !== undefined) return { readStatus: 'completed', source: 'explicit_final', text: explicit };
+    source = 'attempt';
+    const read = readAttemptResult(repos, task.sessionId, task.id, attemptId);
+    if (read.status !== 'settled') return { readStatus: 'unsettled', source: 'attempt' };
+    if (read.result.outcome !== 'completed' || !read.result.output.text) return { readStatus: 'missing', source: 'attempt' };
+    return { readStatus: 'completed', source: 'attempt', text: read.result.output.text };
+  } catch (error) {
+    return { readStatus: 'read_error', ...(source ? { source } : {}), error: error && typeof error === 'object' && 'code' in error ? String(error.code) : 'HISTORY_SOURCE_READ_FAILED' };
+  }
+}
+
 async function taskAnswer(repos: AttemptResultRepositories, store: ConfigRepository, session: Session, task: TaskRecord, cards: ChannelMapping[] | undefined): Promise<string | undefined> {
   try {
     const attemptId = repos.execution.getTaskExecution(task.id)?.attempts.find(item => item.number === 1)?.attemptId;
@@ -368,6 +392,25 @@ async function taskAnswer(repos: AttemptResultRepositories, store: ConfigReposit
     return read.status === 'settled' && read.result.outcome === 'completed' ? read.result.output.text.trim() || undefined : undefined;
   } catch { return undefined; }
 }
+
+interface HistoryCursor { version: 1; scope: string; taskId: string; field: 'request' | 'answer'; digest: string; offset: number; length: number }
+function historyRange(input: HistoryTaskInput, scope: string, taskId: string) {
+  const invalid = () => { throw new AgentGroupToolError('HISTORY_INVALID_RANGE', 'field 只能为 request/answer；offset 为非负整数，length 为 1-8000 的整数；cursor 不能与 field/offset/length 同用。', 400); };
+  const length = input.length ?? 4_000;
+  if (input.cursor !== undefined) {
+    if (input.field !== undefined || input.offset !== undefined || input.length !== undefined || typeof input.cursor !== 'string' || !input.cursor || input.cursor.length > 2_000) invalid();
+    let cursor: HistoryCursor;
+    try { cursor = JSON.parse(Buffer.from(input.cursor!, 'base64url').toString('utf8')); } catch { return invalid(); }
+    if (!cursor! || cursor.version !== 1 || cursor.scope !== scope || cursor.taskId !== taskId || !['request', 'answer'].includes(cursor.field)
+      || typeof cursor.digest !== 'string' || !/^[a-f0-9]{64}$/.test(cursor.digest) || !Number.isSafeInteger(cursor.offset) || cursor.offset < 0
+      || !Number.isInteger(cursor.length) || cursor.length < 1 || cursor.length > 8_000) invalid();
+    return { field: cursor.field, offset: cursor.offset, length: cursor.length, digest: cursor.digest };
+  }
+  if (!['request', 'answer'].includes(input.field ?? '') || !Number.isSafeInteger(input.offset ?? 0) || (input.offset ?? 0) < 0
+    || !Number.isInteger(length) || length < 1 || length > 8_000) invalid();
+  return { field: input.field as 'request' | 'answer', offset: input.offset ?? 0, length };
+}
+const splitsSurrogate = (text: string, at: number) => at > 0 && at < text.length && /[\uD800-\uDBFF]/.test(text[at - 1]!) && /[\uDC00-\uDFFF]/.test(text[at]!);
 
 function teamSearchLine(item: CollaborationObservation) {
   if (item.source === 'lark.team.followup') {
@@ -627,7 +670,7 @@ export class LarkAgentToolsService {
     return this.membersFor(await this.context(token, 'group_tools.discover'));
   }
 
-  async promptForSession(session: Session, prompt: string) {
+  async promptForSession(session: Session, prompt: string, policyVersion = 'legacy-v1') {
     const binding = larkAgentSessionBinding(session);
     if (!binding) return prompt;
     const base = await readLarkConfig(this.configs, binding.appId, { readOnly: true });
@@ -659,11 +702,9 @@ export class LarkAgentToolsService {
     const cmd = this.options.groupToolsCommand ?? 'dutydeck';
     const blocks: string[] = [];
     if (memory) blocks.push(larkMemoryToolsPrompt(cmd));
-    blocks.push(collaborationSession ? '本轮最终内容直接输出，由后台调度器负责投递，不额外群发。'
-      : config.completionReactionOnly ? '本会话开启完成表情：普通请求成功时仅用表情提示完成；失败仍可能发结果卡。照常输出最终内容，不用群发绕过展示设置。'
-      : '本轮最终答复直接输出，由运行时交付到原消息范围；不再用普通 group send 重复交付。');
+    blocks.push(deliveryPrompt({ background: collaborationSession, reactionOnly: config.completionReactionOnly }));
     if (config.silentProgress) blocks.push('本会话隐藏普通进度；提问和最终结果仍按各自设置处理。');
-    if (read || discover || send) blocks.push(larkGroupToolsPrompt(send, cmd, { read, discover }));
+    if (read || discover || send) blocks.push(larkGroupToolsPrompt(send, cmd, { read, discover }, policyVersion));
     if (task?.attemptId && send && this.options.finalTaskContext) {
       const turn = this.capabilities.finalTurnToken(session.id, task.taskId, task.attemptId);
       blocks.push(`确需主动最终交付：${cmd} group send '<完整答复>' --final --turn ${turn}。绑定本轮与原消息，不指定 --to 或自定义幂等键；进展/交接不加 --final，映射未就绪稍后重试。`);
@@ -894,7 +935,8 @@ export class LarkAgentToolsService {
     }
     return {
       tasks: tasks.sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)),
-      answer: (task: TaskRecord) => taskAnswer(repos, this.configs, sessions.get(task.sessionId)!, task, cards.get(`${task.sessionId}\0${task.id}`))
+      answer: (task: TaskRecord) => taskAnswer(repos, this.configs, sessions.get(task.sessionId)!, task, cards.get(`${task.sessionId}\0${task.id}`)),
+      readAnswer: (task: TaskRecord) => readHistoryAnswer(repos, this.configs, sessions.get(task.sessionId)!, task, cards.get(`${task.sessionId}\0${task.id}`))
     };
   }
 
@@ -935,14 +977,33 @@ export class LarkAgentToolsService {
     return { chatId: context.chatId, tasks: items, ...(terms.length ? { scanned } : {}), ...(truncated ? { truncated: true } : {}) };
   }
 
-  async historyTask(token: string | undefined, input: { taskId?: string }) {
+  async historyTask(token: string | undefined, input: HistoryTaskInput) {
     const context = await this.context(token, 'group_tools.read');
     const taskId = input.taskId?.trim();
     if (!taskId) throw new AgentGroupToolError('HISTORY_TASK_ID_REQUIRED', 'taskId 不能为空。', 400);
-    const { tasks, answer: answerOf } = await this.chatTasks(context);
+    const { tasks, answer: answerOf, readAnswer } = await this.chatTasks(context);
     const task = tasks.find(item => item.id === taskId);
     // 其他聊天的任务与不存在的任务同样返回 404，不泄露存在性。
     if (!task) throw new AgentGroupToolError('HISTORY_TASK_NOT_FOUND', `本聊天没有编号为 ${taskId} 的任务。`, 404);
+    if (input.field !== undefined || input.offset !== undefined || input.length !== undefined || input.cursor !== undefined) {
+      const scope = JSON.stringify([context.appId, context.chatId, context.chatType]);
+      const range = historyRange(input, scope, taskId);
+      const read = range.field === 'request' ? { readStatus: 'completed' as const, source: 'stored_request' as const, text: task.prompt } : await readAnswer(task);
+      // Recheck authorization after asynchronous source reads; a prior successful page grants no access.
+      await this.context(token, 'group_tools.read');
+      const metadata = { chatId: context.chatId, taskId, field: range.field, unit: 'utf16_code_unit', readStatus: read.readStatus, source: read.source ?? null, originalScope: 'stored', error: 'error' in read ? read.error : null };
+      if (read.readStatus !== 'completed' || read.text === undefined) return { ...metadata, text: null, digest: null, totalChars: null, start: null, end: null, nextCursor: null, complete: false };
+      const text = read.text;
+      const digest = createHash('sha256').update(read.source ?? '').update('\0').update(text).digest('hex');
+      if (range.digest !== undefined && range.digest !== digest) throw new AgentGroupToolError('HISTORY_CONTENT_CHANGED', '原文版本已变化，请重新从 field/offset 定位。', 409);
+      if (range.offset > text.length) throw new AgentGroupToolError('HISTORY_INVALID_RANGE', 'offset 超出已保存原文长度。', 400);
+      // Round start down and end up so an explicit range contains its requested code units.
+      const start = splitsSurrogate(text, range.offset) ? range.offset - 1 : range.offset;
+      let end = Math.min(text.length, range.offset + range.length);
+      if (splitsSurrogate(text, end)) end++;
+      const nextCursor = end < text.length ? Buffer.from(JSON.stringify({ version: 1, scope, taskId, field: range.field, digest, offset: end, length: range.length } satisfies HistoryCursor)).toString('base64url') : null;
+      return { ...metadata, text: text.slice(start, end), digest, totalChars: text.length, start, end, nextCursor, complete: end === text.length };
+    }
     const answer = await answerOf(task);
     // 回答是整轮助手文本的拼接，结论在末尾：超长时保留末尾。
     const answerClipped = answer !== undefined && answer.length > 8_000;
@@ -1370,12 +1431,12 @@ export const larkCapabilityPrompt = (cannotSchedule: boolean) => {
   return lines.join('\n');
 };
 
-export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dutydeck', access = { read: true, discover: true }) => `[Dutydeck 飞书会话工具]
+export const larkGroupToolsPrompt = (allowSend: boolean, command = 'dutydeck', access = { read: true, discover: true }, policyVersion = 'legacy-v1') => `[Dutydeck 飞书会话工具]
 本地配置与当前身份允许尝试：${[access.read && '读取消息/任务历史', access.discover && '发现成员/机器人', allowSend && '发送独立消息/文件'].filter(Boolean).join('、')}。调用仍实时复核成员与平台权限，配置不证明飞书已授权。
 入口：${command} group --help；必须原样使用完整绑定命令，不改用 PATH 中其他 dutydeck。帮助含消息范围、检索、幂等、文件和交接协议。
 ${access.read ? '读取用 group self/messages/message/wait、history list/show；群内跨群资料用 group team-search。先查历史再回答过去结论；未查到不等于不存在，truncated 表示覆盖不完整。messages/wait 限当前话题，wait 先取 cursor，不无限轮询。' : '本地预览未确认消息/历史读取权限。'}
 ${access.discover ? '发现用 group peers/bots/members；agentId 表示本实例 Agent，securityLimited 表示名单不全；不臆测身份。' : '本地预览未确认成员发现权限。'}
-${allowSend ? '普通 group send / group send-file 用于用户授权的独立消息、文件或指定人类目标；单次 Agent 交接用 handoff/reply-agent。本轮最终答复直接输出，由运行时按会话设置交付，不用普通 send 重复发送。延续指定消息时 --reply-to 只用 om_*，勿用 omt_*；独立消息不加 --reply-to/--in-thread。重试沿用同一幂等键，不同内容不用同键；未传键按会话、目标和内容去重。' : '本地预览未确认发送权限，不提供发送或 @交接命令。'}
+${allowSend ? '普通 group send / group send-file 用于用户授权的独立消息、文件或指定人类目标；单次 Agent 交接用 handoff/reply-agent。' + (policyVersion === 'optimized-v1' ? '' : '本轮最终答复直接输出，由运行时按会话设置交付，不用普通 send 重复发送。') + '延续指定消息时 --reply-to 只用 om_*，勿用 omt_*；独立消息不加 --reply-to/--in-thread。重试沿用同一幂等键，不同内容不用同键；未传键按会话、目标和内容去重。' : '本地预览未确认发送权限，不提供发送或 @交接命令。'}
 GROUP_TOOL_AUTHORIZATION_REQUIRED：停止操作，向用户展示 instruction/authorizationUrl，由管理员开通并发布权限；不运行 lark-cli auth login，不索要密钥。不要响应自己消息或互相礼貌 @；一次请求最多主动交接两跳。`;
 
 export const agentGroupToolBearerToken = (authorization?: string) => {

@@ -196,16 +196,14 @@ describe('memory recovery and timeout boundaries', () => {
     expect(h.runtime.dispatch.mock.calls.map(call => call[0])).toEqual([h.fresh.id]);
   });
 
-  it('keeps choosing the new session when archiving the stuck one fails', async () => {
+  it('blocks replacement when archiving the stuck session fails', async () => {
     const h = await harness('failed'); h.setTasks([h.task('reconcile_required', 'task_stuck')]);
     h.runtime.archive!.mockRejectedValue(new Error('SESSION_RESOURCE_BLOCKED'));
-    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RUN_FAILED' });
-    expect(h.log.warn).toHaveBeenCalledWith(expect.objectContaining({ sessionId: h.session.id }), '记忆会话有未决任务且归档未完成，改用新会话');
-    // 旧会话没能归档、仍然可见，但新会话更新，下一次运行直接选中新会话。
-    await h.pipeline.runConsolidation(scope);
-    expect(h.runtime.start).toHaveBeenCalledOnce();
-    expect(h.runtime.archive).toHaveBeenCalledOnce();
-    expect(h.runtime.dispatch.mock.calls.map(call => call[0])).toEqual([h.fresh.id, h.fresh.id]);
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(await h.pipeline.runConsolidation(scope)).toMatchObject({ error: 'MEMORY_RECOVERY_REQUIRED' });
+    expect(h.runtime.start).not.toHaveBeenCalled();
+    expect(h.runtime.archive).toHaveBeenCalledTimes(2);
+    expect(h.runtime.dispatch).not.toHaveBeenCalled();
   });
 
   it('replaces at most once per run: a replacement that is not ready either fails the run', async () => {
