@@ -165,6 +165,32 @@ const promoteLabel = '中断当前这一轮，先做这条';
 const injectLabel = '插进当前这一轮';
 
 describe('排队卡：紧排在正在执行的那一轮后面', () => {
+  it('接受后的排队 PATCH 失败仍保留任务归属，之后正常交付独立结果', async () => {
+    const h = await harness();
+    await h.dispatch('om_1', '先处理第一件事');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    const update = h.service.update.getMockImplementation()!;
+    let failed = false;
+    h.service.update.mockImplementation(async input => {
+      if (input.taskId === 'om_2' && input.state === 'queued' && !failed) { failed = true; throw new Error('PATCH unavailable'); }
+      return update(input);
+    });
+    await h.dispatch('om_2', '再处理第二件事', 'ou_bob');
+    expect(failed).toBe(true);
+    const queued = (await h.runtimeTask('再处理第二件事'))!;
+    expect(queued.status).toBe('queued');
+    expect(await h.inboxRecord('om_2')).toMatchObject({ state: 'accepted', taskId: queued.id });
+    const mapping = () => h.repos.channelMappings.get(`lark-card:${h.config.appId}`, 'om_2');
+    expect(JSON.parse((await mapping())!.extra!)).toMatchObject({ runtime_task_id: queued.id, state: 'queued' });
+    h.release();
+    await vi.waitFor(async () => expect(JSON.parse((await mapping())!.extra!)).toMatchObject({
+      runtime_task_id: queued.id, state: 'completed', final_delivery_state: 'delivered', progress_frozen: true
+    }));
+    const saved = JSON.parse((await mapping())!.extra!);
+    expect(saved.final_message_id).not.toBe(saved.card_message_id);
+    expect(h.prompts.filter(prompt => prompt.includes('再处理第二件事'))).toHaveLength(1);
+  });
+
   it('写明不会传给正在执行的那一轮，并给出中断与插话两个按钮；排在别的排队项后面不给', async () => {
     const h = await harness();
     await h.dispatch('om_1', '第一件事');
@@ -369,6 +395,36 @@ describe('排队卡：当前这一轮被审批挡住', () => {
 });
 
 describe('同一人紧接着连发的排队消息合并成一轮', () => {
+  it('合并收据与仍在途的排队刷新共用队列，迟到刷新不能覆盖最终说明', async () => {
+    const h = await harness();
+    await h.dispatch('om_1', '处理主任务');
+    await vi.waitFor(() => expect(h.prompts).toHaveLength(1));
+    await h.dispatch('om_2', '第一段补充');
+    const update = h.service.update.getMockImplementation()!;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let waiting = false;
+    h.service.update.mockImplementation(async input => {
+      if (input.taskId === 'om_2' && input.state === 'queued' && !waiting) { waiting = true; await gate; }
+      return update(input);
+    });
+    const refresh = h.coordinator.handleAction({ action: 'refresh', task_id: 'om_2' }, 'ou_alice');
+    await vi.waitFor(() => expect(waiting).toBe(true));
+    const merged = h.dispatch('om_3', '第二段补充');
+    try {
+      await vi.waitFor(async () => expect((await h.runtimeTask('第一段补充'))?.status).toBe('cancelled'));
+      expect(h.service.update.mock.calls.some(([input]) => input.taskId === 'om_2' && input.statusLabel === '已并入下一条')).toBe(false);
+    } finally { release(); }
+    await refresh;
+    await merged;
+    const receipt = await h.waitCard('om_2', '已并入下一条');
+    expect(h.latestCard('om_2')).toBe(receipt);
+    const mapping = await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, 'om_2');
+    expect(JSON.parse(mapping!.extra!)).toMatchObject({ state: 'cancelled', card_message_id: receipt.messageId,
+      final_message_id: receipt.messageId, final_delivery_state: 'delivered', progress_frozen: true });
+    expect(h.cards.some(card => card.taskId === 'om_2' && card.cardKind === 'result')).toBe(false);
+  });
+
   it('前一条排队卡改成「已并入下一条」，合并后只执行一轮，被并入的那条重启后不会重放', async () => {
     const h = await harness();
     await h.dispatch('om_1', '看下登录为什么失败');
@@ -380,6 +436,9 @@ describe('同一人紧接着连发的排队消息合并成一轮', () => {
     expect((await h.runtime.getTasks(await h.sessionId())).filter(task => task.status === 'queued').map(task => task.id)).toEqual([merged.id]);
     const absorbed = await h.waitCard('om_2', '已并入下一条');
     expect(absorbed).toMatchObject({ state: 'cancelled', statusLabel: '已并入下一条' });
+    const mapping = await h.repos.channelMappings.get(`lark-card:${h.config.appId}`, 'om_2');
+    expect(JSON.parse(mapping!.extra!)).toMatchObject({ state: 'cancelled', card_message_id: absorbed.messageId,
+      final_message_id: absorbed.messageId, final_delivery_state: 'delivered', progress_frozen: true });
     // 重启后能被重放的只有还没交给 runtime 的消息：被并入的那条不在其中。
     expect((await new LarkTaskInbox(h.repos.config).recoverable(h.config.appId)).map(record => record.event.messageId)).not.toContain('om_2');
     h.release();

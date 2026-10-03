@@ -88,8 +88,9 @@ function ledgerRuntime(repos: Repos, harnessSession: HarnessSession, options: { 
   const runtime: BoundRuntime = {
     dispatches,
     async getSession(id) { return repos.sessions.get(id); },
-    async dispatch(sessionId, prompt, _mode, _agentPrompt, _risk, _actorId, _idempotencyKey, _skills, supplied) {
+    async dispatchRequest(supplied) {
       if (!supplied) throw new Error('Automation dispatch must reuse the frozen request');
+      const sessionId = supplied.sessionId;
       const x = bound(repos);
       const committed = x.acceptTask({ sessionId, runId: harnessSession.runId }, supplied, acceptedInput(supplied), 'back');
       dispatches.push(committed.task!);
@@ -689,7 +690,7 @@ describe('SessionAutomationService GitHub CI subscriptions', () => {
     const blocked = new Promise<void>(resolve => { release = resolve; });
     const hangingRuntime: SessionAutomationRuntime = {
       getSession: id => h.repositories.sessions.get(id),
-      async dispatch() { await blocked; throw new Error('old process stopped'); }
+      async dispatchRequest() { await blocked; throw new Error('old process stopped'); }
     };
     const first = new SessionAutomationService({ repositories: h.repositories, runtime: hangingRuntime, authorize: async () => true, githubFetch: request, clock: () => new Date(h.now.value) });
     cleanups.push(() => first.close());

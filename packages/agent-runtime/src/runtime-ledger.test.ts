@@ -9,7 +9,7 @@ import { JsonlTailer } from '../../pty-driver/src/transcript/tail.js';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRepositories } from '@dutydeck/storage';
-import type { AgentConfig, AgentDriver, BoundExecutionRepository, NormalizedDriverEvent, Session, TaskRequestV1 } from '@dutydeck/shared';
+import type { AgentConfig, AgentDriver, BoundExecutionRepository, NormalizedDriverEvent, Session, TaskExecutionContext, TaskRequestV1 } from '@dutydeck/shared';
 import { DriverRecoveryError } from '@dutydeck/shared';
 import { DutydeckRuntime, type RuntimeOptions } from './index.js';
 
@@ -153,9 +153,57 @@ describe('Runtime uses the execution ledger', () => {
     expect(second.id).toBe(first.id); expect(second.replayed).toBe(true); expect(prepare).toHaveBeenCalledTimes(1); expect(h.sent).toEqual(['frozen:input']);
     expect(h.runtime.lookupAcceptedTask(envelope)?.input?.executionContext.agentPrompt).toBe('frozen:input');
   });
-  it('rejects a mismatched explicit envelope before acceptance', async () => {
+  it('uses the request identity and explicit material without trusting source payload permissions', async () => {
+    const prepare = vi.fn(async (_session: Session, prompt: string, _skills?: string[], context?: Pick<TaskExecutionContext, 'promptParts'>) => ({ agentPrompt: 'prepared:' + prompt, promptParts: context?.promptParts }));
+    const authorize = vi.fn(async (_id: string, _actorId?: string) => {});
+    const h = await fixture({ prepareTaskPrompt: prepare, authorizeExecution: authorize, sessionPrompt: (_session, prompt) => 'session:' + prompt });
+    const envelope: TaskRequestV1 = { ...request(h.session.id, 'material', { model: 'request-model' }),
+      actor: { kind: 'installation_owner', id: 'installation_owner' },
+      sourcePayload: { agentPrompt: 'untrusted prompt', actorId: 'other', permissionMode: 'full-trust', riskPolicy: { enabled: true, authorized: true, pattern: '.*' } } };
+    const material = { agentPrompt: 'downloaded material', riskPolicy: { enabled: true, authorized: false, pattern: 'write' }, idleCompactHours: 12, promptParts: [{ kind: 'reference' as const, trustScope: 'source', content: 'downloaded material' }] };
+    const first = await h.runtime.dispatchRequest(envelope, material);
+    await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(first.id)?.task.status).toBe('completed'));
+    expect(h.sent).toEqual(['session:prepared:downloaded material']);
+    expect(h.runtime.lookupAcceptedTask(envelope)?.input).toMatchObject({ prompt: 'material', executionOptions: { permissionMode: 'ask', model: 'request-model' }, executionContext: { agentPrompt: 'prepared:downloaded material', actorId: 'installation_owner' } });
+    expect(h.runtime.lookupAcceptedTask(envelope)?.input?.executionContext).toMatchObject({ riskPolicy: material.riskPolicy, idleCompactHours: 12, promptParts: material.promptParts });
+    expect(authorize).toHaveBeenCalledWith(h.session.id, 'installation_owner');
+    expect(authorize.mock.calls.every(call => call[1] === 'installation_owner')).toBe(true);
+    const replay = await h.runtime.dispatchRequest(envelope, { agentPrompt: 'changed material', riskPolicy: { enabled: true, authorized: true, pattern: '.*' }, idleCompactHours: 24, promptParts: [] });
+    expect(replay).toMatchObject({ id: first.id, replayed: true });
+    expect(h.runtime.lookupAcceptedTask(envelope)?.input?.executionContext).toMatchObject({ riskPolicy: material.riskPolicy, idleCompactHours: 12, promptParts: material.promptParts });
+    expect(prepare).toHaveBeenCalledOnce();
+    await expect(h.runtime.dispatchRequest({ ...envelope, prompt: 'different request' })).rejects.toMatchObject({ code: 'TASK_IDEMPOTENCY_CONFLICT' });
+    expect(prepare).toHaveBeenCalledOnce();
+  });
+  it('defaults request material to the original prompt', async () => {
     const h = await fixture();
-    await expect(h.runtime.dispatch(h.session.id, 'different', 'queue', 'different', undefined, undefined, 'original', [], request(h.session.id, 'original'))).rejects.toMatchObject({ code: 'TASK_REQUEST_MISMATCH' });
+    const task = await h.runtime.dispatchRequest({ ...request(h.session.id, 'original'), sourcePayload: { agentPrompt: 'source-only material', riskPolicy: { enabled: true, authorized: true, pattern: '.*' }, idleCompactHours: 12 } });
+    await vi.waitFor(() => expect(h.repos.execution.getTaskExecution(task.id)?.task.status).toBe('completed'));
+    expect(h.sent).toEqual(['original']);
+    expect(h.repos.execution.getAcceptedTask(task.id)?.input?.executionContext).not.toHaveProperty('riskPolicy');
+    expect(h.repos.execution.getAcceptedTask(task.id)?.input?.executionContext).not.toHaveProperty('idleCompactHours');
+  });
+  it('retains actor kind, app and namespace constraints on request admission', async () => {
+    const h = await fixture();
+    const envelope = request(h.session.id, 'identity');
+    await expect(h.runtime.dispatchRequest({ ...envelope, actor: { kind: 'channel', id: 'user', appId: 'app' } })).rejects.toMatchObject({ code: 'TASK_ACTOR_CONFLICT' });
+    await expect(h.runtime.dispatchRequest({ ...envelope, namespace: 'work_item', actor: { kind: 'installation_owner', id: 'installation_owner' } })).rejects.toMatchObject({ code: 'TASK_REQUEST_SCOPE_CONFLICT' });
+    await expect(h.runtime.dispatchRequest({ ...envelope, options: { permissionMode: 'full-trust' } })).rejects.toMatchObject({ code: 'ACTOR_REQUIRED' });
+    const lark = await h.runtime.start({ agentId: agent.id, cwd: h.directory, source: 'lark', sourceId: 'app:chat:group' });
+    const channel: TaskRequestV1 = { ...request(lark.id, 'channel'), namespace: 'lark', actor: { kind: 'channel', id: 'user', appId: 'other-app' } };
+    await expect(h.runtime.dispatchRequest(channel)).rejects.toMatchObject({ code: 'TASK_ACTOR_CONFLICT' });
+    await expect(h.runtime.dispatchRequest({ ...channel, actor: { kind: 'unspecified' } })).rejects.toMatchObject({ code: 'ACTOR_REQUIRED' });
+    const accepted = await h.runtime.dispatchRequest({ ...channel, actor: { kind: 'channel', id: 'user', appId: 'app' } });
+    expect(h.repos.execution.getAcceptedTask(accepted.id)?.input?.executionContext.actorId).toBe('user');
+    expect(await h.runtime.getTasks(h.session.id)).toEqual([]);
+  });
+  it.each<Partial<TaskRequestV1>>([
+    { sessionId: 'other-session' }, { prompt: 'different' }, { mode: 'interrupt' },
+    { key: 'other-key' }, { skills: ['other-skill'] }, { actor: { kind: 'installation_owner', id: 'installation_owner' } }
+  ])('rejects mismatched legacy dispatch arguments before acceptance: %j', async changed => {
+    const h = await fixture();
+    const envelope = { ...request(h.session.id, 'original'), ...changed };
+    await expect(h.runtime.dispatch(h.session.id, 'original', 'queue', 'original', undefined, undefined, 'original', [], envelope)).rejects.toMatchObject({ code: 'TASK_REQUEST_MISMATCH' });
     expect(await h.runtime.getTasks(h.session.id)).toEqual([]); expect(h.sent).toEqual([]);
   });
   it('does not turn a rejected submitted send into failed or advance the queue', async () => {

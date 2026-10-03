@@ -2,7 +2,7 @@ import type { PromptPart } from '@dutydeck/shared';
 import { promptDigest } from '../prompt-context.js';
 import { readGitStatusLine } from './git-status.js';
 import { redactTraceText } from './secret-redaction.js';
-import { setTimeout as retryDelay } from 'node:timers/promises';
+import { OnlineProcessCard, type CardUpdateOutcome } from './online-process-card.js';
 import { completeExplicitFinal, explicitFinalContext, hasExplicitFinal, withExplicitFinalLock } from './explicit-final.js';
 import { mergeGroupTaskWatermark } from './group-task-context.js';
 import { describeLarkTaskRecovery, larkStallNote, notifyLarkTaskRecovery, verifiedLarkRecoveryOutput } from './task-recovery.js';
@@ -14,16 +14,11 @@ import { renderLarkMemoryInjection, renderMemoryIndex } from './memory-view.js';
 import type { AgentEvent, PolicyAction, Session, TaskRecord, ToolRiskPolicy } from '@dutydeck/shared';
 import { RuntimeError } from '@dutydeck/shared';
 import { defaultHighRiskPattern, defaultLarkIdleCompactHours, defaultLarkTraceLimit, larkMemoryEnabled, larkPermissionMode, readLarkConfigs, type StoredLarkConfig } from './config.js';
-import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError, type LarkCardService } from './service.js';
+import { boundLarkCardElements, larkIdentityPermissionHelp, LarkServiceError } from './service.js';
 import {
   loadLarkTaskEvents,
   steeringOutcomeText,
   hasUnresolvedToolCalls,
-  isLarkCardContentRejected,
-  isLarkMessageRateLimit,
-  isLarkMessageUnupdatable,
-  larkRateLimitBackoffMs,
-  patchRejectedCardDelta,
   renderLarkProcessElements,
   renderLarkResultElements,
   type LarkCardElement
@@ -78,6 +73,39 @@ const approvalSummary = (record: LarkInteraction) => {
 };
 
 export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
+  private readonly processCards = new WeakMap<LarkTask, { turn: number; messageId: string; card: OnlineProcessCard }>();
+
+  private processCard(task: LarkTask, elements = task.lastSuccessfulElements): OnlineProcessCard {
+    const turn = task.turn;
+    const messageId = task.cardMessageId!;
+    const previous = this.processCards.get(task);
+    if (previous?.turn === turn && previous.messageId === messageId) return previous.card;
+    const card = new OnlineProcessCard({
+      service: this.service, messageId,
+      isCurrent: () => !this.stopped && task.turn === turn && task.cardMessageId === messageId,
+      frozen: task.progressFrozen, elements,
+      report: async delivery => {
+        // The module invokes this only while this card/turn is current; mutations precede awaits.
+        if (delivery.elements) task.lastSuccessfulElements = delivery.elements;
+        if (delivery.frozen) task.progressFrozen = true;
+        if (delivery.repaired) this.log.warn({ messageId, state: delivery.state }, '飞书卡片增量被拒绝，已保留上次成功内容并原地修补');
+        if (delivery.error) {
+          this.log.warn({ error: delivery.error, taskId: task.id, messageId }, '在线过程卡更新失败，等待后续更新或对账');
+          this.scheduleReconcile();
+        }
+        if (!delivery.delivered && !delivery.frozen) return;
+        try {
+          await this.saveCardTask(task, delivery.state ?? task.state);
+        } catch (error) {
+          this.log.warn({ error, taskId: task.id, messageId }, '飞书卡片状态落库失败，等待对账补齐持久化');
+          this.scheduleReconcile();
+        }
+      }
+    });
+    this.processCards.set(task, { turn, messageId, card });
+    return card;
+  }
+
   /**
    * 「提到队首」会中断当前正在执行的那一轮（runtime 的 promoteQueued 带 interrupt），
    * 所以除了队列自己的 queue.promote，还必须过与 /cancel 同一道中断门。
@@ -255,6 +283,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
   /** absorbQueuedTask 的前半：只取消，卡片留给 rewriteAbsorbedCard。取消成功返回 true。 */
   protected async cancelQueuedInPlace(task: LarkTask, actorId?: string): Promise<boolean> {
     if (task.state !== 'queued' || !task.sessionId || !task.runtimeTaskId || !this.runtime.cancelQueued) return false;
+    const turn = task.turn;
     const previous = { finalMessageId: task.finalMessageId, finalDeliveryState: task.finalDeliveryState, finalDeliveredTurn: task.finalDeliveredTurn };
     task.finalDeliveredTurn = task.turn;
     if (task.cardMessageId) { task.finalMessageId = task.cardMessageId; task.finalDeliveryState = 'delivered'; }
@@ -262,10 +291,12 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
     try {
       await this.runtime.cancelQueued(task.sessionId, task.runtimeTaskId, actorId);
     } catch (error) {
+      if (task.turn !== turn) return false;
       Object.assign(task, previous);
       this.log.info({ error, taskId: task.id, runtimeTaskId: task.runtimeTaskId }, '排队任务未能取消（可能已经开始执行），按原样执行');
       return false;
     }
+    if (this.stopped || task.turn !== turn) return false;
     task.state = 'cancelled';
     task.progressFrozen = true;
     return true;
@@ -274,9 +305,11 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
   /** absorbQueuedTask 的后半：把已取消的排队卡原位改成一句说明，并记下映射。 */
   protected async rewriteAbsorbedCard(task: LarkTask, markdown: string, statusLabel: string) {
     if (!task.sessionId) return;
+    const turn = task.turn;
     if (task.cardMessageId) {
+      const card = this.processCard(task);
       const webBaseUrl = task.config.webBaseUrl?.trim().replace(/\/$/, '');
-      await this.service.update({
+      await card.rewriteReceipt({
         cardKind: 'process', messageId: task.cardMessageId, taskId: task.id, taskName: larkTaskTitle(task.prompt, task.config.name), turn: task.turn,
         sessionId: task.sessionId, state: 'cancelled', statusLabel, readOnly: true, markdown,
         capabilities: { canCancelQueued: false, canInterrupt: false, canRetry: false, canRefresh: false,
@@ -284,8 +317,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) },
         agentName: await this.resolveAgentName(task.config), permissionMode: larkPermissionMode(task.config),
         ...(task.config.webBaseUrl ? { webBaseUrl: task.config.webBaseUrl } : {})
-      }).catch(error => this.log.warn({ error, taskId: task.id }, '排队卡未能改成说明'));
+      });
     }
+    if (this.stopped || task.turn !== turn) return;
     await this.saveCardTask(task, 'cancelled').catch(error => this.log.warn({ error, taskId: task.id }, '排队任务已取消，卡片映射待对账'));
   }
 
@@ -927,11 +961,17 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       if (silentProgress) {
         this.log.info({ taskId: task.id, chatId: event.chatId }, '中间进展静默：本轮不发执行过程卡');
       } else if (task.cardMessageId) {
-        await this.service.update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, taskId: task.id, taskName: taskTitle, markdown: initialMarkdown, sessionId: task.sessionId, turn: currentTurn, ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) }).catch(markLarkFirstCardUndelivered);
+        const outcome = await this.processCard(task, initialElements).update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, taskId: task.id, taskName: taskTitle, markdown: initialMarkdown, sessionId: task.sessionId, turn: currentTurn, ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) });
+        if (!outcome.delivered) {
+          if (this.stopped || task.turn !== currentTurn) return;
+          markLarkFirstCardUndelivered(outcome.error ?? new Error('过程卡未送达'));
+        }
       } else {
         const card = await sendTaskCard(this.service, event, { ...cardContext, cardKind: 'process', ...(task.inbox ? { idempotencyKey: `task_${event.messageId}_${currentTurn}`.slice(0, 50) } : {}), state: initialState, statusLabel: initialState === 'queued' ? '已接收' : undefined, readOnly: initialState === 'queued', taskId: task.id, taskName: taskTitle, markdown: initialMarkdown, sessionId: task.sessionId, turn: currentTurn, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}), ...(this.workflowOptions.loginLinks ? { detailLogin: true } : {}) }, this.log).catch(markLarkFirstCardUndelivered);
+        if (this.stopped || task.turn !== currentTurn) return;
         task.cardMessageId = card.messageId;
       }
+      if (this.stopped || task.turn !== currentTurn) return;
       task.lastSuccessfulElements = initialElements;
       await this.saveCardTask(task);
       if (task.inbox) await this.inbox!.update(task.inbox, { sessionId: session.id, cardId: task.cardMessageId, turn: currentTurn });
@@ -940,194 +980,9 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
 
     let timer: NodeJS.Timeout | undefined;
     let heartbeatActive = false;
-    /** 一次卡片更新的真实结果。终态交付只认这里的 delivered，不认「链已 resolve」。 */
-    type CardUpdateOutcome = { delivered: boolean; messageId?: string };
-    type PendingCardUpdate = {
-      input: Parameters<LarkCardService['update']>[0];
-      terminal: boolean;
-      /** 入队时的轮次；重试开了新一轮之后，这一条必须整条作废，不得再碰上一轮的卡。 */
-      turn: number;
-      settle: (outcome: CardUpdateOutcome) => void;
-    };
-    let pendingUpdate: PendingCardUpdate | undefined;
-    let updateChain: Promise<void> | undefined;
-    let cardRateLimitFailures = 0;
-    let cardRateLimitedUntil = 0;
-    const flushUpdates = () => {
-      if (updateChain) return updateChain;
-      updateChain = (async () => {
-        while (pendingUpdate) {
-          const pending = pendingUpdate;
-          pendingUpdate = undefined;
-          let lastError: unknown;
-          let delivered = false;
-          let contentRejected = false;
-          const deliveredMessageId = pending.input.messageId;
-          // 整条 entry 的处理都包在 try/finally 里：PATCH 成功但落库失败时，
-          // 也必须把这条 entry 结算掉。否则调用方的 await 永久挂起，cleanup 不会执行。
-          try {
-          /**
-           * 这一条更新是否还属于当前轮次。
-           *
-           * 必须在**每次 await 之后**重新判断，不能只在入口判一次：dispatch 模式下
-           * executeTask 在 dispatch 建立订阅后就返回，group.tail 随即 resolve，因此
-           * 用户点重试时新一轮会立刻开跑并递增 turn——而上一轮的终态 PATCH 可能
-           * 还悬在 await 里。等它回来时，task 上的 cardMessageId、lastSuccessfulElements、
-           * finalMessageId 已经属于新一轮，旧轮次再写就会污染新一轮的卡片与持久化。
-           * 判据用 pending.turn（入队时的轮次），不是现读的 task.turn。
-           */
-          const stale = () => this.stopped || pending.turn !== task.turn;
-          if (stale()) continue;
-          // 过程卡已被永久冻结：停止向已确认永久不可更新的卡 PATCH，避免重复浪费 API 调用。
-          if (task.progressFrozen && pending.input.messageId === task.cardMessageId) {
-            continue;
-          }
-          // Online delivery and HTTP retries share one deadline/attempt budget.
-          // Failed terminal delivery remains persisted and is retried by reconciliation.
-          const attempts = pending.terminal ? 3 : 1;
-          const deliver = async (signal?: AbortSignal) => {
-            for (let attempt = 1; attempt <= attempts; attempt++) {
-              try {
-                await this.service.update(pending.input);
-                lastError = undefined;
-                delivered = true;
-                // 更新本身打在旧卡上无害（那是它自己的卡），但快照属于新一轮，不能覆盖。
-                if (pending.input.elements && !stale()) {
-                  // queue_summary 是该时刻的瞬态队列读数；若冻结进 last_successful_elements，
-                  // 守护进程重启后 reconciler 会在恢复卡上重放崩溃瞬间的陈旧「排队 N 条」。
-                  // protocol_hint / recovery_note 是持久事实，保留。
-                  task.lastSuccessfulElements = (pending.input.elements as LarkCardElement[])
-                    .filter(element => element.element_id !== QUEUE_SUMMARY_ELEMENT_ID);
-                }
-                cardRateLimitFailures = 0;
-                cardRateLimitedUntil = 0;
-                break;
-              } catch (error) {
-                lastError = error;
-                if (isLarkCardContentRejected(error)) { contentRejected = true; break; }
-                if (isLarkMessageUnupdatable(error)) break;
-                if (isLarkMessageRateLimit(error)) {
-                  cardRateLimitFailures += 1;
-                  cardRateLimitedUntil = Date.now() + larkRateLimitBackoffMs(cardRateLimitFailures);
-                }
-                this.log.warn({ error, messageId: pending.input.messageId, attempt, attempts }, '更新飞书服务卡片失败');
-                // 轮次已翻页：不再为旧卡消耗重试预算，也不再制造新的在途请求。
-                if (stale() || signal?.aborted || (error as { larkRequestExhausted?: boolean })?.larkRequestExhausted
-                  || error instanceof LarkServiceError && ['LARK_REQUEST_BUDGET_EXHAUSTED', 'LARK_CIRCUIT_OPEN'].includes(error.code)
-                  || ['AbortError', 'TimeoutError'].includes((error as Error)?.name)) break;
-                if (attempt < attempts) {
-                  const delayMs = isLarkMessageRateLimit(error)
-                    ? Math.max(0, cardRateLimitedUntil - Date.now())
-                    : attempt * 300;
-                  try { await retryDelay(delayMs, undefined, { signal }); } catch (error) { lastError = error; break; }
-                }
-              }
-            }
-            if (stale()) return;
-            // 过程卡内容被拒绝时保留上一次成功内容，结果消息独立交付。
-            if (lastError && contentRejected && Array.isArray(task.lastSuccessfulElements) && task.lastSuccessfulElements.length) {
-              const patchedElements = patchRejectedCardDelta(task.lastSuccessfulElements, pending.input.elements as LarkCardElement[] | undefined);
-              try {
-                await this.service.update({ ...pending.input, elements: patchedElements, markdown: undefined });
-                delivered = true;
-                lastError = undefined;
-                if (!stale()) task.lastSuccessfulElements = patchedElements;
-                this.log.warn({ messageId: pending.input.messageId, state: pending.input.state }, '飞书卡片增量被拒绝，已保留上次成功内容并原地修补');
-              } catch (error) {
-                lastError = error;
-              }
-            }
-          };
-          try {
-            if (this.service.withRequestBudget) await this.service.withRequestBudget(deliver);
-            else await deliver();
-          } catch (error) { lastError = error; }
-          if (stale()) continue;
-          if (lastError) {
-            if (isLarkMessageUnupdatable(lastError)) {
-              // 异步失败处理必须捕获并核对当前 card id/轮次，旧卡失败不能冻结新卡/新任务。
-              if (!this.stopped && pending.turn === task.turn && pending.input.messageId === task.cardMessageId) {
-                task.progressFrozen = true;
-                try {
-                  await this.saveCardTask(task, pending.input.state ?? task.state);
-                } catch (saveError) {
-                  this.log.warn({ error: saveError, taskId: task.id, messageId: deliveredMessageId }, '持久化卡片冻结状态失败，等待对账');
-                  this.scheduleReconcile();
-                }
-              } else {
-                this.log.info({
-                  taskId: task.id,
-                  pendingTurn: pending.turn,
-                  taskTurn: task.turn,
-                  pendingMessageId: pending.input.messageId,
-                  currentCardMessageId: task.cardMessageId
-                }, '旧轮次或旧卡的不可更新错误，跳过冻结以保护当前卡片');
-              }
-            } else if (pending.terminal) {
-              this.log.warn({ error: lastError, messageId: pending.input.messageId }, '执行过程卡更新失败，等待对账；结果仍将独立交付');
-              this.scheduleReconcile();
-            }
-          }
-          if (delivered && pending.input.state) {
-            // 旧轮次不得写入新一轮的持久化：mapping 只有一行，写进去就把新一轮的
-            // card_message_id / runtime_task_id 覆盖成上一轮的了。
-            if (stale()) {
-              this.log.info({ taskId: task.id, turn: pending.turn, messageId: deliveredMessageId }, '旧轮次终态已送达，但新一轮已开始，跳过持久化以免覆盖新一轮状态');
-              continue;
-            }
-            if (pending.terminal) task.progressFrozen = true;
-            // 落库失败不改变「卡片已经送达用户」这个事实，因此不回退 delivered：
-            // 谎称未送达会让对账再交付一次。只补一次对账把持久化补上。
-            try {
-              await this.saveCardTask(task, pending.input.state);
-            } catch (error) {
-              this.log.warn({ error, taskId: task.id, messageId: deliveredMessageId }, '飞书卡片状态落库失败，卡片已送达，等待对账补齐持久化');
-              this.scheduleReconcile();
-            }
-          }
-          } finally {
-            // 无论走哪条分支（含 continue 与异常）都必须结算，否则调用方永久挂起。
-            pending.settle({ delivered, ...(delivered ? { messageId: deliveredMessageId } : {}) });
-          }
-        }
-      })().finally(() => {
-        updateChain = undefined;
-        if (pendingUpdate) void flushUpdates();
-      });
-      return updateChain;
-    };
-    /**
-     * 本轮是否已经请求过终态。终态一旦入队就固定这一轮的过程卡状态，
-     * 之后到达的心跳/排队重绘不得把它挤掉，也不得在它之后再改写卡片。
-     */
-    let terminalLatched = false;
-    /**
-     * 入队一次卡片更新，返回的 promise 只在**这一条**更新有结果后才 resolve。
-     *
-     * 刻意不返回 updateChain：链的 finally 会为后到的 pendingUpdate 再起一次没人 await 的
-     * flush，此时 await 旧链拿到的是「上一帧心跳写完了」，而不是「我的终态真的写进去了」。
-     * 过程冻结必须以自己那次 PATCH 的真实结果为准，结果消息的交付另行记录。
-     */
-    const enqueueUpdate = (entry: Omit<PendingCardUpdate, 'settle'>) => {
-      // 终态已经在队列里或已经写过：晚到的非终态重绘一律丢弃。
-      // 心跳与终态可能同时在途（心跳的 PATCH 正在飞，终态紧接着入队），
-      // 若允许覆盖，用户最终看到的会是一张停在「执行中」的卡。
-      if (terminalLatched && !entry.terminal) return Promise.resolve({ delivered: false } as CardUpdateOutcome);
-      if (entry.terminal) {
-        terminalLatched = true;
-        // 终态已定，心跳不能再排下一帧。
-        heartbeatActive = false;
-        if (timer) { clearTimeout(timer); timer = undefined; }
-      }
-      return new Promise<CardUpdateOutcome>(resolve => {
-        // 被顶掉的那条永远不会执行，必须就地了结，否则它的 await 会永久挂起。
-        pendingUpdate?.settle({ delivered: false });
-        pendingUpdate = { ...entry, settle: resolve };
-        void flushUpdates();
-      });
-    };
-
+    const processCard = task.cardMessageId ? this.processCard(task) : undefined;
     const update = async (state: Exclude<LarkTaskState, 'interrupting'>) => {
+      if (this.stopped || task.turn !== currentTurn) return { delivered: false } as CardUpdateOutcome;
       // Runtime running is monotonic for a turn. Late dispatch/cancel bookkeeping may
       // still report queued, but must never repaint an executing card backwards.
       if (state === 'queued' && task.state === 'running') return Promise.resolve({ delivered: false } as CardUpdateOutcome);
@@ -1221,31 +1076,32 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
       }
       const compaction = task.events.filter(item => item.type === 'status' && (item.data as any)?.state === 'compaction').at(-1)?.data as { phase?: string } | undefined;
       const compacting = state === 'running' && compaction?.phase === 'start';
-      const outcome = await enqueueUpdate({
-        terminal,
+      if (this.stopped || task.turn !== currentTurn) return { delivered: false } as CardUpdateOutcome;
+      if (terminal) {
+        heartbeatActive = false;
+        if (timer) { clearTimeout(timer); timer = undefined; }
+      }
+      const outcome = await processCard!.update({
+        ...cardContext,
+        cardKind: 'process',
+        messageId: task.cardMessageId!,
+        permissionMode: larkPermissionMode(config),
+        state,
+        ...(recovery ? { statusLabel: recovery.label } : task.state === 'interrupting' ? { statusLabel: '等待停止确认', actionState: 'interrupting' as const } : compacting ? { statusLabel: '正在压缩历史上下文' } : stalled ? { statusLabel: '可能卡住' } : {}),
+        ...(awaitingAnswer ? { awaitingAnswer: true } : {}),
+        taskId: task.id,
+        taskName: taskTitle,
+        elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
+        sessionId: task.sessionId,
+        // 按钮能力按 runtime 实际状态注入。终态同样按能力表渲染，而不是一刀切 readOnly：
+        // 失败/中断的这张卡就是用户唯一的入口，重试必须留在上面。
         turn: task.turn,
-        input: {
-          ...cardContext,
-          cardKind: 'process',
-          messageId: task.cardMessageId!,
-          permissionMode: larkPermissionMode(config),
-          state,
-          ...(recovery ? { statusLabel: recovery.label } : task.state === 'interrupting' ? { statusLabel: '等待停止确认', actionState: 'interrupting' as const } : compacting ? { statusLabel: '正在压缩历史上下文' } : stalled ? { statusLabel: '可能卡住' } : {}),
-          ...(awaitingAnswer ? { awaitingAnswer: true } : {}),
-          taskId: task.id,
-          taskName: taskTitle,
-          elapsedSeconds: (Date.now() - task.startedAt!) / 1_000,
-          sessionId: task.sessionId,
-          // 按钮能力按 runtime 实际状态注入。终态同样按能力表渲染，而不是一刀切 readOnly：
-          // 失败/中断的这张卡就是用户唯一的入口，重试必须留在上面。
-          turn: task.turn,
-          ...(terminal && task.retryable !== undefined ? { retryable: task.retryable } : {}),
-          // 完成后的回执写不写「结果见下条」：只贴表情的模式下不会再发结果消息。
-          ...(state === 'completed' && !completionReactionOnly ? { resultFollows: true } : {}),
-          capabilities: { ...this.capabilitiesForTask(task), ...(recovery?.relaunch ? { canRelaunch: true } : {}), ...turnOptions?.capabilities },
-          ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
-          elements
-        }
+        ...(terminal && task.retryable !== undefined ? { retryable: task.retryable } : {}),
+        // 完成后的回执写不写「结果见下条」：只贴表情的模式下不会再发结果消息。
+        ...(state === 'completed' && !completionReactionOnly ? { resultFollows: true } : {}),
+        capabilities: { ...this.capabilitiesForTask(task), ...(recovery?.relaunch ? { canRelaunch: true } : {}), ...turnOptions?.capabilities },
+        ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}),
+        elements
       });
       if (task.progressFrozen) await notifyRecovery();
       return outcome;
@@ -1357,7 +1213,7 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           void this.pinLongRunningCard(task);
         }
         void update('running').finally(scheduleHeartbeat);
-      }, Math.max(config.pushIntervalMs, cardRateLimitedUntil - Date.now()));
+      }, config.pushIntervalMs);
     };
     task.requestUpdate = async (state, completed) => {
       if (state === 'completed' || state === 'failed' || state === 'interrupted' || state === 'cancelled') return deliverTerminal(state, completed);
@@ -1691,9 +1547,10 @@ export abstract class LarkCoordinatorDispatch extends LarkCoordinatorRecovery {
           // 「取消」。首张「已接收」卡片刻意不提供（runtimeTaskId 尚未分配，点了必失败）。
           try {
             if (!task.cardMessageId || silentProgress || task.progressFrozen) await update('queued');
-            else await this.service.update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: 'queued', statusLabel: recovery.label, taskId: task.id, taskName: taskTitle, markdown: queueMarkdown,
+            else await processCard!.update({ ...cardContext, cardKind: 'process', messageId: task.cardMessageId, permissionMode: larkPermissionMode(config), state: 'queued', statusLabel: recovery.label, taskId: task.id, taskName: taskTitle, markdown: queueMarkdown,
               ...(turnOptions?.approval ? { elements: this.queuedApprovalElements(task, turnOptions.approval.record, queueMarkdown) } : {}),
               sessionId: task.sessionId, turn: task.turn, capabilities: { ...this.capabilitiesForTask(task), ...(recovery.relaunch ? { canRelaunch: true } : {}), ...turnOptions?.capabilities }, ...(config.webBaseUrl ? { webBaseUrl: config.webBaseUrl } : {}) });
+            if (this.stopped || task.turn !== currentTurn) return;
             await this.saveCardTask(task, 'queued');
           } catch (error) {
             // Runtime already owns this task. A receipt/mapping outage must not

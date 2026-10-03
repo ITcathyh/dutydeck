@@ -666,10 +666,9 @@ export class WorkItemService {
         await this.authorizeExecution(session.id, record.actorId);
         const request = admission.request;
         if (!request) throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Historical admission cannot be redispatched', 409);
-        const actorId = request.actor.kind === 'installation_owner' ? installationOwnerTaskActor : request.actor.kind === 'channel' ? request.actor.id : undefined;
         const sourcePayload = request.sourcePayload as { agentPrompt?: unknown };
         const agentPrompt = typeof sourcePayload.agentPrompt === 'string' ? sourcePayload.agentPrompt : request.prompt;
-        return this.options.runtime.dispatch(session.id, request.prompt, request.mode, agentPrompt, record.riskPolicy, actorId, request.key, request.skills, request);
+        return this.options.runtime.dispatchRequest(request, { agentPrompt, riskPolicy: record.riskPolicy });
       })(), Math.min(PREPARE_TIMEOUT_MS, TIMEOUT_MS - (Date.now() - Date.parse(attempt.createdAt))));
       if (accepted.id !== admission.taskId) throw new RuntimeError('WORK_ITEM_ADMISSION_CONFLICT', 'Runtime task identity did not match the fixed admission', 409);
       attempt.taskId = admission.taskId; attempt.status = 'accepted'; attempt.updatedAt = time(); await this.write(state);

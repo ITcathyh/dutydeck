@@ -110,8 +110,8 @@ describe('SessionAutomation ledger integration with real SQLite and local JSONL 
     const f = await fixture();
     await f.enableSchedule();
     let dispatchReturned = false;
-    const realDispatch = f.runtime.dispatch.bind(f.runtime);
-    vi.spyOn(f.runtime, 'dispatch').mockImplementationOnce(async (...args: Parameters<typeof f.runtime.dispatch>) => {
+    const realDispatch = f.runtime.dispatchRequest.bind(f.runtime);
+    vi.spyOn(f.runtime, 'dispatchRequest').mockImplementationOnce(async (...args: Parameters<typeof f.runtime.dispatchRequest>) => {
       await realDispatch(...args);
       dispatchReturned = true;
       throw new Error('response lost: network partition before source status write');
