@@ -1,5 +1,13 @@
 import type { DriverContext, DriverSubmission, DriverSubmissionInput, DriverResourceCapabilities, OperationPermit } from './driver-resources.js';
 import type { EventType, PermissionMode, ToolRiskPolicy } from './index.js';
+import type { TranscriptSourceObservation } from './session-insight.js';
+
+export type DriverTranscriptSourceObservation = Readonly<
+  Omit<
+    TranscriptSourceObservation,
+    'sessionId' | 'activeRunId' | 'driverInstanceId' | 'sourceKey' | 'sourceSessionKey'
+  >
+>;
 
 /**
  * Dutydeck 驱动契约（canonical driver contract）
@@ -150,6 +158,12 @@ export interface AgentDriver {
   /** Trusted checkpoint of an idle persistent terminal, bound to its original resource at shutdown. */
   persistentTerminalIdentity?(): unknown;
   attachTerminal?(identity?: unknown): boolean | Promise<boolean>;
+  /**
+   * 可选：订阅底层日志来源观察（TranscriptSourceObservation 的 driver 侧非密钥元信息）。
+   * 驱动只上报不可变的非密钥元信息，不负责写数据库；订阅时重放已有观察，后续原生身份或日志路径确认时再发追加观察。
+   * 返回取消订阅回调。
+   */
+  subscribeTranscriptSource?(listener: (observation: DriverTranscriptSourceObservation) => void): () => void;
 }
 
 export interface TerminalScreen {

@@ -16,7 +16,7 @@ import { DutydeckRuntime } from '@dutydeck/runtime';
 import { loadConfig, type AppConfig } from '@dutydeck/config';
 import { assertBotProcessStartup, childProcessIdentity, createRepositories, observeProcess } from '@dutydeck/storage';
 import { createPtyRetirementControl } from './pty-recovery.js';
-import { installationOwnerTaskActor, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
+import { installationOwnerTaskActor, makeId, RuntimeError, workPlanConfirmationRequired, type DriverFactory, type PolicyAction, type PolicyDecision } from '@dutydeck/shared';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,6 +49,8 @@ import {
   PTY_AGENT_CONTRIBUTIONS,
   type BackendProbes,
 } from '@dutydeck/pty-driver';
+import { claudeDataDir, codexHome, traeHome } from '@dutydeck/pty-driver';
+import { childEnvironment } from '@dutydeck/shared/child-environment';
 import { createCliAdapter } from '@dutydeck/cli-adapters';
 import { RelayAskBroker, RelayCapabilityRegistry, RelayService, loadOrCreateRelaySigningSecret } from '@dutydeck/relay';
 import { LocalFileSecretProvider, localFileSecretProviderName, secretDirectoryForDatabase } from '@dutydeck/secret-provider';
@@ -60,6 +62,10 @@ import {
 } from './foundation-policy.js';
 import { WorkspaceOrganizationService } from './workspace-organization.js';
 import { parseUsageBackgroundLimits, parseUsagePricing, UsageLedger } from './usage-ledger.js';
+import { SessionInsightService } from './session-insight-service.js';
+import type { SessionInsightResolver } from './session-insight-service.js';
+import { SessionInsightResolver as SessionInsightResolverImpl } from './session-insight-resolver.js';
+import { createTranscriptSourceKeys } from '@dutydeck/runtime';
 
 export interface StartLocalServerOptions {
   configureCollaborationExtensions?: (extensions: CollaborationExtensions) => void;
@@ -114,6 +120,69 @@ function localApiBaseUrl(config: Pick<AppConfig, 'host' | 'port'>) {
   return localLoopbackUrl(config.host, config.port);
 }
 
+/**
+ * 按当前 session 对应 agent 的子进程环境计算弱候选数据根（每次 resolve 实时算，
+ * 不缓存 agent env，不持久化密钥，不扫描 HOME）。候选仅用于有界历史发现，
+ * resolver 仍须内容 native id + ledger 身份证明才成 historical_verified。
+ *
+ * - PTY 驱动：childEnvironment(serverEnv, agent.env, { stripClaude: true })，
+ *   剥离 daemon 的 ANTHROPIC_/CLAUDE_ 桥接身份；
+ * - ACP/其它：childEnvironment(serverEnv, agent.env) 不 strip；
+ * - 无 agent 配置：回退 serverEnv 自身（daemon 直跑场景）。
+ */
+function configuredRootsForSession(
+  serverEnv: NodeJS.ProcessEnv,
+  session: import('@dutydeck/shared').Session | undefined,
+  agent: import('@dutydeck/shared').AgentConfig | undefined
+): Array<{ client: 'claude' | 'codex' | 'traex'; path: string }> {
+  const isPtyCli = session?.protocol === 'pty-cli';
+  const childEnv = childEnvironment(
+    serverEnv as Record<string, string | undefined>,
+    agent?.env ?? {},
+    ...(isPtyCli ? [{ stripClaude: true }] : [])
+  ) as Record<string, string | undefined>;
+  return [
+    { client: 'claude' as const, path: claudeDataDir(childEnv) },
+    { client: 'codex' as const, path: codexHome(childEnv) },
+    { client: 'traex' as const, path: traeHome(childEnv) }
+  ];
+}
+
+/**
+ * 构造生产会话分析 resolver（静态接线，esbuild bundle 必须能静态解析）。
+ * 返回 SessionInsightResolver interface 的轻量 wrapper：每次 resolve(sessionId)
+ * 实时读取该 session 的 agent 配置，用 childEnvironment 合并当前 server env
+ * （startLocalServer options.env 生效，不固定 process.env）与 agent.env，
+ * 再调 cli-paths 三函数生成 weak candidate roots，最后 new 真实 resolver 委托。
+ * 持久 observations 的历史 dataRoot 仍由 resolver 自行并入。
+ */
+function createInsightResolver(
+  repos: ReturnType<typeof createRepositories>,
+  serverEnv: NodeJS.ProcessEnv
+): SessionInsightResolver {
+  return {
+    async resolveSessionInsightSources(sessionId, options) {
+      const session = await repos.sessions.get(sessionId);
+      const agent = session ? await repos.agents.get(session.agentId) : undefined;
+      const configuredRoots = configuredRootsForSession(serverEnv, session ?? undefined, agent ?? undefined);
+      return new SessionInsightResolverImpl({
+        repositories: {
+          insight: repos.insight,
+          sessions: repos.sessions,
+          execution: repos.execution,
+          config: repos.config,
+          agents: repos.agents
+        },
+        configuredRoots,
+        // 统一 source key hash 算法来自 T3c runtime helper（包根具名导出），接线方不另复制。
+        createTranscriptSourceKeys
+      }).resolveSessionInsightSources(sessionId, options);
+    }
+  };
+}
+
+export { configuredRootsForSession, createInsightResolver };
+
 /** Production PTY-CLI policy: persistent tmux or a hard failure, never an
  * implicit downgrade to the in-process PtyBackend. */
 export function createProductionPtyBackend(
@@ -131,11 +200,25 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   if (refusal) throw new Error(refusal);
   assertBotProcessStartup(config.databaseUrl, (options.env ?? process.env).DUTYDECK_BOT_APP_ID);
   const repos = createRepositories(config.databaseUrl, { mode: 'runtime', newDatabaseAuthority: 'ledger_v1' });
+  // 声明在 try 外：setup 失败路径与正常关闭路径都要先显式 await 分析服务关闭。
+  let insightService: SessionInsightService | undefined;
+  const insightCloseErrors: unknown[] = [];
+  const closeInsightService = async (): Promise<void> => {
+    if (!insightService) return;
+    try { await insightService.close(); }
+    catch (error) { insightCloseErrors.push(error); }
+  };
   const setupCleanup: Array<() => unknown> = [];
   let closeResources = async () => {
+    // 初始化失败路径同样先显式关闭分析服务（拒新刷新/取消作业/清临时目录），
+    // 再跑 setupCleanup 并行组与 repos.close。
+    await closeInsightService();
     const results = await Promise.allSettled(setupCleanup.reverse().map(close => Promise.resolve().then(close)));
     repos.close();
-    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason);
+    const errors = [
+      ...insightCloseErrors,
+      ...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason)
+    ];
     if (errors.length) throw new AggregateError(errors, 'Dutydeck setup cleanup failed');
   };
   try {
@@ -349,6 +432,32 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     config: repos.config,
     listSessions: () => runtime.listSessions(),
   });
+  // 会话分析服务（T4c）：1 running/16 queued，按需 Go 分析，失败不影响 Agent 运行。
+  // resolver 每次 resolve 按 session agent 当前 env 实时计算候选根；静态接线，无动态 import。
+  try {
+    insightService = new SessionInsightService({
+      insightRepository: repos.insight,
+      resolver: createInsightResolver(repos, options.env ?? process.env),
+      dataDir: config.databaseUrl === ':memory:'
+        ? join(tmpdir(), 'dutydeck-insight')
+        : dirname(resolve(config.databaseUrl)),
+      processRunId: makeId('insight-run'),
+      hostEvidence: {
+        readHostEvidenceRaw: (sessionId) => repos.insight.readHostEvidenceRaw(sessionId),
+        getSessionExecutions: (sessionId) => repos.execution.getSessionExecutions(sessionId),
+        getAcceptedTask: (taskId) => repos.execution.getAcceptedTask(taskId),
+        readTransaction: (work) => repos.insight.readTransaction(work)
+      },
+      loadWorkspaceOrganization: async () => (await workspaceOrganizationService.getSnapshot()).organization,
+      getCurrentFingerprint: async (sessionId) => runtime.getCodeFingerprint(sessionId),
+      log: (details, message) => app?.log.warn(details, message)
+    });
+    await insightService.initialize();
+  } catch {
+    // 只记录固定 code，绝不回显 error.message（可能携带私有路径/token）。
+    process.stderr.write('[dutydeck] Session insight service disabled: INSIGHT_STARTUP_FAILED\n');
+    insightService = undefined;
+  }
   const automationIntegration = createAutomationIntegration(repos, runtime, groupManager, { env, client: config => createLarkCardService(env, workbenchHttp.fetch, config), log: { warn: (...args: unknown[]) => app?.log.warn(...args as [unknown, string]) } });
   const codebaseWebhookSecret = env.DUTYDECK_CODEBASE_WEBHOOK_SECRET?.trim();
   const codebaseCi = codebaseWebhookSecret ? new CodebaseCiService({ repositories: repos, runtime, secret: codebaseWebhookSecret,
@@ -415,12 +524,15 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
   const workInteractions = new WorkItemInteractions(workItems, runtime, relayBroker, (sessionId, actorId, action) => authorizeWorkItemInteraction(repos, groupManager, sessionId, actorId, action, env, workbenchHttp.fetch));
   closeResources = () => {
     if (!closeRun) closeRun = (async () => {
+      // 分析服务必须在任何并行关闭组之前显式 await：先拒新刷新、取消 queued/running
+      // 作业并等待 runner 退出与临时目录清理，再关闭 HTTP/runtime/repos。
+      await closeInsightService();
       if (tokenRefresh) clearInterval(tokenRefresh);
       clearInterval(shareSecretRefresh);
       disposeShareSigner();
       if (automationTimer) clearInterval(automationTimer);
       if (collaborationTimer) clearInterval(collaborationTimer);
-      const errors: unknown[] = [];
+      const errors: unknown[] = [...insightCloseErrors];
       const settle = async (operations: Array<() => unknown>) => {
         const results = await Promise.allSettled(operations.map(operation => Promise.resolve().then(operation)));
         errors.push(...results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason));
@@ -483,6 +595,9 @@ export async function startLocalServer(options: StartLocalServerOptions = {}): P
     };
     app = await buildApp(runtime, {
     terminalSettings,
+      ...(insightService
+        ? { insight: { service: insightService, authorize: async request => Boolean(await resolveInstallationPrincipal(request)) } }
+        : {}),
       recovery: { authorize: async request => Boolean(await resolveInstallationPrincipal(request)),
         larkResultDeliveries: async sessionId => larkResultDeliveryIssues((await Promise.all((await readLarkConfigs(repos.config))
           .map(bot => repos.channelMappings.list(`lark-card:${bot.appId}`)))).flat().filter(mapping => mapping.sessionId === sessionId)) },

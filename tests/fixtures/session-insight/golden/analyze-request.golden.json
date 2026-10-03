@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "requestId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "files": [
+    {
+      "sourceKey": "src_claude_main_01",
+      "client": "claude",
+      "path": "/tmp/insight-tmp/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d/claude-main.jsonl",
+      "sha256": "4eca389acf9738934ae7fdc35a2ef4dfc34dcad94e90530fad96b2ad906006e3",
+      "bytes": 603,
+      "expectedNativeSessionId": "claude-shared-session",
+      "expectedStream": {
+        "kind": "main",
+        "nativeAgentId": null
+      }
+    }
+  ],
+  "limits": {
+    "maxLineBytes": 4194304,
+    "maxTraceEvents": 20000
+  }
+}

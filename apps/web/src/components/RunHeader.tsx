@@ -1,4 +1,4 @@
-import { Archive, BookOpen, ChevronRight, Folder, MessageSquare, PanelRightOpen, Pencil, Square, Terminal } from 'lucide-react';
+import { Archive, BookOpen, ChevronRight, Folder, LineChart, MessageSquare, PanelRightOpen, Pencil, Square, Terminal } from 'lucide-react';
 import type { Agent, Session, SessionUsage, Task } from '../api';
 import type { StreamStatus } from '../sse';
 import { sessionDisplayName } from '../run-summary';
@@ -42,7 +42,7 @@ function usageLabel(usage?: SessionUsage) {
   return { text: `本任务${unknown ? '已知费用' : '累计'} ${usd(own.costUsd + subSteps.costUsd)}${extra ? `（${extra}）` : ''}`, detail: `输入 ${tokens('inputTokens')} · 输出 ${tokens('outputTokens')} · 缓存读 ${tokens('cacheReadTokens')} · 缓存写 ${tokens('cacheWriteTokens')} token` };
 }
 
-export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, usage, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename }: {
+export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTasks, usage, rawVisible, rawAvailable, restarting, onInterrupt, onRestart, onOpenPrompt, onArchive, onToggleRaw, onRename, onOpenInsight }: {
   session: Session;
   agent?: Agent;
   taskPrompt?: string;
@@ -58,6 +58,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
   onArchive(): void;
   onToggleRaw(): void;
   onRename?(): void;
+  onOpenInsight(): void;
 }) {
   const managed = session.source === 'work_item';
   const workspace = sessionWorkspaceName(session);
@@ -105,6 +106,7 @@ export function RunHeader({ session, agent, taskPrompt, streamStatus, queuedTask
         {status.busy && !managed && <IconButton label="中断当前任务" onClick={onInterrupt}><Square size={14}/></IconButton>}
         {session.systemPrompt && <IconButton label="查看系统提示词" onClick={onOpenPrompt}><BookOpen size={14}/></IconButton>}
         {!status.archived && !managed && <IconButton label="归档任务" onClick={onArchive}><Archive size={15}/></IconButton>}
+        <Button aria-label="会话分析" variant="secondary" onClick={onOpenInsight} icon={<LineChart size={14}/>}><span className="hidden sm:inline">分析</span></Button>
         <Button aria-label="原始日志" variant="secondary" tone={rawVisible ? 'inverse' : 'default'} disabled={!rawAvailable} onClick={onToggleRaw} icon={rawVisible ? <PanelRightOpen size={14}/> : <Terminal size={14}/>}><span className="hidden sm:inline">日志</span></Button>
       </div>
     </div>

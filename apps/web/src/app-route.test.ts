@@ -51,6 +51,19 @@ describe('浮层的 URL 表示', () => {
     expect(parseAppLocation('/', '?panel=archive-confirm').overlay).toBeUndefined();
   });
 
+  it('insight 只在会话详情上打开；compare 会话 id 从 query 恢复', () => {
+    expect(parseAppLocation('/sessions/s1', '?panel=insight').overlay).toEqual({ kind: 'insight' });
+    expect(parseAppLocation('/sessions/s1', '?panel=insight&compare=s2').overlay).toEqual({ kind: 'insight', compare: 's2' });
+    // 当前路由不是会话时不打开 insight。
+    expect(parseAppLocation('/', '?panel=insight').overlay).toBeUndefined();
+  });
+
+  it('usage 面板支持 view=insight 恢复会话分析 tab；无 view 时是费用 tab', () => {
+    expect(parseAppLocation('/', '?panel=usage').overlay).toEqual({ kind: 'usage' });
+    expect(parseAppLocation('/', '?panel=usage&view=insight').overlay).toEqual({ kind: 'usage', view: 'insight' });
+    expect(parseAppLocation('/', '?panel=usage&view=nope').overlay).toEqual({ kind: 'usage' });
+  });
+
   it('危险确认与瞬态浮层没有 URL 表示', () => {
     // 归档确认：深链等于让一条链接对别人的任务弹出不可逆操作的确认框。
     // 命令面板 / 快捷键帮助：按一下就开、Escape 就关，进 URL 只污染历史记录。
@@ -104,7 +117,10 @@ describe('反向序列化', () => {
       { route: { kind: 'session', sessionId: 's1' }, overlay: { kind: 'lark-setup' } },
       { route: { kind: 'session', sessionId: 'a b' }, overlay: { kind: 'groups' } },
       { route: { kind: 'overview' }, overlay: { kind: 'automation' } },
-      { route: { kind: 'overview' }, overlay: { kind: 'usage' } }
+      { route: { kind: 'overview' }, overlay: { kind: 'usage' } },
+      { route: { kind: 'overview' }, overlay: { kind: 'usage', view: 'insight' } },
+      { route: { kind: 'session', sessionId: 's1' }, overlay: { kind: 'insight' } },
+      { route: { kind: 'session', sessionId: 's1' }, overlay: { kind: 'insight', compare: 's2' } }
     ];
     for (const location of cases) {
       const path = appLocationPath(location);

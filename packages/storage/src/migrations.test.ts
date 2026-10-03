@@ -4,11 +4,12 @@ import { chmod, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { AgentConfig } from '@dutydeck/shared'
+import type { AgentConfig, MemoryJob } from '@dutydeck/shared'
 import { createRepositories, PRE_V10_BACKUP_SUFFIX } from './index.js'
 import { migrations, runMigrations, withMigrationTransaction } from './migrations.js'
 import { createCiWebhookRepository } from './ci-webhook.js'
 import { createUsageLedgerRepository } from './usage-ledger.js'
+import { createMemoryJobRepository } from './memory-jobs.js'
 
 const BUSINESS_TABLES = [
   'agent_configs',
@@ -49,11 +50,15 @@ const BUSINESS_TABLES = [
   'collaboration_decisions',
   'collaboration_feedbacks',
   'collaboration_actions',
-  'collaboration_activities'
+  'collaboration_activities',
+  'insight_sources',
+  'insight_snapshots',
+  'insight_events',
+  'insight_refresh'
 ]
 
 const SESSION_PATCH_COLUMNS = ['reasoning_effort', 'system_prompt', 'permission_mode', 'source', 'source_id', 'archived_at']
-const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33]
+const ALL_VERSIONS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]
 const temporaryDirectories: string[] = []
 const linuxIt = process.platform === 'linux' ? it : it.skip
 
@@ -146,6 +151,92 @@ describe('storage migrations', () => {
     expect(db.prepare('SELECT * FROM task_steering_operations').all()).toEqual([]);
     expect(appliedVersions(db)).toEqual(ALL_VERSIONS); runMigrations(db);
     expect(db.pragma('foreign_key_check')).toEqual([]); db.close();
+  });
+
+  it('v34 adds the session insight derived-cache tables with cascade foreign keys and indexes', () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+    withMigrationTransaction(db, () => { for (const migration of migrations.filter(m => m.version <= 32)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version,'2026-10-02'); } });
+    expect(tableNames(db)).not.toContain('insight_sources');
+    runMigrations(db);
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+    for (const table of ['insight_sources', 'insight_snapshots', 'insight_events', 'insight_refresh']) {
+      expect(tableNames(db)).toContain(table);
+    }
+
+    const indexNames = (table: string): string[] =>
+      (db.pragma(`index_list(${table})`) as Array<{ name: string }>).map(index => index.name);
+    expect(indexNames('insight_events')).toEqual(
+      expect.arrayContaining(['insight_events_kind', 'insight_events_result', 'insight_events_event_id'])
+    );
+    expect(indexNames('insight_snapshots')).toContain('insight_snapshots_active_cache_key');
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+
+    // Dangling references are rejected under FK enforcement.
+    db.pragma('foreign_keys = ON');
+    expect(() => db.prepare(
+      "INSERT INTO insight_sources(observation_id,session_id,run_id,driver_instance_id,proof_kind,private_payload_json,created_at) VALUES ('o','missing','r','d','launch_observed','{}','2026-10-03')"
+    ).run()).toThrow(/FOREIGN KEY/);
+    expect(() => db.prepare(
+      "INSERT INTO insight_refresh(session_id,state) VALUES ('missing','idle')"
+    ).run()).toThrow(/FOREIGN KEY/);
+
+    // A snapshot cannot reference a missing session.
+    expect(() => db.prepare(
+      "INSERT INTO insight_snapshots(snapshot_id,session_id,cache_key,schema_version,engine_version,parser_version,metric_version,redaction_version,created_at) VALUES ('snap','missing',lower(hex(randomblob(32))),1,'e','p','m','r','2026-10-03')"
+    ).run()).toThrow(/FOREIGN KEY/);
+
+    // Events cascade when their snapshot is deleted.
+    db.prepare("INSERT INTO sessions(id,agent_id,state,cwd,run_id,created_at,updated_at) VALUES ('s','a','idle','/tmp','r','2026-10-03','2026-10-03')").run();
+    db.prepare(
+      "INSERT INTO insight_snapshots(snapshot_id,session_id,cache_key,schema_version,engine_version,parser_version,metric_version,redaction_version,created_at) VALUES ('snap','s',lower(hex(randomblob(32))),1,'e','p','m','r','2026-10-03')"
+    ).run();
+    db.prepare("INSERT INTO insight_events(snapshot_id,ordinal,event_id,kind,event_json) VALUES ('snap',0,'e','tool_call','{}')").run();
+    db.prepare("DELETE FROM insight_snapshots WHERE snapshot_id='snap'").run();
+    expect(db.prepare('SELECT COUNT(*) AS c FROM insight_events').get()).toEqual({ c: 0 });
+    db.close();
+  });
+
+  it('v34 upgrades a real master v33 database, preserving memory_jobs rows and creating the insight cache tables', async () => {
+    const db = new Database(':memory:');
+    db.exec('CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)');
+    // A real current master database: every migration through v33 (memory_jobs) applied.
+    withMigrationTransaction(db, () => { for (const migration of migrations.filter(m => m.version <= 33)) { migration.up(db); db.prepare('INSERT INTO schema_migrations VALUES (?,?)').run(migration.version,'2026-10-03'); } });
+    expect(tableNames(db)).toContain('memory_jobs');
+    expect(tableNames(db)).not.toContain('insight_sources');
+
+    // An unsettled memory job written through the real v33 repository API.
+    const scope = { appId: 'app', pool: 'groups' };
+    const job: MemoryJob = {
+      id: 'memory_' + 'a'.repeat(64), scope, revision: 0, claimToken: 'claim',
+      kind: 'extraction', mode: 'compatible',
+      input: { turns: [{ taskId: 'old' }] }, inputDigest: 'b'.repeat(64),
+      versions: [
+        { key: 'lark.memory.app.groups' },
+        { key: 'lark.memory.ignore.app.groups' },
+        { key: 'lark.bots' },
+        { key: 'lark.credentials' }
+      ],
+      sessionId: 'ses_memory_' + 'a'.repeat(64),
+      sessionInput: { agentId: 'agent', source: 'lark-memory', sourceId: 'app:groups:memory' },
+      requests: [], state: 'prepared', createdAt: '2026-10-03T00:00:00Z'
+    };
+    const memoryJobs = createMemoryJobRepository(db);
+    await memoryJobs.create(job);
+
+    runMigrations(db);
+    expect(appliedVersions(db)).toEqual(ALL_VERSIONS);
+
+    // The additive v34 migration must not touch the v33 memory_jobs ledger.
+    expect(await memoryJobs.get(scope, job.id)).toMatchObject({ id: job.id, state: 'prepared', revision: 0 });
+    expect(db.prepare('SELECT COUNT(*) AS c FROM memory_jobs').get()).toEqual({ c: 1 });
+
+    // The four insight derived-cache tables are created on top of the v33 database.
+    for (const table of ['insight_sources', 'insight_snapshots', 'insight_events', 'insight_refresh']) {
+      expect(tableNames(db)).toContain(table);
+    }
+    expect(db.pragma('foreign_key_check')).toEqual([]);
+    db.close();
   });
 
   it('is idempotent when run twice', () => {
