@@ -91,3 +91,17 @@ it('binds shared history to native session and second-resolution time; missing t
   appendFileSync(historyPath, line({ session_id: 'native-one', ts: Math.floor(Date.now() / 1000), text: 'ok' }));
   await history.flush(); await pending; expect(confirmed).toBe(true);
 });
+
+it.each(['3cff', 'edcb'])('unwraps the observed Claude 2.1.287 paste envelope %s without trimming its body', id => {
+  const text = '\n 中文👩‍💻\n\nsecond \n';
+  const wrapped = `\n\n<pasted_content id="${id}">\n${text}\n</pasted_content id="${id}">\n`;
+  expect(claudeInputText(user(wrapped))).toBe(text);
+  for (const invalid of [wrapped.replace(`</pasted_content id="${id}">`, '</pasted_content id="other">'), 'quoted: ' + wrapped, wrapped + 'extra', wrapped + '\n']) {
+    expect(claudeInputText(user(invalid))).toBe(invalid);
+  }
+});
+
+it('unwraps only the native outer envelope and preserves literal nested paste tags', () => {
+  const text = '\n\n<pasted_content id="literal">\nquoted user text\n</pasted_content id="literal">\n';
+  expect(claudeInputText(user(`\n\n<pasted_content id="3cff">\n${text}\n</pasted_content id="3cff">\n`))).toBe(text);
+});
